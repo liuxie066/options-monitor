@@ -1,5 +1,7 @@
 # Options Monitor
 
+> 状态：线上可用版（2026-03-22）— 里程碑见 VERSION.md
+
 一个基于 Yahoo Finance / yfinance 的美股期权监控工具，当前聚焦两类卖方策略：
 
 - Sell Put
