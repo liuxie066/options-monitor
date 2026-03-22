@@ -19,6 +19,7 @@ cd /home/node/.openclaw/workspace/options-monitor
 Cron Job:
 - name: `options-monitor auto tick`
 - id: `9cba60f7-407b-4427-9120-0a176b818de9`
+- schedule: `*/10 9-16 * * 1-5` @ `America/New_York`（只在美股交易时段附近跑；不追求严格从 09:30 开始）
 
 常用命令：
 ```bash
