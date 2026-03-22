@@ -1,6 +1,9 @@
 # Secrets (do not commit)
 secrets/
 
+# Local configs (do not commit)
+config.json
+
 # Local state/output
 output/
 
