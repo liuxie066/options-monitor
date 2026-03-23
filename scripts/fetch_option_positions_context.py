@@ -77,7 +77,15 @@ def parse_note_kv(note: str, key: str) -> str:
 
 
 def build_context(records: list[dict], market: str, account: str | None = None, rates: dict | None = None) -> dict:
-    selected = []
+    """Build context from raw Bitable records.
+
+    Important: keep record_id for downstream actions (auto-close expired positions)
+    without adding extra list calls.
+    """
+
+    selected_items: list[dict] = []  # each: {record_id, fields}
+    selected_fields: list[dict] = []
+
     for rec in records:
         fields = rec.get("fields") or {}
         if not fields:
@@ -86,7 +94,11 @@ def build_context(records: list[dict], market: str, account: str | None = None, 
             continue
         if account and fields.get("account") != account:
             continue
-        selected.append(fields)
+        selected_items.append({
+            'record_id': rec.get('record_id') or rec.get('id'),
+            'fields': fields,
+        })
+        selected_fields.append(fields)
 
     # Aggregate open short positions for constraints
     locked_shares_by_symbol: dict[str, int] = {}
@@ -112,11 +124,29 @@ def build_context(records: list[dict], market: str, account: str | None = None, 
         except Exception:
             hkdcny = None
 
-    for f in selected:
+    # Minimal open positions list for downstream (auto-close), keeps record_id.
+    open_positions_min: list[dict] = []
+
+    for f in selected_fields:
         note = f.get('note') or ''
         status = (f.get("status") or "").strip() or parse_note_kv(note, 'status')
         if status and status != "open":
             continue
+
+        # Build open positions list (best-effort) for downstream tasks.
+        # We'll attach record_id later by matching position_id when possible.
+        open_positions_min.append({
+            'record_id': None,
+            'position_id': (f.get('position_id') or '').strip() or None,
+            'market': f.get('market'),
+            'account': f.get('account'),
+            'symbol': (f.get('symbol') or '').strip().upper() or None,
+            'option_type': (f.get('option_type') or '').strip() or parse_note_kv(note, 'option_type') or None,
+            'side': (f.get('side') or '').strip() or parse_note_kv(note, 'side') or None,
+            'status': 'open',
+            'expiration': f.get('expiration'),
+            'note': note,
+        })
 
         symbol = (f.get("symbol") or "").strip().upper()
         if not symbol:
@@ -170,6 +200,24 @@ def build_context(records: list[dict], market: str, account: str | None = None, 
                 else:
                     cash_secured_total_cny = None
 
+    # Attach record_id to open positions list.
+    # Prefer matching by primary key position_id; fallback to a coarse signature.
+    id_by_position_id: dict[str, str] = {}
+    for it in selected_items:
+        rid = it.get('record_id')
+        f = it.get('fields') or {}
+        pid = (f.get('position_id') or '').strip()
+        if rid and pid:
+            id_by_position_id[pid] = rid
+
+    open_positions_min2: list[dict] = []
+    for p in open_positions_min:
+        pid = (p.get('position_id') or '').strip()
+        rid = id_by_position_id.get(pid) if pid else None
+        p2 = dict(p)
+        p2['record_id'] = rid
+        open_positions_min2.append(p2)
+
     return {
         "as_of_utc": datetime.now(timezone.utc).isoformat(),
         "filters": {"market": market, "account": account},
@@ -178,7 +226,8 @@ def build_context(records: list[dict], market: str, account: str | None = None, 
         "cash_secured_total_by_ccy": cash_secured_total_by_ccy,
         "cash_secured_total_cny": cash_secured_total_cny,
         "fx_rates": (rates or {}),
-        "raw_selected_count": len(selected),
+        "raw_selected_count": len(selected_fields),
+        "open_positions_min": open_positions_min2,
     }
 
 

@@ -610,6 +610,21 @@ def main():
                 cmd.extend(['--account', str(account)])
             run(cmd, cwd=base, timeout_sec=portfolio_timeout_sec)
             option_ctx = json.loads((base / 'output/state/option_positions_context.json').read_text(encoding='utf-8'))
+
+            # Auto-close expired open positions (table maintenance) without extra scans.
+            # Uses the context we just generated (contains open_positions_min with record_id).
+            try:
+                run([
+                    py, 'scripts/auto_close_expired_positions.py',
+                    '--pm-config', str(pm_config),
+                    '--context', 'output/state/option_positions_context.json',
+                    '--grace-days', '1',
+                    '--max-close', '20',
+                    '--summary-out', 'output/reports/auto_close_summary.txt',
+                ], cwd=base, timeout_sec=portfolio_timeout_sec)
+            except Exception as e2:
+                print(f"[WARN] auto-close expired positions failed: {e2}")
+
         except Exception as e:
             print(f"[WARN] option positions context not available: {e}")
 

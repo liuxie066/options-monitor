@@ -43,9 +43,18 @@ def utc_now() -> str:
 
 def atomic_symlink(path: Path, target: Path):
     tmp = path.with_name(path.name + '.tmp')
+    # tmp may be left as a directory from previous runs; remove it robustly.
     if tmp.exists() or tmp.is_symlink():
-        tmp.unlink(missing_ok=True)
+        try:
+            tmp.unlink(missing_ok=True)
+        except IsADirectoryError:
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
     tmp.symlink_to(target, target_is_directory=True)
+    # Replace destination even if it's an existing directory (first-time migration).
+    if path.exists() and not path.is_symlink():
+        import shutil
+        shutil.rmtree(path, ignore_errors=True)
     os.replace(tmp, path)
 
 
@@ -267,6 +276,13 @@ def main():
             continue
 
         text = notif_path.read_text(encoding='utf-8', errors='replace').strip() if notif_path.exists() else ''
+
+        # Append auto-close summary (if any)
+        auto_close_path = acct_out / 'reports' / 'auto_close_summary.txt'
+        auto_close_text = auto_close_path.read_text(encoding='utf-8', errors='replace').strip() if auto_close_path.exists() else ''
+        if auto_close_text:
+            text = (text.strip() + '\n\n' + '---\n' + auto_close_text.strip()).strip()
+
         meaningful = bool(text) and (text != '今日无需要主动提醒的内容。')
         results.append(AccountResult(acct, True, should_notify, meaningful, reason, text))
 
