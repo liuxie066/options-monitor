@@ -208,7 +208,9 @@ def main():
                 patch['note'] = merge_note(existing_note, {
                     'auto_close_at': now_iso,
                     'auto_close_reason': 'expired',
+                    'close_reason': 'expired',
                     'auto_close_grace_days': str(args.grace_days),
+                    'auto_close_exp_src': d.effective_exp_source,
                 })
                 bitable_update_record(token, app_token, table_id, d.record_id, patch)
                 applied.append(d)
