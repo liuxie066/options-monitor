@@ -250,7 +250,11 @@ def build_merged_message(results: list[AccountResult]) -> str:
                 continue
             kept.append(ln)
 
-        lines.append(f"[{r.account}]")
+        # Count Put/Call blocks for this account (for quick sanity check; sections may be omitted when empty)
+        put_n = sum(1 for ln in kept if ' 卖Put ' in ln)
+        call_n = sum(1 for ln in kept if ' 卖Call ' in ln)
+
+        lines.append(f"[{r.account.upper()}]（Put {put_n} / Call {call_n}）")
         lines.append(annotate_notification(r.account, '\n'.join(kept).strip() + '\n').strip())
         lines.append('')
 
