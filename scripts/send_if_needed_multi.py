@@ -176,6 +176,46 @@ def annotate_notification(acct: str, text: str) -> str:
     return '\n'.join(out).strip() + '\n'
 
 
+AUTO_CLOSE_APPLIED_RE = re.compile(r"applied_closed:\s*(?P<n>\d+)")
+AUTO_CLOSE_CAND_RE = re.compile(r"candidates_should_close:\s*(?P<n>\d+)")
+AUTO_CLOSE_ERR_RE = re.compile(r"^ERRORS:\s*(?P<n>\d+)\s*$", re.M)
+
+
+def flatten_auto_close_summary(text: str, *, always_show: bool = False) -> str:
+    """Return a compact auto-close summary block.
+
+    - When nothing happened (applied=0 and errors=0), return '' unless always_show=True.
+    - When applied>0 or errors>0, include compact header plus a few detail lines.
+    """
+    if not text:
+        return ''
+
+    m_applied = AUTO_CLOSE_APPLIED_RE.search(text)
+    m_cand = AUTO_CLOSE_CAND_RE.search(text)
+    m_err = AUTO_CLOSE_ERR_RE.search(text)
+
+    applied = int(m_applied.group('n')) if m_applied else 0
+    cand = int(m_cand.group('n')) if m_cand else applied
+    err = int(m_err.group('n')) if m_err else 0
+
+    if applied == 0 and err == 0 and (not always_show):
+        return ''
+
+    header = f"Auto-close(exp+1d): closed {applied}/{cand}, errors {err}"
+    lines = [header]
+
+    # Append detail lines only when something happened.
+    if err > 0 or applied > 0:
+        # Prefer explicit error bullets, else closed list bullets.
+        for ln in text.splitlines():
+            if ln.startswith('- '):
+                lines.append(ln)
+            if len(lines) >= 1 + 6:
+                break
+
+    return ('---\n' + '\n'.join(lines).strip()).strip()
+
+
 def build_merged_message(results: list[AccountResult]) -> str:
     now = utc_now()
     lines: list[str] = []
@@ -277,11 +317,12 @@ def main():
 
         text = notif_path.read_text(encoding='utf-8', errors='replace').strip() if notif_path.exists() else ''
 
-        # Append auto-close summary (if any)
+        # Append compact auto-close summary (only when applied>0 or errors>0)
         auto_close_path = acct_out / 'reports' / 'auto_close_summary.txt'
         auto_close_text = auto_close_path.read_text(encoding='utf-8', errors='replace').strip() if auto_close_path.exists() else ''
-        if auto_close_text:
-            text = (text.strip() + '\n\n' + '---\n' + auto_close_text.strip()).strip()
+        auto_close_flat = flatten_auto_close_summary(auto_close_text, always_show=False)
+        if auto_close_flat:
+            text = (text.strip() + '\n\n' + auto_close_flat.strip()).strip()
 
         meaningful = bool(text) and (text != '今日无需要主动提醒的内容。')
         results.append(AccountResult(acct, True, should_notify, meaningful, reason, text))
