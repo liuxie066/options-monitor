@@ -89,15 +89,29 @@ def build_context(records: list[dict], market: str, account: str | None = None) 
 
     for f in selected:
         asset_type = f.get("asset_type")
+        asset_class = (f.get("asset_class") or "").strip()
         asset_id = (f.get("asset_id") or "").strip()
+        asset_name = (f.get("asset_name") or "").strip()
         currency = f.get("currency")
         qty = safe_float(f.get("quantity"))
         avg_cost = safe_float(f.get("avg_cost"))
 
+        # Be tolerant: some rows may miss asset_type (data entry). Infer cash rows.
+        inferred_cash = False
         if asset_type == "cash":
+            inferred_cash = True
+        elif asset_class == "现金":
+            inferred_cash = True
+        elif asset_id.upper().endswith("-CASH") or asset_id.upper().endswith("-MMF"):
+            inferred_cash = True
+        elif asset_name in ("账户余额", "货基", "余额宝") and avg_cost is None:
+            inferred_cash = True
+
+        if inferred_cash:
             # holdings 表里 cash 的 quantity 可能是字符串；currency 是单选，值为 'USD'/'CNY'/...
             if currency and qty is not None:
-                cash_by_currency[str(currency).strip().upper()] = cash_by_currency.get(str(currency).strip().upper(), 0.0) + qty
+                ccy_u = str(currency).strip().upper()
+                cash_by_currency[ccy_u] = cash_by_currency.get(ccy_u, 0.0) + qty
             continue
 
         if asset_type == "us_stock":
