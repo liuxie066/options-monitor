@@ -98,26 +98,14 @@ def top_pick_line(row: pd.Series) -> str:
             except Exception:
                 pass
 
-            # Headroom after adding 1 contract of this candidate (base CNY preferred)
+            # Cash required for 1 contract (keep only requirement; do not compute remaining after buy)
             try:
                 req_cny = row.get('cash_required_cny')
-                free_cny = row.get('cash_free_cny')
                 req_cny_v = float(req_cny) if req_cny is not None and not pd.isna(req_cny) else None
-                free_cny_v = float(free_cny) if free_cny is not None and not pd.isna(free_cny) else None
-                if req_cny_v is not None and free_cny_v is not None and req_cny_v > 0:
-                    headroom_cny = free_cny_v - req_cny_v
+                if req_cny_v is not None and req_cny_v > 0:
                     parts.append(f"cash_req_cny ¥{req_cny_v:,.0f}")
-                    parts.append(f"cash_free_cny ¥{free_cny_v:,.0f}")
-                    parts.append(f"headroom_cny ¥{headroom_cny:,.0f}")
-                else:
-                    # fallback USD
-                    if req is not None and req > 0:
-                        if free is not None and not pd.isna(free):
-                            headroom = float(free) - float(req)
-                            parts.append(f"headroom ${headroom:,.0f}")
-                        elif free_est is not None and not pd.isna(free_est):
-                            headroom = float(free_est) - float(req)
-                            parts.append(f"headroom_eq ${headroom:,.0f}")
+                elif req is not None and req > 0:
+                    parts.append(f"cash_req ${float(req):,.0f}")
             except Exception:
                 pass
 

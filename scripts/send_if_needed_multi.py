@@ -224,16 +224,47 @@ def build_merged_message(results: list[AccountResult]) -> str:
     lines.append('')
 
     any_content = False
+    cash_footer: dict[str, str] = {}
+
     for r in results:
         if not (r.should_notify and r.meaningful and r.notification_text.strip()):
             continue
         any_content = True
+
+        # Extract and remove any per-notification cash footer (we append both accounts at the very end)
+        txt_lines = r.notification_text.strip().splitlines()
+        kept: list[str] = []
+        in_cash = False
+        for ln in txt_lines:
+            if ln.strip() == '现金结余:':
+                in_cash = True
+                continue
+            if in_cash:
+                # expected: "LX账户 base free(CNY): ¥..."
+                if '账户 base free(CNY):' in ln:
+                    try:
+                        acct2, rest = ln.split('账户', 1)
+                        cash_footer[acct2.strip().upper()] = '账户' + rest
+                    except Exception:
+                        pass
+                continue
+            kept.append(ln)
+
         lines.append(f"[{r.account}]")
-        lines.append(annotate_notification(r.account, r.notification_text).strip())
+        lines.append(annotate_notification(r.account, '\n'.join(kept).strip() + '\n').strip())
         lines.append('')
 
     if not any_content:
         return ''
+
+    # Append cash footer at the end
+    if cash_footer:
+        lines.append('现金结余:')
+        # Keep deterministic order
+        for acct in ['LX', 'SY']:
+            if acct in cash_footer:
+                lines.append(f"{acct}{cash_footer[acct]}")
+        lines.append('')
 
     return '\n'.join(lines).strip() + '\n'
 

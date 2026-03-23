@@ -67,16 +67,17 @@ def _format_alert_line(line: str) -> str:
     if strategy == 'sell_put':
         cash_req = extras.get('cash_req', '')
         cash_req_cny = extras.get('cash_req_cny', '')
-        headroom_cny = extras.get('headroom_cny', '')
+        # Only show cash required (no headroom calc)
+        cash_req_only = extras.get('cash_req_cny', '') or extras.get('cash_req', '')
 
         # Line 1 (compact)
         line1 = f"{symbol} 卖Put {contract} | {annual} | {income} | {dte}"
 
         # Line 2 (cash)
-        req = cash_req_cny or cash_req or ''
+        req = cash_req_cny or cash_req or cash_req_only or ''
         line2 = ''
-        if req or headroom_cny:
-            line2 = f"担保 {req or '-'} | 加仓后余量 {headroom_cny or '-'}"
+        if req:
+            line2 = f"占用担保 {req}"
 
         out = [line1]
         if line2:
@@ -104,57 +105,6 @@ def _format_alert_line(line: str) -> str:
     return raw
 
 
-def _extract_cash_overview(alerts_text: str) -> dict:
-    used_total = None
-    avail_eq = None
-    free_eq = None
-    free_cny = None
-
-    for line in alerts_text.splitlines():
-        if not line.startswith('- '):
-            continue
-        if ' | sell_put | ' not in line:
-            continue
-
-        parts = [p.strip() for p in line.split('|')]
-
-        def _money_after(token: str):
-            for p in parts:
-                if token in p:
-                    try:
-                        v = p.split(token, 1)[1].strip().replace('$', '').replace(',', '')
-                        return float(v)
-                    except Exception:
-                        return None
-            return None
-
-        ut = _money_after('cash_used_total')
-        if ut is not None:
-            used_total = ut if used_total is None else max(used_total, ut)
-
-        a = _money_after('cash_avail_eq')
-        if a is not None:
-            avail_eq = a if avail_eq is None else max(avail_eq, a)
-
-        f = _money_after('cash_free_eq')
-        if f is not None:
-            free_eq = f if free_eq is None else min(free_eq, f)
-
-        for p in parts:
-            if 'cash_free_cny' in p:
-                try:
-                    v = p.split('cash_free_cny', 1)[1].strip().replace('¥', '').replace(',', '')
-                    v = float(v)
-                    free_cny = v if free_cny is None else min(free_cny, v)
-                except Exception:
-                    pass
-
-    return {
-        'used_total': used_total,
-        'avail_eq': avail_eq,
-        'free_eq': free_eq,
-        'free_cny': free_cny,
-    }
 
 
 def _group_by_strategy(raw_lines: list[str]) -> dict[str, list[str]]:
@@ -175,14 +125,10 @@ def build_notification(changes_text: str, alerts_text: str, fx_info: dict | None
     high_lines = extract_section(alerts_text, '## 高优先级')
     medium_lines = extract_section(alerts_text, '## 中优先级')
 
-    cash = _extract_cash_overview(alerts_text)
 
     lines: list[str] = []
 
-    # Header: keep minimal
-    if cash.get('free_cny') is not None:
-        lines.append(f"现金余量(base): ¥{cash.get('free_cny'):,.0f}")
-        lines.append('')
+    # Header: keep minimal (cash summary will be appended at bottom)
 
     significant_changes = [line for line in change_lines if '无显著变化' not in line and '初始记录' not in line]
 

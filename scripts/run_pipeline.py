@@ -715,6 +715,15 @@ def main():
             '--output', 'output/reports/symbols_notification.txt',
         ], cwd=base)
 
+        # Append cash summaries at the bottom (LX + SY). Do NOT compute "after-buy" remaining cash.
+        run([
+            py, 'scripts/append_cash_summary.py',
+            '--pm-config', str(pm_config),
+            '--market', str(market),
+            '--accounts', 'lx', 'sy',
+            '--notification', 'output/reports/symbols_notification.txt',
+        ], cwd=base)
+
         notifications_cfg = cfg.get('notifications', {}) or {}
         if notifications_cfg.get('enabled', False):
             print('[INFO] notifications enabled in config; pipeline prepared notification text for sending.')
