@@ -57,6 +57,32 @@ pip install -r requirements.txt
 - `output/parsed/`：标准化 CSV
 - `output/reports/`：候选、提醒与摘要输出
 
+## Watchlist 管理（监控标的：查看/新增/删除/编辑）
+
+配置文件：`config.json` 的 `symbols[]`
+
+```bash
+# 查看当前监控标的
+./.venv/bin/python scripts/watchlist.py list
+
+# 新增标的（示例：只监控 sell put；默认所有账户都跑）
+./.venv/bin/python scripts/watchlist.py add TSLA --put --use put_base --limit-exp 8
+
+# 新增标的（只让某些账户跑）
+./.venv/bin/python scripts/watchlist.py add AAPL --put --accounts lx
+
+# 删除标的
+./.venv/bin/python scripts/watchlist.py rm TSLA
+
+# 编辑标的（用 --set 打补丁，支持重复）
+./.venv/bin/python scripts/watchlist.py edit NVDA --set sell_put.min_strike=145 --set sell_put.max_strike=160
+./.venv/bin/python scripts/watchlist.py edit NVDA --set sell_call.enabled=false
+
+# 也可以给已有标的指定账户（默认不写 accounts = 两个账户都跑）
+./.venv/bin/python scripts/watchlist.py edit GOOGL --set accounts=["lx","sy"]
+./.venv/bin/python scripts/watchlist.py edit FUTU --set accounts=["lx"]
+```
+
 ## 当前主要脚本
 
 - `scripts/fetch_market_data.py`

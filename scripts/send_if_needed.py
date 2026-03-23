@@ -135,6 +135,16 @@ def main():
             return pipe.returncode
 
         text = notif.read_text(encoding='utf-8', errors='replace').strip() if notif.exists() else ''
+
+        # Prefix notification with account tag when configured.
+        try:
+            p = (cfg_obj.get('portfolio') or {}) if isinstance(cfg_obj, dict) else {}
+            acct = str(p.get('account') or '').strip()
+            if acct and text:
+                text = f"[{acct}]\n" + text
+        except Exception:
+            pass
+
         meaningful = bool(text) and (text != '今日无需要主动提醒的内容。')
 
         if should_notify and meaningful:

@@ -7,6 +7,10 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Local helper to get FX rates (USDCNY/HKDCNY) for base-currency normalization.
+# This file lives in the same scripts/ directory, so plain import works.
+from fx_rates import get_rates
+
 
 def http_json(method: str, url: str, payload: dict | None = None, headers: dict | None = None) -> dict:
     data = None
@@ -72,7 +76,7 @@ def parse_note_kv(note: str, key: str) -> str:
     return ''
 
 
-def build_context(records: list[dict], market: str, account: str | None = None) -> dict:
+def build_context(records: list[dict], market: str, account: str | None = None, rates: dict | None = None) -> dict:
     selected = []
     for rec in records:
         fields = rec.get("fields") or {}
@@ -86,7 +90,27 @@ def build_context(records: list[dict], market: str, account: str | None = None) 
 
     # Aggregate open short positions for constraints
     locked_shares_by_symbol: dict[str, int] = {}
-    cash_secured_by_symbol: dict[str, float] = {}
+
+    # cash_secured_amount is stored in option_positions table with an explicit currency field (USD/CNY/HKD).
+    # We aggregate:
+    # - by_symbol: in original currency buckets
+    # - total_base_cny: unified base currency (CNY) using FX rates when available
+    cash_secured_by_symbol_by_ccy: dict[str, dict[str, float]] = {}
+    cash_secured_total_by_ccy: dict[str, float] = {}
+
+    cash_secured_total_cny: float | None = 0.0
+
+    usdcny = None
+    hkdcny = None
+    if rates:
+        try:
+            usdcny = float(rates.get('USDCNY')) if rates.get('USDCNY') else None
+        except Exception:
+            usdcny = None
+        try:
+            hkdcny = float(rates.get('HKDCNY')) if rates.get('HKDCNY') else None
+        except Exception:
+            hkdcny = None
 
     for f in selected:
         note = f.get('note') or ''
@@ -104,11 +128,12 @@ def build_context(records: list[dict], market: str, account: str | None = None) 
         contracts = safe_float(f.get("contracts"))
         contracts_i = int(contracts) if contracts is not None else 0
 
-        # fields name note: current table uses underlying_share_locked (singular)
         locked = safe_float(f.get("underlying_share_locked"))
         if locked is None:
             locked = safe_float(f.get("underlying_shares_locked"))
+
         cash_secured = safe_float(f.get("cash_secured_amount"))
+        currency = (f.get('currency') or '').strip().upper()
 
         if side == "short" and option_type == "call":
             if locked is None:
@@ -116,14 +141,43 @@ def build_context(records: list[dict], market: str, account: str | None = None) 
             locked_shares_by_symbol[symbol] = locked_shares_by_symbol.get(symbol, 0) + int(locked)
 
         if side == "short" and option_type == "put":
-            if cash_secured is not None:
-                cash_secured_by_symbol[symbol] = cash_secured_by_symbol.get(symbol, 0.0) + float(cash_secured)
+            if cash_secured is None:
+                continue
+            if not currency:
+                currency = 'USD'  # backward compatible default
+
+            # bucket per symbol per currency
+            m = cash_secured_by_symbol_by_ccy.get(symbol) or {}
+            m[currency] = m.get(currency, 0.0) + float(cash_secured)
+            cash_secured_by_symbol_by_ccy[symbol] = m
+
+            cash_secured_total_by_ccy[currency] = cash_secured_total_by_ccy.get(currency, 0.0) + float(cash_secured)
+
+            # unify to CNY if possible
+            if cash_secured_total_cny is not None:
+                if currency == 'CNY':
+                    cash_secured_total_cny += float(cash_secured)
+                elif currency == 'USD':
+                    if usdcny:
+                        cash_secured_total_cny += float(cash_secured) * float(usdcny)
+                    else:
+                        cash_secured_total_cny = None
+                elif currency == 'HKD':
+                    if hkdcny:
+                        cash_secured_total_cny += float(cash_secured) * float(hkdcny)
+                    else:
+                        cash_secured_total_cny = None
+                else:
+                    cash_secured_total_cny = None
 
     return {
         "as_of_utc": datetime.now(timezone.utc).isoformat(),
         "filters": {"market": market, "account": account},
         "locked_shares_by_symbol": locked_shares_by_symbol,
-        "cash_secured_by_symbol": cash_secured_by_symbol,
+        "cash_secured_by_symbol_by_ccy": cash_secured_by_symbol_by_ccy,
+        "cash_secured_total_by_ccy": cash_secured_total_by_ccy,
+        "cash_secured_total_cny": cash_secured_total_cny,
+        "fx_rates": (rates or {}),
         "raw_selected_count": len(selected),
     }
 
@@ -155,7 +209,15 @@ def main():
 
     token = get_tenant_access_token(app_id, app_secret)
     records = bitable_list_records(token, app_token, table_id)
-    ctx = build_context(records, market=args.market, account=args.account)
+    # Load FX rates for base-currency normalization (CNY).
+    # Uses local cache + shared portfolio-management cache when available.
+    base = Path(__file__).resolve().parents[1]
+    rates = get_rates(
+        cache_path=(base / 'output' / 'state' / 'rate_cache.json'),
+        shared_cache_path=(Path(__file__).resolve().parents[2] / 'portfolio-management' / '.data' / 'rate_cache.json'),
+        max_age_hours=24,
+    )
+    ctx = build_context(records, market=args.market, account=args.account, rates=rates)
 
     out_path = Path(args.out)
     if not out_path.is_absolute():
@@ -165,7 +227,16 @@ def main():
 
     print(f"[DONE] option positions context -> {out_path}")
     print(f"market={args.market} account={args.account or '-'} selected={ctx['raw_selected_count']}")
-    print(f"locked_symbols={len(ctx['locked_shares_by_symbol'])} cash_secured_symbols={len(ctx['cash_secured_by_symbol'])}")
+
+    # Backward/forward compatible stats
+    cash_secured_syms = 0
+    try:
+        m = ctx.get('cash_secured_by_symbol_by_ccy') or {}
+        cash_secured_syms = len(m)
+    except Exception:
+        cash_secured_syms = 0
+
+    print(f"locked_symbols={len(ctx.get('locked_shares_by_symbol') or {})} cash_secured_symbols={cash_secured_syms}")
 
 
 if __name__ == "__main__":
