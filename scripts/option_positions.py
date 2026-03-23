@@ -296,22 +296,63 @@ def main():
 
         note = merge_note(args.note, note_kv)
 
+        # Fill table schema fields so primary column isn't "未命名记录"
+        alias = {
+            '0700.HK': 'TENCENT',
+            '9992.HK': 'POPMART',
+            '3690.HK': 'MEITUAN',
+        }
+
+        def _fmt_strike(v: float | None) -> str:
+            if v is None:
+                return 'NA'
+            if float(v).is_integer():
+                return str(int(v))
+            return str(v).replace('.', 'p')
+
+        exp_ymd = (args.exp or '').strip() or None
+        exp_compact = exp_ymd.replace('-', '') if exp_ymd else 'NA'
+        strike_txt = _fmt_strike(strike)
+        pc = 'P' if opt_type == 'put' else 'C'
+        base = alias.get(sym, sym.replace('.', '_'))
+        position_id = f"{base}_{exp_compact}_{strike_txt}{pc}_{side}_x{contracts}"
+
+        expiration_ms = None
+        if exp_ymd:
+            # store as UTC 00:00:00 of the date, same as existing records
+            y, m, d = map(int, exp_ymd.split('-'))
+            from datetime import datetime, timezone
+            expiration_ms = int(datetime(y, m, d, tzinfo=timezone.utc).timestamp() * 1000)
+
+        from datetime import datetime, timezone
+        opened_at_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+
         fields = {
+            'position_id': position_id,
             'market': args.market,
             'account': acct,
             'symbol': sym,
             'option_type': opt_type,
             'side': side,
-            'contracts': str(contracts),
+            # Feishu Bitable Number field must be a JSON number
+            'contracts': int(contracts),
             'currency': ccy,
             'status': 'open',
             'note': note or None,
+            'opened_at': opened_at_ms,
         }
+        if strike is not None:
+            fields['strike'] = float(strike)
+        if expiration_ms is not None:
+            fields['expiration'] = int(expiration_ms)
+        if args.premium_per_share is not None:
+            fields['premium'] = float(args.premium_per_share)
         if args.underlying_share_locked is not None:
-            fields['underlying_share_locked'] = str(int(args.underlying_share_locked))
+            # Feishu Bitable Number field must be a JSON number
+            fields['underlying_share_locked'] = int(args.underlying_share_locked)
         if cash_secured is not None:
-            # store as string or number both work; match existing table strings
-            fields['cash_secured_amount'] = str(float(cash_secured))
+            # Feishu Bitable Number field must be a JSON number (not a string)
+            fields['cash_secured_amount'] = float(cash_secured)
 
         if args.dry_run:
             print('[DRY_RUN] create fields:')
