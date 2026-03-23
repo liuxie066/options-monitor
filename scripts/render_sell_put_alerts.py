@@ -125,7 +125,7 @@ def render_one(row) -> str:
         "",
         f"Spot: {num(row['spot'])}",
         f"DTE: {int(row['dte'])}",
-        f"卖出参考价(mid): {num(row['mid'])}",
+        f"卖出参考价(mid): {num(row['mid'])}  (收益率按 mid 价计算)",
         "",
         f"担保现金需求(1张): {('-' if cash_req is None else '$' + num(cash_req, 0))} / {('-' if cash_req_cny is None else '¥' + num(cash_req_cny, 0))}",
         f"已占用担保现金(全账户): {'$' + num(cash_used_total, 0) if cash_used_total else '$0'}",
