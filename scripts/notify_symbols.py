@@ -27,6 +27,10 @@ def _suggest_sell_price_tag(mid: str, bid: str | None, ask: str | None) -> str:
             return ''
         b = float(str(bid).strip())
         a = float(str(ask).strip())
+        # Treat non-positive quotes as missing (Yahoo sometimes returns 0/0)
+        if b <= 0 or a <= 0:
+            v = mid.split(' ', 1)[1] if mid and ' ' in mid else ''
+            return f"建议挂单 {v}" if v else ''
         if a < b:
             b, a = a, b
         spread = max(0.0, a - b)
@@ -127,7 +131,16 @@ def _format_alert_line(line: str) -> str:
         price_tag = f"卖价 {price_val} ({ccy_val})" if ccy_val else f"卖价 {price_val}"
         sug = _suggest_sell_price_tag(mid, bid_val, ask_val)
         sug_tag = f" | {sug}" if sug else ""
-        delta_tag = f" | Δ(est) {delta.split(' ',1)[1]}" if delta and ' ' in delta else ''
+        # Delta is estimated. Hide nonsense values (e.g. ~0 caused by bad IV/quotes) to avoid false confidence.
+        delta_tag = ''
+        try:
+            if delta and ' ' in delta:
+                dv = float(delta.split(' ', 1)[1])
+                if abs(dv) >= 0.05:
+                    delta_tag = f" | Δ(est) {dv:.2f}"
+        except Exception:
+            delta_tag = ''
+
         line1 = f"{symbol} 卖Put {contract} | {price_tag}{sug_tag}{delta_tag} | {annual} | {income_int_tag(income)} | {dte}"
 
         # Line 2 (cash)
@@ -155,7 +168,16 @@ def _format_alert_line(line: str) -> str:
         price_tag = f"卖价 {price_val} ({ccy_val})" if ccy_val else f"卖价 {price_val}"
         sug = _suggest_sell_price_tag(mid, bid_val, ask_val)
         sug_tag = f" | {sug}" if sug else ""
-        delta_tag = f" | Δ(est) {delta.split(' ',1)[1]}" if delta and ' ' in delta else ''
+        # Delta is estimated. Hide nonsense values (e.g. ~0 caused by bad IV/quotes) to avoid false confidence.
+        delta_tag = ''
+        try:
+            if delta and ' ' in delta:
+                dv = float(delta.split(' ', 1)[1])
+                if abs(dv) >= 0.05:
+                    delta_tag = f" | Δ(est) {dv:.2f}"
+        except Exception:
+            delta_tag = ''
+
         line1 = f"{symbol} 卖Call {contract} | {price_tag}{sug_tag}{delta_tag} | {annual} | {income_int_tag(income)} | {dte}"
         line2 = ''
         if cover or shares:
