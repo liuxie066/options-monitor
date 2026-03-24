@@ -124,14 +124,14 @@ def _format_alert_line(line: str) -> str:
         # Only show cash required (no headroom calc)
         cash_req_only = extras.get('cash_req_cny', '') or extras.get('cash_req', '')
 
-        # Line 1 (compact)
-        # Include suggested sell price (mid)
+        # Header line (more scannable)
         price_val = mid.split(' ', 1)[1] if mid and ' ' in mid else 'mid'
         ccy_val = ccy.split(' ', 1)[1] if ccy and ' ' in ccy else ''
         price_tag = f"卖价 {price_val} ({ccy_val})" if ccy_val else f"卖价 {price_val}"
+
         sug = _suggest_sell_price_tag(mid, bid_val, ask_val)
         sug_tag = f" | {sug}" if sug else ""
-        # Delta is estimated. Hide nonsense values (e.g. ~0 caused by bad IV/quotes) to avoid false confidence.
+
         delta_tag = ''
         try:
             if delta and ' ' in delta:
@@ -141,15 +141,16 @@ def _format_alert_line(line: str) -> str:
         except Exception:
             delta_tag = ''
 
-        line1 = f"{symbol} 卖Put {contract} | {price_tag}{sug_tag}{delta_tag} | {annual} | {income_int_tag(income)} | {dte}"
+        # Move annual/net/dte to the end, keep only one separator
+        meta = " | ".join([x for x in [annual, income_int_tag(income), dte] if x])
+        line1 = f"{symbol} 卖Put {contract} | {price_tag}{sug_tag}{delta_tag}" + (f" | {meta}" if meta else "")
 
-        # Line 2 (cash)
+        # Line 2 (cash) -> shorten
         req = cash_req_cny or cash_req or cash_req_only or ''
         line2 = ''
         if req:
-            # Append explicit currency tag (CNY/USD)
             cur = 'CNY' if (cash_req_cny or '¥' in str(req)) else 'USD'
-            line2 = f"占用担保 {req} ({cur})"
+            line2 = f"担保占用: {req} ({cur})"
 
         out = [line1]
         if line2:
@@ -162,13 +163,13 @@ def _format_alert_line(line: str) -> str:
         cover = extras.get('cover', '')
         shares = extras.get('shares', '')
 
-        # Include suggested sell price (mid)
         price_val = mid.split(' ', 1)[1] if mid and ' ' in mid else 'mid'
         ccy_val = ccy.split(' ', 1)[1] if ccy and ' ' in ccy else ''
         price_tag = f"卖价 {price_val} ({ccy_val})" if ccy_val else f"卖价 {price_val}"
+
         sug = _suggest_sell_price_tag(mid, bid_val, ask_val)
         sug_tag = f" | {sug}" if sug else ""
-        # Delta is estimated. Hide nonsense values (e.g. ~0 caused by bad IV/quotes) to avoid false confidence.
+
         delta_tag = ''
         try:
             if delta and ' ' in delta:
@@ -178,10 +179,14 @@ def _format_alert_line(line: str) -> str:
         except Exception:
             delta_tag = ''
 
-        line1 = f"{symbol} 卖Call {contract} | {price_tag}{sug_tag}{delta_tag} | {annual} | {income_int_tag(income)} | {dte}"
+        meta = " | ".join([x for x in [annual, income_int_tag(income), dte] if x])
+        line1 = f"{symbol} 卖Call {contract} | {price_tag}{sug_tag}{delta_tag}" + (f" | {meta}" if meta else "")
+
+        # Coverage line: make it more human
         line2 = ''
         if cover or shares:
-            line2 = f"覆盖 cover {cover or '-'} | shares {shares or '-'}"
+            # keep original shares string (it already encodes locked shares like 160(-0))
+            line2 = f"覆盖: {cover or '-'} 张 | shares {shares or '-'}"
 
         out = [line1]
         if line2:
