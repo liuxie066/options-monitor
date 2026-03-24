@@ -94,6 +94,8 @@ def summarize_sell_put(df: pd.DataFrame, symbol: str) -> dict:
         'cash_free_cny': None,
         'cash_required_cny': None,
         'mid': None,
+        'bid': None,
+        'ask': None,
         'option_ccy': None,
         'note': '无候选',
     }
@@ -160,6 +162,8 @@ def summarize_sell_put(df: pd.DataFrame, symbol: str) -> dict:
         'cash_free_cny': cash_free_cny,
         'cash_required_cny': cash_required_cny,
         'mid': (float(top['mid']) if 'mid' in top else None),
+        'bid': (float(top['bid']) if 'bid' in top and pd.notna(top['bid']) else None),
+        'ask': (float(top['ask']) if 'ask' in top and pd.notna(top['ask']) else None),
         'option_ccy': ('HKD' if str(symbol).upper().endswith('.HK') else 'USD'),
         'note': '有候选',
     })
@@ -179,6 +183,8 @@ def summarize_sell_call(df: pd.DataFrame, symbol: str) -> dict:
         'annualized_return': None,
         'risk_label': '',
         'mid': None,
+        'bid': None,
+        'ask': None,
         'option_ccy': None,
         'note': '无候选',
     }
@@ -204,6 +210,8 @@ def summarize_sell_call(df: pd.DataFrame, symbol: str) -> dict:
         'annualized_return': float(top['annualized_net_premium_return']),
         'risk_label': top.get('risk_label', ''),
         'mid': (float(top['mid']) if 'mid' in top else None),
+        'bid': (float(top['bid']) if 'bid' in top and pd.notna(top['bid']) else None),
+        'ask': (float(top['ask']) if 'ask' in top and pd.notna(top['ask']) else None),
         'option_ccy': ('HKD' if str(symbol).upper().endswith('.HK') else 'USD'),
         'note': f"有候选 | cover_avail {cover_avail} | shares_total {int(top.get('shares_total', 0) or 0)} | shares_locked {int(top.get('shares_locked', 0) or 0)}",
     })

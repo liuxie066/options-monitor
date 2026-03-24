@@ -74,6 +74,18 @@ def top_pick_line(row: pd.Series) -> str:
                     parts.append(f"mid {float(mid):.3f}")
             except Exception:
                 pass
+            try:
+                bid = row.get('bid')
+                if bid is not None and not pd.isna(bid):
+                    parts.append(f"bid {float(bid):.3f}")
+            except Exception:
+                pass
+            try:
+                ask = row.get('ask')
+                if ask is not None and not pd.isna(ask):
+                    parts.append(f"ask {float(ask):.3f}")
+            except Exception:
+                pass
             parts.append(f"cover {cover_avail}")
             parts.append(f"shares {shares_total}(-{shares_locked})")
             extra = " | " + " | ".join(parts)
@@ -130,6 +142,18 @@ def top_pick_line(row: pd.Series) -> str:
                 mid = row.get('mid')
                 if mid is not None and not pd.isna(mid):
                     parts.insert(0, f"mid {float(mid):.3f}")
+            except Exception:
+                pass
+            try:
+                bid = row.get('bid')
+                if bid is not None and not pd.isna(bid):
+                    parts.insert(0, f"bid {float(bid):.3f}")
+            except Exception:
+                pass
+            try:
+                ask = row.get('ask')
+                if ask is not None and not pd.isna(ask):
+                    parts.insert(0, f"ask {float(ask):.3f}")
             except Exception:
                 pass
             try:

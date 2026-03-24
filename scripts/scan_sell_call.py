@@ -83,7 +83,7 @@ def main():
     parser.add_argument('--symbols', nargs='+', required=True)
     parser.add_argument('--avg-cost', type=float, required=True, help='Average holding cost per share')
     parser.add_argument('--shares', type=int, default=100)
-    parser.add_argument('--min-dte', type=int, default=20)
+    parser.add_argument('--min-dte', type=int, default=7)
     parser.add_argument('--max-dte', type=int, default=90)
     parser.add_argument('--min-strike', type=float, default=None)
     parser.add_argument('--max-strike', type=float, default=None)
