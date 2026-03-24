@@ -41,6 +41,24 @@ openclaw cron run 9cba60f7-407b-4427-9120-0a176b818de9 --expect-final --timeout 
 
 ---
 
+## 🔐 SSH / Deploy Key 自检（强烈推荐）
+
+当你发现 **重启 OpenClaw / 重启容器 / 换机器** 后突然无法 push/PR，先跑自检：
+
+```bash
+cd /home/node/.openclaw/workspace/options-monitor
+scripts/ssh_selfcheck.sh
+```
+
+它会检查：
+- 本机 deploy key 私钥/公钥是否存在（路径：`/home/node/.openclaw/secrets/ssh/options-monitor/`）
+- `ssh -T git@github.com` 是否能通过认证
+- `git ls-remote` 是否能访问远端
+
+如果失败，会直接打印：你应该去 GitHub 仓库 **Settings → Deploy keys** 更新哪一行 pubkey。
+
+---
+
 ## 🔎 排障（只看三处）
 
 1) 是否在跑：
