@@ -94,6 +94,8 @@ def main():
     parser.add_argument("--min-open-interest", type=float, default=100)
     parser.add_argument("--min-volume", type=float, default=10)
     parser.add_argument("--max-spread-ratio", type=float, default=0.30)
+    parser.add_argument("--min-abs-delta", type=float, default=None, help="min abs(delta) (e.g. 0.15)")
+    parser.add_argument("--max-abs-delta", type=float, default=None, help="max abs(delta) (e.g. 0.28)")
     args = parser.parse_args()
 
     base = Path(__file__).resolve().parents[1]
@@ -136,6 +138,18 @@ def main():
                 if mid is not None and mid > 0:
                     spread_ratio = spread / mid
 
+            # Delta filter (optional)
+            try:
+                d = safe_float(row.get('delta'))
+                if d is not None:
+                    ad = abs(float(d))
+                    if args.min_abs_delta is not None and ad < float(args.min_abs_delta):
+                        continue
+                    if args.max_abs_delta is not None and ad > float(args.max_abs_delta):
+                        continue
+            except Exception:
+                pass
+
             metrics = compute_metrics(row)
             if not metrics:
                 continue
@@ -162,6 +176,7 @@ def main():
                 "open_interest": oi,
                 "volume": vol,
                 "implied_volatility": safe_float(row.get("implied_volatility")),
+                "delta": safe_float(row.get("delta")),
                 "spread": spread,
                 "spread_ratio": spread_ratio,
                 **metrics,
