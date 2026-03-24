@@ -42,6 +42,44 @@ def get_spot_price(ticker: yf.Ticker) -> float:
     raise RuntimeError("Could not determine underlying spot price")
 
 
+def _norm_cdf(x: float) -> float:
+    # Standard normal CDF via erf (no scipy dependency)
+    import math
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def calc_bs_delta(spot: float, strike: float, dte: int, iv: float, option_type: str, r: float = 0.0, q: float = 0.0) -> float | None:
+    """Black-Scholes delta using implied volatility.
+
+    iv is expected as decimal (e.g. 0.5 for 50%). We clamp to a reasonable range.
+    """
+    try:
+        import math
+        if spot <= 0 or strike <= 0 or dte <= 0:
+            return None
+        if iv is None or math.isnan(iv) or iv <= 0:
+            return None
+
+        # Some data sources may output IV in percent (e.g. 50 for 50%); normalize heuristically.
+        sigma = float(iv)
+        if sigma > 3.0:
+            sigma = sigma / 100.0
+        sigma = max(1e-6, min(sigma, 5.0))
+
+        T = float(dte) / 365.0
+        if T <= 0:
+            return None
+
+        d1 = (math.log(spot / strike) + (r - q + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt(T))
+        if option_type == 'call':
+            return math.exp(-q * T) * _norm_cdf(d1)
+        if option_type == 'put':
+            return math.exp(-q * T) * (_norm_cdf(d1) - 1.0)
+        return None
+    except Exception:
+        return None
+
+
 def normalize_option_rows(symbol: str, expiration: str, option_type: str, df: pd.DataFrame, spot: float) -> list[dict[str, Any]]:
     today = date.today()
     exp_date = datetime.strptime(expiration, "%Y-%m-%d").date()
@@ -81,6 +119,25 @@ def normalize_option_rows(symbol: str, expiration: str, option_type: str, df: pd
                 row["otm_pct"] = (strike - spot) / spot
         else:
             row["otm_pct"] = None
+
+        # Greeks (best-effort): delta from BS using implied vol
+        try:
+            iv = float(row.get('implied_volatility')) if row.get('implied_volatility') is not None else None
+        except Exception:
+            iv = None
+        try:
+            dte = int(row.get('dte'))
+        except Exception:
+            dte = 0
+        try:
+            strike = float(row.get('strike'))
+        except Exception:
+            strike = None
+
+        if strike is not None:
+            row['delta'] = calc_bs_delta(float(spot), float(strike), int(dte), iv, str(option_type))
+        else:
+            row['delta'] = None
 
         rows.append(row)
 
