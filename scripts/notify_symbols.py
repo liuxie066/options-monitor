@@ -214,13 +214,20 @@ def _group_by_strategy(raw_lines: list[str]) -> dict[str, list[str]]:
 
 
 def build_notification(changes_text: str, alerts_text: str, fx_info: dict | None = None) -> str:
+    """Build markdown-ish notification text.
+
+    User preference:
+    - Two-line candidates
+    - Notes are not folded
+
+    Note: Some chat clients won't render markdown; we still gain readability.
+    """
+
     change_lines = extract_change_lines(changes_text)
     high_lines = extract_section(alerts_text, '## 高优先级')
     medium_lines = extract_section(alerts_text, '## 中优先级')
 
     lines: list[str] = []
-
-    # Header: keep minimal (cash summary appended later by append_cash_summary.py)
 
     significant_changes = [
         line for line in change_lines
@@ -230,40 +237,44 @@ def build_notification(changes_text: str, alerts_text: str, fx_info: dict | None
     def emit_grouped(title: str, raw: list[str]):
         if not raw:
             return
-        lines.append(f"{title}:")
+        lines.append(f"## {title}")
         groups = _group_by_strategy(raw)
 
         def emit_items(items: list[str]):
             for x in items:
                 block = _format_alert_line(x).strip()
-                lines.append(block)
-                # Add a blank line only for multi-line blocks (e.g., Put/Call candidates).
-                if '\n' in block:
-                    lines.append('')
+                if not block:
+                    continue
+                blk = block.splitlines()
+                # First line as bullet; subsequent lines indented.
+                lines.append(f"- {blk[0]}")
+                for ln in blk[1:]:
+                    lines.append(f"  {ln}")
+                lines.append('')
 
-        # Put first, then Call
         if groups['sell_put']:
-            lines.append('Put:')
+            lines.append('### Put')
             emit_items(groups['sell_put'])
         if groups['sell_call']:
-            lines.append('Call:')
+            lines.append('### Call')
             emit_items(groups['sell_call'])
         if groups['other']:
             emit_items(groups['other'])
 
-        # Ensure a trailing blank line between sections
-        if lines and lines[-1] != '':
-            lines.append('')
-
-    # Always show candidates first (per-account & non-mergeable, especially covered call),
-    # then show changes as supplementary info.
     if high_lines:
         emit_grouped('重点', high_lines[:5])
     elif medium_lines:
         emit_grouped('观察', medium_lines[:5])
 
     if significant_changes:
-        emit_grouped('变化', significant_changes[:8])
+        # Changes are short; keep as bullet list
+        lines.append('## 变化')
+        for ln in significant_changes[:8]:
+            s = ln.strip()
+            if s.startswith('- '):
+                s = s[2:]
+            lines.append(f"- {s}")
+        lines.append('')
 
     if not (high_lines or medium_lines or significant_changes):
         lines.append('今日无需要主动提醒的内容。')
