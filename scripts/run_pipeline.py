@@ -481,6 +481,7 @@ def process_symbol(
         # allow overriding shares/avg_cost from portfolio context (holdings), so alerts become account-aware
         shares_override = None
         avg_cost_override = None
+        stock = None
         if portfolio_ctx:
             stock = (portfolio_ctx.get('stocks_by_symbol') or {}).get(symbol)
             if stock:
@@ -489,6 +490,13 @@ def process_symbol(
 
             # NOTE: do NOT deduct locked shares when passing shares into scan_sell_call.
             # The scan itself is just opportunity scanning; coverage is enforced/annotated after scan.
+
+        # Safety: if there is no holdings row for this symbol in this account, skip sell_call.
+        # This avoids recommending covered calls for accounts that do not hold the underlying.
+        if not stock:
+            summary_rows.append(summarize_sell_call(pd.DataFrame(), symbol))
+            return summary_rows
+
         shares_total = shares_override if shares_override is not None else cc.get('shares', 100)
         avg_cost = avg_cost_override if avg_cost_override is not None else cc['avg_cost']
 
