@@ -127,7 +127,7 @@ def _format_alert_line(line: str) -> str:
         price_tag = f"卖价 {price_val} ({ccy_val})" if ccy_val else f"卖价 {price_val}"
         sug = _suggest_sell_price_tag(mid, bid_val, ask_val)
         sug_tag = f" | {sug}" if sug else ""
-        delta_tag = f" | Δ {delta.split(' ',1)[1]}" if delta and ' ' in delta else ''
+        delta_tag = f" | Δ(est) {delta.split(' ',1)[1]}" if delta and ' ' in delta else ''
         line1 = f"{symbol} 卖Put {contract} | {price_tag}{sug_tag}{delta_tag} | {annual} | {income_int_tag(income)} | {dte}"
 
         # Line 2 (cash)
@@ -155,7 +155,7 @@ def _format_alert_line(line: str) -> str:
         price_tag = f"卖价 {price_val} ({ccy_val})" if ccy_val else f"卖价 {price_val}"
         sug = _suggest_sell_price_tag(mid, bid_val, ask_val)
         sug_tag = f" | {sug}" if sug else ""
-        delta_tag = f" | Δ {delta.split(' ',1)[1]}" if delta and ' ' in delta else ''
+        delta_tag = f" | Δ(est) {delta.split(' ',1)[1]}" if delta and ' ' in delta else ''
         line1 = f"{symbol} 卖Call {contract} | {price_tag}{sug_tag}{delta_tag} | {annual} | {income_int_tag(income)} | {dte}"
         line2 = ''
         if cover or shares:

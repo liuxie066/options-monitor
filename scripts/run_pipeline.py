@@ -103,9 +103,22 @@ def summarize_sell_put(df: pd.DataFrame, symbol: str) -> dict:
     if df.empty:
         return row
     row['candidate_count'] = len(df)
-    top = df.sort_values(
-        ['annualized_net_return_on_cash_basis', 'net_income'],
-        ascending=[False, False],
+    # Pick the top contract with a more execution-friendly preference:
+    # prefer delta close to target, then higher annualized return, then net income.
+    target_abs_delta = 0.22
+    d = df.copy()
+    try:
+        if 'delta' in d.columns:
+            d['_abs_delta'] = d['delta'].abs()
+            d['_delta_dist'] = (d['_abs_delta'] - target_abs_delta).abs()
+        else:
+            d['_delta_dist'] = 999.0
+    except Exception:
+        d['_delta_dist'] = 999.0
+
+    top = d.sort_values(
+        ['_delta_dist', 'annualized_net_return_on_cash_basis', 'net_income'],
+        ascending=[True, False, False],
     ).iloc[0]
     cash_secured_used = 0.0
     cash_avail = None
@@ -194,9 +207,20 @@ def summarize_sell_call(df: pd.DataFrame, symbol: str) -> dict:
     if df.empty:
         return row
     row['candidate_count'] = len(df)
-    top = df.sort_values(
-        ['annualized_net_premium_return', 'if_exercised_total_return', 'net_income'],
-        ascending=[False, False, False],
+    # Prefer delta close to a steady target, then higher premium return.
+    target_delta = 0.28
+    d = df.copy()
+    try:
+        if 'delta' in d.columns:
+            d['_delta_dist'] = (d['delta'] - target_delta).abs()
+        else:
+            d['_delta_dist'] = 999.0
+    except Exception:
+        d['_delta_dist'] = 999.0
+
+    top = d.sort_values(
+        ['_delta_dist', 'annualized_net_premium_return', 'if_exercised_total_return', 'net_income'],
+        ascending=[True, False, False, False],
     ).iloc[0]
     cover_avail = 0
     try:
