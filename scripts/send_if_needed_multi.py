@@ -32,13 +32,203 @@ import json
 import os
 import re
 import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta, time
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def bj_now() -> str:
+    return datetime.now(timezone.utc).astimezone(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M:%S')
+
+
+def read_json(path: Path, default):
+    try:
+        if path.exists() and path.stat().st_size > 0:
+            return json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        pass
+    return default
+
+
+def write_json(path: Path, obj):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(obj, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+
+
+def parse_hhmm(value: str) -> time:
+    hour, minute = value.split(':', 1)
+    return time(hour=int(hour), minute=int(minute))
+
+
+def maybe_parse_dt(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    return datetime.fromisoformat(value)
+
+
+def is_high_priority_notification(text: str) -> bool:
+    # notify_symbols.py emits "重点:" when there are high-priority candidates.
+    return bool(re.search(r"(?m)^重点:\s*$", text or ""))
+
+
+def parse_last_json(stdout: str) -> dict:
+    """Parse the last JSON object printed to stdout (tolerant of logs above it)."""
+    lines = (stdout or '').splitlines()
+    buf = []
+    for ln in reversed(lines):
+        if not ln.strip():
+            continue
+        buf.append(ln)
+        if ln.strip().startswith('{'):
+            break
+    txt = '\n'.join(reversed(buf)).strip()
+    return json.loads(txt) if txt else {}
+
+
+def money_cny(v) -> str:
+    try:
+        if v is None:
+            return '-'
+        return f"¥{float(v):,.0f} (CNY)"
+    except Exception:
+        return '-'
+
+
+def _snapshot_fresh(payload: dict, max_age_sec: int) -> bool:
+    if not payload or max_age_sec <= 0:
+        return False
+    try:
+        as_of = payload.get('as_of_utc')
+        if not as_of:
+            return False
+        dt = datetime.fromisoformat(str(as_of))
+        # tolerate naive timestamps by treating them as UTC
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        age = datetime.now(timezone.utc) - dt.astimezone(timezone.utc)
+        return age.total_seconds() <= float(max_age_sec)
+    except Exception:
+        return False
+
+
+def query_cash_footer(
+    base: Path,
+    *,
+    market: str,
+    accounts: list[str],
+    timeout_sec: int = 180,
+    snapshot_max_age_sec: int = 900,
+) -> list[str]:
+    """Compute the cash footer once.
+
+    Engineering goals:
+    - Prefer reading per-account cash_snapshot.json (fast + reproducible)
+    - Refresh snapshot when missing/stale
+    - Best-effort: if some account fails, still print others
+    - Make failures visible in the footer
+    """
+    vpy = str(base / '.venv' / 'bin' / 'python')
+
+    lines: list[str] = []
+    payloads: dict[str, dict] = {}
+    errors: dict[str, str] = {}
+
+    def _run_one(acct_l: str) -> tuple[str, dict | None, str | None]:
+        """Return (acct, payload, error)."""
+        state_dir = (base / 'output_accounts' / acct_l / 'state').resolve()
+        state_dir.mkdir(parents=True, exist_ok=True)
+        snap_path = state_dir / 'cash_snapshot.json'
+
+        # 1) Try snapshot first
+        try:
+            if snap_path.exists() and snap_path.stat().st_size > 0:
+                snap = json.loads(snap_path.read_text(encoding='utf-8'))
+                if isinstance(snap, dict) and _snapshot_fresh(snap, snapshot_max_age_sec):
+                    return acct_l, snap, None
+        except Exception:
+            pass
+
+        # 2) Refresh snapshot
+        try:
+            p = subprocess.run(
+                [
+                    vpy,
+                    'scripts/query_sell_put_cash.py',
+                    '--market', str(market),
+                    '--account', acct_l,
+                    '--format', 'json',
+                    '--out-dir', str(state_dir),
+                ],
+                cwd=str(base),
+                capture_output=True,
+                text=True,
+                timeout=timeout_sec,
+            )
+        except Exception as e:
+            return acct_l, None, f"exec_error: {e}"
+
+        if p.returncode != 0:
+            err = (p.stderr or p.stdout or '').strip().splitlines()[-1:]  # last line only
+            return acct_l, None, (err[0] if err else f"returncode={p.returncode}")
+
+        payload = parse_last_json(p.stdout)
+        try:
+            if isinstance(payload, dict) and payload:
+                snap_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+        except Exception:
+            pass
+
+        return acct_l, payload, None
+
+    acct_list = [str(a).strip().lower() for a in accounts if str(a).strip()]
+
+    # Parallelize per-account snapshot read/refresh
+    with ThreadPoolExecutor(max_workers=min(8, max(1, len(acct_list)))) as ex:
+        futs = {ex.submit(_run_one, acct_l): acct_l for acct_l in acct_list}
+        for fut in as_completed(futs):
+            acct_l, payload, err = fut.result()
+            if err:
+                errors[acct_l] = err
+            elif payload is not None:
+                payloads[acct_l] = payload
+
+    if not payloads and not errors:
+        return []
+
+    def asof_bj(payload: dict) -> str:
+        try:
+            s = payload.get('as_of_utc')
+            if not s:
+                return ''
+            dt = datetime.fromisoformat(str(s))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            bj = dt.astimezone(ZoneInfo('Asia/Shanghai'))
+            return bj.strftime('%Y-%m-%d %H:%M')
+        except Exception:
+            return ''
+
+    lines.append('现金（CNY）:')
+    for acct in accounts:
+        acct_l = str(acct).strip().lower()
+        acct_u = acct_l.upper()
+        if acct_l in payloads:
+            payload = payloads[acct_l] or {}
+            t = asof_bj(payload)
+            tag = f" (as_of {t})" if t else ''
+            lines.append(
+                f"{acct_u}: holding {money_cny(payload.get('cash_available_cny'))} | free {money_cny(payload.get('cash_free_cny'))}{tag}"
+            )
+        elif acct_l in errors:
+            lines.append(f"{acct_u}: (cash query failed) {errors[acct_l]}")
+
+    return lines
 
 
 def atomic_symlink(path: Path, target: Path):
@@ -216,39 +406,29 @@ def flatten_auto_close_summary(text: str, *, always_show: bool = False) -> str:
     return ('---\n' + '\n'.join(lines).strip()).strip()
 
 
-def build_merged_message(results: list[AccountResult]) -> str:
-    now = utc_now()
+def build_merged_message(
+    results: list[AccountResult],
+    *,
+    base_cfg: dict | None = None,
+    cash_accounts: list[str] | None = None,
+) -> str:
+    now_bj = bj_now()
     lines: list[str] = []
-    lines.append(f"options-monitor 合并提醒")
-    lines.append(f"UTC: {now}")
+    lines.append("options-monitor 合并提醒")
+    lines.append(f"北京时间: {now_bj}")
     lines.append('')
 
     any_content = False
-    cash_footer: dict[str, str] = {}
+    # Cash footer is computed once at the end (do not rely on parsing per-account notifications).
 
     for r in results:
         if not (r.should_notify and r.meaningful and r.notification_text.strip()):
             continue
         any_content = True
 
-        # Extract and remove any per-notification cash footer (we append both accounts at the very end)
-        txt_lines = r.notification_text.strip().splitlines()
-        kept: list[str] = []
-        in_cash = False
-        for ln in txt_lines:
-            if ln.strip() == '现金结余:':
-                in_cash = True
-                continue
-            if in_cash:
-                # expected: "LX账户 base free(CNY): ¥..."
-                if '账户 base free(CNY):' in ln:
-                    try:
-                        acct2, rest = ln.split('账户', 1)
-                        cash_footer[acct2.strip().upper()] = '账户' + rest
-                    except Exception:
-                        pass
-                continue
-            kept.append(ln)
+        # Per-account notification should not include cash footer anymore.
+        # Keep logic simple: just take the text as-is.
+        kept = r.notification_text.strip().splitlines()
 
         # Count Put/Call blocks for this account (for quick sanity check; sections may be omitted when empty)
         put_n = sum(1 for ln in kept if ' 卖Put ' in ln)
@@ -261,14 +441,30 @@ def build_merged_message(results: list[AccountResult]) -> str:
     if not any_content:
         return ''
 
-    # Append cash footer at the end
-    if cash_footer:
-        lines.append('现金结余:')
-        # Keep deterministic order
-        for acct in ['LX', 'SY']:
-            if acct in cash_footer:
-                lines.append(f"{acct}{cash_footer[acct]}")
-        lines.append('')
+    # Append cash footer at the end (compute once)
+    try:
+        base = Path(__file__).resolve().parents[1]
+        cfg = base_cfg or {}
+        cfg_market = str((cfg.get('portfolio') or {}).get('market') or '富途')
+
+        notif_cfg = (cfg.get('notifications') or {}) if isinstance(cfg, dict) else {}
+        accts = cash_accounts or (notif_cfg.get('cash_footer_accounts') or ['lx', 'sy'])
+        timeout_sec = int(notif_cfg.get('cash_footer_timeout_sec') or 180)
+        max_age_sec = int(notif_cfg.get('cash_snapshot_max_age_sec') or 900)
+
+        footer_lines = query_cash_footer(
+            base,
+            market=cfg_market,
+            accounts=accts,
+            timeout_sec=timeout_sec,
+            snapshot_max_age_sec=max_age_sec,
+        )
+        if footer_lines:
+            lines.extend(footer_lines)
+            lines.append('')
+    except Exception:
+        # best-effort: skip cash footer if anything fails
+        pass
 
     return '\n'.join(lines).strip() + '\n'
 
@@ -287,6 +483,11 @@ def main():
     if not cfg_path.is_absolute():
         cfg_path = (base / cfg_path).resolve()
     base_cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
+
+    schedule_cfg = base_cfg.get('schedule', {}) or {}
+    dense_notify_cooldown_min = int(schedule_cfg.get('notify_cooldown_dense_min', 30))
+    sparse_after_beijing = parse_hhmm(schedule_cfg.get('sparse_after_beijing', '02:00'))
+    bj_tz = ZoneInfo(schedule_cfg.get('beijing_timezone', 'Asia/Shanghai'))
 
     # Ensure output/accounts layout
     accounts_root = (base / 'output_accounts').resolve()
@@ -350,6 +551,17 @@ def main():
             results.append(AccountResult(acct, True, should_notify, False, 'pipeline failed', ''))
             continue
 
+        # Update scan timestamp so the scheduler interval works next tick.
+        # (scan_scheduler.py only updates last_scan_utc in --run-if-due mode, which we don't use here.)
+        try:
+            st = read_json(state_path, {'last_scan_utc': None, 'last_notify_utc': None})
+            if not isinstance(st, dict):
+                st = {'last_scan_utc': None, 'last_notify_utc': None}
+            st['last_scan_utc'] = utc_now()
+            write_json(state_path, st)
+        except Exception:
+            pass
+
         text = notif_path.read_text(encoding='utf-8', errors='replace').strip() if notif_path.exists() else ''
 
         # Append compact auto-close summary (only when applied>0 or errors>0)
@@ -360,10 +572,45 @@ def main():
             text = (text.strip() + '\n\n' + auto_close_flat.strip()).strip()
 
         meaningful = bool(text) and (text != '今日无需要主动提醒的内容。')
-        results.append(AccountResult(acct, True, should_notify, meaningful, reason, text))
 
-    merged = build_merged_message(results)
+        # Content-aware notify override (your preference):
+        # Before Beijing 02:00, allow HIGH-priority notifications as frequently as every 30 minutes.
+        # Medium/changes still follow scan_scheduler's base cooldown (typically 60 minutes).
+        should_notify_effective = should_notify
+        try:
+            now_bj = datetime.now(timezone.utc).astimezone(bj_tz)
+            before_sparse = now_bj.time() < sparse_after_beijing
+            high_pri = meaningful and is_high_priority_notification(text)
+
+            if (not should_notify_effective) and before_sparse and high_pri:
+                st = read_json(state_path, {'last_notify_utc': None})
+                last_notify = maybe_parse_dt((st or {}).get('last_notify_utc')) if isinstance(st, dict) else None
+                if last_notify is None:
+                    should_notify_effective = True
+                    reason = (reason + f" | override(high,dense): last_notify missing")
+                else:
+                    elapsed = datetime.now(timezone.utc) - last_notify.astimezone(timezone.utc)
+                    if elapsed >= timedelta(minutes=dense_notify_cooldown_min):
+                        should_notify_effective = True
+                        reason = (reason + f" | override(high,dense): elapsed>={dense_notify_cooldown_min}m")
+        except Exception:
+            pass
+
+        results.append(AccountResult(acct, True, should_notify_effective, meaningful, reason, text))
+
+    merged = build_merged_message(results, base_cfg=base_cfg, cash_accounts=['lx', 'sy'])
     if not merged:
+        # Even if we didn't send, record that we ran.
+        try:
+            write_json(base / 'output' / 'state' / 'last_run.json', {
+                'last_run_utc': utc_now(),
+                'sent': False,
+                'reason': 'no_merged_notification',
+                'accounts': [r.account for r in results],
+                'results': [r.__dict__ for r in results],
+            })
+        except Exception:
+            pass
         return 0
 
     # Send ONCE
@@ -391,6 +638,32 @@ def main():
                 [str(vpy), 'scripts/scan_scheduler.py', '--config', str(cfg_override), '--state', str(state_path), '--mark-notified'],
                 cwd=str(base),
             )
+
+    # Write shared last_run.json (for cron observability)
+    try:
+        last_run_path = base / 'output' / 'state' / 'last_run.json'
+        prev = read_json(last_run_path, {})
+        run_meta = {
+            'last_run_utc': utc_now(),
+            'sent': True,
+            'channel': str(channel),
+            'target': str(target),
+            'accounts': [r.account for r in results],
+            'results': [r.__dict__ for r in results],
+        }
+        # Keep a small history for debugging (no unbounded growth)
+        hist = prev.get('history') if isinstance(prev, dict) else None
+        if not isinstance(hist, list):
+            hist = []
+        hist.append(run_meta)
+        hist = hist[-20:]
+        write_json(last_run_path, {
+            **(prev if isinstance(prev, dict) else {}),
+            **run_meta,
+            'history': hist,
+        })
+    except Exception:
+        pass
 
     return 0
 

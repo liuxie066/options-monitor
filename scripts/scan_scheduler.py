@@ -10,8 +10,6 @@ from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-
-
 @dataclass
 class SchedulerDecision:
     now_utc: str
@@ -79,6 +77,9 @@ def decide(schedule_cfg: dict, state: dict, now_utc: datetime) -> SchedulerDecis
     market_close = parse_hhmm(schedule_cfg.get('market_close', '16:00'))
     in_hours = is_market_hours(now_market, market_open, market_close)
 
+    # Base notification cooldown (minutes).
+    # Content-aware overrides (e.g., HIGH-priority before 02:00 Beijing) are implemented in send_if_needed_multi
+    # after the pipeline generates the notification text.
     notify_cooldown_min = int(schedule_cfg.get('notify_cooldown_min', 60))
 
     # Decide scan interval
@@ -104,6 +105,9 @@ def decide(schedule_cfg: dict, state: dict, now_utc: datetime) -> SchedulerDecis
         # Sparse window: [sparse_after, close_bj_time] (handles DST because close_bj_time changes)
         use_sparse = _time_in_range(now_bj.time(), sparse_after, close_bj_time)
         interval_min = sparse if use_sparse else dense
+
+        # Notification cooldown is handled separately (content-aware) in send_if_needed_multi.
+        # Scheduler keeps a single base cooldown (notify_cooldown_min) here.
 
     last_scan = maybe_parse_dt(state.get('last_scan_utc'))
     last_notify = maybe_parse_dt(state.get('last_notify_utc'))
