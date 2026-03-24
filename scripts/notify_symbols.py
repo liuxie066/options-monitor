@@ -52,6 +52,20 @@ def _format_alert_line(line: str) -> str:
     annual = next((p for p in parts if p.startswith('年化')), '')
     income = next((p for p in parts if p.startswith('净收入')), '')
     dte = next((p for p in parts if p.startswith('DTE')), '')
+
+    def income_int_tag(s: str) -> str:
+        # input like "净收入 137.99" -> "净收 138"
+        try:
+            if not s:
+                return ''
+            x = s.replace('净收入', '').strip()
+            v = float(x)
+            return f"净收 {int(round(v))}"
+        except Exception:
+            return s
+    # mid price used for return calculation (if present)
+    mid = next((p for p in parts if p.startswith('mid ')), '')
+    ccy = next((p for p in parts if p.startswith('ccy ')), '')
     risk = parts[7] if len(parts) >= 8 else ''
 
     extras: dict[str, str] = {}
@@ -71,13 +85,19 @@ def _format_alert_line(line: str) -> str:
         cash_req_only = extras.get('cash_req_cny', '') or extras.get('cash_req', '')
 
         # Line 1 (compact)
-        line1 = f"{symbol} 卖Put {contract} | {annual} | {income} | {dte}"
+        # Include suggested sell price (mid)
+        price_val = mid.split(' ', 1)[1] if mid and ' ' in mid else 'mid'
+        ccy_val = ccy.split(' ', 1)[1] if ccy and ' ' in ccy else ''
+        price_tag = f"卖价 {price_val} ({ccy_val})" if ccy_val else f"卖价 {price_val}"
+        line1 = f"{symbol} 卖Put {contract} | {price_tag} | {annual} | {income_int_tag(income)} | {dte}"
 
         # Line 2 (cash)
         req = cash_req_cny or cash_req or cash_req_only or ''
         line2 = ''
         if req:
-            line2 = f"占用担保 {req}"
+            # Append explicit currency tag (CNY/USD)
+            cur = 'CNY' if (cash_req_cny or '¥' in str(req)) else 'USD'
+            line2 = f"占用担保 {req} ({cur})"
 
         out = [line1]
         if line2:
@@ -90,7 +110,11 @@ def _format_alert_line(line: str) -> str:
         cover = extras.get('cover', '')
         shares = extras.get('shares', '')
 
-        line1 = f"{symbol} 卖Call {contract} | {annual} | {income} | {dte}"
+        # Include suggested sell price (mid)
+        price_val = mid.split(' ', 1)[1] if mid and ' ' in mid else 'mid'
+        ccy_val = ccy.split(' ', 1)[1] if ccy and ' ' in ccy else ''
+        price_tag = f"卖价 {price_val} ({ccy_val})" if ccy_val else f"卖价 {price_val}"
+        line1 = f"{symbol} 卖Call {contract} | {price_tag} | {annual} | {income_int_tag(income)} | {dte}"
         line2 = ''
         if cover or shares:
             line2 = f"覆盖 cover {cover or '-'} | shares {shares or '-'}"

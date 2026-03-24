@@ -45,7 +45,7 @@ def money_cny(v) -> str:
     try:
         if v is None:
             return '-'
-        return f"¥{float(v):,.0f}"
+        return f"¥{float(v):,.0f} (CNY)"
     except Exception:
         return '-'
 
@@ -62,6 +62,26 @@ def main():
     notif_path = base / args.notification
     text = notif_path.read_text(encoding='utf-8').strip() if notif_path.exists() else ''
 
+    # Remove any previous cash footer blocks to keep the file clean and idempotent.
+    # We support older formats as well.
+    def _strip_old_cash_blocks(t: str) -> str:
+        if not t:
+            return t
+        lines = t.splitlines()
+        cut = len(lines)
+        headers = {
+            '现金结余:',
+            '现金（holding表，CNY）:',
+            '现金（CNY）:',
+        }
+        for i, ln in enumerate(lines):
+            if ln.strip() in headers:
+                cut = i
+                break
+        return '\n'.join(lines[:cut]).rstrip()
+
+    text = _strip_old_cash_blocks(text)
+
     py = str(base / '.venv' / 'bin' / 'python')
 
     rows = []
@@ -74,12 +94,19 @@ def main():
             '--format', 'json',
         ], cwd=base, timeout_sec=180)
         payload = parse_last_json(out)
-        rows.append((acct.upper(), payload.get('cash_free_cny')))
+        # Show BOTH:
+        # - holding-table cash (cash_available_cny)
+        # - free cash after subtracting put cash-secured (cash_free_cny)
+        rows.append((
+            acct.upper(),
+            payload.get('cash_available_cny'),
+            payload.get('cash_free_cny'),
+        ))
 
     footer = []
-    footer.append('现金结余:')
-    for acct, free_cny in rows:
-        footer.append(f"{acct}账户 base free(CNY): {money_cny(free_cny)}")
+    footer.append('现金（CNY）:')
+    for acct, avail_cny, free_cny in rows:
+        footer.append(f"{acct}: holding {money_cny(avail_cny)} | free {money_cny(free_cny)}")
 
     new_text = (text + '\n\n' + '\n'.join(footer).strip() + '\n').strip() + '\n'
     notif_path.write_text(new_text, encoding='utf-8')
