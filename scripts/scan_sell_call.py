@@ -92,6 +92,8 @@ def main():
     parser.add_argument('--min-open-interest', type=float, default=100)
     parser.add_argument('--min-volume', type=float, default=10)
     parser.add_argument('--max-spread-ratio', type=float, default=0.30)
+    parser.add_argument('--min-delta', type=float, default=None, help='min call delta (e.g. 0.20)')
+    parser.add_argument('--max-delta', type=float, default=None, help='max call delta (e.g. 0.35)')
     args = parser.parse_args()
 
     if args.shares < 100:
@@ -137,6 +139,18 @@ def main():
             if spread_ratio is not None and spread_ratio > args.max_spread_ratio:
                 continue
 
+            # Delta filter (optional)
+            try:
+                d = safe_float(row.get('delta'))
+                if d is not None:
+                    d = float(d)
+                    if args.min_delta is not None and d < float(args.min_delta):
+                        continue
+                    if args.max_delta is not None and d > float(args.max_delta):
+                        continue
+            except Exception:
+                pass
+
             metrics = compute_metrics(row, args.avg_cost)
             if not metrics:
                 continue
@@ -161,6 +175,7 @@ def main():
                 'open_interest': oi,
                 'volume': vol,
                 'implied_volatility': safe_float(row.get('implied_volatility')),
+                'delta': safe_float(row.get('delta')),
                 'spread': spread,
                 'spread_ratio': spread_ratio,
                 **metrics,

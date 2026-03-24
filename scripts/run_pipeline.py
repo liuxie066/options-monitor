@@ -84,6 +84,7 @@ def summarize_sell_put(df: pd.DataFrame, symbol: str) -> dict:
         'net_income': None,
         'annualized_return': None,
         'risk_label': '',
+        'delta': None,
         'cash_secured_used_usd': 0.0,
         'cash_required_usd': None,
         'cash_available_usd': None,
@@ -152,6 +153,7 @@ def summarize_sell_put(df: pd.DataFrame, symbol: str) -> dict:
         'net_income': float(top['net_income']),
         'annualized_return': float(top['annualized_net_return_on_cash_basis']),
         'risk_label': top.get('risk_label', ''),
+        'delta': (float(top['delta']) if 'delta' in top and pd.notna(top['delta']) else None),
         'cash_secured_used_usd': cash_secured_used,
         'cash_required_usd': cash_required,
         'cash_available_usd': cash_avail,
@@ -182,6 +184,7 @@ def summarize_sell_call(df: pd.DataFrame, symbol: str) -> dict:
         'net_income': None,
         'annualized_return': None,
         'risk_label': '',
+        'delta': None,
         'mid': None,
         'bid': None,
         'ask': None,
@@ -209,6 +212,7 @@ def summarize_sell_call(df: pd.DataFrame, symbol: str) -> dict:
         'net_income': float(top['net_income']),
         'annualized_return': float(top['annualized_net_premium_return']),
         'risk_label': top.get('risk_label', ''),
+        'delta': (float(top['delta']) if 'delta' in top and pd.notna(top['delta']) else None),
         'mid': (float(top['mid']) if 'mid' in top else None),
         'bid': (float(top['bid']) if 'bid' in top and pd.notna(top['bid']) else None),
         'ask': (float(top['ask']) if 'ask' in top and pd.notna(top['ask']) else None),
@@ -259,6 +263,12 @@ def process_symbol(
             '--min-volume', str(sp.get('min_volume', 10)),
             '--max-spread-ratio', str(sp.get('max_spread_ratio', 0.30)),
         ]
+        # Delta filter (optional): abs(delta) in [min_abs_delta, max_abs_delta]
+        if sp.get('min_abs_delta') is not None:
+            cmd.extend(['--min-abs-delta', str(sp.get('min_abs_delta'))])
+        if sp.get('max_abs_delta') is not None:
+            cmd.extend(['--max-abs-delta', str(sp.get('max_abs_delta'))])
+
         if sp.get('min_strike') is not None:
             cmd.extend(['--min-strike', str(sp.get('min_strike'))])
         if sp.get('max_strike') is not None:
@@ -423,6 +433,11 @@ def process_symbol(
             cmd.extend(['--min-strike', str(cc.get('min_strike'))])
         if cc.get('max_strike') is not None:
             cmd.extend(['--max-strike', str(cc.get('max_strike'))])
+        # Delta filter (optional): call delta in [min_delta, max_delta]
+        if cc.get('min_delta') is not None:
+            cmd.extend(['--min-delta', str(cc.get('min_delta'))])
+        if cc.get('max_delta') is not None:
+            cmd.extend(['--max-delta', str(cc.get('max_delta'))])
         run(cmd, cwd=base, timeout_sec=timeout_sec)
 
         shared_cc = report_dir / 'sell_call_candidates.csv'
