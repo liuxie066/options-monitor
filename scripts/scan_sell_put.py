@@ -84,7 +84,7 @@ def compute_metrics(row: pd.Series) -> dict | None:
 def main():
     parser = argparse.ArgumentParser(description="Run Sell Put scan on Yahoo required_data CSV files")
     parser.add_argument("--symbols", nargs="+", required=True)
-    parser.add_argument("--min-dte", type=int, default=20)
+    parser.add_argument("--min-dte", type=int, default=7)
     parser.add_argument("--max-dte", type=int, default=45)
     parser.add_argument("--min-otm-pct", type=float, default=0.05)
     parser.add_argument("--min-annualized-net-return", type=float, default=0.10)
