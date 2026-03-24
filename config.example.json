@@ -8,8 +8,10 @@
         "min_open_interest": 50,
         "min_volume": 10,
         "max_spread_ratio": 0.3,
+
         "min_abs_delta": 0.15,
-        "max_abs_delta": 0.28
+        "max_abs_delta": 0.28,
+        "target_abs_delta": 0.22
       }
     },
     "call_base": {
@@ -19,8 +21,10 @@
         "min_open_interest": 50,
         "min_volume": 10,
         "max_spread_ratio": 0.3,
+
         "min_delta": 0.20,
-        "max_delta": 0.35
+        "max_delta": 0.35,
+        "target_delta": 0.28
       }
     }
   },
