@@ -60,8 +60,14 @@ def top_pick_line(row: pd.Series) -> str:
             shares_total = int(row.get('shares_total') or 0)
             shares_locked = int(row.get('shares_locked') or 0)
             cover_avail = int(row.get('cover_avail') or 0)
-            # include suggested sell price (mid) + currency
+            # include suggested sell price (bid/ask/mid) + delta + currency
             parts = []
+            try:
+                d = row.get('delta')
+                if d is not None and not pd.isna(d):
+                    parts.append(f"delta {float(d):.2f}")
+            except Exception:
+                pass
             try:
                 ccy = row.get('option_ccy')
                 if ccy and isinstance(ccy, str):
@@ -72,6 +78,18 @@ def top_pick_line(row: pd.Series) -> str:
                 mid = row.get('mid')
                 if mid is not None and not pd.isna(mid):
                     parts.append(f"mid {float(mid):.3f}")
+            except Exception:
+                pass
+            try:
+                bid = row.get('bid')
+                if bid is not None and not pd.isna(bid):
+                    parts.append(f"bid {float(bid):.3f}")
+            except Exception:
+                pass
+            try:
+                ask = row.get('ask')
+                if ask is not None and not pd.isna(ask):
+                    parts.append(f"ask {float(ask):.3f}")
             except Exception:
                 pass
             parts.append(f"cover {cover_avail}")
@@ -125,11 +143,29 @@ def top_pick_line(row: pd.Series) -> str:
             except Exception:
                 pass
 
-            # include suggested sell price (mid) and option currency for clarity
+            # include delta + suggested sell price (bid/ask/mid) and option currency for clarity
+            try:
+                d = row.get('delta')
+                if d is not None and not pd.isna(d):
+                    parts.insert(0, f"delta {float(d):.2f}")
+            except Exception:
+                pass
             try:
                 mid = row.get('mid')
                 if mid is not None and not pd.isna(mid):
                     parts.insert(0, f"mid {float(mid):.3f}")
+            except Exception:
+                pass
+            try:
+                bid = row.get('bid')
+                if bid is not None and not pd.isna(bid):
+                    parts.insert(0, f"bid {float(bid):.3f}")
+            except Exception:
+                pass
+            try:
+                ask = row.get('ask')
+                if ask is not None and not pd.isna(ask):
+                    parts.insert(0, f"ask {float(ask):.3f}")
             except Exception:
                 pass
             try:

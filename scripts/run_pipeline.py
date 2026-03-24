@@ -84,6 +84,7 @@ def summarize_sell_put(df: pd.DataFrame, symbol: str) -> dict:
         'net_income': None,
         'annualized_return': None,
         'risk_label': '',
+        'delta': None,
         'cash_secured_used_usd': 0.0,
         'cash_required_usd': None,
         'cash_available_usd': None,
@@ -94,15 +95,35 @@ def summarize_sell_put(df: pd.DataFrame, symbol: str) -> dict:
         'cash_free_cny': None,
         'cash_required_cny': None,
         'mid': None,
+        'bid': None,
+        'ask': None,
         'option_ccy': None,
         'note': '无候选',
     }
     if df.empty:
         return row
     row['candidate_count'] = len(df)
-    top = df.sort_values(
-        ['annualized_net_return_on_cash_basis', 'net_income'],
-        ascending=[False, False],
+    # Pick the top contract with a more execution-friendly preference:
+    # prefer abs(delta) close to target, then higher annualized return, then net income.
+    target_abs_delta = 0.22
+    try:
+        # Configurable target (symbol-level overrides template)
+        target_abs_delta = float((symbol_cfg.get('sell_put') or {}).get('target_abs_delta') or target_abs_delta)
+    except Exception:
+        pass
+    d = df.copy()
+    try:
+        if 'delta' in d.columns:
+            d['_abs_delta'] = d['delta'].abs()
+            d['_delta_dist'] = (d['_abs_delta'] - target_abs_delta).abs()
+        else:
+            d['_delta_dist'] = 999.0
+    except Exception:
+        d['_delta_dist'] = 999.0
+
+    top = d.sort_values(
+        ['_delta_dist', 'annualized_net_return_on_cash_basis', 'net_income'],
+        ascending=[True, False, False],
     ).iloc[0]
     cash_secured_used = 0.0
     cash_avail = None
@@ -150,6 +171,7 @@ def summarize_sell_put(df: pd.DataFrame, symbol: str) -> dict:
         'net_income': float(top['net_income']),
         'annualized_return': float(top['annualized_net_return_on_cash_basis']),
         'risk_label': top.get('risk_label', ''),
+        'delta': (float(top['delta']) if 'delta' in top and pd.notna(top['delta']) else None),
         'cash_secured_used_usd': cash_secured_used,
         'cash_required_usd': cash_required,
         'cash_available_usd': cash_avail,
@@ -160,6 +182,8 @@ def summarize_sell_put(df: pd.DataFrame, symbol: str) -> dict:
         'cash_free_cny': cash_free_cny,
         'cash_required_cny': cash_required_cny,
         'mid': (float(top['mid']) if 'mid' in top else None),
+        'bid': (float(top['bid']) if 'bid' in top and pd.notna(top['bid']) else None),
+        'ask': (float(top['ask']) if 'ask' in top and pd.notna(top['ask']) else None),
         'option_ccy': ('HKD' if str(symbol).upper().endswith('.HK') else 'USD'),
         'note': '有候选',
     })
@@ -178,16 +202,34 @@ def summarize_sell_call(df: pd.DataFrame, symbol: str) -> dict:
         'net_income': None,
         'annualized_return': None,
         'risk_label': '',
+        'delta': None,
         'mid': None,
+        'bid': None,
+        'ask': None,
         'option_ccy': None,
         'note': '无候选',
     }
     if df.empty:
         return row
     row['candidate_count'] = len(df)
-    top = df.sort_values(
-        ['annualized_net_premium_return', 'if_exercised_total_return', 'net_income'],
-        ascending=[False, False, False],
+    # Prefer delta close to a steady target, then higher premium return.
+    target_delta = 0.28
+    try:
+        target_delta = float((symbol_cfg.get('sell_call') or {}).get('target_delta') or target_delta)
+    except Exception:
+        pass
+    d = df.copy()
+    try:
+        if 'delta' in d.columns:
+            d['_delta_dist'] = (d['delta'] - target_delta).abs()
+        else:
+            d['_delta_dist'] = 999.0
+    except Exception:
+        d['_delta_dist'] = 999.0
+
+    top = d.sort_values(
+        ['_delta_dist', 'annualized_net_premium_return', 'if_exercised_total_return', 'net_income'],
+        ascending=[True, False, False, False],
     ).iloc[0]
     cover_avail = 0
     try:
@@ -203,7 +245,10 @@ def summarize_sell_call(df: pd.DataFrame, symbol: str) -> dict:
         'net_income': float(top['net_income']),
         'annualized_return': float(top['annualized_net_premium_return']),
         'risk_label': top.get('risk_label', ''),
+        'delta': (float(top['delta']) if 'delta' in top and pd.notna(top['delta']) else None),
         'mid': (float(top['mid']) if 'mid' in top else None),
+        'bid': (float(top['bid']) if 'bid' in top and pd.notna(top['bid']) else None),
+        'ask': (float(top['ask']) if 'ask' in top and pd.notna(top['ask']) else None),
         'option_ccy': ('HKD' if str(symbol).upper().endswith('.HK') else 'USD'),
         'note': f"有候选 | cover_avail {cover_avail} | shares_total {int(top.get('shares_total', 0) or 0)} | shares_locked {int(top.get('shares_locked', 0) or 0)}",
     })
@@ -233,6 +278,41 @@ def process_symbol(
 
     sp = symbol_cfg.get('sell_put', {})
     if sp.get('enabled', False):
+        # Auto data-quality policy (reduce config complexity):
+        # If delta gating is enabled but quotes are mostly empty (Yahoo bid/ask=0),
+        # do NOT hard-fail the symbol. Instead, degrade gracefully:
+        # - disable require_bid_ask
+        # - disable delta gating
+        # - keep other filters (OTM/return/spread)
+        try:
+            parsed = base / 'output' / 'parsed' / f"{symbol}_required_data.csv"
+            if parsed.exists() and parsed.stat().st_size > 0:
+                df_req = pd.read_csv(parsed)
+                df_req = df_req[df_req.get('option_type') == 'put'] if 'option_type' in df_req.columns else df_req
+                # Only consider rows within strike range if provided
+                if sp.get('min_strike') is not None:
+                    df_req = df_req[df_req.get('strike') >= float(sp.get('min_strike'))]
+                if sp.get('max_strike') is not None:
+                    df_req = df_req[df_req.get('strike') <= float(sp.get('max_strike'))]
+                if 'bid' in df_req.columns and 'ask' in df_req.columns and len(df_req) > 0:
+                    valid_quotes = ((df_req['bid'] > 0) & (df_req['ask'] > 0)).sum()
+                    valid_ratio = float(valid_quotes) / float(len(df_req))
+                    # Heuristic: if less than 5% rows have real quotes, treat the data as low quality.
+                    if valid_ratio < 0.05:
+                        sp = dict(sp)
+                        # drop strict quote requirements
+                        sp['require_bid_ask'] = False
+                        # delta gating becomes meaningless when IV/quotes are unreliable
+                        sp.pop('min_abs_delta', None)
+                        sp.pop('max_abs_delta', None)
+                        # IV gate also becomes suspect; do not block all candidates due to bad IV
+                        sp.pop('min_iv', None)
+                        sp.pop('max_iv', None)
+                        # loosen execution-related gates so we can still surface something (with warnings)
+                        sp['min_open_interest'] = 0
+                        sp['min_volume'] = 0
+        except Exception:
+            pass
         cmd = [
             py, 'scripts/scan_sell_put.py',
             '--symbols', symbol,
@@ -251,6 +331,20 @@ def process_symbol(
             '--min-volume', str(sp.get('min_volume', 10)),
             '--max-spread-ratio', str(sp.get('max_spread_ratio', 0.30)),
         ]
+        # Data quality gates (optional)
+        if sp.get('require_bid_ask'):
+            cmd.append('--require-bid-ask')
+        if sp.get('min_iv') is not None:
+            cmd.extend(['--min-iv', str(sp.get('min_iv'))])
+        if sp.get('max_iv') is not None:
+            cmd.extend(['--max-iv', str(sp.get('max_iv'))])
+
+        # Delta filter (optional): abs(delta) in [min_abs_delta, max_abs_delta]
+        if sp.get('min_abs_delta') is not None:
+            cmd.extend(['--min-abs-delta', str(sp.get('min_abs_delta'))])
+        if sp.get('max_abs_delta') is not None:
+            cmd.extend(['--max-abs-delta', str(sp.get('max_abs_delta'))])
+
         if sp.get('min_strike') is not None:
             cmd.extend(['--min-strike', str(sp.get('min_strike'))])
         if sp.get('max_strike') is not None:
@@ -415,6 +509,19 @@ def process_symbol(
             cmd.extend(['--min-strike', str(cc.get('min_strike'))])
         if cc.get('max_strike') is not None:
             cmd.extend(['--max-strike', str(cc.get('max_strike'))])
+        # Data quality gates (optional)
+        if cc.get('require_bid_ask'):
+            cmd.append('--require-bid-ask')
+        if cc.get('min_iv') is not None:
+            cmd.extend(['--min-iv', str(cc.get('min_iv'))])
+        if cc.get('max_iv') is not None:
+            cmd.extend(['--max-iv', str(cc.get('max_iv'))])
+
+        # Delta filter (optional): call delta in [min_delta, max_delta]
+        if cc.get('min_delta') is not None:
+            cmd.extend(['--min-delta', str(cc.get('min_delta'))])
+        if cc.get('max_delta') is not None:
+            cmd.extend(['--max-delta', str(cc.get('max_delta'))])
         run(cmd, cwd=base, timeout_sec=timeout_sec)
 
         shared_cc = report_dir / 'sell_call_candidates.csv'

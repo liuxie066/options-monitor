@@ -11,6 +11,40 @@ import json
 from pathlib import Path
 
 
+def _suggest_sell_price_tag(mid: str, bid: str | None, ask: str | None) -> str:
+    """Return human-readable suggested order price tag.
+
+    Example: "建议挂单 bid 1.200 / fair 1.260".
+
+    We assume bid/ask are numeric strings; if missing, fallback to mid.
+    """
+    try:
+        if bid is None or ask is None:
+            # fallback
+            v = mid.split(' ', 1)[1] if mid and ' ' in mid else ''
+            if v:
+                return f"建议挂单 {v}"
+            return ''
+        b = float(str(bid).strip())
+        a = float(str(ask).strip())
+        # Treat non-positive quotes as missing (Yahoo sometimes returns 0/0)
+        if b <= 0 or a <= 0:
+            v = mid.split(' ', 1)[1] if mid and ' ' in mid else ''
+            return f"建议挂单 {v}" if v else ''
+        if a < b:
+            b, a = a, b
+        spread = max(0.0, a - b)
+        fast = b
+        fair = b + 0.3 * spread
+        return f"建议挂单 bid {fast:.3f} / fair {fair:.3f}"
+    except Exception:
+        try:
+            v = mid.split(' ', 1)[1] if mid and ' ' in mid else ''
+            return f"建议挂单 {v}" if v else ''
+        except Exception:
+            return ''
+
+
 def read_text(path: Path) -> str:
     if path.exists() and path.stat().st_size > 0:
         return path.read_text(encoding='utf-8').strip()
@@ -66,7 +100,13 @@ def _format_alert_line(line: str) -> str:
     # mid price used for return calculation (if present)
     mid = next((p for p in parts if p.startswith('mid ')), '')
     ccy = next((p for p in parts if p.startswith('ccy ')), '')
+    delta = next((p for p in parts if p.startswith('delta ')), '')
     risk = parts[7] if len(parts) >= 8 else ''
+
+    bid = next((p for p in parts if p.startswith('bid ')), None)
+    ask = next((p for p in parts if p.startswith('ask ')), None)
+    bid_val = bid.split(' ', 1)[1] if bid and ' ' in bid else None
+    ask_val = ask.split(' ', 1)[1] if ask and ' ' in ask else None
 
     extras: dict[str, str] = {}
     comment = ''
@@ -89,7 +129,19 @@ def _format_alert_line(line: str) -> str:
         price_val = mid.split(' ', 1)[1] if mid and ' ' in mid else 'mid'
         ccy_val = ccy.split(' ', 1)[1] if ccy and ' ' in ccy else ''
         price_tag = f"卖价 {price_val} ({ccy_val})" if ccy_val else f"卖价 {price_val}"
-        line1 = f"{symbol} 卖Put {contract} | {price_tag} | {annual} | {income_int_tag(income)} | {dte}"
+        sug = _suggest_sell_price_tag(mid, bid_val, ask_val)
+        sug_tag = f" | {sug}" if sug else ""
+        # Delta is estimated. Hide nonsense values (e.g. ~0 caused by bad IV/quotes) to avoid false confidence.
+        delta_tag = ''
+        try:
+            if delta and ' ' in delta:
+                dv = float(delta.split(' ', 1)[1])
+                if abs(dv) >= 0.05:
+                    delta_tag = f" | Δ(est) {dv:.2f}"
+        except Exception:
+            delta_tag = ''
+
+        line1 = f"{symbol} 卖Put {contract} | {price_tag}{sug_tag}{delta_tag} | {annual} | {income_int_tag(income)} | {dte}"
 
         # Line 2 (cash)
         req = cash_req_cny or cash_req or cash_req_only or ''
@@ -114,7 +166,19 @@ def _format_alert_line(line: str) -> str:
         price_val = mid.split(' ', 1)[1] if mid and ' ' in mid else 'mid'
         ccy_val = ccy.split(' ', 1)[1] if ccy and ' ' in ccy else ''
         price_tag = f"卖价 {price_val} ({ccy_val})" if ccy_val else f"卖价 {price_val}"
-        line1 = f"{symbol} 卖Call {contract} | {price_tag} | {annual} | {income_int_tag(income)} | {dte}"
+        sug = _suggest_sell_price_tag(mid, bid_val, ask_val)
+        sug_tag = f" | {sug}" if sug else ""
+        # Delta is estimated. Hide nonsense values (e.g. ~0 caused by bad IV/quotes) to avoid false confidence.
+        delta_tag = ''
+        try:
+            if delta and ' ' in delta:
+                dv = float(delta.split(' ', 1)[1])
+                if abs(dv) >= 0.05:
+                    delta_tag = f" | Δ(est) {dv:.2f}"
+        except Exception:
+            delta_tag = ''
+
+        line1 = f"{symbol} 卖Call {contract} | {price_tag}{sug_tag}{delta_tag} | {annual} | {income_int_tag(income)} | {dte}"
         line2 = ''
         if cover or shares:
             line2 = f"覆盖 cover {cover or '-'} | shares {shares or '-'}"
