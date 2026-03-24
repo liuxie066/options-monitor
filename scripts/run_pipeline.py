@@ -93,6 +93,8 @@ def summarize_sell_put(df: pd.DataFrame, symbol: str) -> dict:
         'cash_available_cny': None,
         'cash_free_cny': None,
         'cash_required_cny': None,
+        'mid': None,
+        'option_ccy': None,
         'note': '无候选',
     }
     if df.empty:
@@ -157,6 +159,8 @@ def summarize_sell_put(df: pd.DataFrame, symbol: str) -> dict:
         'cash_available_cny': cash_avail_cny,
         'cash_free_cny': cash_free_cny,
         'cash_required_cny': cash_required_cny,
+        'mid': (float(top['mid']) if 'mid' in top else None),
+        'option_ccy': ('HKD' if str(symbol).upper().endswith('.HK') else 'USD'),
         'note': '有候选',
     })
     return row
@@ -174,6 +178,8 @@ def summarize_sell_call(df: pd.DataFrame, symbol: str) -> dict:
         'net_income': None,
         'annualized_return': None,
         'risk_label': '',
+        'mid': None,
+        'option_ccy': None,
         'note': '无候选',
     }
     if df.empty:
@@ -197,7 +203,9 @@ def summarize_sell_call(df: pd.DataFrame, symbol: str) -> dict:
         'net_income': float(top['net_income']),
         'annualized_return': float(top['annualized_net_premium_return']),
         'risk_label': top.get('risk_label', ''),
-        'note': f"有候选 | cover_avail {cover_avail} | shares_total {int(top.get('shares_total', 0) or 0)} | shares_locked {int(top.get('shares_locked', 0) or 0)}", 
+        'mid': (float(top['mid']) if 'mid' in top else None),
+        'option_ccy': ('HKD' if str(symbol).upper().endswith('.HK') else 'USD'),
+        'note': f"有候选 | cover_avail {cover_avail} | shares_total {int(top.get('shares_total', 0) or 0)} | shares_locked {int(top.get('shares_locked', 0) or 0)}",
     })
     return row
 
@@ -262,18 +270,30 @@ def process_symbol(
         df_sp_lab = safe_read_csv(symbol_sp_labeled)
         if not df_sp_lab.empty and portfolio_ctx:
             option_ctx = portfolio_ctx.get('option_ctx') if isinstance(portfolio_ctx, dict) else None
-            used_symbol = 0.0
-            used_total = 0.0
+
+            # New schema (preferred): cash_secured_by_symbol_by_ccy / cash_secured_total_by_ccy / cash_secured_total_cny
+            # Old schema (legacy): cash_secured_by_symbol (USD-only)
+            used_symbol_usd = 0.0
+            used_total_usd = 0.0
+            used_total_cny = None
+
             if option_ctx:
-                used_map = (option_ctx.get('cash_secured_by_symbol') or {})
                 try:
-                    used_symbol = float(used_map.get(symbol) or 0.0)
+                    by_sym_ccy = option_ctx.get('cash_secured_by_symbol_by_ccy') or {}
+                    tot_by_ccy = option_ctx.get('cash_secured_total_by_ccy') or {}
+                    if isinstance(by_sym_ccy, dict) and (by_sym_ccy or tot_by_ccy):
+                        used_symbol_usd = float(((by_sym_ccy.get(symbol) or {}).get('USD')) or 0.0)
+                        used_total_usd = float((tot_by_ccy.get('USD')) or 0.0)
+                        v = option_ctx.get('cash_secured_total_cny')
+                        used_total_cny = float(v) if v is not None else None
+                    else:
+                        used_map = (option_ctx.get('cash_secured_by_symbol') or {})
+                        used_symbol_usd = float(used_map.get(symbol) or 0.0)
+                        used_total_usd = float(sum(float(v or 0.0) for v in used_map.values()))
                 except Exception:
-                    used_symbol = 0.0
-                try:
-                    used_total = float(sum(float(v or 0.0) for v in used_map.values()))
-                except Exception:
-                    used_total = 0.0
+                    used_symbol_usd = 0.0
+                    used_total_usd = 0.0
+                    used_total_cny = None
 
             cash_avail = None
             cash_avail_est = None  # USD equivalent (from base CNY)
@@ -286,14 +306,19 @@ def process_symbol(
 
                 cny = cash_by_ccy.get('CNY')
                 cash_avail_cny = float(cny) if cny is not None else None
+
                 if cash_avail_cny is not None:
                     # Base-currency (CNY) free cash after reserving existing cash-secured puts.
-                    # NOTE: used_total is recorded in USD; we convert it into CNY using USDCNY.
-                    if fx_usd_per_cny:
-                        usdcny = 1.0 / float(fx_usd_per_cny)
-                        cash_free_cny = cash_avail_cny - (used_total * usdcny)
+                    # Prefer option_ctx.cash_secured_total_cny (already FX-normalized).
+                    if used_total_cny is not None:
+                        cash_free_cny = cash_avail_cny - used_total_cny
                     else:
-                        cash_free_cny = None
+                        # Fallback: treat used_total_usd as USD and convert into CNY
+                        if fx_usd_per_cny:
+                            usdcny = 1.0 / float(fx_usd_per_cny)
+                            cash_free_cny = cash_avail_cny - (used_total_usd * usdcny)
+                        else:
+                            cash_free_cny = None
 
                 # If no USD cash record in holdings, derive USD equivalent from base CNY using fx.
                 if cash_avail is None and cash_avail_cny is not None and fx_usd_per_cny:
@@ -302,24 +327,24 @@ def process_symbol(
                 cash_avail = None
                 cash_avail_est = None
 
-            # Account-level cash usage: all open short puts (cash has to cover all of them)
-            df_sp_lab['cash_secured_used_usd_total'] = used_total
-            df_sp_lab['cash_secured_used_usd_symbol'] = used_symbol
+            # Account-level cash usage: all open short puts (USD bucket for USD-based reporting)
+            df_sp_lab['cash_secured_used_usd_total'] = used_total_usd
+            df_sp_lab['cash_secured_used_usd_symbol'] = used_symbol_usd
             # Backward-compatible: treat cash_secured_used_usd as account-level used
-            df_sp_lab['cash_secured_used_usd'] = used_total
+            df_sp_lab['cash_secured_used_usd'] = used_total_usd
 
             # If we have true USD cash from holdings, use it; else use USD equivalent derived from base CNY.
             if cash_avail is not None:
                 df_sp_lab['cash_available_usd'] = cash_avail
                 df_sp_lab['cash_available_usd_est'] = pd.NA
-                df_sp_lab['cash_free_usd'] = cash_avail - used_total
+                df_sp_lab['cash_free_usd'] = cash_avail - used_total_usd
                 df_sp_lab['cash_free_usd_est'] = pd.NA
             else:
                 df_sp_lab['cash_available_usd'] = pd.NA
                 df_sp_lab['cash_free_usd'] = pd.NA
                 df_sp_lab['cash_available_usd_est'] = (cash_avail_est if cash_avail_est is not None else pd.NA)
                 if cash_avail_est is not None:
-                    df_sp_lab['cash_free_usd_est'] = cash_avail_est - used_total
+                    df_sp_lab['cash_free_usd_est'] = cash_avail_est - used_total_usd
                 else:
                     df_sp_lab['cash_free_usd_est'] = pd.NA
 
@@ -715,14 +740,22 @@ def main():
             '--output', 'output/reports/symbols_notification.txt',
         ], cwd=base)
 
-        # Append cash summaries at the bottom (LX + SY). Do NOT compute "after-buy" remaining cash.
-        run([
-            py, 'scripts/append_cash_summary.py',
-            '--pm-config', str(pm_config),
-            '--market', str(market),
-            '--accounts', 'lx', 'sy',
-            '--notification', 'output/reports/symbols_notification.txt',
-        ], cwd=base)
+        # Append cash summaries at the bottom (optional).
+        # In multi-account merged notifications, we prefer adding cash footer only once in send_if_needed_multi.py.
+        include_cash_footer = True
+        try:
+            include_cash_footer = bool((cfg.get('notifications') or {}).get('include_cash_footer', True))
+        except Exception:
+            include_cash_footer = True
+
+        if include_cash_footer:
+            run([
+                py, 'scripts/append_cash_summary.py',
+                '--pm-config', str(pm_config),
+                '--market', str(market),
+                '--accounts', 'lx', 'sy',
+                '--notification', 'output/reports/symbols_notification.txt',
+            ], cwd=base)
 
         notifications_cfg = cfg.get('notifications', {}) or {}
         if notifications_cfg.get('enabled', False):

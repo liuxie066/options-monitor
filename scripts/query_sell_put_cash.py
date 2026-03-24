@@ -53,6 +53,11 @@ def main():
     ap.add_argument("--format", choices=["text", "json"], default="text")
     ap.add_argument("--top", type=int, default=10, help="top N symbols in cash-secured breakdown")
     ap.add_argument("--no-fx", action="store_true", help="do not fetch FX rates / CNY equivalent")
+    ap.add_argument(
+        "--out-dir",
+        default="output/state",
+        help="Directory to write intermediate JSON state (portfolio_context/option_positions_context/rate_cache). Default: output/state",
+    )
     args = ap.parse_args()
 
     base = Path(__file__).resolve().parents[1]
@@ -61,7 +66,9 @@ def main():
     if not pm_config_path.is_absolute():
         pm_config_path = (base / pm_config_path).resolve()
 
-    out_dir = (base / "output" / "state").resolve()
+    out_dir = Path(args.out_dir)
+    if not out_dir.is_absolute():
+        out_dir = (base / out_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
     portfolio_out = out_dir / "portfolio_context.json"
