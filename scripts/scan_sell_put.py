@@ -84,7 +84,7 @@ def compute_metrics(row: pd.Series) -> dict | None:
 def main():
     parser = argparse.ArgumentParser(description="Run Sell Put scan on Yahoo required_data CSV files")
     parser.add_argument("--symbols", nargs="+", required=True)
-    parser.add_argument("--min-dte", type=int, default=20)
+    parser.add_argument("--min-dte", type=int, default=7)
     parser.add_argument("--max-dte", type=int, default=45)
     parser.add_argument("--min-otm-pct", type=float, default=0.05)
     parser.add_argument("--min-annualized-net-return", type=float, default=0.10)
@@ -94,6 +94,11 @@ def main():
     parser.add_argument("--min-open-interest", type=float, default=100)
     parser.add_argument("--min-volume", type=float, default=10)
     parser.add_argument("--max-spread-ratio", type=float, default=0.30)
+    parser.add_argument("--min-iv", type=float, default=None, help="min implied volatility (decimal, e.g. 0.15)")
+    parser.add_argument("--max-iv", type=float, default=None, help="max implied volatility (decimal, e.g. 2.0)")
+    parser.add_argument("--require-bid-ask", action="store_true", help="require bid>0 and ask>0 (better fillability)")
+    parser.add_argument("--min-abs-delta", type=float, default=None, help="min abs(delta) (e.g. 0.15)")
+    parser.add_argument("--max-abs-delta", type=float, default=None, help="max abs(delta) (e.g. 0.28)")
     args = parser.parse_args()
 
     base = Path(__file__).resolve().parents[1]
@@ -129,12 +134,44 @@ def main():
             bid = safe_float(row.get("bid"))
             ask = safe_float(row.get("ask"))
             mid = safe_float(row.get("mid"))
+
+            # Data-quality gate: require a real market (avoid Yahoo rows with 0/0 quotes)
+            if args.require_bid_ask:
+                if bid is None or ask is None or bid <= 0 or ask <= 0:
+                    continue
+
+            iv = safe_float(row.get("implied_volatility"))
+            if iv is not None:
+                # yfinance sometimes yields IV in percent; normalize heuristically
+                if iv > 3.0:
+                    iv = iv / 100.0
+            if args.min_iv is not None:
+                if iv is None or iv < float(args.min_iv):
+                    continue
+            if args.max_iv is not None and iv is not None:
+                if iv > float(args.max_iv):
+                    continue
             spread = None
             spread_ratio = None
             if bid is not None and ask is not None and ask >= bid:
                 spread = ask - bid
                 if mid is not None and mid > 0:
                     spread_ratio = spread / mid
+
+            # Delta filter (optional)
+            try:
+                d = safe_float(row.get('delta'))
+                if (args.min_abs_delta is not None) or (args.max_abs_delta is not None):
+                    # If user requests delta gating, missing delta => skip.
+                    if d is None:
+                        continue
+                    ad = abs(float(d))
+                    if args.min_abs_delta is not None and ad < float(args.min_abs_delta):
+                        continue
+                    if args.max_abs_delta is not None and ad > float(args.max_abs_delta):
+                        continue
+            except Exception:
+                pass
 
             metrics = compute_metrics(row)
             if not metrics:
@@ -162,6 +199,7 @@ def main():
                 "open_interest": oi,
                 "volume": vol,
                 "implied_volatility": safe_float(row.get("implied_volatility")),
+                "delta": safe_float(row.get("delta")),
                 "spread": spread,
                 "spread_ratio": spread_ratio,
                 **metrics,

@@ -83,7 +83,7 @@ def main():
     parser.add_argument('--symbols', nargs='+', required=True)
     parser.add_argument('--avg-cost', type=float, required=True, help='Average holding cost per share')
     parser.add_argument('--shares', type=int, default=100)
-    parser.add_argument('--min-dte', type=int, default=20)
+    parser.add_argument('--min-dte', type=int, default=7)
     parser.add_argument('--max-dte', type=int, default=90)
     parser.add_argument('--min-strike', type=float, default=None)
     parser.add_argument('--max-strike', type=float, default=None)
@@ -92,6 +92,11 @@ def main():
     parser.add_argument('--min-open-interest', type=float, default=100)
     parser.add_argument('--min-volume', type=float, default=10)
     parser.add_argument('--max-spread-ratio', type=float, default=0.30)
+    parser.add_argument('--min-iv', type=float, default=None, help='min implied volatility (decimal, e.g. 0.15)')
+    parser.add_argument('--max-iv', type=float, default=None, help='max implied volatility (decimal, e.g. 2.0)')
+    parser.add_argument('--require-bid-ask', action='store_true', help='require bid>0 and ask>0 (better fillability)')
+    parser.add_argument('--min-delta', type=float, default=None, help='min call delta (e.g. 0.20)')
+    parser.add_argument('--max-delta', type=float, default=None, help='max call delta (e.g. 0.35)')
     args = parser.parse_args()
 
     if args.shares < 100:
@@ -128,6 +133,20 @@ def main():
             bid = safe_float(row.get('bid'))
             ask = safe_float(row.get('ask'))
             mid = safe_float(row.get('mid'))
+
+            if args.require_bid_ask:
+                if bid is None or ask is None or bid <= 0 or ask <= 0:
+                    continue
+
+            iv = safe_float(row.get('implied_volatility'))
+            if iv is not None and iv > 3.0:
+                iv = iv / 100.0
+            if args.min_iv is not None:
+                if iv is None or iv < float(args.min_iv):
+                    continue
+            if args.max_iv is not None and iv is not None:
+                if iv > float(args.max_iv):
+                    continue
             spread = None
             spread_ratio = None
             if bid is not None and ask is not None and ask >= bid:
@@ -136,6 +155,20 @@ def main():
                     spread_ratio = spread / mid
             if spread_ratio is not None and spread_ratio > args.max_spread_ratio:
                 continue
+
+            # Delta filter (optional)
+            try:
+                d = safe_float(row.get('delta'))
+                if (args.min_delta is not None) or (args.max_delta is not None):
+                    if d is None:
+                        continue
+                    d = float(d)
+                    if args.min_delta is not None and d < float(args.min_delta):
+                        continue
+                    if args.max_delta is not None and d > float(args.max_delta):
+                        continue
+            except Exception:
+                pass
 
             metrics = compute_metrics(row, args.avg_cost)
             if not metrics:
@@ -161,6 +194,7 @@ def main():
                 'open_interest': oi,
                 'volume': vol,
                 'implied_volatility': safe_float(row.get('implied_volatility')),
+                'delta': safe_float(row.get('delta')),
                 'spread': spread,
                 'spread_ratio': spread_ratio,
                 **metrics,
