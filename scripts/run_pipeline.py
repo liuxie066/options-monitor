@@ -104,8 +104,13 @@ def summarize_sell_put(df: pd.DataFrame, symbol: str) -> dict:
         return row
     row['candidate_count'] = len(df)
     # Pick the top contract with a more execution-friendly preference:
-    # prefer delta close to target, then higher annualized return, then net income.
+    # prefer abs(delta) close to target, then higher annualized return, then net income.
     target_abs_delta = 0.22
+    try:
+        # Configurable target (symbol-level overrides template)
+        target_abs_delta = float((symbol_cfg.get('sell_put') or {}).get('target_abs_delta') or target_abs_delta)
+    except Exception:
+        pass
     d = df.copy()
     try:
         if 'delta' in d.columns:
@@ -209,6 +214,10 @@ def summarize_sell_call(df: pd.DataFrame, symbol: str) -> dict:
     row['candidate_count'] = len(df)
     # Prefer delta close to a steady target, then higher premium return.
     target_delta = 0.28
+    try:
+        target_delta = float((symbol_cfg.get('sell_call') or {}).get('target_delta') or target_delta)
+    except Exception:
+        pass
     d = df.copy()
     try:
         if 'delta' in d.columns:
