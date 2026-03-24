@@ -68,19 +68,22 @@ def main():
     # keep both legacy + aliasing behavior in run_pipeline.py
     cfg['symbols'] = filtered
 
-    # optionally write filtered config for inspection
+    # write filtered config (always), so the delegated pipeline actually uses per-account overrides.
     if args.out_config:
         outp = Path(args.out_config)
         if not outp.is_absolute():
             outp = (base / outp).resolve()
-        outp.parent.mkdir(parents=True, exist_ok=True)
-        outp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-        print(f"[DONE] filtered config -> {outp} (symbols={len(filtered)})")
+    else:
+        outp = (base / 'output' / 'state' / f'config.filtered_{acct}.json').resolve()
+
+    outp.parent.mkdir(parents=True, exist_ok=True)
+    outp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+    print(f"[DONE] filtered config -> {outp} (symbols={len(filtered)})")
 
     # delegate to run_pipeline.py
     import subprocess
     vpy = base / '.venv' / 'bin' / 'python'
-    res = subprocess.run([str(vpy), 'scripts/run_pipeline.py', '--config', str(cfg_path if not args.out_config else outp)], cwd=str(base))
+    res = subprocess.run([str(vpy), 'scripts/run_pipeline.py', '--config', str(outp)], cwd=str(base))
     raise SystemExit(res.returncode)
 
 

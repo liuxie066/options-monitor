@@ -60,7 +60,23 @@ def top_pick_line(row: pd.Series) -> str:
             shares_total = int(row.get('shares_total') or 0)
             shares_locked = int(row.get('shares_locked') or 0)
             cover_avail = int(row.get('cover_avail') or 0)
-            extra = f" | cover {cover_avail} | shares {shares_total}(-{shares_locked})"
+            # include suggested sell price (mid) + currency
+            parts = []
+            try:
+                ccy = row.get('option_ccy')
+                if ccy and isinstance(ccy, str):
+                    parts.append(f"ccy {ccy.strip().upper()}")
+            except Exception:
+                pass
+            try:
+                mid = row.get('mid')
+                if mid is not None and not pd.isna(mid):
+                    parts.append(f"mid {float(mid):.3f}")
+            except Exception:
+                pass
+            parts.append(f"cover {cover_avail}")
+            parts.append(f"shares {shares_total}(-{shares_locked})")
+            extra = " | " + " | ".join(parts)
         if row.get('strategy') == 'sell_put':
             used_total = float(row.get('cash_secured_used_usd') or 0.0)
             used_symbol = float(row.get('cash_secured_used_usd_symbol') or 0.0) if 'cash_secured_used_usd_symbol' in row else 0.0
@@ -106,6 +122,20 @@ def top_pick_line(row: pd.Series) -> str:
                     parts.append(f"cash_req_cny ¥{req_cny_v:,.0f}")
                 elif req is not None and req > 0:
                     parts.append(f"cash_req ${float(req):,.0f}")
+            except Exception:
+                pass
+
+            # include suggested sell price (mid) and option currency for clarity
+            try:
+                mid = row.get('mid')
+                if mid is not None and not pd.isna(mid):
+                    parts.insert(0, f"mid {float(mid):.3f}")
+            except Exception:
+                pass
+            try:
+                ccy = row.get('option_ccy')
+                if ccy and isinstance(ccy, str):
+                    parts.insert(0, f"ccy {ccy.strip().upper()}")
             except Exception:
                 pass
 
