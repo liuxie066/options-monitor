@@ -15,8 +15,11 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 
 
+# NOTE: symbol aliases are now configurable in config.json:intake.symbol_aliases.
+# Keep a small built-in fallback for robustness.
 ALIASES = {
     '腾讯': '0700.HK',
     '腾讯控股': '0700.HK',
@@ -30,12 +33,30 @@ ALIASES = {
 }
 
 
+def load_intake_config() -> dict:
+    """Load intake config from repo config.json (best-effort)."""
+    try:
+        base = Path(__file__).resolve().parents[1]
+        cfg = json.loads((base / 'config.json').read_text(encoding='utf-8'))
+        return cfg.get('intake') or {}
+    except Exception:
+        return {}
+
+
 def normalize_symbol(s: str) -> str | None:
     s = (s or '').strip()
     if not s:
         return None
+
+    intake = load_intake_config()
+    aliases = (intake.get('symbol_aliases') or {}) if isinstance(intake, dict) else {}
+
+    if s in aliases:
+        return str(aliases[s]).strip().upper()
+
     if s in ALIASES:
         return ALIASES[s]
+
     # allow direct hk code 0700.HK / 9992.HK etc.
     s2 = s.upper().replace(' ', '')
     if re.fullmatch(r"\d{4}\.HK", s2) or re.fullmatch(r"\d{5}\.HK", s2):
@@ -216,11 +237,23 @@ def main():
 
     # infer multiplier if missing
     if multiplier is None and symbol:
-        # HK stock options often 1000; US commonly 100
-        if symbol.endswith('.HK'):
-            multiplier = 1000
+        intake = load_intake_config()
+        mb = (intake.get('multiplier_by_symbol') or {}) if isinstance(intake, dict) else {}
+        if symbol in mb:
+            try:
+                multiplier = int(mb[symbol])
+            except Exception:
+                multiplier = None
+
+    if multiplier is None and symbol:
+        intake = load_intake_config()
+        if isinstance(intake, dict):
+            if symbol.endswith('.HK'):
+                multiplier = int(intake.get('default_multiplier_hk', 1000))
+            else:
+                multiplier = int(intake.get('default_multiplier_us', 100))
         else:
-            multiplier = 100
+            multiplier = 1000 if symbol.endswith('.HK') else 100
 
     ok = all([symbol, exp, opt_type, side, strike is not None, multiplier, contracts, account, currency])
 
