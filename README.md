@@ -57,6 +57,16 @@ pip install -r requirements.txt
 - `output/parsed/`：标准化 CSV
 - `output/reports/`：候选、提醒与摘要输出
 
+## 消息 Intake（成交提醒 → option_positions）
+
+- 解析成交/手工输入消息：`scripts/parse_option_message.py`
+- 解析 + 写入（默认 dry-run）：`scripts/option_intake.py`
+
+Intake 可配置项（见 `config.json:intake`）：
+- `symbol_aliases`: 中文标的名 → 代码（例如 中海油 → 0883.HK）
+- `multiplier_by_symbol`: 合约乘数（例如 0883.HK → 1000）
+- `default_multiplier_hk` / `default_multiplier_us`
+
 ## Watchlist 管理（监控标的：查看/新增/删除/编辑）
 
 配置文件：`config.json` 的 `symbols[]`
