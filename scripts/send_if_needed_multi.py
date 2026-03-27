@@ -128,6 +128,17 @@ def prefetch_required_data(vpy: Path, base: Path, cfg: dict, shared_required: Pa
 
         try:
             subprocess.run(cmd, cwd=str(base), capture_output=True, text=True, timeout=60)
+            # prefetch fallback to yahoo (US) if opend produced no outputs
+            try:
+                if src == 'opend':
+                    out = (base / 'output').resolve()
+                    src_raw = out / 'raw' / f"{symbol}_required_data.json"
+                    src_csv = out / 'parsed' / f"{symbol}_required_data.csv"
+                    if (not src_raw.exists()) or (not src_csv.exists()) or src_csv.stat().st_size <= 0:
+                        cmd2 = [str(vpy), 'scripts/fetch_market_data.py', '--symbols', symbol, '--limit-expirations', str(limit_exp)]
+                        subprocess.run(cmd2, cwd=str(base), capture_output=True, text=True, timeout=60)
+            except Exception:
+                pass
         except Exception:
             continue
 
