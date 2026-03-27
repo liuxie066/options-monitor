@@ -46,11 +46,23 @@ def parse_hhmm(value: str) -> time:
     return time(hour=int(hour), minute=int(minute))
 
 
-def is_market_hours(now_market: datetime, market_open: time, market_close: time) -> bool:
+def is_market_hours(now_market: datetime, market_open: time, market_close: time, break_start: time | None = None, break_end: time | None = None) -> bool:
+    """Return whether we should monitor during market hours.
+
+    Supports an optional mid-day break window (e.g., HK 12:00-13:00).
+    Break window is treated as [break_start, break_end) in local market time.
+    """
     if now_market.weekday() >= 5:
         return False
     current = now_market.time()
-    return market_open <= current <= market_close
+    if not (market_open <= current <= market_close):
+        return False
+
+    if break_start is not None and break_end is not None:
+        # half-open break interval
+        if _time_in_range(current, break_start, break_end) and current != break_end:
+            return False
+    return True
 
 
 def to_iso(dt: datetime) -> str:
@@ -75,7 +87,14 @@ def decide(schedule_cfg: dict, state: dict, now_utc: datetime) -> SchedulerDecis
     now_market = now_utc.astimezone(market_tz)
     market_open = parse_hhmm(schedule_cfg.get('market_open', '09:30'))
     market_close = parse_hhmm(schedule_cfg.get('market_close', '16:00'))
-    in_hours = is_market_hours(now_market, market_open, market_close)
+
+    break_start = None
+    break_end = None
+    if schedule_cfg.get('market_break_start') and schedule_cfg.get('market_break_end'):
+        break_start = parse_hhmm(schedule_cfg.get('market_break_start'))
+        break_end = parse_hhmm(schedule_cfg.get('market_break_end'))
+
+    in_hours = is_market_hours(now_market, market_open, market_close, break_start=break_start, break_end=break_end)
 
     # Base notification cooldown (minutes).
     # Content-aware overrides (e.g., HIGH-priority before 02:00 Beijing) are implemented in send_if_needed_multi
