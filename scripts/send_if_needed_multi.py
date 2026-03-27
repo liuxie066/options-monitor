@@ -32,7 +32,7 @@ import json
 import os
 import re
 import subprocess
-import time
+from time import monotonic
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta, time
@@ -661,14 +661,14 @@ def main():
                 sch_args.extend(['--schedule-key', 'schedule_hk'])
         except Exception:
             pass
-        t_sch0 = time.monotonic()
+        t_sch0 = monotonic()
         sch = subprocess.run(
             sch_args,
             cwd=str(base),
             capture_output=True,
             text=True,
         )
-        acct_metrics['scheduler_ms'] = int((time.monotonic() - t_sch0) * 1000)
+        acct_metrics['scheduler_ms'] = int((monotonic() - t_sch0) * 1000)
         if sch.returncode != 0:
             acct_metrics['ran_scan'] = False
             acct_metrics['should_notify'] = False
@@ -706,14 +706,14 @@ def main():
         if shared_scan_ready:
             pipe_cmd.append('--reuse-shared-scan')
 
-        t_pipe0 = time.monotonic()
+        t_pipe0 = monotonic()
         pipe = subprocess.run(
             pipe_cmd,
             cwd=str(base),
             capture_output=True,
             text=True,
         )
-        acct_metrics['pipeline_ms'] = int((time.monotonic() - t_pipe0) * 1000)
+        acct_metrics['pipeline_ms'] = int((monotonic() - t_pipe0) * 1000)
         if pipe.returncode != 0:
             # Only print the tail for debugging (avoid noisy logs on success)
             out = ((pipe.stdout or '') + '\n' + (pipe.stderr or '')).strip()
