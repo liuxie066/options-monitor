@@ -578,6 +578,14 @@ def main():
     elif in_us_session(now_utc):
         markets_to_run = ['US']
 
+
+    # Shared scan artifacts (per-invocation) for cross-account reuse
+    shared_scan_dir = (base / 'output_shared' / 'scan_runs' / utc_now().replace(':','').replace('-','').split('.')[0]).resolve()
+    shared_scan_dir.mkdir(parents=True, exist_ok=True)
+    shared_scan_ready = False
+    # shared required_data dir should already exist (created by prefetch step)
+    shared_required = (base / 'output_shared' / 'required_data').resolve()
+
     for acct in args.accounts:
         acct = str(acct).strip()
         if not acct:
@@ -604,12 +612,21 @@ def main():
         cfg_override = acct_out / 'state' / 'config.override.json'
         cfg_override.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 
-        state_path = acct_out / 'state' / 'scheduler_state.json'
+        # Unified scan timing: use ONE shared scheduler_state per market.
+        # Notify cooldown remains per-account (stored in last_notify_utc_by_account within the same shared file).
+        shared_state_dir = (base / 'output_shared' / 'state').resolve()
+        shared_state_dir.mkdir(parents=True, exist_ok=True)
+        if markets_to_run == ['HK']:
+            state_path = shared_state_dir / 'scheduler_state_hk.json'
+        elif markets_to_run == ['US']:
+            state_path = shared_state_dir / 'scheduler_state_us.json'
+        else:
+            state_path = shared_state_dir / 'scheduler_state.json'
         notif_path = acct_out / 'reports' / 'symbols_notification.txt'
 
         # 1) scheduler decision
         # market-aware schedule: use schedule_hk during HK session, otherwise default schedule
-        sch_args = [str(vpy), 'scripts/scan_scheduler.py', '--config', str(cfg_override), '--state', str(state_path), '--jsonl']
+        sch_args = [str(vpy), 'scripts/scan_scheduler.py', '--config', str(cfg_override), '--state', str(state_path), '--jsonl', '--account', str(acct)]
         try:
             if markets_to_run == ['HK']:
                 sch_args.extend(['--schedule-key', 'schedule_hk'])
@@ -643,8 +660,13 @@ def main():
         except Exception:
             pass
 
+        # Shared scan reuse: first due account writes shared scan artifacts; subsequent due accounts reuse them
+        pipe_cmd = [str(vpy), 'scripts/run_pipeline.py', '--config', str(cfg_override), '--mode', 'scheduled', '--shared-required-data', str(shared_required), '--shared-scan-dir', str(shared_scan_dir)]
+        if shared_scan_ready:
+            pipe_cmd.append('--reuse-shared-scan')
+
         pipe = subprocess.run(
-            [str(vpy), 'scripts/run_pipeline.py', '--config', str(cfg_override), '--mode', 'scheduled'],
+            pipe_cmd,
             cwd=str(base),
             capture_output=True,
             text=True,
@@ -658,14 +680,11 @@ def main():
             results.append(AccountResult(acct, True, should_notify, False, 'pipeline failed', ''))
             continue
 
-        # Update scan timestamp so the scheduler interval works next tick.
-        # (scan_scheduler.py only updates last_scan_utc in --run-if-due mode, which we don't use here.)
+
+        shared_scan_ready = True
+        # Mark scanned (shared scan clock)
         try:
-            st = read_json(state_path, {'last_scan_utc': None, 'last_notify_utc': None})
-            if not isinstance(st, dict):
-                st = {'last_scan_utc': None, 'last_notify_utc': None}
-            st['last_scan_utc'] = utc_now()
-            write_json(state_path, st)
+            subprocess.run([str(vpy), 'scripts/scan_scheduler.py', '--config', str(cfg_override), '--state', str(state_path), '--mark-scanned'], cwd=str(base))
         except Exception:
             pass
 
@@ -751,16 +770,15 @@ def main():
     if send.returncode != 0:
         raise SystemExit(send.returncode)
 
-    # Mark notified for accounts that were included
-    for r in results:
-        if r.should_notify and r.meaningful and r.notification_text.strip():
-            acct_out = accounts_root / r.account
-            state_path = acct_out / 'state' / 'scheduler_state.json'
-            cfg_override = acct_out / 'state' / 'config.override.json'
-            subprocess.run(
-                [str(vpy), 'scripts/scan_scheduler.py', '--config', str(cfg_override), '--state', str(state_path), '--mark-notified'],
-                cwd=str(base),
-            )
+    # Mark notified ONCE (global cooldown, unified across accounts)
+    try:
+        if results:
+            acct0 = results[0].account
+            acct_out0 = accounts_root / acct0
+            cfg_override0 = acct_out0 / 'state' / 'config.override.json'
+            subprocess.run([str(vpy), 'scripts/scan_scheduler.py', '--config', str(cfg_override0), '--state', str(state_path), '--mark-notified'], cwd=str(base))
+    except Exception:
+        pass
 
     # Write shared last_run.json (for cron observability)
     try:
