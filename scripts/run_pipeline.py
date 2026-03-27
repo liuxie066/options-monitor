@@ -932,8 +932,11 @@ def main():
         # 1) portfolio_context cache
         try:
             port_path = (base / 'output/state/portfolio_context.json').resolve()
+            cached = None
             if ttl_port_ctx > 0 and is_fresh(port_path, ttl_port_ctx):
-                portfolio_ctx = load_cached_json(port_path)
+                cached = load_cached_json(port_path)
+            if cached is not None:
+                portfolio_ctx = cached
             else:
                 cmd = [
                     py, 'scripts/fetch_portfolio_context.py',
@@ -955,8 +958,11 @@ def main():
         try:
             opt_path = (base / 'output/state/option_positions_context.json').resolve()
             refreshed = False
+            cached = None
             if ttl_opt_ctx > 0 and is_fresh(opt_path, ttl_opt_ctx):
-                option_ctx = load_cached_json(opt_path)
+                cached = load_cached_json(opt_path)
+            if cached is not None:
+                option_ctx = cached
             else:
                 cmd = [
                     py, 'scripts/fetch_option_positions_context.py',
