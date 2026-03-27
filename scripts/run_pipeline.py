@@ -660,6 +660,7 @@ def process_symbol(
             '--shares', str(shares_total),
             '--min-dte', str(cc.get('min_dte', 20)),
             '--max-dte', str(cc.get('max_dte', 90)),
+            '--min-otm-pct', str(cc.get('min_otm_pct', 0.0)),
             '--min-annualized-net-return', str(cc.get('min_annualized_net_return', 0.03)),
             '--min-if-exercised-total-return', str(cc.get('min_if_exercised_total_return', 0.0)),
             '--min-open-interest', str(cc.get('min_open_interest', 100)),
