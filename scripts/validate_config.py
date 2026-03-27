@@ -11,6 +11,31 @@ def die(msg: str):
 
 
 def validate_config(cfg: dict):
+    # intake config (optional)
+    intake = cfg.get('intake') or {}
+    if intake and not isinstance(intake, dict):
+        die('intake must be an object')
+    if isinstance(intake, dict):
+        sa = intake.get('symbol_aliases') or {}
+        if sa and not isinstance(sa, dict):
+            die('intake.symbol_aliases must be an object')
+        mb = intake.get('multiplier_by_symbol') or {}
+        if mb and not isinstance(mb, dict):
+            die('intake.multiplier_by_symbol must be an object')
+        for k, v in mb.items():
+            try:
+                if float(v) <= 0:
+                    die(f'intake.multiplier_by_symbol[{k}] must be > 0')
+            except Exception:
+                die(f'intake.multiplier_by_symbol[{k}] must be a number')
+        for key in ('default_multiplier_us', 'default_multiplier_hk'):
+            if key in intake and intake[key] is not None:
+                try:
+                    if float(intake[key]) <= 0:
+                        die(f'intake.{key} must be > 0')
+                except Exception:
+                    die(f'intake.{key} must be a number')
+
     if not isinstance(cfg.get('symbols'), list) or not cfg['symbols']:
         die('symbols[] is required and cannot be empty')
 
