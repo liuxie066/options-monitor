@@ -62,6 +62,13 @@ def write_json(path: Path, obj):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(obj, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 
+def log(msg: str) -> None:
+    try:
+        if DEBUG:
+            print(msg)
+    except Exception:
+        pass
+
 
 
 def prefetch_required_data(vpy: Path, base: Path, cfg: dict, shared_required: Path) -> None:
@@ -617,7 +624,10 @@ def main():
     ap.add_argument('--market-config', default='auto', choices=['auto','hk','us','all'], help='Select symbols by market at config-load time (auto=by session).')
     ap.add_argument('--no-send', action='store_true', help='Do not send messages (for smoke tests / debugging).')
     ap.add_argument('--smoke', action='store_true', help='Smoke mode: run scheduler decisions but skip pipeline execution.')
+    ap.add_argument('--debug', action='store_true', help='Verbose logs to stdout (for manual debugging).')
     args = ap.parse_args()
+
+    DEBUG = bool(getattr(args, 'debug', False))
 
     no_send = bool(getattr(args, 'no_send', False))
     smoke = bool(getattr(args, 'smoke', False))
