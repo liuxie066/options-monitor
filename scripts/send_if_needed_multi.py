@@ -67,6 +67,26 @@ def parse_hhmm(value: str) -> time:
     return time(hour=int(hour), minute=int(minute))
 
 
+def in_hk_session(now_utc: datetime) -> bool:
+    hk = ZoneInfo('Asia/Hong_Kong')
+    t = now_utc.astimezone(hk)
+    if t.weekday() >= 5:
+        return False
+    hm = t.hour * 60 + t.minute
+    # 09:30-12:00, 13:00-16:00 (HKT)
+    return (9 * 60 + 30) <= hm < (12 * 60) or (13 * 60) <= hm < (16 * 60)
+
+
+def in_us_session(now_utc: datetime) -> bool:
+    ny = ZoneInfo('America/New_York')
+    t = now_utc.astimezone(ny)
+    if t.weekday() >= 5:
+        return False
+    hm = t.hour * 60 + t.minute
+    # 09:30-16:00 (NY)
+    return (9 * 60 + 30) <= hm < (16 * 60)
+
+
 def maybe_parse_dt(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -550,6 +570,14 @@ def main():
 
     results: list[AccountResult] = []
 
+    # Market-aware filtering (speed): only run symbols for the current market session.
+    now_utc = datetime.now(timezone.utc)
+    markets_to_run: list[str] = []
+    if in_hk_session(now_utc):
+        markets_to_run = ['HK']
+    elif in_us_session(now_utc):
+        markets_to_run = ['US']
+
     for acct in args.accounts:
         acct = str(acct).strip()
         if not acct:
@@ -561,10 +589,18 @@ def main():
         # Switch ./output -> this account
         atomic_symlink(out_link, acct_out)
 
-        # Write per-account config override (portfolio.account)
+        # Write per-account config override (portfolio.account) + market-aware symbol filtering
         cfg = json.loads(json.dumps(base_cfg))
         cfg.setdefault('portfolio', {})
         cfg['portfolio']['account'] = acct
+
+        try:
+            syms = cfg.get('symbols') or []
+            if markets_to_run:
+                syms = [it for it in syms if isinstance(it, dict) and (it.get('market') in markets_to_run)]
+            cfg['symbols'] = syms
+        except Exception:
+            pass
         cfg_override = acct_out / 'state' / 'config.override.json'
         cfg_override.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 
@@ -591,17 +627,27 @@ def main():
             results.append(AccountResult(acct, False, should_notify, False, reason, ''))
             continue
 
-        # 2) pipeline (timeout-protected)
+        # 2) pipeline (scheduled mode: faster, less output)
+        # If market-aware filtering leaves us with no symbols, skip early.
         try:
-            pipe = subprocess.run(
-                [str(vpy), 'scripts/run_pipeline.py', '--config', str(cfg_override)],
-                cwd=str(base),
-                timeout=int((base_cfg.get('runtime') or {}).get('pipeline_timeout_sec') or 600),
-            )
-        except subprocess.TimeoutExpired:
-            results.append(AccountResult(acct, True, should_notify, False, 'pipeline timeout', ''))
-            continue
+            if markets_to_run and (not (cfg.get('symbols') or [])):
+                results.append(AccountResult(acct, False, should_notify, False, reason + ' | 本时段无对应市场标的', ''))
+                continue
+        except Exception:
+            pass
+
+        pipe = subprocess.run(
+            [str(vpy), 'scripts/run_pipeline.py', '--config', str(cfg_override), '--mode', 'scheduled'],
+            cwd=str(base),
+            capture_output=True,
+            text=True,
+        )
         if pipe.returncode != 0:
+            # Only print the tail for debugging (avoid noisy logs on success)
+            out = ((pipe.stdout or '') + '\n' + (pipe.stderr or '')).strip()
+            if out:
+                tail = '\n'.join(out.splitlines()[-60:])
+                print(f"[ERR] pipeline failed ({acct})\n{tail}")
             results.append(AccountResult(acct, True, should_notify, False, 'pipeline failed', ''))
             continue
 

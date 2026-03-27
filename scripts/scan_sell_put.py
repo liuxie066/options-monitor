@@ -134,6 +134,7 @@ def main():
     parser.add_argument("--require-bid-ask", action="store_true", help="require bid>0 and ask>0 (better fillability)")
     parser.add_argument("--min-abs-delta", type=float, default=None, help="min abs(delta) (e.g. 0.15)")
     parser.add_argument("--max-abs-delta", type=float, default=None, help="max abs(delta) (e.g. 0.28)")
+    parser.add_argument("--quiet", action="store_true", help="quiet mode: suppress human-friendly prints")
     args = parser.parse_args()
 
     base = Path(__file__).resolve().parents[1]
@@ -258,14 +259,15 @@ def main():
     else:
         out.to_csv(out_path, index=False)
 
-    print(f"[DONE] sell put scan -> {out_path}")
-    print(f"[DONE] candidates: {len(out)}")
-    if not out.empty:
-        display_cols = [
-            "symbol", "expiration", "dte", "strike", "spot", "mid",
-            "futu_fee", "net_income", "otm_pct", "annualized_net_return_on_cash_basis"
-        ]
-        print(out[display_cols].head(20).to_string(index=False))
+    if not args.quiet:
+        print(f"[DONE] sell put scan -> {out_path}")
+        print(f"[DONE] candidates: {len(out)}")
+        if not out.empty:
+            display_cols = [
+                "symbol", "expiration", "dte", "strike", "spot", "mid",
+                "futu_fee", "net_income", "otm_pct", "annualized_net_return_on_cash_basis"
+            ]
+            print(out[display_cols].head(20).to_string(index=False))
 
 
 if __name__ == "__main__":
