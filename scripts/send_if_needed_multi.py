@@ -619,6 +619,9 @@ def main():
     ap.add_argument('--smoke', action='store_true', help='Smoke mode: run scheduler decisions but skip pipeline execution.')
     args = ap.parse_args()
 
+    no_send = bool(getattr(args, 'no_send', False))
+    smoke = bool(getattr(args, 'smoke', False))
+
     base = Path(__file__).resolve().parents[1]
     vpy = base / '.venv' / 'bin' / 'python'
 
@@ -849,7 +852,7 @@ def main():
         should_notify = bool(decision.get('should_notify'))
         reason = str(decision.get('reason') or '')
 
-        if bool(getattr(args, 'smoke', False)):
+        if smoke:
             should_run = False
             reason = (str(reason) + ' | smoke_skip_pipeline').strip()
         acct_metrics['should_notify'] = bool(should_notify)
