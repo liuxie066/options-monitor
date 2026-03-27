@@ -12,19 +12,25 @@ set -euo pipefail
 DEV_DIR="/home/node/.openclaw/workspace/options-monitor"
 PROD_DIR="/home/node/.openclaw/workspace/options-monitor-prod"
 TARGET_BRANCH="hotfix/scheduled-speed-quiet-20260327"
-DO_MERGE=1
+# Default behavior: create a publish commit on a publish/* branch, but do NOT merge into target.
+# Use --apply to merge (after manual confirmation).
+DO_MERGE=0
+APPLY=0
 ALLOW_DIRTY=0
 
 usage() {
   cat <<EOF
 Usage:
-  $(basename "$0") [--dev <dir>] [--prod <dir>] [--target-branch <name>] [--no-merge] [--allow-dirty]
+  $(basename "$0") [--dev <dir>] [--prod <dir>] [--target-branch <name>] [--apply] [--no-merge] [--allow-dirty]
 
 Examples:
-  # Standard publish (recommended)
+  # Create publish commit (does NOT affect production yet)
   $(basename "$0")
 
-  # Publish but do not merge into target branch (leave changes on publish branch)
+  # Apply to production (merge publish branch into target branch)
+  $(basename "$0") --apply
+
+  # Publish but do not merge into target branch (explicit)
   $(basename "$0") --no-merge
 
 Notes:
@@ -39,6 +45,7 @@ while [[ $# -gt 0 ]]; do
     --dev) DEV_DIR="$2"; shift 2;;
     --prod) PROD_DIR="$2"; shift 2;;
     --target-branch) TARGET_BRANCH="$2"; shift 2;;
+    --apply) APPLY=1; DO_MERGE=1; shift 1;;
     --no-merge) DO_MERGE=0; shift 1;;
     --allow-dirty) ALLOW_DIRTY=1; shift 1;;
     -h|--help) usage; exit 0;;
@@ -119,6 +126,10 @@ done <<< "$TRACKED"
 )
 
 if [[ $DO_MERGE -eq 1 ]]; then
+  if [[ $APPLY -ne 1 ]]; then
+    echo "[ERR] Refusing to merge without explicit --apply" >&2
+    exit 1
+  fi
   (
     cd "$PROD_DIR"
     git checkout "$TARGET_BRANCH" >/dev/null
