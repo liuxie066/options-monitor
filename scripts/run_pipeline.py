@@ -420,6 +420,10 @@ def process_symbol(
             '--min-volume', str(sp.get('min_volume', 10)),
             '--max-spread-ratio', str(sp.get('max_spread_ratio', 0.30)),
         ]
+        if sp.get('min_strike_above') is not None:
+            cmd.extend(['--min-strike-above', str(sp.get('min_strike_above'))])
+        if sp.get('max_strike_above') is not None:
+            cmd.extend(['--max-strike-above', str(sp.get('max_strike_above'))])
         # Data quality gates (optional)
         if sp.get('require_bid_ask'):
             cmd.append('--require-bid-ask')
