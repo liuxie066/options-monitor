@@ -700,7 +700,14 @@ def process_symbol(
                 locked = int((option_ctx.get('locked_shares_by_symbol') or {}).get(symbol) or 0)
             shares_total_v = int((stock or {}).get('shares') or shares_total)
             shares_available = max(shares_total_v - locked, 0)
-            covered_contracts_available = shares_available // 100
+            # Covered-call capacity should follow contract multiplier (HK symbols may not be 100).
+            try:
+                m = int(float(df_cc.iloc[0].get('multiplier') or 0)) if not df_cc.empty else 100
+            except Exception:
+                m = 100
+            if m <= 0:
+                m = 100
+            covered_contracts_available = shares_available // m
 
             df_cc['shares_total'] = shares_total_v
             df_cc['shares_locked'] = locked
