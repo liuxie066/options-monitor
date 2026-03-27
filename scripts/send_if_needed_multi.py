@@ -612,12 +612,21 @@ def main():
         cfg_override = acct_out / 'state' / 'config.override.json'
         cfg_override.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 
-        state_path = acct_out / 'state' / 'scheduler_state.json'
+        # Unified scan timing: use ONE shared scheduler_state per market.
+        # Notify cooldown remains per-account (stored in last_notify_utc_by_account within the same shared file).
+        shared_state_dir = (base / 'output_shared' / 'state').resolve()
+        shared_state_dir.mkdir(parents=True, exist_ok=True)
+        if markets_to_run == ['HK']:
+            state_path = shared_state_dir / 'scheduler_state_hk.json'
+        elif markets_to_run == ['US']:
+            state_path = shared_state_dir / 'scheduler_state_us.json'
+        else:
+            state_path = shared_state_dir / 'scheduler_state.json'
         notif_path = acct_out / 'reports' / 'symbols_notification.txt'
 
         # 1) scheduler decision
         # market-aware schedule: use schedule_hk during HK session, otherwise default schedule
-        sch_args = [str(vpy), 'scripts/scan_scheduler.py', '--config', str(cfg_override), '--state', str(state_path), '--jsonl']
+        sch_args = [str(vpy), 'scripts/scan_scheduler.py', '--config', str(cfg_override), '--state', str(state_path), '--jsonl', '--account', str(acct)]
         try:
             if markets_to_run == ['HK']:
                 sch_args.extend(['--schedule-key', 'schedule_hk'])
@@ -673,14 +682,9 @@ def main():
 
 
         shared_scan_ready = True
-        # Update scan timestamp so the scheduler interval works next tick.
-        # (scan_scheduler.py only updates last_scan_utc in --run-if-due mode, which we don't use here.)
+        # Mark scanned (shared scan clock)
         try:
-            st = read_json(state_path, {'last_scan_utc': None, 'last_notify_utc': None})
-            if not isinstance(st, dict):
-                st = {'last_scan_utc': None, 'last_notify_utc': None}
-            st['last_scan_utc'] = utc_now()
-            write_json(state_path, st)
+            subprocess.run([str(vpy), 'scripts/scan_scheduler.py', '--config', str(cfg_override), '--state', str(state_path), '--mark-scanned'], cwd=str(base))
         except Exception:
             pass
 
@@ -705,8 +709,16 @@ def main():
             high_pri = meaningful and is_high_priority_notification(text)
 
             if (not should_notify_effective) and before_sparse and high_pri:
-                st = read_json(state_path, {'last_notify_utc': None})
-                last_notify = maybe_parse_dt((st or {}).get('last_notify_utc')) if isinstance(st, dict) else None
+                st = read_json(state_path, {'last_notify_utc': None, 'last_notify_utc_by_account': {}})
+                last_notify = None
+                try:
+                    m = (st or {}).get('last_notify_utc_by_account') if isinstance(st, dict) else None
+                    if isinstance(m, dict):
+                        last_notify = maybe_parse_dt(m.get(str(acct)))
+                except Exception:
+                    last_notify = None
+                if last_notify is None:
+                    last_notify = maybe_parse_dt((st or {}).get('last_notify_utc')) if isinstance(st, dict) else None
                 if last_notify is None:
                     should_notify_effective = True
                     reason = (reason + f" | override(high,dense): last_notify missing")
@@ -773,7 +785,7 @@ def main():
             state_path = acct_out / 'state' / 'scheduler_state.json'
             cfg_override = acct_out / 'state' / 'config.override.json'
             subprocess.run(
-                [str(vpy), 'scripts/scan_scheduler.py', '--config', str(cfg_override), '--state', str(state_path), '--mark-notified'],
+                [str(vpy), 'scripts/scan_scheduler.py', '--config', str(cfg_override), '--state', str(state_path), '--account', str(r.account), '--mark-notified'],
                 cwd=str(base),
             )
 
