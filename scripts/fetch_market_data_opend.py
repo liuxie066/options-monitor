@@ -33,6 +33,17 @@ from typing import Any
 
 import pandas as pd
 
+import json
+
+
+def _write_metrics_json(metrics_path: Path, payload: dict):
+    try:
+        metrics_path.parent.mkdir(parents=True, exist_ok=True)
+        metrics_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+    except Exception:
+        pass
+
+
 COLUMNS = [
     'symbol','option_type','expiration','dte','contract_symbol','strike','spot',
     'bid','ask','last_price','mid','volume','open_interest','implied_volatility',
@@ -440,6 +451,7 @@ def main():
     base = Path(__file__).resolve().parents[1]
 
     for sym in args.symbols:
+        t0 = time.monotonic()
         payload = fetch_symbol(
             sym,
             limit_expirations=args.limit_expirations,
