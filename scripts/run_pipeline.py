@@ -624,7 +624,7 @@ def process_symbol(
                 '--top', str(top_n),
                 '--layered',
                 '--output', f'output/reports/{symbol_lower}_sell_put_alerts.txt',
-            ], cwd=base)
+                ], cwd=base)
         summary_rows.append(summarize_sell_put(safe_read_csv(symbol_sp_labeled), symbol))
     else:
         summary_rows.append(summarize_sell_put(pd.DataFrame(), symbol))
@@ -838,10 +838,33 @@ def main():
     parser.add_argument('--config', required=True, help='Path to JSON config (single-symbol or watchlist). YAML is legacy.')
     parser.add_argument('--mode', default='dev', choices=['dev', 'scheduled'], help='Runtime mode: dev (verbose) vs scheduled (fast)')
     parser.add_argument('--symbols', default=None, help='Comma-separated symbol whitelist; only process these symbols')
+    parser.add_argument('--stage', default='all', choices=['fetch','scan','alert','notify','all'], help='Pipeline stage: fetch|scan|alert|notify|all (dev speed; runs up to this stage)')
+    parser.add_argument('--stage-only', default=None, choices=['alert','notify'], help='Run ONLY a late stage (no fetch/scan). Requires existing output files.')
     args = parser.parse_args()
 
     RUNTIME_MODE = str(args.mode)
     IS_SCHEDULED = (RUNTIME_MODE == 'scheduled')
+    STAGE = str(args.stage)
+    STAGE_ONLY = (str(args.stage_only) if args.stage_only else None)
+
+    def want(name: str) -> bool:
+        # stage-only mode: run ONLY the requested late stage
+        if STAGE_ONLY is not None:
+            return name == STAGE_ONLY
+        # normal mode: run up to STAGE
+        if STAGE == 'all':
+            return True
+        order = ['fetch', 'scan', 'alert', 'notify']
+        try:
+            return order.index(name) <= order.index(STAGE)
+        except Exception:
+            return True
+
+    def stage_only_changes_out() -> str:
+        # In dev iteration, stage-only should not mutate snapshot/change history.
+        # (Otherwise, formatting tests would pollute symbols_summary_prev.csv / changes.)
+        return '/dev/null'
+
 
     base = Path(__file__).resolve().parents[1]
     cfg_path = Path(args.config)
@@ -910,116 +933,162 @@ def main():
         symbol_timeout_sec = int(runtime.get('symbol_timeout_sec', 120))
         portfolio_timeout_sec = int(runtime.get('portfolio_timeout_sec', 60))
 
+        # stage-only late-stage runner: skip fetch/scan and re-use existing outputs.
+        # Typical usage:
+        #   --stage-only alert  (requires output/reports/symbols_summary.csv)
+        #   --stage-only notify (requires output/reports/symbols_alerts.txt)
+        if STAGE_ONLY is not None:
+            summary_path = base / 'output' / 'reports' / 'symbols_summary.csv'
+            alerts_path = base / 'output' / 'reports' / 'symbols_alerts.txt'
+            if STAGE_ONLY == 'alert':
+                if not (summary_path.exists() and summary_path.stat().st_size > 0):
+                    raise SystemExit(f"[STAGE_ONLY_ERROR] missing required file: {summary_path}")
+            if STAGE_ONLY == 'notify':
+                if not (alerts_path.exists() and alerts_path.stat().st_size > 0):
+                    raise SystemExit(f"[STAGE_ONLY_ERROR] missing required file: {alerts_path}")
+
+            changes_out = stage_only_changes_out() if STAGE_ONLY else ('/dev/null' if IS_SCHEDULED else 'output/reports/symbols_changes.txt')
+            alert_cmd = [
+                py, 'scripts/alert_engine.py',
+                '--summary-input', 'output/reports/symbols_summary.csv',
+                '--output', 'output/reports/symbols_alerts.txt',
+                '--changes-output', changes_out,
+            ]
+            # stage-only: do NOT update snapshot/history
+            if (not IS_SCHEDULED) and (not STAGE_ONLY):
+                alert_cmd.extend([
+                    '--previous-summary', 'output/state/symbols_summary_prev.csv',
+                    '--update-snapshot',
+                ])
+            if want('alert'):
+                run(alert_cmd, cwd=base)
+
+            if want('notify'):
+                run([
+                    py, 'scripts/notify_symbols.py',
+                    '--alerts-input', 'output/reports/symbols_alerts.txt',
+                    '--changes-input', (changes_out if STAGE_ONLY else ('/dev/null' if IS_SCHEDULED else 'output/reports/symbols_changes.txt')),
+                    '--output', 'output/reports/symbols_notification.txt',
+                ], cwd=base)
+
+            print(f"[INFO] stage-only done: {STAGE_ONLY}")
+            return
+
         symbols = []
         summary_rows: list[dict] = []
 
-        # portfolio context
-        portfolio_cfg = cfg.get('portfolio', {}) or {}
-        pm_config = portfolio_cfg.get('pm_config', '../portfolio-management/config.json')
-        market = portfolio_cfg.get('market', '富途')
-        account = portfolio_cfg.get('account')
-
-        portfolio_ctx = None
-        option_ctx = None
-
-        # Cache policy (TTL seconds)
-        # - scheduled: longer TTL (reduce PM subprocess overhead)
-        # - dev: shorter TTL (keep reasonably fresh)
-        runtime = cfg.get('runtime', {}) or {}
-        ttl_opt_ctx = int(runtime.get('option_positions_context_ttl_sec', 900 if IS_SCHEDULED else 120) or 0)
-        ttl_port_ctx = int(runtime.get('portfolio_context_ttl_sec', 900 if IS_SCHEDULED else 60) or 0)
-
-        # 1) portfolio_context cache
-        try:
-            port_path = (base / 'output/state/portfolio_context.json').resolve()
-            cached = None
-            if ttl_port_ctx > 0 and is_fresh(port_path, ttl_port_ctx):
-                cached = load_cached_json(port_path)
-            if cached is not None:
-                portfolio_ctx = cached
-            else:
-                cmd = [
-                    py, 'scripts/fetch_portfolio_context.py',
-                    '--pm-config', str(pm_config),
-                    '--market', str(market),
-                    '--out', 'output/state/portfolio_context.json',
-                ]
-                if account:
-                    cmd.extend(['--account', str(account)])
-                run(cmd, cwd=base, timeout_sec=portfolio_timeout_sec)
-                portfolio_ctx = load_cached_json(port_path) or json.loads(port_path.read_text(encoding='utf-8'))
-        except BaseException as e:
-            # Important: run() raises SystemExit on non-zero return codes.
-            # For unattended cron, portfolio context is best-effort and should not kill the whole scan.
-            print(f"[WARN] portfolio context not available: {e}")
+        if not want('scan'):
             portfolio_ctx = None
+            option_ctx = None
+            fx_usd_per_cny = None
+            hkdcny = None
+        else:
+            # portfolio context
+            portfolio_cfg = cfg.get('portfolio', {}) or {}
+            pm_config = portfolio_cfg.get('pm_config', '../portfolio-management/config.json')
+            market = portfolio_cfg.get('market', '富途')
+            account = portfolio_cfg.get('account')
 
-        # 2) option_positions_context cache (and auto-close only on refresh)
-        try:
-            opt_path = (base / 'output/state/option_positions_context.json').resolve()
-            refreshed = False
-            cached = None
-            if ttl_opt_ctx > 0 and is_fresh(opt_path, ttl_opt_ctx):
-                cached = load_cached_json(opt_path)
-            if cached is not None:
-                option_ctx = cached
-            else:
-                cmd = [
-                    py, 'scripts/fetch_option_positions_context.py',
-                    '--pm-config', str(pm_config),
-                    '--market', str(market),
-                    '--out', 'output/state/option_positions_context.json',
-                ]
-                if account:
-                    cmd.extend(['--account', str(account)])
-                run(cmd, cwd=base, timeout_sec=portfolio_timeout_sec)
-                option_ctx = load_cached_json(opt_path) or json.loads(opt_path.read_text(encoding='utf-8'))
-                refreshed = True
-
-            if refreshed:
-                # Auto-close expired open positions (table maintenance) without extra scans.
-                # Uses the context we just generated (contains open_positions_min with record_id).
-                try:
-                    run([
-                        py, 'scripts/auto_close_expired_positions.py',
-                        '--pm-config', str(pm_config),
-                        '--context', 'output/state/option_positions_context.json',
-                        '--grace-days', '1',
-                        '--max-close', '20',
-                        '--summary-out', 'output/reports/auto_close_summary.txt',
-                    ], cwd=base, timeout_sec=portfolio_timeout_sec)
-                except Exception as e2:
-                    print(f"[WARN] auto-close expired positions failed: {e2}")
-
-        except BaseException as e:
-            # best-effort; do not kill pipeline if this fails
-            print(f"[WARN] option positions context not available: {e}")
+            portfolio_ctx = None
             option_ctx = None
 
-        # FX (once per pipeline).
-        fx_usd_per_cny = None
-        hkdcny = None
-        try:
-            # scripts/ is not a package; load fx_rates.py by path
-            import importlib.util
-            fx_path = (base / 'scripts' / 'fx_rates.py').resolve()
-            import sys as _sys
-            spec = importlib.util.spec_from_file_location('fx_rates', fx_path)
-            assert spec and spec.loader
-            mod = importlib.util.module_from_spec(spec)
-            # dataclasses expects module to exist in sys.modules during exec
-            _sys.modules['fx_rates'] = mod
-            spec.loader.exec_module(mod)  # type: ignore
-            fx_usd_per_cny = mod.get_usd_per_cny(base)  # type: ignore
-            # also load HKDCNY (CNY per 1 HKD) from cache
+            # Cache policy (TTL seconds)
+            # - scheduled: longer TTL (reduce PM subprocess overhead)
+            # - dev: shorter TTL (keep reasonably fresh)
+            ttl_opt_ctx = int(runtime.get('option_positions_context_ttl_sec', 900 if IS_SCHEDULED else 120) or 0)
+            ttl_port_ctx = int(runtime.get('portfolio_context_ttl_sec', 900 if IS_SCHEDULED else 60) or 0)
+
+            # 1) portfolio_context cache
             try:
-                rates = mod.get_rates((base / 'output/state/rate_cache.json').resolve(), None)  # type: ignore
-                hkdcny = float(rates.get('HKDCNY')) if rates and rates.get('HKDCNY') else None
-            except Exception:
-                hkdcny = None
-        except BaseException as e:
-            # best-effort
-            print(f"[WARN] fx rates not available: {e}")
+                port_path = (base / 'output/state/portfolio_context.json').resolve()
+                cached = None
+                if ttl_port_ctx > 0 and is_fresh(port_path, ttl_port_ctx):
+                    cached = load_cached_json(port_path)
+                if cached is not None:
+                    portfolio_ctx = cached
+                else:
+                    cmd = [
+                        py, 'scripts/fetch_portfolio_context.py',
+                        '--pm-config', str(pm_config),
+                        '--market', str(market),
+                        '--out', 'output/state/portfolio_context.json',
+                    ]
+                    if account:
+                        cmd.extend(['--account', str(account)])
+                    run(cmd, cwd=base, timeout_sec=portfolio_timeout_sec)
+                    portfolio_ctx = load_cached_json(port_path) or json.loads(port_path.read_text(encoding='utf-8'))
+            except BaseException as e:
+                # Important: run() raises SystemExit on non-zero return codes.
+                # For unattended cron, portfolio context is best-effort and should not kill the whole scan.
+                print(f"[WARN] portfolio context not available: {e}")
+                portfolio_ctx = None
+
+            # 2) option_positions_context cache (and auto-close only on refresh)
+            try:
+                opt_path = (base / 'output/state/option_positions_context.json').resolve()
+                refreshed = False
+                cached = None
+                if ttl_opt_ctx > 0 and is_fresh(opt_path, ttl_opt_ctx):
+                    cached = load_cached_json(opt_path)
+                if cached is not None:
+                    option_ctx = cached
+                else:
+                    cmd = [
+                        py, 'scripts/fetch_option_positions_context.py',
+                        '--pm-config', str(pm_config),
+                        '--market', str(market),
+                        '--out', 'output/state/option_positions_context.json',
+                    ]
+                    if account:
+                        cmd.extend(['--account', str(account)])
+                    run(cmd, cwd=base, timeout_sec=portfolio_timeout_sec)
+                    option_ctx = load_cached_json(opt_path) or json.loads(opt_path.read_text(encoding='utf-8'))
+                    refreshed = True
+
+                if refreshed:
+                    # Auto-close expired open positions (table maintenance) without extra scans.
+                    # Only run when we refreshed context (avoid repeated close calls during rapid dev loops).
+                    try:
+                        run([
+                            py, 'scripts/auto_close_expired_positions.py',
+                            '--pm-config', str(pm_config),
+                            '--context', 'output/state/option_positions_context.json',
+                            '--grace-days', '1',
+                            '--max-close', '20',
+                            '--summary-out', 'output/reports/auto_close_summary.txt',
+                        ], cwd=base, timeout_sec=portfolio_timeout_sec)
+                    except Exception as e2:
+                        print(f"[WARN] auto-close expired positions failed: {e2}")
+
+            except BaseException as e:
+                # best-effort; do not kill pipeline if this fails
+                print(f"[WARN] option positions context not available: {e}")
+                option_ctx = None
+
+            # FX (once per pipeline).
+            fx_usd_per_cny = None
+            hkdcny = None
+            try:
+                # scripts/ is not a package; load fx_rates.py by path
+                import importlib.util
+                fx_path = (base / 'scripts' / 'fx_rates.py').resolve()
+                import sys as _sys
+                spec = importlib.util.spec_from_file_location('fx_rates', fx_path)
+                assert spec and spec.loader
+                mod = importlib.util.module_from_spec(spec)
+                # dataclasses expects module to exist in sys.modules during exec
+                _sys.modules['fx_rates'] = mod
+                spec.loader.exec_module(mod)  # type: ignore
+                fx_usd_per_cny = mod.get_usd_per_cny(base)  # type: ignore
+                # also load HKDCNY (CNY per 1 HKD) from cache
+                try:
+                    rates = mod.get_rates((base / 'output/state/rate_cache.json').resolve(), None)  # type: ignore
+                    hkdcny = float(rates.get('HKDCNY')) if rates and rates.get('HKDCNY') else None
+                except Exception:
+                    hkdcny = None
+            except BaseException as e:
+                # best-effort
+                print(f"[WARN] fx rates not available: {e}")
 
         profiles = cfg.get('profiles') or {}
 
@@ -1035,7 +1104,14 @@ def main():
                 # inject option_ctx into portfolio_ctx for now (minimal change):
                 if portfolio_ctx is not None and option_ctx is not None:
                     portfolio_ctx['option_ctx'] = option_ctx
-                summary_rows.extend(process_symbol(py, base, item, top_n, portfolio_ctx=portfolio_ctx, fx_usd_per_cny=fx_usd_per_cny, hkdcny=hkdcny, timeout_sec=symbol_timeout_sec))
+                if not want('scan'):
+                    # fetch-only: just pull required_data and stop
+                    item_fetch = dict(item)
+                    item_fetch['sell_put'] = {'enabled': False}
+                    item_fetch['sell_call'] = {'enabled': False}
+                    process_symbol(py, base, item_fetch, top_n, portfolio_ctx=None, fx_usd_per_cny=None, hkdcny=None, timeout_sec=symbol_timeout_sec)
+                else:
+                    summary_rows.extend(process_symbol(py, base, item, top_n, portfolio_ctx=portfolio_ctx, fx_usd_per_cny=fx_usd_per_cny, hkdcny=hkdcny, timeout_sec=symbol_timeout_sec))
             except Exception as e:
                 symbol = item.get('symbol', 'UNKNOWN')
                 print(f'[WARN] {symbol} processing failed: {e}')
@@ -1066,6 +1142,13 @@ def main():
                     'note': f'处理失败: {e}',
                 })
             symbols.append(item['symbol'])
+
+        # fetch-only stage: stop after market-data fetch
+        # (but do not interfere with stage-only late-stage runs)
+        if (STAGE_ONLY is None) and (not want('scan')):
+            print(f"[INFO] stage={STAGE}: fetch done")
+            return
+
         build_symbols_summary(base, summary_rows)
         if not IS_SCHEDULED:
             build_symbols_digest(base, symbols)
@@ -1093,14 +1176,16 @@ def main():
                 alert_cmd.extend(['--policy-json', policy.strip()])
         except Exception:
             pass
-        run(alert_cmd, cwd=base)
+        if want('alert'):
+            run(alert_cmd, cwd=base)
 
-        run([
-            py, 'scripts/notify_symbols.py',
-            '--alerts-input', 'output/reports/symbols_alerts.txt',
-            '--changes-input', ('/dev/null' if IS_SCHEDULED else 'output/reports/symbols_changes.txt'),
-            '--output', 'output/reports/symbols_notification.txt',
-        ], cwd=base)
+        if want('notify'):
+            run([
+                py, 'scripts/notify_symbols.py',
+                '--alerts-input', 'output/reports/symbols_alerts.txt',
+                '--changes-input', ('/dev/null' if IS_SCHEDULED else 'output/reports/symbols_changes.txt'),
+                '--output', 'output/reports/symbols_notification.txt',
+            ], cwd=base)
 
         # Append cash summaries at the bottom (optional).
         # In multi-account merged notifications, we prefer adding cash footer only once in send_if_needed_multi.py.
