@@ -80,3 +80,11 @@ cat /home/node/.openclaw/workspace/options-monitor/output/reports/symbols_notifi
 
 Some legacy/unused helper scripts were moved to `scripts/_archive/` to reduce confusion.
 If you need them for manual debugging, you can still run them from there, but they are not part of the production cron pipeline.
+
+## Tools (manual)
+
+Manual diagnostics/helpers live under `scripts/tools/`:
+- doctor_opend_telnet.py: basic OpenD connectivity/status checks
+- doctor_required_data_schema.py: validate required_data.csv schema
+- snip_sell_put_headroom.py: extract headroom summary
+- sell_put_cash_and_notify.py: standalone cash warning helper
