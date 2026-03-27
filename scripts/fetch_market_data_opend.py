@@ -36,10 +36,22 @@ import pandas as pd
 import json
 
 
-def _write_metrics_json(metrics_path: Path, payload: dict):
+def _append_metrics_json(metrics_path: Path, payload: dict, max_entries: int = 400):
+    """Append payload into a bounded JSON list file. Keeps last max_entries records."""
     try:
         metrics_path.parent.mkdir(parents=True, exist_ok=True)
-        metrics_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+        arr = []
+        if metrics_path.exists() and metrics_path.stat().st_size > 0:
+            try:
+                obj = json.loads(metrics_path.read_text(encoding='utf-8'))
+                if isinstance(obj, list):
+                    arr = obj
+            except Exception:
+                arr = []
+        arr.append(payload)
+        if len(arr) > int(max_entries):
+            arr = arr[-int(max_entries):]
+        metrics_path.write_text(json.dumps(arr, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
     except Exception:
         pass
 
@@ -450,6 +462,8 @@ def main():
 
     base = Path(__file__).resolve().parents[1]
 
+    opend_metrics_path = (base / 'output_shared' / 'state' / 'opend_metrics.json').resolve()
+
     for sym in args.symbols:
         t0 = time.monotonic()
         payload = fetch_symbol(
@@ -470,6 +484,21 @@ def main():
             no_retry=bool(args.no_retry),
         )
         raw_path, csv_path = save_outputs(base, sym, payload)
+        try:
+            meta = payload.get('meta') or {}
+            _append_metrics_json(opend_metrics_path, {
+                'as_of_utc': datetime.now().astimezone().isoformat(),
+                'symbol': sym,
+                'ms': int((time.monotonic() - t0) * 1000),
+                'rows': int(len(payload.get('rows') or [])),
+                'expiration_count': int(payload.get('expiration_count') or 0),
+                'underlier_code': payload.get('underlier_code'),
+                'host': meta.get('host'),
+                'port': meta.get('port'),
+                'error': meta.get('error'),
+            })
+        except Exception:
+            pass
         if not args.quiet:
             print(f"[OK] {sym} source=opend")
             print(f"  underlier={payload.get('underlier_code')} spot={payload.get('spot')}")
