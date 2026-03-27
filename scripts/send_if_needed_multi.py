@@ -709,16 +709,8 @@ def main():
             high_pri = meaningful and is_high_priority_notification(text)
 
             if (not should_notify_effective) and before_sparse and high_pri:
-                st = read_json(state_path, {'last_notify_utc': None, 'last_notify_utc_by_account': {}})
-                last_notify = None
-                try:
-                    m = (st or {}).get('last_notify_utc_by_account') if isinstance(st, dict) else None
-                    if isinstance(m, dict):
-                        last_notify = maybe_parse_dt(m.get(str(acct)))
-                except Exception:
-                    last_notify = None
-                if last_notify is None:
-                    last_notify = maybe_parse_dt((st or {}).get('last_notify_utc')) if isinstance(st, dict) else None
+                st = read_json(state_path, {'last_notify_utc': None})
+                last_notify = maybe_parse_dt((st or {}).get('last_notify_utc')) if isinstance(st, dict) else None
                 if last_notify is None:
                     should_notify_effective = True
                     reason = (reason + f" | override(high,dense): last_notify missing")
@@ -778,16 +770,15 @@ def main():
     if send.returncode != 0:
         raise SystemExit(send.returncode)
 
-    # Mark notified for accounts that were included
-    for r in results:
-        if r.should_notify and r.meaningful and r.notification_text.strip():
-            acct_out = accounts_root / r.account
-            state_path = acct_out / 'state' / 'scheduler_state.json'
-            cfg_override = acct_out / 'state' / 'config.override.json'
-            subprocess.run(
-                [str(vpy), 'scripts/scan_scheduler.py', '--config', str(cfg_override), '--state', str(state_path), '--account', str(r.account), '--mark-notified'],
-                cwd=str(base),
-            )
+    # Mark notified ONCE (global cooldown, unified across accounts)
+    try:
+        if results:
+            acct0 = results[0].account
+            acct_out0 = accounts_root / acct0
+            cfg_override0 = acct_out0 / 'state' / 'config.override.json'
+            subprocess.run([str(vpy), 'scripts/scan_scheduler.py', '--config', str(cfg_override0), '--state', str(state_path), '--mark-notified'], cwd=str(base))
+    except Exception:
+        pass
 
     # Write shared last_run.json (for cron observability)
     try:
