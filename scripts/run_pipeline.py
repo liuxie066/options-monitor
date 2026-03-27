@@ -808,21 +808,32 @@ def main():
     parser.add_argument('--config', required=True, help='Path to JSON config (single-symbol or watchlist). YAML is legacy.')
     parser.add_argument('--mode', default='dev', choices=['dev', 'scheduled'], help='Runtime mode: dev (verbose) vs scheduled (fast)')
     parser.add_argument('--symbols', default=None, help='Comma-separated symbol whitelist; only process these symbols')
-    parser.add_argument('--stage', default='all', choices=['fetch','scan','alert','notify','all'], help='Pipeline stage: fetch|scan|alert|notify|all (dev speed)')
+    parser.add_argument('--stage', default='all', choices=['fetch','scan','alert','notify','all'], help='Pipeline stage: fetch|scan|alert|notify|all (dev speed; runs up to this stage)')
+    parser.add_argument('--stage-only', default=None, choices=['alert','notify'], help='Run ONLY a late stage (no fetch/scan). Requires existing output files.')
     args = parser.parse_args()
 
     RUNTIME_MODE = str(args.mode)
     IS_SCHEDULED = (RUNTIME_MODE == 'scheduled')
     STAGE = str(args.stage)
+    STAGE_ONLY = (str(args.stage_only) if args.stage_only else None)
 
     def want(name: str) -> bool:
+        # stage-only mode: run ONLY the requested late stage
+        if STAGE_ONLY is not None:
+            return name == STAGE_ONLY
+        # normal mode: run up to STAGE
         if STAGE == 'all':
             return True
-        order = ['fetch','scan','alert','notify']
+        order = ['fetch', 'scan', 'alert', 'notify']
         try:
             return order.index(name) <= order.index(STAGE)
         except Exception:
             return True
+
+    def stage_only_changes_out() -> str:
+        # In dev iteration, stage-only should not mutate snapshot/change history.
+        # (Otherwise, formatting tests would pollute symbols_summary_prev.csv / changes.)
+        return '/dev/null'
 
 
     base = Path(__file__).resolve().parents[1]
@@ -891,6 +902,47 @@ def main():
         runtime = cfg.get('runtime', {}) or {}
         symbol_timeout_sec = int(runtime.get('symbol_timeout_sec', 120))
         portfolio_timeout_sec = int(runtime.get('portfolio_timeout_sec', 60))
+
+        # stage-only late-stage runner: skip fetch/scan and re-use existing outputs.
+        # Typical usage:
+        #   --stage-only alert  (requires output/reports/symbols_summary.csv)
+        #   --stage-only notify (requires output/reports/symbols_alerts.txt)
+        if STAGE_ONLY is not None:
+            summary_path = base / 'output' / 'reports' / 'symbols_summary.csv'
+            alerts_path = base / 'output' / 'reports' / 'symbols_alerts.txt'
+            if STAGE_ONLY == 'alert':
+                if not (summary_path.exists() and summary_path.stat().st_size > 0):
+                    raise SystemExit(f"[STAGE_ONLY_ERROR] missing required file: {summary_path}")
+            if STAGE_ONLY == 'notify':
+                if not (alerts_path.exists() and alerts_path.stat().st_size > 0):
+                    raise SystemExit(f"[STAGE_ONLY_ERROR] missing required file: {alerts_path}")
+
+            changes_out = stage_only_changes_out() if STAGE_ONLY else ('/dev/null' if IS_SCHEDULED else 'output/reports/symbols_changes.txt')
+            alert_cmd = [
+                py, 'scripts/alert_engine.py',
+                '--summary-input', 'output/reports/symbols_summary.csv',
+                '--output', 'output/reports/symbols_alerts.txt',
+                '--changes-output', changes_out,
+            ]
+            # stage-only: do NOT update snapshot/history
+            if (not IS_SCHEDULED) and (not STAGE_ONLY):
+                alert_cmd.extend([
+                    '--previous-summary', 'output/state/symbols_summary_prev.csv',
+                    '--update-snapshot',
+                ])
+            if want('alert'):
+                run(alert_cmd, cwd=base)
+
+            if want('notify'):
+                run([
+                    py, 'scripts/notify_symbols.py',
+                    '--alerts-input', 'output/reports/symbols_alerts.txt',
+                    '--changes-input', (changes_out if STAGE_ONLY else ('/dev/null' if IS_SCHEDULED else 'output/reports/symbols_changes.txt')),
+                    '--output', 'output/reports/symbols_notification.txt',
+                ], cwd=base)
+
+            print(f"[INFO] stage-only done: {STAGE_ONLY}")
+            return
 
         symbols = []
         summary_rows: list[dict] = []
@@ -1036,7 +1088,8 @@ def main():
             symbols.append(item['symbol'])
 
         # fetch-only stage: stop after market-data fetch
-        if not want('scan'):
+        # (but do not interfere with stage-only late-stage runs)
+        if (STAGE_ONLY is None) and (not want('scan')):
             print(f"[INFO] stage={STAGE}: fetch done")
             return
 
