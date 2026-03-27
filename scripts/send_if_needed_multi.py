@@ -32,11 +32,13 @@ import json
 import os
 import re
 import subprocess
+from time import monotonic
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta, time
 from pathlib import Path
 from zoneinfo import ZoneInfo
+import socket
 
 
 def utc_now() -> str:
@@ -60,10 +62,147 @@ def write_json(path: Path, obj):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(obj, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 
+def log(msg: str) -> None:
+    try:
+        if DEBUG:
+            print(msg)
+    except Exception:
+        pass
+
+
+
+def prefetch_required_data(vpy: Path, base: Path, cfg: dict, shared_required: Path) -> None:
+    # Fetch required_data for all symbols once per tick into shared_required (raw/parsed).
+    # Best-effort: failures should not crash the tick; downstream will handle empty/partial data.
+    # This runs in the current ./output context; it copies outputs into shared_required afterwards.
+    try:
+        shared_required.mkdir(parents=True, exist_ok=True)
+        (shared_required / 'raw').mkdir(parents=True, exist_ok=True)
+        (shared_required / 'parsed').mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return
+
+    syms = cfg.get('symbols') or []
+    for it in syms:
+        if not isinstance(it, dict):
+            continue
+        symbol = str(it.get('symbol') or '').strip()
+        if not symbol:
+            continue
+
+        # Skip if already present
+        try:
+            raw0 = (shared_required / 'raw' / f"{symbol}_required_data.json").resolve()
+            csv0 = (shared_required / 'parsed' / f"{symbol}_required_data.csv").resolve()
+            if raw0.exists() and csv0.exists() and raw0.stat().st_size > 0 and csv0.stat().st_size > 0:
+                continue
+        except Exception:
+            pass
+
+        fetch = (it.get('fetch') or {})
+        src = str(fetch.get('source') or 'yahoo').strip().lower()
+
+        # Derive basic option-types from config (account-agnostic)
+        want_put = bool((it.get('sell_put') or {}).get('enabled', False))
+        want_call = bool((it.get('sell_call') or {}).get('enabled', False))
+        opt_types = 'put,call'
+        if want_put and (not want_call):
+            opt_types = 'put'
+        elif want_call and (not want_put):
+            opt_types = 'call'
+
+        limit_exp = int(fetch.get('limit_expirations') or cfg.get('limit_expirations') or 8)
+
+        cmd = [str(vpy)]
+        if src == 'opend':
+            host = str(fetch.get('host') or '127.0.0.1')
+            port = int(fetch.get('port') or 11111)
+            cmd += [
+                'scripts/fetch_market_data_opend.py',
+                '--symbols', symbol,
+                '--limit-expirations', str(limit_exp),
+                '--host', host,
+                '--port', str(port),
+                '--option-types', str(opt_types),
+                '--quiet',
+            ]
+        else:
+            cmd += [
+                'scripts/fetch_market_data.py',
+                '--symbols', symbol,
+                '--limit-expirations', str(limit_exp),
+            ]
+
+        try:
+            subprocess.run(cmd, cwd=str(base), capture_output=True, text=True, timeout=60)
+            # prefetch fallback to yahoo (US) if opend produced no outputs
+            try:
+                if src == 'opend':
+                    out = (base / 'output').resolve()
+                    src_raw = out / 'raw' / f"{symbol}_required_data.json"
+                    src_csv = out / 'parsed' / f"{symbol}_required_data.csv"
+                    if (not src_raw.exists()) or (not src_csv.exists()) or src_csv.stat().st_size <= 0:
+                        cmd2 = [str(vpy), 'scripts/fetch_market_data.py', '--symbols', symbol, '--limit-expirations', str(limit_exp)]
+                        subprocess.run(cmd2, cwd=str(base), capture_output=True, text=True, timeout=60)
+            except Exception:
+                pass
+        except Exception:
+            continue
+
+        try:
+            out = (base / 'output').resolve()
+            src_raw = out / 'raw' / f"{symbol}_required_data.json"
+            src_csv = out / 'parsed' / f"{symbol}_required_data.csv"
+            if src_raw.exists() and src_raw.stat().st_size > 0:
+                (shared_required / 'raw' / src_raw.name).write_bytes(src_raw.read_bytes())
+            if src_csv.exists() and src_csv.stat().st_size > 0:
+                (shared_required / 'parsed' / src_csv.name).write_bytes(src_csv.read_bytes())
+        except Exception:
+            pass
+
+def append_json_list(path: Path, payload: dict, max_entries: int = 200):
+    """Append payload into a bounded JSON list file. Keeps last max_entries records."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        arr = []
+        if path.exists() and path.stat().st_size > 0:
+            try:
+                obj = json.loads(path.read_text(encoding='utf-8'))
+                if isinstance(obj, list):
+                    arr = obj
+            except Exception:
+                arr = []
+        arr.append(payload)
+        if len(arr) > int(max_entries):
+            arr = arr[-int(max_entries):]
+        path.write_text(json.dumps(arr, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+    except Exception:
+        pass
+
 
 def parse_hhmm(value: str) -> time:
     hour, minute = value.split(':', 1)
     return time(hour=int(hour), minute=int(minute))
+
+
+def in_hk_session(now_utc: datetime) -> bool:
+    hk = ZoneInfo('Asia/Hong_Kong')
+    t = now_utc.astimezone(hk)
+    if t.weekday() >= 5:
+        return False
+    hm = t.hour * 60 + t.minute
+    # 09:30-12:00, 13:00-16:00 (HKT)
+    return (9 * 60 + 30) <= hm < (12 * 60) or (13 * 60) <= hm < (16 * 60)
+
+
+def in_us_session(now_utc: datetime) -> bool:
+    ny = ZoneInfo('America/New_York')
+    t = now_utc.astimezone(ny)
+    if t.weekday() >= 5:
+        return False
+    hm = t.hour * 60 + t.minute
+    # 09:30-16:00 (NY)
+    return (9 * 60 + 30) <= hm < (16 * 60)
 
 
 def maybe_parse_dt(value: str | None) -> datetime | None:
@@ -469,12 +608,29 @@ def build_merged_message(
     return '\n'.join(lines).strip() + '\n'
 
 
+def _tcp_open(host: str, port: int, timeout_sec: float = 1.0) -> bool:
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout_sec):
+            return True
+    except Exception:
+        return False
+
+
 def main():
     ap = argparse.ArgumentParser(description='Multi-account tick with merged notification')
     ap.add_argument('--config', default='config.json')
     ap.add_argument('--accounts', nargs='+', required=True)
     ap.add_argument('--default-account', default='lx')
+    ap.add_argument('--market-config', default='auto', choices=['auto','hk','us','all'], help='Select symbols by market at config-load time (auto=by session).')
+    ap.add_argument('--no-send', action='store_true', help='Do not send messages (for smoke tests / debugging).')
+    ap.add_argument('--smoke', action='store_true', help='Smoke mode: run scheduler decisions but skip pipeline execution.')
+    ap.add_argument('--debug', action='store_true', help='Verbose logs to stdout (for manual debugging).')
     args = ap.parse_args()
+
+    DEBUG = bool(getattr(args, 'debug', False))
+
+    no_send = bool(getattr(args, 'no_send', False))
+    smoke = bool(getattr(args, 'smoke', False))
 
     base = Path(__file__).resolve().parents[1]
     vpy = base / '.venv' / 'bin' / 'python'
@@ -484,10 +640,57 @@ def main():
         cfg_path = (base / cfg_path).resolve()
     base_cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
 
+    market_cfg = str(getattr(args, 'market_config', 'auto') or 'auto').lower()
+    if market_cfg in ('hk','us'):
+        try:
+            base_cfg = dict(base_cfg)
+            syms = base_cfg.get('symbols') or []
+            base_cfg['symbols'] = [it for it in syms if isinstance(it, dict) and (it.get('market') == market_cfg.upper())]
+        except Exception:
+            pass
+    # auto/all: keep full config; later market-aware filtering still applies
+
     schedule_cfg = base_cfg.get('schedule', {}) or {}
     dense_notify_cooldown_min = int(schedule_cfg.get('notify_cooldown_dense_min', 30))
     sparse_after_beijing = parse_hhmm(schedule_cfg.get('sparse_after_beijing', '02:00'))
     bj_tz = ZoneInfo(schedule_cfg.get('beijing_timezone', 'Asia/Shanghai'))
+
+    # Preflight: fail fast if option source is configured as local OpenD but the port isn't listening.
+    # Otherwise the run can hang for minutes on repeated ECONNREFUSED.
+    try:
+        ports = set()
+        for sym in (base_cfg.get('symbols') or []):
+            fetch = (sym or {}).get('fetch') or {}
+            if str(fetch.get('source') or '').lower() == 'opend':
+                host = fetch.get('host') or '127.0.0.1'
+                port = fetch.get('port')
+                if port:
+                    ports.add((str(host), int(port)))
+        for host, port in sorted(ports):
+            if not _tcp_open(host, port, timeout_sec=1.0):
+                # Record a last_run marker in each account state dir for observability, then exit.
+                now = utc_now()
+                for acct in args.accounts:
+                    acct = str(acct).strip().lower()
+                    if not acct:
+                        continue
+                    try:
+                        state_dir = (base / 'output_accounts' / acct / 'state')
+                        state_dir.mkdir(parents=True, exist_ok=True)
+                        write_json(state_dir / 'last_run.json', {
+                            'last_run_utc': now,
+                            'sent': False,
+                            'reason': 'opend_unreachable',
+                            'detail': f"cannot connect to {host}:{port}",
+                        })
+                    except Exception:
+                        pass
+                raise SystemExit(f"[FATAL] OpenD unreachable at {host}:{port} (configured fetch.source=opend).")
+    except SystemExit:
+        raise
+    except Exception:
+        # best-effort: do not block execution if preflight fails unexpectedly
+        pass
 
     # Ensure output/accounts layout
     accounts_root = (base / 'output_accounts').resolve()
@@ -504,35 +707,153 @@ def main():
 
     results: list[AccountResult] = []
 
+    # Market-aware filtering (speed): only run symbols for the current market session.
+    now_utc = datetime.now(timezone.utc)
+    markets_to_run: list[str] = []
+    if in_hk_session(now_utc):
+        markets_to_run = ['HK']
+    elif in_us_session(now_utc):
+        markets_to_run = ['US']
+
+
+    # Shared scan artifacts (per-invocation) for cross-account reuse
+    shared_scan_dir = (base / 'output_shared' / 'scan_runs' / utc_now().replace(':','').replace('-','').split('.')[0]).resolve()
+    shared_scan_dir.mkdir(parents=True, exist_ok=True)
+    shared_scan_ready = False
+    prefetch_done = False
+    # shared required_data dir is per-tick (avoid stale reuse across runs)
+    shared_required = (base / 'output_shared' / 'required_data_runs' / shared_scan_dir.name).resolve()
+    tick_metrics_path = (base / 'output_shared' / 'state' / 'tick_metrics.json').resolve()
+    tick_metrics_history_path = (base / 'output_shared' / 'state' / 'tick_metrics_history.json').resolve()
+    tick_metrics = {
+        'as_of_utc': utc_now(),
+        'markets_to_run': markets_to_run,
+        'accounts': [],
+        'sent': False,
+        'reason': '',
+    }
+
     for acct in args.accounts:
         acct = str(acct).strip()
         if not acct:
             continue
 
         acct_out = accounts_root / acct
+        # Legacy cleanup: per-account scheduler_state.json is no longer authoritative. Rename once to avoid confusion.
+        try:
+            legacy = (acct_out / 'state' / 'scheduler_state.json').resolve()
+            legacy_dst = (acct_out / 'state' / 'scheduler_state.legacy.json').resolve()
+            if legacy.exists() and (not legacy_dst.exists()):
+                legacy_dst.parent.mkdir(parents=True, exist_ok=True)
+                legacy.rename(legacy_dst)
+        except Exception:
+            pass
+        acct_metrics = {
+            'account': acct,
+            'scheduler_ms': None,
+            'pipeline_ms': None,
+            'ran_scan': False,
+            'should_notify': False,
+            'meaningful': False,
+            'reason': '',
+        }
         ensure_account_output_dir(acct_out)
 
         # Switch ./output -> this account
         atomic_symlink(out_link, acct_out)
 
-        # Write per-account config override (portfolio.account)
+        # Write per-account config override (portfolio.account) + market-aware symbol filtering
         cfg = json.loads(json.dumps(base_cfg))
         cfg.setdefault('portfolio', {})
         cfg['portfolio']['account'] = acct
+
+        try:
+            syms = cfg.get('symbols') or []
+            if markets_to_run:
+                syms = [it for it in syms if isinstance(it, dict) and (it.get('market') in markets_to_run)]
+            cfg['symbols'] = syms
+        except Exception:
+            pass
         cfg_override = acct_out / 'state' / 'config.override.json'
         cfg_override.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 
-        state_path = acct_out / 'state' / 'scheduler_state.json'
+        # Unified scan timing: use ONE shared scheduler_state per market.
+        # Notify cooldown remains per-account (stored in last_notify_utc_by_account within the same shared file).
+        shared_state_dir = (base / 'output_shared' / 'state').resolve()
+        shared_state_dir.mkdir(parents=True, exist_ok=True)
+        if markets_to_run == ['HK']:
+            state_path = shared_state_dir / 'scheduler_state_hk.json'
+        elif markets_to_run == ['US']:
+            state_path = shared_state_dir / 'scheduler_state_us.json'
+        else:
+            state_path = shared_state_dir / 'scheduler_state.json'
+
+        # Ensure shared scheduler state exists (so ops/debug can inspect even before first scan/notify)
+        try:
+            if (not state_path.exists()) or state_path.stat().st_size <= 0:
+                write_json(state_path, {
+                    'last_scan_utc': None,
+                    'last_notify_utc': None,
+                    'last_notify_utc_by_account': {},
+                })
+        except Exception:
+            pass
+
+        # Migrate legacy per-account scheduler_state.json into shared state (one-time best-effort)
+        try:
+            st0 = read_json(state_path, {})
+            if isinstance(st0, dict) and (not st0.get('last_scan_utc')) and (not st0.get('last_notify_utc')):
+                legacy_candidates = []
+                for _acct in args.accounts:
+                    lp = (accounts_root / _acct / 'state' / 'scheduler_state.json').resolve()
+                    if lp.exists() and lp.stat().st_size > 0:
+                        try:
+                            obj = read_json(lp, {})
+                            if isinstance(obj, dict):
+                                legacy_candidates.append(obj)
+                        except Exception:
+                            pass
+
+                best_scan = None
+                best_notify = None
+                for obj in legacy_candidates:
+                    s = obj.get('last_scan_utc')
+                    n = obj.get('last_notify_utc')
+                    if s and ((best_scan is None) or (str(s) > str(best_scan))):
+                        best_scan = s
+                    if n and ((best_notify is None) or (str(n) > str(best_notify))):
+                        best_notify = n
+
+                if best_scan or best_notify:
+                    st0['last_scan_utc'] = best_scan
+                    st0['last_notify_utc'] = best_notify
+                    write_json(state_path, st0)
+        except Exception:
+            pass
         notif_path = acct_out / 'reports' / 'symbols_notification.txt'
 
         # 1) scheduler decision
+        # market-aware schedule: use schedule_hk during HK session, otherwise default schedule
+        sch_args = [str(vpy), 'scripts/scan_scheduler.py', '--config', str(cfg_override), '--state', str(state_path), '--jsonl', '--account', str(acct)]
+        try:
+            if markets_to_run == ['HK']:
+                sch_args.extend(['--schedule-key', 'schedule_hk'])
+        except Exception:
+            pass
+        t_sch0 = monotonic()
         sch = subprocess.run(
-            [str(vpy), 'scripts/scan_scheduler.py', '--config', str(cfg_override), '--state', str(state_path), '--jsonl'],
+            sch_args,
             cwd=str(base),
             capture_output=True,
             text=True,
         )
+        acct_metrics['scheduler_ms'] = int((monotonic() - t_sch0) * 1000)
         if sch.returncode != 0:
+            acct_metrics['ran_scan'] = False
+            acct_metrics['should_notify'] = False
+            acct_metrics['meaningful'] = False
+            acct_metrics['reason'] = f"scheduler error: {(sch.stderr or sch.stdout).strip()}"
+            tick_metrics['accounts'].append(acct_metrics)
             results.append(AccountResult(acct, False, False, False, f"scheduler error: {(sch.stderr or sch.stdout).strip()}", ''))
             continue
 
@@ -541,24 +862,66 @@ def main():
         should_notify = bool(decision.get('should_notify'))
         reason = str(decision.get('reason') or '')
 
+        if smoke:
+            should_run = False
+            reason = (str(reason) + ' | smoke_skip_pipeline').strip()
+        acct_metrics['should_notify'] = bool(should_notify)
+        acct_metrics['reason'] = str(reason)
+
         if not should_run:
+            acct_metrics['ran_scan'] = False
+            acct_metrics['meaningful'] = False
+            tick_metrics['accounts'].append(acct_metrics)
             results.append(AccountResult(acct, False, should_notify, False, reason, ''))
             continue
 
-        # 2) pipeline
-        pipe = subprocess.run([str(vpy), 'scripts/run_pipeline.py', '--config', str(cfg_override)], cwd=str(base))
+        # 2) pipeline (scheduled mode: faster, less output)
+        # If market-aware filtering leaves us with no symbols, skip early.
+        try:
+            if markets_to_run and (not (cfg.get('symbols') or [])):
+                results.append(AccountResult(acct, False, should_notify, False, reason + ' | 本时段无对应市场标的', ''))
+                continue
+        except Exception:
+            pass
+
+        # Shared scan reuse: first due account writes shared scan artifacts; subsequent due accounts reuse them
+        if (not prefetch_done):
+            try:
+                prefetch_required_data(vpy=vpy, base=base, cfg=cfg, shared_required=shared_required)
+            except Exception:
+                pass
+            prefetch_done = True
+
+        pipe_cmd = [str(vpy), 'scripts/run_pipeline.py', '--config', str(cfg_override), '--mode', 'scheduled', '--shared-required-data', str(shared_required), '--shared-scan-dir', str(shared_scan_dir)]
+        if shared_scan_ready:
+            pipe_cmd.append('--reuse-shared-scan')
+
+        t_pipe0 = monotonic()
+        pipe = subprocess.run(
+            pipe_cmd,
+            cwd=str(base),
+            capture_output=True,
+            text=True,
+        )
+        acct_metrics['pipeline_ms'] = int((monotonic() - t_pipe0) * 1000)
         if pipe.returncode != 0:
+            # Only print the tail for debugging (avoid noisy logs on success)
+            out = ((pipe.stdout or '') + '\n' + (pipe.stderr or '')).strip()
+            if out:
+                tail = '\n'.join(out.splitlines()[-60:])
+                print(f"[ERR] pipeline failed ({acct})\n{tail}")
+            acct_metrics['ran_scan'] = True
+            acct_metrics['meaningful'] = False
+            acct_metrics['reason'] = 'pipeline failed'
+            tick_metrics['accounts'].append(acct_metrics)
             results.append(AccountResult(acct, True, should_notify, False, 'pipeline failed', ''))
             continue
 
-        # Update scan timestamp so the scheduler interval works next tick.
-        # (scan_scheduler.py only updates last_scan_utc in --run-if-due mode, which we don't use here.)
+
+        shared_scan_ready = True
+        # Mark scanned (shared scan clock)
         try:
-            st = read_json(state_path, {'last_scan_utc': None, 'last_notify_utc': None})
-            if not isinstance(st, dict):
-                st = {'last_scan_utc': None, 'last_notify_utc': None}
-            st['last_scan_utc'] = utc_now()
-            write_json(state_path, st)
+            subprocess.run([str(vpy), 'scripts/scan_scheduler.py', '--config', str(cfg_override), '--state', str(state_path), '--mark-scanned'], cwd=str(base))
         except Exception:
             pass
 
@@ -596,12 +959,18 @@ def main():
         except Exception:
             pass
 
+        acct_metrics['ran_scan'] = True
+        acct_metrics['should_notify'] = bool(should_notify_effective)
+        acct_metrics['meaningful'] = bool(meaningful)
+        acct_metrics['reason'] = str(reason)
+        tick_metrics['accounts'].append(acct_metrics)
         results.append(AccountResult(acct, True, should_notify_effective, meaningful, reason, text))
 
     merged = build_merged_message(results, base_cfg=base_cfg, cash_accounts=['lx', 'sy'])
     if not merged:
         # Even if we didn't send, record that we ran.
         try:
+            # Shared marker under ./output (symlink points to last processed account).
             write_json(base / 'output' / 'state' / 'last_run.json', {
                 'last_run_utc': utc_now(),
                 'sent': False,
@@ -611,33 +980,71 @@ def main():
             })
         except Exception:
             pass
+
+        # Per-account marker for easier debugging.
+        try:
+            for r in results:
+                acct_out = accounts_root / r.account
+                write_json(acct_out / 'state' / 'last_run.json', {
+                    'last_run_utc': utc_now(),
+                    'sent': False,
+                    'reason': 'no_merged_notification',
+                    'account': r.account,
+                    'result': r.__dict__,
+                })
+        except Exception:
+            pass
+
+        try:
+            tick_metrics['sent'] = False
+            tick_metrics['reason'] = 'no_merged_notification'
+            write_json(tick_metrics_path, tick_metrics)
+            append_json_list(tick_metrics_history_path, tick_metrics)
+        except Exception:
+            pass
+
         return 0
+
+    no_send = bool(getattr(args, 'no_send', False))
 
     # Send ONCE
     channel = (base_cfg.get('notifications') or {}).get('channel') or 'feishu'
     target = (base_cfg.get('notifications') or {}).get('target')
-    if not target:
-        raise SystemExit('[CONFIG_ERROR] notifications.target is required')
 
-    send = subprocess.run(
-        ['openclaw', 'message', 'send', '--channel', str(channel), '--target', str(target), '--message', merged, '--json'],
-        cwd=str(base),
-        capture_output=True,
-        text=True,
-    )
-    if send.returncode != 0:
-        raise SystemExit(send.returncode)
+    if not no_send:
+        if not target:
+            raise SystemExit('[CONFIG_ERROR] notifications.target is required')
 
-    # Mark notified for accounts that were included
-    for r in results:
-        if r.should_notify and r.meaningful and r.notification_text.strip():
-            acct_out = accounts_root / r.account
-            state_path = acct_out / 'state' / 'scheduler_state.json'
-            cfg_override = acct_out / 'state' / 'config.override.json'
-            subprocess.run(
-                [str(vpy), 'scripts/scan_scheduler.py', '--config', str(cfg_override), '--state', str(state_path), '--mark-notified'],
-                cwd=str(base),
-            )
+        send = subprocess.run(
+            ['openclaw', 'message', 'send', '--channel', str(channel), '--target', str(target), '--message', merged, '--json'],
+            cwd=str(base),
+            capture_output=True,
+            text=True,
+        )
+        if send.returncode != 0:
+            raise SystemExit(send.returncode)
+    else:
+        # Smoke/debug: do not send and do not mark notified
+        target = None
+
+    # Mark notified ONCE (global cooldown, unified across accounts)
+    if not no_send:
+        try:
+            if results:
+                acct0 = results[0].account
+                acct_out0 = accounts_root / acct0
+                cfg_override0 = acct_out0 / 'state' / 'config.override.json'
+                subprocess.run([str(vpy), 'scripts/scan_scheduler.py', '--config', str(cfg_override0), '--state', str(state_path), '--mark-notified'], cwd=str(base))
+        except Exception:
+            pass
+
+    try:
+        tick_metrics['sent'] = (not no_send)
+        tick_metrics['reason'] = ('sent' if (not no_send) else 'no_send')
+        write_json(tick_metrics_path, tick_metrics)
+        append_json_list(tick_metrics_history_path, tick_metrics)
+    except Exception:
+        pass
 
     # Write shared last_run.json (for cron observability)
     try:

@@ -6,6 +6,7 @@ import json
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -17,13 +18,28 @@ def run(cmd: list[str], cwd: Path, timeout_sec: int | None = None):
     """Run a subprocess with optional timeout.
 
     Timeout is important for unattended cron usage: a single hanging symbol must not block the whole pipeline.
+
+    Scheduled mode policy:
+    - capture stdout/stderr to reduce log I/O
+    - only print tail on failure
     """
-    print(f"[RUN] {' '.join(cmd)}" + (f" (timeout={timeout_sec}s)" if timeout_sec else ""))
+    if not IS_SCHEDULED:
+        print(f"[RUN] {' '.join(cmd)}" + (f" (timeout={timeout_sec}s)" if timeout_sec else ""))
+
     try:
-        result = subprocess.run(cmd, cwd=str(cwd), timeout=timeout_sec)
+        if IS_SCHEDULED:
+            result = subprocess.run(cmd, cwd=str(cwd), timeout=timeout_sec, capture_output=True, text=True)
+        else:
+            result = subprocess.run(cmd, cwd=str(cwd), timeout=timeout_sec)
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"timeout after {timeout_sec}s: {' '.join(cmd)}")
+
     if result.returncode != 0:
+        if IS_SCHEDULED:
+            out = ((result.stdout or '') + '\n' + (result.stderr or '')).strip()
+            if out:
+                tail = '\n'.join(out.splitlines()[-60:])
+                print(f"[ERR] {' '.join(cmd)}\n{tail}")
         raise SystemExit(result.returncode)
 
 
@@ -42,6 +58,35 @@ def copy_if_exists(src: Path, dst: Path):
         shutil.copyfile(src, dst)
     else:
         pd.DataFrame().to_csv(dst, index=False)
+
+
+def is_fresh(path: Path, max_age_sec: int) -> bool:
+    try:
+        if not path.exists() or path.stat().st_size <= 0:
+            return False
+        age = time.time() - path.stat().st_mtime
+        return age <= float(max_age_sec)
+    except Exception:
+        return False
+
+
+def load_cached_json(path: Path) -> dict | None:
+    """Best-effort cached JSON loader.
+
+    Returns None if file is missing/invalid/clearly incomplete.
+    """
+    try:
+        if not path.exists() or path.stat().st_size <= 2:
+            return None
+        obj = json.loads(path.read_text(encoding='utf-8'))
+        if not isinstance(obj, dict):
+            return None
+        # sanity keys
+        if 'as_of_utc' not in obj and 'filters' not in obj:
+            return None
+        return obj
+    except Exception:
+        return None
 
 
 def add_sell_put_labels(base: Path, input_path: Path, output_path: Path):
@@ -255,6 +300,126 @@ def summarize_sell_call(df: pd.DataFrame, symbol: str) -> dict:
     return row
 
 
+
+
+
+
+
+
+def copy_from_shared_required_data(base: Path, symbol: str, shared_dir: Path) -> bool:
+    sym = str(symbol)
+    raw_src = shared_dir / 'raw' / f"{sym}_required_data.json"
+    parsed_src = shared_dir / 'parsed' / f"{sym}_required_data.csv"
+    raw_dst = (base / 'output' / 'raw' / f"{sym}_required_data.json").resolve()
+    parsed_dst = (base / 'output' / 'parsed' / f"{sym}_required_data.csv").resolve()
+    if not (raw_src.exists() and raw_src.stat().st_size > 0 and parsed_src.exists() and parsed_src.stat().st_size > 0):
+        return False
+    raw_dst.parent.mkdir(parents=True, exist_ok=True)
+    parsed_dst.parent.mkdir(parents=True, exist_ok=True)
+    import shutil
+    shutil.copyfile(raw_src, raw_dst)
+    shutil.copyfile(parsed_src, parsed_dst)
+    return True
+
+def _shared_scan_paths_put(shared_dir: Path, symbol: str) -> tuple[Path, Path]:
+    # Return (raw_candidates, labeled_base_candidates) paths under shared_dir.
+    sym = str(symbol)
+    report_dir = (shared_dir / 'reports').resolve()
+    report_dir.mkdir(parents=True, exist_ok=True)
+    lower = sym.lower()
+    raw = report_dir / f"{lower}_sell_put_candidates.csv"
+    labeled_base = report_dir / f"{lower}_sell_put_candidates_labeled_base.csv"
+    return raw, labeled_base
+
+
+
+def _shared_scan_paths_call(shared_dir: Path, symbol: str) -> tuple[Path, Path]:
+    sym = str(symbol)
+    report_dir = (shared_dir / 'reports').resolve()
+    report_dir.mkdir(parents=True, exist_ok=True)
+    lower = sym.lower()
+    raw = report_dir / f"{lower}_sell_call_candidates.csv"
+    labeled_base = report_dir / f"{lower}_sell_call_candidates_labeled_base.csv"
+    return raw, labeled_base
+
+
+def _copy_if_exists(src: Path, dst: Path) -> bool:
+    try:
+        if src.exists() and src.stat().st_size > 0:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            import shutil
+            shutil.copyfile(src, dst)
+            return True
+    except Exception:
+        return False
+    return False
+
+def derive_put_max_strike_from_cash(symbol: str, portfolio_ctx: dict | None, fx_usd_per_cny: float | None, hkdcny: float | None, *, fallback_multiplier: int = 100) -> float | None:
+    """Return a cash-based max_strike cap to prefilter sell_put.
+
+    Preferred cash source (native currency):
+    - cash_by_currency[USD/HKD] from holdings
+    - minus option_ctx.cash_secured_total_by_ccy[USD/HKD] (short puts already occupying cash)
+
+    strike_cap ~= free_cash_native / multiplier
+
+    Multiplier source: output_shared/state/multiplier_cache.json (best-effort), else fallback 100.
+    """
+    if not portfolio_ctx:
+        return None
+
+    sym_u = str(symbol).strip().upper()
+    want_ccy = 'HKD' if sym_u.endswith('.HK') else 'USD'
+
+    # 1) cash available in native currency (from holdings)
+    cash_native = None
+    try:
+        cash_by = portfolio_ctx.get('cash_by_currency') or {}
+        if isinstance(cash_by, dict):
+            v = cash_by.get(want_ccy)
+            cash_native = float(v) if v is not None else None
+    except Exception:
+        cash_native = None
+
+    if cash_native is None:
+        return None
+
+    # 2) subtract cash-secured used in native currency (from option_ctx)
+    used_native = 0.0
+    try:
+        option_ctx = portfolio_ctx.get('option_ctx') if isinstance(portfolio_ctx, dict) else None
+        if isinstance(option_ctx, dict):
+            tot_by_ccy = option_ctx.get('cash_secured_total_by_ccy') or {}
+            if isinstance(tot_by_ccy, dict):
+                used_native = float(tot_by_ccy.get(want_ccy) or 0.0)
+    except Exception:
+        used_native = 0.0
+
+    free_native = float(cash_native) - float(used_native)
+    if free_native <= 0:
+        return 0.0
+
+    # 3) multiplier from cache
+    mult = None
+    try:
+        from scripts import multiplier_cache
+        repo_base = Path(__file__).resolve().parents[1]
+        cache = multiplier_cache.load_cache(multiplier_cache.default_cache_path(repo_base))
+        mult = multiplier_cache.get_cached_multiplier(cache, sym_u)
+    except Exception:
+        mult = None
+
+    if not mult or mult <= 0:
+        mult = int(fallback_multiplier) if fallback_multiplier and fallback_multiplier > 0 else 100
+
+    return free_native / float(mult)
+
+    # default: USD
+    if not fx_usd_per_cny or fx_usd_per_cny <= 0:
+        return None
+    free_native = float(free_cny) * float(fx_usd_per_cny)
+    return free_native / float(m)
+
 def process_symbol(
     py: str,
     base: Path,
@@ -262,6 +427,7 @@ def process_symbol(
     top_n: int,
     portfolio_ctx: dict | None = None,
     fx_usd_per_cny: float | None = None,
+    hkdcny: float | None = None,
     timeout_sec: int | None = 120,
 ) -> list[dict]:
     symbol = symbol_cfg['symbol']
@@ -270,14 +436,169 @@ def process_symbol(
     report_dir = base / 'output' / 'reports'
     summary_rows: list[dict] = []
 
-    run([
-        py, 'scripts/fetch_market_data.py',
-        '--symbols', symbol,
-        '--limit-expirations', str(limit_expirations),
-    ], cwd=base, timeout_sec=timeout_sec)
 
-    sp = symbol_cfg.get('sell_put', {})
-    if sp.get('enabled', False):
+    sp = symbol_cfg.get('sell_put', {}) or {}
+    cc = symbol_cfg.get('sell_call', {}) or {}
+    want_put = bool(sp.get('enabled', False))
+    want_call = bool(cc.get('enabled', False))
+
+    # Pre-filter (call): if this account has no holdings row for the symbol, skip sell_call fully.
+    stock = None
+    if want_call and portfolio_ctx:
+        try:
+            stock = (portfolio_ctx.get('stocks_by_symbol') or {}).get(symbol)
+        except Exception:
+            stock = None
+        if not stock:
+            want_call = False
+
+    # Pre-filter (put): derive a cash-based max_strike cap to reduce chain size.
+    if want_put:
+        try:
+            cash_cap = derive_put_max_strike_from_cash(symbol, portfolio_ctx, fx_usd_per_cny, hkdcny)
+            if cash_cap and cash_cap > 0:
+                if sp.get('max_strike') is None or float(sp.get('max_strike')) > float(cash_cap):
+                    sp = dict(sp)
+                    sp['max_strike'] = float(cash_cap)
+            if sp.get('max_strike') is not None and float(sp.get('max_strike')) <= 0:
+                want_put = False
+        except Exception:
+            pass
+
+
+    # Multiplier static cache (best-effort): fill missing/invalid multiplier in required_data.csv
+    def _apply_multiplier_cache_to_required_data_csv(symbol: str) -> None:
+        try:
+            from scripts import multiplier_cache
+
+            cache_path = multiplier_cache.default_cache_path(base)
+            cache = multiplier_cache.load_cache(cache_path)
+            m = multiplier_cache.get_cached_multiplier(cache, symbol)
+            if not m:
+                return
+
+            parsed = (base / 'output' / 'parsed' / f"{symbol}_required_data.csv").resolve()
+            if not parsed.exists() or parsed.stat().st_size <= 0:
+                return
+
+            df = pd.read_csv(parsed)
+            if df.empty:
+                return
+
+            if 'multiplier' not in df.columns:
+                df['multiplier'] = float(m)
+            else:
+                try:
+                    mm = pd.to_numeric(df['multiplier'], errors='coerce')
+                    bad = mm.isna() | (mm <= 0)
+                    if bad.any():
+                        df.loc[bad, 'multiplier'] = float(m)
+                except Exception:
+                    df['multiplier'] = float(m)
+
+            df.to_csv(parsed, index=False)
+        except Exception:
+            return
+
+    # Shared required_data reuse (cross-account): copy into this account output and skip fetch
+    fetched = False
+    if SHARED_REQUIRED_DATA:
+        try:
+            shared_dir = Path(SHARED_REQUIRED_DATA).resolve()
+            fetched = copy_from_shared_required_data(base, symbol, shared_dir)
+        except Exception:
+            fetched = False
+
+    # ===== Fetch market data =====
+    if not fetched:
+        # Default: Yahoo (US)
+        # Optional: OpenD (HK/US) when fetch.source == 'opend'
+        fetch_cfg = symbol_cfg.get('fetch', {}) or {}
+        fetch_source = str(fetch_cfg.get('source') or 'yahoo').strip().lower()
+        if fetch_source == 'opend':
+            host = str(fetch_cfg.get('host') or '127.0.0.1')
+            port = int(fetch_cfg.get('port') or 11111)
+            cmd = [
+                py, 'scripts/fetch_market_data_opend.py',
+                '--symbols', symbol,
+                '--limit-expirations', str(limit_expirations),
+                '--host', host,
+                '--port', str(port),
+                '--option-types', ('put,call' if (want_put and want_call) else ('put' if want_put else 'call')),
+            ]
+            # If OpenD has no US stock quote right, we can still compute OTM% using portfolio-management prices.
+            if bool(fetch_cfg.get('spot_from_portfolio_management', False)):
+                cmd.append('--spot-from-pm')
+            # Put cash prefilter: shrink chain by passing max-strike into OpenD fetch
+            try:
+                if want_put and sp.get('max_strike') is not None:
+                    cmd.extend(['--max-strike', str(sp.get('max_strike'))])
+            except Exception:
+                pass
+            if IS_SCHEDULED:
+                # Quiet mode for fetch_market_data_opend.py
+                cmd.append('--quiet')
+            run(cmd, cwd=base, timeout_sec=timeout_sec)
+            _apply_multiplier_cache_to_required_data_csv(symbol)
+
+            # fallback to yahoo (US) if OpenD returned empty data or transient error
+            try:
+                is_us = (not str(symbol).upper().endswith('.HK'))
+                parsed = (base / 'output' / 'parsed' / f"{symbol}_required_data.csv").resolve()
+                raw = (base / 'output' / 'raw' / f"{symbol}_required_data.json").resolve()
+
+                err_s = ''
+                try:
+                    if raw.exists() and raw.stat().st_size > 0:
+                        obj = json.loads(raw.read_text(encoding='utf-8'))
+                        meta = (obj.get('meta') or {}) if isinstance(obj, dict) else {}
+                        err_s = str(meta.get('error') or '')
+                except Exception:
+                    err_s = ''
+
+                empty = True
+                try:
+                    if parsed.exists() and parsed.stat().st_size > 0:
+                        df0 = pd.read_csv(parsed)
+                        empty = bool(df0.empty)
+                except Exception:
+                    empty = True
+
+                transient = any(k in err_s.lower() for k in [
+                    'rate', '频率', 'too frequent',
+                    'timeout', 'timed out',
+                    'econn', 'refused',
+                    'disconnect', 'callclose',
+                ])
+
+                if is_us and (empty or transient):
+                    run([
+                        py, 'scripts/fetch_market_data.py',
+                        '--symbols', symbol,
+                        '--limit-expirations', str(limit_expirations),
+                    ], cwd=base, timeout_sec=timeout_sec)
+                    _apply_multiplier_cache_to_required_data_csv(symbol)
+            except Exception:
+                pass
+        else:
+            run([
+                py, 'scripts/fetch_market_data.py',
+                '--symbols', symbol,
+                '--limit-expirations', str(limit_expirations),
+            ], cwd=base, timeout_sec=timeout_sec)
+            _apply_multiplier_cache_to_required_data_csv(symbol)
+
+    if want_put:
+        # If required_data.csv is empty (rate limit / data source failure), skip scans gracefully.
+        try:
+            parsed = base / 'output' / 'parsed' / f"{symbol}_required_data.csv"
+            df_req0 = safe_read_csv(parsed)
+            if df_req0.empty:
+                log(f"[WARN] {symbol} required_data empty; skip sell_put scan")
+                summary_rows.append(summarize_sell_put(pd.DataFrame(), symbol))
+                return summary_rows
+        except Exception:
+            pass
         # Auto data-quality policy (reduce config complexity):
         # If delta gating is enabled but quotes are mostly empty (Yahoo bid/ask=0),
         # do NOT hard-fail the symbol. Instead, degrade gracefully:
@@ -313,52 +634,90 @@ def process_symbol(
                         sp['min_volume'] = 0
         except Exception:
             pass
-        cmd = [
-            py, 'scripts/scan_sell_put.py',
-            '--symbols', symbol,
-            '--min-dte', str(sp.get('min_dte', 20)),
-            '--max-dte', str(sp.get('max_dte', 90)),
-            '--min-otm-pct', str(sp.get('min_otm_pct', 0.0)),
-            '--min-annualized-net-return', str(sp.get('min_annualized_net_return', 0.03)),
-            # NOTE: config min_net_income is normalized to base CNY.
-            # scan_sell_put.py computes net_income in USD for US options,
-            # so we convert CNY->USD using fx_usd_per_cny (USD per 1 CNY).
-            '--min-net-income', str(
-                0.0 if (sp.get('min_net_income') not in (None, '') and float(sp.get('min_net_income') or 0) > 0 and not fx_usd_per_cny)
-                else (float(sp.get('min_net_income') or 0.0) * float(fx_usd_per_cny)) if fx_usd_per_cny else float(sp.get('min_net_income') or 0.0)
-            ),
-            '--min-open-interest', str(sp.get('min_open_interest', 100)),
-            '--min-volume', str(sp.get('min_volume', 10)),
-            '--max-spread-ratio', str(sp.get('max_spread_ratio', 0.30)),
-        ]
-        # Data quality gates (optional)
-        if sp.get('require_bid_ask'):
-            cmd.append('--require-bid-ask')
-        if sp.get('min_iv') is not None:
-            cmd.extend(['--min-iv', str(sp.get('min_iv'))])
-        if sp.get('max_iv') is not None:
-            cmd.extend(['--max-iv', str(sp.get('max_iv'))])
+        # Shared scan reuse (sell_put): reuse base candidates across accounts within the same tick
+        shared_dir = Path(SHARED_SCAN_DIR).resolve() if SHARED_SCAN_DIR else None
+        reuse_ok = False
+        if REUSE_SHARED_SCAN and shared_dir:
+            try:
+                sp_raw_shared, sp_lab_shared = _shared_scan_paths_put(shared_dir, symbol)
+                sp_raw_dst = report_dir / f"{symbol_lower}_sell_put_candidates.csv"
+                sp_lab_dst = report_dir / f"{symbol_lower}_sell_put_candidates_labeled.csv"
+                ok1 = _copy_if_exists(sp_raw_shared, sp_raw_dst)
+                ok2 = _copy_if_exists(sp_lab_shared, sp_lab_dst)
+                reuse_ok = bool(ok1 and ok2)
+            except Exception:
+                reuse_ok = False
 
-        # Delta filter (optional): abs(delta) in [min_abs_delta, max_abs_delta]
-        if sp.get('min_abs_delta') is not None:
-            cmd.extend(['--min-abs-delta', str(sp.get('min_abs_delta'))])
-        if sp.get('max_abs_delta') is not None:
-            cmd.extend(['--max-abs-delta', str(sp.get('max_abs_delta'))])
+        if not reuse_ok:
+            cmd = [
+                py, 'scripts/scan_sell_put.py',
+                '--symbols', symbol,
+                '--min-dte', str(sp.get('min_dte', 20)),
+                '--max-dte', str(sp.get('max_dte', 90)),
+                '--min-otm-pct', str(sp.get('min_otm_pct', 0.0)),
+                '--min-annualized-net-return', str(sp.get('min_annualized_net_return', 0.03)),
+                # NOTE: config min_net_income is normalized to base CNY.
+                # scan_sell_put.py now computes net_income in the option's native currency.
+                # We convert the CNY threshold into the option currency using FX when possible.
+                '--min-net-income', str(
+                    # Config threshold is in base CNY; scanners run in option's native currency.
+                    # USD: CNY->USD using fx_usd_per_cny (USD per 1 CNY)
+                    # HKD: CNY->HKD using HKDCNY (CNY per 1 HKD)
+                    (0.0 if float(sp.get('min_net_income') or 0.0) <= 0 else (
+                        (float(sp.get('min_net_income') or 0.0) * float(fx_usd_per_cny))
+                        if (not str(symbol).upper().endswith('.HK')) and fx_usd_per_cny
+                        else (
+                            (float(sp.get('min_net_income') or 0.0) / float(hkdcny))
+                            if (str(symbol).upper().endswith('.HK') and hkdcny)
+                            else 0.0
+                        )
+                    ))
+                ),
+                '--min-open-interest', str(sp.get('min_open_interest', 100)),
+                '--min-volume', str(sp.get('min_volume', 10)),
+                '--max-spread-ratio', str(sp.get('max_spread_ratio', 0.30)),
+            ]
+            # Data quality gates (optional)
+            if sp.get('require_bid_ask'):
+                cmd.append('--require-bid-ask')
+            if sp.get('min_iv') is not None:
+                cmd.extend(['--min-iv', str(sp.get('min_iv'))])
+            if sp.get('max_iv') is not None:
+                cmd.extend(['--max-iv', str(sp.get('max_iv'))])
 
-        if sp.get('min_strike') is not None:
-            cmd.extend(['--min-strike', str(sp.get('min_strike'))])
-        if sp.get('max_strike') is not None:
-            cmd.extend(['--max-strike', str(sp.get('max_strike'))])
-        run(cmd, cwd=base, timeout_sec=timeout_sec)
+            # Delta filter (optional): abs(delta) in [min_abs_delta, max_abs_delta]
+            if sp.get('min_abs_delta') is not None:
+                cmd.extend(['--min-abs-delta', str(sp.get('min_abs_delta'))])
+            if sp.get('max_abs_delta') is not None:
+                cmd.extend(['--max-abs-delta', str(sp.get('max_abs_delta'))])
 
-        shared_sp = report_dir / 'sell_put_candidates.csv'
-        symbol_sp = report_dir / f'{symbol_lower}_sell_put_candidates.csv'
-        copy_if_exists(shared_sp, symbol_sp)
+            if sp.get('min_strike') is not None:
+                cmd.extend(['--min-strike', str(sp.get('min_strike'))])
+            if sp.get('max_strike') is not None:
+                cmd.extend(['--max-strike', str(sp.get('max_strike'))])
+            if IS_SCHEDULED:
+                cmd.append('--quiet')
+            run(cmd, cwd=base, timeout_sec=timeout_sec)
 
-        shared_sp_labeled = report_dir / 'sell_put_candidates_labeled.csv'
-        symbol_sp_labeled = report_dir / f'{symbol_lower}_sell_put_candidates_labeled.csv'
-        add_sell_put_labels(base, symbol_sp, shared_sp_labeled)
-        copy_if_exists(shared_sp_labeled, symbol_sp_labeled)
+            shared_sp = report_dir / 'sell_put_candidates.csv'
+            symbol_sp = report_dir / f'{symbol_lower}_sell_put_candidates.csv'
+            copy_if_exists(shared_sp, symbol_sp)
+
+            shared_sp_labeled = report_dir / 'sell_put_candidates_labeled.csv'
+            symbol_sp_labeled = report_dir / f'{symbol_lower}_sell_put_candidates_labeled.csv'
+            add_sell_put_labels(base, symbol_sp, shared_sp_labeled)
+            copy_if_exists(shared_sp_labeled, symbol_sp_labeled)
+
+
+        # Persist base sell_put scan artifacts for cross-account reuse (same tick)
+        try:
+            if SHARED_SCAN_DIR and (not REUSE_SHARED_SCAN):
+                shared_dir = Path(SHARED_SCAN_DIR).resolve()
+                sp_raw_shared, sp_lab_shared = _shared_scan_paths_put(shared_dir, symbol)
+                _copy_if_exists(symbol_sp, sp_raw_shared)
+                _copy_if_exists(symbol_sp_labeled, sp_lab_shared)
+        except Exception:
+            pass
 
         # account-aware: attach cash secured usage from option_positions (open short puts)
         df_sp_lab = safe_read_csv(symbol_sp_labeled)
@@ -370,6 +729,7 @@ def process_symbol(
             used_symbol_usd = 0.0
             used_total_usd = 0.0
             used_total_cny = None
+            used_symbol_cny = None
 
             if option_ctx:
                 try:
@@ -378,8 +738,16 @@ def process_symbol(
                     if isinstance(by_sym_ccy, dict) and (by_sym_ccy or tot_by_ccy):
                         used_symbol_usd = float(((by_sym_ccy.get(symbol) or {}).get('USD')) or 0.0)
                         used_total_usd = float((tot_by_ccy.get('USD')) or 0.0)
+                        # Prefer the context-provided CNY-normalized totals.
                         v = option_ctx.get('cash_secured_total_cny')
                         used_total_cny = float(v) if v is not None else None
+                        # Best-effort: symbol-level CNY is not always provided; if absent we'll keep None.
+                        vs = None
+                        try:
+                            vs = (option_ctx.get('cash_secured_by_symbol_cny') or {}).get(symbol)
+                        except Exception:
+                            vs = None
+                        used_symbol_cny = float(vs) if vs is not None else None
                     else:
                         used_map = (option_ctx.get('cash_secured_by_symbol') or {})
                         used_symbol_usd = float(used_map.get(symbol) or 0.0)
@@ -388,6 +756,7 @@ def process_symbol(
                     used_symbol_usd = 0.0
                     used_total_usd = 0.0
                     used_total_cny = None
+                    used_symbol_cny = None
 
             cash_avail = None
             cash_avail_est = None  # USD equivalent (from base CNY)
@@ -421,11 +790,23 @@ def process_symbol(
                 cash_avail = None
                 cash_avail_est = None
 
-            # Account-level cash usage: all open short puts (USD bucket for USD-based reporting)
+            # Account-level cash usage.
+            # Keep legacy USD columns, but also provide CNY-normalized view for display.
             df_sp_lab['cash_secured_used_usd_total'] = used_total_usd
             df_sp_lab['cash_secured_used_usd_symbol'] = used_symbol_usd
-            # Backward-compatible: treat cash_secured_used_usd as account-level used
             df_sp_lab['cash_secured_used_usd'] = used_total_usd
+
+            # CNY-normalized totals (preferred for unified display)
+            if used_total_cny is not None:
+                df_sp_lab['cash_secured_used_cny_total'] = float(used_total_cny)
+            else:
+                df_sp_lab['cash_secured_used_cny_total'] = pd.NA
+            if used_symbol_cny is not None:
+                df_sp_lab['cash_secured_used_cny_symbol'] = float(used_symbol_cny)
+            else:
+                df_sp_lab['cash_secured_used_cny_symbol'] = pd.NA
+            # Backward-compatible alias
+            df_sp_lab['cash_secured_used_cny'] = df_sp_lab['cash_secured_used_cny_total']
 
             # If we have true USD cash from holdings, use it; else use USD equivalent derived from base CNY.
             if cash_avail is not None:
@@ -446,107 +827,160 @@ def process_symbol(
             df_sp_lab['cash_available_cny'] = (cash_avail_cny if cash_avail_cny is not None else pd.NA)
             df_sp_lab['cash_free_cny'] = (cash_free_cny if cash_free_cny is not None else pd.NA)
 
-            # candidate cash requirement per 1 contract (100 shares)
+            # ===== Cash requirement =====
+            # Old columns are named *_usd for historical reasons. We keep them for compatibility,
+            # but going forward we want everything normalized into CNY for display/risk.
             try:
-                df_sp_lab['cash_required_usd'] = df_sp_lab['strike'].astype(float) * 100.0
+                # per-contract multiplier (preferred from data source; fallback 100)
+                if 'multiplier' in df_sp_lab.columns:
+                    m = df_sp_lab['multiplier'].fillna(100.0).astype(float)
+                else:
+                    m = 100.0
+
+                # native requirement in option currency: strike * multiplier
+                native_req = df_sp_lab['strike'].astype(float) * m
+
+                # keep legacy USD column (only meaningful for USD options; for HKD it's just the native amount)
+                df_sp_lab['cash_required_usd'] = native_req
+
+                # normalize to CNY using FX
+                ccy = None
+                if 'currency' in df_sp_lab.columns and len(df_sp_lab) > 0:
+                    ccy = str(df_sp_lab['currency'].iloc[0] or '').upper()
+
+                if ccy == 'HKD':
+                    # HKDCNY is CNY per 1 HKD
+                    try:
+                        # Load from shared cache path (same as fx_rates.py uses)
+                        import json as _json
+                        from pathlib import Path as _Path
+                        rate_cache = (base / 'output/state/rate_cache.json').resolve()
+                        workspace = _Path(__file__).resolve().parents[2]
+                        shared_path = workspace / 'portfolio-management' / '.data' / 'rate_cache.json'
+                        # minimal inline: prefer existing cache file
+                        rates = None
+                        for p in [rate_cache, shared_path]:
+                            if p.exists() and p.stat().st_size > 0:
+                                d = _json.loads(p.read_text(encoding='utf-8'))
+                                rates = (d.get('rates') or {})
+                                break
+                        hkdcny = float(rates.get('HKDCNY')) if rates and rates.get('HKDCNY') else None
+                    except Exception:
+                        hkdcny = None
+                    if hkdcny:
+                        df_sp_lab['cash_required_cny'] = native_req.astype(float) * float(hkdcny)
+                    else:
+                        df_sp_lab['cash_required_cny'] = pd.NA
+                else:
+                    # USD -> CNY using USDCNY derived from fx_usd_per_cny
+                    if fx_usd_per_cny:
+                        usdcny = 1.0 / float(fx_usd_per_cny)
+                        df_sp_lab['cash_required_cny'] = native_req.astype(float) * float(usdcny)
+                    else:
+                        df_sp_lab['cash_required_cny'] = pd.NA
             except Exception:
                 df_sp_lab['cash_required_usd'] = pd.NA
-
-            # candidate cash requirement in base currency (CNY)
-            if fx_usd_per_cny:
-                usdcny = 1.0 / float(fx_usd_per_cny)
-                try:
-                    df_sp_lab['cash_required_cny'] = df_sp_lab['strike'].astype(float) * 100.0 * float(usdcny)
-                except Exception:
-                    df_sp_lab['cash_required_cny'] = pd.NA
-            else:
                 df_sp_lab['cash_required_cny'] = pd.NA
 
             df_sp_lab.to_csv(symbol_sp_labeled, index=False)
 
-        run([
-            py, 'scripts/render_sell_put_alerts.py',
-            '--input', f'output/reports/{symbol_lower}_sell_put_candidates_labeled.csv',
-            '--symbol', symbol,
-            '--top', str(top_n),
-            '--layered',
-            '--output', f'output/reports/{symbol_lower}_sell_put_alerts.txt',
-        ], cwd=base)
+        if not IS_SCHEDULED:
+            run([
+                py, 'scripts/render_sell_put_alerts.py',
+                '--input', f'output/reports/{symbol_lower}_sell_put_candidates_labeled.csv',
+                '--symbol', symbol,
+                '--top', str(top_n),
+                '--layered',
+                '--output', f'output/reports/{symbol_lower}_sell_put_alerts.txt',
+                ], cwd=base)
         summary_rows.append(summarize_sell_put(safe_read_csv(symbol_sp_labeled), symbol))
     else:
         summary_rows.append(summarize_sell_put(pd.DataFrame(), symbol))
 
-    cc = symbol_cfg.get('sell_call', {})
-    if cc.get('enabled', False):
+    if want_call:
         # allow overriding shares/avg_cost from portfolio context (holdings), so alerts become account-aware
         shares_override = None
         avg_cost_override = None
-        stock = None
-        if portfolio_ctx:
-            stock = (portfolio_ctx.get('stocks_by_symbol') or {}).get(symbol)
-            if stock:
-                shares_override = stock.get('shares')
-                avg_cost_override = stock.get('avg_cost')
+        if stock:
+            shares_override = stock.get('shares')
+            avg_cost_override = stock.get('avg_cost')
 
-            # NOTE: do NOT deduct locked shares when passing shares into scan_sell_call.
-            # The scan itself is just opportunity scanning; coverage is enforced/annotated after scan.
+        # NOTE: do NOT deduct locked shares when passing shares into scan_sell_call.
+        # The scan itself is just opportunity scanning; coverage is enforced/annotated after scan.
 
-        # Safety: if there is no holdings row for this symbol in this account, skip sell_call.
-        # This avoids recommending covered calls for accounts that do not hold the underlying.
-        if not stock:
-            summary_rows.append(summarize_sell_call(pd.DataFrame(), symbol))
-            return summary_rows
 
         shares_total = shares_override if shares_override is not None else cc.get('shares', 100)
         avg_cost = avg_cost_override if avg_cost_override is not None else cc['avg_cost']
 
-        cmd = [
-            py, 'scripts/scan_sell_call.py',
-            '--symbols', symbol,
-            '--avg-cost', str(avg_cost),
-            '--shares', str(shares_total),
-            '--min-dte', str(cc.get('min_dte', 20)),
-            '--max-dte', str(cc.get('max_dte', 90)),
-            '--min-annualized-net-return', str(cc.get('min_annualized_net_return', 0.03)),
-            '--min-if-exercised-total-return', str(cc.get('min_if_exercised_total_return', 0.0)),
-            '--min-open-interest', str(cc.get('min_open_interest', 100)),
-            '--min-volume', str(cc.get('min_volume', 10)),
-            '--max-spread-ratio', str(cc.get('max_spread_ratio', 0.30)),
-        ]
-        if cc.get('min_strike') is not None:
-            cmd.extend(['--min-strike', str(cc.get('min_strike'))])
-        if cc.get('max_strike') is not None:
-            cmd.extend(['--max-strike', str(cc.get('max_strike'))])
-        # Data quality gates (optional)
-        if cc.get('require_bid_ask'):
-            cmd.append('--require-bid-ask')
-        if cc.get('min_iv') is not None:
-            cmd.extend(['--min-iv', str(cc.get('min_iv'))])
-        if cc.get('max_iv') is not None:
-            cmd.extend(['--max-iv', str(cc.get('max_iv'))])
+        # Shared scan reuse (sell_call): reuse base candidates across accounts within the same tick
+        shared_dir = Path(SHARED_SCAN_DIR).resolve() if SHARED_SCAN_DIR else None
+        reuse_ok_call = False
+        if REUSE_SHARED_SCAN and shared_dir:
+            try:
+                cc_raw_shared, cc_lab_shared = _shared_scan_paths_call(shared_dir, symbol)
+                cc_raw_dst = report_dir / f"{symbol_lower}_sell_call_candidates.csv"
+                cc_lab_dst = report_dir / f"{symbol_lower}_sell_call_candidates_labeled.csv"
+                ok1 = _copy_if_exists(cc_raw_shared, cc_raw_dst)
+                ok2 = _copy_if_exists(cc_lab_shared, cc_lab_dst)
+                reuse_ok_call = bool(ok1 and ok2)
+            except Exception:
+                reuse_ok_call = False
 
-        # Delta filter (optional): call delta in [min_delta, max_delta]
-        if cc.get('min_delta') is not None:
-            cmd.extend(['--min-delta', str(cc.get('min_delta'))])
-        if cc.get('max_delta') is not None:
-            cmd.extend(['--max-delta', str(cc.get('max_delta'))])
-        run(cmd, cwd=base, timeout_sec=timeout_sec)
+        if not reuse_ok_call:
+            cmd = [
+                py, 'scripts/scan_sell_call.py',
+                '--symbols', symbol,
+                '--avg-cost', str(avg_cost),
+                '--shares', str(shares_total),
+                '--min-dte', str(cc.get('min_dte', 20)),
+                '--max-dte', str(cc.get('max_dte', 90)),
+                '--min-otm-pct', str(cc.get('min_otm_pct', 0.0)),
+                '--min-annualized-net-return', str(cc.get('min_annualized_net_return', 0.03)),
+                '--min-if-exercised-total-return', str(cc.get('min_if_exercised_total_return', 0.0)),
+                '--min-open-interest', str(cc.get('min_open_interest', 100)),
+                '--min-volume', str(cc.get('min_volume', 10)),
+                '--max-spread-ratio', str(cc.get('max_spread_ratio', 0.30)),
+            ]
+            if cc.get('min_strike') is not None:
+                cmd.extend(['--min-strike', str(cc.get('min_strike'))])
+            if cc.get('max_strike') is not None:
+                cmd.extend(['--max-strike', str(cc.get('max_strike'))])
+            # Data quality gates (optional)
+            if cc.get('require_bid_ask'):
+                cmd.append('--require-bid-ask')
+            if cc.get('min_iv') is not None:
+                cmd.extend(['--min-iv', str(cc.get('min_iv'))])
+            if cc.get('max_iv') is not None:
+                cmd.extend(['--max-iv', str(cc.get('max_iv'))])
 
-        shared_cc = report_dir / 'sell_call_candidates.csv'
-        symbol_cc = report_dir / f'{symbol_lower}_sell_call_candidates.csv'
-        copy_if_exists(shared_cc, symbol_cc)
+            # Delta filter (optional): call delta in [min_delta, max_delta]
+            if cc.get('min_delta') is not None:
+                cmd.extend(['--min-delta', str(cc.get('min_delta'))])
+            if cc.get('max_delta') is not None:
+                cmd.extend(['--max-delta', str(cc.get('max_delta'))])
+            run(cmd, cwd=base, timeout_sec=timeout_sec)
+
+            shared_cc = report_dir / 'sell_call_candidates.csv'
+            symbol_cc = report_dir / f'{symbol_lower}_sell_call_candidates.csv'
+            copy_if_exists(shared_cc, symbol_cc)
 
         df_cc = safe_read_csv(symbol_cc)
         # enrich candidates with holdings + option-locked shares (account-aware)
         if not df_cc.empty and portfolio_ctx:
-            stock = (portfolio_ctx.get('stocks_by_symbol') or {}).get(symbol)
             option_ctx = portfolio_ctx.get('option_ctx') if isinstance(portfolio_ctx, dict) else None
             locked = 0
             if option_ctx:
                 locked = int((option_ctx.get('locked_shares_by_symbol') or {}).get(symbol) or 0)
             shares_total_v = int((stock or {}).get('shares') or shares_total)
             shares_available = max(shares_total_v - locked, 0)
-            covered_contracts_available = shares_available // 100
+            # Covered-call capacity should follow contract multiplier (HK symbols may not be 100).
+            try:
+                m = int(float(df_cc.iloc[0].get('multiplier') or 0)) if not df_cc.empty else 100
+            except Exception:
+                m = 100
+            if m <= 0:
+                m = 100
+            covered_contracts_available = shares_available // m
 
             df_cc['shares_total'] = shares_total_v
             df_cc['shares_locked'] = locked
@@ -555,14 +989,15 @@ def process_symbol(
             df_cc['is_fully_covered_available'] = covered_contracts_available >= 1
             df_cc.to_csv(symbol_cc, index=False)
 
-        run([
-            py, 'scripts/render_sell_call_alerts.py',
-            '--input', f'output/reports/{symbol_lower}_sell_call_candidates.csv',
-            '--symbol', symbol,
-            '--top', str(top_n),
-            '--layered',
-            '--output', f'output/reports/{symbol_lower}_sell_call_alerts.txt',
-        ], cwd=base)
+        if not IS_SCHEDULED:
+            run([
+                py, 'scripts/render_sell_call_alerts.py',
+                '--input', f'output/reports/{symbol_lower}_sell_call_candidates.csv',
+                '--symbol', symbol,
+                '--top', str(top_n),
+                '--layered',
+                '--output', f'output/reports/{symbol_lower}_sell_call_alerts.txt',
+            ], cwd=base)
 
         summary_rows.append(summarize_sell_call(df_cc, symbol))
     else:
@@ -595,9 +1030,10 @@ def build_symbols_summary(base: Path, summary_rows: list[dict]):
                 f"Top {r['top_contract'] or '-'} | 年化 {annual} | 净收入 {income} | "
                 f"DTE {dte} | Strike {strike} | {r['risk_label'] or '-'} | {r['note']}"
             )
-    txt_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+    if not IS_SCHEDULED:
+        txt_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+        print(f"[DONE] symbols summary text -> {txt_path}")
     print(f"[DONE] symbols summary -> {csv_path}")
-    print(f"[DONE] symbols summary text -> {txt_path}")
 
 
 
@@ -671,13 +1107,91 @@ def apply_profiles(item: dict, profiles: dict | None) -> dict:
     return merged
 
 
+# Runtime mode flags (set in main())
+RUNTIME_MODE = 'dev'
+IS_SCHEDULED = False
+
+QUIET = bool(IS_SCHEDULED)
+
+def log(msg: str) -> None:
+    if not QUIET:
+        print(msg)
+
+SHARED_REQUIRED_DATA = None
+SHARED_SCAN_DIR = None
+REUSE_SHARED_SCAN = False
+
+
 def main():
+    global RUNTIME_MODE, IS_SCHEDULED
+
     parser = argparse.ArgumentParser(description='Run options-monitor pipeline')
     parser.add_argument('--config', required=True, help='Path to JSON config (single-symbol or watchlist). YAML is legacy.')
+    parser.add_argument('--mode', default='dev', choices=['dev', 'scheduled'], help='Runtime mode: dev (verbose) vs scheduled (fast)')
+    parser.add_argument('--symbols', default=None, help='Comma-separated symbol whitelist; only process these symbols')
+    parser.add_argument('--stage', default='all', choices=['fetch','scan','alert','notify','all'], help='Pipeline stage: fetch|scan|alert|notify|all (dev speed; runs up to this stage)')
+    parser.add_argument('--stage-only', default=None, choices=['alert','notify'], help='Run ONLY a late stage (no fetch/scan). Requires existing output files.')
+    parser.add_argument('--refresh-multiplier-cache', action='store_true', help='Refresh output_shared/state/multiplier_cache.json via OpenD before running (best-effort).')
+    parser.add_argument('--no-context', action='store_true', help='Skip portfolio/option_positions context fetch (dev speed). Useful when tuning filters only.')
+    parser.add_argument('--shared-required-data', default=None, help='Path to shared required_data directory (contains raw/ and parsed/). If set, will reuse/copy instead of fetching.')
+    parser.add_argument('--shared-scan-dir', default=None, help='Directory to store shared scan artifacts (sell_put base candidates) for reuse across accounts in the same tick.')
+    parser.add_argument('--reuse-shared-scan', action='store_true', help='Reuse shared scan artifacts when available (skip running sell_put scan).')
     args = parser.parse_args()
+
+    RUNTIME_MODE = str(args.mode)
+    IS_SCHEDULED = (RUNTIME_MODE == 'scheduled')
+    STAGE = str(args.stage)
+    STAGE_ONLY = (str(args.stage_only) if args.stage_only else None)
+
+    global SHARED_REQUIRED_DATA
+    SHARED_REQUIRED_DATA = (str(args.shared_required_data) if getattr(args, 'shared_required_data', None) else None)
+
+    global SHARED_SCAN_DIR, REUSE_SHARED_SCAN
+    SHARED_SCAN_DIR = (str(args.shared_scan_dir) if args.shared_scan_dir else None)
+    REUSE_SHARED_SCAN = bool(getattr(args, 'reuse_shared_scan', False))
+
+    def want(name: str) -> bool:
+        # stage-only mode: run ONLY the requested late stage
+        if STAGE_ONLY is not None:
+            return name == STAGE_ONLY
+        # normal mode: run up to STAGE
+        if STAGE == 'all':
+            return True
+        order = ['fetch', 'scan', 'alert', 'notify']
+        try:
+            return order.index(name) <= order.index(STAGE)
+        except Exception:
+            return True
+
+    def stage_only_changes_out() -> str:
+        # In dev iteration, stage-only should not mutate snapshot/change history.
+        # (Otherwise, formatting tests would pollute symbols_summary_prev.csv / changes.)
+        return '/dev/null'
+
 
     base = Path(__file__).resolve().parents[1]
     cfg_path = Path(args.config)
+
+    # Manual multiplier cache refresh (best-effort)
+    if bool(getattr(args, 'refresh_multiplier_cache', False)):
+        try:
+            from scripts import multiplier_cache
+            cache_path = multiplier_cache.default_cache_path(base)
+            cfg0 = json.loads(cfg_path.read_text(encoding='utf-8'))
+            syms = cfg0.get('watchlist') or cfg0.get('symbols') or []
+            syms = [it for it in syms if isinstance(it, dict) and str(((it.get('fetch') or {}).get('source') or '')).lower() == 'opend']
+            cache = multiplier_cache.load_cache(cache_path)
+            for it in syms:
+                sym = str(it.get('symbol') or '').strip().upper()
+                fetch = it.get('fetch') or {}
+                host = fetch.get('host') or '127.0.0.1'
+                port = int(fetch.get('port') or 11111)
+                r = multiplier_cache.refresh_via_opend(repo_base=base, symbol=sym, host=str(host), port=int(port), limit_expirations=1)
+                if r.ok and r.multiplier:
+                    cache[sym] = {'multiplier': int(r.multiplier), 'as_of_utc': multiplier_cache.utc_now(), 'source': 'opend'}
+            multiplier_cache.save_cache(cache_path, cache)
+        except Exception:
+            pass
     if not cfg_path.is_absolute():
         cfg_path = (base / cfg_path).resolve()
 
@@ -689,9 +1203,33 @@ def main():
             cfg = yaml.safe_load(f)
 
     # Validate config early (fail fast)
+    # - dev mode: always validate
+    # - scheduled mode: validate only when config content changes (hash cache)
     try:
         from scripts.validate_config import validate_config as _validate_config
-        _validate_config(cfg)
+
+        should_validate = True
+        if IS_SCHEDULED:
+            try:
+                import hashlib
+                import json as _json
+                state_dir = (base / 'output' / 'state').resolve()
+                state_dir.mkdir(parents=True, exist_ok=True)
+                cache_path = state_dir / 'config_validation_cache.json'
+                payload = _json.dumps(cfg, ensure_ascii=False, sort_keys=True)
+                h = hashlib.sha256(payload.encode('utf-8')).hexdigest()
+                prev = None
+                if cache_path.exists() and cache_path.stat().st_size > 0:
+                    prev = _json.loads(cache_path.read_text(encoding='utf-8')).get('sha256')
+                if prev == h:
+                    should_validate = False
+                else:
+                    cache_path.write_text(_json.dumps({'sha256': h}, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+            except Exception:
+                should_validate = True
+
+        if should_validate:
+            _validate_config(cfg)
     except SystemExit:
         raise
     except Exception:
@@ -709,94 +1247,198 @@ def main():
         cfg['watchlist'] = cfg.get('symbols')
 
     if 'watchlist' in cfg:
+        # Optional symbols whitelist (comma-separated)
+        sym_whitelist = None
+        if args.symbols:
+            sym_whitelist = {s.strip() for s in str(args.symbols).split(',') if s.strip()}
+
         top_n = cfg.get('outputs', {}).get('top_n_alerts', 3)
         runtime = cfg.get('runtime', {}) or {}
         symbol_timeout_sec = int(runtime.get('symbol_timeout_sec', 120))
         portfolio_timeout_sec = int(runtime.get('portfolio_timeout_sec', 60))
 
+        # stage-only late-stage runner: skip fetch/scan and re-use existing outputs.
+        # Typical usage:
+        #   --stage-only alert  (requires output/reports/symbols_summary.csv)
+        #   --stage-only notify (requires output/reports/symbols_alerts.txt)
+        if STAGE_ONLY is not None:
+            summary_path = base / 'output' / 'reports' / 'symbols_summary.csv'
+            alerts_path = base / 'output' / 'reports' / 'symbols_alerts.txt'
+            if STAGE_ONLY == 'alert':
+                if not (summary_path.exists() and summary_path.stat().st_size > 0):
+                    raise SystemExit(f"[STAGE_ONLY_ERROR] missing required file: {summary_path}")
+            if STAGE_ONLY == 'notify':
+                if not (alerts_path.exists() and alerts_path.stat().st_size > 0):
+                    raise SystemExit(f"[STAGE_ONLY_ERROR] missing required file: {alerts_path}")
+
+            changes_out = stage_only_changes_out() if STAGE_ONLY else ('/dev/null' if IS_SCHEDULED else 'output/reports/symbols_changes.txt')
+            alert_cmd = [
+                py, 'scripts/alert_engine.py',
+                '--summary-input', 'output/reports/symbols_summary.csv',
+                '--output', 'output/reports/symbols_alerts.txt',
+                '--changes-output', changes_out,
+            ]
+            # stage-only: do NOT update snapshot/history
+            if (not IS_SCHEDULED) and (not STAGE_ONLY):
+                alert_cmd.extend([
+                    '--previous-summary', 'output/state/symbols_summary_prev.csv',
+                    '--update-snapshot',
+                ])
+            if want('alert'):
+                run(alert_cmd, cwd=base)
+
+            if want('notify'):
+                run([
+                    py, 'scripts/notify_symbols.py',
+                    '--alerts-input', 'output/reports/symbols_alerts.txt',
+                    '--changes-input', (changes_out if STAGE_ONLY else ('/dev/null' if IS_SCHEDULED else 'output/reports/symbols_changes.txt')),
+                    '--output', 'output/reports/symbols_notification.txt',
+                ], cwd=base)
+
+            log(f"[INFO] stage-only done: {STAGE_ONLY}")
+            return
+
         symbols = []
         summary_rows: list[dict] = []
 
-        # portfolio context
-        portfolio_cfg = cfg.get('portfolio', {}) or {}
-        pm_config = portfolio_cfg.get('pm_config', '../portfolio-management/config.json')
-        market = portfolio_cfg.get('market', '富途')
-        account = portfolio_cfg.get('account')
+        if (not want('scan')) or bool(getattr(args, 'no_context', False)):
+            portfolio_ctx = None
+            option_ctx = None
+            fx_usd_per_cny = None
+            hkdcny = None
+        else:
+            # portfolio context
+            portfolio_cfg = cfg.get('portfolio', {}) or {}
+            pm_config = portfolio_cfg.get('pm_config', '../portfolio-management/config.json')
+            market = portfolio_cfg.get('market', '富途')
+            account = portfolio_cfg.get('account')
 
-        portfolio_ctx = None
-        option_ctx = None
-        try:
-            cmd = [
-                py, 'scripts/fetch_portfolio_context.py',
-                '--pm-config', str(pm_config),
-                '--market', str(market),
-                '--out', 'output/state/portfolio_context.json',
-            ]
-            if account:
-                cmd.extend(['--account', str(account)])
-            run(cmd, cwd=base, timeout_sec=portfolio_timeout_sec)
-            portfolio_ctx = json.loads((base / 'output/state/portfolio_context.json').read_text(encoding='utf-8'))
-        except Exception as e:
-            print(f"[WARN] portfolio context not available: {e}")
+            portfolio_ctx = None
+            option_ctx = None
 
-        try:
-            cmd = [
-                py, 'scripts/fetch_option_positions_context.py',
-                '--pm-config', str(pm_config),
-                '--market', str(market),
-                '--out', 'output/state/option_positions_context.json',
-            ]
-            if account:
-                cmd.extend(['--account', str(account)])
-            run(cmd, cwd=base, timeout_sec=portfolio_timeout_sec)
-            option_ctx = json.loads((base / 'output/state/option_positions_context.json').read_text(encoding='utf-8'))
+            # Cache policy (TTL seconds)
+            # - scheduled: longer TTL (reduce PM subprocess overhead)
+            # - dev: shorter TTL (keep reasonably fresh)
+            ttl_opt_ctx = int(runtime.get('option_positions_context_ttl_sec', 900 if IS_SCHEDULED else 120) or 0)
+            ttl_port_ctx = int(runtime.get('portfolio_context_ttl_sec', 900 if IS_SCHEDULED else 60) or 0)
 
-            # Auto-close expired open positions (table maintenance) without extra scans.
-            # Uses the context we just generated (contains open_positions_min with record_id).
+            # 1) portfolio_context cache
             try:
-                run([
-                    py, 'scripts/auto_close_expired_positions.py',
-                    '--pm-config', str(pm_config),
-                    '--context', 'output/state/option_positions_context.json',
-                    '--grace-days', '1',
-                    '--max-close', '20',
-                    '--summary-out', 'output/reports/auto_close_summary.txt',
-                ], cwd=base, timeout_sec=portfolio_timeout_sec)
-            except Exception as e2:
-                print(f"[WARN] auto-close expired positions failed: {e2}")
+                port_path = (base / 'output/state/portfolio_context.json').resolve()
+                cached = None
+                if ttl_port_ctx > 0 and is_fresh(port_path, ttl_port_ctx):
+                    cached = load_cached_json(port_path)
+                if cached is not None:
+                    portfolio_ctx = cached
+                else:
+                    cmd = [
+                        py, 'scripts/fetch_portfolio_context.py',
+                        '--pm-config', str(pm_config),
+                        '--market', str(market),
+                        '--out', 'output/state/portfolio_context.json',
+                    ]
+                    if account:
+                        cmd.extend(['--account', str(account)])
+                    run(cmd, cwd=base, timeout_sec=portfolio_timeout_sec)
+                    portfolio_ctx = load_cached_json(port_path) or json.loads(port_path.read_text(encoding='utf-8'))
+            except BaseException as e:
+                # Important: run() raises SystemExit on non-zero return codes.
+                # For unattended cron, portfolio context is best-effort and should not kill the whole scan.
+                log(f"[WARN] portfolio context not available: {e}")
+                portfolio_ctx = None
 
-        except Exception as e:
-            print(f"[WARN] option positions context not available: {e}")
+            # 2) option_positions_context cache (and auto-close only on refresh)
+            try:
+                opt_path = (base / 'output/state/option_positions_context.json').resolve()
+                refreshed = False
+                cached = None
+                if ttl_opt_ctx > 0 and is_fresh(opt_path, ttl_opt_ctx):
+                    cached = load_cached_json(opt_path)
+                if cached is not None:
+                    option_ctx = cached
+                else:
+                    cmd = [
+                        py, 'scripts/fetch_option_positions_context.py',
+                        '--pm-config', str(pm_config),
+                        '--market', str(market),
+                        '--out', 'output/state/option_positions_context.json',
+                    ]
+                    if account:
+                        cmd.extend(['--account', str(account)])
+                    run(cmd, cwd=base, timeout_sec=portfolio_timeout_sec)
+                    option_ctx = load_cached_json(opt_path) or json.loads(opt_path.read_text(encoding='utf-8'))
+                    refreshed = True
 
-        # FX (once per pipeline). We only need USD-per-CNY for monitoring estimates.
-        fx_usd_per_cny = None
-        try:
-            # scripts/ is not a package; load fx_rates.py by path
-            import importlib.util
-            fx_path = (base / 'scripts' / 'fx_rates.py').resolve()
-            import sys as _sys
-            spec = importlib.util.spec_from_file_location('fx_rates', fx_path)
-            assert spec and spec.loader
-            mod = importlib.util.module_from_spec(spec)
-            # dataclasses expects module to exist in sys.modules during exec
-            _sys.modules['fx_rates'] = mod
-            spec.loader.exec_module(mod)  # type: ignore
-            fx_usd_per_cny = mod.get_usd_per_cny(base)  # type: ignore
-        except Exception as e:
-            print(f"[WARN] fx rates not available: {e}")
+                if refreshed:
+                    # Auto-close expired open positions (table maintenance) without extra scans.
+                    # Only run when we refreshed context (avoid repeated close calls during rapid dev loops).
+                    try:
+                        run([
+                            py, 'scripts/auto_close_expired_positions.py',
+                            '--pm-config', str(pm_config),
+                            '--context', 'output/state/option_positions_context.json',
+                            '--grace-days', '1',
+                            '--max-close', '20',
+                            '--summary-out', 'output/reports/auto_close_summary.txt',
+                        ], cwd=base, timeout_sec=portfolio_timeout_sec)
+                    except Exception as e2:
+                        log(f"[WARN] auto-close expired positions failed: {e2}")
+
+            except BaseException as e:
+                # best-effort; do not kill pipeline if this fails
+                log(f"[WARN] option positions context not available: {e}")
+                option_ctx = None
+
+            # FX (once per pipeline).
+            fx_usd_per_cny = None
+            hkdcny = None
+            try:
+                # scripts/ is not a package; load fx_rates.py by path
+                import importlib.util
+                fx_path = (base / 'scripts' / 'fx_rates.py').resolve()
+                import sys as _sys
+                spec = importlib.util.spec_from_file_location('fx_rates', fx_path)
+                assert spec and spec.loader
+                mod = importlib.util.module_from_spec(spec)
+                # dataclasses expects module to exist in sys.modules during exec
+                _sys.modules['fx_rates'] = mod
+                spec.loader.exec_module(mod)  # type: ignore
+                fx_usd_per_cny = mod.get_usd_per_cny(base)  # type: ignore
+                # also load HKDCNY (CNY per 1 HKD) from cache
+                try:
+                    rates = mod.get_rates((base / 'output/state/rate_cache.json').resolve(), None)  # type: ignore
+                    hkdcny = float(rates.get('HKDCNY')) if rates and rates.get('HKDCNY') else None
+                except Exception:
+                    hkdcny = None
+            except BaseException as e:
+                # best-effort
+                log(f"[WARN] fx rates not available: {e}")
 
         profiles = cfg.get('profiles') or {}
 
         for item in cfg['watchlist']:
             try:
+                # Optional whitelist filter
+                if sym_whitelist is not None:
+                    s0 = str((item or {}).get('symbol') or '').strip()
+                    if s0 and s0 not in sym_whitelist:
+                        continue
+
                 item = apply_profiles(item, profiles)
                 # inject option_ctx into portfolio_ctx for now (minimal change):
                 if portfolio_ctx is not None and option_ctx is not None:
                     portfolio_ctx['option_ctx'] = option_ctx
-                summary_rows.extend(process_symbol(py, base, item, top_n, portfolio_ctx=portfolio_ctx, fx_usd_per_cny=fx_usd_per_cny, timeout_sec=symbol_timeout_sec))
+                if not want('scan'):
+                    # fetch-only: just pull required_data and stop
+                    item_fetch = dict(item)
+                    item_fetch['sell_put'] = {'enabled': False}
+                    item_fetch['sell_call'] = {'enabled': False}
+                    process_symbol(py, base, item_fetch, top_n, portfolio_ctx=None, fx_usd_per_cny=None, hkdcny=None, timeout_sec=symbol_timeout_sec)
+                else:
+                    summary_rows.extend(process_symbol(py, base, item, top_n, portfolio_ctx=portfolio_ctx, fx_usd_per_cny=fx_usd_per_cny, hkdcny=hkdcny, timeout_sec=symbol_timeout_sec))
             except Exception as e:
                 symbol = item.get('symbol', 'UNKNOWN')
-                print(f'[WARN] {symbol} processing failed: {e}')
+                log(f'[WARN] {symbol} processing failed: {e}')
                 summary_rows.append({
                     'symbol': symbol,
                     'strategy': 'sell_put',
@@ -824,16 +1466,28 @@ def main():
                     'note': f'处理失败: {e}',
                 })
             symbols.append(item['symbol'])
+
+        # fetch-only stage: stop after market-data fetch
+        # (but do not interfere with stage-only late-stage runs)
+        if (STAGE_ONLY is None) and (not want('scan')):
+            log(f"[INFO] stage={STAGE}: fetch done")
+            return
+
         build_symbols_summary(base, summary_rows)
-        build_symbols_digest(base, symbols)
+        if not IS_SCHEDULED:
+            build_symbols_digest(base, symbols)
+        changes_out = ('/dev/null' if IS_SCHEDULED else 'output/reports/symbols_changes.txt')
         alert_cmd = [
             py, 'scripts/alert_engine.py',
             '--summary-input', 'output/reports/symbols_summary.csv',
             '--output', 'output/reports/symbols_alerts.txt',
-            '--changes-output', 'output/reports/symbols_changes.txt',
-            '--previous-summary', 'output/state/symbols_summary_prev.csv',
-            '--update-snapshot',
+            '--changes-output', changes_out,
         ]
+        if not IS_SCHEDULED:
+            alert_cmd.extend([
+                '--previous-summary', 'output/state/symbols_summary_prev.csv',
+                '--update-snapshot',
+            ])
         # alert policy overrides (optional)
         try:
             policy = cfg.get('alert_policy')
@@ -846,14 +1500,16 @@ def main():
                 alert_cmd.extend(['--policy-json', policy.strip()])
         except Exception:
             pass
-        run(alert_cmd, cwd=base)
+        if want('alert'):
+            run(alert_cmd, cwd=base)
 
-        run([
-            py, 'scripts/notify_symbols.py',
-            '--alerts-input', 'output/reports/symbols_alerts.txt',
-            '--changes-input', 'output/reports/symbols_changes.txt',
-            '--output', 'output/reports/symbols_notification.txt',
-        ], cwd=base)
+        if want('notify'):
+            run([
+                py, 'scripts/notify_symbols.py',
+                '--alerts-input', 'output/reports/symbols_alerts.txt',
+                '--changes-input', ('/dev/null' if IS_SCHEDULED else 'output/reports/symbols_changes.txt'),
+                '--output', 'output/reports/symbols_notification.txt',
+            ], cwd=base)
 
         # Append cash summaries at the bottom (optional).
         # In multi-account merged notifications, we prefer adding cash footer only once in send_if_needed_multi.py.
@@ -863,7 +1519,7 @@ def main():
         except Exception:
             include_cash_footer = True
 
-        if include_cash_footer:
+        if include_cash_footer and (not IS_SCHEDULED):
             run([
                 py, 'scripts/append_cash_summary.py',
                 '--pm-config', str(pm_config),
@@ -874,17 +1530,18 @@ def main():
 
         notifications_cfg = cfg.get('notifications', {}) or {}
         if notifications_cfg.get('enabled', False):
-            print('[INFO] notifications enabled in config; pipeline prepared notification text for sending.')
+            log('[INFO] notifications enabled in config; pipeline prepared notification text for sending.')
         else:
-            print('[INFO] notifications disabled; generated notification text only.')
-        print('\n[DONE] Symbols pipeline finished')
-        print('- output/reports/symbols_summary.csv')
-        print('- output/reports/symbols_summary.txt')
-        print('- output/reports/symbols_digest.txt')
-        print('- output/reports/symbols_alerts.txt')
-        print('- output/reports/symbols_changes.txt')
-        print('- output/reports/symbols_notification.txt')
-        print('')
+            log('[INFO] notifications disabled; generated notification text only.')
+        if not IS_SCHEDULED:
+            print('\n[DONE] Symbols pipeline finished')
+            print('- output/reports/symbols_summary.csv')
+            print('- output/reports/symbols_summary.txt')
+            print('- output/reports/symbols_digest.txt')
+            print('- output/reports/symbols_alerts.txt')
+            print('- output/reports/symbols_changes.txt')
+            print('- output/reports/symbols_notification.txt')
+            print('')
 
         return
 
