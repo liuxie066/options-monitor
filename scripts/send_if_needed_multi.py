@@ -578,6 +578,14 @@ def main():
     elif in_us_session(now_utc):
         markets_to_run = ['US']
 
+
+    # Shared scan artifacts (per-invocation) for cross-account reuse
+    shared_scan_dir = (base / 'output_shared' / 'scan_runs' / utc_now().replace(':','').replace('-','').split('.')[0]).resolve()
+    shared_scan_dir.mkdir(parents=True, exist_ok=True)
+    shared_scan_ready = False
+    # shared required_data dir should already exist (created by prefetch step)
+    shared_required = (base / 'output_shared' / 'required_data').resolve()
+
     for acct in args.accounts:
         acct = str(acct).strip()
         if not acct:
@@ -643,8 +651,13 @@ def main():
         except Exception:
             pass
 
+        # Shared scan reuse: first due account writes shared scan artifacts; subsequent due accounts reuse them
+        pipe_cmd = [str(vpy), 'scripts/run_pipeline.py', '--config', str(cfg_override), '--mode', 'scheduled', '--shared-required-data', str(shared_required), '--shared-scan-dir', str(shared_scan_dir)]
+        if shared_scan_ready:
+            pipe_cmd.append('--reuse-shared-scan')
+
         pipe = subprocess.run(
-            [str(vpy), 'scripts/run_pipeline.py', '--config', str(cfg_override), '--mode', 'scheduled'],
+            pipe_cmd,
             cwd=str(base),
             capture_output=True,
             text=True,
@@ -658,6 +671,8 @@ def main():
             results.append(AccountResult(acct, True, should_notify, False, 'pipeline failed', ''))
             continue
 
+
+        shared_scan_ready = True
         # Update scan timestamp so the scheduler interval works next tick.
         # (scan_scheduler.py only updates last_scan_utc in --run-if-due mode, which we don't use here.)
         try:
