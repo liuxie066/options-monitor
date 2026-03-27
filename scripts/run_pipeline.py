@@ -305,54 +305,62 @@ def summarize_sell_call(df: pd.DataFrame, symbol: str) -> dict:
 def derive_put_max_strike_from_cash(symbol: str, portfolio_ctx: dict | None, fx_usd_per_cny: float | None, hkdcny: float | None, *, fallback_multiplier: int = 100) -> float | None:
     """Return a cash-based max_strike cap to prefilter sell_put.
 
-    strike_cap ~= free_cash_native / multiplier
+    Preferred cash source (native currency):
+    - cash_by_currency[USD/HKD] from holdings
+    - minus option_ctx.cash_secured_total_by_ccy[USD/HKD] (short puts already occupying cash)
 
-    Uses CNY free cash when available, then converts to option currency:
-    - US: CNY->USD using fx_usd_per_cny (USD per 1 CNY)
-    - HK: CNY->HKD using hkdcny (CNY per 1 HKD)
+    strike_cap ~= free_cash_native / multiplier
 
     Multiplier source: output_shared/state/multiplier_cache.json (best-effort), else fallback 100.
     """
     if not portfolio_ctx:
         return None
 
-    free_cny = None
+    sym_u = str(symbol).strip().upper()
+    want_ccy = 'HKD' if sym_u.endswith('.HK') else 'USD'
+
+    # 1) cash available in native currency (from holdings)
+    cash_native = None
     try:
-        v = portfolio_ctx.get('cash_free_cny')
-        if v is not None:
-            free_cny = float(v)
+        cash_by = portfolio_ctx.get('cash_by_currency') or {}
+        if isinstance(cash_by, dict):
+            v = cash_by.get(want_ccy)
+            cash_native = float(v) if v is not None else None
     except Exception:
-        free_cny = None
+        cash_native = None
 
-    if free_cny is None:
-        try:
-            cash_by = portfolio_ctx.get('cash_by_currency') or {}
-            if 'CNY' in cash_by:
-                free_cny = float(cash_by.get('CNY') or 0.0)
-        except Exception:
-            free_cny = None
-
-    if free_cny is None or free_cny <= 0:
+    if cash_native is None:
         return None
 
-    m = None
+    # 2) subtract cash-secured used in native currency (from option_ctx)
+    used_native = 0.0
+    try:
+        option_ctx = portfolio_ctx.get('option_ctx') if isinstance(portfolio_ctx, dict) else None
+        if isinstance(option_ctx, dict):
+            tot_by_ccy = option_ctx.get('cash_secured_total_by_ccy') or {}
+            if isinstance(tot_by_ccy, dict):
+                used_native = float(tot_by_ccy.get(want_ccy) or 0.0)
+    except Exception:
+        used_native = 0.0
+
+    free_native = float(cash_native) - float(used_native)
+    if free_native <= 0:
+        return 0.0
+
+    # 3) multiplier from cache
+    mult = None
     try:
         from scripts import multiplier_cache
         repo_base = Path(__file__).resolve().parents[1]
         cache = multiplier_cache.load_cache(multiplier_cache.default_cache_path(repo_base))
-        m = multiplier_cache.get_cached_multiplier(cache, symbol)
+        mult = multiplier_cache.get_cached_multiplier(cache, sym_u)
     except Exception:
-        m = None
+        mult = None
 
-    if not m or m <= 0:
-        m = int(fallback_multiplier) if fallback_multiplier and fallback_multiplier > 0 else 100
+    if not mult or mult <= 0:
+        mult = int(fallback_multiplier) if fallback_multiplier and fallback_multiplier > 0 else 100
 
-    sym_u = str(symbol).upper()
-    if sym_u.endswith('.HK'):
-        if not hkdcny or hkdcny <= 0:
-            return None
-        free_native = float(free_cny) / float(hkdcny)
-        return free_native / float(m)
+    return free_native / float(mult)
 
     # default: USD
     if not fx_usd_per_cny or fx_usd_per_cny <= 0:
