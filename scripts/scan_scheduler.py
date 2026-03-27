@@ -26,7 +26,8 @@ class SchedulerDecision:
 
 STATE_DEFAULT = {
     'last_scan_utc': None,
-    'last_notify_utc': None,
+    'last_notify_utc': None,  # legacy
+    'last_notify_utc_by_account': {},
 }
 
 
@@ -38,7 +39,7 @@ def read_state(path: Path) -> dict:
 
 def write_state(path: Path, state: dict):
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding='utf-8')
+    path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding='utf-8')
 
 
 def parse_hhmm(value: str) -> time:
@@ -82,7 +83,7 @@ def _time_in_range(t: time, start: time, end: time) -> bool:
     return t >= start or t <= end
 
 
-def decide(schedule_cfg: dict, state: dict, now_utc: datetime) -> SchedulerDecision:
+def decide(schedule_cfg: dict, state: dict, now_utc: datetime, account: str | None = None) -> SchedulerDecision:
     market_tz = ZoneInfo(schedule_cfg.get('market_timezone', 'America/New_York'))
     now_market = now_utc.astimezone(market_tz)
     market_open = parse_hhmm(schedule_cfg.get('market_open', '09:30'))
@@ -128,7 +129,7 @@ def decide(schedule_cfg: dict, state: dict, now_utc: datetime) -> SchedulerDecis
         # Notification cooldown is handled separately (content-aware) in send_if_needed_multi.
         # Scheduler keeps a single base cooldown (notify_cooldown_min) here.
 
-    last_scan = maybe_parse_dt(state.get('last_scan_utc'))
+    last_scan = maybe_parse_dt(state.get('last_scan_utc'))    # notify timestamp: GLOBAL (unified across accounts)
     last_notify = maybe_parse_dt(state.get('last_notify_utc'))
 
     should_run_scan = False
@@ -184,8 +185,10 @@ def main():
     parser.add_argument('--config', required=True)
     parser.add_argument('--state', default='output/state/scheduler_state.json')
     parser.add_argument('--schedule-key', default='schedule', help='Top-level key to read schedule config from (default: schedule). Example: schedule_hk' )
+    parser.add_argument('--account', default=None, help='Account id for per-account notify cooldown state (optional).')
     parser.add_argument('--run-if-due', action='store_true', help='When due, run scripts/run_pipeline.py --config <config>')
     parser.add_argument('--mark-notified', action='store_true', help='Update last_notify_utc to now (call this only AFTER you actually sent a notification)')
+    parser.add_argument('--mark-scanned', action='store_true', help='Update last_scan_utc to now (call this only AFTER you actually ran a scan)')
     parser.add_argument('--jsonl', action='store_true', help='Print a single-line JSON decision (for automation)')
     parser.add_argument('--force', action='store_true', help='Force running regardless of schedule')
     args = parser.parse_args()
@@ -210,7 +213,7 @@ def main():
 
     now_utc = datetime.now(timezone.utc)
     state = read_state(state_path)
-    decision = decide(schedule_cfg, state, now_utc)
+    decision = decide(schedule_cfg, state, now_utc, account=(str(args.account) if args.account else None))
 
     if args.force:
         decision.should_run_scan = True
@@ -226,9 +229,23 @@ def main():
         return
 
     if args.mark_notified:
-        state['last_notify_utc'] = to_iso(datetime.now(timezone.utc))
+        now_s = to_iso(datetime.now(timezone.utc))
+        state['last_notify_utc'] = now_s
+        # keep per-account map as optional debug info
+        if args.account:
+            m = state.get('last_notify_utc_by_account')
+            if not isinstance(m, dict):
+                m = {}
+            m[str(args.account)] = now_s
+            state['last_notify_utc_by_account'] = m
         write_state(state_path, state)
         print(f'[DONE] marked notified -> {state_path}')
+        return
+
+    if args.mark_scanned:
+        state['last_scan_utc'] = to_iso(datetime.now(timezone.utc))
+        write_state(state_path, state)
+        print(f'[DONE] marked scanned -> {state_path}')
         return
 
     if args.run_if_due and decision.should_run_scan:
