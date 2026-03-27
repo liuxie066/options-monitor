@@ -265,8 +265,10 @@ def main():
 
     notification = build_notification(changes_text, alerts_text, fx_info=fx_info)
     output_path.write_text(notification, encoding='utf-8')
-    print(notification)
-    print(f'[DONE] notification -> {output_path}')
+    # When changes_input is /dev/null (scheduled fast mode), suppress stdout.
+    if str(changes_path) != '/dev/null':
+        print(notification)
+        print(f'[DONE] notification -> {output_path}')
 
 
 if __name__ == '__main__':

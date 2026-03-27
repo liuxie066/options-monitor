@@ -459,7 +459,12 @@ def main():
     previous_path = base / args.previous_summary
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    changes_path.parent.mkdir(parents=True, exist_ok=True)
+    # When changes-output is /dev/null (scheduled fast mode), avoid trying to create its parent.
+    try:
+        if str(changes_path) != '/dev/null':
+            changes_path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
     previous_path.parent.mkdir(parents=True, exist_ok=True)
 
     current = safe_read_csv(summary_path)
@@ -505,12 +510,18 @@ def main():
     changes_text = build_changes_text(current, previous)
 
     output_path.write_text(alert_text, encoding='utf-8')
-    changes_path.write_text(changes_text, encoding='utf-8')
+    try:
+        if str(changes_path) != '/dev/null':
+            changes_path.write_text(changes_text, encoding='utf-8')
+    except Exception:
+        pass
 
-    print(alert_text)
-    print(f'[DONE] alerts -> {output_path}')
-    print(changes_text)
-    print(f'[DONE] changes -> {changes_path}')
+    # In scheduled fast mode, keep stdout minimal; run_pipeline consumes output files.
+    if str(changes_path) != '/dev/null':
+        print(alert_text)
+        print(f'[DONE] alerts -> {output_path}')
+        print(changes_text)
+        print(f'[DONE] changes -> {changes_path}')
 
     if args.update_snapshot:
         snapshot_summary(summary_path, previous_path)

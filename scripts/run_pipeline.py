@@ -17,13 +17,28 @@ def run(cmd: list[str], cwd: Path, timeout_sec: int | None = None):
     """Run a subprocess with optional timeout.
 
     Timeout is important for unattended cron usage: a single hanging symbol must not block the whole pipeline.
+
+    Scheduled mode policy:
+    - capture stdout/stderr to reduce log I/O
+    - only print tail on failure
     """
-    print(f"[RUN] {' '.join(cmd)}" + (f" (timeout={timeout_sec}s)" if timeout_sec else ""))
+    if not IS_SCHEDULED:
+        print(f"[RUN] {' '.join(cmd)}" + (f" (timeout={timeout_sec}s)" if timeout_sec else ""))
+
     try:
-        result = subprocess.run(cmd, cwd=str(cwd), timeout=timeout_sec)
+        if IS_SCHEDULED:
+            result = subprocess.run(cmd, cwd=str(cwd), timeout=timeout_sec, capture_output=True, text=True)
+        else:
+            result = subprocess.run(cmd, cwd=str(cwd), timeout=timeout_sec)
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"timeout after {timeout_sec}s: {' '.join(cmd)}")
+
     if result.returncode != 0:
+        if IS_SCHEDULED:
+            out = ((result.stdout or '') + '\n' + (result.stderr or '')).strip()
+            if out:
+                tail = '\n'.join(out.splitlines()[-60:])
+                print(f"[ERR] {' '.join(cmd)}\n{tail}")
         raise SystemExit(result.returncode)
 
 
@@ -289,6 +304,9 @@ def process_symbol(
         # If OpenD has no US stock quote right, we can still compute OTM% using portfolio-management prices.
         if bool(fetch_cfg.get('spot_from_portfolio_management', False)):
             cmd.append('--spot-from-pm')
+        if IS_SCHEDULED:
+            # Quiet mode for fetch_market_data_opend.py
+            cmd.append('--quiet')
         run(cmd, cwd=base, timeout_sec=timeout_sec)
     else:
         run([
@@ -390,6 +408,8 @@ def process_symbol(
             cmd.extend(['--min-strike', str(sp.get('min_strike'))])
         if sp.get('max_strike') is not None:
             cmd.extend(['--max-strike', str(sp.get('max_strike'))])
+        if IS_SCHEDULED:
+            cmd.append('--quiet')
         run(cmd, cwd=base, timeout_sec=timeout_sec)
 
         shared_sp = report_dir / 'sell_put_candidates.csv'
@@ -566,14 +586,15 @@ def process_symbol(
 
             df_sp_lab.to_csv(symbol_sp_labeled, index=False)
 
-        run([
-            py, 'scripts/render_sell_put_alerts.py',
-            '--input', f'output/reports/{symbol_lower}_sell_put_candidates_labeled.csv',
-            '--symbol', symbol,
-            '--top', str(top_n),
-            '--layered',
-            '--output', f'output/reports/{symbol_lower}_sell_put_alerts.txt',
-        ], cwd=base)
+        if not IS_SCHEDULED:
+            run([
+                py, 'scripts/render_sell_put_alerts.py',
+                '--input', f'output/reports/{symbol_lower}_sell_put_candidates_labeled.csv',
+                '--symbol', symbol,
+                '--top', str(top_n),
+                '--layered',
+                '--output', f'output/reports/{symbol_lower}_sell_put_alerts.txt',
+            ], cwd=base)
         summary_rows.append(summarize_sell_put(safe_read_csv(symbol_sp_labeled), symbol))
     else:
         summary_rows.append(summarize_sell_put(pd.DataFrame(), symbol))
@@ -657,14 +678,15 @@ def process_symbol(
             df_cc['is_fully_covered_available'] = covered_contracts_available >= 1
             df_cc.to_csv(symbol_cc, index=False)
 
-        run([
-            py, 'scripts/render_sell_call_alerts.py',
-            '--input', f'output/reports/{symbol_lower}_sell_call_candidates.csv',
-            '--symbol', symbol,
-            '--top', str(top_n),
-            '--layered',
-            '--output', f'output/reports/{symbol_lower}_sell_call_alerts.txt',
-        ], cwd=base)
+        if not IS_SCHEDULED:
+            run([
+                py, 'scripts/render_sell_call_alerts.py',
+                '--input', f'output/reports/{symbol_lower}_sell_call_candidates.csv',
+                '--symbol', symbol,
+                '--top', str(top_n),
+                '--layered',
+                '--output', f'output/reports/{symbol_lower}_sell_call_alerts.txt',
+            ], cwd=base)
 
         summary_rows.append(summarize_sell_call(df_cc, symbol))
     else:
@@ -697,9 +719,10 @@ def build_symbols_summary(base: Path, summary_rows: list[dict]):
                 f"Top {r['top_contract'] or '-'} | 年化 {annual} | 净收入 {income} | "
                 f"DTE {dte} | Strike {strike} | {r['risk_label'] or '-'} | {r['note']}"
             )
-    txt_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+    if not IS_SCHEDULED:
+        txt_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+        print(f"[DONE] symbols summary text -> {txt_path}")
     print(f"[DONE] symbols summary -> {csv_path}")
-    print(f"[DONE] symbols summary text -> {txt_path}")
 
 
 
@@ -773,10 +796,22 @@ def apply_profiles(item: dict, profiles: dict | None) -> dict:
     return merged
 
 
+# Runtime mode flags (set in main())
+RUNTIME_MODE = 'dev'
+IS_SCHEDULED = False
+
+
 def main():
+    global RUNTIME_MODE, IS_SCHEDULED
+
     parser = argparse.ArgumentParser(description='Run options-monitor pipeline')
     parser.add_argument('--config', required=True, help='Path to JSON config (single-symbol or watchlist). YAML is legacy.')
+    parser.add_argument('--mode', default='dev', choices=['dev', 'scheduled'], help='Runtime mode: dev (verbose) vs scheduled (fast)')
+    parser.add_argument('--symbols', default=None, help='Comma-separated symbol whitelist; only process these symbols')
     args = parser.parse_args()
+
+    RUNTIME_MODE = str(args.mode)
+    IS_SCHEDULED = (RUNTIME_MODE == 'scheduled')
 
     base = Path(__file__).resolve().parents[1]
     cfg_path = Path(args.config)
@@ -791,9 +826,33 @@ def main():
             cfg = yaml.safe_load(f)
 
     # Validate config early (fail fast)
+    # - dev mode: always validate
+    # - scheduled mode: validate only when config content changes (hash cache)
     try:
         from scripts.validate_config import validate_config as _validate_config
-        _validate_config(cfg)
+
+        should_validate = True
+        if IS_SCHEDULED:
+            try:
+                import hashlib
+                import json as _json
+                state_dir = (base / 'output' / 'state').resolve()
+                state_dir.mkdir(parents=True, exist_ok=True)
+                cache_path = state_dir / 'config_validation_cache.json'
+                payload = _json.dumps(cfg, ensure_ascii=False, sort_keys=True)
+                h = hashlib.sha256(payload.encode('utf-8')).hexdigest()
+                prev = None
+                if cache_path.exists() and cache_path.stat().st_size > 0:
+                    prev = _json.loads(cache_path.read_text(encoding='utf-8')).get('sha256')
+                if prev == h:
+                    should_validate = False
+                else:
+                    cache_path.write_text(_json.dumps({'sha256': h}, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+            except Exception:
+                should_validate = True
+
+        if should_validate:
+            _validate_config(cfg)
     except SystemExit:
         raise
     except Exception:
@@ -811,6 +870,11 @@ def main():
         cfg['watchlist'] = cfg.get('symbols')
 
     if 'watchlist' in cfg:
+        # Optional symbols whitelist (comma-separated)
+        sym_whitelist = None
+        if args.symbols:
+            sym_whitelist = {s.strip() for s in str(args.symbols).split(',') if s.strip()}
+
         top_n = cfg.get('outputs', {}).get('top_n_alerts', 3)
         runtime = cfg.get('runtime', {}) or {}
         symbol_timeout_sec = int(runtime.get('symbol_timeout_sec', 120))
@@ -904,6 +968,12 @@ def main():
 
         for item in cfg['watchlist']:
             try:
+                # Optional whitelist filter
+                if sym_whitelist is not None:
+                    s0 = str((item or {}).get('symbol') or '').strip()
+                    if s0 and s0 not in sym_whitelist:
+                        continue
+
                 item = apply_profiles(item, profiles)
                 # inject option_ctx into portfolio_ctx for now (minimal change):
                 if portfolio_ctx is not None and option_ctx is not None:
@@ -940,15 +1010,20 @@ def main():
                 })
             symbols.append(item['symbol'])
         build_symbols_summary(base, summary_rows)
-        build_symbols_digest(base, symbols)
+        if not IS_SCHEDULED:
+            build_symbols_digest(base, symbols)
+        changes_out = ('/dev/null' if IS_SCHEDULED else 'output/reports/symbols_changes.txt')
         alert_cmd = [
             py, 'scripts/alert_engine.py',
             '--summary-input', 'output/reports/symbols_summary.csv',
             '--output', 'output/reports/symbols_alerts.txt',
-            '--changes-output', 'output/reports/symbols_changes.txt',
-            '--previous-summary', 'output/state/symbols_summary_prev.csv',
-            '--update-snapshot',
+            '--changes-output', changes_out,
         ]
+        if not IS_SCHEDULED:
+            alert_cmd.extend([
+                '--previous-summary', 'output/state/symbols_summary_prev.csv',
+                '--update-snapshot',
+            ])
         # alert policy overrides (optional)
         try:
             policy = cfg.get('alert_policy')
@@ -966,7 +1041,7 @@ def main():
         run([
             py, 'scripts/notify_symbols.py',
             '--alerts-input', 'output/reports/symbols_alerts.txt',
-            '--changes-input', 'output/reports/symbols_changes.txt',
+            '--changes-input', ('/dev/null' if IS_SCHEDULED else 'output/reports/symbols_changes.txt'),
             '--output', 'output/reports/symbols_notification.txt',
         ], cwd=base)
 
@@ -978,7 +1053,7 @@ def main():
         except Exception:
             include_cash_footer = True
 
-        if include_cash_footer:
+        if include_cash_footer and (not IS_SCHEDULED):
             run([
                 py, 'scripts/append_cash_summary.py',
                 '--pm-config', str(pm_config),
@@ -992,14 +1067,15 @@ def main():
             print('[INFO] notifications enabled in config; pipeline prepared notification text for sending.')
         else:
             print('[INFO] notifications disabled; generated notification text only.')
-        print('\n[DONE] Symbols pipeline finished')
-        print('- output/reports/symbols_summary.csv')
-        print('- output/reports/symbols_summary.txt')
-        print('- output/reports/symbols_digest.txt')
-        print('- output/reports/symbols_alerts.txt')
-        print('- output/reports/symbols_changes.txt')
-        print('- output/reports/symbols_notification.txt')
-        print('')
+        if not IS_SCHEDULED:
+            print('\n[DONE] Symbols pipeline finished')
+            print('- output/reports/symbols_summary.csv')
+            print('- output/reports/symbols_summary.txt')
+            print('- output/reports/symbols_digest.txt')
+            print('- output/reports/symbols_alerts.txt')
+            print('- output/reports/symbols_changes.txt')
+            print('- output/reports/symbols_notification.txt')
+            print('')
 
         return
 

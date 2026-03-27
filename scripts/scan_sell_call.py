@@ -130,6 +130,7 @@ def main():
     parser.add_argument('--require-bid-ask', action='store_true', help='require bid>0 and ask>0 (better fillability)')
     parser.add_argument('--min-delta', type=float, default=None, help='min call delta (e.g. 0.20)')
     parser.add_argument('--max-delta', type=float, default=None, help='max call delta (e.g. 0.35)')
+    parser.add_argument('--quiet', action='store_true', help='quiet mode: suppress human-friendly prints')
     args = parser.parse_args()
 
     if args.shares < 100:
@@ -250,14 +251,15 @@ def main():
     else:
         out.to_csv(out_path, index=False)
 
-    print(f'[DONE] sell call scan -> {out_path}')
-    print(f'[DONE] candidates: {len(out)}')
-    if not out.empty:
-        cols = [
-            'symbol','expiration','dte','strike','spot','avg_cost','mid','net_income',
-            'annualized_net_premium_return','if_exercised_total_return','strike_above_spot_pct','risk_label'
-        ]
-        print(out[cols].head(20).to_string(index=False))
+    if not args.quiet:
+        print(f'[DONE] sell call scan -> {out_path}')
+        print(f'[DONE] candidates: {len(out)}')
+        if not out.empty:
+            cols = [
+                'symbol','expiration','dte','strike','spot','avg_cost','mid','net_income',
+                'annualized_net_premium_return','if_exercised_total_return','strike_above_spot_pct','risk_label'
+            ]
+            print(out[cols].head(20).to_string(index=False))
 
 
 if __name__ == '__main__':

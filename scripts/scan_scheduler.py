@@ -228,21 +228,4 @@ def main():
 if __name__ == '__main__':
     main()
 
-def in_hk_session(now_utc: datetime) -> bool:
-    hk = ZoneInfo(Asia/Hong_Kong)
-    t = now_utc.astimezone(hk)
-    if t.weekday() >= 5:
-        return False
-    hm = t.hour * 60 + t.minute
-    return (9*60+30) <= hm < (12*60) or (13*60) <= hm < (16*60)
-
-
-def in_us_session(now_utc: datetime) -> bool:
-    ny = ZoneInfo(America/New_York)
-    t = now_utc.astimezone(ny)
-    if t.weekday() >= 5:
-        return False
-    hm = t.hour * 60 + t.minute
-    return (9*60+30) <= hm < (16*60)
-
-
+# NOTE: market-session helpers live in scripts/send_if_needed_multi.py (multi-account entrypoint).
