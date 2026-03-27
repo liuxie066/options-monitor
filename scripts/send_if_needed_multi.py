@@ -37,6 +37,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta, time
 from pathlib import Path
 from zoneinfo import ZoneInfo
+import socket
 
 
 def utc_now() -> str:
@@ -64,6 +65,26 @@ def write_json(path: Path, obj):
 def parse_hhmm(value: str) -> time:
     hour, minute = value.split(':', 1)
     return time(hour=int(hour), minute=int(minute))
+
+
+def in_hk_session(now_utc: datetime) -> bool:
+    hk = ZoneInfo('Asia/Hong_Kong')
+    t = now_utc.astimezone(hk)
+    if t.weekday() >= 5:
+        return False
+    hm = t.hour * 60 + t.minute
+    # 09:30-12:00, 13:00-16:00 (HKT)
+    return (9 * 60 + 30) <= hm < (12 * 60) or (13 * 60) <= hm < (16 * 60)
+
+
+def in_us_session(now_utc: datetime) -> bool:
+    ny = ZoneInfo('America/New_York')
+    t = now_utc.astimezone(ny)
+    if t.weekday() >= 5:
+        return False
+    hm = t.hour * 60 + t.minute
+    # 09:30-16:00 (NY)
+    return (9 * 60 + 30) <= hm < (16 * 60)
 
 
 def maybe_parse_dt(value: str | None) -> datetime | None:
@@ -469,6 +490,14 @@ def build_merged_message(
     return '\n'.join(lines).strip() + '\n'
 
 
+def _tcp_open(host: str, port: int, timeout_sec: float = 1.0) -> bool:
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout_sec):
+            return True
+    except Exception:
+        return False
+
+
 def main():
     ap = argparse.ArgumentParser(description='Multi-account tick with merged notification')
     ap.add_argument('--config', default='config.json')
@@ -489,6 +518,43 @@ def main():
     sparse_after_beijing = parse_hhmm(schedule_cfg.get('sparse_after_beijing', '02:00'))
     bj_tz = ZoneInfo(schedule_cfg.get('beijing_timezone', 'Asia/Shanghai'))
 
+    # Preflight: fail fast if option source is configured as local OpenD but the port isn't listening.
+    # Otherwise the run can hang for minutes on repeated ECONNREFUSED.
+    try:
+        ports = set()
+        for sym in (base_cfg.get('symbols') or []):
+            fetch = (sym or {}).get('fetch') or {}
+            if str(fetch.get('source') or '').lower() == 'opend':
+                host = fetch.get('host') or '127.0.0.1'
+                port = fetch.get('port')
+                if port:
+                    ports.add((str(host), int(port)))
+        for host, port in sorted(ports):
+            if not _tcp_open(host, port, timeout_sec=1.0):
+                # Record a last_run marker in each account state dir for observability, then exit.
+                now = utc_now()
+                for acct in args.accounts:
+                    acct = str(acct).strip().lower()
+                    if not acct:
+                        continue
+                    try:
+                        state_dir = (base / 'output_accounts' / acct / 'state')
+                        state_dir.mkdir(parents=True, exist_ok=True)
+                        write_json(state_dir / 'last_run.json', {
+                            'last_run_utc': now,
+                            'sent': False,
+                            'reason': 'opend_unreachable',
+                            'detail': f"cannot connect to {host}:{port}",
+                        })
+                    except Exception:
+                        pass
+                raise SystemExit(f"[FATAL] OpenD unreachable at {host}:{port} (configured fetch.source=opend).")
+    except SystemExit:
+        raise
+    except Exception:
+        # best-effort: do not block execution if preflight fails unexpectedly
+        pass
+
     # Ensure output/accounts layout
     accounts_root = (base / 'output_accounts').resolve()
     accounts_root.mkdir(parents=True, exist_ok=True)
@@ -504,6 +570,14 @@ def main():
 
     results: list[AccountResult] = []
 
+    # Market-aware filtering (speed): only run symbols for the current market session.
+    now_utc = datetime.now(timezone.utc)
+    markets_to_run: list[str] = []
+    if in_hk_session(now_utc):
+        markets_to_run = ['HK']
+    elif in_us_session(now_utc):
+        markets_to_run = ['US']
+
     for acct in args.accounts:
         acct = str(acct).strip()
         if not acct:
@@ -515,10 +589,18 @@ def main():
         # Switch ./output -> this account
         atomic_symlink(out_link, acct_out)
 
-        # Write per-account config override (portfolio.account)
+        # Write per-account config override (portfolio.account) + market-aware symbol filtering
         cfg = json.loads(json.dumps(base_cfg))
         cfg.setdefault('portfolio', {})
         cfg['portfolio']['account'] = acct
+
+        try:
+            syms = cfg.get('symbols') or []
+            if markets_to_run:
+                syms = [it for it in syms if isinstance(it, dict) and (it.get('market') in markets_to_run)]
+            cfg['symbols'] = syms
+        except Exception:
+            pass
         cfg_override = acct_out / 'state' / 'config.override.json'
         cfg_override.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 
@@ -545,9 +627,27 @@ def main():
             results.append(AccountResult(acct, False, should_notify, False, reason, ''))
             continue
 
-        # 2) pipeline
-        pipe = subprocess.run([str(vpy), 'scripts/run_pipeline.py', '--config', str(cfg_override)], cwd=str(base))
+        # 2) pipeline (scheduled mode: faster, less output)
+        # If market-aware filtering leaves us with no symbols, skip early.
+        try:
+            if markets_to_run and (not (cfg.get('symbols') or [])):
+                results.append(AccountResult(acct, False, should_notify, False, reason + ' | 本时段无对应市场标的', ''))
+                continue
+        except Exception:
+            pass
+
+        pipe = subprocess.run(
+            [str(vpy), 'scripts/run_pipeline.py', '--config', str(cfg_override), '--mode', 'scheduled'],
+            cwd=str(base),
+            capture_output=True,
+            text=True,
+        )
         if pipe.returncode != 0:
+            # Only print the tail for debugging (avoid noisy logs on success)
+            out = ((pipe.stdout or '') + '\n' + (pipe.stderr or '')).strip()
+            if out:
+                tail = '\n'.join(out.splitlines()[-60:])
+                print(f"[ERR] pipeline failed ({acct})\n{tail}")
             results.append(AccountResult(acct, True, should_notify, False, 'pipeline failed', ''))
             continue
 
@@ -602,6 +702,7 @@ def main():
     if not merged:
         # Even if we didn't send, record that we ran.
         try:
+            # Shared marker under ./output (symlink points to last processed account).
             write_json(base / 'output' / 'state' / 'last_run.json', {
                 'last_run_utc': utc_now(),
                 'sent': False,
@@ -611,6 +712,21 @@ def main():
             })
         except Exception:
             pass
+
+        # Per-account marker for easier debugging.
+        try:
+            for r in results:
+                acct_out = accounts_root / r.account
+                write_json(acct_out / 'state' / 'last_run.json', {
+                    'last_run_utc': utc_now(),
+                    'sent': False,
+                    'reason': 'no_merged_notification',
+                    'account': r.account,
+                    'result': r.__dict__,
+                })
+        except Exception:
+            pass
+
         return 0
 
     # Send ONCE

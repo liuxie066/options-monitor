@@ -96,11 +96,44 @@ def top_pick_line(row: pd.Series) -> str:
             parts.append(f"shares {shares_total}(-{shares_locked})")
             extra = " | " + " | ".join(parts)
         if row.get('strategy') == 'sell_put':
-            used_total = float(row.get('cash_secured_used_usd') or 0.0)
-            used_symbol = float(row.get('cash_secured_used_usd_symbol') or 0.0) if 'cash_secured_used_usd_symbol' in row else 0.0
+            # Prefer CNY-normalized figures for unified display.
+            used_total = None
+            used_symbol = None
+            try:
+                v = row.get('cash_secured_used_cny') or row.get('cash_secured_used_cny_total')
+                used_total = float(v) if v is not None and not pd.isna(v) else None
+            except Exception:
+                used_total = None
+            try:
+                v = row.get('cash_secured_used_cny_symbol')
+                used_symbol = float(v) if v is not None and not pd.isna(v) else None
+            except Exception:
+                used_symbol = None
+
+            req_cny = None
+            try:
+                v = row.get('cash_required_cny')
+                req_cny = float(v) if v is not None and not pd.isna(v) else None
+            except Exception:
+                req_cny = None
+
+            avail_cny = None
+            free_cny = None
+            try:
+                v = row.get('cash_available_cny')
+                avail_cny = float(v) if v is not None and not pd.isna(v) else None
+            except Exception:
+                avail_cny = None
+            try:
+                v = row.get('cash_free_cny')
+                free_cny = float(v) if v is not None and not pd.isna(v) else None
+            except Exception:
+                free_cny = None
+
+            # Legacy USD (keep as fallback only)
             req = row.get('cash_required_usd')
             try:
-                req = float(req) if req is not None and not pd.isna(req) else float(row.get('strike') or 0.0) * 100.0
+                req = float(req) if req is not None and not pd.isna(req) else None
             except Exception:
                 req = None
             avail = row.get('cash_available_usd')
@@ -109,39 +142,41 @@ def top_pick_line(row: pd.Series) -> str:
             free_est = row.get('cash_free_usd_est')
 
             parts = []
-            if req is not None and req > 0:
-                parts.append(f"cash_req ${req:,.0f}")
-            if used_total > 0:
-                parts.append(f"cash_used_total ${used_total:,.0f}")
-                if used_symbol > 0:
-                    parts.append(f"cash_used_sym ${used_symbol:,.0f}")
 
-            # Only show one pair: real USD cash first; else estimated.
-            try:
-                if avail is not None and not pd.isna(avail):
-                    parts.append(f"cash_avail ${float(avail):,.0f}")
-                elif avail_est is not None and not pd.isna(avail_est):
-                    parts.append(f"cash_avail_eq ${float(avail_est):,.0f}")
-            except Exception:
-                pass
-            try:
-                if free is not None and not pd.isna(free):
-                    parts.append(f"cash_free ${float(free):,.0f}")
-                elif free_est is not None and not pd.isna(free_est):
-                    parts.append(f"cash_free_eq ${float(free_est):,.0f}")
-            except Exception:
-                pass
+            # Unified CNY view
+            if req_cny is not None and req_cny > 0:
+                parts.append(f"cash_req_cny ¥{req_cny:,.0f}")
+            if used_total is not None and used_total > 0:
+                parts.append(f"cash_used_total_cny ¥{used_total:,.0f}")
+                if used_symbol is not None and used_symbol > 0:
+                    parts.append(f"cash_used_sym_cny ¥{used_symbol:,.0f}")
+            if avail_cny is not None and avail_cny > 0:
+                parts.append(f"cash_avail_cny ¥{avail_cny:,.0f}")
+            if free_cny is not None and free_cny > 0:
+                parts.append(f"cash_free_cny ¥{free_cny:,.0f}")
 
-            # Cash required for 1 contract (keep only requirement; do not compute remaining after buy)
-            try:
-                req_cny = row.get('cash_required_cny')
-                req_cny_v = float(req_cny) if req_cny is not None and not pd.isna(req_cny) else None
-                if req_cny_v is not None and req_cny_v > 0:
-                    parts.append(f"cash_req_cny ¥{req_cny_v:,.0f}")
-                elif req is not None and req > 0:
-                    parts.append(f"cash_req ${float(req):,.0f}")
-            except Exception:
-                pass
+            # If we don't have CNY view, fallback to legacy USD view
+            if not parts:
+                if req is not None and req > 0:
+                    parts.append(f"cash_req ${req:,.0f}")
+                if used_total is not None and used_total > 0:
+                    parts.append(f"cash_used_total ${used_total:,.0f}")
+                    if used_symbol is not None and used_symbol > 0:
+                        parts.append(f"cash_used_sym ${used_symbol:,.0f}")
+                try:
+                    if avail is not None and not pd.isna(avail):
+                        parts.append(f"cash_avail ${float(avail):,.0f}")
+                    elif avail_est is not None and not pd.isna(avail_est):
+                        parts.append(f"cash_avail_eq ${float(avail_est):,.0f}")
+                except Exception:
+                    pass
+                try:
+                    if free is not None and not pd.isna(free):
+                        parts.append(f"cash_free ${float(free):,.0f}")
+                    elif free_est is not None and not pd.isna(free_est):
+                        parts.append(f"cash_free_eq ${float(free_est):,.0f}")
+                except Exception:
+                    pass
 
             # include delta + suggested sell price (bid/ask/mid) and option currency for clarity
             try:
@@ -424,7 +459,12 @@ def main():
     previous_path = base / args.previous_summary
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    changes_path.parent.mkdir(parents=True, exist_ok=True)
+    # When changes-output is /dev/null (scheduled fast mode), avoid trying to create its parent.
+    try:
+        if str(changes_path) != '/dev/null':
+            changes_path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
     previous_path.parent.mkdir(parents=True, exist_ok=True)
 
     current = safe_read_csv(summary_path)
@@ -470,12 +510,18 @@ def main():
     changes_text = build_changes_text(current, previous)
 
     output_path.write_text(alert_text, encoding='utf-8')
-    changes_path.write_text(changes_text, encoding='utf-8')
+    try:
+        if str(changes_path) != '/dev/null':
+            changes_path.write_text(changes_text, encoding='utf-8')
+    except Exception:
+        pass
 
-    print(alert_text)
-    print(f'[DONE] alerts -> {output_path}')
-    print(changes_text)
-    print(f'[DONE] changes -> {changes_path}')
+    # In scheduled fast mode, keep stdout minimal; run_pipeline consumes output files.
+    if str(changes_path) != '/dev/null':
+        print(alert_text)
+        print(f'[DONE] alerts -> {output_path}')
+        print(changes_text)
+        print(f'[DONE] changes -> {changes_path}')
 
     if args.update_snapshot:
         snapshot_summary(summary_path, previous_path)
