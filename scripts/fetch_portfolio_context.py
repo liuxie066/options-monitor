@@ -30,8 +30,39 @@ def get_tenant_access_token(app_id: str, app_secret: str) -> str:
     return res["tenant_access_token"]
 
 
+def bitable_search_records(tenant_token: str, app_token: str, table_id: str, page_size: int = 500) -> list[dict]:
+    """Search records (preferred).
+
+    Feishu has been gradually deprecating the GET list-records API for some tenants.
+    The POST /records/search API is the recommended replacement and supports paging.
+    """
+    base = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/search"
+    headers = {
+        "Authorization": f"Bearer {tenant_token}",
+        # doc says: application/json; charset=utf-8 (we set json already)
+        "Content-Type": "application/json; charset=utf-8",
+    }
+
+    page_token = None
+    out: list[dict] = []
+    for _ in range(50):
+        url = f"{base}?page_size={page_size}" + (f"&page_token={page_token}" if page_token else "")
+        # empty body means: no filter, default view
+        res = http_json("POST", url, payload={}, headers=headers)
+        if res.get("code") != 0:
+            raise RuntimeError(f"bitable search records failed: {res}")
+        data = res.get("data", {})
+        out.extend(data.get("items", []))
+        if not data.get("has_more"):
+            break
+        page_token = data.get("page_token")
+        if not page_token:
+            break
+    return out
+
+
 def bitable_list_records(tenant_token: str, app_token: str, table_id: str, page_size: int = 500) -> list[dict]:
-    # docs: /open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records
+    """Legacy list records (kept as fallback)."""
     base = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records"
     headers = {"Authorization": f"Bearer {tenant_token}"}
     page_token = None
@@ -159,7 +190,12 @@ def main():
     app_token, table_id = holdings_ref.split("/", 1)
 
     token = get_tenant_access_token(app_id, app_secret)
-    records = bitable_list_records(token, app_token, table_id)
+    # Prefer the search API (newer, more compatible). Fallback to legacy list.
+    try:
+        records = bitable_search_records(token, app_token, table_id)
+    except Exception as e:
+        # last resort: some tenants still allow list
+        records = bitable_list_records(token, app_token, table_id)
     ctx = build_context(records, market=args.market, account=args.account)
 
     out_path = Path(args.out)

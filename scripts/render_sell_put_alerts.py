@@ -39,34 +39,37 @@ def render_one(row) -> str:
     strike = num(row["strike"], 0 if float(row["strike"]).is_integer() else 2)
     title = f"[Sell Put 候选] {symbol} {expiration} {strike}P"
 
-    cash_req = None
     cash_req_cny = None
-    try:
-        cash_req = float(row.get('cash_required_usd')) if not pd.isna(row.get('cash_required_usd')) else None
-    except Exception:
-        cash_req = None
-    if cash_req is None:
-        try:
-            cash_req = float(row['strike']) * 100.0
-        except Exception:
-            cash_req = None
-
     try:
         v = row.get('cash_required_cny')
         cash_req_cny = float(v) if v is not None and not pd.isna(v) else None
     except Exception:
         cash_req_cny = None
+    # Prefer CNY-normalized secured cash usage when available.
+    cash_used_total = None
+    cash_used_symbol = None
+    try:
+        v = row.get('cash_secured_used_cny_total')
+        cash_used_total = float(v) if v is not None and not pd.isna(v) else None
+    except Exception:
+        cash_used_total = None
+    try:
+        v = row.get('cash_secured_used_cny_symbol')
+        cash_used_symbol = float(v) if v is not None and not pd.isna(v) else None
+    except Exception:
+        cash_used_symbol = None
 
-    cash_used_total = 0.0
-    cash_used_symbol = 0.0
-    try:
-        cash_used_total = float(row.get('cash_secured_used_usd_total') or row.get('cash_secured_used_usd') or 0.0)
-    except Exception:
-        cash_used_total = 0.0
-    try:
-        cash_used_symbol = float(row.get('cash_secured_used_usd_symbol') or 0.0)
-    except Exception:
-        cash_used_symbol = 0.0
+    # Fallback to legacy USD columns (better than nothing)
+    if cash_used_total is None:
+        try:
+            cash_used_total = float(row.get('cash_secured_used_usd_total') or row.get('cash_secured_used_usd') or 0.0)
+        except Exception:
+            cash_used_total = 0.0
+    if cash_used_symbol is None:
+        try:
+            cash_used_symbol = float(row.get('cash_secured_used_usd_symbol') or 0.0)
+        except Exception:
+            cash_used_symbol = 0.0
 
     cash_avail = None
     cash_avail_est = None
@@ -127,19 +130,13 @@ def render_one(row) -> str:
         f"DTE: {int(row['dte'])}",
         f"卖出参考价(mid): {num(row['mid'])}  (收益率按 mid 价计算)",
         "",
-        f"担保现金需求(1张): {('-' if cash_req is None else '$' + num(cash_req, 0))} / {('-' if cash_req_cny is None else '¥' + num(cash_req_cny, 0))}",
-        f"已占用担保现金(全账户): {'$' + num(cash_used_total, 0) if cash_used_total else '$0'}",
-        f"其中该标的占用: {'$' + num(cash_used_symbol, 0) if cash_used_symbol else '$0'}",
-        f"富途CNY现金(base): {('-' if cash_avail_cny is None else '¥' + num(cash_avail_cny, 0))}",
-        f"现金余量(base, 扣占用折算): {('-' if cash_free_cny is None else '¥' + num(cash_free_cny, 0))}",
-        f"富途USD现金: {('-' if cash_avail is None else '$' + num(cash_avail, 0))}",
-        f"现金余量(USD口径): {('-' if cash_free is None else '$' + num(cash_free, 0))}",
-        f"加仓后余量(USD口径): {('-' if headroom is None else '$' + num(headroom, 0))}",
-        f"富途USD现金(折算, 以CNY现金换算): {('-' if cash_avail_est is None else '$' + num(cash_avail_est, 0))}",
-        f"现金余量(折算): {('-' if cash_free_est is None else '$' + num(cash_free_est, 0))}",
-        f"加仓后余量(折算): {('-' if headroom_est is None else '$' + num(headroom_est, 0))}",
+        f"担保现金需求(1张, CNY): {('-' if cash_req_cny is None else '¥' + num(cash_req_cny, 0))}",
+        f"已占用担保现金(全账户, CNY口径): {('-' if cash_used_total is None else '¥' + num(cash_used_total, 0))}",
+        f"其中该标的占用(估算, CNY口径): {('-' if cash_used_symbol is None else '¥' + num(cash_used_symbol, 0))}",
+        f"富途现金(base, CNY): {('-' if cash_avail_cny is None else '¥' + num(cash_avail_cny, 0))}",
+        f"现金余量(base, 扣占用折算, CNY): {('-' if cash_free_cny is None else '¥' + num(cash_free_cny, 0))}",
         "",
-        f"净收入: {num(row['net_income'])}",
+        f"净收入({str(row.get('currency') or row.get('option_ccy') or 'N/A').upper()}): {num(row['net_income'])}",
         f"净年化: {pct(row['annualized_net_return_on_cash_basis'])}",
         f"OTM: {pct(row['otm_pct'])}",
         f"风险标签: {row.get('risk_label', '-')}",
