@@ -972,32 +972,41 @@ def main():
 
             portfolio_ctx = None
             option_ctx = None
+
+            # Cache policy (TTL seconds)
+            # - scheduled: longer TTL (reduce PM subprocess overhead)
+            # - dev: shorter TTL (keep reasonably fresh)
+            ttl_opt_ctx = int(runtime.get('option_positions_context_ttl_sec', 900 if IS_SCHEDULED else 120) or 0)
+            ttl_port_ctx = int(runtime.get('portfolio_context_ttl_sec', 900 if IS_SCHEDULED else 60) or 0)
+
+            # 1) portfolio_context cache
             try:
-                cmd = [
-                    py, 'scripts/fetch_portfolio_context.py',
-                    '--pm-config', str(pm_config),
-                    '--market', str(market),
-                    '--out', 'output/state/portfolio_context.json',
-                ]
-                if account:
-                    cmd.extend(['--account', str(account)])
-                run(cmd, cwd=base, timeout_sec=portfolio_timeout_sec)
-                portfolio_ctx = json.loads((base / 'output/state/portfolio_context.json').read_text(encoding='utf-8'))
+                port_path = (base / 'output/state/portfolio_context.json').resolve()
+                if ttl_port_ctx > 0 and is_fresh(port_path, ttl_port_ctx):
+                    portfolio_ctx = json.loads(port_path.read_text(encoding='utf-8'))
+                else:
+                    cmd = [
+                        py, 'scripts/fetch_portfolio_context.py',
+                        '--pm-config', str(pm_config),
+                        '--market', str(market),
+                        '--out', 'output/state/portfolio_context.json',
+                    ]
+                    if account:
+                        cmd.extend(['--account', str(account)])
+                    run(cmd, cwd=base, timeout_sec=portfolio_timeout_sec)
+                    portfolio_ctx = json.loads(port_path.read_text(encoding='utf-8'))
             except BaseException as e:
                 # Important: run() raises SystemExit on non-zero return codes.
                 # For unattended cron, portfolio context is best-effort and should not kill the whole scan.
                 print(f"[WARN] portfolio context not available: {e}")
                 portfolio_ctx = None
 
+            # 2) option_positions_context cache (and auto-close only on refresh)
             try:
-                option_ctx_path = (base / 'output/state/option_positions_context.json').resolve()
-                # Dev speed optimization: cache option_positions_context for a short TTL.
-                # This is safe because it only affects cash-secured/locked-shares calculations and auto-close maintenance.
-                # When stale, we'll refresh.
-                ttl_sec = int((runtime.get('option_positions_context_ttl_sec') if isinstance(runtime, dict) else None) or (120 if not IS_SCHEDULED else 900))
-
-                if is_fresh(option_ctx_path, ttl_sec):
-                    option_ctx = json.loads(option_ctx_path.read_text(encoding='utf-8'))
+                opt_path = (base / 'output/state/option_positions_context.json').resolve()
+                refreshed = False
+                if ttl_opt_ctx > 0 and is_fresh(opt_path, ttl_opt_ctx):
+                    option_ctx = json.loads(opt_path.read_text(encoding='utf-8'))
                 else:
                     cmd = [
                         py, 'scripts/fetch_option_positions_context.py',
@@ -1008,8 +1017,10 @@ def main():
                     if account:
                         cmd.extend(['--account', str(account)])
                     run(cmd, cwd=base, timeout_sec=portfolio_timeout_sec)
-                    option_ctx = json.loads(option_ctx_path.read_text(encoding='utf-8'))
+                    option_ctx = json.loads(opt_path.read_text(encoding='utf-8'))
+                    refreshed = True
 
+                if refreshed:
                     # Auto-close expired open positions (table maintenance) without extra scans.
                     # Only run when we refreshed context (avoid repeated close calls during rapid dev loops).
                     try:
