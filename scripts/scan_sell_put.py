@@ -126,6 +126,8 @@ def main():
     parser.add_argument("--min-net-income", type=float, default=50.0)
     parser.add_argument("--min-strike", type=float, default=None)
     parser.add_argument("--max-strike", type=float, default=None)
+    parser.add_argument("--min-strike-above", type=float, default=None, help="min (spot-strike) absolute amount, in option currency")
+    parser.add_argument("--max-strike-above", type=float, default=None, help="max (spot-strike) absolute amount, in option currency")
     parser.add_argument("--min-open-interest", type=float, default=100)
     parser.add_argument("--min-volume", type=float, default=10)
     parser.add_argument("--max-spread-ratio", type=float, default=0.30)
@@ -212,6 +214,17 @@ def main():
             metrics = compute_metrics(row)
             if not metrics:
                 continue
+            # Optional: absolute distance filter (spot - strike)
+            if args.min_strike_above is not None or args.max_strike_above is not None:
+                spot = safe_float(row.get('spot'))
+                strike = safe_float(row.get('strike'))
+                if spot is None or strike is None:
+                    continue
+                diff = spot - strike
+                if args.min_strike_above is not None and diff < float(args.min_strike_above):
+                    continue
+                if args.max_strike_above is not None and diff > float(args.max_strike_above):
+                    continue
             if metrics["otm_pct"] < args.min_otm_pct:
                 continue
             if metrics["net_income"] < args.min_net_income:
