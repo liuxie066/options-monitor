@@ -145,9 +145,25 @@ def normalize_option_rows(symbol: str, expiration: str, option_type: str, df: pd
 
 
 def fetch_symbol(symbol: str, limit_expirations: int | None = None) -> dict[str, Any]:
+    """Fetch a symbol's option chain using yfinance.
+
+    NOTE: Yahoo may rate-limit (YFRateLimitError). For pipeline stability we prefer to
+    degrade gracefully (return empty rows + error meta) instead of crashing the whole run.
+    """
     ticker = yf.Ticker(symbol)
-    spot = get_spot_price(ticker)
-    expirations = list(ticker.options or [])
+    try:
+        spot = get_spot_price(ticker)
+        expirations = list(ticker.options or [])
+    except Exception as e:
+        return {
+            "symbol": symbol,
+            "spot": None,
+            "expiration_count": 0,
+            "expirations": [],
+            "rows": [],
+            "meta": {"source": "yahoo", "error": f"{type(e).__name__}: {e}"},
+        }
+
     if limit_expirations:
         expirations = expirations[:limit_expirations]
 
