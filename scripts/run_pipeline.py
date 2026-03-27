@@ -332,6 +332,17 @@ def _shared_scan_paths_put(shared_dir: Path, symbol: str) -> tuple[Path, Path]:
     return raw, labeled_base
 
 
+
+def _shared_scan_paths_call(shared_dir: Path, symbol: str) -> tuple[Path, Path]:
+    sym = str(symbol)
+    report_dir = (shared_dir / 'reports').resolve()
+    report_dir.mkdir(parents=True, exist_ok=True)
+    lower = sym.lower()
+    raw = report_dir / f"{lower}_sell_call_candidates.csv"
+    labeled_base = report_dir / f"{lower}_sell_call_candidates_labeled_base.csv"
+    return raw, labeled_base
+
+
 def _copy_if_exists(src: Path, dst: Path) -> bool:
     try:
         if src.exists() and src.stat().st_size > 0:
@@ -861,42 +872,57 @@ def process_symbol(
         shares_total = shares_override if shares_override is not None else cc.get('shares', 100)
         avg_cost = avg_cost_override if avg_cost_override is not None else cc['avg_cost']
 
-        cmd = [
-            py, 'scripts/scan_sell_call.py',
-            '--symbols', symbol,
-            '--avg-cost', str(avg_cost),
-            '--shares', str(shares_total),
-            '--min-dte', str(cc.get('min_dte', 20)),
-            '--max-dte', str(cc.get('max_dte', 90)),
-            '--min-otm-pct', str(cc.get('min_otm_pct', 0.0)),
-            '--min-annualized-net-return', str(cc.get('min_annualized_net_return', 0.03)),
-            '--min-if-exercised-total-return', str(cc.get('min_if_exercised_total_return', 0.0)),
-            '--min-open-interest', str(cc.get('min_open_interest', 100)),
-            '--min-volume', str(cc.get('min_volume', 10)),
-            '--max-spread-ratio', str(cc.get('max_spread_ratio', 0.30)),
-        ]
-        if cc.get('min_strike') is not None:
-            cmd.extend(['--min-strike', str(cc.get('min_strike'))])
-        if cc.get('max_strike') is not None:
-            cmd.extend(['--max-strike', str(cc.get('max_strike'))])
-        # Data quality gates (optional)
-        if cc.get('require_bid_ask'):
-            cmd.append('--require-bid-ask')
-        if cc.get('min_iv') is not None:
-            cmd.extend(['--min-iv', str(cc.get('min_iv'))])
-        if cc.get('max_iv') is not None:
-            cmd.extend(['--max-iv', str(cc.get('max_iv'))])
+        # Shared scan reuse (sell_call): reuse base candidates across accounts within the same tick
+        shared_dir = Path(SHARED_SCAN_DIR).resolve() if SHARED_SCAN_DIR else None
+        reuse_ok_call = False
+        if REUSE_SHARED_SCAN and shared_dir:
+            try:
+                cc_raw_shared, cc_lab_shared = _shared_scan_paths_call(shared_dir, symbol)
+                cc_raw_dst = report_dir / f"{symbol_lower}_sell_call_candidates.csv"
+                cc_lab_dst = report_dir / f"{symbol_lower}_sell_call_candidates_labeled.csv"
+                ok1 = _copy_if_exists(cc_raw_shared, cc_raw_dst)
+                ok2 = _copy_if_exists(cc_lab_shared, cc_lab_dst)
+                reuse_ok_call = bool(ok1 and ok2)
+            except Exception:
+                reuse_ok_call = False
 
-        # Delta filter (optional): call delta in [min_delta, max_delta]
-        if cc.get('min_delta') is not None:
-            cmd.extend(['--min-delta', str(cc.get('min_delta'))])
-        if cc.get('max_delta') is not None:
-            cmd.extend(['--max-delta', str(cc.get('max_delta'))])
-        run(cmd, cwd=base, timeout_sec=timeout_sec)
+        if not reuse_ok_call:
+            cmd = [
+                py, 'scripts/scan_sell_call.py',
+                '--symbols', symbol,
+                '--avg-cost', str(avg_cost),
+                '--shares', str(shares_total),
+                '--min-dte', str(cc.get('min_dte', 20)),
+                '--max-dte', str(cc.get('max_dte', 90)),
+                '--min-otm-pct', str(cc.get('min_otm_pct', 0.0)),
+                '--min-annualized-net-return', str(cc.get('min_annualized_net_return', 0.03)),
+                '--min-if-exercised-total-return', str(cc.get('min_if_exercised_total_return', 0.0)),
+                '--min-open-interest', str(cc.get('min_open_interest', 100)),
+                '--min-volume', str(cc.get('min_volume', 10)),
+                '--max-spread-ratio', str(cc.get('max_spread_ratio', 0.30)),
+            ]
+            if cc.get('min_strike') is not None:
+                cmd.extend(['--min-strike', str(cc.get('min_strike'))])
+            if cc.get('max_strike') is not None:
+                cmd.extend(['--max-strike', str(cc.get('max_strike'))])
+            # Data quality gates (optional)
+            if cc.get('require_bid_ask'):
+                cmd.append('--require-bid-ask')
+            if cc.get('min_iv') is not None:
+                cmd.extend(['--min-iv', str(cc.get('min_iv'))])
+            if cc.get('max_iv') is not None:
+                cmd.extend(['--max-iv', str(cc.get('max_iv'))])
 
-        shared_cc = report_dir / 'sell_call_candidates.csv'
-        symbol_cc = report_dir / f'{symbol_lower}_sell_call_candidates.csv'
-        copy_if_exists(shared_cc, symbol_cc)
+            # Delta filter (optional): call delta in [min_delta, max_delta]
+            if cc.get('min_delta') is not None:
+                cmd.extend(['--min-delta', str(cc.get('min_delta'))])
+            if cc.get('max_delta') is not None:
+                cmd.extend(['--max-delta', str(cc.get('max_delta'))])
+            run(cmd, cwd=base, timeout_sec=timeout_sec)
+
+            shared_cc = report_dir / 'sell_call_candidates.csv'
+            symbol_cc = report_dir / f'{symbol_lower}_sell_call_candidates.csv'
+            copy_if_exists(shared_cc, symbol_cc)
 
         df_cc = safe_read_csv(symbol_cc)
         # enrich candidates with holdings + option-locked shares (account-aware)
