@@ -615,7 +615,12 @@ def main():
     ap.add_argument('--accounts', nargs='+', required=True)
     ap.add_argument('--default-account', default='lx')
     ap.add_argument('--market-config', default='auto', choices=['auto','hk','us','all'], help='Select symbols by market at config-load time (auto=by session).')
+    ap.add_argument('--no-send', action='store_true', help='Do not send messages (for smoke tests / debugging).')
+    ap.add_argument('--smoke', action='store_true', help='Smoke mode: run scheduler decisions but skip pipeline execution.')
     args = ap.parse_args()
+
+    no_send = bool(getattr(args, 'no_send', False))
+    smoke = bool(getattr(args, 'smoke', False))
 
     base = Path(__file__).resolve().parents[1]
     vpy = base / '.venv' / 'bin' / 'python'
@@ -846,6 +851,10 @@ def main():
         should_run = bool(decision.get('should_run_scan'))
         should_notify = bool(decision.get('should_notify'))
         reason = str(decision.get('reason') or '')
+
+        if smoke:
+            should_run = False
+            reason = (str(reason) + ' | smoke_skip_pipeline').strip()
         acct_metrics['should_notify'] = bool(should_notify)
         acct_metrics['reason'] = str(reason)
 
@@ -986,34 +995,42 @@ def main():
 
         return 0
 
+    no_send = bool(getattr(args, 'no_send', False))
+
     # Send ONCE
     channel = (base_cfg.get('notifications') or {}).get('channel') or 'feishu'
     target = (base_cfg.get('notifications') or {}).get('target')
-    if not target:
-        raise SystemExit('[CONFIG_ERROR] notifications.target is required')
 
-    send = subprocess.run(
-        ['openclaw', 'message', 'send', '--channel', str(channel), '--target', str(target), '--message', merged, '--json'],
-        cwd=str(base),
-        capture_output=True,
-        text=True,
-    )
-    if send.returncode != 0:
-        raise SystemExit(send.returncode)
+    if not no_send:
+        if not target:
+            raise SystemExit('[CONFIG_ERROR] notifications.target is required')
+
+        send = subprocess.run(
+            ['openclaw', 'message', 'send', '--channel', str(channel), '--target', str(target), '--message', merged, '--json'],
+            cwd=str(base),
+            capture_output=True,
+            text=True,
+        )
+        if send.returncode != 0:
+            raise SystemExit(send.returncode)
+    else:
+        # Smoke/debug: do not send and do not mark notified
+        target = None
 
     # Mark notified ONCE (global cooldown, unified across accounts)
-    try:
-        if results:
-            acct0 = results[0].account
-            acct_out0 = accounts_root / acct0
-            cfg_override0 = acct_out0 / 'state' / 'config.override.json'
-            subprocess.run([str(vpy), 'scripts/scan_scheduler.py', '--config', str(cfg_override0), '--state', str(state_path), '--mark-notified'], cwd=str(base))
-    except Exception:
-        pass
+    if not no_send:
+        try:
+            if results:
+                acct0 = results[0].account
+                acct_out0 = accounts_root / acct0
+                cfg_override0 = acct_out0 / 'state' / 'config.override.json'
+                subprocess.run([str(vpy), 'scripts/scan_scheduler.py', '--config', str(cfg_override0), '--state', str(state_path), '--mark-notified'], cwd=str(base))
+        except Exception:
+            pass
 
     try:
-        tick_metrics['sent'] = True
-        tick_metrics['reason'] = 'sent'
+        tick_metrics['sent'] = (not no_send)
+        tick_metrics['reason'] = ('sent' if (not no_send) else 'no_send')
         write_json(tick_metrics_path, tick_metrics)
         append_json_list(tick_metrics_history_path, tick_metrics)
     except Exception:
