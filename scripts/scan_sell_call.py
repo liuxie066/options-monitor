@@ -118,6 +118,7 @@ def main():
     parser.add_argument('--shares', type=int, default=100)
     parser.add_argument('--min-dte', type=int, default=7)
     parser.add_argument('--max-dte', type=int, default=90)
+    parser.add_argument('--min-otm-pct', type=float, default=0.0, help='min OTM percent for calls: (strike-spot)/spot (e.g. 0.05)')
     parser.add_argument('--min-strike', type=float, default=None)
     parser.add_argument('--max-strike', type=float, default=None)
     parser.add_argument('--min-annualized-net-return', type=float, default=0.03)
@@ -154,6 +155,15 @@ def main():
             strike = safe_float(row.get('strike'))
             if strike is None:
                 continue
+
+            # OTM filter for calls: (strike - spot)/spot >= min_otm_pct
+            if args.min_otm_pct is not None and float(args.min_otm_pct) > 0:
+                spot = safe_float(row.get('spot'))
+                if spot is None or spot <= 0:
+                    continue
+                otm_pct = (strike - spot) / spot
+                if otm_pct < float(args.min_otm_pct):
+                    continue
             if args.min_strike is not None and strike < args.min_strike:
                 continue
             if args.max_strike is not None and strike > args.max_strike:
