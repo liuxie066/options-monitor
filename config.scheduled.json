@@ -210,14 +210,25 @@
       },
       "use": "put_base",
       "sell_put": {
-        "enabled": true,
+        "enabled": false,
         "min_dte": 5,
         "max_dte": 45,
         "min_strike": 0,
         "max_strike": 999999
       },
       "sell_call": {
-        "enabled": false
+        "enabled": true,
+        "min_dte": 10,
+        "max_dte": 90,
+        "min_strike": 30,
+        "avg_cost": 0.01,
+        "shares": 100,
+        "min_annualized_net_return": 0.03,
+        "min_if_exercised_total_return": 0.0,
+        "min_open_interest": 50,
+        "min_volume": 10,
+        "max_spread_ratio": 0.3,
+        "require_bid_ask": true
       },
       "market": "HK"
     },
