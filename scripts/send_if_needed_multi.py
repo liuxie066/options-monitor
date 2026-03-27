@@ -32,6 +32,7 @@ import json
 import os
 import re
 import subprocess
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta, time
@@ -585,6 +586,14 @@ def main():
     shared_scan_ready = False
     # shared required_data dir should already exist (created by prefetch step)
     shared_required = (base / 'output_shared' / 'required_data').resolve()
+    tick_metrics_path = (base / 'output_shared' / 'state' / 'tick_metrics.json').resolve()
+    tick_metrics = {
+        'as_of_utc': utc_now(),
+        'markets_to_run': markets_to_run,
+        'accounts': [],
+        'sent': False,
+        'reason': '',
+    }
 
     for acct in args.accounts:
         acct = str(acct).strip()
@@ -592,6 +601,15 @@ def main():
             continue
 
         acct_out = accounts_root / acct
+        acct_metrics = {
+            'account': acct,
+            'scheduler_ms': None,
+            'pipeline_ms': None,
+            'ran_scan': False,
+            'should_notify': False,
+            'meaningful': False,
+            'reason': '',
+        }
         ensure_account_output_dir(acct_out)
 
         # Switch ./output -> this account
@@ -643,13 +661,20 @@ def main():
                 sch_args.extend(['--schedule-key', 'schedule_hk'])
         except Exception:
             pass
+        t_sch0 = time.monotonic()
         sch = subprocess.run(
             sch_args,
             cwd=str(base),
             capture_output=True,
             text=True,
         )
+        acct_metrics['scheduler_ms'] = int((time.monotonic() - t_sch0) * 1000)
         if sch.returncode != 0:
+            acct_metrics['ran_scan'] = False
+            acct_metrics['should_notify'] = False
+            acct_metrics['meaningful'] = False
+            acct_metrics['reason'] = f"scheduler error: {(sch.stderr or sch.stdout).strip()}"
+            tick_metrics['accounts'].append(acct_metrics)
             results.append(AccountResult(acct, False, False, False, f"scheduler error: {(sch.stderr or sch.stdout).strip()}", ''))
             continue
 
@@ -657,8 +682,13 @@ def main():
         should_run = bool(decision.get('should_run_scan'))
         should_notify = bool(decision.get('should_notify'))
         reason = str(decision.get('reason') or '')
+        acct_metrics['should_notify'] = bool(should_notify)
+        acct_metrics['reason'] = str(reason)
 
         if not should_run:
+            acct_metrics['ran_scan'] = False
+            acct_metrics['meaningful'] = False
+            tick_metrics['accounts'].append(acct_metrics)
             results.append(AccountResult(acct, False, should_notify, False, reason, ''))
             continue
 
@@ -676,18 +706,24 @@ def main():
         if shared_scan_ready:
             pipe_cmd.append('--reuse-shared-scan')
 
+        t_pipe0 = time.monotonic()
         pipe = subprocess.run(
             pipe_cmd,
             cwd=str(base),
             capture_output=True,
             text=True,
         )
+        acct_metrics['pipeline_ms'] = int((time.monotonic() - t_pipe0) * 1000)
         if pipe.returncode != 0:
             # Only print the tail for debugging (avoid noisy logs on success)
             out = ((pipe.stdout or '') + '\n' + (pipe.stderr or '')).strip()
             if out:
                 tail = '\n'.join(out.splitlines()[-60:])
                 print(f"[ERR] pipeline failed ({acct})\n{tail}")
+            acct_metrics['ran_scan'] = True
+            acct_metrics['meaningful'] = False
+            acct_metrics['reason'] = 'pipeline failed'
+            tick_metrics['accounts'].append(acct_metrics)
             results.append(AccountResult(acct, True, should_notify, False, 'pipeline failed', ''))
             continue
 
@@ -733,6 +769,11 @@ def main():
         except Exception:
             pass
 
+        acct_metrics['ran_scan'] = True
+        acct_metrics['should_notify'] = bool(should_notify_effective)
+        acct_metrics['meaningful'] = bool(meaningful)
+        acct_metrics['reason'] = str(reason)
+        tick_metrics['accounts'].append(acct_metrics)
         results.append(AccountResult(acct, True, should_notify_effective, meaningful, reason, text))
 
     merged = build_merged_message(results, base_cfg=base_cfg, cash_accounts=['lx', 'sy'])
@@ -764,6 +805,13 @@ def main():
         except Exception:
             pass
 
+        try:
+            tick_metrics['sent'] = False
+            tick_metrics['reason'] = 'no_merged_notification'
+            write_json(tick_metrics_path, tick_metrics)
+        except Exception:
+            pass
+
         return 0
 
     # Send ONCE
@@ -788,6 +836,13 @@ def main():
             acct_out0 = accounts_root / acct0
             cfg_override0 = acct_out0 / 'state' / 'config.override.json'
             subprocess.run([str(vpy), 'scripts/scan_scheduler.py', '--config', str(cfg_override0), '--state', str(state_path), '--mark-notified'], cwd=str(base))
+    except Exception:
+        pass
+
+    try:
+        tick_metrics['sent'] = True
+        tick_metrics['reason'] = 'sent'
+        write_json(tick_metrics_path, tick_metrics)
     except Exception:
         pass
 
