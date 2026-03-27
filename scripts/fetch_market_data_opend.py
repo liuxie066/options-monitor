@@ -25,6 +25,8 @@ Usage:
 import argparse
 import json
 import math
+import random
+import time
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -103,17 +105,70 @@ def get_spot_opend(ctx, underlier_code: str) -> float | None:
         return None
 
 
-def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = '127.0.0.1', port: int = 11111, spot_override: float | None = None, *, spot_from_pm: bool = False, base_dir: Path | None = None, option_types: str = 'put,call', min_strike: float | None = None, max_strike: float | None = None) -> dict[str, Any]:
+def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = '127.0.0.1', port: int = 11111, spot_override: float | None = None, *, spot_from_pm: bool = False, base_dir: Path | None = None, option_types: str = 'put,call', min_strike: float | None = None, max_strike: float | None = None, retry_max_attempts: int = 4, retry_time_budget_sec: float = 8.0, retry_base_delay_sec: float = 0.8, retry_max_delay_sec: float = 6.0, no_retry: bool = False) -> dict[str, Any]:
     from futu import OpenQuoteContext, RET_OK
 
     u = normalize_underlier(symbol)
     ctx = OpenQuoteContext(host=host, port=port)
     try:
+        def _is_rate_limited(err: str) -> bool:
+            s = (err or '')
+            sl = s.lower()
+            return ('频率太高' in s) or ('最多10次' in s) or ('rate limit' in sl) or ('too frequent' in sl)
+
+        def _is_transient(err: str) -> bool:
+            sl = (err or '').lower()
+            keys = ['timeout', 'timed out', 'econnreset', 'econnrefused', 'connection', 'disconnected', 'callclose']
+            return any(k in sl for k in keys)
+
+        def _opend_call_with_retry(what: str, fn, quiet: bool = False):
+            if no_retry or (retry_max_attempts <= 1):
+                return fn()
+            t0 = time.monotonic()
+            attempt = 0
+            delay = float(retry_base_delay_sec or 0.5)
+            max_delay = float(retry_max_delay_sec or 6.0)
+            budget = float(retry_time_budget_sec or 0.0)
+            last_err = None
+            while True:
+                attempt += 1
+                try:
+                    out = fn()
+                    if isinstance(out, tuple) and len(out) >= 2:
+                        ret, data = out[0], out[1]
+                        if ret == RET_OK:
+                            return out
+                        last_err = str(data)
+                        raise RuntimeError(f"ret={ret} err={last_err}")
+                    return out
+                except Exception as e:
+                    last_err = f"{type(e).__name__}: {e}"
+
+                if attempt >= int(retry_max_attempts):
+                    raise RuntimeError(f"{what} failed after {attempt} attempts: {last_err}")
+
+                sleep_s = min(max_delay, max(0.0, delay))
+                if _is_rate_limited(last_err or ''):
+                    sleep_s = max(sleep_s, 2.0)
+
+                if (budget > 0) and ((time.monotonic() - t0) + sleep_s > budget):
+                    raise RuntimeError(f"{what} failed (retry budget {budget}s exceeded): {last_err}")
+
+                # If not transient or rate-limited, don't keep retrying.
+                if (not _is_transient(last_err or '')) and (not _is_rate_limited(last_err or '')):
+                    raise RuntimeError(f"{what} failed (non-transient): {last_err}")
+
+                if not quiet:
+                    print(f"[WARN] {what} failed (attempt {attempt}/{retry_max_attempts}): {last_err}; sleep {sleep_s:.1f}s")
+
+                time.sleep(sleep_s + random.uniform(0.0, 0.2))
+                delay = min(max_delay, delay * 2.0)
+
         # Fail fast if OpenD requires phone verification / cannot connect.
         # Without this, futu-api may retry for minutes, hanging unattended cron jobs.
         try:
             # Prefer get_global_state() which exists across futu-api versions.
-            ret0, state = ctx.get_global_state()
+            ret0, state = _opend_call_with_retry('get_global_state', lambda: ctx.get_global_state(), quiet=True)
             if ret0 != RET_OK:
                 raise RuntimeError(f"OpenD not ready (get_global_state ret={ret0})")
             if not isinstance(state, dict) or state.get('program_status_type') not in (None, '', 'READY'):
@@ -171,7 +226,7 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
                 pass
         # spot may still be None; keep it.
 
-        ret, chain = ctx.get_option_chain(u.code)
+        ret, chain = _opend_call_with_retry('get_option_chain', lambda: ctx.get_option_chain(u.code), quiet=False)
         if ret != RET_OK:
             raise RuntimeError(f"get_option_chain failed: {chain}")
 
@@ -202,7 +257,10 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
         BATCH = 200
         for i in range(0, len(option_codes), BATCH):
             batch = option_codes[i:i+BATCH]
-            ret2, snap = ctx.get_market_snapshot(batch)
+            try:
+                ret2, snap = _opend_call_with_retry('get_market_snapshot(batch)', lambda: ctx.get_market_snapshot(batch), quiet=True)
+            except Exception:
+                ret2, snap = (None, None)
             if ret2 == RET_OK and snap is not None and not snap.empty:
                 snapshots.append(snap)
 
@@ -315,6 +373,17 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
                 'snapshots_rows': int(len(snap_df)) if not snap_df.empty else 0,
             },
         }
+    except Exception as e:
+        return {
+            'symbol': symbol,
+            'underlier_code': (u.code if 'u' in locals() else None),
+            'spot': spot_override,
+            'expiration_count': 0,
+            'expirations': [],
+            'rows': [],
+            'meta': {'source': 'opend', 'host': host, 'port': port, 'error': f'{type(e).__name__}: {e}'},
+        }
+
     finally:
         try:
             ctx.close()
@@ -357,6 +426,11 @@ def main():
     ap.add_argument('--spot', type=float, default=None, help='override spot if OpenD has no quote right')
     ap.add_argument('--spot-from-pm', action='store_true', help='for US symbols: if OpenD has no stock quote right, fallback to portfolio-management get_price()')
     ap.add_argument('--quiet', action='store_true', help='quiet mode: suppress non-critical prints')
+    ap.add_argument('--no-retry', action='store_true', help='Disable OpenD retries/backoff')
+    ap.add_argument('--retry-max-attempts', type=int, default=4)
+    ap.add_argument('--retry-time-budget-sec', type=float, default=8.0)
+    ap.add_argument('--retry-base-delay-sec', type=float, default=0.8)
+    ap.add_argument('--retry-max-delay-sec', type=float, default=6.0)
     args = ap.parse_args()
 
     opt_types = set([s.strip().lower() for s in str(args.option_types or '').split(',') if s.strip()])
@@ -377,6 +451,11 @@ def main():
             option_types=('put,call' if (want_put and want_call) else ('put' if want_put else 'call')),
             min_strike=args.min_strike,
             max_strike=args.max_strike,
+            retry_max_attempts=int(args.retry_max_attempts),
+            retry_time_budget_sec=float(args.retry_time_budget_sec),
+            retry_base_delay_sec=float(args.retry_base_delay_sec),
+            retry_max_delay_sec=float(args.retry_max_delay_sec),
+            no_retry=bool(args.no_retry),
         )
         raw_path, csv_path = save_outputs(base, sym, payload)
         if not args.quiet:
