@@ -490,30 +490,6 @@ def build_merged_message(
     return '\n'.join(lines).strip() + '\n'
 
 
-
-
-def prefetch_required_data(base: Path, vpy: Path, cfg: dict, symbols: list[dict]) -> None:
-    """Fetch required_data once per tick to reduce OpenD rate pressure.
-
-    This writes into ./output (which is a symlink). Caller should point ./output to the DEFAULT account
-    (or any shared account dir) before calling.
-
-    It runs run_pipeline.py in scheduled fetch-only mode for the selected symbols.
-    """
-    if not symbols:
-        return
-
-    tmp_cfg = dict(cfg)
-    tmp_cfg['symbols'] = symbols
-    tmp_path = (base / 'output' / 'state' / 'config.prefetch.json').resolve()
-    tmp_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path.write_text(json.dumps(tmp_cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
-    # Stage fetch: only pulls required_data, no portfolio/scan/alert/notify.
-    cmd = [str(vpy), 'scripts/run_pipeline.py', '--config', str(tmp_path), '--mode', 'scheduled', '--stage', 'fetch']
-    subprocess.run(cmd, cwd=str(base), check=False, capture_output=True, text=True)
-
-
 def _tcp_open(host: str, port: int, timeout_sec: float = 1.0) -> bool:
     try:
         with socket.create_connection((host, int(port)), timeout=timeout_sec):
@@ -557,21 +533,7 @@ def main():
             if not _tcp_open(host, port, timeout_sec=1.0):
                 # Record a last_run marker in each account state dir for observability, then exit.
                 now = utc_now()
-            
-
-    # Prefetch required_data once per tick (shared across accounts) to reduce OpenD chain/snapshot calls
-    try:
-        syms_all = base_cfg.get('symbols') or []
-        if markets_to_run:
-            syms_all = [it for it in syms_all if isinstance(it, dict) and (it.get('market') in markets_to_run)]
-        # Point ./output symlink to default account dir so prefetch writes into a stable shared location
-        atomic_symlink(out_link, accounts_root / default_acct)
-        prefetch_required_data(base, vpy, base_cfg, syms_all)
-    except Exception:
-        # Best-effort: do not block per-account runs
-        pass
-
-    for acct in args.accounts:
+                for acct in args.accounts:
                     acct = str(acct).strip().lower()
                     if not acct:
                         continue

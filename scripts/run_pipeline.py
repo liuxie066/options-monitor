@@ -316,6 +316,40 @@ def process_symbol(
     report_dir = base / 'output' / 'reports'
     summary_rows: list[dict] = []
 
+    # Multiplier static cache (best-effort): fill missing/invalid multiplier in required_data.csv
+    def _apply_multiplier_cache_to_required_data_csv(symbol: str) -> None:
+        try:
+            from scripts import multiplier_cache
+
+            cache_path = multiplier_cache.default_cache_path(base)
+            cache = multiplier_cache.load_cache(cache_path)
+            m = multiplier_cache.get_cached_multiplier(cache, symbol)
+            if not m:
+                return
+
+            parsed = (base / 'output' / 'parsed' / f"{symbol}_required_data.csv").resolve()
+            if not parsed.exists() or parsed.stat().st_size <= 0:
+                return
+
+            df = pd.read_csv(parsed)
+            if df.empty:
+                return
+
+            if 'multiplier' not in df.columns:
+                df['multiplier'] = float(m)
+            else:
+                try:
+                    mm = pd.to_numeric(df['multiplier'], errors='coerce')
+                    bad = mm.isna() | (mm <= 0)
+                    if bad.any():
+                        df.loc[bad, 'multiplier'] = float(m)
+                except Exception:
+                    df['multiplier'] = float(m)
+
+            df.to_csv(parsed, index=False)
+        except Exception:
+            return
+
     # ===== Fetch market data =====
     # Default: Yahoo (US)
     # Optional: OpenD (HK/US) when fetch.source == 'opend'
@@ -338,12 +372,14 @@ def process_symbol(
             # Quiet mode for fetch_market_data_opend.py
             cmd.append('--quiet')
         run(cmd, cwd=base, timeout_sec=timeout_sec)
+        _apply_multiplier_cache_to_required_data_csv(symbol)
     else:
         run([
             py, 'scripts/fetch_market_data.py',
             '--symbols', symbol,
             '--limit-expirations', str(limit_expirations),
         ], cwd=base, timeout_sec=timeout_sec)
+        _apply_multiplier_cache_to_required_data_csv(symbol)
 
     sp = symbol_cfg.get('sell_put', {})
     if sp.get('enabled', False):
@@ -848,6 +884,7 @@ def main():
     parser.add_argument('--symbols', default=None, help='Comma-separated symbol whitelist; only process these symbols')
     parser.add_argument('--stage', default='all', choices=['fetch','scan','alert','notify','all'], help='Pipeline stage: fetch|scan|alert|notify|all (dev speed; runs up to this stage)')
     parser.add_argument('--stage-only', default=None, choices=['alert','notify'], help='Run ONLY a late stage (no fetch/scan). Requires existing output files.')
+    parser.add_argument('--refresh-multiplier-cache', action='store_true', help='Refresh output_shared/state/multiplier_cache.json via OpenD before running (best-effort).')
     args = parser.parse_args()
 
     RUNTIME_MODE = str(args.mode)
@@ -876,6 +913,27 @@ def main():
 
     base = Path(__file__).resolve().parents[1]
     cfg_path = Path(args.config)
+
+    # Manual multiplier cache refresh (best-effort)
+    if bool(getattr(args, 'refresh_multiplier_cache', False)):
+        try:
+            from scripts import multiplier_cache
+            cache_path = multiplier_cache.default_cache_path(base)
+            cfg0 = json.loads(cfg_path.read_text(encoding='utf-8'))
+            syms = cfg0.get('watchlist') or cfg0.get('symbols') or []
+            syms = [it for it in syms if isinstance(it, dict) and str(((it.get('fetch') or {}).get('source') or '')).lower() == 'opend']
+            cache = multiplier_cache.load_cache(cache_path)
+            for it in syms:
+                sym = str(it.get('symbol') or '').strip().upper()
+                fetch = it.get('fetch') or {}
+                host = fetch.get('host') or '127.0.0.1'
+                port = int(fetch.get('port') or 11111)
+                r = multiplier_cache.refresh_via_opend(repo_base=base, symbol=sym, host=str(host), port=int(port), limit_expirations=1)
+                if r.ok and r.multiplier:
+                    cache[sym] = {'multiplier': int(r.multiplier), 'as_of_utc': multiplier_cache.utc_now(), 'source': 'opend'}
+            multiplier_cache.save_cache(cache_path, cache)
+        except Exception:
+            pass
     if not cfg_path.is_absolute():
         cfg_path = (base / cfg_path).resolve()
 
