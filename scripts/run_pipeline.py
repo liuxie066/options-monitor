@@ -594,7 +594,7 @@ def process_symbol(
             parsed = base / 'output' / 'parsed' / f"{symbol}_required_data.csv"
             df_req0 = safe_read_csv(parsed)
             if df_req0.empty:
-                print(f"[WARN] {symbol} required_data empty; skip sell_put scan")
+                log(f"[WARN] {symbol} required_data empty; skip sell_put scan")
                 summary_rows.append(summarize_sell_put(pd.DataFrame(), symbol))
                 return summary_rows
         except Exception:
@@ -1110,6 +1110,13 @@ def apply_profiles(item: dict, profiles: dict | None) -> dict:
 # Runtime mode flags (set in main())
 RUNTIME_MODE = 'dev'
 IS_SCHEDULED = False
+
+QUIET = bool(IS_SCHEDULED)
+
+def log(msg: str) -> None:
+    if not QUIET:
+        print(msg)
+
 SHARED_REQUIRED_DATA = None
 SHARED_SCAN_DIR = None
 REUSE_SHARED_SCAN = False
@@ -1288,7 +1295,7 @@ def main():
                     '--output', 'output/reports/symbols_notification.txt',
                 ], cwd=base)
 
-            print(f"[INFO] stage-only done: {STAGE_ONLY}")
+            log(f"[INFO] stage-only done: {STAGE_ONLY}")
             return
 
         symbols = []
@@ -1337,7 +1344,7 @@ def main():
             except BaseException as e:
                 # Important: run() raises SystemExit on non-zero return codes.
                 # For unattended cron, portfolio context is best-effort and should not kill the whole scan.
-                print(f"[WARN] portfolio context not available: {e}")
+                log(f"[WARN] portfolio context not available: {e}")
                 portfolio_ctx = None
 
             # 2) option_positions_context cache (and auto-close only on refresh)
@@ -1375,11 +1382,11 @@ def main():
                             '--summary-out', 'output/reports/auto_close_summary.txt',
                         ], cwd=base, timeout_sec=portfolio_timeout_sec)
                     except Exception as e2:
-                        print(f"[WARN] auto-close expired positions failed: {e2}")
+                        log(f"[WARN] auto-close expired positions failed: {e2}")
 
             except BaseException as e:
                 # best-effort; do not kill pipeline if this fails
-                print(f"[WARN] option positions context not available: {e}")
+                log(f"[WARN] option positions context not available: {e}")
                 option_ctx = None
 
             # FX (once per pipeline).
@@ -1405,7 +1412,7 @@ def main():
                     hkdcny = None
             except BaseException as e:
                 # best-effort
-                print(f"[WARN] fx rates not available: {e}")
+                log(f"[WARN] fx rates not available: {e}")
 
         profiles = cfg.get('profiles') or {}
 
@@ -1431,7 +1438,7 @@ def main():
                     summary_rows.extend(process_symbol(py, base, item, top_n, portfolio_ctx=portfolio_ctx, fx_usd_per_cny=fx_usd_per_cny, hkdcny=hkdcny, timeout_sec=symbol_timeout_sec))
             except Exception as e:
                 symbol = item.get('symbol', 'UNKNOWN')
-                print(f'[WARN] {symbol} processing failed: {e}')
+                log(f'[WARN] {symbol} processing failed: {e}')
                 summary_rows.append({
                     'symbol': symbol,
                     'strategy': 'sell_put',
@@ -1463,7 +1470,7 @@ def main():
         # fetch-only stage: stop after market-data fetch
         # (but do not interfere with stage-only late-stage runs)
         if (STAGE_ONLY is None) and (not want('scan')):
-            print(f"[INFO] stage={STAGE}: fetch done")
+            log(f"[INFO] stage={STAGE}: fetch done")
             return
 
         build_symbols_summary(base, summary_rows)
@@ -1523,9 +1530,9 @@ def main():
 
         notifications_cfg = cfg.get('notifications', {}) or {}
         if notifications_cfg.get('enabled', False):
-            print('[INFO] notifications enabled in config; pipeline prepared notification text for sending.')
+            log('[INFO] notifications enabled in config; pipeline prepared notification text for sending.')
         else:
-            print('[INFO] notifications disabled; generated notification text only.')
+            log('[INFO] notifications disabled; generated notification text only.')
         if not IS_SCHEDULED:
             print('\n[DONE] Symbols pipeline finished')
             print('- output/reports/symbols_summary.csv')
