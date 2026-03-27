@@ -608,8 +608,15 @@ def main():
         notif_path = acct_out / 'reports' / 'symbols_notification.txt'
 
         # 1) scheduler decision
+        # market-aware schedule: use schedule_hk during HK session, otherwise default schedule
+        sch_args = [str(vpy), 'scripts/scan_scheduler.py', '--config', str(cfg_override), '--state', str(state_path), '--jsonl']
+        try:
+            if markets_to_run == ['HK']:
+                sch_args.extend(['--schedule-key', 'schedule_hk'])
+        except Exception:
+            pass
         sch = subprocess.run(
-            [str(vpy), 'scripts/scan_scheduler.py', '--config', str(cfg_override), '--state', str(state_path), '--jsonl'],
+            sch_args,
             cwd=str(base),
             capture_output=True,
             text=True,
