@@ -302,6 +302,47 @@ def summarize_sell_call(df: pd.DataFrame, symbol: str) -> dict:
 
 
 
+
+
+
+
+def copy_from_shared_required_data(base: Path, symbol: str, shared_dir: Path) -> bool:
+    sym = str(symbol)
+    raw_src = shared_dir / 'raw' / f"{sym}_required_data.json"
+    parsed_src = shared_dir / 'parsed' / f"{sym}_required_data.csv"
+    raw_dst = (base / 'output' / 'raw' / f"{sym}_required_data.json").resolve()
+    parsed_dst = (base / 'output' / 'parsed' / f"{sym}_required_data.csv").resolve()
+    if not (raw_src.exists() and raw_src.stat().st_size > 0 and parsed_src.exists() and parsed_src.stat().st_size > 0):
+        return False
+    raw_dst.parent.mkdir(parents=True, exist_ok=True)
+    parsed_dst.parent.mkdir(parents=True, exist_ok=True)
+    import shutil
+    shutil.copyfile(raw_src, raw_dst)
+    shutil.copyfile(parsed_src, parsed_dst)
+    return True
+
+def _shared_scan_paths_put(shared_dir: Path, symbol: str) -> tuple[Path, Path]:
+    # Return (raw_candidates, labeled_base_candidates) paths under shared_dir.
+    sym = str(symbol)
+    report_dir = (shared_dir / 'reports').resolve()
+    report_dir.mkdir(parents=True, exist_ok=True)
+    lower = sym.lower()
+    raw = report_dir / f"{lower}_sell_put_candidates.csv"
+    labeled_base = report_dir / f"{lower}_sell_put_candidates_labeled_base.csv"
+    return raw, labeled_base
+
+
+def _copy_if_exists(src: Path, dst: Path) -> bool:
+    try:
+        if src.exists() and src.stat().st_size > 0:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            import shutil
+            shutil.copyfile(src, dst)
+            return True
+    except Exception:
+        return False
+    return False
+
 def derive_put_max_strike_from_cash(symbol: str, portfolio_ctx: dict | None, fx_usd_per_cny: float | None, hkdcny: float | None, *, fallback_multiplier: int = 100) -> float | None:
     """Return a cash-based max_strike cap to prefilter sell_put.
 
@@ -448,43 +489,53 @@ def process_symbol(
         except Exception:
             return
 
-    # ===== Fetch market data =====
-    # Default: Yahoo (US)
-    # Optional: OpenD (HK/US) when fetch.source == 'opend'
-    fetch_cfg = symbol_cfg.get('fetch', {}) or {}
-    fetch_source = str(fetch_cfg.get('source') or 'yahoo').strip().lower()
-    if fetch_source == 'opend':
-        host = str(fetch_cfg.get('host') or '127.0.0.1')
-        port = int(fetch_cfg.get('port') or 11111)
-        cmd = [
-            py, 'scripts/fetch_market_data_opend.py',
-            '--symbols', symbol,
-            '--limit-expirations', str(limit_expirations),
-            '--host', host,
-            '--port', str(port),
-            '--option-types', ('put,call' if (want_put and want_call) else ('put' if want_put else 'call')),
-        ]
-        # If OpenD has no US stock quote right, we can still compute OTM% using portfolio-management prices.
-        if bool(fetch_cfg.get('spot_from_portfolio_management', False)):
-            cmd.append('--spot-from-pm')
-        # Put cash prefilter: shrink chain by passing max-strike into OpenD fetch
+    # Shared required_data reuse (cross-account): copy into this account output and skip fetch
+    fetched = False
+    if SHARED_REQUIRED_DATA:
         try:
-            if want_put and sp.get('max_strike') is not None:
-                cmd.extend(['--max-strike', str(sp.get('max_strike'))])
+            shared_dir = Path(SHARED_REQUIRED_DATA).resolve()
+            fetched = copy_from_shared_required_data(base, symbol, shared_dir)
         except Exception:
-            pass
-        if IS_SCHEDULED:
-            # Quiet mode for fetch_market_data_opend.py
-            cmd.append('--quiet')
-        run(cmd, cwd=base, timeout_sec=timeout_sec)
-        _apply_multiplier_cache_to_required_data_csv(symbol)
-    else:
-        run([
-            py, 'scripts/fetch_market_data.py',
-            '--symbols', symbol,
-            '--limit-expirations', str(limit_expirations),
-        ], cwd=base, timeout_sec=timeout_sec)
-        _apply_multiplier_cache_to_required_data_csv(symbol)
+            fetched = False
+
+    # ===== Fetch market data =====
+    if not fetched:
+        # Default: Yahoo (US)
+        # Optional: OpenD (HK/US) when fetch.source == 'opend'
+        fetch_cfg = symbol_cfg.get('fetch', {}) or {}
+        fetch_source = str(fetch_cfg.get('source') or 'yahoo').strip().lower()
+        if fetch_source == 'opend':
+            host = str(fetch_cfg.get('host') or '127.0.0.1')
+            port = int(fetch_cfg.get('port') or 11111)
+            cmd = [
+                py, 'scripts/fetch_market_data_opend.py',
+                '--symbols', symbol,
+                '--limit-expirations', str(limit_expirations),
+                '--host', host,
+                '--port', str(port),
+                '--option-types', ('put,call' if (want_put and want_call) else ('put' if want_put else 'call')),
+            ]
+            # If OpenD has no US stock quote right, we can still compute OTM% using portfolio-management prices.
+            if bool(fetch_cfg.get('spot_from_portfolio_management', False)):
+                cmd.append('--spot-from-pm')
+            # Put cash prefilter: shrink chain by passing max-strike into OpenD fetch
+            try:
+                if want_put and sp.get('max_strike') is not None:
+                    cmd.extend(['--max-strike', str(sp.get('max_strike'))])
+            except Exception:
+                pass
+            if IS_SCHEDULED:
+                # Quiet mode for fetch_market_data_opend.py
+                cmd.append('--quiet')
+            run(cmd, cwd=base, timeout_sec=timeout_sec)
+            _apply_multiplier_cache_to_required_data_csv(symbol)
+        else:
+            run([
+                py, 'scripts/fetch_market_data.py',
+                '--symbols', symbol,
+                '--limit-expirations', str(limit_expirations),
+            ], cwd=base, timeout_sec=timeout_sec)
+            _apply_multiplier_cache_to_required_data_csv(symbol)
 
     if want_put:
         # If required_data.csv is empty (rate limit / data source failure), skip scans gracefully.
@@ -532,64 +583,90 @@ def process_symbol(
                         sp['min_volume'] = 0
         except Exception:
             pass
-        cmd = [
-            py, 'scripts/scan_sell_put.py',
-            '--symbols', symbol,
-            '--min-dte', str(sp.get('min_dte', 20)),
-            '--max-dte', str(sp.get('max_dte', 90)),
-            '--min-otm-pct', str(sp.get('min_otm_pct', 0.0)),
-            '--min-annualized-net-return', str(sp.get('min_annualized_net_return', 0.03)),
-            # NOTE: config min_net_income is normalized to base CNY.
-            # scan_sell_put.py now computes net_income in the option's native currency.
-            # We convert the CNY threshold into the option currency using FX when possible.
-            '--min-net-income', str(
-                # Config threshold is in base CNY; scanners run in option's native currency.
-                # USD: CNY->USD using fx_usd_per_cny (USD per 1 CNY)
-                # HKD: CNY->HKD using HKDCNY (CNY per 1 HKD)
-                (0.0 if float(sp.get('min_net_income') or 0.0) <= 0 else (
-                    (float(sp.get('min_net_income') or 0.0) * float(fx_usd_per_cny))
-                    if (not str(symbol).upper().endswith('.HK')) and fx_usd_per_cny
-                    else (
-                        (float(sp.get('min_net_income') or 0.0) / float(hkdcny))
-                        if (str(symbol).upper().endswith('.HK') and hkdcny)
-                        else 0.0
-                    )
-                ))
-            ),
-            '--min-open-interest', str(sp.get('min_open_interest', 100)),
-            '--min-volume', str(sp.get('min_volume', 10)),
-            '--max-spread-ratio', str(sp.get('max_spread_ratio', 0.30)),
-        ]
-        # Data quality gates (optional)
-        if sp.get('require_bid_ask'):
-            cmd.append('--require-bid-ask')
-        if sp.get('min_iv') is not None:
-            cmd.extend(['--min-iv', str(sp.get('min_iv'))])
-        if sp.get('max_iv') is not None:
-            cmd.extend(['--max-iv', str(sp.get('max_iv'))])
+        # Shared scan reuse (sell_put): reuse base candidates across accounts within the same tick
+        shared_dir = Path(SHARED_SCAN_DIR).resolve() if SHARED_SCAN_DIR else None
+        reuse_ok = False
+        if REUSE_SHARED_SCAN and shared_dir:
+            try:
+                sp_raw_shared, sp_lab_shared = _shared_scan_paths_put(shared_dir, symbol)
+                sp_raw_dst = report_dir / f"{symbol_lower}_sell_put_candidates.csv"
+                sp_lab_dst = report_dir / f"{symbol_lower}_sell_put_candidates_labeled.csv"
+                ok1 = _copy_if_exists(sp_raw_shared, sp_raw_dst)
+                ok2 = _copy_if_exists(sp_lab_shared, sp_lab_dst)
+                reuse_ok = bool(ok1 and ok2)
+            except Exception:
+                reuse_ok = False
 
-        # Delta filter (optional): abs(delta) in [min_abs_delta, max_abs_delta]
-        if sp.get('min_abs_delta') is not None:
-            cmd.extend(['--min-abs-delta', str(sp.get('min_abs_delta'))])
-        if sp.get('max_abs_delta') is not None:
-            cmd.extend(['--max-abs-delta', str(sp.get('max_abs_delta'))])
+        if not reuse_ok:
+            cmd = [
+                py, 'scripts/scan_sell_put.py',
+                '--symbols', symbol,
+                '--min-dte', str(sp.get('min_dte', 20)),
+                '--max-dte', str(sp.get('max_dte', 90)),
+                '--min-otm-pct', str(sp.get('min_otm_pct', 0.0)),
+                '--min-annualized-net-return', str(sp.get('min_annualized_net_return', 0.03)),
+                # NOTE: config min_net_income is normalized to base CNY.
+                # scan_sell_put.py now computes net_income in the option's native currency.
+                # We convert the CNY threshold into the option currency using FX when possible.
+                '--min-net-income', str(
+                    # Config threshold is in base CNY; scanners run in option's native currency.
+                    # USD: CNY->USD using fx_usd_per_cny (USD per 1 CNY)
+                    # HKD: CNY->HKD using HKDCNY (CNY per 1 HKD)
+                    (0.0 if float(sp.get('min_net_income') or 0.0) <= 0 else (
+                        (float(sp.get('min_net_income') or 0.0) * float(fx_usd_per_cny))
+                        if (not str(symbol).upper().endswith('.HK')) and fx_usd_per_cny
+                        else (
+                            (float(sp.get('min_net_income') or 0.0) / float(hkdcny))
+                            if (str(symbol).upper().endswith('.HK') and hkdcny)
+                            else 0.0
+                        )
+                    ))
+                ),
+                '--min-open-interest', str(sp.get('min_open_interest', 100)),
+                '--min-volume', str(sp.get('min_volume', 10)),
+                '--max-spread-ratio', str(sp.get('max_spread_ratio', 0.30)),
+            ]
+            # Data quality gates (optional)
+            if sp.get('require_bid_ask'):
+                cmd.append('--require-bid-ask')
+            if sp.get('min_iv') is not None:
+                cmd.extend(['--min-iv', str(sp.get('min_iv'))])
+            if sp.get('max_iv') is not None:
+                cmd.extend(['--max-iv', str(sp.get('max_iv'))])
 
-        if sp.get('min_strike') is not None:
-            cmd.extend(['--min-strike', str(sp.get('min_strike'))])
-        if sp.get('max_strike') is not None:
-            cmd.extend(['--max-strike', str(sp.get('max_strike'))])
-        if IS_SCHEDULED:
-            cmd.append('--quiet')
-        run(cmd, cwd=base, timeout_sec=timeout_sec)
+            # Delta filter (optional): abs(delta) in [min_abs_delta, max_abs_delta]
+            if sp.get('min_abs_delta') is not None:
+                cmd.extend(['--min-abs-delta', str(sp.get('min_abs_delta'))])
+            if sp.get('max_abs_delta') is not None:
+                cmd.extend(['--max-abs-delta', str(sp.get('max_abs_delta'))])
 
-        shared_sp = report_dir / 'sell_put_candidates.csv'
-        symbol_sp = report_dir / f'{symbol_lower}_sell_put_candidates.csv'
-        copy_if_exists(shared_sp, symbol_sp)
+            if sp.get('min_strike') is not None:
+                cmd.extend(['--min-strike', str(sp.get('min_strike'))])
+            if sp.get('max_strike') is not None:
+                cmd.extend(['--max-strike', str(sp.get('max_strike'))])
+            if IS_SCHEDULED:
+                cmd.append('--quiet')
+            run(cmd, cwd=base, timeout_sec=timeout_sec)
 
-        shared_sp_labeled = report_dir / 'sell_put_candidates_labeled.csv'
-        symbol_sp_labeled = report_dir / f'{symbol_lower}_sell_put_candidates_labeled.csv'
-        add_sell_put_labels(base, symbol_sp, shared_sp_labeled)
-        copy_if_exists(shared_sp_labeled, symbol_sp_labeled)
+            shared_sp = report_dir / 'sell_put_candidates.csv'
+            symbol_sp = report_dir / f'{symbol_lower}_sell_put_candidates.csv'
+            copy_if_exists(shared_sp, symbol_sp)
+
+            shared_sp_labeled = report_dir / 'sell_put_candidates_labeled.csv'
+            symbol_sp_labeled = report_dir / f'{symbol_lower}_sell_put_candidates_labeled.csv'
+            add_sell_put_labels(base, symbol_sp, shared_sp_labeled)
+            copy_if_exists(shared_sp_labeled, symbol_sp_labeled)
+
+
+        # Persist base sell_put scan artifacts for cross-account reuse (same tick)
+        try:
+            if SHARED_SCAN_DIR and (not REUSE_SHARED_SCAN):
+                shared_dir = Path(SHARED_SCAN_DIR).resolve()
+                sp_raw_shared, sp_lab_shared = _shared_scan_paths_put(shared_dir, symbol)
+                _copy_if_exists(symbol_sp, sp_raw_shared)
+                _copy_if_exists(symbol_sp_labeled, sp_lab_shared)
+        except Exception:
+            pass
 
         # account-aware: attach cash secured usage from option_positions (open short puts)
         df_sp_lab = safe_read_csv(symbol_sp_labeled)
@@ -967,6 +1044,9 @@ def apply_profiles(item: dict, profiles: dict | None) -> dict:
 # Runtime mode flags (set in main())
 RUNTIME_MODE = 'dev'
 IS_SCHEDULED = False
+SHARED_REQUIRED_DATA = None
+SHARED_SCAN_DIR = None
+REUSE_SHARED_SCAN = False
 
 
 def main():
@@ -980,12 +1060,22 @@ def main():
     parser.add_argument('--stage-only', default=None, choices=['alert','notify'], help='Run ONLY a late stage (no fetch/scan). Requires existing output files.')
     parser.add_argument('--refresh-multiplier-cache', action='store_true', help='Refresh output_shared/state/multiplier_cache.json via OpenD before running (best-effort).')
     parser.add_argument('--no-context', action='store_true', help='Skip portfolio/option_positions context fetch (dev speed). Useful when tuning filters only.')
+    parser.add_argument('--shared-required-data', default=None, help='Path to shared required_data directory (contains raw/ and parsed/). If set, will reuse/copy instead of fetching.')
+    parser.add_argument('--shared-scan-dir', default=None, help='Directory to store shared scan artifacts (sell_put base candidates) for reuse across accounts in the same tick.')
+    parser.add_argument('--reuse-shared-scan', action='store_true', help='Reuse shared scan artifacts when available (skip running sell_put scan).')
     args = parser.parse_args()
 
     RUNTIME_MODE = str(args.mode)
     IS_SCHEDULED = (RUNTIME_MODE == 'scheduled')
     STAGE = str(args.stage)
     STAGE_ONLY = (str(args.stage_only) if args.stage_only else None)
+
+    global SHARED_REQUIRED_DATA
+    SHARED_REQUIRED_DATA = (str(args.shared_required_data) if getattr(args, 'shared_required_data', None) else None)
+
+    global SHARED_SCAN_DIR, REUSE_SHARED_SCAN
+    SHARED_SCAN_DIR = (str(args.shared_scan_dir) if args.shared_scan_dir else None)
+    REUSE_SHARED_SCAN = bool(getattr(args, 'reuse_shared_scan', False))
 
     def want(name: str) -> bool:
         # stage-only mode: run ONLY the requested late stage
