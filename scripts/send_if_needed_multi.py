@@ -601,6 +601,15 @@ def main():
             continue
 
         acct_out = accounts_root / acct
+        # Legacy cleanup: per-account scheduler_state.json is no longer authoritative. Rename once to avoid confusion.
+        try:
+            legacy = (acct_out / 'state' / 'scheduler_state.json').resolve()
+            legacy_dst = (acct_out / 'state' / 'scheduler_state.legacy.json').resolve()
+            if legacy.exists() and (not legacy_dst.exists()):
+                legacy_dst.parent.mkdir(parents=True, exist_ok=True)
+                legacy.rename(legacy_dst)
+        except Exception:
+            pass
         acct_metrics = {
             'account': acct,
             'scheduler_ms': None,
