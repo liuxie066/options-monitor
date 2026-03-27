@@ -28,7 +28,12 @@ from pathlib import Path
 
 def run(cmd: list[str], cwd: Path, timeout_sec: int | None = None):
     print(f"[RUN] {' '.join(cmd)}")
-    return subprocess.run(cmd, cwd=str(cwd), timeout=timeout_sec)
+    return subprocess.run(cmd, cwd=str(cwd), timeout=timeout_sec, capture_output=True, text=True)
+
+
+def _is_opend_2fa_text(s: str) -> bool:
+    s = s or ''
+    return ('需要手机验证码' in s) or ('手机验证码' in s) or ('OPEND_2FA_REQUIRED' in s)
 
 
 def main():
@@ -97,8 +102,19 @@ def main():
     # Run pipeline
     res = run([sys.executable, 'scripts/run_pipeline.py', '--config', str(tmp_cfg)], cwd=base)
 
+    # Relay stdout/stderr to caller logs
+    if res.stdout:
+        print(res.stdout)
+    if res.stderr:
+        print(res.stderr, file=sys.stderr)
+
+    # Fast-fail marker when OpenD requires 2FA
+    combined = (res.stdout or '') + "\n" + (res.stderr or '')
+    if res.returncode != 0 and _is_opend_2fa_text(combined):
+        print(json.dumps({"success": False, "reason": "OPEND_2FA_REQUIRED", "message": "OpenD requires phone verification code"}, ensure_ascii=False))
+        raise SystemExit(0)
+
     if not args.keep_temp:
-        # keep tmp_cfg for traceability? default keep (it's inside per-account output). we can keep it.
         pass
 
     raise SystemExit(res.returncode)
