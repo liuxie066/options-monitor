@@ -62,6 +62,25 @@ def write_json(path: Path, obj):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(obj, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 
+def append_json_list(path: Path, payload: dict, max_entries: int = 200):
+    """Append payload into a bounded JSON list file. Keeps last max_entries records."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        arr = []
+        if path.exists() and path.stat().st_size > 0:
+            try:
+                obj = json.loads(path.read_text(encoding='utf-8'))
+                if isinstance(obj, list):
+                    arr = obj
+            except Exception:
+                arr = []
+        arr.append(payload)
+        if len(arr) > int(max_entries):
+            arr = arr[-int(max_entries):]
+        path.write_text(json.dumps(arr, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+    except Exception:
+        pass
+
 
 def parse_hhmm(value: str) -> time:
     hour, minute = value.split(':', 1)
@@ -587,6 +606,7 @@ def main():
     # shared required_data dir should already exist (created by prefetch step)
     shared_required = (base / 'output_shared' / 'required_data').resolve()
     tick_metrics_path = (base / 'output_shared' / 'state' / 'tick_metrics.json').resolve()
+    tick_metrics_history_path = (base / 'output_shared' / 'state' / 'tick_metrics_history.json').resolve()
     tick_metrics = {
         'as_of_utc': utc_now(),
         'markets_to_run': markets_to_run,
@@ -850,6 +870,7 @@ def main():
             tick_metrics['sent'] = False
             tick_metrics['reason'] = 'no_merged_notification'
             write_json(tick_metrics_path, tick_metrics)
+            append_json_list(tick_metrics_history_path, tick_metrics)
         except Exception:
             pass
 
@@ -884,6 +905,7 @@ def main():
         tick_metrics['sent'] = True
         tick_metrics['reason'] = 'sent'
         write_json(tick_metrics_path, tick_metrics)
+        append_json_list(tick_metrics_history_path, tick_metrics)
     except Exception:
         pass
 
