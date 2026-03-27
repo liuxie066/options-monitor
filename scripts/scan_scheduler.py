@@ -164,7 +164,7 @@ def main():
     parser = argparse.ArgumentParser(description='Scan scheduler / frequency controller for options-monitor')
     parser.add_argument('--config', required=True)
     parser.add_argument('--state', default='output/state/scheduler_state.json')
-    parser.add_argument('--schedule-key', default='schedule', help='Top-level key to read schedule config from (default: schedule). Example: schedule_hk')
+    parser.add_argument('--schedule-key', default='schedule', help='Top-level key to read schedule config from (default: schedule). Example: schedule_hk' )
     parser.add_argument('--run-if-due', action='store_true', help='When due, run scripts/run_pipeline.py --config <config>')
     parser.add_argument('--mark-notified', action='store_true', help='Update last_notify_utc to now (call this only AFTER you actually sent a notification)')
     parser.add_argument('--jsonl', action='store_true', help='Print a single-line JSON decision (for automation)')
