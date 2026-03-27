@@ -300,6 +300,66 @@ def summarize_sell_call(df: pd.DataFrame, symbol: str) -> dict:
     return row
 
 
+
+
+def derive_put_max_strike_from_cash(symbol: str, portfolio_ctx: dict | None, fx_usd_per_cny: float | None, hkdcny: float | None, *, fallback_multiplier: int = 100) -> float | None:
+    """Return a cash-based max_strike cap to prefilter sell_put.
+
+    strike_cap ~= free_cash_native / multiplier
+
+    Uses CNY free cash when available, then converts to option currency:
+    - US: CNY->USD using fx_usd_per_cny (USD per 1 CNY)
+    - HK: CNY->HKD using hkdcny (CNY per 1 HKD)
+
+    Multiplier source: output_shared/state/multiplier_cache.json (best-effort), else fallback 100.
+    """
+    if not portfolio_ctx:
+        return None
+
+    free_cny = None
+    try:
+        v = portfolio_ctx.get('cash_free_cny')
+        if v is not None:
+            free_cny = float(v)
+    except Exception:
+        free_cny = None
+
+    if free_cny is None:
+        try:
+            cash_by = portfolio_ctx.get('cash_by_currency') or {}
+            if 'CNY' in cash_by:
+                free_cny = float(cash_by.get('CNY') or 0.0)
+        except Exception:
+            free_cny = None
+
+    if free_cny is None or free_cny <= 0:
+        return None
+
+    m = None
+    try:
+        from scripts import multiplier_cache
+        repo_base = Path(__file__).resolve().parents[1]
+        cache = multiplier_cache.load_cache(multiplier_cache.default_cache_path(repo_base))
+        m = multiplier_cache.get_cached_multiplier(cache, symbol)
+    except Exception:
+        m = None
+
+    if not m or m <= 0:
+        m = int(fallback_multiplier) if fallback_multiplier and fallback_multiplier > 0 else 100
+
+    sym_u = str(symbol).upper()
+    if sym_u.endswith('.HK'):
+        if not hkdcny or hkdcny <= 0:
+            return None
+        free_native = float(free_cny) / float(hkdcny)
+        return free_native / float(m)
+
+    # default: USD
+    if not fx_usd_per_cny or fx_usd_per_cny <= 0:
+        return None
+    free_native = float(free_cny) * float(fx_usd_per_cny)
+    return free_native / float(m)
+
 def process_symbol(
     py: str,
     base: Path,
@@ -316,6 +376,70 @@ def process_symbol(
     report_dir = base / 'output' / 'reports'
     summary_rows: list[dict] = []
 
+
+    sp = symbol_cfg.get('sell_put', {}) or {}
+    cc = symbol_cfg.get('sell_call', {}) or {}
+    want_put = bool(sp.get('enabled', False))
+    want_call = bool(cc.get('enabled', False))
+
+    # Pre-filter (call): if this account has no holdings row for the symbol, skip sell_call fully.
+    stock = None
+    if want_call and portfolio_ctx:
+        try:
+            stock = (portfolio_ctx.get('stocks_by_symbol') or {}).get(symbol)
+        except Exception:
+            stock = None
+        if not stock:
+            want_call = False
+
+    # Pre-filter (put): derive a cash-based max_strike cap to reduce chain size.
+    if want_put:
+        try:
+            cash_cap = derive_put_max_strike_from_cash(symbol, portfolio_ctx, fx_usd_per_cny, hkdcny)
+            if cash_cap and cash_cap > 0:
+                if sp.get('max_strike') is None or float(sp.get('max_strike')) > float(cash_cap):
+                    sp = dict(sp)
+                    sp['max_strike'] = float(cash_cap)
+            if sp.get('max_strike') is not None and float(sp.get('max_strike')) <= 0:
+                want_put = False
+        except Exception:
+            pass
+
+
+    # Multiplier static cache (best-effort): fill missing/invalid multiplier in required_data.csv
+    def _apply_multiplier_cache_to_required_data_csv(symbol: str) -> None:
+        try:
+            from scripts import multiplier_cache
+
+            cache_path = multiplier_cache.default_cache_path(base)
+            cache = multiplier_cache.load_cache(cache_path)
+            m = multiplier_cache.get_cached_multiplier(cache, symbol)
+            if not m:
+                return
+
+            parsed = (base / 'output' / 'parsed' / f"{symbol}_required_data.csv").resolve()
+            if not parsed.exists() or parsed.stat().st_size <= 0:
+                return
+
+            df = pd.read_csv(parsed)
+            if df.empty:
+                return
+
+            if 'multiplier' not in df.columns:
+                df['multiplier'] = float(m)
+            else:
+                try:
+                    mm = pd.to_numeric(df['multiplier'], errors='coerce')
+                    bad = mm.isna() | (mm <= 0)
+                    if bad.any():
+                        df.loc[bad, 'multiplier'] = float(m)
+                except Exception:
+                    df['multiplier'] = float(m)
+
+            df.to_csv(parsed, index=False)
+        except Exception:
+            return
+
     # ===== Fetch market data =====
     # Default: Yahoo (US)
     # Optional: OpenD (HK/US) when fetch.source == 'opend'
@@ -330,23 +454,31 @@ def process_symbol(
             '--limit-expirations', str(limit_expirations),
             '--host', host,
             '--port', str(port),
+            '--option-types', ('put,call' if (want_put and want_call) else ('put' if want_put else 'call')),
         ]
         # If OpenD has no US stock quote right, we can still compute OTM% using portfolio-management prices.
         if bool(fetch_cfg.get('spot_from_portfolio_management', False)):
             cmd.append('--spot-from-pm')
+        # Put cash prefilter: shrink chain by passing max-strike into OpenD fetch
+        try:
+            if want_put and sp.get('max_strike') is not None:
+                cmd.extend(['--max-strike', str(sp.get('max_strike'))])
+        except Exception:
+            pass
         if IS_SCHEDULED:
             # Quiet mode for fetch_market_data_opend.py
             cmd.append('--quiet')
         run(cmd, cwd=base, timeout_sec=timeout_sec)
+        _apply_multiplier_cache_to_required_data_csv(symbol)
     else:
         run([
             py, 'scripts/fetch_market_data.py',
             '--symbols', symbol,
             '--limit-expirations', str(limit_expirations),
         ], cwd=base, timeout_sec=timeout_sec)
+        _apply_multiplier_cache_to_required_data_csv(symbol)
 
-    sp = symbol_cfg.get('sell_put', {})
-    if sp.get('enabled', False):
+    if want_put:
         # If required_data.csv is empty (rate limit / data source failure), skip scans gracefully.
         try:
             parsed = base / 'output' / 'parsed' / f"{symbol}_required_data.csv"
@@ -629,26 +761,17 @@ def process_symbol(
     else:
         summary_rows.append(summarize_sell_put(pd.DataFrame(), symbol))
 
-    cc = symbol_cfg.get('sell_call', {})
-    if cc.get('enabled', False):
+    if want_call:
         # allow overriding shares/avg_cost from portfolio context (holdings), so alerts become account-aware
         shares_override = None
         avg_cost_override = None
-        stock = None
-        if portfolio_ctx:
-            stock = (portfolio_ctx.get('stocks_by_symbol') or {}).get(symbol)
-            if stock:
-                shares_override = stock.get('shares')
-                avg_cost_override = stock.get('avg_cost')
+        if stock:
+            shares_override = stock.get('shares')
+            avg_cost_override = stock.get('avg_cost')
 
-            # NOTE: do NOT deduct locked shares when passing shares into scan_sell_call.
-            # The scan itself is just opportunity scanning; coverage is enforced/annotated after scan.
+        # NOTE: do NOT deduct locked shares when passing shares into scan_sell_call.
+        # The scan itself is just opportunity scanning; coverage is enforced/annotated after scan.
 
-        # Safety: if there is no holdings row for this symbol in this account, skip sell_call.
-        # This avoids recommending covered calls for accounts that do not hold the underlying.
-        if not stock:
-            summary_rows.append(summarize_sell_call(pd.DataFrame(), symbol))
-            return summary_rows
 
         shares_total = shares_override if shares_override is not None else cc.get('shares', 100)
         avg_cost = avg_cost_override if avg_cost_override is not None else cc['avg_cost']
@@ -693,14 +816,20 @@ def process_symbol(
         df_cc = safe_read_csv(symbol_cc)
         # enrich candidates with holdings + option-locked shares (account-aware)
         if not df_cc.empty and portfolio_ctx:
-            stock = (portfolio_ctx.get('stocks_by_symbol') or {}).get(symbol)
             option_ctx = portfolio_ctx.get('option_ctx') if isinstance(portfolio_ctx, dict) else None
             locked = 0
             if option_ctx:
                 locked = int((option_ctx.get('locked_shares_by_symbol') or {}).get(symbol) or 0)
             shares_total_v = int((stock or {}).get('shares') or shares_total)
             shares_available = max(shares_total_v - locked, 0)
-            covered_contracts_available = shares_available // 100
+            # Covered-call capacity should follow contract multiplier (HK symbols may not be 100).
+            try:
+                m = int(float(df_cc.iloc[0].get('multiplier') or 0)) if not df_cc.empty else 100
+            except Exception:
+                m = 100
+            if m <= 0:
+                m = 100
+            covered_contracts_available = shares_available // m
 
             df_cc['shares_total'] = shares_total_v
             df_cc['shares_locked'] = locked
@@ -841,6 +970,8 @@ def main():
     parser.add_argument('--symbols', default=None, help='Comma-separated symbol whitelist; only process these symbols')
     parser.add_argument('--stage', default='all', choices=['fetch','scan','alert','notify','all'], help='Pipeline stage: fetch|scan|alert|notify|all (dev speed; runs up to this stage)')
     parser.add_argument('--stage-only', default=None, choices=['alert','notify'], help='Run ONLY a late stage (no fetch/scan). Requires existing output files.')
+    parser.add_argument('--refresh-multiplier-cache', action='store_true', help='Refresh output_shared/state/multiplier_cache.json via OpenD before running (best-effort).')
+    parser.add_argument('--no-context', action='store_true', help='Skip portfolio/option_positions context fetch (dev speed). Useful when tuning filters only.')
     args = parser.parse_args()
 
     RUNTIME_MODE = str(args.mode)
@@ -869,6 +1000,27 @@ def main():
 
     base = Path(__file__).resolve().parents[1]
     cfg_path = Path(args.config)
+
+    # Manual multiplier cache refresh (best-effort)
+    if bool(getattr(args, 'refresh_multiplier_cache', False)):
+        try:
+            from scripts import multiplier_cache
+            cache_path = multiplier_cache.default_cache_path(base)
+            cfg0 = json.loads(cfg_path.read_text(encoding='utf-8'))
+            syms = cfg0.get('watchlist') or cfg0.get('symbols') or []
+            syms = [it for it in syms if isinstance(it, dict) and str(((it.get('fetch') or {}).get('source') or '')).lower() == 'opend']
+            cache = multiplier_cache.load_cache(cache_path)
+            for it in syms:
+                sym = str(it.get('symbol') or '').strip().upper()
+                fetch = it.get('fetch') or {}
+                host = fetch.get('host') or '127.0.0.1'
+                port = int(fetch.get('port') or 11111)
+                r = multiplier_cache.refresh_via_opend(repo_base=base, symbol=sym, host=str(host), port=int(port), limit_expirations=1)
+                if r.ok and r.multiplier:
+                    cache[sym] = {'multiplier': int(r.multiplier), 'as_of_utc': multiplier_cache.utc_now(), 'source': 'opend'}
+            multiplier_cache.save_cache(cache_path, cache)
+        except Exception:
+            pass
     if not cfg_path.is_absolute():
         cfg_path = (base / cfg_path).resolve()
 
@@ -978,7 +1130,7 @@ def main():
         symbols = []
         summary_rows: list[dict] = []
 
-        if not want('scan'):
+        if (not want('scan')) or bool(getattr(args, 'no_context', False)):
             portfolio_ctx = None
             option_ctx = None
             fx_usd_per_cny = None

@@ -31,6 +31,13 @@ from typing import Any
 
 import pandas as pd
 
+COLUMNS = [
+    'symbol','option_type','expiration','dte','contract_symbol','strike','spot',
+    'bid','ask','last_price','mid','volume','open_interest','implied_volatility',
+    'in_the_money','currency','otm_pct','delta','multiplier'
+]
+
+
 # Allow running as a script (python scripts/xxx.py) without package install
 # by ensuring repo root is on sys.path.
 import sys
@@ -96,7 +103,7 @@ def get_spot_opend(ctx, underlier_code: str) -> float | None:
         return None
 
 
-def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = '127.0.0.1', port: int = 11111, spot_override: float | None = None, *, spot_from_pm: bool = False, base_dir: Path | None = None) -> dict[str, Any]:
+def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = '127.0.0.1', port: int = 11111, spot_override: float | None = None, *, spot_from_pm: bool = False, base_dir: Path | None = None, option_types: str = 'put,call', min_strike: float | None = None, max_strike: float | None = None) -> dict[str, Any]:
     from futu import OpenQuoteContext, RET_OK
 
     u = normalize_underlier(symbol)
@@ -229,6 +236,18 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
                 elif 'put' in option_type:
                     option_type = 'put'
 
+            # Filter by option type
+            ot_set = set([s.strip().lower() for s in str(option_types or '').split(',') if s.strip()])
+            if ot_set and option_type and (option_type not in ot_set):
+                continue
+
+            # Filter by strike range (best-effort)
+            if strike is not None:
+                if (min_strike is not None) and (strike < float(min_strike)):
+                    continue
+                if (max_strike is not None) and (strike > float(max_strike)):
+                    continue
+
             srow = snap_map.get(opt_code)
             last_price = to_float(_pick_col(srow, 'last_price')) if srow is not None else None
             bid = to_float(_pick_col(srow, 'bid_price', 'bid')) if srow is not None else None
@@ -313,7 +332,16 @@ def save_outputs(base: Path, symbol: str, payload: dict[str, Any]):
     csv_path = parsed_dir / f"{symbol}_required_data.csv"
 
     raw_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding='utf-8')
-    pd.DataFrame(payload['rows']).to_csv(csv_path, index=False)
+    df = pd.DataFrame(payload.get('rows') or [])
+    if df.empty:
+        df = pd.DataFrame(columns=COLUMNS)
+    else:
+        # ensure stable columns order
+        for c in COLUMNS:
+            if c not in df.columns:
+                df[c] = pd.NA
+        df = df[COLUMNS]
+    df.to_csv(csv_path, index=False)
     return raw_path, csv_path
 
 
@@ -321,12 +349,19 @@ def main():
     ap = argparse.ArgumentParser(description='Fetch required option data from Futu OpenD')
     ap.add_argument('--symbols', nargs='+', required=True)
     ap.add_argument('--limit-expirations', type=int, default=2)
+    ap.add_argument('--option-types', default='put,call', help='Comma-separated option types to include: put,call (default: put,call)')
+    ap.add_argument('--min-strike', type=float, default=None)
+    ap.add_argument('--max-strike', type=float, default=None)
     ap.add_argument('--host', default='127.0.0.1')
     ap.add_argument('--port', type=int, default=11111)
     ap.add_argument('--spot', type=float, default=None, help='override spot if OpenD has no quote right')
     ap.add_argument('--spot-from-pm', action='store_true', help='for US symbols: if OpenD has no stock quote right, fallback to portfolio-management get_price()')
     ap.add_argument('--quiet', action='store_true', help='quiet mode: suppress non-critical prints')
     args = ap.parse_args()
+
+    opt_types = set([s.strip().lower() for s in str(args.option_types or '').split(',') if s.strip()])
+    want_put = ('put' in opt_types) if opt_types else True
+    want_call = ('call' in opt_types) if opt_types else True
 
     base = Path(__file__).resolve().parents[1]
 
@@ -339,6 +374,9 @@ def main():
             spot_override=args.spot,
             spot_from_pm=bool(args.spot_from_pm),
             base_dir=base,
+            option_types=('put,call' if (want_put and want_call) else ('put' if want_put else 'call')),
+            min_strike=args.min_strike,
+            max_strike=args.max_strike,
         )
         raw_path, csv_path = save_outputs(base, sym, payload)
         if not args.quiet:

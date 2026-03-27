@@ -17,4 +17,5 @@ config.json
 output
 output/
 output_accounts/
+output_shared/
 secrets/
