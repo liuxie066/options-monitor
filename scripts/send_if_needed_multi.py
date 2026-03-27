@@ -62,6 +62,86 @@ def write_json(path: Path, obj):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(obj, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 
+
+
+def prefetch_required_data(vpy: Path, base: Path, cfg: dict, shared_required: Path) -> None:
+    # Fetch required_data for all symbols once per tick into shared_required (raw/parsed).
+    # Best-effort: failures should not crash the tick; downstream will handle empty/partial data.
+    # This runs in the current ./output context; it copies outputs into shared_required afterwards.
+    try:
+        shared_required.mkdir(parents=True, exist_ok=True)
+        (shared_required / 'raw').mkdir(parents=True, exist_ok=True)
+        (shared_required / 'parsed').mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return
+
+    syms = cfg.get('symbols') or []
+    for it in syms:
+        if not isinstance(it, dict):
+            continue
+        symbol = str(it.get('symbol') or '').strip()
+        if not symbol:
+            continue
+
+        # Skip if already present
+        try:
+            raw0 = (shared_required / 'raw' / f"{symbol}_required_data.json").resolve()
+            csv0 = (shared_required / 'parsed' / f"{symbol}_required_data.csv").resolve()
+            if raw0.exists() and csv0.exists() and raw0.stat().st_size > 0 and csv0.stat().st_size > 0:
+                continue
+        except Exception:
+            pass
+
+        fetch = (it.get('fetch') or {})
+        src = str(fetch.get('source') or 'yahoo').strip().lower()
+
+        # Derive basic option-types from config (account-agnostic)
+        want_put = bool((it.get('sell_put') or {}).get('enabled', False))
+        want_call = bool((it.get('sell_call') or {}).get('enabled', False))
+        opt_types = 'put,call'
+        if want_put and (not want_call):
+            opt_types = 'put'
+        elif want_call and (not want_put):
+            opt_types = 'call'
+
+        limit_exp = int(fetch.get('limit_expirations') or cfg.get('limit_expirations') or 8)
+
+        cmd = [str(vpy)]
+        if src == 'opend':
+            host = str(fetch.get('host') or '127.0.0.1')
+            port = int(fetch.get('port') or 11111)
+            cmd += [
+                'scripts/fetch_market_data_opend.py',
+                '--symbols', symbol,
+                '--limit-expirations', str(limit_exp),
+                '--host', host,
+                '--port', str(port),
+                '--option-types', str(opt_types),
+                '--quiet',
+            ]
+        else:
+            cmd += [
+                'scripts/fetch_market_data.py',
+                '--symbols', symbol,
+                '--limit-expirations', str(limit_exp),
+            ]
+
+        try:
+            subprocess.run(cmd, cwd=str(base), capture_output=True, text=True, timeout=60)
+        except Exception:
+            continue
+
+        try:
+            out = (base / 'output').resolve()
+            src_raw = out / 'raw' / f"{symbol}_required_data.json"
+            src_csv = out / 'parsed' / f"{symbol}_required_data.csv"
+            if src_raw.exists() and src_raw.stat().st_size > 0:
+                (shared_required / 'raw' / src_raw.name).write_bytes(src_raw.read_bytes())
+            if src_csv.exists() and src_csv.stat().st_size > 0:
+                (shared_required / 'parsed' / src_csv.name).write_bytes(src_csv.read_bytes())
+        except Exception:
+            pass
+
 def append_json_list(path: Path, payload: dict, max_entries: int = 200):
     """Append payload into a bounded JSON list file. Keeps last max_entries records."""
     try:
