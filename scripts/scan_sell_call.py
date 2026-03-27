@@ -5,7 +5,7 @@ import argparse
 from pathlib import Path
 import pandas as pd
 
-MULTIPLIER = 100
+DEFAULT_MULTIPLIER = 100
 
 
 def calc_futu_us_option_fee(order_price: float, contracts: int = 1, is_sell: bool = True) -> float:
@@ -17,6 +17,32 @@ def calc_futu_us_option_fee(order_price: float, contracts: int = 1, is_sell: boo
     occ = 0.02 * contracts
     settlement = 0.18 * contracts
     return round(commission + platform_fee + taf + orf + occ + settlement, 6)
+
+
+def calc_futu_hk_option_fee_static(order_price: float, contracts: int = 1, is_sell: bool = True, *, base_dir: Path | None = None) -> float:
+    platform_fee_per_order = 15.0
+    commission_per_order = 0.0
+    other_per_order = 0.0
+    try:
+        if base_dir is not None:
+            import json
+            cfg_path = base_dir / 'config.json'
+            if cfg_path.exists() and cfg_path.stat().st_size > 0:
+                cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
+                hk = ((cfg.get('fees') or {}).get('hk_static') or {})
+                platform_fee_per_order = float(hk.get('platform_fee_per_order_hkd', platform_fee_per_order))
+                commission_per_order = float(hk.get('commission_per_order_hkd', commission_per_order))
+                other_per_order = float(hk.get('other_fees_per_order_hkd', other_per_order))
+    except Exception:
+        pass
+    return round(platform_fee_per_order + commission_per_order + other_per_order, 6)
+
+
+def calc_futu_option_fee(currency: str | None, order_price: float, contracts: int = 1, is_sell: bool = True, *, base_dir: Path | None = None) -> float:
+    ccy = (currency or 'USD').upper()
+    if ccy == 'HKD':
+        return calc_futu_hk_option_fee_static(order_price, contracts=contracts, is_sell=is_sell, base_dir=base_dir)
+    return calc_futu_us_option_fee(order_price, contracts=contracts, is_sell=is_sell)
 
 
 def safe_float(v):
@@ -48,20 +74,27 @@ def compute_metrics(row: pd.Series, avg_cost: float):
     mid = safe_float(row.get('mid'))
     strike = safe_float(row.get('strike'))
     spot = safe_float(row.get('spot'))
-    dte = int(row.get('dte'))
+    try:
+        dte = int(row.get('dte'))
+    except Exception:
+        return None
     if None in (mid, strike, spot) or dte <= 0 or avg_cost <= 0:
         return None
     if mid <= 0 or strike <= 0 or spot <= 0:
         return None
 
-    gross_income = mid * MULTIPLIER
-    fee = calc_futu_us_option_fee(mid, contracts=1, is_sell=True)
+    multiplier = safe_float(row.get('multiplier'))
+    m = int(multiplier) if multiplier and multiplier > 0 else DEFAULT_MULTIPLIER
+
+    gross_income = mid * m
+    base_dir = Path(__file__).resolve().parents[1]
+    fee = calc_futu_option_fee(row.get('currency'), mid, contracts=1, is_sell=True, base_dir=base_dir)
     net_income = gross_income - fee
     if net_income <= 0:
         return None
 
-    annualized_net_premium_return = (net_income / (avg_cost * MULTIPLIER)) * (365 / dte)
-    if_exercised_total_return = (((strike - avg_cost) * MULTIPLIER) + net_income) / (avg_cost * MULTIPLIER)
+    annualized_net_premium_return = (net_income / (avg_cost * m)) * (365 / dte)
+    if_exercised_total_return = (((strike - avg_cost) * m) + net_income) / (avg_cost * m)
     strike_above_spot_pct = (strike - spot) / spot
     strike_above_cost_pct = (strike - avg_cost) / avg_cost
 
@@ -97,6 +130,7 @@ def main():
     parser.add_argument('--require-bid-ask', action='store_true', help='require bid>0 and ask>0 (better fillability)')
     parser.add_argument('--min-delta', type=float, default=None, help='min call delta (e.g. 0.20)')
     parser.add_argument('--max-delta', type=float, default=None, help='max call delta (e.g. 0.35)')
+    parser.add_argument('--quiet', action='store_true', help='quiet mode: suppress human-friendly prints')
     args = parser.parse_args()
 
     if args.shares < 100:
@@ -183,6 +217,8 @@ def main():
                 'expiration': row['expiration'],
                 'dte': dte,
                 'contract_symbol': row.get('contract_symbol'),
+                'multiplier': safe_float(row.get('multiplier')),
+                'currency': row.get('currency'),
                 'strike': strike,
                 'spot': safe_float(row.get('spot')),
                 'avg_cost': args.avg_cost,
@@ -204,16 +240,26 @@ def main():
     if not out.empty:
         out = out.sort_values(by=['annualized_net_premium_return', 'if_exercised_total_return'], ascending=[False, False])
     out_path = out_dir / 'sell_call_candidates.csv'
-    out.to_csv(out_path, index=False)
-
-    print(f'[DONE] sell call scan -> {out_path}')
-    print(f'[DONE] candidates: {len(out)}')
-    if not out.empty:
+    if out.empty:
         cols = [
-            'symbol','expiration','dte','strike','spot','avg_cost','mid','net_income',
-            'annualized_net_premium_return','if_exercised_total_return','strike_above_spot_pct','risk_label'
+            'symbol','expiration','dte','contract_symbol','multiplier','currency','strike','spot','avg_cost','shares',
+            'bid','ask','last_price','mid','open_interest','volume','implied_volatility','delta','spread','spread_ratio',
+            'gross_income','futu_fee','net_income','annualized_net_premium_return','if_exercised_total_return',
+            'strike_above_spot_pct','strike_above_cost_pct','cc_band','risk_label'
         ]
-        print(out[cols].head(20).to_string(index=False))
+        pd.DataFrame(columns=cols).to_csv(out_path, index=False)
+    else:
+        out.to_csv(out_path, index=False)
+
+    if not args.quiet:
+        print(f'[DONE] sell call scan -> {out_path}')
+        print(f'[DONE] candidates: {len(out)}')
+        if not out.empty:
+            cols = [
+                'symbol','expiration','dte','strike','spot','avg_cost','mid','net_income',
+                'annualized_net_premium_return','if_exercised_total_return','strike_above_spot_pct','risk_label'
+            ]
+            print(out[cols].head(20).to_string(index=False))
 
 
 if __name__ == '__main__':

@@ -17,13 +17,28 @@ def run(cmd: list[str], cwd: Path, timeout_sec: int | None = None):
     """Run a subprocess with optional timeout.
 
     Timeout is important for unattended cron usage: a single hanging symbol must not block the whole pipeline.
+
+    Scheduled mode policy:
+    - capture stdout/stderr to reduce log I/O
+    - only print tail on failure
     """
-    print(f"[RUN] {' '.join(cmd)}" + (f" (timeout={timeout_sec}s)" if timeout_sec else ""))
+    if not IS_SCHEDULED:
+        print(f"[RUN] {' '.join(cmd)}" + (f" (timeout={timeout_sec}s)" if timeout_sec else ""))
+
     try:
-        result = subprocess.run(cmd, cwd=str(cwd), timeout=timeout_sec)
+        if IS_SCHEDULED:
+            result = subprocess.run(cmd, cwd=str(cwd), timeout=timeout_sec, capture_output=True, text=True)
+        else:
+            result = subprocess.run(cmd, cwd=str(cwd), timeout=timeout_sec)
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"timeout after {timeout_sec}s: {' '.join(cmd)}")
+
     if result.returncode != 0:
+        if IS_SCHEDULED:
+            out = ((result.stdout or '') + '\n' + (result.stderr or '')).strip()
+            if out:
+                tail = '\n'.join(out.splitlines()[-60:])
+                print(f"[ERR] {' '.join(cmd)}\n{tail}")
         raise SystemExit(result.returncode)
 
 
@@ -262,6 +277,7 @@ def process_symbol(
     top_n: int,
     portfolio_ctx: dict | None = None,
     fx_usd_per_cny: float | None = None,
+    hkdcny: float | None = None,
     timeout_sec: int | None = 120,
 ) -> list[dict]:
     symbol = symbol_cfg['symbol']
@@ -270,14 +286,47 @@ def process_symbol(
     report_dir = base / 'output' / 'reports'
     summary_rows: list[dict] = []
 
-    run([
-        py, 'scripts/fetch_market_data.py',
-        '--symbols', symbol,
-        '--limit-expirations', str(limit_expirations),
-    ], cwd=base, timeout_sec=timeout_sec)
+    # ===== Fetch market data =====
+    # Default: Yahoo (US)
+    # Optional: OpenD (HK/US) when fetch.source == 'opend'
+    fetch_cfg = symbol_cfg.get('fetch', {}) or {}
+    fetch_source = str(fetch_cfg.get('source') or 'yahoo').strip().lower()
+    if fetch_source == 'opend':
+        host = str(fetch_cfg.get('host') or '127.0.0.1')
+        port = int(fetch_cfg.get('port') or 11111)
+        cmd = [
+            py, 'scripts/fetch_market_data_opend.py',
+            '--symbols', symbol,
+            '--limit-expirations', str(limit_expirations),
+            '--host', host,
+            '--port', str(port),
+        ]
+        # If OpenD has no US stock quote right, we can still compute OTM% using portfolio-management prices.
+        if bool(fetch_cfg.get('spot_from_portfolio_management', False)):
+            cmd.append('--spot-from-pm')
+        if IS_SCHEDULED:
+            # Quiet mode for fetch_market_data_opend.py
+            cmd.append('--quiet')
+        run(cmd, cwd=base, timeout_sec=timeout_sec)
+    else:
+        run([
+            py, 'scripts/fetch_market_data.py',
+            '--symbols', symbol,
+            '--limit-expirations', str(limit_expirations),
+        ], cwd=base, timeout_sec=timeout_sec)
 
     sp = symbol_cfg.get('sell_put', {})
     if sp.get('enabled', False):
+        # If required_data.csv is empty (rate limit / data source failure), skip scans gracefully.
+        try:
+            parsed = base / 'output' / 'parsed' / f"{symbol}_required_data.csv"
+            df_req0 = safe_read_csv(parsed)
+            if df_req0.empty:
+                print(f"[WARN] {symbol} required_data empty; skip sell_put scan")
+                summary_rows.append(summarize_sell_put(pd.DataFrame(), symbol))
+                return summary_rows
+        except Exception:
+            pass
         # Auto data-quality policy (reduce config complexity):
         # If delta gating is enabled but quotes are mostly empty (Yahoo bid/ask=0),
         # do NOT hard-fail the symbol. Instead, degrade gracefully:
@@ -321,11 +370,21 @@ def process_symbol(
             '--min-otm-pct', str(sp.get('min_otm_pct', 0.0)),
             '--min-annualized-net-return', str(sp.get('min_annualized_net_return', 0.03)),
             # NOTE: config min_net_income is normalized to base CNY.
-            # scan_sell_put.py computes net_income in USD for US options,
-            # so we convert CNY->USD using fx_usd_per_cny (USD per 1 CNY).
+            # scan_sell_put.py now computes net_income in the option's native currency.
+            # We convert the CNY threshold into the option currency using FX when possible.
             '--min-net-income', str(
-                0.0 if (sp.get('min_net_income') not in (None, '') and float(sp.get('min_net_income') or 0) > 0 and not fx_usd_per_cny)
-                else (float(sp.get('min_net_income') or 0.0) * float(fx_usd_per_cny)) if fx_usd_per_cny else float(sp.get('min_net_income') or 0.0)
+                # Config threshold is in base CNY; scanners run in option's native currency.
+                # USD: CNY->USD using fx_usd_per_cny (USD per 1 CNY)
+                # HKD: CNY->HKD using HKDCNY (CNY per 1 HKD)
+                (0.0 if float(sp.get('min_net_income') or 0.0) <= 0 else (
+                    (float(sp.get('min_net_income') or 0.0) * float(fx_usd_per_cny))
+                    if (not str(symbol).upper().endswith('.HK')) and fx_usd_per_cny
+                    else (
+                        (float(sp.get('min_net_income') or 0.0) / float(hkdcny))
+                        if (str(symbol).upper().endswith('.HK') and hkdcny)
+                        else 0.0
+                    )
+                ))
             ),
             '--min-open-interest', str(sp.get('min_open_interest', 100)),
             '--min-volume', str(sp.get('min_volume', 10)),
@@ -349,6 +408,8 @@ def process_symbol(
             cmd.extend(['--min-strike', str(sp.get('min_strike'))])
         if sp.get('max_strike') is not None:
             cmd.extend(['--max-strike', str(sp.get('max_strike'))])
+        if IS_SCHEDULED:
+            cmd.append('--quiet')
         run(cmd, cwd=base, timeout_sec=timeout_sec)
 
         shared_sp = report_dir / 'sell_put_candidates.csv'
@@ -370,6 +431,7 @@ def process_symbol(
             used_symbol_usd = 0.0
             used_total_usd = 0.0
             used_total_cny = None
+            used_symbol_cny = None
 
             if option_ctx:
                 try:
@@ -378,8 +440,16 @@ def process_symbol(
                     if isinstance(by_sym_ccy, dict) and (by_sym_ccy or tot_by_ccy):
                         used_symbol_usd = float(((by_sym_ccy.get(symbol) or {}).get('USD')) or 0.0)
                         used_total_usd = float((tot_by_ccy.get('USD')) or 0.0)
+                        # Prefer the context-provided CNY-normalized totals.
                         v = option_ctx.get('cash_secured_total_cny')
                         used_total_cny = float(v) if v is not None else None
+                        # Best-effort: symbol-level CNY is not always provided; if absent we'll keep None.
+                        vs = None
+                        try:
+                            vs = (option_ctx.get('cash_secured_by_symbol_cny') or {}).get(symbol)
+                        except Exception:
+                            vs = None
+                        used_symbol_cny = float(vs) if vs is not None else None
                     else:
                         used_map = (option_ctx.get('cash_secured_by_symbol') or {})
                         used_symbol_usd = float(used_map.get(symbol) or 0.0)
@@ -388,6 +458,7 @@ def process_symbol(
                     used_symbol_usd = 0.0
                     used_total_usd = 0.0
                     used_total_cny = None
+                    used_symbol_cny = None
 
             cash_avail = None
             cash_avail_est = None  # USD equivalent (from base CNY)
@@ -421,11 +492,23 @@ def process_symbol(
                 cash_avail = None
                 cash_avail_est = None
 
-            # Account-level cash usage: all open short puts (USD bucket for USD-based reporting)
+            # Account-level cash usage.
+            # Keep legacy USD columns, but also provide CNY-normalized view for display.
             df_sp_lab['cash_secured_used_usd_total'] = used_total_usd
             df_sp_lab['cash_secured_used_usd_symbol'] = used_symbol_usd
-            # Backward-compatible: treat cash_secured_used_usd as account-level used
             df_sp_lab['cash_secured_used_usd'] = used_total_usd
+
+            # CNY-normalized totals (preferred for unified display)
+            if used_total_cny is not None:
+                df_sp_lab['cash_secured_used_cny_total'] = float(used_total_cny)
+            else:
+                df_sp_lab['cash_secured_used_cny_total'] = pd.NA
+            if used_symbol_cny is not None:
+                df_sp_lab['cash_secured_used_cny_symbol'] = float(used_symbol_cny)
+            else:
+                df_sp_lab['cash_secured_used_cny_symbol'] = pd.NA
+            # Backward-compatible alias
+            df_sp_lab['cash_secured_used_cny'] = df_sp_lab['cash_secured_used_cny_total']
 
             # If we have true USD cash from holdings, use it; else use USD equivalent derived from base CNY.
             if cash_avail is not None:
@@ -446,32 +529,72 @@ def process_symbol(
             df_sp_lab['cash_available_cny'] = (cash_avail_cny if cash_avail_cny is not None else pd.NA)
             df_sp_lab['cash_free_cny'] = (cash_free_cny if cash_free_cny is not None else pd.NA)
 
-            # candidate cash requirement per 1 contract (100 shares)
+            # ===== Cash requirement =====
+            # Old columns are named *_usd for historical reasons. We keep them for compatibility,
+            # but going forward we want everything normalized into CNY for display/risk.
             try:
-                df_sp_lab['cash_required_usd'] = df_sp_lab['strike'].astype(float) * 100.0
+                # per-contract multiplier (preferred from data source; fallback 100)
+                if 'multiplier' in df_sp_lab.columns:
+                    m = df_sp_lab['multiplier'].fillna(100.0).astype(float)
+                else:
+                    m = 100.0
+
+                # native requirement in option currency: strike * multiplier
+                native_req = df_sp_lab['strike'].astype(float) * m
+
+                # keep legacy USD column (only meaningful for USD options; for HKD it's just the native amount)
+                df_sp_lab['cash_required_usd'] = native_req
+
+                # normalize to CNY using FX
+                ccy = None
+                if 'currency' in df_sp_lab.columns and len(df_sp_lab) > 0:
+                    ccy = str(df_sp_lab['currency'].iloc[0] or '').upper()
+
+                if ccy == 'HKD':
+                    # HKDCNY is CNY per 1 HKD
+                    try:
+                        # Load from shared cache path (same as fx_rates.py uses)
+                        import json as _json
+                        from pathlib import Path as _Path
+                        rate_cache = (base / 'output/state/rate_cache.json').resolve()
+                        workspace = _Path(__file__).resolve().parents[2]
+                        shared_path = workspace / 'portfolio-management' / '.data' / 'rate_cache.json'
+                        # minimal inline: prefer existing cache file
+                        rates = None
+                        for p in [rate_cache, shared_path]:
+                            if p.exists() and p.stat().st_size > 0:
+                                d = _json.loads(p.read_text(encoding='utf-8'))
+                                rates = (d.get('rates') or {})
+                                break
+                        hkdcny = float(rates.get('HKDCNY')) if rates and rates.get('HKDCNY') else None
+                    except Exception:
+                        hkdcny = None
+                    if hkdcny:
+                        df_sp_lab['cash_required_cny'] = native_req.astype(float) * float(hkdcny)
+                    else:
+                        df_sp_lab['cash_required_cny'] = pd.NA
+                else:
+                    # USD -> CNY using USDCNY derived from fx_usd_per_cny
+                    if fx_usd_per_cny:
+                        usdcny = 1.0 / float(fx_usd_per_cny)
+                        df_sp_lab['cash_required_cny'] = native_req.astype(float) * float(usdcny)
+                    else:
+                        df_sp_lab['cash_required_cny'] = pd.NA
             except Exception:
                 df_sp_lab['cash_required_usd'] = pd.NA
-
-            # candidate cash requirement in base currency (CNY)
-            if fx_usd_per_cny:
-                usdcny = 1.0 / float(fx_usd_per_cny)
-                try:
-                    df_sp_lab['cash_required_cny'] = df_sp_lab['strike'].astype(float) * 100.0 * float(usdcny)
-                except Exception:
-                    df_sp_lab['cash_required_cny'] = pd.NA
-            else:
                 df_sp_lab['cash_required_cny'] = pd.NA
 
             df_sp_lab.to_csv(symbol_sp_labeled, index=False)
 
-        run([
-            py, 'scripts/render_sell_put_alerts.py',
-            '--input', f'output/reports/{symbol_lower}_sell_put_candidates_labeled.csv',
-            '--symbol', symbol,
-            '--top', str(top_n),
-            '--layered',
-            '--output', f'output/reports/{symbol_lower}_sell_put_alerts.txt',
-        ], cwd=base)
+        if not IS_SCHEDULED:
+            run([
+                py, 'scripts/render_sell_put_alerts.py',
+                '--input', f'output/reports/{symbol_lower}_sell_put_candidates_labeled.csv',
+                '--symbol', symbol,
+                '--top', str(top_n),
+                '--layered',
+                '--output', f'output/reports/{symbol_lower}_sell_put_alerts.txt',
+            ], cwd=base)
         summary_rows.append(summarize_sell_put(safe_read_csv(symbol_sp_labeled), symbol))
     else:
         summary_rows.append(summarize_sell_put(pd.DataFrame(), symbol))
@@ -555,14 +678,15 @@ def process_symbol(
             df_cc['is_fully_covered_available'] = covered_contracts_available >= 1
             df_cc.to_csv(symbol_cc, index=False)
 
-        run([
-            py, 'scripts/render_sell_call_alerts.py',
-            '--input', f'output/reports/{symbol_lower}_sell_call_candidates.csv',
-            '--symbol', symbol,
-            '--top', str(top_n),
-            '--layered',
-            '--output', f'output/reports/{symbol_lower}_sell_call_alerts.txt',
-        ], cwd=base)
+        if not IS_SCHEDULED:
+            run([
+                py, 'scripts/render_sell_call_alerts.py',
+                '--input', f'output/reports/{symbol_lower}_sell_call_candidates.csv',
+                '--symbol', symbol,
+                '--top', str(top_n),
+                '--layered',
+                '--output', f'output/reports/{symbol_lower}_sell_call_alerts.txt',
+            ], cwd=base)
 
         summary_rows.append(summarize_sell_call(df_cc, symbol))
     else:
@@ -595,9 +719,10 @@ def build_symbols_summary(base: Path, summary_rows: list[dict]):
                 f"Top {r['top_contract'] or '-'} | 年化 {annual} | 净收入 {income} | "
                 f"DTE {dte} | Strike {strike} | {r['risk_label'] or '-'} | {r['note']}"
             )
-    txt_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+    if not IS_SCHEDULED:
+        txt_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+        print(f"[DONE] symbols summary text -> {txt_path}")
     print(f"[DONE] symbols summary -> {csv_path}")
-    print(f"[DONE] symbols summary text -> {txt_path}")
 
 
 
@@ -671,10 +796,22 @@ def apply_profiles(item: dict, profiles: dict | None) -> dict:
     return merged
 
 
+# Runtime mode flags (set in main())
+RUNTIME_MODE = 'dev'
+IS_SCHEDULED = False
+
+
 def main():
+    global RUNTIME_MODE, IS_SCHEDULED
+
     parser = argparse.ArgumentParser(description='Run options-monitor pipeline')
     parser.add_argument('--config', required=True, help='Path to JSON config (single-symbol or watchlist). YAML is legacy.')
+    parser.add_argument('--mode', default='dev', choices=['dev', 'scheduled'], help='Runtime mode: dev (verbose) vs scheduled (fast)')
+    parser.add_argument('--symbols', default=None, help='Comma-separated symbol whitelist; only process these symbols')
     args = parser.parse_args()
+
+    RUNTIME_MODE = str(args.mode)
+    IS_SCHEDULED = (RUNTIME_MODE == 'scheduled')
 
     base = Path(__file__).resolve().parents[1]
     cfg_path = Path(args.config)
@@ -689,9 +826,33 @@ def main():
             cfg = yaml.safe_load(f)
 
     # Validate config early (fail fast)
+    # - dev mode: always validate
+    # - scheduled mode: validate only when config content changes (hash cache)
     try:
         from scripts.validate_config import validate_config as _validate_config
-        _validate_config(cfg)
+
+        should_validate = True
+        if IS_SCHEDULED:
+            try:
+                import hashlib
+                import json as _json
+                state_dir = (base / 'output' / 'state').resolve()
+                state_dir.mkdir(parents=True, exist_ok=True)
+                cache_path = state_dir / 'config_validation_cache.json'
+                payload = _json.dumps(cfg, ensure_ascii=False, sort_keys=True)
+                h = hashlib.sha256(payload.encode('utf-8')).hexdigest()
+                prev = None
+                if cache_path.exists() and cache_path.stat().st_size > 0:
+                    prev = _json.loads(cache_path.read_text(encoding='utf-8')).get('sha256')
+                if prev == h:
+                    should_validate = False
+                else:
+                    cache_path.write_text(_json.dumps({'sha256': h}, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+            except Exception:
+                should_validate = True
+
+        if should_validate:
+            _validate_config(cfg)
     except SystemExit:
         raise
     except Exception:
@@ -709,6 +870,11 @@ def main():
         cfg['watchlist'] = cfg.get('symbols')
 
     if 'watchlist' in cfg:
+        # Optional symbols whitelist (comma-separated)
+        sym_whitelist = None
+        if args.symbols:
+            sym_whitelist = {s.strip() for s in str(args.symbols).split(',') if s.strip()}
+
         top_n = cfg.get('outputs', {}).get('top_n_alerts', 3)
         runtime = cfg.get('runtime', {}) or {}
         symbol_timeout_sec = int(runtime.get('symbol_timeout_sec', 120))
@@ -736,8 +902,11 @@ def main():
                 cmd.extend(['--account', str(account)])
             run(cmd, cwd=base, timeout_sec=portfolio_timeout_sec)
             portfolio_ctx = json.loads((base / 'output/state/portfolio_context.json').read_text(encoding='utf-8'))
-        except Exception as e:
+        except BaseException as e:
+            # Important: run() raises SystemExit on non-zero return codes.
+            # For unattended cron, portfolio context is best-effort and should not kill the whole scan.
             print(f"[WARN] portfolio context not available: {e}")
+            portfolio_ctx = None
 
         try:
             cmd = [
@@ -765,11 +934,14 @@ def main():
             except Exception as e2:
                 print(f"[WARN] auto-close expired positions failed: {e2}")
 
-        except Exception as e:
+        except BaseException as e:
+            # best-effort; do not kill pipeline if this fails
             print(f"[WARN] option positions context not available: {e}")
+            option_ctx = None
 
-        # FX (once per pipeline). We only need USD-per-CNY for monitoring estimates.
+        # FX (once per pipeline).
         fx_usd_per_cny = None
+        hkdcny = None
         try:
             # scripts/ is not a package; load fx_rates.py by path
             import importlib.util
@@ -782,18 +954,31 @@ def main():
             _sys.modules['fx_rates'] = mod
             spec.loader.exec_module(mod)  # type: ignore
             fx_usd_per_cny = mod.get_usd_per_cny(base)  # type: ignore
-        except Exception as e:
+            # also load HKDCNY (CNY per 1 HKD) from cache
+            try:
+                rates = mod.get_rates((base / 'output/state/rate_cache.json').resolve(), None)  # type: ignore
+                hkdcny = float(rates.get('HKDCNY')) if rates and rates.get('HKDCNY') else None
+            except Exception:
+                hkdcny = None
+        except BaseException as e:
+            # best-effort
             print(f"[WARN] fx rates not available: {e}")
 
         profiles = cfg.get('profiles') or {}
 
         for item in cfg['watchlist']:
             try:
+                # Optional whitelist filter
+                if sym_whitelist is not None:
+                    s0 = str((item or {}).get('symbol') or '').strip()
+                    if s0 and s0 not in sym_whitelist:
+                        continue
+
                 item = apply_profiles(item, profiles)
                 # inject option_ctx into portfolio_ctx for now (minimal change):
                 if portfolio_ctx is not None and option_ctx is not None:
                     portfolio_ctx['option_ctx'] = option_ctx
-                summary_rows.extend(process_symbol(py, base, item, top_n, portfolio_ctx=portfolio_ctx, fx_usd_per_cny=fx_usd_per_cny, timeout_sec=symbol_timeout_sec))
+                summary_rows.extend(process_symbol(py, base, item, top_n, portfolio_ctx=portfolio_ctx, fx_usd_per_cny=fx_usd_per_cny, hkdcny=hkdcny, timeout_sec=symbol_timeout_sec))
             except Exception as e:
                 symbol = item.get('symbol', 'UNKNOWN')
                 print(f'[WARN] {symbol} processing failed: {e}')
@@ -825,15 +1010,20 @@ def main():
                 })
             symbols.append(item['symbol'])
         build_symbols_summary(base, summary_rows)
-        build_symbols_digest(base, symbols)
+        if not IS_SCHEDULED:
+            build_symbols_digest(base, symbols)
+        changes_out = ('/dev/null' if IS_SCHEDULED else 'output/reports/symbols_changes.txt')
         alert_cmd = [
             py, 'scripts/alert_engine.py',
             '--summary-input', 'output/reports/symbols_summary.csv',
             '--output', 'output/reports/symbols_alerts.txt',
-            '--changes-output', 'output/reports/symbols_changes.txt',
-            '--previous-summary', 'output/state/symbols_summary_prev.csv',
-            '--update-snapshot',
+            '--changes-output', changes_out,
         ]
+        if not IS_SCHEDULED:
+            alert_cmd.extend([
+                '--previous-summary', 'output/state/symbols_summary_prev.csv',
+                '--update-snapshot',
+            ])
         # alert policy overrides (optional)
         try:
             policy = cfg.get('alert_policy')
@@ -851,7 +1041,7 @@ def main():
         run([
             py, 'scripts/notify_symbols.py',
             '--alerts-input', 'output/reports/symbols_alerts.txt',
-            '--changes-input', 'output/reports/symbols_changes.txt',
+            '--changes-input', ('/dev/null' if IS_SCHEDULED else 'output/reports/symbols_changes.txt'),
             '--output', 'output/reports/symbols_notification.txt',
         ], cwd=base)
 
@@ -863,7 +1053,7 @@ def main():
         except Exception:
             include_cash_footer = True
 
-        if include_cash_footer:
+        if include_cash_footer and (not IS_SCHEDULED):
             run([
                 py, 'scripts/append_cash_summary.py',
                 '--pm-config', str(pm_config),
@@ -877,14 +1067,15 @@ def main():
             print('[INFO] notifications enabled in config; pipeline prepared notification text for sending.')
         else:
             print('[INFO] notifications disabled; generated notification text only.')
-        print('\n[DONE] Symbols pipeline finished')
-        print('- output/reports/symbols_summary.csv')
-        print('- output/reports/symbols_summary.txt')
-        print('- output/reports/symbols_digest.txt')
-        print('- output/reports/symbols_alerts.txt')
-        print('- output/reports/symbols_changes.txt')
-        print('- output/reports/symbols_notification.txt')
-        print('')
+        if not IS_SCHEDULED:
+            print('\n[DONE] Symbols pipeline finished')
+            print('- output/reports/symbols_summary.csv')
+            print('- output/reports/symbols_summary.txt')
+            print('- output/reports/symbols_digest.txt')
+            print('- output/reports/symbols_alerts.txt')
+            print('- output/reports/symbols_changes.txt')
+            print('- output/reports/symbols_notification.txt')
+            print('')
 
         return
 
