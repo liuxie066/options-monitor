@@ -6,6 +6,7 @@ import json
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -57,6 +58,16 @@ def copy_if_exists(src: Path, dst: Path):
         shutil.copyfile(src, dst)
     else:
         pd.DataFrame().to_csv(dst, index=False)
+
+
+def is_fresh(path: Path, max_age_sec: int) -> bool:
+    try:
+        if not path.exists() or path.stat().st_size <= 0:
+            return False
+        age = time.time() - path.stat().st_mtime
+        return age <= float(max_age_sec)
+    except Exception:
+        return False
 
 
 def add_sell_put_labels(base: Path, input_path: Path, output_path: Path):
@@ -891,48 +902,69 @@ def main():
 
         portfolio_ctx = None
         option_ctx = None
+
+        # Cache policy (TTL seconds)
+        # - scheduled: longer TTL (reduce PM subprocess overhead)
+        # - dev: shorter TTL (keep reasonably fresh)
+        runtime = cfg.get('runtime', {}) or {}
+        ttl_opt_ctx = int(runtime.get('option_positions_context_ttl_sec', 900 if IS_SCHEDULED else 120) or 0)
+        ttl_port_ctx = int(runtime.get('portfolio_context_ttl_sec', 900 if IS_SCHEDULED else 60) or 0)
+
+        # 1) portfolio_context cache
         try:
-            cmd = [
-                py, 'scripts/fetch_portfolio_context.py',
-                '--pm-config', str(pm_config),
-                '--market', str(market),
-                '--out', 'output/state/portfolio_context.json',
-            ]
-            if account:
-                cmd.extend(['--account', str(account)])
-            run(cmd, cwd=base, timeout_sec=portfolio_timeout_sec)
-            portfolio_ctx = json.loads((base / 'output/state/portfolio_context.json').read_text(encoding='utf-8'))
+            port_path = (base / 'output/state/portfolio_context.json').resolve()
+            if ttl_port_ctx > 0 and is_fresh(port_path, ttl_port_ctx):
+                portfolio_ctx = json.loads(port_path.read_text(encoding='utf-8'))
+            else:
+                cmd = [
+                    py, 'scripts/fetch_portfolio_context.py',
+                    '--pm-config', str(pm_config),
+                    '--market', str(market),
+                    '--out', 'output/state/portfolio_context.json',
+                ]
+                if account:
+                    cmd.extend(['--account', str(account)])
+                run(cmd, cwd=base, timeout_sec=portfolio_timeout_sec)
+                portfolio_ctx = json.loads(port_path.read_text(encoding='utf-8'))
         except BaseException as e:
             # Important: run() raises SystemExit on non-zero return codes.
             # For unattended cron, portfolio context is best-effort and should not kill the whole scan.
             print(f"[WARN] portfolio context not available: {e}")
             portfolio_ctx = None
 
+        # 2) option_positions_context cache (and auto-close only on refresh)
         try:
-            cmd = [
-                py, 'scripts/fetch_option_positions_context.py',
-                '--pm-config', str(pm_config),
-                '--market', str(market),
-                '--out', 'output/state/option_positions_context.json',
-            ]
-            if account:
-                cmd.extend(['--account', str(account)])
-            run(cmd, cwd=base, timeout_sec=portfolio_timeout_sec)
-            option_ctx = json.loads((base / 'output/state/option_positions_context.json').read_text(encoding='utf-8'))
-
-            # Auto-close expired open positions (table maintenance) without extra scans.
-            # Uses the context we just generated (contains open_positions_min with record_id).
-            try:
-                run([
-                    py, 'scripts/auto_close_expired_positions.py',
+            opt_path = (base / 'output/state/option_positions_context.json').resolve()
+            refreshed = False
+            if ttl_opt_ctx > 0 and is_fresh(opt_path, ttl_opt_ctx):
+                option_ctx = json.loads(opt_path.read_text(encoding='utf-8'))
+            else:
+                cmd = [
+                    py, 'scripts/fetch_option_positions_context.py',
                     '--pm-config', str(pm_config),
-                    '--context', 'output/state/option_positions_context.json',
-                    '--grace-days', '1',
-                    '--max-close', '20',
-                    '--summary-out', 'output/reports/auto_close_summary.txt',
-                ], cwd=base, timeout_sec=portfolio_timeout_sec)
-            except Exception as e2:
-                print(f"[WARN] auto-close expired positions failed: {e2}")
+                    '--market', str(market),
+                    '--out', 'output/state/option_positions_context.json',
+                ]
+                if account:
+                    cmd.extend(['--account', str(account)])
+                run(cmd, cwd=base, timeout_sec=portfolio_timeout_sec)
+                option_ctx = json.loads(opt_path.read_text(encoding='utf-8'))
+                refreshed = True
+
+            if refreshed:
+                # Auto-close expired open positions (table maintenance) without extra scans.
+                # Uses the context we just generated (contains open_positions_min with record_id).
+                try:
+                    run([
+                        py, 'scripts/auto_close_expired_positions.py',
+                        '--pm-config', str(pm_config),
+                        '--context', 'output/state/option_positions_context.json',
+                        '--grace-days', '1',
+                        '--max-close', '20',
+                        '--summary-out', 'output/reports/auto_close_summary.txt',
+                    ], cwd=base, timeout_sec=portfolio_timeout_sec)
+                except Exception as e2:
+                    print(f"[WARN] auto-close expired positions failed: {e2}")
 
         except BaseException as e:
             # best-effort; do not kill pipeline if this fails
