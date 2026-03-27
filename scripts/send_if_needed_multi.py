@@ -622,6 +622,17 @@ def main():
             state_path = shared_state_dir / 'scheduler_state_us.json'
         else:
             state_path = shared_state_dir / 'scheduler_state.json'
+
+        # Ensure shared scheduler state exists (so ops/debug can inspect even before first scan/notify)
+        try:
+            if (not state_path.exists()) or state_path.stat().st_size <= 0:
+                write_json(state_path, {
+                    'last_scan_utc': None,
+                    'last_notify_utc': None,
+                    'last_notify_utc_by_account': {},
+                })
+        except Exception:
+            pass
         notif_path = acct_out / 'reports' / 'symbols_notification.txt'
 
         # 1) scheduler decision
