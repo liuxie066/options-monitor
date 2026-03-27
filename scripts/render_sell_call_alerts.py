@@ -47,7 +47,7 @@ def render_one(row) -> str:
         f"DTE: {int(row['dte'])}",
         f"卖出参考价(mid): {num(row['mid'])}  (收益率按 mid 价计算)",
         "",
-        f"净收入: {num(row['net_income'])}",
+        f"净收入({str(row.get('currency') or row.get('option_ccy') or 'N/A').upper()}): {num(row['net_income'])}",
         f"净权利金年化: {pct(row['annualized_net_premium_return'])}",
         f"若被行权总收益: {pct(row['if_exercised_total_return'])}",
         f"strike 相对现价空间: {pct(row['strike_above_spot_pct'])}",
