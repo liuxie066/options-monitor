@@ -540,6 +540,46 @@ def process_symbol(
                 cmd.append('--quiet')
             run(cmd, cwd=base, timeout_sec=timeout_sec)
             _apply_multiplier_cache_to_required_data_csv(symbol)
+
+            # fallback to yahoo (US) if OpenD returned empty data or transient error
+            try:
+                is_us = (not str(symbol).upper().endswith('.HK'))
+                parsed = (base / 'output' / 'parsed' / f"{symbol}_required_data.csv").resolve()
+                raw = (base / 'output' / 'raw' / f"{symbol}_required_data.json").resolve()
+
+                err_s = ''
+                try:
+                    if raw.exists() and raw.stat().st_size > 0:
+                        obj = json.loads(raw.read_text(encoding='utf-8'))
+                        meta = (obj.get('meta') or {}) if isinstance(obj, dict) else {}
+                        err_s = str(meta.get('error') or '')
+                except Exception:
+                    err_s = ''
+
+                empty = True
+                try:
+                    if parsed.exists() and parsed.stat().st_size > 0:
+                        df0 = pd.read_csv(parsed)
+                        empty = bool(df0.empty)
+                except Exception:
+                    empty = True
+
+                transient = any(k in err_s.lower() for k in [
+                    'rate', '频率', 'too frequent',
+                    'timeout', 'timed out',
+                    'econn', 'refused',
+                    'disconnect', 'callclose',
+                ])
+
+                if is_us and (empty or transient):
+                    run([
+                        py, 'scripts/fetch_market_data.py',
+                        '--symbols', symbol,
+                        '--limit-expirations', str(limit_expirations),
+                    ], cwd=base, timeout_sec=timeout_sec)
+                    _apply_multiplier_cache_to_required_data_csv(symbol)
+            except Exception:
+                pass
         else:
             run([
                 py, 'scripts/fetch_market_data.py',
