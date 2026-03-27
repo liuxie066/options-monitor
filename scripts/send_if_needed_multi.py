@@ -651,6 +651,38 @@ def main():
                 })
         except Exception:
             pass
+
+        # Migrate legacy per-account scheduler_state.json into shared state (one-time best-effort)
+        try:
+            st0 = read_json(state_path, {})
+            if isinstance(st0, dict) and (not st0.get('last_scan_utc')) and (not st0.get('last_notify_utc')):
+                legacy_candidates = []
+                for _acct in accounts:
+                    lp = (accounts_root / _acct / 'state' / 'scheduler_state.json').resolve()
+                    if lp.exists() and lp.stat().st_size > 0:
+                        try:
+                            obj = read_json(lp, {})
+                            if isinstance(obj, dict):
+                                legacy_candidates.append(obj)
+                        except Exception:
+                            pass
+
+                best_scan = None
+                best_notify = None
+                for obj in legacy_candidates:
+                    s = obj.get('last_scan_utc')
+                    n = obj.get('last_notify_utc')
+                    if s and ((best_scan is None) or (str(s) > str(best_scan))):
+                        best_scan = s
+                    if n and ((best_notify is None) or (str(n) > str(best_notify))):
+                        best_notify = n
+
+                if best_scan or best_notify:
+                    st0['last_scan_utc'] = best_scan
+                    st0['last_notify_utc'] = best_notify
+                    write_json(state_path, st0)
+        except Exception:
+            pass
         notif_path = acct_out / 'reports' / 'symbols_notification.txt'
 
         # 1) scheduler decision
