@@ -789,7 +789,7 @@ def main():
             st0 = read_json(state_path, {})
             if isinstance(st0, dict) and (not st0.get('last_scan_utc')) and (not st0.get('last_notify_utc')):
                 legacy_candidates = []
-                for _acct in accounts:
+                for _acct in args.accounts:
                     lp = (accounts_root / _acct / 'state' / 'scheduler_state.json').resolve()
                     if lp.exists() and lp.stat().st_size > 0:
                         try:
