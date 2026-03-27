@@ -308,5 +308,15 @@
     "notify_cooldown_min": 60,
     "notify_cooldown_dense_min": 30,
     "notify_cooldown_sparse_min": 60
+  },
+  "schedule_hk": {
+    "enabled": true,
+    "market_timezone": "Asia/Hong_Kong",
+    "market_open": "09:30",
+    "market_close": "16:00",
+    "monitor_off_hours": false,
+    "market_dense_interval_min": 30,
+    "market_sparse_interval_min": 30,
+    "notify_cooldown_min": 60
   }
 }

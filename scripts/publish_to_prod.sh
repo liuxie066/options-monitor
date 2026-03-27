@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Publish dev repo changes into the local prod checkout.
+#
+# Design goals:
+# - Avoid editing prod directly (no drift): always publish from dev.
+# - Copy ONLY tracked files from dev (git ls-files), so local prod config.json/output/.venv are untouched.
+# - Create an auditable publish commit on a timestamped branch in prod, then merge into a target branch.
+#
+# Default dirs match this OpenClaw workspace layout.
+DEV_DIR="/home/node/.openclaw/workspace/options-monitor"
+PROD_DIR="/home/node/.openclaw/workspace/options-monitor-prod"
+TARGET_BRANCH="hotfix/scheduled-speed-quiet-20260327"
+DO_MERGE=1
+ALLOW_DIRTY=0
+
+usage() {
+  cat <<EOF
+Usage:
+  $(basename "$0") [--dev <dir>] [--prod <dir>] [--target-branch <name>] [--no-merge] [--allow-dirty]
+
+Examples:
+  # Standard publish (recommended)
+  $(basename "$0")
+
+  # Publish but do not merge into target branch (leave changes on publish branch)
+  $(basename "$0") --no-merge
+
+Notes:
+- This script performs ONLY local git commits/merges; it does NOT push to GitHub.
+- It copies files from dev using: git ls-files (tracked only).
+  So ignored local files like config.json/output/.venv are NOT overwritten.
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dev) DEV_DIR="$2"; shift 2;;
+    --prod) PROD_DIR="$2"; shift 2;;
+    --target-branch) TARGET_BRANCH="$2"; shift 2;;
+    --no-merge) DO_MERGE=0; shift 1;;
+    --allow-dirty) ALLOW_DIRTY=1; shift 1;;
+    -h|--help) usage; exit 0;;
+    *) echo "Unknown arg: $1"; usage; exit 2;;
+  esac
+done
+
+need_git_repo() {
+  local dir="$1"
+  if [[ ! -d "$dir/.git" ]]; then
+    echo "[ERR] not a git repo: $dir" >&2
+    exit 1
+  fi
+}
+
+ensure_clean() {
+  local dir="$1" label="$2"
+  if [[ $ALLOW_DIRTY -eq 1 ]]; then
+    return 0
+  fi
+  local st
+  st=$(cd "$dir" && git status --porcelain=v1)
+  if [[ -n "$st" ]]; then
+    echo "[ERR] $label repo has uncommitted changes. Commit/stash them or pass --allow-dirty." >&2
+    echo "$st" >&2
+    exit 1
+  fi
+}
+
+need_git_repo "$DEV_DIR"
+need_git_repo "$PROD_DIR"
+ensure_clean "$DEV_DIR" "DEV"
+ensure_clean "$PROD_DIR" "PROD"
+
+DEV_HEAD=$(cd "$DEV_DIR" && git rev-parse --short HEAD)
+DEV_BRANCH=$(cd "$DEV_DIR" && git branch --show-current)
+
+STAMP=$(date -u +%Y%m%d-%H%M%S)
+PUBLISH_BRANCH="publish/from-dev-${STAMP}"
+
+echo "[INFO] DEV:  $DEV_DIR ($DEV_BRANCH @ $DEV_HEAD)"
+echo "[INFO] PROD: $PROD_DIR (target branch: $TARGET_BRANCH)"
+echo "[INFO] publish branch: $PUBLISH_BRANCH"
+
+# Create publish branch in prod
+(
+  cd "$PROD_DIR"
+  git checkout -b "$PUBLISH_BRANCH" >/dev/null
+)
+
+# Copy tracked files from dev into prod
+TRACKED=$(cd "$DEV_DIR" && git ls-files)
+while IFS= read -r f; do
+  case "$f" in
+    output*|output_accounts*|secrets*|.venv*|.tmp_* )
+      continue;;
+  esac
+  src="$DEV_DIR/$f"
+  dst="$PROD_DIR/$f"
+  mkdir -p "$(dirname "$dst")"
+  # Preserve mode/timestamps where possible
+  cp -a "$src" "$dst"
+done <<< "$TRACKED"
+
+# Compile quick sanity check (scripts only)
+"$PROD_DIR/.venv/bin/python" -m py_compile "$PROD_DIR"/scripts/*.py
+
+# Commit on publish branch
+(
+  cd "$PROD_DIR"
+  git add -A
+  if git diff --cached --quiet; then
+    echo "[INFO] No changes to publish (prod already matches dev tracked files)."
+  else
+    git commit -m "publish: sync dev(${DEV_BRANCH}@${DEV_HEAD}) -> prod" >/dev/null
+    echo "[OK] publish commit created: $(git rev-parse --short HEAD)"
+  fi
+)
+
+if [[ $DO_MERGE -eq 1 ]]; then
+  (
+    cd "$PROD_DIR"
+    git checkout "$TARGET_BRANCH" >/dev/null
+    git merge --no-ff "$PUBLISH_BRANCH" -m "merge: publish ${PUBLISH_BRANCH}" >/dev/null
+    echo "[OK] merged into $TARGET_BRANCH: $(git rev-parse --short HEAD)"
+  )
+else
+  echo "[INFO] --no-merge set: leaving changes on $PUBLISH_BRANCH"
+fi
+
+echo "[DONE] publish complete"
