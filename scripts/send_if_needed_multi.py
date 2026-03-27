@@ -683,6 +683,7 @@ def main():
     shared_scan_dir = (base / 'output_shared' / 'scan_runs' / utc_now().replace(':','').replace('-','').split('.')[0]).resolve()
     shared_scan_dir.mkdir(parents=True, exist_ok=True)
     shared_scan_ready = False
+    prefetch_done = False
     # shared required_data dir should already exist (created by prefetch step)
     shared_required = (base / 'output_shared' / 'required_data').resolve()
     tick_metrics_path = (base / 'output_shared' / 'state' / 'tick_metrics.json').resolve()
@@ -843,6 +844,13 @@ def main():
             pass
 
         # Shared scan reuse: first due account writes shared scan artifacts; subsequent due accounts reuse them
+        if (not prefetch_done):
+            try:
+                prefetch_required_data(vpy=vpy, base=base, cfg=cfg, shared_required=shared_required)
+            except Exception:
+                pass
+            prefetch_done = True
+
         pipe_cmd = [str(vpy), 'scripts/run_pipeline.py', '--config', str(cfg_override), '--mode', 'scheduled', '--shared-required-data', str(shared_required), '--shared-scan-dir', str(shared_scan_dir)]
         if shared_scan_ready:
             pipe_cmd.append('--reuse-shared-scan')
