@@ -614,6 +614,7 @@ def main():
     ap.add_argument('--config', default='config.json')
     ap.add_argument('--accounts', nargs='+', required=True)
     ap.add_argument('--default-account', default='lx')
+    ap.add_argument('--market-config', default='auto', choices=['auto','hk','us','all'], help='Select symbols by market at config-load time (auto=by session).')
     args = ap.parse_args()
 
     base = Path(__file__).resolve().parents[1]
@@ -623,6 +624,16 @@ def main():
     if not cfg_path.is_absolute():
         cfg_path = (base / cfg_path).resolve()
     base_cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
+
+    market_cfg = str(getattr(args, 'market_config', 'auto') or 'auto').lower()
+    if market_cfg in ('hk','us'):
+        try:
+            base_cfg = dict(base_cfg)
+            syms = base_cfg.get('symbols') or []
+            base_cfg['symbols'] = [it for it in syms if isinstance(it, dict) and (it.get('market') == market_cfg.upper())]
+        except Exception:
+            pass
+    # auto/all: keep full config; later market-aware filtering still applies
 
     schedule_cfg = base_cfg.get('schedule', {}) or {}
     dense_notify_cooldown_min = int(schedule_cfg.get('notify_cooldown_dense_min', 30))
