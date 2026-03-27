@@ -454,10 +454,17 @@ def process_symbol(
             '--limit-expirations', str(limit_expirations),
             '--host', host,
             '--port', str(port),
+            '--option-types', ('put,call' if (want_put and want_call) else ('put' if want_put else 'call')),
         ]
         # If OpenD has no US stock quote right, we can still compute OTM% using portfolio-management prices.
         if bool(fetch_cfg.get('spot_from_portfolio_management', False)):
             cmd.append('--spot-from-pm')
+        # Put cash prefilter: shrink chain by passing max-strike into OpenD fetch
+        try:
+            if want_put and sp.get('max_strike') is not None:
+                cmd.extend(['--max-strike', str(sp.get('max_strike'))])
+        except Exception:
+            pass
         if IS_SCHEDULED:
             # Quiet mode for fetch_market_data_opend.py
             cmd.append('--quiet')
