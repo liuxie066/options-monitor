@@ -37,6 +37,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta, time
 from pathlib import Path
 from zoneinfo import ZoneInfo
+import socket
 
 
 def utc_now() -> str:
@@ -489,6 +490,14 @@ def build_merged_message(
     return '\n'.join(lines).strip() + '\n'
 
 
+def _tcp_open(host: str, port: int, timeout_sec: float = 1.0) -> bool:
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout_sec):
+            return True
+    except Exception:
+        return False
+
+
 def main():
     ap = argparse.ArgumentParser(description='Multi-account tick with merged notification')
     ap.add_argument('--config', default='config.json')
@@ -508,6 +517,43 @@ def main():
     dense_notify_cooldown_min = int(schedule_cfg.get('notify_cooldown_dense_min', 30))
     sparse_after_beijing = parse_hhmm(schedule_cfg.get('sparse_after_beijing', '02:00'))
     bj_tz = ZoneInfo(schedule_cfg.get('beijing_timezone', 'Asia/Shanghai'))
+
+    # Preflight: fail fast if option source is configured as local OpenD but the port isn't listening.
+    # Otherwise the run can hang for minutes on repeated ECONNREFUSED.
+    try:
+        ports = set()
+        for sym in (base_cfg.get('symbols') or []):
+            fetch = (sym or {}).get('fetch') or {}
+            if str(fetch.get('source') or '').lower() == 'opend':
+                host = fetch.get('host') or '127.0.0.1'
+                port = fetch.get('port')
+                if port:
+                    ports.add((str(host), int(port)))
+        for host, port in sorted(ports):
+            if not _tcp_open(host, port, timeout_sec=1.0):
+                # Record a last_run marker in each account state dir for observability, then exit.
+                now = utc_now()
+                for acct in args.accounts:
+                    acct = str(acct).strip().lower()
+                    if not acct:
+                        continue
+                    try:
+                        state_dir = (base / 'output_accounts' / acct / 'state')
+                        state_dir.mkdir(parents=True, exist_ok=True)
+                        write_json(state_dir / 'last_run.json', {
+                            'last_run_utc': now,
+                            'sent': False,
+                            'reason': 'opend_unreachable',
+                            'detail': f"cannot connect to {host}:{port}",
+                        })
+                    except Exception:
+                        pass
+                raise SystemExit(f"[FATAL] OpenD unreachable at {host}:{port} (configured fetch.source=opend).")
+    except SystemExit:
+        raise
+    except Exception:
+        # best-effort: do not block execution if preflight fails unexpectedly
+        pass
 
     # Ensure output/accounts layout
     accounts_root = (base / 'output_accounts').resolve()
@@ -656,6 +702,7 @@ def main():
     if not merged:
         # Even if we didn't send, record that we ran.
         try:
+            # Shared marker under ./output (symlink points to last processed account).
             write_json(base / 'output' / 'state' / 'last_run.json', {
                 'last_run_utc': utc_now(),
                 'sent': False,
@@ -665,6 +712,21 @@ def main():
             })
         except Exception:
             pass
+
+        # Per-account marker for easier debugging.
+        try:
+            for r in results:
+                acct_out = accounts_root / r.account
+                write_json(acct_out / 'state' / 'last_run.json', {
+                    'last_run_utc': utc_now(),
+                    'sent': False,
+                    'reason': 'no_merged_notification',
+                    'account': r.account,
+                    'result': r.__dict__,
+                })
+        except Exception:
+            pass
+
         return 0
 
     # Send ONCE

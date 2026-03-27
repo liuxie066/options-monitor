@@ -7,20 +7,11 @@ import math
 import pandas as pd
 
 
-MULTIPLIER = 100
+DEFAULT_MULTIPLIER = 100
 
 
 def calc_futu_us_option_fee(order_price: float, contracts: int = 1, is_sell: bool = True) -> float:
-    """
-    Simplified Futu US option fee model for single-leg option order.
-    Assumptions based on current public schedule discussed in the project:
-    - Commission: $0.65/contract if premium > 0.1, else $0.15/contract; minimum $1.99/order
-    - Platform fee: $0.30/contract
-    - TAF (sell only): $0.00329/contract, minimum $0.01/order
-    - ORF: $0.013/contract
-    - OCC clearing fee: $0.02/contract
-    - Settlement fee: $0.18/contract
-    """
+    """Simplified Futu US option fee model for single-leg option order."""
     commission_per_contract = 0.65 if order_price > 0.1 else 0.15
     commission = max(commission_per_contract * contracts, 1.99)
     platform_fee = 0.30 * contracts
@@ -30,6 +21,43 @@ def calc_futu_us_option_fee(order_price: float, contracts: int = 1, is_sell: boo
     settlement = 0.18 * contracts
     total = commission + platform_fee + taf + orf + occ + settlement
     return round(total, 6)
+
+
+def calc_futu_hk_option_fee_static(order_price: float, contracts: int = 1, is_sell: bool = True, *, base_dir: Path | None = None) -> float:
+    """HK option static fee model (HKD).
+
+    Configurable via config.json:
+      fees.hk_static.platform_fee_per_order_hkd
+      fees.hk_static.commission_per_order_hkd
+      fees.hk_static.other_fees_per_order_hkd
+
+    Note: this is per-order, not per-contract.
+    """
+    platform_fee_per_order = 15.0
+    commission_per_order = 0.0
+    other_per_order = 0.0
+
+    try:
+        if base_dir is not None:
+            import json
+            cfg_path = base_dir / 'config.json'
+            if cfg_path.exists() and cfg_path.stat().st_size > 0:
+                cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
+                hk = ((cfg.get('fees') or {}).get('hk_static') or {})
+                platform_fee_per_order = float(hk.get('platform_fee_per_order_hkd', platform_fee_per_order))
+                commission_per_order = float(hk.get('commission_per_order_hkd', commission_per_order))
+                other_per_order = float(hk.get('other_fees_per_order_hkd', other_per_order))
+    except Exception:
+        pass
+
+    return round(platform_fee_per_order + commission_per_order + other_per_order, 6)
+
+
+def calc_futu_option_fee(currency: str | None, order_price: float, contracts: int = 1, is_sell: bool = True, *, base_dir: Path | None = None) -> float:
+    ccy = (currency or 'USD').upper()
+    if ccy == 'HKD':
+        return calc_futu_hk_option_fee_static(order_price, contracts=contracts, is_sell=is_sell, base_dir=base_dir)
+    return calc_futu_us_option_fee(order_price, contracts=contracts, is_sell=is_sell)
 
 
 def safe_float(v):
@@ -45,7 +73,10 @@ def compute_metrics(row: pd.Series) -> dict | None:
     mid = safe_float(row.get("mid"))
     strike = safe_float(row.get("strike"))
     spot = safe_float(row.get("spot"))
-    dte = int(row.get("dte"))
+    try:
+        dte = int(row.get("dte"))
+    except Exception:
+        return None
 
     if mid is None or strike is None or spot is None or dte <= 0:
         return None
@@ -54,20 +85,24 @@ def compute_metrics(row: pd.Series) -> dict | None:
     if strike >= spot:
         return None
 
-    gross_income = mid * MULTIPLIER
-    fee = calc_futu_us_option_fee(mid, contracts=1, is_sell=True)
+    multiplier = safe_float(row.get("multiplier"))
+    m = int(multiplier) if multiplier and multiplier > 0 else DEFAULT_MULTIPLIER
+
+    gross_income = mid * m
+    base_dir = Path(__file__).resolve().parents[1]
+    fee = calc_futu_option_fee(row.get('currency'), mid, contracts=1, is_sell=True, base_dir=base_dir)
     net_income = gross_income - fee
     if net_income <= 0:
         return None
 
     otm_pct = (spot - strike) / spot
-    cash_basis = strike * MULTIPLIER - net_income
+    cash_basis = strike * m - net_income
     if cash_basis <= 0:
         return None
 
     annualized_net_return_on_cash_basis = (net_income / cash_basis) * (365 / dte)
-    annualized_net_return_on_strike = (net_income / (strike * MULTIPLIER)) * (365 / dte)
-    breakeven = strike - net_income / MULTIPLIER
+    annualized_net_return_on_strike = (net_income / (strike * m)) * (365 / dte)
+    breakeven = strike - net_income / m
 
     return {
         "gross_income": round(gross_income, 6),
@@ -191,6 +226,8 @@ def main():
                 "expiration": row["expiration"],
                 "dte": dte,
                 "contract_symbol": row.get("contract_symbol"),
+                "multiplier": safe_float(row.get("multiplier")),
+                "currency": row.get("currency"),
                 "strike": safe_float(row.get("strike")),
                 "spot": safe_float(row.get("spot")),
                 "bid": safe_float(row.get("bid")),
@@ -210,7 +247,17 @@ def main():
     if not out.empty:
         out = out.sort_values(by=["annualized_net_return_on_cash_basis", "net_income"], ascending=[False, False])
     out_path = out_dir / "sell_put_candidates.csv"
-    out.to_csv(out_path, index=False)
+    if out.empty:
+        # keep a valid header-only CSV to avoid downstream EmptyDataError
+        cols = [
+            "symbol","expiration","dte","contract_symbol","multiplier","currency","strike","spot","bid","ask","last_price","mid",
+            "open_interest","volume","implied_volatility","delta","spread","spread_ratio",
+            "gross_income","futu_fee","net_income","otm_pct","cash_basis","breakeven",
+            "annualized_net_return_on_strike","annualized_net_return_on_cash_basis",
+        ]
+        pd.DataFrame(columns=cols).to_csv(out_path, index=False)
+    else:
+        out.to_csv(out_path, index=False)
 
     if not args.quiet:
         print(f"[DONE] sell put scan -> {out_path}")

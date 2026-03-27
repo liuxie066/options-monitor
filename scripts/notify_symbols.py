@@ -12,37 +12,18 @@ from pathlib import Path
 
 
 def _suggest_sell_price_tag(mid: str, bid: str | None, ask: str | None) -> str:
-    """Return human-readable suggested order price tag.
+    """Return suggested order price tag.
 
-    Example: "建议挂单 bid 1.200 / fair 1.260".
+    Keep the format aligned with the existing US-option notification style:
+      "建议挂单 1.980"
 
-    We assume bid/ask are numeric strings; if missing, fallback to mid.
+    So we intentionally prefer a simple suggestion based on the mid used for return calc.
     """
     try:
-        if bid is None or ask is None:
-            # fallback
-            v = mid.split(' ', 1)[1] if mid and ' ' in mid else ''
-            if v:
-                return f"建议挂单 {v}"
-            return ''
-        b = float(str(bid).strip())
-        a = float(str(ask).strip())
-        # Treat non-positive quotes as missing (Yahoo sometimes returns 0/0)
-        if b <= 0 or a <= 0:
-            v = mid.split(' ', 1)[1] if mid and ' ' in mid else ''
-            return f"建议挂单 {v}" if v else ''
-        if a < b:
-            b, a = a, b
-        spread = max(0.0, a - b)
-        fast = b
-        fair = b + 0.3 * spread
-        return f"建议挂单 bid {fast:.3f} / fair {fair:.3f}"
+        v = mid.split(' ', 1)[1] if mid and ' ' in mid else ''
+        return f"建议挂单 {v}" if v else ''
     except Exception:
-        try:
-            v = mid.split(' ', 1)[1] if mid and ' ' in mid else ''
-            return f"建议挂单 {v}" if v else ''
-        except Exception:
-            return ''
+        return ''
 
 
 def read_text(path: Path) -> str:
@@ -97,16 +78,13 @@ def _format_alert_line(line: str) -> str:
             return f"净收 {int(round(v))}"
         except Exception:
             return s
-    # mid price used for return calculation (if present)
+    # Mid price used for return calculation (if present)
     mid = next((p for p in parts if p.startswith('mid ')), '')
     ccy = next((p for p in parts if p.startswith('ccy ')), '')
-    delta = next((p for p in parts if p.startswith('delta ')), '')
-    risk = parts[7] if len(parts) >= 8 else ''
 
-    bid = next((p for p in parts if p.startswith('bid ')), None)
-    ask = next((p for p in parts if p.startswith('ask ')), None)
-    bid_val = bid.split(' ', 1)[1] if bid and ' ' in bid else None
-    ask_val = ask.split(' ', 1)[1] if ask and ' ' in ask else None
+    # For notification we intentionally do not surface bid/ask/delta/risk here.
+    bid_val = None
+    ask_val = None
 
     extras: dict[str, str] = {}
     comment = ''
@@ -119,10 +97,7 @@ def _format_alert_line(line: str) -> str:
             extras[k.strip()] = v.strip()
 
     if strategy == 'sell_put':
-        cash_req = extras.get('cash_req', '')
         cash_req_cny = extras.get('cash_req_cny', '')
-        # Only show cash required (no headroom calc)
-        cash_req_only = extras.get('cash_req_cny', '') or extras.get('cash_req', '')
 
         # Header line (more scannable)
         price_val = mid.split(' ', 1)[1] if mid and ' ' in mid else 'mid'
@@ -132,25 +107,14 @@ def _format_alert_line(line: str) -> str:
         sug = _suggest_sell_price_tag(mid, bid_val, ask_val)
         sug_tag = f" | {sug}" if sug else ""
 
-        delta_tag = ''
-        try:
-            if delta and ' ' in delta:
-                dv = float(delta.split(' ', 1)[1])
-                if abs(dv) >= 0.05:
-                    delta_tag = f" | Δ(est) {dv:.2f}"
-        except Exception:
-            delta_tag = ''
-
         # Move annual/net/dte to the end, keep only one separator
         meta = " | ".join([x for x in [annual, income_int_tag(income), dte] if x])
-        line1 = f"{symbol} 卖Put {contract} | {price_tag}{sug_tag}{delta_tag}" + (f" | {meta}" if meta else "")
+        line1 = f"{symbol} 卖Put {contract} | {price_tag}{sug_tag}" + (f" | {meta}" if meta else "")
 
-        # Line 2 (cash) -> shorten
-        req = cash_req_cny or cash_req or cash_req_only or ''
+        # Line 2 (cash): always base currency (CNY)
         line2 = ''
-        if req:
-            cur = 'CNY' if (cash_req_cny or '¥' in str(req)) else 'USD'
-            line2 = f"担保占用: {req} ({cur})"
+        if cash_req_cny:
+            line2 = f"担保占用: {cash_req_cny} (CNY)"
 
         out = [line1]
         if line2:
@@ -170,17 +134,8 @@ def _format_alert_line(line: str) -> str:
         sug = _suggest_sell_price_tag(mid, bid_val, ask_val)
         sug_tag = f" | {sug}" if sug else ""
 
-        delta_tag = ''
-        try:
-            if delta and ' ' in delta:
-                dv = float(delta.split(' ', 1)[1])
-                if abs(dv) >= 0.05:
-                    delta_tag = f" | Δ(est) {dv:.2f}"
-        except Exception:
-            delta_tag = ''
-
         meta = " | ".join([x for x in [annual, income_int_tag(income), dte] if x])
-        line1 = f"{symbol} 卖Call {contract} | {price_tag}{sug_tag}{delta_tag}" + (f" | {meta}" if meta else "")
+        line1 = f"{symbol} 卖Call {contract} | {price_tag}{sug_tag}" + (f" | {meta}" if meta else "")
 
         # Coverage line: make it more human
         line2 = ''
@@ -226,6 +181,7 @@ def build_notification(changes_text: str, alerts_text: str, fx_info: dict | None
     change_lines = extract_change_lines(changes_text)
     high_lines = extract_section(alerts_text, '## 高优先级')
     medium_lines = extract_section(alerts_text, '## 中优先级')
+    low_lines = extract_section(alerts_text, '## 低优先级')
 
     lines: list[str] = []
 
@@ -234,41 +190,39 @@ def build_notification(changes_text: str, alerts_text: str, fx_info: dict | None
         if '无显著变化' not in line and '初始记录' not in line
     ]
 
-    def emit_grouped(title: str, raw: list[str]):
-        if not raw:
-            return
-        lines.append(f"## {title}")
-        groups = _group_by_strategy(raw)
+    # ===== Candidates (align with existing US-option notification style) =====
+    # Prefer: high > medium > low
+    candidate_lines: list[str] = []
+    if high_lines:
+        candidate_lines = high_lines[:5]
+    elif medium_lines:
+        candidate_lines = medium_lines[:5]
+    elif low_lines:
+        candidate_lines = low_lines[:5]
 
-        def emit_items(items: list[str]):
+    if candidate_lines:
+        groups = _group_by_strategy(candidate_lines)
+
+        def emit_plain(title: str, items: list[str]):
+            if not items:
+                return
+            lines.append(title)
             for x in items:
                 block = _format_alert_line(x).strip()
                 if not block:
                     continue
-                blk = block.splitlines()
-                # First line as bullet; subsequent lines indented.
-                lines.append(f"- {blk[0]}")
-                for ln in blk[1:]:
-                    lines.append(f"  {ln}")
+                lines.append(block)
                 lines.append('')
 
         if groups['sell_put']:
-            lines.append('### Put')
-            emit_items(groups['sell_put'])
+            emit_plain('Put', groups['sell_put'])
         if groups['sell_call']:
-            lines.append('### Call')
-            emit_items(groups['sell_call'])
+            emit_plain('Call', groups['sell_call'])
         if groups['other']:
-            emit_items(groups['other'])
-
-    if high_lines:
-        emit_grouped('重点', high_lines[:5])
-    elif medium_lines:
-        emit_grouped('观察', medium_lines[:5])
+            emit_plain('Other', groups['other'])
 
     if significant_changes:
-        # Changes are short; keep as bullet list
-        lines.append('## 变化')
+        lines.append('变化')
         for ln in significant_changes[:8]:
             s = ln.strip()
             if s.startswith('- '):
@@ -276,7 +230,7 @@ def build_notification(changes_text: str, alerts_text: str, fx_info: dict | None
             lines.append(f"- {s}")
         lines.append('')
 
-    if not (high_lines or medium_lines or significant_changes):
+    if not candidate_lines and not significant_changes:
         lines.append('今日无需要主动提醒的内容。')
         lines.append('')
 
