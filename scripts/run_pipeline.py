@@ -6,6 +6,7 @@ import json
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -57,6 +58,16 @@ def copy_if_exists(src: Path, dst: Path):
         shutil.copyfile(src, dst)
     else:
         pd.DataFrame().to_csv(dst, index=False)
+
+
+def is_fresh(path: Path, max_age_sec: int) -> bool:
+    try:
+        if not path.exists() or path.stat().st_size <= 0:
+            return False
+        age = time.time() - path.stat().st_mtime
+        return age <= float(max_age_sec)
+    except Exception:
+        return False
 
 
 def add_sell_put_labels(base: Path, input_path: Path, output_path: Path):
@@ -979,30 +990,39 @@ def main():
                 portfolio_ctx = None
 
             try:
-                cmd = [
-                    py, 'scripts/fetch_option_positions_context.py',
-                    '--pm-config', str(pm_config),
-                    '--market', str(market),
-                    '--out', 'output/state/option_positions_context.json',
-                ]
-                if account:
-                    cmd.extend(['--account', str(account)])
-                run(cmd, cwd=base, timeout_sec=portfolio_timeout_sec)
-                option_ctx = json.loads((base / 'output/state/option_positions_context.json').read_text(encoding='utf-8'))
+                option_ctx_path = (base / 'output/state/option_positions_context.json').resolve()
+                # Dev speed optimization: cache option_positions_context for a short TTL.
+                # This is safe because it only affects cash-secured/locked-shares calculations and auto-close maintenance.
+                # When stale, we'll refresh.
+                ttl_sec = int((runtime.get('option_positions_context_ttl_sec') if isinstance(runtime, dict) else None) or (120 if not IS_SCHEDULED else 900))
 
-                # Auto-close expired open positions (table maintenance) without extra scans.
-                # Uses the context we just generated (contains open_positions_min with record_id).
-                try:
-                    run([
-                        py, 'scripts/auto_close_expired_positions.py',
+                if is_fresh(option_ctx_path, ttl_sec):
+                    option_ctx = json.loads(option_ctx_path.read_text(encoding='utf-8'))
+                else:
+                    cmd = [
+                        py, 'scripts/fetch_option_positions_context.py',
                         '--pm-config', str(pm_config),
-                        '--context', 'output/state/option_positions_context.json',
-                        '--grace-days', '1',
-                        '--max-close', '20',
-                        '--summary-out', 'output/reports/auto_close_summary.txt',
-                    ], cwd=base, timeout_sec=portfolio_timeout_sec)
-                except Exception as e2:
-                    print(f"[WARN] auto-close expired positions failed: {e2}")
+                        '--market', str(market),
+                        '--out', 'output/state/option_positions_context.json',
+                    ]
+                    if account:
+                        cmd.extend(['--account', str(account)])
+                    run(cmd, cwd=base, timeout_sec=portfolio_timeout_sec)
+                    option_ctx = json.loads(option_ctx_path.read_text(encoding='utf-8'))
+
+                    # Auto-close expired open positions (table maintenance) without extra scans.
+                    # Only run when we refreshed context (avoid repeated close calls during rapid dev loops).
+                    try:
+                        run([
+                            py, 'scripts/auto_close_expired_positions.py',
+                            '--pm-config', str(pm_config),
+                            '--context', 'output/state/option_positions_context.json',
+                            '--grace-days', '1',
+                            '--max-close', '20',
+                            '--summary-out', 'output/reports/auto_close_summary.txt',
+                        ], cwd=base, timeout_sec=portfolio_timeout_sec)
+                    except Exception as e2:
+                        print(f"[WARN] auto-close expired positions failed: {e2}")
 
             except BaseException as e:
                 # best-effort; do not kill pipeline if this fails
