@@ -70,6 +70,25 @@ def is_fresh(path: Path, max_age_sec: int) -> bool:
         return False
 
 
+def load_cached_json(path: Path) -> dict | None:
+    """Best-effort cached JSON loader.
+
+    Returns None if file is missing/invalid/clearly incomplete.
+    """
+    try:
+        if not path.exists() or path.stat().st_size <= 2:
+            return None
+        obj = json.loads(path.read_text(encoding='utf-8'))
+        if not isinstance(obj, dict):
+            return None
+        # sanity keys
+        if 'as_of_utc' not in obj and 'filters' not in obj:
+            return None
+        return obj
+    except Exception:
+        return None
+
+
 def add_sell_put_labels(base: Path, input_path: Path, output_path: Path):
     df = safe_read_csv(input_path)
 
@@ -914,7 +933,7 @@ def main():
         try:
             port_path = (base / 'output/state/portfolio_context.json').resolve()
             if ttl_port_ctx > 0 and is_fresh(port_path, ttl_port_ctx):
-                portfolio_ctx = json.loads(port_path.read_text(encoding='utf-8'))
+                portfolio_ctx = load_cached_json(port_path)
             else:
                 cmd = [
                     py, 'scripts/fetch_portfolio_context.py',
@@ -925,7 +944,7 @@ def main():
                 if account:
                     cmd.extend(['--account', str(account)])
                 run(cmd, cwd=base, timeout_sec=portfolio_timeout_sec)
-                portfolio_ctx = json.loads(port_path.read_text(encoding='utf-8'))
+                portfolio_ctx = load_cached_json(port_path) or json.loads(port_path.read_text(encoding='utf-8'))
         except BaseException as e:
             # Important: run() raises SystemExit on non-zero return codes.
             # For unattended cron, portfolio context is best-effort and should not kill the whole scan.
@@ -937,7 +956,7 @@ def main():
             opt_path = (base / 'output/state/option_positions_context.json').resolve()
             refreshed = False
             if ttl_opt_ctx > 0 and is_fresh(opt_path, ttl_opt_ctx):
-                option_ctx = json.loads(opt_path.read_text(encoding='utf-8'))
+                option_ctx = load_cached_json(opt_path)
             else:
                 cmd = [
                     py, 'scripts/fetch_option_positions_context.py',
@@ -948,7 +967,7 @@ def main():
                 if account:
                     cmd.extend(['--account', str(account)])
                 run(cmd, cwd=base, timeout_sec=portfolio_timeout_sec)
-                option_ctx = json.loads(opt_path.read_text(encoding='utf-8'))
+                option_ctx = load_cached_json(opt_path) or json.loads(opt_path.read_text(encoding='utf-8'))
                 refreshed = True
 
             if refreshed:
