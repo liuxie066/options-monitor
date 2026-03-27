@@ -971,6 +971,7 @@ def main():
     parser.add_argument('--stage', default='all', choices=['fetch','scan','alert','notify','all'], help='Pipeline stage: fetch|scan|alert|notify|all (dev speed; runs up to this stage)')
     parser.add_argument('--stage-only', default=None, choices=['alert','notify'], help='Run ONLY a late stage (no fetch/scan). Requires existing output files.')
     parser.add_argument('--refresh-multiplier-cache', action='store_true', help='Refresh output_shared/state/multiplier_cache.json via OpenD before running (best-effort).')
+    parser.add_argument('--no-context', action='store_true', help='Skip portfolio/option_positions context fetch (dev speed). Useful when tuning filters only.')
     args = parser.parse_args()
 
     RUNTIME_MODE = str(args.mode)
@@ -1129,7 +1130,7 @@ def main():
         symbols = []
         summary_rows: list[dict] = []
 
-        if not want('scan'):
+        if (not want('scan')) or bool(getattr(args, 'no_context', False)):
             portfolio_ctx = None
             option_ctx = None
             fx_usd_per_cny = None
