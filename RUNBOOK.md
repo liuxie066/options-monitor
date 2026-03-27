@@ -75,3 +75,8 @@ cat /home/node/.openclaw/workspace/options-monitor/output/state/last_run.json
 ```bash
 cat /home/node/.openclaw/workspace/options-monitor/output/reports/symbols_notification.txt
 ```
+
+## Archived scripts
+
+Some legacy/unused helper scripts were moved to `scripts/_archive/` to reduce confusion.
+If you need them for manual debugging, you can still run them from there, but they are not part of the production cron pipeline.
