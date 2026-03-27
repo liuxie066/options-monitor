@@ -706,8 +706,8 @@ def main():
     shared_scan_dir.mkdir(parents=True, exist_ok=True)
     shared_scan_ready = False
     prefetch_done = False
-    # shared required_data dir should already exist (created by prefetch step)
-    shared_required = (base / 'output_shared' / 'required_data').resolve()
+    # shared required_data dir is per-tick (avoid stale reuse across runs)
+    shared_required = (base / 'output_shared' / 'required_data_runs' / shared_scan_dir.name).resolve()
     tick_metrics_path = (base / 'output_shared' / 'state' / 'tick_metrics.json').resolve()
     tick_metrics_history_path = (base / 'output_shared' / 'state' / 'tick_metrics_history.json').resolve()
     tick_metrics = {
