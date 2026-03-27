@@ -193,7 +193,10 @@
         "min_dte": 5,
         "max_dte": 45,
         "min_strike": 0,
-        "max_strike": 999999
+        "max_strike": 150,
+        "min_otm_pct": 0.05,
+        "min_strike_above": 20,
+        "max_strike_above": 90
       },
       "sell_call": {
         "enabled": false
