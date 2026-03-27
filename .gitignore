@@ -8,6 +8,11 @@
 .DS_Store
 .venv/
 __pycache__/
+
+# extra local venvs / temp dirs
+.venv*/
+.tmp_*/
+
 config.json
 output
 output/
