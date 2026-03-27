@@ -685,7 +685,35 @@ def main():
                         })
                     except Exception:
                         pass
-                raise SystemExit(f"[FATAL] OpenD unreachable at {host}:{port} (configured fetch.source=opend).")
+                # Do NOT fail the whole tick: degrade opend sources to yahoo for this run.
+                try:
+                    for sym in (base_cfg.get('symbols') or []):
+                        fetch = (sym or {}).get('fetch') or {}
+                        if str(fetch.get('source') or '').lower() == 'opend':
+                            fetch['source'] = 'yahoo'
+                            for k in ['host','port','spot_from_portfolio_management']:
+                                fetch.pop(k, None)
+                            sym['fetch'] = fetch
+                    now = utc_now()
+                    for acct in args.accounts:
+                        acct = str(acct).strip().lower()
+                        if not acct:
+                            continue
+                        try:
+                            state_dir = (base / 'output_accounts' / acct / 'state')
+                            state_dir.mkdir(parents=True, exist_ok=True)
+                            write_json(state_dir / 'last_run.json', {
+                                'last_run_utc': now,
+                                'sent': False,
+                                'reason': 'opend_unreachable_degraded_to_yahoo',
+                                'detail': f'cannot connect to {host}:{port}',
+                            })
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                log(f"[WARN] OpenD unreachable at {host}:{port}; degraded opend sources to yahoo for this run")
+                break
     except SystemExit:
         raise
     except Exception:
