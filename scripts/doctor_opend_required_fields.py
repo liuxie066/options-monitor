@@ -93,11 +93,13 @@ def main():
             missing = [c for c in REQUIRED_SNAPSHOT_COLS if c not in snap.columns]
 
             # spot via snapshot underlier
+            # NOTE: For US underliers OpenD may have no stock quote right; spot may be unavailable.
             spot = None
             try:
-                ret3, s0 = ctx.get_market_snapshot([u.code])
-                if ret3 == RET_OK and s0 is not None and not s0.empty:
-                    spot = float(s0.iloc[0].get("last_price")) if s0.iloc[0].get("last_price") is not None else None
+                if u.market != 'US':
+                    ret3, s0 = ctx.get_market_snapshot([u.code])
+                    if ret3 == RET_OK and s0 is not None and not s0.empty:
+                        spot = float(s0.iloc[0].get("last_price")) if s0.iloc[0].get("last_price") is not None else None
             except Exception:
                 spot = None
 
@@ -106,8 +108,10 @@ def main():
                 any_fail = True
 
             note = None
-            if spot is None:
+            if spot is None and u.market != 'US':
                 note = "spot missing via OpenD snapshot; consider spot override/fallback"
+            if u.market == 'US':
+                note = "US spot is not required from OpenD (often no quote right); use spot override/fallback if needed"
 
             results.append(SymResult(
                 symbol=sym,

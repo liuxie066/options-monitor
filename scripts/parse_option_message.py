@@ -235,25 +235,33 @@ def main():
         account = parse_account(raw2)
         currency = infer_currency(raw2)
 
-    # infer multiplier if missing
+    # infer multiplier if missing:
+    # Policy: do NOT default silently. Prefer fetching from OpenD (futu-api) for the underlier.
+    # If OpenD is unavailable, leave missing so user must input explicitly.
     if multiplier is None and symbol:
-        intake = load_intake_config()
-        mb = (intake.get('multiplier_by_symbol') or {}) if isinstance(intake, dict) else {}
-        if symbol in mb:
-            try:
-                multiplier = int(mb[symbol])
-            except Exception:
-                multiplier = None
+        try:
+            base = Path(__file__).resolve().parents[1]
+            # Ensure repo root is on sys.path
+            import sys
+            if str(base) not in sys.path:
+                sys.path.insert(0, str(base))
 
-    if multiplier is None and symbol:
-        intake = load_intake_config()
-        if isinstance(intake, dict):
-            if symbol.endswith('.HK'):
-                multiplier = int(intake.get('default_multiplier_hk', 1000))
-            else:
-                multiplier = int(intake.get('default_multiplier_us', 100))
-        else:
-            multiplier = 1000 if symbol.endswith('.HK') else 100
+            from scripts import multiplier_cache
+
+            # 1) Try refresh via OpenD (best-effort)
+            r = multiplier_cache.refresh_via_opend(repo_base=base, symbol=symbol, host='127.0.0.1', port=11111, limit_expirations=1)
+            if r.ok and r.multiplier and int(r.multiplier) > 0:
+                multiplier = int(r.multiplier)
+                # Persist cache entry as opend-derived for later reuse
+                try:
+                    cache_path = multiplier_cache.default_cache_path(base)
+                    cache = multiplier_cache.load_cache(cache_path)
+                    cache[str(symbol).upper()] = {"multiplier": int(multiplier), "as_of_utc": multiplier_cache.utc_now(), "source": "opend"}
+                    multiplier_cache.save_cache(cache_path, cache)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     ok = all([symbol, exp, opt_type, side, strike is not None, multiplier, contracts, account, currency])
 
