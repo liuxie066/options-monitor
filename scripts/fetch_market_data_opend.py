@@ -417,15 +417,15 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
 
             srow = snap_map.get(opt_code)
             # srow is a dict of minimal snapshot fields
-            last_price = to_float(_pick_col(pd.Series(srow) if isinstance(srow, dict) else srow, 'last_price')) if srow is not None else None
-            bid = to_float(_pick_col(pd.Series(srow) if isinstance(srow, dict) else srow, 'bid_price', 'bid')) if srow is not None else None
-            ask = to_float(_pick_col(pd.Series(srow) if isinstance(srow, dict) else srow, 'ask_price', 'ask')) if srow is not None else None
-            vol = to_float(_pick_col(pd.Series(srow) if isinstance(srow, dict) else srow, 'volume')) if srow is not None else None
+            last_price = to_float(_pick_col(srow, 'last_price')) if srow is not None else None
+            bid = to_float(_pick_col(srow, 'bid_price', 'bid')) if srow is not None else None
+            ask = to_float(_pick_col(srow, 'ask_price', 'ask')) if srow is not None else None
+            vol = to_float(_pick_col(srow, 'volume')) if srow is not None else None
 
             # Option-specific columns may be prefixed in market_snapshot
-            oi = _pick_col(pd.Series(srow) if isinstance(srow, dict) else srow, 'option_open_interest', 'open_interest', 'net_open_interest') if srow is not None else None
+            oi = _pick_col(srow, 'option_open_interest', 'open_interest', 'net_open_interest') if srow is not None else None
             oi = to_float(oi)
-            iv = _pick_col(pd.Series(srow) if isinstance(srow, dict) else srow, 'option_implied_volatility', 'implied_volatility') if srow is not None else None
+            iv = _pick_col(srow, 'option_implied_volatility', 'implied_volatility') if srow is not None else None
             iv = to_float(iv)
             # Normalize OpenD IV to decimal (e.g. 25 -> 0.25)
             try:
