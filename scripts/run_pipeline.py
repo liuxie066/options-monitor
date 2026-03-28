@@ -52,12 +52,22 @@ def safe_read_csv(path: Path) -> pd.DataFrame:
     return pd.DataFrame()
 
 
-def copy_if_exists(src: Path, dst: Path):
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    if src.exists() and src.stat().st_size > 0:
-        shutil.copyfile(src, dst)
-    else:
-        pd.DataFrame().to_csv(dst, index=False)
+def copy_if_exists(src: Path, dst: Path) -> bool:
+    """Copy file only when src exists and is non-empty.
+
+    Return True if copied, False otherwise.
+
+    Rationale: avoid generating lots of empty CSV artifacts in scheduled runs.
+    Downstream uses safe_read_csv(), so missing files are treated as empty.
+    """
+    try:
+        if src.exists() and src.stat().st_size > 0:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src, dst)
+            return True
+    except Exception:
+        return False
+    return False
 
 
 def is_fresh(path: Path, max_age_sec: int) -> bool:
@@ -91,6 +101,9 @@ def load_cached_json(path: Path) -> dict | None:
 
 def add_sell_put_labels(base: Path, input_path: Path, output_path: Path):
     df = safe_read_csv(input_path)
+    # If upstream candidates are empty/missing, skip writing labeled output.
+    if df is None or df.empty:
+        return
 
     def band(v):
         if pd.isna(v):
@@ -706,6 +719,7 @@ def process_symbol(
             shared_sp_labeled = report_dir / 'sell_put_candidates_labeled.csv'
             symbol_sp_labeled = report_dir / f'{symbol_lower}_sell_put_candidates_labeled.csv'
             add_sell_put_labels(base, symbol_sp, shared_sp_labeled)
+            # Only copy labeled file if it was actually generated.
             copy_if_exists(shared_sp_labeled, symbol_sp_labeled)
 
 
@@ -1510,6 +1524,42 @@ def main():
                 '--changes-input', ('/dev/null' if IS_SCHEDULED else 'output/reports/symbols_changes.txt'),
                 '--output', 'output/reports/symbols_notification.txt',
             ], cwd=base)
+
+            # Scheduled mode artifact cleanup:
+            # Keep only:
+            # - output/reports/symbols_summary.csv
+            # - output/reports/symbols_notification.txt
+            # Plus output/state/* (written elsewhere)
+            if IS_SCHEDULED:
+                try:
+                    import glob
+                    keep = {
+                        (base / 'output/reports/symbols_summary.csv').resolve(),
+                        (base / 'output/reports/symbols_notification.txt').resolve(),
+                    }
+                    patterns = [
+                        'output/reports/*sell_put_candidates*.csv',
+                        'output/reports/*sell_call_candidates*.csv',
+                        'output/reports/*sell_put_alerts*.txt',
+                        'output/reports/*sell_call_alerts*.txt',
+                        'output/reports/symbols_summary.txt',
+                        'output/reports/symbols_digest.txt',
+                        'output/reports/symbols_alerts.txt',
+                        'output/reports/symbols_changes.txt',
+                        'output/reports/auto_close_summary.txt',
+                    ]
+                    for pat in patterns:
+                        for fp in glob.glob(str((base / pat).resolve())):
+                            p0 = Path(fp).resolve()
+                            if p0 in keep:
+                                continue
+                            try:
+                                if p0.exists():
+                                    p0.unlink()
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
 
         # Append cash summaries at the bottom (optional).
         # In multi-account merged notifications, we prefer adding cash footer only once in send_if_needed_multi.py.
