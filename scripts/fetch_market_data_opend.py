@@ -203,11 +203,17 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
             # Close ctx then propagate.
             raise
         spot = spot_override
-        if spot is None:
-            spot = get_spot_opend(ctx, u.code)
 
-        # If OpenD can't provide US underlier spot (quote permission), optionally fallback to portfolio-management price.
-        # This keeps "US options via OpenD" workable because downstream scanners need spot for OTM%.
+        # Spot policy:
+        # - HK/CN: try OpenD snapshot (usually available)
+        # - US: do NOT attempt OpenD spot by default (often no stock quote right); use external fallback(s)
+        if spot is None:
+            if u.market != 'US':
+                spot = get_spot_opend(ctx, u.code)
+
+        # US spot: do not use OpenD (often no stock quote right).
+        # Preferred fallback is portfolio-management's PriceFetcher (it has caching + multiple sources).
+        # If still missing, keep None and require explicit --spot from user.
         if spot is None and u.market == 'US' and spot_from_pm and base_dir is not None:
             # portfolio_context does not include price; fetch it from portfolio-management via subprocess
             # to avoid dependency/import issues.
@@ -247,7 +253,10 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
                             spot = float(r.get('price'))
             except Exception:
                 pass
-        # spot may still be None; keep it.
+        # spot may still be None; keep it. Downstream scans will skip rows if spot is required.
+        if spot is None and u.market == 'US' and (not spot_from_pm):
+            # Make it explicit in meta by leaving spot None; caller can provide --spot.
+            pass
 
         ret, chain = _opend_call_with_retry('get_option_chain', lambda: ctx.get_option_chain(u.code), quiet=False)
         if ret != RET_OK:
@@ -340,6 +349,14 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
             oi = to_float(oi)
             iv = _pick_col(srow, 'option_implied_volatility', 'implied_volatility') if srow is not None else None
             iv = to_float(iv)
+            # Normalize OpenD IV to decimal (e.g. 25 -> 0.25)
+            try:
+                from scripts.opend_normalize import normalize_iv
+                iv = normalize_iv(iv)
+            except Exception:
+                # fallback: keep existing heuristic
+                if iv is not None and iv > 3.0:
+                    iv = iv / 100.0
             delta = _pick_col(srow, 'option_delta', 'delta') if srow is not None else None
             delta = to_float(delta)
 
