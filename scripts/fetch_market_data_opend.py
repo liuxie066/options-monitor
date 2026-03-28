@@ -109,11 +109,23 @@ def _safe_int(x):
         return None
 
 
-def _pick_col(row: pd.Series, *cands: str):
-    for c in cands:
-        if c in row and pd.notna(row[c]):
-            return row[c]
-    return None
+def _pick_col(row: Any, *cands: str):
+    # row can be a pandas Series or a plain dict (we prefer dicts for memory efficiency)
+    try:
+        if row is None:
+            return None
+        if isinstance(row, dict):
+            for c in cands:
+                if c in row and row[c] is not None and (not (isinstance(row[c], float) and math.isnan(row[c]))):
+                    return row[c]
+            return None
+        # pandas Series-like
+        for c in cands:
+            if c in row and pd.notna(row[c]):
+                return row[c]
+        return None
+    except Exception:
+        return None
 
 
 def get_spot_opend(ctx, underlier_code: str) -> float | None:
@@ -203,11 +215,17 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
             # Close ctx then propagate.
             raise
         spot = spot_override
-        if spot is None:
-            spot = get_spot_opend(ctx, u.code)
 
-        # If OpenD can't provide US underlier spot (quote permission), optionally fallback to portfolio-management price.
-        # This keeps "US options via OpenD" workable because downstream scanners need spot for OTM%.
+        # Spot policy:
+        # - HK/CN: try OpenD snapshot (usually available)
+        # - US: do NOT attempt OpenD spot by default (often no stock quote right); use external fallback(s)
+        if spot is None:
+            if u.market != 'US':
+                spot = get_spot_opend(ctx, u.code)
+
+        # US spot: do not use OpenD (often no stock quote right).
+        # Preferred fallback is portfolio-management's PriceFetcher (it has caching + multiple sources).
+        # If still missing, keep None and require explicit --spot from user.
         if spot is None and u.market == 'US' and spot_from_pm and base_dir is not None:
             # portfolio_context does not include price; fetch it from portfolio-management via subprocess
             # to avoid dependency/import issues.
@@ -247,7 +265,10 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
                             spot = float(r.get('price'))
             except Exception:
                 pass
-        # spot may still be None; keep it.
+        # spot may still be None; keep it. Downstream scans will skip rows if spot is required.
+        if spot is None and u.market == 'US' and (not spot_from_pm):
+            # Make it explicit in meta by leaving spot None; caller can provide --spot.
+            pass
 
         ret, chain = _opend_call_with_retry('get_option_chain', lambda: ctx.get_option_chain(u.code), quiet=False)
         if ret != RET_OK:
@@ -273,10 +294,43 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
 
         chain = chain[chain['expiration'].isin(expirations)].copy()
 
+        # Early filters BEFORE snapshots (performance-critical):
+        # - option type (put/call)
+        # - strike range (min_strike/max_strike)
+        try:
+            ot_set = {s.strip().lower() for s in str(option_types or '').split(',') if s.strip()}
+            if ot_set and 'option_type' in chain.columns:
+                def _norm_ot(x):
+                    s = str(x or '').lower()
+                    if s in ('call','put'):
+                        return s
+                    if 'call' in s:
+                        return 'call'
+                    if 'put' in s:
+                        return 'put'
+                    return s
+                chain['_ot'] = chain['option_type'].apply(_norm_ot)
+                chain = chain[chain['_ot'].isin(ot_set)].copy()
+        except Exception:
+            pass
+
+        try:
+            if (min_strike is not None) or (max_strike is not None):
+                if 'strike_price' in chain.columns:
+                    sp = pd.to_numeric(chain['strike_price'], errors='coerce')
+                    if min_strike is not None:
+                        chain = chain[sp >= float(min_strike)].copy()
+                        sp = pd.to_numeric(chain['strike_price'], errors='coerce')
+                    if max_strike is not None:
+                        chain = chain[sp <= float(max_strike)].copy()
+        except Exception:
+            pass
+
         # Fetch snapshots for option codes in batches
         option_codes = [str(x) for x in chain['code'].tolist() if isinstance(x, str) and x]
 
-        snapshots: list[pd.DataFrame] = []
+        # Build a minimal snapshot map directly (avoid concatenating large DataFrames / storing Series for memory efficiency)
+        snap_map: dict[str, dict[str, Any]] = {}
         BATCH = 200
         for i in range(0, len(option_codes), BATCH):
             batch = option_codes[i:i+BATCH]
@@ -284,16 +338,48 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
                 ret2, snap = _opend_call_with_retry('get_market_snapshot(batch)', lambda: ctx.get_market_snapshot(batch), quiet=True)
             except Exception:
                 ret2, snap = (None, None)
-            if ret2 == RET_OK and snap is not None and not snap.empty:
-                snapshots.append(snap)
+            if ret2 != RET_OK or snap is None or snap.empty:
+                continue
 
-        snap_df = pd.concat(snapshots, ignore_index=True) if snapshots else pd.DataFrame()
-        snap_map = {}
-        if not snap_df.empty and 'code' in snap_df.columns:
-            for _, r in snap_df.iterrows():
-                code = str(r.get('code'))
-                if code:
-                    snap_map[code] = r
+            # Extract only the columns we actually use downstream.
+            cols = set(snap.columns)
+            want = [
+                'code',
+                'last_price',
+                'bid_price',
+                'ask_price',
+                'volume',
+                'option_open_interest',
+                'option_implied_volatility',
+                'option_delta',
+                'option_contract_multiplier',
+                # fallbacks that sometimes appear
+                'lot_size',
+                'open_interest',
+                'implied_volatility',
+                'delta',
+                'bid',
+                'ask',
+            ]
+            keep = [c for c in want if c in cols]
+            if not keep or 'code' not in keep:
+                continue
+
+            try:
+                for rec in snap[keep].to_dict(orient='records'):
+                    code = str(rec.get('code') or '')
+                    if code:
+                        snap_map[code] = rec
+            except Exception:
+                # Fallback: slower but robust
+                try:
+                    for _, r in snap.iterrows():
+                        code = str(r.get('code') or '')
+                        if not code:
+                            continue
+                        snap_map[code] = {k: r.get(k) for k in keep}
+                except Exception:
+                    pass
 
         today = date.today()
         rows: list[dict[str, Any]] = []
@@ -330,6 +416,7 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
                     continue
 
             srow = snap_map.get(opt_code)
+            # srow is a dict of minimal snapshot fields
             last_price = to_float(_pick_col(srow, 'last_price')) if srow is not None else None
             bid = to_float(_pick_col(srow, 'bid_price', 'bid')) if srow is not None else None
             ask = to_float(_pick_col(srow, 'ask_price', 'ask')) if srow is not None else None
@@ -340,6 +427,14 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
             oi = to_float(oi)
             iv = _pick_col(srow, 'option_implied_volatility', 'implied_volatility') if srow is not None else None
             iv = to_float(iv)
+            # Normalize OpenD IV to decimal (e.g. 25 -> 0.25)
+            try:
+                from scripts.opend_normalize import normalize_iv
+                iv = normalize_iv(iv)
+            except Exception:
+                # fallback: keep existing heuristic
+                if iv is not None and iv > 3.0:
+                    iv = iv / 100.0
             delta = _pick_col(srow, 'option_delta', 'delta') if srow is not None else None
             delta = to_float(delta)
 
@@ -393,7 +488,7 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
                 'host': host,
                 'port': port,
                 'option_codes': len(option_codes),
-                'snapshots_rows': int(len(snap_df)) if not snap_df.empty else 0,
+                'snapshots_rows': int(len(snap_map)),
             },
         }
     except Exception as e:
