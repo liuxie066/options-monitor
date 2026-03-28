@@ -226,5 +226,8 @@
       },
       "market": "US"
     }
-  ]
+  ],
+  "fetch_policy": {
+    "allow_downgrade_to_yahoo": true
+  }
 }
