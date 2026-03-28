@@ -28,26 +28,22 @@
 
 ## 安装
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-## 推荐运行方式
-
-推荐用项目自带脚本（会自动处理虚拟环境与依赖）：
+推荐用项目自带脚本启动（会自动创建虚拟环境并安装依赖）：
 
 ```bash
 ./run_watchlist.sh
 ```
 
-这会自动完成：
-1. 抓取标的数据与期权链
-2. 扫描 Sell Put 候选
-3. 扫描 Sell Call 候选
-4. 生成提醒文本
-5. 生成策略摘要
+如需手动安装：
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -U pip
+pip install -r requirements.txt
+```
+
+> 配置入口默认是 `config.us.json`（可用环境变量 `OPTIONS_MONITOR_CONFIG` 覆盖）。
 
 ## 配置
 
