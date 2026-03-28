@@ -660,6 +660,14 @@ def main():
     # Preflight: OpenD watchdog (ensure process + login state).
     # Otherwise futu-api can spend minutes reconnecting (ECONNREFUSED) and blow our symbol timeouts.
     try:
+        fetch_policy = base_cfg.get('fetch_policy') if isinstance(base_cfg, dict) else None
+        allow_downgrade = True
+        try:
+            if isinstance(fetch_policy, dict) and ('allow_downgrade_to_yahoo' in fetch_policy):
+                allow_downgrade = bool(fetch_policy.get('allow_downgrade_to_yahoo'))
+        except Exception:
+            allow_downgrade = True
+
         need_opend = False
         ports = set()
         for sym in (base_cfg.get('symbols') or []):
@@ -679,7 +687,7 @@ def main():
                     except Exception:
                         pass
 
-            # 2) If still unreachable, degrade opend sources to yahoo for this run.
+            # 2) If still unreachable: either downgrade (if allowed) or exit early.
             for host, port in sorted(ports):
                 if not _tcp_open(host, port, timeout_sec=1.0):
                     now = utc_now()
@@ -699,22 +707,27 @@ def main():
                         except Exception:
                             pass
 
-                    try:
-                        for sym in (base_cfg.get('symbols') or []):
-                            # Only US has a downgrade path (HK is OpenD-only)
-                            if str((sym or {}).get('market') or '').upper() != 'US':
-                                continue
-                            fetch = (sym or {}).get('fetch') or {}
-                            if str(fetch.get('source') or '').lower() == 'opend':
-                                fetch['source'] = 'yahoo'
-                                for k in ['host', 'port', 'spot_from_portfolio_management']:
-                                    fetch.pop(k, None)
-                                sym['fetch'] = fetch
-                    except Exception:
-                        pass
+                    if allow_downgrade:
+                        try:
+                            for sym in (base_cfg.get('symbols') or []):
+                                # Downgrade only US (HK is OpenD-only)
+                                if str((sym or {}).get('market') or '').upper() != 'US':
+                                    continue
+                                fetch = (sym or {}).get('fetch') or {}
+                                if str(fetch.get('source') or '').lower() == 'opend':
+                                    fetch['source'] = 'yahoo'
+                                    for k in ['host', 'port', 'spot_from_portfolio_management']:
+                                        fetch.pop(k, None)
+                                    sym['fetch'] = fetch
+                        except Exception:
+                            pass
 
-                    log(f"[WARN] OpenD unreachable at {host}:{port}; degraded US opend sources to yahoo for this run")
-                    break
+                        log(f"[WARN] OpenD unreachable at {host}:{port}; degraded US opend sources to yahoo for this run")
+                        break
+
+                    # No downgrade allowed (e.g. HK): exit early.
+                    log(f"[WARN] OpenD unreachable at {host}:{port}; no downgrade allowed, exiting early")
+                    return 0
 
             # 3) If reachable but not READY/logged-in, exit early (human action needed) instead of wasting cycles.
             for host, port in sorted(ports):
