@@ -282,6 +282,38 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
 
         chain = chain[chain['expiration'].isin(expirations)].copy()
 
+        # Early filters BEFORE snapshots (performance-critical):
+        # - option type (put/call)
+        # - strike range (min_strike/max_strike)
+        try:
+            ot_set = {s.strip().lower() for s in str(option_types or '').split(',') if s.strip()}
+            if ot_set and 'option_type' in chain.columns:
+                def _norm_ot(x):
+                    s = str(x or '').lower()
+                    if s in ('call','put'):
+                        return s
+                    if 'call' in s:
+                        return 'call'
+                    if 'put' in s:
+                        return 'put'
+                    return s
+                chain['_ot'] = chain['option_type'].apply(_norm_ot)
+                chain = chain[chain['_ot'].isin(ot_set)].copy()
+        except Exception:
+            pass
+
+        try:
+            if (min_strike is not None) or (max_strike is not None):
+                if 'strike_price' in chain.columns:
+                    sp = pd.to_numeric(chain['strike_price'], errors='coerce')
+                    if min_strike is not None:
+                        chain = chain[sp >= float(min_strike)].copy()
+                        sp = pd.to_numeric(chain['strike_price'], errors='coerce')
+                    if max_strike is not None:
+                        chain = chain[sp <= float(max_strike)].copy()
+        except Exception:
+            pass
+
         # Fetch snapshots for option codes in batches
         option_codes = [str(x) for x in chain['code'].tolist() if isinstance(x, str) and x]
 
