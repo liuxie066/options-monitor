@@ -19,5 +19,5 @@ then
   .venv/bin/pip install -r requirements.txt
 fi
 
-echo "[RUN] watchlist pipeline (config.json)"
-exec .venv/bin/python scripts/run_pipeline.py --config config.json
+echo "[RUN] watchlist pipeline (${OPTIONS_MONITOR_CONFIG:-config.us.json})"
+exec .venv/bin/python scripts/run_pipeline.py --config "${OPTIONS_MONITOR_CONFIG:-config.us.json}"
