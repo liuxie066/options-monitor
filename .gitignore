@@ -19,3 +19,17 @@ output/
 output_accounts/
 output_shared/
 secrets/
+
+# Build / packaging
+*.egg-info/
+dist/
+build/
+
+# Test / cache
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Tooling
+.mypy_cache/
+.ruff_cache/

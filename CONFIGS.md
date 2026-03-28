@@ -8,13 +8,13 @@
 
 ### 美股
 ```bash
-cd /home/node/.openclaw/workspace/options-monitor-prod
+cd /home/node/.openclaw/workspace/options-monitor
 ./.venv/bin/python scripts/send_if_needed_multi.py --config config.us.json --accounts lx sy --market-config all
 ```
 
 ### 港股
 ```bash
-cd /home/node/.openclaw/workspace/options-monitor-prod
+cd /home/node/.openclaw/workspace/options-monitor
 ./.venv/bin/python scripts/send_if_needed_multi.py --config config.hk.json --accounts lx sy --market-config all
 ```
 
