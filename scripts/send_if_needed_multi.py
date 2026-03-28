@@ -135,13 +135,15 @@ def prefetch_required_data(vpy: Path, base: Path, cfg: dict, shared_required: Pa
 
         try:
             subprocess.run(cmd, cwd=str(base), capture_output=True, text=True, timeout=60)
-            # prefetch fallback to yahoo (US) if opend produced no outputs
+            # prefetch fallback to yahoo ONLY for US (HK has only OpenD source; no downgrade)
             try:
                 if src == 'opend':
+                    market = str(it.get('market') or '').upper()
                     out = (base / 'output').resolve()
                     src_raw = out / 'raw' / f"{symbol}_required_data.json"
                     src_csv = out / 'parsed' / f"{symbol}_required_data.csv"
-                    if (not src_raw.exists()) or (not src_csv.exists()) or src_csv.stat().st_size <= 0:
+                    empty = (not src_raw.exists()) or (not src_csv.exists()) or (src_csv.stat().st_size <= 0)
+                    if empty and market == 'US':
                         cmd2 = [str(vpy), 'scripts/fetch_market_data.py', '--symbols', symbol, '--limit-expirations', str(limit_exp)]
                         subprocess.run(cmd2, cwd=str(base), capture_output=True, text=True, timeout=60)
             except Exception:
@@ -691,7 +693,7 @@ def main():
                             write_json(state_dir / 'last_run.json', {
                                 'last_run_utc': now,
                                 'sent': False,
-                                'reason': 'opend_unreachable_degraded_to_yahoo',
+                                'reason': 'opend_unreachable',
                                 'detail': f'cannot connect to {host}:{port}',
                             })
                         except Exception:
@@ -699,6 +701,9 @@ def main():
 
                     try:
                         for sym in (base_cfg.get('symbols') or []):
+                            # Only US has a downgrade path (HK is OpenD-only)
+                            if str((sym or {}).get('market') or '').upper() != 'US':
+                                continue
                             fetch = (sym or {}).get('fetch') or {}
                             if str(fetch.get('source') or '').lower() == 'opend':
                                 fetch['source'] = 'yahoo'
@@ -708,7 +713,7 @@ def main():
                     except Exception:
                         pass
 
-                    log(f"[WARN] OpenD unreachable at {host}:{port}; degraded opend sources to yahoo for this run")
+                    log(f"[WARN] OpenD unreachable at {host}:{port}; degraded US opend sources to yahoo for this run")
                     break
 
             # 3) If reachable but not READY/logged-in, exit early (human action needed) instead of wasting cycles.
