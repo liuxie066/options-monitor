@@ -655,52 +655,38 @@ def main():
     sparse_after_beijing = parse_hhmm(schedule_cfg.get('sparse_after_beijing', '02:00'))
     bj_tz = ZoneInfo(schedule_cfg.get('beijing_timezone', 'Asia/Shanghai'))
 
-    # Preflight: fail fast if option source is configured as local OpenD but the port isn't listening.
-    # Otherwise the run can hang for minutes on repeated ECONNREFUSED.
+    # Preflight: OpenD watchdog (ensure process + login state).
+    # Otherwise futu-api can spend minutes reconnecting (ECONNREFUSED) and blow our symbol timeouts.
     try:
+        need_opend = False
         ports = set()
         for sym in (base_cfg.get('symbols') or []):
             fetch = (sym or {}).get('fetch') or {}
             if str(fetch.get('source') or '').lower() == 'opend':
+                need_opend = True
                 host = fetch.get('host') or '127.0.0.1'
-                port = fetch.get('port')
-                if port:
-                    ports.add((str(host), int(port)))
-        for host, port in sorted(ports):
-            if not _tcp_open(host, port, timeout_sec=1.0):
-                # Record a last_run marker in each account state dir for observability, then exit.
-                now = utc_now()
-                for acct in args.accounts:
-                    acct = str(acct).strip().lower()
-                    if not acct:
-                        continue
+                port = fetch.get('port') or 11111
+                ports.add((str(host), int(port)))
+
+        if need_opend:
+            # 1) Ensure OpenD port is reachable; if not, try to start it once.
+            for host, port in sorted(ports):
+                if not _tcp_open(host, port, timeout_sec=1.0):
                     try:
-                        state_dir = (base / 'output_accounts' / acct / 'state')
-                        state_dir.mkdir(parents=True, exist_ok=True)
-                        write_json(state_dir / 'last_run.json', {
-                            'last_run_utc': now,
-                            'sent': False,
-                            'reason': 'opend_unreachable',
-                            'detail': f"cannot connect to {host}:{port}",
-                        })
+                        subprocess.run([str(vpy), 'scripts/opend_watchdog.py', '--ensure', '--host', str(host), '--port', str(port)], cwd=str(base), timeout=30)
                     except Exception:
                         pass
-                # Do NOT fail the whole tick: degrade opend sources to yahoo for this run.
-                try:
-                    for sym in (base_cfg.get('symbols') or []):
-                        fetch = (sym or {}).get('fetch') or {}
-                        if str(fetch.get('source') or '').lower() == 'opend':
-                            fetch['source'] = 'yahoo'
-                            for k in ['host','port','spot_from_portfolio_management']:
-                                fetch.pop(k, None)
-                            sym['fetch'] = fetch
+
+            # 2) If still unreachable, degrade opend sources to yahoo for this run.
+            for host, port in sorted(ports):
+                if not _tcp_open(host, port, timeout_sec=1.0):
                     now = utc_now()
                     for acct in args.accounts:
-                        acct = str(acct).strip().lower()
-                        if not acct:
+                        acct0 = str(acct).strip().lower()
+                        if not acct0:
                             continue
                         try:
-                            state_dir = (base / 'output_accounts' / acct / 'state')
+                            state_dir = (base / 'output_accounts' / acct0 / 'state')
                             state_dir.mkdir(parents=True, exist_ok=True)
                             write_json(state_dir / 'last_run.json', {
                                 'last_run_utc': now,
@@ -710,14 +696,37 @@ def main():
                             })
                         except Exception:
                             pass
+
+                    try:
+                        for sym in (base_cfg.get('symbols') or []):
+                            fetch = (sym or {}).get('fetch') or {}
+                            if str(fetch.get('source') or '').lower() == 'opend':
+                                fetch['source'] = 'yahoo'
+                                for k in ['host', 'port', 'spot_from_portfolio_management']:
+                                    fetch.pop(k, None)
+                                sym['fetch'] = fetch
+                    except Exception:
+                        pass
+
+                    log(f"[WARN] OpenD unreachable at {host}:{port}; degraded opend sources to yahoo for this run")
+                    break
+
+            # 3) If reachable but not READY/logged-in, exit early (human action needed) instead of wasting cycles.
+            for host, port in sorted(ports):
+                try:
+                    wd = subprocess.run([str(vpy), 'scripts/opend_watchdog.py', '--host', str(host), '--port', str(port), '--json'], cwd=str(base), capture_output=True, text=True, timeout=30)
+                    if wd.returncode != 0:
+                        msg = (wd.stdout or wd.stderr or '').strip()
+                        log(f"[WARN] OpenD not ready/logged-in: {msg}")
+                        # exit gracefully: scheduler state files still get updated later; avoid hanging
+                        return 0
                 except Exception:
                     pass
-                log(f"[WARN] OpenD unreachable at {host}:{port}; degraded opend sources to yahoo for this run")
-                break
+
     except SystemExit:
         raise
     except Exception:
-        # best-effort: do not block execution if preflight fails unexpectedly
+        # best-effort: do not block execution if watchdog fails unexpectedly
         pass
 
     # Ensure output/accounts layout
