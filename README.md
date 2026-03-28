@@ -2,7 +2,7 @@
 
 > 状态：线上可用版（2026-03-22）— 里程碑见 VERSION.md
 
-一个基于 Yahoo Finance / yfinance 的美股期权监控工具，当前聚焦两类卖方策略：
+一个期权监控工具（支持美股/港股；数据源可配置：OpenD/Yahoo），当前聚焦两类卖方策略：
 
 - Sell Put
 - Sell Call
@@ -49,9 +49,10 @@ pip install -r requirements.txt
 4. 生成提醒文本
 5. 生成策略摘要
 
-## 主要目录
+## 配置
 
-- `config.json`：唯一配置入口（templates + symbols）
+- 推荐入口：`config.us.json`（美股）/ `config.hk.json`（港股）
+- `config.json`：历史兼容入口（不再推荐作为唯一入口）
 - `scripts/`：抓取、扫描、提醒与统一入口脚本
 - `output/raw/`：原始 JSON
 - `output/parsed/`：标准化 CSV
@@ -62,14 +63,14 @@ pip install -r requirements.txt
 - 解析成交/手工输入消息：`scripts/parse_option_message.py`
 - 解析 + 写入（默认 dry-run）：`scripts/option_intake.py`
 
-Intake 可配置项（见 `config.json:intake`）：
+Intake 可配置项（见 `config.us.json:intake` / `config.hk.json:intake`，或历史 `config.json:intake`）：
 - `symbol_aliases`: 中文标的名 → 代码（例如 中海油 → 0883.HK）
 - `multiplier_by_symbol`: 合约乘数（例如 0883.HK → 1000）
 - `default_multiplier_hk` / `default_multiplier_us`
 
 ## Watchlist 管理（监控标的：查看/新增/删除/编辑）
 
-配置文件：`config.json` 的 `symbols[]`
+配置文件：`config.us.json` / `config.hk.json` 的 `symbols[]`（历史：`config.json`）
 
 ```bash
 # 查看当前监控标的
