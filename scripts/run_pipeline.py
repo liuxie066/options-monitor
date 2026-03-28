@@ -1546,7 +1546,6 @@ def main():
                         'output/reports/symbols_digest.txt',
                         'output/reports/symbols_alerts.txt',
                         'output/reports/symbols_changes.txt',
-                        'output/reports/auto_close_summary.txt',
                     ]
                     for pat in patterns:
                         for fp in glob.glob(str((base / pat).resolve())):
