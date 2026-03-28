@@ -340,6 +340,14 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
             oi = to_float(oi)
             iv = _pick_col(srow, 'option_implied_volatility', 'implied_volatility') if srow is not None else None
             iv = to_float(iv)
+            # Normalize OpenD IV to decimal (e.g. 25 -> 0.25)
+            try:
+                from scripts.opend_normalize import normalize_iv
+                iv = normalize_iv(iv)
+            except Exception:
+                # fallback: keep existing heuristic
+                if iv is not None and iv > 3.0:
+                    iv = iv / 100.0
             delta = _pick_col(srow, 'option_delta', 'delta') if srow is not None else None
             delta = to_float(delta)
 
