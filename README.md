@@ -10,8 +10,8 @@
 数据源策略：
 
 - 主要：富途 OpenD（US/HK）
-- 降级：美股在 OpenD 不可用时可选 Yahoo/yfinance（见 `config.us.json:fetch_policy`）
-- 港股：默认 OpenD-only（见 `config.hk.json:fetch_policy`）
+- 降级：美股在 OpenD 不可用时可选 Yahoo/yfinance（见 `config.example.us.json:fetch_policy`）
+- 港股：默认 OpenD-only（见 `config.example.hk.json:fetch_policy`）
 
 核心能力：
 
@@ -48,12 +48,14 @@ pip install -U pip
 pip install -r requirements.txt
 ```
 
-> 配置入口默认是 `config.us.json`（可用环境变量 `OPTIONS_MONITOR_CONFIG` 覆盖）。
+> 默认读取 `config.local.us.json`（不提交到仓库）；也可用环境变量 `OPTIONS_MONITOR_CONFIG` 指向任意配置文件。
+> 先从示例复制：`cp config.example.us.json config.local.us.json`（港股：`cp config.example.hk.json config.local.hk.json`）。
 
 ## 配置
 
-- 推荐入口：`config.us.json`（美股）/ `config.hk.json`（港股）
-- `config.json`：历史兼容入口（不再推荐作为唯一入口）
+- 示例配置：`config.example.us.json`（美股）/ `config.example.hk.json`（港股）
+- 本地运行建议复制为 `config.local.us.json` / `config.local.hk.json`（不要提交）
+- （仓库不再提交真实运行配置；仅保留示例）
 - `scripts/`：抓取、扫描、提醒与统一入口脚本
 - `output/raw/`：原始 JSON
 - `output/parsed/`：标准化 CSV
@@ -64,14 +66,14 @@ pip install -r requirements.txt
 - 解析成交/手工输入消息：`scripts/parse_option_message.py`
 - 解析 + 写入（默认 dry-run）：`scripts/option_intake.py`
 
-Intake 可配置项（见 `config.us.json:intake` / `config.hk.json:intake`，或历史 `config.json:intake`）：
+Intake 可配置项（见 `config.example.us.json:intake` / `config.example.hk.json:intake`）：
 - `symbol_aliases`: 中文标的名 → 代码（例如 中海油 → 0883.HK）
 - `multiplier_by_symbol`: 合约乘数（例如 0883.HK → 1000）
 - `default_multiplier_hk` / `default_multiplier_us`
 
 ## Watchlist 管理（监控标的：查看/新增/删除/编辑）
 
-配置文件：`config.us.json` / `config.hk.json` 的 `symbols[]`（历史：`config.json`）
+配置文件：`config.local.us.json` / `config.local.hk.json` 的 `symbols[]`（从示例复制后修改）
 
 ```bash
 # 查看当前监控标的

@@ -1,8 +1,15 @@
 # options-monitor — Milestones
 
+> 说明：本仓库不提交真实运行配置（仅保留 `config.example.*.json` 示例）。
+
+## 2026-03-28 (phase: 配置示例化 + 文档对齐)
+
+- 仓库只保留示例配置：`config.example.us.json` / `config.example.hk.json`。
+- 真实运行配置建议使用本地文件：`config.local.us.json` / `config.local.hk.json`（已加入 `.gitignore`）。
+- `run_watchlist.sh` 默认读取 `config.local.us.json`，并在缺失时提示从示例复制。
+
 ## 2026-03-22 (phase: 线上可用版)
 
-- 配置统一为 `config.json`（JSON-only），使用 `templates` + `symbols` 命名。
 - 生产入口固定为单命令：`scripts/send_if_needed.py`（scheduler → pipeline → send → mark-notified）。
 - Cron 运行：交易时段监控；北京时间 02:00 之后改为 60 分钟间隔；非交易时段不监控。
 - 通知：适配飞书私聊，Put/Call 分组，内容极简。
