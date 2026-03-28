@@ -729,14 +729,32 @@ def main():
                     log(f"[WARN] OpenD unreachable at {host}:{port}; no downgrade allowed, exiting early")
                     return 0
 
-            # 3) If reachable but not READY/logged-in, exit early (human action needed) instead of wasting cycles.
+            # 3) If reachable but not READY/logged-in: US may downgrade; HK must stop.
             for host, port in sorted(ports):
                 try:
                     wd = subprocess.run([str(vpy), 'scripts/opend_watchdog.py', '--host', str(host), '--port', str(port), '--json'], cwd=str(base), capture_output=True, text=True, timeout=30)
                     if wd.returncode != 0:
                         msg = (wd.stdout or wd.stderr or '').strip()
                         log(f"[WARN] OpenD not ready/logged-in: {msg}")
-                        # exit gracefully: scheduler state files still get updated later; avoid hanging
+
+                        if allow_downgrade:
+                            # Downgrade only US symbols
+                            try:
+                                for sym in (base_cfg.get('symbols') or []):
+                                    if str((sym or {}).get('market') or '').upper() != 'US':
+                                        continue
+                                    fetch = (sym or {}).get('fetch') or {}
+                                    if str(fetch.get('source') or '').lower() == 'opend':
+                                        fetch['source'] = 'yahoo'
+                                        for k in ['host', 'port', 'spot_from_portfolio_management']:
+                                            fetch.pop(k, None)
+                                        sym['fetch'] = fetch
+                                log('[WARN] OpenD not ready; degraded US opend sources to yahoo for this run')
+                            except Exception:
+                                pass
+                            break
+
+                        # No downgrade allowed (e.g. HK): exit early.
                         return 0
                 except Exception:
                     pass

@@ -105,7 +105,9 @@ def main():
         ready = (st.get('program_status_type') in (None, '', 'READY'))
         qot = bool(st.get('qot_logined', True))
         trd = bool(st.get('trd_logined', True))
-        if ready and qot and trd:
+
+        # Quotes are sufficient for this project; trade login may legitimately be False.
+        if ready and qot:
             h.ok = True
         else:
             h.error = f"OpenD not ready/logged in: READY={ready} qot={qot} trd={trd}"
