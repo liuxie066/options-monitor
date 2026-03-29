@@ -3,28 +3,26 @@ from __future__ import annotations
 
 """OpenD watchdog for options-monitor.
 
-We do NOT keep futu-api contexts alive. We keep the OpenD process and login state healthy.
-
 Checks:
 - port 11111 reachable
 - get_global_state program_status_type == READY
 - qot_logined == True
-- trd_logined == True
 
-Actions:
-- If port closed: optionally start OpenD console via futu-agent start.sh
+Outputs:
+- Structured JSON with explicit error_code + short message
 
 Exit codes:
 - 0: healthy
-- 2: unhealthy (needs human action)
+- 2: unhealthy
 """
 
 import argparse
 import json
+import os
 import socket
 import subprocess
+import sys
 import time
-import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -36,9 +34,11 @@ class Health:
     state: dict | None = None
     error: str | None = None
     action_taken: str | None = None
+    error_code: str | None = None
+    message: str | None = None
 
 
-def port_open(host: str, port: int, timeout: float = 0.6) -> bool:
+def port_open(host: str, port: int, timeout: float = 0.8) -> bool:
     try:
         s = socket.socket()
         s.settimeout(timeout)
@@ -49,12 +49,56 @@ def port_open(host: str, port: int, timeout: float = 0.6) -> bool:
         return False
 
 
+def _looks_like_rate_limit(msg: str) -> bool:
+    s = (msg or '')
+    sl = s.lower()
+    keys = ['频率太高', '最多10次', 'too frequent', 'rate limit', '频率限制', '请求过快']
+    return any(k in s for k in keys) or any(k in sl for k in ['too frequent', 'rate limit'])
+
+
+def _looks_like_phone_verify(msg: str) -> bool:
+    s = (msg or '')
+    sl = s.lower()
+    keys = ['phone verify', 'phone verification', 'verify code', '验证码', '手机验证', '短信验证', 'not login', 'not logged']
+    return any(k in s for k in ['验证码', '手机验证', '短信验证']) or any(k in sl for k in keys)
+
+
+def classify_watchdog_result(state: dict | None, error_text: str | None) -> tuple[str, str]:
+    """Map watchdog result to stable error_code + short human message."""
+    err = str(error_text or '').strip()
+    st = state if isinstance(state, dict) else {}
+
+    if err:
+        low = err.lower()
+        if 'port not open' in low or 'cannot connect' in low or 'connection refused' in low:
+            return ('OPEND_PORT_CLOSED', 'OpenD 端口不可达')
+        if _looks_like_rate_limit(err):
+            return ('OPEND_RATE_LIMIT', 'OpenD 请求频率受限')
+        if _looks_like_phone_verify(err):
+            return ('OPEND_NEEDS_PHONE_VERIFY', 'OpenD 需要手机验证码登录')
+        if 'not ready' in low:
+            return ('OPEND_NOT_READY', 'OpenD 未就绪')
+        if 'quote not logged in' in low or 'qot' in low:
+            return ('OPEND_QOT_NOT_LOGINED', 'OpenD 行情未登录')
+
+    # Fallback to state-based mapping.
+    status = st.get('program_status_type')
+    if status not in (None, '', 'READY'):
+        # In practice, non-READY frequently means waiting for phone verify.
+        if _looks_like_phone_verify(str(st)):
+            return ('OPEND_NEEDS_PHONE_VERIFY', 'OpenD 需要手机验证码登录')
+        return ('OPEND_NOT_READY', 'OpenD 未就绪')
+
+    if not bool(st.get('qot_logined', True)):
+        return ('OPEND_QOT_NOT_LOGINED', 'OpenD 行情未登录')
+
+    return ('OPEND_API_ERROR', 'OpenD 接口异常')
+
+
 def get_global_state(host: str, port: int) -> dict:
-    import sys
     # Prefer repo venv if available
     vpy = Path(__file__).resolve().parents[1] / '.venv' / 'bin' / 'python'
     if vpy.exists() and str(vpy) != sys.executable:
-        # Re-exec under venv to ensure futu is importable
         os.execv(str(vpy), [str(vpy)] + sys.argv)
 
     from futu import OpenQuoteContext, RET_OK
@@ -84,6 +128,20 @@ def try_start_opend() -> tuple[bool, str]:
         return (False, f"start_opend exception: {type(e).__name__}: {e}")
 
 
+def _emit(h: Health, as_json: bool) -> None:
+    if not h.error_code and not h.ok:
+        h.error_code, h.message = classify_watchdog_result(h.state, h.error)
+    if as_json:
+        print(json.dumps(h.__dict__, ensure_ascii=False))
+    else:
+        if h.ok:
+            print('[OPEND_OK] OpenD healthy')
+        else:
+            msg = h.message or h.error or 'OpenD unhealthy'
+            code = h.error_code or 'OPEND_API_ERROR'
+            print(f"[OPEND_UNHEALTHY] {code}: {msg}")
+
+
 def main():
     ap = argparse.ArgumentParser(description='OpenD watchdog')
     ap.add_argument('--host', default='127.0.0.1')
@@ -103,7 +161,8 @@ def main():
 
         if not port_open(args.host, args.port):
             h.error = f"OpenD port not open: {args.host}:{args.port}"
-            print(json.dumps(h.__dict__, ensure_ascii=False) if args.json else f"[OPEND_UNHEALTHY] {h.error}")
+            h.error_code, h.message = classify_watchdog_result(None, h.error)
+            _emit(h, args.json)
             raise SystemExit(2)
 
     h.ports_open = True
@@ -113,17 +172,22 @@ def main():
         h.state = st
         ready = (st.get('program_status_type') in (None, '', 'READY'))
         qot = bool(st.get('qot_logined', True))
-        trd = bool(st.get('trd_logined', True))
 
-        # Quotes are sufficient for this project; trade login may legitimately be False.
         if ready and qot:
             h.ok = True
+            h.error_code = None
+            h.message = 'OpenD 健康'
         else:
-            h.error = f"OpenD not ready/logged in: READY={ready} qot={qot} trd={trd}"
+            if not ready:
+                h.error = f"OpenD not READY: {st}"
+            elif not qot:
+                h.error = f"OpenD quote not logged in: {st}"
+            h.error_code, h.message = classify_watchdog_result(st, h.error)
     except Exception as e:
         h.error = f"get_global_state failed: {type(e).__name__}: {e}"
+        h.error_code, h.message = classify_watchdog_result(h.state, h.error)
 
-    print(json.dumps(h.__dict__, ensure_ascii=False) if args.json else ('[OPEND_OK]' if h.ok else f"[OPEND_UNHEALTHY] {h.error}"))
+    _emit(h, args.json)
     raise SystemExit(0 if h.ok else 2)
 
 

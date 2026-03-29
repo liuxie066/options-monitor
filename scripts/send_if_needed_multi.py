@@ -41,6 +41,9 @@ from zoneinfo import ZoneInfo
 import socket
 
 
+DEBUG = False
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -610,6 +613,95 @@ def build_merged_message(
     return '\n'.join(lines).strip() + '\n'
 
 
+def _parse_last_json_obj(text: str) -> dict:
+    s = (text or '').strip()
+    if not s:
+        return {}
+    i = s.find('{')
+    j = s.rfind('}')
+    if i < 0 or j < 0 or j <= i:
+        return {}
+    try:
+        return json.loads(s[i:j+1])
+    except Exception:
+        return {}
+
+
+def _opend_alert_rl_path(base: Path) -> Path:
+    return (base / 'output_shared' / 'state' / 'opend_alert_rate_limit.json').resolve()
+
+
+def _should_send_opend_alert(base: Path, error_code: str, cooldown_sec: int = 600) -> bool:
+    p = _opend_alert_rl_path(base)
+    now = datetime.now(timezone.utc)
+    st = read_json(p, {}) if p.exists() else {}
+    if not isinstance(st, dict):
+        st = {}
+
+    m = st.get('last_sent_utc_by_error')
+    if not isinstance(m, dict):
+        m = {}
+
+    prev = m.get(str(error_code))
+    if prev:
+        try:
+            dt = datetime.fromisoformat(str(prev))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            if (now - dt.astimezone(timezone.utc)).total_seconds() < int(cooldown_sec):
+                return False
+        except Exception:
+            pass
+
+    m[str(error_code)] = now.isoformat()
+    st['last_sent_utc_by_error'] = m
+    write_json(p, st)
+    return True
+
+
+def _send_opend_alert(base: Path, cfg: dict, *, error_code: str, message_text: str, detail: str = '', no_send: bool = False) -> bool:
+    """Send OpenD unhealthy alert with per-error-code rate limit.
+
+    Returns True iff a message was actually sent.
+    """
+    cooldown_sec = 600
+    try:
+        v = ((cfg.get('notifications') or {}).get('opend_alert_cooldown_sec'))
+        if v is not None:
+            cooldown_sec = max(60, int(v))
+    except Exception:
+        cooldown_sec = 600
+
+    if not _should_send_opend_alert(base, str(error_code), cooldown_sec=cooldown_sec):
+        return False
+
+    if no_send:
+        return False
+
+    notif = cfg.get('notifications') or {}
+    channel = notif.get('channel') or 'feishu'
+    target = notif.get('target')
+    if not target:
+        return False
+
+    msg = (
+        f"options-monitor OpenD 告警\n"
+        f"error_code: {error_code}\n"
+        f"message: {message_text}\n"
+        f"time_utc: {utc_now()}"
+    )
+    if detail:
+        msg += f"\ndetail: {detail[:1200]}"
+
+    send = subprocess.run(
+        ['openclaw', 'message', 'send', '--channel', str(channel), '--target', str(target), '--message', msg, '--json'],
+        cwd=str(base),
+        capture_output=True,
+        text=True,
+    )
+    return send.returncode == 0
+
+
 def _tcp_open(host: str, port: int, timeout_sec: float = 1.0) -> bool:
     try:
         with socket.create_connection((host, int(port)), timeout=timeout_sec):
@@ -629,6 +721,7 @@ def main():
     ap.add_argument('--debug', action='store_true', help='Verbose logs to stdout (for manual debugging).')
     args = ap.parse_args()
 
+    global DEBUG
     DEBUG = bool(getattr(args, 'debug', False))
 
     no_send = bool(getattr(args, 'no_send', False))
@@ -658,7 +751,7 @@ def main():
     bj_tz = ZoneInfo(schedule_cfg.get('beijing_timezone', 'Asia/Shanghai'))
 
     # Preflight: OpenD watchdog (ensure process + login state).
-    # Otherwise futu-api can spend minutes reconnecting (ECONNREFUSED) and blow our symbol timeouts.
+    # When watchdog is unhealthy, fail-fast and alert (rate-limited per error_code).
     try:
         fetch_policy = base_cfg.get('fetch_policy') if isinstance(base_cfg, dict) else None
         allow_downgrade = True
@@ -670,6 +763,7 @@ def main():
 
         need_opend = False
         ports = set()
+        has_hk_opend = False
         for sym in (base_cfg.get('symbols') or []):
             fetch = (sym or {}).get('fetch') or {}
             if str(fetch.get('source') or '').lower() == 'opend':
@@ -677,87 +771,99 @@ def main():
                 host = fetch.get('host') or '127.0.0.1'
                 port = fetch.get('port') or 11111
                 ports.add((str(host), int(port)))
+                if str((sym or {}).get('market') or '').upper() == 'HK':
+                    has_hk_opend = True
 
         if need_opend:
-            # 1) Ensure OpenD port is reachable; if not, try to start it once.
+            unhealthy = None
+
+            # Ensure OpenD process once, then do formal watchdog json check.
             for host, port in sorted(ports):
-                if not _tcp_open(host, port, timeout_sec=1.0):
+                try:
+                    wd0 = subprocess.run(
+                        [str(vpy), 'scripts/opend_watchdog.py', '--ensure', '--host', str(host), '--port', str(port), '--json'],
+                        cwd=str(base),
+                        capture_output=True,
+                        text=True,
+                        timeout=35,
+                    )
+                    payload0 = _parse_last_json_obj((wd0.stdout or '') + '\n' + (wd0.stderr or ''))
+                    ok0 = bool(payload0.get('ok')) if payload0 else (wd0.returncode == 0)
+                    if not ok0:
+                        unhealthy = {
+                            'host': host,
+                            'port': port,
+                            'payload': payload0,
+                            'detail': ((wd0.stdout or '') + '\n' + (wd0.stderr or '')).strip(),
+                        }
+                        break
+                except Exception as e:
+                    unhealthy = {
+                        'host': host,
+                        'port': port,
+                        'payload': {'ok': False, 'error_code': 'OPEND_API_ERROR', 'message': 'OpenD 看门狗执行失败'},
+                        'detail': f'{type(e).__name__}: {e}',
+                    }
+                    break
+
+            if unhealthy is not None:
+                payload = unhealthy.get('payload') or {}
+                error_code = str(payload.get('error_code') or 'OPEND_API_ERROR')
+                msg = str(payload.get('message') or payload.get('error') or 'OpenD 不健康')
+                detail = str(unhealthy.get('detail') or '')
+                host = unhealthy.get('host')
+                port = unhealthy.get('port')
+
+                # Optional degrade for US only; if HK OpenD exists, always fail-fast.
+                degraded = False
+                if allow_downgrade and (not has_hk_opend):
                     try:
-                        subprocess.run([str(vpy), 'scripts/opend_watchdog.py', '--ensure', '--host', str(host), '--port', str(port)], cwd=str(base), timeout=30)
+                        for sym in (base_cfg.get('symbols') or []):
+                            if str((sym or {}).get('market') or '').upper() != 'US':
+                                continue
+                            fetch = (sym or {}).get('fetch') or {}
+                            if str(fetch.get('source') or '').lower() == 'opend':
+                                fetch['source'] = 'yahoo'
+                                for k in ['host', 'port', 'spot_from_portfolio_management']:
+                                    fetch.pop(k, None)
+                                sym['fetch'] = fetch
+                                degraded = True
+                    except Exception:
+                        degraded = False
+
+                # Alert on any unhealthy watchdog.
+                _send_opend_alert(
+                    base,
+                    base_cfg,
+                    error_code=error_code,
+                    message_text=msg,
+                    detail=(f"{host}:{port} {detail}" if host is not None and port is not None else detail),
+                    no_send=no_send,
+                )
+
+                now = utc_now()
+                for acct in args.accounts:
+                    acct0 = str(acct).strip().lower()
+                    if not acct0:
+                        continue
+                    try:
+                        state_dir = (base / 'output_accounts' / acct0 / 'state')
+                        state_dir.mkdir(parents=True, exist_ok=True)
+                        write_json(state_dir / 'last_run.json', {
+                            'last_run_utc': now,
+                            'sent': False,
+                            'reason': 'opend_unhealthy',
+                            'error_code': error_code,
+                            'detail': msg,
+                        })
                     except Exception:
                         pass
 
-            # 2) If still unreachable: either downgrade (if allowed) or exit early.
-            for host, port in sorted(ports):
-                if not _tcp_open(host, port, timeout_sec=1.0):
-                    now = utc_now()
-                    for acct in args.accounts:
-                        acct0 = str(acct).strip().lower()
-                        if not acct0:
-                            continue
-                        try:
-                            state_dir = (base / 'output_accounts' / acct0 / 'state')
-                            state_dir.mkdir(parents=True, exist_ok=True)
-                            write_json(state_dir / 'last_run.json', {
-                                'last_run_utc': now,
-                                'sent': False,
-                                'reason': 'opend_unreachable',
-                                'detail': f'cannot connect to {host}:{port}',
-                            })
-                        except Exception:
-                            pass
-
-                    if allow_downgrade:
-                        try:
-                            for sym in (base_cfg.get('symbols') or []):
-                                # Downgrade only US (HK is OpenD-only)
-                                if str((sym or {}).get('market') or '').upper() != 'US':
-                                    continue
-                                fetch = (sym or {}).get('fetch') or {}
-                                if str(fetch.get('source') or '').lower() == 'opend':
-                                    fetch['source'] = 'yahoo'
-                                    for k in ['host', 'port', 'spot_from_portfolio_management']:
-                                        fetch.pop(k, None)
-                                    sym['fetch'] = fetch
-                        except Exception:
-                            pass
-
-                        log(f"[WARN] OpenD unreachable at {host}:{port}; degraded US opend sources to yahoo for this run")
-                        break
-
-                    # No downgrade allowed (e.g. HK): exit early.
-                    log(f"[WARN] OpenD unreachable at {host}:{port}; no downgrade allowed, exiting early")
+                if degraded:
+                    log(f"[WARN] OpenD unhealthy ({error_code}); degraded US opend sources to yahoo for this run")
+                else:
+                    # Fail-fast: do not proceed symbol scans when OpenD source is unhealthy.
                     return 0
-
-            # 3) If reachable but not READY/logged-in: US may downgrade; HK must stop.
-            for host, port in sorted(ports):
-                try:
-                    wd = subprocess.run([str(vpy), 'scripts/opend_watchdog.py', '--host', str(host), '--port', str(port), '--json'], cwd=str(base), capture_output=True, text=True, timeout=30)
-                    if wd.returncode != 0:
-                        msg = (wd.stdout or wd.stderr or '').strip()
-                        log(f"[WARN] OpenD not ready/logged-in: {msg}")
-
-                        if allow_downgrade:
-                            # Downgrade only US symbols
-                            try:
-                                for sym in (base_cfg.get('symbols') or []):
-                                    if str((sym or {}).get('market') or '').upper() != 'US':
-                                        continue
-                                    fetch = (sym or {}).get('fetch') or {}
-                                    if str(fetch.get('source') or '').lower() == 'opend':
-                                        fetch['source'] = 'yahoo'
-                                        for k in ['host', 'port', 'spot_from_portfolio_management']:
-                                            fetch.pop(k, None)
-                                        sym['fetch'] = fetch
-                                log('[WARN] OpenD not ready; degraded US opend sources to yahoo for this run')
-                            except Exception:
-                                pass
-                            break
-
-                        # No downgrade allowed (e.g. HK): exit early.
-                        return 0
-                except Exception:
-                    pass
 
     except SystemExit:
         raise
