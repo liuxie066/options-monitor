@@ -24,7 +24,9 @@ import json
 import socket
 import subprocess
 import time
+import os
 from dataclasses import dataclass
+from pathlib import Path
 
 
 @dataclass
@@ -48,6 +50,13 @@ def port_open(host: str, port: int, timeout: float = 0.6) -> bool:
 
 
 def get_global_state(host: str, port: int) -> dict:
+    import sys
+    # Prefer repo venv if available
+    vpy = Path(__file__).resolve().parents[1] / '.venv' / 'bin' / 'python'
+    if vpy.exists() and str(vpy) != sys.executable:
+        # Re-exec under venv to ensure futu is importable
+        os.execv(str(vpy), [str(vpy)] + sys.argv)
+
     from futu import OpenQuoteContext, RET_OK
 
     ctx = OpenQuoteContext(host=host, port=int(port))
