@@ -60,11 +60,17 @@ def main() -> None:
         test_chain_cache_helpers_roundtrip,
         test_chain_cache_fresh_check,
     )
+    from test_opend_watchdog_alerts import (
+        test_watchdog_error_code_mapping,
+        test_opend_alert_rate_limit,
+    )
 
     tests = [
         test_parse_futu_fill_message,
         test_chain_cache_helpers_roundtrip,
         test_chain_cache_fresh_check,
+        test_watchdog_error_code_mapping,
+        test_opend_alert_rate_limit,
     ]
     for t in tests:
         t()
