@@ -98,6 +98,25 @@ def _save_chain_cache(path: Path, payload: dict) -> None:
         pass
 
 
+def _prune_chain_cache(base_dir: Path, keep_days: int) -> None:
+    try:
+        if keep_days <= 0:
+            return
+        root = base_dir / 'cache' / 'opend_option_chain'
+        if not root.exists():
+            return
+        import time
+        cutoff = time.time() - keep_days * 86400
+        for p in root.glob('*.json'):
+            try:
+                if p.stat().st_mtime < cutoff:
+                    p.unlink(missing_ok=True)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 def _is_chain_cache_fresh(obj: dict, today: date) -> bool:
     try:
         if not isinstance(obj, dict):
@@ -603,6 +622,7 @@ def main():
     ap.add_argument('--limit-expirations', type=int, default=2)
     ap.add_argument('--chain-cache', action='store_true', help='Enable option_chain day-cache (per underlier) to reduce OpenD calls')
     ap.add_argument('--chain-cache-force-refresh', action='store_true', help='Force refresh option_chain even if cache is fresh')
+    ap.add_argument('--chain-cache-keep-days', type=int, default=7, help='Keep N days of option_chain cache files (default: 7)')
     ap.add_argument('--option-types', default='put,call', help='Comma-separated option types to include: put,call (default: put,call)')
     ap.add_argument('--min-strike', type=float, default=None)
     ap.add_argument('--max-strike', type=float, default=None)
@@ -623,6 +643,9 @@ def main():
     want_call = ('call' in opt_types) if opt_types else True
 
     base = Path(__file__).resolve().parents[1]
+
+    if args.chain_cache:
+        _prune_chain_cache(base, int(args.chain_cache_keep_days))
 
     opend_metrics_path = (base / 'output_shared' / 'state' / 'opend_metrics.json').resolve()
 
