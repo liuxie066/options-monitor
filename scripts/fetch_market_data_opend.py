@@ -74,6 +74,43 @@ if str(REPO_ROOT) not in sys.path:
 from scripts.opend_utils import normalize_underlier
 
 
+def _chain_cache_path(base_dir: Path, u_code: str) -> Path:
+    safe = u_code.replace('.', '_')
+    return base_dir / 'cache' / 'opend_option_chain' / f'{safe}.json'
+
+
+def _load_chain_cache(path: Path) -> dict | None:
+    try:
+        if not path.exists() or path.stat().st_size == 0:
+            return None
+        import json
+        return json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        return None
+
+
+def _save_chain_cache(path: Path, payload: dict) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        import json
+        path.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding='utf-8')
+    except Exception:
+        pass
+
+
+def _is_chain_cache_fresh(obj: dict, today: date) -> bool:
+    try:
+        if not isinstance(obj, dict):
+            return False
+        asof = obj.get('asof_date')
+        if not asof:
+            return False
+        return str(asof) == today.isoformat()
+    except Exception:
+        return False
+
+
+
 def to_float(v):
     try:
         if v is None:
@@ -140,7 +177,7 @@ def get_spot_opend(ctx, underlier_code: str) -> float | None:
         return None
 
 
-def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = '127.0.0.1', port: int = 11111, spot_override: float | None = None, *, spot_from_pm: bool = False, base_dir: Path | None = None, option_types: str = 'put,call', min_strike: float | None = None, max_strike: float | None = None, retry_max_attempts: int = 4, retry_time_budget_sec: float = 8.0, retry_base_delay_sec: float = 0.8, retry_max_delay_sec: float = 6.0, no_retry: bool = False) -> dict[str, Any]:
+def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = '127.0.0.1', port: int = 11111, spot_override: float | None = None, *, spot_from_pm: bool = False, base_dir: Path | None = None, option_types: str = 'put,call', min_strike: float | None = None, max_strike: float | None = None, retry_max_attempts: int = 4, retry_time_budget_sec: float = 8.0, retry_base_delay_sec: float = 0.8, retry_max_delay_sec: float = 6.0, no_retry: bool = False, chain_cache: bool = False, chain_cache_force_refresh: bool = False) -> dict[str, Any]:
     from futu import OpenQuoteContext, RET_OK
 
     u = normalize_underlier(symbol)
@@ -270,7 +307,35 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
             # Make it explicit in meta by leaving spot None; caller can provide --spot.
             pass
 
-        ret, chain = _opend_call_with_retry('get_option_chain', lambda: ctx.get_option_chain(u.code), quiet=False)
+        # Option chain cache (day-level).
+        chain_obj = None
+        cache_path = None
+        if chain_cache and base_dir is not None:
+            cache_path = _chain_cache_path(base_dir, u.code)
+            cached = _load_chain_cache(cache_path)
+            if (not chain_cache_force_refresh) and _is_chain_cache_fresh(cached, date.today()):
+                chain_obj = cached
+
+        if chain_obj is None:
+            ret, chain = _opend_call_with_retry('get_option_chain', lambda: ctx.get_option_chain(u.code), quiet=False)
+            if ret != RET_OK or chain is None or chain.empty:
+                raise RuntimeError(f"get_option_chain failed: {chain}")
+
+            # Persist a lightweight JSON cache (avoid pickling DataFrame).
+            try:
+                rows = chain.to_dict(orient='records')
+            except Exception:
+                rows = []
+            chain_obj = {
+                'asof_date': date.today().isoformat(),
+                'underlier_code': u.code,
+                'rows': rows,
+            }
+            if cache_path is not None:
+                _save_chain_cache(cache_path, chain_obj)
+
+        # Rehydrate into a DataFrame for existing downstream logic.
+        chain = pd.DataFrame(chain_obj.get('rows') or [])
         if ret != RET_OK:
             raise RuntimeError(f"get_option_chain failed: {chain}")
 
@@ -536,6 +601,8 @@ def main():
     ap = argparse.ArgumentParser(description='Fetch required option data from Futu OpenD')
     ap.add_argument('--symbols', nargs='+', required=True)
     ap.add_argument('--limit-expirations', type=int, default=2)
+    ap.add_argument('--chain-cache', action='store_true', help='Enable option_chain day-cache (per underlier) to reduce OpenD calls')
+    ap.add_argument('--chain-cache-force-refresh', action='store_true', help='Force refresh option_chain even if cache is fresh')
     ap.add_argument('--option-types', default='put,call', help='Comma-separated option types to include: put,call (default: put,call)')
     ap.add_argument('--min-strike', type=float, default=None)
     ap.add_argument('--max-strike', type=float, default=None)
@@ -569,6 +636,8 @@ def main():
             spot_override=args.spot,
             spot_from_pm=bool(args.spot_from_pm),
             base_dir=base,
+            chain_cache=bool(args.chain_cache),
+            chain_cache_force_refresh=bool(args.chain_cache_force_refresh),
             option_types=('put,call' if (want_put and want_call) else ('put' if want_put else 'call')),
             min_strike=args.min_strike,
             max_strike=args.max_strike,

@@ -26,7 +26,16 @@ def run_parser(text: str) -> dict:
         text=True,
         check=True,
     )
-    return json.loads(p.stdout)
+    # Some scripts may print logs; extract the JSON block from the first '{' to the last '}'.
+    out = (p.stdout or '').strip()
+    if not out:
+        raise RuntimeError('empty stdout')
+    s = out.find('{')
+    e = out.rfind('}')
+    if s < 0 or e < 0 or e <= s:
+        raise RuntimeError(f'cannot find json in stdout: {out[:200]}')
+    j = out[s : e + 1]
+    return json.loads(j)
 
 
 def test_parse_futu_fill_message() -> None:
@@ -47,7 +56,16 @@ def test_parse_futu_fill_message() -> None:
 
 
 def main() -> None:
-    tests = [test_parse_futu_fill_message]
+    from test_opend_chain_cache_minimal import (
+        test_chain_cache_helpers_roundtrip,
+        test_chain_cache_fresh_check,
+    )
+
+    tests = [
+        test_parse_futu_fill_message,
+        test_chain_cache_helpers_roundtrip,
+        test_chain_cache_fresh_check,
+    ]
     for t in tests:
         t()
     print(f"OK ({len(tests)} tests)")

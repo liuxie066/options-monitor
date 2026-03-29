@@ -19,3 +19,6 @@ output/
 output_accounts/
 output_shared/
 secrets/
+-e 
+# local caches
+cache/
