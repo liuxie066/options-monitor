@@ -38,10 +38,17 @@ from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta, time
 from pathlib import Path
 from zoneinfo import ZoneInfo
+from typing import Any
 import socket
+
+try:
+    from scripts.run_log import RunLogger
+except Exception:
+    from run_log import RunLogger
 
 
 DEBUG = False
+_CURRENT_RUN_ID: str | None = None
 
 
 def utc_now() -> str:
@@ -74,16 +81,25 @@ def log(msg: str) -> None:
 
 
 
-def prefetch_required_data(vpy: Path, base: Path, cfg: dict, shared_required: Path) -> None:
+def prefetch_required_data(vpy: Path, base: Path, cfg: dict, shared_required: Path) -> dict[str, int]:
     # Fetch required_data for all symbols once per tick into shared_required (raw/parsed).
     # Best-effort: failures should not crash the tick; downstream will handle empty/partial data.
     # This runs in the current ./output context; it copies outputs into shared_required afterwards.
+    stats = {
+        'symbols_total': 0,
+        'cache_hits': 0,
+        'fetch_attempts': 0,
+        'fallback_to_yahoo': 0,
+        'fetch_errors': 0,
+        'copied_raw': 0,
+        'copied_csv': 0,
+    }
     try:
         shared_required.mkdir(parents=True, exist_ok=True)
         (shared_required / 'raw').mkdir(parents=True, exist_ok=True)
         (shared_required / 'parsed').mkdir(parents=True, exist_ok=True)
     except Exception:
-        return
+        return stats
 
     syms = cfg.get('symbols') or []
     for it in syms:
@@ -92,12 +108,14 @@ def prefetch_required_data(vpy: Path, base: Path, cfg: dict, shared_required: Pa
         symbol = str(it.get('symbol') or '').strip()
         if not symbol:
             continue
+        stats['symbols_total'] += 1
 
         # Skip if already present
         try:
             raw0 = (shared_required / 'raw' / f"{symbol}_required_data.json").resolve()
             csv0 = (shared_required / 'parsed' / f"{symbol}_required_data.csv").resolve()
             if raw0.exists() and csv0.exists() and raw0.stat().st_size > 0 and csv0.stat().st_size > 0:
+                stats['cache_hits'] += 1
                 continue
         except Exception:
             pass
@@ -137,6 +155,7 @@ def prefetch_required_data(vpy: Path, base: Path, cfg: dict, shared_required: Pa
             ]
 
         try:
+            stats['fetch_attempts'] += 1
             subprocess.run(cmd, cwd=str(base), capture_output=True, text=True, timeout=60)
             # prefetch fallback to yahoo ONLY for US (HK has only OpenD source; no downgrade)
             try:
@@ -149,9 +168,11 @@ def prefetch_required_data(vpy: Path, base: Path, cfg: dict, shared_required: Pa
                     if empty and market == 'US':
                         cmd2 = [str(vpy), 'scripts/fetch_market_data.py', '--symbols', symbol, '--limit-expirations', str(limit_exp)]
                         subprocess.run(cmd2, cwd=str(base), capture_output=True, text=True, timeout=60)
+                        stats['fallback_to_yahoo'] += 1
             except Exception:
                 pass
         except Exception:
+            stats['fetch_errors'] += 1
             continue
 
         try:
@@ -160,10 +181,14 @@ def prefetch_required_data(vpy: Path, base: Path, cfg: dict, shared_required: Pa
             src_csv = out / 'parsed' / f"{symbol}_required_data.csv"
             if src_raw.exists() and src_raw.stat().st_size > 0:
                 (shared_required / 'raw' / src_raw.name).write_bytes(src_raw.read_bytes())
+                stats['copied_raw'] += 1
             if src_csv.exists() and src_csv.stat().st_size > 0:
                 (shared_required / 'parsed' / src_csv.name).write_bytes(src_csv.read_bytes())
+                stats['copied_csv'] += 1
         except Exception:
             pass
+
+    return stats
 
 def append_json_list(path: Path, payload: dict, max_entries: int = 200):
     """Append payload into a bounded JSON list file. Keeps last max_entries records."""
@@ -710,6 +735,29 @@ def _tcp_open(host: str, port: int, timeout_sec: float = 1.0) -> bool:
         return False
 
 
+def _safe_runlog_data(data: dict[str, Any] | None, max_items: int = 16) -> dict[str, Any]:
+    """Small summary-only payload for run log events."""
+    if not isinstance(data, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for i, (k, v) in enumerate(data.items()):
+        if i >= max_items:
+            out['_truncated'] = True
+            break
+        kk = str(k)[:60]
+        if isinstance(v, dict):
+            out[kk] = {'_type': 'dict', 'size': len(v), 'keys': list(v.keys())[:8]}
+        elif isinstance(v, (list, tuple, set)):
+            out[kk] = {'_type': 'list', 'size': len(v)}
+        elif isinstance(v, str):
+            out[kk] = v[:160]
+        elif v is None or isinstance(v, (bool, int, float)):
+            out[kk] = v
+        else:
+            out[kk] = str(v)[:160]
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser(description='Multi-account tick with merged notification')
     ap.add_argument('--config', default='config.json')
@@ -729,11 +777,38 @@ def main():
 
     base = Path(__file__).resolve().parents[1]
     vpy = base / '.venv' / 'bin' / 'python'
+    runlog = RunLogger(base)
+    global _CURRENT_RUN_ID
+    _CURRENT_RUN_ID = runlog.run_id
 
     cfg_path = Path(args.config)
     if not cfg_path.is_absolute():
         cfg_path = (base / cfg_path).resolve()
     base_cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
+
+    # run_start checkpoint
+    try:
+        syms0 = base_cfg.get('symbols') or []
+        src_counts: dict[str, int] = {}
+        for it in syms0:
+            if not isinstance(it, dict):
+                continue
+            src = str(((it.get('fetch') or {}).get('source') or 'yahoo')).lower()
+            src_counts[src] = src_counts.get(src, 0) + 1
+        runlog.event(
+            'run_start',
+            'start',
+            data=_safe_runlog_data({
+                'accounts': [str(a).strip().lower() for a in (args.accounts or []) if str(a).strip()],
+                'symbols_count': len([x for x in syms0 if isinstance(x, dict)]),
+                'source_selections': src_counts,
+                'market_config': str(getattr(args, 'market_config', 'auto') or 'auto'),
+                'no_send': bool(no_send),
+                'smoke': bool(smoke),
+            }),
+        )
+    except Exception:
+        pass
 
     market_cfg = str(getattr(args, 'market_config', 'auto') or 'auto').lower()
     if market_cfg in ('hk','us'):
@@ -752,6 +827,11 @@ def main():
 
     # Preflight: OpenD watchdog (ensure process + login state).
     # When watchdog is unhealthy, fail-fast and alert (rate-limited per error_code).
+    t_watchdog0 = monotonic()
+    try:
+        runlog.event('watchdog', 'start')
+    except Exception:
+        pass
     try:
         fetch_policy = base_cfg.get('fetch_policy') if isinstance(base_cfg, dict) else None
         allow_downgrade = True
@@ -861,14 +941,58 @@ def main():
 
                 if degraded:
                     log(f"[WARN] OpenD unhealthy ({error_code}); degraded US opend sources to yahoo for this run")
+                    try:
+                        runlog.event(
+                            'watchdog',
+                            'degraded',
+                            duration_ms=int((monotonic() - t_watchdog0) * 1000),
+                            error_code=error_code,
+                            message=msg,
+                            data=_safe_runlog_data({'degraded': True, 'host': host, 'port': port}),
+                        )
+                    except Exception:
+                        pass
                 else:
                     # Fail-fast: do not proceed symbol scans when OpenD source is unhealthy.
+                    try:
+                        runlog.event(
+                            'watchdog',
+                            'error',
+                            duration_ms=int((monotonic() - t_watchdog0) * 1000),
+                            error_code=error_code,
+                            message=msg,
+                            data=_safe_runlog_data({'degraded': False, 'host': host, 'port': port}),
+                        )
+                        runlog.event(
+                            'run_end',
+                            'error',
+                            error_code=error_code,
+                            message='opend watchdog unhealthy',
+                            data=_safe_runlog_data({'sent': False, 'reason': 'opend_unhealthy'}),
+                        )
+                    except Exception:
+                        pass
                     return 0
 
     except SystemExit:
         raise
-    except Exception:
+    except Exception as e:
         # best-effort: do not block execution if watchdog fails unexpectedly
+        try:
+            runlog.event(
+                'watchdog',
+                'error',
+                duration_ms=int((monotonic() - t_watchdog0) * 1000),
+                error_code='WATCHDOG_EXCEPTION',
+                message=str(e),
+            )
+        except Exception:
+            pass
+        pass
+
+    try:
+        runlog.event('watchdog', 'ok', duration_ms=int((monotonic() - t_watchdog0) * 1000))
+    except Exception:
         pass
 
     # Ensure output/accounts layout
@@ -1066,14 +1190,31 @@ def main():
         # Shared scan reuse: first due account writes shared scan artifacts; subsequent due accounts reuse them
         if (not prefetch_done):
             try:
-                prefetch_required_data(vpy=vpy, base=base, cfg=cfg, shared_required=shared_required)
+                runlog.event('fetch_chain_cache', 'start', data=_safe_runlog_data({'account': acct, 'symbols_count': len(cfg.get('symbols') or [])}))
             except Exception:
                 pass
+            try:
+                prefetch_stats = prefetch_required_data(vpy=vpy, base=base, cfg=cfg, shared_required=shared_required)
+                runlog.event('fetch_chain_cache', 'ok', data=_safe_runlog_data(prefetch_stats))
+            except Exception as e:
+                try:
+                    runlog.event('fetch_chain_cache', 'error', error_code='FETCH_CHAIN_EXCEPTION', message=str(e))
+                except Exception:
+                    pass
             prefetch_done = True
 
         pipe_cmd = [str(vpy), 'scripts/run_pipeline.py', '--config', str(cfg_override), '--mode', 'scheduled', '--shared-required-data', str(shared_required), '--shared-scan-dir', str(shared_scan_dir)]
         if shared_scan_ready:
             pipe_cmd.append('--reuse-shared-scan')
+
+        try:
+            runlog.event(
+                'snapshot_batches',
+                'start',
+                data=_safe_runlog_data({'account': acct, 'reuse_shared_scan': bool(shared_scan_ready)}),
+            )
+        except Exception:
+            pass
 
         t_pipe0 = monotonic()
         pipe = subprocess.run(
@@ -1084,6 +1225,17 @@ def main():
         )
         acct_metrics['pipeline_ms'] = int((monotonic() - t_pipe0) * 1000)
         if pipe.returncode != 0:
+            try:
+                runlog.event(
+                    'snapshot_batches',
+                    'error',
+                    duration_ms=acct_metrics['pipeline_ms'],
+                    error_code='PIPELINE_FAILED',
+                    message=f'pipeline failed for {acct}',
+                    data=_safe_runlog_data({'account': acct, 'returncode': pipe.returncode}),
+                )
+            except Exception:
+                pass
             # Only print the tail for debugging (avoid noisy logs on success)
             out = ((pipe.stdout or '') + '\n' + (pipe.stderr or '')).strip()
             if out:
@@ -1096,6 +1248,15 @@ def main():
             results.append(AccountResult(acct, True, should_notify, False, 'pipeline failed', ''))
             continue
 
+        try:
+            runlog.event(
+                'snapshot_batches',
+                'ok',
+                duration_ms=acct_metrics['pipeline_ms'],
+                data=_safe_runlog_data({'account': acct, 'reuse_shared_scan': bool(shared_scan_ready)}),
+            )
+        except Exception:
+            pass
 
         shared_scan_ready = True
         # Mark scanned (shared scan clock)
@@ -1145,8 +1306,25 @@ def main():
         tick_metrics['accounts'].append(acct_metrics)
         results.append(AccountResult(acct, True, should_notify_effective, meaningful, reason, text))
 
+    try:
+        runlog.event(
+            'notify',
+            'prepare',
+            data=_safe_runlog_data({
+                'results_count': len(results),
+                'notify_candidates': len([r for r in results if r.should_notify and r.meaningful and bool(r.notification_text.strip())]),
+            }),
+        )
+    except Exception:
+        pass
+
     merged = build_merged_message(results, base_cfg=base_cfg, cash_accounts=['lx', 'sy'])
     if not merged:
+        try:
+            runlog.event('notify', 'skip', message='no merged notification content')
+        except Exception:
+            pass
+
         # Even if we didn't send, record that we ran.
         try:
             # Shared marker under ./output (symlink points to last processed account).
@@ -1182,6 +1360,11 @@ def main():
         except Exception:
             pass
 
+        try:
+            runlog.event('run_end', 'ok', data=_safe_runlog_data({'sent': False, 'reason': 'no_merged_notification', 'accounts': [r.account for r in results]}))
+        except Exception:
+            pass
+
         return 0
 
     no_send = bool(getattr(args, 'no_send', False))
@@ -1192,8 +1375,18 @@ def main():
 
     if not no_send:
         if not target:
+            try:
+                runlog.event('notify', 'error', error_code='CONFIG_ERROR', message='notifications.target is required')
+            except Exception:
+                pass
             raise SystemExit('[CONFIG_ERROR] notifications.target is required')
 
+        try:
+            runlog.event('notify', 'start', data=_safe_runlog_data({'channel': channel, 'target_set': bool(target), 'message_len': len(merged)}))
+        except Exception:
+            pass
+
+        t_notify0 = monotonic()
         send = subprocess.run(
             ['openclaw', 'message', 'send', '--channel', str(channel), '--target', str(target), '--message', merged, '--json'],
             cwd=str(base),
@@ -1201,10 +1394,30 @@ def main():
             text=True,
         )
         if send.returncode != 0:
+            try:
+                runlog.event(
+                    'notify',
+                    'error',
+                    duration_ms=int((monotonic() - t_notify0) * 1000),
+                    error_code='SEND_FAILED',
+                    message='message send failed',
+                    data=_safe_runlog_data({'returncode': send.returncode}),
+                )
+            except Exception:
+                pass
             raise SystemExit(send.returncode)
+
+        try:
+            runlog.event('notify', 'ok', duration_ms=int((monotonic() - t_notify0) * 1000), data=_safe_runlog_data({'channel': channel}))
+        except Exception:
+            pass
     else:
         # Smoke/debug: do not send and do not mark notified
         target = None
+        try:
+            runlog.event('notify', 'skip', message='no_send mode')
+        except Exception:
+            pass
 
     # Mark notified ONCE (global cooldown, unified across accounts)
     if not no_send:
@@ -1251,8 +1464,28 @@ def main():
     except Exception:
         pass
 
+    try:
+        runlog.event('run_end', 'ok', data=_safe_runlog_data({'sent': (not no_send), 'accounts': [r.account for r in results]}))
+    except Exception:
+        pass
+
     return 0
 
 
 if __name__ == '__main__':
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except SystemExit:
+        raise
+    except Exception as e:
+        try:
+            base = Path(__file__).resolve().parents[1]
+            RunLogger(base, run_id=_CURRENT_RUN_ID).event(
+                'run_error',
+                'error',
+                error_code=(getattr(e, 'error_code', None) or type(e).__name__),
+                message=str(e),
+            )
+        except Exception:
+            pass
+        raise
