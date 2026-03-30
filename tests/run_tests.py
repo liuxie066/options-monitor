@@ -109,6 +109,9 @@ def main() -> None:
         test_watchdog_error_code_mapping,
         test_opend_alert_rate_limit,
     )
+    from test_fetch_portfolio_context_richtext import (
+        test_build_context_richtext_normalization_and_hk_symbol,
+    )
 
     tests = [
         test_parse_futu_fill_message,
@@ -118,6 +121,7 @@ def main() -> None:
         test_opend_alert_rate_limit,
         test_run_log_writer_create_and_append,
         test_run_log_data_small,
+        test_build_context_richtext_normalization_and_hk_symbol,
     ]
     for t in tests:
         t()
