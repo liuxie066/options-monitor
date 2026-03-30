@@ -69,16 +69,30 @@ def _compact_data(data: Any, max_chars: int = 1200) -> dict[str, Any]:
             out[key] = _compact_scalar(v)
 
     # Enforce payload budget.
-    while True:
+    # Enforce payload budget.
+    # IMPORTANT: avoid infinite loop when we always add a marker key.
+    truncated_marked = False
+    for _ in range(200):
         s = json.dumps(out, ensure_ascii=False, separators=(",", ":"))
         if len(s) <= max_chars:
             return out
         if not out:
             return {}
-        # drop the last inserted key
-        last_key = next(reversed(out))
-        out.pop(last_key, None)
-        out["_truncated"] = True
+
+        # Drop one key (prefer dropping non-marker keys).
+        keys = [k for k in out.keys() if k not in ("_truncated", "_truncated_keys")]
+        if keys:
+            out.pop(keys[-1], None)
+        else:
+            # Nothing meaningful to drop; return a minimal marker.
+            return {"_truncated": True}
+
+        if not truncated_marked:
+            out["_truncated"] = True
+            truncated_marked = True
+
+    # Failsafe
+    return {"_truncated": True}
 
 
 class RunLogger:
