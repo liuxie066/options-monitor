@@ -336,7 +336,50 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
                 chain_obj = cached
 
         if chain_obj is None:
-            ret, chain = _opend_call_with_retry('get_option_chain', lambda: ctx.get_option_chain(u.code), quiet=False)
+            # IMPORTANT:
+            # futu-api get_option_chain() defaults to an expiration date window of [today, today+30d]
+            # when start/end are None. For some underliers (e.g., HK.09992), the next expiry may be
+            # beyond 30 days, which makes the default call look like it has only 0DTE options.
+            #
+            # So we:
+            # 1) call get_option_expiration_date() to enumerate expirations
+            # 2) take the closest N expirations (limit_expirations)
+            # 3) call get_option_chain(code, start=exp, end=exp) for each expiration, then concat
+            try:
+                ret_e, df_e = _opend_call_with_retry('get_option_expiration_date', lambda: ctx.get_option_expiration_date(u.code), quiet=False)
+                if ret_e != RET_OK or df_e is None or df_e.empty:
+                    expirations_all: list[str] = []
+                else:
+                    expirations_all = sorted({str(x)[:10] for x in df_e.get('strike_time').astype(str).tolist() if str(x) and len(str(x)) >= 10})
+            except Exception:
+                expirations_all = []
+
+            if limit_expirations and expirations_all:
+                expirations_pick = expirations_all[: int(limit_expirations)]
+            else:
+                expirations_pick = expirations_all
+
+            chains = []
+            if expirations_pick:
+                for exp0 in expirations_pick:
+                    ret, chain0 = _opend_call_with_retry(
+                        f'get_option_chain({exp0})',
+                        lambda exp=exp0: ctx.get_option_chain(u.code, start=str(exp), end=str(exp)),
+                        quiet=True,
+                    )
+                    if ret == RET_OK and chain0 is not None and (not chain0.empty):
+                        chains.append(chain0)
+
+            if chains:
+                try:
+                    chain = pd.concat(chains, ignore_index=True)
+                except Exception:
+                    chain = chains[0]
+                ret = RET_OK
+            else:
+                # Fallback to legacy behavior (best-effort) if expiration_date not available.
+                ret, chain = _opend_call_with_retry('get_option_chain', lambda: ctx.get_option_chain(u.code), quiet=False)
+
             if ret != RET_OK or chain is None or chain.empty:
                 raise RuntimeError(f"get_option_chain failed: {chain}")
 
@@ -349,6 +392,8 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
                 'asof_date': date.today().isoformat(),
                 'underlier_code': u.code,
                 'rows': rows,
+                'expirations_all': expirations_all,
+                'expirations_pick': expirations_pick,
             }
             if cache_path is not None:
                 _save_chain_cache(cache_path, chain_obj)
