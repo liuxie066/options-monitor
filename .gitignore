@@ -44,3 +44,6 @@ config.local*.json
 
 # Local caches
 cache/
+
+# Runtime audit logs
+/audit/run_logs/
