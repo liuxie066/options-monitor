@@ -55,6 +55,51 @@ def test_parse_futu_fill_message() -> None:
     assert parsed['currency'] == 'HKD'
 
 
+def test_run_log_writer_create_and_append() -> None:
+    import sys
+    from tempfile import TemporaryDirectory
+
+    if str(BASE) not in sys.path:
+        sys.path.insert(0, str(BASE))
+
+    from scripts.run_log import RunLogger
+
+    with TemporaryDirectory() as td:
+        root = Path(td)
+        lg = RunLogger(root)
+        lg.event('run_start', 'start', data={'accounts': ['lx', 'sy'], 'symbols_count': 3})
+        lg.event('run_end', 'ok', duration_ms=12)
+
+        files = list((root / 'audit' / 'run_logs').glob('*.jsonl'))
+        assert len(files) == 1
+        lines = [ln for ln in files[0].read_text(encoding='utf-8').splitlines() if ln.strip()]
+        assert len(lines) == 2
+
+        rec1 = json.loads(lines[0])
+        rec2 = json.loads(lines[1])
+        assert rec1['run_id'] == rec2['run_id']
+        assert rec1['step'] == 'run_start'
+        assert rec2['step'] == 'run_end'
+
+
+def test_run_log_data_small() -> None:
+    import sys
+
+    if str(BASE) not in sys.path:
+        sys.path.insert(0, str(BASE))
+
+    from scripts.run_log import _compact_data
+
+    big = {
+        'k1': 'x' * 2000,
+        'k2': list(range(500)),
+        'k3': {'a': 1, 'b': 2, 'c': 3},
+    }
+    out = _compact_data(big, max_chars=300)
+    payload = json.dumps(out, ensure_ascii=False)
+    assert len(payload) <= 300
+
+
 def main() -> None:
     from test_opend_chain_cache_minimal import (
         test_chain_cache_helpers_roundtrip,
@@ -71,6 +116,8 @@ def main() -> None:
         test_chain_cache_fresh_check,
         test_watchdog_error_code_mapping,
         test_opend_alert_rate_limit,
+        test_run_log_writer_create_and_append,
+        test_run_log_data_small,
     ]
     for t in tests:
         t()
