@@ -8,7 +8,13 @@ import sys
 from pathlib import Path
 
 from scripts.fx_rates import CurrencyConverter, FxRates
-from scripts.io_utils import copy_if_exists, is_fresh, load_cached_json, safe_read_csv
+from scripts.io_utils import (
+    copy_if_exists,
+    has_shared_required_data,
+    is_fresh,
+    load_cached_json,
+    safe_read_csv,
+)
 from scripts.report_labels import add_sell_put_labels
 from scripts.report_summaries import summarize_sell_call, summarize_sell_put
 
@@ -54,27 +60,6 @@ def run(cmd: list[str], cwd: Path, timeout_sec: int | None = None):
 
 
 
-def has_shared_required_data(symbol: str, shared_dir: Path) -> bool:
-    """Return True when shared required_data artifacts exist and are readable.
-
-    - raw json must exist and be non-empty
-    - parsed csv must exist and be non-empty (header-only is accepted)
-    """
-    sym = str(symbol)
-    raw_src = shared_dir / 'raw' / f"{sym}_required_data.json"
-    parsed_src = shared_dir / 'parsed' / f"{sym}_required_data.csv"
-
-    if not (raw_src.exists() and raw_src.stat().st_size > 0):
-        return False
-    if not (parsed_src.exists() and parsed_src.stat().st_size > 0):
-        return False
-
-    try:
-        _ = safe_read_csv(parsed_src)
-    except Exception:
-        return False
-
-    return True
 
 def derive_put_max_strike_from_cash(symbol: str, portfolio_ctx: dict | None, fx_usd_per_cny: float | None, hkdcny: float | None, *, fallback_multiplier: int = 100) -> float | None:
     """Return a cash-based max_strike cap to prefilter sell_put.
