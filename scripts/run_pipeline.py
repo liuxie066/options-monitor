@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 import sys
 from pathlib import Path
 
@@ -17,48 +16,10 @@ from scripts.io_utils import (
 )
 from scripts.report_labels import add_sell_put_labels
 from scripts.report_summaries import summarize_sell_call, summarize_sell_put
+from scripts.subprocess_utils import run_cmd
 
 import pandas as pd
 import yaml
-
-
-def run(cmd: list[str], cwd: Path, timeout_sec: int | None = None):
-    """Run a subprocess with optional timeout.
-
-    Timeout is important for unattended cron usage: a single hanging symbol must not block the whole pipeline.
-
-    Scheduled mode policy:
-    - capture stdout/stderr to reduce log I/O
-    - only print tail on failure
-    """
-    if not IS_SCHEDULED:
-        print(f"[RUN] {' '.join(cmd)}" + (f" (timeout={timeout_sec}s)" if timeout_sec else ""))
-
-    try:
-        if IS_SCHEDULED:
-            result = subprocess.run(cmd, cwd=str(cwd), timeout=timeout_sec, capture_output=True, text=True)
-        else:
-            result = subprocess.run(cmd, cwd=str(cwd), timeout=timeout_sec)
-    except subprocess.TimeoutExpired:
-        raise RuntimeError(f"timeout after {timeout_sec}s: {' '.join(cmd)}")
-
-    if result.returncode != 0:
-        if IS_SCHEDULED:
-            out = ((result.stdout or '') + '\n' + (result.stderr or '')).strip()
-            if out:
-                tail = '\n'.join(out.splitlines()[-60:])
-                print(f"[ERR] {' '.join(cmd)}\n{tail}")
-        raise SystemExit(result.returncode)
-
-
-
-
-
-
-
-
-
-
 
 
 def derive_put_max_strike_from_cash(symbol: str, portfolio_ctx: dict | None, fx_usd_per_cny: float | None, hkdcny: float | None, *, fallback_multiplier: int = 100) -> float | None:
@@ -257,7 +218,7 @@ def process_symbol(
             if IS_SCHEDULED:
                 # Quiet mode for fetch_market_data_opend.py
                 cmd.append('--quiet')
-            run(cmd, cwd=base, timeout_sec=timeout_sec)
+            run_cmd(cmd, cwd=base, timeout_sec=timeout_sec, is_scheduled=IS_SCHEDULED)
             _apply_multiplier_cache_to_required_data_csv(symbol)
 
             # fallback to yahoo (US) if OpenD returned empty data or transient error
@@ -291,22 +252,22 @@ def process_symbol(
                 ])
 
                 if is_us and (empty or transient):
-                    run([
+                    run_cmd([
                         py, 'scripts/fetch_market_data.py',
                         '--symbols', symbol,
                         '--limit-expirations', str(limit_expirations),
                         '--output-root', str(required_data_dir),
-                    ], cwd=base, timeout_sec=timeout_sec)
+                    ], cwd=base, timeout_sec=timeout_sec, is_scheduled=IS_SCHEDULED)
                     _apply_multiplier_cache_to_required_data_csv(symbol)
             except Exception:
                 pass
         else:
-            run([
+            run_cmd([
                 py, 'scripts/fetch_market_data.py',
                 '--symbols', symbol,
                 '--limit-expirations', str(limit_expirations),
                 '--output-root', str(required_data_dir),
-            ], cwd=base, timeout_sec=timeout_sec)
+            ], cwd=base, timeout_sec=timeout_sec, is_scheduled=IS_SCHEDULED)
             _apply_multiplier_cache_to_required_data_csv(symbol)
 
     if want_put:
@@ -408,7 +369,7 @@ def process_symbol(
             cmd.extend(['--max-strike', str(sp.get('max_strike'))])
         if IS_SCHEDULED:
             cmd.append('--quiet')
-        run(cmd, cwd=base, timeout_sec=timeout_sec)
+        run_cmd(cmd, cwd=base, timeout_sec=timeout_sec, is_scheduled=IS_SCHEDULED)
 
         add_sell_put_labels(base, symbol_sp, symbol_sp_labeled)
 
@@ -553,14 +514,14 @@ def process_symbol(
             df_sp_lab.to_csv(symbol_sp_labeled, index=False)
 
         if not IS_SCHEDULED:
-            run([
+            run_cmd([
                 py, 'scripts/render_sell_put_alerts.py',
                 '--input', str((report_dir / f'{symbol_lower}_sell_put_candidates_labeled.csv').as_posix()),
                 '--symbol', symbol,
                 '--top', str(top_n),
                 '--layered',
                 '--output', str((report_dir / f'{symbol_lower}_sell_put_alerts.txt').as_posix()),
-                ], cwd=base)
+                ], cwd=base, is_scheduled=IS_SCHEDULED)
         summary_rows.append(summarize_sell_put(safe_read_csv(symbol_sp_labeled), symbol))
     else:
         summary_rows.append(summarize_sell_put(pd.DataFrame(), symbol))
@@ -614,7 +575,7 @@ def process_symbol(
             cmd.extend(['--min-delta', str(cc.get('min_delta'))])
         if cc.get('max_delta') is not None:
             cmd.extend(['--max-delta', str(cc.get('max_delta'))])
-        run(cmd, cwd=base, timeout_sec=timeout_sec)
+        run_cmd(cmd, cwd=base, timeout_sec=timeout_sec, is_scheduled=IS_SCHEDULED)
 
         df_cc = safe_read_csv(symbol_cc)
         # enrich candidates with holdings + option-locked shares (account-aware)
@@ -642,14 +603,14 @@ def process_symbol(
             df_cc.to_csv(symbol_cc, index=False)
 
         if not IS_SCHEDULED:
-            run([
+            run_cmd([
                 py, 'scripts/render_sell_call_alerts.py',
                 '--input', str((report_dir / f'{symbol_lower}_sell_call_candidates.csv').as_posix()),
                 '--symbol', symbol,
                 '--top', str(top_n),
                 '--layered',
                 '--output', str((report_dir / f'{symbol_lower}_sell_call_alerts.txt').as_posix()),
-            ], cwd=base)
+            ], cwd=base, is_scheduled=IS_SCHEDULED)
 
         summary_rows.append(summarize_sell_call(df_cc, symbol))
     else:
@@ -936,15 +897,15 @@ def main():
                     '--update-snapshot',
                 ])
             if want('alert'):
-                run(alert_cmd, cwd=base)
+                run_cmd(alert_cmd, cwd=base, is_scheduled=IS_SCHEDULED)
 
             if want('notify'):
-                run([
+                run_cmd([
                     py, 'scripts/notify_symbols.py',
                     '--alerts-input', str((report_dir / 'symbols_alerts.txt').as_posix()),
                     '--changes-input', (changes_out if STAGE_ONLY else ('/dev/null' if IS_SCHEDULED else str((report_dir / 'symbols_changes.txt').as_posix()))),
                     '--output', str((report_dir / 'symbols_notification.txt').as_posix()),
-                ], cwd=base)
+                ], cwd=base, is_scheduled=IS_SCHEDULED)
 
             log(f"[INFO] stage-only done: {STAGE_ONLY}")
             return
@@ -993,10 +954,10 @@ def main():
                     ]
                     if account:
                         cmd.extend(['--account', str(account)])
-                    run(cmd, cwd=base, timeout_sec=portfolio_timeout_sec)
+                    run_cmd(cmd, cwd=base, timeout_sec=portfolio_timeout_sec, is_scheduled=IS_SCHEDULED)
                     portfolio_ctx = load_cached_json(port_path) or json.loads(port_path.read_text(encoding='utf-8'))
             except BaseException as e:
-                # Important: run() raises SystemExit on non-zero return codes.
+                # Important: run_cmd() raises SystemExit on non-zero return codes.
                 # For unattended cron, portfolio context is best-effort and should not kill the whole scan.
                 log(f"[WARN] portfolio context not available: {e}")
                 portfolio_ctx = None
@@ -1019,7 +980,7 @@ def main():
                     ]
                     if account:
                         cmd.extend(['--account', str(account)])
-                    run(cmd, cwd=base, timeout_sec=portfolio_timeout_sec)
+                    run_cmd(cmd, cwd=base, timeout_sec=portfolio_timeout_sec, is_scheduled=IS_SCHEDULED)
                     option_ctx = load_cached_json(opt_path) or json.loads(opt_path.read_text(encoding='utf-8'))
                     refreshed = True
 
@@ -1027,14 +988,14 @@ def main():
                     # Auto-close expired open positions (table maintenance) without extra scans.
                     # Only run when we refreshed context (avoid repeated close calls during rapid dev loops).
                     try:
-                        run([
+                        run_cmd([
                             py, 'scripts/auto_close_expired_positions.py',
                             '--pm-config', str(pm_config),
                             '--context', 'output/state/option_positions_context.json',
                             '--grace-days', '1',
                             '--max-close', '20',
                             '--summary-out', str((report_dir / 'auto_close_summary.txt').as_posix()),
-                        ], cwd=base, timeout_sec=portfolio_timeout_sec)
+                        ], cwd=base, timeout_sec=portfolio_timeout_sec, is_scheduled=IS_SCHEDULED)
                     except Exception as e2:
                         log(f"[WARN] auto-close expired positions failed: {e2}")
 
@@ -1158,15 +1119,15 @@ def main():
         except Exception:
             pass
         if want('alert'):
-            run(alert_cmd, cwd=base)
+            run_cmd(alert_cmd, cwd=base, is_scheduled=IS_SCHEDULED)
 
         if want('notify'):
-            run([
+            run_cmd([
                 py, 'scripts/notify_symbols.py',
                 '--alerts-input', str((report_dir / 'symbols_alerts.txt').as_posix()),
                 '--changes-input', ('/dev/null' if IS_SCHEDULED else str((report_dir / 'symbols_changes.txt').as_posix())),
                 '--output', str((report_dir / 'symbols_notification.txt').as_posix()),
-            ], cwd=base)
+            ], cwd=base, is_scheduled=IS_SCHEDULED)
 
             # Scheduled mode artifact cleanup:
             # If report_dir was overridden, do not touch legacy output/reports.
@@ -1209,13 +1170,13 @@ def main():
             include_cash_footer = True
 
         if include_cash_footer and (not IS_SCHEDULED):
-            run([
+            run_cmd([
                 py, 'scripts/append_cash_summary.py',
                 '--pm-config', str(pm_config),
                 '--market', str(market),
                 '--accounts', 'lx', 'sy',
                 '--notification', str((report_dir / 'symbols_notification.txt').as_posix()),
-            ], cwd=base)
+            ], cwd=base, is_scheduled=IS_SCHEDULED)
 
         notifications_cfg = cfg.get('notifications', {}) or {}
         if notifications_cfg.get('enabled', False):
