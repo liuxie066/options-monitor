@@ -290,35 +290,39 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
                 import subprocess
                 from pathlib import Path as _Path
 
-                ctx_path = (base_dir / 'output' / 'state' / 'portfolio_context.json').resolve()
-                if ctx_path.exists() and ctx_path.stat().st_size > 0:
-                    ctxj = json.loads(ctx_path.read_text(encoding='utf-8'))
-                    ticker = u.code.split('.', 1)[1]
-                    stock = (ctxj.get('stocks_by_symbol') or {}).get(ticker)
-                    if stock and stock.get('symbol'):
-                        # Use portfolio-management's PriceFetcher directly (no Feishu deps).
-                        pm_dir = (_Path(__file__).resolve().parents[2] / 'portfolio-management').resolve()
-                        # IMPORTANT: do NOT .resolve() here, otherwise we lose the venv context (symlink collapses to system python)
-                        pm_py = pm_dir / '.venv' / 'bin' / 'python'
-                        code = (
-                            "import sys, json; "
-                            "sys.path.insert(0, '.'); "
-                            "from src.price_fetcher import PriceFetcher; "
-                            f"r=PriceFetcher().fetch('{ticker}'); "
-                            "print(json.dumps(r, ensure_ascii=False))"
-                        )
-                        out = subprocess.check_output([str(pm_py), '-c', code], cwd=str(pm_dir), timeout=12)
-                        txt = out.decode('utf-8', errors='ignore')
-                        # price_fetcher prints rate-cache logs; extract the last JSON object in output.
-                        lines = [ln.strip() for ln in txt.splitlines() if ln.strip()]
-                        jline = None
-                        for ln in reversed(lines):
-                            if ln.startswith('{') and ln.endswith('}'):
-                                jline = ln
-                                break
-                        r = json.loads(jline or '{}')
-                        if r and r.get('price'):
-                            spot = float(r.get('price'))
+                # Do NOT require the symbol to exist in holdings.
+                # Watchlist symbols may be unheld but still need a spot for OTM/risk computations.
+                ticker = u.code.split('.', 1)[1]
+
+                # Use portfolio-management's PriceFetcher directly (no Feishu deps).
+                pm_dir = (_Path(__file__).resolve().parents[2] / 'portfolio-management').resolve()
+                # IMPORTANT: do NOT .resolve() here, otherwise we lose the venv context (symlink collapses to system python)
+                pm_py = pm_dir / '.venv' / 'bin' / 'python'
+                code = (
+                    "import sys, json; "
+                    "sys.path.insert(0, '.'); "
+                    "from src.price_fetcher import PriceFetcher; "
+                    f"r=PriceFetcher().fetch('{ticker}'); "
+                    "print(json.dumps(r, ensure_ascii=False))"
+                )
+                out = subprocess.check_output([str(pm_py), '-c', code], cwd=str(pm_dir), timeout=12)
+                txt = out.decode('utf-8', errors='ignore')
+                # price_fetcher prints rate-cache logs; extract the last JSON object in output.
+                lines = [ln.strip() for ln in txt.splitlines() if ln.strip()]
+                jline = None
+                for ln in reversed(lines):
+                    if ln.startswith('{') and ln.endswith('}'):
+                        jline = ln
+                        break
+                r = json.loads(jline or '{}')
+                p = r.get('price') if isinstance(r, dict) else None
+                try:
+                    p = float(p) if p is not None else None
+                except Exception:
+                    p = None
+                # Guard: treat 0/None as missing
+                if p and p > 0:
+                    spot = p
             except Exception:
                 pass
         # spot may still be None; keep it. Downstream scans will skip rows if spot is required.
@@ -638,9 +642,10 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
             pass
 
 
-def save_outputs(base: Path, symbol: str, payload: dict[str, Any]):
-    raw_dir = base / 'output' / 'raw'
-    parsed_dir = base / 'output' / 'parsed'
+def save_outputs(base: Path, symbol: str, payload: dict[str, Any], *, output_root: Path | None = None):
+    root = (output_root.resolve() if output_root is not None else (base / 'output').resolve())
+    raw_dir = root / 'raw'
+    parsed_dir = root / 'parsed'
     raw_dir.mkdir(parents=True, exist_ok=True)
     parsed_dir.mkdir(parents=True, exist_ok=True)
 
@@ -681,6 +686,7 @@ def main():
     ap.add_argument('--retry-time-budget-sec', type=float, default=8.0)
     ap.add_argument('--retry-base-delay-sec', type=float, default=0.8)
     ap.add_argument('--retry-max-delay-sec', type=float, default=6.0)
+    ap.add_argument('--output-root', default=None, help='Output root containing raw/ and parsed/ (default: ./output)')
     args = ap.parse_args()
 
     opt_types = set([s.strip().lower() for s in str(args.option_types or '').split(',') if s.strip()])
@@ -688,6 +694,7 @@ def main():
     want_call = ('call' in opt_types) if opt_types else True
 
     base = Path(__file__).resolve().parents[1]
+    output_root = (Path(args.output_root).resolve() if args.output_root else None)
 
     if args.chain_cache:
         _prune_chain_cache(base, int(args.chain_cache_keep_days))
@@ -715,7 +722,7 @@ def main():
             retry_max_delay_sec=float(args.retry_max_delay_sec),
             no_retry=bool(args.no_retry),
         )
-        raw_path, csv_path = save_outputs(base, sym, payload)
+        raw_path, csv_path = save_outputs(base, sym, payload, output_root=output_root)
         try:
             meta = payload.get('meta') or {}
             _append_metrics_json(opend_metrics_path, {
