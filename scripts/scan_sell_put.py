@@ -135,15 +135,18 @@ def main():
     parser.add_argument("--min-abs-delta", type=float, default=None, help="min abs(delta) (e.g. 0.15)")
     parser.add_argument("--max-abs-delta", type=float, default=None, help="max abs(delta) (e.g. 0.28)")
     parser.add_argument("--quiet", action="store_true", help="quiet mode: suppress human-friendly prints")
+    parser.add_argument("--output", default=None, help="Output CSV path (default: output/reports/sell_put_candidates.csv)")
+    parser.add_argument("--input-root", default=None, help="Input root containing parsed/ required_data CSVs (default: ./output)")
     args = parser.parse_args()
 
     base = Path(__file__).resolve().parents[1]
-    out_dir = base / "output" / "reports"
-    out_dir.mkdir(parents=True, exist_ok=True)
+    input_root = (Path(args.input_root).resolve() if args.input_root else (base / "output").resolve())
+    out_path = Path(args.output).resolve() if args.output else (base / "output" / "reports" / "sell_put_candidates.csv")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
 
     rows = []
     for symbol in args.symbols:
-        path = base / "output" / "parsed" / f"{symbol}_required_data.csv"
+        path = input_root / "parsed" / f"{symbol}_required_data.csv"
         df = pd.read_csv(path)
         df = df[df["option_type"] == "put"].copy()
 
@@ -246,7 +249,6 @@ def main():
     out = pd.DataFrame(rows)
     if not out.empty:
         out = out.sort_values(by=["annualized_net_return_on_cash_basis", "net_income"], ascending=[False, False])
-    out_path = out_dir / "sell_put_candidates.csv"
     if out.empty:
         # keep a valid header-only CSV to avoid downstream EmptyDataError
         cols = [

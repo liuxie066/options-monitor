@@ -184,9 +184,10 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None) -> dict[str,
     }
 
 
-def save_outputs(base: Path, symbol: str, payload: dict[str, Any]):
-    raw_dir = base / "output" / "raw"
-    parsed_dir = base / "output" / "parsed"
+def save_outputs(base: Path, symbol: str, payload: dict[str, Any], *, output_root: Path | None = None):
+    root = (output_root.resolve() if output_root is not None else (base / "output").resolve())
+    raw_dir = root / "raw"
+    parsed_dir = root / "parsed"
     raw_dir.mkdir(parents=True, exist_ok=True)
     parsed_dir.mkdir(parents=True, exist_ok=True)
 
@@ -194,7 +195,22 @@ def save_outputs(base: Path, symbol: str, payload: dict[str, Any]):
     csv_path = parsed_dir / f"{symbol}_required_data.csv"
 
     raw_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
-    pd.DataFrame(payload["rows"]).to_csv(csv_path, index=False)
+
+    rows = payload.get("rows") or []
+    df = pd.DataFrame(rows)
+
+    # IMPORTANT: even when rows is empty (e.g. Yahoo rate-limited), write a header-only CSV
+    # with a stable schema. Downstream scanners assume read_csv() succeeds.
+    if df.empty:
+        cols = [
+            "symbol","option_type","expiration","dte","contract_symbol","strike","spot",
+            "bid","ask","last_price","mid","volume","open_interest","implied_volatility",
+            "in_the_money","currency","otm_pct","delta","multiplier",
+        ]
+        pd.DataFrame(columns=cols).to_csv(csv_path, index=False)
+    else:
+        df.to_csv(csv_path, index=False)
+
     return raw_path, csv_path
 
 
@@ -202,13 +218,15 @@ def main():
     parser = argparse.ArgumentParser(description="Fetch required US option data from Yahoo Finance via yfinance")
     parser.add_argument("--symbols", nargs="+", required=True, help="US tickers like AAPL TSLA SPY")
     parser.add_argument("--limit-expirations", type=int, default=2, help="Only fetch first N expirations for quick POC")
+    parser.add_argument("--output-root", default=None, help="Output root containing raw/ and parsed/ (default: ./output)")
     args = parser.parse_args()
 
     base = Path(__file__).resolve().parents[1]
+    output_root = (Path(args.output_root).resolve() if args.output_root else None)
 
     for symbol in args.symbols:
         payload = fetch_symbol(symbol, limit_expirations=args.limit_expirations)
-        raw_path, csv_path = save_outputs(base, symbol, payload)
+        raw_path, csv_path = save_outputs(base, symbol, payload, output_root=output_root)
         print(f"[OK] {symbol}")
         print(f"  spot={payload['spot']}")
         print(f"  expirations={payload['expiration_count']} fetched={len(payload['expirations'])}")
