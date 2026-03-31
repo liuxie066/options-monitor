@@ -19,6 +19,8 @@ from scripts.subprocess_utils import run_cmd
 import pandas as pd
 import yaml
 
+from scripts.report_builders import build_symbols_digest, build_symbols_summary
+
 
 
 def main():
@@ -379,7 +381,7 @@ def main():
             return
 
         # Write summary directly into report_dir
-        build_symbols_summary(summary_rows, report_dir)
+        build_symbols_summary(summary_rows, report_dir, is_scheduled=IS_SCHEDULED)
 
         if not IS_SCHEDULED:
             build_symbols_digest(symbols, report_dir)
