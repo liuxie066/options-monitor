@@ -837,30 +837,13 @@ def process_symbol(
                     ccy = str(df_sp_lab['currency'].iloc[0] or '').upper()
 
                 if ccy == 'HKD':
-                    # HKDCNY is CNY per 1 HKD
-                    try:
-                        # Load from shared cache path (same as fx_rates.py uses)
-                        import json as _json
-                        from pathlib import Path as _Path
-                        rate_cache = (base / 'output/state/rate_cache.json').resolve()
-                        workspace = _Path(__file__).resolve().parents[2]
-                        shared_path = workspace / 'portfolio-management' / '.data' / 'rate_cache.json'
-                        # minimal inline: prefer existing cache file
-                        rates = None
-                        for p in [rate_cache, shared_path]:
-                            if p.exists() and p.stat().st_size > 0:
-                                d = _json.loads(p.read_text(encoding='utf-8'))
-                                rates = (d.get('rates') or {})
-                                break
-                        hkdcny = float(rates.get('HKDCNY')) if rates and rates.get('HKDCNY') else None
-                    except Exception:
-                        hkdcny = None
+                    # HKD -> CNY
                     if hkdcny:
                         df_sp_lab['cash_required_cny'] = native_req.astype(float) * float(hkdcny)
                     else:
                         df_sp_lab['cash_required_cny'] = pd.NA
                 else:
-                    # USD -> CNY using USDCNY derived from fx_usd_per_cny
+                    # USD -> CNY
                     if fx_usd_per_cny:
                         usdcny = 1.0 / float(fx_usd_per_cny)
                         df_sp_lab['cash_required_cny'] = native_req.astype(float) * float(usdcny)
