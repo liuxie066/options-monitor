@@ -3,352 +3,24 @@ from __future__ import annotations
 
 import argparse
 import json
-import shutil
-import subprocess
 import sys
-import time
 from pathlib import Path
 
 from scripts.fx_rates import CurrencyConverter, FxRates
+from scripts.io_utils import (
+    copy_if_exists,
+    has_shared_required_data,
+    is_fresh,
+    load_cached_json,
+    safe_read_csv,
+)
+from scripts.report_labels import add_sell_put_labels
+from scripts.report_summaries import summarize_sell_call, summarize_sell_put
+from scripts.subprocess_utils import run_cmd
 
 import pandas as pd
-from pandas.errors import EmptyDataError
 import yaml
 
-
-def run(cmd: list[str], cwd: Path, timeout_sec: int | None = None):
-    """Run a subprocess with optional timeout.
-
-    Timeout is important for unattended cron usage: a single hanging symbol must not block the whole pipeline.
-
-    Scheduled mode policy:
-    - capture stdout/stderr to reduce log I/O
-    - only print tail on failure
-    """
-    if not IS_SCHEDULED:
-        print(f"[RUN] {' '.join(cmd)}" + (f" (timeout={timeout_sec}s)" if timeout_sec else ""))
-
-    try:
-        if IS_SCHEDULED:
-            result = subprocess.run(cmd, cwd=str(cwd), timeout=timeout_sec, capture_output=True, text=True)
-        else:
-            result = subprocess.run(cmd, cwd=str(cwd), timeout=timeout_sec)
-    except subprocess.TimeoutExpired:
-        raise RuntimeError(f"timeout after {timeout_sec}s: {' '.join(cmd)}")
-
-    if result.returncode != 0:
-        if IS_SCHEDULED:
-            out = ((result.stdout or '') + '\n' + (result.stderr or '')).strip()
-            if out:
-                tail = '\n'.join(out.splitlines()[-60:])
-                print(f"[ERR] {' '.join(cmd)}\n{tail}")
-        raise SystemExit(result.returncode)
-
-
-def safe_read_csv(path: Path) -> pd.DataFrame:
-    """Safe CSV reader.
-
-    Treat header-only / empty / invalid CSV as empty DataFrame.
-    """
-    try:
-        if not path.exists() or path.stat().st_size <= 0:
-            return pd.DataFrame()
-        try:
-            return pd.read_csv(path)
-        except EmptyDataError:
-            return pd.DataFrame()
-    except Exception:
-        return pd.DataFrame()
-
-
-def copy_if_exists(src: Path, dst: Path) -> bool:
-    """Copy file only when src exists and is non-empty.
-
-    Return True if copied, False otherwise.
-
-    Rationale: avoid generating lots of empty CSV artifacts in scheduled runs.
-    Downstream uses safe_read_csv(), so missing files are treated as empty.
-    """
-    try:
-        if src.exists() and src.stat().st_size > 0:
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(src, dst)
-            return True
-    except Exception:
-        return False
-    return False
-
-
-def is_fresh(path: Path, max_age_sec: int) -> bool:
-    try:
-        if not path.exists() or path.stat().st_size <= 0:
-            return False
-        age = time.time() - path.stat().st_mtime
-        return age <= float(max_age_sec)
-    except Exception:
-        return False
-
-
-def load_cached_json(path: Path) -> dict | None:
-    """Best-effort cached JSON loader.
-
-    Returns None if file is missing/invalid/clearly incomplete.
-    """
-    try:
-        if not path.exists() or path.stat().st_size <= 2:
-            return None
-        obj = json.loads(path.read_text(encoding='utf-8'))
-        if not isinstance(obj, dict):
-            return None
-        # sanity keys
-        if 'as_of_utc' not in obj and 'filters' not in obj:
-            return None
-        return obj
-    except Exception:
-        return None
-
-
-def add_sell_put_labels(base: Path, input_path: Path, output_path: Path):
-    df = safe_read_csv(input_path)
-    # If upstream candidates are empty/missing, skip writing labeled output.
-    if df is None or df.empty:
-        return
-
-    def band(v):
-        if pd.isna(v):
-            return 'unknown'
-        if v < 0.03:
-            return '<3%'
-        if v < 0.07:
-            return '3%-7%'
-        return '>=7%'
-
-    def label(v):
-        if pd.isna(v):
-            return '未知'
-        if v < 0.03:
-            return '激进'
-        if v < 0.07:
-            return '中性'
-        return '保守'
-
-    if not df.empty:
-        df['otm_band'] = df['otm_pct'].apply(band)
-        df['risk_label'] = df['otm_pct'].apply(label)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(output_path, index=False)
-
-
-def summarize_sell_put(df: pd.DataFrame, symbol: str) -> dict:
-    row = {
-        'symbol': symbol,
-        'strategy': 'sell_put',
-        'candidate_count': 0,
-        'top_contract': '',
-        'expiration': '',
-        'strike': None,
-        'dte': None,
-        'net_income': None,
-        'annualized_return': None,
-        'risk_label': '',
-        'delta': None,
-        'cash_secured_used_usd': 0.0,
-        'cash_required_usd': None,
-        'cash_available_usd': None,
-        'cash_free_usd': None,
-        'cash_available_usd_est': None,
-        'cash_free_usd_est': None,
-        'cash_available_cny': None,
-        'cash_free_cny': None,
-        'cash_required_cny': None,
-        'mid': None,
-        'bid': None,
-        'ask': None,
-        'option_ccy': None,
-        'note': '无候选',
-    }
-    if df.empty:
-        return row
-    row['candidate_count'] = len(df)
-    # Pick the top contract with a more execution-friendly preference:
-    # prefer abs(delta) close to target, then higher annualized return, then net income.
-    target_abs_delta = 0.22
-    try:
-        # Configurable target (symbol-level overrides template)
-        target_abs_delta = float((symbol_cfg.get('sell_put') or {}).get('target_abs_delta') or target_abs_delta)
-    except Exception:
-        pass
-    d = df.copy()
-    try:
-        if 'delta' in d.columns:
-            d['_abs_delta'] = d['delta'].abs()
-            d['_delta_dist'] = (d['_abs_delta'] - target_abs_delta).abs()
-        else:
-            d['_delta_dist'] = 999.0
-    except Exception:
-        d['_delta_dist'] = 999.0
-
-    top = d.sort_values(
-        ['_delta_dist', 'annualized_net_return_on_cash_basis', 'net_income'],
-        ascending=[True, False, False],
-    ).iloc[0]
-    cash_secured_used = 0.0
-    cash_avail = None
-    cash_free = None
-    cash_avail_est = None
-    cash_free_est = None
-    cash_avail_cny = None
-    cash_free_cny = None
-    cash_required_cny = None
-    try:
-        if 'cash_secured_used_usd' in df.columns and len(df) > 0:
-            cash_secured_used = float(df['cash_secured_used_usd'].iloc[0] or 0.0)
-        if 'cash_available_usd' in df.columns and len(df) > 0 and pd.notna(df['cash_available_usd'].iloc[0]):
-            cash_avail = float(df['cash_available_usd'].iloc[0])
-        if 'cash_free_usd' in df.columns and len(df) > 0 and pd.notna(df['cash_free_usd'].iloc[0]):
-            cash_free = float(df['cash_free_usd'].iloc[0])
-        if 'cash_available_usd_est' in df.columns and len(df) > 0 and pd.notna(df['cash_available_usd_est'].iloc[0]):
-            cash_avail_est = float(df['cash_available_usd_est'].iloc[0])
-        if 'cash_free_usd_est' in df.columns and len(df) > 0 and pd.notna(df['cash_free_usd_est'].iloc[0]):
-            cash_free_est = float(df['cash_free_usd_est'].iloc[0])
-        if 'cash_available_cny' in df.columns and len(df) > 0 and pd.notna(df['cash_available_cny'].iloc[0]):
-            cash_avail_cny = float(df['cash_available_cny'].iloc[0])
-        if 'cash_free_cny' in df.columns and len(df) > 0 and pd.notna(df['cash_free_cny'].iloc[0]):
-            cash_free_cny = float(df['cash_free_cny'].iloc[0])
-        if 'cash_required_cny' in df.columns and len(df) > 0 and pd.notna(df['cash_required_cny'].iloc[0]):
-            cash_required_cny = float(df['cash_required_cny'].iloc[0])
-    except Exception:
-        cash_secured_used = 0.0
-        cash_avail = None
-        cash_free = None
-        cash_avail_est = None
-        cash_free_est = None
-
-    cash_required = None
-    try:
-        cash_required = float(top['strike']) * 100.0
-    except Exception:
-        cash_required = None
-
-    row.update({
-        'top_contract': f"{top['expiration']} {int(top['strike']) if float(top['strike']).is_integer() else top['strike']}P",
-        'expiration': top['expiration'],
-        'strike': float(top['strike']),
-        'dte': int(top['dte']),
-        'net_income': float(top['net_income']),
-        'annualized_return': float(top['annualized_net_return_on_cash_basis']),
-        'risk_label': top.get('risk_label', ''),
-        'delta': (float(top['delta']) if 'delta' in top and pd.notna(top['delta']) else None),
-        'cash_secured_used_usd': cash_secured_used,
-        'cash_required_usd': cash_required,
-        'cash_available_usd': cash_avail,
-        'cash_free_usd': cash_free,
-        'cash_available_usd_est': cash_avail_est,
-        'cash_free_usd_est': cash_free_est,
-        'cash_available_cny': cash_avail_cny,
-        'cash_free_cny': cash_free_cny,
-        'cash_required_cny': cash_required_cny,
-        'mid': (float(top['mid']) if 'mid' in top else None),
-        'bid': (float(top['bid']) if 'bid' in top and pd.notna(top['bid']) else None),
-        'ask': (float(top['ask']) if 'ask' in top and pd.notna(top['ask']) else None),
-        'option_ccy': ('HKD' if str(symbol).upper().endswith('.HK') else 'USD'),
-        'note': '有候选',
-    })
-    return row
-
-
-def summarize_sell_call(df: pd.DataFrame, symbol: str) -> dict:
-    row = {
-        'symbol': symbol,
-        'strategy': 'sell_call',
-        'candidate_count': 0,
-        'top_contract': '',
-        'expiration': '',
-        'strike': None,
-        'dte': None,
-        'net_income': None,
-        'annualized_return': None,
-        'risk_label': '',
-        'delta': None,
-        'mid': None,
-        'bid': None,
-        'ask': None,
-        'option_ccy': None,
-        'note': '无候选',
-    }
-    if df.empty:
-        return row
-    row['candidate_count'] = len(df)
-    # Prefer delta close to a steady target, then higher premium return.
-    target_delta = 0.28
-    try:
-        target_delta = float((symbol_cfg.get('sell_call') or {}).get('target_delta') or target_delta)
-    except Exception:
-        pass
-    d = df.copy()
-    try:
-        if 'delta' in d.columns:
-            d['_delta_dist'] = (d['delta'] - target_delta).abs()
-        else:
-            d['_delta_dist'] = 999.0
-    except Exception:
-        d['_delta_dist'] = 999.0
-
-    top = d.sort_values(
-        ['_delta_dist', 'annualized_net_premium_return', 'if_exercised_total_return', 'net_income'],
-        ascending=[True, False, False, False],
-    ).iloc[0]
-    cover_avail = 0
-    try:
-        cover_avail = int(top.get('covered_contracts_available', 0) or 0)
-    except Exception:
-        cover_avail = 0
-
-    row.update({
-        'top_contract': f"{top['expiration']} {int(top['strike']) if float(top['strike']).is_integer() else top['strike']}C",
-        'expiration': top['expiration'],
-        'strike': float(top['strike']),
-        'dte': int(top['dte']),
-        'net_income': float(top['net_income']),
-        'annualized_return': float(top['annualized_net_premium_return']),
-        'risk_label': top.get('risk_label', ''),
-        'delta': (float(top['delta']) if 'delta' in top and pd.notna(top['delta']) else None),
-        'mid': (float(top['mid']) if 'mid' in top else None),
-        'bid': (float(top['bid']) if 'bid' in top and pd.notna(top['bid']) else None),
-        'ask': (float(top['ask']) if 'ask' in top and pd.notna(top['ask']) else None),
-        'option_ccy': ('HKD' if str(symbol).upper().endswith('.HK') else 'USD'),
-        'note': f"有候选 | cover_avail {cover_avail} | shares_total {int(top.get('shares_total', 0) or 0)} | shares_locked {int(top.get('shares_locked', 0) or 0)}",
-    })
-    return row
-
-
-
-
-
-
-
-
-def has_shared_required_data(symbol: str, shared_dir: Path) -> bool:
-    """Return True when shared required_data artifacts exist and are readable.
-
-    - raw json must exist and be non-empty
-    - parsed csv must exist and be non-empty (header-only is accepted)
-    """
-    sym = str(symbol)
-    raw_src = shared_dir / 'raw' / f"{sym}_required_data.json"
-    parsed_src = shared_dir / 'parsed' / f"{sym}_required_data.csv"
-
-    if not (raw_src.exists() and raw_src.stat().st_size > 0):
-        return False
-    if not (parsed_src.exists() and parsed_src.stat().st_size > 0):
-        return False
-
-    try:
-        _ = safe_read_csv(parsed_src)
-    except Exception:
-        return False
-
-    return True
 
 def derive_put_max_strike_from_cash(symbol: str, portfolio_ctx: dict | None, fx_usd_per_cny: float | None, hkdcny: float | None, *, fallback_multiplier: int = 100) -> float | None:
     """Return a cash-based max_strike cap to prefilter sell_put.
@@ -546,7 +218,7 @@ def process_symbol(
             if IS_SCHEDULED:
                 # Quiet mode for fetch_market_data_opend.py
                 cmd.append('--quiet')
-            run(cmd, cwd=base, timeout_sec=timeout_sec)
+            run_cmd(cmd, cwd=base, timeout_sec=timeout_sec, is_scheduled=IS_SCHEDULED)
             _apply_multiplier_cache_to_required_data_csv(symbol)
 
             # fallback to yahoo (US) if OpenD returned empty data or transient error
@@ -580,22 +252,22 @@ def process_symbol(
                 ])
 
                 if is_us and (empty or transient):
-                    run([
+                    run_cmd([
                         py, 'scripts/fetch_market_data.py',
                         '--symbols', symbol,
                         '--limit-expirations', str(limit_expirations),
                         '--output-root', str(required_data_dir),
-                    ], cwd=base, timeout_sec=timeout_sec)
+                    ], cwd=base, timeout_sec=timeout_sec, is_scheduled=IS_SCHEDULED)
                     _apply_multiplier_cache_to_required_data_csv(symbol)
             except Exception:
                 pass
         else:
-            run([
+            run_cmd([
                 py, 'scripts/fetch_market_data.py',
                 '--symbols', symbol,
                 '--limit-expirations', str(limit_expirations),
                 '--output-root', str(required_data_dir),
-            ], cwd=base, timeout_sec=timeout_sec)
+            ], cwd=base, timeout_sec=timeout_sec, is_scheduled=IS_SCHEDULED)
             _apply_multiplier_cache_to_required_data_csv(symbol)
 
     if want_put:
@@ -697,7 +369,7 @@ def process_symbol(
             cmd.extend(['--max-strike', str(sp.get('max_strike'))])
         if IS_SCHEDULED:
             cmd.append('--quiet')
-        run(cmd, cwd=base, timeout_sec=timeout_sec)
+        run_cmd(cmd, cwd=base, timeout_sec=timeout_sec, is_scheduled=IS_SCHEDULED)
 
         add_sell_put_labels(base, symbol_sp, symbol_sp_labeled)
 
@@ -842,14 +514,14 @@ def process_symbol(
             df_sp_lab.to_csv(symbol_sp_labeled, index=False)
 
         if not IS_SCHEDULED:
-            run([
+            run_cmd([
                 py, 'scripts/render_sell_put_alerts.py',
                 '--input', str((report_dir / f'{symbol_lower}_sell_put_candidates_labeled.csv').as_posix()),
                 '--symbol', symbol,
                 '--top', str(top_n),
                 '--layered',
                 '--output', str((report_dir / f'{symbol_lower}_sell_put_alerts.txt').as_posix()),
-                ], cwd=base)
+                ], cwd=base, is_scheduled=IS_SCHEDULED)
         summary_rows.append(summarize_sell_put(safe_read_csv(symbol_sp_labeled), symbol))
     else:
         summary_rows.append(summarize_sell_put(pd.DataFrame(), symbol))
@@ -903,7 +575,7 @@ def process_symbol(
             cmd.extend(['--min-delta', str(cc.get('min_delta'))])
         if cc.get('max_delta') is not None:
             cmd.extend(['--max-delta', str(cc.get('max_delta'))])
-        run(cmd, cwd=base, timeout_sec=timeout_sec)
+        run_cmd(cmd, cwd=base, timeout_sec=timeout_sec, is_scheduled=IS_SCHEDULED)
 
         df_cc = safe_read_csv(symbol_cc)
         # enrich candidates with holdings + option-locked shares (account-aware)
@@ -931,14 +603,14 @@ def process_symbol(
             df_cc.to_csv(symbol_cc, index=False)
 
         if not IS_SCHEDULED:
-            run([
+            run_cmd([
                 py, 'scripts/render_sell_call_alerts.py',
                 '--input', str((report_dir / f'{symbol_lower}_sell_call_candidates.csv').as_posix()),
                 '--symbol', symbol,
                 '--top', str(top_n),
                 '--layered',
                 '--output', str((report_dir / f'{symbol_lower}_sell_call_alerts.txt').as_posix()),
-            ], cwd=base)
+            ], cwd=base, is_scheduled=IS_SCHEDULED)
 
         summary_rows.append(summarize_sell_call(df_cc, symbol))
     else:
@@ -1225,15 +897,15 @@ def main():
                     '--update-snapshot',
                 ])
             if want('alert'):
-                run(alert_cmd, cwd=base)
+                run_cmd(alert_cmd, cwd=base, is_scheduled=IS_SCHEDULED)
 
             if want('notify'):
-                run([
+                run_cmd([
                     py, 'scripts/notify_symbols.py',
                     '--alerts-input', str((report_dir / 'symbols_alerts.txt').as_posix()),
                     '--changes-input', (changes_out if STAGE_ONLY else ('/dev/null' if IS_SCHEDULED else str((report_dir / 'symbols_changes.txt').as_posix()))),
                     '--output', str((report_dir / 'symbols_notification.txt').as_posix()),
-                ], cwd=base)
+                ], cwd=base, is_scheduled=IS_SCHEDULED)
 
             log(f"[INFO] stage-only done: {STAGE_ONLY}")
             return
@@ -1282,10 +954,10 @@ def main():
                     ]
                     if account:
                         cmd.extend(['--account', str(account)])
-                    run(cmd, cwd=base, timeout_sec=portfolio_timeout_sec)
+                    run_cmd(cmd, cwd=base, timeout_sec=portfolio_timeout_sec, is_scheduled=IS_SCHEDULED)
                     portfolio_ctx = load_cached_json(port_path) or json.loads(port_path.read_text(encoding='utf-8'))
             except BaseException as e:
-                # Important: run() raises SystemExit on non-zero return codes.
+                # Important: run_cmd() raises SystemExit on non-zero return codes.
                 # For unattended cron, portfolio context is best-effort and should not kill the whole scan.
                 log(f"[WARN] portfolio context not available: {e}")
                 portfolio_ctx = None
@@ -1308,7 +980,7 @@ def main():
                     ]
                     if account:
                         cmd.extend(['--account', str(account)])
-                    run(cmd, cwd=base, timeout_sec=portfolio_timeout_sec)
+                    run_cmd(cmd, cwd=base, timeout_sec=portfolio_timeout_sec, is_scheduled=IS_SCHEDULED)
                     option_ctx = load_cached_json(opt_path) or json.loads(opt_path.read_text(encoding='utf-8'))
                     refreshed = True
 
@@ -1316,14 +988,14 @@ def main():
                     # Auto-close expired open positions (table maintenance) without extra scans.
                     # Only run when we refreshed context (avoid repeated close calls during rapid dev loops).
                     try:
-                        run([
+                        run_cmd([
                             py, 'scripts/auto_close_expired_positions.py',
                             '--pm-config', str(pm_config),
                             '--context', 'output/state/option_positions_context.json',
                             '--grace-days', '1',
                             '--max-close', '20',
                             '--summary-out', str((report_dir / 'auto_close_summary.txt').as_posix()),
-                        ], cwd=base, timeout_sec=portfolio_timeout_sec)
+                        ], cwd=base, timeout_sec=portfolio_timeout_sec, is_scheduled=IS_SCHEDULED)
                     except Exception as e2:
                         log(f"[WARN] auto-close expired positions failed: {e2}")
 
@@ -1447,15 +1119,15 @@ def main():
         except Exception:
             pass
         if want('alert'):
-            run(alert_cmd, cwd=base)
+            run_cmd(alert_cmd, cwd=base, is_scheduled=IS_SCHEDULED)
 
         if want('notify'):
-            run([
+            run_cmd([
                 py, 'scripts/notify_symbols.py',
                 '--alerts-input', str((report_dir / 'symbols_alerts.txt').as_posix()),
                 '--changes-input', ('/dev/null' if IS_SCHEDULED else str((report_dir / 'symbols_changes.txt').as_posix())),
                 '--output', str((report_dir / 'symbols_notification.txt').as_posix()),
-            ], cwd=base)
+            ], cwd=base, is_scheduled=IS_SCHEDULED)
 
             # Scheduled mode artifact cleanup:
             # If report_dir was overridden, do not touch legacy output/reports.
@@ -1498,13 +1170,13 @@ def main():
             include_cash_footer = True
 
         if include_cash_footer and (not IS_SCHEDULED):
-            run([
+            run_cmd([
                 py, 'scripts/append_cash_summary.py',
                 '--pm-config', str(pm_config),
                 '--market', str(market),
                 '--accounts', 'lx', 'sy',
                 '--notification', str((report_dir / 'symbols_notification.txt').as_posix()),
-            ], cwd=base)
+            ], cwd=base, is_scheduled=IS_SCHEDULED)
 
         notifications_cfg = cfg.get('notifications', {}) or {}
         if notifications_cfg.get('enabled', False):
