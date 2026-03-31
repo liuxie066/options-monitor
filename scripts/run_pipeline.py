@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 from scripts.fx_rates import CurrencyConverter, FxRates
+from scripts.report_summaries import summarize_sell_call, summarize_sell_put
 
 import pandas as pd
 from pandas.errors import EmptyDataError
@@ -139,36 +140,6 @@ def add_sell_put_labels(base: Path, input_path: Path, output_path: Path):
     df.to_csv(output_path, index=False)
 
 
-def summarize_sell_put(df: pd.DataFrame, symbol: str) -> dict:
-    row = {
-        'symbol': symbol,
-        'strategy': 'sell_put',
-        'candidate_count': 0,
-        'top_contract': '',
-        'expiration': '',
-        'strike': None,
-        'dte': None,
-        'net_income': None,
-        'annualized_return': None,
-        'risk_label': '',
-        'delta': None,
-        'cash_secured_used_usd': 0.0,
-        'cash_required_usd': None,
-        'cash_available_usd': None,
-        'cash_free_usd': None,
-        'cash_available_usd_est': None,
-        'cash_free_usd_est': None,
-        'cash_available_cny': None,
-        'cash_free_cny': None,
-        'cash_required_cny': None,
-        'mid': None,
-        'bid': None,
-        'ask': None,
-        'option_ccy': None,
-        'note': '无候选',
-    }
-    if df.empty:
-        return row
     row['candidate_count'] = len(df)
     # Pick the top contract with a more execution-friendly preference:
     # prefer abs(delta) close to target, then higher annualized return, then net income.
@@ -257,27 +228,6 @@ def summarize_sell_put(df: pd.DataFrame, symbol: str) -> dict:
     return row
 
 
-def summarize_sell_call(df: pd.DataFrame, symbol: str) -> dict:
-    row = {
-        'symbol': symbol,
-        'strategy': 'sell_call',
-        'candidate_count': 0,
-        'top_contract': '',
-        'expiration': '',
-        'strike': None,
-        'dte': None,
-        'net_income': None,
-        'annualized_return': None,
-        'risk_label': '',
-        'delta': None,
-        'mid': None,
-        'bid': None,
-        'ask': None,
-        'option_ccy': None,
-        'note': '无候选',
-    }
-    if df.empty:
-        return row
     row['candidate_count'] = len(df)
     # Prefer delta close to a steady target, then higher premium return.
     target_delta = 0.28
