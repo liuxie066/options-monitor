@@ -17,6 +17,7 @@ from scripts.io_utils import safe_read_csv
 from scripts.pipeline_steps import derive_put_max_strike_from_cash
 from scripts.report_labels import add_sell_put_labels
 from scripts.report_summaries import summarize_sell_call, summarize_sell_put
+from scripts.sell_put_cash import enrich_sell_put_candidates_with_cash
 from scripts.subprocess_utils import run_cmd
 
 
@@ -195,120 +196,14 @@ def process_symbol(
 
         # account-aware: attach cash secured usage from option_positions (open short puts)
         df_sp_lab = safe_read_csv(symbol_sp_labeled)
-        if not df_sp_lab.empty and portfolio_ctx:
-            option_ctx = portfolio_ctx.get('option_ctx') if isinstance(portfolio_ctx, dict) else None
-
-            used_symbol_usd = 0.0
-            used_total_usd = 0.0
-            used_total_cny = None
-            used_symbol_cny = None
-
-            if option_ctx:
-                try:
-                    by_sym_ccy = option_ctx.get('cash_secured_by_symbol_by_ccy') or {}
-                    tot_by_ccy = option_ctx.get('cash_secured_total_by_ccy') or {}
-                    if isinstance(by_sym_ccy, dict) and (by_sym_ccy or tot_by_ccy):
-                        used_symbol_usd = float(((by_sym_ccy.get(symbol) or {}).get('USD')) or 0.0)
-                        used_total_usd = float((tot_by_ccy.get('USD')) or 0.0)
-                        v = option_ctx.get('cash_secured_total_cny')
-                        used_total_cny = float(v) if v is not None else None
-                        vs = None
-                        try:
-                            vs = (option_ctx.get('cash_secured_by_symbol_cny') or {}).get(symbol)
-                        except Exception:
-                            vs = None
-                        used_symbol_cny = float(vs) if vs is not None else None
-                    else:
-                        used_map = (option_ctx.get('cash_secured_by_symbol') or {})
-                        used_symbol_usd = float(used_map.get(symbol) or 0.0)
-                        used_total_usd = float(sum(float(v or 0.0) for v in used_map.values()))
-                except Exception:
-                    used_symbol_usd = 0.0
-                    used_total_usd = 0.0
-                    used_total_cny = None
-                    used_symbol_cny = None
-
-            cash_avail = None
-            cash_avail_est = None
-            cash_avail_cny = None
-            cash_free_cny = None
-            try:
-                cash_by_ccy = (portfolio_ctx.get('cash_by_currency') or {}) if isinstance(portfolio_ctx, dict) else {}
-                v = cash_by_ccy.get('USD')
-                cash_avail = float(v) if v is not None else None
-
-                cny = cash_by_ccy.get('CNY')
-                cash_avail_cny = float(cny) if cny is not None else None
-
-                if cash_avail_cny is not None:
-                    if used_total_cny is not None:
-                        cash_free_cny = cash_avail_cny - used_total_cny
-                    else:
-                        k = _FX.native_to_cny(1.0, native_ccy='USD')
-                        cash_free_cny = (cash_avail_cny - (used_total_usd * float(k))) if k else None
-
-                if cash_avail is None and cash_avail_cny is not None:
-                    cash_avail_est = _FX.cny_to_native(cash_avail_cny, native_ccy='USD')
-            except Exception:
-                cash_avail = None
-                cash_avail_est = None
-
-            df_sp_lab['cash_secured_used_usd_total'] = used_total_usd
-            df_sp_lab['cash_secured_used_usd_symbol'] = used_symbol_usd
-            df_sp_lab['cash_secured_used_usd'] = used_total_usd
-
-            if used_total_cny is not None:
-                df_sp_lab['cash_secured_used_cny_total'] = float(used_total_cny)
-            else:
-                df_sp_lab['cash_secured_used_cny_total'] = pd.NA
-            if used_symbol_cny is not None:
-                df_sp_lab['cash_secured_used_cny_symbol'] = float(used_symbol_cny)
-            else:
-                df_sp_lab['cash_secured_used_cny_symbol'] = pd.NA
-            df_sp_lab['cash_secured_used_cny'] = df_sp_lab['cash_secured_used_cny_total']
-
-            if cash_avail is not None:
-                df_sp_lab['cash_available_usd'] = cash_avail
-                df_sp_lab['cash_available_usd_est'] = pd.NA
-                df_sp_lab['cash_free_usd'] = cash_avail - used_total_usd
-                df_sp_lab['cash_free_usd_est'] = pd.NA
-            else:
-                df_sp_lab['cash_available_usd'] = pd.NA
-                df_sp_lab['cash_free_usd'] = pd.NA
-                df_sp_lab['cash_available_usd_est'] = (cash_avail_est if cash_avail_est is not None else pd.NA)
-                if cash_avail_est is not None:
-                    df_sp_lab['cash_free_usd_est'] = cash_avail_est - used_total_usd
-                else:
-                    df_sp_lab['cash_free_usd_est'] = pd.NA
-
-            df_sp_lab['cash_available_cny'] = (cash_avail_cny if cash_avail_cny is not None else pd.NA)
-            df_sp_lab['cash_free_cny'] = (cash_free_cny if cash_free_cny is not None else pd.NA)
-
-            # Cash requirement
-            try:
-                if 'multiplier' in df_sp_lab.columns:
-                    m = df_sp_lab['multiplier'].fillna(100.0).astype(float)
-                else:
-                    m = 100.0
-
-                native_req = df_sp_lab['strike'].astype(float) * m
-                df_sp_lab['cash_required_usd'] = native_req
-
-                ccy = None
-                if 'currency' in df_sp_lab.columns and len(df_sp_lab) > 0:
-                    ccy = str(df_sp_lab['currency'].iloc[0] or '').upper()
-
-                c = (ccy or 'USD')
-                k = _FX.native_to_cny(1.0, native_ccy=c)
-                if k is None or k <= 0:
-                    df_sp_lab['cash_required_cny'] = pd.NA
-                else:
-                    df_sp_lab['cash_required_cny'] = native_req.astype(float) * float(k)
-            except Exception:
-                df_sp_lab['cash_required_usd'] = pd.NA
-                df_sp_lab['cash_required_cny'] = pd.NA
-
-            df_sp_lab.to_csv(symbol_sp_labeled, index=False)
+        if not df_sp_lab.empty:
+            enrich_sell_put_candidates_with_cash(
+                df_labeled=df_sp_lab,
+                symbol=symbol,
+                portfolio_ctx=portfolio_ctx,
+                fx=_FX,
+                out_path=symbol_sp_labeled,
+            )
 
         if not IS_SCHEDULED:
             run_cmd([
