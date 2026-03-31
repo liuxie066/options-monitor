@@ -1,15 +1,23 @@
 """I/O utilities (Stage 1 infrastructure).
 
 Goal: centralize repeated file read/write helpers so later refactors don't fork logic.
-This module is intentionally tiny and side-effect free.
+
+Note:
+- Keep these helpers small and dependency-light.
+- These are shared utilities; avoid importing run_pipeline from here.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import shutil
+import time
 from pathlib import Path
 from typing import Any
+
+import pandas as pd
+from pandas.errors import EmptyDataError
 
 
 def ensure_dir(path: str | Path) -> Path:
@@ -49,3 +57,63 @@ def atomic_write_text(path: str | Path, content: str, *, encoding: str = 'utf-8'
 
 def atomic_write_json(path: str | Path, obj: Any, *, encoding: str = 'utf-8', indent: int = 2) -> None:
     atomic_write_text(path, json.dumps(obj, ensure_ascii=False, indent=indent) + '\n', encoding=encoding)
+
+
+def safe_read_csv(path: Path) -> pd.DataFrame:
+    """Safe CSV reader.
+
+    Treat header-only / empty / invalid CSV as empty DataFrame.
+    """
+    try:
+        if not path.exists() or path.stat().st_size <= 0:
+            return pd.DataFrame()
+        try:
+            return pd.read_csv(path)
+        except EmptyDataError:
+            return pd.DataFrame()
+    except Exception:
+        return pd.DataFrame()
+
+
+def copy_if_exists(src: Path, dst: Path) -> bool:
+    """Copy file only when src exists and is non-empty.
+
+    Return True if copied, False otherwise.
+    """
+    try:
+        if src.exists() and src.stat().st_size > 0:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src, dst)
+            return True
+    except Exception:
+        return False
+    return False
+
+
+def is_fresh(path: Path, max_age_sec: int) -> bool:
+    try:
+        if not path.exists() or path.stat().st_size <= 0:
+            return False
+        age = time.time() - path.stat().st_mtime
+        return age <= float(max_age_sec)
+    except Exception:
+        return False
+
+
+def load_cached_json(path: Path) -> dict | None:
+    """Best-effort cached JSON loader.
+
+    Returns None if file is missing/invalid/clearly incomplete.
+    """
+    try:
+        if not path.exists() or path.stat().st_size <= 2:
+            return None
+        obj = json.loads(path.read_text(encoding='utf-8'))
+        if not isinstance(obj, dict):
+            return None
+        # sanity keys
+        if 'as_of_utc' not in obj and 'filters' not in obj:
+            return None
+        return obj
+    except Exception:
+        return None
