@@ -15,10 +15,9 @@ import pandas as pd
 from scripts.fx_rates import CurrencyConverter, FxRates
 from scripts.io_utils import safe_read_csv
 from scripts.pipeline_steps import derive_put_max_strike_from_cash
-from scripts.report_labels import add_sell_put_labels
 from scripts.report_summaries import summarize_sell_call, summarize_sell_put
 from scripts.sell_call_steps import empty_sell_call_summary, run_sell_call_scan_and_summarize
-from scripts.sell_put_cash import enrich_sell_put_candidates_with_cash
+from scripts.sell_put_steps import empty_sell_put_summary, run_sell_put_scan_and_summarize
 from scripts.subprocess_utils import run_cmd
 
 
@@ -151,74 +150,26 @@ def process_symbol(
 
     # ---------- Scan sell_put ----------
     if want_put:
-        symbol_sp = (report_dir / f'{symbol_lower}_sell_put_candidates.csv').resolve()
-        symbol_sp_labeled = (report_dir / f'{symbol_lower}_sell_put_candidates_labeled.csv').resolve()
-
-        cmd = [
-            py, 'scripts/scan_sell_put.py',
-            '--symbols', sym,
-            '--input-root', str(required_data_dir),
-            '--min-dte', str(sp.get('min_dte', 20)),
-            '--max-dte', str(sp.get('max_dte', 60)),
-            '--min-annualized-return', str(sp.get('min_annualized_net_return', 0.07)),
-            '--min-open-interest', str(sp.get('min_open_interest', 100)),
-            '--min-volume', str(sp.get('min_volume', 10)),
-            '--out', str(symbol_sp),
-            '--top', str(top_n),
-        ]
-        if sp.get('min_strike') is not None:
-            cmd.extend(['--min-strike', str(sp.get('min_strike'))])
-        if sp.get('max_strike') is not None:
-            cmd.extend(['--max-strike', str(sp.get('max_strike'))])
-
-        # CNY threshold -> option native (USD/HKD)
-        cmd.extend([
-            '--min-net-income', str(
-                (lambda cny_threshold: (
-                    0.0 if cny_threshold <= 0 else (
-                        (
-                            _FX.cny_to_native(
-                                cny_threshold,
-                                native_ccy=('HKD' if str(symbol).upper().endswith('.HK') else 'USD'),
-                            )
-                        )
-                        or 0.0
-                    )
-                ))(float(sp.get('min_net_income') or 0.0))
-            ),
-        ])
-
-        if IS_SCHEDULED:
-            cmd.append('--quiet')
-
-        run_cmd(cmd, cwd=base, timeout_sec=timeout_sec, is_scheduled=IS_SCHEDULED)
-
-        add_sell_put_labels(base, symbol_sp, symbol_sp_labeled)
-
-        # account-aware: attach cash secured usage from option_positions (open short puts)
-        df_sp_lab = safe_read_csv(symbol_sp_labeled)
-        if not df_sp_lab.empty:
-            enrich_sell_put_candidates_with_cash(
-                df_labeled=df_sp_lab,
+        summary_rows.append(
+            run_sell_put_scan_and_summarize(
+                py=py,
+                base=base,
+                sym=sym,
                 symbol=symbol,
-                portfolio_ctx=portfolio_ctx,
+                symbol_lower=symbol_lower,
+                symbol_cfg=symbol_cfg,
+                sp=sp,
+                top_n=top_n,
+                required_data_dir=required_data_dir,
+                report_dir=report_dir,
+                timeout_sec=timeout_sec,
+                is_scheduled=IS_SCHEDULED,
                 fx=_FX,
-                out_path=symbol_sp_labeled,
+                portfolio_ctx=portfolio_ctx,
             )
-
-        if not IS_SCHEDULED:
-            run_cmd([
-                py, 'scripts/render_sell_put_alerts.py',
-                '--input', str((report_dir / f'{symbol_lower}_sell_put_candidates_labeled.csv').as_posix()),
-                '--symbol', symbol,
-                '--top', str(top_n),
-                '--layered',
-                '--output', str((report_dir / f'{symbol_lower}_sell_put_alerts.txt').as_posix()),
-            ], cwd=base, is_scheduled=IS_SCHEDULED)
-
-        summary_rows.append(summarize_sell_put(safe_read_csv(symbol_sp_labeled), symbol, symbol_cfg=symbol_cfg))
+        )
     else:
-        summary_rows.append(summarize_sell_put(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg))
+        summary_rows.append(empty_sell_put_summary(symbol, symbol_cfg=symbol_cfg))
 
     # ---------- Scan sell_call ----------
     if want_call:
