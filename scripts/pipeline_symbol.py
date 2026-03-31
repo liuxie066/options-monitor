@@ -16,6 +16,7 @@ from scripts.fx_rates import CurrencyConverter, FxRates
 from scripts.io_utils import safe_read_csv
 from scripts.pipeline_steps import derive_put_max_strike_from_cash
 from scripts.report_summaries import summarize_sell_call, summarize_sell_put
+from scripts.required_data_steps import ensure_required_data
 from scripts.sell_call_steps import empty_sell_call_summary, run_sell_call_scan_and_summarize
 from scripts.sell_put_steps import empty_sell_put_summary, run_sell_put_scan_and_summarize
 from scripts.subprocess_utils import run_cmd
@@ -129,24 +130,17 @@ def process_symbol(
         pass
 
     # ---------- Fetch required_data ----------
-    symbol_lower = symbol.lower()
-    sym = symbol
-
-    raw = (required_data_dir / 'raw' / f"{sym}_required_data.json").resolve()
-    parsed = (required_data_dir / 'parsed' / f"{sym}_required_data.csv").resolve()
-
-    if want_put or want_call:
-        # Always fetch before scan if required_data missing.
-        if not raw.exists() or raw.stat().st_size <= 0 or not parsed.exists() or parsed.stat().st_size <= 0:
-            cmd = [
-                py, 'scripts/fetch_required_data.py',
-                '--symbols', sym,
-                '--output-root', str(required_data_dir),
-                '--limit-expirations', str(limit_expirations),
-            ]
-            if IS_SCHEDULED:
-                cmd.append('--quiet')
-            run_cmd(cmd, cwd=base, timeout_sec=timeout_sec, is_scheduled=IS_SCHEDULED)
+    ensure_required_data(
+        py=py,
+        base=base,
+        symbol=symbol,
+        required_data_dir=required_data_dir,
+        limit_expirations=limit_expirations,
+        want_put=want_put,
+        want_call=want_call,
+        timeout_sec=timeout_sec,
+        is_scheduled=IS_SCHEDULED,
+    )
 
     # ---------- Scan sell_put ----------
     if want_put:
