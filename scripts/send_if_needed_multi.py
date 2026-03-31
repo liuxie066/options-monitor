@@ -84,7 +84,7 @@ def log(msg: str) -> None:
 def prefetch_required_data(vpy: Path, base: Path, cfg: dict, shared_required: Path) -> dict[str, int]:
     # Fetch required_data for all symbols once per tick into shared_required (raw/parsed).
     # Best-effort: failures should not crash the tick; downstream will handle empty/partial data.
-    # This runs in the current ./output context; it copies outputs into shared_required afterwards.
+    # New flow: write directly into shared_required; do not touch ./output/{raw,parsed}.
     stats = {
         'symbols_total': 0,
         'cache_hits': 0,
@@ -145,6 +145,7 @@ def prefetch_required_data(vpy: Path, base: Path, cfg: dict, shared_required: Pa
                 '--host', host,
                 '--port', str(port),
                 '--option-types', str(opt_types),
+                '--output-root', str(shared_required),
                 '--quiet',
             ]
         else:
@@ -152,6 +153,7 @@ def prefetch_required_data(vpy: Path, base: Path, cfg: dict, shared_required: Pa
                 'scripts/fetch_market_data.py',
                 '--symbols', symbol,
                 '--limit-expirations', str(limit_exp),
+                '--output-root', str(shared_required),
             ]
 
         try:
@@ -161,12 +163,16 @@ def prefetch_required_data(vpy: Path, base: Path, cfg: dict, shared_required: Pa
             try:
                 if src == 'opend':
                     market = str(it.get('market') or '').upper()
-                    out = (base / 'output').resolve()
-                    src_raw = out / 'raw' / f"{symbol}_required_data.json"
-                    src_csv = out / 'parsed' / f"{symbol}_required_data.csv"
-                    empty = (not src_raw.exists()) or (not src_csv.exists()) or (src_csv.stat().st_size <= 0)
+                    raw0 = (shared_required / 'raw' / f"{symbol}_required_data.json").resolve()
+                    csv0 = (shared_required / 'parsed' / f"{symbol}_required_data.csv").resolve()
+                    empty = (not raw0.exists()) or (not csv0.exists()) or (csv0.stat().st_size <= 0)
                     if empty and market == 'US':
-                        cmd2 = [str(vpy), 'scripts/fetch_market_data.py', '--symbols', symbol, '--limit-expirations', str(limit_exp)]
+                        cmd2 = [
+                            str(vpy), 'scripts/fetch_market_data.py',
+                            '--symbols', symbol,
+                            '--limit-expirations', str(limit_exp),
+                            '--output-root', str(shared_required),
+                        ]
                         subprocess.run(cmd2, cwd=str(base), capture_output=True, text=True, timeout=60)
                         stats['fallback_to_yahoo'] += 1
             except Exception:
@@ -176,14 +182,12 @@ def prefetch_required_data(vpy: Path, base: Path, cfg: dict, shared_required: Pa
             continue
 
         try:
-            out = (base / 'output').resolve()
-            src_raw = out / 'raw' / f"{symbol}_required_data.json"
-            src_csv = out / 'parsed' / f"{symbol}_required_data.csv"
-            if src_raw.exists() and src_raw.stat().st_size > 0:
-                (shared_required / 'raw' / src_raw.name).write_bytes(src_raw.read_bytes())
+            raw0 = (shared_required / 'raw' / f"{symbol}_required_data.json").resolve()
+            csv0 = (shared_required / 'parsed' / f"{symbol}_required_data.csv").resolve()
+            if raw0.exists() and raw0.stat().st_size > 0:
                 stats['copied_raw'] += 1
-            if src_csv.exists() and src_csv.stat().st_size > 0:
-                (shared_required / 'parsed' / src_csv.name).write_bytes(src_csv.read_bytes())
+            # Accept header-only CSV as valid required_data artifact (avoid 1-byte file issues).
+            if csv0.exists() and csv0.stat().st_size > 0:
                 stats['copied_csv'] += 1
         except Exception:
             pass
@@ -766,6 +770,7 @@ def main():
     ap.add_argument('--market-config', default='auto', choices=['auto','hk','us','all'], help='Select symbols by market at config-load time (auto=by session).')
     ap.add_argument('--no-send', action='store_true', help='Do not send messages (for smoke tests / debugging).')
     ap.add_argument('--smoke', action='store_true', help='Smoke mode: run scheduler decisions but skip pipeline execution.')
+    ap.add_argument('--force', action='store_true', help='Force running scan pipeline regardless of market hours / scan interval (sending still respects --no-send and should_notify decisions).')
     ap.add_argument('--debug', action='store_true', help='Verbose logs to stdout (for manual debugging).')
     args = ap.parse_args()
 
@@ -996,6 +1001,28 @@ def main():
         pass
 
     # Ensure output/accounts layout
+    # Transitional: clean run_dir history (keep last 7 days)
+    # Safety: only delete directories that look like real run_id (YYYYMMDDTHHMMSS).
+    # Never delete manual runs / ad-hoc dirs.
+    try:
+        import shutil, time, re
+        runs_root = (base / 'output_runs').resolve()
+        runs_root.mkdir(parents=True, exist_ok=True)
+        cutoff = time.time() - 7 * 86400
+        pat = re.compile(r'^\d{8}T\d{6}$')
+        for d in runs_root.iterdir():
+            try:
+                if not d.is_dir():
+                    continue
+                if not pat.match(d.name):
+                    continue
+                if d.stat().st_mtime < cutoff:
+                    shutil.rmtree(d, ignore_errors=True)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
     accounts_root = (base / 'output_accounts').resolve()
     accounts_root.mkdir(parents=True, exist_ok=True)
     migrate_output_if_needed(base, accounts_root, default_acct=args.default_account)
@@ -1011,26 +1038,55 @@ def main():
     results: list[AccountResult] = []
 
     # Market-aware filtering (speed): only run symbols for the current market session.
+    # Respect --market-config override.
     now_utc = datetime.now(timezone.utc)
     markets_to_run: list[str] = []
-    if in_hk_session(now_utc):
+    mc = str(getattr(args, 'market_config', 'auto') or 'auto').lower()
+    if mc == 'hk':
         markets_to_run = ['HK']
-    elif in_us_session(now_utc):
+    elif mc == 'us':
         markets_to_run = ['US']
+    elif mc == 'all':
+        markets_to_run = ['HK', 'US']
+    else:
+        if in_hk_session(now_utc):
+            markets_to_run = ['HK']
+        elif in_us_session(now_utc):
+            markets_to_run = ['US']
 
 
-    # Shared scan artifacts (per-invocation) for cross-account reuse
-    shared_scan_dir = (base / 'output_shared' / 'scan_runs' / utc_now().replace(':','').replace('-','').split('.')[0]).resolve()
-    shared_scan_dir.mkdir(parents=True, exist_ok=True)
-    shared_scan_ready = False
+    # Transitional run_dir (new flow): keep required_data as a per-run artifact.
+    # For now we still run per-account pipelines, but we fetch required_data once and copy it into run_dir.
+    run_id = utc_now().replace(':','').replace('-','').split('.')[0]
+    run_dir = (base / 'output_runs' / run_id).resolve()
+    required_dir = (run_dir / 'required_data').resolve()
+    required_raw = (required_dir / 'raw').resolve()
+    required_parsed = (required_dir / 'parsed').resolve()
+    required_raw.mkdir(parents=True, exist_ok=True)
+    required_parsed.mkdir(parents=True, exist_ok=True)
+
     prefetch_done = False
-    # shared required_data dir is per-tick (avoid stale reuse across runs)
-    shared_required = (base / 'output_shared' / 'required_data_runs' / shared_scan_dir.name).resolve()
+    # Reuse existing prefetch implementation by passing run_dir/required_data as the shared_required sink.
+    shared_required = required_dir
     tick_metrics_path = (base / 'output_shared' / 'state' / 'tick_metrics.json').resolve()
     tick_metrics_history_path = (base / 'output_shared' / 'state' / 'tick_metrics_history.json').resolve()
+
+    # Per-run state (new flow): write a full copy of tick_metrics into run_dir for replay/audit.
+    run_state_dir = (run_dir / 'state').resolve()
+    run_state_dir.mkdir(parents=True, exist_ok=True)
+    tick_metrics_run_path = (run_state_dir / 'tick_metrics.json').resolve()
+    tick_metrics_history_run_path = (run_state_dir / 'tick_metrics_history.json').resolve()
+
+    # Record run_dir for traceability (latest pointer)
+    try:
+        tick_metrics_run_dir_path = (base / 'output_shared' / 'state' / 'last_run_dir.txt').resolve()
+        tick_metrics_run_dir_path.write_text(str(run_dir) + "\n", encoding='utf-8')
+    except Exception:
+        pass
     tick_metrics = {
         'as_of_utc': utc_now(),
         'markets_to_run': markets_to_run,
+        'run_dir': str(run_dir),
         'accounts': [],
         'sent': False,
         'reason': '',
@@ -1133,7 +1189,22 @@ def main():
                     write_json(state_path, st0)
         except Exception:
             pass
-        notif_path = acct_out / 'reports' / 'symbols_notification.txt'
+        # New flow: pipeline writes into run_dir/accounts/<acct>
+        acct_report_dir = (run_dir / 'accounts' / acct).resolve()
+        acct_state_dir = (acct_report_dir / 'state').resolve()
+        try:
+            acct_state_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+
+        def _write_acct_run_state(name: str, payload: dict):
+            try:
+                acct_state_dir.mkdir(parents=True, exist_ok=True)
+                write_json((acct_state_dir / name).resolve(), payload)
+            except Exception:
+                pass
+
+        notif_path = (acct_report_dir / 'symbols_notification.txt').resolve()
 
         # 1) scheduler decision
         # market-aware schedule: use schedule_hk during HK session, otherwise default schedule
@@ -1161,15 +1232,42 @@ def main():
             continue
 
         decision = json.loads((sch.stdout or '').strip())
+        # Persist scheduler decision per-account into run_dir for replay/audit.
+        _write_acct_run_state('scheduler_decision.json', {
+            'as_of_utc': utc_now(),
+            'account': acct,
+            'decision': decision,
+        })
+
         should_run = bool(decision.get('should_run_scan'))
         should_notify = bool(decision.get('should_notify'))
         reason = str(decision.get('reason') or '')
+
+        # Transitional: allow forcing pipeline runs even off-hours (useful for dev/test).
+        # Notify eligibility is still controlled by scheduler + send_if_needed_multi logic.
+        if bool(getattr(args, 'force', False)):
+            should_run = True
+            reason = (reason + ' | force').strip(' |')
 
         if smoke:
             should_run = False
             reason = (str(reason) + ' | smoke_skip_pipeline').strip()
         acct_metrics['should_notify'] = bool(should_notify)
         acct_metrics['reason'] = str(reason)
+
+        # Persist lightweight per-account metrics snapshot early.
+        _write_acct_run_state('account_metrics.json', {
+            'as_of_utc': utc_now(),
+            'account': acct,
+            'markets_to_run': markets_to_run,
+            'scheduler_ms': acct_metrics.get('scheduler_ms'),
+            'pipeline_ms': acct_metrics.get('pipeline_ms'),
+            'ran_scan': acct_metrics.get('ran_scan'),
+            'should_notify': acct_metrics.get('should_notify'),
+            'meaningful': acct_metrics.get('meaningful'),
+            'reason': acct_metrics.get('reason'),
+            'run_dir': str(run_dir),
+        })
 
         if not should_run:
             acct_metrics['ran_scan'] = False
@@ -1187,7 +1285,7 @@ def main():
         except Exception:
             pass
 
-        # Shared scan reuse: first due account writes shared scan artifacts; subsequent due accounts reuse them
+        # Prefetch required_data once per tick into run_dir/required_data.
         if (not prefetch_done):
             try:
                 runlog.event('fetch_chain_cache', 'start', data=_safe_runlog_data({'account': acct, 'symbols_count': len(cfg.get('symbols') or [])}))
@@ -1203,15 +1301,21 @@ def main():
                     pass
             prefetch_done = True
 
-        pipe_cmd = [str(vpy), 'scripts/run_pipeline.py', '--config', str(cfg_override), '--mode', 'scheduled', '--shared-required-data', str(shared_required), '--shared-scan-dir', str(shared_scan_dir)]
-        if shared_scan_ready:
-            pipe_cmd.append('--reuse-shared-scan')
+        # run_pipeline consumes shared_required_data as authoritative required_data source.
+        acct_report_dir.mkdir(parents=True, exist_ok=True)
 
+        pipe_cmd = [
+            str(vpy), 'scripts/run_pipeline.py',
+            '--config', str(cfg_override),
+            '--mode', 'scheduled',
+            '--shared-required-data', str(shared_required),
+            '--report-dir', str(acct_report_dir),
+        ]
         try:
             runlog.event(
                 'snapshot_batches',
                 'start',
-                data=_safe_runlog_data({'account': acct, 'reuse_shared_scan': bool(shared_scan_ready)}),
+                data=_safe_runlog_data({'account': acct}),
             )
         except Exception:
             pass
@@ -1253,12 +1357,10 @@ def main():
                 'snapshot_batches',
                 'ok',
                 duration_ms=acct_metrics['pipeline_ms'],
-                data=_safe_runlog_data({'account': acct, 'reuse_shared_scan': bool(shared_scan_ready)}),
+                data=_safe_runlog_data({'account': acct}),
             )
         except Exception:
             pass
-
-        shared_scan_ready = True
         # Mark scanned (shared scan clock)
         try:
             subprocess.run([str(vpy), 'scripts/scan_scheduler.py', '--config', str(cfg_override), '--state', str(state_path), '--mark-scanned'], cwd=str(base))
@@ -1267,8 +1369,25 @@ def main():
 
         text = notif_path.read_text(encoding='utf-8', errors='replace').strip() if notif_path.exists() else ''
 
+        # Transitional: persist per-account outputs into run_dir for traceability.
+        try:
+            acct_run_dir = (run_dir / 'accounts' / acct).resolve()
+            acct_run_dir.mkdir(parents=True, exist_ok=True)
+            # notification
+            (acct_run_dir / 'symbols_notification.txt').write_text(text + '\n', encoding='utf-8')
+            # summary is already written into acct_run_dir by run_pipeline via --report-dir
+            # keep copy step as no-op for backward compat
+            src_summary = (acct_run_dir / 'symbols_summary.csv').resolve()
+            if src_summary.exists() and src_summary.stat().st_size > 0:
+                pass
+            # config override (best-effort)
+            if cfg_override.exists() and cfg_override.stat().st_size > 0:
+                (acct_run_dir / 'config.override.json').write_bytes(cfg_override.read_bytes())
+        except Exception:
+            pass
+
         # Append compact auto-close summary (only when applied>0 or errors>0)
-        auto_close_path = acct_out / 'reports' / 'auto_close_summary.txt'
+        auto_close_path = acct_report_dir / 'auto_close_summary.txt'
         auto_close_text = auto_close_path.read_text(encoding='utf-8', errors='replace').strip() if auto_close_path.exists() else ''
         auto_close_flat = flatten_auto_close_summary(auto_close_text, always_show=False)
         if auto_close_flat:
@@ -1342,21 +1461,30 @@ def main():
         try:
             for r in results:
                 acct_out = accounts_root / r.account
-                write_json(acct_out / 'state' / 'last_run.json', {
+                payload = {
                     'last_run_utc': utc_now(),
                     'sent': False,
                     'reason': 'no_merged_notification',
                     'account': r.account,
                     'result': r.__dict__,
-                })
+                    'run_dir': str(run_dir),
+                }
+                # legacy pointer
+                write_json(acct_out / 'state' / 'last_run.json', payload)
+                # per-run copy
+                write_json((run_dir / 'accounts' / r.account / 'state' / 'last_run.json').resolve(), payload)
         except Exception:
             pass
 
         try:
             tick_metrics['sent'] = False
             tick_metrics['reason'] = 'no_merged_notification'
+            # shared (latest pointer)
             write_json(tick_metrics_path, tick_metrics)
             append_json_list(tick_metrics_history_path, tick_metrics)
+            # per-run (replay/audit)
+            write_json(tick_metrics_run_path, tick_metrics)
+            append_json_list(tick_metrics_history_run_path, tick_metrics)
         except Exception:
             pass
 
@@ -1426,15 +1554,21 @@ def main():
                 acct0 = results[0].account
                 acct_out0 = accounts_root / acct0
                 cfg_override0 = acct_out0 / 'state' / 'config.override.json'
-                subprocess.run([str(vpy), 'scripts/scan_scheduler.py', '--config', str(cfg_override0), '--state', str(state_path), '--mark-notified'], cwd=str(base))
+                # Mark notified per-account to avoid cross-account cooldown contamination.
+                # We still use a shared state file, but scan_scheduler will record per-account notify state.
+                subprocess.run([str(vpy), 'scripts/scan_scheduler.py', '--config', str(cfg_override0), '--state', str(state_path), '--mark-notified', '--account', str(acct0)], cwd=str(base))
         except Exception:
             pass
 
     try:
         tick_metrics['sent'] = (not no_send)
         tick_metrics['reason'] = ('sent' if (not no_send) else 'no_send')
+        # shared (latest pointer)
         write_json(tick_metrics_path, tick_metrics)
         append_json_list(tick_metrics_history_path, tick_metrics)
+        # per-run (replay/audit)
+        write_json(tick_metrics_run_path, tick_metrics)
+        append_json_list(tick_metrics_history_run_path, tick_metrics)
     except Exception:
         pass
 
