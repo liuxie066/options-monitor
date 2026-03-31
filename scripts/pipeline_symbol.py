@@ -35,6 +35,7 @@ def process_symbol(
     *,
     required_data_dir: Path | None = None,
     report_dir: Path | None = None,
+    is_scheduled: bool = False,
 ) -> list[dict]:
     """Run fetch/scan/render per symbol.
 
@@ -65,7 +66,7 @@ def process_symbol(
     # NOTE: in scheduled mode, suppress verbose printing.
     # We don't have IS_SCHEDULED here; caller passes it through run_cmd.
     # (run_cmd already has is_scheduled argument at call-sites below.)
-    IS_SCHEDULED = False
+    IS_SCHEDULED = bool(is_scheduled)
 
     # Pre-filter (call): if this account has no holdings row for the symbol, skip sell_call fully.
     stock = None
