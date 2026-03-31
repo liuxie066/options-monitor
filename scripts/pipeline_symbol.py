@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from scripts.fx_rates import CurrencyConverter, FxRates
+from scripts.fx_loader import build_converter
 from scripts.prefilters import apply_prefilters
 from scripts.multiplier_steps import apply_multiplier_cache_to_required_data_csv
 from scripts.required_data_steps import ensure_required_data
@@ -59,7 +59,7 @@ def process_symbol(
     want_put = bool(sp.get('enabled', False))
     want_call = bool(cc.get('enabled', False))
 
-    _FX = CurrencyConverter(FxRates(usd_per_cny=fx_usd_per_cny, cny_per_hkd=hkdcny))
+    _FX = build_converter(fx_usd_per_cny=fx_usd_per_cny, hkdcny=hkdcny)
 
     # NOTE: in scheduled mode, suppress verbose printing.
     # We don't have IS_SCHEDULED here; caller passes it through run_cmd.
