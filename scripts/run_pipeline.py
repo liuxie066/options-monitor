@@ -9,6 +9,8 @@ import sys
 import time
 from pathlib import Path
 
+from scripts.fx_rates import CurrencyConverter, FxRates
+
 import pandas as pd
 from pandas.errors import EmptyDataError
 import yaml
@@ -448,6 +450,8 @@ def process_symbol(
     want_put = bool(sp.get('enabled', False))
     want_call = bool(cc.get('enabled', False))
 
+    _FX = CurrencyConverter(FxRates(usd_per_cny=fx_usd_per_cny, cny_per_hkd=hkdcny))
+
     # Pre-filter (call): if this account has no holdings row for the symbol, skip sell_call fully.
     stock = None
     if want_call and portfolio_ctx:
@@ -661,17 +665,18 @@ def process_symbol(
             # We convert the CNY threshold into the option currency using FX when possible.
             '--min-net-income', str(
                 # Config threshold is in base CNY; scanners run in option's native currency.
-                # USD: CNY->USD using fx_usd_per_cny (USD per 1 CNY)
-                # HKD: CNY->HKD using HKDCNY (CNY per 1 HKD)
-                (0.0 if float(sp.get('min_net_income') or 0.0) <= 0 else (
-                    (float(sp.get('min_net_income') or 0.0) * float(fx_usd_per_cny))
-                    if (not str(symbol).upper().endswith('.HK')) and fx_usd_per_cny
-                    else (
-                        (float(sp.get('min_net_income') or 0.0) / float(hkdcny))
-                        if (str(symbol).upper().endswith('.HK') and hkdcny)
-                        else 0.0
+                # Convert CNY->native via centralized FX helper.
+                (lambda cny_threshold: (
+                    0.0 if cny_threshold <= 0 else (
+                        (
+                            _FX.cny_to_native(
+                                cny_threshold,
+                                native_ccy=('HKD' if str(symbol).upper().endswith('.HK') else 'USD'),
+                            )
+                        )
+                        or 0.0
                     )
-                ))
+                ))(float(sp.get('min_net_income') or 0.0))
             ),
             '--min-open-interest', str(sp.get('min_open_interest', 100)),
             '--min-volume', str(sp.get('min_volume', 10)),
