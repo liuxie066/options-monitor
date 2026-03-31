@@ -410,12 +410,6 @@ def derive_put_max_strike_from_cash(symbol: str, portfolio_ctx: dict | None, fx_
 
     return free_native / float(mult)
 
-    # default: USD
-    if not fx_usd_per_cny or fx_usd_per_cny <= 0:
-        return None
-    free_native = float(free_cny) * float(fx_usd_per_cny)
-    return free_native / float(m)
-
 def process_symbol(
     py: str,
     base: Path,
