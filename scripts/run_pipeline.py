@@ -13,6 +13,7 @@ from scripts.io_utils import (
     load_cached_json,
     safe_read_csv,
 )
+from scripts.config_profiles import apply_profiles
 from scripts.pipeline_symbol import process_symbol
 from scripts.subprocess_utils import run_cmd
 
