@@ -341,9 +341,9 @@ def main():
                     item_fetch = dict(item)
                     item_fetch['sell_put'] = {'enabled': False}
                     item_fetch['sell_call'] = {'enabled': False}
-                    process_symbol(py, base, item_fetch, top_n, portfolio_ctx=None, fx_usd_per_cny=None, hkdcny=None, timeout_sec=symbol_timeout_sec)
+                    process_symbol(py, base, item_fetch, top_n, portfolio_ctx=None, fx_usd_per_cny=None, hkdcny=None, timeout_sec=symbol_timeout_sec, is_scheduled=IS_SCHEDULED)
                 else:
-                    summary_rows.extend(process_symbol(py, base, item, top_n, portfolio_ctx=portfolio_ctx, fx_usd_per_cny=fx_usd_per_cny, hkdcny=hkdcny, timeout_sec=symbol_timeout_sec))
+                    summary_rows.extend(process_symbol(py, base, item, top_n, portfolio_ctx=portfolio_ctx, fx_usd_per_cny=fx_usd_per_cny, hkdcny=hkdcny, timeout_sec=symbol_timeout_sec, is_scheduled=IS_SCHEDULED))
             except Exception as e:
                 symbol = item.get('symbol', 'UNKNOWN')
                 log(f'[WARN] {symbol} processing failed: {e}')
@@ -487,7 +487,7 @@ def main():
         return
 
     top_n = cfg.get('outputs', {}).get('top_n_alerts', 3)
-    process_symbol(py, base, cfg, top_n, report_dir=report_dir)
+    process_symbol(py, base, cfg, top_n, report_dir=report_dir, is_scheduled=IS_SCHEDULED)
     print('\n[DONE] Single-symbol pipeline finished')
     print(f'- {report_dir}/{{symbol}}_sell_put_candidates*.csv / alerts.txt')
     print(f'- {report_dir}/{{symbol}}_sell_call_candidates.csv / alerts.txt')
