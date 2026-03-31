@@ -17,6 +17,7 @@ from scripts.io_utils import safe_read_csv
 from scripts.pipeline_steps import derive_put_max_strike_from_cash
 from scripts.report_labels import add_sell_put_labels
 from scripts.report_summaries import summarize_sell_call, summarize_sell_put
+from scripts.sell_call_steps import empty_sell_call_summary, run_sell_call_scan_and_summarize
 from scripts.sell_put_cash import enrich_sell_put_candidates_with_cash
 from scripts.subprocess_utils import run_cmd
 
@@ -221,52 +222,23 @@ def process_symbol(
 
     # ---------- Scan sell_call ----------
     if want_call:
-        shares_override = None
-        avg_cost_override = None
-        if stock:
-            shares_override = stock.get('shares')
-            avg_cost_override = stock.get('avg_cost')
-
-        shares_total = shares_override if shares_override is not None else cc.get('shares', 100)
-        avg_cost = avg_cost_override if avg_cost_override is not None else cc['avg_cost']
-
-        symbol_cc = report_dir / f'{symbol_lower}_sell_call_candidates.csv'
-        cmd = [
-            py, 'scripts/scan_sell_call.py',
-            '--symbols', symbol,
-            '--input-root', str(required_data_dir),
-            '--avg-cost', str(avg_cost),
-            '--shares', str(shares_total),
-            '--min-dte', str(cc.get('min_dte', 20)),
-            '--max-dte', str(cc.get('max_dte', 90)),
-            '--min-annualized-premium-return', str(cc.get('min_annualized_net_premium_return', 0.07)),
-            '--min-open-interest', str(cc.get('min_open_interest', 100)),
-            '--min-volume', str(cc.get('min_volume', 10)),
-            '--out', str(symbol_cc),
-            '--top', str(top_n),
-        ]
-        if cc.get('min_strike') is not None:
-            cmd.extend(['--min-strike', str(cc.get('min_strike'))])
-        if cc.get('max_strike') is not None:
-            cmd.extend(['--max-strike', str(cc.get('max_strike'))])
-
-        if IS_SCHEDULED:
-            cmd.append('--quiet')
-        run_cmd(cmd, cwd=base, timeout_sec=timeout_sec, is_scheduled=IS_SCHEDULED)
-
-        df_cc = safe_read_csv(symbol_cc)
-        if not IS_SCHEDULED:
-            run_cmd([
-                py, 'scripts/render_sell_call_alerts.py',
-                '--input', str((report_dir / f'{symbol_lower}_sell_call_candidates.csv').as_posix()),
-                '--symbol', symbol,
-                '--top', str(top_n),
-                '--layered',
-                '--output', str((report_dir / f'{symbol_lower}_sell_call_alerts.txt').as_posix()),
-            ], cwd=base, is_scheduled=IS_SCHEDULED)
-
-        summary_rows.append(summarize_sell_call(df_cc, symbol, symbol_cfg=symbol_cfg))
+        summary_rows.append(
+            run_sell_call_scan_and_summarize(
+                py=py,
+                base=base,
+                symbol=symbol,
+                symbol_lower=symbol_lower,
+                symbol_cfg=symbol_cfg,
+                cc=cc,
+                top_n=top_n,
+                required_data_dir=required_data_dir,
+                report_dir=report_dir,
+                timeout_sec=timeout_sec,
+                is_scheduled=IS_SCHEDULED,
+                stock=stock,
+            )
+        )
     else:
-        summary_rows.append(summarize_sell_call(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg))
+        summary_rows.append(empty_sell_call_summary(symbol, symbol_cfg=symbol_cfg))
 
     return summary_rows
