@@ -167,14 +167,29 @@ def prefetch_required_data(vpy: Path, base: Path, cfg: dict, shared_required: Pa
                     csv0 = (shared_required / 'parsed' / f"{symbol}_required_data.csv").resolve()
                     empty = (not raw0.exists()) or (not csv0.exists()) or (csv0.stat().st_size <= 0)
                     if empty and market == 'US':
-                        cmd2 = [
-                            str(vpy), 'scripts/fetch_market_data.py',
-                            '--symbols', symbol,
-                            '--limit-expirations', str(limit_exp),
-                            '--output-root', str(shared_required),
-                        ]
-                        subprocess.run(cmd2, cwd=str(base), capture_output=True, text=True, timeout=60)
-                        stats['fallback_to_yahoo'] += 1
+                        # Fail-fast: do NOT downgrade to Yahoo when OpenD is blocked by login/phone verification.
+                        # Downgrading causes YF rate-limit loops and makes the system non-deterministic.
+                        err_s = ''
+                        try:
+                            if raw0.exists() and raw0.stat().st_size > 0:
+                                obj0 = json.loads(raw0.read_text(encoding='utf-8'))
+                                meta0 = (obj0.get('meta') or {}) if isinstance(obj0, dict) else {}
+                                err_s = str(meta0.get('error') or '')
+                        except Exception:
+                            err_s = ''
+
+                        need_code = ('手机验证码' in err_s) or ('verification' in err_s.lower())
+                        if need_code:
+                            stats['fetch_errors'] += 1
+                        else:
+                            cmd2 = [
+                                str(vpy), 'scripts/fetch_market_data.py',
+                                '--symbols', symbol,
+                                '--limit-expirations', str(limit_exp),
+                                '--output-root', str(shared_required),
+                            ]
+                            subprocess.run(cmd2, cwd=str(base), capture_output=True, text=True, timeout=60)
+                            stats['fallback_to_yahoo'] += 1
             except Exception:
                 pass
         except Exception:
