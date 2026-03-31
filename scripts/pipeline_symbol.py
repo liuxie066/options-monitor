@@ -39,6 +39,7 @@ def process_symbol(
     NOTE: Extracted from scripts/run_pipeline.py. Keep changes minimal.
     """
     symbol = symbol_cfg['symbol']
+    sym = symbol  # used by scanners' --symbols arg
     symbol_lower = symbol.lower()
     limit_expirations = symbol_cfg.get('fetch', {}).get('limit_expirations', 8)
 
