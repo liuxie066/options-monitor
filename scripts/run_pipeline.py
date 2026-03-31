@@ -836,19 +836,14 @@ def process_symbol(
                 if 'currency' in df_sp_lab.columns and len(df_sp_lab) > 0:
                     ccy = str(df_sp_lab['currency'].iloc[0] or '').upper()
 
-                if ccy == 'HKD':
-                    # HKD -> CNY
-                    if hkdcny:
-                        df_sp_lab['cash_required_cny'] = native_req.astype(float) * float(hkdcny)
-                    else:
-                        df_sp_lab['cash_required_cny'] = pd.NA
+                # normalize to CNY using centralized FX helper
+                c = (ccy or 'USD')
+                k = _FX.native_to_cny(1.0, native_ccy=c)
+                if k is None or k <= 0:
+                    df_sp_lab['cash_required_cny'] = pd.NA
                 else:
-                    # USD -> CNY
-                    if fx_usd_per_cny:
-                        usdcny = 1.0 / float(fx_usd_per_cny)
-                        df_sp_lab['cash_required_cny'] = native_req.astype(float) * float(usdcny)
-                    else:
-                        df_sp_lab['cash_required_cny'] = pd.NA
+                    # native_req is a Series
+                    df_sp_lab['cash_required_cny'] = native_req.astype(float) * float(k)
             except Exception:
                 df_sp_lab['cash_required_usd'] = pd.NA
                 df_sp_lab['cash_required_cny'] = pd.NA
