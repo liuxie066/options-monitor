@@ -117,3 +117,26 @@ def load_cached_json(path: Path) -> dict | None:
         return obj
     except Exception:
         return None
+
+
+def has_shared_required_data(symbol: str, shared_dir: Path) -> bool:
+    """Return True when shared required_data artifacts exist and are readable.
+
+    - raw json must exist and be non-empty
+    - parsed csv must exist and be non-empty (header-only is accepted)
+    """
+    sym = str(symbol)
+    raw_src = shared_dir / 'raw' / f"{sym}_required_data.json"
+    parsed_src = shared_dir / 'parsed' / f"{sym}_required_data.csv"
+
+    if not (raw_src.exists() and raw_src.stat().st_size > 0):
+        return False
+    if not (parsed_src.exists() and parsed_src.stat().st_size > 0):
+        return False
+
+    try:
+        _ = safe_read_csv(parsed_src)
+    except Exception:
+        return False
+
+    return True
