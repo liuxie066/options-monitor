@@ -18,6 +18,7 @@ output
 output/
 output_accounts/
 output_shared/
+output_runs/
 secrets/
 
 # Build / packaging

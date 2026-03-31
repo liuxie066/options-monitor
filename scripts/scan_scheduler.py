@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 class SchedulerDecision:
     now_utc: str
     now_market: str
+    now_beijing: str
     in_market_hours: bool
     interval_min: int
     notify_cooldown_min: int
@@ -22,6 +23,10 @@ class SchedulerDecision:
     reason: str
     next_run_utc: str
     next_run_market: str
+    next_run_beijing: str
+    market_open_beijing: str
+    market_close_beijing: str
+    schedule_key: str
 
 
 STATE_DEFAULT = {
@@ -83,9 +88,13 @@ def _time_in_range(t: time, start: time, end: time) -> bool:
     return t >= start or t <= end
 
 
-def decide(schedule_cfg: dict, state: dict, now_utc: datetime, account: str | None = None) -> SchedulerDecision:
+def decide(schedule_cfg: dict, state: dict, now_utc: datetime, account: str | None = None, *, schedule_key: str = 'schedule') -> SchedulerDecision:
     market_tz = ZoneInfo(schedule_cfg.get('market_timezone', 'America/New_York'))
     now_market = now_utc.astimezone(market_tz)
+
+    bj_tz = ZoneInfo(schedule_cfg.get('beijing_timezone', 'Asia/Shanghai'))
+    now_bj = now_utc.astimezone(bj_tz)
+
     market_open = parse_hhmm(schedule_cfg.get('market_open', '09:30'))
     market_close = parse_hhmm(schedule_cfg.get('market_close', '16:00'))
 
@@ -114,8 +123,7 @@ def decide(schedule_cfg: dict, state: dict, now_utc: datetime, account: str | No
         dense = int(schedule_cfg.get('market_dense_interval_min', schedule_cfg.get('market_hours_interval_min', 30)))
         sparse = int(schedule_cfg.get('market_sparse_interval_min', dense))
 
-        bj_tz = ZoneInfo(schedule_cfg.get('beijing_timezone', 'Asia/Shanghai'))
-        now_bj = now_utc.astimezone(bj_tz)
+        # (bj_tz/now_bj already computed above)
         sparse_after = parse_hhmm(schedule_cfg.get('sparse_after_beijing', '02:00'))
 
         # Compute market close time in Beijing (time-of-day)
@@ -129,8 +137,21 @@ def decide(schedule_cfg: dict, state: dict, now_utc: datetime, account: str | No
         # Notification cooldown is handled separately (content-aware) in send_if_needed_multi.
         # Scheduler keeps a single base cooldown (notify_cooldown_min) here.
 
-    last_scan = maybe_parse_dt(state.get('last_scan_utc'))    # notify timestamp: GLOBAL (unified across accounts)
-    last_notify = maybe_parse_dt(state.get('last_notify_utc'))
+    last_scan = maybe_parse_dt(state.get('last_scan_utc'))
+
+    # Notify cooldown should be account-specific in multi-account mode.
+    # If account is provided, read last_notify from the per-account map first.
+    last_notify = None
+    try:
+        if account:
+            m = state.get('last_notify_utc_by_account')
+            if isinstance(m, dict):
+                last_notify = maybe_parse_dt(m.get(str(account)))
+    except Exception:
+        last_notify = None
+    if last_notify is None:
+        # fallback to legacy global notify timestamp
+        last_notify = maybe_parse_dt(state.get('last_notify_utc'))
 
     should_run_scan = False
     reason = ''
@@ -166,9 +187,14 @@ def decide(schedule_cfg: dict, state: dict, now_utc: datetime, account: str | No
     else:
         next_run = now_utc
 
+    # Also expose Beijing-time for readability/debuggability.
+    open_dt_market = datetime.combine(now_market.date(), market_open, tzinfo=market_tz)
+    close_dt_market = datetime.combine(now_market.date(), market_close, tzinfo=market_tz)
+
     return SchedulerDecision(
         now_utc=to_iso(now_utc),
         now_market=now_market.isoformat(),
+        now_beijing=now_bj.isoformat(),
         in_market_hours=in_hours,
         interval_min=interval_min,
         notify_cooldown_min=notify_cooldown_min,
@@ -177,6 +203,10 @@ def decide(schedule_cfg: dict, state: dict, now_utc: datetime, account: str | No
         reason=reason,
         next_run_utc=to_iso(next_run),
         next_run_market=next_run.astimezone(market_tz).isoformat(),
+        next_run_beijing=next_run.astimezone(bj_tz).isoformat(),
+        market_open_beijing=open_dt_market.astimezone(bj_tz).isoformat(),
+        market_close_beijing=close_dt_market.astimezone(bj_tz).isoformat(),
+        schedule_key=str(schedule_key),
     )
 
 

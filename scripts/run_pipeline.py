@@ -9,6 +9,8 @@ import sys
 import time
 from pathlib import Path
 
+from scripts.fx_rates import CurrencyConverter, FxRates
+
 import pandas as pd
 from pandas.errors import EmptyDataError
 import yaml
@@ -44,12 +46,19 @@ def run(cmd: list[str], cwd: Path, timeout_sec: int | None = None):
 
 
 def safe_read_csv(path: Path) -> pd.DataFrame:
+    """Safe CSV reader.
+
+    Treat header-only / empty / invalid CSV as empty DataFrame.
+    """
     try:
-        if path.exists() and path.stat().st_size > 0:
+        if not path.exists() or path.stat().st_size <= 0:
+            return pd.DataFrame()
+        try:
             return pd.read_csv(path)
-    except EmptyDataError:
-        pass
-    return pd.DataFrame()
+        except EmptyDataError:
+            return pd.DataFrame()
+    except Exception:
+        return pd.DataFrame()
 
 
 def copy_if_exists(src: Path, dst: Path) -> bool:
@@ -319,53 +328,27 @@ def summarize_sell_call(df: pd.DataFrame, symbol: str) -> dict:
 
 
 
-def copy_from_shared_required_data(base: Path, symbol: str, shared_dir: Path) -> bool:
+def has_shared_required_data(symbol: str, shared_dir: Path) -> bool:
+    """Return True when shared required_data artifacts exist and are readable.
+
+    - raw json must exist and be non-empty
+    - parsed csv must exist and be non-empty (header-only is accepted)
+    """
     sym = str(symbol)
     raw_src = shared_dir / 'raw' / f"{sym}_required_data.json"
     parsed_src = shared_dir / 'parsed' / f"{sym}_required_data.csv"
-    raw_dst = (base / 'output' / 'raw' / f"{sym}_required_data.json").resolve()
-    parsed_dst = (base / 'output' / 'parsed' / f"{sym}_required_data.csv").resolve()
-    if not (raw_src.exists() and raw_src.stat().st_size > 0 and parsed_src.exists() and parsed_src.stat().st_size > 0):
+
+    if not (raw_src.exists() and raw_src.stat().st_size > 0):
         return False
-    raw_dst.parent.mkdir(parents=True, exist_ok=True)
-    parsed_dst.parent.mkdir(parents=True, exist_ok=True)
-    import shutil
-    shutil.copyfile(raw_src, raw_dst)
-    shutil.copyfile(parsed_src, parsed_dst)
-    return True
+    if not (parsed_src.exists() and parsed_src.stat().st_size > 0):
+        return False
 
-def _shared_scan_paths_put(shared_dir: Path, symbol: str) -> tuple[Path, Path]:
-    # Return (raw_candidates, labeled_base_candidates) paths under shared_dir.
-    sym = str(symbol)
-    report_dir = (shared_dir / 'reports').resolve()
-    report_dir.mkdir(parents=True, exist_ok=True)
-    lower = sym.lower()
-    raw = report_dir / f"{lower}_sell_put_candidates.csv"
-    labeled_base = report_dir / f"{lower}_sell_put_candidates_labeled_base.csv"
-    return raw, labeled_base
-
-
-
-def _shared_scan_paths_call(shared_dir: Path, symbol: str) -> tuple[Path, Path]:
-    sym = str(symbol)
-    report_dir = (shared_dir / 'reports').resolve()
-    report_dir.mkdir(parents=True, exist_ok=True)
-    lower = sym.lower()
-    raw = report_dir / f"{lower}_sell_call_candidates.csv"
-    labeled_base = report_dir / f"{lower}_sell_call_candidates_labeled_base.csv"
-    return raw, labeled_base
-
-
-def _copy_if_exists(src: Path, dst: Path) -> bool:
     try:
-        if src.exists() and src.stat().st_size > 0:
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            import shutil
-            shutil.copyfile(src, dst)
-            return True
+        _ = safe_read_csv(parsed_src)
     except Exception:
         return False
-    return False
+
+    return True
 
 def derive_put_max_strike_from_cash(symbol: str, portfolio_ctx: dict | None, fx_usd_per_cny: float | None, hkdcny: float | None, *, fallback_multiplier: int = 100) -> float | None:
     """Return a cash-based max_strike cap to prefilter sell_put.
@@ -427,12 +410,6 @@ def derive_put_max_strike_from_cash(symbol: str, portfolio_ctx: dict | None, fx_
 
     return free_native / float(mult)
 
-    # default: USD
-    if not fx_usd_per_cny or fx_usd_per_cny <= 0:
-        return None
-    free_native = float(free_cny) * float(fx_usd_per_cny)
-    return free_native / float(m)
-
 def process_symbol(
     py: str,
     base: Path,
@@ -442,11 +419,23 @@ def process_symbol(
     fx_usd_per_cny: float | None = None,
     hkdcny: float | None = None,
     timeout_sec: int | None = 120,
+    *,
+    required_data_dir: Path | None = None,
+    report_dir: Path | None = None,
 ) -> list[dict]:
     symbol = symbol_cfg['symbol']
     symbol_lower = symbol.lower()
     limit_expirations = symbol_cfg.get('fetch', {}).get('limit_expirations', 8)
-    report_dir = base / 'output' / 'reports'
+
+    # Directories:
+    # - required_data_dir: where {raw,parsed} required_data lives (new flow: run_dir/required_data)
+    # - report_dir: where per-run reports are written
+    if report_dir is None:
+        report_dir = base / 'output' / 'reports'
+    if required_data_dir is None:
+        # legacy
+        required_data_dir = base / 'output'
+
     summary_rows: list[dict] = []
 
 
@@ -454,6 +443,8 @@ def process_symbol(
     cc = symbol_cfg.get('sell_call', {}) or {}
     want_put = bool(sp.get('enabled', False))
     want_call = bool(cc.get('enabled', False))
+
+    _FX = CurrencyConverter(FxRates(usd_per_cny=fx_usd_per_cny, cny_per_hkd=hkdcny))
 
     # Pre-filter (call): if this account has no holdings row for the symbol, skip sell_call fully.
     stock = None
@@ -490,11 +481,13 @@ def process_symbol(
             if not m:
                 return
 
-            parsed = (base / 'output' / 'parsed' / f"{symbol}_required_data.csv").resolve()
+            parsed = (required_data_dir / 'parsed' / f"{symbol}_required_data.csv").resolve()
             if not parsed.exists() or parsed.stat().st_size <= 0:
                 return
 
-            df = pd.read_csv(parsed)
+            df = safe_read_csv(parsed)
+            if df.empty:
+                return
             if df.empty:
                 return
 
@@ -513,12 +506,13 @@ def process_symbol(
         except Exception:
             return
 
-    # Shared required_data reuse (cross-account): copy into this account output and skip fetch
+    # Shared required_data reuse (cross-account): shared dir is authoritative; no copying.
     fetched = False
     if SHARED_REQUIRED_DATA:
         try:
             shared_dir = Path(SHARED_REQUIRED_DATA).resolve()
-            fetched = copy_from_shared_required_data(base, symbol, shared_dir)
+            required_data_dir = shared_dir
+            fetched = has_shared_required_data(symbol, shared_dir)
         except Exception:
             fetched = False
 
@@ -538,6 +532,7 @@ def process_symbol(
                 '--host', host,
                 '--port', str(port),
                 '--option-types', ('put,call' if (want_put and want_call) else ('put' if want_put else 'call')),
+                '--output-root', str(required_data_dir),
             ]
             # If OpenD has no US stock quote right, we can still compute OTM% using portfolio-management prices.
             if bool(fetch_cfg.get('spot_from_portfolio_management', False)):
@@ -557,8 +552,8 @@ def process_symbol(
             # fallback to yahoo (US) if OpenD returned empty data or transient error
             try:
                 is_us = (not str(symbol).upper().endswith('.HK'))
-                parsed = (base / 'output' / 'parsed' / f"{symbol}_required_data.csv").resolve()
-                raw = (base / 'output' / 'raw' / f"{symbol}_required_data.json").resolve()
+                parsed = (required_data_dir / 'parsed' / f"{symbol}_required_data.csv").resolve()
+                raw = (required_data_dir / 'raw' / f"{symbol}_required_data.json").resolve()
 
                 err_s = ''
                 try:
@@ -589,6 +584,7 @@ def process_symbol(
                         py, 'scripts/fetch_market_data.py',
                         '--symbols', symbol,
                         '--limit-expirations', str(limit_expirations),
+                        '--output-root', str(required_data_dir),
                     ], cwd=base, timeout_sec=timeout_sec)
                     _apply_multiplier_cache_to_required_data_csv(symbol)
             except Exception:
@@ -598,13 +594,14 @@ def process_symbol(
                 py, 'scripts/fetch_market_data.py',
                 '--symbols', symbol,
                 '--limit-expirations', str(limit_expirations),
+                '--output-root', str(required_data_dir),
             ], cwd=base, timeout_sec=timeout_sec)
             _apply_multiplier_cache_to_required_data_csv(symbol)
 
     if want_put:
         # If required_data.csv is empty (rate limit / data source failure), skip scans gracefully.
         try:
-            parsed = base / 'output' / 'parsed' / f"{symbol}_required_data.csv"
+            parsed = required_data_dir / 'parsed' / f"{symbol}_required_data.csv"
             df_req0 = safe_read_csv(parsed)
             if df_req0.empty:
                 log(f"[WARN] {symbol} required_data empty; skip sell_put scan")
@@ -619,7 +616,7 @@ def process_symbol(
         # - disable delta gating
         # - keep other filters (OTM/return/spread)
         try:
-            parsed = base / 'output' / 'parsed' / f"{symbol}_required_data.csv"
+            parsed = required_data_dir / 'parsed' / f"{symbol}_required_data.csv"
             if parsed.exists() and parsed.stat().st_size > 0:
                 df_req = pd.read_csv(parsed)
                 df_req = df_req[df_req.get('option_type') == 'put'] if 'option_type' in df_req.columns else df_req
@@ -647,91 +644,62 @@ def process_symbol(
                         sp['min_volume'] = 0
         except Exception:
             pass
-        # Shared scan reuse (sell_put): reuse base candidates across accounts within the same tick
-        shared_dir = Path(SHARED_SCAN_DIR).resolve() if SHARED_SCAN_DIR else None
-        reuse_ok = False
-        if REUSE_SHARED_SCAN and shared_dir:
-            try:
-                sp_raw_shared, sp_lab_shared = _shared_scan_paths_put(shared_dir, symbol)
-                sp_raw_dst = report_dir / f"{symbol_lower}_sell_put_candidates.csv"
-                sp_lab_dst = report_dir / f"{symbol_lower}_sell_put_candidates_labeled.csv"
-                ok1 = _copy_if_exists(sp_raw_shared, sp_raw_dst)
-                ok2 = _copy_if_exists(sp_lab_shared, sp_lab_dst)
-                reuse_ok = bool(ok1 and ok2)
-            except Exception:
-                reuse_ok = False
-
-        if not reuse_ok:
-            cmd = [
-                py, 'scripts/scan_sell_put.py',
-                '--symbols', symbol,
-                '--min-dte', str(sp.get('min_dte', 20)),
-                '--max-dte', str(sp.get('max_dte', 90)),
-                '--min-otm-pct', str(sp.get('min_otm_pct', 0.0)),
-                '--min-annualized-net-return', str(sp.get('min_annualized_net_return', 0.03)),
-                # NOTE: config min_net_income is normalized to base CNY.
-                # scan_sell_put.py now computes net_income in the option's native currency.
-                # We convert the CNY threshold into the option currency using FX when possible.
-                '--min-net-income', str(
-                    # Config threshold is in base CNY; scanners run in option's native currency.
-                    # USD: CNY->USD using fx_usd_per_cny (USD per 1 CNY)
-                    # HKD: CNY->HKD using HKDCNY (CNY per 1 HKD)
-                    (0.0 if float(sp.get('min_net_income') or 0.0) <= 0 else (
-                        (float(sp.get('min_net_income') or 0.0) * float(fx_usd_per_cny))
-                        if (not str(symbol).upper().endswith('.HK')) and fx_usd_per_cny
-                        else (
-                            (float(sp.get('min_net_income') or 0.0) / float(hkdcny))
-                            if (str(symbol).upper().endswith('.HK') and hkdcny)
-                            else 0.0
+        symbol_sp = report_dir / f'{symbol_lower}_sell_put_candidates.csv'
+        symbol_sp_labeled = report_dir / f'{symbol_lower}_sell_put_candidates_labeled.csv'
+        cmd = [
+            py, 'scripts/scan_sell_put.py',
+            '--symbols', symbol,
+            '--input-root', str(required_data_dir),
+            '--min-dte', str(sp.get('min_dte', 20)),
+            '--max-dte', str(sp.get('max_dte', 90)),
+            '--min-otm-pct', str(sp.get('min_otm_pct', 0.0)),
+            '--min-annualized-net-return', str(sp.get('min_annualized_net_return', 0.03)),
+            # NOTE: config min_net_income is normalized to base CNY.
+            # scan_sell_put.py now computes net_income in the option's native currency.
+            # We convert the CNY threshold into the option currency using FX when possible.
+            '--min-net-income', str(
+                # Config threshold is in base CNY; scanners run in option's native currency.
+                # Convert CNY->native via centralized FX helper.
+                (lambda cny_threshold: (
+                    0.0 if cny_threshold <= 0 else (
+                        (
+                            _FX.cny_to_native(
+                                cny_threshold,
+                                native_ccy=('HKD' if str(symbol).upper().endswith('.HK') else 'USD'),
+                            )
                         )
-                    ))
-                ),
-                '--min-open-interest', str(sp.get('min_open_interest', 100)),
-                '--min-volume', str(sp.get('min_volume', 10)),
-                '--max-spread-ratio', str(sp.get('max_spread_ratio', 0.30)),
-            ]
-            # Data quality gates (optional)
-            if sp.get('require_bid_ask'):
-                cmd.append('--require-bid-ask')
-            if sp.get('min_iv') is not None:
-                cmd.extend(['--min-iv', str(sp.get('min_iv'))])
-            if sp.get('max_iv') is not None:
-                cmd.extend(['--max-iv', str(sp.get('max_iv'))])
+                        or 0.0
+                    )
+                ))(float(sp.get('min_net_income') or 0.0))
+            ),
+            '--min-open-interest', str(sp.get('min_open_interest', 100)),
+            '--min-volume', str(sp.get('min_volume', 10)),
+            '--max-spread-ratio', str(sp.get('max_spread_ratio', 0.30)),
+            '--output', str(symbol_sp),
+        ]
+        # Data quality gates (optional)
+        if sp.get('require_bid_ask'):
+            cmd.append('--require-bid-ask')
+        if sp.get('min_iv') is not None:
+            cmd.extend(['--min-iv', str(sp.get('min_iv'))])
+        if sp.get('max_iv') is not None:
+            cmd.extend(['--max-iv', str(sp.get('max_iv'))])
 
-            # Delta filter (optional): abs(delta) in [min_abs_delta, max_abs_delta]
-            if sp.get('min_abs_delta') is not None:
-                cmd.extend(['--min-abs-delta', str(sp.get('min_abs_delta'))])
-            if sp.get('max_abs_delta') is not None:
-                cmd.extend(['--max-abs-delta', str(sp.get('max_abs_delta'))])
+        # Delta filter (optional): abs(delta) in [min_abs_delta, max_abs_delta]
+        if sp.get('min_abs_delta') is not None:
+            cmd.extend(['--min-abs-delta', str(sp.get('min_abs_delta'))])
+        if sp.get('max_abs_delta') is not None:
+            cmd.extend(['--max-abs-delta', str(sp.get('max_abs_delta'))])
 
-            if sp.get('min_strike') is not None:
-                cmd.extend(['--min-strike', str(sp.get('min_strike'))])
-            if sp.get('max_strike') is not None:
-                cmd.extend(['--max-strike', str(sp.get('max_strike'))])
-            if IS_SCHEDULED:
-                cmd.append('--quiet')
-            run(cmd, cwd=base, timeout_sec=timeout_sec)
+        if sp.get('min_strike') is not None:
+            cmd.extend(['--min-strike', str(sp.get('min_strike'))])
+        if sp.get('max_strike') is not None:
+            cmd.extend(['--max-strike', str(sp.get('max_strike'))])
+        if IS_SCHEDULED:
+            cmd.append('--quiet')
+        run(cmd, cwd=base, timeout_sec=timeout_sec)
 
-            shared_sp = report_dir / 'sell_put_candidates.csv'
-            symbol_sp = report_dir / f'{symbol_lower}_sell_put_candidates.csv'
-            copy_if_exists(shared_sp, symbol_sp)
-
-            shared_sp_labeled = report_dir / 'sell_put_candidates_labeled.csv'
-            symbol_sp_labeled = report_dir / f'{symbol_lower}_sell_put_candidates_labeled.csv'
-            add_sell_put_labels(base, symbol_sp, shared_sp_labeled)
-            # Only copy labeled file if it was actually generated.
-            copy_if_exists(shared_sp_labeled, symbol_sp_labeled)
-
-
-        # Persist base sell_put scan artifacts for cross-account reuse (same tick)
-        try:
-            if SHARED_SCAN_DIR and (not REUSE_SHARED_SCAN):
-                shared_dir = Path(SHARED_SCAN_DIR).resolve()
-                sp_raw_shared, sp_lab_shared = _shared_scan_paths_put(shared_dir, symbol)
-                _copy_if_exists(symbol_sp, sp_raw_shared)
-                _copy_if_exists(symbol_sp_labeled, sp_lab_shared)
-        except Exception:
-            pass
+        add_sell_put_labels(base, symbol_sp, symbol_sp_labeled)
 
         # account-aware: attach cash secured usage from option_positions (open short puts)
         df_sp_lab = safe_read_csv(symbol_sp_labeled)
@@ -791,15 +759,12 @@ def process_symbol(
                         cash_free_cny = cash_avail_cny - used_total_cny
                     else:
                         # Fallback: treat used_total_usd as USD and convert into CNY
-                        if fx_usd_per_cny:
-                            usdcny = 1.0 / float(fx_usd_per_cny)
-                            cash_free_cny = cash_avail_cny - (used_total_usd * usdcny)
-                        else:
-                            cash_free_cny = None
+                        k = _FX.native_to_cny(1.0, native_ccy='USD')
+                        cash_free_cny = (cash_avail_cny - (used_total_usd * float(k))) if k else None
 
                 # If no USD cash record in holdings, derive USD equivalent from base CNY using fx.
-                if cash_avail is None and cash_avail_cny is not None and fx_usd_per_cny:
-                    cash_avail_est = float(cash_avail_cny) * float(fx_usd_per_cny)
+                if cash_avail is None and cash_avail_cny is not None:
+                    cash_avail_est = _FX.cny_to_native(cash_avail_cny, native_ccy='USD')
             except Exception:
                 cash_avail = None
                 cash_avail_est = None
@@ -862,36 +827,14 @@ def process_symbol(
                 if 'currency' in df_sp_lab.columns and len(df_sp_lab) > 0:
                     ccy = str(df_sp_lab['currency'].iloc[0] or '').upper()
 
-                if ccy == 'HKD':
-                    # HKDCNY is CNY per 1 HKD
-                    try:
-                        # Load from shared cache path (same as fx_rates.py uses)
-                        import json as _json
-                        from pathlib import Path as _Path
-                        rate_cache = (base / 'output/state/rate_cache.json').resolve()
-                        workspace = _Path(__file__).resolve().parents[2]
-                        shared_path = workspace / 'portfolio-management' / '.data' / 'rate_cache.json'
-                        # minimal inline: prefer existing cache file
-                        rates = None
-                        for p in [rate_cache, shared_path]:
-                            if p.exists() and p.stat().st_size > 0:
-                                d = _json.loads(p.read_text(encoding='utf-8'))
-                                rates = (d.get('rates') or {})
-                                break
-                        hkdcny = float(rates.get('HKDCNY')) if rates and rates.get('HKDCNY') else None
-                    except Exception:
-                        hkdcny = None
-                    if hkdcny:
-                        df_sp_lab['cash_required_cny'] = native_req.astype(float) * float(hkdcny)
-                    else:
-                        df_sp_lab['cash_required_cny'] = pd.NA
+                # normalize to CNY using centralized FX helper
+                c = (ccy or 'USD')
+                k = _FX.native_to_cny(1.0, native_ccy=c)
+                if k is None or k <= 0:
+                    df_sp_lab['cash_required_cny'] = pd.NA
                 else:
-                    # USD -> CNY using USDCNY derived from fx_usd_per_cny
-                    if fx_usd_per_cny:
-                        usdcny = 1.0 / float(fx_usd_per_cny)
-                        df_sp_lab['cash_required_cny'] = native_req.astype(float) * float(usdcny)
-                    else:
-                        df_sp_lab['cash_required_cny'] = pd.NA
+                    # native_req is a Series
+                    df_sp_lab['cash_required_cny'] = native_req.astype(float) * float(k)
             except Exception:
                 df_sp_lab['cash_required_usd'] = pd.NA
                 df_sp_lab['cash_required_cny'] = pd.NA
@@ -901,11 +844,11 @@ def process_symbol(
         if not IS_SCHEDULED:
             run([
                 py, 'scripts/render_sell_put_alerts.py',
-                '--input', f'output/reports/{symbol_lower}_sell_put_candidates_labeled.csv',
+                '--input', str((report_dir / f'{symbol_lower}_sell_put_candidates_labeled.csv').as_posix()),
                 '--symbol', symbol,
                 '--top', str(top_n),
                 '--layered',
-                '--output', f'output/reports/{symbol_lower}_sell_put_alerts.txt',
+                '--output', str((report_dir / f'{symbol_lower}_sell_put_alerts.txt').as_posix()),
                 ], cwd=base)
         summary_rows.append(summarize_sell_put(safe_read_csv(symbol_sp_labeled), symbol))
     else:
@@ -926,57 +869,41 @@ def process_symbol(
         shares_total = shares_override if shares_override is not None else cc.get('shares', 100)
         avg_cost = avg_cost_override if avg_cost_override is not None else cc['avg_cost']
 
-        # Shared scan reuse (sell_call): reuse base candidates across accounts within the same tick
-        shared_dir = Path(SHARED_SCAN_DIR).resolve() if SHARED_SCAN_DIR else None
-        reuse_ok_call = False
-        if REUSE_SHARED_SCAN and shared_dir:
-            try:
-                cc_raw_shared, cc_lab_shared = _shared_scan_paths_call(shared_dir, symbol)
-                cc_raw_dst = report_dir / f"{symbol_lower}_sell_call_candidates.csv"
-                cc_lab_dst = report_dir / f"{symbol_lower}_sell_call_candidates_labeled.csv"
-                ok1 = _copy_if_exists(cc_raw_shared, cc_raw_dst)
-                ok2 = _copy_if_exists(cc_lab_shared, cc_lab_dst)
-                reuse_ok_call = bool(ok1 and ok2)
-            except Exception:
-                reuse_ok_call = False
+        symbol_cc = report_dir / f'{symbol_lower}_sell_call_candidates.csv'
+        cmd = [
+            py, 'scripts/scan_sell_call.py',
+            '--symbols', symbol,
+            '--input-root', str(required_data_dir),
+            '--avg-cost', str(avg_cost),
+            '--shares', str(shares_total),
+            '--min-dte', str(cc.get('min_dte', 20)),
+            '--max-dte', str(cc.get('max_dte', 90)),
+            '--min-otm-pct', str(cc.get('min_otm_pct', 0.0)),
+            '--min-annualized-net-return', str(cc.get('min_annualized_net_return', 0.03)),
+            '--min-if-exercised-total-return', str(cc.get('min_if_exercised_total_return', 0.0)),
+            '--min-open-interest', str(cc.get('min_open_interest', 100)),
+            '--min-volume', str(cc.get('min_volume', 10)),
+            '--max-spread-ratio', str(cc.get('max_spread_ratio', 0.30)),
+            '--output', str(symbol_cc),
+        ]
+        if cc.get('min_strike') is not None:
+            cmd.extend(['--min-strike', str(cc.get('min_strike'))])
+        if cc.get('max_strike') is not None:
+            cmd.extend(['--max-strike', str(cc.get('max_strike'))])
+        # Data quality gates (optional)
+        if cc.get('require_bid_ask'):
+            cmd.append('--require-bid-ask')
+        if cc.get('min_iv') is not None:
+            cmd.extend(['--min-iv', str(cc.get('min_iv'))])
+        if cc.get('max_iv') is not None:
+            cmd.extend(['--max-iv', str(cc.get('max_iv'))])
 
-        if not reuse_ok_call:
-            cmd = [
-                py, 'scripts/scan_sell_call.py',
-                '--symbols', symbol,
-                '--avg-cost', str(avg_cost),
-                '--shares', str(shares_total),
-                '--min-dte', str(cc.get('min_dte', 20)),
-                '--max-dte', str(cc.get('max_dte', 90)),
-                '--min-otm-pct', str(cc.get('min_otm_pct', 0.0)),
-                '--min-annualized-net-return', str(cc.get('min_annualized_net_return', 0.03)),
-                '--min-if-exercised-total-return', str(cc.get('min_if_exercised_total_return', 0.0)),
-                '--min-open-interest', str(cc.get('min_open_interest', 100)),
-                '--min-volume', str(cc.get('min_volume', 10)),
-                '--max-spread-ratio', str(cc.get('max_spread_ratio', 0.30)),
-            ]
-            if cc.get('min_strike') is not None:
-                cmd.extend(['--min-strike', str(cc.get('min_strike'))])
-            if cc.get('max_strike') is not None:
-                cmd.extend(['--max-strike', str(cc.get('max_strike'))])
-            # Data quality gates (optional)
-            if cc.get('require_bid_ask'):
-                cmd.append('--require-bid-ask')
-            if cc.get('min_iv') is not None:
-                cmd.extend(['--min-iv', str(cc.get('min_iv'))])
-            if cc.get('max_iv') is not None:
-                cmd.extend(['--max-iv', str(cc.get('max_iv'))])
-
-            # Delta filter (optional): call delta in [min_delta, max_delta]
-            if cc.get('min_delta') is not None:
-                cmd.extend(['--min-delta', str(cc.get('min_delta'))])
-            if cc.get('max_delta') is not None:
-                cmd.extend(['--max-delta', str(cc.get('max_delta'))])
-            run(cmd, cwd=base, timeout_sec=timeout_sec)
-
-            shared_cc = report_dir / 'sell_call_candidates.csv'
-            symbol_cc = report_dir / f'{symbol_lower}_sell_call_candidates.csv'
-            copy_if_exists(shared_cc, symbol_cc)
+        # Delta filter (optional): call delta in [min_delta, max_delta]
+        if cc.get('min_delta') is not None:
+            cmd.extend(['--min-delta', str(cc.get('min_delta'))])
+        if cc.get('max_delta') is not None:
+            cmd.extend(['--max-delta', str(cc.get('max_delta'))])
+        run(cmd, cwd=base, timeout_sec=timeout_sec)
 
         df_cc = safe_read_csv(symbol_cc)
         # enrich candidates with holdings + option-locked shares (account-aware)
@@ -1006,11 +933,11 @@ def process_symbol(
         if not IS_SCHEDULED:
             run([
                 py, 'scripts/render_sell_call_alerts.py',
-                '--input', f'output/reports/{symbol_lower}_sell_call_candidates.csv',
+                '--input', str((report_dir / f'{symbol_lower}_sell_call_candidates.csv').as_posix()),
                 '--symbol', symbol,
                 '--top', str(top_n),
                 '--layered',
-                '--output', f'output/reports/{symbol_lower}_sell_call_alerts.txt',
+                '--output', str((report_dir / f'{symbol_lower}_sell_call_alerts.txt').as_posix()),
             ], cwd=base)
 
         summary_rows.append(summarize_sell_call(df_cc, symbol))
@@ -1020,8 +947,7 @@ def process_symbol(
     return summary_rows
 
 
-def build_symbols_summary(base: Path, summary_rows: list[dict]):
-    report_dir = base / 'output' / 'reports'
+def build_symbols_summary(summary_rows: list[dict], report_dir: Path):
     df = pd.DataFrame(summary_rows)
     csv_path = report_dir / 'symbols_summary.csv'
     txt_path = report_dir / 'symbols_summary.txt'
@@ -1051,8 +977,7 @@ def build_symbols_summary(base: Path, summary_rows: list[dict]):
 
 
 
-def build_symbols_digest(base: Path, symbols: list[str]):
-    report_dir = base / 'output' / 'reports'
+def build_symbols_digest(symbols: list[str], report_dir: Path):
     lines = ['# Symbols Strategy Digest', '']
 
     for symbol in symbols:
@@ -1132,8 +1057,6 @@ def log(msg: str) -> None:
         print(msg)
 
 SHARED_REQUIRED_DATA = None
-SHARED_SCAN_DIR = None
-REUSE_SHARED_SCAN = False
 
 
 def main():
@@ -1147,9 +1070,12 @@ def main():
     parser.add_argument('--stage-only', default=None, choices=['alert','notify'], help='Run ONLY a late stage (no fetch/scan). Requires existing output files.')
     parser.add_argument('--refresh-multiplier-cache', action='store_true', help='Refresh output_shared/state/multiplier_cache.json via OpenD before running (best-effort).')
     parser.add_argument('--no-context', action='store_true', help='Skip portfolio/option_positions context fetch (dev speed). Useful when tuning filters only.')
-    parser.add_argument('--shared-required-data', default=None, help='Path to shared required_data directory (contains raw/ and parsed/). If set, will reuse/copy instead of fetching.')
-    parser.add_argument('--shared-scan-dir', default=None, help='Directory to store shared scan artifacts (sell_put base candidates) for reuse across accounts in the same tick.')
-    parser.add_argument('--reuse-shared-scan', action='store_true', help='Reuse shared scan artifacts when available (skip running sell_put scan).')
+    parser.add_argument('--shared-required-data', default=None, help='Path to shared required_data directory (contains raw/ and parsed/). If set, it is authoritative and fetch is skipped when artifacts exist.')
+    # New flow (transitional): allow redirecting report outputs away from ./output/reports
+    parser.add_argument('--report-dir', default=None, help='Directory to write reports (symbols_summary/alerts/notification). Default: output/reports')
+    # Backward-compatible no-op flags (legacy shared scan plumbing removed)
+    parser.add_argument('--shared-scan-dir', default=None, help='[no-op] legacy compatibility flag')
+    parser.add_argument('--reuse-shared-scan', action='store_true', help='[no-op] legacy compatibility flag')
     args = parser.parse_args()
 
     RUNTIME_MODE = str(args.mode)
@@ -1159,10 +1085,6 @@ def main():
 
     global SHARED_REQUIRED_DATA
     SHARED_REQUIRED_DATA = (str(args.shared_required_data) if getattr(args, 'shared_required_data', None) else None)
-
-    global SHARED_SCAN_DIR, REUSE_SHARED_SCAN
-    SHARED_SCAN_DIR = (str(args.shared_scan_dir) if args.shared_scan_dir else None)
-    REUSE_SHARED_SCAN = bool(getattr(args, 'reuse_shared_scan', False))
 
     def want(name: str) -> bool:
         # stage-only mode: run ONLY the requested late stage
@@ -1185,6 +1107,10 @@ def main():
 
     base = Path(__file__).resolve().parents[1]
     cfg_path = Path(args.config)
+
+    # report_dir override (new flow: write into run_dir/accounts/<acct>/)
+    report_dir = (Path(args.report_dir).resolve() if getattr(args, 'report_dir', None) else (base / 'output' / 'reports').resolve())
+    report_dir.mkdir(parents=True, exist_ok=True)
 
     # Manual multiplier cache refresh (best-effort)
     if bool(getattr(args, 'refresh_multiplier_cache', False)):
@@ -1276,8 +1202,8 @@ def main():
         #   --stage-only alert  (requires output/reports/symbols_summary.csv)
         #   --stage-only notify (requires output/reports/symbols_alerts.txt)
         if STAGE_ONLY is not None:
-            summary_path = base / 'output' / 'reports' / 'symbols_summary.csv'
-            alerts_path = base / 'output' / 'reports' / 'symbols_alerts.txt'
+            summary_path = (report_dir / 'symbols_summary.csv').resolve()
+            alerts_path = (report_dir / 'symbols_alerts.txt').resolve()
             if STAGE_ONLY == 'alert':
                 if not (summary_path.exists() and summary_path.stat().st_size > 0):
                     raise SystemExit(f"[STAGE_ONLY_ERROR] missing required file: {summary_path}")
@@ -1285,11 +1211,11 @@ def main():
                 if not (alerts_path.exists() and alerts_path.stat().st_size > 0):
                     raise SystemExit(f"[STAGE_ONLY_ERROR] missing required file: {alerts_path}")
 
-            changes_out = stage_only_changes_out() if STAGE_ONLY else ('/dev/null' if IS_SCHEDULED else 'output/reports/symbols_changes.txt')
+            changes_out = stage_only_changes_out() if STAGE_ONLY else ('/dev/null' if IS_SCHEDULED else str((report_dir / 'symbols_changes.txt').as_posix()))
             alert_cmd = [
                 py, 'scripts/alert_engine.py',
-                '--summary-input', 'output/reports/symbols_summary.csv',
-                '--output', 'output/reports/symbols_alerts.txt',
+                '--summary-input', str((report_dir / 'symbols_summary.csv').as_posix()),
+                '--output', str((report_dir / 'symbols_alerts.txt').as_posix()),
                 '--changes-output', changes_out,
             ]
             # stage-only: do NOT update snapshot/history
@@ -1304,9 +1230,9 @@ def main():
             if want('notify'):
                 run([
                     py, 'scripts/notify_symbols.py',
-                    '--alerts-input', 'output/reports/symbols_alerts.txt',
-                    '--changes-input', (changes_out if STAGE_ONLY else ('/dev/null' if IS_SCHEDULED else 'output/reports/symbols_changes.txt')),
-                    '--output', 'output/reports/symbols_notification.txt',
+                    '--alerts-input', str((report_dir / 'symbols_alerts.txt').as_posix()),
+                    '--changes-input', (changes_out if STAGE_ONLY else ('/dev/null' if IS_SCHEDULED else str((report_dir / 'symbols_changes.txt').as_posix()))),
+                    '--output', str((report_dir / 'symbols_notification.txt').as_posix()),
                 ], cwd=base)
 
             log(f"[INFO] stage-only done: {STAGE_ONLY}")
@@ -1314,6 +1240,9 @@ def main():
 
         symbols = []
         summary_rows: list[dict] = []
+
+        # Ensure per-run report dir exists.
+        report_dir.mkdir(parents=True, exist_ok=True)
 
         if (not want('scan')) or bool(getattr(args, 'no_context', False)):
             portfolio_ctx = None
@@ -1393,7 +1322,7 @@ def main():
                             '--context', 'output/state/option_positions_context.json',
                             '--grace-days', '1',
                             '--max-close', '20',
-                            '--summary-out', 'output/reports/auto_close_summary.txt',
+                            '--summary-out', str((report_dir / 'auto_close_summary.txt').as_posix()),
                         ], cwd=base, timeout_sec=portfolio_timeout_sec)
                     except Exception as e2:
                         log(f"[WARN] auto-close expired positions failed: {e2}")
@@ -1487,14 +1416,17 @@ def main():
             log(f"[INFO] stage={STAGE}: fetch done")
             return
 
-        build_symbols_summary(base, summary_rows)
+        # Write summary directly into report_dir
+        build_symbols_summary(summary_rows, report_dir)
+
         if not IS_SCHEDULED:
-            build_symbols_digest(base, symbols)
-        changes_out = ('/dev/null' if IS_SCHEDULED else 'output/reports/symbols_changes.txt')
+            build_symbols_digest(symbols, report_dir)
+
+        changes_out = ('/dev/null' if IS_SCHEDULED else str((report_dir / 'symbols_changes.txt').as_posix()))
         alert_cmd = [
             py, 'scripts/alert_engine.py',
-            '--summary-input', 'output/reports/symbols_summary.csv',
-            '--output', 'output/reports/symbols_alerts.txt',
+            '--summary-input', str((report_dir / 'symbols_summary.csv').as_posix()),
+            '--output', str((report_dir / 'symbols_alerts.txt').as_posix()),
             '--changes-output', changes_out,
         ]
         if not IS_SCHEDULED:
@@ -1520,17 +1452,14 @@ def main():
         if want('notify'):
             run([
                 py, 'scripts/notify_symbols.py',
-                '--alerts-input', 'output/reports/symbols_alerts.txt',
-                '--changes-input', ('/dev/null' if IS_SCHEDULED else 'output/reports/symbols_changes.txt'),
-                '--output', 'output/reports/symbols_notification.txt',
+                '--alerts-input', str((report_dir / 'symbols_alerts.txt').as_posix()),
+                '--changes-input', ('/dev/null' if IS_SCHEDULED else str((report_dir / 'symbols_changes.txt').as_posix())),
+                '--output', str((report_dir / 'symbols_notification.txt').as_posix()),
             ], cwd=base)
 
             # Scheduled mode artifact cleanup:
-            # Keep only:
-            # - output/reports/symbols_summary.csv
-            # - output/reports/symbols_notification.txt
-            # Plus output/state/* (written elsewhere)
-            if IS_SCHEDULED:
+            # If report_dir was overridden, do not touch legacy output/reports.
+            if IS_SCHEDULED and (report_dir == (base / 'output' / 'reports').resolve()):
                 try:
                     import glob
                     keep = {
@@ -1574,7 +1503,7 @@ def main():
                 '--pm-config', str(pm_config),
                 '--market', str(market),
                 '--accounts', 'lx', 'sy',
-                '--notification', 'output/reports/symbols_notification.txt',
+                '--notification', str((report_dir / 'symbols_notification.txt').as_posix()),
             ], cwd=base)
 
         notifications_cfg = cfg.get('notifications', {}) or {}
@@ -1584,21 +1513,19 @@ def main():
             log('[INFO] notifications disabled; generated notification text only.')
         if not IS_SCHEDULED:
             print('\n[DONE] Symbols pipeline finished')
-            print('- output/reports/symbols_summary.csv')
-            print('- output/reports/symbols_summary.txt')
-            print('- output/reports/symbols_digest.txt')
-            print('- output/reports/symbols_alerts.txt')
-            print('- output/reports/symbols_changes.txt')
-            print('- output/reports/symbols_notification.txt')
+            print(f"- {report_dir}/symbols_summary.csv")
+            print(f"- {report_dir}/symbols_alerts.txt")
+            print(f"- {report_dir}/symbols_changes.txt")
+            print(f"- {report_dir}/symbols_notification.txt")
             print('')
 
         return
 
     top_n = cfg.get('outputs', {}).get('top_n_alerts', 3)
-    process_symbol(py, base, cfg, top_n)
+    process_symbol(py, base, cfg, top_n, report_dir=report_dir)
     print('\n[DONE] Single-symbol pipeline finished')
-    print('- output/reports/{symbol}_sell_put_candidates*.csv / alerts.txt')
-    print('- output/reports/{symbol}_sell_call_candidates.csv / alerts.txt')
+    print(f'- {report_dir}/{{symbol}}_sell_put_candidates*.csv / alerts.txt')
+    print(f'- {report_dir}/{{symbol}}_sell_call_candidates.csv / alerts.txt')
 
 
 if __name__ == '__main__':
