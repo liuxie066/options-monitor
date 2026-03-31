@@ -765,11 +765,8 @@ def process_symbol(
                         cash_free_cny = cash_avail_cny - used_total_cny
                     else:
                         # Fallback: treat used_total_usd as USD and convert into CNY
-                        if fx_usd_per_cny:
-                            usdcny = 1.0 / float(fx_usd_per_cny)
-                            cash_free_cny = cash_avail_cny - (used_total_usd * usdcny)
-                        else:
-                            cash_free_cny = None
+                        k = _FX.native_to_cny(1.0, native_ccy='USD')
+                        cash_free_cny = (cash_avail_cny - (used_total_usd * float(k))) if k else None
 
                 # If no USD cash record in holdings, derive USD equivalent from base CNY using fx.
                 if cash_avail is None and cash_avail_cny is not None and fx_usd_per_cny:
