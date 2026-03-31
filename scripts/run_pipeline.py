@@ -3,18 +3,16 @@ from __future__ import annotations
 
 import argparse
 import json
-import shutil
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 from scripts.fx_rates import CurrencyConverter, FxRates
+from scripts.io_utils import copy_if_exists, is_fresh, load_cached_json, safe_read_csv
 from scripts.report_labels import add_sell_put_labels
 from scripts.report_summaries import summarize_sell_call, summarize_sell_put
 
 import pandas as pd
-from pandas.errors import EmptyDataError
 import yaml
 
 
@@ -47,67 +45,12 @@ def run(cmd: list[str], cwd: Path, timeout_sec: int | None = None):
         raise SystemExit(result.returncode)
 
 
-def safe_read_csv(path: Path) -> pd.DataFrame:
-    """Safe CSV reader.
-
-    Treat header-only / empty / invalid CSV as empty DataFrame.
-    """
-    try:
-        if not path.exists() or path.stat().st_size <= 0:
-            return pd.DataFrame()
-        try:
-            return pd.read_csv(path)
-        except EmptyDataError:
-            return pd.DataFrame()
-    except Exception:
-        return pd.DataFrame()
 
 
-def copy_if_exists(src: Path, dst: Path) -> bool:
-    """Copy file only when src exists and is non-empty.
-
-    Return True if copied, False otherwise.
-
-    Rationale: avoid generating lots of empty CSV artifacts in scheduled runs.
-    Downstream uses safe_read_csv(), so missing files are treated as empty.
-    """
-    try:
-        if src.exists() and src.stat().st_size > 0:
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(src, dst)
-            return True
-    except Exception:
-        return False
-    return False
 
 
-def is_fresh(path: Path, max_age_sec: int) -> bool:
-    try:
-        if not path.exists() or path.stat().st_size <= 0:
-            return False
-        age = time.time() - path.stat().st_mtime
-        return age <= float(max_age_sec)
-    except Exception:
-        return False
 
 
-def load_cached_json(path: Path) -> dict | None:
-    """Best-effort cached JSON loader.
-
-    Returns None if file is missing/invalid/clearly incomplete.
-    """
-    try:
-        if not path.exists() or path.stat().st_size <= 2:
-            return None
-        obj = json.loads(path.read_text(encoding='utf-8'))
-        if not isinstance(obj, dict):
-            return None
-        # sanity keys
-        if 'as_of_utc' not in obj and 'filters' not in obj:
-            return None
-        return obj
-    except Exception:
-        return None
 
 
 
