@@ -13,14 +13,11 @@ from pathlib import Path
 import pandas as pd
 
 from scripts.fx_rates import CurrencyConverter, FxRates
-from scripts.io_utils import safe_read_csv
-from scripts.pipeline_steps import derive_put_max_strike_from_cash
-from scripts.report_summaries import summarize_sell_call, summarize_sell_put
+from scripts.prefilters import apply_prefilters
 from scripts.multiplier_steps import apply_multiplier_cache_to_required_data_csv
 from scripts.required_data_steps import ensure_required_data
 from scripts.sell_call_steps import empty_sell_call_summary, run_sell_call_scan_and_summarize
 from scripts.sell_put_steps import empty_sell_put_summary, run_sell_put_scan_and_summarize
-from scripts.subprocess_utils import run_cmd
 
 
 def process_symbol(
@@ -68,28 +65,22 @@ def process_symbol(
     # (run_cmd already has is_scheduled argument at call-sites below.)
     IS_SCHEDULED = bool(is_scheduled)
 
-    # Pre-filter (call): if this account has no holdings row for the symbol, skip sell_call fully.
-    stock = None
-    if want_call and portfolio_ctx:
-        try:
-            stock = (portfolio_ctx.get('stocks_by_symbol') or {}).get(symbol)
-        except Exception:
-            stock = None
-        if not stock:
-            want_call = False
-
-    # Pre-filter (put): derive a cash-based max_strike cap to reduce chain size.
-    if want_put:
-        try:
-            cash_cap = derive_put_max_strike_from_cash(symbol, portfolio_ctx, fx_usd_per_cny, hkdcny)
-            if cash_cap and cash_cap > 0:
-                if sp.get('max_strike') is None or float(sp.get('max_strike')) > float(cash_cap):
-                    sp = dict(sp)
-                    sp['max_strike'] = float(cash_cap)
-            if sp.get('max_strike') is not None and float(sp.get('max_strike')) <= 0:
-                want_put = False
-        except Exception:
-            pass
+    # Prefilters
+    pf = apply_prefilters(
+        symbol=symbol,
+        sp=sp,
+        cc=cc,
+        want_put=want_put,
+        want_call=want_call,
+        portfolio_ctx=portfolio_ctx,
+        fx_usd_per_cny=fx_usd_per_cny,
+        hkdcny=hkdcny,
+    )
+    want_put = pf.want_put
+    want_call = pf.want_call
+    sp = pf.sp
+    cc = pf.cc
+    stock = pf.stock
 
     # Multiplier static cache (best-effort): fill missing/invalid multiplier in required_data.csv
     try:
