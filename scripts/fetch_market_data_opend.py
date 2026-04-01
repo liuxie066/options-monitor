@@ -187,11 +187,17 @@ def _pick_col(row: Any, *cands: str):
 def get_spot_opend(ctx, underlier_code: str) -> float | None:
     """Try to get underlying spot from OpenD."""
     try:
-        ret, df = _with_reconnect('get_market_snapshot', lambda: ctx.get_market_snapshot([underlier_code]))
+        # NOTE: keep this function independent from fetch_symbol()'s local reconnect wrapper.
+        ret, df = ctx.get_market_snapshot([underlier_code])
         if ret != 0 or df is None or df.empty:
             return None
-        v = to_float(df.iloc[0].get('last_price'))
-        return v
+        row = df.iloc[0]
+        # Prefer last_price; fallback to other common fields.
+        for k in ['last_price', 'price', 'cur_price', 'close_price_5min', 'open_price', 'prev_close_price']:
+            v = to_float(row.get(k))
+            if v is not None and v > 0:
+                return v
+        return None
     except Exception:
         return None
 
