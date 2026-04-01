@@ -130,6 +130,9 @@ def main() -> None:
     from test_atomic_write_json import (
         test_atomic_write_json_writes_valid_json,
     )
+    from test_pipeline_watchlist_whitelist import (
+        test_watchlist_whitelist_filters_symbols,
+    )
 
     tests = [
         test_parse_futu_fill_message,
@@ -146,6 +149,7 @@ def main() -> None:
         test_select_markets_to_run_hk_break_respected,
         test_scheduled_validation_is_cached,
         test_atomic_write_json_writes_valid_json,
+        test_watchlist_whitelist_filters_symbols,
     ]
     for t in tests:
         t()
