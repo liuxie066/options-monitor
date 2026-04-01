@@ -121,6 +121,9 @@ def main() -> None:
     from test_scan_scheduler_scan_per_account import (
         test_scan_scheduler_scan_is_per_account,
     )
+    from test_market_session_single_source_of_truth import (
+        test_select_markets_to_run_hk_break_respected,
+    )
 
     tests = [
         test_parse_futu_fill_message,
@@ -134,6 +137,7 @@ def main() -> None:
         test_add_sell_put_labels_overwrites_on_empty,
         test_scan_scheduler_emits_is_notify_window_open_and_backcompat_should_notify,
         test_scan_scheduler_scan_is_per_account,
+        test_select_markets_to_run_hk_break_respected,
     ]
     for t in tests:
         t()
