@@ -143,7 +143,7 @@ def get_global_state_once(host: str, port: int) -> dict:
             pass
 
 
-def get_global_state(host: str, port: int, *, retry_once: bool = True) -> tuple[dict | None, str | None, str | None]:
+def get_global_state(host: str, port: int, *, retry_once: bool = True, ensure: bool = False) -> tuple[dict | None, str | None, str | None]:
     """Get global state with a single reconnect-style retry on disconnect errors.
 
     Returns (state, error_text, action_taken).
@@ -168,17 +168,23 @@ def get_global_state(host: str, port: int, *, retry_once: bool = True) -> tuple[
         if code1 == 'OPEND_RATE_LIMIT':
             return (None, err1, 'no_retry_rate_limit')
 
-        if (not retry_once) or (not _looks_like_disconnect_error(err1)):
-            return (None, err1, None)
+        # If we got a disconnect-like error, try one-shot reconnect.
+        if retry_once and _looks_like_disconnect_error(err1):
+            # Optionally ensure service is started when port seems down.
+            if ensure and (not port_open(host, port)):
+                ok, _msg = try_start_opend()
+                if ok:
+                    time.sleep(1.0)
 
-        # One-shot reconnect: sleep a bit then retry.
-        time.sleep(0.3)
-        try:
-            st2 = get_global_state_once(host, port)
-            return (st2, None, 'retry_once')
-        except Exception as e2:
-            err2 = f"get_global_state failed after retry: {type(e2).__name__}: {e2}"
-            return (None, err1 + ' | ' + err2, 'retry_once_failed')
+            time.sleep(0.3)
+            try:
+                st2 = get_global_state_once(host, port)
+                return (st2, None, 'retry_once')
+            except Exception as e2:
+                err2 = f"get_global_state failed after retry: {type(e2).__name__}: {e2}"
+                return (None, err1 + ' | ' + err2, 'retry_once_failed')
+
+        return (None, err1, None)
 
 
 def try_start_opend() -> tuple[bool, str]:
@@ -231,7 +237,7 @@ def main():
     h.ports_open = True
 
     try:
-        st, err, action = get_global_state(args.host, args.port, retry_once=True)
+        st, err, action = get_global_state(args.host, args.port, retry_once=True, ensure=bool(args.ensure))
         h.action_taken = action
         if err:
             h.error = err
