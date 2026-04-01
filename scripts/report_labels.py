@@ -27,13 +27,14 @@ def _safe_read_csv(path: Path) -> pd.DataFrame:
 def add_sell_put_labels(base: Path, input_path: Path, output_path: Path) -> None:
     """Add OTM risk labels to sell_put candidate CSV.
 
+    Why: even when upstream scan yields 0 candidates, we must still overwrite the
+    labeled output; otherwise stale labeled CSV from a previous symbol/run may be
+    reused and cause "symbol串线".
+
     Note: `base` is kept for call-site compatibility; it is not used.
     """
     _ = base
     df = _safe_read_csv(input_path)
-    # If upstream candidates are empty/missing, skip writing labeled output.
-    if df.empty:
-        return
 
     def band(v):
         if pd.isna(v):
