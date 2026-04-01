@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pandas as pd
 
 from scripts.fx_loader import build_converter
 from scripts.prefilters import apply_prefilters
