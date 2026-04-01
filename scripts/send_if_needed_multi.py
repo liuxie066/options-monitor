@@ -166,7 +166,10 @@ def prefetch_required_data(vpy: Path, base: Path, cfg: dict, shared_required: Pa
                     raw0 = (shared_required / 'raw' / f"{symbol}_required_data.json").resolve()
                     csv0 = (shared_required / 'parsed' / f"{symbol}_required_data.csv").resolve()
                     empty = (not raw0.exists()) or (not csv0.exists()) or (csv0.stat().st_size <= 0)
-                    if empty and market == 'US':
+
+                    allow_downgrade = bool(((cfg.get('fetch_policy') or {}).get('allow_downgrade_to_yahoo', True)))
+
+                    if empty and market == 'US' and allow_downgrade:
                         # Fail-fast: do NOT downgrade to Yahoo when OpenD is blocked by login/phone verification.
                         # Downgrading causes YF rate-limit loops and makes the system non-deterministic.
                         err_s = ''
@@ -190,6 +193,9 @@ def prefetch_required_data(vpy: Path, base: Path, cfg: dict, shared_required: Pa
                             ]
                             subprocess.run(cmd2, cwd=str(base), capture_output=True, text=True, timeout=60)
                             stats['fallback_to_yahoo'] += 1
+                    elif empty and market == 'US' and (not allow_downgrade):
+                        # Explicitly disabled downgrade; count as fetch error for observability.
+                        stats['fetch_errors'] += 1
             except Exception:
                 pass
         except Exception:
