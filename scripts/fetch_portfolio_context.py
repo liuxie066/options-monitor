@@ -91,6 +91,70 @@ def safe_float(x):
         return None
 
 
+def _as_text(v) -> str:
+    """Normalize Feishu Bitable cell values into plain text.
+
+    In records/search API, Text fields often come back as a rich-text array:
+      [{"text": "富途", "type": "text"}, ...]
+    We join the text parts.
+    """
+    try:
+        if v is None:
+            return ""
+        if isinstance(v, str):
+            return v
+        if isinstance(v, (int, float)):
+            return str(v)
+        if isinstance(v, list):
+            parts: list[str] = []
+            for it in v:
+                if isinstance(it, dict) and it.get('text') is not None:
+                    parts.append(str(it.get('text')))
+                elif isinstance(it, str):
+                    parts.append(it)
+            return "".join(parts)
+        if isinstance(v, dict) and v.get('text') is not None:
+            return str(v.get('text'))
+    except Exception:
+        pass
+    return str(v)
+
+
+def _normalize_symbol(asset_type: str | None, asset_id: str, market_text: str = "") -> str | None:
+    """Normalize asset_id into monitoring symbol.
+
+    - us_stock: keep as upper (e.g., NVDA)
+    - hk_stock: convert 5-digit/4-digit codes into XXXX.HK (e.g., 00700 -> 0700.HK)
+    """
+    t = (asset_type or "").strip().lower()
+    aid = (asset_id or "").strip()
+    if not aid:
+        return None
+
+    if t == 'us_stock':
+        return aid.upper()
+
+    if t == 'hk_stock':
+        # Accept forms: 00700 / 0700 / 700 / HK.00700 / 0700.HK
+        s = aid.upper()
+        if s.endswith('.HK'):
+            core = s[:-3]
+        else:
+            core = s
+        if core.startswith('HK.'):
+            core = core[3:]
+        core = core.strip()
+        # keep digits only
+        digits = ''.join(ch for ch in core if ch.isdigit())
+        if not digits:
+            return None
+        digits = str(int(digits))  # strip leading zeros
+        digits = digits.zfill(4)
+        return f"{digits}.HK"
+
+    return None
+
+
 def build_context(records: list[dict], market: str, account: str | None = None) -> dict:
     # holding schema fields we saw:
     # asset_id, asset_type, market, account, quantity, avg_cost, currency
@@ -99,12 +163,12 @@ def build_context(records: list[dict], market: str, account: str | None = None) 
     account_norm = str(account).strip() if account else None
 
     for rec in records:
-        fields = rec.get("fields") or {}
-        if not fields:
+        fields0 = rec.get("fields") or {}
+        if not fields0:
             continue
 
-        m = str(fields.get("market") or "").strip()
-        a = str(fields.get("account") or "").strip()
+        m = _as_text(fields0.get("market")).strip()
+        a = _as_text(fields0.get("account")).strip()
 
         # Be tolerant: market column is free-text; accept values that contain the target market string.
         # Still keeps the "only 富途" constraint when market_norm is set.
@@ -113,17 +177,22 @@ def build_context(records: list[dict], market: str, account: str | None = None) 
         if account_norm and account_norm != a:
             continue
 
+        # Normalize selected fields (avoid leaking rich-text arrays downstream)
+        fields = dict(fields0)
+        for k in ("market", "account", "asset_id", "asset_name"):
+            if k in fields:
+                fields[k] = _as_text(fields.get(k)).strip()
         selected.append(fields)
 
     stocks_by_symbol: dict[str, dict] = {}
     cash_by_currency: dict[str, float] = {}
 
     for f in selected:
-        asset_type = f.get("asset_type")
-        asset_class = (f.get("asset_class") or "").strip()
-        asset_id = (f.get("asset_id") or "").strip()
-        asset_name = (f.get("asset_name") or "").strip()
-        currency = f.get("currency")
+        asset_type = _as_text(f.get("asset_type")).strip()
+        asset_class = _as_text(f.get("asset_class")).strip()
+        asset_id = _as_text(f.get("asset_id")).strip()
+        asset_name = _as_text(f.get("asset_name")).strip()
+        currency = _as_text(f.get("currency")).strip() or None
         qty = safe_float(f.get("quantity"))
         avg_cost = safe_float(f.get("avg_cost"))
 
@@ -145,17 +214,19 @@ def build_context(records: list[dict], market: str, account: str | None = None) 
                 cash_by_currency[ccy_u] = cash_by_currency.get(ccy_u, 0.0) + qty
             continue
 
-        if asset_type == "us_stock":
-            if not asset_id or qty is None:
-                continue
-            stocks_by_symbol[asset_id.upper()] = {
-                "symbol": asset_id.upper(),
-                "shares": int(qty),
-                "avg_cost": avg_cost,
-                "currency": currency,
-                "market": f.get("market"),
-                "account": f.get("account"),
-            }
+        sym = _normalize_symbol(asset_type, asset_id, market_text=_as_text(f.get('market')))
+        if not sym or qty is None:
+            continue
+
+        # Keep only what downstream needs.
+        stocks_by_symbol[sym] = {
+            "symbol": sym,
+            "shares": int(qty),
+            "avg_cost": avg_cost,
+            "currency": currency,
+            "market": _as_text(f.get("market")).strip(),
+            "account": _as_text(f.get("account")).strip(),
+        }
 
     return {
         "as_of_utc": datetime.now(timezone.utc).isoformat(),

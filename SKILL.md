@@ -3,7 +3,7 @@ name: options-monitor
 description: |
   期权监控与提醒（sell put / sell call），支持多账户（lx/sy）分开计算约束，但合并输出。
 
-  代码仓库：/home/node/.openclaw/workspace/options-monitor-prod
+  代码仓库：/home/node/.openclaw/workspace/options-monitor
   上游仓库：https://github.com/liuxie85/options-monitor
 
   主要能力：
@@ -23,8 +23,8 @@ description: |
 ### 1) 生产 tick（多账户合并提醒）
 
 ```bash
-cd /home/node/.openclaw/workspace/options-monitor-prod
-./.venv/bin/python scripts/send_if_needed_multi.py --config config.json --accounts lx sy
+cd /home/node/.openclaw/workspace/options-monitor
+./.venv/bin/python scripts/send_if_needed_multi.py --config config.us.json --accounts lx sy
 ```
 
 ### 2) 查询卖 Put 担保占用 / 剩余现金（按账户，统一折算 CNY）

@@ -1,18 +1,23 @@
 # Options Monitor
 
-> 状态：线上可用版（2026-03-22）— 里程碑见 VERSION.md
+> 状态：可用（持续迭代）— 里程碑见 VERSION.md（首个可用里程碑：2026-03-22）
 
-一个基于 Yahoo Finance / yfinance 的美股期权监控工具，当前聚焦两类卖方策略：
+一个期权监控与提醒工具，覆盖 **美股/港股**，主要用于卖方策略扫描：
 
-- Sell Put
-- Sell Call
+- Sell Put（现金担保）
+- Sell Call（覆盖式）
 
-目标是提供一个可重复运行的最小版本，用于：
+数据源策略：
 
-- 抓取美股期权链
-- 基于规则筛选候选
-- 计算扣手续费后的净收益指标
-- 生成提醒文本和策略摘要
+- 主要：富途 OpenD（US/HK）
+- 降级：美股在 OpenD 不可用时可选 Yahoo/yfinance（见 `config.example.us.json:fetch_policy`）
+- 港股：默认 OpenD-only（见 `config.example.hk.json:fetch_policy`）
+
+核心能力：
+
+- 抓取期权链与必要字段（含 IV/Delta 等；缺失会明确提示）
+- 按规则筛选候选并计算（含手续费）净收益/年化等指标
+- 生成摘要/提醒文本（支持飞书通知、多账户合并输出）
 
 ## 当前范围
 
@@ -28,30 +33,29 @@
 
 ## 安装
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-## 推荐运行方式
-
-推荐用项目自带脚本（会自动处理虚拟环境与依赖）：
+推荐用项目自带脚本启动（会自动创建虚拟环境并安装依赖）：
 
 ```bash
 ./run_watchlist.sh
 ```
 
-这会自动完成：
-1. 抓取标的数据与期权链
-2. 扫描 Sell Put 候选
-3. 扫描 Sell Call 候选
-4. 生成提醒文本
-5. 生成策略摘要
+如需手动安装：
 
-## 主要目录
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -U pip
+pip install -r requirements.txt
+```
 
-- `config.json`：唯一配置入口（templates + symbols）
+> 默认读取 `config.local.us.json`（不提交到仓库）；也可用环境变量 `OPTIONS_MONITOR_CONFIG` 指向任意配置文件。
+> 先从示例复制：`cp config.example.us.json config.local.us.json`（港股：`cp config.example.hk.json config.local.hk.json`）。
+
+## 配置
+
+- 示例配置：`config.example.us.json`（美股）/ `config.example.hk.json`（港股）
+- 本地运行建议复制为 `config.local.us.json` / `config.local.hk.json`（不要提交）
+- （仓库不再提交真实运行配置；仅保留示例）
 - `scripts/`：抓取、扫描、提醒与统一入口脚本
 - `output/raw/`：原始 JSON
 - `output/parsed/`：标准化 CSV
@@ -62,14 +66,14 @@ pip install -r requirements.txt
 - 解析成交/手工输入消息：`scripts/parse_option_message.py`
 - 解析 + 写入（默认 dry-run）：`scripts/option_intake.py`
 
-Intake 可配置项（见 `config.json:intake`）：
+Intake 可配置项（见 `config.example.us.json:intake` / `config.example.hk.json:intake`）：
 - `symbol_aliases`: 中文标的名 → 代码（例如 中海油 → 0883.HK）
 - `multiplier_by_symbol`: 合约乘数（例如 0883.HK → 1000）
 - `default_multiplier_hk` / `default_multiplier_us`
 
 ## Watchlist 管理（监控标的：查看/新增/删除/编辑）
 
-配置文件：`config.json` 的 `symbols[]`
+配置文件：`config.local.us.json` / `config.local.hk.json` 的 `symbols[]`（从示例复制后修改）
 
 ```bash
 # 查看当前监控标的
