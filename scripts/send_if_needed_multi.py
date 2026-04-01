@@ -1261,7 +1261,7 @@ def main():
         })
 
         should_run = bool(decision.get('should_run_scan'))
-        should_notify = bool(decision.get('should_notify'))
+        should_notify = bool(decision.get('is_notify_window_open', decision.get('should_notify')))
         reason = str(decision.get('reason') or '')
 
         # Transitional: allow forcing pipeline runs even off-hours (useful for dev/test).
