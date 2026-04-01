@@ -1,6 +1,16 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+# Allow running as a script without installation.
+# When executed as `python scripts/run_pipeline.py`, ensure repo root is on sys.path
+# so `import scripts.*` works consistently.
+import sys
+from pathlib import Path
+
+repo_base = Path(__file__).resolve().parents[1]
+if str(repo_base) not in sys.path:
+    sys.path.insert(0, str(repo_base))
+
 import argparse
 import json
 import sys
@@ -18,7 +28,6 @@ from scripts.pipeline_symbol import process_symbol
 from scripts.subprocess_utils import run_cmd
 
 import pandas as pd
-import yaml
 
 from scripts.report_builders import build_symbols_digest, build_symbols_summary
 
@@ -110,56 +119,16 @@ def main():
     if not cfg_path.is_absolute():
         cfg_path = (base / cfg_path).resolve()
 
-    # config supports YAML or JSON
-    if cfg_path.suffix.lower() == '.json':
-        cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
-    else:
-        with open(cfg_path, 'r', encoding='utf-8') as f:
-            cfg = yaml.safe_load(f)
+    from scripts.config_loader import load_config
 
-    # Validate config early (fail fast)
-    # - dev mode: always validate
-    # - scheduled mode: validate only when config content changes (hash cache)
-    try:
-        from scripts.validate_config import validate_config as _validate_config
-
-        should_validate = True
-        if IS_SCHEDULED:
-            try:
-                import hashlib
-                import json as _json
-                state_dir = (base / 'output' / 'state').resolve()
-                state_dir.mkdir(parents=True, exist_ok=True)
-                cache_path = state_dir / 'config_validation_cache.json'
-                payload = _json.dumps(cfg, ensure_ascii=False, sort_keys=True)
-                h = hashlib.sha256(payload.encode('utf-8')).hexdigest()
-                prev = None
-                if cache_path.exists() and cache_path.stat().st_size > 0:
-                    prev = _json.loads(cache_path.read_text(encoding='utf-8')).get('sha256')
-                if prev == h:
-                    should_validate = False
-                else:
-                    cache_path.write_text(_json.dumps({'sha256': h}, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-            except Exception:
-                should_validate = True
-
-        if should_validate:
-            _validate_config(cfg)
-    except SystemExit:
-        raise
-    except Exception:
-        # don't block if validator import fails
-        pass
+    cfg = load_config(
+        base=base,
+        config_path=cfg_path,
+        is_scheduled=IS_SCHEDULED,
+        log=log,
+    )
 
     py = sys.executable
-
-    # naming aliases (prefer more intuitive names):
-    # - templates == profiles (legacy internal name)
-    # - symbols == watchlist (legacy internal name)
-    if 'templates' in cfg and 'profiles' not in cfg:
-        cfg['profiles'] = cfg.get('templates')
-    if 'symbols' in cfg and 'watchlist' not in cfg:
-        cfg['watchlist'] = cfg.get('symbols')
 
     if 'watchlist' in cfg:
         # Optional symbols whitelist (comma-separated)
