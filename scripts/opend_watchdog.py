@@ -95,7 +95,32 @@ def classify_watchdog_result(state: dict | None, error_text: str | None) -> tupl
     return ('OPEND_API_ERROR', 'OpenD 接口异常')
 
 
-def get_global_state(host: str, port: int) -> dict:
+def _looks_like_disconnect_error(msg: str) -> bool:
+    s = (msg or '').strip()
+    sl = s.lower()
+
+    # Do not treat phone-verify errors as disconnect.
+    if _looks_like_phone_verify(s):
+        return False
+
+    keys = [
+        'econnrefused',
+        'connection refused',
+        'econnreset',
+        'connection reset',
+        'broken pipe',
+        'timed out',
+        'timeout',
+        'socket',
+        'disconnected',
+        'remote closed',
+        'callclose',
+        'eof',
+    ]
+    return any(k in sl for k in keys)
+
+
+def get_global_state_once(host: str, port: int) -> dict:
     # Prefer repo venv if available
     vpy = Path(__file__).resolve().parents[1] / '.venv' / 'bin' / 'python'
     if vpy.exists() and str(vpy) != sys.executable:
@@ -116,6 +141,44 @@ def get_global_state(host: str, port: int) -> dict:
             ctx.close()
         except Exception:
             pass
+
+
+def get_global_state(host: str, port: int, *, retry_once: bool = True) -> tuple[dict | None, str | None, str | None]:
+    """Get global state with a single reconnect-style retry on disconnect errors.
+
+    Returns (state, error_text, action_taken).
+
+    Policy:
+    - For "needs phone verification" errors: fail-fast (no retry).
+    - For rate-limit errors: no retry.
+    - For disconnect-like errors: retry once after a short sleep.
+    """
+    try:
+        st = get_global_state_once(host, port)
+        return (st, None, None)
+    except Exception as e:
+        err1 = f"get_global_state failed: {type(e).__name__}: {e}"
+        code1, _ = classify_watchdog_result(None, err1)
+
+        # Fail-fast on phone verification.
+        if code1 == 'OPEND_NEEDS_PHONE_VERIFY':
+            return (None, err1, 'fail_fast_phone_verify')
+
+        # Rate-limit won't be fixed by retry.
+        if code1 == 'OPEND_RATE_LIMIT':
+            return (None, err1, 'no_retry_rate_limit')
+
+        if (not retry_once) or (not _looks_like_disconnect_error(err1)):
+            return (None, err1, None)
+
+        # One-shot reconnect: sleep a bit then retry.
+        time.sleep(0.3)
+        try:
+            st2 = get_global_state_once(host, port)
+            return (st2, None, 'retry_once')
+        except Exception as e2:
+            err2 = f"get_global_state failed after retry: {type(e2).__name__}: {e2}"
+            return (None, err1 + ' | ' + err2, 'retry_once_failed')
 
 
 def try_start_opend() -> tuple[bool, str]:
@@ -168,23 +231,30 @@ def main():
     h.ports_open = True
 
     try:
-        st = get_global_state(args.host, args.port)
-        h.state = st
-        ready = (st.get('program_status_type') in (None, '', 'READY'))
-        qot = bool(st.get('qot_logined', True))
+        st, err, action = get_global_state(args.host, args.port, retry_once=True)
+        h.action_taken = action
+        if err:
+            h.error = err
+        if st:
+            h.state = st
+            ready = (st.get('program_status_type') in (None, '', 'READY'))
+            qot = bool(st.get('qot_logined', True))
 
-        if ready and qot:
-            h.ok = True
-            h.error_code = None
-            h.message = 'OpenD 健康'
+            if ready and qot:
+                h.ok = True
+                h.error_code = None
+                h.message = 'OpenD 健康'
+            else:
+                if not ready:
+                    h.error = f"OpenD not READY: {st}"
+                elif not qot:
+                    h.error = f"OpenD quote not logged in: {st}"
+                h.error_code, h.message = classify_watchdog_result(st, h.error)
         else:
-            if not ready:
-                h.error = f"OpenD not READY: {st}"
-            elif not qot:
-                h.error = f"OpenD quote not logged in: {st}"
-            h.error_code, h.message = classify_watchdog_result(st, h.error)
+            # no state
+            h.error_code, h.message = classify_watchdog_result(h.state, h.error)
     except Exception as e:
-        h.error = f"get_global_state failed: {type(e).__name__}: {e}"
+        h.error = f"get_global_state wrapper failed: {type(e).__name__}: {e}"
         h.error_code, h.message = classify_watchdog_result(h.state, h.error)
 
     _emit(h, args.json)
