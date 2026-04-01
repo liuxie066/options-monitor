@@ -124,6 +124,9 @@ def main() -> None:
     from test_market_session_single_source_of_truth import (
         test_select_markets_to_run_hk_break_respected,
     )
+    from test_config_loader_validation_cache import (
+        test_scheduled_validation_is_cached,
+    )
 
     tests = [
         test_parse_futu_fill_message,
@@ -138,6 +141,7 @@ def main() -> None:
         test_scan_scheduler_emits_is_notify_window_open_and_backcompat_should_notify,
         test_scan_scheduler_scan_is_per_account,
         test_select_markets_to_run_hk_break_respected,
+        test_scheduled_validation_is_cached,
     ]
     for t in tests:
         t()
