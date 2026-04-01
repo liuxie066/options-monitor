@@ -133,6 +133,11 @@ def main() -> None:
     from test_pipeline_watchlist_whitelist import (
         test_watchlist_whitelist_filters_symbols,
     )
+    from test_pipeline_runner_stage_plan import (
+        test_stage_plan_fetch_only,
+        test_stage_plan_scan_includes_fetch,
+        test_stage_plan_stage_only_notify,
+    )
 
     tests = [
         test_parse_futu_fill_message,
@@ -150,6 +155,9 @@ def main() -> None:
         test_scheduled_validation_is_cached,
         test_atomic_write_json_writes_valid_json,
         test_watchlist_whitelist_filters_symbols,
+        test_stage_plan_fetch_only,
+        test_stage_plan_scan_includes_fetch,
+        test_stage_plan_stage_only_notify,
     ]
     for t in tests:
         t()

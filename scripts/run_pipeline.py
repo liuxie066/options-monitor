@@ -68,26 +68,19 @@ def main():
     parser.add_argument('--reuse-shared-scan', action='store_true', help='[no-op] legacy compatibility flag')
     args = parser.parse_args()
 
-    RUNTIME_MODE = str(args.mode)
-    IS_SCHEDULED = (RUNTIME_MODE == 'scheduled')
-    STAGE = str(args.stage)
-    STAGE_ONLY = (str(args.stage_only) if args.stage_only else None)
+    runtime_mode = str(args.mode)
+    is_scheduled = (runtime_mode == 'scheduled')
+    stage = str(args.stage)
+    stage_only = (str(args.stage_only) if args.stage_only else None)
+
+    global RUNTIME_MODE, IS_SCHEDULED, STAGE, STAGE_ONLY
+    RUNTIME_MODE = runtime_mode
+    IS_SCHEDULED = is_scheduled
+    STAGE = stage
+    STAGE_ONLY = stage_only
 
     global SHARED_REQUIRED_DATA
     SHARED_REQUIRED_DATA = (str(args.shared_required_data) if getattr(args, 'shared_required_data', None) else None)
-
-    def want(name: str) -> bool:
-        # stage-only mode: run ONLY the requested late stage
-        if STAGE_ONLY is not None:
-            return name == STAGE_ONLY
-        # normal mode: run up to STAGE
-        if STAGE == 'all':
-            return True
-        order = ['fetch', 'scan', 'alert', 'notify']
-        try:
-            return order.index(name) <= order.index(STAGE)
-        except Exception:
-            return True
 
     base = Path(__file__).resolve().parents[1]
     cfg_path = Path(args.config)
