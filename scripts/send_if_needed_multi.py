@@ -1385,7 +1385,7 @@ def main():
             pass
         # Mark scanned (shared scan clock)
         try:
-            subprocess.run([str(vpy), 'scripts/scan_scheduler.py', '--config', str(cfg_override), '--state', str(state_path), '--mark-scanned'], cwd=str(base))
+            subprocess.run([str(vpy), 'scripts/scan_scheduler.py', '--config', str(cfg_override), '--state', str(state_path), '--mark-scanned', '--account', str(acct)], cwd=str(base))
         except Exception:
             pass
 

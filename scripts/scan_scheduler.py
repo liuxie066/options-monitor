@@ -30,7 +30,8 @@ class SchedulerDecision:
 
 
 STATE_DEFAULT = {
-    'last_scan_utc': None,
+    'last_scan_utc': None,  # legacy (shared scan clock)
+    'last_scan_utc_by_account': {},
     'last_notify_utc': None,  # legacy
     'last_notify_utc_by_account': {},
 }
@@ -137,7 +138,16 @@ def decide(schedule_cfg: dict, state: dict, now_utc: datetime, account: str | No
         # Notification cooldown is handled separately (content-aware) in send_if_needed_multi.
         # Scheduler keeps a single base cooldown (notify_cooldown_min) here.
 
-    last_scan = maybe_parse_dt(state.get('last_scan_utc'))
+    last_scan = None
+    try:
+        if account:
+            m = state.get('last_scan_utc_by_account')
+            if isinstance(m, dict):
+                last_scan = maybe_parse_dt(m.get(str(account)))
+    except Exception:
+        last_scan = None
+    if last_scan is None:
+        last_scan = maybe_parse_dt(state.get('last_scan_utc'))
 
     # Notify cooldown should be account-specific in multi-account mode.
     # If account is provided, read last_notify from the per-account map first.
@@ -277,7 +287,14 @@ def main():
         return
 
     if args.mark_scanned:
-        state['last_scan_utc'] = to_iso(datetime.now(timezone.utc))
+        now_s = to_iso(datetime.now(timezone.utc))
+        state['last_scan_utc'] = now_s
+        if args.account:
+            m = state.get('last_scan_utc_by_account')
+            if not isinstance(m, dict):
+                m = {}
+            m[str(args.account)] = now_s
+            state['last_scan_utc_by_account'] = m
         write_state(state_path, state)
         print(f'[DONE] marked scanned -> {state_path}')
         return
