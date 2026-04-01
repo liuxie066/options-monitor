@@ -104,7 +104,7 @@ def process_symbol(
         fetch_source=str(fetch_cfg.get('source') or 'yahoo'),
         fetch_host=str(fetch_cfg.get('host') or '127.0.0.1'),
         fetch_port=int(fetch_cfg.get('port') or 11111),
-        spot_from_pm=bool(fetch_cfg.get('spot_from_portfolio_management', False)),
+        spot_from_pm=(fetch_cfg.get('spot_from_portfolio_management', None)),
         max_strike=(float(sp.get('max_strike')) if (want_put and sp.get('max_strike') is not None) else None),
     )
 
