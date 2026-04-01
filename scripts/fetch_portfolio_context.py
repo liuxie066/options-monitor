@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from scripts.io_utils import atomic_write_json
+
 
 def http_json(method: str, url: str, payload: dict | None = None, headers: dict | None = None) -> dict:
     data = None
@@ -272,8 +274,7 @@ def main():
     out_path = Path(args.out)
     if not out_path.is_absolute():
         out_path = (base / out_path).resolve()
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(ctx, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_json(out_path, ctx)
 
     # concise stdout
     usd_cash = ctx["cash_by_currency"].get("USD")
