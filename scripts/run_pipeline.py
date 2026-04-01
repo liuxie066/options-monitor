@@ -159,80 +159,34 @@ def main():
             )
             return
 
-        symbols = []
-        summary_rows: list[dict] = []
-
         # Ensure per-run report dir exists.
         report_dir.mkdir(parents=True, exist_ok=True)
 
-        # Context (portfolio / option_positions / FX)
         from scripts.pipeline_context import build_pipeline_context
+        from scripts.pipeline_watchlist import run_watchlist_pipeline
 
-        portfolio_ctx, option_ctx, fx_usd_per_cny, hkdcny = build_pipeline_context(
+        summary_rows = run_watchlist_pipeline(
             py=py,
             base=base,
             cfg=cfg,
             report_dir=report_dir,
-            portfolio_timeout_sec=portfolio_timeout_sec,
-            runtime=runtime,
             is_scheduled=IS_SCHEDULED,
-            log=log,
-            no_context=bool(getattr(args, 'no_context', False)),
+            top_n=top_n,
+            symbol_timeout_sec=symbol_timeout_sec,
+            portfolio_timeout_sec=portfolio_timeout_sec,
             want_scan=want('scan'),
+            no_context=bool(getattr(args, 'no_context', False)),
+            symbols_arg=getattr(args, 'symbols', None),
+            log=log,
+            want_fn=want,
+            apply_profiles_fn=apply_profiles,
+            process_symbol_fn=process_symbol,
+            build_pipeline_context_fn=build_pipeline_context,
+            build_symbols_summary_fn=lambda rows: build_symbols_summary(rows, report_dir, is_scheduled=IS_SCHEDULED),
+            build_symbols_digest_fn=lambda rows, n: (None if IS_SCHEDULED else build_symbols_digest([r.get('symbol') for r in rows if r.get('symbol')], report_dir)),
         )
 
-        profiles = cfg.get('profiles') or {}
-
-        for item in cfg['watchlist']:
-            try:
-                # Optional whitelist filter
-                if sym_whitelist is not None:
-                    s0 = str((item or {}).get('symbol') or '').strip()
-                    if s0 and s0 not in sym_whitelist:
-                        continue
-
-                item = apply_profiles(item, profiles)
-                # inject option_ctx into portfolio_ctx for now (minimal change):
-                if portfolio_ctx is not None and option_ctx is not None:
-                    portfolio_ctx['option_ctx'] = option_ctx
-                if not want('scan'):
-                    # fetch-only: just pull required_data and stop
-                    item_fetch = dict(item)
-                    item_fetch['sell_put'] = {'enabled': False}
-                    item_fetch['sell_call'] = {'enabled': False}
-                    process_symbol(py, base, item_fetch, top_n, portfolio_ctx=None, fx_usd_per_cny=None, hkdcny=None, timeout_sec=symbol_timeout_sec, is_scheduled=IS_SCHEDULED)
-                else:
-                    summary_rows.extend(process_symbol(py, base, item, top_n, portfolio_ctx=portfolio_ctx, fx_usd_per_cny=fx_usd_per_cny, hkdcny=hkdcny, timeout_sec=symbol_timeout_sec, is_scheduled=IS_SCHEDULED))
-            except Exception as e:
-                symbol = item.get('symbol', 'UNKNOWN')
-                log(f'[WARN] {symbol} processing failed: {e}')
-                summary_rows.append({
-                    'symbol': symbol,
-                    'strategy': 'sell_put',
-                    'candidate_count': 0,
-                    'top_contract': '',
-                    'expiration': '',
-                    'strike': None,
-                    'dte': None,
-                    'net_income': None,
-                    'annualized_return': None,
-                    'risk_label': '',
-                    'note': f'处理失败: {e}',
-                })
-                summary_rows.append({
-                    'symbol': symbol,
-                    'strategy': 'sell_call',
-                    'candidate_count': 0,
-                    'top_contract': '',
-                    'expiration': '',
-                    'strike': None,
-                    'dte': None,
-                    'net_income': None,
-                    'annualized_return': None,
-                    'risk_label': '',
-                    'note': f'处理失败: {e}',
-                })
-            symbols.append(item['symbol'])
+        symbols = [r.get('symbol') for r in summary_rows if r.get('symbol')]
 
         # fetch-only stage: stop after market-data fetch
         # (but do not interfere with stage-only late-stage runs)
