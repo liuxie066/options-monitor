@@ -127,6 +127,9 @@ def main() -> None:
     from test_config_loader_validation_cache import (
         test_scheduled_validation_is_cached,
     )
+    from test_atomic_write_json import (
+        test_atomic_write_json_writes_valid_json,
+    )
 
     tests = [
         test_parse_futu_fill_message,
@@ -142,6 +145,7 @@ def main() -> None:
         test_scan_scheduler_scan_is_per_account,
         test_select_markets_to_run_hk_break_respected,
         test_scheduled_validation_is_cached,
+        test_atomic_write_json_writes_valid_json,
     ]
     for t in tests:
         t()

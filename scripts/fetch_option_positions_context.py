@@ -7,6 +7,8 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+from scripts.io_utils import atomic_write_json
+
 # Local helper to get FX rates (USDCNY/HKDCNY) for base-currency normalization.
 # This file lives in the same scripts/ directory, so plain import works.
 from fx_rates import get_rates
@@ -271,8 +273,7 @@ def main():
     out_path = Path(args.out)
     if not out_path.is_absolute():
         out_path = (base / out_path).resolve()
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(ctx, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_json(out_path, ctx)
 
     print(f"[DONE] option positions context -> {out_path}")
     print(f"market={args.market} account={args.account or '-'} selected={ctx['raw_selected_count']}")
