@@ -115,6 +115,9 @@ def main() -> None:
     from test_report_labels_no_stale import (
         test_add_sell_put_labels_overwrites_on_empty,
     )
+    from test_scan_scheduler_notify_semantics import (
+        test_scan_scheduler_emits_is_notify_window_open_and_backcompat_should_notify,
+    )
 
     tests = [
         test_parse_futu_fill_message,
@@ -126,6 +129,7 @@ def main() -> None:
         test_run_log_data_small,
         test_build_context_richtext_normalization_and_hk_symbol,
         test_add_sell_put_labels_overwrites_on_empty,
+        test_scan_scheduler_emits_is_notify_window_open_and_backcompat_should_notify,
     ]
     for t in tests:
         t()

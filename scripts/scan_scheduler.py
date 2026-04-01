@@ -19,7 +19,7 @@ class SchedulerDecision:
     interval_min: int
     notify_cooldown_min: int
     should_run_scan: bool
-    should_notify: bool
+    is_notify_window_open: bool
     reason: str
     next_run_utc: str
     next_run_market: str
@@ -171,13 +171,13 @@ def decide(schedule_cfg: dict, state: dict, now_utc: datetime, account: str | No
             should_run_scan = False
             reason = f'距离上次扫描不足 {interval_min} 分钟。'
 
-    should_notify = False
+    is_notify_window_open = False
     if (not in_hours) and (not monitor_off_hours):
-        should_notify = False
+        is_notify_window_open = False
     elif last_notify is None:
-        should_notify = True
+        is_notify_window_open = True
     else:
-        should_notify = (now_utc - last_notify.astimezone(timezone.utc)) >= timedelta(minutes=notify_cooldown_min)
+        is_notify_window_open = (now_utc - last_notify.astimezone(timezone.utc)) >= timedelta(minutes=notify_cooldown_min)
 
     if not should_run_scan:
         if last_scan is None or interval_min >= 10**8:
@@ -199,7 +199,7 @@ def decide(schedule_cfg: dict, state: dict, now_utc: datetime, account: str | No
         interval_min=interval_min,
         notify_cooldown_min=notify_cooldown_min,
         should_run_scan=should_run_scan,
-        should_notify=should_notify,
+        is_notify_window_open=is_notify_window_open,
         reason=reason,
         next_run_utc=to_iso(next_run),
         next_run_market=next_run.astimezone(market_tz).isoformat(),
@@ -243,16 +243,20 @@ def main():
 
     now_utc = datetime.now(timezone.utc)
     state = read_state(state_path)
-    decision = decide(schedule_cfg, state, now_utc, account=(str(args.account) if args.account else None))
+    decision = decide(schedule_cfg, state, now_utc, account=(str(args.account) if args.account else None), schedule_key=schedule_key)
 
     if args.force:
         decision.should_run_scan = True
+        decision.is_notify_window_open = True
         decision.reason = 'force 模式：忽略频率控制直接执行。'
 
+    payload = asdict(decision)
+    payload['should_notify'] = bool(payload.get('is_notify_window_open'))
+
     if args.jsonl:
-        print(json.dumps(asdict(decision), ensure_ascii=False))
+        print(json.dumps(payload, ensure_ascii=False))
     else:
-        print(json.dumps(asdict(decision), ensure_ascii=False, indent=2))
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
 
     if not schedule_enabled and not args.force:
         print('[INFO] schedule disabled in config; no scheduling enforcement applied.')
