@@ -112,6 +112,9 @@ def main() -> None:
     from test_fetch_portfolio_context_richtext import (
         test_build_context_richtext_normalization_and_hk_symbol,
     )
+    from test_report_labels_no_stale import (
+        test_add_sell_put_labels_overwrites_on_empty,
+    )
 
     tests = [
         test_parse_futu_fill_message,
@@ -122,6 +125,7 @@ def main() -> None:
         test_run_log_writer_create_and_append,
         test_run_log_data_small,
         test_build_context_richtext_normalization_and_hk_symbol,
+        test_add_sell_put_labels_overwrites_on_empty,
     ]
     for t in tests:
         t()
