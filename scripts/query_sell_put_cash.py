@@ -210,6 +210,41 @@ def main():
     if cash_avail_cny is not None and cash_secured_total_cny is not None:
         cash_free_cny = cash_avail_cny - cash_secured_total_cny
 
+    # Optional "total" view: convert multi-ccy cash in holdings into CNY when FX is available.
+    cash_avail_total_cny = None
+    if isinstance(cash_by_ccy, dict):
+        total = 0.0
+        ok = True
+        for ccy, v in cash_by_ccy.items():
+            try:
+                fv = float(v)
+            except Exception:
+                continue
+            if not fv:
+                continue
+            c = str(ccy).strip().upper()
+            if c in ('CNY', 'RMB'):
+                total += fv
+            elif c == 'USD':
+                if not usdcny:
+                    ok = False
+                    break
+                total += fv * float(usdcny)
+            elif c == 'HKD':
+                if not hkdcny:
+                    ok = False
+                    break
+                total += fv * float(hkdcny)
+            else:
+                ok = False
+                break
+        if ok:
+            cash_avail_total_cny = total
+
+    cash_free_total_cny = None
+    if cash_avail_total_cny is not None and cash_secured_total_cny is not None:
+        cash_free_total_cny = cash_avail_total_cny - cash_secured_total_cny
+
     payload = {
         "as_of_utc": datetime.now(timezone.utc).isoformat(),
         "market": args.market,
@@ -220,6 +255,8 @@ def main():
         "cash_available_cny": cash_avail_cny,
         "cash_secured_used_cny": cash_secured_total_cny,
         "cash_free_cny": cash_free_cny,
+        "cash_available_total_cny": cash_avail_total_cny,
+        "cash_free_total_cny": cash_free_total_cny,
         "fx_rates": {"USDCNY": usdcny, "HKDCNY": hkdcny},
         "cash_secured_total_by_ccy": total_by_ccy_norm,
         "cash_secured_by_symbol_by_ccy": norm_by_ccy,
@@ -239,6 +276,10 @@ def main():
     lines.append(f"- base(CNY) 现金（持仓表）: {money(cash_avail_cny, 'CNY')}")
     lines.append(f"- Sell Put 已占用担保现金（折算CNY）: {money(cash_secured_total_cny, 'CNY')}")
     lines.append(f"- 不在担保之内的剩余现金（base free, CNY）: {money(cash_free_cny, 'CNY')}")
+
+    # Total view (all cash in holdings converted to CNY) — only when FX is available.
+    lines.append(f"- 总现金（holdings 全币种折算CNY）: {money(payload.get('cash_available_total_cny'), 'CNY')}")
+    lines.append(f"- 总剩余现金（total free, 折算CNY）: {money(payload.get('cash_free_total_cny'), 'CNY')}")
 
     if usdcny or hkdcny:
         parts=[]
