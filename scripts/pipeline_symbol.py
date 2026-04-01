@@ -90,6 +90,27 @@ def process_symbol(
 
     # ---------- Fetch required_data ----------
     fetch_cfg = symbol_cfg.get('fetch', {}) or {}
+    min_dte = None
+    max_dte = None
+    try:
+        min_dte = int(max(
+            float(sp.get('min_dte') or 0) if want_put else 0,
+            float(cc.get('min_dte') or 0) if want_call else 0,
+            0,
+        ))
+    except Exception:
+        min_dte = None
+    try:
+        max_dte = int(max(
+            float(sp.get('max_dte') or 0) if want_put else 0,
+            float(cc.get('max_dte') or 0) if want_call else 0,
+            0,
+        ))
+        if max_dte <= 0:
+            max_dte = None
+    except Exception:
+        max_dte = None
+
     ensure_required_data(
         py=py,
         base=base,
@@ -105,6 +126,8 @@ def process_symbol(
         fetch_port=int(fetch_cfg.get('port') or 11111),
         spot_from_pm=(fetch_cfg.get('spot_from_portfolio_management', None)),
         max_strike=(float(sp.get('max_strike')) if (want_put and sp.get('max_strike') is not None) else None),
+        min_dte=min_dte,
+        max_dte=max_dte,
     )
 
     # ---------- Scan sell_put ----------

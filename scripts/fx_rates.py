@@ -112,9 +112,31 @@ def get_usd_per_cny(base_dir: Path) -> float | None:
     """Return USD per 1 CNY from rate_cache.json.
 
     rate_cache stores USDCNY (CNY per 1 USD). We invert it.
+
+    NOTE: For backward compatibility this function keeps the original signature.
+    It will try multiple cache locations:
+      1) <base_dir>/output/state/rate_cache.json (legacy)
+      2) <base_dir>/output_shared/state/rate_cache.json (shared)
+      3) <base_dir>/../portfolio-management/.data/rate_cache.json (shared)
     """
     try:
-        rates = get_rates(cache_path=(Path(base_dir) / 'output/state/rate_cache.json').resolve())
+        base_dir = Path(base_dir).resolve()
+        candidates = [
+            (base_dir / 'output' / 'state' / 'rate_cache.json').resolve(),
+            (base_dir / 'output_shared' / 'state' / 'rate_cache.json').resolve(),
+        ]
+        # workspace sibling (best-effort)
+        try:
+            candidates.append((base_dir.parents[0] / 'portfolio-management' / '.data' / 'rate_cache.json').resolve())
+        except Exception:
+            pass
+
+        rates = None
+        for p in candidates:
+            rates = get_rates(cache_path=p, shared_cache_path=None)
+            if rates:
+                break
+
         if not rates:
             return None
         usdcny = rates.get('USDCNY')

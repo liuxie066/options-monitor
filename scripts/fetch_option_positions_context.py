@@ -1,11 +1,20 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+# Allow running as a script without installation.
+# When executed as `python scripts/fetch_option_positions_context.py`, ensure repo root is on sys.path
+# so `import scripts.*` works consistently.
+import sys
+from pathlib import Path
+
+repo_base = Path(__file__).resolve().parents[1]
+if str(repo_base) not in sys.path:
+    sys.path.insert(0, str(repo_base))
+
 import argparse
 import json
 import urllib.request
 from datetime import datetime, timezone
-from pathlib import Path
 
 from scripts.io_utils import atomic_write_json
 
@@ -238,7 +247,9 @@ def main():
     parser.add_argument("--pm-config", default="../portfolio-management/config.json")
     parser.add_argument("--market", default="富途")
     parser.add_argument("--account", default=None)
-    parser.add_argument("--out", default="output/state/option_positions_context.json")
+    parser.add_argument("--out", default=None, help="Output JSON path (default: <state-dir>/option_positions_context.json)")
+    parser.add_argument("--state-dir", default="output/state", help="Directory for outputs (default: output/state)")
+    parser.add_argument("--quiet", action="store_true", help="suppress stdout (scheduled/cron)")
     args = parser.parse_args()
 
     base = Path(__file__).resolve().parents[1]
@@ -263,30 +274,44 @@ def main():
     # Load FX rates for base-currency normalization (CNY).
     # Uses local cache + shared portfolio-management cache when available.
     base = Path(__file__).resolve().parents[1]
+    # Resolve output path/state_dir
+    if args.out:
+        out_path = Path(args.out)
+        if not out_path.is_absolute():
+            out_path = (base / out_path).resolve()
+        state_dir = out_path.parent
+    else:
+        sd = Path(args.state_dir)
+        if not sd.is_absolute():
+            sd = (base / sd).resolve()
+        sd.mkdir(parents=True, exist_ok=True)
+        state_dir = sd
+        out_path = (state_dir / 'option_positions_context.json').resolve()
+
+    # Prefer co-locating rate_cache with state_dir
+
     rates = get_rates(
-        cache_path=(base / 'output' / 'state' / 'rate_cache.json'),
+        cache_path=(state_dir / 'rate_cache.json').resolve(),
         shared_cache_path=(Path(__file__).resolve().parents[2] / 'portfolio-management' / '.data' / 'rate_cache.json'),
         max_age_hours=24,
     )
     ctx = build_context(records, market=args.market, account=args.account, rates=rates)
 
-    out_path = Path(args.out)
-    if not out_path.is_absolute():
-        out_path = (base / out_path).resolve()
     atomic_write_json(out_path, ctx)
 
-    print(f"[DONE] option positions context -> {out_path}")
-    print(f"market={args.market} account={args.account or '-'} selected={ctx['raw_selected_count']}")
+    if not args.quiet:
+        print(f"[DONE] option positions context -> {out_path}")
+        print(f"market={args.market} account={args.account or '-'} selected={ctx['raw_selected_count']}")
 
-    # Backward/forward compatible stats
-    cash_secured_syms = 0
-    try:
-        m = ctx.get('cash_secured_by_symbol_by_ccy') or {}
-        cash_secured_syms = len(m)
-    except Exception:
+        # Backward/forward compatible stats
         cash_secured_syms = 0
+        try:
+            m = ctx.get('cash_secured_by_symbol_by_ccy') or {}
+            cash_secured_syms = len(m)
+        except Exception:
+            cash_secured_syms = 0
 
-    print(f"locked_symbols={len(ctx.get('locked_shares_by_symbol') or {})} cash_secured_symbols={cash_secured_syms}")
+        print(f"locked_symbols={len(ctx.get('locked_shares_by_symbol') or {})} cash_secured_symbols={cash_secured_syms}")
 
 
 if __name__ == "__main__":

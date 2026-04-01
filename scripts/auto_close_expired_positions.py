@@ -100,19 +100,27 @@ class Decision:
 def main():
     ap = argparse.ArgumentParser(description='Auto-close expired option_positions (table maintenance)')
     ap.add_argument('--pm-config', default='../portfolio-management/config.json')
-    ap.add_argument('--context', default='output/state/option_positions_context.json')
+    ap.add_argument('--context', default=None, help='Option positions context JSON (default: <state-dir>/option_positions_context.json)')
+    ap.add_argument('--state-dir', default='output/state', help='State dir for default context path (default: output/state)')
     ap.add_argument('--as-of-utc', default=None, help='ISO time; default now UTC')
     ap.add_argument('--grace-days', type=int, default=1)
     ap.add_argument('--max-close', type=int, default=20)
     ap.add_argument('--dry-run', action='store_true', help='do not write updates')
     ap.add_argument('--summary-out', default='output/reports/auto_close_summary.txt')
+    ap.add_argument('--quiet', action='store_true', help='suppress stdout (scheduled/cron)')
     args = ap.parse_args()
 
     base = Path(__file__).resolve().parents[1]
 
-    ctx_path = Path(args.context)
-    if not ctx_path.is_absolute():
-        ctx_path = (base / ctx_path).resolve()
+    if args.context:
+        ctx_path = Path(args.context)
+        if not ctx_path.is_absolute():
+            ctx_path = (base / ctx_path).resolve()
+    else:
+        sd = Path(args.state_dir)
+        if not sd.is_absolute():
+            sd = (base / sd).resolve()
+        ctx_path = (sd / 'option_positions_context.json').resolve()
     ctx = json.loads(ctx_path.read_text(encoding='utf-8')) if ctx_path.exists() else {}
 
     positions = ctx.get('open_positions_min') or []
@@ -262,8 +270,9 @@ def main():
     summary_out.parent.mkdir(parents=True, exist_ok=True)
     summary_out.write_text("\n".join(lines).strip() + "\n", encoding='utf-8')
 
-    print(f"[DONE] auto_close summary -> {summary_out}")
-    print(f"should_close={len(to_close)} applied={len(applied)} errors={len(errors)} dry_run={bool(args.dry_run)}")
+    if not args.quiet:
+        print(f"[DONE] auto_close summary -> {summary_out}")
+        print(f"should_close={len(to_close)} applied={len(applied)} errors={len(errors)} dry_run={bool(args.dry_run)}")
 
 
 if __name__ == '__main__':
