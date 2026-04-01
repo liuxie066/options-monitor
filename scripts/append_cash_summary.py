@@ -5,7 +5,7 @@ We do NOT compute any "after buying" remaining cash.
 We only compute current base free(CNY) per account.
 
 Input:
-- notification text file: output/reports/symbols_notification.txt (per-account)
+- notification text file: <report_dir>/symbols_notification.txt (per-account; default report_dir=output/reports)
 
 Output:
 - same file, with a footer appended.
@@ -55,11 +55,23 @@ def main():
     ap.add_argument('--pm-config', default='../portfolio-management/config.json')
     ap.add_argument('--market', default='富途')
     ap.add_argument('--accounts', nargs='+', default=['lx', 'sy'])
-    ap.add_argument('--notification', default='output/reports/symbols_notification.txt')
+    ap.add_argument('--report-dir', default='output/reports', help='Report dir for default notification path (default: output/reports)')
+    ap.add_argument('--notification', default=None, help='Notification text file (default: <report-dir>/symbols_notification.txt)')
     args = ap.parse_args()
 
     base = Path(__file__).resolve().parents[1]
-    notif_path = base / args.notification
+
+    report_dir = Path(args.report_dir)
+    if not report_dir.is_absolute():
+        report_dir = (base / report_dir).resolve()
+
+    if args.notification:
+        notif_path = Path(args.notification)
+        if not notif_path.is_absolute():
+            notif_path = (base / notif_path).resolve()
+    else:
+        notif_path = (report_dir / 'symbols_notification.txt').resolve()
+
     text = notif_path.read_text(encoding='utf-8').strip() if notif_path.exists() else ''
 
     # Remove any previous cash footer blocks to keep the file clean and idempotent.

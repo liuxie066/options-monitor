@@ -202,7 +202,7 @@ def get_spot_opend(ctx, underlier_code: str) -> float | None:
         return None
 
 
-def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = '127.0.0.1', port: int = 11111, spot_override: float | None = None, *, spot_from_pm: bool = False, base_dir: Path | None = None, option_types: str = 'put,call', min_strike: float | None = None, max_strike: float | None = None, retry_max_attempts: int = 4, retry_time_budget_sec: float = 8.0, retry_base_delay_sec: float = 0.8, retry_max_delay_sec: float = 6.0, no_retry: bool = False, chain_cache: bool = False, chain_cache_force_refresh: bool = False) -> dict[str, Any]:
+def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = '127.0.0.1', port: int = 11111, spot_override: float | None = None, *, spot_from_pm: bool = False, base_dir: Path | None = None, option_types: str = 'put,call', min_strike: float | None = None, max_strike: float | None = None, min_dte: int | None = None, max_dte: int | None = None, retry_max_attempts: int = 4, retry_time_budget_sec: float = 8.0, retry_base_delay_sec: float = 0.8, retry_max_delay_sec: float = 6.0, no_retry: bool = False, chain_cache: bool = False, chain_cache_force_refresh: bool = False) -> dict[str, Any]:
     from futu import OpenQuoteContext, RET_OK
 
     u = normalize_underlier(symbol)
@@ -376,6 +376,7 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
         # Option chain cache (day-level).
         chain_obj = None
         cache_path = None
+        ret = RET_OK
         if chain_cache and base_dir is not None:
             cache_path = _chain_cache_path(base_dir, u.code)
             cached = _load_chain_cache(cache_path)
@@ -401,10 +402,32 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
             except Exception:
                 expirations_all = []
 
-            if limit_expirations and expirations_all:
-                expirations_pick = expirations_all[: int(limit_expirations)]
+            expirations_pick0 = expirations_all
+            # If min_dte/max_dte is requested, filter expirations by DTE window.
+            if expirations_all and ((min_dte is not None) or (max_dte is not None)):
+                try:
+                    from datetime import datetime
+                    today0 = date.today()
+                    filtered = []
+                    for e in expirations_all:
+                        try:
+                            d0 = datetime.fromisoformat(str(e)[:10]).date()
+                            dte0 = int((d0 - today0).days)
+                            if (min_dte is not None) and (dte0 < int(min_dte)):
+                                continue
+                            if (max_dte is not None) and (dte0 > int(max_dte)):
+                                continue
+                            filtered.append(str(e)[:10])
+                        except Exception:
+                            continue
+                    expirations_pick0 = filtered if filtered else expirations_all
+                except Exception:
+                    expirations_pick0 = expirations_all
+
+            if limit_expirations and expirations_pick0:
+                expirations_pick = expirations_pick0[: int(limit_expirations)]
             else:
-                expirations_pick = expirations_all
+                expirations_pick = expirations_pick0
 
             chains = []
             if expirations_pick:
@@ -742,6 +765,8 @@ def main():
     ap.add_argument('--option-types', default='put,call', help='Comma-separated option types to include: put,call (default: put,call)')
     ap.add_argument('--min-strike', type=float, default=None)
     ap.add_argument('--max-strike', type=float, default=None)
+    ap.add_argument('--min-dte', type=int, default=None, help='Only pick expirations with DTE >= min_dte before applying limit-expirations')
+    ap.add_argument('--max-dte', type=int, default=None, help='Only pick expirations with DTE <= max_dte before applying limit-expirations')
     ap.add_argument('--host', default='127.0.0.1')
     ap.add_argument('--port', type=int, default=11111)
     ap.add_argument('--spot', type=float, default=None, help='override spot if OpenD has no quote right')
@@ -782,6 +807,8 @@ def main():
             option_types=('put,call' if (want_put and want_call) else ('put' if want_put else 'call')),
             min_strike=args.min_strike,
             max_strike=args.max_strike,
+            min_dte=args.min_dte,
+            max_dte=args.max_dte,
             retry_max_attempts=int(args.retry_max_attempts),
             retry_time_budget_sec=float(args.retry_time_budget_sec),
             retry_base_delay_sec=float(args.retry_base_delay_sec),

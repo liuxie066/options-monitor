@@ -40,7 +40,8 @@ def build_symbols_summary(summary_rows: list[dict], report_dir: Path, *, is_sche
         txt_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
         print(f"[DONE] symbols summary text -> {txt_path}")
 
-    print(f"[DONE] symbols summary -> {csv_path}")
+    if not is_scheduled:
+        print(f"[DONE] symbols summary -> {csv_path}")
 
 def build_symbols_digest(symbols: list[str], report_dir: Path):
     lines = ['# Symbols Strategy Digest', '']

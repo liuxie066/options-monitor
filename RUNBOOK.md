@@ -3,12 +3,12 @@
 ## ✅ 日常使用（唯一入口）
 
 ```bash
-cd /home/node/.openclaw/workspace/options-monitor
+cd /home/node/.openclaw/workspace/options-monitor-prod
 ./run_watchlist.sh
 ```
 
 - 读取：`config.json`
-- 生成：`output/reports/symbols_*` 以及每标的 `*_sell_put_* / *_sell_call_*`
+- 生成：`<report_dir>/symbols_*` 以及每标的 `*_sell_put_* / *_sell_call_*`（默认 report_dir=output/reports）
 
 > 提醒：不要用系统 python 直接跑脚本，统一用项目 `.venv`（脚本已自动处理）。
 
@@ -46,7 +46,7 @@ openclaw cron run 9cba60f7-407b-4427-9120-0a176b818de9 --expect-final --timeout 
 当你发现 **重启 OpenClaw / 重启容器 / 换机器** 后突然无法 push/PR，先跑自检：
 
 ```bash
-cd /home/node/.openclaw/workspace/options-monitor
+cd /home/node/.openclaw/workspace/options-monitor-prod
 scripts/ssh_selfcheck.sh
 ```
 
@@ -68,12 +68,12 @@ openclaw cron runs
 
 2) 上一次运行结果（最重要）：
 ```bash
-cat /home/node/.openclaw/workspace/options-monitor/output/state/last_run.json
+cat /home/node/.openclaw/workspace/options-monitor-prod/output/state/last_run.json
 ```
 
 3) 最新通知内容：
 ```bash
-cat /home/node/.openclaw/workspace/options-monitor/output/reports/symbols_notification.txt
+cat /home/node/.openclaw/workspace/options-monitor-prod/<report_dir>/symbols_notification.txt  # 默认 report_dir=output/reports
 ```
 
 ## Archived scripts

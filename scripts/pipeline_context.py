@@ -29,11 +29,12 @@ def load_portfolio_context(
     ttl_sec: int,
     timeout_sec: int,
     is_scheduled: bool,
+    state_dir: Path,
     log,
 ) -> dict | None:
     """Best-effort load portfolio context to dict."""
     try:
-        port_path = (base / 'output/state/portfolio_context.json').resolve()
+        port_path = (state_dir / 'portfolio_context.json').resolve()
         cached = None
         if ttl_sec > 0 and is_fresh(port_path, ttl_sec):
             cached = load_cached_json(port_path)
@@ -44,10 +45,12 @@ def load_portfolio_context(
             py, 'scripts/fetch_portfolio_context.py',
             '--pm-config', str(pm_config),
             '--market', str(market),
-            '--out', 'output/state/portfolio_context.json',
+            '--out', str((state_dir / 'portfolio_context.json').as_posix()),
         ]
         if account:
             cmd.extend(['--account', str(account)])
+        if is_scheduled:
+            cmd.append('--quiet')
         run_cmd(cmd, cwd=base, timeout_sec=timeout_sec, is_scheduled=is_scheduled)
         return load_cached_json(port_path) or json.loads(port_path.read_text(encoding='utf-8'))
     except BaseException as e:
@@ -66,6 +69,7 @@ def load_option_positions_context(
     timeout_sec: int,
     is_scheduled: bool,
     report_dir: Path,
+    state_dir: Path,
     log,
 ) -> tuple[dict | None, bool]:
     """Best-effort load option_positions context.
@@ -73,7 +77,7 @@ def load_option_positions_context(
     Returns (context, refreshed).
     """
     try:
-        opt_path = (base / 'output/state/option_positions_context.json').resolve()
+        opt_path = (state_dir / 'option_positions_context.json').resolve()
         cached = None
         if ttl_sec > 0 and is_fresh(opt_path, ttl_sec):
             cached = load_cached_json(opt_path)
@@ -84,10 +88,12 @@ def load_option_positions_context(
             py, 'scripts/fetch_option_positions_context.py',
             '--pm-config', str(pm_config),
             '--market', str(market),
-            '--out', 'output/state/option_positions_context.json',
+            '--out', str(opt_path.as_posix()),
         ]
         if account:
             cmd.extend(['--account', str(account)])
+        if is_scheduled:
+            cmd.append('--quiet')
         run_cmd(cmd, cwd=base, timeout_sec=timeout_sec, is_scheduled=is_scheduled)
         ctx = load_cached_json(opt_path) or json.loads(opt_path.read_text(encoding='utf-8'))
         return ctx, True
@@ -102,6 +108,7 @@ def maybe_auto_close_expired_positions(
     base: Path,
     pm_config: str,
     report_dir: Path,
+    state_dir: Path,
     timeout_sec: int,
     is_scheduled: bool,
     refreshed: bool,
@@ -112,25 +119,29 @@ def maybe_auto_close_expired_positions(
     if not refreshed:
         return
     try:
-        run_cmd([
+        cmd = [
             py, 'scripts/auto_close_expired_positions.py',
             '--pm-config', str(pm_config),
-            '--context', 'output/state/option_positions_context.json',
+            '--context', str((state_dir / 'option_positions_context.json').as_posix()),
+            '--state-dir', str(state_dir),
             '--grace-days', '1',
             '--max-close', '20',
             '--summary-out', str((report_dir / 'auto_close_summary.txt').as_posix()),
-        ], cwd=base, timeout_sec=timeout_sec, is_scheduled=is_scheduled)
+        ]
+        if is_scheduled:
+            cmd.append('--quiet')
+        run_cmd(cmd, cwd=base, timeout_sec=timeout_sec, is_scheduled=is_scheduled)
     except Exception as e2:
         log(f"[WARN] auto-close expired positions failed: {e2}")
 
 
-def load_fx_rates(*, base: Path, log) -> tuple[float | None, float | None]:
+def load_fx_rates(*, base: Path, state_dir: Path, log) -> tuple[float | None, float | None]:
     """Best-effort FX loader.
 
     Keep the original behavior from run_pipeline:
     - load scripts/fx_rates.py via importlib by file path
     - fx_usd_per_cny from get_usd_per_cny(base)
-    - hkdcny from output/state/rate_cache.json via get_rates
+    - hkdcny from state_dir/rate_cache.json via get_rates
     """
     fx_usd_per_cny = None
     hkdcny = None
@@ -148,7 +159,7 @@ def load_fx_rates(*, base: Path, log) -> tuple[float | None, float | None]:
 
         fx_usd_per_cny = mod.get_usd_per_cny(base)  # type: ignore
         try:
-            rates = mod.get_rates((base / 'output/state/rate_cache.json').resolve(), None)  # type: ignore
+            rates = mod.get_rates((state_dir / 'rate_cache.json').resolve(), None)  # type: ignore
             hkdcny = float(rates.get('HKDCNY')) if rates and rates.get('HKDCNY') else None
         except Exception:
             hkdcny = None
@@ -166,6 +177,7 @@ def build_pipeline_context(
     portfolio_timeout_sec: int,
     runtime: dict,
     is_scheduled: bool,
+    state_dir: Path,
     log,
     no_context: bool,
     want_scan: bool,
@@ -192,6 +204,7 @@ def build_pipeline_context(
         ttl_sec=ttl_port_ctx,
         timeout_sec=portfolio_timeout_sec,
         is_scheduled=is_scheduled,
+        state_dir=state_dir,
         log=log,
     )
 
@@ -205,6 +218,7 @@ def build_pipeline_context(
         timeout_sec=portfolio_timeout_sec,
         is_scheduled=is_scheduled,
         report_dir=report_dir,
+        state_dir=state_dir,
         log=log,
     )
 
@@ -213,12 +227,13 @@ def build_pipeline_context(
         base=base,
         pm_config=str(pm_config),
         report_dir=report_dir,
+        state_dir=state_dir,
         timeout_sec=portfolio_timeout_sec,
         is_scheduled=is_scheduled,
         refreshed=refreshed,
         log=log,
     )
 
-    fx_usd_per_cny, hkdcny = load_fx_rates(base=base, log=log)
+    fx_usd_per_cny, hkdcny = load_fx_rates(base=base, state_dir=state_dir, log=log)
 
     return portfolio_ctx, option_ctx, fx_usd_per_cny, hkdcny
