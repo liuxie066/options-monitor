@@ -28,6 +28,8 @@ def ensure_required_data(
     fetch_port: int = 11111,
     spot_from_pm: bool | None = None,
     max_strike: float | None = None,
+    min_dte: int | None = None,
+    max_dte: int | None = None,
 ) -> None:
     sym = symbol
     raw = (required_data_dir / 'raw' / f"{sym}_required_data.json").resolve()
@@ -37,8 +39,21 @@ def ensure_required_data(
         return
 
     # Always fetch before scan if required_data missing.
+    # Also refetch when min_dte is requested but existing required_data doesn't reach that DTE.
     if raw.exists() and raw.stat().st_size > 0 and parsed.exists() and parsed.stat().st_size > 0:
-        return
+        if min_dte is not None:
+            try:
+                import pandas as pd
+
+                df0 = pd.read_csv(parsed, usecols=['dte'])
+                mx = pd.to_numeric(df0['dte'], errors='coerce').max()
+                if mx is not None and mx >= float(min_dte):
+                    return
+            except Exception:
+                # On read/parse failure, refetch to be safe.
+                pass
+        else:
+            return
 
     src = str(fetch_source or 'yahoo').strip().lower()
 
@@ -54,6 +69,10 @@ def ensure_required_data(
             '--option-types', opt_types,
             '--output-root', str(required_data_dir),
         ]
+        if min_dte is not None:
+            cmd.extend(['--min-dte', str(int(min_dte))])
+        if max_dte is not None:
+            cmd.extend(['--max-dte', str(int(max_dte))])
 
         # US spot policy: OpenD often lacks US quote right; default to PM spot fetch unless explicitly disabled.
         if spot_from_pm is None:
@@ -63,6 +82,8 @@ def ensure_required_data(
             cmd.append('--spot-from-pm')
         if (max_strike is not None) and want_put:
             cmd.extend(['--max-strike', str(max_strike)])
+        # Cache option_chain daily to reduce OpenD calls (US/HK share the same OpenD limit).
+        cmd.append('--chain-cache')
         if is_scheduled:
             cmd.append('--quiet')
     else:

@@ -156,8 +156,13 @@ def main():
     rows = []
     for symbol in args.symbols:
         path = input_root / "parsed" / f"{symbol}_required_data.csv"
-        df = pd.read_csv(path)
-        df = df[df["option_type"] == "put"].copy()
+        try:
+            df = pd.read_csv(path)
+        except pd.errors.EmptyDataError:
+            # Keep consistent behavior with downstream: an empty required_data CSV should
+            # produce an empty candidates CSV, not crash the whole tick.
+            df = pd.DataFrame()
+        df = df[df["option_type"] == "put"].copy() if (not df.empty and ("option_type" in df.columns)) else pd.DataFrame()
 
         for _, row in df.iterrows():
             # Critical compute gate: avoid NaN/None silently propagating into returns.

@@ -16,10 +16,10 @@ from pathlib import Path
 from scripts.subprocess_utils import run_cmd
 
 
-def stage_only_changes_out(*, is_scheduled: bool) -> str:
-    # In dev iteration, stage-only should not mutate snapshot/change history.
-    # (Otherwise, formatting tests would pollute symbols_summary_prev.csv / changes.)
-    return '/dev/null'
+def stage_only_changes_out(*, report_dir: Path) -> str:
+    # Stage-only should not mutate snapshot history, but it's still useful to
+    # materialize changes output for notify rendering and debugging.
+    return str((report_dir / 'symbols_changes.txt').as_posix())
 
 
 def run_stage_only_alert_notify(
@@ -27,6 +27,7 @@ def run_stage_only_alert_notify(
     py: str,
     base: Path,
     report_dir: Path,
+    state_dir: Path,
     is_scheduled: bool,
     stage_only: str,
     want,
@@ -44,7 +45,7 @@ def run_stage_only_alert_notify(
         if not (alerts_path.exists() and alerts_path.stat().st_size > 0):
             raise SystemExit(f"[STAGE_ONLY_ERROR] missing required file: {alerts_path}")
 
-    changes_out = stage_only_changes_out(is_scheduled=is_scheduled)
+    changes_out = stage_only_changes_out(report_dir=report_dir)
 
     alert_cmd = [
         py, 'scripts/alert_engine.py',
@@ -53,11 +54,8 @@ def run_stage_only_alert_notify(
         '--changes-output', changes_out,
     ]
     # stage-only: do NOT update snapshot/history
-    if (not is_scheduled) and (not stage_only):
-        alert_cmd.extend([
-            '--previous-summary', 'output/state/symbols_summary_prev.csv',
-            '--update-snapshot',
-        ])
+    # stage-only: do NOT update snapshot/history (do not touch symbols_summary_prev.csv)
+    # NOTE: state_dir is injected for future compatibility but intentionally unused here.
     if want('alert'):
         run_cmd(alert_cmd, cwd=base, is_scheduled=is_scheduled)
 

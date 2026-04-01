@@ -223,7 +223,8 @@ def decide(schedule_cfg: dict, state: dict, now_utc: datetime, account: str | No
 def main():
     parser = argparse.ArgumentParser(description='Scan scheduler / frequency controller for options-monitor')
     parser.add_argument('--config', required=True)
-    parser.add_argument('--state', default='output/state/scheduler_state.json')
+    parser.add_argument('--state-dir', default='output/state', help='Directory for scheduler_state.json (default: output/state)')
+    parser.add_argument('--state', default=None, help='[deprecated] explicit scheduler_state.json path. Prefer --state-dir.' )
     parser.add_argument('--schedule-key', default='schedule', help='Top-level key to read schedule config from (default: schedule). Example: schedule_hk' )
     parser.add_argument('--account', default=None, help='Account id for per-account notify cooldown state (optional).')
     parser.add_argument('--run-if-due', action='store_true', help='When due, run scripts/run_pipeline.py --config <config>')
@@ -237,9 +238,17 @@ def main():
     config_path = Path(args.config)
     if not config_path.is_absolute():
         config_path = (base / config_path).resolve()
-    state_path = Path(args.state)
-    if not state_path.is_absolute():
-        state_path = (base / state_path).resolve()
+    state_dir = Path(args.state_dir)
+    if not state_dir.is_absolute():
+        state_dir = (base / state_dir).resolve()
+    state_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.state:
+        state_path = Path(args.state)
+        if not state_path.is_absolute():
+            state_path = (base / state_path).resolve()
+    else:
+        state_path = (state_dir / 'scheduler_state.json').resolve()
 
     # config supports JSON (preferred) or YAML (legacy)
     if config_path.suffix.lower() == '.json':

@@ -63,6 +63,8 @@ def main():
     parser.add_argument('--shared-required-data', default=None, help='Path to shared required_data directory (contains raw/ and parsed/). If set, it is authoritative and fetch is skipped when artifacts exist.')
     # New flow (transitional): allow redirecting report outputs away from ./output/reports
     parser.add_argument('--report-dir', default=None, help='Directory to write reports (symbols_summary/alerts/notification). Default: output/reports')
+    # New flow (Stage 4): allow redirecting state/context cache away from ./output/state
+    parser.add_argument('--state-dir', default=None, help='Directory to read/write state cache (portfolio_context/option_positions_context/rate_cache/etc). Default: output/state')
     # Backward-compatible no-op flags (legacy shared scan plumbing removed)
     parser.add_argument('--shared-scan-dir', default=None, help='[no-op] legacy compatibility flag')
     parser.add_argument('--reuse-shared-scan', action='store_true', help='[no-op] legacy compatibility flag')
@@ -79,6 +81,32 @@ def main():
     STAGE = stage
     STAGE_ONLY = stage_only
 
+    # stage semantics helper
+    # - stage=fetch  => fetch only (no scan/alert/notify)
+    # - stage=scan   => fetch + scan (no alert/notify)
+    # - stage=alert  => fetch + scan + alert
+    # - stage=notify => fetch + scan + alert + notify
+    # - stage=all    => same as notify
+    def want(step: str) -> bool:
+        s = str(step or '').strip().lower()
+        if not s:
+            return False
+
+        # stage-only late-stage runner (no fetch/scan)
+        if STAGE_ONLY is not None:
+            if s == 'alert':
+                return STAGE_ONLY == 'alert'
+            if s == 'notify':
+                return STAGE_ONLY == 'notify'
+            return False
+
+        order = {'fetch': 0, 'scan': 1, 'alert': 2, 'notify': 3, 'all': 3}
+        cur = order.get(str(STAGE or 'all'), 3)
+        need = order.get(s)
+        if need is None:
+            return False
+        return cur >= need
+
     global SHARED_REQUIRED_DATA
     SHARED_REQUIRED_DATA = (str(args.shared_required_data) if getattr(args, 'shared_required_data', None) else None)
 
@@ -88,6 +116,10 @@ def main():
     # report_dir override (new flow: write into run_dir/accounts/<acct>/)
     report_dir = (Path(args.report_dir).resolve() if getattr(args, 'report_dir', None) else (base / 'output' / 'reports').resolve())
     report_dir.mkdir(parents=True, exist_ok=True)
+
+    # state_dir override (Stage 4): state/context cache root
+    state_dir = (Path(args.state_dir).resolve() if getattr(args, 'state_dir', None) else (base / 'output' / 'state').resolve())
+    state_dir.mkdir(parents=True, exist_ok=True)
 
     # Manual multiplier cache refresh (best-effort)
     if bool(getattr(args, 'refresh_multiplier_cache', False)):
@@ -145,6 +177,7 @@ def main():
                 py=py,
                 base=base,
                 report_dir=report_dir,
+                state_dir=state_dir,
                 is_scheduled=IS_SCHEDULED,
                 stage_only=STAGE_ONLY,
                 want=want,
@@ -157,6 +190,11 @@ def main():
 
         from scripts.pipeline_context import build_pipeline_context
         from scripts.pipeline_watchlist import run_watchlist_pipeline
+
+        # required_data_dir contract:
+        # - when --shared-required-data is set, treat it as the authoritative required_data root
+        # - otherwise fall back to legacy ./output
+        required_data_dir = (Path(SHARED_REQUIRED_DATA).resolve() if SHARED_REQUIRED_DATA else (base / 'output').resolve())
 
         summary_rows = run_watchlist_pipeline(
             py=py,
@@ -173,8 +211,20 @@ def main():
             log=log,
             want_fn=want,
             apply_profiles_fn=apply_profiles,
-            process_symbol_fn=process_symbol,
-            build_pipeline_context_fn=build_pipeline_context,
+            process_symbol_fn=(
+                lambda *a, **kw: process_symbol(
+                    *a,
+                    **kw,
+                    required_data_dir=required_data_dir,
+                    report_dir=report_dir,
+                )
+            ),
+            build_pipeline_context_fn=(
+                lambda **kw: build_pipeline_context(
+                    **kw,
+                    state_dir=state_dir,
+                )
+            ),
             build_symbols_summary_fn=lambda rows: build_symbols_summary(rows, report_dir, is_scheduled=IS_SCHEDULED),
             build_symbols_digest_fn=lambda rows, n: (None if IS_SCHEDULED else build_symbols_digest([r.get('symbol') for r in rows if r.get('symbol')], report_dir)),
         )
@@ -199,17 +249,18 @@ def main():
             '--summary-input', str((report_dir / 'symbols_summary.csv').as_posix()),
             '--output', str((report_dir / 'symbols_alerts.txt').as_posix()),
             '--changes-output', changes_out,
+            '--state-dir', str(state_dir),
         ]
         if not IS_SCHEDULED:
             alert_cmd.extend([
-                '--previous-summary', 'output/state/symbols_summary_prev.csv',
+                '--previous-summary', str((state_dir / 'symbols_summary_prev.csv').as_posix()),
                 '--update-snapshot',
             ])
         # alert policy overrides (optional)
         try:
             policy = cfg.get('alert_policy')
             if isinstance(policy, dict) and policy:
-                p = base / 'output' / 'state' / 'alert_policy.json'
+                p = (state_dir / 'alert_policy.json').resolve()
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_text(json.dumps(policy, ensure_ascii=False, indent=2), encoding='utf-8')
                 alert_cmd.extend(['--policy-json', str(p)])
@@ -226,6 +277,7 @@ def main():
                 '--alerts-input', str((report_dir / 'symbols_alerts.txt').as_posix()),
                 '--changes-input', ('/dev/null' if IS_SCHEDULED else str((report_dir / 'symbols_changes.txt').as_posix())),
                 '--output', str((report_dir / 'symbols_notification.txt').as_posix()),
+                '--state-dir', str(state_dir),
             ], cwd=base, is_scheduled=IS_SCHEDULED)
 
             # Scheduled mode artifact cleanup:
@@ -234,21 +286,21 @@ def main():
                 try:
                     import glob
                     keep = {
-                        (base / 'output/reports/symbols_summary.csv').resolve(),
-                        (base / 'output/reports/symbols_notification.txt').resolve(),
+                        (report_dir / 'symbols_summary.csv').resolve(),
+                        (report_dir / 'symbols_notification.txt').resolve(),
                     }
                     patterns = [
-                        'output/reports/*sell_put_candidates*.csv',
-                        'output/reports/*sell_call_candidates*.csv',
-                        'output/reports/*sell_put_alerts*.txt',
-                        'output/reports/*sell_call_alerts*.txt',
-                        'output/reports/symbols_summary.txt',
-                        'output/reports/symbols_digest.txt',
-                        'output/reports/symbols_alerts.txt',
-                        'output/reports/symbols_changes.txt',
+                        str((report_dir / '*sell_put_candidates*.csv').resolve()),
+                        str((report_dir / '*sell_call_candidates*.csv').resolve()),
+                        str((report_dir / '*sell_put_alerts*.txt').resolve()),
+                        str((report_dir / '*sell_call_alerts*.txt').resolve()),
+                        str((report_dir / 'symbols_summary.txt').resolve()),
+                        str((report_dir / 'symbols_digest.txt').resolve()),
+                        str((report_dir / 'symbols_alerts.txt').resolve()),
+                        str((report_dir / 'symbols_changes.txt').resolve()),
                     ]
                     for pat in patterns:
-                        for fp in glob.glob(str((base / pat).resolve())):
+                        for fp in glob.glob(pat):
                             p0 = Path(fp).resolve()
                             if p0 in keep:
                                 continue
@@ -262,6 +314,11 @@ def main():
 
         # Append cash summaries at the bottom (optional).
         # In multi-account merged notifications, we prefer adding cash footer only once in send_if_needed_multi.py.
+        # Keep behavior-compatible defaults: fallback to default pm config/market when not present.
+        portfolio_cfg = cfg.get('portfolio', {}) or {}
+        pm_config = str(portfolio_cfg.get('pm_config', '../portfolio-management/config.json'))
+        market = str(portfolio_cfg.get('market', '富途'))
+
         include_cash_footer = True
         try:
             include_cash_footer = bool((cfg.get('notifications') or {}).get('include_cash_footer', True))
