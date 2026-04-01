@@ -1234,7 +1234,7 @@ def main():
         # market-aware schedule: use schedule_hk during HK session, otherwise default schedule
         sch_args = [str(vpy), 'scripts/scan_scheduler.py', '--config', str(cfg_override), '--state', str(state_path), '--jsonl', '--account', str(acct)]
         try:
-            if markets_to_run == ['HK']:
+            if markets_to_run == ['HK'] and ('schedule_hk' in cfg):
                 sch_args.extend(['--schedule-key', 'schedule_hk'])
         except Exception:
             pass
