@@ -652,6 +652,29 @@ def save_outputs(base: Path, symbol: str, payload: dict[str, Any], *, output_roo
     raw_path = raw_dir / f"{symbol}_required_data.json"
     csv_path = parsed_dir / f"{symbol}_required_data.csv"
 
+    # Boundary validation: drop rows missing critical fields (strike/expiration/dte/option_type)
+    try:
+        from scripts.required_data_validate import validate_required_rows
+
+        rows0 = payload.get('rows') or []
+        rows1, st = validate_required_rows(rows0)
+        payload['rows'] = rows1
+        meta = payload.get('meta') or {}
+        if not isinstance(meta, dict):
+            meta = {'meta': str(meta)}
+        meta['validation'] = {
+            'total_rows': int(st.total_rows),
+            'kept_rows': int(st.kept_rows),
+            'dropped_rows': int(st.dropped_rows),
+            'missing_strike': int(st.missing_strike),
+            'missing_expiration': int(st.missing_expiration),
+            'missing_dte': int(st.missing_dte),
+            'missing_option_type': int(st.missing_option_type),
+        }
+        payload['meta'] = meta
+    except Exception:
+        pass
+
     raw_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding='utf-8')
     df = pd.DataFrame(payload.get('rows') or [])
     if df.empty:
