@@ -213,6 +213,9 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
         except Exception as e:
             msg = str(e)
             low = msg.lower()
+            # Do not reconnect when phone verification is required.
+            if ('手机验证码' in msg) or ('verification' in low) or ('verify code' in low):
+                raise
             if any(k in low for k in ['callclose', 'disconnected', 'econnreset', 'broken pipe', 'connection reset']):
                 try:
                     ctx.close()
@@ -223,12 +226,25 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
             raise
 
     try:
+        def _looks_like_phone_verify(err: str) -> bool:
+            s = (err or '')
+            sl = s.lower()
+            keys = [
+                '手机验证码', '短信验证', '手机验证', '验证码',
+                'phone verify', 'phone verification', 'verify code',
+                'not login', 'not logged',
+            ]
+            return any(k in s for k in ['手机验证码', '短信验证', '手机验证', '验证码']) or any(k in sl for k in keys)
+
         def _is_rate_limited(err: str) -> bool:
             s = (err or '')
             sl = s.lower()
             return ('频率太高' in s) or ('最多10次' in s) or ('rate limit' in sl) or ('too frequent' in sl)
 
         def _is_transient(err: str) -> bool:
+            # IMPORTANT: phone verification is not transient; fail-fast and require manual input.
+            if _looks_like_phone_verify(err):
+                return False
             sl = (err or '').lower()
             keys = ['timeout', 'timed out', 'econnreset', 'econnrefused', 'connection', 'disconnected', 'callclose']
             return any(k in sl for k in keys)
