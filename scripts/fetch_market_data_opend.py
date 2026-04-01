@@ -187,7 +187,7 @@ def _pick_col(row: Any, *cands: str):
 def get_spot_opend(ctx, underlier_code: str) -> float | None:
     """Try to get underlying spot from OpenD."""
     try:
-        ret, df = ctx.get_market_snapshot([underlier_code])
+        ret, df = _with_reconnect('get_market_snapshot', lambda: ctx.get_market_snapshot([underlier_code]))
         if ret != 0 or df is None or df.empty:
             return None
         v = to_float(df.iloc[0].get('last_price'))
@@ -201,6 +201,27 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
 
     u = normalize_underlier(symbol)
     ctx = OpenQuoteContext(host=host, port=port)
+
+    def _with_reconnect(what: str, fn):
+        """One-shot reconnect wrapper.
+
+        Policy: if ctx is disconnected, close it and create a new context, then retry once.
+        """
+        nonlocal ctx
+        try:
+            return fn()
+        except Exception as e:
+            msg = str(e)
+            low = msg.lower()
+            if any(k in low for k in ['callclose', 'disconnected', 'econnreset', 'broken pipe', 'connection reset']):
+                try:
+                    ctx.close()
+                except Exception:
+                    pass
+                ctx = OpenQuoteContext(host=host, port=port)
+                return fn()
+            raise
+
     try:
         def _is_rate_limited(err: str) -> bool:
             s = (err or '')
@@ -259,7 +280,7 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
         # Without this, futu-api may retry for minutes, hanging unattended cron jobs.
         try:
             # Prefer get_global_state() which exists across futu-api versions.
-            ret0, state = _opend_call_with_retry('get_global_state', lambda: ctx.get_global_state(), quiet=True)
+            ret0, state = _opend_call_with_retry('get_global_state', lambda: _with_reconnect('get_global_state', lambda: ctx.get_global_state()), quiet=True)
             if ret0 != RET_OK:
                 raise RuntimeError(f"OpenD not ready (get_global_state ret={ret0})")
             if not isinstance(state, dict) or state.get('program_status_type') not in (None, '', 'READY'):
@@ -350,7 +371,7 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
             # 2) take the closest N expirations (limit_expirations)
             # 3) call get_option_chain(code, start=exp, end=exp) for each expiration, then concat
             try:
-                ret_e, df_e = _opend_call_with_retry('get_option_expiration_date', lambda: ctx.get_option_expiration_date(u.code), quiet=False)
+                ret_e, df_e = _opend_call_with_retry('get_option_expiration_date', lambda: _with_reconnect('get_option_expiration_date', lambda: ctx.get_option_expiration_date(u.code)), quiet=False)
                 if ret_e != RET_OK or df_e is None or df_e.empty:
                     expirations_all: list[str] = []
                 else:
@@ -368,7 +389,7 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
                 for exp0 in expirations_pick:
                     ret, chain0 = _opend_call_with_retry(
                         f'get_option_chain({exp0})',
-                        lambda exp=exp0: ctx.get_option_chain(u.code, start=str(exp), end=str(exp)),
+                        lambda exp=exp0: _with_reconnect('get_option_chain', lambda: ctx.get_option_chain(u.code, start=str(exp), end=str(exp))),
                         quiet=True,
                     )
                     if ret == RET_OK and chain0 is not None and (not chain0.empty):
@@ -382,7 +403,7 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
                 ret = RET_OK
             else:
                 # Fallback to legacy behavior (best-effort) if expiration_date not available.
-                ret, chain = _opend_call_with_retry('get_option_chain', lambda: ctx.get_option_chain(u.code), quiet=False)
+                ret, chain = _opend_call_with_retry('get_option_chain', lambda: _with_reconnect('get_option_chain', lambda: ctx.get_option_chain(u.code)), quiet=False)
 
             if ret != RET_OK or chain is None or chain.empty:
                 raise RuntimeError(f"get_option_chain failed: {chain}")
@@ -468,7 +489,7 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
         for i in range(0, len(option_codes), BATCH):
             batch = option_codes[i:i+BATCH]
             try:
-                ret2, snap = _opend_call_with_retry('get_market_snapshot(batch)', lambda: ctx.get_market_snapshot(batch), quiet=True)
+                ret2, snap = _opend_call_with_retry('get_market_snapshot(batch)', lambda: _with_reconnect('get_market_snapshot', lambda: ctx.get_market_snapshot(batch)), quiet=True)
             except Exception:
                 ret2, snap = (None, None)
             if ret2 != RET_OK or snap is None or snap.empty:
