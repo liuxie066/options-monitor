@@ -26,7 +26,7 @@ def ensure_required_data(
     fetch_source: str = 'yahoo',
     fetch_host: str = '127.0.0.1',
     fetch_port: int = 11111,
-    spot_from_pm: bool = False,
+    spot_from_pm: bool | None = None,
     max_strike: float | None = None,
 ) -> None:
     sym = symbol
@@ -54,7 +54,12 @@ def ensure_required_data(
             '--option-types', opt_types,
             '--output-root', str(required_data_dir),
         ]
-        if spot_from_pm:
+
+        # US spot policy: OpenD often lacks US quote right; default to PM spot fetch unless explicitly disabled.
+        if spot_from_pm is None:
+            u = str(symbol).strip().upper()
+            spot_from_pm = (not u.endswith('.HK'))
+        if bool(spot_from_pm):
             cmd.append('--spot-from-pm')
         if (max_strike is not None) and want_put:
             cmd.extend(['--max-strike', str(max_strike)])
