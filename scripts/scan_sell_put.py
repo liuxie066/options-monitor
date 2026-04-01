@@ -69,6 +69,15 @@ def safe_float(v):
         return None
 
 
+def safe_int(v):
+    try:
+        if pd.isna(v):
+            return None
+        return int(v)
+    except Exception:
+        return None
+
+
 def compute_metrics(row: pd.Series) -> dict | None:
     mid = safe_float(row.get("mid"))
     strike = safe_float(row.get("strike"))
@@ -151,7 +160,10 @@ def main():
         df = df[df["option_type"] == "put"].copy()
 
         for _, row in df.iterrows():
-            dte = int(row["dte"])
+            # Critical compute gate: avoid NaN/None silently propagating into returns.
+            dte = safe_int(row.get("dte"))
+            if dte is None or dte <= 0:
+                continue
             if dte < args.min_dte or dte > args.max_dte:
                 continue
 
@@ -173,6 +185,12 @@ def main():
             bid = safe_float(row.get("bid"))
             ask = safe_float(row.get("ask"))
             mid = safe_float(row.get("mid"))
+
+            # Critical compute gate: mid/strike/spot must be valid; otherwise compute_metrics may
+            # return None but NaN can still leak via later formatting.
+            spot = safe_float(row.get("spot"))
+            if mid is None or strike is None or spot is None:
+                continue
 
             # Data-quality gate: require a real market (avoid Yahoo rows with 0/0 quotes)
             if args.require_bid_ask:

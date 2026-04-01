@@ -23,6 +23,22 @@ import yaml
 from scripts.report_builders import build_symbols_digest, build_symbols_summary
 
 
+LOG = __import__('scripts.logging_config', fromlist=['get_logger']).get_logger('run_pipeline')
+
+
+def log(msg: str) -> None:
+    try:
+        if msg.startswith('[WARN]'):
+            LOG.warning(msg)
+        elif msg.startswith('[INFO]'):
+            LOG.info(msg)
+        elif msg.startswith('[ERR]'):
+            LOG.error(msg)
+        else:
+            LOG.info(msg)
+    except Exception:
+        print(msg)
+
 
 def main():
     global RUNTIME_MODE, IS_SCHEDULED
