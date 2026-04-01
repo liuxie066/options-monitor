@@ -58,6 +58,11 @@ def run_pipeline(
     build_symbols_digest_fn,
     apply_profiles_fn,
     process_symbol_fn,
+    postprocess_scan_results_fn,
+    render_sell_put_alerts_fn,
+    render_sell_call_alerts_fn,
+    should_notify_symbols_fn,
+    notify_symbols_fn,
 ) -> list[dict]:
     plan = build_stage_plan(stage=stage, stage_only=stage_only)
 
@@ -73,7 +78,7 @@ def run_pipeline(
         )
         return []
 
-    return run_watchlist_pipeline_fn(
+    summary_rows = run_watchlist_pipeline_fn(
         py=py,
         base=base,
         cfg=cfg,
@@ -93,3 +98,25 @@ def run_pipeline(
         build_symbols_summary_fn=build_symbols_summary_fn,
         build_symbols_digest_fn=build_symbols_digest_fn,
     )
+
+    symbols = [str(r.get('symbol')) for r in summary_rows if r.get('symbol')]
+    runtime = cfg.get('runtime', {}) or {}
+
+    postprocess_scan_results_fn(
+        summary_rows=summary_rows,
+        report_dir=report_dir,
+        is_scheduled=is_scheduled,
+        top_n=int(top_n),
+        symbols=symbols,
+        runtime=runtime,
+        want_fn=plan.want,
+        build_symbols_summary_fn=build_symbols_summary_fn,
+        build_symbols_digest_fn=build_symbols_digest_fn,
+        render_sell_put_alerts_fn=render_sell_put_alerts_fn,
+        render_sell_call_alerts_fn=render_sell_call_alerts_fn,
+        should_notify_symbols_fn=should_notify_symbols_fn,
+        notify_symbols_fn=notify_symbols_fn,
+        log=log,
+    )
+
+    return summary_rows

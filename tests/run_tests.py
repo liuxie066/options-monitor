@@ -138,6 +138,9 @@ def main() -> None:
         test_stage_plan_scan_includes_fetch,
         test_stage_plan_stage_only_notify,
     )
+    from test_pipeline_postprocess_notify_gate import (
+        test_postprocess_notify_gate,
+    )
 
     tests = [
         test_parse_futu_fill_message,
@@ -158,6 +161,7 @@ def main() -> None:
         test_stage_plan_fetch_only,
         test_stage_plan_scan_includes_fetch,
         test_stage_plan_stage_only_notify,
+        test_postprocess_notify_gate,
     ]
     for t in tests:
         t()
