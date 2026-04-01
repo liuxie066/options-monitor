@@ -240,24 +240,39 @@ def parse_hhmm(value: str) -> time:
     return time(hour=int(hour), minute=int(minute))
 
 
-def in_hk_session(now_utc: datetime) -> bool:
-    hk = ZoneInfo('Asia/Hong_Kong')
-    t = now_utc.astimezone(hk)
-    if t.weekday() >= 5:
-        return False
-    hm = t.hour * 60 + t.minute
-    # 09:30-12:00, 13:00-16:00 (HKT)
-    return (9 * 60 + 30) <= hm < (12 * 60) or (13 * 60) <= hm < (16 * 60)
+def _select_markets_to_run(now_utc: datetime, cfg: dict, market_config: str) -> list[str]:
+    mc = str(market_config or 'auto').lower()
+    if mc == 'hk':
+        return ['HK']
+    if mc == 'us':
+        return ['US']
+    if mc == 'all':
+        return ['HK', 'US']
 
+    schedule_hk = (cfg.get('schedule_hk') or {}) if isinstance(cfg, dict) else {}
+    schedule_us = (cfg.get('schedule') or {}) if isinstance(cfg, dict) else {}
 
-def in_us_session(now_utc: datetime) -> bool:
-    ny = ZoneInfo('America/New_York')
-    t = now_utc.astimezone(ny)
-    if t.weekday() >= 5:
-        return False
-    hm = t.hour * 60 + t.minute
-    # 09:30-16:00 (NY)
-    return (9 * 60 + 30) <= hm < (16 * 60)
+    try:
+        from scripts.scan_scheduler import decide
+
+        state0: dict = {
+            'last_scan_utc': None,
+            'last_scan_utc_by_account': {},
+            'last_notify_utc': None,
+            'last_notify_utc_by_account': {},
+        }
+
+        d_hk = decide(schedule_hk, state0, now_utc, account=None, schedule_key='schedule_hk')
+        if d_hk.in_market_hours:
+            return ['HK']
+
+        d_us = decide(schedule_us, state0, now_utc, account=None, schedule_key='schedule')
+        if d_us.in_market_hours:
+            return ['US']
+    except Exception:
+        pass
+
+    return []
 
 
 def maybe_parse_dt(value: str | None) -> datetime | None:
@@ -1059,21 +1074,9 @@ def main():
     results: list[AccountResult] = []
 
     # Market-aware filtering (speed): only run symbols for the current market session.
-    # Respect --market-config override.
+    # Scheduler is the single source of truth for market-hours judging.
     now_utc = datetime.now(timezone.utc)
-    markets_to_run: list[str] = []
-    mc = str(getattr(args, 'market_config', 'auto') or 'auto').lower()
-    if mc == 'hk':
-        markets_to_run = ['HK']
-    elif mc == 'us':
-        markets_to_run = ['US']
-    elif mc == 'all':
-        markets_to_run = ['HK', 'US']
-    else:
-        if in_hk_session(now_utc):
-            markets_to_run = ['HK']
-        elif in_us_session(now_utc):
-            markets_to_run = ['US']
+    markets_to_run: list[str] = _select_markets_to_run(now_utc, base_cfg, getattr(args, 'market_config', 'auto'))
 
 
     # Transitional run_dir (new flow): keep required_data as a per-run artifact.
