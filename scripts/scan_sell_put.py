@@ -69,6 +69,15 @@ def safe_float(v):
         return None
 
 
+def safe_int(v):
+    try:
+        if pd.isna(v):
+            return None
+        return int(v)
+    except Exception:
+        return None
+
+
 def compute_metrics(row: pd.Series) -> dict | None:
     mid = safe_float(row.get("mid"))
     strike = safe_float(row.get("strike"))
@@ -135,20 +144,26 @@ def main():
     parser.add_argument("--min-abs-delta", type=float, default=None, help="min abs(delta) (e.g. 0.15)")
     parser.add_argument("--max-abs-delta", type=float, default=None, help="max abs(delta) (e.g. 0.28)")
     parser.add_argument("--quiet", action="store_true", help="quiet mode: suppress human-friendly prints")
+    parser.add_argument("--output", default=None, help="Output CSV path (default: output/reports/sell_put_candidates.csv)")
+    parser.add_argument("--input-root", default=None, help="Input root containing parsed/ required_data CSVs (default: ./output)")
     args = parser.parse_args()
 
     base = Path(__file__).resolve().parents[1]
-    out_dir = base / "output" / "reports"
-    out_dir.mkdir(parents=True, exist_ok=True)
+    input_root = (Path(args.input_root).resolve() if args.input_root else (base / "output").resolve())
+    out_path = Path(args.output).resolve() if args.output else (base / "output" / "reports" / "sell_put_candidates.csv")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
 
     rows = []
     for symbol in args.symbols:
-        path = base / "output" / "parsed" / f"{symbol}_required_data.csv"
+        path = input_root / "parsed" / f"{symbol}_required_data.csv"
         df = pd.read_csv(path)
         df = df[df["option_type"] == "put"].copy()
 
         for _, row in df.iterrows():
-            dte = int(row["dte"])
+            # Critical compute gate: avoid NaN/None silently propagating into returns.
+            dte = safe_int(row.get("dte"))
+            if dte is None or dte <= 0:
+                continue
             if dte < args.min_dte or dte > args.max_dte:
                 continue
 
@@ -170,6 +185,12 @@ def main():
             bid = safe_float(row.get("bid"))
             ask = safe_float(row.get("ask"))
             mid = safe_float(row.get("mid"))
+
+            # Critical compute gate: mid/strike/spot must be valid; otherwise compute_metrics may
+            # return None but NaN can still leak via later formatting.
+            spot = safe_float(row.get("spot"))
+            if mid is None or strike is None or spot is None:
+                continue
 
             # Data-quality gate: require a real market (avoid Yahoo rows with 0/0 quotes)
             if args.require_bid_ask:
@@ -246,7 +267,6 @@ def main():
     out = pd.DataFrame(rows)
     if not out.empty:
         out = out.sort_values(by=["annualized_net_return_on_cash_basis", "net_income"], ascending=[False, False])
-    out_path = out_dir / "sell_put_candidates.csv"
     if out.empty:
         # keep a valid header-only CSV to avoid downstream EmptyDataError
         cols = [

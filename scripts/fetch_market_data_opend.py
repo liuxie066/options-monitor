@@ -98,6 +98,25 @@ def _save_chain_cache(path: Path, payload: dict) -> None:
         pass
 
 
+def _prune_chain_cache(base_dir: Path, keep_days: int) -> None:
+    try:
+        if keep_days <= 0:
+            return
+        root = base_dir / 'cache' / 'opend_option_chain'
+        if not root.exists():
+            return
+        import time
+        cutoff = time.time() - keep_days * 86400
+        for p in root.glob('*.json'):
+            try:
+                if p.stat().st_mtime < cutoff:
+                    p.unlink(missing_ok=True)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 def _is_chain_cache_fresh(obj: dict, today: date) -> bool:
     try:
         if not isinstance(obj, dict):
@@ -168,11 +187,17 @@ def _pick_col(row: Any, *cands: str):
 def get_spot_opend(ctx, underlier_code: str) -> float | None:
     """Try to get underlying spot from OpenD."""
     try:
+        # NOTE: keep this function independent from fetch_symbol()'s local reconnect wrapper.
         ret, df = ctx.get_market_snapshot([underlier_code])
         if ret != 0 or df is None or df.empty:
             return None
-        v = to_float(df.iloc[0].get('last_price'))
-        return v
+        row = df.iloc[0]
+        # Prefer last_price; fallback to other common fields.
+        for k in ['last_price', 'price', 'cur_price', 'close_price_5min', 'open_price', 'prev_close_price']:
+            v = to_float(row.get(k))
+            if v is not None and v > 0:
+                return v
+        return None
     except Exception:
         return None
 
@@ -182,13 +207,50 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
 
     u = normalize_underlier(symbol)
     ctx = OpenQuoteContext(host=host, port=port)
+
+    def _with_reconnect(what: str, fn):
+        """One-shot reconnect wrapper.
+
+        Policy: if ctx is disconnected, close it and create a new context, then retry once.
+        """
+        nonlocal ctx
+        try:
+            return fn()
+        except Exception as e:
+            msg = str(e)
+            low = msg.lower()
+            # Do not reconnect when phone verification is required.
+            if ('手机验证码' in msg) or ('verification' in low) or ('verify code' in low):
+                raise
+            if any(k in low for k in ['callclose', 'disconnected', 'econnreset', 'broken pipe', 'connection reset']):
+                try:
+                    ctx.close()
+                except Exception:
+                    pass
+                ctx = OpenQuoteContext(host=host, port=port)
+                return fn()
+            raise
+
     try:
+        def _looks_like_phone_verify(err: str) -> bool:
+            s = (err or '')
+            sl = s.lower()
+            keys = [
+                '手机验证码', '短信验证', '手机验证', '验证码',
+                'phone verify', 'phone verification', 'verify code',
+                'not login', 'not logged',
+            ]
+            return any(k in s for k in ['手机验证码', '短信验证', '手机验证', '验证码']) or any(k in sl for k in keys)
+
         def _is_rate_limited(err: str) -> bool:
             s = (err or '')
             sl = s.lower()
             return ('频率太高' in s) or ('最多10次' in s) or ('rate limit' in sl) or ('too frequent' in sl)
 
         def _is_transient(err: str) -> bool:
+            # IMPORTANT: phone verification is not transient; fail-fast and require manual input.
+            if _looks_like_phone_verify(err):
+                return False
             sl = (err or '').lower()
             keys = ['timeout', 'timed out', 'econnreset', 'econnrefused', 'connection', 'disconnected', 'callclose']
             return any(k in sl for k in keys)
@@ -240,7 +302,7 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
         # Without this, futu-api may retry for minutes, hanging unattended cron jobs.
         try:
             # Prefer get_global_state() which exists across futu-api versions.
-            ret0, state = _opend_call_with_retry('get_global_state', lambda: ctx.get_global_state(), quiet=True)
+            ret0, state = _opend_call_with_retry('get_global_state', lambda: _with_reconnect('get_global_state', lambda: ctx.get_global_state()), quiet=True)
             if ret0 != RET_OK:
                 raise RuntimeError(f"OpenD not ready (get_global_state ret={ret0})")
             if not isinstance(state, dict) or state.get('program_status_type') not in (None, '', 'READY'):
@@ -271,35 +333,39 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
                 import subprocess
                 from pathlib import Path as _Path
 
-                ctx_path = (base_dir / 'output' / 'state' / 'portfolio_context.json').resolve()
-                if ctx_path.exists() and ctx_path.stat().st_size > 0:
-                    ctxj = json.loads(ctx_path.read_text(encoding='utf-8'))
-                    ticker = u.code.split('.', 1)[1]
-                    stock = (ctxj.get('stocks_by_symbol') or {}).get(ticker)
-                    if stock and stock.get('symbol'):
-                        # Use portfolio-management's PriceFetcher directly (no Feishu deps).
-                        pm_dir = (_Path(__file__).resolve().parents[2] / 'portfolio-management').resolve()
-                        # IMPORTANT: do NOT .resolve() here, otherwise we lose the venv context (symlink collapses to system python)
-                        pm_py = pm_dir / '.venv' / 'bin' / 'python'
-                        code = (
-                            "import sys, json; "
-                            "sys.path.insert(0, '.'); "
-                            "from src.price_fetcher import PriceFetcher; "
-                            f"r=PriceFetcher().fetch('{ticker}'); "
-                            "print(json.dumps(r, ensure_ascii=False))"
-                        )
-                        out = subprocess.check_output([str(pm_py), '-c', code], cwd=str(pm_dir), timeout=12)
-                        txt = out.decode('utf-8', errors='ignore')
-                        # price_fetcher prints rate-cache logs; extract the last JSON object in output.
-                        lines = [ln.strip() for ln in txt.splitlines() if ln.strip()]
-                        jline = None
-                        for ln in reversed(lines):
-                            if ln.startswith('{') and ln.endswith('}'):
-                                jline = ln
-                                break
-                        r = json.loads(jline or '{}')
-                        if r and r.get('price'):
-                            spot = float(r.get('price'))
+                # Do NOT require the symbol to exist in holdings.
+                # Watchlist symbols may be unheld but still need a spot for OTM/risk computations.
+                ticker = u.code.split('.', 1)[1]
+
+                # Use portfolio-management's PriceFetcher directly (no Feishu deps).
+                pm_dir = (_Path(__file__).resolve().parents[2] / 'portfolio-management').resolve()
+                # IMPORTANT: do NOT .resolve() here, otherwise we lose the venv context (symlink collapses to system python)
+                pm_py = pm_dir / '.venv' / 'bin' / 'python'
+                code = (
+                    "import sys, json; "
+                    "sys.path.insert(0, '.'); "
+                    "from src.price_fetcher import PriceFetcher; "
+                    f"r=PriceFetcher().fetch('{ticker}'); "
+                    "print(json.dumps(r, ensure_ascii=False))"
+                )
+                out = subprocess.check_output([str(pm_py), '-c', code], cwd=str(pm_dir), timeout=12)
+                txt = out.decode('utf-8', errors='ignore')
+                # price_fetcher prints rate-cache logs; extract the last JSON object in output.
+                lines = [ln.strip() for ln in txt.splitlines() if ln.strip()]
+                jline = None
+                for ln in reversed(lines):
+                    if ln.startswith('{') and ln.endswith('}'):
+                        jline = ln
+                        break
+                r = json.loads(jline or '{}')
+                p = r.get('price') if isinstance(r, dict) else None
+                try:
+                    p = float(p) if p is not None else None
+                except Exception:
+                    p = None
+                # Guard: treat 0/None as missing
+                if p and p > 0:
+                    spot = p
             except Exception:
                 pass
         # spot may still be None; keep it. Downstream scans will skip rows if spot is required.
@@ -317,7 +383,50 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
                 chain_obj = cached
 
         if chain_obj is None:
-            ret, chain = _opend_call_with_retry('get_option_chain', lambda: ctx.get_option_chain(u.code), quiet=False)
+            # IMPORTANT:
+            # futu-api get_option_chain() defaults to an expiration date window of [today, today+30d]
+            # when start/end are None. For some underliers (e.g., HK.09992), the next expiry may be
+            # beyond 30 days, which makes the default call look like it has only 0DTE options.
+            #
+            # So we:
+            # 1) call get_option_expiration_date() to enumerate expirations
+            # 2) take the closest N expirations (limit_expirations)
+            # 3) call get_option_chain(code, start=exp, end=exp) for each expiration, then concat
+            try:
+                ret_e, df_e = _opend_call_with_retry('get_option_expiration_date', lambda: _with_reconnect('get_option_expiration_date', lambda: ctx.get_option_expiration_date(u.code)), quiet=False)
+                if ret_e != RET_OK or df_e is None or df_e.empty:
+                    expirations_all: list[str] = []
+                else:
+                    expirations_all = sorted({str(x)[:10] for x in df_e.get('strike_time').astype(str).tolist() if str(x) and len(str(x)) >= 10})
+            except Exception:
+                expirations_all = []
+
+            if limit_expirations and expirations_all:
+                expirations_pick = expirations_all[: int(limit_expirations)]
+            else:
+                expirations_pick = expirations_all
+
+            chains = []
+            if expirations_pick:
+                for exp0 in expirations_pick:
+                    ret, chain0 = _opend_call_with_retry(
+                        f'get_option_chain({exp0})',
+                        lambda exp=exp0: _with_reconnect('get_option_chain', lambda: ctx.get_option_chain(u.code, start=str(exp), end=str(exp))),
+                        quiet=True,
+                    )
+                    if ret == RET_OK and chain0 is not None and (not chain0.empty):
+                        chains.append(chain0)
+
+            if chains:
+                try:
+                    chain = pd.concat(chains, ignore_index=True)
+                except Exception:
+                    chain = chains[0]
+                ret = RET_OK
+            else:
+                # Fallback to legacy behavior (best-effort) if expiration_date not available.
+                ret, chain = _opend_call_with_retry('get_option_chain', lambda: _with_reconnect('get_option_chain', lambda: ctx.get_option_chain(u.code)), quiet=False)
+
             if ret != RET_OK or chain is None or chain.empty:
                 raise RuntimeError(f"get_option_chain failed: {chain}")
 
@@ -330,6 +439,8 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
                 'asof_date': date.today().isoformat(),
                 'underlier_code': u.code,
                 'rows': rows,
+                'expirations_all': expirations_all,
+                'expirations_pick': expirations_pick,
             }
             if cache_path is not None:
                 _save_chain_cache(cache_path, chain_obj)
@@ -400,7 +511,7 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
         for i in range(0, len(option_codes), BATCH):
             batch = option_codes[i:i+BATCH]
             try:
-                ret2, snap = _opend_call_with_retry('get_market_snapshot(batch)', lambda: ctx.get_market_snapshot(batch), quiet=True)
+                ret2, snap = _opend_call_with_retry('get_market_snapshot(batch)', lambda: _with_reconnect('get_market_snapshot', lambda: ctx.get_market_snapshot(batch)), quiet=True)
             except Exception:
                 ret2, snap = (None, None)
             if ret2 != RET_OK or snap is None or snap.empty:
@@ -574,14 +685,38 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
             pass
 
 
-def save_outputs(base: Path, symbol: str, payload: dict[str, Any]):
-    raw_dir = base / 'output' / 'raw'
-    parsed_dir = base / 'output' / 'parsed'
+def save_outputs(base: Path, symbol: str, payload: dict[str, Any], *, output_root: Path | None = None):
+    root = (output_root.resolve() if output_root is not None else (base / 'output').resolve())
+    raw_dir = root / 'raw'
+    parsed_dir = root / 'parsed'
     raw_dir.mkdir(parents=True, exist_ok=True)
     parsed_dir.mkdir(parents=True, exist_ok=True)
 
     raw_path = raw_dir / f"{symbol}_required_data.json"
     csv_path = parsed_dir / f"{symbol}_required_data.csv"
+
+    # Boundary validation: drop rows missing critical fields (strike/expiration/dte/option_type)
+    try:
+        from scripts.required_data_validate import validate_required_rows
+
+        rows0 = payload.get('rows') or []
+        rows1, st = validate_required_rows(rows0)
+        payload['rows'] = rows1
+        meta = payload.get('meta') or {}
+        if not isinstance(meta, dict):
+            meta = {'meta': str(meta)}
+        meta['validation'] = {
+            'total_rows': int(st.total_rows),
+            'kept_rows': int(st.kept_rows),
+            'dropped_rows': int(st.dropped_rows),
+            'missing_strike': int(st.missing_strike),
+            'missing_expiration': int(st.missing_expiration),
+            'missing_dte': int(st.missing_dte),
+            'missing_option_type': int(st.missing_option_type),
+        }
+        payload['meta'] = meta
+    except Exception:
+        pass
 
     raw_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding='utf-8')
     df = pd.DataFrame(payload.get('rows') or [])
@@ -603,6 +738,7 @@ def main():
     ap.add_argument('--limit-expirations', type=int, default=2)
     ap.add_argument('--chain-cache', action='store_true', help='Enable option_chain day-cache (per underlier) to reduce OpenD calls')
     ap.add_argument('--chain-cache-force-refresh', action='store_true', help='Force refresh option_chain even if cache is fresh')
+    ap.add_argument('--chain-cache-keep-days', type=int, default=7, help='Keep N days of option_chain cache files (default: 7)')
     ap.add_argument('--option-types', default='put,call', help='Comma-separated option types to include: put,call (default: put,call)')
     ap.add_argument('--min-strike', type=float, default=None)
     ap.add_argument('--max-strike', type=float, default=None)
@@ -616,6 +752,7 @@ def main():
     ap.add_argument('--retry-time-budget-sec', type=float, default=8.0)
     ap.add_argument('--retry-base-delay-sec', type=float, default=0.8)
     ap.add_argument('--retry-max-delay-sec', type=float, default=6.0)
+    ap.add_argument('--output-root', default=None, help='Output root containing raw/ and parsed/ (default: ./output)')
     args = ap.parse_args()
 
     opt_types = set([s.strip().lower() for s in str(args.option_types or '').split(',') if s.strip()])
@@ -623,6 +760,10 @@ def main():
     want_call = ('call' in opt_types) if opt_types else True
 
     base = Path(__file__).resolve().parents[1]
+    output_root = (Path(args.output_root).resolve() if args.output_root else None)
+
+    if args.chain_cache:
+        _prune_chain_cache(base, int(args.chain_cache_keep_days))
 
     opend_metrics_path = (base / 'output_shared' / 'state' / 'opend_metrics.json').resolve()
 
@@ -647,7 +788,7 @@ def main():
             retry_max_delay_sec=float(args.retry_max_delay_sec),
             no_retry=bool(args.no_retry),
         )
-        raw_path, csv_path = save_outputs(base, sym, payload)
+        raw_path, csv_path = save_outputs(base, sym, payload, output_root=output_root)
         try:
             meta = payload.get('meta') or {}
             _append_metrics_json(opend_metrics_path, {

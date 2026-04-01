@@ -18,7 +18,33 @@ output
 output/
 output_accounts/
 output_shared/
+output_runs/
 secrets/
--e 
-# local caches
+
+# Build / packaging
+*.egg-info/
+dist/
+build/
+
+# Test / cache
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Tooling
+.mypy_cache/
+.ruff_cache/
+
+# Local runtime configs (do not commit)
+config.us.json
+config.hk.json
+config.market_us.json
+config.market_hk.json
+config.scheduled.json
+config.local*.json
+
+# Local caches
 cache/
+
+# Runtime audit logs
+/audit/run_logs/
