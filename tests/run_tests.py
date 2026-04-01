@@ -118,6 +118,9 @@ def main() -> None:
     from test_scan_scheduler_notify_semantics import (
         test_scan_scheduler_emits_is_notify_window_open_and_backcompat_should_notify,
     )
+    from test_scan_scheduler_scan_per_account import (
+        test_scan_scheduler_scan_is_per_account,
+    )
 
     tests = [
         test_parse_futu_fill_message,
@@ -130,6 +133,7 @@ def main() -> None:
         test_build_context_richtext_normalization_and_hk_symbol,
         test_add_sell_put_labels_overwrites_on_empty,
         test_scan_scheduler_emits_is_notify_window_open_and_backcompat_should_notify,
+        test_scan_scheduler_scan_is_per_account,
     ]
     for t in tests:
         t()
