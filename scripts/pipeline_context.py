@@ -159,8 +159,20 @@ def load_fx_rates(*, base: Path, state_dir: Path, log) -> tuple[float | None, fl
 
         fx_usd_per_cny = mod.get_usd_per_cny(base)  # type: ignore
         try:
-            rates = mod.get_rates((state_dir / 'rate_cache.json').resolve(), None)  # type: ignore
-            hkdcny = float(rates.get('HKDCNY')) if rates and rates.get('HKDCNY') else None
+            rates = mod.get_rates(cache_path=(state_dir / 'rate_cache.json').resolve(), shared_cache_path=None)
+            # Support both legacy {HKDCNY: <value>} and nested {rates: {HKDCNY: <value>}} schemas
+            hkdcny = None
+            if isinstance(rates, dict):
+                hkdcny = rates.get('HKDCNY')
+                if hkdcny is None:
+                    nested = rates.get('rates')
+                    if isinstance(nested, dict):
+                        hkdcny = nested.get('HKDCNY')
+            if hkdcny is not None:
+                try:
+                    hkdcny = float(hkdcny)
+                except Exception:
+                    hkdcny = None
         except Exception:
             hkdcny = None
     except BaseException as e:
