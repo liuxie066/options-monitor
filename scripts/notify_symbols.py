@@ -119,8 +119,7 @@ def _format_alert_line(line: str) -> str:
         out = [line1]
         if line2:
             out.append(line2)
-        if comment:
-            out.append(f"备注: {comment}")
+        # user preference: omit comment line
         return "\n".join(out)
 
     if strategy == 'sell_call':
@@ -146,8 +145,7 @@ def _format_alert_line(line: str) -> str:
         out = [line1]
         if line2:
             out.append(line2)
-        if comment:
-            out.append(f"备注: {comment}")
+        # user preference: omit comment line
         return "\n".join(out)
 
     return raw
