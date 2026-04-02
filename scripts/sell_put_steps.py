@@ -45,15 +45,32 @@ def run_sell_put_scan_and_summarize(
         '--input-root', str(required_data_dir),
         '--min-dte', str(sp.get('min_dte', 20)),
         '--max-dte', str(sp.get('max_dte', 60)),
+        '--min-otm-pct', str(sp.get('min_otm_pct', 0.05)),
         '--min-annualized-net-return', str(sp.get('min_annualized_net_return', 0.07)),
         '--min-open-interest', str(sp.get('min_open_interest', 100)),
         '--min-volume', str(sp.get('min_volume', 10)),
+        '--max-spread-ratio', str(sp.get('max_spread_ratio', 0.30)),
         '--output', str(symbol_sp),
     ]
     if sp.get('min_strike') is not None:
         cmd.extend(['--min-strike', str(sp.get('min_strike'))])
     if sp.get('max_strike') is not None:
         cmd.extend(['--max-strike', str(sp.get('max_strike'))])
+
+    # Optional execution-quality filters
+    if sp.get('require_bid_ask') is not None:
+        if bool(sp.get('require_bid_ask')):
+            cmd.append('--require-bid-ask')
+
+    if sp.get('min_iv') is not None:
+        cmd.extend(['--min-iv', str(sp.get('min_iv'))])
+    if sp.get('max_iv') is not None:
+        cmd.extend(['--max-iv', str(sp.get('max_iv'))])
+
+    if sp.get('min_abs_delta') is not None:
+        cmd.extend(['--min-abs-delta', str(sp.get('min_abs_delta'))])
+    if sp.get('max_abs_delta') is not None:
+        cmd.extend(['--max-abs-delta', str(sp.get('max_abs_delta'))])
 
     # CNY threshold -> option native (USD/HKD)
     cmd.extend([
