@@ -7,7 +7,6 @@ import math
 import pandas as pd
 
 
-DEFAULT_MULTIPLIER = 100
 
 
 def calc_futu_us_option_fee(order_price: float, contracts: int = 1, is_sell: bool = True) -> float:
@@ -95,7 +94,9 @@ def compute_metrics(row: pd.Series) -> dict | None:
         return None
 
     multiplier = safe_float(row.get("multiplier"))
-    m = int(multiplier) if multiplier and multiplier > 0 else DEFAULT_MULTIPLIER
+    m = int(multiplier) if multiplier and multiplier > 0 else None
+    if not m:
+        return None
 
     gross_income = mid * m
     base_dir = Path(__file__).resolve().parents[1]

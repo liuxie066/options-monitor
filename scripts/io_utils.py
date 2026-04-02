@@ -14,6 +14,8 @@ import os
 import shutil
 import time
 from pathlib import Path
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from typing import Any
 
 import pandas as pd
@@ -36,7 +38,7 @@ def write_text(path: str | Path, content: str, *, encoding: str = 'utf-8') -> No
     p.write_text(content, encoding=encoding)
 
 
-def read_json(path: str | Path, *, default: Any = None, encoding: str = 'utf-8') -> Any:
+def read_json(path: str | Path, default: Any = None, encoding: str = 'utf-8') -> Any:
     p = Path(path)
     if not p.exists():
         return default
@@ -44,6 +46,59 @@ def read_json(path: str | Path, *, default: Any = None, encoding: str = 'utf-8')
         return json.loads(p.read_text(encoding=encoding))
     except Exception:
         return default
+
+
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def bj_now() -> str:
+    return datetime.now(timezone.utc).astimezone(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M:%S')
+
+
+def parse_last_json(text: str) -> dict[str, Any]:
+    """Parse the last JSON object printed to text (tolerant of logs above it)."""
+    lines = (text or '').splitlines()
+    buf = []
+    for ln in reversed(lines):
+        if not ln.strip():
+            continue
+        buf.append(ln)
+        if ln.strip().startswith('{'):
+            break
+    txt = '\n'.join(reversed(buf)).strip()
+    if not txt:
+        return {}
+    try:
+        return json.loads(txt)
+    except Exception:
+        return {}
+
+
+def parse_last_json_obj(text: str) -> dict:
+    """Parse the last JSON object fragment from free-form text (starts at first { ends at last })."""
+    s = (text or '').strip()
+    if not s:
+        return {}
+    i = s.find('{')
+    j = s.rfind('}')
+    if i < 0 or j < 0 or j <= i:
+        return {}
+    try:
+        return json.loads(s[i:j+1])
+    except Exception:
+        return {}
+
+
+def money_cny(v) -> str:
+    try:
+        if v is None:
+            return '-'
+        return f"¥{float(v):,.0f} (CNY)"
+    except Exception:
+        return '-'
 
 
 def atomic_write_text(path: str | Path, content: str, *, encoding: str = 'utf-8') -> None:
