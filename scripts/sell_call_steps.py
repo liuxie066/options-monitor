@@ -47,6 +47,11 @@ def run_sell_call_scan_and_summarize(
         return summarize_sell_call(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg)
 
     symbol_cc = report_dir / f'{symbol_lower}_sell_call_candidates.csv'
+    # Backward-compat: accept both config keys
+    min_annualized = cc.get('min_annualized_net_premium_return', None)
+    if min_annualized is None:
+        min_annualized = cc.get('min_annualized_net_return', None)
+
     cmd = [
         py, 'scripts/scan_sell_call.py',
         '--symbols', symbol,
@@ -55,15 +60,33 @@ def run_sell_call_scan_and_summarize(
         '--shares', str(shares_total),
         '--min-dte', str(cc.get('min_dte', 20)),
         '--max-dte', str(cc.get('max_dte', 90)),
-        '--min-annualized-net-return', str(cc.get('min_annualized_net_premium_return', 0.07)),
+        '--min-otm-pct', str(cc.get('min_otm_pct', 0.0)),
+        '--min-annualized-net-return', str(min_annualized if min_annualized is not None else 0.07),
+        '--min-if-exercised-total-return', str(cc.get('min_if_exercised_total_return', 0.0)),
         '--min-open-interest', str(cc.get('min_open_interest', 100)),
         '--min-volume', str(cc.get('min_volume', 10)),
+        '--max-spread-ratio', str(cc.get('max_spread_ratio', 0.30)),
         '--output', str(symbol_cc),
     ]
     if cc.get('min_strike') is not None:
         cmd.extend(['--min-strike', str(cc.get('min_strike'))])
     if cc.get('max_strike') is not None:
         cmd.extend(['--max-strike', str(cc.get('max_strike'))])
+
+    # Optional execution-quality filters
+    if cc.get('require_bid_ask') is not None:
+        if bool(cc.get('require_bid_ask')):
+            cmd.append('--require-bid-ask')
+
+    if cc.get('min_iv') is not None:
+        cmd.extend(['--min-iv', str(cc.get('min_iv'))])
+    if cc.get('max_iv') is not None:
+        cmd.extend(['--max-iv', str(cc.get('max_iv'))])
+
+    if cc.get('min_delta') is not None:
+        cmd.extend(['--min-delta', str(cc.get('min_delta'))])
+    if cc.get('max_delta') is not None:
+        cmd.extend(['--max-delta', str(cc.get('max_delta'))])
 
     if is_scheduled:
         cmd.append('--quiet')
