@@ -36,8 +36,15 @@ def validate_config(cfg: dict):
                 except Exception:
                     die(f'intake.{key} must be a number')
 
-    if not isinstance(cfg.get('symbols'), list) or not cfg['symbols']:
-        die('symbols[] is required and cannot be empty')
+    syms = cfg.get('symbols')
+    if syms is None:
+        syms = cfg.get('watchlist')
+    if not isinstance(syms, list) or not syms:
+        die('symbols[] (or watchlist[]) is required and cannot be empty')
+
+    # Backward-compat: normalize for downstream validation loops
+    if cfg.get('symbols') is None and isinstance(syms, list):
+        cfg['symbols'] = syms
 
     runtime = cfg.get('runtime') or {}
     if runtime and not isinstance(runtime, dict):
@@ -56,9 +63,16 @@ def validate_config(cfg: dict):
         except Exception:
             die('runtime.portfolio_timeout_sec must be an integer')
 
-    templates = cfg.get('templates') or {}
+    templates = cfg.get('templates')
+    if templates is None:
+        templates = cfg.get('profiles')
+    templates = templates or {}
     if templates and not isinstance(templates, dict):
-        die('templates must be an object')
+        die('templates (or profiles) must be an object')
+
+    # Backward-compat: keep templates key populated for older code paths
+    if cfg.get('templates') is None and isinstance(templates, dict):
+        cfg['templates'] = templates
 
     seen = set()
     for i, item in enumerate(cfg['symbols']):
