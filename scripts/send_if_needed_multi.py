@@ -1409,7 +1409,7 @@ def main():
             out = ((pipe.stdout or '') + '\n' + (pipe.stderr or '')).strip()
             if out:
                 tail = '\n'.join(out.splitlines()[-60:])
-                print(f"[ERR] pipeline failed ({acct})\n{tail}")
+                log(f"[ERR] pipeline failed ({acct})\n{tail}")
             acct_metrics['ran_scan'] = True
             acct_metrics['meaningful'] = False
             acct_metrics['reason'] = 'pipeline failed'
