@@ -164,7 +164,9 @@ def main():
         df = df[df['option_type'] == 'call'].copy() if (not df.empty and ('option_type' in df.columns)) else pd.DataFrame()
 
         for _, row in df.iterrows():
-            dte = int(row['dte'])
+            dte = safe_int(row.get('dte'))
+            if dte is None:
+                continue
             if dte < args.min_dte or dte > args.max_dte:
                 continue
 
