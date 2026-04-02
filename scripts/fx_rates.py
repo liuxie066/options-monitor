@@ -108,6 +108,34 @@ def get_rates(
     return None
 
 
+def _extract_usdcny_from_rates(obj: dict | None) -> float | None:
+    """Extract USDCNY from either legacy or nested schema.
+
+    - Legacy: {USDCNY: <value>, HKDCNY: <value>}
+    - New: {rates: {USDCNY: <value>, HKDCNY: <value>}}
+    Returns float or None.
+    """
+    if not obj:
+        return None
+    # Try new nested schema
+    rates_map = obj.get('rates')
+    if isinstance(rates_map, dict):
+        usdcny = rates_map.get('USDCNY')
+        if usdcny is not None:
+            try:
+                return float(usdcny)
+            except Exception:
+                return None
+    # Legacy top-level
+    usdcny = obj.get('USDCNY')
+    if usdcny is not None:
+        try:
+            return float(usdcny)
+        except Exception:
+            return None
+    return None
+
+
 def get_usd_per_cny(base_dir: Path) -> float | None:
     """Return USD per 1 CNY from rate_cache.json.
 
@@ -131,19 +159,14 @@ def get_usd_per_cny(base_dir: Path) -> float | None:
         except Exception:
             pass
 
-        rates = None
+        obj = None
         for p in candidates:
-            rates = get_rates(cache_path=p, shared_cache_path=None)
-            if rates:
+            obj = get_rates(cache_path=p, shared_cache_path=None)
+            if obj:
                 break
 
-        if not rates:
-            return None
-        usdcny = rates.get('USDCNY')
-        if usdcny is None:
-            return None
-        usdcny = float(usdcny)
-        if usdcny <= 0:
+        usdcny = _extract_usdcny_from_rates(obj)
+        if usdcny is None or usdcny <= 0:
             return None
         return 1.0 / usdcny
     except Exception:
