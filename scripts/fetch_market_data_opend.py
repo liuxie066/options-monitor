@@ -71,7 +71,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.opend_utils import normalize_underlier
+from scripts.opend_utils import normalize_underlier, get_trading_date
 
 
 def _chain_cache_path(base_dir: Path, u_code: str) -> Path:
@@ -373,6 +373,9 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
             # Make it explicit in meta by leaving spot None; caller can provide --spot.
             pass
 
+        # Trading-date anchor for DTE / cache freshness.
+        today = get_trading_date(u.market)
+
         # Option chain cache (day-level).
         chain_obj = None
         cache_path = None
@@ -380,7 +383,7 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
         if chain_cache and base_dir is not None:
             cache_path = _chain_cache_path(base_dir, u.code)
             cached = _load_chain_cache(cache_path)
-            if (not chain_cache_force_refresh) and _is_chain_cache_fresh(cached, date.today()):
+            if (not chain_cache_force_refresh) and _is_chain_cache_fresh(cached, today):
                 chain_obj = cached
 
         if chain_obj is None:
@@ -407,7 +410,7 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
             if expirations_all and ((min_dte is not None) or (max_dte is not None)):
                 try:
                     from datetime import datetime
-                    today0 = date.today()
+                    today0 = today
                     filtered = []
                     for e in expirations_all:
                         try:
@@ -459,7 +462,7 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
             except Exception:
                 rows = []
             chain_obj = {
-                'asof_date': date.today().isoformat(),
+                'asof_date': today.isoformat(),
                 'underlier_code': u.code,
                 'rows': rows,
                 'expirations_all': expirations_all,
@@ -580,7 +583,6 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
                 except Exception:
                     pass
 
-        today = date.today()
         rows: list[dict[str, Any]] = []
 
         for _, r in chain.iterrows():

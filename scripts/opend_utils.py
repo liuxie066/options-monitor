@@ -14,6 +14,23 @@ HK options chain support is possible, but may require multiplier/fee model chang
 
 import re
 from dataclasses import dataclass
+from datetime import datetime, date
+from zoneinfo import ZoneInfo
+
+
+def get_trading_date(market: str) -> date:
+    """Market-convention trading date.
+
+    Why: server may run in UTC; using date.today() can shift DTE by 1 around US after-hours.
+    """
+    m = (market or '').upper().strip()
+    if m == 'US':
+        return datetime.now(ZoneInfo('America/New_York')).date()
+    if m == 'HK':
+        return datetime.now(ZoneInfo('Asia/Hong_Kong')).date()
+    if m == 'CN':
+        return datetime.now(ZoneInfo('Asia/Shanghai')).date()
+    return datetime.now(ZoneInfo('UTC')).date()
 
 
 @dataclass
