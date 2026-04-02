@@ -126,12 +126,14 @@ def build_context(records: list[dict], market: str, account: str | None = None, 
     usdcny = None
     hkdcny = None
     if rates:
+        # rates may be either the full cache object {rates:{...}, timestamp, cached_at} or already the dict of rates
+        rates_map = rates.get('rates') if isinstance(rates, dict) and 'rates' in rates else rates
         try:
-            usdcny = float(rates.get('USDCNY')) if rates.get('USDCNY') else None
+            usdcny = float(rates_map.get('USDCNY')) if rates_map.get('USDCNY') else None
         except Exception:
             usdcny = None
         try:
-            hkdcny = float(rates.get('HKDCNY')) if rates.get('HKDCNY') else None
+            hkdcny = float(rates_map.get('HKDCNY')) if rates_map.get('HKDCNY') else None
         except Exception:
             hkdcny = None
 
