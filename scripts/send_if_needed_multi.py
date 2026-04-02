@@ -27,6 +27,13 @@ Safety:
 
 from __future__ import annotations
 
+# Ensure repo root is on sys.path for `scripts.*` imports when run as a script
+import sys
+from pathlib import Path as _PathLib
+_repo_root = _PathLib(__file__).resolve().parent.parent
+if str(_repo_root) not in sys.path:
+    sys.path.insert(0, str(_repo_root))
+
 import argparse
 import json
 import os
