@@ -1615,16 +1615,31 @@ def main():
         except Exception:
             pass
 
-    # Mark notified ONCE (global cooldown, unified across accounts)
+    # Mark notified once per merged-message recipient to avoid stale cross-account notify cooldown.
     if not no_send:
         try:
-            if results:
-                acct0 = results[0].account
-                acct_out0 = accounts_root / acct0
-                cfg_override0 = acct_out0 / 'state' / 'config.override.json'
-                # Mark notified per-account to avoid cross-account cooldown contamination.
-                # We still use a shared state file, but scan_scheduler will record per-account notify state.
-                subprocess.run([str(vpy), 'scripts/scan_scheduler.py', '--config', str(cfg_override0), '--state', str(state_path), '--state-dir', str((run_dir / 'state').resolve()), '--mark-notified', '--account', str(acct0)], cwd=str(base))
+            notified_accounts = [
+                str(r.account).strip()
+                for r in results
+                if r.should_notify and r.meaningful and str(r.notification_text or '').strip()
+            ]
+            for acct0 in notified_accounts:
+                if not acct0:
+                    continue
+                cfg_override0 = (accounts_root / acct0 / 'state' / 'config.override.json').resolve()
+                if not cfg_override0.exists():
+                    continue
+                subprocess.run(
+                    [
+                        str(vpy), 'scripts/scan_scheduler.py',
+                        '--config', str(cfg_override0),
+                        '--state', str(state_path),
+                        '--state-dir', str((run_dir / 'state').resolve()),
+                        '--mark-notified',
+                        '--account', str(acct0),
+                    ],
+                    cwd=str(base),
+                )
         except Exception:
             pass
 

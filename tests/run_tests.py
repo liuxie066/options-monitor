@@ -112,6 +112,10 @@ def main() -> None:
     from test_fetch_portfolio_context_richtext import (
         test_build_context_richtext_normalization_and_hk_symbol,
     )
+    from test_fetch_option_positions_context_rates import (
+        test_build_context_reads_nested_rates_payload,
+        test_build_context_reads_plain_rates_payload,
+    )
     from test_report_labels_no_stale import (
         test_add_sell_put_labels_overwrites_on_empty,
     )
