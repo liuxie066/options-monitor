@@ -205,6 +205,7 @@ def build_notification(changes_text: str, alerts_text: str, fx_info: dict | None
             if not items:
                 return
             lines.append(title)
+            lines.append('')  # blank line after section heading (Feishu plaintext friendly)
             for x in items:
                 block = _format_alert_line(x).strip()
                 if not block:
