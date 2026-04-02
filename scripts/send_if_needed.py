@@ -70,10 +70,12 @@ def _release_lock(fd: int, lock_path: Path):
 def main():
     ap = argparse.ArgumentParser(description='Run scheduled tick and send notification if needed')
     ap.add_argument('--config', default='config.json')
-    ap.add_argument('--state', default='output/state/scheduler_state.json')
+    ap.add_argument('--state-dir', default='output/state', help='Directory for scheduler_state/last_run/locks (default: output/state)')
     ap.add_argument('--channel', default=None)
     ap.add_argument('--target', default=None)
-    ap.add_argument('--notification', default='output/reports/symbols_notification.txt')
+    ap.add_argument('--state', default=None, help='[deprecated] scheduler state file path. Prefer --state-dir.')
+    ap.add_argument('--report-dir', default='output/reports', help='Directory where pipeline writes reports (default: output/reports)')
+    ap.add_argument('--notification', default=None, help='Notification text file path. Default: <report-dir>/symbols_notification.txt')
     args = ap.parse_args()
 
     base = Path(__file__).resolve().parents[1]
@@ -91,16 +93,32 @@ def main():
     if not target:
         raise SystemExit('[CONFIG_ERROR] notifications.target is required (e.g. user:open_id or chat:chat_id)')
 
-    state = Path(args.state)
-    if not state.is_absolute():
-        state = (base / state).resolve()
+    state_dir = Path(args.state_dir)
+    if not state_dir.is_absolute():
+        state_dir = (base / state_dir).resolve()
+    state_dir.mkdir(parents=True, exist_ok=True)
 
-    notif = Path(args.notification)
-    if not notif.is_absolute():
-        notif = (base / notif).resolve()
+    # Backward compat: allow explicit --state file override
+    if args.state:
+        state = Path(args.state)
+        if not state.is_absolute():
+            state = (base / state).resolve()
+    else:
+        state = (state_dir / 'scheduler_state.json').resolve()
 
-    last_run = base / 'output' / 'state' / 'last_run.json'
-    lock_path = base / 'output' / 'state' / 'send_if_needed.lock'
+    report_dir = Path(args.report_dir)
+    if not report_dir.is_absolute():
+        report_dir = (base / report_dir).resolve()
+
+    if args.notification:
+        notif = Path(args.notification)
+        if not notif.is_absolute():
+            notif = (base / notif).resolve()
+    else:
+        notif = (report_dir / 'symbols_notification.txt').resolve()
+
+    last_run = (state_dir / 'last_run.json').resolve()
+    lock_path = (state_dir / 'send_if_needed.lock').resolve()
 
     started = utc_now()
 
@@ -129,7 +147,13 @@ def main():
             return 0
 
         # 2) pipeline
-        pipe = subprocess.run([str(vpy), 'scripts/run_pipeline.py', '--config', str(cfg)], cwd=str(base))
+        pipe = subprocess.run([
+            str(vpy), 'scripts/run_pipeline.py',
+            '--config', str(cfg),
+            '--mode', 'scheduled',
+            '--report-dir', str(report_dir),
+            '--state-dir', str(state_dir),
+        ], cwd=str(base))
         if pipe.returncode != 0:
             sh([str(vpy), 'scripts/write_last_run.py', '--path', str(last_run), '--status', 'error', '--stage', 'pipeline', '--reason', 'pipeline failed', '--started-at', started], cwd=base)
             return pipe.returncode

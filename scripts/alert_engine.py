@@ -434,7 +434,8 @@ def main():
     parser.add_argument('--summary-input', default='output/reports/symbols_summary.csv')
     parser.add_argument('--output', default='output/reports/symbols_alerts.txt')
     parser.add_argument('--changes-output', default='output/reports/symbols_changes.txt')
-    parser.add_argument('--previous-summary', default='output/state/symbols_summary_prev.csv')
+    parser.add_argument('--previous-summary', default=None, help='Previous summary snapshot CSV (default: <state-dir>/symbols_summary_prev.csv)')
+    parser.add_argument('--state-dir', default=None, help='[optional] state dir for symbols_summary_prev.csv (overrides --previous-summary when set)')
     parser.add_argument('--update-snapshot', action='store_true')
     parser.add_argument('--policy-json', default=None, help='JSON file for alert policy overrides')
     args = parser.parse_args()
@@ -456,7 +457,19 @@ def main():
     summary_path = base / args.summary_input
     output_path = base / args.output
     changes_path = base / args.changes_output
-    previous_path = base / args.previous_summary
+
+    # Resolve previous snapshot
+    if args.state_dir:
+        sd = Path(args.state_dir)
+        if not sd.is_absolute():
+            sd = (base / sd).resolve()
+        previous_path = (sd / 'symbols_summary_prev.csv').resolve()
+    elif args.previous_summary:
+        previous_path = Path(args.previous_summary)
+        if not previous_path.is_absolute():
+            previous_path = (base / previous_path).resolve()
+    else:
+        previous_path = (base / 'output' / 'state' / 'symbols_summary_prev.csv').resolve()
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     # When changes-output is /dev/null (scheduled fast mode), avoid trying to create its parent.

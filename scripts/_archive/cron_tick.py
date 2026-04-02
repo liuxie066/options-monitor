@@ -35,7 +35,9 @@ def run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess:
 def main():
     base = Path(__file__).resolve().parents[1]
     vpy = str(base / '.venv' / 'bin' / 'python')
-    cfg = str(base / 'config.json')
+    # Config selection: default to US config; override via OPTIONS_MONITOR_CONFIG env
+    import os
+    cfg = str(base / os.getenv('OPTIONS_MONITOR_CONFIG', 'config.us.json'))
     state = str(base / 'output' / 'state' / 'scheduler_state.json')
     last_run = str(base / 'output' / 'state' / 'last_run.json')
 

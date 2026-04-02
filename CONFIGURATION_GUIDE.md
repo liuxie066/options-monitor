@@ -165,6 +165,6 @@
 
 ```bash
 openclaw cron runs
-cat /home/node/.openclaw/workspace/options-monitor/output/state/last_run.json
-cat /home/node/.openclaw/workspace/options-monitor/output/reports/symbols_notification.txt
+cat /home/node/.openclaw/workspace/options-monitor-prod/output/state/last_run.json
+cat /home/node/.openclaw/workspace/options-monitor-prod/<report_dir>/symbols_notification.txt  # 默认 report_dir=output/reports
 ```

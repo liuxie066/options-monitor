@@ -147,8 +147,12 @@ def main():
     rows = []
     for symbol in args.symbols:
         path = input_root / 'parsed' / f'{symbol}_required_data.csv'
-        df = pd.read_csv(path)
-        df = df[df['option_type'] == 'call'].copy()
+        try:
+            df = pd.read_csv(path)
+        except pd.errors.EmptyDataError:
+            # Empty required_data CSV: treat as no candidates instead of crashing.
+            df = pd.DataFrame()
+        df = df[df['option_type'] == 'call'].copy() if (not df.empty and ('option_type' in df.columns)) else pd.DataFrame()
 
         for _, row in df.iterrows():
             dte = int(row['dte'])

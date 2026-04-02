@@ -19,16 +19,5 @@ then
   .venv/bin/pip install -r requirements.txt
 fi
 
-CFG_DEFAULT="config.local.us.json"
-CFG="${OPTIONS_MONITOR_CONFIG:-$CFG_DEFAULT}"
-
-if [[ ! -f "$CFG" ]]; then
-  echo "[ERR] config file not found: $CFG"
-  echo "      Create one from example:"
-  echo "      cp config.example.us.json $CFG_DEFAULT"
-  echo "      # or for HK: cp config.example.hk.json config.local.hk.json"
-  exit 2
-fi
-
-echo "[RUN] watchlist pipeline ($CFG)"
-exec .venv/bin/python scripts/run_pipeline.py --config "$CFG"
+echo "[RUN] watchlist pipeline (${OPTIONS_MONITOR_CONFIG:-config.us.json})"
+exec .venv/bin/python scripts/run_pipeline.py --config "${OPTIONS_MONITOR_CONFIG:-config.us.json}"

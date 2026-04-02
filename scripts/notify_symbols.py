@@ -242,6 +242,7 @@ def main():
     parser.add_argument('--alerts-input', default='output/reports/symbols_alerts.txt')
     parser.add_argument('--changes-input', default='output/reports/symbols_changes.txt')
     parser.add_argument('--output', default='output/reports/symbols_notification.txt')
+    parser.add_argument('--state-dir', default=None, help='[optional] state dir for rate_cache.json')
     args = parser.parse_args()
 
     base = Path(__file__).resolve().parents[1]
@@ -255,7 +256,14 @@ def main():
 
     fx_info = None
     try:
-        rate_path = base / 'output' / 'state' / 'rate_cache.json'
+        if args.state_dir:
+            sd = Path(args.state_dir)
+            if not sd.is_absolute():
+                sd = (base / sd).resolve()
+            rate_path = (sd / 'rate_cache.json').resolve()
+        else:
+            rate_path = (base / 'output' / 'state' / 'rate_cache.json').resolve()
+
         if rate_path.exists() and rate_path.stat().st_size > 0:
             data = json.loads(rate_path.read_text(encoding='utf-8'))
             rates = (data.get('rates') or {}) if isinstance(data, dict) else {}
