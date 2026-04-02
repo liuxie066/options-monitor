@@ -15,8 +15,6 @@ def derive_put_max_strike_from_cash(
     portfolio_ctx: dict | None,
     fx_usd_per_cny: float | None,
     hkdcny: float | None,
-    *,
-    fallback_multiplier: int = 100,
 ) -> float | None:
     """Return a cash-based max_strike cap to prefilter sell_put.
 
@@ -26,7 +24,7 @@ def derive_put_max_strike_from_cash(
 
     strike_cap ~= free_cash_native / multiplier
 
-    Multiplier source: scripts/multiplier_cache.py (best-effort), else fallback 100.
+    Multiplier source: scripts/multiplier_cache.py (best-effort). Missing => return None.
 
     Note: fx_usd_per_cny / hkdcny are currently unused in this step (kept for call-site compatibility).
     """
@@ -77,6 +75,7 @@ def derive_put_max_strike_from_cash(
         mult = None
 
     if not mult or mult <= 0:
-        mult = int(fallback_multiplier) if fallback_multiplier and fallback_multiplier > 0 else 100
+        # No default: missing multiplier => can't derive a cash-based strike cap safely.
+        return None
 
     return free_native / float(mult)

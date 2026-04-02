@@ -35,243 +35,28 @@ import subprocess
 from time import monotonic
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import datetime, timezone, timedelta, time
+from datetime import datetime, timedelta, time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from typing import Any
-import socket
-
 try:
     from scripts.run_log import RunLogger
 except Exception:
     from run_log import RunLogger
 
+from scripts.io_utils import (
+    read_json,
+    atomic_write_json as write_json,
+    parse_last_json,
+    parse_last_json_obj,
+    money_cny,
+    utc_now,
+    bj_now,
+)
+
 
 DEBUG = False
 _CURRENT_RUN_ID: str | None = None
-
-
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def bj_now() -> str:
-    return datetime.now(timezone.utc).astimezone(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M:%S')
-
-
-def read_json(path: Path, default):
-    try:
-        if path.exists() and path.stat().st_size > 0:
-            return json.loads(path.read_text(encoding='utf-8'))
-    except Exception:
-        pass
-    return default
-
-
-def write_json(path: Path, obj):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(obj, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-
-def log(msg: str) -> None:
-    try:
-        if DEBUG:
-            print(msg)
-    except Exception:
-        pass
-
-
-
-def prefetch_required_data(vpy: Path, base: Path, cfg: dict, shared_required: Path) -> dict[str, int]:
-    # Fetch required_data for all symbols once per tick into shared_required (raw/parsed).
-    # Best-effort: failures should not crash the tick; downstream will handle empty/partial data.
-    # New flow: write directly into shared_required; do not touch ./output/{raw,parsed}.
-    stats = {
-        'symbols_total': 0,
-        'cache_hits': 0,
-        'fetch_attempts': 0,
-        'fallback_to_yahoo': 0,
-        'fetch_errors': 0,
-        'copied_raw': 0,
-        'copied_csv': 0,
-    }
-    try:
-        shared_required.mkdir(parents=True, exist_ok=True)
-        (shared_required / 'raw').mkdir(parents=True, exist_ok=True)
-        (shared_required / 'parsed').mkdir(parents=True, exist_ok=True)
-    except Exception:
-        return stats
-
-    syms = cfg.get('symbols') or []
-    for it in syms:
-        if not isinstance(it, dict):
-            continue
-        symbol = str(it.get('symbol') or '').strip()
-        if not symbol:
-            continue
-        stats['symbols_total'] += 1
-
-        fetch = (it.get('fetch') or {})
-        src = str(fetch.get('source') or 'yahoo').strip().lower()
-
-        # Derive basic option-types from config (account-agnostic)
-        want_put = bool((it.get('sell_put') or {}).get('enabled', False))
-        want_call = bool((it.get('sell_call') or {}).get('enabled', False))
-        opt_types = 'put,call'
-        if want_put and (not want_call):
-            opt_types = 'put'
-        elif want_call and (not want_put):
-            opt_types = 'call'
-
-        # Expiration pick policy:
-        # For US/HK we want expirations that can satisfy scan min_dte, otherwise the first N expirations
-        # are often too near-term and produce 0 candidates.
-        limit_exp = int(fetch.get('limit_expirations') or cfg.get('limit_expirations') or 8)
-        min_dte_put = float((it.get('sell_put') or {}).get('min_dte') or 0)
-        min_dte_call = float((it.get('sell_call') or {}).get('min_dte') or 0)
-        min_dte = int(max(min_dte_put, min_dte_call, 0))
-
-        # Skip if already present and sufficient for min_dte
-        try:
-            raw0 = (shared_required / 'raw' / f"{symbol}_required_data.json").resolve()
-            csv0 = (shared_required / 'parsed' / f"{symbol}_required_data.csv").resolve()
-            if raw0.exists() and csv0.exists() and raw0.stat().st_size > 0 and csv0.stat().st_size > 0:
-                if min_dte > 0:
-                    try:
-                        import pandas as pd
-                        df0 = pd.read_csv(csv0, usecols=['dte'])
-                        mx = pd.to_numeric(df0['dte'], errors='coerce').max()
-                        if mx is not None and mx >= float(min_dte):
-                            stats['cache_hits'] += 1
-                            continue
-                    except Exception:
-                        pass
-                else:
-                    stats['cache_hits'] += 1
-                    continue
-        except Exception:
-            pass
-
-        cmd = [str(vpy)]
-        if src == 'opend':
-            host = str(fetch.get('host') or '127.0.0.1')
-            port = int(fetch.get('port') or 11111)
-
-            max_dte_put = float((it.get('sell_put') or {}).get('max_dte') or 0)
-            max_dte_call = float((it.get('sell_call') or {}).get('max_dte') or 0)
-            max_dte = int(max(max_dte_put, max_dte_call, 0))
-            max_dte = (max_dte if max_dte > 0 else None)
-
-            cmd += [
-                'scripts/fetch_market_data_opend.py',
-                '--symbols', symbol,
-                '--limit-expirations', str(limit_exp),
-                '--min-dte', str(min_dte),
-                '--host', host,
-                '--port', str(port),
-                '--option-types', str(opt_types),
-                '--output-root', str(shared_required),
-                '--chain-cache',
-                '--quiet',
-            ]
-            # Keep behavior consistent with per-symbol pipeline: for US, default to PM spot unless explicitly disabled.
-            try:
-                if (str(symbol).strip().upper().endswith('.HK')):
-                    pass
-                else:
-                    spot_from_pm0 = fetch.get('spot_from_portfolio_management', None)
-                    if spot_from_pm0 is None:
-                        cmd.append('--spot-from-pm')
-                    elif bool(spot_from_pm0):
-                        cmd.append('--spot-from-pm')
-            except Exception:
-                pass
-            if max_dte is not None:
-                cmd += ['--max-dte', str(max_dte)]
-        else:
-            cmd += [
-                'scripts/fetch_market_data.py',
-                '--symbols', symbol,
-                '--limit-expirations', str(limit_exp),
-                '--output-root', str(shared_required),
-            ]
-
-        try:
-            stats['fetch_attempts'] += 1
-            subprocess.run(cmd, cwd=str(base), capture_output=True, text=True, timeout=60)
-            # prefetch fallback to yahoo ONLY for US (HK has only OpenD source; no downgrade)
-            try:
-                if src == 'opend':
-                    market = str(it.get('market') or '').upper()
-                    raw0 = (shared_required / 'raw' / f"{symbol}_required_data.json").resolve()
-                    csv0 = (shared_required / 'parsed' / f"{symbol}_required_data.csv").resolve()
-                    empty = (not raw0.exists()) or (not csv0.exists()) or (csv0.stat().st_size <= 0)
-
-                    allow_downgrade = bool(((cfg.get('fetch_policy') or {}).get('allow_downgrade_to_yahoo', True)))
-
-                    if empty and market == 'US' and allow_downgrade:
-                        # Fail-fast: do NOT downgrade to Yahoo when OpenD is blocked by login/phone verification.
-                        # Downgrading causes YF rate-limit loops and makes the system non-deterministic.
-                        err_s = ''
-                        try:
-                            if raw0.exists() and raw0.stat().st_size > 0:
-                                obj0 = json.loads(raw0.read_text(encoding='utf-8'))
-                                meta0 = (obj0.get('meta') or {}) if isinstance(obj0, dict) else {}
-                                err_s = str(meta0.get('error') or '')
-                        except Exception:
-                            err_s = ''
-
-                        need_code = ('手机验证码' in err_s) or ('verification' in err_s.lower())
-                        if need_code:
-                            stats['fetch_errors'] += 1
-                        else:
-                            cmd2 = [
-                                str(vpy), 'scripts/fetch_market_data.py',
-                                '--symbols', symbol,
-                                '--limit-expirations', str(limit_exp),
-                                '--output-root', str(shared_required),
-                            ]
-                            subprocess.run(cmd2, cwd=str(base), capture_output=True, text=True, timeout=60)
-                            stats['fallback_to_yahoo'] += 1
-                    elif empty and market == 'US' and (not allow_downgrade):
-                        # Explicitly disabled downgrade; count as fetch error for observability.
-                        stats['fetch_errors'] += 1
-            except Exception:
-                pass
-        except Exception:
-            stats['fetch_errors'] += 1
-            continue
-
-        try:
-            raw0 = (shared_required / 'raw' / f"{symbol}_required_data.json").resolve()
-            csv0 = (shared_required / 'parsed' / f"{symbol}_required_data.csv").resolve()
-            if raw0.exists() and raw0.stat().st_size > 0:
-                stats['copied_raw'] += 1
-            # Accept header-only CSV as valid required_data artifact (avoid 1-byte file issues).
-            if csv0.exists() and csv0.stat().st_size > 0:
-                stats['copied_csv'] += 1
-        except Exception:
-            pass
-
-    return stats
-
-def append_json_list(path: Path, payload: dict, max_entries: int = 200):
-    """Append payload into a bounded JSON list file. Keeps last max_entries records."""
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        arr = []
-        if path.exists() and path.stat().st_size > 0:
-            try:
-                obj = json.loads(path.read_text(encoding='utf-8'))
-                if isinstance(obj, list):
-                    arr = obj
-            except Exception:
-                arr = []
-        arr.append(payload)
-        if len(arr) > int(max_entries):
-            arr = arr[-int(max_entries):]
-        path.write_text(json.dumps(arr, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-    except Exception:
-        pass
 
 
 def parse_hhmm(value: str) -> time:
@@ -323,29 +108,6 @@ def maybe_parse_dt(value: str | None) -> datetime | None:
 def is_high_priority_notification(text: str) -> bool:
     # notify_symbols.py emits "重点:" when there are high-priority candidates.
     return bool(re.search(r"(?m)^重点:\s*$", text or ""))
-
-
-def parse_last_json(stdout: str) -> dict:
-    """Parse the last JSON object printed to stdout (tolerant of logs above it)."""
-    lines = (stdout or '').splitlines()
-    buf = []
-    for ln in reversed(lines):
-        if not ln.strip():
-            continue
-        buf.append(ln)
-        if ln.strip().startswith('{'):
-            break
-    txt = '\n'.join(reversed(buf)).strip()
-    return json.loads(txt) if txt else {}
-
-
-def money_cny(v) -> str:
-    try:
-        if v is None:
-            return '-'
-        return f"¥{float(v):,.0f} (CNY)"
-    except Exception:
-        return '-'
 
 
 def _snapshot_fresh(payload: dict, max_age_sec: int) -> bool:
@@ -501,8 +263,6 @@ def ensure_account_output_dir(d: Path):
     (d / 'parsed').mkdir(parents=True, exist_ok=True)
     (d / 'reports').mkdir(parents=True, exist_ok=True)
     (d / 'state').mkdir(parents=True, exist_ok=True)
-
-
 
 
 @dataclass
@@ -700,20 +460,6 @@ def build_merged_message(
     return '\n'.join(lines).strip() + '\n'
 
 
-def _parse_last_json_obj(text: str) -> dict:
-    s = (text or '').strip()
-    if not s:
-        return {}
-    i = s.find('{')
-    j = s.rfind('}')
-    if i < 0 or j < 0 or j <= i:
-        return {}
-    try:
-        return json.loads(s[i:j+1])
-    except Exception:
-        return {}
-
-
 def _opend_alert_rl_path(base: Path) -> Path:
     return (base / 'output_shared' / 'state' / 'opend_alert_rate_limit.json').resolve()
 
@@ -789,14 +535,6 @@ def _send_opend_alert(base: Path, cfg: dict, *, error_code: str, message_text: s
     return send.returncode == 0
 
 
-def _tcp_open(host: str, port: int, timeout_sec: float = 1.0) -> bool:
-    try:
-        with socket.create_connection((host, int(port)), timeout=timeout_sec):
-            return True
-    except Exception:
-        return False
-
-
 def _safe_runlog_data(data: dict[str, Any] | None, max_items: int = 16) -> dict[str, Any]:
     """Small summary-only payload for run log events."""
     if not isinstance(data, dict):
@@ -866,7 +604,7 @@ def main():
                 'symbols_count': len([x for x in syms0 if isinstance(x, dict)]),
                 'source_selections': src_counts,
                 'market_config': str(getattr(args, 'market_config', 'auto') or 'auto'),
-                'no_send': bool(no_send),
+                'no_send': no_send,
                 'smoke': bool(smoke),
             }),
         )
@@ -930,7 +668,7 @@ def main():
                         text=True,
                         timeout=35,
                     )
-                    payload0 = _parse_last_json_obj((wd0.stdout or '') + '\n' + (wd0.stderr or ''))
+                    payload0 = parse_last_json_obj((wd0.stdout or '') + '\n' + (wd0.stderr or ''))
                     ok0 = bool(payload0.get('ok')) if payload0 else (wd0.returncode == 0)
                     if not ok0:
                         unhealthy = {
@@ -1051,8 +789,6 @@ def main():
             )
         except Exception:
             pass
-        pass
-
     try:
         runlog.event('watchdog', 'ok', duration_ms=int((monotonic() - t_watchdog0) * 1000))
     except Exception:
@@ -1385,8 +1121,6 @@ def main():
             # summary is already written into acct_run_dir by run_pipeline via --report-dir
             # keep copy step as no-op for backward compat
             src_summary = (acct_run_dir / 'symbols_summary.csv').resolve()
-            if src_summary.exists() and src_summary.stat().st_size > 0:
-                pass
             # config override (best-effort)
             if cfg_override.exists() and cfg_override.stat().st_size > 0:
                 (acct_run_dir / 'config.override.json').write_bytes(cfg_override.read_bytes())
@@ -1479,7 +1213,7 @@ def main():
                     'result': r.__dict__,
                     'run_dir': str(run_dir),
                 }
-                # legacy pointer
+                # per-account marker
                 write_json(acct_out / 'state' / 'last_run.json', payload)
                 # per-run copy
                 write_json((run_dir / 'accounts' / r.account / 'state' / 'last_run.json').resolve(), payload)
@@ -1504,8 +1238,6 @@ def main():
             pass
 
         return 0
-
-    no_send = bool(getattr(args, 'no_send', False))
 
     # Send ONCE
     channel = (base_cfg.get('notifications') or {}).get('channel') or 'feishu'

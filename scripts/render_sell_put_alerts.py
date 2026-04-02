@@ -85,10 +85,9 @@ def render_one(row) -> str:
         cash_avail_est = None
 
     cash_free = None
-    cash_free_est = None
+    cash_free_cny = None
 
     cash_avail_cny = None
-    cash_free_cny = None
     try:
         v = row.get('cash_available_cny')
         cash_avail_cny = float(v) if v is not None and not pd.isna(v) else None
@@ -104,24 +103,12 @@ def render_one(row) -> str:
         cash_free = float(v) if v is not None and not pd.isna(v) else None
     except Exception:
         cash_free = None
-    try:
-        v = row.get('cash_free_usd_est')
-        cash_free_est = float(v) if v is not None and not pd.isna(v) else None
-    except Exception:
-        cash_free_est = None
-
     headroom = None
-    headroom_est = None
     try:
-        if cash_req is not None and cash_free is not None:
-            headroom = float(cash_free) - float(cash_req)
+        if cash_req_cny is not None and cash_free_cny is not None:
+            headroom = float(cash_free_cny) - float(cash_req_cny)
     except Exception:
         headroom = None
-    try:
-        if cash_req is not None and cash_free_est is not None:
-            headroom_est = float(cash_free_est) - float(cash_req)
-    except Exception:
-        headroom_est = None
 
     body = [
         title,
@@ -135,6 +122,7 @@ def render_one(row) -> str:
         f"其中该标的占用(估算, CNY口径): {('-' if cash_used_symbol is None else '¥' + num(cash_used_symbol, 0))}",
         f"富途现金(base, CNY): {('-' if cash_avail_cny is None else '¥' + num(cash_avail_cny, 0))}",
         f"现金余量(base, 扣占用折算, CNY): {('-' if cash_free_cny is None else '¥' + num(cash_free_cny, 0))}",
+        f"加仓后余量(估算, CNY): {('-' if headroom is None else '¥' + num(headroom, 0))}",
         "",
         f"净收入({str(row.get('currency') or row.get('option_ccy') or 'N/A').upper()}): {num(row['net_income'])}",
         f"净年化: {pct(row['annualized_net_return_on_cash_basis'])}",

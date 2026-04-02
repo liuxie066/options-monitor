@@ -136,12 +136,20 @@ def enrich_sell_put_candidates_with_cash(
     # Cash requirement
     try:
         if 'multiplier' in df_sp_lab.columns:
-            m = df_sp_lab['multiplier'].fillna(100.0).astype(float)
+            m = pd.to_numeric(df_sp_lab['multiplier'], errors='coerce')
         else:
-            m = 100.0
+            m = pd.Series([pd.NA] * len(df_sp_lab), index=df_sp_lab.index, dtype='float64')
 
-        native_req = df_sp_lab['strike'].astype(float) * m
+        strike = pd.to_numeric(df_sp_lab['strike'], errors='coerce')
+        native_req = strike.astype(float) * m.astype(float)
         df_sp_lab['cash_required_usd'] = native_req
+        # If multiplier missing, cash requirement is unknown.
+        try:
+            missing_m = m.isna() | (m.astype(float) <= 0)
+            if missing_m.any():
+                df_sp_lab.loc[missing_m, 'cash_required_usd'] = pd.NA
+        except Exception:
+            pass
 
         ccy = None
         if 'currency' in df_sp_lab.columns and len(df_sp_lab) > 0:
@@ -153,6 +161,12 @@ def enrich_sell_put_candidates_with_cash(
             df_sp_lab['cash_required_cny'] = pd.NA
         else:
             df_sp_lab['cash_required_cny'] = native_req.astype(float) * float(k)
+            try:
+                missing_m = m.isna() | (m.astype(float) <= 0)
+                if missing_m.any():
+                    df_sp_lab.loc[missing_m, 'cash_required_cny'] = pd.NA
+            except Exception:
+                pass
     except Exception:
         df_sp_lab['cash_required_usd'] = pd.NA
         df_sp_lab['cash_required_cny'] = pd.NA

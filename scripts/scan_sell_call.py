@@ -5,8 +5,6 @@ import argparse
 from pathlib import Path
 import pandas as pd
 
-DEFAULT_MULTIPLIER = 100
-
 
 def calc_futu_us_option_fee(order_price: float, contracts: int = 1, is_sell: bool = True) -> float:
     commission_per_contract = 0.65 if order_price > 0.1 else 0.15
@@ -54,6 +52,15 @@ def safe_float(v):
         return None
 
 
+def safe_int(v):
+    try:
+        if pd.isna(v):
+            return None
+        return int(v)
+    except Exception:
+        return None
+
+
 def strike_band(strike_above_spot_pct: float) -> str:
     if strike_above_spot_pct < 0.03:
         return '<3%'
@@ -84,7 +91,9 @@ def compute_metrics(row: pd.Series, avg_cost: float):
         return None
 
     multiplier = safe_float(row.get('multiplier'))
-    m = int(multiplier) if multiplier and multiplier > 0 else DEFAULT_MULTIPLIER
+    m = int(multiplier) if multiplier and multiplier > 0 else None
+    if not m:
+        return None
 
     gross_income = mid * m
     base_dir = Path(__file__).resolve().parents[1]

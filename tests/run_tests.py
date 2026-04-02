@@ -145,8 +145,14 @@ def main() -> None:
     from test_pipeline_postprocess_notify_gate import (
         test_postprocess_notify_gate,
     )
+    from test_multiplier_no_default_in_scanners import (
+        test_sell_put_metrics_requires_multiplier,
+        test_sell_call_metrics_requires_multiplier,
+    )
 
     tests = [
+        test_sell_put_metrics_requires_multiplier,
+        test_sell_call_metrics_requires_multiplier,
         test_parse_futu_fill_message,
         test_chain_cache_helpers_roundtrip,
         test_chain_cache_fresh_check,
