@@ -112,6 +112,39 @@ def main() -> None:
     from test_fetch_portfolio_context_richtext import (
         test_build_context_richtext_normalization_and_hk_symbol,
     )
+    from test_fetch_option_positions_context_rates import (
+        test_build_context_reads_nested_rates_payload,
+        test_build_context_reads_plain_rates_payload,
+    )
+    from test_report_labels_no_stale import (
+        test_add_sell_put_labels_overwrites_on_empty,
+    )
+    from test_scan_scheduler_notify_semantics import (
+        test_scan_scheduler_emits_is_notify_window_open_and_backcompat_should_notify,
+    )
+    from test_scan_scheduler_scan_per_account import (
+        test_scan_scheduler_scan_is_per_account,
+    )
+    from test_market_session_single_source_of_truth import (
+        test_select_markets_to_run_hk_break_respected,
+    )
+    from test_config_loader_validation_cache import (
+        test_scheduled_validation_is_cached,
+    )
+    from test_atomic_write_json import (
+        test_atomic_write_json_writes_valid_json,
+    )
+    from test_pipeline_watchlist_whitelist import (
+        test_watchlist_whitelist_filters_symbols,
+    )
+    from test_pipeline_runner_stage_plan import (
+        test_stage_plan_fetch_only,
+        test_stage_plan_scan_includes_fetch,
+        test_stage_plan_stage_only_notify,
+    )
+    from test_pipeline_postprocess_notify_gate import (
+        test_postprocess_notify_gate,
+    )
 
     tests = [
         test_parse_futu_fill_message,
@@ -122,6 +155,17 @@ def main() -> None:
         test_run_log_writer_create_and_append,
         test_run_log_data_small,
         test_build_context_richtext_normalization_and_hk_symbol,
+        test_add_sell_put_labels_overwrites_on_empty,
+        test_scan_scheduler_emits_is_notify_window_open_and_backcompat_should_notify,
+        test_scan_scheduler_scan_is_per_account,
+        test_select_markets_to_run_hk_break_respected,
+        test_scheduled_validation_is_cached,
+        test_atomic_write_json_writes_valid_json,
+        test_watchlist_whitelist_filters_symbols,
+        test_stage_plan_fetch_only,
+        test_stage_plan_scan_includes_fetch,
+        test_stage_plan_stage_only_notify,
+        test_postprocess_notify_gate,
     ]
     for t in tests:
         t()

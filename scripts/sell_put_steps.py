@@ -45,11 +45,10 @@ def run_sell_put_scan_and_summarize(
         '--input-root', str(required_data_dir),
         '--min-dte', str(sp.get('min_dte', 20)),
         '--max-dte', str(sp.get('max_dte', 60)),
-        '--min-annualized-return', str(sp.get('min_annualized_net_return', 0.07)),
+        '--min-annualized-net-return', str(sp.get('min_annualized_net_return', 0.07)),
         '--min-open-interest', str(sp.get('min_open_interest', 100)),
         '--min-volume', str(sp.get('min_volume', 10)),
-        '--out', str(symbol_sp),
-        '--top', str(top_n),
+        '--output', str(symbol_sp),
     ]
     if sp.get('min_strike') is not None:
         cmd.extend(['--min-strike', str(sp.get('min_strike'))])

@@ -97,16 +97,34 @@ def pick_layered(df: pd.DataFrame) -> pd.DataFrame:
 
 def main():
     parser = argparse.ArgumentParser(description="Render Sell Call alert text from candidate CSV")
-    parser.add_argument("--input", default="output/reports/sell_call_candidates.csv")
+    parser.add_argument("--input", default=None, help="Input CSV path (default: <report-dir>/sell_call_candidates.csv)")
+    parser.add_argument("--report-dir", default="output/reports", help="Report dir for default input/output (default: output/reports)")
     parser.add_argument("--top", type=int, default=5)
     parser.add_argument("--symbol", default=None)
-    parser.add_argument("--output", default="output/reports/sell_call_alerts.txt")
+    parser.add_argument("--output", default=None, help="Output txt path (default: <report-dir>/sell_call_alerts.txt)")
     parser.add_argument("--layered", action="store_true")
     args = parser.parse_args()
 
     base = Path(__file__).resolve().parents[1]
-    input_path = base / args.input
-    output_path = base / args.output
+
+    report_dir = Path(args.report_dir)
+    if not report_dir.is_absolute():
+        report_dir = (base / report_dir).resolve()
+
+    if args.input:
+        input_path = Path(args.input)
+        if not input_path.is_absolute():
+            input_path = (base / input_path).resolve()
+    else:
+        input_path = (report_dir / 'sell_call_candidates.csv').resolve()
+
+    if args.output:
+        output_path = Path(args.output)
+        if not output_path.is_absolute():
+            output_path = (base / output_path).resolve()
+    else:
+        output_path = (report_dir / 'sell_call_alerts.txt').resolve()
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     try:

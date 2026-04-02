@@ -9,7 +9,8 @@ from pathlib import Path
 
 def main():
     ap = argparse.ArgumentParser(description='Write last_run.json')
-    ap.add_argument('--path', default='output/state/last_run.json')
+    ap.add_argument('--state-dir', default='output/state', help='Directory for last_run.json (default: output/state)')
+    ap.add_argument('--path', default=None, help='[deprecated] explicit last_run.json path. Prefer --state-dir.' )
     ap.add_argument('--status', required=True, choices=['ok','error','skip'])
     ap.add_argument('--stage', default='')
     ap.add_argument('--reason', default='')
@@ -20,7 +21,18 @@ def main():
     args = ap.parse_args()
 
     base = Path(__file__).resolve().parents[1]
-    out = base / args.path
+
+    if args.path:
+        out = Path(args.path)
+        if not out.is_absolute():
+            out = (base / out).resolve()
+    else:
+        state_dir = Path(args.state_dir)
+        if not state_dir.is_absolute():
+            state_dir = (base / state_dir).resolve()
+        state_dir.mkdir(parents=True, exist_ok=True)
+        out = (state_dir / 'last_run.json').resolve()
+
     out.parent.mkdir(parents=True, exist_ok=True)
 
     def now():

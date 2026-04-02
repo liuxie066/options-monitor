@@ -12,6 +12,8 @@ This module is intentionally minimal; expand only as needed.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
+import json
 
 
 @dataclass(frozen=True)
@@ -67,4 +69,82 @@ class CurrencyConverter:
             return self.hkd_to_cny(amount)
         if c == 'CNY':
             return float(amount)
+        return None
+
+
+def get_rates(
+    *,
+    cache_path: Path,
+    shared_cache_path: Path | None = None,
+    max_age_hours: int | None = None,
+) -> dict | None:
+    """Read cached FX rates (best-effort).
+
+    Backward compatible with existing call-sites that pass:
+      - cache_path=...
+      - shared_cache_path=...
+      - max_age_hours=...
+
+    We currently ignore max_age_hours (the callers already treat FX as best-effort).
+    Resolution preference:
+      1) local cache_path
+      2) shared_cache_path (portfolio-management)
+    """
+    def _read(p: Path) -> dict | None:
+        try:
+            p = Path(p).resolve()
+            if not p.exists() or p.stat().st_size <= 0:
+                return None
+            obj = json.loads(p.read_text(encoding='utf-8'))
+            return obj if isinstance(obj, dict) else None
+        except Exception:
+            return None
+
+    r = _read(Path(cache_path))
+    if r is not None:
+        return r
+    if shared_cache_path:
+        return _read(Path(shared_cache_path))
+    return None
+
+
+def get_usd_per_cny(base_dir: Path) -> float | None:
+    """Return USD per 1 CNY from rate_cache.json.
+
+    rate_cache stores USDCNY (CNY per 1 USD). We invert it.
+
+    NOTE: For backward compatibility this function keeps the original signature.
+    It will try multiple cache locations:
+      1) <base_dir>/output/state/rate_cache.json (legacy)
+      2) <base_dir>/output_shared/state/rate_cache.json (shared)
+      3) <base_dir>/../portfolio-management/.data/rate_cache.json (shared)
+    """
+    try:
+        base_dir = Path(base_dir).resolve()
+        candidates = [
+            (base_dir / 'output' / 'state' / 'rate_cache.json').resolve(),
+            (base_dir / 'output_shared' / 'state' / 'rate_cache.json').resolve(),
+        ]
+        # workspace sibling (best-effort)
+        try:
+            candidates.append((base_dir.parents[0] / 'portfolio-management' / '.data' / 'rate_cache.json').resolve())
+        except Exception:
+            pass
+
+        rates = None
+        for p in candidates:
+            rates = get_rates(cache_path=p, shared_cache_path=None)
+            if rates:
+                break
+
+        if not rates:
+            return None
+        usdcny = rates.get('USDCNY')
+        if usdcny is None:
+            return None
+        usdcny = float(usdcny)
+        if usdcny <= 0:
+            return None
+        return 1.0 / usdcny
+    except Exception:
         return None
