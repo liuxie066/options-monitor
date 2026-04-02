@@ -39,21 +39,37 @@ def ensure_required_data(
         return
 
     # Always fetch before scan if required_data missing.
-    # Also refetch when min_dte is requested but existing required_data doesn't reach that DTE.
+    # Also refetch when:
+    # - raw meta.error exists (previous fetch failed but left header-only CSV)
+    # - min_dte is requested but existing required_data doesn't reach that DTE.
     if raw.exists() and raw.stat().st_size > 0 and parsed.exists() and parsed.stat().st_size > 0:
-        if min_dte is not None:
-            try:
-                import pandas as pd
+        should_refetch = False
+        try:
+            import json
 
-                df0 = pd.read_csv(parsed, usecols=['dte'])
-                mx = pd.to_numeric(df0['dte'], errors='coerce').max()
-                if mx is not None and mx >= float(min_dte):
-                    return
-            except Exception:
-                # On read/parse failure, refetch to be safe.
-                pass
-        else:
-            return
+            obj = json.loads(raw.read_text(encoding='utf-8'))
+            meta = obj.get('meta') if isinstance(obj, dict) else None
+            err = (meta or {}).get('error') if isinstance(meta, dict) else None
+            if err:
+                should_refetch = True
+        except Exception:
+            # raw is unreadable => treat as invalid
+            should_refetch = True
+
+        if not should_refetch:
+            if min_dte is not None:
+                try:
+                    import pandas as pd
+
+                    df0 = pd.read_csv(parsed, usecols=['dte'])
+                    mx = pd.to_numeric(df0['dte'], errors='coerce').max()
+                    if mx is not None and mx >= float(min_dte):
+                        return
+                except Exception:
+                    # On read/parse failure, refetch to be safe.
+                    pass
+            else:
+                return
 
     src = str(fetch_source or 'yahoo').strip().lower()
 

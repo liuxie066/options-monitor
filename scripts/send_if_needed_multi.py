@@ -42,7 +42,7 @@ import subprocess
 from time import monotonic
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import datetime, timedelta, time
+from datetime import datetime, timedelta, time, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from typing import Any

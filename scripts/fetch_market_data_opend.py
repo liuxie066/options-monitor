@@ -741,17 +741,24 @@ def save_outputs(base: Path, symbol: str, payload: dict[str, Any], *, output_roo
     except Exception:
         pass
 
-    raw_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding='utf-8')
+    # Atomic writes: avoid half-written json/csv when process is killed mid-write.
+    from scripts.io_utils import atomic_write_text
+    import io
+
+    atomic_write_text(raw_path, json.dumps(payload, ensure_ascii=False, indent=2, default=str) + '\n', encoding='utf-8')
+
     df = pd.DataFrame(payload.get('rows') or [])
     if df.empty:
-        df = pd.DataFrame(columns=COLUMNS)
+        df_out = pd.DataFrame(columns=COLUMNS)
     else:
-        # ensure stable columns order
         for c in COLUMNS:
             if c not in df.columns:
                 df[c] = pd.NA
-        df = df[COLUMNS]
-    df.to_csv(csv_path, index=False)
+        df_out = df[COLUMNS]
+
+    buf = io.StringIO()
+    df_out.to_csv(buf, index=False)
+    atomic_write_text(csv_path, buf.getvalue(), encoding='utf-8')
     return raw_path, csv_path
 
 

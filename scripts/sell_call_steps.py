@@ -42,7 +42,9 @@ def run_sell_call_scan_and_summarize(
         avg_cost_override = stock.get('avg_cost')
 
     shares_total = shares_override if shares_override is not None else cc.get('shares', 100)
-    avg_cost = avg_cost_override if avg_cost_override is not None else cc['avg_cost']
+    avg_cost = avg_cost_override if avg_cost_override is not None else cc.get('avg_cost')
+    if avg_cost is None:
+        return summarize_sell_call(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg)
 
     symbol_cc = report_dir / f'{symbol_lower}_sell_call_candidates.csv'
     cmd = [
