@@ -312,24 +312,40 @@ def annotate_notification(acct: str, text: str) -> str:
     for ln in lines:
         s = ln.rstrip('\n')
 
-        if s.strip() == 'Put:':
+        hdr = s.strip()
+
+        if hdr in ('Put', 'Put:'):
             in_put, in_call = True, False
-            out.append(s)
+            # Add a blank line before a new section (helps readability in Feishu)
+            if out and out[-1].strip() != '':
+                out.append('')
+            out.append('Put:')
             last_line1_idx = None
             continue
-        if s.strip() == 'Call:':
+
+        if hdr in ('Call', 'Call:'):
             in_put, in_call = False, True
-            out.append(s)
+            if out and out[-1].strip() != '':
+                out.append('')
+            out.append('Call:')
+            last_line1_idx = None
+            continue
+
+        if hdr in ('变化', '变化:'):
+            in_put, in_call = False, False
+            if out and out[-1].strip() != '':
+                out.append('')
+            out.append('变化:')
             last_line1_idx = None
             continue
 
         # Heuristic: line1 begins with "<SYMBOL> 卖Put" or "<SYMBOL> 卖Call"
         if in_put and ' 卖Put ' in s:
-            out.append(s)
+            out.append('- ' + s)
             last_line1_idx = len(out) - 1
             continue
         if in_call and ' 卖Call ' in s:
-            out.append(s)
+            out.append('- ' + s)
             last_line1_idx = len(out) - 1
             continue
 
