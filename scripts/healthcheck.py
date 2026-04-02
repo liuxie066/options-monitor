@@ -23,6 +23,8 @@ import sys
 from pathlib import Path
 from datetime import datetime, timezone
 import urllib.request
+import urllib.error
+import socket
 
 
 def http_json(method: str, url: str, payload=None, headers=None) -> dict:
@@ -31,11 +33,51 @@ def http_json(method: str, url: str, payload=None, headers=None) -> dict:
     if headers:
         h.update(headers)
     if payload is not None:
-        data = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(url, data=data, method=method, headers=h)
-    with urllib.request.urlopen(req, timeout=25) as resp:
-        return json.loads(resp.read().decode('utf-8'))
+    try:
+        with urllib.request.urlopen(req, timeout=25) as resp:
+            body = resp.read().decode("utf-8")
+            return json.loads(body)
+    except urllib.error.HTTPError as e:
+        body_text = ""
+        try:
+            raw = e.read()
+            if raw is not None:
+                body_text = raw.decode("utf-8", errors="replace")
+        except Exception:
+            body_text = ""
 
+        error_data = None
+        if body_text:
+            try:
+                error_data = json.loads(body_text)
+            except Exception:
+                error_data = None
+
+        if isinstance(error_data, dict):
+            error_data.setdefault("code", e.code)
+            error_data.setdefault("http_status", e.code)
+            error_data.setdefault("http_error", True)
+            error_data.setdefault("error", f"HTTP {e.code}")
+            if error_data.get("body") is None:
+                error_data["body"] = body_text
+            return error_data
+
+        return {
+            "code": e.code,
+            "http_status": e.code,
+            "http_error": True,
+            "body": body_text,
+            "error": f"HTTP {e.code}",
+        }
+    except (urllib.error.URLError, socket.timeout) as e:
+        return {
+            "code": -1,
+            "error_type": type(e).__name__,
+            "error": str(e),
+            "http_error": True,
+        }
 
 def feishu_token(app_id: str, app_secret: str) -> str:
     res = http_json('POST', 'https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal/', {
