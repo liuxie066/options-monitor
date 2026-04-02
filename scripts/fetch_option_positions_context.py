@@ -13,119 +13,19 @@ if str(repo_base) not in sys.path:
 
 import argparse
 import json
-import urllib.request
-import urllib.error
-import socket
 from datetime import datetime, timezone
 
+from scripts.feishu_bitable import (
+    get_tenant_access_token,
+    bitable_list_records,
+    safe_float,
+    parse_note_kv,
+)
 from scripts.io_utils import atomic_write_json
 
 # Local helper to get FX rates (USDCNY/HKDCNY) for base-currency normalization.
 # This file lives in the same scripts/ directory, so plain import works.
 from fx_rates import get_rates
-
-
-def http_json(method: str, url: str, payload: dict | None = None, headers: dict | None = None) -> dict:
-    data = None
-    req_headers = {"Content-Type": "application/json"}
-    if headers:
-        req_headers.update(headers)
-    if payload is not None:
-        data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(url, data=data, method=method, headers=req_headers)
-    try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            body = resp.read().decode("utf-8")
-            return json.loads(body)
-    except urllib.error.HTTPError as e:
-        body_text = ""
-        try:
-            raw = e.read()
-            if raw is not None:
-                body_text = raw.decode("utf-8", errors="replace")
-        except Exception:
-            body_text = ""
-
-        error_data = None
-        if body_text:
-            try:
-                error_data = json.loads(body_text)
-            except Exception:
-                error_data = None
-
-        if isinstance(error_data, dict):
-            error_data.setdefault("code", e.code)
-            error_data.setdefault("http_status", e.code)
-            error_data.setdefault("http_error", True)
-            error_data.setdefault("error", f"HTTP {e.code}")
-            if error_data.get("body") is None:
-                error_data["body"] = body_text
-            return error_data
-
-        return {
-            "code": e.code,
-            "http_status": e.code,
-            "http_error": True,
-            "body": body_text,
-            "error": f"HTTP {e.code}",
-        }
-    except (urllib.error.URLError, socket.timeout) as e:
-        return {
-            "code": -1,
-            "error_type": type(e).__name__,
-            "error": str(e),
-            "http_error": True,
-        }
-
-def get_tenant_access_token(app_id: str, app_secret: str) -> str:
-    url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal/"
-    res = http_json("POST", url, {"app_id": app_id, "app_secret": app_secret})
-    if res.get("code") != 0:
-        raise RuntimeError(f"feishu auth failed: {res}")
-    return res["tenant_access_token"]
-
-
-def bitable_list_records(tenant_token: str, app_token: str, table_id: str, page_size: int = 500) -> list[dict]:
-    base = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records"
-    headers = {"Authorization": f"Bearer {tenant_token}"}
-    page_token = None
-    out: list[dict] = []
-    for _ in range(40):
-        url = f"{base}?page_size={page_size}" + (f"&page_token={page_token}" if page_token else "")
-        res = http_json("GET", url, None, headers=headers)
-        if res.get("code") != 0:
-            raise RuntimeError(f"bitable list records failed: {res}")
-        data = res.get("data", {})
-        out.extend(data.get("items", []))
-        if not data.get("has_more"):
-            break
-        page_token = data.get("page_token")
-        if not page_token:
-            break
-    return out
-
-
-def safe_float(x):
-    try:
-        if x is None or x == "":
-            return None
-        return float(x)
-    except Exception:
-        return None
-
-
-def parse_note_kv(note: str, key: str) -> str:
-    # supports "key=value" segments separated by ; or ,
-    if not note:
-        return ''
-    s = str(note)
-    for part in s.replace(',', ';').split(';'):
-        part = part.strip()
-        if not part:
-            continue
-        if part.startswith(key + '='):
-            return part.split('=', 1)[1].strip()
-    return ''
 
 
 def build_context(records: list[dict], market: str, account: str | None = None, rates: dict | None = None) -> dict:

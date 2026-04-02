@@ -13,134 +13,19 @@ if str(repo_base) not in sys.path:
 
 import argparse
 import json
-import urllib.request
-import urllib.error
-import socket
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from scripts.feishu_bitable import (
+    FeishuAuthError,
+    FeishuError,
+    get_tenant_access_token,
+    bitable_search_records,
+    bitable_list_records,
+)
 from scripts.io_utils import atomic_write_json
 
-
-def http_json(method: str, url: str, payload: dict | None = None, headers: dict | None = None) -> dict:
-    data = None
-    req_headers = {"Content-Type": "application/json"}
-    if headers:
-        req_headers.update(headers)
-    if payload is not None:
-        data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(url, data=data, method=method, headers=req_headers)
-    try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            body = resp.read().decode("utf-8")
-            return json.loads(body)
-    except urllib.error.HTTPError as e:
-        body_text = ""
-        try:
-            raw = e.read()
-            if raw is not None:
-                body_text = raw.decode("utf-8", errors="replace")
-        except Exception:
-            body_text = ""
-
-        error_data = None
-        if body_text:
-            try:
-                error_data = json.loads(body_text)
-            except Exception:
-                error_data = None
-
-        if isinstance(error_data, dict):
-            error_data.setdefault("code", e.code)
-            error_data.setdefault("http_status", e.code)
-            error_data.setdefault("http_error", True)
-            error_data.setdefault("error", f"HTTP {e.code}")
-            if error_data.get("body") is None:
-                error_data["body"] = body_text
-            return error_data
-
-        return {
-            "code": e.code,
-            "http_status": e.code,
-            "http_error": True,
-            "body": body_text,
-            "error": f"HTTP {e.code}",
-        }
-    except (urllib.error.URLError, socket.timeout) as e:
-        return {
-            "code": -1,
-            "error_type": type(e).__name__,
-            "error": str(e),
-            "http_error": True,
-        }
-
-def get_tenant_access_token(app_id: str, app_secret: str) -> str:
-    url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal/"
-    res = http_json("POST", url, {"app_id": app_id, "app_secret": app_secret})
-    if res.get("code") != 0:
-        raise RuntimeError(f"feishu auth failed: {res}")
-    return res["tenant_access_token"]
-
-
-def bitable_search_records(tenant_token: str, app_token: str, table_id: str, page_size: int = 500) -> list[dict]:
-    """Search records (preferred).
-
-    Feishu has been gradually deprecating the GET list-records API for some tenants.
-    The POST /records/search API is the recommended replacement and supports paging.
-    """
-    base = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/search"
-    headers = {
-        "Authorization": f"Bearer {tenant_token}",
-        # doc says: application/json; charset=utf-8 (we set json already)
-        "Content-Type": "application/json; charset=utf-8",
-    }
-
-    page_token = None
-    out: list[dict] = []
-    for _ in range(50):
-        url = f"{base}?page_size={page_size}" + (f"&page_token={page_token}" if page_token else "")
-        # empty body means: no filter, default view
-        res = http_json("POST", url, payload={}, headers=headers)
-        if res.get("code") != 0:
-            raise RuntimeError(f"bitable search records failed: {res}")
-        data = res.get("data", {})
-        out.extend(data.get("items", []))
-        if not data.get("has_more"):
-            break
-        page_token = data.get("page_token")
-        if not page_token:
-            break
-    return out
-
-
-def bitable_list_records(tenant_token: str, app_token: str, table_id: str, page_size: int = 500) -> list[dict]:
-    """Legacy list records (kept as fallback)."""
-    base = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records"
-    headers = {"Authorization": f"Bearer {tenant_token}"}
-    page_token = None
-    out: list[dict] = []
-    for _ in range(20):
-        url = f"{base}?page_size={page_size}" + (f"&page_token={page_token}" if page_token else "")
-        res = http_json("GET", url, None, headers=headers)
-        if res.get("code") != 0:
-            raise RuntimeError(f"bitable list records failed: {res}")
-        data = res.get("data", {})
-        out.extend(data.get("items", []))
-        if not data.get("has_more"):
-            break
-        page_token = data.get("page_token")
-        if not page_token:
-            break
-    return out
-
-
-def safe_float(x):
-    try:
-        if x is None or x == "":
-            return None
-        return float(x)
-    except Exception:
-        return None
+from scripts.feishu_bitable import safe_float
 
 
 def _as_text(v) -> str:
@@ -318,7 +203,7 @@ def main():
     # Prefer the search API (newer, more compatible). Fallback to legacy list.
     try:
         records = bitable_search_records(token, app_token, table_id)
-    except Exception as e:
+    except FeishuError as e:
         # last resort: some tenants still allow list
         records = bitable_list_records(token, app_token, table_id)
     ctx = build_context(records, market=args.market, account=args.account)
