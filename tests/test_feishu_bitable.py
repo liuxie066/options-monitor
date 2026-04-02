@@ -125,3 +125,82 @@ def test_get_tenant_access_token_cache_and_force_refresh() -> None:
         t2 = fb.get_tenant_access_token("a", "s", force_refresh=True)
         assert t2 == "t2"
         assert calls["n"] == 2
+
+
+def test_http_json_logs_warn_retries_when_rate_limited() -> None:
+    from scripts import feishu_bitable as fb
+
+    ok_body = json.dumps({"code": 0, "msg": "ok", "data": {"x": 1}}).encode("utf-8")
+
+    class FakeResp:
+        def __init__(self, body: bytes):
+            self._body = body
+            self.status = 200
+
+        def read(self):
+            return self._body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    err_body = json.dumps({"code": 99991400, "msg": "rate limit"})
+    fake_429 = _make_http_error(429, err_body)
+
+    calls = {"n": 0}
+    logs = []
+
+    def logger(entry):
+        logs.append(entry)
+
+    def side_effect(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise fake_429
+        return FakeResp(ok_body)
+
+    with patch("urllib.request.urlopen", side_effect=side_effect), patch("time.sleep"):
+        res = fb.http_json("GET", "https://example.com/path?a=b", retry_max_attempts=3, log_fn=logger)
+        assert res["code"] == 0
+
+    assert calls["n"] == 2
+    assert any(item.get("level") == "warn" for item in logs)
+    warn = next(item for item in logs if item.get("level") == "warn")
+    assert warn["category"] == "rate_limit"
+    assert warn["http_status"] == 429
+    assert warn["feishu_code"] == 99991400
+    assert warn["url_path"] == "example.com/path"
+
+
+def test_http_json_logs_error_when_all_retries_fail() -> None:
+    from scripts import feishu_bitable as fb
+
+    err_body = json.dumps({"code": 0, "msg": "server error"})
+    fake_500 = _make_http_error(500, err_body)
+
+    calls = {"n": 0}
+    logs = []
+
+    def logger(entry):
+        logs.append(entry)
+
+    def side_effect(*args, **kwargs):
+        calls["n"] += 1
+        raise fake_500
+
+    with patch("urllib.request.urlopen", side_effect=side_effect), patch("time.sleep"):
+        try:
+            fb.http_json("GET", "https://example.com/other", retry_max_attempts=2, log_fn=logger)
+            assert False, "should raise"
+        except fb.FeishuTransientError:
+            pass
+
+    assert calls["n"] == 2
+    assert any(item.get("level") == "error" for item in logs)
+    err = next(item for item in logs if item.get("level") == "error")
+    assert err["attempt"] == 2
+    assert err["max_attempts"] == 2
+    assert err["category"] == "transient"
+    assert err["url_path"] == "example.com/other"
