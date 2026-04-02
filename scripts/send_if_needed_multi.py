@@ -503,23 +503,6 @@ def ensure_account_output_dir(d: Path):
     (d / 'state').mkdir(parents=True, exist_ok=True)
 
 
-def migrate_output_if_needed(base: Path, accounts_root: Path, default_acct: str = 'lx'):
-    out = base / 'output'
-    if out.exists() and not out.is_symlink():
-        dst = accounts_root / default_acct
-        ensure_account_output_dir(dst)
-        # move children of output/ into dst/
-        for child in out.iterdir():
-            target = dst / child.name
-            if target.exists():
-                # best-effort: skip existing
-                continue
-            child.rename(target)
-        try:
-            out.rmdir()
-        except Exception:
-            pass
-        atomic_symlink(out, dst)
 
 
 @dataclass
@@ -1100,7 +1083,6 @@ def main():
 
     accounts_root = (base / 'output_accounts').resolve()
     accounts_root.mkdir(parents=True, exist_ok=True)
-    migrate_output_if_needed(base, accounts_root, default_acct=args.default_account)
 
     out_link = base / 'output'
     if not out_link.exists():
@@ -1161,15 +1143,6 @@ def main():
             continue
 
         acct_out = accounts_root / acct
-        # Legacy cleanup: per-account scheduler_state.json is no longer authoritative. Rename once to avoid confusion.
-        try:
-            legacy = (acct_out / 'state' / 'scheduler_state.json').resolve()
-            legacy_dst = (acct_out / 'state' / 'scheduler_state.legacy.json').resolve()
-            if legacy.exists() and (not legacy_dst.exists()):
-                legacy_dst.parent.mkdir(parents=True, exist_ok=True)
-                legacy.rename(legacy_dst)
-        except Exception:
-            pass
         acct_metrics = {
             'account': acct,
             'scheduler_ms': None,
@@ -1221,37 +1194,6 @@ def main():
         except Exception:
             pass
 
-        # Migrate legacy per-account scheduler_state.json into shared state (one-time best-effort)
-        try:
-            st0 = read_json(state_path, {})
-            if isinstance(st0, dict) and (not st0.get('last_scan_utc')) and (not st0.get('last_notify_utc')):
-                legacy_candidates = []
-                for _acct in args.accounts:
-                    lp = (accounts_root / _acct / 'state' / 'scheduler_state.json').resolve()
-                    if lp.exists() and lp.stat().st_size > 0:
-                        try:
-                            obj = read_json(lp, {})
-                            if isinstance(obj, dict):
-                                legacy_candidates.append(obj)
-                        except Exception:
-                            pass
-
-                best_scan = None
-                best_notify = None
-                for obj in legacy_candidates:
-                    s = obj.get('last_scan_utc')
-                    n = obj.get('last_notify_utc')
-                    if s and ((best_scan is None) or (str(s) > str(best_scan))):
-                        best_scan = s
-                    if n and ((best_notify is None) or (str(n) > str(best_notify))):
-                        best_notify = n
-
-                if best_scan or best_notify:
-                    st0['last_scan_utc'] = best_scan
-                    st0['last_notify_utc'] = best_notify
-                    write_json(state_path, st0)
-        except Exception:
-            pass
         # New flow: pipeline writes into run_dir/accounts/<acct>
         acct_report_dir = (run_dir / 'accounts' / acct).resolve()
         acct_state_dir = (acct_report_dir / 'state').resolve()
