@@ -10,6 +10,8 @@ from typing import Any
 import pandas as pd
 import yfinance as yf
 
+from scripts.opend_utils import get_trading_date
+
 
 def to_float(v):
     try:
@@ -81,7 +83,8 @@ def calc_bs_delta(spot: float, strike: float, dte: int, iv: float, option_type: 
 
 
 def normalize_option_rows(symbol: str, expiration: str, option_type: str, df: pd.DataFrame, spot: float) -> list[dict[str, Any]]:
-    today = date.today()
+    # Yahoo flow is US-only here; use market-convention trading date.
+    today = get_trading_date('US')
     exp_date = datetime.strptime(expiration, "%Y-%m-%d").date()
     dte = (exp_date - today).days
     rows: list[dict[str, Any]] = []
