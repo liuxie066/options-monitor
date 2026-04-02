@@ -23,7 +23,8 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Callable
+from urllib.parse import urlsplit
 
 
 # -----------------
@@ -145,6 +146,62 @@ def _classify_error(*, http_status: int | None, body_text: str, parsed: Any, url
     )
 
 
+def _log_record(level: str, *, category: str, http_status: int | None, feishu_code: int | None, attempt: int, max_attempts: int, url_path: str, sleep_s: float | None = None) -> dict:
+    rec = {
+        "level": level,
+        "category": category,
+        "http_status": http_status,
+        "feishu_code": feishu_code,
+        "attempt": attempt,
+        "max_attempts": max_attempts,
+        "url_path": url_path,
+    }
+    if sleep_s is not None:
+        rec["sleep_s"] = sleep_s
+    return rec
+
+
+def _emit_log(log_fn: Callable[[dict], Any], record: dict, *, default_label: str = "INFO") -> None:
+    if log_fn is not None:
+        log_fn(record)
+        return
+    print(f"[{default_label}] {record}")
+
+
+def _log_path(url: str) -> str:
+    p = urlsplit(url)
+    path = p.path or "/"
+    if p.netloc:
+        return f"{p.netloc}{path}"
+    return path
+
+
+def _error_category(err: Exception) -> str:
+    if isinstance(err, FeishuRateLimitError):
+        return "rate_limit"
+    if isinstance(err, FeishuTransientError):
+        return "transient"
+    if isinstance(err, FeishuAuthError):
+        return "auth"
+    if isinstance(err, FeishuPermissionError):
+        return "permission"
+    if isinstance(err, FeishuPermanentError):
+        return "permanent"
+    return err.__class__.__name__
+
+
+def _extract_http_status(err: Exception) -> int | None:
+    if isinstance(err, FeishuError):
+        return err.response.get("http_status") if isinstance(err.response, dict) else None
+    return None
+
+
+def _extract_feishu_code(err: Exception) -> int | None:
+    if isinstance(err, FeishuError):
+        return err.code
+    return None
+
+
 def http_json(
     method: str,
     url: str,
@@ -153,6 +210,7 @@ def http_json(
     *,
     timeout: int = 20,
     retry_max_attempts: int = 3,
+    log_fn: Callable[[dict], Any] | None = None,
 ) -> dict:
     """Unified HTTP JSON helper.
 
@@ -171,6 +229,7 @@ def http_json(
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
     last_err: Exception | None = None
+    url_path = _log_path(url)
 
     for attempt in range(1, retry_max_attempts + 1):
         req = urllib.request.Request(url, data=data, method=method, headers=req_headers)
@@ -216,10 +275,31 @@ def http_json(
         # retry gate
         should_retry = isinstance(last_err, (FeishuTransientError, FeishuRateLimitError))
         if not should_retry or attempt >= retry_max_attempts:
+            if last_err is not None:
+                record = _log_record(
+                    "error",
+                    category=_error_category(last_err),
+                    http_status=_extract_http_status(last_err),
+                    feishu_code=_extract_feishu_code(last_err),
+                    attempt=attempt,
+                    max_attempts=retry_max_attempts,
+                    url_path=url_path,
+                )
+                _emit_log(log_fn, record, default_label="ERROR")
             raise last_err
 
         sleep_s = 2 ** (attempt - 1)
-        print(f"[WARN] http_json failed (attempt {attempt}/{retry_max_attempts}): {last_err}; sleep {sleep_s:.1f}s")
+        record = _log_record(
+            "warn",
+            category=_error_category(last_err),
+            http_status=_extract_http_status(last_err),
+            feishu_code=_extract_feishu_code(last_err),
+            attempt=attempt,
+            max_attempts=retry_max_attempts,
+            url_path=url_path,
+            sleep_s=sleep_s,
+        )
+        _emit_log(log_fn, record, default_label="WARN")
         time.sleep(sleep_s)
 
     raise last_err or FeishuPermanentError("unknown error")
