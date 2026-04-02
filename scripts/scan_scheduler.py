@@ -19,7 +19,7 @@ class SchedulerDecision:
     interval_min: int
     notify_cooldown_min: int
     should_run_scan: bool
-    should_notify: bool
+    is_notify_window_open: bool
     reason: str
     next_run_utc: str
     next_run_market: str
@@ -30,7 +30,8 @@ class SchedulerDecision:
 
 
 STATE_DEFAULT = {
-    'last_scan_utc': None,
+    'last_scan_utc': None,  # legacy (shared scan clock)
+    'last_scan_utc_by_account': {},
     'last_notify_utc': None,  # legacy
     'last_notify_utc_by_account': {},
 }
@@ -137,7 +138,16 @@ def decide(schedule_cfg: dict, state: dict, now_utc: datetime, account: str | No
         # Notification cooldown is handled separately (content-aware) in send_if_needed_multi.
         # Scheduler keeps a single base cooldown (notify_cooldown_min) here.
 
-    last_scan = maybe_parse_dt(state.get('last_scan_utc'))
+    last_scan = None
+    try:
+        if account:
+            m = state.get('last_scan_utc_by_account')
+            if isinstance(m, dict):
+                last_scan = maybe_parse_dt(m.get(str(account)))
+    except Exception:
+        last_scan = None
+    if last_scan is None:
+        last_scan = maybe_parse_dt(state.get('last_scan_utc'))
 
     # Notify cooldown should be account-specific in multi-account mode.
     # If account is provided, read last_notify from the per-account map first.
@@ -171,13 +181,13 @@ def decide(schedule_cfg: dict, state: dict, now_utc: datetime, account: str | No
             should_run_scan = False
             reason = f'距离上次扫描不足 {interval_min} 分钟。'
 
-    should_notify = False
+    is_notify_window_open = False
     if (not in_hours) and (not monitor_off_hours):
-        should_notify = False
+        is_notify_window_open = False
     elif last_notify is None:
-        should_notify = True
+        is_notify_window_open = True
     else:
-        should_notify = (now_utc - last_notify.astimezone(timezone.utc)) >= timedelta(minutes=notify_cooldown_min)
+        is_notify_window_open = (now_utc - last_notify.astimezone(timezone.utc)) >= timedelta(minutes=notify_cooldown_min)
 
     if not should_run_scan:
         if last_scan is None or interval_min >= 10**8:
@@ -199,7 +209,7 @@ def decide(schedule_cfg: dict, state: dict, now_utc: datetime, account: str | No
         interval_min=interval_min,
         notify_cooldown_min=notify_cooldown_min,
         should_run_scan=should_run_scan,
-        should_notify=should_notify,
+        is_notify_window_open=is_notify_window_open,
         reason=reason,
         next_run_utc=to_iso(next_run),
         next_run_market=next_run.astimezone(market_tz).isoformat(),
@@ -213,7 +223,8 @@ def decide(schedule_cfg: dict, state: dict, now_utc: datetime, account: str | No
 def main():
     parser = argparse.ArgumentParser(description='Scan scheduler / frequency controller for options-monitor')
     parser.add_argument('--config', required=True)
-    parser.add_argument('--state', default='output/state/scheduler_state.json')
+    parser.add_argument('--state-dir', default='output/state', help='Directory for scheduler_state.json (default: output/state)')
+    parser.add_argument('--state', default=None, help='[deprecated] explicit scheduler_state.json path. Prefer --state-dir.' )
     parser.add_argument('--schedule-key', default='schedule', help='Top-level key to read schedule config from (default: schedule). Example: schedule_hk' )
     parser.add_argument('--account', default=None, help='Account id for per-account notify cooldown state (optional).')
     parser.add_argument('--run-if-due', action='store_true', help='When due, run scripts/run_pipeline.py --config <config>')
@@ -227,9 +238,17 @@ def main():
     config_path = Path(args.config)
     if not config_path.is_absolute():
         config_path = (base / config_path).resolve()
-    state_path = Path(args.state)
-    if not state_path.is_absolute():
-        state_path = (base / state_path).resolve()
+    state_dir = Path(args.state_dir)
+    if not state_dir.is_absolute():
+        state_dir = (base / state_dir).resolve()
+    state_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.state:
+        state_path = Path(args.state)
+        if not state_path.is_absolute():
+            state_path = (base / state_path).resolve()
+    else:
+        state_path = (state_dir / 'scheduler_state.json').resolve()
 
     # config supports JSON (preferred) or YAML (legacy)
     if config_path.suffix.lower() == '.json':
@@ -243,16 +262,20 @@ def main():
 
     now_utc = datetime.now(timezone.utc)
     state = read_state(state_path)
-    decision = decide(schedule_cfg, state, now_utc, account=(str(args.account) if args.account else None))
+    decision = decide(schedule_cfg, state, now_utc, account=(str(args.account) if args.account else None), schedule_key=schedule_key)
 
     if args.force:
         decision.should_run_scan = True
+        decision.is_notify_window_open = True
         decision.reason = 'force 模式：忽略频率控制直接执行。'
 
+    payload = asdict(decision)
+    payload['should_notify'] = bool(payload.get('is_notify_window_open'))
+
     if args.jsonl:
-        print(json.dumps(asdict(decision), ensure_ascii=False))
+        print(json.dumps(payload, ensure_ascii=False))
     else:
-        print(json.dumps(asdict(decision), ensure_ascii=False, indent=2))
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
 
     if not schedule_enabled and not args.force:
         print('[INFO] schedule disabled in config; no scheduling enforcement applied.')
@@ -273,7 +296,14 @@ def main():
         return
 
     if args.mark_scanned:
-        state['last_scan_utc'] = to_iso(datetime.now(timezone.utc))
+        now_s = to_iso(datetime.now(timezone.utc))
+        state['last_scan_utc'] = now_s
+        if args.account:
+            m = state.get('last_scan_utc_by_account')
+            if not isinstance(m, dict):
+                m = {}
+            m[str(args.account)] = now_s
+            state['last_scan_utc_by_account'] = m
         write_state(state_path, state)
         print(f'[DONE] marked scanned -> {state_path}')
         return

@@ -141,7 +141,12 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--apply", action="store_true", help="Actually copy files")
     ap.add_argument("--prune", action="store_true", help="Also delete files in prod that are not present in dev under the synced scope")
+    # Backward/UX compat: default is dry-run; allow explicit flag for clarity.
+    ap.add_argument("--dry-run", action="store_true", help="Dry-run only (default behavior). Kept for CLI compatibility")
     args = ap.parse_args()
+
+    if args.apply and args.dry_run:
+        raise SystemExit("[ARG_ERROR] --apply and --dry-run cannot be used together")
 
     ref = dev_ref()
     copies, deletes = plan_copy()

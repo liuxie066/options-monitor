@@ -110,16 +110,6 @@ def prefetch_required_data(vpy: Path, base: Path, cfg: dict, shared_required: Pa
             continue
         stats['symbols_total'] += 1
 
-        # Skip if already present
-        try:
-            raw0 = (shared_required / 'raw' / f"{symbol}_required_data.json").resolve()
-            csv0 = (shared_required / 'parsed' / f"{symbol}_required_data.csv").resolve()
-            if raw0.exists() and csv0.exists() and raw0.stat().st_size > 0 and csv0.stat().st_size > 0:
-                stats['cache_hits'] += 1
-                continue
-        except Exception:
-            pass
-
         fetch = (it.get('fetch') or {})
         src = str(fetch.get('source') or 'yahoo').strip().lower()
 
@@ -132,22 +122,71 @@ def prefetch_required_data(vpy: Path, base: Path, cfg: dict, shared_required: Pa
         elif want_call and (not want_put):
             opt_types = 'call'
 
+        # Expiration pick policy:
+        # For US/HK we want expirations that can satisfy scan min_dte, otherwise the first N expirations
+        # are often too near-term and produce 0 candidates.
         limit_exp = int(fetch.get('limit_expirations') or cfg.get('limit_expirations') or 8)
+        min_dte_put = float((it.get('sell_put') or {}).get('min_dte') or 0)
+        min_dte_call = float((it.get('sell_call') or {}).get('min_dte') or 0)
+        min_dte = int(max(min_dte_put, min_dte_call, 0))
+
+        # Skip if already present and sufficient for min_dte
+        try:
+            raw0 = (shared_required / 'raw' / f"{symbol}_required_data.json").resolve()
+            csv0 = (shared_required / 'parsed' / f"{symbol}_required_data.csv").resolve()
+            if raw0.exists() and csv0.exists() and raw0.stat().st_size > 0 and csv0.stat().st_size > 0:
+                if min_dte > 0:
+                    try:
+                        import pandas as pd
+                        df0 = pd.read_csv(csv0, usecols=['dte'])
+                        mx = pd.to_numeric(df0['dte'], errors='coerce').max()
+                        if mx is not None and mx >= float(min_dte):
+                            stats['cache_hits'] += 1
+                            continue
+                    except Exception:
+                        pass
+                else:
+                    stats['cache_hits'] += 1
+                    continue
+        except Exception:
+            pass
 
         cmd = [str(vpy)]
         if src == 'opend':
             host = str(fetch.get('host') or '127.0.0.1')
             port = int(fetch.get('port') or 11111)
+
+            max_dte_put = float((it.get('sell_put') or {}).get('max_dte') or 0)
+            max_dte_call = float((it.get('sell_call') or {}).get('max_dte') or 0)
+            max_dte = int(max(max_dte_put, max_dte_call, 0))
+            max_dte = (max_dte if max_dte > 0 else None)
+
             cmd += [
                 'scripts/fetch_market_data_opend.py',
                 '--symbols', symbol,
                 '--limit-expirations', str(limit_exp),
+                '--min-dte', str(min_dte),
                 '--host', host,
                 '--port', str(port),
                 '--option-types', str(opt_types),
                 '--output-root', str(shared_required),
+                '--chain-cache',
                 '--quiet',
             ]
+            # Keep behavior consistent with per-symbol pipeline: for US, default to PM spot unless explicitly disabled.
+            try:
+                if (str(symbol).strip().upper().endswith('.HK')):
+                    pass
+                else:
+                    spot_from_pm0 = fetch.get('spot_from_portfolio_management', None)
+                    if spot_from_pm0 is None:
+                        cmd.append('--spot-from-pm')
+                    elif bool(spot_from_pm0):
+                        cmd.append('--spot-from-pm')
+            except Exception:
+                pass
+            if max_dte is not None:
+                cmd += ['--max-dte', str(max_dte)]
         else:
             cmd += [
                 'scripts/fetch_market_data.py',
@@ -240,24 +279,39 @@ def parse_hhmm(value: str) -> time:
     return time(hour=int(hour), minute=int(minute))
 
 
-def in_hk_session(now_utc: datetime) -> bool:
-    hk = ZoneInfo('Asia/Hong_Kong')
-    t = now_utc.astimezone(hk)
-    if t.weekday() >= 5:
-        return False
-    hm = t.hour * 60 + t.minute
-    # 09:30-12:00, 13:00-16:00 (HKT)
-    return (9 * 60 + 30) <= hm < (12 * 60) or (13 * 60) <= hm < (16 * 60)
+def _select_markets_to_run(now_utc: datetime, cfg: dict, market_config: str) -> list[str]:
+    mc = str(market_config or 'auto').lower()
+    if mc == 'hk':
+        return ['HK']
+    if mc == 'us':
+        return ['US']
+    if mc == 'all':
+        return ['HK', 'US']
 
+    schedule_hk = (cfg.get('schedule_hk') or {}) if isinstance(cfg, dict) else {}
+    schedule_us = (cfg.get('schedule') or {}) if isinstance(cfg, dict) else {}
 
-def in_us_session(now_utc: datetime) -> bool:
-    ny = ZoneInfo('America/New_York')
-    t = now_utc.astimezone(ny)
-    if t.weekday() >= 5:
-        return False
-    hm = t.hour * 60 + t.minute
-    # 09:30-16:00 (NY)
-    return (9 * 60 + 30) <= hm < (16 * 60)
+    try:
+        from scripts.scan_scheduler import decide
+
+        state0: dict = {
+            'last_scan_utc': None,
+            'last_scan_utc_by_account': {},
+            'last_notify_utc': None,
+            'last_notify_utc_by_account': {},
+        }
+
+        d_hk = decide(schedule_hk, state0, now_utc, account=None, schedule_key='schedule_hk')
+        if d_hk.in_market_hours:
+            return ['HK']
+
+        d_us = decide(schedule_us, state0, now_utc, account=None, schedule_key='schedule')
+        if d_us.in_market_hours:
+            return ['US']
+    except Exception:
+        pass
+
+    return []
 
 
 def maybe_parse_dt(value: str | None) -> datetime | None:
@@ -1059,21 +1113,9 @@ def main():
     results: list[AccountResult] = []
 
     # Market-aware filtering (speed): only run symbols for the current market session.
-    # Respect --market-config override.
+    # Scheduler is the single source of truth for market-hours judging.
     now_utc = datetime.now(timezone.utc)
-    markets_to_run: list[str] = []
-    mc = str(getattr(args, 'market_config', 'auto') or 'auto').lower()
-    if mc == 'hk':
-        markets_to_run = ['HK']
-    elif mc == 'us':
-        markets_to_run = ['US']
-    elif mc == 'all':
-        markets_to_run = ['HK', 'US']
-    else:
-        if in_hk_session(now_utc):
-            markets_to_run = ['HK']
-        elif in_us_session(now_utc):
-            markets_to_run = ['US']
+    markets_to_run: list[str] = _select_markets_to_run(now_utc, base_cfg, getattr(args, 'market_config', 'auto'))
 
 
     # Transitional run_dir (new flow): keep required_data as a per-run artifact.
@@ -1229,9 +1271,9 @@ def main():
 
         # 1) scheduler decision
         # market-aware schedule: use schedule_hk during HK session, otherwise default schedule
-        sch_args = [str(vpy), 'scripts/scan_scheduler.py', '--config', str(cfg_override), '--state', str(state_path), '--jsonl', '--account', str(acct)]
+        sch_args = [str(vpy), 'scripts/scan_scheduler.py', '--config', str(cfg_override), '--state', str(state_path), '--state-dir', str((run_dir / 'state').resolve()), '--jsonl', '--account', str(acct)]
         try:
-            if markets_to_run == ['HK']:
+            if markets_to_run == ['HK'] and ('schedule_hk' in cfg):
                 sch_args.extend(['--schedule-key', 'schedule_hk'])
         except Exception:
             pass
@@ -1261,7 +1303,7 @@ def main():
         })
 
         should_run = bool(decision.get('should_run_scan'))
-        should_notify = bool(decision.get('should_notify'))
+        should_notify = bool(decision.get('is_notify_window_open', decision.get('should_notify')))
         reason = str(decision.get('reason') or '')
 
         # Transitional: allow forcing pipeline runs even off-hours (useful for dev/test).
@@ -1331,6 +1373,7 @@ def main():
             '--mode', 'scheduled',
             '--shared-required-data', str(shared_required),
             '--report-dir', str(acct_report_dir),
+            '--state-dir', str((run_dir / 'state').resolve()),
         ]
         try:
             runlog.event(
@@ -1347,6 +1390,7 @@ def main():
             cwd=str(base),
             capture_output=True,
             text=True,
+            env=dict(os.environ, PYTHONPATH=str(base)),
         )
         acct_metrics['pipeline_ms'] = int((monotonic() - t_pipe0) * 1000)
         if pipe.returncode != 0:
@@ -1365,7 +1409,7 @@ def main():
             out = ((pipe.stdout or '') + '\n' + (pipe.stderr or '')).strip()
             if out:
                 tail = '\n'.join(out.splitlines()[-60:])
-                print(f"[ERR] pipeline failed ({acct})\n{tail}")
+                log(f"[ERR] pipeline failed ({acct})\n{tail}")
             acct_metrics['ran_scan'] = True
             acct_metrics['meaningful'] = False
             acct_metrics['reason'] = 'pipeline failed'
@@ -1384,7 +1428,7 @@ def main():
             pass
         # Mark scanned (shared scan clock)
         try:
-            subprocess.run([str(vpy), 'scripts/scan_scheduler.py', '--config', str(cfg_override), '--state', str(state_path), '--mark-scanned'], cwd=str(base))
+            subprocess.run([str(vpy), 'scripts/scan_scheduler.py', '--config', str(cfg_override), '--state', str(state_path), '--state-dir', str((run_dir / 'state').resolve()), '--mark-scanned', '--account', str(acct)], cwd=str(base))
         except Exception:
             pass
 
@@ -1467,11 +1511,14 @@ def main():
 
         # Even if we didn't send, record that we ran.
         try:
-            # Shared marker under ./output (symlink points to last processed account).
-            write_json(base / 'output' / 'state' / 'last_run.json', {
+            # True shared marker (NOT under ./output symlink)
+            shared_last = (base / 'output_shared' / 'state' / 'last_run.json').resolve()
+            shared_last.parent.mkdir(parents=True, exist_ok=True)
+            write_json(shared_last, {
                 'last_run_utc': utc_now(),
                 'sent': False,
                 'reason': 'no_merged_notification',
+                'account': 'merged',
                 'accounts': [r.account for r in results],
                 'results': [r.__dict__ for r in results],
             })
@@ -1568,16 +1615,31 @@ def main():
         except Exception:
             pass
 
-    # Mark notified ONCE (global cooldown, unified across accounts)
+    # Mark notified once per merged-message recipient to avoid stale cross-account notify cooldown.
     if not no_send:
         try:
-            if results:
-                acct0 = results[0].account
-                acct_out0 = accounts_root / acct0
-                cfg_override0 = acct_out0 / 'state' / 'config.override.json'
-                # Mark notified per-account to avoid cross-account cooldown contamination.
-                # We still use a shared state file, but scan_scheduler will record per-account notify state.
-                subprocess.run([str(vpy), 'scripts/scan_scheduler.py', '--config', str(cfg_override0), '--state', str(state_path), '--mark-notified', '--account', str(acct0)], cwd=str(base))
+            notified_accounts = [
+                str(r.account).strip()
+                for r in results
+                if r.should_notify and r.meaningful and str(r.notification_text or '').strip()
+            ]
+            for acct0 in notified_accounts:
+                if not acct0:
+                    continue
+                cfg_override0 = (accounts_root / acct0 / 'state' / 'config.override.json').resolve()
+                if not cfg_override0.exists():
+                    continue
+                subprocess.run(
+                    [
+                        str(vpy), 'scripts/scan_scheduler.py',
+                        '--config', str(cfg_override0),
+                        '--state', str(state_path),
+                        '--state-dir', str((run_dir / 'state').resolve()),
+                        '--mark-notified',
+                        '--account', str(acct0),
+                    ],
+                    cwd=str(base),
+                )
         except Exception:
             pass
 
@@ -1595,13 +1657,14 @@ def main():
 
     # Write shared last_run.json (for cron observability)
     try:
-        last_run_path = base / 'output' / 'state' / 'last_run.json'
+        last_run_path = (base / 'output_shared' / 'state' / 'last_run.json').resolve()
         prev = read_json(last_run_path, {})
         run_meta = {
             'last_run_utc': utc_now(),
             'sent': True,
             'channel': str(channel),
             'target': str(target),
+            'account': 'merged',
             'accounts': [r.account for r in results],
             'results': [r.__dict__ for r in results],
         }
