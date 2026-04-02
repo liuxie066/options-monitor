@@ -150,6 +150,18 @@ def main() -> None:
         test_sell_call_metrics_requires_multiplier,
     )
 
+    from test_http_json_http_error_handling import (
+        test_http_json_404_non_json_body_raises_permanent_error,
+        test_http_json_500_json_body_raises_transient_error,
+        test_http_json_urlerror_raises_transient_error,
+        test_http_json_socket_timeout_raises_transient_error,
+    )
+    from test_feishu_bitable import (
+        test_http_json_retries_on_429_then_succeeds,
+        test_http_json_does_not_retry_on_permission,
+        test_get_tenant_access_token_cache_and_force_refresh,
+    )
+
     tests = [
         test_sell_put_metrics_requires_multiplier,
         test_sell_call_metrics_requires_multiplier,
@@ -172,6 +184,15 @@ def main() -> None:
         test_stage_plan_scan_includes_fetch,
         test_stage_plan_stage_only_notify,
         test_postprocess_notify_gate,
+        # http_json regression
+        test_http_json_404_non_json_body_raises_permanent_error,
+        test_http_json_500_json_body_raises_transient_error,
+        test_http_json_urlerror_raises_transient_error,
+        test_http_json_socket_timeout_raises_transient_error,
+        # feishu_bitable module
+        test_http_json_retries_on_429_then_succeeds,
+        test_http_json_does_not_retry_on_permission,
+        test_get_tenant_access_token_cache_and_force_refresh,
     ]
     for t in tests:
         t()

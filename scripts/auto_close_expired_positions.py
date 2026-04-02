@@ -18,106 +18,16 @@ from __future__ import annotations
 
 import argparse
 import json
-import urllib.request
-import urllib.error
-import socket
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-
-def http_json(method: str, url: str, payload: dict | None = None, headers: dict | None = None) -> dict:
-    data = None
-    req_headers = {"Content-Type": "application/json"}
-    if headers:
-        req_headers.update(headers)
-    if payload is not None:
-        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    req = urllib.request.Request(url, data=data, method=method, headers=req_headers)
-    try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            body = resp.read().decode("utf-8")
-            return json.loads(body)
-    except urllib.error.HTTPError as e:
-        body_text = ""
-        try:
-            raw = e.read()
-            if raw is not None:
-                body_text = raw.decode("utf-8", errors="replace")
-        except Exception:
-            body_text = ""
-
-        error_data = None
-        if body_text:
-            try:
-                error_data = json.loads(body_text)
-            except Exception:
-                error_data = None
-
-        if isinstance(error_data, dict):
-            error_data.setdefault("code", e.code)
-            error_data.setdefault("http_status", e.code)
-            error_data.setdefault("http_error", True)
-            error_data.setdefault("error", f"HTTP {e.code}")
-            if error_data.get("body") is None:
-                error_data["body"] = body_text
-            return error_data
-
-        return {
-            "code": e.code,
-            "http_status": e.code,
-            "http_error": True,
-            "body": body_text,
-            "error": f"HTTP {e.code}",
-        }
-    except (urllib.error.URLError, socket.timeout) as e:
-        return {
-            "code": -1,
-            "error_type": type(e).__name__,
-            "error": str(e),
-            "http_error": True,
-        }
-
-def get_tenant_access_token(app_id: str, app_secret: str) -> str:
-    url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal/"
-    res = http_json("POST", url, {"app_id": app_id, "app_secret": app_secret})
-    if res.get("code") != 0:
-        raise RuntimeError(f"feishu auth failed: {res}")
-    return res["tenant_access_token"]
-
-
-def bitable_update_record(tenant_token: str, app_token: str, table_id: str, record_id: str, fields: dict) -> dict:
-    url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/{record_id}"
-    headers = {"Authorization": f"Bearer {tenant_token}"}
-    res = http_json("PUT", url, {"fields": fields}, headers=headers)
-    if res.get("code") != 0:
-        raise RuntimeError(f"bitable update record failed: {res}")
-    return res.get("data") or {}
-
-
-def parse_note_kv(note: str, key: str) -> str:
-    if not note:
-        return ''
-    s = str(note)
-    for part in s.replace(',', ';').split(';'):
-        part = part.strip()
-        if not part:
-            continue
-        if part.startswith(key + '='):
-            return part.split('=', 1)[1].strip()
-    return ''
-
-
-def merge_note(note: str | None, kv: dict[str, str]) -> str:
-    base = (note or '').strip()
-    parts = []
-    if base:
-        parts.append(base)
-    for k, v in kv.items():
-        if v is None or v == '':
-            continue
-        parts.append(f"{k}={v}")
-    return ';'.join(parts)
+from scripts.feishu_bitable import (
+    get_tenant_access_token,
+    bitable_update_record,
+    parse_note_kv,
+    merge_note,
+)
 
 
 def parse_exp_to_ms(exp_ymd: str) -> int | None:
