@@ -226,7 +226,15 @@ def main():
         if args.ensure:
             ok, _msg = try_start_opend()
             h.action_taken = 'start_opend' if ok else 'start_opend_failed'
-            time.sleep(1.0)
+
+            # OpenD may take a few seconds to bind the port after starting.
+            # Wait briefly and re-check to avoid false alarms.
+            if ok:
+                deadline = time.time() + 8.0
+                while time.time() < deadline and (not port_open(args.host, args.port)):
+                    time.sleep(0.8)
+            else:
+                time.sleep(1.0)
 
         if not port_open(args.host, args.port):
             h.error = f"OpenD port not open: {args.host}:{args.port}"
