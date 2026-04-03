@@ -19,6 +19,7 @@ from scripts.io_utils import (
     atomic_write_json as write_json,
     parse_last_json_obj,
     utc_now,
+    bj_now,
 )
 
 from .cash_footer import query_cash_footer
@@ -688,7 +689,12 @@ def main() -> int:
     except Exception:
         cash_footer_lines = []
 
-    merged = build_merged_message(results, cash_footer_lines=cash_footer_lines)
+    now_bj = bj_now()
+    merged = build_merged_message(
+        results,
+        now_bj=now_bj,
+        cash_footer_lines=cash_footer_lines,
+    )
     if not merged:
         runlog.safe_event('notify', 'skip', message='no merged notification content')
 

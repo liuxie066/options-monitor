@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import re
 
-from scripts.io_utils import bj_now
-
 from .misc import (
     AccountResult,
     AUTO_CLOSE_APPLIED_RE,
@@ -143,9 +141,9 @@ def flatten_auto_close_summary(text: str, *, always_show: bool = False) -> str:
 def build_merged_message(
     results: list[AccountResult],
     *,
+    now_bj: str,
     cash_footer_lines: list[str] | None = None,
 ) -> str:
-    now_bj = bj_now()
     lines: list[str] = []
     lines.append("options-monitor 合并提醒")
     lines.append(f"北京时间: {now_bj}")
