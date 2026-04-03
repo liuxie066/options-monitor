@@ -2,10 +2,11 @@
 
 期权监控与提醒（Sell Put / Covered Call），覆盖 **美股/港股**，支持 **多账户（lx/sy）分开计算约束、合并输出提醒**。
 
+- For Agents：看 `SKILL.md`（白名单命令、关键约束）
+- For Humans：看本文（Quickstart / Cheatsheet / Troubleshooting）
+
 - 适用：日常候选扫描、仓位/现金约束核算、飞书提醒
 - 不适用：把 Yahoo 当成严肃实时主数据源；用不完整字段做交易级决策
-
-> 给 AI/Agent 的入口说明看 `SKILL.md`（白名单命令、关键约束）。
 
 ---
 
