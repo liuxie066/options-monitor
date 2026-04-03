@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 
 
@@ -57,6 +58,28 @@ def extract_change_lines(text: str) -> list[str]:
     return [line for line in text.splitlines() if line.startswith('- ')]
 
 
+_MD_LINK_RE = re.compile(r"^\[(?P<label>[^\]]+)\]\((?P<target>[^\)]+)\)$")
+
+
+def _symbol_display_name(symbol: str) -> str:
+    """Prefer human-readable underlying name over raw code.
+
+    Today we support only one lightweight case:
+    - If symbol is a markdown link like [TENCENT](0700.HK), use label (TENCENT).
+
+    If the label is just the code itself (e.g. [0700.HK](0700.HK)), this does NOT improve.
+    For real Chinese names (0700.HK -> 腾讯), inject mapping upstream in alert generation.
+    """
+    s = (symbol or '').strip()
+    m = _MD_LINK_RE.match(s)
+    if m:
+        label = (m.group('label') or '').strip()
+        target = (m.group('target') or '').strip()
+        if label and target and label != target:
+            return label
+    return s
+
+
 def _format_alert_line(line: str) -> str:
     raw = line.strip()
     if raw.startswith('- '):
@@ -65,7 +88,8 @@ def _format_alert_line(line: str) -> str:
     if len(parts) < 3:
         return line
 
-    symbol = parts[0]
+    symbol_raw = parts[0]
+    symbol = _symbol_display_name(symbol_raw)
     strategy = parts[1]
     contract = parts[2]
 
