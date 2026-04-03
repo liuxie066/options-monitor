@@ -1088,7 +1088,7 @@ def main():
         cfg_override.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 
         # Unified scan timing: use ONE shared scheduler_state per market.
-        # Notify cooldown remains per-account (stored in last_notify_utc_by_account within the same shared file).
+        # Notify cooldown is unified globally (shared last_notify_utc) across accounts.
         shared_state_dir = (base / 'output_shared' / 'state').resolve()
         shared_state_dir.mkdir(parents=True, exist_ok=True)
         if markets_to_run == ['HK']:
@@ -1105,6 +1105,7 @@ def main():
                     'last_scan_utc': None,
                     'last_notify_utc': None,
                     'last_notify_utc_by_account': {},
+                    'last_scan_utc_by_account': {},
                 })
         except Exception:
             pass
@@ -1128,7 +1129,7 @@ def main():
 
         # 1) scheduler decision
         # market-aware schedule: use schedule_hk during HK session, otherwise default schedule
-        sch_args = [str(vpy), 'scripts/scan_scheduler.py', '--config', str(cfg_override), '--state', str(state_path), '--state-dir', str((run_dir / 'state').resolve()), '--jsonl', '--account', str(acct)]
+        sch_args = [str(vpy), 'scripts/scan_scheduler.py', '--config', str(cfg_override), '--state', str(state_path), '--state-dir', str((run_dir / 'state').resolve()), '--jsonl']
         try:
             if markets_to_run == ['HK'] and ('schedule_hk' in cfg):
                 sch_args.extend(['--schedule-key', 'schedule_hk'])
@@ -1445,31 +1446,25 @@ def main():
         target = None
         runlog.safe_event('notify', 'skip', message='no_send mode')
 
-    # Mark notified once per merged-message recipient to avoid stale cross-account notify cooldown.
+    # Mark notified once globally (unified notify cooldown across accounts).
     if not no_send:
         try:
-            notified_accounts = [
-                str(r.account).strip()
-                for r in results
-                if r.should_notify and r.meaningful and str(r.notification_text or '').strip()
-            ]
-            for acct0 in notified_accounts:
-                if not acct0:
-                    continue
-                cfg_override0 = (accounts_root / acct0 / 'state' / 'config.override.json').resolve()
-                if not cfg_override0.exists():
-                    continue
-                subprocess.run(
-                    [
-                        str(vpy), 'scripts/scan_scheduler.py',
-                        '--config', str(cfg_override0),
-                        '--state', str(state_path),
-                        '--state-dir', str((run_dir / 'state').resolve()),
-                        '--mark-notified',
-                        '--account', str(acct0),
-                    ],
-                    cwd=str(base),
-                )
+            # Use default-account config override for schedule-key compatibility.
+            cfg_override0 = (accounts_root / str(args.default_account).strip().lower() / 'state' / 'config.override.json').resolve()
+            if cfg_override0.exists():
+                sch_args = [
+                    str(vpy), 'scripts/scan_scheduler.py',
+                    '--config', str(cfg_override0),
+                    '--state', str(state_path),
+                    '--state-dir', str((run_dir / 'state').resolve()),
+                    '--mark-notified',
+                ]
+                try:
+                    if markets_to_run == ['HK'] and ('schedule_hk' in (base_cfg or {})):
+                        sch_args.extend(['--schedule-key', 'schedule_hk'])
+                except Exception:
+                    pass
+                subprocess.run(sch_args, cwd=str(base))
         except Exception:
             pass
 
