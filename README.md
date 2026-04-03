@@ -1,118 +1,107 @@
-# Options Monitor
+# options-monitor
 
-> 状态：可用（持续迭代）— 里程碑见 VERSION.md（首个可用里程碑：2026-03-22）
+期权监控与提醒（Sell Put / Covered Call），覆盖 **美股/港股**，支持 **多账户（lx/sy）分开计算约束、合并输出提醒**。
 
-一个期权监控与提醒工具，覆盖 **美股/港股**，主要用于卖方策略扫描：
+- 适用：日常候选扫描、仓位/现金约束核算、飞书提醒
+- 不适用：把 Yahoo 当成严肃实时主数据源；用不完整字段做交易级决策
 
-- Sell Put（现金担保）
-- Sell Call（覆盖式）
+> 给 AI/Agent 的入口说明看 `SKILL.md`（白名单命令、关键约束）。
 
-数据源策略：
+---
 
-- 主要：富途 OpenD（US/HK）
-- 降级：美股在 OpenD 不可用时可选 Yahoo/yfinance（见 `config.example.us.json:fetch_policy`）
-- 港股：默认 OpenD-only（见 `config.example.hk.json:fetch_policy`）
+## Hard Rules（别踩）
 
-核心能力：
+1. **真实运行配置不要提交**
+   - 仓库只保留 `config.example.us.json` / `config.example.hk.json`
+   - 本机约定：实际运行配置文件名用 `config.us.json` / `config.hk.json`（本地文件，不要提交）
 
-- 抓取期权链与必要字段（含 IV/Delta 等；缺失会明确提示）
-- 按规则筛选候选并计算（含手续费）净收益/年化等指标
-- 生成摘要/提醒文本（支持飞书通知、多账户合并输出）
+2. **dev → prod 有纪律**
+   - 开发只在：`/home/node/.openclaw/workspace/options-monitor`（dev repo）
+   - 生产运行在：`/home/node/.openclaw/workspace/options-monitor-prod`
+   - 部署用：`scripts/deploy_to_prod.py`（不要直接改 prod）
 
-## 当前范围
+3. **数据缺失必须显式提示**（字段缺失/源不可用/降级路径）
 
-当前版本适合：
-- 验证策略扫描规则
-- 做日常候选筛选
-- 输出 Sell Put / Sell Call 的候选与提醒
+---
 
-当前版本不适合：
-- 作为长期严肃生产级主数据源
-- 依赖 Yahoo 数据做高精度实时交易决策
-- 替代人工风险控制
+## Quickstart
 
-## 安装
-
-推荐用项目自带脚本启动（会自动创建虚拟环境并安装依赖）：
+### 1) 安装依赖（推荐一键）
 
 ```bash
+cd /home/node/.openclaw/workspace/options-monitor
 ./run_watchlist.sh
 ```
 
-如需手动安装：
+### 2) 准备本地配置
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -U pip
-pip install -r requirements.txt
+cp config.example.us.json config.us.json
+cp config.example.hk.json config.hk.json
 ```
 
-> 默认读取 `config.local.us.json`（不提交到仓库）；也可用环境变量 `OPTIONS_MONITOR_CONFIG` 指向任意配置文件。
-> 先从示例复制：`cp config.example.us.json config.local.us.json`（港股：`cp config.example.hk.json config.local.hk.json`）。
+---
 
-## 配置
+## Cheatsheet（常用命令）
 
-- 示例配置：`config.example.us.json`（美股）/ `config.example.hk.json`（港股）
-- 本地运行建议复制为 `config.local.us.json` / `config.local.hk.json`（不要提交）
-- （仓库不再提交真实运行配置；仅保留示例）
-- `scripts/`：抓取、扫描、提醒与统一入口脚本
-- `output/raw/`：原始 JSON
-- `output/parsed/`：标准化 CSV
-- `output/reports/`：候选、提醒与摘要输出
+> 说明：这里是给人跑的；Agent/cron 的白名单命令以 `SKILL.md` 为准。
 
-## 消息 Intake（成交提醒 → option_positions）
-
-- 解析成交/手工输入消息：`scripts/parse_option_message.py`
-- 解析 + 写入（默认 dry-run）：`scripts/option_intake.py`
-
-Intake 可配置项（见 `config.example.us.json:intake` / `config.example.hk.json:intake`）：
-- `symbol_aliases`: 中文标的名 → 代码（例如 中海油 → 0883.HK）
-- `multiplier_by_symbol`: 合约乘数（例如 0883.HK → 1000）
-- `default_multiplier_hk` / `default_multiplier_us`
-
-## Watchlist 管理（监控标的：查看/新增/删除/编辑）
-
-配置文件：`config.local.us.json` / `config.local.hk.json` 的 `symbols[]`（从示例复制后修改）
+### A. 生产 tick（按 scheduler 决策是否扫描/是否通知）
 
 ```bash
-# 查看当前监控标的
+# US
+./.venv/bin/python scripts/send_if_needed_multi.py --config config.us.json --market-config us --accounts lx sy
+
+# HK
+./.venv/bin/python scripts/send_if_needed_multi.py --config config.hk.json --market-config hk --accounts lx sy
+```
+
+### B. Watchlist 管理
+
+```bash
 ./.venv/bin/python scripts/watchlist.py list
-
-# 新增标的（示例：只监控 sell put；默认所有账户都跑）
 ./.venv/bin/python scripts/watchlist.py add TSLA --put --use put_base --limit-exp 8
-
-# 新增标的（只让某些账户跑）
 ./.venv/bin/python scripts/watchlist.py add AAPL --put --accounts lx
-
-# 删除标的
-./.venv/bin/python scripts/watchlist.py rm TSLA
-
-# 编辑标的（用 --set 打补丁，支持重复）
 ./.venv/bin/python scripts/watchlist.py edit NVDA --set sell_put.min_strike=145 --set sell_put.max_strike=160
-./.venv/bin/python scripts/watchlist.py edit NVDA --set sell_call.enabled=false
-
-# 也可以给已有标的指定账户（默认不写 accounts = 两个账户都跑）
-./.venv/bin/python scripts/watchlist.py edit GOOGL --set accounts=["lx","sy"]
-./.venv/bin/python scripts/watchlist.py edit FUTU --set accounts=["lx"]
+./.venv/bin/python scripts/watchlist.py rm TSLA
 ```
 
-## 当前主要脚本
+### C. 成交/手工输入 → option_positions（Intake）
 
-- `scripts/fetch_market_data.py`
-- `scripts/scan_sell_put.py`
-- `scripts/scan_sell_call.py`
-- `scripts/render_sell_put_alerts.py`
-- `scripts/render_sell_call_alerts.py`
-- `scripts/alert_engine.py`
-- `scripts/scan_scheduler.py`
-- `scripts/run_pipeline.py`
+```bash
+./.venv/bin/python scripts/parse_option_message.py --text "..."
+./.venv/bin/python scripts/option_intake.py --market hk --account lx --text "..." --dry-run
+```
 
-## 主要输出
+---
 
-- `output/reports/symbols_summary.csv` / `symbols_summary.txt`
-- `output/reports/symbols_digest.txt`
-- `output/reports/symbols_alerts.txt`
-- `output/reports/symbols_changes.txt`
-- `output/reports/symbols_notification.txt`
+## Config & State
 
+- 配置：`config.local.us.json` / `config.local.hk.json`
+- 输出目录（dev）：`output/`
+  - `output/raw/`：原始抓取
+  - `output/parsed/`：标准化 CSV
+  - `output/reports/`：候选/摘要/提醒文本
+- prod 的共享调度状态（权威）：
+  - `options-monitor-prod/output_shared/state/scheduler_state_us.json`
+  - `options-monitor-prod/output_shared/state/scheduler_state_hk.json`
+
+---
+
+## Troubleshooting（只列高频）
+
+- **OpenD 不可用 / 登录失效**：先确认 OpenD 进程与端口，再看 `output/*/opend_metrics.json` 是否大量失败。
+- **“字段缺失”**：不要硬跑，先把缺失字段打印出来并确认数据源是否支持。
+- **“非交易时段：不监控”但你认为是交易时段**：优先检查 tick 用的是不是正确的 `--market-config` 与对应 `config.*.hk/us.json`。
+
+---
+
+## Dev → Prod 部署
+
+```bash
+cd /home/node/.openclaw/workspace/options-monitor
+./.venv/bin/python scripts/deploy_to_prod.py --dry-run
+./.venv/bin/python scripts/deploy_to_prod.py --apply
+```
+
+> prod 不是开发源，不要在 `options-monitor-prod` 里直接改代码。
