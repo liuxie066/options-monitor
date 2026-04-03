@@ -248,7 +248,7 @@ def build_notification(changes_text: str, alerts_text: str, fx_info: dict | None
                     s = ln.rstrip()
                     if not s.strip():
                         continue
-                    lines.append('  ' + s)
+                    lines.append(s)
                 lines.append('')
 
         if groups['sell_put']:
