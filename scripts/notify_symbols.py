@@ -143,7 +143,18 @@ def _format_alert_line(line: str) -> str:
         # Line 2 (cash): always base currency (CNY)
         line2 = ''
         if cash_req_cny:
-            line2 = f"担保占用: {cash_req_cny} (CNY)"
+            # cash_req_cny might be a raw number or already formatted; normalize to "¥12,345 (CNY)" when possible.
+            v = str(cash_req_cny).strip()
+            fmt = v
+            try:
+                # keep digits / dot / minus only
+                cleaned = ''.join(ch for ch in v if (ch.isdigit() or ch in '.-'))
+                if cleaned and cleaned not in ('-', '.', '-.'):
+                    n = float(cleaned)
+                    fmt = f"¥{n:,.0f} (CNY)"
+            except Exception:
+                fmt = v
+            line2 = f"预计暂停现金: {fmt}"
 
         out = [line1]
         if line2:
