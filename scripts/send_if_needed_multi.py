@@ -1014,6 +1014,68 @@ def main():
     now_utc = datetime.now(timezone.utc)
     markets_to_run: list[str] = _select_markets_to_run(now_utc, base_cfg, getattr(args, 'market_config', 'auto'))
 
+    # Unified scheduler state path: one shared state per market session.
+    shared_state_dir = (base / 'output_shared' / 'state').resolve()
+    shared_state_dir.mkdir(parents=True, exist_ok=True)
+    if markets_to_run == ['HK']:
+        state_path = shared_state_dir / 'scheduler_state_hk.json'
+    elif markets_to_run == ['US']:
+        state_path = shared_state_dir / 'scheduler_state_us.json'
+    else:
+        state_path = shared_state_dir / 'scheduler_state.json'
+
+    # Ensure shared scheduler state exists for observability.
+    try:
+        if (not state_path.exists()) or state_path.stat().st_size <= 0:
+            write_json(state_path, {
+                'last_scan_utc': None,
+                'last_notify_utc': None,
+                'last_notify_utc_by_account': {},
+                'last_scan_utc_by_account': {},
+            })
+    except Exception:
+        pass
+
+    # Compute scheduler decision ONCE per tick (global cooldown, no --account).
+    scheduler_schedule_key = 'schedule_hk' if (markets_to_run == ['HK'] and ('schedule_hk' in (base_cfg or {}))) else 'schedule'
+    scheduler_cmd = [
+        str(vpy), 'scripts/scan_scheduler.py',
+        '--config', str(cfg_path),
+        '--state', str(state_path),
+        '--jsonl',
+        '--schedule-key', str(scheduler_schedule_key),
+    ]
+    t_sch0 = monotonic()
+    scheduler_proc = subprocess.run(
+        scheduler_cmd,
+        cwd=str(base),
+        capture_output=True,
+        text=True,
+    )
+    scheduler_ms = int((monotonic() - t_sch0) * 1000)
+    if scheduler_proc.returncode != 0:
+        err = f"scheduler error: {(scheduler_proc.stderr or scheduler_proc.stdout).strip()}"
+        for acct in args.accounts:
+            acct0 = str(acct).strip()
+            if acct0:
+                results.append(AccountResult(acct0, False, False, False, err, ''))
+        runlog.safe_event('run_end', 'error', error_code='SCHEDULER_FAILED', message=err)
+        return 0
+
+    scheduler_decision = json.loads((scheduler_proc.stdout or '').strip())
+    should_run_global = bool(scheduler_decision.get('should_run_scan'))
+    should_notify_global = bool(scheduler_decision.get('is_notify_window_open', scheduler_decision.get('should_notify')))
+    reason_global = str(scheduler_decision.get('reason') or '')
+
+    if bool(getattr(args, 'force', False)):
+        should_run_global = True
+        reason_global = (reason_global + ' | force').strip(' |')
+
+    if smoke:
+        should_run_global = False
+        reason_global = (str(reason_global) + ' | smoke_skip_pipeline').strip()
+
+    ran_any_pipeline = False
 
     # Transitional run_dir (new flow): keep required_data as a per-run artifact.
     # For now we still run per-account pipelines, but we fetch required_data once and copy it into run_dir.
@@ -1060,7 +1122,7 @@ def main():
         acct_out = accounts_root / acct
         acct_metrics = {
             'account': acct,
-            'scheduler_ms': None,
+            'scheduler_ms': scheduler_ms,
             'pipeline_ms': None,
             'ran_scan': False,
             'should_notify': False,
@@ -1087,29 +1149,6 @@ def main():
         cfg_override = acct_out / 'state' / 'config.override.json'
         cfg_override.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 
-        # Unified scan timing: use ONE shared scheduler_state per market.
-        # Notify cooldown is unified globally (shared last_notify_utc) across accounts.
-        shared_state_dir = (base / 'output_shared' / 'state').resolve()
-        shared_state_dir.mkdir(parents=True, exist_ok=True)
-        if markets_to_run == ['HK']:
-            state_path = shared_state_dir / 'scheduler_state_hk.json'
-        elif markets_to_run == ['US']:
-            state_path = shared_state_dir / 'scheduler_state_us.json'
-        else:
-            state_path = shared_state_dir / 'scheduler_state.json'
-
-        # Ensure shared scheduler state exists (so ops/debug can inspect even before first scan/notify)
-        try:
-            if (not state_path.exists()) or state_path.stat().st_size <= 0:
-                write_json(state_path, {
-                    'last_scan_utc': None,
-                    'last_notify_utc': None,
-                    'last_notify_utc_by_account': {},
-                    'last_scan_utc_by_account': {},
-                })
-        except Exception:
-            pass
-
         # New flow: pipeline writes into run_dir/accounts/<acct>
         acct_report_dir = (run_dir / 'accounts' / acct).resolve()
         acct_state_dir = (acct_report_dir / 'state').resolve()
@@ -1127,32 +1166,8 @@ def main():
 
         notif_path = (acct_report_dir / 'symbols_notification.txt').resolve()
 
-        # 1) scheduler decision
-        # market-aware schedule: use schedule_hk during HK session, otherwise default schedule
-        sch_args = [str(vpy), 'scripts/scan_scheduler.py', '--config', str(cfg_override), '--state', str(state_path), '--state-dir', str((run_dir / 'state').resolve()), '--jsonl']
-        try:
-            if markets_to_run == ['HK'] and ('schedule_hk' in cfg):
-                sch_args.extend(['--schedule-key', 'schedule_hk'])
-        except Exception:
-            pass
-        t_sch0 = monotonic()
-        sch = subprocess.run(
-            sch_args,
-            cwd=str(base),
-            capture_output=True,
-            text=True,
-        )
-        acct_metrics['scheduler_ms'] = int((monotonic() - t_sch0) * 1000)
-        if sch.returncode != 0:
-            acct_metrics['ran_scan'] = False
-            acct_metrics['should_notify'] = False
-            acct_metrics['meaningful'] = False
-            acct_metrics['reason'] = f"scheduler error: {(sch.stderr or sch.stdout).strip()}"
-            tick_metrics['accounts'].append(acct_metrics)
-            results.append(AccountResult(acct, False, False, False, f"scheduler error: {(sch.stderr or sch.stdout).strip()}", ''))
-            continue
-
-        decision = json.loads((sch.stdout or '').strip())
+        # 1) scheduler decision (computed once globally per tick)
+        decision = scheduler_decision
         # Persist scheduler decision per-account into run_dir for replay/audit.
         _write_acct_run_state('scheduler_decision.json', {
             'as_of_utc': utc_now(),
@@ -1160,19 +1175,10 @@ def main():
             'decision': decision,
         })
 
-        should_run = bool(decision.get('should_run_scan'))
-        should_notify = bool(decision.get('is_notify_window_open', decision.get('should_notify')))
-        reason = str(decision.get('reason') or '')
+        should_run = bool(should_run_global)
+        should_notify = bool(should_notify_global)
+        reason = str(reason_global)
 
-        # Transitional: allow forcing pipeline runs even off-hours (useful for dev/test).
-        # Notify eligibility is still controlled by scheduler + send_if_needed_multi logic.
-        if bool(getattr(args, 'force', False)):
-            should_run = True
-            reason = (reason + ' | force').strip(' |')
-
-        if smoke:
-            should_run = False
-            reason = (str(reason) + ' | smoke_skip_pipeline').strip()
         acct_metrics['should_notify'] = bool(should_notify)
         acct_metrics['reason'] = str(reason)
 
@@ -1266,11 +1272,7 @@ def main():
             duration_ms=acct_metrics['pipeline_ms'],
             data=_safe_runlog_data({'account': acct}),
         )
-        # Mark scanned (shared scan clock)
-        try:
-            subprocess.run([str(vpy), 'scripts/scan_scheduler.py', '--config', str(cfg_override), '--state', str(state_path), '--state-dir', str((run_dir / 'state').resolve()), '--mark-scanned', '--account', str(acct)], cwd=str(base))
-        except Exception:
-            pass
+        ran_any_pipeline = True
 
         text = notif_path.read_text(encoding='utf-8', errors='replace').strip() if notif_path.exists() else ''
 
@@ -1327,6 +1329,21 @@ def main():
         acct_metrics['reason'] = str(reason)
         tick_metrics['accounts'].append(acct_metrics)
         results.append(AccountResult(acct, True, should_notify_effective, meaningful, reason, text))
+
+    # Mark scanned once globally (shared scan clock) after account pipelines complete.
+    if ran_any_pipeline:
+        try:
+            sch_args = [
+                str(vpy), 'scripts/scan_scheduler.py',
+                '--config', str(cfg_path),
+                '--state', str(state_path),
+                '--state-dir', str((run_dir / 'state').resolve()),
+                '--mark-scanned',
+                '--schedule-key', str(scheduler_schedule_key),
+            ]
+            subprocess.run(sch_args, cwd=str(base))
+        except Exception:
+            pass
 
     runlog.safe_event(
         'notify',
@@ -1449,22 +1466,15 @@ def main():
     # Mark notified once globally (unified notify cooldown across accounts).
     if not no_send:
         try:
-            # Use default-account config override for schedule-key compatibility.
-            cfg_override0 = (accounts_root / str(args.default_account).strip().lower() / 'state' / 'config.override.json').resolve()
-            if cfg_override0.exists():
-                sch_args = [
-                    str(vpy), 'scripts/scan_scheduler.py',
-                    '--config', str(cfg_override0),
-                    '--state', str(state_path),
-                    '--state-dir', str((run_dir / 'state').resolve()),
-                    '--mark-notified',
-                ]
-                try:
-                    if markets_to_run == ['HK'] and ('schedule_hk' in (base_cfg or {})):
-                        sch_args.extend(['--schedule-key', 'schedule_hk'])
-                except Exception:
-                    pass
-                subprocess.run(sch_args, cwd=str(base))
+            sch_args = [
+                str(vpy), 'scripts/scan_scheduler.py',
+                '--config', str(cfg_path),
+                '--state', str(state_path),
+                '--state-dir', str((run_dir / 'state').resolve()),
+                '--mark-notified',
+                '--schedule-key', str(scheduler_schedule_key),
+            ]
+            subprocess.run(sch_args, cwd=str(base))
         except Exception:
             pass
 
