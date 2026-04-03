@@ -448,13 +448,20 @@ def annotate_notification(acct: str, text: str) -> str:
             last_line1_idx = None
             continue
 
-        # Heuristic: line1 begins with "<SYMBOL> 卖Put" or "<SYMBOL> 卖Call"
+        # Heuristic: candidate line begins with "<SYMBOL> 卖Put" or "<SYMBOL> 卖Call".
+        # NOTE: notify_symbols.py may already format candidates as bullets. Preserve existing bullets.
         if in_put and ' 卖Put ' in s:
-            out.append('- ' + s)
+            if s.lstrip().startswith('- '):
+                out.append(s)
+            else:
+                out.append('- ' + s)
             last_line1_idx = len(out) - 1
             continue
         if in_call and ' 卖Call ' in s:
-            out.append('- ' + s)
+            if s.lstrip().startswith('- '):
+                out.append(s)
+            else:
+                out.append('- ' + s)
             last_line1_idx = len(out) - 1
             continue
 
