@@ -2,6 +2,11 @@
 """Symbols notification builder.
 
 This is the same logic as the previous notify_watchlist.py, renamed for clarity.
+
+NOTE (template ownership):
+- This file is the *single source of truth* for notification layout (Put/Call sections, blank lines, bullet lists).
+- For multi-account merged notifications, send_if_needed_multi.py must treat per-account notification text as opaque
+  and must NOT reformat individual candidates.
 """
 
 from __future__ import annotations
@@ -210,7 +215,16 @@ def build_notification(changes_text: str, alerts_text: str, fx_info: dict | None
                 block = _format_alert_line(x).strip()
                 if not block:
                     continue
-                lines.append(block)
+                b_lines = block.splitlines()
+                if not b_lines:
+                    continue
+                # List style: first line as bullet, following lines indented.
+                lines.append('- ' + b_lines[0].strip())
+                for ln in b_lines[1:]:
+                    s = ln.rstrip()
+                    if not s.strip():
+                        continue
+                    lines.append('  ' + s)
                 lines.append('')
 
         if groups['sell_put']:
@@ -222,6 +236,7 @@ def build_notification(changes_text: str, alerts_text: str, fx_info: dict | None
 
     if significant_changes:
         lines.append('变化')
+        lines.append('')
         for ln in significant_changes[:8]:
             s = ln.strip()
             if s.startswith('- '):

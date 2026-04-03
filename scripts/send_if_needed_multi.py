@@ -403,7 +403,11 @@ def _parse_cny(s: str) -> float | None:
 
 
 def annotate_notification(acct: str, text: str) -> str:
-    """Add explicit support flags for Put/Call blocks."""
+    """Add explicit support flags for Put/Call blocks.
+
+    Layout ownership: notify_symbols.py is the single source of truth for formatting.
+    This function should only add minimal tags, and must not restructure candidates.
+    """
     if not text:
         return text
 
