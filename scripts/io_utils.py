@@ -92,11 +92,17 @@ def parse_last_json_obj(text: str) -> dict:
         return {}
 
 
-def money_cny(v) -> str:
+def money_cny(v, *, decimals: int = 0, show_ccy: bool = True) -> str:
+    """Format CNY amount.
+
+    Defaults keep backward compatibility: no decimals + show "(CNY)".
+    """
     try:
         if v is None:
             return '-'
-        return f"¥{float(v):,.0f} (CNY)"
+        n = float(v)
+        s = f"¥{n:,.{int(decimals)}f}"
+        return (s + " (CNY)") if show_ccy else s
     except Exception:
         return '-'
 

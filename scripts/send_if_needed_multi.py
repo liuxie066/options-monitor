@@ -59,6 +59,7 @@ from scripts.io_utils import (
     money_cny,
     utc_now,
     bj_now,
+    has_shared_required_data,
 )
 
 
@@ -248,6 +249,110 @@ def query_cash_footer(
     return lines
 
 
+def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required: Path) -> dict:
+    """Best-effort prefetch required_data for all symbols once per tick.
+
+    Writes into shared_required/{raw,parsed}. Parallelized per symbol with bounded workers.
+    """
+    syms = [it for it in (cfg.get('symbols') or []) if isinstance(it, dict) and it.get('symbol')]
+    symbols = [str(it.get('symbol')).strip() for it in syms if str(it.get('symbol')).strip()]
+
+    raw_dir = (shared_required / 'raw').resolve()
+    parsed_dir = (shared_required / 'parsed').resolve()
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    parsed_dir.mkdir(parents=True, exist_ok=True)
+
+    def _need_fetch(symbol: str) -> bool:
+        try:
+            return (not has_shared_required_data(symbol, shared_required))
+        except Exception:
+            return True
+
+    def _fetch_one(symbol_cfg: dict) -> tuple[str, bool, str]:
+        symbol = str(symbol_cfg.get('symbol')).strip()
+        if not symbol:
+            return '', False, 'empty_symbol'
+        if not _need_fetch(symbol):
+            return symbol, True, 'cached'
+
+        fetch_cfg = (symbol_cfg.get('fetch') or {}) if isinstance(symbol_cfg, dict) else {}
+        src = str(fetch_cfg.get('source') or 'yahoo').lower()
+        limit_exp = int(fetch_cfg.get('limit_expirations') or symbol_cfg.get('fetch', {}).get('limit_expirations', 8) or 8)
+
+        # Respect option-type needs loosely: default to put,call for safety.
+        opt_types = 'put,call'
+
+        cmd: list[str]
+        if src == 'opend':
+            cmd = [
+                str(vpy), 'scripts/fetch_market_data_opend.py',
+                '--symbols', symbol,
+                '--limit-expirations', str(limit_exp),
+                '--host', str(fetch_cfg.get('host') or '127.0.0.1'),
+                '--port', str(int(fetch_cfg.get('port') or 11111)),
+                '--option-types', opt_types,
+                '--output-root', str(shared_required),
+                '--chain-cache',
+                '--quiet',
+            ]
+            # US spot policy matches required_data_steps.ensure_required_data
+            try:
+                u = str(symbol).strip().upper()
+                spot_from_pm = (not u.endswith('.HK')) if (fetch_cfg.get('spot_from_portfolio_management') is None) else bool(fetch_cfg.get('spot_from_portfolio_management'))
+                if spot_from_pm:
+                    cmd.append('--spot-from-pm')
+            except Exception:
+                pass
+        else:
+            cmd = [
+                str(vpy), 'scripts/fetch_market_data.py',
+                '--symbols', symbol,
+                '--output-root', str(shared_required),
+                '--limit-expirations', str(limit_exp),
+            ]
+
+        p = subprocess.run(cmd, cwd=str(base), capture_output=True, text=True)
+        if p.returncode != 0:
+            tail = ((p.stderr or p.stdout) or '').strip().splitlines()[-1:]  # last line only
+            return symbol, False, (tail[0] if tail else f'returncode={p.returncode}')
+        return symbol, True, 'fetched'
+
+    # Filter symbols that need work
+    todo_cfgs = [it for it in syms if _need_fetch(str(it.get('symbol')).strip())]
+
+    ok = 0
+    err = 0
+    results: dict[str, str] = {}
+
+    if not todo_cfgs:
+        return {
+            'symbols_total': len(symbols),
+            'fetched': 0,
+            'cached': len(symbols),
+            'errors': 0,
+        }
+
+    with ThreadPoolExecutor(max_workers=min(8, max(1, len(todo_cfgs)))) as ex:
+        futs = {ex.submit(_fetch_one, it): str(it.get('symbol')).strip() for it in todo_cfgs}
+        for fut in as_completed(futs):
+            sym, ok1, msg = fut.result()
+            if not sym:
+                continue
+            results[sym] = msg
+            if ok1:
+                ok += 1
+            else:
+                err += 1
+
+    return {
+        'symbols_total': len(symbols),
+        'to_fetch': len(todo_cfgs),
+        'fetched_ok': ok,
+        'errors': err,
+        'results': results,
+    }
+
+
 def atomic_symlink(path: Path, target: Path):
     tmp = path.with_name(path.name + '.tmp')
     # tmp may be left as a directory from previous runs; remove it robustly.
@@ -423,8 +528,7 @@ def flatten_auto_close_summary(text: str, *, always_show: bool = False) -> str:
 def build_merged_message(
     results: list[AccountResult],
     *,
-    base_cfg: dict | None = None,
-    cash_accounts: list[str] | None = None,
+    cash_footer_lines: list[str] | None = None,
 ) -> str:
     now_bj = bj_now()
     lines: list[str] = []
@@ -455,30 +559,11 @@ def build_merged_message(
     if not any_content:
         return ''
 
-    # Append cash footer at the end (compute once)
-    try:
-        base = Path(__file__).resolve().parents[1]
-        cfg = base_cfg or {}
-        cfg_market = str((cfg.get('portfolio') or {}).get('market') or '富途')
-
-        notif_cfg = (cfg.get('notifications') or {}) if isinstance(cfg, dict) else {}
-        accts = cash_accounts or (notif_cfg.get('cash_footer_accounts') or ['lx', 'sy'])
-        timeout_sec = int(notif_cfg.get('cash_footer_timeout_sec') or 180)
-        max_age_sec = int(notif_cfg.get('cash_snapshot_max_age_sec') or 900)
-
-        footer_lines = query_cash_footer(
-            base,
-            market=cfg_market,
-            accounts=accts,
-            timeout_sec=timeout_sec,
-            snapshot_max_age_sec=max_age_sec,
-        )
-        if footer_lines:
-            lines.extend(footer_lines)
-            lines.append('')
-    except Exception:
-        # best-effort: skip cash footer if anything fails
-        pass
+    # Append cash footer at the end (computed outside; formatter must stay pure)
+    footer_lines = cash_footer_lines or []
+    if footer_lines:
+        lines.extend(list(footer_lines))
+        lines.append('')
 
     return '\n'.join(lines).strip() + '\n'
 
@@ -611,28 +696,25 @@ def main():
     base_cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
 
     # run_start checkpoint
-    try:
-        syms0 = base_cfg.get('symbols') or []
-        src_counts: dict[str, int] = {}
-        for it in syms0:
-            if not isinstance(it, dict):
-                continue
-            src = str(((it.get('fetch') or {}).get('source') or 'yahoo')).lower()
-            src_counts[src] = src_counts.get(src, 0) + 1
-        runlog.event(
-            'run_start',
-            'start',
-            data=_safe_runlog_data({
-                'accounts': [str(a).strip().lower() for a in (args.accounts or []) if str(a).strip()],
-                'symbols_count': len([x for x in syms0 if isinstance(x, dict)]),
-                'source_selections': src_counts,
-                'market_config': str(getattr(args, 'market_config', 'auto') or 'auto'),
-                'no_send': no_send,
-                'smoke': bool(smoke),
-            }),
-        )
-    except Exception:
-        pass
+    syms0 = base_cfg.get('symbols') or []
+    src_counts: dict[str, int] = {}
+    for it in syms0:
+        if not isinstance(it, dict):
+            continue
+        src = str(((it.get('fetch') or {}).get('source') or 'yahoo')).lower()
+        src_counts[src] = src_counts.get(src, 0) + 1
+    runlog.safe_event(
+        'run_start',
+        'start',
+        data=_safe_runlog_data({
+            'accounts': [str(a).strip().lower() for a in (args.accounts or []) if str(a).strip()],
+            'symbols_count': len([x for x in syms0 if isinstance(x, dict)]),
+            'source_selections': src_counts,
+            'market_config': str(getattr(args, 'market_config', 'auto') or 'auto'),
+            'no_send': no_send,
+            'smoke': bool(smoke),
+        }),
+    )
 
     market_cfg = str(getattr(args, 'market_config', 'auto') or 'auto').lower()
     if market_cfg in ('hk','us'):
@@ -652,10 +734,7 @@ def main():
     # Preflight: OpenD watchdog (ensure process + login state).
     # When watchdog is unhealthy, fail-fast and alert (rate-limited per error_code).
     t_watchdog0 = monotonic()
-    try:
-        runlog.event('watchdog', 'start')
-    except Exception:
-        pass
+    runlog.safe_event('watchdog', 'start')
     try:
         fetch_policy = base_cfg.get('fetch_policy') if isinstance(base_cfg, dict) else None
         allow_downgrade = True
@@ -765,57 +844,45 @@ def main():
 
                 if degraded:
                     log(f"[WARN] OpenD unhealthy ({error_code}); degraded US opend sources to yahoo for this run")
-                    try:
-                        runlog.event(
-                            'watchdog',
-                            'degraded',
-                            duration_ms=int((monotonic() - t_watchdog0) * 1000),
-                            error_code=error_code,
-                            message=msg,
-                            data=_safe_runlog_data({'degraded': True, 'host': host, 'port': port}),
-                        )
-                    except Exception:
-                        pass
+                    runlog.safe_event(
+                        'watchdog',
+                        'degraded',
+                        duration_ms=int((monotonic() - t_watchdog0) * 1000),
+                        error_code=error_code,
+                        message=msg,
+                        data=_safe_runlog_data({'degraded': True, 'host': host, 'port': port}),
+                    )
                 else:
                     # Fail-fast: do not proceed symbol scans when OpenD source is unhealthy.
-                    try:
-                        runlog.event(
-                            'watchdog',
-                            'error',
-                            duration_ms=int((monotonic() - t_watchdog0) * 1000),
-                            error_code=error_code,
-                            message=msg,
-                            data=_safe_runlog_data({'degraded': False, 'host': host, 'port': port}),
-                        )
-                        runlog.event(
-                            'run_end',
-                            'error',
-                            error_code=error_code,
-                            message='opend watchdog unhealthy',
-                            data=_safe_runlog_data({'sent': False, 'reason': 'opend_unhealthy'}),
-                        )
-                    except Exception:
-                        pass
+                    runlog.safe_event(
+                        'watchdog',
+                        'error',
+                        duration_ms=int((monotonic() - t_watchdog0) * 1000),
+                        error_code=error_code,
+                        message=msg,
+                        data=_safe_runlog_data({'degraded': False, 'host': host, 'port': port}),
+                    )
+                    runlog.safe_event(
+                        'run_end',
+                        'error',
+                        error_code=error_code,
+                        message='opend watchdog unhealthy',
+                        data=_safe_runlog_data({'sent': False, 'reason': 'opend_unhealthy'}),
+                    )
                     return 0
 
     except SystemExit:
         raise
     except Exception as e:
         # best-effort: do not block execution if watchdog fails unexpectedly
-        try:
-            runlog.event(
-                'watchdog',
-                'error',
-                duration_ms=int((monotonic() - t_watchdog0) * 1000),
-                error_code='WATCHDOG_EXCEPTION',
-                message=str(e),
-            )
-        except Exception:
-            pass
-    try:
-        runlog.event('watchdog', 'ok', duration_ms=int((monotonic() - t_watchdog0) * 1000))
-    except Exception:
-        pass
+        runlog.safe_event(
+            'watchdog',
+            'error',
+            duration_ms=int((monotonic() - t_watchdog0) * 1000),
+            error_code='WATCHDOG_EXCEPTION',
+            message=str(e),
+        )
+    runlog.safe_event('watchdog', 'ok', duration_ms=int((monotonic() - t_watchdog0) * 1000))
 
     # Ensure output/accounts layout
     # Transitional: clean run_dir history (keep last 7 days)
@@ -1051,18 +1118,9 @@ def main():
 
         # Prefetch required_data once per tick into run_dir/required_data.
         if (not prefetch_done):
-            try:
-                runlog.event('fetch_chain_cache', 'start', data=_safe_runlog_data({'account': acct, 'symbols_count': len(cfg.get('symbols') or [])}))
-            except Exception:
-                pass
-            try:
-                prefetch_stats = prefetch_required_data(vpy=vpy, base=base, cfg=cfg, shared_required=shared_required)
-                runlog.event('fetch_chain_cache', 'ok', data=_safe_runlog_data(prefetch_stats))
-            except Exception as e:
-                try:
-                    runlog.event('fetch_chain_cache', 'error', error_code='FETCH_CHAIN_EXCEPTION', message=str(e))
-                except Exception:
-                    pass
+            runlog.safe_event('fetch_chain_cache', 'start', data=_safe_runlog_data({'account': acct, 'symbols_count': len(cfg.get('symbols') or [])}))
+            prefetch_stats = prefetch_required_data(vpy=vpy, base=base, cfg=cfg, shared_required=shared_required)
+            runlog.safe_event('fetch_chain_cache', 'ok', data=_safe_runlog_data(prefetch_stats))
             prefetch_done = True
 
         # run_pipeline consumes shared_required_data as authoritative required_data source.
@@ -1076,14 +1134,11 @@ def main():
             '--report-dir', str(acct_report_dir),
             '--state-dir', str((run_dir / 'state').resolve()),
         ]
-        try:
-            runlog.event(
-                'snapshot_batches',
-                'start',
-                data=_safe_runlog_data({'account': acct}),
-            )
-        except Exception:
-            pass
+        runlog.safe_event(
+            'snapshot_batches',
+            'start',
+            data=_safe_runlog_data({'account': acct}),
+        )
 
         t_pipe0 = monotonic()
         pipe = subprocess.run(
@@ -1095,17 +1150,14 @@ def main():
         )
         acct_metrics['pipeline_ms'] = int((monotonic() - t_pipe0) * 1000)
         if pipe.returncode != 0:
-            try:
-                runlog.event(
-                    'snapshot_batches',
-                    'error',
-                    duration_ms=acct_metrics['pipeline_ms'],
-                    error_code='PIPELINE_FAILED',
-                    message=f'pipeline failed for {acct}',
-                    data=_safe_runlog_data({'account': acct, 'returncode': pipe.returncode}),
-                )
-            except Exception:
-                pass
+            runlog.safe_event(
+                'snapshot_batches',
+                'error',
+                duration_ms=acct_metrics['pipeline_ms'],
+                error_code='PIPELINE_FAILED',
+                message=f'pipeline failed for {acct}',
+                data=_safe_runlog_data({'account': acct, 'returncode': pipe.returncode}),
+            )
             # Only print the tail for debugging (avoid noisy logs on success)
             out = ((pipe.stdout or '') + '\n' + (pipe.stderr or '')).strip()
             if out:
@@ -1118,15 +1170,12 @@ def main():
             results.append(AccountResult(acct, True, should_notify, False, 'pipeline failed', ''))
             continue
 
-        try:
-            runlog.event(
-                'snapshot_batches',
-                'ok',
-                duration_ms=acct_metrics['pipeline_ms'],
-                data=_safe_runlog_data({'account': acct}),
-            )
-        except Exception:
-            pass
+        runlog.safe_event(
+            'snapshot_batches',
+            'ok',
+            duration_ms=acct_metrics['pipeline_ms'],
+            data=_safe_runlog_data({'account': acct}),
+        )
         # Mark scanned (shared scan clock)
         try:
             subprocess.run([str(vpy), 'scripts/scan_scheduler.py', '--config', str(cfg_override), '--state', str(state_path), '--state-dir', str((run_dir / 'state').resolve()), '--mark-scanned', '--account', str(acct)], cwd=str(base))
@@ -1189,24 +1238,37 @@ def main():
         tick_metrics['accounts'].append(acct_metrics)
         results.append(AccountResult(acct, True, should_notify_effective, meaningful, reason, text))
 
+    runlog.safe_event(
+        'notify',
+        'prepare',
+        data=_safe_runlog_data({
+            'results_count': len(results),
+            'notify_candidates': len([r for r in results if r.should_notify and r.meaningful and bool(r.notification_text.strip())]),
+        }),
+    )
+
+    # Compute cash footer outside of merged-message formatter (avoid I/O side effects in formatting).
+    cash_footer_lines: list[str] = []
     try:
-        runlog.event(
-            'notify',
-            'prepare',
-            data=_safe_runlog_data({
-                'results_count': len(results),
-                'notify_candidates': len([r for r in results if r.should_notify and r.meaningful and bool(r.notification_text.strip())]),
-            }),
+        cfg = base_cfg or {}
+        cfg_market = str((cfg.get('portfolio') or {}).get('market') or '富途')
+        notif_cfg = (cfg.get('notifications') or {}) if isinstance(cfg, dict) else {}
+        accts = (notif_cfg.get('cash_footer_accounts') or ['lx', 'sy'])
+        timeout_sec = int(notif_cfg.get('cash_footer_timeout_sec') or 180)
+        max_age_sec = int(notif_cfg.get('cash_snapshot_max_age_sec') or 900)
+        cash_footer_lines = query_cash_footer(
+            base,
+            market=cfg_market,
+            accounts=accts,
+            timeout_sec=timeout_sec,
+            snapshot_max_age_sec=max_age_sec,
         )
     except Exception:
-        pass
+        cash_footer_lines = []
 
-    merged = build_merged_message(results, base_cfg=base_cfg, cash_accounts=['lx', 'sy'])
+    merged = build_merged_message(results, cash_footer_lines=cash_footer_lines)
     if not merged:
-        try:
-            runlog.event('notify', 'skip', message='no merged notification content')
-        except Exception:
-            pass
+        runlog.safe_event('notify', 'skip', message='no merged notification content')
 
         # Even if we didn't send, record that we ran.
         try:
@@ -1255,10 +1317,7 @@ def main():
         except Exception:
             pass
 
-        try:
-            runlog.event('run_end', 'ok', data=_safe_runlog_data({'sent': False, 'reason': 'no_merged_notification', 'accounts': [r.account for r in results]}))
-        except Exception:
-            pass
+        runlog.safe_event('run_end', 'ok', data=_safe_runlog_data({'sent': False, 'reason': 'no_merged_notification', 'accounts': [r.account for r in results]}))
 
         return 0
 
@@ -1268,16 +1327,10 @@ def main():
 
     if not no_send:
         if not target:
-            try:
-                runlog.event('notify', 'error', error_code='CONFIG_ERROR', message='notifications.target is required')
-            except Exception:
-                pass
+            runlog.safe_event('notify', 'error', error_code='CONFIG_ERROR', message='notifications.target is required')
             raise SystemExit('[CONFIG_ERROR] notifications.target is required')
 
-        try:
-            runlog.event('notify', 'start', data=_safe_runlog_data({'channel': channel, 'target_set': bool(target), 'message_len': len(merged)}))
-        except Exception:
-            pass
+        runlog.safe_event('notify', 'start', data=_safe_runlog_data({'channel': channel, 'target_set': bool(target), 'message_len': len(merged)}))
 
         t_notify0 = monotonic()
         send = subprocess.run(
@@ -1287,30 +1340,21 @@ def main():
             text=True,
         )
         if send.returncode != 0:
-            try:
-                runlog.event(
-                    'notify',
-                    'error',
-                    duration_ms=int((monotonic() - t_notify0) * 1000),
-                    error_code='SEND_FAILED',
-                    message='message send failed',
-                    data=_safe_runlog_data({'returncode': send.returncode}),
-                )
-            except Exception:
-                pass
+            runlog.safe_event(
+                'notify',
+                'error',
+                duration_ms=int((monotonic() - t_notify0) * 1000),
+                error_code='SEND_FAILED',
+                message='message send failed',
+                data=_safe_runlog_data({'returncode': send.returncode}),
+            )
             raise SystemExit(send.returncode)
 
-        try:
-            runlog.event('notify', 'ok', duration_ms=int((monotonic() - t_notify0) * 1000), data=_safe_runlog_data({'channel': channel}))
-        except Exception:
-            pass
+        runlog.safe_event('notify', 'ok', duration_ms=int((monotonic() - t_notify0) * 1000), data=_safe_runlog_data({'channel': channel}))
     else:
         # Smoke/debug: do not send and do not mark notified
         target = None
-        try:
-            runlog.event('notify', 'skip', message='no_send mode')
-        except Exception:
-            pass
+        runlog.safe_event('notify', 'skip', message='no_send mode')
 
     # Mark notified once per merged-message recipient to avoid stale cross-account notify cooldown.
     if not no_send:
@@ -1379,10 +1423,7 @@ def main():
     except Exception:
         pass
 
-    try:
-        runlog.event('run_end', 'ok', data=_safe_runlog_data({'sent': (not no_send), 'accounts': [r.account for r in results]}))
-    except Exception:
-        pass
+    runlog.safe_event('run_end', 'ok', data=_safe_runlog_data({'sent': (not no_send), 'accounts': [r.account for r in results]}))
 
     return 0
 

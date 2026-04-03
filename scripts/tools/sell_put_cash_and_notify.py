@@ -42,10 +42,19 @@ def run_json(base: Path, cmd: list[str], timeout_sec: int = 120) -> dict:
         raise RuntimeError(f"failed to parse json output (tail): {txt[:2000]}")
 
 
-def money_cny(v: float | None) -> str:
-    if v is None:
-        return '-'
-    return f"¥{v:,.2f}"
+# Allow running as a script (python scripts/tools/xxx.py) without package install
+# by ensuring repo root is on sys.path.
+import sys
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from scripts.io_utils import money_cny
+
+
+def _money_cny(v: float | None) -> str:
+    # Keep this script's legacy formatting: 2 decimals, no (CNY).
+    return money_cny(v, decimals=2, show_ccy=False)
 
 
 def main():
@@ -101,9 +110,9 @@ def main():
     lines.append(f"[WARN] Sell Put 现金覆盖偏紧 ({args.account})")
     if reason:
         lines.append(f"reason: {reason}")
-    lines.append(f"base(CNY)现金: {money_cny(avail_cny)}")
-    lines.append(f"担保占用(CNY): {money_cny(used_cny)}")
-    lines.append(f"free(CNY): {money_cny(free_cny)}")
+    lines.append(f"base(CNY)现金: {_money_cny(avail_cny)}")
+    lines.append(f"担保占用(CNY): {_money_cny(used_cny)}")
+    lines.append(f"free(CNY): {_money_cny(free_cny)}")
 
     # Top symbols breakdown (compact)
     by_sym = payload.get('cash_secured_by_symbol_by_ccy') or {}

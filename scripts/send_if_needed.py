@@ -18,12 +18,9 @@ import json
 import os
 import subprocess
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
-
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+from scripts.io_utils import utc_now
 
 
 def sh(cmd: list[str], cwd: Path, capture: bool = True) -> subprocess.CompletedProcess:

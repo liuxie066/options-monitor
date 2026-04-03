@@ -16,9 +16,10 @@ This script is designed to run in the per-account context where ./output symlink
 from __future__ import annotations
 
 import argparse
-import json
 import subprocess
 from pathlib import Path
+
+from scripts.io_utils import parse_last_json, money_cny
 
 
 def run_capture(cmd: list[str], cwd: Path, timeout_sec: int = 120) -> str:
@@ -26,28 +27,6 @@ def run_capture(cmd: list[str], cwd: Path, timeout_sec: int = 120) -> str:
     if p.returncode != 0:
         raise SystemExit(p.returncode)
     return p.stdout or ''
-
-
-def parse_last_json(stdout: str) -> dict:
-    lines = (stdout or '').splitlines()
-    buf = []
-    for ln in reversed(lines):
-        if not ln.strip():
-            continue
-        buf.append(ln)
-        if ln.strip().startswith('{'):
-            break
-    txt = '\n'.join(reversed(buf)).strip()
-    return json.loads(txt)
-
-
-def money_cny(v) -> str:
-    try:
-        if v is None:
-            return '-'
-        return f"¥{float(v):,.0f} (CNY)"
-    except Exception:
-        return '-'
 
 
 def main():

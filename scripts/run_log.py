@@ -105,6 +105,29 @@ class RunLogger:
         day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         self.log_path = self.logs_dir / f"{day}.jsonl"
 
+    def safe_event(
+        self,
+        step: str,
+        status: str,
+        *,
+        duration_ms: int | None = None,
+        error_code: str | None = None,
+        message: str | None = None,
+        data: dict[str, Any] | None = None,
+    ) -> None:
+        """Best-effort wrapper: logging must never break business flow."""
+        try:
+            self.event(
+                step,
+                status,
+                duration_ms=duration_ms,
+                error_code=error_code,
+                message=message,
+                data=data,
+            )
+        except Exception:
+            pass
+
     def event(
         self,
         step: str,
