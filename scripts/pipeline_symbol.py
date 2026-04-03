@@ -169,6 +169,7 @@ def process_symbol(
                 timeout_sec=timeout_sec,
                 is_scheduled=IS_SCHEDULED,
                 stock=stock,
+                locked_shares_by_symbol=((portfolio_ctx or {}).get('option_ctx') or {}).get('locked_shares_by_symbol'),
             )
         )
     else:

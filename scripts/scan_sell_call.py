@@ -125,6 +125,9 @@ def main():
     parser.add_argument('--symbols', nargs='+', required=True)
     parser.add_argument('--avg-cost', type=float, required=True, help='Average holding cost per share')
     parser.add_argument('--shares', type=int, default=100)
+    # Covered-call capacity (optional, for account-aware gating)
+    parser.add_argument('--shares-locked', type=int, default=0)
+    parser.add_argument('--shares-available-for-cover', type=int, default=None)
     parser.add_argument('--min-dte', type=int, default=7)
     parser.add_argument('--max-dte', type=int, default=90)
     parser.add_argument('--min-otm-pct', type=float, default=0.0, help='min OTM percent for calls: (strike-spot)/spot (e.g. 0.05)')
@@ -240,17 +243,48 @@ def main():
             if metrics['if_exercised_total_return'] < args.min_if_exercised_total_return:
                 continue
 
+            m = safe_float(row.get('multiplier'))
+            m_int = int(m) if m is not None and m > 0 else 0
+
+            shares_total = int(args.shares)
+            shares_locked = int(args.shares_locked or 0)
+            shares_available_for_cover = None
+            try:
+                if args.shares_available_for_cover is not None:
+                    shares_available_for_cover = int(args.shares_available_for_cover)
+            except Exception:
+                shares_available_for_cover = None
+            if shares_available_for_cover is None:
+                shares_available_for_cover = max(0, shares_total - shares_locked)
+
+            covered_contracts_available = 0
+            is_fully_covered_available = False
+            try:
+                if m_int > 0:
+                    covered_contracts_available = max(0, shares_available_for_cover) // m_int
+                    is_fully_covered_available = (covered_contracts_available >= 1)
+            except Exception:
+                covered_contracts_available = 0
+                is_fully_covered_available = False
+
             rows.append({
                 'symbol': row['symbol'],
                 'expiration': row['expiration'],
                 'dte': dte,
                 'contract_symbol': row.get('contract_symbol'),
-                'multiplier': safe_float(row.get('multiplier')),
+                'multiplier': m,
                 'currency': row.get('currency'),
                 'strike': strike,
                 'spot': safe_float(row.get('spot')),
                 'avg_cost': args.avg_cost,
-                'shares': args.shares,
+                # Coverage context
+                'shares_total': shares_total,
+                'shares_locked': shares_locked,
+                'shares_available_for_cover': shares_available_for_cover,
+                'covered_contracts_available': covered_contracts_available,
+                'is_fully_covered_available': is_fully_covered_available,
+                # Backward-compatible legacy field
+                'shares': shares_total,
                 'bid': bid,
                 'ask': ask,
                 'last_price': safe_float(row.get('last_price')),
@@ -269,7 +303,11 @@ def main():
         out = out.sort_values(by=['annualized_net_premium_return', 'if_exercised_total_return'], ascending=[False, False])
     if out.empty:
         cols = [
-            'symbol','expiration','dte','contract_symbol','multiplier','currency','strike','spot','avg_cost','shares',
+            'symbol','expiration','dte','contract_symbol','multiplier','currency','strike','spot','avg_cost',
+            # coverage context
+            'shares_total','shares_locked','shares_available_for_cover','covered_contracts_available','is_fully_covered_available',
+            # backward-compatible legacy field
+            'shares',
             'bid','ask','last_price','mid','open_interest','volume','implied_volatility','delta','spread','spread_ratio',
             'gross_income','futu_fee','net_income','annualized_net_premium_return','if_exercised_total_return',
             'strike_above_spot_pct','strike_above_cost_pct','cc_band','risk_label'

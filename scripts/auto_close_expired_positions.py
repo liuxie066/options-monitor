@@ -16,11 +16,20 @@ This is *table maintenance*, not trade execution.
 
 from __future__ import annotations
 
+# Allow running as a script without installation.
+# When executed as `python scripts/auto_close_expired_positions.py`, ensure repo root is on sys.path
+# so `import scripts.*` works consistently.
+import sys
+from pathlib import Path
+
+repo_base = Path(__file__).resolve().parents[1]
+if str(repo_base) not in sys.path:
+    sys.path.insert(0, str(repo_base))
+
 import argparse
 import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 from scripts.feishu_bitable import (
     get_tenant_access_token,

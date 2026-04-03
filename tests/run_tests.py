@@ -119,6 +119,10 @@ def main() -> None:
     from test_report_labels_no_stale import (
         test_add_sell_put_labels_overwrites_on_empty,
     )
+    from test_sell_call_cover_capacity import (
+        test_sell_call_cover_capacity_basic_hk,
+        test_sell_call_cover_capacity_never_negative,
+    )
     from test_scan_scheduler_notify_semantics import (
         test_scan_scheduler_emits_is_notify_window_open_and_backcompat_should_notify,
     )
@@ -174,6 +178,8 @@ def main() -> None:
         test_run_log_data_small,
         test_build_context_richtext_normalization_and_hk_symbol,
         test_add_sell_put_labels_overwrites_on_empty,
+        test_sell_call_cover_capacity_basic_hk,
+        test_sell_call_cover_capacity_never_negative,
         test_scan_scheduler_emits_is_notify_window_open_and_backcompat_should_notify,
         test_scan_scheduler_scan_is_per_account,
         test_select_markets_to_run_hk_break_respected,
