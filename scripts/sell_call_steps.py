@@ -30,6 +30,7 @@ def run_sell_call_scan_and_summarize(
     timeout_sec: int | None,
     is_scheduled: bool,
     stock: dict | None,
+    locked_shares_by_symbol: dict[str, int] | None = None,
 ) -> dict:
     """Run sell_call scan + (optional) render + summarize.
 
@@ -41,10 +42,18 @@ def run_sell_call_scan_and_summarize(
         shares_override = stock.get('shares')
         avg_cost_override = stock.get('avg_cost')
 
-    shares_total = shares_override if shares_override is not None else cc.get('shares', 100)
+    shares_total = int(shares_override if shares_override is not None else cc.get('shares', 100))
     avg_cost = avg_cost_override if avg_cost_override is not None else cc.get('avg_cost')
     if avg_cost is None:
         return summarize_sell_call(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg)
+
+    locked = 0
+    try:
+        if locked_shares_by_symbol and symbol:
+            locked = int(locked_shares_by_symbol.get(str(symbol).upper(), 0) or 0)
+    except Exception:
+        locked = 0
+    shares_available_for_cover = max(0, int(shares_total) - int(locked))
 
     symbol_cc = report_dir / f'{symbol_lower}_sell_call_candidates.csv'
     # Backward-compat: accept both config keys
@@ -58,6 +67,8 @@ def run_sell_call_scan_and_summarize(
         '--input-root', str(required_data_dir),
         '--avg-cost', str(avg_cost),
         '--shares', str(shares_total),
+        '--shares-locked', str(int(locked)),
+        '--shares-available-for-cover', str(int(shares_available_for_cover)),
         '--min-dte', str(cc.get('min_dte', 20)),
         '--max-dte', str(cc.get('max_dte', 90)),
         '--min-otm-pct', str(cc.get('min_otm_pct', 0.0)),
