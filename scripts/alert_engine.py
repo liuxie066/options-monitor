@@ -10,6 +10,35 @@ import pandas as pd
 from pandas.errors import EmptyDataError
 
 
+def _load_symbol_display_map(base: Path) -> dict[str, str]:
+    """Best-effort load display name mapping from config.json:intake.symbol_aliases.
+
+    Returns: {"0700.HK": "腾讯", ...}
+    """
+    try:
+        cfg = json.loads((base / 'config.json').read_text(encoding='utf-8'))
+        intake = (cfg.get('intake') or {}) if isinstance(cfg, dict) else {}
+        aliases = (intake.get('symbol_aliases') or {}) if isinstance(intake, dict) else {}
+        # invert: name -> code  ==>  code -> preferred name (choose shortest name)
+        m: dict[str, str] = {}
+        for name, code in (aliases or {}).items():
+            n = str(name or '').strip()
+            c = str(code or '').strip().upper()
+            if not n or not c:
+                continue
+            prev = m.get(c)
+            if (prev is None) or (len(n) < len(prev)):
+                m[c] = n
+        return m
+    except Exception:
+        return {}
+
+
+def _disp_symbol(symbol: str, mp: dict[str, str]) -> str:
+    s = str(symbol or '').strip().upper()
+    return mp.get(s) or str(symbol or '').strip()
+
+
 # Alert priority policy (keep it simple):
 # Layer 1 (收益率门槛) is already handled by the scanners (min_annualized_* in config).
 # Layer 2 (风险/约束) is handled here:
@@ -305,8 +334,9 @@ def classify_alert(row: pd.Series) -> tuple[str | None, str]:
     return None, ''
 
 
-def build_alert_text(summary: pd.DataFrame) -> str:
+def build_alert_text(summary: pd.DataFrame, *, symbol_display_map: dict[str, str] | None = None) -> str:
     lines: list[str] = ['# Symbols Alerts', '']
+    mp = symbol_display_map or {}
 
     if summary.empty:
         lines.append('无提醒。')
@@ -321,7 +351,21 @@ def build_alert_text(summary: pd.DataFrame) -> str:
         level, comment = classify_alert(row)
         if not level:
             continue
-        line = f"- {top_pick_line(row)} | {comment}"
+        sym_disp = _disp_symbol(row.get('symbol', ''), mp)
+        sym_code = str(row.get('symbol', '')).strip()
+        sym_tag = f"[{sym_disp}]({sym_code})" if sym_disp and sym_code and (sym_disp != sym_code) else sym_code
+
+        # Reuse original line builder for all fields/extras, only replace the first field (symbol) with sym_tag.
+        base_line = top_pick_line(row)
+        try:
+            parts = base_line.split(' | ')
+            if parts:
+                parts[0] = sym_tag
+            line_core = ' | '.join(parts)
+        except Exception:
+            line_core = base_line
+
+        line = f"- {line_core} | {comment}"
         if level == 'high':
             high_rows.append(line)
         elif level == 'medium':
@@ -519,7 +563,8 @@ def main():
                     return 0.0
             current.loc[mask2, 'cash_secured_used_usd'] = current.loc[mask2, 'note'].apply(lambda x: _parse_float_after(x, 'cash_secured_used_usd'))
 
-    alert_text = build_alert_text(current)
+    symbol_display_map = _load_symbol_display_map(base)
+    alert_text = build_alert_text(current, symbol_display_map=symbol_display_map)
     changes_text = build_changes_text(current, previous)
 
     output_path.write_text(alert_text, encoding='utf-8')
