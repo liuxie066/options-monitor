@@ -154,7 +154,7 @@ def _format_alert_line(line: str) -> str:
                     fmt = f"¥{n:,.0f} (CNY)"
             except Exception:
                 fmt = v
-            line2 = f"预计暂停现金: {fmt}"
+            line2 = f"预计占用现金: {fmt}"
 
         out = [line1]
         if line2:
