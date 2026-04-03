@@ -583,6 +583,48 @@ def _opend_alert_rl_path(base: Path) -> Path:
     return (base / 'output_shared' / 'state' / 'opend_alert_rate_limit.json').resolve()
 
 
+def _opend_phone_verify_pending_path(base: Path) -> Path:
+    return (base / 'output_shared' / 'state' / 'opend_phone_verify_pending.json').resolve()
+
+
+def _mark_opend_phone_verify_pending(base: Path, *, detail: str | None = None) -> None:
+    """Mark OpenD as requiring phone verification and pause future ticks.
+
+    This prevents cron/tick loops from repeatedly trying to recover automatically.
+    """
+    try:
+        p = _opend_phone_verify_pending_path(base)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            'pending': True,
+            'detected_at_utc': utc_now(),
+            'detail': (detail or '')[:2000],
+        }
+        write_json(p, payload)
+    except Exception:
+        pass
+
+
+def _clear_opend_phone_verify_pending(base: Path) -> None:
+    try:
+        p = _opend_phone_verify_pending_path(base)
+        if p.exists():
+            p.unlink()
+    except Exception:
+        pass
+
+
+def _is_opend_phone_verify_pending(base: Path) -> bool:
+    try:
+        p = _opend_phone_verify_pending_path(base)
+        if not p.exists() or p.stat().st_size <= 0:
+            return False
+        st = read_json(p, {})
+        return bool(isinstance(st, dict) and st.get('pending'))
+    except Exception:
+        return False
+
+
 def _should_send_opend_alert(base: Path, error_code: str, cooldown_sec: int = 600) -> bool:
     p = _opend_alert_rl_path(base)
     now = datetime.now(timezone.utc)
@@ -687,6 +729,7 @@ def main():
     ap.add_argument('--smoke', action='store_true', help='Smoke mode: run scheduler decisions but skip pipeline execution.')
     ap.add_argument('--force', action='store_true', help='Force running scan pipeline regardless of market hours / scan interval (sending still respects --no-send and should_notify decisions).')
     ap.add_argument('--debug', action='store_true', help='Verbose logs to stdout (for manual debugging).')
+    ap.add_argument('--opend-phone-verify-continue', action='store_true', help='Clear OpenD phone-verify pending pause and continue running.')
     args = ap.parse_args()
 
     global DEBUG
@@ -741,6 +784,16 @@ def main():
     dense_notify_cooldown_min = int(schedule_cfg.get('notify_cooldown_dense_min', 30))
     sparse_after_beijing = parse_hhmm(schedule_cfg.get('sparse_after_beijing', '02:00'))
     bj_tz = ZoneInfo(schedule_cfg.get('beijing_timezone', 'Asia/Shanghai'))
+
+    # OpenD phone-verify pause gate:
+    # - If OpenD previously required phone verification, stop running until user explicitly confirms.
+    # - User confirmation is out-of-band (Feishu message) and then rerun with --opend-phone-verify-continue.
+    if bool(getattr(args, 'opend_phone_verify_continue', False)):
+        _clear_opend_phone_verify_pending(base)
+
+    if _is_opend_phone_verify_pending(base):
+        runlog.safe_event('run_end', 'skip', message='opend phone verify pending; paused until user confirmation')
+        return 0
 
     # Preflight: OpenD watchdog (ensure process + login state).
     # When watchdog is unhealthy, fail-fast and alert (rate-limited per error_code).
@@ -824,6 +877,31 @@ def main():
                                 degraded = True
                     except Exception:
                         degraded = False
+
+                # Phone-verify rule: remind + pause. Never auto-trigger/auto-input verification.
+                if error_code == 'OPEND_NEEDS_PHONE_VERIFY':
+                    _mark_opend_phone_verify_pending(
+                        base,
+                        detail=(f"{host}:{port} {detail}" if host is not None and port is not None else detail),
+                    )
+
+                    _send_opend_alert(
+                        base,
+                        base_cfg,
+                        error_code=error_code,
+                        message_text=msg + "（已暂停：等待你在飞书确认后再继续）",
+                        detail=(f"{host}:{port} {detail}" if host is not None and port is not None else detail),
+                        no_send=no_send,
+                    )
+
+                    runlog.safe_event(
+                        'run_end',
+                        'skip',
+                        error_code=error_code,
+                        message='opend needs phone verify; paused until user confirmation',
+                        data=_safe_runlog_data({'sent': False, 'reason': 'opend_phone_verify_pending'}),
+                    )
+                    return 0
 
                 # Alert on any unhealthy watchdog.
                 _send_opend_alert(
