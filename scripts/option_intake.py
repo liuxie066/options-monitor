@@ -43,17 +43,29 @@ def main():
     if code != 0:
         print(err.strip() or out.strip())
         return code
-    parsed = json.loads(out)
+    # parse_option_message may print noisy OpenAPI logs before JSON; take the last JSON object.
+    lines = (out or '').splitlines()
+    buf = []
+    for ln in reversed(lines):
+        if not ln.strip():
+            continue
+        buf.append(ln)
+        if ln.strip().startswith('{'):
+            break
+    txt = '\n'.join(reversed(buf)).strip()
+    parsed = json.loads(txt)
     if not parsed.get('ok'):
         print('[PARSE_FAIL] missing: ' + ','.join(parsed.get('missing') or []))
         print(json.dumps(parsed, ensure_ascii=False, indent=2))
         return 2
 
     p = parsed['parsed']
+    market = (p.get('market') or args.market)
+
     # Build add command
     cmd = [
         py, 'scripts/option_positions.py', 'add',
-        '--market', args.market,
+        '--market', market,
         '--account', p['account'],
         '--symbol', p['symbol'],
         '--option-type', p['option_type'],

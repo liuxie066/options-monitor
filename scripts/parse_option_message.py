@@ -13,9 +13,13 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import os
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+
+# Suppress noisy OpenAPI logs when multiplier_cache triggers futu/OpenD imports.
+os.environ.setdefault('OPENAPI_LOG_LEVEL', 'ERROR')
 
 
 # NOTE: symbol aliases are now configurable in config.json:intake.symbol_aliases.
@@ -57,10 +61,16 @@ def normalize_symbol(s: str) -> str | None:
     if s in ALIASES:
         return ALIASES[s]
 
-    # allow direct hk code 0700.HK / 9992.HK etc.
     s2 = s.upper().replace(' ', '')
+
+    # allow direct hk code 0700.HK / 9992.HK etc.
     if re.fullmatch(r"\d{4}\.HK", s2) or re.fullmatch(r"\d{5}\.HK", s2):
         return s2
+
+    # allow US ticker like NVDA/TSLA/AAPL
+    if re.fullmatch(r"[A-Z][A-Z0-9\.\-]{0,9}", s2):
+        return s2
+
     return None
 
 
@@ -99,12 +109,18 @@ def parse_float_after(keys: list[str], s: str) -> float | None:
 def parse_futu_strike(s: str) -> float | None:
     """Parse strike from Futu fill message.
 
-    Examples:
+    Supports:
       "$中海油 260330 30.00 购$" -> 30.00
+      "$NVDA 260618 154.00P$" -> 154.00
     """
     m = re.search(r"\b\d{6}\s+([0-9]+(?:\.[0-9]+)?)\s*(?:购|沽)\b", s)
     if m:
         return float(m.group(1))
+
+    m2 = re.search(r"\$[^$]*?\b\d{6}\s+([0-9]+(?:\.[0-9]+)?)\s*[CP]\$", s, flags=re.I)
+    if m2:
+        return float(m2.group(1))
+
     return None
 
 
@@ -117,10 +133,17 @@ def parse_futu_premium(s: str) -> float | None:
 
 
 def parse_futu_underlying(s: str) -> str | None:
-    # $中海油 260330 30.00 购$
+    # Patterns:
+    # - $中海油 260330 30.00 购$
+    # - $NVDA 260618 154.00P$
     m = re.search(r"\$([^$]+?)\s+\d{6}\s+[0-9]+(?:\.[0-9]+)?\s*(?:购|沽)\$", s)
     if m:
         return m.group(1).strip()
+
+    m2 = re.search(r"\$([^$]+?)\s+\d{6}\s+[0-9]+(?:\.[0-9]+)?\s*[CP]\$", s, flags=re.I)
+    if m2:
+        return m2.group(1).strip()
+
     return None
 
 
@@ -131,6 +154,17 @@ def infer_currency(s: str) -> str | None:
     # Futu HK hint
     if '香港' in s or '富途证券(香港' in s or '富途证券（香港' in s:
         return 'HKD'
+    return None
+
+
+def infer_market(s: str) -> str | None:
+    """Infer broker/source market label for option_positions.
+
+    Current policy: map Futu notifications to market='富途'.
+    """
+    s2 = str(s or '')
+    if ('富途证券' in s2) or ('富途' in s2):
+        return '富途'
     return None
 
 
@@ -155,6 +189,13 @@ def parse_option_type(s: str) -> str | None:
         return 'put'
     if re.search(r"\bcall\b", s, flags=re.I) or '认购' in s or '购' in s:
         return 'call'
+
+    # Futu style: $NVDA 260618 154.00P$
+    if re.search(r"\$[^$]*\d{6}\s+[0-9]+(?:\.[0-9]+)?\s*P\$", s, flags=re.I):
+        return 'put'
+    if re.search(r"\$[^$]*\d{6}\s+[0-9]+(?:\.[0-9]+)?\s*C\$", s, flags=re.I):
+        return 'call'
+
     return None
 
 
@@ -220,6 +261,7 @@ def main():
         contracts = parse_contracts(raw2)
         account = parse_account(raw2)
         currency = infer_currency(raw2)
+        market = infer_market(raw2)
         multiplier = None  # not present in message; fill later
     else:
         # 2) manual intake format
@@ -234,6 +276,7 @@ def main():
         contracts = parse_contracts(raw2)
         account = parse_account(raw2)
         currency = infer_currency(raw2)
+        market = infer_market(raw2)
 
     # infer multiplier if missing:
     # Policy: do NOT default silently. Prefer fetching from OpenD (futu-api) for the underlier.
@@ -280,6 +323,7 @@ def main():
             'contracts': contracts,
             'account': account,
             'currency': currency,
+            'market': market,
         },
         'missing': [
             k for k,v in {
@@ -297,7 +341,7 @@ def main():
         'ts': datetime.utcnow().isoformat() + 'Z',
     }
 
-    print(json.dumps(out, ensure_ascii=False, indent=2))
+    print(json.dumps(out, ensure_ascii=False, indent=2), flush=True)
 
 
 if __name__ == '__main__':
