@@ -89,9 +89,7 @@ def _select_markets_to_run(now_utc: datetime, cfg: dict, market_config: str) -> 
 
         state0: dict = {
             'last_scan_utc': None,
-            'last_scan_utc_by_account': {},
             'last_notify_utc': None,
-            'last_notify_utc_by_account': {},
         }
 
         d_hk = decide(schedule_hk, state0, now_utc, account=None, schedule_key='schedule_hk')
@@ -1030,8 +1028,6 @@ def main():
             write_json(state_path, {
                 'last_scan_utc': None,
                 'last_notify_utc': None,
-                'last_notify_utc_by_account': {},
-                'last_scan_utc_by_account': {},
             })
     except Exception:
         pass
@@ -1109,10 +1105,23 @@ def main():
         'as_of_utc': utc_now(),
         'markets_to_run': markets_to_run,
         'run_dir': str(run_dir),
+        'scheduler_ms': scheduler_ms,
+        'scheduler_decision': scheduler_decision,
         'accounts': [],
         'sent': False,
         'reason': '',
     }
+
+    # Persist scheduler decision once per tick into run_dir for replay/audit.
+    try:
+        write_json((run_dir / 'state' / 'scheduler_decision.json').resolve(), {
+            'as_of_utc': utc_now(),
+            'schedule_key': str(scheduler_schedule_key),
+            'decision': scheduler_decision,
+            'state_path': str(state_path),
+        })
+    except Exception:
+        pass
 
     for acct in args.accounts:
         acct = str(acct).strip()
@@ -1168,12 +1177,6 @@ def main():
 
         # 1) scheduler decision (computed once globally per tick)
         decision = scheduler_decision
-        # Persist scheduler decision per-account into run_dir for replay/audit.
-        _write_acct_run_state('scheduler_decision.json', {
-            'as_of_utc': utc_now(),
-            'account': acct,
-            'decision': decision,
-        })
 
         should_run = bool(should_run_global)
         should_notify = bool(should_notify_global)
