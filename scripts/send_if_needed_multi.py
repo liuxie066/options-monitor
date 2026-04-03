@@ -1265,11 +1265,23 @@ def main():
             duration_ms=acct_metrics['pipeline_ms'],
             data=_safe_runlog_data({'account': acct}),
         )
-        # Mark scanned (shared scan clock)
-        try:
-            subprocess.run([str(vpy), 'scripts/scan_scheduler.py', '--config', str(cfg_override), '--state', str(state_path), '--state-dir', str((run_dir / 'state').resolve()), '--mark-scanned', '--account', str(acct)], cwd=str(base))
-        except Exception:
-            pass
+        # Mark scanned (shared scan clock) ONCE per unified tick.
+        # (Fully unified schedule: one tick decision -> all accounts run; do not advance scan clock per account.)
+        if not tick_metrics.get('_marked_scanned'):
+            try:
+                subprocess.run(
+                    [
+                        str(vpy), 'scripts/scan_scheduler.py',
+                        '--config', str(cfg_path),
+                        '--state', str(state_path),
+                        '--state-dir', str((run_dir / 'state').resolve()),
+                        '--mark-scanned',
+                    ],
+                    cwd=str(base),
+                )
+            except Exception:
+                pass
+            tick_metrics['_marked_scanned'] = True
 
         text = notif_path.read_text(encoding='utf-8', errors='replace').strip() if notif_path.exists() else ''
 
