@@ -158,6 +158,7 @@ def build_context(records: list[dict], market: str, account: str | None = None) 
         # Keep only what downstream needs.
         stocks_by_symbol[sym] = {
             "symbol": sym,
+            "name": asset_name or None,
             "shares": int(qty),
             "avg_cost": avg_cost,
             "currency": currency,

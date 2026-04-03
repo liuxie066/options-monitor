@@ -10,17 +10,40 @@ import pandas as pd
 from pandas.errors import EmptyDataError
 
 
-def _load_symbol_display_map(base: Path) -> dict[str, str]:
-    """Best-effort load display name mapping from config.json:intake.symbol_aliases.
+def _load_symbol_display_map(base: Path, *, state_dir: Path | None = None) -> dict[str, str]:
+    """Best-effort load display name mapping.
+
+    Priority:
+    1) portfolio_context.json (from holdings): stocks_by_symbol[*].name
+    2) config.json:intake.symbol_aliases (name -> code inverted)
 
     Returns: {"0700.HK": "腾讯", ...}
     """
+    m: dict[str, str] = {}
+
+    # 1) from portfolio context (holdings table)
+    try:
+        if state_dir is not None:
+            port_path = (state_dir / 'portfolio_context.json').resolve()
+            if port_path.exists() and port_path.stat().st_size > 0:
+                ctx = json.loads(port_path.read_text(encoding='utf-8'))
+                stocks = (ctx.get('stocks_by_symbol') or {}) if isinstance(ctx, dict) else {}
+                if isinstance(stocks, dict):
+                    for sym, info in stocks.items():
+                        if not sym or not isinstance(info, dict):
+                            continue
+                        name = str(info.get('name') or '').strip()
+                        code = str(sym).strip().upper()
+                        if name and code:
+                            m[code] = name
+    except Exception:
+        pass
+
+    # 2) from config aliases (fallback)
     try:
         cfg = json.loads((base / 'config.json').read_text(encoding='utf-8'))
         intake = (cfg.get('intake') or {}) if isinstance(cfg, dict) else {}
         aliases = (intake.get('symbol_aliases') or {}) if isinstance(intake, dict) else {}
-        # invert: name -> code  ==>  code -> preferred name (choose shortest name)
-        m: dict[str, str] = {}
         for name, code in (aliases or {}).items():
             n = str(name or '').strip()
             c = str(code or '').strip().upper()
@@ -29,9 +52,10 @@ def _load_symbol_display_map(base: Path) -> dict[str, str]:
             prev = m.get(c)
             if (prev is None) or (len(n) < len(prev)):
                 m[c] = n
-        return m
     except Exception:
-        return {}
+        pass
+
+    return m
 
 
 def _disp_symbol(symbol: str, mp: dict[str, str]) -> str:
@@ -563,7 +587,16 @@ def main():
                     return 0.0
             current.loc[mask2, 'cash_secured_used_usd'] = current.loc[mask2, 'note'].apply(lambda x: _parse_float_after(x, 'cash_secured_used_usd'))
 
-    symbol_display_map = _load_symbol_display_map(base)
+    state_dir = None
+    try:
+        sd = Path(args.state_dir) if args.state_dir else None
+        if sd is not None and (not sd.is_absolute()):
+            sd = (base / sd).resolve()
+        state_dir = sd
+    except Exception:
+        state_dir = None
+
+    symbol_display_map = _load_symbol_display_map(base, state_dir=state_dir)
     alert_text = build_alert_text(current, symbol_display_map=symbol_display_map)
     changes_text = build_changes_text(current, previous)
 
