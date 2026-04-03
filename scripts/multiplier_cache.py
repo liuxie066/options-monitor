@@ -21,12 +21,10 @@ This module provides:
 import argparse
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
-
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+from scripts.io_utils import utc_now
 
 
 def default_cache_path(repo_base: Path) -> Path:
