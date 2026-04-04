@@ -20,7 +20,69 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Ensure repo root is on sys.path for `scripts.*` imports when run as a script
+from pathlib import Path as _PathLib
+
+_repo_root = _PathLib(__file__).resolve().parent.parent
+if str(_repo_root) not in sys.path:
+    sys.path.insert(0, str(_repo_root))
+
 from scripts.io_utils import utc_now
+
+
+def _infer_trading_day_guard_market(cfg_obj: dict) -> str:
+    try:
+        syms = cfg_obj.get('symbols') or []
+        mk = sorted({str((it or {}).get('market') or '').upper() for it in syms if isinstance(it, dict) and (it or {}).get('market')})
+        if len(mk) == 1 and mk[0] in ('US', 'HK', 'CN'):
+            return mk[0]
+    except Exception:
+        pass
+    return 'US'
+
+
+def _trading_day_guard(cfg_obj: dict) -> tuple[bool | None, str]:
+    """Return (is_trading_day, market_used).
+
+    None means guard check failed and caller should continue without blocking.
+    """
+    try:
+        from futu import OpenQuoteContext
+    except Exception:
+        return (None, _infer_trading_day_guard_market(cfg_obj))
+
+    try:
+        from scripts.opend_utils import is_trading_day_via_futu
+    except Exception:
+        return (None, _infer_trading_day_guard_market(cfg_obj))
+
+    market = _infer_trading_day_guard_market(cfg_obj)
+
+    host = '127.0.0.1'
+    port = 11111
+    try:
+        for sym in (cfg_obj.get('symbols') or []):
+            if not isinstance(sym, dict):
+                continue
+            if str(sym.get('market') or '').upper() != market:
+                continue
+            fetch = (sym.get('fetch') or {})
+            if str(fetch.get('source') or '').lower() != 'opend':
+                continue
+            host = str(fetch.get('host') or host)
+            port = int(fetch.get('port') or port)
+            break
+    except Exception:
+        pass
+
+    ctx = OpenQuoteContext(host=host, port=port)
+    try:
+        return is_trading_day_via_futu(ctx, market)
+    finally:
+        try:
+            ctx.close()
+        except Exception:
+            pass
 
 
 def sh(cmd: list[str], cwd: Path, capture: bool = True) -> subprocess.CompletedProcess:
@@ -141,6 +203,12 @@ def main():
 
         if not should_run:
             sh([str(vpy), 'scripts/write_last_run.py', '--path', str(last_run), '--status', 'skip', '--stage', 'scheduler', '--reason', str(decision.get('reason') or ''), '--started-at', started], cwd=base)
+            return 0
+
+        # 1.5) trading day guard
+        is_trading_day, guard_market = _trading_day_guard(cfg_obj)
+        if is_trading_day is False:
+            sh([str(vpy), 'scripts/write_last_run.py', '--path', str(last_run), '--status', 'skip', '--stage', 'trading_day_guard', '--reason', f'non-trading day: {guard_market}', '--started-at', started], cwd=base)
             return 0
 
         # 2) pipeline

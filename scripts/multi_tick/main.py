@@ -46,6 +46,7 @@ from .misc import (
     _safe_runlog_data,
     append_json_list,
 )
+from scripts.opend_utils import is_trading_day_via_futu
 
 
 _CURRENT_RUN_ID: str | None = None
@@ -82,6 +83,84 @@ def _select_markets_to_run(now_utc: datetime, cfg: dict, market_config: str) -> 
         pass
 
     return []
+
+
+def _markets_for_trading_day_guard(markets_to_run: list[str], cfg: dict, market_config: str) -> list[str]:
+    """Infer pre-scan trading-day markets (US/HK/CN) for this run."""
+    mc = str(market_config or 'auto').lower()
+    if mc == 'hk':
+        return ['HK']
+    if mc == 'us':
+        return ['US']
+    if mc == 'all':
+        return ['HK', 'US']
+
+    try:
+        mk0 = [str(m).upper() for m in (markets_to_run or []) if str(m).upper() in ('HK', 'US', 'CN')]
+        if mk0:
+            return mk0
+    except Exception:
+        pass
+
+    try:
+        syms = (cfg or {}).get('symbols') or []
+        mk = sorted({str((it or {}).get('market') or '').upper() for it in syms if isinstance(it, dict) and (it or {}).get('market')})
+        mk = [m for m in mk if m in ('HK', 'US', 'CN')]
+        if mk:
+            return mk
+    except Exception:
+        pass
+
+    try:
+        market_hint = str(((cfg or {}).get('portfolio') or {}).get('market') or '').strip()
+        if ('港' in market_hint) or ('HK' in market_hint.upper()):
+            return ['HK']
+        if ('美' in market_hint) or ('US' in market_hint.upper()):
+            return ['US']
+        if ('A股' in market_hint) or ('CN' in market_hint.upper()):
+            return ['CN']
+    except Exception:
+        pass
+
+    return ['US']
+
+
+def _is_trading_day_guard_for_market(cfg: dict, market: str) -> tuple[bool | None, str]:
+    """Return (is_trading_day, market_used) for one market.
+
+    None means guard check failed and caller should continue without blocking.
+    """
+    try:
+        from futu import OpenQuoteContext
+    except Exception:
+        return (None, str(market).upper().strip())
+
+    market = str(market).upper().strip()
+
+    host = '127.0.0.1'
+    port = 11111
+    try:
+        for sym in (cfg.get('symbols') or []):
+            if not isinstance(sym, dict):
+                continue
+            fetch = (sym.get('fetch') or {})
+            if str(fetch.get('source') or '').lower() != 'opend':
+                continue
+            if str(sym.get('market') or '').upper() == market:
+                host = str(fetch.get('host') or host)
+                port = int(fetch.get('port') or port)
+                break
+    except Exception:
+        pass
+
+    ctx = OpenQuoteContext(host=host, port=port)
+    try:
+        return is_trading_day_via_futu(ctx, market)
+    finally:
+        try:
+            ctx.close()
+        except Exception:
+            pass
 
 
 def main() -> int:
@@ -357,6 +436,36 @@ def main() -> int:
 
     now_utc = datetime.now(timezone.utc)
     markets_to_run: list[str] = _select_markets_to_run(now_utc, base_cfg, getattr(args, 'market_config', 'auto'))
+
+    guard_markets = _markets_for_trading_day_guard(markets_to_run, base_cfg, getattr(args, 'market_config', 'auto'))
+    guard_results: list[dict] = []
+    for gm in guard_markets:
+        is_td, gm_used = _is_trading_day_guard_for_market(base_cfg, gm)
+        guard_results.append({'market': gm_used, 'is_trading_day': is_td})
+        log(f"[TRADING_DAY_GUARD] market={gm_used} result={is_td}")
+
+    runlog.safe_event(
+        'trading_day_guard',
+        'check',
+        data=_safe_runlog_data({'results': guard_results, 'markets_to_run': markets_to_run, 'market_config': str(getattr(args, 'market_config', 'auto') or 'auto')}),
+    )
+
+    false_markets = [str(r.get('market')) for r in guard_results if r.get('is_trading_day') is False]
+    true_markets = [str(r.get('market')) for r in guard_results if r.get('is_trading_day') is True]
+
+    if false_markets:
+        if markets_to_run:
+            markets_to_run = [m for m in markets_to_run if m not in set(false_markets)]
+            if not markets_to_run:
+                runlog.safe_event('run_end', 'skip', message=f"non-trading day: {','.join(false_markets)}")
+                return 0
+        else:
+            # If we didn't select a session market (e.g. off-hours / force), narrow to trading markets when possible.
+            if true_markets:
+                markets_to_run = sorted({m for m in true_markets if m in ('HK', 'US', 'CN')})
+            else:
+                runlog.safe_event('run_end', 'skip', message=f"non-trading day: {','.join(false_markets)}")
+                return 0
 
     shared_state_dir = (base / 'output_shared' / 'state').resolve()
     shared_state_dir.mkdir(parents=True, exist_ok=True)
