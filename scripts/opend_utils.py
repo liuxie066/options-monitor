@@ -62,7 +62,15 @@ def is_trading_day_via_futu(ctx: Any, market: str) -> tuple[bool | None, str]:
     if ret != 0:
         return (None, market_used)
 
-    rows = data if isinstance(data, list) else []
+    rows = []
+    if isinstance(data, list):
+        rows = data
+    elif hasattr(data, 'to_dict'):
+        # Futu often returns a pandas DataFrame
+        try:
+            rows = data.to_dict('records')  # type: ignore[attr-defined]
+        except Exception:
+            rows = []
     for row in rows:
         if not isinstance(row, dict):
             continue
