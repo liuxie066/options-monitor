@@ -180,6 +180,7 @@ def main() -> int:
 
     no_send = bool(getattr(args, 'no_send', False))
     smoke = bool(getattr(args, 'smoke', False))
+    force_mode = bool(getattr(args, 'force', False))
 
     base = Path(__file__).resolve().parents[2]
     vpy = base / '.venv' / 'bin' / 'python'
@@ -209,6 +210,7 @@ def main() -> int:
             'market_config': str(getattr(args, 'market_config', 'auto') or 'auto'),
             'no_send': no_send,
             'smoke': bool(smoke),
+            'force': force_mode,
         }),
     )
 
@@ -437,35 +439,44 @@ def main() -> int:
     now_utc = datetime.now(timezone.utc)
     markets_to_run: list[str] = _select_markets_to_run(now_utc, base_cfg, getattr(args, 'market_config', 'auto'))
 
-    guard_markets = _markets_for_trading_day_guard(markets_to_run, base_cfg, getattr(args, 'market_config', 'auto'))
-    guard_results: list[dict] = []
-    for gm in guard_markets:
-        is_td, gm_used = _is_trading_day_guard_for_market(base_cfg, gm)
-        guard_results.append({'market': gm_used, 'is_trading_day': is_td})
-        log(f"[TRADING_DAY_GUARD] market={gm_used} result={is_td}")
+    if force_mode:
+        print("force: bypass guard")
+        runlog.safe_event(
+            'trading_day_guard',
+            'skip',
+            message='force: bypass guard',
+            data=_safe_runlog_data({'markets_to_run': markets_to_run, 'market_config': str(getattr(args, 'market_config', 'auto') or 'auto')}),
+        )
+    else:
+        guard_markets = _markets_for_trading_day_guard(markets_to_run, base_cfg, getattr(args, 'market_config', 'auto'))
+        guard_results: list[dict] = []
+        for gm in guard_markets:
+            is_td, gm_used = _is_trading_day_guard_for_market(base_cfg, gm)
+            guard_results.append({'market': gm_used, 'is_trading_day': is_td})
+            log(f"[TRADING_DAY_GUARD] market={gm_used} result={is_td}")
 
-    runlog.safe_event(
-        'trading_day_guard',
-        'check',
-        data=_safe_runlog_data({'results': guard_results, 'markets_to_run': markets_to_run, 'market_config': str(getattr(args, 'market_config', 'auto') or 'auto')}),
-    )
+        runlog.safe_event(
+            'trading_day_guard',
+            'check',
+            data=_safe_runlog_data({'results': guard_results, 'markets_to_run': markets_to_run, 'market_config': str(getattr(args, 'market_config', 'auto') or 'auto')}),
+        )
 
-    false_markets = [str(r.get('market')) for r in guard_results if r.get('is_trading_day') is False]
-    true_markets = [str(r.get('market')) for r in guard_results if r.get('is_trading_day') is True]
+        false_markets = [str(r.get('market')) for r in guard_results if r.get('is_trading_day') is False]
+        true_markets = [str(r.get('market')) for r in guard_results if r.get('is_trading_day') is True]
 
-    if false_markets:
-        if markets_to_run:
-            markets_to_run = [m for m in markets_to_run if m not in set(false_markets)]
-            if not markets_to_run:
-                runlog.safe_event('run_end', 'skip', message=f"non-trading day: {','.join(false_markets)}")
-                return 0
-        else:
-            # If we didn't select a session market (e.g. off-hours / force), narrow to trading markets when possible.
-            if true_markets:
-                markets_to_run = sorted({m for m in true_markets if m in ('HK', 'US', 'CN')})
+        if false_markets:
+            if markets_to_run:
+                markets_to_run = [m for m in markets_to_run if m not in set(false_markets)]
+                if not markets_to_run:
+                    runlog.safe_event('run_end', 'skip', message=f"non-trading day: {','.join(false_markets)}")
+                    return 0
             else:
-                runlog.safe_event('run_end', 'skip', message=f"non-trading day: {','.join(false_markets)}")
-                return 0
+                # If we didn't select a session market (e.g. off-hours), narrow to trading markets when possible.
+                if true_markets:
+                    markets_to_run = sorted({m for m in true_markets if m in ('HK', 'US', 'CN')})
+                else:
+                    runlog.safe_event('run_end', 'skip', message=f"non-trading day: {','.join(false_markets)}")
+                    return 0
 
     shared_state_dir = (base / 'output_shared' / 'state').resolve()
     shared_state_dir.mkdir(parents=True, exist_ok=True)
@@ -515,9 +526,9 @@ def main() -> int:
     should_notify_global = bool(scheduler_decision.get('is_notify_window_open', scheduler_decision.get('should_notify')))
     reason_global = str(scheduler_decision.get('reason') or '')
 
-    if bool(getattr(args, 'force', False)):
+    if force_mode:
         should_run_global = True
-        reason_global = (reason_global + ' | force').strip(' |')
+        reason_global = (reason_global + ' | force | force: bypass guard').strip(' |')
 
     if smoke:
         should_run_global = False
