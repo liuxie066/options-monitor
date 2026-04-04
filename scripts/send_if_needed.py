@@ -30,33 +30,33 @@ if str(_repo_root) not in sys.path:
 from scripts.io_utils import utc_now
 
 
-def _infer_trading_day_guard_market(cfg_obj: dict) -> str:
+def _infer_trading_day_guard_markets(cfg_obj: dict) -> list[str]:
     try:
         syms = cfg_obj.get('symbols') or []
         mk = sorted({str((it or {}).get('market') or '').upper() for it in syms if isinstance(it, dict) and (it or {}).get('market')})
-        if len(mk) == 1 and mk[0] in ('US', 'HK', 'CN'):
-            return mk[0]
+        mk = [m for m in mk if m in ('US', 'HK', 'CN')]
+        if mk:
+            return mk
     except Exception:
         pass
-    return 'US'
+    return ['US']
 
 
-def _trading_day_guard(cfg_obj: dict) -> tuple[bool | None, str]:
+def _trading_day_guard_for_market(cfg_obj: dict, market: str) -> tuple[bool | None, str]:
     """Return (is_trading_day, market_used).
 
     None means guard check failed and caller should continue without blocking.
     """
+    market = str(market or '').upper().strip() or 'US'
     try:
         from futu import OpenQuoteContext
     except Exception:
-        return (None, _infer_trading_day_guard_market(cfg_obj))
+        return (None, market)
 
     try:
         from scripts.opend_utils import is_trading_day_via_futu
     except Exception:
-        return (None, _infer_trading_day_guard_market(cfg_obj))
-
-    market = _infer_trading_day_guard_market(cfg_obj)
+        return (None, market)
 
     host = '127.0.0.1'
     port = 11111
@@ -75,7 +75,11 @@ def _trading_day_guard(cfg_obj: dict) -> tuple[bool | None, str]:
     except Exception:
         pass
 
-    ctx = OpenQuoteContext(host=host, port=port)
+    try:
+        ctx = OpenQuoteContext(host=host, port=port)
+    except Exception:
+        return (None, market)
+
     try:
         return is_trading_day_via_futu(ctx, market)
     finally:
@@ -205,10 +209,32 @@ def main():
             sh([str(vpy), 'scripts/write_last_run.py', '--path', str(last_run), '--status', 'skip', '--stage', 'scheduler', '--reason', str(decision.get('reason') or ''), '--started-at', started], cwd=base)
             return 0
 
-        # 1.5) trading day guard
-        is_trading_day, guard_market = _trading_day_guard(cfg_obj)
-        if is_trading_day is False:
-            sh([str(vpy), 'scripts/write_last_run.py', '--path', str(last_run), '--status', 'skip', '--stage', 'trading_day_guard', '--reason', f'non-trading day: {guard_market}', '--started-at', started], cwd=base)
+        # 1.5) trading day guard (multi-market)
+        guard_markets = _infer_trading_day_guard_markets(cfg_obj)
+        guard_results: list[dict] = []
+        for gm in guard_markets:
+            is_td, gm_used = _trading_day_guard_for_market(cfg_obj, gm)
+            guard_results.append({'market': gm_used, 'is_trading_day': is_td})
+
+        false_markets = [str(r.get('market')) for r in guard_results if r.get('is_trading_day') is False]
+        if false_markets and len(false_markets) == len(guard_markets):
+            sh(
+                [
+                    str(vpy),
+                    'scripts/write_last_run.py',
+                    '--path',
+                    str(last_run),
+                    '--status',
+                    'skip',
+                    '--stage',
+                    'trading_day_guard',
+                    '--reason',
+                    f"non-trading day: {','.join(false_markets)}",
+                    '--started-at',
+                    started,
+                ],
+                cwd=base,
+            )
             return 0
 
         # 2) pipeline
