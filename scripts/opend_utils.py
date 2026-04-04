@@ -16,6 +16,62 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, date
 from zoneinfo import ZoneInfo
+from typing import Any
+
+
+def market_to_futu_trade_date_market(market: str):
+    """Map internal market label to futu TradeDateMarket enum.
+
+    Returns None when mapping is unknown.
+    """
+    try:
+        from futu import TradeDateMarket
+    except Exception:
+        return None
+
+    m = (market or '').upper().strip()
+    mapping = {
+        'HK': 'HK',
+        'US': 'US',
+        'CN': 'CN',
+    }
+    key = mapping.get(m)
+    return getattr(TradeDateMarket, key, None) if key else None
+
+
+def is_trading_day_via_futu(ctx: Any, market: str) -> tuple[bool | None, str]:
+    """Check whether today is a trading day via futu request_trading_days.
+
+    Returns:
+      (True/False, market_used) on API success;
+      (None, market_used) when market mapping/API call fails.
+    """
+    market_used = (market or '').upper().strip()
+    tm = market_to_futu_trade_date_market(market_used)
+    if tm is None:
+        return (None, market_used)
+
+    d = get_trading_date(market_used)
+    ds = d.strftime('%Y-%m-%d')
+    try:
+        ret, data = ctx.request_trading_days(market=tm, start=ds, end=ds)
+    except Exception:
+        return (None, market_used)
+
+    # futu RET_OK is 0
+    if ret != 0:
+        return (None, market_used)
+
+    rows = data if isinstance(data, list) else []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get('time') or '') != ds:
+            continue
+        t = str(row.get('trade_date_type') or '').upper()
+        if t in ('WHOLE', 'MORNING', 'AFTERNOON', 'TRADING'):
+            return (True, market_used)
+    return (False, market_used)
 
 
 def get_trading_date(market: str) -> date:
