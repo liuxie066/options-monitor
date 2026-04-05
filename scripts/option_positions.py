@@ -143,14 +143,16 @@ def main():
     sub = ap.add_subparsers(dest='cmd', required=True)
 
     p_list = sub.add_parser('list', help='list records')
-    p_list.add_argument('--market', default='富途')
+    p_list.add_argument('--broker', default='富途')
+    p_list.add_argument('--market', default=None, help='DEPRECATED alias of --broker')
     p_list.add_argument('--account', default=None)
     p_list.add_argument('--status', default='open', choices=['open', 'close', 'all'])
     p_list.add_argument('--format', default='text', choices=['text', 'json'])
     p_list.add_argument('--limit', type=int, default=50)
 
     p_add = sub.add_parser('add', help='add a record')
-    p_add.add_argument('--market', default='富途')
+    p_add.add_argument('--broker', default='富途')
+    p_add.add_argument('--market', default=None, help='DEPRECATED alias of --broker')
     p_add.add_argument('--account', required=True)
     p_add.add_argument('--symbol', required=True)
     p_add.add_argument('--option-type', required=True, choices=['put', 'call'])
@@ -190,7 +192,10 @@ def main():
         for it in items:
             rid = it.get('record_id')
             f = it.get('fields') or {}
-            if args.market and (f.get('market') != args.market):
+            broker = args.broker
+            if args.market:
+                broker = args.market
+            if broker and ((f.get('broker') or f.get('market')) != broker):
                 continue
             if args.account and (f.get('account') != args.account):
                 continue
@@ -199,7 +204,7 @@ def main():
                 continue
             rows.append({
                 'record_id': rid,
-                'market': f.get('market'),
+                'broker': (f.get('broker') or f.get('market')),
                 'account': f.get('account'),
                 'symbol': f.get('symbol'),
                 'option_type': f.get('option_type'),
@@ -295,9 +300,17 @@ def main():
         from datetime import datetime, timezone
         opened_at_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
 
+        broker = args.broker
+        if args.market:
+            broker = args.market
+            print('[WARN] --market is deprecated; use --broker')
+
         fields = {
             'position_id': position_id,
-            'market': args.market,
+            # prefer new schema
+            'broker': broker,
+            # keep legacy field for backward compatibility with existing records/filters
+            'market': broker,
             'account': acct,
             'symbol': sym,
             'option_type': opt_type,

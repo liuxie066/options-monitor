@@ -30,7 +30,7 @@ def _record(symbol: str, side: str, option_type: str, currency: str, cash_secure
 
 def test_build_context_reads_nested_rates_payload() -> None:
     records = [_record('NVDA', 'short', 'put', 'USD', 120.0)]
-    ctx = build_context(records, market="富途", account="lx", rates={"rates": {"USDCNY": "7.2", "HKDCNY": "7.8"}})
+    ctx = build_context(records, broker="富途", account="lx", rates={"rates": {"USDCNY": "7.2", "HKDCNY": "7.8"}})
 
     assert ctx["cash_secured_by_symbol_by_ccy"]["NVDA"]["USD"] == 120.0
     assert ctx["cash_secured_total_by_ccy"]["USD"] == 120.0
@@ -39,7 +39,7 @@ def test_build_context_reads_nested_rates_payload() -> None:
 
 def test_build_context_reads_plain_rates_payload() -> None:
     records = [_record('700.HK', 'short', 'put', 'HKD', 100.0)]
-    ctx = build_context(records, market="富途", account="lx", rates={"USDCNY": "7.2", "HKDCNY": "7.9"})
+    ctx = build_context(records, broker="富途", account="lx", rates={"USDCNY": "7.2", "HKDCNY": "7.9"})
 
     assert ctx["cash_secured_by_symbol_by_ccy"]["700.HK"]["HKD"] == 100.0
     assert ctx["cash_secured_total_by_ccy"]["HKD"] == 100.0

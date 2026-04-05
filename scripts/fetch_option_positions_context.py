@@ -28,7 +28,7 @@ from scripts.io_utils import atomic_write_json
 from fx_rates import get_rates
 
 
-def build_context(records: list[dict], market: str, account: str | None = None, rates: dict | None = None) -> dict:
+def build_context(records: list[dict], broker: str, account: str | None = None, rates: dict | None = None) -> dict:
     """Build context from raw Bitable records.
 
     Important: keep record_id for downstream actions (auto-close expired positions)
@@ -42,8 +42,11 @@ def build_context(records: list[dict], market: str, account: str | None = None, 
         fields = rec.get("fields") or {}
         if not fields:
             continue
-        if market and fields.get("market") != market:
-            continue
+        # broker: prefer new field; fallback to legacy market field (backward compatible)
+        if broker:
+            rec_broker = (fields.get("broker") or fields.get("market") or "").strip()
+            if rec_broker != broker:
+                continue
         if account and fields.get("account") != account:
             continue
         selected_items.append({
@@ -92,7 +95,7 @@ def build_context(records: list[dict], market: str, account: str | None = None, 
         open_positions_min.append({
             'record_id': None,
             'position_id': (f.get('position_id') or '').strip() or None,
-            'market': f.get('market'),
+            'broker': (f.get('broker') or f.get('market')),
             'account': f.get('account'),
             'symbol': (f.get('symbol') or '').strip().upper() or None,
             'option_type': (f.get('option_type') or '').strip() or parse_note_kv(note, 'option_type') or None,
@@ -174,7 +177,7 @@ def build_context(records: list[dict], market: str, account: str | None = None, 
 
     return {
         "as_of_utc": datetime.now(timezone.utc).isoformat(),
-        "filters": {"market": market, "account": account},
+        "filters": {"broker": broker, "account": account},
         "locked_shares_by_symbol": locked_shares_by_symbol,
         "cash_secured_by_symbol_by_ccy": cash_secured_by_symbol_by_ccy,
         "cash_secured_total_by_ccy": cash_secured_total_by_ccy,
@@ -188,7 +191,8 @@ def build_context(records: list[dict], market: str, account: str | None = None, 
 def main():
     parser = argparse.ArgumentParser(description="Fetch option positions context from Feishu option_positions table")
     parser.add_argument("--pm-config", default="../portfolio-management/config.json")
-    parser.add_argument("--market", default="富途")
+    parser.add_argument("--broker", default="富途")
+    parser.add_argument("--market", default=None, help="DEPRECATED alias of --broker")
     parser.add_argument("--account", default=None)
     parser.add_argument("--out", default=None, help="Output JSON path (default: <state-dir>/option_positions_context.json)")
     parser.add_argument("--state-dir", default="output/state", help="Directory for outputs (default: output/state)")
@@ -238,13 +242,19 @@ def main():
         shared_cache_path=(Path(__file__).resolve().parents[2] / 'portfolio-management' / '.data' / 'rate_cache.json'),
         max_age_hours=24,
     )
-    ctx = build_context(records, market=args.market, account=args.account, rates=rates)
+    broker = args.broker
+    if args.market:
+        broker = args.market
+        if not args.quiet:
+            print("[WARN] --market is deprecated; use --broker")
+
+    ctx = build_context(records, broker=broker, account=args.account, rates=rates)
 
     atomic_write_json(out_path, ctx)
 
     if not args.quiet:
         print(f"[DONE] option positions context -> {out_path}")
-        print(f"market={args.market} account={args.account or '-'} selected={ctx['raw_selected_count']}")
+        print(f"broker={broker} account={args.account or '-'} selected={ctx['raw_selected_count']}")
 
         # Backward/forward compatible stats
         cash_secured_syms = 0
