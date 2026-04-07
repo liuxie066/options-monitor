@@ -32,15 +32,19 @@ def apply_prefilters(
     fx_usd_per_cny: float | None,
     hkdcny: float | None,
 ) -> PrefilterResult:
-    # Pre-filter (call): if this account has no holdings row for the symbol, skip sell_call fully.
+    # Pre-filter (call): sell_call must be based on holdings.
+    # If holdings (portfolio_ctx) is unavailable for this account, skip sell_call entirely.
     stock = None
-    if want_call and portfolio_ctx:
-        try:
-            stock = (portfolio_ctx.get('stocks_by_symbol') or {}).get(symbol)
-        except Exception:
-            stock = None
-        if not stock:
+    if want_call:
+        if not portfolio_ctx:
             want_call = False
+        else:
+            try:
+                stock = (portfolio_ctx.get('stocks_by_symbol') or {}).get(symbol)
+            except Exception:
+                stock = None
+            if not stock:
+                want_call = False
 
     # Pre-filter (put): derive a cash-based max_strike cap to reduce chain size.
     if want_put:
