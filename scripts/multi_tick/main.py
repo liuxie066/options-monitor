@@ -224,8 +224,6 @@ def main() -> int:
             pass
 
     schedule_cfg = base_cfg.get('schedule', {}) or {}
-    dense_notify_cooldown_min = int(schedule_cfg.get('notify_cooldown_dense_min', 30))
-    sparse_after_beijing = parse_hhmm(schedule_cfg.get('sparse_after_beijing', '02:00'))
     bj_tz = ZoneInfo(schedule_cfg.get('beijing_timezone', 'Asia/Shanghai'))
 
     if bool(getattr(args, 'opend_phone_verify_continue', False)):
@@ -742,24 +740,7 @@ def main() -> int:
         meaningful = bool(text) and (text != '今日无需要主动提醒的内容。')
 
         should_notify_effective = should_notify
-        try:
-            now_bj = datetime.now(timezone.utc).astimezone(bj_tz)
-            before_sparse = now_bj.time() < sparse_after_beijing
-            high_pri = meaningful and is_high_priority_notification(text)
-
-            if (not should_notify_effective) and before_sparse and high_pri:
-                st = read_json(state_path, {'last_notify_utc': None})
-                last_notify = maybe_parse_dt((st or {}).get('last_notify_utc')) if isinstance(st, dict) else None
-                if last_notify is None:
-                    should_notify_effective = True
-                    reason = (reason + f" | override(high,dense): last_notify missing")
-                else:
-                    elapsed = datetime.now(timezone.utc) - last_notify.astimezone(timezone.utc)
-                    if elapsed >= timedelta(minutes=dense_notify_cooldown_min):
-                        should_notify_effective = True
-                        reason = (reason + f" | override(high,dense): elapsed>={dense_notify_cooldown_min}m")
-        except Exception:
-            pass
+        # [REMOVED] legacy override(high,dense) logic
 
         acct_metrics['ran_scan'] = True
         acct_metrics['should_notify'] = bool(should_notify_effective)
@@ -864,6 +845,29 @@ def main() -> int:
 
     channel = (base_cfg.get('notifications') or {}).get('channel') or 'feishu'
     target = (base_cfg.get('notifications') or {}).get('target')
+
+    # --- Quiet Hours (DND) Check ---
+    notif_cfg = base_cfg.get('notifications') or {}
+    quiet_hours = notif_cfg.get('quiet_hours_beijing')
+    if quiet_hours and isinstance(quiet_hours, dict) and not no_send:
+        try:
+            start_t = parse_hhmm(quiet_hours.get('start', '02:00'))
+            end_t = parse_hhmm(quiet_hours.get('end', '08:00'))
+            now_bj_time = datetime.now(timezone.utc).astimezone(bj_tz).time()
+            
+            is_quiet = False
+            if start_t <= end_t:
+                is_quiet = start_t <= now_bj_time <= end_t
+            else: # Crosses midnight
+                is_quiet = now_bj_time >= start_t or now_bj_time <= end_t
+                
+            if is_quiet:
+                runlog.safe_event('notify', 'skip', message=f'in quiet hours ({start_t.strftime("%H:%M")}-{end_t.strftime("%H:%M")})')
+                print(f"[SKIP] Currently in quiet hours (DND). Target was: {target}")
+                return 0
+        except Exception as e:
+            runlog.safe_event('notify', 'error', message=f'failed to parse quiet_hours: {e}')
+    # -------------------------------
 
     if not no_send:
         if not target:
