@@ -48,3 +48,4 @@ cache/
 
 # Runtime audit logs
 /audit/run_logs/
+logs/
