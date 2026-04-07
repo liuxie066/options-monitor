@@ -98,11 +98,31 @@ def validate_config(cfg: dict):
 
         sc = item.get('sell_call') or {}
         if sc.get('enabled'):
-            for k in ('avg_cost','shares','min_dte','max_dte','min_strike'):
+            # NOTE:
+            # - avg_cost/shares can be sourced from holdings (portfolio_context) at runtime.
+            # - Therefore, do not require them in config validation.
+            # - If holdings is unavailable for an account, pipeline will skip sell_call for that account.
+            for k in ('min_dte', 'max_dte', 'min_strike'):
                 if k not in sc:
                     die(f"{sym}.sell_call enabled but missing {k}")
+
             if sc['min_dte'] > sc['max_dte']:
                 die(f"{sym}.sell_call min_dte > max_dte")
+
+            # Optional sanity checks
+            if sc.get('shares') is not None:
+                try:
+                    if int(sc.get('shares')) <= 0:
+                        die(f"{sym}.sell_call shares must be > 0")
+                except Exception:
+                    die(f"{sym}.sell_call shares must be an integer")
+
+            if sc.get('avg_cost') is not None:
+                try:
+                    if float(sc.get('avg_cost')) <= 0:
+                        die(f"{sym}.sell_call avg_cost must be > 0")
+                except Exception:
+                    die(f"{sym}.sell_call avg_cost must be a number")
 
 
 def main():

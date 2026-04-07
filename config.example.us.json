@@ -119,7 +119,9 @@
         "max_strike": 160
       },
       "sell_call": {
-        "enabled": false
+        "enabled": false,
+        "avg_cost": null,
+        "shares": null
       }
     }
   ]
