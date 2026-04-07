@@ -108,7 +108,9 @@
 ### 4.2 symbols[]：每个标的的个性化区间
 你通常只需要改：
 - sell_put：`min_dte/max_dte`、`min_strike/max_strike`
-- sell_call（enabled 时）：`avg_cost/shares/min_strike`（以及 dte 范围）
+- sell_call（enabled 时）：`min_strike`（以及 dte 范围）
+  - `avg_cost/shares` 可选：优先从 holdings 自动读取；配置里可以不填（或填 null）。
+  - 若 holdings 取不到（该账户缺 holdings / 读取失败），则该账户的 sell_call 会被跳过。
 - `use`: 选择使用哪些模板（例如 `["put_base","call_base"]`）
 
 ### 4.3 portfolio：账户约束来源

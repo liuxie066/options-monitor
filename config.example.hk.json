@@ -98,7 +98,9 @@
         "max_strike": 999999
       },
       "sell_call": {
-        "enabled": false
+        "enabled": false,
+        "avg_cost": null,
+        "shares": null
       }
     }
   ]
