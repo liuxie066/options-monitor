@@ -33,6 +33,13 @@ openclaw cron run 9cba60f7-407b-4427-9120-0a176b818de9 --expect-final --timeout 
 线上定时执行入口（固化脚本）：
 - `scripts/send_if_needed.py`
 
+### Dev -> Prod 自动发布
+
+- 自动发布脚本：`/home/node/.openclaw/workspace/options-monitor/scripts/auto_deploy_from_main.py`
+- cron：每 2 分钟检查一次 `origin/main`，有新 commit 才发布
+- 日志：`/home/node/.openclaw/workspace/options-monitor/logs/auto_deploy_from_main.log`
+- 回滚/停用：删除对应 cron 条目即可立即停止自动发布
+
 它会：
 - `scan_scheduler` 判断是否到点/是否允许推送
 - 到点则跑 pipeline

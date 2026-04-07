@@ -60,7 +60,7 @@ def should_skip(path_rel: Path) -> bool:
         return True
     if path_rel.name in EXCLUDE_FILES:
         return True
-    if path_rel.name.startswith("config.local") and path_rel.name.endswith(".json"):
+    if path_rel.name.startswith("config.local."):
         return True
     return False
 
