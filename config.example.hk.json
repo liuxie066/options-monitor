@@ -38,7 +38,9 @@
       }
     }
   },
-  "outputs": {"top_n_alerts": 3},
+  "outputs": {
+    "top_n_alerts": 3
+  },
   "runtime": {
     "symbol_timeout_sec": 120,
     "portfolio_timeout_sec": 60,
@@ -60,7 +62,11 @@
     "enabled": true,
     "channel": "feishu",
     "target": "user:YOUR_OPEN_ID",
-    "mode": "change_or_high"
+    "mode": "change_or_high",
+    "quiet_hours_beijing": {
+      "start": "02:00",
+      "end": "08:00"
+    }
   },
   "schedule": {
     "enabled": true,
@@ -68,20 +74,32 @@
     "market_open": "09:30",
     "market_close": "16:00",
     "monitor_off_hours": false,
-    "market_dense_interval_min": 30,
-    "market_sparse_interval_min": 30,
     "notify_cooldown_min": 60,
     "market_break_start": "12:00",
-    "market_break_end": "13:00"
+    "market_break_end": "13:00",
+    "interval_min": 60
   },
   "symbols": [
     {
       "symbol": "0700.HK",
       "market": "HK",
-      "fetch": {"source": "opend", "host": "127.0.0.1", "port": 11111, "limit_expirations": 8},
+      "fetch": {
+        "source": "opend",
+        "host": "127.0.0.1",
+        "port": 11111,
+        "limit_expirations": 8
+      },
       "use": "put_base",
-      "sell_put": {"enabled": true, "min_dte": 5, "max_dte": 45, "min_strike": 0, "max_strike": 999999},
-      "sell_call": {"enabled": false}
+      "sell_put": {
+        "enabled": true,
+        "min_dte": 5,
+        "max_dte": 45,
+        "min_strike": 0,
+        "max_strike": 999999
+      },
+      "sell_call": {
+        "enabled": false
+      }
     }
   ]
 }
