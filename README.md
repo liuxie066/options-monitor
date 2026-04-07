@@ -106,3 +106,11 @@ cd /home/node/.openclaw/workspace/options-monitor
 ```
 
 > prod 不是开发源，不要在 `options-monitor-prod` 里直接改代码。
+
+### 自动发布（main -> prod）
+
+- 定时器：`*/2 * * * *`（每 2 分钟）
+- 执行脚本：`scripts/auto_deploy_from_main.py`
+- 日志：`/home/node/.openclaw/workspace/options-monitor/logs/auto_deploy_from_main.log`
+- 行为：仅当 `origin/main` 有新 commit 时才 `pull --ff-only` 并执行 `scripts/deploy_to_prod.py --apply --prune`
+- 安全：带锁；dev/prod 任一仓库有未提交改动、拉取失败或部署失败时直接中止，不改写 prod
