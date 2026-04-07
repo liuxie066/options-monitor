@@ -66,11 +66,12 @@ def git(cwd: Path, *args: str, capture: bool = True) -> subprocess.CompletedProc
 
 
 def _must_clean_repo(path: Path, label: str) -> None:
-    res = git(path, 'status', '--porcelain=v1')
+    # Only block on tracked changes. Untracked/ignored runtime artifacts are expected.
+    res = git(path, 'status', '--porcelain=v1', '--untracked-files=no')
     if res.returncode != 0:
         raise RuntimeError(f'[{label}] git status failed: {(res.stderr or res.stdout).strip()}')
     if (res.stdout or '').strip():
-        raise RuntimeError(f'[{label}] repo has uncommitted changes; abort')
+        raise RuntimeError(f'[{label}] repo has tracked uncommitted changes; abort')
 
 
 def _must_on_main(path: Path) -> None:
