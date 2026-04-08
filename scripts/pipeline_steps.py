@@ -37,12 +37,23 @@ def derive_put_max_strike_from_cash(
     want_ccy = 'HKD' if sym_u.endswith('.HK') else 'USD'
 
     # 1) cash available in native currency (from holdings)
+    # Preferred: direct native-currency cash (USD for US symbols, HKD for HK symbols).
+    # Fallback: derive native cash from base CNY cash when FX is available.
     cash_native = None
     try:
         cash_by = portfolio_ctx.get('cash_by_currency') or {}
         if isinstance(cash_by, dict):
             v = cash_by.get(want_ccy)
             cash_native = float(v) if v is not None else None
+            if cash_native is None:
+                cny = cash_by.get('CNY')
+                cny_v = float(cny) if cny is not None else None
+                if cny_v is not None:
+                    if want_ccy == 'USD' and fx_usd_per_cny is not None and float(fx_usd_per_cny) > 0:
+                        cash_native = cny_v * float(fx_usd_per_cny)
+                    elif want_ccy == 'HKD' and hkdcny is not None and float(hkdcny) > 0:
+                        # hkdcny is CNY per HKD, so HKD per CNY is 1 / hkdcny.
+                        cash_native = cny_v / float(hkdcny)
     except Exception:
         cash_native = None
 

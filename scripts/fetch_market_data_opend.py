@@ -33,7 +33,6 @@ from typing import Any
 
 import pandas as pd
 
-import json
 
 
 def _append_metrics_json(metrics_path: Path, payload: dict, max_entries: int = 400):
@@ -66,11 +65,17 @@ COLUMNS = [
 # Allow running as a script (python scripts/xxx.py) without package install
 # by ensuring repo root is on sys.path.
 import sys
-from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from scripts.futu_gateway import (
+    build_futu_gateway,
+    FutuGatewayNeed2FAError,
+    FutuGatewayAuthExpiredError,
+    FutuGatewayRateLimitError,
+    FutuGatewayTransientError,
+)
 from scripts.opend_utils import normalize_underlier, get_trading_date
 
 
@@ -184,12 +189,11 @@ def _pick_col(row: Any, *cands: str):
         return None
 
 
-def get_spot_opend(ctx, underlier_code: str) -> float | None:
+def get_spot_opend(gateway, underlier_code: str) -> float | None:
     """Try to get underlying spot from OpenD."""
     try:
-        # NOTE: keep this function independent from fetch_symbol()'s local reconnect wrapper.
-        ret, df = ctx.get_market_snapshot([underlier_code])
-        if ret != 0 or df is None or df.empty:
+        df = gateway.get_snapshot([underlier_code])
+        if df is None or df.empty:
             return None
         row = df.iloc[0]
         # Prefer last_price; fallback to other common fields.
@@ -203,55 +207,42 @@ def get_spot_opend(ctx, underlier_code: str) -> float | None:
 
 
 def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = '127.0.0.1', port: int = 11111, spot_override: float | None = None, *, spot_from_pm: bool = False, base_dir: Path | None = None, option_types: str = 'put,call', min_strike: float | None = None, max_strike: float | None = None, min_dte: int | None = None, max_dte: int | None = None, retry_max_attempts: int = 4, retry_time_budget_sec: float = 8.0, retry_base_delay_sec: float = 0.8, retry_max_delay_sec: float = 6.0, no_retry: bool = False, chain_cache: bool = False, chain_cache_force_refresh: bool = False) -> dict[str, Any]:
-    from futu import OpenQuoteContext, RET_OK
-
     u = normalize_underlier(symbol)
-    ctx = OpenQuoteContext(host=host, port=port)
-
-    def _with_reconnect(what: str, fn):
-        """One-shot reconnect wrapper.
-
-        Policy: if ctx is disconnected, close it and create a new context, then retry once.
-        """
-        nonlocal ctx
-        try:
-            return fn()
-        except Exception as e:
-            msg = str(e)
-            low = msg.lower()
-            # Do not reconnect when phone verification is required.
-            if ('手机验证码' in msg) or ('verification' in low) or ('verify code' in low):
-                raise
-            if any(k in low for k in ['callclose', 'disconnected', 'econnreset', 'broken pipe', 'connection reset']):
-                try:
-                    ctx.close()
-                except Exception:
-                    pass
-                ctx = OpenQuoteContext(host=host, port=port)
-                return fn()
-            raise
+    gateway = build_futu_gateway(
+        host=host,
+        port=int(port),
+        is_option_chain_cache_enabled=bool(chain_cache),
+    )
 
     try:
-        def _looks_like_phone_verify(err: str) -> bool:
-            s = (err or '')
+        def _looks_like_phone_verify(err_or_exc: Any) -> bool:
+            if isinstance(err_or_exc, FutuGatewayNeed2FAError):
+                return True
+            s = str(err_or_exc or '')
             sl = s.lower()
-            keys = [
-                '手机验证码', '短信验证', '手机验证', '验证码',
-                'phone verify', 'phone verification', 'verify code',
-                'not login', 'not logged',
-            ]
-            return any(k in s for k in ['手机验证码', '短信验证', '手机验证', '验证码']) or any(k in sl for k in keys)
+            return ('手机验证码' in s) or ('短信验证' in s) or ('手机验证' in s) or ('验证码' in s) or ('phone verification' in sl) or ('verify code' in sl)
 
-        def _is_rate_limited(err: str) -> bool:
-            s = (err or '')
+        def _is_auth_expired(err_or_exc: Any) -> bool:
+            if isinstance(err_or_exc, FutuGatewayAuthExpiredError):
+                return True
+            s = str(err_or_exc or '')
+            sl = s.lower()
+            return ('login expired' in sl) or ('auth expired' in sl) or ('not logged' in sl) or ('not login' in sl)
+
+        def _is_rate_limited(err_or_exc: Any) -> bool:
+            if isinstance(err_or_exc, FutuGatewayRateLimitError):
+                return True
+            s = str(err_or_exc or '')
             sl = s.lower()
             return ('频率太高' in s) or ('最多10次' in s) or ('rate limit' in sl) or ('too frequent' in sl)
 
-        def _is_transient(err: str) -> bool:
+        def _is_transient(err_or_exc: Any) -> bool:
+            if isinstance(err_or_exc, FutuGatewayTransientError):
+                return True
             # IMPORTANT: phone verification is not transient; fail-fast and require manual input.
-            if _looks_like_phone_verify(err):
+            if _looks_like_phone_verify(err_or_exc):
                 return False
-            sl = (err or '').lower()
+            sl = str(err_or_exc or '').lower()
             keys = ['timeout', 'timed out', 'econnreset', 'econnrefused', 'connection', 'disconnected', 'callclose']
             return any(k in sl for k in keys)
 
@@ -267,16 +258,9 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
             while True:
                 attempt += 1
                 try:
-                    out = fn()
-                    if isinstance(out, tuple) and len(out) >= 2:
-                        ret, data = out[0], out[1]
-                        if ret == RET_OK:
-                            return out
-                        last_err = str(data)
-                        raise RuntimeError(f"ret={ret} err={last_err}")
-                    return out
+                    return fn()
                 except Exception as e:
-                    last_err = f"{type(e).__name__}: {e}"
+                    last_err = e
 
                 if attempt >= int(retry_max_attempts):
                     raise RuntimeError(f"{what} failed after {attempt} attempts: {last_err}")
@@ -289,7 +273,9 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
                     raise RuntimeError(f"{what} failed (retry budget {budget}s exceeded): {last_err}")
 
                 # If not transient or rate-limited, don't keep retrying.
-                if (not _is_transient(last_err or '')) and (not _is_rate_limited(last_err or '')):
+                if _is_auth_expired(last_err):
+                    raise RuntimeError(f"{what} failed (auth expired): {last_err}")
+                if (not _is_transient(last_err)) and (not _is_rate_limited(last_err)):
                     raise RuntimeError(f"{what} failed (non-transient): {last_err}")
 
                 if not quiet:
@@ -298,21 +284,8 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
                 time.sleep(sleep_s + random.uniform(0.0, 0.2))
                 delay = min(max_delay, delay * 2.0)
 
-        # Fail fast if OpenD requires phone verification / cannot connect.
-        # Without this, futu-api may retry for minutes, hanging unattended cron jobs.
-        try:
-            # Prefer get_global_state() which exists across futu-api versions.
-            ret0, state = _opend_call_with_retry('get_global_state', lambda: _with_reconnect('get_global_state', lambda: ctx.get_global_state()), quiet=True)
-            if ret0 != RET_OK:
-                raise RuntimeError(f"OpenD not ready (get_global_state ret={ret0})")
-            if not isinstance(state, dict) or state.get('program_status_type') not in (None, '', 'READY'):
-                # If OpenD is not READY, it may be waiting for phone verification.
-                raise RuntimeError(f"OpenD not READY: {state}")
-            if not state.get('qot_logined', True):
-                raise RuntimeError(f"OpenD quote not logged in: {state}")
-        except Exception:
-            # Close ctx then propagate.
-            raise
+        # Fail fast if OpenD requires phone verification / auth expired / cannot connect.
+        _opend_call_with_retry('ensure_quote_ready', lambda: gateway.ensure_quote_ready(), quiet=True)
         spot = spot_override
 
         # Spot policy:
@@ -320,7 +293,7 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
         # - US: do NOT attempt OpenD spot by default (often no stock quote right); use external fallback(s)
         if spot is None:
             if u.market != 'US':
-                spot = get_spot_opend(ctx, u.code)
+                spot = get_spot_opend(gateway, u.code)
 
         # US spot: do not use OpenD (often no stock quote right).
         # Preferred fallback is portfolio-management's PriceFetcher (it has caching + multiple sources).
@@ -379,7 +352,6 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
         # Option chain cache (day-level).
         chain_obj = None
         cache_path = None
-        ret = RET_OK
         if chain_cache and base_dir is not None:
             cache_path = _chain_cache_path(base_dir, u.code)
             cached = _load_chain_cache(cache_path)
@@ -397,8 +369,8 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
             # 2) take the closest N expirations (limit_expirations)
             # 3) call get_option_chain(code, start=exp, end=exp) for each expiration, then concat
             try:
-                ret_e, df_e = _opend_call_with_retry('get_option_expiration_date', lambda: _with_reconnect('get_option_expiration_date', lambda: ctx.get_option_expiration_date(u.code)), quiet=False)
-                if ret_e != RET_OK or df_e is None or df_e.empty:
+                df_e = _opend_call_with_retry('get_option_expiration_date', lambda: gateway.get_option_expiration_dates(u.code), quiet=False)
+                if df_e is None or df_e.empty:
                     expirations_all: list[str] = []
                 else:
                     expirations_all = sorted({str(x)[:10] for x in df_e.get('strike_time').astype(str).tolist() if str(x) and len(str(x)) >= 10})
@@ -435,12 +407,12 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
             chains = []
             if expirations_pick:
                 for exp0 in expirations_pick:
-                    ret, chain0 = _opend_call_with_retry(
+                    chain0 = _opend_call_with_retry(
                         f'get_option_chain({exp0})',
-                        lambda exp=exp0: _with_reconnect('get_option_chain', lambda: ctx.get_option_chain(u.code, start=str(exp), end=str(exp))),
+                        lambda exp=exp0: gateway.get_option_chain(code=u.code, start=str(exp), end=str(exp), is_force_refresh=bool(chain_cache_force_refresh)),
                         quiet=True,
                     )
-                    if ret == RET_OK and chain0 is not None and (not chain0.empty):
+                    if chain0 is not None and (not chain0.empty):
                         chains.append(chain0)
 
             if chains:
@@ -448,12 +420,15 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
                     chain = pd.concat(chains, ignore_index=True)
                 except Exception:
                     chain = chains[0]
-                ret = RET_OK
             else:
                 # Fallback to legacy behavior (best-effort) if expiration_date not available.
-                ret, chain = _opend_call_with_retry('get_option_chain', lambda: _with_reconnect('get_option_chain', lambda: ctx.get_option_chain(u.code)), quiet=False)
+                chain = _opend_call_with_retry(
+                    'get_option_chain',
+                    lambda: gateway.get_option_chain(code=u.code, is_force_refresh=bool(chain_cache_force_refresh)),
+                    quiet=False,
+                )
 
-            if ret != RET_OK or chain is None or chain.empty:
+            if chain is None or chain.empty:
                 raise RuntimeError(f"get_option_chain failed: {chain}")
 
             # Persist a lightweight JSON cache (avoid pickling DataFrame).
@@ -473,9 +448,6 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
 
         # Rehydrate into a DataFrame for existing downstream logic.
         chain = pd.DataFrame(chain_obj.get('rows') or [])
-        if ret != RET_OK:
-            raise RuntimeError(f"get_option_chain failed: {chain}")
-
         if chain is None or chain.empty:
             return {
                 'symbol': symbol,
@@ -537,10 +509,10 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
         for i in range(0, len(option_codes), BATCH):
             batch = option_codes[i:i+BATCH]
             try:
-                ret2, snap = _opend_call_with_retry('get_market_snapshot(batch)', lambda: _with_reconnect('get_market_snapshot', lambda: ctx.get_market_snapshot(batch)), quiet=True)
+                snap = _opend_call_with_retry('get_market_snapshot(batch)', lambda: gateway.get_snapshot(batch), quiet=True)
             except Exception:
-                ret2, snap = (None, None)
-            if ret2 != RET_OK or snap is None or snap.empty:
+                snap = None
+            if snap is None or snap.empty:
                 continue
 
             # Extract only the columns we actually use downstream.
@@ -705,7 +677,7 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
 
     finally:
         try:
-            ctx.close()
+            gateway.close()
         except Exception:
             pass
 

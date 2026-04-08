@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import argparse
 import filecmp
-import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -43,12 +42,13 @@ EXCLUDE_TOP = {
 # Exclusions by filename (anywhere)
 EXCLUDE_FILES = {
     "config.json",
+    "disable_autodeploy.flag",
 }
 
 
 def dev_ref() -> str:
     try:
-        out = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], cwd=str(ROOT_DEV)).decode().strip()
+        out = subprocess.check_output(["git", "-c", f"safe.directory={ROOT_DEV}", "rev-parse", "--short", "HEAD"], cwd=str(ROOT_DEV)).decode().strip()
         return out
     except Exception:
         return "unknown"
@@ -60,7 +60,7 @@ def should_skip(path_rel: Path) -> bool:
         return True
     if path_rel.name in EXCLUDE_FILES:
         return True
-    if path_rel.name.startswith("config.local."):
+    if path_rel.name.startswith("config.local"):
         return True
     return False
 
@@ -72,8 +72,8 @@ def iter_files(src_root: Path) -> list[Path]:
     for p in src_root.rglob("*"):
         if not p.is_file():
             continue
-        # skip bytecode
-        if p.suffix == '.pyc' or '__pycache__' in p.parts:
+        # Skip bytecode/cache.
+        if p.suffix == ".pyc" or "__pycache__" in p.parts:
             continue
         rel = p.relative_to(ROOT_DEV)
         if should_skip(rel):
@@ -82,13 +82,10 @@ def iter_files(src_root: Path) -> list[Path]:
     return files
 
 
-def plan_copy() -> tuple[list[tuple[Path, Path]], list[Path]]:
-    """Return (copies, deletes).
-
-    deletes are paths in prod that should be deleted because they exist under ITEMS scope
-    but no longer exist in dev.
-    """
-    copies: list[tuple[Path, Path]] = []
+def plan_copy() -> tuple[list[tuple[Path, Path]], list[tuple[Path, Path]], list[Path]]:
+    """Return (added, updated, deletes)."""
+    added: list[tuple[Path, Path]] = []
+    updated: list[tuple[Path, Path]] = []
 
     # Build dev file set
     dev_files: set[Path] = set()
@@ -97,20 +94,19 @@ def plan_copy() -> tuple[list[tuple[Path, Path]], list[Path]]:
         for f in iter_files(src):
             dev_files.add(f.relative_to(ROOT_DEV))
 
-    # Determine copies (new/changed)
+    # Determine adds/updates
     for rel in sorted(dev_files):
         src = ROOT_DEV / rel
         dst = ROOT_PROD / rel
         if not dst.exists():
-            copies.append((src, dst))
+            added.append((src, dst))
         else:
-            # compare content
             try:
                 same = filecmp.cmp(src, dst, shallow=False)
             except Exception:
                 same = False
             if not same:
-                copies.append((src, dst))
+                updated.append((src, dst))
 
     # Determine deletes inside scope
     deletes: list[Path] = []
@@ -126,7 +122,7 @@ def plan_copy() -> tuple[list[tuple[Path, Path]], list[Path]]:
         for p in prod_base.rglob("*"):
             if not p.is_file():
                 continue
-            if p.suffix == '.pyc' or '__pycache__' in p.parts:
+            if p.suffix == ".pyc" or "__pycache__" in p.parts:
                 continue
             rel = p.relative_to(ROOT_PROD)
             if should_skip(rel):
@@ -134,7 +130,7 @@ def plan_copy() -> tuple[list[tuple[Path, Path]], list[Path]]:
             if rel not in dev_files:
                 deletes.append(p)
 
-    return copies, sorted(deletes)
+    return added, updated, sorted(deletes)
 
 
 def main() -> None:
@@ -149,23 +145,28 @@ def main() -> None:
         raise SystemExit("[ARG_ERROR] --apply and --dry-run cannot be used together")
 
     ref = dev_ref()
-    copies, deletes = plan_copy()
+    added, updated, deletes = plan_copy()
     if not args.prune:
         deletes = []
 
     mode = "APPLY" if args.apply else "DRY-RUN"
     print(f"[deploy] dev={ROOT_DEV}@{ref} -> prod={ROOT_PROD} mode={mode}")
-    print(f"[deploy] plan: {len(copies)} copy/update, {len(deletes)} delete")
+    print(f"[deploy] summary: add={len(added)} update={len(updated)} delete={len(deletes)}")
 
-    for src, dst in copies[:200]:
-        print(f"  COPY {src.relative_to(ROOT_DEV)} -> {dst.relative_to(ROOT_PROD)}")
-    if len(copies) > 200:
-        print(f"  ... ({len(copies)-200} more copies)")
+    for src, dst in added[:200]:
+        print(f"  ADD  {src.relative_to(ROOT_DEV)} -> {dst.relative_to(ROOT_PROD)}")
+    if len(added) > 200:
+        print(f"  ... ({len(added)-200} more added)")
+
+    for src, dst in updated[:200]:
+        print(f"  UPD  {src.relative_to(ROOT_DEV)} -> {dst.relative_to(ROOT_PROD)}")
+    if len(updated) > 200:
+        print(f"  ... ({len(updated)-200} more updated)")
 
     for p in deletes[:200]:
         print(f"  DEL  {p.relative_to(ROOT_PROD)}")
     if len(deletes) > 200:
-        print(f"  ... ({len(deletes)-200} more deletes)")
+        print(f"  ... ({len(deletes)-200} more deleted)")
 
     if not args.apply:
         return
@@ -178,7 +179,7 @@ def main() -> None:
             print(f"[WARN] failed delete {p}: {e}")
 
     # Apply copies
-    for src, dst in copies:
+    for src, dst in [*added, *updated]:
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
 

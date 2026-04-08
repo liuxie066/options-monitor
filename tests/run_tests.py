@@ -109,6 +109,10 @@ def main() -> None:
         test_watchdog_error_code_mapping,
         test_opend_alert_rate_limit,
     )
+    from test_futu_gateway_minimal import (
+        test_build_gateway_with_mock_backend_and_snapshot_call,
+        test_gateway_error_mapping_need_2fa,
+    )
     from test_fetch_portfolio_context_richtext import (
         test_build_context_richtext_normalization_and_hk_symbol,
     )
@@ -146,12 +150,19 @@ def main() -> None:
         test_stage_plan_scan_includes_fetch,
         test_stage_plan_stage_only_notify,
     )
+    from test_multi_tick_account_state_dir import (
+        test_account_run_state_dir_isolated_by_account,
+    )
     from test_pipeline_postprocess_notify_gate import (
         test_postprocess_notify_gate,
     )
     from test_multiplier_no_default_in_scanners import (
         test_sell_put_metrics_requires_multiplier,
         test_sell_call_metrics_requires_multiplier,
+    )
+    from test_notify_symbols_markdown import (
+        test_notify_symbols_markdown_put_layout,
+        test_notify_symbols_markdown_call_layout_and_changes,
     )
 
     from test_http_json_http_error_handling import (
@@ -170,6 +181,8 @@ def main() -> None:
         test_sell_put_metrics_requires_multiplier,
         test_sell_call_metrics_requires_multiplier,
         test_parse_futu_fill_message,
+        test_build_gateway_with_mock_backend_and_snapshot_call,
+        test_gateway_error_mapping_need_2fa,
         test_chain_cache_helpers_roundtrip,
         test_chain_cache_fresh_check,
         test_watchdog_error_code_mapping,
@@ -189,7 +202,10 @@ def main() -> None:
         test_stage_plan_fetch_only,
         test_stage_plan_scan_includes_fetch,
         test_stage_plan_stage_only_notify,
+        test_account_run_state_dir_isolated_by_account,
         test_postprocess_notify_gate,
+        test_notify_symbols_markdown_put_layout,
+        test_notify_symbols_markdown_call_layout_and_changes,
         # http_json regression
         test_http_json_404_non_json_body_raises_permanent_error,
         test_http_json_500_json_body_raises_transient_error,

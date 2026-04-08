@@ -52,6 +52,10 @@ from scripts.opend_utils import is_trading_day_via_futu
 _CURRENT_RUN_ID: str | None = None
 
 
+def account_run_state_dir(run_dir: Path, account: str) -> Path:
+    return (run_dir / 'accounts' / str(account).strip() / 'state').resolve()
+
+
 def _select_markets_to_run(now_utc: datetime, cfg: dict, market_config: str) -> list[str]:
     mc = str(market_config or 'auto').lower()
     if mc == 'hk':
@@ -612,7 +616,7 @@ def main() -> int:
         cfg_override.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 
         acct_report_dir = (run_dir / 'accounts' / acct).resolve()
-        acct_state_dir = (acct_report_dir / 'state').resolve()
+        acct_state_dir = account_run_state_dir(run_dir, acct)
         try:
             acct_state_dir.mkdir(parents=True, exist_ok=True)
         except Exception:
@@ -675,7 +679,7 @@ def main() -> int:
             '--mode', 'scheduled',
             '--shared-required-data', str(shared_required),
             '--report-dir', str(acct_report_dir),
-            '--state-dir', str((run_dir / 'state').resolve()),
+            '--state-dir', str(acct_state_dir),
         ]
         runlog.safe_event(
             'snapshot_batches',
