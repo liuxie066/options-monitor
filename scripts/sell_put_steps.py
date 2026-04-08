@@ -99,13 +99,42 @@ def run_sell_put_scan_and_summarize(
     # account-aware: attach cash secured usage from option_positions (open short puts)
     df_sp_lab = safe_read_csv(symbol_sp_labeled)
     if not df_sp_lab.empty:
-        enrich_sell_put_candidates_with_cash(
+        df_sp_lab = enrich_sell_put_candidates_with_cash(
             df_labeled=df_sp_lab,
             symbol=symbol,
             portfolio_ctx=portfolio_ctx,
             fx=fx,
             out_path=symbol_sp_labeled,
         )
+
+        # Enforce cash headroom as a hard filter at candidate-filter stage:
+        # - Prefer base(CNY) gating when both required/free are known.
+        # - Fallback to USD gating when CNY fields are unavailable.
+        try:
+            d = df_sp_lab.copy()
+            dropped = False
+
+            if ('cash_required_cny' in d.columns) and ('cash_free_cny' in d.columns):
+                req_cny = pd.to_numeric(d['cash_required_cny'], errors='coerce')
+                free_cny = pd.to_numeric(d['cash_free_cny'], errors='coerce')
+                mask_drop = req_cny.notna() & free_cny.notna() & (req_cny > free_cny)
+                if mask_drop.any():
+                    d = d.loc[~mask_drop].copy()
+                    dropped = True
+
+            if (not dropped) and ('cash_required_usd' in d.columns) and ('cash_free_usd' in d.columns):
+                req_usd = pd.to_numeric(d['cash_required_usd'], errors='coerce')
+                free_usd = pd.to_numeric(d['cash_free_usd'], errors='coerce')
+                mask_drop = req_usd.notna() & free_usd.notna() & (req_usd > free_usd)
+                if mask_drop.any():
+                    d = d.loc[~mask_drop].copy()
+                    dropped = True
+
+            if dropped:
+                d.to_csv(symbol_sp_labeled, index=False)
+                df_sp_lab = d
+        except Exception:
+            pass
 
     if not is_scheduled:
         run_cmd([

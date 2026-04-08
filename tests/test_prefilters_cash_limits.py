@@ -1,0 +1,34 @@
+from __future__ import annotations
+
+from unittest.mock import patch
+
+from scripts.pipeline_steps import derive_put_max_strike_from_cash
+from scripts.prefilters import apply_prefilters
+
+
+def test_apply_prefilters_disables_sell_call_without_portfolio_context() -> None:
+    pf = apply_prefilters(
+        symbol='NVDA',
+        sp={'enabled': False},
+        cc={'enabled': True, 'avg_cost': 100, 'shares': 100},
+        want_put=False,
+        want_call=True,
+        portfolio_ctx=None,
+        fx_usd_per_cny=None,
+        hkdcny=None,
+    )
+    assert pf.want_call is False
+
+
+def test_derive_put_cash_cap_uses_cny_fallback_for_us_symbols() -> None:
+    # 70,000 CNY -> 9,800 USD at 0.14; minus 2,000 USD secured => 7,800 USD free.
+    # With multiplier 100, strike cap should be 78.
+    ctx = {
+        'cash_by_currency': {'CNY': 70000.0},
+        'option_ctx': {'cash_secured_total_by_ccy': {'USD': 2000.0}},
+    }
+    with patch('scripts.multiplier_cache.load_cache', return_value={}):
+        with patch('scripts.multiplier_cache.get_cached_multiplier', return_value=100):
+            out = derive_put_max_strike_from_cash('NVDA', ctx, fx_usd_per_cny=0.14, hkdcny=None)
+    assert out is not None
+    assert abs(float(out) - 78.0) < 1e-9

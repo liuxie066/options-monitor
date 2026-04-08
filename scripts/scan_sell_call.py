@@ -267,6 +267,10 @@ def main():
                 covered_contracts_available = 0
                 is_fully_covered_available = False
 
+            # Enforce covered-call shares constraint as a hard gate.
+            if covered_contracts_available < 1:
+                continue
+
             rows.append({
                 'symbol': row['symbol'],
                 'expiration': row['expiration'],

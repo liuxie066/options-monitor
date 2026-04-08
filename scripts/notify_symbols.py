@@ -61,26 +61,60 @@ def extract_change_lines(text: str) -> list[str]:
 _MD_LINK_RE = re.compile(r"^\[(?P<label>[^\]]+)\]\((?P<target>[^\)]+)\)$")
 
 
-def _symbol_display_name(symbol: str) -> str:
-    """Prefer human-readable underlying name over raw code.
+def _symbol_parts(symbol: str) -> tuple[str, str]:
+    """Parse symbol display/code from raw field.
 
-    Today we support only one lightweight case:
-    - If symbol is a markdown link like [TENCENT](0700.HK), use label (TENCENT).
-
-    If the label is just the code itself (e.g. [0700.HK](0700.HK)), this does NOT improve.
-    For real Chinese names (0700.HK -> 腾讯), inject mapping upstream in alert generation.
+    Support markdown-link style symbol tags emitted by alert_engine:
+    - [腾讯](0700.HK) -> ("腾讯", "0700.HK")
+    - NVDA -> ("NVDA", "NVDA")
     """
     s = (symbol or '').strip()
     m = _MD_LINK_RE.match(s)
     if m:
         label = (m.group('label') or '').strip()
         target = (m.group('target') or '').strip()
-        if label and target and label != target:
-            return label
-    return s
+        if label and target:
+            return (label, target)
+    return (s, s)
 
 
-def _format_alert_line(line: str) -> str:
+def _symbol_display_name(symbol: str) -> str:
+    return _symbol_parts(symbol)[0]
+
+
+def _quote_url(symbol_code: str) -> str:
+    s = (symbol_code or '').strip()
+    if not s:
+        return ''
+    return f"https://finance.yahoo.com/quote/{s}"
+
+
+def _parse_contract(contract: str) -> tuple[str, str]:
+    s = (contract or '').strip()
+    m = re.match(r'^(?P<exp>\d{4}-\d{2}-\d{2})\s+(?P<strike>.+)$', s)
+    if not m:
+        return ('-', s or '-')
+    return (m.group('exp').strip(), m.group('strike').strip())
+
+
+def _infer_account_label(*paths: Path | None) -> str:
+    for p in paths:
+        if p is None:
+            continue
+        parts = list(p.parts)
+        for i, token in enumerate(parts):
+            if token == 'accounts' and (i + 1) < len(parts):
+                acct = str(parts[i + 1]).strip()
+                if acct:
+                    return acct.upper()
+            if token == 'output_accounts' and (i + 1) < len(parts):
+                acct = str(parts[i + 1]).strip()
+                if acct:
+                    return acct.upper()
+    return '当前账户'
+
+
+def _format_alert_line(line: str, *, account_label: str = '当前账户') -> str:
     raw = line.strip()
     if raw.startswith('- '):
         raw = raw[2:]
@@ -89,13 +123,16 @@ def _format_alert_line(line: str) -> str:
         return line
 
     symbol_raw = parts[0]
-    symbol = _symbol_display_name(symbol_raw)
+    symbol_name, symbol_code = _symbol_parts(symbol_raw)
     strategy = parts[1]
     contract = parts[2]
+    exp, strike_from_contract = _parse_contract(contract)
 
     annual = next((p for p in parts if p.startswith('年化')), '')
     income = next((p for p in parts if p.startswith('净收入')), '')
     dte = next((p for p in parts if p.startswith('DTE')), '')
+    strike_tag = next((p for p in parts if p.startswith('Strike ')), '')
+    risk_tag = next((p for p in parts if p in ('保守', '中性', '激进')), '')
 
     def income_int_tag(s: str) -> str:
         # input like "净收入 137.99" -> "净收 138"
@@ -112,12 +149,13 @@ def _format_alert_line(line: str) -> str:
     ccy = next((p for p in parts if p.startswith('ccy ')), '')
 
     # For notification we intentionally do not surface bid/ask/delta/risk here.
-    bid_val = None
-    ask_val = None
-
     extras: dict[str, str] = {}
     comment = ''
+    trailing_url = ''
     for p in parts[8:]:
+        if p.startswith('http://') or p.startswith('https://'):
+            trailing_url = p
+            continue
         if p.startswith('通过准入') or p.startswith('已通过准入') or p.startswith('当前') or p.startswith('所需'):
             comment = p
             continue
@@ -127,65 +165,76 @@ def _format_alert_line(line: str) -> str:
 
     if strategy == 'sell_put':
         cash_req_cny = extras.get('cash_req_cny', '')
+        delta = extras.get('delta', '')
+        iv = extras.get('iv', '') or extras.get('IV', '')
 
-        # Header line (more scannable)
         price_val = mid.split(' ', 1)[1] if mid and ' ' in mid else 'mid'
         ccy_val = ccy.split(' ', 1)[1] if ccy and ' ' in ccy else ''
-        price_tag = f"卖价 {price_val} ({ccy_val})" if ccy_val else f"卖价 {price_val}"
+        premium = f"{price_val} ({ccy_val})" if ccy_val else price_val
+        sug = _suggest_sell_price_tag(mid, None, None)
 
-        sug = _suggest_sell_price_tag(mid, bid_val, ask_val)
-        sug_tag = f" | {sug}" if sug else ""
-
-        # Move annual/net/dte to the end, keep only one separator
-        meta = " | ".join([x for x in [annual, income_int_tag(income), dte] if x])
-        line1 = f"{symbol} 卖Put {contract} | {price_tag}{sug_tag}" + (f" | {meta}" if meta else "")
-
-        # Line 2 (cash): always base currency (CNY)
-        line2 = ''
+        margin = '-'
         if cash_req_cny:
-            # cash_req_cny might be a raw number or already formatted; normalize to "¥12,345 (CNY)" when possible.
             v = str(cash_req_cny).strip()
-            fmt = v
+            margin = v
             try:
-                # keep digits / dot / minus only
                 cleaned = ''.join(ch for ch in v if (ch.isdigit() or ch in '.-'))
                 if cleaned and cleaned not in ('-', '.', '-.'):
                     n = float(cleaned)
-                    fmt = f"¥{n:,.0f} (CNY)"
+                    margin = f"¥{n:,.0f} (CNY)"
             except Exception:
-                fmt = v
-            line2 = f"预计占用现金: {fmt}"
+                pass
 
-        out = [line1]
-        if line2:
-            out.append(line2)
-        # user preference: omit comment line
+        strike_val = strike_tag.replace('Strike ', '').strip() if strike_tag else strike_from_contract
+        url = trailing_url or _quote_url(symbol_code)
+        title = f"### [{account_label}] {symbol_name} | 到期 {exp} | 策略 卖Put"
+        out = [
+            title,
+            f"- {symbol_name} 卖Put {contract}",
+            f"- 指标: 方向=卖Put | 行权价={strike_val} | 数量=1张(默认) | 权利金={premium} | {annual or '年化 -'} | {income_int_tag(income) or '净收 -'} | 保证金占用={margin} | delta/IV={delta or '-'}{('/' + iv) if iv else ''}",
+        ]
+        if sug:
+            out.append(f"- 建议挂单: {sug.replace('建议挂单 ', '').strip()}")
+        out.append("> 次要信息")
+        out.append(f"> 风险: {risk_tag or '-'}")
+        out.append(f"> DTE: {dte.replace('DTE ', '').strip() if dte else '-'}")
+        if comment:
+            out.append(f"> 备注: {comment}")
+        out.append("---")
+        if url:
+            out.append(url)
         return "\n".join(out)
 
     if strategy == 'sell_call':
         cover = extras.get('cover', '')
         shares = extras.get('shares', '')
+        delta = extras.get('delta', '')
+        iv = extras.get('iv', '') or extras.get('IV', '')
 
         price_val = mid.split(' ', 1)[1] if mid and ' ' in mid else 'mid'
         ccy_val = ccy.split(' ', 1)[1] if ccy and ' ' in ccy else ''
-        price_tag = f"卖价 {price_val} ({ccy_val})" if ccy_val else f"卖价 {price_val}"
-
-        sug = _suggest_sell_price_tag(mid, bid_val, ask_val)
-        sug_tag = f" | {sug}" if sug else ""
-
-        meta = " | ".join([x for x in [annual, income_int_tag(income), dte] if x])
-        line1 = f"{symbol} 卖Call {contract} | {price_tag}{sug_tag}" + (f" | {meta}" if meta else "")
-
-        # Coverage line: make it more human
-        line2 = ''
-        if cover or shares:
-            # keep original shares string (it already encodes locked shares like 160(-0))
-            line2 = f"覆盖: {cover or '-'} 张 | shares {shares or '-'}"
-
-        out = [line1]
-        if line2:
-            out.append(line2)
-        # user preference: omit comment line
+        premium = f"{price_val} ({ccy_val})" if ccy_val else price_val
+        sug = _suggest_sell_price_tag(mid, None, None)
+        strike_val = strike_tag.replace('Strike ', '').strip() if strike_tag else strike_from_contract
+        qty = f"{cover}张(可覆盖)" if cover else '1张(默认)'
+        url = trailing_url or _quote_url(symbol_code)
+        title = f"### [{account_label}] {symbol_name} | 到期 {exp} | 策略 卖Call"
+        out = [
+            title,
+            f"- {symbol_name} 卖Call {contract}",
+            f"- 指标: 方向=卖Call | 行权价={strike_val} | 数量={qty} | 权利金={premium} | {annual or '年化 -'} | {income_int_tag(income) or '净收 -'} | 保证金占用=- | delta/IV={delta or '-'}{('/' + iv) if iv else ''}",
+        ]
+        if sug:
+            out.append(f"- 建议挂单: {sug.replace('建议挂单 ', '').strip()}")
+        out.append("> 次要信息")
+        out.append(f"> 覆盖: {cover or '-'} 张 | shares {shares or '-'}")
+        out.append(f"> 风险: {risk_tag or '-'}")
+        out.append(f"> DTE: {dte.replace('DTE ', '').strip() if dte else '-'}")
+        if comment:
+            out.append(f"> 备注: {comment}")
+        out.append("---")
+        if url:
+            out.append(url)
         return "\n".join(out)
 
     return raw
@@ -206,7 +255,13 @@ def _group_by_strategy(raw_lines: list[str]) -> dict[str, list[str]]:
     return g
 
 
-def build_notification(changes_text: str, alerts_text: str, fx_info: dict | None = None) -> str:
+def build_notification(
+    changes_text: str,
+    alerts_text: str,
+    fx_info: dict | None = None,
+    *,
+    account_label: str = '当前账户',
+) -> str:
     """Build markdown-ish notification text.
 
     User preference:
@@ -247,14 +302,13 @@ def build_notification(changes_text: str, alerts_text: str, fx_info: dict | None
             lines.append(title)
             lines.append('')  # blank line after section heading (Feishu plaintext friendly)
             for x in items:
-                block = _format_alert_line(x).strip()
+                block = _format_alert_line(x, account_label=account_label).strip()
                 if not block:
                     continue
                 b_lines = block.splitlines()
                 if not b_lines:
                     continue
-                # List style: first line as bullet, following lines indented.
-                lines.append('- ' + b_lines[0].strip())
+                lines.append(b_lines[0].strip())
                 for ln in b_lines[1:]:
                     s = ln.rstrip()
                     if not s.strip():
@@ -302,6 +356,7 @@ def main():
 
     alerts_text = read_text(alerts_path)
     changes_text = read_text(changes_path)
+    account_label = _infer_account_label(output_path, alerts_path)
 
     fx_info = None
     try:
@@ -320,7 +375,7 @@ def main():
     except Exception:
         fx_info = None
 
-    notification = build_notification(changes_text, alerts_text, fx_info=fx_info)
+    notification = build_notification(changes_text, alerts_text, fx_info=fx_info, account_label=account_label)
     output_path.write_text(notification, encoding='utf-8')
     # When changes_input is /dev/null (scheduled fast mode), suppress stdout.
     if str(changes_path) != '/dev/null':

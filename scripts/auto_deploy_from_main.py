@@ -9,6 +9,7 @@ Safety model:
 - Abort on non-main current branch (prevents surprising branch switches)
 - Pull with --ff-only only when origin/main has new commits
 - Deploy only after successful pull
+- Honor disable_autodeploy.flag pause switch in prod
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ ROOT_DEV = Path('/home/node/.openclaw/workspace/options-monitor')
 ROOT_PROD = Path('/home/node/.openclaw/workspace/options-monitor-prod')
 LOCK_PATH = ROOT_DEV / '.tmp_auto_deploy_from_main.lock'
 DEPLOY_SCRIPT = ROOT_DEV / 'scripts' / 'deploy_to_prod.py'
+DISABLE_FLAG = ROOT_PROD / 'disable_autodeploy.flag'
 
 
 def _pid_alive(pid: int) -> bool:
@@ -105,6 +107,10 @@ def main() -> int:
             lock_fd = _acquire_lock(LOCK_PATH)
         except FileExistsError:
             print('[skip] another auto-deploy run is in progress')
+            return 0
+
+        if DISABLE_FLAG.exists():
+            print(f'[skip] auto deploy paused by {DISABLE_FLAG}')
             return 0
 
         if not ROOT_DEV.is_dir():
