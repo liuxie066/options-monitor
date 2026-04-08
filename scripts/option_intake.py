@@ -15,12 +15,35 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
+from json import JSONDecodeError, JSONDecoder
 from pathlib import Path
 
 
-def run_capture(cmd: list[str], cwd: Path, timeout_sec: int = 120) -> tuple[int, str, str]:
-    p = subprocess.run(cmd, cwd=str(cwd), timeout=timeout_sec, capture_output=True, text=True)
+def extract_json_tail(s: str) -> dict:
+    decoder = JSONDecoder()
+    for i, ch in enumerate(s):
+        if ch != '{':
+            continue
+        try:
+            obj, end = decoder.raw_decode(s[i:])
+            if isinstance(obj, dict):
+                return obj
+        except JSONDecodeError:
+            continue
+    raise SystemExit('no valid JSON payload found from parser output')
+
+
+def run_capture(cmd: list[str], cwd: Path, timeout_sec: int = 120, env: dict[str, str] | None = None) -> tuple[int, str, str]:
+    p = subprocess.run(
+        cmd,
+        cwd=str(cwd),
+        timeout=timeout_sec,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
     return p.returncode, (p.stdout or ''), (p.stderr or '')
 
 
@@ -39,21 +62,15 @@ def main():
     if (not args.dry_run) and (not args.apply):
         args.dry_run = True
 
-    code, out, err = run_capture([py, 'scripts/parse_option_message.py', '--text', args.text], cwd=base, timeout_sec=30)
+    env = dict(os.environ)
+    env.setdefault('PYTHONPATH', str(base))
+
+    code, out, err = run_capture([py, 'scripts/parse_option_message.py', '--text', args.text], cwd=base, timeout_sec=30, env=env)
     if code != 0:
         print(err.strip() or out.strip())
         return code
-    # parse_option_message may print noisy OpenAPI logs before JSON; take the last JSON object.
-    lines = (out or '').splitlines()
-    buf = []
-    for ln in reversed(lines):
-        if not ln.strip():
-            continue
-        buf.append(ln)
-        if ln.strip().startswith('{'):
-            break
-    txt = '\n'.join(reversed(buf)).strip()
-    parsed = json.loads(txt)
+
+    parsed = extract_json_tail((out or ''))
     if not parsed.get('ok'):
         print('[PARSE_FAIL] missing: ' + ','.join(parsed.get('missing') or []))
         print(json.dumps(parsed, ensure_ascii=False, indent=2))
@@ -84,7 +101,7 @@ def main():
     if args.dry_run and (not args.apply):
         cmd.append('--dry-run')
 
-    rc = subprocess.call(cmd, cwd=str(base))
+    rc = subprocess.call(cmd, cwd=str(base), env=env)
     return rc
 
 
