@@ -111,18 +111,40 @@ def query_cash_footer(
         except Exception:
             return ''
 
-    lines.append('现金（CNY）:')
+    if not payloads and not errors:
+        return []
+
+    def asof_bj(payload: dict) -> str:
+        try:
+            s = payload.get('as_of_utc')
+            if not s:
+                return ''
+            dt = datetime.fromisoformat(str(s))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            bj = dt.astimezone(ZoneInfo('Asia/Shanghai'))
+            return bj.strftime('%Y-%m-%d %H:%M')
+        except Exception:
+            return ''
+
+    lines.append('**💰 现金 CNY**')
+    latest_asof = ''
     for acct in accounts:
         acct_l = str(acct).strip().lower()
         acct_u = acct_l.upper()
         if acct_l in payloads:
             payload = payloads[acct_l] or {}
             t = asof_bj(payload)
-            tag = f" (as_of {t})" if t else ''
+            if t and (not latest_asof or t > latest_asof):
+                latest_asof = t
             lines.append(
-                f"{acct_u}: holding {money_cny(payload.get('cash_available_cny'))} | free {money_cny(payload.get('cash_free_cny'))}{tag}"
+                f"- **{acct_u}** 持有 {money_cny(payload.get('cash_available_cny'))} | 可用 {money_cny(payload.get('cash_free_cny'))}"
             )
         elif acct_l in errors:
-            lines.append(f"{acct_u}: (cash query failed) {errors[acct_l]}")
+            lines.append(f"- **{acct_u}**: (查询失败) {errors[acct_l]}")
+
+    if latest_asof:
+        lines.append('')
+        lines.append(f"> 截至 {latest_asof}")
 
     return lines

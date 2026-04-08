@@ -46,7 +46,7 @@ def annotate_notification(acct: str, text: str) -> str:
             in_put, in_call = True, False
             if out and out[-1].strip() != '':
                 out.append('')
-            out.append('Put:')
+            out.append('**Put:**')
             last_line1_idx = None
             continue
 
@@ -54,7 +54,7 @@ def annotate_notification(acct: str, text: str) -> str:
             in_put, in_call = False, True
             if out and out[-1].strip() != '':
                 out.append('')
-            out.append('Call:')
+            out.append('**Call:**')
             last_line1_idx = None
             continue
 
@@ -145,8 +145,11 @@ def build_merged_message(
     cash_footer_lines: list[str] | None = None,
 ) -> str:
     lines: list[str] = []
-    lines.append("options-monitor 合并提醒")
-    lines.append(f"北京时间: {now_bj}")
+    lines.append("**📊 Options Monitor 合并提醒**")
+    lines.append('')
+    lines.append(f"> 北京时间 **{now_bj}**")
+    lines.append('')
+    lines.append('---')
     lines.append('')
 
     any_content = False
@@ -161,8 +164,11 @@ def build_merged_message(
         put_n = sum(1 for ln in kept if ' 卖Put ' in ln)
         call_n = sum(1 for ln in kept if ' 卖Call ' in ln)
 
-        lines.append(f"[{r.account.upper()}]（Put {put_n} / Call {call_n}）")
+        lines.append(f"**【{r.account.upper()}】Put {put_n} / Call {call_n}**")
+        lines.append('')
         lines.append(annotate_notification(r.account, '\n'.join(kept).strip() + '\n').strip())
+        lines.append('')
+        lines.append('---')
         lines.append('')
 
     if not any_content:
