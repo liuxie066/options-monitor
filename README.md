@@ -43,6 +43,31 @@ cp config.example.hk.json config.hk.json
 
 ---
 
+## futu-core 接入（阶段一）
+
+当前 `dev` 仓已完成第一阶段接入：OpenD 相关主路径优先经 `futu-core` 统一客户端调用。
+
+- 统一入口：`scripts/futu_gateway.py`
+- 构建方式：`OpenDBackend + FutuCoreClient`
+- 已替换主路径：`scripts/fetch_market_data_opend.py`（期权链/快照）
+- 错误语义：2FA / 登录失效 / 限流会映射为可识别异常并 fail-fast
+
+依赖安装方式（开发环境）：
+
+```bash
+cd /home/node/.openclaw/workspace/futu-core
+pip install -e .[opend]
+
+cd /home/node/.openclaw/workspace/options-monitor
+./.venv/bin/pip install -e ../futu-core
+```
+
+说明：
+- 为兼容本地联调，`scripts/futu_gateway.py` 会在未安装时尝试加载邻接仓 `../futu-core/src`。
+- 生产/CI 仍建议显式安装 `futu-core` 依赖，不依赖路径注入。
+
+---
+
 ## Cheatsheet（常用命令）
 
 > 说明：这里是给人跑的；Agent/cron 的白名单命令以 `SKILL.md` 为准。

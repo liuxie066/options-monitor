@@ -38,7 +38,7 @@
         "min_annualized_net_return": 0.1,
         "min_net_income": 100,
         "min_open_interest": 50,
-        "min_volume": 10,
+        "min_volume": 0,
         "max_spread_ratio": 0.3
       }
     },
@@ -47,7 +47,7 @@
         "min_annualized_net_return": 0.1,
         "min_if_exercised_total_return": 0.05,
         "min_open_interest": 50,
-        "min_volume": 10,
+        "min_volume": 0,
         "max_spread_ratio": 0.3
       }
     }
