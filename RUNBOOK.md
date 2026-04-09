@@ -111,9 +111,12 @@ cd /home/node/.openclaw/workspace/options-monitor
 
 # 可选：同时清理 output_accounts/*/raw 下旧 JSON（默认关闭，保守）
 .venv/bin/python scripts/cleanup_runtime_artifacts.py --keep-days 7 --cleanup-account-raw --apply
+
+# 可选：同时清理 logs/ 与 audit/ 旧文件（默认关闭，保守）
+.venv/bin/python scripts/cleanup_runtime_artifacts.py --keep-days 7 --cleanup-logs-audit --apply
 ```
 
 安全策略：
 - 永不删除“最近一次成功 run”目录
-- 仅删除仓库白名单路径：`output_runs/` 与（可选）`output_accounts/*/raw/*.json`
+- 仅删除仓库白名单路径：`output_runs/`、（可选）`output_accounts/*/raw/*.json`、（可选）`logs/**`、`audit/**`
 - 每次输出扫描/删除汇总、空间估算与保护目录
