@@ -17,14 +17,12 @@ def test_notify_symbols_markdown_put_layout() -> None:
 
 ### [LX] 腾讯 | 到期 2026-04-29 | 策略 卖Put
 - 腾讯 卖Put 2026-04-29 460P
-- 指标: 方向=卖Put | 行权价=460 | 数量=1张(默认) | 权利金=5.720 (HKD) | 年化 17.21% | 净收 557 | 保证金占用=¥110,720 (CNY) | delta/IV=-0.23
+- 指标: 方向=卖Put | 行权价=460 | 数量=1张(默认) | 权利金=5.720 (HKD) | 年化 17.21% | 净收 557 | 保证金占用=¥110,720 (CNY) | delta=-0.23 | IV=-
 - 建议挂单: 5.720
 > 次要信息
 > 风险: 中性
 > DTE: 26
-> 备注: 通过准入后，收益/风险组合较强，值得优先看。
 ---
-https://finance.yahoo.com/quote/0700.HK
 """
     assert out == expected
 
@@ -45,7 +43,5 @@ def test_notify_symbols_markdown_call_layout_and_changes() -> None:
 
     assert "### [SY] 英伟达 | 到期 2026-06-18 | 策略 卖Call" in out
     assert "数量=2张(可覆盖)" in out
-    assert "https://finance.yahoo.com/quote/NVDA" in out
     assert "变化" in out
     assert "- NVDA sell_call: Top pick 由 2026-06-18 175C 变为 2026-06-18 180C。" in out
-
