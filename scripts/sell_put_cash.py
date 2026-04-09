@@ -57,16 +57,42 @@ def enrich_sell_put_candidates_with_cash(
             by_sym_ccy = option_ctx.get('cash_secured_by_symbol_by_ccy') or {}
             tot_by_ccy = option_ctx.get('cash_secured_total_by_ccy') or {}
             if isinstance(by_sym_ccy, dict) and (by_sym_ccy or tot_by_ccy):
-                used_symbol_usd = float(((by_sym_ccy.get(symbol) or {}).get('USD')) or 0.0)
+                symbol_u = str(symbol or '').strip().upper()
+                sym_used_by_ccy = (by_sym_ccy.get(symbol_u) or by_sym_ccy.get(symbol) or {})
+
+                used_symbol_usd = float(((sym_used_by_ccy or {}).get('USD')) or 0.0)
                 used_total_usd = float((tot_by_ccy.get('USD')) or 0.0)
                 v = option_ctx.get('cash_secured_total_cny')
                 used_total_cny = float(v) if v is not None else None
                 vs = None
                 try:
-                    vs = (option_ctx.get('cash_secured_by_symbol_cny') or {}).get(symbol)
+                    m_cny = option_ctx.get('cash_secured_by_symbol_cny') or {}
+                    if isinstance(m_cny, dict):
+                        vs = m_cny.get(symbol_u)
+                        if vs is None:
+                            vs = m_cny.get(symbol)
                 except Exception:
                     vs = None
                 used_symbol_cny = float(vs) if vs is not None else None
+
+                # Newer schema may only provide per-symbol cash usage by currency.
+                if used_symbol_cny is None and isinstance(sym_used_by_ccy, dict) and sym_used_by_ccy:
+                    cny_sum = 0.0
+                    has_any = False
+                    failed = False
+                    for ccy, amt in sym_used_by_ccy.items():
+                        try:
+                            v_amt = float(amt or 0.0)
+                        except Exception:
+                            continue
+                        v_cny = fx.native_to_cny(v_amt, native_ccy=str(ccy or '').upper())
+                        if v_cny is None:
+                            failed = True
+                            break
+                        cny_sum += float(v_cny)
+                        has_any = True
+                    if has_any and (not failed):
+                        used_symbol_cny = cny_sum
             else:
                 used_map = (option_ctx.get('cash_secured_by_symbol') or {})
                 used_symbol_usd = float(used_map.get(symbol) or 0.0)
