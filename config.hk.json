@@ -117,8 +117,6 @@
       },
       "sell_call": {
         "enabled": true,
-        "avg_cost": 500,
-        "shares": 100,
         "min_dte": 20,
         "max_dte": 90,
         "min_strike": 550,
@@ -170,8 +168,6 @@
       },
       "sell_call": {
         "enabled": true,
-        "avg_cost": 150,
-        "shares": 100,
         "min_dte": 20,
         "max_dte": 90,
         "min_strike": 190,

@@ -202,8 +202,6 @@
         "max_dte": 90,
         "min_otm_pct": 0.05,
         "min_strike": 30,
-        "avg_cost": 0.01,
-        "shares": 100,
         "min_annualized_net_return": 0.03,
         "min_if_exercised_total_return": 0.0,
         "min_open_interest": 50,

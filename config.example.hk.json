@@ -99,8 +99,6 @@
       },
       "sell_call": {
         "enabled": false,
-        "avg_cost": null,
-        "shares": null
       }
     }
   ]
