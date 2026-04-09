@@ -36,15 +36,18 @@ def run_sell_call_scan_and_summarize(
 
     Returns the summary row dict (same schema as summarize_sell_call).
     """
-    shares_override = None
-    avg_cost_override = None
-    if stock:
-        shares_override = stock.get('shares')
-        avg_cost_override = stock.get('avg_cost')
+    # sell_call avg_cost/shares are sourced from account holdings context only.
+    # Covered-call cost basis and shares are account-scoped and must come from holdings context.
+    if not stock:
+        return summarize_sell_call(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg)
 
-    shares_total = int(shares_override if shares_override is not None else cc.get('shares', 100))
-    avg_cost = avg_cost_override if avg_cost_override is not None else cc.get('avg_cost')
-    if avg_cost is None:
+    try:
+        shares_total = int(stock.get('shares'))
+        avg_cost = float(stock.get('avg_cost'))
+    except Exception:
+        return summarize_sell_call(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg)
+
+    if shares_total <= 0 or avg_cost <= 0:
         return summarize_sell_call(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg)
 
     locked = 0
