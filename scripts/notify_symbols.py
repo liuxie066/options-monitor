@@ -83,10 +83,7 @@ def _symbol_display_name(symbol: str) -> str:
 
 
 def _quote_url(symbol_code: str) -> str:
-    s = (symbol_code or '').strip()
-    if not s:
-        return ''
-    return f"https://finance.yahoo.com/quote/{s}"
+    return ''
 
 
 def _parse_contract(contract: str) -> tuple[str, str]:
@@ -151,11 +148,7 @@ def _format_alert_line(line: str, *, account_label: str = '当前账户') -> str
     # For notification we intentionally do not surface bid/ask/delta/risk here.
     extras: dict[str, str] = {}
     comment = ''
-    trailing_url = ''
     for p in parts[8:]:
-        if p.startswith('http://') or p.startswith('https://'):
-            trailing_url = p
-            continue
         if p.startswith('通过准入') or p.startswith('已通过准入') or p.startswith('当前') or p.startswith('所需'):
             comment = p
             continue
@@ -186,23 +179,18 @@ def _format_alert_line(line: str, *, account_label: str = '当前账户') -> str
                 pass
 
         strike_val = strike_tag.replace('Strike ', '').strip() if strike_tag else strike_from_contract
-        url = trailing_url or _quote_url(symbol_code)
         title = f"### [{account_label}] {symbol_name} | 到期 {exp} | 策略 卖Put"
         out = [
             title,
             f"- {symbol_name} 卖Put {contract}",
-            f"- 指标: 方向=卖Put | 行权价={strike_val} | 数量=1张(默认) | 权利金={premium} | {annual or '年化 -'} | {income_int_tag(income) or '净收 -'} | 保证金占用={margin} | delta/IV={delta or '-'}{('/' + iv) if iv else ''}",
+            f"- 指标: 方向=卖Put | 行权价={strike_val} | 数量=1张(默认) | 权利金={premium} | {annual or '年化 -'} | {income_int_tag(income) or '净收 -'} | 保证金占用={margin} | delta={delta or '-'} | IV={iv or '-'}",
         ]
         if sug:
             out.append(f"- 建议挂单: {sug.replace('建议挂单 ', '').strip()}")
         out.append("> 次要信息")
         out.append(f"> 风险: {risk_tag or '-'}")
         out.append(f"> DTE: {dte.replace('DTE ', '').strip() if dte else '-'}")
-        if comment:
-            out.append(f"> 备注: {comment}")
         out.append("---")
-        if url:
-            out.append(url)
         return "\n".join(out)
 
     if strategy == 'sell_call':
@@ -217,12 +205,11 @@ def _format_alert_line(line: str, *, account_label: str = '当前账户') -> str
         sug = _suggest_sell_price_tag(mid, None, None)
         strike_val = strike_tag.replace('Strike ', '').strip() if strike_tag else strike_from_contract
         qty = f"{cover}张(可覆盖)" if cover else '1张(默认)'
-        url = trailing_url or _quote_url(symbol_code)
         title = f"### [{account_label}] {symbol_name} | 到期 {exp} | 策略 卖Call"
         out = [
             title,
             f"- {symbol_name} 卖Call {contract}",
-            f"- 指标: 方向=卖Call | 行权价={strike_val} | 数量={qty} | 权利金={premium} | {annual or '年化 -'} | {income_int_tag(income) or '净收 -'} | 保证金占用=- | delta/IV={delta or '-'}{('/' + iv) if iv else ''}",
+            f"- 指标: 方向=卖Call | 行权价={strike_val} | 数量={qty} | 权利金={premium} | {annual or '年化 -'} | {income_int_tag(income) or '净收 -'} | 保证金占用=- | delta={delta or '-'} | IV={iv or '-'}",
         ]
         if sug:
             out.append(f"- 建议挂单: {sug.replace('建议挂单 ', '').strip()}")
@@ -230,11 +217,7 @@ def _format_alert_line(line: str, *, account_label: str = '当前账户') -> str
         out.append(f"> 覆盖: {cover or '-'} 张 | shares {shares or '-'}")
         out.append(f"> 风险: {risk_tag or '-'}")
         out.append(f"> DTE: {dte.replace('DTE ', '').strip() if dte else '-'}")
-        if comment:
-            out.append(f"> 备注: {comment}")
         out.append("---")
-        if url:
-            out.append(url)
         return "\n".join(out)
 
     return raw
