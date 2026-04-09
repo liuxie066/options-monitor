@@ -49,6 +49,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Also clean old JSON files under output_accounts/*/raw (disabled by default)",
     )
+    parser.add_argument(
+        "--cleanup-logs-audit",
+        action="store_true",
+        help="Also clean old files under logs/ and audit/ (disabled by default)",
+    )
     args = parser.parse_args()
 
     # --apply wins. Without --apply we remain in dry-run mode.
@@ -210,6 +215,48 @@ def build_account_raw_candidates(
     return candidates, scanned_dirs
 
 
+def build_logs_audit_candidates(
+    repo_root: Path,
+    cutoff: datetime,
+    whitelist_roots: list[Path],
+) -> tuple[list[Candidate], int, int]:
+    candidates: list[Candidate] = []
+    scanned_logs_files = 0
+    scanned_audit_files = 0
+
+    logs_root = (repo_root / "logs").resolve()
+    audit_root = (repo_root / "audit").resolve()
+
+    def collect_from_root(root: Path, kind: str) -> tuple[list[Candidate], int]:
+        local_candidates: list[Candidate] = []
+        scanned_files = 0
+        if not root.exists() or not root.is_dir():
+            return local_candidates, scanned_files
+
+        for item in root.rglob("*"):
+            if not item.is_file():
+                continue
+            scanned_files += 1
+            if file_mtime(item) >= cutoff:
+                continue
+            if not any(is_within(item, wroot) for wroot in whitelist_roots):
+                continue
+            try:
+                size = item.stat().st_size
+            except OSError:
+                size = 0
+            local_candidates.append(Candidate(path=item.resolve(), kind=kind, size_bytes=size))
+
+        return local_candidates, scanned_files
+
+    log_candidates, scanned_logs_files = collect_from_root(logs_root, "logs_file")
+    audit_candidates, scanned_audit_files = collect_from_root(audit_root, "audit_file")
+    candidates.extend(log_candidates)
+    candidates.extend(audit_candidates)
+
+    return candidates, scanned_logs_files, scanned_audit_files
+
+
 def bytes_human(n: int) -> str:
     units = ["B", "KB", "MB", "GB", "TB"]
     size = float(n)
@@ -220,9 +267,11 @@ def bytes_human(n: int) -> str:
     return f"{n}B"
 
 
-def delete_candidates(candidates: list[Candidate], dry_run: bool) -> tuple[int, int]:
+def delete_candidates(candidates: list[Candidate], dry_run: bool) -> tuple[int, int, int, int]:
     deleted_dirs = 0
-    deleted_files = 0
+    deleted_raw_files = 0
+    deleted_logs_files = 0
+    deleted_audit_files = 0
 
     for c in candidates:
         if dry_run:
@@ -233,9 +282,15 @@ def delete_candidates(candidates: list[Candidate], dry_run: bool) -> tuple[int, 
             deleted_dirs += 1
         elif c.kind == "account_raw_file":
             c.path.unlink()
-            deleted_files += 1
+            deleted_raw_files += 1
+        elif c.kind == "logs_file":
+            c.path.unlink()
+            deleted_logs_files += 1
+        elif c.kind == "audit_file":
+            c.path.unlink()
+            deleted_audit_files += 1
 
-    return deleted_dirs, deleted_files
+    return deleted_dirs, deleted_raw_files, deleted_logs_files, deleted_audit_files
 
 
 def main() -> int:
@@ -244,6 +299,8 @@ def main() -> int:
     repo_root = Path(args.repo_root).resolve()
     runs_root = (repo_root / "output_runs").resolve()
     accounts_root = (repo_root / "output_accounts").resolve()
+    logs_root = (repo_root / "logs").resolve()
+    audit_root = (repo_root / "audit").resolve()
 
     if not repo_root.exists() or not repo_root.is_dir():
         raise SystemExit(f"[ERROR] repo root does not exist: {repo_root}")
@@ -253,6 +310,8 @@ def main() -> int:
     whitelist_roots = [runs_root]
     if args.cleanup_account_raw:
         whitelist_roots.append(accounts_root)
+    if args.cleanup_logs_audit:
+        whitelist_roots.extend([logs_root, audit_root])
 
     latest_success_run_dir, pointer_run_dir = detect_success_run_dirs(repo_root, runs_root)
     protected: set[Path] = set()
@@ -285,10 +344,24 @@ def main() -> int:
             whitelist_roots=whitelist_roots,
         )
 
-    all_candidates = run_candidates + raw_candidates
-    estimated_bytes = sum(c.size_bytes for c in all_candidates)
+    logs_audit_candidates: list[Candidate] = []
+    scanned_logs_files = 0
+    scanned_audit_files = 0
+    if args.cleanup_logs_audit:
+        logs_audit_candidates, scanned_logs_files, scanned_audit_files = build_logs_audit_candidates(
+            repo_root=repo_root,
+            cutoff=cutoff,
+            whitelist_roots=whitelist_roots,
+        )
 
-    deleted_dirs, deleted_files = delete_candidates(all_candidates, dry_run=args.dry_run)
+    all_candidates = run_candidates + raw_candidates + logs_audit_candidates
+    estimated_bytes = sum(c.size_bytes for c in all_candidates)
+    estimated_logs_bytes = sum(c.size_bytes for c in logs_audit_candidates if c.kind == "logs_file")
+    estimated_audit_bytes = sum(c.size_bytes for c in logs_audit_candidates if c.kind == "audit_file")
+
+    deleted_dirs, deleted_raw_files, deleted_logs_files, deleted_audit_files = delete_candidates(
+        all_candidates, dry_run=args.dry_run
+    )
 
     mode = "dry-run" if args.dry_run else "apply"
     print(f"[MODE] {mode}")
@@ -296,14 +369,28 @@ def main() -> int:
     print(f"[CUTOFF_UTC] {cutoff.isoformat()}")
     print(f"[KEEP_DAYS] {args.keep_days}")
     print(f"[SAFE] latest_success_run_dir={displayed_latest_success}")
-    print(f"[SCAN] run_dirs={scanned_run_dirs} account_raw_dirs={scanned_raw_dirs}")
-    print(f"[PLAN] delete_run_dirs={len(run_candidates)} delete_account_raw_files={len(raw_candidates)}")
-    print(f"[ESTIMATE] reclaim={estimated_bytes} ({bytes_human(estimated_bytes)})")
+    print(
+        f"[SCAN] run_dirs={scanned_run_dirs} account_raw_dirs={scanned_raw_dirs} "
+        f"logs_files={scanned_logs_files} audit_files={scanned_audit_files}"
+    )
+    print(
+        f"[PLAN] delete_run_dirs={len(run_candidates)} delete_account_raw_files={len(raw_candidates)} "
+        f"delete_logs_files={sum(1 for c in logs_audit_candidates if c.kind == 'logs_file')} "
+        f"delete_audit_files={sum(1 for c in logs_audit_candidates if c.kind == 'audit_file')}"
+    )
+    print(
+        f"[ESTIMATE] reclaim={estimated_bytes} ({bytes_human(estimated_bytes)}) "
+        f"logs={estimated_logs_bytes} ({bytes_human(estimated_logs_bytes)}) "
+        f"audit={estimated_audit_bytes} ({bytes_human(estimated_audit_bytes)})"
+    )
 
     for c in all_candidates:
         print(f"[CANDIDATE] {c.kind} size={c.size_bytes} path={c.path}")
 
-    print(f"[RESULT] deleted_run_dirs={deleted_dirs} deleted_account_raw_files={deleted_files}")
+    print(
+        f"[RESULT] deleted_run_dirs={deleted_dirs} deleted_account_raw_files={deleted_raw_files} "
+        f"deleted_logs_files={deleted_logs_files} deleted_audit_files={deleted_audit_files}"
+    )
     return 0
 
 
