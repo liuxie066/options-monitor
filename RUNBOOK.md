@@ -95,3 +95,25 @@ Manual diagnostics/helpers live under `scripts/tools/`:
 - doctor_required_data_schema.py: validate required_data.csv schema
 - snip_sell_put_headroom.py: extract headroom summary
 - sell_put_cash_and_notify.py: standalone cash warning helper
+
+## 🧹 历史运行产物清理（手动）
+
+仅实现手动/cron 可调用脚本；是否创建 cron 任务由你自行决定。
+
+```bash
+cd /home/node/.openclaw/workspace/options-monitor
+
+# 预览（默认 dry-run）
+.venv/bin/python scripts/cleanup_runtime_artifacts.py --keep-days 7
+
+# 执行删除（仅 output_runs）
+.venv/bin/python scripts/cleanup_runtime_artifacts.py --keep-days 7 --apply
+
+# 可选：同时清理 output_accounts/*/raw 下旧 JSON（默认关闭，保守）
+.venv/bin/python scripts/cleanup_runtime_artifacts.py --keep-days 7 --cleanup-account-raw --apply
+```
+
+安全策略：
+- 永不删除“最近一次成功 run”目录
+- 仅删除仓库白名单路径：`output_runs/` 与（可选）`output_accounts/*/raw/*.json`
+- 每次输出扫描/删除汇总、空间估算与保护目录
