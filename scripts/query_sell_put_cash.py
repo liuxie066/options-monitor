@@ -22,6 +22,13 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
+from scripts.cash_secured_utils import (
+    cash_secured_symbol_cny,
+    normalize_cash_secured_by_symbol_by_ccy,
+    normalize_cash_secured_total_by_ccy,
+    read_cash_secured_total_cny,
+)
+
 
 def run(cmd: list[str], cwd: Path, timeout_sec: int = 60):
     p = subprocess.run(cmd, cwd=str(cwd), timeout=timeout_sec)
@@ -120,51 +127,9 @@ def main():
     except Exception:
         cash_avail_usd = None
 
-    # New schema: cash_secured_by_symbol_by_ccy + totals by ccy + total_cny.
-    # Keep backward compatibility if old key exists.
-    norm_by_ccy = {}
-    if opt.get('cash_secured_by_symbol_by_ccy'):
-        for sym, m in (opt.get('cash_secured_by_symbol_by_ccy') or {}).items():
-            if not isinstance(m, dict):
-                continue
-            for ccy, v in m.items():
-                try:
-                    fv = float(v)
-                except Exception:
-                    continue
-                if not fv:
-                    continue
-                sym_u = str(sym).strip().upper()
-                ccy_u = str(ccy).strip().upper() or 'USD'
-                norm_by_ccy.setdefault(sym_u, {})
-                norm_by_ccy[sym_u][ccy_u] = norm_by_ccy[sym_u].get(ccy_u, 0.0) + fv
-    else:
-        old_map = (opt.get('cash_secured_by_symbol') or {})
-        for sym, v in old_map.items():
-            try:
-                fv = float(v)
-            except Exception:
-                continue
-            if fv:
-                sym_u = str(sym).strip().upper()
-                norm_by_ccy[sym_u] = {'USD': fv}
-
-    total_by_ccy = opt.get('cash_secured_total_by_ccy') or {}
-    # Normalize numeric totals
-    total_by_ccy_norm = {}
-    for ccy, v in total_by_ccy.items():
-        try:
-            fv = float(v)
-        except Exception:
-            continue
-        if fv:
-            total_by_ccy_norm[str(ccy).strip().upper()] = fv
-
-    cash_secured_total_cny = opt.get('cash_secured_total_cny')
-    try:
-        cash_secured_total_cny = float(cash_secured_total_cny) if cash_secured_total_cny is not None else None
-    except Exception:
-        cash_secured_total_cny = None
+    norm_by_ccy = normalize_cash_secured_by_symbol_by_ccy(opt)
+    total_by_ccy_norm = normalize_cash_secured_total_by_ccy(opt, by_symbol_by_ccy=norm_by_ccy)
+    cash_secured_total_cny = read_cash_secured_total_cny(opt)
 
     # We can only compute a meaningful USD free cash if both are USD-based.
     # (HKD-secured puts cannot be subtracted from USD cash without more broker semantics.)
@@ -307,25 +272,24 @@ def main():
         for i, (sym, total, m) in enumerate(items[: max(args.top, 1)]):
             detail = ", ".join([f"{ccy} {money(v, ccy).replace('$','').replace('¥','')}" for ccy, v in sorted(m.items())])
 
-            # Add CNY equivalent per symbol when FX is available.
-            cny_eq = None
-            if (usdcny or hkdcny) and isinstance(m, dict):
-                cny_eq = 0.0
-                for ccy, v in m.items():
-                    try:
-                        fv = float(v)
-                    except Exception:
-                        continue
-                    c = str(ccy).strip().upper()
-                    if c == 'CNY':
-                        cny_eq += fv
-                    elif c == 'USD' and usdcny:
-                        cny_eq += fv * float(usdcny)
-                    elif c == 'HKD' and hkdcny:
-                        cny_eq += fv * float(hkdcny)
-                    else:
-                        cny_eq = None
-                        break
+            cny_eq = cash_secured_symbol_cny(
+                opt,
+                sym,
+                by_symbol_by_ccy=norm_by_ccy,
+                native_to_cny=lambda amt, ccy: (
+                    float(amt)
+                    if ccy == 'CNY'
+                    else (
+                        float(amt) * float(usdcny)
+                        if (ccy == 'USD' and usdcny)
+                        else (
+                            float(amt) * float(hkdcny)
+                            if (ccy == 'HKD' and hkdcny)
+                            else None
+                        )
+                    )
+                ),
+            )
 
             cny_part = f" | ≈ {money(cny_eq, 'CNY')}" if cny_eq is not None else ""
             lines.append(f"- {sym}: {detail}{cny_part}")
