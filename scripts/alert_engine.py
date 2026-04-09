@@ -122,6 +122,12 @@ def top_pick_line(row: pd.Series) -> str:
             except Exception:
                 pass
             try:
+                iv = row.get('iv')
+                if iv is not None and not pd.isna(iv):
+                    parts.append(f"iv {pct(iv)}")
+            except Exception:
+                pass
+            try:
                 ccy = row.get('option_ccy')
                 if ccy and isinstance(ccy, str):
                     parts.append(f"ccy {ccy.strip().upper()}")
@@ -236,6 +242,12 @@ def top_pick_line(row: pd.Series) -> str:
                 d = row.get('delta')
                 if d is not None and not pd.isna(d):
                     parts.insert(0, f"delta {float(d):.2f}")
+            except Exception:
+                pass
+            try:
+                iv = row.get('iv')
+                if iv is not None and not pd.isna(iv):
+                    parts.insert(0, f"iv {pct(iv)}")
             except Exception:
                 pass
             try:
