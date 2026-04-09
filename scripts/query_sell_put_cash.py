@@ -19,8 +19,15 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+# Allow running as a script (python scripts/query_sell_put_cash.py)
+# by ensuring repo root is on sys.path.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.cash_secured_utils import (
     cash_secured_symbol_cny,
