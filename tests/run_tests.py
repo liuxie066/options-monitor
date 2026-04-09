@@ -164,6 +164,9 @@ def main() -> None:
         test_notify_symbols_markdown_put_layout,
         test_notify_symbols_markdown_call_layout_and_changes,
     )
+    from test_multi_tick_notify_format import (
+        test_merged_message_is_plain_text_for_weixin,
+    )
 
     from test_http_json_http_error_handling import (
         test_http_json_404_non_json_body_raises_permanent_error,
@@ -206,6 +209,7 @@ def main() -> None:
         test_postprocess_notify_gate,
         test_notify_symbols_markdown_put_layout,
         test_notify_symbols_markdown_call_layout_and_changes,
+        test_merged_message_is_plain_text_for_weixin,
         # http_json regression
         test_http_json_404_non_json_body_raises_permanent_error,
         test_http_json_500_json_body_raises_transient_error,
