@@ -49,3 +49,10 @@ cache/
 # Runtime audit logs
 /audit/run_logs/
 logs/
+
+# webui build
+scripts/webui/static/
+scripts/webui/frontend/node_modules/
+
+# local config backups
+config.*.bak.*

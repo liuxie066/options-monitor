@@ -27,7 +27,7 @@ from .required_data_prefetch import prefetch_required_data
 from .notify_format import (
     is_high_priority_notification,
     flatten_auto_close_summary,
-    build_merged_message,
+    build_account_message,
 )
 from .opend_guard import (
     mark_opend_phone_verify_pending,
@@ -50,6 +50,31 @@ from scripts.opend_utils import is_trading_day_via_futu
 
 
 _CURRENT_RUN_ID: str | None = None
+
+
+def _cash_footer_for_account(cash_footer_lines: list[str], account: str) -> list[str]:
+    if not cash_footer_lines:
+        return []
+    acct = str(account).strip().upper()
+    out: list[str] = []
+    matched = False
+    asof_line = ''
+    for ln in cash_footer_lines:
+        s = str(ln)
+        if s.startswith('**💰 现金 CNY**'):
+            out.append(s)
+            continue
+        if s.startswith('> 截至 '):
+            asof_line = s
+            continue
+        if s.startswith(f'- **{acct}**'):
+            out.append(s)
+            matched = True
+            continue
+    if matched and asof_line:
+        out.append('')
+        out.append(asof_line)
+    return out if matched else []
 
 
 def account_run_state_dir(run_dir: Path, account: str) -> Path:
@@ -525,8 +550,32 @@ def main() -> int:
 
     scheduler_decision = json.loads((scheduler_proc.stdout or '').strip())
     should_run_global = bool(scheduler_decision.get('should_run_scan'))
-    should_notify_global = bool(scheduler_decision.get('is_notify_window_open', scheduler_decision.get('should_notify')))
     reason_global = str(scheduler_decision.get('reason') or '')
+
+    notify_decision_by_account: dict[str, bool] = {}
+    for acct0 in [str(a).strip() for a in (args.accounts or []) if str(a).strip()]:
+        try:
+            sch_acct_cmd = [
+                str(vpy), 'scripts/scan_scheduler.py',
+                '--config', str(cfg_path),
+                '--state', str(state_path),
+                '--jsonl',
+                '--schedule-key', str(scheduler_schedule_key),
+                '--account', str(acct0),
+            ]
+            sch_acct = subprocess.run(
+                sch_acct_cmd,
+                cwd=str(base),
+                capture_output=True,
+                text=True,
+            )
+            if sch_acct.returncode == 0:
+                sch_acct_decision = json.loads((sch_acct.stdout or '').strip())
+                notify_decision_by_account[acct0] = bool(sch_acct_decision.get('is_notify_window_open', sch_acct_decision.get('should_notify')))
+            else:
+                notify_decision_by_account[acct0] = bool(scheduler_decision.get('is_notify_window_open', scheduler_decision.get('should_notify')))
+        except Exception:
+            notify_decision_by_account[acct0] = bool(scheduler_decision.get('is_notify_window_open', scheduler_decision.get('should_notify')))
 
     if force_mode:
         should_run_global = True
@@ -632,7 +681,7 @@ def main() -> int:
         notif_path = (acct_report_dir / 'symbols_notification.txt').resolve()
 
         should_run = bool(should_run_global)
-        should_notify = bool(should_notify_global)
+        should_notify = bool(notify_decision_by_account.get(acct, scheduler_decision.get('is_notify_window_open', scheduler_decision.get('should_notify'))))
         reason = str(reason_global)
 
         acct_metrics['should_notify'] = bool(should_notify)
@@ -795,13 +844,19 @@ def main() -> int:
         cash_footer_lines = []
 
     now_bj = bj_now()
-    merged = build_merged_message(
-        results,
-        now_bj=now_bj,
-        cash_footer_lines=cash_footer_lines,
-    )
-    if not merged:
-        runlog.safe_event('notify', 'skip', message='no merged notification content')
+    account_messages: dict[str, str] = {}
+    notify_candidates = [r for r in results if r.should_notify and r.meaningful and bool(r.notification_text.strip())]
+    for r in notify_candidates:
+        msg = build_account_message(
+            r,
+            now_bj=now_bj,
+            cash_footer_lines=_cash_footer_for_account(cash_footer_lines, r.account),
+        )
+        if msg:
+            account_messages[str(r.account)] = msg
+
+    if not account_messages:
+        runlog.safe_event('notify', 'skip', message='no account notification content')
 
         try:
             shared_last = (base / 'output_shared' / 'state' / 'last_run.json').resolve()
@@ -809,8 +864,7 @@ def main() -> int:
             write_json(shared_last, {
                 'last_run_utc': utc_now(),
                 'sent': False,
-                'reason': 'no_merged_notification',
-                'account': 'merged',
+                'reason': 'no_account_notification',
                 'accounts': [r.account for r in results],
                 'results': [r.__dict__ for r in results],
             })
@@ -823,7 +877,7 @@ def main() -> int:
                 payload = {
                     'last_run_utc': utc_now(),
                     'sent': False,
-                    'reason': 'no_merged_notification',
+                    'reason': 'no_account_notification',
                     'account': r.account,
                     'result': r.__dict__,
                     'run_dir': str(run_dir),
@@ -835,7 +889,7 @@ def main() -> int:
 
         try:
             tick_metrics['sent'] = False
-            tick_metrics['reason'] = 'no_merged_notification'
+            tick_metrics['reason'] = 'no_account_notification'
             write_json(tick_metrics_path, tick_metrics)
             append_json_list(tick_metrics_history_path, tick_metrics)
             write_json(tick_metrics_run_path, tick_metrics)
@@ -843,7 +897,7 @@ def main() -> int:
         except Exception:
             pass
 
-        runlog.safe_event('run_end', 'ok', data=_safe_runlog_data({'sent': False, 'reason': 'no_merged_notification', 'accounts': [r.account for r in results]}))
+        runlog.safe_event('run_end', 'ok', data=_safe_runlog_data({'sent': False, 'reason': 'no_account_notification', 'accounts': [r.account for r in results]}))
 
         return 0
 
@@ -852,19 +906,21 @@ def main() -> int:
 
     # --- Quiet Hours (DND) Check ---
     notif_cfg = base_cfg.get('notifications') or {}
+    schedule_cfg0 = base_cfg.get('schedule') or {}
+    schedule_v2_enabled = bool((schedule_cfg0.get('schedule_v2') or {}).get('enabled', False))
     quiet_hours = notif_cfg.get('quiet_hours_beijing')
-    if quiet_hours and isinstance(quiet_hours, dict) and not no_send:
+    if (not schedule_v2_enabled) and quiet_hours and isinstance(quiet_hours, dict) and not no_send:
         try:
             start_t = parse_hhmm(quiet_hours.get('start', '02:00'))
             end_t = parse_hhmm(quiet_hours.get('end', '08:00'))
             now_bj_time = datetime.now(timezone.utc).astimezone(bj_tz).time()
-            
+
             is_quiet = False
             if start_t <= end_t:
                 is_quiet = start_t <= now_bj_time <= end_t
-            else: # Crosses midnight
+            else:  # Crosses midnight
                 is_quiet = now_bj_time >= start_t or now_bj_time <= end_t
-                
+
             if is_quiet:
                 runlog.safe_event('notify', 'skip', message=f'in quiet hours ({start_t.strftime("%H:%M")}-{end_t.strftime("%H:%M")})')
                 print(f"[SKIP] Currently in quiet hours (DND). Target was: {target}")
@@ -873,53 +929,60 @@ def main() -> int:
             runlog.safe_event('notify', 'error', message=f'failed to parse quiet_hours: {e}')
     # -------------------------------
 
+    sent_accounts: list[str] = []
+
     if not no_send:
         if not target:
             runlog.safe_event('notify', 'error', error_code='CONFIG_ERROR', message='notifications.target is required')
             raise SystemExit('[CONFIG_ERROR] notifications.target is required')
 
-        runlog.safe_event('notify', 'start', data=_safe_runlog_data({'channel': channel, 'target_set': bool(target), 'message_len': len(merged)}))
+        for acct, msg in account_messages.items():
+            runlog.safe_event('notify', 'start', data=_safe_runlog_data({'channel': channel, 'target_set': bool(target), 'account': acct, 'message_len': len(msg)}))
 
-        t_notify0 = monotonic()
-        send = subprocess.run(
-            ['openclaw', 'message', 'send', '--channel', str(channel), '--target', str(target), '--message', merged, '--json'],
-            cwd=str(base),
-            capture_output=True,
-            text=True,
-        )
-        if send.returncode != 0:
-            runlog.safe_event(
-                'notify',
-                'error',
-                duration_ms=int((monotonic() - t_notify0) * 1000),
-                error_code='SEND_FAILED',
-                message='message send failed',
-                data=_safe_runlog_data({'returncode': send.returncode}),
+            t_notify0 = monotonic()
+            send = subprocess.run(
+                ['openclaw', 'message', 'send', '--channel', str(channel), '--target', str(target), '--message', msg, '--json'],
+                cwd=str(base),
+                capture_output=True,
+                text=True,
             )
-            raise SystemExit(send.returncode)
+            if send.returncode != 0:
+                runlog.safe_event(
+                    'notify',
+                    'error',
+                    duration_ms=int((monotonic() - t_notify0) * 1000),
+                    error_code='SEND_FAILED',
+                    message=f'message send failed ({acct})',
+                    data=_safe_runlog_data({'returncode': send.returncode, 'account': acct}),
+                )
+                raise SystemExit(send.returncode)
 
-        runlog.safe_event('notify', 'ok', duration_ms=int((monotonic() - t_notify0) * 1000), data=_safe_runlog_data({'channel': channel}))
+            sent_accounts.append(acct)
+            runlog.safe_event('notify', 'ok', duration_ms=int((monotonic() - t_notify0) * 1000), data=_safe_runlog_data({'channel': channel, 'account': acct}))
     else:
         target = None
+        sent_accounts = list(account_messages.keys())
         runlog.safe_event('notify', 'skip', message='no_send mode')
 
     if not no_send:
         try:
-            sch_args = [
-                str(vpy), 'scripts/scan_scheduler.py',
-                '--config', str(cfg_path),
-                '--state', str(state_path),
-                '--state-dir', str((run_dir / 'state').resolve()),
-                '--mark-notified',
-                '--schedule-key', str(scheduler_schedule_key),
-            ]
-            subprocess.run(sch_args, cwd=str(base))
+            for acct in sent_accounts:
+                sch_args = [
+                    str(vpy), 'scripts/scan_scheduler.py',
+                    '--config', str(cfg_path),
+                    '--state', str(state_path),
+                    '--state-dir', str((run_dir / 'state').resolve()),
+                    '--mark-notified',
+                    '--schedule-key', str(scheduler_schedule_key),
+                    '--account', str(acct),
+                ]
+                subprocess.run(sch_args, cwd=str(base))
         except Exception:
             pass
 
     try:
-        tick_metrics['sent'] = (not no_send)
-        tick_metrics['reason'] = ('sent' if (not no_send) else 'no_send')
+        tick_metrics['sent'] = (not no_send) and bool(sent_accounts)
+        tick_metrics['reason'] = ('sent' if ((not no_send) and bool(sent_accounts)) else ('no_send' if no_send else 'no_account_sent'))
         write_json(tick_metrics_path, tick_metrics)
         append_json_list(tick_metrics_history_path, tick_metrics)
         write_json(tick_metrics_run_path, tick_metrics)
@@ -932,11 +995,11 @@ def main() -> int:
         prev = read_json(last_run_path, {})
         run_meta = {
             'last_run_utc': utc_now(),
-            'sent': True,
+            'sent': bool(sent_accounts),
             'channel': str(channel),
             'target': str(target),
-            'account': 'merged',
             'accounts': [r.account for r in results],
+            'sent_accounts': sent_accounts,
             'results': [r.__dict__ for r in results],
         }
         hist = prev.get('history') if isinstance(prev, dict) else None
@@ -952,7 +1015,7 @@ def main() -> int:
     except Exception:
         pass
 
-    runlog.safe_event('run_end', 'ok', data=_safe_runlog_data({'sent': (not no_send), 'accounts': [r.account for r in results]}))
+    runlog.safe_event('run_end', 'ok', data=_safe_runlog_data({'sent': (not no_send) and bool(sent_accounts), 'accounts': [r.account for r in results], 'sent_accounts': sent_accounts}))
 
     return 0
 

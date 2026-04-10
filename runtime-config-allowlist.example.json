@@ -1,0 +1,11 @@
+{
+  "rules": [
+    {
+      "market": "HK",
+      "symbol": "0883.HK",
+      "fields": [
+        "sell_put.max_strike"
+      ]
+    }
+  ]
+}
