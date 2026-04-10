@@ -128,8 +128,12 @@ cd /home/node/.openclaw/workspace/options-monitor
 cd /home/node/.openclaw/workspace/options-monitor
 ./.venv/bin/python scripts/deploy_to_prod.py --dry-run
 ./.venv/bin/python scripts/deploy_to_prod.py --apply
+# 如需显式覆盖 prod 运行配置（默认不会覆盖）
+./.venv/bin/python scripts/deploy_to_prod.py --dry-run --include-runtime-config
 ```
 
+> 默认会跳过运行配置：`config.json` / `config.us.json` / `config.hk.json` / `config.scheduled.json` / `config.market_*.json` / `config.local.*.json`；`config.example.*.json` 会继续同步。
+>
 > prod 不是开发源，不要在 `options-monitor-prod` 里直接改代码。
 
 ### 自动发布（main -> prod）

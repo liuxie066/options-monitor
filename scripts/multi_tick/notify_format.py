@@ -183,3 +183,35 @@ def build_merged_message(
         lines.append('')
 
     return '\n'.join(lines).strip() + '\n'
+
+
+def build_account_message(
+    result: AccountResult,
+    *,
+    now_bj: str,
+    cash_footer_lines: list[str] | None = None,
+) -> str:
+    if not (result.should_notify and result.meaningful and result.notification_text.strip()):
+        return ''
+
+    kept = result.notification_text.strip().splitlines()
+    put_n = sum(1 for ln in kept if ' 卖Put ' in ln)
+    call_n = sum(1 for ln in kept if ' 卖Call ' in ln)
+    acct = str(result.account).strip().lower()
+
+    lines: list[str] = []
+    lines.append(f"📊 Options Monitor 账户提醒（{acct}）")
+    lines.append('')
+    lines.append(f"北京时间 {now_bj}")
+    lines.append('')
+    lines.append(f"【账户 {acct}】Put {put_n} / Call {call_n}")
+    lines.append('')
+    lines.append(annotate_notification(result.account, '\n'.join(kept).strip() + '\n').strip())
+    lines.append('')
+
+    footer_lines = cash_footer_lines or []
+    if footer_lines:
+        lines.extend(list(footer_lines))
+        lines.append('')
+
+    return '\n'.join(lines).strip() + '\n'
