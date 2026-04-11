@@ -172,3 +172,77 @@ def decide_notify_dispatch(*, no_send: bool, target: Any, dnd_is_quiet: bool) ->
         'config_error': None,
         'reason': 'send',
     }
+
+
+def cash_footer_for_account(cash_footer_lines: list[str], account: str) -> list[str]:
+    if not cash_footer_lines:
+        return []
+    acct = str(account).strip().upper()
+    out: list[str] = []
+    matched = False
+    asof_line = ''
+    for ln in cash_footer_lines:
+        s = str(ln)
+        if s.startswith('**💰 现金 CNY**'):
+            out.append(s)
+            continue
+        if s.startswith('> 截至 '):
+            asof_line = s
+            continue
+        if s.startswith(f'- **{acct}**'):
+            out.append(s)
+            matched = True
+            continue
+    if matched and asof_line:
+        out.append('')
+        out.append(asof_line)
+    return out if matched else []
+
+
+def reduce_trading_day_guard(
+    *,
+    markets_to_run: list[str],
+    guard_results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    false_markets = [str(r.get('market')) for r in guard_results if r.get('is_trading_day') is False]
+    true_markets = [str(r.get('market')) for r in guard_results if r.get('is_trading_day') is True]
+
+    if false_markets:
+        if markets_to_run:
+            narrowed = [m for m in markets_to_run if m not in set(false_markets)]
+            if not narrowed:
+                return {
+                    'should_skip': True,
+                    'markets_to_run': [],
+                    'skip_message': f"non-trading day: {','.join(false_markets)}",
+                }
+            return {
+                'should_skip': False,
+                'markets_to_run': narrowed,
+                'skip_message': '',
+            }
+        if true_markets:
+            return {
+                'should_skip': False,
+                'markets_to_run': sorted({m for m in true_markets if m in ('HK', 'US', 'CN')}),
+                'skip_message': '',
+            }
+        return {
+            'should_skip': True,
+            'markets_to_run': [],
+            'skip_message': f"non-trading day: {','.join(false_markets)}",
+        }
+
+    return {
+        'should_skip': False,
+        'markets_to_run': list(markets_to_run or []),
+        'skip_message': '',
+    }
+
+
+def select_scheduler_state_filename(markets_to_run: list[str]) -> str:
+    if markets_to_run == ['HK']:
+        return 'scheduler_state_hk.json'
+    if markets_to_run == ['US']:
+        return 'scheduler_state_us.json'
+    return 'scheduler_state.json'

@@ -48,12 +48,15 @@ from om.domain import (
     build_account_messages,
     build_no_account_notification_payloads,
     build_shared_last_run_payload,
+    cash_footer_for_account,
     decide_notify_dispatch,
     decide_should_notify,
     evaluate_dnd_quiet_hours,
     filter_notify_candidates,
     markets_for_trading_day_guard as domain_markets_for_trading_day_guard,
+    reduce_trading_day_guard,
     select_markets_to_run as domain_select_markets_to_run,
+    select_scheduler_state_filename,
 )
 from scripts.infra.service import (
     run_opend_watchdog,
@@ -72,31 +75,6 @@ except Exception:
 
 
 _CURRENT_RUN_ID: str | None = None
-
-
-def _cash_footer_for_account(cash_footer_lines: list[str], account: str) -> list[str]:
-    if not cash_footer_lines:
-        return []
-    acct = str(account).strip().upper()
-    out: list[str] = []
-    matched = False
-    asof_line = ''
-    for ln in cash_footer_lines:
-        s = str(ln)
-        if s.startswith('**💰 现金 CNY**'):
-            out.append(s)
-            continue
-        if s.startswith('> 截至 '):
-            asof_line = s
-            continue
-        if s.startswith(f'- **{acct}**'):
-            out.append(s)
-            matched = True
-            continue
-    if matched and asof_line:
-        out.append('')
-        out.append(asof_line)
-    return out if matched else []
 
 
 def account_run_state_dir(run_dir: Path, account: str) -> Path:
@@ -415,30 +393,17 @@ def main() -> int:
             data=_safe_runlog_data({'results': guard_results, 'markets_to_run': markets_to_run, 'market_config': str(getattr(args, 'market_config', 'auto') or 'auto')}),
         )
 
-        false_markets = [str(r.get('market')) for r in guard_results if r.get('is_trading_day') is False]
-        true_markets = [str(r.get('market')) for r in guard_results if r.get('is_trading_day') is True]
-
-        if false_markets:
-            if markets_to_run:
-                markets_to_run = [m for m in markets_to_run if m not in set(false_markets)]
-                if not markets_to_run:
-                    runlog.safe_event('run_end', 'skip', message=f"non-trading day: {','.join(false_markets)}")
-                    return 0
-            else:
-                # If we didn't select a session market (e.g. off-hours), narrow to trading markets when possible.
-                if true_markets:
-                    markets_to_run = sorted({m for m in true_markets if m in ('HK', 'US', 'CN')})
-                else:
-                    runlog.safe_event('run_end', 'skip', message=f"non-trading day: {','.join(false_markets)}")
-                    return 0
+        guard_reduced = reduce_trading_day_guard(
+            markets_to_run=markets_to_run,
+            guard_results=guard_results,
+        )
+        markets_to_run = list(guard_reduced.get('markets_to_run') or [])
+        if bool(guard_reduced.get('should_skip')):
+            runlog.safe_event('run_end', 'skip', message=str(guard_reduced.get('skip_message') or ''))
+            return 0
 
     state_repo.shared_state_dir(base)
-    if markets_to_run == ['HK']:
-        state_path = storage_paths.shared_state_path(base, 'scheduler_state_hk.json')
-    elif markets_to_run == ['US']:
-        state_path = storage_paths.shared_state_path(base, 'scheduler_state_us.json')
-    else:
-        state_path = storage_paths.shared_state_path(base, 'scheduler_state.json')
+    state_path = storage_paths.shared_state_path(base, select_scheduler_state_filename(markets_to_run))
 
     try:
         if (not state_path.exists()) or state_path.stat().st_size <= 0:
@@ -758,7 +723,7 @@ def main() -> int:
         notify_candidates=notify_candidates,
         now_bj=now_bj,
         cash_footer_lines=cash_footer_lines,
-        cash_footer_for_account_fn=_cash_footer_for_account,
+        cash_footer_for_account_fn=cash_footer_for_account,
         build_account_message_fn=build_account_message,
     )
 
