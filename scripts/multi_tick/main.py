@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import subprocess
 from time import monotonic
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -46,7 +45,13 @@ from .misc import (
     _safe_runlog_data,
     append_json_list,
 )
-from scripts.opend_utils import is_trading_day_via_futu
+from scripts.infra.service import (
+    run_opend_watchdog,
+    run_pipeline_script,
+    run_scan_scheduler_cli,
+    send_openclaw_message,
+    trading_day_via_futu,
+)
 
 
 _CURRENT_RUN_ID: str | None = None
@@ -159,37 +164,7 @@ def _is_trading_day_guard_for_market(cfg: dict, market: str) -> tuple[bool | Non
 
     None means guard check failed and caller should continue without blocking.
     """
-    try:
-        from futu import OpenQuoteContext
-    except Exception:
-        return (None, str(market).upper().strip())
-
-    market = str(market).upper().strip()
-
-    host = '127.0.0.1'
-    port = 11111
-    try:
-        for sym in (cfg.get('symbols') or []):
-            if not isinstance(sym, dict):
-                continue
-            fetch = (sym.get('fetch') or {})
-            if str(fetch.get('source') or '').lower() != 'opend':
-                continue
-            if str(sym.get('market') or '').upper() == market:
-                host = str(fetch.get('host') or host)
-                port = int(fetch.get('port') or port)
-                break
-    except Exception:
-        pass
-
-    ctx = OpenQuoteContext(host=host, port=port)
-    try:
-        return is_trading_day_via_futu(ctx, market)
-    finally:
-        try:
-            ctx.close()
-        except Exception:
-            pass
+    return trading_day_via_futu(cfg, market)
 
 
 def main() -> int:
@@ -290,12 +265,13 @@ def main() -> int:
             unhealthy = None
             for host, port in sorted(ports):
                 try:
-                    wd0 = subprocess.run(
-                        [str(vpy), 'scripts/opend_watchdog.py', '--ensure', '--host', str(host), '--port', str(port), '--json'],
-                        cwd=str(base),
-                        capture_output=True,
-                        text=True,
-                        timeout=35,
+                    wd0 = run_opend_watchdog(
+                        vpy=vpy,
+                        base=base,
+                        host=str(host),
+                        port=int(port),
+                        ensure=True,
+                        timeout_sec=35,
                     )
                     payload0 = parse_last_json_obj((wd0.stdout or '') + '\n' + (wd0.stderr or ''))
                     ok0 = bool(payload0.get('ok')) if payload0 else (wd0.returncode == 0)
@@ -524,19 +500,15 @@ def main() -> int:
         pass
 
     scheduler_schedule_key = 'schedule_hk' if (markets_to_run == ['HK'] and ('schedule_hk' in (base_cfg or {}))) else 'schedule'
-    scheduler_cmd = [
-        str(vpy), 'scripts/cli/scan_scheduler_cli.py',
-        '--config', str(cfg_path),
-        '--state', str(state_path),
-        '--jsonl',
-        '--schedule-key', str(scheduler_schedule_key),
-    ]
     t_sch0 = monotonic()
-    scheduler_proc = subprocess.run(
-        scheduler_cmd,
-        cwd=str(base),
+    scheduler_proc = run_scan_scheduler_cli(
+        vpy=vpy,
+        base=base,
+        config=cfg_path,
+        state=state_path,
+        jsonl=True,
+        schedule_key=str(scheduler_schedule_key),
         capture_output=True,
-        text=True,
     )
     scheduler_ms = int((monotonic() - t_sch0) * 1000)
     if scheduler_proc.returncode != 0:
@@ -555,19 +527,15 @@ def main() -> int:
     notify_decision_by_account: dict[str, bool] = {}
     for acct0 in [str(a).strip() for a in (args.accounts or []) if str(a).strip()]:
         try:
-            sch_acct_cmd = [
-                str(vpy), 'scripts/cli/scan_scheduler_cli.py',
-                '--config', str(cfg_path),
-                '--state', str(state_path),
-                '--jsonl',
-                '--schedule-key', str(scheduler_schedule_key),
-                '--account', str(acct0),
-            ]
-            sch_acct = subprocess.run(
-                sch_acct_cmd,
-                cwd=str(base),
+            sch_acct = run_scan_scheduler_cli(
+                vpy=vpy,
+                base=base,
+                config=cfg_path,
+                state=state_path,
+                jsonl=True,
+                schedule_key=str(scheduler_schedule_key),
+                account=str(acct0),
                 capture_output=True,
-                text=True,
             )
             if sch_acct.returncode == 0:
                 sch_acct_decision = json.loads((sch_acct.stdout or '').strip())
@@ -722,14 +690,6 @@ def main() -> int:
 
         acct_report_dir.mkdir(parents=True, exist_ok=True)
 
-        pipe_cmd = [
-            str(vpy), 'scripts/run_pipeline.py',
-            '--config', str(cfg_override),
-            '--mode', 'scheduled',
-            '--shared-required-data', str(shared_required),
-            '--report-dir', str(acct_report_dir),
-            '--state-dir', str(acct_state_dir),
-        ]
         runlog.safe_event(
             'snapshot_batches',
             'start',
@@ -737,9 +697,13 @@ def main() -> int:
         )
 
         t_pipe0 = monotonic()
-        pipe = subprocess.run(
-            pipe_cmd,
-            cwd=str(base),
+        pipe = run_pipeline_script(
+            vpy=vpy,
+            base=base,
+            config=cfg_override,
+            report_dir=acct_report_dir,
+            state_dir=acct_state_dir,
+            shared_required_data=shared_required,
             capture_output=True,
             text=True,
             env=dict(os.environ, PYTHONPATH=str(base)),
@@ -804,15 +768,16 @@ def main() -> int:
 
     if ran_any_pipeline:
         try:
-            sch_args = [
-                str(vpy), 'scripts/cli/scan_scheduler_cli.py',
-                '--config', str(cfg_path),
-                '--state', str(state_path),
-                '--state-dir', str((run_dir / 'state').resolve()),
-                '--mark-scanned',
-                '--schedule-key', str(scheduler_schedule_key),
-            ]
-            subprocess.run(sch_args, cwd=str(base))
+            run_scan_scheduler_cli(
+                vpy=vpy,
+                base=base,
+                config=cfg_path,
+                state=state_path,
+                state_dir=(run_dir / 'state').resolve(),
+                mark_scanned=True,
+                schedule_key=str(scheduler_schedule_key),
+                capture_output=False,
+            )
         except Exception:
             pass
 
@@ -940,11 +905,11 @@ def main() -> int:
             runlog.safe_event('notify', 'start', data=_safe_runlog_data({'channel': channel, 'target_set': bool(target), 'account': acct, 'message_len': len(msg)}))
 
             t_notify0 = monotonic()
-            send = subprocess.run(
-                ['openclaw', 'message', 'send', '--channel', str(channel), '--target', str(target), '--message', msg, '--json'],
-                cwd=str(base),
-                capture_output=True,
-                text=True,
+            send = send_openclaw_message(
+                base=base,
+                channel=str(channel),
+                target=str(target),
+                message=msg,
             )
             if send.returncode != 0:
                 runlog.safe_event(
@@ -967,16 +932,17 @@ def main() -> int:
     if not no_send:
         try:
             for acct in sent_accounts:
-                sch_args = [
-                    str(vpy), 'scripts/cli/scan_scheduler_cli.py',
-                    '--config', str(cfg_path),
-                    '--state', str(state_path),
-                    '--state-dir', str((run_dir / 'state').resolve()),
-                    '--mark-notified',
-                    '--schedule-key', str(scheduler_schedule_key),
-                    '--account', str(acct),
-                ]
-                subprocess.run(sch_args, cwd=str(base))
+                run_scan_scheduler_cli(
+                    vpy=vpy,
+                    base=base,
+                    config=cfg_path,
+                    state=state_path,
+                    state_dir=(run_dir / 'state').resolve(),
+                    mark_notified=True,
+                    schedule_key=str(scheduler_schedule_key),
+                    account=str(acct),
+                    capture_output=False,
+                )
         except Exception:
             pass
 

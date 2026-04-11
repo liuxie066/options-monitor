@@ -128,3 +128,5 @@ cd /home/node/.openclaw/workspace/options-monitor
 - `scripts/cli/render_sell_put_alerts_cli.py`
 - `scripts/cli/render_sell_call_alerts_cli.py`
 - `scripts/cli/query_sell_put_cash_cli.py`
+
+- 第5步收口：`scripts/send_if_needed.py` 与 `scripts/multi_tick/main.py` 仅保留编排；外部调用统一下沉到 `scripts/infra/service.py`（`scripts/infra/entry_external.py` 仅兼容转发）。

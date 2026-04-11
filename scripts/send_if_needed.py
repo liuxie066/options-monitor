@@ -16,7 +16,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import subprocess
 import sys
 from pathlib import Path
 
@@ -28,6 +27,13 @@ if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
 from scripts.io_utils import utc_now
+from scripts.infra.service import (
+    run_command,
+    run_pipeline_script,
+    run_scan_scheduler_cli,
+    send_openclaw_message,
+    trading_day_via_futu,
+)
 
 
 def _infer_trading_day_guard_markets(cfg_obj: dict) -> list[str]:
@@ -47,50 +53,11 @@ def _trading_day_guard_for_market(cfg_obj: dict, market: str) -> tuple[bool | No
 
     None means guard check failed and caller should continue without blocking.
     """
-    market = str(market or '').upper().strip() or 'US'
-    try:
-        from futu import OpenQuoteContext
-    except Exception:
-        return (None, market)
-
-    try:
-        from scripts.opend_utils import is_trading_day_via_futu
-    except Exception:
-        return (None, market)
-
-    host = '127.0.0.1'
-    port = 11111
-    try:
-        for sym in (cfg_obj.get('symbols') or []):
-            if not isinstance(sym, dict):
-                continue
-            if str(sym.get('market') or '').upper() != market:
-                continue
-            fetch = (sym.get('fetch') or {})
-            if str(fetch.get('source') or '').lower() != 'opend':
-                continue
-            host = str(fetch.get('host') or host)
-            port = int(fetch.get('port') or port)
-            break
-    except Exception:
-        pass
-
-    try:
-        ctx = OpenQuoteContext(host=host, port=port)
-    except Exception:
-        return (None, market)
-
-    try:
-        return is_trading_day_via_futu(ctx, market)
-    finally:
-        try:
-            ctx.close()
-        except Exception:
-            pass
+    return trading_day_via_futu(cfg_obj, market)
 
 
-def sh(cmd: list[str], cwd: Path, capture: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, cwd=str(cwd), capture_output=capture, text=True)
+def sh(cmd: list[str], cwd: Path, capture: bool = True):
+    return run_command(cmd, cwd=cwd, capture_output=capture, text=True)
 
 
 def _pid_alive(pid: int) -> bool:
@@ -195,7 +162,7 @@ def main():
 
     try:
         # 1) scheduler decision
-        sch = sh([str(vpy), 'scripts/cli/scan_scheduler_cli.py', '--config', str(cfg), '--state', str(state), '--jsonl'], cwd=base, capture=True)
+        sch = run_scan_scheduler_cli(vpy=vpy, base=base, config=cfg, state=state, jsonl=True, capture_output=True)
         if sch.returncode != 0:
             sh([str(vpy), 'scripts/write_last_run.py', '--path', str(last_run), '--status', 'error', '--stage', 'scheduler', '--details', (sch.stderr or sch.stdout or '').strip(), '--started-at', started], cwd=base)
             sys.stderr.write(sch.stderr)
@@ -238,13 +205,13 @@ def main():
             return 0
 
         # 2) pipeline
-        pipe = subprocess.run([
-            str(vpy), 'scripts/run_pipeline.py',
-            '--config', str(cfg),
-            '--mode', 'scheduled',
-            '--report-dir', str(report_dir),
-            '--state-dir', str(state_dir),
-        ], cwd=str(base))
+        pipe = run_pipeline_script(
+            vpy=vpy,
+            base=base,
+            config=cfg,
+            report_dir=report_dir,
+            state_dir=state_dir,
+        )
         if pipe.returncode != 0:
             sh([str(vpy), 'scripts/write_last_run.py', '--path', str(last_run), '--status', 'error', '--stage', 'pipeline', '--reason', 'pipeline failed', '--started-at', started], cwd=base)
             return pipe.returncode
@@ -264,12 +231,7 @@ def main():
 
         if should_notify and meaningful:
             # 3) send via OpenClaw CLI
-            send = subprocess.run(
-                ['openclaw', 'message', 'send', '--channel', channel, '--target', target, '--message', text, '--json'],
-                cwd=str(base),
-                capture_output=True,
-                text=True,
-            )
+            send = send_openclaw_message(base=base, channel=channel, target=target, message=text)
             if send.returncode != 0:
                 sh([str(vpy), 'scripts/write_last_run.py', '--path', str(last_run), '--status', 'error', '--stage', 'send', '--details', (send.stderr or send.stdout or '').strip(), '--started-at', started], cwd=base)
                 sys.stderr.write(send.stderr)
@@ -284,7 +246,7 @@ def main():
                 message_id = None
 
             # 4) mark notified (only after successful send)
-            mark = subprocess.run([str(vpy), 'scripts/cli/scan_scheduler_cli.py', '--config', str(cfg), '--state', str(state), '--mark-notified'], cwd=str(base))
+            mark = run_scan_scheduler_cli(vpy=vpy, base=base, config=cfg, state=state, mark_notified=True, capture_output=False)
             if mark.returncode != 0:
                 # send succeeded but mark failed: still record it
                 sh([str(vpy), 'scripts/write_last_run.py', '--path', str(last_run), '--status', 'error', '--stage', 'mark-notified', '--reason', 'send ok but mark-notified failed', '--started-at', started], cwd=base)
