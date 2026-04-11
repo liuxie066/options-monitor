@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+repo_name="$(basename "$repo_root")"
+
+if [[ "$repo_name" == *"options-monitor-prod"* ]] || [[ "$repo_root" == *"/options-monitor-prod"* ]]; then
+  echo "[guardrails] blocked: commits are forbidden in prod repo: $repo_root" >&2
+  exit 1
+fi

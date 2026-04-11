@@ -1,0 +1,33 @@
+name: Guardrails
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  guardrails:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m venv .venv
+          ./.venv/bin/pip install --upgrade pip
+          ./.venv/bin/pip install -r requirements.txt
+
+      - name: Guardrails checks
+        run: |
+          ./.venv/bin/python scripts/guardrails_check.py --check-doc-wording --check-deploy-args
+
+      - name: Minimal regression
+        run: |
+          ./.venv/bin/python tests/run_smoke.py
