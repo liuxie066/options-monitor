@@ -110,7 +110,7 @@ def run_sell_call_scan_and_summarize(
     df_cc = safe_read_csv(symbol_cc)
     if not is_scheduled:
         run_cmd([
-            py, 'scripts/render_sell_call_alerts.py',
+            py, 'scripts/cli/render_sell_call_alerts_cli.py',
             '--input', str((report_dir / f'{symbol_lower}_sell_call_candidates.csv').as_posix()),
             '--symbol', symbol,
             '--top', str(top_n),

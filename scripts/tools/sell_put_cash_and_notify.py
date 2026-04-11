@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Check sell-put cash headroom and notify only when below threshold.
 
-- Reuses scripts/query_sell_put_cash.py to compute base(CNY) free cash.
+- Reuses scripts/cli/query_sell_put_cash_cli.py to compute base(CNY) free cash.
 - Emits a short text payload; can be used in cron.
 
 Policy:
@@ -72,7 +72,7 @@ def main():
         base,
         [
             str(base / '.venv' / 'bin' / 'python'),
-            'scripts/query_sell_put_cash.py',
+            'scripts/cli/query_sell_put_cash_cli.py',
             '--pm-config', str((base / args.pm_config).resolve()) if not Path(args.pm_config).is_absolute() else str(args.pm_config),
             '--market', args.market,
             '--account', args.account,

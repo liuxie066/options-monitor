@@ -195,7 +195,7 @@ def main():
 
     try:
         # 1) scheduler decision
-        sch = sh([str(vpy), 'scripts/scan_scheduler.py', '--config', str(cfg), '--state', str(state), '--jsonl'], cwd=base, capture=True)
+        sch = sh([str(vpy), 'scripts/cli/scan_scheduler_cli.py', '--config', str(cfg), '--state', str(state), '--jsonl'], cwd=base, capture=True)
         if sch.returncode != 0:
             sh([str(vpy), 'scripts/write_last_run.py', '--path', str(last_run), '--status', 'error', '--stage', 'scheduler', '--details', (sch.stderr or sch.stdout or '').strip(), '--started-at', started], cwd=base)
             sys.stderr.write(sch.stderr)
@@ -284,7 +284,7 @@ def main():
                 message_id = None
 
             # 4) mark notified (only after successful send)
-            mark = subprocess.run([str(vpy), 'scripts/scan_scheduler.py', '--config', str(cfg), '--state', str(state), '--mark-notified'], cwd=str(base))
+            mark = subprocess.run([str(vpy), 'scripts/cli/scan_scheduler_cli.py', '--config', str(cfg), '--state', str(state), '--mark-notified'], cwd=str(base))
             if mark.returncode != 0:
                 # send succeeded but mark failed: still record it
                 sh([str(vpy), 'scripts/write_last_run.py', '--path', str(last_run), '--status', 'error', '--stage', 'mark-notified', '--reason', 'send ok but mark-notified failed', '--started-at', started], cwd=base)

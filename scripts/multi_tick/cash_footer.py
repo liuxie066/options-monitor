@@ -57,7 +57,7 @@ def query_cash_footer(
             p = subprocess.run(
                 [
                     vpy,
-                    'scripts/query_sell_put_cash.py',
+                    'scripts/cli/query_sell_put_cash_cli.py',
                     '--market', str(market),
                     '--account', acct_l,
                     '--format', 'json',

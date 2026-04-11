@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import argparse
 from pathlib import Path
+
 import pandas as pd
 from pandas.errors import EmptyDataError
 
@@ -45,7 +45,7 @@ def render_one(row) -> str:
         cash_req_cny = float(v) if v is not None and not pd.isna(v) else None
     except Exception:
         cash_req_cny = None
-    # Prefer CNY-normalized secured cash usage when available.
+
     cash_used_total = None
     cash_used_symbol = None
     try:
@@ -59,7 +59,6 @@ def render_one(row) -> str:
     except Exception:
         cash_used_symbol = None
 
-    # Fallback to legacy USD columns (better than nothing)
     if cash_used_total is None:
         try:
             cash_used_total = float(row.get('cash_secured_used_usd_total') or row.get('cash_secured_used_usd') or 0.0)
@@ -71,23 +70,8 @@ def render_one(row) -> str:
         except Exception:
             cash_used_symbol = 0.0
 
-    cash_avail = None
-    cash_avail_est = None
-    try:
-        v = row.get('cash_available_usd')
-        cash_avail = float(v) if v is not None and not pd.isna(v) else None
-    except Exception:
-        cash_avail = None
-    try:
-        v = row.get('cash_available_usd_est')
-        cash_avail_est = float(v) if v is not None and not pd.isna(v) else None
-    except Exception:
-        cash_avail_est = None
-
-    cash_free = None
-    cash_free_cny = None
-
     cash_avail_cny = None
+    cash_free_cny = None
     try:
         v = row.get('cash_available_cny')
         cash_avail_cny = float(v) if v is not None and not pd.isna(v) else None
@@ -98,11 +82,7 @@ def render_one(row) -> str:
         cash_free_cny = float(v) if v is not None and not pd.isna(v) else None
     except Exception:
         cash_free_cny = None
-    try:
-        v = row.get('cash_free_usd')
-        cash_free = float(v) if v is not None and not pd.isna(v) else None
-    except Exception:
-        cash_free = None
+
     headroom = None
     try:
         if cash_req_cny is not None and cash_free_cny is not None:
@@ -138,7 +118,7 @@ def render_one(row) -> str:
 
 
 def pick_layered(df: pd.DataFrame) -> pd.DataFrame:
-    """Pick one candidate from each risk layer if available, then fill remaining by ranking."""
+    """按风险层优先挑选候选，再按收益补齐。"""
     selected = []
     used = set()
 
@@ -174,53 +154,55 @@ def pick_layered(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(selected)
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Render Sell Put alert text from candidate CSV")
-    parser.add_argument("--input", default=None, help="Input CSV path (default: <report-dir>/sell_put_candidates_labeled.csv)")
-    parser.add_argument("--report-dir", default="output/reports", help="Report dir for default input/output (default: output/reports)")
-    parser.add_argument("--top", type=int, default=5)
-    parser.add_argument("--symbol", default=None)
-    parser.add_argument("--output", default=None, help="Output txt path (default: <report-dir>/sell_put_alerts.txt)")
-    parser.add_argument("--layered", action="store_true", help="Pick layered alerts by risk label")
-    args = parser.parse_args()
+def render_sell_put_alerts(
+    *,
+    input_path: str | Path | None = None,
+    report_dir: str | Path = 'output/reports',
+    top: int = 5,
+    symbol: str | None = None,
+    output_path: str | Path | None = None,
+    layered: bool = False,
+    base_dir: Path | None = None,
+) -> str:
+    """渲染 Sell Put 候选提醒文本并写入文件。"""
+    base = (base_dir or Path(__file__).resolve().parents[1]).resolve()
 
-    base = Path(__file__).resolve().parents[1]
+    report_dir_path = Path(report_dir)
+    if not report_dir_path.is_absolute():
+        report_dir_path = (base / report_dir_path).resolve()
 
-    report_dir = Path(args.report_dir)
-    if not report_dir.is_absolute():
-        report_dir = (base / report_dir).resolve()
-
-    if args.input:
-        input_path = Path(args.input)
-        if not input_path.is_absolute():
-            input_path = (base / input_path).resolve()
+    if input_path:
+        input_file = Path(input_path)
+        if not input_file.is_absolute():
+            input_file = (base / input_file).resolve()
     else:
-        input_path = (report_dir / 'sell_put_candidates_labeled.csv').resolve()
+        input_file = (report_dir_path / 'sell_put_candidates_labeled.csv').resolve()
 
-    if args.output:
-        output_path = Path(args.output)
-        if not output_path.is_absolute():
-            output_path = (base / output_path).resolve()
+    if output_path:
+        output_file = Path(output_path)
+        if not output_file.is_absolute():
+            output_file = (base / output_file).resolve()
     else:
-        output_path = (report_dir / 'sell_put_alerts.txt').resolve()
+        output_file = (report_dir_path / 'sell_put_alerts.txt').resolve()
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
 
     try:
-        df = pd.read_csv(input_path)
+        df = pd.read_csv(input_file)
     except (FileNotFoundError, EmptyDataError):
         df = pd.DataFrame()
-    if args.symbol and not df.empty:
-        df = df[df["symbol"] == args.symbol].copy()
+
+    if symbol and not df.empty:
+        df = df[df["symbol"] == symbol].copy()
 
     if df.empty:
         text = "无候选提醒。"
-        output_path.write_text(text, encoding="utf-8")
+        output_file.write_text(text, encoding="utf-8")
         print(text)
-        return
+        return text
 
-    if args.layered and "risk_label" in df.columns:
-        top = pick_layered(df).head(args.top)
+    if layered and "risk_label" in df.columns:
+        top_df = pick_layered(df).head(top)
     else:
         sort_cols = []
         ascending = []
@@ -232,14 +214,11 @@ def main():
             ascending.append(False)
         if sort_cols:
             df = df.sort_values(sort_cols, ascending=ascending)
-        top = df.head(args.top)
+        top_df = df.head(top)
 
-    blocks = [render_one(row) for _, row in top.iterrows()]
+    blocks = [render_one(row) for _, row in top_df.iterrows()]
     text = "\n\n" + ("\n\n".join(blocks)) + "\n"
-    output_path.write_text(text, encoding="utf-8")
+    output_file.write_text(text, encoding="utf-8")
     print(text)
-    print(f"[DONE] alerts -> {output_path}")
-
-
-if __name__ == "__main__":
-    main()
+    print(f"[DONE] alerts -> {output_file}")
+    return text

@@ -85,3 +85,187 @@ def test_alert_engine_domain_and_cli() -> None:
             check=True,
         )
         assert changes_path.exists()
+
+
+def test_step4_domain_files_no_argparse_or_main() -> None:
+    targets = [
+        BASE / 'scripts' / 'scan_scheduler.py',
+        BASE / 'scripts' / 'render_sell_put_alerts.py',
+        BASE / 'scripts' / 'render_sell_call_alerts.py',
+        BASE / 'scripts' / 'query_sell_put_cash.py',
+    ]
+    for path in targets:
+        text = path.read_text(encoding='utf-8')
+        assert 'import argparse' not in text
+        assert '__main__' not in text
+
+
+def test_scan_scheduler_domain_and_cli() -> None:
+    if str(BASE) not in sys.path:
+        sys.path.insert(0, str(BASE))
+
+    from scripts.scan_scheduler import run_scheduler
+
+    with TemporaryDirectory() as td:
+        root = Path(td)
+        cfg = root / 'config.json'
+        state = root / 'scheduler_state.json'
+
+        cfg.write_text(
+            json.dumps(
+                {
+                    'schedule': {
+                        'enabled': True,
+                        'market_timezone': 'UTC',
+                        'beijing_timezone': 'UTC',
+                        'market_open': '00:00',
+                        'market_close': '23:59',
+                        'monitor_off_hours': True,
+                        'market_hours_interval_min': 10,
+                    }
+                },
+                ensure_ascii=False,
+            ) + '\n',
+            encoding='utf-8',
+        )
+
+        payload = run_scheduler(config=cfg, state=state, jsonl=True, base_dir=BASE)
+        assert 'should_run_scan' in payload
+        assert 'should_notify' in payload
+
+        p = subprocess.run(
+            [
+                str(BASE / '.venv' / 'bin' / 'python'),
+                'scripts/cli/scan_scheduler_cli.py',
+                '--config',
+                str(cfg),
+                '--state',
+                str(state),
+                '--jsonl',
+            ],
+            cwd=str(BASE),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        line = (p.stdout or '').strip().splitlines()[-1]
+        cli_payload = json.loads(line)
+        assert 'should_run_scan' in cli_payload
+        assert 'should_notify' in cli_payload
+
+
+def test_render_sell_put_domain_and_cli() -> None:
+    if str(BASE) not in sys.path:
+        sys.path.insert(0, str(BASE))
+
+    from scripts.render_sell_put_alerts import render_sell_put_alerts
+
+    with TemporaryDirectory() as td:
+        root = Path(td)
+        csv_path = root / 'sell_put_candidates_labeled.csv'
+        out_path = root / 'sell_put_alerts.txt'
+
+        pd.DataFrame(
+            [
+                {
+                    'symbol': 'AAPL',
+                    'expiration': '2026-05-15',
+                    'strike': 180.0,
+                    'spot': 200.0,
+                    'dte': 30,
+                    'mid': 2.5,
+                    'net_income': 250.0,
+                    'annualized_net_return_on_cash_basis': 0.2,
+                    'otm_pct': 0.1,
+                    'risk_label': '中性',
+                    'spread_ratio': 0.1,
+                    'open_interest': 100,
+                    'volume': 50,
+                }
+            ]
+        ).to_csv(csv_path, index=False)
+
+        text = render_sell_put_alerts(input_path=csv_path, output_path=out_path, top=1, layered=True, base_dir=BASE)
+        assert '[Sell Put 候选]' in text
+        assert out_path.exists()
+
+        subprocess.run(
+            [
+                str(BASE / '.venv' / 'bin' / 'python'),
+                'scripts/cli/render_sell_put_alerts_cli.py',
+                '--input',
+                str(csv_path),
+                '--output',
+                str(out_path),
+                '--top',
+                '1',
+                '--layered',
+            ],
+            cwd=str(BASE),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert '[Sell Put 候选]' in out_path.read_text(encoding='utf-8')
+
+
+def test_render_sell_call_domain_and_cli() -> None:
+    if str(BASE) not in sys.path:
+        sys.path.insert(0, str(BASE))
+
+    from scripts.render_sell_call_alerts import render_sell_call_alerts
+
+    with TemporaryDirectory() as td:
+        root = Path(td)
+        csv_path = root / 'sell_call_candidates.csv'
+        out_path = root / 'sell_call_alerts.txt'
+
+        pd.DataFrame(
+            [
+                {
+                    'symbol': 'AAPL',
+                    'expiration': '2026-05-15',
+                    'strike': 220.0,
+                    'spot': 200.0,
+                    'dte': 30,
+                    'mid': 2.5,
+                    'net_income': 250.0,
+                    'annualized_net_premium_return': 0.12,
+                    'if_exercised_total_return': 0.2,
+                    'strike_above_spot_pct': 0.1,
+                    'strike_above_cost_pct': 0.15,
+                    'risk_label': '中性',
+                    'spread_ratio': 0.1,
+                    'open_interest': 100,
+                    'volume': 50,
+                    'shares_total': 200,
+                    'shares_locked': 0,
+                    'shares_available_for_cover': 200,
+                    'covered_contracts_available': 2,
+                    'is_fully_covered_available': True,
+                }
+            ]
+        ).to_csv(csv_path, index=False)
+
+        text = render_sell_call_alerts(input_path=csv_path, output_path=out_path, top=1, layered=True, base_dir=BASE)
+        assert '[Sell Call 候选]' in text
+        assert out_path.exists()
+
+        subprocess.run(
+            [
+                str(BASE / '.venv' / 'bin' / 'python'),
+                'scripts/cli/render_sell_call_alerts_cli.py',
+                '--input',
+                str(csv_path),
+                '--output',
+                str(out_path),
+                '--top',
+                '1',
+                '--layered',
+            ],
+            cwd=str(BASE),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert '[Sell Call 候选]' in out_path.read_text(encoding='utf-8')

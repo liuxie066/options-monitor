@@ -112,7 +112,7 @@ def main():
             tmp.parent.mkdir(parents=True, exist_ok=True)
             tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
             state = base / 'output' / 'state' / f'healthcheck_scheduler_state.{acct}.json'
-            res = subprocess.run([str(vpy), 'scripts/scan_scheduler.py', '--config', str(tmp), '--state', str(state), '--jsonl'], cwd=str(base), capture_output=True, text=True)
+            res = subprocess.run([str(vpy), 'scripts/cli/scan_scheduler_cli.py', '--config', str(tmp), '--state', str(state), '--jsonl'], cwd=str(base), capture_output=True, text=True)
             if res.returncode != 0:
                 warns.append(f"scheduler check failed ({acct}): {(res.stderr or res.stdout).strip()}")
     except Exception as e:
