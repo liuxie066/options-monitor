@@ -139,6 +139,9 @@ def main() -> None:
     from test_config_loader_validation_cache import (
         test_scheduled_validation_is_cached,
     )
+    from test_runtime_config_sync import (
+        test_runtime_config_sync_notifications_apply_and_check,
+    )
     from test_atomic_write_json import (
         test_atomic_write_json_writes_valid_json,
     )
@@ -217,6 +220,7 @@ def main() -> None:
         test_scan_scheduler_scan_is_per_account,
         test_select_markets_to_run_hk_break_respected,
         test_scheduled_validation_is_cached,
+        test_runtime_config_sync_notifications_apply_and_check,
         test_atomic_write_json_writes_valid_json,
         test_watchlist_whitelist_filters_symbols,
         test_stage_plan_fetch_only,

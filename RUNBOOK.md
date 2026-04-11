@@ -9,8 +9,17 @@ cd /home/node/.openclaw/workspace/options-monitor-prod
 
 - 读取：`config.us.json`（US）或 `config.hk.json`（HK）
 - 生成：`<report_dir>/symbols_*` 以及每标的 `*_sell_put_* / *_sell_call_*`（默认 report_dir=output/reports）
+- 兼容派生配置（`config.scheduled.json` / `config.market_*.json` / `config.market_us.fallback_yahoo.json` / `config.json`）由同步脚本生成，不手工维护
 
 > 提醒：不要用系统 python 直接跑脚本，统一用项目 `.venv`（脚本已自动处理）。
+
+### 配置单一来源同步
+
+```bash
+cd /home/node/.openclaw/workspace/options-monitor-prod
+./.venv/bin/python scripts/sync_runtime_configs.py --check
+./.venv/bin/python scripts/sync_runtime_configs.py --apply
+```
 
 ---
 

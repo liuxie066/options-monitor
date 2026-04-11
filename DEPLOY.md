@@ -6,6 +6,7 @@
 - 生产只运行：`/home/node/.openclaw/workspace/options-monitor-prod`
 - 不要在 prod 目录直接改代码
 - options-monitor 运行入口配置仅 `config.us.json` / `config.hk.json`（不要将 `config.json`、`config.scheduled.json`、`config.market_us*`、`config.market_hk*` 视为主运行入口）
+- 兼容运行配置（`config.scheduled.json` / `config.market_*.json` / `config.market_us.fallback_yahoo.json` / `config.json`）由 `scripts/sync_runtime_configs.py` 从 canonical 配置同步生成
 
 ## Standard Commands
 
@@ -40,6 +41,22 @@ cd /home/node/.openclaw/workspace/options-monitor
 
 ```bash
 ./.venv/bin/python scripts/deploy_to_prod.py --apply --prune
+```
+
+## Runtime Config Single-Source Workflow
+
+```bash
+cd /home/node/.openclaw/workspace/options-monitor
+
+# 1) 只修改 canonical 配置
+$EDITOR config.us.json
+$EDITOR config.hk.json
+
+# 2) 同步兼容派生配置
+./.venv/bin/python scripts/sync_runtime_configs.py --apply
+
+# 3) 可选：严格检查
+./.venv/bin/python scripts/sync_runtime_configs.py --check
 ```
 
 ## Auto Deploy
