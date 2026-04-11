@@ -525,7 +525,7 @@ def main() -> int:
 
     scheduler_schedule_key = 'schedule_hk' if (markets_to_run == ['HK'] and ('schedule_hk' in (base_cfg or {}))) else 'schedule'
     scheduler_cmd = [
-        str(vpy), 'scripts/scan_scheduler.py',
+        str(vpy), 'scripts/cli/scan_scheduler_cli.py',
         '--config', str(cfg_path),
         '--state', str(state_path),
         '--jsonl',
@@ -556,7 +556,7 @@ def main() -> int:
     for acct0 in [str(a).strip() for a in (args.accounts or []) if str(a).strip()]:
         try:
             sch_acct_cmd = [
-                str(vpy), 'scripts/scan_scheduler.py',
+                str(vpy), 'scripts/cli/scan_scheduler_cli.py',
                 '--config', str(cfg_path),
                 '--state', str(state_path),
                 '--jsonl',
@@ -805,7 +805,7 @@ def main() -> int:
     if ran_any_pipeline:
         try:
             sch_args = [
-                str(vpy), 'scripts/scan_scheduler.py',
+                str(vpy), 'scripts/cli/scan_scheduler_cli.py',
                 '--config', str(cfg_path),
                 '--state', str(state_path),
                 '--state-dir', str((run_dir / 'state').resolve()),
@@ -968,7 +968,7 @@ def main() -> int:
         try:
             for acct in sent_accounts:
                 sch_args = [
-                    str(vpy), 'scripts/scan_scheduler.py',
+                    str(vpy), 'scripts/cli/scan_scheduler_cli.py',
                     '--config', str(cfg_path),
                     '--state', str(state_path),
                     '--state-dir', str((run_dir / 'state').resolve()),

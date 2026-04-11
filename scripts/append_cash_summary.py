@@ -78,7 +78,7 @@ def main():
     rows = []
     for acct in args.accounts:
         out = run_capture([
-            py, 'scripts/query_sell_put_cash.py',
+            py, 'scripts/cli/query_sell_put_cash_cli.py',
             '--pm-config', str((base / args.pm_config).resolve()) if not Path(args.pm_config).is_absolute() else str(args.pm_config),
             '--market', args.market,
             '--account', acct,

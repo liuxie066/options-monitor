@@ -6,7 +6,7 @@ This repo is meant to run as a repeatable monitoring pipeline.
 
 - Runtime config entry (OM only): `config.us.json` / `config.hk.json`
 - Main pipeline: `./run_watchlist.sh` → `scripts/run_pipeline.py`
-- Scheduler: `scripts/scan_scheduler.py`
+- Scheduler: `scripts/cli/scan_scheduler_cli.py`
 - Alert engine: `scripts/alert_engine.py`
 - Multi-account notifier: `scripts/send_if_needed_multi.py`
 

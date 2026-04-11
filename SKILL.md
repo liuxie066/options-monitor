@@ -30,8 +30,8 @@ cd /home/node/.openclaw/workspace/options-monitor
 ### 2) 查询卖 Put 担保占用 / 剩余现金（按账户，统一折算 CNY）
 
 ```bash
-./.venv/bin/python scripts/query_sell_put_cash.py --market 富途 --account lx
-./.venv/bin/python scripts/query_sell_put_cash.py --market 富途 --account sy
+./.venv/bin/python scripts/cli/query_sell_put_cash_cli.py --market 富途 --account lx
+./.venv/bin/python scripts/cli/query_sell_put_cash_cli.py --market 富途 --account sy
 ```
 
 ### 3) watchlist 管理（监控标的）

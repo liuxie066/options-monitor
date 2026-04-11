@@ -120,3 +120,11 @@ cd /home/node/.openclaw/workspace/options-monitor
 - 永不删除“最近一次成功 run”目录
 - 仅删除仓库白名单路径：`output_runs/`、（可选）`output_accounts/*/raw/*.json`、（可选）`logs/**`、`audit/**`
 - 每次输出扫描/删除汇总、空间估算与保护目录
+
+## CLI 入口（第4步最小改造）
+
+以下脚本入口已拆分为 `scripts/cli/`：
+- `scripts/cli/scan_scheduler_cli.py`
+- `scripts/cli/render_sell_put_alerts_cli.py`
+- `scripts/cli/render_sell_call_alerts_cli.py`
+- `scripts/cli/query_sell_put_cash_cli.py`
