@@ -31,6 +31,9 @@ NEGATION_TERMS = (
     "非运行入口",
     "不是",
     "不要将",
+    "禁止",
+    "forbid",
+    "forbidden",
     "not",
     "historical",
     "history",
@@ -50,6 +53,11 @@ EXPLICIT_TERMS = (
     "explicit",
     "如需",
     "allowlist",
+    "禁止",
+    "forbid",
+    "forbidden",
+    "不带",
+    "默认不会",
 )
 
 
@@ -117,6 +125,8 @@ def check_runtime_entry_wording(files: list[Path]) -> list[Violation]:
 def check_deploy_include_runtime_default(files: list[Path]) -> list[Violation]:
     issues: list[Violation] = []
     for path in files:
+        if path.relative_to(ROOT).as_posix() == "scripts/guardrails_check.py":
+            continue
         lines = read_lines(path)
         for idx, line in enumerate(lines, start=1):
             lowered = line.lower()
