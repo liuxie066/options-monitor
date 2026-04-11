@@ -48,7 +48,7 @@ def run_stage_only_alert_notify(
     changes_out = stage_only_changes_out(report_dir=report_dir)
 
     alert_cmd = [
-        py, 'scripts/alert_engine.py',
+        py, 'scripts/cli/alert_engine_cli.py',
         '--summary-input', str((report_dir / 'symbols_summary.csv').as_posix()),
         '--output', str((report_dir / 'symbols_alerts.txt').as_posix()),
         '--changes-output', changes_out,

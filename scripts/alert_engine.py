@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import argparse
 import json
 import shutil
 from pathlib import Path
@@ -508,52 +507,100 @@ def snapshot_summary(current_path: Path, snapshot_path: Path):
         pd.DataFrame().to_csv(snapshot_path, index=False)
 
 
-def main():
+def _resolve_repo_path(*, repo_base: Path, value: str) -> Path:
+    path = Path(value)
+    if not path.is_absolute():
+        path = (repo_base / path).resolve()
+    return path
+
+
+def _resolve_previous_summary_path(*, repo_base: Path, previous_summary: str | None, state_dir: str | None) -> Path:
+    if state_dir:
+        sd = _resolve_repo_path(repo_base=repo_base, value=state_dir)
+        return (sd / 'symbols_summary_prev.csv').resolve()
+    if previous_summary:
+        return _resolve_repo_path(repo_base=repo_base, value=previous_summary)
+    return (repo_base / 'output' / 'state' / 'symbols_summary_prev.csv').resolve()
+
+
+def _load_policy(policy_json: str | None, *, repo_base: Path) -> dict:
+    if not policy_json:
+        return DEFAULT_POLICY.copy()
+    try:
+        p = _resolve_repo_path(repo_base=repo_base, value=policy_json)
+        if p.exists() and p.stat().st_size > 0:
+            data = json.loads(p.read_text(encoding='utf-8'))
+            if isinstance(data, dict):
+                return {**DEFAULT_POLICY, **data}
+    except Exception:
+        pass
+    return DEFAULT_POLICY.copy()
+
+
+def _fill_capacity_fields_from_note(current: pd.DataFrame) -> pd.DataFrame:
+    """补齐摘要里依赖 note 的衍生字段，保持旧行为。"""
+    if current.empty or ('note' not in current.columns):
+        return current
+
+    def _parse_int_after(s: str, key: str) -> int:
+        try:
+            txt = str(s)
+            if key not in txt:
+                return 0
+            parts = txt.split(key, 1)[1].strip().split()
+            if not parts:
+                return 0
+            return int(float(parts[0]))
+        except Exception:
+            return 0
+
+    mask = current.get('strategy').astype(str) == 'sell_call'
+    if mask.any():
+        current.loc[mask, 'cover_avail'] = current.loc[mask, 'note'].apply(lambda x: _parse_int_after(x, 'cover_avail'))
+        current.loc[mask, 'shares_total'] = current.loc[mask, 'note'].apply(lambda x: _parse_int_after(x, 'shares_total'))
+        current.loc[mask, 'shares_locked'] = current.loc[mask, 'note'].apply(lambda x: _parse_int_after(x, 'shares_locked'))
+
+    mask2 = current.get('strategy').astype(str) == 'sell_put'
+    if mask2.any() and 'cash_secured_used_usd' not in current.columns:
+        def _parse_float_after(s: str, key: str) -> float:
+            try:
+                txt = str(s)
+                if key not in txt:
+                    return 0.0
+                parts = txt.split(key, 1)[1].strip().split()
+                if not parts:
+                    return 0.0
+                return float(parts[0])
+            except Exception:
+                return 0.0
+
+        current.loc[mask2, 'cash_secured_used_usd'] = current.loc[mask2, 'note'].apply(lambda x: _parse_float_after(x, 'cash_secured_used_usd'))
+
+    return current
+
+
+def run_alert_engine(
+    *,
+    summary_input: str = 'output/reports/symbols_summary.csv',
+    output: str = 'output/reports/symbols_alerts.txt',
+    changes_output: str = 'output/reports/symbols_changes.txt',
+    previous_summary: str | None = None,
+    state_dir: str | None = None,
+    update_snapshot: bool = False,
+    policy_json: str | None = None,
+) -> dict:
+    """执行提醒文本构建，不包含 CLI 参数解析。"""
     global POLICY
 
-    parser = argparse.ArgumentParser(description='Build alert and change text from symbols summary')
-    parser.add_argument('--summary-input', default='output/reports/symbols_summary.csv')
-    parser.add_argument('--output', default='output/reports/symbols_alerts.txt')
-    parser.add_argument('--changes-output', default='output/reports/symbols_changes.txt')
-    parser.add_argument('--previous-summary', default=None, help='Previous summary snapshot CSV (default: <state-dir>/symbols_summary_prev.csv)')
-    parser.add_argument('--state-dir', default=None, help='[optional] state dir for symbols_summary_prev.csv (overrides --previous-summary when set)')
-    parser.add_argument('--update-snapshot', action='store_true')
-    parser.add_argument('--policy-json', default=None, help='JSON file for alert policy overrides')
-    args = parser.parse_args()
-
-    if args.policy_json:
-        try:
-            p = Path(args.policy_json)
-            if not p.is_absolute():
-                base0 = Path(__file__).resolve().parents[1]
-                p = (base0 / p).resolve()
-            if p.exists() and p.stat().st_size > 0:
-                data = json.loads(p.read_text(encoding='utf-8'))
-                if isinstance(data, dict):
-                    POLICY = {**DEFAULT_POLICY, **data}
-        except Exception:
-            POLICY = DEFAULT_POLICY.copy()
-
     base = Path(__file__).resolve().parents[1]
-    summary_path = base / args.summary_input
-    output_path = base / args.output
-    changes_path = base / args.changes_output
+    POLICY = _load_policy(policy_json, repo_base=base)
 
-    # Resolve previous snapshot
-    if args.state_dir:
-        sd = Path(args.state_dir)
-        if not sd.is_absolute():
-            sd = (base / sd).resolve()
-        previous_path = (sd / 'symbols_summary_prev.csv').resolve()
-    elif args.previous_summary:
-        previous_path = Path(args.previous_summary)
-        if not previous_path.is_absolute():
-            previous_path = (base / previous_path).resolve()
-    else:
-        previous_path = (base / 'output' / 'state' / 'symbols_summary_prev.csv').resolve()
+    summary_path = _resolve_repo_path(repo_base=base, value=summary_input)
+    output_path = _resolve_repo_path(repo_base=base, value=output)
+    changes_path = Path(changes_output) if str(changes_output) == '/dev/null' else _resolve_repo_path(repo_base=base, value=changes_output)
+    previous_path = _resolve_previous_summary_path(repo_base=base, previous_summary=previous_summary, state_dir=state_dir)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    # When changes-output is /dev/null (scheduled fast mode), avoid trying to create its parent.
     try:
         if str(changes_path) != '/dev/null':
             changes_path.parent.mkdir(parents=True, exist_ok=True)
@@ -563,53 +610,16 @@ def main():
 
     current = safe_read_csv(summary_path)
     previous = safe_read_csv(previous_path)
+    current = _fill_capacity_fields_from_note(current)
 
-    # Parse sell_call cover capacity out of note (added by pipeline), so alerts/notifications become account-aware.
-    if not current.empty and 'note' in current.columns:
-        def _parse_int_after(s: str, key: str) -> int:
-            try:
-                txt = str(s)
-                if key not in txt:
-                    return 0
-                parts = txt.split(key, 1)[1].strip().split()
-                if not parts:
-                    return 0
-                return int(float(parts[0]))
-            except Exception:
-                return 0
-
-        mask = current.get('strategy').astype(str) == 'sell_call'
-        if mask.any():
-            current.loc[mask, 'cover_avail'] = current.loc[mask, 'note'].apply(lambda x: _parse_int_after(x, 'cover_avail'))
-            current.loc[mask, 'shares_total'] = current.loc[mask, 'note'].apply(lambda x: _parse_int_after(x, 'shares_total'))
-            current.loc[mask, 'shares_locked'] = current.loc[mask, 'note'].apply(lambda x: _parse_int_after(x, 'shares_locked'))
-
-        # sell_put: prefer structured column; fallback to parsing note if needed
-        mask2 = current.get('strategy').astype(str) == 'sell_put'
-        if mask2.any() and 'cash_secured_used_usd' not in current.columns:
-            def _parse_float_after(s: str, key: str) -> float:
-                try:
-                    txt = str(s)
-                    if key not in txt:
-                        return 0.0
-                    parts = txt.split(key, 1)[1].strip().split()
-                    if not parts:
-                        return 0.0
-                    return float(parts[0])
-                except Exception:
-                    return 0.0
-            current.loc[mask2, 'cash_secured_used_usd'] = current.loc[mask2, 'note'].apply(lambda x: _parse_float_after(x, 'cash_secured_used_usd'))
-
-    state_dir = None
+    resolved_state_dir = None
     try:
-        sd = Path(args.state_dir) if args.state_dir else None
-        if sd is not None and (not sd.is_absolute()):
-            sd = (base / sd).resolve()
-        state_dir = sd
+        if state_dir:
+            resolved_state_dir = _resolve_repo_path(repo_base=base, value=state_dir)
     except Exception:
-        state_dir = None
+        resolved_state_dir = None
 
-    symbol_display_map = _load_symbol_display_map(base, state_dir=state_dir)
+    symbol_display_map = _load_symbol_display_map(base, state_dir=resolved_state_dir)
     alert_text = build_alert_text(current, symbol_display_map=symbol_display_map)
     changes_text = build_changes_text(current, previous)
 
@@ -620,17 +630,14 @@ def main():
     except Exception:
         pass
 
-    # In scheduled fast mode, keep stdout minimal; run_pipeline consumes output files.
-    if str(changes_path) != '/dev/null':
-        print(alert_text)
-        print(f'[DONE] alerts -> {output_path}')
-        print(changes_text)
-        print(f'[DONE] changes -> {changes_path}')
-
-    if args.update_snapshot:
+    if update_snapshot:
         snapshot_summary(summary_path, previous_path)
-        print(f'[DONE] snapshot updated -> {previous_path}')
 
-
-if __name__ == '__main__':
-    main()
+    return {
+        'alert_text': alert_text,
+        'changes_text': changes_text,
+        'output_path': output_path,
+        'changes_path': changes_path,
+        'previous_path': previous_path,
+        'snapshot_updated': bool(update_snapshot),
+    }

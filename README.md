@@ -96,7 +96,7 @@ cd /home/node/.openclaw/workspace/options-monitor
 ### C. 成交/手工输入 → option_positions（Intake）
 
 ```bash
-./.venv/bin/python scripts/parse_option_message.py --text "..."
+./.venv/bin/python scripts/cli/parse_option_message_cli.py --text "..."
 ./.venv/bin/python scripts/option_intake.py --market hk --account lx --text "..." --dry-run
 ```
 

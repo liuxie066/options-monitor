@@ -20,7 +20,7 @@ VPY = BASE / '.venv' / 'bin' / 'python'
 
 def run_parser(text: str) -> dict:
     p = subprocess.run(
-        [str(VPY), 'scripts/parse_option_message.py', '--text', text],
+        [str(VPY), 'scripts/cli/parse_option_message_cli.py', '--text', text],
         cwd=str(BASE),
         capture_output=True,
         text=True,

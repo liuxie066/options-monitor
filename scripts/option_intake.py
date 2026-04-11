@@ -6,7 +6,7 @@ Usage examples:
   ./scripts/option_intake.py --text "期权：腾讯20260330 put，strike500，成本5.425每股，乘数100，short 10张，sy，HKD" --apply
 
 Design:
-- Parses message with scripts/parse_option_message.py
+- Parses message with scripts/cli/parse_option_message_cli.py
 - Writes via scripts/option_positions.py add
 - Default dry-run (safe). Use --apply to persist.
 """
@@ -65,7 +65,7 @@ def main():
     env = dict(os.environ)
     env.setdefault('PYTHONPATH', str(base))
 
-    code, out, err = run_capture([py, 'scripts/parse_option_message.py', '--text', args.text], cwd=base, timeout_sec=30, env=env)
+    code, out, err = run_capture([py, 'scripts/cli/parse_option_message_cli.py', '--text', args.text], cwd=base, timeout_sec=30, env=env)
     if code != 0:
         print(err.strip() or out.strip())
         return code
