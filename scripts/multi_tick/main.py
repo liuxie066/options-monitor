@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 from time import monotonic
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -194,6 +195,7 @@ def main() -> int:
 
         if need_opend:
             unhealthy = None
+            watchdog_timed_out = False
             for host, port in sorted(ports):
                 try:
                     wd0 = run_opend_watchdog(
@@ -215,6 +217,7 @@ def main() -> int:
                         }
                         break
                 except Exception as e:
+                    watchdog_timed_out = isinstance(e, subprocess.TimeoutExpired)
                     unhealthy = {
                         'host': host,
                         'port': port,
@@ -232,7 +235,7 @@ def main() -> int:
                 port = unhealthy.get('port')
 
                 degraded = False
-                if allow_downgrade and (not has_hk_opend):
+                if allow_downgrade and (not has_hk_opend) and (not watchdog_timed_out):
                     try:
                         for sym in (base_cfg.get('symbols') or []):
                             if str((sym or {}).get('market') or '').upper() != 'US':
