@@ -24,6 +24,10 @@
    - 部署用：`scripts/deploy_to_prod.py`（不要直接改 prod）
 
 3. **数据缺失必须显式提示**（字段缺失/源不可用/降级路径）
+4. **运行配置单一来源**
+   - 只改 `config.us.json` / `config.hk.json`
+   - `config.scheduled.json` / `config.market_*.json` / `config.market_us.fallback_yahoo.json` / `config.json` 视为兼容派生文件
+   - 修改通知渠道/目标后，用同步脚本一次性刷新兼容文件
 
 ---
 
@@ -41,6 +45,7 @@ cd /home/node/.openclaw/workspace/options-monitor
 ```bash
 cp config.example.us.json config.us.json
 cp config.example.hk.json config.hk.json
+./.venv/bin/python scripts/sync_runtime_configs.py --apply
 ```
 
 ---
@@ -178,4 +183,14 @@ cd /home/node/.openclaw/workspace/options-monitor
 
 # Sell Call
 ./.venv/bin/python scripts/cli/scan_sell_call_cli.py --symbols AAPL --avg-cost 150 --shares 100 --min-annualized-net-return 0.08 --quiet
+```
+
+### E. 运行配置同步（单一来源 -> 兼容文件）
+
+```bash
+# 查看是否有漂移（有漂移时返回非 0）
+./.venv/bin/python scripts/sync_runtime_configs.py --check
+
+# 应用同步（把 notifications 从 config.us/config.hk 写入兼容文件）
+./.venv/bin/python scripts/sync_runtime_configs.py --apply
 ```
