@@ -28,7 +28,7 @@ def load_json(p: Path) -> dict:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description='options-monitor healthcheck + notify')
-    ap.add_argument('--config', default='config.json', help='options-monitor config.json')
+    ap.add_argument('--config', default='config.us.json', help='options-monitor config.us.json/config.hk.json')
     ap.add_argument('--accounts', nargs='*', default=['lx', 'sy'])
     ap.add_argument('--notify-on', choices=['warn', 'critical', 'both'], default='both')
     ap.add_argument('--silent-ok', action='store_true', default=True)

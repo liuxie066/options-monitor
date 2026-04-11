@@ -5,7 +5,7 @@ set -euo pipefail
 #
 # Design goals:
 # - Avoid editing prod directly (no drift): always publish from dev.
-# - Copy ONLY tracked files from dev (git ls-files), so local prod config.json/output/.venv are untouched.
+# - Copy ONLY tracked files from dev (git ls-files), so local prod config.us.json/config.hk.json/output/.venv are untouched.
 # - Create an auditable publish commit on a timestamped branch in prod, then merge into a target branch.
 #
 # Default dirs match this OpenClaw workspace layout.
@@ -36,7 +36,7 @@ Examples:
 Notes:
 - This script performs ONLY local git commits/merges; it does NOT push to GitHub.
 - It copies files from dev using: git ls-files (tracked only).
-  So ignored local files like config.json/output/.venv are NOT overwritten.
+  So ignored local files like config.us.json/config.hk.json/output/.venv are NOT overwritten.
 EOF
 }
 

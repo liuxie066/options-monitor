@@ -14,6 +14,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable, Iterable
 
+from scripts.sell_call_config import resolve_min_annualized_net_premium_return
+from scripts.sell_put_config import resolve_min_annualized_net_return
+
 
 def _parse_symbols_whitelist(symbols_arg: str | None) -> set[str] | None:
     if not symbols_arg:
@@ -78,6 +81,19 @@ def run_watchlist_pipeline(
                     continue
 
             item = apply_profiles_fn(item0, profiles)
+
+            # Resolve min annualized return with a single source-of-truth chain:
+            # symbol.sell_put > templates.sell_put > DEFAULT.
+            resolved_put_min = resolve_min_annualized_net_return(symbol_cfg=item0, profiles=profiles)
+            sell_put_cfg = dict(item.get('sell_put') or {})
+            sell_put_cfg['min_annualized_net_return'] = resolved_put_min
+            item['sell_put'] = sell_put_cfg
+
+            resolved_call_min = resolve_min_annualized_net_premium_return(symbol_cfg=item0, profiles=profiles)
+            sell_call_cfg = dict(item.get('sell_call') or {})
+            sell_call_cfg['min_annualized_net_premium_return'] = resolved_call_min
+            sell_call_cfg.pop('min_annualized_net_return', None)
+            item['sell_call'] = sell_call_cfg
 
             # inject option_ctx into portfolio_ctx for now (minimal change)
             if portfolio_ctx is not None and option_ctx is not None:

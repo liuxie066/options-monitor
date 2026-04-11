@@ -103,7 +103,8 @@ cd /home/node/.openclaw/workspace/options-monitor
 
 ## Config & State
 
-- 配置：`config.local.us.json` / `config.local.hk.json`
+- 运行入口配置（OM）：`config.us.json` / `config.hk.json`（唯一入口）
+- `portfolio-management/config.json`：仅 PM 凭证与 Bitable 读取配置，不是 options-monitor 运行入口配置
 - 输出目录（dev）：`output/`
   - `output/raw/`：原始抓取
   - `output/parsed/`：标准化 CSV
@@ -132,7 +133,7 @@ cd /home/node/.openclaw/workspace/options-monitor
 ./.venv/bin/python scripts/deploy_to_prod.py --dry-run --include-runtime-config
 ```
 
-> 默认会跳过运行配置：`config.json` / `config.us.json` / `config.hk.json` / `config.scheduled.json` / `config.market_*.json` / `config.local.*.json`；`config.example.*.json` 会继续同步。
+> 默认会跳过运行配置：`config.us.json` / `config.hk.json` / `config.local.*.json`；`*.example.json` 会继续同步。
 >
 > prod 不是开发源，不要在 `options-monitor-prod` 里直接改代码。
 

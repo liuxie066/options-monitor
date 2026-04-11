@@ -132,7 +132,7 @@ def _release_lock(fd: int, lock_path: Path):
 
 def main():
     ap = argparse.ArgumentParser(description='Run scheduled tick and send notification if needed')
-    ap.add_argument('--config', default='config.json')
+    ap.add_argument('--config', default='config.us.json')
     ap.add_argument('--state-dir', default='output/state', help='Directory for scheduler_state/last_run/locks (default: output/state)')
     ap.add_argument('--channel', default=None)
     ap.add_argument('--target', default=None)

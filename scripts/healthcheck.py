@@ -35,7 +35,7 @@ def now_utc():
 
 def main():
     ap = argparse.ArgumentParser(description='options-monitor healthcheck')
-    ap.add_argument('--config', default='config.json')
+    ap.add_argument('--config', default='config.us.json')
     ap.add_argument('--accounts', nargs='*', default=['lx', 'sy'])
     args = ap.parse_args()
 
@@ -59,8 +59,6 @@ def main():
 
     # 2) feishu schema
     try:
-        pm_cfg = json.loads((base / 'config.json').read_text(encoding='utf-8'))
-        # actually config.json here is options-monitor; pm_config in it points to portfolio-management
         opt_cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
         pm_ref = (opt_cfg.get('portfolio') or {}).get('pm_config')
         if not pm_ref:

@@ -111,8 +111,8 @@ def validate_config(cfg: dict):
 
 
 def main():
-    ap = argparse.ArgumentParser(description='Validate options-monitor config.json')
-    ap.add_argument('--config', default='config.json')
+    ap = argparse.ArgumentParser(description='Validate options-monitor config.us.json/config.hk.json')
+    ap.add_argument('--config', default='config.us.json')
     args = ap.parse_args()
 
     base = Path(__file__).resolve().parents[1]

@@ -5,6 +5,7 @@
 - 开发只在：`/home/node/.openclaw/workspace/options-monitor`
 - 生产只运行：`/home/node/.openclaw/workspace/options-monitor-prod`
 - 不要在 prod 目录直接改代码
+- options-monitor 运行入口配置仅 `config.us.json` / `config.hk.json`（不要将 `config.json`、`config.scheduled.json`、`config.market_us*`、`config.market_hk*` 视为主运行入口）
 
 ## Standard Commands
 
