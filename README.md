@@ -16,6 +16,7 @@
 1. **真实运行配置不要提交**
    - 仓库只保留 `config.example.us.json` / `config.example.hk.json`
    - 本机约定：实际运行配置文件名用 `config.us.json` / `config.hk.json`（本地文件，不要提交）
+   - 历史运行配置名（`config.market_*.json`、`config.scheduled.json`、`config.market_us.fallback_yahoo.json`、`*.deprecated`）也仅限本地，远端只保留 `*.example.json`
 
 2. **dev → prod 有纪律**
    - 开发只在：`/home/node/.openclaw/workspace/options-monitor`（dev repo）
