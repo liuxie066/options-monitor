@@ -46,7 +46,7 @@ def run_sell_put_scan_and_summarize(
     )
 
     cmd = [
-        py, 'scripts/scan_sell_put.py',
+        py, 'scripts/cli/scan_sell_put_cli.py',
         '--symbols', sym,
         '--input-root', str(required_data_dir),
         '--min-dte', str(sp.get('min_dte', 20)),

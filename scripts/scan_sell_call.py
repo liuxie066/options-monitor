@@ -1,17 +1,47 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import argparse
-import sys
 from pathlib import Path
 import pandas as pd
 
-# Allow running as `python scripts/scan_sell_call.py` without installation.
-repo_base = Path(__file__).resolve().parents[1]
-if str(repo_base) not in sys.path:
-    sys.path.insert(0, str(repo_base))
-
 from scripts.sell_call_config import validate_min_annualized_net_premium_return
+
+SELL_CALL_EMPTY_OUTPUT_COLUMNS = [
+    "symbol",
+    "expiration",
+    "dte",
+    "contract_symbol",
+    "multiplier",
+    "currency",
+    "strike",
+    "spot",
+    "avg_cost",
+    "shares_total",
+    "shares_locked",
+    "shares_available_for_cover",
+    "covered_contracts_available",
+    "is_fully_covered_available",
+    "shares",
+    "bid",
+    "ask",
+    "last_price",
+    "mid",
+    "open_interest",
+    "volume",
+    "implied_volatility",
+    "delta",
+    "spread",
+    "spread_ratio",
+    "gross_income",
+    "futu_fee",
+    "net_income",
+    "annualized_net_premium_return",
+    "if_exercised_total_return",
+    "strike_above_spot_pct",
+    "strike_above_cost_pct",
+    "cc_band",
+    "risk_label",
+]
 
 
 def calc_futu_us_option_fee(order_price: float, contracts: int = 1, is_sell: bool = True) -> float:
@@ -32,25 +62,26 @@ def calc_futu_hk_option_fee_static(order_price: float, contracts: int = 1, is_se
     try:
         if base_dir is not None:
             import json
+
             cfg = None
-            for cfg_name in ('config.hk.json', 'config.us.json'):
+            for cfg_name in ("config.hk.json", "config.us.json"):
                 cfg_path = base_dir / cfg_name
                 if cfg_path.exists() and cfg_path.stat().st_size > 0:
-                    cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
+                    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
                     break
             if isinstance(cfg, dict):
-                hk = ((cfg.get('fees') or {}).get('hk_static') or {})
-                platform_fee_per_order = float(hk.get('platform_fee_per_order_hkd', platform_fee_per_order))
-                commission_per_order = float(hk.get('commission_per_order_hkd', commission_per_order))
-                other_per_order = float(hk.get('other_fees_per_order_hkd', other_per_order))
+                hk = ((cfg.get("fees") or {}).get("hk_static") or {})
+                platform_fee_per_order = float(hk.get("platform_fee_per_order_hkd", platform_fee_per_order))
+                commission_per_order = float(hk.get("commission_per_order_hkd", commission_per_order))
+                other_per_order = float(hk.get("other_fees_per_order_hkd", other_per_order))
     except Exception:
         pass
     return round(platform_fee_per_order + commission_per_order + other_per_order, 6)
 
 
 def calc_futu_option_fee(currency: str | None, order_price: float, contracts: int = 1, is_sell: bool = True, *, base_dir: Path | None = None) -> float:
-    ccy = (currency or 'USD').upper()
-    if ccy == 'HKD':
+    ccy = (currency or "USD").upper()
+    if ccy == "HKD":
         return calc_futu_hk_option_fee_static(order_price, contracts=contracts, is_sell=is_sell, base_dir=base_dir)
     return calc_futu_us_option_fee(order_price, contracts=contracts, is_sell=is_sell)
 
@@ -75,26 +106,26 @@ def safe_int(v):
 
 def strike_band(strike_above_spot_pct: float) -> str:
     if strike_above_spot_pct < 0.03:
-        return '<3%'
+        return "<3%"
     if strike_above_spot_pct < 0.08:
-        return '3%-8%'
-    return '>=8%'
+        return "3%-8%"
+    return ">=8%"
 
 
 def risk_label(strike_above_spot_pct: float) -> str:
     if strike_above_spot_pct < 0.03:
-        return '激进'
+        return "激进"
     if strike_above_spot_pct < 0.08:
-        return '中性'
-    return '保守'
+        return "中性"
+    return "保守"
 
 
 def compute_metrics(row: pd.Series, avg_cost: float):
-    mid = safe_float(row.get('mid'))
-    strike = safe_float(row.get('strike'))
-    spot = safe_float(row.get('spot'))
+    mid = safe_float(row.get("mid"))
+    strike = safe_float(row.get("strike"))
+    spot = safe_float(row.get("spot"))
     try:
-        dte = int(row.get('dte'))
+        dte = int(row.get("dte"))
     except Exception:
         return None
     if None in (mid, strike, spot) or dte <= 0 or avg_cost <= 0:
@@ -102,14 +133,14 @@ def compute_metrics(row: pd.Series, avg_cost: float):
     if mid <= 0 or strike <= 0 or spot <= 0:
         return None
 
-    multiplier = safe_float(row.get('multiplier'))
+    multiplier = safe_float(row.get("multiplier"))
     m = int(multiplier) if multiplier and multiplier > 0 else None
     if not m:
         return None
 
     gross_income = mid * m
     base_dir = Path(__file__).resolve().parents[1]
-    fee = calc_futu_option_fee(row.get('currency'), mid, contracts=1, is_sell=True, base_dir=base_dir)
+    fee = calc_futu_option_fee(row.get("currency"), mid, contracts=1, is_sell=True, base_dir=base_dir)
     net_income = gross_income - fee
     if net_income <= 0:
         return None
@@ -120,236 +151,223 @@ def compute_metrics(row: pd.Series, avg_cost: float):
     strike_above_cost_pct = (strike - avg_cost) / avg_cost
 
     return {
-        'gross_income': round(gross_income, 6),
-        'futu_fee': round(fee, 6),
-        'net_income': round(net_income, 6),
-        'annualized_net_premium_return': round(annualized_net_premium_return, 6),
-        'if_exercised_total_return': round(if_exercised_total_return, 6),
-        'strike_above_spot_pct': round(strike_above_spot_pct, 6),
-        'strike_above_cost_pct': round(strike_above_cost_pct, 6),
-        'cc_band': strike_band(strike_above_spot_pct),
-        'risk_label': risk_label(strike_above_spot_pct),
+        "gross_income": round(gross_income, 6),
+        "futu_fee": round(fee, 6),
+        "net_income": round(net_income, 6),
+        "annualized_net_premium_return": round(annualized_net_premium_return, 6),
+        "if_exercised_total_return": round(if_exercised_total_return, 6),
+        "strike_above_spot_pct": round(strike_above_spot_pct, 6),
+        "strike_above_cost_pct": round(strike_above_cost_pct, 6),
+        "cc_band": strike_band(strike_above_spot_pct),
+        "risk_label": risk_label(strike_above_spot_pct),
     }
 
 
-def main():
-    parser = argparse.ArgumentParser(description='Run Sell Call scan on Yahoo required_data CSV files')
-    parser.add_argument('--symbols', nargs='+', required=True)
-    parser.add_argument('--avg-cost', type=float, required=True, help='Average holding cost per share')
-    parser.add_argument('--shares', type=int, default=100)
-    # Covered-call capacity (optional, for account-aware gating)
-    parser.add_argument('--shares-locked', type=int, default=0)
-    parser.add_argument('--shares-available-for-cover', type=int, default=None)
-    parser.add_argument('--min-dte', type=int, default=7)
-    parser.add_argument('--max-dte', type=int, default=90)
-    parser.add_argument('--min-otm-pct', type=float, default=0.0, help='min OTM percent for calls: (strike-spot)/spot (e.g. 0.05)')
-    parser.add_argument('--min-strike', type=float, default=None)
-    parser.add_argument('--max-strike', type=float, default=None)
-    parser.add_argument('--min-annualized-net-return', type=float, default=None, help='required; min annualized net premium return in [0,1]')
-    parser.add_argument('--min-if-exercised-total-return', type=float, default=0.0)
-    parser.add_argument('--min-open-interest', type=float, default=100)
-    parser.add_argument('--min-volume', type=float, default=10)
-    parser.add_argument('--max-spread-ratio', type=float, default=0.30)
-    parser.add_argument('--min-iv', type=float, default=None, help='min implied volatility (decimal, e.g. 0.15)')
-    parser.add_argument('--max-iv', type=float, default=None, help='max implied volatility (decimal, e.g. 2.0)')
-    parser.add_argument('--require-bid-ask', action='store_true', help='require bid>0 and ask>0 (better fillability)')
-    parser.add_argument('--min-delta', type=float, default=None, help='min call delta (e.g. 0.20)')
-    parser.add_argument('--max-delta', type=float, default=None, help='max call delta (e.g. 0.35)')
-    parser.add_argument('--quiet', action='store_true', help='quiet mode: suppress human-friendly prints')
-    parser.add_argument('--output', default=None, help='Output CSV path (default: output/reports/sell_call_candidates.csv)')
-    parser.add_argument('--input-root', default=None, help='Input root containing parsed/ required_data CSVs (default: ./output)')
-    args = parser.parse_args()
+def run_sell_call_scan(
+    *,
+    symbols: list[str],
+    input_root: Path,
+    output: Path,
+    avg_cost: float,
+    shares: int = 100,
+    shares_locked: int = 0,
+    shares_available_for_cover: int | None = None,
+    min_dte: int = 7,
+    max_dte: int = 90,
+    min_otm_pct: float = 0.0,
+    min_strike: float | None = None,
+    max_strike: float | None = None,
+    min_annualized_net_return: float | None = None,
+    min_if_exercised_total_return: float = 0.0,
+    min_open_interest: float = 100,
+    min_volume: float = 10,
+    max_spread_ratio: float = 0.30,
+    min_iv: float | None = None,
+    max_iv: float | None = None,
+    require_bid_ask: bool = False,
+    min_delta: float | None = None,
+    max_delta: float | None = None,
+    quiet: bool = False,
+) -> pd.DataFrame:
+    """执行卖出看涨期权扫描并写出候选 CSV。"""
+    if shares < 100:
+        raise ValueError("shares 必须至少 100，sell call 才有意义。")
 
-    if args.shares < 100:
-        raise SystemExit('shares 必须至少 100，sell call 才有意义。')
+    threshold = validate_min_annualized_net_premium_return(
+        min_annualized_net_return,
+        source="--min-annualized-net-return",
+    )
 
-    try:
-        min_annualized_net_return = validate_min_annualized_net_premium_return(
-            args.min_annualized_net_return,
-            source='--min-annualized-net-return',
-        )
-    except ValueError as e:
-        raise SystemExit(f"[ARG_ERROR] {e}")
-
-    base = Path(__file__).resolve().parents[1]
-    input_root = (Path(args.input_root).resolve() if args.input_root else (base / 'output').resolve())
-    out_path = Path(args.output).resolve() if args.output else (base / 'output' / 'reports' / 'sell_call_candidates.csv')
+    out_path = Path(output).resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    rows = []
-    for symbol in args.symbols:
-        path = input_root / 'parsed' / f'{symbol}_required_data.csv'
+    rows: list[dict] = []
+    for symbol in symbols:
+        path = Path(input_root) / "parsed" / f"{symbol}_required_data.csv"
         try:
             df = pd.read_csv(path)
         except pd.errors.EmptyDataError:
-            # Empty required_data CSV: treat as no candidates instead of crashing.
+            # 空 required_data 视为无候选，避免中断整轮扫描。
             df = pd.DataFrame()
-        df = df[df['option_type'] == 'call'].copy() if (not df.empty and ('option_type' in df.columns)) else pd.DataFrame()
+        df = df[df["option_type"] == "call"].copy() if (not df.empty and ("option_type" in df.columns)) else pd.DataFrame()
 
         for _, row in df.iterrows():
-            dte = safe_int(row.get('dte'))
+            dte = safe_int(row.get("dte"))
             if dte is None:
                 continue
-            if dte < args.min_dte or dte > args.max_dte:
+            if dte < min_dte or dte > max_dte:
                 continue
 
-            strike = safe_float(row.get('strike'))
+            strike = safe_float(row.get("strike"))
             if strike is None:
                 continue
 
-            # OTM filter for calls: (strike - spot)/spot >= min_otm_pct
-            if args.min_otm_pct is not None and float(args.min_otm_pct) > 0:
-                spot = safe_float(row.get('spot'))
+            if min_otm_pct is not None and float(min_otm_pct) > 0:
+                spot = safe_float(row.get("spot"))
                 if spot is None or spot <= 0:
                     continue
                 otm_pct = (strike - spot) / spot
-                if otm_pct < float(args.min_otm_pct):
+                if otm_pct < float(min_otm_pct):
                     continue
-            if args.min_strike is not None and strike < args.min_strike:
+            if min_strike is not None and strike < min_strike:
                 continue
-            if args.max_strike is not None and strike > args.max_strike:
-                continue
-
-            oi = safe_float(row.get('open_interest')) or 0.0
-            vol = safe_float(row.get('volume')) or 0.0
-            if oi < args.min_open_interest or vol < args.min_volume:
+            if max_strike is not None and strike > max_strike:
                 continue
 
-            bid = safe_float(row.get('bid'))
-            ask = safe_float(row.get('ask'))
-            mid = safe_float(row.get('mid'))
+            oi = safe_float(row.get("open_interest")) or 0.0
+            vol = safe_float(row.get("volume")) or 0.0
+            if oi < min_open_interest or vol < min_volume:
+                continue
 
-            if args.require_bid_ask:
-                if bid is None or ask is None or bid <= 0 or ask <= 0:
-                    continue
+            bid = safe_float(row.get("bid"))
+            ask = safe_float(row.get("ask"))
+            mid = safe_float(row.get("mid"))
 
-            iv = safe_float(row.get('implied_volatility'))
+            if require_bid_ask and (bid is None or ask is None or bid <= 0 or ask <= 0):
+                continue
+
+            iv = safe_float(row.get("implied_volatility"))
             if iv is not None and iv > 3.0:
                 iv = iv / 100.0
-            if args.min_iv is not None:
-                if iv is None or iv < float(args.min_iv):
-                    continue
-            if args.max_iv is not None and iv is not None:
-                if iv > float(args.max_iv):
-                    continue
+            if min_iv is not None and (iv is None or iv < float(min_iv)):
+                continue
+            if max_iv is not None and iv is not None and iv > float(max_iv):
+                continue
+
             spread = None
             spread_ratio = None
             if bid is not None and ask is not None and ask >= bid:
                 spread = ask - bid
                 if mid is not None and mid > 0:
                     spread_ratio = spread / mid
-            if spread_ratio is not None and spread_ratio > args.max_spread_ratio:
+            if spread_ratio is not None and spread_ratio > max_spread_ratio:
                 continue
 
-            # Delta filter (optional)
             try:
-                d = safe_float(row.get('delta'))
-                if (args.min_delta is not None) or (args.max_delta is not None):
+                d = safe_float(row.get("delta"))
+                if (min_delta is not None) or (max_delta is not None):
                     if d is None:
                         continue
                     d = float(d)
-                    if args.min_delta is not None and d < float(args.min_delta):
+                    if min_delta is not None and d < float(min_delta):
                         continue
-                    if args.max_delta is not None and d > float(args.max_delta):
+                    if max_delta is not None and d > float(max_delta):
                         continue
             except Exception:
                 pass
 
-            metrics = compute_metrics(row, args.avg_cost)
+            metrics = compute_metrics(row, avg_cost)
             if not metrics:
                 continue
-            if metrics['annualized_net_premium_return'] < min_annualized_net_return:
+            if metrics["annualized_net_premium_return"] < threshold:
                 continue
-            if metrics['if_exercised_total_return'] < args.min_if_exercised_total_return:
+            if metrics["if_exercised_total_return"] < min_if_exercised_total_return:
                 continue
 
-            m = safe_float(row.get('multiplier'))
+            m = safe_float(row.get("multiplier"))
             m_int = int(m) if m is not None and m > 0 else 0
 
-            shares_total = int(args.shares)
-            shares_locked = int(args.shares_locked or 0)
-            shares_available_for_cover = None
+            shares_total = int(shares)
+            shares_locked_value = int(shares_locked or 0)
+            available = shares_available_for_cover
             try:
-                if args.shares_available_for_cover is not None:
-                    shares_available_for_cover = int(args.shares_available_for_cover)
+                if available is not None:
+                    available = int(available)
             except Exception:
-                shares_available_for_cover = None
-            if shares_available_for_cover is None:
-                shares_available_for_cover = max(0, shares_total - shares_locked)
+                available = None
+            if available is None:
+                available = max(0, shares_total - shares_locked_value)
 
             covered_contracts_available = 0
             is_fully_covered_available = False
             try:
                 if m_int > 0:
-                    covered_contracts_available = max(0, shares_available_for_cover) // m_int
-                    is_fully_covered_available = (covered_contracts_available >= 1)
+                    covered_contracts_available = max(0, available) // m_int
+                    is_fully_covered_available = covered_contracts_available >= 1
             except Exception:
                 covered_contracts_available = 0
                 is_fully_covered_available = False
 
-            # Enforce covered-call shares constraint as a hard gate.
             if covered_contracts_available < 1:
                 continue
 
-            rows.append({
-                'symbol': row['symbol'],
-                'expiration': row['expiration'],
-                'dte': dte,
-                'contract_symbol': row.get('contract_symbol'),
-                'multiplier': m,
-                'currency': row.get('currency'),
-                'strike': strike,
-                'spot': safe_float(row.get('spot')),
-                'avg_cost': args.avg_cost,
-                # Coverage context
-                'shares_total': shares_total,
-                'shares_locked': shares_locked,
-                'shares_available_for_cover': shares_available_for_cover,
-                'covered_contracts_available': covered_contracts_available,
-                'is_fully_covered_available': is_fully_covered_available,
-                # Backward-compatible legacy field
-                'shares': shares_total,
-                'bid': bid,
-                'ask': ask,
-                'last_price': safe_float(row.get('last_price')),
-                'mid': mid,
-                'open_interest': oi,
-                'volume': vol,
-                'implied_volatility': safe_float(row.get('implied_volatility')),
-                'delta': safe_float(row.get('delta')),
-                'spread': spread,
-                'spread_ratio': spread_ratio,
-                **metrics,
-            })
+            rows.append(
+                {
+                    "symbol": row["symbol"],
+                    "expiration": row["expiration"],
+                    "dte": dte,
+                    "contract_symbol": row.get("contract_symbol"),
+                    "multiplier": m,
+                    "currency": row.get("currency"),
+                    "strike": strike,
+                    "spot": safe_float(row.get("spot")),
+                    "avg_cost": avg_cost,
+                    "shares_total": shares_total,
+                    "shares_locked": shares_locked_value,
+                    "shares_available_for_cover": available,
+                    "covered_contracts_available": covered_contracts_available,
+                    "is_fully_covered_available": is_fully_covered_available,
+                    "shares": shares_total,
+                    "bid": bid,
+                    "ask": ask,
+                    "last_price": safe_float(row.get("last_price")),
+                    "mid": mid,
+                    "open_interest": oi,
+                    "volume": vol,
+                    "implied_volatility": safe_float(row.get("implied_volatility")),
+                    "delta": safe_float(row.get("delta")),
+                    "spread": spread,
+                    "spread_ratio": spread_ratio,
+                    **metrics,
+                }
+            )
 
     out = pd.DataFrame(rows)
     if not out.empty:
-        out = out.sort_values(by=['annualized_net_premium_return', 'if_exercised_total_return'], ascending=[False, False])
+        out = out.sort_values(by=["annualized_net_premium_return", "if_exercised_total_return"], ascending=[False, False])
     if out.empty:
-        cols = [
-            'symbol','expiration','dte','contract_symbol','multiplier','currency','strike','spot','avg_cost',
-            # coverage context
-            'shares_total','shares_locked','shares_available_for_cover','covered_contracts_available','is_fully_covered_available',
-            # backward-compatible legacy field
-            'shares',
-            'bid','ask','last_price','mid','open_interest','volume','implied_volatility','delta','spread','spread_ratio',
-            'gross_income','futu_fee','net_income','annualized_net_premium_return','if_exercised_total_return',
-            'strike_above_spot_pct','strike_above_cost_pct','cc_band','risk_label'
-        ]
-        pd.DataFrame(columns=cols).to_csv(out_path, index=False)
+        pd.DataFrame(columns=SELL_CALL_EMPTY_OUTPUT_COLUMNS).to_csv(out_path, index=False)
     else:
         out.to_csv(out_path, index=False)
 
-    if not args.quiet:
-        print(f'[DONE] sell call scan -> {out_path}')
-        print(f'[DONE] candidates: {len(out)}')
+    if not quiet:
+        print(f"[DONE] sell call scan -> {out_path}")
+        print(f"[DONE] candidates: {len(out)}")
         if not out.empty:
             cols = [
-                'symbol','expiration','dte','strike','spot','avg_cost','mid','net_income',
-                'annualized_net_premium_return','if_exercised_total_return','strike_above_spot_pct','risk_label'
+                "symbol",
+                "expiration",
+                "dte",
+                "strike",
+                "spot",
+                "avg_cost",
+                "mid",
+                "net_income",
+                "annualized_net_premium_return",
+                "if_exercised_total_return",
+                "strike_above_spot_pct",
+                "risk_label",
             ]
             print(out[cols].head(20).to_string(index=False))
 
-
-if __name__ == '__main__':
-    main()
+    return out
