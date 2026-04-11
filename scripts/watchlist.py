@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Manage monitored symbols in options-monitor/config.json.
+"""Manage monitored symbols in options-monitor config.us.json/config.hk.json.
 
 Supports:
 - list: show current symbols and basic config
@@ -152,8 +152,8 @@ def cmd_edit(cfg: dict, symbol: str, sets: list[str]):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Manage options-monitor watchlist (config.json symbols)")
-    ap.add_argument("--config", default="config.json")
+    ap = argparse.ArgumentParser(description="Manage options-monitor watchlist (config.us.json/config.hk.json symbols)")
+    ap.add_argument("--config", default="config.us.json")
 
     sub = ap.add_subparsers(dest="cmd", required=True)
 

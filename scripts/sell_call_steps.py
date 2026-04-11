@@ -13,6 +13,7 @@ import pandas as pd
 
 from scripts.io_utils import safe_read_csv
 from scripts.report_summaries import summarize_sell_call
+from scripts.sell_call_config import resolve_min_annualized_net_premium_return_from_sell_call_cfg
 from scripts.subprocess_utils import run_cmd
 
 
@@ -59,10 +60,10 @@ def run_sell_call_scan_and_summarize(
     shares_available_for_cover = max(0, int(shares_total) - int(locked))
 
     symbol_cc = report_dir / f'{symbol_lower}_sell_call_candidates.csv'
-    # Backward-compat: accept both config keys
-    min_annualized = cc.get('min_annualized_net_premium_return', None)
-    if min_annualized is None:
-        min_annualized = cc.get('min_annualized_net_return', None)
+    min_annualized = resolve_min_annualized_net_premium_return_from_sell_call_cfg(
+        sell_call_cfg=cc,
+        source_prefix=f'{symbol}.sell_call',
+    )
 
     cmd = [
         py, 'scripts/scan_sell_call.py',
@@ -75,7 +76,7 @@ def run_sell_call_scan_and_summarize(
         '--min-dte', str(cc.get('min_dte', 20)),
         '--max-dte', str(cc.get('max_dte', 90)),
         '--min-otm-pct', str(cc.get('min_otm_pct', 0.0)),
-        '--min-annualized-net-return', str(min_annualized if min_annualized is not None else 0.07),
+        '--min-annualized-net-return', str(min_annualized),
         '--min-if-exercised-total-return', str(cc.get('min_if_exercised_total_return', 0.0)),
         '--min-open-interest', str(cc.get('min_open_interest', 100)),
         '--min-volume', str(cc.get('min_volume', 10)),

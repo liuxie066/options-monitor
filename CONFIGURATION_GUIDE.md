@@ -1,7 +1,7 @@
 # options-monitor 配置与表结构说明（实战版）
 
 > 目标：你只要维护：
-> - `options-monitor/config.json`（策略与监控）
+> - `options-monitor/config.us.json 或 options-monitor/config.hk.json`（策略与监控）
 > - 飞书 Bitable 的两张表：`holdings`、`option_positions`（账户约束）
 > - （可选）Feishu App 凭证（用于程序读取 Bitable）
 
@@ -9,7 +9,7 @@
 
 ## 1) 本项目需要哪些外部“表”（Bitable）？
 
-目前本项目会通过 `portfolio-management/config.json` 读取飞书 Bitable：
+目前本项目会通过 `portfolio-management/config.json` 读取飞书 Bitable（这是 PM 凭证配置，不是 options-monitor 运行入口配置）：
 - `holdings`：现金与股票持仓（用于 base 现金、shares、avg_cost）
 - `option_positions`：已卖出期权占用（用于：
   - covered call 锁股数 `locked_shares_by_symbol`
@@ -96,12 +96,14 @@
 
 ---
 
-## 4) options-monitor/config.json：你需要配置什么？
+## 4) options-monitor/config.us.json 或 options-monitor/config.hk.json：你需要配置什么？
 
-文件：`options-monitor/config.json`
+文件：`options-monitor/config.us.json 或 options-monitor/config.hk.json`
 
 ### 4.1 templates：通用底线（复用）
 - `templates.put_base.sell_put.min_annualized_net_return`：全局 put 最低年化（例如 0.10）
+- `sell_put.min_annualized_net_return` 统一解析优先级：
+  `symbol.sell_put.min_annualized_net_return` > `templates.<name>.sell_put.min_annualized_net_return` > 代码默认 `DEFAULT_MIN_ANNUALIZED_NET_RETURN(0.07)`。
 - `min_open_interest / min_volume / max_spread_ratio`：流动性与可成交性底线
 - `templates.call_base.sell_call.*`：call 的通用底线
 
@@ -114,7 +116,7 @@
 - `use`: 选择使用哪些模板（例如 `["put_base","call_base"]`）
 
 ### 4.3 portfolio：账户约束来源
-- `pm_config`: 指向 `../portfolio-management/config.json`
+- `pm_config`: 指向 `../portfolio-management/config.json`（仅 PM 凭证配置，不是 OM 运行入口）
 - `market`: 用来过滤两张表（例如 `富途`）
 - `account`: 用来过滤两张表（例如 `lx`）
 - `base_currency`: 当前策略口径（CNY）
@@ -141,7 +143,7 @@
 ## 5) Feishu App 凭证（AppID/AppSecret）到底放哪？
 
 ### 当前实现（已在用）
-- `portfolio-management/config.json` 内的 `feishu.app_id/app_secret` 用于获取 tenant_access_token，再读取 Bitable。
+- `portfolio-management/config.json` 内的 `feishu.app_id/app_secret` 用于获取 tenant_access_token，再读取 Bitable（这是 PM 凭证配置，不是 options-monitor 运行入口配置）。
 - options-monitor 通过 `portfolio.pm_config` 引用这一份配置。
 
 ### 推荐改进（更安全/更自洽）
@@ -157,7 +159,7 @@
 你可以发这些（任意一种即可）：
 1) holdings 表的 Bitable 链接 + option_positions 表的 Bitable 链接
 2) 或者直接发 `app_token/table_id`（例如 `xxx/tblxxx`），以及表的字段列表截图
-3) 你当前 `config.json`（可以直接发文件内容；里面不包含 secret）
+3) 你当前 `config.us.json` 或 `config.hk.json`（可以直接发文件内容；里面不包含 secret）
 
 **不要发**：Feishu app_secret、user_token。
 

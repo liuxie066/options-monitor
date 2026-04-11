@@ -55,6 +55,7 @@ def test_sell_put_keeps_zero_volume_when_min_volume_zero() -> None:
                 '--min-open-interest', '50',
                 '--min-volume', '0',
                 '--min-net-income', '0',
+                '--min-annualized-net-return', '0',
                 '--quiet',
             ]
             scan_sell_put.main()

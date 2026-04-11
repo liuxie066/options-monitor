@@ -29,16 +29,21 @@ ITEMS = [
     ".gitignore",
     "requirements.txt",
     "README.md",
+    "RUNBOOK.md",
+    "DEPLOY.md",
+    "CONFIGS.md",
+    "CONFIGURATION_GUIDE.md",
     "SKILL.md",
-    "config.json",
     "config.us.json",
     "config.hk.json",
-    "config.scheduled.json",
-    "config.market_us.json",
-    "config.market_hk.json",
-    "config.market_us.fallback_yahoo.json",
+    "config.legacy.example.json",
+    "config.scheduled.example.json",
+    "config.market_us.example.json",
+    "config.market_hk.example.json",
+    "config.market_us.fallback_yahoo.example.json",
     "scripts",
     "tests",
+    "docs",
 ]
 
 # Exclusions relative to repo root
@@ -55,10 +60,8 @@ EXCLUDE_TOP = {
 EXCLUDE_FILES = {"disable_autodeploy.flag"}
 
 RUNTIME_CONFIG_EXACT = {
-    "config.json",
     "config.us.json",
     "config.hk.json",
-    "config.scheduled.json",
 }
 
 
@@ -133,8 +136,6 @@ def is_runtime_config(path_rel: Path) -> bool:
         return False
     name = path_rel.name
     if name in RUNTIME_CONFIG_EXACT:
-        return True
-    if name.startswith("config.market_") and name.endswith(".json"):
         return True
     if name.startswith("config.local.") and name.endswith(".json"):
         return True

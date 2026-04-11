@@ -167,6 +167,23 @@ def main() -> None:
     from test_multi_tick_notify_format import (
         test_merged_message_is_plain_text_for_weixin,
     )
+    from test_sell_call_min_annualized_resolution import (
+        test_symbol_sell_call_min_overrides_template,
+        test_template_sell_call_min_overrides_default,
+        test_none_sell_call_min_uses_default,
+        test_legacy_sell_call_field_still_works,
+        test_invalid_sell_call_min_raises,
+        test_scan_sell_call_requires_min_annualized_arg,
+        test_scan_sell_call_rejects_out_of_range_arg,
+        test_sell_call_steps_passes_resolved_threshold_to_scanner,
+    )
+
+    from test_sell_put_min_annualized_resolution import (
+        test_symbol_sell_put_min_overrides_template,
+        test_template_sell_put_min_overrides_default,
+        test_none_sell_put_min_uses_default,
+        test_invalid_sell_put_min_raises,
+    )
 
     from test_http_json_http_error_handling import (
         test_http_json_404_non_json_body_raises_permanent_error,
@@ -209,6 +226,18 @@ def main() -> None:
         test_postprocess_notify_gate,
         test_notify_symbols_markdown_put_layout,
         test_notify_symbols_markdown_call_layout_and_changes,
+        test_symbol_sell_call_min_overrides_template,
+        test_template_sell_call_min_overrides_default,
+        test_none_sell_call_min_uses_default,
+        test_legacy_sell_call_field_still_works,
+        test_invalid_sell_call_min_raises,
+        test_scan_sell_call_requires_min_annualized_arg,
+        test_scan_sell_call_rejects_out_of_range_arg,
+        test_sell_call_steps_passes_resolved_threshold_to_scanner,
+        test_symbol_sell_put_min_overrides_template,
+        test_template_sell_put_min_overrides_default,
+        test_none_sell_put_min_uses_default,
+        test_invalid_sell_put_min_raises,
         test_merged_message_is_plain_text_for_weixin,
         # http_json regression
         test_http_json_404_non_json_body_raises_permanent_error,

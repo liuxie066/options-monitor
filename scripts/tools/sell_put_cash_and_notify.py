@@ -59,7 +59,7 @@ def _money_cny(v: float | None) -> str:
 
 def main():
     ap = argparse.ArgumentParser(description='Notify when sell-put cash free falls below threshold')
-    ap.add_argument('--config', default='config.json')
+    ap.add_argument('--config', default='config.us.json')
     ap.add_argument('--pm-config', default='../portfolio-management/config.json')
     ap.add_argument('--market', default='富途')
     ap.add_argument('--account', required=True)

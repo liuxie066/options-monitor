@@ -22,7 +22,7 @@ from pathlib import Path
 os.environ.setdefault('OPENAPI_LOG_LEVEL', 'ERROR')
 
 
-# NOTE: symbol aliases are now configurable in config.json:intake.symbol_aliases.
+# NOTE: symbol aliases are now configurable in config.us.json/config.hk.json:intake.symbol_aliases.
 # Keep a small built-in fallback for robustness.
 ALIASES = {
     '腾讯': '0700.HK',
@@ -38,13 +38,27 @@ ALIASES = {
 
 
 def load_intake_config() -> dict:
-    """Load intake config from repo config.json (best-effort)."""
-    try:
-        base = Path(__file__).resolve().parents[1]
-        cfg = json.loads((base / 'config.json').read_text(encoding='utf-8'))
-        return cfg.get('intake') or {}
-    except Exception:
-        return {}
+    """Load intake config from runtime entry configs (best-effort)."""
+    base = Path(__file__).resolve().parents[1]
+    merged: dict = {}
+    for name in ("config.us.json", "config.hk.json"):
+        try:
+            cfg = json.loads((base / name).read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        intake = cfg.get("intake") or {}
+        if not isinstance(intake, dict):
+            continue
+        for k, v in intake.items():
+            if isinstance(v, dict):
+                cur = merged.get(k)
+                if isinstance(cur, dict):
+                    cur.update(v)
+                else:
+                    merged[k] = dict(v)
+            else:
+                merged[k] = v
+    return merged
 
 
 def normalize_symbol(s: str) -> str | None:

@@ -7,7 +7,7 @@ cd /home/node/.openclaw/workspace/options-monitor-prod
 ./run_watchlist.sh
 ```
 
-- 读取：`config.json`
+- 读取：`config.us.json`（US）或 `config.hk.json`（HK）
 - 生成：`<report_dir>/symbols_*` 以及每标的 `*_sell_put_* / *_sell_call_*`（默认 report_dir=output/reports）
 
 > 提醒：不要用系统 python 直接跑脚本，统一用项目 `.venv`（脚本已自动处理）。

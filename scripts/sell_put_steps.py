@@ -17,6 +17,7 @@ from scripts.report_labels import add_sell_put_labels
 from scripts.report_summaries import summarize_sell_put
 from scripts.sell_put_cash import enrich_sell_put_candidates_with_cash
 from scripts.subprocess_utils import run_cmd
+from scripts.sell_put_config import validate_min_annualized_net_return
 
 
 def run_sell_put_scan_and_summarize(
@@ -39,6 +40,11 @@ def run_sell_put_scan_and_summarize(
     symbol_sp = (report_dir / f'{symbol_lower}_sell_put_candidates.csv').resolve()
     symbol_sp_labeled = (report_dir / f'{symbol_lower}_sell_put_candidates_labeled.csv').resolve()
 
+    resolved_min_annualized_net_return = validate_min_annualized_net_return(
+        sp.get('min_annualized_net_return'),
+        source=f'{symbol}.sell_put.min_annualized_net_return',
+    )
+
     cmd = [
         py, 'scripts/scan_sell_put.py',
         '--symbols', sym,
@@ -46,7 +52,7 @@ def run_sell_put_scan_and_summarize(
         '--min-dte', str(sp.get('min_dte', 20)),
         '--max-dte', str(sp.get('max_dte', 60)),
         '--min-otm-pct', str(sp.get('min_otm_pct', 0.05)),
-        '--min-annualized-net-return', str(sp.get('min_annualized_net_return', 0.07)),
+        '--min-annualized-net-return', str(resolved_min_annualized_net_return),
         '--min-open-interest', str(sp.get('min_open_interest', 100)),
         '--min-volume', str(sp.get('min_volume', 10)),
         '--max-spread-ratio', str(sp.get('max_spread_ratio', 0.30)),

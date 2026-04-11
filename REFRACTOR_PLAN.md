@@ -19,14 +19,14 @@
 1) **Scheduler-only（最小）**
 ```bash
 cd /home/node/.openclaw/workspace/options-monitor-prod
-./.venv/bin/python scripts/send_if_needed_multi.py --config config.market_hk.json --market-config hk --accounts lx sy --no-send --smoke
+./.venv/bin/python scripts/send_if_needed_multi.py --config config.market_hk.example.json --market-config hk --accounts lx sy --no-send --smoke
 ```
 
 2) **真实 pipeline（不发送）**
 > 目标：至少跑一轮 pipeline，验证 required_data/report_dir/state 的 IO 路径。
 ```bash
 cd /home/node/.openclaw/workspace/options-monitor-prod
-./.venv/bin/python scripts/send_if_needed_multi.py --config config.market_hk.json --market-config hk --accounts lx sy --no-send --force
+./.venv/bin/python scripts/send_if_needed_multi.py --config config.market_hk.example.json --market-config hk --accounts lx sy --no-send --force
 ```
 
 - 增加一个“只看 IO 的检查清单”（不要求内容正确，只要求路径正确且产物存在）：

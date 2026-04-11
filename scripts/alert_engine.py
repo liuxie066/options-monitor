@@ -15,7 +15,7 @@ def _load_symbol_display_map(base: Path, *, state_dir: Path | None = None) -> di
 
     Priority:
     1) portfolio_context.json (from holdings): stocks_by_symbol[*].name
-    2) config.json:intake.symbol_aliases (name -> code inverted)
+    2) config.us.json/config.hk.json:intake.symbol_aliases (name -> code inverted)
 
     Returns: {"0700.HK": "腾讯", ...}
     """
@@ -39,21 +39,22 @@ def _load_symbol_display_map(base: Path, *, state_dir: Path | None = None) -> di
     except Exception:
         pass
 
-    # 2) from config aliases (fallback)
-    try:
-        cfg = json.loads((base / 'config.json').read_text(encoding='utf-8'))
-        intake = (cfg.get('intake') or {}) if isinstance(cfg, dict) else {}
-        aliases = (intake.get('symbol_aliases') or {}) if isinstance(intake, dict) else {}
-        for name, code in (aliases or {}).items():
-            n = str(name or '').strip()
-            c = str(code or '').strip().upper()
-            if not n or not c:
-                continue
-            prev = m.get(c)
-            if (prev is None) or (len(n) < len(prev)):
-                m[c] = n
-    except Exception:
-        pass
+    # 2) from runtime config aliases (fallback)
+    for cfg_name in ('config.us.json', 'config.hk.json'):
+        try:
+            cfg = json.loads((base / cfg_name).read_text(encoding='utf-8'))
+            intake = (cfg.get('intake') or {}) if isinstance(cfg, dict) else {}
+            aliases = (intake.get('symbol_aliases') or {}) if isinstance(intake, dict) else {}
+            for name, code in (aliases or {}).items():
+                n = str(name or '').strip()
+                c = str(code or '').strip().upper()
+                if not n or not c:
+                    continue
+                prev = m.get(c)
+                if (prev is None) or (len(n) < len(prev)):
+                    m[c] = n
+        except Exception:
+            continue
 
     return m
 

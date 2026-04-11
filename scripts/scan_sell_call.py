@@ -2,8 +2,16 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 import pandas as pd
+
+# Allow running as `python scripts/scan_sell_call.py` without installation.
+repo_base = Path(__file__).resolve().parents[1]
+if str(repo_base) not in sys.path:
+    sys.path.insert(0, str(repo_base))
+
+from scripts.sell_call_config import validate_min_annualized_net_premium_return
 
 
 def calc_futu_us_option_fee(order_price: float, contracts: int = 1, is_sell: bool = True) -> float:
@@ -24,9 +32,13 @@ def calc_futu_hk_option_fee_static(order_price: float, contracts: int = 1, is_se
     try:
         if base_dir is not None:
             import json
-            cfg_path = base_dir / 'config.json'
-            if cfg_path.exists() and cfg_path.stat().st_size > 0:
-                cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
+            cfg = None
+            for cfg_name in ('config.hk.json', 'config.us.json'):
+                cfg_path = base_dir / cfg_name
+                if cfg_path.exists() and cfg_path.stat().st_size > 0:
+                    cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
+                    break
+            if isinstance(cfg, dict):
                 hk = ((cfg.get('fees') or {}).get('hk_static') or {})
                 platform_fee_per_order = float(hk.get('platform_fee_per_order_hkd', platform_fee_per_order))
                 commission_per_order = float(hk.get('commission_per_order_hkd', commission_per_order))
@@ -133,7 +145,7 @@ def main():
     parser.add_argument('--min-otm-pct', type=float, default=0.0, help='min OTM percent for calls: (strike-spot)/spot (e.g. 0.05)')
     parser.add_argument('--min-strike', type=float, default=None)
     parser.add_argument('--max-strike', type=float, default=None)
-    parser.add_argument('--min-annualized-net-return', type=float, default=0.03)
+    parser.add_argument('--min-annualized-net-return', type=float, default=None, help='required; min annualized net premium return in [0,1]')
     parser.add_argument('--min-if-exercised-total-return', type=float, default=0.0)
     parser.add_argument('--min-open-interest', type=float, default=100)
     parser.add_argument('--min-volume', type=float, default=10)
@@ -150,6 +162,14 @@ def main():
 
     if args.shares < 100:
         raise SystemExit('shares 必须至少 100，sell call 才有意义。')
+
+    try:
+        min_annualized_net_return = validate_min_annualized_net_premium_return(
+            args.min_annualized_net_return,
+            source='--min-annualized-net-return',
+        )
+    except ValueError as e:
+        raise SystemExit(f"[ARG_ERROR] {e}")
 
     base = Path(__file__).resolve().parents[1]
     input_root = (Path(args.input_root).resolve() if args.input_root else (base / 'output').resolve())
@@ -238,7 +258,7 @@ def main():
             metrics = compute_metrics(row, args.avg_cost)
             if not metrics:
                 continue
-            if metrics['annualized_net_premium_return'] < args.min_annualized_net_return:
+            if metrics['annualized_net_premium_return'] < min_annualized_net_return:
                 continue
             if metrics['if_exercised_total_return'] < args.min_if_exercised_total_return:
                 continue

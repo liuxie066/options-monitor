@@ -4,6 +4,7 @@ This repo is meant to run as a repeatable monitoring pipeline.
 
 ## Core entrypoints
 
+- Runtime config entry (OM only): `config.us.json` / `config.hk.json`
 - Main pipeline: `./run_watchlist.sh` → `scripts/run_pipeline.py`
 - Scheduler: `scripts/scan_scheduler.py`
 - Alert engine: `scripts/alert_engine.py`
@@ -28,7 +29,7 @@ This repo is meant to run as a repeatable monitoring pipeline.
 
 ## Diagnostics
 
-- Config: `python scripts/validate_config.py --config config.json`
-- Health: `python scripts/healthcheck.py --config config.json`
-- Health + notify (dry-run): `python scripts/healthcheck_and_notify.py --config config.json --dry-run`
+- Config: `python scripts/validate_config.py --config config.us.json`
+- Health: `python scripts/healthcheck.py --config config.us.json`
+- Health + notify (dry-run): `python scripts/healthcheck_and_notify.py --config config.us.json --dry-run`
 - Tests (no pytest): `./.venv/bin/python tests/run_tests.py`
