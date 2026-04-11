@@ -144,7 +144,7 @@ def run_sell_put_scan_and_summarize(
 
     if not is_scheduled:
         run_cmd([
-            py, 'scripts/render_sell_put_alerts.py',
+            py, 'scripts/cli/render_sell_put_alerts_cli.py',
             '--input', str((report_dir / f'{symbol_lower}_sell_put_candidates_labeled.csv').as_posix()),
             '--symbol', symbol,
             '--top', str(top_n),

@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import argparse
 import json
 import subprocess
 import sys
@@ -9,6 +8,7 @@ from dataclasses import dataclass, asdict
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
 
 @dataclass
 class SchedulerDecision:
@@ -270,51 +270,54 @@ def decide(schedule_cfg: dict, state: dict, now_utc: datetime, account: str | No
     )
 
 
-def main():
-    parser = argparse.ArgumentParser(description='Scan scheduler / frequency controller for options-monitor')
-    parser.add_argument('--config', required=True)
-    parser.add_argument('--state-dir', default='output/state', help='Directory for scheduler_state.json (default: output/state)')
-    parser.add_argument('--state', default=None, help='[deprecated] explicit scheduler_state.json path. Prefer --state-dir.' )
-    parser.add_argument('--schedule-key', default='schedule', help='Top-level key to read schedule config from (default: schedule). Example: schedule_hk' )
-    parser.add_argument('--account', default=None, help='Account id for per-account notify cooldown state (optional).')
-    parser.add_argument('--run-if-due', action='store_true', help='When due, run scripts/run_pipeline.py --config <config>')
-    parser.add_argument('--mark-notified', action='store_true', help='Update last_notify_utc to now (call this only AFTER you actually sent a notification)')
-    parser.add_argument('--mark-scanned', action='store_true', help='Update last_scan_utc to now (call this only AFTER you actually ran a scan)')
-    parser.add_argument('--jsonl', action='store_true', help='Print a single-line JSON decision (for automation)')
-    parser.add_argument('--force', action='store_true', help='Force running regardless of schedule')
-    args = parser.parse_args()
+def run_scheduler(
+    *,
+    config: str | Path,
+    state_dir: str | Path = 'output/state',
+    state: str | Path | None = None,
+    schedule_key: str = 'schedule',
+    account: str | None = None,
+    run_if_due: bool = False,
+    mark_notified: bool = False,
+    mark_scanned: bool = False,
+    jsonl: bool = False,
+    force: bool = False,
+    base_dir: Path | None = None,
+) -> dict:
+    """执行调度判定并处理状态副作用。"""
+    base = (base_dir or Path(__file__).resolve().parents[1]).resolve()
 
-    base = Path(__file__).resolve().parents[1]
-    config_path = Path(args.config)
+    config_path = Path(config)
     if not config_path.is_absolute():
         config_path = (base / config_path).resolve()
-    state_dir = Path(args.state_dir)
-    if not state_dir.is_absolute():
-        state_dir = (base / state_dir).resolve()
-    state_dir.mkdir(parents=True, exist_ok=True)
 
-    if args.state:
-        state_path = Path(args.state)
+    state_dir_path = Path(state_dir)
+    if not state_dir_path.is_absolute():
+        state_dir_path = (base / state_dir_path).resolve()
+    state_dir_path.mkdir(parents=True, exist_ok=True)
+
+    if state:
+        state_path = Path(state)
         if not state_path.is_absolute():
             state_path = (base / state_path).resolve()
     else:
-        state_path = (state_dir / 'scheduler_state.json').resolve()
+        state_path = (state_dir_path / 'scheduler_state.json').resolve()
 
-    # config supports JSON (preferred) or YAML (legacy)
     if config_path.suffix.lower() == '.json':
         cfg = json.loads(config_path.read_text(encoding='utf-8'))
     else:
         import yaml
         cfg = yaml.safe_load(config_path.read_text(encoding='utf-8'))
-    schedule_key = str(args.schedule_key or 'schedule')
-    schedule_cfg = cfg.get(schedule_key, {}) or {}
+
+    schedule_key_val = str(schedule_key or 'schedule')
+    schedule_cfg = cfg.get(schedule_key_val, {}) or {}
     schedule_enabled = bool(schedule_cfg.get('enabled', True))
 
     now_utc = datetime.now(timezone.utc)
-    state = read_state(state_path)
-    decision = decide(schedule_cfg, state, now_utc, account=(str(args.account) if args.account else None), schedule_key=schedule_key)
+    state_data = read_state(state_path)
+    decision = decide(schedule_cfg, state_data, now_utc, account=(str(account) if account else None), schedule_key=schedule_key_val)
 
-    if args.force:
+    if force:
         decision.should_run_scan = True
         decision.is_notify_window_open = True
         decision.reason = 'force 模式：忽略频率控制直接执行。'
@@ -322,58 +325,54 @@ def main():
     payload = asdict(decision)
     payload['should_notify'] = bool(payload.get('is_notify_window_open'))
 
-    if args.jsonl:
+    if jsonl:
         print(json.dumps(payload, ensure_ascii=False))
     else:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
 
-    if not schedule_enabled and not args.force:
+    if not schedule_enabled and not force:
         print('[INFO] schedule disabled in config; no scheduling enforcement applied.')
-        return
+        return payload
 
-    if args.mark_notified:
+    if mark_notified:
         now_s = to_iso(datetime.now(timezone.utc))
-        state['last_notify_utc'] = now_s
-        # keep per-account map as optional debug info
-        if args.account:
-            m = state.get('last_notify_utc_by_account')
+        state_data['last_notify_utc'] = now_s
+        if account:
+            m = state_data.get('last_notify_utc_by_account')
             if not isinstance(m, dict):
                 m = {}
-            m[str(args.account)] = now_s
-            state['last_notify_utc_by_account'] = m
-        write_state(state_path, state)
+            m[str(account)] = now_s
+            state_data['last_notify_utc_by_account'] = m
+        write_state(state_path, state_data)
         print(f'[DONE] marked notified -> {state_path}')
-        return
+        return payload
 
-    if args.mark_scanned:
+    if mark_scanned:
         now_s = to_iso(datetime.now(timezone.utc))
-        state['last_scan_utc'] = now_s
-        if args.account:
-            m = state.get('last_scan_utc_by_account')
+        state_data['last_scan_utc'] = now_s
+        if account:
+            m = state_data.get('last_scan_utc_by_account')
             if not isinstance(m, dict):
                 m = {}
-            m[str(args.account)] = now_s
-            state['last_scan_utc_by_account'] = m
-        write_state(state_path, state)
+            m[str(account)] = now_s
+            state_data['last_scan_utc_by_account'] = m
+        write_state(state_path, state_data)
         print(f'[DONE] marked scanned -> {state_path}')
-        return
+        return payload
 
-    if args.run_if_due and decision.should_run_scan:
+    if run_if_due and decision.should_run_scan:
         cmd = [sys.executable, 'scripts/run_pipeline.py', '--config', str(config_path)]
         print(f"[RUN] {' '.join(cmd)}")
         result = subprocess.run(cmd, cwd=str(base))
         if result.returncode != 0:
             raise SystemExit(result.returncode)
-        state['last_scan_utc'] = to_iso(datetime.now(timezone.utc))
-        # NOTE: do NOT update last_notify_utc here.
-        # last_notify_utc should only be updated after a notification was actually sent.
-        write_state(state_path, state)
+        state_data['last_scan_utc'] = to_iso(datetime.now(timezone.utc))
+        write_state(state_path, state_data)
         print(f'[DONE] scheduler state -> {state_path}')
-    elif args.run_if_due:
+    elif run_if_due:
         print('[SKIP] 当前未到应扫描时间。')
 
+    return payload
 
-if __name__ == '__main__':
-    main()
 
 # NOTE: market-session helpers live in scripts/send_if_needed_multi.py (multi-account entrypoint).
