@@ -6,6 +6,11 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+try:
+    from om.storage.repositories import state_repo
+except Exception:
+    from scripts.om.storage.repositories import state_repo  # type: ignore
+
 
 def main():
     ap = argparse.ArgumentParser(description='Write last_run.json')
@@ -26,11 +31,12 @@ def main():
         out = Path(args.path)
         if not out.is_absolute():
             out = (base / out).resolve()
+        target_state_dir: Path | None = None
     else:
         state_dir = Path(args.state_dir)
         if not state_dir.is_absolute():
             state_dir = (base / state_dir).resolve()
-        state_dir.mkdir(parents=True, exist_ok=True)
+        target_state_dir = state_dir
         out = (state_dir / 'last_run.json').resolve()
 
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -60,7 +66,10 @@ def main():
         'duration_ms': duration_ms,
     }
 
-    out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
+    if target_state_dir is not None:
+        state_repo.write_state_json(target_state_dir, 'last_run.json', payload)
+    else:
+        out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
     print(f"[DONE] last_run -> {out}")
 
 
