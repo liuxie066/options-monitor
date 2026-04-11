@@ -246,7 +246,7 @@ def main():
 
         changes_out = ('/dev/null' if IS_SCHEDULED else str((report_dir / 'symbols_changes.txt').as_posix()))
         alert_cmd = [
-            py, 'scripts/alert_engine.py',
+            py, 'scripts/cli/alert_engine_cli.py',
             '--summary-input', str((report_dir / 'symbols_summary.csv').as_posix()),
             '--output', str((report_dir / 'symbols_alerts.txt').as_posix()),
             '--changes-output', changes_out,

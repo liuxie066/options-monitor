@@ -10,11 +10,9 @@ This script is used by auto-intake (chat-driven). It does NOT write to Feishu.
 
 from __future__ import annotations
 
-import argparse
 import json
 import re
 import os
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -252,12 +250,49 @@ def parse_underlying_name(s: str) -> str | None:
     return None
 
 
-def main():
-    ap = argparse.ArgumentParser(description='Parse option intake message')
-    ap.add_argument('--text', required=True)
-    args = ap.parse_args()
+def _infer_multiplier_if_missing(*, symbol: str | None, multiplier: int | None, repo_base: Path) -> int | None:
+    """在缺少乘数时，尽力通过 OpenD 推断。"""
+    if multiplier is not None or not symbol:
+        return multiplier
 
-    raw = args.text.strip()
+    # Policy: do NOT default silently. Prefer fetching from OpenD (futu-api) for the underlier.
+    # If OpenD is unavailable, leave missing so user must input explicitly.
+    try:
+        import sys
+        if str(repo_base) not in sys.path:
+            sys.path.insert(0, str(repo_base))
+
+        from scripts import multiplier_cache
+
+        r = multiplier_cache.refresh_via_opend(
+            repo_base=repo_base,
+            symbol=symbol,
+            host='127.0.0.1',
+            port=11111,
+            limit_expirations=1,
+        )
+        if r.ok and r.multiplier and int(r.multiplier) > 0:
+            multiplier = int(r.multiplier)
+            # Persist cache entry as opend-derived for later reuse
+            try:
+                cache_path = multiplier_cache.default_cache_path(repo_base)
+                cache = multiplier_cache.load_cache(cache_path)
+                cache[str(symbol).upper()] = {
+                    'multiplier': int(multiplier),
+                    'as_of_utc': multiplier_cache.utc_now(),
+                    'source': 'opend',
+                }
+                multiplier_cache.save_cache(cache_path, cache)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return multiplier
+
+
+def parse_option_message_text(text: str) -> dict:
+    """解析单条期权消息，返回结构化字段。"""
+    raw = (text or '').strip()
 
     # strip prefix like "期权："
     raw2 = re.sub(r"^\s*期权\s*[:：]\s*", "", raw)
@@ -292,33 +327,8 @@ def main():
         currency = infer_currency(raw2)
         market = infer_market(raw2)
 
-    # infer multiplier if missing:
-    # Policy: do NOT default silently. Prefer fetching from OpenD (futu-api) for the underlier.
-    # If OpenD is unavailable, leave missing so user must input explicitly.
-    if multiplier is None and symbol:
-        try:
-            base = Path(__file__).resolve().parents[1]
-            # Ensure repo root is on sys.path
-            import sys
-            if str(base) not in sys.path:
-                sys.path.insert(0, str(base))
-
-            from scripts import multiplier_cache
-
-            # 1) Try refresh via OpenD (best-effort)
-            r = multiplier_cache.refresh_via_opend(repo_base=base, symbol=symbol, host='127.0.0.1', port=11111, limit_expirations=1)
-            if r.ok and r.multiplier and int(r.multiplier) > 0:
-                multiplier = int(r.multiplier)
-                # Persist cache entry as opend-derived for later reuse
-                try:
-                    cache_path = multiplier_cache.default_cache_path(base)
-                    cache = multiplier_cache.load_cache(cache_path)
-                    cache[str(symbol).upper()] = {"multiplier": int(multiplier), "as_of_utc": multiplier_cache.utc_now(), "source": "opend"}
-                    multiplier_cache.save_cache(cache_path, cache)
-                except Exception:
-                    pass
-        except Exception:
-            pass
+    base = Path(__file__).resolve().parents[1]
+    multiplier = _infer_multiplier_if_missing(symbol=symbol, multiplier=multiplier, repo_base=base)
 
     ok = all([symbol, exp, opt_type, side, strike is not None, multiplier, contracts, account, currency])
 
@@ -340,7 +350,7 @@ def main():
             'market': market,
         },
         'missing': [
-            k for k,v in {
+            k for k, v in {
                 'symbol': symbol,
                 'exp': exp,
                 'option_type': opt_type,
@@ -355,8 +365,4 @@ def main():
         'ts': datetime.utcnow().isoformat() + 'Z',
     }
 
-    print(json.dumps(out, ensure_ascii=False, indent=2), flush=True)
-
-
-if __name__ == '__main__':
-    main()
+    return out
