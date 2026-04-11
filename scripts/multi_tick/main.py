@@ -48,7 +48,9 @@ from om.domain import (
     build_account_messages,
     build_no_account_notification_payloads,
     build_shared_last_run_payload,
+    decide_notify_dispatch,
     decide_should_notify,
+    evaluate_dnd_quiet_hours,
     filter_notify_candidates,
     markets_for_trading_day_guard as domain_markets_for_trading_day_guard,
     select_markets_to_run as domain_select_markets_to_run,
@@ -796,38 +798,41 @@ def main() -> int:
     channel = (base_cfg.get('notifications') or {}).get('channel') or 'feishu'
     target = (base_cfg.get('notifications') or {}).get('target')
 
-    # --- Quiet Hours (DND) Check ---
     notif_cfg = base_cfg.get('notifications') or {}
     schedule_cfg0 = base_cfg.get('schedule') or {}
     schedule_v2_enabled = bool((schedule_cfg0.get('schedule_v2') or {}).get('enabled', False))
     quiet_hours = notif_cfg.get('quiet_hours_beijing')
-    if (not schedule_v2_enabled) and quiet_hours and isinstance(quiet_hours, dict) and not no_send:
-        try:
-            start_t = parse_hhmm(quiet_hours.get('start', '02:00'))
-            end_t = parse_hhmm(quiet_hours.get('end', '08:00'))
-            now_bj_time = datetime.now(timezone.utc).astimezone(bj_tz).time()
+    dnd_decision = evaluate_dnd_quiet_hours(
+        schedule_v2_enabled=schedule_v2_enabled,
+        quiet_hours=quiet_hours,
+        no_send=no_send,
+        now_bj_time=datetime.now(timezone.utc).astimezone(bj_tz).time(),
+        parse_hhmm_fn=parse_hhmm,
+    )
+    parse_error = dnd_decision.get('parse_error')
+    if parse_error:
+        runlog.safe_event('notify', 'error', message=f'failed to parse quiet_hours: {parse_error}')
 
-            is_quiet = False
-            if start_t <= end_t:
-                is_quiet = start_t <= now_bj_time <= end_t
-            else:  # Crosses midnight
-                is_quiet = now_bj_time >= start_t or now_bj_time <= end_t
-
-            if is_quiet:
-                runlog.safe_event('notify', 'skip', message=f'in quiet hours ({start_t.strftime("%H:%M")}-{end_t.strftime("%H:%M")})')
-                print(f"[SKIP] Currently in quiet hours (DND). Target was: {target}")
-                return 0
-        except Exception as e:
-            runlog.safe_event('notify', 'error', message=f'failed to parse quiet_hours: {e}')
-    # -------------------------------
+    dispatch_decision = decide_notify_dispatch(
+        no_send=no_send,
+        target=target,
+        dnd_is_quiet=bool(dnd_decision.get('is_quiet')),
+    )
+    if str(dispatch_decision.get('reason') or '') == 'quiet_hours':
+        quiet_window = str(dnd_decision.get('quiet_window') or '')
+        runlog.safe_event('notify', 'skip', message=f'in quiet hours ({quiet_window})')
+        print(f"[SKIP] Currently in quiet hours (DND). Target was: {target}")
+        return 0
 
     sent_accounts: list[str] = []
 
-    if not no_send:
-        if not target:
-            runlog.safe_event('notify', 'error', error_code='CONFIG_ERROR', message='notifications.target is required')
-            raise SystemExit('[CONFIG_ERROR] notifications.target is required')
+    config_error = dispatch_decision.get('config_error')
+    if config_error:
+        runlog.safe_event('notify', 'error', error_code='CONFIG_ERROR', message=str(config_error))
+        raise SystemExit(f'[CONFIG_ERROR] {config_error}')
 
+    if bool(dispatch_decision.get('should_send')):
+        target = dispatch_decision.get('effective_target')
         for acct, msg in account_messages.items():
             runlog.safe_event('notify', 'start', data=_safe_runlog_data({'channel': channel, 'target_set': bool(target), 'account': acct, 'message_len': len(msg)}))
 
@@ -852,7 +857,7 @@ def main() -> int:
             sent_accounts.append(acct)
             runlog.safe_event('notify', 'ok', duration_ms=int((monotonic() - t_notify0) * 1000), data=_safe_runlog_data({'channel': channel, 'account': acct}))
     else:
-        target = None
+        target = dispatch_decision.get('effective_target')
         sent_accounts = list(account_messages.keys())
         runlog.safe_event('notify', 'skip', message='no_send mode')
 

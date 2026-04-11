@@ -41,6 +41,7 @@ ITEMS = [
     "config.market_us.example.json",
     "config.market_hk.example.json",
     "config.market_us.fallback_yahoo.example.json",
+    "om",
     "scripts",
     "tests",
     "docs",
@@ -454,7 +455,7 @@ def main() -> None:
             shutil.copy2(src, dst)
 
     # Cleanup empty dirs under scope
-    for it in ["scripts", "tests"]:
+    for it in ["om", "scripts", "tests"]:
         base = ROOT_PROD / it
         if not base.exists():
             continue

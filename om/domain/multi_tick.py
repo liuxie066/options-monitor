@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any, Callable
 
 
 def select_markets_to_run(now_utc: datetime, cfg: dict, market_config: str) -> list[str]:
@@ -102,3 +103,72 @@ def decide_should_notify(*, account: str, notify_decision_by_account: dict[str, 
 
 def filter_notify_candidates(results: list) -> list:
     return [r for r in results if r.should_notify and r.meaningful and bool(r.notification_text.strip())]
+
+
+def is_in_quiet_hours_window(*, start_t, end_t, now_bj_time) -> bool:
+    if start_t <= end_t:
+        return start_t <= now_bj_time <= end_t
+    return now_bj_time >= start_t or now_bj_time <= end_t
+
+
+def evaluate_dnd_quiet_hours(
+    *,
+    schedule_v2_enabled: bool,
+    quiet_hours: Any,
+    no_send: bool,
+    now_bj_time,
+    parse_hhmm_fn: Callable[[str], Any],
+) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        'enabled': False,
+        'quiet_window': '',
+        'is_quiet': False,
+        'parse_error': None,
+    }
+    if schedule_v2_enabled or no_send:
+        return out
+    if (not quiet_hours) or (not isinstance(quiet_hours, dict)):
+        return out
+
+    out['enabled'] = True
+    try:
+        start_t = parse_hhmm_fn(str(quiet_hours.get('start', '02:00')))
+        end_t = parse_hhmm_fn(str(quiet_hours.get('end', '08:00')))
+        out['quiet_window'] = f'{start_t.strftime("%H:%M")}-{end_t.strftime("%H:%M")}'
+        out['is_quiet'] = bool(is_in_quiet_hours_window(start_t=start_t, end_t=end_t, now_bj_time=now_bj_time))
+    except Exception as e:
+        out['parse_error'] = str(e)
+    return out
+
+
+def decide_notify_dispatch(*, no_send: bool, target: Any, dnd_is_quiet: bool) -> dict[str, Any]:
+    if dnd_is_quiet:
+        return {
+            'should_send': False,
+            'effective_target': target,
+            'config_error': None,
+            'reason': 'quiet_hours',
+        }
+
+    if no_send:
+        return {
+            'should_send': False,
+            'effective_target': None,
+            'config_error': None,
+            'reason': 'no_send',
+        }
+
+    if not target:
+        return {
+            'should_send': False,
+            'effective_target': target,
+            'config_error': 'notifications.target is required',
+            'reason': 'config_error',
+        }
+
+    return {
+        'should_send': True,
+        'effective_target': target,
+        'config_error': None,
+        'reason': 'send',
+    }
