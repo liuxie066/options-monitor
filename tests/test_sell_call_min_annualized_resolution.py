@@ -95,7 +95,7 @@ def test_scan_sell_call_requires_min_annualized_arg() -> None:
     p = subprocess.run(
         [
             str(VPY),
-            'scripts/scan_sell_call.py',
+            'scripts/cli/scan_sell_call_cli.py',
             '--symbols',
             'AAPL',
             '--avg-cost',
@@ -121,7 +121,7 @@ def test_scan_sell_call_rejects_out_of_range_arg() -> None:
     p = subprocess.run(
         [
             str(VPY),
-            'scripts/scan_sell_call.py',
+            'scripts/cli/scan_sell_call_cli.py',
             '--symbols',
             'AAPL',
             '--avg-cost',

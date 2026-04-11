@@ -148,3 +148,13 @@ cd /home/node/.openclaw/workspace/options-monitor
 - 日志：`/home/node/.openclaw/workspace/options-monitor/logs/auto_deploy_from_main.log`
 - 行为：仅当 `origin/main` 有新 commit 时才 `pull --ff-only` 并执行 `scripts/deploy_to_prod.py --apply --prune`
 - 安全：带锁；dev/prod 任一仓库有未提交改动、拉取失败或部署失败时直接中止，不改写 prod
+
+### D. 单标的 scan 调试（CLI 入口）
+
+```bash
+# Sell Put
+./.venv/bin/python scripts/cli/scan_sell_put_cli.py --symbols AAPL --min-annualized-net-return 0.08 --quiet
+
+# Sell Call
+./.venv/bin/python scripts/cli/scan_sell_call_cli.py --symbols AAPL --avg-cost 150 --shares 100 --min-annualized-net-return 0.08 --quiet
+```

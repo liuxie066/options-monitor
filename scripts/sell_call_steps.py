@@ -66,7 +66,7 @@ def run_sell_call_scan_and_summarize(
     )
 
     cmd = [
-        py, 'scripts/scan_sell_call.py',
+        py, 'scripts/cli/scan_sell_call_cli.py',
         '--symbols', symbol,
         '--input-root', str(required_data_dir),
         '--avg-cost', str(avg_cost),
