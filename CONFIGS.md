@@ -4,6 +4,20 @@
 - `config.us.json`
 - `config.hk.json`
 
+兼容派生文件：
+- `config.scheduled.json`
+- `config.market_us.json`
+- `config.market_hk.json`
+- `config.market_us.fallback_yahoo.json`
+- `config.json`
+
+以上兼容文件不手工维护；使用同步脚本生成：
+
+```bash
+cd /home/node/.openclaw/workspace/options-monitor
+./.venv/bin/python scripts/sync_runtime_configs.py --apply
+```
+
 ## 运行入口
 
 ### 美股
