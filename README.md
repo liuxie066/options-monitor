@@ -4,6 +4,7 @@
 
 - For Agents：看 `SKILL.md`（白名单命令、关键约束）
 - For Humans：看本文（Quickstart / Cheatsheet / Troubleshooting）
+- Guardrails：看 `docs/GUARDRAILS.md`（hooks 启用、CI 合并闸、deploy-safe）
 
 - 适用：日常候选扫描、仓位/现金约束核算、飞书提醒
 - 不适用：把 Yahoo 当成严肃实时主数据源；用不完整字段做交易级决策
