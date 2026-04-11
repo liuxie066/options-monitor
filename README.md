@@ -124,6 +124,26 @@ cd /home/node/.openclaw/workspace/options-monitor
 
 ---
 
+## Multi-Tick Refactor 状态（Step4/5/6）
+
+- Step4（显式 IO 路径，移除 symlink 依赖）：已完成并部署。
+- Step5（错误处理治理，主链路不静默吞错）：已完成并部署。
+- Step6（`send_if_needed_multi.py` 拆分，入口命令保持不变）：已完成并部署。
+
+### Watchdog Timeout 验收（最小可复现）
+
+```bash
+cd /home/node/.openclaw/workspace/options-monitor
+./.venv/bin/python tests/test_multi_tick_watchdog_timeout.py
+```
+
+预期结果：
+- 输出 `OK (watchdog-timeout)` 并返回码 `0`
+- watchdog 超时时，scheduler/pipeline 不继续执行
+- US 源不会降级为 yahoo 后继续跑 pipeline
+
+---
+
 ## Dev → Prod 部署
 
 ```bash

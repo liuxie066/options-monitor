@@ -6,6 +6,24 @@
 > 
 > 发布到 prod：使用 `scripts/deploy_to_prod.py`（默认 dry-run，`--apply` 应用）。
 
+## 当前状态（2026-04-11）
+
+- 阶段 4（multi_tick 显式 IO 路径）已完成并部署。
+- 阶段 5（错误处理治理）已完成并部署。
+- 阶段 6（`send_if_needed_multi.py` 拆分）已完成并部署。
+- 部署语义保持不变：仍使用 `scripts/deploy_to_prod.py`，默认不覆盖 runtime config（`config.us.json` / `config.hk.json`）。
+
+### 阶段 6 收口后的最小验收（watchdog timeout）
+
+```bash
+cd /home/node/.openclaw/workspace/options-monitor
+./.venv/bin/python tests/test_multi_tick_watchdog_timeout.py
+```
+
+验收点：
+- 超时后安全停止（不继续 scheduler/pipeline）
+- 不触发 “US 降级为 yahoo 后继续跑” 的路径
+
 ---
 
 ## 阶段 0（新增）：锁行为（先保证“怎么跑”不漂）
