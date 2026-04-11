@@ -30,8 +30,10 @@ from scripts.subprocess_utils import run_cmd
 import pandas as pd
 
 from scripts.report_builders import build_symbols_digest, build_symbols_summary
-
-from scripts.report_builders import build_symbols_digest, build_symbols_summary
+try:
+    from om.storage.repositories import report_repo
+except Exception:
+    from scripts.om.storage.repositories import report_repo  # type: ignore
 
 LOG = __import__('scripts.logging_config', fromlist=['get_logger']).get_logger('run_pipeline')
 
@@ -115,12 +117,11 @@ def main():
     cfg_path = Path(args.config)
 
     # report_dir override (new flow: write into run_dir/accounts/<acct>/)
-    report_dir = (Path(args.report_dir).resolve() if getattr(args, 'report_dir', None) else (base / 'output' / 'reports').resolve())
-    report_dir.mkdir(parents=True, exist_ok=True)
-
-    # state_dir override (Stage 4): state/context cache root
-    state_dir = (Path(args.state_dir).resolve() if getattr(args, 'state_dir', None) else (base / 'output' / 'state').resolve())
-    state_dir.mkdir(parents=True, exist_ok=True)
+    report_dir, state_dir = report_repo.prepare_dirs(
+        base=base,
+        report_dir=getattr(args, 'report_dir', None),
+        state_dir=getattr(args, 'state_dir', None),
+    )
 
     # Manual multiplier cache refresh (best-effort)
     if bool(getattr(args, 'refresh_multiplier_cache', False)):
@@ -187,7 +188,7 @@ def main():
             return
 
         # Ensure per-run report dir exists.
-        report_dir.mkdir(parents=True, exist_ok=True)
+        report_repo.ensure_report_dir(report_dir)
 
         from scripts.pipeline_context import build_pipeline_context
         from scripts.pipeline_watchlist import run_watchlist_pipeline
@@ -262,8 +263,7 @@ def main():
             policy = cfg.get('alert_policy')
             if isinstance(policy, dict) and policy:
                 p = (state_dir / 'alert_policy.json').resolve()
-                p.parent.mkdir(parents=True, exist_ok=True)
-                p.write_text(json.dumps(policy, ensure_ascii=False, indent=2), encoding='utf-8')
+                report_repo.write_state_json_text(state_dir, 'alert_policy.json', policy)
                 alert_cmd.extend(['--policy-json', str(p)])
             elif isinstance(policy, str) and policy.strip():
                 alert_cmd.extend(['--policy-json', policy.strip()])

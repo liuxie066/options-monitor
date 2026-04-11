@@ -15,7 +15,6 @@ except Exception:
 
 from scripts.io_utils import (
     read_json,
-    atomic_write_json as write_json,
     parse_last_json_obj,
     utc_now,
     bj_now,
@@ -43,7 +42,13 @@ from .misc import (
     ensure_account_output_dir,
     AccountResult,
     _safe_runlog_data,
-    append_json_list,
+)
+from om.domain import (
+    apply_scan_run_decision,
+    decide_should_notify,
+    filter_notify_candidates,
+    markets_for_trading_day_guard as domain_markets_for_trading_day_guard,
+    select_markets_to_run as domain_select_markets_to_run,
 )
 from scripts.infra.service import (
     run_opend_watchdog,
@@ -52,6 +57,13 @@ from scripts.infra.service import (
     send_openclaw_message,
     trading_day_via_futu,
 )
+
+try:
+    from om.storage import paths as storage_paths
+    from om.storage.repositories import run_repo, state_repo
+except Exception:
+    from scripts.om.storage import paths as storage_paths  # type: ignore
+    from scripts.om.storage.repositories import run_repo, state_repo  # type: ignore
 
 
 _CURRENT_RUN_ID: str | None = None
@@ -83,80 +95,16 @@ def _cash_footer_for_account(cash_footer_lines: list[str], account: str) -> list
 
 
 def account_run_state_dir(run_dir: Path, account: str) -> Path:
+    """Legacy helper kept for compatibility with existing tests/callers."""
     return (run_dir / 'accounts' / str(account).strip() / 'state').resolve()
 
 
 def _select_markets_to_run(now_utc: datetime, cfg: dict, market_config: str) -> list[str]:
-    mc = str(market_config or 'auto').lower()
-    if mc == 'hk':
-        return ['HK']
-    if mc == 'us':
-        return ['US']
-    if mc == 'all':
-        return ['HK', 'US']
-
-    schedule_hk = (cfg.get('schedule_hk') or {}) if isinstance(cfg, dict) else {}
-    schedule_us = (cfg.get('schedule') or {}) if isinstance(cfg, dict) else {}
-
-    try:
-        from scripts.scan_scheduler import decide
-
-        state0: dict = {
-            'last_scan_utc': None,
-            'last_notify_utc': None,
-        }
-
-        d_hk = decide(schedule_hk, state0, now_utc, account=None, schedule_key='schedule_hk')
-        if d_hk.in_market_hours:
-            return ['HK']
-
-        d_us = decide(schedule_us, state0, now_utc, account=None, schedule_key='schedule')
-        if d_us.in_market_hours:
-            return ['US']
-    except Exception:
-        pass
-
-    return []
+    return domain_select_markets_to_run(now_utc, cfg, market_config)
 
 
 def _markets_for_trading_day_guard(markets_to_run: list[str], cfg: dict, market_config: str) -> list[str]:
-    """Infer pre-scan trading-day markets (US/HK/CN) for this run."""
-    mc = str(market_config or 'auto').lower()
-    if mc == 'hk':
-        return ['HK']
-    if mc == 'us':
-        return ['US']
-    if mc == 'all':
-        return ['HK', 'US']
-
-    try:
-        mk0 = [str(m).upper() for m in (markets_to_run or []) if str(m).upper() in ('HK', 'US', 'CN')]
-        if mk0:
-            return mk0
-    except Exception:
-        pass
-
-    try:
-        syms = (cfg or {}).get('symbols') or []
-        mk = sorted({str((it or {}).get('market') or '').upper() for it in syms if isinstance(it, dict) and (it or {}).get('market')})
-        mk = [m for m in mk if m in ('HK', 'US', 'CN')]
-        if mk:
-            return mk
-    except Exception:
-        pass
-
-    try:
-        market_hint = str(((cfg or {}).get('portfolio') or {}).get('market') or '').strip()
-        if ('港' in market_hint) or ('HK' in market_hint.upper()):
-            return ['HK']
-        if ('美' in market_hint) or ('US' in market_hint.upper()):
-            return ['US']
-        if ('A股' in market_hint) or ('CN' in market_hint.upper()):
-            return ['CN']
-    except Exception:
-        pass
-
-    return ['US']
+    return domain_markets_for_trading_day_guard(markets_to_run, cfg, market_config)
 
 
 def _is_trading_day_guard_for_market(cfg: dict, market: str) -> tuple[bool | None, str]:
@@ -355,9 +303,7 @@ def main() -> int:
                     if not acct0:
                         continue
                     try:
-                        state_dir = (base / 'output_accounts' / acct0 / 'state')
-                        state_dir.mkdir(parents=True, exist_ok=True)
-                        write_json(state_dir / 'last_run.json', {
+                        state_repo.write_account_last_run(base, acct0, {
                             'last_run_utc': now,
                             'sent': False,
                             'reason': 'opend_unhealthy',
@@ -481,18 +427,17 @@ def main() -> int:
                     runlog.safe_event('run_end', 'skip', message=f"non-trading day: {','.join(false_markets)}")
                     return 0
 
-    shared_state_dir = (base / 'output_shared' / 'state').resolve()
-    shared_state_dir.mkdir(parents=True, exist_ok=True)
+    state_repo.shared_state_dir(base)
     if markets_to_run == ['HK']:
-        state_path = shared_state_dir / 'scheduler_state_hk.json'
+        state_path = storage_paths.shared_state_path(base, 'scheduler_state_hk.json')
     elif markets_to_run == ['US']:
-        state_path = shared_state_dir / 'scheduler_state_us.json'
+        state_path = storage_paths.shared_state_path(base, 'scheduler_state_us.json')
     else:
-        state_path = shared_state_dir / 'scheduler_state.json'
+        state_path = storage_paths.shared_state_path(base, 'scheduler_state.json')
 
     try:
         if (not state_path.exists()) or state_path.stat().st_size <= 0:
-            write_json(state_path, {
+            state_repo.write_shared_state(base, state_path.name, {
                 'last_scan_utc': None,
                 'last_notify_utc': None,
             })
@@ -545,18 +490,17 @@ def main() -> int:
         except Exception:
             notify_decision_by_account[acct0] = bool(scheduler_decision.get('is_notify_window_open', scheduler_decision.get('should_notify')))
 
-    if force_mode:
-        should_run_global = True
-        reason_global = (reason_global + ' | force | force: bypass guard').strip(' |')
-
-    if smoke:
-        should_run_global = False
-        reason_global = (str(reason_global) + ' | smoke_skip_pipeline').strip()
+    should_run_global, reason_global = apply_scan_run_decision(
+        should_run_global=should_run_global,
+        reason_global=reason_global,
+        force_mode=force_mode,
+        smoke=smoke,
+    )
 
     ran_any_pipeline = False
 
     run_id = utc_now().replace(':', '').replace('-', '').split('.')[0]
-    run_dir = (base / 'output_runs' / run_id).resolve()
+    run_dir = run_repo.ensure_run_dir(base, run_id)
     required_dir = (run_dir / 'required_data').resolve()
     required_raw = (required_dir / 'raw').resolve()
     required_parsed = (required_dir / 'parsed').resolve()
@@ -565,17 +509,10 @@ def main() -> int:
 
     prefetch_done = False
     shared_required = required_dir
-    tick_metrics_path = (base / 'output_shared' / 'state' / 'tick_metrics.json').resolve()
-    tick_metrics_history_path = (base / 'output_shared' / 'state' / 'tick_metrics_history.json').resolve()
-
-    run_state_dir = (run_dir / 'state').resolve()
-    run_state_dir.mkdir(parents=True, exist_ok=True)
-    tick_metrics_run_path = (run_state_dir / 'tick_metrics.json').resolve()
-    tick_metrics_history_run_path = (run_state_dir / 'tick_metrics_history.json').resolve()
+    run_repo.ensure_run_state_dir(base, run_id)
 
     try:
-        tick_metrics_run_dir_path = (base / 'output_shared' / 'state' / 'last_run_dir.txt').resolve()
-        tick_metrics_run_dir_path.write_text(str(run_dir) + "\n", encoding='utf-8')
+        state_repo.write_last_run_dir_pointer(base, run_id)
     except Exception:
         pass
     tick_metrics = {
@@ -590,7 +527,7 @@ def main() -> int:
     }
 
     try:
-        write_json((run_dir / 'state' / 'scheduler_decision.json').resolve(), {
+        state_repo.write_scheduler_decision(base, run_id, {
             'as_of_utc': utc_now(),
             'schedule_key': str(scheduler_schedule_key),
             'decision': scheduler_decision,
@@ -632,24 +569,27 @@ def main() -> int:
         cfg_override = acct_out / 'state' / 'config.override.json'
         cfg_override.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 
-        acct_report_dir = (run_dir / 'accounts' / acct).resolve()
-        acct_state_dir = account_run_state_dir(run_dir, acct)
+        acct_report_dir = run_repo.get_run_account_dir(base, run_id, acct)
+        acct_state_dir = run_repo.get_run_account_state_dir(base, run_id, acct)
         try:
-            acct_state_dir.mkdir(parents=True, exist_ok=True)
+            run_repo.ensure_run_account_state_dir(base, run_id, acct)
         except Exception:
             pass
 
         def _write_acct_run_state(name: str, payload: dict):
             try:
-                acct_state_dir.mkdir(parents=True, exist_ok=True)
-                write_json((acct_state_dir / name).resolve(), payload)
+                state_repo.write_account_run_state(base, run_id, acct, name, payload)
             except Exception:
                 pass
 
         notif_path = (acct_report_dir / 'symbols_notification.txt').resolve()
 
         should_run = bool(should_run_global)
-        should_notify = bool(notify_decision_by_account.get(acct, scheduler_decision.get('is_notify_window_open', scheduler_decision.get('should_notify'))))
+        should_notify = decide_should_notify(
+            account=acct,
+            notify_decision_by_account=notify_decision_by_account,
+            scheduler_decision=scheduler_decision,
+        )
         reason = str(reason_global)
 
         acct_metrics['should_notify'] = bool(should_notify)
@@ -740,8 +680,7 @@ def main() -> int:
         text = notif_path.read_text(encoding='utf-8', errors='replace').strip() if notif_path.exists() else ''
 
         try:
-            acct_run_dir = (run_dir / 'accounts' / acct).resolve()
-            acct_run_dir.mkdir(parents=True, exist_ok=True)
+            acct_run_dir = run_repo.ensure_run_account_dir(base, run_id, acct)
             (acct_run_dir / 'symbols_notification.txt').write_text(text + '\n', encoding='utf-8')
             if cfg_override.exists() and cfg_override.stat().st_size > 0:
                 (acct_run_dir / 'config.override.json').write_bytes(cfg_override.read_bytes())
@@ -773,7 +712,7 @@ def main() -> int:
                 base=base,
                 config=cfg_path,
                 state=state_path,
-                state_dir=(run_dir / 'state').resolve(),
+                state_dir=run_repo.get_run_state_dir(base, run_id),
                 mark_scanned=True,
                 schedule_key=str(scheduler_schedule_key),
                 capture_output=False,
@@ -786,7 +725,7 @@ def main() -> int:
         'prepare',
         data=_safe_runlog_data({
             'results_count': len(results),
-            'notify_candidates': len([r for r in results if r.should_notify and r.meaningful and bool(r.notification_text.strip())]),
+            'notify_candidates': len(filter_notify_candidates(results)),
         }),
     )
 
@@ -810,7 +749,7 @@ def main() -> int:
 
     now_bj = bj_now()
     account_messages: dict[str, str] = {}
-    notify_candidates = [r for r in results if r.should_notify and r.meaningful and bool(r.notification_text.strip())]
+    notify_candidates = filter_notify_candidates(results)
     for r in notify_candidates:
         msg = build_account_message(
             r,
@@ -824,9 +763,7 @@ def main() -> int:
         runlog.safe_event('notify', 'skip', message='no account notification content')
 
         try:
-            shared_last = (base / 'output_shared' / 'state' / 'last_run.json').resolve()
-            shared_last.parent.mkdir(parents=True, exist_ok=True)
-            write_json(shared_last, {
+            state_repo.write_shared_last_run(base, {
                 'last_run_utc': utc_now(),
                 'sent': False,
                 'reason': 'no_account_notification',
@@ -838,7 +775,6 @@ def main() -> int:
 
         try:
             for r in results:
-                acct_out = accounts_root / r.account
                 payload = {
                     'last_run_utc': utc_now(),
                     'sent': False,
@@ -847,18 +783,16 @@ def main() -> int:
                     'result': r.__dict__,
                     'run_dir': str(run_dir),
                 }
-                write_json(acct_out / 'state' / 'last_run.json', payload)
-                write_json((run_dir / 'accounts' / r.account / 'state' / 'last_run.json').resolve(), payload)
+                state_repo.write_account_last_run(base, r.account, payload)
+                state_repo.write_run_account_last_run(base, run_id, r.account, payload)
         except Exception:
             pass
 
         try:
             tick_metrics['sent'] = False
             tick_metrics['reason'] = 'no_account_notification'
-            write_json(tick_metrics_path, tick_metrics)
-            append_json_list(tick_metrics_history_path, tick_metrics)
-            write_json(tick_metrics_run_path, tick_metrics)
-            append_json_list(tick_metrics_history_run_path, tick_metrics)
+            state_repo.write_tick_metrics(base, run_id, tick_metrics)
+            state_repo.append_tick_metrics_history(base, run_id, tick_metrics)
         except Exception:
             pass
 
@@ -937,7 +871,7 @@ def main() -> int:
                     base=base,
                     config=cfg_path,
                     state=state_path,
-                    state_dir=(run_dir / 'state').resolve(),
+                    state_dir=run_repo.get_run_state_dir(base, run_id),
                     mark_notified=True,
                     schedule_key=str(scheduler_schedule_key),
                     account=str(acct),
@@ -949,15 +883,13 @@ def main() -> int:
     try:
         tick_metrics['sent'] = (not no_send) and bool(sent_accounts)
         tick_metrics['reason'] = ('sent' if ((not no_send) and bool(sent_accounts)) else ('no_send' if no_send else 'no_account_sent'))
-        write_json(tick_metrics_path, tick_metrics)
-        append_json_list(tick_metrics_history_path, tick_metrics)
-        write_json(tick_metrics_run_path, tick_metrics)
-        append_json_list(tick_metrics_history_run_path, tick_metrics)
+        state_repo.write_tick_metrics(base, run_id, tick_metrics)
+        state_repo.append_tick_metrics_history(base, run_id, tick_metrics)
     except Exception:
         pass
 
     try:
-        last_run_path = (base / 'output_shared' / 'state' / 'last_run.json').resolve()
+        last_run_path = (state_repo.shared_state_dir(base) / 'last_run.json').resolve()
         prev = read_json(last_run_path, {})
         run_meta = {
             'last_run_utc': utc_now(),
@@ -973,7 +905,7 @@ def main() -> int:
             hist = []
         hist.append(run_meta)
         hist = hist[-20:]
-        write_json(last_run_path, {
+        state_repo.write_shared_last_run(base, {
             **(prev if isinstance(prev, dict) else {}),
             **run_meta,
             'history': hist,
