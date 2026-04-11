@@ -45,6 +45,9 @@ from .misc import (
 )
 from om.domain import (
     apply_scan_run_decision,
+    build_account_messages,
+    build_no_account_notification_payloads,
+    build_shared_last_run_payload,
     decide_should_notify,
     filter_notify_candidates,
     markets_for_trading_day_guard as domain_markets_for_trading_day_guard,
@@ -748,41 +751,31 @@ def main() -> int:
         cash_footer_lines = []
 
     now_bj = bj_now()
-    account_messages: dict[str, str] = {}
     notify_candidates = filter_notify_candidates(results)
-    for r in notify_candidates:
-        msg = build_account_message(
-            r,
-            now_bj=now_bj,
-            cash_footer_lines=_cash_footer_for_account(cash_footer_lines, r.account),
-        )
-        if msg:
-            account_messages[str(r.account)] = msg
+    account_messages = build_account_messages(
+        notify_candidates=notify_candidates,
+        now_bj=now_bj,
+        cash_footer_lines=cash_footer_lines,
+        cash_footer_for_account_fn=_cash_footer_for_account,
+        build_account_message_fn=build_account_message,
+    )
 
     if not account_messages:
         runlog.safe_event('notify', 'skip', message='no account notification content')
 
+        shared_payload, account_payloads = build_no_account_notification_payloads(
+            now_utc_fn=utc_now,
+            results=results,
+            run_dir=str(run_dir),
+        )
         try:
-            state_repo.write_shared_last_run(base, {
-                'last_run_utc': utc_now(),
-                'sent': False,
-                'reason': 'no_account_notification',
-                'accounts': [r.account for r in results],
-                'results': [r.__dict__ for r in results],
-            })
+            state_repo.write_shared_last_run(base, shared_payload)
         except Exception:
             pass
 
         try:
             for r in results:
-                payload = {
-                    'last_run_utc': utc_now(),
-                    'sent': False,
-                    'reason': 'no_account_notification',
-                    'account': r.account,
-                    'result': r.__dict__,
-                    'run_dir': str(run_dir),
-                }
+                payload = account_payloads.get(str(r.account), {})
                 state_repo.write_account_last_run(base, r.account, payload)
                 state_repo.write_run_account_last_run(base, run_id, r.account, payload)
         except Exception:
@@ -900,16 +893,10 @@ def main() -> int:
             'sent_accounts': sent_accounts,
             'results': [r.__dict__ for r in results],
         }
-        hist = prev.get('history') if isinstance(prev, dict) else None
-        if not isinstance(hist, list):
-            hist = []
-        hist.append(run_meta)
-        hist = hist[-20:]
-        state_repo.write_shared_last_run(base, {
-            **(prev if isinstance(prev, dict) else {}),
-            **run_meta,
-            'history': hist,
-        })
+        state_repo.write_shared_last_run(
+            base,
+            build_shared_last_run_payload(prev_payload=prev, run_meta=run_meta, history_limit=20),
+        )
     except Exception:
         pass
 
