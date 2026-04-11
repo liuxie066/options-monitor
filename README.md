@@ -129,8 +129,11 @@ cd /home/node/.openclaw/workspace/options-monitor
 cd /home/node/.openclaw/workspace/options-monitor
 ./.venv/bin/python scripts/deploy_to_prod.py --dry-run
 ./.venv/bin/python scripts/deploy_to_prod.py --apply
-# 如需显式覆盖 prod 运行配置（默认不会覆盖）
-./.venv/bin/python scripts/deploy_to_prod.py --dry-run --include-runtime-config
+# 如需显式覆盖 prod 运行配置（默认不会覆盖，且必须带 allowlist）
+./.venv/bin/python scripts/deploy_to_prod.py \
+  --dry-run \
+  --include-runtime-config \
+  --runtime-config-allowlist runtime-config-allowlist.example.json
 ```
 
 > 默认会跳过运行配置：`config.us.json` / `config.hk.json` / `config.local.*.json`；`*.example.json` 会继续同步。

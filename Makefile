@@ -7,3 +7,7 @@ policy-check:
 deploy-prod:
 	$(MAKE) policy-check POLICY_ACTION=deploy
 	python3 scripts/deploy_to_prod.py --apply
+
+deploy-safe:
+	$(MAKE) policy-check POLICY_ACTION=deploy
+	bash scripts/deploy_safe.sh
