@@ -56,3 +56,7 @@ scripts/webui/frontend/node_modules/
 
 # local config backups
 config.*.bak.*
+
+# Legacy runtime-only config variants (keep local)
+config.market_us.fallback_yahoo.json
+config.market_*.json.deprecated
