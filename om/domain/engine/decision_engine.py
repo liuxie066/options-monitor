@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
+from om.domain.tool_boundary import resolve_notify_window_open
 
 
 @dataclass(frozen=True)
@@ -15,7 +16,7 @@ class SchedulerDecisionView:
         src = payload if isinstance(payload, Mapping) else {}
         return cls(
             should_run_scan=bool(src.get('should_run_scan')),
-            is_notify_window_open=bool(src.get('is_notify_window_open', src.get('should_notify'))),
+            is_notify_window_open=resolve_notify_window_open(src),
             reason=str(src.get('reason') or ''),
         )
 
@@ -38,11 +39,9 @@ class AccountSchedulerDecisionView:
             else SchedulerDecisionView.from_payload(scheduler_decision)
         )
         return cls(
-            is_notify_window_open=bool(
-                src.get(
-                    'is_notify_window_open',
-                    src.get('should_notify', scheduler_view.is_notify_window_open),
-                )
+            is_notify_window_open=resolve_notify_window_open(
+                src,
+                default=bool(scheduler_view.is_notify_window_open),
             ),
         )
 
@@ -83,7 +82,7 @@ def build_scheduler_decision_dto(
         'schema_kind': 'scheduler_decision',
         'schema_version': '1.0',
         'should_run_scan': bool(raw.get('should_run_scan')),
-        'is_notify_window_open': bool(raw.get('is_notify_window_open', raw.get('should_notify'))),
+        'is_notify_window_open': resolve_notify_window_open(raw),
         'reason': str(raw.get('reason') or ''),
         **raw,
     }
