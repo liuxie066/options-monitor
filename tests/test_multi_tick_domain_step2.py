@@ -160,15 +160,21 @@ def test_decide_should_notify_normalizes_account_payload_via_view() -> None:
         mod.AccountSchedulerDecisionView.from_payload = old_from_payload  # type: ignore[method-assign]
 
 
-def test_decide_should_notify_converts_bool_account_payload_before_view_normalize() -> None:
+def test_decide_should_notify_routes_account_payload_via_account_scheduler_dto_builder() -> None:
     from om.domain import multi_tick as mod
 
-    seen = {'payload': None}
+    seen = {'raw': None, 'scheduler_decision': None}
+    old_build_account_scheduler_decision_dto = mod.build_account_scheduler_decision_dto
     old_from_payload = mod.AccountSchedulerDecisionView.from_payload
     try:
+        mod.build_account_scheduler_decision_dto = lambda raw, *, scheduler_decision: (  # type: ignore[assignment]
+            seen.__setitem__('raw', raw),
+            seen.__setitem__('scheduler_decision', scheduler_decision),
+            {'is_notify_window_open': True},
+        )[2]
         mod.AccountSchedulerDecisionView.from_payload = classmethod(  # type: ignore[method-assign]
             lambda cls, payload, *, scheduler_decision: (
-                seen.__setitem__('payload', payload),
+                seen.__setitem__('scheduler_decision', scheduler_decision),
                 cls(is_notify_window_open=bool(payload.get('is_notify_window_open'))),
             )[1]
         )
@@ -180,8 +186,10 @@ def test_decide_should_notify_converts_bool_account_payload_before_view_normaliz
             )
             is True
         )
-        assert seen['payload'] == {'is_notify_window_open': True}
+        assert seen['raw'] is True
+        assert bool(getattr(seen['scheduler_decision'], 'is_notify_window_open', False)) is False
     finally:
+        mod.build_account_scheduler_decision_dto = old_build_account_scheduler_decision_dto  # type: ignore[assignment]
         mod.AccountSchedulerDecisionView.from_payload = old_from_payload  # type: ignore[method-assign]
 
 
