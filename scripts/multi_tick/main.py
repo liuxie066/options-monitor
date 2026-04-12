@@ -63,6 +63,9 @@ from om.domain import (
     select_scheduler_state_filename,
 )
 from om.domain.engine import (
+    build_scheduler_decision_dto,
+    decide_notification_meaningful,
+    decide_notify_window_open,
     decide_opend_degrade_to_yahoo,
     filter_notify_candidates as engine_filter_notify_candidates,
     rank_notify_candidates,
@@ -557,17 +560,10 @@ def main() -> int:
         return 0
 
     scheduler_raw = json.loads((scheduler_proc.stdout or '').strip())
-    try:
-        scheduler_decision = normalize_scheduler_decision_payload(scheduler_raw)
-    except Exception:
-        scheduler_decision = {
-            'schema_kind': 'scheduler_decision',
-            'schema_version': '1.0',
-            'should_run_scan': bool((scheduler_raw or {}).get('should_run_scan')),
-            'is_notify_window_open': bool((scheduler_raw or {}).get('is_notify_window_open', (scheduler_raw or {}).get('should_notify'))),
-            'reason': str((scheduler_raw or {}).get('reason') or ''),
-            **(scheduler_raw if isinstance(scheduler_raw, dict) else {}),
-        }
+    scheduler_decision = build_scheduler_decision_dto(
+        scheduler_raw,
+        normalize_fn=normalize_scheduler_decision_payload,
+    )
     should_run_global = bool(scheduler_decision.get('should_run_scan'))
     reason_global = str(scheduler_decision.get('reason') or '')
 
@@ -586,11 +582,18 @@ def main() -> int:
             )
             if sch_acct.returncode == 0:
                 sch_acct_decision = json.loads((sch_acct.stdout or '').strip())
-                notify_decision_by_account[acct0] = bool(sch_acct_decision.get('is_notify_window_open', sch_acct_decision.get('should_notify')))
+                notify_decision_by_account[acct0] = decide_notify_window_open(
+                    scheduler_decision=scheduler_decision,
+                    account_scheduler_decision=sch_acct_decision,
+                )
             else:
-                notify_decision_by_account[acct0] = bool(scheduler_decision.get('is_notify_window_open', scheduler_decision.get('should_notify')))
+                notify_decision_by_account[acct0] = decide_notify_window_open(
+                    scheduler_decision=scheduler_decision,
+                )
         except Exception:
-            notify_decision_by_account[acct0] = bool(scheduler_decision.get('is_notify_window_open', scheduler_decision.get('should_notify')))
+            notify_decision_by_account[acct0] = decide_notify_window_open(
+                scheduler_decision=scheduler_decision,
+            )
 
     should_run_global, reason_global = apply_scan_run_decision(
         should_run_global=should_run_global,
@@ -860,7 +863,7 @@ def main() -> int:
         if auto_close_flat:
             text = (text.strip() + '\n\n' + auto_close_flat.strip()).strip()
 
-        meaningful = bool(text) and (text != '今日无需要主动提醒的内容。')
+        meaningful = decide_notification_meaningful(text)
 
         should_notify_effective = should_notify
         # [REMOVED] legacy override(high,dense) logic
