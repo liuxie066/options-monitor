@@ -54,7 +54,6 @@ from om.domain import (
     decide_notify_dispatch,
     decide_should_notify,
     evaluate_dnd_quiet_hours,
-    filter_notify_candidates,
     classify_failure,
     ensure_runtime_canonical_config,
     markets_for_trading_day_guard as domain_markets_for_trading_day_guard,
@@ -62,6 +61,11 @@ from om.domain import (
     reduce_trading_day_guard,
     select_markets_to_run as domain_select_markets_to_run,
     select_scheduler_state_filename,
+)
+from om.domain.engine import (
+    decide_opend_degrade_to_yahoo,
+    filter_notify_candidates as engine_filter_notify_candidates,
+    rank_notify_candidates,
 )
 from scripts.infra.service import (
     run_opend_watchdog,
@@ -313,7 +317,11 @@ def main() -> int:
                 port = unhealthy.get('port')
 
                 degraded = False
-                if allow_downgrade and (not has_hk_opend) and (not watchdog_timed_out):
+                if decide_opend_degrade_to_yahoo(
+                    allow_downgrade=allow_downgrade,
+                    has_hk_opend=has_hk_opend,
+                    watchdog_timed_out=watchdog_timed_out,
+                ):
                     try:
                         for sym in (base_cfg.get('symbols') or []):
                             if str((sym or {}).get('market') or '').upper() != 'US':
@@ -884,7 +892,7 @@ def main() -> int:
         'prepare',
         data=_safe_runlog_data({
             'results_count': len(results),
-            'notify_candidates': len(filter_notify_candidates(results)),
+            'notify_candidates': len(engine_filter_notify_candidates(results)),
         }),
     )
 
@@ -907,7 +915,7 @@ def main() -> int:
         cash_footer_lines = []
 
     now_bj = bj_now()
-    notify_candidates = filter_notify_candidates(results)
+    notify_candidates = rank_notify_candidates(engine_filter_notify_candidates(results))
     account_messages = build_account_messages(
         notify_candidates=notify_candidates,
         now_bj=now_bj,
