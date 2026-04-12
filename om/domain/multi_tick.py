@@ -108,6 +108,8 @@ def decide_should_notify(
 ) -> bool:
     if isinstance(scheduler_decision, SchedulerDecisionView):
         scheduler_view = scheduler_decision
+    elif isinstance(scheduler_decision, dict) and str(scheduler_decision.get('schema_kind') or '') == 'scheduler_decision':
+        scheduler_view = SchedulerDecisionView.from_payload(scheduler_decision)
     else:
         # Keep scheduler legacy-compat reads centralized in decision DTO builder.
         scheduler_view = SchedulerDecisionView.from_payload(
