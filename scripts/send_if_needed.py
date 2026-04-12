@@ -28,7 +28,7 @@ if str(_repo_root) not in sys.path:
 
 from scripts.io_utils import utc_now
 from om.domain import normalize_notify_subprocess_output, normalize_pipeline_subprocess_output
-from om.domain.engine import SchedulerDecisionView, build_scheduler_decision_dto
+from om.domain.engine import SchedulerDecisionView, build_scheduler_decision_dto, decide_notify_window_open
 from om.domain.tool_boundary import normalize_scheduler_decision_payload
 from scripts.infra.service import (
     run_command,
@@ -178,7 +178,7 @@ def main():
         )
         scheduler_view = SchedulerDecisionView.from_payload(scheduler_decision)
         should_run = bool(scheduler_view.should_run_scan)
-        should_notify = bool(scheduler_view.is_notify_window_open)
+        should_notify = decide_notify_window_open(scheduler_decision=scheduler_view)
         reason = str(scheduler_view.reason)
 
         if not should_run:
