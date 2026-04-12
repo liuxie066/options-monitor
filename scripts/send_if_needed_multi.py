@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 # Ensure repo root is on sys.path for `scripts.*` imports when run as a script
+import importlib
 import sys
 from pathlib import Path as _PathLib
 
@@ -19,7 +20,11 @@ except Exception:
     from run_log import RunLogger
 
 from scripts.multi_tick import main as _multi_main
-import scripts.multi_tick.main as _multi_main_mod
+_multi_main_mod = importlib.import_module('scripts.multi_tick.main')
+from scripts.multi_tick.opend_guard import should_send_opend_alert as _should_send_opend_alert
+
+# Legacy compatibility exports for tests/callers still importing old private names
+_select_markets_to_run = _multi_main_mod._select_markets_to_run
 
 
 if __name__ == '__main__':
