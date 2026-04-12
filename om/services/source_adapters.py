@@ -3,13 +3,25 @@ from __future__ import annotations
 from typing import Any
 
 from om.domain.canonical_schema import normalize_source_snapshot
+from om.domain.error_policy import classify_failure
 
 
 def adapt_opend_tool_payload(payload: dict[str, Any] | Any) -> dict[str, Any]:
     src = payload if isinstance(payload, dict) else {}
-    status = str(src.get("status") or "").lower()
     ok = bool(src.get("ok"))
-    status_norm = "ok" if ok and status in {"fetched", "cached"} else ("error" if not ok else "fallback")
+    source_norm = str(src.get("source") or "").strip().lower()
+    fallback_used = bool(source_norm and source_norm != "opend")
+    status_norm = ("ok" if ok and (not fallback_used) else ("fallback" if ok else "error"))
+    message = str(src.get("message") or "").strip()
+    failure = (
+        classify_failure(
+            error_code=str(src.get("error_code") or "TOOL_EXEC_FAILED"),
+            message=message,
+            upstream="opend",
+        )
+        if not ok
+        else None
+    )
     return normalize_source_snapshot(
         source_name="opend",
         status=status_norm,
@@ -19,11 +31,13 @@ def adapt_opend_tool_payload(payload: dict[str, Any] | Any) -> dict[str, Any]:
             "tool_name": str(src.get("tool_name") or ""),
             "idempotency_key": str(src.get("idempotency_key") or ""),
             "returncode": src.get("returncode"),
-            "message": str(src.get("message") or ""),
+            "message": message,
+            "raw_error_code": str(src.get("error_code") or ""),
         },
-        fallback_used=(str(src.get("source") or "").lower() != "opend"),
-        error_code=("TOOL_EXEC_FAILED" if not ok else None),
-        error_message=(None if ok else str(src.get("message") or "tool execution failed")),
+        fallback_used=fallback_used,
+        error_code=(failure or {}).get("error_code"),
+        error_category=(failure or {}).get("category"),
+        error_message=(None if ok else (message or "tool execution failed")),
     )
 
 

@@ -8,7 +8,11 @@ BASE = Path(__file__).resolve().parents[1]
 if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
-from om.domain import normalize_processor_row, normalize_source_snapshot
+from om.domain.canonical_schema import (
+    normalize_processor_row,
+    normalize_processor_rows,
+    normalize_source_snapshot,
+)
 
 _ADAPTERS_PATH = BASE / "om" / "services" / "source_adapters.py"
 _ADAPTERS_SPEC = importlib.util.spec_from_file_location("om_source_adapters", _ADAPTERS_PATH)
@@ -39,6 +43,15 @@ def test_source_snapshot_validates_and_normalizes() -> None:
     assert out["schema_version"] == "3.0"
     assert out["source_name"] == "holdings"
     assert out["status"] == "ok"
+    assert out["fallback_used"] is False
+
+
+def test_normalize_processor_rows_requires_list_contract() -> None:
+    try:
+        normalize_processor_rows({"symbol": "AAPL", "strategy": "sell_put"})
+        raise AssertionError("expected ValueError")
+    except ValueError:
+        pass
 
 
 def test_three_source_adapters_produce_unified_dto() -> None:
@@ -83,10 +96,44 @@ def test_three_source_adapters_produce_unified_dto() -> None:
         assert isinstance(dto["payload"], dict)
 
 
+def test_opend_adapter_marks_fallback_and_unified_error_code() -> None:
+    timeout_case = adapt_opend_tool_payload(
+        {
+            "symbol": "AAPL",
+            "tool_name": "required_data_prefetch",
+            "status": "error",
+            "ok": False,
+            "source": "opend",
+            "error_code": "OPEND_API_ERROR",
+            "message": "request timed out",
+        }
+    )
+    assert timeout_case["status"] == "error"
+    assert timeout_case["fallback_used"] is False
+    assert timeout_case["error_code"] == "ERR_TIMEOUT"
+    assert timeout_case["error_category"] == "timeout"
+
+    fallback_ok = adapt_opend_tool_payload(
+        {
+            "symbol": "AAPL",
+            "tool_name": "required_data_prefetch",
+            "status": "fetched",
+            "ok": True,
+            "source": "yahoo",
+            "returncode": 0,
+        }
+    )
+    assert fallback_ok["status"] == "fallback"
+    assert fallback_ok["fallback_used"] is True
+    assert fallback_ok["error_code"] is None
+
+
 def main() -> None:
     test_normalize_processor_row_requires_symbol_and_strategy()
     test_source_snapshot_validates_and_normalizes()
+    test_normalize_processor_rows_requires_list_contract()
     test_three_source_adapters_produce_unified_dto()
+    test_opend_adapter_marks_fallback_and_unified_error_code()
     print("OK (canonical-schema-adapters)")
 
 
