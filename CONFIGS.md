@@ -1,48 +1,51 @@
-# options-monitor 配置收敛（US / HK）
+# options-monitor Config Source of Truth
 
-目标：把混杂的 config 文件收敛成两份最终入口配置：
+配置文档只覆盖：canonical 配置、派生配置、变更与同步流程。
+
+## 文档边界
+
+- 快速上手与首日命令：`README.md`
+- 发布/回滚：`DEPLOY.md`
+- 运行排障：`RUNBOOK.md`
+
+## Canonical Configs（唯一入口）
+
 - `config.us.json`
 - `config.hk.json`
 
-兼容派生文件：
+规则：
+- 只改这两份。
+- options-monitor 运行入口只认这两份。
+
+## Derived Configs（兼容派生）
+
+以下文件不手工维护，由同步脚本生成：
 - `config.scheduled.json`
 - `config.market_us.json`
 - `config.market_hk.json`
 - `config.market_us.fallback_yahoo.json`
 - `config.json`
 
-以上兼容文件不手工维护；使用同步脚本生成：
+同步命令：
 
 ```bash
 cd /home/node/.openclaw/workspace/options-monitor
 ./.venv/bin/python scripts/sync_runtime_configs.py --apply
 ```
 
-## 运行入口
+## Config Workflow（变更流程）
 
-### 美股
-```bash
-cd /home/node/.openclaw/workspace/options-monitor-prod
-./.venv/bin/python scripts/send_if_needed_multi.py --config config.us.json --accounts lx sy --market-config all
-```
+1. 编辑 canonical：`config.us.json` / `config.hk.json`。
+2. 执行同步：`./.venv/bin/python scripts/sync_runtime_configs.py --apply`。
+3. 可选校验：`./.venv/bin/python scripts/sync_runtime_configs.py --check`。
+4. 如需发布到 prod，按 `DEPLOY.md` 执行 `deploy_to_prod.py`。
 
-### 港股
-```bash
-cd /home/node/.openclaw/workspace/options-monitor-prod
-./.venv/bin/python scripts/send_if_needed_multi.py --config config.hk.json --accounts lx sy --market-config all
-```
+## Drift Handling（漂移处理）
 
-## 说明
+- `--check` 非 0：表示 canonical 与派生文件不一致。
+- 处理方式：重新执行 `--apply`，不要手工编辑派生文件。
 
-- 两份配置都使用统一键名 `schedule`，避免 `schedule_hk` 这种分叉键。
-- `config.hk.json` 的 `schedule` 来自历史 `config.market_hk.example.json` 的 `schedule_hk` 段。
-- `config.us.json` 的 `schedule` 来自历史 `config.legacy.example.json` 的 `schedule` 段。
+## Scope Clarification
 
-## 现存历史文件（建议保留但不再作为入口）
-
-- `config.legacy.example.json`：旧的混合入口（含 US+HK symbols + US schedule）
-- `config.market_us.example.json` / `config.market_hk.example.json`：历史市场拆分版本（键名不统一）
-- `config.scheduled.example.json`：历史 scheduled 模式版本
-- `config.market_us.fallback_yahoo.example.json`：历史 fallback 版本
-
-建议：后续只维护 `config.us.json` / `config.hk.json`，其它作为归档与回滚参考。
+- `portfolio-management/config.json` 仅用于 PM 凭证与 Bitable 读取，不是 options-monitor 运行入口配置。
+- 历史示例文件（如 `config.legacy.example.json` / `config.market_*.example.json` / `config.scheduled.example.json`）仅用于参考与回滚对照，不作为当前入口。
