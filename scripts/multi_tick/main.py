@@ -707,7 +707,7 @@ def main() -> int:
         should_notify = decide_should_notify(
             account=acct,
             notify_decision_by_account=notify_decision_by_account,
-            scheduler_decision=scheduler_decision,
+            scheduler_decision=scheduler_view,
         )
         reason = str(reason_global)
 
