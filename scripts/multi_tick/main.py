@@ -58,6 +58,7 @@ from om.domain import (
     ensure_runtime_canonical_config,
     markets_for_trading_day_guard as domain_markets_for_trading_day_guard,
     reduce_trading_day_guard,
+    resolve_notification_channel_target,
     select_markets_to_run as domain_select_markets_to_run,
     select_scheduler_state_filename,
 )
@@ -952,10 +953,10 @@ def main() -> int:
 
         return 0
 
-    channel = (base_cfg.get('notifications') or {}).get('channel') or 'feishu'
-    target = (base_cfg.get('notifications') or {}).get('target')
-
     notif_cfg = base_cfg.get('notifications') or {}
+    notify_route = resolve_notification_channel_target(notifications=notif_cfg)
+    channel = notify_route.get('channel')
+    target = notify_route.get('target')
     schedule_cfg0 = base_cfg.get('schedule') or {}
     schedule_v2_enabled = bool((schedule_cfg0.get('schedule_v2') or {}).get('enabled', False))
     quiet_hours = notif_cfg.get('quiet_hours_beijing')

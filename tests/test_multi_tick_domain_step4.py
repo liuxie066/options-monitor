@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import time
+from pathlib import Path
 
 
 def test_evaluate_dnd_quiet_hours_cross_midnight_window() -> None:
@@ -59,3 +60,40 @@ def test_decide_notify_dispatch_preserves_route_and_target_rules() -> None:
         'config_error': None,
         'reason': 'quiet_hours',
     }
+
+
+def test_resolve_notification_channel_target_keeps_fallback_order() -> None:
+    from om.domain.multi_tick import resolve_notification_channel_target
+
+    out_default = resolve_notification_channel_target(
+        notifications={'target': 'user:cfg'},
+        cli_channel=None,
+        cli_target=None,
+    )
+    assert out_default == {'channel': 'feishu', 'target': 'user:cfg'}
+
+    out_cli = resolve_notification_channel_target(
+        notifications={'channel': 'cfg-chan', 'target': 'user:cfg'},
+        cli_channel='cli-chan',
+        cli_target='user:cli',
+    )
+    assert out_cli == {'channel': 'cli-chan', 'target': 'user:cli'}
+
+
+def test_resolve_scheduler_state_path_supports_legacy_state_override() -> None:
+    from om.domain.multi_tick import resolve_scheduler_state_path
+
+    base = Path('/tmp/base-test')
+    state = resolve_scheduler_state_path(
+        base_dir=base,
+        state_dir='output/state',
+        state_override='custom/state.json',
+    )
+    assert str(state) == '/tmp/base-test/custom/state.json'
+
+    state_default = resolve_scheduler_state_path(
+        base_dir=base,
+        state_dir='output/state',
+        state_override=None,
+    )
+    assert str(state_default) == '/tmp/base-test/output/state/scheduler_state.json'

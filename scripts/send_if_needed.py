@@ -27,7 +27,12 @@ if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
 from scripts.io_utils import utc_now
-from om.domain import normalize_notify_subprocess_output, normalize_pipeline_subprocess_output
+from om.domain import (
+    normalize_notify_subprocess_output,
+    normalize_pipeline_subprocess_output,
+    resolve_notification_channel_target,
+    resolve_scheduler_state_path,
+)
 from om.domain.engine import SchedulerDecisionView, build_scheduler_decision_dto, decide_notify_window_open
 from scripts.infra.service import (
     run_command,
@@ -119,9 +124,13 @@ def main():
 
     cfg_obj = json.loads(cfg.read_text(encoding='utf-8'))
     notif_cfg = cfg_obj.get('notifications') or {}
-
-    channel = args.channel or notif_cfg.get('channel') or 'feishu'
-    target = args.target or notif_cfg.get('target')
+    notify_route = resolve_notification_channel_target(
+        notifications=notif_cfg,
+        cli_channel=args.channel,
+        cli_target=args.target,
+    )
+    channel = notify_route.get('channel')
+    target = notify_route.get('target')
     if not target:
         raise SystemExit('[CONFIG_ERROR] notifications.target is required (e.g. user:open_id or chat:chat_id)')
 
@@ -130,13 +139,12 @@ def main():
         state_dir = (base / state_dir).resolve()
     state_dir.mkdir(parents=True, exist_ok=True)
 
-    # Backward compat: allow explicit --state file override
-    if args.state:
-        state = Path(args.state)
-        if not state.is_absolute():
-            state = (base / state).resolve()
-    else:
-        state = (state_dir / 'scheduler_state.json').resolve()
+    state = resolve_scheduler_state_path(
+        base_dir=base,
+        state_dir=state_dir,
+        state_override=args.state,
+        filename='scheduler_state.json',
+    )
 
     report_dir = Path(args.report_dir)
     if not report_dir.is_absolute():

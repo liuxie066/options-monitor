@@ -8,6 +8,8 @@ from .multi_tick import (
     is_in_quiet_hours_window,
     markets_for_trading_day_guard,
     reduce_trading_day_guard,
+    resolve_notification_channel_target,
+    resolve_scheduler_state_path,
     select_markets_to_run,
     select_scheduler_state_filename,
 )
@@ -64,6 +66,8 @@ __all__ = [
     'is_in_quiet_hours_window',
     'markets_for_trading_day_guard',
     'reduce_trading_day_guard',
+    'resolve_notification_channel_target',
+    'resolve_scheduler_state_path',
     'select_markets_to_run',
     'select_scheduler_state_filename',
     'build_account_messages',
