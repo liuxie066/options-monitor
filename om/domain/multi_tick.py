@@ -112,9 +112,7 @@ def decide_should_notify(
     )
     account_decision_raw = notify_decision_by_account.get(str(account))
     account_decision: dict[str, Any] | AccountSchedulerDecisionView | None
-    if isinstance(account_decision_raw, bool):
-        account_decision = {'is_notify_window_open': bool(account_decision_raw)}
-    elif account_decision_raw is None or isinstance(account_decision_raw, AccountSchedulerDecisionView):
+    if account_decision_raw is None or isinstance(account_decision_raw, AccountSchedulerDecisionView):
         account_decision = account_decision_raw
     else:
         account_decision = build_account_scheduler_decision_dto(
