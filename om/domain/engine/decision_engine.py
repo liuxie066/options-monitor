@@ -107,6 +107,8 @@ def build_account_scheduler_decision_dto(
         if isinstance(scheduler_decision, SchedulerDecisionView)
         else SchedulerDecisionView.from_payload(scheduler_decision)
     )
+    if isinstance(account_scheduler_raw, bool):
+        account_scheduler_raw = {'is_notify_window_open': bool(account_scheduler_raw)}
     account_raw = normalize_notify_window_aliases(
         account_scheduler_raw,
         default=bool(scheduler_view.is_notify_window_open),
