@@ -19,7 +19,7 @@ def test_timeout_classification() -> None:
     out = classify_failure(error_code="OPEND_API_ERROR", message="read timed out", upstream="opend")
     assert out["error_code"] == ERR_TIMEOUT
     assert out["category"] == "timeout"
-    assert out["fallback_allowed"] is True
+    assert out["fallback_allowed"] is False
 
 
 def test_two_factor_classification() -> None:

@@ -11,12 +11,13 @@ ERR_UNEXPECTED = "ERR_UNEXPECTED"
 
 
 _TIMEOUT_HINTS = ("timeout", "timed out")
-_TWO_FA_HINTS = ("2fa", "phone_verify", "needs_phone_verify", "phone verification")
+_TWO_FA_HINTS = ("2fa", "phone_verify", "needs_phone_verify", "phone verification", "need_2fa")
 _UPSTREAM_UNAVAILABLE_CODES = {
     "OPEND_PORT_CLOSED",
     "OPEND_NOT_READY",
     "OPEND_QOT_NOT_LOGINED",
     "OPEND_API_ERROR",
+    "OPEND_RATE_LIMIT",
     "TOOL_EXEC_FAILED",
 }
 
@@ -38,7 +39,7 @@ def classify_failure(
             "error_code": ERR_TIMEOUT,
             "category": "timeout",
             "retryable": True,
-            "fallback_allowed": True,
+            "fallback_allowed": False,
             "upstream": str(upstream or ""),
         }
     if (code == "OPEND_NEEDS_PHONE_VERIFY") or any(hint in txt for hint in _TWO_FA_HINTS):
