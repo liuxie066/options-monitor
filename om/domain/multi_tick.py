@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Callable
 
-from .engine import SchedulerDecisionView
+from .engine import AccountSchedulerDecisionView, SchedulerDecisionView, decide_account_notify_window_open
 
 
 def select_markets_to_run(now_utc: datetime, cfg: dict, market_config: str) -> list[str]:
@@ -97,7 +97,7 @@ def apply_scan_run_decision(*, should_run_global: bool, reason_global: str, forc
 def decide_should_notify(
     *,
     account: str,
-    notify_decision_by_account: dict[str, bool],
+    notify_decision_by_account: dict[str, bool | dict[str, Any] | AccountSchedulerDecisionView],
     scheduler_decision: dict | SchedulerDecisionView,
 ) -> bool:
     scheduler_view = (
@@ -105,10 +105,13 @@ def decide_should_notify(
         if isinstance(scheduler_decision, SchedulerDecisionView)
         else SchedulerDecisionView.from_payload(scheduler_decision)
     )
+    account_decision = notify_decision_by_account.get(str(account))
+    if isinstance(account_decision, bool):
+        return bool(account_decision)
     return bool(
-        notify_decision_by_account.get(
-            str(account),
-            scheduler_view.is_notify_window_open,
+        decide_account_notify_window_open(
+            scheduler_decision=scheduler_view,
+            account_scheduler_decision=account_decision,
         )
     )
 
