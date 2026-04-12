@@ -28,6 +28,8 @@ if str(_repo_root) not in sys.path:
 
 from scripts.io_utils import utc_now
 from om.domain import normalize_notify_subprocess_output, normalize_pipeline_subprocess_output
+from om.domain.engine import SchedulerDecisionView, build_scheduler_decision_dto
+from om.domain.tool_boundary import normalize_scheduler_decision_payload
 from scripts.infra.service import (
     run_command,
     run_pipeline_script,
@@ -169,12 +171,18 @@ def main():
             sys.stderr.write(sch.stderr)
             raise SystemExit(sch.returncode)
 
-        decision = json.loads((sch.stdout or '').strip())
-        should_run = bool(decision.get('should_run_scan'))
-        should_notify = bool(decision.get('should_notify'))
+        scheduler_raw = json.loads((sch.stdout or '').strip())
+        scheduler_decision = build_scheduler_decision_dto(
+            scheduler_raw,
+            normalize_fn=normalize_scheduler_decision_payload,
+        )
+        scheduler_view = SchedulerDecisionView.from_payload(scheduler_decision)
+        should_run = bool(scheduler_view.should_run_scan)
+        should_notify = bool(scheduler_view.is_notify_window_open)
+        reason = str(scheduler_view.reason)
 
         if not should_run:
-            sh([str(vpy), 'scripts/write_last_run.py', '--path', str(last_run), '--status', 'skip', '--stage', 'scheduler', '--reason', str(decision.get('reason') or ''), '--started-at', started], cwd=base)
+            sh([str(vpy), 'scripts/write_last_run.py', '--path', str(last_run), '--status', 'skip', '--stage', 'scheduler', '--reason', reason, '--started-at', started], cwd=base)
             return 0
 
         # 1.5) trading day guard (multi-market)
@@ -270,7 +278,7 @@ def main():
             return 0
 
         # not sending
-        sh([str(vpy), 'scripts/write_last_run.py', '--path', str(last_run), '--status', 'ok', '--stage', 'pipeline', '--reason', str(decision.get('reason') or ''), '--details', f"should_notify={should_notify} meaningful={meaningful}", '--started-at', started], cwd=base)
+        sh([str(vpy), 'scripts/write_last_run.py', '--path', str(last_run), '--status', 'ok', '--stage', 'pipeline', '--reason', reason, '--details', f"should_notify={should_notify} meaningful={meaningful}", '--started-at', started], cwd=base)
         return 0
     finally:
         if lock_fd is not None:

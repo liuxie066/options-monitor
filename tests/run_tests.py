@@ -205,6 +205,9 @@ def main() -> None:
         test_tool_execution_schema_and_idempotency_key,
         test_repository_audit_and_text_writers,
     )
+    from test_send_if_needed_batch3 import (
+        test_send_if_needed_scheduler_view_compat_should_notify_field,
+    )
 
     tests = [
         test_sell_put_metrics_requires_multiplier,
@@ -262,6 +265,7 @@ def main() -> None:
         test_tool_execution_schema_and_idempotency_key,
         test_repository_audit_and_text_writers,
         test_prefetch_required_data_idempotency_audit,
+        test_send_if_needed_scheduler_view_compat_should_notify_field,
     ]
     for t in tests:
         t()
