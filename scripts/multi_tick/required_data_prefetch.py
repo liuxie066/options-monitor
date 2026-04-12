@@ -7,7 +7,11 @@ from om.domain import (
     SCHEMA_VERSION_V1,
     normalize_tool_execution_payload,
 )
-from om.services import ToolExecutionIntent, ToolExecutionService
+from om.services import (
+    ToolExecutionIntent,
+    ToolExecutionService,
+    adapt_opend_tool_payload,
+)
 from scripts.io_utils import has_shared_required_data
 
 
@@ -86,7 +90,7 @@ def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required:
                 '--limit-expirations', str(limit_exp),
             ]
 
-        return exec_service.execute(
+        payload = exec_service.execute(
             ToolExecutionIntent(
                 tool_name='required_data_prefetch',
                 symbol=symbol,
@@ -99,6 +103,9 @@ def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required:
                 idempotency_scope='required_data_prefetch',
             )
         )
+        # Canonical adapter validation before entering next layer.
+        adapt_opend_tool_payload(payload)
+        return payload
 
     todo_cfgs = [it for it in syms if _need_fetch(str(it.get('symbol')).strip())]
 
