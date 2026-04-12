@@ -28,6 +28,7 @@ if str(_repo_root) not in sys.path:
 
 from scripts.io_utils import utc_now
 from om.domain import (
+    markets_for_trading_day_guard as domain_markets_for_trading_day_guard,
     normalize_notify_subprocess_output,
     normalize_pipeline_subprocess_output,
     resolve_notification_channel_target,
@@ -44,15 +45,8 @@ from scripts.infra.service import (
 
 
 def _infer_trading_day_guard_markets(cfg_obj: dict) -> list[str]:
-    try:
-        syms = cfg_obj.get('symbols') or []
-        mk = sorted({str((it or {}).get('market') or '').upper() for it in syms if isinstance(it, dict) and (it or {}).get('market')})
-        mk = [m for m in mk if m in ('US', 'HK', 'CN')]
-        if mk:
-            return mk
-    except Exception:
-        pass
-    return ['US']
+    # Keep legacy helper name for callers/tests, but centralize compat reads in domain.
+    return domain_markets_for_trading_day_guard([], cfg_obj, 'auto')
 
 
 def _trading_day_guard_for_market(cfg_obj: dict, market: str) -> tuple[bool | None, str]:
