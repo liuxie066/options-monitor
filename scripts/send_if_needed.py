@@ -27,6 +27,7 @@ if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
 from scripts.io_utils import utc_now
+from om.domain import normalize_notify_subprocess_output, normalize_pipeline_subprocess_output
 from scripts.infra.service import (
     run_command,
     run_pipeline_script,
@@ -212,9 +213,14 @@ def main():
             report_dir=report_dir,
             state_dir=state_dir,
         )
-        if pipe.returncode != 0:
+        pipe_payload = normalize_pipeline_subprocess_output(
+            returncode=int(pipe.returncode),
+            stdout=str(pipe.stdout or ""),
+            stderr=str(pipe.stderr or ""),
+        )
+        if not bool(pipe_payload.get("ok")):
             sh([str(vpy), 'scripts/write_last_run.py', '--path', str(last_run), '--status', 'error', '--stage', 'pipeline', '--reason', 'pipeline failed', '--started-at', started], cwd=base)
-            return pipe.returncode
+            return int(pipe_payload.get("returncode") or pipe.returncode)
 
         text = notif.read_text(encoding='utf-8', errors='replace').strip() if notif.exists() else ''
 
@@ -232,10 +238,15 @@ def main():
         if should_notify and meaningful:
             # 3) send via OpenClaw CLI
             send = send_openclaw_message(base=base, channel=channel, target=target, message=text)
-            if send.returncode != 0:
+            send_payload = normalize_notify_subprocess_output(
+                returncode=int(send.returncode),
+                stdout=str(send.stdout or ""),
+                stderr=str(send.stderr or ""),
+            )
+            if not bool(send_payload.get("ok")):
                 sh([str(vpy), 'scripts/write_last_run.py', '--path', str(last_run), '--status', 'error', '--stage', 'send', '--details', (send.stderr or send.stdout or '').strip(), '--started-at', started], cwd=base)
                 sys.stderr.write(send.stderr)
-                return send.returncode
+                return int(send_payload.get("returncode") or send.returncode)
 
             message_id = None
             try:

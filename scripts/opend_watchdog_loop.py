@@ -22,6 +22,8 @@ import argparse
 import json
 import time
 
+from om.domain import normalize_watchdog_subprocess_output
+
 
 def main() -> None:
     ap = argparse.ArgumentParser(description='OpenD watchdog loop')
@@ -48,6 +50,11 @@ def main() -> None:
 
     while True:
         p = subprocess.run(cmd, capture_output=True, text=True)
+        normalized = normalize_watchdog_subprocess_output(
+            returncode=int(p.returncode),
+            stdout=str(p.stdout or ""),
+            stderr=str(p.stderr or ""),
+        )
         # opend_watchdog.py may print futu logs; extract JSON block if present.
         txt = ((p.stdout or '') + '\n' + (p.stderr or '')).strip()
         out = txt.strip()
@@ -62,9 +69,9 @@ def main() -> None:
                 obj = json.loads(out_json)
                 ok = bool(obj.get('ok'))
             except Exception:
-                ok = (p.returncode == 0)
+                ok = bool(normalized.get('ok'))
         else:
-            ok = (p.returncode == 0)
+            ok = bool(normalized.get('ok'))
 
         print(out_json if out_json else out, flush=True)
         if not ok and args.exit_on_unhealthy:

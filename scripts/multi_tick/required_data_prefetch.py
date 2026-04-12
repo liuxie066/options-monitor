@@ -1,16 +1,13 @@
 from __future__ import annotations
 
-import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
 from pathlib import Path
-from threading import Lock
 
 from om.domain import (
     SCHEMA_VERSION_V1,
-    build_tool_idempotency_key,
     normalize_tool_execution_payload,
 )
+from om.services import ToolExecutionIntent, ToolExecutionService
 from scripts.io_utils import has_shared_required_data
 
 
@@ -29,11 +26,7 @@ def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required:
         except Exception:
             return True
 
-    idempotency_seen: set[str] = set()
-    idempotency_lock = Lock()
-
-    def _now_utc() -> str:
-        return datetime.now(timezone.utc).isoformat()
+    exec_service = ToolExecutionService(base=base)
 
     def _fetch_one(symbol_cfg: dict) -> dict:
         symbol = str(symbol_cfg.get('symbol')).strip()
@@ -63,27 +56,6 @@ def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required:
         fetch_cfg = (symbol_cfg.get('fetch') or {}) if isinstance(symbol_cfg, dict) else {}
         src = str(fetch_cfg.get('source') or 'yahoo').lower()
         limit_exp = int(fetch_cfg.get('limit_expirations') or symbol_cfg.get('fetch', {}).get('limit_expirations', 8) or 8)
-        idem_key = build_tool_idempotency_key(
-            tool_name='required_data_prefetch',
-            symbol=symbol,
-            source=src,
-            limit_exp=limit_exp,
-        )
-        with idempotency_lock:
-            if idem_key in idempotency_seen:
-                return normalize_tool_execution_payload(
-                    tool_name='required_data_prefetch',
-                    symbol=symbol,
-                    source=src,
-                    limit_exp=limit_exp,
-                    status='skipped',
-                    ok=True,
-                    message='idempotent_duplicate',
-                    returncode=0,
-                    idempotency_key=idem_key,
-                )
-            idempotency_seen.add(idem_key)
-
         opt_types = 'put,call'
 
         cmd: list[str]
@@ -114,36 +86,18 @@ def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required:
                 '--limit-expirations', str(limit_exp),
             ]
 
-        started_at = _now_utc()
-        p = subprocess.run(cmd, cwd=str(base), capture_output=True, text=True)
-        finished_at = _now_utc()
-        if p.returncode != 0:
-            tail = ((p.stderr or p.stdout) or '').strip().splitlines()[-1:]
-            return normalize_tool_execution_payload(
+        return exec_service.execute(
+            ToolExecutionIntent(
                 tool_name='required_data_prefetch',
                 symbol=symbol,
                 source=src,
                 limit_exp=limit_exp,
-                status='error',
-                ok=False,
-                message=(tail[0] if tail else f'returncode={p.returncode}'),
-                returncode=int(p.returncode),
-                idempotency_key=idem_key,
-                started_at_utc=started_at,
-                finished_at_utc=finished_at,
+                cmd=cmd,
+                cwd=base,
+                capture_output=True,
+                text=True,
+                idempotency_scope='required_data_prefetch',
             )
-        return normalize_tool_execution_payload(
-            tool_name='required_data_prefetch',
-            symbol=symbol,
-            source=src,
-            limit_exp=limit_exp,
-            status='fetched',
-            ok=True,
-            message='fetched',
-            returncode=0,
-            idempotency_key=idem_key,
-            started_at_utc=started_at,
-            finished_at_utc=finished_at,
         )
 
     todo_cfgs = [it for it in syms if _need_fetch(str(it.get('symbol')).strip())]

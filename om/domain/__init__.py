@@ -17,12 +17,17 @@ from .multi_tick_result import (
     build_shared_last_run_payload,
 )
 from .tool_boundary import (
+    SCHEMA_KIND_SUBPROCESS_ADAPTER,
     SCHEMA_KIND_SCHEDULER_DECISION,
     SCHEMA_KIND_TOOL_EXECUTION,
     SCHEMA_VERSION_V1,
     build_tool_idempotency_key,
+    normalize_notify_subprocess_output,
+    normalize_pipeline_subprocess_output,
     normalize_scheduler_decision_payload,
+    normalize_subprocess_adapter_payload,
     normalize_tool_execution_payload,
+    normalize_watchdog_subprocess_output,
     validate_schema_payload,
 )
 
@@ -44,8 +49,13 @@ __all__ = [
     'SCHEMA_VERSION_V1',
     'SCHEMA_KIND_TOOL_EXECUTION',
     'SCHEMA_KIND_SCHEDULER_DECISION',
+    'SCHEMA_KIND_SUBPROCESS_ADAPTER',
     'validate_schema_payload',
     'normalize_scheduler_decision_payload',
     'build_tool_idempotency_key',
     'normalize_tool_execution_payload',
+    'normalize_subprocess_adapter_payload',
+    'normalize_watchdog_subprocess_output',
+    'normalize_pipeline_subprocess_output',
+    'normalize_notify_subprocess_output',
 ]

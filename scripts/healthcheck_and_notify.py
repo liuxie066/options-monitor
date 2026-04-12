@@ -21,6 +21,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from om.domain import normalize_notify_subprocess_output, normalize_pipeline_subprocess_output
+
 
 def load_json(p: Path) -> dict:
     return json.loads(p.read_text(encoding='utf-8'))
@@ -50,10 +52,15 @@ def main() -> int:
         capture_output=True,
         text=True,
     )
+    hc_payload = normalize_pipeline_subprocess_output(
+        returncode=int(hc.returncode),
+        stdout=str(hc.stdout or ""),
+        stderr=str(hc.stderr or ""),
+    )
     out = (hc.stdout or '')
     err = (hc.stderr or '')
 
-    if hc.returncode not in (0, 2):
+    if int(hc_payload.get("returncode") or 0) not in (0, 2):
         # healthcheck itself failed unexpectedly
         sys.stderr.write(err or out)
         return 2
@@ -96,9 +103,14 @@ def main() -> int:
         capture_output=True,
         text=True,
     )
-    if send.returncode != 0:
+    send_payload = normalize_notify_subprocess_output(
+        returncode=int(send.returncode),
+        stdout=str(send.stdout or ""),
+        stderr=str(send.stderr or ""),
+    )
+    if not bool(send_payload.get("ok")):
         sys.stderr.write(send.stderr or send.stdout or '')
-        return send.returncode
+        return int(send_payload.get("returncode") or send.returncode)
 
     return 0
 
