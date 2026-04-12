@@ -1,5 +1,6 @@
 POLICY_REPO_PATH ?= $(CURDIR)
 POLICY_ACTION ?= running
+PYTHON ?= $(if $(wildcard .venv/bin/python),./.venv/bin/python,python3)
 
 policy-check:
 	python3 scripts/policy_check.py --repo-path "$(POLICY_REPO_PATH)" --action "$(POLICY_ACTION)"
@@ -17,3 +18,12 @@ config-sync:
 
 config-sync-check:
 	./.venv/bin/python scripts/sync_runtime_configs.py --check
+
+test:
+	$(PYTHON) tests/run_tests.py
+
+test-all:
+	$(PYTHON) tests/run_tests.py --all
+
+smoke:
+	$(PYTHON) tests/run_smoke.py
