@@ -108,6 +108,19 @@ def test_decide_should_notify_accepts_account_scheduler_dto() -> None:
     )
 
 
+def test_decide_should_notify_treats_none_account_payload_as_scheduler_fallback() -> None:
+    from om.domain.multi_tick import decide_should_notify
+
+    assert (
+        decide_should_notify(
+            account='sy',
+            notify_decision_by_account={'sy': None},
+            scheduler_decision={'should_notify': True},
+        )
+        is True
+    )
+
+
 def test_decide_should_notify_prefers_canonical_account_field_over_legacy() -> None:
     from om.domain.multi_tick import decide_should_notify
 
