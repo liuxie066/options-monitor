@@ -117,6 +117,8 @@ def decide_should_notify(
     if account_decision_raw is None or isinstance(account_decision_raw, AccountSchedulerDecisionView):
         account_decision = account_decision_raw
     else:
+        if isinstance(account_decision_raw, bool):
+            account_decision_raw = {'is_notify_window_open': bool(account_decision_raw)}
         account_decision = AccountSchedulerDecisionView.from_payload(
             account_decision_raw,
             scheduler_decision=scheduler_view,

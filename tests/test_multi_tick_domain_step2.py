@@ -160,6 +160,31 @@ def test_decide_should_notify_normalizes_account_payload_via_view() -> None:
         mod.AccountSchedulerDecisionView.from_payload = old_from_payload  # type: ignore[method-assign]
 
 
+def test_decide_should_notify_converts_bool_account_payload_before_view_normalize() -> None:
+    from om.domain import multi_tick as mod
+
+    seen = {'payload': None}
+    old_from_payload = mod.AccountSchedulerDecisionView.from_payload
+    try:
+        mod.AccountSchedulerDecisionView.from_payload = classmethod(  # type: ignore[method-assign]
+            lambda cls, payload, *, scheduler_decision: (
+                seen.__setitem__('payload', payload),
+                cls(is_notify_window_open=bool(payload.get('is_notify_window_open'))),
+            )[1]
+        )
+        assert (
+            mod.decide_should_notify(
+                account='sy',
+                notify_decision_by_account={'sy': True},
+                scheduler_decision={'is_notify_window_open': False},
+            )
+            is True
+        )
+        assert seen['payload'] == {'is_notify_window_open': True}
+    finally:
+        mod.AccountSchedulerDecisionView.from_payload = old_from_payload  # type: ignore[method-assign]
+
+
 def test_filter_notify_candidates_matches_existing_predicate() -> None:
     from om.domain.multi_tick import filter_notify_candidates
     from scripts.multi_tick.misc import AccountResult
