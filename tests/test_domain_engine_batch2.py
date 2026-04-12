@@ -112,6 +112,12 @@ def test_build_account_scheduler_decision_dto_uses_global_fallback() -> None:
     )
     assert out2['is_notify_window_open'] is True
 
+    out3 = build_account_scheduler_decision_dto(
+        True,
+        scheduler_decision={'is_notify_window_open': False},
+    )
+    assert out3['is_notify_window_open'] is True
+
 
 def test_decide_account_notify_window_open_uses_explicit_account_dto() -> None:
     from om.domain.engine import (
