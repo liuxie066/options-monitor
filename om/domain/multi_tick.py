@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Callable
 
+from .engine import SchedulerDecisionView
+
 
 def select_markets_to_run(now_utc: datetime, cfg: dict, market_config: str) -> list[str]:
     mc = str(market_config or 'auto').lower()
@@ -92,11 +94,21 @@ def apply_scan_run_decision(*, should_run_global: bool, reason_global: str, forc
     return should_run, reason
 
 
-def decide_should_notify(*, account: str, notify_decision_by_account: dict[str, bool], scheduler_decision: dict) -> bool:
+def decide_should_notify(
+    *,
+    account: str,
+    notify_decision_by_account: dict[str, bool],
+    scheduler_decision: dict | SchedulerDecisionView,
+) -> bool:
+    scheduler_view = (
+        scheduler_decision
+        if isinstance(scheduler_decision, SchedulerDecisionView)
+        else SchedulerDecisionView.from_payload(scheduler_decision)
+    )
     return bool(
         notify_decision_by_account.get(
             str(account),
-            scheduler_decision.get('is_notify_window_open', scheduler_decision.get('should_notify')),
+            scheduler_view.is_notify_window_open,
         )
     )
 
