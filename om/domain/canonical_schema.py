@@ -56,6 +56,14 @@ def normalize_processor_row(raw: dict[str, Any] | Any) -> dict[str, Any]:
     return validate_canonical_payload(out, kind=SCHEMA_KIND_PROCESSOR_OUTPUT)
 
 
+def normalize_processor_rows(raw_rows: Any) -> list[dict[str, Any]]:
+    if raw_rows is None:
+        return []
+    if not isinstance(raw_rows, list):
+        raise ValueError("processor output rows must be a list")
+    return [normalize_processor_row(row) for row in raw_rows]
+
+
 def normalize_source_snapshot(
     *,
     source_name: str,
@@ -64,6 +72,7 @@ def normalize_source_snapshot(
     as_of_utc: str | None = None,
     fallback_used: bool = False,
     error_code: str | None = None,
+    error_category: str | None = None,
     error_message: str | None = None,
 ) -> dict[str, Any]:
     source_norm = str(source_name or "").strip().lower()
@@ -82,6 +91,7 @@ def normalize_source_snapshot(
         "as_of_utc": str(as_of_utc or utc_now_iso()),
         "fallback_used": bool(fallback_used),
         "error_code": (str(error_code) if error_code else None),
+        "error_category": (str(error_category) if error_category else None),
         "error_message": (str(error_message) if error_message else None),
         "payload": (payload if isinstance(payload, dict) else {}),
     }
