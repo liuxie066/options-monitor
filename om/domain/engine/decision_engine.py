@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
-from om.domain.tool_boundary import resolve_notify_window_open
+from om.domain.tool_boundary import normalize_notify_window_aliases, resolve_notify_window_open
 
 
 @dataclass(frozen=True)
@@ -13,7 +13,7 @@ class SchedulerDecisionView:
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any] | Any) -> 'SchedulerDecisionView':
-        src = payload if isinstance(payload, Mapping) else {}
+        src = normalize_notify_window_aliases(payload)
         return cls(
             should_run_scan=bool(src.get('should_run_scan')),
             is_notify_window_open=resolve_notify_window_open(src),
@@ -32,11 +32,14 @@ class AccountSchedulerDecisionView:
         *,
         scheduler_decision: Mapping[str, Any] | SchedulerDecisionView,
     ) -> 'AccountSchedulerDecisionView':
-        src = payload if isinstance(payload, Mapping) else {}
         scheduler_view = (
             scheduler_decision
             if isinstance(scheduler_decision, SchedulerDecisionView)
             else SchedulerDecisionView.from_payload(scheduler_decision)
+        )
+        src = normalize_notify_window_aliases(
+            payload,
+            default=bool(scheduler_view.is_notify_window_open),
         )
         return cls(
             is_notify_window_open=resolve_notify_window_open(
@@ -77,12 +80,12 @@ def build_scheduler_decision_dto(
             return dict(normalized)
     except Exception:
         pass
-    raw = scheduler_raw if isinstance(scheduler_raw, Mapping) else {}
+    raw = normalize_notify_window_aliases(scheduler_raw)
     return {
         'schema_kind': 'scheduler_decision',
         'schema_version': '1.0',
         'should_run_scan': bool(raw.get('should_run_scan')),
-        'is_notify_window_open': resolve_notify_window_open(raw),
+        'is_notify_window_open': bool(raw.get('is_notify_window_open')),
         'reason': str(raw.get('reason') or ''),
         **raw,
     }
@@ -94,11 +97,16 @@ def build_account_scheduler_decision_dto(
     scheduler_decision: Mapping[str, Any] | SchedulerDecisionView,
 ) -> dict[str, Any]:
     """Build account-level scheduler decision DTO with global fallback."""
-    account_raw = account_scheduler_raw if isinstance(account_scheduler_raw, Mapping) else {}
-    account_view = AccountSchedulerDecisionView.from_payload(
-        account_raw,
-        scheduler_decision=scheduler_decision,
+    scheduler_view = (
+        scheduler_decision
+        if isinstance(scheduler_decision, SchedulerDecisionView)
+        else SchedulerDecisionView.from_payload(scheduler_decision)
     )
+    account_raw = normalize_notify_window_aliases(
+        account_scheduler_raw,
+        default=bool(scheduler_view.is_notify_window_open),
+    )
+    account_view = AccountSchedulerDecisionView.from_payload(account_raw, scheduler_decision=scheduler_view)
     return {
         'schema_kind': 'scheduler_decision_account',
         'schema_version': '1.0',

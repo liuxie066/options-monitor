@@ -43,13 +43,29 @@ def resolve_notify_window_open(
     return bool(default)
 
 
+def normalize_notify_window_aliases(
+    src: dict[str, Any] | Any,
+    *,
+    default: bool = False,
+) -> dict[str, Any]:
+    payload = dict(src) if isinstance(src, dict) else {}
+    if "is_notify_window_open" in payload:
+        payload["is_notify_window_open"] = bool(payload.get("is_notify_window_open"))
+        return payload
+    if "should_notify" in payload:
+        payload["is_notify_window_open"] = bool(payload.get("should_notify"))
+        return payload
+    payload["is_notify_window_open"] = bool(default)
+    return payload
+
+
 def normalize_scheduler_decision_payload(raw: dict[str, Any] | Any) -> dict[str, Any]:
-    src = raw if isinstance(raw, dict) else {}
+    src = normalize_notify_window_aliases(raw)
     out = {
         "schema_kind": SCHEMA_KIND_SCHEDULER_DECISION,
         "schema_version": SCHEMA_VERSION_V1,
         "should_run_scan": bool(src.get("should_run_scan")),
-        "is_notify_window_open": resolve_notify_window_open(src),
+        "is_notify_window_open": bool(src.get("is_notify_window_open")),
         "reason": str(src.get("reason") or ""),
     }
     for key in (

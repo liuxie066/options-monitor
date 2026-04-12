@@ -58,6 +58,20 @@ def test_tool_execution_schema_and_idempotency_key() -> None:
     assert out["idempotency_key"] == k1
 
 
+def test_notify_window_alias_normalization_prefers_canonical_field() -> None:
+    from om.domain.tool_boundary import normalize_notify_window_aliases, resolve_notify_window_open
+
+    only_legacy = normalize_notify_window_aliases({"should_notify": 1})
+    assert only_legacy["is_notify_window_open"] is True
+    assert resolve_notify_window_open(only_legacy) is True
+
+    canonical_first = normalize_notify_window_aliases(
+        {"is_notify_window_open": False, "should_notify": True}
+    )
+    assert canonical_first["is_notify_window_open"] is False
+    assert resolve_notify_window_open(canonical_first) is False
+
+
 def test_repository_audit_and_text_writers() -> None:
     from om.storage.repositories import run_repo, state_repo
 
@@ -142,6 +156,7 @@ def test_prefetch_required_data_idempotency_audit() -> None:
 def main() -> None:
     test_scheduler_decision_schema_boundary()
     test_tool_execution_schema_and_idempotency_key()
+    test_notify_window_alias_normalization_prefers_canonical_field()
     test_repository_audit_and_text_writers()
     test_prefetch_required_data_idempotency_audit()
     print("OK (phase1 tool boundary)")
