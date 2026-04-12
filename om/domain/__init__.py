@@ -30,6 +30,14 @@ from .tool_boundary import (
     normalize_watchdog_subprocess_output,
     validate_schema_payload,
 )
+from .canonical_schema import (
+    CANONICAL_SCHEMA_VERSION_V1,
+    SCHEMA_KIND_PROCESSOR_OUTPUT,
+    SCHEMA_KIND_SOURCE_SNAPSHOT,
+    normalize_processor_row,
+    normalize_source_snapshot,
+    validate_canonical_payload,
+)
 
 __all__ = [
     'apply_scan_run_decision',
@@ -58,4 +66,10 @@ __all__ = [
     'normalize_watchdog_subprocess_output',
     'normalize_pipeline_subprocess_output',
     'normalize_notify_subprocess_output',
+    'CANONICAL_SCHEMA_VERSION_V1',
+    'SCHEMA_KIND_PROCESSOR_OUTPUT',
+    'SCHEMA_KIND_SOURCE_SNAPSHOT',
+    'validate_canonical_payload',
+    'normalize_processor_row',
+    'normalize_source_snapshot',
 ]
