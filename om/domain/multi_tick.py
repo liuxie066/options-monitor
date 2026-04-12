@@ -117,6 +117,11 @@ def decide_should_notify(
     account_decision: dict[str, Any] | AccountSchedulerDecisionView | None
     if account_decision_raw is None or isinstance(account_decision_raw, AccountSchedulerDecisionView):
         account_decision = account_decision_raw
+    elif isinstance(account_decision_raw, dict) and str(account_decision_raw.get('schema_kind') or '') == 'scheduler_decision_account':
+        account_decision = AccountSchedulerDecisionView.from_payload(
+            account_decision_raw,
+            scheduler_decision=scheduler_view,
+        )
     else:
         account_decision = build_account_scheduler_decision_dto(
             account_decision_raw,

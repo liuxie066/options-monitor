@@ -193,6 +193,36 @@ def test_decide_should_notify_routes_account_payload_via_account_scheduler_dto_b
         mod.AccountSchedulerDecisionView.from_payload = old_from_payload  # type: ignore[method-assign]
 
 
+def test_decide_should_notify_uses_canonical_account_dto_without_rebuilding() -> None:
+    from om.domain import multi_tick as mod
+
+    calls = {'n': 0}
+    old_build_account_scheduler_decision_dto = mod.build_account_scheduler_decision_dto
+    try:
+        mod.build_account_scheduler_decision_dto = lambda raw, *, scheduler_decision: (  # type: ignore[assignment]
+            calls.__setitem__('n', calls['n'] + 1),
+            {'is_notify_window_open': False},
+        )[1]
+        assert (
+            mod.decide_should_notify(
+                account='sy',
+                notify_decision_by_account={
+                    'sy': {
+                        'schema_kind': 'scheduler_decision_account',
+                        'schema_version': '1.0',
+                        'is_notify_window_open': True,
+                        'should_notify': False,
+                    }
+                },
+                scheduler_decision={'is_notify_window_open': False},
+            )
+            is True
+        )
+        assert calls['n'] == 0
+    finally:
+        mod.build_account_scheduler_decision_dto = old_build_account_scheduler_decision_dto  # type: ignore[assignment]
+
+
 def test_filter_notify_candidates_matches_existing_predicate() -> None:
     from om.domain.multi_tick import filter_notify_candidates
     from scripts.multi_tick.misc import AccountResult
