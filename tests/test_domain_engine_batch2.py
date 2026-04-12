@@ -58,6 +58,43 @@ def test_decide_notify_window_open_prefers_account_payload() -> None:
     )
 
 
+def test_build_account_scheduler_decision_dto_uses_global_fallback() -> None:
+    from om.domain.engine import build_account_scheduler_decision_dto
+
+    out = build_account_scheduler_decision_dto(
+        None,
+        scheduler_decision={'is_notify_window_open': False, 'should_notify': True},
+    )
+    assert out['schema_kind'] == 'scheduler_decision_account'
+    assert out['schema_version'] == '1.0'
+    assert out['is_notify_window_open'] is False
+
+    out2 = build_account_scheduler_decision_dto(
+        {'should_notify': True},
+        scheduler_decision={'is_notify_window_open': False, 'should_notify': False},
+    )
+    assert out2['is_notify_window_open'] is True
+
+
+def test_decide_account_notify_window_open_uses_explicit_account_dto() -> None:
+    from om.domain.engine import (
+        build_account_scheduler_decision_dto,
+        decide_account_notify_window_open,
+    )
+
+    account_dto = build_account_scheduler_decision_dto(
+        {'is_notify_window_open': True},
+        scheduler_decision={'is_notify_window_open': False},
+    )
+    assert (
+        decide_account_notify_window_open(
+            scheduler_decision={'is_notify_window_open': False},
+            account_scheduler_decision=account_dto,
+        )
+        is True
+    )
+
+
 def test_decide_notification_meaningful_keeps_existing_predicate() -> None:
     from om.domain.engine import decide_notification_meaningful
 

@@ -63,9 +63,10 @@ from om.domain import (
     select_scheduler_state_filename,
 )
 from om.domain.engine import (
+    build_account_scheduler_decision_dto,
     build_scheduler_decision_dto,
+    decide_account_notify_window_open,
     decide_notification_meaningful,
-    decide_notify_window_open,
     decide_opend_degrade_to_yahoo,
     filter_notify_candidates as engine_filter_notify_candidates,
     rank_notify_candidates,
@@ -569,6 +570,10 @@ def main() -> int:
 
     notify_decision_by_account: dict[str, bool] = {}
     for acct0 in [str(a).strip() for a in (args.accounts or []) if str(a).strip()]:
+        account_scheduler_dto = build_account_scheduler_decision_dto(
+            None,
+            scheduler_decision=scheduler_decision,
+        )
         try:
             sch_acct = run_scan_scheduler_cli(
                 vpy=vpy,
@@ -581,19 +586,19 @@ def main() -> int:
                 capture_output=True,
             )
             if sch_acct.returncode == 0:
-                sch_acct_decision = json.loads((sch_acct.stdout or '').strip())
-                notify_decision_by_account[acct0] = decide_notify_window_open(
-                    scheduler_decision=scheduler_decision,
-                    account_scheduler_decision=sch_acct_decision,
-                )
-            else:
-                notify_decision_by_account[acct0] = decide_notify_window_open(
+                account_scheduler_dto = build_account_scheduler_decision_dto(
+                    json.loads((sch_acct.stdout or '').strip()),
                     scheduler_decision=scheduler_decision,
                 )
         except Exception:
-            notify_decision_by_account[acct0] = decide_notify_window_open(
+            account_scheduler_dto = build_account_scheduler_decision_dto(
+                None,
                 scheduler_decision=scheduler_decision,
             )
+        notify_decision_by_account[acct0] = decide_account_notify_window_open(
+            scheduler_decision=scheduler_decision,
+            account_scheduler_decision=account_scheduler_dto,
+        )
 
     should_run_global, reason_global = apply_scan_run_decision(
         should_run_global=should_run_global,
