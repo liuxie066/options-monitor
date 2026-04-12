@@ -16,6 +16,7 @@ from typing import Callable, Iterable
 
 from scripts.sell_call_config import resolve_min_annualized_net_premium_return
 from scripts.sell_put_config import resolve_min_annualized_net_return
+from om.domain import normalize_processor_row
 
 
 def _parse_symbols_whitelist(symbols_arg: str | None) -> set[str] | None:
@@ -116,19 +117,19 @@ def run_watchlist_pipeline(
                 )
                 continue
 
-            summary_rows.extend(
-                process_symbol_fn(
-                    py,
-                    base,
-                    item,
-                    top_n,
-                    portfolio_ctx=portfolio_ctx,
-                    fx_usd_per_cny=fx_usd_per_cny,
-                    hkdcny=hkdcny,
-                    timeout_sec=symbol_timeout_sec,
-                    is_scheduled=is_scheduled,
-                )
+            processor_rows = process_symbol_fn(
+                py,
+                base,
+                item,
+                top_n,
+                portfolio_ctx=portfolio_ctx,
+                fx_usd_per_cny=fx_usd_per_cny,
+                hkdcny=hkdcny,
+                timeout_sec=symbol_timeout_sec,
+                is_scheduled=is_scheduled,
             )
+            validated_rows = [normalize_processor_row(r) for r in (processor_rows or [])]
+            summary_rows.extend(validated_rows)
         except Exception as e:
             symbol = item0.get('symbol', 'UNKNOWN')
             log(f'[WARN] {symbol} processing failed: {e}')

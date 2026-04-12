@@ -17,6 +17,7 @@ from pathlib import Path
 
 from scripts.io_utils import is_fresh, load_cached_json
 from scripts.subprocess_utils import run_cmd
+from om.services import adapt_holdings_context, adapt_option_positions_context
 
 
 def load_portfolio_context(
@@ -39,6 +40,7 @@ def load_portfolio_context(
         if ttl_sec > 0 and is_fresh(port_path, ttl_sec):
             cached = load_cached_json(port_path)
         if cached is not None:
+            adapt_holdings_context(cached)
             return cached
 
         cmd = [
@@ -52,7 +54,9 @@ def load_portfolio_context(
         if is_scheduled:
             cmd.append('--quiet')
         run_cmd(cmd, cwd=base, timeout_sec=timeout_sec, is_scheduled=is_scheduled)
-        return load_cached_json(port_path) or json.loads(port_path.read_text(encoding='utf-8'))
+        ctx = load_cached_json(port_path) or json.loads(port_path.read_text(encoding='utf-8'))
+        adapt_holdings_context(ctx)
+        return ctx
     except BaseException as e:
         log(f"[WARN] portfolio context not available: {e}")
         return None
@@ -82,6 +86,7 @@ def load_option_positions_context(
         if ttl_sec > 0 and is_fresh(opt_path, ttl_sec):
             cached = load_cached_json(opt_path)
         if cached is not None:
+            adapt_option_positions_context(cached)
             return cached, False
 
         cmd = [
@@ -96,6 +101,7 @@ def load_option_positions_context(
             cmd.append('--quiet')
         run_cmd(cmd, cwd=base, timeout_sec=timeout_sec, is_scheduled=is_scheduled)
         ctx = load_cached_json(opt_path) or json.loads(opt_path.read_text(encoding='utf-8'))
+        adapt_option_positions_context(ctx)
         return ctx, True
     except BaseException as e:
         log(f"[WARN] option positions context not available: {e}")
