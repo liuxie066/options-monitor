@@ -64,6 +64,19 @@ def test_decide_should_notify_accepts_scheduler_view() -> None:
     )
 
 
+def test_decide_should_notify_accepts_account_scheduler_dto() -> None:
+    from om.domain.multi_tick import decide_should_notify
+
+    assert (
+        decide_should_notify(
+            account='sy',
+            notify_decision_by_account={'sy': {'should_notify': True}},
+            scheduler_decision={'is_notify_window_open': False},
+        )
+        is True
+    )
+
+
 def test_filter_notify_candidates_matches_existing_predicate() -> None:
     from om.domain.multi_tick import filter_notify_candidates
     from scripts.multi_tick.misc import AccountResult

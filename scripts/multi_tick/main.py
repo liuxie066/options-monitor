@@ -66,7 +66,6 @@ from om.domain.engine import (
     SchedulerDecisionView,
     build_account_scheduler_decision_dto,
     build_scheduler_decision_dto,
-    decide_account_notify_window_open,
     decide_notification_meaningful,
     decide_opend_degrade_to_yahoo,
     filter_notify_candidates as engine_filter_notify_candidates,
@@ -570,7 +569,7 @@ def main() -> int:
     should_run_global = bool(scheduler_view.should_run_scan)
     reason_global = str(scheduler_view.reason)
 
-    notify_decision_by_account: dict[str, bool] = {}
+    notify_decision_by_account: dict[str, dict] = {}
     for acct0 in [str(a).strip() for a in (args.accounts or []) if str(a).strip()]:
         account_scheduler_dto = build_account_scheduler_decision_dto(
             None,
@@ -597,10 +596,7 @@ def main() -> int:
                 None,
                 scheduler_decision=scheduler_view,
             )
-        notify_decision_by_account[acct0] = decide_account_notify_window_open(
-            scheduler_decision=scheduler_view,
-            account_scheduler_decision=account_scheduler_dto,
-        )
+        notify_decision_by_account[acct0] = account_scheduler_dto
 
     should_run_global, reason_global = apply_scan_run_decision(
         should_run_global=should_run_global,
