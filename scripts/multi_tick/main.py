@@ -63,6 +63,7 @@ from om.domain import (
     select_scheduler_state_filename,
 )
 from om.domain.engine import (
+    SchedulerDecisionView,
     build_account_scheduler_decision_dto,
     build_scheduler_decision_dto,
     decide_account_notify_window_open,
@@ -565,14 +566,15 @@ def main() -> int:
         scheduler_raw,
         normalize_fn=normalize_scheduler_decision_payload,
     )
-    should_run_global = bool(scheduler_decision.get('should_run_scan'))
-    reason_global = str(scheduler_decision.get('reason') or '')
+    scheduler_view = SchedulerDecisionView.from_payload(scheduler_decision)
+    should_run_global = bool(scheduler_view.should_run_scan)
+    reason_global = str(scheduler_view.reason)
 
     notify_decision_by_account: dict[str, bool] = {}
     for acct0 in [str(a).strip() for a in (args.accounts or []) if str(a).strip()]:
         account_scheduler_dto = build_account_scheduler_decision_dto(
             None,
-            scheduler_decision=scheduler_decision,
+            scheduler_decision=scheduler_view,
         )
         try:
             sch_acct = run_scan_scheduler_cli(
@@ -588,15 +590,15 @@ def main() -> int:
             if sch_acct.returncode == 0:
                 account_scheduler_dto = build_account_scheduler_decision_dto(
                     json.loads((sch_acct.stdout or '').strip()),
-                    scheduler_decision=scheduler_decision,
+                    scheduler_decision=scheduler_view,
                 )
         except Exception:
             account_scheduler_dto = build_account_scheduler_decision_dto(
                 None,
-                scheduler_decision=scheduler_decision,
+                scheduler_decision=scheduler_view,
             )
         notify_decision_by_account[acct0] = decide_account_notify_window_open(
-            scheduler_decision=scheduler_decision,
+            scheduler_decision=scheduler_view,
             account_scheduler_decision=account_scheduler_dto,
         )
 

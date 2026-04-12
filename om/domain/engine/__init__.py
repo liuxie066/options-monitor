@@ -1,4 +1,6 @@
 from .decision_engine import (
+    AccountSchedulerDecisionView,
+    SchedulerDecisionView,
     build_account_scheduler_decision_dto,
     build_scheduler_decision_dto,
     decide_account_notify_window_open,
@@ -10,6 +12,8 @@ from .decision_engine import (
 )
 
 __all__ = [
+    'AccountSchedulerDecisionView',
+    'SchedulerDecisionView',
     'build_account_scheduler_decision_dto',
     'build_scheduler_decision_dto',
     'decide_account_notify_window_open',
