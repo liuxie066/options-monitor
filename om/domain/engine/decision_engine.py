@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
-from om.domain.tool_boundary import normalize_notify_window_aliases, resolve_notify_window_open
+from om.domain.tool_boundary import (
+    normalize_notify_window_aliases,
+    normalize_scheduler_decision_payload,
+    resolve_notify_window_open,
+)
 
 
 @dataclass(frozen=True)
@@ -71,11 +75,12 @@ def rank_notify_candidates(results: list[Any]) -> list[Any]:
 def build_scheduler_decision_dto(
     scheduler_raw: Any,
     *,
-    normalize_fn: Callable[[Any], Mapping[str, Any]],
+    normalize_fn: Callable[[Any], Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build scheduler decision DTO with legacy-compatible fallback shape."""
     try:
-        normalized = normalize_fn(scheduler_raw)
+        resolved_normalize_fn = normalize_fn or normalize_scheduler_decision_payload
+        normalized = resolved_normalize_fn(scheduler_raw)
         if isinstance(normalized, Mapping):
             return dict(normalized)
     except Exception:

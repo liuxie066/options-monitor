@@ -39,6 +39,21 @@ def test_build_scheduler_decision_dto_fallback_keeps_legacy_shape() -> None:
     assert out['extra'] == 'v'
 
 
+def test_build_scheduler_decision_dto_default_normalizer_supports_legacy_notify_alias() -> None:
+    from om.domain.engine import build_scheduler_decision_dto
+
+    out = build_scheduler_decision_dto(
+        {'should_run_scan': 1, 'should_notify': 0, 'reason': 'legacy-alias'},
+    )
+
+    assert out['schema_kind'] == 'scheduler_decision'
+    assert out['schema_version'] == '1.0'
+    assert out['should_run_scan'] is True
+    assert out['is_notify_window_open'] is False
+    assert out['should_notify'] == 0
+    assert out['reason'] == 'legacy-alias'
+
+
 def test_decide_notify_window_open_prefers_account_payload() -> None:
     from om.domain.engine import AccountSchedulerDecisionView, decide_notify_window_open
 

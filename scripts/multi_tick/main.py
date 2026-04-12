@@ -57,7 +57,6 @@ from om.domain import (
     classify_failure,
     ensure_runtime_canonical_config,
     markets_for_trading_day_guard as domain_markets_for_trading_day_guard,
-    normalize_scheduler_decision_payload,
     reduce_trading_day_guard,
     select_markets_to_run as domain_select_markets_to_run,
     select_scheduler_state_filename,
@@ -561,10 +560,7 @@ def main() -> int:
         return 0
 
     scheduler_raw = json.loads((scheduler_proc.stdout or '').strip())
-    scheduler_decision = build_scheduler_decision_dto(
-        scheduler_raw,
-        normalize_fn=normalize_scheduler_decision_payload,
-    )
+    scheduler_decision = build_scheduler_decision_dto(scheduler_raw)
     scheduler_view = SchedulerDecisionView.from_payload(scheduler_decision)
     should_run_global = bool(scheduler_view.should_run_scan)
     reason_global = str(scheduler_view.reason)

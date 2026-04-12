@@ -29,7 +29,6 @@ if str(_repo_root) not in sys.path:
 from scripts.io_utils import utc_now
 from om.domain import normalize_notify_subprocess_output, normalize_pipeline_subprocess_output
 from om.domain.engine import SchedulerDecisionView, build_scheduler_decision_dto, decide_notify_window_open
-from om.domain.tool_boundary import normalize_scheduler_decision_payload
 from scripts.infra.service import (
     run_command,
     run_pipeline_script,
@@ -172,10 +171,7 @@ def main():
             raise SystemExit(sch.returncode)
 
         scheduler_raw = json.loads((sch.stdout or '').strip())
-        scheduler_decision = build_scheduler_decision_dto(
-            scheduler_raw,
-            normalize_fn=normalize_scheduler_decision_payload,
-        )
+        scheduler_decision = build_scheduler_decision_dto(scheduler_raw)
         scheduler_view = SchedulerDecisionView.from_payload(scheduler_decision)
         should_run = bool(scheduler_view.should_run_scan)
         should_notify = decide_notify_window_open(scheduler_decision=scheduler_view)
