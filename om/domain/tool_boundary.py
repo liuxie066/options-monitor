@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from hashlib import sha256
+import json
 from typing import Any
 
 
@@ -9,8 +10,10 @@ SCHEMA_VERSION_V1 = "1.0"
 
 SCHEMA_KIND_TOOL_EXECUTION = "tool_execution"
 SCHEMA_KIND_SCHEDULER_DECISION = "scheduler_decision"
+SCHEMA_KIND_SUBPROCESS_ADAPTER = "subprocess_adapter"
 
 ALLOWED_TOOL_STATUS = {"cached", "fetched", "error", "skipped"}
+ALLOWED_SUBPROCESS_STATUS = {"ok", "error"}
 
 
 def _utc_now_iso() -> str:
@@ -95,3 +98,115 @@ def normalize_tool_execution_payload(
         "finished_at_utc": str(finished_at_utc or _utc_now_iso()),
     }
     return validate_schema_payload(out, kind=SCHEMA_KIND_TOOL_EXECUTION)
+
+
+def _tail_text(raw: Any, *, max_lines: int = 60, max_chars: int = 4000) -> str:
+    txt = str(raw or "").strip()
+    if not txt:
+        return ""
+    lines = txt.splitlines()
+    tail = "\n".join(lines[-max_lines:])
+    if len(tail) > max_chars:
+        tail = tail[-max_chars:]
+    return tail
+
+
+def _extract_last_json_obj(raw: str) -> dict[str, Any] | None:
+    txt = str(raw or "").strip()
+    s = txt.find("{")
+    e = txt.rfind("}")
+    if s < 0 or e <= s:
+        return None
+    try:
+        obj = json.loads(txt[s : e + 1])
+    except Exception:
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def normalize_subprocess_adapter_payload(
+    *,
+    adapter: str,
+    tool_name: str,
+    returncode: int | None,
+    stdout: str | None,
+    stderr: str | None,
+    ok: bool | None = None,
+    message: str = "",
+    started_at_utc: str | None = None,
+    finished_at_utc: str | None = None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    resolved_ok = bool(ok) if ok is not None else (int(returncode or 0) == 0)
+    status = "ok" if resolved_ok else "error"
+    if status not in ALLOWED_SUBPROCESS_STATUS:
+        status = "error"
+
+    out = {
+        "schema_kind": SCHEMA_KIND_SUBPROCESS_ADAPTER,
+        "schema_version": SCHEMA_VERSION_V1,
+        "adapter": str(adapter or "").strip().lower(),
+        "tool_name": str(tool_name or "").strip(),
+        "status": status,
+        "ok": resolved_ok,
+        "returncode": (None if returncode is None else int(returncode)),
+        "message": str(message or ""),
+        "stdout_tail": _tail_text(stdout),
+        "stderr_tail": _tail_text(stderr),
+        "started_at_utc": str(started_at_utc or _utc_now_iso()),
+        "finished_at_utc": str(finished_at_utc or _utc_now_iso()),
+    }
+    if isinstance(extra, dict):
+        for k, v in extra.items():
+            if k not in out:
+                out[k] = v
+    return validate_schema_payload(out, kind=SCHEMA_KIND_SUBPROCESS_ADAPTER)
+
+
+def normalize_watchdog_subprocess_output(*, returncode: int, stdout: str = "", stderr: str = "") -> dict[str, Any]:
+    merged = ((stdout or "") + "\n" + (stderr or "")).strip()
+    obj = _extract_last_json_obj(merged) or {}
+    ok = bool(obj.get("ok")) if obj else (int(returncode) == 0)
+    message = str(obj.get("message") or obj.get("error") or "").strip()
+    return normalize_subprocess_adapter_payload(
+        adapter="watchdog",
+        tool_name="opend_watchdog",
+        returncode=returncode,
+        stdout=stdout,
+        stderr=stderr,
+        ok=ok,
+        message=message,
+        extra={"watchdog_payload": obj if obj else None},
+    )
+
+
+def normalize_pipeline_subprocess_output(*, returncode: int, stdout: str = "", stderr: str = "") -> dict[str, Any]:
+    msg_src = (stderr or stdout or "").strip()
+    message = msg_src.splitlines()[-1] if msg_src else ""
+    return normalize_subprocess_adapter_payload(
+        adapter="pipeline",
+        tool_name="run_pipeline",
+        returncode=returncode,
+        stdout=stdout,
+        stderr=stderr,
+        message=message,
+    )
+
+
+def normalize_notify_subprocess_output(*, returncode: int, stdout: str = "", stderr: str = "") -> dict[str, Any]:
+    obj = _extract_last_json_obj(stdout or "") or {}
+    msg_id = obj.get("messageId")
+    if msg_id is None and isinstance(obj.get("result"), dict):
+        msg_id = obj.get("result", {}).get("messageId")
+    message = str(stderr or "").strip()
+    if not message and msg_id:
+        message = f"message_id={msg_id}"
+    return normalize_subprocess_adapter_payload(
+        adapter="notify",
+        tool_name="openclaw_message_send",
+        returncode=returncode,
+        stdout=stdout,
+        stderr=stderr,
+        message=message,
+        extra={"message_id": msg_id},
+    )

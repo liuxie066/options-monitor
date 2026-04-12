@@ -93,21 +93,30 @@ def test_repository_audit_and_text_writers() -> None:
 def test_prefetch_required_data_idempotency_audit() -> None:
     from scripts.multi_tick import required_data_prefetch as mod
 
-    class _P:
-        returncode = 0
-        stdout = ""
-        stderr = ""
-
-    calls: list[list[str]] = []
+    calls: list[tuple[str, str, int]] = []
     old_has = mod.has_shared_required_data
-    old_run = mod.subprocess.run
+    old_exec = mod.ToolExecutionService.execute
     mod.has_shared_required_data = lambda symbol, shared_dir: False
 
-    def _fake_run(cmd, cwd, capture_output, text):
-        calls.append(cmd)
-        return _P()
+    def _fake_execute(self, intent):
+        calls.append((intent.tool_name, intent.symbol, int(intent.limit_exp)))
+        return {
+            "schema_kind": "tool_execution",
+            "schema_version": "1.0",
+            "tool_name": intent.tool_name,
+            "symbol": intent.symbol,
+            "source": intent.source,
+            "limit_exp": int(intent.limit_exp),
+            "idempotency_key": "k",
+            "status": "fetched" if len(calls) == 1 else "skipped",
+            "ok": True,
+            "message": "fetched" if len(calls) == 1 else "idempotent_duplicate",
+            "returncode": 0,
+            "started_at_utc": "2026-01-01T00:00:00+00:00",
+            "finished_at_utc": "2026-01-01T00:00:01+00:00",
+        }
 
-    mod.subprocess.run = _fake_run
+    mod.ToolExecutionService.execute = _fake_execute
     try:
         with TemporaryDirectory() as td:
             out = mod.prefetch_required_data(
@@ -124,10 +133,10 @@ def test_prefetch_required_data_idempotency_audit() -> None:
         assert out["fetched_ok"] == 1
         assert out["skipped"] == 1
         assert len(out["audit"]) == 2
-        assert len(calls) == 1
+        assert len(calls) == 2
     finally:
         mod.has_shared_required_data = old_has
-        mod.subprocess.run = old_run
+        mod.ToolExecutionService.execute = old_exec
 
 
 def main() -> None:
