@@ -63,8 +63,8 @@ from om.domain import (
     select_scheduler_state_filename,
 )
 from om.domain.engine import (
-    AccountSchedulerDecisionView,
     SchedulerDecisionView,
+    build_account_scheduler_decision_dto,
     build_scheduler_decision_dto,
     decide_notification_meaningful,
     decide_opend_degrade_to_yahoo,
@@ -569,9 +569,9 @@ def main() -> int:
     should_run_global = bool(scheduler_view.should_run_scan)
     reason_global = str(scheduler_view.reason)
 
-    notify_decision_by_account: dict[str, AccountSchedulerDecisionView] = {}
+    notify_decision_by_account: dict[str, dict] = {}
     for acct0 in [str(a).strip() for a in (args.accounts or []) if str(a).strip()]:
-        account_scheduler_view = AccountSchedulerDecisionView.from_payload(
+        account_scheduler_decision = build_account_scheduler_decision_dto(
             None,
             scheduler_decision=scheduler_view,
         )
@@ -587,16 +587,16 @@ def main() -> int:
                 capture_output=True,
             )
             if sch_acct.returncode == 0:
-                account_scheduler_view = AccountSchedulerDecisionView.from_payload(
+                account_scheduler_decision = build_account_scheduler_decision_dto(
                     json.loads((sch_acct.stdout or '').strip()),
                     scheduler_decision=scheduler_view,
                 )
         except Exception:
-            account_scheduler_view = AccountSchedulerDecisionView.from_payload(
+            account_scheduler_decision = build_account_scheduler_decision_dto(
                 None,
                 scheduler_decision=scheduler_view,
             )
-        notify_decision_by_account[acct0] = account_scheduler_view
+        notify_decision_by_account[acct0] = account_scheduler_decision
 
     should_run_global, reason_global = apply_scan_run_decision(
         should_run_global=should_run_global,
