@@ -1,6 +1,50 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Callable, Mapping
+
+
+@dataclass(frozen=True)
+class SchedulerDecisionView:
+    should_run_scan: bool
+    is_notify_window_open: bool
+    reason: str
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, Any] | Any) -> 'SchedulerDecisionView':
+        src = payload if isinstance(payload, Mapping) else {}
+        return cls(
+            should_run_scan=bool(src.get('should_run_scan')),
+            is_notify_window_open=bool(src.get('is_notify_window_open', src.get('should_notify'))),
+            reason=str(src.get('reason') or ''),
+        )
+
+
+@dataclass(frozen=True)
+class AccountSchedulerDecisionView:
+    is_notify_window_open: bool
+
+    @classmethod
+    def from_payload(
+        cls,
+        payload: Mapping[str, Any] | Any,
+        *,
+        scheduler_decision: Mapping[str, Any] | SchedulerDecisionView,
+    ) -> 'AccountSchedulerDecisionView':
+        src = payload if isinstance(payload, Mapping) else {}
+        scheduler_view = (
+            scheduler_decision
+            if isinstance(scheduler_decision, SchedulerDecisionView)
+            else SchedulerDecisionView.from_payload(scheduler_decision)
+        )
+        return cls(
+            is_notify_window_open=bool(
+                src.get(
+                    'is_notify_window_open',
+                    src.get('should_notify', scheduler_view.is_notify_window_open),
+                )
+            ),
+        )
 
 
 def decide_opend_degrade_to_yahoo(
@@ -48,42 +92,47 @@ def build_scheduler_decision_dto(
 def build_account_scheduler_decision_dto(
     account_scheduler_raw: Any,
     *,
-    scheduler_decision: Mapping[str, Any],
+    scheduler_decision: Mapping[str, Any] | SchedulerDecisionView,
 ) -> dict[str, Any]:
     """Build account-level scheduler decision DTO with global fallback."""
     account_raw = account_scheduler_raw if isinstance(account_scheduler_raw, Mapping) else {}
+    account_view = AccountSchedulerDecisionView.from_payload(
+        account_raw,
+        scheduler_decision=scheduler_decision,
+    )
     return {
         'schema_kind': 'scheduler_decision_account',
         'schema_version': '1.0',
-        'is_notify_window_open': bool(
-            account_raw.get(
-                'is_notify_window_open',
-                account_raw.get(
-                    'should_notify',
-                    scheduler_decision.get(
-                        'is_notify_window_open',
-                        scheduler_decision.get('should_notify'),
-                    ),
-                ),
-            )
-        ),
+        'is_notify_window_open': bool(account_view.is_notify_window_open),
         **account_raw,
     }
 
 
 def decide_notify_window_open(
     *,
-    scheduler_decision: Mapping[str, Any],
-    account_scheduler_decision: Mapping[str, Any] | None = None,
+    scheduler_decision: Mapping[str, Any] | SchedulerDecisionView,
+    account_scheduler_decision: Mapping[str, Any] | AccountSchedulerDecisionView | None = None,
 ) -> bool:
-    payload = account_scheduler_decision if account_scheduler_decision is not None else scheduler_decision
-    return bool(payload.get('is_notify_window_open', payload.get('should_notify')))
+    scheduler_view = (
+        scheduler_decision
+        if isinstance(scheduler_decision, SchedulerDecisionView)
+        else SchedulerDecisionView.from_payload(scheduler_decision)
+    )
+    if account_scheduler_decision is None:
+        return bool(scheduler_view.is_notify_window_open)
+    if isinstance(account_scheduler_decision, AccountSchedulerDecisionView):
+        return bool(account_scheduler_decision.is_notify_window_open)
+    account_view = AccountSchedulerDecisionView.from_payload(
+        account_scheduler_decision,
+        scheduler_decision=scheduler_view,
+    )
+    return bool(account_view.is_notify_window_open)
 
 
 def decide_account_notify_window_open(
     *,
-    scheduler_decision: Mapping[str, Any],
-    account_scheduler_decision: Mapping[str, Any] | None = None,
+    scheduler_decision: Mapping[str, Any] | SchedulerDecisionView,
+    account_scheduler_decision: Mapping[str, Any] | AccountSchedulerDecisionView | None = None,
 ) -> bool:
     """Single decision entry used by orchestrator with explicit DTO input."""
     return decide_notify_window_open(
