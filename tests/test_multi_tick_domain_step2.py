@@ -135,6 +135,31 @@ def test_decide_should_notify_accepts_account_scheduler_view() -> None:
     )
 
 
+def test_decide_should_notify_normalizes_account_payload_via_view() -> None:
+    from om.domain import multi_tick as mod
+
+    calls = {'n': 0}
+    old_from_payload = mod.AccountSchedulerDecisionView.from_payload
+    try:
+        mod.AccountSchedulerDecisionView.from_payload = classmethod(  # type: ignore[method-assign]
+            lambda cls, _payload, *, scheduler_decision: (
+                calls.__setitem__('n', calls['n'] + 1),
+                cls(is_notify_window_open=bool(scheduler_decision.is_notify_window_open)),
+            )[1]
+        )
+        assert (
+            mod.decide_should_notify(
+                account='sy',
+                notify_decision_by_account={'sy': {'should_notify': True}},
+                scheduler_decision={'is_notify_window_open': True},
+            )
+            is True
+        )
+        assert calls['n'] == 1
+    finally:
+        mod.AccountSchedulerDecisionView.from_payload = old_from_payload  # type: ignore[method-assign]
+
+
 def test_filter_notify_candidates_matches_existing_predicate() -> None:
     from om.domain.multi_tick import filter_notify_candidates
     from scripts.multi_tick.misc import AccountResult
