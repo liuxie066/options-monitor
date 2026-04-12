@@ -3,7 +3,12 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Callable
 
-from .engine import AccountSchedulerDecisionView, SchedulerDecisionView, decide_account_notify_window_open
+from .engine import (
+    AccountSchedulerDecisionView,
+    SchedulerDecisionView,
+    build_account_scheduler_decision_dto,
+    decide_account_notify_window_open,
+)
 
 
 def select_markets_to_run(now_utc: datetime, cfg: dict, market_config: str) -> list[str]:
@@ -105,9 +110,17 @@ def decide_should_notify(
         if isinstance(scheduler_decision, SchedulerDecisionView)
         else SchedulerDecisionView.from_payload(scheduler_decision)
     )
-    account_decision = notify_decision_by_account.get(str(account))
-    if isinstance(account_decision, bool):
-        return bool(account_decision)
+    account_decision_raw = notify_decision_by_account.get(str(account))
+    account_decision: dict[str, Any] | AccountSchedulerDecisionView | None
+    if isinstance(account_decision_raw, bool):
+        account_decision = {'is_notify_window_open': bool(account_decision_raw)}
+    elif account_decision_raw is None or isinstance(account_decision_raw, AccountSchedulerDecisionView):
+        account_decision = account_decision_raw
+    else:
+        account_decision = build_account_scheduler_decision_dto(
+            account_decision_raw,
+            scheduler_decision=scheduler_view,
+        )
     return bool(
         decide_account_notify_window_open(
             scheduler_decision=scheduler_view,
