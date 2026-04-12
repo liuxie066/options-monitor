@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import importlib.util
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parents[1]
@@ -8,7 +9,16 @@ if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
 from om.domain import normalize_processor_row, normalize_source_snapshot
-from om.services import adapt_holdings_context, adapt_opend_tool_payload, adapt_option_positions_context
+
+_ADAPTERS_PATH = BASE / "om" / "services" / "source_adapters.py"
+_ADAPTERS_SPEC = importlib.util.spec_from_file_location("om_source_adapters", _ADAPTERS_PATH)
+assert _ADAPTERS_SPEC and _ADAPTERS_SPEC.loader
+_ADAPTERS_MOD = importlib.util.module_from_spec(_ADAPTERS_SPEC)
+_ADAPTERS_SPEC.loader.exec_module(_ADAPTERS_MOD)
+
+adapt_holdings_context = _ADAPTERS_MOD.adapt_holdings_context
+adapt_opend_tool_payload = _ADAPTERS_MOD.adapt_opend_tool_payload
+adapt_option_positions_context = _ADAPTERS_MOD.adapt_option_positions_context
 
 
 def test_normalize_processor_row_requires_symbol_and_strategy() -> None:

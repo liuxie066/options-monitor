@@ -16,7 +16,7 @@ from typing import Callable, Iterable
 
 from scripts.sell_call_config import resolve_min_annualized_net_premium_return
 from scripts.sell_put_config import resolve_min_annualized_net_return
-from om.domain import normalize_processor_row
+from om.domain import normalize_processor_row, normalize_processor_rows
 
 
 def _parse_symbols_whitelist(symbols_arg: str | None) -> set[str] | None:
@@ -128,13 +128,31 @@ def run_watchlist_pipeline(
                 timeout_sec=symbol_timeout_sec,
                 is_scheduled=is_scheduled,
             )
-            validated_rows = [normalize_processor_row(r) for r in (processor_rows or [])]
+            validated_rows = normalize_processor_rows(processor_rows)
             summary_rows.extend(validated_rows)
         except Exception as e:
             symbol = item0.get('symbol', 'UNKNOWN')
             log(f'[WARN] {symbol} processing failed: {e}')
-            summary_rows.append({'symbol': symbol, 'strategy': 'sell_put', 'candidate_count': 0, 'note': f'处理失败: {e}'})
-            summary_rows.append({'symbol': symbol, 'strategy': 'sell_call', 'candidate_count': 0, 'note': f'处理失败: {e}'})
+            summary_rows.append(
+                normalize_processor_row(
+                    {
+                        'symbol': symbol,
+                        'strategy': 'sell_put',
+                        'candidate_count': 0,
+                        'note': f'处理失败: {e}',
+                    }
+                )
+            )
+            summary_rows.append(
+                normalize_processor_row(
+                    {
+                        'symbol': symbol,
+                        'strategy': 'sell_call',
+                        'candidate_count': 0,
+                        'note': f'处理失败: {e}',
+                    }
+                )
+            )
 
     if want_fn('scan'):
         build_symbols_summary_fn(summary_rows)
