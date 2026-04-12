@@ -252,13 +252,7 @@ def main():
                 sys.stderr.write(send.stderr)
                 return int(send_payload.get("returncode") or send.returncode)
 
-            message_id = None
-            try:
-                data = json.loads((send.stdout or '').strip())
-                # OpenClaw CLI may return {"messageId": ...} or nested {"result": {"messageId": ...}}
-                message_id = data.get('messageId') or ((data.get('result') or {}).get('messageId') if isinstance(data.get('result'), dict) else None)
-            except Exception:
-                message_id = None
+            message_id = send_payload.get("message_id")
 
             # 4) mark notified (only after successful send)
             mark = run_scan_scheduler_cli(vpy=vpy, base=base, config=cfg, state=state, mark_notified=True, capture_output=False)
