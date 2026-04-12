@@ -45,6 +45,15 @@ def test_decide_should_notify_prefers_account_and_fallbacks_to_scheduler_fields(
         is True
     )
 
+    assert (
+        decide_should_notify(
+            account='sy',
+            notify_decision_by_account={'sy': False},
+            scheduler_decision={'is_notify_window_open': True},
+        )
+        is False
+    )
+
 
 def test_decide_should_notify_accepts_scheduler_view() -> None:
     from om.domain.engine import SchedulerDecisionView
