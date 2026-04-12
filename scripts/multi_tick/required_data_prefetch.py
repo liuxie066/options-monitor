@@ -12,6 +12,7 @@ from om.services import (
     ToolExecutionService,
     adapt_opend_tool_payload,
 )
+from om.storage.repositories import state_repo
 from scripts.io_utils import has_shared_required_data
 
 
@@ -104,7 +105,12 @@ def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required:
             )
         )
         # Canonical adapter validation before entering next layer.
-        adapt_opend_tool_payload(payload)
+        source_snapshot = adapt_opend_tool_payload(payload)
+        payload["source_snapshot"] = source_snapshot
+        try:
+            state_repo.append_source_snapshot_event(base, source_snapshot)
+        except Exception:
+            pass
         return payload
 
     todo_cfgs = [it for it in syms if _need_fetch(str(it.get('symbol')).strip())]

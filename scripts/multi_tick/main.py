@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import subprocess
+from hashlib import sha256
 from time import monotonic
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -54,6 +55,8 @@ from om.domain import (
     decide_should_notify,
     evaluate_dnd_quiet_hours,
     filter_notify_candidates,
+    classify_failure,
+    ensure_runtime_canonical_config,
     markets_for_trading_day_guard as domain_markets_for_trading_day_guard,
     normalize_scheduler_decision_payload,
     reduce_trading_day_guard,
@@ -128,6 +131,12 @@ def main() -> int:
     cfg_path = Path(args.config)
     if not cfg_path.is_absolute():
         cfg_path = (base / cfg_path).resolve()
+    allow_derived_config = str(os.environ.get('OM_ALLOW_DERIVED_CONFIG', '')).strip() in {'1', 'true', 'TRUE'}
+    ensure_runtime_canonical_config(
+        cfg_path,
+        str(getattr(args, 'market_config', 'auto') or 'auto'),
+        allow_derived=allow_derived_config,
+    )
     base_cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
 
     syms0 = base_cfg.get('symbols') or []
@@ -152,6 +161,54 @@ def main() -> int:
     )
 
     market_cfg = str(getattr(args, 'market_config', 'auto') or 'auto').lower()
+    execution_bucket = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M')
+    execution_idempotency_key = sha256(
+        (
+            f"{cfg_path.resolve()}|{market_cfg}|"
+            f"{','.join(sorted([str(a).strip().lower() for a in (args.accounts or []) if str(a).strip()]))}|"
+            f"{execution_bucket}"
+        ).encode('utf-8')
+    ).hexdigest()
+
+    def _audit(event_type: str, action: str, *, status: str = 'ok', run_id: str | None = None, account: str | None = None, **kwargs) -> None:
+        try:
+            payload = {
+                'event_type': event_type,
+                'action': action,
+                'status': status,
+                'run_id': run_id or runlog.run_id,
+                'account': account,
+                'idempotency_key': execution_idempotency_key,
+            }
+            payload.update(kwargs)
+            state_repo.append_audit_event(base, payload, run_id=(run_id or runlog.run_id))
+        except Exception:
+            pass
+
+    dedupe = state_repo.put_idempotency_success(
+        base,
+        scope='tick_execution',
+        key=execution_idempotency_key,
+        payload={
+            'ok': True,
+            'status': 'started',
+            'run_id': runlog.run_id,
+            'market_config': market_cfg,
+            'accounts': [str(a).strip().lower() for a in (args.accounts or []) if str(a).strip()],
+        },
+    )
+    if not bool(dedupe.get('created')):
+        _audit(
+            'idempotency',
+            'skip_duplicate_tick',
+            status='skip',
+            message='duplicate tick in same execution bucket',
+            extra={'bucket': execution_bucket},
+        )
+        runlog.safe_event('run_end', 'skip', message='duplicate tick execution skipped')
+        return 0
+    _audit('idempotency', 'claim_tick_execution', extra={'bucket': execution_bucket})
+
     if market_cfg in ('hk', 'us'):
         try:
             base_cfg = dict(base_cfg)
@@ -167,11 +224,13 @@ def main() -> int:
         clear_opend_phone_verify_pending(base)
 
     if is_opend_phone_verify_pending(base):
+        _audit('guard', 'opend_phone_verify_pending', status='skip')
         runlog.safe_event('run_end', 'skip', message='opend phone verify pending; paused until user confirmation')
         return 0
 
     t_watchdog0 = monotonic()
     runlog.safe_event('watchdog', 'start')
+    _audit('tool_call', 'opend_watchdog_start', tool_name='opend_watchdog')
     try:
         fetch_policy = base_cfg.get('fetch_policy') if isinstance(base_cfg, dict) else None
         allow_downgrade = True
@@ -209,6 +268,13 @@ def main() -> int:
                     )
                     payload0 = parse_last_json_obj((wd0.stdout or '') + '\n' + (wd0.stderr or ''))
                     ok0 = bool(payload0.get('ok')) if payload0 else (wd0.returncode == 0)
+                    _audit(
+                        'tool_call',
+                        'opend_watchdog_result',
+                        status=('ok' if ok0 else 'error'),
+                        tool_name='opend_watchdog',
+                        extra={'host': str(host), 'port': int(port), 'returncode': int(wd0.returncode)},
+                    )
                     if not ok0:
                         unhealthy = {
                             'host': host,
@@ -219,10 +285,21 @@ def main() -> int:
                         break
                 except Exception as e:
                     watchdog_timed_out = isinstance(e, subprocess.TimeoutExpired)
+                    classified = classify_failure(
+                        exc=e,
+                        upstream='opend',
+                        error_code=('OPEND_TIMEOUT' if watchdog_timed_out else 'OPEND_API_ERROR'),
+                        message=str(e),
+                    )
                     unhealthy = {
                         'host': host,
                         'port': port,
-                        'payload': {'ok': False, 'error_code': 'OPEND_API_ERROR', 'message': 'OpenD 看门狗执行失败'},
+                        'payload': {
+                            'ok': False,
+                            'error_code': str(classified.get('error_code') or 'OPEND_API_ERROR'),
+                            'message': 'OpenD 看门狗执行失败',
+                            'category': classified.get('category'),
+                        },
                         'detail': f'{type(e).__name__}: {e}',
                     }
                     break
@@ -273,6 +350,14 @@ def main() -> int:
                         message='opend needs phone verify; paused until user confirmation',
                         data=_safe_runlog_data({'sent': False, 'reason': 'opend_phone_verify_pending'}),
                     )
+                    _audit(
+                        'notify',
+                        'send_opend_alert',
+                        status='error',
+                        error_code=error_code,
+                        message='opend needs phone verify; paused',
+                        fallback_used=False,
+                    )
                     return 0
 
                 send_opend_alert(
@@ -297,6 +382,7 @@ def main() -> int:
                             'error_code': error_code,
                             'detail': msg,
                         })
+                        _audit('write', 'write_account_last_run', account=acct0, error_code=error_code)
                     except Exception:
                         pass
 
@@ -309,6 +395,14 @@ def main() -> int:
                         error_code=error_code,
                         message=msg,
                         data=_safe_runlog_data({'degraded': True, 'host': host, 'port': port}),
+                    )
+                    _audit(
+                        'fallback',
+                        'degrade_opend_to_yahoo',
+                        status='ok',
+                        error_code=error_code,
+                        fallback_used=True,
+                        message=msg,
                     )
                 else:
                     runlog.safe_event(
@@ -325,6 +419,14 @@ def main() -> int:
                         error_code=error_code,
                         message='opend watchdog unhealthy',
                         data=_safe_runlog_data({'sent': False, 'reason': 'opend_unhealthy'}),
+                    )
+                    _audit(
+                        'fallback',
+                        'opend_unhealthy_no_fallback',
+                        status='error',
+                        error_code=error_code,
+                        fallback_used=False,
+                        message=msg,
                     )
                     return 0
 
@@ -430,6 +532,13 @@ def main() -> int:
         capture_output=True,
     )
     scheduler_ms = int((monotonic() - t_sch0) * 1000)
+    _audit(
+        'tool_call',
+        'scan_scheduler',
+        status=('ok' if scheduler_proc.returncode == 0 else 'error'),
+        tool_name='scan_scheduler_cli',
+        extra={'duration_ms': scheduler_ms, 'returncode': int(scheduler_proc.returncode)},
+    )
     if scheduler_proc.returncode != 0:
         err = f"scheduler error: {(scheduler_proc.stderr or scheduler_proc.stdout).strip()}"
         for acct in args.accounts:
@@ -518,6 +627,7 @@ def main() -> int:
             'decision': scheduler_decision,
             'state_path': str(state_path),
         })
+        _audit('write', 'write_scheduler_decision', run_id=run_id)
     except Exception:
         pass
 
@@ -557,6 +667,7 @@ def main() -> int:
             'config.override.json',
             cfg,
         )
+        _audit('write', 'write_account_state_json_text:config.override.json', run_id=run_id, account=acct)
 
         acct_report_dir = run_repo.get_run_account_dir(base, run_id, acct)
         acct_state_dir = run_repo.get_run_account_state_dir(base, run_id, acct)
@@ -568,6 +679,7 @@ def main() -> int:
         def _write_acct_run_state(name: str, payload: dict):
             try:
                 state_repo.write_account_run_state(base, run_id, acct, name, payload)
+                _audit('write', f'write_account_run_state:{name}', run_id=run_id, account=acct)
             except Exception:
                 pass
 
@@ -614,6 +726,15 @@ def main() -> int:
         if (not prefetch_done):
             runlog.safe_event('fetch_chain_cache', 'start', data=_safe_runlog_data({'account': acct, 'symbols_count': len(cfg.get('symbols') or [])}))
             prefetch_stats = prefetch_required_data(vpy=vpy, base=base, cfg=cfg, shared_required=shared_required)
+            _audit(
+                'tool_call',
+                'required_data_prefetch',
+                run_id=run_id,
+                account=acct,
+                status=('ok' if int(prefetch_stats.get('errors') or 0) == 0 else 'error'),
+                tool_name='required_data_prefetch',
+                extra={'stats': {k: v for k, v in prefetch_stats.items() if k != 'audit'}},
+            )
             try:
                 state_repo.write_account_run_state(
                     base,
@@ -629,6 +750,15 @@ def main() -> int:
                             run_id,
                             'tool_execution_audit.jsonl',
                             item,
+                        )
+                        _audit(
+                            'tool_call',
+                            'required_data_prefetch_item',
+                            run_id=run_id,
+                            account=acct,
+                            status=('ok' if bool(item.get('ok')) else 'error'),
+                            tool_name=str(item.get('tool_name') or 'required_data_prefetch'),
+                            extra={'symbol': item.get('symbol'), 'message': item.get('message')},
                         )
             except Exception:
                 pass
@@ -656,6 +786,15 @@ def main() -> int:
             env=dict(os.environ, PYTHONPATH=str(base)),
         )
         acct_metrics['pipeline_ms'] = int((monotonic() - t_pipe0) * 1000)
+        _audit(
+            'tool_call',
+            'run_pipeline',
+            run_id=run_id,
+            account=acct,
+            status=('ok' if pipe.returncode == 0 else 'error'),
+            tool_name='run_pipeline',
+            extra={'duration_ms': acct_metrics['pipeline_ms'], 'returncode': int(pipe.returncode)},
+        )
         if pipe.returncode != 0:
             runlog.safe_event(
                 'snapshot_batches',
@@ -694,6 +833,7 @@ def main() -> int:
                 'symbols_notification.txt',
                 text + '\n',
             )
+            _audit('write', 'write_run_account_text:symbols_notification.txt', run_id=run_id, account=acct)
             if cfg_override.exists() and cfg_override.stat().st_size > 0:
                 run_repo.copy_to_run_account(
                     base,
@@ -702,6 +842,7 @@ def main() -> int:
                     cfg_override,
                     'config.override.json',
                 )
+                _audit('write', 'copy_to_run_account:config.override.json', run_id=run_id, account=acct)
         except Exception:
             pass
 
@@ -785,6 +926,7 @@ def main() -> int:
         )
         try:
             state_repo.write_shared_last_run(base, shared_payload)
+            _audit('write', 'write_shared_last_run', run_id=run_id, status='skip', message='no_account_notification')
         except Exception:
             pass
 
@@ -793,6 +935,7 @@ def main() -> int:
                 payload = account_payloads.get(str(r.account), {})
                 state_repo.write_account_last_run(base, r.account, payload)
                 state_repo.write_run_account_last_run(base, run_id, r.account, payload)
+                _audit('write', 'write_account_last_run', run_id=run_id, account=str(r.account), status='skip', message='no_account_notification')
         except Exception:
             pass
 
@@ -801,6 +944,7 @@ def main() -> int:
             tick_metrics['reason'] = 'no_account_notification'
             state_repo.write_tick_metrics(base, run_id, tick_metrics)
             state_repo.append_tick_metrics_history(base, run_id, tick_metrics)
+            _audit('write', 'write_tick_metrics', run_id=run_id, status='skip', message='no_account_notification')
         except Exception:
             pass
 
@@ -831,6 +975,14 @@ def main() -> int:
         target=target,
         dnd_is_quiet=bool(dnd_decision.get('is_quiet')),
     )
+    _audit(
+        'notify',
+        'dispatch_decision',
+        run_id=run_id,
+        status=('ok' if not dispatch_decision.get('config_error') else 'error'),
+        target=(str(target) if target else None),
+        extra={'reason': dispatch_decision.get('reason'), 'should_send': bool(dispatch_decision.get('should_send'))},
+    )
     if str(dispatch_decision.get('reason') or '') == 'quiet_hours':
         quiet_window = str(dnd_decision.get('quiet_window') or '')
         runlog.safe_event('notify', 'skip', message=f'in quiet hours ({quiet_window})')
@@ -857,6 +1009,16 @@ def main() -> int:
                 message=msg,
             )
             if send.returncode != 0:
+                _audit(
+                    'notify',
+                    'send_openclaw_message',
+                    run_id=run_id,
+                    account=acct,
+                    status='error',
+                    target=str(target),
+                    error_code='SEND_FAILED',
+                    extra={'returncode': int(send.returncode)},
+                )
                 runlog.safe_event(
                     'notify',
                     'error',
@@ -868,6 +1030,15 @@ def main() -> int:
                 raise SystemExit(send.returncode)
 
             sent_accounts.append(acct)
+            _audit(
+                'notify',
+                'send_openclaw_message',
+                run_id=run_id,
+                account=acct,
+                status='ok',
+                target=str(target),
+                extra={'returncode': int(send.returncode)},
+            )
             runlog.safe_event('notify', 'ok', duration_ms=int((monotonic() - t_notify0) * 1000), data=_safe_runlog_data({'channel': channel, 'account': acct}))
     else:
         target = dispatch_decision.get('effective_target')
@@ -896,6 +1067,7 @@ def main() -> int:
         tick_metrics['reason'] = ('sent' if ((not no_send) and bool(sent_accounts)) else ('no_send' if no_send else 'no_account_sent'))
         state_repo.write_tick_metrics(base, run_id, tick_metrics)
         state_repo.append_tick_metrics_history(base, run_id, tick_metrics)
+        _audit('write', 'write_tick_metrics', run_id=run_id, extra={'sent': bool(tick_metrics.get('sent'))})
     except Exception:
         pass
 
@@ -915,6 +1087,7 @@ def main() -> int:
             base,
             build_shared_last_run_payload(prev_payload=prev, run_meta=run_meta, history_limit=20),
         )
+        _audit('write', 'write_shared_last_run', run_id=run_id, extra={'sent_accounts': list(sent_accounts)})
     except Exception:
         pass
 

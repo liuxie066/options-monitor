@@ -33,6 +33,8 @@ def test_watchdog_timeout_should_not_degrade_and_should_skip_pipeline() -> None:
         "run_scan_scheduler_cli": mt.run_scan_scheduler_cli,
         "send_opend_alert": mt.send_opend_alert,
         "write_account_last_run": mt.state_repo.write_account_last_run,
+        "put_idempotency_success": mt.state_repo.put_idempotency_success,
+        "append_audit_event": mt.state_repo.append_audit_event,
         "is_opend_phone_verify_pending": mt.is_opend_phone_verify_pending,
         "argv": sys.argv[:],
     }
@@ -61,6 +63,8 @@ def test_watchdog_timeout_should_not_degrade_and_should_skip_pipeline() -> None:
         mt.run_scan_scheduler_cli = _scheduler_should_not_run  # type: ignore[assignment]
         mt.send_opend_alert = lambda *a, **k: None  # type: ignore[assignment]
         mt.state_repo.write_account_last_run = lambda *a, **k: None  # type: ignore[assignment]
+        mt.state_repo.put_idempotency_success = lambda *a, **k: {"created": True}  # type: ignore[assignment]
+        mt.state_repo.append_audit_event = lambda *a, **k: None  # type: ignore[assignment]
         mt.is_opend_phone_verify_pending = lambda _base: False  # type: ignore[assignment]
 
         cfg_path = (BASE / "config.us.json").resolve()
@@ -86,6 +90,8 @@ def test_watchdog_timeout_should_not_degrade_and_should_skip_pipeline() -> None:
         mt.run_scan_scheduler_cli = old["run_scan_scheduler_cli"]  # type: ignore[assignment]
         mt.send_opend_alert = old["send_opend_alert"]  # type: ignore[assignment]
         mt.state_repo.write_account_last_run = old["write_account_last_run"]  # type: ignore[assignment]
+        mt.state_repo.put_idempotency_success = old["put_idempotency_success"]  # type: ignore[assignment]
+        mt.state_repo.append_audit_event = old["append_audit_event"]  # type: ignore[assignment]
         mt.is_opend_phone_verify_pending = old["is_opend_phone_verify_pending"]  # type: ignore[assignment]
         sys.argv = old["argv"]
 
