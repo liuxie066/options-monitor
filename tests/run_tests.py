@@ -199,6 +199,12 @@ def main() -> None:
         test_http_json_does_not_retry_on_permission,
         test_get_tenant_access_token_cache_and_force_refresh,
     )
+    from test_phase1_tool_boundary import (
+        test_prefetch_required_data_idempotency_audit,
+        test_scheduler_decision_schema_boundary,
+        test_tool_execution_schema_and_idempotency_key,
+        test_repository_audit_and_text_writers,
+    )
 
     tests = [
         test_sell_put_metrics_requires_multiplier,
@@ -252,6 +258,10 @@ def main() -> None:
         test_http_json_retries_on_429_then_succeeds,
         test_http_json_does_not_retry_on_permission,
         test_get_tenant_access_token_cache_and_force_refresh,
+        test_scheduler_decision_schema_boundary,
+        test_tool_execution_schema_and_idempotency_key,
+        test_repository_audit_and_text_writers,
+        test_prefetch_required_data_idempotency_audit,
     ]
     for t in tests:
         t()
