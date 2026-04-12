@@ -7,6 +7,7 @@ from .engine import (
     AccountSchedulerDecisionView,
     SchedulerDecisionView,
     build_account_scheduler_decision_dto,
+    build_scheduler_decision_dto,
     decide_account_notify_window_open,
 )
 
@@ -105,11 +106,13 @@ def decide_should_notify(
     notify_decision_by_account: dict[str, bool | dict[str, Any] | AccountSchedulerDecisionView],
     scheduler_decision: dict | SchedulerDecisionView,
 ) -> bool:
-    scheduler_view = (
-        scheduler_decision
-        if isinstance(scheduler_decision, SchedulerDecisionView)
-        else SchedulerDecisionView.from_payload(scheduler_decision)
-    )
+    if isinstance(scheduler_decision, SchedulerDecisionView):
+        scheduler_view = scheduler_decision
+    else:
+        # Keep scheduler legacy-compat reads centralized in decision DTO builder.
+        scheduler_view = SchedulerDecisionView.from_payload(
+            build_scheduler_decision_dto(scheduler_decision)
+        )
     account_decision_raw = notify_decision_by_account.get(str(account))
     account_decision: dict[str, Any] | AccountSchedulerDecisionView | None
     if account_decision_raw is None or isinstance(account_decision_raw, AccountSchedulerDecisionView):

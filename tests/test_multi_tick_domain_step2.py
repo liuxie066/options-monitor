@@ -73,6 +73,28 @@ def test_decide_should_notify_accepts_scheduler_view() -> None:
     )
 
 
+def test_decide_should_notify_normalizes_scheduler_payload_via_dto_builder() -> None:
+    from om.domain import multi_tick as mod
+
+    old_build_scheduler_decision_dto = mod.build_scheduler_decision_dto
+    try:
+        mod.build_scheduler_decision_dto = lambda _raw: {  # type: ignore[assignment]
+            'should_run_scan': True,
+            'is_notify_window_open': True,
+            'reason': 'normalized',
+        }
+        assert (
+            mod.decide_should_notify(
+                account='sy',
+                notify_decision_by_account={},
+                scheduler_decision={'should_notify': False, 'is_notify_window_open': False},
+            )
+            is True
+        )
+    finally:
+        mod.build_scheduler_decision_dto = old_build_scheduler_decision_dto  # type: ignore[assignment]
+
+
 def test_decide_should_notify_accepts_account_scheduler_dto() -> None:
     from om.domain.multi_tick import decide_should_notify
 
