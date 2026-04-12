@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -81,6 +82,13 @@ def write_account_last_run(base: Path, account: str, payload: dict[str, Any]) ->
     return out
 
 
+def write_account_state_json_text(base: Path, account: str, name: str, payload: dict[str, Any]) -> Path:
+    out = (account_state_dir(base, account) / str(name)).resolve()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return out
+
+
 def write_run_account_last_run(base: Path, run_id: str, account: str, payload: dict[str, Any]) -> Path:
     out = (run_account_state_dir(base, run_id, account) / "last_run.json").resolve()
     write_json(out, payload)
@@ -97,3 +105,11 @@ def write_last_run_dir_pointer(base: Path, run_id: str) -> Path:
     p = (shared_state_dir(base) / "last_run_dir.txt").resolve()
     p.write_text(str(run_repo.get_run_dir(base, run_id)) + "\n", encoding="utf-8")
     return p
+
+
+def append_run_audit_jsonl(base: Path, run_id: str, name: str, payload: dict[str, Any]) -> Path:
+    out = (run_state_dir(base, run_id) / str(name)).resolve()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with out.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    return out

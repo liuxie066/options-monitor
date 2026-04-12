@@ -16,6 +16,15 @@ from .multi_tick_result import (
     build_no_account_notification_payloads,
     build_shared_last_run_payload,
 )
+from .tool_boundary import (
+    SCHEMA_KIND_SCHEDULER_DECISION,
+    SCHEMA_KIND_TOOL_EXECUTION,
+    SCHEMA_VERSION_V1,
+    build_tool_idempotency_key,
+    normalize_scheduler_decision_payload,
+    normalize_tool_execution_payload,
+    validate_schema_payload,
+)
 
 __all__ = [
     'apply_scan_run_decision',
@@ -32,4 +41,11 @@ __all__ = [
     'build_account_messages',
     'build_no_account_notification_payloads',
     'build_shared_last_run_payload',
+    'SCHEMA_VERSION_V1',
+    'SCHEMA_KIND_TOOL_EXECUTION',
+    'SCHEMA_KIND_SCHEDULER_DECISION',
+    'validate_schema_payload',
+    'normalize_scheduler_decision_payload',
+    'build_tool_idempotency_key',
+    'normalize_tool_execution_payload',
 ]

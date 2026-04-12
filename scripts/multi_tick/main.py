@@ -55,6 +55,7 @@ from om.domain import (
     evaluate_dnd_quiet_hours,
     filter_notify_candidates,
     markets_for_trading_day_guard as domain_markets_for_trading_day_guard,
+    normalize_scheduler_decision_payload,
     reduce_trading_day_guard,
     select_markets_to_run as domain_select_markets_to_run,
     select_scheduler_state_filename,
@@ -438,7 +439,18 @@ def main() -> int:
         runlog.safe_event('run_end', 'error', error_code='SCHEDULER_FAILED', message=err)
         return 0
 
-    scheduler_decision = json.loads((scheduler_proc.stdout or '').strip())
+    scheduler_raw = json.loads((scheduler_proc.stdout or '').strip())
+    try:
+        scheduler_decision = normalize_scheduler_decision_payload(scheduler_raw)
+    except Exception:
+        scheduler_decision = {
+            'schema_kind': 'scheduler_decision',
+            'schema_version': '1.0',
+            'should_run_scan': bool((scheduler_raw or {}).get('should_run_scan')),
+            'is_notify_window_open': bool((scheduler_raw or {}).get('is_notify_window_open', (scheduler_raw or {}).get('should_notify'))),
+            'reason': str((scheduler_raw or {}).get('reason') or ''),
+            **(scheduler_raw if isinstance(scheduler_raw, dict) else {}),
+        }
     should_run_global = bool(scheduler_decision.get('should_run_scan'))
     reason_global = str(scheduler_decision.get('reason') or '')
 
@@ -539,8 +551,12 @@ def main() -> int:
             cfg['symbols'] = syms
         except Exception:
             pass
-        cfg_override = acct_out / 'state' / 'config.override.json'
-        cfg_override.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+        cfg_override = state_repo.write_account_state_json_text(
+            base,
+            acct,
+            'config.override.json',
+            cfg,
+        )
 
         acct_report_dir = run_repo.get_run_account_dir(base, run_id, acct)
         acct_state_dir = run_repo.get_run_account_state_dir(base, run_id, acct)
@@ -598,6 +614,24 @@ def main() -> int:
         if (not prefetch_done):
             runlog.safe_event('fetch_chain_cache', 'start', data=_safe_runlog_data({'account': acct, 'symbols_count': len(cfg.get('symbols') or [])}))
             prefetch_stats = prefetch_required_data(vpy=vpy, base=base, cfg=cfg, shared_required=shared_required)
+            try:
+                state_repo.write_account_run_state(
+                    base,
+                    run_id,
+                    acct,
+                    'required_data_prefetch_summary.json',
+                    prefetch_stats,
+                )
+                for item in (prefetch_stats.get('audit') or []):
+                    if isinstance(item, dict):
+                        state_repo.append_run_audit_jsonl(
+                            base,
+                            run_id,
+                            'tool_execution_audit.jsonl',
+                            item,
+                        )
+            except Exception:
+                pass
             runlog.safe_event('fetch_chain_cache', 'ok', data=_safe_runlog_data(prefetch_stats))
             prefetch_done = True
 
@@ -653,10 +687,21 @@ def main() -> int:
         text = notif_path.read_text(encoding='utf-8', errors='replace').strip() if notif_path.exists() else ''
 
         try:
-            acct_run_dir = run_repo.ensure_run_account_dir(base, run_id, acct)
-            (acct_run_dir / 'symbols_notification.txt').write_text(text + '\n', encoding='utf-8')
+            run_repo.write_run_account_text(
+                base,
+                run_id,
+                acct,
+                'symbols_notification.txt',
+                text + '\n',
+            )
             if cfg_override.exists() and cfg_override.stat().st_size > 0:
-                (acct_run_dir / 'config.override.json').write_bytes(cfg_override.read_bytes())
+                run_repo.copy_to_run_account(
+                    base,
+                    run_id,
+                    acct,
+                    cfg_override,
+                    'config.override.json',
+                )
         except Exception:
             pass
 
