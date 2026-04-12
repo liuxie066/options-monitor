@@ -5,17 +5,61 @@ We keep this repo runnable in minimal environments.
 
 Usage:
   ./.venv/bin/python tests/run_tests.py
+  ./.venv/bin/python tests/run_tests.py --all
 """
 
 from __future__ import annotations
 
+import argparse
+import importlib
+import inspect
 import json
 import subprocess
+import traceback
+import types
+import unittest
 from pathlib import Path
 
 
 BASE = Path(__file__).resolve().parents[1]
 VPY = BASE / '.venv' / 'bin' / 'python'
+TESTS_DIR = Path(__file__).resolve().parent
+
+# Keep default scope as key regressions so minimal environments stay stable.
+CRITICAL_MODULES = [
+    "test_multiplier_no_default_in_scanners",
+    "test_futu_gateway_minimal",
+    "test_opend_chain_cache_minimal",
+    "test_opend_watchdog_alerts",
+    "test_fetch_portfolio_context_richtext",
+    "test_report_labels_no_stale",
+    "test_sell_call_cover_capacity",
+    "test_scan_scheduler_notify_semantics",
+    "test_scan_scheduler_scan_per_account",
+    "test_market_session_single_source_of_truth",
+    "test_config_loader_validation_cache",
+    "test_runtime_config_sync",
+    "test_atomic_write_json",
+    "test_pipeline_watchlist_whitelist",
+    "test_pipeline_runner_stage_plan",
+    "test_multi_tick_account_state_dir",
+    "test_pipeline_postprocess_notify_gate",
+    "test_notify_symbols_markdown",
+    "test_sell_call_min_annualized_resolution",
+    "test_sell_put_min_annualized_resolution",
+    "test_multi_tick_notify_format",
+    "test_http_json_http_error_handling",
+    "test_feishu_bitable",
+    "test_phase1_tool_boundary",
+    "test_send_if_needed_batch3",
+]
+
+# Keep default critical scope behavior-compatible with the previous curated list.
+# We still use auto-discovery, but trim non-critical additions in a few modules.
+CRITICAL_EXCLUDED_TESTS: dict[str, set[str]] = {
+    "test_opend_chain_cache_minimal": {"test_chain_cache_prune_by_mtime"},
+    "test_feishu_bitable": {"test_http_json_logs_warn_retries_when_rate_limited"},
+}
 
 
 def run_parser(text: str) -> dict:
@@ -100,176 +144,91 @@ def test_run_log_data_small() -> None:
     assert len(payload) <= 300
 
 
+def _discover_all_module_names() -> list[str]:
+    names = []
+    for p in sorted(TESTS_DIR.glob("test_*.py")):
+        names.append(p.stem)
+    return names
+
+
+def _pick_module_names(run_all: bool) -> list[str]:
+    if run_all:
+        return _discover_all_module_names()
+    return list(CRITICAL_MODULES)
+
+
+def _iter_function_tests(mod: types.ModuleType, *, exclude_names: set[str] | None = None):
+    excluded = exclude_names or set()
+    for _, fn in inspect.getmembers(mod, inspect.isfunction):
+        if not fn.__name__.startswith("test_"):
+            continue
+        if fn.__name__ in excluded:
+            continue
+        if fn.__module__ != mod.__name__:
+            continue
+        sig = inspect.signature(fn)
+        required = [
+            p for p in sig.parameters.values()
+            if p.default is inspect._empty and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)
+        ]
+        if required:
+            continue
+        yield fn
+
+
+def _run_unittest_module(mod: types.ModuleType) -> tuple[int, list[str]]:
+    suite = unittest.defaultTestLoader.loadTestsFromModule(mod)
+    total = suite.countTestCases()
+    if total == 0:
+        return 0, []
+    result = unittest.TestResult()
+    suite.run(result)
+    errs = []
+    for case, tb in result.errors + result.failures:
+        errs.append(f"[FAIL] {case.id()}\n{tb}")
+    return total, errs
+
+
+def run_modules(module_names: list[str], *, run_all: bool) -> tuple[int, list[str]]:
+    total = 0
+    failures: list[str] = []
+
+    for mod_name in module_names:
+        mod = importlib.import_module(mod_name)
+
+        excluded = set() if run_all else CRITICAL_EXCLUDED_TESTS.get(mod_name, set())
+        fn_tests = sorted(_iter_function_tests(mod, exclude_names=excluded), key=lambda f: f.__name__)
+        for fn in fn_tests:
+            total += 1
+            try:
+                fn()
+            except Exception:
+                failures.append(f"[FAIL] {mod_name}.{fn.__name__}\n{traceback.format_exc()}")
+
+        ut_count, ut_failures = _run_unittest_module(mod)
+        total += ut_count
+        failures.extend(ut_failures)
+
+    return total, failures
+
+
+def parse_args() -> argparse.Namespace:
+    ap = argparse.ArgumentParser(description="Run regression tests without pytest")
+    ap.add_argument("--all", action="store_true", help="run all test_*.py modules instead of critical suite")
+    return ap.parse_args()
+
+
 def main() -> None:
-    from test_opend_chain_cache_minimal import (
-        test_chain_cache_helpers_roundtrip,
-        test_chain_cache_fresh_check,
-    )
-    from test_opend_watchdog_alerts import (
-        test_watchdog_error_code_mapping,
-        test_opend_alert_rate_limit,
-    )
-    from test_futu_gateway_minimal import (
-        test_build_gateway_with_mock_backend_and_snapshot_call,
-        test_gateway_error_mapping_need_2fa,
-    )
-    from test_fetch_portfolio_context_richtext import (
-        test_build_context_richtext_normalization_and_hk_symbol,
-    )
-    from test_fetch_option_positions_context_rates import (
-        test_build_context_reads_nested_rates_payload,
-        test_build_context_reads_plain_rates_payload,
-    )
-    from test_report_labels_no_stale import (
-        test_add_sell_put_labels_overwrites_on_empty,
-    )
-    from test_sell_call_cover_capacity import (
-        test_sell_call_cover_capacity_basic_hk,
-        test_sell_call_cover_capacity_never_negative,
-    )
-    from test_scan_scheduler_notify_semantics import (
-        test_scan_scheduler_emits_is_notify_window_open_and_backcompat_should_notify,
-    )
-    from test_scan_scheduler_scan_per_account import (
-        test_scan_scheduler_scan_is_per_account,
-    )
-    from test_market_session_single_source_of_truth import (
-        test_select_markets_to_run_hk_break_respected,
-    )
-    from test_config_loader_validation_cache import (
-        test_scheduled_validation_is_cached,
-    )
-    from test_runtime_config_sync import (
-        test_runtime_config_sync_notifications_apply_and_check,
-    )
-    from test_atomic_write_json import (
-        test_atomic_write_json_writes_valid_json,
-    )
-    from test_pipeline_watchlist_whitelist import (
-        test_watchlist_whitelist_filters_symbols,
-    )
-    from test_pipeline_runner_stage_plan import (
-        test_stage_plan_fetch_only,
-        test_stage_plan_scan_includes_fetch,
-        test_stage_plan_stage_only_notify,
-    )
-    from test_multi_tick_account_state_dir import (
-        test_account_run_state_dir_isolated_by_account,
-    )
-    from test_pipeline_postprocess_notify_gate import (
-        test_postprocess_notify_gate,
-    )
-    from test_multiplier_no_default_in_scanners import (
-        test_sell_put_metrics_requires_multiplier,
-        test_sell_call_metrics_requires_multiplier,
-    )
-    from test_notify_symbols_markdown import (
-        test_notify_symbols_markdown_put_layout,
-        test_notify_symbols_markdown_call_layout_and_changes,
-    )
-    from test_multi_tick_notify_format import (
-        test_merged_message_is_plain_text_for_weixin,
-    )
-    from test_sell_call_min_annualized_resolution import (
-        test_symbol_sell_call_min_overrides_template,
-        test_template_sell_call_min_overrides_default,
-        test_none_sell_call_min_uses_default,
-        test_legacy_sell_call_field_still_works,
-        test_invalid_sell_call_min_raises,
-        test_scan_sell_call_requires_min_annualized_arg,
-        test_scan_sell_call_rejects_out_of_range_arg,
-        test_sell_call_steps_passes_resolved_threshold_to_scanner,
-    )
+    args = parse_args()
+    module_names = _pick_module_names(run_all=bool(args.all))
 
-    from test_sell_put_min_annualized_resolution import (
-        test_symbol_sell_put_min_overrides_template,
-        test_template_sell_put_min_overrides_default,
-        test_none_sell_put_min_uses_default,
-        test_invalid_sell_put_min_raises,
-    )
+    total, failures = run_modules(module_names, run_all=bool(args.all))
+    if failures:
+        print("\n\n".join(failures))
+        raise SystemExit(1)
 
-    from test_http_json_http_error_handling import (
-        test_http_json_404_non_json_body_raises_permanent_error,
-        test_http_json_500_json_body_raises_transient_error,
-        test_http_json_urlerror_raises_transient_error,
-        test_http_json_socket_timeout_raises_transient_error,
-    )
-    from test_feishu_bitable import (
-        test_http_json_retries_on_429_then_succeeds,
-        test_http_json_does_not_retry_on_permission,
-        test_get_tenant_access_token_cache_and_force_refresh,
-    )
-    from test_phase1_tool_boundary import (
-        test_prefetch_required_data_idempotency_audit,
-        test_scheduler_decision_schema_boundary,
-        test_tool_execution_schema_and_idempotency_key,
-        test_repository_audit_and_text_writers,
-    )
-    from test_send_if_needed_batch3 import (
-        test_send_if_needed_scheduler_view_compat_should_notify_field,
-    )
-
-    tests = [
-        test_sell_put_metrics_requires_multiplier,
-        test_sell_call_metrics_requires_multiplier,
-        test_parse_futu_fill_message,
-        test_build_gateway_with_mock_backend_and_snapshot_call,
-        test_gateway_error_mapping_need_2fa,
-        test_chain_cache_helpers_roundtrip,
-        test_chain_cache_fresh_check,
-        test_watchdog_error_code_mapping,
-        test_opend_alert_rate_limit,
-        test_run_log_writer_create_and_append,
-        test_run_log_data_small,
-        test_build_context_richtext_normalization_and_hk_symbol,
-        test_add_sell_put_labels_overwrites_on_empty,
-        test_sell_call_cover_capacity_basic_hk,
-        test_sell_call_cover_capacity_never_negative,
-        test_scan_scheduler_emits_is_notify_window_open_and_backcompat_should_notify,
-        test_scan_scheduler_scan_is_per_account,
-        test_select_markets_to_run_hk_break_respected,
-        test_scheduled_validation_is_cached,
-        test_runtime_config_sync_notifications_apply_and_check,
-        test_atomic_write_json_writes_valid_json,
-        test_watchlist_whitelist_filters_symbols,
-        test_stage_plan_fetch_only,
-        test_stage_plan_scan_includes_fetch,
-        test_stage_plan_stage_only_notify,
-        test_account_run_state_dir_isolated_by_account,
-        test_postprocess_notify_gate,
-        test_notify_symbols_markdown_put_layout,
-        test_notify_symbols_markdown_call_layout_and_changes,
-        test_symbol_sell_call_min_overrides_template,
-        test_template_sell_call_min_overrides_default,
-        test_none_sell_call_min_uses_default,
-        test_legacy_sell_call_field_still_works,
-        test_invalid_sell_call_min_raises,
-        test_scan_sell_call_requires_min_annualized_arg,
-        test_scan_sell_call_rejects_out_of_range_arg,
-        test_sell_call_steps_passes_resolved_threshold_to_scanner,
-        test_symbol_sell_put_min_overrides_template,
-        test_template_sell_put_min_overrides_default,
-        test_none_sell_put_min_uses_default,
-        test_invalid_sell_put_min_raises,
-        test_merged_message_is_plain_text_for_weixin,
-        # http_json regression
-        test_http_json_404_non_json_body_raises_permanent_error,
-        test_http_json_500_json_body_raises_transient_error,
-        test_http_json_urlerror_raises_transient_error,
-        test_http_json_socket_timeout_raises_transient_error,
-        # feishu_bitable module
-        test_http_json_retries_on_429_then_succeeds,
-        test_http_json_does_not_retry_on_permission,
-        test_get_tenant_access_token_cache_and_force_refresh,
-        test_scheduler_decision_schema_boundary,
-        test_tool_execution_schema_and_idempotency_key,
-        test_repository_audit_and_text_writers,
-        test_prefetch_required_data_idempotency_audit,
-        test_send_if_needed_scheduler_view_compat_should_notify_field,
-    ]
-    for t in tests:
-        t()
-    print(f"OK ({len(tests)} tests)")
+    scope = "all" if args.all else "critical"
+    print(f"OK ({total} tests, scope={scope})")
 
 
 if __name__ == '__main__':
