@@ -40,7 +40,7 @@ def test_build_scheduler_decision_dto_fallback_keeps_legacy_shape() -> None:
 
 
 def test_decide_notify_window_open_prefers_account_payload() -> None:
-    from om.domain.engine import decide_notify_window_open
+    from om.domain.engine import AccountSchedulerDecisionView, decide_notify_window_open
 
     assert (
         decide_notify_window_open(
@@ -56,6 +56,28 @@ def test_decide_notify_window_open_prefers_account_payload() -> None:
         )
         is True
     )
+    assert (
+        decide_notify_window_open(
+            scheduler_decision={'is_notify_window_open': False},
+            account_scheduler_decision=AccountSchedulerDecisionView(is_notify_window_open=True),
+        )
+        is True
+    )
+
+
+def test_scheduler_decision_view_from_payload_enforces_fields() -> None:
+    from om.domain.engine import SchedulerDecisionView
+
+    view = SchedulerDecisionView.from_payload(
+        {
+            'should_run_scan': 1,
+            'should_notify': 0,
+            'reason': None,
+        }
+    )
+    assert view.should_run_scan is True
+    assert view.is_notify_window_open is False
+    assert view.reason == ''
 
 
 def test_build_account_scheduler_decision_dto_uses_global_fallback() -> None:
