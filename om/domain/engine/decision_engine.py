@@ -45,6 +45,32 @@ def build_scheduler_decision_dto(
     }
 
 
+def build_account_scheduler_decision_dto(
+    account_scheduler_raw: Any,
+    *,
+    scheduler_decision: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build account-level scheduler decision DTO with global fallback."""
+    account_raw = account_scheduler_raw if isinstance(account_scheduler_raw, Mapping) else {}
+    return {
+        'schema_kind': 'scheduler_decision_account',
+        'schema_version': '1.0',
+        'is_notify_window_open': bool(
+            account_raw.get(
+                'is_notify_window_open',
+                account_raw.get(
+                    'should_notify',
+                    scheduler_decision.get(
+                        'is_notify_window_open',
+                        scheduler_decision.get('should_notify'),
+                    ),
+                ),
+            )
+        ),
+        **account_raw,
+    }
+
+
 def decide_notify_window_open(
     *,
     scheduler_decision: Mapping[str, Any],
@@ -52,6 +78,18 @@ def decide_notify_window_open(
 ) -> bool:
     payload = account_scheduler_decision if account_scheduler_decision is not None else scheduler_decision
     return bool(payload.get('is_notify_window_open', payload.get('should_notify')))
+
+
+def decide_account_notify_window_open(
+    *,
+    scheduler_decision: Mapping[str, Any],
+    account_scheduler_decision: Mapping[str, Any] | None = None,
+) -> bool:
+    """Single decision entry used by orchestrator with explicit DTO input."""
+    return decide_notify_window_open(
+        scheduler_decision=scheduler_decision,
+        account_scheduler_decision=account_scheduler_decision,
+    )
 
 
 def decide_notification_meaningful(
