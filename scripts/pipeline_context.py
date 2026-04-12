@@ -18,6 +18,17 @@ from pathlib import Path
 from scripts.io_utils import is_fresh, load_cached_json
 from scripts.subprocess_utils import run_cmd
 from om.services import adapt_holdings_context, adapt_option_positions_context
+try:
+    from om.storage.repositories import state_repo
+except Exception:
+    from scripts.om.storage.repositories import state_repo  # type: ignore
+
+
+def _persist_source_snapshot(base: Path, snapshot: dict) -> None:
+    try:
+        state_repo.append_source_snapshot_event(base, snapshot)
+    except Exception:
+        pass
 
 
 def load_portfolio_context(
@@ -40,7 +51,8 @@ def load_portfolio_context(
         if ttl_sec > 0 and is_fresh(port_path, ttl_sec):
             cached = load_cached_json(port_path)
         if cached is not None:
-            adapt_holdings_context(cached)
+            snap = adapt_holdings_context(cached)
+            _persist_source_snapshot(base, snap)
             return cached
 
         cmd = [
@@ -55,7 +67,8 @@ def load_portfolio_context(
             cmd.append('--quiet')
         run_cmd(cmd, cwd=base, timeout_sec=timeout_sec, is_scheduled=is_scheduled)
         ctx = load_cached_json(port_path) or json.loads(port_path.read_text(encoding='utf-8'))
-        adapt_holdings_context(ctx)
+        snap = adapt_holdings_context(ctx)
+        _persist_source_snapshot(base, snap)
         return ctx
     except BaseException as e:
         log(f"[WARN] portfolio context not available: {e}")
@@ -86,7 +99,8 @@ def load_option_positions_context(
         if ttl_sec > 0 and is_fresh(opt_path, ttl_sec):
             cached = load_cached_json(opt_path)
         if cached is not None:
-            adapt_option_positions_context(cached)
+            snap = adapt_option_positions_context(cached)
+            _persist_source_snapshot(base, snap)
             return cached, False
 
         cmd = [
@@ -101,7 +115,8 @@ def load_option_positions_context(
             cmd.append('--quiet')
         run_cmd(cmd, cwd=base, timeout_sec=timeout_sec, is_scheduled=is_scheduled)
         ctx = load_cached_json(opt_path) or json.loads(opt_path.read_text(encoding='utf-8'))
-        adapt_option_positions_context(ctx)
+        snap = adapt_option_positions_context(ctx)
+        _persist_source_snapshot(base, snap)
         return ctx, True
     except BaseException as e:
         log(f"[WARN] option positions context not available: {e}")

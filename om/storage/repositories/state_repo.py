@@ -13,6 +13,10 @@ from scripts.io_utils import atomic_write_json as write_json
 from scripts.io_utils import read_json
 
 
+AUDIT_SCHEMA_KIND = "audit_event"
+AUDIT_SCHEMA_VERSION = "1.0"
+
+
 def shared_state_dir(base: Path) -> Path:
     p = paths.shared_state_dir(base)
     p.mkdir(parents=True, exist_ok=True)
@@ -36,6 +40,7 @@ def run_account_state_dir(base: Path, run_id: str, account: str) -> Path:
 def write_scheduler_decision(base: Path, run_id: str, payload: dict[str, Any]) -> Path:
     out = run_state_dir(base, run_id) / "scheduler_decision.json"
     write_json(out, payload)
+    write_shared_current_read_model(base, "scheduler_decision.current.json", payload)
     return out
 
 
@@ -46,6 +51,7 @@ def write_tick_metrics(base: Path, run_id: str, payload: dict[str, Any]) -> dict
     p_run = (rdir / "tick_metrics.json").resolve()
     write_json(p_shared, payload)
     write_json(p_run, payload)
+    write_shared_current_read_model(base, "tick_metrics.current.json", payload)
     return {"shared": p_shared, "run": p_run}
 
 
@@ -70,17 +76,31 @@ def append_tick_metrics_history(base: Path, run_id: str, payload: dict[str, Any]
 def write_shared_last_run(base: Path, payload: dict[str, Any]) -> Path:
     out = (shared_state_dir(base) / "last_run.json").resolve()
     write_json(out, payload)
+    write_shared_current_read_model(base, "last_run.current.json", payload)
     return out
 
 
 def write_shared_state(base: Path, name: str, payload: dict[str, Any]) -> Path:
     out = (shared_state_dir(base) / str(name)).resolve()
     write_json(out, payload)
+    write_shared_current_read_model(base, f"{str(name)}.current.json", payload)
     return out
 
 
 def write_account_last_run(base: Path, account: str, payload: dict[str, Any]) -> Path:
     out = (account_state_dir(base, account) / "last_run.json").resolve()
+    write_json(out, payload)
+    return out
+
+
+def shared_current_read_model_dir(base: Path) -> Path:
+    out = (shared_state_dir(base) / "current").resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+
+def write_shared_current_read_model(base: Path, name: str, payload: dict[str, Any]) -> Path:
+    out = (shared_current_read_model_dir(base) / str(name)).resolve()
     write_json(out, payload)
     return out
 
@@ -126,12 +146,96 @@ def append_shared_audit_jsonl(base: Path, name: str, payload: dict[str, Any]) ->
     return out
 
 
+def normalize_audit_event(payload: dict[str, Any] | Any) -> dict[str, Any]:
+    src = payload if isinstance(payload, dict) else {}
+    event_type = str(src.get("event_type") or "").strip()
+    action = str(src.get("action") or "").strip()
+    if not event_type:
+        raise ValueError("audit event requires event_type")
+    if not action:
+        raise ValueError("audit event requires action")
+    out = {
+        "schema_kind": AUDIT_SCHEMA_KIND,
+        "schema_version": AUDIT_SCHEMA_VERSION,
+        "event_type": event_type,
+        "action": action,
+        "status": str(src.get("status") or "ok"),
+        "event_at_utc": str(src.get("event_at_utc") or datetime.now(timezone.utc).isoformat()),
+    }
+    for key in (
+        "run_id",
+        "account",
+        "idempotency_key",
+        "tool_name",
+        "target",
+        "message",
+        "error_code",
+        "fallback_used",
+    ):
+        if key in src:
+            out[key] = src.get(key)
+    extra = src.get("extra")
+    if isinstance(extra, dict):
+        out["extra"] = extra
+    return out
+
+
+def append_audit_event(base: Path, payload: dict[str, Any], *, run_id: str | None = None) -> dict[str, Path]:
+    normalized = normalize_audit_event(payload)
+    out = {
+        "shared": append_shared_audit_jsonl(base, "audit_events.jsonl", normalized),
+    }
+    if run_id:
+        out["run"] = append_run_audit_jsonl(base, run_id, "audit_events.jsonl", normalized)
+    try:
+        write_shared_current_read_model(
+            base,
+            "audit_event_latest.current.json",
+            normalized,
+        )
+    except Exception:
+        pass
+    return out
+
+
 def append_tool_execution_audit(base: Path, payload: dict[str, Any], *, run_id: str | None = None) -> dict[str, Path]:
     out: dict[str, Path] = {
         "shared": append_shared_audit_jsonl(base, "tool_execution_audit.jsonl", payload),
     }
     if run_id:
         out["run"] = append_run_audit_jsonl(base, run_id, "tool_execution_audit.jsonl", payload)
+    return out
+
+
+def append_source_snapshot_event(
+    base: Path,
+    payload: dict[str, Any],
+    *,
+    run_id: str | None = None,
+) -> dict[str, Path]:
+    out: dict[str, Path] = {
+        "shared": append_shared_audit_jsonl(base, "source_snapshots.events.jsonl", payload),
+    }
+    if run_id:
+        out["run"] = append_run_audit_jsonl(base, run_id, "source_snapshots.events.jsonl", payload)
+
+    source_name = str((payload or {}).get("source_name") or "").strip().lower()
+    if source_name:
+        write_shared_current_read_model(
+            base,
+            f"source_snapshot.{source_name}.current.json",
+            payload,
+        )
+
+    aggregated_path = (shared_current_read_model_dir(base) / "source_snapshots.current.json").resolve()
+    aggregated = read_json(aggregated_path, {})
+    if not isinstance(aggregated, dict):
+        aggregated = {}
+    if source_name:
+        aggregated[source_name] = payload
+    aggregated["updated_at_utc"] = datetime.now(timezone.utc).isoformat()
+    write_json(aggregated_path, aggregated)
+    out["current"] = aggregated_path
     return out
 
 

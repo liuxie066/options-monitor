@@ -35,8 +35,23 @@ from .canonical_schema import (
     SCHEMA_KIND_PROCESSOR_OUTPUT,
     SCHEMA_KIND_SOURCE_SNAPSHOT,
     normalize_processor_row,
+    normalize_processor_rows,
     normalize_source_snapshot,
     validate_canonical_payload,
+)
+from .error_policy import (
+    ERR_2FA_REQUIRED,
+    ERR_CONFIG,
+    ERR_TIMEOUT,
+    ERR_UNEXPECTED,
+    ERR_UPSTREAM_UNAVAILABLE,
+    classify_failure,
+)
+from .config_contract import (
+    CANONICAL_CONFIGS,
+    DERIVED_CONFIGS,
+    ensure_runtime_canonical_config,
+    resolve_config_contract,
 )
 
 __all__ = [
@@ -71,5 +86,16 @@ __all__ = [
     'SCHEMA_KIND_SOURCE_SNAPSHOT',
     'validate_canonical_payload',
     'normalize_processor_row',
+    'normalize_processor_rows',
     'normalize_source_snapshot',
+    'ERR_TIMEOUT',
+    'ERR_2FA_REQUIRED',
+    'ERR_UPSTREAM_UNAVAILABLE',
+    'ERR_CONFIG',
+    'ERR_UNEXPECTED',
+    'classify_failure',
+    'CANONICAL_CONFIGS',
+    'DERIVED_CONFIGS',
+    'resolve_config_contract',
+    'ensure_runtime_canonical_config',
 ]
