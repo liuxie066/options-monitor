@@ -2,45 +2,25 @@
 
 期权监控与提醒（Sell Put / Covered Call），覆盖 **美股/港股**，支持 **多账户（lx/sy）分开计算约束、合并输出提醒**。
 
-- For Agents：看 `SKILL.md`（白名单命令、关键约束）
-- For Humans：看本文（Quickstart / Cheatsheet / Troubleshooting）
-- Guardrails：看 `docs/GUARDRAILS.md`（hooks 启用、CI 合并闸、deploy-safe）
+## 文档导航
 
-- 适用：日常候选扫描、仓位/现金约束核算、飞书提醒
-- 不适用：把 Yahoo 当成严肃实时主数据源；用不完整字段做交易级决策
+- 快速上手（本文）：首日安装、配置、常用运行命令
+- 部署发布：`DEPLOY.md`
+- 运维值班 / 排障：`RUNBOOK.md`
+- 配置单一来源与变更流程：`CONFIGS.md`
+- Agent 约束：`SKILL.md`
+- Guardrails：`docs/GUARDRAILS.md`
 
----
+## Quick Start（首日）
 
-## Hard Rules（别踩）
-
-1. **真实运行配置不要提交**
-   - 仓库只保留 `config.example.us.json` / `config.example.hk.json`
-   - 本机约定：实际运行配置文件名用 `config.us.json` / `config.hk.json`（本地文件，不要提交）
-   - 历史运行配置名（`config.market_*.json`、`config.scheduled.json`、`config.market_us.fallback_yahoo.json`、`*.deprecated`）也仅限本地，远端只保留 `*.example.json`
-
-2. **dev → prod 有纪律**
-   - 开发只在：`/home/node/.openclaw/workspace/options-monitor`（dev repo）
-   - 生产运行在：`/home/node/.openclaw/workspace/options-monitor-prod`
-   - 部署用：`scripts/deploy_to_prod.py`（不要直接改 prod）
-
-3. **数据缺失必须显式提示**（字段缺失/源不可用/降级路径）
-4. **运行配置单一来源**
-   - 只改 `config.us.json` / `config.hk.json`
-   - `config.scheduled.json` / `config.market_*.json` / `config.market_us.fallback_yahoo.json` / `config.json` 视为兼容派生文件
-   - 修改通知渠道/目标后，用同步脚本一次性刷新兼容文件
-
----
-
-## Quickstart
-
-### 1) 安装依赖（推荐一键）
+### 1) 初始化环境
 
 ```bash
 cd /home/node/.openclaw/workspace/options-monitor
 ./run_watchlist.sh
 ```
 
-### 2) 准备本地配置
+### 2) 准备本地运行配置
 
 ```bash
 cp config.example.us.json config.us.json
@@ -48,38 +28,11 @@ cp config.example.hk.json config.hk.json
 ./.venv/bin/python scripts/sync_runtime_configs.py --apply
 ```
 
----
+说明：`config.us.json` / `config.hk.json` 是运行入口；其它 `config.market_*` / `config.scheduled.json` / `config.json` 属于兼容派生文件，来源见 `CONFIGS.md`。
 
-## futu-core 接入（阶段一）
+## First-Day Usage（高频命令）
 
-当前 `dev` 仓已完成第一阶段接入：OpenD 相关主路径优先经 `futu-core` 统一客户端调用。
-
-- 统一入口：`scripts/futu_gateway.py`
-- 构建方式：`OpenDBackend + FutuCoreClient`
-- 已替换主路径：`scripts/fetch_market_data_opend.py`（期权链/快照）
-- 错误语义：2FA / 登录失效 / 限流会映射为可识别异常并 fail-fast
-
-依赖安装方式（开发环境）：
-
-```bash
-cd /home/node/.openclaw/workspace/futu-core
-pip install -e .[opend]
-
-cd /home/node/.openclaw/workspace/options-monitor
-./.venv/bin/pip install -e ../futu-core
-```
-
-说明：
-- 为兼容本地联调，`scripts/futu_gateway.py` 会在未安装时尝试加载邻接仓 `../futu-core/src`。
-- 生产/CI 仍建议显式安装 `futu-core` 依赖，不依赖路径注入。
-
----
-
-## Cheatsheet（常用命令）
-
-> 说明：这里是给人跑的；Agent/cron 的白名单命令以 `SKILL.md` 为准。
-
-### A. 生产 tick（按 scheduler 决策是否扫描/是否通知）
+### 生产 tick（按 scheduler 决策是否扫描/是否通知）
 
 ```bash
 # US
@@ -89,7 +42,7 @@ cd /home/node/.openclaw/workspace/options-monitor
 ./.venv/bin/python scripts/send_if_needed_multi.py --config config.hk.json --market-config hk --accounts lx sy
 ```
 
-### B. Watchlist 管理
+### Watchlist 管理
 
 ```bash
 ./.venv/bin/python scripts/watchlist.py list
@@ -99,83 +52,7 @@ cd /home/node/.openclaw/workspace/options-monitor
 ./.venv/bin/python scripts/watchlist.py rm TSLA
 ```
 
-### C. 成交/手工输入 → option_positions（Intake）
-
-```bash
-./.venv/bin/python scripts/cli/parse_option_message_cli.py --text "..."
-./.venv/bin/python scripts/option_intake.py --market hk --account lx --text "..." --dry-run
-```
-
----
-
-## Config & State
-
-- 运行入口配置（OM）：`config.us.json` / `config.hk.json`（唯一入口）
-- `portfolio-management/config.json`：仅 PM 凭证与 Bitable 读取配置，不是 options-monitor 运行入口配置
-- 输出目录（dev）：`output/`
-  - `output/raw/`：原始抓取
-  - `output/parsed/`：标准化 CSV
-  - `output/reports/`：候选/摘要/提醒文本
-- prod 的共享调度状态（权威）：
-  - `options-monitor-prod/output_shared/state/scheduler_state_us.json`
-  - `options-monitor-prod/output_shared/state/scheduler_state_hk.json`
-
----
-
-## Troubleshooting（只列高频）
-
-- **OpenD 不可用 / 登录失效**：先确认 OpenD 进程与端口，再看 `output/*/opend_metrics.json` 是否大量失败。
-- **“字段缺失”**：不要硬跑，先把缺失字段打印出来并确认数据源是否支持。
-- **“非交易时段：不监控”但你认为是交易时段**：优先检查 tick 用的是不是正确的 `--market-config` 与对应 `config.*.hk/us.json`。
-
----
-
-## Multi-Tick Refactor 状态（Step4/5/6）
-
-- Step4（显式 IO 路径，移除 symlink 依赖）：已完成并部署。
-- Step5（错误处理治理，主链路不静默吞错）：已完成并部署。
-- Step6（`send_if_needed_multi.py` 拆分，入口命令保持不变）：已完成并部署。
-
-### Watchdog Timeout 验收（最小可复现）
-
-```bash
-cd /home/node/.openclaw/workspace/options-monitor
-./.venv/bin/python tests/test_multi_tick_watchdog_timeout.py
-```
-
-预期结果：
-- 输出 `OK (watchdog-timeout)` 并返回码 `0`
-- watchdog 超时时，scheduler/pipeline 不继续执行
-- US 源不会降级为 yahoo 后继续跑 pipeline
-
----
-
-## Dev → Prod 部署
-
-```bash
-cd /home/node/.openclaw/workspace/options-monitor
-./.venv/bin/python scripts/deploy_to_prod.py --dry-run
-./.venv/bin/python scripts/deploy_to_prod.py --apply
-# 如需显式覆盖 prod 运行配置（默认不会覆盖，且必须带 allowlist）
-./.venv/bin/python scripts/deploy_to_prod.py \
-  --dry-run \
-  --include-runtime-config \
-  --runtime-config-allowlist runtime-config-allowlist.example.json
-```
-
-> 默认会跳过运行配置：`config.us.json` / `config.hk.json` / `config.local.*.json`；`*.example.json` 会继续同步。
->
-> prod 不是开发源，不要在 `options-monitor-prod` 里直接改代码。
-
-### 自动发布（main -> prod）
-
-- 定时器：`*/2 * * * *`（每 2 分钟）
-- 执行脚本：`scripts/auto_deploy_from_main.py`
-- 日志：`/home/node/.openclaw/workspace/options-monitor/logs/auto_deploy_from_main.log`
-- 行为：仅当 `origin/main` 有新 commit 时才 `pull --ff-only` 并执行 `scripts/deploy_to_prod.py --apply --prune`
-- 安全：带锁；dev/prod 任一仓库有未提交改动、拉取失败或部署失败时直接中止，不改写 prod
-
-### D. 单标的 scan 调试（CLI 入口）
+### 单标的调试（CLI）
 
 ```bash
 # Sell Put
@@ -185,12 +62,25 @@ cd /home/node/.openclaw/workspace/options-monitor
 ./.venv/bin/python scripts/cli/scan_sell_call_cli.py --symbols AAPL --avg-cost 150 --shares 100 --min-annualized-net-return 0.08 --quiet
 ```
 
-### E. 运行配置同步（单一来源 -> 兼容文件）
+### 成交/手工输入 -> option_positions（Intake）
 
 ```bash
-# 查看是否有漂移（有漂移时返回非 0）
-./.venv/bin/python scripts/sync_runtime_configs.py --check
-
-# 应用同步（把 notifications 从 config.us/config.hk 写入兼容文件）
-./.venv/bin/python scripts/sync_runtime_configs.py --apply
+./.venv/bin/python scripts/cli/parse_option_message_cli.py --text "..."
+./.venv/bin/python scripts/option_intake.py --market hk --account lx --text "..." --dry-run
 ```
+
+## 输出与状态（定位文件）
+
+- dev 输出目录：`output/`
+- `output/raw/`：原始抓取
+- `output/parsed/`：标准化 CSV
+- `output/reports/`：候选/摘要/提醒文本
+- prod scheduler 权威状态：
+  - `options-monitor-prod/output_shared/state/scheduler_state_us.json`
+  - `options-monitor-prod/output_shared/state/scheduler_state_hk.json`
+
+## 高频问题（入口指引）
+
+- OpenD 不可用 / 登录失效：先看 `RUNBOOK.md` 的排障章节。
+- 配置漂移或通知目标不一致：按 `CONFIGS.md` 的同步流程执行 `sync_runtime_configs.py`。
+- 发布或回滚需求：按 `DEPLOY.md` 执行，避免直接改 `options-monitor-prod` 代码。
