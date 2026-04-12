@@ -218,10 +218,34 @@ def test_send_if_needed_uses_normalized_notify_message_id_from_nested_payload() 
         mod.sh = old["sh"]  # type: ignore[assignment]
 
 
+def test_send_if_needed_trading_day_guard_market_inference_delegates_to_domain() -> None:
+    mod = importlib.import_module("scripts.send_if_needed")
+
+    old = mod.domain_markets_for_trading_day_guard
+    seen: dict[str, object] = {}
+    try:
+        def _fake(markets_to_run, cfg, market_config):
+            seen["markets_to_run"] = list(markets_to_run or [])
+            seen["cfg"] = cfg
+            seen["market_config"] = market_config
+            return ["HK"]
+
+        mod.domain_markets_for_trading_day_guard = _fake  # type: ignore[assignment]
+        cfg = {"symbols": [{"symbol": "0700.HK", "market": "HK"}]}
+        out = mod._infer_trading_day_guard_markets(cfg)
+        assert out == ["HK"]
+        assert seen["markets_to_run"] == []
+        assert seen["cfg"] is cfg
+        assert seen["market_config"] == "auto"
+    finally:
+        mod.domain_markets_for_trading_day_guard = old  # type: ignore[assignment]
+
+
 def main() -> None:
     test_send_if_needed_scheduler_view_compat_should_notify_field()
     test_send_if_needed_scheduler_view_prefers_is_notify_window_open_field()
     test_send_if_needed_uses_normalized_notify_message_id_from_nested_payload()
+    test_send_if_needed_trading_day_guard_market_inference_delegates_to_domain()
     print("OK (send-if-needed-batch3)")
 
 
