@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable
 
 from .engine import (
@@ -282,3 +283,36 @@ def select_scheduler_state_filename(markets_to_run: list[str]) -> str:
     if markets_to_run == ['US']:
         return 'scheduler_state_us.json'
     return 'scheduler_state.json'
+
+
+def resolve_notification_channel_target(
+    *,
+    notifications: Any,
+    cli_channel: Any = None,
+    cli_target: Any = None,
+    default_channel: str = 'feishu',
+) -> dict[str, Any]:
+    """Resolve channel/target with compat defaults at domain boundary."""
+    notif_cfg = notifications if isinstance(notifications, dict) else {}
+    return {
+        'channel': (cli_channel or notif_cfg.get('channel') or default_channel),
+        'target': (cli_target or notif_cfg.get('target')),
+    }
+
+
+def resolve_scheduler_state_path(
+    *,
+    base_dir: Path,
+    state_dir: str | Path,
+    state_override: str | Path | None,
+    filename: str = 'scheduler_state.json',
+) -> Path:
+    """Resolve scheduler state path while centralizing legacy --state override."""
+    if state_override:
+        state = Path(state_override)
+        return state if state.is_absolute() else (base_dir / state).resolve()
+
+    state_root = Path(state_dir)
+    if not state_root.is_absolute():
+        state_root = (base_dir / state_root).resolve()
+    return (state_root / str(filename)).resolve()
