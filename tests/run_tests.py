@@ -52,7 +52,9 @@ CRITICAL_MODULES = [
     "test_feishu_bitable",
     "test_phase1_tool_boundary",
     "test_domain_engine_batch4",
+    "test_domain_engine_batch5",
     "test_send_if_needed_batch3",
+    "test_send_if_needed_batch4",
 ]
 
 # Keep default critical scope behavior-compatible with the previous curated list.
