@@ -65,3 +65,23 @@ def test_om_allow_derived_config_gate_is_env_controlled_in_multi_tick_main() -> 
     assert "allow_derived=allow_derived_config" in src
     assert "OM_ALLOW_DERIVED_CONFIG_INVALID" in src
     assert "OM_ALLOW_DERIVED_CONFIG_ENABLED" in src
+
+
+def test_multi_tick_main_current_run_id_accessor_is_public_compat() -> None:
+    import importlib
+
+    mod = importlib.import_module("scripts.multi_tick.main")
+
+    old = mod._CURRENT_RUN_ID
+    try:
+        mod._CURRENT_RUN_ID = "test-run-id"
+        assert mod.current_run_id() == "test-run-id"
+    finally:
+        mod._CURRENT_RUN_ID = old
+
+
+def test_multi_entrypoint_uses_public_run_id_accessor() -> None:
+    src = Path("scripts/send_if_needed_multi.py").read_text(encoding="utf-8")
+    assert "importlib" not in src
+    assert "current_run_id as _current_run_id" in src
+    assert "run_id=_current_run_id()" in src

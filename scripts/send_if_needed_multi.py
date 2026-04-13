@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 # Ensure repo root is on sys.path for `scripts.*` imports when run as a script
-import importlib
 import sys
 import warnings
 from pathlib import Path as _PathLib
@@ -21,7 +20,7 @@ except Exception:
     from run_log import RunLogger
 
 from scripts.multi_tick import main as _multi_main
-_multi_main_mod = importlib.import_module('scripts.multi_tick.main')
+from scripts.multi_tick.main import current_run_id as _current_run_id
 from scripts.multi_tick.opend_guard import should_send_opend_alert as _domain_should_send_opend_alert
 from om.domain import select_markets_to_run as _domain_select_markets_to_run
 
@@ -65,7 +64,7 @@ if __name__ == '__main__':
     except Exception as e:
         try:
             base = Path(__file__).resolve().parents[1]
-            RunLogger(base, run_id=getattr(_multi_main_mod, '_CURRENT_RUN_ID', None)).event(
+            RunLogger(base, run_id=_current_run_id()).event(
                 'run_error',
                 'error',
                 error_code=(getattr(e, 'error_code', None) or type(e).__name__),
