@@ -45,6 +45,10 @@ from .misc import (
     _safe_runlog_data,
 )
 from om.domain import (
+    Decision,
+    DeliveryPlan,
+    SchemaValidationError,
+    SnapshotDTO,
     apply_scan_run_decision,
     build_account_messages,
     build_no_account_notification_payloads,
@@ -89,6 +93,24 @@ except Exception:
 
 
 _CURRENT_RUN_ID: str | None = None
+SCHEMA_VALIDATION_ERROR_CODE = 'SCHEMA_VALIDATION_FAILED'
+
+
+def _fail_schema_validation(*, runlog: RunLogger, audit_fn, stage: str, exc: BaseException, run_id: str | None = None) -> None:
+    msg = f"{stage}: {type(exc).__name__}: {exc}"
+    runlog.safe_event('contract', 'error', error_code=SCHEMA_VALIDATION_ERROR_CODE, message=msg)
+    try:
+        audit_fn(
+            'contract',
+            f'validate_{stage}',
+            run_id=run_id,
+            status='error',
+            error_code=SCHEMA_VALIDATION_ERROR_CODE,
+            message=msg,
+        )
+    except Exception:
+        pass
+    raise SystemExit(f'[CONTRACT_ERROR] {msg}')
 
 
 def account_run_state_dir(run_dir: Path, account: str) -> Path:
@@ -614,13 +636,23 @@ def main() -> int:
     }
 
     try:
-        state_repo.write_scheduler_decision(base, run_id, {
-            'as_of_utc': utc_now(),
-            'schedule_key': str(scheduler_schedule_key),
-            'decision': scheduler_decision,
-            'state_path': str(state_path),
-        })
+        scheduler_snapshot = SnapshotDTO.from_payload(
+            {
+                'schema_kind': 'snapshot_dto',
+                'schema_version': '1.0',
+                'snapshot_name': 'scheduler_decision',
+                'as_of_utc': utc_now(),
+                'payload': {
+                    'schedule_key': str(scheduler_schedule_key),
+                    'decision': scheduler_decision,
+                    'state_path': str(state_path),
+                },
+            }
+        )
+        state_repo.write_scheduler_decision(base, run_id, scheduler_snapshot.to_payload())
         _audit('write', 'write_scheduler_decision', run_id=run_id)
+    except SchemaValidationError as e:
+        _fail_schema_validation(runlog=runlog, audit_fn=_audit, stage='snapshot_dto', exc=e, run_id=run_id)
     except Exception:
         pass
 
@@ -678,13 +710,27 @@ def main() -> int:
 
         notif_path = (acct_report_dir / 'symbols_notification.txt').resolve()
 
-        should_run = bool(should_run_global)
-        should_notify = decide_should_notify(
+        should_notify_raw = decide_should_notify(
             account=acct,
             notify_decision_by_account=notify_decision_by_account,
             scheduler_decision=scheduler_view,
         )
-        reason = str(reason_global)
+        try:
+            decision = Decision.from_payload(
+                {
+                    'schema_kind': 'decision',
+                    'schema_version': '1.0',
+                    'account': acct,
+                    'should_run': bool(should_run_global),
+                    'should_notify': bool(should_notify_raw),
+                    'reason': str(reason_global),
+                }
+            )
+        except SchemaValidationError as e:
+            _fail_schema_validation(runlog=runlog, audit_fn=_audit, stage='decision', exc=e, run_id=run_id)
+        should_run = bool(decision.should_run)
+        should_notify = bool(decision.should_notify)
+        reason = str(decision.reason)
 
         acct_metrics['should_notify'] = bool(should_notify)
         acct_metrics['reason'] = str(reason)
@@ -1007,16 +1053,30 @@ def main() -> int:
         runlog.safe_event('notify', 'error', error_code='CONFIG_ERROR', message=str(config_error))
         raise SystemExit(f'[CONFIG_ERROR] {config_error}')
 
+    delivery_plan: DeliveryPlan | None = None
     if bool(dispatch_decision.get('should_send')):
         target = dispatch_decision.get('effective_target')
-        for acct, msg in account_messages.items():
+        try:
+            delivery_plan = DeliveryPlan.from_payload(
+                {
+                    'schema_kind': 'delivery_plan',
+                    'schema_version': '1.0',
+                    'channel': str(channel),
+                    'target': str(target),
+                    'account_messages': account_messages,
+                    'should_send': True,
+                }
+            )
+        except SchemaValidationError as e:
+            _fail_schema_validation(runlog=runlog, audit_fn=_audit, stage='delivery_plan', exc=e, run_id=run_id)
+        for acct, msg in delivery_plan.account_messages.items():
             runlog.safe_event('notify', 'start', data=_safe_runlog_data({'channel': channel, 'target_set': bool(target), 'account': acct, 'message_len': len(msg)}))
 
             t_notify0 = monotonic()
             send = send_openclaw_message(
                 base=base,
-                channel=str(channel),
-                target=str(target),
+                channel=str(delivery_plan.channel),
+                target=str(delivery_plan.target),
                 message=msg,
             )
             if send.returncode != 0:
@@ -1026,7 +1086,7 @@ def main() -> int:
                     run_id=run_id,
                     account=acct,
                     status='error',
-                    target=str(target),
+                    target=str(delivery_plan.target),
                     error_code='SEND_FAILED',
                     extra={'returncode': int(send.returncode)},
                 )
@@ -1047,7 +1107,7 @@ def main() -> int:
                 run_id=run_id,
                 account=acct,
                 status='ok',
-                target=str(target),
+                target=str(delivery_plan.target),
                 extra={'returncode': int(send.returncode)},
             )
             runlog.safe_event('notify', 'ok', duration_ms=int((monotonic() - t_notify0) * 1000), data=_safe_runlog_data({'channel': channel, 'account': acct}))
