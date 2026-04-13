@@ -455,6 +455,11 @@ def resolve_multi_tick_engine_entrypoint(
 ) -> dict[str, Any]:
     """Single engine entrypoint for scheduler/watchdog/notify decision resolution."""
     out: dict[str, Any] = {}
+    account_scheduler_map = (
+        account_scheduler_raw_by_account if isinstance(account_scheduler_raw_by_account, Mapping) else {}
+    )
+    opend_unhealthy_map = opend_unhealthy if isinstance(opend_unhealthy, Mapping) else {}
+    has_opend_unhealthy = opend_unhealthy is not None
 
     if scheduler_raw is not None:
         scheduler_decision, scheduler_view = resolve_scheduler_decision(
@@ -467,7 +472,7 @@ def resolve_multi_tick_engine_entrypoint(
             'account_scheduler_decisions': {},
             'account_scheduler_views': {},
         }
-        for acct, raw in (account_scheduler_raw_by_account or {}).items():
+        for acct, raw in account_scheduler_map.items():
             acct_key = str(acct)
             account_decision_dto = build_account_scheduler_decision_dto(
                 raw,
@@ -481,14 +486,14 @@ def resolve_multi_tick_engine_entrypoint(
             scheduler_bundle['account_scheduler_views'][acct_key] = account_view
         out['scheduler'] = scheduler_bundle
 
-    if opend_unhealthy is not None:
+    if has_opend_unhealthy:
         out['watchdog'] = build_opend_unhealthy_execution_plan(
-            error_code=str(opend_unhealthy.get('error_code') or 'OPEND_API_ERROR'),
-            degraded=bool(opend_unhealthy.get('degraded')),
-            message_text=str(opend_unhealthy.get('message_text') or ''),
-            detail_text=str(opend_unhealthy.get('detail_text') or ''),
-            host=opend_unhealthy.get('host'),
-            port=opend_unhealthy.get('port'),
+            error_code=str(opend_unhealthy_map.get('error_code') or 'OPEND_API_ERROR'),
+            degraded=bool(opend_unhealthy_map.get('degraded')),
+            message_text=str(opend_unhealthy_map.get('message_text') or ''),
+            detail_text=str(opend_unhealthy_map.get('detail_text') or ''),
+            host=opend_unhealthy_map.get('host'),
+            port=opend_unhealthy_map.get('port'),
         )
 
     if (notify_dispatch is not None) or (dnd_decision is not None):
