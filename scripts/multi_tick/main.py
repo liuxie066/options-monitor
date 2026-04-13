@@ -59,6 +59,9 @@ from om.domain import (
     evaluate_dnd_quiet_hours,
     classify_failure,
     ensure_runtime_canonical_config,
+    normalize_notify_subprocess_output,
+    normalize_pipeline_subprocess_output,
+    normalize_subprocess_adapter_payload,
     resolve_config_contract,
     markets_for_trading_day_guard as domain_markets_for_trading_day_guard,
     reduce_trading_day_guard,
@@ -77,6 +80,7 @@ from om.domain.engine import (
     decide_pipeline_execution_result,
     decide_notification_meaningful,
     decide_trading_day_guard,
+    build_failure_audit_fields,
     filter_notify_candidates as engine_filter_notify_candidates,
     rank_notify_candidates,
     resolve_scheduler_decision,
@@ -109,6 +113,10 @@ def current_run_id() -> str | None:
 def _fail_schema_validation(*, runlog: RunLogger, audit_fn, stage: str, exc: BaseException, run_id: str | None = None) -> None:
     msg = f"{stage}: {type(exc).__name__}: {exc}"
     runlog.safe_event('contract', 'error', error_code=SCHEMA_VALIDATION_ERROR_CODE, message=msg)
+    failure_fields = build_failure_audit_fields(
+        failure_kind='decision_error',
+        failure_stage=str(stage),
+    )
     try:
         audit_fn(
             'contract',
@@ -117,6 +125,7 @@ def _fail_schema_validation(*, runlog: RunLogger, audit_fn, stage: str, exc: Bas
             status='error',
             error_code=SCHEMA_VALIDATION_ERROR_CODE,
             message=msg,
+            **failure_fields,
         )
     except Exception:
         pass
@@ -593,15 +602,35 @@ def main() -> int:
         schedule_key=str(scheduler_schedule_key),
         capture_output=True,
     )
+    scheduler_tool_dto = normalize_subprocess_adapter_payload(
+        adapter='scheduler',
+        tool_name='scan_scheduler_cli',
+        returncode=scheduler_proc.returncode,
+        stdout=scheduler_proc.stdout,
+        stderr=scheduler_proc.stderr,
+        message='scan_scheduler_cli completed',
+    )
     scheduler_ms = int((monotonic() - t_sch0) * 1000)
+    scheduler_extra = {
+        'duration_ms': scheduler_ms,
+        'returncode': int(scheduler_proc.returncode),
+    }
+    if not bool(scheduler_tool_dto.get('ok')):
+        scheduler_extra.update(
+            build_failure_audit_fields(
+                failure_kind='io_error',
+                failure_stage='scan_scheduler',
+                failure_adapter=str(scheduler_tool_dto.get('adapter') or 'scheduler'),
+            )
+        )
     _audit(
         'tool_call',
         'scan_scheduler',
         status=('ok' if scheduler_proc.returncode == 0 else 'error'),
         tool_name='scan_scheduler_cli',
-        extra={'duration_ms': scheduler_ms, 'returncode': int(scheduler_proc.returncode)},
+        extra=scheduler_extra,
     )
-    if scheduler_proc.returncode != 0:
+    if not bool(scheduler_tool_dto.get('ok')):
         err = f"scheduler error: {(scheduler_proc.stderr or scheduler_proc.stdout).strip()}"
         for acct in args.accounts:
             acct0 = str(acct).strip()
@@ -920,8 +949,28 @@ def main() -> int:
             tool_name='run_pipeline',
             extra={'duration_ms': acct_metrics['pipeline_ms'], 'returncode': int(pipe.returncode)},
         )
-        pipeline_result = decide_pipeline_execution_result(returncode=pipe.returncode)
+        pipeline_tool_dto = normalize_pipeline_subprocess_output(
+            returncode=pipe.returncode,
+            stdout=pipe.stdout or '',
+            stderr=pipe.stderr or '',
+        )
+        pipeline_result = decide_pipeline_execution_result(
+            returncode=int(pipeline_tool_dto.get('returncode') or 0)
+        )
         if not bool(pipeline_result.get('ok')):
+            _audit(
+                'tool_call',
+                'run_pipeline_result',
+                run_id=run_id,
+                account=acct,
+                status='error',
+                tool_name='run_pipeline',
+                extra=build_failure_audit_fields(
+                    failure_kind='io_error',
+                    failure_stage='run_pipeline',
+                    failure_adapter=str(pipeline_tool_dto.get('adapter') or 'pipeline'),
+                ),
+            )
             runlog.safe_event(
                 'snapshot_batches',
                 'error',
@@ -1177,7 +1226,12 @@ def main() -> int:
                 target=str(delivery_plan.target),
                 message=msg,
             )
-            if send.returncode != 0:
+            send_tool_dto = normalize_notify_subprocess_output(
+                returncode=send.returncode,
+                stdout=send.stdout or '',
+                stderr=send.stderr or '',
+            )
+            if not bool(send_tool_dto.get('ok')):
                 _audit(
                     'notify',
                     'send_openclaw_message',
@@ -1186,7 +1240,14 @@ def main() -> int:
                     status='error',
                     target=str(delivery_plan.target),
                     error_code='SEND_FAILED',
-                    extra={'returncode': int(send.returncode)},
+                    extra={
+                        'returncode': int(send.returncode),
+                        **build_failure_audit_fields(
+                            failure_kind='io_error',
+                            failure_stage='send_openclaw_message',
+                            failure_adapter=str(send_tool_dto.get('adapter') or 'notify'),
+                        ),
+                    },
                 )
                 runlog.safe_event(
                     'notify',
@@ -1206,7 +1267,10 @@ def main() -> int:
                 account=acct,
                 status='ok',
                 target=str(delivery_plan.target),
-                extra={'returncode': int(send.returncode)},
+                extra={
+                    'returncode': int(send.returncode),
+                    'message_id': send_tool_dto.get('message_id'),
+                },
             )
             runlog.safe_event('notify', 'ok', duration_ms=int((monotonic() - t_notify0) * 1000), data=_safe_runlog_data({'channel': channel, 'account': acct}))
     else:

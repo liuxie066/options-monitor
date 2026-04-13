@@ -24,3 +24,13 @@ def test_multi_tick_trading_day_guard_decision_delegates_to_engine() -> None:
     base = Path(__file__).resolve().parents[1]
     src = (base / "scripts" / "multi_tick" / "main.py").read_text(encoding="utf-8")
     assert "decide_trading_day_guard(" in src
+
+
+def test_multi_tick_io_and_decision_failure_audit_fields_are_distinguishable() -> None:
+    base = Path(__file__).resolve().parents[1]
+    src = (base / "scripts" / "multi_tick" / "main.py").read_text(encoding="utf-8")
+    assert "normalize_subprocess_adapter_payload(" in src
+    assert "normalize_pipeline_subprocess_output(" in src
+    assert "normalize_notify_subprocess_output(" in src
+    assert "failure_kind='io_error'" in src
+    assert "failure_kind='decision_error'" in src
