@@ -28,6 +28,10 @@ if str(_repo_root) not in sys.path:
 
 from scripts.io_utils import utc_now
 from om.domain import (
+    Decision,
+    DeliveryPlan,
+    SchemaValidationError,
+    SnapshotDTO,
     markets_for_trading_day_guard as domain_markets_for_trading_day_guard,
     normalize_notify_subprocess_output,
     normalize_pipeline_subprocess_output,
@@ -42,6 +46,8 @@ from scripts.infra.service import (
     send_openclaw_message,
     trading_day_via_futu,
 )
+
+SCHEMA_VALIDATION_ERROR_CODE = "SCHEMA_VALIDATION_FAILED"
 
 
 def _infer_trading_day_guard_markets(cfg_obj: dict) -> list[str]:
@@ -96,6 +102,33 @@ def _release_lock(fd: int, lock_path: Path):
         lock_path.unlink(missing_ok=True)
     except Exception:
         pass
+
+
+def _fail_schema_validation(*, base: Path, vpy: Path, last_run: Path, started: str, stage: str, exc: BaseException) -> None:
+    msg = f"{stage}: {type(exc).__name__}: {exc}"
+    try:
+        sh(
+            [
+                str(vpy),
+                "scripts/write_last_run.py",
+                "--path",
+                str(last_run),
+                "--status",
+                "error",
+                "--stage",
+                "contract",
+                "--reason",
+                SCHEMA_VALIDATION_ERROR_CODE,
+                "--details",
+                msg,
+                "--started-at",
+                started,
+            ],
+            cwd=base,
+        )
+    except Exception:
+        pass
+    raise SystemExit(f"[CONTRACT_ERROR][{SCHEMA_VALIDATION_ERROR_CODE}] {msg}")
 
 
 def main():
@@ -171,11 +204,50 @@ def main():
             sys.stderr.write(sch.stderr)
             raise SystemExit(sch.returncode)
 
-        scheduler_raw = json.loads((sch.stdout or '').strip())
-        scheduler_decision, scheduler_view = resolve_scheduler_decision(scheduler_raw)
-        should_run = bool(scheduler_view.should_run_scan)
-        should_notify = decide_notify_window_open(scheduler_decision=scheduler_view)
-        reason = str(scheduler_view.reason)
+        try:
+            scheduler_raw = json.loads((sch.stdout or "").strip())
+            scheduler_snapshot = SnapshotDTO.from_payload(
+                {
+                    "schema_kind": "snapshot_dto",
+                    "schema_version": "1.0",
+                    "snapshot_name": "send_if_needed_scheduler_raw",
+                    "as_of_utc": utc_now(),
+                    "payload": scheduler_raw,
+                }
+            )
+            scheduler_decision, scheduler_view = resolve_scheduler_decision(scheduler_snapshot.payload)
+            account_name = str(((cfg_obj.get("portfolio") or {}).get("account") or "default")).strip() or "default"
+            decision = Decision.from_payload(
+                {
+                    "schema_kind": "decision",
+                    "schema_version": "1.0",
+                    "account": account_name,
+                    "should_run": bool(scheduler_view.should_run_scan),
+                    "should_notify": bool(decide_notify_window_open(scheduler_decision=scheduler_view)),
+                    "reason": str(scheduler_view.reason),
+                }
+            )
+        except SchemaValidationError as e:
+            _fail_schema_validation(
+                base=base,
+                vpy=vpy,
+                last_run=last_run,
+                started=started,
+                stage="scheduler_decision",
+                exc=e,
+            )
+        except Exception as e:
+            _fail_schema_validation(
+                base=base,
+                vpy=vpy,
+                last_run=last_run,
+                started=started,
+                stage="scheduler_parse",
+                exc=e,
+            )
+        should_run = bool(decision.should_run)
+        should_notify = bool(decision.should_notify)
+        reason = str(decision.reason)
 
         if not should_run:
             sh([str(vpy), 'scripts/write_last_run.py', '--path', str(last_run), '--status', 'skip', '--stage', 'scheduler', '--reason', reason, '--started-at', started], cwd=base)
@@ -238,10 +310,36 @@ def main():
             pass
 
         meaningful = bool(text) and (text != '今日无需要主动提醒的内容。')
+        account_name = str(((cfg_obj.get("portfolio") or {}).get("account") or "default")).strip() or "default"
+        try:
+            delivery_plan = DeliveryPlan.from_payload(
+                {
+                    "schema_kind": "delivery_plan",
+                    "schema_version": "1.0",
+                    "channel": str(channel),
+                    "target": str(target),
+                    "account_messages": {account_name: text},
+                    "should_send": bool(should_notify and meaningful),
+                }
+            )
+        except SchemaValidationError as e:
+            _fail_schema_validation(
+                base=base,
+                vpy=vpy,
+                last_run=last_run,
+                started=started,
+                stage="delivery_plan",
+                exc=e,
+            )
 
-        if should_notify and meaningful:
+        if bool(delivery_plan.should_send):
             # 3) send via OpenClaw CLI
-            send = send_openclaw_message(base=base, channel=channel, target=target, message=text)
+            send = send_openclaw_message(
+                base=base,
+                channel=str(delivery_plan.channel),
+                target=str(delivery_plan.target),
+                message=str(delivery_plan.account_messages.get(account_name) or ""),
+            )
             send_payload = normalize_notify_subprocess_output(
                 returncode=int(send.returncode),
                 stdout=str(send.stdout or ""),
