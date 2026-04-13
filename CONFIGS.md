@@ -49,3 +49,10 @@ cd /home/node/.openclaw/workspace/options-monitor
 
 - `portfolio-management/config.json` 仅用于 PM 凭证与 Bitable 读取，不是 options-monitor 运行入口配置。
 - 历史示例文件（如 `config.legacy.example.json` / `config.market_*.example.json` / `config.scheduled.example.json`）仅用于参考与回滚对照，不作为当前入口。
+
+## Derived Config Gate（灰度）
+
+- 环境变量：`OM_ALLOW_DERIVED_CONFIG`
+- 当前读点：`scripts/multi_tick/main.py`（在调用 `ensure_runtime_canonical_config(..., allow_derived=...)` 前读取）
+- 当前写点：无（仓库内没有对该变量的写入逻辑）
+- 影响面（当前）：仅影响多账户 tick 入口对“兼容派生配置是否允许”的判定；默认未设置时保持现有行为，不强制关闭。

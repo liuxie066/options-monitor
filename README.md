@@ -32,6 +32,8 @@ cp config.example.hk.json config.hk.json
 
 ## First-Day Usage（高频命令）
 
+说明：dev 主线统一运行入口为 `scripts/send_if_needed_multi.py`（内部委托 `scripts.multi_tick.main.main`）；线上定时调度入口保持 `scripts/send_if_needed.py` 不变。
+
 ### 生产 tick（按 scheduler 决策是否扫描/是否通知）
 
 ```bash
