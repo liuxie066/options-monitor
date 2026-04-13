@@ -59,6 +59,29 @@ def extract_change_lines(text: str) -> list[str]:
 
 
 _MD_LINK_RE = re.compile(r"^\[(?P<label>[^\]]+)\]\((?P<target>[^\)]+)\)$")
+_MISSING_MARKERS = {"", "-", "nan", "none", "null", "n/a", "na"}
+
+
+def _is_missing_value(value: str | None) -> bool:
+    if value is None:
+        return True
+    v = str(value).strip().lower()
+    return v in _MISSING_MARKERS
+
+
+def _present_or_missing(value: str | None, *, reason: str) -> str:
+    if _is_missing_value(value):
+        return f"缺失({reason})"
+    return str(value).strip()
+
+
+def _value_after_prefix(token: str | None, prefix: str) -> str:
+    if not token:
+        return ''
+    s = str(token).strip()
+    if not s.startswith(prefix):
+        return s
+    return s[len(prefix):].strip()
 
 
 def _symbol_parts(symbol: str) -> tuple[str, str]:
@@ -92,6 +115,14 @@ def _parse_contract(contract: str) -> tuple[str, str]:
     if not m:
         return ('-', s or '-')
     return (m.group('exp').strip(), m.group('strike').strip())
+
+
+def _normalize_contract_strike(strike_token: str) -> str:
+    s = (strike_token or '').strip()
+    m = re.match(r'^(?P<num>\d+(?:\.\d+)?)[CP]$', s, flags=re.IGNORECASE)
+    if m:
+        return m.group('num')
+    return s
 
 
 def _infer_account_label(*paths: Path | None) -> str:
@@ -145,10 +176,9 @@ def _format_alert_line(line: str, *, account_label: str = '当前账户') -> str
     mid = next((p for p in parts if p.startswith('mid ')), '')
     ccy = next((p for p in parts if p.startswith('ccy ')), '')
 
-    # For notification we intentionally do not surface bid/ask/delta/risk here.
     extras: dict[str, str] = {}
     comment = ''
-    for p in parts[8:]:
+    for p in parts[3:]:
         if p.startswith('通过准入') or p.startswith('已通过准入') or p.startswith('当前') or p.startswith('所需'):
             comment = p
             continue
@@ -158,6 +188,7 @@ def _format_alert_line(line: str, *, account_label: str = '当前账户') -> str
 
     if strategy == 'sell_put':
         cash_req_cny = extras.get('cash_req_cny', '')
+        cash_req_usd = extras.get('cash_req', '')
         delta = extras.get('delta', '')
         iv = extras.get('iv', '') or extras.get('IV', '')
 
@@ -166,24 +197,34 @@ def _format_alert_line(line: str, *, account_label: str = '当前账户') -> str
         premium = f"{price_val} ({ccy_val})" if ccy_val else price_val
         sug = _suggest_sell_price_tag(mid, None, None)
 
-        margin = '-'
-        if cash_req_cny:
-            v = str(cash_req_cny).strip()
+        margin = _present_or_missing('', reason='告警未提供cash_req_cny/cash_req')
+        raw_margin = cash_req_cny if not _is_missing_value(cash_req_cny) else cash_req_usd
+        if not _is_missing_value(raw_margin):
+            v = str(raw_margin).strip()
             margin = v
             try:
                 cleaned = ''.join(ch for ch in v if (ch.isdigit() or ch in '.-'))
                 if cleaned and cleaned not in ('-', '.', '-.'):
                     n = float(cleaned)
-                    margin = f"¥{n:,.0f} (CNY)"
+                    if v.startswith('¥') or (not _is_missing_value(cash_req_cny) and _is_missing_value(cash_req_usd)):
+                        margin = f"¥{n:,.0f} (CNY)"
+                    elif '$' in v or (not _is_missing_value(cash_req_usd) and _is_missing_value(cash_req_cny)):
+                        margin = f"${n:,.0f} (USD)"
             except Exception:
-                pass
+                margin = _present_or_missing('', reason=f'cash_req值无效:{v}')
 
-        strike_val = strike_tag.replace('Strike ', '').strip() if strike_tag else strike_from_contract
+        strike_from_tag = strike_tag.replace('Strike ', '').strip() if strike_tag else ''
+        strike_val = strike_from_tag if not _is_missing_value(strike_from_tag) else _normalize_contract_strike(strike_from_contract)
+        strike_show = _present_or_missing(strike_val, reason='告警未提供Strike/合约行权价')
+        annual_val = _value_after_prefix(annual, '年化')
+        annual_show = f"年化 {_present_or_missing(annual_val, reason='告警未提供年化')}"
+        delta_show = _present_or_missing(delta, reason='告警未提供delta')
+        iv_show = _present_or_missing(iv, reason='告警未提供iv')
         title = f"### [{account_label}] {symbol_name} | 到期 {exp} | 策略 卖Put"
         out = [
             title,
             f"- {symbol_name} 卖Put {contract}",
-            f"- 指标: 方向=卖Put | 行权价={strike_val} | 数量=1张(默认) | 权利金={premium} | {annual or '年化 -'} | {income_int_tag(income) or '净收 -'} | 保证金占用={margin} | delta={delta or '-'} | IV={iv or '-'}",
+            f"- 指标: 方向=卖Put | 行权价={strike_show} | 数量=1张(默认) | 权利金={premium} | {annual_show} | {income_int_tag(income) or '净收 -'} | 保证金占用={margin} | delta={delta_show} | IV={iv_show}",
         ]
         if sug:
             out.append(f"- 建议挂单: {sug.replace('建议挂单 ', '').strip()}")
