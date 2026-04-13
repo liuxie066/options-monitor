@@ -57,6 +57,8 @@ def test_normalize_processor_rows_requires_list_contract() -> None:
 def test_three_source_adapters_produce_unified_dto() -> None:
     opend = adapt_opend_tool_payload(
         {
+            "schema_kind": "tool_execution",
+            "schema_version": "1.0",
             "symbol": "AAPL",
             "tool_name": "required_data_prefetch",
             "status": "fetched",
@@ -99,6 +101,8 @@ def test_three_source_adapters_produce_unified_dto() -> None:
 def test_opend_adapter_marks_fallback_and_unified_error_code() -> None:
     timeout_case = adapt_opend_tool_payload(
         {
+            "schema_kind": "tool_execution",
+            "schema_version": "1.0",
             "symbol": "AAPL",
             "tool_name": "required_data_prefetch",
             "status": "error",
@@ -115,6 +119,8 @@ def test_opend_adapter_marks_fallback_and_unified_error_code() -> None:
 
     fallback_ok = adapt_opend_tool_payload(
         {
+            "schema_kind": "tool_execution",
+            "schema_version": "1.0",
             "symbol": "AAPL",
             "tool_name": "required_data_prefetch",
             "status": "fetched",
@@ -128,12 +134,31 @@ def test_opend_adapter_marks_fallback_and_unified_error_code() -> None:
     assert fallback_ok["error_code"] is None
 
 
+def test_opend_adapter_rejects_non_tool_execution_schema() -> None:
+    try:
+        adapt_opend_tool_payload(
+            {
+                "schema_kind": "bad_kind",
+                "schema_version": "1.0",
+                "symbol": "AAPL",
+                "tool_name": "required_data_prefetch",
+                "status": "fetched",
+                "ok": True,
+                "source": "opend",
+            }
+        )
+        raise AssertionError("expected ValueError")
+    except ValueError as e:
+        assert "schema_kind must be tool_execution" in str(e)
+
+
 def main() -> None:
     test_normalize_processor_row_requires_symbol_and_strategy()
     test_source_snapshot_validates_and_normalizes()
     test_normalize_processor_rows_requires_list_contract()
     test_three_source_adapters_produce_unified_dto()
     test_opend_adapter_marks_fallback_and_unified_error_code()
+    test_opend_adapter_rejects_non_tool_execution_schema()
     print("OK (canonical-schema-adapters)")
 
 

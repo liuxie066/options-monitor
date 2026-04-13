@@ -117,7 +117,7 @@ def decide_should_notify(
             build_scheduler_decision_dto(scheduler_decision)
         )
     account_decision_raw = notify_decision_by_account.get(str(account))
-    account_decision: dict[str, Any] | AccountSchedulerDecisionView | None
+    account_decision: AccountSchedulerDecisionView | None
     if account_decision_raw is None or isinstance(account_decision_raw, AccountSchedulerDecisionView):
         account_decision = account_decision_raw
     elif isinstance(account_decision_raw, dict) and str(account_decision_raw.get('schema_kind') or '') == 'scheduler_decision_account':
@@ -126,9 +126,12 @@ def decide_should_notify(
             scheduler_decision=scheduler_view,
         )
     else:
-        account_decision = build_account_scheduler_decision_dto(
+        account_decision_dto = build_account_scheduler_decision_dto(
             account_decision_raw,
             scheduler_decision=scheduler_view,
+        )
+        account_decision = AccountSchedulerDecisionView(
+            is_notify_window_open=bool(account_decision_dto.get('is_notify_window_open')),
         )
     return bool(
         decide_account_notify_window_open(

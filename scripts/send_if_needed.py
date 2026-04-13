@@ -206,16 +206,28 @@ def main():
 
         try:
             scheduler_raw = json.loads((sch.stdout or "").strip())
-            scheduler_snapshot = SnapshotDTO.from_payload(
+            scheduler_input_snapshot = SnapshotDTO.from_payload(
                 {
                     "schema_kind": "snapshot_dto",
                     "schema_version": "1.0",
                     "snapshot_name": "send_if_needed_scheduler_raw",
                     "as_of_utc": utc_now(),
-                    "payload": scheduler_raw,
+                    "payload": {"scheduler_raw": scheduler_raw},
                 }
             )
-            scheduler_decision, scheduler_view = resolve_scheduler_decision(scheduler_snapshot.payload)
+            scheduler_payload = scheduler_input_snapshot.payload.get("scheduler_raw")
+            if not isinstance(scheduler_payload, dict):
+                raise SchemaValidationError("scheduler_raw must be a dict")
+            scheduler_decision, scheduler_view = resolve_scheduler_decision(scheduler_payload)
+            SnapshotDTO.from_payload(
+                {
+                    "schema_kind": "snapshot_dto",
+                    "schema_version": "1.0",
+                    "snapshot_name": "send_if_needed_scheduler_decision",
+                    "as_of_utc": utc_now(),
+                    "payload": {"scheduler_decision": scheduler_decision},
+                }
+            )
             account_name = str(((cfg_obj.get("portfolio") or {}).get("account") or "default")).strip() or "default"
             decision = Decision.from_payload(
                 {
@@ -289,11 +301,21 @@ def main():
             report_dir=report_dir,
             state_dir=state_dir,
         )
-        pipe_payload = normalize_pipeline_subprocess_output(
-            returncode=int(pipe.returncode),
-            stdout=str(pipe.stdout or ""),
-            stderr=str(pipe.stderr or ""),
-        )
+        try:
+            pipe_payload = normalize_pipeline_subprocess_output(
+                returncode=int(pipe.returncode),
+                stdout=str(pipe.stdout or ""),
+                stderr=str(pipe.stderr or ""),
+            )
+        except ValueError as e:
+            _fail_schema_validation(
+                base=base,
+                vpy=vpy,
+                last_run=last_run,
+                started=started,
+                stage="pipeline_subprocess_adapter",
+                exc=e,
+            )
         if not bool(pipe_payload.get("ok")):
             sh([str(vpy), 'scripts/write_last_run.py', '--path', str(last_run), '--status', 'error', '--stage', 'pipeline', '--reason', 'pipeline failed', '--started-at', started], cwd=base)
             return int(pipe_payload.get("returncode") or pipe.returncode)
@@ -340,11 +362,21 @@ def main():
                 target=str(delivery_plan.target),
                 message=str(delivery_plan.account_messages.get(account_name) or ""),
             )
-            send_payload = normalize_notify_subprocess_output(
-                returncode=int(send.returncode),
-                stdout=str(send.stdout or ""),
-                stderr=str(send.stderr or ""),
-            )
+            try:
+                send_payload = normalize_notify_subprocess_output(
+                    returncode=int(send.returncode),
+                    stdout=str(send.stdout or ""),
+                    stderr=str(send.stderr or ""),
+                )
+            except ValueError as e:
+                _fail_schema_validation(
+                    base=base,
+                    vpy=vpy,
+                    last_run=last_run,
+                    started=started,
+                    stage="notify_subprocess_adapter",
+                    exc=e,
+                )
             if not bool(send_payload.get("ok")):
                 sh([str(vpy), 'scripts/write_last_run.py', '--path', str(last_run), '--status', 'error', '--stage', 'send', '--details', (send.stderr or send.stdout or '').strip(), '--started-at', started], cwd=base)
                 sys.stderr.write(send.stderr)

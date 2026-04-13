@@ -9,6 +9,7 @@ from typing import Any
 
 from om.storage import paths
 from om.storage.repositories import run_repo
+from om.domain.intermediate_objects import SnapshotDTO
 from scripts.io_utils import atomic_write_json as write_json
 from scripts.io_utils import read_json
 
@@ -38,9 +39,10 @@ def run_account_state_dir(base: Path, run_id: str, account: str) -> Path:
 
 
 def write_scheduler_decision(base: Path, run_id: str, payload: dict[str, Any]) -> Path:
+    normalized = SnapshotDTO.from_payload(payload).to_payload()
     out = run_state_dir(base, run_id) / "scheduler_decision.json"
-    write_json(out, payload)
-    write_shared_current_read_model(base, "scheduler_decision.current.json", payload)
+    write_json(out, normalized)
+    write_shared_current_read_model(base, "scheduler_decision.current.json", normalized)
     return out
 
 

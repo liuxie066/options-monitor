@@ -143,3 +143,73 @@ def test_send_if_needed_validates_delivery_plan_even_when_not_sending() -> None:
     finally:
         mod.DeliveryPlan.from_payload = old_delivery_from_payload  # type: ignore[method-assign]
         _restore(mod, old)
+
+
+def test_send_if_needed_blocks_on_pipeline_subprocess_adapter_schema_failure() -> None:
+    mod = importlib.import_module("scripts.send_if_needed")
+    old = _patch_common(mod)
+    cfg_path = (BASE / "config.us.json").resolve()
+    old_normalize = mod.normalize_pipeline_subprocess_output
+    try:
+        mod.run_scan_scheduler_cli = lambda **_kwargs: SimpleNamespace(  # type: ignore[assignment]
+            returncode=0,
+            stdout=json.dumps({"should_run_scan": True, "is_notify_window_open": False, "reason": "ok"}),
+            stderr="",
+        )
+        mod.normalize_pipeline_subprocess_output = lambda **_kwargs: (_ for _ in ()).throw(ValueError("bad pipeline adapter"))  # type: ignore[assignment]
+        sys.argv = [
+            "send_if_needed.py",
+            "--config",
+            str(cfg_path),
+            "--state-dir",
+            "output/state_test_send_if_needed_batch4",
+            "--target",
+            "user:test",
+            "--notification",
+            "README.md",
+        ]
+        try:
+            mod.main()
+            assert False, "expected SystemExit"
+        except SystemExit as exc:
+            msg = str(exc)
+            assert "SCHEMA_VALIDATION_FAILED" in msg
+            assert "pipeline_subprocess_adapter" in msg
+    finally:
+        mod.normalize_pipeline_subprocess_output = old_normalize  # type: ignore[assignment]
+        _restore(mod, old)
+
+
+def test_send_if_needed_blocks_on_notify_subprocess_adapter_schema_failure() -> None:
+    mod = importlib.import_module("scripts.send_if_needed")
+    old = _patch_common(mod)
+    cfg_path = (BASE / "config.us.json").resolve()
+    old_normalize = mod.normalize_notify_subprocess_output
+    try:
+        mod.run_scan_scheduler_cli = lambda **_kwargs: SimpleNamespace(  # type: ignore[assignment]
+            returncode=0,
+            stdout=json.dumps({"should_run_scan": True, "is_notify_window_open": True, "reason": "ok"}),
+            stderr="",
+        )
+        mod.normalize_notify_subprocess_output = lambda **_kwargs: (_ for _ in ()).throw(ValueError("bad notify adapter"))  # type: ignore[assignment]
+        sys.argv = [
+            "send_if_needed.py",
+            "--config",
+            str(cfg_path),
+            "--state-dir",
+            "output/state_test_send_if_needed_batch4",
+            "--target",
+            "user:test",
+            "--notification",
+            "README.md",
+        ]
+        try:
+            mod.main()
+            assert False, "expected SystemExit"
+        except SystemExit as exc:
+            msg = str(exc)
+            assert "SCHEMA_VALIDATION_FAILED" in msg
+            assert "notify_subprocess_adapter" in msg
+    finally:
+        mod.normalize_notify_subprocess_output = old_normalize  # type: ignore[assignment]
+        _restore(mod, old)

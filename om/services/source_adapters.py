@@ -4,10 +4,11 @@ from typing import Any
 
 from om.domain.canonical_schema import normalize_source_snapshot
 from om.domain.error_policy import classify_failure
+from om.domain.tool_boundary import SCHEMA_KIND_TOOL_EXECUTION, validate_schema_payload
 
 
 def adapt_opend_tool_payload(payload: dict[str, Any] | Any) -> dict[str, Any]:
-    src = payload if isinstance(payload, dict) else {}
+    src = validate_schema_payload((payload if isinstance(payload, dict) else {}), kind=SCHEMA_KIND_TOOL_EXECUTION)
     ok = bool(src.get("ok"))
     source_norm = str(src.get("source") or "").strip().lower()
     fallback_used = bool(source_norm and source_norm != "opend")
