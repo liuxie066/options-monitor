@@ -17,6 +17,7 @@ DELIVERY_PIPELINE_FILES = [
     BASE / "scripts" / "pipeline_alert_steps.py",
     BASE / "scripts" / "pipeline_postprocess.py",
     BASE / "scripts" / "required_data_steps.py",
+    BASE / "scripts" / "pipeline_fetch_models.py",
 ]
 
 

@@ -109,9 +109,63 @@ def test_ensure_required_data_skips_when_read_model_is_ok_and_dte_satisfies() ->
     assert called == []
 
 
+def test_ensure_required_data_does_not_read_raw_fetch_file_on_main_path() -> None:
+    import pathlib
+    import scripts.required_data_steps as mod
+
+    root = (BASE / "tests" / ".tmp_pipeline_fetch_read_model_no_raw").resolve()
+    if root.exists():
+        shutil.rmtree(root, ignore_errors=True)
+    root.mkdir(parents=True, exist_ok=True)
+    required, state_dir = _make_dirs(root)
+    symbol = "AAPL"
+    (required / "parsed" / f"{symbol}_required_data.csv").write_text("dte\n12\n", encoding="utf-8")
+    (required / "raw" / f"{symbol}_required_data.json").write_text(
+        '{"meta": {"error": "legacy_error"}}',
+        encoding="utf-8",
+    )
+
+    old_run_cmd = mod.run_cmd
+    old_read_text = pathlib.Path.read_text
+    called: list[list[str]] = []
+    raw_touched: list[Path] = []
+
+    def _guard_read_text(self: Path, *args, **kwargs):  # type: ignore[no-untyped-def]
+        p = str(self)
+        if p.endswith(f"{symbol}_required_data.json"):
+            raw_touched.append(self)
+        return old_read_text(self, *args, **kwargs)
+
+    try:
+        mod.run_cmd = lambda cmd, **_kw: called.append(list(cmd))  # type: ignore[assignment]
+        pathlib.Path.read_text = _guard_read_text  # type: ignore[assignment]
+        mod.ensure_required_data(
+            py="python3",
+            base=BASE,
+            symbol=symbol,
+            required_data_dir=required,
+            limit_expirations=2,
+            want_put=True,
+            want_call=False,
+            timeout_sec=5,
+            is_scheduled=False,
+            state_dir=state_dir,
+            fetch_source="opend",
+            fetch_host="127.0.0.1",
+            fetch_port=11111,
+        )
+    finally:
+        mod.run_cmd = old_run_cmd  # type: ignore[assignment]
+        pathlib.Path.read_text = old_read_text  # type: ignore[assignment]
+
+    assert called == []
+    assert raw_touched == []
+
+
 def main() -> None:
     test_ensure_required_data_uses_read_model_error_to_force_refetch()
     test_ensure_required_data_skips_when_read_model_is_ok_and_dte_satisfies()
+    test_ensure_required_data_does_not_read_raw_fetch_file_on_main_path()
     print("OK (pipeline-fetch-read-model-boundary)")
 
 
