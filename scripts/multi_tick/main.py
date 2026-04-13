@@ -59,6 +59,7 @@ from om.domain import (
     evaluate_dnd_quiet_hours,
     classify_failure,
     ensure_runtime_canonical_config,
+    resolve_config_contract,
     markets_for_trading_day_guard as domain_markets_for_trading_day_guard,
     reduce_trading_day_guard,
     resolve_notification_route_from_config,
@@ -164,7 +165,25 @@ def main() -> int:
     cfg_path = Path(args.config)
     if not cfg_path.is_absolute():
         cfg_path = (base / cfg_path).resolve()
-    allow_derived_config = str(os.environ.get('OM_ALLOW_DERIVED_CONFIG', '')).strip() in {'1', 'true', 'TRUE'}
+    allow_derived_raw = str(os.environ.get('OM_ALLOW_DERIVED_CONFIG', '')).strip()
+    allow_derived_config = allow_derived_raw.lower() in {'1', 'true'}
+    if allow_derived_raw and not allow_derived_config:
+        runlog.safe_event(
+            'config_guard',
+            'warn',
+            error_code='OM_ALLOW_DERIVED_CONFIG_INVALID',
+            message='OM_ALLOW_DERIVED_CONFIG is set but not recognized; treated as disabled.',
+            data=_safe_runlog_data({'raw': allow_derived_raw}),
+        )
+    contract_info = resolve_config_contract(cfg_path, str(getattr(args, 'market_config', 'auto') or 'auto'))
+    if allow_derived_config and (not contract_info.get('is_canonical', False) or not contract_info.get('market_match', False)):
+        runlog.safe_event(
+            'config_guard',
+            'warn',
+            error_code='OM_ALLOW_DERIVED_CONFIG_ENABLED',
+            message='OM_ALLOW_DERIVED_CONFIG enabled for non-canonical or market-mismatch runtime config.',
+            data=_safe_runlog_data(contract_info),
+        )
     ensure_runtime_canonical_config(
         cfg_path,
         str(getattr(args, 'market_config', 'auto') or 'auto'),
