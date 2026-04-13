@@ -51,6 +51,7 @@ CRITICAL_MODULES = [
     "test_http_json_http_error_handling",
     "test_feishu_bitable",
     "test_phase1_tool_boundary",
+    "test_domain_engine_batch4",
     "test_send_if_needed_batch3",
 ]
 
