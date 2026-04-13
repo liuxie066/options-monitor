@@ -15,8 +15,8 @@ def test_multi_tick_scheduler_and_account_decision_use_objectized_contract_path(
     base = Path(__file__).resolve().parents[1]
     src = (base / "scripts" / "multi_tick" / "main.py").read_text(encoding="utf-8")
     assert "snapshot_name': 'scheduler_raw'" in src
-    assert "AccountSchedulerDecisionView.from_payload(" in src
-    assert "build_account_scheduler_decision_dto(" in src
+    assert "resolve_multi_tick_engine_entrypoint(" in src
+    assert "account scheduler decision view must be valid" in src
     assert "stage='account_scheduler_decision'" in src
 
 
@@ -24,6 +24,8 @@ def test_multi_tick_trading_day_guard_decision_delegates_to_engine() -> None:
     base = Path(__file__).resolve().parents[1]
     src = (base / "scripts" / "multi_tick" / "main.py").read_text(encoding="utf-8")
     assert "decide_trading_day_guard(" in src
+    assert "opend_unhealthy={" in src
+    assert "notify_dispatch=dispatch_decision" in src
 
 
 def test_multi_tick_io_and_decision_failure_audit_fields_are_distinguishable() -> None:

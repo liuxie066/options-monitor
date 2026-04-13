@@ -440,3 +440,59 @@ def decide_trading_day_guard(
         'should_skip': bool(reduced.get('should_skip')),
         'skip_message': str(reduced.get('skip_message') or ''),
     }
+
+
+def resolve_multi_tick_engine_entrypoint(
+    *,
+    scheduler_raw: Any | None = None,
+    account_scheduler_raw_by_account: Mapping[str, Any] | None = None,
+    opend_unhealthy: Mapping[str, Any] | None = None,
+    notify_dispatch: Mapping[str, Any] | Any = None,
+    dnd_decision: Mapping[str, Any] | Any = None,
+    normalize_fn: Callable[[Any], Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Single engine entrypoint for scheduler/watchdog/notify decision resolution."""
+    out: dict[str, Any] = {}
+
+    if scheduler_raw is not None:
+        scheduler_decision, scheduler_view = resolve_scheduler_decision(
+            scheduler_raw,
+            normalize_fn=normalize_fn,
+        )
+        scheduler_bundle: dict[str, Any] = {
+            'scheduler_decision': scheduler_decision,
+            'scheduler_view': scheduler_view,
+            'account_scheduler_decisions': {},
+            'account_scheduler_views': {},
+        }
+        for acct, raw in (account_scheduler_raw_by_account or {}).items():
+            acct_key = str(acct)
+            account_decision_dto = build_account_scheduler_decision_dto(
+                raw,
+                scheduler_decision=scheduler_view,
+            )
+            account_view = AccountSchedulerDecisionView.from_payload(
+                account_decision_dto,
+                scheduler_decision=scheduler_view,
+            )
+            scheduler_bundle['account_scheduler_decisions'][acct_key] = account_decision_dto
+            scheduler_bundle['account_scheduler_views'][acct_key] = account_view
+        out['scheduler'] = scheduler_bundle
+
+    if opend_unhealthy is not None:
+        out['watchdog'] = build_opend_unhealthy_execution_plan(
+            error_code=str(opend_unhealthy.get('error_code') or 'OPEND_API_ERROR'),
+            degraded=bool(opend_unhealthy.get('degraded')),
+            message_text=str(opend_unhealthy.get('message_text') or ''),
+            detail_text=str(opend_unhealthy.get('detail_text') or ''),
+            host=opend_unhealthy.get('host'),
+            port=opend_unhealthy.get('port'),
+        )
+
+    if (notify_dispatch is not None) or (dnd_decision is not None):
+        out['notify'] = decide_notify_dispatch_gate(
+            dispatch_decision=notify_dispatch or {},
+            dnd_decision=dnd_decision or {},
+        )
+
+    return out
