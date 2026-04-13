@@ -63,12 +63,11 @@ from om.domain import (
     select_scheduler_state_filename,
 )
 from om.domain.engine import (
-    SchedulerDecisionView,
-    build_scheduler_decision_dto,
     decide_notification_meaningful,
     decide_opend_degrade_to_yahoo,
     filter_notify_candidates as engine_filter_notify_candidates,
     rank_notify_candidates,
+    resolve_scheduler_decision,
 )
 from scripts.infra.service import (
     run_opend_watchdog,
@@ -560,8 +559,7 @@ def main() -> int:
         return 0
 
     scheduler_raw = json.loads((scheduler_proc.stdout or '').strip())
-    scheduler_decision = build_scheduler_decision_dto(scheduler_raw)
-    scheduler_view = SchedulerDecisionView.from_payload(scheduler_decision)
+    scheduler_decision, scheduler_view = resolve_scheduler_decision(scheduler_raw)
     should_run_global = bool(scheduler_view.should_run_scan)
     reason_global = str(scheduler_view.reason)
 

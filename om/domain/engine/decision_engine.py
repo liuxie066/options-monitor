@@ -96,6 +96,20 @@ def build_scheduler_decision_dto(
     }
 
 
+def resolve_scheduler_decision(
+    scheduler_raw: Any,
+    *,
+    normalize_fn: Callable[[Any], Mapping[str, Any]] | None = None,
+) -> tuple[dict[str, Any], SchedulerDecisionView]:
+    """Single entrypoint for scheduler legacy/alias reads at domain boundary."""
+    scheduler_decision = build_scheduler_decision_dto(
+        scheduler_raw,
+        normalize_fn=normalize_fn,
+    )
+    scheduler_view = SchedulerDecisionView.from_payload(scheduler_decision)
+    return scheduler_decision, scheduler_view
+
+
 def build_account_scheduler_decision_dto(
     account_scheduler_raw: Any,
     *,

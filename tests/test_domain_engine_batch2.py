@@ -144,3 +144,18 @@ def test_decide_notification_meaningful_keeps_existing_predicate() -> None:
     assert decide_notification_meaningful('hello') is True
     assert decide_notification_meaningful('') is False
     assert decide_notification_meaningful('今日无需要主动提醒的内容。') is False
+
+
+def test_resolve_scheduler_decision_centralizes_legacy_alias_reads() -> None:
+    from om.domain.engine import resolve_scheduler_decision
+
+    dto, view = resolve_scheduler_decision(
+        {'should_run_scan': 1, 'should_notify': 0, 'reason': 'compat-alias'}
+    )
+
+    assert dto['schema_kind'] == 'scheduler_decision'
+    assert dto['schema_version'] == '1.0'
+    assert dto['is_notify_window_open'] is False
+    assert view.should_run_scan is True
+    assert view.is_notify_window_open is False
+    assert view.reason == 'compat-alias'

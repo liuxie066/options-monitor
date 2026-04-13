@@ -34,7 +34,7 @@ from om.domain import (
     resolve_notification_channel_target,
     resolve_scheduler_state_path,
 )
-from om.domain.engine import SchedulerDecisionView, build_scheduler_decision_dto, decide_notify_window_open
+from om.domain.engine import decide_notify_window_open, resolve_scheduler_decision
 from scripts.infra.service import (
     run_command,
     run_pipeline_script,
@@ -173,8 +173,7 @@ def main():
             raise SystemExit(sch.returncode)
 
         scheduler_raw = json.loads((sch.stdout or '').strip())
-        scheduler_decision = build_scheduler_decision_dto(scheduler_raw)
-        scheduler_view = SchedulerDecisionView.from_payload(scheduler_decision)
+        scheduler_decision, scheduler_view = resolve_scheduler_decision(scheduler_raw)
         should_run = bool(scheduler_view.should_run_scan)
         should_notify = decide_notify_window_open(scheduler_decision=scheduler_view)
         reason = str(scheduler_view.reason)
