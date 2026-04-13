@@ -105,36 +105,6 @@ def backfill_symbol_snapshot_from_raw(
     symbol: str,
     source: str,
 ) -> dict[str, Any] | None:
-    current = read_symbol_fetch_current(state_dir=state_dir, symbol=symbol)
-    if isinstance(current, dict):
-        return current
-
-    sym = str(symbol or "").strip()
-    if not sym:
-        return None
-    raw_file = (required_data_dir / "raw" / f"{sym}_required_data.json").resolve()
-    if not (raw_file.exists() and raw_file.stat().st_size > 0):
-        return None
-
-    status = "ok"
-    reason = ""
-    try:
-        obj = json.loads(raw_file.read_text(encoding="utf-8"))
-        meta = obj.get("meta") if isinstance(obj, dict) else None
-        err = (meta or {}).get("error") if isinstance(meta, dict) else None
-        if err:
-            status = "error"
-            reason = str(err)
-    except Exception:
-        status = "error"
-        reason = "raw_unreadable"
-
-    record_fetch_snapshot(
-        state_dir=state_dir,
-        symbol=sym,
-        source=source,
-        status=status,
-        reason=reason,
-        fallback_used=False,
-    )
-    return read_symbol_fetch_current(state_dir=state_dir, symbol=sym)
+    _ = required_data_dir
+    _ = source
+    return read_symbol_fetch_current(state_dir=state_dir, symbol=symbol)
