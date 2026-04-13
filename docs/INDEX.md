@@ -8,7 +8,8 @@ This repo is meant to run as a repeatable monitoring pipeline.
 - Main pipeline: `./run_watchlist.sh` → `scripts/run_pipeline.py`
 - Scheduler: `scripts/cli/scan_scheduler_cli.py`
 - Alert engine: `scripts/alert_engine.py`
-- Multi-account notifier: `scripts/send_if_needed_multi.py`
+- Dev mainline unified entry: `scripts/send_if_needed_multi.py` (thin wrapper -> `scripts.multi_tick.main.main`)
+- Production scheduler entry (unchanged): `scripts/send_if_needed.py`
 
 ## Data + state
 
