@@ -399,6 +399,24 @@ def decide_pipeline_execution_result(
     }
 
 
+def build_failure_audit_fields(
+    *,
+    failure_kind: str,
+    failure_stage: str,
+    failure_adapter: str | None = None,
+) -> dict[str, Any]:
+    kind = str(failure_kind or '').strip().lower()
+    if kind not in {'io_error', 'decision_error'}:
+        kind = 'io_error'
+    out: dict[str, Any] = {
+        'failure_kind': kind,
+        'failure_stage': str(failure_stage or '').strip(),
+    }
+    if failure_adapter:
+        out['failure_adapter'] = str(failure_adapter).strip()
+    return out
+
+
 def decide_trading_day_guard(
     *,
     markets_to_run: list[str],

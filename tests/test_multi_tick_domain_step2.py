@@ -265,6 +265,30 @@ def test_decide_should_notify_uses_canonical_scheduler_dto_without_rebuilding() 
         mod.build_scheduler_decision_dto = old_build_scheduler_decision_dto  # type: ignore[assignment]
 
 
+def test_build_failure_audit_fields_distinguishes_io_vs_decision() -> None:
+    from om.domain.engine import build_failure_audit_fields
+
+    io_out = build_failure_audit_fields(
+        failure_kind='io_error',
+        failure_stage='scan_scheduler',
+        failure_adapter='scheduler',
+    )
+    assert io_out == {
+        'failure_kind': 'io_error',
+        'failure_stage': 'scan_scheduler',
+        'failure_adapter': 'scheduler',
+    }
+
+    decision_out = build_failure_audit_fields(
+        failure_kind='decision_error',
+        failure_stage='scheduler_decision',
+    )
+    assert decision_out == {
+        'failure_kind': 'decision_error',
+        'failure_stage': 'scheduler_decision',
+    }
+
+
 def test_filter_notify_candidates_matches_existing_predicate() -> None:
     from om.domain.multi_tick import filter_notify_candidates
     from scripts.multi_tick.misc import AccountResult
