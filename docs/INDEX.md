@@ -5,7 +5,7 @@ This repo is meant to run as a repeatable monitoring pipeline.
 ## Core entrypoints
 
 - Runtime config entry (OM only): `config.us.json` / `config.hk.json`
-- Main pipeline: `./run_watchlist.sh` → `scripts/run_pipeline.py`
+- Main pipeline: `./run_watchlist.sh` -> `scripts/run_pipeline.py`
 - Scheduler: `scripts/cli/scan_scheduler_cli.py`
 - Alert engine: `scripts/alert_engine.py`
 - Dev mainline unified entry: `scripts/send_if_needed_multi.py` (thin wrapper -> `scripts.multi_tick.main.main`)
@@ -18,7 +18,7 @@ This repo is meant to run as a repeatable monitoring pipeline.
 
 ## Option positions (write-back)
 
-- Parse message → normalized params: `scripts/parse_option_message.py`
+- Parse message -> normalized params: `scripts/parse_option_message.py`
 - Parse + write (safe by default): `scripts/option_intake.py` (default `--dry-run`)
 - CRUD: `scripts/option_positions.py`
 
@@ -34,3 +34,7 @@ This repo is meant to run as a repeatable monitoring pipeline.
 - Health: `python scripts/healthcheck.py --config config.us.json`
 - Health + notify (dry-run): `python scripts/healthcheck_and_notify.py --config config.us.json --dry-run`
 - Tests (no pytest): `./.venv/bin/python tests/run_tests.py`
+
+## Archived docs
+
+- Historical planning docs: `docs/archive/INDEX.md`
