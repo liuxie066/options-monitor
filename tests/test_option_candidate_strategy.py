@@ -1,0 +1,81 @@
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import pandas as pd
+
+
+def _add_repo_to_syspath() -> None:
+    base = Path(__file__).resolve().parents[1]
+    if str(base) not in sys.path:
+        sys.path.insert(0, str(base))
+
+
+def test_put_filter_and_rank_consistent_with_legacy_sort() -> None:
+    _add_repo_to_syspath()
+    from scripts.option_candidate_strategy import (
+        build_strategy_config,
+        filter_candidates,
+        rank_candidates,
+        score_candidates,
+    )
+
+    df = pd.DataFrame(
+        [
+            {"contract_symbol": "A", "annualized_net_return_on_cash_basis": 0.12, "net_income": 70, "otm_pct": 0.06, "spread_ratio": 0.20},
+            {"contract_symbol": "B", "annualized_net_return_on_cash_basis": 0.15, "net_income": 60, "otm_pct": 0.07, "spread_ratio": 0.10},
+            {"contract_symbol": "C", "annualized_net_return_on_cash_basis": 0.09, "net_income": 80, "otm_pct": 0.08, "spread_ratio": 0.10},
+            {"contract_symbol": "D", "annualized_net_return_on_cash_basis": 0.14, "net_income": 90, "otm_pct": 0.06, "spread_ratio": 0.40},
+            {"contract_symbol": "E", "annualized_net_return_on_cash_basis": 0.14, "net_income": 40, "otm_pct": 0.06, "spread_ratio": 0.20},
+        ]
+    )
+
+    cfg = build_strategy_config(
+        "put",
+        min_annualized_return=0.10,
+        min_net_income=50,
+        min_otm_pct=0.05,
+        max_spread_ratio=0.30,
+    )
+    ranked = rank_candidates(score_candidates(filter_candidates(df, cfg), cfg), cfg)
+    assert list(ranked["contract_symbol"]) == ["B", "A"]
+
+
+def test_put_layered_rank_matches_previous_fill_limit_behavior() -> None:
+    _add_repo_to_syspath()
+    from scripts.option_candidate_strategy import build_strategy_config, rank_candidates
+
+    df = pd.DataFrame(
+        [
+            {"symbol": "NVDA", "expiration": "2026-06-18", "strike": 1, "risk_label": "激进", "annualized_net_return_on_cash_basis": 0.20, "net_income": 100},
+            {"symbol": "NVDA", "expiration": "2026-06-18", "strike": 2, "risk_label": "激进", "annualized_net_return_on_cash_basis": 0.18, "net_income": 300},
+            {"symbol": "NVDA", "expiration": "2026-06-18", "strike": 3, "risk_label": "中性", "annualized_net_return_on_cash_basis": 0.16, "net_income": 90},
+            {"symbol": "NVDA", "expiration": "2026-06-18", "strike": 4, "risk_label": "保守", "annualized_net_return_on_cash_basis": 0.14, "net_income": 80},
+            {"symbol": "NVDA", "expiration": "2026-06-18", "strike": 5, "risk_label": "中性", "annualized_net_return_on_cash_basis": 0.13, "net_income": 120},
+            {"symbol": "NVDA", "expiration": "2026-06-18", "strike": 6, "risk_label": "保守", "annualized_net_return_on_cash_basis": 0.12, "net_income": 130},
+        ]
+    )
+
+    cfg = build_strategy_config("put")
+    layered = rank_candidates(df, cfg, layered=True, top=10)
+    assert list(layered["strike"]) == [1, 3, 4, 2, 5]
+    assert len(layered) == 5
+
+
+def test_call_mode_rank_uses_call_sort_columns() -> None:
+    _add_repo_to_syspath()
+    from scripts.option_candidate_strategy import build_strategy_config, rank_candidates
+
+    df = pd.DataFrame(
+        [
+            {"contract_symbol": "C1", "annualized_net_premium_return": 0.10, "if_exercised_total_return": 0.20, "net_income": 110},
+            {"contract_symbol": "C2", "annualized_net_premium_return": 0.10, "if_exercised_total_return": 0.21, "net_income": 100},
+            {"contract_symbol": "C3", "annualized_net_premium_return": 0.09, "if_exercised_total_return": 0.30, "net_income": 130},
+        ]
+    )
+
+    cfg = build_strategy_config("call")
+    ranked = rank_candidates(df, cfg)
+    assert list(ranked["contract_symbol"]) == ["C2", "C1", "C3"]
+
