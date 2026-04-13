@@ -31,7 +31,7 @@ from om.domain import (
     markets_for_trading_day_guard as domain_markets_for_trading_day_guard,
     normalize_notify_subprocess_output,
     normalize_pipeline_subprocess_output,
-    resolve_notification_channel_target,
+    resolve_notification_route_from_config,
     resolve_scheduler_state_path,
 )
 from om.domain.engine import decide_notify_window_open, resolve_scheduler_decision
@@ -117,9 +117,8 @@ def main():
         cfg = (base / cfg).resolve()
 
     cfg_obj = json.loads(cfg.read_text(encoding='utf-8'))
-    notif_cfg = cfg_obj.get('notifications') or {}
-    notify_route = resolve_notification_channel_target(
-        notifications=notif_cfg,
+    notify_route = resolve_notification_route_from_config(
+        config=cfg_obj,
         cli_channel=args.channel,
         cli_target=args.target,
     )
