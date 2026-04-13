@@ -32,6 +32,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-abs-delta", type=float, default=None, help="max abs(delta) (e.g. 0.28)")
     parser.add_argument("--quiet", action="store_true", help="quiet mode: suppress human-friendly prints")
     parser.add_argument("--output", default=None, help="Output CSV path (default: output/reports/sell_put_candidates.csv)")
+    parser.add_argument("--reject-log-output", default=None, help="Reject log CSV path (default: <output>_reject_log.csv)")
     parser.add_argument("--input-root", default=None, help="Input root containing parsed/ required_data CSVs (default: ./output)")
     return parser.parse_args(argv)
 
@@ -64,6 +65,7 @@ def main(argv: list[str] | None = None) -> int:
             require_bid_ask=args.require_bid_ask,
             min_abs_delta=args.min_abs_delta,
             max_abs_delta=args.max_abs_delta,
+            reject_log_output=(Path(args.reject_log_output).resolve() if args.reject_log_output else None),
             quiet=args.quiet,
         )
     except ValueError as e:

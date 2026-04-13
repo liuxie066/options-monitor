@@ -6,7 +6,7 @@ import pandas as pd
 
 from scripts.option_candidate_strategy import (
     build_strategy_config,
-    filter_candidates,
+    filter_candidates_with_reject_log,
     rank_candidates,
     score_candidates,
 )
@@ -176,6 +176,7 @@ def run_sell_put_scan(
     require_bid_ask: bool = False,
     min_abs_delta: float | None = None,
     max_abs_delta: float | None = None,
+    reject_log_output: Path | None = None,
     quiet: bool = False,
 ) -> pd.DataFrame:
     """执行卖出看跌期权扫描并写出候选 CSV。"""
@@ -186,6 +187,12 @@ def run_sell_put_scan(
 
     out_path = Path(output).resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    reject_out_path = (
+        Path(reject_log_output).resolve()
+        if reject_log_output is not None
+        else out_path.with_name(f"{out_path.stem}_reject_log.csv")
+    )
+    reject_out_path.parent.mkdir(parents=True, exist_ok=True)
 
     rows: list[dict] = []
     for symbol in symbols:
@@ -285,6 +292,7 @@ def run_sell_put_scan(
             )
 
     out = pd.DataFrame(rows)
+    reject_log = pd.DataFrame()
     if not out.empty:
         strategy_cfg = build_strategy_config(
             "put",
@@ -293,7 +301,7 @@ def run_sell_put_scan(
             min_otm_pct=min_otm_pct,
             max_spread_ratio=max_spread_ratio,
         )
-        out = filter_candidates(out, strategy_cfg)
+        out, reject_log = filter_candidates_with_reject_log(out, strategy_cfg, reject_stage="step3_risk_gate")
         out = score_candidates(out, strategy_cfg)
         out = rank_candidates(out, strategy_cfg, layered=False)
         if "_strategy_score" in out.columns:
@@ -302,9 +310,26 @@ def run_sell_put_scan(
         pd.DataFrame(columns=SELL_PUT_EMPTY_OUTPUT_COLUMNS).to_csv(out_path, index=False)
     else:
         out.to_csv(out_path, index=False)
+    if reject_log.empty:
+        pd.DataFrame(
+            columns=[
+                "reject_stage",
+                "reject_rule",
+                "metric_value",
+                "threshold",
+                "symbol",
+                "contract_symbol",
+                "expiration",
+                "strike",
+                "mode",
+            ]
+        ).to_csv(reject_out_path, index=False)
+    else:
+        reject_log.to_csv(reject_out_path, index=False)
 
     if not quiet:
         print(f"[DONE] sell put scan -> {out_path}")
+        print(f"[DONE] reject log -> {reject_out_path}")
         print(f"[DONE] candidates: {len(out)}")
         if not out.empty:
             display_cols = [
