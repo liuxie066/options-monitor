@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 from om.domain.tool_boundary import (
     normalize_notify_window_aliases,
     normalize_scheduler_decision_payload,
@@ -63,13 +63,69 @@ def decide_opend_degrade_to_yahoo(
     return bool(allow_downgrade and (not has_hk_opend) and (not watchdog_timed_out))
 
 
+def apply_opend_degrade_to_yahoo(
+    *,
+    symbols: Sequence[Any],
+    allow_downgrade: bool,
+    has_hk_opend: bool,
+    watchdog_timed_out: bool,
+) -> bool:
+    """Apply per-run OpenD->Yahoo fallback with unchanged legacy predicates."""
+    if not decide_opend_degrade_to_yahoo(
+        allow_downgrade=allow_downgrade,
+        has_hk_opend=has_hk_opend,
+        watchdog_timed_out=watchdog_timed_out,
+    ):
+        return False
+
+    degraded = False
+    for sym in (symbols or []):
+        if not isinstance(sym, dict):
+            continue
+        if str(sym.get('market') or '').upper() != 'US':
+            continue
+        fetch = sym.get('fetch')
+        if not isinstance(fetch, dict):
+            continue
+        if str(fetch.get('source') or '').lower() != 'opend':
+            continue
+        fetch['source'] = 'yahoo'
+        for k in ('host', 'port', 'spot_from_portfolio_management'):
+            fetch.pop(k, None)
+        sym['fetch'] = fetch
+        degraded = True
+    return degraded
+
+
+def score_notify_candidate(result: Any) -> int:
+    """Keep v1 scoring neutral to preserve ordering semantics."""
+    return 1 if bool(str(getattr(result, 'notification_text', '') or '').strip()) else 0
+
+
 def filter_notify_candidates(results: list[Any]) -> list[Any]:
     return [r for r in results if r.should_notify and r.meaningful and bool(r.notification_text.strip())]
 
 
 def rank_notify_candidates(results: list[Any]) -> list[Any]:
-    """Placeholder ranking entry for stepwise extraction; preserve original order."""
-    return list(results)
+    """Compute candidate scores but keep legacy stable order for v1 semantics."""
+    scored = [(idx, score_notify_candidate(r), r) for idx, r in enumerate(results or [])]
+    scored.sort(key=lambda it: (-int(it[1]), int(it[0])))
+    return [it[2] for it in scored]
+
+
+def decide_notify_threshold_met(
+    account_messages: Mapping[str, str] | Any,
+    *,
+    min_accounts: int = 1,
+) -> bool:
+    try:
+        required = max(1, int(min_accounts))
+    except Exception:
+        required = 1
+    if not isinstance(account_messages, Mapping):
+        return False
+    count = sum(1 for _acct, msg in account_messages.items() if bool(str(msg or '').strip()))
+    return count >= required
 
 
 def build_scheduler_decision_dto(
