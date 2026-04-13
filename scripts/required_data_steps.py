@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from scripts import pipeline_fetch_models
 from scripts.subprocess_utils import run_cmd
 
 
@@ -23,6 +24,7 @@ def ensure_required_data(
     want_call: bool,
     timeout_sec: int | None,
     is_scheduled: bool,
+    state_dir: Path | None = None,
     fetch_source: str = 'yahoo',
     fetch_host: str = '127.0.0.1',
     fetch_port: int = 11111,
@@ -32,29 +34,38 @@ def ensure_required_data(
     max_dte: int | None = None,
 ) -> None:
     sym = symbol
-    raw = (required_data_dir / 'raw' / f"{sym}_required_data.json").resolve()
     parsed = (required_data_dir / 'parsed' / f"{sym}_required_data.csv").resolve()
 
     if not (want_put or want_call):
         return
 
+    src = str(fetch_source or 'yahoo').strip().lower()
+
+    # In dev mode, keep fetch write/read model separated from pipeline orchestration:
+    # - write model: fetch_required_data.events.jsonl + fetch_required_data.snapshots.json
+    # - read model:  state/current/fetch_required_data.current.json
+    # This keeps delivery/pipeline path from directly reading raw fetch artifacts.
+    fetch_current = None
+    if (not is_scheduled) and (state_dir is not None):
+        try:
+            fetch_current = pipeline_fetch_models.backfill_symbol_snapshot_from_raw(
+                required_data_dir=required_data_dir,
+                state_dir=state_dir,
+                symbol=sym,
+                source=src,
+            )
+        except Exception:
+            fetch_current = None
+
     # Always fetch before scan if required_data missing.
     # Also refetch when:
-    # - raw meta.error exists (previous fetch failed but left header-only CSV)
+    # - read-model shows previous fetch status=error
     # - min_dte is requested but existing required_data doesn't reach that DTE.
-    if raw.exists() and raw.stat().st_size > 0 and parsed.exists() and parsed.stat().st_size > 0:
+    if parsed.exists() and parsed.stat().st_size > 0:
         should_refetch = False
-        try:
-            import json
-
-            obj = json.loads(raw.read_text(encoding='utf-8'))
-            meta = obj.get('meta') if isinstance(obj, dict) else None
-            err = (meta or {}).get('error') if isinstance(meta, dict) else None
-            if err:
+        if isinstance(fetch_current, dict):
+            if str(fetch_current.get('status') or '').lower() == 'error':
                 should_refetch = True
-        except Exception:
-            # raw is unreadable => treat as invalid
-            should_refetch = True
 
         if not should_refetch:
             if min_dte is not None:
@@ -70,8 +81,6 @@ def ensure_required_data(
                     pass
             else:
                 return
-
-    src = str(fetch_source or 'yahoo').strip().lower()
 
     # fetch_required_data.py no longer exists; use fetch_market_data(_opend).py directly.
     if src == 'opend':
@@ -110,4 +119,22 @@ def ensure_required_data(
             '--limit-expirations', str(limit_expirations),
         ]
 
-    run_cmd(cmd, cwd=base, timeout_sec=timeout_sec, is_scheduled=is_scheduled)
+    try:
+        run_cmd(cmd, cwd=base, timeout_sec=timeout_sec, is_scheduled=is_scheduled)
+        if (not is_scheduled) and (state_dir is not None):
+            pipeline_fetch_models.record_fetch_snapshot(
+                state_dir=state_dir,
+                symbol=sym,
+                source=src,
+                status='ok',
+            )
+    except BaseException as e:
+        if (not is_scheduled) and (state_dir is not None):
+            pipeline_fetch_models.record_fetch_snapshot(
+                state_dir=state_dir,
+                symbol=sym,
+                source=src,
+                status='error',
+                reason=str(e),
+            )
+        raise

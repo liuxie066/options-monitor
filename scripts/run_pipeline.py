@@ -219,6 +219,7 @@ def main():
                     **kw,
                     required_data_dir=required_data_dir,
                     report_dir=report_dir,
+                    state_dir=state_dir,
                 )
             ),
             build_pipeline_context_fn=(
@@ -351,7 +352,7 @@ def main():
         return
 
     top_n = cfg.get('outputs', {}).get('top_n_alerts', 3)
-    process_symbol(py, base, cfg, top_n, report_dir=report_dir, is_scheduled=IS_SCHEDULED)
+    process_symbol(py, base, cfg, top_n, report_dir=report_dir, state_dir=state_dir, is_scheduled=IS_SCHEDULED)
     print('\n[DONE] Single-symbol pipeline finished')
     print(f'- {report_dir}/{{symbol}}_sell_put_candidates*.csv / alerts.txt')
     print(f'- {report_dir}/{{symbol}}_sell_call_candidates.csv / alerts.txt')
