@@ -25,7 +25,6 @@ from scripts.io_utils import (
 from .cash_footer import query_cash_footer
 from .required_data_prefetch import prefetch_required_data
 from .notify_format import (
-    is_high_priority_notification,
     flatten_auto_close_summary,
     build_account_message,
 )
@@ -63,8 +62,9 @@ from om.domain import (
     select_scheduler_state_filename,
 )
 from om.domain.engine import (
+    apply_opend_degrade_to_yahoo,
+    decide_notify_threshold_met,
     decide_notification_meaningful,
-    decide_opend_degrade_to_yahoo,
     filter_notify_candidates as engine_filter_notify_candidates,
     rank_notify_candidates,
     resolve_scheduler_decision,
@@ -318,25 +318,12 @@ def main() -> int:
                 host = unhealthy.get('host')
                 port = unhealthy.get('port')
 
-                degraded = False
-                if decide_opend_degrade_to_yahoo(
+                degraded = apply_opend_degrade_to_yahoo(
+                    symbols=(base_cfg.get('symbols') or []),
                     allow_downgrade=allow_downgrade,
                     has_hk_opend=has_hk_opend,
                     watchdog_timed_out=watchdog_timed_out,
-                ):
-                    try:
-                        for sym in (base_cfg.get('symbols') or []):
-                            if str((sym or {}).get('market') or '').upper() != 'US':
-                                continue
-                            fetch = (sym or {}).get('fetch') or {}
-                            if str(fetch.get('source') or '').lower() == 'opend':
-                                fetch['source'] = 'yahoo'
-                                for k in ['host', 'port', 'spot_from_portfolio_management']:
-                                    fetch.pop(k, None)
-                                sym['fetch'] = fetch
-                                degraded = True
-                    except Exception:
-                        degraded = False
+                )
 
                 if error_code == 'OPEND_NEEDS_PHONE_VERIFY':
                     mark_opend_phone_verify_pending(
@@ -915,7 +902,7 @@ def main() -> int:
         build_account_message_fn=build_account_message,
     )
 
-    if not account_messages:
+    if not decide_notify_threshold_met(account_messages, min_accounts=1):
         runlog.safe_event('notify', 'skip', message='no account notification content')
 
         shared_payload, account_payloads = build_no_account_notification_payloads(
