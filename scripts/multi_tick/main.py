@@ -99,6 +99,11 @@ _CURRENT_RUN_ID: str | None = None
 SCHEMA_VALIDATION_ERROR_CODE = 'SCHEMA_VALIDATION_FAILED'
 
 
+def current_run_id() -> str | None:
+    """Public accessor for wrapper-level error logging compatibility."""
+    return _CURRENT_RUN_ID
+
+
 def _fail_schema_validation(*, runlog: RunLogger, audit_fn, stage: str, exc: BaseException, run_id: str | None = None) -> None:
     msg = f"{stage}: {type(exc).__name__}: {exc}"
     runlog.safe_event('contract', 'error', error_code=SCHEMA_VALIDATION_ERROR_CODE, message=msg)
