@@ -130,7 +130,12 @@ def test_decide_pipeline_execution_result_matches_legacy_branching() -> None:
 def test_main_uses_engine_decision_entrypoints_batch3() -> None:
     base = Path(__file__).resolve().parents[1]
     src = (base / 'scripts' / 'multi_tick' / 'main.py').read_text(encoding='utf-8')
-    assert 'decide_opend_unhealthy_action' in src
+    # Batch-3 accepted direct decision calls; later batches may route watchdog via
+    # unified engine entrypoint. Keep this guard compatible with both forms.
+    assert (
+        'decide_opend_unhealthy_action' in src
+        or 'resolve_multi_tick_engine_entrypoint(' in src
+    )
     assert 'decide_account_scan_gate' in src
     assert 'decide_pipeline_execution_result' in src
 
