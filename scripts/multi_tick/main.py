@@ -63,7 +63,10 @@ from om.domain import (
 )
 from om.domain.engine import (
     apply_opend_degrade_to_yahoo,
+    decide_account_scan_gate,
     decide_notify_threshold_met,
+    decide_opend_unhealthy_action,
+    decide_pipeline_execution_result,
     decide_notification_meaningful,
     filter_notify_candidates as engine_filter_notify_candidates,
     rank_notify_candidates,
@@ -324,8 +327,12 @@ def main() -> int:
                     has_hk_opend=has_hk_opend,
                     watchdog_timed_out=watchdog_timed_out,
                 )
+                opend_action = decide_opend_unhealthy_action(
+                    error_code=error_code,
+                    degraded=degraded,
+                )
 
-                if error_code == 'OPEND_NEEDS_PHONE_VERIFY':
+                if str(opend_action.get('action')) == 'pause_phone_verify':
                     mark_opend_phone_verify_pending(
                         base,
                         detail=(f"{host}:{port} {detail}" if host is not None and port is not None else detail),
@@ -353,7 +360,7 @@ def main() -> int:
                         status='error',
                         error_code=error_code,
                         message='opend needs phone verify; paused',
-                        fallback_used=False,
+                        fallback_used=bool(opend_action.get('fallback_used')),
                     )
                     return 0
 
@@ -383,7 +390,7 @@ def main() -> int:
                     except Exception:
                         pass
 
-                if degraded:
+                if str(opend_action.get('action')) == 'degrade_continue':
                     log(f"[WARN] OpenD unhealthy ({error_code}); degraded US opend sources to yahoo for this run")
                     runlog.safe_event(
                         'watchdog',
@@ -398,7 +405,7 @@ def main() -> int:
                         'degrade_opend_to_yahoo',
                         status='ok',
                         error_code=error_code,
-                        fallback_used=True,
+                        fallback_used=bool(opend_action.get('fallback_used')),
                         message=msg,
                     )
                 else:
@@ -422,7 +429,7 @@ def main() -> int:
                         'opend_unhealthy_no_fallback',
                         status='error',
                         error_code=error_code,
-                        fallback_used=False,
+                        fallback_used=bool(opend_action.get('fallback_used')),
                         message=msg,
                     )
                     return 0
@@ -695,19 +702,27 @@ def main() -> int:
             'run_dir': str(run_dir),
         })
 
-        if not should_run:
-            acct_metrics['ran_scan'] = False
-            acct_metrics['meaningful'] = False
+        scan_gate = decide_account_scan_gate(
+            should_run=should_run,
+            has_symbols=((not markets_to_run) or bool(cfg.get('symbols') or [])),
+            reason=reason,
+        )
+        if not bool(scan_gate.get('run_pipeline')):
+            acct_metrics['ran_scan'] = bool(scan_gate.get('ran_scan'))
+            acct_metrics['meaningful'] = bool(scan_gate.get('meaningful'))
+            acct_metrics['reason'] = str(scan_gate.get('result_reason') or reason)
             tick_metrics['accounts'].append(acct_metrics)
-            results.append(AccountResult(acct, False, should_notify, False, reason, ''))
+            results.append(
+                AccountResult(
+                    acct,
+                    bool(scan_gate.get('ran_scan')),
+                    should_notify,
+                    bool(scan_gate.get('meaningful')),
+                    str(scan_gate.get('result_reason') or reason),
+                    '',
+                )
+            )
             continue
-
-        try:
-            if markets_to_run and (not (cfg.get('symbols') or [])):
-                results.append(AccountResult(acct, False, should_notify, False, reason + ' | 本时段无对应市场标的', ''))
-                continue
-        except Exception:
-            pass
 
         if (not prefetch_done):
             runlog.safe_event('fetch_chain_cache', 'start', data=_safe_runlog_data({'account': acct, 'symbols_count': len(cfg.get('symbols') or [])}))
@@ -781,7 +796,8 @@ def main() -> int:
             tool_name='run_pipeline',
             extra={'duration_ms': acct_metrics['pipeline_ms'], 'returncode': int(pipe.returncode)},
         )
-        if pipe.returncode != 0:
+        pipeline_result = decide_pipeline_execution_result(returncode=pipe.returncode)
+        if not bool(pipeline_result.get('ok')):
             runlog.safe_event(
                 'snapshot_batches',
                 'error',
@@ -794,11 +810,20 @@ def main() -> int:
             if out:
                 tail = '\n'.join(out.splitlines()[-60:])
                 print(f"[ERR] pipeline failed ({acct})\n{tail}")
-            acct_metrics['ran_scan'] = True
-            acct_metrics['meaningful'] = False
-            acct_metrics['reason'] = 'pipeline failed'
+            acct_metrics['ran_scan'] = bool(pipeline_result.get('ran_scan'))
+            acct_metrics['meaningful'] = bool(pipeline_result.get('meaningful'))
+            acct_metrics['reason'] = str(pipeline_result.get('reason') or 'pipeline failed')
             tick_metrics['accounts'].append(acct_metrics)
-            results.append(AccountResult(acct, True, should_notify, False, 'pipeline failed', ''))
+            results.append(
+                AccountResult(
+                    acct,
+                    bool(pipeline_result.get('ran_scan')),
+                    should_notify,
+                    bool(pipeline_result.get('meaningful')),
+                    str(pipeline_result.get('reason') or 'pipeline failed'),
+                    '',
+                )
+            )
             continue
 
         runlog.safe_event(
