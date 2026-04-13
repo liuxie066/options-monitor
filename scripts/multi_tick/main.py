@@ -972,6 +972,22 @@ def main() -> int:
         cash_footer_for_account_fn=cash_footer_for_account,
         build_account_message_fn=build_account_message,
     )
+    try:
+        account_messages_snapshot = SnapshotDTO.from_payload(
+            {
+                'schema_kind': 'snapshot_dto',
+                'schema_version': '1.0',
+                'snapshot_name': 'account_messages',
+                'as_of_utc': utc_now(),
+                'payload': {'account_messages': account_messages},
+            }
+        )
+        raw_account_messages = account_messages_snapshot.payload.get('account_messages')
+        if not isinstance(raw_account_messages, dict):
+            raise SchemaValidationError('account_messages must be a dict')
+        account_messages = {str(k): str(v) for k, v in raw_account_messages.items()}
+    except SchemaValidationError as e:
+        _fail_schema_validation(runlog=runlog, audit_fn=_audit, stage='account_messages_snapshot', exc=e, run_id=run_id)
 
     if not decide_notify_threshold_met(account_messages, min_accounts=1):
         runlog.safe_event('notify', 'skip', message='no account notification content')
