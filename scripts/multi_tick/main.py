@@ -73,9 +73,7 @@ from om.domain.engine import (
     AccountSchedulerDecisionView,
     apply_opend_degrade_to_yahoo,
     build_opend_unhealthy_execution_plan,
-    build_account_scheduler_decision_dto,
     decide_account_scan_gate,
-    decide_notify_dispatch_gate,
     decide_notify_threshold_met,
     decide_pipeline_execution_result,
     decide_notification_meaningful,
@@ -83,7 +81,7 @@ from om.domain.engine import (
     build_failure_audit_fields,
     filter_notify_candidates as engine_filter_notify_candidates,
     rank_notify_candidates,
-    resolve_scheduler_decision,
+    resolve_multi_tick_engine_entrypoint,
 )
 from scripts.infra.service import (
     run_opend_watchdog,
@@ -386,7 +384,16 @@ def main() -> int:
                     has_hk_opend=has_hk_opend,
                     watchdog_timed_out=watchdog_timed_out,
                 )
-                opend_plan = build_opend_unhealthy_execution_plan(
+                opend_plan = resolve_multi_tick_engine_entrypoint(
+                    opend_unhealthy={
+                        'error_code': error_code,
+                        'degraded': degraded,
+                        'message_text': msg,
+                        'detail_text': detail,
+                        'host': host,
+                        'port': port,
+                    }
+                ).get('watchdog') or build_opend_unhealthy_execution_plan(
                     error_code=error_code,
                     degraded=degraded,
                     message_text=msg,
@@ -653,7 +660,13 @@ def main() -> int:
         scheduler_payload = scheduler_input_snapshot.payload.get('scheduler_raw')
         if not isinstance(scheduler_payload, dict):
             raise SchemaValidationError('scheduler_raw must be a dict')
-        scheduler_decision, scheduler_view = resolve_scheduler_decision(scheduler_payload)
+        scheduler_bundle = resolve_multi_tick_engine_entrypoint(
+            scheduler_raw=scheduler_payload,
+        ).get('scheduler') or {}
+        scheduler_decision = scheduler_bundle.get('scheduler_decision')
+        scheduler_view = scheduler_bundle.get('scheduler_view')
+        if not isinstance(scheduler_decision, dict) or scheduler_view is None:
+            raise SchemaValidationError('scheduler decision engine entrypoint returned invalid payload')
     except SchemaValidationError as e:
         _fail_schema_validation(runlog=runlog, audit_fn=_audit, stage='scheduler_decision', exc=e)
     except Exception as e:
@@ -677,10 +690,11 @@ def main() -> int:
             )
             if sch_acct.returncode == 0:
                 account_scheduler_raw = json.loads((sch_acct.stdout or '').strip())
-                account_scheduler_decision_dto = build_account_scheduler_decision_dto(
-                    account_scheduler_raw,
-                    scheduler_decision=scheduler_view,
-                )
+                account_scheduler_bundle = resolve_multi_tick_engine_entrypoint(
+                    scheduler_raw=scheduler_decision,
+                    account_scheduler_raw_by_account={str(acct0): account_scheduler_raw},
+                ).get('scheduler') or {}
+                account_scheduler_decision_dto = (account_scheduler_bundle.get('account_scheduler_decisions') or {}).get(str(acct0))
                 account_scheduler_snapshot = SnapshotDTO.from_payload(
                     {
                         'schema_kind': 'snapshot_dto',
@@ -696,10 +710,9 @@ def main() -> int:
                 account_decision_payload = account_scheduler_snapshot.payload.get('decision')
                 if not isinstance(account_decision_payload, dict):
                     raise SchemaValidationError('account scheduler decision must be a dict')
-                account_scheduler_decision_view = AccountSchedulerDecisionView.from_payload(
-                    account_decision_payload,
-                    scheduler_decision=scheduler_view,
-                )
+                account_scheduler_decision_view = (account_scheduler_bundle.get('account_scheduler_views') or {}).get(str(acct0))
+                if not isinstance(account_scheduler_decision_view, AccountSchedulerDecisionView):
+                    raise SchemaValidationError('account scheduler decision view must be valid')
         except SchemaValidationError as e:
             _fail_schema_validation(runlog=runlog, audit_fn=_audit, stage='account_scheduler_decision', exc=e)
         except Exception:
@@ -1175,10 +1188,10 @@ def main() -> int:
         target=target,
         dnd_is_quiet=bool(dnd_decision.get('is_quiet')),
     )
-    dispatch_gate = decide_notify_dispatch_gate(
-        dispatch_decision=dispatch_decision,
+    dispatch_gate = resolve_multi_tick_engine_entrypoint(
+        notify_dispatch=dispatch_decision,
         dnd_decision=dnd_decision,
-    )
+    ).get('notify') or {}
     _audit(
         'notify',
         'dispatch_decision',
