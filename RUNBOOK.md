@@ -5,8 +5,8 @@
 ## 文档边界
 
 - 快速上手与常用命令：`README.md`
-- 发布/回滚：`DEPLOY.md`
 - 配置来源与同步：`CONFIGS.md`
+- 发布/回滚：仅在本地私有运维仓执行（本仓不公开流程细节）
 
 ## 日常运行（prod）
 
@@ -91,7 +91,7 @@ scripts/ssh_selfcheck.sh
 ## 应急控制
 
 - 立即停自动发布：
-  - 创建 `options-monitor-prod/disable_autodeploy.flag`（见 `DEPLOY.md`）
+  - 创建 `options-monitor-prod/disable_autodeploy.flag`
 - 立即停定时监控：
   - `openclaw cron disable 9cba60f7-407b-4427-9120-0a176b818de9`
 

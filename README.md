@@ -5,11 +5,12 @@
 ## 文档导航
 
 - 快速上手（本文）：首日安装、配置、常用运行命令
-- 部署发布：`DEPLOY.md`
 - 运维值班 / 排障：`RUNBOOK.md`
 - 配置单一来源与变更流程：`CONFIGS.md`
 - Agent 约束：`SKILL.md`
 - Guardrails：`docs/GUARDRAILS.md`
+
+说明：发布流程仅在本地私有运维仓执行，不在本远端仓公开。
 
 ## Quick Start（首日）
 
@@ -85,4 +86,4 @@ cp config.example.hk.json config.hk.json
 
 - OpenD 不可用 / 登录失效：先看 `RUNBOOK.md` 的排障章节。
 - 配置漂移或通知目标不一致：按 `CONFIGS.md` 的同步流程执行 `sync_runtime_configs.py`。
-- 发布或回滚需求：按 `DEPLOY.md` 执行，避免直接改 `options-monitor-prod` 代码。
+- 发布或回滚需求：发布流程仅在本地私有运维仓执行。
