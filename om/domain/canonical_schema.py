@@ -56,6 +56,22 @@ def normalize_processor_row(raw: dict[str, Any] | Any) -> dict[str, Any]:
         "dte": src.get("dte", None),
         "risk_label": src.get("risk_label", ""),
         "note": note,
+        # Keep put/call alert fields stable through canonical processor row normalization.
+        "delta": src.get("delta", None),
+        "iv": src.get("iv", None),
+        "mid": src.get("mid", None),
+        "bid": src.get("bid", None),
+        "ask": src.get("ask", None),
+        "option_ccy": src.get("option_ccy", None),
+        "cash_required_cny": src.get("cash_required_cny", None),
+        "cash_required_usd": src.get("cash_required_usd", None),
+        "cash_free_cny": src.get("cash_free_cny", None),
+        "cash_free_usd": src.get("cash_free_usd", None),
+        "cash_free_usd_est": src.get("cash_free_usd_est", None),
+        "cash_available_cny": src.get("cash_available_cny", None),
+        "cash_available_usd": src.get("cash_available_usd", None),
+        "cash_available_usd_est": src.get("cash_available_usd_est", None),
+        "cash_secured_used_usd": src.get("cash_secured_used_usd", None),
     }
     for key in ("market", "account", "source", "run_id"):
         if key in src:
