@@ -69,10 +69,10 @@ from om.domain import (
 from om.domain.engine import (
     AccountSchedulerDecisionView,
     apply_opend_degrade_to_yahoo,
+    build_opend_unhealthy_execution_plan,
     build_account_scheduler_decision_dto,
     decide_account_scan_gate,
     decide_notify_threshold_met,
-    decide_opend_unhealthy_action,
     decide_pipeline_execution_result,
     decide_notification_meaningful,
     filter_notify_candidates as engine_filter_notify_candidates,
@@ -375,23 +375,29 @@ def main() -> int:
                     has_hk_opend=has_hk_opend,
                     watchdog_timed_out=watchdog_timed_out,
                 )
-                opend_action = decide_opend_unhealthy_action(
+                opend_plan = build_opend_unhealthy_execution_plan(
                     error_code=error_code,
                     degraded=degraded,
+                    message_text=msg,
+                    detail_text=detail,
+                    host=host,
+                    port=port,
                 )
 
-                if str(opend_action.get('action')) == 'pause_phone_verify':
+                alert_message_text = str(opend_plan.get('alert_message_text') or msg)
+                alert_detail = str(opend_plan.get('alert_detail') or detail)
+                if bool(opend_plan.get('should_mark_phone_verify_pending')):
                     mark_opend_phone_verify_pending(
                         base,
-                        detail=(f"{host}:{port} {detail}" if host is not None and port is not None else detail),
+                        detail=alert_detail,
                     )
 
                     send_opend_alert(
                         base,
                         base_cfg,
                         error_code=error_code,
-                        message_text=msg + "（已暂停：等待你在飞书确认后再继续）",
-                        detail=(f"{host}:{port} {detail}" if host is not None and port is not None else detail),
+                        message_text=alert_message_text,
+                        detail=alert_detail,
                         no_send=no_send,
                     )
 
@@ -408,7 +414,7 @@ def main() -> int:
                         status='error',
                         error_code=error_code,
                         message='opend needs phone verify; paused',
-                        fallback_used=bool(opend_action.get('fallback_used')),
+                        fallback_used=bool(opend_plan.get('fallback_used')),
                     )
                     return 0
 
@@ -416,8 +422,8 @@ def main() -> int:
                     base,
                     base_cfg,
                     error_code=error_code,
-                    message_text=msg,
-                    detail=(f"{host}:{port} {detail}" if host is not None and port is not None else detail),
+                    message_text=alert_message_text,
+                    detail=alert_detail,
                     no_send=no_send,
                 )
 
@@ -438,7 +444,7 @@ def main() -> int:
                     except Exception:
                         pass
 
-                if str(opend_action.get('action')) == 'degrade_continue':
+                if bool(opend_plan.get('should_continue')):
                     log(f"[WARN] OpenD unhealthy ({error_code}); degraded US opend sources to yahoo for this run")
                     runlog.safe_event(
                         'watchdog',
@@ -453,7 +459,7 @@ def main() -> int:
                         'degrade_opend_to_yahoo',
                         status='ok',
                         error_code=error_code,
-                        fallback_used=bool(opend_action.get('fallback_used')),
+                        fallback_used=bool(opend_plan.get('fallback_used')),
                         message=msg,
                     )
                 else:
@@ -477,7 +483,7 @@ def main() -> int:
                         'opend_unhealthy_no_fallback',
                         status='error',
                         error_code=error_code,
-                        fallback_used=bool(opend_action.get('fallback_used')),
+                        fallback_used=bool(opend_plan.get('fallback_used')),
                         message=msg,
                     )
                     return 0
