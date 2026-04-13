@@ -244,18 +244,24 @@ def _format_alert_line(line: str, *, account_label: str = '当前账户') -> str
         ccy_val = ccy.split(' ', 1)[1] if ccy and ' ' in ccy else ''
         premium = f"{price_val} ({ccy_val})" if ccy_val else price_val
         sug = _suggest_sell_price_tag(mid, None, None)
-        strike_val = strike_tag.replace('Strike ', '').strip() if strike_tag else strike_from_contract
-        qty = f"{cover}张(可覆盖)" if cover else '1张(默认)'
+        strike_from_tag = strike_tag.replace('Strike ', '').strip() if strike_tag else ''
+        strike_val = strike_from_tag if not _is_missing_value(strike_from_tag) else _normalize_contract_strike(strike_from_contract)
+        strike_show = _present_or_missing(strike_val, reason='告警未提供Strike/合约行权价')
+        annual_val = _value_after_prefix(annual, '年化')
+        annual_show = f"年化 {_present_or_missing(annual_val, reason='告警未提供年化')}"
+        delta_show = _present_or_missing(delta, reason='告警未提供delta')
+        iv_show = _present_or_missing(iv, reason='告警未提供iv')
+        qty = f"{cover}张(可覆盖)" if (not _is_missing_value(cover)) else '1张(默认)'
         title = f"### [{account_label}] {symbol_name} | 到期 {exp} | 策略 卖Call"
         out = [
             title,
             f"- {symbol_name} 卖Call {contract}",
-            f"- 指标: 方向=卖Call | 行权价={strike_val} | 数量={qty} | 权利金={premium} | {annual or '年化 -'} | {income_int_tag(income) or '净收 -'} | 保证金占用=- | delta={delta or '-'} | IV={iv or '-'}",
+            f"- 指标: 方向=卖Call | 行权价={strike_show} | 数量={qty} | 权利金={premium} | {annual_show} | {income_int_tag(income) or '净收 -'} | 保证金占用=- | delta={delta_show} | IV={iv_show}",
         ]
         if sug:
             out.append(f"- 建议挂单: {sug.replace('建议挂单 ', '').strip()}")
         out.append("> 次要信息")
-        out.append(f"> 覆盖: {cover or '-'} 张 | shares {shares or '-'}")
+        out.append(f"> 覆盖: {_present_or_missing(cover, reason='告警未提供cover')} 张 | shares {_present_or_missing(shares, reason='告警未提供shares')}")
         out.append(f"> 风险: {risk_tag or '-'}")
         out.append(f"> DTE: {dte.replace('DTE ', '').strip() if dte else '-'}")
         out.append("---")

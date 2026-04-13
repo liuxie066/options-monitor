@@ -78,6 +78,24 @@ def test_notify_symbols_markdown_call_layout_and_changes() -> None:
     assert "- NVDA sell_call: Top pick 由 2026-06-18 175C 变为 2026-06-18 180C。" in out
 
 
+def test_notify_symbols_markdown_call_layout_missing_fields_have_reasons() -> None:
+    from scripts.notify_symbols import build_notification
+
+    alerts = """# Symbols Alerts
+
+## 高优先级
+- NVDA | sell_call | 2026-06-18 180C | 年化 - | 净收入 240.40 | DTE 44 | Strike nan | 保守 | ccy USD | ask 2.500 | bid 2.300 | mid 2.400 | delta nan | cover nan | shares nan | 已通过准入，可作为 sell call 备选。
+"""
+    out = build_notification("", alerts, account_label="SY")
+
+    assert "nan" not in out.lower()
+    assert "行权价=180" in out
+    assert "年化 缺失(告警未提供年化)" in out
+    assert "delta=缺失(告警未提供delta)" in out
+    assert "IV=缺失(告警未提供iv)" in out
+    assert "覆盖: 缺失(告警未提供cover) 张 | shares 缺失(告警未提供shares)" in out
+
+
 def test_notify_symbols_markdown_put_chain_uses_upstream_fields_when_available() -> None:
     out = _render_via_alert_engine(
         {
