@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from om.domain.canonical_schema import normalize_source_snapshot
-from om.domain.error_policy import classify_failure
-from om.domain.tool_boundary import SCHEMA_KIND_TOOL_EXECUTION, validate_schema_payload
+from domain.domain.canonical_schema import normalize_source_snapshot
+from domain.domain.error_policy import classify_failure
+from domain.domain.tool_boundary import SCHEMA_KIND_TOOL_EXECUTION, validate_schema_payload
 
 
 def adapt_opend_tool_payload(payload: dict[str, Any] | Any) -> dict[str, Any]:

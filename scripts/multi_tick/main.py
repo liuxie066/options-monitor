@@ -44,7 +44,7 @@ from .misc import (
     AccountResult,
     _safe_runlog_data,
 )
-from om.domain import (
+from domain.domain import (
     Decision,
     DeliveryPlan,
     SchemaValidationError,
@@ -70,7 +70,7 @@ from om.domain import (
     select_markets_to_run as domain_select_markets_to_run,
     select_scheduler_state_filename,
 )
-from om.domain.engine import (
+from domain.domain.engine import (
     AccountSchedulerDecisionView,
     apply_opend_degrade_to_yahoo,
     build_opend_unhealthy_execution_plan,
@@ -93,11 +93,11 @@ from scripts.infra.service import (
 )
 
 try:
-    from om.storage import paths as storage_paths
-    from om.storage.repositories import run_repo, state_repo
+    from domain.storage import paths as storage_paths
+    from domain.storage.repositories import run_repo, state_repo
 except Exception:
-    from scripts.om.storage import paths as storage_paths  # type: ignore
-    from scripts.om.storage.repositories import run_repo, state_repo  # type: ignore
+    from scripts.domain.storage import paths as storage_paths  # type: ignore
+    from scripts.domain.storage.repositories import run_repo, state_repo  # type: ignore
 
 
 _CURRENT_RUN_ID: str | None = None

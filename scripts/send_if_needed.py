@@ -27,7 +27,7 @@ if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
 from scripts.io_utils import utc_now
-from om.domain import (
+from domain.domain import (
     Decision,
     DeliveryPlan,
     SchemaValidationError,
@@ -38,7 +38,7 @@ from om.domain import (
     resolve_notification_route_from_config,
     resolve_scheduler_state_path,
 )
-from om.domain.engine import decide_notify_window_open, resolve_scheduler_decision
+from domain.domain.engine import decide_notify_window_open, resolve_scheduler_decision
 from scripts.infra.service import (
     run_command,
     run_pipeline_script,

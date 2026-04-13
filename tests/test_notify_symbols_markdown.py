@@ -6,7 +6,7 @@ import pandas as pd
 
 
 def _render_via_alert_engine(summary_row: dict) -> str:
-    from om.domain import normalize_processor_row
+    from domain.domain import normalize_processor_row
     from scripts.alert_engine import build_alert_text
     from scripts.notify_symbols import build_notification
 

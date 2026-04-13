@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 def test_evaluate_dnd_quiet_hours_cross_midnight_window() -> None:
-    from om.domain.multi_tick import evaluate_dnd_quiet_hours
+    from domain.domain.multi_tick import evaluate_dnd_quiet_hours
 
     out = evaluate_dnd_quiet_hours(
         schedule_v2_enabled=False,
@@ -22,7 +22,7 @@ def test_evaluate_dnd_quiet_hours_cross_midnight_window() -> None:
 
 
 def test_evaluate_dnd_quiet_hours_parse_error_keeps_non_blocking_behavior() -> None:
-    from om.domain.multi_tick import evaluate_dnd_quiet_hours
+    from domain.domain.multi_tick import evaluate_dnd_quiet_hours
 
     out = evaluate_dnd_quiet_hours(
         schedule_v2_enabled=False,
@@ -38,7 +38,7 @@ def test_evaluate_dnd_quiet_hours_parse_error_keeps_non_blocking_behavior() -> N
 
 
 def test_decide_notify_dispatch_preserves_route_and_target_rules() -> None:
-    from om.domain.multi_tick import decide_notify_dispatch
+    from domain.domain.multi_tick import decide_notify_dispatch
 
     assert decide_notify_dispatch(no_send=True, target='chat-id', dnd_is_quiet=False) == {
         'should_send': False,
@@ -63,7 +63,7 @@ def test_decide_notify_dispatch_preserves_route_and_target_rules() -> None:
 
 
 def test_resolve_notification_channel_target_keeps_fallback_order() -> None:
-    from om.domain.multi_tick import resolve_notification_channel_target
+    from domain.domain.multi_tick import resolve_notification_channel_target
 
     out_default = resolve_notification_channel_target(
         notifications={'target': 'user:cfg'},
@@ -81,7 +81,7 @@ def test_resolve_notification_channel_target_keeps_fallback_order() -> None:
 
 
 def test_resolve_notification_route_from_config_centralizes_notifications_reads() -> None:
-    from om.domain.multi_tick import resolve_notification_route_from_config
+    from domain.domain.multi_tick import resolve_notification_route_from_config
 
     out = resolve_notification_route_from_config(
         config={'notifications': {'target': 'user:cfg'}},
@@ -105,7 +105,7 @@ def test_resolve_notification_route_from_config_centralizes_notifications_reads(
 
 
 def test_resolve_scheduler_state_path_supports_legacy_state_override() -> None:
-    from om.domain.multi_tick import resolve_scheduler_state_path
+    from domain.domain.multi_tick import resolve_scheduler_state_path
 
     base = Path('/tmp/base-test')
     state = resolve_scheduler_state_path(

@@ -70,7 +70,7 @@ def _legacy_pipeline_execution_result(returncode: int) -> dict[str, object]:
 
 
 def test_decide_opend_unhealthy_action_matches_legacy_branching() -> None:
-    from om.domain.engine import decide_opend_unhealthy_action
+    from domain.domain.engine import decide_opend_unhealthy_action
 
     for error_code in ('OPEND_NEEDS_PHONE_VERIFY', 'OPEND_API_ERROR'):
         for degraded in (False, True):
@@ -80,7 +80,7 @@ def test_decide_opend_unhealthy_action_matches_legacy_branching() -> None:
 
 
 def test_decide_account_scan_gate_matches_legacy_branching() -> None:
-    from om.domain.engine import decide_account_scan_gate
+    from domain.domain.engine import decide_account_scan_gate
 
     cases = [
         {
@@ -119,7 +119,7 @@ def test_decide_account_scan_gate_matches_legacy_branching() -> None:
 
 
 def test_decide_pipeline_execution_result_matches_legacy_branching() -> None:
-    from om.domain.engine import decide_pipeline_execution_result
+    from domain.domain.engine import decide_pipeline_execution_result
 
     for returncode in (0, 1, 2):
         expected = _legacy_pipeline_execution_result(returncode)
@@ -141,7 +141,7 @@ def test_main_uses_engine_decision_entrypoints_batch3() -> None:
 
 
 def test_engine_package_exports_batch3_entrypoints() -> None:
-    from om.domain.engine import (
+    from domain.domain.engine import (
         build_opend_unhealthy_execution_plan,
         decide_notify_dispatch_gate,
         decide_trading_day_guard,

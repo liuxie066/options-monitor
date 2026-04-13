@@ -4,7 +4,7 @@ from scripts.multi_tick.misc import AccountResult
 
 
 def test_decide_opend_degrade_to_yahoo_keeps_existing_gate() -> None:
-    from om.domain.engine import decide_opend_degrade_to_yahoo
+    from domain.domain.engine import decide_opend_degrade_to_yahoo
 
     assert (
         decide_opend_degrade_to_yahoo(
@@ -41,7 +41,7 @@ def test_decide_opend_degrade_to_yahoo_keeps_existing_gate() -> None:
 
 
 def test_notify_candidate_filter_and_rank_keep_semantics() -> None:
-    from om.domain.engine import filter_notify_candidates, rank_notify_candidates
+    from domain.domain.engine import filter_notify_candidates, rank_notify_candidates
 
     results = [
         AccountResult('a', True, True, True, 'ok', 'msg-a'),
@@ -56,7 +56,7 @@ def test_notify_candidate_filter_and_rank_keep_semantics() -> None:
 
 
 def test_apply_opend_degrade_to_yahoo_keeps_existing_symbol_scope() -> None:
-    from om.domain.engine import apply_opend_degrade_to_yahoo
+    from domain.domain.engine import apply_opend_degrade_to_yahoo
 
     symbols = [
         {'market': 'US', 'fetch': {'source': 'opend', 'host': '127.0.0.1', 'port': 11111}},
@@ -79,7 +79,7 @@ def test_apply_opend_degrade_to_yahoo_keeps_existing_symbol_scope() -> None:
 
 
 def test_decide_notify_threshold_met_min_one_account_keeps_legacy_behavior() -> None:
-    from om.domain.engine import decide_notify_threshold_met
+    from domain.domain.engine import decide_notify_threshold_met
 
     assert decide_notify_threshold_met({'lx': 'hello'}, min_accounts=1) is True
     assert decide_notify_threshold_met({'lx': '   '}, min_accounts=1) is False

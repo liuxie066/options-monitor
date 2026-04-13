@@ -22,7 +22,7 @@ import argparse
 import json
 import time
 
-from om.domain import normalize_watchdog_subprocess_output
+from domain.domain import normalize_watchdog_subprocess_output
 
 
 def main() -> None:

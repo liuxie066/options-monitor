@@ -21,7 +21,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from om.domain import normalize_notify_subprocess_output, normalize_pipeline_subprocess_output
+from domain.domain import normalize_notify_subprocess_output, normalize_pipeline_subprocess_output
 
 
 def load_json(p: Path) -> dict:

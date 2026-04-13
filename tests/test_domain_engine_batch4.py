@@ -57,7 +57,7 @@ def _legacy_plan(
 
 
 def test_build_opend_unhealthy_execution_plan_matches_legacy_branching() -> None:
-    from om.domain.engine import build_opend_unhealthy_execution_plan
+    from domain.domain.engine import build_opend_unhealthy_execution_plan
 
     for error_code in ('OPEND_NEEDS_PHONE_VERIFY', 'OPEND_API_ERROR'):
         for degraded in (False, True):
@@ -190,8 +190,8 @@ def _legacy_notify_dispatch_gate(
 
 
 def test_decide_trading_day_guard_matches_legacy_semantics() -> None:
-    from om.domain.engine import decide_trading_day_guard
-    from om.domain.multi_tick import reduce_trading_day_guard
+    from domain.domain.engine import decide_trading_day_guard
+    from domain.domain.multi_tick import reduce_trading_day_guard
 
     def _check(gm: str) -> tuple[bool | None, str]:
         table = {
@@ -216,7 +216,7 @@ def test_decide_trading_day_guard_matches_legacy_semantics() -> None:
 
 
 def test_decide_notify_dispatch_gate_matches_legacy_branching() -> None:
-    from om.domain.engine import decide_notify_dispatch_gate
+    from domain.domain.engine import decide_notify_dispatch_gate
 
     cases = [
         (

@@ -8,7 +8,7 @@ from tempfile import TemporaryDirectory
 
 def test_private_compat_exports_emit_deprecation_warning_and_keep_behavior() -> None:
     import scripts.send_if_needed_multi as s
-    from om.domain import select_markets_to_run
+    from domain.domain import select_markets_to_run
     from scripts.multi_tick.opend_guard import should_send_opend_alert
 
     cfg = {
@@ -43,7 +43,7 @@ def test_private_compat_exports_emit_deprecation_warning_and_keep_behavior() -> 
     assert compat_out == direct_out
     assert any(issubclass(w.category, DeprecationWarning) for w in caught)
     warning_messages = [str(w.message) for w in caught]
-    assert any('om.domain.select_markets_to_run' in msg for msg in warning_messages)
+    assert any('domain.domain.select_markets_to_run' in msg for msg in warning_messages)
 
     with TemporaryDirectory() as td:
         base = Path(td)
@@ -65,7 +65,7 @@ def test_om_allow_derived_config_gate_is_env_controlled_in_multi_tick_main() -> 
     assert "allow_derived=allow_derived_config" in src
     assert "resolve_allow_derived_config_gate(" in src
     assert "OM_ALLOW_DERIVED_CONFIG_LEGACY_DISABLED" in Path(
-        "om/domain/config_contract.py"
+        "domain/domain/config_contract.py"
     ).read_text(encoding="utf-8")
     assert "OM_ALLOW_DERIVED_CONFIG_ENABLED" in src
 
@@ -91,7 +91,7 @@ def test_multi_entrypoint_uses_public_run_id_accessor() -> None:
 
 
 def test_resolve_allow_derived_config_gate_defaults_to_disabled_and_has_migration_hint() -> None:
-    from om.domain import resolve_allow_derived_config_gate
+    from domain.domain import resolve_allow_derived_config_gate
 
     out_default = resolve_allow_derived_config_gate("")
     assert out_default["allow_derived"] is False

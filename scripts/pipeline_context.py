@@ -17,11 +17,11 @@ from pathlib import Path
 
 from scripts.io_utils import is_fresh, load_cached_json
 from scripts.subprocess_utils import run_cmd
-from om.services import adapt_holdings_context, adapt_option_positions_context
+from domain.services import adapt_holdings_context, adapt_option_positions_context
 try:
-    from om.storage.repositories import state_repo
+    from domain.storage.repositories import state_repo
 except Exception:
-    from scripts.om.storage.repositories import state_repo  # type: ignore
+    from scripts.domain.storage.repositories import state_repo  # type: ignore
 
 
 def _persist_source_snapshot(base: Path, snapshot: dict) -> None:

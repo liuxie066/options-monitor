@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 def test_snapshot_decision_delivery_plan_roundtrip() -> None:
-    from om.domain import Decision, DeliveryPlan, SnapshotDTO
+    from domain.domain import Decision, DeliveryPlan, SnapshotDTO
 
     snapshot = SnapshotDTO.from_payload(
         {
@@ -43,7 +43,7 @@ def test_snapshot_decision_delivery_plan_roundtrip() -> None:
 
 
 def test_delivery_plan_validation_blocks_empty_target() -> None:
-    from om.domain import DeliveryPlan, SchemaValidationError
+    from domain.domain import DeliveryPlan, SchemaValidationError
 
     try:
         DeliveryPlan.from_payload(
@@ -71,7 +71,7 @@ def test_main_uses_intermediate_objects_in_critical_path() -> None:
 
 
 def test_snapshot_schema_error_has_stable_error_code() -> None:
-    from om.domain import SchemaValidationError, SnapshotDTO
+    from domain.domain import SchemaValidationError, SnapshotDTO
 
     try:
         SnapshotDTO.from_payload(
@@ -89,7 +89,7 @@ def test_snapshot_schema_error_has_stable_error_code() -> None:
 
 
 def test_decision_schema_error_has_stable_error_code_for_bool_field() -> None:
-    from om.domain import Decision, SchemaValidationError
+    from domain.domain import Decision, SchemaValidationError
 
     try:
         Decision.from_payload(
@@ -108,7 +108,7 @@ def test_decision_schema_error_has_stable_error_code_for_bool_field() -> None:
 
 
 def test_delivery_plan_schema_error_has_stable_error_code_for_message_type() -> None:
-    from om.domain import DeliveryPlan, SchemaValidationError
+    from domain.domain import DeliveryPlan, SchemaValidationError
 
     try:
         DeliveryPlan.from_payload(

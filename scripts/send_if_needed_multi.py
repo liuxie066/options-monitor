@@ -22,7 +22,7 @@ except Exception:
 from scripts.multi_tick import main as _multi_main
 from scripts.multi_tick.main import current_run_id as _current_run_id
 from scripts.multi_tick.opend_guard import should_send_opend_alert as _domain_should_send_opend_alert
-from om.domain import select_markets_to_run as _domain_select_markets_to_run
+from domain.domain import select_markets_to_run as _domain_select_markets_to_run
 
 # Dev mainline entrypoint:
 #   scripts/send_if_needed_multi.py -> scripts.multi_tick.main.main
@@ -43,7 +43,7 @@ def _warn_deprecated_private_export(name: str, replacement: str) -> None:
 def _select_markets_to_run(now_utc, cfg, market_config):
     _warn_deprecated_private_export(
         "scripts.send_if_needed_multi._select_markets_to_run",
-        "om.domain.select_markets_to_run",
+        "domain.domain.select_markets_to_run",
     )
     return _domain_select_markets_to_run(now_utc, cfg, market_config)
 

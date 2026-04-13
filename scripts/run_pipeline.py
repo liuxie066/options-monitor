@@ -24,9 +24,9 @@ import pandas as pd
 
 from scripts.report_builders import build_symbols_digest, build_symbols_summary
 try:
-    from om.storage.repositories import report_repo
+    from domain.storage.repositories import report_repo
 except Exception:
-    from scripts.om.storage.repositories import report_repo  # type: ignore
+    from scripts.domain.storage.repositories import report_repo  # type: ignore
 
 LOG = __import__('scripts.logging_config', fromlist=['get_logger']).get_logger('run_pipeline')
 

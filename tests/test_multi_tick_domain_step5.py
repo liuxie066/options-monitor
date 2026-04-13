@@ -2,7 +2,7 @@ from __future__ import annotations
 
 
 def test_cash_footer_for_account_keeps_header_and_asof_when_matched() -> None:
-    from om.domain.multi_tick import cash_footer_for_account
+    from domain.domain.multi_tick import cash_footer_for_account
 
     lines = [
         '**💰 现金 CNY**',
@@ -21,7 +21,7 @@ def test_cash_footer_for_account_keeps_header_and_asof_when_matched() -> None:
 
 
 def test_cash_footer_for_account_returns_empty_when_not_matched() -> None:
-    from om.domain.multi_tick import cash_footer_for_account
+    from domain.domain.multi_tick import cash_footer_for_account
 
     lines = [
         '**💰 现金 CNY**',
@@ -32,7 +32,7 @@ def test_cash_footer_for_account_returns_empty_when_not_matched() -> None:
 
 
 def test_reduce_trading_day_guard_narrows_markets_when_false_present() -> None:
-    from om.domain.multi_tick import reduce_trading_day_guard
+    from domain.domain.multi_tick import reduce_trading_day_guard
 
     out = reduce_trading_day_guard(
         markets_to_run=['HK', 'US'],
@@ -48,7 +48,7 @@ def test_reduce_trading_day_guard_narrows_markets_when_false_present() -> None:
 
 
 def test_reduce_trading_day_guard_offhours_uses_true_markets_when_false_exists() -> None:
-    from om.domain.multi_tick import reduce_trading_day_guard
+    from domain.domain.multi_tick import reduce_trading_day_guard
 
     out = reduce_trading_day_guard(
         markets_to_run=[],
@@ -63,7 +63,7 @@ def test_reduce_trading_day_guard_offhours_uses_true_markets_when_false_exists()
 
 
 def test_reduce_trading_day_guard_skip_when_all_false() -> None:
-    from om.domain.multi_tick import reduce_trading_day_guard
+    from domain.domain.multi_tick import reduce_trading_day_guard
 
     out = reduce_trading_day_guard(
         markets_to_run=['US'],
@@ -76,7 +76,7 @@ def test_reduce_trading_day_guard_skip_when_all_false() -> None:
 
 
 def test_select_scheduler_state_filename_keeps_existing_mapping() -> None:
-    from om.domain.multi_tick import select_scheduler_state_filename
+    from domain.domain.multi_tick import select_scheduler_state_filename
 
     assert select_scheduler_state_filename(['HK']) == 'scheduler_state_hk.json'
     assert select_scheduler_state_filename(['US']) == 'scheduler_state_us.json'

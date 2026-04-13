@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
-from om.domain.tool_boundary import (
+from domain.domain.tool_boundary import (
     normalize_notify_window_aliases,
     normalize_scheduler_decision_payload,
     resolve_notify_window_open,

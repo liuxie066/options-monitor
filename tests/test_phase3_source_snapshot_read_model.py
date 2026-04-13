@@ -11,7 +11,7 @@ if str(BASE) not in sys.path:
 
 
 def test_state_repo_source_snapshot_events_and_current_models() -> None:
-    from om.storage.repositories import state_repo
+    from domain.storage.repositories import state_repo
 
     root = (BASE / "tests" / ".tmp_phase3_source_snapshot_read_model").resolve()
     if root.exists():

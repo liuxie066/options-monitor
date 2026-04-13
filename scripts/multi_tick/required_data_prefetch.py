@@ -3,16 +3,16 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from om.domain import (
+from domain.domain import (
     SCHEMA_VERSION_V1,
     normalize_tool_execution_payload,
 )
-from om.services import (
+from domain.services import (
     ToolExecutionIntent,
     ToolExecutionService,
     adapt_opend_tool_payload,
 )
-from om.storage.repositories import state_repo
+from domain.storage.repositories import state_repo
 from scripts.io_utils import has_shared_required_data
 
 
