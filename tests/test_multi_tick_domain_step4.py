@@ -80,6 +80,30 @@ def test_resolve_notification_channel_target_keeps_fallback_order() -> None:
     assert out_cli == {'channel': 'cli-chan', 'target': 'user:cli'}
 
 
+def test_resolve_notification_route_from_config_centralizes_notifications_reads() -> None:
+    from om.domain.multi_tick import resolve_notification_route_from_config
+
+    out = resolve_notification_route_from_config(
+        config={'notifications': {'target': 'user:cfg'}},
+    )
+    assert out == {
+        'notifications': {'target': 'user:cfg'},
+        'channel': 'feishu',
+        'target': 'user:cfg',
+    }
+
+    out_cli = resolve_notification_route_from_config(
+        config={'notifications': {'channel': 'cfg-chan', 'target': 'user:cfg'}},
+        cli_channel='cli-chan',
+        cli_target='user:cli',
+    )
+    assert out_cli == {
+        'notifications': {'channel': 'cfg-chan', 'target': 'user:cfg'},
+        'channel': 'cli-chan',
+        'target': 'user:cli',
+    }
+
+
 def test_resolve_scheduler_state_path_supports_legacy_state_override() -> None:
     from om.domain.multi_tick import resolve_scheduler_state_path
 
