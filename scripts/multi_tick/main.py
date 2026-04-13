@@ -583,7 +583,7 @@ def main() -> int:
         )
         guard_results = list(guard_decision.get('guard_results') or [])
         for item in guard_results:
-            gm_used = str(item.get('market'))
+            gm_used = str(item.get('market') or '')
             is_td = item.get('is_trading_day')
             log(f"[TRADING_DAY_GUARD] market={gm_used} result={is_td}")
 
