@@ -258,6 +258,41 @@ def decide_opend_unhealthy_action(
     }
 
 
+def build_opend_unhealthy_execution_plan(
+    *,
+    error_code: str,
+    degraded: bool,
+    message_text: str,
+    detail_text: str,
+    host: Any,
+    port: Any,
+) -> dict[str, Any]:
+    """Build side-effect plan for OpenD unhealthy handling without IO."""
+    action = decide_opend_unhealthy_action(
+        error_code=error_code,
+        degraded=degraded,
+    )
+    action_name = str(action.get('action') or '')
+    is_pause = action_name == 'pause_phone_verify'
+    is_degrade = action_name == 'degrade_continue'
+    detail = (
+        f'{host}:{port} {detail_text}'
+        if host is not None and port is not None
+        else str(detail_text or '')
+    )
+    message = str(message_text or '')
+    if is_pause:
+        message = message + '（已暂停：等待你在飞书确认后再继续）'
+    return {
+        **action,
+        'alert_message_text': message,
+        'alert_detail': detail,
+        'should_mark_phone_verify_pending': is_pause,
+        'should_write_account_last_run': (not is_pause),
+        'should_continue': is_degrade,
+    }
+
+
 def decide_account_scan_gate(
     *,
     should_run: bool,
