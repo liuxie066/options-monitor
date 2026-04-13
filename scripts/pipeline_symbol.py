@@ -31,6 +31,7 @@ def process_symbol(
     *,
     required_data_dir: Path | None = None,
     report_dir: Path | None = None,
+    state_dir: Path | None = None,
     is_scheduled: bool = False,
 ) -> list[dict]:
     """Run fetch/scan/render per symbol.
@@ -121,6 +122,7 @@ def process_symbol(
         want_call=want_call,
         timeout_sec=timeout_sec,
         is_scheduled=IS_SCHEDULED,
+        state_dir=state_dir,
         fetch_source=str(fetch_cfg.get('source') or 'yahoo'),
         fetch_host=str(fetch_cfg.get('host') or '127.0.0.1'),
         fetch_port=int(fetch_cfg.get('port') or 11111),
