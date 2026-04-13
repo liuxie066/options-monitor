@@ -13,6 +13,8 @@ DERIVED_CONFIGS = {
     "config.json",
 }
 
+ALLOW_DERIVED_STRICT_TOKEN = "strict"
+
 
 def resolve_config_contract(config_path: str | Path, market_config: str) -> dict[str, Any]:
     name = Path(config_path).name
@@ -32,6 +34,46 @@ def resolve_config_contract(config_path: str | Path, market_config: str) -> dict
         "is_derived": is_derived,
         "market_match": market_match,
         "expected": sorted(expected),
+    }
+
+
+def resolve_allow_derived_config_gate(raw: Any) -> dict[str, Any]:
+    token = str(raw or "").strip()
+    lowered = token.lower()
+    migration_hint = (
+        "默认禁用派生配置；如确需临时放开，请显式设置 "
+        f"OM_ALLOW_DERIVED_CONFIG={ALLOW_DERIVED_STRICT_TOKEN} 并尽快迁移到 canonical config."
+    )
+    if not token:
+        return {
+            "allow_derived": False,
+            "error_code": None,
+            "message": "",
+            "migration_hint": migration_hint,
+            "raw": token,
+        }
+    if lowered == ALLOW_DERIVED_STRICT_TOKEN:
+        return {
+            "allow_derived": True,
+            "error_code": None,
+            "message": "",
+            "migration_hint": migration_hint,
+            "raw": token,
+        }
+    if lowered in {"1", "true", "yes", "on"}:
+        return {
+            "allow_derived": False,
+            "error_code": "OM_ALLOW_DERIVED_CONFIG_LEGACY_DISABLED",
+            "message": "legacy truthy value is no longer enough to enable derived config.",
+            "migration_hint": migration_hint,
+            "raw": token,
+        }
+    return {
+        "allow_derived": False,
+        "error_code": "OM_ALLOW_DERIVED_CONFIG_INVALID",
+        "message": "OM_ALLOW_DERIVED_CONFIG is set but not recognized; treated as disabled.",
+        "migration_hint": migration_hint,
+        "raw": token,
     }
 
 

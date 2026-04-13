@@ -9,18 +9,48 @@ SCHEMA_KIND_SNAPSHOT_DTO = "snapshot_dto"
 SCHEMA_KIND_DECISION = "decision"
 SCHEMA_KIND_DELIVERY_PLAN = "delivery_plan"
 
+ERR_SCHEMA_PAYLOAD_NOT_MAPPING = "E_SCHEMA_PAYLOAD_NOT_MAPPING"
+ERR_SCHEMA_KIND_MISMATCH = "E_SCHEMA_KIND_MISMATCH"
+ERR_SCHEMA_VERSION_UNSUPPORTED = "E_SCHEMA_VERSION_UNSUPPORTED"
+ERR_SNAPSHOT_NAME_REQUIRED = "E_SNAPSHOT_NAME_REQUIRED"
+ERR_SNAPSHOT_PAYLOAD_INVALID = "E_SNAPSHOT_PAYLOAD_INVALID"
+ERR_SNAPSHOT_AS_OF_UTC_REQUIRED = "E_SNAPSHOT_AS_OF_UTC_REQUIRED"
+ERR_DECISION_ACCOUNT_REQUIRED = "E_DECISION_ACCOUNT_REQUIRED"
+ERR_DECISION_SHOULD_RUN_INVALID = "E_DECISION_SHOULD_RUN_INVALID"
+ERR_DECISION_SHOULD_NOTIFY_INVALID = "E_DECISION_SHOULD_NOTIFY_INVALID"
+ERR_DELIVERY_CHANNEL_REQUIRED = "E_DELIVERY_CHANNEL_REQUIRED"
+ERR_DELIVERY_TARGET_REQUIRED = "E_DELIVERY_TARGET_REQUIRED"
+ERR_DELIVERY_ACCOUNT_MESSAGES_INVALID = "E_DELIVERY_ACCOUNT_MESSAGES_INVALID"
+ERR_DELIVERY_ACCOUNT_KEY_INVALID = "E_DELIVERY_ACCOUNT_KEY_INVALID"
+ERR_DELIVERY_ACCOUNT_MESSAGE_INVALID = "E_DELIVERY_ACCOUNT_MESSAGE_INVALID"
+ERR_DELIVERY_SHOULD_SEND_INVALID = "E_DELIVERY_SHOULD_SEND_INVALID"
+
 
 class SchemaValidationError(ValueError):
     """Blocking schema validation error for critical multi_tick path."""
 
 
+def _schema_error(code: str, message: str) -> SchemaValidationError:
+    return SchemaValidationError(f"{str(code).strip()}: {message}")
+
+
+def _require_bool(src: Mapping[str, Any], key: str, *, error_code: str) -> bool:
+    val = src.get(key)
+    if not isinstance(val, bool):
+        raise _schema_error(error_code, f"{key} must be a bool")
+    return bool(val)
+
+
 def _require_schema(payload: Mapping[str, Any] | Any, *, kind: str) -> Mapping[str, Any]:
     if not isinstance(payload, Mapping):
-        raise SchemaValidationError("payload must be a mapping")
+        raise _schema_error(ERR_SCHEMA_PAYLOAD_NOT_MAPPING, "payload must be a mapping")
     if str(payload.get("schema_kind") or "") != str(kind):
-        raise SchemaValidationError(f"schema_kind must be {kind}")
+        raise _schema_error(ERR_SCHEMA_KIND_MISMATCH, f"schema_kind must be {kind}")
     if str(payload.get("schema_version") or "") != SCHEMA_VERSION_V1:
-        raise SchemaValidationError(f"unsupported schema_version: {payload.get('schema_version')}")
+        raise _schema_error(
+            ERR_SCHEMA_VERSION_UNSUPPORTED,
+            f"unsupported schema_version: {payload.get('schema_version')}",
+        )
     return payload
 
 
@@ -56,13 +86,13 @@ class SnapshotDTO:
         src = _require_schema(raw, kind=SCHEMA_KIND_SNAPSHOT_DTO)
         name = str(src.get("snapshot_name") or "").strip()
         if not name:
-            raise SchemaValidationError("snapshot_name is required")
+            raise _schema_error(ERR_SNAPSHOT_NAME_REQUIRED, "snapshot_name is required")
         payload = src.get("payload")
-        if not isinstance(payload, dict):
-            raise SchemaValidationError("payload must be a dict")
+        if not isinstance(payload, Mapping):
+            raise _schema_error(ERR_SNAPSHOT_PAYLOAD_INVALID, "payload must be a mapping")
         as_of_utc = str(src.get("as_of_utc") or "").strip()
         if not as_of_utc:
-            raise SchemaValidationError("as_of_utc is required")
+            raise _schema_error(ERR_SNAPSHOT_AS_OF_UTC_REQUIRED, "as_of_utc is required")
         return cls(snapshot_name=name, payload=dict(payload), as_of_utc=as_of_utc)
 
 
@@ -101,11 +131,11 @@ class Decision:
         src = _require_schema(raw, kind=SCHEMA_KIND_DECISION)
         account = str(src.get("account") or "").strip()
         if not account:
-            raise SchemaValidationError("account is required")
+            raise _schema_error(ERR_DECISION_ACCOUNT_REQUIRED, "account is required")
         return cls(
             account=account,
-            should_run=bool(src.get("should_run")),
-            should_notify=bool(src.get("should_notify")),
+            should_run=_require_bool(src, "should_run", error_code=ERR_DECISION_SHOULD_RUN_INVALID),
+            should_notify=_require_bool(src, "should_notify", error_code=ERR_DECISION_SHOULD_NOTIFY_INVALID),
             reason=str(src.get("reason") or ""),
         )
 
@@ -146,21 +176,26 @@ class DeliveryPlan:
         channel = str(src.get("channel") or "").strip()
         target = str(src.get("target") or "").strip()
         if not channel:
-            raise SchemaValidationError("channel is required")
+            raise _schema_error(ERR_DELIVERY_CHANNEL_REQUIRED, "channel is required")
         if not target:
-            raise SchemaValidationError("target is required")
+            raise _schema_error(ERR_DELIVERY_TARGET_REQUIRED, "target is required")
         raw_messages = src.get("account_messages")
         if not isinstance(raw_messages, Mapping):
-            raise SchemaValidationError("account_messages must be a mapping")
+            raise _schema_error(ERR_DELIVERY_ACCOUNT_MESSAGES_INVALID, "account_messages must be a mapping")
         account_messages: dict[str, str] = {}
         for key, value in raw_messages.items():
             acct = str(key or "").strip()
             if not acct:
-                raise SchemaValidationError("account_messages key must be non-empty")
-            account_messages[acct] = str(value or "")
+                raise _schema_error(ERR_DELIVERY_ACCOUNT_KEY_INVALID, "account_messages key must be non-empty")
+            if not isinstance(value, str):
+                raise _schema_error(
+                    ERR_DELIVERY_ACCOUNT_MESSAGE_INVALID,
+                    "account_messages value must be string",
+                )
+            account_messages[acct] = value
         return cls(
             channel=channel,
             target=target,
             account_messages=account_messages,
-            should_send=bool(src.get("should_send")),
+            should_send=_require_bool(src, "should_send", error_code=ERR_DELIVERY_SHOULD_SEND_INVALID),
         )

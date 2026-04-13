@@ -287,6 +287,50 @@ def decide_notify_dispatch_gate(
     }
 
 
+def decide_notify_delivery_action(
+    *,
+    dispatch_gate: Mapping[str, Any] | Any,
+) -> dict[str, Any]:
+    """Map notify dispatch gate into orchestration actions without inline policy checks."""
+    gate = dispatch_gate if isinstance(dispatch_gate, Mapping) else {}
+    action = str(gate.get('action') or '')
+    if action == 'skip_quiet_hours':
+        return {
+            'action': 'skip_quiet_hours',
+            'should_send': False,
+            'config_error': None,
+            'effective_target': gate.get('effective_target'),
+            'reason': str(gate.get('reason') or ''),
+            'quiet_window': str(gate.get('quiet_window') or ''),
+        }
+    if action == 'config_error':
+        return {
+            'action': 'config_error',
+            'should_send': False,
+            'config_error': gate.get('config_error'),
+            'effective_target': gate.get('effective_target'),
+            'reason': str(gate.get('reason') or ''),
+            'quiet_window': str(gate.get('quiet_window') or ''),
+        }
+    if action == 'send':
+        return {
+            'action': 'send',
+            'should_send': True,
+            'config_error': None,
+            'effective_target': gate.get('effective_target'),
+            'reason': str(gate.get('reason') or ''),
+            'quiet_window': str(gate.get('quiet_window') or ''),
+        }
+    return {
+        'action': 'skip',
+        'should_send': False,
+        'config_error': None,
+        'effective_target': gate.get('effective_target'),
+        'reason': str(gate.get('reason') or ''),
+        'quiet_window': str(gate.get('quiet_window') or ''),
+    }
+
+
 def decide_opend_unhealthy_action(
     *,
     error_code: str,
@@ -451,6 +495,7 @@ def resolve_multi_tick_engine_entrypoint(
     dnd_decision: Mapping[str, Any] | Any = None,
     notify_account_messages: Mapping[str, str] | Any = None,
     notify_min_accounts: int | Any = 1,
+    notify_dispatch_gate: Mapping[str, Any] | Any = None,
     normalize_fn: Callable[[Any], Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Single engine entrypoint for scheduler/watchdog/notify decision resolution."""
@@ -510,5 +555,9 @@ def resolve_multi_tick_engine_entrypoint(
             ),
             'min_accounts': notify_min_accounts,
         }
+    if notify_dispatch_gate is not None:
+        out['notify_delivery'] = decide_notify_delivery_action(
+            dispatch_gate=notify_dispatch_gate,
+        )
 
     return out

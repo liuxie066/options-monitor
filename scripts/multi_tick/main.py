@@ -63,6 +63,7 @@ from om.domain import (
     normalize_pipeline_subprocess_output,
     normalize_subprocess_adapter_payload,
     resolve_config_contract,
+    resolve_allow_derived_config_gate,
     markets_for_trading_day_guard as domain_markets_for_trading_day_guard,
     reduce_trading_day_guard,
     resolve_notification_route_from_config,
@@ -74,6 +75,7 @@ from om.domain.engine import (
     apply_opend_degrade_to_yahoo,
     build_opend_unhealthy_execution_plan,
     decide_account_scan_gate,
+    decide_notify_delivery_action,
     decide_pipeline_execution_result,
     decide_notification_meaningful,
     decide_trading_day_guard,
@@ -178,15 +180,26 @@ def main() -> int:
     cfg_path = Path(args.config)
     if not cfg_path.is_absolute():
         cfg_path = (base / cfg_path).resolve()
-    allow_derived_raw = str(os.environ.get('OM_ALLOW_DERIVED_CONFIG', '')).strip()
-    allow_derived_config = allow_derived_raw.lower() in {'1', 'true'}
-    if allow_derived_raw and not allow_derived_config:
+    allow_derived_gate = resolve_allow_derived_config_gate(
+        os.environ.get('OM_ALLOW_DERIVED_CONFIG', ''),
+    )
+    allow_derived_config = bool(allow_derived_gate.get('allow_derived'))
+    allow_derived_error_code = str(allow_derived_gate.get('error_code') or '').strip()
+    allow_derived_message = str(allow_derived_gate.get('message') or '').strip()
+    allow_derived_migration_hint = str(allow_derived_gate.get('migration_hint') or '').strip()
+    allow_derived_raw = str(allow_derived_gate.get('raw') or '').strip()
+    if allow_derived_error_code:
         runlog.safe_event(
             'config_guard',
             'warn',
-            error_code='OM_ALLOW_DERIVED_CONFIG_INVALID',
-            message='OM_ALLOW_DERIVED_CONFIG is set but not recognized; treated as disabled.',
-            data=_safe_runlog_data({'raw': allow_derived_raw}),
+            error_code=allow_derived_error_code,
+            message=allow_derived_message,
+            data=_safe_runlog_data(
+                {
+                    'raw': allow_derived_raw,
+                    'migration_hint': allow_derived_migration_hint,
+                }
+            ),
         )
     contract_info = resolve_config_contract(cfg_path, str(getattr(args, 'market_config', 'auto') or 'auto'))
     if allow_derived_config and (not contract_info.get('is_canonical', False) or not contract_info.get('market_match', False)):
@@ -1195,6 +1208,11 @@ def main() -> int:
         notify_dispatch=dispatch_decision,
         dnd_decision=dnd_decision,
     ).get('notify') or {}
+    notify_delivery = resolve_multi_tick_engine_entrypoint(
+        notify_dispatch_gate=dispatch_gate,
+    ).get('notify_delivery') or decide_notify_delivery_action(
+        dispatch_gate=dispatch_gate,
+    )
     _audit(
         'notify',
         'dispatch_decision',
@@ -1203,22 +1221,22 @@ def main() -> int:
         target=(str(target) if target else None),
         extra={'reason': dispatch_decision.get('reason'), 'should_send': bool(dispatch_decision.get('should_send'))},
     )
-    if str(dispatch_gate.get('action') or '') == 'skip_quiet_hours':
-        quiet_window = str(dispatch_gate.get('quiet_window') or '')
+    if str(notify_delivery.get('action') or '') == 'skip_quiet_hours':
+        quiet_window = str(notify_delivery.get('quiet_window') or '')
         runlog.safe_event('notify', 'skip', message=f'in quiet hours ({quiet_window})')
         print(f"[SKIP] Currently in quiet hours (DND). Target was: {target}")
         return 0
 
     sent_accounts: list[str] = []
 
-    config_error = dispatch_gate.get('config_error')
+    config_error = notify_delivery.get('config_error')
     if config_error:
         runlog.safe_event('notify', 'error', error_code='CONFIG_ERROR', message=str(config_error))
         raise SystemExit(f'[CONFIG_ERROR] {config_error}')
 
     delivery_plan: DeliveryPlan | None = None
-    if bool(dispatch_gate.get('should_send')):
-        target = dispatch_gate.get('effective_target')
+    if bool(notify_delivery.get('should_send')):
+        target = notify_delivery.get('effective_target')
         try:
             delivery_plan = DeliveryPlan.from_payload(
                 {
@@ -1290,7 +1308,7 @@ def main() -> int:
             )
             runlog.safe_event('notify', 'ok', duration_ms=int((monotonic() - t_notify0) * 1000), data=_safe_runlog_data({'channel': channel, 'account': acct}))
     else:
-        target = dispatch_gate.get('effective_target')
+        target = notify_delivery.get('effective_target')
         sent_accounts = list(account_messages.keys())
         runlog.safe_event('notify', 'skip', message='no_send mode')
 

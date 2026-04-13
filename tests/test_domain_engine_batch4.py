@@ -274,6 +274,7 @@ def test_main_uses_notify_dispatch_gate_entrypoint_batch4() -> None:
     src = (base / 'scripts' / 'multi_tick' / 'main.py').read_text(encoding='utf-8')
     assert 'resolve_multi_tick_engine_entrypoint' in src
     assert 'notify_dispatch=dispatch_decision' in src
+    assert 'notify_dispatch_gate=dispatch_gate' in src
 
 
 def test_main_orchestrator_guard_batch4_no_legacy_rule_reflow() -> None:
@@ -286,6 +287,7 @@ def test_main_orchestrator_guard_batch4_no_legacy_rule_reflow() -> None:
         'build_opend_unhealthy_execution_plan(',
         'decide_trading_day_guard(',
         'resolve_multi_tick_engine_entrypoint(',
+        'decide_notify_delivery_action(',
         'engine_filter_notify_candidates(',
         'rank_notify_candidates(',
     ):
@@ -296,6 +298,7 @@ def test_main_orchestrator_guard_batch4_no_legacy_rule_reflow() -> None:
         "allow_downgrade and (not has_hk_opend) and (not watchdog_timed_out)",
         "false_markets = [str(r.get('market')) for r in guard_results if r.get('is_trading_day') is False]",
         "if reason == 'quiet_hours':",
+        "if str(dispatch_gate.get('action') or '') == 'skip_quiet_hours':",
         "if should_send:",
     ):
         assert legacy_fragment not in src
