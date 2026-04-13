@@ -79,3 +79,71 @@ def test_call_mode_rank_uses_call_sort_columns() -> None:
     ranked = rank_candidates(df, cfg)
     assert list(ranked["contract_symbol"]) == ["C2", "C1", "C3"]
 
+
+def test_strategy_param_table_v1_default_weights_split_put_call() -> None:
+    _add_repo_to_syspath()
+    from scripts.option_candidate_strategy import build_strategy_config
+
+    put_cfg = build_strategy_config("put")
+    call_cfg = build_strategy_config("call")
+
+    assert put_cfg.param_table_version == "v1"
+    assert call_cfg.param_table_version == "v1"
+    assert put_cfg.score_weight_if_exercised_total_return == 0.0
+    assert call_cfg.score_weight_if_exercised_total_return == 1e-3
+
+
+def test_filter_candidates_with_reject_log_contains_required_fields() -> None:
+    _add_repo_to_syspath()
+    from scripts.option_candidate_strategy import (
+        build_strategy_config,
+        filter_candidates_with_reject_log,
+    )
+
+    df = pd.DataFrame(
+        [
+            {
+                "symbol": "NVDA",
+                "contract_symbol": "PASS",
+                "expiration": "2026-06-18",
+                "strike": 110.0,
+                "annualized_net_return_on_cash_basis": 0.12,
+                "net_income": 80.0,
+                "otm_pct": 0.07,
+                "spread_ratio": 0.20,
+            },
+            {
+                "symbol": "NVDA",
+                "contract_symbol": "FAIL_RET",
+                "expiration": "2026-06-18",
+                "strike": 115.0,
+                "annualized_net_return_on_cash_basis": 0.08,
+                "net_income": 90.0,
+                "otm_pct": 0.07,
+                "spread_ratio": 0.20,
+            },
+            {
+                "symbol": "NVDA",
+                "contract_symbol": "FAIL_SPREAD",
+                "expiration": "2026-06-18",
+                "strike": 105.0,
+                "annualized_net_return_on_cash_basis": 0.13,
+                "net_income": 90.0,
+                "otm_pct": 0.07,
+                "spread_ratio": 0.40,
+            },
+        ]
+    )
+
+    cfg = build_strategy_config(
+        "put",
+        min_annualized_return=0.10,
+        max_spread_ratio=0.30,
+    )
+    out, reject_log = filter_candidates_with_reject_log(df, cfg, reject_stage="step3_risk_gate")
+
+    assert list(out["contract_symbol"]) == ["PASS"]
+    assert len(reject_log) == 2
+    assert set(["reject_stage", "reject_rule", "metric_value", "threshold", "symbol", "contract_symbol"]).issubset(
+        set(reject_log.columns)
+    )
