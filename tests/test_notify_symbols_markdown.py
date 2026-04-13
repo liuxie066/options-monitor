@@ -2,6 +2,19 @@
 
 from __future__ import annotations
 
+import pandas as pd
+
+
+def _render_via_alert_engine(summary_row: dict) -> str:
+    from om.domain import normalize_processor_row
+    from scripts.alert_engine import build_alert_text
+    from scripts.notify_symbols import build_notification
+
+    normalized = normalize_processor_row(summary_row)
+    df = pd.DataFrame([normalized])
+    alerts = build_alert_text(df)
+    return build_notification("", alerts, account_label="SY")
+
 
 def test_notify_symbols_markdown_put_layout() -> None:
     from scripts.notify_symbols import build_notification
@@ -63,3 +76,53 @@ def test_notify_symbols_markdown_call_layout_and_changes() -> None:
     assert "数量=2张(可覆盖)" in out
     assert "变化" in out
     assert "- NVDA sell_call: Top pick 由 2026-06-18 175C 变为 2026-06-18 180C。" in out
+
+
+def test_notify_symbols_markdown_put_chain_uses_upstream_fields_when_available() -> None:
+    out = _render_via_alert_engine(
+        {
+            "symbol": "0700.HK",
+            "strategy": "sell_put",
+            "candidate_count": 1,
+            "top_contract": "2026-04-29 460P",
+            "annualized_return": 0.1721,
+            "net_income": 557.00,
+            "dte": 26,
+            "strike": 460.0,
+            "risk_label": "中性",
+            "delta": -0.23,
+            "iv": 0.41,
+            "cash_required_cny": 110720.0,
+            "mid": 5.72,
+            "bid": 5.58,
+            "ask": 5.86,
+            "option_ccy": "HKD",
+        }
+    )
+
+    assert "保证金占用=¥110,720 (CNY)" in out
+    assert "delta=-0.23" in out
+    assert "IV=41.00%" in out
+    assert "告警未提供cash_req_cny/cash_req" not in out
+    assert "告警未提供delta" not in out
+    assert "告警未提供iv" not in out
+
+
+def test_notify_symbols_markdown_put_chain_missing_fields_keep_reasons() -> None:
+    out = _render_via_alert_engine(
+        {
+            "symbol": "NVDA",
+            "strategy": "sell_put",
+            "candidate_count": 1,
+            "top_contract": "2026-06-18 156P",
+            "annualized_return": 0.1,
+            "net_income": 524.99,
+            "dte": 76,
+            "strike": 156.0,
+            "risk_label": "中性",
+        }
+    )
+
+    assert "保证金占用=缺失(告警未提供cash_req_cny/cash_req)" in out
+    assert "delta=缺失(告警未提供delta)" in out
+    assert "IV=缺失(告警未提供iv)" in out

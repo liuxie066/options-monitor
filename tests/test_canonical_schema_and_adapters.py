@@ -52,6 +52,9 @@ def test_normalize_processor_row_keeps_summary_fields_with_defaults() -> None:
     assert out["strike"] == 180.0
     assert out["dte"] == 32
     assert out["risk_label"] == "中性"
+    assert out["delta"] is None
+    assert out["iv"] is None
+    assert out["cash_required_cny"] is None
 
     out2 = normalize_processor_row({"symbol": "msft", "strategy": "sell_call"})
     assert out2["top_contract"] == ""
@@ -60,6 +63,47 @@ def test_normalize_processor_row_keeps_summary_fields_with_defaults() -> None:
     assert out2["strike"] is None
     assert out2["dte"] is None
     assert out2["risk_label"] == ""
+    assert out2["delta"] is None
+    assert out2["iv"] is None
+    assert out2["cash_required_cny"] is None
+
+
+def test_normalize_processor_row_preserves_put_alert_fields() -> None:
+    out = normalize_processor_row(
+        {
+            "symbol": "nvda",
+            "strategy": "sell_put",
+            "candidate_count": 1,
+            "delta": -0.23,
+            "iv": 0.41,
+            "cash_required_cny": 110720.0,
+            "cash_required_usd": 15200.0,
+            "cash_free_cny": 200000.0,
+            "cash_free_usd": 25000.0,
+            "cash_free_usd_est": 24800.0,
+            "cash_available_cny": 260000.0,
+            "cash_available_usd": 32000.0,
+            "cash_available_usd_est": 31800.0,
+            "mid": 5.72,
+            "bid": 5.58,
+            "ask": 5.86,
+            "option_ccy": "HKD",
+        }
+    )
+    assert out["delta"] == -0.23
+    assert out["iv"] == 0.41
+    assert out["cash_required_cny"] == 110720.0
+    assert out["cash_required_usd"] == 15200.0
+    assert out["cash_free_cny"] == 200000.0
+    assert out["cash_free_usd"] == 25000.0
+    assert out["cash_free_usd_est"] == 24800.0
+    assert out["cash_available_cny"] == 260000.0
+    assert out["cash_available_usd"] == 32000.0
+    assert out["cash_available_usd_est"] == 31800.0
+    assert out["mid"] == 5.72
+    assert out["bid"] == 5.58
+    assert out["ask"] == 5.86
+    assert out["option_ccy"] == "HKD"
 
 
 def test_source_snapshot_validates_and_normalizes() -> None:
@@ -184,6 +228,7 @@ def test_opend_adapter_rejects_non_tool_execution_schema() -> None:
 def main() -> None:
     test_normalize_processor_row_requires_symbol_and_strategy()
     test_normalize_processor_row_keeps_summary_fields_with_defaults()
+    test_normalize_processor_row_preserves_put_alert_fields()
     test_source_snapshot_validates_and_normalizes()
     test_normalize_processor_rows_requires_list_contract()
     test_three_source_adapters_produce_unified_dto()
