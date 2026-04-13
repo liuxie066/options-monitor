@@ -14,6 +14,9 @@ import pandas as pd
 
 def build_symbols_summary(summary_rows: list[dict], report_dir: Path, *, is_scheduled: bool = False):
     df = pd.DataFrame(summary_rows)
+    # Backward/partial schema compatibility: tolerate missing optional columns.
+    if 'annualized_return' not in df.columns:
+        df['annualized_return'] = None
     csv_path = report_dir / 'symbols_summary.csv'
     txt_path = report_dir / 'symbols_summary.txt'
     df.to_csv(csv_path, index=False)
@@ -70,4 +73,3 @@ def build_symbols_digest(symbols: list[str], report_dir: Path):
 
 
     print(f'[DONE] symbols digest -> {out_path}')
-
