@@ -449,6 +449,8 @@ def resolve_multi_tick_engine_entrypoint(
     opend_unhealthy: Mapping[str, Any] | None = None,
     notify_dispatch: Mapping[str, Any] | Any = None,
     dnd_decision: Mapping[str, Any] | Any = None,
+    notify_account_messages: Mapping[str, str] | Any = None,
+    notify_min_accounts: int | Any = 1,
     normalize_fn: Callable[[Any], Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Single engine entrypoint for scheduler/watchdog/notify decision resolution."""
@@ -494,5 +496,14 @@ def resolve_multi_tick_engine_entrypoint(
             dispatch_decision=notify_dispatch or {},
             dnd_decision=dnd_decision or {},
         )
+
+    if notify_account_messages is not None:
+        out['notify_threshold'] = {
+            'threshold_met': decide_notify_threshold_met(
+                notify_account_messages,
+                min_accounts=notify_min_accounts,
+            ),
+            'min_accounts': notify_min_accounts,
+        }
 
     return out

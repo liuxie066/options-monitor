@@ -74,7 +74,6 @@ from om.domain.engine import (
     apply_opend_degrade_to_yahoo,
     build_opend_unhealthy_execution_plan,
     decide_account_scan_gate,
-    decide_notify_threshold_met,
     decide_pipeline_execution_result,
     decide_notification_meaningful,
     decide_trading_day_guard,
@@ -1129,7 +1128,11 @@ def main() -> int:
     except SchemaValidationError as e:
         _fail_schema_validation(runlog=runlog, audit_fn=_audit, stage='account_messages_snapshot', exc=e, run_id=run_id)
 
-    if not decide_notify_threshold_met(account_messages, min_accounts=1):
+    notify_threshold = resolve_multi_tick_engine_entrypoint(
+        notify_account_messages=account_messages,
+        notify_min_accounts=1,
+    ).get('notify_threshold') or {}
+    if not bool(notify_threshold.get('threshold_met')):
         runlog.safe_event('notify', 'skip', message='no account notification content')
 
         shared_payload, account_payloads = build_no_account_notification_payloads(
