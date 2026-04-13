@@ -75,6 +75,7 @@ from om.domain.engine import (
     decide_notify_threshold_met,
     decide_pipeline_execution_result,
     decide_notification_meaningful,
+    decide_trading_day_guard,
     filter_notify_candidates as engine_filter_notify_candidates,
     rank_notify_candidates,
     resolve_scheduler_decision,
@@ -545,10 +546,16 @@ def main() -> int:
         )
     else:
         guard_markets = _markets_for_trading_day_guard(markets_to_run, base_cfg, getattr(args, 'market_config', 'auto'))
-        guard_results: list[dict] = []
-        for gm in guard_markets:
-            is_td, gm_used = _is_trading_day_guard_for_market(base_cfg, gm)
-            guard_results.append({'market': gm_used, 'is_trading_day': is_td})
+        guard_decision = decide_trading_day_guard(
+            markets_to_run=markets_to_run,
+            guard_markets=guard_markets,
+            check_trading_day_for_market=lambda gm: _is_trading_day_guard_for_market(base_cfg, gm),
+            reduce_guard_fn=reduce_trading_day_guard,
+        )
+        guard_results = list(guard_decision.get('guard_results') or [])
+        for item in guard_results:
+            gm_used = str(item.get('market'))
+            is_td = item.get('is_trading_day')
             log(f"[TRADING_DAY_GUARD] market={gm_used} result={is_td}")
 
         runlog.safe_event(
@@ -557,13 +564,9 @@ def main() -> int:
             data=_safe_runlog_data({'results': guard_results, 'markets_to_run': markets_to_run, 'market_config': str(getattr(args, 'market_config', 'auto') or 'auto')}),
         )
 
-        guard_reduced = reduce_trading_day_guard(
-            markets_to_run=markets_to_run,
-            guard_results=guard_results,
-        )
-        markets_to_run = list(guard_reduced.get('markets_to_run') or [])
-        if bool(guard_reduced.get('should_skip')):
-            runlog.safe_event('run_end', 'skip', message=str(guard_reduced.get('skip_message') or ''))
+        markets_to_run = list(guard_decision.get('markets_to_run') or [])
+        if bool(guard_decision.get('should_skip')):
+            runlog.safe_event('run_end', 'skip', message=str(guard_decision.get('skip_message') or ''))
             return 0
 
     state_repo.shared_state_dir(base)
