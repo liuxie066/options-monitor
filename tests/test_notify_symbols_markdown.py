@@ -17,7 +17,7 @@ def test_notify_symbols_markdown_put_layout() -> None:
 
 ### [LX] 腾讯 | 到期 2026-04-29 | 策略 卖Put
 - 腾讯 卖Put 2026-04-29 460P
-- 指标: 方向=卖Put | 行权价=460 | 数量=1张(默认) | 权利金=5.720 (HKD) | 年化 17.21% | 净收 557 | 保证金占用=¥110,720 (CNY) | delta=-0.23 | IV=-
+- 指标: 方向=卖Put | 行权价=460 | 数量=1张(默认) | 权利金=5.720 (HKD) | 年化 17.21% | 净收 557 | 保证金占用=¥110,720 (CNY) | delta=-0.23 | IV=缺失(告警未提供iv)
 - 建议挂单: 5.720
 > 次要信息
 > 风险: 中性
@@ -25,6 +25,24 @@ def test_notify_symbols_markdown_put_layout() -> None:
 ---
 """
     assert out == expected
+
+
+def test_notify_symbols_markdown_put_layout_missing_fields_have_reasons() -> None:
+    from scripts.notify_symbols import build_notification
+
+    alerts = """# Symbols Alerts
+
+## 高优先级
+- NVDA | sell_put | 2026-06-18 156P | 年化 - | 净收入 524.99 | DTE 76 | Strike nan | nan | ccy USD | ask 5.450 | bid 5.100 | mid 5.275 | delta nan | iv nan | cash_req - | 通过准入后，收益/风险组合较强，值得优先看。
+"""
+    out = build_notification("", alerts, account_label="SY")
+
+    assert "nan" not in out.lower()
+    assert "行权价=156" in out
+    assert "年化 缺失(告警未提供年化)" in out
+    assert "保证金占用=缺失(告警未提供cash_req_cny/cash_req)" in out
+    assert "delta=缺失(告警未提供delta)" in out
+    assert "IV=缺失(告警未提供iv)" in out
 
 
 def test_notify_symbols_markdown_call_layout_and_changes() -> None:
