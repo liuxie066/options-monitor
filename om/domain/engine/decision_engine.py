@@ -231,3 +231,80 @@ def decide_notification_meaningful(
     empty_placeholder: str = '今日无需要主动提醒的内容。',
 ) -> bool:
     return bool(notification_text) and (notification_text != empty_placeholder)
+
+
+def decide_opend_unhealthy_action(
+    *,
+    error_code: str,
+    degraded: bool,
+) -> dict[str, Any]:
+    code = str(error_code or 'OPEND_API_ERROR')
+    if code == 'OPEND_NEEDS_PHONE_VERIFY':
+        return {
+            'action': 'pause_phone_verify',
+            'terminal': True,
+            'fallback_used': False,
+        }
+    if bool(degraded):
+        return {
+            'action': 'degrade_continue',
+            'terminal': False,
+            'fallback_used': True,
+        }
+    return {
+        'action': 'abort',
+        'terminal': True,
+        'fallback_used': False,
+    }
+
+
+def decide_account_scan_gate(
+    *,
+    should_run: bool,
+    has_symbols: bool,
+    reason: str,
+    no_symbols_suffix: str = '本时段无对应市场标的',
+) -> dict[str, Any]:
+    if not bool(should_run):
+        return {
+            'run_pipeline': False,
+            'ran_scan': False,
+            'meaningful': False,
+            'result_reason': str(reason or ''),
+        }
+    if not bool(has_symbols):
+        reason0 = str(reason or '').strip()
+        msg = f'{reason0} | {no_symbols_suffix}'.strip(' |')
+        return {
+            'run_pipeline': False,
+            'ran_scan': False,
+            'meaningful': False,
+            'result_reason': msg,
+        }
+    return {
+        'run_pipeline': True,
+        'ran_scan': True,
+        'meaningful': None,
+        'result_reason': str(reason or ''),
+    }
+
+
+def decide_pipeline_execution_result(
+    *,
+    returncode: int,
+    failed_reason: str = 'pipeline failed',
+) -> dict[str, Any]:
+    ok = int(returncode) == 0
+    if ok:
+        return {
+            'ok': True,
+            'ran_scan': True,
+            'meaningful': None,
+            'reason': '',
+        }
+    return {
+        'ok': False,
+        'ran_scan': True,
+        'meaningful': False,
+        'reason': str(failed_reason or 'pipeline failed'),
+    }
