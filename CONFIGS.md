@@ -1,6 +1,6 @@
 # options-monitor 配置契约文档
 
-仅定义配置契约与门禁，不重复 README/DEPLOY 的操作细节。
+仅定义配置契约与门禁，不重复 README/RUNBOOK 的操作细节。
 
 ## Canonical Configs（唯一真源）
 

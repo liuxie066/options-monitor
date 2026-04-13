@@ -2,6 +2,11 @@
 
 This repo is meant to run as a repeatable monitoring pipeline.
 
+## Public doc boundary
+
+- Remote-repo entrypoints: `README.md`, `CONFIGS.md`, `RUNBOOK.md`
+- Release/deploy workflow: executed only in local private ops repo (not documented here)
+
 ## Core entrypoints
 
 - Runtime config entry (OM only): `config.us.json` / `config.hk.json`
