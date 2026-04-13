@@ -133,3 +133,15 @@ def test_main_uses_engine_decision_entrypoints_batch3() -> None:
     assert 'decide_opend_unhealthy_action' in src
     assert 'decide_account_scan_gate' in src
     assert 'decide_pipeline_execution_result' in src
+
+
+def test_engine_package_exports_batch3_entrypoints() -> None:
+    from om.domain.engine import (
+        build_opend_unhealthy_execution_plan,
+        decide_notify_dispatch_gate,
+        decide_trading_day_guard,
+    )
+
+    assert callable(build_opend_unhealthy_execution_plan)
+    assert callable(decide_notify_dispatch_gate)
+    assert callable(decide_trading_day_guard)
