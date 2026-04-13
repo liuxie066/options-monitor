@@ -48,3 +48,28 @@ def test_main_uses_notify_threshold_entrypoint_batch5() -> None:
     assert 'notify_account_messages=account_messages' in src
     assert 'notify_min_accounts=1' in src
     assert 'decide_notify_threshold_met(' not in src
+
+
+def test_resolve_multi_tick_engine_entrypoint_shape_guard_for_account_scheduler_map() -> None:
+    from om.domain.engine import resolve_multi_tick_engine_entrypoint
+
+    out = resolve_multi_tick_engine_entrypoint(
+        scheduler_raw={
+            'should_run_scan': True,
+            'is_notify_window_open': True,
+            'reason': 'ok',
+        },
+        account_scheduler_raw_by_account=['not-a-mapping'],
+    )
+    scheduler = out.get('scheduler') or {}
+    assert scheduler.get('account_scheduler_decisions') == {}
+    assert scheduler.get('account_scheduler_views') == {}
+
+
+def test_resolve_multi_tick_engine_entrypoint_shape_guard_for_opend_payload() -> None:
+    from om.domain.engine import resolve_multi_tick_engine_entrypoint
+
+    out = resolve_multi_tick_engine_entrypoint(opend_unhealthy='invalid-shape')
+    watchdog = out.get('watchdog') or {}
+    assert watchdog.get('action') == 'abort'
+    assert watchdog.get('fallback_used') is False
