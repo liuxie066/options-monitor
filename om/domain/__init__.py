@@ -65,6 +65,7 @@ from .intermediate_objects import (
     SchemaValidationError,
     SnapshotDTO,
 )
+from .engine import build_failure_audit_fields
 
 __all__ = [
     'apply_scan_run_decision',
@@ -120,4 +121,5 @@ __all__ = [
     'SnapshotDTO',
     'Decision',
     'DeliveryPlan',
+    'build_failure_audit_fields',
 ]
