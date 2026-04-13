@@ -56,6 +56,15 @@ from .config_contract import (
     ensure_runtime_canonical_config,
     resolve_config_contract,
 )
+from .intermediate_objects import (
+    SCHEMA_KIND_DECISION,
+    SCHEMA_KIND_DELIVERY_PLAN,
+    SCHEMA_KIND_SNAPSHOT_DTO,
+    Decision,
+    DeliveryPlan,
+    SchemaValidationError,
+    SnapshotDTO,
+)
 
 __all__ = [
     'apply_scan_run_decision',
@@ -104,4 +113,11 @@ __all__ = [
     'DERIVED_CONFIGS',
     'resolve_config_contract',
     'ensure_runtime_canonical_config',
+    'SCHEMA_KIND_SNAPSHOT_DTO',
+    'SCHEMA_KIND_DECISION',
+    'SCHEMA_KIND_DELIVERY_PLAN',
+    'SchemaValidationError',
+    'SnapshotDTO',
+    'Decision',
+    'DeliveryPlan',
 ]
