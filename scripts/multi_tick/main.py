@@ -66,7 +66,9 @@ from om.domain import (
     select_scheduler_state_filename,
 )
 from om.domain.engine import (
+    AccountSchedulerDecisionView,
     apply_opend_degrade_to_yahoo,
+    build_account_scheduler_decision_dto,
     decide_account_scan_gate,
     decide_notify_threshold_met,
     decide_opend_unhealthy_action,
@@ -574,14 +576,31 @@ def main() -> int:
         runlog.safe_event('run_end', 'error', error_code='SCHEDULER_FAILED', message=err)
         return 0
 
-    scheduler_raw = json.loads((scheduler_proc.stdout or '').strip())
-    scheduler_decision, scheduler_view = resolve_scheduler_decision(scheduler_raw)
+    try:
+        scheduler_raw = json.loads((scheduler_proc.stdout or '').strip())
+        scheduler_input_snapshot = SnapshotDTO.from_payload(
+            {
+                'schema_kind': 'snapshot_dto',
+                'schema_version': '1.0',
+                'snapshot_name': 'scheduler_raw',
+                'as_of_utc': utc_now(),
+                'payload': {'scheduler_raw': scheduler_raw},
+            }
+        )
+        scheduler_payload = scheduler_input_snapshot.payload.get('scheduler_raw')
+        if not isinstance(scheduler_payload, dict):
+            raise SchemaValidationError('scheduler_raw must be a dict')
+        scheduler_decision, scheduler_view = resolve_scheduler_decision(scheduler_payload)
+    except SchemaValidationError as e:
+        _fail_schema_validation(runlog=runlog, audit_fn=_audit, stage='scheduler_decision', exc=e)
+    except Exception as e:
+        _fail_schema_validation(runlog=runlog, audit_fn=_audit, stage='scheduler_parse', exc=e)
     should_run_global = bool(scheduler_view.should_run_scan)
     reason_global = str(scheduler_view.reason)
 
-    notify_decision_by_account: dict[str, dict | None] = {}
+    notify_decision_by_account: dict[str, AccountSchedulerDecisionView | None] = {}
     for acct0 in [str(a).strip() for a in (args.accounts or []) if str(a).strip()]:
-        account_scheduler_decision_raw: dict | None = None
+        account_scheduler_decision_view: AccountSchedulerDecisionView | None = None
         try:
             sch_acct = run_scan_scheduler_cli(
                 vpy=vpy,
@@ -594,10 +613,35 @@ def main() -> int:
                 capture_output=True,
             )
             if sch_acct.returncode == 0:
-                account_scheduler_decision_raw = json.loads((sch_acct.stdout or '').strip())
+                account_scheduler_raw = json.loads((sch_acct.stdout or '').strip())
+                account_scheduler_decision_dto = build_account_scheduler_decision_dto(
+                    account_scheduler_raw,
+                    scheduler_decision=scheduler_view,
+                )
+                account_scheduler_snapshot = SnapshotDTO.from_payload(
+                    {
+                        'schema_kind': 'snapshot_dto',
+                        'schema_version': '1.0',
+                        'snapshot_name': f'account_scheduler_decision:{acct0}',
+                        'as_of_utc': utc_now(),
+                        'payload': {
+                            'account': str(acct0),
+                            'decision': account_scheduler_decision_dto,
+                        },
+                    }
+                )
+                account_decision_payload = account_scheduler_snapshot.payload.get('decision')
+                if not isinstance(account_decision_payload, dict):
+                    raise SchemaValidationError('account scheduler decision must be a dict')
+                account_scheduler_decision_view = AccountSchedulerDecisionView.from_payload(
+                    account_decision_payload,
+                    scheduler_decision=scheduler_view,
+                )
+        except SchemaValidationError as e:
+            _fail_schema_validation(runlog=runlog, audit_fn=_audit, stage='account_scheduler_decision', exc=e)
         except Exception:
-            account_scheduler_decision_raw = None
-        notify_decision_by_account[acct0] = account_scheduler_decision_raw
+            account_scheduler_decision_view = None
+        notify_decision_by_account[acct0] = account_scheduler_decision_view
 
     should_run_global, reason_global = apply_scan_run_decision(
         should_run_global=should_run_global,
