@@ -48,6 +48,13 @@ def normalize_processor_row(raw: dict[str, Any] | Any) -> dict[str, Any]:
         "symbol": symbol,
         "strategy": strategy,
         "candidate_count": candidate_count,
+        # Keep summary/report contract fields stable even when upstream rows are partial.
+        "top_contract": src.get("top_contract", ""),
+        "annualized_return": src.get("annualized_return", None),
+        "net_income": src.get("net_income", None),
+        "strike": src.get("strike", None),
+        "dte": src.get("dte", None),
+        "risk_label": src.get("risk_label", ""),
         "note": note,
     }
     for key in ("market", "account", "source", "run_id"):

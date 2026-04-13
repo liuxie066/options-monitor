@@ -33,6 +33,35 @@ def test_normalize_processor_row_requires_symbol_and_strategy() -> None:
     assert out["candidate_count"] == 2
 
 
+def test_normalize_processor_row_keeps_summary_fields_with_defaults() -> None:
+    out = normalize_processor_row(
+        {
+            "symbol": "aapl",
+            "strategy": "sell_put",
+            "top_contract": "2026-05-15 180P",
+            "annualized_return": 0.12,
+            "net_income": 123.45,
+            "strike": 180.0,
+            "dte": 32,
+            "risk_label": "中性",
+        }
+    )
+    assert out["top_contract"] == "2026-05-15 180P"
+    assert out["annualized_return"] == 0.12
+    assert out["net_income"] == 123.45
+    assert out["strike"] == 180.0
+    assert out["dte"] == 32
+    assert out["risk_label"] == "中性"
+
+    out2 = normalize_processor_row({"symbol": "msft", "strategy": "sell_call"})
+    assert out2["top_contract"] == ""
+    assert out2["annualized_return"] is None
+    assert out2["net_income"] is None
+    assert out2["strike"] is None
+    assert out2["dte"] is None
+    assert out2["risk_label"] == ""
+
+
 def test_source_snapshot_validates_and_normalizes() -> None:
     out = normalize_source_snapshot(
         source_name="holdings",
@@ -154,6 +183,7 @@ def test_opend_adapter_rejects_non_tool_execution_schema() -> None:
 
 def main() -> None:
     test_normalize_processor_row_requires_symbol_and_strategy()
+    test_normalize_processor_row_keeps_summary_fields_with_defaults()
     test_source_snapshot_validates_and_normalizes()
     test_normalize_processor_rows_requires_list_contract()
     test_three_source_adapters_produce_unified_dto()
