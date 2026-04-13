@@ -10,6 +10,7 @@ from .engine import (
     build_account_scheduler_decision_dto,
     build_scheduler_decision_dto,
     decide_account_notify_window_open,
+    filter_notify_candidates as filter_notify_candidates_engine,
 )
 
 
@@ -142,7 +143,7 @@ def decide_should_notify(
 
 
 def filter_notify_candidates(results: list) -> list:
-    return [r for r in results if r.should_notify and r.meaningful and bool(r.notification_text.strip())]
+    return filter_notify_candidates_engine(results)
 
 
 def is_in_quiet_hours_window(*, start_t, end_t, now_bj_time) -> bool:
