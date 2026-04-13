@@ -7,8 +7,8 @@ from pathlib import Path
 from threading import Lock
 from typing import Callable
 
-from om.domain import build_tool_idempotency_key, normalize_tool_execution_payload
-from om.storage.repositories import state_repo
+from domain.domain import build_tool_idempotency_key, normalize_tool_execution_payload
+from domain.storage.repositories import state_repo
 
 
 def _utc_now_iso() -> str:

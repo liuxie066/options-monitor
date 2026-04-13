@@ -3,7 +3,7 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from om.storage import paths
+from domain.storage import paths
 
 
 def get_run_dir(base: Path, run_id: str) -> Path:

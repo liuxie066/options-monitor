@@ -2,7 +2,7 @@ from __future__ import annotations
 
 
 def test_build_scheduler_decision_dto_uses_normalized_payload() -> None:
-    from om.domain.engine import build_scheduler_decision_dto
+    from domain.domain.engine import build_scheduler_decision_dto
 
     raw = {'should_run_scan': False}
 
@@ -24,7 +24,7 @@ def test_build_scheduler_decision_dto_uses_normalized_payload() -> None:
 
 
 def test_build_scheduler_decision_dto_fallback_keeps_legacy_shape() -> None:
-    from om.domain.engine import build_scheduler_decision_dto
+    from domain.domain.engine import build_scheduler_decision_dto
 
     out = build_scheduler_decision_dto(
         {'should_run_scan': 1, 'should_notify': 0, 'reason': None, 'extra': 'v'},
@@ -40,7 +40,7 @@ def test_build_scheduler_decision_dto_fallback_keeps_legacy_shape() -> None:
 
 
 def test_build_scheduler_decision_dto_default_normalizer_supports_legacy_notify_alias() -> None:
-    from om.domain.engine import build_scheduler_decision_dto
+    from domain.domain.engine import build_scheduler_decision_dto
 
     out = build_scheduler_decision_dto(
         {'should_run_scan': 1, 'should_notify': 0, 'reason': 'legacy-alias'},
@@ -55,7 +55,7 @@ def test_build_scheduler_decision_dto_default_normalizer_supports_legacy_notify_
 
 
 def test_decide_notify_window_open_prefers_account_payload() -> None:
-    from om.domain.engine import AccountSchedulerDecisionView, decide_notify_window_open
+    from domain.domain.engine import AccountSchedulerDecisionView, decide_notify_window_open
 
     assert (
         decide_notify_window_open(
@@ -81,7 +81,7 @@ def test_decide_notify_window_open_prefers_account_payload() -> None:
 
 
 def test_scheduler_decision_view_from_payload_enforces_fields() -> None:
-    from om.domain.engine import SchedulerDecisionView
+    from domain.domain.engine import SchedulerDecisionView
 
     view = SchedulerDecisionView.from_payload(
         {
@@ -96,7 +96,7 @@ def test_scheduler_decision_view_from_payload_enforces_fields() -> None:
 
 
 def test_build_account_scheduler_decision_dto_uses_global_fallback() -> None:
-    from om.domain.engine import build_account_scheduler_decision_dto
+    from domain.domain.engine import build_account_scheduler_decision_dto
 
     out = build_account_scheduler_decision_dto(
         None,
@@ -120,7 +120,7 @@ def test_build_account_scheduler_decision_dto_uses_global_fallback() -> None:
 
 
 def test_decide_account_notify_window_open_uses_explicit_account_dto() -> None:
-    from om.domain.engine import (
+    from domain.domain.engine import (
         build_account_scheduler_decision_dto,
         decide_account_notify_window_open,
     )
@@ -139,7 +139,7 @@ def test_decide_account_notify_window_open_uses_explicit_account_dto() -> None:
 
 
 def test_decide_notification_meaningful_keeps_existing_predicate() -> None:
-    from om.domain.engine import decide_notification_meaningful
+    from domain.domain.engine import decide_notification_meaningful
 
     assert decide_notification_meaningful('hello') is True
     assert decide_notification_meaningful('') is False
@@ -147,7 +147,7 @@ def test_decide_notification_meaningful_keeps_existing_predicate() -> None:
 
 
 def test_resolve_scheduler_decision_centralizes_legacy_alias_reads() -> None:
-    from om.domain.engine import resolve_scheduler_decision
+    from domain.domain.engine import resolve_scheduler_decision
 
     dto, view = resolve_scheduler_decision(
         {'should_run_scan': 1, 'should_notify': 0, 'reason': 'compat-alias'}

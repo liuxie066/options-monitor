@@ -8,7 +8,7 @@ BASE = Path(__file__).resolve().parents[1]
 if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
-from om.domain.canonical_schema import (
+from domain.domain.canonical_schema import (
     normalize_processor_row,
     normalize_processor_rows,
     normalize_source_snapshot,

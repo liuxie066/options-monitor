@@ -19,7 +19,7 @@ def _legacy_notify_threshold_met(
 
 
 def test_resolve_multi_tick_engine_entrypoint_notify_threshold_matches_legacy() -> None:
-    from om.domain.engine import resolve_multi_tick_engine_entrypoint
+    from domain.domain.engine import resolve_multi_tick_engine_entrypoint
 
     cases = [
         ({'lx': 'hello', 'sy': ''}, 1),
@@ -51,7 +51,7 @@ def test_main_uses_notify_threshold_entrypoint_batch5() -> None:
 
 
 def test_resolve_multi_tick_engine_entrypoint_shape_guard_for_account_scheduler_map() -> None:
-    from om.domain.engine import resolve_multi_tick_engine_entrypoint
+    from domain.domain.engine import resolve_multi_tick_engine_entrypoint
 
     out = resolve_multi_tick_engine_entrypoint(
         scheduler_raw={
@@ -67,7 +67,7 @@ def test_resolve_multi_tick_engine_entrypoint_shape_guard_for_account_scheduler_
 
 
 def test_resolve_multi_tick_engine_entrypoint_shape_guard_for_opend_payload() -> None:
-    from om.domain.engine import resolve_multi_tick_engine_entrypoint
+    from domain.domain.engine import resolve_multi_tick_engine_entrypoint
 
     out = resolve_multi_tick_engine_entrypoint(opend_unhealthy='invalid-shape')
     watchdog = out.get('watchdog') or {}
@@ -115,7 +115,7 @@ def _legacy_notify_delivery_action(dispatch_gate: dict[str, object]) -> dict[str
 
 
 def test_notify_delivery_action_matches_legacy_branching_batch5() -> None:
-    from om.domain.engine import decide_notify_delivery_action
+    from domain.domain.engine import decide_notify_delivery_action
 
     cases = [
         {'action': 'skip_quiet_hours', 'effective_target': 'u1', 'reason': 'quiet_hours', 'quiet_window': '23:00-06:00'},

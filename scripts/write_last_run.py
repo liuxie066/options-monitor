@@ -7,9 +7,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 try:
-    from om.storage.repositories import state_repo
+    from domain.storage.repositories import state_repo
 except Exception:
-    from scripts.om.storage.repositories import state_repo  # type: ignore
+    from scripts.domain.storage.repositories import state_repo  # type: ignore
 
 
 def main():

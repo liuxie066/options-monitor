@@ -11,7 +11,7 @@ if str(BASE) not in sys.path:
 
 
 def test_subprocess_boundary_wrappers() -> None:
-    from om.domain import (
+    from domain.domain import (
         normalize_notify_subprocess_output,
         normalize_pipeline_subprocess_output,
         normalize_watchdog_subprocess_output,
@@ -43,7 +43,7 @@ def test_subprocess_boundary_wrappers() -> None:
 
 
 def test_state_repo_idempotency_and_audit_helpers() -> None:
-    from om.storage.repositories import state_repo
+    from domain.storage.repositories import state_repo
 
     with TemporaryDirectory() as td:
         base = Path(td)
@@ -87,8 +87,8 @@ def test_state_repo_idempotency_and_audit_helpers() -> None:
 
 
 def test_tool_execution_service_idempotency_and_audit() -> None:
-    from om.services import ToolExecutionIntent, ToolExecutionService
-    from om.storage.repositories import state_repo
+    from domain.services import ToolExecutionIntent, ToolExecutionService
+    from domain.storage.repositories import state_repo
 
     class _Proc:
         returncode = 0

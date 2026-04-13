@@ -11,7 +11,7 @@ if str(BASE) not in sys.path:
 
 
 def test_scheduler_decision_schema_boundary() -> None:
-    from om.domain import normalize_scheduler_decision_payload
+    from domain.domain import normalize_scheduler_decision_payload
 
     out = normalize_scheduler_decision_payload({
         "should_run_scan": 1,
@@ -26,7 +26,7 @@ def test_scheduler_decision_schema_boundary() -> None:
 
 
 def test_tool_execution_schema_and_idempotency_key() -> None:
-    from om.domain import build_tool_idempotency_key, normalize_tool_execution_payload
+    from domain.domain import build_tool_idempotency_key, normalize_tool_execution_payload
 
     k1 = build_tool_idempotency_key(
         tool_name="required_data_prefetch",
@@ -59,7 +59,7 @@ def test_tool_execution_schema_and_idempotency_key() -> None:
 
 
 def test_notify_window_alias_normalization_prefers_canonical_field() -> None:
-    from om.domain.tool_boundary import normalize_notify_window_aliases, resolve_notify_window_open
+    from domain.domain.tool_boundary import normalize_notify_window_aliases, resolve_notify_window_open
 
     only_legacy = normalize_notify_window_aliases({"should_notify": 1})
     assert only_legacy["is_notify_window_open"] is True
@@ -73,7 +73,7 @@ def test_notify_window_alias_normalization_prefers_canonical_field() -> None:
 
 
 def test_repository_audit_and_text_writers() -> None:
-    from om.storage.repositories import run_repo, state_repo
+    from domain.storage.repositories import run_repo, state_repo
 
     with TemporaryDirectory() as td:
         base = Path(td)

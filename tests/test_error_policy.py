@@ -7,7 +7,7 @@ BASE = Path(__file__).resolve().parents[1]
 if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
-from om.domain.error_policy import (
+from domain.domain.error_policy import (
     ERR_2FA_REQUIRED,
     ERR_TIMEOUT,
     ERR_UPSTREAM_UNAVAILABLE,

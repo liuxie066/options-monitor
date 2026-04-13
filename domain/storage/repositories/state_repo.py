@@ -7,9 +7,9 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
-from om.storage import paths
-from om.storage.repositories import run_repo
-from om.domain.intermediate_objects import SnapshotDTO
+from domain.storage import paths
+from domain.storage.repositories import run_repo
+from domain.domain.intermediate_objects import SnapshotDTO
 from scripts.io_utils import atomic_write_json as write_json
 from scripts.io_utils import read_json
 

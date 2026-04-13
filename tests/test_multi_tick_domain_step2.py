@@ -2,7 +2,7 @@ from __future__ import annotations
 
 
 def test_apply_scan_run_decision_force_and_smoke_keep_existing_semantics() -> None:
-    from om.domain.multi_tick import apply_scan_run_decision
+    from domain.domain.multi_tick import apply_scan_run_decision
 
     should_run, reason = apply_scan_run_decision(
         should_run_global=False,
@@ -16,7 +16,7 @@ def test_apply_scan_run_decision_force_and_smoke_keep_existing_semantics() -> No
 
 
 def test_decide_should_notify_prefers_account_and_fallbacks_to_scheduler_fields() -> None:
-    from om.domain.multi_tick import decide_should_notify
+    from domain.domain.multi_tick import decide_should_notify
 
     assert (
         decide_should_notify(
@@ -56,8 +56,8 @@ def test_decide_should_notify_prefers_account_and_fallbacks_to_scheduler_fields(
 
 
 def test_decide_should_notify_accepts_scheduler_view() -> None:
-    from om.domain.engine import SchedulerDecisionView
-    from om.domain.multi_tick import decide_should_notify
+    from domain.domain.engine import SchedulerDecisionView
+    from domain.domain.multi_tick import decide_should_notify
 
     assert (
         decide_should_notify(
@@ -74,7 +74,7 @@ def test_decide_should_notify_accepts_scheduler_view() -> None:
 
 
 def test_decide_should_notify_normalizes_scheduler_payload_via_dto_builder() -> None:
-    from om.domain import multi_tick as mod
+    from domain.domain import multi_tick as mod
 
     old_build_scheduler_decision_dto = mod.build_scheduler_decision_dto
     try:
@@ -96,7 +96,7 @@ def test_decide_should_notify_normalizes_scheduler_payload_via_dto_builder() -> 
 
 
 def test_decide_should_notify_accepts_account_scheduler_dto() -> None:
-    from om.domain.multi_tick import decide_should_notify
+    from domain.domain.multi_tick import decide_should_notify
 
     assert (
         decide_should_notify(
@@ -109,7 +109,7 @@ def test_decide_should_notify_accepts_account_scheduler_dto() -> None:
 
 
 def test_decide_should_notify_treats_none_account_payload_as_scheduler_fallback() -> None:
-    from om.domain.multi_tick import decide_should_notify
+    from domain.domain.multi_tick import decide_should_notify
 
     assert (
         decide_should_notify(
@@ -122,7 +122,7 @@ def test_decide_should_notify_treats_none_account_payload_as_scheduler_fallback(
 
 
 def test_decide_should_notify_prefers_canonical_account_field_over_legacy() -> None:
-    from om.domain.multi_tick import decide_should_notify
+    from domain.domain.multi_tick import decide_should_notify
 
     assert (
         decide_should_notify(
@@ -135,8 +135,8 @@ def test_decide_should_notify_prefers_canonical_account_field_over_legacy() -> N
 
 
 def test_decide_should_notify_accepts_account_scheduler_view() -> None:
-    from om.domain.engine import AccountSchedulerDecisionView
-    from om.domain.multi_tick import decide_should_notify
+    from domain.domain.engine import AccountSchedulerDecisionView
+    from domain.domain.multi_tick import decide_should_notify
 
     assert (
         decide_should_notify(
@@ -149,7 +149,7 @@ def test_decide_should_notify_accepts_account_scheduler_view() -> None:
 
 
 def test_decide_should_notify_normalizes_account_payload_via_view() -> None:
-    from om.domain import multi_tick as mod
+    from domain.domain import multi_tick as mod
 
     calls = {'n': 0}
     old_from_payload = mod.AccountSchedulerDecisionView.from_payload
@@ -174,7 +174,7 @@ def test_decide_should_notify_normalizes_account_payload_via_view() -> None:
 
 
 def test_decide_should_notify_routes_account_payload_via_account_scheduler_dto_builder() -> None:
-    from om.domain import multi_tick as mod
+    from domain.domain import multi_tick as mod
 
     seen = {'raw': None, 'scheduler_decision': None}
     old_build_account_scheduler_decision_dto = mod.build_account_scheduler_decision_dto
@@ -207,7 +207,7 @@ def test_decide_should_notify_routes_account_payload_via_account_scheduler_dto_b
 
 
 def test_decide_should_notify_uses_canonical_account_dto_without_rebuilding() -> None:
-    from om.domain import multi_tick as mod
+    from domain.domain import multi_tick as mod
 
     calls = {'n': 0}
     old_build_account_scheduler_decision_dto = mod.build_account_scheduler_decision_dto
@@ -237,7 +237,7 @@ def test_decide_should_notify_uses_canonical_account_dto_without_rebuilding() ->
 
 
 def test_decide_should_notify_uses_canonical_scheduler_dto_without_rebuilding() -> None:
-    from om.domain import multi_tick as mod
+    from domain.domain import multi_tick as mod
 
     calls = {'n': 0}
     old_build_scheduler_decision_dto = mod.build_scheduler_decision_dto
@@ -266,7 +266,7 @@ def test_decide_should_notify_uses_canonical_scheduler_dto_without_rebuilding() 
 
 
 def test_build_failure_audit_fields_distinguishes_io_vs_decision() -> None:
-    from om.domain.engine import build_failure_audit_fields
+    from domain.domain.engine import build_failure_audit_fields
 
     io_out = build_failure_audit_fields(
         failure_kind='io_error',
@@ -290,7 +290,7 @@ def test_build_failure_audit_fields_distinguishes_io_vs_decision() -> None:
 
 
 def test_filter_notify_candidates_matches_existing_predicate() -> None:
-    from om.domain.multi_tick import filter_notify_candidates
+    from domain.domain.multi_tick import filter_notify_candidates
     from scripts.multi_tick.misc import AccountResult
 
     results = [
@@ -305,7 +305,7 @@ def test_filter_notify_candidates_matches_existing_predicate() -> None:
 
 
 def test_build_account_messages_aggregates_non_empty_messages() -> None:
-    from om.domain.multi_tick_result import build_account_messages
+    from domain.domain.multi_tick_result import build_account_messages
     from scripts.multi_tick.misc import AccountResult
 
     def _cash_footer_for_account(lines: list[str], account: str) -> list[str]:
@@ -332,7 +332,7 @@ def test_build_account_messages_aggregates_non_empty_messages() -> None:
 
 
 def test_build_no_account_notification_payloads_keeps_existing_fields() -> None:
-    from om.domain.multi_tick_result import build_no_account_notification_payloads
+    from domain.domain.multi_tick_result import build_no_account_notification_payloads
     from scripts.multi_tick.misc import AccountResult
 
     calls = {'n': 0}
@@ -362,7 +362,7 @@ def test_build_no_account_notification_payloads_keeps_existing_fields() -> None:
 
 
 def test_build_shared_last_run_payload_merges_prev_and_caps_history() -> None:
-    from om.domain.multi_tick_result import build_shared_last_run_payload
+    from domain.domain.multi_tick_result import build_shared_last_run_payload
 
     prev = {
         'legacy': 1,

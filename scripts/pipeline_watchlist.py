@@ -16,7 +16,7 @@ from typing import Callable, Iterable
 
 from scripts.sell_call_config import resolve_min_annualized_net_premium_return
 from scripts.sell_put_config import resolve_min_annualized_net_return
-from om.domain import normalize_processor_row, normalize_processor_rows
+from domain.domain import normalize_processor_row, normalize_processor_rows
 
 
 def _parse_symbols_whitelist(symbols_arg: str | None) -> set[str] | None:

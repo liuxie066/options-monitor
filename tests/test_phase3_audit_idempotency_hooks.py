@@ -9,7 +9,7 @@ if str(BASE) not in sys.path:
 
 
 def test_state_repo_normalize_audit_event_requires_minimal_fields() -> None:
-    from om.storage.repositories.state_repo import normalize_audit_event
+    from domain.storage.repositories.state_repo import normalize_audit_event
 
     out = normalize_audit_event(
         {
