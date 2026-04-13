@@ -4,6 +4,12 @@ from __future__ import annotations
 from pathlib import Path
 import pandas as pd
 
+from scripts.option_candidate_strategy import (
+    build_strategy_config,
+    filter_candidates,
+    rank_candidates,
+    score_candidates,
+)
 from scripts.sell_put_config import validate_min_annualized_net_return
 
 SELL_PUT_EMPTY_OUTPUT_COLUMNS = [
@@ -254,15 +260,6 @@ def run_sell_put_scan(
             metrics = compute_metrics(row)
             if not metrics:
                 continue
-            if metrics["otm_pct"] < min_otm_pct:
-                continue
-            if metrics["net_income"] < min_net_income:
-                continue
-            if metrics["annualized_net_return_on_cash_basis"] < threshold:
-                continue
-            if spread_ratio is not None and spread_ratio > max_spread_ratio:
-                continue
-
             rows.append(
                 {
                     "symbol": row["symbol"],
@@ -289,7 +286,18 @@ def run_sell_put_scan(
 
     out = pd.DataFrame(rows)
     if not out.empty:
-        out = out.sort_values(by=["annualized_net_return_on_cash_basis", "net_income"], ascending=[False, False])
+        strategy_cfg = build_strategy_config(
+            "put",
+            min_annualized_return=threshold,
+            min_net_income=min_net_income,
+            min_otm_pct=min_otm_pct,
+            max_spread_ratio=max_spread_ratio,
+        )
+        out = filter_candidates(out, strategy_cfg)
+        out = score_candidates(out, strategy_cfg)
+        out = rank_candidates(out, strategy_cfg, layered=False)
+        if "_strategy_score" in out.columns:
+            out = out.drop(columns=["_strategy_score"])
     if out.empty:
         pd.DataFrame(columns=SELL_PUT_EMPTY_OUTPUT_COLUMNS).to_csv(out_path, index=False)
     else:
