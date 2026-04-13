@@ -22,7 +22,6 @@ def test_build_symbols_summary_tolerates_missing_annualized_return_column() -> N
             'strategy': 'sell_put',
             'candidate_count': 1,
             'top_contract': 'TENCENT-TEST',
-            'net_income': 100.0,
             'strike': 280.0,
             'dte': 30,
             'risk_label': '中',
@@ -41,7 +40,10 @@ def test_build_symbols_summary_tolerates_missing_annualized_return_column() -> N
 
         txt = txt_path.read_text(encoding='utf-8')
         assert '年化 -' in txt
+        assert '净收入 -' in txt
 
         df = pd.read_csv(csv_path)
         assert 'annualized_return' in df.columns
+        assert 'net_income' in df.columns
         assert pd.isna(df.loc[0, 'annualized_return'])
+        assert pd.isna(df.loc[0, 'net_income'])
