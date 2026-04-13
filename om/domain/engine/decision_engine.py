@@ -233,6 +233,60 @@ def decide_notification_meaningful(
     return bool(notification_text) and (notification_text != empty_placeholder)
 
 
+def decide_notify_dispatch_gate(
+    *,
+    dispatch_decision: Mapping[str, Any] | Any,
+    dnd_decision: Mapping[str, Any] | Any = None,
+) -> dict[str, Any]:
+    """Centralize notification dispatch gate branching from orchestrator."""
+    dispatch = dispatch_decision if isinstance(dispatch_decision, Mapping) else {}
+    dnd = dnd_decision if isinstance(dnd_decision, Mapping) else {}
+    reason = str(dispatch.get('reason') or '')
+    config_error = dispatch.get('config_error')
+    should_send = bool(dispatch.get('should_send'))
+    effective_target = dispatch.get('effective_target')
+    quiet_window = str(dnd.get('quiet_window') or '')
+
+    if reason == 'quiet_hours':
+        return {
+            'action': 'skip_quiet_hours',
+            'reason': reason,
+            'should_send': False,
+            'effective_target': effective_target,
+            'config_error': None,
+            'quiet_window': quiet_window,
+        }
+
+    if config_error:
+        return {
+            'action': 'config_error',
+            'reason': reason,
+            'should_send': False,
+            'effective_target': effective_target,
+            'config_error': config_error,
+            'quiet_window': quiet_window,
+        }
+
+    if should_send:
+        return {
+            'action': 'send',
+            'reason': reason,
+            'should_send': True,
+            'effective_target': effective_target,
+            'config_error': None,
+            'quiet_window': quiet_window,
+        }
+
+    return {
+        'action': 'skip',
+        'reason': reason,
+        'should_send': False,
+        'effective_target': effective_target,
+        'config_error': None,
+        'quiet_window': quiet_window,
+    }
+
+
 def decide_opend_unhealthy_action(
     *,
     error_code: str,
