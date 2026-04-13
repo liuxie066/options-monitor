@@ -273,3 +273,28 @@ def test_main_uses_notify_dispatch_gate_entrypoint_batch4() -> None:
     base = Path(__file__).resolve().parents[1]
     src = (base / 'scripts' / 'multi_tick' / 'main.py').read_text(encoding='utf-8')
     assert 'decide_notify_dispatch_gate' in src
+
+
+def test_main_orchestrator_guard_batch4_no_legacy_rule_reflow() -> None:
+    base = Path(__file__).resolve().parents[1]
+    src = (base / 'scripts' / 'multi_tick' / 'main.py').read_text(encoding='utf-8')
+
+    # Keep main.py as orchestration-only for key Batch-4 decisions.
+    for entrypoint in (
+        'apply_opend_degrade_to_yahoo(',
+        'build_opend_unhealthy_execution_plan(',
+        'decide_trading_day_guard(',
+        'decide_notify_dispatch_gate(',
+        'engine_filter_notify_candidates(',
+        'rank_notify_candidates(',
+    ):
+        assert entrypoint in src
+
+    # Guard against legacy business predicates drifting back into main.py.
+    for legacy_fragment in (
+        "allow_downgrade and (not has_hk_opend) and (not watchdog_timed_out)",
+        "false_markets = [str(r.get('market')) for r in guard_results if r.get('is_trading_day') is False]",
+        "if reason == 'quiet_hours':",
+        "if should_send:",
+    ):
+        assert legacy_fragment not in src
