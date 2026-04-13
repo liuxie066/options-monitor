@@ -300,6 +300,30 @@ def resolve_notification_channel_target(
     }
 
 
+def resolve_notification_route_from_config(
+    *,
+    config: Any,
+    cli_channel: Any = None,
+    cli_target: Any = None,
+    default_channel: str = 'feishu',
+) -> dict[str, Any]:
+    """Resolve notification route while centralizing config notifications fallback reads."""
+    cfg = config if isinstance(config, dict) else {}
+    notifications = cfg.get('notifications')
+    notif_cfg = notifications if isinstance(notifications, dict) else {}
+    route = resolve_notification_channel_target(
+        notifications=notif_cfg,
+        cli_channel=cli_channel,
+        cli_target=cli_target,
+        default_channel=default_channel,
+    )
+    return {
+        'notifications': notif_cfg,
+        'channel': route.get('channel'),
+        'target': route.get('target'),
+    }
+
+
 def resolve_scheduler_state_path(
     *,
     base_dir: Path,

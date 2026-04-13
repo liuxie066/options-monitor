@@ -58,7 +58,7 @@ from om.domain import (
     ensure_runtime_canonical_config,
     markets_for_trading_day_guard as domain_markets_for_trading_day_guard,
     reduce_trading_day_guard,
-    resolve_notification_channel_target,
+    resolve_notification_route_from_config,
     select_markets_to_run as domain_select_markets_to_run,
     select_scheduler_state_filename,
 )
@@ -951,8 +951,8 @@ def main() -> int:
 
         return 0
 
-    notif_cfg = base_cfg.get('notifications') or {}
-    notify_route = resolve_notification_channel_target(notifications=notif_cfg)
+    notify_route = resolve_notification_route_from_config(config=base_cfg)
+    notif_cfg = notify_route.get('notifications') or {}
     channel = notify_route.get('channel')
     target = notify_route.get('target')
     schedule_cfg0 = base_cfg.get('schedule') or {}
