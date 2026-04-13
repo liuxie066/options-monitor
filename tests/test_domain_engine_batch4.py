@@ -272,7 +272,8 @@ def test_decide_notify_dispatch_gate_matches_legacy_branching() -> None:
 def test_main_uses_notify_dispatch_gate_entrypoint_batch4() -> None:
     base = Path(__file__).resolve().parents[1]
     src = (base / 'scripts' / 'multi_tick' / 'main.py').read_text(encoding='utf-8')
-    assert 'decide_notify_dispatch_gate' in src
+    assert 'resolve_multi_tick_engine_entrypoint' in src
+    assert 'notify_dispatch=dispatch_decision' in src
 
 
 def test_main_orchestrator_guard_batch4_no_legacy_rule_reflow() -> None:
@@ -284,7 +285,7 @@ def test_main_orchestrator_guard_batch4_no_legacy_rule_reflow() -> None:
         'apply_opend_degrade_to_yahoo(',
         'build_opend_unhealthy_execution_plan(',
         'decide_trading_day_guard(',
-        'decide_notify_dispatch_gate(',
+        'resolve_multi_tick_engine_entrypoint(',
         'engine_filter_notify_candidates(',
         'rank_notify_candidates(',
     ):

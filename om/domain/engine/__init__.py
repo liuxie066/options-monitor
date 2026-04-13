@@ -19,6 +19,7 @@ from .decision_engine import (
     decide_opend_degrade_to_yahoo,
     filter_notify_candidates,
     rank_notify_candidates,
+    resolve_multi_tick_engine_entrypoint,
     score_notify_candidate,
 )
 
@@ -43,5 +44,6 @@ __all__ = [
     'decide_opend_degrade_to_yahoo',
     'filter_notify_candidates',
     'rank_notify_candidates',
+    'resolve_multi_tick_engine_entrypoint',
     'score_notify_candidate',
 ]
