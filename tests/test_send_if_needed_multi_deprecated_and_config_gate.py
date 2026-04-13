@@ -63,7 +63,10 @@ def test_om_allow_derived_config_gate_is_env_controlled_in_multi_tick_main() -> 
     src = Path("scripts/multi_tick/main.py").read_text(encoding="utf-8")
     assert "OM_ALLOW_DERIVED_CONFIG" in src
     assert "allow_derived=allow_derived_config" in src
-    assert "OM_ALLOW_DERIVED_CONFIG_INVALID" in src
+    assert "resolve_allow_derived_config_gate(" in src
+    assert "OM_ALLOW_DERIVED_CONFIG_LEGACY_DISABLED" in Path(
+        "om/domain/config_contract.py"
+    ).read_text(encoding="utf-8")
     assert "OM_ALLOW_DERIVED_CONFIG_ENABLED" in src
 
 
@@ -85,3 +88,19 @@ def test_multi_entrypoint_uses_public_run_id_accessor() -> None:
     assert "importlib" not in src
     assert "current_run_id as _current_run_id" in src
     assert "run_id=_current_run_id()" in src
+
+
+def test_resolve_allow_derived_config_gate_defaults_to_disabled_and_has_migration_hint() -> None:
+    from om.domain import resolve_allow_derived_config_gate
+
+    out_default = resolve_allow_derived_config_gate("")
+    assert out_default["allow_derived"] is False
+    assert out_default["error_code"] is None
+    assert "OM_ALLOW_DERIVED_CONFIG=strict" in str(out_default["migration_hint"])
+
+    out_legacy = resolve_allow_derived_config_gate("true")
+    assert out_legacy["allow_derived"] is False
+    assert out_legacy["error_code"] == "OM_ALLOW_DERIVED_CONFIG_LEGACY_DISABLED"
+
+    out_strict = resolve_allow_derived_config_gate("strict")
+    assert out_strict["allow_derived"] is True

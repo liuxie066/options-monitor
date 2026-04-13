@@ -68,3 +68,59 @@ def test_main_uses_intermediate_objects_in_critical_path() -> None:
     assert "Decision.from_payload" in src
     assert "DeliveryPlan.from_payload" in src
     assert "SCHEMA_VALIDATION_FAILED" in src
+
+
+def test_snapshot_schema_error_has_stable_error_code() -> None:
+    from om.domain import SchemaValidationError, SnapshotDTO
+
+    try:
+        SnapshotDTO.from_payload(
+            {
+                "schema_kind": "snapshot_dto",
+                "schema_version": "1.0",
+                "snapshot_name": "bad",
+                "as_of_utc": "2026-04-13T00:00:00+00:00",
+                "payload": [],
+            }
+        )
+        assert False, "expected SchemaValidationError"
+    except SchemaValidationError as e:
+        assert "E_SNAPSHOT_PAYLOAD_INVALID" in str(e)
+
+
+def test_decision_schema_error_has_stable_error_code_for_bool_field() -> None:
+    from om.domain import Decision, SchemaValidationError
+
+    try:
+        Decision.from_payload(
+            {
+                "schema_kind": "decision",
+                "schema_version": "1.0",
+                "account": "lx",
+                "should_run": "yes",
+                "should_notify": False,
+                "reason": "bad",
+            }
+        )
+        assert False, "expected SchemaValidationError"
+    except SchemaValidationError as e:
+        assert "E_DECISION_SHOULD_RUN_INVALID" in str(e)
+
+
+def test_delivery_plan_schema_error_has_stable_error_code_for_message_type() -> None:
+    from om.domain import DeliveryPlan, SchemaValidationError
+
+    try:
+        DeliveryPlan.from_payload(
+            {
+                "schema_kind": "delivery_plan",
+                "schema_version": "1.0",
+                "channel": "openclaw",
+                "target": "user:abc",
+                "account_messages": {"lx": 1},
+                "should_send": True,
+            }
+        )
+        assert False, "expected SchemaValidationError"
+    except SchemaValidationError as e:
+        assert "E_DELIVERY_ACCOUNT_MESSAGE_INVALID" in str(e)

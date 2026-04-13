@@ -19,12 +19,14 @@ DELIVERY_PIPELINE_FILES = [
     BASE / "scripts" / "pipeline_postprocess.py",
     BASE / "scripts" / "required_data_steps.py",
     BASE / "scripts" / "pipeline_fetch_models.py",
+    BASE / "scripts" / "send_if_needed.py",
 ]
 
 
 RAW_FETCH_PATTERNS = [
     re.compile(r"_required_data\.json"),
     re.compile(r"(required_data_dir|shared_dir|raw_dir)\s*/\s*['\"]raw['\"]"),
+    re.compile(r"output_accounts\s*/\s*['\"].*raw"),
     re.compile(r"\bhas_shared_required_data\b"),
 ]
 

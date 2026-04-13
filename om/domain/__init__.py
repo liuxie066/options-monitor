@@ -51,9 +51,11 @@ from .error_policy import (
     classify_failure,
 )
 from .config_contract import (
+    ALLOW_DERIVED_STRICT_TOKEN,
     CANONICAL_CONFIGS,
     DERIVED_CONFIGS,
     ensure_runtime_canonical_config,
+    resolve_allow_derived_config_gate,
     resolve_config_contract,
 )
 from .intermediate_objects import (
@@ -112,7 +114,9 @@ __all__ = [
     'classify_failure',
     'CANONICAL_CONFIGS',
     'DERIVED_CONFIGS',
+    'ALLOW_DERIVED_STRICT_TOKEN',
     'resolve_config_contract',
+    'resolve_allow_derived_config_gate',
     'ensure_runtime_canonical_config',
     'SCHEMA_KIND_SNAPSHOT_DTO',
     'SCHEMA_KIND_DECISION',

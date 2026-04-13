@@ -73,3 +73,56 @@ def test_resolve_multi_tick_engine_entrypoint_shape_guard_for_opend_payload() ->
     watchdog = out.get('watchdog') or {}
     assert watchdog.get('action') == 'abort'
     assert watchdog.get('fallback_used') is False
+
+
+def _legacy_notify_delivery_action(dispatch_gate: dict[str, object]) -> dict[str, object]:
+    action = str(dispatch_gate.get('action') or '')
+    if action == 'skip_quiet_hours':
+        return {
+            'action': 'skip_quiet_hours',
+            'should_send': False,
+            'config_error': None,
+            'effective_target': dispatch_gate.get('effective_target'),
+            'reason': str(dispatch_gate.get('reason') or ''),
+            'quiet_window': str(dispatch_gate.get('quiet_window') or ''),
+        }
+    if action == 'config_error':
+        return {
+            'action': 'config_error',
+            'should_send': False,
+            'config_error': dispatch_gate.get('config_error'),
+            'effective_target': dispatch_gate.get('effective_target'),
+            'reason': str(dispatch_gate.get('reason') or ''),
+            'quiet_window': str(dispatch_gate.get('quiet_window') or ''),
+        }
+    if action == 'send':
+        return {
+            'action': 'send',
+            'should_send': True,
+            'config_error': None,
+            'effective_target': dispatch_gate.get('effective_target'),
+            'reason': str(dispatch_gate.get('reason') or ''),
+            'quiet_window': str(dispatch_gate.get('quiet_window') or ''),
+        }
+    return {
+        'action': 'skip',
+        'should_send': False,
+        'config_error': None,
+        'effective_target': dispatch_gate.get('effective_target'),
+        'reason': str(dispatch_gate.get('reason') or ''),
+        'quiet_window': str(dispatch_gate.get('quiet_window') or ''),
+    }
+
+
+def test_notify_delivery_action_matches_legacy_branching_batch5() -> None:
+    from om.domain.engine import decide_notify_delivery_action
+
+    cases = [
+        {'action': 'skip_quiet_hours', 'effective_target': 'u1', 'reason': 'quiet_hours', 'quiet_window': '23:00-06:00'},
+        {'action': 'config_error', 'effective_target': '', 'reason': 'config_error', 'config_error': 'missing target'},
+        {'action': 'send', 'effective_target': 'u2', 'reason': 'send'},
+        {'action': 'skip', 'effective_target': None, 'reason': 'no_send'},
+        {'action': 'unknown', 'effective_target': None, 'reason': 'x'},
+    ]
+    for gate in cases:
+        assert decide_notify_delivery_action(dispatch_gate=gate) == _legacy_notify_delivery_action(gate)
