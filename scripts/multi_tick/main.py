@@ -72,6 +72,7 @@ from om.domain.engine import (
     build_opend_unhealthy_execution_plan,
     build_account_scheduler_decision_dto,
     decide_account_scan_gate,
+    decide_notify_dispatch_gate,
     decide_notify_threshold_met,
     decide_pipeline_execution_result,
     decide_notification_meaningful,
@@ -1125,6 +1126,10 @@ def main() -> int:
         target=target,
         dnd_is_quiet=bool(dnd_decision.get('is_quiet')),
     )
+    dispatch_gate = decide_notify_dispatch_gate(
+        dispatch_decision=dispatch_decision,
+        dnd_decision=dnd_decision,
+    )
     _audit(
         'notify',
         'dispatch_decision',
@@ -1133,22 +1138,22 @@ def main() -> int:
         target=(str(target) if target else None),
         extra={'reason': dispatch_decision.get('reason'), 'should_send': bool(dispatch_decision.get('should_send'))},
     )
-    if str(dispatch_decision.get('reason') or '') == 'quiet_hours':
-        quiet_window = str(dnd_decision.get('quiet_window') or '')
+    if str(dispatch_gate.get('action') or '') == 'skip_quiet_hours':
+        quiet_window = str(dispatch_gate.get('quiet_window') or '')
         runlog.safe_event('notify', 'skip', message=f'in quiet hours ({quiet_window})')
         print(f"[SKIP] Currently in quiet hours (DND). Target was: {target}")
         return 0
 
     sent_accounts: list[str] = []
 
-    config_error = dispatch_decision.get('config_error')
+    config_error = dispatch_gate.get('config_error')
     if config_error:
         runlog.safe_event('notify', 'error', error_code='CONFIG_ERROR', message=str(config_error))
         raise SystemExit(f'[CONFIG_ERROR] {config_error}')
 
     delivery_plan: DeliveryPlan | None = None
-    if bool(dispatch_decision.get('should_send')):
-        target = dispatch_decision.get('effective_target')
+    if bool(dispatch_gate.get('should_send')):
+        target = dispatch_gate.get('effective_target')
         try:
             delivery_plan = DeliveryPlan.from_payload(
                 {
@@ -1205,7 +1210,7 @@ def main() -> int:
             )
             runlog.safe_event('notify', 'ok', duration_ms=int((monotonic() - t_notify0) * 1000), data=_safe_runlog_data({'channel': channel, 'account': acct}))
     else:
-        target = dispatch_decision.get('effective_target')
+        target = dispatch_gate.get('effective_target')
         sent_accounts = list(account_messages.keys())
         runlog.safe_event('notify', 'skip', message='no_send mode')
 

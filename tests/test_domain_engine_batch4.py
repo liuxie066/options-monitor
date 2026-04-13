@@ -139,6 +139,56 @@ def _legacy_trading_day_guard_decision(
     }
 
 
+def _legacy_notify_dispatch_gate(
+    *,
+    dispatch_decision: dict[str, object],
+    dnd_decision: dict[str, object] | None = None,
+) -> dict[str, object]:
+    dispatch = dispatch_decision or {}
+    dnd = dnd_decision or {}
+    reason = str(dispatch.get('reason') or '')
+    config_error = dispatch.get('config_error')
+    should_send = bool(dispatch.get('should_send'))
+    effective_target = dispatch.get('effective_target')
+    quiet_window = str(dnd.get('quiet_window') or '')
+
+    if reason == 'quiet_hours':
+        return {
+            'action': 'skip_quiet_hours',
+            'reason': reason,
+            'should_send': False,
+            'effective_target': effective_target,
+            'config_error': None,
+            'quiet_window': quiet_window,
+        }
+    if config_error:
+        return {
+            'action': 'config_error',
+            'reason': reason,
+            'should_send': False,
+            'effective_target': effective_target,
+            'config_error': config_error,
+            'quiet_window': quiet_window,
+        }
+    if should_send:
+        return {
+            'action': 'send',
+            'reason': reason,
+            'should_send': True,
+            'effective_target': effective_target,
+            'config_error': None,
+            'quiet_window': quiet_window,
+        }
+    return {
+        'action': 'skip',
+        'reason': reason,
+        'should_send': False,
+        'effective_target': effective_target,
+        'config_error': None,
+        'quiet_window': quiet_window,
+    }
+
+
 def test_decide_trading_day_guard_matches_legacy_semantics() -> None:
     from om.domain.engine import decide_trading_day_guard
     from om.domain.multi_tick import reduce_trading_day_guard
@@ -163,3 +213,63 @@ def test_decide_trading_day_guard_matches_legacy_semantics() -> None:
         reduce_guard_fn=reduce_trading_day_guard,
     )
     assert actual == expected
+
+
+def test_decide_notify_dispatch_gate_matches_legacy_branching() -> None:
+    from om.domain.engine import decide_notify_dispatch_gate
+
+    cases = [
+        (
+            {
+                'should_send': False,
+                'effective_target': 'chat-id',
+                'config_error': None,
+                'reason': 'quiet_hours',
+            },
+            {'quiet_window': '23:00-06:00'},
+        ),
+        (
+            {
+                'should_send': False,
+                'effective_target': '',
+                'config_error': 'notifications.target is required',
+                'reason': 'config_error',
+            },
+            {'quiet_window': ''},
+        ),
+        (
+            {
+                'should_send': True,
+                'effective_target': 'chat-id',
+                'config_error': None,
+                'reason': 'send',
+            },
+            {'quiet_window': ''},
+        ),
+        (
+            {
+                'should_send': False,
+                'effective_target': None,
+                'config_error': None,
+                'reason': 'no_send',
+            },
+            {'quiet_window': ''},
+        ),
+    ]
+
+    for dispatch_decision, dnd_decision in cases:
+        expected = _legacy_notify_dispatch_gate(
+            dispatch_decision=dispatch_decision,
+            dnd_decision=dnd_decision,
+        )
+        actual = decide_notify_dispatch_gate(
+            dispatch_decision=dispatch_decision,
+            dnd_decision=dnd_decision,
+        )
+        assert actual == expected
+
+
+def test_main_uses_notify_dispatch_gate_entrypoint_batch4() -> None:
+    base = Path(__file__).resolve().parents[1]
+    src = (base / 'scripts' / 'multi_tick' / 'main.py').read_text(encoding='utf-8')
+    assert 'decide_notify_dispatch_gate' in src
