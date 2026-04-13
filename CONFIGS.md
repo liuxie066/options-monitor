@@ -1,58 +1,39 @@
-# options-monitor Config Source of Truth
+# options-monitor 配置契约文档
 
-配置文档只覆盖：canonical 配置、派生配置、变更与同步流程。
+仅定义配置契约与门禁，不重复 README/DEPLOY 的操作细节。
 
-## 文档边界
-
-- 快速上手与首日命令：`README.md`
-- 发布/回滚：`DEPLOY.md`
-- 运行排障：`RUNBOOK.md`
-
-## Canonical Configs（唯一入口）
+## Canonical Configs（唯一真源）
 
 - `config.us.json`
 - `config.hk.json`
 
 规则：
-- 只改这两份。
-- options-monitor 运行入口只认这两份。
+- 仅允许直接编辑以上两份。
+- runtime 入口配置以 canonical 为准。
 
-## Derived Configs（兼容派生）
+## Derived Configs（派生产物，禁止手工维护）
 
-以下文件不手工维护，由同步脚本生成：
+以下文件为派生产物，只能由同步脚本生成：
 - `config.scheduled.json`
 - `config.market_us.json`
 - `config.market_hk.json`
 - `config.market_us.fallback_yahoo.json`
 - `config.json`
 
-同步命令：
-
-```bash
-cd /home/node/.openclaw/workspace/options-monitor
-./.venv/bin/python scripts/sync_runtime_configs.py --apply
-```
-
-## Config Workflow（变更流程）
+## 变更流程（编辑 canonical -> 同步 -> 校验）
 
 1. 编辑 canonical：`config.us.json` / `config.hk.json`。
-2. 执行同步：`./.venv/bin/python scripts/sync_runtime_configs.py --apply`。
-3. 可选校验：`./.venv/bin/python scripts/sync_runtime_configs.py --check`。
-4. 如需发布到 prod，按 `DEPLOY.md` 执行 `deploy_to_prod.py`。
+2. 同步派生：`./.venv/bin/python scripts/sync_runtime_configs.py --apply`。
+3. 校验一致性：`./.venv/bin/python scripts/sync_runtime_configs.py --check`。
 
-## Drift Handling（漂移处理）
+## 禁令
 
-- `--check` 非 0：表示 canonical 与派生文件不一致。
-- 处理方式：重新执行 `--apply`，不要手工编辑派生文件。
+- 禁止把派生配置当作维护入口或长期入口。
+- 禁止提交本地 runtime secrets（凭证、token、私钥等）。
 
-## Scope Clarification
+## Derived Config Gate
 
-- `portfolio-management/config.json` 仅用于 PM 凭证与 Bitable 读取，不是 options-monitor 运行入口配置。
-- 历史示例文件（如 `config.legacy.example.json` / `config.market_*.example.json` / `config.scheduled.example.json`）仅用于参考与回滚对照，不作为当前入口。
-
-## Derived Config Gate（灰度）
-
-- 环境变量：`OM_ALLOW_DERIVED_CONFIG`
-- 当前读点：`scripts/multi_tick/main.py`（在调用 `ensure_runtime_canonical_config(..., allow_derived=...)` 前读取）
-- 当前写点：无（仓库内没有对该变量的写入逻辑）
-- 影响面（当前）：仅影响多账户 tick 入口对“兼容派生配置是否允许”的判定；默认未设置时保持现有行为，不强制关闭。
+- 环境变量：`OM_ALLOW_DERIVED_CONFIG`（读点：`scripts/multi_tick/main.py`）。
+- 默认禁用：未设置/空值 => `allow_derived = false`。
+- `true` / `1` / `on`（及其他 legacy truthy）=> 仍禁用，并标记 `OM_ALLOW_DERIVED_CONFIG_LEGACY_DISABLED`。
+- 仅 `strict` 可临时放开（`allow_derived = true`），并应按迁移提示尽快回到 canonical config。
