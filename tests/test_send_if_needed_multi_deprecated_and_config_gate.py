@@ -42,6 +42,8 @@ def test_private_compat_exports_emit_deprecation_warning_and_keep_behavior() -> 
     direct_out = select_markets_to_run(now_utc, cfg, 'auto')
     assert compat_out == direct_out
     assert any(issubclass(w.category, DeprecationWarning) for w in caught)
+    warning_messages = [str(w.message) for w in caught]
+    assert any('om.domain.select_markets_to_run' in msg for msg in warning_messages)
 
     with TemporaryDirectory() as td:
         base = Path(td)
@@ -53,9 +55,13 @@ def test_private_compat_exports_emit_deprecation_warning_and_keep_behavior() -> 
         assert compat_first is True
         assert direct_second is False
         assert any(issubclass(w.category, DeprecationWarning) for w in caught_alert)
+        warning_messages = [str(w.message) for w in caught_alert]
+        assert any('scripts.multi_tick.opend_guard.should_send_opend_alert' in msg for msg in warning_messages)
 
 
 def test_om_allow_derived_config_gate_is_env_controlled_in_multi_tick_main() -> None:
     src = Path("scripts/multi_tick/main.py").read_text(encoding="utf-8")
     assert "OM_ALLOW_DERIVED_CONFIG" in src
     assert "allow_derived=allow_derived_config" in src
+    assert "OM_ALLOW_DERIVED_CONFIG_INVALID" in src
+    assert "OM_ALLOW_DERIVED_CONFIG_ENABLED" in src
