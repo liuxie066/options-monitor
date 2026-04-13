@@ -11,6 +11,7 @@ if str(BASE) not in sys.path:
 
 DELIVERY_PIPELINE_FILES = [
     BASE / "scripts" / "run_pipeline.py",
+    BASE / "scripts" / "pipeline_runner.py",
     BASE / "scripts" / "pipeline_symbol.py",
     BASE / "scripts" / "pipeline_watchlist.py",
     BASE / "scripts" / "pipeline_context.py",
@@ -23,7 +24,8 @@ DELIVERY_PIPELINE_FILES = [
 
 RAW_FETCH_PATTERNS = [
     re.compile(r"_required_data\.json"),
-    re.compile(r"required_data_dir\s*/\s*['\"]raw['\"]"),
+    re.compile(r"(required_data_dir|shared_dir|raw_dir)\s*/\s*['\"]raw['\"]"),
+    re.compile(r"\bhas_shared_required_data\b"),
 ]
 
 
