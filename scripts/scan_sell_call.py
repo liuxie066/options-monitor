@@ -4,6 +4,12 @@ from __future__ import annotations
 from pathlib import Path
 import pandas as pd
 
+from scripts.option_candidate_strategy import (
+    build_strategy_config,
+    filter_candidates,
+    rank_candidates,
+    score_candidates,
+)
 from scripts.sell_call_config import validate_min_annualized_net_premium_return
 
 SELL_CALL_EMPTY_OUTPUT_COLUMNS = [
@@ -260,9 +266,6 @@ def run_sell_call_scan(
                 spread = ask - bid
                 if mid is not None and mid > 0:
                     spread_ratio = spread / mid
-            if spread_ratio is not None and spread_ratio > max_spread_ratio:
-                continue
-
             try:
                 d = safe_float(row.get("delta"))
                 if (min_delta is not None) or (max_delta is not None):
@@ -278,10 +281,6 @@ def run_sell_call_scan(
 
             metrics = compute_metrics(row, avg_cost)
             if not metrics:
-                continue
-            if metrics["annualized_net_premium_return"] < threshold:
-                continue
-            if metrics["if_exercised_total_return"] < min_if_exercised_total_return:
                 continue
 
             m = safe_float(row.get("multiplier"))
@@ -344,7 +343,17 @@ def run_sell_call_scan(
 
     out = pd.DataFrame(rows)
     if not out.empty:
-        out = out.sort_values(by=["annualized_net_premium_return", "if_exercised_total_return"], ascending=[False, False])
+        strategy_cfg = build_strategy_config(
+            "call",
+            min_annualized_return=threshold,
+            max_spread_ratio=max_spread_ratio,
+            min_if_exercised_total_return=min_if_exercised_total_return,
+        )
+        out = filter_candidates(out, strategy_cfg)
+        out = score_candidates(out, strategy_cfg)
+        out = rank_candidates(out, strategy_cfg, layered=False)
+        if "_strategy_score" in out.columns:
+            out = out.drop(columns=["_strategy_score"])
     if out.empty:
         pd.DataFrame(columns=SELL_CALL_EMPTY_OUTPUT_COLUMNS).to_csv(out_path, index=False)
     else:

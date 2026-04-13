@@ -6,6 +6,11 @@ from pathlib import Path
 import pandas as pd
 from pandas.errors import EmptyDataError
 
+from scripts.option_candidate_strategy import (
+    build_strategy_config,
+    rank_candidates,
+    score_candidates,
+)
 
 def pct(v, digits=2):
     if pd.isna(v):
@@ -62,40 +67,6 @@ def render_one(row) -> str:
     return "\n".join(body)
 
 
-def pick_layered(df: pd.DataFrame) -> pd.DataFrame:
-    """按风险层优先挑选候选，再按收益补齐。"""
-    selected = []
-    used = set()
-    layer_order = ["激进", "中性", "保守"]
-
-    for layer in layer_order:
-        layer_df = df[df["risk_label"] == layer].copy()
-        if layer_df.empty:
-            continue
-        layer_df = layer_df.sort_values(
-            ["annualized_net_premium_return", "if_exercised_total_return", "net_income"],
-            ascending=[False, False, False],
-        )
-        row = layer_df.iloc[0]
-        key = (row["symbol"], row["expiration"], row["strike"])
-        if key not in used:
-            selected.append(row)
-            used.add(key)
-
-    remaining = df.copy()
-    if used:
-        remaining = remaining[~remaining.apply(lambda r: (r["symbol"], r["expiration"], r["strike"]) in used, axis=1)]
-    remaining = remaining.sort_values(
-        ["annualized_net_premium_return", "if_exercised_total_return", "net_income"],
-        ascending=[False, False, False],
-    )
-    for _, row in remaining.iterrows():
-        if len(selected) >= 5:
-            break
-        selected.append(row)
-    return pd.DataFrame(selected)
-
-
 def render_sell_call_alerts(
     *,
     input_path: str | Path | None = None,
@@ -143,14 +114,9 @@ def render_sell_call_alerts(
         print(text)
         return text
 
-    if layered and "risk_label" in df.columns:
-        top_df = pick_layered(df).head(top)
-    else:
-        df = df.sort_values(
-            ["annualized_net_premium_return", "if_exercised_total_return", "net_income"],
-            ascending=[False, False, False],
-        )
-        top_df = df.head(top)
+    strategy_cfg = build_strategy_config("call")
+    df = score_candidates(df, strategy_cfg)
+    top_df = rank_candidates(df, strategy_cfg, layered=layered, top=top)
 
     blocks = [render_one(row) for _, row in top_df.iterrows()]
     text = "\n\n" + ("\n\n".join(blocks)) + "\n"
