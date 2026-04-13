@@ -304,6 +304,23 @@ def test_filter_notify_candidates_matches_existing_predicate() -> None:
     assert [r.account for r in selected] == ['a']
 
 
+def test_filter_notify_candidates_delegates_to_engine() -> None:
+    from domain.domain import multi_tick as mod
+
+    called = {'n': 0}
+    old = mod.filter_notify_candidates_engine
+    try:
+        mod.filter_notify_candidates_engine = lambda results: (  # type: ignore[assignment]
+            called.__setitem__('n', called['n'] + 1),
+            list(results),
+        )[1]
+        out = mod.filter_notify_candidates([1, 2, 3])
+        assert out == [1, 2, 3]
+        assert called['n'] == 1
+    finally:
+        mod.filter_notify_candidates_engine = old  # type: ignore[assignment]
+
+
 def test_build_account_messages_aggregates_non_empty_messages() -> None:
     from domain.domain.multi_tick_result import build_account_messages
     from scripts.multi_tick.misc import AccountResult
