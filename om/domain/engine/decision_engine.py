@@ -343,3 +343,28 @@ def decide_pipeline_execution_result(
         'meaningful': False,
         'reason': str(failed_reason or 'pipeline failed'),
     }
+
+
+def decide_trading_day_guard(
+    *,
+    markets_to_run: list[str],
+    guard_markets: list[str],
+    check_trading_day_for_market: Callable[[str], tuple[bool | None, str]],
+    reduce_guard_fn: Callable[..., Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Centralize trading-day guard decision while keeping legacy semantics."""
+    guard_results: list[dict[str, Any]] = []
+    for gm in (guard_markets or []):
+        is_td, gm_used = check_trading_day_for_market(str(gm))
+        guard_results.append({'market': gm_used, 'is_trading_day': is_td})
+
+    reduced = reduce_guard_fn(
+        markets_to_run=list(markets_to_run or []),
+        guard_results=guard_results,
+    )
+    return {
+        'guard_results': guard_results,
+        'markets_to_run': list(reduced.get('markets_to_run') or []),
+        'should_skip': bool(reduced.get('should_skip')),
+        'skip_message': str(reduced.get('skip_message') or ''),
+    }

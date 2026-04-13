@@ -18,3 +18,9 @@ def test_multi_tick_scheduler_and_account_decision_use_objectized_contract_path(
     assert "AccountSchedulerDecisionView.from_payload(" in src
     assert "build_account_scheduler_decision_dto(" in src
     assert "stage='account_scheduler_decision'" in src
+
+
+def test_multi_tick_trading_day_guard_decision_delegates_to_engine() -> None:
+    base = Path(__file__).resolve().parents[1]
+    src = (base / "scripts" / "multi_tick" / "main.py").read_text(encoding="utf-8")
+    assert "decide_trading_day_guard(" in src
