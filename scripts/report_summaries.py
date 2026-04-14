@@ -11,6 +11,8 @@ from typing import Any
 
 import pandas as pd
 
+from domain.domain.engine import rank_candidate_rows
+
 
 def summarize_sell_put(df: pd.DataFrame, symbol: str, *, symbol_cfg: dict | None = None) -> dict[str, Any]:
     symbol_cfg = symbol_cfg or {}
@@ -48,28 +50,14 @@ def summarize_sell_put(df: pd.DataFrame, symbol: str, *, symbol_cfg: dict | None
 
     row['candidate_count'] = len(df)
 
-    # Pick the top contract with a more execution-friendly preference:
-    # prefer abs(delta) close to target, then higher annualized return, then net income.
-    target_abs_delta = 0.22
-    try:
-        target_abs_delta = float((symbol_cfg.get('sell_put') or {}).get('target_abs_delta') or target_abs_delta)
-    except Exception:
-        pass
+    ranked = rank_candidate_rows(
+        df.to_dict('records'),
+        mode='put',
+    )
+    if not ranked:
+        return row
 
-    d = df.copy()
-    try:
-        if 'delta' in d.columns:
-            d['_abs_delta'] = d['delta'].abs()
-            d['_delta_dist'] = (d['_abs_delta'] - target_abs_delta).abs()
-        else:
-            d['_delta_dist'] = 999.0
-    except Exception:
-        d['_delta_dist'] = 999.0
-
-    top = d.sort_values(
-        ['_delta_dist', 'annualized_net_return_on_cash_basis', 'net_income'],
-        ascending=[True, False, False],
-    ).iloc[0]
+    top = pd.Series(ranked[0])
 
     cash_secured_used = 0.0
     cash_avail = None
@@ -164,26 +152,12 @@ def summarize_sell_call(df: pd.DataFrame, symbol: str, *, symbol_cfg: dict | Non
 
     row['candidate_count'] = len(df)
 
-    # Prefer delta close to a steady target, then higher premium return.
-    target_delta = 0.28
-    try:
-        target_delta = float((symbol_cfg.get('sell_call') or {}).get('target_delta') or target_delta)
-    except Exception:
-        pass
-
-    d = df.copy()
-    try:
-        if 'delta' in d.columns:
-            d['_delta_dist'] = (d['delta'] - target_delta).abs()
-        else:
-            d['_delta_dist'] = 999.0
-    except Exception:
-        d['_delta_dist'] = 999.0
-
-    top = d.sort_values(
-        ['_delta_dist', 'annualized_net_premium_return', 'if_exercised_total_return', 'net_income'],
-        ascending=[True, False, False, False],
-    ).iloc[0]
+    top = pd.Series(
+        rank_candidate_rows(
+            df.to_dict('records'),
+            mode='call',
+        )[0]
+    )
 
     cover_avail = 0
     try:

@@ -40,6 +40,6 @@ This repo is meant to run as a repeatable monitoring pipeline.
 - Health + notify (dry-run): `python scripts/healthcheck_and_notify.py --config config.us.json --dry-run`
 - Tests (no pytest): `./.venv/bin/python tests/run_tests.py`
 
-## Archived docs
+## Strategy
 
-- Historical planning docs: `docs/archive/INDEX.md`
+- Candidate filtering and ranking contract: `docs/candidate_strategy.md`

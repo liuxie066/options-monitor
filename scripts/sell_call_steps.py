@@ -81,9 +81,8 @@ def run_sell_call_scan_and_summarize(
         '--shares-available-for-cover', str(int(shares_available_for_cover)),
         '--min-dte', str(cc.get('min_dte', 20)),
         '--max-dte', str(cc.get('max_dte', 90)),
-        '--min-otm-pct', str(cc.get('min_otm_pct', 0.0)),
         '--min-annualized-net-return', str(min_annualized),
-        '--min-if-exercised-total-return', str(cc.get('min_if_exercised_total_return', 0.0)),
+        '--min-net-income', str(cc.get('min_net_income', 50.0)),
         '--min-open-interest', str(d3.get('min_open_interest', 100)),
         '--min-volume', str(d3.get('min_volume', 10)),
         '--max-spread-ratio', str(d3.get('max_spread_ratio', 0.3)),
@@ -98,21 +97,6 @@ def run_sell_call_scan_and_summarize(
         cmd.extend(['--min-strike', str(cc.get('min_strike'))])
     if cc.get('max_strike') is not None:
         cmd.extend(['--max-strike', str(cc.get('max_strike'))])
-
-    # Optional execution-quality filters
-    if cc.get('require_bid_ask') is not None:
-        if bool(cc.get('require_bid_ask')):
-            cmd.append('--require-bid-ask')
-
-    if cc.get('min_iv') is not None:
-        cmd.extend(['--min-iv', str(cc.get('min_iv'))])
-    if cc.get('max_iv') is not None:
-        cmd.extend(['--max-iv', str(cc.get('max_iv'))])
-
-    if cc.get('min_delta') is not None:
-        cmd.extend(['--min-delta', str(cc.get('min_delta'))])
-    if cc.get('max_delta') is not None:
-        cmd.extend(['--max-delta', str(cc.get('max_delta'))])
 
     if is_scheduled:
         cmd.append('--quiet')
