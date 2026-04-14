@@ -38,7 +38,11 @@ from domain.domain import (
     resolve_notification_route_from_config,
     resolve_scheduler_state_path,
 )
-from domain.domain.engine import decide_notify_window_open, resolve_scheduler_decision
+from domain.domain.engine import (
+    decide_notification_delivery,
+    decide_notify_window_open,
+    resolve_scheduler_decision,
+)
 from scripts.infra.service import (
     run_command,
     run_pipeline_script,
@@ -81,26 +85,31 @@ def _acquire_lock(lock_path: Path) -> int:
             pid = int(pid_txt) if pid_txt else -1
             if pid <= 0 or not _pid_alive(pid):
                 lock_path.unlink(missing_ok=True)
-        except Exception:
-            # If unreadable, prefer removing to avoid permanent deadlock
+        except (OSError, ValueError):
+            # If unreadable/unparseable, prefer removing to avoid permanent deadlock
             try:
                 lock_path.unlink(missing_ok=True)
-            except Exception:
+            except OSError:
                 pass
 
     fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-    os.write(fd, str(os.getpid()).encode('utf-8'))
+    try:
+        os.write(fd, str(os.getpid()).encode('utf-8'))
+    except BaseException:
+        # Guarantee fd is closed if write fails
+        os.close(fd)
+        raise
     return fd
 
 
 def _release_lock(fd: int, lock_path: Path):
     try:
         os.close(fd)
-    except Exception:
+    except OSError:
         pass
     try:
         lock_path.unlink(missing_ok=True)
-    except Exception:
+    except OSError:
         pass
 
 
@@ -157,8 +166,6 @@ def main():
     )
     channel = notify_route.get('channel')
     target = notify_route.get('target')
-    if not target:
-        raise SystemExit('[CONFIG_ERROR] notifications.target is required (e.g. user:open_id or chat:chat_id)')
 
     state_dir = Path(args.state_dir)
     if not state_dir.is_absolute():
@@ -321,6 +328,8 @@ def main():
             return int(pipe_payload.get("returncode") or pipe.returncode)
 
         text = notif.read_text(encoding='utf-8', errors='replace').strip() if notif.exists() else ''
+        notification_text_for_decision = text
+        account_name = str(((cfg_obj.get("portfolio") or {}).get("account") or "default")).strip() or "default"
 
         # Prefix notification with account tag when configured.
         try:
@@ -331,8 +340,16 @@ def main():
         except Exception:
             pass
 
-        meaningful = bool(text) and (text != '今日无需要主动提醒的内容。')
-        account_name = str(((cfg_obj.get("portfolio") or {}).get("account") or "default")).strip() or "default"
+        delivery_decision = decide_notification_delivery(
+            should_notify_window=bool(should_notify),
+            notification_text=notification_text_for_decision,
+            target=target,
+        )
+        config_error = delivery_decision.get('config_error')
+        if config_error:
+            raise SystemExit(f'[CONFIG_ERROR] {config_error}')
+
+        meaningful = bool(delivery_decision.get('meaningful'))
         try:
             delivery_plan = DeliveryPlan.from_payload(
                 {
@@ -341,7 +358,7 @@ def main():
                     "channel": str(channel),
                     "target": str(target),
                     "account_messages": {account_name: text},
-                    "should_send": bool(should_notify and meaningful),
+                    "should_send": bool(delivery_decision.get('should_send')),
                 }
             )
         except SchemaValidationError as e:

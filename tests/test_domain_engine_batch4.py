@@ -273,8 +273,8 @@ def test_main_uses_notify_dispatch_gate_entrypoint_batch4() -> None:
     base = Path(__file__).resolve().parents[1]
     src = (base / 'scripts' / 'multi_tick' / 'main.py').read_text(encoding='utf-8')
     assert 'resolve_multi_tick_engine_entrypoint' in src
-    assert 'notify_dispatch=dispatch_decision' in src
-    assert 'notify_dispatch_gate=dispatch_gate' in src
+    assert 'decide_notification_delivery(' in src
+    assert 'notification_text=' in src
 
 
 def test_main_orchestrator_guard_batch4_no_legacy_rule_reflow() -> None:
@@ -287,7 +287,7 @@ def test_main_orchestrator_guard_batch4_no_legacy_rule_reflow() -> None:
         'build_opend_unhealthy_execution_plan(',
         'decide_trading_day_guard(',
         'resolve_multi_tick_engine_entrypoint(',
-        'decide_notify_delivery_action(',
+        'decide_notification_delivery(',
         'engine_filter_notify_candidates(',
         'rank_notify_candidates(',
     ):
@@ -299,6 +299,8 @@ def test_main_orchestrator_guard_batch4_no_legacy_rule_reflow() -> None:
         "false_markets = [str(r.get('market')) for r in guard_results if r.get('is_trading_day') is False]",
         "if reason == 'quiet_hours':",
         "if str(dispatch_gate.get('action') or '') == 'skip_quiet_hours':",
+        'decide_notify_dispatch(',
+        'decide_notify_delivery_action(',
         "if should_send:",
     ):
         assert legacy_fragment not in src

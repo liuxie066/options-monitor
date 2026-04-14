@@ -10,11 +10,11 @@ class OptionPositionsHttpPathsTest(unittest.TestCase):
     def test_bitable_create_record_uses_http_json(self):
         calls = []
 
-        def fake_http_json(method, url, payload, headers=None):
+        def fake_http_json(method, url, payload, headers=None, **kwargs):
             calls.append((method, url, payload, headers))
             return {"code": 0, "data": {"record": {"record_id": "rec_create"}}}
 
-        with patch.object(op, "http_json", fake_http_json):
+        with patch("scripts.feishu_bitable.http_json", fake_http_json):
             data = op.bitable_create_record("tenant_tok", "app_tok", "tbl_tok", {"status": "open"})
 
         self.assertTrue(calls)
@@ -28,11 +28,11 @@ class OptionPositionsHttpPathsTest(unittest.TestCase):
     def test_bitable_update_record_uses_http_json(self):
         calls = []
 
-        def fake_http_json(method, url, payload, headers=None):
+        def fake_http_json(method, url, payload, headers=None, **kwargs):
             calls.append((method, url, payload, headers))
             return {"code": 0, "data": {"record": {"record_id": "rec_update"}}}
 
-        with patch.object(op, "http_json", fake_http_json):
+        with patch("scripts.feishu_bitable.http_json", fake_http_json):
             data = op.bitable_update_record("tenant_tok", "app_tok", "tbl_tok", "rec_123", {"status": "close"})
 
         self.assertTrue(calls)
