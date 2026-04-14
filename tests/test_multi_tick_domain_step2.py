@@ -348,6 +348,29 @@ def test_build_account_messages_aggregates_non_empty_messages() -> None:
     assert out == {'a': 'a@BJ_NOW|a:1'}
 
 
+def test_build_no_candidate_account_messages_emits_monitor_heartbeat() -> None:
+    from domain.domain.multi_tick_result import build_no_candidate_account_messages
+    from scripts.multi_tick.misc import AccountResult
+
+    results = [
+        AccountResult('a', True, True, False, 'ok', ''),
+        AccountResult('b', True, False, False, 'closed', ''),
+        AccountResult('c', False, True, False, 'skip', ''),
+    ]
+
+    out = build_no_candidate_account_messages(
+        results=results,
+        now_bj='BJ_NOW',
+        cash_footer_lines=['cash'],
+        cash_footer_for_account_fn=lambda lines, account: [f"{account}:{len(lines)}"],
+    )
+
+    assert list(out) == ['a']
+    assert '监控正常触发，本轮无候选' in out['a']
+    assert '北京时间 BJ_NOW' in out['a']
+    assert 'a:1' in out['a']
+
+
 def test_build_no_account_notification_payloads_keeps_existing_fields() -> None:
     from domain.domain.multi_tick_result import build_no_account_notification_payloads
     from scripts.multi_tick.misc import AccountResult

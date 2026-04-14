@@ -28,7 +28,6 @@
   "templates": {
     "put_base": {
       "sell_put": {
-        "min_otm_pct": 0.05,
         "min_annualized_net_return": 0.1,
         "min_net_income": 100,
         "min_open_interest": 50,
@@ -97,7 +96,7 @@
         "max_strike": 999999
       },
       "sell_call": {
-        "enabled": false,
+        "enabled": false
       }
     }
   ]

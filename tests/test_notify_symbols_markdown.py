@@ -40,6 +40,15 @@ def test_notify_symbols_markdown_put_layout() -> None:
     assert out == expected
 
 
+def test_notify_symbols_no_candidate_message_is_heartbeat() -> None:
+    from scripts.notify_symbols import build_notification
+
+    out = build_notification('', '', account_label='LX')
+
+    assert '监控正常触发：本轮无候选。' in out
+    assert '今日无需要主动提醒的内容。' not in out
+
+
 def test_notify_symbols_markdown_put_layout_missing_fields_have_reasons() -> None:
     from scripts.notify_symbols import build_notification
 

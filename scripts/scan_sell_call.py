@@ -4,11 +4,10 @@ from __future__ import annotations
 from pathlib import Path
 import pandas as pd
 
-from scripts.option_candidate_strategy import (
+from domain.domain.engine import (
+    empty_reject_log_dataframe,
     build_strategy_config,
-    filter_candidates_with_reject_log,
-    rank_candidates,
-    score_candidates,
+    filter_rank_candidates_with_reject_log,
 )
 from scripts.d3_event_filter import annotate_candidates_with_d3_events
 from scripts.sell_call_config import validate_min_annualized_net_premium_return
@@ -54,65 +53,7 @@ SELL_CALL_EMPTY_OUTPUT_COLUMNS = [
     "reject_stage_candidate",
 ]
 
-
-def calc_futu_us_option_fee(order_price: float, contracts: int = 1, is_sell: bool = True) -> float:
-    commission_per_contract = 0.65 if order_price > 0.1 else 0.15
-    commission = max(commission_per_contract * contracts, 1.99)
-    platform_fee = 0.30 * contracts
-    taf = max(0.00329 * contracts, 0.01) if is_sell else 0.0
-    orf = 0.013 * contracts
-    occ = 0.02 * contracts
-    settlement = 0.18 * contracts
-    return round(commission + platform_fee + taf + orf + occ + settlement, 6)
-
-
-def calc_futu_hk_option_fee_static(order_price: float, contracts: int = 1, is_sell: bool = True, *, base_dir: Path | None = None) -> float:
-    platform_fee_per_order = 15.0
-    commission_per_order = 0.0
-    other_per_order = 0.0
-    try:
-        if base_dir is not None:
-            import json
-
-            cfg = None
-            for cfg_name in ("config.hk.json", "config.us.json"):
-                cfg_path = base_dir / cfg_name
-                if cfg_path.exists() and cfg_path.stat().st_size > 0:
-                    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
-                    break
-            if isinstance(cfg, dict):
-                hk = ((cfg.get("fees") or {}).get("hk_static") or {})
-                platform_fee_per_order = float(hk.get("platform_fee_per_order_hkd", platform_fee_per_order))
-                commission_per_order = float(hk.get("commission_per_order_hkd", commission_per_order))
-                other_per_order = float(hk.get("other_fees_per_order_hkd", other_per_order))
-    except Exception:
-        pass
-    return round(platform_fee_per_order + commission_per_order + other_per_order, 6)
-
-
-def calc_futu_option_fee(currency: str | None, order_price: float, contracts: int = 1, is_sell: bool = True, *, base_dir: Path | None = None) -> float:
-    ccy = (currency or "USD").upper()
-    if ccy == "HKD":
-        return calc_futu_hk_option_fee_static(order_price, contracts=contracts, is_sell=is_sell, base_dir=base_dir)
-    return calc_futu_us_option_fee(order_price, contracts=contracts, is_sell=is_sell)
-
-
-def safe_float(v):
-    try:
-        if pd.isna(v):
-            return None
-        return float(v)
-    except Exception:
-        return None
-
-
-def safe_int(v):
-    try:
-        if pd.isna(v):
-            return None
-        return int(v)
-    except Exception:
-        return None
+from scripts.fee_calc import calc_futu_us_option_fee, calc_futu_hk_option_fee_static, calc_futu_option_fee, safe_float, safe_int
 
 
 def strike_band(strike_above_spot_pct: float) -> str:
@@ -185,19 +126,13 @@ def run_sell_call_scan(
     shares_available_for_cover: int | None = None,
     min_dte: int = 7,
     max_dte: int = 90,
-    min_otm_pct: float = 0.0,
     min_strike: float | None = None,
     max_strike: float | None = None,
     min_annualized_net_return: float | None = None,
-    min_if_exercised_total_return: float = 0.0,
+    min_net_income: float = 50.0,
     min_open_interest: float = 100,
     min_volume: float = 10,
     max_spread_ratio: float | None = 0.30,
-    min_iv: float | None = None,
-    max_iv: float | None = None,
-    require_bid_ask: bool = False,
-    min_delta: float | None = None,
-    max_delta: float | None = None,
     d3_event_cfg: dict | None = None,
     reject_log_output: Path | None = None,
     quiet: bool = False,
@@ -241,13 +176,6 @@ def run_sell_call_scan(
             if strike is None:
                 continue
 
-            if min_otm_pct is not None and float(min_otm_pct) > 0:
-                spot = safe_float(row.get("spot"))
-                if spot is None or spot <= 0:
-                    continue
-                otm_pct = (strike - spot) / spot
-                if otm_pct < float(min_otm_pct):
-                    continue
             if min_strike is not None and strike < min_strike:
                 continue
             if max_strike is not None and strike > max_strike:
@@ -263,16 +191,6 @@ def run_sell_call_scan(
             bid = safe_float(row.get("bid"))
             ask = safe_float(row.get("ask"))
             mid = safe_float(row.get("mid"))
-            if require_bid_ask and (bid is None or ask is None or bid <= 0 or ask <= 0):
-                continue
-
-            iv = safe_float(row.get("implied_volatility"))
-            if iv is not None and iv > 3.0:
-                iv = iv / 100.0
-            if min_iv is not None and (iv is None or iv < float(min_iv)):
-                continue
-            if max_iv is not None and iv is not None and iv > float(max_iv):
-                continue
 
             spread = None
             spread_ratio = None
@@ -282,18 +200,6 @@ def run_sell_call_scan(
                     spread_ratio = spread / mid
             if max_spread_ratio is not None and spread_ratio is not None and spread_ratio > float(max_spread_ratio):
                 continue
-            try:
-                d = safe_float(row.get("delta"))
-                if (min_delta is not None) or (max_delta is not None):
-                    if d is None:
-                        continue
-                    d = float(d)
-                    if min_delta is not None and d < float(min_delta):
-                        continue
-                    if max_delta is not None and d > float(max_delta):
-                        continue
-            except Exception:
-                pass
 
             metrics = compute_metrics(row, avg_cost)
             if not metrics:
@@ -363,12 +269,15 @@ def run_sell_call_scan(
         strategy_cfg = build_strategy_config(
             "call",
             min_annualized_return=threshold,
-            min_if_exercised_total_return=min_if_exercised_total_return,
+            min_net_income=min_net_income,
             max_spread_ratio=max_spread_ratio,
         )
-        out, reject_log = filter_candidates_with_reject_log(out, strategy_cfg, reject_stage="step3_risk_gate")
-        out = score_candidates(out, strategy_cfg)
-        out = rank_candidates(out, strategy_cfg, layered=False)
+        out, reject_log = filter_rank_candidates_with_reject_log(
+            out,
+            strategy_cfg,
+            reject_stage="step3_risk_gate",
+            layered=False,
+        )
         out = annotate_candidates_with_d3_events(
             out,
             base_dir=Path(__file__).resolve().parents[1],
@@ -381,19 +290,7 @@ def run_sell_call_scan(
     else:
         out.to_csv(out_path, index=False)
     if reject_log.empty:
-        pd.DataFrame(
-            columns=[
-                "reject_stage",
-                "reject_rule",
-                "metric_value",
-                "threshold",
-                "symbol",
-                "contract_symbol",
-                "expiration",
-                "strike",
-                "mode",
-            ]
-        ).to_csv(reject_out_path, index=False)
+        empty_reject_log_dataframe().to_csv(reject_out_path, index=False)
     else:
         reject_log.to_csv(reject_out_path, index=False)
 

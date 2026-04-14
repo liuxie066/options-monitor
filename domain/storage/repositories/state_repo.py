@@ -304,7 +304,9 @@ def put_idempotency_success(
         prev = read_idempotency_record(base, scope=scope, key=key) or {}
         return {"created": False, "path": p, "record": prev}
     try:
-        os.write(fd, raw)
+        written = os.write(fd, raw)
+        if written != len(raw):
+            raise OSError(f"short write: {written}/{len(raw)} bytes")
     finally:
         os.close(fd)
     return {"created": True, "path": p, "record": body}

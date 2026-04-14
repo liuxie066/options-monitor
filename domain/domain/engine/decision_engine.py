@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping, Sequence
 from domain.domain.tool_boundary import (
     normalize_notify_window_aliases,
@@ -233,6 +234,85 @@ def decide_notification_meaningful(
     return bool(notification_text) and (notification_text != empty_placeholder)
 
 
+def decide_scheduler_timing(
+    *,
+    now_utc: datetime,
+    last_scan_utc: datetime | None,
+    last_notify_utc: datetime | None,
+    in_window: bool,
+    monitor_off_hours: bool,
+    interval_min: int,
+    notify_cooldown_min: int,
+    schedule_v2_enabled: bool = False,
+    force_final_scan: bool = False,
+    off_window_notify: bool = False,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Pure scheduler timing decision; callers keep state IO and config parsing."""
+    now = now_utc.astimezone(timezone.utc)
+    interval = int(interval_min)
+    cooldown = int(notify_cooldown_min)
+
+    if bool(force):
+        return {
+            'should_run_scan': True,
+            'is_notify_window_open': True,
+            'reason': 'force 模式：忽略频率控制直接执行。',
+            'next_run_utc': now,
+        }
+
+    if (not bool(in_window)) and (not bool(monitor_off_hours)):
+        should_run_scan = False
+        reason = '窗口外：不扫描。'
+    elif last_scan_utc is None:
+        should_run_scan = True
+        reason = '首次运行，无历史扫描记录。'
+    else:
+        elapsed = now - last_scan_utc.astimezone(timezone.utc)
+        if elapsed >= timedelta(minutes=interval):
+            should_run_scan = True
+            reason = f'距离上次扫描已超过 {interval} 分钟。'
+        elif bool(schedule_v2_enabled) and bool(force_final_scan):
+            should_run_scan = True
+            reason = '窗口收盘前最后一跳：强制扫描。'
+        else:
+            should_run_scan = False
+            reason = f'距离上次扫描不足 {interval} 分钟。'
+
+    if bool(schedule_v2_enabled):
+        if (not bool(in_window)) and (not bool(off_window_notify)):
+            is_notify_window_open = False
+        elif last_notify_utc is None:
+            is_notify_window_open = True
+        else:
+            is_notify_window_open = (
+                now - last_notify_utc.astimezone(timezone.utc)
+            ) >= timedelta(minutes=cooldown)
+    elif (not bool(in_window)) and (not bool(monitor_off_hours)):
+        is_notify_window_open = False
+    elif last_notify_utc is None:
+        is_notify_window_open = True
+    else:
+        is_notify_window_open = (
+            now - last_notify_utc.astimezone(timezone.utc)
+        ) >= timedelta(minutes=cooldown)
+
+    if not should_run_scan:
+        if last_scan_utc is None or interval >= 10**8:
+            next_run = now + timedelta(hours=24)
+        else:
+            next_run = last_scan_utc.astimezone(timezone.utc) + timedelta(minutes=interval)
+    else:
+        next_run = now
+
+    return {
+        'should_run_scan': bool(should_run_scan),
+        'is_notify_window_open': bool(is_notify_window_open),
+        'reason': str(reason),
+        'next_run_utc': next_run,
+    }
+
+
 def decide_notify_dispatch_gate(
     *,
     dispatch_decision: Mapping[str, Any] | Any,
@@ -328,6 +408,84 @@ def decide_notify_delivery_action(
         'effective_target': gate.get('effective_target'),
         'reason': str(gate.get('reason') or ''),
         'quiet_window': str(gate.get('quiet_window') or ''),
+    }
+
+
+def decide_notification_delivery(
+    *,
+    should_notify_window: bool,
+    notification_text: str,
+    target: Any,
+    no_send: bool = False,
+    is_quiet: bool = False,
+    quiet_window: str = '',
+    empty_placeholder: str = '今日无需要主动提醒的内容。',
+) -> dict[str, Any]:
+    """Single delivery policy entrypoint for notification orchestration."""
+    meaningful = decide_notification_meaningful(
+        str(notification_text or ''),
+        empty_placeholder=empty_placeholder,
+    )
+    effective_target = target
+
+    if bool(is_quiet):
+        return {
+            'action': 'skip_quiet_hours',
+            'should_send': False,
+            'meaningful': bool(meaningful),
+            'effective_target': effective_target,
+            'config_error': None,
+            'reason': 'quiet_hours',
+            'quiet_window': str(quiet_window or ''),
+        }
+
+    if bool(no_send):
+        return {
+            'action': 'skip',
+            'should_send': False,
+            'meaningful': bool(meaningful),
+            'effective_target': None,
+            'config_error': None,
+            'reason': 'no_send',
+        }
+
+    if not target:
+        return {
+            'action': 'config_error',
+            'should_send': False,
+            'meaningful': bool(meaningful),
+            'effective_target': effective_target,
+            'config_error': 'notifications.target is required',
+            'reason': 'config_error',
+        }
+
+    if not bool(should_notify_window):
+        return {
+            'action': 'skip',
+            'should_send': False,
+            'meaningful': bool(meaningful),
+            'effective_target': effective_target,
+            'config_error': None,
+            'reason': 'notify_window_closed',
+        }
+
+    if not bool(meaningful):
+        return {
+            'action': 'skip',
+            'should_send': False,
+            'meaningful': False,
+            'effective_target': effective_target,
+            'config_error': None,
+            'reason': 'not_meaningful',
+        }
+
+    return {
+        'action': 'send',
+        'should_send': True,
+        'meaningful': True,
+        'effective_target': effective_target,
+        'config_error': None,
+        'reason': 'send',
     }
 
 

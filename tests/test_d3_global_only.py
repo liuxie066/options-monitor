@@ -295,3 +295,4 @@ def test_sell_put_reject_stage_is_strategy_gate() -> None:
         reject_log = pd.read_csv(out_path.with_name(f'{out_path.stem}_reject_log.csv'))
         assert not reject_log.empty
         assert set(reject_log['reject_stage'].dropna().astype(str).tolist()) == {'step3_risk_gate'}
+        assert set(['engine_reject_stage', 'engine_reject_reason']).issubset(set(reject_log.columns))

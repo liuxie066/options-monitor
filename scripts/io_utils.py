@@ -13,6 +13,7 @@ import json
 import os
 import shutil
 import time
+import uuid
 from pathlib import Path
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -111,9 +112,16 @@ def atomic_write_text(path: str | Path, content: str, *, encoding: str = 'utf-8'
     """Best-effort atomic write (write to tmp then replace)."""
     p = Path(path)
     ensure_dir(p.parent)
-    tmp = p.with_suffix(p.suffix + f'.tmp.{os.getpid()}')
-    tmp.write_text(content, encoding=encoding)
-    tmp.replace(p)
+    tmp = p.with_suffix(p.suffix + f'.tmp.{uuid.uuid4().hex[:12]}')
+    try:
+        tmp.write_text(content, encoding=encoding)
+        tmp.replace(p)
+    except BaseException:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
 
 def atomic_write_json(path: str | Path, obj: Any, *, encoding: str = 'utf-8', indent: int = 2) -> None:

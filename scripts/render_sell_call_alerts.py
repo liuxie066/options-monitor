@@ -6,10 +6,10 @@ from pathlib import Path
 import pandas as pd
 from pandas.errors import EmptyDataError
 
-from scripts.option_candidate_strategy import (
+from scripts.io_utils import atomic_write_text
+from domain.domain.engine import (
     build_strategy_config,
-    rank_candidates,
-    score_candidates,
+    rank_scored_candidates,
 )
 
 def pct(v, digits=2):
@@ -110,17 +110,16 @@ def render_sell_call_alerts(
 
     if df.empty:
         text = "无候选提醒。"
-        output_file.write_text(text, encoding="utf-8")
+        atomic_write_text(output_file, text)
         print(text)
         return text
 
     strategy_cfg = build_strategy_config("call")
-    df = score_candidates(df, strategy_cfg)
-    top_df = rank_candidates(df, strategy_cfg, layered=layered, top=top)
+    top_df = rank_scored_candidates(df, strategy_cfg, layered=layered, top=top)
 
     blocks = [render_one(row) for _, row in top_df.iterrows()]
     text = "\n\n" + ("\n\n".join(blocks)) + "\n"
-    output_file.write_text(text, encoding="utf-8")
+    atomic_write_text(output_file, text)
     print(text)
     print(f"[DONE] alerts -> {output_file}")
     return text

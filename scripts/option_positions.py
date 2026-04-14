@@ -43,61 +43,8 @@ from scripts.feishu_bitable import (
 )
 
 
-def bitable_create_record(tenant_token: str, app_token: str, table_id: str, fields: dict) -> dict:
-    url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records"
-    headers = {"Authorization": f"Bearer {tenant_token}"}
-    res = http_json("POST", url, {"fields": fields}, headers=headers)
-    if res.get("code") != 0:
-        raise RuntimeError(f"bitable create record failed: {res}")
-    return res.get("data") or {}
-
-
-def bitable_update_record(tenant_token: str, app_token: str, table_id: str, record_id: str, fields: dict) -> dict:
-    url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/{record_id}"
-    headers = {"Authorization": f"Bearer {tenant_token}"}
-    res = http_json("PUT", url, {"fields": fields}, headers=headers)
-    if res.get("code") != 0:
-        raise RuntimeError(f"bitable update record failed: {res}")
-    return res.get("data") or {}
-
-
-def parse_note_kv(note: str, key: str) -> str:
-    if not note:
-        return ''
-    s = str(note)
-    for part in s.replace(',', ';').split(';'):
-        part = part.strip()
-        if not part:
-            continue
-        if part.startswith(key + '='):
-            return part.split('=', 1)[1].strip()
-    return ''
-
-
-def merge_note(note: str | None, kv: dict[str, str]) -> str:
-    base = (note or '').strip()
-    parts = []
-    if base:
-        # keep existing; we don't try to dedup
-        parts.append(base)
-    for k, v in kv.items():
-        if v is None or v == '':
-            continue
-        parts.append(f"{k}={v}")
-    return ';'.join(parts)
-
-
 def norm_symbol(s: str) -> str:
     return str(s).strip().upper()
-
-
-def safe_float(x):
-    try:
-        if x is None or x == '':
-            return None
-        return float(x)
-    except Exception:
-        return None
 
 
 def calc_cash_secured(strike: float, multiplier: float, contracts: int) -> float:

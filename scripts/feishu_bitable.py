@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import socket
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -73,6 +74,7 @@ _token_cache: dict[str, Any] = {
     "token": None,
     "expire_at": None,  # datetime
 }
+_token_lock = threading.Lock()
 
 
 def _now_utc() -> datetime:
@@ -317,25 +319,30 @@ def get_tenant_access_token(app_id: str, app_secret: str, *, force_refresh: bool
     expire_at: datetime | None = _token_cache.get("expire_at")
     token: str | None = _token_cache.get("token")
 
-    if not force_refresh and token and expire_at:
-        if expire_at - _now_utc() >= timedelta(minutes=5):
-            return token
+    with _token_lock:
+        # Re-check under lock (another thread may have refreshed)
+        expire_at = _token_cache.get("expire_at")
+        token = _token_cache.get("token")
 
-    url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal/"
-    res = http_json("POST", url, {"app_id": app_id, "app_secret": app_secret}, timeout=20, retry_max_attempts=3)
+        if not force_refresh and token and expire_at:
+            if expire_at - _now_utc() >= timedelta(minutes=5):
+                return token
 
-    # res is expected: {code, msg, tenant_access_token, expire}
-    if res.get("code") != 0:
-        raise FeishuAuthError(f"feishu auth failed: {res}", code=res.get("code"), response=res)
+        url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal/"
+        res = http_json("POST", url, {"app_id": app_id, "app_secret": app_secret}, timeout=20, retry_max_attempts=3)
 
-    token = res["tenant_access_token"]
-    expire_s = int(res.get("expire", 0) or 0)
-    expire_at = _now_utc() + timedelta(seconds=expire_s)
+        # res is expected: {code, msg, tenant_access_token, expire}
+        if res.get("code") != 0:
+            raise FeishuAuthError(f"feishu auth failed: {res}", code=res.get("code"), response=res)
 
-    _token_cache["token"] = token
-    _token_cache["expire_at"] = expire_at
+        token = res["tenant_access_token"]
+        expire_s = int(res.get("expire", 0) or 0)
+        expire_at = _now_utc() + timedelta(seconds=expire_s)
 
-    return token
+        _token_cache["token"] = token
+        _token_cache["expire_at"] = expire_at
+
+        return token
 
 
 # -----------------

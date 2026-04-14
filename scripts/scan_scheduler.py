@@ -9,6 +9,8 @@ from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from domain.domain.engine import decide_scheduler_timing
+
 
 @dataclass
 class SchedulerDecision:
@@ -45,7 +47,8 @@ def read_state(path: Path) -> dict:
 
 def write_state(path: Path, state: dict):
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding='utf-8')
+    from scripts.io_utils import atomic_write_text
+    atomic_write_text(path, json.dumps(state, ensure_ascii=False, indent=2) + "\n")
 
 
 def parse_hhmm(value: str) -> time:
@@ -89,7 +92,15 @@ def _time_in_range(t: time, start: time, end: time) -> bool:
     return t >= start or t <= end
 
 
-def decide(schedule_cfg: dict, state: dict, now_utc: datetime, account: str | None = None, *, schedule_key: str = 'schedule') -> SchedulerDecision:
+def decide(
+    schedule_cfg: dict,
+    state: dict,
+    now_utc: datetime,
+    account: str | None = None,
+    *,
+    schedule_key: str = 'schedule',
+    force: bool = False,
+) -> SchedulerDecision:
     market_tz = ZoneInfo(schedule_cfg.get('market_timezone', 'America/New_York'))
     now_market = now_utc.astimezone(market_tz)
 
@@ -202,50 +213,24 @@ def decide(schedule_cfg: dict, state: dict, now_utc: datetime, account: str | No
         # fallback to legacy global notify timestamp
         last_notify = maybe_parse_dt(state.get('last_notify_utc'))
 
-    should_run_scan = False
-    reason = ''
-
-    if (not in_window) and (not monitor_off_hours):
-        should_run_scan = False
-        reason = '窗口外：不扫描。'
-    elif last_scan is None:
-        should_run_scan = True
-        reason = '首次运行，无历史扫描记录。'
-    else:
-        elapsed = now_utc - last_scan.astimezone(timezone.utc)
-        if elapsed >= timedelta(minutes=interval_min):
-            should_run_scan = True
-            reason = f'距离上次扫描已超过 {interval_min} 分钟。'
-        elif schedule_v2_enabled and force_final_scan:
-            should_run_scan = True
-            reason = '窗口收盘前最后一跳：强制扫描。'
-        else:
-            should_run_scan = False
-            reason = f'距离上次扫描不足 {interval_min} 分钟。'
-
-    is_notify_window_open = False
-    if schedule_v2_enabled:
-        off_window_notify = bool((schedule_v2.get('off_window') or {}).get('notify', False))
-        if (not in_window) and (not off_window_notify):
-            is_notify_window_open = False
-        elif last_notify is None:
-            is_notify_window_open = True
-        else:
-            is_notify_window_open = (now_utc - last_notify.astimezone(timezone.utc)) >= timedelta(minutes=notify_cooldown_min)
-    elif (not in_window) and (not monitor_off_hours):
-        is_notify_window_open = False
-    elif last_notify is None:
-        is_notify_window_open = True
-    else:
-        is_notify_window_open = (now_utc - last_notify.astimezone(timezone.utc)) >= timedelta(minutes=notify_cooldown_min)
-
-    if not should_run_scan:
-        if last_scan is None or interval_min >= 10**8:
-            next_run = now_utc + timedelta(hours=24)
-        else:
-            next_run = last_scan.astimezone(timezone.utc) + timedelta(minutes=interval_min)
-    else:
-        next_run = now_utc
+    timing_decision = decide_scheduler_timing(
+        now_utc=now_utc,
+        last_scan_utc=last_scan,
+        last_notify_utc=last_notify,
+        in_window=bool(in_window),
+        monitor_off_hours=bool(monitor_off_hours),
+        interval_min=int(interval_min),
+        notify_cooldown_min=int(notify_cooldown_min),
+        schedule_v2_enabled=bool(schedule_v2_enabled),
+        force_final_scan=bool(force_final_scan),
+        off_window_notify=bool((schedule_v2.get('off_window') or {}).get('notify', False)),
+        force=bool(force),
+    )
+    should_run_scan = bool(timing_decision.get('should_run_scan'))
+    is_notify_window_open = bool(timing_decision.get('is_notify_window_open'))
+    reason = str(timing_decision.get('reason') or '')
+    next_run_raw = timing_decision.get('next_run_utc')
+    next_run = next_run_raw if isinstance(next_run_raw, datetime) else now_utc
 
     # Also expose Beijing-time for readability/debuggability.
     open_dt_market = datetime.combine(now_market.date(), market_open, tzinfo=market_tz)
@@ -315,12 +300,14 @@ def run_scheduler(
 
     now_utc = datetime.now(timezone.utc)
     state_data = read_state(state_path)
-    decision = decide(schedule_cfg, state_data, now_utc, account=(str(account) if account else None), schedule_key=schedule_key_val)
-
-    if force:
-        decision.should_run_scan = True
-        decision.is_notify_window_open = True
-        decision.reason = 'force 模式：忽略频率控制直接执行。'
+    decision = decide(
+        schedule_cfg,
+        state_data,
+        now_utc,
+        account=(str(account) if account else None),
+        schedule_key=schedule_key_val,
+        force=bool(force),
+    )
 
     payload = asdict(decision)
     payload['should_notify'] = bool(payload.get('is_notify_window_open'))

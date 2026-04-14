@@ -364,7 +364,7 @@ def build_notification(
         lines.append('')
 
     if not candidate_lines and not significant_changes:
-        lines.append('今日无需要主动提醒的内容。')
+        lines.append('监控正常触发：本轮无候选。')
         lines.append('')
 
     return '\n'.join(lines).strip() + '\n'

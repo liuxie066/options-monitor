@@ -17,7 +17,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--symbols", nargs="+", required=True)
     parser.add_argument("--min-dte", type=int, default=7)
     parser.add_argument("--max-dte", type=int, default=45)
-    parser.add_argument("--min-otm-pct", type=float, default=0.05)
     parser.add_argument("--min-annualized-net-return", type=float, default=None, help="required; min annualized net return in [0,1]")
     parser.add_argument("--min-net-income", type=float, default=50.0)
     parser.add_argument("--min-strike", type=float, default=None)
@@ -28,11 +27,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--d3-event-enabled", dest="d3_event_enabled", action="store_true", default=None)
     parser.add_argument("--no-d3-event-enabled", dest="d3_event_enabled", action="store_false")
     parser.add_argument("--d3-event-mode", type=str, default="warn")
-    parser.add_argument("--min-iv", type=float, default=None, help="min implied volatility (decimal, e.g. 0.15)")
-    parser.add_argument("--max-iv", type=float, default=None, help="max implied volatility (decimal, e.g. 2.0)")
-    parser.add_argument("--require-bid-ask", action="store_true", help="require bid>0 and ask>0 (better fillability)")
-    parser.add_argument("--min-abs-delta", type=float, default=None, help="min abs(delta) (e.g. 0.15)")
-    parser.add_argument("--max-abs-delta", type=float, default=None, help="max abs(delta) (e.g. 0.28)")
     parser.add_argument("--quiet", action="store_true", help="quiet mode: suppress human-friendly prints")
     parser.add_argument("--output", default=None, help="Output CSV path (default: output/reports/sell_put_candidates.csv)")
     parser.add_argument("--reject-log-output", default=None, help="Reject log CSV path (default: <output>_reject_log.csv)")
@@ -55,7 +49,6 @@ def main(argv: list[str] | None = None) -> int:
             output=out_path,
             min_dte=args.min_dte,
             max_dte=args.max_dte,
-            min_otm_pct=args.min_otm_pct,
             min_annualized_net_return=args.min_annualized_net_return,
             min_net_income=args.min_net_income,
             min_strike=args.min_strike,
@@ -63,11 +56,6 @@ def main(argv: list[str] | None = None) -> int:
             min_open_interest=args.min_open_interest,
             min_volume=args.min_volume,
             max_spread_ratio=args.max_spread_ratio,
-            min_iv=args.min_iv,
-            max_iv=args.max_iv,
-            require_bid_ask=args.require_bid_ask,
-            min_abs_delta=args.min_abs_delta,
-            max_abs_delta=args.max_abs_delta,
             d3_event_cfg={
                 "enabled": True if args.d3_event_enabled is None else bool(args.d3_event_enabled),
                 "mode": str(args.d3_event_mode or "warn"),

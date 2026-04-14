@@ -23,6 +23,36 @@ def build_account_messages(
     return out
 
 
+def build_no_candidate_account_messages(
+    *,
+    results: list,
+    now_bj,
+    cash_footer_lines: list[str],
+    cash_footer_for_account_fn: Callable[[list[str], str], list[str]],
+) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for r in (results or []):
+        if not (getattr(r, 'ran_scan', False) and getattr(r, 'should_notify', False)):
+            continue
+        acct = str(getattr(r, 'account', '') or '').strip().lower()
+        if not acct:
+            continue
+        lines = [
+            f"Options Monitor 账户提醒（{acct}）",
+            '',
+            f"北京时间 {now_bj}",
+            '',
+            f"【账户 {acct}】监控正常触发，本轮无候选。",
+            '',
+        ]
+        footer_lines = cash_footer_for_account_fn(cash_footer_lines, acct)
+        if footer_lines:
+            lines.extend(list(footer_lines))
+            lines.append('')
+        out[acct] = '\n'.join(lines).strip() + '\n'
+    return out
+
+
 def build_no_account_notification_payloads(
     *,
     now_utc_fn: Callable[[], str],

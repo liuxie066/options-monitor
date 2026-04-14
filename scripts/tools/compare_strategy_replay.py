@@ -13,10 +13,9 @@ repo_base = Path(__file__).resolve().parents[2]
 if str(repo_base) not in sys.path:
     sys.path.insert(0, str(repo_base))
 
-from scripts.option_candidate_strategy import (
+from domain.domain.engine import (
     build_strategy_config,
-    rank_candidates,
-    score_candidates,
+    rank_scored_candidates,
     sort_columns,
 )
 
@@ -32,9 +31,7 @@ def _legacy_rank(df: pd.DataFrame, mode: str, top_n: int) -> pd.DataFrame:
 
 def _new_rank(df: pd.DataFrame, mode: str, top_n: int) -> pd.DataFrame:
     cfg = build_strategy_config(mode)
-    scored = score_candidates(df, cfg)
-    ranked = rank_candidates(scored, cfg, layered=False, top=top_n)
-    return ranked
+    return rank_scored_candidates(df, cfg, layered=False, top=top_n)
 
 
 def _top_signature(df: pd.DataFrame) -> list[str]:

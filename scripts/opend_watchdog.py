@@ -26,6 +26,12 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+# Re-exec under repo venv if this is the main script and the venv python differs
+if __name__ == '__main__':
+    _vpy = Path(__file__).resolve().parents[1] / '.venv' / 'bin' / 'python'
+    if _vpy.exists() and str(_vpy) != sys.executable:
+        os.execv(str(_vpy), [str(_vpy)] + sys.argv)
+
 
 @dataclass
 class Health:
@@ -121,11 +127,6 @@ def _looks_like_disconnect_error(msg: str) -> bool:
 
 
 def get_global_state_once(host: str, port: int) -> dict:
-    # Prefer repo venv if available
-    vpy = Path(__file__).resolve().parents[1] / '.venv' / 'bin' / 'python'
-    if vpy.exists() and str(vpy) != sys.executable:
-        os.execv(str(vpy), [str(vpy)] + sys.argv)
-
     from futu import OpenQuoteContext, RET_OK
 
     ctx = OpenQuoteContext(host=host, port=int(port))
@@ -188,7 +189,7 @@ def get_global_state(host: str, port: int, *, retry_once: bool = True, ensure: b
 
 
 def try_start_opend() -> tuple[bool, str]:
-    start_sh = '/home/node/.openclaw/workspace/skills/futu-agent/scripts/start.sh'
+    start_sh = os.environ.get('OPEND_START_SCRIPT', '/home/node/.openclaw/workspace/skills/futu-agent/scripts/start.sh')
     try:
         p = subprocess.run(['bash', start_sh], capture_output=True, text=True, timeout=20)
         out = ((p.stdout or '') + '\n' + (p.stderr or '')).strip()

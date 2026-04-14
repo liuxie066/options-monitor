@@ -93,8 +93,12 @@ def load_config(
             validate_config_fn(cfg)
     except SystemExit:
         raise
+    except ImportError as e:
+        # Do not block the pipeline if validator module is not available.
+        log(f"[WARN] config validation skipped (import failed): {e}")
     except Exception as e:
-        # Do not block the pipeline if validator import fails.
-        log(f"[WARN] config validation skipped: {e}")
+        # Validation logic itself raised — surface this as an error, don't swallow.
+        log(f"[ERR] config validation failed: {e}")
+        raise SystemExit(f"[CONFIG_ERROR] validation failed: {e}") from e
 
     return cfg
