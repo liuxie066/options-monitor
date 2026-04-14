@@ -111,22 +111,6 @@ def query_cash_footer(
         except Exception:
             return ''
 
-    if not payloads and not errors:
-        return []
-
-    def asof_bj(payload: dict) -> str:
-        try:
-            s = payload.get('as_of_utc')
-            if not s:
-                return ''
-            dt = datetime.fromisoformat(str(s))
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            bj = dt.astimezone(ZoneInfo('Asia/Shanghai'))
-            return bj.strftime('%Y-%m-%d %H:%M')
-        except Exception:
-            return ''
-
     lines.append('**💰 现金 CNY**')
     latest_asof = ''
     for acct in accounts:

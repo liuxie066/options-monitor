@@ -33,6 +33,12 @@ def _persist_source_snapshot(base: Path, snapshot: dict) -> None:
         pass
 
 
+def _with_context_source(ctx: dict, source: str) -> dict:
+    out = dict(ctx)
+    out['context_source'] = str(source)
+    return out
+
+
 def load_portfolio_context(
     *,
     py: str,
@@ -54,6 +60,8 @@ def load_portfolio_context(
         if ttl_sec > 0 and is_fresh(port_path, ttl_sec):
             cached = load_cached_json(port_path)
         if cached is not None:
+            cached = _with_context_source(cached, 'account_cache')
+            log(f"[CTX] portfolio_context source=account_cache account={account or '-'}")
             snap = adapt_holdings_context(cached)
             _persist_source_snapshot(base, snap)
             return cached
@@ -69,8 +77,10 @@ def load_portfolio_context(
                 if isinstance(shared_cached, dict):
                     sliced = slice_shared_portfolio_context_for_account(shared_cached, account)
                     if isinstance(sliced, dict):
+                        sliced = _with_context_source(sliced, 'shared_slice')
                         port_path.parent.mkdir(parents=True, exist_ok=True)
                         port_path.write_text(json.dumps(sliced, ensure_ascii=False, indent=2), encoding='utf-8')
+                        log(f"[CTX] portfolio_context source=shared_slice account={account or '-'}")
                         snap = adapt_holdings_context(sliced)
                         _persist_source_snapshot(base, snap)
                         return sliced
@@ -92,6 +102,9 @@ def load_portfolio_context(
                 cmd.append('--quiet')
             run_cmd(cmd, cwd=base, timeout_sec=timeout_sec, is_scheduled=is_scheduled)
             ctx = load_cached_json(port_path) or json.loads(port_path.read_text(encoding='utf-8'))
+            ctx = _with_context_source(ctx, 'shared_refresh')
+            port_path.write_text(json.dumps(ctx, ensure_ascii=False, indent=2), encoding='utf-8')
+            log(f"[CTX] portfolio_context source=shared_refresh account={account or '-'}")
             snap = adapt_holdings_context(ctx)
             _persist_source_snapshot(base, snap)
             return ctx
@@ -111,10 +124,13 @@ def load_portfolio_context(
             cmd.append('--quiet')
         run_cmd(cmd, cwd=base, timeout_sec=timeout_sec, is_scheduled=is_scheduled)
         ctx = load_cached_json(port_path) or json.loads(port_path.read_text(encoding='utf-8'))
+        ctx = _with_context_source(ctx, 'direct_fetch')
+        port_path.write_text(json.dumps(ctx, ensure_ascii=False, indent=2), encoding='utf-8')
+        log(f"[CTX] portfolio_context source=direct_fetch account={account or '-'}")
         snap = adapt_holdings_context(ctx)
         _persist_source_snapshot(base, snap)
         return ctx
-    except BaseException as e:
+    except Exception as e:
         log(f"[WARN] portfolio context not available: {e}")
         return None
 
@@ -144,6 +160,8 @@ def load_option_positions_context(
         if ttl_sec > 0 and is_fresh(opt_path, ttl_sec):
             cached = load_cached_json(opt_path)
         if cached is not None:
+            cached = _with_context_source(cached, 'account_cache')
+            log(f"[CTX] option_positions_context source=account_cache account={account or '-'}")
             snap = adapt_option_positions_context(cached)
             _persist_source_snapshot(base, snap)
             return cached, False
@@ -159,8 +177,10 @@ def load_option_positions_context(
                 if isinstance(shared_cached, dict):
                     sliced = slice_shared_option_context_for_account(shared_cached, account)
                     if isinstance(sliced, dict):
+                        sliced = _with_context_source(sliced, 'shared_slice')
                         opt_path.parent.mkdir(parents=True, exist_ok=True)
                         opt_path.write_text(json.dumps(sliced, ensure_ascii=False, indent=2), encoding='utf-8')
+                        log(f"[CTX] option_positions_context source=shared_slice account={account or '-'}")
                         snap = adapt_option_positions_context(sliced)
                         _persist_source_snapshot(base, snap)
                         # Keep existing semantics: account-level context was refreshed for this run.
@@ -183,6 +203,9 @@ def load_option_positions_context(
                 cmd.append('--quiet')
             run_cmd(cmd, cwd=base, timeout_sec=timeout_sec, is_scheduled=is_scheduled)
             ctx = load_cached_json(opt_path) or json.loads(opt_path.read_text(encoding='utf-8'))
+            ctx = _with_context_source(ctx, 'shared_refresh')
+            opt_path.write_text(json.dumps(ctx, ensure_ascii=False, indent=2), encoding='utf-8')
+            log(f"[CTX] option_positions_context source=shared_refresh account={account or '-'}")
             snap = adapt_option_positions_context(ctx)
             _persist_source_snapshot(base, snap)
             return ctx, True
@@ -202,10 +225,13 @@ def load_option_positions_context(
             cmd.append('--quiet')
         run_cmd(cmd, cwd=base, timeout_sec=timeout_sec, is_scheduled=is_scheduled)
         ctx = load_cached_json(opt_path) or json.loads(opt_path.read_text(encoding='utf-8'))
+        ctx = _with_context_source(ctx, 'direct_fetch')
+        opt_path.write_text(json.dumps(ctx, ensure_ascii=False, indent=2), encoding='utf-8')
+        log(f"[CTX] option_positions_context source=direct_fetch account={account or '-'}")
         snap = adapt_option_positions_context(ctx)
         _persist_source_snapshot(base, snap)
         return ctx, True
-    except BaseException as e:
+    except Exception as e:
         log(f"[WARN] option positions context not available: {e}")
         return None, False
 
@@ -283,7 +309,7 @@ def load_fx_rates(*, base: Path, state_dir: Path, log) -> tuple[float | None, fl
                     hkdcny = None
         except Exception:
             hkdcny = None
-    except BaseException as e:
+    except Exception as e:
         log(f"[WARN] fx rates not available: {e}")
     return fx_usd_per_cny, hkdcny
 
