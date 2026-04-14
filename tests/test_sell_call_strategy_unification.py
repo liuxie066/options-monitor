@@ -38,7 +38,7 @@ def test_scan_sell_call_filter_and_rank_baseline() -> None:
 
         pd.DataFrame(
             [
-                # pass, lower if_exercised_total_return
+                # pass; same score as B, so stable input order wins
                 {
                     "symbol": "AAPL",
                     "option_type": "call",
@@ -58,7 +58,7 @@ def test_scan_sell_call_filter_and_rank_baseline() -> None:
                     "implied_volatility": 0.30,
                     "delta": 0.25,
                 },
-                # pass, same annualized but higher if_exercised_total_return => should rank first
+                # pass; if_exercised_total_return must not affect rank
                 {
                     "symbol": "AAPL",
                     "option_type": "call",
@@ -98,7 +98,7 @@ def test_scan_sell_call_filter_and_rank_baseline() -> None:
                     "implied_volatility": 0.30,
                     "delta": 0.10,
                 },
-                # fail if_exercised_total_return
+                # fail net income
                 {
                     "symbol": "AAPL",
                     "option_type": "call",
@@ -109,10 +109,10 @@ def test_scan_sell_call_filter_and_rank_baseline() -> None:
                     "currency": "USD",
                     "strike": 101.0,
                     "spot": 100.0,
-                    "bid": 1.4,
-                    "ask": 1.6,
-                    "last_price": 1.5,
-                    "mid": 1.5,
+                    "bid": 0.35,
+                    "ask": 0.45,
+                    "last_price": 0.4,
+                    "mid": 0.4,
                     "open_interest": 200,
                     "volume": 50,
                     "implied_volatility": 0.30,
@@ -148,21 +148,22 @@ def test_scan_sell_call_filter_and_rank_baseline() -> None:
             avg_cost=100.0,
             shares=100,
             min_annualized_net_return=0.10,
-            min_if_exercised_total_return=0.15,
+            min_net_income=100,
             min_open_interest=10,
             quiet=True,
         )
 
-        assert list(out["contract_symbol"]) == ["B", "A"]
+        assert list(out["contract_symbol"]) == ["A", "B"]
         reject_path = out_path.with_name(f"{out_path.stem}_reject_log.csv")
         reject_log = pd.read_csv(reject_path)
         assert not reject_log.empty
         assert set(reject_log["reject_stage"].dropna().astype(str).tolist()) == {"step3_risk_gate"}
+        assert set(["engine_reject_stage", "engine_reject_reason"]).issubset(set(reject_log.columns))
 
 
 def test_render_sell_call_rank_order_consistent_with_strategy() -> None:
     _add_repo_to_syspath()
-    from scripts.option_candidate_strategy import build_strategy_config, rank_candidates, score_candidates
+    from domain.domain.engine import build_strategy_config, rank_scored_candidates
     from scripts.render_sell_call_alerts import render_sell_call_alerts
 
     with TemporaryDirectory() as td:
@@ -269,7 +270,7 @@ def test_render_sell_call_rank_order_consistent_with_strategy() -> None:
         df.to_csv(in_path, index=False)
 
         cfg = build_strategy_config("call")
-        expected = rank_candidates(score_candidates(df, cfg), cfg, layered=True, top=3)
+        expected = rank_scored_candidates(df, cfg, layered=True, top=3)
 
         text = render_sell_call_alerts(
             input_path=in_path,

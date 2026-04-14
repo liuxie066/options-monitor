@@ -7,6 +7,7 @@ This module is intentionally small and side-effect free except writing to the la
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import pandas as pd
@@ -20,6 +21,8 @@ from scripts.cash_secured_utils import (
 )
 from scripts.fx_rates import CurrencyConverter
 from scripts.io_utils import safe_read_csv
+
+log = logging.getLogger(__name__)
 
 
 def enrich_sell_put_candidates_with_cash(
@@ -44,14 +47,15 @@ def enrich_sell_put_candidates_with_cash(
     if not portfolio_ctx:
         try:
             df_sp_lab.to_csv(out_path, index=False)
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("sell_put_cash: failed to write CSV: %s", e)
         return df_sp_lab
 
     option_ctx: dict[str, Any] | None = None
     try:
         option_ctx = portfolio_ctx.get('option_ctx') if isinstance(portfolio_ctx, dict) else None
-    except Exception:
+    except Exception as e:
+        log.warning("sell_put_cash: failed to read option_ctx: %s", e)
         option_ctx = None
 
     used_symbol_usd = 0.0
@@ -74,7 +78,8 @@ def enrich_sell_put_candidates_with_cash(
                 by_symbol_by_ccy=norm_by_ccy,
                 native_to_cny=lambda amt, ccy: fx.native_to_cny(amt, native_ccy=ccy),
             )
-        except Exception:
+        except Exception as e:
+            log.warning("sell_put_cash: cash_secured calc failed for %s: %s", symbol, e)
             used_symbol_usd = 0.0
             used_total_usd = 0.0
             used_total_cny = None
@@ -101,7 +106,8 @@ def enrich_sell_put_candidates_with_cash(
 
         if cash_avail is None and cash_avail_cny is not None:
             cash_avail_est = fx.cny_to_native(cash_avail_cny, native_ccy='USD')
-    except Exception:
+    except Exception as e:
+        log.warning("sell_put_cash: cash_available calc failed: %s", e)
         cash_avail = None
         cash_avail_est = None
 
@@ -170,13 +176,14 @@ def enrich_sell_put_candidates_with_cash(
                     df_sp_lab.loc[missing_m, 'cash_required_cny'] = pd.NA
             except Exception:
                 pass
-    except Exception:
+    except Exception as e:
+        log.warning("sell_put_cash: cash_required calc failed: %s", e)
         df_sp_lab['cash_required_usd'] = pd.NA
         df_sp_lab['cash_required_cny'] = pd.NA
 
     try:
         df_sp_lab.to_csv(out_path, index=False)
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning("sell_put_cash: failed to write CSV: %s", e)
 
     return df_sp_lab

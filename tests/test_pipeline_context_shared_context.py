@@ -170,10 +170,16 @@ def test_shared_context_reuses_fetch_calls_across_accounts() -> None:
         assert o1 and o2
         assert r1 is True
         assert r2 is True
+        assert p1["context_source"] == "shared_refresh"
+        assert p2["context_source"] == "shared_slice"
+        assert o1["context_source"] == "shared_refresh"
+        assert o2["context_source"] == "shared_slice"
         assert p1["cash_by_currency"]["USD"] == 1000.0
         assert p2["cash_by_currency"]["USD"] == 1500.0
         assert o1["locked_shares_by_symbol"]["NVDA"] == 100
         assert o2["locked_shares_by_symbol"]["NVDA"] == 200
+        assert any("portfolio_context source=shared_slice account=sy" in x for x in logs)
+        assert any("option_positions_context source=shared_slice account=sy" in x for x in logs)
     finally:
         pc.run_cmd = old_run_cmd  # type: ignore[assignment]
 

@@ -34,7 +34,6 @@
   "templates": {
     "put_base": {
       "sell_put": {
-        "min_otm_pct": 0.05,
         "min_annualized_net_return": 0.1,
         "min_net_income": 100,
         "min_open_interest": 50,
@@ -45,7 +44,7 @@
     "call_base": {
       "sell_call": {
         "min_annualized_net_return": 0.1,
-        "min_if_exercised_total_return": 0.05,
+        "min_net_income": 100,
         "min_open_interest": 50,
         "min_volume": 10,
         "max_spread_ratio": 0.3
@@ -128,8 +127,7 @@
         "min_dte": 20,
         "max_dte": 90,
         "min_strike": 0,
-        "max_strike": 450,
-        "min_otm_pct": 0.05
+        "max_strike": 450
       },
       "sell_call": {
         "enabled": false
@@ -150,8 +148,7 @@
         "min_dte": 20,
         "max_dte": 90,
         "min_strike": 0,
-        "max_strike": 70,
-        "min_otm_pct": 0.05
+        "max_strike": 70
       },
       "sell_call": {
         "enabled": false
@@ -172,8 +169,7 @@
         "min_dte": 20,
         "max_dte": 90,
         "min_strike": 0,
-        "max_strike": 150,
-        "min_otm_pct": 0.05
+        "max_strike": 150
       },
       "sell_call": {
         "enabled": false
@@ -200,10 +196,9 @@
         "enabled": true,
         "min_dte": 10,
         "max_dte": 90,
-        "min_otm_pct": 0.05,
         "min_strike": 30,
         "min_annualized_net_return": 0.03,
-        "min_if_exercised_total_return": 0.0,
+        "min_net_income": 100,
         "min_open_interest": 50,
         "min_volume": 10,
         "max_spread_ratio": 0.3

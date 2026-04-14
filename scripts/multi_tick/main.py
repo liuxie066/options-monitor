@@ -57,10 +57,10 @@ from domain.domain import (
     SnapshotDTO,
     apply_scan_run_decision,
     build_account_messages,
+    build_no_candidate_account_messages,
     build_no_account_notification_payloads,
     build_shared_last_run_payload,
     cash_footer_for_account,
-    decide_notify_dispatch,
     decide_should_notify,
     evaluate_dnd_quiet_hours,
     classify_failure,
@@ -81,7 +81,7 @@ from domain.domain.engine import (
     apply_opend_degrade_to_yahoo,
     build_opend_unhealthy_execution_plan,
     decide_account_scan_gate,
-    decide_notify_delivery_action,
+    decide_notification_delivery,
     decide_pipeline_execution_result,
     decide_notification_meaningful,
     decide_trading_day_guard,
@@ -1219,40 +1219,67 @@ def main() -> int:
         notify_min_accounts=1,
     ).get('notify_threshold') or {}
     if not bool(notify_threshold.get('threshold_met')):
-        runlog.safe_event('notify', 'skip', message='no account notification content')
-
-        shared_payload, account_payloads = build_no_account_notification_payloads(
-            now_utc_fn=utc_now,
+        account_messages = build_no_candidate_account_messages(
             results=results,
-            run_dir=str(run_dir),
+            now_bj=now_bj,
+            cash_footer_lines=cash_footer_lines,
+            cash_footer_for_account_fn=cash_footer_for_account,
+        )
+        notify_threshold = resolve_multi_tick_engine_entrypoint(
+            notify_account_messages=account_messages,
+            notify_min_accounts=1,
+        ).get('notify_threshold') or {}
+
+        if not bool(notify_threshold.get('threshold_met')):
+            runlog.safe_event('notify', 'skip', message='no account notification content')
+
+            shared_payload, account_payloads = build_no_account_notification_payloads(
+                now_utc_fn=utc_now,
+                results=results,
+                run_dir=str(run_dir),
+            )
+            try:
+                state_repo.write_shared_last_run(base, shared_payload)
+                _audit('write', 'write_shared_last_run', run_id=run_id, status='skip', message='no_account_notification')
+            except Exception:
+                pass
+
+            try:
+                for r in results:
+                    payload = account_payloads.get(str(r.account), {})
+                    state_repo.write_account_last_run(base, r.account, payload)
+                    state_repo.write_run_account_last_run(base, run_id, r.account, payload)
+                    _audit('write', 'write_account_last_run', run_id=run_id, account=str(r.account), status='skip', message='no_account_notification')
+            except Exception:
+                pass
+
+            try:
+                tick_metrics['sent'] = False
+                tick_metrics['reason'] = 'no_account_notification'
+                state_repo.write_tick_metrics(base, run_id, tick_metrics)
+                state_repo.append_tick_metrics_history(base, run_id, tick_metrics)
+                _audit('write', 'write_tick_metrics', run_id=run_id, status='skip', message='no_account_notification')
+            except Exception:
+                pass
+
+            runlog.safe_event('run_end', 'ok', data=_safe_runlog_data({'sent': False, 'reason': 'no_account_notification', 'accounts': [r.account for r in results]}))
+            _guard_mark_success()
+            return 0
+
+        runlog.safe_event(
+            'notify',
+            'prepare',
+            message='no candidates; sending monitor heartbeat',
+            data=_safe_runlog_data({'accounts': list(account_messages.keys())}),
         )
         try:
-            state_repo.write_shared_last_run(base, shared_payload)
-            _audit('write', 'write_shared_last_run', run_id=run_id, status='skip', message='no_account_notification')
+            for acct in account_messages:
+                for acct_metrics in tick_metrics.get('accounts', []):
+                    if str(acct_metrics.get('account') or '').strip().lower() == str(acct).strip().lower():
+                        acct_metrics['meaningful'] = True
+                        acct_metrics['notification_type'] = 'no_candidate'
         except Exception:
             pass
-
-        try:
-            for r in results:
-                payload = account_payloads.get(str(r.account), {})
-                state_repo.write_account_last_run(base, r.account, payload)
-                state_repo.write_run_account_last_run(base, run_id, r.account, payload)
-                _audit('write', 'write_account_last_run', run_id=run_id, account=str(r.account), status='skip', message='no_account_notification')
-        except Exception:
-            pass
-
-        try:
-            tick_metrics['sent'] = False
-            tick_metrics['reason'] = 'no_account_notification'
-            state_repo.write_tick_metrics(base, run_id, tick_metrics)
-            state_repo.append_tick_metrics_history(base, run_id, tick_metrics)
-            _audit('write', 'write_tick_metrics', run_id=run_id, status='skip', message='no_account_notification')
-        except Exception:
-            pass
-
-        runlog.safe_event('run_end', 'ok', data=_safe_runlog_data({'sent': False, 'reason': 'no_account_notification', 'accounts': [r.account for r in results]}))
-        _guard_mark_success()
-        return 0
 
     notify_route = resolve_notification_route_from_config(config=base_cfg)
     notif_cfg = notify_route.get('notifications') or {}
@@ -1272,27 +1299,21 @@ def main() -> int:
     if parse_error:
         runlog.safe_event('notify', 'error', message=f'failed to parse quiet_hours: {parse_error}')
 
-    dispatch_decision = decide_notify_dispatch(
-        no_send=no_send,
+    notify_delivery = decide_notification_delivery(
+        should_notify_window=True,
+        notification_text='\n'.join(str(msg) for msg in account_messages.values()),
         target=target,
-        dnd_is_quiet=bool(dnd_decision.get('is_quiet')),
-    )
-    dispatch_gate = resolve_multi_tick_engine_entrypoint(
-        notify_dispatch=dispatch_decision,
-        dnd_decision=dnd_decision,
-    ).get('notify') or {}
-    notify_delivery = resolve_multi_tick_engine_entrypoint(
-        notify_dispatch_gate=dispatch_gate,
-    ).get('notify_delivery') or decide_notify_delivery_action(
-        dispatch_gate=dispatch_gate,
+        no_send=no_send,
+        is_quiet=bool(dnd_decision.get('is_quiet')),
+        quiet_window=str(dnd_decision.get('quiet_window') or ''),
     )
     _audit(
         'notify',
-        'dispatch_decision',
+        'delivery_decision',
         run_id=run_id,
-        status=('ok' if not dispatch_decision.get('config_error') else 'error'),
+        status=('ok' if not notify_delivery.get('config_error') else 'error'),
         target=(str(target) if target else None),
-        extra={'reason': dispatch_decision.get('reason'), 'should_send': bool(dispatch_decision.get('should_send'))},
+        extra={'reason': notify_delivery.get('reason'), 'should_send': bool(notify_delivery.get('should_send'))},
     )
     if str(notify_delivery.get('action') or '') == 'skip_quiet_hours':
         quiet_window = str(notify_delivery.get('quiet_window') or '')

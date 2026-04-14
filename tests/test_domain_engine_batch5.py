@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -126,3 +127,122 @@ def test_notify_delivery_action_matches_legacy_branching_batch5() -> None:
     ]
     for gate in cases:
         assert decide_notify_delivery_action(dispatch_gate=gate) == _legacy_notify_delivery_action(gate)
+
+
+def test_decide_notification_delivery_centralizes_single_entry_policy() -> None:
+    from domain.domain.engine import decide_notification_delivery
+
+    assert decide_notification_delivery(
+        should_notify_window=True,
+        notification_text='hello',
+        target='',
+    ) == {
+        'action': 'config_error',
+        'should_send': False,
+        'meaningful': True,
+        'effective_target': '',
+        'config_error': 'notifications.target is required',
+        'reason': 'config_error',
+    }
+    assert decide_notification_delivery(
+        should_notify_window=True,
+        notification_text='hello',
+        target='user:test',
+        is_quiet=True,
+    )['action'] == 'skip_quiet_hours'
+    assert decide_notification_delivery(
+        should_notify_window=True,
+        notification_text='hello',
+        target='user:test',
+        no_send=True,
+    )['reason'] == 'no_send'
+    assert decide_notification_delivery(
+        should_notify_window=False,
+        notification_text='hello',
+        target='user:test',
+    )['reason'] == 'notify_window_closed'
+    assert decide_notification_delivery(
+        should_notify_window=True,
+        notification_text='今日无需要主动提醒的内容。',
+        target='user:test',
+    )['reason'] == 'not_meaningful'
+    assert decide_notification_delivery(
+        should_notify_window=True,
+        notification_text='hello',
+        target='user:test',
+    ) == {
+        'action': 'send',
+        'should_send': True,
+        'meaningful': True,
+        'effective_target': 'user:test',
+        'config_error': None,
+        'reason': 'send',
+    }
+
+
+def test_decide_scheduler_timing_centralizes_scan_and_notify_cooldown() -> None:
+    from domain.domain.engine import decide_scheduler_timing
+
+    now = datetime(2026, 4, 1, 1, 0, tzinfo=timezone.utc)
+    assert decide_scheduler_timing(
+        now_utc=now,
+        last_scan_utc=None,
+        last_notify_utc=None,
+        in_window=True,
+        monitor_off_hours=False,
+        interval_min=30,
+        notify_cooldown_min=60,
+    ) == {
+        'should_run_scan': True,
+        'is_notify_window_open': True,
+        'reason': '首次运行，无历史扫描记录。',
+        'next_run_utc': now,
+    }
+    assert decide_scheduler_timing(
+        now_utc=now,
+        last_scan_utc=now - timedelta(minutes=10),
+        last_notify_utc=now - timedelta(minutes=10),
+        in_window=True,
+        monitor_off_hours=False,
+        interval_min=30,
+        notify_cooldown_min=60,
+    )['is_notify_window_open'] is False
+    assert decide_scheduler_timing(
+        now_utc=now,
+        last_scan_utc=now - timedelta(minutes=10),
+        last_notify_utc=now - timedelta(minutes=90),
+        in_window=True,
+        monitor_off_hours=False,
+        interval_min=30,
+        notify_cooldown_min=60,
+    )['is_notify_window_open'] is True
+    assert decide_scheduler_timing(
+        now_utc=now,
+        last_scan_utc=now - timedelta(minutes=10),
+        last_notify_utc=None,
+        in_window=False,
+        monitor_off_hours=False,
+        interval_min=30,
+        notify_cooldown_min=60,
+    )['reason'] == '窗口外：不扫描。'
+    assert decide_scheduler_timing(
+        now_utc=now,
+        last_scan_utc=now - timedelta(minutes=10),
+        last_notify_utc=now - timedelta(minutes=10),
+        in_window=False,
+        monitor_off_hours=False,
+        interval_min=30,
+        notify_cooldown_min=60,
+        schedule_v2_enabled=True,
+        off_window_notify=True,
+    )['is_notify_window_open'] is False
+    assert decide_scheduler_timing(
+        now_utc=now,
+        last_scan_utc=now,
+        last_notify_utc=now,
+        in_window=False,
+        monitor_off_hours=False,
+        interval_min=30,
+        notify_cooldown_min=60,
+        force=True,
+    )['reason'] == 'force 模式：忽略频率控制直接执行。'
