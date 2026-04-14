@@ -206,8 +206,7 @@
         "min_if_exercised_total_return": 0.0,
         "min_open_interest": 50,
         "min_volume": 10,
-        "max_spread_ratio": 0.3,
-        "require_bid_ask": true
+        "max_spread_ratio": 0.3
       },
       "market": "HK"
     }

@@ -10,6 +10,7 @@ from scripts.option_candidate_strategy import (
     rank_candidates,
     score_candidates,
 )
+from scripts.d3_event_filter import annotate_candidates_with_d3_events
 from scripts.sell_call_config import validate_min_annualized_net_premium_return
 
 SELL_CALL_EMPTY_OUTPUT_COLUMNS = [
@@ -47,6 +48,10 @@ SELL_CALL_EMPTY_OUTPUT_COLUMNS = [
     "strike_above_cost_pct",
     "cc_band",
     "risk_label",
+    "event_flag",
+    "event_types",
+    "event_dates",
+    "reject_stage_candidate",
 ]
 
 
@@ -187,12 +192,13 @@ def run_sell_call_scan(
     min_if_exercised_total_return: float = 0.0,
     min_open_interest: float = 100,
     min_volume: float = 10,
-    max_spread_ratio: float = 0.30,
+    max_spread_ratio: float | None = 0.30,
     min_iv: float | None = None,
     max_iv: float | None = None,
     require_bid_ask: bool = False,
     min_delta: float | None = None,
     max_delta: float | None = None,
+    d3_event_cfg: dict | None = None,
     reject_log_output: Path | None = None,
     quiet: bool = False,
 ) -> pd.DataFrame:
@@ -248,14 +254,15 @@ def run_sell_call_scan(
                 continue
 
             oi = safe_float(row.get("open_interest")) or 0.0
+            if oi < min_open_interest:
+                continue
             vol = safe_float(row.get("volume")) or 0.0
-            if oi < min_open_interest or vol < min_volume:
+            if vol < min_volume:
                 continue
 
             bid = safe_float(row.get("bid"))
             ask = safe_float(row.get("ask"))
             mid = safe_float(row.get("mid"))
-
             if require_bid_ask and (bid is None or ask is None or bid <= 0 or ask <= 0):
                 continue
 
@@ -273,6 +280,8 @@ def run_sell_call_scan(
                 spread = ask - bid
                 if mid is not None and mid > 0:
                     spread_ratio = spread / mid
+            if max_spread_ratio is not None and spread_ratio is not None and spread_ratio > float(max_spread_ratio):
+                continue
             try:
                 d = safe_float(row.get("delta"))
                 if (min_delta is not None) or (max_delta is not None):
@@ -354,12 +363,17 @@ def run_sell_call_scan(
         strategy_cfg = build_strategy_config(
             "call",
             min_annualized_return=threshold,
-            max_spread_ratio=max_spread_ratio,
             min_if_exercised_total_return=min_if_exercised_total_return,
+            max_spread_ratio=max_spread_ratio,
         )
         out, reject_log = filter_candidates_with_reject_log(out, strategy_cfg, reject_stage="step3_risk_gate")
         out = score_candidates(out, strategy_cfg)
         out = rank_candidates(out, strategy_cfg, layered=False)
+        out = annotate_candidates_with_d3_events(
+            out,
+            base_dir=Path(__file__).resolve().parents[1],
+            d3_event_cfg=d3_event_cfg,
+        )
         if "_strategy_score" in out.columns:
             out = out.drop(columns=["_strategy_score"])
     if out.empty:

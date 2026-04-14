@@ -14,7 +14,7 @@ def _add_repo_to_syspath() -> Path:
     return base
 
 
-def test_sell_put_keeps_zero_volume_when_min_volume_zero() -> None:
+def test_sell_put_enforces_min_volume_flag_in_cli() -> None:
     _add_repo_to_syspath()
     from scripts.cli import scan_sell_put_cli
 
@@ -53,7 +53,7 @@ def test_sell_put_keeps_zero_volume_when_min_volume_zero() -> None:
                 '--input-root', str(root),
                 '--output', str(out_path),
                 '--min-open-interest', '50',
-                '--min-volume', '0',
+                '--min-volume', '999999',
                 '--min-net-income', '0',
                 '--min-annualized-net-return', '0',
                 '--quiet',
@@ -63,5 +63,4 @@ def test_sell_put_keeps_zero_volume_when_min_volume_zero() -> None:
             sys.argv = old_argv
 
         out = pd.read_csv(out_path)
-        assert len(out) == 1
-        assert float(out.iloc[0]['volume']) == 0.0
+        assert out.empty

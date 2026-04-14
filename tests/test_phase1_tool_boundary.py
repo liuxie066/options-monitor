@@ -153,12 +153,110 @@ def test_prefetch_required_data_idempotency_audit() -> None:
         mod.ToolExecutionService.execute = old_exec
 
 
+def test_prefetch_required_data_protections_minimal() -> None:
+    from scripts.multi_tick import required_data_prefetch as mod
+
+    old_has = mod.has_shared_required_data
+    old_exec = mod.ToolExecutionService.execute
+    mod.has_shared_required_data = lambda symbol, shared_dir: False
+
+    calls: list[str] = []
+
+    def _fake_execute(self, intent):
+        sym = str(intent.symbol)
+        calls.append(sym)
+        if sym == "AAPL":
+            return {
+                "schema_kind": "tool_execution",
+                "schema_version": "1.0",
+                "tool_name": intent.tool_name,
+                "symbol": sym,
+                "source": intent.source,
+                "limit_exp": int(intent.limit_exp),
+                "idempotency_key": f"k-{sym}",
+                "status": "fetched",
+                "ok": True,
+                "message": "warning error=should_not_count",
+                "returncode": 0,
+                "started_at_utc": "2026-01-01T00:00:00+00:00",
+                "finished_at_utc": "2026-01-01T00:00:01+00:00",
+            }
+        if sym == "MSFT":
+            return {
+                "schema_kind": "tool_execution",
+                "schema_version": "1.0",
+                "tool_name": intent.tool_name,
+                "symbol": sym,
+                "source": intent.source,
+                "limit_exp": int(intent.limit_exp),
+                "idempotency_key": f"k-{sym}",
+                "status": "error",
+                "ok": False,
+                "message": "OpenD rate limit too frequent",
+                "error_code": "OPEND_RATE_LIMIT",
+                "returncode": 2,
+                "started_at_utc": "2026-01-01T00:00:00+00:00",
+                "finished_at_utc": "2026-01-01T00:00:01+00:00",
+            }
+        return {
+            "schema_kind": "tool_execution",
+            "schema_version": "1.0",
+            "tool_name": intent.tool_name,
+            "symbol": sym,
+            "source": intent.source,
+            "limit_exp": int(intent.limit_exp),
+            "idempotency_key": f"k-{sym}",
+            "status": "error",
+            "ok": False,
+            "message": "generic failure",
+            "returncode": 3,
+            "started_at_utc": "2026-01-01T00:00:00+00:00",
+            "finished_at_utc": "2026-01-01T00:00:01+00:00",
+        }
+
+    mod.ToolExecutionService.execute = _fake_execute
+    try:
+        with TemporaryDirectory() as td:
+            out = mod.prefetch_required_data(
+                vpy=Path("/usr/bin/python3"),
+                base=Path(td),
+                cfg={
+                    "runtime": {
+                        "prefetch_max_workers": 1,
+                        "prefetch_fail_budget_consecutive": 2,
+                        "prefetch_fail_budget_total": 2,
+                    },
+                    "symbols": [
+                        {"symbol": "AAPL", "fetch": {"source": "opend", "limit_expirations": 8}},
+                        {"symbol": "MSFT", "fetch": {"source": "opend", "limit_expirations": 8}},
+                        {"symbol": "TSLA", "fetch": {"source": "opend", "limit_expirations": 8}},
+                        {"symbol": "BABA", "fetch": {"source": "opend", "limit_expirations": 8}},
+                    ],
+                },
+                shared_required=Path(td) / "required_data",
+            )
+        assert out["max_workers"] == 1
+        assert out["errors"] == 1
+        assert out["fetched_ok"] >= 1
+        assert "US" in (out.get("opend_rate_limit_classes") or [])
+        assert "TSLA" not in calls
+        assert "BABA" not in calls
+        tsla_msg = str((out.get("results") or {}).get("TSLA") or "")
+        baba_msg = str((out.get("results") or {}).get("BABA") or "")
+        assert "short_circuit" in tsla_msg or "stopped_by_failure_budget" in tsla_msg
+        assert "short_circuit" in baba_msg or "stopped_by_failure_budget" in baba_msg
+    finally:
+        mod.has_shared_required_data = old_has
+        mod.ToolExecutionService.execute = old_exec
+
+
 def main() -> None:
     test_scheduler_decision_schema_boundary()
     test_tool_execution_schema_and_idempotency_key()
     test_notify_window_alias_normalization_prefers_canonical_field()
     test_repository_audit_and_text_writers()
     test_prefetch_required_data_idempotency_audit()
+    test_prefetch_required_data_protections_minimal()
     print("OK (phase1 tool boundary)")
 
 

@@ -50,3 +50,19 @@ def test_opend_alert_rate_limit() -> None:
         assert s._should_send_opend_alert(base, 'OPEND_RATE_LIMIT', cooldown_sec=600) is False
         # Different code should still pass.
         assert s._should_send_opend_alert(base, 'OPEND_NOT_READY', cooldown_sec=600) is True
+
+
+def test_opend_alert_family_dedupe_and_burst_limit() -> None:
+    _ensure_repo_path()
+    from scripts.multi_tick.opend_guard import should_send_opend_alert
+
+    with TemporaryDirectory() as td:
+        base = Path(td)
+
+        # Same unhealthy family should dedupe even if concrete error code differs.
+        assert should_send_opend_alert(base, 'OPEND_NOT_READY', cooldown_sec=600) is True
+        assert should_send_opend_alert(base, 'OPEND_API_ERROR', cooldown_sec=600) is False
+
+        # Burst limit should cap project-level alert storms.
+        assert should_send_opend_alert(base, 'OPEND_RATE_LIMIT', cooldown_sec=1, burst_window_sec=600, burst_max=2) is True
+        assert should_send_opend_alert(base, 'OPEND_NEEDS_PHONE_VERIFY', cooldown_sec=1, burst_window_sec=600, burst_max=2) is False

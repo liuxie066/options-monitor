@@ -118,7 +118,7 @@ def test_scan_sell_call_filter_and_rank_baseline() -> None:
                     "implied_volatility": 0.30,
                     "delta": 0.45,
                 },
-                # fail spread ratio
+                # fail D3 open-interest
                 {
                     "symbol": "AAPL",
                     "option_type": "call",
@@ -133,7 +133,7 @@ def test_scan_sell_call_filter_and_rank_baseline() -> None:
                     "ask": 1.5,
                     "last_price": 1.0,
                     "mid": 1.0,
-                    "open_interest": 200,
+                    "open_interest": 5,
                     "volume": 50,
                     "implied_volatility": 0.30,
                     "delta": 0.2,
@@ -150,12 +150,14 @@ def test_scan_sell_call_filter_and_rank_baseline() -> None:
             min_annualized_net_return=0.10,
             min_if_exercised_total_return=0.15,
             min_open_interest=10,
-            min_volume=1,
-            max_spread_ratio=0.30,
             quiet=True,
         )
 
         assert list(out["contract_symbol"]) == ["B", "A"]
+        reject_path = out_path.with_name(f"{out_path.stem}_reject_log.csv")
+        reject_log = pd.read_csv(reject_path)
+        assert not reject_log.empty
+        assert set(reject_log["reject_stage"].dropna().astype(str).tolist()) == {"step3_risk_gate"}
 
 
 def test_render_sell_call_rank_order_consistent_with_strategy() -> None:
@@ -278,4 +280,3 @@ def test_render_sell_call_rank_order_consistent_with_strategy() -> None:
         )
 
         assert _extract_title_strikes(text) == [float(v) for v in expected["strike"].tolist()]
-

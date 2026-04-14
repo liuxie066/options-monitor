@@ -72,6 +72,13 @@ cp config.example.hk.json config.hk.json
 ./.venv/bin/python scripts/option_intake.py --market hk --account lx --text "..." --dry-run
 ```
 
+## D3 关键事件过滤（earnings + ex-div）
+
+- 过滤范围：仅关注两类关键事件 `earnings` 与 `ex_dividend`（即 ex-div）。
+- 默认模式：`mode=warn`，命中时仅打标（如 `event_flag` / `event_types` / `event_dates`、`reject_stage_candidate=D3_EVENT_WARN`），不拦截候选。
+- 事件缓存：`output_shared/state/event_cache.json`，当前 TTL 为 `86400` 秒（24 小时）。
+- 配置位置：仅支持全局配置 `sell_put.d3_event` 与 `sell_call.d3_event`；不支持 symbol 级 `d3_event` 覆盖。
+
 ## 输出与状态（定位文件）
 
 - dev 输出目录：`output/`

@@ -104,7 +104,7 @@
 - `templates.put_base.sell_put.min_annualized_net_return`：全局 put 最低年化（例如 0.10）
 - `sell_put.min_annualized_net_return` 统一解析优先级：
   `symbol.sell_put.min_annualized_net_return` > `templates.<name>.sell_put.min_annualized_net_return` > 代码默认 `DEFAULT_MIN_ANNUALIZED_NET_RETURN(0.07)`。
-- `min_open_interest / min_volume / max_spread_ratio`：流动性与可成交性底线
+- D3 全局仅允许 3 个硬过滤键：`min_open_interest`、`min_volume`、`max_spread_ratio`
 - `templates.call_base.sell_call.*`：call 的通用底线
 
 ### 4.2 symbols[]：每个标的的个性化区间

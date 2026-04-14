@@ -156,11 +156,6 @@
         "max_dte": 60,
         "min_strike": 80,
         "max_strike": 100,
-        "require_bid_ask": true,
-        "min_iv": 0.15,
-        "max_iv": 2.0,
-        "min_abs_delta": 0.15,
-        "max_abs_delta": 0.32,
         "target_abs_delta": 0.2
       },
       "sell_call": {

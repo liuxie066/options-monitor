@@ -10,6 +10,7 @@ from scripts.option_candidate_strategy import (
     rank_candidates,
     score_candidates,
 )
+from scripts.d3_event_filter import annotate_candidates_with_d3_events
 from scripts.sell_put_config import validate_min_annualized_net_return
 
 SELL_PUT_EMPTY_OUTPUT_COLUMNS = [
@@ -39,6 +40,10 @@ SELL_PUT_EMPTY_OUTPUT_COLUMNS = [
     "breakeven",
     "annualized_net_return_on_strike",
     "annualized_net_return_on_cash_basis",
+    "event_flag",
+    "event_types",
+    "event_dates",
+    "reject_stage_candidate",
 ]
 
 
@@ -170,12 +175,13 @@ def run_sell_put_scan(
     max_strike: float | None = None,
     min_open_interest: float = 100,
     min_volume: float = 10,
-    max_spread_ratio: float = 0.30,
+    max_spread_ratio: float | None = 0.30,
     min_iv: float | None = None,
     max_iv: float | None = None,
     require_bid_ask: bool = False,
     min_abs_delta: float | None = None,
     max_abs_delta: float | None = None,
+    d3_event_cfg: dict | None = None,
     reject_log_output: Path | None = None,
     quiet: bool = False,
 ) -> pd.DataFrame:
@@ -220,9 +226,9 @@ def run_sell_put_scan(
                 continue
 
             oi = safe_float(row.get("open_interest")) or 0.0
-            vol = safe_float(row.get("volume")) or 0.0
             if oi < min_open_interest:
                 continue
+            vol = safe_float(row.get("volume")) or 0.0
             if vol < min_volume:
                 continue
 
@@ -232,7 +238,6 @@ def run_sell_put_scan(
             spot = safe_float(row.get("spot"))
             if mid is None or strike is None or spot is None:
                 continue
-
             if require_bid_ask and (bid is None or ask is None or bid <= 0 or ask <= 0):
                 continue
 
@@ -250,6 +255,8 @@ def run_sell_put_scan(
                 spread = ask - bid
                 if mid is not None and mid > 0:
                     spread_ratio = spread / mid
+            if max_spread_ratio is not None and spread_ratio is not None and spread_ratio > float(max_spread_ratio):
+                continue
 
             try:
                 d = safe_float(row.get("delta"))
@@ -304,6 +311,11 @@ def run_sell_put_scan(
         out, reject_log = filter_candidates_with_reject_log(out, strategy_cfg, reject_stage="step3_risk_gate")
         out = score_candidates(out, strategy_cfg)
         out = rank_candidates(out, strategy_cfg, layered=False)
+        out = annotate_candidates_with_d3_events(
+            out,
+            base_dir=Path(__file__).resolve().parents[1],
+            d3_event_cfg=d3_event_cfg,
+        )
         if "_strategy_score" in out.columns:
             out = out.drop(columns=["_strategy_score"])
     if out.empty:

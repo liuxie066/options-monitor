@@ -5,6 +5,22 @@ import argparse
 import json
 from pathlib import Path
 
+D3_ALLOWED_GLOBAL_FIELDS = (
+    'min_open_interest',
+    'min_volume',
+    'max_spread_ratio',
+)
+D3_REMOVED_FIELDS = (
+    'require_bid_ask',
+    'min_iv',
+    'max_iv',
+    'min_abs_delta',
+    'max_abs_delta',
+    'min_delta',
+    'max_delta',
+)
+D3_SYMBOL_FORBIDDEN_FIELDS = D3_ALLOWED_GLOBAL_FIELDS + D3_REMOVED_FIELDS + ('d3_event',)
+
 
 def die(msg: str):
     raise SystemExit(f"[CONFIG_ERROR] {msg}")
@@ -74,6 +90,22 @@ def validate_config(cfg: dict):
     if cfg.get('templates') is None and isinstance(templates, dict):
         cfg['templates'] = templates
 
+    # Strict D3 Occam contract: global D3 only supports 3 hard filters.
+    if isinstance(templates, dict):
+        for profile_name, profile in templates.items():
+            if not isinstance(profile, dict):
+                continue
+            for side in ('sell_put', 'sell_call'):
+                side_cfg = profile.get(side)
+                if not isinstance(side_cfg, dict):
+                    continue
+                bad_keys = [k for k in D3_REMOVED_FIELDS if k in side_cfg]
+                if bad_keys:
+                    die(
+                        f"templates.{profile_name}.{side} has unsupported D3 keys: "
+                        f"{', '.join(bad_keys)}; only {', '.join(D3_ALLOWED_GLOBAL_FIELDS)} are allowed"
+                    )
+
     seen = set()
     for i, item in enumerate(cfg['symbols']):
         if not isinstance(item, dict):
@@ -87,6 +119,10 @@ def validate_config(cfg: dict):
 
         # sell_put basic checks if enabled
         sp = item.get('sell_put') or {}
+        if isinstance(sp, dict):
+            bad_keys = [k for k in D3_SYMBOL_FORBIDDEN_FIELDS if k in sp]
+            if bad_keys:
+                die(f"{sym}.sell_put has forbidden symbol-level D3 keys: {', '.join(bad_keys)}")
         if sp.get('enabled'):
             for k in ('min_dte','max_dte','min_strike','max_strike'):
                 if k not in sp:
@@ -97,6 +133,10 @@ def validate_config(cfg: dict):
                 die(f"{sym}.sell_put min_strike > max_strike")
 
         sc = item.get('sell_call') or {}
+        if isinstance(sc, dict):
+            bad_keys = [k for k in D3_SYMBOL_FORBIDDEN_FIELDS if k in sc]
+            if bad_keys:
+                die(f"{sym}.sell_call has forbidden symbol-level D3 keys: {', '.join(bad_keys)}")
         if sc.get('enabled'):
             # NOTE:
             # - sell_call cost basis/shares come from holdings (portfolio_context) at runtime.

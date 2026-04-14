@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 # Publish dev repo changes into the local prod checkout.
 #
@@ -82,9 +82,89 @@ ensure_clean "$PROD_DIR" "PROD"
 
 DEV_HEAD=$(cd "$DEV_DIR" && git rev-parse --short HEAD)
 DEV_BRANCH=$(cd "$DEV_DIR" && git branch --show-current)
+PROD_HEAD_BEFORE=$(cd "$PROD_DIR" && git rev-parse --short HEAD)
+
+OBS_STATUS="failed"
+OBS_FAILURE_REASON=""
+OBS_MERGED_TO_TARGET=0
+OBS_PUBLISH_BRANCH=""
+
+record_observability() {
+  local rc="$?"
+  local py_bin prod_after status reason merged
+  status="${OBS_STATUS}"
+  reason="${OBS_FAILURE_REASON}"
+  merged="${OBS_MERGED_TO_TARGET}"
+
+  if [[ "$rc" -ne 0 ]]; then
+    status="failed"
+    if [[ -z "$reason" ]]; then
+      reason="exit_code=${rc}"
+    fi
+  fi
+
+  if [[ -d "$PROD_DIR/.git" ]]; then
+    prod_after=$(cd "$PROD_DIR" && git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+  else
+    prod_after="unknown"
+  fi
+
+  py_bin="$DEV_DIR/.venv/bin/python"
+  if [[ ! -x "$py_bin" ]]; then
+    py_bin="$(command -v python3 || command -v python)"
+  fi
+
+  OBS_DEV_DIR="$DEV_DIR" \
+  OBS_STATUS="$status" \
+  OBS_REASON="$reason" \
+  OBS_DEV_HEAD="${DEV_HEAD:-unknown}" \
+  OBS_PROD_BEFORE="${PROD_HEAD_BEFORE:-unknown}" \
+  OBS_PROD_AFTER="$prod_after" \
+  OBS_TARGET_BRANCH="${TARGET_BRANCH:-}" \
+  OBS_MERGED="$merged" \
+  OBS_APPLY="${APPLY:-0}" \
+  OBS_PUBLISH_BRANCH="${OBS_PUBLISH_BRANCH:-}" \
+  "$py_bin" - <<'PY' || true
+import os
+import sys
+
+dev_dir = os.environ.get("OBS_DEV_DIR", "")
+if dev_dir:
+    sys.path.insert(0, dev_dir)
+
+from scripts.deploy_observability import append_event, build_summary, make_machine_json, utc_now
+
+status = os.environ.get("OBS_STATUS", "failed")
+reason = os.environ.get("OBS_REASON", "")
+event = {
+    "timestamp_utc": utc_now(),
+    "operation": "publish",
+    "status": status,
+    "dev_commit": os.environ.get("OBS_DEV_HEAD", "unknown"),
+    "prod_commit_before": os.environ.get("OBS_PROD_BEFORE", "unknown"),
+    "prod_commit_after": os.environ.get("OBS_PROD_AFTER", "unknown"),
+    "target_branch": os.environ.get("OBS_TARGET_BRANCH", ""),
+    "merged_to_target": os.environ.get("OBS_MERGED", "0") == "1",
+    "applied": os.environ.get("OBS_APPLY", "0") == "1",
+    "publish_branch": os.environ.get("OBS_PUBLISH_BRANCH", ""),
+}
+if status == "failed":
+    event["failure_reason"] = reason or "unknown"
+
+recorded = append_event(event)
+print(f"[publish][json] {make_machine_json(recorded)}")
+print(build_summary(recorded))
+if bool(recorded.get("should_alert")):
+    print("[publish][alert] state-changed-or-new-failure")
+PY
+}
+
+trap 'OBS_FAILURE_REASON="line:${LINENO} cmd:${BASH_COMMAND}"' ERR
+trap 'record_observability' EXIT
 
 STAMP=$(date -u +%Y%m%d-%H%M%S)
 PUBLISH_BRANCH="publish/from-dev-${STAMP}"
+OBS_PUBLISH_BRANCH="$PUBLISH_BRANCH"
 
 echo "[INFO] DEV:  $DEV_DIR ($DEV_BRANCH @ $DEV_HEAD)"
 echo "[INFO] PROD: $PROD_DIR (target branch: $TARGET_BRANCH)"
@@ -136,8 +216,10 @@ if [[ $DO_MERGE -eq 1 ]]; then
     git merge --no-ff "$PUBLISH_BRANCH" -m "merge: publish ${PUBLISH_BRANCH}" >/dev/null
     echo "[OK] merged into $TARGET_BRANCH: $(git rev-parse --short HEAD)"
   )
+  OBS_MERGED_TO_TARGET=1
 else
   echo "[INFO] --no-merge set: leaving changes on $PUBLISH_BRANCH"
 fi
 
+OBS_STATUS="success"
 echo "[DONE] publish complete"

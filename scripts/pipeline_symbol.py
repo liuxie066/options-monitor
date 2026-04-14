@@ -150,6 +150,8 @@ def process_symbol(
                 is_scheduled=IS_SCHEDULED,
                 fx=_FX,
                 portfolio_ctx=portfolio_ctx,
+                global_sell_put_d3=(symbol_cfg.get('_global_sell_put_d3') or {}),
+                global_sell_put_d3_event=(symbol_cfg.get('_global_sell_put_d3_event') or {}),
             )
         )
     else:
@@ -172,6 +174,8 @@ def process_symbol(
                 is_scheduled=IS_SCHEDULED,
                 stock=stock,
                 locked_shares_by_symbol=((portfolio_ctx or {}).get('option_ctx') or {}).get('locked_shares_by_symbol'),
+                global_sell_call_d3=(symbol_cfg.get('_global_sell_call_d3') or {}),
+                global_sell_call_d3_event=(symbol_cfg.get('_global_sell_call_d3_event') or {}),
             )
         )
     else:
