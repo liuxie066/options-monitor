@@ -20,7 +20,13 @@ import filecmp
 import json
 import shutil
 import subprocess
+import sys
 from pathlib import Path
+
+try:
+    from scripts.deploy_observability import append_event, build_summary, make_machine_json, utc_now
+except ModuleNotFoundError:
+    from deploy_observability import append_event, build_summary, make_machine_json, utc_now
 
 ROOT_DEV = Path("/home/node/.openclaw/workspace/options-monitor")
 ROOT_PROD = Path("/home/node/.openclaw/workspace/options-monitor-prod")
@@ -127,6 +133,14 @@ def sync_items() -> list[str]:
 def dev_ref() -> str:
     try:
         out = subprocess.check_output(["git", "-c", f"safe.directory={ROOT_DEV}", "rev-parse", "--short", "HEAD"], cwd=str(ROOT_DEV)).decode().strip()
+        return out
+    except Exception:
+        return "unknown"
+
+
+def repo_ref(repo: Path) -> str:
+    try:
+        out = subprocess.check_output(["git", "-c", f"safe.directory={repo}", "rev-parse", "--short", "HEAD"], cwd=str(repo)).decode().strip()
         return out
     except Exception:
         return "unknown"
@@ -383,89 +397,120 @@ def main() -> None:
         help="JSON allowlist path for runtime config updates; required with --include-runtime-config",
     )
     args = ap.parse_args()
-
-    if args.apply and args.dry_run:
-        raise SystemExit("[ARG_ERROR] --apply and --dry-run cannot be used together")
-
-    runtime_allowlist: RuntimeAllowlist | None = None
-    if args.include_runtime_config:
-        if not args.runtime_config_allowlist:
-            raise SystemExit("[ARG_ERROR] --include-runtime-config requires --runtime-config-allowlist <path>")
-        runtime_allowlist = RuntimeAllowlist.from_file(args.runtime_config_allowlist)
-
     ref = dev_ref()
-    added, updated, deletes, skipped, runtime_write_map, runtime_allowed, runtime_protected = plan_copy(
-        include_runtime_config=args.include_runtime_config,
-        runtime_allowlist=runtime_allowlist,
-    )
-    if not args.prune:
-        deletes = []
+    prod_before = repo_ref(ROOT_PROD)
+    event_base: dict[str, object] = {
+        "timestamp_utc": utc_now(),
+        "operation": "deploy",
+        "dev_commit": ref,
+        "prod_commit_before": prod_before,
+        "prod_commit_after": prod_before,
+        "target_branch": "",
+        "merged_to_target": False,
+        "applied": bool(args.apply),
+    }
 
-    mode = "APPLY" if args.apply else "DRY-RUN"
-    print(f"[deploy] dev={ROOT_DEV}@{ref} -> prod={ROOT_PROD} mode={mode}")
-    print(f"[deploy] summary: add={len(added)} update={len(updated)} delete={len(deletes)}")
-    if args.include_runtime_config:
-        print("[deploy] runtime-config mode: INCLUDED (explicit flag)")
-        print(f"[deploy] runtime-config allowlist: {args.runtime_config_allowlist}")
-        for item in runtime_allowed[:200]:
-            print(f"  UPD_ALLOWED {item}")
-        if len(runtime_allowed) > 200:
-            print(f"  ... ({len(runtime_allowed) - 200} more allowed updates)")
-        for item in runtime_protected[:200]:
-            print(f"  SKIP_PROTECTED {item}")
-        if len(runtime_protected) > 200:
-            print(f"  ... ({len(runtime_protected) - 200} more protected skips)")
-    else:
-        print("[deploy] runtime-config mode: SKIPPED (default)")
-        for rel in skipped:
-            print(f"  SKIP {rel}")
+    def _record_and_print(event: dict[str, object]) -> None:
+        recorded = append_event(event)
+        print(f"[deploy][json] {make_machine_json(recorded)}")
+        print(build_summary(recorded))
+        if bool(recorded.get("should_alert")):
+            print("[deploy][alert] state-changed-or-new-failure")
 
-    for src, dst in added[:200]:
-        print(f"  ADD  {src.relative_to(ROOT_DEV)} -> {dst.relative_to(ROOT_PROD)}")
-    if len(added) > 200:
-        print(f"  ... ({len(added)-200} more added)")
+    try:
+        if args.apply and args.dry_run:
+            raise RuntimeError("[ARG_ERROR] --apply and --dry-run cannot be used together")
 
-    for src, dst in updated[:200]:
-        print(f"  UPD  {src.relative_to(ROOT_DEV)} -> {dst.relative_to(ROOT_PROD)}")
-    if len(updated) > 200:
-        print(f"  ... ({len(updated)-200} more updated)")
+        runtime_allowlist: RuntimeAllowlist | None = None
+        if args.include_runtime_config:
+            if not args.runtime_config_allowlist:
+                raise RuntimeError("[ARG_ERROR] --include-runtime-config requires --runtime-config-allowlist <path>")
+            runtime_allowlist = RuntimeAllowlist.from_file(args.runtime_config_allowlist)
 
-    for p in deletes[:200]:
-        print(f"  DEL  {p.relative_to(ROOT_PROD)}")
-    if len(deletes) > 200:
-        print(f"  ... ({len(deletes)-200} more deleted)")
+        added, updated, deletes, skipped, runtime_write_map, runtime_allowed, runtime_protected = plan_copy(
+            include_runtime_config=args.include_runtime_config,
+            runtime_allowlist=runtime_allowlist,
+        )
+        if not args.prune:
+            deletes = []
 
-    if not args.apply:
-        return
-
-    # Apply deletes
-    for p in deletes:
-        try:
-            p.unlink(missing_ok=True)
-        except Exception as e:
-            print(f"[WARN] failed delete {p}: {e}")
-
-    # Apply copies
-    for src, dst in [*added, *updated]:
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        runtime_text = runtime_write_map.get(dst)
-        if runtime_text is not None:
-            dst.write_text(runtime_text, encoding="utf-8")
+        mode = "APPLY" if args.apply else "DRY-RUN"
+        print(f"[deploy] dev={ROOT_DEV}@{ref} -> prod={ROOT_PROD} mode={mode}")
+        print(f"[deploy] summary: add={len(added)} update={len(updated)} delete={len(deletes)}")
+        if args.include_runtime_config:
+            print("[deploy] runtime-config mode: INCLUDED (explicit flag)")
+            print(f"[deploy] runtime-config allowlist: {args.runtime_config_allowlist}")
+            for item in runtime_allowed[:200]:
+                print(f"  UPD_ALLOWED {item}")
+            if len(runtime_allowed) > 200:
+                print(f"  ... ({len(runtime_allowed) - 200} more allowed updates)")
+            for item in runtime_protected[:200]:
+                print(f"  SKIP_PROTECTED {item}")
+            if len(runtime_protected) > 200:
+                print(f"  ... ({len(runtime_protected) - 200} more protected skips)")
         else:
-            shutil.copy2(src, dst)
+            print("[deploy] runtime-config mode: SKIPPED (default)")
+            for rel in skipped:
+                print(f"  SKIP {rel}")
 
-    # Cleanup empty dirs under scope
-    for it in ["om", "scripts", "tests"]:
-        base = ROOT_PROD / it
-        if not base.exists():
-            continue
-        for d in sorted([p for p in base.rglob("*") if p.is_dir()], key=lambda x: len(x.as_posix()), reverse=True):
-            try:
-                d.rmdir()
-            except Exception:
-                pass
+        for src, dst in added[:200]:
+            print(f"  ADD  {src.relative_to(ROOT_DEV)} -> {dst.relative_to(ROOT_PROD)}")
+        if len(added) > 200:
+            print(f"  ... ({len(added)-200} more added)")
 
-    print("[deploy] applied")
+        for src, dst in updated[:200]:
+            print(f"  UPD  {src.relative_to(ROOT_DEV)} -> {dst.relative_to(ROOT_PROD)}")
+        if len(updated) > 200:
+            print(f"  ... ({len(updated)-200} more updated)")
+
+        for p in deletes[:200]:
+            print(f"  DEL  {p.relative_to(ROOT_PROD)}")
+        if len(deletes) > 200:
+            print(f"  ... ({len(deletes)-200} more deleted)")
+
+        if args.apply:
+            # Apply deletes
+            for p in deletes:
+                try:
+                    p.unlink(missing_ok=True)
+                except Exception as e:
+                    print(f"[WARN] failed delete {p}: {e}")
+
+            # Apply copies
+            for src, dst in [*added, *updated]:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                runtime_text = runtime_write_map.get(dst)
+                if runtime_text is not None:
+                    dst.write_text(runtime_text, encoding="utf-8")
+                else:
+                    shutil.copy2(src, dst)
+
+            # Cleanup empty dirs under scope
+            for it in ["om", "scripts", "tests"]:
+                base = ROOT_PROD / it
+                if not base.exists():
+                    continue
+                for d in sorted([p for p in base.rglob("*") if p.is_dir()], key=lambda x: len(x.as_posix()), reverse=True):
+                    try:
+                        d.rmdir()
+                    except Exception:
+                        pass
+
+            print("[deploy] applied")
+
+        event = dict(event_base)
+        event["status"] = "success"
+        event["prod_commit_after"] = repo_ref(ROOT_PROD)
+        event["summary_counts"] = {"add": len(added), "update": len(updated), "delete": len(deletes)}
+        _record_and_print(event)
+    except Exception as e:
+        event = dict(event_base)
+        event["status"] = "failed"
+        event["failure_reason"] = str(e)
+        event["prod_commit_after"] = repo_ref(ROOT_PROD)
+        _record_and_print(event)
+        print(f"[deploy][error] {e}", file=sys.stderr)
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

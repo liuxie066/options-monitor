@@ -14,9 +14,28 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable, Iterable
 
+from scripts.config_profiles import deep_merge
 from scripts.sell_call_config import resolve_min_annualized_net_premium_return
 from scripts.sell_put_config import resolve_min_annualized_net_return
 from domain.domain import normalize_processor_row, normalize_processor_rows
+
+D3_COMMON_FIELDS = (
+    'min_open_interest',
+    'min_volume',
+    'max_spread_ratio',
+)
+
+
+def _extract_d3_event_cfg(side_cfg: dict) -> dict:
+    default = {"enabled": True, "mode": "warn"}
+    raw = side_cfg.get("d3_event")
+    if not isinstance(raw, dict):
+        return default
+    out = dict(default)
+    out.update(raw)
+    out["enabled"] = bool(out.get("enabled", True))
+    out["mode"] = str(out.get("mode") or "warn").strip().lower() or "warn"
+    return out
 
 
 def _parse_symbols_whitelist(symbols_arg: str | None) -> set[str] | None:
@@ -31,6 +50,31 @@ def _iter_watchlist(cfg: dict) -> Iterable[dict]:
     if not isinstance(wl, list):
         return []
     return [it for it in wl if isinstance(it, dict)]
+
+
+def _resolve_profile_side_cfg(item: dict, profiles: dict, side: str) -> dict:
+    use = item.get('use')
+    if not use:
+        return {}
+
+    use_list: list[str] = []
+    if isinstance(use, str):
+        use_list = [use]
+    elif isinstance(use, list):
+        use_list = [x for x in use if isinstance(x, str)]
+
+    merged: dict = {}
+    for name in use_list:
+        p = profiles.get(name)
+        if isinstance(p, dict):
+            merged = deep_merge(merged, p)
+    side_cfg = merged.get(side)
+    return dict(side_cfg) if isinstance(side_cfg, dict) else {}
+
+
+def _extract_d3_fields(side_cfg: dict, *, is_put: bool) -> dict:
+    keys = list(D3_COMMON_FIELDS)
+    return {k: side_cfg[k] for k in keys if k in side_cfg}
 
 
 def run_watchlist_pipeline(
@@ -95,6 +139,20 @@ def run_watchlist_pipeline(
             sell_call_cfg['min_annualized_net_premium_return'] = resolved_call_min
             sell_call_cfg.pop('min_annualized_net_return', None)
             item['sell_call'] = sell_call_cfg
+            item['_global_sell_put_d3'] = _extract_d3_fields(
+                _resolve_profile_side_cfg(item0, profiles, 'sell_put'),
+                is_put=True,
+            )
+            item['_global_sell_call_d3'] = _extract_d3_fields(
+                _resolve_profile_side_cfg(item0, profiles, 'sell_call'),
+                is_put=False,
+            )
+            item['_global_sell_put_d3_event'] = _extract_d3_event_cfg(
+                _resolve_profile_side_cfg(item0, profiles, 'sell_put'),
+            )
+            item['_global_sell_call_d3_event'] = _extract_d3_event_cfg(
+                _resolve_profile_side_cfg(item0, profiles, 'sell_call'),
+            )
 
             # inject option_ctx into portfolio_ctx for now (minimal change)
             if portfolio_ctx is not None and option_ctx is not None:

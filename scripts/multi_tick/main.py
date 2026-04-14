@@ -34,6 +34,12 @@ from .opend_guard import (
     is_opend_phone_verify_pending,
     send_opend_alert,
 )
+from .project_guard import (
+    admit_project_run,
+    apply_project_load_shed,
+    record_project_failure,
+    record_project_success,
+)
 from .misc import (
     set_debug,
     log,
@@ -238,6 +244,44 @@ def main() -> int:
         }),
     )
 
+    guard_failure_recorded = False
+
+    def _guard_mark_failure(error_code: str, stage: str) -> None:
+        nonlocal guard_failure_recorded
+        if guard_failure_recorded:
+            return
+        try:
+            g = record_project_failure(
+                base,
+                base_cfg,
+                error_code=str(error_code),
+                stage=str(stage),
+            )
+            runlog.safe_event(
+                'project_guard',
+                ('open' if bool(g.get('opened')) else 'record_failure'),
+                error_code=str(error_code),
+                data=_safe_runlog_data({
+                    'stage': str(stage),
+                    'state': g.get('state'),
+                    'failure_count': g.get('failure_count'),
+                    'open_until_utc': g.get('open_until_utc'),
+                }),
+            )
+        except Exception:
+            pass
+        guard_failure_recorded = True
+
+    def _guard_mark_success() -> None:
+        if guard_failure_recorded:
+            return
+        try:
+            g = record_project_success(base, base_cfg)
+            if bool(g.get('closed')):
+                runlog.safe_event('project_guard', 'closed', data=_safe_runlog_data({'state': g.get('state')}))
+        except Exception:
+            pass
+
     market_cfg = str(getattr(args, 'market_config', 'auto') or 'auto').lower()
     execution_bucket = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M')
     execution_idempotency_key = sha256(
@@ -287,6 +331,29 @@ def main() -> int:
         return 0
     _audit('idempotency', 'claim_tick_execution', extra={'bucket': execution_bucket})
 
+    guard_admission = admit_project_run(base, base_cfg)
+    if not bool(guard_admission.get('allowed')):
+        msg = str(guard_admission.get('reason') or 'project guard blocked')
+        err = str(guard_admission.get('error_code') or 'PROJECT_GUARD_BLOCKED')
+        runlog.safe_event('project_guard', 'skip', error_code=err, message=msg)
+        runlog.safe_event('run_end', 'skip', error_code=err, message=msg)
+        return 0
+
+    accounts_normalized = [str(a).strip() for a in (args.accounts or []) if str(a).strip()]
+    accounts_effective = apply_project_load_shed(accounts_normalized, guard_admission)
+    if accounts_effective != accounts_normalized:
+        args.accounts = accounts_effective
+        runlog.safe_event(
+            'project_guard',
+            'degraded',
+            message='half-open probe mode load shedding',
+            data=_safe_runlog_data({
+                'mode': guard_admission.get('mode'),
+                'accounts_before': accounts_normalized,
+                'accounts_after': accounts_effective,
+            }),
+        )
+
     if market_cfg in ('hk', 'us'):
         try:
             base_cfg = dict(base_cfg)
@@ -304,6 +371,7 @@ def main() -> int:
     if is_opend_phone_verify_pending(base):
         _audit('guard', 'opend_phone_verify_pending', status='skip')
         runlog.safe_event('run_end', 'skip', message='opend phone verify pending; paused until user confirmation')
+        _guard_mark_success()
         return 0
 
     t_watchdog0 = monotonic()
@@ -456,6 +524,7 @@ def main() -> int:
                     detail=alert_detail,
                     no_send=no_send,
                 )
+                _guard_mark_failure(error_code, 'opend_watchdog')
 
                 now = utc_now()
                 for acct in args.accounts:
@@ -521,6 +590,7 @@ def main() -> int:
     except SystemExit:
         raise
     except Exception as e:
+        _guard_mark_failure('WATCHDOG_EXCEPTION', 'opend_watchdog')
         runlog.safe_event(
             'watchdog',
             'error',
@@ -596,6 +666,7 @@ def main() -> int:
         markets_to_run = list(guard_decision.get('markets_to_run') or [])
         if bool(guard_decision.get('should_skip')):
             runlog.safe_event('run_end', 'skip', message=str(guard_decision.get('skip_message') or ''))
+            _guard_mark_success()
             return 0
 
     state_repo.shared_state_dir(base)
@@ -656,6 +727,7 @@ def main() -> int:
             if acct0:
                 results.append(AccountResult(acct0, False, False, False, err, ''))
         runlog.safe_event('run_end', 'error', error_code='SCHEDULER_FAILED', message=err)
+        _guard_mark_failure('SCHEDULER_FAILED', 'scan_scheduler')
         return 0
 
     try:
@@ -1178,7 +1250,7 @@ def main() -> int:
             pass
 
         runlog.safe_event('run_end', 'ok', data=_safe_runlog_data({'sent': False, 'reason': 'no_account_notification', 'accounts': [r.account for r in results]}))
-
+        _guard_mark_success()
         return 0
 
     notify_route = resolve_notification_route_from_config(config=base_cfg)
@@ -1225,6 +1297,7 @@ def main() -> int:
         quiet_window = str(notify_delivery.get('quiet_window') or '')
         runlog.safe_event('notify', 'skip', message=f'in quiet hours ({quiet_window})')
         print(f"[SKIP] Currently in quiet hours (DND). Target was: {target}")
+        _guard_mark_success()
         return 0
 
     sent_accounts: list[str] = []
@@ -1291,6 +1364,7 @@ def main() -> int:
                     message=f'message send failed ({acct})',
                     data=_safe_runlog_data({'returncode': send.returncode, 'account': acct}),
                 )
+                _guard_mark_failure('SEND_FAILED', 'send_openclaw_message')
                 raise SystemExit(send.returncode)
 
             sent_accounts.append(acct)
@@ -1359,7 +1433,7 @@ def main() -> int:
         pass
 
     runlog.safe_event('run_end', 'ok', data=_safe_runlog_data({'sent': (not no_send) and bool(sent_accounts), 'accounts': [r.account for r in results], 'sent_accounts': sent_accounts}))
-
+    _guard_mark_success()
     return 0
 
 

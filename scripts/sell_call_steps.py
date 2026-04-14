@@ -32,6 +32,8 @@ def run_sell_call_scan_and_summarize(
     is_scheduled: bool,
     stock: dict | None,
     locked_shares_by_symbol: dict[str, int] | None = None,
+    global_sell_call_d3: dict | None = None,
+    global_sell_call_d3_event: dict | None = None,
 ) -> dict:
     """Run sell_call scan + (optional) render + summarize.
 
@@ -64,6 +66,10 @@ def run_sell_call_scan_and_summarize(
         sell_call_cfg=cc,
         source_prefix=f'{symbol}.sell_call',
     )
+    d3 = dict(global_sell_call_d3 or {})
+    d3_event = {"enabled": True, "mode": "warn"}
+    if isinstance(global_sell_call_d3_event, dict):
+        d3_event.update(global_sell_call_d3_event)
 
     cmd = [
         py, 'scripts/cli/scan_sell_call_cli.py',
@@ -78,11 +84,16 @@ def run_sell_call_scan_and_summarize(
         '--min-otm-pct', str(cc.get('min_otm_pct', 0.0)),
         '--min-annualized-net-return', str(min_annualized),
         '--min-if-exercised-total-return', str(cc.get('min_if_exercised_total_return', 0.0)),
-        '--min-open-interest', str(cc.get('min_open_interest', 100)),
-        '--min-volume', str(cc.get('min_volume', 10)),
-        '--max-spread-ratio', str(cc.get('max_spread_ratio', 0.30)),
+        '--min-open-interest', str(d3.get('min_open_interest', 100)),
+        '--min-volume', str(d3.get('min_volume', 10)),
+        '--max-spread-ratio', str(d3.get('max_spread_ratio', 0.3)),
+        '--d3-event-mode', str(d3_event.get('mode', 'warn')),
         '--output', str(symbol_cc),
     ]
+    if bool(d3_event.get('enabled', True)):
+        cmd.append('--d3-event-enabled')
+    else:
+        cmd.append('--no-d3-event-enabled')
     if cc.get('min_strike') is not None:
         cmd.extend(['--min-strike', str(cc.get('min_strike'))])
     if cc.get('max_strike') is not None:

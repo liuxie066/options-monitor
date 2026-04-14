@@ -49,7 +49,24 @@ def is_opend_phone_verify_pending(base: Path) -> bool:
         return False
 
 
-def should_send_opend_alert(base: Path, error_code: str, cooldown_sec: int = 600) -> bool:
+def _opend_alert_family(error_code: str) -> str:
+    code = str(error_code or '').strip().upper()
+    if code in {'OPEND_PORT_CLOSED', 'OPEND_NOT_READY', 'OPEND_QOT_NOT_LOGINED', 'OPEND_API_ERROR'}:
+        return 'OPEND_UNHEALTHY'
+    if code.startswith('OPEND_'):
+        return code
+    return (code or 'OPEND_UNKNOWN')
+
+
+def should_send_opend_alert(
+    base: Path,
+    error_code: str,
+    cooldown_sec: int = 600,
+    *,
+    burst_window_sec: int = 900,
+    burst_max: int = 3,
+    scope: str = 'project',
+) -> bool:
     p = opend_alert_rl_path(base)
     now = datetime.now(timezone.utc)
     st = read_json(p, {}) if p.exists() else {}
@@ -60,7 +77,9 @@ def should_send_opend_alert(base: Path, error_code: str, cooldown_sec: int = 600
     if not isinstance(m, dict):
         m = {}
 
-    prev = m.get(str(error_code))
+    family = _opend_alert_family(str(error_code))
+    error_key = f"{str(scope or 'project')}::{family}"
+    prev = m.get(error_key)
     if prev:
         try:
             dt = datetime.fromisoformat(str(prev))
@@ -71,22 +90,64 @@ def should_send_opend_alert(base: Path, error_code: str, cooldown_sec: int = 600
         except Exception:
             pass
 
-    m[str(error_code)] = now.isoformat()
+    # Project-level burst limit: cap total alert sends in a rolling window to avoid spam storms.
+    rec = st.get('recent_sent')
+    if not isinstance(rec, list):
+        rec = []
+    window_start = now.timestamp() - max(60, int(burst_window_sec))
+    recent: list[dict] = []
+    for item in rec:
+        if not isinstance(item, dict):
+            continue
+        ts = item.get('ts')
+        try:
+            d = datetime.fromisoformat(str(ts))
+            if d.tzinfo is None:
+                d = d.replace(tzinfo=timezone.utc)
+            if d.astimezone(timezone.utc).timestamp() >= window_start:
+                recent.append(item)
+        except Exception:
+            continue
+    scope_key = str(scope or 'project')
+    recent_count = sum(1 for item in recent if str(item.get('scope') or 'project') == scope_key)
+    if recent_count >= max(1, int(burst_max)):
+        return False
+
+    m[error_key] = now.isoformat()
     st['last_sent_utc_by_error'] = m
+    recent.append({'ts': now.isoformat(), 'scope': scope_key, 'error_code': str(error_code), 'family': family})
+    st['recent_sent'] = recent[-200:]
     write_json(p, st)
     return True
 
 
 def send_opend_alert(base: Path, cfg: dict, *, error_code: str, message_text: str, detail: str = '', no_send: bool = False) -> bool:
     cooldown_sec = 600
+    burst_window_sec = 900
+    burst_max = 3
     try:
-        v = ((cfg.get('notifications') or {}).get('opend_alert_cooldown_sec'))
+        notif_cfg = (cfg.get('notifications') or {})
+        v = notif_cfg.get('opend_alert_cooldown_sec')
         if v is not None:
             cooldown_sec = max(60, int(v))
+        bw = notif_cfg.get('opend_alert_burst_window_sec')
+        if bw is not None:
+            burst_window_sec = max(60, int(bw))
+        bm = notif_cfg.get('opend_alert_burst_max')
+        if bm is not None:
+            burst_max = max(1, int(bm))
     except Exception:
         cooldown_sec = 600
+        burst_window_sec = 900
+        burst_max = 3
 
-    if not should_send_opend_alert(base, str(error_code), cooldown_sec=cooldown_sec):
+    if not should_send_opend_alert(
+        base,
+        str(error_code),
+        cooldown_sec=cooldown_sec,
+        burst_window_sec=burst_window_sec,
+        burst_max=burst_max,
+    ):
         return False
 
     if no_send:

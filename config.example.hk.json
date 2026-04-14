@@ -32,8 +32,7 @@
         "min_annualized_net_return": 0.1,
         "min_net_income": 100,
         "min_open_interest": 50,
-        "min_volume": 0,
-        "require_bid_ask": true,
+        "min_volume": 10,
         "max_spread_ratio": 0.3
       }
     }

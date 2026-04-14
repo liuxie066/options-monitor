@@ -25,6 +25,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--min-open-interest", type=float, default=100)
     parser.add_argument("--min-volume", type=float, default=10)
     parser.add_argument("--max-spread-ratio", type=float, default=0.30)
+    parser.add_argument("--d3-event-enabled", dest="d3_event_enabled", action="store_true", default=None)
+    parser.add_argument("--no-d3-event-enabled", dest="d3_event_enabled", action="store_false")
+    parser.add_argument("--d3-event-mode", type=str, default="warn")
     parser.add_argument("--min-iv", type=float, default=None, help="min implied volatility (decimal, e.g. 0.15)")
     parser.add_argument("--max-iv", type=float, default=None, help="max implied volatility (decimal, e.g. 2.0)")
     parser.add_argument("--require-bid-ask", action="store_true", help="require bid>0 and ask>0 (better fillability)")
@@ -65,6 +68,10 @@ def main(argv: list[str] | None = None) -> int:
             require_bid_ask=args.require_bid_ask,
             min_abs_delta=args.min_abs_delta,
             max_abs_delta=args.max_abs_delta,
+            d3_event_cfg={
+                "enabled": True if args.d3_event_enabled is None else bool(args.d3_event_enabled),
+                "mode": str(args.d3_event_mode or "warn"),
+            },
             reject_log_output=(Path(args.reject_log_output).resolve() if args.reject_log_output else None),
             quiet=args.quiet,
         )
