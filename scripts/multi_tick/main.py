@@ -1032,6 +1032,7 @@ def main() -> int:
             report_dir=acct_report_dir,
             state_dir=acct_state_dir,
             shared_required_data=shared_required,
+            shared_context_dir=run_repo.get_run_state_dir(base, run_id),
             capture_output=True,
             text=True,
             env=dict(os.environ, PYTHONPATH=str(base)),

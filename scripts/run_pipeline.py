@@ -61,6 +61,7 @@ def main():
     parser.add_argument('--report-dir', default=None, help='Directory to write reports (symbols_summary/alerts/notification). Default: output/reports')
     # New flow (Stage 4): allow redirecting state/context cache away from ./output/state
     parser.add_argument('--state-dir', default=None, help='Directory to read/write state cache (portfolio_context/option_positions_context/rate_cache/etc). Default: output/state')
+    parser.add_argument('--shared-context-dir', default=None, help='Optional shared context cache directory for cross-account reuse within one tick')
     # Backward-compatible no-op flags (legacy shared scan plumbing removed)
     parser.add_argument('--shared-scan-dir', default=None, help='[no-op] legacy compatibility flag')
     parser.add_argument('--reuse-shared-scan', action='store_true', help='[no-op] legacy compatibility flag')
@@ -115,6 +116,7 @@ def main():
         report_dir=getattr(args, 'report_dir', None),
         state_dir=getattr(args, 'state_dir', None),
     )
+    shared_context_dir = (Path(args.shared_context_dir).resolve() if getattr(args, 'shared_context_dir', None) else None)
 
     # Manual multiplier cache refresh (best-effort)
     if bool(getattr(args, 'refresh_multiplier_cache', False)):
@@ -219,6 +221,7 @@ def main():
                 lambda **kw: build_pipeline_context(
                     **kw,
                     state_dir=state_dir,
+                    shared_state_dir=shared_context_dir,
                 )
             ),
             build_symbols_summary_fn=lambda rows: build_symbols_summary(rows, report_dir, is_scheduled=IS_SCHEDULED),

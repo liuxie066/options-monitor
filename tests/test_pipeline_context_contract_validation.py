@@ -31,6 +31,7 @@ def test_load_portfolio_context_rejects_invalid_cached_contract() -> None:
             timeout_sec=1,
             is_scheduled=True,
             state_dir=Path("."),
+            shared_state_dir=Path("."),
             log=logs.append,
         )
         assert out is None
@@ -64,6 +65,7 @@ def test_load_option_positions_context_rejects_invalid_cached_contract() -> None
             is_scheduled=True,
             report_dir=Path("."),
             state_dir=Path("."),
+            shared_state_dir=Path("."),
             log=logs.append,
         )
         assert out is None
@@ -116,6 +118,7 @@ def test_load_context_persists_source_snapshots_for_valid_cached_contracts() -> 
             timeout_sec=1,
             is_scheduled=True,
             state_dir=Path("."),
+            shared_state_dir=Path("."),
             log=logs.append,
         )
         octx, refreshed = pc.load_option_positions_context(
@@ -129,6 +132,7 @@ def test_load_context_persists_source_snapshots_for_valid_cached_contracts() -> 
             is_scheduled=True,
             report_dir=Path("."),
             state_dir=Path("."),
+            shared_state_dir=Path("."),
             log=logs.append,
         )
         assert pctx is not None

@@ -175,11 +175,48 @@ def build_context(records: list[dict], market: str, account: str | None = None) 
     }
 
 
+def build_shared_context(records: list[dict], market: str) -> dict:
+    market_norm = str(market).strip() if market else None
+    accounts: set[str] = set()
+    for rec in records:
+        fields0 = rec.get("fields") or {}
+        if not fields0:
+            continue
+        m = _as_text(fields0.get("market")).strip()
+        if market_norm and market_norm not in m:
+            continue
+        a = _as_text(fields0.get("account")).strip()
+        if a:
+            accounts.add(a)
+
+    by_account = {acct: build_context(records, market=market, account=acct) for acct in sorted(accounts)}
+    return {
+        "as_of_utc": datetime.now(timezone.utc).isoformat(),
+        "filters": {"market": market},
+        "all_accounts": build_context(records, market=market, account=None),
+        "by_account": by_account,
+    }
+
+
+def slice_shared_context_for_account(shared_ctx: dict, account: str | None) -> dict | None:
+    if not isinstance(shared_ctx, dict):
+        return None
+    if not account:
+        all_accounts = shared_ctx.get("all_accounts")
+        return (dict(all_accounts) if isinstance(all_accounts, dict) else None)
+    by_account = shared_ctx.get("by_account")
+    if not isinstance(by_account, dict):
+        return None
+    out = by_account.get(str(account))
+    return (dict(out) if isinstance(out, dict) else None)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Fetch portfolio context from Feishu holdings table")
     parser.add_argument("--pm-config", default="../portfolio-management/config.json")
     parser.add_argument("--market", default="富途")
     parser.add_argument("--account", default=None)
+    parser.add_argument("--shared-out", default=None, help="Optional output path for shared context cache")
     parser.add_argument("--out", default=None, help="Output JSON path (default: <state-dir>/portfolio_context.json)")
     parser.add_argument("--state-dir", default="output/state", help="Directory for outputs (default: output/state)")
     parser.add_argument("--quiet", action="store_true", help="suppress stdout (scheduled/cron)")
@@ -220,6 +257,11 @@ def main():
         sd.mkdir(parents=True, exist_ok=True)
         out_path = (sd / 'portfolio_context.json').resolve()
     atomic_write_json(out_path, ctx)
+    if args.shared_out:
+        shared_out = Path(args.shared_out)
+        if not shared_out.is_absolute():
+            shared_out = (base / shared_out).resolve()
+        atomic_write_json(shared_out, build_shared_context(records, market=args.market))
 
     if not args.quiet:
         usd_cash = ctx["cash_by_currency"].get("USD")
