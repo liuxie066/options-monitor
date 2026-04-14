@@ -18,6 +18,8 @@ from pathlib import Path
 from scripts.io_utils import is_fresh, load_cached_json
 from scripts.subprocess_utils import run_cmd
 from domain.services import adapt_holdings_context, adapt_option_positions_context
+from scripts.fetch_portfolio_context import slice_shared_context_for_account as slice_shared_portfolio_context_for_account
+from scripts.fetch_option_positions_context import slice_shared_context_for_account as slice_shared_option_context_for_account
 try:
     from domain.storage.repositories import state_repo
 except Exception:
@@ -42,6 +44,7 @@ def load_portfolio_context(
     timeout_sec: int,
     is_scheduled: bool,
     state_dir: Path,
+    shared_state_dir: Path | None,
     log,
 ) -> dict | None:
     """Best-effort load portfolio context to dict."""
@@ -55,6 +58,47 @@ def load_portfolio_context(
             _persist_source_snapshot(base, snap)
             return cached
 
+        shared_root = (shared_state_dir or state_dir).resolve()
+        shared_root.mkdir(parents=True, exist_ok=True)
+        shared_path = (shared_root / 'portfolio_context.shared.json').resolve()
+
+        # Reuse shared cache first; this keeps per-account output schema unchanged.
+        try:
+            if ttl_sec > 0 and is_fresh(shared_path, ttl_sec):
+                shared_cached = load_cached_json(shared_path)
+                if isinstance(shared_cached, dict):
+                    sliced = slice_shared_portfolio_context_for_account(shared_cached, account)
+                    if isinstance(sliced, dict):
+                        port_path.parent.mkdir(parents=True, exist_ok=True)
+                        port_path.write_text(json.dumps(sliced, ensure_ascii=False, indent=2), encoding='utf-8')
+                        snap = adapt_holdings_context(sliced)
+                        _persist_source_snapshot(base, snap)
+                        return sliced
+        except Exception:
+            pass
+
+        # Refresh shared cache (single fetch) and produce account context in one command.
+        try:
+            cmd = [
+                py, 'scripts/fetch_portfolio_context.py',
+                '--pm-config', str(pm_config),
+                '--market', str(market),
+                '--out', str(port_path.as_posix()),
+                '--shared-out', str(shared_path.as_posix()),
+            ]
+            if account:
+                cmd.extend(['--account', str(account)])
+            if is_scheduled:
+                cmd.append('--quiet')
+            run_cmd(cmd, cwd=base, timeout_sec=timeout_sec, is_scheduled=is_scheduled)
+            ctx = load_cached_json(port_path) or json.loads(port_path.read_text(encoding='utf-8'))
+            snap = adapt_holdings_context(ctx)
+            _persist_source_snapshot(base, snap)
+            return ctx
+        except Exception:
+            pass
+
+        # Fallback: legacy per-account direct fetch path.
         cmd = [
             py, 'scripts/fetch_portfolio_context.py',
             '--pm-config', str(pm_config),
@@ -87,6 +131,7 @@ def load_option_positions_context(
     is_scheduled: bool,
     report_dir: Path,
     state_dir: Path,
+    shared_state_dir: Path | None,
     log,
 ) -> tuple[dict | None, bool]:
     """Best-effort load option_positions context.
@@ -103,6 +148,48 @@ def load_option_positions_context(
             _persist_source_snapshot(base, snap)
             return cached, False
 
+        shared_root = (shared_state_dir or state_dir).resolve()
+        shared_root.mkdir(parents=True, exist_ok=True)
+        shared_path = (shared_root / 'option_positions_context.shared.json').resolve()
+
+        # Reuse shared cache first; this keeps per-account output schema unchanged.
+        try:
+            if ttl_sec > 0 and is_fresh(shared_path, ttl_sec):
+                shared_cached = load_cached_json(shared_path)
+                if isinstance(shared_cached, dict):
+                    sliced = slice_shared_option_context_for_account(shared_cached, account)
+                    if isinstance(sliced, dict):
+                        opt_path.parent.mkdir(parents=True, exist_ok=True)
+                        opt_path.write_text(json.dumps(sliced, ensure_ascii=False, indent=2), encoding='utf-8')
+                        snap = adapt_option_positions_context(sliced)
+                        _persist_source_snapshot(base, snap)
+                        # Keep existing semantics: account-level context was refreshed for this run.
+                        return sliced, True
+        except Exception:
+            pass
+
+        # Refresh shared cache (single fetch) and produce account context in one command.
+        try:
+            cmd = [
+                py, 'scripts/fetch_option_positions_context.py',
+                '--pm-config', str(pm_config),
+                '--market', str(market),
+                '--out', str(opt_path.as_posix()),
+                '--shared-out', str(shared_path.as_posix()),
+            ]
+            if account:
+                cmd.extend(['--account', str(account)])
+            if is_scheduled:
+                cmd.append('--quiet')
+            run_cmd(cmd, cwd=base, timeout_sec=timeout_sec, is_scheduled=is_scheduled)
+            ctx = load_cached_json(opt_path) or json.loads(opt_path.read_text(encoding='utf-8'))
+            snap = adapt_option_positions_context(ctx)
+            _persist_source_snapshot(base, snap)
+            return ctx, True
+        except Exception:
+            pass
+
+        # Fallback: legacy per-account direct fetch path.
         cmd = [
             py, 'scripts/fetch_option_positions_context.py',
             '--pm-config', str(pm_config),
@@ -211,6 +298,7 @@ def build_pipeline_context(
     runtime: dict,
     is_scheduled: bool,
     state_dir: Path,
+    shared_state_dir: Path | None = None,
     log,
     no_context: bool,
     want_scan: bool,
@@ -238,6 +326,7 @@ def build_pipeline_context(
         timeout_sec=portfolio_timeout_sec,
         is_scheduled=is_scheduled,
         state_dir=state_dir,
+        shared_state_dir=shared_state_dir,
         log=log,
     )
 
@@ -252,6 +341,7 @@ def build_pipeline_context(
         is_scheduled=is_scheduled,
         report_dir=report_dir,
         state_dir=state_dir,
+        shared_state_dir=shared_state_dir,
         log=log,
     )
 

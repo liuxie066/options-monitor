@@ -25,7 +25,10 @@ from scripts.io_utils import atomic_write_json
 
 # Local helper to get FX rates (USDCNY/HKDCNY) for base-currency normalization.
 # This file lives in the same scripts/ directory, so plain import works.
-from fx_rates import get_rates
+try:
+    from fx_rates import get_rates
+except Exception:
+    from scripts.fx_rates import get_rates
 
 
 def build_context(records: list[dict], broker: str, account: str | None = None, rates: dict | None = None) -> dict:
@@ -188,12 +191,47 @@ def build_context(records: list[dict], broker: str, account: str | None = None, 
     }
 
 
+def build_shared_context(records: list[dict], broker: str, rates: dict | None = None) -> dict:
+    accounts: set[str] = set()
+    for rec in records:
+        fields = rec.get("fields") or {}
+        if not fields:
+            continue
+        rec_broker = (fields.get("broker") or fields.get("market") or "").strip()
+        if broker and rec_broker != broker:
+            continue
+        acct = (fields.get("account") or "").strip()
+        if acct:
+            accounts.add(acct)
+    by_account = {acct: build_context(records, broker=broker, account=acct, rates=rates) for acct in sorted(accounts)}
+    return {
+        "as_of_utc": datetime.now(timezone.utc).isoformat(),
+        "filters": {"broker": broker},
+        "all_accounts": build_context(records, broker=broker, account=None, rates=rates),
+        "by_account": by_account,
+    }
+
+
+def slice_shared_context_for_account(shared_ctx: dict, account: str | None) -> dict | None:
+    if not isinstance(shared_ctx, dict):
+        return None
+    if not account:
+        all_accounts = shared_ctx.get("all_accounts")
+        return (dict(all_accounts) if isinstance(all_accounts, dict) else None)
+    by_account = shared_ctx.get("by_account")
+    if not isinstance(by_account, dict):
+        return None
+    out = by_account.get(str(account))
+    return (dict(out) if isinstance(out, dict) else None)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Fetch option positions context from Feishu option_positions table")
     parser.add_argument("--pm-config", default="../portfolio-management/config.json")
     parser.add_argument("--broker", default="富途")
     parser.add_argument("--market", default=None, help="DEPRECATED alias of --broker")
     parser.add_argument("--account", default=None)
+    parser.add_argument("--shared-out", default=None, help="Optional output path for shared context cache")
     parser.add_argument("--out", default=None, help="Output JSON path (default: <state-dir>/option_positions_context.json)")
     parser.add_argument("--state-dir", default="output/state", help="Directory for outputs (default: output/state)")
     parser.add_argument("--quiet", action="store_true", help="suppress stdout (scheduled/cron)")
@@ -251,6 +289,11 @@ def main():
     ctx = build_context(records, broker=broker, account=args.account, rates=rates)
 
     atomic_write_json(out_path, ctx)
+    if args.shared_out:
+        shared_out = Path(args.shared_out)
+        if not shared_out.is_absolute():
+            shared_out = (base / shared_out).resolve()
+        atomic_write_json(shared_out, build_shared_context(records, broker=broker, rates=rates))
 
     if not args.quiet:
         print(f"[DONE] option positions context -> {out_path}")
