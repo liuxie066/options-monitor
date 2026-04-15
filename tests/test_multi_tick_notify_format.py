@@ -29,9 +29,9 @@ def test_merged_message_is_plain_text_for_weixin() -> None:
         cash_footer_lines=["💰 现金 CNY", "LX 持有 ¥1,000 (CNY) | 可用 ¥200 (CNY)"],
     )
 
-    assert "📊 Options Monitor 合并提醒" in merged
+    assert "# 📊 Options Monitor\n## 合并提醒" in merged
     assert "北京时间 2026-04-08 22:31:00" in merged
-    assert "【LX】Put 1 / Call 1" in merged
+    assert "### LX · 本轮候选\n- Put 1 / Call 1" in merged
     assert "**" not in merged
     assert "\n>" not in merged
 
