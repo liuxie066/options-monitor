@@ -36,7 +36,7 @@ def maybe_parse_dt(value: str | None) -> datetime | None:
 
 
 def atomic_symlink(path: Path, target: Path, *, tmp_dir: Path | None = None):
-    tmp_root = (tmp_dir or path.parent).resolve()
+    tmp_root = tmp_dir or path.parent
     tmp_root.mkdir(parents=True, exist_ok=True)
     tmp = tmp_root / f'{path.name}.tmp'
     if tmp.exists() or tmp.is_symlink():
