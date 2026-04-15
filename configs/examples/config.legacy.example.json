@@ -281,10 +281,8 @@
     "base_currency": "CNY"
   },
   "notifications": {
-    "enabled": true,
     "channel": "feishu",
     "target": "user:ou_f2fdd1ff6f59b2863c29843f7bd3403c",
-    "mode": "change_or_high",
     "include_cash_footer": false,
     "cash_footer_accounts": [
       "lx",
@@ -298,7 +296,6 @@
     "market_timezone": "America/New_York",
     "market_open": "09:30",
     "market_close": "16:00",
-    "monitor_off_hours": false,
     "beijing_timezone": "Asia/Shanghai",
     "first_notify_after_open_min": 30,
     "notify_interval_min": 60,

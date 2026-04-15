@@ -22,6 +22,27 @@ CONFIG_FILES: dict[str, Path] = {
     "hk": (BASE_DIR / "config.hk.json").resolve(),
 }
 
+GLOBAL_STRATEGY_FIELDS: dict[str, type] = {
+    "min_annualized_net_return": float,
+    "min_net_income": float,
+    "min_open_interest": int,
+    "min_volume": int,
+    "max_spread_ratio": float,
+}
+
+SCHEDULE_SUMMARY_FIELDS = {
+    "enabled",
+    "market_timezone",
+    "beijing_timezone",
+    "market_open",
+    "market_close",
+    "market_break_start",
+    "market_break_end",
+    "first_notify_after_open_min",
+    "notify_interval_min",
+    "final_notify_before_close_min",
+}
+
 
 @dataclass(frozen=True)
 class SymbolRow:
@@ -174,8 +195,13 @@ def _global_summary(config_key: str) -> dict[str, Any]:
         symbols = []
 
     notifications = cfg.get("notifications") if isinstance(cfg.get("notifications"), dict) else {}
-    schedule = cfg.get("schedule") if isinstance(cfg.get("schedule"), dict) else {}
+    raw_schedule = cfg.get("schedule") if isinstance(cfg.get("schedule"), dict) else {}
+    schedule = {k: raw_schedule.get(k) for k in SCHEDULE_SUMMARY_FIELDS if k in raw_schedule}
     templates = cfg.get("templates") if isinstance(cfg.get("templates"), dict) else {}
+    put_template = templates.get("put_base") if isinstance(templates.get("put_base"), dict) else {}
+    call_template = templates.get("call_base") if isinstance(templates.get("call_base"), dict) else {}
+    put_strategy = put_template.get("sell_put") if isinstance(put_template.get("sell_put"), dict) else {}
+    call_strategy = call_template.get("sell_call") if isinstance(call_template.get("sell_call"), dict) else {}
 
     return {
         "configKey": config_key,
@@ -195,11 +221,19 @@ def _global_summary(config_key: str) -> dict[str, Any]:
         "sections": {
             "schedule": schedule,
             "notifications": {
-                "enabled": notifications.get("enabled"),
-                "channel": notifications.get("channel"),
-                "mode": notifications.get("mode"),
-                "include_cash_footer": notifications.get("include_cash_footer"),
-                "quiet_hours_beijing": notifications.get("quiet_hours_beijing"),
+                k: v
+                for k, v in {
+                    "channel": notifications.get("channel"),
+                    "target": notifications.get("target"),
+                    "cash_footer_accounts": notifications.get("cash_footer_accounts"),
+                    "cash_footer_timeout_sec": notifications.get("cash_footer_timeout_sec"),
+                    "cash_snapshot_max_age_sec": notifications.get("cash_snapshot_max_age_sec"),
+                    "quiet_hours_beijing": notifications.get("quiet_hours_beijing"),
+                    "opend_alert_cooldown_sec": notifications.get("opend_alert_cooldown_sec"),
+                    "opend_alert_burst_window_sec": notifications.get("opend_alert_burst_window_sec"),
+                    "opend_alert_burst_max": notifications.get("opend_alert_burst_max"),
+                }.items()
+                if v is not None
             },
             "templates": sorted(templates.keys()),
             "outputs": cfg.get("outputs") if isinstance(cfg.get("outputs"), dict) else {},
@@ -208,7 +242,68 @@ def _global_summary(config_key: str) -> dict[str, Any]:
             "fetch_policy": cfg.get("fetch_policy") if isinstance(cfg.get("fetch_policy"), dict) else {},
             "portfolio": cfg.get("portfolio") if isinstance(cfg.get("portfolio"), dict) else {},
         },
+        "globalStrategy": {
+            "sell_put": {k: put_strategy.get(k) for k in GLOBAL_STRATEGY_FIELDS},
+            "sell_call": {k: call_strategy.get(k) for k in GLOBAL_STRATEGY_FIELDS},
+        },
     }
+
+
+def _patch_global_strategy(cfg: dict, payload: dict):
+    strategies = payload.get("strategies")
+    if not isinstance(strategies, dict):
+        raise HTTPException(status_code=400, detail="strategies must be an object")
+
+    templates = cfg.get("templates")
+    if templates is None:
+        templates = cfg.get("profiles")
+    if templates is None:
+        templates = {}
+        cfg["templates"] = templates
+    if not isinstance(templates, dict):
+        raise HTTPException(status_code=400, detail="templates must be an object")
+    cfg["templates"] = templates
+
+    targets = {
+        "sell_put": ("put_base", "sell_put"),
+        "sell_call": ("call_base", "sell_call"),
+    }
+    for side, (template_name, side_key) in targets.items():
+        side_payload = strategies.get(side)
+        if side_payload is None:
+            continue
+        if not isinstance(side_payload, dict):
+            raise HTTPException(status_code=400, detail=f"strategies.{side} must be an object")
+
+        template = templates.get(template_name)
+        if template is None:
+            template = {}
+            templates[template_name] = template
+        if not isinstance(template, dict):
+            raise HTTPException(status_code=400, detail=f"templates.{template_name} must be an object")
+
+        side_cfg = template.get(side_key)
+        if side_cfg is None:
+            side_cfg = {}
+            template[side_key] = side_cfg
+        if not isinstance(side_cfg, dict):
+            raise HTTPException(status_code=400, detail=f"templates.{template_name}.{side_key} must be an object")
+
+        for field, caster in GLOBAL_STRATEGY_FIELDS.items():
+            if field not in side_payload:
+                continue
+            raw = side_payload.get(field)
+            if raw is None or raw == "":
+                raise HTTPException(status_code=400, detail=f"{side}.{field} is required")
+            try:
+                value = caster(raw)
+            except Exception:
+                raise HTTPException(status_code=400, detail=f"{side}.{field} must be a number")
+            if field in {"min_annualized_net_return", "min_net_income", "min_open_interest", "min_volume"} and value < 0:
+                raise HTTPException(status_code=400, detail=f"{side}.{field} must be >= 0")
+            if field == "max_spread_ratio" and value < 0:
+                raise HTTPException(status_code=400, detail=f"{side}.{field} must be >= 0")
+            side_cfg[field] = value
 
 
 def _find_symbol(cfg: dict, symbol: str) -> tuple[int | None, dict | None]:
@@ -319,6 +414,33 @@ def api_list_watchlist():
 @app.get("/api/configs/summary")
 def api_configs_summary():
     return {"configs": {k: _global_summary(k) for k in ("hk", "us")}}
+
+
+@app.post("/api/configs/global/update")
+async def api_update_global_config(req: Request):
+    _require_token_for_write(req)
+    payload = await req.json()
+
+    config_key = str(payload.get("configKey") or "").strip().lower()
+    if config_key not in CONFIG_FILES:
+        raise HTTPException(status_code=400, detail="configKey must be us|hk")
+
+    cfg = _load_config(config_key)
+    _patch_global_strategy(cfg, payload)
+
+    path = CONFIG_FILES[config_key]
+    bak = _backup(path)
+    try:
+        _write_config_atomic(path, cfg)
+        _validate_config(path)
+    except HTTPException:
+        shutil.copy2(bak, path)
+        raise
+    except Exception as e:
+        shutil.copy2(bak, path)
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return {"ok": True, "configs": {k: _global_summary(k) for k in ("hk", "us")}}
 
 
 @app.post("/api/watchlist/upsert")

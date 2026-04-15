@@ -127,10 +127,12 @@
 - `base_currency`: 当前策略口径（CNY）
 
 ### 4.4 notifications：推送目标
-- `enabled`: true/false
-- `channel`: `feishu`
+- `channel`: `feishu`，或本机 `openclaw` 已支持的其他通道
 - `target`: `user:open_id` 或 `chat:chat_id`
-- `mode`: 当前为 `change_or_high`
+- `quiet_hours_beijing`: 可选，北京时间免打扰窗口；不需要时直接省略，不要写 `null`
+- `cash_footer_accounts` / `cash_footer_timeout_sec` / `cash_snapshot_max_age_sec`: 可选，现金摘要账户与查询参数
+- `include_cash_footer`: 兼容旧 `scripts/run_pipeline.py` 的字段；多账户主流程不把它作为开关，主示例不再配置
+- 不再推荐配置 `enabled` / `mode`，当前主流程不读取它们作为行为开关
 
 ### 4.5 schedule：监控时间窗口
 - 非交易日 / 非交易时段：不监控、不通知。
