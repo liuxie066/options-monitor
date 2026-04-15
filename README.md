@@ -44,8 +44,8 @@ python3 -m venv .venv
 准备本地运行配置：
 
 ```bash
-cp config.example.us.json config.us.json
-cp config.example.hk.json config.hk.json
+cp configs/examples/config.example.us.json config.us.json
+cp configs/examples/config.example.hk.json config.hk.json
 ./.venv/bin/python scripts/sync_runtime_configs.py --apply
 ```
 
@@ -64,12 +64,106 @@ cp config.example.hk.json config.hk.json
 ./.venv/bin/python scripts/sync_runtime_configs.py --check
 ```
 
+## 外部服务与凭证配置
+
+本项目会按配置使用外部服务。首次部署时，建议先按下面清单准备好本地配置和凭证；所有真实凭证都不要提交到 Git。
+
+### 1) 飞书多维表（持仓与期权占用）
+
+用途：
+
+- 读取 `holdings` 表：现金、股票持仓、成本价，用于 Sell Put 现金余量和 Covered Call 可覆盖股数。
+- 读取/维护 `option_positions` 表：已卖出的 put/call 占用，用于 cash-secured put 和 covered call 风控。
+
+配置位置：
+
+- `config.us.json` / `config.hk.json` 的 `portfolio.pm_config`，默认指向 `../portfolio-management/config.json`。
+- `portfolio-management/config.json` 内需要配置 Feishu `app_id`、`app_secret` 和两张 Bitable 表引用。
+
+需要准备：
+
+- Feishu App 的 `app_id` / `app_secret`。
+- `holdings` 表的 `app_token/table_id`。
+- `option_positions` 表的 `app_token/table_id`。
+- 表字段需要符合 [CONFIGURATION_GUIDE.md](CONFIGURATION_GUIDE.md) 里的字段说明。
+
+注意：
+
+- 不要把 `app_secret`、tenant token、user token 写进仓库。
+- 写入飞书的操作，例如成交入库、自动关闭仓位，建议先用 `--dry-run`。
+
+### 2) 富途 OpenD / Futu API（行情与期权链）
+
+用途：
+
+- 当标的配置里的 `fetch.source` 为 `opend` 时，通过本机 OpenD 拉行情、期权链、合约乘数等数据。
+- 港股期权通常依赖 OpenD；美股可按配置在 OpenD 和 Yahoo 之间选择或降级。
+
+需要准备：
+
+- 本机或服务器已启动 OpenD。
+- 富途账户已登录，行情权限可用。
+- 默认连接 `127.0.0.1:11111`；如需调整，在配置或脚本参数里设置 host/port。
+
+常用检查：
+
+```bash
+./.venv/bin/python scripts/opend_watchdog.py
+./.venv/bin/python scripts/doctor_opend_required_fields.py --symbols NVDA 00700.HK
+```
+
+### 3) Yahoo / yfinance（可选行情源）
+
+用途：
+
+- 当 `fetch.source` 为 `yahoo` 时，使用 yfinance 拉取美股行情和期权链。
+- 也可作为 OpenD 不可用时的美股降级来源。
+
+注意：
+
+- 当前示例配置不需要 Yahoo API Key。
+- Yahoo/yfinance 可能被限流；生产监控中建议保留 OpenD 健康检查和降级策略。
+
+### 4) Finnhub 等第三方行情源（如启用）
+
+用途：
+
+- 如果你的本地 `portfolio-management` 或自定义行情流程启用了 Finnhub，需要单独准备 API Key。
+- 当前仓库示例配置默认不强制 Finnhub；只有在你自己的配置或外部依赖里引用时才需要。
+
+建议：
+
+- 将 Finnhub API Key 放在外部服务自己的本地配置或环境变量中。
+- 不要把 API Key 写入 `config.*.json` 示例文件或提交到 Git。
+
+### 5) 通知发送目标
+
+用途：
+
+- 发送候选提醒、无候选心跳、OpenD 告警等消息。
+
+配置位置：
+
+- `config.us.json` / `config.hk.json` 的 `notifications`。
+
+常见字段：
+
+- `enabled`: 是否启用发送。
+- `channel`: 当前常用为 `feishu`。
+- `target`: `user:open_id` 或 `chat:chat_id`。
+- `include_cash_footer`: 是否在多账户通知里附加现金摘要。
+
+安全建议：
+
+- 本地调试时优先使用 `--no-send` 或只查看 `output/reports/symbols_notification.txt`。
+- 没确认前不要把生产群聊作为测试 target。
+
 ## 5 分钟跑通
 
 1. 准备配置：
 
 ```bash
-cp config.example.us.json config.us.json
+cp configs/examples/config.example.us.json config.us.json
 ./.venv/bin/python scripts/sync_runtime_configs.py --apply
 ```
 

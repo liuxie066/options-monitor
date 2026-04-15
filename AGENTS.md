@@ -44,8 +44,8 @@ Some send tests expect local runtime config files such as `config.us.json`. If t
 For config validation:
 
 ```bash
-python3 scripts/validate_config.py --config config.market_us.example.json
-python3 scripts/validate_config.py --config config.market_hk.example.json
+python3 scripts/validate_config.py --config configs/examples/config.example.us.json
+python3 scripts/validate_config.py --config configs/examples/config.example.hk.json
 ```
 
 ## Common Commands
