@@ -9,8 +9,6 @@ from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from domain.domain.engine import decide_scheduler_timing
-
 
 @dataclass
 class SchedulerDecision:
@@ -92,6 +90,87 @@ def _time_in_range(t: time, start: time, end: time) -> bool:
     return t >= start or t <= end
 
 
+def _market_session_dt(now_market: datetime, market_tz: ZoneInfo, session_time: time) -> datetime:
+    return datetime.combine(now_market.date(), session_time, tzinfo=market_tz)
+
+
+def _next_trading_day(day):
+    next_day = day + timedelta(days=1)
+    while next_day.weekday() >= 5:
+        next_day += timedelta(days=1)
+    return next_day
+
+
+def _scheduled_notify_targets(
+    *,
+    now_market: datetime,
+    market_tz: ZoneInfo,
+    market_open: time,
+    market_close: time,
+    break_start: time | None,
+    break_end: time | None,
+    first_after_open_min: int,
+    interval_min: int,
+    final_before_close_min: int,
+) -> list[datetime]:
+    open_dt = _market_session_dt(now_market, market_tz, market_open)
+    close_dt = _market_session_dt(now_market, market_tz, market_close)
+    first_target = open_dt + timedelta(minutes=max(first_after_open_min, 0))
+    final_target = close_dt - timedelta(minutes=max(final_before_close_min, 0))
+    cadence = max(interval_min, 1)
+
+    targets: list[datetime] = []
+    cursor = first_target
+    while cursor <= final_target:
+        targets.append(cursor)
+        cursor += timedelta(minutes=cadence)
+
+    if final_target >= open_dt and all(t != final_target for t in targets):
+        targets.append(final_target)
+
+    targets = sorted(set(targets))
+    return [
+        target
+        for target in targets
+        if is_market_hours(target, market_open, market_close, break_start=break_start, break_end=break_end)
+    ]
+
+
+def _next_target_after(
+    *,
+    now_market: datetime,
+    market_tz: ZoneInfo,
+    market_open: time,
+    market_close: time,
+    break_start: time | None,
+    break_end: time | None,
+    first_after_open_min: int,
+    interval_min: int,
+    final_before_close_min: int,
+) -> datetime:
+    day_cursor = now_market
+    for _ in range(8):
+        targets = _scheduled_notify_targets(
+            now_market=day_cursor,
+            market_tz=market_tz,
+            market_open=market_open,
+            market_close=market_close,
+            break_start=break_start,
+            break_end=break_end,
+            first_after_open_min=first_after_open_min,
+            interval_min=interval_min,
+            final_before_close_min=final_before_close_min,
+        )
+        for target in targets:
+            if target > now_market:
+                return target.astimezone(timezone.utc)
+
+        next_day = _next_trading_day(day_cursor.date())
+        day_cursor = datetime.combine(next_day, time(0, 0), tzinfo=market_tz)
+
+    return now_market.astimezone(timezone.utc) + timedelta(days=1)
+
+
 def decide(
     schedule_cfg: dict,
     state: dict,
@@ -118,75 +197,10 @@ def decide(
 
     in_hours = is_market_hours(now_market, market_open, market_close, break_start=break_start, break_end=break_end)
 
-    schedule_v2 = schedule_cfg.get('schedule_v2') or {}
-    schedule_v2_enabled = bool(schedule_v2.get('enabled', False))
-
-    # Base notification cooldown (minutes).
-    notify_cooldown_min = int(schedule_cfg.get('notify_cooldown_min', 60))
-
-    # Decide scan interval + window semantics.
-    monitor_off_hours = bool(schedule_cfg.get('monitor_off_hours', False))
-    in_window = in_hours
-    force_final_scan = False
-
-    if schedule_v2_enabled:
-        # v2 single-window model: map market open/close into Beijing time.
-        v2_market_tz = ZoneInfo(schedule_v2.get('market_timezone', schedule_cfg.get('market_timezone', 'America/New_York')))
-        v2_bj_tz = ZoneInfo(schedule_v2.get('beijing_timezone', schedule_cfg.get('beijing_timezone', 'Asia/Shanghai')))
-        now_v2_market = now_utc.astimezone(v2_market_tz)
-        now_v2_bj = now_utc.astimezone(v2_bj_tz)
-
-        window_cfg = schedule_v2.get('window') or {}
-        window_mode = str(schedule_v2.get('window_mode', 'market_mapped'))
-
-        open_from_market = str(window_cfg.get('open_from_market', 'market_open'))
-        close_from_market = str(window_cfg.get('close_from_market', 'market_close'))
-
-        if window_mode == 'market_mapped':
-            open_src = market_open if open_from_market == 'market_open' else market_close
-            close_src = market_close if close_from_market == 'market_close' else market_open
-
-            open_dt_v2_market = datetime.combine(now_v2_market.date(), open_src, tzinfo=v2_market_tz)
-            close_dt_v2_market = datetime.combine(now_v2_market.date(), close_src, tzinfo=v2_market_tz)
-            open_v2_bj = open_dt_v2_market.astimezone(v2_bj_tz)
-            close_v2_bj = close_dt_v2_market.astimezone(v2_bj_tz)
-            in_window = _time_in_range(now_v2_bj.time(), open_v2_bj.time(), close_v2_bj.time())
-
-            if in_window:
-                close_anchor = close_v2_bj
-                while close_anchor < now_v2_bj:
-                    close_anchor += timedelta(days=1)
-                mins_to_close = (close_anchor - now_v2_bj).total_seconds() / 60.0
-
-                force_before_close_min = int((schedule_v2.get('scan') or {}).get('force_final_scan_before_close_min', 0))
-                force_final_scan = mins_to_close <= max(force_before_close_min, 0)
-        else:
-            in_window = in_hours
-
-        off_window = schedule_v2.get('off_window') or {}
-        monitor_off_hours = bool(off_window.get('scan', False))
-        notify_cooldown_min = int((schedule_v2.get('notify') or {}).get('cooldown_min', notify_cooldown_min))
-        interval_min = int((schedule_v2.get('scan') or {}).get('cadence_min', 10))
-    else:
-        interval_min: int
-        if not in_hours and not monitor_off_hours:
-            # No monitoring outside market hours
-            interval_min = 10**9
-        else:
-            # In-hours: support Beijing split (dense before 2am, sparse after 2am until close)
-            dense = int(schedule_cfg.get('market_dense_interval_min', schedule_cfg.get('market_hours_interval_min', 30)))
-            sparse = int(schedule_cfg.get('market_sparse_interval_min', dense))
-
-            # (bj_tz/now_bj already computed above)
-            sparse_after = parse_hhmm(schedule_cfg.get('sparse_after_beijing', '02:00'))
-
-            # Compute market close time in Beijing (time-of-day)
-            close_dt_market = datetime.combine(now_market.date(), market_close, tzinfo=market_tz)
-            close_bj_time = close_dt_market.astimezone(bj_tz).time()
-
-            # Sparse window: [sparse_after, close_bj_time] (handles DST because close_bj_time changes)
-            use_sparse = _time_in_range(now_bj.time(), sparse_after, close_bj_time)
-            interval_min = sparse if use_sparse else dense
+    first_after_open_min = int(schedule_cfg.get('first_notify_after_open_min', 30))
+    interval_min = int(schedule_cfg.get('notify_interval_min', schedule_cfg.get('interval_min', 60)))
+    final_before_close_min = int(schedule_cfg.get('final_notify_before_close_min', 10))
+    notify_cooldown_min = interval_min
 
     last_scan = None
     try:
@@ -199,38 +213,76 @@ def decide(
     if last_scan is None:
         last_scan = maybe_parse_dt(state.get('last_scan_utc'))
 
-    # Notify cooldown should be account-specific in multi-account mode.
-    # If account is provided, read last_notify from the per-account map first.
-    last_notify = None
-    try:
-        if account:
-            m = state.get('last_notify_utc_by_account')
-            if isinstance(m, dict):
-                last_notify = maybe_parse_dt(m.get(str(account)))
-    except Exception:
-        last_notify = None
-    if last_notify is None:
-        # fallback to legacy global notify timestamp
-        last_notify = maybe_parse_dt(state.get('last_notify_utc'))
-
-    timing_decision = decide_scheduler_timing(
-        now_utc=now_utc,
-        last_scan_utc=last_scan,
-        last_notify_utc=last_notify,
-        in_window=bool(in_window),
-        monitor_off_hours=bool(monitor_off_hours),
-        interval_min=int(interval_min),
-        notify_cooldown_min=int(notify_cooldown_min),
-        schedule_v2_enabled=bool(schedule_v2_enabled),
-        force_final_scan=bool(force_final_scan),
-        off_window_notify=bool((schedule_v2.get('off_window') or {}).get('notify', False)),
-        force=bool(force),
+    targets = _scheduled_notify_targets(
+        now_market=now_market,
+        market_tz=market_tz,
+        market_open=market_open,
+        market_close=market_close,
+        break_start=break_start,
+        break_end=break_end,
+        first_after_open_min=first_after_open_min,
+        interval_min=interval_min,
+        final_before_close_min=final_before_close_min,
     )
-    should_run_scan = bool(timing_decision.get('should_run_scan'))
-    is_notify_window_open = bool(timing_decision.get('is_notify_window_open'))
-    reason = str(timing_decision.get('reason') or '')
-    next_run_raw = timing_decision.get('next_run_utc')
-    next_run = next_run_raw if isinstance(next_run_raw, datetime) else now_utc
+    due_targets = [target for target in targets if target <= now_market]
+    due_target = due_targets[-1] if due_targets else None
+    next_target = next(
+        (target for target in targets if target > now_market),
+        None,
+    )
+
+    if force:
+        should_run_scan = True
+        is_notify_window_open = True
+        reason = 'force 模式：忽略交易时段目标点直接执行。'
+        next_run = now_utc
+    elif not in_hours:
+        should_run_scan = False
+        is_notify_window_open = False
+        reason = '交易时段外：不扫描、不通知。'
+        next_run = _next_target_after(
+            now_market=now_market,
+            market_tz=market_tz,
+            market_open=market_open,
+            market_close=market_close,
+            break_start=break_start,
+            break_end=break_end,
+            first_after_open_min=first_after_open_min,
+            interval_min=interval_min,
+            final_before_close_min=final_before_close_min,
+        )
+    elif due_target is None:
+        should_run_scan = False
+        is_notify_window_open = False
+        reason = f'交易时段内，等待开盘后 {first_after_open_min} 分钟的首次通知点。'
+        next_run = (next_target.astimezone(timezone.utc) if next_target else now_utc)
+    else:
+        due_target_utc = due_target.astimezone(timezone.utc)
+        already_processed = (
+            last_scan is not None
+            and last_scan.astimezone(timezone.utc) >= due_target_utc
+        )
+        should_run_scan = not already_processed
+        is_notify_window_open = not already_processed
+        if already_processed:
+            reason = f'当前通知点 {due_target.strftime("%H:%M")} 已处理，等待下一个通知点。'
+            if next_target is None:
+                next_run = _next_target_after(
+                    now_market=now_market,
+                    market_tz=market_tz,
+                    market_open=market_open,
+                    market_close=market_close,
+                    break_start=break_start,
+                    break_end=break_end,
+                    first_after_open_min=first_after_open_min,
+                    interval_min=interval_min,
+                    final_before_close_min=final_before_close_min,
+                )
+            else:
+                next_run = next_target.astimezone(timezone.utc)
+        else:
+            reason = f'到达通知点 {due_target.strftime("%H:%M")}：执行扫描并允许通知。'
+            next_run = now_utc
 
     # Also expose Beijing-time for readability/debuggability.
     open_dt_market = datetime.combine(now_market.date(), market_open, tzinfo=market_tz)
@@ -240,7 +292,7 @@ def decide(
         now_utc=to_iso(now_utc),
         now_market=now_market.isoformat(),
         now_beijing=now_bj.isoformat(),
-        in_market_hours=in_window,
+        in_market_hours=in_hours,
         interval_min=interval_min,
         notify_cooldown_min=notify_cooldown_min,
         should_run_scan=should_run_scan,

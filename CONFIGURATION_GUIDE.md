@@ -132,9 +132,11 @@
 - `target`: `user:open_id` 或 `chat:chat_id`
 - `mode`: 当前为 `change_or_high`
 
-### 4.5 schedule：频率（你已定制）
-- 非交易时段：不监控
-- 交易时段：北京时间 2 点前密，2 点后稀
+### 4.5 schedule：监控时间窗口
+- 非交易日 / 非交易时段：不监控、不通知。
+- 交易时段：开盘后 30 分钟通知一次，之后每小时通知一次，收盘前 10 分钟通知一次。
+- 港股午休等中场休市可用 `market_break_start` / `market_break_end` 配置，休市窗口内会跳过。
+- 可调字段：`first_notify_after_open_min`、`notify_interval_min`、`final_notify_before_close_min`。
 
 ### 4.6 runtime：超时（线上稳定）
 - `symbol_timeout_sec`：单标的 fetch/scan 超时

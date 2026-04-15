@@ -94,8 +94,9 @@
     "market_close": "16:00",
     "monitor_off_hours": false,
     "beijing_timezone": "Asia/Shanghai",
-    "notify_cooldown_min": 60,
-    "interval_min": 60
+    "first_notify_after_open_min": 30,
+    "notify_interval_min": 60,
+    "final_notify_before_close_min": 10
   },
   "symbols": [
     {
