@@ -136,6 +136,30 @@ def test_notify_symbols_markdown_put_chain_uses_upstream_fields_when_available()
     assert "告警未提供iv" not in out
 
 
+def test_notify_symbols_markdown_put_falls_back_to_usd_margin_when_cny_margin_missing() -> None:
+    out = _render_via_alert_engine(
+        {
+            "symbol": "0700.HK",
+            "strategy": "sell_put",
+            "candidate_count": 1,
+            "top_contract": "2026-04-29 460P",
+            "annualized_return": 0.1721,
+            "net_income": 557.00,
+            "dte": 26,
+            "strike": 460.0,
+            "risk_label": "中性",
+            "delta": -0.23,
+            "cash_required_usd": 58880.0,
+            "cash_free_cny": 200000.0,
+            "mid": 5.72,
+            "option_ccy": "HKD",
+        }
+    )
+
+    assert "保证金占用=$58,880 (USD)" in out
+    assert "告警未提供cash_req_cny/cash_req" not in out
+
+
 def test_notify_symbols_markdown_put_chain_missing_fields_keep_reasons() -> None:
     out = _render_via_alert_engine(
         {
