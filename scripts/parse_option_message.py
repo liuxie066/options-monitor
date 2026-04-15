@@ -16,6 +16,8 @@ import os
 from datetime import datetime
 from pathlib import Path
 
+from scripts.account_config import DEFAULT_ACCOUNTS, normalize_accounts
+
 # Suppress noisy OpenAPI logs when multiplier_cache triggers futu/OpenD imports.
 os.environ.setdefault('OPENAPI_LOG_LEVEL', 'ERROR')
 
@@ -219,15 +221,17 @@ def parse_contracts(s: str) -> int | None:
     return None
 
 
-def parse_account(s: str) -> str | None:
-    m = re.search(r"\b(lx|sy)\b", s, flags=re.I)
+def parse_account(s: str, *, accounts: list[str] | tuple[str, ...] | None = None) -> str | None:
+    candidates = normalize_accounts(accounts, fallback=DEFAULT_ACCOUNTS)
+    pattern = "|".join(re.escape(acct) for acct in candidates)
+    m = re.search(rf"\b({pattern})\b", s, flags=re.I) if pattern else None
     if m:
         return m.group(1).lower()
-    # Chinese hint
-    if '账户sy' in s.lower() or 'sy账户' in s.lower():
-        return 'sy'
-    if '账户lx' in s.lower() or 'lx账户' in s.lower():
-        return 'lx'
+    # Chinese hint, e.g. 账户alpha / alpha账户
+    low = s.lower()
+    for acct in candidates:
+        if f'账户{acct}' in low or f'{acct}账户' in low:
+            return acct
     return None
 
 
@@ -290,7 +294,7 @@ def _infer_multiplier_if_missing(*, symbol: str | None, multiplier: int | None, 
     return multiplier
 
 
-def parse_option_message_text(text: str) -> dict:
+def parse_option_message_text(text: str, *, accounts: list[str] | tuple[str, ...] | None = None) -> dict:
     """解析单条期权消息，返回结构化字段。"""
     raw = (text or '').strip()
 
@@ -308,7 +312,7 @@ def parse_option_message_text(text: str) -> dict:
         strike = parse_futu_strike(raw2)
         premium = parse_futu_premium(raw2)
         contracts = parse_contracts(raw2)
-        account = parse_account(raw2)
+        account = parse_account(raw2, accounts=accounts)
         currency = infer_currency(raw2)
         market = infer_market(raw2)
         multiplier = None  # not present in message; fill later
@@ -323,7 +327,7 @@ def parse_option_message_text(text: str) -> dict:
         multiplier = parse_int_after(['乘数', 'multiplier'], raw2)
         premium = parse_float_after(['成本', 'premium', '权利金'], raw2)
         contracts = parse_contracts(raw2)
-        account = parse_account(raw2)
+        account = parse_account(raw2, accounts=accounts)
         currency = infer_currency(raw2)
         market = infer_market(raw2)
 

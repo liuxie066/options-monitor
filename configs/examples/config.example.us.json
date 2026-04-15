@@ -13,6 +13,10 @@
   "fetch_policy": {
     "allow_downgrade_to_yahoo": true
   },
+  "accounts": [
+    "lx",
+    "sy"
+  ],
   "intake": {
     "symbol_aliases": {
       "中海油": "0883.HK",

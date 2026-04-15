@@ -13,6 +13,8 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
+from scripts.account_config import accounts_from_config
+
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 CONFIG_FILES: dict[str, Path] = {
@@ -327,7 +329,14 @@ async def api_delete(req: Request):
 
 @app.get("/api/meta")
 def api_meta():
+    accounts: set[str] = set()
+    for key in CONFIG_FILES:
+        try:
+            accounts.update(accounts_from_config(_load_config(key)))
+        except HTTPException:
+            continue
     return {
         "configs": {k: str(v) for k, v in CONFIG_FILES.items()},
+        "accounts": sorted(accounts),
         "tokenRequired": bool((os.environ.get("OM_WEBUI_TOKEN") or "").strip()),
     }

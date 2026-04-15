@@ -22,6 +22,7 @@ import sys
 from pathlib import Path
 
 from domain.domain import normalize_notify_subprocess_output, normalize_pipeline_subprocess_output
+from scripts.account_config import accounts_from_config
 
 
 def load_json(p: Path) -> dict:
@@ -31,7 +32,7 @@ def load_json(p: Path) -> dict:
 def main() -> int:
     ap = argparse.ArgumentParser(description='options-monitor healthcheck + notify')
     ap.add_argument('--config', default='config.us.json', help='options-monitor config.us.json/config.hk.json')
-    ap.add_argument('--accounts', nargs='*', default=['lx', 'sy'])
+    ap.add_argument('--accounts', nargs='*', default=None)
     ap.add_argument('--notify-on', choices=['warn', 'critical', 'both'], default='both')
     ap.add_argument('--silent-ok', action='store_true', default=True)
     ap.add_argument('--dry-run', action='store_true', help='print what would be sent')
@@ -44,10 +45,11 @@ def main() -> int:
     if not cfg_path.is_absolute():
         cfg_path = (base / cfg_path).resolve()
     cfg = load_json(cfg_path)
+    accounts = accounts_from_config(cfg) if args.accounts is None else accounts_from_config({'accounts': args.accounts})
 
     # Run healthcheck
     hc = subprocess.run(
-        [str(vpy), 'scripts/healthcheck.py', '--config', str(cfg_path), '--accounts', *args.accounts],
+        [str(vpy), 'scripts/healthcheck.py', '--config', str(cfg_path), '--accounts', *accounts],
         cwd=str(base),
         capture_output=True,
         text=True,

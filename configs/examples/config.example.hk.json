@@ -13,6 +13,10 @@
   "fetch_policy": {
     "allow_downgrade_to_yahoo": false
   },
+  "accounts": [
+    "lx",
+    "sy"
+  ],
   "intake": {
     "symbol_aliases": {
       "腾讯": "0700.HK",

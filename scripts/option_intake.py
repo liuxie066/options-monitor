@@ -50,6 +50,8 @@ def run_capture(cmd: list[str], cwd: Path, timeout_sec: int = 120, env: dict[str
 def main():
     ap = argparse.ArgumentParser(description='Option intake (parse + write)')
     ap.add_argument('--text', required=True)
+    ap.add_argument('--config', default=None, help='optional options-monitor config used to resolve account labels')
+    ap.add_argument('--accounts', nargs='*', default=None, help='optional account labels to recognize')
     ap.add_argument('--market', default='富途')
     ap.add_argument('--dry-run', action='store_true', help='default behavior if neither --dry-run nor --apply specified')
     ap.add_argument('--apply', action='store_true')
@@ -65,7 +67,12 @@ def main():
     env = dict(os.environ)
     env.setdefault('PYTHONPATH', str(base))
 
-    code, out, err = run_capture([py, 'scripts/cli/parse_option_message_cli.py', '--text', args.text], cwd=base, timeout_sec=30, env=env)
+    parse_cmd = [py, 'scripts/cli/parse_option_message_cli.py', '--text', args.text]
+    if args.config:
+        parse_cmd += ['--config', args.config]
+    if args.accounts is not None:
+        parse_cmd += ['--accounts', *args.accounts]
+    code, out, err = run_capture(parse_cmd, cwd=base, timeout_sec=30, env=env)
     if code != 0:
         print(err.strip() or out.strip())
         return code

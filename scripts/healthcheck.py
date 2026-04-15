@@ -27,6 +27,7 @@ from scripts.feishu_bitable import (
     get_tenant_access_token,
     bitable_fields,
 )
+from scripts.account_config import accounts_from_config
 
 
 def now_utc():
@@ -36,7 +37,7 @@ def now_utc():
 def main():
     ap = argparse.ArgumentParser(description='options-monitor healthcheck')
     ap.add_argument('--config', default='config.us.json')
-    ap.add_argument('--accounts', nargs='*', default=['lx', 'sy'])
+    ap.add_argument('--accounts', nargs='*', default=None)
     args = ap.parse_args()
 
     base = Path(__file__).resolve().parents[1]
@@ -46,6 +47,13 @@ def main():
 
     errors = []
     warns = []
+    opt_cfg: dict = {}
+
+    try:
+        opt_cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
+    except Exception:
+        opt_cfg = {}
+    accounts = accounts_from_config(opt_cfg) if args.accounts is None else accounts_from_config({'accounts': args.accounts})
 
     # 1) config valid
     try:
@@ -59,7 +67,6 @@ def main():
 
     # 2) feishu schema
     try:
-        opt_cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
         pm_ref = (opt_cfg.get('portfolio') or {}).get('pm_config')
         if not pm_ref:
             raise RuntimeError('portfolio.pm_config missing')
@@ -103,7 +110,7 @@ def main():
     try:
         import subprocess
         vpy = base / '.venv' / 'bin' / 'python'
-        for acct in args.accounts:
+        for acct in accounts:
             # write override config in a temp path
             cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
             cfg.setdefault('portfolio', {})
