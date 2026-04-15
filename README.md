@@ -208,6 +208,8 @@ OPTIONS_MONITOR_CONFIG=config.hk.json ./run_watchlist.sh
 
 这个入口会按 scheduler 判断是否需要扫描和通知；多账户运行会复用同一 tick 的 required data 与持仓上下文缓存。
 
+当前 scheduler 只在交易日的交易时段内触发：开盘后 30 分钟通知一次，之后每小时通知一次，收盘前 10 分钟通知一次。港股午休等 `market_break_start` / `market_break_end` 时段会跳过。
+
 ### 单账户定时入口
 
 ```bash
@@ -324,6 +326,7 @@ find output_runs -maxdepth 3 -type f | sort | tail -40
 
 - 有候选：发送候选提醒。
 - 无候选但监控正常触发：发送心跳文案 `监控正常触发：本轮无候选。`
+- 调度触发点：交易日交易时段内，开盘后 30 分钟、之后每小时、收盘前 10 分钟。
 - quiet hours / no-send / 缺通知目标等发送门控仍会阻止发送。
 
 ## 文档导航

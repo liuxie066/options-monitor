@@ -300,11 +300,8 @@
     "market_close": "16:00",
     "monitor_off_hours": false,
     "beijing_timezone": "Asia/Shanghai",
-    "sparse_after_beijing": "02:00",
-    "market_dense_interval_min": 10,
-    "market_sparse_interval_min": 60,
-    "notify_cooldown_min": 60,
-    "notify_cooldown_dense_min": 30,
-    "notify_cooldown_sparse_min": 60
+    "first_notify_after_open_min": 30,
+    "notify_interval_min": 60,
+    "final_notify_before_close_min": 10
   }
 }

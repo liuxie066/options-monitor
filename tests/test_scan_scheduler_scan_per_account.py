@@ -13,15 +13,14 @@ def test_scan_scheduler_scan_is_per_account() -> None:
         'market_timezone': 'Asia/Hong_Kong',
         'market_open': '09:30',
         'market_close': '16:00',
-        'monitor_off_hours': True,
-        'market_dense_interval_min': 30,
-        'market_sparse_interval_min': 30,
-        'notify_cooldown_min': 60,
+        'monitor_off_hours': False,
+        'first_notify_after_open_min': 30,
+        'notify_interval_min': 60,
+        'final_notify_before_close_min': 10,
         'beijing_timezone': 'Asia/Shanghai',
-        'sparse_after_beijing': '02:00',
     }
 
-    t0 = datetime(2026, 4, 1, 1, 0, 0, tzinfo=timezone.utc)
+    t0 = datetime(2026, 4, 1, 2, 0, 0, tzinfo=timezone.utc)  # 10:00 HKT target
     t1 = t0 + timedelta(minutes=10)
 
     state = {
