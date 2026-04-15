@@ -16,6 +16,22 @@ function fmtRange(a,b){
   return `${a ?? ''}~${b ?? ''}`;
 }
 
+const MARKETS = [
+  { key: 'hk', label: 'HK', name: '港股市场', exchange: 'HK' },
+  { key: 'us', label: 'US', name: '美股市场', exchange: 'US' },
+];
+
+const GLOBAL_SECTIONS = [
+  ['schedule', '交易时间'],
+  ['notifications', '通知策略'],
+  ['alert_policy', '提醒阈值'],
+  ['runtime', '运行超时'],
+  ['outputs', '输出'],
+  ['fetch_policy', '数据源策略'],
+  ['portfolio', '持仓来源'],
+  ['templates', '策略模板'],
+];
+
 async function api(path, opts={}){
   const r = await fetch(path, opts);
   const j = await r.json().catch(()=>({detail: r.statusText}));
@@ -52,11 +68,20 @@ function toEditHash({configKey, symbol}){
   return `#/edit${q ? `?${q}` : ''}`;
 }
 
+function selectedMarketMeta(key){
+  return MARKETS.find(m=>m.key === key) || MARKETS[0];
+}
+
+function isEmptyObject(v){
+  return v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).length === 0;
+}
+
 function createNewForm(configKey){
+  const key = (configKey || 'us').toLowerCase();
   return {
-    configKey: (configKey || 'us').toLowerCase(),
+    configKey: key,
     symbol: '',
-    market: '',
+    market: key.toUpperCase(),
     accounts: '',
     limit_expirations: '8',
     sell_put_enabled: 'true',
@@ -97,6 +122,7 @@ export default function App(){
   const [route, setRoute] = useState(()=>parseRoute());
 
   const [rows, setRows] = useState([]);
+  const [configSummaries, setConfigSummaries] = useState({});
   const [tokenRequired, setTokenRequired] = useState(false);
   const [accountOptions, setAccountOptions] = useState([]);
 
@@ -112,6 +138,8 @@ export default function App(){
 
   const [status, setStatus] = useState('-');
   const [toasts, setToasts] = useState([]);
+  const [selectedMarket, setSelectedMarket] = useState('hk');
+  const [configModule, setConfigModule] = useState('global');
 
   function pushToast(kind, text, ms=3000){
     const id = nowId();
@@ -125,8 +153,6 @@ export default function App(){
   // filters
   const [q, setQ] = useState('');
   const [account, setAccount] = useState('');
-  // NOTE: market here means exchange (US/HK) for the underlying
-  const [market, setMarket] = useState('');
   const [putOn, setPutOn] = useState(false);
   const [callOn, setCallOn] = useState(false);
 
@@ -217,6 +243,12 @@ export default function App(){
     })().catch(e=>pushToast('error', e.message));
   },[]);
 
+  async function loadConfigSummaries(){
+    const data = await api('/api/configs/summary');
+    setConfigSummaries(data.configs || {});
+    return data.configs || {};
+  }
+
   async function loadRows(){
     setStatus('loading...');
     const data = await api('/api/watchlist');
@@ -227,6 +259,7 @@ export default function App(){
   }
 
   useEffect(()=>{ loadRows().catch(e=>pushToast('error', e.message)); },[]);
+  useEffect(()=>{ loadConfigSummaries().catch(e=>pushToast('error', e.message)); },[]);
 
   useEffect(()=>{
     if (route.name !== 'edit') return;
@@ -236,6 +269,7 @@ export default function App(){
 
     const configKey = (route.configKey || 'us').toLowerCase();
     const symbol = (route.symbol || '').toUpperCase();
+    setSelectedMarket(configKey === 'us' ? 'us' : 'hk');
 
     if (!symbol){
       setForm(createNewForm(configKey));
@@ -264,8 +298,8 @@ export default function App(){
   const filtered = useMemo(()=>{
     const qq = q.trim().toUpperCase();
     return rows.filter(r=>{
+      if (r.configKey !== selectedMarket) return false;
       if (qq && !String(r.symbol||'').toUpperCase().includes(qq)) return false;
-      if (market && String(r.market||'').toUpperCase() !== market) return false;
       if (account){
         const a = (r.accounts||[]).map(x=>String(x).toLowerCase());
         if (a.length>0 && !a.includes(account)) return false;
@@ -274,11 +308,12 @@ export default function App(){
       if (callOn && !r.sell_call_enabled) return false;
       return true;
     });
-  }, [rows,q,market,account,putOn,callOn]);
+  }, [rows,q,selectedMarket,account,putOn,callOn]);
 
   useEffect(()=>{ setStatus(`rows=${filtered.length}/${rows.length}`); }, [filtered.length, rows.length]);
 
   function goList(){
+    setConfigModule('symbols');
     window.location.hash = '#/';
   }
 
@@ -287,10 +322,11 @@ export default function App(){
   }
 
   function openNew(){
-    goEdit('us', '');
+    goEdit(selectedMarket, '');
   }
 
   function openEdit(row){
+    setSelectedMarket(row.configKey || selectedMarket);
     goEdit(row.configKey, row.symbol);
   }
 
@@ -336,6 +372,7 @@ export default function App(){
       if (tok) headers['x-om-token'] = String(tok).trim();
       const out = await api('/api/watchlist/upsert', {method:'POST', headers, body: JSON.stringify(payload)});
       setRows(out.rows || []);
+      loadConfigSummaries().catch(e=>pushToast('error', e.message));
       setStatus('saved');
       pushToast('ok', '已保存');
       goList();
@@ -362,6 +399,7 @@ export default function App(){
       if (tok) headers['x-om-token'] = String(tok).trim();
       const out = await api('/api/watchlist/delete', {method:'POST', headers, body: JSON.stringify({configKey: form.configKey, symbol})});
       setRows(out.rows || []);
+      loadConfigSummaries().catch(e=>pushToast('error', e.message));
       pushToast('ok', '已删除');
       goList();
     };
@@ -389,12 +427,16 @@ export default function App(){
   }
 
   const isEdit = route.name === 'edit';
+  const marketMeta = selectedMarketMeta(selectedMarket);
+  const currentSummary = configSummaries[selectedMarket] || {};
+  const marketRows = rows.filter(r=>r.configKey === selectedMarket);
+  const enabledRows = marketRows.filter(r=>r.sell_put_enabled || r.sell_call_enabled);
 
   return (
     <>
       <div className="Header">
         <div className="HeaderInner">
-          <div className="Title"><span className="Mark">OM</span> watchlist（合并视图）</div>
+          <div className="Title"><span className="Mark">OM</span> 配置中心</div>
           <div className="Status">{status}</div>
         </div>
       </div>
@@ -402,58 +444,99 @@ export default function App(){
       <div className="Page">
         {!isEdit && (
           <>
-            <div className="Toolbar">
-              <input className={`Control ControlSearch`} value={q} onChange={e=>setQ(e.target.value)} placeholder="Search symbol（NVDA / 0700.HK）" />
-
-              <select className="Control SelectAccount" value={account} onChange={e=>setAccount(e.target.value)}>
-                <option value="">account: all</option>
-                {accountOptions.map(acct => <option key={acct} value={acct}>{acct}</option>)}
-              </select>
-
-              <select className="Control SelectMarket" value={market} onChange={e=>setMarket(e.target.value)}>
-                <option value="">exchange: all</option>
-                <option value="US">US</option>
-                <option value="HK">HK</option>
-              </select>
-
-              <div className="ToggleGroup">
-                <label className="Toggle TogglePut"><input type="checkbox" checked={putOn} onChange={e=>setPutOn(e.target.checked)} /> put</label>
-                <label className="Toggle ToggleCall"><input type="checkbox" checked={callOn} onChange={e=>setCallOn(e.target.checked)} /> call</label>
+            <section className="HeroPanel">
+              <div>
+                <div className="Eyebrow">Runtime Config</div>
+                <h1 className="HeroTitle">按市场管理配置</h1>
+                <p className="HeroText">先选择 HK 或 US，再维护该市场下的全局配置与标的配置，避免在合并列表里来回确认来源。</p>
               </div>
+              <div className="HeroStats">
+                <div className="StatCard"><span>标的</span><strong>{marketRows.length}</strong></div>
+                <div className="StatCard"><span>启用</span><strong>{enabledRows.length}</strong></div>
+                <div className="StatCard"><span>账户</span><strong>{(currentSummary.accounts || []).length || '-'}</strong></div>
+              </div>
+            </section>
 
-              <span className="Spacer ToolbarSpacer" />
-
-              <button className="Button ButtonPrimary BtnNew" onClick={openNew}>新增</button>
+            <div className="MarketSwitch" role="tablist" aria-label="市场">
+              {MARKETS.map(m=>(
+                <button
+                  key={m.key}
+                  className={`MarketTab ${selectedMarket === m.key ? 'MarketTabActive' : ''}`}
+                  onClick={()=>{
+                    setSelectedMarket(m.key);
+                    setQ('');
+                    setAccount('');
+                  }}
+                >
+                  <span>{m.label}</span>
+                  <small>{m.name}</small>
+                </button>
+              ))}
             </div>
 
-            <div className="Box BoxScroll">
-              <table>
-                <thead>
-                  <tr>
-                    <th>config</th><th>exchange</th><th>symbol</th><th>accounts</th><th>put</th><th>call</th>
-                    <th>limit_exp</th><th>put dte</th><th>put strike</th><th>call dte</th><th>call strike</th><th>ops</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filtered.map((r)=> (
-                    <tr key={`${r.configKey}-${r.symbol}`}>
-                      <td><span className="Label">{r.configKey}</span></td>
-                      <td>{r.market ?? ''}</td>
-                      <td><strong>{r.symbol}</strong></td>
-                      <td>{(r.accounts && r.accounts.length)? r.accounts.join(',') : <span style={{color:'var(--muted)'}}>all</span>}</td>
-                      <td>{badgeOnOff(r.sell_put_enabled)}</td>
-                      <td>{badgeOnOff(r.sell_call_enabled)}</td>
-                      <td>{r.limit_expirations ?? ''}</td>
-                      <td>{fmtRange(r.sell_put_min_dte, r.sell_put_max_dte)}</td>
-                      <td>{fmtRange(r.sell_put_min_strike, r.sell_put_max_strike)}</td>
-                      <td>{fmtRange(r.sell_call_min_dte, r.sell_call_max_dte)}</td>
-                      <td>{fmtRange(r.sell_call_min_strike, r.sell_call_max_strike)}</td>
-                      <td><button className="LinkBtn" onClick={()=>openEdit(r)}>Edit</button></td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+            <div className="ModuleTabs" role="tablist" aria-label="配置模块">
+              <button className={`ModuleTab ${configModule === 'global' ? 'ModuleTabActive' : ''}`} onClick={()=>setConfigModule('global')}>全局配置</button>
+              <button className={`ModuleTab ${configModule === 'symbols' ? 'ModuleTabActive' : ''}`} onClick={()=>setConfigModule('symbols')}>标的配置</button>
             </div>
+
+            {configModule === 'global' && (
+              <GlobalConfigPanel summary={currentSummary} marketMeta={marketMeta} />
+            )}
+
+            {configModule === 'symbols' && (
+              <>
+                <div className="Toolbar">
+                  <input className={`Control ControlSearch`} value={q} onChange={e=>setQ(e.target.value)} placeholder={`搜索 ${marketMeta.label} 标的（NVDA / 0700.HK）`} />
+
+                  <select className="Control SelectAccount" value={account} onChange={e=>setAccount(e.target.value)}>
+                    <option value="">account: all</option>
+                    {accountOptions.map(acct => <option key={acct} value={acct}>{acct}</option>)}
+                  </select>
+
+                  <div className="ToggleGroup">
+                    <label className="Toggle TogglePut"><input type="checkbox" checked={putOn} onChange={e=>setPutOn(e.target.checked)} /> put</label>
+                    <label className="Toggle ToggleCall"><input type="checkbox" checked={callOn} onChange={e=>setCallOn(e.target.checked)} /> call</label>
+                  </div>
+
+                  <span className="Spacer ToolbarSpacer" />
+
+                  <button className="Button ButtonPrimary BtnNew" onClick={openNew}>新增 {marketMeta.label} 标的</button>
+                </div>
+
+                <div className="Box BoxScroll">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>exchange</th><th>symbol</th><th>accounts</th><th>put</th><th>call</th>
+                        <th>limit_exp</th><th>put dte</th><th>put strike</th><th>call dte</th><th>call strike</th><th>ops</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filtered.map((r)=> (
+                        <tr key={`${r.configKey}-${r.symbol}`}>
+                          <td>{r.market ?? marketMeta.exchange}</td>
+                          <td><strong>{r.symbol}</strong></td>
+                          <td>{(r.accounts && r.accounts.length)? r.accounts.join(',') : <span style={{color:'var(--muted)'}}>all</span>}</td>
+                          <td>{badgeOnOff(r.sell_put_enabled)}</td>
+                          <td>{badgeOnOff(r.sell_call_enabled)}</td>
+                          <td>{r.limit_expirations ?? ''}</td>
+                          <td>{fmtRange(r.sell_put_min_dte, r.sell_put_max_dte)}</td>
+                          <td>{fmtRange(r.sell_put_min_strike, r.sell_put_max_strike)}</td>
+                          <td>{fmtRange(r.sell_call_min_dte, r.sell_call_max_dte)}</td>
+                          <td>{fmtRange(r.sell_call_min_strike, r.sell_call_max_strike)}</td>
+                          <td><button className="LinkBtn" onClick={()=>openEdit(r)}>Edit</button></td>
+                        </tr>
+                      ))}
+                      {!filtered.length && (
+                        <tr>
+                          <td colSpan="11"><span style={{color:'var(--muted)'}}>当前筛选下没有标的配置</span></td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
           </>
         )}
 
@@ -461,7 +544,7 @@ export default function App(){
           <>
             <div className="Box" style={{padding: 12}}>
               <div style={{display:'flex', alignItems:'center', gap: 12, flexWrap:'wrap'}}>
-                <div style={{fontWeight: 800}}>编辑 {form.symbol || ''}</div>
+                <div style={{fontWeight: 800}}>编辑 {form.configKey?.toUpperCase()} 标的 {form.symbol || ''}</div>
                 <div style={{color:'var(--muted)', fontSize: 12}}>写操作需要 token（弹框输入）</div>
               </div>
 
@@ -469,7 +552,7 @@ export default function App(){
                 <div className="FormSection">
                   <div className="SectionTitle">基础</div>
                   <div className="FormGrid">
-                    <Field label="configKey"><select className="Control" value={form.configKey} onChange={e=>setForm({...form, configKey:e.target.value})}><option value="us">us</option><option value="hk">hk</option></select></Field>
+                    <Field label="市场配置"><select className="Control" value={form.configKey} onChange={e=>setForm({...form, configKey:e.target.value, market:e.target.value.toUpperCase()})}><option value="hk">hk</option><option value="us">us</option></select></Field>
                     <Field label="symbol"><input className="Control" value={form.symbol} onChange={e=>setForm({...form, symbol:e.target.value})} placeholder="NVDA / 0700.HK" /></Field>
                     <Field label="exchange"><select className="Control" value={form.market} onChange={e=>setForm({...form, market:e.target.value})}><option value="">(keep)</option><option value="US">US</option><option value="HK">HK</option></select></Field>
                     <Field label="accounts（逗号分隔，空=all）"><input className="Control" value={form.accounts} onChange={e=>setForm({...form, accounts:e.target.value})} placeholder={accountOptions.length ? accountOptions.join(',') : 'account1,account2'} /></Field>
@@ -584,5 +667,59 @@ function Field({label, children}){
       <div className="FieldLabel">{label}</div>
       {children}
     </div>
+  );
+}
+
+function GlobalConfigPanel({summary, marketMeta}){
+  if (!summary || !summary.exists){
+    return (
+      <div className="Box EmptyState">
+        <div className="EmptyTitle">{marketMeta.label} 全局配置未就绪</div>
+        <div className="EmptyText">{summary?.error || '未找到本地 runtime config 文件'}</div>
+        <code>{summary?.path || ''}</code>
+      </div>
+    );
+  }
+
+  const sections = summary.sections || {};
+
+  return (
+    <div className="GlobalPanel">
+      <div className="GlobalOverview">
+        <div>
+          <div className="Eyebrow">{marketMeta.label} Global</div>
+          <h2 className="PanelTitle">全局配置概览</h2>
+          <p className="PanelText">这里汇总市场级配置：账户、交易时间、通知策略、模板和运行参数。当前为只读摘要，避免误改生产配置。</p>
+        </div>
+        <div className="ConfigPath"><span>文件</span><code>{summary.path}</code></div>
+      </div>
+
+      <div className="SummaryGrid">
+        <div className="SummaryCard"><span>账户</span><strong>{(summary.accounts || []).join(', ') || '-'}</strong></div>
+        <div className="SummaryCard"><span>标的总数</span><strong>{summary.symbolCount ?? 0}</strong></div>
+        <div className="SummaryCard"><span>启用标的</span><strong>{summary.enabledSymbolCount ?? 0}</strong></div>
+        <div className="SummaryCard"><span>模板</span><strong>{(sections.templates || []).join(', ') || '-'}</strong></div>
+      </div>
+
+      <div className="SectionGrid">
+        {GLOBAL_SECTIONS.map(([key, label])=>(
+          <ConfigSection key={key} title={label} value={sections[key]} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ConfigSection({title, value}){
+  const empty = value == null || value === '' || (Array.isArray(value) && value.length === 0) || isEmptyObject(value);
+  return (
+    <section className="ConfigSectionCard">
+      <div className="ConfigSectionTitle">{title}</div>
+      {empty ? (
+        <div className="MutedText">未配置</div>
+      ) : (
+        <pre>{JSON.stringify(value, null, 2)}</pre>
+      )}
+    </section>
   );
 }
