@@ -51,7 +51,7 @@
     "change_annual_threshold": 0.02
   },
   "portfolio": {
-    "pm_config": "../portfolio-management/config.json",
+    "pm_config": "secrets/portfolio.feishu.json",
     "market": "富途",
     "account": "lx",
     "base_currency": "CNY"

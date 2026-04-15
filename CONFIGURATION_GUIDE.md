@@ -3,13 +3,13 @@
 > 目标：你只要维护：
 > - `options-monitor/config.us.json 或 options-monitor/config.hk.json`（策略与监控）
 > - 飞书 Bitable 的两张表：`holdings`、`option_positions`（账户约束）
-> - （可选）Feishu App 凭证（用于程序读取 Bitable）
+> - Feishu App 凭证（用于程序读取 Bitable，推荐放在 `secrets/portfolio.feishu.json`）
 
 ---
 
 ## 1) 本项目需要哪些外部“表”（Bitable）？
 
-目前本项目会通过 `portfolio-management/config.json` 读取飞书 Bitable（这是 PM 凭证配置，不是 options-monitor 运行入口配置）：
+目前本项目通过 `portfolio.pm_config` 指向的本地凭证文件读取飞书 Bitable。新部署推荐使用 `options-monitor/secrets/portfolio.feishu.json`；旧部署仍兼容 `../portfolio-management/config.json`：
 - `holdings`：现金与股票持仓（用于 base 现金、shares、avg_cost）
 - `option_positions`：已卖出期权占用（用于：
   - covered call 锁股数 `locked_shares_by_symbol`
@@ -116,7 +116,7 @@
 - `use`: 选择使用哪些模板（例如 `["put_base","call_base"]`）
 
 ### 4.3 portfolio：账户约束来源
-- `pm_config`: 指向 `../portfolio-management/config.json`（仅 PM 凭证配置，不是 OM 运行入口）
+- `pm_config`: 推荐指向 `secrets/portfolio.feishu.json`（仅 Feishu/Bitable 凭证配置，不是 OM 运行入口）
 - `market`: 用来过滤两张表（例如 `富途`）
 - `account`: 用来过滤两张表（例如 `lx`）
 - `base_currency`: 当前策略口径（CNY）
@@ -142,13 +142,31 @@
 
 ## 5) Feishu App 凭证（AppID/AppSecret）到底放哪？
 
-### 当前实现（已在用）
-- `portfolio-management/config.json` 内的 `feishu.app_id/app_secret` 用于获取 tenant_access_token，再读取 Bitable（这是 PM 凭证配置，不是 options-monitor 运行入口配置）。
-- options-monitor 通过 `portfolio.pm_config` 引用这一份配置。
+### 推荐方式（新部署）
+- 从 `configs/examples/portfolio.feishu.example.json` 复制到 `secrets/portfolio.feishu.json`。
+- 在 `secrets/portfolio.feishu.json` 内填写 `feishu.app_id/app_secret` 和 `tables.holdings` / `tables.option_positions`。
+- 在 `config.us.json` / `config.hk.json` 内保持 `portfolio.pm_config = "secrets/portfolio.feishu.json"`。
 
-### 推荐改进（更安全/更自洽）
-- 在 options-monitor 内部放 `secrets/feishu.json`（不进 git），由 options-monitor 自己读取。
-- 当前仓库已加入 `.gitignore`（忽略 secrets/ 与 output/）。
+### 兼容方式（旧部署）
+- 如果你已经维护 `../portfolio-management/config.json`，仍可把 `portfolio.pm_config` 指向该文件。
+- 当前若部分脚本未从运行配置读取 `pm_config`，其 CLI 默认值仍保留 `../portfolio-management/config.json` 以兼容旧环境。
+
+示例：
+
+```json
+{
+  "feishu": {
+    "app_id": "cli_YOUR_APP_ID",
+    "app_secret": "YOUR_APP_SECRET",
+    "tables": {
+      "holdings": "app_token/table_id",
+      "option_positions": "app_token/table_id"
+    }
+  }
+}
+```
+
+当前仓库已加入 `.gitignore`（忽略 `secrets/` 与 `output/`）。
 
 > 注意：不要在聊天里发送 app_secret。
 
