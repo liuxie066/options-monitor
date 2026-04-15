@@ -17,9 +17,25 @@ from scripts.account_config import accounts_from_config
 
 
 BASE_DIR = Path(__file__).resolve().parents[2]
+DEFAULT_RUNTIME_CONFIG_DIR = Path("../options-monitor-config")
+
+
+def _runtime_config_path(config_key: str, filename: str) -> Path:
+    env_key = f"OM_WEBUI_CONFIG_{config_key.upper()}"
+    explicit = (os.environ.get(env_key) or "").strip()
+    if explicit:
+        return Path(explicit).expanduser()
+
+    env_dir = (os.environ.get("OM_WEBUI_CONFIG_DIR") or "").strip()
+    if env_dir:
+        return Path(env_dir).expanduser() / filename
+
+    return DEFAULT_RUNTIME_CONFIG_DIR / filename
+
+
 CONFIG_FILES: dict[str, Path] = {
-    "us": (BASE_DIR / "config.us.json").resolve(),
-    "hk": (BASE_DIR / "config.hk.json").resolve(),
+    "us": _runtime_config_path("us", "config.us.json"),
+    "hk": _runtime_config_path("hk", "config.hk.json"),
 }
 
 GLOBAL_STRATEGY_FIELDS: dict[str, type] = {
@@ -71,14 +87,25 @@ app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
 @app.get("/__debug/z")
 def debug_z() -> dict[str, Any]:
-    return {"static_dir": str(static_dir), "ts": int(time.time())}
+    return {
+        "static_dir": str(static_dir),
+        "config_files": {k: str(v) for k, v in CONFIG_FILES.items()},
+        "resolved_config_files": {k: str(_resolve_config_path(v)) for k, v in CONFIG_FILES.items()},
+        "ts": int(time.time()),
+    }
+
+
+def _resolve_config_path(path: Path) -> Path:
+    if path.is_absolute():
+        return path
+    return (BASE_DIR / path).resolve()
 
 
 def _load_config(config_key: str) -> dict:
     if config_key not in CONFIG_FILES:
         raise HTTPException(status_code=400, detail=f"invalid configKey: {config_key}")
 
-    path = CONFIG_FILES[config_key]
+    path = _resolve_config_path(CONFIG_FILES[config_key])
     if not path.exists():
         raise HTTPException(status_code=404, detail=f"config not found: {path}")
 
@@ -113,7 +140,7 @@ def _validate_config(path: Path):
     if not py.exists():
         raise HTTPException(status_code=500, detail="python venv not found; run ./run_webui.sh once")
 
-    cmd = [str(py), "scripts/validate_config.py", "--config", str(path.name)]
+    cmd = [str(py), "scripts/validate_config.py", "--config", str(path)]
     try:
         r = subprocess.run(cmd, cwd=str(BASE_DIR), capture_output=True, text=True, timeout=30)
     except Exception as e:
@@ -180,12 +207,13 @@ def _list_rows() -> list[dict[str, Any]]:
 
 
 def _global_summary(config_key: str) -> dict[str, Any]:
-    path = CONFIG_FILES[config_key]
+    path = _resolve_config_path(CONFIG_FILES[config_key])
     cfg, err = _try_load_config(config_key)
     if cfg is None:
         return {
             "configKey": config_key,
-            "path": str(path),
+            "path": str(CONFIG_FILES[config_key]),
+            "resolvedPath": str(path),
             "exists": path.exists(),
             "error": err,
         }
@@ -205,7 +233,8 @@ def _global_summary(config_key: str) -> dict[str, Any]:
 
     return {
         "configKey": config_key,
-        "path": str(path),
+        "path": str(CONFIG_FILES[config_key]),
+        "resolvedPath": str(path),
         "exists": True,
         "accounts": accounts_from_config(cfg),
         "symbolCount": len(symbols),
@@ -428,7 +457,7 @@ async def api_update_global_config(req: Request):
     cfg = _load_config(config_key)
     _patch_global_strategy(cfg, payload)
 
-    path = CONFIG_FILES[config_key]
+    path = _resolve_config_path(CONFIG_FILES[config_key])
     bak = _backup(path)
     try:
         _write_config_atomic(path, cfg)
@@ -468,7 +497,7 @@ async def api_upsert(req: Request):
 
     _patch_entry(entry, payload)
 
-    path = CONFIG_FILES[config_key]
+    path = _resolve_config_path(CONFIG_FILES[config_key])
     bak = _backup(path)
     try:
         _write_config_atomic(path, cfg)
@@ -504,7 +533,7 @@ async def api_delete(req: Request):
 
     symbols.pop(idx)
 
-    path = CONFIG_FILES[config_key]
+    path = _resolve_config_path(CONFIG_FILES[config_key])
     bak = _backup(path)
     try:
         _write_config_atomic(path, cfg)

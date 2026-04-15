@@ -1,7 +1,7 @@
 # options-monitor 配置与表结构说明（实战版）
 
 > 目标：你只要维护：
-> - 仓外 `config.us.json` / `config.hk.json`（策略与监控，例如 `/opt/options-monitor/configs/`）
+> - 同级 `../options-monitor-config/config.us.json` / `../options-monitor-config/config.hk.json`（策略与监控）
 > - 飞书 Bitable 的两张表：`holdings`、`option_positions`（账户约束）
 > - Feishu App 凭证（用于程序读取 Bitable，推荐放在仓外 `secrets/portfolio.feishu.json`）
 
@@ -98,7 +98,7 @@
 
 ## 4) 仓外 config.us.json 或 config.hk.json：你需要配置什么？
 
-推荐文件：`/opt/options-monitor/configs/config.us.json` 或 `/opt/options-monitor/configs/config.hk.json`
+推荐文件：`../options-monitor-config/config.us.json` 或 `../options-monitor-config/config.hk.json`
 
 ### 4.0 accounts：账户列表
 - `accounts`: 多账户运行和辅助脚本的默认账户列表，例如 `["lx", "sy"]`。
@@ -107,6 +107,7 @@
 
 ### 4.1 templates：通用底线（复用）
 - `templates.put_base.sell_put.min_annualized_net_return`：全局 put 最低年化（例如 0.10）
+- `templates.*.*.min_net_income`：全局最低单笔净收益，统一按 CNY 配置；运行时会按标的币种换算为 USD/HKD 后传给扫描器。
 - `sell_put.min_annualized_net_return` 统一解析优先级：
   `symbol.sell_put.min_annualized_net_return` > `templates.<name>.sell_put.min_annualized_net_return` > 代码默认 `DEFAULT_MIN_ANNUALIZED_NET_RETURN(0.07)`。
 - D3 全局仅允许 3 个硬过滤键：`min_open_interest`、`min_volume`、`max_spread_ratio`

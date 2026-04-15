@@ -23,7 +23,7 @@ const MARKETS = [
 
 const GLOBAL_STRATEGY_FIELDS = [
   ['min_annualized_net_return', '收益率', '0.1', '年化净收益率阈值，例如 0.1 = 10%'],
-  ['min_net_income', '收益', '100', '单笔最小净收益'],
+  ['min_net_income', '收益(CNY)', '100', '单笔最小净收益，统一按 CNY 配置，运行时换算为标的交易币种'],
   ['min_open_interest', 'min_open_interest', '50', '最小未平仓量'],
   ['min_volume', 'min_volume', '10', '最小成交量'],
   ['max_spread_ratio', 'max_spread_ratio', '0.3', '最大买卖价差比例'],
