@@ -14,6 +14,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from scripts.account_config import accounts_from_config
+from scripts.validate_config import D3_SYMBOL_FORBIDDEN_FIELDS
 
 
 BASE_DIR = Path(__file__).resolve().parents[2]
@@ -45,6 +46,9 @@ GLOBAL_STRATEGY_FIELDS: dict[str, type] = {
     "min_volume": int,
     "max_spread_ratio": float,
 }
+
+SYMBOL_LEVEL_D3_FORBIDDEN_FIELDS = D3_SYMBOL_FORBIDDEN_FIELDS
+
 
 SCHEDULE_SUMMARY_FIELDS = {
     "enabled",
@@ -361,6 +365,23 @@ def _ensure_symbols_list(cfg: dict) -> list:
     return cfg["symbols"]
 
 
+def _clean_symbol_level_d3_fields(cfg: dict) -> None:
+    symbols = cfg.get("symbols")
+    if symbols is None:
+        symbols = cfg.get("watchlist")
+    if not isinstance(symbols, list):
+        return
+    for item in symbols:
+        if not isinstance(item, dict):
+            continue
+        for side in ("sell_put", "sell_call"):
+            side_cfg = item.get(side)
+            if not isinstance(side_cfg, dict):
+                continue
+            for field in SYMBOL_LEVEL_D3_FORBIDDEN_FIELDS:
+                side_cfg.pop(field, None)
+
+
 def _patch_entry(entry: dict, payload: dict):
     # only patch known editable fields; keep other fields untouched
     if "market" in payload:
@@ -390,6 +411,8 @@ def _patch_entry(entry: dict, payload: dict):
     if not isinstance(sp, dict):
         sp = {}
         entry["sell_put"] = sp
+    for field in SYMBOL_LEVEL_D3_FORBIDDEN_FIELDS:
+        sp.pop(field, None)
     mapping_sp = {
         "sell_put_enabled": ("enabled", bool),
         "sell_put_min_dte": ("min_dte", int),
@@ -411,6 +434,8 @@ def _patch_entry(entry: dict, payload: dict):
     if not isinstance(sc, dict):
         sc = {}
         entry["sell_call"] = sc
+    for field in SYMBOL_LEVEL_D3_FORBIDDEN_FIELDS:
+        sc.pop(field, None)
     mapping_sc = {
         "sell_call_enabled": ("enabled", bool),
         "sell_call_min_dte": ("min_dte", int),
@@ -456,6 +481,7 @@ async def api_update_global_config(req: Request):
 
     cfg = _load_config(config_key)
     _patch_global_strategy(cfg, payload)
+    _clean_symbol_level_d3_fields(cfg)
 
     path = _resolve_config_path(CONFIG_FILES[config_key])
     bak = _backup(path)
@@ -496,6 +522,7 @@ async def api_upsert(req: Request):
         pass
 
     _patch_entry(entry, payload)
+    _clean_symbol_level_d3_fields(cfg)
 
     path = _resolve_config_path(CONFIG_FILES[config_key])
     bak = _backup(path)
