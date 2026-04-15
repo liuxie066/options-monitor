@@ -67,6 +67,13 @@ def _load_config(config_key: str) -> dict:
         raise HTTPException(status_code=500, detail=f"failed to parse config: {e}")
 
 
+def _try_load_config(config_key: str) -> tuple[dict | None, str | None]:
+    try:
+        return _load_config(config_key), None
+    except HTTPException as e:
+        return None, str(e.detail)
+
+
 def _write_config_atomic(path: Path, cfg: dict):
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -131,7 +138,9 @@ def _to_row(config_key: str, item: dict) -> SymbolRow:
 def _list_rows() -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for k in ("us", "hk"):
-        cfg = _load_config(k)
+        cfg, _err = _try_load_config(k)
+        if cfg is None:
+            continue
         symbols = cfg.get("symbols") or cfg.get("watchlist") or []
         if not isinstance(symbols, list):
             continue
@@ -147,6 +156,59 @@ def _list_rows() -> list[dict[str, Any]]:
 
     rows.sort(key=_key)
     return rows
+
+
+def _global_summary(config_key: str) -> dict[str, Any]:
+    path = CONFIG_FILES[config_key]
+    cfg, err = _try_load_config(config_key)
+    if cfg is None:
+        return {
+            "configKey": config_key,
+            "path": str(path),
+            "exists": path.exists(),
+            "error": err,
+        }
+
+    symbols = cfg.get("symbols") or cfg.get("watchlist") or []
+    if not isinstance(symbols, list):
+        symbols = []
+
+    notifications = cfg.get("notifications") if isinstance(cfg.get("notifications"), dict) else {}
+    schedule = cfg.get("schedule") if isinstance(cfg.get("schedule"), dict) else {}
+    templates = cfg.get("templates") if isinstance(cfg.get("templates"), dict) else {}
+
+    return {
+        "configKey": config_key,
+        "path": str(path),
+        "exists": True,
+        "accounts": accounts_from_config(cfg),
+        "symbolCount": len(symbols),
+        "enabledSymbolCount": sum(
+            1
+            for it in symbols
+            if isinstance(it, dict)
+            and (
+                bool((it.get("sell_put") or {}).get("enabled"))
+                or bool((it.get("sell_call") or {}).get("enabled"))
+            )
+        ),
+        "sections": {
+            "schedule": schedule,
+            "notifications": {
+                "enabled": notifications.get("enabled"),
+                "channel": notifications.get("channel"),
+                "mode": notifications.get("mode"),
+                "include_cash_footer": notifications.get("include_cash_footer"),
+                "quiet_hours_beijing": notifications.get("quiet_hours_beijing"),
+            },
+            "templates": sorted(templates.keys()),
+            "outputs": cfg.get("outputs") if isinstance(cfg.get("outputs"), dict) else {},
+            "runtime": cfg.get("runtime") if isinstance(cfg.get("runtime"), dict) else {},
+            "alert_policy": cfg.get("alert_policy") if isinstance(cfg.get("alert_policy"), dict) else {},
+            "fetch_policy": cfg.get("fetch_policy") if isinstance(cfg.get("fetch_policy"), dict) else {},
+            "portfolio": cfg.get("portfolio") if isinstance(cfg.get("portfolio"), dict) else {},
+        },
+    }
 
 
 def _find_symbol(cfg: dict, symbol: str) -> tuple[int | None, dict | None]:
@@ -249,6 +311,11 @@ def index():
 @app.get("/api/watchlist")
 def api_list_watchlist():
     return {"rows": _list_rows()}
+
+
+@app.get("/api/configs/summary")
+def api_configs_summary():
+    return {"configs": {k: _global_summary(k) for k in ("hk", "us")}}
 
 
 @app.post("/api/watchlist/upsert")
