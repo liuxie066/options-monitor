@@ -1,0 +1,10 @@
+{
+  "feishu": {
+    "app_id": "cli_YOUR_APP_ID",
+    "app_secret": "YOUR_APP_SECRET",
+    "tables": {
+      "holdings": "app_token/table_id",
+      "option_positions": "app_token/table_id"
+    }
+  }
+}

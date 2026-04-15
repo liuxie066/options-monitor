@@ -77,8 +77,9 @@ cp configs/examples/config.example.hk.json config.hk.json
 
 配置位置：
 
-- `config.us.json` / `config.hk.json` 的 `portfolio.pm_config`，默认指向 `../portfolio-management/config.json`。
-- `portfolio-management/config.json` 内需要配置 Feishu `app_id`、`app_secret` 和两张 Bitable 表引用。
+- `config.us.json` / `config.hk.json` 的 `portfolio.pm_config`。
+- 新部署推荐指向本项目内的 `secrets/portfolio.feishu.json`；可从 `configs/examples/portfolio.feishu.example.json` 复制后填写。
+- 旧部署仍可继续使用 `../portfolio-management/config.json`，当前脚本默认值也保留这个兼容路径。
 
 需要准备：
 
@@ -90,6 +91,7 @@ cp configs/examples/config.example.hk.json config.hk.json
 注意：
 
 - 不要把 `app_secret`、tenant token、user token 写进仓库。
+- `secrets/` 已被 `.gitignore` 忽略，适合放本地真实凭证。
 - 写入飞书的操作，例如成交入库、自动关闭仓位，建议先用 `--dry-run`。
 
 ### 2) 富途 OpenD / Futu API（行情与期权链）

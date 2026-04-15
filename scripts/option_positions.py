@@ -20,7 +20,9 @@ Because the table currently doesn't have explicit strike/multiplier columns,
 we store them in note as key=value pairs:
   strike=..., multiplier=..., exp=..., premium_per_share=...
 
-This script uses Feishu app_id/app_secret from ../portfolio-management/config.json.
+This script uses Feishu app_id/app_secret from --pm-config.
+New deployments should prefer secrets/portfolio.feishu.json; the CLI default keeps
+../portfolio-management/config.json for backward compatibility.
 """
 
 from __future__ import annotations
