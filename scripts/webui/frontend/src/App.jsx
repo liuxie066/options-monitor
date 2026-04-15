@@ -21,15 +21,12 @@ const MARKETS = [
   { key: 'us', label: 'US', name: '美股市场', exchange: 'US' },
 ];
 
-const GLOBAL_SECTIONS = [
-  ['schedule', '交易时间'],
-  ['notifications', '通知策略'],
-  ['alert_policy', '提醒阈值'],
-  ['runtime', '运行超时'],
-  ['outputs', '输出'],
-  ['fetch_policy', '数据源策略'],
-  ['portfolio', '持仓来源'],
-  ['templates', '策略模板'],
+const GLOBAL_STRATEGY_FIELDS = [
+  ['min_annualized_net_return', '收益率', '0.1', '年化净收益率阈值，例如 0.1 = 10%'],
+  ['min_net_income', '收益', '100', '单笔最小净收益'],
+  ['min_open_interest', 'min_open_interest', '50', '最小未平仓量'],
+  ['min_volume', 'min_volume', '10', '最小成交量'],
+  ['max_spread_ratio', 'max_spread_ratio', '0.3', '最大买卖价差比例'],
 ];
 
 async function api(path, opts={}){
@@ -72,10 +69,6 @@ function selectedMarketMeta(key){
   return MARKETS.find(m=>m.key === key) || MARKETS[0];
 }
 
-function isEmptyObject(v){
-  return v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).length === 0;
-}
-
 function createNewForm(configKey){
   const key = (configKey || 'us').toLowerCase();
   return {
@@ -95,6 +88,37 @@ function createNewForm(configKey){
     sell_call_min_strike: '',
     sell_call_max_strike: ''
   };
+}
+
+function emptyGlobalForm(){
+  const mk = () => Object.fromEntries(GLOBAL_STRATEGY_FIELDS.map(([key, _label, fallback]) => [key, fallback]));
+  return { sell_put: mk(), sell_call: mk() };
+}
+
+function globalFormFromSummary(summary){
+  const strategy = summary?.globalStrategy || {};
+  const fromSide = (side) => {
+    const values = strategy[side] || {};
+    return Object.fromEntries(GLOBAL_STRATEGY_FIELDS.map(([key, _label, fallback]) => [
+      key,
+      values[key] == null ? fallback : String(values[key]),
+    ]));
+  };
+  return {
+    sell_put: fromSide('sell_put'),
+    sell_call: fromSide('sell_call'),
+  };
+}
+
+function numberPayloadFromGlobalForm(globalForm){
+  const out = { sell_put: {}, sell_call: {} };
+  for (const side of Object.keys(out)){
+    for (const [key] of GLOBAL_STRATEGY_FIELDS){
+      const raw = String(globalForm?.[side]?.[key] ?? '').trim();
+      out[side][key] = raw === '' ? null : Number(raw);
+    }
+  }
+  return out;
 }
 
 function formFromRow(row){
@@ -140,6 +164,7 @@ export default function App(){
   const [toasts, setToasts] = useState([]);
   const [selectedMarket, setSelectedMarket] = useState('hk');
   const [configModule, setConfigModule] = useState('global');
+  const [globalForm, setGlobalForm] = useState(()=>emptyGlobalForm());
 
   function pushToast(kind, text, ms=3000){
     const id = nowId();
@@ -262,6 +287,10 @@ export default function App(){
   useEffect(()=>{ loadConfigSummaries().catch(e=>pushToast('error', e.message)); },[]);
 
   useEffect(()=>{
+    setGlobalForm(globalFormFromSummary(configSummaries[selectedMarket]));
+  }, [configSummaries, selectedMarket]);
+
+  useEffect(()=>{
     if (route.name !== 'edit') return;
     const editKey = `${route.configKey || 'us'}|${route.symbol || ''}`;
     if (lastEditKeyRef.current === editKey) return;
@@ -328,6 +357,39 @@ export default function App(){
   function openEdit(row){
     setSelectedMarket(row.configKey || selectedMarket);
     goEdit(row.configKey, row.symbol);
+  }
+
+  async function saveGlobalConfig(){
+    const payload = {
+      configKey: selectedMarket,
+      strategies: numberPayloadFromGlobalForm(globalForm),
+    };
+
+    for (const side of Object.keys(payload.strategies)){
+      for (const [key, label] of GLOBAL_STRATEGY_FIELDS){
+        const v = payload.strategies[side][key];
+        if (!Number.isFinite(v)) throw new Error(`${side} ${label} 需要填写数字`);
+      }
+    }
+
+    const doReq = async (tok) => {
+      const headers = {'content-type':'application/json'};
+      if (tok) headers['x-om-token'] = String(tok).trim();
+      const out = await api('/api/configs/global/update', {method:'POST', headers, body: JSON.stringify(payload)});
+      setConfigSummaries(out.configs || {});
+      pushToast('ok', `${selectedMarket.toUpperCase()} 全局配置已保存`);
+    };
+
+    if (!tokenRequired) {
+      await doReq('');
+      return;
+    }
+
+    setTokenDlgError('');
+    setTokenDlgValue('');
+    setTokenDlgAction('保存全局配置');
+    setTokenDlgOnOk(()=>async (tok)=>{ await doReq(tok); });
+    setTokenDlgOpen(true);
   }
 
   async function save(){
@@ -437,6 +499,21 @@ export default function App(){
       <div className="Header">
         <div className="HeaderInner">
           <div className="Title"><span className="Mark">OM</span> 配置中心</div>
+          <div className="HeaderTabs" role="tablist" aria-label="市场">
+            {MARKETS.map(m=>(
+              <button
+                key={m.key}
+                className={`HeaderTab ${selectedMarket === m.key ? 'HeaderTabActive' : ''}`}
+                onClick={()=>{
+                  setSelectedMarket(m.key);
+                  setQ('');
+                  setAccount('');
+                }}
+              >
+                {m.label}
+              </button>
+            ))}
+          </div>
           <div className="Status">{status}</div>
         </div>
       </div>
@@ -457,30 +534,19 @@ export default function App(){
               </div>
             </section>
 
-            <div className="MarketSwitch" role="tablist" aria-label="市场">
-              {MARKETS.map(m=>(
-                <button
-                  key={m.key}
-                  className={`MarketTab ${selectedMarket === m.key ? 'MarketTabActive' : ''}`}
-                  onClick={()=>{
-                    setSelectedMarket(m.key);
-                    setQ('');
-                    setAccount('');
-                  }}
-                >
-                  <span>{m.label}</span>
-                  <small>{m.name}</small>
-                </button>
-              ))}
-            </div>
-
             <div className="ModuleTabs" role="tablist" aria-label="配置模块">
               <button className={`ModuleTab ${configModule === 'global' ? 'ModuleTabActive' : ''}`} onClick={()=>setConfigModule('global')}>全局配置</button>
               <button className={`ModuleTab ${configModule === 'symbols' ? 'ModuleTabActive' : ''}`} onClick={()=>setConfigModule('symbols')}>标的配置</button>
             </div>
 
             {configModule === 'global' && (
-              <GlobalConfigPanel summary={currentSummary} marketMeta={marketMeta} />
+              <GlobalConfigPanel
+                summary={currentSummary}
+                marketMeta={marketMeta}
+                form={globalForm}
+                setForm={setGlobalForm}
+                onSave={()=>saveGlobalConfig().catch(e=>pushToast('error', e.message))}
+              />
             )}
 
             {configModule === 'symbols' && (
@@ -670,7 +736,7 @@ function Field({label, children}){
   );
 }
 
-function GlobalConfigPanel({summary, marketMeta}){
+function GlobalConfigPanel({summary, marketMeta, form, setForm, onSave}){
   if (!summary || !summary.exists){
     return (
       <div className="Box EmptyState">
@@ -681,15 +747,13 @@ function GlobalConfigPanel({summary, marketMeta}){
     );
   }
 
-  const sections = summary.sections || {};
-
   return (
     <div className="GlobalPanel">
       <div className="GlobalOverview">
         <div>
           <div className="Eyebrow">{marketMeta.label} Global</div>
-          <h2 className="PanelTitle">全局配置概览</h2>
-          <p className="PanelText">这里汇总市场级配置：账户、交易时间、通知策略、模板和运行参数。当前为只读摘要，避免误改生产配置。</p>
+          <h2 className="PanelTitle">全局策略阈值</h2>
+          <p className="PanelText">维护市场级策略模板字段。保存时只更新 put_base / call_base 的收益率、收益和 D3 硬过滤参数。</p>
         </div>
         <div className="ConfigPath"><span>文件</span><code>{summary.path}</code></div>
       </div>
@@ -698,28 +762,71 @@ function GlobalConfigPanel({summary, marketMeta}){
         <div className="SummaryCard"><span>账户</span><strong>{(summary.accounts || []).join(', ') || '-'}</strong></div>
         <div className="SummaryCard"><span>标的总数</span><strong>{summary.symbolCount ?? 0}</strong></div>
         <div className="SummaryCard"><span>启用标的</span><strong>{summary.enabledSymbolCount ?? 0}</strong></div>
-        <div className="SummaryCard"><span>模板</span><strong>{(sections.templates || []).join(', ') || '-'}</strong></div>
+        <div className="SummaryCard"><span>当前市场</span><strong>{marketMeta.name}</strong></div>
       </div>
 
-      <div className="SectionGrid">
-        {GLOBAL_SECTIONS.map(([key, label])=>(
-          <ConfigSection key={key} title={label} value={sections[key]} />
-        ))}
+      <div className="GlobalFormShell">
+        <StrategyForm
+          title="Sell Put"
+          subtitle="templates.put_base.sell_put"
+          side="sell_put"
+          form={form}
+          setForm={setForm}
+        />
+        <StrategyForm
+          title="Covered Call"
+          subtitle="templates.call_base.sell_call"
+          side="sell_call"
+          form={form}
+          setForm={setForm}
+        />
+      </div>
+
+      <div className="GlobalSaveBar">
+        <div>
+          <strong>保存全局配置</strong>
+          <span>会先备份配置文件，再运行 validate_config 校验。</span>
+        </div>
+        <button className="Button ButtonPrimary" onClick={onSave}>保存 {marketMeta.label} 全局配置</button>
       </div>
     </div>
   );
 }
 
-function ConfigSection({title, value}){
-  const empty = value == null || value === '' || (Array.isArray(value) && value.length === 0) || isEmptyObject(value);
+function StrategyForm({title, subtitle, side, form, setForm}){
+  function updateField(key, value){
+    setForm(prev => ({
+      ...prev,
+      [side]: {
+        ...(prev?.[side] || {}),
+        [key]: value,
+      },
+    }));
+  }
+
   return (
-    <section className="ConfigSectionCard">
-      <div className="ConfigSectionTitle">{title}</div>
-      {empty ? (
-        <div className="MutedText">未配置</div>
-      ) : (
-        <pre>{JSON.stringify(value, null, 2)}</pre>
-      )}
+    <section className="StrategyCard">
+      <div className="StrategyHeader">
+        <div>
+          <div className="StrategyTitle">{title}</div>
+          <div className="StrategySub">{subtitle}</div>
+        </div>
+        <span className="StrategyPill">{side === 'sell_put' ? 'PUT' : 'CALL'}</span>
+      </div>
+      <div className="StrategyGrid">
+        {GLOBAL_STRATEGY_FIELDS.map(([key, label, _fallback, help])=>(
+          <Field key={key} label={label}>
+            <input
+              className="Control"
+              type="number"
+              step="any"
+              value={form?.[side]?.[key] ?? ''}
+              onChange={e=>updateField(key, e.target.value)}
+              title={help}
+            />
+          </Field>
+        ))}
+      </div>
     </section>
   );
 }
