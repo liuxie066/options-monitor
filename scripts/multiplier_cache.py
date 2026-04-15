@@ -27,6 +27,20 @@ from pathlib import Path
 from scripts.io_utils import utc_now
 
 
+BUILTIN_MULTIPLIERS: dict[str, dict] = {
+    # HK stock options. Keep this list intentionally small and conservative;
+    # OpenD or runtime cache remains the preferred source when available.
+    "0700.HK": {"multiplier": 100, "source": "builtin.hk.common"},  # 腾讯
+    "00700.HK": {"multiplier": 100, "source": "builtin.hk.common"},
+    "0883.HK": {"multiplier": 1000, "source": "builtin.hk.common"},  # 中海油
+    "00883.HK": {"multiplier": 1000, "source": "builtin.hk.common"},
+    "3690.HK": {"multiplier": 100, "source": "builtin.hk.common"},  # 美团
+    "03690.HK": {"multiplier": 100, "source": "builtin.hk.common"},
+    "9992.HK": {"multiplier": 200, "source": "builtin.hk.common"},  # 泡泡玛特
+    "09992.HK": {"multiplier": 200, "source": "builtin.hk.common"},
+}
+
+
 def default_cache_path(repo_base: Path) -> Path:
     return (repo_base / "output_shared" / "state" / "multiplier_cache.json").resolve()
 
@@ -47,19 +61,62 @@ def save_cache(path: Path, cache: dict) -> None:
 
 
 def normalize_symbol(symbol: str) -> str:
-    return str(symbol or "").strip().upper()
+    sym = str(symbol or "").strip().upper()
+    if sym.endswith(".HK"):
+        code = sym[:-3]
+        if code.isdigit():
+            return f"{int(code):04d}.HK"
+    return sym
+
+
+def _symbol_aliases(symbol: str) -> list[str]:
+    sym = normalize_symbol(symbol)
+    out = [sym]
+    if sym.endswith(".HK"):
+        code = sym[:-3]
+        if code.isdigit():
+            out.append(f"{int(code):05d}.HK")
+    return list(dict.fromkeys(out))
 
 
 def get_cached_multiplier(cache: dict, symbol: str) -> int | None:
-    sym = normalize_symbol(symbol)
-    try:
-        v = cache.get(sym)
-        if not isinstance(v, dict):
-            return None
-        m = int(v.get("multiplier") or 0)
-        return m if m > 0 else None
-    except Exception:
-        return None
+    for sym in _symbol_aliases(symbol):
+        try:
+            v = cache.get(sym)
+            if not isinstance(v, dict):
+                continue
+            m = int(v.get("multiplier") or 0)
+            if m > 0:
+                return m
+        except Exception:
+            continue
+    return None
+
+
+def get_builtin_multiplier(symbol: str) -> int | None:
+    for sym in _symbol_aliases(symbol):
+        try:
+            v = BUILTIN_MULTIPLIERS.get(sym)
+            if not isinstance(v, dict):
+                continue
+            m = int(v.get("multiplier") or 0)
+            if m > 0:
+                return m
+        except Exception:
+            continue
+    norm = normalize_symbol(symbol)
+    if norm and not norm.endswith(".HK"):
+        return 100
+    return None
+
+
+def get_multiplier(cache: dict, symbol: str, *, include_builtin: bool = True) -> int | None:
+    cached = get_cached_multiplier(cache, symbol)
+    if cached:
+        return cached
+    if include_builtin:
+        return get_builtin_multiplier(symbol)
+    return None
 
 
 @dataclass

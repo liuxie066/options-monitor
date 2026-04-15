@@ -1,24 +1,8 @@
 #!/usr/bin/env python3
-"""Manage Feishu Bitable option_positions records (add/edit/close/list).
+"""Manage Feishu Bitable option_positions records.
 
-You asked for:
-- 自动算 cash_secured_amount（卖 put 的担保占用）
-- 平仓/删除用改 status=close 即可
-
-Assumptions (match current tables):
-- option_positions table fields include:
-  market, account, symbol, option_type, side, contracts, currency, status,
-  cash_secured_amount, note, underlying_share_locked
-- cash_secured_amount is stored in *native* currency as specified by currency (USD/HKD/CNY)
-
-Auto-calc rule:
-- For short put:
-    cash_secured_amount = strike * multiplier * contracts
-  where strike is the option strike in the same currency.
-
-Because the table currently doesn't have explicit strike/multiplier columns,
-we store them in note as key=value pairs:
-  strike=..., multiplier=..., exp=..., premium_per_share=...
+Supports open, buy-to-close (including partial close), auto-close-compatible
+fields, list, and low-level edit.
 
 This script uses Feishu app_id/app_secret from --pm-config.
 New deployments should prefer secrets/portfolio.feishu.json; the CLI default keeps
@@ -29,36 +13,35 @@ from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 
 from scripts.feishu_bitable import (
-    http_json,
-    get_tenant_access_token,
-    bitable_list_records,
     bitable_create_record,
     bitable_update_record,
     parse_note_kv,
     merge_note,
     safe_float,
 )
-
-
-def norm_symbol(s: str) -> str:
-    return str(s).strip().upper()
-
-
-def calc_cash_secured(strike: float, multiplier: float, contracts: int) -> float:
-    return float(strike) * float(multiplier) * int(contracts)
-
-
-def guess_multiplier(symbol: str) -> float | None:
-    # US equity options commonly 100; HK stock options vary, so default None for .HK
-    sym = norm_symbol(symbol)
-    if sym.endswith('.HK'):
-        return None
-    return 100.0
+from scripts.option_positions_core.domain import (
+    OpenPositionCommand,
+    build_buy_to_close_patch,
+    build_open_fields,
+    calc_cash_secured,
+    effective_contracts_open,
+    normalize_account,
+    normalize_broker,
+    normalize_close_type,
+    normalize_currency,
+    normalize_option_type,
+    normalize_side,
+    normalize_status,
+)
+from scripts.option_positions_core.service import (
+    OptionPositionsRepository,
+    buy_to_close_position,
+    load_table_ref,
+    open_position,
+)
 
 
 def format_money(v: float | None, ccy: str) -> str:
@@ -72,18 +55,6 @@ def format_money(v: float | None, ccy: str) -> str:
     if c == 'CNY':
         return f"¥{v:,.2f}"
     return f"{v:,.2f} {c}"
-
-
-def load_pm_config(pm_config: Path) -> tuple[str, str, str, str]:
-    cfg = json.loads(pm_config.read_text(encoding='utf-8'))
-    feishu_cfg = cfg.get('feishu', {}) or {}
-    app_id = feishu_cfg.get('app_id')
-    app_secret = feishu_cfg.get('app_secret')
-    ref = (feishu_cfg.get('tables', {}) or {}).get('option_positions')
-    if not (app_id and app_secret and ref and '/' in ref):
-        raise SystemExit('pm config missing feishu app_id/app_secret/option_positions')
-    app_token, table_id = ref.split('/', 1)
-    return app_id, app_secret, app_token, table_id
 
 
 def main():
@@ -117,8 +88,17 @@ def main():
     p_add.add_argument('--note', default=None)
     p_add.add_argument('--dry-run', action='store_true')
 
-    p_close = sub.add_parser('close', help='mark record status=close')
+    p_buy_close = sub.add_parser('buy-close', help='buy to close a position by record_id')
+    p_buy_close.add_argument('--record-id', required=True)
+    p_buy_close.add_argument('--contracts', type=int, required=True, help='contracts to close; supports partial close')
+    p_buy_close.add_argument('--close-price', type=float, default=None, help='buy-to-close price per share/contract unit')
+    p_buy_close.add_argument('--close-reason', default='manual_buy_to_close')
+    p_buy_close.add_argument('--dry-run', action='store_true')
+
+    p_close = sub.add_parser('close', help='DEPRECATED alias: close all remaining contracts by record_id')
     p_close.add_argument('--record-id', required=True)
+    p_close.add_argument('--close-price', type=float, default=None)
+    p_close.add_argument('--close-reason', default='manual_buy_to_close')
     p_close.add_argument('--dry-run', action='store_true')
 
     p_edit = sub.add_parser('edit', help='patch fields for a record')
@@ -133,36 +113,39 @@ def main():
     if not pm_config.is_absolute():
         pm_config = (base / pm_config).resolve()
 
-    app_id, app_secret, app_token, table_id = load_pm_config(pm_config)
-    token = get_tenant_access_token(app_id, app_secret)
+    repo = OptionPositionsRepository(load_table_ref(pm_config))
 
     if args.cmd == 'list':
-        items = bitable_list_records(token, app_token, table_id, page_size=200)
+        items = repo.list_records(page_size=200)
         rows = []
         for it in items:
             rid = it.get('record_id')
             f = it.get('fields') or {}
-            broker = args.broker
+            broker = normalize_broker(args.broker)
             if args.market:
-                broker = args.market
-            if broker and ((f.get('broker') or f.get('market')) != broker):
+                broker = normalize_broker(args.market)
+            if broker and normalize_broker(f.get('broker') or f.get('market')) != broker:
                 continue
-            if args.account and (f.get('account') != args.account):
+            if args.account and normalize_account(f.get('account')) != normalize_account(args.account):
                 continue
-            st = (f.get('status') or '').strip()
+            st = normalize_status(f.get('status'))
             if args.status != 'all' and st != args.status:
                 continue
             rows.append({
                 'record_id': rid,
-                'broker': (f.get('broker') or f.get('market')),
-                'account': f.get('account'),
+                'broker': normalize_broker(f.get('broker') or f.get('market')),
+                'account': normalize_account(f.get('account')) or f.get('account'),
                 'symbol': f.get('symbol'),
-                'option_type': f.get('option_type'),
-                'side': f.get('side'),
+                'option_type': normalize_option_type(f.get('option_type')),
+                'side': normalize_side(f.get('side')),
                 'contracts': f.get('contracts'),
-                'currency': f.get('currency'),
+                'contracts_open': f.get('contracts_open'),
+                'contracts_closed': f.get('contracts_closed'),
+                'currency': normalize_currency(f.get('currency')),
                 'cash_secured_amount': f.get('cash_secured_amount'),
                 'underlying_share_locked': f.get('underlying_share_locked'),
+                'close_type': normalize_close_type(f.get('close_type')) if f.get('close_type') else None,
+                'close_reason': f.get('close_reason'),
                 'status': st,
                 'note': f.get('note'),
             })
@@ -181,129 +164,99 @@ def main():
             cash_txt = format_money(cash, ccy) if cash is not None else '-'
             print(
                 f"- {r['record_id']} | {r.get('account')} | {r.get('symbol')} | {r.get('side')} {r.get('option_type')} | "
-                f"contracts {r.get('contracts')} | {ccy} cash_secured {cash_txt} | status {r.get('status')}"
+                f"contracts {r.get('contracts')} open {r.get('contracts_open')} closed {r.get('contracts_closed')} | "
+                f"{ccy} cash_secured {cash_txt} | status {r.get('status')}"
             )
         return
 
     if args.cmd == 'add':
-        sym = norm_symbol(args.symbol)
-        acct = str(args.account).strip()
-        ccy = str(args.currency).strip().upper()
-        side = args.side
-        opt_type = args.option_type
-        contracts = int(args.contracts)
-
-        strike = args.strike
-        multiplier = args.multiplier
-
-        if side == 'short' and opt_type == 'put':
-            if strike is None:
-                raise SystemExit('add short put requires --strike for auto cash_secured_amount')
-            if multiplier is None:
-                multiplier = guess_multiplier(sym)
-            if multiplier is None:
-                raise SystemExit('add short put requires --multiplier for HK symbols (cannot guess)')
-            cash_secured = calc_cash_secured(float(strike), float(multiplier), contracts)
-        else:
-            cash_secured = None
-
-        note_kv = {}
-        if strike is not None:
-            note_kv['strike'] = str(strike)
-        if multiplier is not None:
-            note_kv['multiplier'] = str(multiplier)
-        if args.exp:
-            note_kv['exp'] = str(args.exp)
-        if args.premium_per_share is not None:
-            note_kv['premium_per_share'] = str(args.premium_per_share)
-
-        note = merge_note(args.note, note_kv)
-
-        # Fill table schema fields so primary column isn't "未命名记录"
-        alias = {
-            '0700.HK': 'TENCENT',
-            '9992.HK': 'POPMART',
-            '3690.HK': 'MEITUAN',
-        }
-
-        def _fmt_strike(v: float | None) -> str:
-            if v is None:
-                return 'NA'
-            if float(v).is_integer():
-                return str(int(v))
-            return str(v).replace('.', 'p')
-
-        exp_ymd = (args.exp or '').strip() or None
-        exp_compact = exp_ymd.replace('-', '') if exp_ymd else 'NA'
-        strike_txt = _fmt_strike(strike)
-        pc = 'P' if opt_type == 'put' else 'C'
-        base = alias.get(sym, sym.replace('.', '_'))
-        position_id = f"{base}_{exp_compact}_{strike_txt}{pc}_{side}_x{contracts}"
-
-        expiration_ms = None
-        if exp_ymd:
-            # store as UTC 00:00:00 of the date, same as existing records
-            y, m, d = map(int, exp_ymd.split('-'))
-            from datetime import datetime, timezone
-            expiration_ms = int(datetime(y, m, d, tzinfo=timezone.utc).timestamp() * 1000)
-
-        from datetime import datetime, timezone
-        opened_at_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-
-        broker = args.broker
+        broker = normalize_broker(args.broker)
         if args.market:
-            broker = args.market
+            broker = normalize_broker(args.market)
             print('[WARN] --market is deprecated; use --broker')
-
-        fields = {
-            'position_id': position_id,
-            # prefer new schema
-            'broker': broker,
-            # keep legacy field for backward compatibility with existing records/filters
-            'market': broker,
-            'account': acct,
-            'symbol': sym,
-            'option_type': opt_type,
-            'side': side,
-            # Feishu Bitable Number field must be a JSON number
-            'contracts': int(contracts),
-            'currency': ccy,
-            'status': 'open',
-            'note': note or None,
-            'opened_at': opened_at_ms,
-        }
-        if strike is not None:
-            fields['strike'] = float(strike)
-        if expiration_ms is not None:
-            fields['expiration'] = int(expiration_ms)
-        if args.premium_per_share is not None:
-            fields['premium'] = float(args.premium_per_share)
-        if args.underlying_share_locked is not None:
-            # Feishu Bitable Number field must be a JSON number
-            fields['underlying_share_locked'] = int(args.underlying_share_locked)
-        if cash_secured is not None:
-            # Feishu Bitable Number field must be a JSON number (not a string)
-            fields['cash_secured_amount'] = float(cash_secured)
+        cmd = OpenPositionCommand(
+            broker=broker,
+            account=args.account,
+            symbol=args.symbol,
+            option_type=args.option_type,
+            side=args.side,
+            contracts=int(args.contracts),
+            currency=args.currency,
+            strike=args.strike,
+            multiplier=args.multiplier,
+            expiration_ymd=((args.exp or '').strip() or None),
+            premium_per_share=args.premium_per_share,
+            underlying_share_locked=args.underlying_share_locked,
+            note=args.note,
+        )
+        try:
+            fields = build_open_fields(cmd)
+        except ValueError as e:
+            raise SystemExit(str(e))
 
         if args.dry_run:
             print('[DRY_RUN] create fields:')
             print(json.dumps(fields, ensure_ascii=False, indent=2))
             return
 
-        res = bitable_create_record(token, app_token, table_id, fields)
+        res = open_position(repo, cmd)
         rec = (res.get('record') or {})
         rid = rec.get('record_id')
         print(f"[DONE] created record_id={rid}")
-        if cash_secured is not None:
-            print(f"cash_secured_amount={format_money(float(cash_secured), ccy)}")
+        if fields.get('cash_secured_amount') is not None:
+            print(f"cash_secured_amount={format_money(float(fields['cash_secured_amount']), fields.get('currency') or '')}")
+        return
+
+    if args.cmd == 'buy-close':
+        existing = repo.get_record_fields(args.record_id)
+        try:
+            patch = build_buy_to_close_patch(
+                existing,
+                contracts_to_close=int(args.contracts),
+                close_price=args.close_price,
+                close_reason=args.close_reason,
+            )
+        except ValueError as e:
+            raise SystemExit(str(e))
+        if args.dry_run:
+            print('[DRY_RUN] update fields:')
+            print(json.dumps(patch, ensure_ascii=False, indent=2))
+            return
+        buy_to_close_position(
+            repo,
+            record_id=args.record_id,
+            contracts_to_close=int(args.contracts),
+            close_price=args.close_price,
+            close_reason=args.close_reason,
+        )
+        print(f"[DONE] buy-closed {args.record_id} contracts={int(args.contracts)}")
         return
 
     if args.cmd == 'close':
+        print('[WARN] close is deprecated; use buy-close --contracts <remaining>')
+        existing = repo.get_record_fields(args.record_id)
+        remaining = effective_contracts_open(existing)
+        try:
+            patch = build_buy_to_close_patch(
+                existing,
+                contracts_to_close=remaining,
+                close_price=args.close_price,
+                close_reason=args.close_reason,
+            )
+        except ValueError as e:
+            raise SystemExit(str(e))
         if args.dry_run:
-            print(f"[DRY_RUN] update {args.record_id}: status=close")
+            print('[DRY_RUN] update fields:')
+            print(json.dumps(patch, ensure_ascii=False, indent=2))
             return
-        bitable_update_record(token, app_token, table_id, args.record_id, {'status': 'close'})
-        print(f"[DONE] closed {args.record_id}")
+        buy_to_close_position(
+            repo,
+            record_id=args.record_id,
+            contracts_to_close=remaining,
+            close_price=args.close_price,
+            close_reason=args.close_reason,
+        )
+        print(f"[DONE] closed {args.record_id} contracts={remaining}")
         return
 
     if args.cmd == 'edit':
@@ -321,7 +274,7 @@ def main():
         # If user edits strike/multiplier/contracts on a short put, offer recalculation when requested.
         # Minimal: if patch includes strike or multiplier, recompute cash_secured_amount.
         # We need existing record to know side/option_type/currency/contracts.
-        items = bitable_list_records(token, app_token, table_id, page_size=200)
+        items = repo.list_records(page_size=200)
         existing = None
         for it in items:
             if it.get('record_id') == args.record_id:
@@ -330,9 +283,8 @@ def main():
         if not existing:
             raise SystemExit(f"record not found: {args.record_id}")
 
-        side = (existing.get('side') or '').strip()
-        opt_type = (existing.get('option_type') or '').strip()
-        currency = (patch.get('currency') or existing.get('currency') or 'USD').strip().upper()
+        side = normalize_side(existing.get('side'))
+        opt_type = normalize_option_type(existing.get('option_type'))
 
         # merge note if user passes note+= style? Keep simple: if patch has note_append, append.
         if 'note_append' in patch:
@@ -360,16 +312,39 @@ def main():
         # Clean: only allow actual table fields
         allowed = {
             'market','account','symbol','option_type','side','contracts','currency','status',
-            'cash_secured_amount','note','underlying_share_locked'
+            'cash_secured_amount','note','underlying_share_locked',
+            'contracts_open','contracts_closed','closed_at','last_action_at',
+            'close_type','close_reason','close_price','broker','strike','expiration','premium',
         }
         patch2 = {k: v for k, v in patch.items() if k in allowed}
+        if 'broker' in patch2:
+            patch2['broker'] = normalize_broker(patch2.get('broker'))
+        if 'market' in patch2:
+            patch2['market'] = normalize_broker(patch2.get('market'))
+        if 'account' in patch2:
+            patch2['account'] = normalize_account(patch2.get('account'))
+        if 'symbol' in patch2:
+            patch2['symbol'] = str(patch2.get('symbol') or '').strip().upper()
+        try:
+            if 'option_type' in patch2:
+                patch2['option_type'] = normalize_option_type(patch2.get('option_type'), strict=True)
+            if 'side' in patch2:
+                patch2['side'] = normalize_side(patch2.get('side'), strict=True)
+            if 'status' in patch2:
+                patch2['status'] = normalize_status(patch2.get('status'), strict=True)
+            if 'currency' in patch2:
+                patch2['currency'] = normalize_currency(patch2.get('currency'), strict=True)
+            if 'close_type' in patch2 and patch2.get('close_type'):
+                patch2['close_type'] = normalize_close_type(patch2.get('close_type'), strict=True)
+        except ValueError as e:
+            raise SystemExit(str(e))
 
         if args.dry_run:
             print('[DRY_RUN] update fields:')
             print(json.dumps(patch2, ensure_ascii=False, indent=2))
             return
 
-        bitable_update_record(token, app_token, table_id, args.record_id, patch2)
+        repo.update_record(args.record_id, patch2)
         print(f"[DONE] updated {args.record_id}")
         return
 
