@@ -205,6 +205,10 @@ def top_pick_line(row: pd.Series) -> str:
             # Unified CNY view
             if req_cny is not None and req_cny > 0:
                 parts.append(f"cash_req_cny ¥{req_cny:,.0f}")
+            elif req is not None and req > 0:
+                # Keep margin display available even when other CNY fields exist
+                # but HKDCNY was unavailable for cash_required_cny.
+                parts.append(f"cash_req ${req:,.0f}")
             if used_total is not None and used_total > 0:
                 parts.append(f"cash_used_total_cny ¥{used_total:,.0f}")
                 if used_symbol is not None and used_symbol > 0:
@@ -216,8 +220,6 @@ def top_pick_line(row: pd.Series) -> str:
 
             # If we don't have CNY view, fallback to legacy USD view
             if not parts:
-                if req is not None and req > 0:
-                    parts.append(f"cash_req ${req:,.0f}")
                 if used_total is not None and used_total > 0:
                     parts.append(f"cash_used_total ${used_total:,.0f}")
                     if used_symbol is not None and used_symbol > 0:
