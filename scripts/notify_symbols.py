@@ -134,15 +134,23 @@ def _infer_account_label(*paths: Path | None) -> str:
             if token == 'accounts' and (i + 1) < len(parts):
                 acct = str(parts[i + 1]).strip()
                 if acct:
-                    return acct.upper()
+                    return acct.lower()
             if token == 'output_accounts' and (i + 1) < len(parts):
                 acct = str(parts[i + 1]).strip()
                 if acct:
-                    return acct.upper()
+                    return acct.lower()
     return '当前账户'
 
 
+def _normalize_account_label(account_label: str) -> str:
+    s = str(account_label or '').strip()
+    if s and s != '当前账户':
+        return s.lower()
+    return s or '当前账户'
+
+
 def _format_alert_line(line: str, *, account_label: str = '当前账户') -> str:
+    account_label = _normalize_account_label(account_label)
     raw = line.strip()
     if raw.startswith('- '):
         raw = raw[2:]

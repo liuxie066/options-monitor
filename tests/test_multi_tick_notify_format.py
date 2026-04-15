@@ -31,7 +31,7 @@ def test_merged_message_is_plain_text_for_weixin() -> None:
 
     assert "# 📊 Options Monitor\n## 合并提醒" in merged
     assert "北京时间 2026-04-08 22:31:00" in merged
-    assert "### LX · 本轮候选\n- Put 1 / Call 1" in merged
+    assert "### lx · 本轮候选\n- Put 1 / Call 1" in merged
     assert "**" not in merged
     assert "\n>" not in merged
 
