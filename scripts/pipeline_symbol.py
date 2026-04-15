@@ -173,6 +173,7 @@ def process_symbol(
                 timeout_sec=timeout_sec,
                 is_scheduled=IS_SCHEDULED,
                 stock=stock,
+                fx=_FX,
                 locked_shares_by_symbol=((portfolio_ctx or {}).get('option_ctx') or {}).get('locked_shares_by_symbol'),
                 global_sell_call_d3=(symbol_cfg.get('_global_sell_call_d3') or {}),
                 global_sell_call_d3_event=(symbol_cfg.get('_global_sell_call_d3_event') or {}),

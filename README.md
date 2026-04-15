@@ -44,17 +44,17 @@ python3 -m venv .venv
 线上推荐将真实运行配置放在仓库外管理，仓库内只保留 `configs/examples/*.json` 模板。例如：
 
 ```text
-/opt/options-monitor/configs/config.us.json
-/opt/options-monitor/configs/config.hk.json
+../options-monitor-config/config.us.json
+../options-monitor-config/config.hk.json
 /opt/options-monitor/secrets/portfolio.feishu.json
 ```
 
 初始化时可从模板复制到仓外路径：
 
 ```bash
-mkdir -p /opt/options-monitor/configs /opt/options-monitor/secrets
-cp configs/examples/config.example.us.json /opt/options-monitor/configs/config.us.json
-cp configs/examples/config.example.hk.json /opt/options-monitor/configs/config.hk.json
+mkdir -p ../options-monitor-config /opt/options-monitor/secrets
+cp configs/examples/config.example.us.json ../options-monitor-config/config.us.json
+cp configs/examples/config.example.hk.json ../options-monitor-config/config.hk.json
 cp configs/examples/portfolio.feishu.example.json /opt/options-monitor/secrets/portfolio.feishu.json
 ```
 
@@ -62,8 +62,19 @@ cp configs/examples/portfolio.feishu.example.json /opt/options-monitor/secrets/p
 
 日常只编辑 canonical runtime config：
 
-- `/opt/options-monitor/configs/config.us.json`
-- `/opt/options-monitor/configs/config.hk.json`
+- `../options-monitor-config/config.us.json`
+- `../options-monitor-config/config.hk.json`
+
+WebUI 配置中心默认读取当前项目目录同级的 `../options-monitor-config`，例如服务跑在 `options-monitor-prod` 时，会读取 `../options-monitor-config/config.us.json` 和 `../options-monitor-config/config.hk.json`。若线上真实路径不同，请在启动 WebUI 时显式设置：
+
+```bash
+OM_WEBUI_CONFIG_DIR=../options-monitor-config
+# 或分别指定
+OM_WEBUI_CONFIG_US=/path/to/config.us.json
+OM_WEBUI_CONFIG_HK=/path/to/config.hk.json
+```
+
+WebUI 不应默认落到 `options-monitor-prod/config.us.json` / `options-monitor-prod/config.hk.json`，那通常只是代码发布目录下的兼容路径，不应作为 canonical runtime config。
 
 多账户列表统一写在配置的顶层 `accounts` 字段中，例如 `["lx", "sy"]`。没有显式传 `--accounts` 的辅助脚本会优先使用这个字段。
 
@@ -72,8 +83,8 @@ cp configs/examples/portfolio.feishu.example.json /opt/options-monitor/secrets/p
 配置校验：
 
 ```bash
-./.venv/bin/python scripts/validate_config.py --config /opt/options-monitor/configs/config.us.json
-./.venv/bin/python scripts/validate_config.py --config /opt/options-monitor/configs/config.hk.json
+./.venv/bin/python scripts/validate_config.py --config ../options-monitor-config/config.us.json
+./.venv/bin/python scripts/validate_config.py --config ../options-monitor-config/config.hk.json
 ```
 
 ## 外部服务与凭证配置
@@ -158,7 +169,7 @@ cp configs/examples/portfolio.feishu.example.json /opt/options-monitor/secrets/p
 
 配置位置：
 
-- 仓外 runtime config 的 `notifications`，例如 `/opt/options-monitor/configs/config.us.json`。
+- `options-monitor-config` runtime config 的 `notifications`，例如 `../options-monitor-config/config.us.json`。
 
 常见字段：
 
@@ -179,7 +190,7 @@ cp configs/examples/portfolio.feishu.example.json /opt/options-monitor/secrets/p
 
 ## 5 分钟跑通
 
-下面命令使用仓内 `config.us.json` 作为开发机简写；生产环境请替换为仓外绝对路径，例如 `/opt/options-monitor/configs/config.us.json`。
+下面命令使用仓内 `config.us.json` 作为开发机简写；生产环境请替换为相对项目目录的 `options-monitor-config` 路径，例如 `../options-monitor-config/config.us.json`。
 
 1. 准备配置：
 
@@ -218,8 +229,8 @@ OPTIONS_MONITOR_CONFIG=config.hk.json ./run_watchlist.sh
 ### 多账户 tick
 
 ```bash
-./.venv/bin/python scripts/send_if_needed_multi.py --config /opt/options-monitor/configs/config.us.json --market-config us --accounts lx sy
-./.venv/bin/python scripts/send_if_needed_multi.py --config /opt/options-monitor/configs/config.hk.json --market-config hk --accounts lx sy
+./.venv/bin/python scripts/send_if_needed_multi.py --config ../options-monitor-config/config.us.json --market-config us --accounts lx sy
+./.venv/bin/python scripts/send_if_needed_multi.py --config ../options-monitor-config/config.hk.json --market-config hk --accounts lx sy
 ```
 
 这个入口会按 scheduler 判断是否需要扫描和通知；多账户运行会复用同一 tick 的 required data 与持仓上下文缓存。
