@@ -8,8 +8,9 @@
 - `config.hk.json`
 
 规则：
-- 仅允许直接编辑以上两份。
-- runtime 入口配置以 canonical 为准。
+- 线上推荐将以上两份放在仓库外管理，例如 `/opt/options-monitor/configs/config.us.json` / `/opt/options-monitor/configs/config.hk.json`。
+- 仓内同名文件仅作为开发机或临时本地运行的兼容默认，已被 `.gitignore` 忽略。
+- runtime 入口配置以 canonical 为准，生产 cron 应显式传入仓外配置的绝对路径。
 
 ## Derived Configs（派生产物，禁止手工维护）
 
@@ -22,14 +23,36 @@
 
 ## 变更流程（编辑 canonical -> 同步 -> 校验）
 
-1. 编辑 canonical：`config.us.json` / `config.hk.json`。
-2. 同步派生：`./.venv/bin/python scripts/sync_runtime_configs.py --apply`。
-3. 校验一致性：`./.venv/bin/python scripts/sync_runtime_configs.py --check`。
+1. 编辑仓外 canonical：`/opt/options-monitor/configs/config.us.json` / `/opt/options-monitor/configs/config.hk.json`。
+2. 运行入口显式使用仓外路径：`--config /opt/options-monitor/configs/config.us.json`。
+3. 若仍维护仓内兼容配置，再按需同步派生：`./.venv/bin/python scripts/sync_runtime_configs.py --apply`。
+4. 校验一致性：`./.venv/bin/python scripts/sync_runtime_configs.py --check`。
+
+## Runtime Config 迁移
+
+仓库代码更新后，如果仓外 `config.us.json` / `config.hk.json` 仍保留旧字段，可先 dry-run：
+
+```bash
+./.venv/bin/python scripts/migrate_runtime_config.py \
+  --config /opt/options-monitor/configs/config.us.json \
+  --config /opt/options-monitor/configs/config.hk.json
+```
+
+确认输出后再写入；脚本会先创建 `*.bak.YYYYmmdd-HHMMSS` 备份：
+
+```bash
+./.venv/bin/python scripts/migrate_runtime_config.py \
+  --config /opt/options-monitor/configs/config.us.json \
+  --config /opt/options-monitor/configs/config.hk.json \
+  --apply
+```
+
+不传 `--config` 时，脚本会兼容读取仓内 `config.us.json` / `config.hk.json`，适合开发机本地运行。
 
 ## 禁令
 
 - 禁止把派生配置当作维护入口或长期入口。
-- 禁止提交本地 runtime secrets（凭证、token、私钥等）。
+- 禁止提交本地 runtime config 与 runtime secrets（凭证、token、私钥等）。
 
 ## Derived Config Gate
 

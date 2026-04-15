@@ -1,15 +1,15 @@
 # options-monitor 配置与表结构说明（实战版）
 
 > 目标：你只要维护：
-> - `options-monitor/config.us.json 或 options-monitor/config.hk.json`（策略与监控）
+> - 仓外 `config.us.json` / `config.hk.json`（策略与监控，例如 `/opt/options-monitor/configs/`）
 > - 飞书 Bitable 的两张表：`holdings`、`option_positions`（账户约束）
-> - Feishu App 凭证（用于程序读取 Bitable，推荐放在 `secrets/portfolio.feishu.json`）
+> - Feishu App 凭证（用于程序读取 Bitable，推荐放在仓外 `secrets/portfolio.feishu.json`）
 
 ---
 
 ## 1) 本项目需要哪些外部“表”（Bitable）？
 
-目前本项目通过 `portfolio.pm_config` 指向的本地凭证文件读取飞书 Bitable。新部署推荐使用 `options-monitor/secrets/portfolio.feishu.json`；旧部署仍兼容 `../portfolio-management/config.json`：
+目前本项目通过 `portfolio.pm_config` 指向的本地凭证文件读取飞书 Bitable。新部署推荐使用仓外 `/opt/options-monitor/secrets/portfolio.feishu.json`；旧部署仍兼容 `../portfolio-management/config.json`：
 - `holdings`：现金与股票持仓（用于 base 现金、shares、avg_cost）
 - `option_positions`：已卖出期权占用（用于：
   - covered call 锁股数 `locked_shares_by_symbol`
@@ -96,9 +96,9 @@
 
 ---
 
-## 4) options-monitor/config.us.json 或 options-monitor/config.hk.json：你需要配置什么？
+## 4) 仓外 config.us.json 或 config.hk.json：你需要配置什么？
 
-文件：`options-monitor/config.us.json 或 options-monitor/config.hk.json`
+推荐文件：`/opt/options-monitor/configs/config.us.json` 或 `/opt/options-monitor/configs/config.hk.json`
 
 ### 4.0 accounts：账户列表
 - `accounts`: 多账户运行和辅助脚本的默认账户列表，例如 `["lx", "sy"]`。
@@ -121,7 +121,7 @@
 - `use`: 选择使用哪些模板（例如 `["put_base","call_base"]`）
 
 ### 4.3 portfolio：账户约束来源
-- `pm_config`: 推荐指向 `secrets/portfolio.feishu.json`（仅 Feishu/Bitable 凭证配置，不是 OM 运行入口）
+- `pm_config`: 推荐指向仓外 `/opt/options-monitor/secrets/portfolio.feishu.json`（仅 Feishu/Bitable 凭证配置，不是 OM 运行入口）
 - `market`: 用来过滤两张表（例如 `富途`）
 - `account`: 用来过滤两张表（例如 `lx`）
 - `base_currency`: 当前策略口径（CNY）
@@ -150,9 +150,9 @@
 ## 5) Feishu App 凭证（AppID/AppSecret）到底放哪？
 
 ### 推荐方式（新部署）
-- 从 `configs/examples/portfolio.feishu.example.json` 复制到 `secrets/portfolio.feishu.json`。
-- 在 `secrets/portfolio.feishu.json` 内填写 `feishu.app_id/app_secret` 和 `tables.holdings` / `tables.option_positions`。
-- 在 `config.us.json` / `config.hk.json` 内保持 `portfolio.pm_config = "secrets/portfolio.feishu.json"`。
+- 从 `configs/examples/portfolio.feishu.example.json` 复制到仓外 `/opt/options-monitor/secrets/portfolio.feishu.json`。
+- 在 `/opt/options-monitor/secrets/portfolio.feishu.json` 内填写 `feishu.app_id/app_secret` 和 `tables.holdings` / `tables.option_positions`。
+- 在仓外 `config.us.json` / `config.hk.json` 内保持 `portfolio.pm_config = "/opt/options-monitor/secrets/portfolio.feishu.json"`。
 
 ### 兼容方式（旧部署）
 - 如果你已经维护 `../portfolio-management/config.json`，仍可把 `portfolio.pm_config` 指向该文件。
@@ -184,7 +184,7 @@
 你可以发这些（任意一种即可）：
 1) holdings 表的 Bitable 链接 + option_positions 表的 Bitable 链接
 2) 或者直接发 `app_token/table_id`（例如 `xxx/tblxxx`），以及表的字段列表截图
-3) 你当前 `config.us.json` 或 `config.hk.json`（可以直接发文件内容；里面不包含 secret）
+3) 你当前仓外 `config.us.json` 或 `config.hk.json`（可以直接发文件内容；里面不包含 secret）
 
 **不要发**：Feishu app_secret、user_token。
 
