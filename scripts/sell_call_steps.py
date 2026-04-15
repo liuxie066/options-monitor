@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from scripts.fx_rates import CurrencyConverter
 from scripts.io_utils import safe_read_csv
 from scripts.report_summaries import summarize_sell_call
 from scripts.sell_call_config import resolve_min_annualized_net_premium_return_from_sell_call_cfg
@@ -31,6 +32,7 @@ def run_sell_call_scan_and_summarize(
     timeout_sec: int | None,
     is_scheduled: bool,
     stock: dict | None,
+    fx: CurrencyConverter,
     locked_shares_by_symbol: dict[str, int] | None = None,
     global_sell_call_d3: dict | None = None,
     global_sell_call_d3_event: dict | None = None,
@@ -71,6 +73,19 @@ def run_sell_call_scan_and_summarize(
     if isinstance(global_sell_call_d3_event, dict):
         d3_event.update(global_sell_call_d3_event)
 
+    # Config min_net_income is always CNY. The scanners expect option-native
+    # currency thresholds (USD for US symbols, HKD for HK symbols).
+    min_net_income_cny = float(cc.get('min_net_income') or 0.0)
+    min_net_income_native = 0.0
+    if min_net_income_cny > 0:
+        min_net_income_native = (
+            fx.cny_to_native(
+                min_net_income_cny,
+                native_ccy=('HKD' if str(symbol).upper().endswith('.HK') else 'USD'),
+            )
+            or 0.0
+        )
+
     cmd = [
         py, 'scripts/cli/scan_sell_call_cli.py',
         '--symbols', symbol,
@@ -82,7 +97,7 @@ def run_sell_call_scan_and_summarize(
         '--min-dte', str(cc.get('min_dte', 20)),
         '--max-dte', str(cc.get('max_dte', 90)),
         '--min-annualized-net-return', str(min_annualized),
-        '--min-net-income', str(cc.get('min_net_income', 50.0)),
+        '--min-net-income', str(min_net_income_native),
         '--min-open-interest', str(d3.get('min_open_interest', 100)),
         '--min-volume', str(d3.get('min_volume', 10)),
         '--max-spread-ratio', str(d3.get('max_spread_ratio', 0.3)),

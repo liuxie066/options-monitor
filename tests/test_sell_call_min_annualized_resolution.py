@@ -149,6 +149,7 @@ def test_sell_call_steps_passes_resolved_threshold_to_scanner() -> None:
     _add_repo_to_syspath()
 
     import scripts.sell_call_steps as steps
+    from scripts.fx_rates import CurrencyConverter, FxRates
 
     calls: list[list[str]] = []
     orig_run_cmd = steps.run_cmd
@@ -171,6 +172,7 @@ def test_sell_call_steps_passes_resolved_threshold_to_scanner() -> None:
             timeout_sec=10,
             is_scheduled=True,
             stock={'shares': 300, 'avg_cost': 100},
+            fx=CurrencyConverter(FxRates(usd_per_cny=0.14, cny_per_hkd=0.92)),
             locked_shares_by_symbol={'AAPL': 100},
         )
     finally:
@@ -181,3 +183,81 @@ def test_sell_call_steps_passes_resolved_threshold_to_scanner() -> None:
     cmd = calls[0]
     i = cmd.index('--min-annualized-net-return')
     assert cmd[i + 1] == '0.123'
+
+
+def test_sell_call_steps_converts_min_net_income_from_cny_to_native() -> None:
+    _add_repo_to_syspath()
+
+    import scripts.sell_call_steps as steps
+    from scripts.fx_rates import CurrencyConverter, FxRates
+
+    calls: list[list[str]] = []
+    orig_run_cmd = steps.run_cmd
+
+    def _fake_run_cmd(cmd, **kwargs):
+        calls.append(cmd)
+
+    steps.run_cmd = _fake_run_cmd
+    try:
+        steps.run_sell_call_scan_and_summarize(
+            py='python',
+            base=BASE,
+            symbol='AAPL',
+            symbol_lower='aapl',
+            symbol_cfg={'symbol': 'AAPL', 'sell_call': {}},
+            cc={'enabled': True, 'min_net_income': 100},
+            top_n=3,
+            required_data_dir=BASE / 'output',
+            report_dir=BASE / 'output' / 'reports',
+            timeout_sec=10,
+            is_scheduled=True,
+            stock={'shares': 300, 'avg_cost': 100},
+            fx=CurrencyConverter(FxRates(usd_per_cny=0.14, cny_per_hkd=0.92)),
+            locked_shares_by_symbol={'AAPL': 100},
+        )
+    finally:
+        steps.run_cmd = orig_run_cmd
+
+    assert calls
+    cmd = calls[0]
+    i = cmd.index('--min-net-income')
+    assert cmd[i + 1] == '14.000000000000002'
+
+
+def test_sell_call_steps_converts_hk_min_net_income_from_cny_to_hkd() -> None:
+    _add_repo_to_syspath()
+
+    import scripts.sell_call_steps as steps
+    from scripts.fx_rates import CurrencyConverter, FxRates
+
+    calls: list[list[str]] = []
+    orig_run_cmd = steps.run_cmd
+
+    def _fake_run_cmd(cmd, **kwargs):
+        calls.append(cmd)
+
+    steps.run_cmd = _fake_run_cmd
+    try:
+        steps.run_sell_call_scan_and_summarize(
+            py='python',
+            base=BASE,
+            symbol='0700.HK',
+            symbol_lower='0700.hk',
+            symbol_cfg={'symbol': '0700.HK', 'sell_call': {}},
+            cc={'enabled': True, 'min_net_income': 100},
+            top_n=3,
+            required_data_dir=BASE / 'output',
+            report_dir=BASE / 'output' / 'reports',
+            timeout_sec=10,
+            is_scheduled=True,
+            stock={'shares': 300, 'avg_cost': 100},
+            fx=CurrencyConverter(FxRates(usd_per_cny=0.14, cny_per_hkd=0.92)),
+            locked_shares_by_symbol={'0700.HK': 100},
+        )
+    finally:
+        steps.run_cmd = orig_run_cmd
+
+    assert calls
+    cmd = calls[0]
+    i = cmd.index('--min-net-income')
+    assert abs(float(cmd[i + 1]) - (100 / 0.92)) < 1e-9
