@@ -2,9 +2,9 @@
 """Deploy from dev repo (options-monitor) to prod repo (options-monitor-prod).
 
 Policy:
-- Copy selected paths (scripts/tests/docs/requirements/.gitignore + selected root configs)
+- Copy selected paths (scripts/tests/docs/config examples/requirements/.gitignore + selected root configs)
 - Default: skip runtime configs (prod keeps local runtime config files)
-- Keep syncing config.example.*.json templates
+- Keep syncing config templates under configs/examples/
 - Use --include-runtime-config to allow config overwrite explicitly
 - Runtime config overwrite is gated by allowlist (required with --include-runtime-config)
 - Default: dry-run; use --apply to write
@@ -42,11 +42,7 @@ ITEMS = [
     "SKILL.md",
     "config.us.json",
     "config.hk.json",
-    "config.legacy.example.json",
-    "config.scheduled.example.json",
-    "config.market_us.example.json",
-    "config.market_hk.example.json",
-    "config.market_us.fallback_yahoo.example.json",
+    "configs",
     "om",
     "scripts",
     "tests",
@@ -121,11 +117,11 @@ class RuntimeAllowlist:
 
 
 def sync_items() -> list[str]:
-    """Return sync scope, including all top-level config.example.*.json templates."""
+    """Return sync scope, including config templates under configs/examples/."""
     items = list(ITEMS)
-    for p in sorted(ROOT_DEV.glob("config.example.*.json")):
+    for p in sorted((ROOT_DEV / "configs" / "examples").glob("*.json")):
         if p.is_file():
-            items.append(p.name)
+            items.append(str(p.relative_to(ROOT_DEV)))
     # Keep a stable order while removing duplicates.
     return list(dict.fromkeys(items))
 

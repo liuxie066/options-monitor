@@ -25,7 +25,6 @@ from pathlib import Path
 
 DEFAULT_FIELDS = ("notifications",)
 
-
 @dataclass(frozen=True)
 class DerivedTarget:
     path: str
@@ -34,15 +33,15 @@ class DerivedTarget:
 
 
 DERIVED_TARGETS: tuple[DerivedTarget, ...] = (
-    DerivedTarget("config.scheduled.json", "config.us.json", "config.scheduled.example.json"),
-    DerivedTarget("config.market_us.json", "config.us.json", "config.market_us.example.json"),
-    DerivedTarget("config.market_hk.json", "config.hk.json", "config.market_hk.example.json"),
+    DerivedTarget("config.scheduled.json", "config.us.json", "configs/examples/config.scheduled.example.json"),
+    DerivedTarget("config.market_us.json", "config.us.json", "configs/examples/config.market_us.example.json"),
+    DerivedTarget("config.market_hk.json", "config.hk.json", "configs/examples/config.market_hk.example.json"),
     DerivedTarget(
         "config.market_us.fallback_yahoo.json",
         "config.us.json",
-        "config.market_us.fallback_yahoo.example.json",
+        "configs/examples/config.market_us.fallback_yahoo.example.json",
     ),
-    DerivedTarget("config.json", "config.us.json", "config.legacy.example.json"),
+    DerivedTarget("config.json", "config.us.json", "configs/examples/config.legacy.example.json"),
 )
 
 
