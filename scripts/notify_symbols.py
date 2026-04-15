@@ -220,17 +220,19 @@ def _format_alert_line(line: str, *, account_label: str = '当前账户') -> str
         annual_show = f"年化 {_present_or_missing(annual_val, reason='告警未提供年化')}"
         delta_show = _present_or_missing(delta, reason='告警未提供delta')
         iv_show = _present_or_missing(iv, reason='告警未提供iv')
-        title = f"### [{account_label}] {symbol_name} | 到期 {exp} | 策略 卖Put"
+        note = comment or '通过准入后，收益/风险组合较强，值得优先看。'
+        title = f"### [{account_label}] {symbol_name} · 卖Put"
         out = [
             title,
             f"- {symbol_name} 卖Put {contract}",
-            f"- 指标: 方向=卖Put | 行权价={strike_show} | 数量=1张(默认) | 权利金={premium} | {annual_show} | {income_int_tag(income) or '净收 -'} | 保证金占用={margin} | delta={delta_show} | IV={iv_show}",
+            f"- 收益: 权利金={premium} | {annual_show} | {income_int_tag(income) or '净收 -'}",
+            f"- 合约: 行权价={strike_show} | 数量=1张(默认) | DTE={dte.replace('DTE ', '').strip() if dte else '-'}",
+            f"- 风控: 风险={risk_tag or '-'} | delta={delta_show} | IV={iv_show}",
+            f"- 资金: 保证金占用={margin}",
         ]
         if sug:
-            out.append(f"- 建议挂单: {sug.replace('建议挂单 ', '').strip()}")
-        out.append("> 次要信息")
-        out.append(f"> 风险: {risk_tag or '-'}")
-        out.append(f"> DTE: {dte.replace('DTE ', '').strip() if dte else '-'}")
+            out.append(f"- 操作: 建议挂单={sug.replace('建议挂单 ', '').strip()}")
+        out.append(f"- 备注: {note}")
         out.append("---")
         return "\n".join(out)
 
@@ -252,18 +254,19 @@ def _format_alert_line(line: str, *, account_label: str = '当前账户') -> str
         delta_show = _present_or_missing(delta, reason='告警未提供delta')
         iv_show = _present_or_missing(iv, reason='告警未提供iv')
         qty = f"{cover}张(可覆盖)" if (not _is_missing_value(cover)) else '1张(默认)'
-        title = f"### [{account_label}] {symbol_name} | 到期 {exp} | 策略 卖Call"
+        note = comment or '已通过准入，可作为 sell call 备选。'
+        title = f"### [{account_label}] {symbol_name} · 卖Call"
         out = [
             title,
             f"- {symbol_name} 卖Call {contract}",
-            f"- 指标: 方向=卖Call | 行权价={strike_show} | 数量={qty} | 权利金={premium} | {annual_show} | {income_int_tag(income) or '净收 -'} | 保证金占用=- | delta={delta_show} | IV={iv_show}",
+            f"- 收益: 权利金={premium} | {annual_show} | {income_int_tag(income) or '净收 -'}",
+            f"- 合约: 行权价={strike_show} | 数量={qty} | DTE={dte.replace('DTE ', '').strip() if dte else '-'}",
+            f"- 风控: 风险={risk_tag or '-'} | delta={delta_show} | IV={iv_show}",
+            f"- 覆盖: {_present_or_missing(cover, reason='告警未提供cover')} 张 | shares {_present_or_missing(shares, reason='告警未提供shares')}",
         ]
         if sug:
-            out.append(f"- 建议挂单: {sug.replace('建议挂单 ', '').strip()}")
-        out.append("> 次要信息")
-        out.append(f"> 覆盖: {_present_or_missing(cover, reason='告警未提供cover')} 张 | shares {_present_or_missing(shares, reason='告警未提供shares')}")
-        out.append(f"> 风险: {risk_tag or '-'}")
-        out.append(f"> DTE: {dte.replace('DTE ', '').strip() if dte else '-'}")
+            out.append(f"- 操作: 建议挂单={sug.replace('建议挂单 ', '').strip()}")
+        out.append(f"- 备注: {note}")
         out.append("---")
         return "\n".join(out)
 
