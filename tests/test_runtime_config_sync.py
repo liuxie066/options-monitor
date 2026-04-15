@@ -36,13 +36,15 @@ def test_runtime_config_sync_notifications_apply_and_check() -> None:
         )
 
         # Templates used when derived files are missing.
+        example_dir = root / "configs" / "examples"
+        example_dir.mkdir(parents=True)
         for name in (
             "config.scheduled.example.json",
             "config.market_hk.example.json",
             "config.market_us.fallback_yahoo.example.json",
             "config.legacy.example.json",
         ):
-            _write_json(root / name, {"notifications": {"channel": "template", "target": "template"}, "seed": name})
+            _write_json(example_dir / name, {"notifications": {"channel": "template", "target": "template"}, "seed": name})
 
         # Pre-apply: should detect drift.
         plan = compute_sync_plan(base_dir=root)
@@ -65,4 +67,3 @@ def test_runtime_config_sync_notifications_apply_and_check() -> None:
         assert us_market["notifications"] == us["notifications"]
         assert hk_market["notifications"] == hk["notifications"]
         assert scheduled["notifications"] == us["notifications"]
-
