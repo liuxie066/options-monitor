@@ -45,7 +45,7 @@ from .misc import (
     log,
     parse_hhmm,
     maybe_parse_dt,
-    atomic_symlink,
+    update_legacy_output_link,
     ensure_account_output_dir,
     AccountResult,
     _safe_runlog_data,
@@ -621,14 +621,21 @@ def main() -> int:
 
     accounts_root = (base / 'output_accounts').resolve()
     accounts_root.mkdir(parents=True, exist_ok=True)
+    legacy_output_tmp_dir = (base / 'output_shared' / 'tmp' / 'legacy_output_link').resolve()
+    legacy_output_tmp_dir.mkdir(parents=True, exist_ok=True)
 
     out_link = base / 'output'
     if not out_link.exists():
         dst = accounts_root / args.default_account
         ensure_account_output_dir(dst)
-        out_link.symlink_to(dst, target_is_directory=True)
-    if not out_link.is_symlink():
-        raise SystemExit(f"./output must be a symlink for multi-account mode: {out_link}")
+        try:
+            update_legacy_output_link(out_link, dst, tmp_dir=legacy_output_tmp_dir)
+        except RuntimeError as exc:
+            raise SystemExit(str(exc))
+    elif not out_link.is_symlink():
+        if os.access(out_link.parent, os.W_OK):
+            raise SystemExit(f"./output must be a symlink for multi-account mode: {out_link}")
+        log(f'skip legacy output link validation on read-only repo root: {out_link}')
 
     results: list[AccountResult] = []
 
@@ -877,7 +884,10 @@ def main() -> int:
         }
         ensure_account_output_dir(acct_out)
 
-        atomic_symlink(out_link, acct_out)
+        try:
+            update_legacy_output_link(out_link, acct_out, tmp_dir=legacy_output_tmp_dir)
+        except RuntimeError as exc:
+            raise SystemExit(str(exc))
 
         cfg = json.loads(json.dumps(base_cfg))
         cfg.setdefault('portfolio', {})
