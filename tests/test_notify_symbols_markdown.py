@@ -28,7 +28,7 @@ def test_notify_symbols_markdown_put_layout() -> None:
 
     expected = """Put
 
-### [LX] 腾讯 · 卖Put
+### [lx] 腾讯 · 卖Put
 - 腾讯 卖Put 2026-04-29 460P
 - 收益: 权利金=5.720 (HKD) | 年化 17.21% | 净收 557
 - 合约: 行权价=460 | 数量=1张(默认) | DTE=26
@@ -82,7 +82,7 @@ def test_notify_symbols_markdown_call_layout_and_changes() -> None:
 """
     out = build_notification(changes, alerts, account_label="SY")
 
-    assert "### [SY] 英伟达 · 卖Call" in out
+    assert "### [sy] 英伟达 · 卖Call" in out
     assert "数量=2张(可覆盖)" in out
     assert "变化" in out
     assert "- NVDA sell_call: Top pick 由 2026-06-18 175C 变为 2026-06-18 180C。" in out
