@@ -172,6 +172,7 @@ def test_sell_put_steps_use_global_d3_only() -> None:
 def test_sell_call_steps_use_global_d3_only() -> None:
     base = _add_repo_to_syspath()
     import scripts.sell_call_steps as steps
+    from scripts.fx_rates import CurrencyConverter, FxRates
 
     calls: list[list[str]] = []
     orig_run_cmd = steps.run_cmd
@@ -201,6 +202,7 @@ def test_sell_call_steps_use_global_d3_only() -> None:
             timeout_sec=10,
             is_scheduled=True,
             stock={'shares': 200, 'avg_cost': 100.0},
+            fx=CurrencyConverter(FxRates(usd_per_cny=0.14, cny_per_hkd=0.92)),
             locked_shares_by_symbol={'AAPL': 0},
             global_sell_call_d3={
                 'min_open_interest': 60,
