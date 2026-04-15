@@ -305,7 +305,10 @@ def _patch_entry(entry: dict, payload: dict):
 
 @app.get("/", response_class=HTMLResponse)
 def index():
-    return FileResponse(str(static_dir / "index.html"))
+    return FileResponse(
+        str(static_dir / "index.html"),
+        headers={"Cache-Control": "no-store, max-age=0"},
+    )
 
 
 @app.get("/api/watchlist")
