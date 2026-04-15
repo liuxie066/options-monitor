@@ -168,7 +168,7 @@ def build_merged_message(
         put_n = sum(1 for ln in kept if ' 卖Put ' in ln)
         call_n = sum(1 for ln in kept if ' 卖Call ' in ln)
 
-        lines.append(f"### {r.account.upper()} · 本轮候选")
+        lines.append(f"### {str(r.account).strip().lower()} · 本轮候选")
         lines.append(f"- Put {put_n} / Call {call_n}")
         lines.append('')
         lines.append(annotate_notification(r.account, '\n'.join(kept).strip() + '\n').strip())
