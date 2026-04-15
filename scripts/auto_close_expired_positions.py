@@ -26,35 +26,16 @@ repo_base = Path(__file__).resolve().parents[1]
 if str(repo_base) not in sys.path:
     sys.path.insert(0, str(repo_base))
 
-import argparse
 import json
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+import argparse
+from datetime import datetime, timezone
 
-from scripts.feishu_bitable import (
-    get_tenant_access_token,
-    bitable_update_record,
-    parse_note_kv,
-    merge_note,
+from scripts.option_positions_core.service import (
+    OptionPositionsRepository,
+    auto_close_expired_positions,
+    build_expired_close_decisions,
+    load_table_ref,
 )
-
-
-def parse_exp_to_ms(exp_ymd: str) -> int | None:
-    try:
-        y, m, d = map(int, exp_ymd.split('-'))
-        return int(datetime(y, m, d, tzinfo=timezone.utc).timestamp() * 1000)
-    except Exception:
-        return None
-
-
-@dataclass
-class Decision:
-    record_id: str
-    position_id: str
-    expiration_ms: int | None
-    effective_exp_source: str
-    should_close: bool
-    reason: str
 
 
 def main():
@@ -95,95 +76,31 @@ def main():
     else:
         as_of = datetime.now(timezone.utc)
 
-    cutoff = as_of - timedelta(days=int(args.grace_days))
-
-    decisions: list[Decision] = []
-    for p in positions:
-        rid = (p.get('record_id') or '').strip()
-        pid = (p.get('position_id') or '').strip() or '(no position_id)'
-        if not rid:
-            decisions.append(Decision('', pid, None, 'none', False, 'missing record_id'))
-            continue
-
-        exp_ms = p.get('expiration')
-        exp_src = 'expiration'
-        exp_dt = None
-        if exp_ms not in (None, '', 0):
-            try:
-                exp_dt = datetime.fromtimestamp(int(exp_ms)/1000, tz=timezone.utc)
-            except Exception:
-                exp_dt = None
-        if exp_dt is None:
-            exp_ymd = parse_note_kv(p.get('note') or '', 'exp')
-            exp_ms2 = parse_exp_to_ms(exp_ymd) if exp_ymd else None
-            if exp_ms2 is not None:
-                exp_ms = exp_ms2
-                exp_src = 'note.exp'
-                exp_dt = datetime.fromtimestamp(int(exp_ms)/1000, tz=timezone.utc)
-
-        if exp_dt is None:
-            decisions.append(Decision(rid, pid, None, 'none', False, 'missing expiration (field and note)'))
-            continue
-
-        should_close = exp_dt <= cutoff
-        reason = f"expired: exp={exp_dt.date().isoformat()} grace_days={args.grace_days} as_of={as_of.date().isoformat()}"
-        decisions.append(Decision(rid, pid, int(exp_ms), exp_src, should_close, reason))
-
-    to_close = [d for d in decisions if d.should_close and d.record_id]
-    skipped = [d for d in decisions if (not d.should_close) or (not d.record_id)]
-
-    # guardrail
-    applied: list[Decision] = []
+    as_of_ms = int(as_of.timestamp() * 1000)
+    decisions = build_expired_close_decisions(
+        [p for p in positions if isinstance(p, dict)],
+        as_of_ms=as_of_ms,
+        grace_days=int(args.grace_days),
+    )
+    to_close = [d for d in decisions if bool(d.get('should_close')) and d.get('record_id')]
+    applied: list[dict] = []
     errors: list[str] = []
 
-    if len(to_close) > int(args.max_close):
-        errors.append(f"too many to close: {len(to_close)} > max_close={args.max_close}; abort")
-        to_apply: list[Decision] = []
-    else:
-        to_apply = to_close
-
-    # Apply updates
-    if to_apply and not args.dry_run and not errors:
+    if to_close and not args.dry_run:
         pm_config = Path(args.pm_config)
         if not pm_config.is_absolute():
             pm_config = (base / pm_config).resolve()
-        cfg = json.loads(pm_config.read_text(encoding='utf-8'))
-        feishu_cfg = cfg.get('feishu', {}) or {}
-        app_id = feishu_cfg.get('app_id')
-        app_secret = feishu_cfg.get('app_secret')
-        ref = (feishu_cfg.get('tables', {}) or {}).get('option_positions')
-        if not (app_id and app_secret and ref and '/' in ref):
-            raise SystemExit('pm config missing feishu app_id/app_secret/option_positions')
-        app_token, table_id = ref.split('/', 1)
-
-        token = get_tenant_access_token(app_id, app_secret)
-
-        for d in to_apply:
-            try:
-                now_iso = as_of.isoformat()
-                patch = {
-                    'status': 'close',
-                    'note': merge_note(None, {}),
-                }
-                # Keep existing note by setting note to existing+append.
-                # We don't have full existing note here reliably; use the note from context.
-                # (Context is produced by the same scan, so it's up-to-date enough.)
-                existing_note = None
-                for p in positions:
-                    if (p.get('record_id') or '').strip() == d.record_id:
-                        existing_note = p.get('note')
-                        break
-                patch['note'] = merge_note(existing_note, {
-                    'auto_close_at': now_iso,
-                    'auto_close_reason': 'expired',
-                    'close_reason': 'expired',
-                    'auto_close_grace_days': str(args.grace_days),
-                    'auto_close_exp_src': d.effective_exp_source,
-                })
-                bitable_update_record(token, app_token, table_id, d.record_id, patch)
-                applied.append(d)
-            except Exception as e:
-                errors.append(f"{d.record_id} {d.position_id}: {e}")
+        repo = OptionPositionsRepository(load_table_ref(pm_config))
+        decisions, applied, errors = auto_close_expired_positions(
+            repo,
+            [p for p in positions if isinstance(p, dict)],
+            as_of_ms=as_of_ms,
+            grace_days=int(args.grace_days),
+            max_close=int(args.max_close),
+        )
+        to_close = [d for d in decisions if bool(d.get('should_close')) and d.get('record_id')]
+    elif len(to_close) > int(args.max_close):
+        errors.append(f"too many to close: {len(to_close)} > max_close={args.max_close}; abort")
 
     # Summary
     lines: list[str] = []
@@ -211,12 +128,15 @@ def main():
     if to_close:
         lines.append("Closed / To close list:")
         for d in (applied if (applied and not args.dry_run) else to_close)[:50]:
-            lines.append(f"- {d.record_id} | {d.position_id} | exp_src={d.effective_exp_source} | exp_ms={d.expiration_ms}")
+            lines.append(
+                f"- {d.get('record_id')} | {d.get('position_id')} | "
+                f"exp_src={d.get('effective_exp_source')} | exp_ms={d.get('expiration_ms')}"
+            )
         lines.append("")
 
     # skipped highlights
-    missing_exp = [d for d in decisions if 'missing expiration' in d.reason]
-    missing_rid = [d for d in decisions if d.reason == 'missing record_id']
+    missing_exp = [d for d in decisions if 'missing expiration' in str(d.get('reason') or '')]
+    missing_rid = [d for d in decisions if str(d.get('reason') or '') == 'missing record_id']
     if missing_exp or missing_rid:
         lines.append("Skipped:")
         if missing_rid:

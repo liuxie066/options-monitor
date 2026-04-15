@@ -21,6 +21,18 @@ from scripts.feishu_bitable import (
     safe_float,
     parse_note_kv,
 )
+from scripts.option_positions_core.domain import (
+    effective_contracts,
+    effective_contracts_closed,
+    effective_contracts_open,
+    normalize_account,
+    normalize_broker,
+    normalize_close_type,
+    normalize_currency,
+    normalize_option_type,
+    normalize_side,
+    normalize_status,
+)
 from scripts.io_utils import atomic_write_json
 
 # Local helper to get FX rates (USDCNY/HKDCNY) for base-currency normalization.
@@ -38,25 +50,24 @@ def build_context(records: list[dict], broker: str, account: str | None = None, 
     without adding extra list calls.
     """
 
+    broker_norm = normalize_broker(broker)
+    account_norm = normalize_account(account) if account else None
     selected_items: list[dict] = []  # each: {record_id, fields}
-    selected_fields: list[dict] = []
-
     for rec in records:
         fields = rec.get("fields") or {}
         if not fields:
             continue
         # broker: prefer new field; fallback to legacy market field (backward compatible)
-        if broker:
-            rec_broker = (fields.get("broker") or fields.get("market") or "").strip()
-            if rec_broker != broker:
+        if broker_norm:
+            rec_broker = normalize_broker(fields.get("broker") or fields.get("market"))
+            if rec_broker != broker_norm:
                 continue
-        if account and fields.get("account") != account:
+        if account_norm and normalize_account(fields.get("account")) != account_norm:
             continue
         selected_items.append({
             'record_id': rec.get('record_id') or rec.get('id'),
             'fields': fields,
         })
-        selected_fields.append(fields)
 
     # Aggregate open short positions for constraints
     locked_shares_by_symbol: dict[str, int] = {}
@@ -87,24 +98,40 @@ def build_context(records: list[dict], broker: str, account: str | None = None, 
     # Minimal open positions list for downstream (auto-close), keeps record_id.
     open_positions_min: list[dict] = []
 
-    for f in selected_fields:
+    for it in selected_items:
+        f = it.get('fields') or {}
         note = f.get('note') or ''
-        status = (f.get("status") or "").strip() or parse_note_kv(note, 'status')
+        status = normalize_status(f.get("status") or parse_note_kv(note, 'status'))
         if status and status != "open":
             continue
+        contracts_total = effective_contracts(f)
+        contracts_open = effective_contracts_open(f)
+        contracts_closed = effective_contracts_closed(f)
+        if contracts_open <= 0:
+            continue
 
-        # Build open positions list (best-effort) for downstream tasks.
-        # We'll attach record_id later by matching position_id when possible.
         open_positions_min.append({
-            'record_id': None,
+            'record_id': it.get('record_id'),
             'position_id': (f.get('position_id') or '').strip() or None,
-            'broker': (f.get('broker') or f.get('market')),
-            'account': f.get('account'),
+            'broker': normalize_broker(f.get('broker') or f.get('market')),
+            'account': normalize_account(f.get('account')) or f.get('account'),
             'symbol': (f.get('symbol') or '').strip().upper() or None,
-            'option_type': (f.get('option_type') or '').strip() or parse_note_kv(note, 'option_type') or None,
-            'side': (f.get('side') or '').strip() or parse_note_kv(note, 'side') or None,
+            'option_type': normalize_option_type(f.get('option_type') or parse_note_kv(note, 'option_type')) or None,
+            'side': normalize_side(f.get('side') or parse_note_kv(note, 'side')) or None,
             'status': 'open',
+            'contracts': f.get('contracts'),
+            'contracts_open': contracts_open,
+            'contracts_closed': contracts_closed,
+            'currency': normalize_currency(f.get('currency')) or f.get('currency'),
+            'cash_secured_amount': f.get('cash_secured_amount'),
+            'underlying_share_locked': f.get('underlying_share_locked') or f.get('underlying_shares_locked'),
+            'strike': f.get('strike'),
+            'multiplier': f.get('multiplier') or parse_note_kv(note, 'multiplier') or None,
             'expiration': f.get('expiration'),
+            'opened_at': f.get('opened_at'),
+            'last_action_at': f.get('last_action_at'),
+            'close_type': normalize_close_type(f.get('close_type')) if f.get('close_type') else None,
+            'close_reason': f.get('close_reason'),
             'note': note,
         })
 
@@ -112,22 +139,21 @@ def build_context(records: list[dict], broker: str, account: str | None = None, 
         if not symbol:
             continue
 
-        option_type = (f.get("option_type") or "").strip() or parse_note_kv(note, 'option_type')
-        side = (f.get("side") or "").strip() or parse_note_kv(note, 'side')
-
-        contracts = safe_float(f.get("contracts"))
-        contracts_i = int(contracts) if contracts is not None else 0
+        option_type = normalize_option_type(f.get("option_type") or parse_note_kv(note, 'option_type'))
+        side = normalize_side(f.get("side") or parse_note_kv(note, 'side'))
 
         locked = safe_float(f.get("underlying_share_locked"))
         if locked is None:
             locked = safe_float(f.get("underlying_shares_locked"))
 
         cash_secured = safe_float(f.get("cash_secured_amount"))
-        currency = (f.get('currency') or '').strip().upper()
+        currency = normalize_currency(f.get('currency'))
 
         if side == "short" and option_type == "call":
             if locked is None:
-                locked = contracts_i * 100
+                locked = contracts_open * 100
+            elif contracts_total > 0 and contracts_open < contracts_total:
+                locked = float(locked) / float(contracts_total) * float(contracts_open)
             locked_shares_by_symbol[symbol] = locked_shares_by_symbol.get(symbol, 0) + int(locked)
 
         if side == "short" and option_type == "put":
@@ -135,6 +161,8 @@ def build_context(records: list[dict], broker: str, account: str | None = None, 
                 continue
             if not currency:
                 currency = 'USD'  # backward compatible default
+            if contracts_total > 0 and contracts_open < contracts_total:
+                cash_secured = float(cash_secured) / float(contracts_total) * float(contracts_open)
 
             # bucket per symbol per currency
             m = cash_secured_by_symbol_by_ccy.get(symbol) or {}
@@ -160,54 +188,37 @@ def build_context(records: list[dict], broker: str, account: str | None = None, 
                 else:
                     cash_secured_total_cny = None
 
-    # Attach record_id to open positions list.
-    # Prefer matching by primary key position_id; fallback to a coarse signature.
-    id_by_position_id: dict[str, str] = {}
-    for it in selected_items:
-        rid = it.get('record_id')
-        f = it.get('fields') or {}
-        pid = (f.get('position_id') or '').strip()
-        if rid and pid:
-            id_by_position_id[pid] = rid
-
-    open_positions_min2: list[dict] = []
-    for p in open_positions_min:
-        pid = (p.get('position_id') or '').strip()
-        rid = id_by_position_id.get(pid) if pid else None
-        p2 = dict(p)
-        p2['record_id'] = rid
-        open_positions_min2.append(p2)
-
     return {
         "as_of_utc": datetime.now(timezone.utc).isoformat(),
-        "filters": {"broker": broker, "account": account},
+        "filters": {"broker": broker_norm, "account": account_norm or account},
         "locked_shares_by_symbol": locked_shares_by_symbol,
         "cash_secured_by_symbol_by_ccy": cash_secured_by_symbol_by_ccy,
         "cash_secured_total_by_ccy": cash_secured_total_by_ccy,
         "cash_secured_total_cny": cash_secured_total_cny,
         "fx_rates": (rates or {}),
-        "raw_selected_count": len(selected_fields),
-        "open_positions_min": open_positions_min2,
+        "raw_selected_count": len(selected_items),
+        "open_positions_min": open_positions_min,
     }
 
 
 def build_shared_context(records: list[dict], broker: str, rates: dict | None = None) -> dict:
+    broker_norm = normalize_broker(broker)
     accounts: set[str] = set()
     for rec in records:
         fields = rec.get("fields") or {}
         if not fields:
             continue
-        rec_broker = (fields.get("broker") or fields.get("market") or "").strip()
-        if broker and rec_broker != broker:
+        rec_broker = normalize_broker(fields.get("broker") or fields.get("market"))
+        if broker_norm and rec_broker != broker_norm:
             continue
-        acct = (fields.get("account") or "").strip()
+        acct = normalize_account(fields.get("account"))
         if acct:
             accounts.add(acct)
-    by_account = {acct: build_context(records, broker=broker, account=acct, rates=rates) for acct in sorted(accounts)}
+    by_account = {acct: build_context(records, broker=broker_norm, account=acct, rates=rates) for acct in sorted(accounts)}
     return {
         "as_of_utc": datetime.now(timezone.utc).isoformat(),
-        "filters": {"broker": broker},
-        "all_accounts": build_context(records, broker=broker, account=None, rates=rates),
+        "filters": {"broker": broker_norm},
+        "all_accounts": build_context(records, broker=broker_norm, account=None, rates=rates),
         "by_account": by_account,
     }
 
@@ -280,9 +291,9 @@ def main():
         shared_cache_path=(Path(__file__).resolve().parents[2] / 'portfolio-management' / '.data' / 'rate_cache.json'),
         max_age_hours=24,
     )
-    broker = args.broker
+    broker = normalize_broker(args.broker)
     if args.market:
-        broker = args.market
+        broker = normalize_broker(args.market)
         if not args.quiet:
             print("[WARN] --market is deprecated; use --broker")
 
