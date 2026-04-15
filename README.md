@@ -162,10 +162,15 @@ cp configs/examples/portfolio.feishu.example.json /opt/options-monitor/secrets/p
 
 常见字段：
 
-- `enabled`: 是否启用发送。
-- `channel`: 当前常用为 `feishu`。
-- `target`: `user:open_id` 或 `chat:chat_id`。
-- `include_cash_footer`: 是否在多账户通知里附加现金摘要。
+- `channel`: 发送通道，当前常用为 `feishu`；也可以使用本机 `openclaw` 已支持的其他通道。
+- `target`: 发送目标，例如 `user:open_id` 或 `chat:chat_id`。
+- `quiet_hours_beijing`: 可选，北京时间免打扰窗口；不需要时不要写 `null`，直接省略。
+- `cash_footer_accounts` / `cash_footer_timeout_sec` / `cash_snapshot_max_age_sec`: 可选，现金摘要账户与查询参数。
+
+兼容字段：
+
+- `include_cash_footer`: 仅旧 `scripts/run_pipeline.py` 会读取；多账户主流程不把它作为发送开关，主示例不再配置。
+- 不再推荐配置 `enabled` / `mode`，当前主流程不读取它们作为行为开关。
 
 安全建议：
 
