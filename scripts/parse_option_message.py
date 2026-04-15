@@ -255,18 +255,24 @@ def parse_underlying_name(s: str) -> str | None:
 
 
 def _infer_multiplier_if_missing(*, symbol: str | None, multiplier: int | None, repo_base: Path) -> int | None:
-    """在缺少乘数时，尽力通过 OpenD 推断。"""
+    """在缺少乘数时，按 本地缓存 -> OpenD -> 内置常见标的 兜底推断。"""
     if multiplier is not None or not symbol:
         return multiplier
 
-    # Policy: do NOT default silently. Prefer fetching from OpenD (futu-api) for the underlier.
-    # If OpenD is unavailable, leave missing so user must input explicitly.
+    # Intake messages often lack multiplier. Prefer explicit local/OpenD data,
+    # then use a small conservative built-in fallback for common HK/US underliers.
     try:
         import sys
         if str(repo_base) not in sys.path:
             sys.path.insert(0, str(repo_base))
 
         from scripts import multiplier_cache
+
+        cache_path = multiplier_cache.default_cache_path(repo_base)
+        cache = multiplier_cache.load_cache(cache_path)
+        cached = multiplier_cache.get_cached_multiplier(cache, symbol)
+        if cached:
+            return int(cached)
 
         r = multiplier_cache.refresh_via_opend(
             repo_base=repo_base,
@@ -279,9 +285,7 @@ def _infer_multiplier_if_missing(*, symbol: str | None, multiplier: int | None, 
             multiplier = int(r.multiplier)
             # Persist cache entry as opend-derived for later reuse
             try:
-                cache_path = multiplier_cache.default_cache_path(repo_base)
-                cache = multiplier_cache.load_cache(cache_path)
-                cache[str(symbol).upper()] = {
+                cache[multiplier_cache.normalize_symbol(symbol)] = {
                     'multiplier': int(multiplier),
                     'as_of_utc': multiplier_cache.utc_now(),
                     'source': 'opend',
@@ -289,6 +293,11 @@ def _infer_multiplier_if_missing(*, symbol: str | None, multiplier: int | None, 
                 multiplier_cache.save_cache(cache_path, cache)
             except Exception:
                 pass
+            return multiplier
+
+        builtin = multiplier_cache.get_builtin_multiplier(symbol)
+        if builtin:
+            return int(builtin)
     except Exception:
         pass
     return multiplier
