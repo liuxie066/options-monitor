@@ -41,18 +41,29 @@ python3 -m venv .venv
 
 ## 配置
 
-准备本地运行配置：
+线上推荐将真实运行配置放在仓库外管理，仓库内只保留 `configs/examples/*.json` 模板。例如：
 
-```bash
-cp configs/examples/config.example.us.json config.us.json
-cp configs/examples/config.example.hk.json config.hk.json
-./.venv/bin/python scripts/sync_runtime_configs.py --apply
+```text
+/opt/options-monitor/configs/config.us.json
+/opt/options-monitor/configs/config.hk.json
+/opt/options-monitor/secrets/portfolio.feishu.json
 ```
 
-日常只编辑：
+初始化时可从模板复制到仓外路径：
 
-- `config.us.json`
-- `config.hk.json`
+```bash
+mkdir -p /opt/options-monitor/configs /opt/options-monitor/secrets
+cp configs/examples/config.example.us.json /opt/options-monitor/configs/config.us.json
+cp configs/examples/config.example.hk.json /opt/options-monitor/configs/config.hk.json
+cp configs/examples/portfolio.feishu.example.json /opt/options-monitor/secrets/portfolio.feishu.json
+```
+
+开发机临时运行也可以复制到仓内同名文件；这些文件已被 `.gitignore` 忽略，不提交 Git。
+
+日常只编辑 canonical runtime config：
+
+- `/opt/options-monitor/configs/config.us.json`
+- `/opt/options-monitor/configs/config.hk.json`
 
 多账户列表统一写在配置的顶层 `accounts` 字段中，例如 `["lx", "sy"]`。没有显式传 `--accounts` 的辅助脚本会优先使用这个字段。
 
@@ -61,9 +72,8 @@ cp configs/examples/config.example.hk.json config.hk.json
 配置校验：
 
 ```bash
-./.venv/bin/python scripts/validate_config.py --config config.us.json
-./.venv/bin/python scripts/validate_config.py --config config.hk.json
-./.venv/bin/python scripts/sync_runtime_configs.py --check
+./.venv/bin/python scripts/validate_config.py --config /opt/options-monitor/configs/config.us.json
+./.venv/bin/python scripts/validate_config.py --config /opt/options-monitor/configs/config.hk.json
 ```
 
 ## 外部服务与凭证配置
@@ -79,8 +89,8 @@ cp configs/examples/config.example.hk.json config.hk.json
 
 配置位置：
 
-- `config.us.json` / `config.hk.json` 的 `portfolio.pm_config`。
-- 新部署推荐指向本项目内的 `secrets/portfolio.feishu.json`；可从 `configs/examples/portfolio.feishu.example.json` 复制后填写。
+- runtime config 的 `portfolio.pm_config`。
+- 新部署推荐指向仓外的 `/opt/options-monitor/secrets/portfolio.feishu.json`；可从 `configs/examples/portfolio.feishu.example.json` 复制后填写。
 - 旧部署仍可继续使用 `../portfolio-management/config.json`，当前脚本默认值也保留这个兼容路径。
 
 需要准备：
@@ -148,7 +158,7 @@ cp configs/examples/config.example.hk.json config.hk.json
 
 配置位置：
 
-- `config.us.json` / `config.hk.json` 的 `notifications`。
+- 仓外 runtime config 的 `notifications`，例如 `/opt/options-monitor/configs/config.us.json`。
 
 常见字段：
 
@@ -164,11 +174,12 @@ cp configs/examples/config.example.hk.json config.hk.json
 
 ## 5 分钟跑通
 
+下面命令使用仓内 `config.us.json` 作为开发机简写；生产环境请替换为仓外绝对路径，例如 `/opt/options-monitor/configs/config.us.json`。
+
 1. 准备配置：
 
 ```bash
 cp configs/examples/config.example.us.json config.us.json
-./.venv/bin/python scripts/sync_runtime_configs.py --apply
 ```
 
 2. 跑一次完整 pipeline：
@@ -202,8 +213,8 @@ OPTIONS_MONITOR_CONFIG=config.hk.json ./run_watchlist.sh
 ### 多账户 tick
 
 ```bash
-./.venv/bin/python scripts/send_if_needed_multi.py --config config.us.json --market-config us --accounts lx sy
-./.venv/bin/python scripts/send_if_needed_multi.py --config config.hk.json --market-config hk --accounts lx sy
+./.venv/bin/python scripts/send_if_needed_multi.py --config /opt/options-monitor/configs/config.us.json --market-config us --accounts lx sy
+./.venv/bin/python scripts/send_if_needed_multi.py --config /opt/options-monitor/configs/config.hk.json --market-config hk --accounts lx sy
 ```
 
 这个入口会按 scheduler 判断是否需要扫描和通知；多账户运行会复用同一 tick 的 required data 与持仓上下文缓存。
