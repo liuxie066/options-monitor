@@ -100,6 +100,11 @@
 
 文件：`options-monitor/config.us.json 或 options-monitor/config.hk.json`
 
+### 4.0 accounts：账户列表
+- `accounts`: 多账户运行和辅助脚本的默认账户列表，例如 `["lx", "sy"]`。
+- 脚本命令行显式传 `--accounts` 时，以命令行为准。
+- `notifications.cash_footer_accounts` 可单独覆盖现金 footer 的账户列表；未配置时会回退到 `accounts`。
+
 ### 4.1 templates：通用底线（复用）
 - `templates.put_base.sell_put.min_annualized_net_return`：全局 put 最低年化（例如 0.10）
 - `sell_put.min_annualized_net_return` 统一解析优先级：

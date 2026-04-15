@@ -10,6 +10,10 @@
       "other_fees_per_order_hkd": 0.0
     }
   },
+  "accounts": [
+    "lx",
+    "sy"
+  ],
   "intake": {
     "symbol_aliases": {
       "中海油": "0883.HK",

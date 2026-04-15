@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 
 from scripts.config_profiles import apply_profiles
+from scripts.account_config import cash_footer_accounts_from_config
 from scripts.pipeline_symbol import process_symbol
 from scripts.subprocess_utils import run_cmd
 
@@ -324,11 +325,13 @@ def main():
             include_cash_footer = True
 
         if include_cash_footer and (not IS_SCHEDULED):
+            cash_footer_accounts = cash_footer_accounts_from_config(cfg)
             run_cmd([
                 py, 'scripts/append_cash_summary.py',
+                '--config', str(cfg_path),
                 '--pm-config', str(pm_config),
                 '--market', str(market),
-                '--accounts', 'lx', 'sy',
+                '--accounts', *cash_footer_accounts,
                 '--notification', str((report_dir / 'symbols_notification.txt').as_posix()),
             ], cwd=base, is_scheduled=IS_SCHEDULED)
 

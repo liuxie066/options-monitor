@@ -21,6 +21,7 @@ from scripts.io_utils import (
     utc_now,
     bj_now,
 )
+from scripts.account_config import accounts_from_config, cash_footer_accounts_from_config
 
 from .cash_footer import query_cash_footer
 from .required_data_prefetch import prefetch_required_data
@@ -161,8 +162,8 @@ def _is_trading_day_guard_for_market(cfg: dict, market: str) -> tuple[bool | Non
 def main() -> int:
     ap = argparse.ArgumentParser(description='Multi-account tick with merged notification')
     ap.add_argument('--config', default='config.us.json')
-    ap.add_argument('--accounts', nargs='+', required=True)
-    ap.add_argument('--default-account', default='lx')
+    ap.add_argument('--accounts', nargs='+', default=None)
+    ap.add_argument('--default-account', default=None)
     ap.add_argument('--market-config', default='auto', choices=['auto', 'hk', 'us', 'all'], help='Select symbols by market at config-load time (auto=by session).')
     ap.add_argument('--no-send', action='store_true', help='Do not send messages (for smoke tests / debugging).')
     ap.add_argument('--smoke', action='store_true', help='Smoke mode: run scheduler decisions but skip pipeline execution.')
@@ -222,6 +223,14 @@ def main() -> int:
         allow_derived=allow_derived_config,
     )
     base_cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
+    if args.accounts is None:
+        args.accounts = accounts_from_config(base_cfg)
+    else:
+        args.accounts = accounts_from_config({'accounts': args.accounts})
+    if args.default_account is None:
+        args.default_account = args.accounts[0]
+    else:
+        args.default_account = str(args.default_account).strip().lower()
 
     syms0 = base_cfg.get('symbols') or []
     src_counts: dict[str, int] = {}
@@ -1185,7 +1194,7 @@ def main() -> int:
         cfg = base_cfg or {}
         cfg_market = str((cfg.get('portfolio') or {}).get('market') or '富途')
         notif_cfg = (cfg.get('notifications') or {}) if isinstance(cfg, dict) else {}
-        accts = (notif_cfg.get('cash_footer_accounts') or ['lx', 'sy'])
+        accts = cash_footer_accounts_from_config(cfg)
         timeout_sec = int(notif_cfg.get('cash_footer_timeout_sec') or 180)
         max_age_sec = int(notif_cfg.get('cash_snapshot_max_age_sec') or 900)
         cash_footer_lines = query_cash_footer(

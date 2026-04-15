@@ -5,7 +5,7 @@ This repository is primarily maintained for personal use. Keep agent support lig
 ## Project Context
 
 - Purpose: options monitoring and notifications for Sell Put and Covered Call workflows.
-- Accounts: use lowercase account labels, currently `lx` and `sy`.
+- Accounts: use lowercase account labels. Read the default list from top-level `accounts` in the runtime config; examples currently use `lx` and `sy`.
 - Core code: `domain/` contains deterministic business logic; `scripts/` contains operational entry points.
 - Reports: generated under `output/`, `output_accounts/`, and `output_shared/`.
 - Notification layout source of truth: `scripts/notify_symbols.py` for per-account notification content and `scripts/multi_tick/notify_format.py` for merged/account message wrappers.

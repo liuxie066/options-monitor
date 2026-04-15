@@ -54,6 +54,8 @@ cp configs/examples/config.example.hk.json config.hk.json
 - `config.us.json`
 - `config.hk.json`
 
+多账户列表统一写在配置的顶层 `accounts` 字段中，例如 `["lx", "sy"]`。没有显式传 `--accounts` 的辅助脚本会优先使用这个字段。
+
 派生配置的来源、同步和禁止手工维护规则见 `CONFIGS.md`。
 
 配置校验：

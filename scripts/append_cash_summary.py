@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Append cash summary (lx + sy) to the end of an existing notification text.
+"""Append per-account cash summary to the end of an existing notification text.
 
 We do NOT compute any "after buying" remaining cash.
 We only compute current base free(CNY) per account.
@@ -16,9 +16,11 @@ This script is designed to run in the per-account context where ./output symlink
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 from pathlib import Path
 
+from scripts.account_config import cash_footer_accounts_from_config
 from scripts.io_utils import parse_last_json, money_cny
 
 
@@ -30,15 +32,30 @@ def run_capture(cmd: list[str], cwd: Path, timeout_sec: int = 120) -> str:
 
 
 def main():
-    ap = argparse.ArgumentParser(description='Append lx/sy cash summary to notification footer')
+    ap = argparse.ArgumentParser(description='Append per-account cash summary to notification footer')
+    ap.add_argument('--config', default=None, help='options-monitor config used to resolve default accounts')
     ap.add_argument('--pm-config', default='../portfolio-management/config.json')
     ap.add_argument('--market', default='富途')
-    ap.add_argument('--accounts', nargs='+', default=['lx', 'sy'])
+    ap.add_argument('--accounts', nargs='+', default=None)
     ap.add_argument('--report-dir', default='output/reports', help='Report dir for default notification path (default: output/reports)')
     ap.add_argument('--notification', default=None, help='Notification text file (default: <report-dir>/symbols_notification.txt)')
     args = ap.parse_args()
 
     base = Path(__file__).resolve().parents[1]
+    cfg = {}
+    if args.config:
+        cfg_path = Path(args.config)
+        if not cfg_path.is_absolute():
+            cfg_path = (base / cfg_path).resolve()
+        try:
+            cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
+        except Exception:
+            cfg = {}
+    accounts = (
+        cash_footer_accounts_from_config(cfg)
+        if args.accounts is None
+        else cash_footer_accounts_from_config({'notifications': {'cash_footer_accounts': args.accounts}})
+    )
 
     report_dir = Path(args.report_dir)
     if not report_dir.is_absolute():
@@ -76,7 +93,7 @@ def main():
     py = str(base / '.venv' / 'bin' / 'python')
 
     rows = []
-    for acct in args.accounts:
+    for acct in accounts:
         out = run_capture([
             py, 'scripts/cli/query_sell_put_cash_cli.py',
             '--pm-config', str((base / args.pm_config).resolve()) if not Path(args.pm_config).is_absolute() else str(args.pm_config),

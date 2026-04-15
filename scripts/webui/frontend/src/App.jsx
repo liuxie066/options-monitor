@@ -98,6 +98,7 @@ export default function App(){
 
   const [rows, setRows] = useState([]);
   const [tokenRequired, setTokenRequired] = useState(false);
+  const [accountOptions, setAccountOptions] = useState([]);
 
   const tokenInputRef = useRef(null);
   const prevBodyStyleRef = useRef(null);
@@ -212,6 +213,7 @@ export default function App(){
     (async ()=>{
       const m = await api('/api/meta');
       setTokenRequired(!!m.tokenRequired);
+      setAccountOptions(Array.isArray(m.accounts) ? m.accounts : []);
     })().catch(e=>pushToast('error', e.message));
   },[]);
 
@@ -405,8 +407,7 @@ export default function App(){
 
               <select className="Control SelectAccount" value={account} onChange={e=>setAccount(e.target.value)}>
                 <option value="">account: all</option>
-                <option value="lx">lx</option>
-                <option value="sy">sy</option>
+                {accountOptions.map(acct => <option key={acct} value={acct}>{acct}</option>)}
               </select>
 
               <select className="Control SelectMarket" value={market} onChange={e=>setMarket(e.target.value)}>
@@ -471,7 +472,7 @@ export default function App(){
                     <Field label="configKey"><select className="Control" value={form.configKey} onChange={e=>setForm({...form, configKey:e.target.value})}><option value="us">us</option><option value="hk">hk</option></select></Field>
                     <Field label="symbol"><input className="Control" value={form.symbol} onChange={e=>setForm({...form, symbol:e.target.value})} placeholder="NVDA / 0700.HK" /></Field>
                     <Field label="exchange"><select className="Control" value={form.market} onChange={e=>setForm({...form, market:e.target.value})}><option value="">(keep)</option><option value="US">US</option><option value="HK">HK</option></select></Field>
-                    <Field label="accounts（逗号分隔，空=all）"><input className="Control" value={form.accounts} onChange={e=>setForm({...form, accounts:e.target.value})} placeholder="lx,sy" /></Field>
+                    <Field label="accounts（逗号分隔，空=all）"><input className="Control" value={form.accounts} onChange={e=>setForm({...form, accounts:e.target.value})} placeholder={accountOptions.length ? accountOptions.join(',') : 'account1,account2'} /></Field>
 
                     <Field label="limit_expirations"><input className="Control" type="number" value={form.limit_expirations} onChange={e=>setForm({...form, limit_expirations:e.target.value})} /></Field>
                     <Field label="put enabled"><select className="Control" value={form.sell_put_enabled} onChange={e=>setForm({...form, sell_put_enabled:e.target.value})}><option value="">(keep)</option><option value="true">true</option><option value="false">false</option></select></Field>
