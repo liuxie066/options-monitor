@@ -66,6 +66,85 @@ class CloseAdviceConfig:
 
 
 @dataclass(frozen=True)
+class CloseAdviceTierRule:
+    level: str
+    reason: str
+    min_capture: float
+    min_dte: int | None = None
+    max_dte: int | None = None
+    remaining_annualized_attr: str | None = None
+
+    def matches(
+        self,
+        *,
+        capture_ratio: float,
+        dte: int,
+        remaining_annualized_return: float | None,
+        config: CloseAdviceConfig,
+    ) -> bool:
+        if self.min_dte is not None and dte < self.min_dte:
+            return False
+        if self.max_dte is not None and dte > self.max_dte:
+            return False
+        if capture_ratio < self.min_capture:
+            return False
+        if self.remaining_annualized_attr:
+            limit = safe_float(getattr(config, self.remaining_annualized_attr, None))
+            if limit is None or remaining_annualized_return is None:
+                return False
+            if remaining_annualized_return > limit:
+                return False
+        return True
+
+
+DEFAULT_TIER_RULES: tuple[CloseAdviceTierRule, ...] = (
+    CloseAdviceTierRule(
+        level="strong",
+        min_dte=7,
+        max_dte=13,
+        min_capture=0.90,
+        remaining_annualized_attr="strong_remaining_annualized_max",
+        reason="已锁定大部分收益，剩余时间仍长，继续持有的边际收益偏低",
+    ),
+    CloseAdviceTierRule(
+        level="strong",
+        min_dte=14,
+        max_dte=29,
+        min_capture=0.85,
+        remaining_annualized_attr="strong_remaining_annualized_max",
+        reason="已锁定大部分收益，剩余时间仍长，继续持有的边际收益偏低",
+    ),
+    CloseAdviceTierRule(
+        level="strong",
+        min_dte=30,
+        min_capture=0.80,
+        remaining_annualized_attr="strong_remaining_annualized_max",
+        reason="已锁定大部分收益，剩余时间仍长，继续持有的边际收益偏低",
+    ),
+    CloseAdviceTierRule(
+        level="medium",
+        min_dte=14,
+        min_capture=0.70,
+        remaining_annualized_attr="medium_remaining_annualized_max",
+        reason="已锁定较多收益，剩余时间仍较长，值得认真考虑买回",
+    ),
+    CloseAdviceTierRule(
+        level="optional",
+        min_dte=1,
+        max_dte=6,
+        min_capture=0.90,
+        reason="临近到期且平仓成本较低，低价买回可选",
+    ),
+    CloseAdviceTierRule(
+        level="weak",
+        min_dte=30,
+        min_capture=0.50,
+        reason="已锁定部分收益且剩余时间较长，适合进入观察",
+    ),
+)
+
+
+@dataclass(frozen=True)
 class CloseAdviceInput:
     account: str
     symbol: str
@@ -82,16 +161,6 @@ class CloseAdviceInput:
     multiplier: float | None = None
     spot: float | None = None
     currency: str | None = None
-
-
-def _strong_capture_threshold(dte: int) -> float | None:
-    if 7 <= dte <= 13:
-        return 0.90
-    if 14 <= dte <= 29:
-        return 0.85
-    if dte >= 30:
-        return 0.80
-    return None
 
 
 def _remaining_annualized_return(inp: CloseAdviceInput) -> float | None:
@@ -125,28 +194,14 @@ def decide_tier(
     remaining_annualized_return: float | None,
     config: CloseAdviceConfig,
 ) -> tuple[str, str]:
-    strong_capture = _strong_capture_threshold(dte)
-    if (
-        strong_capture is not None
-        and capture_ratio >= strong_capture
-        and remaining_annualized_return is not None
-        and remaining_annualized_return <= config.strong_remaining_annualized_max
-    ):
-        return "strong", "已锁定大部分收益，剩余时间仍长，继续持有的边际收益偏低"
-
-    if (
-        dte >= 14
-        and capture_ratio >= 0.70
-        and remaining_annualized_return is not None
-        and remaining_annualized_return <= config.medium_remaining_annualized_max
-    ):
-        return "medium", "已锁定较多收益，剩余时间仍较长，值得认真考虑买回"
-
-    if 1 <= dte <= 6 and capture_ratio >= 0.90:
-        return "optional", "临近到期且平仓成本较低，低价买回可选"
-
-    if dte >= 30 and capture_ratio >= 0.50:
-        return "weak", "已锁定部分收益且剩余时间较长，适合进入观察"
+    for rule in DEFAULT_TIER_RULES:
+        if rule.matches(
+            capture_ratio=capture_ratio,
+            dte=dte,
+            remaining_annualized_return=remaining_annualized_return,
+            config=config,
+        ):
+            return rule.level, rule.reason
 
     return "none", "未达到平仓建议阈值"
 
