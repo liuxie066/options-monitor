@@ -98,6 +98,7 @@ from scripts.infra.service import (
     send_openclaw_message,
     trading_day_via_futu,
 )
+from scripts.close_advice import run_close_advice
 
 try:
     from domain.storage import paths as storage_paths
@@ -1287,6 +1288,44 @@ def main() -> int:
         auto_close_flat = flatten_auto_close_summary(auto_close_text, always_show=False)
         if auto_close_flat:
             text = (text.strip() + '\n\n' + auto_close_flat.strip()).strip()
+
+        close_advice_cfg = (cfg.get('close_advice') or {}) if isinstance(cfg, dict) else {}
+        if bool(close_advice_cfg.get('enabled', False)):
+            try:
+                close_result = run_close_advice(
+                    config=cfg,
+                    context_path=(acct_state_dir / 'option_positions_context.json').resolve(),
+                    required_data_root=shared_required,
+                    output_dir=acct_report_dir,
+                    base_dir=base,
+                )
+                _audit(
+                    'tool_call',
+                    'close_advice',
+                    run_id=run_id,
+                    account=acct,
+                    status='ok',
+                    tool_name='close_advice',
+                    extra={
+                        'rows': close_result.get('rows'),
+                        'notify_rows': close_result.get('notify_rows'),
+                    },
+                )
+                close_text_path = acct_report_dir / 'close_advice.txt'
+                close_text = close_text_path.read_text(encoding='utf-8', errors='replace').strip() if close_text_path.exists() else ''
+                if close_text:
+                    text = (text.strip() + '\n\n' + close_text.strip()).strip()
+            except Exception as exc:
+                _audit(
+                    'tool_call',
+                    'close_advice',
+                    run_id=run_id,
+                    account=acct,
+                    status='error',
+                    tool_name='close_advice',
+                    message=str(exc),
+                )
+                runlog.safe_event('close_advice', 'error', message=f'close advice failed for {acct}: {exc}')
 
         meaningful = decide_notification_meaningful(text)
 
