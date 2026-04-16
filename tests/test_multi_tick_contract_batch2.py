@@ -42,3 +42,12 @@ def test_multi_tick_pipeline_calls_share_context_dir() -> None:
     base = Path(__file__).resolve().parents[1]
     src = (base / "scripts" / "multi_tick" / "main.py").read_text(encoding="utf-8")
     assert "shared_context_dir=run_repo.get_run_state_dir(base, run_id)" in src
+
+
+def test_multi_tick_notify_failure_is_account_isolated() -> None:
+    base = Path(__file__).resolve().parents[1]
+    src = (base / "scripts" / "multi_tick" / "main.py").read_text(encoding="utf-8")
+    assert "notify_failures: list[dict[str, object]] = []" in src
+    assert "notify_failures.append(" in src
+    assert "continue" in src[src.index("notify_failures.append(") : src.index("sent_accounts.append(acct)")]
+    assert "NOTIFY_PARTIAL_FAILED" in src
