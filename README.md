@@ -11,6 +11,7 @@
 - 为 Sell Put 检查现金担保能力。
 - 为 Covered Call 检查可覆盖股数。
 - 生成候选 CSV、摘要、提醒文本。
+- 根据已持仓 short put/call 的已锁定收益、剩余 DTE 和剩余收益年化生成平仓建议。
 - 按账户发送通知；没有候选时也发送一条“监控正常触发，本轮无候选”的心跳消息。
 
 ## 项目架构
@@ -41,6 +42,8 @@ flowchart TD
     PipelineCore --> Domain["确定性业务逻辑<br/>domain/domain/*"]
     Domain --> Scan["Sell Put / Covered Call 扫描<br/>scripts/scan_sell_put.py<br/>scripts/scan_sell_call.py"]
     Scan --> Alert["候选筛选与提醒渲染<br/>scripts/alert_engine.py<br/>scripts/notify_symbols.py"]
+    Context --> CloseAdvice["平仓建议<br/>domain/domain/close_advice.py<br/>scripts/close_advice/"]
+    Fetch --> CloseAdvice
 
     Multi --> SharedCache["共享数据复用<br/>output_shared/"]
     Alert --> Reports["报告输出<br/>output/ / output_accounts/ / output_runs/"]
@@ -49,6 +52,7 @@ flowchart TD
     Multi --> AccountState["账户隔离状态<br/>output_runs/&lt;run_id&gt;/accounts/&lt;account&gt;/state/"]
 
     Alert --> Notify["通知封装<br/>scripts/multi_tick/notify_format.py"]
+    CloseAdvice --> Notify
     Notify --> OpenClaw["OpenClaw CLI<br/>openclaw message send"]
     OpenClaw --> Channel["通知渠道<br/>Feishu 等"]
 
@@ -89,6 +93,15 @@ Covered Call 主要关注：
 - 可用股数会扣除已被其他 short call 占用的部分。
 - 行权价、到期时间、年化权利金收益率、单笔净收入需要满足配置阈值。
 - 排序时会优先看年化权利金收益率，同时保留到期被行权时的整体收益视角，便于人工复核。
+
+平仓建议主要关注：
+
+- 只评估 `option_positions` 中仍 open 的 short put / short call，不处理 long option，也不做亏损止损建议。
+- 开仓权利金必须来自持仓表字段 `premium`，或 `note` 中的 `premium_per_share`；系统不会从历史行情反推开仓价。
+- 当前平仓价优先使用本轮 required data 里的 `mid`，匹配不到时可按配置 best-effort 使用 OpenD 取报价；报价失败不会阻断原有扫描。
+- 核心指标是已锁定收益比例、剩余 DTE 和剩余收益年化。short put 的剩余收益年化约为 `close_mid / strike / dte * 365`，short call 约为 `close_mid / spot / dte * 365`。
+- 强度分为 strong / medium / weak / optional / none。默认只把 strong 和 medium 追加到通知，weak 和 optional 主要用于 CSV 复核。
+- 平仓建议只提醒，不自动下单、不写回 `option_positions`。
 
 风险事件与排序：
 
@@ -172,6 +185,28 @@ WebUI 不应默认落到 `options-monitor-prod/config.us.json` / `options-monito
 ./.venv/bin/python scripts/validate_config.py --config ../options-monitor-config/config.us.json
 ./.venv/bin/python scripts/validate_config.py --config ../options-monitor-config/config.hk.json
 ```
+
+可选启用平仓建议：
+
+```json
+{
+  "close_advice": {
+    "enabled": true,
+    "max_items_per_account": 5,
+    "max_spread_ratio": 0.4,
+    "notify_levels": ["strong", "medium"],
+    "strong_remaining_annualized_max": 0.08,
+    "medium_remaining_annualized_max": 0.12
+  }
+}
+```
+
+字段说明：
+
+- `enabled`: 默认 `false`；开启后，多账户 tick 会为每个账户生成平仓建议。
+- `notify_levels`: 默认只通知 `strong` 和 `medium`；`weak`、`optional` 仍会写入 CSV。
+- `max_spread_ratio`: bid/ask 价差过宽时不提醒，但会在 CSV 的 `data_quality_flags` 标记。
+- `strong_remaining_annualized_max` / `medium_remaining_annualized_max`: 剩余收益年化上限，用于校准建议强度。
 
 ## 外部服务与凭证配置
 
@@ -389,6 +424,25 @@ OPTIONS_MONITOR_CONFIG=config.hk.json ./run_watchlist.sh
   --quiet
 ```
 
+### 平仓建议
+
+单独生成报告，不发送通知：
+
+```bash
+./.venv/bin/python scripts/close_advice.py \
+  --config config.us.json \
+  --context output/state/option_positions_context.json \
+  --required-data-root output \
+  --output-dir output/reports
+```
+
+输出：
+
+- `close_advice.csv`: 全部可评估持仓和数据质量标记。
+- `close_advice.txt`: 按 `notify_levels` 过滤后的 Markdown 提醒片段。
+
+多账户 tick 下，输出位于 `output_runs/<run_id>/accounts/<account>/close_advice.csv` 和 `close_advice.txt`，并在 `close_advice.enabled=true` 时自动追加到账户通知。
+
 ### 只跑到某个阶段
 
 ```bash
@@ -421,6 +475,8 @@ OPTIONS_MONITOR_CONFIG=config.hk.json ./run_watchlist.sh
 - `output/state/`：单账户状态缓存。
 - `output_runs/<run_id>/`：多账户 tick 的单次运行产物。
 - `output_runs/<run_id>/accounts/<account>/`：多账户下单个账户的报告和状态。
+- `output_runs/<run_id>/accounts/<account>/close_advice.csv`：平仓建议明细。
+- `output_runs/<run_id>/accounts/<account>/close_advice.txt`：追加到账户通知的平仓建议片段。
 
 多账户运行时，可重点看：
 
@@ -438,6 +494,7 @@ find output_runs -maxdepth 3 -type f | sort | tail -40
 ## 通知行为
 
 - 有候选：发送候选提醒。
+- 有 strong/medium 平仓建议：追加到账户提醒；即使没有新开仓候选，也可触发账户消息。
 - 无候选但监控正常触发：发送心跳文案 `监控正常触发：本轮无候选。`
 - 调度触发点：交易日交易时段内，开盘后 30 分钟、之后每小时、收盘前 10 分钟。
 - quiet hours / no-send / 缺通知目标等发送门控仍会阻止发送。
