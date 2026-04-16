@@ -25,6 +25,7 @@ def test_build_context_preserves_record_id_without_position_id() -> None:
                 "contracts_open": 1,
                 "cash_secured_amount": 1000,
                 "currency": "美元",
+                "premium": 1.23,
             },
         }
     ]
@@ -38,6 +39,32 @@ def test_build_context_preserves_record_id_without_position_id() -> None:
     assert ctx["open_positions_min"][0]["option_type"] == "put"
     assert ctx["open_positions_min"][0]["side"] == "short"
     assert ctx["open_positions_min"][0]["currency"] == "USD"
+    assert ctx["open_positions_min"][0]["premium"] == 1.23
+
+
+def test_build_context_reads_premium_from_note_fallback() -> None:
+    records = [
+        {
+            "record_id": "rec_1",
+            "fields": {
+                "broker": "富途",
+                "account": "lx",
+                "symbol": "NVDA",
+                "status": "open",
+                "side": "short",
+                "option_type": "put",
+                "contracts": 1,
+                "contracts_open": 1,
+                "cash_secured_amount": 1000,
+                "currency": "USD",
+                "note": "premium_per_share=0.88",
+            },
+        }
+    ]
+
+    ctx = build_context(records, broker="富途", account="lx", rates={"USDCNY": 7.2})
+
+    assert ctx["open_positions_min"][0]["premium"] == "0.88"
 
 
 def test_build_context_scales_cash_secured_for_partial_close() -> None:
