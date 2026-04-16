@@ -395,9 +395,11 @@ def main():
                     exc=e,
                 )
             if not bool(send_payload.get("ok")):
-                sh([str(vpy), 'scripts/write_last_run.py', '--path', str(last_run), '--status', 'error', '--stage', 'send', '--details', (send.stderr or send.stdout or '').strip(), '--started-at', started], cwd=base)
+                error_code = "SEND_UNCONFIRMED" if bool(send_payload.get("command_ok")) else "SEND_FAILED"
+                details = str(send_payload.get("message") or (send.stderr or send.stdout or "").strip())
+                sh([str(vpy), 'scripts/write_last_run.py', '--path', str(last_run), '--status', 'error', '--stage', 'send', '--reason', error_code, '--details', details, '--started-at', started], cwd=base)
                 sys.stderr.write(send.stderr)
-                return int(send_payload.get("returncode") or send.returncode)
+                return int(send_payload.get("returncode") or send.returncode or 1)
 
             message_id = send_payload.get("message_id")
 
