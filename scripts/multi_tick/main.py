@@ -199,16 +199,17 @@ def _send_account_message_with_retry(
             stdout=send.stdout or '',
             stderr=send.stderr or '',
         )
-        ok = bool(send_tool_dto.get('ok'))
+        message_id = send_tool_dto.get('message_id')
+        ok = bool(send_tool_dto.get('ok') or (bool(send_tool_dto.get('command_ok')) and message_id))
         error_code = None if ok else _notify_error_code(send_tool_dto)
         record = {
             'account': account,
             'attempt': attempt,
             'max_attempts': attempts,
             'returncode': int(send.returncode),
-            'message_id': send_tool_dto.get('message_id'),
+            'message_id': message_id,
             'command_ok': bool(send_tool_dto.get('command_ok')),
-            'delivery_confirmed': bool(send_tool_dto.get('delivery_confirmed')),
+            'delivery_confirmed': bool(ok),
             'stdout_tail': send_tool_dto.get('stdout_tail'),
             'stderr_tail': send_tool_dto.get('stderr_tail'),
         }

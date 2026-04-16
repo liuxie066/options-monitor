@@ -43,6 +43,24 @@ def test_subprocess_boundary_wrappers() -> None:
     assert notif["delivery_confirmed"] is True
     assert notif["message_id"] == "m-1"
 
+    stderr_notif = normalize_notify_subprocess_output(
+        returncode=0,
+        stdout="",
+        stderr='log\n{"result":{"messageId":"stderr-1"}}',
+    )
+    assert stderr_notif["ok"] is True
+    assert stderr_notif["delivery_confirmed"] is True
+    assert stderr_notif["message_id"] == "stderr-1"
+
+    nested_notif = normalize_notify_subprocess_output(
+        returncode=0,
+        stdout='{"data":{"messageId":"nested-data-1","deliveryconfirmed":false}}',
+        stderr="",
+    )
+    assert nested_notif["ok"] is True
+    assert nested_notif["delivery_confirmed"] is True
+    assert nested_notif["message_id"] == "nested-data-1"
+
     unconfirmed = normalize_notify_subprocess_output(
         returncode=0,
         stdout='{"ok":true}',

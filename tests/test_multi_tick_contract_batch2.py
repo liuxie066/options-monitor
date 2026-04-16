@@ -113,6 +113,55 @@ def test_multi_tick_notify_retry_recovers_unconfirmed_send() -> None:
     assert [e["status"] for e in runlog.events] == ["error", "ok"]
 
 
+def test_multi_tick_notify_does_not_retry_when_message_id_exists() -> None:
+    mt = importlib.import_module("scripts.multi_tick.main")
+
+    send_calls: list[dict] = []
+    audit_events: list[dict] = []
+    sleeps: list[float] = []
+    runlog = _FakeRunLogger()
+
+    def _send(**kwargs):
+        send_calls.append(dict(kwargs))
+        return SimpleNamespace(returncode=0, stdout='{"messageId":"lx-1"}', stderr="")
+
+    def _normalize(**_kwargs):
+        return {
+            "ok": False,
+            "command_ok": True,
+            "delivery_confirmed": False,
+            "message_id": "lx-1",
+            "stdout_tail": '{"messageId":"lx-1"}',
+            "stderr_tail": "",
+            "adapter": "notify",
+        }
+
+    def _audit(event_type, action, **kwargs):
+        audit_events.append({"event_type": event_type, "action": action, **kwargs})
+
+    result = mt._send_account_message_with_retry(
+        base=Path("/tmp/options-monitor-test"),
+        channel="feishu",
+        target="user:test",
+        account="lx",
+        message="hello",
+        run_id="run-1",
+        runlog=runlog,
+        audit_fn=_audit,
+        send_fn=_send,
+        normalize_fn=_normalize,
+        sleep_fn=lambda seconds: sleeps.append(seconds),
+    )
+
+    assert result["ok"] is True
+    assert result["attempts"] == 1
+    assert len(send_calls) == 1
+    assert sleeps == []
+    assert audit_events[0]["status"] == "ok"
+    assert audit_events[0]["extra"]["delivery_confirmed"] is True
+    assert audit_events[0]["extra"]["message_id"] == "lx-1"
+
+
 def test_multi_tick_notify_retry_exhausts_unconfirmed_without_success() -> None:
     mt = importlib.import_module("scripts.multi_tick.main")
 
