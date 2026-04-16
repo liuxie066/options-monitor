@@ -110,7 +110,7 @@
 - `templates.*.*.min_net_income`：全局最低单笔净收益，统一按 CNY 配置；运行时会按标的币种换算为 USD/HKD 后传给扫描器。
 - `sell_put.min_annualized_net_return` 统一解析优先级：
   `symbol.sell_put.min_annualized_net_return` > `templates.<name>.sell_put.min_annualized_net_return` > 代码默认 `DEFAULT_MIN_ANNUALIZED_NET_RETURN(0.07)`。
-- D3 全局仅允许 3 个硬过滤键：`min_open_interest`、`min_volume`、`max_spread_ratio`
+- 全局流动性/价差硬过滤仅允许 3 个键：`min_open_interest`、`min_volume`、`max_spread_ratio`
 - `templates.call_base.sell_call.*`：call 的通用底线
 
 ### 4.2 symbols[]：每个标的的个性化区间

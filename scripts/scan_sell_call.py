@@ -9,7 +9,7 @@ from domain.domain.engine import (
     build_strategy_config,
     filter_rank_candidates_with_reject_log,
 )
-from scripts.d3_event_filter import annotate_candidates_with_d3_events
+from scripts.event_risk_filter import annotate_candidates_with_event_risk
 from scripts.sell_call_config import validate_min_annualized_net_premium_return
 
 SELL_CALL_EMPTY_OUTPUT_COLUMNS = [
@@ -133,7 +133,7 @@ def run_sell_call_scan(
     min_open_interest: float = 100,
     min_volume: float = 10,
     max_spread_ratio: float | None = 0.30,
-    d3_event_cfg: dict | None = None,
+    event_risk_cfg: dict | None = None,
     reject_log_output: Path | None = None,
     quiet: bool = False,
 ) -> pd.DataFrame:
@@ -278,10 +278,10 @@ def run_sell_call_scan(
             reject_stage="step3_risk_gate",
             layered=False,
         )
-        out = annotate_candidates_with_d3_events(
+        out = annotate_candidates_with_event_risk(
             out,
             base_dir=Path(__file__).resolve().parents[1],
-            d3_event_cfg=d3_event_cfg,
+            event_risk_cfg=event_risk_cfg,
         )
         if "_strategy_score" in out.columns:
             out = out.drop(columns=["_strategy_score"])

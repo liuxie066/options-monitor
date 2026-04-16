@@ -19,16 +19,16 @@ from scripts.sell_call_config import resolve_min_annualized_net_premium_return
 from scripts.sell_put_config import resolve_min_annualized_net_return
 from domain.domain import normalize_processor_row, normalize_processor_rows
 
-D3_COMMON_FIELDS = (
+LIQUIDITY_COMMON_FIELDS = (
     'min_open_interest',
     'min_volume',
     'max_spread_ratio',
 )
 
 
-def _extract_d3_event_cfg(side_cfg: dict) -> dict:
+def _extract_event_risk_cfg(side_cfg: dict) -> dict:
     default = {"enabled": True, "mode": "warn"}
-    raw = side_cfg.get("d3_event")
+    raw = side_cfg.get("event_risk")
     if not isinstance(raw, dict):
         return default
     out = dict(default)
@@ -72,8 +72,8 @@ def _resolve_profile_side_cfg(item: dict, profiles: dict, side: str) -> dict:
     return dict(side_cfg) if isinstance(side_cfg, dict) else {}
 
 
-def _extract_d3_fields(side_cfg: dict, *, is_put: bool) -> dict:
-    keys = list(D3_COMMON_FIELDS)
+def _extract_liquidity_fields(side_cfg: dict, *, is_put: bool) -> dict:
+    keys = list(LIQUIDITY_COMMON_FIELDS)
     return {k: side_cfg[k] for k in keys if k in side_cfg}
 
 
@@ -139,18 +139,18 @@ def run_watchlist_pipeline(
             sell_call_cfg['min_annualized_net_premium_return'] = resolved_call_min
             sell_call_cfg.pop('min_annualized_net_return', None)
             item['sell_call'] = sell_call_cfg
-            item['_global_sell_put_d3'] = _extract_d3_fields(
+            item['_global_sell_put_liquidity'] = _extract_liquidity_fields(
                 _resolve_profile_side_cfg(item0, profiles, 'sell_put'),
                 is_put=True,
             )
-            item['_global_sell_call_d3'] = _extract_d3_fields(
+            item['_global_sell_call_liquidity'] = _extract_liquidity_fields(
                 _resolve_profile_side_cfg(item0, profiles, 'sell_call'),
                 is_put=False,
             )
-            item['_global_sell_put_d3_event'] = _extract_d3_event_cfg(
+            item['_global_sell_put_event_risk'] = _extract_event_risk_cfg(
                 _resolve_profile_side_cfg(item0, profiles, 'sell_put'),
             )
-            item['_global_sell_call_d3_event'] = _extract_d3_event_cfg(
+            item['_global_sell_call_event_risk'] = _extract_event_risk_cfg(
                 _resolve_profile_side_cfg(item0, profiles, 'sell_call'),
             )
 

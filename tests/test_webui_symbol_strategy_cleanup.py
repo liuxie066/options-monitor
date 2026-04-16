@@ -50,10 +50,10 @@ def _install_fastapi_stubs() -> None:
 
 _install_fastapi_stubs()
 
-from scripts.webui.server import SYMBOL_LEVEL_D3_FORBIDDEN_FIELDS, _clean_symbol_level_d3_fields, _patch_entry
+from scripts.webui.server import SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS, _clean_symbol_level_strategy_fields, _patch_entry
 
 
-def test_patch_entry_removes_forbidden_symbol_level_d3_fields() -> None:
+def test_patch_entry_removes_forbidden_symbol_level_strategy_fields() -> None:
     entry = {
         "symbol": "PDD",
         "sell_put": {
@@ -70,7 +70,7 @@ def test_patch_entry_removes_forbidden_symbol_level_d3_fields() -> None:
             "min_open_interest": 50,
             "min_volume": 10,
             "max_spread_ratio": 0.3,
-            "d3_event": {"enabled": True},
+            "event_risk": {"enabled": True},
         },
         "sell_call": {
             "enabled": False,
@@ -89,7 +89,7 @@ def test_patch_entry_removes_forbidden_symbol_level_d3_fields() -> None:
         },
     )
 
-    for field in SYMBOL_LEVEL_D3_FORBIDDEN_FIELDS:
+    for field in SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS:
         assert field not in entry["sell_put"]
         assert field not in entry["sell_call"]
     assert entry["sell_put"]["min_dte"] == 10
@@ -98,7 +98,7 @@ def test_patch_entry_removes_forbidden_symbol_level_d3_fields() -> None:
     assert entry["sell_put"]["max_strike"] == 110.0
 
 
-def test_clean_symbol_level_d3_fields_removes_stale_keys_from_all_symbols() -> None:
+def test_clean_symbol_level_strategy_fields_removes_stale_keys_from_all_symbols() -> None:
     cfg = {
         "symbols": [
             {
@@ -114,16 +114,16 @@ def test_clean_symbol_level_d3_fields_removes_stale_keys_from_all_symbols() -> N
                 "sell_call": {
                     "enabled": True,
                     "max_spread_ratio": 0.3,
-                    "d3_event": {"enabled": True},
+                    "event_risk": {"enabled": True},
                 },
             },
         ]
     }
 
-    _clean_symbol_level_d3_fields(cfg)
+    _clean_symbol_level_strategy_fields(cfg)
 
     for item in cfg["symbols"]:
         for side in ("sell_put", "sell_call"):
             side_cfg = item.get(side) or {}
-            for field in SYMBOL_LEVEL_D3_FORBIDDEN_FIELDS:
+            for field in SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS:
                 assert field not in side_cfg

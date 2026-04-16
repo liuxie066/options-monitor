@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from scripts.account_config import accounts_from_config
-from scripts.validate_config import D3_SYMBOL_FORBIDDEN_FIELDS
+from scripts.validate_config import SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS as VALIDATOR_SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS
 
 
 BASE_DIR = Path(__file__).resolve().parents[2]
@@ -47,7 +47,7 @@ GLOBAL_STRATEGY_FIELDS: dict[str, type] = {
     "max_spread_ratio": float,
 }
 
-SYMBOL_LEVEL_D3_FORBIDDEN_FIELDS = D3_SYMBOL_FORBIDDEN_FIELDS
+SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS = VALIDATOR_SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS
 
 
 SCHEDULE_SUMMARY_FIELDS = {
@@ -365,7 +365,7 @@ def _ensure_symbols_list(cfg: dict) -> list:
     return cfg["symbols"]
 
 
-def _clean_symbol_level_d3_fields(cfg: dict) -> None:
+def _clean_symbol_level_strategy_fields(cfg: dict) -> None:
     symbols = cfg.get("symbols")
     if symbols is None:
         symbols = cfg.get("watchlist")
@@ -378,7 +378,7 @@ def _clean_symbol_level_d3_fields(cfg: dict) -> None:
             side_cfg = item.get(side)
             if not isinstance(side_cfg, dict):
                 continue
-            for field in SYMBOL_LEVEL_D3_FORBIDDEN_FIELDS:
+            for field in SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS:
                 side_cfg.pop(field, None)
 
 
@@ -411,7 +411,7 @@ def _patch_entry(entry: dict, payload: dict):
     if not isinstance(sp, dict):
         sp = {}
         entry["sell_put"] = sp
-    for field in SYMBOL_LEVEL_D3_FORBIDDEN_FIELDS:
+    for field in SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS:
         sp.pop(field, None)
     mapping_sp = {
         "sell_put_enabled": ("enabled", bool),
@@ -434,7 +434,7 @@ def _patch_entry(entry: dict, payload: dict):
     if not isinstance(sc, dict):
         sc = {}
         entry["sell_call"] = sc
-    for field in SYMBOL_LEVEL_D3_FORBIDDEN_FIELDS:
+    for field in SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS:
         sc.pop(field, None)
     mapping_sc = {
         "sell_call_enabled": ("enabled", bool),
@@ -481,7 +481,7 @@ async def api_update_global_config(req: Request):
 
     cfg = _load_config(config_key)
     _patch_global_strategy(cfg, payload)
-    _clean_symbol_level_d3_fields(cfg)
+    _clean_symbol_level_strategy_fields(cfg)
 
     path = _resolve_config_path(CONFIG_FILES[config_key])
     bak = _backup(path)
@@ -522,7 +522,7 @@ async def api_upsert(req: Request):
         pass
 
     _patch_entry(entry, payload)
-    _clean_symbol_level_d3_fields(cfg)
+    _clean_symbol_level_strategy_fields(cfg)
 
     path = _resolve_config_path(CONFIG_FILES[config_key])
     bak = _backup(path)

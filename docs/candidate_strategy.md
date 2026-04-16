@@ -87,11 +87,11 @@ Apply high-accident-risk and execution-quality gates:
   - Ex-dividend.
   - Future macro/event calendar items when supported.
 
-Current D3 contract:
+Current liquidity and event-risk contract:
 
-- Global template D3 hard fields are limited to `min_open_interest`, `min_volume`, and `max_spread_ratio`.
-- Symbol-level D3 fields are forbidden by config validation.
-- D3 event mode defaults to `warn`; event hits are annotated with `D3_EVENT_WARN` and are not hard rejects by default.
+- Global template hard-filter fields are limited to `min_open_interest`, `min_volume`, and `max_spread_ratio`.
+- Symbol-level liquidity/volatility shortcut fields are forbidden by config validation.
+- Event-risk mode defaults to `warn`; event hits are annotated with `EVENT_WARN` and are not hard rejects by default.
 
 ## Stage 4: Ranking And Top Pick
 
@@ -165,8 +165,8 @@ Current scanner CSV compatibility:
 - Shared simple ranking: `domain/domain/engine/candidate_engine.py`.
 - Production scanner/render entrypoints import the Engine strategy directly.
 - Compatibility wrapper for old callers: `scripts/option_candidate_strategy.py`.
-- D3 event annotation: `scripts/d3_event_filter.py`.
-- Config D3 validation: `scripts/validate_config.py`.
+- Event-risk annotation: `scripts/event_risk_filter.py`.
+- Config validation for global liquidity filters: `scripts/validate_config.py`.
 - Put cash enrichment and headroom gate: `scripts/sell_put_steps.py`, `scripts/sell_put_cash.py`.
 - Call covered-capacity gate: `scripts/sell_call_steps.py`, `scripts/scan_sell_call.py`.
 - Summary report assembly: `scripts/report_summaries.py`.
