@@ -153,6 +153,26 @@ def _extract_last_json_obj(raw: str) -> dict[str, Any] | None:
     return obj if isinstance(obj, dict) else None
 
 
+def _extract_notify_message_id(obj: dict[str, Any]) -> Any:
+    msg_id = obj.get("messageId") or obj.get("message_id") or obj.get("id")
+    if msg_id is not None:
+        return msg_id
+    result = obj.get("result")
+    if isinstance(result, dict):
+        msg_id = result.get("messageId") or result.get("message_id") or result.get("id")
+        if msg_id is not None:
+            return msg_id
+    for value in obj.values():
+        if isinstance(value, dict):
+            msg_id = value.get("messageId") or value.get("message_id")
+            if msg_id is not None:
+                return msg_id
+            nested = _extract_notify_message_id(value)
+            if nested is not None:
+                return nested
+    return None
+
+
 def normalize_subprocess_adapter_payload(
     *,
     adapter: str,
@@ -223,11 +243,8 @@ def normalize_pipeline_subprocess_output(*, returncode: int, stdout: str = "", s
 
 
 def normalize_notify_subprocess_output(*, returncode: int, stdout: str = "", stderr: str = "") -> dict[str, Any]:
-    obj = _extract_last_json_obj(stdout or "") or {}
-    msg_id = obj.get("messageId") or obj.get("message_id") or obj.get("id")
-    if msg_id is None and isinstance(obj.get("result"), dict):
-        result = obj.get("result", {})
-        msg_id = result.get("messageId") or result.get("message_id") or result.get("id")
+    obj = _extract_last_json_obj((stdout or "") + "\n" + (stderr or "")) or {}
+    msg_id = _extract_notify_message_id(obj) if obj else None
     command_ok = int(returncode) == 0
     delivery_confirmed = bool(command_ok and msg_id)
     message = str(stderr or "").strip()
