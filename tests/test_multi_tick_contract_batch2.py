@@ -60,8 +60,8 @@ def test_multi_tick_notify_failure_is_account_isolated() -> None:
     base = Path(__file__).resolve().parents[1]
     src = (base / "scripts" / "multi_tick" / "main.py").read_text(encoding="utf-8")
     assert "notify_failures: list[dict[str, object]] = []" in src
-    assert "NOTIFY_SEND_MAX_ATTEMPTS = 3" in src
-    assert "NOTIFY_SEND_RETRY_DELAYS_SEC = (1.0, 3.0)" in src
+    assert "NOTIFY_SEND_MAX_ATTEMPTS = 1" in src
+    assert "NOTIFY_SEND_RETRY_DELAYS_SEC: tuple[float, ...] = ()" in src
     assert "notify_failures.append(" in src
     assert "continue" in src[src.index("notify_failures.append(") : src.index("sent_accounts.append(acct)")]
     assert "'final_returncode': int(send_result.get('final_returncode') or 0)" in src
@@ -71,13 +71,9 @@ def test_multi_tick_notify_failure_is_account_isolated() -> None:
     assert "'notify_summary': notify_summary" in src
 
 
-def test_multi_tick_notify_retry_recovers_unconfirmed_send() -> None:
+def test_multi_tick_notify_unconfirmed_is_not_retried() -> None:
     mt = importlib.import_module("scripts.multi_tick.main")
 
-    sends = [
-        SimpleNamespace(returncode=0, stdout='{"ok":true}', stderr=""),
-        SimpleNamespace(returncode=0, stdout='{"messageId":"lx-2"}', stderr=""),
-    ]
     send_calls: list[dict] = []
     audit_events: list[dict] = []
     sleeps: list[float] = []
@@ -85,7 +81,7 @@ def test_multi_tick_notify_retry_recovers_unconfirmed_send() -> None:
 
     def _send(**kwargs):
         send_calls.append(dict(kwargs))
-        return sends.pop(0)
+        return SimpleNamespace(returncode=0, stdout='{"ok":true}', stderr="")
 
     def _audit(event_type, action, **kwargs):
         audit_events.append({"event_type": event_type, "action": action, **kwargs})
@@ -103,14 +99,14 @@ def test_multi_tick_notify_retry_recovers_unconfirmed_send() -> None:
         sleep_fn=lambda seconds: sleeps.append(seconds),
     )
 
-    assert result["ok"] is True
-    assert result["attempts"] == 2
-    assert len(send_calls) == 2
-    assert sleeps == [1.0]
-    assert [e["status"] for e in audit_events] == ["unconfirmed", "ok"]
+    assert result["ok"] is False
+    assert result["error_code"] == "SEND_UNCONFIRMED"
+    assert result["attempts"] == 1
+    assert len(send_calls) == 1
+    assert sleeps == []
+    assert [e["status"] for e in audit_events] == ["unconfirmed"]
     assert audit_events[0]["extra"]["delivery_confirmed"] is False
-    assert audit_events[1]["extra"]["message_id"] == "lx-2"
-    assert [e["status"] for e in runlog.events] == ["error", "ok"]
+    assert [e["status"] for e in runlog.events] == ["error"]
 
 
 def test_multi_tick_notify_does_not_retry_when_message_id_exists() -> None:
@@ -162,7 +158,7 @@ def test_multi_tick_notify_does_not_retry_when_message_id_exists() -> None:
     assert audit_events[0]["extra"]["message_id"] == "lx-1"
 
 
-def test_multi_tick_notify_retry_exhausts_unconfirmed_without_success() -> None:
+def test_multi_tick_notify_unconfirmed_can_retry_when_explicitly_requested() -> None:
     mt = importlib.import_module("scripts.multi_tick.main")
 
     audit_events: list[dict] = []
@@ -186,6 +182,8 @@ def test_multi_tick_notify_retry_exhausts_unconfirmed_without_success() -> None:
         audit_fn=_audit,
         send_fn=_send,
         sleep_fn=lambda seconds: sleeps.append(seconds),
+        max_attempts=3,
+        retry_delays_sec=(1.0, 3.0),
     )
 
     assert result["ok"] is False
@@ -199,14 +197,16 @@ def test_multi_tick_notify_retry_exhausts_unconfirmed_without_success() -> None:
     assert all(e["extra"]["attempt"] in {1, 2, 3} for e in audit_events)
 
 
-def test_multi_tick_notify_retry_exhausts_failed_send() -> None:
+def test_multi_tick_notify_failed_send_is_not_retried() -> None:
     mt = importlib.import_module("scripts.multi_tick.main")
 
     audit_events: list[dict] = []
     sleeps: list[float] = []
+    send_calls: list[dict] = []
     runlog = _FakeRunLogger()
 
-    def _send(**_kwargs):
+    def _send(**kwargs):
+        send_calls.append(dict(kwargs))
         return SimpleNamespace(returncode=2, stdout="", stderr="boom")
 
     def _audit(event_type, action, **kwargs):
@@ -227,9 +227,10 @@ def test_multi_tick_notify_retry_exhausts_failed_send() -> None:
 
     assert result["ok"] is False
     assert result["error_code"] == "SEND_FAILED"
-    assert result["attempts"] == 3
+    assert result["attempts"] == 1
     assert result["final_returncode"] == 2
     assert result["command_ok"] is False
     assert result["delivery_confirmed"] is False
-    assert sleeps == [1.0, 3.0]
-    assert [e["status"] for e in audit_events] == ["error", "error", "error"]
+    assert len(send_calls) == 1
+    assert sleeps == []
+    assert [e["status"] for e in audit_events] == ["error"]
