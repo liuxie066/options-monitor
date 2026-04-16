@@ -11,7 +11,7 @@ def _add_repo_to_syspath() -> Path:
     return base
 
 
-def test_validate_config_rejects_symbol_level_d3_keys() -> None:
+def test_validate_config_rejects_symbol_level_strategy_filter_keys() -> None:
     _add_repo_to_syspath()
     from scripts.validate_config import validate_config
 
@@ -64,7 +64,7 @@ def test_validate_config_rejects_symbol_level_d3_keys() -> None:
         assert 'max_delta' in msg
 
 
-def test_validate_config_rejects_removed_global_d3_keys() -> None:
+def test_validate_config_rejects_removed_global_strategy_filter_keys() -> None:
     _add_repo_to_syspath()
     from scripts.validate_config import validate_config
 
@@ -106,7 +106,7 @@ def test_validate_config_rejects_removed_global_d3_keys() -> None:
         assert 'min_iv' in msg
 
 
-def test_sell_put_steps_use_global_d3_only() -> None:
+def test_sell_put_steps_use_global_liquidity_filters_only() -> None:
     base = _add_repo_to_syspath()
     import scripts.sell_put_steps as steps
     from scripts.fx_rates import CurrencyConverter, FxRates
@@ -144,7 +144,7 @@ def test_sell_put_steps_use_global_d3_only() -> None:
             is_scheduled=True,
             fx=CurrencyConverter(FxRates()),
             portfolio_ctx=None,
-            global_sell_put_d3={
+            global_sell_put_liquidity={
                 'min_open_interest': 50,
                 'min_volume': 12,
                 'max_spread_ratio': 0.31,
@@ -169,7 +169,7 @@ def test_sell_put_steps_use_global_d3_only() -> None:
     assert '--require-bid-ask' not in cmd
 
 
-def test_sell_call_steps_use_global_d3_only() -> None:
+def test_sell_call_steps_use_global_liquidity_filters_only() -> None:
     base = _add_repo_to_syspath()
     import scripts.sell_call_steps as steps
     from scripts.fx_rates import CurrencyConverter, FxRates
@@ -204,7 +204,7 @@ def test_sell_call_steps_use_global_d3_only() -> None:
             stock={'shares': 200, 'avg_cost': 100.0},
             fx=CurrencyConverter(FxRates(usd_per_cny=0.14, cny_per_hkd=0.92)),
             locked_shares_by_symbol={'AAPL': 0},
-            global_sell_call_d3={
+            global_sell_call_liquidity={
                 'min_open_interest': 60,
                 'min_volume': 8,
                 'max_spread_ratio': 0.22,

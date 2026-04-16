@@ -13,6 +13,92 @@
 - 生成候选 CSV、摘要、提醒文本。
 - 按账户发送通知；没有候选时也发送一条“监控正常触发，本轮无候选”的心跳消息。
 
+## 项目架构
+
+```mermaid
+flowchart TD
+    User["用户 / Cron / WebUI"] --> Entrypoints["运行入口"]
+    Entrypoints --> Single["单账户入口<br/>scripts/send_if_needed.py"]
+    Entrypoints --> Multi["多账户入口<br/>scripts/send_if_needed_multi.py<br/>scripts/multi_tick/main.py"]
+    Entrypoints --> Pipeline["手动 Pipeline<br/>scripts/run_pipeline.py"]
+    Entrypoints --> Intake["成交入库<br/>scripts/option_intake.py"]
+
+    RuntimeConfig["仓外 Runtime Config<br/>../options-monitor-config/config.us.json<br/>../options-monitor-config/config.hk.json"] --> Entrypoints
+    Examples["仓内配置模板<br/>configs/examples/*.json"] -.复制初始化.-> RuntimeConfig
+
+    Multi --> Scheduler["调度与发送窗口<br/>scripts/scan_scheduler.py"]
+    Single --> Scheduler
+    Scheduler --> PipelineCore["扫描 Pipeline"]
+    Pipeline --> PipelineCore
+
+    PipelineCore --> Fetch["行情与期权链获取<br/>scripts/fetch_market_data*.py"]
+    Fetch --> OpenD["富途 OpenD / Futu API"]
+    Fetch --> Yahoo["Yahoo / yfinance"]
+
+    PipelineCore --> Context["账户与持仓上下文<br/>scripts/pipeline_context.py<br/>scripts/fetch_portfolio_context.py"]
+    Context --> Feishu["飞书多维表<br/>holdings / option_positions"]
+
+    PipelineCore --> Domain["确定性业务逻辑<br/>domain/domain/*"]
+    Domain --> Scan["Sell Put / Covered Call 扫描<br/>scripts/scan_sell_put.py<br/>scripts/scan_sell_call.py"]
+    Scan --> Alert["候选筛选与提醒渲染<br/>scripts/alert_engine.py<br/>scripts/notify_symbols.py"]
+
+    Multi --> SharedCache["共享数据复用<br/>output_shared/"]
+    Alert --> Reports["报告输出<br/>output/ / output_accounts/ / output_runs/"]
+    Multi --> Reports
+    Single --> State["运行状态<br/>output/state/"]
+    Multi --> AccountState["账户隔离状态<br/>output_runs/&lt;run_id&gt;/accounts/&lt;account&gt;/state/"]
+
+    Alert --> Notify["通知封装<br/>scripts/multi_tick/notify_format.py"]
+    Notify --> OpenClaw["OpenClaw CLI<br/>openclaw message send"]
+    OpenClaw --> Channel["通知渠道<br/>Feishu 等"]
+
+    Intake --> PositionCore["期权持仓服务<br/>scripts/option_positions_core/*"]
+    PositionCore --> Feishu
+```
+
+核心边界：
+
+- `domain/` 放确定性业务逻辑和跨入口共享契约，尽量不直接做外部 IO。
+- `scripts/` 放运行入口、适配器、报表渲染、外部服务调用和运维脚本。
+- `configs/examples/` 只放模板；真实线上配置推荐放在仓库外，不提交 Git。
+- `output*` 目录是运行产物和状态缓存，不作为源码维护。
+
+## 筛选标的业务策略
+
+系统的筛选目标不是“找最高收益率”，而是在账户约束、行权价边界、到期时间、流动性和风险事件都可接受的前提下，挑出最值得人工复核的 Sell Put / Covered Call 候选。
+
+整体流程：
+
+1. 先从配置里的 watchlist 读取需要监控的标的、账户和策略方向，例如 Sell Put、Covered Call，或两者同时开启。
+2. 拉取对应标的的行情、期权链、合约乘数、DTE、bid/ask/mid、成交量、未平仓量、IV、Delta 等基础数据。
+3. 结合账户上下文做可行性检查：Sell Put 看现金担保能力，Covered Call 看可覆盖股数。
+4. 对可行合约应用硬性筛选：到期时间、行权价范围、收益门槛、单笔净收入、流动性和价差。
+5. 对通过筛选的候选排序并生成提醒；如果没有候选，也会在应通知窗口内发送“本轮无候选”的心跳消息。
+
+Sell Put 主要关注：
+
+- 行权价需要低于当前股价，并落在配置允许的绝对或相对区间内。
+- 到期时间需要满足 `min_dte <= dte <= max_dte`。
+- 现金担保金额不能超过账户可用现金和已占用保证金后的可用额度。
+- 年化净收益率需要达到配置阈值，必要时还会检查单笔净收入。
+- 流动性需要满足最小未平仓量、最小成交量和最大价差比例要求。
+
+Covered Call 主要关注：
+
+- 合约需要是 call，并且账户里有足够股票覆盖卖出张数。
+- 可用股数会扣除已被其他 short call 占用的部分。
+- 行权价、到期时间、年化权利金收益率、单笔净收入需要满足配置阈值。
+- 排序时会优先看年化权利金收益率，同时保留到期被行权时的整体收益视角，便于人工复核。
+
+风险事件与排序：
+
+- 财报、除权除息等事件默认以提示为主，命中时在报告里标注，不默认硬拒绝。
+- 当前全局流动性/价差硬筛选只保留 `min_open_interest`、`min_volume`、`max_spread_ratio`。
+- 排序保持确定性：Sell Put 主要按现金基础年化净收益率排序，Covered Call 主要按年化权利金收益率排序，净收入作为次级参考。
+- 分层输出里的“激进 / 中性 / 保守”只是展示多样化策略，不替代硬性筛选规则。
+
+更详细的字段契约、拒绝原因和实现映射见 [docs/candidate_strategy.md](docs/candidate_strategy.md)。
+
 ## 安装
 
 要求：

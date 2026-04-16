@@ -5,12 +5,12 @@ import argparse
 import json
 from pathlib import Path
 
-D3_ALLOWED_GLOBAL_FIELDS = (
+LIQUIDITY_ALLOWED_GLOBAL_FIELDS = (
     'min_open_interest',
     'min_volume',
     'max_spread_ratio',
 )
-D3_REMOVED_FIELDS = (
+REMOVED_STRATEGY_FILTER_FIELDS = (
     'require_bid_ask',
     'min_iv',
     'max_iv',
@@ -19,7 +19,7 @@ D3_REMOVED_FIELDS = (
     'min_delta',
     'max_delta',
 )
-D3_SYMBOL_FORBIDDEN_FIELDS = D3_ALLOWED_GLOBAL_FIELDS + D3_REMOVED_FIELDS + ('d3_event',)
+SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS = LIQUIDITY_ALLOWED_GLOBAL_FIELDS + REMOVED_STRATEGY_FILTER_FIELDS + ('event_risk',)
 
 
 def die(msg: str):
@@ -90,7 +90,7 @@ def validate_config(cfg: dict):
     if cfg.get('templates') is None and isinstance(templates, dict):
         cfg['templates'] = templates
 
-    # Strict D3 Occam contract: global D3 only supports 3 hard filters.
+# Strict config contract: global liquidity filters only support 3 hard fields.
     if isinstance(templates, dict):
         for profile_name, profile in templates.items():
             if not isinstance(profile, dict):
@@ -99,11 +99,11 @@ def validate_config(cfg: dict):
                 side_cfg = profile.get(side)
                 if not isinstance(side_cfg, dict):
                     continue
-                bad_keys = [k for k in D3_REMOVED_FIELDS if k in side_cfg]
+                bad_keys = [k for k in REMOVED_STRATEGY_FILTER_FIELDS if k in side_cfg]
                 if bad_keys:
                     die(
-                        f"templates.{profile_name}.{side} has unsupported D3 keys: "
-                        f"{', '.join(bad_keys)}; only {', '.join(D3_ALLOWED_GLOBAL_FIELDS)} are allowed"
+                        f"templates.{profile_name}.{side} has unsupported strategy filter keys: "
+                        f"{', '.join(bad_keys)}; only {', '.join(LIQUIDITY_ALLOWED_GLOBAL_FIELDS)} are allowed"
                     )
 
     seen = set()
@@ -120,9 +120,9 @@ def validate_config(cfg: dict):
         # sell_put basic checks if enabled
         sp = item.get('sell_put') or {}
         if isinstance(sp, dict):
-            bad_keys = [k for k in D3_SYMBOL_FORBIDDEN_FIELDS if k in sp]
+            bad_keys = [k for k in SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS if k in sp]
             if bad_keys:
-                die(f"{sym}.sell_put has forbidden symbol-level D3 keys: {', '.join(bad_keys)}")
+                die(f"{sym}.sell_put has forbidden symbol-level strategy filter keys: {', '.join(bad_keys)}")
         if sp.get('enabled'):
             for k in ('min_dte','max_dte','min_strike','max_strike'):
                 if k not in sp:
@@ -134,9 +134,9 @@ def validate_config(cfg: dict):
 
         sc = item.get('sell_call') or {}
         if isinstance(sc, dict):
-            bad_keys = [k for k in D3_SYMBOL_FORBIDDEN_FIELDS if k in sc]
+            bad_keys = [k for k in SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS if k in sc]
             if bad_keys:
-                die(f"{sym}.sell_call has forbidden symbol-level D3 keys: {', '.join(bad_keys)}")
+                die(f"{sym}.sell_call has forbidden symbol-level strategy filter keys: {', '.join(bad_keys)}")
         if sc.get('enabled'):
             # NOTE:
             # - sell_call cost basis/shares come from holdings (portfolio_context) at runtime.

@@ -34,8 +34,8 @@ def run_sell_call_scan_and_summarize(
     stock: dict | None,
     fx: CurrencyConverter,
     locked_shares_by_symbol: dict[str, int] | None = None,
-    global_sell_call_d3: dict | None = None,
-    global_sell_call_d3_event: dict | None = None,
+    global_sell_call_liquidity: dict | None = None,
+    global_sell_call_event_risk: dict | None = None,
 ) -> dict:
     """Run sell_call scan + (optional) render + summarize.
 
@@ -68,10 +68,10 @@ def run_sell_call_scan_and_summarize(
         sell_call_cfg=cc,
         source_prefix=f'{symbol}.sell_call',
     )
-    d3 = dict(global_sell_call_d3 or {})
-    d3_event = {"enabled": True, "mode": "warn"}
-    if isinstance(global_sell_call_d3_event, dict):
-        d3_event.update(global_sell_call_d3_event)
+    liquidity = dict(global_sell_call_liquidity or {})
+    event_risk = {"enabled": True, "mode": "warn"}
+    if isinstance(global_sell_call_event_risk, dict):
+        event_risk.update(global_sell_call_event_risk)
 
     # Config min_net_income is always CNY. The scanners expect option-native
     # currency thresholds (USD for US symbols, HKD for HK symbols).
@@ -98,16 +98,16 @@ def run_sell_call_scan_and_summarize(
         '--max-dte', str(cc.get('max_dte', 90)),
         '--min-annualized-net-return', str(min_annualized),
         '--min-net-income', str(min_net_income_native),
-        '--min-open-interest', str(d3.get('min_open_interest', 100)),
-        '--min-volume', str(d3.get('min_volume', 10)),
-        '--max-spread-ratio', str(d3.get('max_spread_ratio', 0.3)),
-        '--d3-event-mode', str(d3_event.get('mode', 'warn')),
+        '--min-open-interest', str(liquidity.get('min_open_interest', 100)),
+        '--min-volume', str(liquidity.get('min_volume', 10)),
+        '--max-spread-ratio', str(liquidity.get('max_spread_ratio', 0.3)),
+        '--event-risk-mode', str(event_risk.get('mode', 'warn')),
         '--output', str(symbol_cc),
     ]
-    if bool(d3_event.get('enabled', True)):
-        cmd.append('--d3-event-enabled')
+    if bool(event_risk.get('enabled', True)):
+        cmd.append('--event-risk-enabled')
     else:
-        cmd.append('--no-d3-event-enabled')
+        cmd.append('--no-event-risk-enabled')
     if cc.get('min_strike') is not None:
         cmd.extend(['--min-strike', str(cc.get('min_strike'))])
     if cc.get('max_strike') is not None:
