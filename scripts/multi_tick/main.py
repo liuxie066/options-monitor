@@ -5,7 +5,7 @@ import json
 import os
 import subprocess
 from hashlib import sha256
-from time import monotonic
+from time import monotonic, sleep
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -109,6 +109,8 @@ except Exception:
 
 _CURRENT_RUN_ID: str | None = None
 SCHEMA_VALIDATION_ERROR_CODE = 'SCHEMA_VALIDATION_FAILED'
+NOTIFY_SEND_MAX_ATTEMPTS = 3
+NOTIFY_SEND_RETRY_DELAYS_SEC = (1.0, 3.0)
 
 
 def current_run_id() -> str | None:
@@ -157,6 +159,139 @@ def _is_trading_day_guard_for_market(cfg: dict, market: str) -> tuple[bool | Non
     None means guard check failed and caller should continue without blocking.
     """
     return trading_day_via_futu(cfg, market)
+
+
+def _notify_error_code(send_tool_dto: dict) -> str:
+    return 'SEND_UNCONFIRMED' if bool(send_tool_dto.get('command_ok')) else 'SEND_FAILED'
+
+
+def _send_account_message_with_retry(
+    *,
+    base: Path,
+    channel: str,
+    target: str,
+    account: str,
+    message: str,
+    run_id: str,
+    runlog,
+    audit_fn,
+    send_fn=send_openclaw_message,
+    normalize_fn=normalize_notify_subprocess_output,
+    sleep_fn=sleep,
+    max_attempts: int = NOTIFY_SEND_MAX_ATTEMPTS,
+    retry_delays_sec: tuple[float, ...] = NOTIFY_SEND_RETRY_DELAYS_SEC,
+) -> dict[str, object]:
+    attempts = max(1, int(max_attempts or 1))
+    final_record: dict[str, object] | None = None
+    attempt_records: list[dict[str, object]] = []
+
+    for attempt in range(1, attempts + 1):
+        t_notify0 = monotonic()
+        send = send_fn(
+            base=base,
+            channel=str(channel),
+            target=str(target),
+            message=message,
+        )
+        send_tool_dto = normalize_fn(
+            returncode=send.returncode,
+            stdout=send.stdout or '',
+            stderr=send.stderr or '',
+        )
+        ok = bool(send_tool_dto.get('ok'))
+        error_code = None if ok else _notify_error_code(send_tool_dto)
+        record = {
+            'account': account,
+            'attempt': attempt,
+            'max_attempts': attempts,
+            'returncode': int(send.returncode),
+            'message_id': send_tool_dto.get('message_id'),
+            'command_ok': bool(send_tool_dto.get('command_ok')),
+            'delivery_confirmed': bool(send_tool_dto.get('delivery_confirmed')),
+            'stdout_tail': send_tool_dto.get('stdout_tail'),
+            'stderr_tail': send_tool_dto.get('stderr_tail'),
+        }
+        attempt_records.append(record)
+        final_record = record
+
+        audit_extra = dict(record)
+        if not ok:
+            audit_extra.update(
+                build_failure_audit_fields(
+                    failure_kind='io_error',
+                    failure_stage='send_openclaw_message',
+                    failure_adapter=str(send_tool_dto.get('adapter') or 'notify'),
+                )
+            )
+        audit_fn(
+            'notify',
+            'send_openclaw_message',
+            run_id=run_id,
+            account=account,
+            status=('ok' if ok else ('unconfirmed' if error_code == 'SEND_UNCONFIRMED' else 'error')),
+            target=str(target),
+            error_code=error_code,
+            extra=audit_extra,
+        )
+
+        if ok:
+            runlog.safe_event(
+                'notify',
+                'ok',
+                duration_ms=int((monotonic() - t_notify0) * 1000),
+                data=_safe_runlog_data(
+                    {
+                        'channel': channel,
+                        **record,
+                    }
+                ),
+            )
+            return {
+                'ok': True,
+                'account': account,
+                'attempts': attempt,
+                'attempt_records': attempt_records,
+                'final': final_record,
+            }
+
+        runlog.safe_event(
+            'notify',
+            'error',
+            duration_ms=int((monotonic() - t_notify0) * 1000),
+            error_code=error_code,
+            message=(f'message send unconfirmed ({account})' if error_code == 'SEND_UNCONFIRMED' else f'message send failed ({account})'),
+            data=_safe_runlog_data(record),
+        )
+
+        if attempt < attempts:
+            delay = float(retry_delays_sec[min(attempt - 1, len(retry_delays_sec) - 1)] or 0.0) if retry_delays_sec else 0.0
+            if delay > 0:
+                sleep_fn(delay)
+
+    final = final_record or {
+        'account': account,
+        'attempt': 0,
+        'max_attempts': attempts,
+        'returncode': 1,
+        'message_id': None,
+        'command_ok': False,
+        'delivery_confirmed': False,
+        'stdout_tail': '',
+        'stderr_tail': '',
+    }
+    command_ok = bool(final.get('command_ok'))
+    return {
+        'ok': False,
+        'account': account,
+        'error_code': 'SEND_UNCONFIRMED' if command_ok else 'SEND_FAILED',
+        'attempts': attempts,
+        'attempt_records': attempt_records,
+        'final': final,
+        'final_returncode': int(final.get('returncode') or 0),
+        'message_id': final.get('message_id'),
+        'command_ok': command_ok,
+        'delivery_confirmed': bool(final.get('delivery_confirmed')),
+    }
 
 
 def main() -> int:
@@ -1367,86 +1502,33 @@ def main() -> int:
             _fail_schema_validation(runlog=runlog, audit_fn=_audit, stage='delivery_plan', exc=e, run_id=run_id)
         for acct, msg in delivery_plan.account_messages.items():
             runlog.safe_event('notify', 'start', data=_safe_runlog_data({'channel': channel, 'target_set': bool(target), 'account': acct, 'message_len': len(msg)}))
-
-            t_notify0 = monotonic()
-            send = send_openclaw_message(
+            send_result = _send_account_message_with_retry(
                 base=base,
                 channel=str(delivery_plan.channel),
                 target=str(delivery_plan.target),
+                account=str(acct),
                 message=msg,
+                run_id=run_id,
+                runlog=runlog,
+                audit_fn=_audit,
             )
-            send_tool_dto = normalize_notify_subprocess_output(
-                returncode=send.returncode,
-                stdout=send.stdout or '',
-                stderr=send.stderr or '',
-            )
-            if not bool(send_tool_dto.get('ok')):
-                error_code = 'SEND_UNCONFIRMED' if bool(send_tool_dto.get('command_ok')) else 'SEND_FAILED'
-                _audit(
-                    'notify',
-                    'send_openclaw_message',
-                    run_id=run_id,
-                    account=acct,
-                    status=('unconfirmed' if error_code == 'SEND_UNCONFIRMED' else 'error'),
-                    target=str(delivery_plan.target),
-                    error_code=error_code,
-                    extra={
-                        'returncode': int(send.returncode),
-                        'message_id': send_tool_dto.get('message_id'),
-                        'command_ok': bool(send_tool_dto.get('command_ok')),
-                        'delivery_confirmed': bool(send_tool_dto.get('delivery_confirmed')),
-                        'stdout_tail': send_tool_dto.get('stdout_tail'),
-                        'stderr_tail': send_tool_dto.get('stderr_tail'),
-                        **build_failure_audit_fields(
-                            failure_kind='io_error',
-                            failure_stage='send_openclaw_message',
-                            failure_adapter=str(send_tool_dto.get('adapter') or 'notify'),
-                        ),
-                    },
-                )
-                runlog.safe_event(
-                    'notify',
-                    'error',
-                    duration_ms=int((monotonic() - t_notify0) * 1000),
-                    error_code=error_code,
-                    message=(f'message send unconfirmed ({acct})' if error_code == 'SEND_UNCONFIRMED' else f'message send failed ({acct})'),
-                    data=_safe_runlog_data(
-                        {
-                            'returncode': send.returncode,
-                            'account': acct,
-                            'message_id': send_tool_dto.get('message_id'),
-                            'command_ok': bool(send_tool_dto.get('command_ok')),
-                            'delivery_confirmed': bool(send_tool_dto.get('delivery_confirmed')),
-                        }
-                    ),
-                )
+            if not bool(send_result.get('ok')):
+                error_code = str(send_result.get('error_code') or 'SEND_FAILED')
                 _guard_mark_failure(error_code, 'send_openclaw_message')
                 notify_failures.append(
                     {
                         'account': acct,
                         'error_code': error_code,
-                        'returncode': int(send.returncode),
-                        'message_id': send_tool_dto.get('message_id'),
-                        'command_ok': bool(send_tool_dto.get('command_ok')),
-                        'delivery_confirmed': bool(send_tool_dto.get('delivery_confirmed')),
+                        'attempts': int(send_result.get('attempts') or NOTIFY_SEND_MAX_ATTEMPTS),
+                        'final_returncode': int(send_result.get('final_returncode') or 0),
+                        'message_id': send_result.get('message_id'),
+                        'command_ok': bool(send_result.get('command_ok')),
+                        'delivery_confirmed': bool(send_result.get('delivery_confirmed')),
                     }
                 )
                 continue
 
             sent_accounts.append(acct)
-            _audit(
-                'notify',
-                'send_openclaw_message',
-                run_id=run_id,
-                account=acct,
-                status='ok',
-                target=str(delivery_plan.target),
-                extra={
-                    'returncode': int(send.returncode),
-                    'message_id': send_tool_dto.get('message_id'),
-                },
-            )
-            runlog.safe_event('notify', 'ok', duration_ms=int((monotonic() - t_notify0) * 1000), data=_safe_runlog_data({'channel': channel, 'account': acct}))
     else:
         target = notify_delivery.get('effective_target')
         sent_accounts = list(account_messages.keys())
@@ -1470,7 +1552,14 @@ def main() -> int:
             pass
 
     try:
+        notify_summary = {
+            'success_count': len(sent_accounts),
+            'failure_count': len(notify_failures),
+            'total_accounts': len(account_messages),
+        }
         tick_metrics['sent'] = (not no_send) and bool(sent_accounts)
+        tick_metrics['sent_accounts'] = sent_accounts
+        tick_metrics['notify_summary'] = notify_summary
         if notify_failures:
             tick_metrics['reason'] = 'sent_partial_notify_failure' if sent_accounts else 'notify_failed'
             tick_metrics['notify_failures'] = notify_failures
@@ -1493,6 +1582,7 @@ def main() -> int:
             'accounts': [r.account for r in results],
             'sent_accounts': sent_accounts,
             'notify_failures': notify_failures,
+            'notify_summary': notify_summary,
             'results': [r.__dict__ for r in results],
         }
         state_repo.write_shared_last_run(
@@ -1514,12 +1604,13 @@ def main() -> int:
                     'accounts': [r.account for r in results],
                     'sent_accounts': sent_accounts,
                     'notify_failures': notify_failures,
+                    'notify_summary': notify_summary,
                 }
             ),
         )
         return 1
 
-    runlog.safe_event('run_end', 'ok', data=_safe_runlog_data({'sent': (not no_send) and bool(sent_accounts), 'accounts': [r.account for r in results], 'sent_accounts': sent_accounts}))
+    runlog.safe_event('run_end', 'ok', data=_safe_runlog_data({'sent': (not no_send) and bool(sent_accounts), 'accounts': [r.account for r in results], 'sent_accounts': sent_accounts, 'notify_summary': notify_summary}))
     _guard_mark_success()
     return 0
 
