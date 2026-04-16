@@ -39,7 +39,22 @@ def test_subprocess_boundary_wrappers() -> None:
     )
     assert notif["adapter"] == "notify"
     assert notif["ok"] is True
+    assert notif["command_ok"] is True
+    assert notif["delivery_confirmed"] is True
     assert notif["message_id"] == "m-1"
+
+    unconfirmed = normalize_notify_subprocess_output(
+        returncode=0,
+        stdout='{"ok":true}',
+        stderr="",
+    )
+    assert unconfirmed["adapter"] == "notify"
+    assert unconfirmed["ok"] is False
+    assert unconfirmed["status"] == "error"
+    assert unconfirmed["command_ok"] is True
+    assert unconfirmed["delivery_confirmed"] is False
+    assert unconfirmed["message_id"] is None
+    assert "message_id is missing" in unconfirmed["message"]
 
 
 def test_state_repo_idempotency_and_audit_helpers() -> None:

@@ -12,6 +12,13 @@ if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
 
+def _test_config_path() -> Path:
+    local = BASE / "config.us.json"
+    if local.exists():
+        return local.resolve()
+    return (BASE / "configs" / "examples" / "config.example.us.json").resolve()
+
+
 def _patch_common(mod):
     old = {
         "argv": sys.argv[:],
@@ -46,7 +53,7 @@ def _restore(mod, old) -> None:
 def test_send_if_needed_blocks_on_scheduler_snapshot_schema_failure() -> None:
     mod = importlib.import_module("scripts.send_if_needed")
     old = _patch_common(mod)
-    cfg_path = (BASE / "config.us.json").resolve()
+    cfg_path = _test_config_path()
     try:
         mod.run_scan_scheduler_cli = lambda **_kwargs: SimpleNamespace(returncode=0, stdout='["bad"]', stderr="")  # type: ignore[assignment]
         sys.argv = [
@@ -74,7 +81,7 @@ def test_send_if_needed_blocks_on_scheduler_snapshot_schema_failure() -> None:
 def test_send_if_needed_blocks_on_decision_schema_failure() -> None:
     mod = importlib.import_module("scripts.send_if_needed")
     old = _patch_common(mod)
-    cfg_path = (BASE / "config.us.json").resolve()
+    cfg_path = _test_config_path()
     old_decision_from_payload = mod.Decision.from_payload
     try:
         mod.run_scan_scheduler_cli = lambda **_kwargs: SimpleNamespace(  # type: ignore[assignment]
@@ -111,7 +118,7 @@ def test_send_if_needed_blocks_on_decision_schema_failure() -> None:
 def test_send_if_needed_validates_delivery_plan_even_when_not_sending() -> None:
     mod = importlib.import_module("scripts.send_if_needed")
     old = _patch_common(mod)
-    cfg_path = (BASE / "config.us.json").resolve()
+    cfg_path = _test_config_path()
     old_delivery_from_payload = mod.DeliveryPlan.from_payload
     try:
         mod.run_scan_scheduler_cli = lambda **_kwargs: SimpleNamespace(  # type: ignore[assignment]
@@ -148,7 +155,7 @@ def test_send_if_needed_validates_delivery_plan_even_when_not_sending() -> None:
 def test_send_if_needed_blocks_on_pipeline_subprocess_adapter_schema_failure() -> None:
     mod = importlib.import_module("scripts.send_if_needed")
     old = _patch_common(mod)
-    cfg_path = (BASE / "config.us.json").resolve()
+    cfg_path = _test_config_path()
     old_normalize = mod.normalize_pipeline_subprocess_output
     try:
         mod.run_scan_scheduler_cli = lambda **_kwargs: SimpleNamespace(  # type: ignore[assignment]
@@ -183,7 +190,7 @@ def test_send_if_needed_blocks_on_pipeline_subprocess_adapter_schema_failure() -
 def test_send_if_needed_blocks_on_notify_subprocess_adapter_schema_failure() -> None:
     mod = importlib.import_module("scripts.send_if_needed")
     old = _patch_common(mod)
-    cfg_path = (BASE / "config.us.json").resolve()
+    cfg_path = _test_config_path()
     old_normalize = mod.normalize_notify_subprocess_output
     try:
         mod.run_scan_scheduler_cli = lambda **_kwargs: SimpleNamespace(  # type: ignore[assignment]

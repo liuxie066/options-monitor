@@ -1380,16 +1380,22 @@ def main() -> int:
                 stderr=send.stderr or '',
             )
             if not bool(send_tool_dto.get('ok')):
+                error_code = 'SEND_UNCONFIRMED' if bool(send_tool_dto.get('command_ok')) else 'SEND_FAILED'
                 _audit(
                     'notify',
                     'send_openclaw_message',
                     run_id=run_id,
                     account=acct,
-                    status='error',
+                    status=('unconfirmed' if error_code == 'SEND_UNCONFIRMED' else 'error'),
                     target=str(delivery_plan.target),
-                    error_code='SEND_FAILED',
+                    error_code=error_code,
                     extra={
                         'returncode': int(send.returncode),
+                        'message_id': send_tool_dto.get('message_id'),
+                        'command_ok': bool(send_tool_dto.get('command_ok')),
+                        'delivery_confirmed': bool(send_tool_dto.get('delivery_confirmed')),
+                        'stdout_tail': send_tool_dto.get('stdout_tail'),
+                        'stderr_tail': send_tool_dto.get('stderr_tail'),
                         **build_failure_audit_fields(
                             failure_kind='io_error',
                             failure_stage='send_openclaw_message',
@@ -1401,12 +1407,20 @@ def main() -> int:
                     'notify',
                     'error',
                     duration_ms=int((monotonic() - t_notify0) * 1000),
-                    error_code='SEND_FAILED',
-                    message=f'message send failed ({acct})',
-                    data=_safe_runlog_data({'returncode': send.returncode, 'account': acct}),
+                    error_code=error_code,
+                    message=(f'message send unconfirmed ({acct})' if error_code == 'SEND_UNCONFIRMED' else f'message send failed ({acct})'),
+                    data=_safe_runlog_data(
+                        {
+                            'returncode': send.returncode,
+                            'account': acct,
+                            'message_id': send_tool_dto.get('message_id'),
+                            'command_ok': bool(send_tool_dto.get('command_ok')),
+                            'delivery_confirmed': bool(send_tool_dto.get('delivery_confirmed')),
+                        }
+                    ),
                 )
-                _guard_mark_failure('SEND_FAILED', 'send_openclaw_message')
-                raise SystemExit(send.returncode)
+                _guard_mark_failure(error_code, 'send_openclaw_message')
+                raise SystemExit(int(send.returncode or 1))
 
             sent_accounts.append(acct)
             _audit(
