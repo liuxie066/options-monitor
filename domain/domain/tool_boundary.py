@@ -224,18 +224,28 @@ def normalize_pipeline_subprocess_output(*, returncode: int, stdout: str = "", s
 
 def normalize_notify_subprocess_output(*, returncode: int, stdout: str = "", stderr: str = "") -> dict[str, Any]:
     obj = _extract_last_json_obj(stdout or "") or {}
-    msg_id = obj.get("messageId")
+    msg_id = obj.get("messageId") or obj.get("message_id") or obj.get("id")
     if msg_id is None and isinstance(obj.get("result"), dict):
-        msg_id = obj.get("result", {}).get("messageId")
+        result = obj.get("result", {})
+        msg_id = result.get("messageId") or result.get("message_id") or result.get("id")
+    command_ok = int(returncode) == 0
+    delivery_confirmed = bool(command_ok and msg_id)
     message = str(stderr or "").strip()
-    if not message and msg_id:
+    if not message and delivery_confirmed:
         message = f"message_id={msg_id}"
+    elif not message and command_ok and not msg_id:
+        message = "openclaw returned 0 but message_id is missing"
     return normalize_subprocess_adapter_payload(
         adapter="notify",
         tool_name="openclaw_message_send",
         returncode=returncode,
         stdout=stdout,
         stderr=stderr,
+        ok=delivery_confirmed,
         message=message,
-        extra={"message_id": msg_id},
+        extra={
+            "command_ok": command_ok,
+            "delivery_confirmed": delivery_confirmed,
+            "message_id": msg_id,
+        },
     )
