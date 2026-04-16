@@ -753,7 +753,7 @@ function GlobalConfigPanel({summary, marketMeta, form, setForm, onSave}){
         <div>
           <div className="Eyebrow">{marketMeta.label} Global</div>
           <h2 className="PanelTitle">全局策略阈值</h2>
-          <p className="PanelText">维护市场级策略模板字段。保存时只更新 put_base / call_base 的收益率、收益和 D3 硬过滤参数。</p>
+          <p className="PanelText">维护市场级策略模板字段。保存时只更新 put_base / call_base 的收益率、收益和流动性/价差硬过滤参数。</p>
         </div>
         <div className="ConfigPath"><span>文件</span><code>{summary.path}</code></div>
       </div>

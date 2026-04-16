@@ -9,14 +9,14 @@ from typing import Callable
 import pandas as pd
 
 
-DEFAULT_D3_EVENT_CFG = {
+DEFAULT_EVENT_RISK_CFG = {
     "enabled": True,
     "mode": "warn",
 }
 
 
-def normalize_d3_event_cfg(cfg: dict | None) -> dict:
-    out = dict(DEFAULT_D3_EVENT_CFG)
+def normalize_event_risk_cfg(cfg: dict | None) -> dict:
+    out = dict(DEFAULT_EVENT_RISK_CFG)
     if isinstance(cfg, dict):
         out.update(cfg)
     out["enabled"] = bool(out.get("enabled", True))
@@ -159,11 +159,11 @@ class EventCache:
         return events
 
 
-def annotate_candidates_with_d3_events(
+def annotate_candidates_with_event_risk(
     df: pd.DataFrame,
     *,
     base_dir: Path,
-    d3_event_cfg: dict | None = None,
+    event_risk_cfg: dict | None = None,
     event_fetcher: Callable[[str], list[dict]] | None = None,
 ) -> pd.DataFrame:
     out = df.copy()
@@ -176,7 +176,7 @@ def annotate_candidates_with_d3_events(
         if col not in out.columns:
             out[col] = default
 
-    cfg = normalize_d3_event_cfg(d3_event_cfg)
+    cfg = normalize_event_risk_cfg(event_risk_cfg)
     if not cfg.get("enabled"):
         return out
 
@@ -218,7 +218,7 @@ def annotate_candidates_with_d3_events(
             flagged.append(True)
             types_list.append(",".join(sorted({t for _, t in hits})))
             dates_list.append(",".join([d for d, _ in hits]))
-            reject_stage.append("D3_EVENT_WARN" if cfg.get("mode") == "warn" else str(row.get("reject_stage_candidate") or ""))
+            reject_stage.append("EVENT_WARN" if cfg.get("mode") == "warn" else str(row.get("reject_stage_candidate") or ""))
         else:
             flagged.append(False)
             types_list.append("")

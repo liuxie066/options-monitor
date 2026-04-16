@@ -31,9 +31,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--min-open-interest", type=float, default=100)
     parser.add_argument("--min-volume", type=float, default=10)
     parser.add_argument("--max-spread-ratio", type=float, default=0.30)
-    parser.add_argument("--d3-event-enabled", dest="d3_event_enabled", action="store_true", default=None)
-    parser.add_argument("--no-d3-event-enabled", dest="d3_event_enabled", action="store_false")
-    parser.add_argument("--d3-event-mode", type=str, default="warn")
+    parser.add_argument("--event-risk-enabled", dest="event_risk_enabled", action="store_true", default=None)
+    parser.add_argument("--no-event-risk-enabled", dest="event_risk_enabled", action="store_false")
+    parser.add_argument("--event-risk-mode", dest="event_risk_mode", type=str, default="warn")
     parser.add_argument("--quiet", action="store_true", help="quiet mode: suppress human-friendly prints")
     parser.add_argument("--output", default=None, help="Output CSV path (default: output/reports/sell_call_candidates.csv)")
     parser.add_argument("--reject-log-output", default=None, help="Reject log CSV path (default: <output>_reject_log.csv)")
@@ -67,9 +67,9 @@ def main(argv: list[str] | None = None) -> int:
             min_open_interest=args.min_open_interest,
             min_volume=args.min_volume,
             max_spread_ratio=args.max_spread_ratio,
-            d3_event_cfg={
-                "enabled": True if args.d3_event_enabled is None else bool(args.d3_event_enabled),
-                "mode": str(args.d3_event_mode or "warn"),
+            event_risk_cfg={
+                "enabled": True if args.event_risk_enabled is None else bool(args.event_risk_enabled),
+                "mode": str(args.event_risk_mode or "warn"),
             },
             reject_log_output=(Path(args.reject_log_output).resolve() if args.reject_log_output else None),
             quiet=args.quiet,

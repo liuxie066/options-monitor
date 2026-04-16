@@ -118,7 +118,7 @@ def test_scan_sell_call_filter_and_rank_baseline() -> None:
                     "implied_volatility": 0.30,
                     "delta": 0.45,
                 },
-                # fail D3 open-interest
+                # fail liquidity open-interest
                 {
                     "symbol": "AAPL",
                     "option_type": "call",

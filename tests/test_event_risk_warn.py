@@ -13,11 +13,11 @@ def _add_repo_to_syspath() -> Path:
     return base
 
 
-def test_d3_event_hit_is_flagged_but_not_blocked() -> None:
+def test_event_risk_hit_is_flagged_but_not_blocked() -> None:
     from tempfile import TemporaryDirectory
 
     _add_repo_to_syspath()
-    from scripts.d3_event_filter import annotate_candidates_with_d3_events
+    from scripts.event_risk_filter import annotate_candidates_with_event_risk
 
     df = pd.DataFrame(
         [
@@ -31,10 +31,10 @@ def test_d3_event_hit_is_flagged_but_not_blocked() -> None:
     )
 
     with TemporaryDirectory() as td:
-        out = annotate_candidates_with_d3_events(
+        out = annotate_candidates_with_event_risk(
             df,
             base_dir=Path(td),
-            d3_event_cfg={"enabled": True, "mode": "warn"},
+            event_risk_cfg={"enabled": True, "mode": "warn"},
             event_fetcher=lambda _symbol: [{"type": "earnings", "date": "2026-05-01"}],
         )
 
@@ -42,5 +42,4 @@ def test_d3_event_hit_is_flagged_but_not_blocked() -> None:
         assert bool(out.iloc[0]["event_flag"]) is True
         assert out.iloc[0]["event_types"] == "earnings"
         assert out.iloc[0]["event_dates"] == "2026-05-01"
-        assert out.iloc[0]["reject_stage_candidate"] == "D3_EVENT_WARN"
-
+        assert out.iloc[0]["reject_stage_candidate"] == "EVENT_WARN"

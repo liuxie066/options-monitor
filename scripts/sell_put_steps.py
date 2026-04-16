@@ -36,8 +36,8 @@ def run_sell_put_scan_and_summarize(
     is_scheduled: bool,
     fx: CurrencyConverter,
     portfolio_ctx: dict | None,
-    global_sell_put_d3: dict | None = None,
-    global_sell_put_d3_event: dict | None = None,
+    global_sell_put_liquidity: dict | None = None,
+    global_sell_put_event_risk: dict | None = None,
 ) -> dict:
     symbol_sp = (report_dir / f'{symbol_lower}_sell_put_candidates.csv').resolve()
     symbol_sp_labeled = (report_dir / f'{symbol_lower}_sell_put_candidates_labeled.csv').resolve()
@@ -47,10 +47,10 @@ def run_sell_put_scan_and_summarize(
         source=f'{symbol}.sell_put.min_annualized_net_return',
     )
 
-    d3 = dict(global_sell_put_d3 or {})
-    d3_event = {"enabled": True, "mode": "warn"}
-    if isinstance(global_sell_put_d3_event, dict):
-        d3_event.update(global_sell_put_d3_event)
+    liquidity = dict(global_sell_put_liquidity or {})
+    event_risk = {"enabled": True, "mode": "warn"}
+    if isinstance(global_sell_put_event_risk, dict):
+        event_risk.update(global_sell_put_event_risk)
 
     cmd = [
         py, 'scripts/cli/scan_sell_put_cli.py',
@@ -59,16 +59,16 @@ def run_sell_put_scan_and_summarize(
         '--min-dte', str(sp.get('min_dte', 20)),
         '--max-dte', str(sp.get('max_dte', 60)),
         '--min-annualized-net-return', str(resolved_min_annualized_net_return),
-        '--min-open-interest', str(d3.get('min_open_interest', 100)),
-        '--min-volume', str(d3.get('min_volume', 10)),
-        '--max-spread-ratio', str(d3.get('max_spread_ratio', 0.3)),
-        '--d3-event-mode', str(d3_event.get('mode', 'warn')),
+        '--min-open-interest', str(liquidity.get('min_open_interest', 100)),
+        '--min-volume', str(liquidity.get('min_volume', 10)),
+        '--max-spread-ratio', str(liquidity.get('max_spread_ratio', 0.3)),
+        '--event-risk-mode', str(event_risk.get('mode', 'warn')),
         '--output', str(symbol_sp),
     ]
-    if bool(d3_event.get('enabled', True)):
-        cmd.append('--d3-event-enabled')
+    if bool(event_risk.get('enabled', True)):
+        cmd.append('--event-risk-enabled')
     else:
-        cmd.append('--no-d3-event-enabled')
+        cmd.append('--no-event-risk-enabled')
     if sp.get('min_strike') is not None:
         cmd.extend(['--min-strike', str(sp.get('min_strike'))])
     if sp.get('max_strike') is not None:
