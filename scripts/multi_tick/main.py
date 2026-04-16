@@ -1342,6 +1342,7 @@ def main() -> int:
         return 0
 
     sent_accounts: list[str] = []
+    notify_failures: list[dict[str, object]] = []
 
     config_error = notify_delivery.get('config_error')
     if config_error:
@@ -1420,7 +1421,17 @@ def main() -> int:
                     ),
                 )
                 _guard_mark_failure(error_code, 'send_openclaw_message')
-                raise SystemExit(int(send.returncode or 1))
+                notify_failures.append(
+                    {
+                        'account': acct,
+                        'error_code': error_code,
+                        'returncode': int(send.returncode),
+                        'message_id': send_tool_dto.get('message_id'),
+                        'command_ok': bool(send_tool_dto.get('command_ok')),
+                        'delivery_confirmed': bool(send_tool_dto.get('delivery_confirmed')),
+                    }
+                )
+                continue
 
             sent_accounts.append(acct)
             _audit(
@@ -1460,7 +1471,11 @@ def main() -> int:
 
     try:
         tick_metrics['sent'] = (not no_send) and bool(sent_accounts)
-        tick_metrics['reason'] = ('sent' if ((not no_send) and bool(sent_accounts)) else ('no_send' if no_send else 'no_account_sent'))
+        if notify_failures:
+            tick_metrics['reason'] = 'sent_partial_notify_failure' if sent_accounts else 'notify_failed'
+            tick_metrics['notify_failures'] = notify_failures
+        else:
+            tick_metrics['reason'] = ('sent' if ((not no_send) and bool(sent_accounts)) else ('no_send' if no_send else 'no_account_sent'))
         state_repo.write_tick_metrics(base, run_id, tick_metrics)
         state_repo.append_tick_metrics_history(base, run_id, tick_metrics)
         _audit('write', 'write_tick_metrics', run_id=run_id, extra={'sent': bool(tick_metrics.get('sent'))})
@@ -1477,6 +1492,7 @@ def main() -> int:
             'target': str(target),
             'accounts': [r.account for r in results],
             'sent_accounts': sent_accounts,
+            'notify_failures': notify_failures,
             'results': [r.__dict__ for r in results],
         }
         state_repo.write_shared_last_run(
@@ -1486,6 +1502,22 @@ def main() -> int:
         _audit('write', 'write_shared_last_run', run_id=run_id, extra={'sent_accounts': list(sent_accounts)})
     except Exception:
         pass
+
+    if notify_failures:
+        runlog.safe_event(
+            'run_end',
+            'error',
+            error_code=('NOTIFY_PARTIAL_FAILED' if sent_accounts else 'NOTIFY_FAILED'),
+            data=_safe_runlog_data(
+                {
+                    'sent': (not no_send) and bool(sent_accounts),
+                    'accounts': [r.account for r in results],
+                    'sent_accounts': sent_accounts,
+                    'notify_failures': notify_failures,
+                }
+            ),
+        )
+        return 1
 
     runlog.safe_event('run_end', 'ok', data=_safe_runlog_data({'sent': (not no_send) and bool(sent_accounts), 'accounts': [r.account for r in results], 'sent_accounts': sent_accounts}))
     _guard_mark_success()
