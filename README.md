@@ -32,7 +32,7 @@ flowchart TD
     Pipeline --> PipelineCore
 
     PipelineCore --> Fetch["行情与期权链获取<br/>scripts/fetch_market_data*.py"]
-    Fetch --> OpenD["富途 OpenD / Futu API"]
+    Fetch --> Futu["富途数据源 futu<br/>OpenD / Futu API"]
     Fetch --> Yahoo["Yahoo / yfinance"]
 
     PipelineCore --> Context["账户与持仓上下文<br/>scripts/pipeline_context.py<br/>scripts/fetch_portfolio_context.py"]
@@ -116,7 +116,7 @@ Covered Call 主要关注：
 要求：
 
 - Python 3.10+
-- 能访问行情源，例如 Yahoo 或 OpenD/Futu，按你的配置决定
+- 能访问行情源，例如 `futu`（富途 OpenD / Futu API）或 Yahoo，按你的配置决定
 - 如需通知或持仓上下文，需要准备对应的飞书/portfolio-management 配置
 
 首次安装：
@@ -237,12 +237,13 @@ WebUI 不应默认落到 `options-monitor-prod/config.us.json` / `options-monito
 - `secrets/` 已被 `.gitignore` 忽略，适合放本地真实凭证。
 - 写入飞书的操作，例如成交入库、自动关闭仓位，建议先用 `--dry-run`。
 
-### 2) 富途 OpenD / Futu API（行情与期权链）
+### 2) 富途数据源 futu（OpenD / Futu API 行情与期权链）
 
 用途：
 
-- 当标的配置里的 `fetch.source` 为 `opend` 时，通过本机 OpenD 拉行情、期权链、合约乘数等数据。
-- 港股期权通常依赖 OpenD；美股可按配置在 OpenD 和 Yahoo 之间选择或降级。
+- 当标的配置里的 `fetch.source` 为 `futu` 时，通过本机 OpenD 网关和 Futu API 拉行情、期权链、合约乘数等数据。
+- 旧配置里的 `fetch.source = "opend"` 仍兼容，但新配置建议统一写 `futu`。
+- 港股期权通常依赖富途数据源；美股可按配置在 futu 和 Yahoo 之间选择或降级。
 
 需要准备：
 
@@ -253,6 +254,7 @@ WebUI 不应默认落到 `options-monitor-prod/config.us.json` / `options-monito
 常用检查：
 
 ```bash
+./.venv/bin/python scripts/doctor_futu.py --symbols NVDA 0700.HK
 ./.venv/bin/python scripts/opend_watchdog.py
 ./.venv/bin/python scripts/doctor_opend_required_fields.py --symbols NVDA 00700.HK
 ```
@@ -262,12 +264,12 @@ WebUI 不应默认落到 `options-monitor-prod/config.us.json` / `options-monito
 用途：
 
 - 当 `fetch.source` 为 `yahoo` 时，使用 yfinance 拉取美股行情和期权链。
-- 也可作为 OpenD 不可用时的美股降级来源。
+- 也可作为富途/OpenD 不可用时的美股降级来源。
 
 注意：
 
 - 当前示例配置不需要 Yahoo API Key。
-- Yahoo/yfinance 可能被限流；生产监控中建议保留 OpenD 健康检查和降级策略。
+- Yahoo/yfinance 可能被限流；生产监控中建议保留富途/OpenD 健康检查和降级策略。
 
 ### 4) Finnhub 等第三方行情源（如启用）
 

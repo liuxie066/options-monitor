@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from domain.domain.fetch_source import is_futu_fetch_source
 from domain.domain.close_advice import (
     CloseAdviceConfig,
     CloseAdviceInput,
@@ -176,7 +177,7 @@ def _fetch_missing_quotes_via_opend(
         symbol_cfg = symbol_cfgs.get(symbol) or {}
         fetch_cfg = symbol_cfg.get("fetch") if isinstance(symbol_cfg, dict) else {}
         fetch_cfg = fetch_cfg if isinstance(fetch_cfg, dict) else {}
-        if str(fetch_cfg.get("source") or "").strip().lower() != "opend":
+        if not is_futu_fetch_source(fetch_cfg.get("source")):
             continue
         strikes = [safe_float(p.get("strike")) for p in missing_positions]
         strikes = [s for s in strikes if s is not None]

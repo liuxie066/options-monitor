@@ -59,7 +59,7 @@ def test_apply_opend_degrade_to_yahoo_keeps_existing_symbol_scope() -> None:
     from domain.domain.engine import apply_opend_degrade_to_yahoo
 
     symbols = [
-        {'market': 'US', 'fetch': {'source': 'opend', 'host': '127.0.0.1', 'port': 11111}},
+        {'market': 'US', 'fetch': {'source': 'futu', 'host': '127.0.0.1', 'port': 11111}},
         {'market': 'HK', 'fetch': {'source': 'opend', 'host': '127.0.0.1', 'port': 11111}},
         {'market': 'US', 'fetch': {'source': 'yahoo'}},
     ]

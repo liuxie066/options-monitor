@@ -22,6 +22,7 @@ from scripts.io_utils import (
     bj_now,
 )
 from scripts.account_config import accounts_from_config, cash_footer_accounts_from_config
+from domain.domain.fetch_source import is_futu_fetch_source, normalize_fetch_source
 
 from .cash_footer import query_cash_footer
 from .required_data_prefetch import prefetch_required_data
@@ -374,7 +375,7 @@ def main() -> int:
     for it in syms0:
         if not isinstance(it, dict):
             continue
-        src = str(((it.get('fetch') or {}).get('source') or 'yahoo')).lower()
+        src = normalize_fetch_source(((it.get('fetch') or {}).get('source') or 'yahoo'))
         src_counts[src] = src_counts.get(src, 0) + 1
     runlog.safe_event(
         'run_start',
@@ -537,7 +538,7 @@ def main() -> int:
         has_hk_opend = False
         for sym in (base_cfg.get('symbols') or []):
             fetch = (sym or {}).get('fetch') or {}
-            if str(fetch.get('source') or '').lower() == 'opend':
+            if is_futu_fetch_source(fetch.get('source')):
                 need_opend = True
                 host = fetch.get('host') or '127.0.0.1'
                 port = fetch.get('port') or 11111

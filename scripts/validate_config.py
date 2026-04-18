@@ -3,7 +3,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
+
+repo_base = Path(__file__).resolve().parents[1]
+if str(repo_base) not in sys.path:
+    sys.path.insert(0, str(repo_base))
+
+from domain.domain.fetch_source import normalize_fetch_source
 
 LIQUIDITY_ALLOWED_GLOBAL_FIELDS = (
     'min_open_interest',
@@ -24,6 +31,10 @@ SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS = LIQUIDITY_ALLOWED_GLOBAL_FIELDS + REMOV
 
 def die(msg: str):
     raise SystemExit(f"[CONFIG_ERROR] {msg}")
+
+
+def warn(msg: str):
+    print(f"[CONFIG_WARN] {msg}", file=sys.stderr)
 
 
 def validate_config(cfg: dict):
@@ -116,6 +127,17 @@ def validate_config(cfg: dict):
         if sym in seen:
             die(f"duplicate symbol: {sym}")
         seen.add(sym)
+
+        fetch = item.get('fetch') or {}
+        if fetch and not isinstance(fetch, dict):
+            die(f"{sym}.fetch must be an object")
+        if isinstance(fetch, dict):
+            src_raw = fetch.get('source', 'yahoo')
+            src = normalize_fetch_source(src_raw)
+            if src not in ('opend', 'yahoo'):
+                die(f"{sym}.fetch.source unsupported: {src_raw}; use futu or yahoo")
+            if str(src_raw or '').strip().lower() == 'opend':
+                warn(f"{sym}.fetch.source=opend is legacy; prefer futu")
 
         # sell_put basic checks if enabled
         sp = item.get('sell_put') or {}
