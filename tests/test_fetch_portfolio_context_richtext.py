@@ -63,3 +63,48 @@ def test_build_context_richtext_normalization_and_hk_symbol() -> None:
 
     assert "NVDA" in stocks
     assert stocks["NVDA"]["shares"] == 160
+
+
+def test_build_context_accepts_broker_field_without_market() -> None:
+    records = [
+        {
+            "fields": {
+                "broker": "富途",
+                "account": "lx",
+                "asset_type": "cash",
+                "asset_id": "USD-CASH",
+                "currency": "USD",
+                "quantity": "123.45",
+            }
+        },
+        {
+            "fields": {
+                "broker": "富途",
+                "account": "lx",
+                "asset_type": "us_stock",
+                "asset_id": "AAPL",
+                "asset_name": "Apple",
+                "currency": "USD",
+                "quantity": "20",
+                "avg_cost": "150",
+            }
+        },
+        {
+            "fields": {
+                "broker": "其他券商",
+                "account": "lx",
+                "asset_type": "cash",
+                "asset_id": "USD-CASH",
+                "currency": "USD",
+                "quantity": "999",
+            }
+        },
+    ]
+
+    ctx = build_context(records, broker="富途", account="lx")
+
+    assert ctx["filters"]["broker"] == "富途"
+    assert ctx["filters"]["market"] == "富途"
+    assert ctx["raw_selected_count"] == 2
+    assert ctx["cash_by_currency"]["USD"] == 123.45
+    assert ctx["stocks_by_symbol"]["AAPL"]["broker"] == "富途"
