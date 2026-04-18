@@ -4,6 +4,7 @@ from typing import Any
 
 from domain.domain.canonical_schema import normalize_source_snapshot
 from domain.domain.error_policy import classify_failure
+from domain.domain.fetch_source import is_futu_fetch_source
 from domain.domain.tool_boundary import SCHEMA_KIND_TOOL_EXECUTION, validate_schema_payload
 
 
@@ -11,7 +12,7 @@ def adapt_opend_tool_payload(payload: dict[str, Any] | Any) -> dict[str, Any]:
     src = validate_schema_payload((payload if isinstance(payload, dict) else {}), kind=SCHEMA_KIND_TOOL_EXECUTION)
     ok = bool(src.get("ok"))
     source_norm = str(src.get("source") or "").strip().lower()
-    fallback_used = bool(source_norm and source_norm != "opend")
+    fallback_used = bool(source_norm and not is_futu_fetch_source(source_norm))
     status_norm = ("ok" if ok and (not fallback_used) else ("fallback" if ok else "error"))
     message = str(src.get("message") or "").strip()
     failure = (

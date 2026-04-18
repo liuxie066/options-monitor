@@ -123,10 +123,11 @@ def main():
     if bool(getattr(args, 'refresh_multiplier_cache', False)):
         try:
             from scripts import multiplier_cache
+            from domain.domain.fetch_source import is_futu_fetch_source
             cache_path = multiplier_cache.default_cache_path(base)
             cfg0 = json.loads(cfg_path.read_text(encoding='utf-8'))
             syms = cfg0.get('watchlist') or cfg0.get('symbols') or []
-            syms = [it for it in syms if isinstance(it, dict) and str(((it.get('fetch') or {}).get('source') or '')).lower() == 'opend']
+            syms = [it for it in syms if isinstance(it, dict) and is_futu_fetch_source((it.get('fetch') or {}).get('source'))]
             cache = multiplier_cache.load_cache(cache_path)
             for it in syms:
                 sym = str(it.get('symbol') or '').strip().upper()

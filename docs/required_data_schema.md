@@ -56,9 +56,9 @@ Each row represents **one option contract**.
 - `scan_sell_put.py` requires: `dte, strike, spot, mid` and uses `open_interest, volume, bid, ask, implied_volatility, delta` for gating.
 - `scan_sell_call.py` requires: `dte, strike, spot, mid` and uses `open_interest, volume, bid, ask, implied_volatility, delta` for gating.
 
-## OpenD integration rule
+## Futu/OpenD integration rule
 
-When integrating additional sources (e.g. Futu OpenD), we should **preserve these columns**.
+When integrating additional sources (e.g. Futu via OpenD), we should **preserve these columns**.
 - Existing columns must not be removed/renamed.
 - New columns may be added (e.g. `opend_code`, `gamma/theta/vega`, `source`, `elapsed_ms`).
 - If OpenD provides greeks, prefer using OpenD values while keeping fallbacks to maintain coverage.

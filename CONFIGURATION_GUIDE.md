@@ -120,6 +120,7 @@
   - `avg_cost/shares` 已移除：sell_call 仅从 holdings 自动读取。
   - 若 holdings 取不到（该账户缺 holdings / 读取失败），则该账户的 sell_call 会被跳过。
 - `use`: 选择使用哪些模板（例如 `["put_base","call_base"]`）
+- `fetch.source`: 行情源，新配置建议使用 `futu`（富途数据源，经本机 OpenD 网关 + Futu API）或 `yahoo`；旧值 `opend` 仍兼容。
 
 ### 4.3 portfolio：账户约束来源
 - `pm_config`: 推荐指向仓外 `/opt/options-monitor/secrets/portfolio.feishu.json`（仅 Feishu/Bitable 凭证配置，不是 OM 运行入口）
