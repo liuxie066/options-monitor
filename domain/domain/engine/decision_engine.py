@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping, Sequence
+
+from domain.domain.fetch_source import is_futu_fetch_source
 from domain.domain.tool_boundary import (
     normalize_notify_window_aliases,
     normalize_scheduler_decision_payload,
@@ -88,7 +90,7 @@ def apply_opend_degrade_to_yahoo(
         fetch = sym.get('fetch')
         if not isinstance(fetch, dict):
             continue
-        if str(fetch.get('source') or '').lower() != 'opend':
+        if not is_futu_fetch_source(fetch.get('source')):
             continue
         fetch['source'] = 'yahoo'
         for k in ('host', 'port', 'spot_from_portfolio_management'):

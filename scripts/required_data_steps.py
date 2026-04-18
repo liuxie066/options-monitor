@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from domain.domain.fetch_source import normalize_fetch_source
 from scripts import pipeline_fetch_models
 from scripts.subprocess_utils import run_cmd
 
@@ -39,7 +40,7 @@ def ensure_required_data(
     if not (want_put or want_call):
         return
 
-    src = str(fetch_source or 'yahoo').strip().lower()
+    src = normalize_fetch_source(fetch_source)
 
     # In dev mode, keep fetch write/read model separated from pipeline orchestration:
     # - write model: fetch_required_data.events.jsonl + fetch_required_data.snapshots.json

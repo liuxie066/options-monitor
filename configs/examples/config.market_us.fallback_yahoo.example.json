@@ -217,7 +217,7 @@
     }
   ],
   "_notes": {
-    "generated_by": "cron emergency fallback: OpenD unreachable -> switch fetch.source opend->yahoo",
+    "generated_by": "cron emergency fallback: Futu/OpenD unreachable -> switch fetch.source futu->yahoo",
     "changed_symbols": [
       "NVDA",
       "GOOGL"

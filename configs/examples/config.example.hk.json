@@ -84,7 +84,7 @@
       "symbol": "0700.HK",
       "market": "HK",
       "fetch": {
-        "source": "opend",
+        "source": "futu",
         "host": "127.0.0.1",
         "port": 11111,
         "limit_expirations": 8

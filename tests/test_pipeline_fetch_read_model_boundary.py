@@ -109,6 +109,41 @@ def test_ensure_required_data_skips_when_read_model_is_ok_and_dte_satisfies() ->
     assert called == []
 
 
+def test_ensure_required_data_treats_futu_source_as_opend_path() -> None:
+    import scripts.required_data_steps as mod
+
+    root = (BASE / "tests" / ".tmp_pipeline_fetch_futu_source").resolve()
+    if root.exists():
+        shutil.rmtree(root, ignore_errors=True)
+    root.mkdir(parents=True, exist_ok=True)
+    required, state_dir = _make_dirs(root)
+
+    old_run_cmd = mod.run_cmd
+    called: list[list[str]] = []
+    try:
+        mod.run_cmd = lambda cmd, **_kw: called.append(list(cmd))  # type: ignore[assignment]
+        mod.ensure_required_data(
+            py="python3",
+            base=BASE,
+            symbol="AAPL",
+            required_data_dir=required,
+            limit_expirations=2,
+            want_put=True,
+            want_call=False,
+            timeout_sec=5,
+            is_scheduled=False,
+            state_dir=state_dir,
+            fetch_source="futu",
+            fetch_host="127.0.0.1",
+            fetch_port=11111,
+        )
+    finally:
+        mod.run_cmd = old_run_cmd  # type: ignore[assignment]
+
+    assert len(called) == 1
+    assert "fetch_market_data_opend.py" in " ".join(called[0])
+
+
 def test_ensure_required_data_does_not_read_raw_fetch_file_on_main_path() -> None:
     import pathlib
     import scripts.required_data_steps as mod
@@ -165,6 +200,7 @@ def test_ensure_required_data_does_not_read_raw_fetch_file_on_main_path() -> Non
 def main() -> None:
     test_ensure_required_data_uses_read_model_error_to_force_refetch()
     test_ensure_required_data_skips_when_read_model_is_ok_and_dte_satisfies()
+    test_ensure_required_data_treats_futu_source_as_opend_path()
     test_ensure_required_data_does_not_read_raw_fetch_file_on_main_path()
     print("OK (pipeline-fetch-read-model-boundary)")
 

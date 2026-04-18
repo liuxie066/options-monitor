@@ -5,6 +5,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from domain.domain.fetch_source import is_futu_fetch_source
+
 
 DEFAULT_OPEND_HOST = '127.0.0.1'
 DEFAULT_OPEND_PORT = 11111
@@ -162,7 +164,7 @@ def _resolve_opend_endpoint_for_market(cfg_obj: dict, market: str) -> tuple[str,
             if str(sym.get('market') or '').upper() != mkt:
                 continue
             fetch = (sym.get('fetch') or {})
-            if str(fetch.get('source') or '').lower() != 'opend':
+            if not is_futu_fetch_source(fetch.get('source')):
                 continue
             host = str(fetch.get('host') or host)
             port = int(fetch.get('port') or port)

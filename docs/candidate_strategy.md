@@ -4,7 +4,7 @@ This document defines the target Put/Call candidate filtering and ranking contra
 It is written for the current decision/execution split:
 
 - Engine owns deterministic decisions, filtering semantics, ranking semantics, DTOs, and reject reasons.
-- Scripts/infra own external effects: option-chain fetch, holdings read, option_positions read, OpenD/Futu calls, and notification delivery.
+- Scripts/infra own external effects: option-chain fetch, holdings read, option_positions read, Futu/OpenD calls, and notification delivery.
 - Current scanner scripts still carry part of the candidate strategy. Future refactors should move those rules behind an Engine candidate decision boundary without changing outputs first.
 
 ## Scope

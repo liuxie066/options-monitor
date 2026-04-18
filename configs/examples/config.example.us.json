@@ -100,7 +100,7 @@
       "market": "US",
       "fetch": {
         "limit_expirations": 8,
-        "source": "opend",
+        "source": "futu",
         "host": "127.0.0.1",
         "port": 11111,
         "spot_from_portfolio_management": true
