@@ -92,11 +92,28 @@ def _normalize_symbol(asset_type: str | None, asset_id: str, market_text: str = 
     return None
 
 
-def build_context(records: list[dict], market: str, account: str | None = None) -> dict:
+def _record_broker_text(fields: dict) -> str:
+    return (_as_text(fields.get("broker")).strip() or _as_text(fields.get("market")).strip())
+
+
+def _filter_payload(*, broker: str | None, account: str | None) -> dict:
+    # Preserve legacy "market" for older readers while making "broker" the
+    # preferred name for holdings/portfolio source filtering.
+    return {"broker": broker, "market": broker, "account": account}
+
+
+def build_context(
+    records: list[dict],
+    broker: str | None = None,
+    account: str | None = None,
+    *,
+    market: str | None = None,
+) -> dict:
     # holding schema fields we saw:
-    # asset_id, asset_type, market, account, quantity, avg_cost, currency
+    # asset_id, asset_type, broker/market, account, quantity, avg_cost, currency
     selected = []
-    market_norm = str(market).strip() if market else None
+    broker_raw = broker if broker is not None else market
+    broker_norm = str(broker_raw).strip() if broker_raw else None
     account_norm = str(account).strip() if account else None
 
     for rec in records:
@@ -104,19 +121,19 @@ def build_context(records: list[dict], market: str, account: str | None = None) 
         if not fields0:
             continue
 
-        m = _as_text(fields0.get("market")).strip()
+        b = _record_broker_text(fields0)
         a = _as_text(fields0.get("account")).strip()
 
-        # Be tolerant: market column is free-text; accept values that contain the target market string.
+        # Be tolerant: broker/legacy market column is free-text; accept values that contain the target broker string.
         # Still keeps the "only 富途" constraint when market_norm is set.
-        if market_norm and market_norm not in m:
+        if broker_norm and broker_norm not in b:
             continue
         if account_norm and account_norm != a:
             continue
 
         # Normalize selected fields (avoid leaking rich-text arrays downstream)
         fields = dict(fields0)
-        for k in ("market", "account", "asset_id", "asset_name"):
+        for k in ("broker", "market", "account", "asset_id", "asset_name"):
             if k in fields:
                 fields[k] = _as_text(fields.get(k)).strip()
         selected.append(fields)
@@ -162,38 +179,40 @@ def build_context(records: list[dict], market: str, account: str | None = None) 
             "shares": int(qty),
             "avg_cost": avg_cost,
             "currency": currency,
+            "broker": _record_broker_text(f),
             "market": _as_text(f.get("market")).strip(),
             "account": _as_text(f.get("account")).strip(),
         }
 
     return {
         "as_of_utc": datetime.now(timezone.utc).isoformat(),
-        "filters": {"market": market, "account": account},
+        "filters": _filter_payload(broker=broker_norm, account=account),
         "cash_by_currency": cash_by_currency,
         "stocks_by_symbol": stocks_by_symbol,
         "raw_selected_count": len(selected),
     }
 
 
-def build_shared_context(records: list[dict], market: str) -> dict:
-    market_norm = str(market).strip() if market else None
+def build_shared_context(records: list[dict], broker: str | None = None, *, market: str | None = None) -> dict:
+    broker_raw = broker if broker is not None else market
+    broker_norm = str(broker_raw).strip() if broker_raw else None
     accounts: set[str] = set()
     for rec in records:
         fields0 = rec.get("fields") or {}
         if not fields0:
             continue
-        m = _as_text(fields0.get("market")).strip()
-        if market_norm and market_norm not in m:
+        b = _record_broker_text(fields0)
+        if broker_norm and broker_norm not in b:
             continue
         a = _as_text(fields0.get("account")).strip()
         if a:
             accounts.add(a)
 
-    by_account = {acct: build_context(records, market=market, account=acct) for acct in sorted(accounts)}
+    by_account = {acct: build_context(records, broker=broker_norm, account=acct) for acct in sorted(accounts)}
     return {
         "as_of_utc": datetime.now(timezone.utc).isoformat(),
-        "filters": {"market": market},
-        "all_accounts": build_context(records, market=market, account=None),
+        "filters": _filter_payload(broker=broker_norm, account=None),
+        "all_accounts": build_context(records, broker=broker_norm, account=None),
         "by_account": by_account,
     }
 
@@ -214,7 +233,8 @@ def slice_shared_context_for_account(shared_ctx: dict, account: str | None) -> d
 def main():
     parser = argparse.ArgumentParser(description="Fetch portfolio context from Feishu holdings table")
     parser.add_argument("--pm-config", default="../portfolio-management/config.json")
-    parser.add_argument("--market", default="富途")
+    parser.add_argument("--broker", default="富途")
+    parser.add_argument("--market", default=None, help="DEPRECATED alias of --broker")
     parser.add_argument("--account", default=None)
     parser.add_argument("--shared-out", default=None, help="Optional output path for shared context cache")
     parser.add_argument("--out", default=None, help="Output JSON path (default: <state-dir>/portfolio_context.json)")
@@ -244,7 +264,11 @@ def main():
     except FeishuError as e:
         # last resort: some tenants still allow list
         records = bitable_list_records(token, app_token, table_id)
-    ctx = build_context(records, market=args.market, account=args.account)
+    broker = args.market if args.market is not None else args.broker
+    if args.market and not args.quiet:
+        print("[WARN] --market is deprecated; use --broker")
+
+    ctx = build_context(records, broker=broker, account=args.account)
 
     if args.out:
         out_path = Path(args.out)
@@ -261,12 +285,12 @@ def main():
         shared_out = Path(args.shared_out)
         if not shared_out.is_absolute():
             shared_out = (base / shared_out).resolve()
-        atomic_write_json(shared_out, build_shared_context(records, market=args.market))
+        atomic_write_json(shared_out, build_shared_context(records, broker=broker))
 
     if not args.quiet:
         usd_cash = ctx["cash_by_currency"].get("USD")
         print(f"[DONE] portfolio context -> {out_path}")
-        print(f"market={args.market} account={args.account or '-'} selected={ctx['raw_selected_count']}")
+        print(f"broker={broker} account={args.account or '-'} selected={ctx['raw_selected_count']}")
         print(f"usd_cash={usd_cash if usd_cash is not None else 'N/A'}")
         print(f"us_stocks={len(ctx['stocks_by_symbol'])}")
 
