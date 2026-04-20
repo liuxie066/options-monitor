@@ -64,6 +64,7 @@ def test_notify_symbols_markdown_put_layout_missing_fields_have_reasons() -> Non
     assert "行权价=156" in out
     assert "年化 缺失(告警未提供年化)" in out
     assert "保证金占用=缺失(告警未提供cash_req_cny/cash_req)" in out
+    assert "同标的Sell Put占用" not in out
     assert "delta=缺失(告警未提供delta)" in out
     assert "IV=缺失(告警未提供iv)" in out
 
@@ -84,6 +85,7 @@ def test_notify_symbols_markdown_call_layout_and_changes() -> None:
 
     assert "### [sy] 英伟达 · 卖Call" in out
     assert "数量=2张(可覆盖)" in out
+    assert "持仓: 总股数=200 | 已占用=0 | 可用=200 | 可覆盖=2张" in out
     assert "变化" in out
     assert "- NVDA sell_call: Top pick 由 2026-06-18 175C 变为 2026-06-18 180C。" in out
 
@@ -103,7 +105,7 @@ def test_notify_symbols_markdown_call_layout_missing_fields_have_reasons() -> No
     assert "年化 缺失(告警未提供年化)" in out
     assert "delta=缺失(告警未提供delta)" in out
     assert "IV=缺失(告警未提供iv)" in out
-    assert "覆盖: 缺失(告警未提供cover) 张 | shares 缺失(告警未提供shares)" in out
+    assert "持仓: 总股数=缺失(告警未提供shares) | 已占用=缺失(告警未提供shares) | 可用=缺失(告警未提供shares) | 可覆盖=缺失(告警未提供cover)张" in out
 
 
 def test_notify_symbols_markdown_put_chain_uses_upstream_fields_when_available() -> None:
@@ -129,6 +131,7 @@ def test_notify_symbols_markdown_put_chain_uses_upstream_fields_when_available()
     )
 
     assert "保证金占用=¥110,720 (CNY)" in out
+    assert "同标的Sell Put占用" not in out
     assert "delta=-0.23" in out
     assert "IV=41.00%" in out
     assert "告警未提供cash_req_cny/cash_req" not in out
@@ -178,3 +181,17 @@ def test_notify_symbols_markdown_put_chain_missing_fields_keep_reasons() -> None
     assert "保证金占用=缺失(告警未提供cash_req_cny/cash_req)" in out
     assert "delta=缺失(告警未提供delta)" in out
     assert "IV=缺失(告警未提供iv)" in out
+
+
+def test_notify_symbols_markdown_put_shows_same_symbol_position_usage() -> None:
+    from scripts.notify_symbols import build_notification
+
+    alerts = """# Symbols Alerts
+
+## 高优先级
+- [腾讯](0700.HK) | sell_put | 2026-04-29 460P | 年化 17.21% | 净收入 557.00 | DTE 26 | Strike 460 | 中性 | ccy HKD | mid 5.720 | cash_req_cny ¥110,720 | cash_used_total_cny ¥200,000 | cash_used_sym_cny ¥45,000 | 通过准入后，收益/风险组合较强，值得优先看。
+"""
+    out = build_notification("", alerts, account_label="LX")
+
+    assert "同标的Sell Put占用=¥45,000" in out
+    assert "全账户Sell Put占用" not in out
