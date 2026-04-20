@@ -164,15 +164,36 @@ def _require_token_for_write(req: Request):
         raise HTTPException(status_code=401, detail="missing/invalid X-OM-Token")
 
 
-def _to_row(config_key: str, item: dict) -> SymbolRow:
+def _normalize_symbol_for_name_lookup(value: Any) -> str:
+    return str(value or "").strip().upper()
+
+
+def _symbol_name_from_aliases(symbol: str, cfg: dict | None) -> str | None:
+    if not isinstance(cfg, dict):
+        return None
+    intake = cfg.get("intake") if isinstance(cfg.get("intake"), dict) else {}
+    aliases = intake.get("symbol_aliases") if isinstance(intake.get("symbol_aliases"), dict) else {}
+    target = _normalize_symbol_for_name_lookup(symbol)
+    for alias, alias_symbol in aliases.items():
+        if _normalize_symbol_for_name_lookup(alias_symbol) == target:
+            name = str(alias).strip()
+            if name:
+                return name
+    return None
+
+
+def _to_row(config_key: str, item: dict, cfg: dict | None = None) -> SymbolRow:
     fetch = item.get("fetch") or {}
     sp = item.get("sell_put") or {}
     sc = item.get("sell_call") or {}
+    symbol = str(item.get("symbol") or "")
     name = item.get("name") or item.get("display_name") or item.get("symbol_name")
+    if name is None or not str(name).strip():
+        name = _symbol_name_from_aliases(symbol, cfg)
 
     return SymbolRow(
         configKey=config_key,  # type: ignore
-        symbol=str(item.get("symbol") or ""),
+        symbol=symbol,
         name=str(name).strip() if name is not None and str(name).strip() else None,
         market=item.get("market"),
         accounts=item.get("accounts"),
@@ -202,7 +223,7 @@ def _list_rows() -> list[dict[str, Any]]:
         for it in symbols:
             if not isinstance(it, dict):
                 continue
-            row = _to_row(k, it)
+            row = _to_row(k, it, cfg)
             rows.append(row.__dict__)
 
     # stable sort: configKey, market, symbol
