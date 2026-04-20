@@ -75,6 +75,15 @@ def _present_or_missing(value: str | None, *, reason: str) -> str:
     return str(value).strip()
 
 
+def _present_money_or_zero(value: str | None, *, reason: str) -> str:
+    if _is_missing_value(value):
+        return f"缺失({reason})"
+    v = str(value).strip()
+    if v in {"0", "0.0", "0.00"}:
+        return "0"
+    return v
+
+
 def _value_after_prefix(token: str | None, prefix: str) -> str:
     if not token:
         return ''
@@ -197,6 +206,8 @@ def _format_alert_line(line: str, *, account_label: str = '当前账户') -> str
     if strategy == 'sell_put':
         cash_req_cny = extras.get('cash_req_cny', '')
         cash_req_usd = extras.get('cash_req', '')
+        cash_used_sym_cny = extras.get('cash_used_sym_cny', '')
+        cash_used_sym = extras.get('cash_used_sym', '')
         delta = extras.get('delta', '')
         iv = extras.get('iv', '') or extras.get('IV', '')
 
@@ -230,6 +241,7 @@ def _format_alert_line(line: str, *, account_label: str = '当前账户') -> str
         iv_show = _present_or_missing(iv, reason='告警未提供iv')
         note = comment or '通过准入后，收益/风险组合较强，值得优先看。'
         title = f"### [{account_label}] {symbol_name} · 卖Put"
+        used_symbol = cash_used_sym_cny if not _is_missing_value(cash_used_sym_cny) else cash_used_sym
         out = [
             title,
             f"- {symbol_name} 卖Put {contract}",
@@ -238,6 +250,8 @@ def _format_alert_line(line: str, *, account_label: str = '当前账户') -> str
             f"- 风控: 风险={risk_tag or '-'} | delta={delta_show} | IV={iv_show}",
             f"- 资金: 保证金占用={margin}",
         ]
+        if not _is_missing_value(used_symbol):
+            out.append(f"- 已持仓: 同标的Sell Put占用={_present_money_or_zero(used_symbol, reason='告警未提供cash_used_sym')}")
         if sug:
             out.append(f"- 操作: 建议挂单={sug.replace('建议挂单 ', '').strip()}")
         out.append(f"- 备注: {note}")
@@ -264,13 +278,28 @@ def _format_alert_line(line: str, *, account_label: str = '当前账户') -> str
         qty = f"{cover}张(可覆盖)" if (not _is_missing_value(cover)) else '1张(默认)'
         note = comment or '已通过准入，可作为 sell call 备选。'
         title = f"### [{account_label}] {symbol_name} · 卖Call"
+        shares_total = ''
+        shares_locked = ''
+        if not _is_missing_value(shares):
+            m = re.match(r'^(?P<total>\d+)\(-(?P<locked>\d+)\)$', str(shares).strip())
+            if m:
+                shares_total = m.group('total')
+                shares_locked = m.group('locked')
+            else:
+                shares_total = str(shares).strip()
+        shares_available = ''
+        try:
+            if not _is_missing_value(shares_total) and not _is_missing_value(shares_locked):
+                shares_available = str(max(0, int(shares_total) - int(shares_locked)))
+        except Exception:
+            shares_available = ''
         out = [
             title,
             f"- {symbol_name} 卖Call {contract}",
             f"- 收益: 权利金={premium} | {annual_show} | {income_int_tag(income) or '净收 -'}",
             f"- 合约: 行权价={strike_show} | 数量={qty} | DTE={dte.replace('DTE ', '').strip() if dte else '-'}",
             f"- 风控: 风险={risk_tag or '-'} | delta={delta_show} | IV={iv_show}",
-            f"- 覆盖: {_present_or_missing(cover, reason='告警未提供cover')} 张 | shares {_present_or_missing(shares, reason='告警未提供shares')}",
+            f"- 持仓: 总股数={_present_or_missing(shares_total, reason='告警未提供shares')} | 已占用={_present_or_missing(shares_locked, reason='告警未提供shares')} | 可用={_present_or_missing(shares_available, reason='告警未提供shares')} | 可覆盖={_present_or_missing(cover, reason='告警未提供cover')}张",
         ]
         if sug:
             out.append(f"- 操作: 建议挂单={sug.replace('建议挂单 ', '').strip()}")
