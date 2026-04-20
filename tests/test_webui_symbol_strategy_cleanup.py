@@ -140,3 +140,21 @@ def test_to_row_exposes_symbol_name_from_supported_config_fields() -> None:
 
     fallback_row = _to_row("us", {"symbol": "NVDA", "display_name": "NVIDIA"})
     assert fallback_row.name == "NVIDIA"
+
+
+def test_to_row_derives_symbol_name_from_intake_aliases() -> None:
+    row = _to_row(
+        "hk",
+        {"symbol": "0700.HK"},
+        {"intake": {"symbol_aliases": {"腾讯": "0700.HK", "腾讯控股": "0700.HK"}}},
+    )
+    assert row.name == "腾讯"
+
+
+def test_to_row_prefers_explicit_symbol_name_over_aliases() -> None:
+    row = _to_row(
+        "hk",
+        {"symbol": "0700.HK", "name": "腾讯控股"},
+        {"intake": {"symbol_aliases": {"腾讯": "0700.HK"}}},
+    )
+    assert row.name == "腾讯控股"
