@@ -68,6 +68,7 @@ SCHEDULE_SUMMARY_FIELDS = {
 class SymbolRow:
     configKey: Literal["us", "hk"]
     symbol: str
+    name: str | None
     market: str | None
     accounts: list[str] | None
     limit_expirations: int | None
@@ -167,10 +168,12 @@ def _to_row(config_key: str, item: dict) -> SymbolRow:
     fetch = item.get("fetch") or {}
     sp = item.get("sell_put") or {}
     sc = item.get("sell_call") or {}
+    name = item.get("name") or item.get("display_name") or item.get("symbol_name")
 
     return SymbolRow(
         configKey=config_key,  # type: ignore
         symbol=str(item.get("symbol") or ""),
+        name=str(name).strip() if name is not None and str(name).strip() else None,
         market=item.get("market"),
         accounts=item.get("accounts"),
         limit_expirations=(fetch.get("limit_expirations") if isinstance(fetch, dict) else None),

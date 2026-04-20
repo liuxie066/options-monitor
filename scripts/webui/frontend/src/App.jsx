@@ -328,7 +328,8 @@ export default function App(){
     const qq = q.trim().toUpperCase();
     return rows.filter(r=>{
       if (r.configKey !== selectedMarket) return false;
-      if (qq && !String(r.symbol||'').toUpperCase().includes(qq)) return false;
+      const searchable = `${r.symbol || ''} ${r.name || ''}`.toUpperCase();
+      if (qq && !searchable.includes(qq)) return false;
       if (account){
         const a = (r.accounts||[]).map(x=>String(x).toLowerCase());
         if (a.length>0 && !a.includes(account)) return false;
@@ -573,7 +574,7 @@ export default function App(){
                   <table>
                     <thead>
                       <tr>
-                        <th>exchange</th><th>symbol</th><th>accounts</th><th>put</th><th>call</th>
+                        <th>exchange</th><th>symbol</th><th>标的名</th><th>accounts</th><th>put</th><th>call</th>
                         <th>limit_exp</th><th>put dte</th><th>put strike</th><th>call dte</th><th>call strike</th><th>ops</th>
                       </tr>
                     </thead>
@@ -582,6 +583,7 @@ export default function App(){
                         <tr key={`${r.configKey}-${r.symbol}`}>
                           <td>{r.market ?? marketMeta.exchange}</td>
                           <td><strong>{r.symbol}</strong></td>
+                          <td>{r.name || <span style={{color:'var(--muted)'}}>-</span>}</td>
                           <td>{(r.accounts && r.accounts.length)? r.accounts.join(',') : <span style={{color:'var(--muted)'}}>all</span>}</td>
                           <td>{badgeOnOff(r.sell_put_enabled)}</td>
                           <td>{badgeOnOff(r.sell_call_enabled)}</td>
@@ -595,7 +597,7 @@ export default function App(){
                       ))}
                       {!filtered.length && (
                         <tr>
-                          <td colSpan="11"><span style={{color:'var(--muted)'}}>当前筛选下没有标的配置</span></td>
+                          <td colSpan="12"><span style={{color:'var(--muted)'}}>当前筛选下没有标的配置</span></td>
                         </tr>
                       )}
                     </tbody>

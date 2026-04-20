@@ -50,7 +50,12 @@ def _install_fastapi_stubs() -> None:
 
 _install_fastapi_stubs()
 
-from scripts.webui.server import SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS, _clean_symbol_level_strategy_fields, _patch_entry
+from scripts.webui.server import (
+    SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS,
+    _clean_symbol_level_strategy_fields,
+    _patch_entry,
+    _to_row,
+)
 
 
 def test_patch_entry_removes_forbidden_symbol_level_strategy_fields() -> None:
@@ -127,3 +132,11 @@ def test_clean_symbol_level_strategy_fields_removes_stale_keys_from_all_symbols(
             side_cfg = item.get(side) or {}
             for field in SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS:
                 assert field not in side_cfg
+
+
+def test_to_row_exposes_symbol_name_from_supported_config_fields() -> None:
+    row = _to_row("hk", {"symbol": "0700.HK", "name": "腾讯控股"})
+    assert row.name == "腾讯控股"
+
+    fallback_row = _to_row("us", {"symbol": "NVDA", "display_name": "NVIDIA"})
+    assert fallback_row.name == "NVIDIA"
