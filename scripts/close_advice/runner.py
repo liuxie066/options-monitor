@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -145,43 +146,70 @@ def _merge_quote_rows(quotes: dict[tuple[str, str, str, str], dict[str, Any]], r
             quotes[key] = row
 
 
+def _quote_number(value: Any) -> float | None:
+    num = safe_float(value)
+    if num is None:
+        return None
+    if isinstance(num, float) and math.isnan(num):
+        return None
+    return num
+
+
+def _quote_has_usable_price(quote: dict[str, Any] | None) -> bool:
+    if not isinstance(quote, dict):
+        return False
+    return _quote_number(quote.get("mid")) is not None or _quote_number(quote.get("last_price")) is not None
+
+
 def _fetch_missing_quotes_via_opend(
     *,
     config: dict[str, Any],
     positions: list[dict[str, Any]],
     quotes: dict[tuple[str, str, str, str], dict[str, Any]],
     base_dir: Path,
-) -> None:
+) -> dict[tuple[str, str, str, str], str]:
     advice_cfg = config.get("close_advice") if isinstance(config, dict) else {}
     if isinstance(advice_cfg, dict) and str(advice_cfg.get("quote_source") or "auto").strip().lower() == "required_data":
-        return
+        return {}
 
     symbol_cfgs = _symbol_config_by_symbol(config)
     missing_by_symbol: dict[str, list[dict[str, Any]]] = {}
+    attempted_reasons: dict[tuple[str, str, str, str], str] = {}
     for pos in positions:
         if not isinstance(pos, dict):
             continue
         key = _quote_key(pos.get("symbol"), pos.get("option_type"), _position_expiration(pos), pos.get("strike"))
-        if all(key) and key not in quotes:
+        if all(key) and not _quote_has_usable_price(quotes.get(key)):
             missing_by_symbol.setdefault(key[0], []).append(pos)
 
     if not missing_by_symbol:
-        return
+        return {}
 
     try:
         from scripts.fetch_market_data_opend import fetch_symbol
     except Exception:
-        return
+        return {}
 
     for symbol, missing_positions in missing_by_symbol.items():
         symbol_cfg = symbol_cfgs.get(symbol) or {}
         fetch_cfg = symbol_cfg.get("fetch") if isinstance(symbol_cfg, dict) else {}
         fetch_cfg = fetch_cfg if isinstance(fetch_cfg, dict) else {}
+        missing_keys = [
+            _quote_key(pos.get("symbol"), pos.get("option_type"), _position_expiration(pos), pos.get("strike"))
+            for pos in missing_positions
+            if isinstance(pos, dict)
+        ]
         if not is_futu_fetch_source(fetch_cfg.get("source")):
+            for key in missing_keys:
+                if all(key):
+                    attempted_reasons[key] = "opend_fetch_skipped_non_futu_source"
             continue
         strikes = [safe_float(p.get("strike")) for p in missing_positions]
         strikes = [s for s in strikes if s is not None]
         if not strikes:
+            for key in missing_keys:
+                if all(key):
+                    attempted_reasons[key] = "opend_fetch_skipped_invalid_strike"
             continue
         option_types = sorted({_norm_option_type(p.get("option_type")) for p in missing_positions if p.get("option_type")})
         try:
@@ -198,9 +226,32 @@ def _fetch_missing_quotes_via_opend(
                 chain_cache=True,
             )
         except Exception:
+            for key in missing_keys:
+                if all(key):
+                    attempted_reasons[key] = "opend_fetch_error"
             continue
         rows = payload.get("rows") if isinstance(payload, dict) else []
         _merge_quote_rows(quotes, rows if isinstance(rows, list) else [])
+        for key in missing_keys:
+            if not all(key):
+                continue
+            if _quote_has_usable_price(quotes.get(key)):
+                continue
+            attempted_reasons[key] = "opend_fetch_no_usable_quote"
+    return attempted_reasons
+
+
+def _quote_observability_flags(
+    key: tuple[str, str, str, str],
+    quote: dict[str, Any] | None,
+    attempted_fetch_reasons: dict[tuple[str, str, str, str], str],
+) -> list[str]:
+    reason = attempted_fetch_reasons.get(key)
+    if not reason:
+        return []
+    if _quote_has_usable_price(quote):
+        return []
+    return [reason]
 
 
 def _position_expiration(pos: dict[str, Any]) -> str | None:
@@ -241,10 +292,10 @@ def _calc_dte(expiration: str | None, quote: dict[str, Any] | None) -> int | Non
 def _mid_from_quote(quote: dict[str, Any] | None) -> tuple[float | None, list[str]]:
     if not isinstance(quote, dict):
         return None, ["missing_quote"]
-    mid = safe_float(quote.get("mid"))
+    mid = _quote_number(quote.get("mid"))
     if mid is not None:
         return mid, []
-    last_price = safe_float(quote.get("last_price"))
+    last_price = _quote_number(quote.get("last_price"))
     if last_price is not None:
         return last_price, ["mid_fallback_last_price"]
     return None, ["missing_mid"]
@@ -401,7 +452,7 @@ def run_close_advice(
     positions = positions if isinstance(positions, list) else []
     symbols = {_norm_symbol(p.get("symbol")) for p in positions if isinstance(p, dict) and p.get("symbol")}
     quotes = load_required_data_quotes(Path(required_data_root), symbols=symbols)
-    _fetch_missing_quotes_via_opend(
+    attempted_fetch_reasons = _fetch_missing_quotes_via_opend(
         config=config,
         positions=positions,
         quotes=quotes,
@@ -419,6 +470,7 @@ def run_close_advice(
         inp, quote_flags = _position_to_input(pos0, quote)
         row = evaluate_close_advice(inp, cfg)
         row = _with_extra_flags(row, quote_flags)
+        row = _with_extra_flags(row, _quote_observability_flags(key, quote, attempted_fetch_reasons))
         row = _apply_buy_to_close_fee(row, base_dir=Path(base_dir))
         rows.append(row)
 
