@@ -38,9 +38,9 @@ from scripts.io_utils import atomic_write_json
 # Local helper to get FX rates (USDCNY/HKDCNY) for base-currency normalization.
 # This file lives in the same scripts/ directory, so plain import works.
 try:
-    from fx_rates import get_rates
+    from fx_rates import get_rates_or_fetch_latest
 except Exception:
-    from scripts.fx_rates import get_rates
+    from scripts.fx_rates import get_rates_or_fetch_latest
 
 
 def build_context(records: list[dict], broker: str, account: str | None = None, rates: dict | None = None) -> dict:
@@ -287,7 +287,7 @@ def main():
 
     # Prefer co-locating rate_cache with state_dir
 
-    rates = get_rates(
+    rates = get_rates_or_fetch_latest(
         cache_path=(state_dir / 'rate_cache.json').resolve(),
         shared_cache_path=(Path(__file__).resolve().parents[2] / 'portfolio-management' / '.data' / 'rate_cache.json'),
         max_age_hours=24,
