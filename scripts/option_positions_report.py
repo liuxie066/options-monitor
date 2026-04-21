@@ -12,7 +12,7 @@ repo_base = Path(__file__).resolve().parents[1]
 if str(repo_base) not in sys.path:
     sys.path.insert(0, str(repo_base))
 
-from scripts.fx_rates import get_rates
+from scripts.fx_rates import get_rates_or_fetch_latest
 from scripts.option_positions_core.reporting import build_monthly_income_report
 from scripts.option_positions_core.service import OptionPositionsRepository, load_table_ref
 
@@ -144,7 +144,7 @@ def main() -> int:
             account=args.account,
             broker=broker,
             month=args.month,
-            rates=get_rates(
+            rates=get_rates_or_fetch_latest(
                 cache_path=(base / "output" / "state" / "rate_cache.json").resolve(),
                 shared_cache_path=(base / "output_shared" / "state" / "rate_cache.json").resolve(),
             ),

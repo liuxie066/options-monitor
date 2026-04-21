@@ -13,7 +13,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from datetime import datetime, timezone
+import importlib.util
 import json
+import sys
 
 
 @dataclass(frozen=True)
@@ -106,6 +109,77 @@ def get_rates(
     if shared_cache_path:
         return _read(Path(shared_cache_path))
     return None
+
+
+def _save_rates(path: Path, rates: dict[str, float]) -> None:
+    try:
+        path = Path(path).resolve()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "rates": rates,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _fetch_latest_rates_from_portfolio_management() -> dict | None:
+    try:
+        base_dir = Path(__file__).resolve().parents[2]
+        pm_root = (base_dir / "portfolio-management").resolve()
+        src_root = (pm_root / "src").resolve()
+        if not src_root.exists():
+            return None
+
+        if str(pm_root) not in sys.path:
+            sys.path.insert(0, str(pm_root))
+
+        mod_path = src_root / "price_fetcher.py"
+        spec = importlib.util.spec_from_file_location("pm_price_fetcher", mod_path)
+        if spec is None or spec.loader is None:
+            return None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        fetcher = mod.PriceFetcher(storage=None, use_cache=False)
+        rates = fetcher._fetch_exchange_rates()
+        if not isinstance(rates, dict):
+            return None
+        return {
+            "rates": {
+                "USDCNY": rates.get("USDCNY"),
+                "HKDCNY": rates.get("HKDCNY"),
+            },
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception:
+        return None
+
+
+def get_rates_or_fetch_latest(
+    *,
+    cache_path: Path,
+    shared_cache_path: Path | None = None,
+    max_age_hours: int | None = None,
+    write_through_path: Path | None = None,
+) -> dict | None:
+    cached = get_rates(
+        cache_path=cache_path,
+        shared_cache_path=shared_cache_path,
+        max_age_hours=max_age_hours,
+    )
+    if cached is not None:
+        return cached
+
+    latest = _fetch_latest_rates_from_portfolio_management()
+    if latest is None:
+        return None
+
+    rates = latest.get("rates")
+    if isinstance(rates, dict):
+        target = write_through_path or cache_path
+        _save_rates(Path(target), rates)
+    return latest
 
 
 def _extract_usdcny_from_rates(obj: dict | None) -> float | None:
