@@ -14,6 +14,7 @@ from scripts.cash_secured_utils import (
     normalize_cash_secured_total_by_ccy,
     read_cash_secured_total_cny,
 )
+from scripts.fx_rates import get_rates_or_fetch_latest
 
 
 def run(cmd: list[str], cwd: Path, timeout_sec: int = 60):
@@ -124,21 +125,12 @@ def query_sell_put_cash(
 
     if not no_fx:
         try:
-            fx_out = out_dir_path / 'rate_cache.json'
-            run(
-                [
-                    str(base / '.venv' / 'bin' / 'python'),
-                    'scripts/fx_rates.py',
-                    '--out',
-                    str(fx_out),
-                    '--max-age-hours',
-                    '24',
-                ],
-                cwd=base,
-                timeout_sec=30,
+            fx = get_rates_or_fetch_latest(
+                cache_path=(out_dir_path / 'rate_cache.json').resolve(),
+                shared_cache_path=(base / 'output_shared' / 'state' / 'rate_cache.json').resolve(),
+                max_age_hours=24,
             )
-            fx = load_json(fx_out)
-            rates = fx.get('rates') or {}
+            rates = (fx.get('rates') or {}) if isinstance(fx, dict) else {}
             if rates.get('USDCNY'):
                 usdcny = float(rates['USDCNY'])
             if rates.get('HKDCNY'):

@@ -268,32 +268,12 @@ def maybe_auto_close_expired_positions(
     except Exception as e2:
         log(f"[WARN] auto-close expired positions failed: {e2}")
 
-
-def _extract_hkdcny_from_rates(rates: dict | None) -> float | None:
-    if not isinstance(rates, dict):
-        return None
-    value = rates.get('HKDCNY')
-    if value is None:
-        nested = rates.get('rates')
-        if isinstance(nested, dict):
-            value = nested.get('HKDCNY')
-    if value is None:
-        return None
-    try:
-        value = float(value)
-    except Exception:
-        return None
-    return value if value > 0 else None
-
-
 def load_fx_rates(*, base: Path, state_dir: Path, log, shared_state_dir: Path | None = None) -> tuple[float | None, float | None]:
     """Best-effort FX loader.
 
-    Keep the original behavior from run_pipeline:
-    - load scripts/fx_rates.py via importlib by file path
-    - fx_usd_per_cny from get_usd_per_cny(base)
-    - hkdcny from rate_cache.json, preferring the account state dir and then
-      falling back to shared/global caches
+    Keep the original importlib boundary from run_pipeline, but use the
+    repo-local FX helper so cache miss behavior stays consistent with other
+    entrypoints.
     """
     fx_usd_per_cny = None
     hkdcny = None
@@ -309,37 +289,30 @@ def load_fx_rates(*, base: Path, state_dir: Path, log, shared_state_dir: Path | 
         _sys.modules['fx_rates'] = mod
         spec.loader.exec_module(mod)  # type: ignore
 
-        fx_usd_per_cny = mod.get_usd_per_cny(base)  # type: ignore
-        rate_candidates = [
-            (state_dir / 'rate_cache.json').resolve(),
-        ]
-        if shared_state_dir is not None:
-            rate_candidates.append((shared_state_dir / 'rate_cache.json').resolve())
-        rate_candidates.extend(
-            [
-                (base / 'output_shared' / 'state' / 'rate_cache.json').resolve(),
-                (base / 'output' / 'state' / 'rate_cache.json').resolve(),
-            ]
+        shared_cache_path = (
+            (shared_state_dir / 'rate_cache.json').resolve()
+            if shared_state_dir is not None
+            else (base / 'output_shared' / 'state' / 'rate_cache.json').resolve()
         )
-        try:
-            rate_candidates.append((base.parents[0] / 'portfolio-management' / '.data' / 'rate_cache.json').resolve())
-        except Exception:
-            pass
-
-        seen: set[str] = set()
-        for cache_path in rate_candidates:
-            key = str(cache_path)
-            if key in seen:
-                continue
-            seen.add(key)
+        rates_obj = mod.get_rates_or_fetch_latest(  # type: ignore
+            cache_path=(state_dir / 'rate_cache.json').resolve(),
+            shared_cache_path=shared_cache_path,
+            max_age_hours=24,
+        )
+        rates_map = rates_obj.get('rates') if isinstance(rates_obj, dict) and isinstance(rates_obj.get('rates'), dict) else rates_obj
+        if isinstance(rates_map, dict):
             try:
-                hkdcny = _extract_hkdcny_from_rates(
-                    mod.get_rates(cache_path=cache_path, shared_cache_path=None)
-                )
+                usdcny = rates_map.get('USDCNY')
+                usdcny = float(usdcny) if usdcny else None
+            except Exception:
+                usdcny = None
+            try:
+                hkdcny_v = rates_map.get('HKDCNY')
+                hkdcny = float(hkdcny_v) if hkdcny_v else None
             except Exception:
                 hkdcny = None
-            if hkdcny is not None:
-                break
+            if usdcny and usdcny > 0:
+                fx_usd_per_cny = 1.0 / usdcny
     except Exception as e:
         log(f"[WARN] fx rates not available: {e}")
     return fx_usd_per_cny, hkdcny
