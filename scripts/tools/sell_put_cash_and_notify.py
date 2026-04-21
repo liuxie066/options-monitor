@@ -50,6 +50,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.io_utils import money_cny
+from scripts.config_loader import resolve_pm_config_path
 
 
 def _money_cny(v: float | None) -> str:
@@ -60,7 +61,7 @@ def _money_cny(v: float | None) -> str:
 def main():
     ap = argparse.ArgumentParser(description='Notify when sell-put cash free falls below threshold')
     ap.add_argument('--config', default='config.us.json')
-    ap.add_argument('--pm-config', default='../portfolio-management/config.json')
+    ap.add_argument('--pm-config', default=None, help='Feishu/Bitable credential config path; auto-resolves when omitted')
     ap.add_argument('--market', default='富途')
     ap.add_argument('--account', required=True)
     ap.add_argument('--threshold-cny', type=float, default=100000.0)
@@ -68,12 +69,13 @@ def main():
 
     base = Path(__file__).resolve().parents[1]
 
+    pm_config = resolve_pm_config_path(base=base, pm_config=args.pm_config)
     payload = run_json(
         base,
         [
             str(base / '.venv' / 'bin' / 'python'),
             'scripts/cli/query_sell_put_cash_cli.py',
-            '--pm-config', str((base / args.pm_config).resolve()) if not Path(args.pm_config).is_absolute() else str(args.pm_config),
+            '--pm-config', str(pm_config),
             '--market', args.market,
             '--account', args.account,
             '--format', 'json',

@@ -15,6 +15,7 @@ Design constraints:
 import json
 from pathlib import Path
 
+from scripts.config_loader import resolve_pm_config_path
 from scripts.io_utils import is_fresh, load_cached_json
 from scripts.subprocess_utils import run_cmd
 from domain.services import adapt_holdings_context, adapt_option_positions_context
@@ -339,7 +340,7 @@ def build_pipeline_context(
         return None, None, None, None
 
     portfolio_cfg = cfg.get('portfolio', {}) or {}
-    pm_config = portfolio_cfg.get('pm_config', '../portfolio-management/config.json')
+    pm_config = resolve_pm_config_path(base=base, pm_config=portfolio_cfg.get('pm_config'))
     market = portfolio_cfg.get('market', '富途')
     account = portfolio_cfg.get('account')
 

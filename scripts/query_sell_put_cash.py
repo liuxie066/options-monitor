@@ -14,6 +14,7 @@ from scripts.cash_secured_utils import (
     normalize_cash_secured_total_by_ccy,
     read_cash_secured_total_cny,
 )
+from scripts.config_loader import resolve_pm_config_path
 from scripts.fx_rates import get_rates_or_fetch_latest
 
 
@@ -41,7 +42,7 @@ def money(v: float | None, currency: str = "USD") -> str:
 
 def query_sell_put_cash(
     *,
-    pm_config: str | Path = '../portfolio-management/config.json',
+    pm_config: str | Path | None = None,
     market: str = '富途',
     account: str | None = None,
     output_format: str = 'text',
@@ -53,9 +54,7 @@ def query_sell_put_cash(
     """执行卖 put 现金占用查询并按指定格式输出。"""
     base = (base_dir or Path(__file__).resolve().parents[1]).resolve()
 
-    pm_config_path = Path(pm_config)
-    if not pm_config_path.is_absolute():
-        pm_config_path = (base / pm_config_path).resolve()
+    pm_config_path = resolve_pm_config_path(base=base, pm_config=pm_config)
 
     out_dir_path = Path(out_dir)
     if not out_dir_path.is_absolute():

@@ -21,6 +21,7 @@ import subprocess
 from pathlib import Path
 
 from scripts.account_config import cash_footer_accounts_from_config
+from scripts.config_loader import resolve_pm_config_path
 from scripts.io_utils import parse_last_json, money_cny
 
 
@@ -34,7 +35,7 @@ def run_capture(cmd: list[str], cwd: Path, timeout_sec: int = 120) -> str:
 def main():
     ap = argparse.ArgumentParser(description='Append per-account cash summary to notification footer')
     ap.add_argument('--config', default=None, help='options-monitor config used to resolve default accounts')
-    ap.add_argument('--pm-config', default='../portfolio-management/config.json')
+    ap.add_argument('--pm-config', default=None, help='Feishu/Bitable credential config path; auto-resolves when omitted')
     ap.add_argument('--market', default='富途')
     ap.add_argument('--accounts', nargs='+', default=None)
     ap.add_argument('--report-dir', default='output/reports', help='Report dir for default notification path (default: output/reports)')
@@ -91,12 +92,13 @@ def main():
     text = _strip_old_cash_blocks(text)
 
     py = str(base / '.venv' / 'bin' / 'python')
+    pm_config = resolve_pm_config_path(base=base, pm_config=args.pm_config)
 
     rows = []
     for acct in accounts:
         out = run_capture([
             py, 'scripts/cli/query_sell_put_cash_cli.py',
-            '--pm-config', str((base / args.pm_config).resolve()) if not Path(args.pm_config).is_absolute() else str(args.pm_config),
+            '--pm-config', str(pm_config),
             '--market', args.market,
             '--account', acct,
             '--format', 'json',
