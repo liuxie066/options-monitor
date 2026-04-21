@@ -5,15 +5,18 @@ from datetime import datetime, timezone
 from typing import Any
 
 from scripts.feishu_bitable import parse_note_kv, safe_float
+from scripts.fx_rates import CurrencyConverter, FxRates
 from scripts.multiplier_cache import get_builtin_multiplier
 from scripts.option_positions_core.domain import (
     BUY_TO_CLOSE,
     EXPIRE_AUTO_CLOSE,
     effective_contracts_closed,
+    effective_contracts,
     normalize_account,
     normalize_broker,
     normalize_close_type,
     normalize_currency,
+    normalize_side,
     normalize_status,
     norm_symbol,
 )
@@ -53,7 +56,37 @@ class IncomeRow:
         }
 
 
-def parse_closed_at_ms(value: Any) -> int | None:
+@dataclass(frozen=True)
+class PremiumIncomeRow:
+    record_id: str
+    month: str
+    account: str
+    broker: str
+    symbol: str
+    currency: str
+    contracts: int
+    premium: float
+    multiplier: int
+    premium_received_gross: float
+    opened_at: int
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "record_id": self.record_id,
+            "month": self.month,
+            "account": self.account,
+            "broker": self.broker,
+            "symbol": self.symbol,
+            "currency": self.currency,
+            "contracts": self.contracts,
+            "premium": self.premium,
+            "multiplier": self.multiplier,
+            "premium_received_gross": self.premium_received_gross,
+            "opened_at": self.opened_at,
+        }
+
+
+def parse_event_at_ms(value: Any) -> int | None:
     if value in (None, "", 0):
         return None
     try:
@@ -68,6 +101,10 @@ def parse_closed_at_ms(value: Any) -> int | None:
         return int(dt.astimezone(timezone.utc).timestamp() * 1000)
     except Exception:
         return None
+
+
+def parse_closed_at_ms(value: Any) -> int | None:
+    return parse_event_at_ms(value)
 
 
 def month_from_ms(ms: int) -> str:
@@ -89,6 +126,28 @@ def _read_multiplier(fields: dict[str, Any]) -> int | None:
         return int(multiplier)
     builtin = get_builtin_multiplier(norm_symbol(fields.get("symbol") or ""))
     return int(builtin) if builtin else None
+
+
+def _build_fx_converter(rates: dict[str, Any] | None) -> CurrencyConverter:
+    rates_map = rates.get("rates") if isinstance(rates, dict) and isinstance(rates.get("rates"), dict) else rates
+    usdcny = None
+    hkdcny = None
+    if isinstance(rates_map, dict):
+        try:
+            usdcny = float(rates_map.get("USDCNY")) if rates_map.get("USDCNY") else None
+        except Exception:
+            usdcny = None
+        try:
+            hkdcny = float(rates_map.get("HKDCNY")) if rates_map.get("HKDCNY") else None
+        except Exception:
+            hkdcny = None
+    usd_per_cny = (1.0 / usdcny) if usdcny and usdcny > 0 else None
+    return CurrencyConverter(FxRates(usd_per_cny=usd_per_cny, cny_per_hkd=hkdcny))
+
+
+def _maybe_to_cny(converter: CurrencyConverter, amount: float, currency: str) -> float | None:
+    out = converter.native_to_cny(float(amount), native_ccy=str(currency or "").upper())
+    return round(float(out), 6) if out is not None else None
 
 
 def build_income_row(record: dict[str, Any]) -> tuple[IncomeRow | None, str | None]:
@@ -151,16 +210,69 @@ def build_income_row(record: dict[str, Any]) -> tuple[IncomeRow | None, str | No
     )
 
 
+def build_premium_income_row(record: dict[str, Any]) -> tuple[PremiumIncomeRow | None, str | None]:
+    record_id = str(record.get("record_id") or record.get("id") or "").strip()
+    fields = record.get("fields") or record
+    if not isinstance(fields, dict):
+        return None, f"{record_id or '(no record_id)'}: fields is not an object"
+
+    side = normalize_side(fields.get("side"))
+    if side != "short":
+        return None, None
+
+    opened_at = parse_event_at_ms(fields.get("opened_at"))
+    if opened_at is None:
+        return None, f"{record_id or '(no record_id)'}: missing opened_at"
+
+    contracts = effective_contracts(fields)
+    if contracts <= 0:
+        return None, f"{record_id or '(no record_id)'}: contracts <= 0"
+
+    premium = _read_premium(fields)
+    if premium is None:
+        return None, f"{record_id or '(no record_id)'}: missing premium"
+
+    multiplier = _read_multiplier(fields)
+    if multiplier is None:
+        return None, f"{record_id or '(no record_id)'}: missing multiplier"
+
+    currency = normalize_currency(fields.get("currency")) or "USD"
+    account = normalize_account(fields.get("account")) or "-"
+    broker = normalize_broker(fields.get("broker") or fields.get("market")) or "-"
+    symbol = norm_symbol(fields.get("symbol") or "-")
+    premium_received_gross = float(premium) * int(multiplier) * int(contracts)
+
+    return (
+        PremiumIncomeRow(
+            record_id=record_id,
+            month=month_from_ms(opened_at),
+            account=account,
+            broker=broker,
+            symbol=symbol,
+            currency=currency,
+            contracts=int(contracts),
+            premium=float(premium),
+            multiplier=int(multiplier),
+            premium_received_gross=round(float(premium_received_gross), 6),
+            opened_at=int(opened_at),
+        ),
+        None,
+    )
+
+
 def build_monthly_income_report(
     records: list[dict[str, Any]],
     *,
     account: str | None = None,
     broker: str | None = None,
     month: str | None = None,
+    rates: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     account_norm = normalize_account(account) if account else None
     broker_norm = normalize_broker(broker) if broker else None
+    converter = _build_fx_converter(rates)
     rows: list[IncomeRow] = []
+    premium_rows: list[PremiumIncomeRow] = []
     warnings: list[str] = []
 
     for rec in records:
@@ -175,11 +287,14 @@ def build_monthly_income_report(
         row, warning = build_income_row(rec)
         if warning:
             warnings.append(warning)
-        if row is None:
-            continue
-        if month and row.month != month:
-            continue
-        rows.append(row)
+        if row is not None and (not month or row.month == month):
+            rows.append(row)
+
+        premium_row, premium_warning = build_premium_income_row(rec)
+        if premium_warning:
+            warnings.append(premium_warning)
+        if premium_row is not None and (not month or premium_row.month == month):
+            premium_rows.append(premium_row)
 
     summary: dict[str, dict[str, Any]] = {}
     for row in rows:
@@ -191,18 +306,74 @@ def build_monthly_income_report(
                 "account": row.account,
                 "currency": row.currency,
                 "realized_gross": 0.0,
+                "realized_gross_cny": 0.0,
+                "realized_gross_cny_missing": False,
                 "closed_contracts": 0,
                 "positions": 0,
+                "premium_received_gross": 0.0,
+                "premium_received_gross_cny": 0.0,
+                "premium_received_gross_cny_missing": False,
+                "premium_contracts": 0,
+                "premium_positions": 0,
             },
         )
         bucket["realized_gross"] = round(float(bucket["realized_gross"]) + row.realized_gross, 6)
+        realized_gross_cny = _maybe_to_cny(converter, row.realized_gross, row.currency)
+        if realized_gross_cny is None:
+            bucket["realized_gross_cny_missing"] = True
+        elif not bucket["realized_gross_cny_missing"]:
+            bucket["realized_gross_cny"] = round(float(bucket["realized_gross_cny"]) + realized_gross_cny, 6)
         bucket["closed_contracts"] = int(bucket["closed_contracts"]) + row.contracts_closed
         bucket["positions"] = int(bucket["positions"]) + 1
 
+    for row in premium_rows:
+        key = f"{row.month}|{row.account}|{row.currency}"
+        bucket = summary.setdefault(
+            key,
+            {
+                "month": row.month,
+                "account": row.account,
+                "currency": row.currency,
+                "realized_gross": 0.0,
+                "realized_gross_cny": 0.0,
+                "realized_gross_cny_missing": False,
+                "closed_contracts": 0,
+                "positions": 0,
+                "premium_received_gross": 0.0,
+                "premium_received_gross_cny": 0.0,
+                "premium_received_gross_cny_missing": False,
+                "premium_contracts": 0,
+                "premium_positions": 0,
+            },
+        )
+        bucket["premium_received_gross"] = round(
+            float(bucket["premium_received_gross"]) + row.premium_received_gross,
+            6,
+        )
+        premium_received_gross_cny = _maybe_to_cny(converter, row.premium_received_gross, row.currency)
+        if premium_received_gross_cny is None:
+            bucket["premium_received_gross_cny_missing"] = True
+        elif not bucket["premium_received_gross_cny_missing"]:
+            bucket["premium_received_gross_cny"] = round(
+                float(bucket["premium_received_gross_cny"]) + premium_received_gross_cny,
+                6,
+            )
+        bucket["premium_contracts"] = int(bucket["premium_contracts"]) + row.contracts
+        bucket["premium_positions"] = int(bucket["premium_positions"]) + 1
+
     summary_rows = sorted(summary.values(), key=lambda x: (str(x["month"]), str(x["account"]), str(x["currency"])))
+    for row in summary_rows:
+        row["realized_gross_cny"] = None if row.pop("realized_gross_cny_missing") else round(float(row["realized_gross_cny"]), 6)
+        row["premium_received_gross_cny"] = None if row.pop("premium_received_gross_cny_missing") else round(
+            float(row["premium_received_gross_cny"]),
+            6,
+        )
     return {
         "summary": summary_rows,
         "rows": [r.as_dict() for r in sorted(rows, key=lambda x: (x.month, x.account, x.currency, x.symbol, x.record_id))],
+        "premium_rows": [
+            r.as_dict() for r in sorted(premium_rows, key=lambda x: (x.month, x.account, x.currency, x.symbol, x.record_id))
+        ],
         "warnings": warnings,
         "filters": {
             "account": account_norm,
