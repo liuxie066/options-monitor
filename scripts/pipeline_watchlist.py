@@ -20,6 +20,7 @@ from scripts.sell_put_config import resolve_min_annualized_net_return
 from domain.domain import normalize_processor_row, normalize_processor_rows
 
 LIQUIDITY_COMMON_FIELDS = (
+    'min_net_income',
     'min_open_interest',
     'min_volume',
     'max_spread_ratio',
