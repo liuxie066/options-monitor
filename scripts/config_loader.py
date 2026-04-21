@@ -18,6 +18,41 @@ from pathlib import Path
 from typing import Callable
 
 
+def pm_config_candidates(*, base: Path) -> list[Path]:
+    base = Path(base).resolve()
+    candidates = [
+        (base / "secrets" / "portfolio.feishu.json").resolve(),
+        Path("/opt/options-monitor/secrets/portfolio.feishu.json").resolve(),
+        (base / "../portfolio-management/config.json").resolve(),
+    ]
+    seen: set[str] = set()
+    out: list[Path] = []
+    for item in candidates:
+        key = str(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+    return out
+
+
+def default_pm_config_path(*, base: Path) -> Path:
+    candidates = pm_config_candidates(base=base)
+    for item in candidates:
+        if item.exists():
+            return item
+    return candidates[-1]
+
+
+def resolve_pm_config_path(*, base: Path, pm_config: str | Path | None) -> Path:
+    if pm_config is not None and str(pm_config).strip():
+        path = Path(pm_config)
+        if not path.is_absolute():
+            path = (Path(base).resolve() / path).resolve()
+        return path
+    return default_pm_config_path(base=base)
+
+
 def normalize_config(cfg: dict) -> dict:
     # naming aliases:
     # - templates == profiles (legacy internal name)

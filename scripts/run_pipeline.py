@@ -7,6 +7,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from scripts.config_loader import load_config, resolve_pm_config_path
+
 repo_base = Path(__file__).resolve().parents[1]
 if str(repo_base) not in sys.path:
     sys.path.insert(0, str(repo_base))
@@ -142,8 +144,6 @@ def main():
             pass
     if not cfg_path.is_absolute():
         cfg_path = (base / cfg_path).resolve()
-
-    from scripts.config_loader import load_config
 
     cfg = load_config(
         base=base,
@@ -316,7 +316,7 @@ def main():
         # In multi-account merged notifications, we prefer adding cash footer only once in send_if_needed_multi.py.
         # Keep behavior-compatible defaults: fallback to default pm config/market when not present.
         portfolio_cfg = cfg.get('portfolio', {}) or {}
-        pm_config = str(portfolio_cfg.get('pm_config', '../portfolio-management/config.json'))
+        pm_config = str(resolve_pm_config_path(base=base, pm_config=portfolio_cfg.get('pm_config')))
         market = str(portfolio_cfg.get('market', '富途'))
 
         include_cash_footer = True
