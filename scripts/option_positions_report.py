@@ -13,6 +13,7 @@ if str(repo_base) not in sys.path:
     sys.path.insert(0, str(repo_base))
 
 from scripts.fx_rates import get_rates_or_fetch_latest
+from scripts.config_loader import resolve_pm_config_path
 from scripts.option_positions_core.reporting import build_monthly_income_report
 from scripts.option_positions_core.service import OptionPositionsRepository, load_table_ref
 
@@ -108,7 +109,7 @@ def print_monthly_income(report: dict, *, include_rows: bool = False) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Option positions reports")
-    parser.add_argument("--pm-config", default="../portfolio-management/config.json")
+    parser.add_argument("--pm-config", default=None, help="Feishu/Bitable credential config path; auto-resolves when omitted")
 
     sub = parser.add_subparsers(dest="cmd", required=True)
     p_monthly = sub.add_parser(
@@ -131,9 +132,7 @@ def main() -> int:
 
     args = parser.parse_args()
     base = Path(__file__).resolve().parents[1]
-    pm_config = Path(args.pm_config)
-    if not pm_config.is_absolute():
-        pm_config = (base / pm_config).resolve()
+    pm_config = resolve_pm_config_path(base=base, pm_config=args.pm_config)
 
     if args.cmd == "monthly-income":
         broker = args.market or args.broker

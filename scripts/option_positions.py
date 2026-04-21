@@ -15,6 +15,7 @@ import argparse
 import json
 from pathlib import Path
 
+from scripts.config_loader import resolve_pm_config_path
 from scripts.feishu_bitable import (
     bitable_create_record,
     bitable_update_record,
@@ -59,7 +60,7 @@ def format_money(v: float | None, ccy: str) -> str:
 
 def main():
     ap = argparse.ArgumentParser(description='Manage Feishu option_positions table')
-    ap.add_argument('--pm-config', default='../portfolio-management/config.json')
+    ap.add_argument('--pm-config', default=None, help='Feishu/Bitable credential config path; auto-resolves when omitted')
 
     sub = ap.add_subparsers(dest='cmd', required=True)
 
@@ -109,9 +110,7 @@ def main():
     args = ap.parse_args()
 
     base = Path(__file__).resolve().parents[1]
-    pm_config = Path(args.pm_config)
-    if not pm_config.is_absolute():
-        pm_config = (base / pm_config).resolve()
+    pm_config = resolve_pm_config_path(base=base, pm_config=args.pm_config)
 
     repo = OptionPositionsRepository(load_table_ref(pm_config))
 

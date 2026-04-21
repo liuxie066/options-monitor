@@ -30,6 +30,7 @@ import json
 import argparse
 from datetime import datetime, timezone
 
+from scripts.config_loader import resolve_pm_config_path
 from scripts.option_positions_core.service import (
     OptionPositionsRepository,
     auto_close_expired_positions,
@@ -40,7 +41,7 @@ from scripts.option_positions_core.service import (
 
 def main():
     ap = argparse.ArgumentParser(description='Auto-close expired option_positions (table maintenance)')
-    ap.add_argument('--pm-config', default='../portfolio-management/config.json')
+    ap.add_argument('--pm-config', default=None, help='Feishu/Bitable credential config path; auto-resolves when omitted')
     ap.add_argument('--context', default=None, help='Option positions context JSON (default: <state-dir>/option_positions_context.json)')
     ap.add_argument('--state-dir', default='output/state', help='State dir for default context path (default: output/state)')
     ap.add_argument('--as-of-utc', default=None, help='ISO time; default now UTC')
@@ -87,9 +88,7 @@ def main():
     errors: list[str] = []
 
     if to_close and not args.dry_run:
-        pm_config = Path(args.pm_config)
-        if not pm_config.is_absolute():
-            pm_config = (base / pm_config).resolve()
+        pm_config = resolve_pm_config_path(base=base, pm_config=args.pm_config)
         repo = OptionPositionsRepository(load_table_ref(pm_config))
         decisions, applied, errors = auto_close_expired_positions(
             repo,

@@ -14,7 +14,7 @@ from scripts.query_sell_put_cash import query_sell_put_cash
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='Query cash headroom for sell-put (cash-secured) strategy')
-    parser.add_argument('--pm-config', default='../portfolio-management/config.json')
+    parser.add_argument('--pm-config', default=None, help='Feishu/Bitable credential config path; auto-resolves when omitted')
     parser.add_argument('--market', default='富途')
     parser.add_argument('--account', default=None)
     parser.add_argument('--format', choices=['text', 'json'], default='text')

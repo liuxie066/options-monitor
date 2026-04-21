@@ -21,6 +21,7 @@ from scripts.feishu_bitable import (
     safe_float,
     parse_note_kv,
 )
+from scripts.config_loader import resolve_pm_config_path
 from scripts.option_positions_core.domain import (
     effective_contracts,
     effective_contracts_closed,
@@ -239,7 +240,7 @@ def slice_shared_context_for_account(shared_ctx: dict, account: str | None) -> d
 
 def main():
     parser = argparse.ArgumentParser(description="Fetch option positions context from Feishu option_positions table")
-    parser.add_argument("--pm-config", default="../portfolio-management/config.json")
+    parser.add_argument("--pm-config", default=None, help="Feishu/Bitable credential config path; auto-resolves when omitted")
     parser.add_argument("--broker", default="富途")
     parser.add_argument("--market", default=None, help="DEPRECATED alias of --broker")
     parser.add_argument("--account", default=None)
@@ -250,9 +251,7 @@ def main():
     args = parser.parse_args()
 
     base = Path(__file__).resolve().parents[1]
-    pm_config_path = Path(args.pm_config)
-    if not pm_config_path.is_absolute():
-        pm_config_path = (base / pm_config_path).resolve()
+    pm_config_path = resolve_pm_config_path(base=base, pm_config=args.pm_config)
 
     cfg = json.loads(pm_config_path.read_text(encoding="utf-8"))
     feishu_cfg = cfg.get("feishu", {}) or {}
