@@ -66,7 +66,7 @@ def test_load_fx_rates_fetches_latest_when_cache_missing(monkeypatch, tmp_path: 
 
     class _FxMod:
         @staticmethod
-        def get_rates_or_fetch_latest(*, cache_path, shared_cache_path=None, max_age_hours=None):
+        def get_rates_or_fetch_latest(*, cache_path, shared_cache_path=None, max_age_hours=None, log=None):
             return {"rates": {"USDCNY": 7.25, "HKDCNY": 0.93}}
 
     def _fake_spec_from_file_location(_name, _path):

@@ -298,6 +298,7 @@ def load_fx_rates(*, base: Path, state_dir: Path, log, shared_state_dir: Path | 
             cache_path=(state_dir / 'rate_cache.json').resolve(),
             shared_cache_path=shared_cache_path,
             max_age_hours=24,
+            log=log,
         )
         rates_map = rates_obj.get('rates') if isinstance(rates_obj, dict) and isinstance(rates_obj.get('rates'), dict) else rates_obj
         if isinstance(rates_map, dict):
