@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 import importlib.util
 import json
 import sys
+from typing import Callable
 
 
 @dataclass(frozen=True)
@@ -111,7 +112,14 @@ def get_rates(
     return None
 
 
-def _save_rates(path: Path, rates: dict[str, float]) -> None:
+def _warn(log: Callable[[str], None] | None, message: str) -> None:
+    if log is not None:
+        log(message)
+        return
+    print(message, file=sys.stderr)
+
+
+def _save_rates(path: Path, rates: dict[str, float], *, log: Callable[[str], None] | None = None) -> None:
     try:
         path = Path(path).resolve()
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -120,16 +128,17 @@ def _save_rates(path: Path, rates: dict[str, float]) -> None:
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception:
-        pass
+    except Exception as exc:
+        _warn(log, f"[WARN] fx cache write failed: path={path} error={exc}")
 
 
-def _fetch_latest_rates_from_portfolio_management() -> dict | None:
+def _fetch_latest_rates_from_portfolio_management(*, log: Callable[[str], None] | None = None) -> dict | None:
     try:
         base_dir = Path(__file__).resolve().parents[2]
         pm_root = (base_dir / "portfolio-management").resolve()
         src_root = (pm_root / "src").resolve()
         if not src_root.exists():
+            _warn(log, f"[WARN] fx external ref missing: portfolio-management src not found at {src_root}")
             return None
 
         if str(pm_root) not in sys.path:
@@ -138,12 +147,23 @@ def _fetch_latest_rates_from_portfolio_management() -> dict | None:
         mod_path = src_root / "price_fetcher.py"
         spec = importlib.util.spec_from_file_location("pm_price_fetcher", mod_path)
         if spec is None or spec.loader is None:
+            _warn(log, f"[WARN] fx external import failed: cannot load spec for {mod_path}")
             return None
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
+        if not hasattr(mod, "PriceFetcher"):
+            _warn(log, f"[WARN] fx external interface changed: PriceFetcher missing in {mod_path}")
+            return None
         fetcher = mod.PriceFetcher(storage=None, use_cache=False)
+        if not hasattr(fetcher, "_fetch_exchange_rates"):
+            _warn(log, "[WARN] fx external interface changed: PriceFetcher._fetch_exchange_rates missing")
+            return None
         rates = fetcher._fetch_exchange_rates()
         if not isinstance(rates, dict):
+            _warn(log, f"[WARN] fx external payload invalid: expected dict got {type(rates).__name__}")
+            return None
+        if rates.get("USDCNY") is None or rates.get("HKDCNY") is None:
+            _warn(log, f"[WARN] fx external payload incomplete: keys={sorted(rates.keys())}")
             return None
         return {
             "rates": {
@@ -152,7 +172,8 @@ def _fetch_latest_rates_from_portfolio_management() -> dict | None:
             },
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
-    except Exception:
+    except Exception as exc:
+        _warn(log, f"[WARN] fx external fetch failed: error={exc}")
         return None
 
 
@@ -162,6 +183,7 @@ def get_rates_or_fetch_latest(
     shared_cache_path: Path | None = None,
     max_age_hours: int | None = None,
     write_through_path: Path | None = None,
+    log: Callable[[str], None] | None = None,
 ) -> dict | None:
     cached = get_rates(
         cache_path=cache_path,
@@ -171,15 +193,42 @@ def get_rates_or_fetch_latest(
     if cached is not None:
         return cached
 
-    latest = _fetch_latest_rates_from_portfolio_management()
+    _warn(
+        log,
+        f"[WARN] fx cache miss: cache_path={Path(cache_path).resolve()} shared_cache_path={Path(shared_cache_path).resolve() if shared_cache_path else '-'}; trying latest fetch",
+    )
+    latest = _fetch_latest_rates_from_portfolio_management(log=log)
     if latest is None:
+        _warn(log, "[WARN] fx latest fetch unavailable: no cache and external fallback failed")
         return None
 
     rates = latest.get("rates")
     if isinstance(rates, dict):
         target = write_through_path or cache_path
-        _save_rates(Path(target), rates)
+        _save_rates(Path(target), rates, log=log)
     return latest
+
+
+def load_fx_info(
+    *,
+    cache_path: Path,
+    shared_cache_path: Path | None = None,
+    max_age_hours: int | None = None,
+    fetch_latest_on_miss: bool = False,
+    log: Callable[[str], None] | None = None,
+) -> dict | None:
+    if fetch_latest_on_miss:
+        return get_rates_or_fetch_latest(
+            cache_path=cache_path,
+            shared_cache_path=shared_cache_path,
+            max_age_hours=max_age_hours,
+            log=log,
+        )
+    return get_rates(
+        cache_path=cache_path,
+        shared_cache_path=shared_cache_path,
+        max_age_hours=max_age_hours,
+    )
 
 
 def _extract_usdcny_from_rates(obj: dict | None) -> float | None:
@@ -223,22 +272,11 @@ def get_usd_per_cny(base_dir: Path) -> float | None:
     """
     try:
         base_dir = Path(base_dir).resolve()
-        candidates = [
-            (base_dir / 'output' / 'state' / 'rate_cache.json').resolve(),
-            (base_dir / 'output_shared' / 'state' / 'rate_cache.json').resolve(),
-        ]
-        # workspace sibling (best-effort)
-        try:
-            candidates.append((base_dir.parents[0] / 'portfolio-management' / '.data' / 'rate_cache.json').resolve())
-        except Exception:
-            pass
-
-        obj = None
-        for p in candidates:
-            obj = get_rates(cache_path=p, shared_cache_path=None)
-            if obj:
-                break
-
+        obj = get_rates_or_fetch_latest(
+            cache_path=(base_dir / 'output' / 'state' / 'rate_cache.json').resolve(),
+            shared_cache_path=(base_dir / 'output_shared' / 'state' / 'rate_cache.json').resolve(),
+            max_age_hours=24,
+        )
         usdcny = _extract_usdcny_from_rates(obj)
         if usdcny is None or usdcny <= 0:
             return None

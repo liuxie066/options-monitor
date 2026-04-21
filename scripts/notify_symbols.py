@@ -14,7 +14,14 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from pathlib import Path
+
+repo_base = Path(__file__).resolve().parents[1]
+if str(repo_base) not in sys.path:
+    sys.path.insert(0, str(repo_base))
+
+from scripts.fx_rates import load_fx_info
 
 
 def _suggest_sell_price_tag(mid: str, bid: str | None, ask: str | None) -> str:
@@ -437,10 +444,14 @@ def main():
             rate_path = (sd / 'rate_cache.json').resolve()
         else:
             rate_path = (base / 'output' / 'state' / 'rate_cache.json').resolve()
-
-        if rate_path.exists() and rate_path.stat().st_size > 0:
-            data = json.loads(rate_path.read_text(encoding='utf-8'))
-            rates = (data.get('rates') or {}) if isinstance(data, dict) else {}
+        data = load_fx_info(
+            cache_path=rate_path,
+            shared_cache_path=(base / 'output_shared' / 'state' / 'rate_cache.json').resolve(),
+            max_age_hours=24,
+            fetch_latest_on_miss=False,
+        )
+        rates = (data.get('rates') or {}) if isinstance(data, dict) else {}
+        if rates:
             fx_info = {'USDCNY': rates.get('USDCNY'), 'timestamp': data.get('timestamp')}
     except Exception:
         fx_info = None
