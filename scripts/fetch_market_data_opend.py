@@ -77,6 +77,7 @@ from scripts.futu_gateway import (
     FutuGatewayTransientError,
 )
 from scripts.opend_utils import normalize_underlier, get_trading_date
+from scripts.pm_bridge import fetch_spot_from_portfolio_management
 
 
 def _chain_cache_path(base_dir: Path, u_code: str) -> Path:
@@ -299,48 +300,10 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
         # Preferred fallback is portfolio-management's PriceFetcher (it has caching + multiple sources).
         # If still missing, keep None and require explicit --spot from user.
         if spot is None and u.market == 'US' and spot_from_pm and base_dir is not None:
-            # portfolio_context does not include price; fetch it from portfolio-management via subprocess
-            # to avoid dependency/import issues.
-            try:
-                import json
-                import subprocess
-                from pathlib import Path as _Path
-
-                # Do NOT require the symbol to exist in holdings.
-                # Watchlist symbols may be unheld but still need a spot for OTM/risk computations.
-                ticker = u.code.split('.', 1)[1]
-
-                # Use portfolio-management's PriceFetcher directly (no Feishu deps).
-                pm_dir = (_Path(__file__).resolve().parents[2] / 'portfolio-management').resolve()
-                # IMPORTANT: do NOT .resolve() here, otherwise we lose the venv context (symlink collapses to system python)
-                pm_py = pm_dir / '.venv' / 'bin' / 'python'
-                code = (
-                    "import sys, json; "
-                    "sys.path.insert(0, '.'); "
-                    "from src.price_fetcher import PriceFetcher; "
-                    f"r=PriceFetcher().fetch('{ticker}'); "
-                    "print(json.dumps(r, ensure_ascii=False))"
-                )
-                out = subprocess.check_output([str(pm_py), '-c', code], cwd=str(pm_dir), timeout=12)
-                txt = out.decode('utf-8', errors='ignore')
-                # price_fetcher prints rate-cache logs; extract the last JSON object in output.
-                lines = [ln.strip() for ln in txt.splitlines() if ln.strip()]
-                jline = None
-                for ln in reversed(lines):
-                    if ln.startswith('{') and ln.endswith('}'):
-                        jline = ln
-                        break
-                r = json.loads(jline or '{}')
-                p = r.get('price') if isinstance(r, dict) else None
-                try:
-                    p = float(p) if p is not None else None
-                except Exception:
-                    p = None
-                # Guard: treat 0/None as missing
-                if p and p > 0:
-                    spot = p
-            except Exception:
-                pass
+            # Do NOT require the symbol to exist in holdings.
+            # Watchlist symbols may be unheld but still need a spot for OTM/risk computations.
+            ticker = u.code.split('.', 1)[1]
+            spot = fetch_spot_from_portfolio_management(ticker)
         # spot may still be None; keep it. Downstream scans will skip rows if spot is required.
         if spot is None and u.market == 'US' and (not spot_from_pm):
             # Make it explicit in meta by leaving spot None; caller can provide --spot.
