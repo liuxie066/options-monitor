@@ -14,7 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime, timezone
-import importlib.util
+import importlib
 import json
 import sys
 from typing import Callable
@@ -104,12 +104,33 @@ def get_rates(
         except Exception:
             return None
 
-    r = _read(Path(cache_path))
-    if r is not None:
-        return r
-    if shared_cache_path:
-        return _read(Path(shared_cache_path))
+    for path in _cache_candidates(cache_path=cache_path, shared_cache_path=shared_cache_path):
+        r = _read(path)
+        if r is not None:
+            return r
     return None
+
+
+def _default_pm_rate_cache_path() -> Path:
+    base_dir = Path(__file__).resolve().parents[2]
+    return (base_dir / "portfolio-management" / ".data" / "rate_cache.json").resolve()
+
+
+def _cache_candidates(*, cache_path: Path, shared_cache_path: Path | None = None) -> list[Path]:
+    candidates = [Path(cache_path).resolve()]
+    if shared_cache_path is not None:
+        candidates.append(Path(shared_cache_path).resolve())
+    candidates.append(_default_pm_rate_cache_path())
+
+    out: list[Path] = []
+    seen: set[str] = set()
+    for path in candidates:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(path)
+    return out
 
 
 def _warn(log: Callable[[str], None] | None, message: str) -> None:
@@ -134,8 +155,7 @@ def _save_rates(path: Path, rates: dict[str, float], *, log: Callable[[str], Non
 
 def _fetch_latest_rates_from_portfolio_management(*, log: Callable[[str], None] | None = None) -> dict | None:
     try:
-        base_dir = Path(__file__).resolve().parents[2]
-        pm_root = (base_dir / "portfolio-management").resolve()
+        pm_root = _default_pm_rate_cache_path().parents[1]
         src_root = (pm_root / "src").resolve()
         if not src_root.exists():
             _warn(log, f"[WARN] fx external ref missing: portfolio-management src not found at {src_root}")
@@ -145,12 +165,7 @@ def _fetch_latest_rates_from_portfolio_management(*, log: Callable[[str], None] 
             sys.path.insert(0, str(pm_root))
 
         mod_path = src_root / "price_fetcher.py"
-        spec = importlib.util.spec_from_file_location("pm_price_fetcher", mod_path)
-        if spec is None or spec.loader is None:
-            _warn(log, f"[WARN] fx external import failed: cannot load spec for {mod_path}")
-            return None
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
+        mod = importlib.import_module("src.price_fetcher")
         if not hasattr(mod, "PriceFetcher"):
             _warn(log, f"[WARN] fx external interface changed: PriceFetcher missing in {mod_path}")
             return None
@@ -195,7 +210,9 @@ def get_rates_or_fetch_latest(
 
     _warn(
         log,
-        f"[WARN] fx cache miss: cache_path={Path(cache_path).resolve()} shared_cache_path={Path(shared_cache_path).resolve() if shared_cache_path else '-'}; trying latest fetch",
+        "[WARN] fx cache miss: "
+        + ", ".join(str(path) for path in _cache_candidates(cache_path=cache_path, shared_cache_path=shared_cache_path))
+        + "; trying latest fetch",
     )
     latest = _fetch_latest_rates_from_portfolio_management(log=log)
     if latest is None:
