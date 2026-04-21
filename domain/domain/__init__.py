@@ -1,131 +1,93 @@
-from .multi_tick import (
-    apply_scan_run_decision,
-    cash_footer_for_account,
-    decide_notify_dispatch,
-    decide_should_notify,
-    evaluate_dnd_quiet_hours,
-    filter_notify_candidates,
-    is_in_quiet_hours_window,
-    markets_for_trading_day_guard,
-    reduce_trading_day_guard,
-    resolve_notification_channel_target,
-    resolve_notification_route_from_config,
-    resolve_scheduler_state_path,
-    select_markets_to_run,
-    select_scheduler_state_filename,
-)
-from .multi_tick_result import (
-    build_account_messages,
-    build_no_candidate_account_messages,
-    build_no_account_notification_payloads,
-    build_shared_last_run_payload,
-)
-from .tool_boundary import (
-    SCHEMA_KIND_SUBPROCESS_ADAPTER,
-    SCHEMA_KIND_SCHEDULER_DECISION,
-    SCHEMA_KIND_TOOL_EXECUTION,
-    SCHEMA_VERSION_V1,
-    build_tool_idempotency_key,
-    normalize_notify_subprocess_output,
-    normalize_pipeline_subprocess_output,
-    normalize_scheduler_decision_payload,
-    normalize_subprocess_adapter_payload,
-    normalize_tool_execution_payload,
-    normalize_watchdog_subprocess_output,
-    validate_schema_payload,
-)
-from .canonical_schema import (
-    CANONICAL_SCHEMA_VERSION_V1,
-    SCHEMA_KIND_PROCESSOR_OUTPUT,
-    SCHEMA_KIND_SOURCE_SNAPSHOT,
-    normalize_processor_row,
-    normalize_processor_rows,
-    normalize_source_snapshot,
-    validate_canonical_payload,
-)
-from .error_policy import (
-    ERR_2FA_REQUIRED,
-    ERR_CONFIG,
-    ERR_TIMEOUT,
-    ERR_UNEXPECTED,
-    ERR_UPSTREAM_UNAVAILABLE,
-    classify_failure,
-)
-from .config_contract import (
-    ALLOW_DERIVED_STRICT_TOKEN,
-    CANONICAL_CONFIGS,
-    DERIVED_CONFIGS,
-    ensure_runtime_canonical_config,
-    resolve_allow_derived_config_gate,
-    resolve_config_contract,
-)
-from .intermediate_objects import (
-    SCHEMA_KIND_DECISION,
-    SCHEMA_KIND_DELIVERY_PLAN,
-    SCHEMA_KIND_SNAPSHOT_DTO,
-    Decision,
-    DeliveryPlan,
-    SchemaValidationError,
-    SnapshotDTO,
-)
-from .engine import build_failure_audit_fields
+from __future__ import annotations
 
-__all__ = [
-    'apply_scan_run_decision',
-    'cash_footer_for_account',
-    'decide_notify_dispatch',
-    'decide_should_notify',
-    'evaluate_dnd_quiet_hours',
-    'filter_notify_candidates',
-    'is_in_quiet_hours_window',
-    'markets_for_trading_day_guard',
-    'reduce_trading_day_guard',
-    'resolve_notification_channel_target',
-    'resolve_notification_route_from_config',
-    'resolve_scheduler_state_path',
-    'select_markets_to_run',
-    'select_scheduler_state_filename',
-    'build_account_messages',
-    'build_no_candidate_account_messages',
-    'build_no_account_notification_payloads',
-    'build_shared_last_run_payload',
-    'SCHEMA_VERSION_V1',
-    'SCHEMA_KIND_TOOL_EXECUTION',
-    'SCHEMA_KIND_SCHEDULER_DECISION',
-    'SCHEMA_KIND_SUBPROCESS_ADAPTER',
-    'validate_schema_payload',
-    'normalize_scheduler_decision_payload',
-    'build_tool_idempotency_key',
-    'normalize_tool_execution_payload',
-    'normalize_subprocess_adapter_payload',
-    'normalize_watchdog_subprocess_output',
-    'normalize_pipeline_subprocess_output',
-    'normalize_notify_subprocess_output',
-    'CANONICAL_SCHEMA_VERSION_V1',
-    'SCHEMA_KIND_PROCESSOR_OUTPUT',
-    'SCHEMA_KIND_SOURCE_SNAPSHOT',
-    'validate_canonical_payload',
-    'normalize_processor_row',
-    'normalize_processor_rows',
-    'normalize_source_snapshot',
-    'ERR_TIMEOUT',
-    'ERR_2FA_REQUIRED',
-    'ERR_UPSTREAM_UNAVAILABLE',
-    'ERR_CONFIG',
-    'ERR_UNEXPECTED',
-    'classify_failure',
-    'CANONICAL_CONFIGS',
-    'DERIVED_CONFIGS',
-    'ALLOW_DERIVED_STRICT_TOKEN',
-    'resolve_config_contract',
-    'resolve_allow_derived_config_gate',
-    'ensure_runtime_canonical_config',
-    'SCHEMA_KIND_SNAPSHOT_DTO',
-    'SCHEMA_KIND_DECISION',
-    'SCHEMA_KIND_DELIVERY_PLAN',
-    'SchemaValidationError',
-    'SnapshotDTO',
-    'Decision',
-    'DeliveryPlan',
-    'build_failure_audit_fields',
-]
+from importlib import import_module
+
+
+_EXPORTS: dict[str, str] = {
+    'apply_scan_run_decision': '.multi_tick',
+    'cash_footer_for_account': '.multi_tick',
+    'decide_notify_dispatch': '.multi_tick',
+    'decide_should_notify': '.multi_tick',
+    'evaluate_dnd_quiet_hours': '.multi_tick',
+    'filter_notify_candidates': '.multi_tick',
+    'is_in_quiet_hours_window': '.multi_tick',
+    'markets_for_trading_day_guard': '.multi_tick',
+    'reduce_trading_day_guard': '.multi_tick',
+    'resolve_notification_channel_target': '.multi_tick',
+    'resolve_notification_route_from_config': '.multi_tick',
+    'resolve_scheduler_state_path': '.multi_tick',
+    'select_markets_to_run': '.multi_tick',
+    'select_scheduler_state_filename': '.multi_tick',
+    'build_account_messages': '.multi_tick_result',
+    'build_no_candidate_account_messages': '.multi_tick_result',
+    'build_no_account_notification_payloads': '.multi_tick_result',
+    'build_shared_last_run_payload': '.multi_tick_result',
+    'SCHEMA_KIND_SUBPROCESS_ADAPTER': '.tool_boundary',
+    'SCHEMA_KIND_SCHEDULER_DECISION': '.tool_boundary',
+    'SCHEMA_KIND_TOOL_EXECUTION': '.tool_boundary',
+    'SCHEMA_VERSION_V1': '.tool_boundary',
+    'build_tool_idempotency_key': '.tool_boundary',
+    'normalize_notify_subprocess_output': '.tool_boundary',
+    'normalize_pipeline_subprocess_output': '.tool_boundary',
+    'normalize_scheduler_decision_payload': '.tool_boundary',
+    'normalize_subprocess_adapter_payload': '.tool_boundary',
+    'normalize_tool_execution_payload': '.tool_boundary',
+    'normalize_watchdog_subprocess_output': '.tool_boundary',
+    'validate_schema_payload': '.tool_boundary',
+    'CANONICAL_SCHEMA_VERSION_V1': '.canonical_schema',
+    'SCHEMA_KIND_PROCESSOR_OUTPUT': '.canonical_schema',
+    'SCHEMA_KIND_SOURCE_SNAPSHOT': '.canonical_schema',
+    'normalize_processor_row': '.canonical_schema',
+    'normalize_processor_rows': '.canonical_schema',
+    'normalize_source_snapshot': '.canonical_schema',
+    'validate_canonical_payload': '.canonical_schema',
+    'ERR_2FA_REQUIRED': '.error_policy',
+    'ERR_CONFIG': '.error_policy',
+    'ERR_TIMEOUT': '.error_policy',
+    'ERR_UNEXPECTED': '.error_policy',
+    'ERR_UPSTREAM_UNAVAILABLE': '.error_policy',
+    'classify_failure': '.error_policy',
+    'ALLOW_DERIVED_STRICT_TOKEN': '.config_contract',
+    'CANONICAL_CONFIGS': '.config_contract',
+    'DERIVED_CONFIGS': '.config_contract',
+    'ensure_runtime_canonical_config': '.config_contract',
+    'resolve_allow_derived_config_gate': '.config_contract',
+    'resolve_config_contract': '.config_contract',
+    'SCHEMA_KIND_DECISION': '.intermediate_objects',
+    'SCHEMA_KIND_DELIVERY_PLAN': '.intermediate_objects',
+    'SCHEMA_KIND_SNAPSHOT_DTO': '.intermediate_objects',
+    'Decision': '.intermediate_objects',
+    'DeliveryPlan': '.intermediate_objects',
+    'SchemaValidationError': '.intermediate_objects',
+    'SnapshotDTO': '.intermediate_objects',
+    'build_failure_audit_fields': '.engine',
+}
+
+_MODULE_EXPORTS = {
+    'multi_tick',
+    'multi_tick_result',
+    'tool_boundary',
+    'canonical_schema',
+    'error_policy',
+    'config_contract',
+    'intermediate_objects',
+    'engine',
+    'fetch_source',
+    'close_advice',
+}
+
+__all__ = [*_EXPORTS.keys(), *_MODULE_EXPORTS]
+
+
+def __getattr__(name: str):
+    if name in _MODULE_EXPORTS:
+        return import_module(f'.{name}', __name__)
+    module_name = _EXPORTS.get(name)
+    if module_name is None:
+        raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
+    module = import_module(module_name, __name__)
+    return getattr(module, name)
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(__all__))
