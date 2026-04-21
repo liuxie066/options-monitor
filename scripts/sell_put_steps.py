@@ -51,6 +51,7 @@ def run_sell_put_scan_and_summarize(
     event_risk = {"enabled": True, "mode": "warn"}
     if isinstance(global_sell_put_event_risk, dict):
         event_risk.update(global_sell_put_event_risk)
+    min_net_income_cny = float(sp.get('min_net_income', liquidity.get('min_net_income', 0.0)) or 0.0)
 
     cmd = [
         py, 'scripts/cli/scan_sell_put_cli.py',
@@ -87,7 +88,7 @@ def run_sell_put_scan_and_summarize(
                     )
                     or 0.0
                 )
-            ))(float(sp.get('min_net_income') or 0.0))
+            ))(min_net_income_cny)
         ),
     ])
 
