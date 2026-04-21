@@ -227,6 +227,94 @@ def test_sell_call_steps_use_global_liquidity_filters_only() -> None:
     assert '--max-delta' not in cmd
 
 
+def test_sell_put_steps_fallback_to_global_min_net_income() -> None:
+    base = _add_repo_to_syspath()
+    import scripts.sell_put_steps as steps
+    from scripts.fx_rates import CurrencyConverter, FxRates
+
+    calls: list[list[str]] = []
+    orig_run_cmd = steps.run_cmd
+    orig_add_labels = steps.add_sell_put_labels
+
+    def _fake_run_cmd(cmd, **kwargs):
+        calls.append(cmd)
+
+    steps.run_cmd = _fake_run_cmd
+    steps.add_sell_put_labels = lambda *args, **kwargs: None
+    try:
+        out = steps.run_sell_put_scan_and_summarize(
+            py='python',
+            base=base,
+            sym='AAPL',
+            symbol='AAPL',
+            symbol_lower='aapl',
+            symbol_cfg={'symbol': 'AAPL', 'sell_put': {}},
+            sp={
+                'enabled': True,
+                'min_dte': 7,
+                'max_dte': 45,
+                'min_annualized_net_return': 0.1,
+            },
+            top_n=3,
+            required_data_dir=base / 'output',
+            report_dir=base / 'output' / 'reports',
+            timeout_sec=10,
+            is_scheduled=True,
+            fx=CurrencyConverter(FxRates(usd_per_cny=0.14, cny_per_hkd=0.92)),
+            portfolio_ctx=None,
+            global_sell_put_liquidity={'min_net_income': 100},
+        )
+    finally:
+        steps.run_cmd = orig_run_cmd
+        steps.add_sell_put_labels = orig_add_labels
+
+    assert out['strategy'] == 'sell_put'
+    assert calls
+    cmd = calls[0]
+    i = cmd.index('--min-net-income')
+    assert cmd[i + 1] == '14.000000000000002'
+
+
+def test_sell_call_steps_fallback_to_global_min_net_income() -> None:
+    base = _add_repo_to_syspath()
+    import scripts.sell_call_steps as steps
+    from scripts.fx_rates import CurrencyConverter, FxRates
+
+    calls: list[list[str]] = []
+    orig_run_cmd = steps.run_cmd
+
+    def _fake_run_cmd(cmd, **kwargs):
+        calls.append(cmd)
+
+    steps.run_cmd = _fake_run_cmd
+    try:
+        out = steps.run_sell_call_scan_and_summarize(
+            py='python',
+            base=base,
+            symbol='AAPL',
+            symbol_lower='aapl',
+            symbol_cfg={'symbol': 'AAPL'},
+            cc={'enabled': True},
+            top_n=3,
+            required_data_dir=base / 'output',
+            report_dir=base / 'output' / 'reports',
+            timeout_sec=10,
+            is_scheduled=True,
+            stock={'shares': 200, 'avg_cost': 100.0},
+            fx=CurrencyConverter(FxRates(usd_per_cny=0.14, cny_per_hkd=0.92)),
+            locked_shares_by_symbol={'AAPL': 0},
+            global_sell_call_liquidity={'min_net_income': 100},
+        )
+    finally:
+        steps.run_cmd = orig_run_cmd
+
+    assert out['strategy'] == 'sell_call'
+    assert calls
+    cmd = calls[0]
+    i = cmd.index('--min-net-income')
+    assert cmd[i + 1] == '14.000000000000002'
+
+
 def test_sell_put_reject_stage_is_strategy_gate() -> None:
     _add_repo_to_syspath()
     from tempfile import TemporaryDirectory

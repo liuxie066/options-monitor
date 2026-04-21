@@ -75,7 +75,7 @@ def run_sell_call_scan_and_summarize(
 
     # Config min_net_income is always CNY. The scanners expect option-native
     # currency thresholds (USD for US symbols, HKD for HK symbols).
-    min_net_income_cny = float(cc.get('min_net_income') or 0.0)
+    min_net_income_cny = float(cc.get('min_net_income', liquidity.get('min_net_income', 0.0)) or 0.0)
     min_net_income_native = 0.0
     if min_net_income_cny > 0:
         min_net_income_native = (
