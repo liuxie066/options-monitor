@@ -72,6 +72,10 @@ def normalize_processor_row(raw: dict[str, Any] | Any) -> dict[str, Any]:
         "cash_available_usd": src.get("cash_available_usd", None),
         "cash_available_usd_est": src.get("cash_available_usd_est", None),
         "cash_secured_used_usd": src.get("cash_secured_used_usd", None),
+        "cash_secured_used_usd_symbol": src.get("cash_secured_used_usd_symbol", None),
+        "cash_secured_used_cny": src.get("cash_secured_used_cny", None),
+        "cash_secured_used_cny_total": src.get("cash_secured_used_cny_total", None),
+        "cash_secured_used_cny_symbol": src.get("cash_secured_used_cny_symbol", None),
     }
     for key in ("market", "account", "source", "run_id"):
         if key in src:
