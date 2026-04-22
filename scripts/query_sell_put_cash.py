@@ -14,7 +14,7 @@ from scripts.cash_secured_utils import (
     normalize_cash_secured_total_by_ccy,
     read_cash_secured_total_cny,
 )
-from scripts.config_loader import normalize_config, resolve_pm_config_path
+from scripts.config_loader import resolve_pm_config_path
 from scripts.fx_rates import get_rates_or_fetch_latest
 from scripts.futu_portfolio_context import fetch_futu_portfolio_context
 
@@ -59,6 +59,15 @@ def _resolve_runtime_config_path(*, base: Path, config: str | Path | None) -> Pa
     return path
 
 
+def _normalize_runtime_config(cfg: dict) -> dict:
+    out = dict(cfg or {})
+    if 'templates' in out and 'profiles' not in out:
+        out['profiles'] = out.get('templates')
+    if 'symbols' in out and 'watchlist' not in out:
+        out['watchlist'] = out.get('symbols')
+    return out
+
+
 def _load_runtime_config(
     *,
     base: Path,
@@ -66,7 +75,7 @@ def _load_runtime_config(
     runtime_config: dict | None,
 ) -> dict:
     if isinstance(runtime_config, dict):
-        return normalize_config(dict(runtime_config))
+        return _normalize_runtime_config(dict(runtime_config))
 
     cfg_path = _resolve_runtime_config_path(base=base, config=config)
     if cfg_path is None:
@@ -75,7 +84,7 @@ def _load_runtime_config(
     cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
     if not isinstance(cfg, dict):
         raise SystemExit('[CONFIG_ERROR] runtime config must be a JSON object')
-    return normalize_config(cfg)
+    return _normalize_runtime_config(cfg)
 
 
 def _fetch_portfolio_context(
