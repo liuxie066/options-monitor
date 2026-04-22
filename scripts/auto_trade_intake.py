@@ -12,7 +12,7 @@ if str(repo_base) not in sys.path:
     sys.path.insert(0, str(repo_base))
 
 from scripts.config_loader import load_config, resolve_pm_config_path
-from scripts.option_positions_core.service import OptionPositionsRepository, load_table_ref
+from scripts.option_positions_core.service import load_option_positions_repo
 from scripts.trade_account_mapping import resolve_trade_intake_config
 from scripts.trade_event_normalizer import normalize_trade_deal
 from scripts.trade_intake_resolver import resolve_trade_deal
@@ -69,7 +69,7 @@ def _build_audit_event(phase: str, *, payload: dict | None = None, deal: object 
 def _process_payload(
     payload: dict,
     *,
-    repo: OptionPositionsRepository,
+    repo,
     state_path: Path,
     audit_path: Path,
     account_mapping: dict[str, str],
@@ -181,7 +181,7 @@ def main(argv: list[str] | None = None) -> int:
         payload = json.loads(Path(args.deal_json).read_text(encoding="utf-8"))
         if apply_changes:
             pm_config = resolve_pm_config_path(base=base, pm_config=args.pm_config)
-            repo: OptionPositionsRepository | _ReplayRepo = OptionPositionsRepository(load_table_ref(pm_config))
+            repo = load_option_positions_repo(pm_config)
         else:
             repo = _ReplayRepo()
         result = _process_payload(
@@ -196,7 +196,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     pm_config = resolve_pm_config_path(base=base, pm_config=args.pm_config)
-    repo = OptionPositionsRepository(load_table_ref(pm_config))
+    repo = load_option_positions_repo(pm_config)
 
     if not bool(intake_cfg["enabled"]):
         raise SystemExit("trade_intake.enabled=false; refusing to start listener")
