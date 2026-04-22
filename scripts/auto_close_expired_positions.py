@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Auto-close expired option_positions records in Feishu Bitable.
+"""Auto-close expired option_positions records.
 
 Design goals:
 - Do NOT add extra list/scan calls: consume the already-generated option_positions_context.json
@@ -32,10 +32,9 @@ from datetime import datetime, timezone
 
 from scripts.config_loader import resolve_pm_config_path
 from scripts.option_positions_core.service import (
-    OptionPositionsRepository,
     auto_close_expired_positions,
     build_expired_close_decisions,
-    load_table_ref,
+    load_option_positions_repo,
 )
 
 
@@ -89,7 +88,7 @@ def main():
 
     if to_close and not args.dry_run:
         pm_config = resolve_pm_config_path(base=base, pm_config=args.pm_config)
-        repo = OptionPositionsRepository(load_table_ref(pm_config))
+        repo = load_option_positions_repo(pm_config)
         decisions, applied, errors = auto_close_expired_positions(
             repo,
             [p for p in positions if isinstance(p, dict)],

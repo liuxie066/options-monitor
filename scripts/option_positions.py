@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Manage Feishu Bitable option_positions records.
+"""Manage option_positions records.
 
 Supports open, buy-to-close (including partial close), auto-close-compatible
 fields, list, and low-level edit.
 
-This script uses Feishu app_id/app_secret from --pm-config.
+Primary storage is SQLite; Feishu is an optional best-effort backup.
+This script still uses Feishu app_id/app_secret from --pm-config when backup sync is enabled.
 New deployments should prefer secrets/portfolio.feishu.json; the CLI default keeps
 ../portfolio-management/config.json for backward compatibility.
 """
@@ -38,9 +39,8 @@ from scripts.option_positions_core.domain import (
     normalize_status,
 )
 from scripts.option_positions_core.service import (
-    OptionPositionsRepository,
     buy_to_close_position,
-    load_table_ref,
+    load_option_positions_repo,
     open_position,
 )
 
@@ -59,7 +59,7 @@ def format_money(v: float | None, ccy: str) -> str:
 
 
 def main():
-    ap = argparse.ArgumentParser(description='Manage Feishu option_positions table')
+    ap = argparse.ArgumentParser(description='Manage option_positions storage')
     ap.add_argument('--pm-config', default=None, help='Feishu/Bitable credential config path; auto-resolves when omitted')
 
     sub = ap.add_subparsers(dest='cmd', required=True)
@@ -107,12 +107,17 @@ def main():
     p_edit.add_argument('--set', action='append', default=[], help='field=value (repeatable)')
     p_edit.add_argument('--dry-run', action='store_true')
 
+    p_sync = sub.add_parser('sync-backup', help='retry Feishu backup sync for SQLite records')
+    p_sync.add_argument('--record-id', default=None)
+    p_sync.add_argument('--limit', type=int, default=200)
+    p_sync.add_argument('--dry-run', action='store_true')
+
     args = ap.parse_args()
 
     base = Path(__file__).resolve().parents[1]
     pm_config = resolve_pm_config_path(base=base, pm_config=args.pm_config)
 
-    repo = OptionPositionsRepository(load_table_ref(pm_config))
+    repo = load_option_positions_repo(pm_config)
 
     if args.cmd == 'list':
         items = repo.list_records(page_size=200)
@@ -345,6 +350,15 @@ def main():
 
         repo.update_record(args.record_id, patch2)
         print(f"[DONE] updated {args.record_id}")
+        return
+
+    if args.cmd == 'sync-backup':
+        result = repo.sync_backup(
+            limit=max(int(args.limit), 1),
+            record_id=((args.record_id or '').strip() or None),
+            dry_run=bool(args.dry_run),
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
         return
 
 
