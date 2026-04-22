@@ -3,12 +3,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 import yfinance as yf
+
+# Allow running as a script without package install by ensuring repo root is on sys.path.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.opend_utils import get_trading_date
 

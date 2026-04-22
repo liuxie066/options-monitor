@@ -92,6 +92,7 @@ def apply_opend_degrade_to_yahoo(
             continue
         if not is_futu_fetch_source(fetch.get('source')):
             continue
+        fetch['_source_resolution'] = 'degraded_to_yahoo'
         fetch['source'] = 'yahoo'
         for k in ('host', 'port', 'spot_from_portfolio_management'):
             fetch.pop(k, None)

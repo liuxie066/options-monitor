@@ -72,6 +72,7 @@ def test_apply_opend_degrade_to_yahoo_keeps_existing_symbol_scope() -> None:
 
     assert degraded is True
     assert symbols[0]['fetch']['source'] == 'yahoo'
+    assert symbols[0]['fetch']['_source_resolution'] == 'degraded_to_yahoo'
     assert 'host' not in symbols[0]['fetch']
     assert 'port' not in symbols[0]['fetch']
     assert symbols[1]['fetch']['source'] == 'opend'
