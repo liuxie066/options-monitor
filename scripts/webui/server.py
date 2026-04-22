@@ -111,6 +111,15 @@ def _recommended_runtime_config_path(config_key: str) -> Path:
     return (BASE_DIR.parent / "options-monitor-config" / filename).resolve()
 
 
+def _uses_runtime_config_override(config_key: str) -> bool:
+    env_key = f"OM_WEBUI_CONFIG_{str(config_key).strip().upper()}"
+    explicit = (os.environ.get(env_key) or "").strip()
+    if explicit:
+        return True
+    env_dir = (os.environ.get("OM_WEBUI_CONFIG_DIR") or "").strip()
+    return bool(env_dir)
+
+
 def _load_config(config_key: str) -> dict:
     if config_key not in CONFIG_FILES:
         raise HTTPException(status_code=400, detail=f"invalid configKey: {config_key}")
@@ -242,7 +251,7 @@ def _list_rows() -> list[dict[str, Any]]:
 def _global_summary(config_key: str) -> dict[str, Any]:
     path = _resolve_config_path(CONFIG_FILES[config_key])
     recommended_path = _recommended_runtime_config_path(config_key)
-    path_warning = recommended_path.exists() and path != recommended_path
+    path_warning = recommended_path.exists() and path != recommended_path and not _uses_runtime_config_override(config_key)
     cfg, err = _try_load_config(config_key)
     if cfg is None:
         return {

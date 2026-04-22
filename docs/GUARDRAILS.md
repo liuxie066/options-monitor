@@ -37,4 +37,5 @@ make deploy-safe
 
 - Always runs `scripts/deploy_to_prod.py --dry-run` then `--apply`
 - Never adds `--include-runtime-config`
-- Verifies `options-monitor-prod/config.us.json` and `options-monitor-prod/config.hk.json` SHA-256 before/after; any change fails with non-zero exit
+- If `OM_CANONICAL_CONFIG_US` and `OM_CANONICAL_CONFIG_HK` are set, verifies those canonical runtime configs SHA-256 before/after; any change fails with non-zero exit
+- If the two env vars are not set, code deploy still runs and runtime-config hash guard is skipped with an explicit `SKIP` log
