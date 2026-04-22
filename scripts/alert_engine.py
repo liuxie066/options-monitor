@@ -13,14 +13,14 @@ def _load_symbol_display_map(base: Path, *, state_dir: Path | None = None) -> di
     """Best-effort load display name mapping.
 
     Priority:
-    1) portfolio_context.json (from holdings): stocks_by_symbol[*].name
+    1) portfolio_context.json: stocks_by_symbol[*].name
     2) config.us.json/config.hk.json:intake.symbol_aliases (name -> code inverted)
 
     Returns: {"0700.HK": "腾讯", ...}
     """
     m: dict[str, str] = {}
 
-    # 1) from portfolio context (holdings table)
+    # 1) from portfolio context
     try:
         if state_dir is not None:
             port_path = (state_dir / 'portfolio_context.json').resolve()
