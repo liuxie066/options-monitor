@@ -106,6 +106,11 @@ def _resolve_config_path(path: Path) -> Path:
     return (BASE_DIR / path).resolve()
 
 
+def _recommended_runtime_config_path(config_key: str) -> Path:
+    filename = "config.hk.json" if str(config_key).strip().lower() == "hk" else "config.us.json"
+    return (BASE_DIR.parent / "options-monitor-config" / filename).resolve()
+
+
 def _load_config(config_key: str) -> dict:
     if config_key not in CONFIG_FILES:
         raise HTTPException(status_code=400, detail=f"invalid configKey: {config_key}")
@@ -236,12 +241,17 @@ def _list_rows() -> list[dict[str, Any]]:
 
 def _global_summary(config_key: str) -> dict[str, Any]:
     path = _resolve_config_path(CONFIG_FILES[config_key])
+    recommended_path = _recommended_runtime_config_path(config_key)
+    path_warning = recommended_path.exists() and path != recommended_path
     cfg, err = _try_load_config(config_key)
     if cfg is None:
         return {
             "configKey": config_key,
             "path": str(CONFIG_FILES[config_key]),
             "resolvedPath": str(path),
+            "recommendedPath": str(recommended_path),
+            "recommendedPathExists": recommended_path.exists(),
+            "canonicalPathWarning": path_warning,
             "exists": path.exists(),
             "error": err,
         }
@@ -263,6 +273,9 @@ def _global_summary(config_key: str) -> dict[str, Any]:
         "configKey": config_key,
         "path": str(CONFIG_FILES[config_key]),
         "resolvedPath": str(path),
+        "recommendedPath": str(recommended_path),
+        "recommendedPathExists": recommended_path.exists(),
+        "canonicalPathWarning": path_warning,
         "exists": True,
         "accounts": accounts_from_config(cfg),
         "symbolCount": len(symbols),

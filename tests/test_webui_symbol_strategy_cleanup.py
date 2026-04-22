@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import sys
 import types
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 
 class _FakeFastAPI:
@@ -53,9 +55,11 @@ _install_fastapi_stubs()
 from scripts.webui.server import (
     SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS,
     _clean_symbol_level_strategy_fields,
+    _global_summary,
     _patch_entry,
     _to_row,
 )
+import scripts.webui.server as webui_server
 
 
 def test_patch_entry_removes_forbidden_symbol_level_strategy_fields() -> None:
@@ -158,3 +162,39 @@ def test_to_row_prefers_explicit_symbol_name_over_aliases() -> None:
         {"intake": {"symbol_aliases": {"腾讯": "0700.HK"}}},
     )
     assert row.name == "腾讯控股"
+
+
+def test_global_summary_exposes_resolved_and_recommended_runtime_config_paths() -> None:
+    old_base = webui_server.BASE_DIR
+    old_config_files = dict(webui_server.CONFIG_FILES)
+    try:
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            repo = root / "options-monitor-prod"
+            repo.mkdir()
+            canonical_dir = root / "options-monitor-config"
+            canonical_dir.mkdir()
+
+            local_cfg = repo / "config.hk.json"
+            local_cfg.write_text('{"symbols": []}', encoding="utf-8")
+            canonical_cfg = canonical_dir / "config.hk.json"
+            canonical_cfg.write_text('{"symbols": []}', encoding="utf-8")
+
+            webui_server.BASE_DIR = repo
+            webui_server.CONFIG_FILES = {"hk": Path("config.hk.json"), "us": Path("config.us.json")}
+
+            summary = _global_summary("hk")
+            assert summary["resolvedPath"] == str(local_cfg.resolve())
+            assert summary["recommendedPath"] == str(canonical_cfg.resolve())
+            assert summary["recommendedPathExists"] is True
+            assert summary["canonicalPathWarning"] is True
+    finally:
+        webui_server.BASE_DIR = old_base
+        webui_server.CONFIG_FILES = old_config_files
+
+
+def test_webui_frontend_shows_resolved_path_and_warning_copy() -> None:
+    src = Path("scripts/webui/frontend/src/App.jsx").read_text(encoding="utf-8")
+    assert "summary.resolvedPath || summary.path" in src
+    assert "当前 WebUI 写入路径不是推荐 canonical runtime config" in src
+    assert "summary.recommendedPath" in src
