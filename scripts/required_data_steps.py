@@ -26,7 +26,7 @@ def ensure_required_data(
     timeout_sec: int | None,
     is_scheduled: bool,
     state_dir: Path | None = None,
-    fetch_source: str = 'yahoo',
+    fetch_source: str = 'opend',
     fetch_host: str = '127.0.0.1',
     fetch_port: int = 11111,
     spot_from_pm: bool | None = None,

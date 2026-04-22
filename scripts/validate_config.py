@@ -132,7 +132,7 @@ def validate_config(cfg: dict):
         if fetch and not isinstance(fetch, dict):
             die(f"{sym}.fetch must be an object")
         if isinstance(fetch, dict):
-            src_raw = fetch.get('source', 'yahoo')
+            src_raw = fetch.get('source', 'futu')
             src = normalize_fetch_source(src_raw)
             if src not in ('opend', 'yahoo'):
                 die(f"{sym}.fetch.source unsupported: {src_raw}; use futu or yahoo")
