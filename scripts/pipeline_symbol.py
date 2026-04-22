@@ -123,7 +123,7 @@ def process_symbol(
         timeout_sec=timeout_sec,
         is_scheduled=IS_SCHEDULED,
         state_dir=state_dir,
-        fetch_source=str(fetch_cfg.get('source') or 'yahoo'),
+        fetch_source=str(fetch_cfg.get('source') or 'opend'),
         fetch_host=str(fetch_cfg.get('host') or '127.0.0.1'),
         fetch_port=int(fetch_cfg.get('port') or 11111),
         spot_from_pm=(fetch_cfg.get('spot_from_portfolio_management', None)),

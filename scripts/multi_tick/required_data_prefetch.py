@@ -13,7 +13,7 @@ from domain.services import (
     ToolExecutionService,
     adapt_opend_tool_payload,
 )
-from domain.domain.fetch_source import is_futu_fetch_source, normalize_fetch_source
+from domain.domain.fetch_source import is_futu_fetch_source, resolve_symbol_fetch_source
 from domain.storage.repositories import state_repo
 from scripts.io_utils import has_shared_required_data
 
@@ -112,7 +112,7 @@ def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required:
             )
 
         fetch_cfg = (symbol_cfg.get('fetch') or {}) if isinstance(symbol_cfg, dict) else {}
-        src = normalize_fetch_source(fetch_cfg.get('source') or 'yahoo')
+        src, _decision = resolve_symbol_fetch_source(fetch_cfg)
         limit_exp = int(fetch_cfg.get('limit_expirations') or symbol_cfg.get('fetch', {}).get('limit_expirations', 8) or 8)
         opt_types = 'put,call'
 
@@ -209,7 +209,7 @@ def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required:
                 q_idx += 1
                 symbol = str((symbol_cfg or {}).get("symbol") or "").strip()
                 fetch_cfg = (symbol_cfg.get("fetch") or {}) if isinstance(symbol_cfg, dict) else {}
-                src = normalize_fetch_source(fetch_cfg.get("source") or "yahoo")
+                src, _decision = resolve_symbol_fetch_source(fetch_cfg)
                 sym_class = _symbol_class(symbol)
                 if src == "opend" and sym_class in rate_limit_blocked_classes:
                     payload = normalize_tool_execution_payload(

@@ -22,7 +22,7 @@ from scripts.io_utils import (
     bj_now,
 )
 from scripts.account_config import accounts_from_config, cash_footer_accounts_from_config
-from domain.domain.fetch_source import is_futu_fetch_source, normalize_fetch_source
+from domain.domain.fetch_source import is_futu_fetch_source, resolve_symbol_fetch_source
 
 from .cash_footer import query_cash_footer
 from .required_data_prefetch import prefetch_required_data
@@ -375,7 +375,7 @@ def main() -> int:
     for it in syms0:
         if not isinstance(it, dict):
             continue
-        src = normalize_fetch_source(((it.get('fetch') or {}).get('source') or 'yahoo'))
+        src, _decision = resolve_symbol_fetch_source(it.get('fetch') or {})
         src_counts[src] = src_counts.get(src, 0) + 1
     runlog.safe_event(
         'run_start',
@@ -390,7 +390,6 @@ def main() -> int:
             'force': force_mode,
         }),
     )
-
     guard_failure_recorded = False
 
     def _guard_mark_failure(error_code: str, stage: str) -> None:
@@ -453,6 +452,21 @@ def main() -> int:
             state_repo.append_audit_event(base, payload, run_id=(run_id or runlog.run_id))
         except Exception:
             pass
+
+    for it in syms0:
+        if not isinstance(it, dict):
+            continue
+        sym = str(it.get('symbol') or '').strip().upper()
+        if not sym:
+            continue
+        src, decision = resolve_symbol_fetch_source(it.get('fetch') or {})
+        _audit(
+            'config',
+            'fetch_source_decision',
+            status='ok',
+            tool_name='fetch_source_resolution',
+            extra={'symbol': sym, 'source': src, 'decision': decision},
+        )
 
     dedupe = state_repo.put_idempotency_success(
         base,
