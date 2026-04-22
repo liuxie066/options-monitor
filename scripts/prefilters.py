@@ -32,8 +32,8 @@ def apply_prefilters(
     fx_usd_per_cny: float | None,
     hkdcny: float | None,
 ) -> PrefilterResult:
-    # Pre-filter (call): sell_call must be based on holdings.
-    # If holdings (portfolio_ctx) is unavailable for this account, skip sell_call entirely.
+    # Pre-filter (call): sell_call must be based on account-level portfolio context.
+    # If portfolio_ctx is unavailable for this account, skip sell_call entirely.
     stock = None
     if want_call:
         if not portfolio_ctx:
