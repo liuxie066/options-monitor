@@ -16,6 +16,7 @@ import json
 from pathlib import Path
 
 from scripts.config_loader import resolve_pm_config_path
+from scripts.futu_portfolio_context import fetch_futu_portfolio_context
 from scripts.io_utils import is_fresh, load_cached_json
 from scripts.subprocess_utils import run_cmd
 from domain.services import adapt_holdings_context, adapt_option_positions_context
@@ -40,7 +41,33 @@ def _with_context_source(ctx: dict, source: str) -> dict:
     return out
 
 
-def load_portfolio_context(
+def _with_portfolio_source_name(ctx: dict, source_name: str) -> dict:
+    out = dict(ctx)
+    out['portfolio_source_name'] = str(source_name)
+    return out
+
+
+def _normalize_portfolio_source(value: str | None) -> str:
+    raw = str(value or '').strip().lower()
+    if raw in ('', 'auto'):
+        return 'auto'
+    if raw in ('futu', 'opend'):
+        return 'futu'
+    return 'holdings'
+
+
+def _cached_portfolio_source_matches(cached: dict, *, requested_source: str) -> bool:
+    actual = _normalize_portfolio_source(cached.get('portfolio_source_name'))
+    if requested_source == 'futu':
+        return actual == 'futu'
+    if requested_source == 'holdings':
+        return actual == 'holdings'
+    if requested_source == 'auto':
+        return actual == 'futu'
+    return True
+
+
+def _load_portfolio_context_from_holdings(
     *,
     py: str,
     base: Path,
@@ -54,70 +81,48 @@ def load_portfolio_context(
     shared_state_dir: Path | None,
     log,
 ) -> dict | None:
-    """Best-effort load portfolio context to dict."""
+    port_path = (state_dir / 'portfolio_context.json').resolve()
+    shared_root = (shared_state_dir or state_dir).resolve()
+    shared_root.mkdir(parents=True, exist_ok=True)
+    shared_path = (shared_root / 'portfolio_context.shared.json').resolve()
+
     try:
-        port_path = (state_dir / 'portfolio_context.json').resolve()
-        cached = None
         if ttl_sec > 0 and is_fresh(port_path, ttl_sec):
             cached = load_cached_json(port_path)
-        if cached is not None:
-            cached = _with_context_source(cached, 'account_cache')
-            log(f"[CTX] portfolio_context source=account_cache account={account or '-'}")
-            snap = adapt_holdings_context(cached)
-            _persist_source_snapshot(base, snap)
-            return cached
+            if isinstance(cached, dict):
+                cached = _with_context_source(_with_portfolio_source_name(cached, 'holdings'), 'account_cache')
+                log(f"[CTX] portfolio_context source=account_cache account={account or '-'}")
+                snap = adapt_holdings_context(cached)
+                _persist_source_snapshot(base, snap)
+                return cached
+    except Exception:
+        pass
 
-        shared_root = (shared_state_dir or state_dir).resolve()
-        shared_root.mkdir(parents=True, exist_ok=True)
-        shared_path = (shared_root / 'portfolio_context.shared.json').resolve()
+    # Reuse shared cache first; this keeps per-account output schema unchanged.
+    try:
+        if ttl_sec > 0 and is_fresh(shared_path, ttl_sec):
+            shared_cached = load_cached_json(shared_path)
+            if isinstance(shared_cached, dict):
+                sliced = slice_shared_portfolio_context_for_account(shared_cached, account)
+                if isinstance(sliced, dict):
+                    sliced = _with_context_source(_with_portfolio_source_name(sliced, 'holdings'), 'shared_slice')
+                    port_path.parent.mkdir(parents=True, exist_ok=True)
+                    port_path.write_text(json.dumps(sliced, ensure_ascii=False, indent=2), encoding='utf-8')
+                    log(f"[CTX] portfolio_context source=shared_slice account={account or '-'}")
+                    snap = adapt_holdings_context(sliced)
+                    _persist_source_snapshot(base, snap)
+                    return sliced
+    except Exception:
+        pass
 
-        # Reuse shared cache first; this keeps per-account output schema unchanged.
-        try:
-            if ttl_sec > 0 and is_fresh(shared_path, ttl_sec):
-                shared_cached = load_cached_json(shared_path)
-                if isinstance(shared_cached, dict):
-                    sliced = slice_shared_portfolio_context_for_account(shared_cached, account)
-                    if isinstance(sliced, dict):
-                        sliced = _with_context_source(sliced, 'shared_slice')
-                        port_path.parent.mkdir(parents=True, exist_ok=True)
-                        port_path.write_text(json.dumps(sliced, ensure_ascii=False, indent=2), encoding='utf-8')
-                        log(f"[CTX] portfolio_context source=shared_slice account={account or '-'}")
-                        snap = adapt_holdings_context(sliced)
-                        _persist_source_snapshot(base, snap)
-                        return sliced
-        except Exception:
-            pass
-
-        # Refresh shared cache (single fetch) and produce account context in one command.
-        try:
-            cmd = [
-                py, 'scripts/fetch_portfolio_context.py',
-                '--pm-config', str(pm_config),
-                '--market', str(market),
-                '--out', str(port_path.as_posix()),
-                '--shared-out', str(shared_path.as_posix()),
-            ]
-            if account:
-                cmd.extend(['--account', str(account)])
-            if is_scheduled:
-                cmd.append('--quiet')
-            run_cmd(cmd, cwd=base, timeout_sec=timeout_sec, is_scheduled=is_scheduled)
-            ctx = load_cached_json(port_path) or json.loads(port_path.read_text(encoding='utf-8'))
-            ctx = _with_context_source(ctx, 'shared_refresh')
-            port_path.write_text(json.dumps(ctx, ensure_ascii=False, indent=2), encoding='utf-8')
-            log(f"[CTX] portfolio_context source=shared_refresh account={account or '-'}")
-            snap = adapt_holdings_context(ctx)
-            _persist_source_snapshot(base, snap)
-            return ctx
-        except Exception:
-            pass
-
-        # Fallback: legacy per-account direct fetch path.
+    # Refresh shared cache (single fetch) and produce account context in one command.
+    try:
         cmd = [
             py, 'scripts/fetch_portfolio_context.py',
             '--pm-config', str(pm_config),
             '--market', str(market),
-            '--out', str((state_dir / 'portfolio_context.json').as_posix()),
+            '--out', str(port_path.as_posix()),
+            '--shared-out', str(shared_path.as_posix()),
         ]
         if account:
             cmd.extend(['--account', str(account)])
@@ -125,12 +130,101 @@ def load_portfolio_context(
             cmd.append('--quiet')
         run_cmd(cmd, cwd=base, timeout_sec=timeout_sec, is_scheduled=is_scheduled)
         ctx = load_cached_json(port_path) or json.loads(port_path.read_text(encoding='utf-8'))
-        ctx = _with_context_source(ctx, 'direct_fetch')
+        ctx = _with_context_source(_with_portfolio_source_name(ctx, 'holdings'), 'shared_refresh')
         port_path.write_text(json.dumps(ctx, ensure_ascii=False, indent=2), encoding='utf-8')
-        log(f"[CTX] portfolio_context source=direct_fetch account={account or '-'}")
+        log(f"[CTX] portfolio_context source=shared_refresh account={account or '-'}")
         snap = adapt_holdings_context(ctx)
         _persist_source_snapshot(base, snap)
         return ctx
+    except Exception:
+        pass
+
+    # Fallback: legacy per-account direct fetch path.
+    cmd = [
+        py, 'scripts/fetch_portfolio_context.py',
+        '--pm-config', str(pm_config),
+        '--market', str(market),
+        '--out', str(port_path.as_posix()),
+    ]
+    if account:
+        cmd.extend(['--account', str(account)])
+    if is_scheduled:
+        cmd.append('--quiet')
+    run_cmd(cmd, cwd=base, timeout_sec=timeout_sec, is_scheduled=is_scheduled)
+    ctx = load_cached_json(port_path) or json.loads(port_path.read_text(encoding='utf-8'))
+    ctx = _with_context_source(_with_portfolio_source_name(ctx, 'holdings'), 'direct_fetch')
+    port_path.write_text(json.dumps(ctx, ensure_ascii=False, indent=2), encoding='utf-8')
+    log(f"[CTX] portfolio_context source=direct_fetch account={account or '-'}")
+    snap = adapt_holdings_context(ctx)
+    _persist_source_snapshot(base, snap)
+    return ctx
+
+
+def load_portfolio_context(
+    *,
+    py: str,
+    base: Path,
+    pm_config: str,
+    market: str,
+    account: str | None,
+    ttl_sec: int,
+    timeout_sec: int,
+    is_scheduled: bool,
+    state_dir: Path,
+    shared_state_dir: Path | None,
+    log,
+    runtime_config: dict | None = None,
+    portfolio_source: str | None = None,
+) -> dict | None:
+    """Best-effort load portfolio context to dict."""
+    try:
+        port_path = (state_dir / 'portfolio_context.json').resolve()
+        source_mode = _normalize_portfolio_source(portfolio_source)
+        cached = None
+        if ttl_sec > 0 and is_fresh(port_path, ttl_sec):
+            cached = load_cached_json(port_path)
+        if isinstance(cached, dict) and _cached_portfolio_source_matches(cached, requested_source=source_mode):
+            cached = _with_context_source(cached, 'account_cache')
+            log(f"[CTX] portfolio_context source=account_cache account={account or '-'}")
+            snap = adapt_holdings_context(cached)
+            _persist_source_snapshot(base, snap)
+            return cached
+
+        if source_mode in ('auto', 'futu'):
+            try:
+                cfg = runtime_config if isinstance(runtime_config, dict) else {}
+                base_ccy = str(((cfg.get('portfolio') or {}).get('base_currency') or 'CNY'))
+                ctx = fetch_futu_portfolio_context(
+                    cfg=cfg,
+                    account=account,
+                    market=str(market),
+                    base_currency=base_ccy,
+                )
+                ctx = _with_context_source(_with_portfolio_source_name(ctx, 'futu'), 'futu_direct')
+                port_path.parent.mkdir(parents=True, exist_ok=True)
+                port_path.write_text(json.dumps(ctx, ensure_ascii=False, indent=2), encoding='utf-8')
+                log(f"[CTX] portfolio_context source=futu_direct account={account or '-'}")
+                snap = adapt_holdings_context(ctx)
+                _persist_source_snapshot(base, snap)
+                return ctx
+            except Exception as e:
+                if source_mode == 'futu':
+                    raise
+                log(f"[WARN] futu portfolio context unavailable; fallback to holdings: {e}")
+
+        return _load_portfolio_context_from_holdings(
+            py=py,
+            base=base,
+            pm_config=pm_config,
+            market=market,
+            account=account,
+            ttl_sec=ttl_sec,
+            timeout_sec=timeout_sec,
+            is_scheduled=is_scheduled,
+            state_dir=state_dir,
+            shared_state_dir=shared_state_dir,
+            log=log,
+        )
     except Exception as e:
         log(f"[WARN] portfolio context not available: {e}")
         return None
@@ -343,6 +437,7 @@ def build_pipeline_context(
     pm_config = resolve_pm_config_path(base=base, pm_config=portfolio_cfg.get('pm_config'))
     market = portfolio_cfg.get('market', '富途')
     account = portfolio_cfg.get('account')
+    portfolio_source = portfolio_cfg.get('source')
 
     # Cache policy (TTL seconds)
     ttl_opt_ctx = int(runtime.get('option_positions_context_ttl_sec', 900 if is_scheduled else 120) or 0)
@@ -360,6 +455,8 @@ def build_pipeline_context(
         state_dir=state_dir,
         shared_state_dir=shared_state_dir,
         log=log,
+        runtime_config=cfg,
+        portfolio_source=(str(portfolio_source) if portfolio_source is not None else None),
     )
 
     option_ctx, refreshed = load_option_positions_context(

@@ -75,6 +75,7 @@ def main():
         [
             str(base / '.venv' / 'bin' / 'python'),
             'scripts/cli/query_sell_put_cash_cli.py',
+            '--config', str(args.config),
             '--pm-config', str(pm_config),
             '--market', args.market,
             '--account', args.account,

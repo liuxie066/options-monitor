@@ -14,6 +14,7 @@ from scripts.query_sell_put_cash import query_sell_put_cash
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='Query cash headroom for sell-put (cash-secured) strategy')
+    parser.add_argument('--config', default=None, help='optional options-monitor runtime config for portfolio source/account mapping')
     parser.add_argument('--pm-config', default=None, help='Feishu/Bitable credential config path; auto-resolves when omitted')
     parser.add_argument('--market', default='富途')
     parser.add_argument('--account', default=None)
@@ -32,6 +33,7 @@ def main(argv: list[str] | None = None) -> int:
     """query_sell_put_cash CLI 入口。"""
     args = parse_args(argv)
     query_sell_put_cash(
+        config=args.config,
         pm_config=args.pm_config,
         market=args.market,
         account=args.account,
