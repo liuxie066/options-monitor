@@ -227,6 +227,7 @@ def test_global_summary_suppresses_canonical_warning_when_webui_config_override_
 
 def test_webui_frontend_shows_resolved_path_and_warning_copy() -> None:
     src = Path("scripts/webui/frontend/src/App.jsx").read_text(encoding="utf-8")
+    assert "const [configModule, setConfigModule] = useState('symbols');" in src
     assert "summary.resolvedPath || summary.path" in src
     assert "当前 WebUI 写入路径不是推荐 canonical runtime config" in src
     assert "summary.recommendedPath" in src
