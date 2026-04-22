@@ -538,6 +538,8 @@ export default function App(){
             <div className="ModuleTabs" role="tablist" aria-label="配置模块">
               <button className={`ModuleTab ${configModule === 'global' ? 'ModuleTabActive' : ''}`} onClick={()=>setConfigModule('global')}>全局配置</button>
               <button className={`ModuleTab ${configModule === 'symbols' ? 'ModuleTabActive' : ''}`} onClick={()=>setConfigModule('symbols')}>标的配置</button>
+              <span className="Spacer ModuleTabsSpacer" />
+              <button className="Button ButtonPrimary BtnNew" onClick={openNew}>新增 {marketMeta.label} 标的</button>
             </div>
 
             {configModule === 'global' && (
@@ -564,10 +566,6 @@ export default function App(){
                     <label className="Toggle TogglePut"><input type="checkbox" checked={putOn} onChange={e=>setPutOn(e.target.checked)} /> put</label>
                     <label className="Toggle ToggleCall"><input type="checkbox" checked={callOn} onChange={e=>setCallOn(e.target.checked)} /> call</label>
                   </div>
-
-                  <span className="Spacer ToolbarSpacer" />
-
-                  <button className="Button ButtonPrimary BtnNew" onClick={openNew}>新增 {marketMeta.label} 标的</button>
                 </div>
 
                 <div className="Box BoxScroll">
