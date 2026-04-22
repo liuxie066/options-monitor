@@ -167,9 +167,10 @@ def validate_config(cfg: dict):
                 die(f"{sym}.sell_call has forbidden symbol-level strategy filter keys: {', '.join(bad_keys)}")
         if sc.get('enabled'):
             # NOTE:
-            # - sell_call cost basis/shares come from holdings (portfolio_context) at runtime.
+            # - sell_call cost basis/shares come from account portfolio_context at runtime.
+            # - portfolio_context may be backed by OpenD or holdings depending on account/runtime settings.
             # - Therefore, do not require them in config validation.
-            # - If holdings is unavailable for an account, pipeline will skip sell_call for that account.
+            # - If portfolio_context is unavailable for an account, pipeline will skip sell_call for that account.
             for k in ('min_dte', 'max_dte', 'min_strike'):
                 if k not in sc:
                     die(f"{sym}.sell_call enabled but missing {k}")

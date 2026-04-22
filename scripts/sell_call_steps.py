@@ -41,8 +41,8 @@ def run_sell_call_scan_and_summarize(
 
     Returns the summary row dict (same schema as summarize_sell_call).
     """
-    # sell_call avg_cost/shares are sourced from account holdings context only.
-    # Covered-call cost basis and shares are account-scoped and must come from holdings context.
+    # sell_call avg_cost/shares are sourced from account-scoped portfolio context.
+    # The upstream portfolio source may be OpenD or holdings, but the downstream stock schema stays the same.
     if not stock:
         return summarize_sell_call(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg)
 
