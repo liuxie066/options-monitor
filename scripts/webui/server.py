@@ -217,7 +217,7 @@ def _list_rows() -> list[dict[str, Any]]:
         cfg, _err = _try_load_config(k)
         if cfg is None:
             continue
-        symbols = cfg.get("symbols") or cfg.get("watchlist") or []
+        symbols = cfg.get("symbols") or []
         if not isinstance(symbols, list):
             continue
         for it in symbols:
@@ -246,7 +246,7 @@ def _global_summary(config_key: str) -> dict[str, Any]:
             "error": err,
         }
 
-    symbols = cfg.get("symbols") or cfg.get("watchlist") or []
+    symbols = cfg.get("symbols") or []
     if not isinstance(symbols, list):
         symbols = []
 
@@ -313,8 +313,6 @@ def _patch_global_strategy(cfg: dict, payload: dict):
 
     templates = cfg.get("templates")
     if templates is None:
-        templates = cfg.get("profiles")
-    if templates is None:
         templates = {}
         cfg["templates"] = templates
     if not isinstance(templates, dict):
@@ -365,8 +363,6 @@ def _patch_global_strategy(cfg: dict, payload: dict):
 
 def _find_symbol(cfg: dict, symbol: str) -> tuple[int | None, dict | None]:
     symbols = cfg.get("symbols")
-    if symbols is None:
-        symbols = cfg.get("watchlist")
     if not isinstance(symbols, list):
         return None, None
 
@@ -380,8 +376,6 @@ def _find_symbol(cfg: dict, symbol: str) -> tuple[int | None, dict | None]:
 
 
 def _ensure_symbols_list(cfg: dict) -> list:
-    if cfg.get("symbols") is None and isinstance(cfg.get("watchlist"), list):
-        cfg["symbols"] = cfg.get("watchlist")
     if cfg.get("symbols") is None:
         cfg["symbols"] = []
     if not isinstance(cfg.get("symbols"), list):
@@ -391,8 +385,6 @@ def _ensure_symbols_list(cfg: dict) -> list:
 
 def _clean_symbol_level_strategy_fields(cfg: dict) -> None:
     symbols = cfg.get("symbols")
-    if symbols is None:
-        symbols = cfg.get("watchlist")
     if not isinstance(symbols, list):
         return
     for item in symbols:

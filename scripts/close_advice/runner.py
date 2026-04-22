@@ -125,8 +125,6 @@ def load_required_data_quotes(required_data_root: Path, symbols: set[str] | None
 
 def _symbol_config_by_symbol(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
     items = config.get("symbols") if isinstance(config, dict) else []
-    if not isinstance(items, list):
-        items = config.get("watchlist") if isinstance(config, dict) else []
     out: dict[str, dict[str, Any]] = {}
     for item in items or []:
         if not isinstance(item, dict):

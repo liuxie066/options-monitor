@@ -95,7 +95,7 @@ def cmd_list(cfg: dict, fmt: str):
         print("(no symbols)")
         return
 
-    print("# options-monitor watchlist")
+    print("# options-monitor symbols")
     for r in rows:
         use = r["use"]
         acct = r.get('accounts')
@@ -152,7 +152,7 @@ def cmd_edit(cfg: dict, symbol: str, sets: list[str]):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Manage options-monitor watchlist (config.us.json/config.hk.json symbols)")
+    ap = argparse.ArgumentParser(description="Manage options-monitor symbols config (config.us.json/config.hk.json)")
     ap.add_argument("--config", default="config.us.json")
 
     sub = ap.add_subparsers(dest="cmd", required=True)

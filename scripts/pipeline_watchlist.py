@@ -1,8 +1,8 @@
-"""Watchlist pipeline runner.
+"""Symbols pipeline runner.
 
 Why:
 - Keep run_pipeline orchestration-only (Stage 3).
-- Centralize watchlist loop and summary aggregation.
+- Centralize symbols loop and summary aggregation.
 
 Design:
 - External dependencies are injected (process_symbol_fn, apply_profiles_fn, build_pipeline_context_fn)
@@ -14,6 +14,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable, Iterable
 
+from scripts.config_loader import resolve_templates_config, resolve_watchlist_config
 from scripts.config_profiles import deep_merge
 from scripts.sell_call_config import resolve_min_annualized_net_premium_return
 from scripts.sell_put_config import resolve_min_annualized_net_return
@@ -47,10 +48,7 @@ def _parse_symbols_whitelist(symbols_arg: str | None) -> set[str] | None:
 
 
 def _iter_watchlist(cfg: dict) -> Iterable[dict]:
-    wl = cfg.get('watchlist')
-    if not isinstance(wl, list):
-        return []
-    return [it for it in wl if isinstance(it, dict)]
+    return resolve_watchlist_config(cfg)
 
 
 def _resolve_profile_side_cfg(item: dict, profiles: dict, side: str) -> dict:
@@ -78,6 +76,44 @@ def _extract_liquidity_fields(side_cfg: dict, *, is_put: bool) -> dict:
     return {k: side_cfg[k] for k in keys if k in side_cfg}
 
 
+def resolve_watchlist_item_runtime_config(
+    *,
+    item: dict,
+    profiles: dict,
+    apply_profiles_fn: Callable[[dict, dict], dict],
+) -> dict:
+    resolved = apply_profiles_fn(item, profiles)
+
+    # Resolve min annualized return with a single source-of-truth chain:
+    # symbol.sell_put > templates.sell_put > DEFAULT.
+    resolved_put_min = resolve_min_annualized_net_return(symbol_cfg=item, profiles=profiles)
+    sell_put_cfg = dict(resolved.get('sell_put') or {})
+    sell_put_cfg['min_annualized_net_return'] = resolved_put_min
+    resolved['sell_put'] = sell_put_cfg
+
+    resolved_call_min = resolve_min_annualized_net_premium_return(symbol_cfg=item, profiles=profiles)
+    sell_call_cfg = dict(resolved.get('sell_call') or {})
+    sell_call_cfg['min_annualized_net_premium_return'] = resolved_call_min
+    sell_call_cfg.pop('min_annualized_net_return', None)
+    resolved['sell_call'] = sell_call_cfg
+
+    resolved['_global_sell_put_liquidity'] = _extract_liquidity_fields(
+        _resolve_profile_side_cfg(item, profiles, 'sell_put'),
+        is_put=True,
+    )
+    resolved['_global_sell_call_liquidity'] = _extract_liquidity_fields(
+        _resolve_profile_side_cfg(item, profiles, 'sell_call'),
+        is_put=False,
+    )
+    resolved['_global_sell_put_event_risk'] = _extract_event_risk_cfg(
+        _resolve_profile_side_cfg(item, profiles, 'sell_put'),
+    )
+    resolved['_global_sell_call_event_risk'] = _extract_event_risk_cfg(
+        _resolve_profile_side_cfg(item, profiles, 'sell_call'),
+    )
+    return resolved
+
+
 def run_watchlist_pipeline(
     *,
     py: str,
@@ -102,7 +138,7 @@ def run_watchlist_pipeline(
     sym_whitelist = _parse_symbols_whitelist(symbols_arg)
 
     runtime = cfg.get('runtime', {}) or {}
-    profiles = cfg.get('profiles') or {}
+    profiles = resolve_templates_config(cfg)
 
     portfolio_ctx, option_ctx, fx_usd_per_cny, hkdcny = build_pipeline_context_fn(
         py=py,
@@ -126,33 +162,10 @@ def run_watchlist_pipeline(
                 if s0 and s0 not in sym_whitelist:
                     continue
 
-            item = apply_profiles_fn(item0, profiles)
-
-            # Resolve min annualized return with a single source-of-truth chain:
-            # symbol.sell_put > templates.sell_put > DEFAULT.
-            resolved_put_min = resolve_min_annualized_net_return(symbol_cfg=item0, profiles=profiles)
-            sell_put_cfg = dict(item.get('sell_put') or {})
-            sell_put_cfg['min_annualized_net_return'] = resolved_put_min
-            item['sell_put'] = sell_put_cfg
-
-            resolved_call_min = resolve_min_annualized_net_premium_return(symbol_cfg=item0, profiles=profiles)
-            sell_call_cfg = dict(item.get('sell_call') or {})
-            sell_call_cfg['min_annualized_net_premium_return'] = resolved_call_min
-            sell_call_cfg.pop('min_annualized_net_return', None)
-            item['sell_call'] = sell_call_cfg
-            item['_global_sell_put_liquidity'] = _extract_liquidity_fields(
-                _resolve_profile_side_cfg(item0, profiles, 'sell_put'),
-                is_put=True,
-            )
-            item['_global_sell_call_liquidity'] = _extract_liquidity_fields(
-                _resolve_profile_side_cfg(item0, profiles, 'sell_call'),
-                is_put=False,
-            )
-            item['_global_sell_put_event_risk'] = _extract_event_risk_cfg(
-                _resolve_profile_side_cfg(item0, profiles, 'sell_put'),
-            )
-            item['_global_sell_call_event_risk'] = _extract_event_risk_cfg(
-                _resolve_profile_side_cfg(item0, profiles, 'sell_call'),
+            item = resolve_watchlist_item_runtime_config(
+                item=item0,
+                profiles=profiles,
+                apply_profiles_fn=apply_profiles_fn,
             )
 
             # inject option_ctx into portfolio_ctx for now (minimal change)

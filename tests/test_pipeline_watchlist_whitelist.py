@@ -25,11 +25,11 @@ def test_watchlist_whitelist_filters_symbols() -> None:
         return None
 
     cfg = {
-        'watchlist': [
+        'symbols': [
             {'symbol': '0700.HK', 'sell_put': {'enabled': True}, 'sell_call': {'enabled': True}},
             {'symbol': '3690.HK', 'sell_put': {'enabled': True}, 'sell_call': {'enabled': True}},
         ],
-        'profiles': {},
+        'templates': {},
         'runtime': {},
     }
 
@@ -79,10 +79,10 @@ def test_watchlist_extracts_global_min_net_income_from_profiles() -> None:
         return None
 
     cfg = {
-        'watchlist': [
+        'symbols': [
             {'symbol': '0700.HK', 'use': 'base_profile', 'sell_put': {'enabled': True}, 'sell_call': {'enabled': True}},
         ],
-        'profiles': {
+        'templates': {
             'base_profile': {
                 'sell_put': {'min_net_income': 100, 'min_open_interest': 50},
                 'sell_call': {'min_net_income': 200, 'min_volume': 12},
@@ -114,3 +114,58 @@ def test_watchlist_extracts_global_min_net_income_from_profiles() -> None:
 
     assert seen['put']['min_net_income'] == 100
     assert seen['call']['min_net_income'] == 200
+
+
+def test_resolve_watchlist_item_runtime_config_centralizes_template_expansion() -> None:
+    from scripts.pipeline_watchlist import resolve_watchlist_item_runtime_config
+
+    def _apply_profiles(item: dict, profiles: dict) -> dict:
+        out = dict(item)
+        for name in ([item.get('use')] if isinstance(item.get('use'), str) else item.get('use') or []):
+            prof = profiles.get(name) or {}
+            for key, value in prof.items():
+                if isinstance(value, dict) and isinstance(out.get(key), dict):
+                    merged = dict(value)
+                    merged.update(out.get(key) or {})
+                    out[key] = merged
+                else:
+                    out.setdefault(key, value)
+        return out
+
+    profiles = {
+        'put_base': {
+            'sell_put': {
+                'min_annualized_net_return': 0.12,
+                'min_net_income': 100,
+                'min_open_interest': 50,
+            }
+        },
+        'call_base': {
+            'sell_call': {
+                'min_annualized_net_return': 0.11,
+                'min_volume': 12,
+            }
+        },
+    }
+    item = {
+        'symbol': '0700.HK',
+        'use': ['put_base', 'call_base'],
+        'sell_put': {'enabled': True, 'min_dte': 20},
+        'sell_call': {'enabled': True},
+    }
+
+    resolved = resolve_watchlist_item_runtime_config(
+        item=item,
+        profiles=profiles,
+        apply_profiles_fn=_apply_profiles,
+    )
+
+    assert resolved['sell_put']['enabled'] is True
+    assert resolved['sell_put']['min_dte'] == 20
+    assert resolved['sell_put']['min_annualized_net_return'] == 0.12
+    assert resolved['sell_call']['enabled'] is True
+    assert resolved['sell_call']['min_annualized_net_premium_return'] == 0.11
+    assert 'min_annualized_net_return' not in resolved['sell_call']
+    assert resolved['_global_sell_put_liquidity'] == {'min_net_income': 100, 'min_open_interest': 50}
+    assert resolved['_global_sell_call_liquidity'] == {'min_volume': 12}
+    assert resolved['_global_sell_put_event_risk'] == {'enabled': True, 'mode': 'warn'}

@@ -6,7 +6,7 @@
 
 ## 你能用它做什么
 
-- 扫描 watchlist 中的标的期权链。
+- 扫描 `symbols` 中配置的标的期权链。
 - 按 DTE、行权价、收益门槛、流动性和事件标注筛选候选。
 - 为 Sell Put 检查现金担保能力。
 - 为 Covered Call 检查可覆盖股数。
@@ -72,7 +72,7 @@ flowchart TD
 
 整体流程：
 
-1. 先从配置里的 watchlist 读取需要监控的标的、账户和策略方向，例如 Sell Put、Covered Call，或两者同时开启。
+1. 先从配置里的 `symbols` 读取需要监控的标的、账户和策略方向，例如 Sell Put、Covered Call，或两者同时开启。
 2. 拉取对应标的的行情、期权链、合约乘数、DTE、bid/ask/mid、成交量、未平仓量、IV、Delta 等基础数据。
 3. 结合账户上下文做可行性检查：Sell Put 看现金担保能力，Covered Call 看可覆盖股数。
 4. 对可行合约应用硬性筛选：到期时间、行权价范围、收益门槛、单笔净收入、流动性和价差。
@@ -341,7 +341,7 @@ cat output/reports/symbols_notification.txt
 
 ## 常用工作流
 
-### 单次 watchlist 扫描
+### 单次 symbols 扫描
 
 ```bash
 OPTIONS_MONITOR_CONFIG=config.us.json ./run_watchlist.sh

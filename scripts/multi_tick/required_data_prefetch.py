@@ -15,6 +15,7 @@ from domain.services import (
 )
 from domain.domain.fetch_source import is_futu_fetch_source, resolve_symbol_fetch_source
 from domain.storage.repositories import state_repo
+from scripts.config_loader import resolve_watchlist_config
 from scripts.io_utils import has_shared_required_data
 
 
@@ -70,7 +71,7 @@ def _symbol_class(symbol: str) -> str:
 
 
 def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required: Path) -> dict:
-    syms = [it for it in (cfg.get('symbols') or []) if isinstance(it, dict) and it.get('symbol')]
+    syms = [it for it in resolve_watchlist_config(cfg) if it.get('symbol')]
     symbols = [str(it.get('symbol')).strip() for it in syms if str(it.get('symbol')).strip()]
 
     raw_dir = (shared_required / 'raw').resolve()
