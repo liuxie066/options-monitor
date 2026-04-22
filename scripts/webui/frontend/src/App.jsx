@@ -163,7 +163,7 @@ export default function App(){
   const [status, setStatus] = useState('-');
   const [toasts, setToasts] = useState([]);
   const [selectedMarket, setSelectedMarket] = useState('hk');
-  const [configModule, setConfigModule] = useState('global');
+  const [configModule, setConfigModule] = useState('symbols');
   const [globalForm, setGlobalForm] = useState(()=>emptyGlobalForm());
 
   function pushToast(kind, text, ms=3000){
