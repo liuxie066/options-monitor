@@ -11,7 +11,7 @@ description: |
   - 卖 Put 担保占用与剩余现金查询：统一折算到 CNY
   - 平仓建议：评估 open short put/call 的已锁定收益、剩余 DTE、剩余收益年化，生成买回提醒
   - watchlist 管理：查看/新增/删除/编辑监控标的（symbols[].accounts 可选，不写=两账户都跑）
-  - option_positions 维护：查看/新增/编辑/关闭（short put 自动算 cash_secured_amount，写操作建议先 dry-run）
+  - option_positions 维护：查看/新增/编辑/关闭（SQLite 主存储，Feishu 可选备份；short put 自动算 cash_secured_amount，写操作建议先 dry-run）
 ---
 
 # options-monitor
@@ -44,7 +44,7 @@ cd /home/node/.openclaw/workspace/options-monitor
 ./.venv/bin/python scripts/watchlist.py rm TCOM
 ```
 
-### 4) option_positions 表维护（飞书多维表）
+### 4) option_positions 维护（SQLite 主存储，Feishu 可选备份）
 
 ```bash
 # 查看
@@ -54,6 +54,9 @@ cd /home/node/.openclaw/workspace/options-monitor
 ./.venv/bin/python scripts/option_positions.py add \
   --account lx --symbol 0700.HK --option-type put --side short --contracts 1 \
   --currency HKD --strike 420 --multiplier 100 --exp 2026-04-29 --dry-run
+
+# 查看待补偿的 Feishu 备份记录
+./.venv/bin/python scripts/option_positions.py sync-backup --dry-run
 ```
 
 ### 5) 平仓建议（只生成报告/提醒文本，不下单）
@@ -81,7 +84,8 @@ cd /home/node/.openclaw/workspace/options-monitor
 - 数据缺失时必须明确提示缺失，不允许脑补。
 - 平仓建议必须使用 option_positions 表的 `premium` 或 `note` 中的 `premium_per_share`；不要从历史行情反推开仓权利金。
 - 平仓建议只提醒，不自动下单、不写回 option_positions。
-- 涉及写入飞书（新增/编辑/关闭仓位）建议先 `--dry-run`，确认字段无误再执行。
+- `option_positions` 默认读写 SQLite；如配置了 Feishu，则写入后会尽力同步备份。
+- 涉及写入仓位的操作建议先 `--dry-run`，确认字段无误再执行；如需补偿 Feishu 备份失败记录，使用 `sync-backup`。
 
 ## 常用检查
 
