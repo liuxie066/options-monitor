@@ -12,6 +12,7 @@ if str(repo_base) not in sys.path:
 
 from domain.domain.fetch_source import normalize_fetch_source
 from scripts.config_loader import resolve_templates_config, resolve_watchlist_config, set_watchlist_config
+from scripts.trade_account_mapping import resolve_trade_intake_config
 
 LIQUIDITY_ALLOWED_GLOBAL_FIELDS = (
     'min_open_interest',
@@ -91,6 +92,15 @@ def validate_config(cfg: dict):
                 die('runtime.portfolio_timeout_sec must be > 0')
         except Exception:
             die('runtime.portfolio_timeout_sec must be an integer')
+
+    trade_intake = cfg.get('trade_intake') or {}
+    if trade_intake and not isinstance(trade_intake, dict):
+        die('trade_intake must be an object')
+    if isinstance(trade_intake, dict):
+        try:
+            resolve_trade_intake_config(cfg)
+        except ValueError as exc:
+            die(str(exc))
 
     raw_templates = cfg.get('templates')
     if raw_templates is not None and not isinstance(raw_templates, dict):
