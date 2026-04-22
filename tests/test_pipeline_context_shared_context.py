@@ -251,6 +251,235 @@ def test_shared_slice_matches_legacy_key_fields() -> None:
     assert sliced_option["open_positions_min"] == legacy_option["open_positions_min"]
 
 
+def test_load_portfolio_context_auto_prefers_futu_when_available() -> None:
+    import scripts.pipeline_context as pc
+
+    old_fetch = pc.fetch_futu_portfolio_context
+    old_run_cmd = pc.run_cmd
+    try:
+        pc.fetch_futu_portfolio_context = lambda **_kwargs: {  # type: ignore[assignment]
+            "as_of_utc": "2026-04-14T00:00:00+00:00",
+            "filters": {"market": "富途", "account": "lx"},
+            "cash_by_currency": {"CNY": 120000.0},
+            "stocks_by_symbol": {},
+            "raw_selected_count": 1,
+            "portfolio_source_name": "futu",
+        }
+        pc.run_cmd = lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("holdings fetch should not run"))  # type: ignore[assignment]
+
+        logs: list[str] = []
+        with TemporaryDirectory() as td:
+            root = Path(td).resolve()
+            out = pc.load_portfolio_context(
+                py="python",
+                base=root,
+                pm_config="x.json",
+                market="富途",
+                account="lx",
+                ttl_sec=0,
+                timeout_sec=1,
+                is_scheduled=True,
+                state_dir=(root / "state").resolve(),
+                shared_state_dir=(root / "shared").resolve(),
+                log=logs.append,
+                runtime_config={"portfolio": {"source": "auto", "base_currency": "CNY"}},
+                portfolio_source="auto",
+            )
+        assert out is not None
+        assert out["portfolio_source_name"] == "futu"
+        assert out["context_source"] == "futu_direct"
+        assert any("portfolio_context source=futu_direct account=lx" in x for x in logs)
+    finally:
+        pc.fetch_futu_portfolio_context = old_fetch  # type: ignore[assignment]
+        pc.run_cmd = old_run_cmd  # type: ignore[assignment]
+
+
+def test_load_portfolio_context_auto_skips_fresh_holdings_cache_and_uses_futu() -> None:
+    import scripts.pipeline_context as pc
+
+    old_is_fresh = pc.is_fresh
+    old_load_cached_json = pc.load_cached_json
+    old_fetch = pc.fetch_futu_portfolio_context
+    old_run_cmd = pc.run_cmd
+    try:
+        pc.is_fresh = lambda *_a, **_k: True  # type: ignore[assignment]
+
+        def _load_cached(path: Path):  # type: ignore[no-untyped-def]
+            if path.name == "portfolio_context.json":
+                return {
+                    "as_of_utc": "2026-04-14T00:00:00+00:00",
+                    "filters": {"market": "富途", "account": "lx"},
+                    "cash_by_currency": {"CNY": 88000.0},
+                    "stocks_by_symbol": {},
+                    "raw_selected_count": 1,
+                    "portfolio_source_name": "holdings",
+                }
+            return None
+
+        pc.load_cached_json = _load_cached  # type: ignore[assignment]
+        pc.fetch_futu_portfolio_context = lambda **_kwargs: {  # type: ignore[assignment]
+            "as_of_utc": "2026-04-14T00:01:00+00:00",
+            "filters": {"market": "富途", "account": "lx"},
+            "cash_by_currency": {"CNY": 120000.0},
+            "stocks_by_symbol": {},
+            "raw_selected_count": 1,
+            "portfolio_source_name": "futu",
+        }
+        pc.run_cmd = lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("holdings fetch should not run"))  # type: ignore[assignment]
+
+        logs: list[str] = []
+        with TemporaryDirectory() as td:
+            root = Path(td).resolve()
+            out = pc.load_portfolio_context(
+                py="python",
+                base=root,
+                pm_config="x.json",
+                market="富途",
+                account="lx",
+                ttl_sec=3600,
+                timeout_sec=1,
+                is_scheduled=True,
+                state_dir=(root / "state").resolve(),
+                shared_state_dir=(root / "shared").resolve(),
+                log=logs.append,
+                runtime_config={"portfolio": {"source": "auto", "base_currency": "CNY"}},
+                portfolio_source="auto",
+            )
+        assert out is not None
+        assert out["portfolio_source_name"] == "futu"
+        assert out["context_source"] == "futu_direct"
+        assert any("portfolio_context source=futu_direct account=lx" in x for x in logs)
+    finally:
+        pc.is_fresh = old_is_fresh  # type: ignore[assignment]
+        pc.load_cached_json = old_load_cached_json  # type: ignore[assignment]
+        pc.fetch_futu_portfolio_context = old_fetch  # type: ignore[assignment]
+        pc.run_cmd = old_run_cmd  # type: ignore[assignment]
+
+
+def test_load_portfolio_context_auto_falls_back_to_holdings_when_futu_unavailable() -> None:
+    import scripts.pipeline_context as pc
+
+    old_fetch = pc.fetch_futu_portfolio_context
+    old_run_cmd = pc.run_cmd
+
+    def _arg(cmd: list[str], name: str) -> str | None:
+        try:
+            i = cmd.index(name)
+            return cmd[i + 1]
+        except Exception:
+            return None
+
+    def _fake_run_cmd(cmd: list[str], **_kwargs):  # type: ignore[no-untyped-def]
+        out = _arg(cmd, "--out")
+        shared_out = _arg(cmd, "--shared-out")
+        ctx = {
+            "as_of_utc": "2026-04-14T00:00:00+00:00",
+            "filters": {"market": "富途", "account": "lx"},
+            "cash_by_currency": {"CNY": 88000.0},
+            "stocks_by_symbol": {},
+            "raw_selected_count": 1,
+        }
+        out_path = Path(str(out)).resolve()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(ctx, ensure_ascii=False), encoding="utf-8")
+        if shared_out:
+            shared_ctx = {
+                "as_of_utc": "2026-04-14T00:00:00+00:00",
+                "filters": {"market": "富途"},
+                "all_accounts": dict(ctx),
+                "by_account": {"lx": dict(ctx)},
+            }
+            shared_path = Path(str(shared_out)).resolve()
+            shared_path.parent.mkdir(parents=True, exist_ok=True)
+            shared_path.write_text(json.dumps(shared_ctx, ensure_ascii=False), encoding="utf-8")
+
+    try:
+        pc.fetch_futu_portfolio_context = lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("opend down"))  # type: ignore[assignment]
+        pc.run_cmd = _fake_run_cmd  # type: ignore[assignment]
+
+        logs: list[str] = []
+        with TemporaryDirectory() as td:
+            root = Path(td).resolve()
+            out = pc.load_portfolio_context(
+                py="python",
+                base=root,
+                pm_config="x.json",
+                market="富途",
+                account="lx",
+                ttl_sec=0,
+                timeout_sec=1,
+                is_scheduled=True,
+                state_dir=(root / "state").resolve(),
+                shared_state_dir=(root / "shared").resolve(),
+                log=logs.append,
+                runtime_config={"portfolio": {"source": "auto", "base_currency": "CNY"}},
+                portfolio_source="auto",
+            )
+        assert out is not None
+        assert out["portfolio_source_name"] == "holdings"
+        assert out["context_source"] == "shared_refresh"
+        assert any("fallback to holdings" in x for x in logs)
+    finally:
+        pc.fetch_futu_portfolio_context = old_fetch  # type: ignore[assignment]
+        pc.run_cmd = old_run_cmd  # type: ignore[assignment]
+
+
+def test_load_portfolio_context_auto_reuses_local_holdings_cache_when_futu_and_fetch_fail() -> None:
+    import scripts.pipeline_context as pc
+
+    old_is_fresh = pc.is_fresh
+    old_load_cached_json = pc.load_cached_json
+    old_fetch = pc.fetch_futu_portfolio_context
+    old_run_cmd = pc.run_cmd
+    try:
+        pc.is_fresh = lambda path, ttl_sec: Path(path).name == "portfolio_context.json"  # type: ignore[assignment]
+
+        def _load_cached(path: Path):  # type: ignore[no-untyped-def]
+            if path.name == "portfolio_context.json":
+                return {
+                    "as_of_utc": "2026-04-14T00:00:00+00:00",
+                    "filters": {"market": "富途", "account": "lx"},
+                    "cash_by_currency": {"CNY": 88000.0},
+                    "stocks_by_symbol": {},
+                    "raw_selected_count": 1,
+                    "portfolio_source_name": "holdings",
+                }
+            return None
+
+        pc.load_cached_json = _load_cached  # type: ignore[assignment]
+        pc.fetch_futu_portfolio_context = lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("opend down"))  # type: ignore[assignment]
+        pc.run_cmd = lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("holdings fetch should not run"))  # type: ignore[assignment]
+
+        logs: list[str] = []
+        with TemporaryDirectory() as td:
+            root = Path(td).resolve()
+            out = pc.load_portfolio_context(
+                py="python",
+                base=root,
+                pm_config="x.json",
+                market="富途",
+                account="lx",
+                ttl_sec=3600,
+                timeout_sec=1,
+                is_scheduled=True,
+                state_dir=(root / "state").resolve(),
+                shared_state_dir=(root / "shared").resolve(),
+                log=logs.append,
+                runtime_config={"portfolio": {"source": "auto", "base_currency": "CNY"}},
+                portfolio_source="auto",
+            )
+        assert out is not None
+        assert out["portfolio_source_name"] == "holdings"
+        assert out["context_source"] == "account_cache"
+        assert any("fallback to holdings" in x for x in logs)
+        assert any("portfolio_context source=account_cache account=lx" in x for x in logs)
+    finally:
+        pc.is_fresh = old_is_fresh  # type: ignore[assignment]
+        pc.load_cached_json = old_load_cached_json  # type: ignore[assignment]
+        pc.fetch_futu_portfolio_context = old_fetch  # type: ignore[assignment]
+        pc.run_cmd = old_run_cmd  # type: ignore[assignment]
+
+
 def main() -> None:
     test_shared_context_reuses_fetch_calls_across_accounts()
     test_shared_slice_matches_legacy_key_fields()

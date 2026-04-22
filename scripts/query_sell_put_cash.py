@@ -14,8 +14,9 @@ from scripts.cash_secured_utils import (
     normalize_cash_secured_total_by_ccy,
     read_cash_secured_total_cny,
 )
-from scripts.config_loader import resolve_pm_config_path
+from scripts.config_loader import normalize_config, resolve_pm_config_path
 from scripts.fx_rates import get_rates_or_fetch_latest
+from scripts.futu_portfolio_context import fetch_futu_portfolio_context
 
 
 def run(cmd: list[str], cwd: Path, timeout_sec: int = 60):
@@ -40,29 +41,71 @@ def money(v: float | None, currency: str = "USD") -> str:
     return f"{v:,.2f} {currency.upper()}"
 
 
-def query_sell_put_cash(
+def _normalize_portfolio_source(value: str | None) -> str:
+    raw = str(value or '').strip().lower()
+    if raw in ('', 'auto'):
+        return 'auto'
+    if raw in ('futu', 'opend'):
+        return 'futu'
+    return 'holdings'
+
+
+def _resolve_runtime_config_path(*, base: Path, config: str | Path | None) -> Path | None:
+    if config is None or not str(config).strip():
+        return None
+    path = Path(config)
+    if not path.is_absolute():
+        path = (base / path).resolve()
+    return path
+
+
+def _load_runtime_config(
     *,
-    pm_config: str | Path | None = None,
-    market: str = '富途',
-    account: str | None = None,
-    output_format: str = 'text',
-    top: int = 10,
-    no_fx: bool = False,
-    out_dir: str | Path = 'output/state',
-    base_dir: Path | None = None,
+    base: Path,
+    config: str | Path | None,
+    runtime_config: dict | None,
 ) -> dict:
-    """执行卖 put 现金占用查询并按指定格式输出。"""
-    base = (base_dir or Path(__file__).resolve().parents[1]).resolve()
+    if isinstance(runtime_config, dict):
+        return normalize_config(dict(runtime_config))
 
-    pm_config_path = resolve_pm_config_path(base=base, pm_config=pm_config)
+    cfg_path = _resolve_runtime_config_path(base=base, config=config)
+    if cfg_path is None:
+        return {}
 
-    out_dir_path = Path(out_dir)
-    if not out_dir_path.is_absolute():
-        out_dir_path = (base / out_dir_path).resolve()
-    out_dir_path.mkdir(parents=True, exist_ok=True)
+    cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
+    if not isinstance(cfg, dict):
+        raise SystemExit('[CONFIG_ERROR] runtime config must be a JSON object')
+    return normalize_config(cfg)
 
-    portfolio_out = out_dir_path / 'portfolio_context.json'
-    option_out = out_dir_path / 'option_positions_context.json'
+
+def _fetch_portfolio_context(
+    *,
+    base: Path,
+    pm_config_path: Path,
+    portfolio_out: Path,
+    market: str,
+    account: str | None,
+    runtime_cfg: dict,
+) -> dict:
+    portfolio_cfg = (runtime_cfg.get('portfolio') or {}) if isinstance(runtime_cfg, dict) else {}
+    source_mode = _normalize_portfolio_source(portfolio_cfg.get('source'))
+
+    if source_mode in ('auto', 'futu'):
+        try:
+            ctx = fetch_futu_portfolio_context(
+                cfg=runtime_cfg,
+                account=account,
+                market=market,
+                base_currency=str(portfolio_cfg.get('base_currency') or 'CNY'),
+            )
+            if isinstance(ctx, dict):
+                ctx = dict(ctx)
+                ctx['portfolio_source_name'] = 'futu'
+                portfolio_out.write_text(json.dumps(ctx, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+                return ctx
+        except Exception:
+            if source_mode == 'futu':
+                raise
 
     run(
         [
@@ -79,6 +122,48 @@ def query_sell_put_cash(
         ],
         cwd=base,
         timeout_sec=90,
+    )
+    ctx = load_json(portfolio_out)
+    if isinstance(ctx, dict):
+        ctx = dict(ctx)
+        ctx.setdefault('portfolio_source_name', 'holdings')
+    return ctx
+
+
+def query_sell_put_cash(
+    *,
+    config: str | Path | None = None,
+    pm_config: str | Path | None = None,
+    market: str = '富途',
+    account: str | None = None,
+    output_format: str = 'text',
+    top: int = 10,
+    no_fx: bool = False,
+    out_dir: str | Path = 'output/state',
+    base_dir: Path | None = None,
+    runtime_config: dict | None = None,
+) -> dict:
+    """执行卖 put 现金占用查询并按指定格式输出。"""
+    base = (base_dir or Path(__file__).resolve().parents[1]).resolve()
+
+    runtime_cfg = _load_runtime_config(base=base, config=config, runtime_config=runtime_config)
+    pm_config_path = resolve_pm_config_path(base=base, pm_config=pm_config)
+
+    out_dir_path = Path(out_dir)
+    if not out_dir_path.is_absolute():
+        out_dir_path = (base / out_dir_path).resolve()
+    out_dir_path.mkdir(parents=True, exist_ok=True)
+
+    portfolio_out = out_dir_path / 'portfolio_context.json'
+    option_out = out_dir_path / 'option_positions_context.json'
+
+    portfolio = _fetch_portfolio_context(
+        base=base,
+        pm_config_path=pm_config_path,
+        portfolio_out=portfolio_out,
+        market=market,
+        account=account,
+        runtime_cfg=runtime_cfg,
     )
 
     run(
@@ -98,8 +183,12 @@ def query_sell_put_cash(
         timeout_sec=90,
     )
 
-    portfolio = load_json(portfolio_out)
     opt = load_json(option_out)
+    portfolio_source_name = (
+        str((portfolio or {}).get('portfolio_source_name') or 'holdings').strip().lower() or 'holdings'
+        if isinstance(portfolio, dict)
+        else 'holdings'
+    )
 
     cash_by_ccy = portfolio.get('cash_by_currency') or {}
     cash_avail_usd = cash_by_ccy.get('USD')
@@ -184,6 +273,7 @@ def query_sell_put_cash(
         'as_of_utc': datetime.now(timezone.utc).isoformat(),
         'market': market,
         'account': account,
+        'portfolio_source_name': portfolio_source_name,
         'cash_available_usd': cash_avail_usd,
         'cash_secured_used_usd': cash_secured_total_usd,
         'cash_free_usd': cash_free_usd,
@@ -205,13 +295,14 @@ def query_sell_put_cash(
     lines.append('# Sell Put 担保现金占用 / 剩余现金')
     lines.append(f"as_of_utc: {payload['as_of_utc']}")
     lines.append(f"market: {market} | account: {account or '-'}")
+    lines.append(f"portfolio_source: {portfolio_source_name}")
     lines.append('')
 
-    lines.append(f"- base(CNY) 现金（持仓表）: {money(cash_avail_cny, 'CNY')}")
+    lines.append(f"- base(CNY) 现金（账户口径）: {money(cash_avail_cny, 'CNY')}")
     lines.append(f"- Sell Put 已占用担保现金（折算CNY）: {money(cash_secured_total_cny, 'CNY')}")
     lines.append(f"- 不在担保之内的剩余现金（base free, CNY）: {money(cash_free_cny, 'CNY')}")
 
-    lines.append(f"- 总现金（holdings 全币种折算CNY）: {money(payload.get('cash_available_total_cny'), 'CNY')}")
+    lines.append(f"- 总现金（全币种折算CNY）: {money(payload.get('cash_available_total_cny'), 'CNY')}")
     lines.append(f"- 总剩余现金（total free, 折算CNY）: {money(payload.get('cash_free_total_cny'), 'CNY')}")
 
     if usdcny or hkdcny:
@@ -223,8 +314,8 @@ def query_sell_put_cash(
         lines.append('- 汇率: ' + ', '.join(parts))
 
     lines.append('')
-    lines.append('## USD 视角（仅当 holdings 里记录了 USD 现金才可靠）')
-    lines.append(f"- USD 现金（持仓表）: {money(cash_avail_usd, 'USD')}")
+    lines.append('## USD 视角（仅当账户口径里有 USD 现金时可靠）')
+    lines.append(f"- USD 现金（账户口径）: {money(cash_avail_usd, 'USD')}")
     lines.append(f"- Sell Put 占用（USD 项合计）: {money(cash_secured_total_usd, 'USD')}")
     lines.append(f"- USD free（仅扣 USD 占用）: {money(cash_free_usd, 'USD')}")
 

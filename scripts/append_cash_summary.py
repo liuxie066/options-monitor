@@ -44,6 +44,7 @@ def main():
 
     base = Path(__file__).resolve().parents[1]
     cfg = {}
+    cfg_path: Path | None = None
     if args.config:
         cfg_path = Path(args.config)
         if not cfg_path.is_absolute():
@@ -96,13 +97,16 @@ def main():
 
     rows = []
     for acct in accounts:
-        out = run_capture([
+        cmd = [
             py, 'scripts/cli/query_sell_put_cash_cli.py',
             '--pm-config', str(pm_config),
             '--market', args.market,
             '--account', acct,
             '--format', 'json',
-        ], cwd=base, timeout_sec=180)
+        ]
+        if cfg_path is not None:
+            cmd.extend(['--config', str(cfg_path)])
+        out = run_capture(cmd, cwd=base, timeout_sec=180)
         payload = parse_last_json(out)
         # Show BOTH:
         # - holding-table cash (cash_available_cny)

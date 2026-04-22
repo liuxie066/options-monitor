@@ -1371,6 +1371,7 @@ def main() -> int:
         max_age_sec = int(notif_cfg.get('cash_snapshot_max_age_sec') or 900)
         cash_footer_lines = query_cash_footer(
             base,
+            config_path=str(cfg_path),
             market=cfg_market,
             accounts=accts,
             timeout_sec=timeout_sec,

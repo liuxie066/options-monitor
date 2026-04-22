@@ -29,6 +29,7 @@ def snapshot_fresh(payload: dict, max_age_sec: int) -> bool:
 def query_cash_footer(
     base: Path,
     *,
+    config_path: str | Path | None = None,
     market: str,
     accounts: list[str],
     timeout_sec: int = 180,
@@ -54,15 +55,18 @@ def query_cash_footer(
             pass
 
         try:
+            cmd = [
+                vpy,
+                'scripts/cli/query_sell_put_cash_cli.py',
+                '--market', str(market),
+                '--account', acct_l,
+                '--format', 'json',
+                '--out-dir', str(state_dir),
+            ]
+            if config_path is not None and str(config_path).strip():
+                cmd.extend(['--config', str(config_path)])
             p = subprocess.run(
-                [
-                    vpy,
-                    'scripts/cli/query_sell_put_cash_cli.py',
-                    '--market', str(market),
-                    '--account', acct_l,
-                    '--format', 'json',
-                    '--out-dir', str(state_dir),
-                ],
+                cmd,
                 cwd=str(base),
                 capture_output=True,
                 text=True,
