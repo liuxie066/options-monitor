@@ -15,12 +15,7 @@ import argparse
 import json
 from datetime import datetime, timezone
 
-from scripts.feishu_bitable import (
-    get_tenant_access_token,
-    bitable_list_records,
-    safe_float,
-    parse_note_kv,
-)
+from scripts.feishu_bitable import safe_float, parse_note_kv
 from scripts.config_loader import resolve_pm_config_path
 from scripts.option_positions_core.domain import (
     effective_contracts,
@@ -35,6 +30,7 @@ from scripts.option_positions_core.domain import (
     normalize_status,
 )
 from scripts.io_utils import atomic_write_json
+from scripts.option_positions_core.service import load_option_positions_repo
 
 # Local helper to get FX rates (USDCNY/HKDCNY) for base-currency normalization.
 # This file lives in the same scripts/ directory, so plain import works.
@@ -253,20 +249,8 @@ def main():
     base = Path(__file__).resolve().parents[1]
     pm_config_path = resolve_pm_config_path(base=base, pm_config=args.pm_config)
 
-    cfg = json.loads(pm_config_path.read_text(encoding="utf-8"))
-    feishu_cfg = cfg.get("feishu", {}) or {}
-    app_id = feishu_cfg.get("app_id")
-    app_secret = feishu_cfg.get("app_secret")
-
-    tables = feishu_cfg.get("tables", {}) or {}
-    ref = tables.get("option_positions")
-    if not (app_id and app_secret and ref and "/" in ref):
-        raise SystemExit("pm config missing feishu app_id/app_secret/option_positions")
-
-    app_token, table_id = ref.split("/", 1)
-
-    token = get_tenant_access_token(app_id, app_secret)
-    records = bitable_list_records(token, app_token, table_id)
+    repo = load_option_positions_repo(pm_config_path)
+    records = repo.list_records(page_size=500)
     # Load FX rates for base-currency normalization (CNY).
     # Uses local cache + shared portfolio-management cache when available.
     base = Path(__file__).resolve().parents[1]

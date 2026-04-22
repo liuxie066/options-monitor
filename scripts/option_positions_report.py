@@ -15,7 +15,7 @@ if str(repo_base) not in sys.path:
 from scripts.fx_rates import get_rates_or_fetch_latest
 from scripts.config_loader import resolve_pm_config_path
 from scripts.option_positions_core.reporting import build_monthly_income_report
-from scripts.option_positions_core.service import OptionPositionsRepository, load_table_ref
+from scripts.option_positions_core.service import load_option_positions_repo
 
 
 def money(value: float | int | None, currency: str) -> str:
@@ -136,7 +136,7 @@ def main() -> int:
 
     if args.cmd == "monthly-income":
         broker = args.market or args.broker
-        repo = OptionPositionsRepository(load_table_ref(pm_config))
+        repo = load_option_positions_repo(pm_config)
         records = repo.list_records(page_size=500)
         report = build_monthly_income_report(
             records,
