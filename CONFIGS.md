@@ -54,9 +54,4 @@
 - 禁止把派生配置当作维护入口或长期入口。
 - 禁止提交本地 runtime config 与 runtime secrets（凭证、token、私钥等）。
 
-## Derived Config Gate
-
-- 环境变量：`OM_ALLOW_DERIVED_CONFIG`（读点：`scripts/multi_tick/main.py`）。
-- 默认禁用：未设置/空值 => `allow_derived = false`。
-- `true` / `1` / `on`（及其他 legacy truthy）=> 仍禁用，并标记 `OM_ALLOW_DERIVED_CONFIG_LEGACY_DISABLED`。
-- 仅 `strict` 可临时放开（`allow_derived = true`），并应按迁移提示尽快回到 canonical config。
+当前生产入口已直接强制 canonical runtime config，不再提供 `OM_ALLOW_DERIVED_CONFIG` 这类 derived-config 放行开关。
