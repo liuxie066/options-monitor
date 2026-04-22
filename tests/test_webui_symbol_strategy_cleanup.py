@@ -193,8 +193,51 @@ def test_global_summary_exposes_resolved_and_recommended_runtime_config_paths() 
         webui_server.CONFIG_FILES = old_config_files
 
 
+def test_global_summary_suppresses_canonical_warning_when_webui_config_override_enabled(monkeypatch) -> None:
+    old_base = webui_server.BASE_DIR
+    old_config_files = dict(webui_server.CONFIG_FILES)
+    try:
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            repo = root / "options-monitor-prod"
+            repo.mkdir()
+            canonical_dir = root / "options-monitor-config"
+            canonical_dir.mkdir()
+            custom_dir = root / "runtime-configs"
+            custom_dir.mkdir()
+
+            canonical_cfg = canonical_dir / "config.hk.json"
+            canonical_cfg.write_text('{"symbols": []}', encoding="utf-8")
+            custom_cfg = custom_dir / "config.hk.json"
+            custom_cfg.write_text('{"symbols": []}', encoding="utf-8")
+
+            monkeypatch.setenv("OM_WEBUI_CONFIG_DIR", str(custom_dir))
+            webui_server.BASE_DIR = repo
+            webui_server.CONFIG_FILES = {"hk": custom_cfg, "us": Path("config.us.json")}
+
+            summary = _global_summary("hk")
+            assert Path(summary["resolvedPath"]).resolve() == custom_cfg.resolve()
+            assert summary["recommendedPath"] == str(canonical_cfg.resolve())
+            assert summary["recommendedPathExists"] is True
+            assert summary["canonicalPathWarning"] is False
+    finally:
+        webui_server.BASE_DIR = old_base
+        webui_server.CONFIG_FILES = old_config_files
+
+
 def test_webui_frontend_shows_resolved_path_and_warning_copy() -> None:
     src = Path("scripts/webui/frontend/src/App.jsx").read_text(encoding="utf-8")
     assert "summary.resolvedPath || summary.path" in src
     assert "当前 WebUI 写入路径不是推荐 canonical runtime config" in src
     assert "summary.recommendedPath" in src
+
+
+def test_deploy_safe_uses_env_configured_canonical_runtime_hash_guard() -> None:
+    src = Path("scripts/deploy_safe.sh").read_text(encoding="utf-8")
+    assert 'OM_CANONICAL_CONFIG_US' in src
+    assert 'OM_CANONICAL_CONFIG_HK' in src
+    assert 'runtime config hash guard disabled' in src
+
+    docs = Path("docs/GUARDRAILS.md").read_text(encoding="utf-8")
+    assert 'OM_CANONICAL_CONFIG_US' in docs
+    assert 'OM_CANONICAL_CONFIG_HK' in docs
