@@ -96,3 +96,70 @@ def test_ensure_runtime_canonical_config_rejects_derived_configs() -> None:
         raise AssertionError("expected canonical config guard failure")
     except SystemExit as e:
         assert "runtime config must be canonical" in str(e)
+
+
+def test_ensure_runtime_canonical_config_requires_sibling_external_when_present() -> None:
+    from domain.domain import ensure_runtime_canonical_config
+
+    with TemporaryDirectory() as td:
+        root = Path(td)
+        repo = root / "options-monitor-prod"
+        repo.mkdir()
+        local_cfg = repo / "config.hk.json"
+        local_cfg.write_text("{}", encoding="utf-8")
+
+        canonical_dir = root / "options-monitor-config"
+        canonical_dir.mkdir()
+        canonical_cfg = canonical_dir / "config.hk.json"
+        canonical_cfg.write_text("{}", encoding="utf-8")
+
+        try:
+            ensure_runtime_canonical_config(
+                local_cfg,
+                "hk",
+                repo_base=repo,
+                require_sibling_external=True,
+            )
+            raise AssertionError("expected sibling canonical config guard failure")
+        except SystemExit as e:
+            assert "must use sibling canonical config when present" in str(e)
+            assert str(local_cfg.resolve()) in str(e)
+            assert str(canonical_cfg.resolve()) in str(e)
+
+        out = ensure_runtime_canonical_config(
+            canonical_cfg,
+            "hk",
+            repo_base=repo,
+            require_sibling_external=True,
+        )
+        assert out["is_sibling_canonical"] is True
+
+
+def test_ensure_runtime_canonical_config_allows_repo_local_when_no_sibling_external_exists() -> None:
+    from domain.domain import ensure_runtime_canonical_config
+
+    with TemporaryDirectory() as td:
+        root = Path(td)
+        repo = root / "options-monitor-prod"
+        repo.mkdir()
+        local_cfg = repo / "config.hk.json"
+        local_cfg.write_text("{}", encoding="utf-8")
+
+        out = ensure_runtime_canonical_config(
+            local_cfg,
+            "hk",
+            repo_base=repo,
+            require_sibling_external=True,
+        )
+        assert out["resolved_path"] == str(local_cfg.resolve())
+        assert out["sibling_canonical_exists"] is False
+
+
+def test_production_entrypoints_enable_sibling_external_guard() -> None:
+    send_src = Path("scripts/send_if_needed.py").read_text(encoding="utf-8")
+    multi_src = Path("scripts/multi_tick/main.py").read_text(encoding="utf-8")
+
+    assert "require_sibling_external=True" in send_src
+    assert "ensure_runtime_canonical_config(" in send_src
+    assert "require_sibling_external=True" in multi_src
+    assert "config_source_path" in multi_src

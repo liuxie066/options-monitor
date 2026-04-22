@@ -324,10 +324,16 @@ def main() -> int:
     cfg_path = Path(args.config)
     if not cfg_path.is_absolute():
         cfg_path = (base / cfg_path).resolve()
-    contract_info = resolve_config_contract(cfg_path, str(getattr(args, 'market_config', 'auto') or 'auto'))
+    contract_info = resolve_config_contract(
+        cfg_path,
+        str(getattr(args, 'market_config', 'auto') or 'auto'),
+        repo_base=base,
+    )
     ensure_runtime_canonical_config(
         cfg_path,
         str(getattr(args, 'market_config', 'auto') or 'auto'),
+        repo_base=base,
+        require_sibling_external=True,
     )
     base_cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
     if args.accounts is None:
@@ -354,6 +360,8 @@ def main() -> int:
             'symbols_count': len([x for x in syms0 if isinstance(x, dict)]),
             'source_selections': src_counts,
             'market_config': str(getattr(args, 'market_config', 'auto') or 'auto'),
+            'config_source_path': contract_info.get('resolved_path'),
+            'config_canonical_path': contract_info.get('sibling_canonical_path'),
             'no_send': no_send,
             'smoke': bool(smoke),
             'force': force_mode,
@@ -1023,6 +1031,7 @@ def main() -> int:
             raise SystemExit(str(exc))
 
         cfg = json.loads(json.dumps(base_cfg))
+        cfg['config_source_path'] = str(cfg_path.resolve())
         cfg.setdefault('portfolio', {})
         cfg['portfolio']['account'] = acct
 

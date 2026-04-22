@@ -757,8 +757,23 @@ function GlobalConfigPanel({summary, marketMeta, form, setForm, onSave}){
           <h2 className="PanelTitle">全局策略阈值</h2>
           <p className="PanelText">维护市场级策略模板字段。保存时只更新 put_base / call_base 的收益率、收益和流动性/价差硬过滤参数。</p>
         </div>
-        <div className="ConfigPath"><span>文件</span><code>{summary.path}</code></div>
+        <div className="ConfigPath">
+          <span>文件</span>
+          <code>{summary.resolvedPath || summary.path}</code>
+        </div>
       </div>
+
+      {summary.canonicalPathWarning && (
+        <div className="Box" style={{padding: 14, borderColor: 'rgba(255,107,95,.45)', background: 'rgba(255,107,95,.08)'}}>
+          <div style={{fontWeight: 800, marginBottom: 6}}>当前 WebUI 写入路径不是推荐 canonical runtime config</div>
+          <div style={{color:'var(--muted)', fontSize: 13, lineHeight: 1.6}}>
+            当前写入：<code>{summary.resolvedPath || summary.path}</code>
+          </div>
+          <div style={{color:'var(--muted)', fontSize: 13, lineHeight: 1.6}}>
+            推荐 canonical：<code>{summary.recommendedPath || '-'}</code>
+          </div>
+        </div>
+      )}
 
       <div className="SummaryGrid">
         <div className="SummaryCard"><span>账户</span><strong>{(summary.accounts || []).join(', ') || '-'}</strong></div>

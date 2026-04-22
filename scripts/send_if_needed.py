@@ -32,6 +32,7 @@ from domain.domain import (
     DeliveryPlan,
     SchemaValidationError,
     SnapshotDTO,
+    ensure_runtime_canonical_config,
     markets_for_trading_day_guard as domain_markets_for_trading_day_guard,
     normalize_notify_subprocess_output,
     normalize_pipeline_subprocess_output,
@@ -157,6 +158,13 @@ def main():
     cfg = Path(args.config)
     if not cfg.is_absolute():
         cfg = (base / cfg).resolve()
+    market_hint = "hk" if cfg.name == "config.hk.json" else "us" if cfg.name == "config.us.json" else "auto"
+    ensure_runtime_canonical_config(
+        cfg,
+        market_hint,
+        repo_base=base,
+        require_sibling_external=True,
+    )
 
     cfg_obj = json.loads(cfg.read_text(encoding='utf-8'))
     notify_route = resolve_notification_route_from_config(
@@ -171,6 +179,17 @@ def main():
     if not state_dir.is_absolute():
         state_dir = (base / state_dir).resolve()
     state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "config_source.json").write_text(
+        json.dumps(
+            {
+                "config_source_path": str(cfg.resolve()),
+                "config_name": cfg.name,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ) + "\n",
+        encoding="utf-8",
+    )
 
     state = resolve_scheduler_state_path(
         base_dir=base,
