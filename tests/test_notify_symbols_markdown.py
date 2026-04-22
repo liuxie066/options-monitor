@@ -139,6 +139,32 @@ def test_notify_symbols_markdown_put_chain_uses_upstream_fields_when_available()
     assert "告警未提供iv" not in out
 
 
+def test_notify_symbols_markdown_put_chain_shows_same_symbol_usage_from_summary_fields() -> None:
+    out = _render_via_alert_engine(
+        {
+            "symbol": "3690.HK",
+            "strategy": "sell_put",
+            "candidate_count": 1,
+            "top_contract": "2026-05-28 75P",
+            "annualized_return": 0.128,
+            "net_income": 468.0,
+            "dte": 36,
+            "strike": 75.0,
+            "risk_label": "保守",
+            "delta": -0.16,
+            "iv": 0.4138,
+            "cash_required_cny": 32715.0,
+            "cash_secured_used_cny_total": 200000.0,
+            "cash_secured_used_cny_symbol": 45000.0,
+            "mid": 0.965,
+            "option_ccy": "HKD",
+        }
+    )
+
+    assert "保证金占用=¥32,715 (CNY)" in out
+    assert "同标的Sell Put占用=¥45,000" in out
+
+
 def test_notify_symbols_markdown_put_falls_back_to_usd_margin_when_cny_margin_missing() -> None:
     out = _render_via_alert_engine(
         {

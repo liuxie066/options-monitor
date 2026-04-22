@@ -31,6 +31,10 @@ def summarize_sell_put(df: pd.DataFrame, symbol: str, *, symbol_cfg: dict | None
         'delta': None,
         'iv': None,
         'cash_secured_used_usd': 0.0,
+        'cash_secured_used_usd_symbol': None,
+        'cash_secured_used_cny': None,
+        'cash_secured_used_cny_total': None,
+        'cash_secured_used_cny_symbol': None,
         'cash_required_usd': None,
         'cash_available_usd': None,
         'cash_free_usd': None,
@@ -60,6 +64,10 @@ def summarize_sell_put(df: pd.DataFrame, symbol: str, *, symbol_cfg: dict | None
     top = pd.Series(ranked[0])
 
     cash_secured_used = 0.0
+    cash_secured_used_symbol = None
+    cash_secured_used_cny = None
+    cash_secured_used_cny_total = None
+    cash_secured_used_cny_symbol = None
     cash_avail = None
     cash_free = None
     cash_avail_est = None
@@ -70,6 +78,14 @@ def summarize_sell_put(df: pd.DataFrame, symbol: str, *, symbol_cfg: dict | None
     try:
         if 'cash_secured_used_usd' in df.columns and len(df) > 0:
             cash_secured_used = float(df['cash_secured_used_usd'].iloc[0] or 0.0)
+        if 'cash_secured_used_usd_symbol' in df.columns and len(df) > 0 and pd.notna(df['cash_secured_used_usd_symbol'].iloc[0]):
+            cash_secured_used_symbol = float(df['cash_secured_used_usd_symbol'].iloc[0])
+        if 'cash_secured_used_cny' in df.columns and len(df) > 0 and pd.notna(df['cash_secured_used_cny'].iloc[0]):
+            cash_secured_used_cny = float(df['cash_secured_used_cny'].iloc[0])
+        if 'cash_secured_used_cny_total' in df.columns and len(df) > 0 and pd.notna(df['cash_secured_used_cny_total'].iloc[0]):
+            cash_secured_used_cny_total = float(df['cash_secured_used_cny_total'].iloc[0])
+        if 'cash_secured_used_cny_symbol' in df.columns and len(df) > 0 and pd.notna(df['cash_secured_used_cny_symbol'].iloc[0]):
+            cash_secured_used_cny_symbol = float(df['cash_secured_used_cny_symbol'].iloc[0])
         if 'cash_available_usd' in df.columns and len(df) > 0 and pd.notna(df['cash_available_usd'].iloc[0]):
             cash_avail = float(df['cash_available_usd'].iloc[0])
         if 'cash_free_usd' in df.columns and len(df) > 0 and pd.notna(df['cash_free_usd'].iloc[0]):
@@ -86,6 +102,10 @@ def summarize_sell_put(df: pd.DataFrame, symbol: str, *, symbol_cfg: dict | None
             cash_required_cny = float(df['cash_required_cny'].iloc[0])
     except Exception:
         cash_secured_used = 0.0
+        cash_secured_used_symbol = None
+        cash_secured_used_cny = None
+        cash_secured_used_cny_total = None
+        cash_secured_used_cny_symbol = None
         cash_avail = None
         cash_free = None
         cash_avail_est = None
@@ -108,6 +128,10 @@ def summarize_sell_put(df: pd.DataFrame, symbol: str, *, symbol_cfg: dict | None
         'delta': (float(top['delta']) if 'delta' in top and pd.notna(top['delta']) else None),
         'iv': (float(top['implied_volatility']) if 'implied_volatility' in top and pd.notna(top['implied_volatility']) else None),
         'cash_secured_used_usd': cash_secured_used,
+        'cash_secured_used_usd_symbol': cash_secured_used_symbol,
+        'cash_secured_used_cny': cash_secured_used_cny,
+        'cash_secured_used_cny_total': cash_secured_used_cny_total,
+        'cash_secured_used_cny_symbol': cash_secured_used_cny_symbol,
         'cash_required_usd': cash_required,
         'cash_available_usd': cash_avail,
         'cash_free_usd': cash_free,
