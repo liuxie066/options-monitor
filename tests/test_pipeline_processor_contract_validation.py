@@ -28,11 +28,11 @@ def test_watchlist_pipeline_validates_processor_rows_before_aggregation() -> Non
         return None
 
     cfg = {
-        "watchlist": [
+        "symbols": [
             {"symbol": "AAPL", "sell_put": {"enabled": True}, "sell_call": {"enabled": True}},
             {"symbol": "MSFT", "sell_put": {"enabled": True}, "sell_call": {"enabled": True}},
         ],
-        "profiles": {},
+        "templates": {},
         "runtime": {},
     }
 
@@ -87,11 +87,11 @@ def test_watchlist_pipeline_rejects_non_list_processor_rows_contract() -> None:
         return None
 
     cfg = {
-        "watchlist": [
+        "symbols": [
             {"symbol": "AAPL", "sell_put": {"enabled": True}, "sell_call": {"enabled": True}},
             {"symbol": "MSFT", "sell_put": {"enabled": True}, "sell_call": {"enabled": True}},
         ],
-        "profiles": {},
+        "templates": {},
         "runtime": {},
     }
 

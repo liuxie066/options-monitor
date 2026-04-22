@@ -59,15 +59,13 @@ def test_private_compat_exports_emit_deprecation_warning_and_keep_behavior() -> 
         assert any('scripts.multi_tick.opend_guard.should_send_opend_alert' in msg for msg in warning_messages)
 
 
-def test_om_allow_derived_config_gate_is_env_controlled_in_multi_tick_main() -> None:
+def test_multi_tick_main_enforces_canonical_runtime_config_without_derived_gate() -> None:
     src = Path("scripts/multi_tick/main.py").read_text(encoding="utf-8")
-    assert "OM_ALLOW_DERIVED_CONFIG" in src
-    assert "allow_derived=allow_derived_config" in src
-    assert "resolve_allow_derived_config_gate(" in src
-    assert "OM_ALLOW_DERIVED_CONFIG_LEGACY_DISABLED" in Path(
-        "domain/domain/config_contract.py"
-    ).read_text(encoding="utf-8")
-    assert "OM_ALLOW_DERIVED_CONFIG_ENABLED" in src
+    assert "OM_ALLOW_DERIVED_CONFIG" not in src
+    assert "resolve_allow_derived_config_gate(" not in src
+    assert "allow_derived=" not in src
+    contract_src = Path("domain/domain/config_contract.py").read_text(encoding="utf-8")
+    assert "resolve_allow_derived_config_gate" not in contract_src
 
 
 def test_multi_tick_main_current_run_id_accessor_is_public_compat() -> None:
@@ -90,17 +88,11 @@ def test_multi_entrypoint_uses_public_run_id_accessor() -> None:
     assert "run_id=_current_run_id()" in src
 
 
-def test_resolve_allow_derived_config_gate_defaults_to_disabled_and_has_migration_hint() -> None:
-    from domain.domain import resolve_allow_derived_config_gate
+def test_ensure_runtime_canonical_config_rejects_derived_configs() -> None:
+    from domain.domain import ensure_runtime_canonical_config
 
-    out_default = resolve_allow_derived_config_gate("")
-    assert out_default["allow_derived"] is False
-    assert out_default["error_code"] is None
-    assert "OM_ALLOW_DERIVED_CONFIG=strict" in str(out_default["migration_hint"])
-
-    out_legacy = resolve_allow_derived_config_gate("true")
-    assert out_legacy["allow_derived"] is False
-    assert out_legacy["error_code"] == "OM_ALLOW_DERIVED_CONFIG_LEGACY_DISABLED"
-
-    out_strict = resolve_allow_derived_config_gate("strict")
-    assert out_strict["allow_derived"] is True
+    try:
+        ensure_runtime_canonical_config("config.market_us.json", "us")
+        raise AssertionError("expected canonical config guard failure")
+    except SystemExit as e:
+        assert "runtime config must be canonical" in str(e)

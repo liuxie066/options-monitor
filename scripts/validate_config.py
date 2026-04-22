@@ -11,6 +11,7 @@ if str(repo_base) not in sys.path:
     sys.path.insert(0, str(repo_base))
 
 from domain.domain.fetch_source import normalize_fetch_source
+from scripts.config_loader import resolve_templates_config, resolve_watchlist_config, set_watchlist_config
 
 LIQUIDITY_ALLOWED_GLOBAL_FIELDS = (
     'min_open_interest',
@@ -38,6 +39,11 @@ def warn(msg: str):
 
 
 def validate_config(cfg: dict):
+    if 'watchlist' in cfg:
+        die('watchlist is no longer supported; use symbols')
+    if 'profiles' in cfg:
+        die('profiles is no longer supported; use templates')
+
     # intake config (optional)
     intake = cfg.get('intake') or {}
     if intake and not isinstance(intake, dict):
@@ -63,15 +69,11 @@ def validate_config(cfg: dict):
                 except Exception:
                     die(f'intake.{key} must be a number')
 
-    syms = cfg.get('symbols')
-    if syms is None:
-        syms = cfg.get('watchlist')
-    if not isinstance(syms, list) or not syms:
-        die('symbols[] (or watchlist[]) is required and cannot be empty')
+    syms = resolve_watchlist_config(cfg)
+    if not syms:
+        die('symbols[] is required and cannot be empty')
 
-    # Backward-compat: normalize for downstream validation loops
-    if cfg.get('symbols') is None and isinstance(syms, list):
-        cfg['symbols'] = syms
+    set_watchlist_config(cfg, syms)
 
     runtime = cfg.get('runtime') or {}
     if runtime and not isinstance(runtime, dict):
@@ -90,16 +92,10 @@ def validate_config(cfg: dict):
         except Exception:
             die('runtime.portfolio_timeout_sec must be an integer')
 
-    templates = cfg.get('templates')
-    if templates is None:
-        templates = cfg.get('profiles')
-    templates = templates or {}
-    if templates and not isinstance(templates, dict):
-        die('templates (or profiles) must be an object')
-
-    # Backward-compat: keep templates key populated for older code paths
-    if cfg.get('templates') is None and isinstance(templates, dict):
-        cfg['templates'] = templates
+    raw_templates = cfg.get('templates')
+    if raw_templates is not None and not isinstance(raw_templates, dict):
+        die('templates must be an object')
+    templates = resolve_templates_config(cfg)
 
 # Strict config contract: global liquidity filters only support 3 hard fields.
     if isinstance(templates, dict):

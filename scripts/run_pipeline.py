@@ -7,7 +7,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from scripts.config_loader import load_config, resolve_pm_config_path
+from scripts.config_loader import load_config, resolve_pm_config_path, resolve_watchlist_config
 
 repo_base = Path(__file__).resolve().parents[1]
 if str(repo_base) not in sys.path:
@@ -52,7 +52,7 @@ def main():
     global RUNTIME_MODE, IS_SCHEDULED
 
     parser = argparse.ArgumentParser(description='Run options-monitor pipeline')
-    parser.add_argument('--config', required=True, help='Path to JSON config (single-symbol or watchlist). YAML is legacy.')
+    parser.add_argument('--config', required=True, help='Path to JSON config with symbols[]. YAML is legacy.')
     parser.add_argument('--mode', default='dev', choices=['dev', 'scheduled'], help='Runtime mode: dev (verbose) vs scheduled (fast)')
     parser.add_argument('--symbols', default=None, help='Comma-separated symbol whitelist; only process these symbols')
     parser.add_argument('--stage', default='all', choices=['fetch','scan','alert','notify','all'], help='Pipeline stage: fetch|scan|alert|notify|all (dev speed; runs up to this stage)')
@@ -128,8 +128,10 @@ def main():
             from domain.domain.fetch_source import is_futu_fetch_source
             cache_path = multiplier_cache.default_cache_path(base)
             cfg0 = json.loads(cfg_path.read_text(encoding='utf-8'))
-            syms = cfg0.get('watchlist') or cfg0.get('symbols') or []
-            syms = [it for it in syms if isinstance(it, dict) and is_futu_fetch_source((it.get('fetch') or {}).get('source'))]
+            syms = [
+                it for it in resolve_watchlist_config(cfg0)
+                if is_futu_fetch_source((it.get('fetch') or {}).get('source'))
+            ]
             cache = multiplier_cache.load_cache(cache_path)
             for it in syms:
                 sym = str(it.get('symbol') or '').strip().upper()
@@ -154,7 +156,7 @@ def main():
 
     py = sys.executable
 
-    if 'watchlist' in cfg:
+    if 'symbols' in cfg:
         # Optional symbols whitelist (comma-separated)
         sym_whitelist = None
         if args.symbols:

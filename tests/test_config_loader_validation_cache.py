@@ -64,3 +64,24 @@ def test_default_pm_config_path_falls_back_to_legacy_location_when_missing() -> 
         out = default_pm_config_path(base=base)
 
     assert out == (base / "../portfolio-management/config.json").resolve()
+
+
+def test_resolve_watchlist_and_templates_config_require_canonical_keys() -> None:
+    from scripts.config_loader import resolve_templates_config, resolve_watchlist_config
+
+    cfg = {
+        "symbols": [{"symbol": "0700.HK"}, {"symbol": "3690.HK"}],
+        "templates": {"put_base": {"sell_put": {"min_net_income": 100}}},
+    }
+
+    assert [it["symbol"] for it in resolve_watchlist_config(cfg)] == ["0700.HK", "3690.HK"]
+    assert resolve_templates_config(cfg) == {"put_base": {"sell_put": {"min_net_income": 100}}}
+
+
+def test_set_watchlist_config_updates_symbols_only() -> None:
+    from scripts.config_loader import set_watchlist_config
+
+    cfg = {}
+    out = set_watchlist_config(cfg, [{"symbol": "0700.HK"}])
+
+    assert out["symbols"] == [{"symbol": "0700.HK"}]

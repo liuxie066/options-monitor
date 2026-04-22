@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import subprocess
 from hashlib import sha256
 from time import monotonic, sleep
@@ -22,6 +21,7 @@ from scripts.io_utils import (
     bj_now,
 )
 from scripts.account_config import accounts_from_config, cash_footer_accounts_from_config
+from scripts.config_loader import resolve_watchlist_config, set_watchlist_config
 from domain.domain.fetch_source import is_futu_fetch_source, resolve_symbol_fetch_source
 
 from .cash_footer import query_cash_footer
@@ -71,7 +71,6 @@ from domain.domain import (
     normalize_pipeline_subprocess_output,
     normalize_subprocess_adapter_payload,
     resolve_config_contract,
-    resolve_allow_derived_config_gate,
     markets_for_trading_day_guard as domain_markets_for_trading_day_guard,
     reduce_trading_day_guard,
     resolve_notification_route_from_config,
@@ -325,40 +324,10 @@ def main() -> int:
     cfg_path = Path(args.config)
     if not cfg_path.is_absolute():
         cfg_path = (base / cfg_path).resolve()
-    allow_derived_gate = resolve_allow_derived_config_gate(
-        os.environ.get('OM_ALLOW_DERIVED_CONFIG', ''),
-    )
-    allow_derived_config = bool(allow_derived_gate.get('allow_derived'))
-    allow_derived_error_code = str(allow_derived_gate.get('error_code') or '').strip()
-    allow_derived_message = str(allow_derived_gate.get('message') or '').strip()
-    allow_derived_migration_hint = str(allow_derived_gate.get('migration_hint') or '').strip()
-    allow_derived_raw = str(allow_derived_gate.get('raw') or '').strip()
-    if allow_derived_error_code:
-        runlog.safe_event(
-            'config_guard',
-            'warn',
-            error_code=allow_derived_error_code,
-            message=allow_derived_message,
-            data=_safe_runlog_data(
-                {
-                    'raw': allow_derived_raw,
-                    'migration_hint': allow_derived_migration_hint,
-                }
-            ),
-        )
     contract_info = resolve_config_contract(cfg_path, str(getattr(args, 'market_config', 'auto') or 'auto'))
-    if allow_derived_config and (not contract_info.get('is_canonical', False) or not contract_info.get('market_match', False)):
-        runlog.safe_event(
-            'config_guard',
-            'warn',
-            error_code='OM_ALLOW_DERIVED_CONFIG_ENABLED',
-            message='OM_ALLOW_DERIVED_CONFIG enabled for non-canonical or market-mismatch runtime config.',
-            data=_safe_runlog_data(contract_info),
-        )
     ensure_runtime_canonical_config(
         cfg_path,
         str(getattr(args, 'market_config', 'auto') or 'auto'),
-        allow_derived=allow_derived_config,
     )
     base_cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
     if args.accounts is None:
@@ -370,7 +339,7 @@ def main() -> int:
     else:
         args.default_account = str(args.default_account).strip().lower()
 
-    syms0 = base_cfg.get('symbols') or []
+    syms0 = resolve_watchlist_config(base_cfg)
     src_counts: dict[str, int] = {}
     for it in syms0:
         if not isinstance(it, dict):
@@ -518,8 +487,11 @@ def main() -> int:
     if market_cfg in ('hk', 'us'):
         try:
             base_cfg = dict(base_cfg)
-            syms = base_cfg.get('symbols') or []
-            base_cfg['symbols'] = [it for it in syms if isinstance(it, dict) and (it.get('market') == market_cfg.upper())]
+            syms = resolve_watchlist_config(base_cfg)
+            set_watchlist_config(
+                base_cfg,
+                [it for it in syms if isinstance(it, dict) and (it.get('market') == market_cfg.upper())],
+            )
         except Exception:
             pass
 
@@ -550,7 +522,7 @@ def main() -> int:
         need_opend = False
         ports = set()
         has_hk_opend = False
-        for sym in (base_cfg.get('symbols') or []):
+        for sym in resolve_watchlist_config(base_cfg):
             fetch = (sym or {}).get('fetch') or {}
             if is_futu_fetch_source(fetch.get('source')):
                 need_opend = True
@@ -620,7 +592,7 @@ def main() -> int:
                 port = unhealthy.get('port')
 
                 degraded = apply_opend_degrade_to_yahoo(
-                    symbols=(base_cfg.get('symbols') or []),
+                    symbols=resolve_watchlist_config(base_cfg),
                     allow_downgrade=allow_downgrade,
                     has_hk_opend=has_hk_opend,
                     watchdog_timed_out=watchdog_timed_out,
@@ -1055,10 +1027,10 @@ def main() -> int:
         cfg['portfolio']['account'] = acct
 
         try:
-            syms = cfg.get('symbols') or []
+            syms = resolve_watchlist_config(cfg)
             if markets_to_run:
                 syms = [it for it in syms if isinstance(it, dict) and (it.get('market') in markets_to_run)]
-            cfg['symbols'] = syms
+            set_watchlist_config(cfg, syms)
         except Exception:
             pass
         cfg_override = state_repo.write_account_state_json_text(
@@ -1125,7 +1097,7 @@ def main() -> int:
 
         scan_gate = decide_account_scan_gate(
             should_run=should_run,
-            has_symbols=((not markets_to_run) or bool(cfg.get('symbols') or [])),
+            has_symbols=((not markets_to_run) or bool(resolve_watchlist_config(cfg))),
             reason=reason,
         )
         if not bool(scan_gate.get('run_pipeline')):
@@ -1146,7 +1118,7 @@ def main() -> int:
             continue
 
         if (not prefetch_done):
-            runlog.safe_event('fetch_chain_cache', 'start', data=_safe_runlog_data({'account': acct, 'symbols_count': len(cfg.get('symbols') or [])}))
+            runlog.safe_event('fetch_chain_cache', 'start', data=_safe_runlog_data({'account': acct, 'symbols_count': len(resolve_watchlist_config(cfg))}))
             prefetch_stats = prefetch_required_data(vpy=vpy, base=base, cfg=cfg, shared_required=shared_required)
             _audit(
                 'tool_call',

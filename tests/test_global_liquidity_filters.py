@@ -16,11 +16,11 @@ def test_validate_config_rejects_symbol_level_strategy_filter_keys() -> None:
     from scripts.validate_config import validate_config
 
     cfg = {
-        'profiles': {
+        'templates': {
             'put_base': {'sell_put': {'min_open_interest': 60, 'min_volume': 10, 'max_spread_ratio': 0.3}},
             'call_base': {'sell_call': {'min_open_interest': 50, 'min_volume': 10, 'max_spread_ratio': 0.3}},
         },
-        'watchlist': [
+        'symbols': [
             {
                 'symbol': 'AAPL',
                 'use': ['put_base'],
@@ -46,8 +46,8 @@ def test_validate_config_rejects_symbol_level_strategy_filter_keys() -> None:
         assert 'AAPL.sell_put' in msg
         assert 'min_iv' in msg
 
-    cfg['watchlist'][0]['sell_put'].pop('min_iv')
-    cfg['watchlist'][0]['sell_call'] = {
+    cfg['symbols'][0]['sell_put'].pop('min_iv')
+    cfg['symbols'][0]['sell_call'] = {
         'enabled': True,
         'min_dte': 7,
         'max_dte': 45,
@@ -79,7 +79,7 @@ def test_validate_config_rejects_removed_global_strategy_filter_keys() -> None:
                 }
             }
         },
-        'watchlist': [
+        'symbols': [
             {
                 'symbol': 'AAPL',
                 'use': ['put_base'],

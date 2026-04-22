@@ -1,8 +1,7 @@
-"""Config loader (JSON/YAML legacy) + normalization + validation gating.
+"""Config loader (JSON/YAML legacy) + validation gating.
 
 Why:
 - Keep run_pipeline orchestration-only (Stage 3).
-- Centralize config aliasing (symbols->watchlist, templates->profiles).
 - Centralize scheduled-mode validation caching (hash-based) to avoid repeated cost.
 
 Design:
@@ -52,16 +51,27 @@ def resolve_pm_config_path(*, base: Path, pm_config: str | Path | None) -> Path:
         return path
     return default_pm_config_path(base=base)
 
+def resolve_templates_config(cfg: dict | None) -> dict:
+    data = cfg if isinstance(cfg, dict) else {}
+    templates = data.get('templates')
+    if isinstance(templates, dict):
+        return templates
+    return {}
 
-def normalize_config(cfg: dict) -> dict:
-    # naming aliases:
-    # - templates == profiles (legacy internal name)
-    # - symbols == watchlist (legacy internal name)
-    if 'templates' in cfg and 'profiles' not in cfg:
-        cfg['profiles'] = cfg.get('templates')
-    if 'symbols' in cfg and 'watchlist' not in cfg:
-        cfg['watchlist'] = cfg.get('symbols')
-    return cfg
+
+def resolve_watchlist_config(cfg: dict | None) -> list[dict]:
+    data = cfg if isinstance(cfg, dict) else {}
+    symbols = data.get('symbols')
+    if isinstance(symbols, list):
+        return [it for it in symbols if isinstance(it, dict)]
+    return []
+
+
+def set_watchlist_config(cfg: dict | None, items: list[dict]) -> dict:
+    data = cfg if isinstance(cfg, dict) else {}
+    normalized = [it for it in (items or []) if isinstance(it, dict)]
+    data['symbols'] = normalized
+    return data
 
 
 def _should_validate_scheduled(*, cfg: dict, state_dir: Path) -> bool:
@@ -112,8 +122,6 @@ def load_config(
 
     if not isinstance(cfg, dict):
         raise SystemExit('[CONFIG_ERROR] config must be a JSON/YAML object')
-
-    cfg = normalize_config(cfg)
 
     try:
         if validate_config_fn is None:

@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 
 from domain.domain.fetch_source import is_futu_fetch_source
+from scripts.config_loader import resolve_watchlist_config
 
 
 DEFAULT_OPEND_HOST = '127.0.0.1'
@@ -158,7 +159,7 @@ def _resolve_opend_endpoint_for_market(cfg_obj: dict, market: str) -> tuple[str,
     mkt = str(market or '').upper().strip()
 
     try:
-        for sym in (cfg_obj.get('symbols') or []):
+        for sym in resolve_watchlist_config(cfg_obj):
             if not isinstance(sym, dict):
                 continue
             if str(sym.get('market') or '').upper() != mkt:
