@@ -17,6 +17,16 @@
     "lx",
     "sy"
   ],
+  "trade_intake": {
+    "enabled": false,
+    "mode": "dry-run",
+    "account_mapping": {
+      "futu": {
+        "REAL_12345678": "lx",
+        "REAL_87654321": "sy"
+      }
+    }
+  },
   "intake": {
     "symbol_aliases": {
       "中海油": "0883.HK",

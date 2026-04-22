@@ -395,6 +395,29 @@ OPTIONS_MONITOR_CONFIG=config.hk.json ./run_watchlist.sh
 ./.venv/bin/python scripts/option_intake.py --market 富途 --text "<成交消息>" --apply
 ```
 
+自动交易入账本地回放样例：
+
+```bash
+python3 scripts/auto_trade_intake.py \
+  --config config.us.json \
+  --mode dry-run \
+  --deal-json configs/examples/auto_trade_intake.open.example.json
+```
+
+平仓样例：
+
+```bash
+python3 scripts/auto_trade_intake.py \
+  --config config.us.json \
+  --mode dry-run \
+  --deal-json configs/examples/auto_trade_intake.close.example.json
+```
+
+说明：
+
+- `auto_trade_intake.open.example.json` 可直接 dry-run 预览，不依赖飞书凭证。
+- `auto_trade_intake.close.example.json` 在没有对应 open 仓位时会返回 `close_match_not_found` 或仓位不足，这是预期行为；要验证平仓 patch，需要 `option_positions` 中已有匹配仓位。
+
 ## CLI 常用命令
 
 ### Sell Put 扫描

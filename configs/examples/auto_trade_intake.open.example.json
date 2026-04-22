@@ -1,0 +1,15 @@
+{
+  "deal_id": "example-open-0700hk-20260429-480p-1",
+  "order_id": "example-order-open-1",
+  "trd_acc_id": "REAL_12345678",
+  "code": "0700.HK",
+  "option_type": "PUT",
+  "side": "SELL",
+  "position_effect": "OPEN",
+  "qty": 2,
+  "price": 3.93,
+  "strike": 480,
+  "expiration": "20260429",
+  "currency": "HKD",
+  "create_time": "2026-04-09 13:10:25"
+}

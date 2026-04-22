@@ -254,10 +254,17 @@ def parse_underlying_name(s: str) -> str | None:
     return None
 
 
-def _infer_multiplier_if_missing(*, symbol: str | None, multiplier: int | None, repo_base: Path) -> int | None:
-    """在缺少乘数时，按 本地缓存 -> OpenD -> 内置常见标的 兜底推断。"""
-    if multiplier is not None or not symbol:
-        return multiplier
+def infer_multiplier_with_source(
+    *,
+    symbol: str | None,
+    multiplier: int | None,
+    repo_base: Path,
+) -> tuple[int | None, str | None]:
+    """在缺少乘数时，按 本地缓存 -> OpenD -> 内置常见标的 兜底推断，并返回来源。"""
+    if multiplier is not None:
+        return multiplier, "payload"
+    if not symbol:
+        return multiplier, None
 
     # Intake messages often lack multiplier. Prefer explicit local/OpenD data,
     # then use a small conservative built-in fallback for common HK/US underliers.
@@ -272,7 +279,13 @@ def _infer_multiplier_if_missing(*, symbol: str | None, multiplier: int | None, 
         cache = multiplier_cache.load_cache(cache_path)
         cached = multiplier_cache.get_cached_multiplier(cache, symbol)
         if cached:
-            return int(cached)
+            source = None
+            for sym in multiplier_cache._symbol_aliases(symbol):
+                item = cache.get(sym)
+                if isinstance(item, dict) and int(item.get("multiplier") or 0) == int(cached):
+                    source = str(item.get("source") or "cache")
+                    break
+            return int(cached), source or "cache"
 
         r = multiplier_cache.refresh_via_opend(
             repo_base=repo_base,
@@ -293,14 +306,29 @@ def _infer_multiplier_if_missing(*, symbol: str | None, multiplier: int | None, 
                 multiplier_cache.save_cache(cache_path, cache)
             except Exception:
                 pass
-            return multiplier
+            return multiplier, "opend"
 
         builtin = multiplier_cache.get_builtin_multiplier(symbol)
         if builtin:
-            return int(builtin)
+            source = None
+            for sym in multiplier_cache._symbol_aliases(symbol):
+                item = multiplier_cache.BUILTIN_MULTIPLIERS.get(sym)
+                if isinstance(item, dict) and int(item.get("multiplier") or 0) == int(builtin):
+                    source = str(item.get("source") or "builtin")
+                    break
+            if source is None and str(symbol or "").strip().upper().endswith(".HK"):
+                source = "builtin.hk.common"
+            if source is None:
+                source = "builtin.us.default"
+            return int(builtin), source
     except Exception:
         pass
-    return multiplier
+    return multiplier, None
+
+
+def _infer_multiplier_if_missing(*, symbol: str | None, multiplier: int | None, repo_base: Path) -> int | None:
+    value, _source = infer_multiplier_with_source(symbol=symbol, multiplier=multiplier, repo_base=repo_base)
+    return value
 
 
 def parse_option_message_text(text: str, *, accounts: list[str] | tuple[str, ...] | None = None) -> dict:
@@ -341,7 +369,7 @@ def parse_option_message_text(text: str, *, accounts: list[str] | tuple[str, ...
         market = infer_market(raw2)
 
     base = Path(__file__).resolve().parents[1]
-    multiplier = _infer_multiplier_if_missing(symbol=symbol, multiplier=multiplier, repo_base=base)
+    multiplier, multiplier_source = infer_multiplier_with_source(symbol=symbol, multiplier=multiplier, repo_base=base)
 
     ok = all([symbol, exp, opt_type, side, strike is not None, multiplier, contracts, account, currency])
 
@@ -356,6 +384,7 @@ def parse_option_message_text(text: str, *, accounts: list[str] | tuple[str, ...
             'side': side,
             'strike': strike,
             'multiplier': multiplier,
+            'multiplier_source': multiplier_source,
             'premium_per_share': premium,
             'contracts': contracts,
             'account': account,
