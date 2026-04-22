@@ -71,6 +71,34 @@ def test_candidate_engine_put_summary_uses_simple_rank() -> None:
     assert summary["top_contract"] == "2026-06-18 140P"
 
 
+def test_candidate_engine_put_summary_keeps_same_symbol_usage_fields() -> None:
+    from scripts.report_summaries import summarize_sell_put
+
+    rows = [
+        {
+            "symbol": "3690.HK",
+            "contract_symbol": "P_TOP",
+            "expiration": "2026-05-28",
+            "strike": 75.0,
+            "dte": 36,
+            "mid": 0.965,
+            "net_income": 468.0,
+            "annualized_net_return_on_cash_basis": 0.128,
+            "delta": -0.16,
+            "implied_volatility": 0.4138,
+            "cash_secured_used_usd": 0.0,
+            "cash_secured_used_cny_total": 200000.0,
+            "cash_secured_used_cny_symbol": 45000.0,
+            "cash_required_cny": 32715.0,
+        },
+    ]
+
+    summary = summarize_sell_put(pd.DataFrame(rows), "3690.HK")
+
+    assert summary["cash_secured_used_cny_total"] == 200000.0
+    assert summary["cash_secured_used_cny_symbol"] == 45000.0
+
+
 def test_candidate_engine_call_summary_uses_simple_rank() -> None:
     from domain.domain.engine import rank_candidate_rows
     from scripts.report_summaries import summarize_sell_call
