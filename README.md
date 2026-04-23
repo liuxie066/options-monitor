@@ -112,10 +112,22 @@ cp configs/examples/portfolio.feishu.example.json secrets/portfolio.feishu.json
 ```json
 {
   "portfolio": {
-    "pm_config": "secrets/portfolio.feishu.json"
+    "pm_config": "secrets/portfolio.feishu.json",
+    "source": "auto",
+    "source_by_account": {
+      "lx": "futu",
+      "sy": "holdings"
+    }
   }
 }
 ```
+
+`portfolio.source` 支持 `auto` / `futu` / `holdings`。
+如果不同账户要走不同来源，可以用 `portfolio.source_by_account` 做覆盖，回退顺序是：
+
+1. `source_by_account[account]`
+2. `source`
+3. `auto`
 
 ### 4) 校验配置
 
@@ -199,6 +211,8 @@ cat output/reports/symbols_notification.txt
 
 - 仍然从 Feishu `holdings` 表读取
 - 用于现金、股票持仓、成本价、covered call 可覆盖股数等上下文
+- 当 `portfolio.source=holdings`，或 `portfolio.source_by_account[账户]=holdings` 时，账户上下文会强制走 holdings
+- 当 `portfolio.source=auto` 时，会优先尝试 futu 账户上下文，失败后回退到 holdings
 
 ### option_positions
 
