@@ -126,6 +126,9 @@
 - `pm_config`: 推荐指向仓外 `/opt/options-monitor/secrets/portfolio.feishu.json`（仅 Feishu/Bitable 凭证配置，不是 OM 运行入口）
 - `market`: 用来过滤两张表（例如 `富途`）
 - `account`: 用来过滤两张表（例如 `lx`）
+- `source`: `auto` / `futu` / `holdings`，作为全局默认 portfolio 来源
+- `source_by_account`: 可选，按账户覆盖 `source`，例如 `{ "lx": "futu", "sy": "holdings" }`
+  - 回退顺序：`source_by_account[account] -> source -> auto`
 - `base_currency`: 当前策略口径（CNY）
 
 ### 4.4 notifications：推送目标
