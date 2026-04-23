@@ -85,30 +85,32 @@ def test_fetch_futu_portfolio_context_filters_rows_by_mapped_account_ids() -> No
     import scripts.futu_portfolio_context as fc
 
     class _FakeGateway:
-        balance_calls: list[str] = []
-        position_calls: list[str] = []
+        balance_calls: list[int] = []
+        position_calls: list[int] = []
 
         def get_account_balance(self, **kwargs):
-            acc_id = str(kwargs.get("acc_id") or "")
+            acc_id = kwargs.get("acc_id")
+            assert isinstance(acc_id, int)
             self.balance_calls.append(acc_id)
-            if acc_id == "281756479859383816":
+            if acc_id == 281756479859383816:
                 return [
                     {"currency": "CNY", "cash": 100000, "fund_assets": 20000},
                 ]
-            if acc_id == "281756455994464030":
+            if acc_id == 281756455994464030:
                 return [
                     {"currency": "CNY", "cash": 999999},
                 ]
             return []
 
         def get_positions(self, **kwargs):
-            acc_id = str(kwargs.get("acc_id") or "")
+            acc_id = kwargs.get("acc_id")
+            assert isinstance(acc_id, int)
             self.position_calls.append(acc_id)
-            if acc_id == "281756479859383816":
+            if acc_id == 281756479859383816:
                 return [
                     {"code": "US.NVDA", "qty": 100, "cost_price": 120, "currency": "USD"},
                 ]
-            if acc_id == "281756455994464030":
+            if acc_id == 281756455994464030:
                 return [
                     {"code": "US.AAPL", "qty": 100, "cost_price": 180, "currency": "USD"},
                 ]
@@ -142,5 +144,43 @@ def test_fetch_futu_portfolio_context_filters_rows_by_mapped_account_ids() -> No
 
     assert out["cash_by_currency"] == {"CNY": 120000.0}
     assert sorted(out["stocks_by_symbol"].keys()) == ["NVDA"]
-    assert fake_gateway.balance_calls == ["281756479859383816"]
-    assert fake_gateway.position_calls == ["281756479859383816"]
+    assert fake_gateway.balance_calls == [281756479859383816]
+    assert fake_gateway.position_calls == [281756479859383816]
+
+
+def test_fetch_futu_portfolio_context_rejects_non_numeric_mapped_account_id() -> None:
+    import pytest
+
+    import scripts.futu_portfolio_context as fc
+
+    class _FakeGateway:
+        def get_account_balance(self, **kwargs):
+            return []
+
+        def get_positions(self, **kwargs):
+            return []
+
+        def close(self):
+            return None
+
+    old_build_gateway = fc.build_futu_gateway
+    try:
+        fc.build_futu_gateway = lambda **_kwargs: _FakeGateway()  # type: ignore[assignment]
+        with pytest.raises(ValueError, match="mapped account_id=not-a-number"):
+            fc.fetch_futu_portfolio_context(
+                cfg={
+                    "portfolio": {"futu": {"host": "127.0.0.1", "port": 11111}},
+                    "trade_intake": {
+                        "account_mapping": {
+                            "futu": {
+                                "not-a-number": "lx",
+                            }
+                        }
+                    },
+                },
+                account="lx",
+                market="富途",
+                base_currency="CNY",
+            )
+    finally:
+        fc.build_futu_gateway = old_build_gateway  # type: ignore[assignment]

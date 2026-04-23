@@ -53,6 +53,24 @@ def _to_int(value: Any) -> int | None:
         return None
 
 
+def _to_futu_acc_id(value: Any) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"invalid futu account_id={value!r}")
+    if isinstance(value, int):
+        return value
+
+    raw = str(value or "").strip()
+    if not raw:
+        raise ValueError(f"invalid futu account_id={value!r}")
+    if raw.startswith("-"):
+        digits = raw[1:]
+    else:
+        digits = raw
+    if not digits.isdigit():
+        raise ValueError(f"invalid futu account_id={value!r}")
+    return int(raw)
+
+
 def _normalize_currency(value: Any, *, fallback: str = "CNY") -> str:
     raw = str(value or "").strip().upper()
     if raw in ("", "RMB", "CNH"):
@@ -194,7 +212,7 @@ def _filter_rows_for_account_ids(rows: list[dict[str, Any]], account_ids: set[st
 def _query_rows_for_account_id(gateway: Any, method_name: str, account_id: str) -> list[dict[str, Any]]:
     method = getattr(gateway, method_name)
     try:
-        return _rows(method(acc_id=account_id))
+        return _rows(method(acc_id=_to_futu_acc_id(account_id)))
     except Exception as exc:
         raise ValueError(
             f"{method_name} failed for mapped account_id={account_id} via acc_id selector"
