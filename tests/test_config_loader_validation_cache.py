@@ -63,7 +63,20 @@ def test_default_pm_config_path_falls_back_to_legacy_location_when_missing() -> 
         base = Path(td)
         out = default_pm_config_path(base=base)
 
-    assert out == (base / "../portfolio-management/config.json").resolve()
+    assert out == (base / "secrets" / "portfolio.feishu.json").resolve()
+
+
+def test_resolve_pm_config_path_prefers_env_override(monkeypatch) -> None:
+    from scripts.config_loader import resolve_pm_config_path
+
+    with TemporaryDirectory() as td:
+        base = Path(td)
+        env_path = base / "external" / "portfolio.feishu.json"
+        monkeypatch.setenv("OM_PM_CONFIG", str(env_path))
+
+        out = resolve_pm_config_path(base=base, pm_config=None)
+
+    assert out == env_path.resolve()
 
 
 def test_resolve_watchlist_and_templates_config_require_canonical_keys() -> None:

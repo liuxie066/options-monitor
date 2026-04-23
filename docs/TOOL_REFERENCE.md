@@ -1,5 +1,21 @@
 # Tool Reference
 
+## Support Matrix
+
+| Tool | Default Availability | Needs `portfolio.pm_config` / `OM_PM_CONFIG` | Needs OpenD | Writes |
+| --- | --- | --- | --- | --- |
+| `healthcheck` | yes | optional | no | no |
+| `scan_opportunities` | yes | optional | only for Futu-backed symbols | no |
+| `query_cash_headroom` | yes | optional | only for Futu-backed portfolio/cash sources | no |
+| `get_portfolio_context` | partial | yes for holdings-backed context | optional for Futu-backed context | no |
+| `manage_symbols` | yes | no | no | dry-run by default |
+| `preview_notification` | yes | no | no | no |
+
+Notes:
+- Public first-run expectation is local install plus a runtime config. Feishu/holdings-backed features need an extra portfolio secret config.
+- US spot and FX fallback are built in via Yahoo best-effort providers. Legacy external fallback is optional and must be configured explicitly.
+- Futu-backed scans and cash queries require your local OpenD / gateway environment to be ready.
+
 ## `healthcheck`
 
 Purpose:

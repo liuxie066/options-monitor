@@ -53,6 +53,7 @@ Recommended environment:
 
 - set `OM_CONFIG_DIR` or explicit config path env vars
 - set `OM_PM_CONFIG` if secrets live outside the repo
+- set `OM_PM_ROOT` or `OM_PM_RATE_CACHE` only if you intentionally want legacy external fallback after the built-in Yahoo providers
 - keep `OM_AGENT_ENABLE_WRITE_TOOLS` unset unless you explicitly want config writes
 
 OpenClaw integration in this public repo is local-tool oriented. Private cron/deploy workflows are not part

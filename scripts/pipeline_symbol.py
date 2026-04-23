@@ -14,6 +14,7 @@ from pathlib import Path
 from scripts.fx_loader import build_converter
 from scripts.prefilters import apply_prefilters
 from scripts.multiplier_steps import apply_multiplier_cache_to_required_data_csv
+from scripts.pm_bridge import resolve_spot_fallback_enabled
 from scripts.required_data_steps import ensure_required_data
 from scripts.sell_call_steps import empty_sell_call_summary, run_sell_call_scan_and_summarize
 from scripts.sell_put_steps import empty_sell_put_summary, run_sell_put_scan_and_summarize
@@ -126,7 +127,7 @@ def process_symbol(
         fetch_source=str(fetch_cfg.get('source') or 'opend'),
         fetch_host=str(fetch_cfg.get('host') or '127.0.0.1'),
         fetch_port=int(fetch_cfg.get('port') or 11111),
-        spot_from_pm=(fetch_cfg.get('spot_from_portfolio_management', None)),
+        spot_from_yahoo=resolve_spot_fallback_enabled(fetch_cfg, symbol=symbol),
         max_strike=(float(sp.get('max_strike')) if (want_put and sp.get('max_strike') is not None) else None),
         min_dte=min_dte,
         max_dte=max_dte,
