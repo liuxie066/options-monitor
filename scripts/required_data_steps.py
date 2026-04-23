@@ -10,6 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from domain.domain.fetch_source import normalize_fetch_source
+from scripts.pm_bridge import resolve_spot_fallback_enabled
 from scripts import pipeline_fetch_models
 from scripts.subprocess_utils import run_cmd
 
@@ -29,7 +30,7 @@ def ensure_required_data(
     fetch_source: str = 'opend',
     fetch_host: str = '127.0.0.1',
     fetch_port: int = 11111,
-    spot_from_pm: bool | None = None,
+    spot_from_yahoo: bool | None = None,
     max_strike: float | None = None,
     min_dte: int | None = None,
     max_dte: int | None = None,
@@ -100,12 +101,12 @@ def ensure_required_data(
         if max_dte is not None:
             cmd.extend(['--max-dte', str(int(max_dte))])
 
-        # US spot policy: OpenD often lacks US quote right; default to PM spot fetch unless explicitly disabled.
-        if spot_from_pm is None:
-            u = str(symbol).strip().upper()
-            spot_from_pm = (not u.endswith('.HK'))
-        if bool(spot_from_pm):
-            cmd.append('--spot-from-pm')
+        # US spot policy: OpenD often lacks US quote right; default to built-in Yahoo
+        # fallback unless explicitly disabled. Legacy key remains accepted upstream.
+        if spot_from_yahoo is None:
+            spot_from_yahoo = resolve_spot_fallback_enabled({}, symbol=symbol)
+        if bool(spot_from_yahoo):
+            cmd.append('--spot-from-yahoo')
         if (max_strike is not None) and want_put:
             cmd.extend(['--max-strike', str(max_strike)])
         # Cache option_chain daily to reduce OpenD calls (US/HK share the same OpenD limit).

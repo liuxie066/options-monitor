@@ -252,7 +252,7 @@ def main():
     repo = load_option_positions_repo(pm_config_path)
     records = repo.list_records(page_size=500)
     # Load FX rates for base-currency normalization (CNY).
-    # Uses local cache + shared portfolio-management cache when available.
+    # Uses local cache plus optional shared cache / provider fallback when available.
     base = Path(__file__).resolve().parents[1]
     # Resolve output path/state_dir
     if args.out:
@@ -272,7 +272,6 @@ def main():
 
     rates = get_rates_or_fetch_latest(
         cache_path=(state_dir / 'rate_cache.json').resolve(),
-        shared_cache_path=(Path(__file__).resolve().parents[2] / 'portfolio-management' / '.data' / 'rate_cache.json'),
         max_age_hours=24,
     )
     broker = normalize_broker(args.broker)

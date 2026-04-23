@@ -187,7 +187,8 @@ cat output/reports/symbols_notification.txt
 
 1. `secrets/portfolio.feishu.json`
 2. `/opt/options-monitor/secrets/portfolio.feishu.json`
-3. `../portfolio-management/config.json`
+
+如需继续复用旧的 `../portfolio-management/config.json`，请显式设置 `portfolio.pm_config` 或 `OM_PM_CONFIG`。
 
 多账户列表统一写在运行配置顶层 `accounts`，例如：
 

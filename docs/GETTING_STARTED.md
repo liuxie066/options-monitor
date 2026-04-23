@@ -53,5 +53,7 @@ relative to the runtime config file.
 - `OM_CONFIG_US`: explicit US config path
 - `OM_CONFIG_HK`: explicit HK config path
 - `OM_PM_CONFIG`: explicit portfolio secret config path
+- `OM_PM_ROOT`: optional legacy external repo root for spot / FX fallback after built-in Yahoo providers
+- `OM_PM_RATE_CACHE`: optional legacy external FX cache path override after built-in Yahoo FX
 - `OM_OUTPUT_DIR`: override plugin output/cache directory
 - `OM_AGENT_ENABLE_WRITE_TOOLS=true`: allow non-dry-run `manage_symbols` writes

@@ -17,6 +17,7 @@ from domain.domain.fetch_source import is_futu_fetch_source, resolve_symbol_fetc
 from domain.storage.repositories import state_repo
 from scripts.config_loader import resolve_watchlist_config
 from scripts.io_utils import has_shared_required_data
+from scripts.pm_bridge import resolve_spot_fallback_enabled
 
 
 def _to_int(v: Any, default: int) -> int:
@@ -132,9 +133,9 @@ def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required:
             ]
             try:
                 u = str(symbol).strip().upper()
-                spot_from_pm = (not u.endswith('.HK')) if (fetch_cfg.get('spot_from_portfolio_management') is None) else bool(fetch_cfg.get('spot_from_portfolio_management'))
-                if spot_from_pm:
-                    cmd.append('--spot-from-pm')
+                spot_from_yahoo = resolve_spot_fallback_enabled(fetch_cfg, symbol=symbol)
+                if spot_from_yahoo:
+                    cmd.append('--spot-from-yahoo')
             except Exception:
                 pass
         else:

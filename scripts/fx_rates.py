@@ -16,6 +16,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 import importlib
 import json
+import os
 import sys
 from typing import Callable
 
@@ -92,7 +93,7 @@ def get_rates(
     We currently ignore max_age_hours (the callers already treat FX as best-effort).
     Resolution preference:
       1) local cache_path
-      2) shared_cache_path (portfolio-management)
+      2) shared_cache_path
     """
     def _read(p: Path) -> dict | None:
         try:
@@ -111,16 +112,25 @@ def get_rates(
     return None
 
 
-def _default_pm_rate_cache_path() -> Path:
-    base_dir = Path(__file__).resolve().parents[2]
-    return (base_dir / "portfolio-management" / ".data" / "rate_cache.json").resolve()
+def _default_pm_rate_cache_path() -> Path | None:
+    raw_cache = str(os.environ.get("OM_PM_RATE_CACHE") or "").strip()
+    if raw_cache:
+        return Path(raw_cache).expanduser().resolve()
+
+    raw_root = str(os.environ.get("OM_PM_ROOT") or "").strip()
+    if raw_root:
+        return (Path(raw_root).expanduser().resolve() / ".data" / "rate_cache.json").resolve()
+
+    return None
 
 
 def _cache_candidates(*, cache_path: Path, shared_cache_path: Path | None = None) -> list[Path]:
     candidates = [Path(cache_path).resolve()]
     if shared_cache_path is not None:
         candidates.append(Path(shared_cache_path).resolve())
-    candidates.append(_default_pm_rate_cache_path())
+    pm_cache_path = _default_pm_rate_cache_path()
+    if pm_cache_path is not None:
+        candidates.append(pm_cache_path)
 
     out: list[Path] = []
     seen: set[str] = set()
@@ -153,9 +163,52 @@ def _save_rates(path: Path, rates: dict[str, float], *, log: Callable[[str], Non
         _warn(log, f"[WARN] fx cache write failed: path={path} error={exc}")
 
 
-def _fetch_latest_rates_from_portfolio_management(*, log: Callable[[str], None] | None = None) -> dict | None:
+def _fetch_latest_rates_from_yahoo(*, log: Callable[[str], None] | None = None) -> dict | None:
     try:
-        pm_root = _default_pm_rate_cache_path().parents[1]
+        import yfinance as yf
+
+        from scripts.fetch_market_data import get_spot_price
+
+        def _read_pair(candidates: list[str], label: str) -> float | None:
+            last_error: Exception | None = None
+            for ticker in candidates:
+                try:
+                    value = float(get_spot_price(yf.Ticker(ticker)))
+                    if value > 0:
+                        return value
+                except Exception as exc:
+                    last_error = exc
+            if last_error is not None:
+                _warn(log, f"[WARN] yahoo fx fetch failed: pair={label} error={last_error}")
+            return None
+
+        usdcny = _read_pair(["USDCNY=X", "CNY=X"], "USDCNY")
+        hkdcny = _read_pair(["HKDCNY=X"], "HKDCNY")
+        if usdcny is None or hkdcny is None:
+            return None
+        return {
+            "rates": {
+                "USDCNY": usdcny,
+                "HKDCNY": hkdcny,
+            },
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as exc:
+        _warn(log, f"[WARN] yahoo fx provider unavailable: error={exc}")
+        return None
+
+
+def _fetch_latest_rates_with_fallback(*, log: Callable[[str], None] | None = None) -> dict | None:
+    yahoo_rates = _fetch_latest_rates_from_yahoo(log=log)
+    if yahoo_rates is not None:
+        return yahoo_rates
+
+    try:
+        pm_cache_path = _default_pm_rate_cache_path()
+        if pm_cache_path is None:
+            _warn(log, "[WARN] legacy fx fallback disabled: set OM_PM_ROOT or OM_PM_RATE_CACHE to enable")
+            return None
+        pm_root = pm_cache_path.parents[1]
         src_root = (pm_root / "src").resolve()
         if not src_root.exists():
             _warn(log, f"[WARN] fx external ref missing: portfolio-management src not found at {src_root}")
@@ -192,6 +245,10 @@ def _fetch_latest_rates_from_portfolio_management(*, log: Callable[[str], None] 
         return None
 
 
+def _fetch_latest_rates_from_portfolio_management(*, log: Callable[[str], None] | None = None) -> dict | None:
+    return _fetch_latest_rates_with_fallback(log=log)
+
+
 def get_rates_or_fetch_latest(
     *,
     cache_path: Path,
@@ -214,7 +271,7 @@ def get_rates_or_fetch_latest(
         + ", ".join(str(path) for path in _cache_candidates(cache_path=cache_path, shared_cache_path=shared_cache_path))
         + "; trying latest fetch",
     )
-    latest = _fetch_latest_rates_from_portfolio_management(log=log)
+    latest = _fetch_latest_rates_with_fallback(log=log)
     if latest is None:
         _warn(log, "[WARN] fx latest fetch unavailable: no cache and external fallback failed")
         return None
@@ -285,7 +342,7 @@ def get_usd_per_cny(base_dir: Path) -> float | None:
     It will try multiple cache locations:
       1) <base_dir>/output/state/rate_cache.json (legacy)
       2) <base_dir>/output_shared/state/rate_cache.json (shared)
-      3) <base_dir>/../portfolio-management/.data/rate_cache.json (shared)
+      3) external cache only when OM_PM_RATE_CACHE or OM_PM_ROOT is set
     """
     try:
         base_dir = Path(base_dir).resolve()

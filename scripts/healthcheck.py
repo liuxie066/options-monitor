@@ -28,6 +28,7 @@ from scripts.feishu_bitable import (
     bitable_fields,
 )
 from scripts.account_config import accounts_from_config
+from scripts.config_loader import resolve_pm_config_path
 
 
 def now_utc():
@@ -68,11 +69,7 @@ def main():
     # 2) feishu schema
     try:
         pm_ref = (opt_cfg.get('portfolio') or {}).get('pm_config')
-        if not pm_ref:
-            raise RuntimeError('portfolio.pm_config missing')
-        pm_path = Path(pm_ref)
-        if not pm_path.is_absolute():
-            pm_path = (base / pm_path).resolve()
+        pm_path = resolve_pm_config_path(base=base, pm_config=pm_ref)
         pm = json.loads(pm_path.read_text(encoding='utf-8'))
 
         fcfg = pm.get('feishu') or {}
@@ -80,7 +77,7 @@ def main():
         app_secret = fcfg.get('app_secret')
         tables = (fcfg.get('tables') or {})
         if not (app_id and app_secret and tables.get('holdings') and tables.get('option_positions')):
-            raise RuntimeError('portfolio-management config missing feishu app creds or tables')
+            raise RuntimeError('portfolio secret config missing feishu app creds or tables')
 
         token = get_tenant_access_token(app_id, app_secret)
 

@@ -9,7 +9,7 @@
 
 ## 1) 本项目需要哪些外部“表”（Bitable）？
 
-目前本项目通过 `portfolio.pm_config` 指向的本地凭证文件读取飞书 Bitable。新部署推荐使用仓外 `/opt/options-monitor/secrets/portfolio.feishu.json`；旧部署仍兼容 `../portfolio-management/config.json`：
+目前本项目通过 `portfolio.pm_config` 指向的本地凭证文件读取飞书 Bitable。新部署推荐使用仓外 `/opt/options-monitor/secrets/portfolio.feishu.json`；如需继续使用旧的 `../portfolio-management/config.json`，请显式配置该路径：
 - `holdings`：现金与股票持仓（用于 base 现金、shares、avg_cost）
 - `option_positions`：已卖出期权占用（用于：
   - covered call 锁股数 `locked_shares_by_symbol`
@@ -163,7 +163,7 @@
 
 ### 兼容方式（旧部署）
 - 如果你已经维护 `../portfolio-management/config.json`，仍可把 `portfolio.pm_config` 指向该文件。
-- 当前若部分脚本未从运行配置读取 `pm_config`，其 CLI 默认值仍保留 `../portfolio-management/config.json` 以兼容旧环境。
+- 或设置环境变量 `OM_PM_CONFIG=../portfolio-management/config.json`。
 
 示例：
 

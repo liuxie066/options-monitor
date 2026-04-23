@@ -30,7 +30,7 @@ def test_get_rates_or_fetch_latest_fetches_and_writes_when_cache_missing(tmp_pat
 
     monkeypatch.setattr(
         fx_rates,
-        "_fetch_latest_rates_from_portfolio_management",
+        "_fetch_latest_rates_with_fallback",
         lambda log=None: {"rates": {"USDCNY": 7.3, "HKDCNY": 0.93}, "timestamp": "2026-04-21T00:00:00+00:00"},
     )
 
@@ -55,7 +55,7 @@ def test_get_rates_or_fetch_latest_reads_pm_shared_cache_when_local_cache_missin
     monkeypatch.setattr(fx_rates, "_default_pm_rate_cache_path", lambda: pm_cache_path)
     monkeypatch.setattr(
         fx_rates,
-        "_fetch_latest_rates_from_portfolio_management",
+        "_fetch_latest_rates_with_fallback",
         lambda log=None: (_ for _ in ()).throw(AssertionError("should not fetch when pm cache exists")),
     )
 
@@ -74,8 +74,9 @@ def test_get_rates_or_fetch_latest_logs_when_external_repo_missing(tmp_path: Pat
         "_default_pm_rate_cache_path",
         lambda: tmp_path / "portfolio-management" / ".data" / "rate_cache.json",
     )
+    monkeypatch.setattr(fx_rates, "_fetch_latest_rates_from_yahoo", lambda log=None: None)
 
-    monkeypatch.setattr(fx_rates, "_fetch_latest_rates_from_portfolio_management", lambda log=None: None)
+    monkeypatch.setattr(fx_rates, "_fetch_latest_rates_with_fallback", lambda log=None: None)
 
     out = fx_rates.get_rates_or_fetch_latest(cache_path=cache_path, log=messages.append)
 
@@ -84,25 +85,73 @@ def test_get_rates_or_fetch_latest_logs_when_external_repo_missing(tmp_path: Pat
     assert any("fx latest fetch unavailable" in msg for msg in messages)
 
 
-def test_fetch_latest_rates_from_portfolio_management_logs_interface_change(monkeypatch) -> None:
+def test_get_rates_or_fetch_latest_does_not_probe_external_repo_without_explicit_config(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from scripts import fx_rates
+
+    cache_path = tmp_path / "state" / "rate_cache.json"
+    messages: list[str] = []
+    monkeypatch.delenv("OM_PM_ROOT", raising=False)
+    monkeypatch.delenv("OM_PM_RATE_CACHE", raising=False)
+    monkeypatch.setattr(fx_rates, "_fetch_latest_rates_from_yahoo", lambda log=None: None)
+
+    out = fx_rates.get_rates_or_fetch_latest(cache_path=cache_path, log=messages.append)
+
+    assert out is None
+    assert any("legacy fx fallback disabled" in msg for msg in messages)
+
+
+def test_fetch_latest_rates_with_fallback_prefers_yahoo_provider(monkeypatch) -> None:
+    from scripts import fx_rates
+
+    monkeypatch.setattr(
+        fx_rates,
+        "_fetch_latest_rates_from_yahoo",
+        lambda log=None: {"rates": {"USDCNY": 7.22, "HKDCNY": 0.91}, "timestamp": "2026-04-21T00:00:00+00:00"},
+    )
+    monkeypatch.setattr(
+        fx_rates,
+        "_default_pm_rate_cache_path",
+        lambda: (_ for _ in ()).throw(AssertionError("legacy path should not be probed when yahoo succeeds")),
+    )
+
+    out = fx_rates._fetch_latest_rates_with_fallback()
+
+    assert out == {"rates": {"USDCNY": 7.22, "HKDCNY": 0.91}, "timestamp": "2026-04-21T00:00:00+00:00"}
+
+
+def test_fetch_latest_rates_with_fallback_logs_interface_change(monkeypatch) -> None:
     from scripts import fx_rates
 
     messages: list[str] = []
 
+    monkeypatch.setattr(fx_rates, "_fetch_latest_rates_from_yahoo", lambda log=None: None)
+    monkeypatch.setattr(
+        fx_rates,
+        "_default_pm_rate_cache_path",
+        lambda: Path("/tmp/portfolio-management/.data/rate_cache.json"),
+    )
     monkeypatch.setattr(fx_rates.Path, "exists", lambda self: True)
     monkeypatch.setattr("importlib.import_module", lambda _name: type("FxModule", (), {"NotPriceFetcher": object})())
 
-    out = fx_rates._fetch_latest_rates_from_portfolio_management(log=messages.append)
+    out = fx_rates._fetch_latest_rates_with_fallback(log=messages.append)
 
     assert out is None
     assert any("PriceFetcher missing" in msg for msg in messages)
 
 
-def test_fetch_latest_rates_from_portfolio_management_imports_package_module(monkeypatch) -> None:
+def test_fetch_latest_rates_with_fallback_imports_package_module(monkeypatch) -> None:
     from scripts import fx_rates
 
     seen: list[str] = []
 
+    monkeypatch.setattr(fx_rates, "_fetch_latest_rates_from_yahoo", lambda log=None: None)
+    monkeypatch.setattr(
+        fx_rates,
+        "_default_pm_rate_cache_path",
+        lambda: Path("/tmp/portfolio-management/.data/rate_cache.json"),
+    )
     monkeypatch.setattr(fx_rates.Path, "exists", lambda self: True)
 
     class _Fetcher:
@@ -120,7 +169,7 @@ def test_fetch_latest_rates_from_portfolio_management_imports_package_module(mon
 
     monkeypatch.setattr("importlib.import_module", _import_module)
 
-    out = fx_rates._fetch_latest_rates_from_portfolio_management()
+    out = fx_rates._fetch_latest_rates_with_fallback()
 
     assert seen == ["src.price_fetcher"]
     assert out is not None
