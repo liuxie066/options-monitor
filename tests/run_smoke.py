@@ -7,6 +7,8 @@ Usage:
 
 from __future__ import annotations
 
+import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -46,9 +48,25 @@ def test_cash_cap_is_best_effort() -> None:
     assert (out is None) or (float(out) >= 0.0)
 
 
+def test_agent_launcher_spec_contract() -> None:
+    base = _ensure_repo_on_path()
+    vpy = (base / ".venv" / "bin" / "python").resolve()
+    p = subprocess.run(
+        [str(vpy), "scripts/cli/om_agent_cli.py", "spec"],
+        cwd=str(base),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    payload = json.loads(p.stdout)
+    assert payload["schema_version"] == "1.0"
+    assert any(str(x.get("name")) == "manage_symbols" for x in payload.get("tools", []))
+
+
 def main() -> None:
     test_scanners_require_multiplier()
     test_cash_cap_is_best_effort()
+    test_agent_launcher_spec_contract()
     print('OK (smoke)')
 
 
