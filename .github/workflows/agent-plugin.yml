@@ -1,0 +1,35 @@
+name: Agent Plugin
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  agent-plugin:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m venv .venv
+          ./.venv/bin/pip install --upgrade pip
+          ./.venv/bin/pip install -r requirements.txt
+          ./.venv/bin/pip install pytest
+
+      - name: Launcher spec smoke
+        run: |
+          chmod +x ./om-agent
+          ./om-agent spec
+
+      - name: Agent plugin tests
+        run: |
+          ./.venv/bin/python -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py

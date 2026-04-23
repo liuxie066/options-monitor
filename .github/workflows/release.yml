@@ -1,0 +1,51 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m venv .venv
+          ./.venv/bin/pip install --upgrade pip
+          ./.venv/bin/pip install -r requirements.txt
+          ./.venv/bin/pip install pytest
+
+      - name: Validate release metadata
+        run: |
+          chmod +x ./om-agent
+          ./.venv/bin/python scripts/release_check.py --tag "${GITHUB_REF_NAME}" --render-notes-out /tmp/release-notes.md
+          ./om-agent spec > /tmp/om-agent-spec.json
+
+      - name: Smoke and plugin tests
+        run: |
+          ./.venv/bin/python tests/run_smoke.py
+          ./.venv/bin/python -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py
+
+      - name: Build source archive
+        run: |
+          git archive --format=tar.gz --output options-monitor-${GITHUB_REF_NAME}.tar.gz HEAD
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: /tmp/release-notes.md
+          files: |
+            options-monitor-${{ github.ref_name }}.tar.gz
+            /tmp/om-agent-spec.json
+            VERSION

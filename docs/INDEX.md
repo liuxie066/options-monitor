@@ -5,7 +5,12 @@ This repo is meant to run as a repeatable monitoring pipeline.
 ## Public doc boundary
 
 - Remote-repo entrypoints: `README.md`, `CONFIGS.md`, `RUNBOOK.md`
-- Release/deploy workflow: executed only in local private ops repo (not documented here)
+- Public plugin release workflow: `.github/workflows/release.yml`
+- Private deploy workflow: still executed only in local/private ops environments
+- Public local agent plugin quick start: `docs/GETTING_STARTED.md`
+- Agent integration contract: `docs/AGENT_INTEGRATION.md`
+- Public tool reference: `docs/TOOL_REFERENCE.md`
+- Public release checklist: `docs/RELEASE_PROCESS.md`
 
 ## Core entrypoints
 

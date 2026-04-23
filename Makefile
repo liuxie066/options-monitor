@@ -27,3 +27,15 @@ test-all:
 
 smoke:
 	$(PYTHON) tests/run_smoke.py
+
+agent-spec:
+	chmod +x ./om-agent
+	./om-agent spec
+
+agent-smoke:
+	chmod +x ./om-agent
+	$(PYTHON) -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py
+
+release-check:
+	chmod +x ./om-agent
+	$(PYTHON) scripts/release_check.py

@@ -82,6 +82,14 @@ python3 -m venv .venv
 ./.venv/bin/pip install -r requirements.txt
 ```
 
+如果你是要把它作为本地 Agent 工具来用，直接跑：
+
+```bash
+bash scripts/install_agent_plugin.sh
+./om-agent spec
+./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'
+```
+
 ### 2) 准备 runtime config
 
 线上推荐放仓外：
@@ -190,6 +198,31 @@ cat output/reports/symbols_notification.txt
 ```
 
 更多配置规则见 [CONFIGS.md](CONFIGS.md) 和 [CONFIGURATION_GUIDE.md](CONFIGURATION_GUIDE.md)。
+
+## 本地 Agent 工具入口
+
+公开本地工具入口是：
+
+```bash
+./om-agent spec
+./om-agent run --tool manage_symbols --input-json '{"config_key":"us","action":"list"}'
+```
+
+环境变量约定：
+
+- `OM_CONFIG_DIR`
+- `OM_CONFIG_US`
+- `OM_CONFIG_HK`
+- `OM_PM_CONFIG`
+- `OM_OUTPUT_DIR`
+- `OM_AGENT_ENABLE_WRITE_TOOLS=true`
+
+详细说明见：
+
+- [Getting Started](docs/GETTING_STARTED.md)
+- [Agent Integration](docs/AGENT_INTEGRATION.md)
+- [Tool Reference](docs/TOOL_REFERENCE.md)
+- [Release Process](docs/RELEASE_PROCESS.md)
 
 ## 数据源和存储边界
 

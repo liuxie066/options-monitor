@@ -58,6 +58,8 @@ CRITICAL_MODULES = [
     "test_domain_engine_batch5",
     "test_send_if_needed_batch3",
     "test_send_if_needed_batch4",
+    "test_agent_plugin_contract",
+    "test_agent_plugin_smoke",
 ]
 
 # Keep default critical scope behavior-compatible with the previous curated list.
