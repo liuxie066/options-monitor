@@ -15,6 +15,7 @@ Design constraints:
 import json
 from pathlib import Path
 
+from scripts.account_config import resolve_portfolio_source
 from scripts.config_loader import resolve_pm_config_path
 from scripts.futu_portfolio_context import fetch_futu_portfolio_context
 from scripts.io_utils import is_fresh, load_cached_json
@@ -437,7 +438,7 @@ def build_pipeline_context(
     pm_config = resolve_pm_config_path(base=base, pm_config=portfolio_cfg.get('pm_config'))
     market = portfolio_cfg.get('market', '富途')
     account = portfolio_cfg.get('account')
-    portfolio_source = portfolio_cfg.get('source')
+    portfolio_source = resolve_portfolio_source(cfg, account=(str(account) if account else None))
 
     # Cache policy (TTL seconds)
     ttl_opt_ctx = int(runtime.get('option_positions_context_ttl_sec', 900 if is_scheduled else 120) or 0)
@@ -456,7 +457,7 @@ def build_pipeline_context(
         shared_state_dir=shared_state_dir,
         log=log,
         runtime_config=cfg,
-        portfolio_source=(str(portfolio_source) if portfolio_source is not None else None),
+        portfolio_source=str(portfolio_source),
     )
 
     option_ctx, refreshed = load_option_positions_context(
