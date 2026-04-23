@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Callable
 
@@ -22,7 +23,6 @@ def pm_config_candidates(*, base: Path) -> list[Path]:
     candidates = [
         (base / "secrets" / "portfolio.feishu.json").resolve(),
         Path("/opt/options-monitor/secrets/portfolio.feishu.json").resolve(),
-        (base / "../portfolio-management/config.json").resolve(),
     ]
     seen: set[str] = set()
     out: list[Path] = []
@@ -40,7 +40,7 @@ def default_pm_config_path(*, base: Path) -> Path:
     for item in candidates:
         if item.exists():
             return item
-    return candidates[-1]
+    return candidates[0]
 
 
 def resolve_pm_config_path(*, base: Path, pm_config: str | Path | None) -> Path:
@@ -49,6 +49,9 @@ def resolve_pm_config_path(*, base: Path, pm_config: str | Path | None) -> Path:
         if not path.is_absolute():
             path = (Path(base).resolve() / path).resolve()
         return path
+    env_ref = str(os.environ.get("OM_PM_CONFIG") or "").strip()
+    if env_ref:
+        return Path(env_ref).expanduser().resolve()
     return default_pm_config_path(base=base)
 
 def resolve_templates_config(cfg: dict | None) -> dict:

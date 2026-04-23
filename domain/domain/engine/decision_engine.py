@@ -94,7 +94,7 @@ def apply_opend_degrade_to_yahoo(
             continue
         fetch['_source_resolution'] = 'degraded_to_yahoo'
         fetch['source'] = 'yahoo'
-        for k in ('host', 'port', 'spot_from_portfolio_management'):
+        for k in ('host', 'port', 'spot_from_portfolio_management', 'spot_from_yahoo'):
             fetch.pop(k, None)
         sym['fetch'] = fetch
         degraded = True

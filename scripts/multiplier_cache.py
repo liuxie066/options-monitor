@@ -148,7 +148,7 @@ def refresh_via_opend(*, repo_base: Path, symbol: str, host: str = "127.0.0.1", 
             host=str(host),
             port=int(port),
             spot_override=None,
-            spot_from_pm=False,
+            spot_from_yahoo=False,
             base_dir=None,
         )
         rows = payload.get("rows") or []

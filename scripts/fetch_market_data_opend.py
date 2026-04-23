@@ -77,7 +77,7 @@ from scripts.futu_gateway import (
     FutuGatewayTransientError,
 )
 from scripts.opend_utils import normalize_underlier, get_trading_date
-from scripts.pm_bridge import fetch_spot_from_portfolio_management
+from scripts.pm_bridge import fetch_spot_with_fallback
 
 
 def _chain_cache_path(base_dir: Path, u_code: str) -> Path:
@@ -207,7 +207,7 @@ def get_spot_opend(gateway, underlier_code: str) -> float | None:
         return None
 
 
-def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = '127.0.0.1', port: int = 11111, spot_override: float | None = None, *, spot_from_pm: bool = False, base_dir: Path | None = None, option_types: str = 'put,call', min_strike: float | None = None, max_strike: float | None = None, min_dte: int | None = None, max_dte: int | None = None, retry_max_attempts: int = 4, retry_time_budget_sec: float = 8.0, retry_base_delay_sec: float = 0.8, retry_max_delay_sec: float = 6.0, no_retry: bool = False, chain_cache: bool = False, chain_cache_force_refresh: bool = False) -> dict[str, Any]:
+def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = '127.0.0.1', port: int = 11111, spot_override: float | None = None, *, spot_from_yahoo: bool = False, base_dir: Path | None = None, option_types: str = 'put,call', min_strike: float | None = None, max_strike: float | None = None, min_dte: int | None = None, max_dte: int | None = None, retry_max_attempts: int = 4, retry_time_budget_sec: float = 8.0, retry_base_delay_sec: float = 0.8, retry_max_delay_sec: float = 6.0, no_retry: bool = False, chain_cache: bool = False, chain_cache_force_refresh: bool = False) -> dict[str, Any]:
     u = normalize_underlier(symbol)
     gateway = build_futu_gateway(
         host=host,
@@ -297,15 +297,16 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
                 spot = get_spot_opend(gateway, u.code)
 
         # US spot: do not use OpenD (often no stock quote right).
-        # Preferred fallback is portfolio-management's PriceFetcher (it has caching + multiple sources).
+        # Preferred fallback is the built-in Yahoo spot provider; legacy external PM bridge
+        # remains available only when explicitly configured.
         # If still missing, keep None and require explicit --spot from user.
-        if spot is None and u.market == 'US' and spot_from_pm and base_dir is not None:
+        if spot is None and u.market == 'US' and spot_from_yahoo and base_dir is not None:
             # Do NOT require the symbol to exist in holdings.
             # Watchlist symbols may be unheld but still need a spot for OTM/risk computations.
             ticker = u.code.split('.', 1)[1]
-            spot = fetch_spot_from_portfolio_management(ticker)
+            spot = fetch_spot_with_fallback(ticker)
         # spot may still be None; keep it. Downstream scans will skip rows if spot is required.
-        if spot is None and u.market == 'US' and (not spot_from_pm):
+        if spot is None and u.market == 'US' and (not spot_from_yahoo):
             # Make it explicit in meta by leaving spot None; caller can provide --spot.
             pass
 
@@ -714,7 +715,8 @@ def main():
     ap.add_argument('--host', default='127.0.0.1')
     ap.add_argument('--port', type=int, default=11111)
     ap.add_argument('--spot', type=float, default=None, help='override spot if OpenD has no quote right')
-    ap.add_argument('--spot-from-pm', action='store_true', help='for US symbols: if OpenD has no stock quote right, fallback to portfolio-management get_price()')
+    ap.add_argument('--spot-from-yahoo', dest='spot_from_yahoo', action='store_true', help='for US symbols: if OpenD has no stock quote right, fallback to built-in Yahoo spot provider')
+    ap.add_argument('--spot-from-pm', dest='spot_from_yahoo', action='store_true', help=argparse.SUPPRESS)
     ap.add_argument('--quiet', action='store_true', help='quiet mode: suppress non-critical prints')
     ap.add_argument('--no-retry', action='store_true', help='Disable OpenD retries/backoff')
     ap.add_argument('--retry-max-attempts', type=int, default=4)
@@ -744,7 +746,7 @@ def main():
             host=args.host,
             port=args.port,
             spot_override=args.spot,
-            spot_from_pm=bool(args.spot_from_pm),
+            spot_from_yahoo=bool(args.spot_from_yahoo),
             base_dir=base,
             chain_cache=bool(args.chain_cache),
             chain_cache_force_refresh=bool(args.chain_cache_force_refresh),

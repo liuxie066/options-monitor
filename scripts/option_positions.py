@@ -6,8 +6,7 @@ fields, list, and low-level edit.
 
 Primary storage is SQLite; Feishu is an optional best-effort backup.
 This script still uses Feishu app_id/app_secret from --pm-config when backup sync is enabled.
-New deployments should prefer secrets/portfolio.feishu.json; the CLI default keeps
-../portfolio-management/config.json for backward compatibility.
+New deployments should prefer secrets/portfolio.feishu.json or OM_PM_CONFIG.
 """
 
 from __future__ import annotations

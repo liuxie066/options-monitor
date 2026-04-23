@@ -113,7 +113,7 @@
         "source": "yahoo",
         "host": "127.0.0.1",
         "port": 11111,
-        "spot_from_portfolio_management": true
+        "spot_from_yahoo": false
       },
       "use": [
         "put_base",
@@ -181,7 +181,7 @@
         "source": "yahoo",
         "host": "127.0.0.1",
         "port": 11111,
-        "spot_from_portfolio_management": true
+        "spot_from_yahoo": false
       },
       "use": "put_base",
       "sell_put": {

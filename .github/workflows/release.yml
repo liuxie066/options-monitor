@@ -21,9 +21,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m venv .venv
-          ./.venv/bin/pip install --upgrade pip
-          ./.venv/bin/pip install -r requirements.txt
+          bash scripts/install_agent_plugin.sh
           ./.venv/bin/pip install pytest
 
       - name: Validate release metadata
