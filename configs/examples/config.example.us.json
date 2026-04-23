@@ -78,6 +78,11 @@
     "pm_config": "secrets/portfolio.feishu.json",
     "market": "富途",
     "account": "lx",
+    "source": "auto",
+    "source_by_account": {
+      "lx": "futu",
+      "sy": "holdings"
+    },
     "base_currency": "CNY"
   },
   "notifications": {

@@ -8,6 +8,7 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
+from scripts.account_config import resolve_portfolio_source
 from scripts.cash_secured_utils import (
     cash_secured_symbol_cny,
     normalize_cash_secured_by_symbol_by_ccy,
@@ -97,7 +98,7 @@ def _fetch_portfolio_context(
     runtime_cfg: dict,
 ) -> dict:
     portfolio_cfg = (runtime_cfg.get('portfolio') or {}) if isinstance(runtime_cfg, dict) else {}
-    source_mode = _normalize_portfolio_source(portfolio_cfg.get('source'))
+    source_mode = _normalize_portfolio_source(resolve_portfolio_source(runtime_cfg, account=account))
 
     if source_mode in ('auto', 'futu'):
         try:

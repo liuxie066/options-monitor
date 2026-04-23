@@ -43,6 +43,64 @@ def _option_ctx(account: str, *, locked: int) -> dict:
     }
 
 
+def test_build_pipeline_context_resolves_portfolio_source_by_account() -> None:
+    import scripts.pipeline_context as pc
+
+    captured: dict[str, object] = {}
+    old_load_portfolio_context = pc.load_portfolio_context
+    old_load_option_positions_context = pc.load_option_positions_context
+    old_auto_close = pc.maybe_auto_close_expired_positions
+    old_load_fx_rates = pc.load_fx_rates
+    try:
+        def _fake_load_portfolio_context(**kwargs):  # type: ignore[no-untyped-def]
+            captured["portfolio_source"] = kwargs.get("portfolio_source")
+            captured["account"] = kwargs.get("account")
+            return {"portfolio_source_name": kwargs.get("portfolio_source")}
+
+        def _fake_load_option_positions_context(**_kwargs):  # type: ignore[no-untyped-def]
+            return None, False
+
+        pc.load_portfolio_context = _fake_load_portfolio_context  # type: ignore[assignment]
+        pc.load_option_positions_context = _fake_load_option_positions_context  # type: ignore[assignment]
+        pc.maybe_auto_close_expired_positions = lambda **_kwargs: None  # type: ignore[assignment]
+        pc.load_fx_rates = lambda **_kwargs: (None, None)  # type: ignore[assignment]
+
+        with TemporaryDirectory() as td:
+            root = Path(td).resolve()
+            portfolio_ctx, option_ctx, fx_usd_per_cny, hkdcny = pc.build_pipeline_context(
+                py="python",
+                base=root,
+                cfg={
+                    "portfolio": {
+                        "pm_config": "x.json",
+                        "market": "富途",
+                        "account": "sy",
+                        "source": "auto",
+                        "source_by_account": {"sy": "holdings"},
+                    }
+                },
+                report_dir=(root / "reports").resolve(),
+                portfolio_timeout_sec=1,
+                runtime={},
+                is_scheduled=True,
+                state_dir=(root / "state").resolve(),
+                shared_state_dir=(root / "shared").resolve(),
+                log=lambda _msg: None,
+                no_context=False,
+                want_scan=True,
+            )
+        assert portfolio_ctx == {"portfolio_source_name": "holdings"}
+        assert option_ctx is None
+        assert fx_usd_per_cny is None
+        assert hkdcny is None
+        assert captured == {"portfolio_source": "holdings", "account": "sy"}
+    finally:
+        pc.load_portfolio_context = old_load_portfolio_context  # type: ignore[assignment]
+        pc.load_option_positions_context = old_load_option_positions_context  # type: ignore[assignment]
+        pc.maybe_auto_close_expired_positions = old_auto_close  # type: ignore[assignment]
+        pc.load_fx_rates = old_load_fx_rates  # type: ignore[assignment]
+
+
 def test_shared_context_reuses_fetch_calls_across_accounts() -> None:
     import scripts.pipeline_context as pc
 

@@ -35,6 +35,24 @@ def accounts_from_config(config: dict[str, Any] | None, *, fallback: tuple[str, 
     return normalize_accounts(cfg.get("accounts"), fallback=fallback)
 
 
+def resolve_portfolio_source(config: dict[str, Any] | None, *, account: str | None) -> str:
+    cfg = config if isinstance(config, dict) else {}
+    portfolio_cfg = cfg.get("portfolio") if isinstance(cfg.get("portfolio"), dict) else {}
+    account_key = str(account or "").strip().lower()
+
+    if account_key:
+        mapping = portfolio_cfg.get("source_by_account") if isinstance(portfolio_cfg, dict) else None
+        if isinstance(mapping, dict):
+            value = mapping.get(account_key)
+            if value is not None and str(value).strip():
+                return str(value).strip()
+
+    value = portfolio_cfg.get("source") if isinstance(portfolio_cfg, dict) else None
+    if value is not None and str(value).strip():
+        return str(value).strip()
+    return "auto"
+
+
 def cash_footer_accounts_from_config(
     config: dict[str, Any] | None,
     *,

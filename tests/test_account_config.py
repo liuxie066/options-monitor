@@ -25,6 +25,25 @@ def test_cash_footer_accounts_prefers_notification_override_then_accounts() -> N
     ) == ["beta", "gamma"]
 
 
+def test_resolve_portfolio_source_prefers_account_override_then_global_then_auto() -> None:
+    from scripts.account_config import resolve_portfolio_source
+
+    cfg = {
+        "portfolio": {
+            "source": "holdings",
+            "source_by_account": {
+                "lx": "futu",
+                "sy": "auto",
+            },
+        }
+    }
+
+    assert resolve_portfolio_source(cfg, account="LX") == "futu"
+    assert resolve_portfolio_source(cfg, account="sy") == "auto"
+    assert resolve_portfolio_source(cfg, account="unknown") == "holdings"
+    assert resolve_portfolio_source({}, account="lx") == "auto"
+
+
 def test_parse_option_message_accepts_configured_account_labels() -> None:
     from scripts.parse_option_message import parse_account
 
