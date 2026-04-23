@@ -7,6 +7,8 @@ BASE = Path(__file__).resolve().parents[1]
 if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
+FAKE_FUTU_ACC_ID_LX = "123456789012345678"
+
 
 def test_query_sell_put_cash_uses_futu_portfolio_context_when_runtime_config_allows_it() -> None:
     import scripts.query_sell_put_cash as m
@@ -53,7 +55,7 @@ def test_query_sell_put_cash_uses_futu_portfolio_context_when_runtime_config_all
             base_dir=BASE,
             runtime_config={
                 "portfolio": {"source": "auto", "base_currency": "CNY"},
-                "trade_intake": {"account_mapping": {"futu": {"281756479859383816": "lx"}}},
+                "trade_intake": {"account_mapping": {"futu": {FAKE_FUTU_ACC_ID_LX: "lx"}}},
             },
             no_fx=True,
         )

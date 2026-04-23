@@ -7,6 +7,10 @@ BASE = Path(__file__).resolve().parents[1]
 if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
+FAKE_FUTU_ACC_ID_LX_PRIMARY = "123456789012345678"
+FAKE_FUTU_ACC_ID_LX_SECONDARY = "123456789012345679"
+FAKE_FUTU_ACC_ID_SY = "123456789012345680"
+
 
 def test_resolve_trade_intake_futu_account_ids_uses_runtime_mapping() -> None:
     from scripts.futu_portfolio_context import resolve_trade_intake_futu_account_ids
@@ -15,19 +19,19 @@ def test_resolve_trade_intake_futu_account_ids_uses_runtime_mapping() -> None:
         "trade_intake": {
             "account_mapping": {
                 "futu": {
-                    "281756479859383816": "lx",
-                    "281756455994464030": "lx",
-                    "281756460289431326": "sy",
+                    FAKE_FUTU_ACC_ID_LX_PRIMARY: "lx",
+                    FAKE_FUTU_ACC_ID_LX_SECONDARY: "lx",
+                    FAKE_FUTU_ACC_ID_SY: "sy",
                 }
             }
         }
     }
 
     assert resolve_trade_intake_futu_account_ids(cfg, account="lx") == [
-        "281756479859383816",
-        "281756455994464030",
+        FAKE_FUTU_ACC_ID_LX_PRIMARY,
+        FAKE_FUTU_ACC_ID_LX_SECONDARY,
     ]
-    assert resolve_trade_intake_futu_account_ids(cfg, account="sy") == ["281756460289431326"]
+    assert resolve_trade_intake_futu_account_ids(cfg, account="sy") == [FAKE_FUTU_ACC_ID_SY]
     assert resolve_trade_intake_futu_account_ids(cfg, account="zz") == []
 
 
@@ -92,11 +96,11 @@ def test_fetch_futu_portfolio_context_filters_rows_by_mapped_account_ids() -> No
             acc_id = kwargs.get("acc_id")
             assert isinstance(acc_id, int)
             self.balance_calls.append(acc_id)
-            if acc_id == 281756479859383816:
+            if acc_id == int(FAKE_FUTU_ACC_ID_LX_PRIMARY):
                 return [
                     {"currency": "CNY", "cash": 100000, "fund_assets": 20000},
                 ]
-            if acc_id == 281756455994464030:
+            if acc_id == int(FAKE_FUTU_ACC_ID_LX_SECONDARY):
                 return [
                     {"currency": "CNY", "cash": 999999},
                 ]
@@ -106,11 +110,11 @@ def test_fetch_futu_portfolio_context_filters_rows_by_mapped_account_ids() -> No
             acc_id = kwargs.get("acc_id")
             assert isinstance(acc_id, int)
             self.position_calls.append(acc_id)
-            if acc_id == 281756479859383816:
+            if acc_id == int(FAKE_FUTU_ACC_ID_LX_PRIMARY):
                 return [
                     {"code": "US.NVDA", "qty": 100, "cost_price": 120, "currency": "USD"},
                 ]
-            if acc_id == 281756455994464030:
+            if acc_id == int(FAKE_FUTU_ACC_ID_LX_SECONDARY):
                 return [
                     {"code": "US.AAPL", "qty": 100, "cost_price": 180, "currency": "USD"},
                 ]
@@ -129,8 +133,8 @@ def test_fetch_futu_portfolio_context_filters_rows_by_mapped_account_ids() -> No
                 "trade_intake": {
                     "account_mapping": {
                         "futu": {
-                            "281756479859383816": "lx",
-                            "281756455994464030": "sy",
+                            FAKE_FUTU_ACC_ID_LX_PRIMARY: "lx",
+                            FAKE_FUTU_ACC_ID_LX_SECONDARY: "sy",
                         }
                     }
                 },
@@ -144,8 +148,8 @@ def test_fetch_futu_portfolio_context_filters_rows_by_mapped_account_ids() -> No
 
     assert out["cash_by_currency"] == {"CNY": 120000.0}
     assert sorted(out["stocks_by_symbol"].keys()) == ["NVDA"]
-    assert fake_gateway.balance_calls == [281756479859383816]
-    assert fake_gateway.position_calls == [281756479859383816]
+    assert fake_gateway.balance_calls == [int(FAKE_FUTU_ACC_ID_LX_PRIMARY)]
+    assert fake_gateway.position_calls == [int(FAKE_FUTU_ACC_ID_LX_PRIMARY)]
 
 
 def test_fetch_futu_portfolio_context_rejects_non_numeric_mapped_account_id() -> None:
