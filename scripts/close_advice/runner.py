@@ -37,6 +37,7 @@ OUTPUT_COLUMNS = [
     "capture_ratio",
     "remaining_premium",
     "realized_if_close",
+    "buy_to_close_fee",
     "remaining_annualized_return",
     "tier",
     "reason",
@@ -325,15 +326,24 @@ def _position_to_input(pos: dict[str, Any], quote: dict[str, Any] | None) -> tup
     )
 
 
-def _apply_buy_to_close_fee(row: dict[str, Any], *, base_dir: Path) -> dict[str, Any]:
+def _apply_buy_to_close_fee(row: dict[str, Any]) -> dict[str, Any]:
     mid = safe_float(row.get("close_mid"))
     contracts = safe_int(row.get("contracts_open")) or 1
     if mid is None:
         return row
+    multiplier = safe_int(row.get("multiplier"))
+    if multiplier is None or multiplier <= 0:
+        return _with_extra_flags(row, ["fee_calc_unavailable"])
     try:
-        fee = calc_futu_option_fee(row.get("currency"), mid, contracts=contracts, is_sell=False, base_dir=base_dir)
+        fee = calc_futu_option_fee(
+            row.get("currency"),
+            mid,
+            contracts=contracts,
+            multiplier=multiplier,
+            is_sell=False,
+        )
     except Exception:
-        fee = 0.0
+        return _with_extra_flags(row, ["fee_calc_unavailable"])
     realized = safe_float(row.get("realized_if_close"))
     if realized is not None:
         row["realized_if_close"] = realized - float(fee)
@@ -470,7 +480,7 @@ def run_close_advice(
         row = evaluate_close_advice(inp, cfg)
         row = _with_extra_flags(row, quote_flags)
         row = _with_extra_flags(row, _quote_observability_flags(key, quote, attempted_fetch_reasons))
-        row = _apply_buy_to_close_fee(row, base_dir=Path(base_dir))
+        row = _apply_buy_to_close_fee(row)
         rows.append(row)
 
     rows = sort_advice_rows(rows)

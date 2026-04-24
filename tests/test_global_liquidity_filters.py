@@ -106,6 +106,81 @@ def test_validate_config_rejects_removed_global_strategy_filter_keys() -> None:
         assert 'min_iv' in msg
 
 
+def test_validate_config_rejects_fees_config() -> None:
+    _add_repo_to_syspath()
+    from scripts.validate_config import validate_config
+
+    cfg = {
+        'fees': {'US': {'model': 'futu_us_simplified'}},
+        'templates': {
+            'put_base': {'sell_put': {'min_open_interest': 60, 'min_volume': 10, 'max_spread_ratio': 0.3}},
+        },
+        'symbols': [
+            {
+                'symbol': 'AAPL',
+                'use': ['put_base'],
+                'sell_put': {
+                    'enabled': True,
+                    'min_dte': 7,
+                    'max_dte': 45,
+                    'min_strike': 10,
+                    'max_strike': 200,
+                },
+                'sell_call': {'enabled': False},
+            }
+        ],
+    }
+
+    try:
+        validate_config(cfg)
+        raise AssertionError('expected config validation failure')
+    except SystemExit as e:
+        msg = str(e)
+        assert '[CONFIG_ERROR]' in msg
+        assert 'fees is no longer supported' in msg
+
+
+def test_validate_config_accepts_external_holdings_account_settings() -> None:
+    _add_repo_to_syspath()
+    from scripts.validate_config import validate_config
+
+    cfg = {
+        'accounts': ['user1', 'ext1'],
+        'account_settings': {
+            'user1': {'type': 'futu'},
+            'ext1': {'type': 'external_holdings', 'holdings_account': 'Feishu EXT'},
+        },
+        'portfolio': {
+            'source': 'futu',
+            'source_by_account': {'ext1': 'holdings'},
+        },
+        'trade_intake': {
+            'account_mapping': {
+                'futu': {'REAL_1': 'user1'},
+            }
+        },
+        'templates': {
+            'put_base': {'sell_put': {'min_open_interest': 60, 'min_volume': 10, 'max_spread_ratio': 0.3}},
+        },
+        'symbols': [
+            {
+                'symbol': 'AAPL',
+                'use': ['put_base'],
+                'sell_put': {
+                    'enabled': True,
+                    'min_dte': 7,
+                    'max_dte': 45,
+                    'min_strike': 10,
+                    'max_strike': 200,
+                },
+                'sell_call': {'enabled': False},
+            }
+        ],
+    }
+
+    validate_config(cfg)
+
+
 def test_sell_put_steps_use_global_liquidity_filters_only() -> None:
     base = _add_repo_to_syspath()
     import scripts.sell_put_steps as steps

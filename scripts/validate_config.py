@@ -11,6 +11,7 @@ if str(repo_base) not in sys.path:
     sys.path.insert(0, str(repo_base))
 
 from domain.domain.fetch_source import normalize_fetch_source
+from scripts.account_config import ACCOUNT_TYPES, account_settings_from_config, accounts_from_config
 from scripts.config_loader import resolve_templates_config, resolve_watchlist_config, set_watchlist_config
 from scripts.trade_account_mapping import resolve_trade_intake_config
 
@@ -44,6 +45,8 @@ def validate_config(cfg: dict):
         die('watchlist is no longer supported; use symbols')
     if 'profiles' in cfg:
         die('profiles is no longer supported; use templates')
+    if 'fees' in cfg:
+        die('fees is no longer supported; fee rules are built in')
 
     # intake config (optional)
     intake = cfg.get('intake') or {}
@@ -92,6 +95,27 @@ def validate_config(cfg: dict):
                 die('runtime.portfolio_timeout_sec must be > 0')
         except Exception:
             die('runtime.portfolio_timeout_sec must be an integer')
+
+    account_settings = cfg.get('account_settings') or {}
+    if account_settings and not isinstance(account_settings, dict):
+        die('account_settings must be an object')
+    if isinstance(account_settings, dict):
+        known_accounts = set(accounts_from_config(cfg))
+        for raw_key, raw_value in account_settings.items():
+            account = str(raw_key or '').strip().lower()
+            if not account:
+                die('account_settings contains empty account key')
+            if account not in known_accounts:
+                die(f'account_settings.{account} must also appear in top-level accounts')
+            if not isinstance(raw_value, dict):
+                die(f'account_settings.{account} must be an object')
+            acct_type = str(raw_value.get('type') or '').strip().lower()
+            if acct_type not in ACCOUNT_TYPES:
+                die(f'account_settings.{account}.type must be one of: {", ".join(ACCOUNT_TYPES)}')
+            holdings_account = raw_value.get('holdings_account')
+            if holdings_account is not None and not str(holdings_account).strip():
+                die(f'account_settings.{account}.holdings_account must be a non-empty string when set')
+        account_settings_from_config(cfg)
 
     trade_intake = cfg.get('trade_intake') or {}
     if trade_intake and not isinstance(trade_intake, dict):
