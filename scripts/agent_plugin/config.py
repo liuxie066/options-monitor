@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from scripts.agent_plugin.contracts import AgentToolError
+from scripts.config_loader import normalize_portfolio_broker_config
 
 
 DEFAULT_CONFIGS = {
@@ -17,21 +18,6 @@ DEFAULT_CONFIGS = {
 
 def repo_base() -> Path:
     return Path(__file__).resolve().parents[2]
-
-
-def _config_dir_from_env() -> Path | None:
-    raw = str(os.environ.get("OM_CONFIG_DIR") or "").strip()
-    if not raw:
-        return None
-    return Path(raw).expanduser().resolve()
-
-
-def _config_path_from_env(config_key: str) -> Path | None:
-    env_key = f"OM_CONFIG_{str(config_key).strip().upper()}"
-    raw = str(os.environ.get(env_key) or "").strip()
-    if not raw:
-        return None
-    return Path(raw).expanduser().resolve()
 
 
 def resolve_runtime_config_path(
@@ -52,37 +38,25 @@ def resolve_runtime_config_path(
             message="config_key must be us or hk when config_path is omitted",
         )
 
-    env_path = _config_path_from_env(key)
-    if env_path is not None:
-        return env_path
-
-    env_dir = _config_dir_from_env()
-    if env_dir is not None:
-        return (env_dir / DEFAULT_CONFIGS[key]).resolve()
-
     return (repo_base() / DEFAULT_CONFIGS[key]).resolve()
 
 
 def _absolutize_portfolio_pm_config(cfg: dict[str, Any], *, config_path: Path) -> dict[str, Any]:
     out = deepcopy(cfg)
-    pm_override = str(os.environ.get("OM_PM_CONFIG") or "").strip()
     portfolio = out.get("portfolio")
     if not isinstance(portfolio, dict):
-        if pm_override:
-            out["portfolio"] = {"pm_config": str(Path(pm_override).expanduser().resolve())}
         return out
 
-    if pm_override:
-        portfolio["pm_config"] = str(Path(pm_override).expanduser().resolve())
-        return out
-
-    pm_ref = portfolio.get("pm_config")
+    pm_ref = portfolio.get("data_config")
+    if pm_ref is None or not str(pm_ref).strip():
+        pm_ref = portfolio.get("pm_config")
     if pm_ref is None or not str(pm_ref).strip():
         return out
 
     pm_path = Path(str(pm_ref).strip()).expanduser()
     if not pm_path.is_absolute():
         pm_path = (config_path.parent / pm_path).resolve()
+    portfolio["data_config"] = str(pm_path)
     portfolio["pm_config"] = str(pm_path)
     return out
 
@@ -97,7 +71,7 @@ def load_runtime_config(
         raise AgentToolError(
             code="CONFIG_ERROR",
             message=f"runtime config not found: {path.name}",
-            hint="Set OM_CONFIG_DIR or pass config_path explicitly.",
+            hint="Create the repo-local config file or pass config_path explicitly.",
         )
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -114,6 +88,7 @@ def load_runtime_config(
             details={"path": path.name},
         )
     cfg = _absolutize_portfolio_pm_config(raw, config_path=path)
+    cfg = normalize_portfolio_broker_config(cfg)
     cfg["config_source_path"] = str(path)
     return path, cfg
 

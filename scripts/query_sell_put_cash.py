@@ -8,14 +8,14 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
-from scripts.account_config import resolve_portfolio_source
+from scripts.account_config import resolve_holdings_account, resolve_portfolio_source
 from scripts.cash_secured_utils import (
     cash_secured_symbol_cny,
     normalize_cash_secured_by_symbol_by_ccy,
     normalize_cash_secured_total_by_ccy,
     read_cash_secured_total_cny,
 )
-from scripts.config_loader import resolve_pm_config_path
+from scripts.config_loader import normalize_portfolio_broker_config, resolve_pm_config_path
 from scripts.fx_rates import get_rates_or_fetch_latest
 from scripts.futu_portfolio_context import fetch_futu_portfolio_context
 
@@ -66,7 +66,7 @@ def _normalize_runtime_config(cfg: dict) -> dict:
         out['profiles'] = out.get('templates')
     if 'symbols' in out and 'watchlist' not in out:
         out['watchlist'] = out.get('symbols')
-    return out
+    return normalize_portfolio_broker_config(out)
 
 
 def _load_runtime_config(
@@ -126,7 +126,7 @@ def _fetch_portfolio_context(
             '--market',
             market,
             '--account',
-            (account or ''),
+            (resolve_holdings_account(runtime_cfg, account=account) or ''),
             '--out',
             str(portfolio_out),
         ],

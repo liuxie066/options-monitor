@@ -35,7 +35,24 @@ def test_resolve_futu_account_mapping_rejects_unknown_internal_account() -> None
     try:
         resolve_futu_account_mapping(cfg)
     except ValueError as exc:
-        assert "not present in top-level accounts" in str(exc)
+        assert "not a futu account" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
+
+
+def test_resolve_futu_account_mapping_rejects_external_holdings_account() -> None:
+    cfg = {
+        "accounts": ["user1", "ext1"],
+        "account_settings": {
+            "ext1": {"type": "external_holdings", "holdings_account": "feishu-ext1"},
+        },
+        "trade_intake": {"account_mapping": {"futu": {"REAL_1": "ext1"}}},
+    }
+
+    try:
+        resolve_futu_account_mapping(cfg)
+    except ValueError as exc:
+        assert "not a futu account" in str(exc)
     else:
         raise AssertionError("expected ValueError")
 
@@ -43,6 +60,6 @@ def test_resolve_futu_account_mapping_rejects_unknown_internal_account() -> None
 def test_resolve_trade_intake_config_uses_defaults() -> None:
     out = resolve_trade_intake_config({"accounts": ["lx"]})
 
-    assert out["enabled"] is False
+    assert out["enabled"] is True
     assert out["mode"] == "dry-run"
     assert str(out["state_path"]).endswith("output/state/auto_trade_intake_state.json")
