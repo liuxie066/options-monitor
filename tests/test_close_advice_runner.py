@@ -78,6 +78,9 @@ def test_run_close_advice_builds_csv_and_markdown_from_local_fixtures(tmp_path: 
     csv_text = (out_dir / "close_advice.csv").read_text(encoding="utf-8")
     assert "capture_ratio" in csv_text
     assert "strong" in csv_text
+    assert "buy_to_close_fee" in csv_text
+    assert "2.31915" in csv_text
+    assert "135.68085" in csv_text
 
 
 def test_run_close_advice_records_missing_quote_but_does_not_notify(tmp_path: Path) -> None:

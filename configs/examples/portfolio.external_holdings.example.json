@@ -1,0 +1,12 @@
+{
+  "option_positions": {
+    "sqlite_path": "output_shared/state/option_positions.sqlite3"
+  },
+  "feishu": {
+    "app_id": "cli_YOUR_APP_ID",
+    "app_secret": "YOUR_APP_SECRET",
+    "tables": {
+      "holdings": "app_token/table_id"
+    }
+  }
+}

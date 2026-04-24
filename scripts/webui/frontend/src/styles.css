@@ -234,6 +234,17 @@ code{font-family:"SFMono-Regular","Cascadia Code",monospace;font-size:12px;white
 .GlobalSaveBar{border:1px solid var(--border);border-radius:14px;background:rgba(255,255,255,.02);padding:14px 16px;display:flex;align-items:center;justify-content:space-between;gap:16px;box-shadow:var(--shadow);}
 .GlobalSaveBar strong{display:block;font-size:14px;}
 .GlobalSaveBar span{display:block;margin-top:4px;color:var(--muted);font-size:12px;}
+.FlowInline{display:flex;gap:8px;flex-wrap:wrap;align-items:center;}
+.OpsToolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;padding:14px 16px;}
+.PreviewPanel{padding:16px;border-top:1px solid var(--borderMuted);}
+.JsonPreview{margin:0;white-space:pre-wrap;word-break:break-word;color:var(--fg);font-size:12px;font-family:"SFMono-Regular","Cascadia Code",monospace;}
+.CheckList{display:grid;gap:10px;padding:0 16px 16px;}
+.CheckItem{border:1px solid var(--border);border-radius:12px;padding:12px;background:rgba(255,255,255,.02);display:grid;gap:4px;}
+.CheckItem strong{font-size:12px;text-transform:uppercase;letter-spacing:.08em;}
+.CheckItem span{color:var(--muted);font-size:12px;line-height:1.5;}
+.CheckItemOk{border-color:rgba(125,211,165,.28);}
+.CheckItemBad{border-color:rgba(248,113,113,.28);}
+.MutedInline{color:var(--muted);font-size:12px;}
 .MutedText{padding:14px;color:var(--muted);font-size:13px;}
 .EmptyState{padding:22px;}
 .EmptyTitle{font-size:20px;font-weight:900;margin-bottom:8px;}

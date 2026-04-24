@@ -1,0 +1,5 @@
+{
+  "option_positions": {
+    "sqlite_path": "output_shared/state/option_positions.sqlite3"
+  }
+}

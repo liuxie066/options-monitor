@@ -1,72 +1,49 @@
 {
-  "fees": {
-    "model": {
-      "US": "futu_us_simplified",
-      "HK": "static"
-    },
-    "hk_static": {
-      "platform_fee_per_order_hkd": 15.0,
-      "commission_per_order_hkd": 0.0,
-      "other_fees_per_order_hkd": 0.0
+  "accounts": [
+    "user1"
+  ],
+  "account_settings": {
+    "user1": {
+      "type": "futu"
     }
   },
-  "fetch_policy": {
-    "allow_downgrade_to_yahoo": false
-  },
-  "accounts": [
-    "lx",
-    "sy"
-  ],
-  "intake": {
-    "symbol_aliases": {
-      "腾讯": "0700.HK",
-      "中海油": "0883.HK"
-    },
-    "multiplier_by_symbol": {
-      "0700.HK": 1000,
-      "0883.HK": 1000
-    },
-    "default_multiplier_us": 100,
-    "default_multiplier_hk": 1000
+  "trade_intake": {
+    "enabled": true,
+    "mode": "dry-run",
+    "account_mapping": {
+      "futu": {
+        "REAL_12345678": "user1"
+      }
+    }
   },
   "templates": {
     "put_base": {
       "sell_put": {
+        "min_otm_pct": 0.05,
         "min_annualized_net_return": 0.1,
-        "min_net_income": 100,
+        "min_net_income": 300,
         "min_open_interest": 50,
-        "min_volume": 10,
+        "min_volume": 0,
         "max_spread_ratio": 0.3
+      }
+    },
+    "call_base": {
+      "sell_call": {
+        "min_annualized_net_return": 0.1,
+        "min_if_exercised_total_return": 0.05,
+        "min_open_interest": 50,
+        "min_volume": 0,
+        "max_spread_ratio": 0.3,
+        "min_net_income": 300
       }
     }
   },
-  "outputs": {
-    "top_n_alerts": 3
-  },
-  "runtime": {
-    "symbol_timeout_sec": 120,
-    "portfolio_timeout_sec": 60,
-    "pipeline_timeout_sec": 600,
-    "option_positions_context_ttl_sec": 900,
-    "portfolio_context_ttl_sec": 900
-  },
-  "alert_policy": {
-    "sell_put_high_return": 0.12,
-    "change_annual_threshold": 0.02
-  },
   "portfolio": {
-    "pm_config": "secrets/portfolio.feishu.json",
-    "market": "富途",
-    "account": "lx",
+    "data_config": "secrets/portfolio.sqlite.json",
+    "broker": "富途",
+    "account": "user1",
+    "source": "futu",
     "base_currency": "CNY"
-  },
-  "notifications": {
-    "channel": "feishu",
-    "target": "user:YOUR_OPEN_ID",
-    "quiet_hours_beijing": {
-      "start": "02:00",
-      "end": "08:00"
-    }
   },
   "schedule": {
     "enabled": true,
@@ -89,7 +66,10 @@
         "port": 11111,
         "limit_expirations": 8
       },
-      "use": "put_base",
+      "use": [
+        "put_base",
+        "call_base"
+      ],
       "sell_put": {
         "enabled": true,
         "min_dte": 5,
@@ -101,5 +81,46 @@
         "enabled": false
       }
     }
-  ]
+  ],
+  "intake": {
+    "symbol_aliases": {
+      "腾讯": "0700.HK",
+      "中海油": "0883.HK"
+    },
+    "multiplier_by_symbol": {
+      "0700.HK": 1000,
+      "0883.HK": 1000
+    },
+    "default_multiplier_us": 100,
+    "default_multiplier_hk": 1000
+  },
+  "outputs": {
+    "top_n_alerts": 3
+  },
+  "runtime": {
+    "symbol_timeout_sec": 120,
+    "portfolio_timeout_sec": 60,
+    "pipeline_timeout_sec": 600,
+    "option_positions_context_ttl_sec": 900,
+    "portfolio_context_ttl_sec": 900
+  },
+  "alert_policy": {
+    "sell_put_high_return": 0.12,
+    "change_annual_threshold": 0.02
+  },
+  "close_advice": {
+    "enabled": true,
+    "quote_source": "auto",
+    "notify_levels": [
+      "strong",
+      "medium"
+    ],
+    "max_items_per_account": 5,
+    "max_spread_ratio": 0.4,
+    "strong_remaining_annualized_max": 0.08,
+    "medium_remaining_annualized_max": 0.12
+  },
+  "fetch_policy": {
+    "allow_downgrade_to_yahoo": false
+  }
 }

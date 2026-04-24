@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from scripts.account_config import accounts_from_config, normalize_accounts
+from scripts.account_config import ACCOUNT_TYPE_FUTU, accounts_from_config, normalize_accounts, resolve_account_type
 
 
 def resolve_trade_intake_config(
@@ -21,7 +21,7 @@ def resolve_trade_intake_config(
     if mode not in ("dry-run", "apply"):
         raise ValueError("trade_intake.mode must be dry-run or apply")
 
-    enabled = bool(ti.get("enabled", False))
+    enabled = bool(ti.get("enabled", True))
     reconnect_sec = int(ti.get("reconnect_sec", 5) or 5)
     if reconnect_sec <= 0:
         raise ValueError("trade_intake.reconnect_sec must be > 0")
@@ -48,7 +48,11 @@ def resolve_futu_account_mapping(cfg: dict[str, Any] | None) -> dict[str, str]:
     futu_mapping = mapping_root.get("futu")
     futu_mapping = futu_mapping if isinstance(futu_mapping, dict) else {}
 
-    allowed_accounts = set(accounts_from_config(src))
+    allowed_accounts = {
+        account
+        for account in accounts_from_config(src)
+        if resolve_account_type(src, account=account) == ACCOUNT_TYPE_FUTU
+    }
     out: dict[str, str] = {}
     for raw_key, raw_value in futu_mapping.items():
         key = str(raw_key or "").strip()
@@ -59,7 +63,7 @@ def resolve_futu_account_mapping(cfg: dict[str, Any] | None) -> dict[str, str]:
             raise ValueError(f"trade_intake.account_mapping.futu[{key}] must be a non-empty account label")
         if value not in allowed_accounts:
             raise ValueError(
-                f"trade_intake.account_mapping.futu[{key}]={value} is not present in top-level accounts"
+                f"trade_intake.account_mapping.futu[{key}]={value} is not a futu account in top-level accounts/account_settings"
             )
         out[key] = value
     return out

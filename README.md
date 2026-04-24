@@ -33,7 +33,7 @@ flowchart TD
     Entrypoints --> Pipeline["手动 Pipeline<br/>scripts/run_pipeline.py"]
     Entrypoints --> Intake["成交入账<br/>scripts/auto_trade_intake.py<br/>scripts/option_intake.py"]
 
-    Runtime["仓外 Runtime Config<br/>../options-monitor-config/config.us.json<br/>../options-monitor-config/config.hk.json"] --> Entrypoints
+    Runtime["仓内 Runtime Config<br/>config.us.json<br/>config.hk.json"] --> Entrypoints
     Examples["仓内模板<br/>configs/examples/*.json"] -.复制初始化.-> Runtime
 
     Pipeline --> Fetch["行情与期权链获取"]
@@ -41,7 +41,8 @@ flowchart TD
     Fetch --> Yahoo["Yahoo / yfinance"]
 
     Pipeline --> Ctx["账户与持仓上下文"]
-    Ctx --> Holdings["Feishu holdings"]
+    Ctx --> FutuPortfolio["Futu / OpenD 持仓与现金"]
+    Ctx -.optional fallback.-> Holdings["Feishu holdings"]
     Ctx --> SQLite["SQLite option_positions 主存储"]
 
     Intake --> PositionCore["option_positions 服务<br/>scripts/option_positions_core/*"]
@@ -60,9 +61,10 @@ flowchart TD
 
 - `domain/` 放确定性业务逻辑，尽量不直接做外部 IO。
 - `scripts/` 放运行入口、适配器、报表、外部服务调用和运维脚本。
-- `holdings` 仍然来自 Feishu。
+- 默认持仓/现金上下文来自 Futu / OpenD。
+- Feishu holdings 现在是可选 fallback，不是最小配置前置。
 - `option_positions` 现在是 `SQLite primary + Feishu best-effort backup`。
-- 真实 runtime config 推荐放在仓外，仓内只保留模板。
+- 安装版默认使用仓内 runtime config。
 
 ## 5 分钟跑通
 
@@ -86,33 +88,62 @@ python3 -m venv .venv
 
 ```bash
 bash scripts/install_agent_plugin.sh
+./om-agent init --market us --futu-acc-id <REAL_ACC_ID> --symbol NVDA
 ./om-agent spec
 ./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'
 ```
 
-### 2) 准备 runtime config
+`init` 会生成：
 
-线上推荐放仓外：
+- `config.us.json` 或 `config.hk.json`
+- `secrets/portfolio.sqlite.json`
+
+并把富途 `acc_id -> account label` 映射直接写进运行配置，避免新安装用户继续从模板里的 `REAL_12345678` 起步。
+
+如果后面要追加账号：
 
 ```bash
-mkdir -p ../options-monitor-config
-cp configs/examples/config.example.us.json ../options-monitor-config/config.us.json
-cp configs/examples/config.example.hk.json ../options-monitor-config/config.hk.json
+./om-agent add-account --market us --account-label user2 --account-type futu --futu-acc-id <REAL_ACC_ID>
+./om-agent add-account --market us --account-label lx --account-type futu --futu-acc-id <REAL_ACC_ID> --holdings-account "lx"
+./om-agent add-account --market us --account-label ext1 --account-type external_holdings --holdings-account "Feishu EXT"
+./om-agent edit-account --market us --account-label lx --futu-acc-id <NEW_REAL_ACC_ID> --holdings-account "lx"
+./om-agent remove-account --market us --account-label ext1
 ```
 
-开发机临时跑也可以直接复制到仓内：
+其中 `external_holdings` 账号不写富途映射，持仓过滤会走 Feishu `holdings.account`。
+如果要启用这类账号，建议把 `configs/examples/portfolio.external_holdings.example.json` 复制到本地 `secrets/` 下再填写 Feishu 凭证。
+如果账号本身是富途主路径，但你还想在富途失败时回退到同一张 Feishu holdings 表，就保留 `account-type futu`，只额外加 `--holdings-account`。
+
+### 2) 准备 runtime config
+
+推荐直接用 `init` 生成：
+
+```bash
+./om-agent init --market us --futu-acc-id <REAL_ACC_ID> --symbol NVDA
+./om-agent init --market hk --futu-acc-id <REAL_ACC_ID> --symbol 0700.HK
+```
+
+如果你要手工重建，也可以直接复制模板到仓内：
 
 ```bash
 cp configs/examples/config.example.us.json config.us.json
+cp configs/examples/config.example.hk.json config.hk.json
+cp configs/examples/portfolio.sqlite.example.json secrets/portfolio.sqlite.json
 ```
 
-### 3) 准备 Feishu 凭证文件
+### 3) 准备最小 `option_positions` 配置
 
-如果需要 holdings 或 `option_positions` Feishu 备份：
+最小配置默认是：
+
+- 行情与期权链：OpenD
+- 持仓与现金：OpenD
+- `option_positions`：SQLite
+
+先准备 SQLite `option_positions` 配置：
 
 ```bash
 mkdir -p secrets
-cp configs/examples/portfolio.feishu.example.json secrets/portfolio.feishu.json
+cp configs/examples/portfolio.sqlite.example.json secrets/portfolio.sqlite.json
 ```
 
 然后在运行配置里保持：
@@ -120,34 +151,23 @@ cp configs/examples/portfolio.feishu.example.json secrets/portfolio.feishu.json
 ```json
 {
   "portfolio": {
-    "pm_config": "secrets/portfolio.feishu.json",
-    "source": "auto",
-    "source_by_account": {
-      "lx": "futu",
-      "sy": "holdings"
-    }
+    "broker": "富途",
+    "data_config": "secrets/portfolio.sqlite.json",
+    "source": "futu"
   }
 }
 ```
 
-`portfolio.source` 支持 `auto` / `futu` / `holdings`。
-如果不同账户要走不同来源，可以用 `portfolio.source_by_account` 做覆盖，回退顺序是：
+`portfolio.broker` 是对外公开配置名；历史 `portfolio.market` 仍兼容，但新配置不再建议继续使用。
 
-1. `source_by_account[account]`
-2. `source`
-3. `auto`
+`portfolio.source` 支持 `auto` / `futu` / `holdings`，但最小配置建议固定成 `futu`。
+如果你后面要加 Feishu holdings fallback，再单独打开 `auto` 或 `holdings`。
 
 ### 4) 校验配置
 
 ```bash
 ./.venv/bin/python scripts/validate_config.py --config config.us.json
-```
-
-或仓外配置：
-
-```bash
-./.venv/bin/python scripts/validate_config.py --config ../options-monitor-config/config.us.json
-./.venv/bin/python scripts/validate_config.py --config ../options-monitor-config/config.hk.json
+./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'
 ```
 
 ### 5) 跑一次完整 pipeline
@@ -171,30 +191,37 @@ cat output/reports/symbols_notification.txt
 
 ## 配置应该放哪里
 
-日常只维护 canonical runtime config：
+日常只维护仓内 runtime config：
 
-- `../options-monitor-config/config.us.json`
-- `../options-monitor-config/config.hk.json`
+- `config.us.json`
+- `config.hk.json`
 
-仓内 `configs/examples/*.json` 只作为模板，不作为线上真源。
+最终保留的配置文件：
 
-真实 Feishu 凭证推荐放这里：
+- 运行时必需：`config.us.json` / `config.hk.json`
+- 数据配置必需：`secrets/portfolio.sqlite.json`
+- 可选扩展：`secrets/portfolio.feishu.json`
 
-- `secrets/portfolio.feishu.json`
-- `/opt/options-monitor/secrets/portfolio.feishu.json`
+仓库模板文件：
 
-`pm_config` 默认查找顺序见 [scripts/config_loader.py](scripts/config_loader.py)：
+- `configs/examples/config.example.us.json`
+- `configs/examples/config.example.hk.json`
+- `configs/examples/portfolio.sqlite.example.json`
+- `configs/examples/portfolio.external_holdings.example.json`
+- `configs/examples/portfolio.feishu.example.json`
 
-1. `secrets/portfolio.feishu.json`
-2. `/opt/options-monitor/secrets/portfolio.feishu.json`
+公开安装版默认只使用仓内：
 
-如需继续复用旧的 `../portfolio-management/config.json`，请显式设置 `portfolio.pm_config` 或 `OM_PM_CONFIG`。
+1. `secrets/portfolio.sqlite.json`
+2. `secrets/portfolio.feishu.json`
+
+如果你还有旧的外部配置路径或 sibling repo 依赖，建议先迁回仓内，再走公开安装流程。
 
 多账户列表统一写在运行配置顶层 `accounts`，例如：
 
 ```json
 {
-  "accounts": ["lx", "sy"]
+  "accounts": ["user1"]
 }
 ```
 
@@ -211,10 +238,6 @@ cat output/reports/symbols_notification.txt
 
 环境变量约定：
 
-- `OM_CONFIG_DIR`
-- `OM_CONFIG_US`
-- `OM_CONFIG_HK`
-- `OM_PM_CONFIG`
 - `OM_OUTPUT_DIR`
 - `OM_AGENT_ENABLE_WRITE_TOOLS=true`
 
@@ -224,6 +247,7 @@ cat output/reports/symbols_notification.txt
 - [Agent Integration](docs/AGENT_INTEGRATION.md)
 - [Tool Reference](docs/TOOL_REFERENCE.md)
 - [Release Process](docs/RELEASE_PROCESS.md)
+- [Current PR Material](docs/PR_PRODUCTIZATION_PHASE1_2.md)
 
 ## 数据源和存储边界
 
@@ -243,9 +267,9 @@ cat output/reports/symbols_notification.txt
 
 ### holdings
 
-- 仍然从 Feishu `holdings` 表读取
-- 用于现金、股票持仓、成本价、covered call 可覆盖股数等上下文
-- 当 `portfolio.source=holdings`，或 `portfolio.source_by_account[账户]=holdings` 时，账户上下文会强制走 holdings
+- 最小配置默认不依赖 Feishu holdings
+- 持仓、现金、covered call 可覆盖股数默认来自 Futu / OpenD
+- 当 `portfolio.source=holdings` 时，账户上下文会强制走 Feishu holdings
 - 当 `portfolio.source=auto` 时，会优先尝试 futu 账户上下文，失败后回退到 holdings
 
 ### option_positions
@@ -258,7 +282,7 @@ cat output/reports/symbols_notification.txt
 当前行为：
 
 - 默认 SQLite 路径：`output_shared/state/option_positions.sqlite3`
-- 可通过 `pm_config.option_positions.sqlite_path` 覆盖
+- 可通过 `data_config.option_positions.sqlite_path` 覆盖
 - 所有 steady-state 读取默认走 SQLite
 - `create/update` 先写 SQLite，再尽力同步 Feishu
 - 如果 SQLite 为空且 Feishu `option_positions` 已配置，首次启动会自动从 Feishu bootstrap
@@ -274,6 +298,7 @@ cat output/reports/symbols_notification.txt
 ### 通知发送
 
 常见通知目标配置在 runtime config 的 `notifications` 中。
+最小配置默认不启用 Feishu 通知；需要时再单独加 `notifications` 和 Feishu 凭证。
 
 安全建议：
 
@@ -288,18 +313,18 @@ cat output/reports/symbols_notification.txt
 
 ```bash
 ./.venv/bin/python scripts/send_if_needed_multi.py \
-  --config ../options-monitor-config/config.us.json \
+  --config config.us.json \
   --market-config us \
-  --accounts lx sy
+  --accounts user1
 ```
 
 港股：
 
 ```bash
 ./.venv/bin/python scripts/send_if_needed_multi.py \
-  --config ../options-monitor-config/config.hk.json \
+  --config config.hk.json \
   --market-config hk \
-  --accounts lx sy
+  --accounts user1
 ```
 
 这个入口会做：
@@ -425,6 +450,26 @@ python3 scripts/auto_trade_intake.py \
   --required-data-root output \
   --output-dir output/reports
 ```
+
+公开配置入口在 runtime config 顶层 `close_advice`，常用字段：
+
+```json
+{
+  "close_advice": {
+    "enabled": true,
+    "quote_source": "auto",
+    "notify_levels": ["strong", "medium"],
+    "max_items_per_account": 5,
+    "max_spread_ratio": 0.4,
+    "strong_remaining_annualized_max": 0.08,
+    "medium_remaining_annualized_max": 0.12
+  }
+}
+```
+
+默认输出：
+- `output/reports/close_advice.csv`
+- `output/reports/close_advice.txt`
 
 ## 业务口径摘要
 
