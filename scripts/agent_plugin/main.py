@@ -6,7 +6,6 @@ from typing import Any
 
 from scripts.agent_plugin.config import write_tools_enabled
 from scripts.agent_plugin.contracts import AgentToolError, build_error_payload, build_response
-from scripts.agent_plugin.tools import TOOL_HANDLERS
 
 
 def build_spec() -> dict[str, Any]:
@@ -197,6 +196,8 @@ def build_spec() -> dict[str, Any]:
 
 
 def run_tool(tool_name: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    from scripts.agent_plugin.tools import TOOL_HANDLERS
+
     handler = TOOL_HANDLERS.get(str(tool_name or "").strip())
     if handler is None:
         err = AgentToolError(
