@@ -21,7 +21,9 @@ from typing import Callable
 def pm_config_candidates(*, base: Path) -> list[Path]:
     base = Path(base).resolve()
     candidates = [
+        (base / "secrets" / "portfolio.sqlite.json").resolve(),
         (base / "secrets" / "portfolio.feishu.json").resolve(),
+        Path("/opt/options-monitor/secrets/portfolio.sqlite.json").resolve(),
         Path("/opt/options-monitor/secrets/portfolio.feishu.json").resolve(),
     ]
     seen: set[str] = set()
@@ -49,6 +51,9 @@ def resolve_pm_config_path(*, base: Path, pm_config: str | Path | None) -> Path:
         if not path.is_absolute():
             path = (Path(base).resolve() / path).resolve()
         return path
+    env_ref = str(os.environ.get("OM_DATA_CONFIG") or "").strip()
+    if env_ref:
+        return Path(env_ref).expanduser().resolve()
     env_ref = str(os.environ.get("OM_PM_CONFIG") or "").strip()
     if env_ref:
         return Path(env_ref).expanduser().resolve()
@@ -74,6 +79,31 @@ def set_watchlist_config(cfg: dict | None, items: list[dict]) -> dict:
     data = cfg if isinstance(cfg, dict) else {}
     normalized = [it for it in (items or []) if isinstance(it, dict)]
     data['symbols'] = normalized
+    return data
+
+
+def normalize_portfolio_broker_config(cfg: dict | None) -> dict:
+    data = dict(cfg or {}) if isinstance(cfg, dict) else {}
+    portfolio = data.get('portfolio')
+    if not isinstance(portfolio, dict):
+        return data
+
+    normalized = dict(portfolio)
+    data_config = str(normalized.get('data_config') or '').strip()
+    pm_config = str(normalized.get('pm_config') or '').strip()
+    if data_config and not pm_config:
+        normalized['pm_config'] = data_config
+    elif pm_config and not data_config:
+        normalized['data_config'] = pm_config
+
+    broker = str(normalized.get('broker') or '').strip()
+    market = str(normalized.get('market') or '').strip()
+    if broker and not market:
+        normalized['market'] = broker
+    elif market and not broker:
+        normalized['broker'] = market
+
+    data['portfolio'] = normalized
     return data
 
 
@@ -125,6 +155,8 @@ def load_config(
 
     if not isinstance(cfg, dict):
         raise SystemExit('[CONFIG_ERROR] config must be a JSON/YAML object')
+
+    cfg = normalize_portfolio_broker_config(cfg)
 
     try:
         if validate_config_fn is None:

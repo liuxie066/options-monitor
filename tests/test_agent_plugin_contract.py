@@ -17,7 +17,14 @@ def test_agent_spec_uses_symbols_public_name() -> None:
 
     assert "manage_symbols" in tool_names
     assert "manage_watchlist" not in tool_names
+    assert "prepare_close_advice_inputs" in tool_names
+    assert "close_advice" in tool_names
+    assert "get_close_advice" in tool_names
     assert spec["schema_version"] == "1.0"
+    assert spec["recommended_flow"] == ["healthcheck", "scan_opportunities", "get_close_advice"]
+    get_close_advice = next(item for item in spec["tools"] if item["name"] == "get_close_advice")
+    assert "requires" in get_close_advice
+    assert "capabilities" in get_close_advice
 
 
 def test_agent_run_unknown_tool_returns_structured_error() -> None:
@@ -43,3 +50,7 @@ def test_agent_cli_spec_prints_json_manifest() -> None:
     payload = json.loads(p.stdout)
     assert payload["name"] == "options-monitor-local-tools"
     assert any(str(x.get("name")) == "query_cash_headroom" for x in payload.get("tools", []))
+    assert payload["launcher"]["init_command"][0:2] == ["./om-agent", "init"]
+    assert payload["launcher"]["add_account_command"][0:2] == ["./om-agent", "add-account"]
+    assert payload["launcher"]["edit_account_command"][0:2] == ["./om-agent", "edit-account"]
+    assert payload["launcher"]["remove_account_command"][0:2] == ["./om-agent", "remove-account"]

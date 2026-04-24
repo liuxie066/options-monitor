@@ -10,7 +10,7 @@ def test_accounts_from_config_normalizes_and_dedupes() -> None:
 def test_accounts_from_config_keeps_legacy_fallback() -> None:
     from scripts.account_config import accounts_from_config
 
-    assert accounts_from_config({}) == ["lx", "sy"]
+    assert accounts_from_config({}) == ["user1"]
 
 
 def test_cash_footer_accounts_prefers_notification_override_then_accounts() -> None:
@@ -42,6 +42,59 @@ def test_resolve_portfolio_source_prefers_account_override_then_global_then_auto
     assert resolve_portfolio_source(cfg, account="sy") == "auto"
     assert resolve_portfolio_source(cfg, account="unknown") == "holdings"
     assert resolve_portfolio_source({}, account="lx") == "auto"
+
+
+def test_resolve_account_type_uses_account_settings_then_legacy_holdings_override() -> None:
+    from scripts.account_config import resolve_account_type
+
+    cfg = {
+        "accounts": ["user1", "ext1", "ext2"],
+        "account_settings": {
+            "user1": {"type": "futu"},
+            "ext1": {"type": "external_holdings", "holdings_account": "feishu-ext1"},
+        },
+        "portfolio": {
+            "source_by_account": {
+                "ext2": "holdings",
+            }
+        },
+    }
+
+    assert resolve_account_type(cfg, account="user1") == "futu"
+    assert resolve_account_type(cfg, account="ext1") == "external_holdings"
+    assert resolve_account_type(cfg, account="ext2") == "external_holdings"
+
+
+def test_resolve_holdings_account_uses_explicit_mapping_then_account_label() -> None:
+    from scripts.account_config import resolve_holdings_account
+
+    cfg = {
+        "accounts": ["user1", "ext1"],
+        "account_settings": {
+            "user1": {"type": "futu", "holdings_account": "LX"},
+            "ext1": {"type": "external_holdings", "holdings_account": "Feishu EXT"},
+        },
+    }
+
+    assert resolve_holdings_account(cfg, account="ext1") == "Feishu EXT"
+    assert resolve_holdings_account(cfg, account="user1") == "LX"
+
+
+def test_resolve_portfolio_source_keeps_futu_auto_with_holdings_fallback() -> None:
+    from scripts.account_config import resolve_portfolio_source
+
+    cfg = {
+        "accounts": ["lx"],
+        "account_settings": {
+            "lx": {"type": "futu", "holdings_account": "lx"},
+        },
+        "portfolio": {
+            "source": "auto",
+            "source_by_account": {"lx": "auto"},
+        },
+    }
+
+    assert resolve_portfolio_source(cfg, account="lx") == "auto"
 
 
 def test_parse_option_message_accepts_configured_account_labels() -> None:

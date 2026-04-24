@@ -68,7 +68,8 @@ def main():
 
     # 2) feishu schema
     try:
-        pm_ref = (opt_cfg.get('portfolio') or {}).get('pm_config')
+        portfolio_cfg = (opt_cfg.get('portfolio') or {})
+        pm_ref = portfolio_cfg.get('data_config') or portfolio_cfg.get('pm_config')
         pm_path = resolve_pm_config_path(base=base, pm_config=pm_ref)
         pm = json.loads(pm_path.read_text(encoding='utf-8'))
 
