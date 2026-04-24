@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import Any, Mapping
 
 from domain.domain.fetch_source import is_futu_fetch_source, normalize_fetch_source
-from scripts.futu_gateway import build_futu_gateway
+from scripts.futu_gateway import build_ready_futu_gateway
 
 
 def _rows(data: Any) -> list[dict[str, Any]]:
@@ -165,7 +165,7 @@ def infer_futu_portfolio_settings(cfg: Mapping[str, Any] | Any) -> dict[str, Any
         fetch = item.get("fetch")
         if not isinstance(fetch, Mapping):
             continue
-        src = normalize_fetch_source(fetch.get("source", "yahoo"))
+        src = normalize_fetch_source(fetch.get("source", "opend"))
         if not is_futu_fetch_source(src):
             continue
         for key in ("host", "port", "trd_env", "acc_id", "trd_market", "cash_currency"):
@@ -328,7 +328,7 @@ def fetch_futu_portfolio_context(
     if not account_ids:
         raise ValueError(f"no futu account mapping for account={account}")
 
-    gateway = build_futu_gateway(
+    gateway = build_ready_futu_gateway(
         host=str(host),
         port=int(port),
         is_option_chain_cache_enabled=False,

@@ -16,7 +16,6 @@ import json
 from datetime import datetime, timezone
 
 from scripts.feishu_bitable import safe_float, parse_note_kv
-from scripts.config_loader import resolve_pm_config_path
 from scripts.option_positions_core.domain import (
     effective_contracts,
     effective_contracts_closed,
@@ -30,15 +29,14 @@ from scripts.option_positions_core.domain import (
     normalize_status,
 )
 from scripts.io_utils import atomic_write_json
-from scripts.option_positions_core.service import load_option_positions_repo
+from src.application.option_positions_facade import load_option_position_records, resolve_option_position_records
 
-# Local helper to get FX rates (USDCNY/HKDCNY) for base-currency normalization.
+# Local helper to get exchange rates (USDCNY/HKDCNY) for base-currency normalization.
 # This file lives in the same scripts/ directory, so plain import works.
 try:
-    from fx_rates import get_rates_or_fetch_latest
+    from exchange_rates import get_exchange_rates_or_fetch_latest
 except Exception:
-    from scripts.fx_rates import get_rates_or_fetch_latest
-
+    from scripts.exchange_rates import get_exchange_rates_or_fetch_latest
 
 def build_context(records: list[dict], broker: str, account: str | None = None, rates: dict | None = None) -> dict:
     """Build context from raw Bitable records.
@@ -69,28 +67,28 @@ def build_context(records: list[dict], broker: str, account: str | None = None, 
     # Aggregate open short positions for constraints
     locked_shares_by_symbol: dict[str, int] = {}
 
-    # cash_secured_amount is stored in option_positions table with an explicit currency field (USD/CNY/HKD).
+    # cash_secured_amount is stored on projected position lots with an explicit currency field (USD/CNY/HKD).
     # We aggregate:
     # - by_symbol: in original currency buckets
-    # - total_base_cny: unified base currency (CNY) using FX rates when available
+    # - total_base_cny: unified base currency (CNY) using exchange rates when available
     cash_secured_by_symbol_by_ccy: dict[str, dict[str, float]] = {}
     cash_secured_total_by_ccy: dict[str, float] = {}
 
     cash_secured_total_cny: float | None = 0.0
 
-    usdcny = None
-    hkdcny = None
+    usdcny_exchange_rate = None
+    cny_per_hkd_exchange_rate = None
     if rates:
         # rates may be either the full cache object {rates:{...}, timestamp, cached_at} or already the dict of rates
         rates_map = rates.get('rates') if isinstance(rates, dict) and 'rates' in rates else rates
         try:
-            usdcny = float(rates_map.get('USDCNY')) if rates_map.get('USDCNY') else None
+            usdcny_exchange_rate = float(rates_map.get('USDCNY')) if rates_map.get('USDCNY') else None
         except Exception:
-            usdcny = None
+            usdcny_exchange_rate = None
         try:
-            hkdcny = float(rates_map.get('HKDCNY')) if rates_map.get('HKDCNY') else None
+            cny_per_hkd_exchange_rate = float(rates_map.get('HKDCNY')) if rates_map.get('HKDCNY') else None
         except Exception:
-            hkdcny = None
+            cny_per_hkd_exchange_rate = None
 
     # Minimal open positions list for downstream (auto-close), keeps record_id.
     open_positions_min: list[dict] = []
@@ -174,13 +172,13 @@ def build_context(records: list[dict], broker: str, account: str | None = None, 
                 if currency == 'CNY':
                     cash_secured_total_cny += float(cash_secured)
                 elif currency == 'USD':
-                    if usdcny:
-                        cash_secured_total_cny += float(cash_secured) * float(usdcny)
+                    if usdcny_exchange_rate:
+                        cash_secured_total_cny += float(cash_secured) * float(usdcny_exchange_rate)
                     else:
                         cash_secured_total_cny = None
                 elif currency == 'HKD':
-                    if hkdcny:
-                        cash_secured_total_cny += float(cash_secured) * float(hkdcny)
+                    if cny_per_hkd_exchange_rate:
+                        cash_secured_total_cny += float(cash_secured) * float(cny_per_hkd_exchange_rate)
                     else:
                         cash_secured_total_cny = None
                 else:
@@ -193,7 +191,7 @@ def build_context(records: list[dict], broker: str, account: str | None = None, 
         "cash_secured_by_symbol_by_ccy": cash_secured_by_symbol_by_ccy,
         "cash_secured_total_by_ccy": cash_secured_total_by_ccy,
         "cash_secured_total_cny": cash_secured_total_cny,
-        "fx_rates": (rates or {}),
+        "exchange_rates": (rates or {}),
         "raw_selected_count": len(selected_items),
         "open_positions_min": open_positions_min,
     }
@@ -235,8 +233,8 @@ def slice_shared_context_for_account(shared_ctx: dict, account: str | None) -> d
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Fetch option positions context from Feishu option_positions table")
-    parser.add_argument("--pm-config", default=None, help="Feishu/Bitable credential config path; auto-resolves when omitted")
+    parser = argparse.ArgumentParser(description="Fetch projected position lot context")
+    parser.add_argument("--data-config", default=None, help="portfolio data config path; auto-resolves when omitted")
     parser.add_argument("--broker", default="富途")
     parser.add_argument("--market", default=None, help="DEPRECATED alias of --broker")
     parser.add_argument("--account", default=None)
@@ -247,12 +245,9 @@ def main():
     args = parser.parse_args()
 
     base = Path(__file__).resolve().parents[1]
-    pm_config_path = resolve_pm_config_path(base=base, pm_config=args.pm_config)
-
-    repo = load_option_positions_repo(pm_config_path)
-    records = repo.list_records(page_size=500)
-    # Load FX rates for base-currency normalization (CNY).
-    # Uses local cache plus optional shared cache / provider fallback when available.
+    _data_config_path, _repo, records = resolve_option_position_records(base=base, data_config=args.data_config)
+    # Load exchange rates for base-currency normalization (CNY).
+    # Uses current-project cache plus live refresh when needed.
     base = Path(__file__).resolve().parents[1]
     # Resolve output path/state_dir
     if args.out:
@@ -270,7 +265,7 @@ def main():
 
     # Prefer co-locating rate_cache with state_dir
 
-    rates = get_rates_or_fetch_latest(
+    rates = get_exchange_rates_or_fetch_latest(
         cache_path=(state_dir / 'rate_cache.json').resolve(),
         max_age_hours=24,
     )

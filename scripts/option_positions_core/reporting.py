@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from scripts.feishu_bitable import parse_note_kv, safe_float
-from scripts.fx_rates import CurrencyConverter, FxRates
-from scripts.multiplier_cache import get_builtin_multiplier
+from scripts.exchange_rates import CurrencyConverter, ExchangeRates
+from scripts.multiplier_cache import resolve_multiplier
 from scripts.option_positions_core.domain import (
     BUY_TO_CLOSE,
     EXPIRE_AUTO_CLOSE,
@@ -124,25 +125,34 @@ def _read_multiplier(fields: dict[str, Any]) -> int | None:
         multiplier = safe_float(parse_note_kv(fields.get("note") or "", "multiplier"))
     if multiplier is not None and int(multiplier) > 0:
         return int(multiplier)
-    builtin = get_builtin_multiplier(norm_symbol(fields.get("symbol") or ""))
-    return int(builtin) if builtin else None
+    resolved = resolve_multiplier(
+        repo_base=Path(__file__).resolve().parents[2],
+        symbol=norm_symbol(fields.get("symbol") or ""),
+        allow_opend_refresh=False,
+    )
+    return int(resolved) if resolved else None
 
 
-def _build_fx_converter(rates: dict[str, Any] | None) -> CurrencyConverter:
+def _build_exchange_rate_converter(rates: dict[str, Any] | None) -> CurrencyConverter:
     rates_map = rates.get("rates") if isinstance(rates, dict) and isinstance(rates.get("rates"), dict) else rates
-    usdcny = None
-    hkdcny = None
+    usdcny_exchange_rate = None
+    cny_per_hkd_exchange_rate = None
     if isinstance(rates_map, dict):
         try:
-            usdcny = float(rates_map.get("USDCNY")) if rates_map.get("USDCNY") else None
+            usdcny_exchange_rate = float(rates_map.get("USDCNY")) if rates_map.get("USDCNY") else None
         except Exception:
-            usdcny = None
+            usdcny_exchange_rate = None
         try:
-            hkdcny = float(rates_map.get("HKDCNY")) if rates_map.get("HKDCNY") else None
+            cny_per_hkd_exchange_rate = float(rates_map.get("HKDCNY")) if rates_map.get("HKDCNY") else None
         except Exception:
-            hkdcny = None
-    usd_per_cny = (1.0 / usdcny) if usdcny and usdcny > 0 else None
-    return CurrencyConverter(FxRates(usd_per_cny=usd_per_cny, cny_per_hkd=hkdcny))
+            cny_per_hkd_exchange_rate = None
+    usd_per_cny_exchange_rate = (1.0 / usdcny_exchange_rate) if usdcny_exchange_rate and usdcny_exchange_rate > 0 else None
+    return CurrencyConverter(
+        ExchangeRates(
+            usd_per_cny=usd_per_cny_exchange_rate,
+            cny_per_hkd=cny_per_hkd_exchange_rate,
+        )
+    )
 
 
 def _maybe_to_cny(converter: CurrencyConverter, amount: float, currency: str) -> float | None:
@@ -270,7 +280,7 @@ def build_monthly_income_report(
 ) -> dict[str, Any]:
     account_norm = normalize_account(account) if account else None
     broker_norm = normalize_broker(broker) if broker else None
-    converter = _build_fx_converter(rates)
+    converter = _build_exchange_rate_converter(rates)
     rows: list[IncomeRow] = []
     premium_rows: list[PremiumIncomeRow] = []
     warnings: list[str] = []

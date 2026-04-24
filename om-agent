@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VPY="$ROOT/.venv/bin/python"
 
 if [[ -x "$VPY" ]]; then
-  exec "$VPY" "$ROOT/scripts/cli/om_agent_cli.py" "$@"
+  exec "$VPY" -m src.interfaces.agent.cli "$@"
 fi
 
-exec python3 "$ROOT/scripts/cli/om_agent_cli.py" "$@"
+exec python3 -m src.interfaces.agent.cli "$@"

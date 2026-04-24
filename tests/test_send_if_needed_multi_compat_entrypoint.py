@@ -3,9 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 
-def test_select_markets_to_run_compat_export_uses_domain_entrypoint() -> None:
+def test_select_markets_to_run_uses_domain_entrypoint() -> None:
     from domain.domain import select_markets_to_run
-    from scripts.send_if_needed_multi import _select_markets_to_run
 
     cfg = {
         'schedule_hk': {
@@ -30,4 +29,4 @@ def test_select_markets_to_run_compat_export_uses_domain_entrypoint() -> None:
         },
     }
     t = datetime(2026, 4, 1, 4, 30, 0, tzinfo=timezone.utc)
-    assert _select_markets_to_run(t, cfg, 'auto') == select_markets_to_run(t, cfg, 'auto')
+    assert select_markets_to_run(t, cfg, 'auto') == []

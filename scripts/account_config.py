@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +10,17 @@ DEFAULT_ACCOUNTS = ("user1",)
 ACCOUNT_TYPE_FUTU = "futu"
 ACCOUNT_TYPE_EXTERNAL_HOLDINGS = "external_holdings"
 ACCOUNT_TYPES = (ACCOUNT_TYPE_FUTU, ACCOUNT_TYPE_EXTERNAL_HOLDINGS)
+
+
+@dataclass(frozen=True)
+class AccountPortfolioSourcePlan:
+    account: str | None
+    account_type: str
+    requested_source: str
+    primary_source: str
+    fallback_source: str | None
+    holdings_account: str | None
+    configured_holdings_account: str | None
 
 
 def normalize_accounts(raw: Any, *, fallback: tuple[str, ...] = DEFAULT_ACCOUNTS) -> list[str]:
@@ -130,6 +142,54 @@ def resolve_portfolio_source(config: dict[str, Any] | None, *, account: str | No
     if value is not None and str(value).strip():
         return str(value).strip()
     return "auto"
+
+
+def normalize_portfolio_source(value: str | None) -> str:
+    raw = str(value or "").strip().lower()
+    if raw in ("", "auto"):
+        return "auto"
+    if raw in ("futu", "opend"):
+        return "futu"
+    return "holdings"
+
+
+def build_account_portfolio_source_plan(
+    config: dict[str, Any] | None,
+    *,
+    account: str | None,
+    portfolio_source: str | None = None,
+) -> AccountPortfolioSourcePlan:
+    account_key = str(account or "").strip().lower() or None
+    cfg = config if isinstance(config, dict) else {}
+    account_type = resolve_account_type(cfg, account=account_key)
+    requested_source = normalize_portfolio_source(
+        portfolio_source if portfolio_source is not None else resolve_portfolio_source(cfg, account=account_key)
+    )
+    configured_holdings_account = resolve_configured_holdings_account(cfg, account=account_key)
+    holdings_account = resolve_holdings_account(cfg, account=account_key)
+
+    if account_type == ACCOUNT_TYPE_EXTERNAL_HOLDINGS:
+        primary_source = "holdings"
+        fallback_source = None
+    elif requested_source == "futu":
+        primary_source = "futu"
+        fallback_source = ("holdings" if configured_holdings_account else None)
+    elif requested_source == "auto":
+        primary_source = "futu"
+        fallback_source = "holdings"
+    else:
+        primary_source = requested_source
+        fallback_source = None
+
+    return AccountPortfolioSourcePlan(
+        account=account_key,
+        account_type=account_type,
+        requested_source=requested_source,
+        primary_source=primary_source,
+        fallback_source=fallback_source,
+        holdings_account=holdings_account,
+        configured_holdings_account=configured_holdings_account,
+    )
 
 
 def cash_footer_accounts_from_config(

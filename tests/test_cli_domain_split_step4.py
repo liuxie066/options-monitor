@@ -14,8 +14,6 @@ TEST_ROOT = BASE / 'output' / 'state' / 'test_cli_domain_split_step4'
 
 DOMAIN_FILES = [
     BASE / 'scripts' / 'scan_scheduler.py',
-    BASE / 'scripts' / 'render_sell_put_alerts.py',
-    BASE / 'scripts' / 'render_sell_call_alerts.py',
     BASE / 'scripts' / 'query_sell_put_cash.py',
 ]
 
@@ -108,7 +106,7 @@ def test_render_alerts_domain_and_cli() -> None:
     p = subprocess.run(
         [
             str(VPY),
-            'scripts/cli/render_sell_put_alerts_cli.py',
+            'scripts/render_sell_put_alerts.py',
             '--input',
             str(put_in),
             '--output',
@@ -158,7 +156,9 @@ def test_scan_scheduler_domain_and_cli() -> None:
     p = subprocess.run(
         [
             str(VPY),
-            'scripts/cli/scan_scheduler_cli.py',
+            '-m',
+            'src.interfaces.cli.main',
+            'scheduler',
             '--config',
             str(cfg),
             '--state',
@@ -180,47 +180,52 @@ def test_query_sell_put_cash_domain_minimal() -> None:
 
     import scripts.query_sell_put_cash as m
 
-    def fake_run(cmd, cwd, timeout_sec=60):
-        return None
+    def fake_load_account_portfolio_context(**_kwargs):
+        return {'cash_by_currency': {'CNY': 100000.0, 'USD': 1000.0}, 'stocks_by_symbol': {}, 'portfolio_source_name': 'holdings'}
 
-    def fake_load_json(path: Path):
-        name = path.name
-        if name == 'portfolio_context.json':
-            return {'cash_by_currency': {'CNY': 100000.0, 'USD': 1000.0}}
-        if name == 'option_positions_context.json':
-            return {
-                'records': [
-                    {'symbol': 'AAPL', 'currency': 'USD', 'cash_secured_amount': 200.0, 'side': 'short', 'option_type': 'put'}
-                ]
-            }
-        if name == 'rate_cache.json':
-            return {'rates': {'USDCNY': 7.2, 'HKDCNY': 0.92}}
-        return {}
-
-    old_run = m.run
-    old_load_json = m.load_json
-    m.run = fake_run
-    m.load_json = fake_load_json
+    old_load_portfolio = m.load_account_portfolio_context
+    old_load_option_position_records = m.load_option_position_records
+    old_exchange_rates = m.get_exchange_rates_or_fetch_latest
+    old_build_context = m.build_option_positions_context
+    m.load_account_portfolio_context = fake_load_account_portfolio_context
+    m.load_option_position_records = lambda *_a, **_k: []
+    m.get_exchange_rates_or_fetch_latest = lambda **_kwargs: {'rates': {'USDCNY': 7.2, 'HKDCNY': 0.92}}
+    m.build_option_positions_context = lambda *_a, **_k: {
+        'cash_secured_by_symbol_by_ccy': {'AAPL': {'USD': 200.0}},
+        'cash_secured_total_by_ccy': {'USD': 200.0},
+        'cash_secured_total_cny': 1440.0,
+    }
     try:
         out_dir = TEST_ROOT / 'cash_query'
         out_dir.mkdir(parents=True, exist_ok=True)
         result = m.query_sell_put_cash(market='富途', account='lx', out_dir=str(out_dir))
         assert 'cash_free_cny' in result
     finally:
-        m.run = old_run
-        m.load_json = old_load_json
+        m.load_account_portfolio_context = old_load_portfolio
+        m.load_option_position_records = old_load_option_position_records
+        m.get_exchange_rates_or_fetch_latest = old_exchange_rates
+        m.build_option_positions_context = old_build_context
 
 
 def test_new_cli_files_exist_and_help_ok() -> None:
     cli_files = [
-        'scripts/cli/scan_scheduler_cli.py',
-        'scripts/cli/render_sell_put_alerts_cli.py',
-        'scripts/cli/render_sell_call_alerts_cli.py',
-        'scripts/cli/query_sell_put_cash_cli.py',
+        'scripts/render_sell_put_alerts.py',
+        'scripts/render_sell_call_alerts.py',
     ]
     for rel in cli_files:
         p = subprocess.run(
             [str(VPY), rel, '--help'],
+            cwd=str(BASE),
+            capture_output=True,
+            text=True,
+        )
+        assert p.returncode == 0
+    for argv in (
+        ['-m', 'src.interfaces.cli.main', 'scheduler', '--help'],
+        ['-m', 'src.interfaces.cli.main', 'sell-put-cash', '--help'],
+    ):
+        p = subprocess.run(
+            [str(VPY), *argv],
             cwd=str(BASE),
             capture_output=True,
             text=True,

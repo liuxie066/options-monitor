@@ -161,6 +161,19 @@ def test_scan_sell_call_filter_and_rank_baseline() -> None:
         assert set(["engine_reject_stage", "engine_reject_reason"]).issubset(set(reject_log.columns))
 
 
+def test_sell_call_risk_bands_are_stable() -> None:
+    _add_repo_to_syspath()
+    from scripts.sell_call_risk_bands import classify_sell_call_risk
+
+    aggressive = classify_sell_call_risk(0.02)
+    neutral = classify_sell_call_risk(0.05)
+    conservative = classify_sell_call_risk(0.10)
+
+    assert (aggressive.band, aggressive.risk_label) == ("<3%", "激进")
+    assert (neutral.band, neutral.risk_label) == ("3%-8%", "中性")
+    assert (conservative.band, conservative.risk_label) == (">=8%", "保守")
+
+
 def test_render_sell_call_rank_order_consistent_with_strategy() -> None:
     _add_repo_to_syspath()
     from domain.domain.engine import build_strategy_config, rank_scored_candidates

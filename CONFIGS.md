@@ -12,21 +12,18 @@
 - 仓内同名文件仅作为开发机或临时本地运行的兼容默认，已被 `.gitignore` 忽略。
 - runtime 入口配置以 canonical 为准，生产 cron 应显式传入仓外配置的绝对路径。
 
-## Derived Configs（派生产物，禁止手工维护）
+## Data Configs（独立数据配置）
 
-以下文件为派生产物，只能由同步脚本生成：
-- `config.scheduled.json`
-- `config.market_us.json`
-- `config.market_hk.json`
-- `config.market_us.fallback_yahoo.json`
-- `config.json`
+- `secrets/portfolio.sqlite.json`
+- 可选：`secrets/portfolio.feishu.json`
 
-## 变更流程（编辑 canonical -> 同步 -> 校验）
+运行时配置里的 `portfolio.data_config` 指向这类数据配置文件。
+
+## 变更流程（编辑 canonical -> 校验）
 
 1. 编辑仓外 canonical：`/opt/options-monitor/configs/config.us.json` / `/opt/options-monitor/configs/config.hk.json`。
 2. 运行入口显式使用仓外路径：`--config /opt/options-monitor/configs/config.us.json`。
-3. 若仍维护仓内兼容配置，再按需同步派生：`./.venv/bin/python scripts/sync_runtime_configs.py --apply`。
-4. 校验一致性：`./.venv/bin/python scripts/sync_runtime_configs.py --check`。
+3. 校验配置：`./.venv/bin/python scripts/validate_config.py --config /opt/options-monitor/configs/config.us.json`。
 
 ## Runtime Config 迁移
 
@@ -51,7 +48,5 @@
 
 ## 禁令
 
-- 禁止把派生配置当作维护入口或长期入口。
+- 禁止把 `config.json` / `config.scheduled.json` / `config.market_*.json` 当作 runtime 入口。
 - 禁止提交本地 runtime config 与 runtime secrets（凭证、token、私钥等）。
-
-当前生产入口已直接强制 canonical runtime config，不再提供 `OM_ALLOW_DERIVED_CONFIG` 这类 derived-config 放行开关。

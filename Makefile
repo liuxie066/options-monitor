@@ -13,12 +13,6 @@ deploy-safe:
 	$(MAKE) policy-check POLICY_ACTION=deploy
 	bash scripts/deploy_safe.sh
 
-config-sync:
-	./.venv/bin/python scripts/sync_runtime_configs.py --apply
-
-config-sync-check:
-	./.venv/bin/python scripts/sync_runtime_configs.py --check
-
 test:
 	$(PYTHON) tests/run_tests.py
 

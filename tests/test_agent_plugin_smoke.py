@@ -31,7 +31,7 @@ def _minimal_cfg() -> dict:
             {
                 "symbol": "NVDA",
                 "market": "US",
-                "fetch": {"source": "yahoo", "limit_expirations": 8},
+                "fetch": {"source": "futu", "limit_expirations": 8},
                 "use": ["put_base"],
                 "sell_put": {
                     "enabled": True,
@@ -268,7 +268,7 @@ def test_healthcheck_accepts_external_holdings_account_without_futu_mapping(monk
     assert fallback["value"]["ext1"]["enabled"] is True
 
 
-def test_get_portfolio_context_allows_futu_source_without_pm_config(monkeypatch, tmp_path: Path) -> None:
+def test_get_portfolio_context_allows_futu_source_without_explicit_data_config(monkeypatch, tmp_path: Path) -> None:
     from scripts.agent_plugin.main import run_tool
     import scripts.agent_plugin.tools as tools
 
@@ -280,7 +280,7 @@ def test_get_portfolio_context_allows_futu_source_without_pm_config(monkeypatch,
     old_load = tools.load_portfolio_context
     try:
         def _fake_load_portfolio_context(**kwargs):  # type: ignore[no-untyped-def]
-            assert str(kwargs["pm_config"]).endswith("secrets/portfolio.sqlite.json")
+            assert str(kwargs["data_config"]).endswith("secrets/portfolio.sqlite.json")
             return {
                 "portfolio_source_name": "futu",
                 "cash_by_currency": {"USD": 1000.0},
@@ -304,7 +304,7 @@ def test_spec_exposes_broker_as_public_field() -> None:
     assert "broker" in query_tool["input_schema"]
     assert "market" in query_tool["input_schema"]
     assert "data_config" in query_tool["input_schema"]
-    assert "pm_config" in query_tool["input_schema"]
+    assert "pm_config" not in query_tool["input_schema"]
 
 
 def test_close_advice_reads_cached_context_and_required_data(monkeypatch, tmp_path: Path) -> None:
@@ -425,7 +425,7 @@ def test_prepare_close_advice_inputs_builds_context_and_required_data(monkeypatc
     assert out["meta"]["required_data_root"] == ".../required_data"
 
 
-def test_prepare_close_advice_inputs_returns_dependency_error_when_context_is_unavailable(tmp_path: Path) -> None:
+def test_prepare_close_advice_inputs_returns_empty_result_when_context_has_no_positions(tmp_path: Path) -> None:
     from scripts.agent_plugin.main import run_tool
 
     cfg_path = tmp_path / "config.us.json"
@@ -435,8 +435,9 @@ def test_prepare_close_advice_inputs_returns_dependency_error_when_context_is_un
 
     out = run_tool("prepare_close_advice_inputs", {"config_path": str(cfg_path)})
 
-    assert out["ok"] is False
-    assert out["error"]["code"] == "DEPENDENCY_MISSING"
+    assert out["ok"] is True
+    assert out["data"]["context_rows"] == 0
+    assert out["data"]["symbol_count"] == 0
 
 
 def test_get_close_advice_runs_prepare_then_render(monkeypatch, tmp_path: Path) -> None:

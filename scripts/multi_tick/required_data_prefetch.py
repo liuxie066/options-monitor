@@ -17,7 +17,6 @@ from domain.domain.fetch_source import is_futu_fetch_source, resolve_symbol_fetc
 from domain.storage.repositories import state_repo
 from scripts.config_loader import resolve_watchlist_config
 from scripts.io_utils import has_shared_required_data
-from scripts.pm_bridge import resolve_spot_fallback_enabled
 
 
 def _to_int(v: Any, default: int) -> int:
@@ -118,33 +117,17 @@ def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required:
         limit_exp = int(fetch_cfg.get('limit_expirations') or symbol_cfg.get('fetch', {}).get('limit_expirations', 8) or 8)
         opt_types = 'put,call'
 
-        cmd: list[str]
-        if src == 'opend':
-            cmd = [
-                str(vpy), 'scripts/fetch_market_data_opend.py',
-                '--symbols', symbol,
-                '--limit-expirations', str(limit_exp),
-                '--host', str(fetch_cfg.get('host') or '127.0.0.1'),
-                '--port', str(int(fetch_cfg.get('port') or 11111)),
-                '--option-types', opt_types,
-                '--output-root', str(shared_required),
-                '--chain-cache',
-                '--quiet',
-            ]
-            try:
-                u = str(symbol).strip().upper()
-                spot_from_yahoo = resolve_spot_fallback_enabled(fetch_cfg, symbol=symbol)
-                if spot_from_yahoo:
-                    cmd.append('--spot-from-yahoo')
-            except Exception:
-                pass
-        else:
-            cmd = [
-                str(vpy), 'scripts/fetch_market_data.py',
-                '--symbols', symbol,
-                '--output-root', str(shared_required),
-                '--limit-expirations', str(limit_exp),
-            ]
+        cmd = [
+            str(vpy), 'scripts/fetch_market_data_opend.py',
+            '--symbols', symbol,
+            '--limit-expirations', str(limit_exp),
+            '--host', str(fetch_cfg.get('host') or '127.0.0.1'),
+            '--port', str(int(fetch_cfg.get('port') or 11111)),
+            '--option-types', opt_types,
+            '--output-root', str(shared_required),
+            '--chain-cache',
+            '--quiet',
+        ]
 
         payload = exec_service.execute(
             ToolExecutionIntent(

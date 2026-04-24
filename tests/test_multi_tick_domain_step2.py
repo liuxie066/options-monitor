@@ -294,10 +294,10 @@ def test_filter_notify_candidates_matches_existing_predicate() -> None:
     from scripts.multi_tick.misc import AccountResult
 
     results = [
-        AccountResult('a', True, True, True, 'ok', 'x'),
-        AccountResult('b', True, True, False, 'ok', 'x'),
-        AccountResult('c', True, False, True, 'ok', 'x'),
-        AccountResult('d', True, True, True, 'ok', '   '),
+        AccountResult('a', True, True, 'ok', 'x'),
+        AccountResult('b', True, True, 'ok', '今日无需要主动提醒的内容。'),
+        AccountResult('c', True, False, 'ok', 'x'),
+        AccountResult('d', True, True, 'ok', '   '),
     ]
 
     selected = filter_notify_candidates(results)
@@ -334,8 +334,8 @@ def test_build_account_messages_aggregates_non_empty_messages() -> None:
         return ''
 
     results = [
-        AccountResult('a', True, True, True, 'ok', 'x'),
-        AccountResult('b', True, True, True, 'ok', 'y'),
+        AccountResult('a', True, True, 'ok', 'x'),
+        AccountResult('b', True, True, 'ok', 'y'),
     ]
 
     out = build_account_messages(
@@ -353,9 +353,9 @@ def test_build_no_candidate_account_messages_emits_monitor_heartbeat() -> None:
     from scripts.multi_tick.misc import AccountResult
 
     results = [
-        AccountResult('a', True, True, False, 'ok', ''),
-        AccountResult('b', True, False, False, 'closed', ''),
-        AccountResult('c', False, True, False, 'skip', ''),
+        AccountResult('a', True, True, 'ok', ''),
+        AccountResult('b', True, False, 'closed', ''),
+        AccountResult('c', False, True, 'skip', ''),
     ]
 
     out = build_no_candidate_account_messages(
@@ -382,8 +382,8 @@ def test_build_no_account_notification_payloads_keeps_existing_fields() -> None:
         return f'2026-04-11T11:44:0{calls["n"]}Z'
 
     results = [
-        AccountResult('a', True, True, True, 'ok', 'x'),
-        AccountResult('b', False, False, False, 'skip', ''),
+        AccountResult('a', True, True, 'ok', 'x'),
+        AccountResult('b', False, False, 'skip', ''),
     ]
 
     shared, per_account = build_no_account_notification_payloads(

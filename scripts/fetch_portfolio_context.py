@@ -13,7 +13,6 @@ if str(repo_base) not in sys.path:
 
 import argparse
 import json
-from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from scripts.feishu_bitable import (
@@ -23,7 +22,7 @@ from scripts.feishu_bitable import (
     bitable_search_records,
     bitable_list_records,
 )
-from scripts.config_loader import resolve_pm_config_path
+from scripts.config_loader import resolve_data_config_path
 from scripts.io_utils import atomic_write_json
 
 from scripts.feishu_bitable import safe_float
@@ -231,9 +230,43 @@ def slice_shared_context_for_account(shared_ctx: dict, account: str | None) -> d
     return (dict(out) if isinstance(out, dict) else None)
 
 
+def load_holdings_records(data_config_path: Path) -> list[dict]:
+    cfg = json.loads(data_config_path.read_text(encoding="utf-8"))
+    feishu_cfg = cfg.get("feishu", {}) or {}
+    app_id = feishu_cfg.get("app_id")
+    app_secret = feishu_cfg.get("app_secret")
+    holdings_ref = (feishu_cfg.get("tables", {}) or {}).get("holdings")
+    if not (app_id and app_secret and holdings_ref and "/" in holdings_ref):
+        raise ValueError("data config missing feishu app_id/app_secret/holdings")
+
+    app_token, table_id = holdings_ref.split("/", 1)
+    token = get_tenant_access_token(app_id, app_secret)
+    try:
+        return bitable_search_records(token, app_token, table_id)
+    except FeishuError:
+        return bitable_list_records(token, app_token, table_id)
+
+
+def load_holdings_portfolio_context(
+    *,
+    data_config_path: Path,
+    broker: str | None = None,
+    account: str | None = None,
+) -> dict:
+    return build_context(load_holdings_records(data_config_path), broker=broker, account=account)
+
+
+def load_holdings_portfolio_shared_context(
+    *,
+    data_config_path: Path,
+    broker: str | None = None,
+) -> dict:
+    return build_shared_context(load_holdings_records(data_config_path), broker=broker)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Fetch portfolio context from Feishu holdings table")
-    parser.add_argument("--pm-config", default=None, help="Feishu/Bitable credential config path; auto-resolves when omitted")
+    parser.add_argument("--data-config", default=None, help="portfolio data config path; auto-resolves when omitted")
     parser.add_argument("--broker", default="富途")
     parser.add_argument("--market", default=None, help="DEPRECATED alias of --broker")
     parser.add_argument("--account", default=None)
@@ -244,29 +277,16 @@ def main():
     args = parser.parse_args()
 
     base = Path(__file__).resolve().parents[1]
-    pm_config_path = resolve_pm_config_path(base=base, pm_config=args.pm_config)
+    data_config_path = resolve_data_config_path(base=base, data_config=args.data_config)
 
-    cfg = json.loads(pm_config_path.read_text(encoding="utf-8"))
-    feishu_cfg = cfg.get("feishu", {}) or {}
-    app_id = feishu_cfg.get("app_id")
-    app_secret = feishu_cfg.get("app_secret")
-    holdings_ref = (feishu_cfg.get("tables", {}) or {}).get("holdings")
-    if not (app_id and app_secret and holdings_ref and "/" in holdings_ref):
-        raise SystemExit("pm config missing feishu app_id/app_secret/holdings")
-
-    app_token, table_id = holdings_ref.split("/", 1)
-
-    token = get_tenant_access_token(app_id, app_secret)
-    # Prefer the search API (newer, more compatible). Fallback to legacy list.
-    try:
-        records = bitable_search_records(token, app_token, table_id)
-    except FeishuError as e:
-        # last resort: some tenants still allow list
-        records = bitable_list_records(token, app_token, table_id)
     broker = args.market if args.market is not None else args.broker
     if args.market and not args.quiet:
         print("[WARN] --market is deprecated; use --broker")
 
+    try:
+        records = load_holdings_records(data_config_path)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     ctx = build_context(records, broker=broker, account=args.account)
 
     if args.out:

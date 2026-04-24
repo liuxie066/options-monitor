@@ -11,8 +11,7 @@ repo_base = Path(__file__).resolve().parents[1]
 if str(repo_base) not in sys.path:
     sys.path.insert(0, str(repo_base))
 
-from scripts.config_loader import load_config, resolve_pm_config_path
-from scripts.option_positions_core.service import load_option_positions_repo
+from scripts.config_loader import load_config
 from scripts.trade_account_mapping import resolve_trade_intake_config
 from scripts.trade_event_normalizer import normalize_trade_deal
 from scripts.trade_intake_resolver import resolve_trade_deal
@@ -23,12 +22,14 @@ from scripts.trade_intake_state import (
     write_trade_intake_state,
 )
 from scripts.trade_push_listener import OpenDTradePushListener
+from src.application.option_positions_facade import resolve_option_positions_repo
+from src.application.trade_intake import process_trade_payload
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="Auto trade intake via OpenD deal push")
     ap.add_argument("--config", default="config.us.json")
-    ap.add_argument("--pm-config", default=None)
+    ap.add_argument("--data-config", default=None)
     ap.add_argument("--mode", choices=["dry-run", "apply"], default=None)
     ap.add_argument("--state-path", default=None)
     ap.add_argument("--audit-path", default=None)
@@ -43,29 +44,6 @@ def _log(message: str) -> None:
     print(message, flush=True)
 
 
-def _build_audit_event(phase: str, *, payload: dict | None = None, deal: object | None = None, result: dict | None = None) -> dict:
-    out: dict = {"phase": str(phase)}
-    if isinstance(payload, dict):
-        out["payload"] = payload
-    if deal is not None and hasattr(deal, "to_dict"):
-        deal_dict = deal.to_dict()
-        out["deal"] = deal_dict
-        out["deal_id"] = deal_dict.get("deal_id")
-        out["account"] = deal_dict.get("internal_account")
-        out["symbol"] = deal_dict.get("symbol")
-        out["position_effect"] = deal_dict.get("position_effect")
-        out["multiplier"] = deal_dict.get("multiplier")
-        out["multiplier_source"] = deal_dict.get("multiplier_source")
-    if isinstance(result, dict):
-        out["result"] = result
-        out["deal_id"] = out.get("deal_id") or result.get("deal_id")
-        out["account"] = out.get("account") or result.get("account")
-        out["action"] = result.get("action")
-        out["status"] = result.get("status")
-        out["reason"] = result.get("reason")
-    return out
-
-
 def _process_payload(
     payload: dict,
     *,
@@ -75,57 +53,20 @@ def _process_payload(
     account_mapping: dict[str, str],
     apply_changes: bool,
 ) -> dict:
-    state = load_trade_intake_state(state_path) if apply_changes else {}
-    append_trade_intake_audit(audit_path, _build_audit_event("received", payload=payload))
-    deal = normalize_trade_deal(payload, futu_account_mapping=account_mapping)
-    append_trade_intake_audit(audit_path, _build_audit_event("normalized", deal=deal))
-    result = resolve_trade_deal(deal, repo=repo, state=state, apply_changes=apply_changes)
-    append_trade_intake_audit(audit_path, _build_audit_event("resolved", deal=deal, result=result.to_dict()))
-
-    if apply_changes and deal.deal_id:
-        if result.status == "applied":
-            state = upsert_deal_state(
-                state,
-                bucket="processed_deal_ids",
-                deal_id=deal.deal_id,
-                payload={
-                    "status": "applied",
-                    "action": result.action,
-                    "account": result.account,
-                    "applied_record_ids": [op.get("record_id") for op in result.operations if op.get("record_id")],
-                    "reason": result.reason,
-                },
-            )
-            write_trade_intake_state(state_path, state)
-        elif result.status == "unresolved":
-            state = upsert_deal_state(
-                state,
-                bucket="unresolved_deal_ids",
-                deal_id=deal.deal_id,
-                payload={
-                    "status": "unresolved",
-                    "action": result.action,
-                    "account": result.account,
-                    "applied_record_ids": [],
-                    "reason": result.reason,
-                },
-            )
-            write_trade_intake_state(state_path, state)
-        elif result.status == "failed":
-            state = upsert_deal_state(
-                state,
-                bucket="failed_deal_ids",
-                deal_id=deal.deal_id,
-                payload={
-                    "status": "failed",
-                    "action": result.action,
-                    "account": result.account,
-                    "applied_record_ids": [],
-                    "reason": result.reason,
-                },
-            )
-            write_trade_intake_state(state_path, state)
-    return result.to_dict()
+    return process_trade_payload(
+        payload,
+        repo=repo,
+        state_path=state_path,
+        audit_path=audit_path,
+        account_mapping=account_mapping,
+        apply_changes=apply_changes,
+        load_trade_intake_state_fn=load_trade_intake_state,
+        write_trade_intake_state_fn=write_trade_intake_state,
+        upsert_deal_state_fn=upsert_deal_state,
+        append_trade_intake_audit_fn=append_trade_intake_audit,
+        normalize_trade_deal_fn=normalize_trade_deal,
+        resolve_trade_deal_fn=resolve_trade_deal,
+    )
 
 
 class _ReplayRepo:
@@ -180,8 +121,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.deal_json:
         payload = json.loads(Path(args.deal_json).read_text(encoding="utf-8"))
         if apply_changes:
-            pm_config = resolve_pm_config_path(base=base, pm_config=args.pm_config)
-            repo = load_option_positions_repo(pm_config)
+            _data_config, repo = resolve_option_positions_repo(base=base, data_config=args.data_config)
         else:
             repo = _ReplayRepo()
         result = _process_payload(
@@ -195,8 +135,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
 
-    pm_config = resolve_pm_config_path(base=base, pm_config=args.pm_config)
-    repo = load_option_positions_repo(pm_config)
+    _data_config, repo = resolve_option_positions_repo(base=base, data_config=args.data_config)
 
     if not bool(intake_cfg["enabled"]):
         raise SystemExit("trade_intake.enabled=false; refusing to start listener")

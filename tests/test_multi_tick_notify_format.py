@@ -20,7 +20,6 @@ def test_merged_message_is_plain_text_for_weixin() -> None:
                 account='lx',
                 ran_scan=True,
                 should_notify=True,
-                meaningful=True,
                 decision_reason='dense',
                 notification_text=notif,
             )
@@ -47,7 +46,6 @@ def test_merged_message_keeps_divider() -> None:
                 account='sy',
                 ran_scan=True,
                 should_notify=True,
-                meaningful=True,
                 decision_reason='dense',
                 notification_text=notif,
             )

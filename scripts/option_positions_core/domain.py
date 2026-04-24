@@ -225,10 +225,20 @@ def calc_cash_secured(strike: float, multiplier: float, contracts: int | float) 
 
 
 def guess_multiplier(symbol: str) -> float | None:
-    sym = norm_symbol(symbol)
-    if sym.endswith(".HK"):
+    try:
+        from pathlib import Path as _Path
+        from scripts.multiplier_cache import resolve_multiplier
+
+        return float(
+            resolve_multiplier(
+                repo_base=_Path(__file__).resolve().parents[2],
+                symbol=norm_symbol(symbol),
+                allow_opend_refresh=False,
+            )
+            or 0
+        ) or None
+    except Exception:
         return None
-    return 100.0
 
 
 def effective_contracts(fields: dict[str, Any]) -> int:

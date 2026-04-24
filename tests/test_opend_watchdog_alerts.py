@@ -39,17 +39,17 @@ def test_watchdog_error_code_mapping() -> None:
 
 def test_opend_alert_rate_limit() -> None:
     _ensure_repo_path()
-    import scripts.send_if_needed_multi as s
+    from scripts.multi_tick.opend_guard import should_send_opend_alert
 
     with TemporaryDirectory() as td:
         base = Path(td)
 
         # First send for a code should pass.
-        assert s._should_send_opend_alert(base, 'OPEND_RATE_LIMIT', cooldown_sec=600) is True
+        assert should_send_opend_alert(base, 'OPEND_RATE_LIMIT', cooldown_sec=600) is True
         # Immediate second send for same code should be blocked.
-        assert s._should_send_opend_alert(base, 'OPEND_RATE_LIMIT', cooldown_sec=600) is False
+        assert should_send_opend_alert(base, 'OPEND_RATE_LIMIT', cooldown_sec=600) is False
         # Different code should still pass.
-        assert s._should_send_opend_alert(base, 'OPEND_NOT_READY', cooldown_sec=600) is True
+        assert should_send_opend_alert(base, 'OPEND_NOT_READY', cooldown_sec=600) is True
 
 
 def test_opend_alert_family_dedupe_and_burst_limit() -> None:

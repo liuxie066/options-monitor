@@ -44,6 +44,15 @@ from domain.domain.engine import (
     decide_notify_window_open,
     resolve_scheduler_decision,
 )
+from src.application.scheduled_notification import (
+    build_scheduler_decision,
+    evaluate_trading_day_guard,
+    execute_single_account_delivery,
+    execute_single_account_pipeline,
+    infer_trading_day_guard_markets,
+    prepare_single_account_delivery,
+)
+from src.application.cron_runtime import request_scheduler_update, write_last_run
 from scripts.infra.service import (
     run_command,
     run_pipeline_script,
@@ -56,8 +65,7 @@ SCHEMA_VALIDATION_ERROR_CODE = "SCHEMA_VALIDATION_FAILED"
 
 
 def _infer_trading_day_guard_markets(cfg_obj: dict) -> list[str]:
-    # Keep legacy helper name for callers/tests, but centralize compat reads in domain.
-    return domain_markets_for_trading_day_guard([], cfg_obj, 'auto')
+    return infer_trading_day_guard_markets(cfg_obj, resolver=domain_markets_for_trading_day_guard)
 
 
 def _trading_day_guard_for_market(cfg_obj: dict, market: str) -> tuple[bool | None, str]:
@@ -117,24 +125,16 @@ def _release_lock(fd: int, lock_path: Path):
 def _fail_schema_validation(*, base: Path, vpy: Path, last_run: Path, started: str, stage: str, exc: BaseException) -> None:
     msg = f"{stage}: {type(exc).__name__}: {exc}"
     try:
-        sh(
-            [
-                str(vpy),
-                "scripts/write_last_run.py",
-                "--path",
-                str(last_run),
-                "--status",
-                "error",
-                "--stage",
-                "contract",
-                "--reason",
-                SCHEMA_VALIDATION_ERROR_CODE,
-                "--details",
-                msg,
-                "--started-at",
-                started,
-            ],
+        write_last_run(
+            sh=sh,
             cwd=base,
+            vpy=vpy,
+            last_run=last_run,
+            status="error",
+            stage="contract",
+            reason=SCHEMA_VALIDATION_ERROR_CODE,
+            details=msg,
+            started_at=started,
         )
     except Exception:
         pass
@@ -219,51 +219,52 @@ def main():
     try:
         lock_fd = _acquire_lock(lock_path)
     except FileExistsError:
-        sh([str(vpy), 'scripts/write_last_run.py', '--path', str(last_run), '--status', 'skip', '--stage', 'lock', '--reason', 'locked (another run in progress)', '--started-at', started], cwd=base)
+        write_last_run(
+            sh=sh,
+            cwd=base,
+            vpy=vpy,
+            last_run=last_run,
+            status="skip",
+            stage="lock",
+            reason="locked (another run in progress)",
+            started_at=started,
+        )
         return 0
 
     try:
         # 1) scheduler decision
-        sch = run_scan_scheduler_cli(vpy=vpy, base=base, config=cfg, state=state, jsonl=True, capture_output=True)
+        sch = request_scheduler_update(
+            runner=run_scan_scheduler_cli,
+            vpy=vpy,
+            base=base,
+            config=cfg,
+            state=state,
+            jsonl=True,
+            capture_output=True,
+        )
         if sch.returncode != 0:
-            sh([str(vpy), 'scripts/write_last_run.py', '--path', str(last_run), '--status', 'error', '--stage', 'scheduler', '--details', (sch.stderr or sch.stdout or '').strip(), '--started-at', started], cwd=base)
+            write_last_run(
+                sh=sh,
+                cwd=base,
+                vpy=vpy,
+                last_run=last_run,
+                status="error",
+                stage="scheduler",
+                details=(sch.stderr or sch.stdout or "").strip(),
+                started_at=started,
+            )
             sys.stderr.write(sch.stderr)
             raise SystemExit(sch.returncode)
 
         try:
-            scheduler_raw = json.loads((sch.stdout or "").strip())
-            scheduler_input_snapshot = SnapshotDTO.from_payload(
-                {
-                    "schema_kind": "snapshot_dto",
-                    "schema_version": "1.0",
-                    "snapshot_name": "send_if_needed_scheduler_raw",
-                    "as_of_utc": utc_now(),
-                    "payload": {"scheduler_raw": scheduler_raw},
-                }
-            )
-            scheduler_payload = scheduler_input_snapshot.payload.get("scheduler_raw")
-            if not isinstance(scheduler_payload, dict):
-                raise SchemaValidationError("scheduler_raw must be a dict")
-            scheduler_decision, scheduler_view = resolve_scheduler_decision(scheduler_payload)
-            SnapshotDTO.from_payload(
-                {
-                    "schema_kind": "snapshot_dto",
-                    "schema_version": "1.0",
-                    "snapshot_name": "send_if_needed_scheduler_decision",
-                    "as_of_utc": utc_now(),
-                    "payload": {"scheduler_decision": scheduler_decision},
-                }
-            )
-            account_name = str(((cfg_obj.get("portfolio") or {}).get("account") or "default")).strip() or "default"
-            decision = Decision.from_payload(
-                {
-                    "schema_kind": "decision",
-                    "schema_version": "1.0",
-                    "account": account_name,
-                    "should_run": bool(scheduler_view.should_run_scan),
-                    "should_notify": bool(decide_notify_window_open(scheduler_decision=scheduler_view)),
-                    "reason": str(scheduler_view.reason),
-                }
+            decision = build_scheduler_decision(
+                scheduler_stdout=str(sch.stdout or ""),
+                cfg_obj=cfg_obj,
+                as_of_utc=utc_now(),
+                snapshot_cls=SnapshotDTO,
+                decision_cls=Decision,
+                scheduler_resolver=resolve_scheduler_decision,
+                notify_window_resolver=decide_notify_window_open,
             )
         except SchemaValidationError as e:
             _fail_schema_validation(
@@ -288,50 +289,49 @@ def main():
         reason = str(decision.reason)
 
         if not should_run:
-            sh([str(vpy), 'scripts/write_last_run.py', '--path', str(last_run), '--status', 'skip', '--stage', 'scheduler', '--reason', reason, '--started-at', started], cwd=base)
-            return 0
-
-        # 1.5) trading day guard (multi-market)
-        guard_markets = _infer_trading_day_guard_markets(cfg_obj)
-        guard_results: list[dict] = []
-        for gm in guard_markets:
-            is_td, gm_used = _trading_day_guard_for_market(cfg_obj, gm)
-            guard_results.append({'market': gm_used, 'is_trading_day': is_td})
-
-        false_markets = [str(r.get('market')) for r in guard_results if r.get('is_trading_day') is False]
-        if false_markets and len(false_markets) == len(guard_markets):
-            sh(
-                [
-                    str(vpy),
-                    'scripts/write_last_run.py',
-                    '--path',
-                    str(last_run),
-                    '--status',
-                    'skip',
-                    '--stage',
-                    'trading_day_guard',
-                    '--reason',
-                    f"non-trading day: {','.join(false_markets)}",
-                    '--started-at',
-                    started,
-                ],
+            write_last_run(
+                sh=sh,
                 cwd=base,
+                vpy=vpy,
+                last_run=last_run,
+                status="skip",
+                stage="scheduler",
+                reason=reason,
+                started_at=started,
             )
             return 0
 
-        # 2) pipeline
-        pipe = run_pipeline_script(
-            vpy=vpy,
-            base=base,
-            config=cfg,
-            report_dir=report_dir,
-            state_dir=state_dir,
+        # 1.5) trading day guard (multi-market)
+        guard_results = evaluate_trading_day_guard(
+            cfg_obj=cfg_obj,
+            trading_day_guard=_trading_day_guard_for_market,
+            market_resolver=_infer_trading_day_guard_markets,
         )
+        guard_markets = [str(item.get("market") or "") for item in guard_results]
+
+        false_markets = [str(r.get('market')) for r in guard_results if r.get('is_trading_day') is False]
+        if false_markets and len(false_markets) == len(guard_markets):
+            write_last_run(
+                sh=sh,
+                cwd=base,
+                vpy=vpy,
+                last_run=last_run,
+                status="skip",
+                stage="trading_day_guard",
+                reason=f"non-trading day: {','.join(false_markets)}",
+                started_at=started,
+            )
+            return 0
+
         try:
-            pipe_payload = normalize_pipeline_subprocess_output(
-                returncode=int(pipe.returncode),
-                stdout=str(pipe.stdout or ""),
-                stderr=str(pipe.stderr or ""),
+            pipe_result = execute_single_account_pipeline(
+                run_pipeline=run_pipeline_script,
+                normalize_pipeline_output=normalize_pipeline_subprocess_output,
+                vpy=vpy,
+                base=base,
+                config=cfg,
+                report_dir=report_dir,
+                state_dir=state_dir,
             )
         except ValueError as e:
             _fail_schema_validation(
@@ -342,44 +342,35 @@ def main():
                 stage="pipeline_subprocess_adapter",
                 exc=e,
             )
-        if not bool(pipe_payload.get("ok")):
-            sh([str(vpy), 'scripts/write_last_run.py', '--path', str(last_run), '--status', 'error', '--stage', 'pipeline', '--reason', 'pipeline failed', '--started-at', started], cwd=base)
-            return int(pipe_payload.get("returncode") or pipe.returncode)
+        if not bool(pipe_result.payload.get("ok")):
+            write_last_run(
+                sh=sh,
+                cwd=base,
+                vpy=vpy,
+                last_run=last_run,
+                status="error",
+                stage="pipeline",
+                reason="pipeline failed",
+                started_at=started,
+            )
+            return pipe_result.returncode
 
         text = notif.read_text(encoding='utf-8', errors='replace').strip() if notif.exists() else ''
-        notification_text_for_decision = text
         account_name = str(((cfg_obj.get("portfolio") or {}).get("account") or "default")).strip() or "default"
-
-        # Prefix notification with account tag when configured.
         try:
-            p = (cfg_obj.get('portfolio') or {}) if isinstance(cfg_obj, dict) else {}
-            acct = str(p.get('account') or '').strip()
-            if acct and text:
-                text = f"[{acct}]\n" + text
-        except Exception:
-            pass
-
-        delivery_decision = decide_notification_delivery(
-            should_notify_window=bool(should_notify),
-            notification_text=notification_text_for_decision,
-            target=target,
-        )
-        config_error = delivery_decision.get('config_error')
-        if config_error:
-            raise SystemExit(f'[CONFIG_ERROR] {config_error}')
-
-        meaningful = bool(delivery_decision.get('meaningful'))
-        try:
-            delivery_plan = DeliveryPlan.from_payload(
-                {
-                    "schema_kind": "delivery_plan",
-                    "schema_version": "1.0",
-                    "channel": str(channel),
-                    "target": str(target),
-                    "account_messages": {account_name: text},
-                    "should_send": bool(delivery_decision.get('should_send')),
-                }
+            prepared_delivery = prepare_single_account_delivery(
+                account=account_name,
+                notification_text=text,
+                channel=channel,
+                target=target,
+                should_notify_window=bool(should_notify),
+                as_of_utc=utc_now(),
+                snapshot_cls=SnapshotDTO,
+                decision_builder=decide_notification_delivery,
+                delivery_plan_cls=DeliveryPlan,
             )
+        except ValueError as err:
+            raise SystemExit(f"[CONFIG_ERROR] {err}")
         except SchemaValidationError as e:
             _fail_schema_validation(
                 base=base,
@@ -389,20 +380,29 @@ def main():
                 stage="delivery_plan",
                 exc=e,
             )
+        delivery_decision = prepared_delivery.delivery_decision
+        delivery_plan = prepared_delivery.delivery_plan
+        if prepared_delivery.effective_target is not None:
+            target = prepared_delivery.effective_target
+        meaningful = bool(delivery_decision.get('meaningful'))
 
-        if bool(delivery_plan.should_send):
-            # 3) send via OpenClaw CLI
-            send = send_openclaw_message(
-                base=base,
-                channel=str(delivery_plan.channel),
-                target=str(delivery_plan.target),
-                message=str(delivery_plan.account_messages.get(account_name) or ""),
-            )
+        if (delivery_plan is not None) and bool(delivery_plan.should_send):
             try:
-                send_payload = normalize_notify_subprocess_output(
-                    returncode=int(send.returncode),
-                    stdout=str(send.stdout or ""),
-                    stderr=str(send.stderr or ""),
+                send_result = execute_single_account_delivery(
+                    delivery_plan=delivery_plan,
+                    account_name=prepared_delivery.account_name,
+                    send_message=send_openclaw_message,
+                    normalize_notify_output=normalize_notify_subprocess_output,
+                    mark_scheduler_notified=lambda: request_scheduler_update(
+                        runner=run_scan_scheduler_cli,
+                        vpy=vpy,
+                        base=base,
+                        config=cfg,
+                        state=state,
+                        capture_output=False,
+                        mark_notified=True,
+                    ),
+                    base=base,
                 )
             except ValueError as e:
                 _fail_schema_validation(
@@ -410,33 +410,47 @@ def main():
                     vpy=vpy,
                     last_run=last_run,
                     started=started,
-                    stage="notify_subprocess_adapter",
-                    exc=e,
+                stage="notify_subprocess_adapter",
+                exc=e,
+            )
+            if not send_result.ok:
+                write_last_run(
+                    sh=sh,
+                    cwd=base,
+                    vpy=vpy,
+                    last_run=last_run,
+                    status="error",
+                    stage=("mark-notified" if send_result.error_code == "MARK_NOTIFIED_FAILED" else "send"),
+                    reason=send_result.error_code,
+                    details=send_result.details,
+                    started_at=started,
                 )
-            if not bool(send_payload.get("ok")):
-                error_code = "SEND_UNCONFIRMED" if bool(send_payload.get("command_ok")) else "SEND_FAILED"
-                details = str(send_payload.get("message") or (send.stderr or send.stdout or "").strip())
-                sh([str(vpy), 'scripts/write_last_run.py', '--path', str(last_run), '--status', 'error', '--stage', 'send', '--reason', error_code, '--details', details, '--started-at', started], cwd=base)
-                sys.stderr.write(send.stderr)
-                return int(send_payload.get("returncode") or send.returncode or 1)
-
-            message_id = send_payload.get("message_id")
-
-            # 4) mark notified (only after successful send)
-            mark = run_scan_scheduler_cli(vpy=vpy, base=base, config=cfg, state=state, mark_notified=True, capture_output=False)
-            if mark.returncode != 0:
-                # send succeeded but mark failed: still record it
-                sh([str(vpy), 'scripts/write_last_run.py', '--path', str(last_run), '--status', 'error', '--stage', 'mark-notified', '--reason', 'send ok but mark-notified failed', '--started-at', started], cwd=base)
-                return mark.returncode
-
-            detail = 'sent+marked'
-            if message_id:
-                detail += f" message_id={message_id}"
-            sh([str(vpy), 'scripts/write_last_run.py', '--path', str(last_run), '--status', 'ok', '--stage', 'send', '--reason', 'sent', '--details', detail, '--started-at', started], cwd=base)
+                return send_result.returncode
+            write_last_run(
+                sh=sh,
+                cwd=base,
+                vpy=vpy,
+                last_run=last_run,
+                status="ok",
+                stage="send",
+                reason="sent",
+                details=send_result.details,
+                started_at=started,
+            )
             return 0
 
         # not sending
-        sh([str(vpy), 'scripts/write_last_run.py', '--path', str(last_run), '--status', 'ok', '--stage', 'pipeline', '--reason', reason, '--details', f"should_notify={should_notify} meaningful={meaningful}", '--started-at', started], cwd=base)
+        write_last_run(
+            sh=sh,
+            cwd=base,
+            vpy=vpy,
+            last_run=last_run,
+            status="ok",
+            stage="pipeline",
+            reason=reason,
+            details=f"should_notify={should_notify} meaningful={meaningful}",
+            started_at=started,
+        )
         return 0
     finally:
         if lock_fd is not None:

@@ -9,7 +9,7 @@ from pathlib import Path
 BASE = Path(__file__).resolve().parents[1]
 
 
-def test_auto_trade_intake_open_example_dry_run_without_pm_config() -> None:
+def test_auto_trade_intake_open_example_dry_run_without_explicit_data_config() -> None:
     result = subprocess.run(
         [
             sys.executable,

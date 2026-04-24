@@ -37,7 +37,7 @@ def _option_ctx(account: str, *, locked: int) -> dict:
         "cash_secured_by_symbol_by_ccy": {"NVDA": {"USD": 1000.0}},
         "cash_secured_total_by_ccy": {"USD": 1000.0},
         "cash_secured_total_cny": 7200.0,
-        "fx_rates": {"rates": {"USDCNY": 7.2}},
+        "exchange_rates": {"rates": {"USDCNY": 7.2}},
         "raw_selected_count": 1,
         "open_positions_min": [],
     }
@@ -50,7 +50,7 @@ def test_build_pipeline_context_resolves_portfolio_source_by_account() -> None:
     old_load_portfolio_context = pc.load_portfolio_context
     old_load_option_positions_context = pc.load_option_positions_context
     old_auto_close = pc.maybe_auto_close_expired_positions
-    old_load_fx_rates = pc.load_fx_rates
+    old_load_exchange_rates = pc.load_exchange_rates
     try:
         def _fake_load_portfolio_context(**kwargs):  # type: ignore[no-untyped-def]
             captured["portfolio_source"] = kwargs.get("portfolio_source")
@@ -63,17 +63,17 @@ def test_build_pipeline_context_resolves_portfolio_source_by_account() -> None:
         pc.load_portfolio_context = _fake_load_portfolio_context  # type: ignore[assignment]
         pc.load_option_positions_context = _fake_load_option_positions_context  # type: ignore[assignment]
         pc.maybe_auto_close_expired_positions = lambda **_kwargs: None  # type: ignore[assignment]
-        pc.load_fx_rates = lambda **_kwargs: (None, None)  # type: ignore[assignment]
+        pc.load_exchange_rates = lambda **_kwargs: (None, None)  # type: ignore[assignment]
 
         with TemporaryDirectory() as td:
             root = Path(td).resolve()
-            portfolio_ctx, option_ctx, fx_usd_per_cny, hkdcny = pc.build_pipeline_context(
+            portfolio_ctx, option_ctx, usd_per_cny_exchange_rate, cny_per_hkd_exchange_rate = pc.build_pipeline_context(
                 py="python",
                 base=root,
                 cfg={
                     "portfolio": {
-                        "pm_config": "x.json",
-                        "market": "富途",
+                        "data_config": "x.json",
+                        "broker": "富途",
                         "account": "sy",
                         "source": "auto",
                         "source_by_account": {"sy": "holdings"},
@@ -91,18 +91,19 @@ def test_build_pipeline_context_resolves_portfolio_source_by_account() -> None:
             )
         assert portfolio_ctx == {"portfolio_source_name": "holdings"}
         assert option_ctx is None
-        assert fx_usd_per_cny is None
-        assert hkdcny is None
+        assert usd_per_cny_exchange_rate is None
+        assert cny_per_hkd_exchange_rate is None
         assert captured == {"portfolio_source": "holdings", "account": "sy"}
     finally:
         pc.load_portfolio_context = old_load_portfolio_context  # type: ignore[assignment]
         pc.load_option_positions_context = old_load_option_positions_context  # type: ignore[assignment]
         pc.maybe_auto_close_expired_positions = old_auto_close  # type: ignore[assignment]
-        pc.load_fx_rates = old_load_fx_rates  # type: ignore[assignment]
+        pc.load_exchange_rates = old_load_exchange_rates  # type: ignore[assignment]
 
 
 def test_shared_context_reuses_fetch_calls_across_accounts() -> None:
     import scripts.pipeline_context as pc
+    import scripts.portfolio_context_service as pcs
 
     shared_portfolio = {
         "as_of_utc": "2026-04-14T00:00:00+00:00",
@@ -124,100 +125,72 @@ def test_shared_context_reuses_fetch_calls_across_accounts() -> None:
     }
 
     counts = {"portfolio": 0, "option": 0}
-    old_run_cmd = pc.run_cmd
-
-    def _arg(cmd: list[str], name: str) -> str | None:
-        try:
-            i = cmd.index(name)
-            return cmd[i + 1]
-        except Exception:
-            return None
-
-    def _fake_run_cmd(cmd: list[str], **_kwargs):  # type: ignore[no-untyped-def]
-        script = str(cmd[1]) if len(cmd) > 1 else ""
-        out = _arg(cmd, "--out")
-        acct = _arg(cmd, "--account")
-        shared_out = _arg(cmd, "--shared-out")
-        if script.endswith("fetch_portfolio_context.py"):
-            counts["portfolio"] += 1
-            ctx = (shared_portfolio["by_account"].get(acct) if acct else shared_portfolio["all_accounts"])
-            out_path = Path(str(out)).resolve()
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            out_path.write_text(json.dumps(ctx, ensure_ascii=False), encoding="utf-8")
-            if shared_out:
-                p = Path(str(shared_out)).resolve()
-                p.parent.mkdir(parents=True, exist_ok=True)
-                p.write_text(json.dumps(shared_portfolio, ensure_ascii=False), encoding="utf-8")
-            return
-        if script.endswith("fetch_option_positions_context.py"):
-            counts["option"] += 1
-            ctx = (shared_option["by_account"].get(acct) if acct else shared_option["all_accounts"])
-            out_path = Path(str(out)).resolve()
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            out_path.write_text(json.dumps(ctx, ensure_ascii=False), encoding="utf-8")
-            if shared_out:
-                p = Path(str(shared_out)).resolve()
-                p.parent.mkdir(parents=True, exist_ok=True)
-                p.write_text(json.dumps(shared_option, ensure_ascii=False), encoding="utf-8")
-            return
-        raise AssertionError(f"unexpected command: {cmd}")
+    old_is_fresh = pc.is_fresh
+    old_load_holdings_portfolio_context = pcs.load_holdings_portfolio_context
+    old_load_holdings_portfolio_shared_context = pcs.load_holdings_portfolio_shared_context
+    old_load_option_positions_repo = pc.load_option_positions_repo
+    old_load_option_position_records = pc.load_option_position_records
+    old_build_option_positions_context = pc.build_option_positions_context
+    old_build_shared_option_positions_context = pc.build_shared_option_positions_context
+    old_load_option_position_exchange_rates = pc._load_option_position_exchange_rates
 
     try:
-        pc.run_cmd = _fake_run_cmd  # type: ignore[assignment]
+        pc.is_fresh = lambda path, ttl_sec: Path(path).exists()  # type: ignore[assignment]
+        def _fake_load_holdings_portfolio_context(**kwargs):  # type: ignore[no-untyped-def]
+            counts["portfolio"] += 1
+            return dict(shared_portfolio["by_account"].get(str(kwargs.get("account") or ""), shared_portfolio["all_accounts"]))
+
+        def _fake_load_holdings_portfolio_shared_context(**_kwargs):  # type: ignore[no-untyped-def]
+            counts["portfolio"] += 1
+            return shared_portfolio
+
+        pcs.load_holdings_portfolio_context = _fake_load_holdings_portfolio_context  # type: ignore[assignment]
+        pcs.load_holdings_portfolio_shared_context = _fake_load_holdings_portfolio_shared_context  # type: ignore[assignment]
+        pc.load_option_positions_repo = lambda *_a, **_k: object()  # type: ignore[assignment]
+        pc.load_option_position_records = lambda *_a, **_k: []  # type: ignore[assignment]
+        pc._load_option_position_exchange_rates = lambda **_kwargs: {"rates": {"USDCNY": 7.2}}  # type: ignore[assignment]
+        pc.build_shared_option_positions_context = lambda *_a, **_k: (counts.__setitem__("option", counts["option"] + 1) or shared_option)  # type: ignore[assignment]
+        pc.build_option_positions_context = lambda *_a, **_k: (counts.__setitem__("option", counts["option"] + 1) or shared_option["all_accounts"])  # type: ignore[assignment]
         logs: list[str] = []
         with TemporaryDirectory() as td:
             root = Path(td).resolve()
             shared_dir = (root / "shared").resolve()
             p1 = pc.load_portfolio_context(
-                py="python",
                 base=root,
-                pm_config="x.json",
+                data_config="x.json",
                 market="富途",
                 account="lx",
                 ttl_sec=3600,
-                timeout_sec=1,
-                is_scheduled=True,
                 state_dir=(root / "acct_lx_state").resolve(),
                 shared_state_dir=shared_dir,
                 log=logs.append,
             )
             p2 = pc.load_portfolio_context(
-                py="python",
                 base=root,
-                pm_config="x.json",
+                data_config="x.json",
                 market="富途",
                 account="sy",
                 ttl_sec=3600,
-                timeout_sec=1,
-                is_scheduled=True,
                 state_dir=(root / "acct_sy_state").resolve(),
                 shared_state_dir=shared_dir,
                 log=logs.append,
             )
             o1, r1 = pc.load_option_positions_context(
-                py="python",
                 base=root,
-                pm_config="x.json",
+                data_config="x.json",
                 market="富途",
                 account="lx",
                 ttl_sec=3600,
-                timeout_sec=1,
-                is_scheduled=True,
-                report_dir=(root / "reports").resolve(),
                 state_dir=(root / "acct_lx_state").resolve(),
                 shared_state_dir=shared_dir,
                 log=logs.append,
             )
             o2, r2 = pc.load_option_positions_context(
-                py="python",
                 base=root,
-                pm_config="x.json",
+                data_config="x.json",
                 market="富途",
                 account="sy",
                 ttl_sec=3600,
-                timeout_sec=1,
-                is_scheduled=True,
-                report_dir=(root / "reports").resolve(),
                 state_dir=(root / "acct_sy_state").resolve(),
                 shared_state_dir=shared_dir,
                 log=logs.append,
@@ -239,7 +212,14 @@ def test_shared_context_reuses_fetch_calls_across_accounts() -> None:
         assert any("portfolio_context source=shared_slice account=sy" in x for x in logs)
         assert any("option_positions_context source=shared_slice account=sy" in x for x in logs)
     finally:
-        pc.run_cmd = old_run_cmd  # type: ignore[assignment]
+        pc.is_fresh = old_is_fresh  # type: ignore[assignment]
+        pcs.load_holdings_portfolio_context = old_load_holdings_portfolio_context  # type: ignore[assignment]
+        pcs.load_holdings_portfolio_shared_context = old_load_holdings_portfolio_shared_context  # type: ignore[assignment]
+        pc.load_option_positions_repo = old_load_option_positions_repo  # type: ignore[assignment]
+        pc.load_option_position_records = old_load_option_position_records  # type: ignore[assignment]
+        pc.build_option_positions_context = old_build_option_positions_context  # type: ignore[assignment]
+        pc.build_shared_option_positions_context = old_build_shared_option_positions_context  # type: ignore[assignment]
+        pc._load_option_position_exchange_rates = old_load_option_position_exchange_rates  # type: ignore[assignment]
 
 
 def test_shared_slice_matches_legacy_key_fields() -> None:
@@ -313,7 +293,6 @@ def test_load_portfolio_context_auto_prefers_futu_when_available() -> None:
     import scripts.pipeline_context as pc
 
     old_fetch = pc.fetch_futu_portfolio_context
-    old_run_cmd = pc.run_cmd
     try:
         pc.fetch_futu_portfolio_context = lambda **_kwargs: {  # type: ignore[assignment]
             "as_of_utc": "2026-04-14T00:00:00+00:00",
@@ -323,20 +302,16 @@ def test_load_portfolio_context_auto_prefers_futu_when_available() -> None:
             "raw_selected_count": 1,
             "portfolio_source_name": "futu",
         }
-        pc.run_cmd = lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("holdings fetch should not run"))  # type: ignore[assignment]
 
         logs: list[str] = []
         with TemporaryDirectory() as td:
             root = Path(td).resolve()
             out = pc.load_portfolio_context(
-                py="python",
                 base=root,
-                pm_config="x.json",
+                data_config="x.json",
                 market="富途",
                 account="lx",
                 ttl_sec=0,
-                timeout_sec=1,
-                is_scheduled=True,
                 state_dir=(root / "state").resolve(),
                 shared_state_dir=(root / "shared").resolve(),
                 log=logs.append,
@@ -349,7 +324,6 @@ def test_load_portfolio_context_auto_prefers_futu_when_available() -> None:
         assert any("portfolio_context source=futu_direct account=lx" in x for x in logs)
     finally:
         pc.fetch_futu_portfolio_context = old_fetch  # type: ignore[assignment]
-        pc.run_cmd = old_run_cmd  # type: ignore[assignment]
 
 
 def test_load_portfolio_context_auto_skips_fresh_holdings_cache_and_uses_futu() -> None:
@@ -358,7 +332,6 @@ def test_load_portfolio_context_auto_skips_fresh_holdings_cache_and_uses_futu() 
     old_is_fresh = pc.is_fresh
     old_load_cached_json = pc.load_cached_json
     old_fetch = pc.fetch_futu_portfolio_context
-    old_run_cmd = pc.run_cmd
     try:
         pc.is_fresh = lambda *_a, **_k: True  # type: ignore[assignment]
 
@@ -383,20 +356,16 @@ def test_load_portfolio_context_auto_skips_fresh_holdings_cache_and_uses_futu() 
             "raw_selected_count": 1,
             "portfolio_source_name": "futu",
         }
-        pc.run_cmd = lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("holdings fetch should not run"))  # type: ignore[assignment]
 
         logs: list[str] = []
         with TemporaryDirectory() as td:
             root = Path(td).resolve()
             out = pc.load_portfolio_context(
-                py="python",
                 base=root,
-                pm_config="x.json",
+                data_config="x.json",
                 market="富途",
                 account="lx",
                 ttl_sec=3600,
-                timeout_sec=1,
-                is_scheduled=True,
                 state_dir=(root / "state").resolve(),
                 shared_state_dir=(root / "shared").resolve(),
                 log=logs.append,
@@ -411,62 +380,47 @@ def test_load_portfolio_context_auto_skips_fresh_holdings_cache_and_uses_futu() 
         pc.is_fresh = old_is_fresh  # type: ignore[assignment]
         pc.load_cached_json = old_load_cached_json  # type: ignore[assignment]
         pc.fetch_futu_portfolio_context = old_fetch  # type: ignore[assignment]
-        pc.run_cmd = old_run_cmd  # type: ignore[assignment]
 
 
 def test_load_portfolio_context_auto_falls_back_to_holdings_when_futu_unavailable() -> None:
     import scripts.pipeline_context as pc
+    import scripts.portfolio_context_service as pcs
 
     old_fetch = pc.fetch_futu_portfolio_context
-    old_run_cmd = pc.run_cmd
-
-    def _arg(cmd: list[str], name: str) -> str | None:
-        try:
-            i = cmd.index(name)
-            return cmd[i + 1]
-        except Exception:
-            return None
-
-    def _fake_run_cmd(cmd: list[str], **_kwargs):  # type: ignore[no-untyped-def]
-        out = _arg(cmd, "--out")
-        shared_out = _arg(cmd, "--shared-out")
-        ctx = {
-            "as_of_utc": "2026-04-14T00:00:00+00:00",
-            "filters": {"market": "富途", "account": "lx"},
-            "cash_by_currency": {"CNY": 88000.0},
-            "stocks_by_symbol": {},
-            "raw_selected_count": 1,
-        }
-        out_path = Path(str(out)).resolve()
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(json.dumps(ctx, ensure_ascii=False), encoding="utf-8")
-        if shared_out:
-            shared_ctx = {
-                "as_of_utc": "2026-04-14T00:00:00+00:00",
-                "filters": {"market": "富途"},
-                "all_accounts": dict(ctx),
-                "by_account": {"lx": dict(ctx)},
-            }
-            shared_path = Path(str(shared_out)).resolve()
-            shared_path.parent.mkdir(parents=True, exist_ok=True)
-            shared_path.write_text(json.dumps(shared_ctx, ensure_ascii=False), encoding="utf-8")
+    old_load_holdings_portfolio_shared_context = pcs.load_holdings_portfolio_shared_context
 
     try:
         pc.fetch_futu_portfolio_context = lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("opend down"))  # type: ignore[assignment]
-        pc.run_cmd = _fake_run_cmd  # type: ignore[assignment]
+        pcs.load_holdings_portfolio_shared_context = lambda **_kwargs: {  # type: ignore[assignment]
+            "as_of_utc": "2026-04-14T00:00:00+00:00",
+            "filters": {"market": "富途"},
+            "all_accounts": {
+                "as_of_utc": "2026-04-14T00:00:00+00:00",
+                "filters": {"market": "富途", "account": "lx"},
+                "cash_by_currency": {"CNY": 88000.0},
+                "stocks_by_symbol": {},
+                "raw_selected_count": 1,
+            },
+            "by_account": {
+                "lx": {
+                    "as_of_utc": "2026-04-14T00:00:00+00:00",
+                    "filters": {"market": "富途", "account": "lx"},
+                    "cash_by_currency": {"CNY": 88000.0},
+                    "stocks_by_symbol": {},
+                    "raw_selected_count": 1,
+                }
+            },
+        }
 
         logs: list[str] = []
         with TemporaryDirectory() as td:
             root = Path(td).resolve()
             out = pc.load_portfolio_context(
-                py="python",
                 base=root,
-                pm_config="x.json",
+                data_config="x.json",
                 market="富途",
                 account="lx",
                 ttl_sec=0,
-                timeout_sec=1,
-                is_scheduled=True,
                 state_dir=(root / "state").resolve(),
                 shared_state_dir=(root / "shared").resolve(),
                 log=logs.append,
@@ -479,7 +433,7 @@ def test_load_portfolio_context_auto_falls_back_to_holdings_when_futu_unavailabl
         assert any("fallback to holdings" in x for x in logs)
     finally:
         pc.fetch_futu_portfolio_context = old_fetch  # type: ignore[assignment]
-        pc.run_cmd = old_run_cmd  # type: ignore[assignment]
+        pcs.load_holdings_portfolio_shared_context = old_load_holdings_portfolio_shared_context  # type: ignore[assignment]
 
 
 def test_load_portfolio_context_auto_reuses_local_holdings_cache_when_futu_and_fetch_fail() -> None:
@@ -488,7 +442,6 @@ def test_load_portfolio_context_auto_reuses_local_holdings_cache_when_futu_and_f
     old_is_fresh = pc.is_fresh
     old_load_cached_json = pc.load_cached_json
     old_fetch = pc.fetch_futu_portfolio_context
-    old_run_cmd = pc.run_cmd
     try:
         pc.is_fresh = lambda path, ttl_sec: Path(path).name == "portfolio_context.json"  # type: ignore[assignment]
 
@@ -506,20 +459,16 @@ def test_load_portfolio_context_auto_reuses_local_holdings_cache_when_futu_and_f
 
         pc.load_cached_json = _load_cached  # type: ignore[assignment]
         pc.fetch_futu_portfolio_context = lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("opend down"))  # type: ignore[assignment]
-        pc.run_cmd = lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("holdings fetch should not run"))  # type: ignore[assignment]
 
         logs: list[str] = []
         with TemporaryDirectory() as td:
             root = Path(td).resolve()
             out = pc.load_portfolio_context(
-                py="python",
                 base=root,
-                pm_config="x.json",
+                data_config="x.json",
                 market="富途",
                 account="lx",
                 ttl_sec=3600,
-                timeout_sec=1,
-                is_scheduled=True,
                 state_dir=(root / "state").resolve(),
                 shared_state_dir=(root / "shared").resolve(),
                 log=logs.append,
@@ -535,7 +484,6 @@ def test_load_portfolio_context_auto_reuses_local_holdings_cache_when_futu_and_f
         pc.is_fresh = old_is_fresh  # type: ignore[assignment]
         pc.load_cached_json = old_load_cached_json  # type: ignore[assignment]
         pc.fetch_futu_portfolio_context = old_fetch  # type: ignore[assignment]
-        pc.run_cmd = old_run_cmd  # type: ignore[assignment]
 
 
 def main() -> None:

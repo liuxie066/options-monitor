@@ -32,6 +32,7 @@ def test_send_if_needed_scheduler_view_compat_should_notify_field() -> None:
         "send_openclaw_message": mod.send_openclaw_message,
         "trading_day_via_futu": mod.trading_day_via_futu,
         "sh": mod.sh,
+        "ensure_runtime_canonical_config": mod.ensure_runtime_canonical_config,
     }
     calls: list[tuple[list[str], Path]] = []
 
@@ -57,6 +58,7 @@ def test_send_if_needed_scheduler_view_compat_should_notify_field() -> None:
         mod.run_pipeline_script = lambda **_kwargs: SimpleNamespace(returncode=0, stdout="", stderr="")  # type: ignore[assignment]
         mod.send_openclaw_message = lambda **_kwargs: SimpleNamespace(returncode=0, stdout='{"messageId":"m1"}', stderr="")  # type: ignore[assignment]
         mod.trading_day_via_futu = lambda _cfg, market: (True, str(market))  # type: ignore[assignment]
+        mod.ensure_runtime_canonical_config = lambda *_args, **_kwargs: {}  # type: ignore[assignment]
 
         sys.argv = [
             "send_if_needed.py",
@@ -81,6 +83,7 @@ def test_send_if_needed_scheduler_view_compat_should_notify_field() -> None:
         mod.send_openclaw_message = old["send_openclaw_message"]  # type: ignore[assignment]
         mod.trading_day_via_futu = old["trading_day_via_futu"]  # type: ignore[assignment]
         mod.sh = old["sh"]  # type: ignore[assignment]
+        mod.ensure_runtime_canonical_config = old["ensure_runtime_canonical_config"]  # type: ignore[assignment]
 
 
 def test_send_if_needed_scheduler_view_prefers_is_notify_window_open_field() -> None:
@@ -96,6 +99,7 @@ def test_send_if_needed_scheduler_view_prefers_is_notify_window_open_field() -> 
         "send_openclaw_message": mod.send_openclaw_message,
         "trading_day_via_futu": mod.trading_day_via_futu,
         "sh": mod.sh,
+        "ensure_runtime_canonical_config": mod.ensure_runtime_canonical_config,
     }
     calls: list[tuple[list[str], Path]] = []
     scheduler_calls: list[dict] = []
@@ -131,6 +135,7 @@ def test_send_if_needed_scheduler_view_prefers_is_notify_window_open_field() -> 
         mod.run_pipeline_script = lambda **_kwargs: SimpleNamespace(returncode=0, stdout="", stderr="")  # type: ignore[assignment]
         mod.send_openclaw_message = _send  # type: ignore[assignment]
         mod.trading_day_via_futu = lambda _cfg, market: (True, str(market))  # type: ignore[assignment]
+        mod.ensure_runtime_canonical_config = lambda *_args, **_kwargs: {}  # type: ignore[assignment]
 
         sys.argv = [
             "send_if_needed.py",
@@ -157,6 +162,7 @@ def test_send_if_needed_scheduler_view_prefers_is_notify_window_open_field() -> 
         mod.send_openclaw_message = old["send_openclaw_message"]  # type: ignore[assignment]
         mod.trading_day_via_futu = old["trading_day_via_futu"]  # type: ignore[assignment]
         mod.sh = old["sh"]  # type: ignore[assignment]
+        mod.ensure_runtime_canonical_config = old["ensure_runtime_canonical_config"]  # type: ignore[assignment]
 
 
 def test_send_if_needed_uses_normalized_notify_message_id_from_nested_payload() -> None:
@@ -172,6 +178,7 @@ def test_send_if_needed_uses_normalized_notify_message_id_from_nested_payload() 
         "send_openclaw_message": mod.send_openclaw_message,
         "trading_day_via_futu": mod.trading_day_via_futu,
         "sh": mod.sh,
+        "ensure_runtime_canonical_config": mod.ensure_runtime_canonical_config,
     }
     calls: list[tuple[list[str], Path]] = []
 
@@ -199,6 +206,7 @@ def test_send_if_needed_uses_normalized_notify_message_id_from_nested_payload() 
             lambda **_kwargs: SimpleNamespace(returncode=0, stdout='{"result":{"messageId":"nested-42"}}', stderr="")
         )
         mod.trading_day_via_futu = lambda _cfg, market: (True, str(market))  # type: ignore[assignment]
+        mod.ensure_runtime_canonical_config = lambda *_args, **_kwargs: {}  # type: ignore[assignment]
 
         sys.argv = [
             "send_if_needed.py",
@@ -223,6 +231,7 @@ def test_send_if_needed_uses_normalized_notify_message_id_from_nested_payload() 
         mod.send_openclaw_message = old["send_openclaw_message"]  # type: ignore[assignment]
         mod.trading_day_via_futu = old["trading_day_via_futu"]  # type: ignore[assignment]
         mod.sh = old["sh"]  # type: ignore[assignment]
+        mod.ensure_runtime_canonical_config = old["ensure_runtime_canonical_config"]  # type: ignore[assignment]
 
 
 def test_send_if_needed_treats_returncode_zero_without_message_id_as_unconfirmed() -> None:
@@ -238,6 +247,7 @@ def test_send_if_needed_treats_returncode_zero_without_message_id_as_unconfirmed
         "send_openclaw_message": mod.send_openclaw_message,
         "trading_day_via_futu": mod.trading_day_via_futu,
         "sh": mod.sh,
+        "ensure_runtime_canonical_config": mod.ensure_runtime_canonical_config,
     }
     calls: list[tuple[list[str], Path]] = []
     mark_calls = {"n": 0}
@@ -267,6 +277,7 @@ def test_send_if_needed_treats_returncode_zero_without_message_id_as_unconfirmed
         mod.run_pipeline_script = lambda **_kwargs: SimpleNamespace(returncode=0, stdout="", stderr="")  # type: ignore[assignment]
         mod.send_openclaw_message = lambda **_kwargs: SimpleNamespace(returncode=0, stdout='{"ok":true}', stderr="")  # type: ignore[assignment]
         mod.trading_day_via_futu = lambda _cfg, market: (True, str(market))  # type: ignore[assignment]
+        mod.ensure_runtime_canonical_config = lambda *_args, **_kwargs: {}  # type: ignore[assignment]
 
         sys.argv = [
             "send_if_needed.py",
@@ -293,6 +304,7 @@ def test_send_if_needed_treats_returncode_zero_without_message_id_as_unconfirmed
         mod.send_openclaw_message = old["send_openclaw_message"]  # type: ignore[assignment]
         mod.trading_day_via_futu = old["trading_day_via_futu"]  # type: ignore[assignment]
         mod.sh = old["sh"]  # type: ignore[assignment]
+        mod.ensure_runtime_canonical_config = old["ensure_runtime_canonical_config"]  # type: ignore[assignment]
 
 
 def test_send_if_needed_trading_day_guard_market_inference_delegates_to_domain() -> None:

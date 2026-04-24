@@ -1,4 +1,5 @@
-yfinance
 pandas
 pyyaml
 tabulate
+fastapi
+uvicorn

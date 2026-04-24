@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 
 def test_select_markets_to_run_hk_break_respected() -> None:
-    from scripts.send_if_needed_multi import _select_markets_to_run
+    from domain.domain import select_markets_to_run
 
     cfg = {
         'schedule_hk': {
@@ -36,5 +36,5 @@ def test_select_markets_to_run_hk_break_respected() -> None:
 
     # 12:30 HKT => lunch break => should NOT select HK.
     t = datetime(2026, 4, 1, 4, 30, 0, tzinfo=timezone.utc)
-    out = _select_markets_to_run(t, cfg, 'auto')
+    out = select_markets_to_run(t, cfg, 'auto')
     assert out == []

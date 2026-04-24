@@ -5,8 +5,8 @@ import json
 import os
 import subprocess
 from hashlib import sha256
-from time import monotonic, sleep
-from datetime import datetime, timedelta, timezone
+from time import monotonic
+from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -26,11 +26,7 @@ from scripts.config_loader import resolve_watchlist_config, set_watchlist_config
 from domain.domain.fetch_source import is_futu_fetch_source, resolve_symbol_fetch_source
 
 from .cash_footer import query_cash_footer
-from .required_data_prefetch import prefetch_required_data
-from .notify_format import (
-    flatten_auto_close_summary,
-    build_account_message,
-)
+from .notify_format import build_account_message
 from .opend_guard import (
     mark_opend_phone_verify_pending,
     clear_opend_phone_verify_pending,
@@ -47,15 +43,12 @@ from .misc import (
     set_debug,
     log,
     parse_hhmm,
-    maybe_parse_dt,
     update_legacy_output_link,
     ensure_account_output_dir,
     AccountResult,
     _safe_runlog_data,
 )
 from domain.domain import (
-    Decision,
-    DeliveryPlan,
     SchemaValidationError,
     SnapshotDTO,
     apply_scan_run_decision,
@@ -64,12 +57,10 @@ from domain.domain import (
     build_no_account_notification_payloads,
     build_shared_last_run_payload,
     cash_footer_for_account,
-    decide_should_notify,
     evaluate_dnd_quiet_hours,
     classify_failure,
     ensure_runtime_canonical_config,
     normalize_notify_subprocess_output,
-    normalize_pipeline_subprocess_output,
     normalize_subprocess_adapter_payload,
     resolve_config_contract,
     markets_for_trading_day_guard as domain_markets_for_trading_day_guard,
@@ -80,26 +71,36 @@ from domain.domain import (
 )
 from domain.domain.engine import (
     AccountSchedulerDecisionView,
-    apply_opend_degrade_to_yahoo,
     build_opend_unhealthy_execution_plan,
-    decide_account_scan_gate,
     decide_notification_delivery,
-    decide_pipeline_execution_result,
-    decide_notification_meaningful,
     decide_trading_day_guard,
     build_failure_audit_fields,
     filter_notify_candidates as engine_filter_notify_candidates,
     rank_notify_candidates,
     resolve_multi_tick_engine_entrypoint,
 )
+from src.application.cron_runtime import (
+    apply_notify_results_to_tick_metrics,
+    build_notify_summary,
+    build_run_end_payload,
+    build_shared_last_run_meta,
+    mark_accounts_notified,
+    request_scheduler_update,
+)
+from src.application.account_run import AccountRunRequest, run_one_account
+from src.application.scheduled_notification import (
+    build_multi_account_delivery,
+    build_multi_tick_account_scheduler_view,
+    build_multi_tick_scheduler_decision,
+    execute_multi_account_delivery,
+    prepare_multi_account_messages,
+)
 from scripts.infra.service import (
     run_opend_watchdog,
-    run_pipeline_script,
     run_scan_scheduler_cli,
     send_openclaw_message,
     trading_day_via_futu,
 )
-from scripts.close_advice import run_close_advice
 
 try:
     from domain.storage import paths as storage_paths
@@ -111,8 +112,6 @@ except Exception:
 
 _CURRENT_RUN_ID: str | None = None
 SCHEMA_VALIDATION_ERROR_CODE = 'SCHEMA_VALIDATION_FAILED'
-NOTIFY_SEND_MAX_ATTEMPTS = 1
-NOTIFY_SEND_RETRY_DELAYS_SEC: tuple[float, ...] = ()
 
 
 def current_run_id() -> str | None:
@@ -147,154 +146,12 @@ def account_run_state_dir(run_dir: Path, account: str) -> Path:
     return (run_dir / 'accounts' / str(account).strip() / 'state').resolve()
 
 
-def _select_markets_to_run(now_utc: datetime, cfg: dict, market_config: str) -> list[str]:
-    return domain_select_markets_to_run(now_utc, cfg, market_config)
-
-
-def _markets_for_trading_day_guard(markets_to_run: list[str], cfg: dict, market_config: str) -> list[str]:
-    return domain_markets_for_trading_day_guard(markets_to_run, cfg, market_config)
-
-
 def _is_trading_day_guard_for_market(cfg: dict, market: str) -> tuple[bool | None, str]:
     """Return (is_trading_day, market_used) for one market.
 
     None means guard check failed and caller should continue without blocking.
     """
     return trading_day_via_futu(cfg, market)
-
-
-def _notify_error_code(send_tool_dto: dict) -> str:
-    return 'SEND_UNCONFIRMED' if bool(send_tool_dto.get('command_ok')) else 'SEND_FAILED'
-
-
-def _send_account_message_with_retry(
-    *,
-    base: Path,
-    channel: str,
-    target: str,
-    account: str,
-    message: str,
-    run_id: str,
-    runlog,
-    audit_fn,
-    send_fn=send_openclaw_message,
-    normalize_fn=normalize_notify_subprocess_output,
-    sleep_fn=sleep,
-    max_attempts: int = NOTIFY_SEND_MAX_ATTEMPTS,
-    retry_delays_sec: tuple[float, ...] = NOTIFY_SEND_RETRY_DELAYS_SEC,
-) -> dict[str, object]:
-    attempts = max(1, int(max_attempts or 1))
-    final_record: dict[str, object] | None = None
-    attempt_records: list[dict[str, object]] = []
-
-    for attempt in range(1, attempts + 1):
-        t_notify0 = monotonic()
-        send = send_fn(
-            base=base,
-            channel=str(channel),
-            target=str(target),
-            message=message,
-        )
-        send_tool_dto = normalize_fn(
-            returncode=send.returncode,
-            stdout=send.stdout or '',
-            stderr=send.stderr or '',
-        )
-        message_id = send_tool_dto.get('message_id')
-        ok = bool(send_tool_dto.get('ok') or (bool(send_tool_dto.get('command_ok')) and message_id))
-        error_code = None if ok else _notify_error_code(send_tool_dto)
-        record = {
-            'account': account,
-            'attempt': attempt,
-            'max_attempts': attempts,
-            'returncode': int(send.returncode),
-            'message_id': message_id,
-            'command_ok': bool(send_tool_dto.get('command_ok')),
-            'delivery_confirmed': bool(ok),
-            'stdout_tail': send_tool_dto.get('stdout_tail'),
-            'stderr_tail': send_tool_dto.get('stderr_tail'),
-        }
-        attempt_records.append(record)
-        final_record = record
-
-        audit_extra = dict(record)
-        if not ok:
-            audit_extra.update(
-                build_failure_audit_fields(
-                    failure_kind='io_error',
-                    failure_stage='send_openclaw_message',
-                    failure_adapter=str(send_tool_dto.get('adapter') or 'notify'),
-                )
-            )
-        audit_fn(
-            'notify',
-            'send_openclaw_message',
-            run_id=run_id,
-            account=account,
-            status=('ok' if ok else ('unconfirmed' if error_code == 'SEND_UNCONFIRMED' else 'error')),
-            target=str(target),
-            error_code=error_code,
-            extra=audit_extra,
-        )
-
-        if ok:
-            runlog.safe_event(
-                'notify',
-                'ok',
-                duration_ms=int((monotonic() - t_notify0) * 1000),
-                data=_safe_runlog_data(
-                    {
-                        'channel': channel,
-                        **record,
-                    }
-                ),
-            )
-            return {
-                'ok': True,
-                'account': account,
-                'attempts': attempt,
-                'attempt_records': attempt_records,
-                'final': final_record,
-            }
-
-        runlog.safe_event(
-            'notify',
-            'error',
-            duration_ms=int((monotonic() - t_notify0) * 1000),
-            error_code=error_code,
-            message=(f'message send unconfirmed ({account})' if error_code == 'SEND_UNCONFIRMED' else f'message send failed ({account})'),
-            data=_safe_runlog_data(record),
-        )
-
-        if attempt < attempts:
-            delay = float(retry_delays_sec[min(attempt - 1, len(retry_delays_sec) - 1)] or 0.0) if retry_delays_sec else 0.0
-            if delay > 0:
-                sleep_fn(delay)
-
-    final = final_record or {
-        'account': account,
-        'attempt': 0,
-        'max_attempts': attempts,
-        'returncode': 1,
-        'message_id': None,
-        'command_ok': False,
-        'delivery_confirmed': False,
-        'stdout_tail': '',
-        'stderr_tail': '',
-    }
-    command_ok = bool(final.get('command_ok'))
-    return {
-        'ok': False,
-        'account': account,
-        'error_code': 'SEND_UNCONFIRMED' if command_ok else 'SEND_FAILED',
-        'attempts': attempts,
-        'attempt_records': attempt_records,
-        'final': final,
-        'final_returncode': int(final.get('returncode') or 0),
-        'message_id': final.get('message_id'),
-        'command_ok': command_ok,
-        'delivery_confirmed': bool(final.get('delivery_confirmed')),
-    }
 
 
 def main() -> int:
@@ -520,17 +377,8 @@ def main() -> int:
     runlog.safe_event('watchdog', 'start')
     _audit('tool_call', 'opend_watchdog_start', tool_name='opend_watchdog')
     try:
-        fetch_policy = base_cfg.get('fetch_policy') if isinstance(base_cfg, dict) else None
-        allow_downgrade = True
-        try:
-            if isinstance(fetch_policy, dict) and ('allow_downgrade_to_yahoo' in fetch_policy):
-                allow_downgrade = bool(fetch_policy.get('allow_downgrade_to_yahoo'))
-        except Exception:
-            allow_downgrade = True
-
         need_opend = False
         ports = set()
-        has_hk_opend = False
         for sym in resolve_watchlist_config(base_cfg):
             fetch = (sym or {}).get('fetch') or {}
             if is_futu_fetch_source(fetch.get('source')):
@@ -538,8 +386,6 @@ def main() -> int:
                 host = fetch.get('host') or '127.0.0.1'
                 port = fetch.get('port') or 11111
                 ports.add((str(host), int(port)))
-                if str((sym or {}).get('market') or '').upper() == 'HK':
-                    has_hk_opend = True
 
         if need_opend:
             unhealthy = None
@@ -600,16 +446,10 @@ def main() -> int:
                 host = unhealthy.get('host')
                 port = unhealthy.get('port')
 
-                degraded = apply_opend_degrade_to_yahoo(
-                    symbols=resolve_watchlist_config(base_cfg),
-                    allow_downgrade=allow_downgrade,
-                    has_hk_opend=has_hk_opend,
-                    watchdog_timed_out=watchdog_timed_out,
-                )
                 opend_plan = resolve_multi_tick_engine_entrypoint(
                     opend_unhealthy={
                         'error_code': error_code,
-                        'degraded': degraded,
+                        'degraded': False,
                         'message_text': msg,
                         'detail_text': detail,
                         'host': host,
@@ -617,7 +457,7 @@ def main() -> int:
                     }
                 ).get('watchdog') or build_opend_unhealthy_execution_plan(
                     error_code=error_code,
-                    degraded=degraded,
+                    degraded=False,
                     message_text=msg,
                     detail_text=detail,
                     host=host,
@@ -685,49 +525,30 @@ def main() -> int:
                     except Exception:
                         pass
 
-                if bool(opend_plan.get('should_continue')):
-                    log(f"[WARN] OpenD unhealthy ({error_code}); degraded US opend sources to yahoo for this run")
-                    runlog.safe_event(
-                        'watchdog',
-                        'degraded',
-                        duration_ms=int((monotonic() - t_watchdog0) * 1000),
-                        error_code=error_code,
-                        message=msg,
-                        data=_safe_runlog_data({'degraded': True, 'host': host, 'port': port}),
-                    )
-                    _audit(
-                        'fallback',
-                        'degrade_opend_to_yahoo',
-                        status='ok',
-                        error_code=error_code,
-                        fallback_used=bool(opend_plan.get('fallback_used')),
-                        message=msg,
-                    )
-                else:
-                    runlog.safe_event(
-                        'watchdog',
-                        'error',
-                        duration_ms=int((monotonic() - t_watchdog0) * 1000),
-                        error_code=error_code,
-                        message=msg,
-                        data=_safe_runlog_data({'degraded': False, 'host': host, 'port': port}),
-                    )
-                    runlog.safe_event(
-                        'run_end',
-                        'error',
-                        error_code=error_code,
-                        message='opend watchdog unhealthy',
-                        data=_safe_runlog_data({'sent': False, 'reason': 'opend_unhealthy'}),
-                    )
-                    _audit(
-                        'fallback',
-                        'opend_unhealthy_no_fallback',
-                        status='error',
-                        error_code=error_code,
-                        fallback_used=bool(opend_plan.get('fallback_used')),
-                        message=msg,
-                    )
-                    return 0
+                runlog.safe_event(
+                    'watchdog',
+                    'error',
+                    duration_ms=int((monotonic() - t_watchdog0) * 1000),
+                    error_code=error_code,
+                    message=msg,
+                    data=_safe_runlog_data({'degraded': False, 'host': host, 'port': port}),
+                )
+                runlog.safe_event(
+                    'run_end',
+                    'error',
+                    error_code=error_code,
+                    message='opend watchdog unhealthy',
+                    data=_safe_runlog_data({'sent': False, 'reason': 'opend_unhealthy'}),
+                )
+                _audit(
+                    'fallback',
+                    'opend_unhealthy_no_fallback',
+                    status='error',
+                    error_code=error_code,
+                    fallback_used=bool(opend_plan.get('fallback_used')),
+                    message=msg,
+                )
+                return 0
 
     except SystemExit:
         raise
@@ -782,7 +603,7 @@ def main() -> int:
     results: list[AccountResult] = []
 
     now_utc = datetime.now(timezone.utc)
-    markets_to_run: list[str] = _select_markets_to_run(now_utc, base_cfg, getattr(args, 'market_config', 'auto'))
+    markets_to_run: list[str] = domain_select_markets_to_run(now_utc, base_cfg, getattr(args, 'market_config', 'auto'))
 
     if force_mode:
         print("force: bypass guard")
@@ -793,7 +614,7 @@ def main() -> int:
             data=_safe_runlog_data({'markets_to_run': markets_to_run, 'market_config': str(getattr(args, 'market_config', 'auto') or 'auto')}),
         )
     else:
-        guard_markets = _markets_for_trading_day_guard(markets_to_run, base_cfg, getattr(args, 'market_config', 'auto'))
+        guard_markets = domain_markets_for_trading_day_guard(markets_to_run, base_cfg, getattr(args, 'market_config', 'auto'))
         guard_decision = decide_trading_day_guard(
             markets_to_run=markets_to_run,
             guard_markets=guard_markets,
@@ -874,32 +695,18 @@ def main() -> int:
         for acct in args.accounts:
             acct0 = str(acct).strip()
             if acct0:
-                results.append(AccountResult(acct0, False, False, False, err, ''))
+                results.append(AccountResult(acct0, False, False, err, ''))
         runlog.safe_event('run_end', 'error', error_code='SCHEDULER_FAILED', message=err)
         _guard_mark_failure('SCHEDULER_FAILED', 'scan_scheduler')
         return 0
 
     try:
-        scheduler_raw = json.loads((scheduler_proc.stdout or '').strip())
-        scheduler_input_snapshot = SnapshotDTO.from_payload(
-            {
-                'schema_kind': 'snapshot_dto',
-                'schema_version': '1.0',
-                'snapshot_name': 'scheduler_raw',
-                'as_of_utc': utc_now(),
-                'payload': {'scheduler_raw': scheduler_raw},
-            }
+        scheduler_decision, scheduler_view = build_multi_tick_scheduler_decision(
+            scheduler_stdout=str(scheduler_proc.stdout or ''),
+            as_of_utc=utc_now(),
+            snapshot_cls=SnapshotDTO,
+            engine_entrypoint=resolve_multi_tick_engine_entrypoint,
         )
-        scheduler_payload = scheduler_input_snapshot.payload.get('scheduler_raw')
-        if not isinstance(scheduler_payload, dict):
-            raise SchemaValidationError('scheduler_raw must be a dict')
-        scheduler_bundle = resolve_multi_tick_engine_entrypoint(
-            scheduler_raw=scheduler_payload,
-        ).get('scheduler') or {}
-        scheduler_decision = scheduler_bundle.get('scheduler_decision')
-        scheduler_view = scheduler_bundle.get('scheduler_view')
-        if not isinstance(scheduler_decision, dict) or scheduler_view is None:
-            raise SchemaValidationError('scheduler decision engine entrypoint returned invalid payload')
     except SchemaValidationError as e:
         _fail_schema_validation(runlog=runlog, audit_fn=_audit, stage='scheduler_decision', exc=e)
     except Exception as e:
@@ -909,7 +716,6 @@ def main() -> int:
 
     notify_decision_by_account: dict[str, AccountSchedulerDecisionView | None] = {}
     for acct0 in [str(a).strip() for a in (args.accounts or []) if str(a).strip()]:
-        account_scheduler_decision_view: AccountSchedulerDecisionView | None = None
         try:
             sch_acct = run_scan_scheduler_cli(
                 vpy=vpy,
@@ -921,36 +727,23 @@ def main() -> int:
                 account=str(acct0),
                 capture_output=True,
             )
-            if sch_acct.returncode == 0:
-                account_scheduler_raw = json.loads((sch_acct.stdout or '').strip())
-                account_scheduler_bundle = resolve_multi_tick_engine_entrypoint(
-                    scheduler_raw=scheduler_decision,
-                    account_scheduler_raw_by_account={str(acct0): account_scheduler_raw},
-                ).get('scheduler') or {}
-                account_scheduler_decision_dto = (account_scheduler_bundle.get('account_scheduler_decisions') or {}).get(str(acct0))
-                account_scheduler_snapshot = SnapshotDTO.from_payload(
-                    {
-                        'schema_kind': 'snapshot_dto',
-                        'schema_version': '1.0',
-                        'snapshot_name': f'account_scheduler_decision:{acct0}',
-                        'as_of_utc': utc_now(),
-                        'payload': {
-                            'account': str(acct0),
-                            'decision': account_scheduler_decision_dto,
-                        },
-                    }
+            notify_decision_by_account[acct0] = (
+                build_multi_tick_account_scheduler_view(
+                    account=str(acct0),
+                    scheduler_stdout=str(sch_acct.stdout or ''),
+                    scheduler_decision=scheduler_decision,
+                    as_of_utc=utc_now(),
+                    snapshot_cls=SnapshotDTO,
+                    engine_entrypoint=resolve_multi_tick_engine_entrypoint,
+                    account_view_cls=AccountSchedulerDecisionView,
                 )
-                account_decision_payload = account_scheduler_snapshot.payload.get('decision')
-                if not isinstance(account_decision_payload, dict):
-                    raise SchemaValidationError('account scheduler decision must be a dict')
-                account_scheduler_decision_view = (account_scheduler_bundle.get('account_scheduler_views') or {}).get(str(acct0))
-                if not isinstance(account_scheduler_decision_view, AccountSchedulerDecisionView):
-                    raise SchemaValidationError('account scheduler decision view must be valid')
+                if sch_acct.returncode == 0
+                else None
+            )
         except SchemaValidationError as e:
             _fail_schema_validation(runlog=runlog, audit_fn=_audit, stage='account_scheduler_decision', exc=e)
         except Exception:
-            account_scheduler_decision_view = None
-        notify_decision_by_account[acct0] = account_scheduler_decision_view
+            notify_decision_by_account[acct0] = None
 
     should_run_global, reason_global = apply_scan_run_decision(
         should_run_global=should_run_global,
@@ -1013,333 +806,46 @@ def main() -> int:
         acct = str(acct).strip()
         if not acct:
             continue
-
-        acct_out = accounts_root / acct
-        acct_metrics = {
-            'account': acct,
-            'scheduler_ms': scheduler_ms,
-            'pipeline_ms': None,
-            'ran_scan': False,
-            'should_notify': False,
-            'meaningful': False,
-            'reason': '',
-        }
-        ensure_account_output_dir(acct_out)
-
-        try:
-            update_legacy_output_link(out_link, acct_out, tmp_dir=legacy_output_tmp_dir)
-        except RuntimeError as exc:
-            raise SystemExit(str(exc))
-
-        cfg = json.loads(json.dumps(base_cfg))
-        cfg['config_source_path'] = str(cfg_path.resolve())
-        cfg.setdefault('portfolio', {})
-        cfg['portfolio']['account'] = acct
-
-        try:
-            syms = resolve_watchlist_config(cfg)
-            if markets_to_run:
-                syms = [it for it in syms if isinstance(it, dict) and (it.get('market') in markets_to_run)]
-            set_watchlist_config(cfg, syms)
-        except Exception:
-            pass
-        cfg_override = state_repo.write_account_state_json_text(
-            base,
-            acct,
-            'config.override.json',
-            cfg,
-        )
-        _audit('write', 'write_account_state_json_text:config.override.json', run_id=run_id, account=acct)
-
-        acct_report_dir = run_repo.get_run_account_dir(base, run_id, acct)
-        acct_state_dir = run_repo.get_run_account_state_dir(base, run_id, acct)
-        try:
-            run_repo.ensure_run_account_state_dir(base, run_id, acct)
-        except Exception:
-            pass
-
-        def _write_acct_run_state(name: str, payload: dict):
-            try:
-                state_repo.write_account_run_state(base, run_id, acct, name, payload)
-                _audit('write', f'write_account_run_state:{name}', run_id=run_id, account=acct)
-            except Exception:
-                pass
-
-        notif_path = (acct_report_dir / 'symbols_notification.txt').resolve()
-
-        should_notify_raw = decide_should_notify(
-            account=acct,
-            notify_decision_by_account=notify_decision_by_account,
-            scheduler_decision=scheduler_view,
-        )
-        try:
-            decision = Decision.from_payload(
-                {
-                    'schema_kind': 'decision',
-                    'schema_version': '1.0',
-                    'account': acct,
-                    'should_run': bool(should_run_global),
-                    'should_notify': bool(should_notify_raw),
-                    'reason': str(reason_global),
-                }
-            )
-        except SchemaValidationError as e:
-            _fail_schema_validation(runlog=runlog, audit_fn=_audit, stage='decision', exc=e, run_id=run_id)
-        should_run = bool(decision.should_run)
-        should_notify = bool(decision.should_notify)
-        reason = str(decision.reason)
-
-        acct_metrics['should_notify'] = bool(should_notify)
-        acct_metrics['reason'] = str(reason)
-
-        _write_acct_run_state('account_metrics.json', {
-            'as_of_utc': utc_now(),
-            'account': acct,
-            'markets_to_run': markets_to_run,
-            'scheduler_ms': acct_metrics.get('scheduler_ms'),
-            'pipeline_ms': acct_metrics.get('pipeline_ms'),
-            'ran_scan': acct_metrics.get('ran_scan'),
-            'should_notify': acct_metrics.get('should_notify'),
-            'meaningful': acct_metrics.get('meaningful'),
-            'reason': acct_metrics.get('reason'),
-            'run_dir': str(run_dir),
-        })
-
-        scan_gate = decide_account_scan_gate(
-            should_run=should_run,
-            has_symbols=((not markets_to_run) or bool(resolve_watchlist_config(cfg))),
-            reason=reason,
-        )
-        if not bool(scan_gate.get('run_pipeline')):
-            acct_metrics['ran_scan'] = bool(scan_gate.get('ran_scan'))
-            acct_metrics['meaningful'] = bool(scan_gate.get('meaningful'))
-            acct_metrics['reason'] = str(scan_gate.get('result_reason') or reason)
-            tick_metrics['accounts'].append(acct_metrics)
-            results.append(
-                AccountResult(
-                    acct,
-                    bool(scan_gate.get('ran_scan')),
-                    should_notify,
-                    bool(scan_gate.get('meaningful')),
-                    str(scan_gate.get('result_reason') or reason),
-                    '',
-                )
-            )
-            continue
-
-        if (not prefetch_done):
-            runlog.safe_event('fetch_chain_cache', 'start', data=_safe_runlog_data({'account': acct, 'symbols_count': len(resolve_watchlist_config(cfg))}))
-            prefetch_stats = prefetch_required_data(vpy=vpy, base=base, cfg=cfg, shared_required=shared_required)
-            _audit(
-                'tool_call',
-                'required_data_prefetch',
+        outcome = run_one_account(
+            request=AccountRunRequest(
+                acct=acct,
+                base=base,
+                base_cfg=base_cfg,
+                cfg_path=cfg_path,
+                vpy=vpy,
+                markets_to_run=markets_to_run,
+                scheduler_ms=scheduler_ms,
+                scheduler_view=scheduler_view,
+                notify_decision_by_account=notify_decision_by_account,
+                should_run_global=should_run_global,
+                reason_global=reason_global,
                 run_id=run_id,
-                account=acct,
-                status=('ok' if int(prefetch_stats.get('errors') or 0) == 0 else 'error'),
-                tool_name='required_data_prefetch',
-                extra={'stats': {k: v for k, v in prefetch_stats.items() if k != 'audit'}},
-            )
-            try:
-                state_repo.write_account_run_state(
-                    base,
-                    run_id,
-                    acct,
-                    'required_data_prefetch_summary.json',
-                    prefetch_stats,
-                )
-                for item in (prefetch_stats.get('audit') or []):
-                    if isinstance(item, dict):
-                        state_repo.append_run_audit_jsonl(
-                            base,
-                            run_id,
-                            'tool_execution_audit.jsonl',
-                            item,
-                        )
-                        _audit(
-                            'tool_call',
-                            'required_data_prefetch_item',
-                            run_id=run_id,
-                            account=acct,
-                            status=('ok' if bool(item.get('ok')) else 'error'),
-                            tool_name=str(item.get('tool_name') or 'required_data_prefetch'),
-                            extra={'symbol': item.get('symbol'), 'message': item.get('message')},
-                        )
-            except Exception:
-                pass
-            runlog.safe_event('fetch_chain_cache', 'ok', data=_safe_runlog_data(prefetch_stats))
-            prefetch_done = True
-
-        acct_report_dir.mkdir(parents=True, exist_ok=True)
-
-        runlog.safe_event(
-            'snapshot_batches',
-            'start',
-            data=_safe_runlog_data({'account': acct}),
-        )
-
-        t_pipe0 = monotonic()
-        pipe = run_pipeline_script(
-            vpy=vpy,
-            base=base,
-            config=cfg_override,
-            report_dir=acct_report_dir,
-            state_dir=acct_state_dir,
-            shared_required_data=shared_required,
-            shared_context_dir=run_repo.get_run_state_dir(base, run_id),
-            capture_output=True,
-            text=True,
-            env=dict(os.environ, PYTHONPATH=str(base)),
-        )
-        acct_metrics['pipeline_ms'] = int((monotonic() - t_pipe0) * 1000)
-        _audit(
-            'tool_call',
-            'run_pipeline',
-            run_id=run_id,
-            account=acct,
-            status=('ok' if pipe.returncode == 0 else 'error'),
-            tool_name='run_pipeline',
-            extra={'duration_ms': acct_metrics['pipeline_ms'], 'returncode': int(pipe.returncode)},
-        )
-        pipeline_tool_dto = normalize_pipeline_subprocess_output(
-            returncode=pipe.returncode,
-            stdout=pipe.stdout or '',
-            stderr=pipe.stderr or '',
-        )
-        pipeline_result = decide_pipeline_execution_result(
-            returncode=int(pipeline_tool_dto.get('returncode') or 0)
-        )
-        if not bool(pipeline_result.get('ok')):
-            _audit(
-                'tool_call',
-                'run_pipeline_result',
+                run_dir=run_dir,
+                shared_required=shared_required,
+                out_link=out_link,
+                legacy_output_tmp_dir=legacy_output_tmp_dir,
+                accounts_root=accounts_root,
+                prefetch_done=prefetch_done,
+            ),
+            runlog=runlog,
+            audit_fn=_audit,
+            fail_schema_validation=lambda *, stage, exc, run_id=None: _fail_schema_validation(
+                runlog=runlog,
+                audit_fn=_audit,
+                stage=stage,
+                exc=exc,
                 run_id=run_id,
-                account=acct,
-                status='error',
-                tool_name='run_pipeline',
-                extra=build_failure_audit_fields(
-                    failure_kind='io_error',
-                    failure_stage='run_pipeline',
-                    failure_adapter=str(pipeline_tool_dto.get('adapter') or 'pipeline'),
-                ),
-            )
-            runlog.safe_event(
-                'snapshot_batches',
-                'error',
-                duration_ms=acct_metrics['pipeline_ms'],
-                error_code='PIPELINE_FAILED',
-                message=f'pipeline failed for {acct}',
-                data=_safe_runlog_data({'account': acct, 'returncode': pipe.returncode}),
-            )
-            out = ((pipe.stdout or '') + '\n' + (pipe.stderr or '')).strip()
-            if out:
-                tail = '\n'.join(out.splitlines()[-60:])
-                print(f"[ERR] pipeline failed ({acct})\n{tail}")
-            acct_metrics['ran_scan'] = bool(pipeline_result.get('ran_scan'))
-            acct_metrics['meaningful'] = bool(pipeline_result.get('meaningful'))
-            acct_metrics['reason'] = str(pipeline_result.get('reason') or 'pipeline failed')
-            tick_metrics['accounts'].append(acct_metrics)
-            results.append(
-                AccountResult(
-                    acct,
-                    bool(pipeline_result.get('ran_scan')),
-                    should_notify,
-                    bool(pipeline_result.get('meaningful')),
-                    str(pipeline_result.get('reason') or 'pipeline failed'),
-                    '',
-                )
-            )
-            continue
-
-        runlog.safe_event(
-            'snapshot_batches',
-            'ok',
-            duration_ms=acct_metrics['pipeline_ms'],
-            data=_safe_runlog_data({'account': acct}),
+            ),
         )
-        ran_any_pipeline = True
-
-        text = notif_path.read_text(encoding='utf-8', errors='replace').strip() if notif_path.exists() else ''
-
-        try:
-            run_repo.write_run_account_text(
-                base,
-                run_id,
-                acct,
-                'symbols_notification.txt',
-                text + '\n',
-            )
-            _audit('write', 'write_run_account_text:symbols_notification.txt', run_id=run_id, account=acct)
-            if cfg_override.exists() and cfg_override.stat().st_size > 0:
-                run_repo.copy_to_run_account(
-                    base,
-                    run_id,
-                    acct,
-                    cfg_override,
-                    'config.override.json',
-                )
-                _audit('write', 'copy_to_run_account:config.override.json', run_id=run_id, account=acct)
-        except Exception:
-            pass
-
-        auto_close_path = acct_report_dir / 'auto_close_summary.txt'
-        auto_close_text = auto_close_path.read_text(encoding='utf-8', errors='replace').strip() if auto_close_path.exists() else ''
-        auto_close_flat = flatten_auto_close_summary(auto_close_text, always_show=False)
-        if auto_close_flat:
-            text = (text.strip() + '\n\n' + auto_close_flat.strip()).strip()
-
-        close_advice_cfg = (cfg.get('close_advice') or {}) if isinstance(cfg, dict) else {}
-        if bool(close_advice_cfg.get('enabled', False)):
-            try:
-                close_result = run_close_advice(
-                    config=cfg,
-                    context_path=(acct_state_dir / 'option_positions_context.json').resolve(),
-                    required_data_root=shared_required,
-                    output_dir=acct_report_dir,
-                    base_dir=base,
-                )
-                _audit(
-                    'tool_call',
-                    'close_advice',
-                    run_id=run_id,
-                    account=acct,
-                    status='ok',
-                    tool_name='close_advice',
-                    extra={
-                        'rows': close_result.get('rows'),
-                        'notify_rows': close_result.get('notify_rows'),
-                    },
-                )
-                close_text_path = acct_report_dir / 'close_advice.txt'
-                close_text = close_text_path.read_text(encoding='utf-8', errors='replace').strip() if close_text_path.exists() else ''
-                if close_text:
-                    text = (text.strip() + '\n\n' + close_text.strip()).strip()
-            except Exception as exc:
-                _audit(
-                    'tool_call',
-                    'close_advice',
-                    run_id=run_id,
-                    account=acct,
-                    status='error',
-                    tool_name='close_advice',
-                    message=str(exc),
-                )
-                runlog.safe_event('close_advice', 'error', message=f'close advice failed for {acct}: {exc}')
-
-        meaningful = decide_notification_meaningful(text)
-
-        should_notify_effective = should_notify
-        # [REMOVED] legacy override(high,dense) logic
-
-        acct_metrics['ran_scan'] = True
-        acct_metrics['should_notify'] = bool(should_notify_effective)
-        acct_metrics['meaningful'] = bool(meaningful)
-        acct_metrics['reason'] = str(reason)
-        tick_metrics['accounts'].append(acct_metrics)
-        results.append(AccountResult(acct, True, should_notify_effective, meaningful, reason, text))
+        prefetch_done = bool(outcome.prefetch_done)
+        ran_any_pipeline = bool(ran_any_pipeline or outcome.ran_pipeline)
+        tick_metrics['accounts'].append(outcome.acct_metrics)
+        results.append(outcome.result)
 
     if ran_any_pipeline:
         try:
-            run_scan_scheduler_cli(
+            request_scheduler_update(
+                runner=run_scan_scheduler_cli,
                 vpy=vpy,
                 base=base,
                 config=cfg_path,
@@ -1382,82 +888,72 @@ def main() -> int:
 
     now_bj = bj_now()
     notify_candidates = rank_notify_candidates(engine_filter_notify_candidates(results))
-    account_messages = build_account_messages(
-        notify_candidates=notify_candidates,
-        now_bj=now_bj,
-        cash_footer_lines=cash_footer_lines,
-        cash_footer_for_account_fn=cash_footer_for_account,
-        build_account_message_fn=build_account_message,
-    )
     try:
-        account_messages_snapshot = SnapshotDTO.from_payload(
-            {
-                'schema_kind': 'snapshot_dto',
-                'schema_version': '1.0',
-                'snapshot_name': 'account_messages',
-                'as_of_utc': utc_now(),
-                'payload': {'account_messages': account_messages},
-            }
-        )
-        raw_account_messages = account_messages_snapshot.payload.get('account_messages')
-        if not isinstance(raw_account_messages, dict):
-            raise SchemaValidationError('account_messages must be a dict')
-        account_messages = {str(k): str(v) for k, v in raw_account_messages.items()}
-    except SchemaValidationError as e:
-        _fail_schema_validation(runlog=runlog, audit_fn=_audit, stage='account_messages_snapshot', exc=e, run_id=run_id)
-
-    notify_threshold = resolve_multi_tick_engine_entrypoint(
-        notify_account_messages=account_messages,
-        notify_min_accounts=1,
-    ).get('notify_threshold') or {}
-    if not bool(notify_threshold.get('threshold_met')):
-        account_messages = build_no_candidate_account_messages(
+        prepared_messages = prepare_multi_account_messages(
+            notify_candidates=notify_candidates,
             results=results,
             now_bj=now_bj,
             cash_footer_lines=cash_footer_lines,
             cash_footer_for_account_fn=cash_footer_for_account,
+            build_account_message_fn=build_account_message,
+            build_account_messages_fn=build_account_messages,
+            build_no_candidate_account_messages_fn=build_no_candidate_account_messages,
+            as_of_utc=utc_now(),
+            snapshot_cls=SnapshotDTO,
+            engine_entrypoint=resolve_multi_tick_engine_entrypoint,
         )
-        notify_threshold = resolve_multi_tick_engine_entrypoint(
-            notify_account_messages=account_messages,
-            notify_min_accounts=1,
-        ).get('notify_threshold') or {}
+    except SchemaValidationError as e:
+        _fail_schema_validation(runlog=runlog, audit_fn=_audit, stage='account_messages_snapshot', exc=e, run_id=run_id)
+    account_messages = prepared_messages.account_messages
 
-        if not bool(notify_threshold.get('threshold_met')):
-            runlog.safe_event('notify', 'skip', message='no account notification content')
+    if not bool(prepared_messages.threshold_met):
+        runlog.safe_event('notify', 'skip', message='no account notification content')
 
-            shared_payload, account_payloads = build_no_account_notification_payloads(
-                now_utc_fn=utc_now,
-                results=results,
-                run_dir=str(run_dir),
-            )
-            try:
-                state_repo.write_shared_last_run(base, shared_payload)
-                _audit('write', 'write_shared_last_run', run_id=run_id, status='skip', message='no_account_notification')
-            except Exception:
-                pass
+        shared_payload, account_payloads = build_no_account_notification_payloads(
+            now_utc_fn=utc_now,
+            results=results,
+            run_dir=str(run_dir),
+        )
+        try:
+            state_repo.write_shared_last_run(base, shared_payload)
+            _audit('write', 'write_shared_last_run', run_id=run_id, status='skip', message='no_account_notification')
+        except Exception:
+            pass
 
-            try:
-                for r in results:
-                    payload = account_payloads.get(str(r.account), {})
-                    state_repo.write_account_last_run(base, r.account, payload)
-                    state_repo.write_run_account_last_run(base, run_id, r.account, payload)
-                    _audit('write', 'write_account_last_run', run_id=run_id, account=str(r.account), status='skip', message='no_account_notification')
-            except Exception:
-                pass
+        try:
+            for r in results:
+                payload = account_payloads.get(str(r.account), {})
+                state_repo.write_account_last_run(base, r.account, payload)
+                state_repo.write_run_account_last_run(base, run_id, r.account, payload)
+                _audit('write', 'write_account_last_run', run_id=run_id, account=str(r.account), status='skip', message='no_account_notification')
+        except Exception:
+            pass
 
-            try:
-                tick_metrics['sent'] = False
-                tick_metrics['reason'] = 'no_account_notification'
-                state_repo.write_tick_metrics(base, run_id, tick_metrics)
-                state_repo.append_tick_metrics_history(base, run_id, tick_metrics)
-                _audit('write', 'write_tick_metrics', run_id=run_id, status='skip', message='no_account_notification')
-            except Exception:
-                pass
+        try:
+            tick_metrics['sent'] = False
+            tick_metrics['reason'] = 'no_account_notification'
+            state_repo.write_tick_metrics(base, run_id, tick_metrics)
+            state_repo.append_tick_metrics_history(base, run_id, tick_metrics)
+            _audit('write', 'write_tick_metrics', run_id=run_id, status='skip', message='no_account_notification')
+        except Exception:
+            pass
 
-            runlog.safe_event('run_end', 'ok', data=_safe_runlog_data({'sent': False, 'reason': 'no_account_notification', 'accounts': [r.account for r in results]}))
-            _guard_mark_success()
-            return 0
+        runlog.safe_event(
+            'run_end',
+            'ok',
+            data=_safe_runlog_data(
+                build_run_end_payload(
+                    no_send=no_send,
+                    results=results,
+                    sent_accounts=[],
+                    reason='no_account_notification',
+                )
+            ),
+        )
+        _guard_mark_success()
+        return 0
 
+    if prepared_messages.used_heartbeat:
         runlog.safe_event(
             'notify',
             'prepare',
@@ -1491,14 +987,21 @@ def main() -> int:
     if parse_error:
         runlog.safe_event('notify', 'error', message=f'failed to parse quiet_hours: {parse_error}')
 
-    notify_delivery = decide_notification_delivery(
-        should_notify_window=True,
-        notification_text='\n'.join(str(msg) for msg in account_messages.values()),
-        target=target,
-        no_send=no_send,
-        is_quiet=bool(dnd_decision.get('is_quiet')),
-        quiet_window=str(dnd_decision.get('quiet_window') or ''),
-    )
+    try:
+        notify_delivery, delivery_plan, target = build_multi_account_delivery(
+            channel=channel,
+            target=target,
+            account_messages=account_messages,
+            no_send=no_send,
+            is_quiet=bool(dnd_decision.get('is_quiet')),
+            quiet_window=str(dnd_decision.get('quiet_window') or ''),
+            decision_builder=decide_notification_delivery,
+        )
+    except ValueError as err:
+        runlog.safe_event('notify', 'error', error_code='CONFIG_ERROR', message=str(err))
+        raise SystemExit(f'[CONFIG_ERROR] {err}')
+    except SchemaValidationError as e:
+        _fail_schema_validation(runlog=runlog, audit_fn=_audit, stage='delivery_plan', exc=e, run_id=run_id)
     _audit(
         'notify',
         'delivery_decision',
@@ -1516,93 +1019,54 @@ def main() -> int:
 
     sent_accounts: list[str] = []
     notify_failures: list[dict[str, object]] = []
-
-    config_error = notify_delivery.get('config_error')
-    if config_error:
-        runlog.safe_event('notify', 'error', error_code='CONFIG_ERROR', message=str(config_error))
-        raise SystemExit(f'[CONFIG_ERROR] {config_error}')
-
-    delivery_plan: DeliveryPlan | None = None
     if bool(notify_delivery.get('should_send')):
-        target = notify_delivery.get('effective_target')
-        try:
-            delivery_plan = DeliveryPlan.from_payload(
-                {
-                    'schema_kind': 'delivery_plan',
-                    'schema_version': '1.0',
-                    'channel': str(channel),
-                    'target': str(target),
-                    'account_messages': account_messages,
-                    'should_send': True,
-                }
-            )
-        except SchemaValidationError as e:
-            _fail_schema_validation(runlog=runlog, audit_fn=_audit, stage='delivery_plan', exc=e, run_id=run_id)
-        for acct, msg in delivery_plan.account_messages.items():
-            runlog.safe_event('notify', 'start', data=_safe_runlog_data({'channel': channel, 'target_set': bool(target), 'account': acct, 'message_len': len(msg)}))
-            send_result = _send_account_message_with_retry(
-                base=base,
-                channel=str(delivery_plan.channel),
-                target=str(delivery_plan.target),
-                account=str(acct),
-                message=msg,
-                run_id=run_id,
-                runlog=runlog,
-                audit_fn=_audit,
-            )
-            if not bool(send_result.get('ok')):
-                error_code = str(send_result.get('error_code') or 'SEND_FAILED')
-                _guard_mark_failure(error_code, 'send_openclaw_message')
-                notify_failures.append(
-                    {
-                        'account': acct,
-                        'error_code': error_code,
-                        'attempts': int(send_result.get('attempts') or NOTIFY_SEND_MAX_ATTEMPTS),
-                        'final_returncode': int(send_result.get('final_returncode') or 0),
-                        'message_id': send_result.get('message_id'),
-                        'command_ok': bool(send_result.get('command_ok')),
-                        'delivery_confirmed': bool(send_result.get('delivery_confirmed')),
-                    }
-                )
-                continue
-
-            sent_accounts.append(acct)
+        assert delivery_plan is not None
+        execution = execute_multi_account_delivery(
+            delivery_plan=delivery_plan,
+            run_id=run_id,
+            runlog=runlog,
+            audit_fn=_audit,
+            safe_data_fn=_safe_runlog_data,
+            send_fn=send_openclaw_message,
+            normalize_fn=normalize_notify_subprocess_output,
+            failure_fields_builder=build_failure_audit_fields,
+            on_failure=lambda error_code: _guard_mark_failure(error_code, 'send_openclaw_message'),
+            base=base,
+        )
+        sent_accounts = execution.sent_accounts
+        notify_failures = execution.notify_failures
     else:
-        target = notify_delivery.get('effective_target')
         sent_accounts = list(account_messages.keys())
         runlog.safe_event('notify', 'skip', message='no_send mode')
 
     if not no_send:
         try:
-            for acct in sent_accounts:
-                run_scan_scheduler_cli(
-                    vpy=vpy,
-                    base=base,
-                    config=cfg_path,
-                    state=state_path,
-                    state_dir=run_repo.get_run_state_dir(base, run_id),
-                    mark_notified=True,
-                    schedule_key=str(scheduler_schedule_key),
-                    account=str(acct),
-                    capture_output=False,
-                )
+            mark_accounts_notified(
+                runner=run_scan_scheduler_cli,
+                vpy=vpy,
+                base=base,
+                config=cfg_path,
+                state=state_path,
+                state_dir=run_repo.get_run_state_dir(base, run_id),
+                schedule_key=str(scheduler_schedule_key),
+                accounts=sent_accounts,
+            )
         except Exception:
             pass
 
     try:
-        notify_summary = {
-            'success_count': len(sent_accounts),
-            'failure_count': len(notify_failures),
-            'total_accounts': len(account_messages),
-        }
-        tick_metrics['sent'] = (not no_send) and bool(sent_accounts)
-        tick_metrics['sent_accounts'] = sent_accounts
-        tick_metrics['notify_summary'] = notify_summary
-        if notify_failures:
-            tick_metrics['reason'] = 'sent_partial_notify_failure' if sent_accounts else 'notify_failed'
-            tick_metrics['notify_failures'] = notify_failures
-        else:
-            tick_metrics['reason'] = ('sent' if ((not no_send) and bool(sent_accounts)) else ('no_send' if no_send else 'no_account_sent'))
+        notify_summary = build_notify_summary(
+            sent_accounts=sent_accounts,
+            notify_failures=notify_failures,
+            total_accounts=len(account_messages),
+        )
+        apply_notify_results_to_tick_metrics(
+            tick_metrics=tick_metrics,
+            no_send=no_send,
+            sent_accounts=sent_accounts,
+            notify_failures=notify_failures,
+            notify_summary=notify_summary,
+        )
         state_repo.write_tick_metrics(base, run_id, tick_metrics)
         state_repo.append_tick_metrics_history(base, run_id, tick_metrics)
         _audit('write', 'write_tick_metrics', run_id=run_id, extra={'sent': bool(tick_metrics.get('sent'))})
@@ -1612,17 +1076,15 @@ def main() -> int:
     try:
         last_run_path = (state_repo.shared_state_dir(base) / 'last_run.json').resolve()
         prev = read_json(last_run_path, {})
-        run_meta = {
-            'last_run_utc': utc_now(),
-            'sent': bool(sent_accounts),
-            'channel': str(channel),
-            'target': str(target),
-            'accounts': [r.account for r in results],
-            'sent_accounts': sent_accounts,
-            'notify_failures': notify_failures,
-            'notify_summary': notify_summary,
-            'results': [r.__dict__ for r in results],
-        }
+        run_meta = build_shared_last_run_meta(
+            now_utc=utc_now(),
+            channel=channel,
+            target=target,
+            results=results,
+            sent_accounts=sent_accounts,
+            notify_failures=notify_failures,
+            notify_summary=notify_summary,
+        )
         state_repo.write_shared_last_run(
             base,
             build_shared_last_run_payload(prev_payload=prev, run_meta=run_meta, history_limit=20),
@@ -1637,18 +1099,29 @@ def main() -> int:
             'error',
             error_code=('NOTIFY_PARTIAL_FAILED' if sent_accounts else 'NOTIFY_FAILED'),
             data=_safe_runlog_data(
-                {
-                    'sent': (not no_send) and bool(sent_accounts),
-                    'accounts': [r.account for r in results],
-                    'sent_accounts': sent_accounts,
-                    'notify_failures': notify_failures,
-                    'notify_summary': notify_summary,
-                }
+                build_run_end_payload(
+                    no_send=no_send,
+                    results=results,
+                    sent_accounts=sent_accounts,
+                    notify_failures=notify_failures,
+                    notify_summary=notify_summary,
+                )
             ),
         )
         return 1
 
-    runlog.safe_event('run_end', 'ok', data=_safe_runlog_data({'sent': (not no_send) and bool(sent_accounts), 'accounts': [r.account for r in results], 'sent_accounts': sent_accounts, 'notify_summary': notify_summary}))
+    runlog.safe_event(
+        'run_end',
+        'ok',
+        data=_safe_runlog_data(
+            build_run_end_payload(
+                no_send=no_send,
+                results=results,
+                sent_accounts=sent_accounts,
+                notify_summary=notify_summary,
+            )
+        ),
+    )
     _guard_mark_success()
     return 0
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from scripts.option_intake import _missing_for_action, parse_om_command
 
 
@@ -60,3 +62,12 @@ def test_close_action_reports_missing_close_fields() -> None:
     }
 
     assert _missing_for_action(parsed, "close") == ["account", "close_price"]
+
+
+def test_option_intake_no_longer_shells_out_to_parser_or_option_positions() -> None:
+    src = Path(__file__).resolve().parents[1] / "scripts" / "option_intake.py"
+    text = src.read_text(encoding="utf-8")
+
+    assert "import subprocess" not in text
+    assert "from scripts.parse_option_message import parse_option_message_text" in text
+    assert "scripts/option_positions.py" not in text

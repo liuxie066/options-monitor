@@ -9,7 +9,7 @@ from __future__ import annotations
 import math
 
 
-DEFAULT_MIN_ANNUALIZED_NET_RETURN = 0.07
+DEFAULT_MIN_ANNUALIZED_NET_RETURN = 0.10
 
 
 def _to_float(value, *, source: str) -> float:

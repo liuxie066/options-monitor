@@ -18,61 +18,75 @@ class _FakeRunLogger:
 def test_multi_tick_account_messages_snapshot_contract_guard_present() -> None:
     base = Path(__file__).resolve().parents[1]
     src = (base / "scripts" / "multi_tick" / "main.py").read_text(encoding="utf-8")
-    assert "snapshot_name': 'account_messages'" in src
+    helper_src = (base / "src" / "application" / "scheduled_notification.py").read_text(encoding="utf-8")
+    assert 'snapshot_name": "account_messages"' in helper_src
+    assert "prepare_multi_account_messages(" in src
+    assert "snapshot_account_messages(" in helper_src
     assert "stage='account_messages_snapshot'" in src
-    assert "account_messages must be a dict" in src
+    assert "account_messages must be a dict" in helper_src
 
 
 def test_multi_tick_scheduler_and_account_decision_use_objectized_contract_path() -> None:
     base = Path(__file__).resolve().parents[1]
     src = (base / "scripts" / "multi_tick" / "main.py").read_text(encoding="utf-8")
-    assert "snapshot_name': 'scheduler_raw'" in src
-    assert "resolve_multi_tick_engine_entrypoint(" in src
-    assert "account scheduler decision view must be valid" in src
+    helper_src = (base / "src" / "application" / "scheduled_notification.py").read_text(encoding="utf-8")
+    assert "build_multi_tick_scheduler_decision" in src
+    assert "build_multi_tick_account_scheduler_view" in src
+    assert "def _snapshot_payload_dict(" in helper_src
+    assert '"scheduler_raw"' in helper_src
+    assert "engine_entrypoint: Callable[..., dict[str, Any]] = resolve_multi_tick_engine_entrypoint" in helper_src
+    assert "account scheduler decision view must be valid" in helper_src
     assert "stage='account_scheduler_decision'" in src
 
 
 def test_multi_tick_trading_day_guard_decision_delegates_to_engine() -> None:
     base = Path(__file__).resolve().parents[1]
     src = (base / "scripts" / "multi_tick" / "main.py").read_text(encoding="utf-8")
+    helper_src = (base / "src" / "application" / "scheduled_notification.py").read_text(encoding="utf-8")
     assert "decide_trading_day_guard(" in src
     assert "opend_unhealthy={" in src
-    assert "decide_notification_delivery(" in src
+    assert "build_multi_account_delivery(" in src
+    assert "decision_builder: Callable[..., dict[str, Any]] = decide_notification_delivery" in helper_src
 
 
 def test_multi_tick_io_and_decision_failure_audit_fields_are_distinguishable() -> None:
     base = Path(__file__).resolve().parents[1]
     src = (base / "scripts" / "multi_tick" / "main.py").read_text(encoding="utf-8")
+    helper_src = (base / "src" / "application" / "scheduled_notification.py").read_text(encoding="utf-8")
+    account_run_src = (base / "src" / "application" / "account_run.py").read_text(encoding="utf-8")
     assert "normalize_subprocess_adapter_payload(" in src
-    assert "normalize_pipeline_subprocess_output(" in src
+    assert "normalize_pipeline_subprocess_output(" in account_run_src
     assert "normalize_notify_subprocess_output" in src
-    assert "failure_kind='io_error'" in src
+    assert 'failure_kind="io_error"' in helper_src
     assert "failure_kind='decision_error'" in src
 
 
 def test_multi_tick_pipeline_calls_share_context_dir() -> None:
     base = Path(__file__).resolve().parents[1]
-    src = (base / "scripts" / "multi_tick" / "main.py").read_text(encoding="utf-8")
-    assert "shared_context_dir=run_repo.get_run_state_dir(base, run_id)" in src
+    helper_src = (base / "src" / "application" / "account_run.py").read_text(encoding="utf-8")
+    assert "shared_context_dir=run_repo.get_run_state_dir(request.base, request.run_id)" in helper_src
 
 
 def test_multi_tick_notify_failure_is_account_isolated() -> None:
     base = Path(__file__).resolve().parents[1]
     src = (base / "scripts" / "multi_tick" / "main.py").read_text(encoding="utf-8")
+    helper_src = (base / "src" / "application" / "scheduled_notification.py").read_text(encoding="utf-8")
+    cron_runtime_src = (base / "src" / "application" / "cron_runtime.py").read_text(encoding="utf-8")
     assert "notify_failures: list[dict[str, object]] = []" in src
-    assert "NOTIFY_SEND_MAX_ATTEMPTS = 1" in src
-    assert "NOTIFY_SEND_RETRY_DELAYS_SEC: tuple[float, ...] = ()" in src
-    assert "notify_failures.append(" in src
-    assert "continue" in src[src.index("notify_failures.append(") : src.index("sent_accounts.append(acct)")]
-    assert "'final_returncode': int(send_result.get('final_returncode') or 0)" in src
-    assert "for acct in sent_accounts:" in src
-    assert "mark_notified=True" in src
+    assert "NOTIFY_SEND_MAX_ATTEMPTS = 1" in helper_src
+    assert "NOTIFY_SEND_RETRY_DELAYS_SEC: tuple[float, ...] = ()" in helper_src
+    assert "notify_failures.append(" in helper_src
+    assert '"final_returncode": int(send_result.get("final_returncode") or 0)' in helper_src
+    assert "sent_accounts.append(acct)" in helper_src
+    assert "mark_accounts_notified(" in src
+    assert "mark_notified=True" in cron_runtime_src
     assert "NOTIFY_PARTIAL_FAILED" in src
-    assert "'notify_summary': notify_summary" in src
+    assert "build_run_end_payload(" in src
+    assert '"notify_summary": notify_summary' in cron_runtime_src
 
 
 def test_multi_tick_notify_unconfirmed_is_not_retried() -> None:
-    mt = importlib.import_module("scripts.multi_tick.main")
+    helper = importlib.import_module("src.application.scheduled_notification")
 
     send_calls: list[dict] = []
     audit_events: list[dict] = []
@@ -86,7 +100,7 @@ def test_multi_tick_notify_unconfirmed_is_not_retried() -> None:
     def _audit(event_type, action, **kwargs):
         audit_events.append({"event_type": event_type, "action": action, **kwargs})
 
-    result = mt._send_account_message_with_retry(
+    result = helper.send_account_message_with_retry(
         base=Path("/tmp/options-monitor-test"),
         channel="feishu",
         target="user:test",
@@ -96,6 +110,9 @@ def test_multi_tick_notify_unconfirmed_is_not_retried() -> None:
         runlog=runlog,
         audit_fn=_audit,
         send_fn=_send,
+        normalize_fn=lambda **kwargs: importlib.import_module("domain.domain").normalize_notify_subprocess_output(**kwargs),
+        safe_data_fn=lambda payload: payload,
+        failure_fields_builder=lambda **kwargs: kwargs,
         sleep_fn=lambda seconds: sleeps.append(seconds),
     )
 
@@ -110,7 +127,7 @@ def test_multi_tick_notify_unconfirmed_is_not_retried() -> None:
 
 
 def test_multi_tick_notify_does_not_retry_when_message_id_exists() -> None:
-    mt = importlib.import_module("scripts.multi_tick.main")
+    helper = importlib.import_module("src.application.scheduled_notification")
 
     send_calls: list[dict] = []
     audit_events: list[dict] = []
@@ -135,7 +152,7 @@ def test_multi_tick_notify_does_not_retry_when_message_id_exists() -> None:
     def _audit(event_type, action, **kwargs):
         audit_events.append({"event_type": event_type, "action": action, **kwargs})
 
-    result = mt._send_account_message_with_retry(
+    result = helper.send_account_message_with_retry(
         base=Path("/tmp/options-monitor-test"),
         channel="feishu",
         target="user:test",
@@ -146,6 +163,8 @@ def test_multi_tick_notify_does_not_retry_when_message_id_exists() -> None:
         audit_fn=_audit,
         send_fn=_send,
         normalize_fn=_normalize,
+        safe_data_fn=lambda payload: payload,
+        failure_fields_builder=lambda **kwargs: kwargs,
         sleep_fn=lambda seconds: sleeps.append(seconds),
     )
 
@@ -159,7 +178,7 @@ def test_multi_tick_notify_does_not_retry_when_message_id_exists() -> None:
 
 
 def test_multi_tick_notify_unconfirmed_can_retry_when_explicitly_requested() -> None:
-    mt = importlib.import_module("scripts.multi_tick.main")
+    helper = importlib.import_module("src.application.scheduled_notification")
 
     audit_events: list[dict] = []
     sleeps: list[float] = []
@@ -171,7 +190,7 @@ def test_multi_tick_notify_unconfirmed_can_retry_when_explicitly_requested() -> 
     def _audit(event_type, action, **kwargs):
         audit_events.append({"event_type": event_type, "action": action, **kwargs})
 
-    result = mt._send_account_message_with_retry(
+    result = helper.send_account_message_with_retry(
         base=Path("/tmp/options-monitor-test"),
         channel="feishu",
         target="user:test",
@@ -181,6 +200,9 @@ def test_multi_tick_notify_unconfirmed_can_retry_when_explicitly_requested() -> 
         runlog=runlog,
         audit_fn=_audit,
         send_fn=_send,
+        normalize_fn=lambda **kwargs: importlib.import_module("domain.domain").normalize_notify_subprocess_output(**kwargs),
+        safe_data_fn=lambda payload: payload,
+        failure_fields_builder=lambda **kwargs: kwargs,
         sleep_fn=lambda seconds: sleeps.append(seconds),
         max_attempts=3,
         retry_delays_sec=(1.0, 3.0),
@@ -198,7 +220,7 @@ def test_multi_tick_notify_unconfirmed_can_retry_when_explicitly_requested() -> 
 
 
 def test_multi_tick_notify_failed_send_is_not_retried() -> None:
-    mt = importlib.import_module("scripts.multi_tick.main")
+    helper = importlib.import_module("src.application.scheduled_notification")
 
     audit_events: list[dict] = []
     sleeps: list[float] = []
@@ -212,7 +234,7 @@ def test_multi_tick_notify_failed_send_is_not_retried() -> None:
     def _audit(event_type, action, **kwargs):
         audit_events.append({"event_type": event_type, "action": action, **kwargs})
 
-    result = mt._send_account_message_with_retry(
+    result = helper.send_account_message_with_retry(
         base=Path("/tmp/options-monitor-test"),
         channel="feishu",
         target="user:test",
@@ -222,6 +244,9 @@ def test_multi_tick_notify_failed_send_is_not_retried() -> None:
         runlog=runlog,
         audit_fn=_audit,
         send_fn=_send,
+        normalize_fn=lambda **kwargs: importlib.import_module("domain.domain").normalize_notify_subprocess_output(**kwargs),
+        safe_data_fn=lambda payload: payload,
+        failure_fields_builder=lambda **kwargs: kwargs,
         sleep_fn=lambda seconds: sleeps.append(seconds),
     )
 

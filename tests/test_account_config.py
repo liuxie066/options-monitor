@@ -97,6 +97,48 @@ def test_resolve_portfolio_source_keeps_futu_auto_with_holdings_fallback() -> No
     assert resolve_portfolio_source(cfg, account="lx") == "auto"
 
 
+def test_build_account_portfolio_source_plan_for_auto_futu_account() -> None:
+    from scripts.account_config import build_account_portfolio_source_plan
+
+    cfg = {
+        "accounts": ["lx"],
+        "account_settings": {
+            "lx": {"type": "futu", "holdings_account": "LX"},
+        },
+        "portfolio": {
+            "source": "auto",
+        },
+    }
+
+    out = build_account_portfolio_source_plan(cfg, account="lx")
+    assert out.account_type == "futu"
+    assert out.requested_source == "auto"
+    assert out.primary_source == "futu"
+    assert out.fallback_source == "holdings"
+    assert out.holdings_account == "LX"
+
+
+def test_build_account_portfolio_source_plan_for_external_holdings_account() -> None:
+    from scripts.account_config import build_account_portfolio_source_plan
+
+    cfg = {
+        "accounts": ["ext1"],
+        "account_settings": {
+            "ext1": {"type": "external_holdings", "holdings_account": "Feishu EXT"},
+        },
+        "portfolio": {
+            "source": "futu",
+        },
+    }
+
+    out = build_account_portfolio_source_plan(cfg, account="ext1")
+    assert out.account_type == "external_holdings"
+    assert out.requested_source == "holdings"
+    assert out.primary_source == "holdings"
+    assert out.fallback_source is None
+    assert out.holdings_account == "Feishu EXT"
+
+
 def test_parse_option_message_accepts_configured_account_labels() -> None:
     from scripts.parse_option_message import parse_account
 

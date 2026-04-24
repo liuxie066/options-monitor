@@ -14,25 +14,17 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
+from domain.domain.close_advice import CloseAdviceConfig
 from domain.storage.repositories import state_repo
 from scripts.account_config import (
     ACCOUNT_TYPE_EXTERNAL_HOLDINGS,
     accounts_from_config,
-    has_holdings_fallback,
-    resolve_account_type,
-    resolve_configured_holdings_account,
-    resolve_holdings_account,
-    resolve_portfolio_source,
+    build_account_portfolio_source_plan,
 )
-from scripts.agent_plugin.config import repo_base as agent_repo_base
-from scripts.agent_plugin.init_local import (
-    add_account_to_local_config,
-    edit_account_in_local_config,
-    remove_account_from_local_config,
-)
-from scripts.agent_plugin.main import build_spec, run_tool
 from scripts.infra.service import send_openclaw_message
 from scripts.validate_config import SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS as VALIDATOR_SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS
+from src.application.account_management import add_account, edit_account, remove_account
+from src.application.tool_execution import build_tool_manifest, execute_tool
 
 
 BASE_DIR = Path(__file__).resolve().parents[2]
@@ -315,6 +307,7 @@ def _global_summary(config_key: str) -> dict[str, Any]:
     schedule = {k: raw_schedule.get(k) for k in SCHEDULE_SUMMARY_FIELDS if k in raw_schedule}
     templates = cfg.get("templates") if isinstance(cfg.get("templates"), dict) else {}
     close_advice = cfg.get("close_advice") if isinstance(cfg.get("close_advice"), dict) else {}
+    resolved_close_advice = CloseAdviceConfig.from_mapping(close_advice)
     put_template = templates.get("put_base") if isinstance(templates.get("put_base"), dict) else {}
     call_template = templates.get("call_base") if isinstance(templates.get("call_base"), dict) else {}
     put_strategy = put_template.get("sell_put") if isinstance(put_template.get("sell_put"), dict) else {}
@@ -371,9 +364,9 @@ def _global_summary(config_key: str) -> dict[str, Any]:
                     "quote_source": close_advice.get("quote_source"),
                     "notify_levels": close_advice.get("notify_levels"),
                     "max_items_per_account": close_advice.get("max_items_per_account"),
-                    "max_spread_ratio": close_advice.get("max_spread_ratio"),
-                    "strong_remaining_annualized_max": close_advice.get("strong_remaining_annualized_max"),
-                    "medium_remaining_annualized_max": close_advice.get("medium_remaining_annualized_max"),
+                    "max_spread_ratio": resolved_close_advice.max_spread_ratio,
+                    "strong_remaining_annualized_max": resolved_close_advice.strong_remaining_annualized_max,
+                    "medium_remaining_annualized_max": resolved_close_advice.medium_remaining_annualized_max,
                 }.items()
                 if v is not None
             },
@@ -631,32 +624,29 @@ def _account_rows(config_key: str) -> list[dict[str, Any]]:
     holdings_ready = feishu_ready and holdings_table_ready
     accounts = accounts_from_config(cfg)
     account_settings = cfg.get("account_settings") if isinstance(cfg.get("account_settings"), dict) else {}
-    portfolio = cfg.get("portfolio") if isinstance(cfg.get("portfolio"), dict) else {}
-    source_by_account = portfolio.get("source_by_account") if isinstance(portfolio.get("source_by_account"), dict) else {}
     trade_intake = cfg.get("trade_intake") if isinstance(cfg.get("trade_intake"), dict) else {}
     account_mapping = trade_intake.get("account_mapping") if isinstance(trade_intake.get("account_mapping"), dict) else {}
     futu_mapping = account_mapping.get("futu") if isinstance(account_mapping.get("futu"), dict) else {}
     rows: list[dict[str, Any]] = []
     for account in accounts:
         setting = account_settings.get(account) if isinstance(account_settings.get(account), dict) else {}
-        account_type = resolve_account_type(cfg, account=account)
+        source_plan = build_account_portfolio_source_plan(cfg, account=account)
+        account_type = source_plan.account_type
         futu_acc_ids = [_mask_acc_id(acc_id) for acc_id, label in futu_mapping.items() if str(label or "").strip().lower() == account]
-        configured_holdings_account = resolve_configured_holdings_account(cfg, account=account)
-        holdings_account = resolve_holdings_account(cfg, account=account)
-        fallback_enabled = bool(str(configured_holdings_account or "").strip()) or account_type == ACCOUNT_TYPE_EXTERNAL_HOLDINGS
-        primary_ready = bool(futu_acc_ids) if account_type != ACCOUNT_TYPE_EXTERNAL_HOLDINGS else bool(holdings_ready)
+        fallback_enabled = bool(source_plan.fallback_source) or account_type == ACCOUNT_TYPE_EXTERNAL_HOLDINGS
+        primary_ready = bool(futu_acc_ids) if source_plan.primary_source == "futu" else bool(holdings_ready)
         fallback_ready = (bool(holdings_ready) if fallback_enabled else None)
         row = AccountRow(
             configKey=config_key,  # type: ignore[arg-type]
             account_label=account,
             account_type=str(setting.get("type") or account_type or "futu"),
             futu_acc_ids=futu_acc_ids,
-            holdings_account=(str(holdings_account or "").strip() or None),
-            portfolio_source=(str(resolve_portfolio_source(cfg, account=account) or source_by_account.get(account) or portfolio.get("source") or "").strip() or None),
-            primary_source=("holdings" if account_type == ACCOUNT_TYPE_EXTERNAL_HOLDINGS else "futu"),
+            holdings_account=(str(source_plan.holdings_account or "").strip() or None),
+            portfolio_source=source_plan.requested_source,
+            primary_source=source_plan.primary_source,
             primary_ready=primary_ready,
             fallback_enabled=fallback_enabled,
-            fallback_source=("holdings" if fallback_enabled else None),
+            fallback_source=(source_plan.fallback_source or ("holdings" if fallback_enabled else None)),
             fallback_ready=fallback_ready,
         )
         rows.append(row.__dict__)
@@ -743,8 +733,6 @@ def _read_jsonl_tail(path: Path, *, limit: int = 20) -> list[dict[str, Any]]:
 def _resolve_portfolio_data_config_path(cfg: dict[str, Any], *, config_path: Path) -> Path | None:
     portfolio = cfg.get("portfolio") if isinstance(cfg.get("portfolio"), dict) else {}
     raw = portfolio.get("data_config")
-    if raw is None or not str(raw).strip():
-        raw = portfolio.get("pm_config")
     if raw is None or not str(raw).strip():
         return None
     path = Path(str(raw).strip()).expanduser()
@@ -841,7 +829,7 @@ def _repair_hint_from_error(error: dict[str, Any] | None) -> dict[str, Any] | No
     elif "portfolio.data_config" in message.lower() or "sqlite" in message.lower():
         actions = [
             "确认 portfolio.data_config 指向本地 SQLite data config。",
-            "检查 option_positions 的 SQLite 文件和 secrets 配置是否存在。",
+            "检查 position lots 的 SQLite 文件和 secrets 配置是否存在。",
         ]
 
     if not hint and not actions:
@@ -1029,8 +1017,7 @@ async def api_upsert_account(req: Request):
     config_path = _resolve_config_path(CONFIG_FILES[config_key])
     try:
         if mode == "add":
-            result = add_account_to_local_config(
-                repo_root=agent_repo_base(),
+            result = add_account(
                 market=config_key,
                 account_label=account_label,
                 account_type=account_type,
@@ -1039,8 +1026,7 @@ async def api_upsert_account(req: Request):
                 holdings_account=holdings_account,
             )
         else:
-            result = edit_account_in_local_config(
-                repo_root=agent_repo_base(),
+            result = edit_account(
                 market=config_key,
                 account_label=account_label,
                 config_path=config_path,
@@ -1069,8 +1055,7 @@ async def api_delete_account(req: Request):
 
     config_path = _resolve_config_path(CONFIG_FILES[config_key])
     try:
-        result = remove_account_from_local_config(
-            repo_root=agent_repo_base(),
+        result = remove_account(
             market=config_key,
             account_label=account_label,
             config_path=config_path,
@@ -1084,7 +1069,7 @@ async def api_delete_account(req: Request):
 
 @app.get("/api/spec")
 def api_spec():
-    return build_spec()
+    return build_tool_manifest()
 
 
 @app.post("/api/tools/run")
@@ -1098,7 +1083,7 @@ async def api_tools_run(req: Request):
     config_key = str(input_payload.get("config_key") or payload.get("configKey") or "").strip().lower()
     if config_key in {"us", "hk"} and "config_key" not in input_payload:
         input_payload = {**input_payload, "config_key": config_key}
-    result = run_tool(tool_name, input_payload)
+    result = execute_tool(tool_name, input_payload)
     _append_webui_tool_execution_audit(config_key=str(input_payload.get("config_key") or config_key or "us"), tool_name=tool_name, result=result)
     return {
         "result": result,
@@ -1146,7 +1131,7 @@ async def api_notifications_preview(req: Request):
     changes_path = reports_dir / "symbols_changes.txt"
     if not alerts_path.exists() and not changes_path.exists():
         raise HTTPException(status_code=404, detail="preview source files not found; run scan first")
-    result = run_tool(
+    result = execute_tool(
         "preview_notification",
         {
             "alerts_path": str(alerts_path),

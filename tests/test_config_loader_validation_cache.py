@@ -29,21 +29,21 @@ def test_scheduled_validation_is_cached() -> None:
     assert len(calls) == 1
 
 
-def test_resolve_pm_config_path_prefers_explicit_path() -> None:
-    from scripts.config_loader import resolve_pm_config_path
+def test_resolve_data_config_path_prefers_explicit_path() -> None:
+    from scripts.config_loader import resolve_data_config_path
 
     with TemporaryDirectory() as td:
         base = Path(td)
         explicit = base / "custom.json"
         explicit.write_text("{}", encoding="utf-8")
 
-        out = resolve_pm_config_path(base=base, pm_config="custom.json")
+        out = resolve_data_config_path(base=base, data_config="custom.json")
 
     assert out == explicit.resolve()
 
 
-def test_default_pm_config_path_prefers_new_secret_location_when_present() -> None:
-    from scripts.config_loader import default_pm_config_path
+def test_default_data_config_path_prefers_new_secret_location_when_present() -> None:
+    from scripts.config_loader import default_data_config_path
 
     with TemporaryDirectory() as td:
         base = Path(td)
@@ -51,30 +51,30 @@ def test_default_pm_config_path_prefers_new_secret_location_when_present() -> No
         secret.parent.mkdir(parents=True, exist_ok=True)
         secret.write_text("{}", encoding="utf-8")
 
-        out = default_pm_config_path(base=base)
+        out = default_data_config_path(base=base)
 
     assert out == secret.resolve()
 
 
-def test_default_pm_config_path_falls_back_to_legacy_location_when_missing() -> None:
-    from scripts.config_loader import default_pm_config_path
+def test_default_data_config_path_falls_back_to_legacy_location_when_missing() -> None:
+    from scripts.config_loader import default_data_config_path
 
     with TemporaryDirectory() as td:
         base = Path(td)
-        out = default_pm_config_path(base=base)
+        out = default_data_config_path(base=base)
 
     assert out == (base / "secrets" / "portfolio.sqlite.json").resolve()
 
 
-def test_resolve_pm_config_path_prefers_env_override(monkeypatch) -> None:
-    from scripts.config_loader import resolve_pm_config_path
+def test_resolve_data_config_path_prefers_env_override(monkeypatch) -> None:
+    from scripts.config_loader import resolve_data_config_path
 
     with TemporaryDirectory() as td:
         base = Path(td)
         env_path = base / "external" / "portfolio.feishu.json"
         monkeypatch.setenv("OM_DATA_CONFIG", str(env_path))
 
-        out = resolve_pm_config_path(base=base, pm_config=None)
+        out = resolve_data_config_path(base=base, data_config=None)
 
     assert out == env_path.resolve()
 
@@ -91,23 +91,23 @@ def test_resolve_watchlist_and_templates_config_require_canonical_keys() -> None
     assert resolve_templates_config(cfg) == {"put_base": {"sell_put": {"min_net_income": 100}}}
 
 
-def test_normalize_portfolio_broker_config_keeps_legacy_market_compat() -> None:
+def test_normalize_portfolio_broker_config_converts_legacy_fields_to_canonical() -> None:
     from scripts.config_loader import normalize_portfolio_broker_config
 
     out = normalize_portfolio_broker_config({"portfolio": {"broker": "富途", "data_config": "x.json", "account": "lx"}})
 
     assert out["portfolio"]["broker"] == "富途"
-    assert out["portfolio"]["market"] == "富途"
     assert out["portfolio"]["data_config"] == "x.json"
-    assert out["portfolio"]["pm_config"] == "x.json"
+    assert "market" not in out["portfolio"]
+    assert "pm_config" not in out["portfolio"]
 
     out_legacy = normalize_portfolio_broker_config({"portfolio": {"market": "富途", "account": "lx"}})
     assert out_legacy["portfolio"]["broker"] == "富途"
-    assert out_legacy["portfolio"]["market"] == "富途"
+    assert "market" not in out_legacy["portfolio"]
 
     out_legacy_data = normalize_portfolio_broker_config({"portfolio": {"pm_config": "y.json", "account": "lx"}})
     assert out_legacy_data["portfolio"]["data_config"] == "y.json"
-    assert out_legacy_data["portfolio"]["pm_config"] == "y.json"
+    assert "pm_config" not in out_legacy_data["portfolio"]
 
 
 def test_set_watchlist_config_updates_symbols_only() -> None:

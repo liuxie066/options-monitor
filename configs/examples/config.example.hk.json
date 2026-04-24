@@ -105,7 +105,6 @@
     "portfolio_context_ttl_sec": 900
   },
   "alert_policy": {
-    "sell_put_high_return": 0.12,
     "change_annual_threshold": 0.02
   },
   "close_advice": {

@@ -22,14 +22,11 @@ def test_load_portfolio_context_rejects_invalid_cached_contract() -> None:
         }
         logs: list[str] = []
         out = pc.load_portfolio_context(
-            py="python",
             base=Path("."),
-            pm_config="x.json",
+            data_config="x.json",
             market="富途",
             account=None,
             ttl_sec=3600,
-            timeout_sec=1,
-            is_scheduled=True,
             state_dir=Path("."),
             shared_state_dir=Path("."),
             log=logs.append,
@@ -55,15 +52,11 @@ def test_load_option_positions_context_rejects_invalid_cached_contract() -> None
         }
         logs: list[str] = []
         out, refreshed = pc.load_option_positions_context(
-            py="python",
             base=Path("."),
-            pm_config="x.json",
+            data_config="x.json",
             market="富途",
             account=None,
             ttl_sec=3600,
-            timeout_sec=1,
-            is_scheduled=True,
-            report_dir=Path("."),
             state_dir=Path("."),
             shared_state_dir=Path("."),
             log=logs.append,
@@ -98,6 +91,7 @@ def test_load_context_persists_source_snapshots_for_valid_cached_contracts() -> 
                     "as_of_utc": "2026-04-12T00:00:00+00:00",
                     "stocks_by_symbol": {"AAPL": {"shares": 100}},
                     "cash_by_currency": {"USD": 100.0},
+                    "portfolio_source_name": "holdings",
                 }
             return {
                 "as_of_utc": "2026-04-12T00:00:00+00:00",
@@ -109,28 +103,21 @@ def test_load_context_persists_source_snapshots_for_valid_cached_contracts() -> 
 
         logs: list[str] = []
         pctx = pc.load_portfolio_context(
-            py="python",
             base=Path("."),
-            pm_config="x.json",
+            data_config="x.json",
             market="富途",
             account=None,
             ttl_sec=3600,
-            timeout_sec=1,
-            is_scheduled=True,
             state_dir=Path("."),
             shared_state_dir=Path("."),
             log=logs.append,
         )
         octx, refreshed = pc.load_option_positions_context(
-            py="python",
             base=Path("."),
-            pm_config="x.json",
+            data_config="x.json",
             market="富途",
             account=None,
             ttl_sec=3600,
-            timeout_sec=1,
-            is_scheduled=True,
-            report_dir=Path("."),
             state_dir=Path("."),
             shared_state_dir=Path("."),
             log=logs.append,

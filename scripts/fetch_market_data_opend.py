@@ -3,7 +3,7 @@ from __future__ import annotations
 
 """Fetch required option data using Futu OpenD (via futu-api).
 
-Outputs the same CSV schema as `scripts/fetch_market_data.py` so downstream scanners keep working.
+Outputs the same CSV schema as the legacy fetcher so downstream scanners keep working.
 
 This is intentionally **minimal and pragmatic**:
 - Fetch option contracts via `get_option_chain(underlier_code)`
@@ -13,7 +13,7 @@ This is intentionally **minimal and pragmatic**:
 Notes:
 - This script requires `futu-api` + its deps (pandas/numpy/protobuf/pycryptodome/simplejson).
 - For US underliers, your OpenD might not have stock quote right; spot may fail.
-  In that case you can pass `--spot` manually or keep using Yahoo-based script for spot.
+  In that case you can pass `--spot` manually.
 
 Usage:
   python3 scripts/fetch_market_data_opend.py --symbols HK.00700 --limit-expirations 2
@@ -25,7 +25,6 @@ Usage:
 import argparse
 import json
 import math
-import random
 import time
 from datetime import date, datetime
 from pathlib import Path
@@ -70,15 +69,10 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.futu_gateway import (
-    build_futu_gateway,
-    FutuGatewayNeed2FAError,
-    FutuGatewayAuthExpiredError,
-    FutuGatewayRateLimitError,
-    FutuGatewayTransientError,
+    build_ready_futu_gateway,
+    retry_futu_gateway_call,
 )
 from scripts.opend_utils import normalize_underlier, get_trading_date
-from scripts.pm_bridge import fetch_spot_with_fallback
-
 
 def _chain_cache_path(base_dir: Path, u_code: str) -> Path:
     safe = u_code.replace('.', '_')
@@ -207,108 +201,22 @@ def get_spot_opend(gateway, underlier_code: str) -> float | None:
         return None
 
 
-def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = '127.0.0.1', port: int = 11111, spot_override: float | None = None, *, spot_from_yahoo: bool = False, base_dir: Path | None = None, option_types: str = 'put,call', min_strike: float | None = None, max_strike: float | None = None, min_dte: int | None = None, max_dte: int | None = None, retry_max_attempts: int = 4, retry_time_budget_sec: float = 8.0, retry_base_delay_sec: float = 0.8, retry_max_delay_sec: float = 6.0, no_retry: bool = False, chain_cache: bool = False, chain_cache_force_refresh: bool = False) -> dict[str, Any]:
+def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = '127.0.0.1', port: int = 11111, spot_override: float | None = None, *, base_dir: Path | None = None, option_types: str = 'put,call', min_strike: float | None = None, max_strike: float | None = None, min_dte: int | None = None, max_dte: int | None = None, retry_max_attempts: int = 4, retry_time_budget_sec: float = 8.0, retry_base_delay_sec: float = 0.8, retry_max_delay_sec: float = 6.0, no_retry: bool = False, chain_cache: bool = False, chain_cache_force_refresh: bool = False) -> dict[str, Any]:
     u = normalize_underlier(symbol)
-    gateway = build_futu_gateway(
+    gateway = build_ready_futu_gateway(
         host=host,
         port=int(port),
         is_option_chain_cache_enabled=bool(chain_cache),
     )
 
     try:
-        def _looks_like_phone_verify(err_or_exc: Any) -> bool:
-            if isinstance(err_or_exc, FutuGatewayNeed2FAError):
-                return True
-            s = str(err_or_exc or '')
-            sl = s.lower()
-            return ('手机验证码' in s) or ('短信验证' in s) or ('手机验证' in s) or ('验证码' in s) or ('phone verification' in sl) or ('verify code' in sl)
-
-        def _is_auth_expired(err_or_exc: Any) -> bool:
-            if isinstance(err_or_exc, FutuGatewayAuthExpiredError):
-                return True
-            s = str(err_or_exc or '')
-            sl = s.lower()
-            return ('login expired' in sl) or ('auth expired' in sl) or ('not logged' in sl) or ('not login' in sl)
-
-        def _is_rate_limited(err_or_exc: Any) -> bool:
-            if isinstance(err_or_exc, FutuGatewayRateLimitError):
-                return True
-            s = str(err_or_exc or '')
-            sl = s.lower()
-            return ('频率太高' in s) or ('最多10次' in s) or ('rate limit' in sl) or ('too frequent' in sl)
-
-        def _is_transient(err_or_exc: Any) -> bool:
-            if isinstance(err_or_exc, FutuGatewayTransientError):
-                return True
-            # IMPORTANT: phone verification is not transient; fail-fast and require manual input.
-            if _looks_like_phone_verify(err_or_exc):
-                return False
-            sl = str(err_or_exc or '').lower()
-            keys = ['timeout', 'timed out', 'econnreset', 'econnrefused', 'connection', 'disconnected', 'callclose']
-            return any(k in sl for k in keys)
-
-        def _opend_call_with_retry(what: str, fn, quiet: bool = False):
-            if no_retry or (retry_max_attempts <= 1):
-                return fn()
-            t0 = time.monotonic()
-            attempt = 0
-            delay = float(retry_base_delay_sec or 0.5)
-            max_delay = float(retry_max_delay_sec or 6.0)
-            budget = float(retry_time_budget_sec or 0.0)
-            last_err = None
-            while True:
-                attempt += 1
-                try:
-                    return fn()
-                except Exception as e:
-                    last_err = e
-
-                if attempt >= int(retry_max_attempts):
-                    raise RuntimeError(f"{what} failed after {attempt} attempts: {last_err}")
-
-                sleep_s = min(max_delay, max(0.0, delay))
-                if _is_rate_limited(last_err or ''):
-                    sleep_s = max(sleep_s, 2.0)
-
-                if (budget > 0) and ((time.monotonic() - t0) + sleep_s > budget):
-                    raise RuntimeError(f"{what} failed (retry budget {budget}s exceeded): {last_err}")
-
-                # If not transient or rate-limited, don't keep retrying.
-                if _is_auth_expired(last_err):
-                    raise RuntimeError(f"{what} failed (auth expired): {last_err}")
-                if (not _is_transient(last_err)) and (not _is_rate_limited(last_err)):
-                    raise RuntimeError(f"{what} failed (non-transient): {last_err}")
-
-                if not quiet:
-                    print(f"[WARN] {what} failed (attempt {attempt}/{retry_max_attempts}): {last_err}; sleep {sleep_s:.1f}s")
-
-                time.sleep(sleep_s + random.uniform(0.0, 0.2))
-                delay = min(max_delay, delay * 2.0)
-
-        # Fail fast if OpenD requires phone verification / auth expired / cannot connect.
-        _opend_call_with_retry('ensure_quote_ready', lambda: gateway.ensure_quote_ready(), quiet=True)
         spot = spot_override
 
         # Spot policy:
         # - HK/CN: try OpenD snapshot (usually available)
-        # - US: do NOT attempt OpenD spot by default (often no stock quote right); use external fallback(s)
+        # - US: also rely on OpenD only; if quote right is missing, keep spot as None
         if spot is None:
-            if u.market != 'US':
-                spot = get_spot_opend(gateway, u.code)
-
-        # US spot: do not use OpenD (often no stock quote right).
-        # Preferred fallback is the built-in Yahoo spot provider; legacy external PM bridge
-        # remains available only when explicitly configured.
-        # If still missing, keep None and require explicit --spot from user.
-        if spot is None and u.market == 'US' and spot_from_yahoo and base_dir is not None:
-            # Do NOT require the symbol to exist in holdings.
-            # Watchlist symbols may be unheld but still need a spot for OTM/risk computations.
-            ticker = u.code.split('.', 1)[1]
-            spot = fetch_spot_with_fallback(ticker)
-        # spot may still be None; keep it. Downstream scans will skip rows if spot is required.
-        if spot is None and u.market == 'US' and (not spot_from_yahoo):
-            # Make it explicit in meta by leaving spot None; caller can provide --spot.
-            pass
+            spot = get_spot_opend(gateway, u.code)
 
         # Trading-date anchor for DTE / cache freshness.
         today = get_trading_date(u.market)
@@ -333,7 +241,16 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
             # 2) take the closest N expirations (limit_expirations)
             # 3) call get_option_chain(code, start=exp, end=exp) for each expiration, then concat
             try:
-                df_e = _opend_call_with_retry('get_option_expiration_date', lambda: gateway.get_option_expiration_dates(u.code), quiet=False)
+                df_e = retry_futu_gateway_call(
+                    'get_option_expiration_date',
+                    lambda: gateway.get_option_expiration_dates(u.code),
+                    no_retry=no_retry,
+                    retry_max_attempts=retry_max_attempts,
+                    retry_time_budget_sec=retry_time_budget_sec,
+                    retry_base_delay_sec=retry_base_delay_sec,
+                    retry_max_delay_sec=retry_max_delay_sec,
+                    quiet=False,
+                )
                 if df_e is None or df_e.empty:
                     expirations_all: list[str] = []
                 else:
@@ -371,9 +288,14 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
             chains = []
             if expirations_pick:
                 for exp0 in expirations_pick:
-                    chain0 = _opend_call_with_retry(
+                    chain0 = retry_futu_gateway_call(
                         f'get_option_chain({exp0})',
                         lambda exp=exp0: gateway.get_option_chain(code=u.code, start=str(exp), end=str(exp), is_force_refresh=bool(chain_cache_force_refresh)),
+                        no_retry=no_retry,
+                        retry_max_attempts=retry_max_attempts,
+                        retry_time_budget_sec=retry_time_budget_sec,
+                        retry_base_delay_sec=retry_base_delay_sec,
+                        retry_max_delay_sec=retry_max_delay_sec,
                         quiet=True,
                     )
                     if chain0 is not None and (not chain0.empty):
@@ -473,7 +395,16 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
         for i in range(0, len(option_codes), BATCH):
             batch = option_codes[i:i+BATCH]
             try:
-                snap = _opend_call_with_retry('get_market_snapshot(batch)', lambda: gateway.get_snapshot(batch), quiet=True)
+                snap = retry_futu_gateway_call(
+                    'get_market_snapshot(batch)',
+                    lambda: gateway.get_snapshot(batch),
+                    no_retry=no_retry,
+                    retry_max_attempts=retry_max_attempts,
+                    retry_time_budget_sec=retry_time_budget_sec,
+                    retry_base_delay_sec=retry_base_delay_sec,
+                    retry_max_delay_sec=retry_max_delay_sec,
+                    quiet=True,
+                )
             except Exception:
                 snap = None
             if snap is None or snap.empty:
@@ -715,8 +646,6 @@ def main():
     ap.add_argument('--host', default='127.0.0.1')
     ap.add_argument('--port', type=int, default=11111)
     ap.add_argument('--spot', type=float, default=None, help='override spot if OpenD has no quote right')
-    ap.add_argument('--spot-from-yahoo', dest='spot_from_yahoo', action='store_true', help='for US symbols: if OpenD has no stock quote right, fallback to built-in Yahoo spot provider')
-    ap.add_argument('--spot-from-pm', dest='spot_from_yahoo', action='store_true', help=argparse.SUPPRESS)
     ap.add_argument('--quiet', action='store_true', help='quiet mode: suppress non-critical prints')
     ap.add_argument('--no-retry', action='store_true', help='Disable OpenD retries/backoff')
     ap.add_argument('--retry-max-attempts', type=int, default=4)
@@ -746,7 +675,6 @@ def main():
             host=args.host,
             port=args.port,
             spot_override=args.spot,
-            spot_from_yahoo=bool(args.spot_from_yahoo),
             base_dir=base,
             chain_cache=bool(args.chain_cache),
             chain_cache_force_refresh=bool(args.chain_cache_force_refresh),

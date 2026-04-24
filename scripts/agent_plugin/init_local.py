@@ -156,12 +156,9 @@ def init_local_config(
             message=f"config already exists: {target_config_path.name}",
             hint="Pass --force to overwrite it.",
         )
-    if target_data_config_path.exists() and not force:
-        raise AgentToolError(
-            code="CONFIG_ERROR",
-            message=f"data config already exists: {target_data_config_path.name}",
-            hint="Pass --force to overwrite it.",
-        )
+    reuse_existing_data_config = target_data_config_path.exists() and not force
+    if reuse_existing_data_config:
+        _read_json_object(target_data_config_path)
 
     runtime_cfg["accounts"] = [normalized_account]
     runtime_cfg["account_settings"] = {
@@ -181,7 +178,6 @@ def init_local_config(
         base_dir=target_config_path.parent,
         target=target_data_config_path,
     )
-    portfolio["pm_config"] = portfolio["data_config"]
     runtime_cfg["portfolio"] = portfolio
 
     trade_intake = runtime_cfg.get("trade_intake")
@@ -206,7 +202,8 @@ def init_local_config(
     target_config_path.parent.mkdir(parents=True, exist_ok=True)
     target_data_config_path.parent.mkdir(parents=True, exist_ok=True)
     target_config_path.write_text(json.dumps(runtime_cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    target_data_config_path.write_text(json.dumps(data_cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    if not reuse_existing_data_config or force:
+        target_data_config_path.write_text(json.dumps(data_cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     return {
         "market": normalized_market,
@@ -216,6 +213,7 @@ def init_local_config(
         "symbols": normalized_symbols,
         "config_path": str(target_config_path),
         "data_config_path": str(target_data_config_path),
+        "data_config_reused": reuse_existing_data_config,
         "opend": {
             "host": str(opend_host).strip() or "127.0.0.1",
             "port": int(opend_port),

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-"""Pipeline context loading (portfolio/option_positions/fx).
+"""Pipeline context loading (portfolio/position-lots/exchange rates).
 
 Stage 3 refactor target:
-- keep scripts/run_pipeline.py thin (orchestration only)
+- keep unified scan entrypoint thin (orchestration only)
 - move context fetch/caching logic into cohesive module
 
 Design constraints:
@@ -15,14 +15,23 @@ Design constraints:
 import json
 from pathlib import Path
 
-from scripts.account_config import resolve_holdings_account, resolve_portfolio_source
-from scripts.config_loader import resolve_pm_config_path
+from scripts.account_config import build_account_portfolio_source_plan
+from scripts.config_loader import resolve_data_config_path
+from scripts.fetch_option_positions_context import (
+    build_context as build_option_positions_context,
+    build_shared_context as build_shared_option_positions_context,
+)
 from scripts.futu_portfolio_context import fetch_futu_portfolio_context
 from scripts.io_utils import is_fresh, load_cached_json
-from scripts.subprocess_utils import run_cmd
+from scripts.option_positions_core.service import (
+    auto_close_expired_positions,
+    build_expired_close_decisions,
+    load_option_positions_repo,
+)
+from scripts.portfolio_context_service import load_account_portfolio_context, with_context_source
 from domain.services import adapt_holdings_context, adapt_option_positions_context
-from scripts.fetch_portfolio_context import slice_shared_context_for_account as slice_shared_portfolio_context_for_account
 from scripts.fetch_option_positions_context import slice_shared_context_for_account as slice_shared_option_context_for_account
+from src.application.option_positions_facade import load_option_position_records
 try:
     from domain.storage.repositories import state_repo
 except Exception:
@@ -36,141 +45,18 @@ def _persist_source_snapshot(base: Path, snapshot: dict) -> None:
         pass
 
 
-def _with_context_source(ctx: dict, source: str) -> dict:
-    out = dict(ctx)
-    out['context_source'] = str(source)
-    return out
-
-
-def _with_portfolio_source_name(ctx: dict, source_name: str) -> dict:
-    out = dict(ctx)
-    out['portfolio_source_name'] = str(source_name)
-    return out
-
-
-def _normalize_portfolio_source(value: str | None) -> str:
-    raw = str(value or '').strip().lower()
-    if raw in ('', 'auto'):
-        return 'auto'
-    if raw in ('futu', 'opend'):
-        return 'futu'
-    return 'holdings'
-
-
-def _cached_portfolio_source_matches(cached: dict, *, requested_source: str) -> bool:
-    actual = _normalize_portfolio_source(cached.get('portfolio_source_name'))
-    if requested_source == 'futu':
-        return actual == 'futu'
-    if requested_source == 'holdings':
-        return actual == 'holdings'
-    if requested_source == 'auto':
-        return actual == 'futu'
-    return True
-
-
-def _load_portfolio_context_from_holdings(
-    *,
-    py: str,
-    base: Path,
-    pm_config: str,
-    market: str,
-    account: str | None,
-    ttl_sec: int,
-    timeout_sec: int,
-    is_scheduled: bool,
-    state_dir: Path,
-    shared_state_dir: Path | None,
-    log,
-) -> dict | None:
-    port_path = (state_dir / 'portfolio_context.json').resolve()
-    shared_root = (shared_state_dir or state_dir).resolve()
-    shared_root.mkdir(parents=True, exist_ok=True)
-    shared_path = (shared_root / 'portfolio_context.shared.json').resolve()
-
-    try:
-        if ttl_sec > 0 and is_fresh(port_path, ttl_sec):
-            cached = load_cached_json(port_path)
-            if isinstance(cached, dict):
-                cached = _with_context_source(_with_portfolio_source_name(cached, 'holdings'), 'account_cache')
-                log(f"[CTX] portfolio_context source=account_cache account={account or '-'}")
-                snap = adapt_holdings_context(cached)
-                _persist_source_snapshot(base, snap)
-                return cached
-    except Exception:
-        pass
-
-    # Reuse shared cache first; this keeps per-account output schema unchanged.
-    try:
-        if ttl_sec > 0 and is_fresh(shared_path, ttl_sec):
-            shared_cached = load_cached_json(shared_path)
-            if isinstance(shared_cached, dict):
-                sliced = slice_shared_portfolio_context_for_account(shared_cached, account)
-                if isinstance(sliced, dict):
-                    sliced = _with_context_source(_with_portfolio_source_name(sliced, 'holdings'), 'shared_slice')
-                    port_path.parent.mkdir(parents=True, exist_ok=True)
-                    port_path.write_text(json.dumps(sliced, ensure_ascii=False, indent=2), encoding='utf-8')
-                    log(f"[CTX] portfolio_context source=shared_slice account={account or '-'}")
-                    snap = adapt_holdings_context(sliced)
-                    _persist_source_snapshot(base, snap)
-                    return sliced
-    except Exception:
-        pass
-
-    # Refresh shared cache (single fetch) and produce account context in one command.
-    try:
-        cmd = [
-            py, 'scripts/fetch_portfolio_context.py',
-            '--pm-config', str(pm_config),
-            '--market', str(market),
-            '--out', str(port_path.as_posix()),
-            '--shared-out', str(shared_path.as_posix()),
-        ]
-        if account:
-            cmd.extend(['--account', str(account)])
-        if is_scheduled:
-            cmd.append('--quiet')
-        run_cmd(cmd, cwd=base, timeout_sec=timeout_sec, is_scheduled=is_scheduled)
-        ctx = load_cached_json(port_path) or json.loads(port_path.read_text(encoding='utf-8'))
-        ctx = _with_context_source(_with_portfolio_source_name(ctx, 'holdings'), 'shared_refresh')
-        port_path.write_text(json.dumps(ctx, ensure_ascii=False, indent=2), encoding='utf-8')
-        log(f"[CTX] portfolio_context source=shared_refresh account={account or '-'}")
-        snap = adapt_holdings_context(ctx)
-        _persist_source_snapshot(base, snap)
-        return ctx
-    except Exception:
-        pass
-
-    # Fallback: legacy per-account direct fetch path.
-    cmd = [
-        py, 'scripts/fetch_portfolio_context.py',
-        '--pm-config', str(pm_config),
-        '--market', str(market),
-        '--out', str(port_path.as_posix()),
-    ]
-    if account:
-        cmd.extend(['--account', str(account)])
-    if is_scheduled:
-        cmd.append('--quiet')
-    run_cmd(cmd, cwd=base, timeout_sec=timeout_sec, is_scheduled=is_scheduled)
-    ctx = load_cached_json(port_path) or json.loads(port_path.read_text(encoding='utf-8'))
-    ctx = _with_context_source(_with_portfolio_source_name(ctx, 'holdings'), 'direct_fetch')
-    port_path.write_text(json.dumps(ctx, ensure_ascii=False, indent=2), encoding='utf-8')
-    log(f"[CTX] portfolio_context source=direct_fetch account={account or '-'}")
-    snap = adapt_holdings_context(ctx)
-    _persist_source_snapshot(base, snap)
-    return ctx
+def _load_option_position_records(data_config: str) -> tuple[object, list[dict]]:
+    repo = load_option_positions_repo(Path(data_config))
+    return repo, list(load_option_position_records(repo))
 
 
 def load_portfolio_context(
     *,
-    py: str,
-    base: Path,
-    pm_config: str,
+    data_config: str,
     market: str,
     account: str | None,
     ttl_sec: int,
-    timeout_sec: int,
-    is_scheduled: bool,
+    base: Path,
     state_dir: Path,
     shared_state_dir: Path | None,
     log,
@@ -179,54 +65,24 @@ def load_portfolio_context(
 ) -> dict | None:
     """Best-effort load portfolio context to dict."""
     try:
-        port_path = (state_dir / 'portfolio_context.json').resolve()
-        source_mode = _normalize_portfolio_source(portfolio_source)
-        cached = None
-        if ttl_sec > 0 and is_fresh(port_path, ttl_sec):
-            cached = load_cached_json(port_path)
-        if isinstance(cached, dict) and _cached_portfolio_source_matches(cached, requested_source=source_mode):
-            cached = _with_context_source(cached, 'account_cache')
-            log(f"[CTX] portfolio_context source=account_cache account={account or '-'}")
-            snap = adapt_holdings_context(cached)
-            _persist_source_snapshot(base, snap)
-            return cached
-
-        if source_mode in ('auto', 'futu'):
-            try:
-                cfg = runtime_config if isinstance(runtime_config, dict) else {}
-                base_ccy = str(((cfg.get('portfolio') or {}).get('base_currency') or 'CNY'))
-                ctx = fetch_futu_portfolio_context(
-                    cfg=cfg,
-                    account=account,
-                    market=str(market),
-                    base_currency=base_ccy,
-                )
-                ctx = _with_context_source(_with_portfolio_source_name(ctx, 'futu'), 'futu_direct')
-                port_path.parent.mkdir(parents=True, exist_ok=True)
-                port_path.write_text(json.dumps(ctx, ensure_ascii=False, indent=2), encoding='utf-8')
-                log(f"[CTX] portfolio_context source=futu_direct account={account or '-'}")
-                snap = adapt_holdings_context(ctx)
-                _persist_source_snapshot(base, snap)
-                return ctx
-            except Exception as e:
-                if source_mode == 'futu':
-                    raise
-                log(f"[WARN] futu portfolio context unavailable; fallback to holdings: {e}")
-
-        holdings_account = resolve_holdings_account(runtime_config, account=account)
-        return _load_portfolio_context_from_holdings(
-            py=py,
+        ctx = load_account_portfolio_context(
             base=base,
-            pm_config=pm_config,
+            data_config=data_config,
             market=market,
-            account=holdings_account,
+            account=account,
             ttl_sec=ttl_sec,
-            timeout_sec=timeout_sec,
-            is_scheduled=is_scheduled,
             state_dir=state_dir,
             shared_state_dir=shared_state_dir,
             log=log,
+            runtime_config=runtime_config,
+            portfolio_source=portfolio_source,
+            fetch_futu_portfolio_context_fn=fetch_futu_portfolio_context,
+            is_fresh_fn=is_fresh,
+            load_json_fn=load_cached_json,
         )
+        snap = adapt_holdings_context(ctx)
+        _persist_source_snapshot(base, snap)
+        return ctx
     except Exception as e:
         log(f"[WARN] portfolio context not available: {e}")
         return None
@@ -234,20 +90,16 @@ def load_portfolio_context(
 
 def load_option_positions_context(
     *,
-    py: str,
     base: Path,
-    pm_config: str,
+    data_config: str,
     market: str,
     account: str | None,
     ttl_sec: int,
-    timeout_sec: int,
-    is_scheduled: bool,
-    report_dir: Path,
     state_dir: Path,
     shared_state_dir: Path | None,
     log,
 ) -> tuple[dict | None, bool]:
-    """Best-effort load option_positions context.
+    """Best-effort load position-lot context.
 
     Returns (context, refreshed).
     """
@@ -257,7 +109,7 @@ def load_option_positions_context(
         if ttl_sec > 0 and is_fresh(opt_path, ttl_sec):
             cached = load_cached_json(opt_path)
         if cached is not None:
-            cached = _with_context_source(cached, 'account_cache')
+            cached = with_context_source(cached, 'account_cache')
             log(f"[CTX] option_positions_context source=account_cache account={account or '-'}")
             snap = adapt_option_positions_context(cached)
             _persist_source_snapshot(base, snap)
@@ -274,7 +126,7 @@ def load_option_positions_context(
                 if isinstance(shared_cached, dict):
                     sliced = slice_shared_option_context_for_account(shared_cached, account)
                     if isinstance(sliced, dict):
-                        sliced = _with_context_source(sliced, 'shared_slice')
+                        sliced = with_context_source(sliced, 'shared_slice')
                         opt_path.parent.mkdir(parents=True, exist_ok=True)
                         opt_path.write_text(json.dumps(sliced, ensure_ascii=False, indent=2), encoding='utf-8')
                         log(f"[CTX] option_positions_context source=shared_slice account={account or '-'}")
@@ -287,20 +139,12 @@ def load_option_positions_context(
 
         # Refresh shared cache (single fetch) and produce account context in one command.
         try:
-            cmd = [
-                py, 'scripts/fetch_option_positions_context.py',
-                '--pm-config', str(pm_config),
-                '--market', str(market),
-                '--out', str(opt_path.as_posix()),
-                '--shared-out', str(shared_path.as_posix()),
-            ]
-            if account:
-                cmd.extend(['--account', str(account)])
-            if is_scheduled:
-                cmd.append('--quiet')
-            run_cmd(cmd, cwd=base, timeout_sec=timeout_sec, is_scheduled=is_scheduled)
-            ctx = load_cached_json(opt_path) or json.loads(opt_path.read_text(encoding='utf-8'))
-            ctx = _with_context_source(ctx, 'shared_refresh')
+            _repo, records = _load_option_position_records(data_config)
+            rates = _load_option_position_exchange_rates(base=base, state_dir=state_dir, log=log)
+            shared_ctx = build_shared_option_positions_context(records, broker=str(market), rates=rates)
+            shared_path.write_text(json.dumps(shared_ctx, ensure_ascii=False, indent=2), encoding='utf-8')
+            ctx = dict(slice_shared_option_context_for_account(shared_ctx, account) or {})
+            ctx = with_context_source(ctx, 'shared_refresh')
             opt_path.write_text(json.dumps(ctx, ensure_ascii=False, indent=2), encoding='utf-8')
             log(f"[CTX] option_positions_context source=shared_refresh account={account or '-'}")
             snap = adapt_option_positions_context(ctx)
@@ -309,20 +153,11 @@ def load_option_positions_context(
         except Exception:
             pass
 
-        # Fallback: legacy per-account direct fetch path.
-        cmd = [
-            py, 'scripts/fetch_option_positions_context.py',
-            '--pm-config', str(pm_config),
-            '--market', str(market),
-            '--out', str(opt_path.as_posix()),
-        ]
-        if account:
-            cmd.extend(['--account', str(account)])
-        if is_scheduled:
-            cmd.append('--quiet')
-        run_cmd(cmd, cwd=base, timeout_sec=timeout_sec, is_scheduled=is_scheduled)
-        ctx = load_cached_json(opt_path) or json.loads(opt_path.read_text(encoding='utf-8'))
-        ctx = _with_context_source(ctx, 'direct_fetch')
+        # Fallback: direct per-account fetch path.
+        _repo, records = _load_option_position_records(data_config)
+        rates = _load_option_position_exchange_rates(base=base, state_dir=state_dir, log=log)
+        ctx = build_option_positions_context(records, broker=str(market), account=account, rates=rates)
+        ctx = with_context_source(ctx, 'direct_fetch')
         opt_path.write_text(json.dumps(ctx, ensure_ascii=False, indent=2), encoding='utf-8')
         log(f"[CTX] option_positions_context source=direct_fetch account={account or '-'}")
         snap = adapt_option_positions_context(ctx)
@@ -335,65 +170,90 @@ def load_option_positions_context(
 
 def maybe_auto_close_expired_positions(
     *,
-    py: str,
-    base: Path,
-    pm_config: str,
+    data_config: str,
     report_dir: Path,
     state_dir: Path,
-    timeout_sec: int,
-    is_scheduled: bool,
     refreshed: bool,
     log,
 ) -> None:
-    # Auto-close expired open positions (table maintenance) without extra scans.
+    # Auto-close expired open lots without extra scans.
     # Only run when we refreshed context (avoid repeated close calls during rapid dev loops).
     if not refreshed:
         return
     try:
-        cmd = [
-            py, 'scripts/auto_close_expired_positions.py',
-            '--pm-config', str(pm_config),
-            '--context', str((state_dir / 'option_positions_context.json').as_posix()),
-            '--state-dir', str(state_dir),
-            '--grace-days', '1',
-            '--max-close', '20',
-            '--summary-out', str((report_dir / 'auto_close_summary.txt').as_posix()),
-        ]
-        if is_scheduled:
-            cmd.append('--quiet')
-        run_cmd(cmd, cwd=base, timeout_sec=timeout_sec, is_scheduled=is_scheduled)
-    except Exception as e2:
-        log(f"[WARN] auto-close expired positions failed: {e2}")
+        from datetime import datetime, timezone
 
-def load_fx_rates(*, base: Path, state_dir: Path, log, shared_state_dir: Path | None = None) -> tuple[float | None, float | None]:
-    """Best-effort FX loader.
+        ctx_path = (state_dir / 'option_positions_context.json').resolve()
+        ctx = json.loads(ctx_path.read_text(encoding='utf-8')) if ctx_path.exists() else {}
+        positions = [p for p in (ctx.get('open_positions_min') or []) if isinstance(p, dict)]
+        as_of_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        decisions = build_expired_close_decisions(
+            positions,
+            as_of_ms=as_of_ms,
+            grace_days=1,
+        )
+        to_close = [d for d in decisions if bool(d.get('should_close')) and d.get('record_id')]
+        applied: list[dict] = []
+        errors: list[str] = []
+        if to_close:
+            repo, _records = _load_option_position_records(data_config)
+            decisions, applied, errors = auto_close_expired_positions(
+                repo,
+                positions,
+                as_of_ms=as_of_ms,
+                grace_days=1,
+                max_close=20,
+            )
+            to_close = [d for d in decisions if bool(d.get('should_close')) and d.get('record_id')]
+
+        lines: list[str] = []
+        lines.append("Auto-close expired positions (grace_days=1)")
+        lines.append(f"context: {ctx_path}")
+        lines.append(f"candidates_should_close: {len(to_close)}")
+        lines.append(f"applied_closed: {len(applied)}")
+        lines.append(f"errors: {len(errors)}")
+        summary_path = (report_dir / 'auto_close_summary.txt').resolve()
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
+        summary_path.write_text("\n".join(lines).strip() + "\n", encoding='utf-8')
+    except Exception as e2:
+        log(f"[WARN] auto-close expired position lots failed: {e2}")
+
+
+def _load_option_position_exchange_rates(*, base: Path, state_dir: Path, log) -> dict | None:
+    try:
+        from scripts.exchange_rates import get_exchange_rates_or_fetch_latest
+
+        return get_exchange_rates_or_fetch_latest(
+            cache_path=(state_dir / 'rate_cache.json').resolve(),
+            max_age_hours=24,
+        )
+    except Exception as exc:
+        log(f"[WARN] option position exchange rates not available: {exc}")
+        return None
+
+def load_exchange_rates(*, base: Path, state_dir: Path, log, shared_state_dir: Path | None = None) -> tuple[float | None, float | None]:
+    """Best-effort exchange-rate loader.
 
     Keep the original importlib boundary from run_pipeline, but use the
-    repo-local FX helper so cache miss behavior stays consistent with other
+    repo-local exchange-rate helper so cache miss behavior stays consistent with other
     entrypoints.
     """
-    fx_usd_per_cny = None
-    hkdcny = None
+    usd_per_cny_exchange_rate = None
+    cny_per_hkd_exchange_rate = None
     try:
         import importlib.util
         import sys as _sys
 
-        fx_path = (base / 'scripts' / 'fx_rates.py').resolve()
-        spec = importlib.util.spec_from_file_location('fx_rates', fx_path)
+        exchange_rate_path = (base / 'scripts' / 'exchange_rates.py').resolve()
+        spec = importlib.util.spec_from_file_location('exchange_rates', exchange_rate_path)
         assert spec and spec.loader
         mod = importlib.util.module_from_spec(spec)
         # dataclasses expects module to exist in sys.modules during exec
-        _sys.modules['fx_rates'] = mod
+        _sys.modules['exchange_rates'] = mod
         spec.loader.exec_module(mod)  # type: ignore
 
-        shared_cache_path = (
-            (shared_state_dir / 'rate_cache.json').resolve()
-            if shared_state_dir is not None
-            else (base / 'output_shared' / 'state' / 'rate_cache.json').resolve()
-        )
-        rates_obj = mod.get_rates_or_fetch_latest(  # type: ignore
+        rates_obj = mod.get_exchange_rates_or_fetch_latest(  # type: ignore
             cache_path=(state_dir / 'rate_cache.json').resolve(),
-            shared_cache_path=shared_cache_path,
             max_age_hours=24,
             log=log,
         )
@@ -405,15 +265,15 @@ def load_fx_rates(*, base: Path, state_dir: Path, log, shared_state_dir: Path | 
             except Exception:
                 usdcny = None
             try:
-                hkdcny_v = rates_map.get('HKDCNY')
-                hkdcny = float(hkdcny_v) if hkdcny_v else None
+                cny_per_hkd_rate_value = rates_map.get('HKDCNY')
+                cny_per_hkd_exchange_rate = float(cny_per_hkd_rate_value) if cny_per_hkd_rate_value else None
             except Exception:
-                hkdcny = None
+                cny_per_hkd_exchange_rate = None
             if usdcny and usdcny > 0:
-                fx_usd_per_cny = 1.0 / usdcny
+                usd_per_cny_exchange_rate = 1.0 / usdcny
     except Exception as e:
-        log(f"[WARN] fx rates not available: {e}")
-    return fx_usd_per_cny, hkdcny
+        log(f"[WARN] exchange rates not available: {e}")
+    return usd_per_cny_exchange_rate, cny_per_hkd_exchange_rate
 
 
 def build_pipeline_context(
@@ -431,29 +291,29 @@ def build_pipeline_context(
     no_context: bool,
     want_scan: bool,
 ) -> tuple[dict | None, dict | None, float | None, float | None]:
-    """Load portfolio_ctx, option_ctx, fx_usd_per_cny, hkdcny."""
+    """Load portfolio_ctx, option_ctx, usd_per_cny_exchange_rate, cny_per_hkd_exchange_rate."""
     if (not want_scan) or bool(no_context):
         return None, None, None, None
 
     portfolio_cfg = cfg.get('portfolio', {}) or {}
-    pm_config = resolve_pm_config_path(base=base, pm_config=portfolio_cfg.get('pm_config'))
-    market = portfolio_cfg.get('market', '富途')
+    data_config = resolve_data_config_path(base=base, data_config=portfolio_cfg.get('data_config'))
+    broker = portfolio_cfg.get('broker') or '富途'
     account = portfolio_cfg.get('account')
-    portfolio_source = resolve_portfolio_source(cfg, account=(str(account) if account else None))
+    portfolio_source = build_account_portfolio_source_plan(
+        cfg,
+        account=(str(account) if account else None),
+    ).requested_source
 
     # Cache policy (TTL seconds)
     ttl_opt_ctx = int(runtime.get('option_positions_context_ttl_sec', 900 if is_scheduled else 120) or 0)
     ttl_port_ctx = int(runtime.get('portfolio_context_ttl_sec', 900 if is_scheduled else 60) or 0)
 
     portfolio_ctx = load_portfolio_context(
-        py=py,
         base=base,
-        pm_config=str(pm_config),
-        market=str(market),
+        data_config=str(data_config),
+        market=str(broker),
         account=(str(account) if account else None),
         ttl_sec=ttl_port_ctx,
-        timeout_sec=portfolio_timeout_sec,
-        is_scheduled=is_scheduled,
         state_dir=state_dir,
         shared_state_dir=shared_state_dir,
         log=log,
@@ -462,37 +322,29 @@ def build_pipeline_context(
     )
 
     option_ctx, refreshed = load_option_positions_context(
-        py=py,
         base=base,
-        pm_config=str(pm_config),
-        market=str(market),
+        data_config=str(data_config),
+        market=str(broker),
         account=(str(account) if account else None),
         ttl_sec=ttl_opt_ctx,
-        timeout_sec=portfolio_timeout_sec,
-        is_scheduled=is_scheduled,
-        report_dir=report_dir,
         state_dir=state_dir,
         shared_state_dir=shared_state_dir,
         log=log,
     )
 
     maybe_auto_close_expired_positions(
-        py=py,
-        base=base,
-        pm_config=str(pm_config),
+        data_config=str(data_config),
         report_dir=report_dir,
         state_dir=state_dir,
-        timeout_sec=portfolio_timeout_sec,
-        is_scheduled=is_scheduled,
         refreshed=refreshed,
         log=log,
     )
 
-    fx_usd_per_cny, hkdcny = load_fx_rates(
+    usd_per_cny_exchange_rate, cny_per_hkd_exchange_rate = load_exchange_rates(
         base=base,
         state_dir=state_dir,
         shared_state_dir=shared_state_dir,
         log=log,
     )
 
-    return portfolio_ctx, option_ctx, fx_usd_per_cny, hkdcny
+    return portfolio_ctx, option_ctx, usd_per_cny_exchange_rate, cny_per_hkd_exchange_rate

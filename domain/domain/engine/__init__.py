@@ -1,7 +1,6 @@
 from .decision_engine import (
     AccountSchedulerDecisionView,
     SchedulerDecisionView,
-    apply_opend_degrade_to_yahoo,
     build_account_scheduler_decision_dto,
     build_scheduler_decision_dto,
     resolve_scheduler_decision,
@@ -19,7 +18,6 @@ from .decision_engine import (
     build_failure_audit_fields,
     decide_trading_day_guard,
     decide_notify_window_open,
-    decide_opend_degrade_to_yahoo,
     filter_notify_candidates,
     rank_notify_candidates,
     resolve_multi_tick_engine_entrypoint,
@@ -74,7 +72,6 @@ from .candidate_strategy import (
 __all__ = [
     'AccountSchedulerDecisionView',
     'SchedulerDecisionView',
-    'apply_opend_degrade_to_yahoo',
     'build_account_scheduler_decision_dto',
     'build_scheduler_decision_dto',
     'resolve_scheduler_decision',
@@ -92,7 +89,6 @@ __all__ = [
     'build_failure_audit_fields',
     'decide_trading_day_guard',
     'decide_notify_window_open',
-    'decide_opend_degrade_to_yahoo',
     'filter_notify_candidates',
     'rank_notify_candidates',
     'resolve_multi_tick_engine_entrypoint',

@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""Auto-close expired option_positions records.
+"""Auto-close expired position lots.
 
 Design goals:
 - Do NOT add extra list/scan calls: consume the already-generated option_positions_context.json
   (produced by fetch_option_positions_context.py), which includes open_positions_min with record_id.
 - Close rule: status=open AND (as_of >= expiration + grace_days).
-  expiration is taken from table field `expiration` (ms) when available, else from note `exp=YYYY-MM-DD`.
+- expiration is taken from lot field `expiration` (ms) when available, else from note `exp=YYYY-MM-DD`.
 - Safety:
   - Default apply (per user requirement) but can run --dry-run.
   - max-close-per-run guardrail.
   - Skip and report positions missing expiration.
 
-This is *table maintenance*, not trade execution.
+This appends synthetic close events and rebuilds position lots; it does not trade with the broker.
 """
 
 from __future__ import annotations
@@ -30,18 +30,17 @@ import json
 import argparse
 from datetime import datetime, timezone
 
-from scripts.config_loader import resolve_pm_config_path
 from scripts.option_positions_core.service import (
     auto_close_expired_positions,
     build_expired_close_decisions,
-    load_option_positions_repo,
 )
+from src.application.option_positions_facade import resolve_option_positions_repo
 
 
 def main():
-    ap = argparse.ArgumentParser(description='Auto-close expired option_positions (table maintenance)')
-    ap.add_argument('--pm-config', default=None, help='Feishu/Bitable credential config path; auto-resolves when omitted')
-    ap.add_argument('--context', default=None, help='Option positions context JSON (default: <state-dir>/option_positions_context.json)')
+    ap = argparse.ArgumentParser(description='Auto-close expired position lots')
+    ap.add_argument('--data-config', default=None, help='portfolio data config path; auto-resolves when omitted')
+    ap.add_argument('--context', default=None, help='Position lot context JSON (default: <state-dir>/option_positions_context.json)')
     ap.add_argument('--state-dir', default='output/state', help='State dir for default context path (default: output/state)')
     ap.add_argument('--as-of-utc', default=None, help='ISO time; default now UTC')
     ap.add_argument('--grace-days', type=int, default=1)
@@ -87,8 +86,7 @@ def main():
     errors: list[str] = []
 
     if to_close and not args.dry_run:
-        pm_config = resolve_pm_config_path(base=base, pm_config=args.pm_config)
-        repo = load_option_positions_repo(pm_config)
+        _data_config, repo = resolve_option_positions_repo(base=base, data_config=args.data_config)
         decisions, applied, errors = auto_close_expired_positions(
             repo,
             [p for p in positions if isinstance(p, dict)],

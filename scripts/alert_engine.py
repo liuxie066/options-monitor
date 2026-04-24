@@ -1,13 +1,27 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import argparse
 import json
 import shutil
+import sys
 from pathlib import Path
+
+repo_base = Path(__file__).resolve().parents[1]
+if str(repo_base) not in sys.path:
+    sys.path.insert(0, str(repo_base))
 
 import pandas as pd
 from pandas.errors import EmptyDataError
 
+from scripts.alert_rules import (
+    SELL_CALL_NOTIFICATION_HIGH,
+    SELL_CALL_NOTIFICATION_LOW,
+    SELL_PUT_NOTIFICATION_HIGH,
+    SELL_PUT_NOTIFICATION_LOW,
+)
+from scripts.alert_policy import DEFAULT_ALERT_POLICY, load_alert_policy
+from scripts.report_formatting import num, pct, strike_text
 
 def _load_symbol_display_map(base: Path, *, state_dir: Path | None = None) -> dict[str, str]:
     """Best-effort load display name mapping.
@@ -68,11 +82,7 @@ def _disp_symbol(symbol: str, mp: dict[str, str]) -> str:
 # Layer 2 (风险/约束) is handled here:
 #   - sell_put: base(CNY) cash headroom gate; then high vs medium by annualized return.
 #   - sell_call: covered capacity gate; then high vs medium by annualized return.
-DEFAULT_POLICY = {
-    'sell_put_high_return': 0.12,
-    'sell_call_high_return': 0.08,
-    'change_annual_threshold': 0.02,
-}
+DEFAULT_POLICY = DEFAULT_ALERT_POLICY.to_mapping()
 
 # Initialized in main() from --policy-json (or DEFAULT_POLICY).
 POLICY = DEFAULT_POLICY.copy()
@@ -87,196 +97,151 @@ def safe_read_csv(path: Path) -> pd.DataFrame:
     return pd.DataFrame()
 
 
-def pct(v, digits=2) -> str:
-    if pd.isna(v):
-        return '-'
-    return f"{float(v) * 100:.{digits}f}%"
+def _append_option_quote_parts(parts: list[str], row: pd.Series, *, prepend: bool = False) -> None:
+    def _add(token: str) -> None:
+        if prepend:
+            parts.insert(0, token)
+        else:
+            parts.append(token)
+
+    try:
+        d = row.get('delta')
+        if d is not None and not pd.isna(d):
+            _add(f"delta {float(d):.2f}")
+    except Exception:
+        pass
+    try:
+        iv = row.get('iv')
+        if iv is not None and not pd.isna(iv):
+            _add(f"iv {pct(iv)}")
+    except Exception:
+        pass
+    try:
+        ccy = row.get('option_ccy')
+        if ccy and isinstance(ccy, str):
+            _add(f"ccy {ccy.strip().upper()}")
+    except Exception:
+        pass
+    try:
+        mid = row.get('mid')
+        if mid is not None and not pd.isna(mid):
+            _add(f"mid {float(mid):.3f}")
+    except Exception:
+        pass
+    try:
+        bid = row.get('bid')
+        if bid is not None and not pd.isna(bid):
+            _add(f"bid {float(bid):.3f}")
+    except Exception:
+        pass
+    try:
+        ask = row.get('ask')
+        if ask is not None and not pd.isna(ask):
+            _add(f"ask {float(ask):.3f}")
+    except Exception:
+        pass
 
 
-def num(v, digits=2) -> str:
-    if pd.isna(v):
-        return '-'
-    return f"{float(v):,.{digits}f}"
+def _build_sell_call_extra_parts(row: pd.Series) -> list[str]:
+    shares_total = int(row.get('shares_total') or 0)
+    shares_locked = int(row.get('shares_locked') or 0)
+    cover_avail = int(row.get('cover_avail') or 0)
+    parts: list[str] = []
+    _append_option_quote_parts(parts, row)
+    parts.append(f"cover {cover_avail}")
+    parts.append(f"shares {shares_total}(-{shares_locked})")
+    return parts
 
 
-def strike_text(v) -> str:
-    if pd.isna(v):
-        return '-'
-    v = float(v)
-    return str(int(v)) if v.is_integer() else f"{v:.2f}"
+def _build_sell_put_extra_parts(row: pd.Series) -> list[str]:
+    used_total = None
+    used_symbol = None
+    req_cny = None
+    avail_cny = None
+    free_cny = None
+    req = None
+    avail = row.get('cash_available_usd')
+    free = row.get('cash_free_usd')
+    avail_est = row.get('cash_available_usd_est')
+    free_est = row.get('cash_free_usd_est')
+
+    try:
+        v = row.get('cash_secured_used_cny') or row.get('cash_secured_used_cny_total')
+        used_total = float(v) if v is not None and not pd.isna(v) else None
+    except Exception:
+        used_total = None
+    try:
+        v = row.get('cash_secured_used_cny_symbol')
+        used_symbol = float(v) if v is not None and not pd.isna(v) else None
+    except Exception:
+        used_symbol = None
+    try:
+        v = row.get('cash_required_cny')
+        req_cny = float(v) if v is not None and not pd.isna(v) else None
+    except Exception:
+        req_cny = None
+    try:
+        v = row.get('cash_available_cny')
+        avail_cny = float(v) if v is not None and not pd.isna(v) else None
+    except Exception:
+        avail_cny = None
+    try:
+        v = row.get('cash_free_cny')
+        free_cny = float(v) if v is not None and not pd.isna(v) else None
+    except Exception:
+        free_cny = None
+    try:
+        raw_req = row.get('cash_required_usd')
+        req = float(raw_req) if raw_req is not None and not pd.isna(raw_req) else None
+    except Exception:
+        req = None
+
+    parts: list[str] = []
+    if req_cny is not None and req_cny > 0:
+        parts.append(f"cash_req_cny ¥{req_cny:,.0f}")
+    elif req is not None and req > 0:
+        parts.append(f"cash_req ${req:,.0f}")
+    if used_total is not None and used_total > 0:
+        parts.append(f"cash_used_total_cny ¥{used_total:,.0f}")
+        if used_symbol is not None and used_symbol > 0:
+            parts.append(f"cash_used_sym_cny ¥{used_symbol:,.0f}")
+    if avail_cny is not None and avail_cny > 0:
+        parts.append(f"cash_avail_cny ¥{avail_cny:,.0f}")
+    if free_cny is not None and free_cny > 0:
+        parts.append(f"cash_free_cny ¥{free_cny:,.0f}")
+
+    if not parts:
+        if used_total is not None and used_total > 0:
+            parts.append(f"cash_used_total ${used_total:,.0f}")
+            if used_symbol is not None and used_symbol > 0:
+                parts.append(f"cash_used_sym ${used_symbol:,.0f}")
+        try:
+            if avail is not None and not pd.isna(avail):
+                parts.append(f"cash_avail ${float(avail):,.0f}")
+            elif avail_est is not None and not pd.isna(avail_est):
+                parts.append(f"cash_avail_eq ${float(avail_est):,.0f}")
+        except Exception:
+            pass
+        try:
+            if free is not None and not pd.isna(free):
+                parts.append(f"cash_free ${float(free):,.0f}")
+            elif free_est is not None and not pd.isna(free_est):
+                parts.append(f"cash_free_eq ${float(free_est):,.0f}")
+        except Exception:
+            pass
+
+    _append_option_quote_parts(parts, row, prepend=True)
+    return parts
 
 
 def top_pick_line(row: pd.Series) -> str:
     extra = ''
     try:
         if row.get('strategy') == 'sell_call':
-            shares_total = int(row.get('shares_total') or 0)
-            shares_locked = int(row.get('shares_locked') or 0)
-            cover_avail = int(row.get('cover_avail') or 0)
-            # include suggested sell price (bid/ask/mid) + delta + currency
-            parts = []
-            try:
-                d = row.get('delta')
-                if d is not None and not pd.isna(d):
-                    parts.append(f"delta {float(d):.2f}")
-            except Exception:
-                pass
-            try:
-                iv = row.get('iv')
-                if iv is not None and not pd.isna(iv):
-                    parts.append(f"iv {pct(iv)}")
-            except Exception:
-                pass
-            try:
-                ccy = row.get('option_ccy')
-                if ccy and isinstance(ccy, str):
-                    parts.append(f"ccy {ccy.strip().upper()}")
-            except Exception:
-                pass
-            try:
-                mid = row.get('mid')
-                if mid is not None and not pd.isna(mid):
-                    parts.append(f"mid {float(mid):.3f}")
-            except Exception:
-                pass
-            try:
-                bid = row.get('bid')
-                if bid is not None and not pd.isna(bid):
-                    parts.append(f"bid {float(bid):.3f}")
-            except Exception:
-                pass
-            try:
-                ask = row.get('ask')
-                if ask is not None and not pd.isna(ask):
-                    parts.append(f"ask {float(ask):.3f}")
-            except Exception:
-                pass
-            parts.append(f"cover {cover_avail}")
-            parts.append(f"shares {shares_total}(-{shares_locked})")
+            parts = _build_sell_call_extra_parts(row)
             extra = " | " + " | ".join(parts)
         if row.get('strategy') == 'sell_put':
-            # Prefer CNY-normalized figures for unified display.
-            used_total = None
-            used_symbol = None
-            try:
-                v = row.get('cash_secured_used_cny') or row.get('cash_secured_used_cny_total')
-                used_total = float(v) if v is not None and not pd.isna(v) else None
-            except Exception:
-                used_total = None
-            try:
-                v = row.get('cash_secured_used_cny_symbol')
-                used_symbol = float(v) if v is not None and not pd.isna(v) else None
-            except Exception:
-                used_symbol = None
-
-            req_cny = None
-            try:
-                v = row.get('cash_required_cny')
-                req_cny = float(v) if v is not None and not pd.isna(v) else None
-            except Exception:
-                req_cny = None
-
-            avail_cny = None
-            free_cny = None
-            try:
-                v = row.get('cash_available_cny')
-                avail_cny = float(v) if v is not None and not pd.isna(v) else None
-            except Exception:
-                avail_cny = None
-            try:
-                v = row.get('cash_free_cny')
-                free_cny = float(v) if v is not None and not pd.isna(v) else None
-            except Exception:
-                free_cny = None
-
-            # Legacy USD (keep as fallback only)
-            req = row.get('cash_required_usd')
-            try:
-                req = float(req) if req is not None and not pd.isna(req) else None
-            except Exception:
-                req = None
-            avail = row.get('cash_available_usd')
-            free = row.get('cash_free_usd')
-            avail_est = row.get('cash_available_usd_est')
-            free_est = row.get('cash_free_usd_est')
-
-            parts = []
-
-            # Unified CNY view
-            if req_cny is not None and req_cny > 0:
-                parts.append(f"cash_req_cny ¥{req_cny:,.0f}")
-            elif req is not None and req > 0:
-                # Keep margin display available even when other CNY fields exist
-                # but HKDCNY was unavailable for cash_required_cny.
-                parts.append(f"cash_req ${req:,.0f}")
-            if used_total is not None and used_total > 0:
-                parts.append(f"cash_used_total_cny ¥{used_total:,.0f}")
-                if used_symbol is not None and used_symbol > 0:
-                    parts.append(f"cash_used_sym_cny ¥{used_symbol:,.0f}")
-            if avail_cny is not None and avail_cny > 0:
-                parts.append(f"cash_avail_cny ¥{avail_cny:,.0f}")
-            if free_cny is not None and free_cny > 0:
-                parts.append(f"cash_free_cny ¥{free_cny:,.0f}")
-
-            # If we don't have CNY view, fallback to legacy USD view
-            if not parts:
-                if used_total is not None and used_total > 0:
-                    parts.append(f"cash_used_total ${used_total:,.0f}")
-                    if used_symbol is not None and used_symbol > 0:
-                        parts.append(f"cash_used_sym ${used_symbol:,.0f}")
-                try:
-                    if avail is not None and not pd.isna(avail):
-                        parts.append(f"cash_avail ${float(avail):,.0f}")
-                    elif avail_est is not None and not pd.isna(avail_est):
-                        parts.append(f"cash_avail_eq ${float(avail_est):,.0f}")
-                except Exception:
-                    pass
-                try:
-                    if free is not None and not pd.isna(free):
-                        parts.append(f"cash_free ${float(free):,.0f}")
-                    elif free_est is not None and not pd.isna(free_est):
-                        parts.append(f"cash_free_eq ${float(free_est):,.0f}")
-                except Exception:
-                    pass
-
-            # include delta + suggested sell price (bid/ask/mid) and option currency for clarity
-            try:
-                d = row.get('delta')
-                if d is not None and not pd.isna(d):
-                    parts.insert(0, f"delta {float(d):.2f}")
-            except Exception:
-                pass
-            try:
-                iv = row.get('iv')
-                if iv is not None and not pd.isna(iv):
-                    parts.insert(0, f"iv {pct(iv)}")
-            except Exception:
-                pass
-            try:
-                mid = row.get('mid')
-                if mid is not None and not pd.isna(mid):
-                    parts.insert(0, f"mid {float(mid):.3f}")
-            except Exception:
-                pass
-            try:
-                bid = row.get('bid')
-                if bid is not None and not pd.isna(bid):
-                    parts.insert(0, f"bid {float(bid):.3f}")
-            except Exception:
-                pass
-            try:
-                ask = row.get('ask')
-                if ask is not None and not pd.isna(ask):
-                    parts.insert(0, f"ask {float(ask):.3f}")
-            except Exception:
-                pass
-            try:
-                ccy = row.get('option_ccy')
-                if ccy and isinstance(ccy, str):
-                    parts.insert(0, f"ccy {ccy.strip().upper()}")
-            except Exception:
-                pass
-
+            parts = _build_sell_put_extra_parts(row)
             if parts:
                 extra = " | " + " | ".join(parts)
     except Exception:
@@ -297,7 +262,6 @@ def classify_alert(row: pd.Series) -> tuple[str | None, str]:
 
     strategy = row.get('strategy', '')
     annual = float(row.get('annualized_return', 0) or 0)
-    risk = row.get('risk_label', '')
 
     if strategy == 'sell_put':
         # cash-aware gating:
@@ -346,13 +310,10 @@ def classify_alert(row: pd.Series) -> tuple[str | None, str]:
         if (cash_free is None) and (cash_free_cny is None) and cash_free_est is not None and cash_req is not None and cash_req > cash_free_est:
             return 'low', f'所需担保现金约 ${cash_req:,.0f}，但账户可用担保现金(折算USD)约 ${cash_free_est:,.0f}（已扣占用）；可能无法再加仓，仅供观察。'
 
-        # Priority by return only (risk label is display-only):
-        if annual >= float(POLICY.get('sell_put_high_return', DEFAULT_POLICY['sell_put_high_return'])):
-            return 'high', '通过准入后，收益/风险组合较强，值得优先看。'
-        # If it passed scanner's min_annualized_net_return but not high, treat as medium.
+        # Passed scanner + cash gate => high priority.
         if annual > 0:
-            return 'medium', '已通过准入，可作为今日观察候选。'
-        return 'low', '已通过准入，但优先级一般。'
+            return 'high', SELL_PUT_NOTIFICATION_HIGH
+        return 'low', SELL_PUT_NOTIFICATION_LOW
 
     if strategy == 'sell_call':
         # account-aware gating: if no covered capacity, do not promote to high/medium
@@ -363,11 +324,9 @@ def classify_alert(row: pd.Series) -> tuple[str | None, str]:
         if cover_avail <= 0:
             return 'low', '当前富途可覆盖张数为 0（可能已占用或持仓不足），仅供观察。'
 
-        if annual >= float(POLICY.get('sell_call_high_return', DEFAULT_POLICY['sell_call_high_return'])):
-            return 'high', '通过准入后，权利金回报与行权空间比较平衡。'
         if annual > 0:
-            return 'medium', '已通过准入，可作为 sell call 备选。'
-        return 'low', '已通过准入，但优先级一般。'
+            return 'high', SELL_CALL_NOTIFICATION_HIGH
+        return 'low', SELL_CALL_NOTIFICATION_LOW
 
     return None, ''
 
@@ -526,17 +485,7 @@ def _resolve_previous_summary_path(*, repo_base: Path, previous_summary: str | N
 
 
 def _load_policy(policy_json: str | None, *, repo_base: Path) -> dict:
-    if not policy_json:
-        return DEFAULT_POLICY.copy()
-    try:
-        p = _resolve_repo_path(repo_base=repo_base, value=policy_json)
-        if p.exists() and p.stat().st_size > 0:
-            data = json.loads(p.read_text(encoding='utf-8'))
-            if isinstance(data, dict):
-                return {**DEFAULT_POLICY, **data}
-    except Exception:
-        pass
-    return DEFAULT_POLICY.copy()
+    return load_alert_policy(policy_json, repo_base=repo_base, resolve_repo_path_fn=_resolve_repo_path)
 
 
 def _fill_capacity_fields_from_note(current: pd.DataFrame) -> pd.DataFrame:
@@ -643,3 +592,42 @@ def run_alert_engine(
         'previous_path': previous_path,
         'snapshot_updated': bool(update_snapshot),
     }
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description='Build alert and change text from symbols summary')
+    parser.add_argument('--summary-input', default='output/reports/symbols_summary.csv')
+    parser.add_argument('--output', default='output/reports/symbols_alerts.txt')
+    parser.add_argument('--changes-output', default='output/reports/symbols_changes.txt')
+    parser.add_argument('--previous-summary', default=None, help='Previous summary snapshot CSV (default: <state-dir>/symbols_summary_prev.csv)')
+    parser.add_argument('--state-dir', default=None, help='[optional] state dir for symbols_summary_prev.csv (overrides --previous-summary when set)')
+    parser.add_argument('--update-snapshot', action='store_true')
+    parser.add_argument('--policy-json', default=None, help='JSON file for alert policy overrides')
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    result = run_alert_engine(
+        summary_input=args.summary_input,
+        output=args.output,
+        changes_output=args.changes_output,
+        previous_summary=args.previous_summary,
+        state_dir=args.state_dir,
+        update_snapshot=args.update_snapshot,
+        policy_json=args.policy_json,
+    )
+
+    changes_path = str(result['changes_path'])
+    if changes_path != '/dev/null':
+        print(result['alert_text'])
+        print(f"[DONE] alerts -> {result['output_path']}")
+        print(result['changes_text'])
+        print(f"[DONE] changes -> {result['changes_path']}")
+    if result.get('snapshot_updated'):
+        print(f"[DONE] snapshot updated -> {result['previous_path']}")
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

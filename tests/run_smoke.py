@@ -22,6 +22,21 @@ def _ensure_repo_on_path() -> Path:
     return base
 
 
+def _init_minimal_config(*, cfg_path: Path, data_cfg_path: Path, market: str = "us", symbols: list[str] | None = None) -> dict[str, object]:
+    _ensure_repo_on_path()
+
+    from scripts.agent_plugin.init_local import init_local_config
+
+    return init_local_config(
+        repo_root=Path(__file__).resolve().parents[1],
+        market=market,
+        futu_acc_id="281756479859383816",
+        config_path=cfg_path,
+        data_config_path=data_cfg_path,
+        symbols=symbols or (["NVDA"] if market == "us" else ["0700.HK"]),
+    )
+
+
 def test_scanners_require_multiplier() -> None:
     _ensure_repo_on_path()
 
@@ -53,8 +68,9 @@ def test_cash_cap_is_best_effort() -> None:
 def test_agent_launcher_spec_contract() -> None:
     base = _ensure_repo_on_path()
     vpy = (base / ".venv" / "bin" / "python").resolve()
+    om_agent = (base / "om-agent").resolve()
     p = subprocess.run(
-        [str(vpy), "scripts/cli/om_agent_cli.py", "spec"],
+        [str(om_agent), "spec"],
         cwd=str(base),
         capture_output=True,
         text=True,
@@ -68,77 +84,49 @@ def test_agent_launcher_spec_contract() -> None:
     assert any(str(x.get("name")) == "get_close_advice" for x in payload.get("tools", []))
 
 
-def test_agent_launcher_init_minimal_config() -> None:
-    base = _ensure_repo_on_path()
-    vpy = (base / ".venv" / "bin" / "python").resolve()
+def test_agent_internal_init_minimal_config() -> None:
+    _ensure_repo_on_path()
     with tempfile.TemporaryDirectory() as td:
         cfg_path = Path(td) / "config.us.json"
         data_cfg_path = Path(td) / "portfolio.sqlite.json"
-        p = subprocess.run(
-            [
-                str(vpy),
-                "scripts/cli/om_agent_cli.py",
-                "init",
-                "--market",
-                "us",
-                "--futu-acc-id",
-                "281756479859383816",
-                "--config-path",
-                str(cfg_path),
-                "--data-config-path",
-                str(data_cfg_path),
-                "--symbol",
-                "NVDA",
-            ],
-            cwd=str(base),
-            capture_output=True,
-            text=True,
-            check=True,
-            env={**os.environ},
-        )
-        payload = json.loads(p.stdout)
-        assert payload["ok"] is True
-        assert payload["data"]["account_label"] == "user1"
+        payload = _init_minimal_config(cfg_path=cfg_path, data_cfg_path=data_cfg_path)
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        assert payload["account_label"] == "user1"
         assert cfg_path.exists()
         assert data_cfg_path.exists()
-        assert Path(payload["data"]["config_path"]).name == "config.us.json"
-        assert Path(payload["data"]["data_config_path"]).name == "portfolio.sqlite.json"
+        assert Path(str(payload["config_path"])).name == "config.us.json"
+        assert Path(str(payload["data_config_path"])).name == "portfolio.sqlite.json"
+        assert cfg["portfolio"]["data_config"] == "portfolio.sqlite.json"
+        assert "pm_config" not in cfg["portfolio"]
+        assert "market" not in cfg["portfolio"]
+
+
+def test_agent_internal_init_reuses_existing_data_config_across_markets() -> None:
+    _ensure_repo_on_path()
+    with tempfile.TemporaryDirectory() as td:
+        us_cfg_path = Path(td) / "config.us.json"
+        hk_cfg_path = Path(td) / "config.hk.json"
+        data_cfg_path = Path(td) / "portfolio.sqlite.json"
+        first = _init_minimal_config(cfg_path=hk_cfg_path, data_cfg_path=data_cfg_path, market="hk")
+        second = _init_minimal_config(cfg_path=us_cfg_path, data_cfg_path=data_cfg_path, market="us")
+        assert first["data_config_reused"] is False
+        assert second["data_config_reused"] is True
+        assert us_cfg_path.exists()
+        assert hk_cfg_path.exists()
+        assert data_cfg_path.exists()
 
 
 def test_agent_launcher_add_external_holdings_account() -> None:
     base = _ensure_repo_on_path()
-    vpy = (base / ".venv" / "bin" / "python").resolve()
+    om_agent = (base / "om-agent").resolve()
     with tempfile.TemporaryDirectory() as td:
         cfg_path = Path(td) / "config.us.json"
         data_cfg_path = Path(td) / "portfolio.sqlite.json"
-        init_p = subprocess.run(
-            [
-                str(vpy),
-                "scripts/cli/om_agent_cli.py",
-                "init",
-                "--market",
-                "us",
-                "--futu-acc-id",
-                "281756479859383816",
-                "--config-path",
-                str(cfg_path),
-                "--data-config-path",
-                str(data_cfg_path),
-                "--symbol",
-                "NVDA",
-            ],
-            cwd=str(base),
-            capture_output=True,
-            text=True,
-            check=True,
-            env={**os.environ},
-        )
-        assert json.loads(init_p.stdout)["ok"] is True
+        _init_minimal_config(cfg_path=cfg_path, data_cfg_path=data_cfg_path)
 
         add_p = subprocess.run(
             [
-                str(vpy),
-                "scripts/cli/om_agent_cli.py",
+                str(om_agent),
                 "add-account",
                 "--market",
                 "us",
@@ -167,38 +155,15 @@ def test_agent_launcher_add_external_holdings_account() -> None:
 
 def test_agent_launcher_add_futu_account_with_holdings_fallback() -> None:
     base = _ensure_repo_on_path()
-    vpy = (base / ".venv" / "bin" / "python").resolve()
+    om_agent = (base / "om-agent").resolve()
     with tempfile.TemporaryDirectory() as td:
         cfg_path = Path(td) / "config.us.json"
         data_cfg_path = Path(td) / "portfolio.sqlite.json"
-        init_p = subprocess.run(
-            [
-                str(vpy),
-                "scripts/cli/om_agent_cli.py",
-                "init",
-                "--market",
-                "us",
-                "--futu-acc-id",
-                "281756479859383816",
-                "--config-path",
-                str(cfg_path),
-                "--data-config-path",
-                str(data_cfg_path),
-                "--symbol",
-                "NVDA",
-            ],
-            cwd=str(base),
-            capture_output=True,
-            text=True,
-            check=True,
-            env={**os.environ},
-        )
-        assert json.loads(init_p.stdout)["ok"] is True
+        _init_minimal_config(cfg_path=cfg_path, data_cfg_path=data_cfg_path)
 
         add_p = subprocess.run(
             [
-                str(vpy),
-                "scripts/cli/om_agent_cli.py",
+                str(om_agent),
                 "add-account",
                 "--market",
                 "us",
@@ -230,24 +195,14 @@ def test_agent_launcher_add_futu_account_with_holdings_fallback() -> None:
 
 def test_agent_launcher_edit_account_updates_type_and_mappings() -> None:
     base = _ensure_repo_on_path()
-    vpy = (base / ".venv" / "bin" / "python").resolve()
+    om_agent = (base / "om-agent").resolve()
     with tempfile.TemporaryDirectory() as td:
         cfg_path = Path(td) / "config.us.json"
         data_cfg_path = Path(td) / "portfolio.sqlite.json"
+        _init_minimal_config(cfg_path=cfg_path, data_cfg_path=data_cfg_path)
         subprocess.run(
             [
-                str(vpy), "scripts/cli/om_agent_cli.py", "init",
-                "--market", "us",
-                "--futu-acc-id", "281756479859383816",
-                "--config-path", str(cfg_path),
-                "--data-config-path", str(data_cfg_path),
-                "--symbol", "NVDA",
-            ],
-            cwd=str(base), capture_output=True, text=True, check=True, env={**os.environ},
-        )
-        subprocess.run(
-            [
-                str(vpy), "scripts/cli/om_agent_cli.py", "add-account",
+                str(om_agent), "add-account",
                 "--market", "us",
                 "--config-path", str(cfg_path),
                 "--account-label", "ext1",
@@ -259,7 +214,7 @@ def test_agent_launcher_edit_account_updates_type_and_mappings() -> None:
 
         edit_p = subprocess.run(
             [
-                str(vpy), "scripts/cli/om_agent_cli.py", "edit-account",
+                str(om_agent), "edit-account",
                 "--market", "us",
                 "--config-path", str(cfg_path),
                 "--account-label", "ext1",
@@ -282,24 +237,14 @@ def test_agent_launcher_edit_account_updates_type_and_mappings() -> None:
 
 def test_agent_launcher_remove_account_updates_runtime_config() -> None:
     base = _ensure_repo_on_path()
-    vpy = (base / ".venv" / "bin" / "python").resolve()
+    om_agent = (base / "om-agent").resolve()
     with tempfile.TemporaryDirectory() as td:
         cfg_path = Path(td) / "config.us.json"
         data_cfg_path = Path(td) / "portfolio.sqlite.json"
+        _init_minimal_config(cfg_path=cfg_path, data_cfg_path=data_cfg_path)
         subprocess.run(
             [
-                str(vpy), "scripts/cli/om_agent_cli.py", "init",
-                "--market", "us",
-                "--futu-acc-id", "281756479859383816",
-                "--config-path", str(cfg_path),
-                "--data-config-path", str(data_cfg_path),
-                "--symbol", "NVDA",
-            ],
-            cwd=str(base), capture_output=True, text=True, check=True, env={**os.environ},
-        )
-        subprocess.run(
-            [
-                str(vpy), "scripts/cli/om_agent_cli.py", "add-account",
+                str(om_agent), "add-account",
                 "--market", "us",
                 "--config-path", str(cfg_path),
                 "--account-label", "sy",
@@ -311,7 +256,7 @@ def test_agent_launcher_remove_account_updates_runtime_config() -> None:
 
         remove_p = subprocess.run(
             [
-                str(vpy), "scripts/cli/om_agent_cli.py", "remove-account",
+                str(om_agent), "remove-account",
                 "--market", "us",
                 "--config-path", str(cfg_path),
                 "--account-label", "user1",
@@ -330,8 +275,9 @@ def test_agent_launcher_remove_account_updates_runtime_config() -> None:
 def test_agent_launcher_spec_prefers_broker_field() -> None:
     base = _ensure_repo_on_path()
     vpy = (base / ".venv" / "bin" / "python").resolve()
+    om_agent = (base / "om-agent").resolve()
     p = subprocess.run(
-        [str(vpy), "scripts/cli/om_agent_cli.py", "spec"],
+        [str(om_agent), "spec"],
         cwd=str(base),
         capture_output=True,
         text=True,
@@ -348,7 +294,8 @@ def main() -> None:
     test_cash_cap_is_best_effort()
     test_agent_launcher_spec_contract()
     test_agent_launcher_spec_prefers_broker_field()
-    test_agent_launcher_init_minimal_config()
+    test_agent_internal_init_minimal_config()
+    test_agent_internal_init_reuses_existing_data_config_across_markets()
     test_agent_launcher_add_external_holdings_account()
     test_agent_launcher_add_futu_account_with_holdings_fallback()
     test_agent_launcher_edit_account_updates_type_and_mappings()

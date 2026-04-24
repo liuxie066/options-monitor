@@ -1,45 +1,28 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import argparse
+import sys
 from pathlib import Path
+
+repo_base = Path(__file__).resolve().parents[1]
+if str(repo_base) not in sys.path:
+    sys.path.insert(0, str(repo_base))
 
 import pandas as pd
 from pandas.errors import EmptyDataError
 
+from scripts.alert_rules import render_sell_call_comment
 from scripts.io_utils import atomic_write_text
+from scripts.report_formatting import num, pct, strike_text
 from domain.domain.engine import (
     build_strategy_config,
     rank_scored_candidates,
 )
 
-def pct(v, digits=2):
-    if pd.isna(v):
-        return "-"
-    return f"{float(v)*100:.{digits}f}%"
-
-
-def num(v, digits=2):
-    if pd.isna(v):
-        return "-"
-    return f"{float(v):,.{digits}f}"
-
-
-def default_comment(row) -> str:
-    risk = row.get("risk_label", "未知")
-    annual = float(row.get("annualized_net_premium_return", 0) or 0)
-    total = float(row.get("if_exercised_total_return", 0) or 0)
-
-    if risk == "激进":
-        return "权利金不错，但行权价离现价较近，更容易卖飞。"
-    if annual >= 0.10 and total >= 0.15:
-        return "权利金收益和被行权后的总收益都比较平衡，可优先看。"
-    if annual >= 0.06:
-        return "收益尚可，适合作为 sell call 备选。"
-    return "可作为备选观察。"
-
 
 def render_one(row) -> str:
-    strike = num(row["strike"], 0 if float(row["strike"]).is_integer() else 2)
+    strike = strike_text(row["strike"])
     title = f"[Sell Call 候选] {row['symbol']} {row['expiration']} {strike}C"
     body = [
         title,
@@ -62,7 +45,7 @@ def render_one(row) -> str:
         f"OI / Volume: {int(row.get('open_interest', 0) or 0)} / {int(row.get('volume', 0) or 0)}",
         f"Spread Ratio: {pct(row.get('spread_ratio', 0))}",
         "",
-        f"判断: {default_comment(row)}",
+        f"判断: {render_sell_call_comment(row)}",
     ]
     return "\n".join(body)
 
@@ -123,3 +106,31 @@ def render_sell_call_alerts(
     print(text)
     print(f"[DONE] alerts -> {output_file}")
     return text
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description='Render Sell Call alert text from candidate CSV')
+    parser.add_argument('--input', default=None, help='Input CSV path (default: <report-dir>/sell_call_candidates.csv)')
+    parser.add_argument('--report-dir', default='output/reports', help='Report dir for default input/output (default: output/reports)')
+    parser.add_argument('--top', type=int, default=5)
+    parser.add_argument('--symbol', default=None)
+    parser.add_argument('--output', default=None, help='Output txt path (default: <report-dir>/sell_call_alerts.txt)')
+    parser.add_argument('--layered', action='store_true')
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    render_sell_call_alerts(
+        input_path=args.input,
+        report_dir=args.report_dir,
+        top=args.top,
+        symbol=args.symbol,
+        output_path=args.output,
+        layered=args.layered,
+    )
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

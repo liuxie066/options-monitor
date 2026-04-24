@@ -13,7 +13,7 @@ from __future__ import annotations
 import math
 
 
-DEFAULT_MIN_ANNUALIZED_NET_PREMIUM_RETURN = 0.07
+DEFAULT_MIN_ANNUALIZED_NET_PREMIUM_RETURN = 0.10
 PRIMARY_FIELD = "min_annualized_net_premium_return"
 LEGACY_FIELD = "min_annualized_net_return"
 

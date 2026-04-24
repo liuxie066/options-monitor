@@ -19,7 +19,7 @@ from scripts.cash_secured_utils import (
     normalize_cash_secured_total_by_ccy,
     read_cash_secured_total_cny,
 )
-from scripts.fx_rates import CurrencyConverter
+from scripts.exchange_rates import CurrencyConverter
 from scripts.io_utils import safe_read_csv
 
 log = logging.getLogger(__name__)
@@ -30,7 +30,7 @@ def enrich_sell_put_candidates_with_cash(
     df_labeled: pd.DataFrame,
     symbol: str,
     portfolio_ctx: dict | None,
-    fx: CurrencyConverter,
+    exchange_rate_converter: CurrencyConverter,
     out_path,
 ) -> pd.DataFrame:
     """Add cash secured usage / cash available / cash required columns onto labeled candidates.
@@ -76,7 +76,7 @@ def enrich_sell_put_candidates_with_cash(
                 option_ctx,
                 symbol,
                 by_symbol_by_ccy=norm_by_ccy,
-                native_to_cny=lambda amt, ccy: fx.native_to_cny(amt, native_ccy=ccy),
+                native_to_cny=lambda amt, ccy: exchange_rate_converter.native_to_cny(amt, native_ccy=ccy),
             )
         except Exception as e:
             log.warning("sell_put_cash: cash_secured calc failed for %s: %s", symbol, e)
@@ -101,11 +101,11 @@ def enrich_sell_put_candidates_with_cash(
             if used_total_cny is not None:
                 cash_free_cny = cash_avail_cny - used_total_cny
             else:
-                k = fx.native_to_cny(1.0, native_ccy='USD')
+                k = exchange_rate_converter.native_to_cny(1.0, native_ccy='USD')
                 cash_free_cny = (cash_avail_cny - (used_total_usd * float(k))) if k else None
 
         if cash_avail is None and cash_avail_cny is not None:
-            cash_avail_est = fx.cny_to_native(cash_avail_cny, native_ccy='USD')
+            cash_avail_est = exchange_rate_converter.cny_to_native(cash_avail_cny, native_ccy='USD')
     except Exception as e:
         log.warning("sell_put_cash: cash_available calc failed: %s", e)
         cash_avail = None
@@ -165,7 +165,7 @@ def enrich_sell_put_candidates_with_cash(
             ccy = str(df_sp_lab['currency'].iloc[0] or '').upper()
 
         c = (ccy or 'USD')
-        k = fx.native_to_cny(1.0, native_ccy=c)
+        k = exchange_rate_converter.native_to_cny(1.0, native_ccy=c)
         if k is None or k <= 0:
             df_sp_lab['cash_required_cny'] = pd.NA
         else:

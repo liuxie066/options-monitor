@@ -17,25 +17,18 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 from pathlib import Path
 
 from scripts.account_config import cash_footer_accounts_from_config
-from scripts.config_loader import resolve_pm_config_path
-from scripts.io_utils import parse_last_json, money_cny
-
-
-def run_capture(cmd: list[str], cwd: Path, timeout_sec: int = 120) -> str:
-    p = subprocess.run(cmd, cwd=str(cwd), timeout=timeout_sec, capture_output=True, text=True)
-    if p.returncode != 0:
-        raise SystemExit(p.returncode)
-    return p.stdout or ''
+from scripts.config_loader import resolve_data_config_path
+from scripts.io_utils import money_cny
+from scripts.query_sell_put_cash import query_sell_put_cash
 
 
 def main():
     ap = argparse.ArgumentParser(description='Append per-account cash summary to notification footer')
     ap.add_argument('--config', default=None, help='options-monitor config used to resolve default accounts')
-    ap.add_argument('--pm-config', default=None, help='Feishu/Bitable credential config path; auto-resolves when omitted')
+    ap.add_argument('--data-config', default=None, help='portfolio data config path; auto-resolves when omitted')
     ap.add_argument('--market', default='富途')
     ap.add_argument('--accounts', nargs='+', default=None)
     ap.add_argument('--report-dir', default='output/reports', help='Report dir for default notification path (default: output/reports)')
@@ -92,22 +85,19 @@ def main():
 
     text = _strip_old_cash_blocks(text)
 
-    py = str(base / '.venv' / 'bin' / 'python')
-    pm_config = resolve_pm_config_path(base=base, pm_config=args.pm_config)
+    data_config = resolve_data_config_path(base=base, data_config=args.data_config)
 
     rows = []
     for acct in accounts:
-        cmd = [
-            py, 'scripts/cli/query_sell_put_cash_cli.py',
-            '--pm-config', str(pm_config),
-            '--market', args.market,
-            '--account', acct,
-            '--format', 'json',
-        ]
-        if cfg_path is not None:
-            cmd.extend(['--config', str(cfg_path)])
-        out = run_capture(cmd, cwd=base, timeout_sec=180)
-        payload = parse_last_json(out)
+        payload = query_sell_put_cash(
+            config=(str(cfg_path) if cfg_path is not None else None),
+            data_config=str(data_config),
+            market=args.market,
+            account=acct,
+            output_format='json',
+            out_dir='output/state',
+            base_dir=base,
+        )
         # Show BOTH:
         # - holding-table cash (cash_available_cny)
         # - free cash after subtracting put cash-secured (cash_free_cny)

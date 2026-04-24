@@ -16,7 +16,7 @@ def _add_repo_to_syspath() -> Path:
 
 def test_sell_put_enforces_min_volume_flag_in_cli() -> None:
     _add_repo_to_syspath()
-    from scripts.cli import scan_sell_put_cli
+    import scripts.scan_sell_put as scan_sell_put
 
     with TemporaryDirectory() as td:
         root = Path(td)
@@ -48,7 +48,7 @@ def test_sell_put_enforces_min_volume_flag_in_cli() -> None:
         old_argv = sys.argv
         try:
             sys.argv = [
-                'scan_sell_put_cli.py',
+                'scan_sell_put.py',
                 '--symbols', '0700.HK',
                 '--input-root', str(root),
                 '--output', str(out_path),
@@ -58,7 +58,7 @@ def test_sell_put_enforces_min_volume_flag_in_cli() -> None:
                 '--min-annualized-net-return', '0',
                 '--quiet',
             ]
-            scan_sell_put_cli.main()
+            scan_sell_put.main()
         finally:
             sys.argv = old_argv
 

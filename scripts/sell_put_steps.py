@@ -11,12 +11,19 @@ from pathlib import Path
 
 import pandas as pd
 
-from scripts.fx_rates import CurrencyConverter
+from scripts.candidate_defaults import (
+    DEFAULT_SELL_PUT_WINDOW,
+    resolve_candidate_liquidity,
+    resolve_candidate_window,
+    resolve_event_risk_config,
+)
+from scripts.exchange_rates import CurrencyConverter
 from scripts.io_utils import safe_read_csv
+from scripts.render_sell_put_alerts import render_sell_put_alerts
 from scripts.report_labels import add_sell_put_labels
 from scripts.report_summaries import summarize_sell_put
+from scripts.scan_sell_put import run_sell_put_scan
 from scripts.sell_put_cash import enrich_sell_put_candidates_with_cash
-from scripts.subprocess_utils import run_cmd
 from scripts.sell_put_config import validate_min_annualized_net_return
 
 
@@ -34,7 +41,7 @@ def run_sell_put_scan_and_summarize(
     report_dir: Path,
     timeout_sec: int | None,
     is_scheduled: bool,
-    fx: CurrencyConverter,
+    exchange_rate_converter: CurrencyConverter,
     portfolio_ctx: dict | None,
     global_sell_put_liquidity: dict | None = None,
     global_sell_put_event_risk: dict | None = None,
@@ -47,66 +54,51 @@ def run_sell_put_scan_and_summarize(
         source=f'{symbol}.sell_put.min_annualized_net_return',
     )
 
-    liquidity = dict(global_sell_put_liquidity or {})
-    event_risk = {"enabled": True, "mode": "warn"}
-    if isinstance(global_sell_put_event_risk, dict):
-        event_risk.update(global_sell_put_event_risk)
-    min_net_income_cny = float(sp.get('min_net_income', liquidity.get('min_net_income', 0.0)) or 0.0)
+    liquidity = resolve_candidate_liquidity(global_sell_put_liquidity)
+    event_risk = resolve_event_risk_config(global_sell_put_event_risk)
+    window = resolve_candidate_window(sp, defaults=DEFAULT_SELL_PUT_WINDOW)
+    global_min_net_income = float((global_sell_put_liquidity or {}).get('min_net_income', 0.0) or 0.0)
+    min_net_income_cny = float(sp.get('min_net_income', global_min_net_income) or 0.0)
 
-    cmd = [
-        py, 'scripts/cli/scan_sell_put_cli.py',
-        '--symbols', sym,
-        '--input-root', str(required_data_dir),
-        '--min-dte', str(sp.get('min_dte', 20)),
-        '--max-dte', str(sp.get('max_dte', 60)),
-        '--min-annualized-net-return', str(resolved_min_annualized_net_return),
-        '--min-open-interest', str(liquidity.get('min_open_interest', 100)),
-        '--min-volume', str(liquidity.get('min_volume', 10)),
-        '--max-spread-ratio', str(liquidity.get('max_spread_ratio', 0.3)),
-        '--event-risk-mode', str(event_risk.get('mode', 'warn')),
-        '--output', str(symbol_sp),
-    ]
-    if bool(event_risk.get('enabled', True)):
-        cmd.append('--event-risk-enabled')
-    else:
-        cmd.append('--no-event-risk-enabled')
-    if sp.get('min_strike') is not None:
-        cmd.extend(['--min-strike', str(sp.get('min_strike'))])
-    if sp.get('max_strike') is not None:
-        cmd.extend(['--max-strike', str(sp.get('max_strike'))])
+    min_net_income_native = (
+        0.0
+        if min_net_income_cny <= 0
+        else (
+            exchange_rate_converter.cny_to_native(
+                min_net_income_cny,
+                native_ccy=('HKD' if str(symbol).upper().endswith('.HK') else 'USD'),
+            )
+            or 0.0
+        )
+    )
 
-    # CNY threshold -> option native (USD/HKD)
-    cmd.extend([
-        '--min-net-income', str(
-            (lambda cny_threshold: (
-                0.0 if cny_threshold <= 0 else (
-                    (
-                        fx.cny_to_native(
-                            cny_threshold,
-                            native_ccy=('HKD' if str(symbol).upper().endswith('.HK') else 'USD'),
-                        )
-                    )
-                    or 0.0
-                )
-            ))(min_net_income_cny)
-        ),
-    ])
-
-    if is_scheduled:
-        cmd.append('--quiet')
-
-    run_cmd(cmd, cwd=base, timeout_sec=timeout_sec, is_scheduled=is_scheduled)
+    run_sell_put_scan(
+        symbols=[sym],
+        input_root=required_data_dir,
+        output=symbol_sp,
+        min_dte=window.min_dte,
+        max_dte=window.max_dte,
+        min_annualized_net_return=resolved_min_annualized_net_return,
+        min_net_income=float(min_net_income_native),
+        min_strike=(float(sp.get('min_strike')) if sp.get('min_strike') is not None else None),
+        max_strike=(float(sp.get('max_strike')) if sp.get('max_strike') is not None else None),
+        min_open_interest=liquidity.min_open_interest,
+        min_volume=liquidity.min_volume,
+        max_spread_ratio=liquidity.max_spread_ratio,
+        event_risk_cfg=event_risk,
+        quiet=bool(is_scheduled),
+    )
 
     add_sell_put_labels(base, symbol_sp, symbol_sp_labeled)
 
-    # account-aware: attach cash secured usage from option_positions (open short puts)
+    # account-aware: attach cash secured usage from position lots (open short puts)
     df_sp_lab = safe_read_csv(symbol_sp_labeled)
     if not df_sp_lab.empty:
         df_sp_lab = enrich_sell_put_candidates_with_cash(
             df_labeled=df_sp_lab,
             symbol=symbol,
             portfolio_ctx=portfolio_ctx,
-            fx=fx,
+            exchange_rate_converter=exchange_rate_converter,
             out_path=symbol_sp_labeled,
         )
 
@@ -140,14 +132,14 @@ def run_sell_put_scan_and_summarize(
             pass
 
     if not is_scheduled:
-        run_cmd([
-            py, 'scripts/cli/render_sell_put_alerts_cli.py',
-            '--input', str((report_dir / f'{symbol_lower}_sell_put_candidates_labeled.csv').as_posix()),
-            '--symbol', symbol,
-            '--top', str(top_n),
-            '--layered',
-            '--output', str((report_dir / f'{symbol_lower}_sell_put_alerts.txt').as_posix()),
-        ], cwd=base, is_scheduled=is_scheduled)
+        render_sell_put_alerts(
+            input_path=report_dir / f'{symbol_lower}_sell_put_candidates_labeled.csv',
+            symbol=symbol,
+            top=int(top_n),
+            layered=True,
+            output_path=report_dir / f'{symbol_lower}_sell_put_alerts.txt',
+            base_dir=base,
+        )
 
     return summarize_sell_put(safe_read_csv(symbol_sp_labeled), symbol, symbol_cfg=symbol_cfg)
 

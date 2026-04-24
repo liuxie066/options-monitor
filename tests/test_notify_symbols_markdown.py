@@ -69,7 +69,7 @@ def test_notify_symbols_markdown_put_layout_missing_fields_have_reasons() -> Non
     assert "IV=缺失(告警未提供iv)" in out
 
 
-def test_notify_symbols_markdown_call_layout_and_changes() -> None:
+def test_notify_symbols_markdown_call_layout_ignores_changes_input() -> None:
     from scripts.notify_symbols import build_notification
 
     alerts = """# Symbols Alerts
@@ -86,8 +86,8 @@ def test_notify_symbols_markdown_call_layout_and_changes() -> None:
     assert "### [sy] 英伟达 · 卖Call" in out
     assert "数量=2张(可覆盖)" in out
     assert "持仓: 总股数=200 | 已占用=0 | 可用=200 | 可覆盖=2张" in out
-    assert "变化" in out
-    assert "- NVDA sell_call: Top pick 由 2026-06-18 175C 变为 2026-06-18 180C。" in out
+    assert "变化" not in out
+    assert "Top pick" not in out
 
 
 def test_notify_symbols_markdown_call_layout_missing_fields_have_reasons() -> None:

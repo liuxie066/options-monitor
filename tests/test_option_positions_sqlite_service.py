@@ -9,7 +9,7 @@ if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
 
-def _write_pm_config(path: Path, *, sqlite_path: Path, with_feishu: bool = True) -> Path:
+def _write_data_config(path: Path, *, sqlite_path: Path, with_feishu: bool = True) -> Path:
     payload: dict[str, object] = {
         "option_positions": {"sqlite_path": str(sqlite_path)},
     }
@@ -23,13 +23,13 @@ def _write_pm_config(path: Path, *, sqlite_path: Path, with_feishu: bool = True)
     return path
 
 
-def test_load_option_positions_repo_bootstraps_from_feishu_when_sqlite_empty(tmp_path: Path) -> None:
+def test_load_option_positions_repo_bootstraps_position_lots_from_feishu(tmp_path: Path) -> None:
     import scripts.option_positions_core.service as svc
 
-    pm_config = _write_pm_config(tmp_path / "pm.json", sqlite_path=tmp_path / "option_positions.sqlite3")
-    old_list = svc.FeishuOptionPositionsRepository.list_records
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
+    old_list = svc._list_feishu_option_position_records
     try:
-        svc.FeishuOptionPositionsRepository.list_records = lambda self, page_size=500: [  # type: ignore[assignment]
+        svc._list_feishu_option_position_records = lambda _ref: [  # type: ignore[assignment]
             {
                 "record_id": "rec_1",
                 "fields": {
@@ -44,134 +44,231 @@ def test_load_option_positions_repo_bootstraps_from_feishu_when_sqlite_empty(tmp
                 },
             }
         ]
-        repo = svc.load_option_positions_repo(pm_config)
+        repo = svc.load_option_positions_repo(data_config)
     finally:
-        svc.FeishuOptionPositionsRepository.list_records = old_list  # type: ignore[assignment]
+        svc._list_feishu_option_position_records = old_list  # type: ignore[assignment]
 
     records = repo.list_records(page_size=10)
     assert len(records) == 1
     assert records[0]["record_id"] == "rec_1"
-    entry = repo.primary_repo.get_entry("rec_1")
-    assert entry["backup_status"] == svc.BACKUP_STATUS_SYNCED
-    assert entry["backup_record_id"] == "rec_1"
+    assert repo.count_position_lots() == 1
 
 
-def test_primary_with_backup_create_and_update_syncs_to_backup(tmp_path: Path) -> None:
+def test_load_option_positions_repo_migrates_legacy_rows_when_lots_missing(tmp_path: Path) -> None:
     import scripts.option_positions_core.service as svc
 
-    class _FakeBackupRepo:
-        def __init__(self):
-            self.creates: list[dict] = []
-            self.updates: list[tuple[str, dict]] = []
+    db_path = tmp_path / "option_positions.sqlite3"
+    repo = svc.SQLiteOptionPositionsRepository(db_path)
+    with repo._connect() as conn:  # type: ignore[attr-defined]
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS option_positions (
+              record_id TEXT PRIMARY KEY,
+              fields_json TEXT NOT NULL,
+              created_at_ms INTEGER NOT NULL,
+              updated_at_ms INTEGER NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO option_positions (record_id, fields_json, created_at_ms, updated_at_ms)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                "legacy_1",
+                json.dumps({"symbol": "AAPL", "status": "open", "contracts_open": 1}, ensure_ascii=False),
+                1000,
+                1000,
+            ),
+        )
+        conn.commit()
 
-        def create_record(self, fields: dict[str, object]) -> dict[str, object]:
-            self.creates.append(dict(fields))
-            return {"record": {"record_id": "bk_1"}}
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=db_path, with_feishu=False)
+    loaded = svc.load_option_positions_repo(data_config)
 
-        def update_record(self, record_id: str, fields: dict[str, object]) -> dict[str, object]:
-            self.updates.append((str(record_id), dict(fields)))
-            return {"record": {"record_id": str(record_id)}}
-
-    sqlite_repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    backup_repo = _FakeBackupRepo()
-    repo = svc.PrimaryWithBackupOptionPositionsRepository(primary_repo=sqlite_repo, backup_repo=backup_repo)  # type: ignore[arg-type]
-
-    created = repo.create_record({"account": "lx", "symbol": "NVDA", "status": "open"})
-    record_id = created["record"]["record_id"]
-    entry = sqlite_repo.get_entry(record_id)
-    assert entry["backup_status"] == svc.BACKUP_STATUS_SYNCED
-    assert entry["backup_record_id"] == "bk_1"
-    assert backup_repo.creates == [{"account": "lx", "symbol": "NVDA", "status": "open"}]
-
-    repo.update_record(record_id, {"status": "close", "contracts_open": 0})
-    entry2 = sqlite_repo.get_entry(record_id)
-    assert entry2["backup_status"] == svc.BACKUP_STATUS_SYNCED
-    assert backup_repo.updates
-    backup_record_id, synced_fields = backup_repo.updates[-1]
-    assert backup_record_id == "bk_1"
-    assert synced_fields["account"] == "lx"
-    assert synced_fields["symbol"] == "NVDA"
-    assert synced_fields["status"] == "close"
-    assert synced_fields["contracts_open"] == 0
-
-
-def test_sync_backup_recovers_failed_backup_record(tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
-
-    class _FlakyBackupRepo:
-        def __init__(self):
-            self.create_attempts = 0
-
-        def create_record(self, fields: dict[str, object]) -> dict[str, object]:
-            self.create_attempts += 1
-            if self.create_attempts == 1:
-                raise RuntimeError("backup unavailable")
-            return {"record": {"record_id": "bk_retry"}}
-
-        def update_record(self, record_id: str, fields: dict[str, object]) -> dict[str, object]:
-            return {"record": {"record_id": str(record_id)}}
-
-    sqlite_repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    backup_repo = _FlakyBackupRepo()
-    repo = svc.PrimaryWithBackupOptionPositionsRepository(primary_repo=sqlite_repo, backup_repo=backup_repo)  # type: ignore[arg-type]
-
-    created = repo.create_record({"account": "sy", "symbol": "AAPL", "status": "open"})
-    record_id = created["record"]["record_id"]
-    failed_entry = sqlite_repo.get_entry(record_id)
-    assert failed_entry["backup_status"] == svc.BACKUP_STATUS_ERROR
-    assert failed_entry["backup_record_id"] is None
-    assert "backup unavailable" in str(failed_entry["backup_error"])
-
-    sync_result = repo.sync_backup(limit=10, dry_run=False)
-    assert sync_result["processed"] == 1
-    assert sync_result["synced"] == 1
-    recovered_entry = sqlite_repo.get_entry(record_id)
-    assert recovered_entry["backup_status"] == svc.BACKUP_STATUS_SYNCED
-    assert recovered_entry["backup_record_id"] == "bk_retry"
+    rows = loaded.list_records(page_size=10)
+    assert len(rows) == 1
+    assert rows[0]["record_id"] == "legacy_1"
+    assert rows[0]["fields"]["symbol"] == "AAPL"
 
 
 def test_load_option_positions_repo_supports_sqlite_only_mode(tmp_path: Path) -> None:
     import scripts.option_positions_core.service as svc
+    from scripts.option_positions_core.domain import OpenPositionCommand
 
-    pm_config = _write_pm_config(
-        tmp_path / "pm.json",
+    data_config = _write_data_config(
+        tmp_path / "data.json",
         sqlite_path=tmp_path / "option_positions.sqlite3",
         with_feishu=False,
     )
-
-    repo = svc.load_option_positions_repo(pm_config)
-    created = repo.create_record({"account": "lx", "symbol": "TSLA", "status": "open"})
-    record_id = created["record"]["record_id"]
+    repo = svc.load_option_positions_repo(data_config)
+    created = svc.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="TSLA",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=100.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            premium_per_share=1.23,
+            opened_at_ms=1000,
+        ),
+    )
 
     records = repo.list_records(page_size=10)
     assert len(records) == 1
-    assert records[0]["record_id"] == record_id
-    entry = repo.primary_repo.get_entry(record_id)
-    assert entry["backup_status"] == svc.BACKUP_STATUS_DISABLED
-    assert entry["backup_record_id"] is None
+    assert records[0]["fields"]["symbol"] == "TSLA"
+    assert created["created"] is True
 
 
-def test_sqlite_list_records_keeps_full_scan_semantics(tmp_path: Path) -> None:
+def test_persist_trade_event_builds_position_lots_projection(tmp_path: Path) -> None:
     import scripts.option_positions_core.service as svc
+    from scripts.trade_event_normalizer import NormalizedTradeDeal
 
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    for idx in range(550):
-        repo.create_record(
-            {"account": "lx", "symbol": f"SYM{idx}", "status": "open"},
-            record_id=f"rec_{idx}",
-            backup_status=svc.BACKUP_STATUS_DISABLED,
-        )
+    open_deal = NormalizedTradeDeal(
+        broker="富途",
+        futu_account_id="REAL_1",
+        internal_account="lx",
+        deal_id="deal-open-1",
+        order_id="order-1",
+        symbol="0700.HK",
+        option_type="put",
+        side="sell",
+        position_effect="open",
+        contracts=2,
+        price=3.93,
+        strike=480.0,
+        multiplier=100,
+        multiplier_source="payload",
+        expiration_ymd="2026-04-29",
+        currency="HKD",
+        trade_time_ms=1000,
+        raw_payload={"deal_id": "deal-open-1"},
+    )
+    close_deal = NormalizedTradeDeal(
+        broker="富途",
+        futu_account_id="REAL_1",
+        internal_account="lx",
+        deal_id="deal-close-1",
+        order_id="order-2",
+        symbol="0700.HK",
+        option_type="put",
+        side="buy",
+        position_effect="close",
+        contracts=1,
+        price=1.2,
+        strike=480.0,
+        multiplier=100,
+        multiplier_source="payload",
+        expiration_ymd="2026-04-29",
+        currency="HKD",
+        trade_time_ms=2000,
+        raw_payload={"deal_id": "deal-close-1"},
+    )
 
-    records = repo.list_records(page_size=500)
-    assert len(records) == 550
+    first = svc.persist_trade_event(repo, open_deal)
+    second = svc.persist_trade_event(repo, close_deal)
+
+    assert first["created"] is True
+    assert second["created"] is True
+    events = repo.list_trade_events()
+    assert [row["event_id"] for row in events] == ["deal-open-1", "deal-close-1"]
+
+    lots = repo.list_position_lots()
+    assert len(lots) == 1
+    fields = lots[0]["fields"]
+    assert fields["source_event_id"] == "deal-open-1"
+    assert fields["contracts"] == 2
+    assert fields["contracts_open"] == 1
+    assert fields["contracts_closed"] == 1
+    assert fields["status"] == "open"
+    assert fields["last_close_event_id"] == "deal-close-1"
+
+
+def test_persist_manual_open_event_builds_position_lot(tmp_path: Path) -> None:
+    import scripts.option_positions_core.service as svc
+    from scripts.option_positions_core.domain import OpenPositionCommand
+
+    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    result = svc.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="0700.HK",
+            option_type="put",
+            side="short",
+            contracts=2,
+            currency="HKD",
+            strike=480.0,
+            multiplier=100,
+            expiration_ymd="2026-04-29",
+            premium_per_share=3.93,
+            opened_at_ms=1000,
+        ),
+    )
+
+    assert result["created"] is True
+    lots = repo.list_position_lots()
+    assert len(lots) == 1
+    assert lots[0]["fields"]["contracts_open"] == 2
+    assert lots[0]["fields"]["status"] == "open"
+
+
+def test_persist_manual_close_event_updates_position_lot(tmp_path: Path) -> None:
+    import scripts.option_positions_core.service as svc
+    from scripts.option_positions_core.domain import OpenPositionCommand
+
+    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    svc.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="0700.HK",
+            option_type="put",
+            side="short",
+            contracts=2,
+            currency="HKD",
+            strike=480.0,
+            multiplier=100,
+            expiration_ymd="2026-04-29",
+            premium_per_share=3.93,
+            opened_at_ms=1000,
+        ),
+    )
+
+    fields = repo.list_position_lots()[0]["fields"]
+    result = svc.persist_manual_close_event(
+        repo,
+        record_id="lot_manual",
+        fields=fields,
+        contracts_to_close=1,
+        close_price=1.2,
+        close_reason="manual_buy_to_close",
+        as_of_ms=2000,
+    )
+
+    assert result["created"] is True
+    lots = repo.list_position_lots()
+    assert len(lots) == 1
+    assert lots[0]["fields"]["contracts_open"] == 1
+    assert lots[0]["fields"]["contracts_closed"] == 1
 
 
 def test_load_option_positions_repo_raises_on_malformed_feishu_config(tmp_path: Path) -> None:
     import pytest
     import scripts.option_positions_core.service as svc
 
-    pm_config = tmp_path / "pm.json"
-    pm_config.write_text(
+    data_config = tmp_path / "data.json"
+    data_config.write_text(
         json.dumps(
             {
                 "option_positions": {"sqlite_path": str(tmp_path / "option_positions.sqlite3")},
@@ -184,16 +281,16 @@ def test_load_option_positions_repo_raises_on_malformed_feishu_config(tmp_path: 
         encoding="utf-8",
     )
 
-    with pytest.raises(SystemExit, match="pm config missing feishu app_id/app_secret/option_positions"):
-        svc.load_option_positions_repo(pm_config)
+    with pytest.raises(SystemExit, match="data config missing feishu app_id/app_secret/option_positions"):
+        svc.load_option_positions_repo(data_config)
 
 
 def test_load_option_positions_repo_rejects_non_object_feishu_config(tmp_path: Path) -> None:
     import pytest
     import scripts.option_positions_core.service as svc
 
-    pm_config = tmp_path / "pm.json"
-    pm_config.write_text(
+    data_config = tmp_path / "data.json"
+    data_config.write_text(
         json.dumps(
             {
                 "option_positions": {"sqlite_path": str(tmp_path / "option_positions.sqlite3")},
@@ -206,28 +303,5 @@ def test_load_option_positions_repo_rejects_non_object_feishu_config(tmp_path: P
         encoding="utf-8",
     )
 
-    with pytest.raises(SystemExit, match="pm config feishu must be a JSON object"):
-        svc.load_option_positions_repo(pm_config)
-
-
-def test_load_option_positions_repo_bootstrap_failure_does_not_block_sqlite(tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
-
-    pm_config = _write_pm_config(tmp_path / "pm.json", sqlite_path=tmp_path / "option_positions.sqlite3")
-    old_list = svc.FeishuOptionPositionsRepository.list_records
-    old_create = svc.FeishuOptionPositionsRepository.create_record
-    try:
-        def _raise(*_args, **_kwargs):
-            raise RuntimeError("feishu unavailable")
-
-        svc.FeishuOptionPositionsRepository.list_records = _raise  # type: ignore[assignment]
-        svc.FeishuOptionPositionsRepository.create_record = _raise  # type: ignore[assignment]
-        repo = svc.load_option_positions_repo(pm_config)
-        assert repo.primary_repo.count_records() == 0
-        assert repo.backup_repo is not None
-        created = repo.create_record({"account": "lx", "symbol": "AMD", "status": "open"})
-        entry = repo.primary_repo.get_entry(str(created["record"]["record_id"]))
-        assert entry["backup_status"] == svc.BACKUP_STATUS_ERROR
-    finally:
-        svc.FeishuOptionPositionsRepository.list_records = old_list  # type: ignore[assignment]
-        svc.FeishuOptionPositionsRepository.create_record = old_create  # type: ignore[assignment]
+    with pytest.raises(SystemExit, match="data config feishu must be a JSON object"):
+        svc.load_option_positions_repo(data_config)

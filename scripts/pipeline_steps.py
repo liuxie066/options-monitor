@@ -13,8 +13,8 @@ from pathlib import Path
 def derive_put_max_strike_from_cash(
     symbol: str,
     portfolio_ctx: dict | None,
-    fx_usd_per_cny: float | None,
-    hkdcny: float | None,
+    usd_per_cny_exchange_rate: float | None,
+    cny_per_hkd_exchange_rate: float | None,
 ) -> float | None:
     """Return a cash-based max_strike cap to prefilter sell_put.
 
@@ -26,9 +26,11 @@ def derive_put_max_strike_from_cash(
 
     Multiplier source: scripts/multiplier_cache.py (best-effort). Missing => return None.
 
-    Note: fx_usd_per_cny / hkdcny are currently unused in this step (kept for call-site compatibility).
+    Note:
+    - usd_per_cny_exchange_rate means USD per 1 CNY
+    - cny_per_hkd_exchange_rate means CNY per 1 HKD
     """
-    _ = (fx_usd_per_cny, hkdcny)
+    _ = (usd_per_cny_exchange_rate, cny_per_hkd_exchange_rate)
 
     if not portfolio_ctx:
         return None
@@ -38,7 +40,7 @@ def derive_put_max_strike_from_cash(
 
     # 1) cash available in native currency (from holdings)
     # Preferred: direct native-currency cash (USD for US symbols, HKD for HK symbols).
-    # Fallback: derive native cash from base CNY cash when FX is available.
+    # Fallback: derive native cash from base CNY cash when exchange rates are available.
     cash_native = None
     try:
         cash_by = portfolio_ctx.get('cash_by_currency') or {}
@@ -49,11 +51,10 @@ def derive_put_max_strike_from_cash(
                 cny = cash_by.get('CNY')
                 cny_v = float(cny) if cny is not None else None
                 if cny_v is not None:
-                    if want_ccy == 'USD' and fx_usd_per_cny is not None and float(fx_usd_per_cny) > 0:
-                        cash_native = cny_v * float(fx_usd_per_cny)
-                    elif want_ccy == 'HKD' and hkdcny is not None and float(hkdcny) > 0:
-                        # hkdcny is CNY per HKD, so HKD per CNY is 1 / hkdcny.
-                        cash_native = cny_v / float(hkdcny)
+                    if want_ccy == 'USD' and usd_per_cny_exchange_rate is not None and float(usd_per_cny_exchange_rate) > 0:
+                        cash_native = cny_v * float(usd_per_cny_exchange_rate)
+                    elif want_ccy == 'HKD' and cny_per_hkd_exchange_rate is not None and float(cny_per_hkd_exchange_rate) > 0:
+                        cash_native = cny_v / float(cny_per_hkd_exchange_rate)
     except Exception:
         cash_native = None
 
@@ -80,8 +81,11 @@ def derive_put_max_strike_from_cash(
     try:
         from scripts import multiplier_cache
         repo_base = Path(__file__).resolve().parents[1]
-        cache = multiplier_cache.load_cache(multiplier_cache.default_cache_path(repo_base))
-        mult = multiplier_cache.get_cached_multiplier(cache, sym_u)
+        mult = multiplier_cache.resolve_multiplier(
+            repo_base=repo_base,
+            symbol=sym_u,
+            allow_opend_refresh=False,
+        )
     except Exception:
         mult = None
 

@@ -95,7 +95,7 @@ def test_scan_sell_call_requires_min_annualized_arg() -> None:
     p = subprocess.run(
         [
             str(VPY),
-            'scripts/cli/scan_sell_call_cli.py',
+            'scripts/scan_sell_call.py',
             '--symbols',
             'AAPL',
             '--avg-cost',
@@ -121,7 +121,7 @@ def test_scan_sell_call_rejects_out_of_range_arg() -> None:
     p = subprocess.run(
         [
             str(VPY),
-            'scripts/cli/scan_sell_call_cli.py',
+            'scripts/scan_sell_call.py',
             '--symbols',
             'AAPL',
             '--avg-cost',
@@ -149,15 +149,18 @@ def test_sell_call_steps_passes_resolved_threshold_to_scanner() -> None:
     _add_repo_to_syspath()
 
     import scripts.sell_call_steps as steps
-    from scripts.fx_rates import CurrencyConverter, FxRates
+    import pandas as pd
+    from scripts.exchange_rates import CurrencyConverter, ExchangeRates
 
-    calls: list[list[str]] = []
-    orig_run_cmd = steps.run_cmd
+    calls: list[dict] = []
+    orig_run_sell_call_scan = steps.run_sell_call_scan
 
-    def _fake_run_cmd(cmd, **kwargs):
-        calls.append(cmd)
+    def _fake_run_sell_call_scan(**kwargs):
+        calls.append(kwargs)
+        Path(kwargs["output"]).parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame().to_csv(kwargs["output"], index=False)
 
-    steps.run_cmd = _fake_run_cmd
+    steps.run_sell_call_scan = _fake_run_sell_call_scan
     try:
         out = steps.run_sell_call_scan_and_summarize(
             py='python',
@@ -172,32 +175,34 @@ def test_sell_call_steps_passes_resolved_threshold_to_scanner() -> None:
             timeout_sec=10,
             is_scheduled=True,
             stock={'shares': 300, 'avg_cost': 100},
-            fx=CurrencyConverter(FxRates(usd_per_cny=0.14, cny_per_hkd=0.92)),
+            exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14, cny_per_hkd=0.92)),
             locked_shares_by_symbol={'AAPL': 100},
         )
     finally:
-        steps.run_cmd = orig_run_cmd
+        steps.run_sell_call_scan = orig_run_sell_call_scan
 
     assert out['strategy'] == 'sell_call'
     assert len(calls) >= 1
-    cmd = calls[0]
-    i = cmd.index('--min-annualized-net-return')
-    assert cmd[i + 1] == '0.123'
+    kwargs = calls[0]
+    assert kwargs['min_annualized_net_return'] == 0.123
 
 
 def test_sell_call_steps_converts_min_net_income_from_cny_to_native() -> None:
     _add_repo_to_syspath()
 
     import scripts.sell_call_steps as steps
-    from scripts.fx_rates import CurrencyConverter, FxRates
+    import pandas as pd
+    from scripts.exchange_rates import CurrencyConverter, ExchangeRates
 
-    calls: list[list[str]] = []
-    orig_run_cmd = steps.run_cmd
+    calls: list[dict] = []
+    orig_run_sell_call_scan = steps.run_sell_call_scan
 
-    def _fake_run_cmd(cmd, **kwargs):
-        calls.append(cmd)
+    def _fake_run_sell_call_scan(**kwargs):
+        calls.append(kwargs)
+        Path(kwargs["output"]).parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame().to_csv(kwargs["output"], index=False)
 
-    steps.run_cmd = _fake_run_cmd
+    steps.run_sell_call_scan = _fake_run_sell_call_scan
     try:
         steps.run_sell_call_scan_and_summarize(
             py='python',
@@ -212,31 +217,33 @@ def test_sell_call_steps_converts_min_net_income_from_cny_to_native() -> None:
             timeout_sec=10,
             is_scheduled=True,
             stock={'shares': 300, 'avg_cost': 100},
-            fx=CurrencyConverter(FxRates(usd_per_cny=0.14, cny_per_hkd=0.92)),
+            exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14, cny_per_hkd=0.92)),
             locked_shares_by_symbol={'AAPL': 100},
         )
     finally:
-        steps.run_cmd = orig_run_cmd
+        steps.run_sell_call_scan = orig_run_sell_call_scan
 
     assert calls
-    cmd = calls[0]
-    i = cmd.index('--min-net-income')
-    assert cmd[i + 1] == '14.000000000000002'
+    kwargs = calls[0]
+    assert kwargs['min_net_income'] == 14.000000000000002
 
 
 def test_sell_call_steps_converts_hk_min_net_income_from_cny_to_hkd() -> None:
     _add_repo_to_syspath()
 
     import scripts.sell_call_steps as steps
-    from scripts.fx_rates import CurrencyConverter, FxRates
+    import pandas as pd
+    from scripts.exchange_rates import CurrencyConverter, ExchangeRates
 
-    calls: list[list[str]] = []
-    orig_run_cmd = steps.run_cmd
+    calls: list[dict] = []
+    orig_run_sell_call_scan = steps.run_sell_call_scan
 
-    def _fake_run_cmd(cmd, **kwargs):
-        calls.append(cmd)
+    def _fake_run_sell_call_scan(**kwargs):
+        calls.append(kwargs)
+        Path(kwargs["output"]).parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame().to_csv(kwargs["output"], index=False)
 
-    steps.run_cmd = _fake_run_cmd
+    steps.run_sell_call_scan = _fake_run_sell_call_scan
     try:
         steps.run_sell_call_scan_and_summarize(
             py='python',
@@ -251,13 +258,12 @@ def test_sell_call_steps_converts_hk_min_net_income_from_cny_to_hkd() -> None:
             timeout_sec=10,
             is_scheduled=True,
             stock={'shares': 300, 'avg_cost': 100},
-            fx=CurrencyConverter(FxRates(usd_per_cny=0.14, cny_per_hkd=0.92)),
+            exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14, cny_per_hkd=0.92)),
             locked_shares_by_symbol={'0700.HK': 100},
         )
     finally:
-        steps.run_cmd = orig_run_cmd
+        steps.run_sell_call_scan = orig_run_sell_call_scan
 
     assert calls
-    cmd = calls[0]
-    i = cmd.index('--min-net-income')
-    assert abs(float(cmd[i + 1]) - (100 / 0.92)) < 1e-9
+    kwargs = calls[0]
+    assert abs(float(kwargs['min_net_income']) - (100 / 0.92)) < 1e-9

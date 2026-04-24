@@ -123,10 +123,10 @@ def test_fetch_futu_portfolio_context_filters_rows_by_mapped_account_ids() -> No
         def close(self):
             return None
 
-    old_build_gateway = fc.build_futu_gateway
+    old_build_gateway = fc.build_ready_futu_gateway
     fake_gateway = _FakeGateway()
     try:
-        fc.build_futu_gateway = lambda **_kwargs: fake_gateway  # type: ignore[assignment]
+        fc.build_ready_futu_gateway = lambda **_kwargs: fake_gateway  # type: ignore[assignment]
         out = fc.fetch_futu_portfolio_context(
             cfg={
                 "portfolio": {"futu": {"host": "127.0.0.1", "port": 11111}},
@@ -144,7 +144,7 @@ def test_fetch_futu_portfolio_context_filters_rows_by_mapped_account_ids() -> No
             base_currency="CNY",
         )
     finally:
-        fc.build_futu_gateway = old_build_gateway  # type: ignore[assignment]
+        fc.build_ready_futu_gateway = old_build_gateway  # type: ignore[assignment]
 
     assert out["cash_by_currency"] == {"CNY": 120000.0}
     assert sorted(out["stocks_by_symbol"].keys()) == ["NVDA"]
@@ -167,9 +167,9 @@ def test_fetch_futu_portfolio_context_rejects_non_numeric_mapped_account_id() ->
         def close(self):
             return None
 
-    old_build_gateway = fc.build_futu_gateway
+    old_build_gateway = fc.build_ready_futu_gateway
     try:
-        fc.build_futu_gateway = lambda **_kwargs: _FakeGateway()  # type: ignore[assignment]
+        fc.build_ready_futu_gateway = lambda **_kwargs: _FakeGateway()  # type: ignore[assignment]
         with pytest.raises(ValueError, match="mapped account_id=not-a-number"):
             fc.fetch_futu_portfolio_context(
                 cfg={
@@ -187,4 +187,4 @@ def test_fetch_futu_portfolio_context_rejects_non_numeric_mapped_account_id() ->
                 base_currency="CNY",
             )
     finally:
-        fc.build_futu_gateway = old_build_gateway  # type: ignore[assignment]
+        fc.build_ready_futu_gateway = old_build_gateway  # type: ignore[assignment]

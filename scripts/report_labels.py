@@ -12,6 +12,8 @@ from pathlib import Path
 import pandas as pd
 from pandas.errors import EmptyDataError
 
+from scripts.sell_put_risk_bands import classify_sell_put_risk
+
 
 def _safe_read_csv(path: Path) -> pd.DataFrame:
     try:
@@ -36,27 +38,12 @@ def add_sell_put_labels(base: Path, input_path: Path, output_path: Path) -> None
     _ = base
     df = _safe_read_csv(input_path)
 
-    def band(v):
-        if pd.isna(v):
-            return 'unknown'
-        if v < 0.03:
-            return '<3%'
-        if v < 0.07:
-            return '3%-7%'
-        return '>=7%'
-
-    def label(v):
-        if pd.isna(v):
-            return '未知'
-        if v < 0.03:
-            return '激进'
-        if v < 0.07:
-            return '中性'
-        return '保守'
-
     if 'otm_pct' in df.columns:
-        df['otm_band'] = df['otm_pct'].apply(band)
-        df['risk_label'] = df['otm_pct'].apply(label)
+        risk_series = df['otm_pct'].apply(
+            lambda v: classify_sell_put_risk(None if pd.isna(v) else float(v))
+        )
+        df['otm_band'] = risk_series.apply(lambda r: r.band)
+        df['risk_label'] = risk_series.apply(lambda r: r.risk_label)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(output_path, index=False)

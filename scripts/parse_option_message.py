@@ -3,20 +3,27 @@
 
   期权：腾讯20260330 put，strike500，成本5.425每股，乘数100，short 10张，sy，HKD
 
-into normalized params for option_positions writer.
+into normalized params for the trade-events / position-lots writer.
 
 This script is used by auto-intake (chat-driven). It does NOT write to Feishu.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
-import re
 import os
-from datetime import datetime
+import re
+import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
-from scripts.account_config import DEFAULT_ACCOUNTS, normalize_accounts
+repo_base = Path(__file__).resolve().parents[1]
+if str(repo_base) not in sys.path:
+    sys.path.insert(0, str(repo_base))
+
+from scripts.account_config import DEFAULT_ACCOUNTS, accounts_from_config_path, normalize_accounts
+from scripts.multiplier_cache import resolve_multiplier_with_source
 
 # Suppress noisy OpenAPI logs when multiplier_cache triggers futu/OpenD imports.
 os.environ.setdefault('OPENAPI_LOG_LEVEL', 'ERROR')
@@ -172,7 +179,7 @@ def infer_currency(s: str) -> str | None:
 
 
 def infer_market(s: str) -> str | None:
-    """Infer broker/source market label for option_positions.
+    """Infer broker/source market label for position-lot intake.
 
     Current policy: map Futu notifications to market='富途'.
     """
@@ -254,83 +261,6 @@ def parse_underlying_name(s: str) -> str | None:
     return None
 
 
-def infer_multiplier_with_source(
-    *,
-    symbol: str | None,
-    multiplier: int | None,
-    repo_base: Path,
-) -> tuple[int | None, str | None]:
-    """在缺少乘数时，按 本地缓存 -> OpenD -> 内置常见标的 兜底推断，并返回来源。"""
-    if multiplier is not None:
-        return multiplier, "payload"
-    if not symbol:
-        return multiplier, None
-
-    # Intake messages often lack multiplier. Prefer explicit local/OpenD data,
-    # then use a small conservative built-in fallback for common HK/US underliers.
-    try:
-        import sys
-        if str(repo_base) not in sys.path:
-            sys.path.insert(0, str(repo_base))
-
-        from scripts import multiplier_cache
-
-        cache_path = multiplier_cache.default_cache_path(repo_base)
-        cache = multiplier_cache.load_cache(cache_path)
-        cached = multiplier_cache.get_cached_multiplier(cache, symbol)
-        if cached:
-            source = None
-            for sym in multiplier_cache._symbol_aliases(symbol):
-                item = cache.get(sym)
-                if isinstance(item, dict) and int(item.get("multiplier") or 0) == int(cached):
-                    source = str(item.get("source") or "cache")
-                    break
-            return int(cached), source or "cache"
-
-        r = multiplier_cache.refresh_via_opend(
-            repo_base=repo_base,
-            symbol=symbol,
-            host='127.0.0.1',
-            port=11111,
-            limit_expirations=1,
-        )
-        if r.ok and r.multiplier and int(r.multiplier) > 0:
-            multiplier = int(r.multiplier)
-            # Persist cache entry as opend-derived for later reuse
-            try:
-                cache[multiplier_cache.normalize_symbol(symbol)] = {
-                    'multiplier': int(multiplier),
-                    'as_of_utc': multiplier_cache.utc_now(),
-                    'source': 'opend',
-                }
-                multiplier_cache.save_cache(cache_path, cache)
-            except Exception:
-                pass
-            return multiplier, "opend"
-
-        builtin = multiplier_cache.get_builtin_multiplier(symbol)
-        if builtin:
-            source = None
-            for sym in multiplier_cache._symbol_aliases(symbol):
-                item = multiplier_cache.BUILTIN_MULTIPLIERS.get(sym)
-                if isinstance(item, dict) and int(item.get("multiplier") or 0) == int(builtin):
-                    source = str(item.get("source") or "builtin")
-                    break
-            if source is None and str(symbol or "").strip().upper().endswith(".HK"):
-                source = "builtin.hk.common"
-            if source is None:
-                source = "builtin.us.default"
-            return int(builtin), source
-    except Exception:
-        pass
-    return multiplier, None
-
-
-def _infer_multiplier_if_missing(*, symbol: str | None, multiplier: int | None, repo_base: Path) -> int | None:
-    value, _source = infer_multiplier_with_source(symbol=symbol, multiplier=multiplier, repo_base=repo_base)
-    return value
-
-
 def parse_option_message_text(text: str, *, accounts: list[str] | tuple[str, ...] | None = None) -> dict:
     """解析单条期权消息，返回结构化字段。"""
     raw = (text or '').strip()
@@ -352,7 +282,7 @@ def parse_option_message_text(text: str, *, accounts: list[str] | tuple[str, ...
         account = parse_account(raw2, accounts=accounts)
         currency = infer_currency(raw2)
         market = infer_market(raw2)
-        multiplier = None  # not present in message; fill later
+        multiplier = None  # not present in message; resolve later
     else:
         # 2) manual intake format
         underlying = parse_underlying_name(raw2)
@@ -369,7 +299,15 @@ def parse_option_message_text(text: str, *, accounts: list[str] | tuple[str, ...
         market = infer_market(raw2)
 
     base = Path(__file__).resolve().parents[1]
-    multiplier, multiplier_source = infer_multiplier_with_source(symbol=symbol, multiplier=multiplier, repo_base=base)
+    multiplier, multiplier_source = resolve_multiplier_with_source(
+        repo_base=base,
+        symbol=symbol,
+        multiplier=multiplier,
+        allow_opend_refresh=True,
+        host='127.0.0.1',
+        port=11111,
+        limit_expirations=1,
+    )
 
     ok = all([symbol, exp, opt_type, side, strike is not None, multiplier, contracts, account, currency])
 
@@ -404,7 +342,32 @@ def parse_option_message_text(text: str, *, accounts: list[str] | tuple[str, ...
                 'currency': currency,
             }.items() if v in (None, '')
         ],
-        'ts': datetime.utcnow().isoformat() + 'Z',
+        'ts': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
     }
 
     return out
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description='Parse option intake message')
+    parser.add_argument('--text', required=True)
+    parser.add_argument('--config', default=None, help='optional options-monitor config used to resolve account labels')
+    parser.add_argument('--accounts', nargs='*', default=None, help='optional account labels to recognize')
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    accounts = args.accounts
+    if accounts is None and args.config:
+        cfg_path = Path(args.config)
+        if not cfg_path.is_absolute():
+            cfg_path = (Path(__file__).resolve().parents[1] / cfg_path).resolve()
+        accounts = accounts_from_config_path(cfg_path)
+    out = parse_option_message_text(args.text, accounts=accounts)
+    print(json.dumps(out, ensure_ascii=False, indent=2), flush=True)
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

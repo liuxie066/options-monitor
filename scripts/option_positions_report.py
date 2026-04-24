@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only reports for option_positions."""
+"""Read-only reports for position lots."""
 
 from __future__ import annotations
 
@@ -12,28 +12,15 @@ repo_base = Path(__file__).resolve().parents[1]
 if str(repo_base) not in sys.path:
     sys.path.insert(0, str(repo_base))
 
-from scripts.fx_rates import get_rates_or_fetch_latest
-from scripts.config_loader import resolve_pm_config_path
-from scripts.option_positions_core.reporting import build_monthly_income_report
-from scripts.option_positions_core.service import load_option_positions_repo
-
-
-def money(value: float | int | None, currency: str) -> str:
-    if value is None:
-        return "-"
-    v = float(value)
-    ccy = str(currency or "").upper()
-    if ccy == "USD":
-        return f"${v:,.2f}"
-    if ccy == "HKD":
-        return f"HKD {v:,.2f}"
-    if ccy == "CNY":
-        return f"¥{v:,.2f}"
-    return f"{v:,.2f} {ccy}"
+from src.application.option_positions_facade import (
+    build_option_positions_monthly_income_report,
+    format_position_money,
+    resolve_option_positions_repo,
+)
 
 
 def print_monthly_income(report: dict, *, include_rows: bool = False) -> None:
-    print("# Option Positions Monthly Income")
+    print("# Position Lots Monthly Income")
     print("")
     print("- realized_gross: 按 closed_at 归月的已实现毛收益")
     print("- premium_received_gross: 按 opened_at 归月的 short 开仓权利金到账")
@@ -59,10 +46,10 @@ def print_monthly_income(report: dict, *, include_rows: bool = False) -> None:
         for row in summary:
             print(
                 f"| {row.get('month')} | {row.get('account')} | {row.get('currency')} | "
-                f"{money(row.get('realized_gross'), row.get('currency') or '')} | "
-                f"{money(row.get('realized_gross_cny'), 'CNY')} | "
-                f"{money(row.get('premium_received_gross'), row.get('currency') or '')} | "
-                f"{money(row.get('premium_received_gross_cny'), 'CNY')} | "
+                f"{format_position_money(row.get('realized_gross'), row.get('currency') or '')} | "
+                f"{format_position_money(row.get('realized_gross_cny'), 'CNY')} | "
+                f"{format_position_money(row.get('premium_received_gross'), row.get('currency') or '')} | "
+                f"{format_position_money(row.get('premium_received_gross_cny'), 'CNY')} | "
                 f"{row.get('closed_contracts')} | {row.get('premium_contracts')} | "
                 f"{row.get('positions')} | {row.get('premium_positions')} |"
             )
@@ -78,7 +65,7 @@ def print_monthly_income(report: dict, *, include_rows: bool = False) -> None:
             print(
                 f"| {row.get('month')} | {row.get('account')} | {row.get('symbol')} | {ccy} | "
                 f"{row.get('contracts_closed')} | {row.get('premium')} | {row.get('close_price')} | "
-                f"{row.get('multiplier')} | {money(row.get('realized_gross'), ccy)} | "
+                f"{row.get('multiplier')} | {format_position_money(row.get('realized_gross'), ccy)} | "
                 f"{row.get('close_type')} | {row.get('record_id')} |"
             )
 
@@ -94,7 +81,7 @@ def print_monthly_income(report: dict, *, include_rows: bool = False) -> None:
                 print(
                     f"| {row.get('month')} | {row.get('account')} | {row.get('symbol')} | {ccy} | "
                     f"{row.get('contracts')} | {row.get('premium')} | {row.get('multiplier')} | "
-                    f"{money(row.get('premium_received_gross'), ccy)} | {row.get('record_id')} |"
+                    f"{format_position_money(row.get('premium_received_gross'), ccy)} | {row.get('record_id')} |"
                 )
 
     warnings = report.get("warnings") or []
@@ -108,8 +95,8 @@ def print_monthly_income(report: dict, *, include_rows: bool = False) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Option positions reports")
-    parser.add_argument("--pm-config", default=None, help="Feishu/Bitable credential config path; auto-resolves when omitted")
+    parser = argparse.ArgumentParser(description="Position lot reports")
+    parser.add_argument("--data-config", default=None, help="portfolio data config path; auto-resolves when omitted")
 
     sub = parser.add_subparsers(dest="cmd", required=True)
     p_monthly = sub.add_parser(
@@ -119,7 +106,7 @@ def main() -> int:
             "Monthly option income report.\n"
             "- realized_gross: groups closed positions by closed_at month.\n"
             "- premium_received_gross: groups short option premium receipts by opened_at month.\n"
-            "- *_cny columns are best-effort FX conversions from rate_cache.json."
+            "- *_cny columns are best-effort exchange-rate conversions from rate_cache.json."
         ),
         formatter_class=argparse.RawTextHelpFormatter,
     )
@@ -132,21 +119,16 @@ def main() -> int:
 
     args = parser.parse_args()
     base = Path(__file__).resolve().parents[1]
-    pm_config = resolve_pm_config_path(base=base, pm_config=args.pm_config)
+    _data_config, repo = resolve_option_positions_repo(base=base, data_config=args.data_config)
 
     if args.cmd == "monthly-income":
         broker = args.market or args.broker
-        repo = load_option_positions_repo(pm_config)
-        records = repo.list_records(page_size=500)
-        report = build_monthly_income_report(
-            records,
+        report = build_option_positions_monthly_income_report(
+            repo,
+            base=base,
             account=args.account,
             broker=broker,
             month=args.month,
-            rates=get_rates_or_fetch_latest(
-                cache_path=(base / "output" / "state" / "rate_cache.json").resolve(),
-                shared_cache_path=(base / "output_shared" / "state" / "rate_cache.json").resolve(),
-            ),
         )
         if args.format == "json":
             print(json.dumps(report, ensure_ascii=False, indent=2))

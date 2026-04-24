@@ -65,8 +65,8 @@ python3 scripts/send_if_needed_multi.py --config config.us.json --accounts lx sy
 Query Sell Put cash usage:
 
 ```bash
-python3 scripts/cli/query_sell_put_cash_cli.py --market 富途 --account lx
-python3 scripts/cli/query_sell_put_cash_cli.py --market 富途 --account sy
+python3 -m src.interfaces.cli.main sell-put-cash --market 富途 --account lx
+python3 -m src.interfaces.cli.main sell-put-cash --market 富途 --account sy
 ```
 
 Manage watchlist:

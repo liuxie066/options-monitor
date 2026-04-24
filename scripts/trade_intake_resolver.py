@@ -5,9 +5,6 @@ from typing import Any, Protocol
 
 from scripts.feishu_bitable import parse_note_kv, safe_float
 from scripts.option_positions_core.domain import (
-    OpenPositionCommand,
-    build_buy_to_close_patch,
-    build_open_fields,
     effective_contracts_open,
     effective_expiration,
     exp_ms_to_datetime,
@@ -17,9 +14,16 @@ from scripts.option_positions_core.domain import (
     normalize_side,
     normalize_status,
 )
-from scripts.option_positions_core.service import buy_to_close_position, open_position
+from scripts.option_positions_core.service import persist_trade_event
 from scripts.trade_event_normalizer import NormalizedTradeDeal
 from scripts.trade_intake_state import lookup_deal_state
+from src.application.position_workflows import (
+    apply_trade_close_with,
+    apply_trade_open_with,
+    preview_trade_close,
+    preview_trade_open,
+)
+from src.application.option_positions_facade import load_option_position_records
 
 
 class OptionPositionsRepoLike(Protocol):
@@ -113,9 +117,13 @@ def _record_expiration_ymd(fields: dict[str, Any]) -> str | None:
     return dt.date().isoformat() if dt is not None else None
 
 
+def load_close_candidate_records(repo: OptionPositionsRepoLike) -> list[dict[str, Any]]:
+    return list(load_option_position_records(repo))
+
+
 def _iter_open_candidates(repo: OptionPositionsRepoLike, deal: NormalizedTradeDeal) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
-    for item in repo.list_records(page_size=500):
+    for item in load_close_candidate_records(repo):
         record_id = str(item.get("record_id") or item.get("id") or "").strip()
         fields = item.get("fields") or {}
         if not record_id or not isinstance(fields, dict):
@@ -210,51 +218,23 @@ def resolve_trade_deal(
                 reason="missing_required_fields:" + ",".join(missing),
                 deal=deal,
             )
-        cmd = OpenPositionCommand(
-            broker="富途",
-            account=str(deal.internal_account),
-            symbol=str(deal.symbol),
-            option_type=str(deal.option_type),
-            side="short",
-            contracts=int(deal.contracts or 0),
-            currency=str(deal.currency),
-            strike=float(deal.strike),
-            multiplier=float(deal.multiplier) if deal.multiplier is not None else None,
-            expiration_ymd=str(deal.expiration_ymd),
-            premium_per_share=float(deal.price),
-            note=(
-                f"source=opend_push "
-                f"deal_id={deal.deal_id} "
-                f"order_id={deal.order_id or ''} "
-                f"multiplier_source={deal.multiplier_source or ''} "
-                f"trade_time_ms={deal.trade_time_ms or ''}"
-            ).strip(),
-            opened_at_ms=deal.trade_time_ms,
-        )
         if apply_changes:
-            res = open_position(repo, cmd)  # type: ignore[arg-type]
-            record = res.get("record") if isinstance(res, dict) else {}
             return IntakeResolution(
                 status="applied",
                 action="open",
                 reason="applied_open",
                 deal_id=deal.deal_id,
                 account=deal.internal_account,
-                operations=[
-                    {
-                        "action": "open",
-                        "record_id": (record or {}).get("record_id"),
-                    }
-                ],
+                operations=[apply_trade_open_with(repo, deal, persist_trade_event_fn=persist_trade_event)],
             )
-        fields = build_open_fields(cmd)
+        preview = preview_trade_open(deal)
         return IntakeResolution(
             status="dry_run",
             action="open",
             reason="preview_open",
             deal_id=deal.deal_id,
             account=deal.internal_account,
-            operations=[{"action": "open", "fields": fields}],
+            operations=[{"action": "open", "fields": preview["fields"]}],
         )
 
     missing = _required_close_missing(deal)
@@ -274,22 +254,12 @@ def resolve_trade_deal(
 
     operations: list[dict[str, Any]] = []
     if apply_changes:
-        for match in matches:
-            buy_to_close_position(
-                repo,  # type: ignore[arg-type]
-                record_id=match.record_id,
-                contracts_to_close=match.contracts_to_close,
-                close_price=float(deal.price),
-                close_reason="auto_trade_buy_to_close",
-                as_of_ms=deal.trade_time_ms,
-            )
-            operations.append(
-                {
-                    "action": "buy_close",
-                    "record_id": match.record_id,
-                    "contracts_to_close": match.contracts_to_close,
-                }
-            )
+        operations = apply_trade_close_with(
+            repo,
+            matches=matches,
+            deal=deal,
+            persist_trade_event_fn=persist_trade_event,
+        )
         return IntakeResolution(
             status="applied",
             action="close",
@@ -299,24 +269,7 @@ def resolve_trade_deal(
             operations=operations,
         )
 
-    for match in matches:
-        fields = repo.get_record_fields(match.record_id)
-        patch = build_buy_to_close_patch(
-            fields,
-            contracts_to_close=match.contracts_to_close,
-            close_price=float(deal.price),
-            close_reason="auto_trade_buy_to_close",
-            as_of_ms=deal.trade_time_ms,
-        )
-        operations.append(
-            {
-                "action": "buy_close",
-                "record_id": match.record_id,
-                "contracts_to_close": match.contracts_to_close,
-                "patch": patch,
-                "matched_by": match.matched_by,
-            }
-        )
+    operations = preview_trade_close(repo, matches=matches, deal=deal)
     return IntakeResolution(
         status="dry_run",
         action="close",

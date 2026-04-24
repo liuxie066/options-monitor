@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-import warnings
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 
-def test_private_compat_exports_emit_deprecation_warning_and_keep_behavior() -> None:
-    import scripts.send_if_needed_multi as s
+def test_market_session_and_opend_alert_use_single_source_of_truth() -> None:
     from domain.domain import select_markets_to_run
     from scripts.multi_tick.opend_guard import should_send_opend_alert
 
@@ -35,28 +33,15 @@ def test_private_compat_exports_emit_deprecation_warning_and_keep_behavior() -> 
     }
     now_utc = datetime(2026, 4, 1, 4, 30, 0, tzinfo=timezone.utc)
 
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter('always', DeprecationWarning)
-        compat_out = s._select_markets_to_run(now_utc, cfg, 'auto')
-
     direct_out = select_markets_to_run(now_utc, cfg, 'auto')
-    assert compat_out == direct_out
-    assert any(issubclass(w.category, DeprecationWarning) for w in caught)
-    warning_messages = [str(w.message) for w in caught]
-    assert any('domain.domain.select_markets_to_run' in msg for msg in warning_messages)
+    assert direct_out == []
 
     with TemporaryDirectory() as td:
         base = Path(td)
-        with warnings.catch_warnings(record=True) as caught_alert:
-            warnings.simplefilter('always', DeprecationWarning)
-            compat_first = s._should_send_opend_alert(base, 'OPEND_RATE_LIMIT', cooldown_sec=600)
-
+        direct_first = should_send_opend_alert(base, 'OPEND_RATE_LIMIT', cooldown_sec=600)
         direct_second = should_send_opend_alert(base, 'OPEND_RATE_LIMIT', cooldown_sec=600)
-        assert compat_first is True
+        assert direct_first is True
         assert direct_second is False
-        assert any(issubclass(w.category, DeprecationWarning) for w in caught_alert)
-        warning_messages = [str(w.message) for w in caught_alert]
-        assert any('scripts.multi_tick.opend_guard.should_send_opend_alert' in msg for msg in warning_messages)
 
 
 def test_multi_tick_main_enforces_canonical_runtime_config_without_derived_gate() -> None:

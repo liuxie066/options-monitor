@@ -38,10 +38,10 @@ def test_ensure_required_data_uses_read_model_error_to_force_refetch() -> None:
         reason="previous_failed",
     )
 
-    old_run_cmd = mod.run_cmd
-    called: list[list[str]] = []
+    old_fetch = mod.fetch_required_data_opend
+    called: list[object] = []
     try:
-        mod.run_cmd = lambda cmd, **_kw: called.append(list(cmd))  # type: ignore[assignment]
+        mod.fetch_required_data_opend = lambda **kwargs: called.append(kwargs)  # type: ignore[assignment]
         mod.ensure_required_data(
             py="python3",
             base=BASE,
@@ -58,10 +58,12 @@ def test_ensure_required_data_uses_read_model_error_to_force_refetch() -> None:
             fetch_port=11111,
         )
     finally:
-        mod.run_cmd = old_run_cmd  # type: ignore[assignment]
+        mod.fetch_required_data_opend = old_fetch  # type: ignore[assignment]
 
     assert len(called) == 1
-    assert "fetch_market_data_opend.py" in " ".join(called[0])
+    request = called[0]["request"]
+    assert request.symbol == symbol
+    assert request.option_types == "put"
 
 
 def test_ensure_required_data_skips_when_read_model_is_ok_and_dte_satisfies() -> None:
@@ -83,10 +85,10 @@ def test_ensure_required_data_skips_when_read_model_is_ok_and_dte_satisfies() ->
         status="ok",
     )
 
-    old_run_cmd = mod.run_cmd
-    called: list[list[str]] = []
+    old_fetch = mod.fetch_required_data_opend
+    called: list[object] = []
     try:
-        mod.run_cmd = lambda cmd, **_kw: called.append(list(cmd))  # type: ignore[assignment]
+        mod.fetch_required_data_opend = lambda **kwargs: called.append(kwargs)  # type: ignore[assignment]
         mod.ensure_required_data(
             py="python3",
             base=BASE,
@@ -104,7 +106,7 @@ def test_ensure_required_data_skips_when_read_model_is_ok_and_dte_satisfies() ->
             min_dte=5,
         )
     finally:
-        mod.run_cmd = old_run_cmd  # type: ignore[assignment]
+        mod.fetch_required_data_opend = old_fetch  # type: ignore[assignment]
 
     assert called == []
 
@@ -118,10 +120,10 @@ def test_ensure_required_data_treats_futu_source_as_opend_path() -> None:
     root.mkdir(parents=True, exist_ok=True)
     required, state_dir = _make_dirs(root)
 
-    old_run_cmd = mod.run_cmd
-    called: list[list[str]] = []
+    old_fetch = mod.fetch_required_data_opend
+    called: list[object] = []
     try:
-        mod.run_cmd = lambda cmd, **_kw: called.append(list(cmd))  # type: ignore[assignment]
+        mod.fetch_required_data_opend = lambda **kwargs: called.append(kwargs)  # type: ignore[assignment]
         mod.ensure_required_data(
             py="python3",
             base=BASE,
@@ -138,10 +140,12 @@ def test_ensure_required_data_treats_futu_source_as_opend_path() -> None:
             fetch_port=11111,
         )
     finally:
-        mod.run_cmd = old_run_cmd  # type: ignore[assignment]
+        mod.fetch_required_data_opend = old_fetch  # type: ignore[assignment]
 
     assert len(called) == 1
-    assert "fetch_market_data_opend.py" in " ".join(called[0])
+    request = called[0]["request"]
+    assert request.symbol == "AAPL"
+    assert request.option_types == "put"
 
 
 def test_ensure_required_data_does_not_read_raw_fetch_file_on_main_path() -> None:
@@ -160,9 +164,9 @@ def test_ensure_required_data_does_not_read_raw_fetch_file_on_main_path() -> Non
         encoding="utf-8",
     )
 
-    old_run_cmd = mod.run_cmd
+    old_fetch = mod.fetch_required_data_opend
     old_read_text = pathlib.Path.read_text
-    called: list[list[str]] = []
+    called: list[object] = []
     raw_touched: list[Path] = []
 
     def _guard_read_text(self: Path, *args, **kwargs):  # type: ignore[no-untyped-def]
@@ -172,7 +176,7 @@ def test_ensure_required_data_does_not_read_raw_fetch_file_on_main_path() -> Non
         return old_read_text(self, *args, **kwargs)
 
     try:
-        mod.run_cmd = lambda cmd, **_kw: called.append(list(cmd))  # type: ignore[assignment]
+        mod.fetch_required_data_opend = lambda **kwargs: called.append(kwargs)  # type: ignore[assignment]
         pathlib.Path.read_text = _guard_read_text  # type: ignore[assignment]
         mod.ensure_required_data(
             py="python3",
@@ -190,7 +194,7 @@ def test_ensure_required_data_does_not_read_raw_fetch_file_on_main_path() -> Non
             fetch_port=11111,
         )
     finally:
-        mod.run_cmd = old_run_cmd  # type: ignore[assignment]
+        mod.fetch_required_data_opend = old_fetch  # type: ignore[assignment]
         pathlib.Path.read_text = old_read_text  # type: ignore[assignment]
 
     assert called == []

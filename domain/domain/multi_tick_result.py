@@ -3,6 +3,34 @@ from __future__ import annotations
 from typing import Any, Callable
 
 
+def build_no_candidate_notification_text(
+    *,
+    account_label: str | None = None,
+    now_bj: str | None = None,
+    cash_footer_lines: list[str] | None = None,
+    include_account_header: bool = False,
+) -> str:
+    acct = str(account_label or '').strip().lower()
+    lines: list[str] = []
+    if include_account_header and acct:
+        lines.extend(
+            [
+                f"Options Monitor 账户提醒（{acct}）",
+                '',
+            ]
+        )
+        if now_bj:
+            lines.extend([f"北京时间 {now_bj}", ''])
+        lines.extend([f"【账户 {acct}】监控正常触发，本轮无候选。", ''])
+        footer = [str(line) for line in (cash_footer_lines or []) if str(line).strip()]
+        if footer:
+            lines.extend(footer)
+            lines.append('')
+        return '\n'.join(lines).strip() + '\n'
+
+    return '监控正常触发：本轮无候选。\n'
+
+
 def build_account_messages(
     *,
     notify_candidates: list,
@@ -37,19 +65,12 @@ def build_no_candidate_account_messages(
         acct = str(getattr(r, 'account', '') or '').strip().lower()
         if not acct:
             continue
-        lines = [
-            f"Options Monitor 账户提醒（{acct}）",
-            '',
-            f"北京时间 {now_bj}",
-            '',
-            f"【账户 {acct}】监控正常触发，本轮无候选。",
-            '',
-        ]
-        footer_lines = cash_footer_for_account_fn(cash_footer_lines, acct)
-        if footer_lines:
-            lines.extend(list(footer_lines))
-            lines.append('')
-        out[acct] = '\n'.join(lines).strip() + '\n'
+        out[acct] = build_no_candidate_notification_text(
+            account_label=acct,
+            now_bj=str(now_bj),
+            cash_footer_lines=cash_footer_for_account_fn(cash_footer_lines, acct),
+            include_account_header=True,
+        )
     return out
 
 

@@ -1,4 +1,4 @@
-"""Config loader (JSON/YAML legacy) + validation gating.
+"""Runtime config loader + validation gating.
 
 Why:
 - Keep run_pipeline orchestration-only (Stage 3).
@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Callable
 
 
-def pm_config_candidates(*, base: Path) -> list[Path]:
+def data_config_candidates(*, base: Path) -> list[Path]:
     base = Path(base).resolve()
     candidates = [
         (base / "secrets" / "portfolio.sqlite.json").resolve(),
@@ -37,17 +37,17 @@ def pm_config_candidates(*, base: Path) -> list[Path]:
     return out
 
 
-def default_pm_config_path(*, base: Path) -> Path:
-    candidates = pm_config_candidates(base=base)
+def default_data_config_path(*, base: Path) -> Path:
+    candidates = data_config_candidates(base=base)
     for item in candidates:
         if item.exists():
             return item
     return candidates[0]
 
 
-def resolve_pm_config_path(*, base: Path, pm_config: str | Path | None) -> Path:
-    if pm_config is not None and str(pm_config).strip():
-        path = Path(pm_config)
+def resolve_data_config_path(*, base: Path, data_config: str | Path | None) -> Path:
+    if data_config is not None and str(data_config).strip():
+        path = Path(data_config)
         if not path.is_absolute():
             path = (Path(base).resolve() / path).resolve()
         return path
@@ -57,7 +57,8 @@ def resolve_pm_config_path(*, base: Path, pm_config: str | Path | None) -> Path:
     env_ref = str(os.environ.get("OM_PM_CONFIG") or "").strip()
     if env_ref:
         return Path(env_ref).expanduser().resolve()
-    return default_pm_config_path(base=base)
+    return default_data_config_path(base=base)
+
 
 def resolve_templates_config(cfg: dict | None) -> dict:
     data = cfg if isinstance(cfg, dict) else {}
@@ -88,20 +89,19 @@ def normalize_portfolio_broker_config(cfg: dict | None) -> dict:
     if not isinstance(portfolio, dict):
         return data
 
-    normalized = dict(portfolio)
-    data_config = str(normalized.get('data_config') or '').strip()
-    pm_config = str(normalized.get('pm_config') or '').strip()
-    if data_config and not pm_config:
-        normalized['pm_config'] = data_config
-    elif pm_config and not data_config:
-        normalized['data_config'] = pm_config
+    normalized = {k: v for k, v in portfolio.items() if k not in {'pm_config', 'market'}}
 
-    broker = str(normalized.get('broker') or '').strip()
-    market = str(normalized.get('market') or '').strip()
-    if broker and not market:
-        normalized['market'] = broker
-    elif market and not broker:
-        normalized['broker'] = market
+    data_config = str(portfolio.get('data_config') or '').strip()
+    if not data_config:
+        data_config = str(portfolio.get('pm_config') or '').strip()
+    if data_config:
+        normalized['data_config'] = data_config
+
+    broker = str(portfolio.get('broker') or '').strip()
+    if not broker:
+        broker = str(portfolio.get('market') or '').strip()
+    if broker:
+        normalized['broker'] = broker
 
     data['portfolio'] = normalized
     return data
@@ -144,17 +144,13 @@ def load_config(
     if not cfg_path.is_absolute():
         cfg_path = (base / cfg_path).resolve()
 
-    if cfg_path.suffix.lower() == '.json':
-        cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
-    else:
-        # YAML is legacy but still supported.
-        import yaml
+    if cfg_path.suffix.lower() != '.json':
+        raise SystemExit('[CONFIG_ERROR] runtime config must be a .json file')
 
-        with open(cfg_path, 'r', encoding='utf-8') as f:
-            cfg = yaml.safe_load(f)
+    cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
 
     if not isinstance(cfg, dict):
-        raise SystemExit('[CONFIG_ERROR] config must be a JSON/YAML object')
+        raise SystemExit('[CONFIG_ERROR] config must be a JSON object')
 
     cfg = normalize_portfolio_broker_config(cfg)
 

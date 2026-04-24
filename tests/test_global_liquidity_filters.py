@@ -184,16 +184,19 @@ def test_validate_config_accepts_external_holdings_account_settings() -> None:
 def test_sell_put_steps_use_global_liquidity_filters_only() -> None:
     base = _add_repo_to_syspath()
     import scripts.sell_put_steps as steps
-    from scripts.fx_rates import CurrencyConverter, FxRates
+    import pandas as pd
+    from scripts.exchange_rates import CurrencyConverter, ExchangeRates
 
-    calls: list[list[str]] = []
-    orig_run_cmd = steps.run_cmd
+    calls: list[dict] = []
+    orig_run_sell_put_scan = steps.run_sell_put_scan
     orig_add_labels = steps.add_sell_put_labels
 
-    def _fake_run_cmd(cmd, **kwargs):
-        calls.append(cmd)
+    def _fake_run_sell_put_scan(**kwargs):
+        calls.append(kwargs)
+        Path(kwargs["output"]).parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame().to_csv(kwargs["output"], index=False)
 
-    steps.run_cmd = _fake_run_cmd
+    steps.run_sell_put_scan = _fake_run_sell_put_scan
     steps.add_sell_put_labels = lambda *args, **kwargs: None
     try:
         out = steps.run_sell_put_scan_and_summarize(
@@ -217,7 +220,7 @@ def test_sell_put_steps_use_global_liquidity_filters_only() -> None:
             report_dir=base / 'output' / 'reports',
             timeout_sec=10,
             is_scheduled=True,
-            fx=CurrencyConverter(FxRates()),
+            exchange_rate_converter=CurrencyConverter(ExchangeRates()),
             portfolio_ctx=None,
             global_sell_put_liquidity={
                 'min_open_interest': 50,
@@ -228,34 +231,34 @@ def test_sell_put_steps_use_global_liquidity_filters_only() -> None:
             },
         )
     finally:
-        steps.run_cmd = orig_run_cmd
+        steps.run_sell_put_scan = orig_run_sell_put_scan
         steps.add_sell_put_labels = orig_add_labels
 
     assert out['strategy'] == 'sell_put'
     assert calls
-    cmd = calls[0]
-    i_oi = cmd.index('--min-open-interest')
-    assert cmd[i_oi + 1] == '50'
-    i_vol = cmd.index('--min-volume')
-    assert cmd[i_vol + 1] == '12'
-    i_spread = cmd.index('--max-spread-ratio')
-    assert cmd[i_spread + 1] == '0.31'
-    assert '--min-iv' not in cmd
-    assert '--require-bid-ask' not in cmd
+    kwargs = calls[0]
+    assert kwargs['min_open_interest'] == 50.0
+    assert kwargs['min_volume'] == 12.0
+    assert kwargs['max_spread_ratio'] == 0.31
+    assert 'min_iv' not in kwargs
+    assert 'require_bid_ask' not in kwargs
 
 
 def test_sell_call_steps_use_global_liquidity_filters_only() -> None:
     base = _add_repo_to_syspath()
     import scripts.sell_call_steps as steps
-    from scripts.fx_rates import CurrencyConverter, FxRates
+    import pandas as pd
+    from scripts.exchange_rates import CurrencyConverter, ExchangeRates
 
-    calls: list[list[str]] = []
-    orig_run_cmd = steps.run_cmd
+    calls: list[dict] = []
+    orig_run_sell_call_scan = steps.run_sell_call_scan
 
-    def _fake_run_cmd(cmd, **kwargs):
-        calls.append(cmd)
+    def _fake_run_sell_call_scan(**kwargs):
+        calls.append(kwargs)
+        Path(kwargs["output"]).parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame().to_csv(kwargs["output"], index=False)
 
-    steps.run_cmd = _fake_run_cmd
+    steps.run_sell_call_scan = _fake_run_sell_call_scan
     try:
         out = steps.run_sell_call_scan_and_summarize(
             py='python',
@@ -277,7 +280,7 @@ def test_sell_call_steps_use_global_liquidity_filters_only() -> None:
             timeout_sec=10,
             is_scheduled=True,
             stock={'shares': 200, 'avg_cost': 100.0},
-            fx=CurrencyConverter(FxRates(usd_per_cny=0.14, cny_per_hkd=0.92)),
+            exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14, cny_per_hkd=0.92)),
             locked_shares_by_symbol={'AAPL': 0},
             global_sell_call_liquidity={
                 'min_open_interest': 60,
@@ -287,34 +290,34 @@ def test_sell_call_steps_use_global_liquidity_filters_only() -> None:
             },
         )
     finally:
-        steps.run_cmd = orig_run_cmd
+        steps.run_sell_call_scan = orig_run_sell_call_scan
 
     assert out['strategy'] == 'sell_call'
     assert calls
-    cmd = calls[0]
-    i_oi = cmd.index('--min-open-interest')
-    assert cmd[i_oi + 1] == '60'
-    i_vol = cmd.index('--min-volume')
-    assert cmd[i_vol + 1] == '8'
-    i_spread = cmd.index('--max-spread-ratio')
-    assert cmd[i_spread + 1] == '0.22'
-    assert '--min-delta' not in cmd
-    assert '--max-delta' not in cmd
+    kwargs = calls[0]
+    assert kwargs['min_open_interest'] == 60.0
+    assert kwargs['min_volume'] == 8.0
+    assert kwargs['max_spread_ratio'] == 0.22
+    assert 'min_delta' not in kwargs
+    assert 'max_delta' not in kwargs
 
 
 def test_sell_put_steps_fallback_to_global_min_net_income() -> None:
     base = _add_repo_to_syspath()
     import scripts.sell_put_steps as steps
-    from scripts.fx_rates import CurrencyConverter, FxRates
+    import pandas as pd
+    from scripts.exchange_rates import CurrencyConverter, ExchangeRates
 
-    calls: list[list[str]] = []
-    orig_run_cmd = steps.run_cmd
+    calls: list[dict] = []
+    orig_run_sell_put_scan = steps.run_sell_put_scan
     orig_add_labels = steps.add_sell_put_labels
 
-    def _fake_run_cmd(cmd, **kwargs):
-        calls.append(cmd)
+    def _fake_run_sell_put_scan(**kwargs):
+        calls.append(kwargs)
+        Path(kwargs["output"]).parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame().to_csv(kwargs["output"], index=False)
 
-    steps.run_cmd = _fake_run_cmd
+    steps.run_sell_put_scan = _fake_run_sell_put_scan
     steps.add_sell_put_labels = lambda *args, **kwargs: None
     try:
         out = steps.run_sell_put_scan_and_summarize(
@@ -335,33 +338,35 @@ def test_sell_put_steps_fallback_to_global_min_net_income() -> None:
             report_dir=base / 'output' / 'reports',
             timeout_sec=10,
             is_scheduled=True,
-            fx=CurrencyConverter(FxRates(usd_per_cny=0.14, cny_per_hkd=0.92)),
+            exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14, cny_per_hkd=0.92)),
             portfolio_ctx=None,
             global_sell_put_liquidity={'min_net_income': 100},
         )
     finally:
-        steps.run_cmd = orig_run_cmd
+        steps.run_sell_put_scan = orig_run_sell_put_scan
         steps.add_sell_put_labels = orig_add_labels
 
     assert out['strategy'] == 'sell_put'
     assert calls
-    cmd = calls[0]
-    i = cmd.index('--min-net-income')
-    assert cmd[i + 1] == '14.000000000000002'
+    kwargs = calls[0]
+    assert kwargs['min_net_income'] == 14.000000000000002
 
 
 def test_sell_call_steps_fallback_to_global_min_net_income() -> None:
     base = _add_repo_to_syspath()
     import scripts.sell_call_steps as steps
-    from scripts.fx_rates import CurrencyConverter, FxRates
+    import pandas as pd
+    from scripts.exchange_rates import CurrencyConverter, ExchangeRates
 
-    calls: list[list[str]] = []
-    orig_run_cmd = steps.run_cmd
+    calls: list[dict] = []
+    orig_run_sell_call_scan = steps.run_sell_call_scan
 
-    def _fake_run_cmd(cmd, **kwargs):
-        calls.append(cmd)
+    def _fake_run_sell_call_scan(**kwargs):
+        calls.append(kwargs)
+        Path(kwargs["output"]).parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame().to_csv(kwargs["output"], index=False)
 
-    steps.run_cmd = _fake_run_cmd
+    steps.run_sell_call_scan = _fake_run_sell_call_scan
     try:
         out = steps.run_sell_call_scan_and_summarize(
             py='python',
@@ -376,18 +381,17 @@ def test_sell_call_steps_fallback_to_global_min_net_income() -> None:
             timeout_sec=10,
             is_scheduled=True,
             stock={'shares': 200, 'avg_cost': 100.0},
-            fx=CurrencyConverter(FxRates(usd_per_cny=0.14, cny_per_hkd=0.92)),
+            exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14, cny_per_hkd=0.92)),
             locked_shares_by_symbol={'AAPL': 0},
             global_sell_call_liquidity={'min_net_income': 100},
         )
     finally:
-        steps.run_cmd = orig_run_cmd
+        steps.run_sell_call_scan = orig_run_sell_call_scan
 
     assert out['strategy'] == 'sell_call'
     assert calls
-    cmd = calls[0]
-    i = cmd.index('--min-net-income')
-    assert cmd[i + 1] == '14.000000000000002'
+    kwargs = calls[0]
+    assert kwargs['min_net_income'] == 14.000000000000002
 
 
 def test_sell_put_reject_stage_is_strategy_gate() -> None:

@@ -5,19 +5,19 @@
 | Tool | Default Availability | Needs `portfolio.data_config` | Needs OpenD | Writes |
 | --- | --- | --- | --- | --- |
 | `healthcheck` | yes | yes | yes | no |
-| `scan_opportunities` | yes | optional but recommended for SQLite `option_positions` context | only for Futu-backed symbols | no |
-| `query_cash_headroom` | yes | yes for SQLite `option_positions` context | yes | no |
+| `scan_opportunities` | yes | optional but recommended for SQLite position-lot context | only for Futu-backed symbols | no |
+| `query_cash_headroom` | yes | yes for SQLite position-lot context | yes | no |
 | `get_portfolio_context` | yes | only for holdings-backed fallback | yes | no |
-| `prepare_close_advice_inputs` | yes | yes for SQLite `option_positions` context | yes in minimal public setup | no |
+| `prepare_close_advice_inputs` | yes | yes for SQLite position-lot context | yes in minimal public setup | no |
 | `close_advice` | yes | no | only when quote_source falls back to OpenD | no |
-| `get_close_advice` | yes | yes for SQLite `option_positions` context | yes in minimal public setup | no |
+| `get_close_advice` | yes | yes for SQLite position-lot context | yes in minimal public setup | no |
 | `manage_symbols` | yes | no | no | dry-run by default |
 | `preview_notification` | yes | no | no | no |
 
 Notes:
-- Public minimal setup is: OpenD for行情/持仓/现金 + SQLite for `option_positions`.
+- Public minimal setup is: OpenD for行情/持仓/现金 + SQLite for `trade_events + position_lots`.
 - `portfolio.data_config` in the minimal setup only needs to point at a small JSON file with `option_positions.sqlite_path`.
-- Feishu is optional and only needed for holdings fallback or best-effort backup.
+- Feishu is optional and only needed for holdings fallback or first-run bootstrap of legacy option records.
 - If you add an `external_holdings` account, `portfolio.data_config` also needs `feishu.app_id` / `feishu.app_secret` / `feishu.tables.holdings`.
 - Use `configs/examples/portfolio.external_holdings.example.json` as the public starting point for that case.
 

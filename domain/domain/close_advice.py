@@ -4,8 +4,14 @@ from dataclasses import dataclass
 from typing import Any
 
 
-DEFAULT_STRONG_REMAINING_ANNUALIZED_MAX = 0.08
-DEFAULT_MEDIUM_REMAINING_ANNUALIZED_MAX = 0.12
+CLOSE_ADVICE_DEFAULTS = {
+    "max_spread_ratio": 0.4,
+    "strong_remaining_annualized_max": 0.08,
+    "medium_remaining_annualized_max": 0.12,
+}
+
+DEFAULT_STRONG_REMAINING_ANNUALIZED_MAX = CLOSE_ADVICE_DEFAULTS["strong_remaining_annualized_max"]
+DEFAULT_MEDIUM_REMAINING_ANNUALIZED_MAX = CLOSE_ADVICE_DEFAULTS["medium_remaining_annualized_max"]
 
 TIER_LABELS = {
     "strong": "强烈建议平仓",
@@ -44,7 +50,7 @@ def safe_int(value: Any) -> int | None:
 
 @dataclass(frozen=True)
 class CloseAdviceConfig:
-    max_spread_ratio: float | None = 0.4
+    max_spread_ratio: float | None = CLOSE_ADVICE_DEFAULTS["max_spread_ratio"]
     strong_remaining_annualized_max: float = DEFAULT_STRONG_REMAINING_ANNUALIZED_MAX
     medium_remaining_annualized_max: float = DEFAULT_MEDIUM_REMAINING_ANNUALIZED_MAX
 
@@ -55,7 +61,7 @@ class CloseAdviceConfig:
         strong_max = safe_float(src.get("strong_remaining_annualized_max"))
         medium_max = safe_float(src.get("medium_remaining_annualized_max"))
         return cls(
-            max_spread_ratio=max_spread if max_spread is not None else 0.4,
+            max_spread_ratio=max_spread if max_spread is not None else CLOSE_ADVICE_DEFAULTS["max_spread_ratio"],
             strong_remaining_annualized_max=(
                 strong_max if strong_max is not None else DEFAULT_STRONG_REMAINING_ANNUALIZED_MAX
             ),
@@ -97,50 +103,60 @@ class CloseAdviceTierRule:
         return True
 
 
-DEFAULT_TIER_RULES: tuple[CloseAdviceTierRule, ...] = (
-    CloseAdviceTierRule(
-        level="strong",
-        min_dte=7,
-        max_dte=13,
-        min_capture=0.90,
-        remaining_annualized_attr="strong_remaining_annualized_max",
-        reason="已锁定大部分收益，剩余时间仍长，继续持有的边际收益偏低",
-    ),
-    CloseAdviceTierRule(
-        level="strong",
-        min_dte=14,
-        max_dte=29,
-        min_capture=0.85,
-        remaining_annualized_attr="strong_remaining_annualized_max",
-        reason="已锁定大部分收益，剩余时间仍长，继续持有的边际收益偏低",
-    ),
-    CloseAdviceTierRule(
-        level="strong",
-        min_dte=30,
-        min_capture=0.80,
-        remaining_annualized_attr="strong_remaining_annualized_max",
-        reason="已锁定大部分收益，剩余时间仍长，继续持有的边际收益偏低",
-    ),
-    CloseAdviceTierRule(
-        level="medium",
-        min_dte=14,
-        min_capture=0.70,
-        remaining_annualized_attr="medium_remaining_annualized_max",
-        reason="已锁定较多收益，剩余时间仍较长，值得认真考虑买回",
-    ),
-    CloseAdviceTierRule(
-        level="optional",
-        min_dte=1,
-        max_dte=6,
-        min_capture=0.90,
-        reason="临近到期且平仓成本较低，低价买回可选",
-    ),
-    CloseAdviceTierRule(
-        level="weak",
-        min_dte=30,
-        min_capture=0.50,
-        reason="已锁定部分收益且剩余时间较长，适合进入观察",
-    ),
+LONG_HOLD_REASON = "已锁定大部分收益，剩余时间仍长，继续持有的边际收益偏低"
+MEDIUM_REASON = "已锁定较多收益，剩余时间仍较长，值得认真考虑买回"
+OPTIONAL_REASON = "临近到期且平仓成本较低，低价买回可选"
+WEAK_REASON = "已锁定部分收益且剩余时间较长，适合进入观察"
+
+DEFAULT_TIER_RULE_SPECS: tuple[dict[str, Any], ...] = (
+    {
+        "level": "strong",
+        "min_dte": 7,
+        "max_dte": 13,
+        "min_capture": 0.90,
+        "remaining_annualized_attr": "strong_remaining_annualized_max",
+        "reason": LONG_HOLD_REASON,
+    },
+    {
+        "level": "strong",
+        "min_dte": 14,
+        "max_dte": 29,
+        "min_capture": 0.85,
+        "remaining_annualized_attr": "strong_remaining_annualized_max",
+        "reason": LONG_HOLD_REASON,
+    },
+    {
+        "level": "strong",
+        "min_dte": 30,
+        "min_capture": 0.80,
+        "remaining_annualized_attr": "strong_remaining_annualized_max",
+        "reason": LONG_HOLD_REASON,
+    },
+    {
+        "level": "medium",
+        "min_dte": 14,
+        "min_capture": 0.70,
+        "remaining_annualized_attr": "medium_remaining_annualized_max",
+        "reason": MEDIUM_REASON,
+    },
+    {
+        "level": "optional",
+        "min_dte": 1,
+        "max_dte": 6,
+        "min_capture": 0.90,
+        "reason": OPTIONAL_REASON,
+    },
+    {
+        "level": "weak",
+        "min_dte": 30,
+        "min_capture": 0.50,
+        "reason": WEAK_REASON,
+    },
+)
+
+
+DEFAULT_TIER_RULES: tuple[CloseAdviceTierRule, ...] = tuple(
+    CloseAdviceTierRule(**spec) for spec in DEFAULT_TIER_RULE_SPECS
 )
 
 
