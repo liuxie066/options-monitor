@@ -11,6 +11,7 @@ This repo is meant to run as a repeatable monitoring pipeline.
 - Agent integration contract: `docs/AGENT_INTEGRATION.md`
 - Public tool reference: `docs/TOOL_REFERENCE.md`
 - Public release checklist: `docs/RELEASE_PROCESS.md`
+- Current PR material pack: `docs/PR_PRODUCTIZATION_PHASE1_2.md`
 
 ## Core entrypoints
 

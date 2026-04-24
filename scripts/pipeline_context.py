@@ -15,7 +15,7 @@ Design constraints:
 import json
 from pathlib import Path
 
-from scripts.account_config import resolve_portfolio_source
+from scripts.account_config import resolve_holdings_account, resolve_portfolio_source
 from scripts.config_loader import resolve_pm_config_path
 from scripts.futu_portfolio_context import fetch_futu_portfolio_context
 from scripts.io_utils import is_fresh, load_cached_json
@@ -213,12 +213,13 @@ def load_portfolio_context(
                     raise
                 log(f"[WARN] futu portfolio context unavailable; fallback to holdings: {e}")
 
+        holdings_account = resolve_holdings_account(runtime_config, account=account)
         return _load_portfolio_context_from_holdings(
             py=py,
             base=base,
             pm_config=pm_config,
             market=market,
-            account=account,
+            account=holdings_account,
             ttl_sec=ttl_sec,
             timeout_sec=timeout_sec,
             is_scheduled=is_scheduled,

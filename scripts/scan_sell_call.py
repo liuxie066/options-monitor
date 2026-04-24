@@ -53,7 +53,7 @@ SELL_CALL_EMPTY_OUTPUT_COLUMNS = [
     "reject_stage_candidate",
 ]
 
-from scripts.fee_calc import calc_futu_us_option_fee, calc_futu_hk_option_fee_static, calc_futu_option_fee, safe_float, safe_int
+from scripts.fee_calc import calc_futu_option_fee, safe_float, safe_int
 
 
 def strike_band(strike_above_spot_pct: float) -> str:
@@ -91,8 +91,13 @@ def compute_metrics(row: pd.Series, avg_cost: float):
         return None
 
     gross_income = mid * m
-    base_dir = Path(__file__).resolve().parents[1]
-    fee = calc_futu_option_fee(row.get("currency"), mid, contracts=1, is_sell=True, base_dir=base_dir)
+    fee = calc_futu_option_fee(
+        row.get("currency"),
+        mid,
+        contracts=1,
+        multiplier=m,
+        is_sell=True,
+    )
     net_income = gross_income - fee
     if net_income <= 0:
         return None

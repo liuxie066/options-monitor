@@ -16,8 +16,11 @@ echo "[install-agent] step: install python deps"
 echo "[install-agent] step: verify public launcher"
 ./om-agent spec >/dev/null
 
+echo "[install-agent] step: prepare local secrets directory"
+mkdir -p secrets
+
 echo "[install-agent] OK"
 echo "[install-agent] next:"
-echo "  1) copy configs/examples/config.example.us.json to config.us.json or set OM_CONFIG_DIR"
-echo "  2) configure portfolio.pm_config or OM_PM_CONFIG if you need holdings-backed tools"
-echo "  3) run ./om-agent spec"
+echo "  1) run ./om-agent init --market us --futu-acc-id <REAL_ACC_ID> --symbol NVDA"
+echo "  2) run ./om-agent run --tool healthcheck --input-json '{\"config_key\":\"us\"}'"
+echo "  3) run ./om-agent run --tool scan_opportunities --input-json '{\"config_key\":\"us\"}'"

@@ -8,7 +8,27 @@ This page is the shortest path to running the public local agent tools.
 git clone <repo-url> options-monitor
 cd options-monitor
 bash scripts/install_agent_plugin.sh
+./om-agent init --market us --futu-acc-id <REAL_ACC_ID> --symbol NVDA
 ```
+
+`init` writes the repo-local files needed by the minimal public setup:
+
+- `config.us.json` or `config.hk.json`
+- `secrets/portfolio.sqlite.json`
+
+To append another account later:
+
+```bash
+./om-agent add-account --market us --account-label user2 --account-type futu --futu-acc-id <REAL_ACC_ID>
+./om-agent add-account --market us --account-label lx --account-type futu --futu-acc-id <REAL_ACC_ID> --holdings-account "lx"
+./om-agent add-account --market us --account-label ext1 --account-type external_holdings --holdings-account "Feishu EXT"
+./om-agent edit-account --market us --account-label lx --futu-acc-id <NEW_REAL_ACC_ID> --holdings-account "lx"
+./om-agent remove-account --market us --account-label ext1
+```
+
+If you add an `external_holdings` account, copy `configs/examples/portfolio.external_holdings.example.json`
+to a local `secrets/` path and fill `feishu.app_id` / `feishu.app_secret` / `feishu.tables.holdings`.
+If you add `--holdings-account` to a `futu` account, it stays on Futu as the primary source and only uses Feishu holdings as a fallback.
 
 To install a tagged pre-release instead of `main`:
 
@@ -16,18 +36,23 @@ To install a tagged pre-release instead of `main`:
 git clone --branch v0.1.0-beta.1 --depth 1 <repo-url> options-monitor
 cd options-monitor
 bash scripts/install_agent_plugin.sh
+./om-agent init --market us --futu-acc-id <REAL_ACC_ID> --symbol NVDA
 ```
 
 ## 2. Prepare runtime config
 
-Use one of:
+By default, the public install flow uses repo-local runtime configs:
 
-- copy `configs/examples/config.example.us.json` to `config.us.json`
-- set `OM_CONFIG_DIR` to a directory containing `config.us.json` / `config.hk.json`
-- set `OM_CONFIG_US` / `OM_CONFIG_HK` directly
+- `config.us.json`
+- `config.hk.json`
 
-If your runtime config references `portfolio.pm_config` relatively, it will be resolved
-relative to the runtime config file.
+Use explicit overrides only when you intentionally want a different path.
+
+`portfolio.data_config` is used for `option_positions` storage config.
+If it is a relative path, it will be resolved relative to the runtime config file.
+
+For the runtime config `portfolio` block, use `broker` as the public field name.
+`market` is still accepted as a legacy compatibility alias.
 
 ## 3. Inspect public tool manifest
 
@@ -41,6 +66,12 @@ relative to the runtime config file.
 ./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'
 ```
 
+Public `healthcheck` now treats the following as blocking errors:
+
+- `secrets/portfolio.sqlite.json` missing
+- placeholder `trade_intake.account_mapping.futu.REAL_12345678`
+- OpenD not reachable from the configured `symbols[].fetch.host/port`
+
 ## 5. Run one read-only tool
 
 ```bash
@@ -49,10 +80,6 @@ relative to the runtime config file.
 
 ## 6. Optional environment variables
 
-- `OM_CONFIG_DIR`: directory containing runtime configs
-- `OM_CONFIG_US`: explicit US config path
-- `OM_CONFIG_HK`: explicit HK config path
-- `OM_PM_CONFIG`: explicit portfolio secret config path
 - `OM_PM_ROOT`: optional legacy external repo root for spot / FX fallback after built-in Yahoo providers
 - `OM_PM_RATE_CACHE`: optional legacy external FX cache path override after built-in Yahoo FX
 - `OM_OUTPUT_DIR`: override plugin output/cache directory

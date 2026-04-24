@@ -1,15 +1,4 @@
 {
-  "fees": {
-    "model": {
-      "US": "futu_us_simplified",
-      "HK": "static"
-    },
-    "hk_static": {
-      "platform_fee_per_order_hkd": 15.0,
-      "commission_per_order_hkd": 0.0,
-      "other_fees_per_order_hkd": 0.0
-    }
-  },
   "accounts": [
     "lx",
     "sy"
@@ -72,7 +61,7 @@
     "change_annual_threshold": 0.02
   },
   "portfolio": {
-    "pm_config": "secrets/portfolio.feishu.json",
+    "data_config": "secrets/portfolio.feishu.json",
     "market": "富途",
     "account": "lx",
     "base_currency": "CNY"

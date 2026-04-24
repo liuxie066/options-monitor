@@ -47,7 +47,7 @@ def test_default_pm_config_path_prefers_new_secret_location_when_present() -> No
 
     with TemporaryDirectory() as td:
         base = Path(td)
-        secret = base / "secrets" / "portfolio.feishu.json"
+        secret = base / "secrets" / "portfolio.sqlite.json"
         secret.parent.mkdir(parents=True, exist_ok=True)
         secret.write_text("{}", encoding="utf-8")
 
@@ -63,7 +63,7 @@ def test_default_pm_config_path_falls_back_to_legacy_location_when_missing() -> 
         base = Path(td)
         out = default_pm_config_path(base=base)
 
-    assert out == (base / "secrets" / "portfolio.feishu.json").resolve()
+    assert out == (base / "secrets" / "portfolio.sqlite.json").resolve()
 
 
 def test_resolve_pm_config_path_prefers_env_override(monkeypatch) -> None:
@@ -72,7 +72,7 @@ def test_resolve_pm_config_path_prefers_env_override(monkeypatch) -> None:
     with TemporaryDirectory() as td:
         base = Path(td)
         env_path = base / "external" / "portfolio.feishu.json"
-        monkeypatch.setenv("OM_PM_CONFIG", str(env_path))
+        monkeypatch.setenv("OM_DATA_CONFIG", str(env_path))
 
         out = resolve_pm_config_path(base=base, pm_config=None)
 
@@ -89,6 +89,25 @@ def test_resolve_watchlist_and_templates_config_require_canonical_keys() -> None
 
     assert [it["symbol"] for it in resolve_watchlist_config(cfg)] == ["0700.HK", "3690.HK"]
     assert resolve_templates_config(cfg) == {"put_base": {"sell_put": {"min_net_income": 100}}}
+
+
+def test_normalize_portfolio_broker_config_keeps_legacy_market_compat() -> None:
+    from scripts.config_loader import normalize_portfolio_broker_config
+
+    out = normalize_portfolio_broker_config({"portfolio": {"broker": "富途", "data_config": "x.json", "account": "lx"}})
+
+    assert out["portfolio"]["broker"] == "富途"
+    assert out["portfolio"]["market"] == "富途"
+    assert out["portfolio"]["data_config"] == "x.json"
+    assert out["portfolio"]["pm_config"] == "x.json"
+
+    out_legacy = normalize_portfolio_broker_config({"portfolio": {"market": "富途", "account": "lx"}})
+    assert out_legacy["portfolio"]["broker"] == "富途"
+    assert out_legacy["portfolio"]["market"] == "富途"
+
+    out_legacy_data = normalize_portfolio_broker_config({"portfolio": {"pm_config": "y.json", "account": "lx"}})
+    assert out_legacy_data["portfolio"]["data_config"] == "y.json"
+    assert out_legacy_data["portfolio"]["pm_config"] == "y.json"
 
 
 def test_set_watchlist_config_updates_symbols_only() -> None:
