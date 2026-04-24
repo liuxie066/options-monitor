@@ -3,8 +3,8 @@
 
 Checks:
 1) Config valid
-2) Feishu table schemas contain required fields (holdings, option_positions)
-3) FX rate fetch works (optional)
+2) Feishu table schemas contain required fields (holdings, legacy position bootstrap source)
+3) Exchange-rate fetch works (optional)
 4) Recent cron runs (best-effort): checks OpenClaw cron job state
 5) Can run a lightweight scheduler decision for each account (no heavy scan)
 
@@ -28,7 +28,7 @@ from scripts.feishu_bitable import (
     bitable_fields,
 )
 from scripts.account_config import accounts_from_config
-from scripts.config_loader import resolve_pm_config_path
+from scripts.config_loader import normalize_portfolio_broker_config, resolve_data_config_path
 
 
 def now_utc():
@@ -51,7 +51,7 @@ def main():
     opt_cfg: dict = {}
 
     try:
-        opt_cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
+        opt_cfg = normalize_portfolio_broker_config(json.loads(cfg_path.read_text(encoding='utf-8')))
     except Exception:
         opt_cfg = {}
     accounts = accounts_from_config(opt_cfg) if args.accounts is None else accounts_from_config({'accounts': args.accounts})
@@ -69,9 +69,9 @@ def main():
     # 2) feishu schema
     try:
         portfolio_cfg = (opt_cfg.get('portfolio') or {})
-        pm_ref = portfolio_cfg.get('data_config') or portfolio_cfg.get('pm_config')
-        pm_path = resolve_pm_config_path(base=base, pm_config=pm_ref)
-        pm = json.loads(pm_path.read_text(encoding='utf-8'))
+        data_ref = portfolio_cfg.get('data_config')
+        data_path = resolve_data_config_path(base=base, data_config=data_ref)
+        pm = json.loads(data_path.read_text(encoding='utf-8'))
 
         fcfg = pm.get('feishu') or {}
         app_id = fcfg.get('app_id')
@@ -100,16 +100,17 @@ def main():
         if missing_hold:
             errors.append('holdings table missing fields: ' + ','.join(missing_hold))
         if missing_opt:
-            errors.append('option_positions table missing fields: ' + ','.join(missing_opt))
+            errors.append('legacy position bootstrap table missing fields: ' + ','.join(missing_opt))
     except Exception as e:
         errors.append(f"feishu schema check failed: {e}")
 
     # 3) scheduler decision per account (lightweight)
     try:
-        import subprocess
-        vpy = base / '.venv' / 'bin' / 'python'
+        import io
+        from contextlib import redirect_stdout
+        from scripts.scan_scheduler import run_scheduler
+
         for acct in accounts:
-            # write override config in a temp path
             cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
             cfg.setdefault('portfolio', {})
             cfg['portfolio']['account'] = acct
@@ -117,9 +118,8 @@ def main():
             tmp.parent.mkdir(parents=True, exist_ok=True)
             tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
             state = base / 'output' / 'state' / f'healthcheck_scheduler_state.{acct}.json'
-            res = subprocess.run([str(vpy), 'scripts/cli/scan_scheduler_cli.py', '--config', str(tmp), '--state', str(state), '--jsonl'], cwd=str(base), capture_output=True, text=True)
-            if res.returncode != 0:
-                warns.append(f"scheduler check failed ({acct}): {(res.stderr or res.stdout).strip()}")
+            with redirect_stdout(io.StringIO()):
+                run_scheduler(config=tmp, state=state, jsonl=True, base_dir=base)
     except Exception as e:
         warns.append(f"scheduler checks skipped: {e}")
 

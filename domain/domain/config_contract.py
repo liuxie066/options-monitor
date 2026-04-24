@@ -5,10 +5,9 @@ from typing import Any
 
 
 CANONICAL_CONFIGS = {"config.us.json", "config.hk.json"}
-DERIVED_CONFIGS = {
+FORBIDDEN_RUNTIME_CONFIGS = {
     "config.market_us.json",
     "config.market_hk.json",
-    "config.market_us.fallback_yahoo.json",
     "config.scheduled.json",
     "config.json",
 }
@@ -32,7 +31,7 @@ def resolve_config_contract(
     name = resolved_path.name
     market = str(market_config or "auto").strip().lower()
     is_canonical = name in CANONICAL_CONFIGS
-    is_derived = name in DERIVED_CONFIGS
+    is_forbidden_runtime = name in FORBIDDEN_RUNTIME_CONFIGS
 
     expected = {"config.us.json", "config.hk.json"} if market in {"auto", "all"} else {
         "config.hk.json" if market == "hk" else "config.us.json"
@@ -49,7 +48,7 @@ def resolve_config_contract(
         "resolved_path": str(resolved_path),
         "market_config": market,
         "is_canonical": is_canonical,
-        "is_derived": is_derived,
+        "is_forbidden_runtime": is_forbidden_runtime,
         "market_match": market_match,
         "expected": sorted(expected),
         "sibling_canonical_path": (str(sibling_canonical_path) if sibling_canonical_path else None),

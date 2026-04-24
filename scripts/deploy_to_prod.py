@@ -39,7 +39,6 @@ ITEMS = [
     "DEPLOY.md",
     "CONFIGS.md",
     "CONFIGURATION_GUIDE.md",
-    "SKILL.md",
     "config.us.json",
     "config.hk.json",
     "configs",

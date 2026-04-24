@@ -18,7 +18,6 @@ from domain.domain.close_advice import (
 )
 from scripts.fee_calc import calc_futu_option_fee
 from scripts.io_utils import atomic_write_text, read_json, safe_read_csv
-from scripts.pm_bridge import resolve_spot_fallback_enabled
 
 
 OUTPUT_COLUMNS = [
@@ -218,7 +217,6 @@ def _fetch_missing_quotes_via_opend(
                 limit_expirations=safe_int(fetch_cfg.get("limit_expirations")) or 8,
                 host=str(fetch_cfg.get("host") or "127.0.0.1"),
                 port=safe_int(fetch_cfg.get("port")) or 11111,
-                spot_from_yahoo=resolve_spot_fallback_enabled(fetch_cfg, symbol=symbol),
                 base_dir=base_dir,
                 option_types=",".join(option_types or ["put", "call"]),
                 min_strike=min(strikes),

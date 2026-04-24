@@ -1,38 +1,95 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-"""Small gateway for futu-core OpenD integration.
+"""Small gateway for Futu OpenD integration.
 
 Centralizes:
-- OpenDBackend + FutuCoreClient creation
+- futu-api OpenD client creation
 - Backward-compatible host/port defaults
 - Explicit fail-fast error classification (2FA/auth expired/rate limit)
 """
 
 from dataclasses import dataclass
 import logging
-from pathlib import Path
-import sys
+import random
+import time
 from typing import Any, Iterable
 
 
 LOG = logging.getLogger(__name__)
 
 
-def _ensure_futu_core_importable() -> None:
-    """Support local sibling `../futu-core/src` during dev without install."""
+def _ensure_futu_api_importable() -> None:
     try:
-        import futu_core  # noqa: F401
+        import futu  # noqa: F401
         return
-    except Exception:
-        pass
+    except Exception as exc:
+        raise ModuleNotFoundError("No module named 'futu'") from exc
 
-    repo_base = Path(__file__).resolve().parents[1]
-    local_src = (repo_base.parent / "futu-core" / "src").resolve()
-    if local_src.exists():
-        p = str(local_src)
-        if p not in sys.path:
-            sys.path.insert(0, p)
+
+class _FutuAPIBackend:
+    def __init__(self, *, host: str, port: int) -> None:
+        self.host = str(host)
+        self.port = int(port)
+        self._quote_client = None
+        self._trade_client = None
+
+    def _ensure_clients(self) -> tuple[Any, Any]:
+        if self._quote_client is None or self._trade_client is None:
+            _ensure_futu_api_importable()
+            import futu
+
+            if self._quote_client is None:
+                self._quote_client = futu.OpenQuoteContext(host=self.host, port=self.port)
+            if self._trade_client is None:
+                self._trade_client = futu.OpenSecTradeContext(host=self.host, port=self.port)
+        return self._quote_client, self._trade_client
+
+
+class _FutuAPIClient:
+    def __init__(self, backend: Any, *, is_option_chain_cache_enabled: bool) -> None:
+        self.backend = backend
+        self.is_option_chain_cache_enabled = bool(is_option_chain_cache_enabled)
+
+    def _quote(self) -> Any:
+        quote, _trade = self.backend._ensure_clients()
+        return quote
+
+    def _trade(self) -> Any:
+        _quote, trade = self.backend._ensure_clients()
+        return trade
+
+    @staticmethod
+    def _unwrap(result: Any) -> Any:
+        try:
+            import futu
+            ret_ok = futu.RET_OK
+        except Exception:
+            ret_ok = 0
+        if isinstance(result, tuple) and len(result) >= 2:
+            ret, data = result[0], result[1]
+            if ret not in (ret_ok, 0, None):
+                raise RuntimeError(data)
+            return data
+        return result
+
+    def get_option_chain(self, **kwargs: Any) -> Any:
+        return self._unwrap(self._quote().get_option_chain(**kwargs))
+
+    def get_snapshot(self, **kwargs: Any) -> Any:
+        return self._unwrap(self._quote().get_market_snapshot(**kwargs))
+
+    def get_positions(self, **kwargs: Any) -> Any:
+        return self._unwrap(self._trade().position_list_query(**kwargs))
+
+    def get_account_balance(self, **kwargs: Any) -> Any:
+        return self._unwrap(self._trade().accinfo_query(**kwargs))
+
+    def get_funds(self, **kwargs: Any) -> Any:
+        trade = self._trade()
+        if hasattr(trade, "acctradinginfo_query"):
+            return self._unwrap(trade.acctradinginfo_query(**kwargs))
+        return self._unwrap(trade.accinfo_query(**kwargs))
 
 
 class FutuGatewayError(RuntimeError):
@@ -67,23 +124,6 @@ def _map_error(exc: Exception, *, action: str) -> FutuGatewayError:
     msg = str(exc or "")
     low = msg.lower()
 
-    try:
-        _ensure_futu_core_importable()
-        from futu_core.errors import FutuCoreError, ErrorCode
-
-        if isinstance(exc, FutuCoreError):
-            if exc.code == ErrorCode.NEED_2FA:
-                return FutuGatewayNeed2FAError(f"{action} failed: {msg}", raw_error=exc)
-            if exc.code == ErrorCode.AUTH_EXPIRED:
-                return FutuGatewayAuthExpiredError(f"{action} failed: {msg}", raw_error=exc)
-            if exc.code == ErrorCode.RATE_LIMIT:
-                return FutuGatewayRateLimitError(f"{action} failed: {msg}", raw_error=exc)
-            if exc.code == ErrorCode.TRANSIENT:
-                return FutuGatewayTransientError(f"{action} failed: {msg}", raw_error=exc)
-            return FutuGatewayError(f"{action} failed: {msg}", raw_error=exc)
-    except Exception:
-        pass
-
     if _contains_any(low, ("2fa", "phone verification", "verify code")) or _contains_any(msg, ("手机验证码", "短信验证", "手机验证", "验证码")):
         return FutuGatewayNeed2FAError(f"{action} failed: {msg}", raw_error=exc)
 
@@ -101,7 +141,7 @@ def _map_error(exc: Exception, *, action: str) -> FutuGatewayError:
 
 @dataclass
 class FutuGateway:
-    """Thin wrapper over futu-core client with explicit error semantics."""
+    """Thin wrapper over OpenD client with explicit error semantics."""
 
     client: Any
     backend: Any
@@ -201,14 +241,84 @@ def build_futu_gateway(
     backend_cls: Any | None = None,
     client_cls: Any | None = None,
 ) -> FutuGateway:
-    _ensure_futu_core_importable()
-    if backend_cls is None or client_cls is None:
-        from futu_core.backends import OpenDBackend
-        from futu_core.client import FutuCoreClient
-
-        backend_cls = backend_cls or OpenDBackend
-        client_cls = client_cls or FutuCoreClient
+    backend_cls = backend_cls or _FutuAPIBackend
+    client_cls = client_cls or _FutuAPIClient
 
     backend = backend_cls(host=str(host), port=int(port))
     client = client_cls(backend, is_option_chain_cache_enabled=bool(is_option_chain_cache_enabled))
     return FutuGateway(client=client, backend=backend, host=str(host), port=int(port))
+
+
+def build_ready_futu_gateway(
+    *,
+    host: str = "127.0.0.1",
+    port: int = 11111,
+    is_option_chain_cache_enabled: bool = True,
+    backend_cls: Any | None = None,
+    client_cls: Any | None = None,
+) -> FutuGateway:
+    gateway = build_futu_gateway(
+        host=host,
+        port=port,
+        is_option_chain_cache_enabled=is_option_chain_cache_enabled,
+        backend_cls=backend_cls,
+        client_cls=client_cls,
+    )
+    try:
+        gateway.ensure_quote_ready()
+        return gateway
+    except Exception:
+        gateway.close()
+        raise
+
+
+def retry_futu_gateway_call(
+    what: str,
+    fn: Any,
+    *,
+    no_retry: bool = False,
+    retry_max_attempts: int = 4,
+    retry_time_budget_sec: float = 8.0,
+    retry_base_delay_sec: float = 0.8,
+    retry_max_delay_sec: float = 6.0,
+    quiet: bool = False,
+) -> Any:
+    if no_retry or int(retry_max_attempts) <= 1:
+        return fn()
+
+    t0 = time.monotonic()
+    attempt = 0
+    delay = float(retry_base_delay_sec or 0.5)
+    max_delay = float(retry_max_delay_sec or 6.0)
+    budget = float(retry_time_budget_sec or 0.0)
+    last_err = None
+
+    while True:
+        attempt += 1
+        try:
+            return fn()
+        except Exception as exc:
+            last_err = exc
+
+        if attempt >= int(retry_max_attempts):
+            raise RuntimeError(f"{what} failed after {attempt} attempts: {last_err}")
+
+        if isinstance(last_err, FutuGatewayAuthExpiredError):
+            raise RuntimeError(f"{what} failed (auth expired): {last_err}")
+        if isinstance(last_err, FutuGatewayNeed2FAError):
+            raise RuntimeError(f"{what} failed (non-transient): {last_err}")
+        if (not isinstance(last_err, FutuGatewayTransientError)) and (not isinstance(last_err, FutuGatewayRateLimitError)):
+            raise RuntimeError(f"{what} failed (non-transient): {last_err}")
+
+        sleep_s = min(max_delay, max(0.0, delay))
+        if isinstance(last_err, FutuGatewayRateLimitError):
+            sleep_s = max(sleep_s, 2.0)
+
+        if (budget > 0) and ((time.monotonic() - t0) + sleep_s > budget):
+            raise RuntimeError(f"{what} failed (retry budget {budget}s exceeded): {last_err}")
+
+        if not quiet:
+            print(f"[WARN] {what} failed (attempt {attempt}/{retry_max_attempts}): {last_err}; sleep {sleep_s:.1f}s")
+
+        time.sleep(sleep_s + random.uniform(0.0, 0.2))
+        delay = min(max_delay, delay * 2.0)

@@ -340,11 +340,9 @@ def run_scheduler(
     else:
         state_path = (state_dir_path / 'scheduler_state.json').resolve()
 
-    if config_path.suffix.lower() == '.json':
-        cfg = json.loads(config_path.read_text(encoding='utf-8'))
-    else:
-        import yaml
-        cfg = yaml.safe_load(config_path.read_text(encoding='utf-8'))
+    if config_path.suffix.lower() != '.json':
+        raise SystemExit('[CONFIG_ERROR] scheduler config must be a .json file')
+    cfg = json.loads(config_path.read_text(encoding='utf-8'))
 
     schedule_key_val = str(schedule_key or 'schedule')
     schedule_cfg = cfg.get(schedule_key_val, {}) or {}
@@ -400,7 +398,7 @@ def run_scheduler(
         return payload
 
     if run_if_due and decision.should_run_scan:
-        cmd = [sys.executable, 'scripts/run_pipeline.py', '--config', str(config_path)]
+        cmd = [sys.executable, '-m', 'src.interfaces.cli.main', 'scan-pipeline', '--config', str(config_path)]
         print(f"[RUN] {' '.join(cmd)}")
         result = subprocess.run(cmd, cwd=str(base))
         if result.returncode != 0:
@@ -414,4 +412,4 @@ def run_scheduler(
     return payload
 
 
-# NOTE: market-session helpers live in scripts/send_if_needed_multi.py (multi-account entrypoint).
+# NOTE: market-session selection lives in domain.domain.select_markets_to_run.

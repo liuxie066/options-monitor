@@ -34,7 +34,7 @@ def _deal(**overrides: object) -> NormalizedTradeDeal:
         "price": 3.93,
         "strike": 480.0,
         "multiplier": 100,
-        "multiplier_source": "builtin.hk.common",
+        "multiplier_source": "cache",
         "expiration_ymd": "2026-04-29",
         "currency": "HKD",
         "trade_time_ms": 1000,
@@ -50,17 +50,23 @@ def test_resolve_trade_open_dry_run_returns_fields_preview() -> None:
     assert result.status == "dry_run"
     assert result.action == "open"
     assert result.operations[0]["fields"]["account"] == "lx"
-    assert "multiplier_source=builtin.hk.common" in result.operations[0]["fields"]["note"]
+    assert "multiplier_source=cache" in result.operations[0]["fields"]["note"]
 
 
 def test_resolve_trade_open_apply_creates_record() -> None:
     repo = FakeRepo()
+    import scripts.trade_intake_resolver as tir
 
-    result = resolve_trade_deal(_deal(), repo=repo, state={}, apply_changes=True)
+    old_persist = tir.persist_trade_event
+    try:
+        tir.persist_trade_event = lambda repo, deal: {"event_id": deal.deal_id, "created": True}  # type: ignore[assignment]
+        result = resolve_trade_deal(_deal(), repo=repo, state={}, apply_changes=True)
+    finally:
+        tir.persist_trade_event = old_persist  # type: ignore[assignment]
 
     assert result.status == "applied"
-    assert result.operations[0]["record_id"] == "rec_open_1"
-    assert repo.created[0]["symbol"] == "0700.HK"
+    assert result.operations[0]["event_id"] == "deal-open-1"
+    assert repo.created == []
 
 
 def test_resolve_trade_open_rejects_duplicate_deal_id() -> None:

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Check sell-put cash headroom and notify only when below threshold.
 
-- Reuses scripts/cli/query_sell_put_cash_cli.py to compute base(CNY) free cash.
+- Reuses query_sell_put_cash(...) to compute base(CNY) free cash.
 - Emits a short text payload; can be used in cron.
 
 Policy:
@@ -16,41 +16,15 @@ Cron delivery can announce it on WARN.
 from __future__ import annotations
 
 import argparse
-import json
-import subprocess
 from pathlib import Path
-
-
-def run_json(base: Path, cmd: list[str], timeout_sec: int = 120) -> dict:
-    p = subprocess.run(cmd, cwd=str(base), timeout=timeout_sec, capture_output=True, text=True)
-    if p.returncode != 0:
-        raise SystemExit(p.returncode)
-
-    # query_sell_put_cash.py prints logs + a JSON payload; take the last JSON object.
-    lines = (p.stdout or '').splitlines()
-    buf = []
-    for ln in reversed(lines):
-        if not ln.strip():
-            continue
-        buf.append(ln)
-        if ln.strip().startswith('{'):
-            break
-    txt = '\n'.join(reversed(buf)).strip()
-    try:
-        return json.loads(txt)
-    except Exception:
-        raise RuntimeError(f"failed to parse json output (tail): {txt[:2000]}")
-
-
-# Allow running as a script (python scripts/tools/xxx.py) without package install
-# by ensuring repo root is on sys.path.
 import sys
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.io_utils import money_cny
-from scripts.config_loader import resolve_pm_config_path
+from scripts.config_loader import resolve_data_config_path
+from scripts.query_sell_put_cash import query_sell_put_cash
 
 
 def _money_cny(v: float | None) -> str:
@@ -61,7 +35,7 @@ def _money_cny(v: float | None) -> str:
 def main():
     ap = argparse.ArgumentParser(description='Notify when sell-put cash free falls below threshold')
     ap.add_argument('--config', default='config.us.json')
-    ap.add_argument('--pm-config', default=None, help='Feishu/Bitable credential config path; auto-resolves when omitted')
+    ap.add_argument('--data-config', default=None, help='portfolio data config path; auto-resolves when omitted')
     ap.add_argument('--market', default='富途')
     ap.add_argument('--account', required=True)
     ap.add_argument('--threshold-cny', type=float, default=100000.0)
@@ -69,19 +43,14 @@ def main():
 
     base = Path(__file__).resolve().parents[1]
 
-    pm_config = resolve_pm_config_path(base=base, pm_config=args.pm_config)
-    payload = run_json(
-        base,
-        [
-            str(base / '.venv' / 'bin' / 'python'),
-            'scripts/cli/query_sell_put_cash_cli.py',
-            '--config', str(args.config),
-            '--pm-config', str(pm_config),
-            '--market', args.market,
-            '--account', args.account,
-            '--format', 'json',
-        ],
-        timeout_sec=180,
+    data_config = resolve_data_config_path(base=base, data_config=args.data_config)
+    payload = query_sell_put_cash(
+        config=str(args.config),
+        data_config=str(data_config),
+        market=args.market,
+        account=args.account,
+        output_format='json',
+        base_dir=base,
     )
 
     free_cny = payload.get('cash_free_cny')

@@ -8,6 +8,7 @@ if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
 from scripts.fetch_option_positions_context import build_context
+from src.application.option_positions_facade import load_option_position_records
 
 
 def test_build_context_preserves_record_id_without_position_id() -> None:
@@ -158,3 +159,35 @@ def test_build_context_excludes_closed_or_zero_open_records() -> None:
     assert ctx["open_positions_min"] == []
     assert ctx["cash_secured_by_symbol_by_ccy"] == {}
     assert ctx["locked_shares_by_symbol"] == {}
+
+
+def test_load_option_position_records_prefers_position_lots_when_available() -> None:
+    class _PrimaryRepo:
+        def list_position_lots(self) -> list[dict]:
+            return [{"record_id": "lot_1", "fields": {"symbol": "NVDA"}}]
+
+    class _Repo:
+        primary_repo = _PrimaryRepo()
+
+        def list_records(self, *, page_size: int = 500) -> list[dict]:
+            return [{"record_id": "legacy_1", "fields": {"symbol": "AAPL"}}]
+
+    rows = load_option_position_records(_Repo())
+
+    assert rows == [{"record_id": "lot_1", "fields": {"symbol": "NVDA"}}]
+
+
+def test_load_option_position_records_falls_back_to_legacy_records_when_projection_empty() -> None:
+    class _PrimaryRepo:
+        def list_position_lots(self) -> list[dict]:
+            return []
+
+    class _Repo:
+        primary_repo = _PrimaryRepo()
+
+        def list_records(self, *, page_size: int = 500) -> list[dict]:
+            return [{"record_id": "legacy_1", "fields": {"symbol": "AAPL"}}]
+
+    rows = load_option_position_records(_Repo())
+
+    assert rows == [{"record_id": "legacy_1", "fields": {"symbol": "AAPL"}}]

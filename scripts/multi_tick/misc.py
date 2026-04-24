@@ -77,7 +77,6 @@ class AccountResult:
     account: str
     ran_scan: bool
     should_notify: bool
-    meaningful: bool
     decision_reason: str
     notification_text: str
 

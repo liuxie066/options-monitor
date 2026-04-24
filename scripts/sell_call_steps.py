@@ -11,11 +11,18 @@ from pathlib import Path
 
 import pandas as pd
 
-from scripts.fx_rates import CurrencyConverter
+from scripts.candidate_defaults import (
+    DEFAULT_SELL_CALL_WINDOW,
+    resolve_candidate_liquidity,
+    resolve_candidate_window,
+    resolve_event_risk_config,
+)
+from scripts.exchange_rates import CurrencyConverter
 from scripts.io_utils import safe_read_csv
+from scripts.render_sell_call_alerts import render_sell_call_alerts
 from scripts.report_summaries import summarize_sell_call
+from scripts.scan_sell_call import run_sell_call_scan
 from scripts.sell_call_config import resolve_min_annualized_net_premium_return_from_sell_call_cfg
-from scripts.subprocess_utils import run_cmd
 
 
 def run_sell_call_scan_and_summarize(
@@ -32,7 +39,7 @@ def run_sell_call_scan_and_summarize(
     timeout_sec: int | None,
     is_scheduled: bool,
     stock: dict | None,
-    fx: CurrencyConverter,
+    exchange_rate_converter: CurrencyConverter,
     locked_shares_by_symbol: dict[str, int] | None = None,
     global_sell_call_liquidity: dict | None = None,
     global_sell_call_event_risk: dict | None = None,
@@ -68,65 +75,55 @@ def run_sell_call_scan_and_summarize(
         sell_call_cfg=cc,
         source_prefix=f'{symbol}.sell_call',
     )
-    liquidity = dict(global_sell_call_liquidity or {})
-    event_risk = {"enabled": True, "mode": "warn"}
-    if isinstance(global_sell_call_event_risk, dict):
-        event_risk.update(global_sell_call_event_risk)
+    liquidity = resolve_candidate_liquidity(global_sell_call_liquidity)
+    event_risk = resolve_event_risk_config(global_sell_call_event_risk)
+    window = resolve_candidate_window(cc, defaults=DEFAULT_SELL_CALL_WINDOW)
 
     # Config min_net_income is always CNY. The scanners expect option-native
     # currency thresholds (USD for US symbols, HKD for HK symbols).
-    min_net_income_cny = float(cc.get('min_net_income', liquidity.get('min_net_income', 0.0)) or 0.0)
+    global_min_net_income = float((global_sell_call_liquidity or {}).get('min_net_income', 0.0) or 0.0)
+    min_net_income_cny = float(cc.get('min_net_income', global_min_net_income) or 0.0)
     min_net_income_native = 0.0
     if min_net_income_cny > 0:
         min_net_income_native = (
-            fx.cny_to_native(
+            exchange_rate_converter.cny_to_native(
                 min_net_income_cny,
                 native_ccy=('HKD' if str(symbol).upper().endswith('.HK') else 'USD'),
             )
             or 0.0
         )
 
-    cmd = [
-        py, 'scripts/cli/scan_sell_call_cli.py',
-        '--symbols', symbol,
-        '--input-root', str(required_data_dir),
-        '--avg-cost', str(avg_cost),
-        '--shares', str(shares_total),
-        '--shares-locked', str(int(locked)),
-        '--shares-available-for-cover', str(int(shares_available_for_cover)),
-        '--min-dte', str(cc.get('min_dte', 20)),
-        '--max-dte', str(cc.get('max_dte', 90)),
-        '--min-annualized-net-return', str(min_annualized),
-        '--min-net-income', str(min_net_income_native),
-        '--min-open-interest', str(liquidity.get('min_open_interest', 100)),
-        '--min-volume', str(liquidity.get('min_volume', 10)),
-        '--max-spread-ratio', str(liquidity.get('max_spread_ratio', 0.3)),
-        '--event-risk-mode', str(event_risk.get('mode', 'warn')),
-        '--output', str(symbol_cc),
-    ]
-    if bool(event_risk.get('enabled', True)):
-        cmd.append('--event-risk-enabled')
-    else:
-        cmd.append('--no-event-risk-enabled')
-    if cc.get('min_strike') is not None:
-        cmd.extend(['--min-strike', str(cc.get('min_strike'))])
-    if cc.get('max_strike') is not None:
-        cmd.extend(['--max-strike', str(cc.get('max_strike'))])
-
-    if is_scheduled:
-        cmd.append('--quiet')
-    run_cmd(cmd, cwd=base, timeout_sec=timeout_sec, is_scheduled=is_scheduled)
+    run_sell_call_scan(
+        symbols=[symbol],
+        input_root=required_data_dir,
+        output=symbol_cc,
+        avg_cost=float(avg_cost),
+        shares=int(shares_total),
+        shares_locked=int(locked),
+        shares_available_for_cover=int(shares_available_for_cover),
+        min_dte=window.min_dte,
+        max_dte=window.max_dte,
+        min_strike=(float(cc.get('min_strike')) if cc.get('min_strike') is not None else None),
+        max_strike=(float(cc.get('max_strike')) if cc.get('max_strike') is not None else None),
+        min_annualized_net_return=min_annualized,
+        min_net_income=float(min_net_income_native),
+        min_open_interest=liquidity.min_open_interest,
+        min_volume=liquidity.min_volume,
+        max_spread_ratio=liquidity.max_spread_ratio,
+        event_risk_cfg=event_risk,
+        quiet=bool(is_scheduled),
+    )
 
     df_cc = safe_read_csv(symbol_cc)
     if not is_scheduled:
-        run_cmd([
-            py, 'scripts/cli/render_sell_call_alerts_cli.py',
-            '--input', str((report_dir / f'{symbol_lower}_sell_call_candidates.csv').as_posix()),
-            '--symbol', symbol,
-            '--top', str(top_n),
-            '--layered',
-            '--output', str((report_dir / f'{symbol_lower}_sell_call_alerts.txt').as_posix()),
-        ], cwd=base, is_scheduled=is_scheduled)
+        render_sell_call_alerts(
+            input_path=report_dir / f'{symbol_lower}_sell_call_candidates.csv',
+            symbol=symbol,
+            top=int(top_n),
+            layered=True,
+            output_path=report_dir / f'{symbol_lower}_sell_call_alerts.txt',
+            base_dir=base,
+        )
 
     return summarize_sell_call(df_cc, symbol, symbol_cfg=symbol_cfg)
 

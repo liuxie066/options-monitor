@@ -64,11 +64,9 @@ def _run_json(cmd: list[str], *, timeout_sec: int) -> tuple[int, dict[str, Any] 
 
 def _sdk_status() -> dict[str, Any]:
     futu_found = importlib.util.find_spec("futu") is not None
-    futu_core_found = importlib.util.find_spec("futu_core") is not None
     return {
         "futu_sdk_importable": futu_found,
-        "futu_core_importable": futu_core_found,
-        "ok": bool(futu_found or futu_core_found),
+        "ok": bool(futu_found),
     }
 
 
@@ -80,14 +78,9 @@ def _print_human(result: dict[str, Any]) -> None:
 
     sdk = result.get("sdk") if isinstance(result.get("sdk"), dict) else {}
     if sdk.get("ok"):
-        bits = []
-        if sdk.get("futu_sdk_importable"):
-            bits.append("futu")
-        if sdk.get("futu_core_importable"):
-            bits.append("futu_core")
-        print(f"[OK] SDK importable: {', '.join(bits)}")
+        print("[OK] SDK importable: futu")
     else:
-        print("[FAIL] SDK not importable: install futu-api or make futu_core available")
+        print("[FAIL] SDK not importable: install futu-api")
 
     wd = result.get("watchdog") if isinstance(result.get("watchdog"), dict) else {}
     if wd.get("ok"):

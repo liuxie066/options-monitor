@@ -9,10 +9,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from domain.domain.fetch_source import normalize_fetch_source
-from scripts.pm_bridge import resolve_spot_fallback_enabled
 from scripts import pipeline_fetch_models
-from scripts.subprocess_utils import run_cmd
+from src.application.required_data_fetching import (
+    RequiredDataFetchRequest,
+    fetch_required_data_opend,
+)
 
 
 def ensure_required_data(
@@ -30,7 +31,6 @@ def ensure_required_data(
     fetch_source: str = 'opend',
     fetch_host: str = '127.0.0.1',
     fetch_port: int = 11111,
-    spot_from_yahoo: bool | None = None,
     max_strike: float | None = None,
     min_dte: int | None = None,
     max_dte: int | None = None,
@@ -41,7 +41,7 @@ def ensure_required_data(
     if not (want_put or want_call):
         return
 
-    src = normalize_fetch_source(fetch_source)
+    src = 'opend'
 
     # In dev mode, keep fetch write/read model separated from pipeline orchestration:
     # - write model: fetch_required_data.events.jsonl + fetch_required_data.snapshots.json
@@ -84,45 +84,24 @@ def ensure_required_data(
             else:
                 return
 
-    # fetch_required_data.py no longer exists; use fetch_market_data(_opend).py directly.
-    if src == 'opend':
-        opt_types = ('put,call' if (want_put and want_call) else ('put' if want_put else 'call'))
-        cmd = [
-            py, 'scripts/fetch_market_data_opend.py',
-            '--symbols', sym,
-            '--limit-expirations', str(limit_expirations),
-            '--host', str(fetch_host),
-            '--port', str(int(fetch_port)),
-            '--option-types', opt_types,
-            '--output-root', str(required_data_dir),
-        ]
-        if min_dte is not None:
-            cmd.extend(['--min-dte', str(int(min_dte))])
-        if max_dte is not None:
-            cmd.extend(['--max-dte', str(int(max_dte))])
-
-        # US spot policy: OpenD often lacks US quote right; default to built-in Yahoo
-        # fallback unless explicitly disabled. Legacy key remains accepted upstream.
-        if spot_from_yahoo is None:
-            spot_from_yahoo = resolve_spot_fallback_enabled({}, symbol=symbol)
-        if bool(spot_from_yahoo):
-            cmd.append('--spot-from-yahoo')
-        if (max_strike is not None) and want_put:
-            cmd.extend(['--max-strike', str(max_strike)])
-        # Cache option_chain daily to reduce OpenD calls (US/HK share the same OpenD limit).
-        cmd.append('--chain-cache')
-        if is_scheduled:
-            cmd.append('--quiet')
-    else:
-        cmd = [
-            py, 'scripts/fetch_market_data.py',
-            '--symbols', sym,
-            '--output-root', str(required_data_dir),
-            '--limit-expirations', str(limit_expirations),
-        ]
+    option_types = 'put,call' if (want_put and want_call) else ('put' if want_put else 'call')
 
     try:
-        run_cmd(cmd, cwd=base, timeout_sec=timeout_sec, is_scheduled=is_scheduled)
+        fetch_required_data_opend(
+            base=base,
+            request=RequiredDataFetchRequest(
+                symbol=sym,
+                limit_expirations=int(limit_expirations),
+                host=str(fetch_host),
+                port=int(fetch_port),
+                output_root=required_data_dir,
+                option_types=option_types,
+                max_strike=(float(max_strike) if ((max_strike is not None) and want_put) else None),
+                min_dte=(int(min_dte) if min_dte is not None else None),
+                max_dte=(int(max_dte) if max_dte is not None else None),
+                chain_cache=True,
+            ),
+        )
         if (not is_scheduled) and (state_dir is not None):
             pipeline_fetch_models.record_fetch_snapshot(
                 state_dir=state_dir,

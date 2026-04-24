@@ -15,6 +15,7 @@ def test_normalize_trade_deal_maps_core_fields() -> None:
         "qty": 2,
         "price": "3.93",
         "strike": "480",
+        "multiplier": 100,
         "expiration": "20260429",
         "currency": "HKD",
         "create_time": "2026-04-09 13:10:25",
@@ -32,7 +33,7 @@ def test_normalize_trade_deal_maps_core_fields() -> None:
     assert deal.price == 3.93
     assert deal.strike == 480.0
     assert deal.multiplier == 100
-    assert deal.multiplier_source in ("builtin.hk.common", "cache", "opend", "payload")
+    assert deal.multiplier_source == "payload"
     assert deal.expiration_ymd == "2026-04-29"
     assert deal.currency == "HKD"
     assert isinstance(deal.trade_time_ms, int)
@@ -49,6 +50,7 @@ def test_normalize_trade_deal_keeps_unknown_position_effect_when_missing() -> No
             "qty": 1,
             "price": 1.23,
             "strike": 100,
+            "multiplier": 100,
             "expiry_date": "260618",
             "currency_code": "USD",
         },
@@ -58,5 +60,5 @@ def test_normalize_trade_deal_keeps_unknown_position_effect_when_missing() -> No
     assert deal.position_effect is None
     assert deal.internal_account == "sy"
     assert deal.multiplier == 100
-    assert deal.multiplier_source in ("builtin.us.default", "cache", "opend", "payload")
+    assert deal.multiplier_source == "payload"
     assert deal.expiration_ymd == "2026-06-18"

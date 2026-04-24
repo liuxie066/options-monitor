@@ -1,48 +1,29 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import argparse
+import sys
 from pathlib import Path
+
+repo_base = Path(__file__).resolve().parents[1]
+if str(repo_base) not in sys.path:
+    sys.path.insert(0, str(repo_base))
 
 import pandas as pd
 from pandas.errors import EmptyDataError
 
+from scripts.alert_rules import render_sell_put_comment
 from scripts.io_utils import atomic_write_text
+from scripts.report_formatting import num, pct, strike_text
 from domain.domain.engine import (
     build_strategy_config,
     rank_scored_candidates,
 )
 
-
-def pct(v, digits=2):
-    if pd.isna(v):
-        return "-"
-    return f"{float(v)*100:.{digits}f}%"
-
-
-def num(v, digits=2):
-    if pd.isna(v):
-        return "-"
-    return f"{float(v):,.{digits}f}"
-
-
-def default_comment(row) -> str:
-    risk = row.get("risk_label", "未知")
-    annual = float(row.get("annualized_net_return_on_cash_basis", 0) or 0)
-    spread = float(row.get("spread_ratio", 1) or 1)
-
-    if risk == "激进":
-        return "年化很高，但离现价较近，偏激进。"
-    if annual >= 0.20 and spread <= 0.20:
-        return "收益和安全边际比较平衡，可优先看。"
-    if annual >= 0.12:
-        return "收益尚可，整体可考虑。"
-    return "可作为备选观察。"
-
-
 def render_one(row) -> str:
     symbol = row["symbol"]
     expiration = row["expiration"]
-    strike = num(row["strike"], 0 if float(row["strike"]).is_integer() else 2)
+    strike = strike_text(row["strike"])
     title = f"[Sell Put 候选] {symbol} {expiration} {strike}P"
 
     cash_req_cny = None
@@ -118,7 +99,7 @@ def render_one(row) -> str:
         f"OI / Volume: {int(row.get('open_interest', 0) or 0)} / {int(row.get('volume', 0) or 0)}",
         f"Spread Ratio: {pct(row.get('spread_ratio', 0))}",
         "",
-        f"判断: {default_comment(row)}",
+        f"判断: {render_sell_put_comment(row)}",
     ]
     return "\n".join(body)
 
@@ -179,3 +160,31 @@ def render_sell_put_alerts(
     print(text)
     print(f"[DONE] alerts -> {output_file}")
     return text
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description='Render Sell Put alert text from candidate CSV')
+    parser.add_argument('--input', default=None, help='Input CSV path (default: <report-dir>/sell_put_candidates_labeled.csv)')
+    parser.add_argument('--report-dir', default='output/reports', help='Report dir for default input/output (default: output/reports)')
+    parser.add_argument('--top', type=int, default=5)
+    parser.add_argument('--symbol', default=None)
+    parser.add_argument('--output', default=None, help='Output txt path (default: <report-dir>/sell_put_alerts.txt)')
+    parser.add_argument('--layered', action='store_true', help='Pick layered alerts by risk label')
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    render_sell_put_alerts(
+        input_path=args.input,
+        report_dir=args.report_dir,
+        top=args.top,
+        symbol=args.symbol,
+        output_path=args.output,
+        layered=args.layered,
+    )
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

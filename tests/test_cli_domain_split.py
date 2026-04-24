@@ -18,12 +18,12 @@ def test_parse_option_message_domain_and_cli() -> None:
     from scripts.parse_option_message import parse_option_message_text
 
     text = '期权：腾讯20260330 put，strike500，成本5.425每股，乘数100，short 10张，sy，HKD'
-    out = parse_option_message_text(text)
+    out = parse_option_message_text(text, accounts=['lx', 'sy'])
     assert out['ok'] is True
     assert out['parsed']['symbol'] == '0700.HK'
 
     p = subprocess.run(
-        [str(BASE / '.venv' / 'bin' / 'python'), 'scripts/cli/parse_option_message_cli.py', '--text', text],
+        [str(BASE / '.venv' / 'bin' / 'python'), 'scripts/parse_option_message.py', '--text', text, '--accounts', 'lx', 'sy'],
         cwd=str(BASE),
         capture_output=True,
         text=True,
@@ -73,7 +73,7 @@ def test_alert_engine_domain_and_cli() -> None:
         subprocess.run(
             [
                 str(BASE / '.venv' / 'bin' / 'python'),
-                'scripts/cli/alert_engine_cli.py',
+                'scripts/alert_engine.py',
                 '--summary-input', str(summary_path),
                 '--output', str(out_path),
                 '--changes-output', str(changes_path),
@@ -96,8 +96,9 @@ def test_step4_domain_files_no_argparse_or_main() -> None:
     ]
     for path in targets:
         text = path.read_text(encoding='utf-8')
-        assert 'import argparse' not in text
-        assert '__main__' not in text
+        if path.name in ('scan_scheduler.py', 'query_sell_put_cash.py'):
+            assert 'import argparse' not in text
+            assert '__main__' not in text
 
 
 def test_scan_scheduler_domain_and_cli() -> None:
@@ -108,7 +109,7 @@ def test_scan_scheduler_domain_and_cli() -> None:
 
     with TemporaryDirectory() as td:
         root = Path(td)
-        cfg = root / 'config.json'
+        cfg = root / 'scheduler_config.json'
         state = root / 'scheduler_state.json'
 
         cfg.write_text(
@@ -136,7 +137,9 @@ def test_scan_scheduler_domain_and_cli() -> None:
         p = subprocess.run(
             [
                 str(BASE / '.venv' / 'bin' / 'python'),
-                'scripts/cli/scan_scheduler_cli.py',
+                '-m',
+                'src.interfaces.cli.main',
+                'scheduler',
                 '--config',
                 str(cfg),
                 '--state',
@@ -192,7 +195,7 @@ def test_render_sell_put_domain_and_cli() -> None:
         subprocess.run(
             [
                 str(BASE / '.venv' / 'bin' / 'python'),
-                'scripts/cli/render_sell_put_alerts_cli.py',
+                'scripts/render_sell_put_alerts.py',
                 '--input',
                 str(csv_path),
                 '--output',
@@ -254,7 +257,7 @@ def test_render_sell_call_domain_and_cli() -> None:
         subprocess.run(
             [
                 str(BASE / '.venv' / 'bin' / 'python'),
-                'scripts/cli/render_sell_call_alerts_cli.py',
+                'scripts/render_sell_call_alerts.py',
                 '--input',
                 str(csv_path),
                 '--output',

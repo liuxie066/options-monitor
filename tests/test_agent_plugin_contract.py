@@ -41,7 +41,7 @@ def test_agent_cli_spec_prints_json_manifest() -> None:
     import subprocess
 
     p = subprocess.run(
-        [str((BASE / ".venv" / "bin" / "python").resolve()), "scripts/cli/om_agent_cli.py", "spec"],
+        [str((BASE / "om-agent").resolve()), "spec"],
         cwd=str(BASE),
         capture_output=True,
         text=True,
@@ -50,7 +50,7 @@ def test_agent_cli_spec_prints_json_manifest() -> None:
     payload = json.loads(p.stdout)
     assert payload["name"] == "options-monitor-local-tools"
     assert any(str(x.get("name")) == "query_cash_headroom" for x in payload.get("tools", []))
-    assert payload["launcher"]["init_command"][0:2] == ["./om-agent", "init"]
+    assert "init_command" not in payload["launcher"]
     assert payload["launcher"]["add_account_command"][0:2] == ["./om-agent", "add-account"]
     assert payload["launcher"]["edit_account_command"][0:2] == ["./om-agent", "edit-account"]
     assert payload["launcher"]["remove_account_command"][0:2] == ["./om-agent", "remove-account"]

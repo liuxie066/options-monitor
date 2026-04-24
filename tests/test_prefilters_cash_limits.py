@@ -14,8 +14,8 @@ def test_apply_prefilters_disables_sell_call_without_portfolio_context() -> None
         want_put=False,
         want_call=True,
         portfolio_ctx=None,
-        fx_usd_per_cny=None,
-        hkdcny=None,
+        usd_per_cny_exchange_rate=None,
+        cny_per_hkd_exchange_rate=None,
     )
     assert pf.want_call is False
 
@@ -33,8 +33,8 @@ def test_apply_prefilters_keeps_sell_call_with_futu_portfolio_stock() -> None:
                 'NVDA': {'symbol': 'NVDA', 'shares': 200, 'avg_cost': 100.0, 'currency': 'USD'}
             },
         },
-        fx_usd_per_cny=None,
-        hkdcny=None,
+        usd_per_cny_exchange_rate=None,
+        cny_per_hkd_exchange_rate=None,
     )
     assert pf.want_call is True
     assert pf.stock is not None
@@ -51,6 +51,6 @@ def test_derive_put_cash_cap_uses_cny_fallback_for_us_symbols() -> None:
     }
     with patch('scripts.multiplier_cache.load_cache', return_value={}):
         with patch('scripts.multiplier_cache.get_cached_multiplier', return_value=100):
-            out = derive_put_max_strike_from_cash('NVDA', ctx, fx_usd_per_cny=0.14, hkdcny=None)
+            out = derive_put_max_strike_from_cash('NVDA', ctx, usd_per_cny_exchange_rate=0.14, cny_per_hkd_exchange_rate=None)
     assert out is not None
     assert abs(float(out) - 78.0) < 1e-9

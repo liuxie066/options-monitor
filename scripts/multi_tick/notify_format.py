@@ -159,7 +159,7 @@ def build_merged_message(
     any_content = False
 
     for r in results:
-        if not (r.should_notify and r.meaningful and r.notification_text.strip()):
+        if not (r.should_notify and r.notification_text.strip()):
             continue
         any_content = True
 
@@ -193,7 +193,7 @@ def build_account_message(
     now_bj: str,
     cash_footer_lines: list[str] | None = None,
 ) -> str:
-    if not (result.should_notify and result.meaningful and result.notification_text.strip()):
+    if not (result.should_notify and result.notification_text.strip()):
         return ''
 
     kept = result.notification_text.strip().splitlines()

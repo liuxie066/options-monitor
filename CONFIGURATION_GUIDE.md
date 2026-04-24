@@ -25,7 +25,7 @@
 
 ### 最小配置和补充配置怎么区分？
 - 最小配置：`config.us.json` / `config.hk.json` + `secrets/portfolio.sqlite.json`
-- 补充配置：在同一套结构上继续补 `notifications.*`、`runtime.*`、`alert_policy.*`、`intake.*`、`portfolio.source_by_account`、`feishu.*`
+- 补充配置：在同一套结构上继续补 `notifications.*`、`runtime.*`、`alert_policy.change_annual_threshold`、`intake.*`、`portfolio.source_by_account`、`feishu.*`
 - 不再维护“两套 schema”或“两份不同风格文档”；只有一套结构，只是填写程度不同。
 
 ---
@@ -149,7 +149,7 @@
 #### 最小配置下默认不需要
 - `notifications.*`
 - `runtime.*`
-- `alert_policy.*`
+- `alert_policy.change_annual_threshold`
 - `fetch_policy.*`
 - `intake.*`
 - `portfolio.source_by_account`
@@ -179,7 +179,7 @@
 
 ### 4.4 portfolio：账户约束来源
 - `data_config`: 最小配置建议指向 `secrets/portfolio.sqlite.json`，只负责 `option_positions.sqlite_path`
-- `pm_config`: 兼容旧配置的别名；新配置不再推荐继续使用
+- `data_config`: 持仓/SQLite/Feishu 数据配置路径
 - `broker`: 对外公开配置名，用来过滤 holdings / option_positions（例如 `富途`）
 - `market`: 兼容旧配置的别名；新配置不再推荐继续使用
 - `account`: 用来过滤两张表（例如 `lx`）
@@ -212,8 +212,8 @@
 - `symbol_timeout_sec`：单标的 fetch/scan 超时
 - `portfolio_timeout_sec`：读取 holdings/positions 超时
 
-### 4.8 alert_policy：提醒分级门槛
-- `sell_put_high_return`、`sell_call_high_return` 等
+### 4.8 alert_policy：提醒变化阈值
+- `change_annual_threshold`：年化变化达到该阈值才写入 changes
 
 ### 4.9 close_advice：平仓建议
 - `enabled`: 是否生成平仓建议；关闭时仍会产出空文件，不会报错
@@ -309,9 +309,9 @@
 }
 ```
 
-### 兼容方式（旧部署）
-- 如果你已经维护 `../portfolio-management/config.json`，仍可把 `portfolio.data_config` 指向该文件。
-- 或设置环境变量 `OM_DATA_CONFIG=../portfolio-management/config.json`。
+### 外部数据配置（旧部署也适用）
+- 如果你已经在仓外维护数据配置 JSON，也可以直接把 `portfolio.data_config` 指向该文件。
+- 或设置环境变量 `OM_DATA_CONFIG=/absolute/path/to/portfolio.sqlite.json`。
 
 示例：
 

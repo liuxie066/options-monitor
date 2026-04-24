@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VPY="$ROOT/.venv/bin/python"
+
+if [[ -x "$VPY" ]]; then
+  exec "$VPY" -m src.interfaces.cli.main "$@"
+fi
+
+exec python3 -m src.interfaces.cli.main "$@"

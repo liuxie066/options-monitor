@@ -164,8 +164,8 @@ def validate_config(cfg: dict):
         if isinstance(fetch, dict):
             src_raw = fetch.get('source', 'futu')
             src = normalize_fetch_source(src_raw)
-            if src not in ('opend', 'yahoo'):
-                die(f"{sym}.fetch.source unsupported: {src_raw}; use futu or yahoo")
+            if src != 'opend':
+                die(f"{sym}.fetch.source unsupported: {src_raw}; use futu")
             if str(src_raw or '').strip().lower() == 'opend':
                 warn(f"{sym}.fetch.source=opend is legacy; prefer futu")
 

@@ -140,7 +140,7 @@ def run_watchlist_pipeline(
     runtime = cfg.get('runtime', {}) or {}
     profiles = resolve_templates_config(cfg)
 
-    portfolio_ctx, option_ctx, fx_usd_per_cny, hkdcny = build_pipeline_context_fn(
+    portfolio_ctx, option_ctx, usd_per_cny_exchange_rate, cny_per_hkd_exchange_rate = build_pipeline_context_fn(
         py=py,
         base=base,
         cfg=cfg,
@@ -182,8 +182,8 @@ def run_watchlist_pipeline(
                     item_fetch,
                     top_n,
                     portfolio_ctx=None,
-                    fx_usd_per_cny=None,
-                    hkdcny=None,
+                    usd_per_cny_exchange_rate=None,
+                    cny_per_hkd_exchange_rate=None,
                     timeout_sec=symbol_timeout_sec,
                     is_scheduled=is_scheduled,
                 )
@@ -195,8 +195,8 @@ def run_watchlist_pipeline(
                 item,
                 top_n,
                 portfolio_ctx=portfolio_ctx,
-                fx_usd_per_cny=fx_usd_per_cny,
-                hkdcny=hkdcny,
+                usd_per_cny_exchange_rate=usd_per_cny_exchange_rate,
+                cny_per_hkd_exchange_rate=cny_per_hkd_exchange_rate,
                 timeout_sec=symbol_timeout_sec,
                 is_scheduled=is_scheduled,
             )
@@ -231,3 +231,68 @@ def run_watchlist_pipeline(
         build_symbols_digest_fn(summary_rows, int(top_n))
 
     return summary_rows
+
+
+def run_watchlist_pipeline_default(
+    *,
+    py: str,
+    base: Path,
+    cfg: dict,
+    report_dir: Path,
+    state_dir: Path,
+    shared_state_dir: Path | None,
+    required_data_dir: Path,
+    is_scheduled: bool,
+    top_n: int,
+    symbol_timeout_sec: int,
+    portfolio_timeout_sec: int,
+    want_scan: bool,
+    no_context: bool,
+    symbols_arg: str | None,
+    log: Callable[[str], None],
+    want_fn: Callable[[str], bool],
+) -> list[dict]:
+    from scripts.config_profiles import apply_profiles
+    from scripts.pipeline_context import build_pipeline_context
+    from scripts.pipeline_symbol import process_symbol
+    from scripts.report_builders import build_symbols_digest, build_symbols_summary
+
+    return run_watchlist_pipeline(
+        py=py,
+        base=base,
+        cfg=cfg,
+        report_dir=report_dir,
+        is_scheduled=is_scheduled,
+        top_n=top_n,
+        symbol_timeout_sec=symbol_timeout_sec,
+        portfolio_timeout_sec=portfolio_timeout_sec,
+        want_scan=want_scan,
+        no_context=no_context,
+        symbols_arg=symbols_arg,
+        log=log,
+        want_fn=want_fn,
+        apply_profiles_fn=apply_profiles,
+        process_symbol_fn=(
+            lambda *a, **kw: process_symbol(
+                *a,
+                **kw,
+                required_data_dir=required_data_dir,
+                report_dir=report_dir,
+                state_dir=state_dir,
+                is_scheduled=is_scheduled,
+            )
+        ),
+        build_pipeline_context_fn=(
+            lambda **kw: build_pipeline_context(
+                **kw,
+                state_dir=state_dir,
+                shared_state_dir=shared_state_dir,
+            )
+        ),
+        build_symbols_summary_fn=lambda rows: build_symbols_summary(rows, report_dir, is_scheduled=is_scheduled),
+        build_symbols_digest_fn=lambda rows, n: (
+            None
+            if is_scheduled
+            else build_symbols_digest([r.get("symbol") for r in rows if r.get("symbol")], report_dir)
+        ),
+    )

@@ -41,23 +41,22 @@ def resolve_runtime_config_path(
     return (repo_base() / DEFAULT_CONFIGS[key]).resolve()
 
 
-def _absolutize_portfolio_pm_config(cfg: dict[str, Any], *, config_path: Path) -> dict[str, Any]:
+def _absolutize_portfolio_data_config(cfg: dict[str, Any], *, config_path: Path) -> dict[str, Any]:
     out = deepcopy(cfg)
     portfolio = out.get("portfolio")
     if not isinstance(portfolio, dict):
         return out
 
-    pm_ref = portfolio.get("data_config")
-    if pm_ref is None or not str(pm_ref).strip():
-        pm_ref = portfolio.get("pm_config")
-    if pm_ref is None or not str(pm_ref).strip():
+    data_ref = portfolio.get("data_config")
+    if data_ref is None or not str(data_ref).strip():
+        data_ref = portfolio.get("pm_config")
+    if data_ref is None or not str(data_ref).strip():
         return out
 
-    pm_path = Path(str(pm_ref).strip()).expanduser()
-    if not pm_path.is_absolute():
-        pm_path = (config_path.parent / pm_path).resolve()
-    portfolio["data_config"] = str(pm_path)
-    portfolio["pm_config"] = str(pm_path)
+    data_path = Path(str(data_ref).strip()).expanduser()
+    if not data_path.is_absolute():
+        data_path = (config_path.parent / data_path).resolve()
+    portfolio["data_config"] = str(data_path)
     return out
 
 
@@ -87,7 +86,7 @@ def load_runtime_config(
             message="runtime config must be a JSON object",
             details={"path": path.name},
         )
-    cfg = _absolutize_portfolio_pm_config(raw, config_path=path)
+    cfg = _absolutize_portfolio_data_config(raw, config_path=path)
     cfg = normalize_portfolio_broker_config(cfg)
     cfg["config_source_path"] = str(path)
     return path, cfg

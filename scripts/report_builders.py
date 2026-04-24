@@ -11,25 +11,10 @@ from pathlib import Path
 
 import pandas as pd
 
+from scripts.summary_formatting import apply_summary_defaults, format_summary_row
 
 def build_symbols_summary(summary_rows: list[dict], report_dir: Path, *, is_scheduled: bool = False):
-    df = pd.DataFrame(summary_rows)
-    # Backward/partial schema compatibility: tolerate missing columns in summary rows.
-    defaults = {
-        'symbol': '-',
-        'strategy': '-',
-        'candidate_count': 0,
-        'top_contract': None,
-        'annualized_return': None,
-        'net_income': None,
-        'strike': None,
-        'dte': None,
-        'risk_label': None,
-        'note': '',
-    }
-    for col, default in defaults.items():
-        if col not in df.columns:
-            df[col] = default
+    df = apply_summary_defaults(pd.DataFrame(summary_rows))
     csv_path = report_dir / 'symbols_summary.csv'
     txt_path = report_dir / 'symbols_summary.txt'
     df.to_csv(csv_path, index=False)
@@ -42,19 +27,7 @@ def build_symbols_summary(summary_rows: list[dict], report_dir: Path, *, is_sche
         ordered['annualized_return_sort'] = ordered['annualized_return'].fillna(-1)
         ordered = ordered.sort_values(['symbol', 'strategy'])
         for _, r in ordered.iterrows():
-            annual = '-' if pd.isna(r['annualized_return']) else f"{float(r['annualized_return']) * 100:.2f}%"
-            income = '-' if pd.isna(r['net_income']) else f"{float(r['net_income']):,.2f}"
-            strike = '-' if pd.isna(r['strike']) else (str(int(r['strike'])) if float(r['strike']).is_integer() else f"{float(r['strike']):.2f}")
-            dte = '-' if pd.isna(r['dte']) else str(int(r['dte']))
-            candidate_count = 0 if pd.isna(r['candidate_count']) else int(r['candidate_count'])
-            top_contract = '-' if pd.isna(r['top_contract']) or not r['top_contract'] else r['top_contract']
-            risk_label = '-' if pd.isna(r['risk_label']) or not r['risk_label'] else r['risk_label']
-            note = '-' if pd.isna(r['note']) or not r['note'] else r['note']
-            lines.append(
-                f"- {r['symbol']} | {r['strategy']} | 候选 {candidate_count} | "
-                f"Top {top_contract} | 年化 {annual} | 净收入 {income} | "
-                f"DTE {dte} | Strike {strike} | {risk_label} | {note}"
-            )
+            lines.append(format_summary_row(r))
 
     if not is_scheduled:
         txt_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')

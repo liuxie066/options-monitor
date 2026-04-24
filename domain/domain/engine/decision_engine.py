@@ -2,9 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Mapping, Sequence
-
-from domain.domain.fetch_source import is_futu_fetch_source
+from typing import Any, Callable, Mapping
 from domain.domain.tool_boundary import (
     normalize_notify_window_aliases,
     normalize_scheduler_decision_payload,
@@ -55,59 +53,18 @@ class AccountSchedulerDecisionView:
             ),
         )
 
-
-def decide_opend_degrade_to_yahoo(
-    *,
-    allow_downgrade: bool,
-    has_hk_opend: bool,
-    watchdog_timed_out: bool,
-) -> bool:
-    """Keep current fallback gating semantics unchanged."""
-    return bool(allow_downgrade and (not has_hk_opend) and (not watchdog_timed_out))
-
-
-def apply_opend_degrade_to_yahoo(
-    *,
-    symbols: Sequence[Any],
-    allow_downgrade: bool,
-    has_hk_opend: bool,
-    watchdog_timed_out: bool,
-) -> bool:
-    """Apply per-run OpenD->Yahoo fallback with unchanged legacy predicates."""
-    if not decide_opend_degrade_to_yahoo(
-        allow_downgrade=allow_downgrade,
-        has_hk_opend=has_hk_opend,
-        watchdog_timed_out=watchdog_timed_out,
-    ):
-        return False
-
-    degraded = False
-    for sym in (symbols or []):
-        if not isinstance(sym, dict):
-            continue
-        if str(sym.get('market') or '').upper() != 'US':
-            continue
-        fetch = sym.get('fetch')
-        if not isinstance(fetch, dict):
-            continue
-        if not is_futu_fetch_source(fetch.get('source')):
-            continue
-        fetch['_source_resolution'] = 'degraded_to_yahoo'
-        fetch['source'] = 'yahoo'
-        for k in ('host', 'port', 'spot_from_portfolio_management', 'spot_from_yahoo'):
-            fetch.pop(k, None)
-        sym['fetch'] = fetch
-        degraded = True
-    return degraded
-
-
 def score_notify_candidate(result: Any) -> int:
     """Keep v1 scoring neutral to preserve ordering semantics."""
     return 1 if bool(str(getattr(result, 'notification_text', '') or '').strip()) else 0
 
 
 def filter_notify_candidates(results: list[Any]) -> list[Any]:
-    return [r for r in results if r.should_notify and r.meaningful and bool(r.notification_text.strip())]
+    return [
+        r
+        for r in results
+        if getattr(r, 'should_notify', False)
+        and decide_notification_meaningful(str(getattr(r, 'notification_text', '') or ''))
+    ]
 
 
 def rank_notify_candidates(results: list[Any]) -> list[Any]:
@@ -234,7 +191,8 @@ def decide_notification_meaningful(
     *,
     empty_placeholder: str = '今日无需要主动提醒的内容。',
 ) -> bool:
-    return bool(notification_text) and (notification_text != empty_placeholder)
+    text = str(notification_text or '').strip()
+    return bool(text) and (text != empty_placeholder)
 
 
 def decide_scheduler_timing(

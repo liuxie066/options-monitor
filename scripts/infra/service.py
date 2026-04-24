@@ -48,7 +48,9 @@ def run_scan_scheduler_cli(
 ) -> subprocess.CompletedProcess:
     cmd = [
         str(vpy),
-        'scripts/cli/scan_scheduler_cli.py',
+        '-m',
+        'src.interfaces.cli.main',
+        'scheduler',
         '--config',
         str(config),
         '--state',
@@ -85,7 +87,9 @@ def run_pipeline_script(
 ) -> subprocess.CompletedProcess:
     cmd = [
         str(vpy),
-        'scripts/run_pipeline.py',
+        '-m',
+        'src.interfaces.cli.main',
+        'scan-pipeline',
         '--config',
         str(config),
         '--mode',

@@ -21,6 +21,6 @@ mkdir -p secrets
 
 echo "[install-agent] OK"
 echo "[install-agent] next:"
-echo "  1) run ./om-agent init --market us --futu-acc-id <REAL_ACC_ID> --symbol NVDA"
-echo "  2) run ./om-agent run --tool healthcheck --input-json '{\"config_key\":\"us\"}'"
-echo "  3) run ./om-agent run --tool scan_opportunities --input-json '{\"config_key\":\"us\"}'"
+echo "  1) start OpenD and confirm it is logged in"
+echo "  2) run ./run_webui.sh"
+echo "  3) finish first-time initialization in the local WebUI"

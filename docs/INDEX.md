@@ -16,8 +16,8 @@ This repo is meant to run as a repeatable monitoring pipeline.
 ## Core entrypoints
 
 - Runtime config entry (OM only): `config.us.json` / `config.hk.json`
-- Main pipeline: `./run_watchlist.sh` -> `scripts/run_pipeline.py`
-- Scheduler: `scripts/cli/scan_scheduler_cli.py`
+- Main pipeline: `./run_watchlist.sh` -> `./om scan-pipeline`
+- Scheduler: `python -m src.interfaces.cli.main scheduler`
 - Alert engine: `scripts/alert_engine.py`
 - Dev mainline unified entry: `scripts/send_if_needed_multi.py` (thin wrapper -> `scripts.multi_tick.main.main`)
 - Production scheduler entry (unchanged): `scripts/send_if_needed.py`
@@ -27,7 +27,7 @@ This repo is meant to run as a repeatable monitoring pipeline.
 - Per-account state: `output_accounts/<account>/state/`
   - `last_run.json`, `scheduler_state.json`, `cash_snapshot.json`, etc.
 
-## Option positions (write-back)
+## Position lots (write-back)
 
 - Parse message -> normalized params: `scripts/parse_option_message.py`
 - Parse + write (safe by default): `scripts/option_intake.py` (default `--dry-run`)

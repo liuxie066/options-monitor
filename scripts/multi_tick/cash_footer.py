@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import json
-import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from scripts.io_utils import money_cny, parse_last_json
+from scripts.io_utils import money_cny
+from scripts.query_sell_put_cash import query_sell_put_cash
 
 
 def snapshot_fresh(payload: dict, max_age_sec: int) -> bool:
@@ -35,8 +35,6 @@ def query_cash_footer(
     timeout_sec: int = 180,
     snapshot_max_age_sec: int = 900,
 ) -> list[str]:
-    vpy = str(base / '.venv' / 'bin' / 'python')
-
     lines: list[str] = []
     payloads: dict[str, dict] = {}
     errors: dict[str, str] = {}
@@ -55,31 +53,16 @@ def query_cash_footer(
             pass
 
         try:
-            cmd = [
-                vpy,
-                'scripts/cli/query_sell_put_cash_cli.py',
-                '--market', str(market),
-                '--account', acct_l,
-                '--format', 'json',
-                '--out-dir', str(state_dir),
-            ]
-            if config_path is not None and str(config_path).strip():
-                cmd.extend(['--config', str(config_path)])
-            p = subprocess.run(
-                cmd,
-                cwd=str(base),
-                capture_output=True,
-                text=True,
-                timeout=timeout_sec,
+            payload = query_sell_put_cash(
+                config=(str(config_path) if config_path is not None and str(config_path).strip() else None),
+                market=str(market),
+                account=acct_l,
+                output_format='json',
+                out_dir=str(state_dir),
+                base_dir=base,
             )
         except Exception as e:
             return acct_l, None, f"exec_error: {e}"
-
-        if p.returncode != 0:
-            err = (p.stderr or p.stdout or '').strip().splitlines()[-1:]
-            return acct_l, None, (err[0] if err else f"returncode={p.returncode}")
-
-        payload = parse_last_json(p.stdout)
         try:
             if isinstance(payload, dict) and payload:
                 snap_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')

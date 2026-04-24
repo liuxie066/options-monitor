@@ -13,22 +13,15 @@ Constraints:
 
 from pathlib import Path
 
-from scripts.subprocess_utils import run_cmd
-
-
-def stage_only_changes_out(*, report_dir: Path) -> str:
-    # Stage-only should not mutate snapshot history, but it's still useful to
-    # materialize changes output for notify rendering and debugging.
-    return str((report_dir / 'symbols_changes.txt').as_posix())
+from src.application.pipeline_reporting import (
+    run_pipeline_alert_stage,
+    run_pipeline_notification_stage,
+)
 
 
 def run_stage_only_alert_notify(
     *,
-    py: str,
-    base: Path,
     report_dir: Path,
-    state_dir: Path,
-    is_scheduled: bool,
     stage_only: str,
     want,
     log,
@@ -45,26 +38,19 @@ def run_stage_only_alert_notify(
         if not (alerts_path.exists() and alerts_path.stat().st_size > 0):
             raise SystemExit(f"[STAGE_ONLY_ERROR] missing required file: {alerts_path}")
 
-    changes_out = stage_only_changes_out(report_dir=report_dir)
-
-    alert_cmd = [
-        py, 'scripts/cli/alert_engine_cli.py',
-        '--summary-input', str((report_dir / 'symbols_summary.csv').as_posix()),
-        '--output', str((report_dir / 'symbols_alerts.txt').as_posix()),
-        '--changes-output', changes_out,
-    ]
     # stage-only: do NOT update snapshot/history
     # stage-only: do NOT update snapshot/history (do not touch symbols_summary_prev.csv)
-    # NOTE: state_dir is injected for future compatibility but intentionally unused here.
     if want('alert'):
-        run_cmd(alert_cmd, cwd=base, is_scheduled=is_scheduled)
+        run_pipeline_alert_stage(
+            summary_input=(report_dir / 'symbols_summary.csv').resolve(),
+            output=(report_dir / 'symbols_alerts.txt').resolve(),
+            changes_output=(report_dir / 'symbols_changes.txt').resolve(),
+        )
 
     if want('notify'):
-        run_cmd([
-            py, 'scripts/notify_symbols.py',
-            '--alerts-input', str((report_dir / 'symbols_alerts.txt').as_posix()),
-            '--changes-input', changes_out,
-            '--output', str((report_dir / 'symbols_notification.txt').as_posix()),
-        ], cwd=base, is_scheduled=is_scheduled)
+        run_pipeline_notification_stage(
+            alerts_input=(report_dir / 'symbols_alerts.txt').resolve(),
+            output=(report_dir / 'symbols_notification.txt').resolve(),
+        )
 
     log(f"[INFO] stage-only done: {stage_only}")

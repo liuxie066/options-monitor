@@ -4,26 +4,22 @@
 from __future__ import annotations
 
 import json
-import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
-from scripts.account_config import resolve_holdings_account, resolve_portfolio_source
 from scripts.cash_secured_utils import (
     cash_secured_symbol_cny,
     normalize_cash_secured_by_symbol_by_ccy,
     normalize_cash_secured_total_by_ccy,
     read_cash_secured_total_cny,
 )
-from scripts.config_loader import normalize_portfolio_broker_config, resolve_pm_config_path
-from scripts.fx_rates import get_rates_or_fetch_latest
+from scripts.config_loader import normalize_portfolio_broker_config, resolve_data_config_path
+from scripts.exchange_rates import get_exchange_rates_or_fetch_latest
+from scripts.fetch_option_positions_context import build_context as build_option_positions_context
 from scripts.futu_portfolio_context import fetch_futu_portfolio_context
-
-
-def run(cmd: list[str], cwd: Path, timeout_sec: int = 60):
-    p = subprocess.run(cmd, cwd=str(cwd), timeout=timeout_sec)
-    if p.returncode != 0:
-        raise SystemExit(p.returncode)
+from scripts.option_positions_core.service import load_option_positions_repo
+from scripts.portfolio_context_service import load_account_portfolio_context
+from src.application.option_positions_facade import load_option_position_records
 
 
 def load_json(path: Path) -> dict:
@@ -40,15 +36,6 @@ def money(v: float | None, currency: str = "USD") -> str:
     if currency.upper() in ("CNY", "RMB"):
         return f"¥{v:,.2f}"
     return f"{v:,.2f} {currency.upper()}"
-
-
-def _normalize_portfolio_source(value: str | None) -> str:
-    raw = str(value or '').strip().lower()
-    if raw in ('', 'auto'):
-        return 'auto'
-    if raw in ('futu', 'opend'):
-        return 'futu'
-    return 'holdings'
 
 
 def _resolve_runtime_config_path(*, base: Path, config: str | Path | None) -> Path | None:
@@ -88,67 +75,30 @@ def _load_runtime_config(
     return _normalize_runtime_config(cfg)
 
 
-def _fetch_portfolio_context(
-    *,
-    base: Path,
-    pm_config_path: Path,
-    portfolio_out: Path,
-    market: str,
-    account: str | None,
-    runtime_cfg: dict,
-) -> dict:
-    portfolio_cfg = (runtime_cfg.get('portfolio') or {}) if isinstance(runtime_cfg, dict) else {}
-    source_mode = _normalize_portfolio_source(resolve_portfolio_source(runtime_cfg, account=account))
-
-    if source_mode in ('auto', 'futu'):
-        try:
-            ctx = fetch_futu_portfolio_context(
-                cfg=runtime_cfg,
-                account=account,
-                market=market,
-                base_currency=str(portfolio_cfg.get('base_currency') or 'CNY'),
-            )
-            if isinstance(ctx, dict):
-                ctx = dict(ctx)
-                ctx['portfolio_source_name'] = 'futu'
-                portfolio_out.write_text(json.dumps(ctx, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-                return ctx
-        except Exception:
-            if source_mode == 'futu':
-                raise
-
-    run(
-        [
-            str(base / '.venv' / 'bin' / 'python'),
-            'scripts/fetch_portfolio_context.py',
-            '--pm-config',
-            str(pm_config_path),
-            '--market',
-            market,
-            '--account',
-            (resolve_holdings_account(runtime_cfg, account=account) or ''),
-            '--out',
-            str(portfolio_out),
-        ],
-        cwd=base,
-        timeout_sec=90,
+def _load_exchange_rate_payload(*, cache_path: Path, enabled: bool) -> dict:
+    if not enabled:
+        return {}
+    payload = get_exchange_rates_or_fetch_latest(
+        cache_path=cache_path,
+        max_age_hours=24,
     )
-    ctx = load_json(portfolio_out)
-    if isinstance(ctx, dict):
-        ctx = dict(ctx)
-        ctx.setdefault('portfolio_source_name', 'holdings')
-    return ctx
+    return payload if isinstance(payload, dict) else {}
+
+
+def _load_option_position_records(data_config_path: Path) -> list[dict]:
+    option_repo = load_option_positions_repo(data_config_path)
+    return list(load_option_position_records(option_repo))
 
 
 def query_sell_put_cash(
     *,
     config: str | Path | None = None,
-    pm_config: str | Path | None = None,
+    data_config: str | Path | None = None,
     market: str = '富途',
     account: str | None = None,
     output_format: str = 'text',
     top: int = 10,
-    no_fx: bool = False,
+    no_exchange_rates: bool = False,
     out_dir: str | Path = 'output/state',
     base_dir: Path | None = None,
     runtime_config: dict | None = None,
@@ -157,43 +107,40 @@ def query_sell_put_cash(
     base = (base_dir or Path(__file__).resolve().parents[1]).resolve()
 
     runtime_cfg = _load_runtime_config(base=base, config=config, runtime_config=runtime_config)
-    pm_config_path = resolve_pm_config_path(base=base, pm_config=pm_config)
+    data_config_path = resolve_data_config_path(base=base, data_config=data_config)
 
     out_dir_path = Path(out_dir)
     if not out_dir_path.is_absolute():
         out_dir_path = (base / out_dir_path).resolve()
     out_dir_path.mkdir(parents=True, exist_ok=True)
 
-    portfolio_out = out_dir_path / 'portfolio_context.json'
-    option_out = out_dir_path / 'option_positions_context.json'
-
-    portfolio = _fetch_portfolio_context(
+    portfolio = load_account_portfolio_context(
         base=base,
-        pm_config_path=pm_config_path,
-        portfolio_out=portfolio_out,
+        data_config=str(data_config_path),
         market=market,
         account=account,
-        runtime_cfg=runtime_cfg,
+        ttl_sec=0,
+        state_dir=out_dir_path,
+        shared_state_dir=None,
+        log=lambda _message: None,
+        runtime_config=runtime_cfg,
+        portfolio_source=None,
+        fetch_futu_portfolio_context_fn=fetch_futu_portfolio_context,
+        is_fresh_fn=lambda _path, _ttl_sec: False,
+        load_json_fn=load_json,
     )
 
-    run(
-        [
-            str(base / '.venv' / 'bin' / 'python'),
-            'scripts/fetch_option_positions_context.py',
-            '--pm-config',
-            str(pm_config_path),
-            '--market',
-            market,
-            '--account',
-            (account or ''),
-            '--out',
-            str(option_out),
-        ],
-        cwd=base,
-        timeout_sec=90,
+    option_records = _load_option_position_records(data_config_path)
+    exchange_rate_payload = _load_exchange_rate_payload(
+        cache_path=(out_dir_path / 'rate_cache.json').resolve(),
+        enabled=(not no_exchange_rates),
     )
-
-    opt = load_json(option_out)
+    opt = build_option_positions_context(
+        option_records,
+        broker=market,
+        account=account,
+        rates=exchange_rate_payload,
+    )
     portfolio_source_name = (
         str((portfolio or {}).get('portfolio_source_name') or 'holdings').strip().lower() or 'holdings'
         if isinstance(portfolio, dict)
@@ -216,26 +163,21 @@ def query_sell_put_cash(
     if cash_avail_usd is not None and cash_secured_total_usd is not None:
         cash_free_usd = cash_avail_usd - cash_secured_total_usd
 
-    usdcny = None
-    hkdcny = None
+    usdcny_exchange_rate = None
+    cny_per_hkd_exchange_rate = None
     cash_avail_cny = None
     cash_free_cny = None
 
-    if not no_fx:
+    if not no_exchange_rates:
         try:
-            fx = get_rates_or_fetch_latest(
-                cache_path=(out_dir_path / 'rate_cache.json').resolve(),
-                shared_cache_path=(base / 'output_shared' / 'state' / 'rate_cache.json').resolve(),
-                max_age_hours=24,
-            )
-            rates = (fx.get('rates') or {}) if isinstance(fx, dict) else {}
+            rates = exchange_rate_payload.get('rates') or {}
             if rates.get('USDCNY'):
-                usdcny = float(rates['USDCNY'])
+                usdcny_exchange_rate = float(rates['USDCNY'])
             if rates.get('HKDCNY'):
-                hkdcny = float(rates['HKDCNY'])
+                cny_per_hkd_exchange_rate = float(rates['HKDCNY'])
         except Exception:
-            usdcny = None
-            hkdcny = None
+            usdcny_exchange_rate = None
+            cny_per_hkd_exchange_rate = None
 
     try:
         cash_avail_cny = float((cash_by_ccy.get('CNY') if isinstance(cash_by_ccy, dict) else None))
@@ -260,15 +202,15 @@ def query_sell_put_cash(
             if c in ('CNY', 'RMB'):
                 total += fv
             elif c == 'USD':
-                if not usdcny:
+                if not usdcny_exchange_rate:
                     ok = False
                     break
-                total += fv * float(usdcny)
+                total += fv * float(usdcny_exchange_rate)
             elif c == 'HKD':
-                if not hkdcny:
+                if not cny_per_hkd_exchange_rate:
                     ok = False
                     break
-                total += fv * float(hkdcny)
+                total += fv * float(cny_per_hkd_exchange_rate)
             else:
                 ok = False
                 break
@@ -292,7 +234,7 @@ def query_sell_put_cash(
         'cash_free_cny': cash_free_cny,
         'cash_available_total_cny': cash_avail_total_cny,
         'cash_free_total_cny': cash_free_total_cny,
-        'fx_rates': {'USDCNY': usdcny, 'HKDCNY': hkdcny},
+        'exchange_rates': {'USDCNY': usdcny_exchange_rate, 'HKDCNY': cny_per_hkd_exchange_rate},
         'cash_secured_total_by_ccy': total_by_ccy_norm,
         'cash_secured_by_symbol_by_ccy': norm_by_ccy,
     }
@@ -315,12 +257,12 @@ def query_sell_put_cash(
     lines.append(f"- 总现金（全币种折算CNY）: {money(payload.get('cash_available_total_cny'), 'CNY')}")
     lines.append(f"- 总剩余现金（total free, 折算CNY）: {money(payload.get('cash_free_total_cny'), 'CNY')}")
 
-    if usdcny or hkdcny:
+    if usdcny_exchange_rate or cny_per_hkd_exchange_rate:
         parts = []
-        if usdcny:
-            parts.append(f'USDCNY={usdcny:.4f}')
-        if hkdcny:
-            parts.append(f'HKDCNY={hkdcny:.4f}')
+        if usdcny_exchange_rate:
+            parts.append(f'USDCNY={usdcny_exchange_rate:.4f}')
+        if cny_per_hkd_exchange_rate:
+            parts.append(f'HKDCNY={cny_per_hkd_exchange_rate:.4f}')
         lines.append('- 汇率: ' + ', '.join(parts))
 
     lines.append('')
@@ -332,7 +274,7 @@ def query_sell_put_cash(
     lines.append('')
     lines.append(f'## 占用明细（Top {top}，按币种）')
     if not norm_by_ccy:
-        lines.append('- (无记录：要么没有 open short puts，要么 option_positions 表未填写 cash_secured_amount/currency)')
+        lines.append('- (无记录：要么没有 open short puts，要么持仓 lot 视图缺少 cash_secured_amount/currency)')
     else:
         items = []
         for sym, m in norm_by_ccy.items():
@@ -350,11 +292,11 @@ def query_sell_put_cash(
                     float(amt)
                     if ccy == 'CNY'
                     else (
-                        float(amt) * float(usdcny)
-                        if (ccy == 'USD' and usdcny)
+                        float(amt) * float(usdcny_exchange_rate)
+                        if (ccy == 'USD' and usdcny_exchange_rate)
                         else (
-                            float(amt) * float(hkdcny)
-                            if (ccy == 'HKD' and hkdcny)
+                            float(amt) * float(cny_per_hkd_exchange_rate)
+                            if (ccy == 'HKD' and cny_per_hkd_exchange_rate)
                             else None
                         )
                     )

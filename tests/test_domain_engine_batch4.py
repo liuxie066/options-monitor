@@ -273,8 +273,8 @@ def test_main_uses_notify_dispatch_gate_entrypoint_batch4() -> None:
     base = Path(__file__).resolve().parents[1]
     src = (base / 'scripts' / 'multi_tick' / 'main.py').read_text(encoding='utf-8')
     assert 'resolve_multi_tick_engine_entrypoint' in src
-    assert 'decide_notification_delivery(' in src
-    assert 'notification_text=' in src
+    assert 'build_multi_account_delivery(' in src
+    assert 'decision_builder=decide_notification_delivery' in src
 
 
 def test_main_orchestrator_guard_batch4_no_legacy_rule_reflow() -> None:
@@ -283,11 +283,10 @@ def test_main_orchestrator_guard_batch4_no_legacy_rule_reflow() -> None:
 
     # Keep main.py as orchestration-only for key Batch-4 decisions.
     for entrypoint in (
-        'apply_opend_degrade_to_yahoo(',
         'build_opend_unhealthy_execution_plan(',
         'decide_trading_day_guard(',
         'resolve_multi_tick_engine_entrypoint(',
-        'decide_notification_delivery(',
+        'build_multi_account_delivery(',
         'engine_filter_notify_candidates(',
         'rank_notify_candidates(',
     ):

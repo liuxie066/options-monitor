@@ -8,10 +8,11 @@ This page is the shortest path to running the public local agent tools.
 git clone <repo-url> options-monitor
 cd options-monitor
 bash scripts/install_agent_plugin.sh
-./om-agent init --market us --futu-acc-id <REAL_ACC_ID> --symbol NVDA
+./run_webui.sh
 ```
 
-`init` writes the repo-local files needed by the minimal public setup:
+After OpenD is running and logged in, complete first-time initialization in the local WebUI.
+The WebUI writes the repo-local files needed by the minimal public setup:
 
 - `config.us.json` or `config.hk.json`
 - `secrets/portfolio.sqlite.json`
@@ -36,7 +37,7 @@ To install a tagged pre-release instead of `main`:
 git clone --branch v0.1.0-beta.1 --depth 1 <repo-url> options-monitor
 cd options-monitor
 bash scripts/install_agent_plugin.sh
-./om-agent init --market us --futu-acc-id <REAL_ACC_ID> --symbol NVDA
+./run_webui.sh
 ```
 
 ## 2. Prepare runtime config
@@ -48,7 +49,7 @@ By default, the public install flow uses repo-local runtime configs:
 
 Use explicit overrides only when you intentionally want a different path.
 
-`portfolio.data_config` is used for `option_positions` storage config.
+`portfolio.data_config` is used for the SQLite `trade_events + position_lots` storage config.
 If it is a relative path, it will be resolved relative to the runtime config file.
 
 For the runtime config `portfolio` block, use `broker` as the public field name.
@@ -78,9 +79,22 @@ Public `healthcheck` now treats the following as blocking errors:
 ./om-agent run --tool manage_symbols --input-json '{"config_key":"us","action":"list"}'
 ```
 
-## 6. Optional environment variables
+## 6. Start the local WebUI
 
-- `OM_PM_ROOT`: optional legacy external repo root for spot / FX fallback after built-in Yahoo providers
-- `OM_PM_RATE_CACHE`: optional legacy external FX cache path override after built-in Yahoo FX
+```bash
+./run_webui.sh
+```
+
+Default URL: `http://127.0.0.1:8000`
+
+Default runtime config paths:
+
+- `config.us.json`
+- `config.hk.json`
+
+Use `OM_WEBUI_CONFIG_DIR`, `OM_WEBUI_CONFIG_US`, or `OM_WEBUI_CONFIG_HK` only when you intentionally want to override the repo-local defaults.
+
+## 7. Optional environment variables
+
 - `OM_OUTPUT_DIR`: override plugin output/cache directory
 - `OM_AGENT_ENABLE_WRITE_TOOLS=true`: allow non-dry-run `manage_symbols` writes

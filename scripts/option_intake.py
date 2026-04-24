@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Chat-friendly option intake -> option_positions writer.
+"""Chat-friendly option intake -> trade-events / position-lots writer.
 
 Usage examples:
   ./scripts/option_intake.py --text "期权：腾讯20260330 put，strike500，成本5.425每股，乘数100，short 10张，sy，HKD" --dry-run
@@ -8,8 +8,8 @@ Usage examples:
   ./scripts/option_intake.py --text "/om -r -lx close --record-id recxxx 【成交提醒】成功买入1张$腾讯 260429 480.00 沽$，成交价格：1.20..."
 
 Design:
-- Parses message with scripts/cli/parse_option_message_cli.py
-- Writes via scripts/option_positions.py add / buy-close
+- Parses message with scripts.parse_option_message.parse_option_message_text
+- Writes through shared position workflow application helpers
 - Default dry-run (safe). Use --apply to persist.
 """
 
@@ -17,38 +17,14 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import shlex
-import subprocess
 from dataclasses import dataclass
-from json import JSONDecodeError, JSONDecoder
 from pathlib import Path
 
-
-def extract_json_tail(s: str) -> dict:
-    decoder = JSONDecoder()
-    for i, ch in enumerate(s):
-        if ch != '{':
-            continue
-        try:
-            obj, end = decoder.raw_decode(s[i:])
-            if isinstance(obj, dict):
-                return obj
-        except JSONDecodeError:
-            continue
-    raise SystemExit('no valid JSON payload found from parser output')
-
-
-def run_capture(cmd: list[str], cwd: Path, timeout_sec: int = 120, env: dict[str, str] | None = None) -> tuple[int, str, str]:
-    p = subprocess.run(
-        cmd,
-        cwd=str(cwd),
-        timeout=timeout_sec,
-        capture_output=True,
-        text=True,
-        env=env,
-    )
-    return p.returncode, (p.stdout or ''), (p.stderr or '')
+from scripts.account_config import accounts_from_config_path
+from scripts.parse_option_message import parse_option_message_text
+from src.application.option_positions_facade import resolve_option_positions_repo
+from src.application.position_workflows import execute_manual_close, execute_manual_open
 
 
 @dataclass(frozen=True)
@@ -167,6 +143,7 @@ def main():
     ap.add_argument('--config', default=None, help='optional options-monitor config used to resolve account labels')
     ap.add_argument('--accounts', nargs='*', default=None, help='optional account labels to recognize')
     ap.add_argument('--market', default='富途')
+    ap.add_argument('--data-config', default=None, help='portfolio data config path; auto-resolves when omitted')
     ap.add_argument('--action', choices=['open', 'close'], default=None, help='explicit action; /om command can also provide open/close')
     ap.add_argument('--account', default=None, help='override parsed account, e.g. lx/sy')
     ap.add_argument('--record-id', default=None, help='required for close/buy-close; no auto matching')
@@ -176,7 +153,6 @@ def main():
     args = ap.parse_args()
 
     base = Path(__file__).resolve().parents[1]
-    py = str(base / '.venv' / 'bin' / 'python')
 
     command = parse_om_command(args.text)
     action = args.action or command.action or 'open'
@@ -193,20 +169,14 @@ def main():
         else:
             args.dry_run = True
 
-    env = dict(os.environ)
-    env.setdefault('PYTHONPATH', str(base))
+    accounts = args.accounts
+    if accounts is None and args.config:
+        cfg_path = Path(args.config)
+        if not cfg_path.is_absolute():
+            cfg_path = (base / cfg_path).resolve()
+        accounts = accounts_from_config_path(cfg_path)
 
-    parse_cmd = [py, 'scripts/cli/parse_option_message_cli.py', '--text', text]
-    if args.config:
-        parse_cmd += ['--config', args.config]
-    if args.accounts is not None:
-        parse_cmd += ['--accounts', *args.accounts]
-    code, out, err = run_capture(parse_cmd, cwd=base, timeout_sec=30, env=env)
-    if code != 0:
-        print(err.strip() or out.strip())
-        return code
-
-    parsed = extract_json_tail((out or ''))
+    parsed = parse_option_message_text(text, accounts=accounts)
     p = parsed['parsed']
     if account_override:
         p['account'] = str(account_override).strip().lower()
@@ -219,43 +189,62 @@ def main():
         return 2
 
     market = (p.get('market') or args.market)
+    need_repo = action == 'close' or bool(args.apply)
+    repo = None
+    if need_repo:
+        _data_config, repo = resolve_option_positions_repo(base=base, data_config=args.data_config)
 
     if action == 'close':
         if not record_id:
             print('[PARSE_FAIL] missing: record_id')
             print(json.dumps(parsed, ensure_ascii=False, indent=2))
             return 2
-        cmd = [
-            py, 'scripts/option_positions.py', 'buy-close',
-            '--record-id', record_id,
-            '--contracts', str(int(p['contracts'])),
-            '--close-reason', args.close_reason,
-        ]
-        if p.get('premium_per_share') is not None:
-            cmd += ['--close-price', str(float(p['premium_per_share']))]
+        try:
+            out = execute_manual_close(
+                repo,
+                record_id=record_id,
+                contracts_to_close=int(p['contracts']),
+                close_price=(float(p['premium_per_share']) if p.get('premium_per_share') is not None else None),
+                close_reason=args.close_reason,
+                dry_run=bool(args.dry_run and not args.apply),
+            )
+        except ValueError as exc:
+            print(str(exc))
+            return 2
+        if args.dry_run and (not args.apply):
+            print('[DRY_RUN] update fields:')
+            print(json.dumps(out['patch'], ensure_ascii=False, indent=2))
+            return 0
+        print(f"[DONE] buy-closed {record_id} contracts={int(p['contracts'])} event_id={out['result'].get('event_id')}")
+        return 0
     else:
-        cmd = [
-            py, 'scripts/option_positions.py', 'add',
-            '--market', market,
-            '--account', p['account'],
-            '--symbol', p['symbol'],
-            '--option-type', p['option_type'],
-            '--side', p['side'],
-            '--contracts', str(int(p['contracts'])),
-            '--currency', p['currency'],
-            '--strike', str(float(p['strike'])),
-            '--multiplier', str(int(p['multiplier'])),
-            '--exp', p['exp'],
-        ]
-        if p.get('premium_per_share') is not None:
-            cmd += ['--premium-per-share', str(float(p['premium_per_share']))]
-        cmd += ['--note', f"user_input: {parsed.get('raw')}"]
-
-    if args.dry_run and (not args.apply):
-        cmd.append('--dry-run')
-
-    rc = subprocess.call(cmd, cwd=str(base), env=env)
-    return rc
+        try:
+            out = execute_manual_open(
+                repo,
+                broker=market,
+                account=p['account'],
+                symbol=p['symbol'],
+                option_type=p['option_type'],
+                side=p['side'],
+                contracts=int(p['contracts']),
+                currency=p['currency'],
+                strike=float(p['strike']),
+                multiplier=float(p['multiplier']) if p.get('multiplier') is not None else None,
+                expiration_ymd=p['exp'],
+                premium_per_share=(float(p['premium_per_share']) if p.get('premium_per_share') is not None else None),
+                underlying_share_locked=None,
+                note=f"user_input: {parsed.get('raw')}",
+                dry_run=bool(args.dry_run and not args.apply),
+            )
+        except ValueError as exc:
+            print(str(exc))
+            return 2
+        if args.dry_run and (not args.apply):
+            print('[DRY_RUN] create fields:')
+            print(json.dumps(out['fields'], ensure_ascii=False, indent=2))
+            return 0
+        print(f"[DONE] created event_id={out['result'].get('event_id')}")
+        return 0
 
 
 if __name__ == '__main__':

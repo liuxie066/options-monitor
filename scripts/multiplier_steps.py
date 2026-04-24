@@ -19,9 +19,11 @@ def apply_multiplier_cache_to_required_data_csv(*, base: Path, required_data_dir
     try:
         from scripts import multiplier_cache
 
-        cache_path = multiplier_cache.default_cache_path(base)
-        cache = multiplier_cache.load_cache(cache_path)
-        m = multiplier_cache.get_cached_multiplier(cache, symbol)
+        m = multiplier_cache.resolve_multiplier(
+            repo_base=base,
+            symbol=symbol,
+            allow_opend_refresh=False,
+        )
         if not m:
             return
 

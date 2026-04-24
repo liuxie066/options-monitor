@@ -6,7 +6,8 @@ from pathlib import Path
 from typing import Any
 
 from scripts.option_positions_core.domain import normalize_currency, normalize_option_type
-from scripts.parse_option_message import infer_multiplier_with_source, normalize_symbol, parse_exp
+from scripts.multiplier_cache import resolve_multiplier_with_source
+from scripts.parse_option_message import normalize_symbol, parse_exp
 from scripts.trade_account_mapping import resolve_internal_account
 
 
@@ -156,10 +157,11 @@ def normalize_trade_deal(
     )
     repo_base = Path(__file__).resolve().parents[1]
     multiplier = _norm_int(_pick(src, "multiplier", "contract_multiplier", "lot_size"))
-    multiplier, multiplier_source = infer_multiplier_with_source(
+    multiplier, multiplier_source = resolve_multiplier_with_source(
+        repo_base=repo_base,
         symbol=symbol,
         multiplier=multiplier,
-        repo_base=repo_base,
+        allow_opend_refresh=True,
     )
 
     return NormalizedTradeDeal(

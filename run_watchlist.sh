@@ -11,7 +11,7 @@ fi
 
 # Ensure deps installed (best-effort idempotent)
 if ! .venv/bin/python - <<'PY' >/dev/null 2>&1
-import pandas, yfinance, yaml, tabulate
+import pandas, yaml, tabulate
 PY
 then
   echo "[BOOTSTRAP] installing deps from requirements.txt"
@@ -20,4 +20,4 @@ then
 fi
 
 echo "[RUN] watchlist pipeline (${OPTIONS_MONITOR_CONFIG:-config.us.json})"
-exec .venv/bin/python scripts/run_pipeline.py --config "${OPTIONS_MONITOR_CONFIG:-config.us.json}"
+exec ./om scan-pipeline --config "${OPTIONS_MONITOR_CONFIG:-config.us.json}"

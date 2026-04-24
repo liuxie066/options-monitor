@@ -11,11 +11,8 @@ from scripts.account_config import (
     ACCOUNT_TYPE_EXTERNAL_HOLDINGS,
     ACCOUNT_TYPE_FUTU,
     accounts_from_config,
-    has_holdings_fallback,
+    build_account_portfolio_source_plan,
     normalize_accounts,
-    resolve_account_type,
-    resolve_configured_holdings_account,
-    resolve_holdings_account,
 )
 from scripts.agent_plugin.config import load_runtime_config, repo_base, resolve_output_root, write_tools_enabled
 from scripts.agent_plugin.contracts import AgentToolError, mask_path
@@ -37,9 +34,7 @@ def _normalize_broker(value: Any) -> str:
 def _resolve_data_config_ref(payload: dict[str, Any], portfolio_cfg: dict[str, Any]) -> str | None:
     value = (
         payload.get("data_config")
-        or payload.get("pm_config")
         or portfolio_cfg.get("data_config")
-        or portfolio_cfg.get("pm_config")
     )
     raw = str(value or "").strip()
     return raw or None
@@ -98,18 +93,6 @@ def save_required_data_opend(*args: Any, **kwargs: Any) -> Any:
     return _save_required_data_opend(*args, **kwargs)
 
 
-def fetch_symbol_yahoo(*args: Any, **kwargs: Any) -> Any:
-    from scripts.fetch_market_data import fetch_symbol as _fetch_symbol_yahoo
-
-    return _fetch_symbol_yahoo(*args, **kwargs)
-
-
-def save_required_data_yahoo(*args: Any, **kwargs: Any) -> Any:
-    from scripts.fetch_market_data import save_outputs as _save_required_data_yahoo
-
-    return _save_required_data_yahoo(*args, **kwargs)
-
-
 def _read_json_object_or_empty(path: Path) -> dict[str, Any]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -118,10 +101,13 @@ def _read_json_object_or_empty(path: Path) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def _validate_runtime_config(cfg: dict[str, Any]) -> list[str]:
+def _validate_runtime_config(cfg: dict[str, Any], *, allow_empty_symbols: bool = False) -> list[str]:
     warnings: list[str] = []
     try:
-        validate_config(deepcopy(cfg))
+        mutated = deepcopy(cfg)
+        if allow_empty_symbols and not resolve_watchlist_config(mutated):
+            mutated["symbols"] = [{"symbol": "DUMMY"}]
+        validate_config(mutated)
     except SystemExit as exc:
         raise AgentToolError(
             code="CONFIG_ERROR",
@@ -323,7 +309,7 @@ def _healthcheck_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str
     )
     warnings: list[str] = []
     checks: list[dict[str, Any]] = []
-    _validate_runtime_config(cfg)
+    _validate_runtime_config(cfg, allow_empty_symbols=True)
     checks.append({"name": "runtime_config", "status": "ok", "message": "config validation passed"})
 
     accounts = normalize_accounts(payload.get("accounts"), fallback=tuple(accounts_from_config(cfg)))
@@ -337,15 +323,15 @@ def _healthcheck_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str
     )
 
     portfolio_cfg = cfg.get("portfolio") if isinstance(cfg.get("portfolio"), dict) else {}
-    pm_config = _resolve_data_config_ref(payload, portfolio_cfg)
-    pm_config_path = _resolve_public_data_config_path(payload, portfolio_cfg)
-    if pm_config_path.exists():
+    data_config_ref = _resolve_data_config_ref(payload, portfolio_cfg)
+    data_config_path = _resolve_public_data_config_path(payload, portfolio_cfg)
+    if data_config_path.exists():
         checks.append(
             {
                 "name": "data_config",
                 "status": "ok",
-                "message": ("portfolio.data_config found" if pm_config else "repo-local SQLite data config found"),
-                "value": mask_path(pm_config_path),
+                "message": ("portfolio.data_config found" if data_config_ref else "repo-local SQLite data config found"),
+                "value": mask_path(data_config_path),
             }
         )
     else:
@@ -353,14 +339,14 @@ def _healthcheck_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str
             {
                 "name": "data_config",
                 "status": "error",
-                "message": ("portfolio.data_config missing" if pm_config else "portfolio.data_config not configured"),
+                "message": ("portfolio.data_config missing" if data_config_ref else "portfolio.data_config not configured"),
             }
         )
         warnings.append(
             "Minimal public setup requires a repo-local SQLite data config at secrets/portfolio.sqlite.json."
         )
 
-    data_cfg = _read_json_object_or_empty(pm_config_path) if pm_config_path.exists() else {}
+    data_cfg = _read_json_object_or_empty(data_config_path) if data_config_path.exists() else {}
     feishu_cfg = data_cfg.get("feishu") if isinstance(data_cfg.get("feishu"), dict) else {}
     feishu_tables = feishu_cfg.get("tables") if isinstance(feishu_cfg.get("tables"), dict) else {}
     feishu_ready = bool(str(feishu_cfg.get("app_id") or "").strip()) and bool(str(feishu_cfg.get("app_secret") or "").strip())
@@ -374,28 +360,27 @@ def _healthcheck_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str
     primary_preview: dict[str, dict[str, Any]] = {}
     fallback_preview: dict[str, dict[str, Any]] = {}
     for account in accounts:
-        account_type = resolve_account_type(cfg, account=account)
+        source_plan = build_account_portfolio_source_plan(cfg, account=account)
+        account_type = source_plan.account_type
         mapped_ids = resolve_trade_intake_futu_account_ids(cfg, account=account)
         primary_preview[account] = {
             "type": account_type,
-            "source": ("futu" if account_type == ACCOUNT_TYPE_FUTU else "holdings"),
+            "source": source_plan.primary_source,
             "ready": False,
         }
         mapping_preview[account] = {
             "type": account_type,
             "futu_account_ids": [_mask_account_id(x) for x in mapped_ids],
         }
-        configured_holdings_account = resolve_configured_holdings_account(cfg, account=account)
-        holdings_account = resolve_holdings_account(cfg, account=account)
-        fallback_enabled = bool(str(configured_holdings_account or "").strip()) or account_type == ACCOUNT_TYPE_EXTERNAL_HOLDINGS
+        fallback_enabled = bool(source_plan.fallback_source) or account_type == ACCOUNT_TYPE_EXTERNAL_HOLDINGS
         fallback_preview[account] = {
             "enabled": fallback_enabled,
-            "source": ("holdings" if fallback_enabled else None),
+            "source": (source_plan.fallback_source or ("holdings" if fallback_enabled else None)),
         }
         if fallback_enabled:
-            mapping_preview[account]["holdings_account"] = holdings_account
+            mapping_preview[account]["holdings_account"] = source_plan.holdings_account
             mapping_preview[account]["holdings_fallback_ready"] = bool(holdings_ready)
-            fallback_preview[account]["holdings_account"] = holdings_account
+            fallback_preview[account]["holdings_account"] = source_plan.holdings_account
             fallback_preview[account]["ready"] = bool(holdings_ready)
         if account_type == ACCOUNT_TYPE_FUTU:
             if not mapped_ids:
@@ -413,7 +398,7 @@ def _healthcheck_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str
             primary_preview[account]["ready"] = not any(
                 msg.startswith(f"{account}:") for msg in primary_errors
             )
-            if has_holdings_fallback(cfg, account=account) and not holdings_ready:
+            if fallback_enabled and not holdings_ready:
                 fallback_warnings.append(
                     f"{account}: holdings fallback configured but feishu.app_id/app_secret/tables.holdings is incomplete in portfolio.data_config"
                 )
@@ -425,7 +410,7 @@ def _healthcheck_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str
         if "/" not in holdings_ref:
             mapping_errors.append(f"{account}: external_holdings requires feishu.tables.holdings in portfolio.data_config")
             primary_errors.append(f"{account}: external_holdings requires feishu.tables.holdings in portfolio.data_config")
-        primary_preview[account]["holdings_account"] = holdings_account
+        primary_preview[account]["holdings_account"] = source_plan.holdings_account
         primary_preview[account]["ready"] = bool(holdings_ready)
     checks.append(
         {
@@ -538,7 +523,7 @@ def _healthcheck_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str
             fallback_ok = bool(fallback.get("ready"))
 
         account_paths[account] = {
-            "type": resolve_account_type(cfg, account=account),
+            "type": str(primary.get("type") or ""),
             "primary": {
                 "source": (primary_source or None),
                 "ok": bool(primary_ok),
@@ -591,7 +576,7 @@ def _query_cash_headroom_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], 
         config_path=payload.get("config_path"),
     )
     portfolio_cfg = cfg.get("portfolio") if isinstance(cfg.get("portfolio"), dict) else {}
-    pm_config_path = _resolve_public_data_config_path(payload, portfolio_cfg)
+    data_config_path = _resolve_public_data_config_path(payload, portfolio_cfg)
     broker = _normalize_broker(
         payload.get("broker")
         or payload.get("market")
@@ -602,12 +587,12 @@ def _query_cash_headroom_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], 
     out_dir = (out_root / "query_cash_headroom").resolve()
     result = query_sell_put_cash(
         config=str(config_path),
-        pm_config=str(pm_config_path),
+        data_config=str(data_config_path),
         market=broker,
         account=(str(payload.get("account")).strip() if payload.get("account") else None),
         output_format="json",
         top=int(payload.get("top") or 10),
-        no_fx=bool(payload.get("no_fx", False)),
+        no_exchange_rates=bool(payload.get("no_exchange_rates", False)),
         out_dir=str(out_dir),
         base_dir=repo_base(),
         runtime_config=cfg,
@@ -628,21 +613,18 @@ def _get_portfolio_context_tool(payload: dict[str, Any]) -> tuple[dict[str, Any]
         or portfolio_cfg.get("broker")
         or portfolio_cfg.get("market")
     )
-    pm_config = str(_resolve_public_data_config_path(payload, portfolio_cfg))
+    data_config = str(_resolve_public_data_config_path(payload, portfolio_cfg))
 
     out_root = resolve_output_root(payload.get("output_dir"))
     state_dir = (out_root / "portfolio_context_state").resolve()
     shared_dir = (out_root / "shared").resolve()
     logs: list[str] = []
     ctx = load_portfolio_context(
-        py=str((repo_base() / ".venv" / "bin" / "python").resolve()),
         base=repo_base(),
-        pm_config=pm_config,
+        data_config=data_config,
         market=broker,
         account=account,
         ttl_sec=int(payload.get("ttl_sec") or 0),
-        timeout_sec=int(payload.get("timeout_sec") or 60),
-        is_scheduled=False,
         state_dir=state_dir,
         shared_state_dir=shared_dir,
         log=logs.append,
@@ -665,11 +647,7 @@ def _scan_opportunities_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], l
     )
 
     from scripts.config_loader import load_config
-    from scripts.config_profiles import apply_profiles
-    from scripts.pipeline_context import build_pipeline_context
-    from scripts.pipeline_symbol import process_symbol
-    from scripts.pipeline_watchlist import run_watchlist_pipeline
-    from scripts.report_builders import build_symbols_digest, build_symbols_summary
+    from scripts.pipeline_watchlist import run_watchlist_pipeline_default
 
     def _log(_msg: str) -> None:
         return None
@@ -695,15 +673,17 @@ def _scan_opportunities_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], l
         data_config_ref = _resolve_data_config_ref(payload, cfg_loaded["portfolio"])
         if data_config_ref:
             cfg_loaded["portfolio"]["data_config"] = data_config_ref
-            cfg_loaded["portfolio"]["pm_config"] = data_config_ref
 
     top_n = int(payload.get("top_n") or (cfg_loaded.get("outputs", {}) or {}).get("top_n_alerts", 3) or 3)
     runtime = cfg_loaded.get("runtime", {}) or {}
-    summary_rows = run_watchlist_pipeline(
+    summary_rows = run_watchlist_pipeline_default(
         py=str((repo_base() / ".venv" / "bin" / "python").resolve()),
         base=repo_base(),
         cfg=cfg_loaded,
         report_dir=report_dir,
+        state_dir=state_dir,
+        shared_state_dir=shared_state_dir,
+        required_data_dir=out_root,
         is_scheduled=False,
         top_n=top_n,
         symbol_timeout_sec=int(payload.get("symbol_timeout_sec") or runtime.get("symbol_timeout_sec", 120) or 120),
@@ -713,26 +693,6 @@ def _scan_opportunities_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], l
         symbols_arg=(",".join(payload.get("symbols")) if isinstance(payload.get("symbols"), list) else payload.get("symbols")),
         log=_log,
         want_fn=lambda _step: True,
-        apply_profiles_fn=apply_profiles,
-        process_symbol_fn=(
-            lambda *a, **kw: process_symbol(
-                *a,
-                **kw,
-                required_data_dir=out_root,
-                report_dir=report_dir,
-                state_dir=state_dir,
-                is_scheduled=False,
-            )
-        ),
-        build_pipeline_context_fn=(
-            lambda **kw: build_pipeline_context(
-                **kw,
-                state_dir=state_dir,
-                shared_state_dir=shared_state_dir,
-            )
-        ),
-        build_symbols_summary_fn=lambda rows: build_symbols_summary(rows, report_dir, is_scheduled=False),
-        build_symbols_digest_fn=lambda rows, n: build_symbols_digest([r.get("symbol") for r in rows if r.get("symbol")], report_dir),
     )
     summary = _scan_summary_rows(summary_rows)
     return {
@@ -750,7 +710,7 @@ def _prepare_close_advice_inputs_tool(payload: dict[str, Any]) -> tuple[dict[str
         config_path=payload.get("config_path"),
     )
     portfolio_cfg = cfg.get("portfolio") if isinstance(cfg.get("portfolio"), dict) else {}
-    pm_config = str(_resolve_public_data_config_path(payload, portfolio_cfg))
+    data_config = str(_resolve_public_data_config_path(payload, portfolio_cfg))
     account = str(payload.get("account") or portfolio_cfg.get("account") or "").strip() or None
     broker = _normalize_broker(
         payload.get("broker")
@@ -767,15 +727,11 @@ def _prepare_close_advice_inputs_tool(payload: dict[str, Any]) -> tuple[dict[str
 
     try:
         ctx, _refreshed = load_option_positions_context(
-            py=str((repo_base() / ".venv" / "bin" / "python").resolve()),
             base=repo_base(),
-            pm_config=pm_config,
+            data_config=data_config,
             market=broker,
             account=account,
             ttl_sec=int(payload.get("ttl_sec") or 0),
-            timeout_sec=int(payload.get("timeout_sec") or 60),
-            is_scheduled=False,
-            report_dir=(out_root / "reports").resolve(),
             state_dir=state_dir,
             shared_state_dir=shared_dir,
             log=logs.append,
@@ -784,7 +740,7 @@ def _prepare_close_advice_inputs_tool(payload: dict[str, Any]) -> tuple[dict[str
         raise AgentToolError(
             code="DEPENDENCY_MISSING",
             message="option positions context refresh failed",
-            hint="Check portfolio.data_config / SQLite option_positions setup before preparing close_advice inputs.",
+            hint="Check portfolio.data_config / SQLite position-lot setup before preparing close_advice inputs.",
             details={"exit_code": str(exc)},
         ) from exc
     if not isinstance(ctx, dict):
@@ -802,21 +758,16 @@ def _prepare_close_advice_inputs_tool(payload: dict[str, Any]) -> tuple[dict[str
         fetch_cfg = symbol_cfg.get("fetch") if isinstance(symbol_cfg.get("fetch"), dict) else {}
         src, _decision = resolve_symbol_fetch_source(fetch_cfg)
         limit_expirations = int(fetch_cfg.get("limit_expirations") or 8)
-        if src == "opend":
-            result = fetch_symbol_opend(
-                symbol,
-                limit_expirations=limit_expirations,
-                host=str(fetch_cfg.get("host") or "127.0.0.1"),
-                port=int(fetch_cfg.get("port") or 11111),
-                spot_from_yahoo=bool(fetch_cfg.get("spot_from_yahoo", False)),
-                base_dir=repo_base(),
-                option_types="put,call",
-                chain_cache=True,
-            )
-            _raw_path, csv_path = save_required_data_opend(repo_base(), symbol, result, output_root=required_data_root)
-        else:
-            result = fetch_symbol_yahoo(symbol, limit_expirations=limit_expirations)
-            _raw_path, csv_path = save_required_data_yahoo(repo_base(), symbol, result, output_root=required_data_root)
+        result = fetch_symbol_opend(
+            symbol,
+            limit_expirations=limit_expirations,
+            host=str(fetch_cfg.get("host") or "127.0.0.1"),
+            port=int(fetch_cfg.get("port") or 11111),
+            base_dir=repo_base(),
+            option_types="put,call",
+            chain_cache=True,
+        )
+        _raw_path, csv_path = save_required_data_opend(repo_base(), symbol, result, output_root=required_data_root)
         meta = result.get("meta") if isinstance(result.get("meta"), dict) else {}
         if meta.get("error"):
             warnings.append(f"{symbol}: {meta['error']}")

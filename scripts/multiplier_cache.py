@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-"""Multiplier static cache.
+"""Multiplier cache and resolver.
 
 Why:
 - Contract multiplier (shares per contract) is largely static for an underlier.
@@ -14,31 +14,17 @@ Cache file (JSON):
 }
 
 This module provides:
-- load/save/get
-- manual refresh via OpenD (best-effort)
+- cache read/write helpers
+- unified multiplier resolution
+- optional OpenD refresh when cache is missing
 """
 
 import argparse
 import json
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 
 from scripts.io_utils import utc_now
-
-
-BUILTIN_MULTIPLIERS: dict[str, dict] = {
-    # HK stock options. Keep this list intentionally small and conservative;
-    # OpenD or runtime cache remains the preferred source when available.
-    "0700.HK": {"multiplier": 100, "source": "builtin.hk.common"},  # 腾讯
-    "00700.HK": {"multiplier": 100, "source": "builtin.hk.common"},
-    "0883.HK": {"multiplier": 1000, "source": "builtin.hk.common"},  # 中海油
-    "00883.HK": {"multiplier": 1000, "source": "builtin.hk.common"},
-    "3690.HK": {"multiplier": 100, "source": "builtin.hk.common"},  # 美团
-    "03690.HK": {"multiplier": 100, "source": "builtin.hk.common"},
-    "9992.HK": {"multiplier": 200, "source": "builtin.hk.common"},  # 泡泡玛特
-    "09992.HK": {"multiplier": 200, "source": "builtin.hk.common"},
-}
 
 
 def default_cache_path(repo_base: Path) -> Path:
@@ -93,38 +79,25 @@ def get_cached_multiplier(cache: dict, symbol: str) -> int | None:
     return None
 
 
-def get_builtin_multiplier(symbol: str) -> int | None:
-    for sym in _symbol_aliases(symbol):
-        try:
-            v = BUILTIN_MULTIPLIERS.get(sym)
-            if not isinstance(v, dict):
-                continue
-            m = int(v.get("multiplier") or 0)
-            if m > 0:
-                return m
-        except Exception:
-            continue
-    norm = normalize_symbol(symbol)
-    if norm and not norm.endswith(".HK"):
-        return 100
-    return None
-
-
-def get_multiplier(cache: dict, symbol: str, *, include_builtin: bool = True) -> int | None:
-    cached = get_cached_multiplier(cache, symbol)
-    if cached:
-        return cached
-    if include_builtin:
-        return get_builtin_multiplier(symbol)
-    return None
-
-
 @dataclass
 class RefreshResult:
     symbol: str
     ok: bool
     multiplier: int | None = None
     error: str | None = None
+
+
+def get_cached_multiplier_source(cache: dict, symbol: str) -> str | None:
+    for sym in _symbol_aliases(symbol):
+        item = cache.get(sym)
+        if not isinstance(item, dict):
+            continue
+        try:
+            if int(item.get("multiplier") or 0) > 0:
+                return str(item.get("source") or "cache")
+        except Exception:
+            continue
+    return None
 
 
 def refresh_via_opend(*, repo_base: Path, symbol: str, host: str = "127.0.0.1", port: int = 11111, limit_expirations: int = 1) -> RefreshResult:
@@ -148,7 +121,6 @@ def refresh_via_opend(*, repo_base: Path, symbol: str, host: str = "127.0.0.1", 
             host=str(host),
             port=int(port),
             spot_override=None,
-            spot_from_yahoo=False,
             base_dir=None,
         )
         rows = payload.get("rows") or []
@@ -169,6 +141,80 @@ def refresh_via_opend(*, repo_base: Path, symbol: str, host: str = "127.0.0.1", 
         return RefreshResult(symbol=sym, ok=True, multiplier=int(m))
     except Exception as e:
         return RefreshResult(symbol=sym, ok=False, multiplier=None, error=f"{type(e).__name__}: {e}")
+
+
+def store_multiplier(cache: dict, symbol: str, multiplier: int, *, source: str = "opend") -> dict:
+    cache[normalize_symbol(symbol)] = {
+        "multiplier": int(multiplier),
+        "as_of_utc": utc_now(),
+        "source": str(source),
+    }
+    return cache
+
+
+def resolve_multiplier_with_source(
+    *,
+    repo_base: Path,
+    symbol: str | None,
+    multiplier: int | float | None = None,
+    allow_opend_refresh: bool = False,
+    host: str = "127.0.0.1",
+    port: int = 11111,
+    limit_expirations: int = 1,
+) -> tuple[int | None, str | None]:
+    if multiplier is not None:
+        try:
+            explicit = int(float(multiplier))
+        except Exception:
+            explicit = 0
+        if explicit > 0:
+            return explicit, "payload"
+    sym = normalize_symbol(str(symbol or ""))
+    if not sym:
+        return None, None
+
+    cache_path = default_cache_path(repo_base)
+    cache = load_cache(cache_path)
+    cached = get_cached_multiplier(cache, sym)
+    if cached:
+        return int(cached), (get_cached_multiplier_source(cache, sym) or "cache")
+    if not allow_opend_refresh:
+        return None, None
+
+    refreshed = refresh_via_opend(
+        repo_base=repo_base,
+        symbol=sym,
+        host=host,
+        port=port,
+        limit_expirations=limit_expirations,
+    )
+    if not refreshed.ok or not refreshed.multiplier or int(refreshed.multiplier) <= 0:
+        return None, None
+    store_multiplier(cache, sym, int(refreshed.multiplier), source="opend")
+    save_cache(cache_path, cache)
+    return int(refreshed.multiplier), "opend"
+
+
+def resolve_multiplier(
+    *,
+    repo_base: Path,
+    symbol: str | None,
+    multiplier: int | float | None = None,
+    allow_opend_refresh: bool = False,
+    host: str = "127.0.0.1",
+    port: int = 11111,
+    limit_expirations: int = 1,
+) -> int | None:
+    value, _source = resolve_multiplier_with_source(
+        repo_base=repo_base,
+        symbol=symbol,
+        multiplier=multiplier,
+        allow_opend_refresh=allow_opend_refresh,
+        host=host,
+        port=port,
+        limit_expirations=limit_expirations,
+    )
+    return value
 
 
 def cmd_list(cache_path: Path):
@@ -200,7 +246,7 @@ def cmd_refresh(cache_path: Path, symbols: list[str], *, host: str, port: int, l
         r = refresh_via_opend(repo_base=Path(__file__).resolve().parents[1], symbol=sym, host=host, port=port, limit_expirations=limit_expirations)
         results.append(r)
         if r.ok and r.multiplier:
-            cache[sym] = {"multiplier": int(r.multiplier), "as_of_utc": utc_now(), "source": "opend"}
+            store_multiplier(cache, sym, int(r.multiplier), source="opend")
             updated += 1
 
     if updated:
@@ -216,7 +262,7 @@ def cmd_refresh(cache_path: Path, symbols: list[str], *, host: str, port: int, l
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Static multiplier cache (output_shared/state/multiplier_cache.json)")
+    ap = argparse.ArgumentParser(description="Multiplier cache and resolver (output_shared/state/multiplier_cache.json)")
     ap.add_argument("--cache", default=None, help="Cache file path (default: <repo>/output_shared/state/multiplier_cache.json)")
 
     sub = ap.add_subparsers(dest="cmd", required=True)
