@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from scripts.futu_portfolio_context import resolve_trade_intake_futu_account_ids
+
 
 DEFAULT_ACCOUNTS = ("user1",)
 ACCOUNT_TYPE_FUTU = "futu"
@@ -21,6 +23,16 @@ class AccountPortfolioSourcePlan:
     fallback_source: str | None
     holdings_account: str | None
     configured_holdings_account: str | None
+
+
+@dataclass(frozen=True)
+class AccountConfigView:
+    account: str
+    account_type: str
+    futu_acc_ids: list[str]
+    holdings_account: str | None
+    portfolio_source_plan: AccountPortfolioSourcePlan
+    fallback_enabled: bool
 
 
 def normalize_accounts(raw: Any, *, fallback: tuple[str, ...] = DEFAULT_ACCOUNTS) -> list[str]:
@@ -203,6 +215,34 @@ def cash_footer_accounts_from_config(
     if explicit is not None:
         return normalize_accounts(explicit, fallback=fallback)
     return accounts_from_config(cfg, fallback=fallback)
+
+
+def build_account_config_view(config: dict[str, Any] | None, *, account: str) -> AccountConfigView:
+    account_key = str(account or "").strip().lower()
+    cfg = config if isinstance(config, dict) else {}
+    source_plan = build_account_portfolio_source_plan(cfg, account=account_key)
+    futu_acc_ids = resolve_trade_intake_futu_account_ids(cfg, account=account_key)
+    fallback_enabled = bool(source_plan.fallback_source) or source_plan.account_type == ACCOUNT_TYPE_EXTERNAL_HOLDINGS
+    return AccountConfigView(
+        account=account_key,
+        account_type=source_plan.account_type,
+        futu_acc_ids=futu_acc_ids,
+        holdings_account=source_plan.holdings_account,
+        portfolio_source_plan=source_plan,
+        fallback_enabled=fallback_enabled,
+    )
+
+
+def list_account_config_views(
+    config: dict[str, Any] | None,
+    *,
+    fallback: tuple[str, ...] = DEFAULT_ACCOUNTS,
+) -> list[AccountConfigView]:
+    cfg = config if isinstance(config, dict) else {}
+    return [
+        build_account_config_view(cfg, account=account)
+        for account in accounts_from_config(cfg, fallback=fallback)
+    ]
 
 
 def accounts_from_config_path(path: str | Path, *, fallback: tuple[str, ...] = DEFAULT_ACCOUNTS) -> list[str]:
