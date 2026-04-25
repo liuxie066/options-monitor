@@ -196,7 +196,7 @@ def build_income_row(record: dict[str, Any]) -> tuple[IncomeRow | None, str | No
 
     currency = normalize_currency(fields.get("currency")) or "USD"
     account = normalize_account(fields.get("account")) or "-"
-    broker = normalize_broker(fields.get("broker") or fields.get("market")) or "-"
+    broker = normalize_broker(fields.get("broker")) or "-"
     symbol = norm_symbol(fields.get("symbol") or "-")
     realized_gross = (float(premium) - float(close_price)) * int(multiplier) * int(contracts_closed)
 
@@ -248,7 +248,7 @@ def build_premium_income_row(record: dict[str, Any]) -> tuple[PremiumIncomeRow |
 
     currency = normalize_currency(fields.get("currency")) or "USD"
     account = normalize_account(fields.get("account")) or "-"
-    broker = normalize_broker(fields.get("broker") or fields.get("market")) or "-"
+    broker = normalize_broker(fields.get("broker")) or "-"
     symbol = norm_symbol(fields.get("symbol") or "-")
     premium_received_gross = float(premium) * int(multiplier) * int(contracts)
 
@@ -291,7 +291,7 @@ def build_monthly_income_report(
             continue
         if account_norm and normalize_account(fields.get("account")) != account_norm:
             continue
-        if broker_norm and normalize_broker(fields.get("broker") or fields.get("market")) != broker_norm:
+        if broker_norm and normalize_broker(fields.get("broker")) != broker_norm:
             continue
 
         row, warning = build_income_row(rec)

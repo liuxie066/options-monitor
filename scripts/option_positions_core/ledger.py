@@ -100,7 +100,7 @@ def _open_lot_record(event: TradeEvent) -> dict[str, Any]:
 
 def _matches_close(fields: dict[str, Any], event: TradeEvent) -> bool:
     return (
-        normalize_broker(fields.get("broker") or fields.get("market")) == event.broker
+        normalize_broker(fields.get("broker")) == event.broker
         and normalize_account(fields.get("account")) == event.account
         and str(fields.get("symbol") or "").strip().upper() == event.symbol
         and normalize_option_type(fields.get("option_type")) == event.option_type

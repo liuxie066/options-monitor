@@ -128,7 +128,7 @@ def _iter_open_candidates(repo: OptionPositionsRepoLike, deal: NormalizedTradeDe
         fields = item.get("fields") or {}
         if not record_id or not isinstance(fields, dict):
             continue
-        if normalize_broker(fields.get("broker") or fields.get("market")) != "富途":
+        if normalize_broker(fields.get("broker")) != "富途":
             continue
         if normalize_account(fields.get("account")) != normalize_account(deal.internal_account):
             continue
