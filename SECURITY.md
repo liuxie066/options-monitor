@@ -29,5 +29,5 @@ you already have and include `[security]` in the subject.
 ## Secrets handling expectations
 
 - Never commit `app_secret`, API tokens, or runtime secrets to the repo.
-- Prefer `OM_PM_CONFIG` or repo-local / external secret files outside source control.
+- Prefer repo-local / external secret files outside source control, or use `OM_DATA_CONFIG` when an explicit data-config override is needed.
 - Public tool responses must not expose secrets, full filesystem paths, or raw broker account IDs.
