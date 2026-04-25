@@ -30,7 +30,7 @@
   - `get_portfolio_context`
   - `manage_symbols`
   - `preview_notification`
-- Public config discovery with `OM_CONFIG_DIR`, `OM_CONFIG_US`, `OM_CONFIG_HK`, `OM_PM_CONFIG`
+- Public config discovery with `OM_CONFIG_DIR`, `OM_CONFIG_US`, `OM_CONFIG_HK`, `OM_DATA_CONFIG`
 - Write-tool gate with `OM_AGENT_ENABLE_WRITE_TOOLS`
 - Install script: `scripts/install_agent_plugin.sh`
 - Public docs for agent integration, getting started, and tool reference
