@@ -4,7 +4,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from scripts.config_loader import resolve_watchlist_config
 from .engine import (
     AccountSchedulerDecisionView,
     SchedulerDecisionView,
@@ -13,6 +12,14 @@ from .engine import (
     decide_account_notify_window_open,
     filter_notify_candidates as filter_notify_candidates_engine,
 )
+
+
+def _resolve_watchlist_config(cfg: dict | None) -> list[dict[str, Any]]:
+    data = cfg if isinstance(cfg, dict) else {}
+    symbols = data.get("symbols")
+    if not isinstance(symbols, list):
+        return []
+    return [item for item in symbols if isinstance(item, dict)]
 
 
 def select_markets_to_run(now_utc: datetime, cfg: dict, market_config: str) -> list[str]:
@@ -66,7 +73,7 @@ def markets_for_trading_day_guard(markets_to_run: list[str], cfg: dict, market_c
         pass
 
     try:
-        syms = resolve_watchlist_config(cfg)
+        syms = _resolve_watchlist_config(cfg)
         mk = sorted({str((it or {}).get('market') or '').upper() for it in syms if isinstance(it, dict) and (it or {}).get('market')})
         mk = [m for m in mk if m in ('HK', 'US', 'CN')]
         if mk:
