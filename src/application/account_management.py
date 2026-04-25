@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from src.application.config_management import repo_base as agent_repo_base
+from scripts.agent_plugin.config import repo_base as agent_repo_base
 from scripts.agent_plugin.init_local import (
     add_account_to_local_config,
     edit_account_in_local_config,

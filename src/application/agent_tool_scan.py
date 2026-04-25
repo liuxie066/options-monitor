@@ -112,7 +112,7 @@ def query_cash_headroom_tool(
     config_path, cfg = load_runtime_config(config_key=payload.get("config_key"), config_path=payload.get("config_path"))
     portfolio_cfg = cfg.get("portfolio") if isinstance(cfg.get("portfolio"), dict) else {}
     data_config_path = resolve_public_data_config_path(payload, portfolio_cfg)
-    broker = normalize_broker(payload.get("broker") or payload.get("market") or portfolio_cfg.get("broker") or portfolio_cfg.get("market"))
+    broker = normalize_broker(payload.get("broker") or portfolio_cfg.get("broker"))
     out_root = resolve_output_root(payload.get("output_dir"))
     out_dir = (out_root / "query_cash_headroom").resolve()
     result = query_sell_put_cash(
@@ -144,7 +144,7 @@ def get_portfolio_context_tool(
     config_path, cfg = load_runtime_config(config_key=payload.get("config_key"), config_path=payload.get("config_path"))
     portfolio_cfg = cfg.get("portfolio") if isinstance(cfg.get("portfolio"), dict) else {}
     account = str(payload.get("account") or portfolio_cfg.get("account") or "").strip() or None
-    broker = normalize_broker(payload.get("broker") or payload.get("market") or portfolio_cfg.get("broker") or portfolio_cfg.get("market"))
+    broker = normalize_broker(payload.get("broker") or portfolio_cfg.get("broker"))
     data_config = str(resolve_public_data_config_path(payload, portfolio_cfg))
     out_root = resolve_output_root(payload.get("output_dir"))
     state_dir = (out_root / "portfolio_context_state").resolve()
@@ -249,7 +249,7 @@ def prepare_close_advice_inputs_tool(
     portfolio_cfg = cfg.get("portfolio") if isinstance(cfg.get("portfolio"), dict) else {}
     data_config = str(resolve_public_data_config_path(payload, portfolio_cfg))
     account = str(payload.get("account") or portfolio_cfg.get("account") or "").strip() or None
-    broker = normalize_broker(payload.get("broker") or payload.get("market") or portfolio_cfg.get("broker") or portfolio_cfg.get("market"))
+    broker = normalize_broker(payload.get("broker") or portfolio_cfg.get("broker"))
     out_root = resolve_output_root(payload.get("output_dir"))
     state_dir = (out_root / "state").resolve()
     shared_dir = (out_root / "shared").resolve()
