@@ -77,6 +77,17 @@ def test_match_close_positions_uses_fifo() -> None:
     assert [(m.record_id, m.contracts_to_close) for m in matches] == [("rec1", 1), ("rec2", 2)]
 
 
+def test_match_close_positions_ignores_market_only_persisted_rows() -> None:
+    market_only = _record("rec1", 100, 1)
+    market_only["fields"].pop("broker", None)
+    market_only["fields"]["market"] = "富途"
+    repo = FakeRepo([market_only, _record("rec2", 200, 3)])
+
+    matches = match_close_positions(repo, _deal())
+
+    assert [(m.record_id, m.contracts_to_close) for m in matches] == [("rec2", 3)]
+
+
 def test_resolve_trade_close_dry_run_builds_patches() -> None:
     repo = FakeRepo([_record("rec1", 100, 1), _record("rec2", 200, 2)])
 

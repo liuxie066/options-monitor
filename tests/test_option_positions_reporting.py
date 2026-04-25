@@ -72,6 +72,32 @@ def test_build_income_row_for_expire_auto_close_uses_zero_close_price() -> None:
     assert row.realized_gross == 250.0
 
 
+def test_build_income_row_does_not_use_market_fallback_for_broker_label() -> None:
+    row, warning = build_income_row(
+        {
+            "record_id": "rec_market_only",
+            "fields": {
+                "market": "富途证券（香港）",
+                "account": "lx",
+                "symbol": "NVDA",
+                "status": "close",
+                "contracts": 1,
+                "contracts_closed": 1,
+                "currency": "USD",
+                "premium": 2.5,
+                "multiplier": 100,
+                "close_price": 1.0,
+                "close_type": BUY_TO_CLOSE,
+                "closed_at": _ms("2026-05-01"),
+            },
+        }
+    )
+
+    assert warning is None
+    assert row is not None
+    assert row.broker == "-"
+
+
 def test_build_income_row_warns_when_buy_close_missing_close_price() -> None:
     row, warning = build_income_row(
         {
@@ -243,3 +269,37 @@ def test_build_monthly_income_report_leaves_cny_fields_empty_without_rates() -> 
             "premium_positions": 1,
         }
     ]
+
+
+def test_build_monthly_income_report_skips_market_only_rows_for_broker_filter() -> None:
+    report = build_monthly_income_report(
+        [
+            {
+                "record_id": "rec_market_only",
+                "fields": {
+                    "market": "富途",
+                    "account": "lx",
+                    "symbol": "NVDA",
+                    "side": "short",
+                    "status": "close",
+                    "contracts": 1,
+                    "contracts_closed": 1,
+                    "currency": "USD",
+                    "premium": 2.5,
+                    "multiplier": 100,
+                    "close_price": 1.0,
+                    "close_type": BUY_TO_CLOSE,
+                    "opened_at": _ms("2026-04-02"),
+                    "closed_at": _ms("2026-04-20"),
+                },
+            }
+        ],
+        account="lx",
+        broker="富途",
+        month="2026-04",
+    )
+
+    assert report["rows"] == []
+    assert report["premium_rows"] == []
+    assert report["summary"] == []
+    assert report["warnings"] == []
