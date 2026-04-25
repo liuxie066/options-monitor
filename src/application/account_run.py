@@ -19,8 +19,8 @@ from domain.domain.engine import (
     decide_account_scan_gate,
     decide_pipeline_execution_result,
 )
+from src.application.config_management import resolve_watchlist_config, set_watchlist_config
 from scripts.close_advice import run_close_advice
-from scripts.config_loader import resolve_watchlist_config, set_watchlist_config
 from scripts.infra.service import run_pipeline_script
 from scripts.io_utils import utc_now
 from scripts.multi_tick.misc import (
@@ -66,6 +66,43 @@ class AccountRunOutcome:
     acct_metrics: dict[str, Any]
     prefetch_done: bool
     ran_pipeline: bool
+
+
+def _record_account_run_degraded(
+    *,
+    runlog,
+    audit_fn: Callable[..., Any],
+    run_id: str,
+    account: str,
+    action: str,
+    exc: Exception,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    try:
+        audit_kwargs: dict[str, Any] = {
+            "run_id": run_id,
+            "account": account,
+            "status": "error",
+            "message": str(exc),
+        }
+        if extra:
+            audit_kwargs["extra"] = dict(extra)
+        audit_fn("write", action, **audit_kwargs)
+    except Exception:
+        pass
+    payload = {
+        "account": account,
+        "action": action,
+        "error": str(exc),
+    }
+    if extra:
+        payload.update(extra)
+    runlog.safe_event(
+        "account_run",
+        "degraded",
+        message=f"{action} failed for {account}: {exc}",
+        data=_safe_runlog_data(payload),
+    )
 
 
 def run_one_account(
@@ -118,15 +155,29 @@ def run_one_account(
     acct_state_dir = run_repo.get_run_account_state_dir(request.base, request.run_id, acct)
     try:
         run_repo.ensure_run_account_state_dir(request.base, request.run_id, acct)
-    except Exception:
-        pass
+    except Exception as exc:
+        _record_account_run_degraded(
+            runlog=runlog,
+            audit_fn=audit_fn,
+            run_id=request.run_id,
+            account=acct,
+            action="ensure_run_account_state_dir",
+            exc=exc,
+        )
 
     def _write_acct_run_state(name: str, payload: dict[str, Any]) -> None:
         try:
             state_repo.write_account_run_state(request.base, request.run_id, acct, name, payload)
             audit_fn("write", f"write_account_run_state:{name}", run_id=request.run_id, account=acct)
-        except Exception:
-            pass
+        except Exception as exc:
+            _record_account_run_degraded(
+                runlog=runlog,
+                audit_fn=audit_fn,
+                run_id=request.run_id,
+                account=acct,
+                action=f"write_account_run_state:{name}",
+                exc=exc,
+            )
 
     notif_path = (acct_report_dir / "symbols_notification.txt").resolve()
 
@@ -240,8 +291,15 @@ def run_one_account(
                         tool_name=str(item.get("tool_name") or "required_data_prefetch"),
                         extra={"symbol": item.get("symbol"), "message": item.get("message")},
                     )
-        except Exception:
-            pass
+        except Exception as exc:
+            _record_account_run_degraded(
+                runlog=runlog,
+                audit_fn=audit_fn,
+                run_id=request.run_id,
+                account=acct,
+                action="write_required_data_prefetch_summary",
+                exc=exc,
+            )
         runlog.safe_event("fetch_chain_cache", "ok", data=_safe_runlog_data(prefetch_stats))
         prefetch_done = True
 
@@ -353,8 +411,15 @@ def run_one_account(
                 "config.override.json",
             )
             audit_fn("write", "copy_to_run_account:config.override.json", run_id=request.run_id, account=acct)
-    except Exception:
-        pass
+    except Exception as exc:
+        _record_account_run_degraded(
+            runlog=runlog,
+            audit_fn=audit_fn,
+            run_id=request.run_id,
+            account=acct,
+            action="write_run_account_artifacts",
+            exc=exc,
+        )
 
     auto_close_path = acct_report_dir / "auto_close_summary.txt"
     auto_close_text = auto_close_path.read_text(encoding="utf-8", errors="replace").strip() if auto_close_path.exists() else ""
