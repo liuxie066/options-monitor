@@ -54,9 +54,6 @@ def resolve_data_config_path(*, base: Path, data_config: str | Path | None) -> P
     env_ref = str(os.environ.get("OM_DATA_CONFIG") or "").strip()
     if env_ref:
         return Path(env_ref).expanduser().resolve()
-    env_ref = str(os.environ.get("OM_PM_CONFIG") or "").strip()
-    if env_ref:
-        return Path(env_ref).expanduser().resolve()
     return default_data_config_path(base=base)
 
 
@@ -72,13 +69,36 @@ def resolve_watchlist_config(cfg: dict | None) -> list[dict]:
     data = cfg if isinstance(cfg, dict) else {}
     symbols = data.get('symbols')
     if isinstance(symbols, list):
-        return [it for it in symbols if isinstance(it, dict)]
+        out: list[dict] = []
+        for item in symbols:
+            if not isinstance(item, dict):
+                continue
+            normalized = dict(item)
+            broker = str(item.get('broker') or '').strip()
+            if not broker:
+                broker = str(item.get('market') or '').strip()
+            if broker:
+                normalized['broker'] = broker
+            normalized.pop('market', None)
+            out.append(normalized)
+        return out
     return []
 
 
 def set_watchlist_config(cfg: dict | None, items: list[dict]) -> dict:
     data = cfg if isinstance(cfg, dict) else {}
-    normalized = [it for it in (items or []) if isinstance(it, dict)]
+    normalized: list[dict] = []
+    for item in (items or []):
+        if not isinstance(item, dict):
+            continue
+        row = dict(item)
+        broker = str(item.get('broker') or '').strip()
+        if not broker:
+            broker = str(item.get('market') or '').strip()
+        if broker:
+            row['broker'] = broker
+        row.pop('market', None)
+        normalized.append(row)
     data['symbols'] = normalized
     return data
 
@@ -89,11 +109,9 @@ def normalize_portfolio_broker_config(cfg: dict | None) -> dict:
     if not isinstance(portfolio, dict):
         return data
 
-    normalized = {k: v for k, v in portfolio.items() if k not in {'pm_config', 'market'}}
+    normalized = {k: v for k, v in portfolio.items() if k != 'market'}
 
     data_config = str(portfolio.get('data_config') or '').strip()
-    if not data_config:
-        data_config = str(portfolio.get('pm_config') or '').strip()
     if data_config:
         normalized['data_config'] = data_config
 
