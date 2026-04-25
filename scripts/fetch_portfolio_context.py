@@ -93,13 +93,11 @@ def _normalize_symbol(asset_type: str | None, asset_id: str, market_text: str = 
 
 
 def _record_broker_text(fields: dict) -> str:
-    return (_as_text(fields.get("broker")).strip() or _as_text(fields.get("market")).strip())
+    return _as_text(fields.get("broker")).strip()
 
 
 def _filter_payload(*, broker: str | None, account: str | None) -> dict:
-    # Preserve legacy "market" for older readers while making "broker" the
-    # preferred name for holdings/portfolio source filtering.
-    return {"broker": broker, "market": broker, "account": account}
+    return {"broker": broker, "account": account}
 
 
 def build_context(
@@ -133,7 +131,7 @@ def build_context(
 
         # Normalize selected fields (avoid leaking rich-text arrays downstream)
         fields = dict(fields0)
-        for k in ("broker", "market", "account", "asset_id", "asset_name"):
+        for k in ("broker", "account", "asset_id", "asset_name"):
             if k in fields:
                 fields[k] = _as_text(fields.get(k)).strip()
         selected.append(fields)
@@ -180,7 +178,6 @@ def build_context(
             "avg_cost": avg_cost,
             "currency": currency,
             "broker": _record_broker_text(f),
-            "market": _as_text(f.get("market")).strip(),
             "account": _as_text(f.get("account")).strip(),
         }
 
