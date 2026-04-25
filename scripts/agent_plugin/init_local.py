@@ -111,7 +111,8 @@ def _build_symbols(template_cfg: dict[str, Any], *, market: str, symbols: list[s
     for symbol in symbols:
         row = deepcopy(template_symbol)
         row["symbol"] = symbol
-        row["market"] = market_name
+        row.pop("market", None)
+        row["broker"] = market_name
         fetch = row.get("fetch")
         if not isinstance(fetch, dict):
             fetch = {}
