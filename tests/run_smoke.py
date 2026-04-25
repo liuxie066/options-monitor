@@ -99,6 +99,8 @@ def test_agent_internal_init_minimal_config() -> None:
         assert cfg["portfolio"]["data_config"] == "portfolio.sqlite.json"
         assert "pm_config" not in cfg["portfolio"]
         assert "market" not in cfg["portfolio"]
+        assert cfg["symbols"][0]["broker"] == "US"
+        assert "market" not in cfg["symbols"][0]
 
 
 def test_agent_internal_init_reuses_existing_data_config_across_markets() -> None:
