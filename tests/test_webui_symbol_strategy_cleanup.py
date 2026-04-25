@@ -111,6 +111,15 @@ def test_patch_entry_removes_forbidden_symbol_level_strategy_fields() -> None:
     assert entry["sell_put"]["max_strike"] == 110.0
 
 
+def test_patch_entry_updates_broker_only() -> None:
+    entry = {"symbol": "PDD", "market": "US"}
+
+    _patch_entry(entry, {"broker": "HK"})
+
+    assert entry["broker"] == "HK"
+    assert entry["market"] == "US"
+
+
 def test_clean_symbol_level_strategy_fields_removes_stale_keys_from_all_symbols() -> None:
     cfg = {
         "symbols": [
