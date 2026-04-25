@@ -292,7 +292,7 @@ def main() -> int:
             syms = resolve_watchlist_config(base_cfg)
             set_watchlist_config(
                 base_cfg,
-                [it for it in syms if isinstance(it, dict) and (it.get('market') == market_cfg.upper())],
+                [it for it in syms if isinstance(it, dict) and (it.get('broker') == market_cfg.upper())],
             )
         except Exception:
             pass
@@ -552,7 +552,7 @@ def main() -> int:
     cash_footer_lines: list[str] = []
     try:
         cfg = base_cfg or {}
-        cfg_market = str((cfg.get('portfolio') or {}).get('market') or '富途')
+        cfg_market = str((cfg.get('portfolio') or {}).get('broker') or '富途')
         notif_cfg = (cfg.get('notifications') or {}) if isinstance(cfg, dict) else {}
         accts = cash_footer_accounts_from_config(cfg)
         timeout_sec = int(notif_cfg.get('cash_footer_timeout_sec') or 180)
