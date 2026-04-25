@@ -284,3 +284,151 @@ def test_prepare_single_account_delivery_builds_messages_and_delivery() -> None:
     assert out.delivery_decision["should_send"] is True
     assert out.delivery_plan["account_messages"] == {"lx": "[lx]\nhello"}
     assert out.effective_target == "user:test"
+
+
+def test_execute_single_account_pipeline_uses_normalized_returncode_when_present() -> None:
+    from src.application.scheduled_notification import execute_single_account_pipeline
+
+    seen: dict[str, object] = {}
+
+    def _run_pipeline(**kwargs):
+        seen["run_kwargs"] = kwargs
+        return SimpleNamespace(returncode=9, stdout="raw-out", stderr="raw-err")
+
+    def _normalize_pipeline_output(**kwargs):
+        seen["normalize_kwargs"] = kwargs
+        return {"returncode": 5, "ok": False, "adapter": "pipeline"}
+
+    out = execute_single_account_pipeline(
+        run_pipeline=_run_pipeline,
+        normalize_pipeline_output=_normalize_pipeline_output,
+        vpy="python",
+        base="/repo",
+        config="config.us.json",
+        report_dir="report-dir",
+        state_dir="state-dir",
+    )
+
+    assert out.returncode == 5
+    assert out.payload["adapter"] == "pipeline"
+    assert seen["normalize_kwargs"] == {
+        "returncode": 9,
+        "stdout": "raw-out",
+        "stderr": "raw-err",
+    }
+
+
+def test_execute_single_account_pipeline_falls_back_to_process_returncode_when_normalized_missing() -> None:
+    from src.application.scheduled_notification import execute_single_account_pipeline
+
+    out = execute_single_account_pipeline(
+        run_pipeline=lambda **kwargs: SimpleNamespace(returncode=7, stdout="", stderr=""),
+        normalize_pipeline_output=lambda **kwargs: {"ok": False},
+        vpy="python",
+        base="/repo",
+        config="config.us.json",
+        report_dir="report-dir",
+        state_dir="state-dir",
+    )
+
+    assert out.returncode == 7
+    assert out.payload == {"ok": False}
+
+
+def test_execute_single_account_delivery_reports_send_failed_when_command_fails() -> None:
+    from src.application.scheduled_notification import execute_single_account_delivery
+
+    delivery_plan = SimpleNamespace(
+        channel="feishu",
+        target="user:test",
+        account_messages={"lx": "[lx]\nhello"},
+    )
+
+    out = execute_single_account_delivery(
+        delivery_plan=delivery_plan,
+        account_name="lx",
+        send_message=lambda **kwargs: SimpleNamespace(returncode=2, stdout="", stderr="send failed"),
+        normalize_notify_output=lambda **kwargs: {"ok": False, "command_ok": False, "message": "boom", "returncode": 2},
+        mark_scheduler_notified=lambda: SimpleNamespace(returncode=0),
+        base="/repo",
+    )
+
+    assert out.ok is False
+    assert out.error_code == "SEND_FAILED"
+    assert out.details == "boom"
+    assert out.returncode == 2
+    assert out.message_id is None
+
+
+def test_execute_single_account_delivery_reports_unconfirmed_when_message_id_missing() -> None:
+    from src.application.scheduled_notification import execute_single_account_delivery
+
+    delivery_plan = SimpleNamespace(
+        channel="feishu",
+        target="user:test",
+        account_messages={"lx": "[lx]\nhello"},
+    )
+
+    out = execute_single_account_delivery(
+        delivery_plan=delivery_plan,
+        account_name="lx",
+        send_message=lambda **kwargs: SimpleNamespace(returncode=0, stdout="sent", stderr=""),
+        normalize_notify_output=lambda **kwargs: {"ok": False, "command_ok": True, "message": "missing message id", "returncode": 0},
+        mark_scheduler_notified=lambda: SimpleNamespace(returncode=0),
+        base="/repo",
+    )
+
+    assert out.ok is False
+    assert out.error_code == "SEND_UNCONFIRMED"
+    assert out.details == "missing message id"
+    assert out.returncode == 1
+
+
+def test_execute_single_account_delivery_fails_when_mark_notified_fails() -> None:
+    from src.application.scheduled_notification import execute_single_account_delivery
+
+    delivery_plan = SimpleNamespace(
+        channel="feishu",
+        target="user:test",
+        account_messages={"lx": "[lx]\nhello"},
+    )
+
+    out = execute_single_account_delivery(
+        delivery_plan=delivery_plan,
+        account_name="lx",
+        send_message=lambda **kwargs: SimpleNamespace(returncode=0, stdout="sent", stderr=""),
+        normalize_notify_output=lambda **kwargs: {"ok": True, "message_id": "msg-1", "returncode": 0},
+        mark_scheduler_notified=lambda: SimpleNamespace(returncode=9),
+        base="/repo",
+    )
+
+    assert out.ok is False
+    assert out.error_code == "MARK_NOTIFIED_FAILED"
+    assert out.details == "send ok but mark-notified failed"
+    assert out.returncode == 9
+    assert out.message_id == "msg-1"
+
+
+def test_execute_single_account_delivery_treats_missing_message_id_as_unconfirmed_even_when_send_reports_ok() -> None:
+    from src.application.scheduled_notification import execute_single_account_delivery
+
+    delivery_plan = SimpleNamespace(
+        channel="feishu",
+        target="user:test",
+        account_messages={"lx": "[lx]\nhello"},
+    )
+
+    out = execute_single_account_delivery(
+        delivery_plan=delivery_plan,
+        account_name="lx",
+        send_message=lambda **kwargs: SimpleNamespace(returncode=0, stdout="sent", stderr=""),
+        normalize_notify_output=lambda **kwargs: {"ok": True, "command_ok": True, "message": "message_id is missing", "returncode": 0},
+        mark_scheduler_notified=lambda: SimpleNamespace(returncode=0),
+        base="/repo",
+    )
+
+    assert out.ok is False
+    assert out.error_code == "SEND_UNCONFIRMED"
+    assert out.details == "message_id is missing"
+    assert out.returncode == 1
+    assert out.message_id is None

@@ -369,19 +369,24 @@ def execute_single_account_delivery(
         stdout=str(send.stdout or ""),
         stderr=str(send.stderr or ""),
     )
-    send_ok = bool(send_payload.get("ok"))
+    normalized_returncode = send_payload.get("returncode")
+    resolved_returncode = int(send.returncode if normalized_returncode is None else normalized_returncode)
+    message_id = send_payload.get("message_id")
+    send_ok = bool(send_payload.get("ok") and message_id)
     if not send_ok:
         error_code = "SEND_UNCONFIRMED" if bool(send_payload.get("command_ok")) else "SEND_FAILED"
+        failure_returncode = resolved_returncode
+        if error_code == "SEND_UNCONFIRMED" and failure_returncode == 0:
+            failure_returncode = 1
         return SingleAccountSendResult(
             ok=False,
             error_code=error_code,
             details=str(send_payload.get("message") or (send.stderr or send.stdout or "").strip()),
-            returncode=int(send_payload.get("returncode") or send.returncode or 1),
-            message_id=(None if send_payload.get("message_id") is None else str(send_payload.get("message_id"))),
+            returncode=failure_returncode,
+            message_id=(None if message_id is None else str(message_id)),
         )
 
     mark = mark_scheduler_notified()
-    message_id = send_payload.get("message_id")
     if mark.returncode != 0:
         return SingleAccountSendResult(
             ok=False,
