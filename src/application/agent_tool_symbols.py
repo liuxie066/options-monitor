@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 from scripts.agent_plugin.contracts import AgentToolError
 
@@ -15,7 +15,7 @@ def list_symbol_rows(cfg: dict[str, Any], *, resolve_watchlist_config, normalize
         rows.append(
             {
                 "symbol": str(item.get("symbol") or "").strip().upper(),
-                "market": item.get("market"),
+                "broker": item.get("broker"),
                 "accounts": normalize_accounts(item.get("accounts"), fallback=()) if item.get("accounts") is not None else None,
                 "use": item.get("use"),
                 "limit_expirations": fetch.get("limit_expirations"),
@@ -48,6 +48,20 @@ def set_path(obj: dict[str, Any], path: str, value: Any) -> None:
     cur[parts[-1]] = value
 
 
+def require_int(payload: dict[str, Any], key: str) -> int:
+    value = payload.get(key)
+    if value is None:
+        raise AgentToolError(code="INPUT_ERROR", message=f"{key} is required")
+    return int(value)
+
+
+def require_float(payload: dict[str, Any], key: str) -> float:
+    value = payload.get(key)
+    if value is None:
+        raise AgentToolError(code="INPUT_ERROR", message=f"{key} is required")
+    return float(value)
+
+
 def apply_symbol_mutation(cfg: dict[str, Any], payload: dict[str, Any], *, normalize_accounts, resolve_watchlist_config) -> dict[str, Any]:
     action = str(payload.get("action") or "list").strip().lower()
     symbol = str(payload.get("symbol") or "").strip().upper()
@@ -59,7 +73,7 @@ def apply_symbol_mutation(cfg: dict[str, Any], payload: dict[str, Any], *, norma
         raise AgentToolError(code="CONFIG_ERROR", message="config symbols must be a list")
     if action == "list":
         return cfg
-    idx, entry = find_symbol_entry(cfg, symbol, resolve_watchlist_config=resolve_watchlist_config)
+    idx, found_entry = find_symbol_entry(cfg, symbol, resolve_watchlist_config=resolve_watchlist_config)
     if action == "remove":
         if idx is None:
             raise AgentToolError(code="INPUT_ERROR", message=f"symbol not found: {symbol}")
@@ -68,7 +82,7 @@ def apply_symbol_mutation(cfg: dict[str, Any], payload: dict[str, Any], *, norma
     if action == "add":
         if not symbol:
             raise AgentToolError(code="INPUT_ERROR", message="symbol is required for add")
-        if entry is not None:
+        if found_entry is not None:
             raise AgentToolError(code="INPUT_ERROR", message=f"symbol already exists: {symbol}")
         sell_put_enabled = bool(payload.get("sell_put_enabled", False))
         sell_call_enabled = bool(payload.get("sell_call_enabled", False))
@@ -80,18 +94,20 @@ def apply_symbol_mutation(cfg: dict[str, Any], payload: dict[str, Any], *, norma
             for key in ("sell_call_min_dte", "sell_call_max_dte", "sell_call_min_strike"):
                 if payload.get(key) is None:
                     raise AgentToolError(code="INPUT_ERROR", message=f"{key} is required when sell_call_enabled=true")
-        entry = {
+        entry: dict[str, Any] = {
             "symbol": symbol,
             "fetch": {"limit_expirations": int(payload.get("limit_expirations") or 8)},
             "sell_put": {"enabled": sell_put_enabled},
             "sell_call": {"enabled": sell_call_enabled},
         }
         if sell_put_enabled:
-            entry["sell_put"].update({"min_dte": int(payload.get("sell_put_min_dte")), "max_dte": int(payload.get("sell_put_max_dte")), "min_strike": float(payload.get("sell_put_min_strike")), "max_strike": float(payload.get("sell_put_max_strike"))})
+            sell_put_entry = cast(dict[str, Any], entry["sell_put"])
+            sell_put_entry.update({"min_dte": require_int(payload, "sell_put_min_dte"), "max_dte": require_int(payload, "sell_put_max_dte"), "min_strike": require_float(payload, "sell_put_min_strike"), "max_strike": require_float(payload, "sell_put_max_strike")})
         if sell_call_enabled:
-            entry["sell_call"].update({"min_dte": int(payload.get("sell_call_min_dte")), "max_dte": int(payload.get("sell_call_max_dte")), "min_strike": float(payload.get("sell_call_min_strike"))})
-        if payload.get("market") is not None:
-            entry["market"] = payload.get("market")
+            sell_call_entry = cast(dict[str, Any], entry["sell_call"])
+            sell_call_entry.update({"min_dte": require_int(payload, "sell_call_min_dte"), "max_dte": require_int(payload, "sell_call_max_dte"), "min_strike": require_float(payload, "sell_call_min_strike")})
+        if payload.get("broker") is not None:
+            entry["broker"] = payload.get("broker")
         if payload.get("use") is not None:
             entry["use"] = payload.get("use")
         if payload.get("accounts") is not None:
@@ -99,8 +115,9 @@ def apply_symbol_mutation(cfg: dict[str, Any], payload: dict[str, Any], *, norma
         symbols.append(entry)
         return cfg
     if action == "edit":
-        if entry is None or idx is None:
+        if found_entry is None or idx is None:
             raise AgentToolError(code="INPUT_ERROR", message=f"symbol not found: {symbol}")
+        entry = found_entry
         sets = payload.get("set")
         if not isinstance(sets, dict) or not sets:
             raise AgentToolError(code="INPUT_ERROR", message="edit requires non-empty set object")

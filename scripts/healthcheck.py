@@ -29,6 +29,11 @@ from scripts.feishu_bitable import (
 )
 from scripts.account_config import accounts_from_config
 from scripts.config_loader import normalize_portfolio_broker_config, resolve_data_config_path
+from scripts.validate_config import validate_config
+
+
+REQUIRED_HOLDINGS_FIELDS = {'asset_id', 'asset_name', 'quantity', 'account', 'broker', 'currency', 'asset_type'}
+REQUIRED_OPTION_POSITION_FIELDS = {'symbol', 'option_type', 'side', 'contracts', 'status', 'account', 'broker', 'currency', 'cash_secured_amount'}
 
 
 def now_utc():
@@ -48,7 +53,7 @@ def main():
 
     errors = []
     warns = []
-    opt_cfg: dict = {}
+    opt_cfg: dict[str, object] = {}
 
     try:
         opt_cfg = normalize_portfolio_broker_config(json.loads(cfg_path.read_text(encoding='utf-8')))
@@ -58,17 +63,14 @@ def main():
 
     # 1) config valid
     try:
-        import subprocess
-        vpy = base / '.venv' / 'bin' / 'python'
-        res = subprocess.run([str(vpy), 'scripts/validate_config.py', '--config', str(cfg_path)], cwd=str(base), capture_output=True, text=True)
-        if res.returncode != 0:
-            errors.append(f"config invalid: {(res.stderr or res.stdout).strip()}")
+        validate_config(json.loads(cfg_path.read_text(encoding='utf-8')))
     except Exception as e:
         errors.append(f"config validation failed: {e}")
 
     # 2) feishu schema
     try:
-        portfolio_cfg = (opt_cfg.get('portfolio') or {})
+        raw_portfolio_cfg = opt_cfg.get('portfolio')
+        portfolio_cfg = raw_portfolio_cfg if isinstance(raw_portfolio_cfg, dict) else {}
         data_ref = portfolio_cfg.get('data_config')
         data_path = resolve_data_config_path(base=base, data_config=data_ref)
         pm = json.loads(data_path.read_text(encoding='utf-8'))
@@ -92,8 +94,8 @@ def main():
         hold_fields = {f.get('field_name') for f in bitable_fields(token, hold_app, hold_tbl)}
         opt_fields = {f.get('field_name') for f in bitable_fields(token, opt_app, opt_tbl)}
 
-        need_hold = {'asset_id','asset_name','quantity','account','market','currency','asset_type'}
-        need_opt = {'symbol','option_type','side','contracts','status','account','market','currency','cash_secured_amount'}
+        need_hold = REQUIRED_HOLDINGS_FIELDS
+        need_opt = REQUIRED_OPTION_POSITION_FIELDS
 
         missing_hold = sorted(list(need_hold - hold_fields))
         missing_opt = sorted(list(need_opt - opt_fields))
