@@ -10,11 +10,11 @@ if str(BASE) not in sys.path:
 from scripts.fetch_portfolio_context import build_context
 
 
-def test_build_context_richtext_normalization_and_hk_symbol() -> None:
+def test_build_context_requires_broker_field_and_normalizes_hk_symbol() -> None:
     records = [
         {
             "fields": {
-                "market": [{"text": "富途", "type": "text"}],
+                "broker": [{"text": "富途", "type": "text"}],
                 "account": [{"text": "lx", "type": "text"}],
                 "asset_type": "hk_stock",
                 "asset_id": [{"text": "00700", "type": "text"}],
@@ -27,7 +27,7 @@ def test_build_context_richtext_normalization_and_hk_symbol() -> None:
         },
         {
             "fields": {
-                "market": [{"text": "富途", "type": "text"}],
+                "broker": [{"text": "富途", "type": "text"}],
                 "account": [{"text": "lx", "type": "text"}],
                 "asset_type": "cash",
                 "asset_id": [{"text": "CNY-CASH", "type": "text"}],
@@ -39,7 +39,7 @@ def test_build_context_richtext_normalization_and_hk_symbol() -> None:
         },
         {
             "fields": {
-                "market": [{"text": "富途", "type": "text"}],
+                "broker": [{"text": "富途", "type": "text"}],
                 "account": [{"text": "lx", "type": "text"}],
                 "asset_type": "us_stock",
                 "asset_id": [{"text": "NVDA", "type": "text"}],
@@ -63,6 +63,27 @@ def test_build_context_richtext_normalization_and_hk_symbol() -> None:
 
     assert "NVDA" in stocks
     assert stocks["NVDA"]["shares"] == 160
+
+
+def test_build_context_ignores_market_only_holdings_rows() -> None:
+    records = [
+        {
+            "fields": {
+                "market": [{"text": "富途", "type": "text"}],
+                "account": [{"text": "lx", "type": "text"}],
+                "asset_type": "cash",
+                "asset_id": [{"text": "USD-CASH", "type": "text"}],
+                "currency": "USD",
+                "quantity": 100,
+            }
+        }
+    ]
+
+    ctx = build_context(records, broker="富途", account="lx")
+
+    assert ctx["raw_selected_count"] == 0
+    assert ctx["cash_by_currency"] == {}
+    assert ctx["stocks_by_symbol"] == {}
 
 
 def test_build_context_accepts_broker_field_without_market() -> None:
@@ -104,7 +125,7 @@ def test_build_context_accepts_broker_field_without_market() -> None:
     ctx = build_context(records, broker="富途", account="lx")
 
     assert ctx["filters"]["broker"] == "富途"
-    assert ctx["filters"]["market"] == "富途"
+    assert "market" not in ctx["filters"]
     assert ctx["raw_selected_count"] == 2
     assert ctx["cash_by_currency"]["USD"] == 123.45
     assert ctx["stocks_by_symbol"]["AAPL"]["broker"] == "富途"
