@@ -25,6 +25,8 @@ def test_multi_tick_and_webui_use_application_facades() -> None:
     agent_src = (ROOT / "om-agent").read_text(encoding="utf-8")
     send_if_needed_src = (ROOT / "scripts" / "send_if_needed.py").read_text(encoding="utf-8")
     multi_tick_main_src = (ROOT / "scripts" / "multi_tick" / "main.py").read_text(encoding="utf-8")
+    multi_tick_scheduler_src = (ROOT / "src" / "application" / "multi_tick_scheduler.py").read_text(encoding="utf-8")
+    multi_tick_finalization_src = (ROOT / "src" / "application" / "multi_tick_finalization.py").read_text(encoding="utf-8")
     cron_runtime_src = (ROOT / "src" / "application" / "cron_runtime.py").read_text(encoding="utf-8")
 
     assert "from src.application.multi_account_tick import current_run_id as _current_run_id" in multi_src
@@ -36,11 +38,12 @@ def test_multi_tick_and_webui_use_application_facades() -> None:
     assert "src.interfaces.agent.cli" in agent_src
     assert "from src.application.scheduled_notification import (" in send_if_needed_src
     assert "from src.application.cron_runtime import request_scheduler_update, write_last_run" in send_if_needed_src
-    assert "build_multi_tick_scheduler_decision" in multi_tick_main_src
-    assert "build_multi_tick_account_scheduler_view" in multi_tick_main_src
+    assert "run_scheduler_flow" in multi_tick_main_src
+    assert "build_multi_tick_scheduler_decision" in multi_tick_scheduler_src
+    assert "build_multi_tick_account_scheduler_view" in multi_tick_scheduler_src
     assert "apply_notify_results_to_tick_metrics" in multi_tick_main_src
-    assert "build_shared_last_run_meta" in multi_tick_main_src
-    assert "build_run_end_payload" in multi_tick_main_src
+    assert "build_shared_last_run_meta" in multi_tick_finalization_src
+    assert "build_run_end_payload" in multi_tick_finalization_src
     assert "def build_notify_summary(" in cron_runtime_src
 
 

@@ -19,16 +19,17 @@ def test_multi_tick_account_messages_snapshot_contract_guard_present() -> None:
     base = Path(__file__).resolve().parents[1]
     src = (base / "scripts" / "multi_tick" / "main.py").read_text(encoding="utf-8")
     helper_src = (base / "src" / "application" / "scheduled_notification.py").read_text(encoding="utf-8")
+    audit_src = (base / "src" / "application" / "multi_tick_audit.py").read_text(encoding="utf-8")
     assert 'snapshot_name": "account_messages"' in helper_src
     assert "prepare_multi_account_messages(" in src
     assert "snapshot_account_messages(" in helper_src
-    assert "stage='account_messages_snapshot'" in src
+    assert 'stage="account_messages_snapshot"' in audit_src or "stage='account_messages_snapshot'" in src
     assert "account_messages must be a dict" in helper_src
 
 
 def test_multi_tick_scheduler_and_account_decision_use_objectized_contract_path() -> None:
     base = Path(__file__).resolve().parents[1]
-    src = (base / "scripts" / "multi_tick" / "main.py").read_text(encoding="utf-8")
+    src = (base / "src" / "application" / "multi_tick_scheduler.py").read_text(encoding="utf-8")
     helper_src = (base / "src" / "application" / "scheduled_notification.py").read_text(encoding="utf-8")
     assert "build_multi_tick_scheduler_decision" in src
     assert "build_multi_tick_account_scheduler_view" in src
@@ -36,29 +37,33 @@ def test_multi_tick_scheduler_and_account_decision_use_objectized_contract_path(
     assert '"scheduler_raw"' in helper_src
     assert "engine_entrypoint: Callable[..., dict[str, Any]] = resolve_multi_tick_engine_entrypoint" in helper_src
     assert "account scheduler decision view must be valid" in helper_src
-    assert "stage='account_scheduler_decision'" in src
+    assert 'stage="account_scheduler_decision"' in src
 
 
 def test_multi_tick_trading_day_guard_decision_delegates_to_engine() -> None:
     base = Path(__file__).resolve().parents[1]
-    src = (base / "scripts" / "multi_tick" / "main.py").read_text(encoding="utf-8")
+    src = (base / "src" / "application" / "multi_tick_scheduler.py").read_text(encoding="utf-8")
+    watchdog_src = (base / "src" / "application" / "multi_tick_watchdog.py").read_text(encoding="utf-8")
+    main_src = (base / "scripts" / "multi_tick" / "main.py").read_text(encoding="utf-8")
     helper_src = (base / "src" / "application" / "scheduled_notification.py").read_text(encoding="utf-8")
     assert "decide_trading_day_guard(" in src
-    assert "opend_unhealthy={" in src
-    assert "build_multi_account_delivery(" in src
+    assert "opend_unhealthy={" in watchdog_src
+    assert "build_multi_account_delivery(" in main_src
     assert "decision_builder: Callable[..., dict[str, Any]] = decide_notification_delivery" in helper_src
 
 
 def test_multi_tick_io_and_decision_failure_audit_fields_are_distinguishable() -> None:
     base = Path(__file__).resolve().parents[1]
-    src = (base / "scripts" / "multi_tick" / "main.py").read_text(encoding="utf-8")
+    scheduler_src = (base / "src" / "application" / "multi_tick_scheduler.py").read_text(encoding="utf-8")
+    audit_src = (base / "src" / "application" / "multi_tick_audit.py").read_text(encoding="utf-8")
+    main_src = (base / "scripts" / "multi_tick" / "main.py").read_text(encoding="utf-8")
     helper_src = (base / "src" / "application" / "scheduled_notification.py").read_text(encoding="utf-8")
     account_run_src = (base / "src" / "application" / "account_run.py").read_text(encoding="utf-8")
-    assert "normalize_subprocess_adapter_payload(" in src
+    assert "normalize_subprocess_adapter_payload(" in scheduler_src
     assert "normalize_pipeline_subprocess_output(" in account_run_src
-    assert "normalize_notify_subprocess_output" in src
+    assert "normalize_notify_subprocess_output" in main_src
     assert 'failure_kind="io_error"' in helper_src
-    assert "failure_kind='decision_error'" in src
+    assert 'failure_kind="decision_error"' in audit_src
 
 
 def test_multi_tick_pipeline_calls_share_context_dir() -> None:
@@ -70,6 +75,7 @@ def test_multi_tick_pipeline_calls_share_context_dir() -> None:
 def test_multi_tick_notify_failure_is_account_isolated() -> None:
     base = Path(__file__).resolve().parents[1]
     src = (base / "scripts" / "multi_tick" / "main.py").read_text(encoding="utf-8")
+    finalization_src = (base / "src" / "application" / "multi_tick_finalization.py").read_text(encoding="utf-8")
     helper_src = (base / "src" / "application" / "scheduled_notification.py").read_text(encoding="utf-8")
     cron_runtime_src = (base / "src" / "application" / "cron_runtime.py").read_text(encoding="utf-8")
     assert "notify_failures: list[dict[str, object]] = []" in src
@@ -80,8 +86,8 @@ def test_multi_tick_notify_failure_is_account_isolated() -> None:
     assert "sent_accounts.append(acct)" in helper_src
     assert "mark_accounts_notified(" in src
     assert "mark_notified=True" in cron_runtime_src
-    assert "NOTIFY_PARTIAL_FAILED" in src
-    assert "build_run_end_payload(" in src
+    assert "NOTIFY_PARTIAL_FAILED" in finalization_src
+    assert "build_run_end_payload(" in finalization_src
     assert '"notify_summary": notify_summary' in cron_runtime_src
 
 
