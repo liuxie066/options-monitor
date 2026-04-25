@@ -7,8 +7,8 @@ BASE = Path(__file__).resolve().parents[1]
 if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
-from scripts.fetch_option_positions_context import build_context
-from src.application.option_positions_facade import load_option_position_records
+from scripts.fetch_option_positions_context import build_context, build_shared_context
+from src.application.option_positions_facade import load_option_position_records, list_position_rows
 
 
 def test_build_context_preserves_record_id_without_position_id() -> None:
@@ -66,6 +66,56 @@ def test_build_context_reads_premium_from_note_fallback() -> None:
     ctx = build_context(records, broker="富途", account="lx", rates={"USDCNY": 7.2})
 
     assert ctx["open_positions_min"][0]["premium"] == "0.88"
+
+
+def test_build_context_requires_broker_on_persisted_rows() -> None:
+    records = [
+        {
+            "record_id": "rec_1",
+            "fields": {
+                "market": "富途证券（香港）",
+                "account": "lx",
+                "symbol": "NVDA",
+                "status": "open",
+                "side": "short",
+                "option_type": "put",
+                "contracts": 1,
+                "contracts_open": 1,
+                "cash_secured_amount": 1000,
+                "currency": "USD",
+            },
+        }
+    ]
+
+    ctx = build_context(records, broker="富途", account="lx", rates={"USDCNY": 7.2})
+
+    assert ctx["raw_selected_count"] == 0
+    assert ctx["open_positions_min"] == []
+
+
+def test_build_shared_context_requires_broker_on_persisted_rows() -> None:
+    shared = build_shared_context(
+        [
+            {
+                "record_id": "rec_1",
+                "fields": {
+                    "market": "富途",
+                    "account": "lx",
+                    "symbol": "NVDA",
+                    "status": "open",
+                    "side": "short",
+                    "option_type": "call",
+                    "contracts": 1,
+                    "contracts_open": 1,
+                    "underlying_share_locked": 100,
+                },
+            }
+        ],
+        broker="富途",
+    )
+
+    assert shared["all_accounts"]["raw_selected_count"] == 0
+    assert shared["by_account"] == {}
 
 
 def test_build_context_scales_cash_secured_for_partial_close() -> None:
@@ -191,3 +241,17 @@ def test_load_option_position_records_falls_back_to_legacy_records_when_projecti
     rows = load_option_position_records(_Repo())
 
     assert rows == [{"record_id": "legacy_1", "fields": {"symbol": "AAPL"}}]
+
+
+def test_list_position_rows_requires_broker_on_persisted_rows() -> None:
+    class _Repo:
+        def list_records(self, *, page_size: int = 500) -> list[dict]:
+            return [
+                {"record_id": "legacy_1", "fields": {"market": "富途", "account": "lx", "symbol": "AAPL", "status": "open"}},
+                {"record_id": "lot_1", "fields": {"broker": "富途", "account": "lx", "symbol": "NVDA", "status": "open"}},
+            ]
+
+    rows = list_position_rows(_Repo(), broker="富途", account="lx", status="open", limit=10)
+
+    assert [row["record_id"] for row in rows] == ["lot_1"]
+    assert rows[0]["broker"] == "富途"
