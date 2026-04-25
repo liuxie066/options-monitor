@@ -302,7 +302,7 @@ def test_spec_exposes_broker_as_public_field() -> None:
     spec = build_spec()
     query_tool = next(item for item in spec["tools"] if item["name"] == "query_cash_headroom")
     assert "broker" in query_tool["input_schema"]
-    assert "market" in query_tool["input_schema"]
+    assert "market" not in query_tool["input_schema"]
     assert "data_config" in query_tool["input_schema"]
     assert "pm_config" not in query_tool["input_schema"]
 
@@ -550,6 +550,8 @@ def test_manage_symbols_list_and_dry_run_add(monkeypatch, tmp_path: Path) -> Non
     assert out_list["ok"] is True
     assert out_list["data"]["symbol_count"] == 1
     assert out_list["data"]["symbols"][0]["symbol"] == "NVDA"
+    assert out_list["data"]["symbols"][0]["broker"] == "US"
+    assert "market" not in out_list["data"]["symbols"][0]
 
     out_dry = run_tool(
         "manage_symbols",
@@ -568,6 +570,8 @@ def test_manage_symbols_list_and_dry_run_add(monkeypatch, tmp_path: Path) -> Non
     assert out_dry["ok"] is True
     assert out_dry["data"]["dry_run"] is True
     assert out_dry["data"]["symbol_count"] == 2
+    added = next(item for item in out_dry["data"]["symbols"] if item["symbol"] == "TSLA")
+    assert "market" not in added
 
     current = json.loads(cfg_path.read_text(encoding="utf-8"))
     assert [x["symbol"] for x in current["symbols"]] == ["NVDA"]
@@ -604,6 +608,7 @@ def test_manage_symbols_write_applies_when_enabled(monkeypatch, tmp_path: Path) 
             "config_path": str(cfg_path),
             "action": "add",
             "symbol": "TSLA",
+            "broker": "US",
             "sell_put_enabled": True,
             "sell_put_min_dte": 20,
             "sell_put_max_dte": 45,
@@ -617,6 +622,9 @@ def test_manage_symbols_write_applies_when_enabled(monkeypatch, tmp_path: Path) 
 
     current = json.loads(cfg_path.read_text(encoding="utf-8"))
     assert [x["symbol"] for x in current["symbols"]] == ["NVDA", "TSLA"]
+    added = next(item for item in current["symbols"] if item["symbol"] == "TSLA")
+    assert added["broker"] == "US"
+    assert "market" not in added
 
 
 def test_preview_notification_is_read_only() -> None:
