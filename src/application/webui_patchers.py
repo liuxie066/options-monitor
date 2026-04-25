@@ -203,8 +203,8 @@ def clean_symbol_level_strategy_fields(cfg: dict, *, forbidden_fields: list[str]
 
 
 def patch_entry(entry: dict, payload: dict, *, forbidden_fields: list[str] | set[str] | tuple[str, ...]) -> None:
-    if "market" in payload:
-        entry["market"] = payload.get("market")
+    if "broker" in payload:
+        entry["broker"] = payload.get("broker")
     if "accounts" in payload:
         accounts = payload.get("accounts")
         if accounts is None:
