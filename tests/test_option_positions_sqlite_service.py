@@ -54,7 +54,35 @@ def test_load_option_positions_repo_bootstraps_position_lots_from_feishu(tmp_pat
     assert repo.count_position_lots() == 1
 
 
-def test_load_option_positions_repo_migrates_legacy_rows_when_lots_missing(tmp_path: Path) -> None:
+def test_load_option_positions_repo_normalizes_market_only_feishu_bootstrap_rows(tmp_path: Path) -> None:
+    import scripts.option_positions_core.service as svc
+
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
+    old_list = svc._list_feishu_option_position_records
+    try:
+        svc._list_feishu_option_position_records = lambda _ref: [  # type: ignore[assignment]
+            {
+                "record_id": "rec_1",
+                "fields": {
+                    "account": "lx",
+                    "market": "富途证券（香港）",
+                    "symbol": "NVDA",
+                    "status": "open",
+                    "contracts": 1,
+                    "contracts_open": 1,
+                },
+            }
+        ]
+        repo = svc.load_option_positions_repo(data_config)
+    finally:
+        svc._list_feishu_option_position_records = old_list  # type: ignore[assignment]
+
+    records = repo.list_records(page_size=10)
+    assert len(records) == 1
+    assert records[0]["fields"]["broker"] == "富途"
+
+
+def test_load_option_positions_repo_skips_legacy_rows_without_broker_or_market(tmp_path: Path) -> None:
     import scripts.option_positions_core.service as svc
 
     db_path = tmp_path / "option_positions.sqlite3"
@@ -88,9 +116,46 @@ def test_load_option_positions_repo_migrates_legacy_rows_when_lots_missing(tmp_p
     loaded = svc.load_option_positions_repo(data_config)
 
     rows = loaded.list_records(page_size=10)
+    assert rows == []
+
+
+def test_load_option_positions_repo_migrates_legacy_rows_with_market_to_broker(tmp_path: Path) -> None:
+    import scripts.option_positions_core.service as svc
+
+    db_path = tmp_path / "option_positions.sqlite3"
+    repo = svc.SQLiteOptionPositionsRepository(db_path)
+    with repo._connect() as conn:  # type: ignore[attr-defined]
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS option_positions (
+              record_id TEXT PRIMARY KEY,
+              fields_json TEXT NOT NULL,
+              created_at_ms INTEGER NOT NULL,
+              updated_at_ms INTEGER NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO option_positions (record_id, fields_json, created_at_ms, updated_at_ms)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                "legacy_1",
+                json.dumps({"symbol": "AAPL", "market": "富途证券", "status": "open", "contracts_open": 1}, ensure_ascii=False),
+                1000,
+                1000,
+            ),
+        )
+        conn.commit()
+
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=db_path, with_feishu=False)
+    loaded = svc.load_option_positions_repo(data_config)
+
+    rows = loaded.list_records(page_size=10)
     assert len(rows) == 1
     assert rows[0]["record_id"] == "legacy_1"
-    assert rows[0]["fields"]["symbol"] == "AAPL"
+    assert rows[0]["fields"]["broker"] == "富途"
 
 
 def test_load_option_positions_repo_supports_sqlite_only_mode(tmp_path: Path) -> None:
@@ -261,6 +326,36 @@ def test_persist_manual_close_event_updates_position_lot(tmp_path: Path) -> None
     assert len(lots) == 1
     assert lots[0]["fields"]["contracts_open"] == 1
     assert lots[0]["fields"]["contracts_closed"] == 1
+
+
+def test_persist_manual_close_event_requires_broker_on_position_lot(tmp_path: Path) -> None:
+    import pytest
+    import scripts.option_positions_core.service as svc
+
+    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+
+    with pytest.raises(ValueError, match="position lot missing broker"):
+        svc.persist_manual_close_event(
+            repo,
+            record_id="lot_market_only",
+            fields={
+                "market": "富途",
+                "account": "lx",
+                "symbol": "0700.HK",
+                "option_type": "put",
+                "side": "short",
+                "contracts": 1,
+                "contracts_open": 1,
+                "currency": "HKD",
+                "strike": 480.0,
+                "multiplier": 100,
+                "expiration": 1777420800000,
+            },
+            contracts_to_close=1,
+            close_price=1.2,
+            close_reason="manual_buy_to_close",
+            as_of_ms=2000,
+        )
 
 
 def test_load_option_positions_repo_raises_on_malformed_feishu_config(tmp_path: Path) -> None:

@@ -14,6 +14,7 @@ from scripts.option_positions_core.domain import (
     build_expire_auto_close_patch,
     effective_expiration,
     exp_ms_to_datetime,
+    normalize_broker,
     now_ms,
 )
 from scripts.option_positions_core.ledger import TradeEvent, project_position_lot_records, trade_event_from_normalized_deal
@@ -90,6 +91,29 @@ def resolve_option_positions_sqlite_path(data_config: Path) -> Path:
 def _list_feishu_option_position_records(table_ref: OptionPositionsTableRef) -> list[dict[str, Any]]:
     token = get_tenant_access_token(table_ref.app_id, table_ref.app_secret)
     return bitable_list_records(token, table_ref.app_token, table_ref.table_id, page_size=500)
+
+
+def _normalize_bootstrap_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    skipped = 0
+    for item in records:
+        record_id = str(item.get("record_id") or item.get("id") or "").strip()
+        fields = item.get("fields") or {}
+        if not record_id or not isinstance(fields, dict):
+            skipped += 1
+            continue
+        broker = normalize_broker(fields.get("broker"))
+        if not broker:
+            broker = normalize_broker(fields.get("market"))
+        if not broker:
+            skipped += 1
+            continue
+        normalized_fields = dict(fields)
+        normalized_fields["broker"] = broker
+        normalized.append({"record_id": record_id, "fields": normalized_fields})
+    if skipped:
+        print(f"[WARN] option_positions bootstrap skipped {skipped} rows without broker/market", file=sys.stderr)
+    return normalized
 
 
 class SQLiteOptionPositionsRepository:
@@ -295,7 +319,7 @@ def load_option_positions_repo(data_config: Path) -> SQLiteOptionPositionsReposi
     feishu_ref = _try_load_table_ref(data_config)
     if feishu_ref is not None:
         try:
-            repo.replace_position_lots(_list_feishu_option_position_records(feishu_ref))
+            repo.replace_position_lots(_normalize_bootstrap_records(_list_feishu_option_position_records(feishu_ref)))
         except Exception as exc:
             print(
                 f"[WARN] option_positions bootstrap skipped for {repo.db_path}: {exc}",
@@ -304,7 +328,7 @@ def load_option_positions_repo(data_config: Path) -> SQLiteOptionPositionsReposi
 
     if repo.count_position_lots() == 0 and repo.count_legacy_records() > 0:
         try:
-            repo.replace_position_lots(repo.list_legacy_records())
+            repo.replace_position_lots(_normalize_bootstrap_records(repo.list_legacy_records()))
         except Exception as exc:
             print(
                 f"[WARN] option_positions legacy migration skipped for {repo.db_path}: {exc}",
@@ -366,6 +390,9 @@ def persist_manual_close_event(
     close_reason: str,
     as_of_ms: int | None = None,
 ) -> dict[str, Any]:
+    broker = normalize_broker(fields.get("broker"))
+    if not broker:
+        raise ValueError(f"position lot missing broker: {record_id}")
     exp_ms, _exp_source = effective_expiration(fields)
     exp_dt = exp_ms_to_datetime(exp_ms)
     multiplier = safe_float(fields.get("multiplier"))
@@ -378,7 +405,7 @@ def persist_manual_close_event(
         event_id=f"manual-close-{record_id}-{uuid.uuid4().hex}",
         source_type="manual_trade_event",
         source_name="cli_manual_close",
-        broker=str(fields.get("broker") or fields.get("market") or ""),
+        broker=broker,
         account=str(fields.get("account") or ""),
         symbol=str(fields.get("symbol") or "").strip().upper(),
         option_type=str(fields.get("option_type") or ""),
