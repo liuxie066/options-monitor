@@ -166,7 +166,7 @@ def _resolve_opend_endpoint_for_market(cfg_obj: dict, market: str) -> tuple[str,
         for sym in resolve_watchlist_config(cfg_obj):
             if not isinstance(sym, dict):
                 continue
-            if str(sym.get('market') or '').upper() != mkt:
+            if str(sym.get('broker') or '').upper() != mkt:
                 continue
             fetch = (sym.get('fetch') or {})
             if not is_futu_fetch_source(fetch.get('source')):

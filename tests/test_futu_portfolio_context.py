@@ -78,6 +78,8 @@ def test_build_futu_portfolio_context_merges_cash_and_fund_assets_and_normalizes
     )
 
     assert out["portfolio_source_name"] == "futu"
+    assert out["filters"]["broker"] == "富途"
+    assert "market" not in out["filters"]
     assert out["cash_by_currency"]["CNY"] == 125000.0
     assert out["cash_by_currency"]["USD"] == 1000.0
     assert out["stocks_by_symbol"]["NVDA"]["shares"] == 100

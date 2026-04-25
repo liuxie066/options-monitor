@@ -281,7 +281,6 @@ def build_futu_portfolio_context(
                 "avg_cost": avg_cost,
                 "currency": currency,
                 "broker": str(market),
-                "market": str(market),
                 "account": (str(account).strip().lower() if account else ""),
             }
             continue
@@ -300,7 +299,7 @@ def build_futu_portfolio_context(
 
     return {
         "as_of_utc": datetime.now(timezone.utc).isoformat(),
-        "filters": {"broker": str(market), "market": str(market), "account": account},
+        "filters": {"broker": str(market), "account": account},
         "cash_by_currency": cash_by_currency,
         "stocks_by_symbol": stocks_by_symbol,
         "raw_selected_count": len(balance_rows) + len(position_rows),
