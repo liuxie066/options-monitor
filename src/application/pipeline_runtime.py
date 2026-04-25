@@ -6,12 +6,9 @@ import sys
 from pathlib import Path
 
 from scripts.account_config import cash_footer_accounts_from_config
+from scripts.config_loader import load_config as load_runtime_pipeline_config
+from scripts.config_loader import resolve_data_config_path, resolve_watchlist_config
 from scripts.report_builders import build_symbols_digest, build_symbols_summary
-from src.application.config_management import (
-    load_runtime_pipeline_config,
-    resolve_data_config_path,
-    resolve_watchlist_config,
-)
 from src.application.pipeline_reporting import (
     run_pipeline_alert_stage,
     run_pipeline_notification_stage,
