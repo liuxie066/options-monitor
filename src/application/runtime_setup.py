@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from scripts.agent_plugin.config import repo_base as agent_repo_base
+from src.application.config_management import repo_base as agent_repo_base
 from scripts.agent_plugin.init_local import init_local_config
 
 
@@ -35,4 +35,3 @@ def init_runtime(
     if data_config_path is not None:
         kwargs["data_config_path"] = data_config_path
     return init_local_config(**kwargs)
-
