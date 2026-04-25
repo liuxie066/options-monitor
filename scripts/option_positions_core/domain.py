@@ -271,8 +271,9 @@ def effective_contracts_closed(fields: dict[str, Any]) -> int:
 
 def effective_expiration(fields: dict[str, Any]) -> tuple[int | None, str]:
     exp_ms = fields.get("expiration")
-    if exp_ms_to_datetime(exp_ms) is not None:
-        return int(exp_ms), "expiration"
+    parsed_exp = exp_ms_to_datetime(exp_ms)
+    if parsed_exp is not None:
+        return int(parsed_exp.timestamp() * 1000), "expiration"
     exp_note = parse_note_kv(fields.get("note") or "", "exp")
     exp_ms2 = parse_exp_to_ms(exp_note)
     if exp_ms2 is not None:
@@ -352,8 +353,9 @@ def build_open_fields(cmd: OpenPositionCommand) -> dict[str, Any]:
     underlying_locked = cmd.underlying_share_locked
     if side == "short" and option_type == "call" and underlying_locked is None:
         m = multiplier if multiplier is not None else guess_multiplier(sym)
-        if m is not None:
-            underlying_locked = int(float(m) * contracts)
+        if m is None:
+            m = 100
+        underlying_locked = int(float(m) * contracts)
 
     note_kv: dict[str, str] = {}
     if cmd.strike is not None:
@@ -376,7 +378,6 @@ def build_open_fields(cmd: OpenPositionCommand) -> dict[str, Any]:
             contracts=contracts,
         ),
         "broker": broker,
-        "market": broker,
         "account": account,
         "symbol": sym,
         "option_type": option_type,

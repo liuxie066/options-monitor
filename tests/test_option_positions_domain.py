@@ -71,7 +71,7 @@ def test_build_open_fields_for_short_put_sets_open_contracts_and_cash() -> None:
 
     assert fields["account"] == "lx"
     assert fields["broker"] == "富途"
-    assert fields["market"] == "富途"
+    assert "market" not in fields
     assert fields["position_id"] == "NVDA_20260417_100P_short"
     assert fields["symbol"] == "NVDA"
     assert fields["option_type"] == "put"
