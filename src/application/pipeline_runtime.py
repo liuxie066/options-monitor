@@ -6,8 +6,12 @@ import sys
 from pathlib import Path
 
 from scripts.account_config import cash_footer_accounts_from_config
-from scripts.config_loader import load_config, resolve_data_config_path, resolve_watchlist_config
 from scripts.report_builders import build_symbols_digest, build_symbols_summary
+from src.application.config_management import (
+    load_runtime_pipeline_config,
+    resolve_data_config_path,
+    resolve_watchlist_config,
+)
 from src.application.pipeline_reporting import (
     run_pipeline_alert_stage,
     run_pipeline_notification_stage,
@@ -136,11 +140,12 @@ def main(argv: list[str] | None = None) -> int:
     if not cfg_path.is_absolute():
         cfg_path = (base / cfg_path).resolve()
 
-    cfg = load_config(
+    cfg = load_runtime_pipeline_config(
         base=base,
         config_path=cfg_path,
         is_scheduled=IS_SCHEDULED,
         log=log,
+        state_dir=state_dir,
     )
 
     py = sys.executable
