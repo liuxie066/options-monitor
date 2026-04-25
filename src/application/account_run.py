@@ -19,7 +19,7 @@ from domain.domain.engine import (
     decide_account_scan_gate,
     decide_pipeline_execution_result,
 )
-from src.application.config_management import resolve_watchlist_config, set_watchlist_config
+from scripts.config_loader import resolve_watchlist_config, set_watchlist_config
 from scripts.close_advice import run_close_advice
 from scripts.infra.service import run_pipeline_script
 from scripts.io_utils import utc_now
@@ -138,7 +138,7 @@ def run_one_account(
     try:
         syms = resolve_watchlist_config(cfg)
         if request.markets_to_run:
-            syms = [it for it in syms if isinstance(it, dict) and (it.get("market") in request.markets_to_run)]
+            syms = [it for it in syms if isinstance(it, dict) and (it.get("broker") in request.markets_to_run)]
         set_watchlist_config(cfg, syms)
     except Exception:
         pass
