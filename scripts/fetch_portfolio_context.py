@@ -93,7 +93,10 @@ def _normalize_symbol(asset_type: str | None, asset_id: str, market_text: str = 
 
 
 def _record_broker_text(fields: dict) -> str:
-    return _as_text(fields.get("broker")).strip()
+    broker = _as_text(fields.get("broker")).strip()
+    if broker:
+        return broker
+    return _as_text(fields.get("market")).strip()
 
 
 def _filter_payload(*, broker: str | None, account: str | None) -> dict:
