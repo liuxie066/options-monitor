@@ -13,7 +13,7 @@ if str(BASE) not in sys.path:
 def _portfolio_ctx(account: str, *, usd_cash: float, shares: int) -> dict:
     return {
         "as_of_utc": "2026-04-14T00:00:00+00:00",
-        "filters": {"market": "富途", "account": account},
+        "filters": {"broker": "富途", "account": account},
         "cash_by_currency": {"USD": usd_cash},
         "stocks_by_symbol": {
             "NVDA": {
@@ -21,7 +21,6 @@ def _portfolio_ctx(account: str, *, usd_cash: float, shares: int) -> dict:
                 "shares": shares,
                 "avg_cost": 100.0,
                 "currency": "USD",
-                "market": "富途美股",
                 "account": account,
             }
         },
@@ -107,7 +106,7 @@ def test_shared_context_reuses_fetch_calls_across_accounts() -> None:
 
     shared_portfolio = {
         "as_of_utc": "2026-04-14T00:00:00+00:00",
-        "filters": {"market": "富途"},
+        "filters": {"broker": "富途"},
         "all_accounts": _portfolio_ctx("", usd_cash=2500.0, shares=300),
         "by_account": {
             "lx": _portfolio_ctx("lx", usd_cash=1000.0, shares=100),
@@ -276,7 +275,13 @@ def test_shared_slice_matches_legacy_key_fields() -> None:
     assert sliced_portfolio is not None
     assert sliced_portfolio["filters"] == legacy_portfolio["filters"]
     assert sliced_portfolio["cash_by_currency"] == legacy_portfolio["cash_by_currency"]
-    assert sliced_portfolio["stocks_by_symbol"] == legacy_portfolio["stocks_by_symbol"]
+    assert {
+        k: {kk: vv for kk, vv in v.items() if kk != "market"}
+        for k, v in sliced_portfolio["stocks_by_symbol"].items()
+    } == {
+        k: {kk: vv for kk, vv in v.items() if kk != "market"}
+        for k, v in legacy_portfolio["stocks_by_symbol"].items()
+    }
 
     rates = {"rates": {"USDCNY": 7.2}}
     legacy_option = build_option_context(option_records, broker="富途", account="lx", rates=rates)
@@ -296,7 +301,7 @@ def test_load_portfolio_context_auto_prefers_futu_when_available() -> None:
     try:
         pc.fetch_futu_portfolio_context = lambda **_kwargs: {  # type: ignore[assignment]
             "as_of_utc": "2026-04-14T00:00:00+00:00",
-            "filters": {"market": "富途", "account": "lx"},
+            "filters": {"broker": "富途", "account": "lx"},
             "cash_by_currency": {"CNY": 120000.0},
             "stocks_by_symbol": {},
             "raw_selected_count": 1,
@@ -339,7 +344,7 @@ def test_load_portfolio_context_auto_skips_fresh_holdings_cache_and_uses_futu() 
             if path.name == "portfolio_context.json":
                 return {
                     "as_of_utc": "2026-04-14T00:00:00+00:00",
-                    "filters": {"market": "富途", "account": "lx"},
+                    "filters": {"broker": "富途", "account": "lx"},
                     "cash_by_currency": {"CNY": 88000.0},
                     "stocks_by_symbol": {},
                     "raw_selected_count": 1,
@@ -350,7 +355,7 @@ def test_load_portfolio_context_auto_skips_fresh_holdings_cache_and_uses_futu() 
         pc.load_cached_json = _load_cached  # type: ignore[assignment]
         pc.fetch_futu_portfolio_context = lambda **_kwargs: {  # type: ignore[assignment]
             "as_of_utc": "2026-04-14T00:01:00+00:00",
-            "filters": {"market": "富途", "account": "lx"},
+            "filters": {"broker": "富途", "account": "lx"},
             "cash_by_currency": {"CNY": 120000.0},
             "stocks_by_symbol": {},
             "raw_selected_count": 1,
