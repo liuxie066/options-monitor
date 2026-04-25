@@ -52,9 +52,8 @@ def build_context(records: list[dict], broker: str, account: str | None = None, 
         fields = rec.get("fields") or {}
         if not fields:
             continue
-        # broker: prefer new field; fallback to legacy market field (backward compatible)
         if broker_norm:
-            rec_broker = normalize_broker(fields.get("broker") or fields.get("market"))
+            rec_broker = normalize_broker(fields.get("broker"))
             if rec_broker != broker_norm:
                 continue
         if account_norm and normalize_account(fields.get("account")) != account_norm:
@@ -108,7 +107,7 @@ def build_context(records: list[dict], broker: str, account: str | None = None, 
         open_positions_min.append({
             'record_id': it.get('record_id'),
             'position_id': (f.get('position_id') or '').strip() or None,
-            'broker': normalize_broker(f.get('broker') or f.get('market')),
+            'broker': normalize_broker(f.get('broker')),
             'account': normalize_account(f.get('account')) or f.get('account'),
             'symbol': (f.get('symbol') or '').strip().upper() or None,
             'option_type': normalize_option_type(f.get('option_type') or parse_note_kv(note, 'option_type')) or None,
@@ -204,7 +203,7 @@ def build_shared_context(records: list[dict], broker: str, rates: dict | None = 
         fields = rec.get("fields") or {}
         if not fields:
             continue
-        rec_broker = normalize_broker(fields.get("broker") or fields.get("market"))
+        rec_broker = normalize_broker(fields.get("broker"))
         if broker_norm and rec_broker != broker_norm:
             continue
         acct = normalize_account(fields.get("account"))

@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from scripts.exchange_rates import get_exchange_rates_or_fetch_latest
+from scripts.config_loader import resolve_data_config_path
 from scripts.feishu_bitable import safe_float
 from scripts.option_positions_core.domain import (
     normalize_account,
@@ -16,7 +17,6 @@ from scripts.option_positions_core.domain import (
 )
 from scripts.option_positions_core.reporting import build_monthly_income_report
 from scripts.option_positions_core.service import load_option_positions_repo
-from src.application.config_management import resolve_data_config_path
 
 
 def resolve_option_positions_repo(*, base: Path, data_config: str | Path | None) -> tuple[Path, Any]:
@@ -60,7 +60,7 @@ def list_position_rows(
     for item in repo.list_records(page_size=200):
         record_id = item.get("record_id")
         fields = item.get("fields") or {}
-        if normalized_broker and normalize_broker(fields.get("broker") or fields.get("market")) != normalized_broker:
+        if normalized_broker and normalize_broker(fields.get("broker")) != normalized_broker:
             continue
         if normalized_account and normalize_account(fields.get("account")) != normalized_account:
             continue
@@ -70,7 +70,7 @@ def list_position_rows(
         rows.append(
             {
                 "record_id": record_id,
-                "broker": normalize_broker(fields.get("broker") or fields.get("market")),
+                "broker": normalize_broker(fields.get("broker")),
                 "account": normalize_account(fields.get("account")) or fields.get("account"),
                 "symbol": fields.get("symbol"),
                 "option_type": normalize_option_type(fields.get("option_type")),
