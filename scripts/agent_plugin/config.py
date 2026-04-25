@@ -49,8 +49,6 @@ def _absolutize_portfolio_data_config(cfg: dict[str, Any], *, config_path: Path)
 
     data_ref = portfolio.get("data_config")
     if data_ref is None or not str(data_ref).strip():
-        data_ref = portfolio.get("pm_config")
-    if data_ref is None or not str(data_ref).strip():
         return out
 
     data_path = Path(str(data_ref).strip()).expanduser()

@@ -5,10 +5,11 @@ import json
 import sys
 from typing import Any
 
+from scripts.agent_plugin.config import load_runtime_config
 from scripts.agent_plugin.contracts import AgentToolError, build_error_payload, build_response
+from scripts.validate_config import validate_config
 from src.application.account_management import add_account, edit_account, remove_account
 from src.application.close_advice_pipeline import run_close_advice
-from src.application.config_management import validate_runtime_config
 from src.application.healthcheck import run_healthcheck
 from src.application.multi_account_tick import run_tick
 from src.application.notification_pipeline import preview_notification
@@ -139,6 +140,16 @@ def _print(payload: dict[str, Any]) -> int:
     return 0 if payload.get("ok", True) else 2
 
 
+def _validate_runtime_config(*, config_key: str | None = None, config_path: str | None = None) -> dict[str, Any]:
+    path, cfg = load_runtime_config(config_key=config_key, config_path=config_path)
+    validate_config(dict(cfg))
+    return {
+        "ok": True,
+        "config_path": str(path),
+        "config_key": str(config_key or "").strip().lower() or None,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     if argv and argv[0] == "scan-pipeline":
         return int(run_scan_pipeline(argv[1:]))
@@ -193,7 +204,7 @@ def main(argv: list[str] | None = None) -> int:
             )))
 
         if args.command == "config" and args.config_command == "validate":
-            return _print(validate_runtime_config(config_key=args.config_key, config_path=args.config_path))
+            return _print(_validate_runtime_config(config_key=args.config_key, config_path=args.config_path))
 
         if args.command == "scheduler":
             run_scheduler(
