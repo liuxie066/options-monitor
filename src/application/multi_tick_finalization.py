@@ -6,6 +6,46 @@ from domain.domain import build_no_account_notification_payloads, build_shared_l
 from src.application.cron_runtime import build_run_end_payload, build_shared_last_run_meta
 
 
+def _record_finalize_degraded(
+    *,
+    runlog,
+    run_id: str,
+    safe_data_fn: Callable[[dict[str, Any]], dict[str, Any]],
+    audit_fn: Callable[..., Any],
+    action: str,
+    exc: Exception,
+    account: str | None = None,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    payload = {
+        "action": action,
+        "error": str(exc),
+    }
+    if account:
+        payload["account"] = str(account)
+    if extra:
+        payload.update(extra)
+    try:
+        audit_kwargs: dict[str, Any] = {
+            "run_id": run_id,
+            "status": "error",
+            "message": str(exc),
+        }
+        if account:
+            audit_kwargs["account"] = str(account)
+        if extra:
+            audit_kwargs["extra"] = dict(extra)
+        audit_fn("write", action, **audit_kwargs)
+    except Exception:
+        pass
+    runlog.safe_event(
+        "finalize",
+        "degraded",
+        message=(f"{action} failed" + (f" for {account}" if account else "")),
+        data=safe_data_fn(payload),
+    )
+
+
 def finalize_no_account_notification(
     *,
     base,
@@ -29,24 +69,50 @@ def finalize_no_account_notification(
     try:
         state_repo.write_shared_last_run(base, shared_payload)
         audit_fn("write", "write_shared_last_run", run_id=run_id, status="skip", message="no_account_notification")
-    except Exception:
-        pass
-    try:
-        for result in results:
-            payload = account_payloads.get(str(result.account), {})
+    except Exception as exc:
+        _record_finalize_degraded(
+            runlog=runlog,
+            run_id=run_id,
+            safe_data_fn=safe_data_fn,
+            audit_fn=audit_fn,
+            action="write_shared_last_run",
+            exc=exc,
+            extra={"reason": "no_account_notification"},
+        )
+    for result in results:
+        account = str(result.account)
+        payload = account_payloads.get(account, {})
+        try:
             state_repo.write_account_last_run(base, result.account, payload)
             state_repo.write_run_account_last_run(base, run_id, result.account, payload)
-            audit_fn("write", "write_account_last_run", run_id=run_id, account=str(result.account), status="skip", message="no_account_notification")
-    except Exception:
-        pass
+            audit_fn("write", "write_account_last_run", run_id=run_id, account=account, status="skip", message="no_account_notification")
+        except Exception as exc:
+            _record_finalize_degraded(
+                runlog=runlog,
+                run_id=run_id,
+                safe_data_fn=safe_data_fn,
+                audit_fn=audit_fn,
+                action="write_account_last_run",
+                exc=exc,
+                account=account,
+                extra={"reason": "no_account_notification"},
+            )
     try:
         tick_metrics["sent"] = False
         tick_metrics["reason"] = "no_account_notification"
         state_repo.write_tick_metrics(base, run_id, tick_metrics)
         state_repo.append_tick_metrics_history(base, run_id, tick_metrics)
         audit_fn("write", "write_tick_metrics", run_id=run_id, status="skip", message="no_account_notification")
-    except Exception:
-        pass
+    except Exception as exc:
+        _record_finalize_degraded(
+            runlog=runlog,
+            run_id=run_id,
+            safe_data_fn=safe_data_fn,
+            audit_fn=audit_fn,
+            action="write_tick_metrics",
+            exc=exc,
+            extra={"reason": "no_account_notification"},
+        )
 
     runlog.safe_event(
         "run_end",
@@ -102,8 +168,16 @@ def finalize_multi_tick_run(
             build_shared_last_run_payload(prev_payload=prev, run_meta=run_meta, history_limit=20),
         )
         audit_fn("write", "write_shared_last_run", run_id=run_id, extra={"sent_accounts": list(sent_accounts)})
-    except Exception:
-        pass
+    except Exception as exc:
+        _record_finalize_degraded(
+            runlog=runlog,
+            run_id=run_id,
+            safe_data_fn=safe_data_fn,
+            audit_fn=audit_fn,
+            action="write_shared_last_run",
+            exc=exc,
+            extra={"sent_accounts": list(sent_accounts)},
+        )
 
     if notify_failures:
         runlog.safe_event(
