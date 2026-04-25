@@ -3,7 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from scripts.config_loader import resolve_data_config_path
 from scripts.exchange_rates import get_exchange_rates_or_fetch_latest
 from scripts.feishu_bitable import safe_float
 from scripts.option_positions_core.domain import (
@@ -17,6 +16,7 @@ from scripts.option_positions_core.domain import (
 )
 from scripts.option_positions_core.reporting import build_monthly_income_report
 from scripts.option_positions_core.service import load_option_positions_repo
+from src.application.config_management import resolve_data_config_path
 
 
 def resolve_option_positions_repo(*, base: Path, data_config: str | Path | None) -> tuple[Path, Any]:
