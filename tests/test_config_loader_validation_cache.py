@@ -79,6 +79,20 @@ def test_resolve_data_config_path_prefers_env_override(monkeypatch) -> None:
     assert out == env_path.resolve()
 
 
+def test_resolve_data_config_path_ignores_legacy_om_pm_config(monkeypatch) -> None:
+    from scripts.config_loader import resolve_data_config_path
+
+    with TemporaryDirectory() as td:
+        base = Path(td)
+        legacy_env_path = base / "external" / "legacy-portfolio.json"
+        monkeypatch.delenv("OM_DATA_CONFIG", raising=False)
+        monkeypatch.setenv("OM_PM_CONFIG", str(legacy_env_path))
+
+        out = resolve_data_config_path(base=base, data_config=None)
+
+    assert out == (base / "secrets" / "portfolio.sqlite.json").resolve()
+
+
 def test_resolve_watchlist_and_templates_config_require_canonical_keys() -> None:
     from scripts.config_loader import resolve_templates_config, resolve_watchlist_config
 
@@ -89,6 +103,24 @@ def test_resolve_watchlist_and_templates_config_require_canonical_keys() -> None
 
     assert [it["symbol"] for it in resolve_watchlist_config(cfg)] == ["0700.HK", "3690.HK"]
     assert resolve_templates_config(cfg) == {"put_base": {"sell_put": {"min_net_income": 100}}}
+
+
+def test_resolve_watchlist_config_canonicalizes_legacy_market_to_broker() -> None:
+    from scripts.config_loader import resolve_watchlist_config
+
+    cfg = {
+        "symbols": [
+            {"symbol": "0700.HK", "market": "HK"},
+            {"symbol": "NVDA", "broker": "US"},
+        ]
+    }
+
+    rows = resolve_watchlist_config(cfg)
+
+    assert rows == [
+        {"symbol": "0700.HK", "broker": "HK"},
+        {"symbol": "NVDA", "broker": "US"},
+    ]
 
 
 def test_normalize_portfolio_broker_config_converts_legacy_fields_to_canonical() -> None:
@@ -105,9 +137,8 @@ def test_normalize_portfolio_broker_config_converts_legacy_fields_to_canonical()
     assert out_legacy["portfolio"]["broker"] == "富途"
     assert "market" not in out_legacy["portfolio"]
 
-    out_legacy_data = normalize_portfolio_broker_config({"portfolio": {"pm_config": "y.json", "account": "lx"}})
-    assert out_legacy_data["portfolio"]["data_config"] == "y.json"
-    assert "pm_config" not in out_legacy_data["portfolio"]
+    out_no_data = normalize_portfolio_broker_config({"portfolio": {"account": "lx"}})
+    assert "data_config" not in out_no_data["portfolio"]
 
 
 def test_set_watchlist_config_updates_symbols_only() -> None:
@@ -117,3 +148,12 @@ def test_set_watchlist_config_updates_symbols_only() -> None:
     out = set_watchlist_config(cfg, [{"symbol": "0700.HK"}])
 
     assert out["symbols"] == [{"symbol": "0700.HK"}]
+
+
+def test_set_watchlist_config_writes_broker_only() -> None:
+    from scripts.config_loader import set_watchlist_config
+
+    cfg = {}
+    out = set_watchlist_config(cfg, [{"symbol": "0700.HK", "market": "HK"}])
+
+    assert out["symbols"] == [{"symbol": "0700.HK", "broker": "HK"}]
