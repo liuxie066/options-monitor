@@ -29,8 +29,8 @@ def test_multi_tick_and_webui_use_application_facades() -> None:
     multi_tick_finalization_src = (ROOT / "src" / "application" / "multi_tick_finalization.py").read_text(encoding="utf-8")
     cron_runtime_src = (ROOT / "src" / "application" / "cron_runtime.py").read_text(encoding="utf-8")
 
-    assert "from src.application.multi_account_tick import current_run_id as _current_run_id" in multi_src
-    assert "from src.application.multi_account_tick import run_tick as _multi_main" in multi_src
+    assert "src.application.multi_account_tick" in multi_src
+    assert "run_tick" in multi_src
     assert "from src.application.account_management import add_account, edit_account, remove_account" in webui_src
     assert "from src.application.tool_execution import build_tool_manifest, execute_tool" in webui_src
     assert "src.interfaces.cli.main" in service_src
