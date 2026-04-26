@@ -1,169 +1,245 @@
 # Tool Reference
 
-## Support Matrix
+这份文档只回答两件事：
 
-| Tool | Default Availability | Needs `portfolio.data_config` | Needs OpenD | Writes |
-| --- | --- | --- | --- | --- |
-| `healthcheck` | yes | yes | yes | no |
-| `scan_opportunities` | yes | optional but recommended for SQLite position-lot context | only for Futu-backed symbols | no |
-| `query_cash_headroom` | yes | yes for SQLite position-lot context | yes | no |
-| `get_portfolio_context` | yes | only for holdings-backed fallback | yes | no |
-| `prepare_close_advice_inputs` | yes | yes for SQLite position-lot context | yes in minimal public setup | no |
-| `close_advice` | yes | no | only when quote_source falls back to OpenD | no |
-| `get_close_advice` | yes | yes for SQLite position-lot context | yes in minimal public setup | no |
-| `manage_symbols` | yes | no | no | dry-run by default |
-| `preview_notification` | yes | no | no | no |
+1. `om-agent` 目前有哪些公开工具
+2. 它们和人工 CLI `om` 的关系是什么
 
-Notes:
-- Public minimal setup is: OpenD for行情/持仓/现金 + SQLite for `trade_events + position_lots`.
-- `portfolio.data_config` in the minimal setup only needs to point at a small JSON file with `option_positions.sqlite_path`.
-- Feishu is optional and only needed for holdings fallback or first-run bootstrap of legacy option records.
-- If you add an `external_holdings` account, `portfolio.data_config` also needs `feishu.app_id` / `feishu.app_secret` / `feishu.tables.holdings`.
-- Use `configs/examples/portfolio.external_holdings.example.json` as the public starting point for that case.
+如果你只想跑产品，先看根目录 [README.md](../README.md)。
 
-## `healthcheck`
+---
 
-Purpose:
-- validate local runtime config
-- summarize account resolution
-- require a real `trade_intake.account_mapping.futu`
-- require OpenD and the SQLite `portfolio.data_config`
-- show `account_primary_paths` and `account_fallback_paths` separately so Futu primary vs Feishu fallback is visible
+## 1. 两套入口的区别
 
-Example:
+| 入口 | 面向对象 | 典型用途 |
+|---|---|---|
+| `./om` | 人工操作 | 手动跑 pipeline、分阶段运行、命令行查询 |
+| `./om-agent` | 程序 / Agent | JSON manifest、结构化 tool 调用 |
+
+一句话：
+
+- `om` 是人类 CLI
+- `om-agent` 是程序化工具入口
+
+---
+
+## 2. 如何查看工具清单
+
+```bash
+./om-agent spec
+```
+
+它会输出当前环境下可用的工具 manifest。
+
+注意：
+- `spec` 不是绝对静态的
+- 某些默认值会受环境变量影响，例如写工具门禁
+
+---
+
+## 3. 常见调用方式
+
+```bash
+./om-agent run --tool <tool-name> --input-json '<json>'
+```
+
+也支持：
+
+```bash
+./om-agent run --tool <tool-name> --input-file payload.json
+```
+
+`--input-file` 会覆盖 `--input-json`。
+
+---
+
+## 4. Tool 与 `om` CLI 的关系
+
+有些能力同时存在于：
+
+- `om-agent` 的 tool
+- `om` 的命令行入口
+
+但名字不一定一样。
+
+### 常见映射
+
+| `om-agent` tool | `om` / CLI 对应能力 |
+|---|---|
+| `healthcheck` | `./om healthcheck` |
+| `scan_opportunities` | `./om scan` / `./om scan-pipeline` |
+| `preview_notification` | `./om notify preview` |
+| `get_close_advice` | `./om close-advice` |
+| `query_cash_headroom` | `./om sell-put-cash` |
+
+说明：
+- `om-agent` 更适合给程序调
+- `om` 更适合人工操作
+
+---
+
+## 5. 当前公开工具列表
+
+## 5.1 `healthcheck`
+
+用途：
+- 校验 runtime config
+- 检查账户路径
+- 检查 OpenD / SQLite / 通知前置条件
+
+示例：
 
 ```bash
 ./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'
 ```
 
-Notes:
-- `data.account_paths` is the stable machine-readable summary for UI / scripts.
-- `checks[]` remains the detailed diagnostic stream for humans.
+---
 
-## `scan_opportunities`
+## 5.2 `scan_opportunities`
 
-Purpose:
-- run the symbols scan pipeline
-- return normalized summary rows
+用途：
+- 跑扫描流程
+- 返回候选摘要
 
-Example:
+示例：
 
 ```bash
 ./om-agent run --tool scan_opportunities --input-json '{"config_key":"us","symbols":["NVDA"],"top_n":3}'
 ```
 
-## `query_cash_headroom`
+---
 
-Purpose:
-- calculate sell-put cash usage and free cash
+## 5.3 `query_cash_headroom`
 
-Example:
+用途：
+- 查询 Sell Put 现金占用与余量
+
+示例：
 
 ```bash
 ./om-agent run --tool query_cash_headroom --input-json '{"config_key":"us","account":"user1"}'
 ```
 
-Notes:
-- public input should use `broker` when you need to override the default broker filter
-- `market` is still accepted as a legacy alias for compatibility with older callers
+注意：
+- 公开输入优先用 `broker`
+- `market` 仍作为兼容别名存在
 
-## `get_portfolio_context`
+---
 
-Purpose:
-- fetch holdings / Futu-backed account context with current source resolution
+## 5.4 `get_portfolio_context`
 
-Example:
+用途：
+- 获取账户持仓 / 现金 context
+
+示例：
 
 ```bash
 ./om-agent run --tool get_portfolio_context --input-json '{"config_key":"us","account":"user1"}'
 ```
 
-Notes:
-- public input should use `broker` when you need to override the default broker filter
-- `market` is still accepted as a legacy alias for compatibility with older callers
-- when `portfolio.source=futu`, this tool can work without Feishu config
+---
 
-## `manage_symbols`
+## 5.5 `prepare_close_advice_inputs`
 
-Purpose:
-- list or mutate `symbols[]`
+用途：
+- 预先刷新 close advice 依赖的本地输入
 
-Notes:
-- `list` is always allowed
-- non-dry-run writes require `OM_AGENT_ENABLE_WRITE_TOOLS=true` and `confirm=true`
+通常与 `close_advice` 搭配使用。
 
-Examples:
+---
 
-```bash
-./om-agent run --tool manage_symbols --input-json '{"config_key":"us","action":"list"}'
-./om-agent run --tool manage_symbols --input-json '{"config_key":"us","action":"add","symbol":"TSLA","sell_put_enabled":true,"dry_run":true}'
-```
+## 5.6 `close_advice`
 
-## `close_advice`
+用途：
+- 基于本地 context 和 quotes 构建平仓建议
 
-Purpose:
-- build close-position suggestions from cached `option_positions_context.json`
-- reuse local `required_data` quotes and only best-effort fetch missing quotes from OpenD
-
-Example:
+示例：
 
 ```bash
 ./om-agent run --tool close_advice --input-json '{"config_key":"us"}'
 ```
 
-Notes:
-- default install path expects:
-  - `output/agent_plugin/state/option_positions_context.json`
-  - `output/agent_plugin/required_data/`
-- you can override them with `context_path` and `required_data_root`
-- output files are written to `output/agent_plugin/reports/close_advice.csv` and `close_advice.txt`
+---
 
-## `get_close_advice`
+## 5.7 `get_close_advice`
 
-Purpose:
-- one-shot public entrypoint for close advice
-- prepare local cached inputs first, then build close-advice output
+用途：
+- 一次性执行 close advice 推荐路径
 
-Example:
+示例：
 
 ```bash
 ./om-agent run --tool get_close_advice --input-json '{"config_key":"us"}'
 ```
 
-Notes:
-- this is the recommended public tool for Agent callers
-- it internally does:
-  - `prepare_close_advice_inputs`
-  - `close_advice`
-- keep the two lower-level tools for debugging and staged workflows
+这是更推荐的 Agent 入口。
 
-## `prepare_close_advice_inputs`
+---
 
-Purpose:
-- refresh `option_positions_context.json`
-- fetch local `required_data` for symbols that currently exist in open option positions
+## 5.8 `manage_symbols`
 
-Example:
+用途：
+- 读取或修改 `symbols[]`
+
+示例：
 
 ```bash
-./om-agent run --tool prepare_close_advice_inputs --input-json '{"config_key":"us"}'
-./om-agent run --tool close_advice --input-json '{"config_key":"us"}'
+./om-agent run --tool manage_symbols --input-json '{"config_key":"us","action":"list"}'
 ```
 
-Notes:
-- default output paths are:
-  - `output/agent_plugin/state/option_positions_context.json`
-  - `output/agent_plugin/required_data/`
-- public install flow should call this before `close_advice`
-- symbol fetch source follows `symbols[].fetch.source`; if a held symbol is not explicitly configured, the minimal product assumption is OpenD
+注意：
+- `list` 永远是只读
+- 真正写操作需要：
+  - `OM_AGENT_ENABLE_WRITE_TOOLS=true`
+  - `confirm=true`
 
-## `preview_notification`
+---
 
-Purpose:
-- build final notification text without sending it
+## 5.9 `preview_notification`
 
-Example:
+用途：
+- 只生成通知内容，不发送
+
+示例：
 
 ```bash
 ./om-agent run --tool preview_notification --input-json '{"alerts_path":"output/reports/symbols_alerts.txt","changes_path":"output/reports/symbols_changes.txt","account_label":"user1"}'
 ```
+
+---
+
+## 6. WebUI 能调用哪些工具
+
+这点要特别说明：
+
+> `om-agent` 有很多工具，但 **WebUI 并不会全部开放。**
+
+当前 `scripts/webui/server.py` 里，`/api/tools/run` 只允许：
+
+- `healthcheck`
+- `scan_opportunities`
+- `get_close_advice`
+
+所以：
+- Tool Reference 是面向 **agent/tool 调用方** 的
+- 不是 WebUI 可调用范围的完整镜像
+
+---
+
+## 7. 字段口径
+
+### 优先使用
+- `broker`
+
+### 兼容存在
+- `market`
+
+对于 agent 工具输入，文档和新调用建议优先使用 `broker`；旧调用仍可能继续接受 `market`。
+
+---
+
+## 8. 相关文档
+
+- Agent 合同：[`AGENT_INTEGRATION.md`](AGENT_INTEGRATION.md)
+- 快速开始：[`GETTING_STARTED.md`](GETTING_STARTED.md)
+- 配置说明：[`../CONFIGURATION_GUIDE.md`](../CONFIGURATION_GUIDE.md)
