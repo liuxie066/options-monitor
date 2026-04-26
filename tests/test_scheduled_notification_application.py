@@ -432,3 +432,26 @@ def test_execute_single_account_delivery_treats_missing_message_id_as_unconfirme
     assert out.details == "message_id is missing"
     assert out.returncode == 1
     assert out.message_id is None
+
+
+def test_execute_single_account_delivery_supports_raw_sender_normalizer() -> None:
+    from src.application.scheduled_notification import execute_single_account_delivery
+
+    delivery_plan = SimpleNamespace(
+        channel="feishu",
+        target="ou_test",
+        account_messages={"lx": "[lx]\nhello"},
+    )
+
+    out = execute_single_account_delivery(
+        delivery_plan=delivery_plan,
+        account_name="lx",
+        send_message=lambda **kwargs: SimpleNamespace(returncode=0, stdout="", stderr="", raw={"http_status": 200, "response_json": {"code": 0, "data": {"message_id": "msg-9"}}}),
+        normalize_notify_output=lambda *, send_result: {"ok": True, "message_id": "msg-9", "returncode": 0},
+        mark_scheduler_notified=lambda: SimpleNamespace(returncode=0),
+        base="/repo",
+    )
+
+    assert out.ok is True
+    assert out.error_code is None
+    assert out.message_id == "msg-9"
