@@ -414,6 +414,9 @@ def test_webui_frontend_shows_resolved_path_and_warning_copy() -> None:
     assert "飞书通知" in panels_src
     assert "Close Advice" in panels_src
     assert "/api/history" in api_src
+    assert "/api/version/check" in api_src
+    assert "const [versionStatus, setVersionStatus] = useState('版本检查中');" in src
+    assert "版本检查失败" in src
     assert "repairHint" in src
 
 

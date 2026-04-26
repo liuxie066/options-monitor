@@ -16,6 +16,7 @@ from src.application.notification_pipeline import preview_notification
 from src.application.pipeline_runtime import main as run_scan_pipeline
 from src.application.runtime_setup import init_runtime
 from src.application.scan_pipeline import run_scan
+from src.application.version_check import check_version_update
 from scripts.query_sell_put_cash import query_sell_put_cash
 from scripts.scan_scheduler import run_scheduler
 
@@ -82,6 +83,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     validate = config_sub.add_parser("validate", help="validate runtime config")
     validate.add_argument("--config-key", default=None, choices=("us", "hk"))
     validate.add_argument("--config-path", default=None)
+
+    sub.add_parser("version", help="check latest released version from git tags")
 
     scheduler = sub.add_parser("scheduler", help="scan scheduler / frequency controller")
     scheduler.add_argument("--config", required=True)
@@ -205,6 +208,10 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "config" and args.config_command == "validate":
             return _print(_validate_runtime_config(config_key=args.config_key, config_path=args.config_path))
+
+        if args.command == "version":
+            sys.stdout.write(_dumps(check_version_update()))
+            return 0
 
         if args.command == "scheduler":
             run_scheduler(

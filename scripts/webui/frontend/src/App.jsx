@@ -5,6 +5,7 @@ import {
   fetchEditor,
   fetchHistory,
   fetchMeta,
+  fetchVersionCheck,
   fetchWatchlist,
   postAccountDelete,
   postAccountUpsert,
@@ -42,6 +43,7 @@ export default function App() {
   const [selectedMarket, setSelectedMarket] = useState('hk');
   const [activeModule, setActiveModule] = useState('market');
   const [status, setStatus] = useState('-');
+  const [versionStatus, setVersionStatus] = useState('版本检查中');
   const [toasts, setToasts] = useState([]);
   const [tokenRequired, setTokenRequired] = useState(false);
   const [tokenDlgOpen, setTokenDlgOpen] = useState(false);
@@ -76,6 +78,15 @@ export default function App() {
     setTokenRequired(!!data.tokenRequired);
   }
 
+  async function loadVersionCheck() {
+    const data = await fetchVersionCheck();
+    if (!data || data.ok === false) {
+      setVersionStatus('版本检查失败');
+      return;
+    }
+    setVersionStatus(String(data.message || '版本信息不可用'));
+  }
+
   async function loadSummaries() {
     const data = await fetchConfigSummaries();
     setConfigSummaries(data.configs || {});
@@ -98,6 +109,7 @@ export default function App() {
 
   useEffect(() => {
     loadMeta().catch((e) => pushToast('error', e.message));
+    loadVersionCheck().catch(() => setVersionStatus('版本检查失败'));
     loadRows().catch((e) => pushToast('error', e.message));
     loadSummaries().catch((e) => pushToast('error', e.message));
   }, []);
@@ -144,6 +156,7 @@ export default function App() {
             ))}
           </div>
           <div className="Status">{status}</div>
+          <div className="Status">{versionStatus}</div>
         </div>
       </div>
 
