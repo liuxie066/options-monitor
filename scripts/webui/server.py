@@ -43,6 +43,12 @@ from src.application.webui_patchers import (
     patch_global_strategy as _patch_global_strategy_impl,
     patch_notifications as _patch_notifications_impl,
 )
+from src.application.webui_editor_adapter import (
+    account_payload_defaults as _account_payload_defaults,
+    apply_market_data_patch as _apply_market_data_patch,
+    build_editor_summary as _build_editor_summary,
+    write_notification_credentials as _write_notification_credentials,
+)
 from src.application.webui_presenters import (
     AccountRow,
     SymbolRow,
@@ -175,6 +181,10 @@ def _patch_notifications(cfg: dict, payload: dict) -> None:
     return _patch_notifications_impl(cfg, payload, notification_numeric_fields=NOTIFICATION_NUMERIC_FIELDS)
 
 
+def _apply_market_data(cfg: dict, payload: dict) -> None:
+    return _apply_market_data_patch(cfg, payload)
+
+
 def _clean_symbol_level_strategy_fields(cfg: dict) -> None:
     return _clean_symbol_level_strategy_fields_impl(cfg, forbidden_fields=SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS)
 
@@ -229,6 +239,17 @@ def api_configs_summary():
     return {"configs": {k: _global_summary(k) for k in ("hk", "us")}}
 
 
+@app.get("/api/configs/editor")
+def api_configs_editor(configKey: str):
+    key = str(configKey or "").strip().lower()
+    if key not in CONFIG_FILES:
+        raise HTTPException(status_code=400, detail="configKey must be us|hk")
+    cfg = _load_config(key)
+    config_path = _resolve_config_path(CONFIG_FILES[key])
+    summary = _global_summary(key)
+    return {"editor": _build_editor_summary(cfg, config_key=key, config_path=config_path, summary=summary)}
+
+
 @app.post("/api/configs/global/update")
 async def api_update_global_config(req: Request):
     _require_token_for_write_impl(req)
@@ -239,9 +260,21 @@ async def api_update_global_config(req: Request):
         raise HTTPException(status_code=400, detail="configKey must be us|hk")
 
     cfg = _load_config(config_key)
+    market_data_payload = payload.get("marketData")
+    if market_data_payload is not None:
+        _apply_market_data(cfg, market_data_payload)
     _patch_global_strategy(cfg, payload)
     _patch_notifications(cfg, payload)
     _patch_close_advice(cfg, payload)
+    notifications_payload = payload.get("notifications") if isinstance(payload.get("notifications"), dict) else None
+    if notifications_payload is not None and ("appId" in notifications_payload or "appSecret" in notifications_payload):
+        _write_notification_credentials(
+            cfg,
+            config_path=_resolve_config_path(CONFIG_FILES[config_key]),
+            app_id=str(notifications_payload.get("appId") or "").strip(),
+            app_secret=str(notifications_payload.get("appSecret") or "").strip(),
+            secrets_file=str(notifications_payload.get("secretsFile") or "").strip() or None,
+        )
     _clean_symbol_level_strategy_fields(cfg)
 
     path = _resolve_config_path(CONFIG_FILES[config_key])
@@ -256,10 +289,11 @@ async def api_upsert_account(req: Request):
     payload = await req.json()
 
     config_key = str(payload.get("configKey") or "").strip().lower()
-    account_label = str(payload.get("accountLabel") or "").strip()
-    account_type = str(payload.get("accountType") or "").strip()
-    futu_acc_id = payload.get("futuAccId")
-    holdings_account = payload.get("holdingsAccount")
+    normalized = _account_payload_defaults(payload, config_key=config_key)
+    account_label = normalized["accountLabel"]
+    account_type = normalized["accountType"]
+    futu_acc_id = normalized["futuAccId"]
+    holdings_account = normalized["holdingsAccount"]
     mode = str(payload.get("mode") or "").strip().lower()
     if config_key not in CONFIG_FILES:
         raise HTTPException(status_code=400, detail="configKey must be us|hk")
@@ -278,6 +312,14 @@ async def api_upsert_account(req: Request):
                 config_path=config_path,
                 futu_acc_id=futu_acc_id,
                 holdings_account=holdings_account,
+                market_label=normalized["market"],
+                enabled=normalized["enabled"],
+                trade_intake_enabled=normalized["tradeIntakeEnabled"],
+                futu_host=str((normalized["futu"] or {}).get("host") or "").strip() or None,
+                futu_port=(normalized["futu"] or {}).get("port"),
+                bitable_app_token=str((normalized["bitable"] or {}).get("app_token") or "").strip() or None,
+                bitable_table_id=str((normalized["bitable"] or {}).get("table_id") or "").strip() or None,
+                bitable_view_name=str((normalized["bitable"] or {}).get("view_name") or "").strip() or None,
             )
         else:
             result = edit_account(
@@ -288,6 +330,14 @@ async def api_upsert_account(req: Request):
                 futu_acc_id=futu_acc_id,
                 holdings_account=holdings_account,
                 clear_holdings_account=bool(payload.get("clearHoldingsAccount", False)),
+                market_label=normalized["market"],
+                enabled=normalized["enabled"],
+                trade_intake_enabled=normalized["tradeIntakeEnabled"],
+                futu_host=str((normalized["futu"] or {}).get("host") or "").strip() or None,
+                futu_port=(normalized["futu"] or {}).get("port"),
+                bitable_app_token=str((normalized["bitable"] or {}).get("app_token") or "").strip() or None,
+                bitable_table_id=str((normalized["bitable"] or {}).get("table_id") or "").strip() or None,
+                bitable_view_name=str((normalized["bitable"] or {}).get("view_name") or "").strip() or None,
             )
     except Exception as exc:
         detail = getattr(exc, "message", None) or getattr(exc, "detail", None) or str(exc)

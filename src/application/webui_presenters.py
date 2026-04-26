@@ -137,6 +137,7 @@ def global_summary(
     if not isinstance(symbols, list):
         symbols = []
     notifications = cfg.get("notifications") if isinstance(cfg.get("notifications"), dict) else {}
+    market_data = cfg.get("market_data") if isinstance(cfg.get("market_data"), dict) else {}
     raw_schedule = cfg.get("schedule") if isinstance(cfg.get("schedule"), dict) else {}
     schedule = {key: raw_schedule.get(key) for key in schedule_summary_fields if key in raw_schedule}
     templates = cfg.get("templates") if isinstance(cfg.get("templates"), dict) else {}
@@ -146,6 +147,19 @@ def global_summary(
     call_template = templates.get("call_base") if isinstance(templates.get("call_base"), dict) else {}
     put_strategy = put_template.get("sell_put") if isinstance(put_template.get("sell_put"), dict) else {}
     call_strategy = call_template.get("sell_call") if isinstance(call_template.get("sell_call"), dict) else {}
+    if not market_data:
+        for item in symbols:
+            if not isinstance(item, dict):
+                continue
+            fetch = item.get("fetch") if isinstance(item.get("fetch"), dict) else {}
+            if fetch.get("host") or fetch.get("port"):
+                market_data = {
+                    "source": "OpenD",
+                    "host": fetch.get("host"),
+                    "port": fetch.get("port"),
+                    "mode": "compat_global",
+                }
+                break
     return {
         "configKey": config_key,
         "path": str(config_files[config_key]),
@@ -159,6 +173,7 @@ def global_summary(
         "enabledSymbolCount": sum(1 for item in symbols if isinstance(item, dict) and (bool((item.get("sell_put") or {}).get("enabled")) or bool((item.get("sell_call") or {}).get("enabled")))),
         "sections": {
             "schedule": schedule,
+            "market_data": {k: v for k, v in market_data.items() if v is not None},
             "notifications": {k: v for k, v in {
                 "enabled": notifications.get("enabled"),
                 "channel": notifications.get("channel"),
