@@ -275,7 +275,7 @@ def run_watchlist_pipeline_default(
         process_symbol_fn=(
             lambda *a, **kw: process_symbol(
                 *a,
-                **kw,
+                **{k: v for k, v in kw.items() if k != 'is_scheduled'},
                 required_data_dir=required_data_dir,
                 report_dir=report_dir,
                 state_dir=state_dir,
