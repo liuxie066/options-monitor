@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+## 0.1.0-beta.3 - 2026-04-26
+
+### Added
+- 6-module WebUI configuration center with modular frontend structure
+- Per-account OpenD holdings runtime support for Futu-backed accounts
+- Feishu app notification secrets example and stronger local notification wiring
+
+### Changed
+- Rewrote README and key docs into product-facing install/init/use guidance
+- Reorganized WebUI code into API, actions, model, shared, state, and panel layers
+- Repositioned `scripts/send_if_needed_multi.py` as a compatibility/developer launcher while preferring unified CLI docs
+
+### Fixed
+- Futu/OpenD doctor and healthcheck false-negative handling under noisy SDK output
+- Futu SDK compatibility for `get_option_chain` when `is_force_refresh` is unsupported
+- Pipeline/runtime compatibility issues around `append_cash_summary`, holdings context wiring, and multi-account launcher argument flow
+- Option intake parsing by inferring currency from symbol when explicit currency is absent
+
 ## 0.1.0-beta.2 - 2026-04-24
 
 ### Added
