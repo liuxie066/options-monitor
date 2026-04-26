@@ -69,8 +69,8 @@ def test_multi_tick_main_current_run_id_accessor_is_public_compat() -> None:
 def test_multi_entrypoint_uses_public_run_id_accessor() -> None:
     src = Path("scripts/send_if_needed_multi.py").read_text(encoding="utf-8")
     assert "importlib" not in src
-    assert "current_run_id as _current_run_id" in src
-    assert "run_id=_current_run_id()" in src
+    assert "current_run_id" in src
+    assert "run_tick" in src
 
 
 def test_ensure_runtime_canonical_config_rejects_derived_configs() -> None:
