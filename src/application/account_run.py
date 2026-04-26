@@ -447,12 +447,28 @@ def run_one_account(
                 extra={
                     "rows": close_result.get("rows"),
                     "notify_rows": close_result.get("notify_rows"),
+                    "quote_issue_rows": close_result.get("quote_issue_rows"),
+                    "tier_counts": close_result.get("tier_counts"),
+                    "flag_counts": close_result.get("flag_counts"),
                 },
             )
             close_text_path = acct_report_dir / "close_advice.txt"
             close_text = close_text_path.read_text(encoding="utf-8", errors="replace").strip() if close_text_path.exists() else ""
             if close_text:
                 text = (text.strip() + "\n\n" + close_text.strip()).strip()
+            elif int(close_result.get("quote_issue_rows") or 0) > 0:
+                flag_counts = close_result.get("flag_counts") if isinstance(close_result.get("flag_counts"), dict) else {}
+                missing_quote = int(flag_counts.get("missing_quote") or 0)
+                missing_mid = int(flag_counts.get("missing_mid") or 0)
+                opend_fetch_error = int(flag_counts.get("opend_fetch_error") or 0)
+                opend_fetch_no_usable_quote = int(flag_counts.get("opend_fetch_no_usable_quote") or 0)
+                summary = (
+                    f"### [{acct}] 平仓建议\n"
+                    f"- 本次未生成 strong/medium 提醒；报价异常 {int(close_result.get('quote_issue_rows') or 0)} 条\n"
+                    f"- missing_quote={missing_quote} | missing_mid={missing_mid} | "
+                    f"opend_fetch_error={opend_fetch_error} | opend_fetch_no_usable_quote={opend_fetch_no_usable_quote}\n"
+                )
+                text = (text.strip() + "\n\n" + summary.strip()).strip()
         except Exception as exc:
             audit_fn(
                 "tool_call",

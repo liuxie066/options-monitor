@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Any
 
 
@@ -34,7 +35,10 @@ def safe_float(value: Any) -> float | None:
     try:
         if value in (None, ""):
             return None
-        return float(value)
+        out = float(value)
+        if math.isnan(out):
+            return None
+        return out
     except Exception:
         return None
 
@@ -43,7 +47,10 @@ def safe_int(value: Any) -> int | None:
     try:
         if value in (None, ""):
             return None
-        return int(float(value))
+        out = float(value)
+        if math.isnan(out):
+            return None
+        return int(out)
     except Exception:
         return None
 
