@@ -3,6 +3,7 @@ import {
   fetchEditor,
   fetchHistory,
   fetchMeta,
+  fetchVersionCheck,
   fetchWatchlist,
   postAccountDelete,
   postAccountUpsert,
@@ -11,6 +12,7 @@ import {
   postNotificationsPreview,
   postNotificationsTestSend,
   postToolRun,
+  postWatchlistDelete,
   postWatchlistUpsert,
 } from './webuiApi.js';
 import { buildStrategySidePayload, nowId } from './webuiState.js';
@@ -26,6 +28,11 @@ export function pushToastFactory(setToasts) {
 export async function loadMetaAction(setTokenRequired) {
   const data = await fetchMeta();
   setTokenRequired(!!data.tokenRequired);
+}
+
+export async function loadVersionCheckAction(setVersionCheck) {
+  const data = await fetchVersionCheck();
+  setVersionCheck(data || null);
 }
 
 export async function loadSummariesAction(setConfigSummaries) {
@@ -172,6 +179,21 @@ export function createSaveSymbolAction(ctx) {
       await loadSummaries();
       setSymbolForm(emptySymbolForm(selectedMarket));
       pushToast('ok', `标的 ${payload.symbol} 已保存`);
+    });
+  };
+}
+
+export function createRemoveSymbolAction(ctx) {
+  return async function removeSymbol(item) {
+    const { selectedMarket, withWriteToken, setRows, loadSummaries, setSymbolForm, emptySymbolForm, pushToast } = ctx;
+    const symbol = String(item?.symbol || '').trim().toUpperCase();
+    if (!symbol) throw new Error('symbol is required');
+    return withWriteToken('删除标的', async (token) => {
+      const out = await postWatchlistDelete({ configKey: selectedMarket, symbol }, token);
+      setRows(out.rows || []);
+      await loadSummaries();
+      setSymbolForm(emptySymbolForm(selectedMarket));
+      pushToast('ok', `标的 ${symbol} 已删除`);
     });
   };
 }

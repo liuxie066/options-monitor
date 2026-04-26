@@ -77,6 +77,30 @@ body{margin:0;min-height:100vh;background:var(--bg);color:var(--fg);}
 .StatCard span,.SummaryCard span{display:block;color:var(--muted);font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;}
 .StatCard strong,.SummaryCard strong{display:block;margin-top:7px;font-size:22px;line-height:1.1;font-weight:700;}
 
+.WorkspaceShell{
+  display:grid;
+  grid-template-columns:240px minmax(0,1fr);
+  gap:18px;
+  align-items:start;
+  margin-top:8px;
+}
+.ModuleNav{
+  position:sticky;
+  top:74px;
+  border:1px solid var(--border);
+  border-radius:14px;
+  background:linear-gradient(180deg,rgba(24,29,37,.98),rgba(19,23,30,.98));
+  box-shadow:var(--shadow);
+  padding:14px;
+  display:grid;
+  gap:14px;
+}
+.ModuleNavHeader{display:grid;gap:6px;}
+.ModuleNavTitle{font-size:18px;font-weight:720;letter-spacing:-.02em;}
+.ModuleNavFooter{display:flex;}
+.WorkspaceContent{display:grid;gap:16px;min-width:0;}
+.WorkspaceIntro{border:1px solid var(--border);border-radius:14px;background:rgba(255,255,255,.02);}
+
 .ModuleTabs{
   display:flex;
   gap:4px;
@@ -85,10 +109,15 @@ body{margin:0;min-height:100vh;background:var(--bg);color:var(--fg);}
   border-radius:10px;
   background:rgba(255,255,255,.02);
   width:100%;
-  margin:8px 0 16px;
   align-items:center;
 }
-.ModuleTabsSpacer{min-width:12px;}
+.ModuleTabsVertical{
+  display:grid;
+  gap:6px;
+  padding:0;
+  border:0;
+  background:transparent;
+}
 .ModuleTab{
   height:32px;
   border:0;
@@ -101,6 +130,18 @@ body{margin:0;min-height:100vh;background:var(--bg);color:var(--fg);}
 }
 .ModuleTab:hover{background:rgba(255,255,255,.04);color:var(--fg);}
 .ModuleTabActive{background:rgba(143,180,255,.12);color:#edf3ff;box-shadow:inset 0 0 0 1px rgba(143,180,255,.2);}
+.ModuleTabVertical{
+  width:100%;
+  min-height:42px;
+  height:auto;
+  padding:10px 14px;
+  display:flex;
+  align-items:center;
+  justify-content:flex-start;
+  text-align:left;
+  border:1px solid transparent;
+}
+.ModuleTabVertical.ModuleTabActive{border-color:rgba(143,180,255,.2);}
 
 .Toolbar{
   margin:16px 0; padding:12px;
@@ -212,6 +253,11 @@ tbody tr:hover{background:rgba(143,180,255,.05);}
   align-items:end;
   box-shadow:var(--shadow);
 }
+.StrategyOverviewSide{
+  display:grid;
+  gap:12px;
+  justify-items:stretch;
+}
 .PanelTitle{margin:4px 0 6px;font-size:26px;font-weight:720;letter-spacing:-.03em;}
 .ConfigPath{border:1px dashed #3a4558;border-radius:10px;padding:12px;background:rgba(8,10,14,.2);min-width:0;}
 .ConfigPath span{display:block;color:var(--muted);font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px;}
@@ -275,6 +321,27 @@ code{font-family:"SFMono-Regular","Cascadia Code",monospace;font-size:12px;white
     calc(100dvh - 96px)
   );
   overflow:hidden;
+}
+.DialogHeader{
+  padding:18px 20px 0;
+}
+.DialogTitle{
+  margin:0;
+  font-size:24px;
+}
+.DialogBody{
+  padding:16px 20px 0;
+}
+.DialogGrid{
+  padding:0 0 8px;
+}
+.DialogActions{
+  display:flex;
+  align-items:center;
+  gap:10px;
+  padding:16px 20px 20px;
+  border-top:1px solid var(--borderMuted);
+  background:rgba(255,255,255,.015);
 }
 
 /* single scroll container inside modal (header+body+footer scroll together) */
@@ -356,6 +423,9 @@ select.Control{line-height:30px;}
   .HeroPanel,.GlobalOverview{grid-template-columns:1fr;}
   .SummaryGrid{grid-template-columns:repeat(2,minmax(0,1fr));}
   .GlobalFormShell{grid-template-columns:1fr;}
+  .WorkspaceShell{grid-template-columns:1fr;}
+  .ModuleNav{position:static;}
+  .ModuleTabsVertical{grid-template-columns:repeat(2,minmax(0,1fr));}
 }
 
 @media (max-width: 720px){
@@ -380,9 +450,10 @@ select.Control{line-height:30px;}
   .HeroPanel{padding:16px;}
   .HeroTitle{font-size:30px;}
   .HeroStats{grid-template-columns:repeat(3,minmax(0,1fr));}
-  .ModuleTabs{width:100%;flex-wrap:wrap;}
-  .ModuleTab{flex:1;}
-  .ModuleTabsSpacer{display:none;}
+  .WorkspaceShell{grid-template-columns:1fr;gap:14px;}
+  .ModuleNav{padding:12px;}
+  .ModuleTabsVertical{grid-template-columns:1fr;}
+  .ModuleTabVertical{width:100%;}
   .BtnNew{width:100%;}
   .StrategyGrid{grid-template-columns:1fr;}
   .GlobalSaveBar{display:grid;}

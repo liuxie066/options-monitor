@@ -9,7 +9,6 @@ export const MODULES = [
   ['strategy', '选股策略'],
   ['closeAdvice', '平仓建议'],
   ['notifications', '消息通知'],
-  ['advanced', '高级设置'],
 ];
 
 export const STRATEGY_FIELDS = [
