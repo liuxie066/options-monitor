@@ -18,6 +18,25 @@ export function SaveBar({ title, desc, label, onSave }) {
   );
 }
 
+export function Dialog({ open, title, subtitle, children, actions, onClose, width = 980 }) {
+  if (!open) return null;
+  return createPortal(
+    <div className="ModalOverlay" onClick={onClose}>
+      <div className="Modal" style={{ width: `min(${width}px, calc(100vw - 24px))` }} onClick={(e) => e.stopPropagation()}>
+        <div className="DialogHeader">
+          <div>
+            <div className="PanelTitle DialogTitle">{title}</div>
+            {subtitle ? <div className="StrategySub">{subtitle}</div> : null}
+          </div>
+        </div>
+        <div className="DialogBody">{children}</div>
+        <div className="DialogActions">{actions}</div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
 export function TokenDialog({ open, action, value, setValue, error, setOpen, onConfirm, tokenInputRef }) {
   if (!open) return null;
   return createPortal(

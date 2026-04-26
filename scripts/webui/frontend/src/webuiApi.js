@@ -42,6 +42,12 @@ export const postWatchlistUpsert = (payload, token) => api('/api/watchlist/upser
   body: JSON.stringify(payload),
 });
 
+export const postWatchlistDelete = (payload, token) => api('/api/watchlist/delete', {
+  method: 'POST',
+  headers: jsonHeaders(token),
+  body: JSON.stringify(payload),
+});
+
 export const postToolRun = (payload) => api('/api/tools/run', {
   method: 'POST',
   headers: jsonHeaders(''),
