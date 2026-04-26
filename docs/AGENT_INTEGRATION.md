@@ -8,6 +8,12 @@ It exposes a stable JSON contract intended for local agent usage:
 - `./om-agent spec`
 - `./om-agent run --tool <name> --input-json '<json>'`
 
+也支持：
+
+- `./om-agent run --tool <name> --input-file payload.json`
+
+其中 `--input-file` 会覆盖 `--input-json`。
+
 ## Contract
 
 All tool responses return:
@@ -33,6 +39,10 @@ Errors are normalized to stable codes such as:
 - `CONFIRMATION_REQUIRED`
 - `INTERNAL_ERROR`
 
+说明：
+- 这些是顶层错误 envelope 的稳定代码。
+- 某些底层诊断项（例如 OpenD doctor 的细粒度失败原因）可能会体现在 `checks[]` 中，而不是顶层错误 code 枚举中。
+
 ## Claude Code
 
 Use the launcher as a local command tool. Typical pattern:
@@ -43,6 +53,12 @@ Use the launcher as a local command tool. Typical pattern:
 ./om-agent run --tool get_close_advice --input-json '{"config_key":"us"}'
 ./om-agent run --tool prepare_close_advice_inputs --input-json '{"config_key":"us"}'
 ./om-agent run --tool close_advice --input-json '{"config_key":"us"}'
+```
+
+如果 payload 很长，优先用：
+
+```bash
+./om-agent run --tool get_close_advice --input-file payload.json
 ```
 
 ## Kimi Code
@@ -59,6 +75,42 @@ Recommended environment:
 - complete first-time initialization from the local WebUI after OpenD is ready
 - use explicit `config_path` input only when you intentionally want to override the default repo-local config
 - keep `OM_AGENT_ENABLE_WRITE_TOOLS` unset unless you explicitly want config writes
+
+## `spec` 的行为说明
+
+`./om-agent spec` 输出的是当前环境下的 tool manifest。
+
+也就是说它不是完全静态文本，至少这些值会受环境影响：
+
+- `write_tools_enabled`
+- 默认写工具可用性
+
+如果你打开了：
+
+```bash
+OM_AGENT_ENABLE_WRITE_TOOLS=true
+```
+
+那么 `spec` 里的默认能力描述也会随之变化。
+
+## 写操作门禁
+
+当前写操作不是只靠一个开关就能执行。
+
+通常需要两层门禁：
+
+1. 环境变量允许写：
+
+```bash
+OM_AGENT_ENABLE_WRITE_TOOLS=true
+```
+
+2. 调用 payload 显式确认（例如 `confirm=true`）
+
+以 `manage_symbols` 为例：
+
+- `list` 永远允许
+- 真正写入需要环境变量 + 显式确认
 
 OpenClaw integration in this public repo is local-tool oriented. Private cron/deploy workflows are not part
 of the public plugin contract.
