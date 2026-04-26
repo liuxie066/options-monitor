@@ -27,6 +27,7 @@ python3 scripts/validate_config.py --config configs/examples/config.example.us.j
 - `VERSION` 正确
 - `CHANGELOG.md` 中存在对应版本段落
 - README 与 Agent 文档没有明显过期命令
+- 更新检查功能读取远端 `origin` 的 Git tags，并与本地 `VERSION` 比较
 
 ---
 

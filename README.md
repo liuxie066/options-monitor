@@ -40,6 +40,8 @@ python3 -m venv .venv
 ./.venv/bin/pip install -r requirements.txt
 ```
 
+`requirements.txt` 已包含 `futu-api`，缺少 Futu SDK 时会随安装流程一起补齐。
+
 ### 1.2 给 Agent 使用（可选）
 
 如果你是把它作为本地 Agent 工具来用，执行：
@@ -170,7 +172,13 @@ cp configs/examples/portfolio.sqlite.example.json secrets/portfolio.sqlite.json
 ./om-agent run --tool healthcheck --input-json '{"config_path":"config.us.json"}'
 ```
 
-### 6.3 手动跑一次 pipeline
+### 6.3 检查版本更新
+
+```bash
+./om version
+```
+
+### 6.4 手动跑一次 pipeline
 
 ```bash
 ./om scan-pipeline --config config.us.json
@@ -185,7 +193,7 @@ cp configs/examples/portfolio.sqlite.example.json secrets/portfolio.sqlite.json
 ./om scan-pipeline --config config.us.json --stage notify
 ```
 
-### 6.4 多账户运行
+### 6.5 多账户运行
 
 推荐：
 
@@ -199,7 +207,7 @@ cp configs/examples/portfolio.sqlite.example.json secrets/portfolio.sqlite.json
 python3 scripts/send_if_needed_multi.py --config config.us.json --accounts lx sy
 ```
 
-### 6.5 单账户入口
+### 6.6 单账户入口
 
 ```bash
 python3 scripts/send_if_needed.py --config config.us.json
