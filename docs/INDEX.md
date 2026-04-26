@@ -1,51 +1,25 @@
-# Options Monitor — Project Map
+# Docs Index
 
-This repo is meant to run as a repeatable monitoring pipeline.
+按用途看文档：
 
-## Public doc boundary
+## 产品使用
+- [../README.md](../README.md)：产品介绍、安装、初始化、常用命令
+- [GETTING_STARTED.md](GETTING_STARTED.md)：本地 Agent 工具快速开始
 
-- Remote-repo entrypoints: `README.md`, `CONFIGS.md`, `RUNBOOK.md`
-- Public plugin release workflow: `.github/workflows/release.yml`
-- Private deploy workflow: still executed only in local/private ops environments
-- Public local agent plugin quick start: `docs/GETTING_STARTED.md`
-- Agent integration contract: `docs/AGENT_INTEGRATION.md`
-- Public tool reference: `docs/TOOL_REFERENCE.md`
-- Public release checklist: `docs/RELEASE_PROCESS.md`
-- Current PR material pack: `docs/PR_PRODUCTIZATION_PHASE1_2.md`
+## 配置
+- [../CONFIGS.md](../CONFIGS.md)：配置来源与 canonical config 约定
+- [../CONFIGURATION_GUIDE.md](../CONFIGURATION_GUIDE.md)：详细配置字段说明
 
-## Core entrypoints
+## Agent / Tool
+- [AGENT_INTEGRATION.md](AGENT_INTEGRATION.md)：Agent 集成合同
+- [TOOL_REFERENCE.md](TOOL_REFERENCE.md)：工具参考
 
-- Runtime config entry (OM only): `config.us.json` / `config.hk.json`
-- Main pipeline: `./run_watchlist.sh` -> `./om scan-pipeline`
-- Scheduler: `python -m src.interfaces.cli.main scheduler`
-- Alert engine: `scripts/alert_engine.py`
-- Dev mainline unified entry: `scripts/send_if_needed_multi.py` (thin wrapper -> `scripts.multi_tick.main.main`)
-- Production scheduler entry (unchanged): `scripts/send_if_needed.py`
+## 运行与运维
+- [../RUNBOOK.md](../RUNBOOK.md)：运维巡检、cron、应急处理
+- [RELEASE_PROCESS.md](RELEASE_PROCESS.md)：维护者发布清单
 
-## Data + state
+## 业务规则
+- [candidate_strategy.md](candidate_strategy.md)：候选筛选与排序规则
 
-- Per-account state: `output_accounts/<account>/state/`
-  - `last_run.json`, `scheduler_state.json`, `cash_snapshot.json`, etc.
-
-## Position lots (write-back)
-
-- Parse message -> normalized params: `scripts/parse_option_message.py`
-- Parse + write (safe by default): `scripts/option_intake.py` (default `--dry-run`)
-- CRUD: `scripts/option_positions.py`
-
-## Non-negotiable invariants
-
-- Intake safety: `option_intake.py` MUST default to dry-run.
-- Idempotency: `position_id` should be stable for the same contract tuple.
-- State isolation: each account writes only under its own state dir.
-
-## Diagnostics
-
-- Config: `python scripts/validate_config.py --config config.us.json`
-- Health: `python scripts/healthcheck.py --config config.us.json`
-- Health + notify (dry-run): `python scripts/healthcheck_and_notify.py --config config.us.json --dry-run`
-- Tests (no pytest): `./.venv/bin/python tests/run_tests.py`
-
-## Strategy
-
-- Candidate filtering and ranking contract: `docs/candidate_strategy.md`
+## 安全与约束
+- [GUARDRAILS.md](GUARDRAILS.md)：guardrails 与安全门禁
