@@ -12,6 +12,7 @@ function jsonHeaders(token) {
 }
 
 export const fetchMeta = () => api('/api/meta');
+export const fetchVersionCheck = () => api('/api/version/check');
 export const fetchConfigSummaries = () => api('/api/configs/summary');
 export const fetchEditor = (configKey) => api(`/api/configs/editor?configKey=${encodeURIComponent(configKey)}`);
 export const fetchWatchlist = () => api('/api/watchlist');
