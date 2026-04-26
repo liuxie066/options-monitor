@@ -23,6 +23,7 @@ Usage:
 """
 
 import argparse
+from collections import deque
 import json
 import math
 import time
@@ -59,6 +60,10 @@ COLUMNS = [
     'bid','ask','last_price','mid','volume','open_interest','implied_volatility',
     'in_the_money','currency','otm_pct','delta','multiplier'
 ]
+
+_OPTION_CHAIN_RATE_LIMIT_WINDOW_SEC = 30.0
+_OPTION_CHAIN_RATE_LIMIT_MAX_CALLS = 10
+_option_chain_call_timestamps: deque[float] = deque()
 
 
 # Allow running as a script (python scripts/xxx.py) without package install
@@ -127,6 +132,22 @@ def _is_chain_cache_fresh(obj: dict, today: date) -> bool:
         return str(asof) == today.isoformat()
     except Exception:
         return False
+
+
+def _respect_option_chain_rate_limit() -> None:
+    now = time.monotonic()
+    while _option_chain_call_timestamps and (now - _option_chain_call_timestamps[0]) >= _OPTION_CHAIN_RATE_LIMIT_WINDOW_SEC:
+        _option_chain_call_timestamps.popleft()
+    if len(_option_chain_call_timestamps) < _OPTION_CHAIN_RATE_LIMIT_MAX_CALLS:
+        _option_chain_call_timestamps.append(now)
+        return
+    sleep_s = _OPTION_CHAIN_RATE_LIMIT_WINDOW_SEC - (now - _option_chain_call_timestamps[0]) + 0.05
+    if sleep_s > 0:
+        time.sleep(sleep_s)
+    now = time.monotonic()
+    while _option_chain_call_timestamps and (now - _option_chain_call_timestamps[0]) >= _OPTION_CHAIN_RATE_LIMIT_WINDOW_SEC:
+        _option_chain_call_timestamps.popleft()
+    _option_chain_call_timestamps.append(now)
 
 
 
@@ -201,7 +222,7 @@ def get_spot_opend(gateway, underlier_code: str) -> float | None:
         return None
 
 
-def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = '127.0.0.1', port: int = 11111, spot_override: float | None = None, *, base_dir: Path | None = None, option_types: str = 'put,call', min_strike: float | None = None, max_strike: float | None = None, min_dte: int | None = None, max_dte: int | None = None, retry_max_attempts: int = 4, retry_time_budget_sec: float = 8.0, retry_base_delay_sec: float = 0.8, retry_max_delay_sec: float = 6.0, no_retry: bool = False, chain_cache: bool = False, chain_cache_force_refresh: bool = False) -> dict[str, Any]:
+def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = '127.0.0.1', port: int = 11111, spot_override: float | None = None, *, base_dir: Path | None = None, option_types: str = 'put,call', min_strike: float | None = None, max_strike: float | None = None, min_dte: int | None = None, max_dte: int | None = None, explicit_expirations: list[str] | None = None, retry_max_attempts: int = 4, retry_time_budget_sec: float = 8.0, retry_base_delay_sec: float = 0.8, retry_max_delay_sec: float = 6.0, no_retry: bool = False, chain_cache: bool = False, chain_cache_force_refresh: bool = False) -> dict[str, Any]:
     u = normalize_underlier(symbol)
     gateway = build_ready_futu_gateway(
         host=host,
@@ -240,27 +261,31 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
             # 1) call get_option_expiration_date() to enumerate expirations
             # 2) take the closest N expirations (limit_expirations)
             # 3) call get_option_chain(code, start=exp, end=exp) for each expiration, then concat
-            try:
-                df_e = retry_futu_gateway_call(
-                    'get_option_expiration_date',
-                    lambda: gateway.get_option_expiration_dates(u.code),
-                    no_retry=no_retry,
-                    retry_max_attempts=retry_max_attempts,
-                    retry_time_budget_sec=retry_time_budget_sec,
-                    retry_base_delay_sec=retry_base_delay_sec,
-                    retry_max_delay_sec=retry_max_delay_sec,
-                    quiet=False,
-                )
-                if df_e is None or df_e.empty:
-                    expirations_all: list[str] = []
-                else:
-                    expirations_all = sorted({str(x)[:10] for x in df_e.get('strike_time').astype(str).tolist() if str(x) and len(str(x)) >= 10})
-            except Exception:
-                expirations_all = []
+            explicit_expirations_norm = sorted({str(x)[:10] for x in (explicit_expirations or []) if str(x) and len(str(x)) >= 10})
+            if explicit_expirations_norm:
+                expirations_all = explicit_expirations_norm
+            else:
+                try:
+                    df_e = retry_futu_gateway_call(
+                        'get_option_expiration_date',
+                        lambda: gateway.get_option_expiration_dates(u.code),
+                        no_retry=no_retry,
+                        retry_max_attempts=retry_max_attempts,
+                        retry_time_budget_sec=retry_time_budget_sec,
+                        retry_base_delay_sec=retry_base_delay_sec,
+                        retry_max_delay_sec=retry_max_delay_sec,
+                        quiet=False,
+                    )
+                    if df_e is None or df_e.empty:
+                        expirations_all = []
+                    else:
+                        expirations_all = sorted({str(x)[:10] for x in df_e.get('strike_time').astype(str).tolist() if str(x) and len(str(x)) >= 10})
+                except Exception:
+                    expirations_all = []
 
             expirations_pick0 = expirations_all
             # If min_dte/max_dte is requested, filter expirations by DTE window.
-            if expirations_all and ((min_dte is not None) or (max_dte is not None)):
+            if expirations_all and (not explicit_expirations_norm) and ((min_dte is not None) or (max_dte is not None)):
                 try:
                     from datetime import datetime
                     today0 = today
@@ -290,7 +315,7 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
                 for exp0 in expirations_pick:
                     chain0 = retry_futu_gateway_call(
                         f'get_option_chain({exp0})',
-                        lambda exp=exp0: gateway.get_option_chain(code=u.code, start=str(exp), end=str(exp), is_force_refresh=bool(chain_cache_force_refresh)),
+                        lambda exp=exp0: (_respect_option_chain_rate_limit(), gateway.get_option_chain(code=u.code, start=str(exp), end=str(exp), is_force_refresh=bool(chain_cache_force_refresh)))[1],
                         no_retry=no_retry,
                         retry_max_attempts=retry_max_attempts,
                         retry_time_budget_sec=retry_time_budget_sec,
@@ -308,9 +333,14 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
                     chain = chains[0]
             else:
                 # Fallback to legacy behavior (best-effort) if expiration_date not available.
-                chain = _opend_call_with_retry(
+                chain = retry_futu_gateway_call(
                     'get_option_chain',
-                    lambda: gateway.get_option_chain(code=u.code, is_force_refresh=bool(chain_cache_force_refresh)),
+                    lambda: (_respect_option_chain_rate_limit(), gateway.get_option_chain(code=u.code, is_force_refresh=bool(chain_cache_force_refresh)))[1],
+                    no_retry=no_retry,
+                    retry_max_attempts=retry_max_attempts,
+                    retry_time_budget_sec=retry_time_budget_sec,
+                    retry_base_delay_sec=retry_base_delay_sec,
+                    retry_max_delay_sec=retry_max_delay_sec,
                     quiet=False,
                 )
 

@@ -203,6 +203,12 @@ def _fetch_missing_quotes_via_opend(
                 if all(key):
                     attempted_reasons[key] = "opend_fetch_skipped_non_futu_source"
             continue
+        expirations = sorted({key[2] for key in missing_keys if len(key) >= 3 and key[2]})
+        if not expirations:
+            for key in missing_keys:
+                if all(key):
+                    attempted_reasons[key] = "opend_fetch_skipped_missing_expiration"
+            continue
         strikes = [safe_float(p.get("strike")) for p in missing_positions]
         strikes = [s for s in strikes if s is not None]
         if not strikes:
@@ -221,6 +227,7 @@ def _fetch_missing_quotes_via_opend(
                 option_types=",".join(option_types or ["put", "call"]),
                 min_strike=min(strikes),
                 max_strike=max(strikes),
+                explicit_expirations=expirations,
                 chain_cache=True,
             )
         except Exception:
@@ -486,6 +493,17 @@ def run_close_advice(
     notify_level_set = {str(x).strip().lower() for x in notify_levels if str(x).strip()}
     max_items = safe_int(advice_cfg.get("max_items_per_account")) or 5
     text = render_markdown(rows, notify_levels=notify_level_set, max_items=max_items)
+    flag_counts: dict[str, int] = {}
+    tier_counts: dict[str, int] = {}
+    quote_issue_rows = 0
+    for row in rows:
+        tier = str(row.get("tier") or "").strip().lower() or "unknown"
+        tier_counts[tier] = tier_counts.get(tier, 0) + 1
+        flags = [x for x in str(row.get("data_quality_flags") or "").split(";") if x]
+        if any(flag in {"missing_quote", "missing_mid", "opend_fetch_error", "opend_fetch_no_usable_quote"} for flag in flags):
+            quote_issue_rows += 1
+        for flag in flags:
+            flag_counts[flag] = flag_counts.get(flag, 0) + 1
 
     _write_csv(csv_path, rows)
     atomic_write_text(text_path, text, encoding="utf-8")
@@ -494,6 +512,9 @@ def run_close_advice(
         "enabled": True,
         "rows": len(rows),
         "notify_rows": len([r for r in rows if str(r.get("tier") or "") in notify_level_set]),
+        "tier_counts": tier_counts,
+        "flag_counts": flag_counts,
+        "quote_issue_rows": quote_issue_rows,
         "csv": str(csv_path),
         "text": str(text_path),
     }

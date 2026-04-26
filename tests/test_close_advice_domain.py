@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 from domain.domain.close_advice import CloseAdviceConfig, CloseAdviceInput, evaluate_close_advice
 
 
@@ -123,3 +125,9 @@ def test_close_advice_mid_above_premium_is_not_profit_advice() -> None:
     row = evaluate_close_advice(_inp(premium=1.0, mid=1.1, dte=30), CloseAdviceConfig())
     assert row["tier"] == "none"
     assert "not_profitable_to_close" in row["data_quality_flags"]
+
+
+def test_close_advice_nan_quote_is_treated_as_missing_data() -> None:
+    row = evaluate_close_advice(_inp(mid=math.nan), CloseAdviceConfig())
+    assert row["tier"] == "none"
+    assert "missing_mid" in row["data_quality_flags"]
