@@ -58,6 +58,11 @@
     "notify_cooldown_dense_min": 30,
     "notify_cooldown_sparse_min": 60
   },
+  "notifications": {
+    "channel": "feishu",
+    "target": "ou_xxx",
+    "secrets_file": "configs/examples/notifications.feishu.app.example.json"
+  },
   "symbols": [
     {
       "symbol": "NVDA",

@@ -56,6 +56,11 @@
     "market_break_start": "12:00",
     "market_break_end": "13:00"
   },
+  "notifications": {
+    "channel": "feishu",
+    "target": "ou_xxx",
+    "secrets_file": "configs/examples/notifications.feishu.app.example.json"
+  },
   "symbols": [
     {
       "symbol": "0700.HK",
