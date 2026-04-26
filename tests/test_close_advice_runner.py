@@ -153,6 +153,7 @@ def test_run_close_advice_fetches_missing_quote_via_opend(tmp_path: Path, monkey
 
     def fake_fetch_symbol(symbol: str, **kwargs: object) -> dict[str, object]:
         calls.append({"symbol": symbol, **kwargs})
+        assert kwargs["explicit_expirations"] == ["2026-04-29"]
         return {
             "rows": [
                 {
@@ -193,6 +194,47 @@ def test_run_close_advice_fetches_missing_quote_via_opend(tmp_path: Path, monkey
     assert "missing_quote" not in csv_text
     assert "mid_fallback_last_price" not in csv_text
     assert calls and calls[0]["symbol"] == "0700.HK"
+
+
+def test_run_close_advice_reports_quote_issue_summary(tmp_path: Path) -> None:
+    ctx_path = tmp_path / "option_positions_context.json"
+    ctx_path.write_text(
+        json.dumps(
+            {
+                "open_positions_min": [
+                    {
+                        "account": "lx",
+                        "symbol": "AAPL",
+                        "option_type": "put",
+                        "side": "short",
+                        "contracts_open": 1,
+                        "currency": "USD",
+                        "strike": 100,
+                        "multiplier": 100,
+                        "premium": 1.0,
+                        "expiration": "2026-05-15",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    required_root = tmp_path / "required_data"
+    (required_root / "parsed").mkdir(parents=True)
+    out_dir = tmp_path / "reports"
+
+    result = run_close_advice(
+        config={"close_advice": {"enabled": True}},
+        context_path=ctx_path,
+        required_data_root=required_root,
+        output_dir=out_dir,
+        base_dir=Path.cwd(),
+    )
+
+    assert result["notify_rows"] == 0
+    assert result["quote_issue_rows"] == 1
+    assert result["flag_counts"]["missing_quote"] == 1
+    assert result["tier_counts"]["none"] == 1
 
 
 def test_run_close_advice_fetches_quote_when_required_data_row_has_no_usable_price(
