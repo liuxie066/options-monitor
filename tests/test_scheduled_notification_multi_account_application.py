@@ -97,3 +97,35 @@ def test_execute_multi_account_delivery_preserves_success_order(fake_runlog_fact
 
     assert out.sent_accounts == ["lx", "sy"]
     assert out.notify_failures == []
+
+
+def test_execute_multi_account_delivery_sends_same_target_for_all_accounts(fake_runlog_factory) -> None:
+    mod = importlib.import_module("src.application.scheduled_notification")
+    seen_targets: list[str] = []
+
+    def _send_fn(*, target: str, message: str, **_kwargs):
+        seen_targets.append(target)
+        suffix = message.split("-")[-1]
+        return SimpleNamespace(returncode=0, stdout="", stderr="", raw={"http_status": 200, "response_json": {"code": 0, "data": {"message_id": suffix}}})
+
+    out = mod.execute_multi_account_delivery(
+        delivery_plan=SimpleNamespace(channel="feishu", target="ou_same", account_messages={"lx": "msg-lx", "sy": "msg-sy"}),
+        run_id="run-4",
+        runlog=fake_runlog_factory([]),
+        audit_fn=lambda *_args, **_kwargs: None,
+        safe_data_fn=lambda payload: payload,
+        send_fn=_send_fn,
+        normalize_fn=lambda *, send_result: {
+            "ok": bool(((send_result.get("response_json") or {}).get("data") or {}).get("message_id")),
+            "command_ok": True,
+            "delivery_confirmed": True,
+            "returncode": 0,
+            "message_id": ((send_result.get("response_json") or {}).get("data") or {}).get("message_id"),
+        },
+        failure_fields_builder=lambda **_kwargs: {},
+        on_failure=lambda _error_code: None,
+        base="/tmp/base",
+    )
+
+    assert out.sent_accounts == ["lx", "sy"]
+    assert seen_targets == ["ou_same", "ou_same"]

@@ -364,11 +364,7 @@ def execute_single_account_delivery(
         target=str(delivery_plan.target),
         message=str(delivery_plan.account_messages.get(account_name) or ""),
     )
-    send_payload = normalize_notify_output(
-        returncode=int(send.returncode),
-        stdout=str(send.stdout or ""),
-        stderr=str(send.stderr or ""),
-    )
+    send_payload = _normalize_delivery_output(normalize_notify_output=normalize_notify_output, send=send)
     normalized_returncode = send_payload.get("returncode")
     resolved_returncode = int(send.returncode if normalized_returncode is None else normalized_returncode)
     message_id = send_payload.get("message_id")
@@ -442,11 +438,7 @@ def send_account_message_with_retry(
             target=str(target),
             message=message,
         )
-        send_tool_dto = normalize_fn(
-            returncode=send.returncode,
-            stdout=send.stdout or "",
-            stderr=send.stderr or "",
-        )
+        send_tool_dto = _normalize_delivery_output(normalize_notify_output=normalize_fn, send=send)
         message_id = send_tool_dto.get("message_id")
         ok = bool(send_tool_dto.get("ok") or (bool(send_tool_dto.get("command_ok")) and message_id))
         error_code = None if ok else _notify_error_code(send_tool_dto)
@@ -537,6 +529,17 @@ def send_account_message_with_retry(
         "command_ok": command_ok,
         "delivery_confirmed": bool(final.get("delivery_confirmed")),
     }
+
+
+def _normalize_delivery_output(*, normalize_notify_output: Callable[..., dict[str, Any]], send: Any) -> dict[str, Any]:
+    try:
+        return normalize_notify_output(send_result=(getattr(send, 'raw', send)))
+    except TypeError:
+        return normalize_notify_output(
+            returncode=int(getattr(send, 'returncode', 0) or 0),
+            stdout=str(getattr(send, 'stdout', '') or ''),
+            stderr=str(getattr(send, 'stderr', '') or ''),
+        )
 
 
 def execute_multi_account_delivery(

@@ -94,7 +94,37 @@ def validate_config(cfg: dict):
             if pt is not None and int(pt) <= 0:
                 die('runtime.portfolio_timeout_sec must be > 0')
         except Exception:
-            die('runtime.portfolio_timeout_sec must be an integer')
+                die('runtime.portfolio_timeout_sec must be an integer')
+
+    notifications = cfg.get('notifications') or {}
+    if notifications and not isinstance(notifications, dict):
+        die('notifications must be an object')
+    if isinstance(notifications, dict) and notifications:
+        channel = str(notifications.get('channel') or '').strip().lower()
+        if channel != 'feishu':
+            die('notifications.channel must be feishu')
+
+        target = notifications.get('target')
+        if not isinstance(target, str) or not str(target).strip():
+            die('notifications.target must be a non-empty open_id string')
+
+        secrets_file_value = str(notifications.get('secrets_file') or 'secrets/notifications.feishu.app.json').strip()
+        secrets_path = Path(secrets_file_value)
+        if not secrets_path.is_absolute():
+            secrets_path = (repo_base / secrets_path).resolve()
+        if not secrets_path.exists():
+            die(f'notification secrets file not found: {secrets_path}')
+
+        try:
+            secrets_payload = json.loads(secrets_path.read_text(encoding='utf-8'))
+        except json.JSONDecodeError:
+            die(f'notification secrets file is not valid json: {secrets_path}')
+
+        feishu = secrets_payload.get('feishu') if isinstance(secrets_payload, dict) else None
+        if not isinstance(feishu, dict):
+            die(f'notification secrets missing feishu object: {secrets_path}')
+        if not str(feishu.get('app_id') or '').strip() or not str(feishu.get('app_secret') or '').strip():
+            die(f'notification secrets missing feishu.app_id/app_secret: {secrets_path}')
 
     account_settings = cfg.get('account_settings') or {}
     if account_settings and not isinstance(account_settings, dict):

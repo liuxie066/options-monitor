@@ -121,7 +121,7 @@ def _classify_error(*, http_status: int | None, body_text: str, parsed: Any, url
         return FeishuRateLimitError(
             f"feishu rate limited (http={http_status}, code={feishu_code})",
             code=feishu_code,
-            response=response_dict or {"http_status": http_status, "body": body_text, "url": url},
+            response=((response_dict or {}) | {"http_status": http_status, "body": body_text, "url": url}),
         )
 
     # Permission
@@ -129,7 +129,7 @@ def _classify_error(*, http_status: int | None, body_text: str, parsed: Any, url
         return FeishuPermissionError(
             f"feishu permission error (http={http_status}, code={feishu_code})",
             code=feishu_code,
-            response=response_dict or {"http_status": http_status, "body": body_text, "url": url},
+            response=((response_dict or {}) | {"http_status": http_status, "body": body_text, "url": url}),
         )
 
     # Transient: http 5xx, network
@@ -137,14 +137,14 @@ def _classify_error(*, http_status: int | None, body_text: str, parsed: Any, url
         return FeishuTransientError(
             f"feishu transient http error (http={http_status}, code={feishu_code})",
             code=feishu_code,
-            response=response_dict or {"http_status": http_status, "body": body_text, "url": url},
+            response=((response_dict or {}) | {"http_status": http_status, "body": body_text, "url": url}),
         )
 
     # Permanent fallback
     return FeishuPermanentError(
         f"feishu permanent error (http={http_status}, code={feishu_code})",
         code=feishu_code,
-        response=response_dict or {"http_status": http_status, "body": body_text, "url": url},
+        response=((response_dict or {}) | {"http_status": http_status, "body": body_text, "url": url}),
     )
 
 
