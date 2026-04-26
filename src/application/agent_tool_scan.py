@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Callable
+import json
 
 from scripts.agent_plugin.contracts import AgentToolError
 
@@ -254,8 +255,25 @@ def prepare_close_advice_inputs_tool(
     state_dir = (out_root / "state").resolve()
     shared_dir = (out_root / "shared").resolve()
     required_data_root = (out_root / "required_data").resolve()
+    state_dir.mkdir(parents=True, exist_ok=True)
+    shared_dir.mkdir(parents=True, exist_ok=True)
     required_data_root.mkdir(parents=True, exist_ok=True)
     logs: list[str] = []
+    context_path = state_dir / "option_positions_context.json"
+    if not Path(data_config).exists():
+        empty_ctx = {"open_positions_min": []}
+        context_path.write_text(json.dumps(empty_ctx, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {
+            "account": account,
+            "broker": broker,
+            "context_rows": 0,
+            "symbols": [],
+            "symbol_count": 0,
+        }, [f"[WARN] option positions data config not found: {mask_path(Path(data_config))}"], {
+            "config_path": mask_path(config_path),
+            "context_path": mask_path(context_path),
+            "required_data_root": mask_path(required_data_root),
+        }
     try:
         ctx, _refreshed = load_option_positions_context(
             base=repo_base(),
@@ -277,10 +295,24 @@ def prepare_close_advice_inputs_tool(
     if not isinstance(ctx, dict):
         raise AgentToolError(code="DEPENDENCY_MISSING", message="option positions context is unavailable", details={"logs": logs[-5:]})
 
+    symbols_in_context = list(extract_context_symbols_fn(ctx))
+    if not symbols_in_context:
+        return {
+            "account": account,
+            "broker": broker,
+            "context_rows": len(ctx.get("open_positions_min") or []),
+            "symbols": [],
+            "symbol_count": 0,
+        }, [item for item in logs if item.startswith("[WARN]")], {
+            "config_path": mask_path(config_path),
+            "context_path": mask_path(context_path),
+            "required_data_root": mask_path(required_data_root),
+        }
+
     symbol_map = symbol_fetch_config_map_fn(cfg)
     fetched: list[dict[str, Any]] = []
     warnings = [item for item in logs if item.startswith("[WARN]")]
-    for symbol in extract_context_symbols_fn(ctx):
+    for symbol in symbols_in_context:
         symbol_cfg = symbol_map.get(symbol) or {}
         fetch_cfg = symbol_cfg.get("fetch") if isinstance(symbol_cfg.get("fetch"), dict) else {}
         src, _decision = resolve_symbol_fetch_source(fetch_cfg)
@@ -308,7 +340,7 @@ def prepare_close_advice_inputs_tool(
         "symbol_count": len(fetched),
     }, warnings, {
         "config_path": mask_path(config_path),
-        "context_path": mask_path(state_dir / "option_positions_context.json"),
+        "context_path": mask_path(context_path),
         "required_data_root": mask_path(required_data_root),
     }
 
