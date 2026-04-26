@@ -16,3 +16,17 @@ def test_parse_futu_tencent_fill_uses_resolved_multiplier_when_account_present(m
     assert out["parsed"]["symbol"] == "0700.HK"
     assert out["parsed"]["multiplier"] == 100
     assert out["parsed"]["account"] == "lx"
+
+
+def test_parse_futu_us_fill_infers_usd_when_currency_missing(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "scripts.parse_option_message.resolve_multiplier_with_source",
+        lambda **_kwargs: (100, "cache"),
+    )
+    msg = "【成交提醒】成功卖出1张$PLTR 260515 30.00 沽$，成交价格：1.25，此笔订单委托已全部成交，2026/04/26 15:30:00 (美国)。【富途证券】 lx"
+
+    out = parse_option_message_text(msg, accounts=["lx", "sy"])
+
+    assert out["ok"] is True
+    assert out["parsed"]["symbol"] == "PLTR"
+    assert out["parsed"]["currency"] == "USD"
