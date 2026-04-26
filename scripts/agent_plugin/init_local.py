@@ -276,6 +276,14 @@ def add_account_to_local_config(
     config_path: str | Path | None = None,
     futu_acc_id: str | None = None,
     holdings_account: str | None = None,
+    market_label: str | None = None,
+    enabled: bool | None = None,
+    trade_intake_enabled: bool | None = None,
+    futu_host: str | None = None,
+    futu_port: int | None = None,
+    bitable_app_token: str | None = None,
+    bitable_table_id: str | None = None,
+    bitable_view_name: str | None = None,
 ) -> dict[str, Any]:
     normalized_market = _normalize_market(market)
     normalized_account = _normalize_account_label(account_label)
@@ -295,6 +303,13 @@ def add_account_to_local_config(
     if not isinstance(account_settings, dict):
         account_settings = {}
     setting: dict[str, Any] = {"type": normalized_type}
+    normalized_market_label = str(market_label or normalized_market).strip().lower()
+    if normalized_market_label in {"us", "hk"}:
+        setting["market"] = normalized_market_label
+    setting["enabled"] = True if enabled is None else bool(enabled)
+    setting["trade_intake_enabled"] = (
+        (normalized_type == ACCOUNT_TYPE_FUTU) if trade_intake_enabled is None else bool(trade_intake_enabled)
+    )
     holdings_value = str(holdings_account or "").strip()
     if normalized_type == ACCOUNT_TYPE_EXTERNAL_HOLDINGS:
         holdings_value = holdings_value or normalized_account
@@ -305,6 +320,29 @@ def add_account_to_local_config(
             )
     if holdings_value:
         setting["holdings_account"] = holdings_value
+    if normalized_type == ACCOUNT_TYPE_FUTU:
+        futu_cfg: dict[str, Any] = {}
+        host = str(futu_host or "").strip()
+        if host:
+            futu_cfg["host"] = host
+        if futu_port not in (None, ""):
+            futu_cfg["port"] = int(futu_port)
+        if futu_acc_id is not None and str(futu_acc_id).strip():
+            futu_cfg["account_id"] = str(futu_acc_id).strip()
+        if futu_cfg:
+            setting["futu"] = futu_cfg
+    else:
+        bitable_cfg: dict[str, Any] = {}
+        for key, value in {
+            "app_token": bitable_app_token,
+            "table_id": bitable_table_id,
+            "view_name": bitable_view_name,
+        }.items():
+            raw = str(value or "").strip()
+            if raw:
+                bitable_cfg[key] = raw
+        if bitable_cfg:
+            setting["bitable"] = bitable_cfg
     account_settings[normalized_account] = setting
     runtime_cfg["account_settings"] = account_settings
 
@@ -360,6 +398,14 @@ def edit_account_in_local_config(
     futu_acc_id: str | None = None,
     holdings_account: str | None = None,
     clear_holdings_account: bool = False,
+    market_label: str | None = None,
+    enabled: bool | None = None,
+    trade_intake_enabled: bool | None = None,
+    futu_host: str | None = None,
+    futu_port: int | None = None,
+    bitable_app_token: str | None = None,
+    bitable_table_id: str | None = None,
+    bitable_view_name: str | None = None,
 ) -> dict[str, Any]:
     target_config_path = _target_runtime_config_path(repo_root=repo_root, market=market, config_path=config_path)
     runtime_cfg = _load_runtime_config_for_update(target_config_path)
@@ -378,6 +424,22 @@ def edit_account_in_local_config(
     existing_acc_ids = [key for key, value in futu_mapping.items() if str(value or "").strip().lower() == normalized_account]
 
     setting: dict[str, Any] = {"type": new_type}
+    current_market = str(current_setting.get("market") or "").strip().lower()
+    normalized_market_label = str(market_label or current_market or _normalize_market(market)).strip().lower()
+    if normalized_market_label in {"us", "hk"}:
+        setting["market"] = normalized_market_label
+    if enabled is None:
+        if "enabled" in current_setting:
+            setting["enabled"] = bool(current_setting.get("enabled"))
+    else:
+        setting["enabled"] = bool(enabled)
+    if trade_intake_enabled is None:
+        if "trade_intake_enabled" in current_setting:
+            setting["trade_intake_enabled"] = bool(current_setting.get("trade_intake_enabled"))
+        else:
+            setting["trade_intake_enabled"] = new_type == ACCOUNT_TYPE_FUTU
+    else:
+        setting["trade_intake_enabled"] = bool(trade_intake_enabled)
     if clear_holdings_account:
         pass
     elif holdings_account is not None:
@@ -389,6 +451,39 @@ def edit_account_in_local_config(
 
     if new_type == ACCOUNT_TYPE_EXTERNAL_HOLDINGS and not str(setting.get("holdings_account") or "").strip():
         setting["holdings_account"] = normalized_account
+
+    if new_type == ACCOUNT_TYPE_FUTU:
+        futu_cfg = current_setting.get("futu") if isinstance(current_setting.get("futu"), dict) else {}
+        merged_futu: dict[str, Any] = dict(futu_cfg)
+        if futu_host is not None:
+            host = str(futu_host).strip()
+            if host:
+                merged_futu["host"] = host
+            else:
+                merged_futu.pop("host", None)
+        if futu_port is not None:
+            merged_futu["port"] = int(futu_port)
+        if futu_acc_id is not None and str(futu_acc_id).strip():
+            merged_futu["account_id"] = str(futu_acc_id).strip()
+        if merged_futu:
+            setting["futu"] = merged_futu
+    else:
+        bitable_cfg = current_setting.get("bitable") if isinstance(current_setting.get("bitable"), dict) else {}
+        merged_bitable: dict[str, Any] = dict(bitable_cfg)
+        for key, value in {
+            "app_token": bitable_app_token,
+            "table_id": bitable_table_id,
+            "view_name": bitable_view_name,
+        }.items():
+            if value is None:
+                continue
+            raw = str(value).strip()
+            if raw:
+                merged_bitable[key] = raw
+            else:
+                merged_bitable.pop(key, None)
+        if merged_bitable:
+            setting["bitable"] = merged_bitable
 
     for acc_id in existing_acc_ids:
         futu_mapping.pop(acc_id, None)

@@ -79,9 +79,42 @@ def account_settings_from_config(config: dict[str, Any] | None) -> dict[str, dic
         if acct_type not in ACCOUNT_TYPES:
             acct_type = ACCOUNT_TYPE_FUTU
         normalized: dict[str, Any] = {"type": acct_type}
+        market = str(item.get("market") or "").strip().lower()
+        if market in {"us", "hk"}:
+            normalized["market"] = market
+        if "enabled" in item:
+            normalized["enabled"] = bool(item.get("enabled"))
+        if "trade_intake_enabled" in item:
+            normalized["trade_intake_enabled"] = bool(item.get("trade_intake_enabled"))
         holdings_account = str(item.get("holdings_account") or "").strip()
         if holdings_account:
             normalized["holdings_account"] = holdings_account
+        futu_cfg = item.get("futu")
+        if isinstance(futu_cfg, dict):
+            futu_out: dict[str, Any] = {}
+            host = str(futu_cfg.get("host") or "").strip()
+            if host:
+                futu_out["host"] = host
+            port = futu_cfg.get("port")
+            if port not in (None, ""):
+                try:
+                    futu_out["port"] = int(port)
+                except Exception:
+                    pass
+            account_id = str(futu_cfg.get("account_id") or "").strip()
+            if account_id:
+                futu_out["account_id"] = account_id
+            if futu_out:
+                normalized["futu"] = futu_out
+        bitable_cfg = item.get("bitable")
+        if isinstance(bitable_cfg, dict):
+            bitable_out: dict[str, Any] = {}
+            for key in ("app_token", "table_id", "view_name"):
+                value = str(bitable_cfg.get(key) or "").strip()
+                if value:
+                    bitable_out[key] = value
+            if bitable_out:
+                normalized["bitable"] = bitable_out
         out[account] = normalized
     return out
 
