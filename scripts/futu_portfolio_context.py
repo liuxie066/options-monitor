@@ -140,10 +140,23 @@ def resolve_trade_intake_futu_account_ids(cfg: Mapping[str, Any] | Any, *, accou
     return _normalize_account_ids(futu_mapping, account=account)
 
 
-def infer_futu_portfolio_settings(cfg: Mapping[str, Any] | Any) -> dict[str, Any]:
+def infer_futu_portfolio_settings(cfg: Mapping[str, Any] | Any, *, account: str | None = None) -> dict[str, Any]:
     if not isinstance(cfg, Mapping):
         return {}
 
+    # 1. Prefer account-specific settings if account is provided
+    if account:
+        account_settings = cfg.get("account_settings")
+        if isinstance(account_settings, Mapping):
+            acc_cfg = account_settings.get(account)
+            if isinstance(acc_cfg, Mapping):
+                futu_cfg = acc_cfg.get("futu")
+                if isinstance(futu_cfg, Mapping):
+                    out = dict(futu_cfg)
+                    if out.get("host") and out.get("port"):
+                        return out
+
+    # 2. Fall back to global portfolio.futu
     portfolio_cfg = cfg.get("portfolio")
     portfolio_futu = {}
     if isinstance(portfolio_cfg, Mapping):
@@ -155,6 +168,7 @@ def infer_futu_portfolio_settings(cfg: Mapping[str, Any] | Any) -> dict[str, Any
     if out.get("host") and out.get("port"):
         return out
 
+    # 3. Fall back to symbol-level fetch settings
     symbols = cfg.get("symbols") or cfg.get("watchlist") or []
     if not isinstance(symbols, list):
         return out
@@ -177,7 +191,7 @@ def infer_futu_portfolio_settings(cfg: Mapping[str, Any] | Any) -> dict[str, Any
 
 
 def should_try_futu_portfolio(cfg: Mapping[str, Any] | Any, *, account: str | None) -> bool:
-    settings = infer_futu_portfolio_settings(cfg)
+    settings = infer_futu_portfolio_settings(cfg, account=account)
     if not settings.get("host") or not settings.get("port"):
         return False
     return bool(resolve_trade_intake_futu_account_ids(cfg, account=account))
@@ -317,7 +331,7 @@ def fetch_futu_portfolio_context(
     if not account:
         raise ValueError("futu portfolio context requires account")
 
-    settings = infer_futu_portfolio_settings(cfg)
+    settings = infer_futu_portfolio_settings(cfg, account=account)
     host = settings.get("host")
     port = settings.get("port")
     if not host or not port:
