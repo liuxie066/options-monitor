@@ -56,7 +56,13 @@ Build per-account notification text from generated alerts:
 python3 scripts/notify_symbols.py --alerts-input output/reports/symbols_alerts.txt --changes-input output/reports/symbols_changes.txt --output output/reports/symbols_notification.txt
 ```
 
-Run the multi-account scheduler entry point:
+Run the multi-account flow (preferred unified CLI):
+
+```bash
+./om run tick --config config.us.json --accounts lx sy
+```
+
+Compatibility launcher:
 
 ```bash
 python3 scripts/send_if_needed_multi.py --config config.us.json --accounts lx sy
