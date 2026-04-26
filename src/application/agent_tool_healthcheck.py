@@ -159,21 +159,86 @@ def run_healthcheck_tool(
         warnings.append("Use `./om-agent add-account --account-type futu|external_holdings` and complete the matching mapping/config fields.")
     warnings.extend(fallback_warnings)
 
+    # Build account-specific health checks for OpenD
+    opend_endpoints: dict[str, dict[str, Any]] = {}
+    for account in accounts:
+        acc_view = account_views[account]
+        if acc_view.portfolio_source_plan.primary_source == "futu":
+            acc_settings = infer_futu_portfolio_settings(cfg, account=account)
+            host = str(acc_settings.get("host") or "").strip()
+            try:
+                port = int(acc_settings.get("port") or 0)
+            except Exception:
+                port = 0
+            if host and port > 0:
+                key = f"{host}:{port}"
+                if key not in opend_endpoints:
+                    opend_endpoints[key] = {"host": host, "port": port, "accounts": []}
+                opend_endpoints[key]["accounts"].append(account)
+
+    doctor_results: dict[str, dict[str, Any]] = {}
+    for key, ep in opend_endpoints.items():
+        ep_host = ep["host"]
+        ep_port = ep["port"]
+        doctor = run_futu_doctor(
+            host=ep_host,
+            port=ep_port,
+            symbols=healthcheck_symbols_for_futu(cfg),
+            timeout_sec=int(payload.get("timeout_sec") or 20),
+        )
+        doctor_results[key] = doctor
+
+    # Legacy global check fallback for summary reporting
     futu_settings = infer_futu_portfolio_settings(cfg)
     futu_host = str(futu_settings.get("host") or "").strip()
     try:
         futu_port = int(futu_settings.get("port") or 0)
     except Exception:
         futu_port = 0
-    if futu_host and futu_port > 0:
+
+    if opend_endpoints:
+        legacy_doctor_status = "ok"
+        legacy_doctor_message = "all OpenD checks passed"
+        for key, ep in opend_endpoints.items():
+            ep_host = ep["host"]
+            ep_port = ep["port"]
+            doctor = doctor_results[key]
+            doctor_ok = bool(doctor.get("ok"))
+            ep_accounts = ep["accounts"]
+            
+            if doctor_ok:
+                doctor_message = f"OpenD check passed for {', '.join(ep_accounts)}"
+            else:
+                watchdog = doctor.get("watchdog") if isinstance(doctor.get("watchdog"), dict) else {}
+                doctor_message = f"{', '.join(ep_accounts)}: " + str(
+                    watchdog.get("message")
+                    or watchdog.get("error")
+                    or doctor.get("message")
+                    or doctor.get("watchdog_raw")
+                    or "doctor_futu failed"
+                )
+            
+            checks.append(
+                {
+                    "name": f"opend_doctor_{key.replace('.', '_').replace(':', '_')}",
+                    "status": ("ok" if doctor_ok else "error"),
+                    "message": doctor_message,
+                    "value": {"host": ep_host, "port": ep_port, "accounts": ep_accounts},
+                }
+            )
+            if not doctor_ok:
+                legacy_doctor_status = "error"
+                legacy_doctor_message = doctor_message
+                warnings.append(f"OpenD endpoint {key} for {', '.join(ep_accounts)} is not ready.")
         checks.append(
             {
-                "name": "opend_endpoint",
-                "status": "ok",
-                "message": "resolved OpenD endpoint from runtime config",
-                "value": {"host": futu_host, "port": futu_port},
+                "name": "opend_doctor",
+                "status": legacy_doctor_status,
+                "message": legacy_doctor_message,
             }
         )
+    elif futu_host and futu_port > 0:
+        # Fallback if no specific account needs futu but global settings exist
         doctor = run_futu_doctor(
             host=futu_host,
             port=futu_port,
@@ -181,23 +246,11 @@ def run_healthcheck_tool(
             timeout_sec=int(payload.get("timeout_sec") or 20),
         )
         doctor_ok = bool(doctor.get("ok"))
-        if doctor_ok:
-            doctor_message = "Futu/OpenD dependency check passed"
-        else:
-            watchdog = doctor.get("watchdog") if isinstance(doctor.get("watchdog"), dict) else {}
-            doctor_message = str(
-                watchdog.get("message")
-                or watchdog.get("error")
-                or doctor.get("message")
-                or doctor.get("watchdog_raw")
-                or "doctor_futu failed"
-            )
-            warnings.append("OpenD is a required dependency for the public install flow.")
         checks.append(
             {
-                "name": "opend_doctor",
+                "name": "opend_doctor_global",
                 "status": ("ok" if doctor_ok else "error"),
-                "message": doctor_message,
+                "message": (doctor.get("message") or "Global OpenD check passed"),
                 "value": {"host": futu_host, "port": futu_port},
             }
         )
@@ -206,13 +259,13 @@ def run_healthcheck_tool(
             {
                 "name": "opend_endpoint",
                 "status": "error",
-                "message": "OpenD host/port not found in symbols[].fetch",
+                "message": "OpenD host/port not found in account_settings or symbols[].fetch",
             }
         )
-        warnings.append("Set symbols[].fetch.source=futu and keep host/port configured for the public install flow.")
+        warnings.append("Set account_settings.<account>.futu.host/port or symbols[].fetch.source=futu for the public install flow.")
 
     opend_ready = bool(
-        futu_host and futu_port > 0 and any(item.get("name") == "opend_doctor" and item.get("status") == "ok" for item in checks)
+        any(item.get("name").startswith("opend_doctor") and item.get("status") == "ok" for item in checks)
     )
     account_paths: dict[str, dict[str, Any]] = {}
     for account in accounts:

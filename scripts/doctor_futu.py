@@ -32,11 +32,12 @@ def _extract_json_obj(text: str) -> dict[str, Any] | None:
     text = str(text or "").strip()
     if not text:
         return None
+    decoder = json.JSONDecoder()
     for i, ch in enumerate(text):
         if ch != "{":
             continue
         try:
-            obj = json.loads(text[i:])
+            obj, _end = decoder.raw_decode(text[i:])
         except Exception:
             continue
         if isinstance(obj, dict):
@@ -55,7 +56,8 @@ def _run_json(cmd: list[str], *, timeout_sec: int) -> tuple[int, dict[str, Any] 
         )
         out = (proc.stdout or "").strip()
         err = (proc.stderr or "").strip()
-        return int(proc.returncode), _extract_json_obj(out), (out or err)
+        mixed = "\n".join(part for part in (out, err) if part)
+        return int(proc.returncode), (_extract_json_obj(out) or _extract_json_obj(mixed)), (mixed or out or err)
     except subprocess.TimeoutExpired as exc:
         return 124, None, f"timeout after {timeout_sec}s: {exc}"
     except Exception as exc:
@@ -121,6 +123,19 @@ def _print_human(result: dict[str, Any]) -> None:
         print("[FAIL] 富途数据源尚不可用。请按上面的失败项处理后重试。")
 
 
+def _required_fields_ok(required_fields: dict[str, Any] | None, *, fields_rc: int, symbols: list[str]) -> bool:
+    if not symbols:
+        return True
+    if int(fields_rc) != 0:
+        return False
+    if not isinstance(required_fields, dict):
+        return False
+    rows = required_fields.get("results") if isinstance(required_fields.get("results"), list) else []
+    if not rows:
+        return False
+    return all(bool(isinstance(row, dict) and row.get("ok")) for row in rows)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Doctor Futu data source (fetch.source=futu)")
     ap.add_argument("--host", default="127.0.0.1")
@@ -164,16 +179,20 @@ def main() -> int:
         ]
         fields_rc, required_fields, fields_raw = _run_json(fields_cmd, timeout_sec=args.timeout_sec)
 
-    ok = bool(sdk.get("ok")) and bool(wd_json and wd_json.get("ok")) and int(fields_rc) == 0
+    watchdog_ok = bool(wd_json and wd_json.get("ok"))
+    fields_ok = _required_fields_ok(required_fields, fields_rc=fields_rc, symbols=[str(s) for s in args.symbols])
+    ok = bool(sdk.get("ok")) and watchdog_ok and fields_ok
     result = {
         "ok": ok,
         "host": str(args.host),
         "port": int(args.port),
         "source": "futu",
         "sdk": sdk,
+        "watchdog_ok": watchdog_ok,
         "watchdog_returncode": wd_rc,
         "watchdog": wd_json,
         "watchdog_raw": wd_raw,
+        "required_fields_ok": fields_ok,
         "required_fields_returncode": fields_rc,
         "required_fields": required_fields,
         "required_fields_raw": fields_raw,

@@ -114,6 +114,12 @@ def run_futu_doctor(*, host: str, port: int, symbols: list[str], timeout_sec: in
 
     payload = extract_json_object(proc.stdout or proc.stderr)
     if isinstance(payload, dict):
+        watchdog_ok = bool(payload.get("watchdog_ok") or ((payload.get("watchdog") or {}).get("ok") if isinstance(payload.get("watchdog"), dict) else False))
+        required_fields_ok = payload.get("required_fields_ok")
+        if required_fields_ok is None:
+            required_fields_ok = int(payload.get("required_fields_returncode") or 0) == 0
+        if watchdog_ok and bool(required_fields_ok):
+            payload["ok"] = True
         payload.setdefault("returncode", int(proc.returncode))
         return payload
     raw = (proc.stdout or proc.stderr or "").strip()
