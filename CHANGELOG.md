@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.1.0-beta.4 - 2026-04-27
+
+### Added
+- Version update check via `./om version` against remote `origin` git tags
+- Shared version-check service for CLI and WebUI consumption
+
+### Changed
+- WebUI surfaces a non-blocking header status for release update checks
+- Release documentation now records the git-tag based update-check contract
+
 ## 0.1.0-beta.3 - 2026-04-26
 
 ### Added
