@@ -24,6 +24,8 @@ python3 -m venv .venv
 ./.venv/bin/pip install -r requirements.txt
 ```
 
+`requirements.txt` 已包含 `futu-api`，用于补齐本地 `futu` Python SDK。
+
 ---
 
 ## 2. 查看 Agent 工具清单
