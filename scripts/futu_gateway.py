@@ -200,6 +200,13 @@ class FutuGateway:
     def get_option_chain(self, *, is_force_refresh: bool = False, **kwargs: Any) -> Any:
         try:
             return self.client.get_option_chain(is_force_refresh=is_force_refresh, **kwargs)
+        except TypeError as exc:
+            if "is_force_refresh" not in str(exc):
+                self._raise_mapped(exc, action="get_option_chain")
+            try:
+                return self.client.get_option_chain(**kwargs)
+            except Exception as exc2:
+                self._raise_mapped(exc2, action="get_option_chain")
         except Exception as exc:
             self._raise_mapped(exc, action="get_option_chain")
         raise AssertionError("unreachable")
