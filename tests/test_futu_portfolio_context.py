@@ -35,6 +35,34 @@ def test_resolve_trade_intake_futu_account_ids_uses_runtime_mapping() -> None:
     assert resolve_trade_intake_futu_account_ids(cfg, account="zz") == []
 
 
+def test_infer_futu_portfolio_settings_prefers_account_settings() -> None:
+    from scripts.futu_portfolio_context import infer_futu_portfolio_settings
+
+    cfg = {
+        "portfolio": {"futu": {"host": "global-host", "port": 11111}},
+        "account_settings": {
+            "lx": {
+                "futu": {"host": "lx-host", "port": 22222}
+            }
+        }
+    }
+
+    # 1. With account label, should prefer account_settings
+    out = infer_futu_portfolio_settings(cfg, account="lx")
+    assert out["host"] == "lx-host"
+    assert out["port"] == 22222
+
+    # 2. Without account label, should use global portfolio.futu
+    out = infer_futu_portfolio_settings(cfg)
+    assert out["host"] == "global-host"
+    assert out["port"] == 11111
+
+    # 3. Non-existent account label, should use global portfolio.futu
+    out = infer_futu_portfolio_settings(cfg, account="unknown")
+    assert out["host"] == "global-host"
+    assert out["port"] == 11111
+
+
 def test_infer_futu_portfolio_settings_falls_back_to_symbol_fetch_config() -> None:
     from scripts.futu_portfolio_context import infer_futu_portfolio_settings
 

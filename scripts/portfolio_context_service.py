@@ -118,14 +118,14 @@ def load_account_portfolio_context(
         try:
             if shared_out is not None:
                 shared_ctx = load_holdings_portfolio_shared_context(
-                    pm_config_path=Path(data_config),
+                    data_config_path=Path(data_config),
                     broker=str(market),
                 )
                 shared_out.write_text(json.dumps(shared_ctx, ensure_ascii=False, indent=2), encoding="utf-8")
                 ctx = dict(slice_shared_context_for_account(shared_ctx, holdings_account) or {})
             else:
                 ctx = load_holdings_portfolio_context(
-                    pm_config_path=Path(data_config),
+                    data_config_path=Path(data_config),
                     broker=str(market),
                     account=holdings_account,
                 )
