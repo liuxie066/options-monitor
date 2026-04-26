@@ -11,7 +11,7 @@ fi
 
 # Ensure deps installed (best-effort idempotent)
 if ! .venv/bin/python - <<'PY' >/dev/null 2>&1
-import pandas, yaml, tabulate
+import pandas, yaml, tabulate, futu
 PY
 then
   echo "[BOOTSTRAP] installing deps from requirements.txt"

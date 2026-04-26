@@ -3,3 +3,4 @@ pyyaml
 tabulate
 fastapi
 uvicorn
+futu-api
