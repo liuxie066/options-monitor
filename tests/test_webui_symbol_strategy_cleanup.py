@@ -399,21 +399,22 @@ def test_repair_hint_maps_common_config_error() -> None:
 
 def test_webui_frontend_shows_resolved_path_and_warning_copy() -> None:
     src = Path("scripts/webui/frontend/src/App.jsx").read_text(encoding="utf-8")
-    assert "const [configModule, setConfigModule] = useState('symbols');" in src
+    model_src = Path("scripts/webui/frontend/src/webuiModel.js").read_text(encoding="utf-8")
+    panels_src = Path("scripts/webui/frontend/src/webuiPanels.jsx").read_text(encoding="utf-8")
+    api_src = Path("scripts/webui/frontend/src/webuiApi.js").read_text(encoding="utf-8")
+    assert "const [activeModule, setActiveModule] = useState('market');" in src
     assert '<span className="Spacer ModuleTabsSpacer" />' in src
-    assert '新增 {marketMeta.label} 标的' in src
-    assert "账户管理" in src
-    assert "运行结果" in src
+    assert "行情设置" in model_src
+    assert "账户设置" in model_src
+    assert "选股策略" in model_src
+    assert "高级设置" in model_src
     assert 'ToolbarSpacer' not in src
-    assert "summary.resolvedPath || summary.path" in src
-    assert "当前 WebUI 写入路径不是推荐 canonical runtime config" in src
-    assert "summary.recommendedPath" in src
-    assert "Feishu 推送" in src
-    assert "notificationsPayloadFromGlobalForm" in src
-    assert "Close Advice" in src
-    assert "审计历史" in src
-    assert "修复建议" in src
-    assert "/api/history" in src
+    assert "新的六模块页面建立在现有 runtime config 之上" in src
+    assert "共享 OpenD 参数会双写到新 DTO 与旧的 symbols[].fetch 字段" in panels_src
+    assert "飞书通知" in panels_src
+    assert "Close Advice" in panels_src
+    assert "/api/history" in api_src
+    assert "repairHint" in src
 
 
 def test_deploy_safe_uses_env_configured_canonical_runtime_hash_guard() -> None:
