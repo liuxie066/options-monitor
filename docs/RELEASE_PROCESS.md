@@ -1,21 +1,18 @@
 # Release Process
 
-This repo now supports public local-plugin releases.
+这份文档只面向维护者。
 
-## Version policy
+## 版本规则
 
-- Use `MAJOR.MINOR.PATCH` for stable releases
-- Use `MAJOR.MINOR.PATCH-<label>` for pre-releases
-- Current first public pre-release target: `0.1.0-beta.1`
-- Git tags must be prefixed with `v`, for example `v0.1.0-beta.1`
+- 稳定版：`MAJOR.MINOR.PATCH`
+- 预发布版：`MAJOR.MINOR.PATCH-<label>`
+- Git tag 必须带前缀 `v`
 
-`VERSION` is the source of truth. The git tag and changelog section must match it.
+`VERSION` 是版本真源。
 
-## Pre-tag checklist
+---
 
-1. Confirm `VERSION` is correct
-2. Confirm `CHANGELOG.md` has a matching `## <version>` section
-3. Run:
+## 发布前检查
 
 ```bash
 python3 scripts/release_check.py
@@ -25,30 +22,25 @@ python3 scripts/validate_config.py --config configs/examples/config.example.us.j
 ./om-agent spec
 ```
 
-4. Verify the public docs still match the launcher:
-   - `docs/GETTING_STARTED.md`
-   - `docs/AGENT_INTEGRATION.md`
-   - `docs/TOOL_REFERENCE.md`
+同时确认：
 
-## Tagging
+- `VERSION` 正确
+- `CHANGELOG.md` 中存在对应版本段落
+- README 与 Agent 文档没有明显过期命令
+
+---
+
+## 打 tag
 
 ```bash
 git tag v0.1.0-beta.1
 git push origin v0.1.0-beta.1
 ```
 
-The release workflow will:
+---
 
-- verify `VERSION` and tag alignment
-- generate release notes from `CHANGELOG.md`
-- run smoke and plugin contract tests
-- attach the source archive and spec artifact to the GitHub release
+## 发布后关注点
 
-## Release notes source
-
-Release notes are rendered from the matching `CHANGELOG.md` section for the current `VERSION`.
-
-## Upgrade expectation
-
-- `./om-agent spec` should stay backward compatible within the same `0.x` minor line unless clearly documented
-- write-tool behavior must remain gated by `OM_AGENT_ENABLE_WRITE_TOOLS`
+- `./om-agent spec` 输出是否正常
+- 示例配置是否仍能通过 `validate_config.py`
+- Agent/tool 合同测试是否通过
