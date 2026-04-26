@@ -18,7 +18,7 @@ def _argv_scope(argv: list[str]) -> Iterator[None]:
 
 
 def run_tick(argv: list[str] | None = None) -> int:
-    scoped = ["om", "run", "tick", *(argv or [])]
+    scoped = ["om", *(argv or [])]
     with _argv_scope(scoped):
         return int(multi_tick_main())
 
