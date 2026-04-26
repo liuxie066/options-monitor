@@ -23,6 +23,12 @@ def resolve_public_data_config_path(
         if not path.is_absolute():
             path = (repo_base() / path).resolve()
         return path
+    config_path = str(payload.get("config_path") or "").strip()
+    if config_path:
+        runtime_path = Path(config_path).expanduser()
+        if not runtime_path.is_absolute():
+            runtime_path = runtime_path.resolve()
+        return (runtime_path.parent / "secrets" / "portfolio.sqlite.json").resolve()
     return (repo_base() / "secrets" / "portfolio.sqlite.json").resolve()
 
 
