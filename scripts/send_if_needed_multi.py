@@ -21,8 +21,10 @@ except Exception:
 from src.application.multi_account_tick import current_run_id as _current_run_id
 from src.application.multi_account_tick import run_tick as _multi_main
 
-# Dev mainline entrypoint:
-#   scripts/send_if_needed_multi.py -> scripts.multi_tick.main.main
+# Compatibility/developer entrypoint:
+#   scripts/send_if_needed_multi.py -> src.application.multi_account_tick.run_tick
+# Preferred human-facing path is the unified CLI:
+#   ./om run tick --config ... --accounts ...
 # Production scheduler entrypoint remains scripts/send_if_needed.py (unchanged).
 
 
