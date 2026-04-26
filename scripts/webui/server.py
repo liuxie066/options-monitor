@@ -61,6 +61,7 @@ from src.application.webui_presenters import (
     global_summary as _global_summary_impl,
     account_rows as _account_rows_impl,
 )
+from src.application.version_check import check_version_update as _check_version_update_impl
 from src.application.runtime_config_paths import read_json_file as _read_json_file_impl
 
 
@@ -224,6 +225,11 @@ def index():
 @app.get("/api/watchlist")
 def api_list_watchlist():
     return {"rows": _list_rows()}
+
+
+@app.get("/api/version/check")
+def api_version_check():
+    return _check_version_update_impl(base_dir=BASE_DIR)
 
 
 @app.get("/api/accounts")
