@@ -178,6 +178,15 @@ def infer_currency(s: str) -> str | None:
     return None
 
 
+def infer_currency_from_symbol(symbol: str | None) -> str | None:
+    raw = str(symbol or '').strip().upper()
+    if not raw:
+        return None
+    if raw.endswith('.HK'):
+        return 'HKD'
+    return 'USD'
+
+
 def infer_market(s: str) -> str | None:
     """Infer broker/source market label for position-lot intake.
 
@@ -297,6 +306,9 @@ def parse_option_message_text(text: str, *, accounts: list[str] | tuple[str, ...
         account = parse_account(raw2, accounts=accounts)
         currency = infer_currency(raw2)
         market = infer_market(raw2)
+
+    if not currency:
+        currency = infer_currency_from_symbol(symbol)
 
     base = Path(__file__).resolve().parents[1]
     multiplier, multiplier_source = resolve_multiplier_with_source(

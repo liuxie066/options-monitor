@@ -18,8 +18,13 @@ from __future__ import annotations
 import argparse
 import json
 import shlex
+import sys
 from dataclasses import dataclass
 from pathlib import Path
+
+repo_base = Path(__file__).resolve().parents[1]
+if str(repo_base) not in sys.path:
+    sys.path.insert(0, str(repo_base))
 
 from scripts.account_config import accounts_from_config_path
 from scripts.parse_option_message import parse_option_message_text
@@ -152,7 +157,7 @@ def main():
     ap.add_argument('--apply', action='store_true')
     args = ap.parse_args()
 
-    base = Path(__file__).resolve().parents[1]
+    base = repo_base
 
     command = parse_om_command(args.text)
     action = args.action or command.action or 'open'
