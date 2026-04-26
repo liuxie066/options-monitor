@@ -193,6 +193,57 @@
 - `account_settings.<account>.holdings_account`:
   - 对 `futu` 账号：Futu 失败后回退到 Feishu holdings 时使用的 `holdings.account`
   - 对 `external_holdings` 账号：该账号在 Feishu holdings 里的实际名称
+- `account_settings.<account>.futu.host` / `account_settings.<account>.futu.port`:
+  - 可选，账户级 OpenD 持仓连接参数。
+  - 当前 runtime 已支持按账户读取不同的 OpenD holdings 端点。
+  - 解析优先级：
+    1. `account_settings.<account>.futu.host/port`
+    2. `portfolio.futu.host/port`
+    3. `symbols[].fetch.host/port`
+    4. 系统默认值
+- `account_settings.<account>.futu.account_id`:
+  - 可选，仅作为该账户对应 Futu 账户信息的一部分保留；实际持仓过滤仍依赖 `trade_intake.account_mapping.futu`。
+
+#### 4.4.1 每账户不同 OpenD 持仓：推荐配置示例
+
+```json
+{
+  "accounts": ["lx", "sy"],
+  "account_settings": {
+    "lx": {
+      "type": "futu",
+      "market": "us",
+      "futu": {
+        "host": "192.168.1.10",
+        "port": 11111,
+        "account_id": "12345678"
+      }
+    },
+    "sy": {
+      "type": "futu",
+      "market": "us",
+      "futu": {
+        "host": "192.168.1.20",
+        "port": 11111,
+        "account_id": "87654321"
+      }
+    }
+  },
+  "trade_intake": {
+    "account_mapping": {
+      "futu": {
+        "12345678": "lx",
+        "87654321": "sy"
+      }
+    }
+  }
+}
+```
+
+说明：
+- 不同账户现在可以实际走不同 OpenD holdings 端点。
+- 旧的全局 `portfolio.futu` 和 `symbols[].fetch.host/port` 仍可继续作为 fallback。
+- 这次升级完成的是 **持仓/现金 context 的 per-account OpenD runtime 支持**，不是所有市场数据缓存都已经做成多 gateway 完全隔离。
 
 ### 4.5 notifications：推送目标
 - `channel`: `feishu`，或本机 `openclaw` 已支持的其他通道

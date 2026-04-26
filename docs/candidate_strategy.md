@@ -1,182 +1,272 @@
-# Candidate Strategy Contract
+# Candidate Strategy
 
-This document defines the target Put/Call candidate filtering and ranking contract.
-It is written for the current decision/execution split:
+这份文档只回答一件事：
 
-- Engine owns deterministic decisions, filtering semantics, ranking semantics, DTOs, and reject reasons.
-- Scripts/infra own external effects: option-chain fetch, holdings read, position-lot context read, Futu/OpenD calls, and notification delivery.
-- Current scanner scripts still carry part of the candidate strategy. Future refactors should move those rules behind an Engine candidate decision boundary without changing outputs first.
+> 系统现在是怎样筛选、排序和输出 Sell Put / Covered Call 候选的。
 
-## Scope
+它不是历史设计稿，也不是未来架构草案；它描述的是**当前生产行为**。
 
-This contract applies to both Sell Put and Sell Call candidates.
+---
 
-Put/Call share the same stages, but use separate parameters and metrics:
+## 1. 适用范围
 
-- Put: cash-secured capacity, annualized net return on cash basis.
-- Call: covered-share capacity, annualized net premium return, net income, if-exercised total return for ranking.
+当前候选策略覆盖两类输出：
 
-## Stage 0: Input Normalization
+- **Sell Put**
+- **Covered Call**
 
-Normalize all upstream source data before strategy decisions:
+两类候选共享大体流程，但关注点不同：
 
-- Contract identity: `symbol`, `option_type`, `expiration`, `dte`, `contract_symbol`.
-- Price fields: `spot`, `strike`, `bid`, `ask`, `last_price`, `mid`.
-- Execution-quality fields: `open_interest`, `volume`, `implied_volatility`, `delta`.
-- Contract economics: `currency`, `multiplier`.
-- Event context: earnings, ex-dividend, and future macro/event calendar fields when available.
-- Account context:
-  - Put: cash by currency, open short-put cash-secured usage, exchange rates.
-  - Call: shares, average cost, open short-call locked shares.
+- **Sell Put**：现金担保能力、年化净收益率、单笔净收益、流动性
+- **Covered Call**：可覆盖股数、年化权利金收益、单笔净收益、流动性
 
-Reject candidates with missing critical fields and attach a reject reason.
+---
 
-Minimum critical fields:
+## 2. 当前实现分层
 
-- Common: `symbol`, `option_type`, `expiration`, `dte`, `spot`, `strike`, `mid`, `multiplier`.
-- Put: put contract type and `strike < spot`.
-- Call: call contract type, valid `avg_cost`, valid `shares`, and cover capacity inputs.
+当前实现不是“所有规则都在一个 Engine 里一次完成”，而是分成三层：
 
-## Stage 1: Hard Constraints
+### A. 数据准备层
+负责：
+- required data 获取
+- 持仓 / 现金 context 获取
+- 汇率与乘数补全
 
-Apply execution feasibility gates before return optimization:
+主要来源：
+- OpenD / Futu API
+- SQLite `position_lots`
+- 可选 Feishu holdings fallback
 
-- DTE range: `min_dte <= dte <= max_dte`.
-- Strike range:
-  - Absolute: `min_strike` / `max_strike`.
-  - Relative to spot when configured.
-- Account feasibility:
-  - Put: cash-secured requirement must be within configured/account capacity.
-  - Call: available covered shares must satisfy contract multiplier demand.
+### B. 核心候选引擎层
+负责：
+- 输入归一化
+- 硬约束判断
+- 收益门槛判断
+- 流动性 / 风险门槛判断
+- 基础排序语义
 
-Put capacity rule:
+当前核心实现主要在：
+- `domain/domain/engine/candidate_engine.py`
 
-- Compute required cash using strike, multiplier, and candidate currency.
-- Prefer base-currency gating when normalized CNY fields are available.
-- Fallback to native-currency gating only when base-currency fields are unavailable.
+### C. 扫描脚本与后处理层
+负责：
+- Sell Put / Call 的具体脚本调用
+- 标签补充
+- 现金担保附加过滤
+- 事件风险标注
+- 报表与 alerts 输出
 
-Call capacity rule:
+主要路径：
+- `scripts/scan_sell_put.py`
+- `scripts/scan_sell_call.py`
+- `scripts/sell_put_steps.py`
+- `scripts/sell_call_steps.py`
+- `scripts/event_risk_filter.py`
 
-- Compute available shares as `shares_total - shares_locked`.
-- Compute available covered contracts as `available_shares // multiplier`.
-- Reject if available covered contracts is less than one.
+---
 
-## Stage 2: Return Floor
+## 3. 候选筛选流程
 
-Apply minimum return rules after the candidate is feasible:
+## 3.1 输入归一化
 
-- Annualized return must meet the configured threshold.
-- Optional single-trade net income must meet the configured threshold.
-- Net income must meet the configured threshold when enabled.
+候选输入会先标准化为统一字段，例如：
 
-Current threshold resolution should remain:
+- `symbol`
+- `option_type`
+- `expiration`
+- `dte`
+- `spot`
+- `strike`
+- `bid`
+- `ask`
+- `mid`
+- `open_interest`
+- `volume`
+- `multiplier`
+- `currency`
 
-- Symbol config overrides template config.
-- Template config overrides default constants.
-- Default annualized threshold is `0.07` unless explicitly changed in code.
+缺少关键字段的合约会被拒绝。
 
-## Stage 3: Risk And Execution Quality
+---
 
-Apply high-accident-risk and execution-quality gates:
+## 3.2 硬约束
 
-- `min_open_interest`.
-- `min_volume`.
-- `max_spread_ratio`.
-- Key event windows:
-  - Earnings.
-  - Ex-dividend.
-  - Future macro/event calendar items when supported.
+### Sell Put
+主要硬约束包括：
 
-Current liquidity and event-risk contract:
+- `min_dte <= dte <= max_dte`
+- `min_strike <= strike <= max_strike`
+- put 必须满足基本 moneyness 约束
 
-- Global template hard-filter fields are limited to `min_open_interest`, `min_volume`, and `max_spread_ratio`.
-- Symbol-level liquidity/volatility shortcut fields are forbidden by config validation.
-- Event-risk mode defaults to `warn`; event hits are annotated with `EVENT_WARN` and are not hard rejects by default.
+### Covered Call
+主要硬约束包括：
 
-## Stage 4: Ranking And Top Pick
+- `min_dte <= dte <= max_dte`
+- `min_strike <= strike <= max_strike`
+- 必须有足够股票可覆盖 short call
 
-Ranking must be deterministic and separate from hard filtering.
+### 说明
+这些硬约束主要由候选引擎和扫描脚本共同完成。
 
-Candidate CSV, alerts, and summary top contract use the same simple ranking.
+---
 
-Put candidate ranking:
+## 3.3 收益门槛
 
-- Primary: annualized net return on cash basis.
-- Secondary: net income.
+当前主要收益门槛包括：
 
-Call candidate ranking:
+- `min_annualized_net_return`（Put）
+- `min_annualized_net_premium_return`（Call）
+- `min_net_income`
 
-- Primary: annualized net premium return.
-- Secondary: net income.
+### 优先级
+字段优先级仍然是：
 
-Layered output:
+1. symbol 级配置
+2. template 级配置
+3. 代码默认值
 
-- Risk layers are `激进`, `中性`, `保守`.
-- Layering is an output diversification policy, not a replacement for hard filtering.
-- When layered output is requested, pick one best candidate from each layer, then fill remaining slots by overall rank.
+### 当前默认值注意
+文档不再写死具体默认数值，因为默认值可能在脚本配置中调整。
+如果你要看当前默认值，请直接看：
 
-## Reject Reason Contract
+- `scripts/sell_put_config.py`
+- `scripts/sell_call_config.py`
 
-Reject reasons should be machine-readable and stable enough for tests and reports.
+---
 
-Recommended reason groups:
+## 3.4 流动性门槛
 
-- `input_missing`: required input missing or invalid.
-- `hard_dte`: DTE outside configured range.
-- `hard_strike`: strike outside configured range or violates moneyness rule.
-- `hard_capacity_put`: put cash requirement exceeds allowed capacity.
-- `hard_capacity_call`: call cover capacity is insufficient.
-- `return_annualized`: annualized return below threshold.
-- `return_net_income`: net income below threshold.
-- `risk_open_interest`: open interest below threshold.
-- `risk_volume`: volume below threshold.
-- `risk_spread`: spread ratio above threshold.
-- `risk_event_warn`: key event hit in warn mode.
-- `risk_event_reject`: key event hit in reject mode, if enabled later.
+当前流动性相关门槛主要是：
 
-## Legacy Reject Bridge
+- `min_open_interest`
+- `min_volume`
+- `max_spread_ratio`
 
-Current scanner reject logs use legacy rule names. The Engine bridge preserves those rows while adding stable Engine stage/reason fields.
+### 约束
+- 全局模板层允许的硬过滤主要围绕这几个字段
+- symbol 级某些旧的快捷风险字段已不再允许
+- 具体门禁由 `scripts/validate_config.py` 保证
 
-Mapping:
+---
 
-- `min_annualized_return` -> `stage2_return_floor` / `return_annualized`.
-- `min_net_income` -> `stage2_return_floor` / `return_net_income`.
-- `max_spread_ratio` -> `stage3_risk_filter` / `risk_spread`.
+## 3.5 事件风险
 
-Bridge behavior:
+当前事件风险不是一个统一的 Engine 内硬拒绝阶段。
 
-- Preserve original `reject_stage` as `legacy_reject_stage`.
-- Preserve original `reject_rule` as `legacy_reject_rule`.
-- Preserve contract identity fields when present: `symbol`, `contract_symbol`, `expiration`, `strike`, and `mode`.
-- Raise on unknown legacy rules so new scanner rules cannot silently bypass the Engine reason contract.
+更准确地说：
 
-Current scanner CSV compatibility:
+- 候选先扫描出来
+- 再由 `scripts/event_risk_filter.py` 做标注 / 风险附加信息处理
 
-- Keep existing reject log columns unchanged.
-- Append only `engine_reject_stage` and `engine_reject_reason` for low-noise Engine integration.
+也就是说：
 
-## Current Implementation Map
+> 事件风险当前更接近后处理标注，而不是单一的前置硬过滤总入口。
 
-- Input source schema: OpenD required-data CSV generated by `scripts/fetch_market_data_opend.py`.
-- Candidate scanner logic: `scripts/scan_sell_put.py`, `scripts/scan_sell_call.py`.
-- Engine strategy implementation: `domain/domain/engine/candidate_strategy.py`.
-- Engine strategy pipeline helpers: `filter_rank_candidates_with_reject_log`, `rank_scored_candidates`.
-- Shared simple ranking: `domain/domain/engine/candidate_engine.py`.
-- Production scanner/render entrypoints import the Engine strategy directly.
-- Compatibility wrapper for old callers: `scripts/option_candidate_strategy.py`.
-- Event-risk annotation: `scripts/event_risk_filter.py`.
-- Config validation for global liquidity filters: `scripts/validate_config.py`.
-- Put cash enrichment and headroom gate: `scripts/sell_put_steps.py`, `scripts/sell_put_cash.py`.
-- Call covered-capacity gate: `scripts/sell_call_steps.py`, `scripts/scan_sell_call.py`.
-- Summary report assembly: `scripts/report_summaries.py`.
-- Alert priority classification: `scripts/alert_engine.py`.
+---
 
-## Refactor Direction
+## 4. Sell Put 的现金担保规则
 
-The next safe refactor is to introduce an Engine candidate boundary without changing behavior:
+这部分是最容易误解的地方。
 
-- Add candidate DTOs for normalized inputs and decisions.
-- Mirror current scanner filter behavior into pure Engine functions.
-- Run old and new paths side by side in tests.
-- Move scanner scripts toward thin adapters after output parity is locked.
+当前行为不是“完全在 candidate_engine 的统一阶段里完成”。
+
+更准确地说：
+
+- 先跑 Sell Put 基础扫描
+- 再在 `scripts/sell_put_steps.py` 里结合账户现金 context 做补充过滤
+
+关键逻辑：
+
+- 优先看 `cash_required_cny` vs `cash_free_cny`
+- 如果没有 CNY 口径，再 fallback 到 USD 口径
+- 超过现金可用额度的候选会在后处理阶段被剔除
+
+### 重要含义
+因此，Sell Put 的现金担保约束：
+
+- 是真实生效的
+- 但不是完全在单一 Engine 阶段内完成的
+- 某些 reject log 口径与“纯 Engine 硬过滤”并不完全一致
+
+---
+
+## 5. Covered Call 的覆盖能力规则
+
+Covered Call 会结合持仓 context 计算：
+
+- 总持股数
+- 已被其他 short call 锁定的股数
+- 最终还能覆盖多少张 call
+
+如果可覆盖股数不足，则该账户下的 call 候选不会通过。
+
+---
+
+## 6. 排序规则
+
+排序与过滤分离。
+
+### Sell Put
+主要按：
+
+1. 年化净收益率
+2. 单笔净收益
+
+### Covered Call
+主要按：
+
+1. 年化权利金收益
+2. 单笔净收益
+
+最终 CSV、summary 和 alerts 使用的是当前生产实现里的简单稳定排序，不再把旧文档里的理想化阶段图当成唯一真相。
+
+---
+
+## 7. 当前真实代码入口
+
+如果你要从代码追当前行为，优先看：
+
+### 核心引擎
+- `domain/domain/engine/candidate_engine.py`
+
+### Put 路径
+- `scripts/scan_sell_put.py`
+- `scripts/sell_put_steps.py`
+- `scripts/sell_put_cash.py`
+- `scripts/sell_put_config.py`
+
+### Call 路径
+- `scripts/scan_sell_call.py`
+- `scripts/sell_call_steps.py`
+- `scripts/sell_call_config.py`
+
+### 风险 / 报表 / 汇总
+- `scripts/event_risk_filter.py`
+- `scripts/report_summaries.py`
+- `scripts/alert_engine.py`
+
+---
+
+## 8. 这份文档不再声明的内容
+
+为了避免再次过时，这份文档不再写死：
+
+- 某个默认阈值一定是 `0.07` 或 `0.10`
+- 所有过滤都一定只发生在某个固定 stage
+- 某个 legacy helper 一定是唯一主实现
+
+如果要确认当前数值真源：
+
+- 看配置文件
+- 看 `scripts/*_config.py`
+- 看 `candidate_engine.py`
+
+---
+
+## 9. 一句话总结
+
+当前候选策略是：
+
+> **候选引擎负责核心筛选语义，扫描脚本和后处理继续承担一部分现金、风险、报表和兼容逻辑。**
+
+如果以后继续重构，目标应该是让实现更集中，但在那之前，这份文档以**当前行为**为准。
