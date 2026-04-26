@@ -96,9 +96,10 @@ from src.application.scheduled_notification import (
     prepare_multi_account_messages,
 )
 from scripts.infra.service import (
+    normalize_feishu_app_send_output,
     run_opend_watchdog,
     run_scan_scheduler_cli,
-    send_openclaw_message,
+    send_feishu_app_message_process,
     trading_day_via_futu,
 )
 
@@ -677,10 +678,13 @@ def main() -> int:
             runlog=runlog,
             audit_fn=audit_helper.audit,
             safe_data_fn=_safe_runlog_data,
-            send_fn=send_openclaw_message,
-            normalize_fn=normalize_notify_subprocess_output,
+            send_fn=lambda **kwargs: send_feishu_app_message_process(
+                **kwargs,
+                notifications=notify_route.get('notifications') or {},
+            ),
+            normalize_fn=normalize_feishu_app_send_output,
             failure_fields_builder=build_failure_audit_fields,
-            on_failure=lambda error_code: audit_helper.guard_mark_failure(error_code, 'send_openclaw_message'),
+            on_failure=lambda error_code: audit_helper.guard_mark_failure(error_code, 'send_feishu_app_message'),
             base=base,
         )
         sent_accounts = execution.sent_accounts

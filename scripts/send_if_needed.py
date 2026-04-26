@@ -54,14 +54,18 @@ from src.application.scheduled_notification import (
 )
 from src.application.cron_runtime import request_scheduler_update, write_last_run
 from scripts.infra.service import (
+    normalize_feishu_app_send_output,
     run_command,
     run_pipeline_script,
     run_scan_scheduler_cli,
     send_openclaw_message,
+    send_feishu_app_message_process,
     trading_day_via_futu,
 )
 
 SCHEMA_VALIDATION_ERROR_CODE = "SCHEMA_VALIDATION_FAILED"
+_DEFAULT_NOTIFY_NORMALIZER = normalize_notify_subprocess_output
+_DEFAULT_OPENCLAW_SENDER = send_openclaw_message
 
 
 def _infer_trading_day_guard_markets(cfg_obj: dict) -> list[str]:
@@ -387,12 +391,27 @@ def main():
         meaningful = bool(delivery_decision.get('meaningful'))
 
         if (delivery_plan is not None) and bool(delivery_plan.should_send):
+            use_legacy_notify_adapter = (
+                send_openclaw_message is not _DEFAULT_OPENCLAW_SENDER
+                or normalize_notify_subprocess_output is not _DEFAULT_NOTIFY_NORMALIZER
+            )
             try:
                 send_result = execute_single_account_delivery(
                     delivery_plan=delivery_plan,
                     account_name=prepared_delivery.account_name,
-                    send_message=send_openclaw_message,
-                    normalize_notify_output=normalize_notify_subprocess_output,
+                    send_message=(
+                        send_openclaw_message
+                        if use_legacy_notify_adapter
+                        else lambda **kwargs: send_feishu_app_message_process(
+                            **kwargs,
+                            notifications=notify_route.get('notifications') or {},
+                        )
+                    ),
+                    normalize_notify_output=(
+                        normalize_notify_subprocess_output
+                        if use_legacy_notify_adapter
+                        else normalize_feishu_app_send_output
+                    ),
                     mark_scheduler_notified=lambda: request_scheduler_update(
                         runner=run_scan_scheduler_cli,
                         vpy=vpy,

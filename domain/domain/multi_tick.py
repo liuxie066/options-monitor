@@ -346,10 +346,10 @@ def resolve_scheduler_state_path(
     """Resolve scheduler state path while centralizing legacy --state override."""
     if state_override:
         state = Path(state_override)
-        resolved = state if state.is_absolute() else (base_dir / state).resolve()
+        resolved = state if state.is_absolute() else (base_dir / state)
         # Guard against path traversal: resolved path must stay within base_dir
-        base_resolved = base_dir.resolve()
-        resolved_real = resolved.resolve()
+        base_resolved = base_dir if base_dir.is_absolute() else base_dir.absolute()
+        resolved_real = resolved if resolved.is_absolute() else resolved.absolute()
         try:
             resolved_real.relative_to(base_resolved)
         except ValueError:
@@ -358,5 +358,5 @@ def resolve_scheduler_state_path(
 
     state_root = Path(state_dir)
     if not state_root.is_absolute():
-        state_root = (base_dir / state_root).resolve()
-    return (state_root / str(filename)).resolve()
+        state_root = (base_dir / state_root)
+    return state_root / str(filename)
