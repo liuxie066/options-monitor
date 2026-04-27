@@ -55,6 +55,7 @@ def load_account_portfolio_context(
 ) -> dict[str, Any]:
     port_path = (state_dir / "portfolio_context.json").resolve()
     plan = build_account_portfolio_source_plan(runtime_config, account=account, portfolio_source=portfolio_source)
+    holdings_source_name = "external_holdings" if plan.primary_source == "external_holdings" else "holdings"
 
     cached = None
     try:
@@ -84,14 +85,8 @@ def load_account_portfolio_context(
             port_path.write_text(json.dumps(ctx, ensure_ascii=False, indent=2), encoding="utf-8")
             log(f"[CTX] portfolio_context source=futu_direct account={account or '-'}")
             return ctx
-        except Exception as exc:
-            if plan.fallback_source != "holdings":
-                raise
-            log(f"[WARN] futu portfolio context unavailable; fallback to holdings: {exc}")
-            if isinstance(cached, dict) and str(cached.get("portfolio_source_name") or "").strip().lower() == "holdings":
-                cached = with_context_source(cached, "account_cache")
-                log(f"[CTX] portfolio_context source=account_cache account={account or '-'}")
-                return cached
+        except Exception:
+            raise
 
     holdings_account = plan.holdings_account
     shared_root = (shared_state_dir or state_dir).resolve()
@@ -105,7 +100,7 @@ def load_account_portfolio_context(
                 sliced = slice_shared_context_for_account(shared_cached, holdings_account)
                 if isinstance(sliced, dict):
                     sliced = dict(sliced)
-                    sliced["portfolio_source_name"] = "holdings"
+                    sliced["portfolio_source_name"] = holdings_source_name
                     sliced = with_context_source(sliced, "shared_slice")
                     port_path.parent.mkdir(parents=True, exist_ok=True)
                     port_path.write_text(json.dumps(sliced, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -131,7 +126,7 @@ def load_account_portfolio_context(
                 )
             if not ctx:
                 ctx = dict(_load_json_payload(load_json_fn, port_path))
-            ctx["portfolio_source_name"] = "holdings"
+            ctx["portfolio_source_name"] = holdings_source_name
             ctx = with_context_source(ctx, context_source)
             port_path.parent.mkdir(parents=True, exist_ok=True)
             port_path.write_text(json.dumps(ctx, ensure_ascii=False, indent=2), encoding="utf-8")
