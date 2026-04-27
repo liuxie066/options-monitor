@@ -7,6 +7,7 @@ from scripts.option_positions_core.domain import (
     OpenPositionCommand,
     build_buy_to_close_patch,
     build_open_fields,
+    effective_expiration,
     effective_contracts_open,
     normalize_account,
     normalize_broker,
@@ -112,6 +113,15 @@ def _open_lot_record(event: TradeEvent) -> dict[str, Any]:
 def _matches_close(fields: dict[str, Any], event: TradeEvent) -> bool:
     if effective_contracts_open(fields) <= 0:
         return False
+    expiration_matches = False
+    effective_exp_ms, exp_source = effective_expiration(fields)
+    if event.expiration_ymd:
+        if effective_exp_ms is not None:
+            expiration_matches = exp_source == "expiration" and str(fields.get("expiration") or "") == str(effective_exp_ms)
+        else:
+            expiration_matches = str(fields.get("note") or "").find(f"exp={event.expiration_ymd}") >= 0
+    elif effective_exp_ms is None:
+        expiration_matches = True
     return (
         normalize_broker(fields.get("broker")) == event.broker
         and normalize_account(fields.get("account")) == event.account
@@ -120,7 +130,7 @@ def _matches_close(fields: dict[str, Any], event: TradeEvent) -> bool:
         and normalize_side(fields.get("side")) == "short"
         and _same_strike(fields.get("strike"), event.strike)
         and str(fields.get("source_event_id") or "") != event.event_id
-        and str(fields.get("note") or "").find(f"exp={event.expiration_ymd}") >= 0
+        and expiration_matches
     )
 
 
