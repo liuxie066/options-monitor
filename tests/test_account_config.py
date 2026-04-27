@@ -80,7 +80,7 @@ def test_resolve_holdings_account_uses_explicit_mapping_then_account_label() -> 
     assert resolve_holdings_account(cfg, account="user1") == "LX"
 
 
-def test_resolve_portfolio_source_keeps_futu_auto_with_holdings_fallback() -> None:
+def test_resolve_portfolio_source_keeps_auto_for_futu_account() -> None:
     from scripts.account_config import resolve_portfolio_source
 
     cfg = {
@@ -114,7 +114,6 @@ def test_build_account_portfolio_source_plan_for_auto_futu_account() -> None:
     assert out.account_type == "futu"
     assert out.requested_source == "auto"
     assert out.primary_source == "futu"
-    assert out.fallback_source == "holdings"
     assert out.holdings_account == "LX"
 
 
@@ -134,8 +133,7 @@ def test_build_account_portfolio_source_plan_for_external_holdings_account() -> 
     out = build_account_portfolio_source_plan(cfg, account="ext1")
     assert out.account_type == "external_holdings"
     assert out.requested_source == "holdings"
-    assert out.primary_source == "holdings"
-    assert out.fallback_source is None
+    assert out.primary_source == "external_holdings"
     assert out.holdings_account == "Feishu EXT"
 
 

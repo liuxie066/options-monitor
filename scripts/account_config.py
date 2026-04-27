@@ -20,7 +20,6 @@ class AccountPortfolioSourcePlan:
     account_type: str
     requested_source: str
     primary_source: str
-    fallback_source: str | None
     holdings_account: str | None
     configured_holdings_account: str | None
 
@@ -32,7 +31,6 @@ class AccountConfigView:
     futu_acc_ids: list[str]
     holdings_account: str | None
     portfolio_source_plan: AccountPortfolioSourcePlan
-    fallback_enabled: bool
 
 
 def normalize_accounts(raw: Any, *, fallback: tuple[str, ...] = DEFAULT_ACCOUNTS) -> list[str]:
@@ -164,10 +162,6 @@ def resolve_configured_holdings_account(config: dict[str, Any] | None, *, accoun
     return None
 
 
-def has_holdings_fallback(config: dict[str, Any] | None, *, account: str | None) -> bool:
-    return bool(str(resolve_configured_holdings_account(config, account=account) or "").strip())
-
-
 def resolve_portfolio_source(config: dict[str, Any] | None, *, account: str | None) -> str:
     cfg = config if isinstance(config, dict) else {}
     portfolio_cfg = cfg.get("portfolio") if isinstance(cfg.get("portfolio"), dict) else {}
@@ -214,24 +208,15 @@ def build_account_portfolio_source_plan(
     holdings_account = resolve_holdings_account(cfg, account=account_key)
 
     if account_type == ACCOUNT_TYPE_EXTERNAL_HOLDINGS:
-        primary_source = "holdings"
-        fallback_source = None
-    elif requested_source == "futu":
-        primary_source = "futu"
-        fallback_source = ("holdings" if configured_holdings_account else None)
-    elif requested_source == "auto":
-        primary_source = "futu"
-        fallback_source = "holdings"
+        primary_source = ACCOUNT_TYPE_EXTERNAL_HOLDINGS
     else:
-        primary_source = requested_source
-        fallback_source = None
+        primary_source = "holdings" if requested_source == "holdings" else "futu"
 
     return AccountPortfolioSourcePlan(
         account=account_key,
         account_type=account_type,
         requested_source=requested_source,
         primary_source=primary_source,
-        fallback_source=fallback_source,
         holdings_account=holdings_account,
         configured_holdings_account=configured_holdings_account,
     )
@@ -255,14 +240,12 @@ def build_account_config_view(config: dict[str, Any] | None, *, account: str) ->
     cfg = config if isinstance(config, dict) else {}
     source_plan = build_account_portfolio_source_plan(cfg, account=account_key)
     futu_acc_ids = resolve_trade_intake_futu_account_ids(cfg, account=account_key)
-    fallback_enabled = bool(source_plan.fallback_source) or source_plan.account_type == ACCOUNT_TYPE_EXTERNAL_HOLDINGS
     return AccountConfigView(
         account=account_key,
         account_type=source_plan.account_type,
         futu_acc_ids=futu_acc_ids,
         holdings_account=source_plan.holdings_account,
         portfolio_source_plan=source_plan,
-        fallback_enabled=fallback_enabled,
     )
 
 
