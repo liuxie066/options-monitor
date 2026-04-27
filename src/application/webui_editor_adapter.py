@@ -5,7 +5,11 @@ from typing import Any
 
 from fastapi import HTTPException
 
-from scripts.account_config import account_settings_from_config, accounts_from_config
+from scripts.account_config import (
+    account_settings_from_config,
+    accounts_from_config,
+    cash_footer_accounts_from_config,
+)
 from src.application.runtime_config_paths import read_json_file, write_json_atomic
 
 
@@ -157,7 +161,7 @@ def build_editor_summary(
             "secretsFile": credentials["secrets_file"],
             "hasCredentials": bool(credentials["app_id"] and credentials["app_secret"]),
             "includeCashFooter": notifications.get("include_cash_footer", True) is not False,
-            "cashFooterAccounts": list(notifications.get("cash_footer_accounts") or []) if isinstance(notifications.get("cash_footer_accounts"), list) else [],
+            "cashFooterAccounts": cash_footer_accounts_from_config(cfg),
             "quietHoursStart": str(quiet_hours.get("start") or ""),
             "quietHoursEnd": str(quiet_hours.get("end") or ""),
         },
