@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.1.0-beta.7 - 2026-04-27
+
+### Changed
+- Simplified cash footer account config so notifications default to the top-level `accounts` list
+- Made WebUI show effective cash footer accounts and avoid persisting redundant `cash_footer_accounts` overrides
+
 ## 0.1.0-beta.6 - 2026-04-27
 
 ### Changed
