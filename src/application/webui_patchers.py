@@ -3,6 +3,8 @@ from __future__ import annotations
 from fastapi import HTTPException
 from typing import Any
 
+from scripts.account_config import accounts_from_config
+
 
 def patch_close_advice(cfg: dict, payload: dict) -> None:
     close_advice = payload.get("closeAdvice")
@@ -129,7 +131,8 @@ def patch_notifications(cfg: dict, payload: dict, *, notification_numeric_fields
             notif_cfg.pop("cash_footer_accounts", None)
         elif isinstance(raw_accounts, list):
             values = [str(x).strip().lower() for x in raw_accounts if str(x).strip()]
-            if values:
+            default_accounts = accounts_from_config(cfg)
+            if values and values != default_accounts:
                 notif_cfg["cash_footer_accounts"] = values
             else:
                 notif_cfg.pop("cash_footer_accounts", None)

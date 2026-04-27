@@ -158,7 +158,7 @@
 ### 4.1 accounts：账户列表
 - `accounts`: 多账户运行和辅助脚本的默认账户列表，例如 `["user1"]`。
 - 脚本命令行显式传 `--accounts` 时，以命令行为准。
-- `notifications.cash_footer_accounts` 可单独覆盖现金 footer 的账户列表；未配置时会回退到 `accounts`。
+- `notifications.cash_footer_accounts` 仅在你要指定“部分账户带现金 footer”时才配置；未配置时会回退到 `accounts`，避免与账户列表重复维护。
 
 ### 4.2 templates：通用底线（复用）
 - `templates.put_base.sell_put.min_annualized_net_return`：全局 put 最低年化（例如 0.10）

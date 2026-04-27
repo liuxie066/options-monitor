@@ -53,6 +53,7 @@ def _install_fastapi_stubs() -> None:
 
 _install_fastapi_stubs()
 
+from src.application.webui_editor_adapter import build_editor_summary
 from scripts.webui.server import (
     SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS,
     _account_rows,
@@ -280,6 +281,28 @@ def test_patch_notifications_updates_runtime_notification_fields() -> None:
     assert notif["opend_alert_burst_max"] == 3
 
 
+def test_patch_notifications_drops_redundant_cash_footer_override() -> None:
+    cfg = {
+        "accounts": ["lx", "sy"],
+        "notifications": {
+            "channel": "feishu",
+            "target": "user:old",
+            "cash_footer_accounts": ["lx"],
+        },
+    }
+
+    _patch_notifications(
+        cfg,
+        {
+            "notifications": {
+                "cash_footer_accounts": ["lx", "sy"],
+            }
+        },
+    )
+
+    assert "cash_footer_accounts" not in cfg["notifications"]
+
+
 def test_global_summary_exposes_notification_config_fields() -> None:
     old_base = webui_server.BASE_DIR
     old_config_files = dict(webui_server.CONFIG_FILES)
@@ -320,6 +343,22 @@ def test_global_summary_exposes_notification_config_fields() -> None:
     finally:
         webui_server.BASE_DIR = old_base
         webui_server.CONFIG_FILES = old_config_files
+
+
+def test_editor_summary_exposes_effective_cash_footer_accounts_when_override_absent() -> None:
+    with TemporaryDirectory() as td:
+        repo = Path(td)
+        cfg_path = (repo / "config.us.json").resolve()
+        cfg = {
+            "accounts": ["lx", "sy"],
+            "notifications": {
+                "channel": "feishu",
+                "target": "user:abc",
+            },
+        }
+        summary = build_editor_summary(cfg, config_key="us", config_path=cfg_path)
+
+    assert summary["notifications"]["cashFooterAccounts"] == ["lx", "sy"]
 
 
 def test_account_rows_expose_single_primary_source_visibility() -> None:
