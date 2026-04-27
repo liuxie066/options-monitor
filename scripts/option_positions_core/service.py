@@ -94,6 +94,31 @@ def _list_feishu_option_position_records(table_ref: OptionPositionsTableRef) -> 
     return bitable_list_records(token, table_ref.app_token, table_ref.table_id, page_size=500)
 
 
+def _is_incomplete_option_bootstrap_fields(fields: dict[str, Any]) -> bool:
+    option_type = str(fields.get("option_type") or "").strip().lower()
+    if option_type not in {"put", "call"}:
+        return False
+    expiration = fields.get("expiration")
+    strike = safe_float(fields.get("strike"))
+    return expiration in (None, "") or strike is None
+
+
+def _validate_position_lot_fields(*, record_id: str, fields: dict[str, Any]) -> None:
+    option_type = str(fields.get("option_type") or "").strip().lower()
+    if option_type not in {"put", "call"}:
+        return
+    expiration = fields.get("expiration")
+    strike = safe_float(fields.get("strike"))
+    missing: list[str] = []
+    if expiration in (None, ""):
+        missing.append("expiration")
+    if strike is None:
+        missing.append("strike")
+    if missing:
+        joined = ", ".join(missing)
+        raise ValueError(f"incomplete option position lot {record_id}: missing {joined}")
+
+
 def _normalize_bootstrap_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     normalized: list[dict[str, Any]] = []
     skipped = 0
@@ -108,6 +133,18 @@ def _normalize_bootstrap_records(records: list[dict[str, Any]]) -> list[dict[str
             broker = normalize_broker(fields.get("market"))
         if not broker:
             skipped += 1
+            continue
+        if _is_incomplete_option_bootstrap_fields(fields):
+            skipped += 1
+            print(
+                (
+                    f"[WARN] option_positions bootstrap skipped incomplete option row "
+                    f"record_id={record_id or '(missing)'} symbol={fields.get('symbol') or ''} "
+                    f"option_type={fields.get('option_type') or ''} expiration={fields.get('expiration') or ''} "
+                    f"strike={fields.get('strike') or ''}"
+                ),
+                file=sys.stderr,
+            )
             continue
         normalized_fields = dict(fields)
         normalized_fields["broker"] = broker
@@ -303,12 +340,18 @@ class SQLiteOptionPositionsRepository:
 
     def replace_position_lots(self, records: list[dict[str, Any]]) -> int:
         ts = int(now_ms())
+        inserted = 0
         with self._connect() as conn:
             conn.execute("DELETE FROM position_lots")
             for item in records:
                 record_id = str(item.get("record_id") or "").strip()
                 fields = item.get("fields") or {}
                 if not record_id or not isinstance(fields, dict):
+                    continue
+                try:
+                    _validate_position_lot_fields(record_id=record_id, fields=fields)
+                except ValueError as exc:
+                    print(f"[WARN] option_positions replace_position_lots skipped {exc}", file=sys.stderr)
                     continue
                 conn.execute(
                     """
@@ -322,8 +365,9 @@ class SQLiteOptionPositionsRepository:
                         ts,
                     ),
                 )
+                inserted += 1
             conn.commit()
-        return len(records)
+        return inserted
 
     def list_position_lots(self) -> list[dict[str, Any]]:
         with self._connect() as conn:
@@ -366,6 +410,7 @@ class SQLiteOptionPositionsRepository:
             raise ValueError("record_id is required")
         if not isinstance(fields, dict):
             raise TypeError("fields must be a dict")
+        _validate_position_lot_fields(record_id=normalized_record_id, fields=fields)
         ts = int(now_ms())
         with self._connect() as conn:
             updated = conn.execute(
@@ -451,8 +496,17 @@ def _persist_trade_event_object(repo: Any, event: TradeEvent) -> dict[str, Any]:
     created = sqlite_repo.upsert_trade_event(event)
     records = project_position_lot_records(sqlite_repo.list_trade_events())
     lot_count = sqlite_repo.replace_position_lots(records)
+    record_id = next(
+        (
+            str(item.get("record_id") or "").strip()
+            for item in records
+            if str((item.get("fields") or {}).get("source_event_id") or "").strip() == str(event.event_id).strip()
+        ),
+        "",
+    )
     return {
         "event_id": event.event_id,
+        "record_id": record_id or None,
         "created": bool(created),
         "position_lot_count": int(lot_count),
     }
