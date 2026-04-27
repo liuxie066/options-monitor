@@ -110,7 +110,7 @@ SCHEDULE_SUMMARY_FIELDS = {
 }
 
 
-app = FastAPI(title="options-monitor webui", version="0.1.0-beta.9")
+app = FastAPI(title="options-monitor webui", version="0.1.0-beta.10")
 
 static_dir = (Path(__file__).resolve().parent / "static").resolve()
 app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
