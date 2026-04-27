@@ -28,6 +28,7 @@ def resolve_trade_intake_config(
 
     state_path = Path(state_path_override or ti.get("state_path") or "output/state/auto_trade_intake_state.json")
     audit_path = Path(audit_path_override or ti.get("audit_path") or "output/state/auto_trade_intake_audit.jsonl")
+    account_mapping = resolve_futu_account_mapping(src)
 
     return {
         "enabled": enabled,
@@ -35,7 +36,8 @@ def resolve_trade_intake_config(
         "state_path": state_path,
         "audit_path": audit_path,
         "reconnect_sec": reconnect_sec,
-        "account_mapping": resolve_futu_account_mapping(src),
+        "account_mapping": account_mapping,
+        "futu_account_ids": sorted(account_mapping.keys()),
     }
 
 
