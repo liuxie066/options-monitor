@@ -222,6 +222,82 @@ def test_match_remote_record_prefers_unique_local_record_id_before_duplicate_pos
     assert reason == "local_record_id"
 
 
+def test_match_remote_record_requires_account_safe_position_id_match() -> None:
+    import scripts.sync_option_positions_to_feishu as sync_mod
+
+    record_id, reason = sync_mod.match_remote_record(
+        "local_row_sy",
+        {
+            "account": "sy",
+            "broker": "富途",
+            "symbol": "0883.HK",
+            "option_type": "call",
+            "side": "short",
+            "position_id": "0883_HK_20260528_30C_short",
+            "source_event_id": "manual-open-2",
+        },
+        [
+            {
+                "record_id": "rec_lx",
+                "fields": {
+                    "account": "lx",
+                    "broker": "富途",
+                    "symbol": "0883.HK",
+                    "option_type": "call",
+                    "side": "short",
+                    "position_id": "0883_HK_20260528_30C_short",
+                },
+            },
+            {
+                "record_id": "rec_sy",
+                "fields": {
+                    "account": "sy",
+                    "broker": "富途",
+                    "symbol": "0883.HK",
+                    "option_type": "call",
+                    "side": "short",
+                    "position_id": "0883_HK_20260528_30C_short",
+                },
+            },
+        ],
+    )
+
+    assert record_id == "rec_sy"
+    assert reason == "account+position_id"
+
+
+def test_match_remote_record_does_not_cross_match_position_id_into_other_account() -> None:
+    import scripts.sync_option_positions_to_feishu as sync_mod
+
+    record_id, reason = sync_mod.match_remote_record(
+        "local_row_sy",
+        {
+            "account": "sy",
+            "broker": "富途",
+            "symbol": "0883.HK",
+            "option_type": "call",
+            "side": "short",
+            "position_id": "0883_HK_20260528_30C_short",
+        },
+        [
+            {
+                "record_id": "rec_lx_only",
+                "fields": {
+                    "account": "lx",
+                    "broker": "富途",
+                    "symbol": "0883.HK",
+                    "option_type": "call",
+                    "side": "short",
+                    "position_id": "0883_HK_20260528_30C_short",
+                },
+            }
+        ],
+    )
+
+    assert record_id is None
+    assert reason == "no_remote_match"
+
+
 def test_sync_apply_update_sends_numeric_payload_types(monkeypatch, tmp_path: Path) -> None:
     import scripts.option_positions_core.service as svc
     import scripts.sync_option_positions_to_feishu as sync_mod
