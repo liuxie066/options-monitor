@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.1.0-beta.10 - 2026-04-27
+
+### Changed
+- Prevented cross-account option position sync collisions by requiring account-aware business-lot matching for shared `position_id` values
+- Preserved schema-aware numeric payload coercion and explicit conflict reporting in the beta10 sync behavior shipped from `origin/main`
+
 ## 0.1.0-beta.9 - 2026-04-27
 
 ### Changed
