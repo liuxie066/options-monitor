@@ -35,7 +35,7 @@
 主要来源：
 - OpenD / Futu API
 - SQLite `position_lots`
-- 可选 Feishu holdings fallback
+- 可选 Feishu holdings 数据源
 
 ### B. 核心候选引擎层
 负责：

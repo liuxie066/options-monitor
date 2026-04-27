@@ -3,7 +3,7 @@
 > 目标：你只要维护：
 > - 仓内 `config.us.json` / `config.hk.json`（策略与监控）
 > - `portfolio.data_config`（最小配置下只需要 SQLite `option_positions` 路径）
-> - Feishu App 凭证和 Bitable 配置是可选项，只在 holdings fallback / backup 场景需要
+> - Feishu App 凭证和 Bitable 配置是可选项，只在 `holdings` / `external_holdings` 数据源场景需要
 
 ---
 
@@ -14,7 +14,7 @@
 - `config.hk.json`
 - `secrets/portfolio.sqlite.json`
 - `secrets/portfolio.external_holdings.json`（可选，只在 external_holdings 账号场景需要）
-- `secrets/portfolio.feishu.json`（可选，只在 holdings fallback / backup 场景需要）
+- `secrets/portfolio.feishu.json`（可选，只在 `holdings` / `external_holdings` 数据源场景需要）
 
 ### 仓库里保留的模板文件
 - `configs/examples/config.example.us.json`
@@ -33,8 +33,8 @@
 ## 1) 本项目需要哪些外部“表”（Bitable）？
 
 目前本项目通过 `portfolio.data_config` 指向本地 portfolio 配置文件。
-最小配置下它只需要提供 SQLite `option_positions` 路径；如果你要启用 Feishu holdings / backup，再在同一个文件里补 `feishu` 配置。
-- `holdings`：可选 fallback，提供现金与股票持仓（用于 base 现金、shares、avg_cost）
+最小配置下它只需要提供 SQLite `option_positions` 路径；如果你要启用 Feishu holdings 数据源，再在同一个文件里补 `feishu` 配置。
+- `holdings`：可选主数据源，提供现金与股票持仓（用于 base 现金、shares、avg_cost）
 - `option_positions`：SQLite 主存储，提供已卖出期权占用（用于：
   - covered call 锁股数 `locked_shares_by_symbol`
   - cash-secured put 占用 `cash_secured_by_symbol`
@@ -188,10 +188,10 @@
   - 回退顺序：`source_by_account[account] -> source -> auto`
 - `base_currency`: 当前策略口径（CNY）
 - `account_settings.<account>.type`:
-  - `futu`: 主路径走 Futu/OpenD，可选回退到 Feishu holdings
+  - `futu`: 主路径走 Futu/OpenD
   - `external_holdings`: 只有 Feishu holdings，没有 Futu `acc_id`
 - `account_settings.<account>.holdings_account`:
-  - 对 `futu` 账号：Futu 失败后回退到 Feishu holdings 时使用的 `holdings.account`
+  - 对 `futu` 账号：当该账号显式使用 `holdings` 数据源时，对应的 `holdings.account`
   - 对 `external_holdings` 账号：该账号在 Feishu holdings 里的实际名称
 - `account_settings.<account>.futu.host` / `account_settings.<account>.futu.port`:
   - 可选，账户级 OpenD 持仓连接参数。
@@ -242,7 +242,7 @@
 
 说明：
 - 不同账户现在可以实际走不同 OpenD holdings 端点。
-- 旧的全局 `portfolio.futu` 和 `symbols[].fetch.host/port` 仍可继续作为 fallback。
+- 旧的全局 `portfolio.futu` 和 `symbols[].fetch.host/port` 仍可继续作为兼容兜底来源。
 - 这次升级完成的是 **持仓/现金 context 的 per-account OpenD runtime 支持**，不是所有市场数据缓存都已经做成多 gateway 完全隔离。
 
 ### 4.5 notifications：推送目标
@@ -323,7 +323,7 @@
 }
 ```
 
-### 可选方式（启用 Feishu holdings / backup）
+### 可选方式（启用 Feishu holdings 数据源）
 - 从 `configs/examples/portfolio.feishu.example.json` 复制到本地安全路径，例如 `secrets/portfolio.feishu.json` 或 `/opt/options-monitor/secrets/portfolio.feishu.json`。
 - 在该文件内填写 `feishu.app_id/app_secret` 和 `tables.holdings` / `tables.option_positions`。
 - 在 `config.us.json` / `config.hk.json` 内把 `portfolio.data_config` 指向该文件。

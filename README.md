@@ -122,7 +122,7 @@ cp configs/examples/portfolio.sqlite.example.json secrets/portfolio.sqlite.json
 
 - 支持多账户配置
 - 持仓与现金默认来自 Futu / OpenD
-- Feishu holdings 仍可作为 fallback / external holdings 来源
+- Feishu holdings 可作为 `holdings` 或 `external_holdings` 来源
 
 如果你需要：
 - 多账户配置
