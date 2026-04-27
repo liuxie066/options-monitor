@@ -72,11 +72,9 @@ def run_healthcheck_tool(
     holdings_ready = feishu_ready and ("/" in holdings_ref)
 
     mapping_errors: list[str] = []
-    fallback_warnings: list[str] = []
     mapping_preview: dict[str, dict[str, Any]] = {}
     primary_errors: list[str] = []
     primary_preview: dict[str, dict[str, Any]] = {}
-    fallback_preview: dict[str, dict[str, Any]] = {}
     account_views = {item.account: item for item in list_account_config_views(cfg)}
     for account in accounts:
         account_view = account_views[account]
@@ -92,16 +90,6 @@ def run_healthcheck_tool(
             "type": account_type,
             "futu_account_ids": [mask_account_id(x) for x in mapped_ids],
         }
-        fallback_enabled = bool(source_plan.fallback_source) or account_type == "external_holdings"
-        fallback_preview[account] = {
-            "enabled": fallback_enabled,
-            "source": (source_plan.fallback_source or ("holdings" if fallback_enabled else None)),
-        }
-        if fallback_enabled:
-            mapping_preview[account]["holdings_account"] = source_plan.holdings_account
-            mapping_preview[account]["holdings_fallback_ready"] = bool(holdings_ready)
-            fallback_preview[account]["holdings_account"] = source_plan.holdings_account
-            fallback_preview[account]["ready"] = bool(holdings_ready)
         if account_type == "futu":
             if not mapped_ids:
                 mapping_errors.append(f"{account}: missing trade_intake.account_mapping.futu entry")
@@ -116,10 +104,6 @@ def run_healthcheck_tool(
                     primary_errors.append(f"{account}: futu acc_id must be digits only")
             primary_preview[account]["futu_account_ids"] = [mask_account_id(x) for x in mapped_ids]
             primary_preview[account]["ready"] = not any(msg.startswith(f"{account}:") for msg in primary_errors)
-            if fallback_enabled and not holdings_ready:
-                fallback_warnings.append(
-                    f"{account}: holdings fallback configured but feishu.app_id/app_secret/tables.holdings is incomplete in portfolio.data_config"
-                )
             continue
 
         if not feishu_ready:
@@ -141,14 +125,6 @@ def run_healthcheck_tool(
     )
     checks.append(
         {
-            "name": "account_fallback_paths",
-            "status": ("warn" if fallback_warnings else "ok"),
-            "message": ("; ".join(fallback_warnings) if fallback_warnings else "resolved fallback account paths"),
-            "value": fallback_preview,
-        }
-    )
-    checks.append(
-        {
             "name": "account_mapping",
             "status": ("error" if mapping_errors else "ok"),
             "message": ("; ".join(mapping_errors) if mapping_errors else f"resolved account setup for {len(accounts)} account(s)"),
@@ -157,7 +133,6 @@ def run_healthcheck_tool(
     )
     if mapping_errors:
         warnings.append("Use `./om-agent add-account --account-type futu|external_holdings` and complete the matching mapping/config fields.")
-    warnings.extend(fallback_warnings)
 
     # Build account-specific health checks for OpenD
     opend_endpoints: dict[str, dict[str, Any]] = {}
@@ -270,12 +245,8 @@ def run_healthcheck_tool(
     account_paths: dict[str, dict[str, Any]] = {}
     for account in accounts:
         primary = dict(primary_preview.get(account) or {})
-        fallback = dict(fallback_preview.get(account) or {})
         primary_source = str(primary.get("source") or "").strip()
         primary_ok = bool(primary.get("ready")) and opend_ready if primary_source == "futu" else bool(primary.get("ready"))
-
-        fallback_source = str(fallback.get("source") or "").strip()
-        fallback_ok = bool(fallback.get("ready")) if fallback.get("enabled") and fallback_source == "holdings" else False
 
         account_paths[account] = {
             "type": str(primary.get("type") or ""),
@@ -284,12 +255,6 @@ def run_healthcheck_tool(
                 "ok": bool(primary_ok),
                 **({"futu_account_ids": primary.get("futu_account_ids")} if primary.get("futu_account_ids") is not None else {}),
                 **({"holdings_account": primary.get("holdings_account")} if primary.get("holdings_account") is not None else {}),
-            },
-            "fallback": {
-                "enabled": bool(fallback.get("enabled")),
-                "source": (fallback_source or None),
-                "ok": bool(fallback_ok),
-                **({"holdings_account": fallback.get("holdings_account")} if fallback.get("holdings_account") is not None else {}),
             },
         }
 

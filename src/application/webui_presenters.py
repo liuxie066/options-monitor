@@ -37,9 +37,6 @@ class AccountRow:
     portfolio_source: str | None
     primary_source: str | None
     primary_ready: bool
-    fallback_enabled: bool
-    fallback_source: str | None
-    fallback_ready: bool | None
 
 
 def normalize_symbol_for_name_lookup(value: Any) -> str:
@@ -219,7 +216,7 @@ def mask_acc_id(value: Any) -> str:
     return raw
 
 
-def account_rows(config_key: str, *, load_config, resolve_config_path, config_files, load_data_config_for_runtime, list_account_config_views, account_type_external_holdings: str) -> list[dict[str, Any]]:
+def account_rows(config_key: str, *, load_config, resolve_config_path, config_files, load_data_config_for_runtime, list_account_config_views) -> list[dict[str, Any]]:
     cfg = load_config(config_key)
     config_path = resolve_config_path(config_files[config_key])
     data_cfg = load_data_config_for_runtime(cfg, config_path=config_path)
@@ -233,9 +230,7 @@ def account_rows(config_key: str, *, load_config, resolve_config_path, config_fi
         source_plan = account_view.portfolio_source_plan
         account_type = account_view.account_type
         futu_acc_ids = [mask_acc_id(acc_id) for acc_id in account_view.futu_acc_ids]
-        fallback_enabled = bool(source_plan.fallback_source) or account_type == account_type_external_holdings
         primary_ready = bool(futu_acc_ids) if source_plan.primary_source == "futu" else bool(holdings_ready)
-        fallback_ready = bool(holdings_ready) if fallback_enabled else None
         rows.append(
             AccountRow(
                 configKey=config_key,  # type: ignore[arg-type]
@@ -246,9 +241,6 @@ def account_rows(config_key: str, *, load_config, resolve_config_path, config_fi
                 portfolio_source=source_plan.requested_source,
                 primary_source=source_plan.primary_source,
                 primary_ready=primary_ready,
-                fallback_enabled=fallback_enabled,
-                fallback_source=(source_plan.fallback_source or ("holdings" if fallback_enabled else None)),
-                fallback_ready=fallback_ready,
             ).__dict__
         )
     return rows
