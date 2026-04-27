@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.1.0-beta.9 - 2026-04-27
+
+### Changed
+- Hardened option position Feishu sync payload typing with schema-aware numeric coercion before create/update writes
+- Added explicit duplicate-business-key conflict reporting for rows blocked by repeated remote option position identifiers
+
 ## 0.1.0-beta.8 - 2026-04-27
 
 ### Changed
