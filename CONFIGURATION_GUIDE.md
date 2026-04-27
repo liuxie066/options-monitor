@@ -185,7 +185,7 @@
 - `account`: 用来过滤两张表（例如 `lx`）
 - `source`: `auto` / `futu` / `holdings`，作为全局默认 portfolio 来源；最小配置建议固定 `futu`
 - `source_by_account`: 可选，按账户覆盖 `source`，例如 `{ "user1": "futu" }`
-  - 回退顺序：`source_by_account[account] -> source -> auto`
+  - 解析优先级：`source_by_account[account] -> source -> auto`
 - `base_currency`: 当前策略口径（CNY）
 - `account_settings.<account>.type`:
   - `futu`: 主路径走 Futu/OpenD
@@ -242,7 +242,7 @@
 
 说明：
 - 不同账户现在可以实际走不同 OpenD holdings 端点。
-- 旧的全局 `portfolio.futu` 和 `symbols[].fetch.host/port` 仍可继续作为兼容兜底来源。
+- 旧的全局 `portfolio.futu` 和 `symbols[].fetch.host/port` 仍可继续作为兼容默认来源。
 - 这次升级完成的是 **持仓/现金 context 的 per-account OpenD runtime 支持**，不是所有市场数据缓存都已经做成多 gateway 完全隔离。
 
 ### 4.5 notifications：推送目标
