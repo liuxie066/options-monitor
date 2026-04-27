@@ -1,4 +1,7 @@
-# 2026-04-22 primary with backup repository pattern
+# 2026-04-22 primary with backup repository pattern (historical)
+
+> Historical note: this pattern documented an earlier primary+backup repository design.
+> It is no longer the recommended model after the 2026-04-27 source-plan cleanup that removed account-level primary/backup source semantics.
 
 - 当要降低对外部 SaaS 存储的依赖时，优先保持领域层和字段语义不变，只替换 repository 边界。
 - 推荐拆成三层：
