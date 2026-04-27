@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.1.0-beta.5 - 2026-04-27
+
+### Changed
+- Removed account-level primary/backup source fallback semantics while preserving `external_holdings` as a distinct primary source identity
+- Simplified healthcheck and WebUI account surfaces to expose a single primary source path
+- Cleaned stale fallback wording in tests, docs, and historical notes to match the single-source model
+
 ## 0.1.0-beta.4 - 2026-04-27
 
 ### Added
