@@ -436,6 +436,7 @@ def run_one_account(
                 required_data_root=request.shared_required,
                 output_dir=acct_report_dir,
                 base_dir=request.base,
+                markets_to_run=request.markets_to_run,
             )
             audit_fn(
                 "tool_call",
@@ -462,12 +463,16 @@ def run_one_account(
                 missing_mid = int(flag_counts.get("missing_mid") or 0)
                 opend_fetch_error = int(flag_counts.get("opend_fetch_error") or 0)
                 opend_fetch_no_usable_quote = int(flag_counts.get("opend_fetch_no_usable_quote") or 0)
+                quote_issue_samples = close_result.get("quote_issue_samples") if isinstance(close_result.get("quote_issue_samples"), list) else []
                 summary = (
                     f"### [{acct}] 平仓建议\n"
                     f"- 本次未生成 strong/medium 提醒；报价异常 {int(close_result.get('quote_issue_rows') or 0)} 条\n"
                     f"- missing_quote={missing_quote} | missing_mid={missing_mid} | "
                     f"opend_fetch_error={opend_fetch_error} | opend_fetch_no_usable_quote={opend_fetch_no_usable_quote}\n"
+                    f"- 说明: missing_quote 表示持仓已获取，但未取得可用报价，不是持仓缺失\n"
                 )
+                if quote_issue_samples:
+                    summary += f"- 样例: {' ; '.join(str(x) for x in quote_issue_samples[:3])}\n"
                 text = (text.strip() + "\n\n" + summary.strip()).strip()
         except Exception as exc:
             audit_fn(

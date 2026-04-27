@@ -52,6 +52,15 @@ def _norm_option_type(value: Any) -> str:
     return str(value or "").strip().lower()
 
 
+def _market_for_symbol(symbol: Any) -> str:
+    sym = _norm_symbol(symbol)
+    if sym.endswith(".HK"):
+        return "HK"
+    if sym:
+        return "US"
+    return ""
+
+
 def _date_from_ms(value: Any) -> str | None:
     try:
         if value in (None, ""):
@@ -230,10 +239,16 @@ def _fetch_missing_quotes_via_opend(
                 explicit_expirations=expirations,
                 chain_cache=True,
             )
-        except Exception:
+        except Exception as exc:
+            err_low = str(exc or "").lower()
+            detail = "opend_fetch_error"
+            if "rate limit" in err_low or "too frequent" in err_low or "最多10次" in str(exc or "") or "频率太高" in str(exc or ""):
+                detail = "opend_fetch_error_rate_limit"
+            elif "retry budget" in err_low:
+                detail = "opend_fetch_error_retry_budget"
             for key in missing_keys:
                 if all(key):
-                    attempted_reasons[key] = "opend_fetch_error"
+                    attempted_reasons[key] = detail
             continue
         rows = payload.get("rows") if isinstance(payload, dict) else []
         _merge_quote_rows(quotes, rows if isinstance(rows, list) else [])
@@ -256,7 +271,57 @@ def _quote_observability_flags(
         return []
     if _quote_has_usable_price(quote):
         return []
+    if reason.startswith("opend_fetch_error_"):
+        return ["opend_fetch_error", reason]
     return [reason]
+
+
+def _filter_positions_by_markets(positions: list[dict[str, Any]], markets_to_run: list[str] | None) -> list[dict[str, Any]]:
+    allow = {str(x).strip().upper() for x in (markets_to_run or []) if str(x).strip()}
+    if not allow:
+        return positions
+    out: list[dict[str, Any]] = []
+    for pos in positions:
+        if not isinstance(pos, dict):
+            continue
+        market = _market_for_symbol(pos.get("symbol"))
+        if market and market in allow:
+            out.append(pos)
+    return out
+
+
+def _build_quote_issue_samples(
+    positions: list[dict[str, Any]],
+    attempted_fetch_reasons: dict[tuple[str, str, str, str], str],
+    limit: int = 3,
+) -> list[str]:
+    samples: list[str] = []
+    for pos in positions:
+        if not isinstance(pos, dict):
+            continue
+        key = _quote_key(pos.get("symbol"), pos.get("option_type"), _position_expiration(pos), pos.get("strike"))
+        reason = attempted_fetch_reasons.get(key)
+        if not reason:
+            continue
+        opt = _norm_option_type(pos.get("option_type")) or "option"
+        exp = _position_expiration(pos) or "-"
+        strike = _num(pos.get("strike"))
+        suffix = "P" if opt == "put" else ("C" if opt == "call" else "")
+        reason_label = {
+            "opend_fetch_no_usable_quote": "无可用报价",
+            "opend_fetch_error_rate_limit": "OpenD 限频",
+            "opend_fetch_error_retry_budget": "OpenD 重试预算耗尽",
+            "opend_fetch_error": "OpenD 拉取失败",
+            "opend_fetch_skipped_non_futu_source": "非 Futu 行情源，跳过补拉",
+            "opend_fetch_skipped_missing_expiration": "缺少到期日，跳过补拉",
+            "opend_fetch_skipped_invalid_strike": "缺少有效行权价，跳过补拉",
+        }.get(reason, reason)
+        sample = f"{_norm_symbol(pos.get('symbol'))} {opt} {exp} {strike}{suffix}: {reason_label}"
+        if sample not in samples:
+            samples.append(sample)
+        if len(samples) >= max(int(limit), 0):
+            break
+    return samples
 
 
 def _position_expiration(pos: dict[str, Any]) -> str | None:
@@ -449,6 +514,7 @@ def run_close_advice(
     required_data_root: Path,
     output_dir: Path,
     base_dir: Path,
+    markets_to_run: list[str] | None = None,
 ) -> dict[str, Any]:
     advice_cfg_raw = config.get("close_advice") if isinstance(config, dict) else {}
     advice_cfg = advice_cfg_raw if isinstance(advice_cfg_raw, dict) else {}
@@ -464,6 +530,7 @@ def run_close_advice(
     ctx = _load_context(context_path)
     positions = ctx.get("open_positions_min") if isinstance(ctx, dict) else []
     positions = positions if isinstance(positions, list) else []
+    positions = _filter_positions_by_markets(positions, markets_to_run)
     symbols = {_norm_symbol(p.get("symbol")) for p in positions if isinstance(p, dict) and p.get("symbol")}
     quotes = load_required_data_quotes(Path(required_data_root), symbols=symbols)
     attempted_fetch_reasons = _fetch_missing_quotes_via_opend(
@@ -507,6 +574,7 @@ def run_close_advice(
 
     _write_csv(csv_path, rows)
     atomic_write_text(text_path, text, encoding="utf-8")
+    quote_issue_samples = _build_quote_issue_samples(positions, attempted_fetch_reasons)
 
     return {
         "enabled": True,
@@ -515,6 +583,7 @@ def run_close_advice(
         "tier_counts": tier_counts,
         "flag_counts": flag_counts,
         "quote_issue_rows": quote_issue_rows,
+        "quote_issue_samples": quote_issue_samples,
         "csv": str(csv_path),
         "text": str(text_path),
     }
@@ -532,6 +601,7 @@ def run_from_paths(
     required_data_root: Path,
     output_dir: Path,
     base_dir: Path,
+    markets_to_run: list[str] | None = None,
 ) -> dict[str, Any]:
     return run_close_advice(
         config=load_config(config_path),
@@ -539,4 +609,5 @@ def run_from_paths(
         required_data_root=required_data_root,
         output_dir=output_dir,
         base_dir=base_dir,
+        markets_to_run=markets_to_run,
     )
