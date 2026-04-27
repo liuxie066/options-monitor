@@ -91,6 +91,18 @@ class _FutuAPIClient:
             return self._unwrap(trade.acctradinginfo_query(**kwargs))
         return self._unwrap(trade.accinfo_query(**kwargs))
 
+    def get_order_list(self, **kwargs: Any) -> Any:
+        trade = self._trade()
+        if hasattr(trade, "order_list_query"):
+            return self._unwrap(trade.order_list_query(**kwargs))
+        raise AttributeError("order_list_query unavailable")
+
+    def get_deal_list(self, **kwargs: Any) -> Any:
+        trade = self._trade()
+        if hasattr(trade, "deal_list_query"):
+            return self._unwrap(trade.deal_list_query(**kwargs))
+        raise AttributeError("deal_list_query unavailable")
+
 
 class FutuGatewayError(RuntimeError):
     code = "UNKNOWN"
@@ -237,6 +249,20 @@ class FutuGateway:
             return self.client.get_funds(**kwargs)
         except Exception as exc:
             self._raise_mapped(exc, action="get_funds")
+        raise AssertionError("unreachable")
+
+    def get_order_list(self, **kwargs: Any) -> Any:
+        try:
+            return self.client.get_order_list(**kwargs)
+        except Exception as exc:
+            self._raise_mapped(exc, action="get_order_list")
+        raise AssertionError("unreachable")
+
+    def get_deal_list(self, **kwargs: Any) -> Any:
+        try:
+            return self.client.get_deal_list(**kwargs)
+        except Exception as exc:
+            self._raise_mapped(exc, action="get_deal_list")
         raise AssertionError("unreachable")
 
 

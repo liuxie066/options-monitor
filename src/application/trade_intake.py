@@ -44,12 +44,18 @@ def process_trade_payload(
     write_trade_intake_state_fn: Callable[[Any, dict[str, Any]], Any],
     upsert_deal_state_fn: Callable[..., dict[str, Any]],
     append_trade_intake_audit_fn: Callable[[Any, dict[str, Any]], Any],
+    enrich_trade_payload_fn: Callable[[dict[str, Any]], dict[str, Any]] | None,
     normalize_trade_deal_fn: Callable[..., Any],
     resolve_trade_deal_fn: Callable[..., Any],
 ) -> dict[str, Any]:
     state = load_trade_intake_state_fn(state_path) if apply_changes else {}
     append_trade_intake_audit_fn(audit_path, build_trade_intake_audit_event("received", payload=payload))
-    deal = normalize_trade_deal_fn(payload, futu_account_mapping=account_mapping)
+    effective_payload = dict(payload)
+    if enrich_trade_payload_fn is not None:
+        effective_payload = enrich_trade_payload_fn(effective_payload)
+        if effective_payload != payload:
+            append_trade_intake_audit_fn(audit_path, build_trade_intake_audit_event("enriched", payload=effective_payload))
+    deal = normalize_trade_deal_fn(effective_payload, futu_account_mapping=account_mapping)
     append_trade_intake_audit_fn(audit_path, build_trade_intake_audit_event("normalized", deal=deal))
     result = resolve_trade_deal_fn(deal, repo=repo, state=state, apply_changes=apply_changes)
     result_dict = result.to_dict()
