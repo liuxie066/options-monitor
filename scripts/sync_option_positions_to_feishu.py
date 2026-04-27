@@ -35,6 +35,43 @@ SYNC_META_KEYS = {
     "feishu_last_synced_at_ms",
 }
 
+INTEGER_PAYLOAD_FIELDS = {
+    "contracts",
+    "contracts_open",
+    "contracts_closed",
+    "underlying_share_locked",
+    "opened_at",
+    "closed_at",
+    "last_action_at",
+    "last_synced_at",
+}
+
+NUMBER_PAYLOAD_FIELDS = {
+    "strike",
+    "premium",
+    "cash_secured_amount",
+}
+
+SCHEMA_NUMERIC_TYPE_HINTS = {
+    "number",
+    "currency",
+    "percent",
+    "rating",
+    "progress",
+}
+
+SCHEMA_INTEGER_FIELD_NAMES = {
+    "contracts",
+    "contracts_open",
+    "contracts_closed",
+    "underlying_share_locked",
+    "opened_at",
+    "closed_at",
+    "last_action_at",
+    "last_synced_at",
+    "expiration",
+}
+
 
 @dataclass(frozen=True)
 class SyncCandidate:
@@ -53,6 +90,78 @@ def normalize_local_fields(fields: dict[str, Any]) -> dict[str, Any]:
     normalized["currency"] = normalize_currency(fields.get("currency")) or None
     if fields.get("close_type"):
         normalized["close_type"] = normalize_close_type(fields.get("close_type"))
+    return normalized
+
+
+def _coerce_int(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(float(value))
+    except Exception:
+        return None
+
+
+def _coerce_number(value: Any) -> float | int | None:
+    if value in (None, ""):
+        return None
+    try:
+        number = float(value)
+    except Exception:
+        return None
+    if number.is_integer():
+        return int(number)
+    return number
+
+
+def normalize_payload_types(payload: dict[str, Any]) -> dict[str, Any]:
+    normalized: dict[str, Any] = {}
+    for key, value in payload.items():
+        if key in INTEGER_PAYLOAD_FIELDS:
+            coerced = _coerce_int(value)
+            normalized[key] = coerced if coerced is not None else value
+            continue
+        if key in NUMBER_PAYLOAD_FIELDS:
+            coerced = _coerce_number(value)
+            normalized[key] = coerced if coerced is not None else value
+            continue
+        normalized[key] = value
+    return normalized
+
+
+def _schema_type_hints(field_meta: dict[str, Any]) -> set[str]:
+    hints: set[str] = set()
+    for key in ("type", "field_type", "ui_type", "property_type", "data_type"):
+        value = field_meta.get(key)
+        if value is None:
+            continue
+        text = str(value).strip().lower()
+        if text:
+            hints.add(text)
+    return hints
+
+
+def normalize_payload_types_by_schema(payload: dict[str, Any], schema_fields: list[dict[str, Any]]) -> dict[str, Any]:
+    schema_by_name = {
+        str(item.get("field_name") or "").strip(): item
+        for item in schema_fields
+        if str(item.get("field_name") or "").strip()
+    }
+    normalized = dict(payload)
+    for key, value in payload.items():
+        field_meta = schema_by_name.get(key)
+        if not field_meta:
+            continue
+        hints = _schema_type_hints(field_meta)
+        if not hints:
+            continue
+        if any(hint in SCHEMA_NUMERIC_TYPE_HINTS for hint in hints):
+            if key in SCHEMA_INTEGER_FIELD_NAMES:
+                coerced = _coerce_int(value)
+            else:
+                coerced = _coerce_number(value)
+            if coerced is not None:
+                normalized[key] = coerced
     return normalized
 
 
@@ -86,7 +195,8 @@ def build_feishu_payload(record_id: str, fields: dict[str, Any]) -> dict[str, An
         "local_record_id": record_id,
         "last_synced_at": int(now_ms()),
     }
-    return {key: value for key, value in payload.items() if value is not None and value != ""}
+    filtered = {key: value for key, value in payload.items() if value is not None and value != ""}
+    return normalize_payload_types(filtered)
 
 
 def filter_payload_for_schema(payload: dict[str, Any], allowed_fields: set[str]) -> dict[str, Any]:
@@ -104,32 +214,55 @@ def extract_remote_record_id(item: dict[str, Any]) -> str:
     return str(item.get("record_id") or item.get("id") or "").strip()
 
 
-def match_remote_record(local_record_id: str, fields: dict[str, Any], remote_records: list[dict[str, Any]]) -> tuple[str | None, str]:
-    local_position_id = str(fields.get("position_id") or "").strip()
-    local_source_event_id = str(fields.get("source_event_id") or "").strip()
-    matches: list[tuple[str, str]] = []
+def _match_remote_record_by_key(
+    *,
+    local_value: str,
+    remote_key: str,
+    remote_records: list[dict[str, Any]],
+) -> tuple[str | None, str | None]:
+    needle = str(local_value or "").strip()
+    if not needle:
+        return None, None
+
+    matches: list[str] = []
     for item in remote_records:
         record_id = extract_remote_record_id(item)
         remote_fields = item.get("fields") or {}
         if not record_id or not isinstance(remote_fields, dict):
             continue
-        if local_position_id and str(remote_fields.get("position_id") or "").strip() == local_position_id:
-            matches.append((record_id, "position_id"))
-            continue
-        if local_source_event_id and str(remote_fields.get("source_event_id") or "").strip() == local_source_event_id:
-            matches.append((record_id, "source_event_id"))
-            continue
-        if str(remote_fields.get("local_record_id") or "").strip() == local_record_id:
-            matches.append((record_id, "local_record_id"))
-            continue
-    unique_ids = {record_id for record_id, _reason in matches}
+        if str(remote_fields.get(remote_key) or "").strip() == needle:
+            matches.append(record_id)
+
+    unique_ids = sorted(set(matches))
+    if not unique_ids:
+        return None, None
     if len(unique_ids) > 1:
-        return None, f"conflict: matched multiple remote rows {sorted(unique_ids)}"
-    if len(unique_ids) == 1:
-        only_id = next(iter(unique_ids))
-        reason = next(reason for record_id, reason in matches if record_id == only_id)
-        return only_id, reason
+        return None, f"conflict: duplicate remote rows by {remote_key} {unique_ids}"
+    return unique_ids[0], remote_key
+
+
+def match_remote_record(local_record_id: str, fields: dict[str, Any], remote_records: list[dict[str, Any]]) -> tuple[str | None, str]:
+    local_position_id = str(fields.get("position_id") or "").strip()
+    local_source_event_id = str(fields.get("source_event_id") or "").strip()
+    for value, key in (
+        (local_record_id, "local_record_id"),
+        (local_source_event_id, "source_event_id"),
+        (local_position_id, "position_id"),
+    ):
+        matched_record_id, reason = _match_remote_record_by_key(
+            local_value=value,
+            remote_key=key,
+            remote_records=remote_records,
+        )
+        if matched_record_id is not None:
+            return matched_record_id, str(reason or key)
+        if reason:
+            return None, reason
     return None, "no_remote_match"
+
+
+def finalize_outgoing_payload(payload: dict[str, Any], schema_fields: list[dict[str, Any]]) -> dict[str, Any]:
+    return normalize_payload_types_by_schema(payload, schema_fields)
 
 
 def sync_meta_patch(fields: dict[str, Any], *, feishu_record_id: str, sync_hash: str, synced_at_ms: int) -> dict[str, Any]:
@@ -213,6 +346,7 @@ def sync_option_positions(
     for candidate in candidates:
         feishu_record_id = str(candidate.fields.get("feishu_record_id") or "").strip()
         outgoing_payload = filter_payload_for_schema(build_feishu_payload(candidate.record_id, candidate.fields), allowed_fields)
+        outgoing_payload = finalize_outgoing_payload(outgoing_payload, schema_fields)
         outgoing_hash = payload_hash(outgoing_payload)
         existing_hash = str(candidate.fields.get("feishu_sync_hash") or "").strip()
         row: dict[str, Any] = {
@@ -239,6 +373,7 @@ def sync_option_positions(
             if matched_record_id is None and match_reason.startswith("conflict:"):
                 row["action"] = "conflict"
                 row["reason"] = match_reason
+                row["match_key"] = "duplicate_remote_business_key"
                 action_rows.append(row)
                 continue
             if matched_record_id:
@@ -355,6 +490,7 @@ def main() -> None:
             source = next((candidate for candidate in candidates if candidate.record_id == row.get("record_id")), None)
             if source is not None:
                 payload = filter_payload_for_schema(build_feishu_payload(source.record_id, source.fields), allowed_fields)
+                payload = finalize_outgoing_payload(payload, schema_fields)
                 printable["payload"] = payload
         print(json.dumps(printable, ensure_ascii=False, sort_keys=True))
 
