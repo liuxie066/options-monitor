@@ -322,7 +322,7 @@ def test_global_summary_exposes_notification_config_fields() -> None:
         webui_server.CONFIG_FILES = old_config_files
 
 
-def test_account_rows_expose_primary_and_fallback_visibility() -> None:
+def test_account_rows_expose_single_primary_source_visibility() -> None:
     old_base = webui_server.BASE_DIR
     old_config_files = dict(webui_server.CONFIG_FILES)
     try:
@@ -371,13 +371,14 @@ def test_account_rows_expose_primary_and_fallback_visibility() -> None:
 
             assert user1["primary_source"] == "futu"
             assert user1["primary_ready"] is True
-            assert user1["fallback_enabled"] is True
-            assert user1["fallback_ready"] is True
+            assert "fallback_enabled" not in user1
+            assert "fallback_source" not in user1
+            assert "fallback_ready" not in user1
 
-            assert sy["primary_source"] == "holdings"
+            assert sy["primary_source"] == "external_holdings"
             assert sy["primary_ready"] is True
-            assert sy["fallback_enabled"] is True
-            assert sy["fallback_source"] == "holdings"
+            assert "fallback_enabled" not in sy
+            assert "fallback_source" not in sy
     finally:
         webui_server.BASE_DIR = old_base
         webui_server.CONFIG_FILES = old_config_files
@@ -403,21 +404,23 @@ def test_webui_frontend_shows_resolved_path_and_warning_copy() -> None:
     panels_src = Path("scripts/webui/frontend/src/webuiPanels.jsx").read_text(encoding="utf-8")
     api_src = Path("scripts/webui/frontend/src/webuiApi.js").read_text(encoding="utf-8")
     assert "const [activeModule, setActiveModule] = useState('market');" in src
-    assert '<span className="Spacer ModuleTabsSpacer" />' in src
+    assert 'className="ModuleTabs ModuleTabsVertical"' in src
+    assert 'className="WorkspaceShell"' in src
     assert "行情设置" in model_src
     assert "账户设置" in model_src
     assert "选股策略" in model_src
-    assert "高级设置" in model_src
+    assert "平仓建议" in model_src
+    assert "消息通知" in model_src
     assert 'ToolbarSpacer' not in src
-    assert "新的六模块页面建立在现有 runtime config 之上" in src
-    assert "共享 OpenD 参数会双写到新 DTO 与旧的 symbols[].fetch 字段" in panels_src
+    assert "配置中心" in src
+    assert "当前版本使用兼容双写：这里保存后，会同步更新旧的 symbol fetch 配置" in panels_src
     assert "飞书通知" in panels_src
     assert "Close Advice" in panels_src
     assert "/api/history" in api_src
     assert "/api/version/check" in api_src
     assert "const [versionStatus, setVersionStatus] = useState('版本检查中');" in src
     assert "版本检查失败" in src
-    assert "repairHint" in src
+    assert "repairHint" in panels_src
 
 
 def test_deploy_safe_uses_env_configured_canonical_runtime_hash_guard() -> None:
