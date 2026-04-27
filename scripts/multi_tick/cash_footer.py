@@ -26,6 +26,20 @@ def snapshot_fresh(payload: dict, max_age_sec: int) -> bool:
         return False
 
 
+def _format_cash_line(acct_u: str, payload: dict) -> str:
+    base_available = payload.get('cash_available_cny')
+    base_free = payload.get('cash_free_cny')
+    if base_available is not None or base_free is not None:
+        return f"- **{acct_u}** CNY 持有 {money_cny(base_available)} | CNY 可用 {money_cny(base_free)}"
+
+    total_available = payload.get('cash_available_total_cny')
+    total_free = payload.get('cash_free_total_cny')
+    if total_available is not None or total_free is not None:
+        return f"- **{acct_u}** 总现金折算 {money_cny(total_available)} | 总可用折算 {money_cny(total_free)}"
+
+    return f"- **{acct_u}** CNY 持有 {money_cny(None)} | CNY 可用 {money_cny(None)}"
+
+
 def query_cash_footer(
     base: Path,
     *,
@@ -108,9 +122,7 @@ def query_cash_footer(
             t = asof_bj(payload)
             if t and (not latest_asof or t > latest_asof):
                 latest_asof = t
-            lines.append(
-                f"- **{acct_u}** 持有 {money_cny(payload.get('cash_available_cny'))} | 可用 {money_cny(payload.get('cash_free_cny'))}"
-            )
+            lines.append(_format_cash_line(acct_u, payload))
         elif acct_l in errors:
             lines.append(f"- **{acct_u}**: (查询失败) {errors[acct_l]}")
 
