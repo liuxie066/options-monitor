@@ -1,10 +1,31 @@
 from __future__ import annotations
 
+import sys
+from pathlib import Path
 from typing import Any
 
 from scripts.option_positions_core.domain import OpenPositionCommand, build_buy_to_close_patch, build_open_fields
-from scripts.option_positions_core.service import persist_manual_close_event, persist_manual_open_event, persist_trade_event
+from scripts.option_positions_core.service import persist_manual_close_event, persist_manual_open_event
+from scripts.sync_option_positions_to_feishu import sync_single_option_position_record
 from scripts.trade_event_normalizer import NormalizedTradeDeal
+
+
+def _auto_sync_record_if_possible(repo: Any, *, record_id: str) -> dict[str, Any] | None:
+    try:
+        data_config = getattr(repo, "data_config_path", None)
+        if data_config is None:
+            return None
+        return sync_single_option_position_record(repo=repo, data_config=Path(str(data_config)), record_id=record_id, apply_mode=True)
+    except Exception as exc:
+        print(f"[WARN] option_positions post-write Feishu sync skipped for {record_id}: {exc}", file=sys.stderr)
+        return None
+
+
+def _manual_open_record_id(result: dict[str, Any]) -> str:
+    event_id = str(result.get("event_id") or "").strip()
+    if not event_id:
+        return ""
+    return f"lot_{event_id}"
 
 
 def _build_trade_open_command(deal: NormalizedTradeDeal) -> OpenPositionCommand:
@@ -120,7 +141,9 @@ def execute_manual_open(
     if repo is None:
         raise ValueError("repo is required when dry_run is false")
     result = persist_manual_open_event(repo, command)
-    return {"mode": "applied", "fields": fields, "result": result, "command": command}
+    synced_record_id = _manual_open_record_id(result)
+    sync_result = _auto_sync_record_if_possible(repo, record_id=synced_record_id) if synced_record_id else None
+    return {"mode": "applied", "fields": fields, "result": result, "command": command, "sync_result": sync_result}
 
 
 def execute_manual_close(
@@ -149,4 +172,5 @@ def execute_manual_close(
         close_price=close_price,
         close_reason=close_reason,
     )
-    return {"mode": "applied", "fields": fields, "patch": patch, "result": result}
+    sync_result = _auto_sync_record_if_possible(repo, record_id=record_id)
+    return {"mode": "applied", "fields": fields, "patch": patch, "result": result, "sync_result": sync_result}
