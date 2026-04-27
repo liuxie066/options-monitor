@@ -241,13 +241,52 @@ def _match_remote_record_by_key(
     return unique_ids[0], remote_key
 
 
-def match_remote_record(local_record_id: str, fields: dict[str, Any], remote_records: list[dict[str, Any]]) -> tuple[str | None, str]:
+def _same_business_lot(fields: dict[str, Any], remote_fields: dict[str, Any]) -> bool:
+    local_account = normalize_account(fields.get("account"))
+    remote_account = normalize_account(remote_fields.get("account"))
+    if local_account != remote_account:
+        return False
+    return (
+        normalize_broker(fields.get("broker")) == normalize_broker(remote_fields.get("broker"))
+        and str(fields.get("symbol") or "").strip().upper() == str(remote_fields.get("symbol") or "").strip().upper()
+        and normalize_option_type(fields.get("option_type")) == normalize_option_type(remote_fields.get("option_type"))
+        and normalize_side(fields.get("side")) == normalize_side(remote_fields.get("side"))
+    )
+
+
+def _match_remote_record_by_position_id_and_account(
+    *,
+    fields: dict[str, Any],
+    remote_records: list[dict[str, Any]],
+) -> tuple[str | None, str | None]:
     local_position_id = str(fields.get("position_id") or "").strip()
+    if not local_position_id:
+        return None, None
+
+    matches: list[str] = []
+    for item in remote_records:
+        record_id = extract_remote_record_id(item)
+        remote_fields = item.get("fields") or {}
+        if not record_id or not isinstance(remote_fields, dict):
+            continue
+        if str(remote_fields.get("position_id") or "").strip() != local_position_id:
+            continue
+        if _same_business_lot(fields, remote_fields):
+            matches.append(record_id)
+
+    unique_ids = sorted(set(matches))
+    if not unique_ids:
+        return None, None
+    if len(unique_ids) > 1:
+        return None, f"conflict: duplicate remote rows by account+position_id {unique_ids}"
+    return unique_ids[0], "account+position_id"
+
+
+def match_remote_record(local_record_id: str, fields: dict[str, Any], remote_records: list[dict[str, Any]]) -> tuple[str | None, str]:
     local_source_event_id = str(fields.get("source_event_id") or "").strip()
     for value, key in (
         (local_record_id, "local_record_id"),
         (local_source_event_id, "source_event_id"),
-        (local_position_id, "position_id"),
     ):
         matched_record_id, reason = _match_remote_record_by_key(
             local_value=value,
@@ -258,6 +297,14 @@ def match_remote_record(local_record_id: str, fields: dict[str, Any], remote_rec
             return matched_record_id, str(reason or key)
         if reason:
             return None, reason
+    matched_record_id, reason = _match_remote_record_by_position_id_and_account(
+        fields=fields,
+        remote_records=remote_records,
+    )
+    if matched_record_id is not None:
+        return matched_record_id, str(reason or "account+position_id")
+    if reason:
+        return None, reason
     return None, "no_remote_match"
 
 
