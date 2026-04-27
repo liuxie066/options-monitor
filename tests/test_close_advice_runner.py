@@ -455,7 +455,7 @@ def test_run_close_advice_required_data_mode_does_not_fetch(tmp_path: Path, monk
     assert "missing_quote" in csv_text
 
 
-def test_run_close_advice_legacy_source_still_fetches_via_opend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_close_advice_non_futu_source_skips_opend_fetch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     ctx_path = tmp_path / "option_positions_context.json"
     ctx_path.write_text(
         json.dumps(
@@ -482,8 +482,7 @@ def test_run_close_advice_legacy_source_still_fetches_via_opend(tmp_path: Path, 
     (required_root / "parsed").mkdir(parents=True)
 
     def fake_fetch_symbol(symbol: str, **kwargs: object) -> dict[str, object]:
-        assert symbol == "AAPL"
-        return {"rows": []}
+        raise AssertionError(f"unexpected OpenD fetch for {symbol}")
 
     monkeypatch.setattr("scripts.fetch_market_data_opend.fetch_symbol", fake_fetch_symbol)
 
@@ -500,7 +499,7 @@ def test_run_close_advice_legacy_source_still_fetches_via_opend(tmp_path: Path, 
 
     csv_text = ((tmp_path / "reports") / "close_advice.csv").read_text(encoding="utf-8")
     assert "missing_quote" in csv_text
-    assert "opend_fetch_no_usable_quote" in csv_text
+    assert "opend_fetch_skipped_non_futu_source" in csv_text
 
 
 def test_run_close_advice_preserves_missing_flag_when_opend_fetch_errors(

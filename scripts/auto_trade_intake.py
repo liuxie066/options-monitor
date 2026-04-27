@@ -12,6 +12,7 @@ if str(repo_base) not in sys.path:
     sys.path.insert(0, str(repo_base))
 
 from scripts.config_loader import load_config
+from scripts.futu_trade_detail_lookup import enrich_trade_push_payload_with_account_id
 from scripts.trade_account_mapping import resolve_trade_intake_config
 from scripts.trade_event_normalizer import normalize_trade_deal
 from scripts.trade_intake_resolver import resolve_trade_deal
@@ -51,7 +52,10 @@ def _process_payload(
     state_path: Path,
     audit_path: Path,
     account_mapping: dict[str, str],
+    futu_account_ids: list[str],
     apply_changes: bool,
+    host: str,
+    port: int,
 ) -> dict:
     return process_trade_payload(
         payload,
@@ -64,6 +68,12 @@ def _process_payload(
         write_trade_intake_state_fn=write_trade_intake_state,
         upsert_deal_state_fn=upsert_deal_state,
         append_trade_intake_audit_fn=append_trade_intake_audit,
+        enrich_trade_payload_fn=lambda raw: enrich_trade_push_payload_with_account_id(
+            raw,
+            host=host,
+            port=port,
+            futu_account_ids=futu_account_ids,
+        ),
         normalize_trade_deal_fn=normalize_trade_deal,
         resolve_trade_deal_fn=resolve_trade_deal,
     )
@@ -130,7 +140,10 @@ def main(argv: list[str] | None = None) -> int:
             state_path=state_path,
             audit_path=audit_path,
             account_mapping=intake_cfg["account_mapping"],
+            futu_account_ids=intake_cfg["futu_account_ids"],
             apply_changes=apply_changes,
+            host=args.host,
+            port=args.port,
         )
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
@@ -149,7 +162,10 @@ def main(argv: list[str] | None = None) -> int:
             state_path=state_path,
             audit_path=audit_path,
             account_mapping=intake_cfg["account_mapping"],
+            futu_account_ids=intake_cfg["futu_account_ids"],
             apply_changes=apply_changes,
+            host=args.host,
+            port=args.port,
         ),
     )
     while True:
