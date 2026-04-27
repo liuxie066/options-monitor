@@ -163,7 +163,7 @@ def run_healthcheck_tool(
         )
         doctor_results[key] = doctor
 
-    # Legacy global check fallback for summary reporting
+    # Legacy global compatibility path for summary reporting
     futu_settings = infer_futu_portfolio_settings(cfg)
     futu_host = str(futu_settings.get("host") or "").strip()
     try:
@@ -213,7 +213,7 @@ def run_healthcheck_tool(
             }
         )
     elif futu_host and futu_port > 0:
-        # Fallback if no specific account needs futu but global settings exist
+        # Compatibility path if no specific account needs futu but global settings exist
         doctor = run_futu_doctor(
             host=futu_host,
             port=futu_port,
