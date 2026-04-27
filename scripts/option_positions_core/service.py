@@ -301,6 +301,31 @@ class SQLiteOptionPositionsRepository:
         fields = json.loads(str(row["fields_json"]) or "{}")
         return fields if isinstance(fields, dict) else {}
 
+    def update_position_lot_fields(self, record_id: str, fields: dict[str, Any]) -> None:
+        normalized_record_id = str(record_id or "").strip()
+        if not normalized_record_id:
+            raise ValueError("record_id is required")
+        if not isinstance(fields, dict):
+            raise TypeError("fields must be a dict")
+        ts = int(now_ms())
+        with self._connect() as conn:
+            updated = conn.execute(
+                """
+                UPDATE position_lots
+                SET fields_json = ?, source_event_id = ?, updated_at_ms = ?
+                WHERE record_id = ?
+                """,
+                (
+                    json.dumps(fields, ensure_ascii=False, sort_keys=True),
+                    (str(fields.get("source_event_id")) if fields.get("source_event_id") else None),
+                    ts,
+                    normalized_record_id,
+                ),
+            )
+            conn.commit()
+        if int(updated.rowcount or 0) <= 0:
+            raise ValueError(f"position lot not found: {normalized_record_id}")
+
     def list_records(self, *, page_size: int = 500) -> list[dict[str, Any]]:
         return self.list_position_lots()
 
@@ -313,6 +338,7 @@ OptionPositionsRepository = SQLiteOptionPositionsRepository
 
 def load_option_positions_repo(data_config: Path) -> SQLiteOptionPositionsRepository:
     repo = SQLiteOptionPositionsRepository(resolve_option_positions_sqlite_path(data_config))
+    repo.data_config_path = Path(data_config).resolve()  # type: ignore[attr-defined]
     if repo.count_position_lots() > 0:
         return repo
 
