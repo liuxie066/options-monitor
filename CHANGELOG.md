@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.1.0-beta.8 - 2026-04-27
+
+### Changed
+- Preserved bootstrapped option positions by migrating snapshot lots into synthetic trade events before projection rebuilds
+- Kept best-effort Feishu sync wiring available on manual option position writes without changing local-write success behavior
+
 ## 0.1.0-beta.7 - 2026-04-27
 
 ### Changed
