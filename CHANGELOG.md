@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.1.0-beta.6 - 2026-04-27
+
+### Changed
+- Clarified cash footer wording so base-CNY and total-CNY cash figures are labeled by actual data scope
+- Narrowed close-advice quote lookup to the current market run and surfaced quote-failure samples in notifications
+- Improved auto trade intake account resolution by enriching push payloads via `order_id`/`deal_id` lookups when account ids are absent
+- Cleaned legacy schedule fields from the US example config and preserved explicit non-Futu fetch sources
+
 ## 0.1.0-beta.5 - 2026-04-27
 
 ### Changed
