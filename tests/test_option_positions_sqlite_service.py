@@ -52,6 +52,10 @@ def test_load_option_positions_repo_bootstraps_position_lots_from_feishu(tmp_pat
     assert len(records) == 1
     assert records[0]["record_id"] == "rec_1"
     assert repo.count_position_lots() == 1
+    assert repo.count_trade_events() == 1
+    events = repo.list_trade_events()
+    assert events[0]["source_type"] == "bootstrap_snapshot"
+    assert events[0]["raw_payload"]["lot_record_id"] == "rec_1"
 
 
 def test_load_option_positions_repo_normalizes_market_only_feishu_bootstrap_rows(tmp_path: Path) -> None:
@@ -156,6 +160,114 @@ def test_load_option_positions_repo_migrates_legacy_rows_with_market_to_broker(t
     assert len(rows) == 1
     assert rows[0]["record_id"] == "legacy_1"
     assert rows[0]["fields"]["broker"] == "富途"
+    assert loaded.count_trade_events() == 1
+
+
+def test_load_option_positions_repo_migrates_existing_position_lots_into_trade_events(tmp_path: Path) -> None:
+    import scripts.option_positions_core.service as svc
+
+    db_path = tmp_path / "option_positions.sqlite3"
+    repo = svc.SQLiteOptionPositionsRepository(db_path)
+    repo.replace_position_lots(
+        [
+            {
+                "record_id": "rec_bootstrap_1",
+                "fields": {
+                    "account": "sy",
+                    "broker": "富途",
+                    "symbol": "TSLA",
+                    "option_type": "put",
+                    "side": "short",
+                    "contracts": 2,
+                    "contracts_open": 2,
+                    "contracts_closed": 0,
+                    "status": "open",
+                    "currency": "USD",
+                    "strike": 180.0,
+                    "expiration": 1781827200000,
+                    "opened_at": 1000,
+                    "last_action_at": 1000,
+                    "position_id": "TSLA_20260619_180P_short",
+                    "note": "exp=2026-06-19;premium_per_share=1.2",
+                    "premium": 1.2,
+                },
+            }
+        ]
+    )
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=db_path, with_feishu=False)
+
+    loaded = svc.load_option_positions_repo(data_config)
+
+    assert loaded.count_trade_events() == 1
+    rows = loaded.list_position_lots()
+    assert len(rows) == 1
+    assert rows[0]["record_id"] == "rec_bootstrap_1"
+    assert rows[0]["fields"]["symbol"] == "TSLA"
+
+
+def test_bootstrap_seed_lot_survives_later_trade_event_projection(tmp_path: Path) -> None:
+    import scripts.option_positions_core.service as svc
+    from scripts.trade_event_normalizer import NormalizedTradeDeal
+
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
+    old_list = svc._list_feishu_option_position_records
+    try:
+        svc._list_feishu_option_position_records = lambda _ref: [  # type: ignore[assignment]
+            {
+                "record_id": "rec_sy_seed",
+                "fields": {
+                    "account": "sy",
+                    "broker": "富途",
+                    "symbol": "AAPL",
+                    "option_type": "put",
+                    "side": "short",
+                    "status": "open",
+                    "contracts": 1,
+                    "contracts_open": 1,
+                    "contracts_closed": 0,
+                    "currency": "USD",
+                    "strike": 150.0,
+                    "expiration": 1781827200000,
+                    "opened_at": 1000,
+                    "last_action_at": 1000,
+                    "position_id": "AAPL_20260619_150P_short",
+                    "note": "exp=2026-06-19;premium_per_share=1.0",
+                    "premium": 1.0,
+                },
+            }
+        ]
+        repo = svc.load_option_positions_repo(data_config)
+    finally:
+        svc._list_feishu_option_position_records = old_list  # type: ignore[assignment]
+
+    assert repo.count_trade_events() == 1
+    open_deal = NormalizedTradeDeal(
+        broker="富途",
+        futu_account_id="REAL_1",
+        internal_account="lx",
+        deal_id="deal-open-2",
+        order_id="order-2",
+        symbol="0700.HK",
+        option_type="put",
+        side="sell",
+        position_effect="open",
+        contracts=1,
+        price=3.2,
+        strike=420.0,
+        multiplier=100,
+        multiplier_source="payload",
+        expiration_ymd="2026-04-29",
+        currency="HKD",
+        trade_time_ms=2000,
+        raw_payload={"deal_id": "deal-open-2"},
+    )
+
+    svc.persist_trade_event(repo, open_deal)
+
+    lots = repo.list_position_lots()
+    record_ids = {row["record_id"] for row in lots}
+    assert "rec_sy_seed" in record_ids
+    assert "lot_deal-open-2" in record_ids
 
 
 def test_load_option_positions_repo_supports_sqlite_only_mode(tmp_path: Path) -> None:
