@@ -400,3 +400,48 @@ def test_load_option_positions_repo_rejects_non_object_feishu_config(tmp_path: P
 
     with pytest.raises(SystemExit, match="data config feishu must be a JSON object"):
         svc.load_option_positions_repo(data_config)
+
+
+def test_update_position_lot_fields_updates_single_row_and_sync_metadata(tmp_path: Path) -> None:
+    import scripts.option_positions_core.service as svc
+    from scripts.option_positions_core.domain import OpenPositionCommand
+
+    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    svc.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="TSLA",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=100.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            premium_per_share=1.23,
+            opened_at_ms=1000,
+        ),
+    )
+
+    lot = repo.list_position_lots()[0]
+    patched_fields = dict(lot["fields"])
+    patched_fields["feishu_record_id"] = "rec_test_1"
+    patched_fields["feishu_sync_hash"] = "hash_1"
+    patched_fields["feishu_last_synced_at_ms"] = 2222
+    patched_fields["source_event_id"] = "manual-open-event-1"
+
+    repo.update_position_lot_fields(lot["record_id"], patched_fields)
+
+    updated = repo.get_position_lot_fields(lot["record_id"])
+    assert updated["feishu_record_id"] == "rec_test_1"
+    assert updated["feishu_sync_hash"] == "hash_1"
+    assert updated["feishu_last_synced_at_ms"] == 2222
+    with repo._connect() as conn:  # type: ignore[attr-defined]
+        row = conn.execute(
+            "SELECT source_event_id FROM position_lots WHERE record_id = ?",
+            (lot["record_id"],),
+        ).fetchone()
+    assert row is not None
+    assert row["source_event_id"] == "manual-open-event-1"
