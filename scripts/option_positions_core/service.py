@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
 import sys
 import uuid
@@ -116,6 +117,59 @@ def _normalize_bootstrap_records(records: list[dict[str, Any]]) -> list[dict[str
     return normalized
 
 
+def _stable_bootstrap_event_id(source_name: str, record_id: str, fields: dict[str, Any]) -> str:
+    seed = json.dumps({"record_id": record_id, "fields": fields}, ensure_ascii=False, sort_keys=True)
+    digest = hashlib.sha1(seed.encode("utf-8")).hexdigest()[:16]
+    return f"bootstrap:{source_name}:{record_id}:{digest}"
+
+
+def _bootstrap_trade_event(item: dict[str, Any], *, source_name: str) -> TradeEvent | None:
+    record_id = str(item.get("record_id") or "").strip()
+    fields = item.get("fields") or {}
+    if not record_id or not isinstance(fields, dict):
+        return None
+    broker = normalize_broker(fields.get("broker") or fields.get("market"))
+    if not broker:
+        return None
+    trade_time_ms = int(fields.get("opened_at") or fields.get("last_action_at") or now_ms())
+    raw_fields = dict(fields)
+    raw_fields["broker"] = broker
+    return TradeEvent(
+        event_id=_stable_bootstrap_event_id(source_name, record_id, raw_fields),
+        source_type="bootstrap_snapshot",
+        source_name=source_name,
+        broker=broker,
+        account=str(fields.get("account") or ""),
+        symbol=str(fields.get("symbol") or "").strip().upper(),
+        option_type=str(fields.get("option_type") or ""),
+        side="sell" if str(fields.get("side") or "").strip().lower() == "short" else str(fields.get("side") or "").strip().lower(),
+        position_effect="open",
+        contracts=max(0, int(safe_float(fields.get("contracts")) or safe_float(fields.get("contracts_open")) or 0)),
+        price=float(safe_float(fields.get("premium")) or 0.0),
+        strike=safe_float(fields.get("strike")),
+        multiplier=(int(float(raw_multiplier)) if (raw_multiplier := safe_float(fields.get("multiplier"))) is not None else None),
+        expiration_ymd=(exp_dt.date().isoformat() if (exp_dt := exp_ms_to_datetime(fields.get("expiration"))) is not None else None),
+        currency=str(fields.get("currency") or "").strip().upper(),
+        trade_time_ms=trade_time_ms,
+        order_id=None,
+        multiplier_source="bootstrap_snapshot" if raw_multiplier is not None else None,
+        raw_payload={
+            "lot_record_id": record_id,
+            "fields": raw_fields,
+            "source": source_name,
+        },
+    )
+
+
+def _bootstrap_trade_events(records: list[dict[str, Any]], *, source_name: str) -> list[TradeEvent]:
+    events: list[TradeEvent] = []
+    for item in records:
+        event = _bootstrap_trade_event(item, source_name=source_name)
+        if event is not None:
+            events.append(event)
+    return events
+
+
 class SQLiteOptionPositionsRepository:
     def __init__(self, db_path: Path):
         self.db_path = Path(db_path).resolve()
@@ -166,6 +220,11 @@ class SQLiteOptionPositionsRepository:
     def count_position_lots(self) -> int:
         with self._connect() as conn:
             row = conn.execute("SELECT COUNT(*) AS cnt FROM position_lots").fetchone()
+        return int((row["cnt"] if row is not None else 0) or 0)
+
+    def count_trade_events(self) -> int:
+        with self._connect() as conn:
+            row = conn.execute("SELECT COUNT(*) AS cnt FROM trade_events").fetchone()
         return int((row["cnt"] if row is not None else 0) or 0)
 
     def count_legacy_records(self) -> int:
@@ -339,22 +398,44 @@ OptionPositionsRepository = SQLiteOptionPositionsRepository
 def load_option_positions_repo(data_config: Path) -> SQLiteOptionPositionsRepository:
     repo = SQLiteOptionPositionsRepository(resolve_option_positions_sqlite_path(data_config))
     repo.data_config_path = Path(data_config).resolve()  # type: ignore[attr-defined]
-    if repo.count_position_lots() > 0:
+    if repo.count_trade_events() > 0:
+        if repo.count_position_lots() == 0:
+            repo.replace_position_lots(project_position_lot_records(repo.list_trade_events()))
         return repo
+
+    if repo.count_position_lots() > 0:
+        try:
+            migrated = _bootstrap_trade_events(repo.list_position_lots(), source_name="sqlite_position_lots")
+            for event in migrated:
+                repo.upsert_trade_event(event)
+            repo.replace_position_lots(project_position_lot_records(repo.list_trade_events()))
+            return repo
+        except Exception as exc:
+            print(
+                f"[WARN] option_positions local snapshot migration skipped for {repo.db_path}: {exc}",
+                file=sys.stderr,
+            )
+            return repo
 
     feishu_ref = _try_load_table_ref(data_config)
     if feishu_ref is not None:
         try:
-            repo.replace_position_lots(_normalize_bootstrap_records(_list_feishu_option_position_records(feishu_ref)))
+            bootstrap_records = _normalize_bootstrap_records(_list_feishu_option_position_records(feishu_ref))
+            for event in _bootstrap_trade_events(bootstrap_records, source_name="feishu_bootstrap"):
+                repo.upsert_trade_event(event)
+            repo.replace_position_lots(project_position_lot_records(repo.list_trade_events()))
         except Exception as exc:
             print(
                 f"[WARN] option_positions bootstrap skipped for {repo.db_path}: {exc}",
                 file=sys.stderr,
             )
 
-    if repo.count_position_lots() == 0 and repo.count_legacy_records() > 0:
+    if repo.count_trade_events() == 0 and repo.count_legacy_records() > 0:
         try:
-            repo.replace_position_lots(_normalize_bootstrap_records(repo.list_legacy_records()))
+            legacy_records = _normalize_bootstrap_records(repo.list_legacy_records())
+            for event in _bootstrap_trade_events(legacy_records, source_name="legacy_option_positions"):
+                repo.upsert_trade_event(event)
+            repo.replace_position_lots(project_position_lot_records(repo.list_trade_events()))
         except Exception as exc:
             print(
                 f"[WARN] option_positions legacy migration skipped for {repo.db_path}: {exc}",

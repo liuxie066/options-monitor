@@ -7,6 +7,7 @@ from scripts.option_positions_core.domain import (
     OpenPositionCommand,
     build_buy_to_close_patch,
     build_open_fields,
+    effective_contracts_open,
     normalize_account,
     normalize_broker,
     normalize_option_type,
@@ -71,6 +72,16 @@ def _same_strike(left: float | None, right: float | None) -> bool:
 
 
 def _open_lot_record(event: TradeEvent) -> dict[str, Any]:
+    if str(event.source_type).strip().lower() == "bootstrap_snapshot":
+        payload = dict(event.raw_payload or {})
+        record_id = str(payload.get("lot_record_id") or event.event_id or "").strip()
+        snapshot_fields = payload.get("fields") or {}
+        if record_id and isinstance(snapshot_fields, dict):
+            fields = dict(snapshot_fields)
+            fields["source_event_id"] = event.event_id
+            fields["event_source_type"] = event.source_type
+            fields["event_source_name"] = event.source_name
+            return {"record_id": record_id, "fields": fields}
     cmd = OpenPositionCommand(
         broker=event.broker,
         account=event.account,
@@ -99,6 +110,8 @@ def _open_lot_record(event: TradeEvent) -> dict[str, Any]:
 
 
 def _matches_close(fields: dict[str, Any], event: TradeEvent) -> bool:
+    if effective_contracts_open(fields) <= 0:
+        return False
     return (
         normalize_broker(fields.get("broker")) == event.broker
         and normalize_account(fields.get("account")) == event.account
@@ -124,6 +137,11 @@ def project_position_lot_records(events: list[dict[str, Any]] | list[TradeEvent]
     normalized_events.sort(key=lambda row: (int(row.trade_time_ms or 0), row.event_id))
     lots: list[dict[str, Any]] = []
     for event in normalized_events:
+        if str(event.source_type).strip().lower() == "bootstrap_snapshot":
+            seeded = _open_lot_record(event)
+            if seeded.get("record_id") and isinstance(seeded.get("fields"), dict):
+                lots.append(seeded)
+            continue
         if not event.event_id or event.contracts <= 0:
             continue
         if event.position_effect == "open" and event.side == "sell":
