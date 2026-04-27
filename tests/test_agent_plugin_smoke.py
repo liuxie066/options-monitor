@@ -74,7 +74,7 @@ def _public_cfg_with_futu(data_config_ref: str) -> dict:
     return cfg
 
 
-def _public_cfg_with_futu_holdings_fallback(data_config_ref: str) -> dict:
+def _public_cfg_with_futu_auto_source(data_config_ref: str) -> dict:
     cfg = _public_cfg_with_futu(data_config_ref)
     cfg["account_settings"]["user1"]["holdings_account"] = "lx"
     cfg["portfolio"]["source"] = "auto"
@@ -126,16 +126,13 @@ def test_healthcheck_works_with_explicit_config_path(monkeypatch, tmp_path: Path
     assert out["data"]["config"]["accounts"] == ["user1"]
     assert out["data"]["account_paths"]["user1"]["primary"]["source"] == "futu"
     assert out["data"]["account_paths"]["user1"]["primary"]["ok"] is True
-    assert out["data"]["account_paths"]["user1"]["fallback"]["enabled"] is False
+    assert "fallback" not in out["data"]["account_paths"]["user1"]
     assert out["meta"]["config_path"] == ".../config.us.json"
     assert any(item["name"] == "opend_doctor" and item["status"] == "ok" for item in out["data"]["checks"])
     assert any(item["name"] == "account_mapping" and item["status"] == "ok" for item in out["data"]["checks"])
     primary = next(item for item in out["data"]["checks"] if item["name"] == "account_primary_paths")
-    fallback = next(item for item in out["data"]["checks"] if item["name"] == "account_fallback_paths")
     assert primary["status"] == "ok"
     assert primary["value"]["user1"]["source"] == "futu"
-    assert fallback["status"] == "ok"
-    assert fallback["value"]["user1"]["enabled"] is False
 
 
 def test_healthcheck_rejects_placeholder_futu_mapping(monkeypatch, tmp_path: Path) -> None:
@@ -173,7 +170,7 @@ def test_healthcheck_rejects_placeholder_futu_mapping(monkeypatch, tmp_path: Pat
     assert "placeholder futu acc_id" in check["message"]
 
 
-def test_healthcheck_warns_when_futu_holdings_fallback_is_configured_but_feishu_missing(monkeypatch, tmp_path: Path) -> None:
+def test_healthcheck_accepts_futu_auto_source_without_fallback_checks(monkeypatch, tmp_path: Path) -> None:
     from scripts.agent_plugin.main import run_tool
     import scripts.agent_plugin.tools as tools
 
@@ -185,7 +182,7 @@ def test_healthcheck_warns_when_futu_holdings_fallback_is_configured_but_feishu_
         encoding="utf-8",
     )
     cfg_path.write_text(
-        json.dumps(_public_cfg_with_futu_holdings_fallback("secrets/portfolio.sqlite.json"), ensure_ascii=False, indent=2),
+        json.dumps(_public_cfg_with_futu_auto_source("secrets/portfolio.sqlite.json"), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 
@@ -204,15 +201,11 @@ def test_healthcheck_warns_when_futu_holdings_fallback_is_configured_but_feishu_
     assert out["ok"] is True
     assert out["data"]["summary"]["ok"] is True
     assert out["data"]["account_paths"]["user1"]["primary"]["ok"] is True
-    assert out["data"]["account_paths"]["user1"]["fallback"]["enabled"] is True
-    assert out["data"]["account_paths"]["user1"]["fallback"]["ok"] is False
+    assert "fallback" not in out["data"]["account_paths"]["user1"]
     primary = next(item for item in out["data"]["checks"] if item["name"] == "account_primary_paths")
-    fallback = next(item for item in out["data"]["checks"] if item["name"] == "account_fallback_paths")
     assert primary["status"] == "ok"
-    assert fallback["status"] == "warn"
-    assert fallback["value"]["user1"]["holdings_account"] == "lx"
-    assert fallback["value"]["user1"]["ready"] is False
-    assert any("holdings fallback configured" in item for item in out["warnings"])
+    assert all(item["name"] != "account_fallback_paths" for item in out["data"]["checks"])
+    assert not any("holdings fallback configured" in item for item in out["warnings"])
 
 
 def test_healthcheck_accepts_external_holdings_account_without_futu_mapping(monkeypatch, tmp_path: Path) -> None:
@@ -255,17 +248,15 @@ def test_healthcheck_accepts_external_holdings_account_without_futu_mapping(monk
     out = run_tool("healthcheck", {"config_path": str(cfg_path)})
 
     assert out["ok"] is True
-    assert out["data"]["account_paths"]["ext1"]["primary"]["source"] == "holdings"
+    assert out["data"]["account_paths"]["ext1"]["primary"]["source"] == "external_holdings"
     assert out["data"]["account_paths"]["ext1"]["primary"]["ok"] is True
-    assert out["data"]["account_paths"]["ext1"]["fallback"]["enabled"] is True
-    assert out["data"]["account_paths"]["ext1"]["fallback"]["ok"] is True
+    assert "fallback" not in out["data"]["account_paths"]["ext1"]
     primary = next(item for item in out["data"]["checks"] if item["name"] == "account_primary_paths")
-    fallback = next(item for item in out["data"]["checks"] if item["name"] == "account_fallback_paths")
     assert primary["status"] == "ok"
     assert primary["value"]["ext1"]["type"] == "external_holdings"
     assert primary["value"]["ext1"]["holdings_account"] == "Feishu EXT"
     assert primary["value"]["ext1"]["ready"] is True
-    assert fallback["value"]["ext1"]["enabled"] is True
+    assert all(item["name"] != "account_fallback_paths" for item in out["data"]["checks"])
 
 
 def test_get_portfolio_context_allows_futu_source_without_explicit_data_config(monkeypatch, tmp_path: Path) -> None:

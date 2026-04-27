@@ -13,7 +13,6 @@ from fastapi.staticfiles import StaticFiles
 from domain.domain.close_advice import CloseAdviceConfig
 from domain.storage.repositories import state_repo
 from scripts.account_config import (
-    ACCOUNT_TYPE_EXTERNAL_HOLDINGS,
     accounts_from_config,
     list_account_config_views,
 )
@@ -198,7 +197,6 @@ def _account_rows(config_key: str) -> list[dict[str, Any]]:
         config_files=CONFIG_FILES,
         load_data_config_for_runtime=lambda cfg, *, config_path: _load_data_config_for_runtime_impl(cfg, config_path=config_path),
         list_account_config_views=list_account_config_views,
-        account_type_external_holdings=ACCOUNT_TYPE_EXTERNAL_HOLDINGS,
     )
 
 
