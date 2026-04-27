@@ -298,6 +298,106 @@ def test_match_remote_record_does_not_cross_match_position_id_into_other_account
     assert reason == "no_remote_match"
 
 
+def test_match_remote_record_reports_conflict_for_duplicate_source_event_id() -> None:
+    import scripts.sync_option_positions_to_feishu as sync_mod
+
+    record_id, reason = sync_mod.match_remote_record(
+        "lot_manual-open-1",
+        {
+            "account": "lx",
+            "broker": "富途",
+            "symbol": "TSLA",
+            "option_type": "put",
+            "side": "short",
+            "source_event_id": "manual-open-1",
+        },
+        [
+            {"record_id": "rec_dup_1", "fields": {"source_event_id": "manual-open-1"}},
+            {"record_id": "rec_dup_2", "fields": {"source_event_id": "manual-open-1"}},
+        ],
+    )
+
+    assert record_id is None
+    assert reason.startswith("conflict: duplicate remote rows by source_event_id")
+
+
+def test_sync_apply_create_persists_metadata_without_touching_business_fields(monkeypatch, tmp_path: Path) -> None:
+    import scripts.option_positions_core.service as svc
+    import scripts.sync_option_positions_to_feishu as sync_mod
+    from scripts.option_positions_core.domain import OpenPositionCommand
+
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
+    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    svc.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="TSLA",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=100.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            premium_per_share=1.23,
+            opened_at_ms=1000,
+        ),
+    )
+    lot = repo.list_position_lots()[0]
+    original_fields = dict(lot["fields"])
+
+    monkeypatch.setattr(sync_mod, "get_tenant_access_token", lambda *_args, **_kwargs: "token")
+    monkeypatch.setattr(
+        sync_mod,
+        "bitable_fields",
+        lambda *_args, **_kwargs: [
+            {"field_name": "position_id"},
+            {"field_name": "source_event_id"},
+            {"field_name": "broker"},
+            {"field_name": "account"},
+            {"field_name": "symbol"},
+            {"field_name": "option_type"},
+            {"field_name": "side"},
+            {"field_name": "contracts"},
+            {"field_name": "contracts_open"},
+            {"field_name": "contracts_closed"},
+            {"field_name": "currency"},
+            {"field_name": "strike"},
+            {"field_name": "expiration"},
+            {"field_name": "premium"},
+            {"field_name": "status"},
+            {"field_name": "opened_at"},
+            {"field_name": "last_action_at"},
+            {"field_name": "note"},
+            {"field_name": "local_record_id"},
+            {"field_name": "last_synced_at"},
+        ],
+    )
+    monkeypatch.setattr(sync_mod, "bitable_list_records", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        sync_mod,
+        "bitable_create_record",
+        lambda *_args, **_kwargs: {"record": {"record_id": "rec_created_1"}},
+    )
+    monkeypatch.setattr(sync_mod, "bitable_update_record", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should not update")))
+
+    rows = sync_mod.sync_option_positions(repo=repo, data_config=data_config, apply_mode=True)
+
+    refreshed_fields = repo.get_position_lot_fields(lot["record_id"])
+    assert rows[0]["action"] == "create"
+    assert refreshed_fields["broker"] == original_fields["broker"]
+    assert refreshed_fields["account"] == original_fields["account"]
+    assert refreshed_fields["position_id"] == original_fields["position_id"]
+    assert refreshed_fields["source_event_id"] == original_fields["source_event_id"]
+    assert refreshed_fields["contracts_open"] == original_fields["contracts_open"]
+    assert refreshed_fields["status"] == original_fields["status"]
+    assert refreshed_fields["feishu_record_id"] == "rec_created_1"
+    assert refreshed_fields["feishu_sync_hash"]
+    assert int(refreshed_fields["feishu_last_synced_at_ms"]) > 0
+
+
 def test_sync_apply_update_sends_numeric_payload_types(monkeypatch, tmp_path: Path) -> None:
     import scripts.option_positions_core.service as svc
     import scripts.sync_option_positions_to_feishu as sync_mod

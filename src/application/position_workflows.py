@@ -22,6 +22,9 @@ def _auto_sync_record_if_possible(repo: Any, *, record_id: str) -> dict[str, Any
 
 
 def _manual_open_record_id(result: dict[str, Any]) -> str:
+    record_id = str(result.get("record_id") or "").strip()
+    if record_id:
+        return record_id
     event_id = str(result.get("event_id") or "").strip()
     if not event_id:
         return ""
