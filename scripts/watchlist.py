@@ -17,6 +17,11 @@ import json
 import sys
 from pathlib import Path
 
+from scripts.config_loader import resolve_watchlist_config, set_watchlist_config
+from scripts.validate_config import validate_config
+from src.application.runtime_config_paths import write_json_atomic
+from src.application.watchlist_mutations import ensure_symbols_list, find_symbol_entry, normalize_symbol, set_path
+
 
 def load_json(path: Path) -> dict:
     if not path.exists() or path.stat().st_size <= 0:
@@ -24,31 +29,10 @@ def load_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def save_json(path: Path, data: dict):
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
-
-def norm_symbol(s: str) -> str:
-    return s.strip().upper()
-
-
-def find_symbol_entry(cfg: dict, symbol: str):
-    sym = norm_symbol(symbol)
-    for i, e in enumerate(cfg.get("symbols") or []):
-        if norm_symbol(str(e.get("symbol") or "")) == sym:
-            return i, e
-    return None, None
-
-
-def set_path(obj: dict, path: str, value):
-    # dot path e.g. sell_put.enabled or fetch.limit_expirations
-    cur = obj
-    parts = path.split(".")
-    for p in parts[:-1]:
-        if p not in cur or not isinstance(cur[p], dict):
-            cur[p] = {}
-        cur = cur[p]
-    cur[parts[-1]] = value
+def _save_validated_json(path: Path, data: dict) -> None:
+    canonical = set_watchlist_config(data, resolve_watchlist_config(data))
+    validate_config(dict(canonical))
+    write_json_atomic(path, canonical)
 
 
 def parse_value(s: str):
@@ -108,8 +92,8 @@ def cmd_list(cfg: dict, fmt: str):
 
 
 def cmd_add(cfg: dict, symbol: str, use: str, limit_exp: int, put: bool, call: bool, accounts: list[str] | None = None):
-    sym = norm_symbol(symbol)
-    _, existing = find_symbol_entry(cfg, sym)
+    sym = normalize_symbol(symbol)
+    _, existing = find_symbol_entry(cfg, sym, resolve_watchlist_config=resolve_watchlist_config)
     if existing:
         raise SystemExit(f"symbol already exists: {sym}")
 
@@ -122,23 +106,22 @@ def cmd_add(cfg: dict, symbol: str, use: str, limit_exp: int, put: bool, call: b
     }
 
     if accounts is not None:
-        entry['accounts'] = [norm_symbol(a) for a in accounts if str(a).strip()]
+        entry['accounts'] = [normalize_symbol(a) for a in accounts if str(a).strip()]
 
-    cfg.setdefault("symbols", [])
-    cfg["symbols"].append(entry)
+    ensure_symbols_list(cfg, error_factory=SystemExit).append(entry)
 
 
 def cmd_rm(cfg: dict, symbol: str):
-    sym = norm_symbol(symbol)
-    idx, _ = find_symbol_entry(cfg, sym)
+    sym = normalize_symbol(symbol)
+    idx, _ = find_symbol_entry(cfg, sym, resolve_watchlist_config=resolve_watchlist_config)
     if idx is None:
         raise SystemExit(f"symbol not found: {sym}")
-    cfg["symbols"].pop(idx)
+    ensure_symbols_list(cfg, error_factory=SystemExit).pop(idx)
 
 
 def cmd_edit(cfg: dict, symbol: str, sets: list[str]):
-    sym = norm_symbol(symbol)
-    idx, entry = find_symbol_entry(cfg, sym)
+    sym = normalize_symbol(symbol)
+    idx, entry = find_symbol_entry(cfg, sym, resolve_watchlist_config=resolve_watchlist_config)
     if idx is None or entry is None:
         raise SystemExit(f"symbol not found: {sym}")
 
@@ -148,7 +131,7 @@ def cmd_edit(cfg: dict, symbol: str, sets: list[str]):
         k, v = s.split("=", 1)
         set_path(entry, k.strip(), parse_value(v))
 
-    cfg["symbols"][idx] = entry
+    ensure_symbols_list(cfg, error_factory=SystemExit)[idx] = entry
 
 
 def main():
@@ -192,22 +175,22 @@ def main():
         if not (args.put or args.call):
             raise SystemExit("add requires at least one of: --put, --call")
         cmd_add(cfg, args.symbol, args.use, args.limit_exp, args.put, args.call, accounts=args.accounts)
-        save_json(cfg_path, cfg)
-        print(f"[DONE] added {norm_symbol(args.symbol)} -> {cfg_path}")
+        _save_validated_json(cfg_path, cfg)
+        print(f"[DONE] added {normalize_symbol(args.symbol)} -> {cfg_path}")
         return
 
     if args.cmd == "rm":
         cmd_rm(cfg, args.symbol)
-        save_json(cfg_path, cfg)
-        print(f"[DONE] removed {norm_symbol(args.symbol)} -> {cfg_path}")
+        _save_validated_json(cfg_path, cfg)
+        print(f"[DONE] removed {normalize_symbol(args.symbol)} -> {cfg_path}")
         return
 
     if args.cmd == "edit":
         if not args.set:
             raise SystemExit("edit requires at least one --set path=value")
         cmd_edit(cfg, args.symbol, args.set)
-        save_json(cfg_path, cfg)
-        print(f"[DONE] edited {norm_symbol(args.symbol)} -> {cfg_path}")
+        _save_validated_json(cfg_path, cfg)
+        print(f"[DONE] edited {normalize_symbol(args.symbol)} -> {cfg_path}")
         return
 
     raise SystemExit("unknown cmd")
