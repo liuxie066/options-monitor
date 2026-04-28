@@ -234,6 +234,10 @@ def normalize_trade_deal(
         "name",
         "underlying",
     )
+    if symbol is None:
+        root_symbol = _normalize_symbol_candidate(option_code_info.get("option_code_root"))
+        if root_symbol:
+            symbol = root_symbol
 
     option_type_raw = _pick(src, "option_type", "put_call", "call_or_put")
     option_type = None
