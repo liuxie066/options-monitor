@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.2.0-beta.8 - 2026-04-28
+
+### Changed
+- Unified expiration normalization for OpenD explicit-expiration fetch paths so held-option requests consistently convert `YYYY-MM-DD`, Unix seconds, and Unix milliseconds into the `YYYY-MM-DD` format required by `get_option_chain`
+- Hardened close-advice preparation and required-data fetch entrypoints against timestamp expirations, preventing `wrong time or time format` regressions when open positions carry numeric expiration values
+
 ## 0.2.0-beta.7 - 2026-04-28
 
 ### Changed
