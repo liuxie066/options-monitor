@@ -19,6 +19,7 @@ from scripts.config_loader import resolve_templates_config, resolve_watchlist_co
 from scripts.sell_call_config import resolve_min_annualized_net_premium_return
 from scripts.sell_put_config import resolve_min_annualized_net_return
 from domain.domain import normalize_processor_row, normalize_processor_rows
+from src.application.watchlist_mutations import normalize_symbol_read
 
 LIQUIDITY_COMMON_FIELDS = (
     'min_net_income',
@@ -43,7 +44,7 @@ def _extract_event_risk_cfg(side_cfg: dict) -> dict:
 def _parse_symbols_whitelist(symbols_arg: str | None) -> set[str] | None:
     if not symbols_arg:
         return None
-    items = {s.strip() for s in str(symbols_arg).split(',') if s.strip()}
+    items = {normalize_symbol_read(s) for s in str(symbols_arg).split(',') if str(s).strip()}
     return items or None
 
 
@@ -158,7 +159,7 @@ def run_watchlist_pipeline(
     for item0 in _iter_watchlist(cfg):
         try:
             if sym_whitelist is not None:
-                s0 = str(item0.get('symbol') or '').strip()
+                s0 = normalize_symbol_read(item0.get('symbol'))
                 if s0 and s0 not in sym_whitelist:
                     continue
 

@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
+from src.application.watchlist_mutations import normalize_symbol_read
+
 
 @dataclass(frozen=True)
 class SymbolRow:
@@ -40,7 +42,7 @@ class AccountRow:
 
 
 def normalize_symbol_for_name_lookup(value: Any) -> str:
-    return str(value or "").strip().upper()
+    return normalize_symbol_read(value)
 
 
 def symbol_name_from_aliases(symbol: str, cfg: dict | None) -> str | None:
