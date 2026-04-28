@@ -69,7 +69,7 @@ def test_enrich_trade_push_payload_falls_back_to_lookup_without_acc_id(monkeypat
         def get_order_list(self, **kwargs):
             if "acc_id" in kwargs:
                 return []
-            return [{"order_id": "order-3", "acc_id": "777"}]
+            return [{"order_id": "order-3", "acc_id": "777", "stock_name": "泡泡玛特", "code": "HK.POP260528P150000"}]
 
         def get_deal_list(self, **kwargs):
             return []
@@ -86,6 +86,8 @@ def test_enrich_trade_push_payload_falls_back_to_lookup_without_acc_id(monkeypat
     )
 
     assert out.payload["futu_account_id"] == "777"
+    assert out.payload["stock_name"] == "泡泡玛特"
+    assert out.payload["code"] == "HK.POP260528P150000"
     assert out.diagnostics["matched_via"] == "order_lookup_without_acc_id"
 
 
