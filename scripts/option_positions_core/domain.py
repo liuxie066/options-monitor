@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from scripts.feishu_bitable import merge_note, parse_note_kv, safe_float
+from scripts.opend_utils import resolve_underlier_alias
 
 
 BUY_TO_CLOSE = "buy_to_close"
@@ -12,7 +13,10 @@ EXPIRE_AUTO_CLOSE = "expire_auto_close"
 
 
 def norm_symbol(value: str) -> str:
-    return str(value or "").strip().upper()
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    return resolve_underlier_alias(raw)
 
 
 def _compact_choice(value: Any) -> str:

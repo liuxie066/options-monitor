@@ -5,6 +5,7 @@ from typing import Any, Mapping
 
 from domain.domain.fetch_source import is_futu_fetch_source, normalize_fetch_source
 from scripts.futu_gateway import build_ready_futu_gateway
+from scripts.opend_utils import resolve_underlier_alias
 
 
 def _rows(data: Any) -> list[dict[str, Any]]:
@@ -88,27 +89,27 @@ def _normalize_symbol(value: Any) -> str | None:
         return None
 
     if raw.startswith("US."):
-        raw = raw[3:]
+        return resolve_underlier_alias(raw[3:]) or None
     elif raw.startswith("HK."):
         digits = "".join(ch for ch in raw[3:] if ch.isdigit())
         if digits:
-            return f"{str(int(digits)).zfill(4)}.HK"
+            return resolve_underlier_alias(f"{str(int(digits)).zfill(4)}.HK") or None
         return None
 
     if raw.endswith(".US"):
-        raw = raw[:-3]
+        return resolve_underlier_alias(raw[:-3]) or None
 
     if raw.endswith(".HK"):
         digits = "".join(ch for ch in raw[:-3] if ch.isdigit())
         if digits:
-            return f"{str(int(digits)).zfill(4)}.HK"
+            return resolve_underlier_alias(f"{str(int(digits)).zfill(4)}.HK") or None
         return None
 
     if raw.isdigit():
-        return f"{str(int(raw)).zfill(4)}.HK"
+        return resolve_underlier_alias(f"{str(int(raw)).zfill(4)}.HK") or None
 
     if raw and raw[0].isalpha() and len(raw) <= 10 and all(ch.isalnum() or ch in ".-" for ch in raw):
-        return raw
+        return resolve_underlier_alias(raw) or None
 
     return None
 

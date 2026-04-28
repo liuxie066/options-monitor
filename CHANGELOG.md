@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.2.0-beta.4 - 2026-04-28
+
+### Changed
+- Unified shared symbol canonicalization across close advice, watchlist writes, option-position writes, multiplier refresh, Futu portfolio context, trade detail enrichment, and trade event normalization so aliases like `POP` consistently resolve to canonical symbols such as `9992.HK`
+- Added system-level symbol normalization contract coverage plus repository guardrails documenting that user-entered symbols, broker raw payloads, and OpenD/Futu underliers must canonicalize before entering business logic
+
 ## 0.2.0-beta.3 - 2026-04-28
 
 ### Changed

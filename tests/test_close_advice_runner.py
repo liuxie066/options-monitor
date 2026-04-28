@@ -305,7 +305,7 @@ def test_run_close_advice_reports_quote_issue_summary(tmp_path: Path) -> None:
     assert result["quote_issue_rows"] == 1
     assert result["flag_counts"]["missing_quote"] == 1
     assert result["tier_counts"]["none"] == 1
-    assert result["quote_issue_samples"] == ["AAPL put 2026-05-15 100.00P: OpenD 拉取失败"]
+    assert result["quote_issue_samples"] == ["AAPL put 2026-05-15 100.00P: OpenD 拉取失败 | opend=US.AAPL"]
 
 
 def test_run_close_advice_fee_can_block_gross_strong_signal(tmp_path: Path) -> None:
@@ -799,6 +799,78 @@ def test_run_close_advice_counts_spread_block_as_quote_issue(tmp_path: Path) -> 
     assert result["flag_counts"]["spread_too_wide"] == 1
 
 
+def test_run_close_advice_fetches_quote_for_alias_symbol_via_opend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    ctx_path = tmp_path / "option_positions_context.json"
+    ctx_path.write_text(
+        json.dumps(
+            {
+                "open_positions_min": [
+                    {
+                        "account": "lx",
+                        "symbol": "POP",
+                        "option_type": "put",
+                        "side": "short",
+                        "contracts_open": 1,
+                        "currency": "HKD",
+                        "strike": 135,
+                        "multiplier": 100,
+                        "premium": 1.0,
+                        "expiration": "2026-04-29",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    required_root = tmp_path / "required_data"
+    parsed = required_root / "parsed"
+    parsed.mkdir(parents=True)
+    out_dir = tmp_path / "reports"
+
+    calls: list[dict[str, object]] = []
+
+    def fake_fetch_symbol(symbol: str, **kwargs: object) -> dict[str, object]:
+        calls.append({"symbol": symbol, **kwargs})
+        assert symbol == "9992.HK"
+        return {
+            "rows": [
+                {
+                    "symbol": "9992.HK",
+                    "option_type": "put",
+                    "expiration": "2026-04-29",
+                    "strike": 135,
+                    "last_price": 0.04,
+                    "bid": 0.0,
+                    "ask": 0.04,
+                    "dte": 1,
+                    "multiplier": 100,
+                    "spot": 140,
+                    "currency": "HKD",
+                }
+            ]
+        }
+
+    monkeypatch.setattr("scripts.fetch_market_data_opend.fetch_symbol", fake_fetch_symbol)
+
+    result = run_close_advice(
+        config={
+            "close_advice": {"enabled": True},
+            "symbols": [{"symbol": "POP", "fetch": {"source": "futu"}}],
+        },
+        context_path=ctx_path,
+        required_data_root=required_root,
+        output_dir=out_dir,
+        base_dir=Path.cwd(),
+    )
+
+    csv_text = (out_dir / "close_advice.csv").read_text(encoding="utf-8")
+    assert calls and calls[0]["symbol"] == "9992.HK"
+    assert "missing_quote" not in csv_text
+    assert "missing_mid" not in csv_text
+    assert "mid_fallback_last_price" in csv_text
+    assert result["flag_counts"]["mid_fallback_last_price"] == 1
+
+
 def test_run_close_advice_required_data_mode_does_not_fetch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     ctx_path = tmp_path / "option_positions_context.json"
     ctx_path.write_text(
@@ -987,7 +1059,7 @@ def test_run_close_advice_surfaces_rate_limit_sample_when_opend_is_limited(
 
     csv_text = ((tmp_path / "reports") / "close_advice.csv").read_text(encoding="utf-8")
     assert "opend_fetch_error_rate_limit" in csv_text
-    assert result["quote_issue_samples"] == ["0700.HK put 2026-04-29 480.00P: OpenD 限频"]
+    assert result["quote_issue_samples"] == ["0700.HK put 2026-04-29 480.00P: OpenD 限频 | opend=HK.00700"]
 
 
 def test_close_advice_text_can_drive_account_message_without_opening_candidates() -> None:

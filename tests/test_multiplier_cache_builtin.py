@@ -15,6 +15,7 @@ def test_normalize_hk_symbol_to_four_digit_suffix() -> None:
     assert normalize_symbol("00700.HK") == "0700.HK"
     assert normalize_symbol("700.HK") == "0700.HK"
     assert normalize_symbol("NVDA") == "NVDA"
+    assert normalize_symbol("POP") == "9992.HK"
 
 
 def test_resolve_multiplier_returns_none_when_cache_missing_and_refresh_disabled(tmp_path: Path) -> None:

@@ -19,6 +19,7 @@ from domain.domain.close_advice import (
 )
 from scripts.fee_calc import calc_futu_option_fee
 from scripts.io_utils import atomic_write_text, read_json, safe_read_csv
+from scripts.opend_utils import normalize_underlier, resolve_underlier_alias
 
 
 OUTPUT_COLUMNS = [
@@ -54,8 +55,12 @@ QUOTE_ISSUE_FLAGS = {
 }
 
 
-def _norm_symbol(value: Any) -> str:
-    return str(value or "").strip().upper()
+def _norm_symbol(value: Any, *, base_dir: Path | None = None) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    resolved = resolve_underlier_alias(raw, base_dir=base_dir)
+    return str(resolved or raw).strip().upper()
 
 
 def _norm_option_type(value: Any) -> str:
@@ -106,16 +111,21 @@ def _strike_key(value: Any) -> str:
     return f"{v:.6f}"
 
 
-def _quote_key(symbol: Any, option_type: Any, expiration: Any, strike: Any) -> tuple[str, str, str, str]:
+def _quote_key(symbol: Any, option_type: Any, expiration: Any, strike: Any, *, base_dir: Path | None = None) -> tuple[str, str, str, str]:
     return (
-        _norm_symbol(symbol),
+        _norm_symbol(symbol, base_dir=base_dir),
         _norm_option_type(option_type),
         normalize_expiration(expiration) or "",
         _strike_key(strike),
     )
 
 
-def load_required_data_quotes(required_data_root: Path, symbols: set[str] | None = None) -> dict[tuple[str, str, str, str], dict[str, Any]]:
+def load_required_data_quotes(
+    required_data_root: Path,
+    symbols: set[str] | None = None,
+    *,
+    base_dir: Path | None = None,
+) -> dict[tuple[str, str, str, str], dict[str, Any]]:
     root = Path(required_data_root)
     parsed = root / "parsed"
     quotes: dict[tuple[str, str, str, str], dict[str, Any]] = {}
@@ -136,6 +146,7 @@ def load_required_data_quotes(required_data_root: Path, symbols: set[str] | None
                 row.get("option_type"),
                 row.get("expiration"),
                 row.get("strike"),
+                base_dir=base_dir,
             )
             if not all(key):
                 continue
@@ -189,38 +200,55 @@ def _fetch_missing_quotes_via_opend(
     positions: list[dict[str, Any]],
     quotes: dict[tuple[str, str, str, str], dict[str, Any]],
     base_dir: Path,
-) -> dict[tuple[str, str, str, str], str]:
+) -> tuple[dict[tuple[str, str, str, str], str], dict[tuple[str, str, str, str], dict[str, Any]]]:
     advice_cfg = config.get("close_advice") if isinstance(config, dict) else {}
     if isinstance(advice_cfg, dict) and str(advice_cfg.get("quote_source") or "auto").strip().lower() == "required_data":
-        return {}
+        return {}, {}
 
     symbol_cfgs = _symbol_config_by_symbol(config)
     missing_by_symbol: dict[str, list[dict[str, Any]]] = {}
     attempted_reasons: dict[tuple[str, str, str, str], str] = {}
+    attempted_details: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     for pos in positions:
         if not isinstance(pos, dict):
             continue
-        key = _quote_key(pos.get("symbol"), pos.get("option_type"), _position_expiration(pos), pos.get("strike"))
+        key = _quote_key(pos.get("symbol"), pos.get("option_type"), _position_expiration(pos), pos.get("strike"), base_dir=base_dir)
         if all(key) and not _quote_has_usable_price(quotes.get(key)):
             missing_by_symbol.setdefault(key[0], []).append(pos)
 
     if not missing_by_symbol:
-        return {}
+        return {}, {}
 
     try:
         from scripts.fetch_market_data_opend import fetch_symbol
     except Exception:
-        return {}
+        return {}, {}
 
     for symbol, missing_positions in missing_by_symbol.items():
         symbol_cfg = symbol_cfgs.get(symbol) or {}
         fetch_cfg = symbol_cfg.get("fetch") if isinstance(symbol_cfg, dict) else {}
         fetch_cfg = fetch_cfg if isinstance(fetch_cfg, dict) else {}
+        requested_symbol = symbol
+        resolved_underlier = None
+        try:
+            resolved_underlier = normalize_underlier(symbol).code
+        except Exception:
+            resolved_underlier = None
         missing_keys = [
-            _quote_key(pos.get("symbol"), pos.get("option_type"), _position_expiration(pos), pos.get("strike"))
+            _quote_key(pos.get("symbol"), pos.get("option_type"), _position_expiration(pos), pos.get("strike"), base_dir=base_dir)
             for pos in missing_positions
             if isinstance(pos, dict)
         ]
+        for key in missing_keys:
+            if all(key):
+                attempted_details.setdefault(
+                    key,
+                    {
+                        "requested_symbol": requested_symbol,
+                        "resolved_underlier": resolved_underlier,
+                        "quote_key": "|".join(key),
+                    },
+                )
         if not is_futu_fetch_source(fetch_cfg.get("source")):
             for key in missing_keys:
                 if all(key):
@@ -272,7 +300,7 @@ def _fetch_missing_quotes_via_opend(
             if _quote_has_usable_price(quotes.get(key)):
                 continue
             attempted_reasons[key] = "opend_fetch_no_usable_quote"
-    return attempted_reasons
+    return attempted_reasons, attempted_details
 
 
 def _quote_observability_flags(
@@ -307,13 +335,16 @@ def _filter_positions_by_markets(positions: list[dict[str, Any]], markets_to_run
 def _build_quote_issue_samples(
     positions: list[dict[str, Any]],
     attempted_fetch_reasons: dict[tuple[str, str, str, str], str],
+    attempted_fetch_details: dict[tuple[str, str, str, str], dict[str, Any]],
+    *,
+    base_dir: Path | None = None,
     limit: int = 3,
 ) -> list[str]:
     samples: list[str] = []
     for pos in positions:
         if not isinstance(pos, dict):
             continue
-        key = _quote_key(pos.get("symbol"), pos.get("option_type"), _position_expiration(pos), pos.get("strike"))
+        key = _quote_key(pos.get("symbol"), pos.get("option_type"), _position_expiration(pos), pos.get("strike"), base_dir=base_dir)
         reason = attempted_fetch_reasons.get(key)
         if not reason:
             continue
@@ -330,7 +361,15 @@ def _build_quote_issue_samples(
             "opend_fetch_skipped_missing_expiration": "缺少到期日，跳过补拉",
             "opend_fetch_skipped_invalid_strike": "缺少有效行权价，跳过补拉",
         }.get(reason, reason)
-        sample = f"{_norm_symbol(pos.get('symbol'))} {opt} {exp} {strike}{suffix}: {reason_label}"
+        detail = attempted_fetch_details.get(key) or {}
+        diag = ""
+        resolved_underlier = str(detail.get("resolved_underlier") or "").strip()
+        requested_symbol = str(detail.get("requested_symbol") or "").strip()
+        if resolved_underlier:
+            diag = f" | opend={resolved_underlier}"
+        elif requested_symbol:
+            diag = f" | requested={requested_symbol}"
+        sample = f"{_norm_symbol(pos.get('symbol'), base_dir=base_dir)} {opt} {exp} {strike}{suffix}: {reason_label}{diag}"
         if sample not in samples:
             samples.append(sample)
         if len(samples) >= max(int(limit), 0):
@@ -588,9 +627,9 @@ def run_close_advice(
     positions = ctx.get("open_positions_min") if isinstance(ctx, dict) else []
     positions = positions if isinstance(positions, list) else []
     positions = _filter_positions_by_markets(positions, markets_to_run)
-    symbols = {_norm_symbol(p.get("symbol")) for p in positions if isinstance(p, dict) and p.get("symbol")}
-    quotes = load_required_data_quotes(Path(required_data_root), symbols=symbols)
-    attempted_fetch_reasons = _fetch_missing_quotes_via_opend(
+    symbols = {_norm_symbol(p.get("symbol"), base_dir=Path(base_dir)) for p in positions if isinstance(p, dict) and p.get("symbol")}
+    quotes = load_required_data_quotes(Path(required_data_root), symbols=symbols, base_dir=Path(base_dir))
+    attempted_fetch_reasons, attempted_fetch_details = _fetch_missing_quotes_via_opend(
         config=config,
         positions=positions,
         quotes=quotes,
@@ -603,7 +642,7 @@ def run_close_advice(
         if not isinstance(pos0, dict):
             continue
         exp = _position_expiration(pos0)
-        key = _quote_key(pos0.get("symbol"), pos0.get("option_type"), exp, pos0.get("strike"))
+        key = _quote_key(pos0.get("symbol"), pos0.get("option_type"), exp, pos0.get("strike"), base_dir=Path(base_dir))
         quote = quotes.get(key)
         inp, quote_flags = _position_to_input(pos0, quote)
         row = evaluate_close_advice(inp, cfg)
@@ -633,7 +672,12 @@ def run_close_advice(
 
     _write_csv(csv_path, rows)
     atomic_write_text(text_path, text, encoding="utf-8")
-    quote_issue_samples = _build_quote_issue_samples(positions, attempted_fetch_reasons)
+    quote_issue_samples = _build_quote_issue_samples(
+        positions,
+        attempted_fetch_reasons,
+        attempted_fetch_details,
+        base_dir=Path(base_dir),
+    )
 
     return {
         "enabled": True,
@@ -643,6 +687,7 @@ def run_close_advice(
         "flag_counts": flag_counts,
         "quote_issue_rows": quote_issue_rows,
         "quote_issue_samples": quote_issue_samples,
+        "quote_fetch_diagnostics": {"attempted": len(attempted_fetch_details)},
         "csv": str(csv_path),
         "text": str(text_path),
     }
