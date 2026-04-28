@@ -166,7 +166,11 @@ def _quote_number(value: Any) -> float | None:
 def _quote_has_usable_price(quote: dict[str, Any] | None) -> bool:
     if not isinstance(quote, dict):
         return False
-    return _quote_number(quote.get("mid")) is not None or _quote_number(quote.get("last_price")) is not None
+    if _quote_number(quote.get("mid")) is not None or _quote_number(quote.get("last_price")) is not None:
+        return True
+    bid = _quote_number(quote.get("bid"))
+    ask = _quote_number(quote.get("ask"))
+    return bid is not None and ask is not None and bid > 0 and ask > 0 and ask >= bid
 
 
 def _fetch_missing_quotes_via_opend(
@@ -365,6 +369,10 @@ def _mid_from_quote(quote: dict[str, Any] | None) -> tuple[float | None, list[st
     mid = _quote_number(quote.get("mid"))
     if mid is not None:
         return mid, []
+    bid = _quote_number(quote.get("bid"))
+    ask = _quote_number(quote.get("ask"))
+    if bid is not None and ask is not None and bid > 0 and ask > 0 and ask >= bid:
+        return round((bid + ask) / 2, 6), ["mid_from_bid_ask"]
     last_price = _quote_number(quote.get("last_price"))
     if last_price is not None:
         return last_price, ["mid_fallback_last_price"]
