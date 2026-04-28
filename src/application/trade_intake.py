@@ -9,6 +9,7 @@ def build_trade_intake_audit_event(
     payload: dict | None = None,
     deal: object | None = None,
     result: dict | None = None,
+    extra: dict | None = None,
 ) -> dict[str, Any]:
     out: dict[str, Any] = {"phase": str(phase)}
     if isinstance(payload, dict):
@@ -22,6 +23,9 @@ def build_trade_intake_audit_event(
         out["position_effect"] = deal_dict.get("position_effect")
         out["multiplier"] = deal_dict.get("multiplier")
         out["multiplier_source"] = deal_dict.get("multiplier_source")
+        out["futu_account_id"] = deal_dict.get("futu_account_id")
+        out["visible_account_fields"] = deal_dict.get("visible_account_fields")
+        out["account_mapping_keys"] = deal_dict.get("account_mapping_keys")
     if isinstance(result, dict):
         out["result"] = result
         out["deal_id"] = out.get("deal_id") or result.get("deal_id")
@@ -29,6 +33,11 @@ def build_trade_intake_audit_event(
         out["action"] = result.get("action")
         out["status"] = result.get("status")
         out["reason"] = result.get("reason")
+        out["futu_account_id"] = out.get("futu_account_id") or result.get("diagnostics", {}).get("futu_account_id")
+        if result.get("diagnostics"):
+            out["diagnostics"] = result.get("diagnostics")
+    if isinstance(extra, dict) and extra:
+        out.update(dict(extra))
     return out
 
 
@@ -52,9 +61,20 @@ def process_trade_payload(
     append_trade_intake_audit_fn(audit_path, build_trade_intake_audit_event("received", payload=payload))
     effective_payload = dict(payload)
     if enrich_trade_payload_fn is not None:
-        effective_payload = enrich_trade_payload_fn(effective_payload)
+        enrich_result = enrich_trade_payload_fn(effective_payload)
+        enrich_diagnostics: dict[str, Any] = {}
+        if hasattr(enrich_result, "payload") and hasattr(enrich_result, "diagnostics"):
+            effective_payload = dict(getattr(enrich_result, "payload") or {})
+            enrich_diagnostics = dict(getattr(enrich_result, "diagnostics") or {})
+        else:
+            effective_payload = enrich_result
         if effective_payload != payload:
             append_trade_intake_audit_fn(audit_path, build_trade_intake_audit_event("enriched", payload=effective_payload))
+        if enrich_diagnostics:
+            append_trade_intake_audit_fn(
+                audit_path,
+                build_trade_intake_audit_event("enrichment_lookup", payload=effective_payload, extra={"enrichment": enrich_diagnostics}),
+            )
     deal = normalize_trade_deal_fn(effective_payload, futu_account_mapping=account_mapping)
     append_trade_intake_audit_fn(audit_path, build_trade_intake_audit_event("normalized", deal=deal))
     result = resolve_trade_deal_fn(deal, repo=repo, state=state, apply_changes=apply_changes)

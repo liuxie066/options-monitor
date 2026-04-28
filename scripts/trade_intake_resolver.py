@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any, Protocol
 
 from scripts.feishu_bitable import parse_note_kv, safe_float
@@ -49,6 +49,7 @@ class IntakeResolution:
     deal_id: str | None
     account: str | None
     operations: list[dict[str, Any]]
+    diagnostics: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -61,6 +62,7 @@ def _failure(
     reason: str,
     deal: NormalizedTradeDeal,
     operations: list[dict[str, Any]] | None = None,
+    diagnostics: dict[str, Any] | None = None,
 ) -> IntakeResolution:
     return IntakeResolution(
         status=status,
@@ -69,7 +71,16 @@ def _failure(
         deal_id=deal.deal_id,
         account=deal.internal_account,
         operations=list(operations or []),
+        diagnostics=dict(diagnostics or {}),
     )
+
+
+def _missing_account_mapping_diagnostics(deal: NormalizedTradeDeal) -> dict[str, Any]:
+    return {
+        "futu_account_id": deal.futu_account_id,
+        "visible_account_fields": dict(deal.visible_account_fields or {}),
+        "account_mapping_keys": list(deal.account_mapping_keys or []),
+    }
 
 
 def _required_open_missing(deal: NormalizedTradeDeal) -> list[str]:
@@ -201,7 +212,18 @@ def resolve_trade_deal(
     if not deal.deal_id:
         return _failure(status="unresolved", action=None, reason="missing_required_fields:deal_id", deal=deal)
     if not deal.internal_account:
-        return _failure(status="unresolved", action=None, reason="missing_account_mapping", deal=deal)
+        diagnostics = _missing_account_mapping_diagnostics(deal)
+        futu_account_id = str(diagnostics.get("futu_account_id") or "").strip()
+        reason = "missing_account_mapping"
+        if futu_account_id:
+            reason += f":futu_account_id={futu_account_id}"
+        return _failure(
+            status="unresolved",
+            action=None,
+            reason=reason,
+            deal=deal,
+            diagnostics=diagnostics,
+        )
     if not deal.symbol or not deal.option_type:
         return _failure(status="unresolved", action=None, reason="not_option_deal", deal=deal)
     if deal.position_effect not in ("open", "close"):
@@ -226,6 +248,7 @@ def resolve_trade_deal(
                 deal_id=deal.deal_id,
                 account=deal.internal_account,
                 operations=[apply_trade_open_with(repo, deal, persist_trade_event_fn=persist_trade_event)],
+                diagnostics={},
             )
         preview = preview_trade_open(deal)
         return IntakeResolution(
@@ -235,6 +258,7 @@ def resolve_trade_deal(
             deal_id=deal.deal_id,
             account=deal.internal_account,
             operations=[{"action": "open", "fields": preview["fields"]}],
+            diagnostics={},
         )
 
     missing = _required_close_missing(deal)
@@ -267,6 +291,7 @@ def resolve_trade_deal(
             deal_id=deal.deal_id,
             account=deal.internal_account,
             operations=operations,
+            diagnostics={},
         )
 
     operations = preview_trade_close(repo, matches=matches, deal=deal)
@@ -277,4 +302,5 @@ def resolve_trade_deal(
         deal_id=deal.deal_id,
         account=deal.internal_account,
         operations=operations,
+        diagnostics={},
     )

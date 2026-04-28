@@ -208,6 +208,40 @@ def test_healthcheck_accepts_futu_auto_source_without_fallback_checks(monkeypatc
     assert not any("holdings fallback configured" in item for item in out["warnings"])
 
 
+def test_healthcheck_rejects_account_settings_acc_id_missing_from_trade_intake_mapping(monkeypatch, tmp_path: Path) -> None:
+    from scripts.agent_plugin.main import run_tool
+    import scripts.agent_plugin.tools as tools
+
+    cfg_path = tmp_path / "config.us.json"
+    secrets_dir = tmp_path / "secrets"
+    secrets_dir.mkdir()
+    (secrets_dir / "portfolio.sqlite.json").write_text(
+        json.dumps({"option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"}}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    cfg = _public_cfg_with_futu("secrets/portfolio.sqlite.json")
+    cfg["account_settings"]["user1"]["futu"] = {"account_id": "999999999999999999"}
+    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    monkeypatch.setattr(
+        tools,
+        "_run_futu_doctor",
+        lambda **kwargs: {
+            "ok": True,
+            "sdk": {"ok": True},
+            "watchdog": {"ok": True},
+        },
+    )
+
+    out = run_tool("healthcheck", {"config_path": str(cfg_path)})
+
+    assert out["ok"] is True
+    assert out["data"]["summary"]["ok"] is False
+    primary = next(item for item in out["data"]["checks"] if item["name"] == "account_primary_paths")
+    assert primary["status"] == "error"
+    assert "missing from trade_intake.account_mapping.futu" in primary["message"]
+
+
 def test_healthcheck_accepts_external_holdings_account_without_futu_mapping(monkeypatch, tmp_path: Path) -> None:
     from scripts.agent_plugin.main import run_tool
     import scripts.agent_plugin.tools as tools
