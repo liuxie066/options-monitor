@@ -6,6 +6,7 @@ from scripts.trade_account_mapping import (
     resolve_internal_account,
     resolve_trade_intake_config,
 )
+from scripts.trade_account_identity import extract_primary_account_id, extract_visible_account_fields
 
 
 def test_resolve_futu_account_mapping_accepts_known_accounts() -> None:
@@ -79,3 +80,33 @@ def test_resolve_futu_lookup_account_ids_merges_account_settings_account_id() ->
     out = resolve_futu_lookup_account_ids(cfg)
 
     assert out == ["111", "222"]
+
+
+def test_extract_primary_account_id_prefers_canonical_priority_order() -> None:
+    payload = {
+        "trade_acc_id": "TRADE_1",
+        "account_id": "ACCOUNT_1",
+        "futu_account_id": "FUTU_1",
+    }
+
+    out = extract_primary_account_id(payload)
+
+    assert out == "FUTU_1"
+
+
+def test_extract_visible_account_fields_keeps_all_visible_account_keys() -> None:
+    payload = {
+        "trade_acc_id": "TRADE_1",
+        "account_id": "ACCOUNT_1",
+        "futu_account_id": "FUTU_1",
+        "accID": "ACCID_1",
+    }
+
+    out = extract_visible_account_fields(payload)
+
+    assert out == {
+        "futu_account_id": "FUTU_1",
+        "account_id": "ACCOUNT_1",
+        "trade_acc_id": "TRADE_1",
+        "accID": "ACCID_1",
+    }

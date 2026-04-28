@@ -231,3 +231,41 @@ def test_build_audit_event_promotes_missing_account_mapping_diagnostics() -> Non
 
     assert event["futu_account_id"] == "281756479859383816"
     assert event["diagnostics"]["account_mapping_keys"] == ["999999999999999999"]
+
+
+def test_build_audit_event_keeps_shared_visible_account_fields_after_normalization() -> None:
+    deal = NormalizedTradeDeal(
+        broker="富途",
+        futu_account_id="FUTU_1",
+        internal_account="lx",
+        deal_id="deal-3",
+        order_id="order-3",
+        symbol="NVDA",
+        option_type="call",
+        side="sell",
+        position_effect="open",
+        contracts=1,
+        price=1.0,
+        strike=100.0,
+        multiplier=100,
+        multiplier_source="payload",
+        expiration_ymd="2026-06-18",
+        currency="USD",
+        trade_time_ms=1000,
+        raw_payload={"trade_acc_id": "TRADE_1", "account_id": "ACCOUNT_1", "futu_account_id": "FUTU_1"},
+        visible_account_fields={
+            "futu_account_id": "FUTU_1",
+            "account_id": "ACCOUNT_1",
+            "trade_acc_id": "TRADE_1",
+        },
+        account_mapping_keys=["FUTU_1"],
+    )
+
+    event = build_trade_intake_audit_event("normalized", deal=deal)
+
+    assert event["futu_account_id"] == "FUTU_1"
+    assert event["visible_account_fields"] == {
+        "futu_account_id": "FUTU_1",
+        "account_id": "ACCOUNT_1",
+        "trade_acc_id": "TRADE_1",
+    }
