@@ -137,7 +137,9 @@ def test_run_close_advice_records_missing_quote_but_does_not_notify(tmp_path: Pa
         base_dir=Path.cwd(),
     )
 
-    assert (out_dir / "close_advice.txt").read_text(encoding="utf-8") == ""
+    text = (out_dir / "close_advice.txt").read_text(encoding="utf-8")
+    assert "待补数据" in text
+    assert "AAPL Put 2026-05-15 100.00P" in text
     assert "missing_quote" in (out_dir / "close_advice.csv").read_text(encoding="utf-8")
 
 
@@ -409,12 +411,15 @@ def test_run_close_advice_reports_missing_expiration_coverage_without_opend_fetc
         base_dir=Path.cwd(),
     )
 
+    text = (out_dir / "close_advice.txt").read_text(encoding="utf-8")
     csv_text = (out_dir / "close_advice.csv").read_text(encoding="utf-8")
     assert "required_data_fetch_error" in csv_text
     assert "opend_fetch_no_usable_quote" not in csv_text
     assert result["coverage_summary"]["coverage_fetch_errors"] == 1
     assert result["quote_fetch_diagnostics"]["attempted"] == 0
     assert result["quote_issue_samples"][0].startswith("9992.HK put 2026-04-29 135.00P: 补拉持仓覆盖失败")
+    assert "待补数据" in text
+    assert "9992.HK Put 2026-04-29 135.00P" in text
 
 
 def test_run_close_advice_fetches_missing_position_coverage_before_pricing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -479,6 +484,7 @@ def test_run_close_advice_fetches_missing_position_coverage_before_pricing(tmp_p
         calls.append({"symbol": symbol, **kwargs})
         assert symbol == "9992.HK"
         assert kwargs["explicit_expirations"] == ["2026-04-29", "2026-06-29"]
+        assert kwargs["chain_cache_force_refresh"] is True
         return {
             "rows": [
                 {
