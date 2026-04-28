@@ -44,6 +44,41 @@ def test_chain_cache_fresh_check() -> None:
     assert m._is_chain_cache_fresh({}, date(2026, 3, 29)) is False
 
 
+def test_chain_cache_must_cover_explicit_expirations() -> None:
+    import sys
+    base = Path(__file__).resolve().parents[1]
+    if str(base) not in sys.path:
+        sys.path.insert(0, str(base))
+
+    import scripts.fetch_market_data_opend as m
+
+    cached = {
+        "asof_date": "2026-04-28",
+        "expirations_all": ["2026-05-28"],
+        "rows": [{"strike_time": "2026-05-28", "code": "HK.TEST"}],
+    }
+    assert m._chain_cache_covers_explicit_expirations(cached, ["2026-05-28"]) is True
+    assert m._chain_cache_covers_explicit_expirations(cached, ["2026-04-29"]) is False
+
+
+def test_chain_cache_does_not_trust_declared_expirations_without_rows() -> None:
+    import sys
+    base = Path(__file__).resolve().parents[1]
+    if str(base) not in sys.path:
+        sys.path.insert(0, str(base))
+
+    import scripts.fetch_market_data_opend as m
+
+    cached = {
+        "asof_date": "2026-04-28",
+        "expirations_all": ["2026-04-29", "2026-06-29"],
+        "expirations_pick": ["2026-04-29", "2026-06-29"],
+        "rows": [{"strike_time": "2026-04-29", "code": "HK.TEST.2026-04-29.P135"}],
+    }
+    assert m._chain_cache_covers_explicit_expirations(cached, ["2026-04-29"]) is True
+    assert m._chain_cache_covers_explicit_expirations(cached, ["2026-06-29"]) is False
+
+
 def test_chain_cache_prune_by_mtime() -> None:
     import sys
     import time

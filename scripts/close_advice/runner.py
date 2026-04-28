@@ -346,6 +346,7 @@ def _ensure_required_data_coverage_for_positions(
                 max_strike=max(strikes) if strikes else None,
                 explicit_expirations=requested_expirations,
                 chain_cache=True,
+                chain_cache_force_refresh=True,
             )
         except Exception as exc:
             summary["errors"] += 1
@@ -761,6 +762,8 @@ def _num(value: Any) -> str:
 def _selected_notify_rows(rows: list[dict[str, Any]], *, notify_levels: set[str], max_items: int) -> list[dict[str, Any]]:
     grouped: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
     for row in sort_advice_rows(rows):
+        if str(row.get("evaluation_status") or "priced").strip().lower() != "priced":
+            continue
         if str(row.get("tier") or "").strip().lower() not in notify_levels:
             continue
         acct = str(row.get("account") or "当前账户").strip().lower() or "当前账户"
@@ -774,44 +777,102 @@ def _selected_notify_rows(rows: list[dict[str, Any]], *, notify_levels: set[str]
     return selected
 
 
+def _selected_evaluation_gap_rows(rows: list[dict[str, Any]], *, max_items: int) -> list[dict[str, Any]]:
+    grouped: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
+    for row in sort_advice_rows(rows):
+        if str(row.get("evaluation_status") or "").strip().lower() == "priced":
+            continue
+        acct = str(row.get("account") or "当前账户").strip().lower() or "当前账户"
+        grouped.setdefault(acct, []).append(row)
+    selected: list[dict[str, Any]] = []
+    for acct_rows in grouped.values():
+        if max_items > 0:
+            selected.extend(acct_rows[:max_items])
+        else:
+            selected.extend(acct_rows)
+    return selected
+
+
+def _gap_reason_label(row: dict[str, Any]) -> str:
+    flags = [x for x in str(row.get("data_quality_flags") or "").split(";") if x]
+    mapping = {
+        "required_data_missing_expiration": "缺少到期日覆盖",
+        "required_data_missing_contract": "缺少合约覆盖",
+        "required_data_fetch_error": "补拉持仓覆盖失败",
+        "required_data_fetch_skipped_non_futu_source": "非 Futu 行情源，无法补拉持仓覆盖",
+        "opend_fetch_no_usable_quote": "无可用报价",
+        "opend_fetch_error_rate_limit": "OpenD 限频",
+        "opend_fetch_error_retry_budget": "OpenD 重试预算耗尽",
+        "opend_fetch_error": "OpenD 拉取失败",
+        "missing_quote": "缺少报价",
+        "missing_mid": "缺少可用定价",
+        "spread_too_wide": "价差过宽",
+        "invalid_spread": "价差无效",
+    }
+    for flag in flags:
+        if flag in mapping:
+            return mapping[flag]
+    return str(row.get("reason") or "无法评估").strip() or "无法评估"
+
+
 def render_markdown(rows: list[dict[str, Any]], *, notify_levels: set[str], max_items: int) -> str:
     selected = _selected_notify_rows(rows, notify_levels=notify_levels, max_items=max_items)
-    if not selected:
+    gap_rows = _selected_evaluation_gap_rows(rows, max_items=max_items)
+    if not selected and not gap_rows:
         return ""
 
     grouped: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
     for row in selected:
         acct = str(row.get("account") or "当前账户").strip().lower() or "当前账户"
         grouped.setdefault(acct, []).append(row)
+    gap_grouped: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
+    for row in gap_rows:
+        acct = str(row.get("account") or "当前账户").strip().lower() or "当前账户"
+        gap_grouped.setdefault(acct, []).append(row)
 
     lines: list[str] = []
-    for acct, acct_rows in grouped.items():
+    for acct in list(grouped.keys()) + [x for x in gap_grouped.keys() if x not in grouped]:
+        acct_rows = grouped.get(acct) or []
+        acct_gap_rows = gap_grouped.get(acct) or []
         if lines:
             lines.append("")
         lines.append(f"### [{acct}] 平仓建议")
-        for row in acct_rows:
-            opt = "Put" if str(row.get("option_type")) == "put" else "Call"
-            exp = row.get("expiration") or "-"
-            strike = _num(row.get("strike"))
-            suffix = "P" if opt == "Put" else "C"
-            currency = row.get("currency")
-            lines.extend(
-                [
-                    f"- {row.get('symbol')} {opt} {exp} {strike}{suffix} · {row.get('tier_label')}",
-                    (
-                        f"- 已锁定: {_pct(row.get('capture_ratio'))} | "
-                        f"剩余DTE={row.get('dte') if row.get('dte') is not None else '-'} | "
-                        f"剩余收益年化={_pct(row.get('remaining_annualized_return'))}"
-                    ),
-                    f"- 价格: 开仓权利金={_num(row.get('premium'))} | 平仓 mid={_num(row.get('close_mid'))}",
-                    (
-                        f"- 估算: 平仓后锁定收益 {_money(row.get('realized_if_close'), currency)} | "
-                        f"剩余权利金 {_money(row.get('remaining_premium'), currency)}"
-                    ),
-                    f"- 理由: {row.get('reason') or '-'}",
-                    "---",
-                ]
-            )
+        if acct_rows:
+            for row in acct_rows:
+                opt = "Put" if str(row.get("option_type")) == "put" else "Call"
+                exp = row.get("expiration") or "-"
+                strike = _num(row.get("strike"))
+                suffix = "P" if opt == "Put" else "C"
+                currency = row.get("currency")
+                lines.extend(
+                    [
+                        f"- {row.get('symbol')} {opt} {exp} {strike}{suffix} · {row.get('tier_label')}",
+                        (
+                            f"- 已锁定: {_pct(row.get('capture_ratio'))} | "
+                            f"剩余DTE={row.get('dte') if row.get('dte') is not None else '-'} | "
+                            f"剩余收益年化={_pct(row.get('remaining_annualized_return'))}"
+                        ),
+                        f"- 价格: 开仓权利金={_num(row.get('premium'))} | 平仓 mid={_num(row.get('close_mid'))}",
+                        (
+                            f"- 估算: 平仓后锁定收益 {_money(row.get('realized_if_close'), currency)} | "
+                            f"剩余权利金 {_money(row.get('remaining_premium'), currency)}"
+                        ),
+                        f"- 理由: {row.get('reason') or '-'}",
+                        "---",
+                    ]
+                )
+        else:
+            lines.append("- 本次无 strong/medium 平仓建议")
+        if acct_gap_rows:
+            lines.append("- 待补数据:")
+            for row in acct_gap_rows:
+                opt = "Put" if str(row.get("option_type")) == "put" else "Call"
+                exp = row.get("expiration") or "-"
+                strike = _num(row.get("strike"))
+                suffix = "P" if opt == "Put" else "C"
+                lines.append(
+                    f"- {row.get('symbol')} {opt} {exp} {strike}{suffix} · 无法评估 | {_gap_reason_label(row)}"
+                )
     return "\n".join(lines).strip() + "\n"
 
 

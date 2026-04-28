@@ -1,7 +1,7 @@
 {
   "name": "om-webui",
   "private": true,
-  "version": "0.2.0-beta.6",
+  "version": "0.2.0-beta.7",
   "type": "module",
   "scripts": {
     "dev": "vite",

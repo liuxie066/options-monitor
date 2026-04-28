@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.2.0-beta.7 - 2026-04-28
+
+### Changed
+- Hardened close-advice held-expiration pricing by forcing exact-contract coverage refreshes to bypass stale same-day option-chain cache when coverage is missing
+- Fixed OpenD explicit-expiration cache semantics so cache coverage is proven by returned chain rows rather than declared expiration lists, preventing false full-coverage hits for partially fetched chains
+
 ## 0.2.0-beta.6 - 2026-04-28
 
 ### Changed

@@ -134,6 +134,25 @@ def _is_chain_cache_fresh(obj: dict, today: date) -> bool:
         return False
 
 
+def _chain_cache_covers_explicit_expirations(obj: dict, explicit_expirations: list[str] | None) -> bool:
+    try:
+        requested = sorted({str(x)[:10] for x in (explicit_expirations or []) if str(x) and len(str(x)) >= 10})
+        if not requested:
+            return True
+        if not isinstance(obj, dict):
+            return False
+        rows = obj.get('rows') or []
+        cached = {
+            str((row or {}).get('strike_time') or (row or {}).get('expiration') or '')[:10]
+            for row in rows
+            if isinstance(row, dict)
+        }
+        cached.discard('')
+        return all(exp in cached for exp in requested)
+    except Exception:
+        return False
+
+
 def _respect_option_chain_rate_limit() -> None:
     now = time.monotonic()
     while _option_chain_call_timestamps and (now - _option_chain_call_timestamps[0]) >= _OPTION_CHAIN_RATE_LIMIT_WINDOW_SEC:
@@ -224,6 +243,7 @@ def get_spot_opend(gateway, underlier_code: str) -> float | None:
 
 def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = '127.0.0.1', port: int = 11111, spot_override: float | None = None, *, base_dir: Path | None = None, option_types: str = 'put,call', min_strike: float | None = None, max_strike: float | None = None, min_dte: int | None = None, max_dte: int | None = None, explicit_expirations: list[str] | None = None, retry_max_attempts: int = 4, retry_time_budget_sec: float = 8.0, retry_base_delay_sec: float = 0.8, retry_max_delay_sec: float = 6.0, no_retry: bool = False, chain_cache: bool = False, chain_cache_force_refresh: bool = False) -> dict[str, Any]:
     u = normalize_underlier(symbol)
+    explicit_expirations_norm = sorted({str(x)[:10] for x in (explicit_expirations or []) if str(x) and len(str(x)) >= 10})
     gateway = build_ready_futu_gateway(
         host=host,
         port=int(port),
@@ -248,7 +268,11 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
         if chain_cache and base_dir is not None:
             cache_path = _chain_cache_path(base_dir, u.code)
             cached = _load_chain_cache(cache_path)
-            if (not chain_cache_force_refresh) and _is_chain_cache_fresh(cached, today):
+            if (
+                (not chain_cache_force_refresh)
+                and _is_chain_cache_fresh(cached, today)
+                and _chain_cache_covers_explicit_expirations(cached, explicit_expirations_norm)
+            ):
                 chain_obj = cached
 
         if chain_obj is None:
@@ -261,7 +285,6 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
             # 1) call get_option_expiration_date() to enumerate expirations
             # 2) take the closest N expirations (limit_expirations)
             # 3) call get_option_chain(code, start=exp, end=exp) for each expiration, then concat
-            explicit_expirations_norm = sorted({str(x)[:10] for x in (explicit_expirations or []) if str(x) and len(str(x)) >= 10})
             if explicit_expirations_norm:
                 expirations_all = explicit_expirations_norm
             else:
@@ -305,7 +328,9 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
                 except Exception:
                     expirations_pick0 = expirations_all
 
-            if limit_expirations and expirations_pick0:
+            if explicit_expirations_norm:
+                expirations_pick = expirations_pick0
+            elif limit_expirations and expirations_pick0:
                 expirations_pick = expirations_pick0[: int(limit_expirations)]
             else:
                 expirations_pick = expirations_pick0
@@ -379,7 +404,9 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
         chain = chain.copy()
         chain['expiration'] = chain['strike_time'].astype(str).str.slice(0, 10)
         expirations = sorted({x for x in chain['expiration'].tolist() if isinstance(x, str) and len(x) >= 10})
-        if limit_expirations:
+        if explicit_expirations_norm:
+            expirations = [exp for exp in explicit_expirations_norm if exp in set(expirations)]
+        elif limit_expirations:
             expirations = expirations[: int(limit_expirations)]
 
         chain = chain[chain['expiration'].isin(expirations)].copy()
