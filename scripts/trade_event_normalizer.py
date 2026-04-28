@@ -33,9 +33,25 @@ def _pick(src: dict[str, Any], *keys: str) -> Any:
     return None
 
 
+def _normalize_symbol_candidate(value: Any) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    upper = raw.upper()
+    if upper.startswith("US."):
+        candidate = upper[3:]
+        return normalize_symbol(candidate)
+    if upper.startswith("HK."):
+        digits = "".join(ch for ch in upper[3:] if ch.isdigit())
+        if digits:
+            return normalize_symbol(f"{int(digits):04d}.HK")
+        return None
+    return normalize_symbol(raw)
+
+
 def _pick_first_normalized_symbol(src: dict[str, Any], *keys: str) -> str | None:
     for key in keys:
-        value = normalize_symbol(str(src.get(key) or ""))
+        value = _normalize_symbol_candidate(src.get(key))
         if value:
             return value
     return None
@@ -202,11 +218,18 @@ def normalize_trade_deal(
     symbol = _pick_first_normalized_symbol(
         src,
         "symbol",
+        "underlying_symbol",
+        "owner_symbol",
         "owner_stock_code",
+        "owner_stock_code_full",
+        "underlying_stock_code",
         "owner_code",
         "underlying_code",
         "stock_code",
         "code",
+        "owner_stock_name",
+        "underlying_stock_name",
+        "owner_name",
         "stock_name",
         "name",
         "underlying",

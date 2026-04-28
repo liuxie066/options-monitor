@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.2.0-beta.2 - 2026-04-28
+
+### Changed
+- Unified Futu underlying symbol normalization during trade enrichment and deal normalization so raw fields like `owner_stock_code=HK.09992` resolve into canonical symbols such as `9992.HK` for automatic option bookkeeping
+
 ## 0.2.0-beta.1 - 2026-04-28
 
 ### Changed

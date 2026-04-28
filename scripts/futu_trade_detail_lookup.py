@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable
 
 from scripts.futu_gateway import build_futu_gateway
+from scripts.parse_option_message import normalize_symbol
 from scripts.trade_event_normalizer import ACCOUNT_ID_KEYS
 
 
@@ -46,6 +47,48 @@ def _extract_account_id(row: dict[str, Any], *, fallback_acc_id: str) -> str:
     return fallback_acc_id
 
 
+def _normalize_underlying_symbol(value: Any) -> str | None:
+    raw = _norm_str(value)
+    if not raw:
+        return None
+    upper = raw.upper()
+    if upper.startswith("US."):
+        return normalize_symbol(upper[3:])
+    if upper.startswith("HK."):
+        digits = "".join(ch for ch in upper[3:] if ch.isdigit())
+        if digits:
+            return normalize_symbol(f"{int(digits):04d}.HK")
+        return None
+    return normalize_symbol(raw)
+
+
+def _resolve_unified_symbol(src: dict[str, Any], row: dict[str, Any]) -> str | None:
+    for container in (src, row):
+        if not isinstance(container, dict):
+            continue
+        for key in (
+            "symbol",
+            "underlying_symbol",
+            "owner_symbol",
+            "owner_stock_code",
+            "owner_stock_code_full",
+            "underlying_stock_code",
+            "owner_code",
+            "underlying_code",
+            "stock_code",
+            "owner_stock_name",
+            "underlying_stock_name",
+            "owner_name",
+            "stock_name",
+            "name",
+            "underlying",
+        ):
+            value = _normalize_underlying_symbol(container.get(key))
+            if value:
+                return value
+    return None
+
+
 @dataclass(frozen=True)
 class TradePushAccountLookupResult:
     payload: dict[str, Any]
@@ -70,6 +113,9 @@ def _merge_lookup_row(src: dict[str, Any], row: dict[str, Any], *, fallback_acc_
         if value in (None, ""):
             continue
         enriched[key] = value
+    symbol = _resolve_unified_symbol(src, row)
+    if symbol and enriched.get("symbol") in (None, ""):
+        enriched["symbol"] = symbol
     return enriched
 
 
