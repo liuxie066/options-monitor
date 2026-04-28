@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.2.0-beta.1 - 2026-04-28
+
+### Changed
+- Completed Futu auto trade-intake semantic parsing for raw deal payloads by deriving option fields from option codes, mapping raw `trd_side` values into open/close semantics, and allowing these trades to proceed into automatic option bookkeeping
+
 ## 0.1.0-beta.14 - 2026-04-28
 
 ### Changed
