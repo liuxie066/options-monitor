@@ -1,11 +1,136 @@
 from __future__ import annotations
 
+import csv
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Callable
 import json
 
 from scripts.agent_plugin.contracts import AgentToolError
+from src.application.watchlist_mutations import normalize_symbol_read
+
+
+def _normalize_expiration(value: Any) -> str:
+    raw = str(value or "").strip()
+    if len(raw) >= 10 and raw[4:5] == "-" and raw[7:8] == "-":
+        return raw[:10]
+    return raw
+
+
+def _normalize_option_type(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    return raw if raw in {"put", "call"} else ""
+
+
+def _as_float_or_none(value: Any) -> float | None:
+    try:
+        if value in (None, ""):
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def _contract_key(symbol: Any, option_type: Any, expiration: Any, strike: Any) -> tuple[str, str, str, str]:
+    sym = normalize_symbol_read(symbol)
+    opt = _normalize_option_type(option_type)
+    exp = _normalize_expiration(expiration)
+    strike_num = _as_float_or_none(strike)
+    strike_key = f"{strike_num:.6f}" if strike_num is not None else ""
+    return sym, opt, exp, strike_key
+
+
+def _extract_position_fetch_requirements(ctx: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = ctx.get("open_positions_min") if isinstance(ctx, dict) else []
+    grouped: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        symbol = normalize_symbol_read(row.get("symbol"))
+        if not symbol:
+            continue
+        item = grouped.get(symbol)
+        if item is None:
+            item = {
+                "symbol": symbol,
+                "requested_expirations": set(),
+                "option_types": set(),
+                "strikes": [],
+                "requested_contracts": set(),
+                "position_count": 0,
+            }
+            grouped[symbol] = item
+            order.append(symbol)
+        item["position_count"] += 1
+        option_type = _normalize_option_type(row.get("option_type"))
+        expiration = _normalize_expiration(row.get("expiration"))
+        strike_num = _as_float_or_none(row.get("strike"))
+        if option_type:
+            item["option_types"].add(option_type)
+        if expiration:
+            item["requested_expirations"].add(expiration)
+        if strike_num is not None:
+            item["strikes"].append(strike_num)
+        key = _contract_key(symbol, option_type, expiration, strike_num)
+        if all(key):
+            item["requested_contracts"].add(key)
+    out: list[dict[str, Any]] = []
+    for symbol in order:
+        item = grouped[symbol]
+        strikes = [float(v) for v in item["strikes"]]
+        out.append(
+            {
+                "symbol": symbol,
+                "requested_expirations": sorted(item["requested_expirations"]),
+                "option_types": sorted(item["option_types"]),
+                "min_strike": min(strikes) if strikes else None,
+                "max_strike": max(strikes) if strikes else None,
+                "requested_contracts": set(item["requested_contracts"]),
+                "position_count": int(item["position_count"]),
+            }
+        )
+    return out
+
+
+def _read_required_data_coverage(csv_path: Path) -> tuple[set[tuple[str, str, str, str]], set[str]]:
+    contract_keys: set[tuple[str, str, str, str]] = set()
+    expirations: set[str] = set()
+    if not csv_path.exists():
+        return contract_keys, expirations
+    try:
+        with csv_path.open("r", encoding="utf-8", newline="") as fh:
+            reader = csv.DictReader(fh)
+            for row in reader:
+                if not isinstance(row, dict):
+                    continue
+                key = _contract_key(
+                    row.get("symbol"),
+                    row.get("option_type"),
+                    row.get("expiration"),
+                    row.get("strike"),
+                )
+                if all(key):
+                    contract_keys.add(key)
+                    expirations.add(key[2])
+    except Exception:
+        return set(), set()
+    return contract_keys, expirations
+
+
+def _build_coverage_summary(symbol_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    missing_symbols = [
+        str(item.get("symbol") or "")
+        for item in symbol_rows
+        if isinstance(item, dict) and not bool(item.get("position_coverage_ok"))
+    ]
+    return {
+        "symbol_count": len(symbol_rows),
+        "position_count": sum(int(item.get("position_count") or 0) for item in symbol_rows if isinstance(item, dict)),
+        "covered_symbol_count": sum(1 for item in symbol_rows if isinstance(item, dict) and bool(item.get("position_coverage_ok"))),
+        "symbols_with_missing_coverage": missing_symbols,
+        "positions_missing_coverage": sum(int(item.get("missing_contract_count") or 0) for item in symbol_rows if isinstance(item, dict)),
+    }
 
 
 def scan_summary_rows(summary_rows: list[dict[str, Any]], *, as_float: Callable[[Any], float | None]) -> dict[str, Any]:
@@ -295,14 +420,15 @@ def prepare_close_advice_inputs_tool(
     if not isinstance(ctx, dict):
         raise AgentToolError(code="DEPENDENCY_MISSING", message="option positions context is unavailable", details={"logs": logs[-5:]})
 
-    symbols_in_context = list(extract_context_symbols_fn(ctx))
-    if not symbols_in_context:
+    position_requirements = _extract_position_fetch_requirements(ctx)
+    if not position_requirements:
         return {
             "account": account,
             "broker": broker,
             "context_rows": len(ctx.get("open_positions_min") or []),
             "symbols": [],
             "symbol_count": 0,
+            "coverage_summary": _build_coverage_summary([]),
         }, [item for item in logs if item.startswith("[WARN]")], {
             "config_path": mask_path(config_path),
             "context_path": mask_path(context_path),
@@ -312,7 +438,8 @@ def prepare_close_advice_inputs_tool(
     symbol_map = symbol_fetch_config_map_fn(cfg)
     fetched: list[dict[str, Any]] = []
     warnings = [item for item in logs if item.startswith("[WARN]")]
-    for symbol in symbols_in_context:
+    for spec in position_requirements:
+        symbol = str(spec.get("symbol") or "").strip()
         symbol_cfg = symbol_map.get(symbol) or {}
         fetch_cfg = symbol_cfg.get("fetch") if isinstance(symbol_cfg.get("fetch"), dict) else {}
         src, _decision = resolve_symbol_fetch_source(fetch_cfg)
@@ -323,14 +450,44 @@ def prepare_close_advice_inputs_tool(
             host=str(fetch_cfg.get("host") or "127.0.0.1"),
             port=int(fetch_cfg.get("port") or 11111),
             base_dir=repo_base(),
-            option_types="put,call",
+            option_types=",".join(spec.get("option_types") or ["put", "call"]),
+            min_strike=spec.get("min_strike"),
+            max_strike=spec.get("max_strike"),
+            explicit_expirations=list(spec.get("requested_expirations") or []),
             chain_cache=True,
         )
         _raw_path, csv_path = save_required_data_opend(repo_base(), symbol, result, output_root=required_data_root)
         meta = result.get("meta") if isinstance(result.get("meta"), dict) else {}
         if meta.get("error"):
             warnings.append(f"{symbol}: {meta['error']}")
-        fetched.append({"symbol": symbol, "source": src, "rows": len(result.get("rows") or []), "expiration_count": int(result.get("expiration_count") or 0), "csv": mask_path(csv_path)})
+        fetched_contracts, fetched_expirations = _read_required_data_coverage(csv_path)
+        requested_expirations = list(spec.get("requested_expirations") or [])
+        requested_contracts = set(spec.get("requested_contracts") or set())
+        missing_expirations = [exp for exp in requested_expirations if exp not in fetched_expirations]
+        missing_contracts = sorted(
+            f"{item[2]} {item[3]}{'P' if item[1] == 'put' else 'C'}"
+            for item in requested_contracts
+            if item not in fetched_contracts
+        )
+        item = {
+            "symbol": symbol,
+            "source": src,
+            "rows": len(result.get("rows") or []),
+            "expiration_count": int(result.get("expiration_count") or 0),
+            "csv": mask_path(csv_path),
+            "position_count": int(spec.get("position_count") or 0),
+            "requested_expirations": requested_expirations,
+            "fetched_expirations": sorted(fetched_expirations),
+            "missing_expirations": missing_expirations,
+            "position_coverage_ok": not missing_contracts,
+            "missing_contract_count": len(missing_contracts),
+            "missing_contract_samples": missing_contracts[:3],
+        }
+        if missing_expirations:
+            warnings.append(f"{symbol}: missing required expirations {', '.join(missing_expirations)}")
+        elif missing_contracts:
+            warnings.append(f"{symbol}: missing required contracts after fetch ({', '.join(missing_contracts[:3])})")
+        fetched.append(item)
 
     return {
         "account": account,
@@ -338,6 +495,7 @@ def prepare_close_advice_inputs_tool(
         "context_rows": len(ctx.get("open_positions_min") or []),
         "symbols": fetched,
         "symbol_count": len(fetched),
+        "coverage_summary": _build_coverage_summary(fetched),
     }, warnings, {
         "config_path": mask_path(config_path),
         "context_path": mask_path(context_path),
@@ -398,6 +556,7 @@ def get_close_advice_tool(
         "advice_row_count": int(advice_data.get("rows") or advice_data.get("summary", {}).get("row_count") or 0),
         "notify_row_count": int(advice_data.get("notify_rows") or 0),
         "tier_counts": dict(advice_data.get("summary", {}).get("tier_counts")) if isinstance(advice_data.get("summary"), dict) and isinstance(advice_data.get("summary", {}).get("tier_counts"), dict) else {},
+        "coverage_summary": dict(prepared_data.get("coverage_summary")) if isinstance(prepared_data.get("coverage_summary"), dict) else {},
     }
     return {
         "prepared": prepared_data,
