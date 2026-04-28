@@ -132,3 +132,22 @@ def test_normalize_trade_deal_accepts_futu_underlying_code_format() -> None:
     assert deal.symbol == "9992.HK"
     assert deal.option_type == "put"
     assert deal.position_effect == "open"
+
+
+def test_normalize_trade_deal_falls_back_to_option_code_root_alias_for_symbol() -> None:
+    deal = normalize_trade_deal(
+        {
+            "deal_id": "deal-6",
+            "futu_account_id": "281756479859383816",
+            "code": "HK.POP260528P150000",
+            "trd_side": "SELL_SHORT",
+            "qty": 1,
+            "price": 6.3,
+            "create_time": "2026-04-28 10:15:56",
+        },
+        futu_account_mapping={"281756479859383816": "lx"},
+    )
+
+    assert deal.symbol == "9992.HK"
+    assert deal.option_type == "put"
+    assert deal.position_effect == "open"
