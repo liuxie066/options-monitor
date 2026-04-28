@@ -72,6 +72,7 @@ def _parse_futu_option_code(code: Any) -> dict[str, Any]:
         "option_type": option_type,
         "expiration_ymd": expiration,
         "strike": strike_value,
+        "currency": ("HKD" if match.group("market") == "HK" else "USD" if match.group("market") == "US" else None),
     }
 
 
@@ -102,7 +103,9 @@ def _normalize_side(value: Any) -> str | None:
     raw = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
     if raw in ("buy", "buy_to_close", "buy_to_open", "b", "1"):
         return "buy"
-    if raw in ("sell", "sell_to_open", "sell_to_close", "s", "2"):
+    if raw in ("buy_back", "buyback"):
+        return "buy"
+    if raw in ("sell", "sell_to_open", "sell_to_close", "sell_short", "short_sell", "s", "2"):
         return "sell"
     return None
 
@@ -115,11 +118,15 @@ def _normalize_position_effect(value: Any) -> str | None:
         "open_only": "open",
         "buy_to_open": "open",
         "sell_to_open": "open",
+        "sell_short": "open",
+        "short_sell": "open",
         "close": "close",
         "close_position": "close",
         "close_only": "close",
         "buy_to_close": "close",
         "sell_to_close": "close",
+        "buy_back": "close",
+        "buyback": "close",
     }
     return aliases.get(raw)
 
@@ -222,9 +229,16 @@ def normalize_trade_deal(
             currency = normalize_currency(currency_raw)
         except Exception:
             currency = None
+    if currency is None:
+        fallback_currency = option_code_info.get("currency")
+        if fallback_currency not in (None, ""):
+            try:
+                currency = normalize_currency(fallback_currency)
+            except Exception:
+                currency = None
 
     position_effect = _normalize_position_effect(
-        _pick(src, "position_effect", "position_side", "offset_type", "open_close")
+        _pick(src, "position_effect", "position_side", "offset_type", "open_close", "trd_side", "trade_side", "side")
     )
     repo_base = Path(__file__).resolve().parents[1]
     multiplier = _norm_int(_pick(src, "multiplier", "contract_multiplier", "lot_size"))

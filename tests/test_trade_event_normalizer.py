@@ -96,11 +96,9 @@ def test_normalize_trade_deal_parses_futu_option_code_with_lookup_underlying_fie
             "futu_account_id": "281756479859383816",
             "code": "HK.POP260528P150000",
             "stock_name": "泡泡玛特",
-            "side": "SELL",
-            "position_effect": "OPEN",
+            "trd_side": "SELL_SHORT",
             "qty": 1,
             "price": 6.3,
-            "currency": "HKD",
             "create_time": "2026-04-28 10:15:56",
         },
         futu_account_mapping={"281756479859383816": "lx"},
@@ -109,5 +107,8 @@ def test_normalize_trade_deal_parses_futu_option_code_with_lookup_underlying_fie
     assert deal.internal_account == "lx"
     assert deal.symbol == "9992.HK"
     assert deal.option_type == "put"
+    assert deal.side == "sell"
+    assert deal.position_effect == "open"
     assert deal.strike == 150.0
     assert deal.expiration_ymd == "2026-05-28"
+    assert deal.currency == "HKD"

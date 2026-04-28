@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.1.0-beta.14 - 2026-04-28
+
+### Changed
+- Completed Futu auto trade-intake semantic parsing for raw deal payloads by mapping `trd_side` values like `SELL_SHORT` and `BUY_BACK`, and inferring option currency from the option code when standard fields are absent
+
 ## 0.1.0-beta.13 - 2026-04-28
 
 ### Changed
