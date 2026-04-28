@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.1.0-beta.11 - 2026-04-28
+
+### Changed
+- Made close advice fee-aware so post-fee non-positive buybacks no longer emit close recommendations
+- Grouped standalone close-advice markdown by account, aligned notify row counts with rendered output, and surfaced spread-blocked quote issues in fallback summaries
+
 ## 0.1.0-beta.10 - 2026-04-27
 
 ### Changed
