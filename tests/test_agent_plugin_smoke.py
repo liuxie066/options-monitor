@@ -293,6 +293,86 @@ def test_healthcheck_accepts_external_holdings_account_without_futu_mapping(monk
     assert all(item["name"] != "account_fallback_paths" for item in out["data"]["checks"])
 
 
+def test_healthcheck_reports_option_positions_bootstrap_degraded(monkeypatch, tmp_path: Path) -> None:
+    from scripts.agent_plugin.main import run_tool
+    import scripts.agent_plugin.tools as tools
+
+    cfg_path = tmp_path / "config.us.json"
+    secrets_dir = tmp_path / "secrets"
+    secrets_dir.mkdir()
+    (secrets_dir / "portfolio.sqlite.json").write_text(
+        json.dumps({"option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"}}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    cfg_path.write_text(
+        json.dumps(_public_cfg_with_futu("secrets/portfolio.sqlite.json"), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        tools,
+        "_run_futu_doctor",
+        lambda **kwargs: {
+            "ok": True,
+            "sdk": {"ok": True},
+            "watchdog": {"ok": True},
+        },
+    )
+
+    class _Repo:
+        bootstrap_status = "degraded_feishu_bootstrap_failed"
+        bootstrap_message = "feishu bootstrap failed: upstream unavailable"
+
+    monkeypatch.setattr(tools, "load_option_positions_repo", lambda _path: _Repo())
+
+    out = run_tool("healthcheck", {"config_path": str(cfg_path)})
+
+    bootstrap = next(item for item in out["data"]["checks"] if item["name"] == "option_positions_bootstrap")
+    assert bootstrap["status"] == "warn"
+    assert bootstrap["value"]["status"] == "degraded_feishu_bootstrap_failed"
+    assert "upstream unavailable" in bootstrap["message"]
+    assert out["data"]["summary"]["warning_count"] >= 1
+
+
+def test_healthcheck_reports_option_positions_bootstrap_ok_for_sqlite_only(monkeypatch, tmp_path: Path) -> None:
+    from scripts.agent_plugin.main import run_tool
+    import scripts.agent_plugin.tools as tools
+
+    cfg_path = tmp_path / "config.us.json"
+    secrets_dir = tmp_path / "secrets"
+    secrets_dir.mkdir()
+    (secrets_dir / "portfolio.sqlite.json").write_text(
+        json.dumps({"option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"}}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    cfg_path.write_text(
+        json.dumps(_public_cfg_with_futu("secrets/portfolio.sqlite.json"), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        tools,
+        "_run_futu_doctor",
+        lambda **kwargs: {
+            "ok": True,
+            "sdk": {"ok": True},
+            "watchdog": {"ok": True},
+        },
+    )
+
+    class _Repo:
+        bootstrap_status = "sqlite_only_no_feishu_bootstrap"
+        bootstrap_message = "no feishu option_positions bootstrap configured"
+
+    monkeypatch.setattr(tools, "load_option_positions_repo", lambda _path: _Repo())
+
+    out = run_tool("healthcheck", {"config_path": str(cfg_path)})
+
+    bootstrap = next(item for item in out["data"]["checks"] if item["name"] == "option_positions_bootstrap")
+    assert bootstrap["status"] == "ok"
+    assert bootstrap["value"]["status"] == "sqlite_only_no_feishu_bootstrap"
+
+
 def test_get_portfolio_context_allows_futu_source_without_explicit_data_config(monkeypatch, tmp_path: Path) -> None:
     from scripts.agent_plugin.main import run_tool
     import scripts.agent_plugin.tools as tools

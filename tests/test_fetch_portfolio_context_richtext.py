@@ -65,7 +65,7 @@ def test_build_context_requires_broker_field_and_normalizes_hk_symbol() -> None:
     assert stocks["NVDA"]["shares"] == 160
 
 
-def test_build_context_ignores_market_only_holdings_rows() -> None:
+def test_build_context_accepts_legacy_market_only_holdings_rows() -> None:
     records = [
         {
             "fields": {
@@ -81,8 +81,8 @@ def test_build_context_ignores_market_only_holdings_rows() -> None:
 
     ctx = build_context(records, broker="富途", account="lx")
 
-    assert ctx["raw_selected_count"] == 0
-    assert ctx["cash_by_currency"] == {}
+    assert ctx["raw_selected_count"] == 1
+    assert ctx["cash_by_currency"] == {"USD": 100.0}
     assert ctx["stocks_by_symbol"] == {}
 
 

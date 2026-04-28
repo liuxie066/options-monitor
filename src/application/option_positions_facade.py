@@ -16,7 +16,7 @@ from scripts.option_positions_core.domain import (
     normalize_status,
 )
 from scripts.option_positions_core.reporting import build_monthly_income_report
-from scripts.option_positions_core.service import load_option_positions_repo
+from scripts.option_positions_core.service import load_option_positions_repo, require_option_positions_read_repo
 
 
 def resolve_option_positions_repo(*, base: Path, data_config: str | Path | None) -> tuple[Path, Any]:
@@ -25,7 +25,10 @@ def resolve_option_positions_repo(*, base: Path, data_config: str | Path | None)
 
 
 def load_option_position_records(repo: Any) -> list[dict[str, Any]]:
-    primary_repo = getattr(repo, "primary_repo", repo)
+    try:
+        primary_repo = require_option_positions_read_repo(repo)
+    except Exception:
+        primary_repo = getattr(repo, "primary_repo", repo)
     list_position_lots = getattr(primary_repo, "list_position_lots", None)
     if callable(list_position_lots):
         try:

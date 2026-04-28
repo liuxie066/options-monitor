@@ -25,7 +25,11 @@ from scripts.option_positions_core.domain import (
     normalize_status,
     now_ms,
 )
-from scripts.option_positions_core.service import load_table_ref
+from scripts.option_positions_core.service import (
+    load_table_ref,
+    require_option_positions_read_repo,
+    require_option_positions_sync_meta_repo,
+)
 from src.application.option_positions_facade import resolve_option_positions_repo
 
 
@@ -77,7 +81,6 @@ SCHEMA_INTEGER_FIELD_NAMES = {
 class SyncCandidate:
     record_id: str
     fields: dict[str, Any]
-
 
 def normalize_local_fields(fields: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(fields)
@@ -367,13 +370,12 @@ def sync_option_positions(
     limit: int | None = None,
 ) -> list[dict[str, Any]]:
     table_ref = load_table_ref(data_config)
-    primary_repo = getattr(repo, "primary_repo", repo)
-    list_position_lots = getattr(primary_repo, "list_position_lots", None)
-    if not callable(list_position_lots):
-        raise SystemExit("option_positions repo does not support list_position_lots")
+    try:
+        primary_repo = require_option_positions_sync_meta_repo(repo) if apply_mode else require_option_positions_read_repo(repo)
+    except TypeError as exc:
+        raise SystemExit(str(exc))
+    list_position_lots = primary_repo.list_position_lots
     update_position_lot_fields = getattr(primary_repo, "update_position_lot_fields", None)
-    if apply_mode and not callable(update_position_lot_fields):
-        raise SystemExit("option_positions repo does not support update_position_lot_fields")
 
     local_records = list_position_lots()
     candidates = select_candidates(

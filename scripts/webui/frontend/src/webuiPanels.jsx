@@ -3,8 +3,17 @@ import { Dialog, Field, InlineNote, SaveBar, formatAccounts, formatBool } from '
 import { STRATEGY_FIELDS } from './webuiModel.js';
 
 export function MarketPanel({ globalForm, setGlobalForm, onSave }) {
+  const bootstrap = globalForm.marketData.optionPositionsBootstrap;
+  const bootstrapText = bootstrap ? `Option Positions 启动状态：${bootstrap.status}${bootstrap.message ? `；${bootstrap.message}` : ''}` : null;
   return (
     <div className="GlobalPanel">
+      <div className="GlobalOverview">
+        <div>
+          <div className="Eyebrow">行情设置</div>
+          <h2 className="PanelTitle">行情与仓位状态</h2>
+          <p className="PanelText">{bootstrapText || '查看 OpenD 行情配置，并确认 option positions SQLite 启动状态。'}</p>
+        </div>
+      </div>
       <section className="StrategyCard">
         <div className="StrategyHeader"><div><div className="StrategyTitle">行情设置</div><div className="StrategySub">market_data + legacy fetch</div></div><span className="StrategyPill">OPEN</span></div>
         <div className="StrategyGrid">
@@ -12,7 +21,7 @@ export function MarketPanel({ globalForm, setGlobalForm, onSave }) {
           <Field label="OpenD 地址"><input className="Control" value={globalForm.marketData.host} onChange={(e) => setGlobalForm((prev) => ({ ...prev, marketData: { ...prev.marketData, host: e.target.value } }))} placeholder="127.0.0.1" /></Field>
           <Field label="OpenD 端口"><input className="Control" type="number" value={globalForm.marketData.port} onChange={(e) => setGlobalForm((prev) => ({ ...prev, marketData: { ...prev.marketData, port: e.target.value } }))} placeholder="11111" /></Field>
         </div>
-        <div className="PreviewPanel"><InlineNote>当前版本使用兼容双写：这里保存后，会同步更新旧的 symbol fetch 配置，避免现有扫描链路失效。</InlineNote></div>
+        <div className="PreviewPanel"><InlineNote>{bootstrapText ? `当前版本使用兼容双写：这里保存后，会同步更新旧的 symbol fetch 配置，避免现有扫描链路失效。${bootstrap.ok ? '' : ' 当前 option positions 启动处于 degraded 状态，请先运行 healthcheck。'}` : '当前版本使用兼容双写：这里保存后，会同步更新旧的 symbol fetch 配置，避免现有扫描链路失效。'}</InlineNote></div>
       </section>
       <SaveBar title="保存行情设置" desc="保存时会回填旧 fetch 字段。" label="保存行情设置" onSave={onSave} />
     </div>
@@ -65,13 +74,13 @@ export function AccountsPanel({ accounts, form, setForm, onEdit, onDelete, onSav
             </>
           ) : (
             <>
-              <Field label="App Token"><input className="Control" value={form.bitableAppToken} onChange={(e) => setForm((prev) => ({ ...prev, bitableAppToken: e.target.value }))} /></Field>
-              <Field label="数据表 ID"><input className="Control" value={form.bitableTableId} onChange={(e) => setForm((prev) => ({ ...prev, bitableTableId: e.target.value }))} /></Field>
-              <Field label="视图名称"><input className="Control" value={form.bitableViewName} onChange={(e) => setForm((prev) => ({ ...prev, bitableViewName: e.target.value }))} /></Field>
+              <Field label="预留 App Token"><input className="Control" value={form.bitableAppToken} onChange={(e) => setForm((prev) => ({ ...prev, bitableAppToken: e.target.value }))} /></Field>
+              <Field label="预留数据表 ID"><input className="Control" value={form.bitableTableId} onChange={(e) => setForm((prev) => ({ ...prev, bitableTableId: e.target.value }))} /></Field>
+              <Field label="预留视图名称"><input className="Control" value={form.bitableViewName} onChange={(e) => setForm((prev) => ({ ...prev, bitableViewName: e.target.value }))} /></Field>
             </>
           )}
         </div>
-        <div className="PreviewPanel"><InlineNote>{form.accountType === 'futu' ? '兼容版本下，账户级持仓 OpenD 参数会被保留，但运行时仍以现有兼容路径为准。' : '飞书多维表仅展示非敏感连接信息；敏感 token 不会从后端回传。'}</InlineNote></div>
+        <div className="PreviewPanel"><InlineNote>{form.accountType === 'futu' ? '兼容版本下，账户级持仓 OpenD 参数会被保留，但运行时仍以现有兼容路径为准。' : 'external_holdings 的运行时数据源只读取 portfolio.data_config.feishu.tables.holdings；这里的 bitable 字段仅作历史兼容/预留展示。'}</InlineNote></div>
       </section>
       <div className="OpsToolbar"><button className="Button" onClick={onReset}>重置</button><button className="Button ButtonPrimary" onClick={onSave}>保存账户</button></div>
     </div>

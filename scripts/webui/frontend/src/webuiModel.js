@@ -59,6 +59,7 @@ export function buildGlobalForm(summary, editor) {
       host: marketData.host == null ? '' : String(marketData.host),
       port: marketData.port == null ? '' : String(marketData.port),
       mode: String(marketData.mode || 'compat_global'),
+      optionPositionsBootstrap: summary?.sections?.portfolio?.option_positions_bootstrap || null,
     },
     strategy: {
       sell_put: buildSide(summary?.globalStrategy?.sell_put || {}),

@@ -70,10 +70,7 @@ _PERMISSION_BIZ_CODES = {99991401, 99991402}
 # -----------------
 
 
-_token_cache: dict[str, Any] = {
-    "token": None,
-    "expire_at": None,  # datetime
-}
+_token_cache: dict[tuple[str, str], dict[str, Any]] = {}
 _token_lock = threading.Lock()
 
 
@@ -316,13 +313,16 @@ def get_tenant_access_token(app_id: str, app_secret: str, *, force_refresh: bool
       - or token expires in < 5 minutes
     """
 
-    expire_at: datetime | None = _token_cache.get("expire_at")
-    token: str | None = _token_cache.get("token")
+    cache_key = (str(app_id), str(app_secret))
+    cached = _token_cache.get(cache_key) or {}
+    expire_at: datetime | None = cached.get("expire_at")
+    token: str | None = cached.get("token")
 
     with _token_lock:
         # Re-check under lock (another thread may have refreshed)
-        expire_at = _token_cache.get("expire_at")
-        token = _token_cache.get("token")
+        cached = _token_cache.get(cache_key) or {}
+        expire_at = cached.get("expire_at")
+        token = cached.get("token")
 
         if not force_refresh and token and expire_at:
             if expire_at - _now_utc() >= timedelta(minutes=5):
@@ -339,8 +339,10 @@ def get_tenant_access_token(app_id: str, app_secret: str, *, force_refresh: bool
         expire_s = int(res.get("expire", 0) or 0)
         expire_at = _now_utc() + timedelta(seconds=expire_s)
 
-        _token_cache["token"] = token
-        _token_cache["expire_at"] = expire_at
+        _token_cache[cache_key] = {
+            "token": token,
+            "expire_at": expire_at,
+        }
 
         return token
 

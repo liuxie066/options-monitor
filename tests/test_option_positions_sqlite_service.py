@@ -351,6 +351,35 @@ def test_load_option_positions_repo_supports_sqlite_only_mode(tmp_path: Path) ->
     assert len(records) == 1
     assert records[0]["fields"]["symbol"] == "TSLA"
     assert created["created"] is True
+    assert repo.bootstrap_status == "sqlite_only_no_feishu_bootstrap"
+
+
+def test_load_option_positions_repo_marks_degraded_when_feishu_bootstrap_fails(tmp_path: Path) -> None:
+    import scripts.option_positions_core.service as svc
+
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
+    old_list = svc._list_feishu_option_position_records
+    try:
+        svc._list_feishu_option_position_records = lambda _ref: (_ for _ in ()).throw(RuntimeError("feishu unavailable"))  # type: ignore[assignment]
+        repo = svc.load_option_positions_repo(data_config)
+    finally:
+        svc._list_feishu_option_position_records = old_list  # type: ignore[assignment]
+
+    assert repo.count_trade_events() == 0
+    assert repo.bootstrap_status == "degraded_feishu_bootstrap_failed"
+    assert "feishu unavailable" in str(repo.bootstrap_message)
+
+
+def test_sqlite_repo_enables_wal_and_busy_timeout(tmp_path: Path) -> None:
+    import scripts.option_positions_core.service as svc
+
+    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    with repo._connect() as conn:  # type: ignore[attr-defined]
+        journal_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        busy_timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+
+    assert str(journal_mode).lower() == "wal"
+    assert int(busy_timeout) == 5000
 
 
 def test_persist_trade_event_builds_position_lots_projection(tmp_path: Path) -> None:
