@@ -85,6 +85,27 @@ def test_build_open_fields_for_short_put_sets_open_contracts_and_cash() -> None:
     assert fields["last_action_at"] == 1000
 
 
+def test_build_open_fields_canonicalizes_alias_symbol() -> None:
+    fields = build_open_fields(
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="POP",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="HKD",
+            strike=135,
+            multiplier=100,
+            expiration_ymd="2026-04-29",
+            opened_at_ms=1000,
+        )
+    )
+
+    assert fields["symbol"] == "9992.HK"
+    assert fields["position_id"] == "POPMART_20260429_135P_short"
+
+
 def test_build_open_fields_for_short_call_sets_locked_shares() -> None:
     fields = build_open_fields(
         OpenPositionCommand(

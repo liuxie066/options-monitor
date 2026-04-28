@@ -53,6 +53,7 @@ git diff --check
 - 修改通知策略时，必须覆盖：有候选、无候选心跳、通知窗口关闭、quiet hours、缺 target。
 - 修改多账户路径时，必须覆盖账户隔离和 shared context 复用，不允许悄悄回退成每账户重复拉取。
 - 修改配置行为时，必须同步 guardrails 或 config validation 测试。
+- 修改 symbol 归一化 / alias 行为时，必须覆盖跨入口 contract：至少验证 watchlist、持仓写入、trade normalize 或 OpenD 入口会收敛到同一个 canonical symbol。
 
 ## 命名约定
 
