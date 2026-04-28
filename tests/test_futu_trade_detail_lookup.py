@@ -91,6 +91,32 @@ def test_enrich_trade_push_payload_falls_back_to_lookup_without_acc_id(monkeypat
     assert out.diagnostics["matched_via"] == "order_lookup_without_acc_id"
 
 
+def test_enrich_trade_push_payload_unifies_symbol_from_futu_underlying_code(monkeypatch) -> None:
+    class FakeGateway:
+        def get_order_list(self, **kwargs):
+            if "acc_id" in kwargs:
+                return [{"order_id": "order-5", "acc_id": "777", "owner_stock_code": "HK.09992"}]
+            return []
+
+        def get_deal_list(self, **kwargs):
+            return []
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr("scripts.futu_trade_detail_lookup.build_futu_gateway", lambda **kwargs: FakeGateway())
+    out = enrich_trade_push_payload_with_account_id(
+        {"order_id": "order-5", "deal_id": "deal-5", "code": "HK.POP260528P150000"},
+        host="127.0.0.1",
+        port=11111,
+        futu_account_ids=["777"],
+    )
+
+    assert out.payload["futu_account_id"] == "777"
+    assert out.payload["symbol"] == "9992.HK"
+    assert out.diagnostics["matched_via"] == "order_lookup_by_acc_id"
+
+
 def test_enrich_trade_push_payload_records_lookup_errors(monkeypatch) -> None:
     class FakeGateway:
         def get_order_list(self, **kwargs):
