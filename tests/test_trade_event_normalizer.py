@@ -112,3 +112,23 @@ def test_normalize_trade_deal_parses_futu_option_code_with_lookup_underlying_fie
     assert deal.strike == 150.0
     assert deal.expiration_ymd == "2026-05-28"
     assert deal.currency == "HKD"
+
+
+def test_normalize_trade_deal_accepts_futu_underlying_code_format() -> None:
+    deal = normalize_trade_deal(
+        {
+            "deal_id": "deal-5",
+            "futu_account_id": "281756479859383816",
+            "code": "HK.POP260528P150000",
+            "owner_stock_code": "HK.09992",
+            "trd_side": "SELL_SHORT",
+            "qty": 1,
+            "price": 6.3,
+            "create_time": "2026-04-28 10:15:56",
+        },
+        futu_account_mapping={"281756479859383816": "lx"},
+    )
+
+    assert deal.symbol == "9992.HK"
+    assert deal.option_type == "put"
+    assert deal.position_effect == "open"
