@@ -4,8 +4,8 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable
 
 from scripts.futu_gateway import build_futu_gateway
-from scripts.opend_utils import resolve_underlier_alias
-from scripts.trade_event_normalizer import ACCOUNT_ID_KEYS
+from scripts.trade_account_identity import extract_primary_account_id
+from scripts.trade_symbol_identity import normalize_symbol_candidate
 
 
 def _rows(data: Any) -> list[dict[str, Any]]:
@@ -40,26 +40,7 @@ def _matches_identifier(row: dict[str, Any], *, order_id: str, deal_id: str) -> 
 
 
 def _extract_account_id(row: dict[str, Any], *, fallback_acc_id: str) -> str:
-    for key in ACCOUNT_ID_KEYS:
-        value = _norm_str(row.get(key))
-        if value:
-            return value
-    return fallback_acc_id
-
-
-def _normalize_underlying_symbol(value: Any) -> str | None:
-    raw = _norm_str(value)
-    if not raw:
-        return None
-    upper = raw.upper()
-    if upper.startswith("US."):
-        return resolve_underlier_alias(upper[3:]) or None
-    if upper.startswith("HK."):
-        digits = "".join(ch for ch in upper[3:] if ch.isdigit())
-        if digits:
-            return resolve_underlier_alias(f"{int(digits):04d}.HK") or None
-        return None
-    return resolve_underlier_alias(raw) or None
+    return extract_primary_account_id(row) or fallback_acc_id
 
 
 def _resolve_unified_symbol(src: dict[str, Any], row: dict[str, Any]) -> str | None:
@@ -83,7 +64,7 @@ def _resolve_unified_symbol(src: dict[str, Any], row: dict[str, Any]) -> str | N
             "name",
             "underlying",
         ):
-            value = _normalize_underlying_symbol(container.get(key))
+            value = normalize_symbol_candidate(container.get(key))
             if value:
                 return value
     return None
@@ -136,7 +117,7 @@ def enrich_trade_push_payload_with_account_id(
         "query_errors": [],
         "tried_queries": [],
     }
-    existing_account_id = _extract_account_id(src, fallback_acc_id="")
+    existing_account_id = extract_primary_account_id(src) or ""
     if existing_account_id:
         enriched = dict(src)
         enriched["futu_account_id"] = existing_account_id

@@ -6,25 +6,16 @@ from pathlib import Path
 import re
 from typing import Any
 
-from scripts.opend_utils import resolve_underlier_alias
 from scripts.option_positions_core.domain import normalize_currency, normalize_option_type
 from scripts.multiplier_cache import resolve_multiplier_with_source
 from scripts.parse_option_message import parse_exp
 from scripts.trade_account_mapping import resolve_internal_account
-
-ACCOUNT_ID_KEYS = (
-    "futu_account_id",
-    "trd_acc_id",
-    "acc_id",
-    "account_id",
-    "trade_acc_id",
-    "account",
-    "accID",
+from scripts.trade_account_identity import (
+    ACCOUNT_ID_KEYS,
+    extract_primary_account_id,
+    extract_visible_account_fields,
 )
-
-OPTION_CODE_RE = re.compile(
-    r"^(?P<market>[A-Z]{2})\.(?P<root>[A-Z]+)(?P<yy>\d{2})(?P<mm>\d{2})(?P<dd>\d{2})(?P<cp>[CP])(?P<strike>\d+)$"
-)
+from scripts.trade_symbol_identity import OPTION_CODE_RE, normalize_symbol_candidate, pick_first_normalized_symbol
 
 
 def _pick(src: dict[str, Any], *keys: str) -> Any:
@@ -32,43 +23,6 @@ def _pick(src: dict[str, Any], *keys: str) -> Any:
         if key in src and src.get(key) not in (None, ""):
             return src.get(key)
     return None
-
-
-def _normalize_symbol_candidate(value: Any) -> str | None:
-    raw = str(value or "").strip()
-    if not raw:
-        return None
-    upper = raw.upper()
-    option_code_match = OPTION_CODE_RE.match(upper)
-    if option_code_match:
-        return resolve_underlier_alias(option_code_match.group("root")) or None
-    if upper.startswith("US."):
-        return resolve_underlier_alias(upper[3:]) or None
-    if upper.startswith("HK."):
-        digits = "".join(ch for ch in upper[3:] if ch.isdigit())
-        if digits:
-            return resolve_underlier_alias(f"{int(digits):04d}.HK") or None
-        return None
-    return resolve_underlier_alias(raw) or None
-
-
-def _pick_first_normalized_symbol(src: dict[str, Any], *keys: str) -> str | None:
-    for key in keys:
-        value = _normalize_symbol_candidate(src.get(key))
-        if value:
-            return value
-    return None
-
-
-def extract_visible_account_fields(src: dict[str, Any] | Any) -> dict[str, str]:
-    if not isinstance(src, dict):
-        return {}
-    out: dict[str, str] = {}
-    for key in ACCOUNT_ID_KEYS:
-        value = _norm_str(src.get(key))
-        if value:
-            out[key] = value
-    return out
 
 
 def _parse_futu_option_code(code: Any) -> dict[str, Any]:
@@ -216,9 +170,9 @@ def normalize_trade_deal(
 ) -> NormalizedTradeDeal:
     src = payload if isinstance(payload, dict) else {}
     visible_account_fields = extract_visible_account_fields(src)
-    futu_account_id = _norm_str(_pick(src, *ACCOUNT_ID_KEYS))
+    futu_account_id = extract_primary_account_id(src)
     option_code_info = _parse_futu_option_code(_pick(src, "code", "stock_code", "symbol"))
-    symbol = _pick_first_normalized_symbol(
+    symbol = pick_first_normalized_symbol(
         src,
         "symbol",
         "underlying_symbol",
@@ -238,7 +192,7 @@ def normalize_trade_deal(
         "underlying",
     )
     if symbol is None:
-        root_symbol = _normalize_symbol_candidate(option_code_info.get("option_code_root"))
+        root_symbol = normalize_symbol_candidate(option_code_info.get("option_code_root"))
         if root_symbol:
             symbol = root_symbol
 
