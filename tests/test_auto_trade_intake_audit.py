@@ -26,6 +26,8 @@ def test_build_audit_event_promotes_multiplier_source_to_top_level() -> None:
         currency="HKD",
         trade_time_ms=1000,
         raw_payload={"deal_id": "deal-1"},
+        visible_account_fields={"trade_acc_id": "REAL_1"},
+        account_mapping_keys=["REAL_1"],
     )
 
     event = build_trade_intake_audit_event("normalized", deal=deal)
@@ -33,9 +35,12 @@ def test_build_audit_event_promotes_multiplier_source_to_top_level() -> None:
     assert event["phase"] == "normalized"
     assert event["deal_id"] == "deal-1"
     assert event["account"] == "lx"
+    assert event["futu_account_id"] == "REAL_1"
     assert event["multiplier"] == 100
     assert event["multiplier_source"] == "cache"
     assert event["deal"]["multiplier_source"] == "cache"
+    assert event["visible_account_fields"] == {"trade_acc_id": "REAL_1"}
+    assert event["account_mapping_keys"] == ["REAL_1"]
 
 
 def test_process_payload_appends_ledger_persist_audit_on_applied(monkeypatch, tmp_path: Path) -> None:
@@ -86,7 +91,11 @@ def test_process_payload_appends_ledger_persist_audit_on_applied(monkeypatch, tm
     monkeypatch.setattr(intake, "write_trade_intake_state", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(intake, "upsert_deal_state", lambda state, **_kwargs: state)
     monkeypatch.setattr(intake, "append_trade_intake_audit", lambda _path, event: events.append(dict(event)))
-    monkeypatch.setattr(intake, "enrich_trade_push_payload_with_account_id", lambda payload, **kwargs: dict(payload))
+    class _EnrichResult:
+        payload = {"deal_id": "deal-1"}
+        diagnostics = {"matched_via": "not_found"}
+
+    monkeypatch.setattr(intake, "enrich_trade_push_payload_with_account_id", lambda payload, **kwargs: _EnrichResult())
     monkeypatch.setattr(intake, "normalize_trade_deal", lambda payload, futu_account_mapping=None: deal)
     monkeypatch.setattr(intake, "resolve_trade_deal", lambda *args, **kwargs: _Result())
     out = intake._process_payload(
@@ -114,11 +123,11 @@ def test_process_payload_appends_enriched_audit_when_lookup_adds_account(monkeyp
     monkeypatch.setattr(intake, "write_trade_intake_state", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(intake, "upsert_deal_state", lambda state, **_kwargs: state)
     monkeypatch.setattr(intake, "append_trade_intake_audit", lambda _path, event: events.append(dict(event)))
-    monkeypatch.setattr(
-        intake,
-        "enrich_trade_push_payload_with_account_id",
-        lambda payload, **kwargs: {**payload, "futu_account_id": "123"},
-    )
+    class _EnrichResult:
+        payload = {"deal_id": "deal-1", "futu_account_id": "123"}
+        diagnostics = {"matched_via": "deal_lookup_by_acc_id"}
+
+    monkeypatch.setattr(intake, "enrich_trade_push_payload_with_account_id", lambda payload, **kwargs: _EnrichResult())
 
     deal = NormalizedTradeDeal(
         broker="富途",
@@ -175,3 +184,50 @@ def test_process_payload_appends_enriched_audit_when_lookup_adds_account(monkeyp
     )
 
     assert any(event.get("phase") == "enriched" and event.get("payload", {}).get("futu_account_id") == "123" for event in events)
+    assert any(event.get("phase") == "enrichment_lookup" and event.get("enrichment", {}).get("matched_via") == "deal_lookup_by_acc_id" for event in events)
+
+
+def test_build_audit_event_promotes_missing_account_mapping_diagnostics() -> None:
+    deal = NormalizedTradeDeal(
+        broker="富途",
+        futu_account_id="281756479859383816",
+        internal_account=None,
+        deal_id="deal-2",
+        order_id="order-2",
+        symbol="0700.HK",
+        option_type="put",
+        side="sell",
+        position_effect="open",
+        contracts=1,
+        price=1.0,
+        strike=480.0,
+        multiplier=100,
+        multiplier_source="cache",
+        expiration_ymd="2026-04-29",
+        currency="HKD",
+        trade_time_ms=1000,
+        raw_payload={"deal_id": "deal-2", "trade_acc_id": "281756479859383816"},
+        visible_account_fields={"trade_acc_id": "281756479859383816"},
+        account_mapping_keys=["999999999999999999"],
+    )
+
+    event = build_trade_intake_audit_event(
+        "resolved",
+        deal=deal,
+        result={
+            "status": "unresolved",
+            "action": None,
+            "reason": "missing_account_mapping:futu_account_id=281756479859383816",
+            "deal_id": "deal-2",
+            "account": None,
+            "operations": [],
+            "diagnostics": {
+                "futu_account_id": "281756479859383816",
+                "visible_account_fields": {"trade_acc_id": "281756479859383816"},
+                "account_mapping_keys": ["999999999999999999"],
+            },
+        },
+    )
+
+    assert event["futu_account_id"] == "281756479859383816"
+    assert event["diagnostics"]["account_mapping_keys"] == ["999999999999999999"]

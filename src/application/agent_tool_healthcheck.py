@@ -76,6 +76,7 @@ def run_healthcheck_tool(
     primary_errors: list[str] = []
     primary_preview: dict[str, dict[str, Any]] = {}
     account_views = {item.account: item for item in list_account_config_views(cfg)}
+    account_settings = cfg.get("account_settings") if isinstance(cfg.get("account_settings"), dict) else {}
     for account in accounts:
         account_view = account_views[account]
         source_plan = account_view.portfolio_source_plan
@@ -95,6 +96,16 @@ def run_healthcheck_tool(
                 mapping_errors.append(f"{account}: missing trade_intake.account_mapping.futu entry")
                 primary_errors.append(f"{account}: missing trade_intake.account_mapping.futu entry")
                 continue
+            account_setting = account_settings.get(account) if isinstance(account_settings.get(account), dict) else {}
+            futu_setting = account_setting.get("futu") if isinstance(account_setting.get("futu"), dict) else {}
+            configured_acc_id = str(futu_setting.get("account_id") or "").strip()
+            if configured_acc_id and configured_acc_id not in {str(x).strip() for x in mapped_ids}:
+                mapping_errors.append(
+                    f"{account}: account_settings.{account}.futu.account_id={configured_acc_id} missing from trade_intake.account_mapping.futu"
+                )
+                primary_errors.append(
+                    f"{account}: account_settings.{account}.futu.account_id={configured_acc_id} missing from trade_intake.account_mapping.futu"
+                )
             for acc_id in mapped_ids:
                 if str(acc_id).startswith("REAL_"):
                     mapping_errors.append(f"{account}: placeholder futu acc_id {acc_id}")

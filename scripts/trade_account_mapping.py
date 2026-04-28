@@ -3,7 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from scripts.account_config import ACCOUNT_TYPE_FUTU, accounts_from_config, normalize_accounts, resolve_account_type
+from scripts.account_config import (
+    ACCOUNT_TYPE_FUTU,
+    account_settings_from_config,
+    accounts_from_config,
+    normalize_accounts,
+    resolve_account_type,
+)
 
 
 def resolve_trade_intake_config(
@@ -29,6 +35,7 @@ def resolve_trade_intake_config(
     state_path = Path(state_path_override or ti.get("state_path") or "output/state/auto_trade_intake_state.json")
     audit_path = Path(audit_path_override or ti.get("audit_path") or "output/state/auto_trade_intake_audit.jsonl")
     account_mapping = resolve_futu_account_mapping(src)
+    futu_lookup_account_ids = resolve_futu_lookup_account_ids(src, account_mapping=account_mapping)
 
     return {
         "enabled": enabled,
@@ -37,7 +44,7 @@ def resolve_trade_intake_config(
         "audit_path": audit_path,
         "reconnect_sec": reconnect_sec,
         "account_mapping": account_mapping,
-        "futu_account_ids": sorted(account_mapping.keys()),
+        "futu_account_ids": futu_lookup_account_ids,
     }
 
 
@@ -83,6 +90,36 @@ def resolve_internal_account(
     if value is None:
         return None
     return str(value).strip().lower() or None
+
+
+def resolve_futu_lookup_account_ids(
+    cfg: dict[str, Any] | None,
+    *,
+    account_mapping: dict[str, str] | None = None,
+) -> list[str]:
+    src = cfg if isinstance(cfg, dict) else {}
+    mapping = account_mapping if isinstance(account_mapping, dict) else resolve_futu_account_mapping(src)
+    seen: set[str] = set()
+    out: list[str] = []
+
+    for raw_key in mapping.keys():
+        key = str(raw_key or "").strip()
+        if key and key not in seen:
+            seen.add(key)
+            out.append(key)
+
+    settings = account_settings_from_config(src)
+    for account in accounts_from_config(src):
+        if resolve_account_type(src, account=account) != ACCOUNT_TYPE_FUTU:
+            continue
+        futu_cfg = settings.get(account, {}).get("futu") if isinstance(settings.get(account), dict) else None
+        if not isinstance(futu_cfg, dict):
+            continue
+        account_id = str(futu_cfg.get("account_id") or "").strip()
+        if account_id and account_id not in seen:
+            seen.add(account_id)
+            out.append(account_id)
+    return out
 
 
 def resolve_recognized_accounts(cfg: dict[str, Any] | None) -> list[str]:

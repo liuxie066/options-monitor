@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -10,12 +10,33 @@ from scripts.multiplier_cache import resolve_multiplier_with_source
 from scripts.parse_option_message import normalize_symbol, parse_exp
 from scripts.trade_account_mapping import resolve_internal_account
 
+ACCOUNT_ID_KEYS = (
+    "futu_account_id",
+    "trd_acc_id",
+    "acc_id",
+    "account_id",
+    "trade_acc_id",
+    "account",
+    "accID",
+)
+
 
 def _pick(src: dict[str, Any], *keys: str) -> Any:
     for key in keys:
         if key in src and src.get(key) not in (None, ""):
             return src.get(key)
     return None
+
+
+def extract_visible_account_fields(src: dict[str, Any] | Any) -> dict[str, str]:
+    if not isinstance(src, dict):
+        return {}
+    out: dict[str, str] = {}
+    for key in ACCOUNT_ID_KEYS:
+        value = _norm_str(src.get(key))
+        if value:
+            out[key] = value
+    return out
 
 
 def _norm_str(value: Any) -> str | None:
@@ -119,6 +140,8 @@ class NormalizedTradeDeal:
     currency: str | None
     trade_time_ms: int | None
     raw_payload: dict[str, Any]
+    visible_account_fields: dict[str, str] = field(default_factory=dict)
+    account_mapping_keys: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -130,10 +153,8 @@ def normalize_trade_deal(
     futu_account_mapping: dict[str, str] | None = None,
 ) -> NormalizedTradeDeal:
     src = payload if isinstance(payload, dict) else {}
-
-    futu_account_id = _norm_str(
-        _pick(src, "futu_account_id", "trd_acc_id", "account_id", "account")
-    )
+    visible_account_fields = extract_visible_account_fields(src)
+    futu_account_id = _norm_str(_pick(src, *ACCOUNT_ID_KEYS))
     symbol = normalize_symbol(str(_pick(src, "symbol", "stock_code", "code", "underlying") or ""))
 
     option_type_raw = _pick(src, "option_type", "put_call", "call_or_put")
@@ -183,4 +204,6 @@ def normalize_trade_deal(
         currency=currency,
         trade_time_ms=_normalize_trade_time_ms(_pick(src, "trade_time_ms", "create_time", "updated_time")),
         raw_payload=dict(src),
+        visible_account_fields=visible_account_fields,
+        account_mapping_keys=sorted(str(key).strip() for key in (futu_account_mapping or {}).keys() if str(key).strip()),
     )

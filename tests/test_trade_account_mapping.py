@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from scripts.trade_account_mapping import (
     resolve_futu_account_mapping,
+    resolve_futu_lookup_account_ids,
     resolve_internal_account,
     resolve_trade_intake_config,
 )
@@ -63,3 +64,18 @@ def test_resolve_trade_intake_config_uses_defaults() -> None:
     assert out["enabled"] is True
     assert out["mode"] == "dry-run"
     assert str(out["state_path"]).endswith("output/state/auto_trade_intake_state.json")
+
+
+def test_resolve_futu_lookup_account_ids_merges_account_settings_account_id() -> None:
+    cfg = {
+        "accounts": ["lx", "sy"],
+        "account_settings": {
+            "lx": {"type": "futu", "futu": {"account_id": "222"}},
+            "sy": {"type": "external_holdings", "holdings_account": "sy"},
+        },
+        "trade_intake": {"account_mapping": {"futu": {"111": "lx"}}},
+    }
+
+    out = resolve_futu_lookup_account_ids(cfg)
+
+    assert out == ["111", "222"]
