@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.1.0-beta.13 - 2026-04-28
+
+### Changed
+- Made trade-intake normalization accept Futu option-code payloads by backfilling lookup row fields and deriving symbol, option type, strike, and expiration from enriched OpenD trade data
+
 ## 0.1.0-beta.12 - 2026-04-28
 
 ### Changed
