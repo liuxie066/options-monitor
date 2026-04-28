@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.2.0-beta.3 - 2026-04-28
+
+### Changed
+- Added a final Futu option-code root fallback for trade intake so payloads like `HK.POP260528P150000` can resolve `symbol=9992.HK` even when no underlying fields are present in the raw push or lookup response
+
 ## 0.2.0-beta.2 - 2026-04-28
 
 ### Changed

@@ -34,6 +34,7 @@ os.environ.setdefault('OPENAPI_LOG_LEVEL', 'ERROR')
 ALIASES = {
     '腾讯': '0700.HK',
     '腾讯控股': '0700.HK',
+    'POP': '9992.HK',
     '泡泡玛特': '9992.HK',
     '美团': '3690.HK',
     '美团w': '3690.HK',
