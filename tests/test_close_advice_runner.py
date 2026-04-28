@@ -107,7 +107,26 @@ def test_run_close_advice_records_missing_quote_but_does_not_notify(tmp_path: Pa
         encoding="utf-8",
     )
     required_root = tmp_path / "required_data"
-    (required_root / "parsed").mkdir(parents=True)
+    parsed = required_root / "parsed"
+    parsed.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "0700.HK",
+                "option_type": "put",
+                "expiration": "2026-04-29",
+                "strike": 480,
+                "mid": None,
+                "last_price": None,
+                "bid": None,
+                "ask": None,
+                "dte": 8,
+                "multiplier": 100,
+                "spot": 500,
+                "currency": "HKD",
+            }
+        ]
+    ).to_csv(parsed / "0700.HK_required_data.csv", index=False)
     out_dir = tmp_path / "reports"
 
     run_close_advice(
@@ -146,7 +165,26 @@ def test_run_close_advice_fetches_missing_quote_via_opend(tmp_path: Path, monkey
         encoding="utf-8",
     )
     required_root = tmp_path / "required_data"
-    (required_root / "parsed").mkdir(parents=True)
+    parsed = required_root / "parsed"
+    parsed.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "0700.HK",
+                "option_type": "put",
+                "expiration": "2026-04-29",
+                "strike": 480,
+                "mid": None,
+                "last_price": None,
+                "bid": None,
+                "ask": None,
+                "dte": 8,
+                "multiplier": 100,
+                "spot": 500,
+                "currency": "HKD",
+            }
+        ]
+    ).to_csv(parsed / "0700.HK_required_data.csv", index=False)
     out_dir = tmp_path / "reports"
 
     calls: list[dict[str, object]] = []
@@ -304,8 +342,79 @@ def test_run_close_advice_reports_quote_issue_summary(tmp_path: Path) -> None:
     assert result["notify_rows"] == 0
     assert result["quote_issue_rows"] == 1
     assert result["flag_counts"]["missing_quote"] == 1
+    assert result["flag_counts"]["required_data_missing_expiration"] == 1
     assert result["tier_counts"]["none"] == 1
-    assert result["quote_issue_samples"] == ["AAPL put 2026-05-15 100.00P: OpenD 拉取失败 | opend=US.AAPL"]
+    assert result["coverage_summary"]["positions_missing_expiration"] == 1
+    assert result["quote_issue_samples"] == ["AAPL put 2026-05-15 100.00P: 缺少到期日覆盖"]
+
+
+def test_run_close_advice_reports_missing_expiration_coverage_without_opend_fetch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    ctx_path = tmp_path / "option_positions_context.json"
+    ctx_path.write_text(
+        json.dumps(
+            {
+                "open_positions_min": [
+                    {
+                        "account": "lx",
+                        "symbol": "9992.HK",
+                        "option_type": "put",
+                        "side": "short",
+                        "contracts_open": 1,
+                        "currency": "HKD",
+                        "strike": 135,
+                        "multiplier": 100,
+                        "premium": 0.88,
+                        "expiration": "2026-04-29",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    required_root = tmp_path / "required_data"
+    parsed = required_root / "parsed"
+    parsed.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "9992.HK",
+                "option_type": "put",
+                "expiration": "2026-05-28",
+                "strike": 135,
+                "mid": 0.04,
+                "bid": 0.03,
+                "ask": 0.05,
+                "dte": 30,
+                "multiplier": 100,
+                "spot": 150,
+                "currency": "HKD",
+            }
+        ]
+    ).to_csv(parsed / "9992.HK_required_data.csv", index=False)
+
+    def fail_fetch_symbol(symbol: str, **kwargs: object) -> dict[str, object]:
+        raise AssertionError(f"unexpected OpenD fetch for {symbol}: {kwargs}")
+
+    monkeypatch.setattr("scripts.fetch_market_data_opend.fetch_symbol", fail_fetch_symbol)
+
+    out_dir = tmp_path / "reports"
+    result = run_close_advice(
+        config={
+            "close_advice": {"enabled": True},
+            "symbols": [{"symbol": "9992.HK", "fetch": {"source": "futu", "limit_expirations": 1}}],
+        },
+        context_path=ctx_path,
+        required_data_root=required_root,
+        output_dir=out_dir,
+        base_dir=Path.cwd(),
+    )
+
+    csv_text = (out_dir / "close_advice.csv").read_text(encoding="utf-8")
+    assert "required_data_missing_expiration" in csv_text
+    assert "opend_fetch_no_usable_quote" not in csv_text
+    assert result["coverage_summary"]["positions_missing_expiration"] == 1
+    assert result["quote_fetch_diagnostics"]["attempted"] == 0
+    assert result["quote_issue_samples"] == ["9992.HK put 2026-04-29 135.00P: 缺少到期日覆盖 | have=2026-05-28"]
 
 
 def test_run_close_advice_fee_can_block_gross_strong_signal(tmp_path: Path) -> None:
@@ -825,6 +934,24 @@ def test_run_close_advice_fetches_quote_for_alias_symbol_via_opend(tmp_path: Pat
     required_root = tmp_path / "required_data"
     parsed = required_root / "parsed"
     parsed.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "9992.HK",
+                "option_type": "put",
+                "expiration": "2026-04-29",
+                "strike": 135,
+                "mid": None,
+                "last_price": None,
+                "bid": None,
+                "ask": None,
+                "dte": 1,
+                "multiplier": 100,
+                "spot": 140,
+                "currency": "HKD",
+            }
+        ]
+    ).to_csv(parsed / "9992.HK_required_data.csv", index=False)
     out_dir = tmp_path / "reports"
 
     calls: list[dict[str, object]] = []
@@ -895,7 +1022,26 @@ def test_run_close_advice_required_data_mode_does_not_fetch(tmp_path: Path, monk
         encoding="utf-8",
     )
     required_root = tmp_path / "required_data"
-    (required_root / "parsed").mkdir(parents=True)
+    parsed = required_root / "parsed"
+    parsed.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "AAPL",
+                "option_type": "put",
+                "expiration": "2026-05-15",
+                "strike": 100,
+                "mid": None,
+                "last_price": None,
+                "bid": None,
+                "ask": None,
+                "dte": 17,
+                "multiplier": 100,
+                "spot": 110,
+                "currency": "USD",
+            }
+        ]
+    ).to_csv(parsed / "AAPL_required_data.csv", index=False)
 
     def fake_fetch_symbol(symbol: str, **kwargs: object) -> dict[str, object]:
         raise AssertionError(f"unexpected fetch for {symbol}")
@@ -941,7 +1087,26 @@ def test_run_close_advice_non_futu_source_skips_opend_fetch(tmp_path: Path, monk
         encoding="utf-8",
     )
     required_root = tmp_path / "required_data"
-    (required_root / "parsed").mkdir(parents=True)
+    parsed = required_root / "parsed"
+    parsed.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "AAPL",
+                "option_type": "put",
+                "expiration": "2026-05-15",
+                "strike": 100,
+                "mid": None,
+                "last_price": None,
+                "bid": None,
+                "ask": None,
+                "dte": 17,
+                "multiplier": 100,
+                "spot": 110,
+                "currency": "USD",
+            }
+        ]
+    ).to_csv(parsed / "AAPL_required_data.csv", index=False)
 
     def fake_fetch_symbol(symbol: str, **kwargs: object) -> dict[str, object]:
         raise AssertionError(f"unexpected OpenD fetch for {symbol}")
@@ -960,7 +1125,7 @@ def test_run_close_advice_non_futu_source_skips_opend_fetch(tmp_path: Path, monk
     )
 
     csv_text = ((tmp_path / "reports") / "close_advice.csv").read_text(encoding="utf-8")
-    assert "missing_quote" in csv_text
+    assert "missing_mid" in csv_text
     assert "opend_fetch_skipped_non_futu_source" in csv_text
 
 
@@ -990,7 +1155,26 @@ def test_run_close_advice_preserves_missing_flag_when_opend_fetch_errors(
         encoding="utf-8",
     )
     required_root = tmp_path / "required_data"
-    (required_root / "parsed").mkdir(parents=True)
+    parsed = required_root / "parsed"
+    parsed.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "0700.HK",
+                "option_type": "put",
+                "expiration": "2026-04-29",
+                "strike": 480,
+                "mid": None,
+                "last_price": None,
+                "bid": None,
+                "ask": None,
+                "dte": 1,
+                "multiplier": 100,
+                "spot": 500,
+                "currency": "HKD",
+            }
+        ]
+    ).to_csv(parsed / "0700.HK_required_data.csv", index=False)
 
     def fake_fetch_symbol(symbol: str, **kwargs: object) -> dict[str, object]:
         raise RuntimeError("opend unavailable")
@@ -1009,7 +1193,7 @@ def test_run_close_advice_preserves_missing_flag_when_opend_fetch_errors(
     )
 
     csv_text = ((tmp_path / "reports") / "close_advice.csv").read_text(encoding="utf-8")
-    assert "missing_quote" in csv_text
+    assert "missing_mid" in csv_text
     assert "opend_fetch_error" in csv_text
 
 
@@ -1039,7 +1223,26 @@ def test_run_close_advice_surfaces_rate_limit_sample_when_opend_is_limited(
         encoding="utf-8",
     )
     required_root = tmp_path / "required_data"
-    (required_root / "parsed").mkdir(parents=True)
+    parsed = required_root / "parsed"
+    parsed.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "0700.HK",
+                "option_type": "put",
+                "expiration": "2026-04-29",
+                "strike": 480,
+                "mid": None,
+                "last_price": None,
+                "bid": None,
+                "ask": None,
+                "dte": 1,
+                "multiplier": 100,
+                "spot": 500,
+                "currency": "HKD",
+            }
+        ]
+    ).to_csv(parsed / "0700.HK_required_data.csv", index=False)
 
     def fake_fetch_symbol(symbol: str, **kwargs: object) -> dict[str, object]:
         raise RuntimeError("get_option_chain failed after 4 attempts: rate limit 最多10次")

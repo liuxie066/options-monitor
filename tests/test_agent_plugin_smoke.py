@@ -419,19 +419,29 @@ def test_prepare_close_advice_inputs_builds_context_and_required_data(monkeypatc
             assert kwargs["account"] == "user1"
             return ({
                 "open_positions_min": [
-                    {"symbol": "NVDA", "option_type": "put", "strike": 100, "expiration": "2026-06-19"}
+                    {"symbol": "NVDA", "option_type": "put", "strike": 100, "expiration": "2026-06-19"},
+                    {"symbol": "NVDA", "option_type": "call", "strike": 120, "expiration": "2026-07-17"},
                 ]
             }, True)
 
         def _fake_fetch_symbol_opend(symbol, **kwargs):  # type: ignore[no-untyped-def]
             assert symbol == "NVDA"
+            assert kwargs["explicit_expirations"] == ["2026-06-19", "2026-07-17"]
+            assert kwargs["option_types"] == "call,put"
+            assert kwargs["min_strike"] == 100
+            assert kwargs["max_strike"] == 120
             return {"rows": [{"symbol": "NVDA"}], "expiration_count": 2}
 
         def _fake_save_required_data_opend(base, symbol, payload, *, output_root):  # type: ignore[no-untyped-def]
             parsed = output_root / "parsed"
             parsed.mkdir(parents=True, exist_ok=True)
             csv_path = parsed / f"{symbol}_required_data.csv"
-            csv_path.write_text("symbol\nNVDA\n", encoding="utf-8")
+            csv_path.write_text(
+                "symbol,option_type,expiration,strike\n"
+                "NVDA,put,2026-06-19,100\n"
+                "NVDA,call,2026-07-17,120\n",
+                encoding="utf-8",
+            )
             return output_root / "raw" / f"{symbol}_required_data.json", csv_path
 
         tools.load_option_positions_context = _fake_load_option_positions_context  # type: ignore[assignment]
@@ -447,7 +457,70 @@ def test_prepare_close_advice_inputs_builds_context_and_required_data(monkeypatc
     assert out["data"]["account"] == "user1"
     assert out["data"]["symbol_count"] == 1
     assert out["data"]["symbols"][0]["symbol"] == "NVDA"
+    assert out["data"]["symbols"][0]["position_coverage_ok"] is True
+    assert out["data"]["coverage_summary"]["covered_symbol_count"] == 1
     assert out["meta"]["required_data_root"] == ".../required_data"
+
+
+def test_prepare_close_advice_inputs_reports_missing_required_expirations(monkeypatch, tmp_path: Path) -> None:
+    from scripts.agent_plugin.main import run_tool
+    import scripts.agent_plugin.tools as tools
+
+    cfg_path = tmp_path / "config.us.json"
+    secrets_dir = tmp_path / "secrets"
+    secrets_dir.mkdir()
+    (secrets_dir / "portfolio.sqlite.json").write_text(
+        json.dumps({"option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"}}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    cfg = _public_cfg_with_futu("secrets/portfolio.sqlite.json")
+    cfg["symbols"][0]["symbol"] = "9992.HK"
+    cfg["symbols"][0]["fetch"]["limit_expirations"] = 1
+    cfg["close_advice"] = {"enabled": True}
+    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    old_load = tools.load_option_positions_context
+    old_opend = tools.fetch_symbol_opend
+    old_save = tools.save_required_data_opend
+    try:
+        def _fake_load_option_positions_context(**kwargs):  # type: ignore[no-untyped-def]
+            return ({
+                "open_positions_min": [
+                    {"symbol": "9992.HK", "option_type": "put", "strike": 135, "expiration": "2026-04-29"},
+                    {"symbol": "9992.HK", "option_type": "call", "strike": 200, "expiration": "2026-06-29"},
+                ]
+            }, True)
+
+        def _fake_fetch_symbol_opend(symbol, **kwargs):  # type: ignore[no-untyped-def]
+            assert symbol == "9992.HK"
+            assert kwargs["explicit_expirations"] == ["2026-04-29", "2026-06-29"]
+            return {"rows": [{"symbol": "9992.HK"}], "expiration_count": 1}
+
+        def _fake_save_required_data_opend(base, symbol, payload, *, output_root):  # type: ignore[no-untyped-def]
+            parsed = output_root / "parsed"
+            parsed.mkdir(parents=True, exist_ok=True)
+            csv_path = parsed / f"{symbol}_required_data.csv"
+            csv_path.write_text(
+                "symbol,option_type,expiration,strike\n"
+                "9992.HK,put,2026-05-28,135\n",
+                encoding="utf-8",
+            )
+            return output_root / "raw" / f"{symbol}_required_data.json", csv_path
+
+        tools.load_option_positions_context = _fake_load_option_positions_context  # type: ignore[assignment]
+        tools.fetch_symbol_opend = _fake_fetch_symbol_opend  # type: ignore[assignment]
+        tools.save_required_data_opend = _fake_save_required_data_opend  # type: ignore[assignment]
+        out = run_tool("prepare_close_advice_inputs", {"config_path": str(cfg_path), "output_dir": str(tmp_path / "output" / "agent_plugin")})
+    finally:
+        tools.load_option_positions_context = old_load  # type: ignore[assignment]
+        tools.fetch_symbol_opend = old_opend  # type: ignore[assignment]
+        tools.save_required_data_opend = old_save  # type: ignore[assignment]
+
+    assert out["ok"] is True
+    assert out["data"]["symbols"][0]["missing_expirations"] == ["2026-04-29", "2026-06-29"]
+    assert out["data"]["symbols"][0]["position_coverage_ok"] is False
+    assert out["data"]["coverage_summary"]["positions_missing_coverage"] == 2
+    assert "missing required expirations" in out["warnings"][0]
 
 
 def test_prepare_close_advice_inputs_returns_empty_result_when_context_has_no_positions(tmp_path: Path) -> None:

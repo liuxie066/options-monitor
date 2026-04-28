@@ -48,6 +48,8 @@ OUTPUT_COLUMNS = [
 QUOTE_ISSUE_FLAGS = {
     "missing_quote",
     "missing_mid",
+    "required_data_missing_expiration",
+    "required_data_missing_contract",
     "opend_fetch_error",
     "opend_fetch_no_usable_quote",
     "spread_too_wide",
@@ -154,6 +156,42 @@ def load_required_data_quotes(
     return quotes
 
 
+def load_required_data_coverage(
+    required_data_root: Path,
+    symbols: set[str] | None = None,
+    *,
+    base_dir: Path | None = None,
+) -> tuple[set[tuple[str, str, str, str]], dict[str, set[str]]]:
+    root = Path(required_data_root)
+    parsed = root / "parsed"
+    covered_keys: set[tuple[str, str, str, str]] = set()
+    expirations_by_symbol: dict[str, set[str]] = {}
+    if not parsed.exists():
+        return covered_keys, expirations_by_symbol
+
+    for path in sorted(parsed.glob("*_required_data.csv")):
+        sym_from_name = path.name.removesuffix("_required_data.csv").upper()
+        if symbols and sym_from_name not in symbols:
+            continue
+        df = safe_read_csv(path)
+        if df.empty:
+            continue
+        for _, row0 in df.iterrows():
+            row = row0.to_dict()
+            key = _quote_key(
+                row.get("symbol") or sym_from_name,
+                row.get("option_type"),
+                row.get("expiration"),
+                row.get("strike"),
+                base_dir=base_dir,
+            )
+            if not all(key):
+                continue
+            covered_keys.add(key)
+            expirations_by_symbol.setdefault(key[0], set()).add(key[2])
+    return covered_keys, expirations_by_symbol
+
+
 def _symbol_config_by_symbol(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
     items = config.get("symbols") if isinstance(config, dict) else []
     out: dict[str, dict[str, Any]] = {}
@@ -199,6 +237,7 @@ def _fetch_missing_quotes_via_opend(
     config: dict[str, Any],
     positions: list[dict[str, Any]],
     quotes: dict[tuple[str, str, str, str], dict[str, Any]],
+    covered_keys: set[tuple[str, str, str, str]],
     base_dir: Path,
 ) -> tuple[dict[tuple[str, str, str, str], str], dict[tuple[str, str, str, str], dict[str, Any]]]:
     advice_cfg = config.get("close_advice") if isinstance(config, dict) else {}
@@ -213,7 +252,7 @@ def _fetch_missing_quotes_via_opend(
         if not isinstance(pos, dict):
             continue
         key = _quote_key(pos.get("symbol"), pos.get("option_type"), _position_expiration(pos), pos.get("strike"), base_dir=base_dir)
-        if all(key) and not _quote_has_usable_price(quotes.get(key)):
+        if all(key) and key in covered_keys and not _quote_has_usable_price(quotes.get(key)):
             missing_by_symbol.setdefault(key[0], []).append(pos)
 
     if not missing_by_symbol:
@@ -303,6 +342,31 @@ def _fetch_missing_quotes_via_opend(
     return attempted_reasons, attempted_details
 
 
+def _classify_required_data_coverage(
+    positions: list[dict[str, Any]],
+    covered_keys: set[tuple[str, str, str, str]],
+    expirations_by_symbol: dict[str, set[str]],
+    *,
+    base_dir: Path,
+) -> tuple[dict[tuple[str, str, str, str], str], dict[tuple[str, str, str, str], dict[str, Any]]]:
+    reasons: dict[tuple[str, str, str, str], str] = {}
+    details: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    for pos in positions:
+        if not isinstance(pos, dict):
+            continue
+        key = _quote_key(pos.get("symbol"), pos.get("option_type"), _position_expiration(pos), pos.get("strike"), base_dir=base_dir)
+        if not all(key) or key in covered_keys:
+            continue
+        available_expirations = sorted(expirations_by_symbol.get(key[0]) or set())
+        has_expiration = bool(key[2] and key[2] in (expirations_by_symbol.get(key[0]) or set()))
+        reasons[key] = "required_data_missing_contract" if has_expiration else "required_data_missing_expiration"
+        details[key] = {
+            "quote_key": "|".join(key),
+            "available_expirations": available_expirations[:5],
+        }
+    return reasons, details
+
+
 def _quote_observability_flags(
     key: tuple[str, str, str, str],
     quote: dict[str, Any] | None,
@@ -334,8 +398,8 @@ def _filter_positions_by_markets(positions: list[dict[str, Any]], markets_to_run
 
 def _build_quote_issue_samples(
     positions: list[dict[str, Any]],
-    attempted_fetch_reasons: dict[tuple[str, str, str, str], str],
-    attempted_fetch_details: dict[tuple[str, str, str, str], dict[str, Any]],
+    issue_reasons: dict[tuple[str, str, str, str], str],
+    issue_details: dict[tuple[str, str, str, str], dict[str, Any]],
     *,
     base_dir: Path | None = None,
     limit: int = 3,
@@ -345,7 +409,7 @@ def _build_quote_issue_samples(
         if not isinstance(pos, dict):
             continue
         key = _quote_key(pos.get("symbol"), pos.get("option_type"), _position_expiration(pos), pos.get("strike"), base_dir=base_dir)
-        reason = attempted_fetch_reasons.get(key)
+        reason = issue_reasons.get(key)
         if not reason:
             continue
         opt = _norm_option_type(pos.get("option_type")) or "option"
@@ -353,6 +417,8 @@ def _build_quote_issue_samples(
         strike = _num(pos.get("strike"))
         suffix = "P" if opt == "put" else ("C" if opt == "call" else "")
         reason_label = {
+            "required_data_missing_expiration": "缺少到期日覆盖",
+            "required_data_missing_contract": "缺少合约覆盖",
             "opend_fetch_no_usable_quote": "无可用报价",
             "opend_fetch_error_rate_limit": "OpenD 限频",
             "opend_fetch_error_retry_budget": "OpenD 重试预算耗尽",
@@ -361,11 +427,14 @@ def _build_quote_issue_samples(
             "opend_fetch_skipped_missing_expiration": "缺少到期日，跳过补拉",
             "opend_fetch_skipped_invalid_strike": "缺少有效行权价，跳过补拉",
         }.get(reason, reason)
-        detail = attempted_fetch_details.get(key) or {}
+        detail = issue_details.get(key) or {}
         diag = ""
         resolved_underlier = str(detail.get("resolved_underlier") or "").strip()
         requested_symbol = str(detail.get("requested_symbol") or "").strip()
-        if resolved_underlier:
+        available_expirations = [str(x).strip() for x in (detail.get("available_expirations") or []) if str(x).strip()]
+        if available_expirations:
+            diag = f" | have={','.join(available_expirations[:3])}"
+        elif resolved_underlier:
             diag = f" | opend={resolved_underlier}"
         elif requested_symbol:
             diag = f" | requested={requested_symbol}"
@@ -629,12 +698,22 @@ def run_close_advice(
     positions = _filter_positions_by_markets(positions, markets_to_run)
     symbols = {_norm_symbol(p.get("symbol"), base_dir=Path(base_dir)) for p in positions if isinstance(p, dict) and p.get("symbol")}
     quotes = load_required_data_quotes(Path(required_data_root), symbols=symbols, base_dir=Path(base_dir))
+    covered_keys, expirations_by_symbol = load_required_data_coverage(Path(required_data_root), symbols=symbols, base_dir=Path(base_dir))
+    coverage_reasons, coverage_details = _classify_required_data_coverage(
+        positions,
+        covered_keys,
+        expirations_by_symbol,
+        base_dir=Path(base_dir),
+    )
     attempted_fetch_reasons, attempted_fetch_details = _fetch_missing_quotes_via_opend(
         config=config,
         positions=positions,
         quotes=quotes,
+        covered_keys=covered_keys,
         base_dir=Path(base_dir),
     )
+    issue_reasons = {**coverage_reasons, **attempted_fetch_reasons}
+    issue_details = {**coverage_details, **attempted_fetch_details}
 
     cfg = CloseAdviceConfig.from_mapping(advice_cfg)
     rows: list[dict[str, Any]] = []
@@ -647,7 +726,7 @@ def run_close_advice(
         inp, quote_flags = _position_to_input(pos0, quote)
         row = evaluate_close_advice(inp, cfg)
         row = _with_extra_flags(row, quote_flags)
-        row = _with_extra_flags(row, _quote_observability_flags(key, quote, attempted_fetch_reasons))
+        row = _with_extra_flags(row, _quote_observability_flags(key, quote, issue_reasons))
         row = _apply_buy_to_close_fee(row)
         row = _apply_fee_profitability_gate(row)
         rows.append(row)
@@ -674,10 +753,15 @@ def run_close_advice(
     atomic_write_text(text_path, text, encoding="utf-8")
     quote_issue_samples = _build_quote_issue_samples(
         positions,
-        attempted_fetch_reasons,
-        attempted_fetch_details,
+        issue_reasons,
+        issue_details,
         base_dir=Path(base_dir),
     )
+    coverage_summary = {
+        "covered_contracts": len(covered_keys),
+        "positions_missing_expiration": sum(1 for reason in coverage_reasons.values() if reason == "required_data_missing_expiration"),
+        "positions_missing_contract": sum(1 for reason in coverage_reasons.values() if reason == "required_data_missing_contract"),
+    }
 
     return {
         "enabled": True,
@@ -687,7 +771,8 @@ def run_close_advice(
         "flag_counts": flag_counts,
         "quote_issue_rows": quote_issue_rows,
         "quote_issue_samples": quote_issue_samples,
-        "quote_fetch_diagnostics": {"attempted": len(attempted_fetch_details)},
+        "coverage_summary": coverage_summary,
+        "quote_fetch_diagnostics": {"attempted": len(attempted_fetch_details), "coverage_missing": len(coverage_reasons)},
         "csv": str(csv_path),
         "text": str(text_path),
     }
