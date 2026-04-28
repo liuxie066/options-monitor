@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+from collections import OrderedDict
 import json
 import math
 from datetime import datetime, timezone
@@ -42,6 +43,15 @@ OUTPUT_COLUMNS = [
     "reason",
     "data_quality_flags",
 ]
+
+QUOTE_ISSUE_FLAGS = {
+    "missing_quote",
+    "missing_mid",
+    "opend_fetch_error",
+    "opend_fetch_no_usable_quote",
+    "spread_too_wide",
+    "invalid_spread",
+}
 
 
 def _norm_symbol(value: Any) -> str:
@@ -429,6 +439,21 @@ def _apply_buy_to_close_fee(row: dict[str, Any]) -> dict[str, Any]:
     return row
 
 
+def _apply_fee_profitability_gate(row: dict[str, Any]) -> dict[str, Any]:
+    realized = safe_float(row.get("realized_if_close"))
+    if realized is None:
+        return row
+    if str(row.get("tier") or "").strip().lower() == "none":
+        return row
+    if realized > 0:
+        return row
+    row = _with_extra_flags(row, ["not_profitable_after_fee"])
+    row["tier"] = "none"
+    row["tier_label"] = "不提醒"
+    row["reason"] = "扣除平仓手续费后已无正收益，不建议作为收益型买回提醒"
+    return row
+
+
 def _with_extra_flags(row: dict[str, Any], flags: list[str]) -> dict[str, Any]:
     cur = [x for x in str(row.get("data_quality_flags") or "").split(";") if x]
     for flag in flags:
@@ -444,9 +469,11 @@ def _money(value: Any, currency: Any) -> str:
         return "-"
     ccy = str(currency or "").strip().upper()
     prefix = "$" if ccy == "USD" else ("HK$" if ccy == "HKD" else "")
+    abs_v = abs(v)
+    fmt = f"{v:,.2f}" if abs_v < 100 else f"{v:,.0f}"
     if prefix:
-        return f"{prefix}{v:,.0f}"
-    return f"{v:,.0f} {ccy}".strip()
+        return f"{prefix}{fmt}"
+    return f"{fmt} {ccy}".strip()
 
 
 def _pct(value: Any) -> str:
@@ -463,38 +490,60 @@ def _num(value: Any) -> str:
     return f"{v:.2f}"
 
 
+def _selected_notify_rows(rows: list[dict[str, Any]], *, notify_levels: set[str], max_items: int) -> list[dict[str, Any]]:
+    grouped: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
+    for row in sort_advice_rows(rows):
+        if str(row.get("tier") or "").strip().lower() not in notify_levels:
+            continue
+        acct = str(row.get("account") or "当前账户").strip().lower() or "当前账户"
+        grouped.setdefault(acct, []).append(row)
+    selected: list[dict[str, Any]] = []
+    for acct_rows in grouped.values():
+        if max_items > 0:
+            selected.extend(acct_rows[:max_items])
+        else:
+            selected.extend(acct_rows)
+    return selected
+
+
 def render_markdown(rows: list[dict[str, Any]], *, notify_levels: set[str], max_items: int) -> str:
-    selected = [r for r in sort_advice_rows(rows) if str(r.get("tier") or "") in notify_levels]
-    if max_items > 0:
-        selected = selected[:max_items]
+    selected = _selected_notify_rows(rows, notify_levels=notify_levels, max_items=max_items)
     if not selected:
         return ""
 
-    acct = str(selected[0].get("account") or "当前账户").strip().lower()
-    lines = [f"### [{acct}] 平仓建议"]
+    grouped: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
     for row in selected:
-        opt = "Put" if str(row.get("option_type")) == "put" else "Call"
-        exp = row.get("expiration") or "-"
-        strike = _num(row.get("strike"))
-        suffix = "P" if opt == "Put" else "C"
-        currency = row.get("currency")
-        lines.extend(
-            [
-                f"- {row.get('symbol')} {opt} {exp} {strike}{suffix} · {row.get('tier_label')}",
-                (
-                    f"- 已锁定: {_pct(row.get('capture_ratio'))} | "
-                    f"剩余DTE={row.get('dte') if row.get('dte') is not None else '-'} | "
-                    f"剩余收益年化={_pct(row.get('remaining_annualized_return'))}"
-                ),
-                f"- 价格: 开仓权利金={_num(row.get('premium'))} | 平仓 mid={_num(row.get('close_mid'))}",
-                (
-                    f"- 估算: 平仓后锁定收益 {_money(row.get('realized_if_close'), currency)} | "
-                    f"剩余权利金 {_money(row.get('remaining_premium'), currency)}"
-                ),
-                f"- 理由: {row.get('reason') or '-'}",
-                "---",
-            ]
-        )
+        acct = str(row.get("account") or "当前账户").strip().lower() or "当前账户"
+        grouped.setdefault(acct, []).append(row)
+
+    lines: list[str] = []
+    for acct, acct_rows in grouped.items():
+        if lines:
+            lines.append("")
+        lines.append(f"### [{acct}] 平仓建议")
+        for row in acct_rows:
+            opt = "Put" if str(row.get("option_type")) == "put" else "Call"
+            exp = row.get("expiration") or "-"
+            strike = _num(row.get("strike"))
+            suffix = "P" if opt == "Put" else "C"
+            currency = row.get("currency")
+            lines.extend(
+                [
+                    f"- {row.get('symbol')} {opt} {exp} {strike}{suffix} · {row.get('tier_label')}",
+                    (
+                        f"- 已锁定: {_pct(row.get('capture_ratio'))} | "
+                        f"剩余DTE={row.get('dte') if row.get('dte') is not None else '-'} | "
+                        f"剩余收益年化={_pct(row.get('remaining_annualized_return'))}"
+                    ),
+                    f"- 价格: 开仓权利金={_num(row.get('premium'))} | 平仓 mid={_num(row.get('close_mid'))}",
+                    (
+                        f"- 估算: 平仓后锁定收益 {_money(row.get('realized_if_close'), currency)} | "
+                        f"剩余权利金 {_money(row.get('remaining_premium'), currency)}"
+                    ),
+                    f"- 理由: {row.get('reason') or '-'}",
+                    "---",
+                ]
+            )
     return "\n".join(lines).strip() + "\n"
 
 
@@ -561,6 +610,7 @@ def run_close_advice(
         row = _with_extra_flags(row, quote_flags)
         row = _with_extra_flags(row, _quote_observability_flags(key, quote, attempted_fetch_reasons))
         row = _apply_buy_to_close_fee(row)
+        row = _apply_fee_profitability_gate(row)
         rows.append(row)
 
     rows = sort_advice_rows(rows)
@@ -568,6 +618,7 @@ def run_close_advice(
     notify_level_set = {str(x).strip().lower() for x in notify_levels if str(x).strip()}
     max_items = safe_int(advice_cfg.get("max_items_per_account")) or 5
     text = render_markdown(rows, notify_levels=notify_level_set, max_items=max_items)
+    selected_notify_rows = _selected_notify_rows(rows, notify_levels=notify_level_set, max_items=max_items)
     flag_counts: dict[str, int] = {}
     tier_counts: dict[str, int] = {}
     quote_issue_rows = 0
@@ -575,7 +626,7 @@ def run_close_advice(
         tier = str(row.get("tier") or "").strip().lower() or "unknown"
         tier_counts[tier] = tier_counts.get(tier, 0) + 1
         flags = [x for x in str(row.get("data_quality_flags") or "").split(";") if x]
-        if any(flag in {"missing_quote", "missing_mid", "opend_fetch_error", "opend_fetch_no_usable_quote"} for flag in flags):
+        if any(flag in QUOTE_ISSUE_FLAGS for flag in flags):
             quote_issue_rows += 1
         for flag in flags:
             flag_counts[flag] = flag_counts.get(flag, 0) + 1
@@ -587,7 +638,7 @@ def run_close_advice(
     return {
         "enabled": True,
         "rows": len(rows),
-        "notify_rows": len([r for r in rows if str(r.get("tier") or "") in notify_level_set]),
+        "notify_rows": len(selected_notify_rows),
         "tier_counts": tier_counts,
         "flag_counts": flag_counts,
         "quote_issue_rows": quote_issue_rows,
