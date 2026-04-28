@@ -151,3 +151,25 @@ def test_normalize_trade_deal_falls_back_to_option_code_root_alias_for_symbol() 
     assert deal.symbol == "9992.HK"
     assert deal.option_type == "put"
     assert deal.position_effect == "open"
+
+
+def test_normalize_trade_deal_canonicalizes_us_prefixed_underlying_symbol() -> None:
+    deal = normalize_trade_deal(
+        {
+            "deal_id": "deal-7",
+            "futu_account_id": "REAL_US_1",
+            "underlying_symbol": "US.NVDA",
+            "option_type": "CALL",
+            "trade_side": "SELL",
+            "position_effect": "OPEN",
+            "qty": 1,
+            "price": 1.23,
+            "strike": 100,
+            "multiplier": 100,
+            "expiry_date": "260618",
+            "currency_code": "USD",
+        },
+        futu_account_mapping={"REAL_US_1": "lx"},
+    )
+
+    assert deal.symbol == "NVDA"
