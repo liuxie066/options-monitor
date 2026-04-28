@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.2.0-beta.6 - 2026-04-28
+
+### Changed
+- Refactored close advice around exact-contract pricing so each open position is priced by its concrete symbol, option type, expiration, and strike before any suggestion tier is computed
+- Made close advice self-heal required-data coverage for held expirations, merge refreshed rows back into required_data, and classify unpriced positions as not evaluable instead of mixing them into normal advice tiers
+
 ## 0.2.0-beta.5 - 2026-04-28
 
 ### Changed
