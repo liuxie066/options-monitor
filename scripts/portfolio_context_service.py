@@ -5,11 +5,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 from scripts.account_config import build_account_portfolio_source_plan
-from scripts.fetch_portfolio_context import (
-    load_holdings_portfolio_context,
-    load_holdings_portfolio_shared_context,
-    slice_shared_context_for_account,
-)
+import scripts.fetch_portfolio_context as holdings_context
+
+load_holdings_portfolio_context = holdings_context.load_holdings_portfolio_context
+load_holdings_portfolio_shared_context = holdings_context.load_holdings_portfolio_shared_context
+slice_shared_context_for_account = holdings_context.slice_shared_context_for_account
 
 
 JsonLoader = Callable[[Path], dict | None]
@@ -56,6 +56,9 @@ def load_account_portfolio_context(
     port_path = (state_dir / "portfolio_context.json").resolve()
     plan = build_account_portfolio_source_plan(runtime_config, account=account, portfolio_source=portfolio_source)
     holdings_source_name = "external_holdings" if plan.primary_source == "external_holdings" else "holdings"
+    allow_holdings_fallback = (
+        plan.primary_source in {"futu", "external_holdings"} and str(plan.requested_source or "").strip().lower() == "auto"
+    ) or plan.primary_source == "external_holdings"
 
     cached = None
     try:
@@ -64,10 +67,17 @@ def load_account_portfolio_context(
     except Exception:
         cached = None
 
-    if isinstance(cached, dict) and str(cached.get("portfolio_source_name") or "").strip().lower() == plan.primary_source:
-        cached = with_context_source(cached, "account_cache")
-        log(f"[CTX] portfolio_context source=account_cache account={account or '-'}")
-        return cached
+    cached_source = str((cached or {}).get("portfolio_source_name") or "").strip().lower() if isinstance(cached, dict) else ""
+    if isinstance(cached, dict):
+        if cached_source == plan.primary_source:
+            cached = with_context_source(cached, "account_cache")
+            log(f"[CTX] portfolio_context source=account_cache account={account or '-'}")
+            return cached
+        if plan.primary_source == "external_holdings" and cached_source in {"holdings", "external_holdings"}:
+            cached = with_context_source(cached, "account_cache")
+            log(f"[CTX] portfolio_context fallback to holdings account={account or '-'} source=account_cache")
+            log(f"[CTX] portfolio_context source=account_cache account={account or '-'}")
+            return cached
 
     portfolio_cfg = (runtime_config.get("portfolio") or {}) if isinstance(runtime_config, dict) else {}
     if plan.primary_source == "futu":
@@ -85,8 +95,10 @@ def load_account_portfolio_context(
             port_path.write_text(json.dumps(ctx, ensure_ascii=False, indent=2), encoding="utf-8")
             log(f"[CTX] portfolio_context source=futu_direct account={account or '-'}")
             return ctx
-        except Exception:
-            raise
+        except Exception as exc:
+            if not allow_holdings_fallback:
+                raise
+            log(f"[CTX] portfolio_context fallback to holdings account={account or '-'} error={exc}")
 
     holdings_account = plan.holdings_account
     shared_root = (shared_state_dir or state_dir).resolve()
@@ -134,5 +146,12 @@ def load_account_portfolio_context(
             return ctx
         except Exception:
             if shared_out is None:
+                if allow_holdings_fallback:
+                    cached_fallback = _load_json_payload(load_json_fn, port_path)
+                    cached_fallback["portfolio_source_name"] = holdings_source_name
+                    cached_fallback = with_context_source(cached_fallback, "account_cache")
+                    log(f"[CTX] portfolio_context fallback to holdings account={account or '-'} source=account_cache")
+                    log(f"[CTX] portfolio_context source=account_cache account={account or '-'}")
+                    return cached_fallback
                 raise
     raise RuntimeError("unreachable")

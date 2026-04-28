@@ -17,6 +17,7 @@ def run_healthcheck_tool(
     list_account_config_views: Callable[[dict[str, Any]], list[Any]],
     mask_account_id: Callable[[Any], str],
     infer_futu_portfolio_settings: Callable[[dict[str, Any]], dict[str, Any]],
+    load_option_positions_repo: Callable[[Any], Any],
     run_futu_doctor: Callable[..., dict[str, Any]],
     healthcheck_symbols_for_futu: Callable[[dict[str, Any]], list[str]],
     write_tools_enabled: Callable[[], bool],
@@ -70,6 +71,30 @@ def run_healthcheck_tool(
     feishu_ready = bool(str(feishu_cfg.get("app_id") or "").strip()) and bool(str(feishu_cfg.get("app_secret") or "").strip())
     holdings_ref = str(feishu_tables.get("holdings") or "").strip()
     holdings_ready = feishu_ready and ("/" in holdings_ref)
+    option_positions_bootstrap_status = None
+    option_positions_bootstrap_message = None
+    if data_config_path.exists():
+        try:
+            option_repo = load_option_positions_repo(data_config_path)
+            option_positions_bootstrap_status = str(getattr(option_repo, "bootstrap_status", "") or "").strip() or None
+            option_positions_bootstrap_message = str(getattr(option_repo, "bootstrap_message", "") or "").strip() or None
+        except Exception as exc:
+            option_positions_bootstrap_status = "degraded_option_positions_repo_load_failed"
+            option_positions_bootstrap_message = str(exc)
+
+    if option_positions_bootstrap_status:
+        bootstrap_check_status = "ok"
+        if option_positions_bootstrap_status.startswith("degraded_"):
+            bootstrap_check_status = "warn"
+            warnings.append(f"option_positions bootstrap degraded: {option_positions_bootstrap_message or option_positions_bootstrap_status}")
+        checks.append(
+            {
+                "name": "option_positions_bootstrap",
+                "status": bootstrap_check_status,
+                "message": (option_positions_bootstrap_message or option_positions_bootstrap_status),
+                "value": {"status": option_positions_bootstrap_status},
+            }
+        )
 
     mapping_errors: list[str] = []
     mapping_preview: dict[str, dict[str, Any]] = {}

@@ -345,6 +345,44 @@ def test_global_summary_exposes_notification_config_fields() -> None:
         webui_server.CONFIG_FILES = old_config_files
 
 
+def test_global_summary_exposes_option_positions_bootstrap_status(monkeypatch) -> None:
+    old_base = webui_server.BASE_DIR
+    old_config_files = dict(webui_server.CONFIG_FILES)
+    old_load_repo = webui_server.load_option_positions_repo
+    try:
+        with TemporaryDirectory() as td:
+            repo = Path(td)
+            (repo / "secrets").mkdir()
+            cfg_path = repo / "config.us.json"
+            data_cfg_path = repo / "secrets" / "portfolio.sqlite.json"
+            data_cfg_path.write_text(
+                json.dumps({"option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"}}, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            cfg_path.write_text(
+                json.dumps({"accounts": ["user1"], "portfolio": {"data_config": "secrets/portfolio.sqlite.json"}, "symbols": []}, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+            class _Repo:
+                bootstrap_status = "degraded_feishu_bootstrap_failed"
+                bootstrap_message = "feishu bootstrap failed: upstream unavailable"
+
+            monkeypatch.setattr(webui_server, "load_option_positions_repo", lambda _path: _Repo())
+            webui_server.BASE_DIR = repo
+            webui_server.CONFIG_FILES = {"us": Path("config.us.json"), "hk": Path("config.hk.json")}
+
+            summary = _global_summary("us")
+            bootstrap = summary["sections"]["portfolio"]["option_positions_bootstrap"]
+            assert bootstrap["status"] == "degraded_feishu_bootstrap_failed"
+            assert bootstrap["ok"] is False
+            assert "upstream unavailable" in bootstrap["message"]
+    finally:
+        webui_server.load_option_positions_repo = old_load_repo
+        webui_server.BASE_DIR = old_base
+        webui_server.CONFIG_FILES = old_config_files
+
+
 def test_editor_summary_exposes_effective_cash_footer_accounts_when_override_absent() -> None:
     with TemporaryDirectory() as td:
         repo = Path(td)

@@ -3,7 +3,7 @@
 > 目标：你只要维护：
 > - 仓内 `config.us.json` / `config.hk.json`（策略与监控）
 > - `portfolio.data_config`（最小配置下只需要 SQLite `option_positions` 路径）
-> - Feishu App 凭证和 Bitable 配置是可选项，只在 `holdings` / `external_holdings` 数据源场景需要
+> - Feishu App 凭证和 Bitable 配置是可选项，只在 `holdings` / `external_holdings` 数据源场景需要；`option_positions` 的稳态读写主存储仍是 SQLite
 
 ---
 
@@ -39,6 +39,10 @@
   - covered call 锁股数 `locked_shares_by_symbol`
   - cash-secured put 占用 `cash_secured_by_symbol`
 )
+- Feishu `tables.option_positions`：仅在两种场景使用
+  - SQLite 空库时作为一次性 bootstrap 输入
+  - 本地 SQLite 变更后作为远端镜像输出
+  - 不参与 steady-state 本地读模型
 
 **你需要给我的信息（不含密钥）**：
 - 两张表的 Bitable 链接（或 app_token/table_id）
@@ -52,7 +56,8 @@
 
 ### 2.1 过滤逻辑
 - 读取全表后按两列过滤：
-  - `market`：要求该字段的字符串 **包含** config 里传入的 market（容错匹配）
+  - `broker`：标准字段，要求该字段的字符串 **包含** config 里传入的 market/broker（容错匹配）
+  - `market`：历史兼容字段；仅当 `broker` 缺失时回退使用，同样走“包含匹配”
   - `account`：若传入 account，则要求 **完全相等**
 
 > 注意：holdings 的 market 是“包含匹配”，option_positions 是“完全相等”（见下文）。
@@ -62,7 +67,8 @@
 - `asset_type`：字符串，至少需要支持：
   - `cash`
   - `us_stock`
-- `market`：字符串（如：`富途`）
+- `broker`：标准字段，字符串（如：`富途`）
+- `market`：历史兼容字段；仅当旧表还未补 `broker` 时继续兼容
 - `account`：字符串（如：`lx`）
 
 #### A) 现金行（asset_type = cash）
@@ -193,6 +199,10 @@
 - `account_settings.<account>.holdings_account`:
   - 对 `futu` 账号：当该账号显式使用 `holdings` 数据源时，对应的 `holdings.account`
   - 对 `external_holdings` 账号：该账号在 Feishu holdings 里的实际名称
+- `account_settings.<account>.bitable.*`:
+  - 当前只作为历史/预留展示字段保留
+  - 不参与 runtime holdings 连接配置
+  - runtime 唯一生效的 Feishu holdings 来源是 `portfolio.data_config.feishu.tables.holdings`
 - `account_settings.<account>.futu.host` / `account_settings.<account>.futu.port`:
   - 可选，账户级 OpenD 持仓连接参数。
   - 当前 runtime 已支持按账户读取不同的 OpenD holdings 端点。
@@ -325,7 +335,8 @@
 
 ### 可选方式（启用 Feishu holdings 数据源）
 - 从 `configs/examples/portfolio.feishu.example.json` 复制到本地安全路径，例如 `secrets/portfolio.feishu.json` 或 `/opt/options-monitor/secrets/portfolio.feishu.json`。
-- 在该文件内填写 `feishu.app_id/app_secret` 和 `tables.holdings` / `tables.option_positions`。
+- 在该文件内填写 `feishu.app_id/app_secret` 和 `tables.holdings`。
+- 如需让 `option_positions` 支持空库 bootstrap 或写回远端镜像，再额外填写 `tables.option_positions`。
 - 在 `config.us.json` / `config.hk.json` 内把 `portfolio.data_config` 指向该文件。
 
 ### 可选方式（增加 external_holdings 账号）
@@ -382,6 +393,11 @@
 当前仓库已加入 `.gitignore`（忽略 `secrets/` 与 `output/`）。
 
 > 注意：不要在聊天里发送 app_secret。
+>
+> `option_positions` bootstrap 的当前状态会出现在两处：
+> - `./om-agent run --tool healthcheck ...` 的 `option_positions_bootstrap`
+> - WebUI 的 Market 面板摘要
+> 如果配置了 Feishu bootstrap，但首次读取失败，这两个地方都会显示 degraded/warn，而不是把它伪装成“天然空库”。
 
 ---
 

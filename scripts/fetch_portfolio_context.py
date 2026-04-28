@@ -96,6 +96,7 @@ def _record_broker_text(fields: dict) -> str:
     broker = _as_text(fields.get("broker")).strip()
     if broker:
         return broker
+    # Keep legacy `market` compatibility for older holdings tables.
     return _as_text(fields.get("market")).strip()
 
 

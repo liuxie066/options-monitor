@@ -11,6 +11,7 @@ We avoid importing the whole app; only the module under test.
 from __future__ import annotations
 
 import json
+import threading
 from unittest.mock import patch
 
 
@@ -88,8 +89,7 @@ def test_get_tenant_access_token_cache_and_force_refresh() -> None:
     from scripts import feishu_bitable as fb
 
     # reset cache
-    fb._token_cache["token"] = None
-    fb._token_cache["expire_at"] = None
+    fb._token_cache.clear()
 
     body1 = json.dumps({"code": 0, "tenant_access_token": "t1", "expire": 7200}).encode("utf-8")
     body2 = json.dumps({"code": 0, "tenant_access_token": "t2", "expire": 7200}).encode("utf-8")
@@ -125,6 +125,73 @@ def test_get_tenant_access_token_cache_and_force_refresh() -> None:
         t2 = fb.get_tenant_access_token("a", "s", force_refresh=True)
         assert t2 == "t2"
         assert calls["n"] == 2
+
+
+def test_get_tenant_access_token_isolated_by_app_credentials() -> None:
+    from scripts import feishu_bitable as fb
+
+    fb._token_cache.clear()
+
+    class FakeResp:
+        def __init__(self, token: str):
+            self._body = json.dumps({"code": 0, "tenant_access_token": token, "expire": 7200}).encode("utf-8")
+            self.status = 200
+
+        def read(self):
+            return self._body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def side_effect(req, **_kwargs):
+        body = json.loads(req.data.decode("utf-8"))
+        app_id = body["app_id"]
+        return FakeResp(f"token-{app_id}")
+
+    with patch("urllib.request.urlopen", side_effect=side_effect) as urlopen_mock:
+        assert fb.get_tenant_access_token("app_a", "secret_a") == "token-app_a"
+        assert fb.get_tenant_access_token("app_b", "secret_b") == "token-app_b"
+        assert fb.get_tenant_access_token("app_a", "secret_a") == "token-app_a"
+
+    assert urlopen_mock.call_count == 2
+
+
+def test_get_tenant_access_token_reuses_cache_under_concurrency() -> None:
+    from scripts import feishu_bitable as fb
+
+    fb._token_cache.clear()
+
+    class FakeResp:
+        def __init__(self):
+            self._body = json.dumps({"code": 0, "tenant_access_token": "token-app_a", "expire": 7200}).encode("utf-8")
+            self.status = 200
+
+        def read(self):
+            return self._body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    results: list[str] = []
+
+    def _worker() -> None:
+        results.append(fb.get_tenant_access_token("app_a", "secret_a"))
+
+    with patch("urllib.request.urlopen", return_value=FakeResp()) as urlopen_mock:
+        threads = [threading.Thread(target=_worker) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+    assert results == ["token-app_a"] * 4
+    assert urlopen_mock.call_count == 1
 
 
 def test_http_json_logs_warn_retries_when_rate_limited() -> None:
