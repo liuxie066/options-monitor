@@ -15,6 +15,7 @@ from src.application.runtime_config_paths import (
     resolve_public_data_config_path,
     write_json_atomic,
 )
+from src.application.watchlist_mutations import normalize_symbol_read
 
 
 def normalize_broker(value: Any) -> str:
@@ -24,7 +25,7 @@ def normalize_broker(value: Any) -> str:
 def symbol_fetch_config_map(cfg: dict[str, Any], *, resolve_watchlist_config: Callable[[dict[str, Any]], list[dict[str, Any]]]) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
     for item in resolve_watchlist_config(cfg):
-        symbol = str(item.get("symbol") or "").strip().upper()
+        symbol = normalize_symbol_read(item.get("symbol"))
         if symbol and isinstance(item, dict):
             out[symbol] = item
     return out
@@ -36,7 +37,7 @@ def extract_context_symbols(ctx: dict[str, Any]) -> list[str]:
     for row in rows if isinstance(rows, list) else []:
         if not isinstance(row, dict):
             continue
-        symbol = str(row.get("symbol") or "").strip().upper()
+        symbol = normalize_symbol_read(row.get("symbol"))
         if symbol and symbol not in out:
             out.append(symbol)
     return out
@@ -138,7 +139,7 @@ def healthcheck_symbols_for_futu(cfg: dict[str, Any], *, resolve_watchlist_confi
         source = str(fetch.get("source") or "futu").strip().lower()
         if source not in {"futu", "opend"}:
             continue
-        symbol = str(item.get("symbol") or "").strip().upper()
+        symbol = normalize_symbol_read(item.get("symbol"))
         if not symbol or symbol in out:
             continue
         out.append(symbol)
