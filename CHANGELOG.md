@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.2.0-beta.5 - 2026-04-28
+
+### Changed
+- Redesigned close-advice required-data preparation to fetch option chains by open position contract coverage, passing explicit held expirations, option types, and strike bounds instead of relying on symbol-level recent-expiration scans
+- Added required-data coverage diagnostics so close advice can distinguish missing expiration/contract coverage from quote usability issues, keeping OpenD fallback limited to last-mile quote repair when the contract is already present in required_data
+
 ## 0.2.0-beta.4 - 2026-04-28
 
 ### Changed

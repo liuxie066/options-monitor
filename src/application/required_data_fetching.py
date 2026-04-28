@@ -18,6 +18,7 @@ class RequiredDataFetchRequest:
     max_strike: float | None = None
     min_dte: int | None = None
     max_dte: int | None = None
+    explicit_expirations: list[str] | None = None
     chain_cache: bool = True
     chain_cache_force_refresh: bool = False
 
@@ -36,6 +37,7 @@ def fetch_required_data_opend(*, base: Path, request: RequiredDataFetchRequest) 
         max_strike=request.max_strike,
         min_dte=request.min_dte,
         max_dte=request.max_dte,
+        explicit_expirations=(list(request.explicit_expirations) if request.explicit_expirations else None),
     )
     return save_outputs(
         Path(base),
