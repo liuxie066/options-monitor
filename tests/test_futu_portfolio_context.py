@@ -115,6 +115,25 @@ def test_build_futu_portfolio_context_merges_cash_and_fund_assets_and_normalizes
     assert out["stocks_by_symbol"]["0700.HK"]["currency"] == "HKD"
 
 
+def test_build_futu_portfolio_context_canonicalizes_alias_and_hk_prefixed_codes() -> None:
+    from scripts.futu_portfolio_context import build_futu_portfolio_context
+
+    out = build_futu_portfolio_context(
+        balance_rows=[],
+        position_rows=[
+            {"code": "HK.09992", "qty": 100, "cost_price": 120, "currency": "HKD", "stock_name": "Pop Mart"},
+            {"symbol": "POP", "qty": 50, "cost_price": 125, "currency": "HKD"},
+        ],
+        account="lx",
+        market="富途",
+        base_currency="CNY",
+    )
+
+    assert sorted(out["stocks_by_symbol"].keys()) == ["9992.HK"]
+    assert out["stocks_by_symbol"]["9992.HK"]["shares"] == 150
+    assert out["stocks_by_symbol"]["9992.HK"]["currency"] == "HKD"
+
+
 def test_fetch_futu_portfolio_context_filters_rows_by_mapped_account_ids() -> None:
     import scripts.futu_portfolio_context as fc
 

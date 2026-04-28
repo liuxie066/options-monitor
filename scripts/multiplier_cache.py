@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from scripts.io_utils import utc_now
+from scripts.opend_utils import resolve_underlier_alias
 
 
 def default_cache_path(repo_base: Path) -> Path:
@@ -47,7 +48,7 @@ def save_cache(path: Path, cache: dict) -> None:
 
 
 def normalize_symbol(symbol: str) -> str:
-    sym = str(symbol or "").strip().upper()
+    sym = resolve_underlier_alias(str(symbol or ""))
     if sym.endswith(".HK"):
         code = sym[:-3]
         if code.isdigit():

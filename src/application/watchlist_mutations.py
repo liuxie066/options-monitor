@@ -2,9 +2,14 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from scripts.opend_utils import resolve_underlier_alias
+
 
 def normalize_symbol(value: str) -> str:
-    return str(value or "").strip().upper()
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    return resolve_underlier_alias(raw)
 
 
 def normalize_symbol_read(value: Any) -> str:

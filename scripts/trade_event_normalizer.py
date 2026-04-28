@@ -6,9 +6,10 @@ from pathlib import Path
 import re
 from typing import Any
 
+from scripts.opend_utils import resolve_underlier_alias
 from scripts.option_positions_core.domain import normalize_currency, normalize_option_type
 from scripts.multiplier_cache import resolve_multiplier_with_source
-from scripts.parse_option_message import normalize_symbol, parse_exp
+from scripts.parse_option_message import parse_exp
 from scripts.trade_account_mapping import resolve_internal_account
 
 ACCOUNT_ID_KEYS = (
@@ -38,15 +39,17 @@ def _normalize_symbol_candidate(value: Any) -> str | None:
     if not raw:
         return None
     upper = raw.upper()
+    option_code_match = OPTION_CODE_RE.match(upper)
+    if option_code_match:
+        return resolve_underlier_alias(option_code_match.group("root")) or None
     if upper.startswith("US."):
-        candidate = upper[3:]
-        return normalize_symbol(candidate)
+        return resolve_underlier_alias(upper[3:]) or None
     if upper.startswith("HK."):
         digits = "".join(ch for ch in upper[3:] if ch.isdigit())
         if digits:
-            return normalize_symbol(f"{int(digits):04d}.HK")
+            return resolve_underlier_alias(f"{int(digits):04d}.HK") or None
         return None
-    return normalize_symbol(raw)
+    return resolve_underlier_alias(raw) or None
 
 
 def _pick_first_normalized_symbol(src: dict[str, Any], *keys: str) -> str | None:

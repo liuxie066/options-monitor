@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable
 
 from scripts.futu_gateway import build_futu_gateway
-from scripts.parse_option_message import normalize_symbol
+from scripts.opend_utils import resolve_underlier_alias
 from scripts.trade_event_normalizer import ACCOUNT_ID_KEYS
 
 
@@ -53,13 +53,13 @@ def _normalize_underlying_symbol(value: Any) -> str | None:
         return None
     upper = raw.upper()
     if upper.startswith("US."):
-        return normalize_symbol(upper[3:])
+        return resolve_underlier_alias(upper[3:]) or None
     if upper.startswith("HK."):
         digits = "".join(ch for ch in upper[3:] if ch.isdigit())
         if digits:
-            return normalize_symbol(f"{int(digits):04d}.HK")
+            return resolve_underlier_alias(f"{int(digits):04d}.HK") or None
         return None
-    return normalize_symbol(raw)
+    return resolve_underlier_alias(raw) or None
 
 
 def _resolve_unified_symbol(src: dict[str, Any], row: dict[str, Any]) -> str | None:
@@ -114,7 +114,7 @@ def _merge_lookup_row(src: dict[str, Any], row: dict[str, Any], *, fallback_acc_
             continue
         enriched[key] = value
     symbol = _resolve_unified_symbol(src, row)
-    if symbol and enriched.get("symbol") in (None, ""):
+    if symbol:
         enriched["symbol"] = symbol
     return enriched
 

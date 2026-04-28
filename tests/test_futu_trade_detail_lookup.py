@@ -117,6 +117,32 @@ def test_enrich_trade_push_payload_unifies_symbol_from_futu_underlying_code(monk
     assert out.diagnostics["matched_via"] == "order_lookup_by_acc_id"
 
 
+def test_enrich_trade_push_payload_canonicalizes_alias_symbol_from_lookup_row(monkeypatch) -> None:
+    class FakeGateway:
+        def get_order_list(self, **kwargs):
+            if "acc_id" in kwargs:
+                return [{"order_id": "order-6", "acc_id": "777", "symbol": "POP"}]
+            return []
+
+        def get_deal_list(self, **kwargs):
+            return []
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr("scripts.futu_trade_detail_lookup.build_futu_gateway", lambda **kwargs: FakeGateway())
+    out = enrich_trade_push_payload_with_account_id(
+        {"order_id": "order-6", "deal_id": "deal-6"},
+        host="127.0.0.1",
+        port=11111,
+        futu_account_ids=["777"],
+    )
+
+    assert out.payload["futu_account_id"] == "777"
+    assert out.payload["symbol"] == "9992.HK"
+    assert out.diagnostics["matched_via"] == "order_lookup_by_acc_id"
+
+
 def test_enrich_trade_push_payload_records_lookup_errors(monkeypatch) -> None:
     class FakeGateway:
         def get_order_list(self, **kwargs):
