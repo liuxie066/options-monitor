@@ -7,14 +7,12 @@ from typing import Any, Callable
 import json
 
 from scripts.agent_plugin.contracts import AgentToolError
+from src.application.expiration_normalization import normalize_expiration_ymd
 from src.application.watchlist_mutations import normalize_symbol_read
 
 
 def _normalize_expiration(value: Any) -> str:
-    raw = str(value or "").strip()
-    if len(raw) >= 10 and raw[4:5] == "-" and raw[7:8] == "-":
-        return raw[:10]
-    return raw
+    return normalize_expiration_ymd(value) or str(value or "").strip()
 
 
 def _normalize_option_type(value: Any) -> str:

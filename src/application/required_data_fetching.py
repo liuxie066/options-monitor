@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from scripts.fetch_market_data_opend import fetch_symbol, save_outputs
+from src.application.expiration_normalization import normalize_expiration_ymd
 
 
 @dataclass(frozen=True)
@@ -24,6 +25,11 @@ class RequiredDataFetchRequest:
 
 
 def fetch_required_data_opend(*, base: Path, request: RequiredDataFetchRequest) -> tuple[Path, Path]:
+    explicit_expirations = sorted({
+        exp
+        for exp in (normalize_expiration_ymd(x) for x in (request.explicit_expirations or []))
+        if exp
+    }) or None
     payload = fetch_symbol(
         request.symbol,
         limit_expirations=int(request.limit_expirations),
@@ -37,7 +43,7 @@ def fetch_required_data_opend(*, base: Path, request: RequiredDataFetchRequest) 
         max_strike=request.max_strike,
         min_dte=request.min_dte,
         max_dte=request.max_dte,
-        explicit_expirations=(list(request.explicit_expirations) if request.explicit_expirations else None),
+        explicit_expirations=explicit_expirations,
     )
     return save_outputs(
         Path(base),

@@ -84,3 +84,63 @@ def test_fetch_symbol_explicit_expirations_override_limit_and_cache(monkeypatch,
     expirations = sorted({str(row.get("expiration")) for row in (payload.get("rows") or [])})
     assert requested_chain_dates == ["2026-04-29", "2026-06-29"]
     assert expirations == ["2026-04-29", "2026-06-29"]
+
+
+def test_fetch_symbol_normalizes_timestamp_explicit_expirations(monkeypatch, tmp_path: Path) -> None:
+    import scripts.fetch_market_data_opend as mod
+
+    requested_chain_dates: list[str] = []
+
+    class _Gateway:
+        def get_snapshot(self, codes):  # noqa: ANN001
+            import pandas as pd
+
+            rows = []
+            for code in codes:
+                if str(code).startswith("US."):
+                    rows.append({"code": code, "last_price": 100.0})
+                else:
+                    rows.append(
+                        {
+                            "code": code,
+                            "last_price": 1.0,
+                            "bid_price": 0.9,
+                            "ask_price": 1.1,
+                            "option_contract_multiplier": 100,
+                        }
+                    )
+            return pd.DataFrame(rows)
+
+        def get_option_chain(self, *, code, start=None, end=None, is_force_refresh=False):  # noqa: ANN001
+            import pandas as pd
+
+            requested_chain_dates.append(str(start))
+            return pd.DataFrame(
+                [
+                    {
+                        "code": f"{code}.{start}.P120",
+                        "strike_time": str(start),
+                        "strike_price": 120.0,
+                        "option_type": "PUT",
+                        "lot_size": 100,
+                    }
+                ]
+            )
+
+    monkeypatch.setattr(mod, "build_ready_futu_gateway", lambda **kwargs: _Gateway())
+    monkeypatch.setattr(mod, "retry_futu_gateway_call", lambda _name, fn, **kwargs: fn())
+    monkeypatch.setattr(mod, "get_trading_date", lambda market: date(2026, 4, 28))
+    monkeypatch.setattr(mod, "get_spot_opend", lambda gateway, code: 100.0)
+
+    payload = mod.fetch_symbol(
+        "FUTU",
+        limit_expirations=1,
+        base_dir=tmp_path,
+        explicit_expirations=[1777420800, "1781740800000"],
+        option_types="put",
+        chain_cache=False,
+    )
+
+    expirations = sorted({str(row.get("expiration")) for row in (payload.get("rows") or [])})
+    assert requested_chain_dates == ["2026-04-29", "2026-06-18"]
+    assert expirations == ["2026-04-29", "2026-06-18"]

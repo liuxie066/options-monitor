@@ -78,6 +78,7 @@ from scripts.futu_gateway import (
     retry_futu_gateway_call,
 )
 from scripts.opend_utils import normalize_underlier, get_trading_date
+from src.application.expiration_normalization import normalize_expiration_ymd
 
 def _chain_cache_path(base_dir: Path, u_code: str) -> Path:
     safe = u_code.replace('.', '_')
@@ -136,18 +137,23 @@ def _is_chain_cache_fresh(obj: dict, today: date) -> bool:
 
 def _chain_cache_covers_explicit_expirations(obj: dict, explicit_expirations: list[str] | None) -> bool:
     try:
-        requested = sorted({str(x)[:10] for x in (explicit_expirations or []) if str(x) and len(str(x)) >= 10})
+        requested = sorted({
+            exp
+            for exp in (normalize_expiration_ymd(x) for x in (explicit_expirations or []))
+            if exp
+        })
         if not requested:
             return True
         if not isinstance(obj, dict):
             return False
         rows = obj.get('rows') or []
         cached = {
-            str((row or {}).get('strike_time') or (row or {}).get('expiration') or '')[:10]
+            exp
             for row in rows
             if isinstance(row, dict)
+            for exp in [normalize_expiration_ymd((row or {}).get('strike_time') or (row or {}).get('expiration'))]
+            if exp
         }
-        cached.discard('')
         return all(exp in cached for exp in requested)
     except Exception:
         return False
@@ -243,7 +249,11 @@ def get_spot_opend(gateway, underlier_code: str) -> float | None:
 
 def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = '127.0.0.1', port: int = 11111, spot_override: float | None = None, *, base_dir: Path | None = None, option_types: str = 'put,call', min_strike: float | None = None, max_strike: float | None = None, min_dte: int | None = None, max_dte: int | None = None, explicit_expirations: list[str] | None = None, retry_max_attempts: int = 4, retry_time_budget_sec: float = 8.0, retry_base_delay_sec: float = 0.8, retry_max_delay_sec: float = 6.0, no_retry: bool = False, chain_cache: bool = False, chain_cache_force_refresh: bool = False) -> dict[str, Any]:
     u = normalize_underlier(symbol)
-    explicit_expirations_norm = sorted({str(x)[:10] for x in (explicit_expirations or []) if str(x) and len(str(x)) >= 10})
+    explicit_expirations_norm = sorted({
+        exp
+        for exp in (normalize_expiration_ymd(x) for x in (explicit_expirations or []))
+        if exp
+    })
     gateway = build_ready_futu_gateway(
         host=host,
         port=int(port),
@@ -302,7 +312,11 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
                     if df_e is None or df_e.empty:
                         expirations_all = []
                     else:
-                        expirations_all = sorted({str(x)[:10] for x in df_e.get('strike_time').astype(str).tolist() if str(x) and len(str(x)) >= 10})
+                        expirations_all = sorted({
+                            exp
+                            for exp in (normalize_expiration_ymd(x) for x in df_e.get('strike_time').tolist())
+                            if exp
+                        })
                 except Exception:
                     expirations_all = []
 

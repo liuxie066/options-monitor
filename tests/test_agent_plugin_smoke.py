@@ -523,6 +523,64 @@ def test_prepare_close_advice_inputs_reports_missing_required_expirations(monkey
     assert "missing required expirations" in out["warnings"][0]
 
 
+def test_prepare_close_advice_inputs_normalizes_timestamp_expirations(monkeypatch, tmp_path: Path) -> None:
+    from scripts.agent_plugin.main import run_tool
+    import scripts.agent_plugin.tools as tools
+
+    cfg_path = tmp_path / "config.us.json"
+    secrets_dir = tmp_path / "secrets"
+    secrets_dir.mkdir()
+    (secrets_dir / "portfolio.sqlite.json").write_text(
+        json.dumps({"option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"}}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    cfg = _public_cfg_with_futu("secrets/portfolio.sqlite.json")
+    cfg["symbols"][0]["symbol"] = "FUTU"
+    cfg["close_advice"] = {"enabled": True}
+    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    old_load = tools.load_option_positions_context
+    old_opend = tools.fetch_symbol_opend
+    old_save = tools.save_required_data_opend
+    try:
+        def _fake_load_option_positions_context(**kwargs):  # type: ignore[no-untyped-def]
+            return ({
+                "open_positions_min": [
+                    {"symbol": "FUTU", "option_type": "put", "strike": 120, "expiration": 1777420800000},
+                    {"symbol": "FUTU", "option_type": "call", "strike": 130, "expiration": 1781740800},
+                ]
+            }, True)
+
+        def _fake_fetch_symbol_opend(symbol, **kwargs):  # type: ignore[no-untyped-def]
+            assert symbol == "FUTU"
+            assert kwargs["explicit_expirations"] == ["2026-04-29", "2026-06-18"]
+            return {"rows": [{"symbol": "FUTU"}], "expiration_count": 2}
+
+        def _fake_save_required_data_opend(base, symbol, payload, *, output_root):  # type: ignore[no-untyped-def]
+            parsed = output_root / "parsed"
+            parsed.mkdir(parents=True, exist_ok=True)
+            csv_path = parsed / f"{symbol}_required_data.csv"
+            csv_path.write_text(
+                "symbol,option_type,expiration,strike\n"
+                "FUTU,put,2026-04-29,120\n"
+                "FUTU,call,2026-06-18,130\n",
+                encoding="utf-8",
+            )
+            return output_root / "raw" / f"{symbol}_required_data.json", csv_path
+
+        tools.load_option_positions_context = _fake_load_option_positions_context  # type: ignore[assignment]
+        tools.fetch_symbol_opend = _fake_fetch_symbol_opend  # type: ignore[assignment]
+        tools.save_required_data_opend = _fake_save_required_data_opend  # type: ignore[assignment]
+        out = run_tool("prepare_close_advice_inputs", {"config_path": str(cfg_path), "output_dir": str(tmp_path / "output" / "agent_plugin")})
+    finally:
+        tools.load_option_positions_context = old_load  # type: ignore[assignment]
+        tools.fetch_symbol_opend = old_opend  # type: ignore[assignment]
+        tools.save_required_data_opend = old_save  # type: ignore[assignment]
+
+    assert out["ok"] is True
+    assert out["data"]["symbols"][0]["position_coverage_ok"] is True
+
+
 def test_prepare_close_advice_inputs_returns_empty_result_when_context_has_no_positions(tmp_path: Path) -> None:
     from scripts.agent_plugin.main import run_tool
 
