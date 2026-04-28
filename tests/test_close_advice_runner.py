@@ -308,6 +308,269 @@ def test_run_close_advice_reports_quote_issue_summary(tmp_path: Path) -> None:
     assert result["quote_issue_samples"] == ["AAPL put 2026-05-15 100.00P: OpenD 拉取失败"]
 
 
+def test_run_close_advice_fee_can_block_gross_strong_signal(tmp_path: Path) -> None:
+    ctx_path = tmp_path / "option_positions_context.json"
+    ctx_path.write_text(
+        json.dumps(
+            {
+                "open_positions_min": [
+                    {
+                        "account": "lx",
+                        "symbol": "AAPL",
+                        "option_type": "put",
+                        "side": "short",
+                        "contracts_open": 1,
+                        "currency": "USD",
+                        "strike": 100,
+                        "multiplier": 100,
+                        "premium": 0.02,
+                        "expiration": "2026-05-30",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    required_root = tmp_path / "required_data"
+    parsed = required_root / "parsed"
+    parsed.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "AAPL",
+                "option_type": "put",
+                "expiration": "2026-05-30",
+                "strike": 100,
+                "mid": 0.001,
+                "bid": 0.001,
+                "ask": 0.001,
+                "dte": 40,
+                "multiplier": 100,
+                "spot": 120,
+                "currency": "USD",
+            }
+        ]
+    ).to_csv(parsed / "AAPL_required_data.csv", index=False)
+
+    out_dir = tmp_path / "reports"
+    result = run_close_advice(
+        config={"close_advice": {"enabled": True, "notify_levels": ["strong", "medium", "optional", "weak"]}},
+        context_path=ctx_path,
+        required_data_root=required_root,
+        output_dir=out_dir,
+        base_dir=Path.cwd(),
+    )
+
+    csv_text = (out_dir / "close_advice.csv").read_text(encoding="utf-8")
+    assert result["notify_rows"] == 0
+    assert "not_profitable_after_fee" in csv_text
+    assert "-0.41915000000000013" in csv_text
+    assert (out_dir / "close_advice.txt").read_text(encoding="utf-8") == ""
+
+
+def test_run_close_advice_renders_small_money_with_decimals(tmp_path: Path) -> None:
+    ctx_path = tmp_path / "option_positions_context.json"
+    ctx_path.write_text(
+        json.dumps(
+            {
+                "open_positions_min": [
+                    {
+                        "account": "lx",
+                        "symbol": "AAPL",
+                        "option_type": "put",
+                        "side": "short",
+                        "contracts_open": 1,
+                        "currency": "USD",
+                        "strike": 100,
+                        "multiplier": 100,
+                        "premium": 0.05,
+                        "expiration": "2026-05-30",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    required_root = tmp_path / "required_data"
+    parsed = required_root / "parsed"
+    parsed.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "AAPL",
+                "option_type": "put",
+                "expiration": "2026-05-30",
+                "strike": 100,
+                "mid": 0.001,
+                "bid": 0.001,
+                "ask": 0.001,
+                "dte": 40,
+                "multiplier": 100,
+                "spot": 120,
+                "currency": "USD",
+            }
+        ]
+    ).to_csv(parsed / "AAPL_required_data.csv", index=False)
+
+    out_dir = tmp_path / "reports"
+    run_close_advice(
+        config={"close_advice": {"enabled": True, "notify_levels": ["strong", "medium", "optional", "weak"]}},
+        context_path=ctx_path,
+        required_data_root=required_root,
+        output_dir=out_dir,
+        base_dir=Path.cwd(),
+    )
+
+    text = (out_dir / "close_advice.txt").read_text(encoding="utf-8")
+    assert "$2.58" in text
+    assert "$0.10" in text
+
+
+def test_run_close_advice_keeps_tier_when_fee_unavailable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    ctx_path = tmp_path / "option_positions_context.json"
+    ctx_path.write_text(
+        json.dumps(
+            {
+                "open_positions_min": [
+                    {
+                        "account": "lx",
+                        "symbol": "NVDA",
+                        "option_type": "put",
+                        "side": "short",
+                        "contracts_open": 1,
+                        "currency": "USD",
+                        "strike": 100,
+                        "multiplier": 100,
+                        "premium": 1.6,
+                        "expiration": "2026-05-15",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    required_root = tmp_path / "required_data"
+    parsed = required_root / "parsed"
+    parsed.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "NVDA",
+                "option_type": "put",
+                "expiration": "2026-05-15",
+                "strike": 100,
+                "mid": 0.22,
+                "bid": 0.21,
+                "ask": 0.23,
+                "dte": 29,
+                "multiplier": 100,
+                "spot": 120,
+                "currency": "USD",
+            }
+        ]
+    ).to_csv(parsed / "NVDA_required_data.csv", index=False)
+
+    monkeypatch.setattr("scripts.close_advice.runner.calc_futu_option_fee", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("fee unavailable")))
+
+    out_dir = tmp_path / "reports"
+    run_close_advice(
+        config={"close_advice": {"enabled": True, "notify_levels": ["strong", "medium"]}},
+        context_path=ctx_path,
+        required_data_root=required_root,
+        output_dir=out_dir,
+        base_dir=Path.cwd(),
+    )
+
+    csv_text = (out_dir / "close_advice.csv").read_text(encoding="utf-8")
+    assert "fee_calc_unavailable" in csv_text
+    assert "strong" in csv_text
+
+
+def test_run_close_advice_groups_mixed_accounts_and_counts_rendered_rows(tmp_path: Path) -> None:
+    ctx_path = tmp_path / "option_positions_context.json"
+    ctx_path.write_text(
+        json.dumps(
+            {
+                "open_positions_min": [
+                    {
+                        "account": "lx",
+                        "symbol": "NVDA",
+                        "option_type": "put",
+                        "side": "short",
+                        "contracts_open": 1,
+                        "currency": "USD",
+                        "strike": 100,
+                        "multiplier": 100,
+                        "premium": 1.6,
+                        "expiration": "2026-05-15",
+                    },
+                    {
+                        "account": "lx",
+                        "symbol": "AAPL",
+                        "option_type": "put",
+                        "side": "short",
+                        "contracts_open": 1,
+                        "currency": "USD",
+                        "strike": 100,
+                        "multiplier": 100,
+                        "premium": 1.6,
+                        "expiration": "2026-05-15",
+                    },
+                    {
+                        "account": "sy",
+                        "symbol": "TSLA",
+                        "option_type": "put",
+                        "side": "short",
+                        "contracts_open": 1,
+                        "currency": "USD",
+                        "strike": 100,
+                        "multiplier": 100,
+                        "premium": 1.6,
+                        "expiration": "2026-05-15",
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    required_root = tmp_path / "required_data"
+    parsed = required_root / "parsed"
+    parsed.mkdir(parents=True)
+    for symbol in ("NVDA", "AAPL", "TSLA"):
+        pd.DataFrame(
+            [
+                {
+                    "symbol": symbol,
+                    "option_type": "put",
+                    "expiration": "2026-05-15",
+                    "strike": 100,
+                    "mid": 0.22,
+                    "bid": 0.21,
+                    "ask": 0.23,
+                    "dte": 29,
+                    "multiplier": 100,
+                    "spot": 120,
+                    "currency": "USD",
+                }
+            ]
+        ).to_csv(parsed / f"{symbol}_required_data.csv", index=False)
+
+    out_dir = tmp_path / "reports"
+    result = run_close_advice(
+        config={"close_advice": {"enabled": True, "notify_levels": ["strong", "medium"], "max_items_per_account": 1}},
+        context_path=ctx_path,
+        required_data_root=required_root,
+        output_dir=out_dir,
+        base_dir=Path.cwd(),
+    )
+
+    text = (out_dir / "close_advice.txt").read_text(encoding="utf-8")
+    assert result["notify_rows"] == 2
+    assert "### [lx] 平仓建议" in text
+    assert "### [sy] 平仓建议" in text
+    assert text.count("强烈建议平仓") == 2
+
+
 def test_run_close_advice_filters_positions_to_current_markets(tmp_path: Path) -> None:
     ctx_path = tmp_path / "option_positions_context.json"
     ctx_path.write_text(
@@ -477,6 +740,63 @@ def test_run_close_advice_fetches_quote_when_required_data_row_has_no_usable_pri
     csv_text = ((tmp_path / "reports") / "close_advice.csv").read_text(encoding="utf-8")
     assert "missing_mid" not in csv_text
     assert "0.6" in csv_text
+
+
+def test_run_close_advice_counts_spread_block_as_quote_issue(tmp_path: Path) -> None:
+    ctx_path = tmp_path / "option_positions_context.json"
+    ctx_path.write_text(
+        json.dumps(
+            {
+                "open_positions_min": [
+                    {
+                        "account": "lx",
+                        "symbol": "NVDA",
+                        "option_type": "put",
+                        "side": "short",
+                        "contracts_open": 1,
+                        "currency": "USD",
+                        "strike": 100,
+                        "multiplier": 100,
+                        "premium": 1.0,
+                        "expiration": "2026-05-15",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    required_root = tmp_path / "required_data"
+    parsed = required_root / "parsed"
+    parsed.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "NVDA",
+                "option_type": "put",
+                "expiration": "2026-05-15",
+                "strike": 100,
+                "mid": 0.5,
+                "bid": 0.1,
+                "ask": 0.9,
+                "dte": 30,
+                "multiplier": 100,
+                "spot": 120,
+                "currency": "USD",
+            }
+        ]
+    ).to_csv(parsed / "NVDA_required_data.csv", index=False)
+
+    out_dir = tmp_path / "reports"
+    result = run_close_advice(
+        config={"close_advice": {"enabled": True}},
+        context_path=ctx_path,
+        required_data_root=required_root,
+        output_dir=out_dir,
+        base_dir=Path.cwd(),
+    )
+
+    assert result["quote_issue_rows"] == 1
+    assert result["flag_counts"]["spread_too_wide"] == 1
 
 
 def test_run_close_advice_required_data_mode_does_not_fetch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
