@@ -42,6 +42,25 @@ class CloseMatch:
 
 
 @dataclass(frozen=True)
+class CloseCandidate:
+    record_id: str
+    broker: str
+    account: str
+    symbol: str
+    option_type: str
+    side: str
+    status: str
+    contracts_open: int
+    strike: float | None
+    expiration_ymd: str | None
+    opened_at: int
+    raw_fields: dict[str, Any]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class IntakeResolution:
     status: str
     action: str | None
@@ -132,39 +151,58 @@ def load_close_candidate_records(repo: OptionPositionsRepoLike) -> list[dict[str
     return list(load_option_position_records(repo))
 
 
-def _iter_open_candidates(repo: OptionPositionsRepoLike, deal: NormalizedTradeDeal) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
+def _normalize_close_candidate(item: dict[str, Any]) -> CloseCandidate | None:
+    record_id = str(item.get("record_id") or item.get("id") or "").strip()
+    fields = item.get("fields") or {}
+    if not record_id or not isinstance(fields, dict):
+        return None
+    return CloseCandidate(
+        record_id=record_id,
+        broker=normalize_broker(fields.get("broker")),
+        account=normalize_account(fields.get("account")),
+        symbol=str(fields.get("symbol") or "").strip().upper(),
+        option_type=normalize_option_type(fields.get("option_type")),
+        side=normalize_side(fields.get("side")),
+        status=normalize_status(fields.get("status")),
+        contracts_open=effective_contracts_open(fields),
+        strike=_record_strike(fields),
+        expiration_ymd=_record_expiration_ymd(fields),
+        opened_at=int(safe_float(fields.get("opened_at")) or 0),
+        raw_fields=dict(fields),
+    )
+
+
+def _iter_open_candidates(repo: OptionPositionsRepoLike, deal: NormalizedTradeDeal) -> list[CloseCandidate]:
+    out: list[CloseCandidate] = []
+    deal_account = normalize_account(deal.internal_account)
+    deal_symbol = str(deal.symbol or "").strip().upper()
+    deal_option_type = normalize_option_type(deal.option_type)
+    deal_strike = float(deal.strike) if deal.strike is not None else None
+    deal_expiration_ymd = str(deal.expiration_ymd or "").strip() or None
     for item in load_close_candidate_records(repo):
-        record_id = str(item.get("record_id") or item.get("id") or "").strip()
-        fields = item.get("fields") or {}
-        if not record_id or not isinstance(fields, dict):
+        candidate = _normalize_close_candidate(item)
+        if candidate is None:
             continue
-        if normalize_broker(fields.get("broker")) != "富途":
+        if candidate.broker != "富途":
             continue
-        if normalize_account(fields.get("account")) != normalize_account(deal.internal_account):
+        if candidate.account != deal_account:
             continue
-        if str(fields.get("symbol") or "").strip().upper() != str(deal.symbol or "").strip().upper():
+        if candidate.symbol != deal_symbol:
             continue
-        if normalize_option_type(fields.get("option_type")) != normalize_option_type(deal.option_type):
+        if candidate.option_type != deal_option_type:
             continue
-        if normalize_side(fields.get("side")) != "short":
+        if candidate.side != "short":
             continue
-        if normalize_status(fields.get("status")) != "open":
+        if candidate.status != "open":
             continue
-        if effective_contracts_open(fields) <= 0:
+        if candidate.contracts_open <= 0:
             continue
-        if _record_strike(fields) != float(deal.strike):
+        if candidate.strike != deal_strike:
             continue
-        if _record_expiration_ymd(fields) != str(deal.expiration_ymd):
+        if candidate.expiration_ymd != deal_expiration_ymd:
             continue
-        out.append(
-            {
-                "record_id": record_id,
-                "fields": fields,
-                "opened_at": int(safe_float(fields.get("opened_at")) or 0),
-            }
-        )
-    out.sort(key=lambda row: (int(row.get("opened_at") or 0), str(row.get("record_id") or "")))
+        out.append(candidate)
+    out.sort(key=lambda row: (int(row.opened_at or 0), row.record_id))
     return out
 
 
@@ -175,8 +213,7 @@ def match_close_positions(repo: OptionPositionsRepoLike, deal: NormalizedTradeDe
     matches: list[CloseMatch] = []
     candidates = _iter_open_candidates(repo, deal)
     for item in candidates:
-        fields = item.get("fields") or {}
-        open_qty = effective_contracts_open(fields)
+        open_qty = item.contracts_open
         if open_qty <= 0:
             continue
         take = min(open_qty, remaining)
@@ -184,7 +221,7 @@ def match_close_positions(repo: OptionPositionsRepoLike, deal: NormalizedTradeDe
             continue
         matches.append(
             CloseMatch(
-                record_id=str(item["record_id"]),
+                record_id=item.record_id,
                 contracts_to_close=int(take),
                 matched_by="strict_exact_fifo",
             )
@@ -205,7 +242,9 @@ def resolve_trade_deal(
     repo: OptionPositionsRepoLike,
     state: dict[str, Any] | None,
     apply_changes: bool,
+    persist_trade_event_fn=None,
 ) -> IntakeResolution:
+    persist_fn = persist_trade_event_fn or persist_trade_event
     if lookup_deal_state(state, deal.deal_id) is not None:
         return _failure(status="skipped", action=None, reason="duplicate_deal_id", deal=deal)
 
@@ -247,7 +286,7 @@ def resolve_trade_deal(
                 reason="applied_open",
                 deal_id=deal.deal_id,
                 account=deal.internal_account,
-                operations=[apply_trade_open_with(repo, deal, persist_trade_event_fn=persist_trade_event)],
+                operations=[apply_trade_open_with(repo, deal, persist_trade_event_fn=persist_fn)],
                 diagnostics={},
             )
         preview = preview_trade_open(deal)
@@ -282,7 +321,7 @@ def resolve_trade_deal(
             repo,
             matches=matches,
             deal=deal,
-            persist_trade_event_fn=persist_trade_event,
+            persist_trade_event_fn=persist_fn,
         )
         return IntakeResolution(
             status="applied",
