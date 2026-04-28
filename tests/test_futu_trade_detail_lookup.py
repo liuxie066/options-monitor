@@ -165,3 +165,29 @@ def test_enrich_trade_push_payload_records_lookup_errors(monkeypatch) -> None:
     assert "futu_account_id" not in out.payload
     assert out.diagnostics["matched_via"] == "not_found"
     assert out.diagnostics["query_errors"]
+
+
+def test_enrich_trade_push_payload_canonicalizes_us_prefixed_symbol_from_lookup_row(monkeypatch) -> None:
+    class FakeGateway:
+        def get_order_list(self, **kwargs):
+            if "acc_id" in kwargs:
+                return [{"order_id": "order-7", "acc_id": "888", "symbol": "US.NVDA"}]
+            return []
+
+        def get_deal_list(self, **kwargs):
+            return []
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr("scripts.futu_trade_detail_lookup.build_futu_gateway", lambda **kwargs: FakeGateway())
+    out = enrich_trade_push_payload_with_account_id(
+        {"order_id": "order-7", "deal_id": "deal-7"},
+        host="127.0.0.1",
+        port=11111,
+        futu_account_ids=["888"],
+    )
+
+    assert out.payload["futu_account_id"] == "888"
+    assert out.payload["symbol"] == "NVDA"
+    assert out.diagnostics["matched_via"] == "order_lookup_by_acc_id"
