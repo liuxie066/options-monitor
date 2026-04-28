@@ -13,6 +13,7 @@ from scripts.feishu_bitable import bitable_list_records, get_tenant_access_token
 from scripts.option_positions_core.domain import (
     OpenPositionCommand,
     build_expire_auto_close_patch,
+    effective_contracts_open,
     effective_expiration,
     exp_ms_to_datetime,
     normalize_broker,
@@ -683,11 +684,17 @@ def auto_close_expired_positions(
     for decision in to_close:
         try:
             fields = repo.get_record_fields(str(decision["record_id"]))
+            contracts_to_close = effective_contracts_open(fields)
+            if contracts_to_close <= 0:
+                errors.append(
+                    f"{decision.get('record_id')} {decision.get('position_id')}: contracts_open resolved to <= 0"
+                )
+                continue
             persist_manual_close_event(
                 repo,
                 record_id=str(decision["record_id"]),
                 fields=fields,
-                contracts_to_close=int(fields.get("contracts_open") or 0),
+                contracts_to_close=contracts_to_close,
                 close_price=None,
                 close_reason="expired",
                 as_of_ms=as_of_ms,
