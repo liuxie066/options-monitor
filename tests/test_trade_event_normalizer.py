@@ -62,3 +62,28 @@ def test_normalize_trade_deal_keeps_unknown_position_effect_when_missing() -> No
     assert deal.multiplier == 100
     assert deal.multiplier_source == "payload"
     assert deal.expiration_ymd == "2026-06-18"
+
+
+def test_normalize_trade_deal_recognizes_additional_account_id_fields() -> None:
+    deal = normalize_trade_deal(
+        {
+            "deal_id": "deal-3",
+            "trade_acc_id": "987654321",
+            "symbol": "NVDA",
+            "option_type": "CALL",
+            "trade_side": "SELL",
+            "position_effect": "OPEN",
+            "qty": 1,
+            "price": 1.23,
+            "strike": 100,
+            "multiplier": 100,
+            "expiry_date": "260618",
+            "currency_code": "USD",
+        },
+        futu_account_mapping={"987654321": "lx"},
+    )
+
+    assert deal.futu_account_id == "987654321"
+    assert deal.internal_account == "lx"
+    assert deal.visible_account_fields == {"trade_acc_id": "987654321"}
+    assert deal.account_mapping_keys == ["987654321"]

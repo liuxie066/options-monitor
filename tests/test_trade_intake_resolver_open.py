@@ -86,3 +86,24 @@ def test_resolve_trade_open_rejects_non_sell_side() -> None:
 
     assert result.status == "unresolved"
     assert result.reason == "unsupported_open_side"
+
+
+def test_resolve_trade_open_missing_account_mapping_exposes_diagnostics() -> None:
+    result = resolve_trade_deal(
+        _deal(
+            internal_account=None,
+            futu_account_id="281756479859383816",
+            raw_payload={"deal_id": "deal-open-1", "trade_acc_id": "281756479859383816"},
+            visible_account_fields={"trade_acc_id": "281756479859383816"},
+            account_mapping_keys=["999999999999999999"],
+        ),
+        repo=FakeRepo(),
+        state={},
+        apply_changes=False,
+    )
+
+    assert result.status == "unresolved"
+    assert result.reason == "missing_account_mapping:futu_account_id=281756479859383816"
+    assert result.diagnostics["futu_account_id"] == "281756479859383816"
+    assert result.diagnostics["visible_account_fields"] == {"trade_acc_id": "281756479859383816"}
+    assert result.diagnostics["account_mapping_keys"] == ["999999999999999999"]
