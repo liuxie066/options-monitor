@@ -14,6 +14,7 @@ from scripts.validate_config import validate_config
 from domain.domain.fetch_source import resolve_symbol_fetch_source
 from scripts.futu_portfolio_context import infer_futu_portfolio_settings
 from scripts.notify_symbols import build_notification
+from scripts.option_positions_core.service import load_option_positions_repo
 from scripts.pipeline_context import load_option_positions_context, load_portfolio_context
 from scripts.query_sell_put_cash import query_sell_put_cash
 from scripts.io_utils import safe_read_csv
@@ -112,6 +113,7 @@ def _healthcheck_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str
         list_account_config_views=list_account_config_views,
         mask_account_id=_mask_account_id,
         infer_futu_portfolio_settings=infer_futu_portfolio_settings,
+        load_option_positions_repo=load_option_positions_repo,
         run_futu_doctor=_run_futu_doctor,
         healthcheck_symbols_for_futu=_healthcheck_symbols_for_futu,
         write_tools_enabled=write_tools_enabled,

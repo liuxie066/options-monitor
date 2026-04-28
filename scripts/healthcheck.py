@@ -32,7 +32,7 @@ from scripts.config_loader import normalize_portfolio_broker_config, resolve_dat
 from scripts.validate_config import validate_config
 
 
-REQUIRED_HOLDINGS_FIELDS = {'asset_id', 'asset_name', 'quantity', 'account', 'broker', 'currency', 'asset_type'}
+REQUIRED_HOLDINGS_FIELDS = {'asset_id', 'asset_name', 'quantity', 'account', 'currency', 'asset_type'}
 REQUIRED_OPTION_POSITION_FIELDS = {'symbol', 'option_type', 'side', 'contracts', 'status', 'account', 'broker', 'currency', 'cash_secured_amount'}
 
 
@@ -99,6 +99,9 @@ def main():
 
         missing_hold = sorted(list(need_hold - hold_fields))
         missing_opt = sorted(list(need_opt - opt_fields))
+        broker_fields = {"broker", "market"}
+        if not (hold_fields & broker_fields):
+            missing_hold.append("broker|market")
         if missing_hold:
             errors.append('holdings table missing fields: ' + ','.join(missing_hold))
         if missing_opt:

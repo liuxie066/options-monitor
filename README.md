@@ -115,6 +115,7 @@ cp configs/examples/portfolio.sqlite.example.json secrets/portfolio.sqlite.json
 - 行情与期权链：OpenD / Futu API
 - 持仓与现金：Futu / OpenD
 - 期权持仓存储：SQLite
+- Feishu `option_positions` 不是稳态主存储；只用于可选的空库 bootstrap 和远端镜像
 
 ---
 
@@ -123,6 +124,12 @@ cp configs/examples/portfolio.sqlite.example.json secrets/portfolio.sqlite.json
 - 支持多账户配置
 - 持仓与现金默认来自 Futu / OpenD
 - Feishu holdings 可作为 `holdings` 或 `external_holdings` 来源
+- 运行时 Feishu holdings 连接只认 `portfolio.data_config.feishu.tables.holdings`
+- 账户级 `bitable_*` 字段当前只是历史/预留展示，不参与运行时读取
+
+如果你启用了 Feishu `option_positions` bootstrap：
+- SQLite 非空时不会再触发 bootstrap
+- SQLite 空库但远端读取失败时，healthcheck 和 WebUI 会明确显示 degraded 状态
 
 如果你需要：
 - 多账户配置

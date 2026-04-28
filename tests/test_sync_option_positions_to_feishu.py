@@ -202,6 +202,40 @@ def test_build_feishu_payload_coerces_numeric_fields_from_strings() -> None:
     assert isinstance(payload["cash_secured_amount"], int)
 
 
+def test_sync_dry_run_accepts_read_only_repo(monkeypatch, tmp_path: Path) -> None:
+    import scripts.sync_option_positions_to_feishu as sync_mod
+
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
+
+    class _ReadOnlyRepo:
+        def list_position_lots(self) -> list[dict[str, Any]]:
+            return [
+                {
+                    "record_id": "rec_local_1",
+                    "fields": {
+                        "broker": "富途",
+                        "account": "lx",
+                        "symbol": "TSLA",
+                        "option_type": "put",
+                        "side": "short",
+                        "contracts": 1,
+                        "contracts_open": 1,
+                        "currency": "USD",
+                        "strike": 100.0,
+                        "expiration": 1781827200000,
+                        "status": "open",
+                    },
+                }
+            ]
+
+    monkeypatch.setattr(sync_mod, "get_tenant_access_token", lambda *_args, **_kwargs: "token")
+    monkeypatch.setattr(sync_mod, "bitable_fields", lambda *_args, **_kwargs: [{"field_name": "broker"}, {"field_name": "local_record_id"}])
+    monkeypatch.setattr(sync_mod, "bitable_list_records", lambda *_args, **_kwargs: [])
+
+    rows = sync_mod.sync_option_positions(repo=_ReadOnlyRepo(), data_config=data_config, apply_mode=False)
+    assert rows[0]["record_id"] == "rec_local_1"
+
+
 def test_match_remote_record_prefers_unique_local_record_id_before_duplicate_position_id() -> None:
     import scripts.sync_option_positions_to_feishu as sync_mod
 

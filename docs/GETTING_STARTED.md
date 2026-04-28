@@ -57,6 +57,10 @@ http://127.0.0.1:8000
 - `config.us.json` 或 `config.hk.json`
 - `secrets/portfolio.sqlite.json`
 
+默认最小配置下：
+- `option_positions` 只需要本地 SQLite
+- Feishu 只在你启用 holdings / external_holdings，或希望给 `option_positions` 增加 bootstrap / 镜像时才需要配置
+
 如果你不用 WebUI，也可以手工复制模板，详见根目录 [README.md](../README.md)。
 
 ---
@@ -66,6 +70,11 @@ http://127.0.0.1:8000
 ```bash
 ./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'
 ```
+
+如果你配置了 Feishu `option_positions` bootstrap，这个 healthcheck 会额外给出 `option_positions_bootstrap` 状态，区分：
+- 未配置 bootstrap
+- 已配置且成功
+- 已配置但首次读取失败（warn / degraded）
 
 如果要显式指定配置路径：
 

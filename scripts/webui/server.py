@@ -17,6 +17,7 @@ from scripts.account_config import (
     list_account_config_views,
 )
 from scripts.infra.service import send_openclaw_message
+from scripts.option_positions_core.service import load_option_positions_repo
 from scripts.validate_config import SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS as VALIDATOR_SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS
 from src.application.account_management import add_account, edit_account, remove_account
 from src.application.tool_execution import build_tool_manifest, execute_tool
@@ -155,7 +156,7 @@ def _list_rows() -> list[dict[str, Any]]:
 
 
 def _global_summary(config_key: str) -> dict[str, Any]:
-    return _global_summary_impl(
+    summary = _global_summary_impl(
         config_key,
         config_files=CONFIG_FILES,
         resolve_config_path=_resolve_config_path,
@@ -167,6 +168,29 @@ def _global_summary(config_key: str) -> dict[str, Any]:
         schedule_summary_fields=SCHEDULE_SUMMARY_FIELDS,
         global_strategy_fields=GLOBAL_STRATEGY_FIELDS,
     )
+    try:
+        cfg = _load_config(config_key)
+        config_path = _resolve_config_path(CONFIG_FILES[config_key])
+        data_config_path = _load_data_config_for_runtime_impl(cfg, config_path=config_path)
+        repo = load_option_positions_repo(data_config_path)
+        status = str(getattr(repo, "bootstrap_status", "") or "").strip()
+        message = str(getattr(repo, "bootstrap_message", "") or "").strip()
+        portfolio = summary.get("sections", {}).get("portfolio")
+        if isinstance(portfolio, dict) and status:
+            portfolio["option_positions_bootstrap"] = {
+                "status": status,
+                "message": (message or status),
+                "ok": not status.startswith("degraded_"),
+            }
+    except Exception as exc:
+        portfolio = summary.get("sections", {}).get("portfolio")
+        if isinstance(portfolio, dict):
+            portfolio["option_positions_bootstrap"] = {
+                "status": "degraded_option_positions_repo_load_failed",
+                "message": str(exc),
+                "ok": False,
+            }
+    return summary
 
 
 def _patch_close_advice(cfg: dict, payload: dict) -> None:
