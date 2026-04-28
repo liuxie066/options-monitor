@@ -87,3 +87,27 @@ def test_normalize_trade_deal_recognizes_additional_account_id_fields() -> None:
     assert deal.internal_account == "lx"
     assert deal.visible_account_fields == {"trade_acc_id": "987654321"}
     assert deal.account_mapping_keys == ["987654321"]
+
+
+def test_normalize_trade_deal_parses_futu_option_code_with_lookup_underlying_fields() -> None:
+    deal = normalize_trade_deal(
+        {
+            "deal_id": "deal-4",
+            "futu_account_id": "281756479859383816",
+            "code": "HK.POP260528P150000",
+            "stock_name": "泡泡玛特",
+            "side": "SELL",
+            "position_effect": "OPEN",
+            "qty": 1,
+            "price": 6.3,
+            "currency": "HKD",
+            "create_time": "2026-04-28 10:15:56",
+        },
+        futu_account_mapping={"281756479859383816": "lx"},
+    )
+
+    assert deal.internal_account == "lx"
+    assert deal.symbol == "9992.HK"
+    assert deal.option_type == "put"
+    assert deal.strike == 150.0
+    assert deal.expiration_ymd == "2026-05-28"

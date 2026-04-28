@@ -61,6 +61,18 @@ def _query_rows(gateway: Any, method_name: str, **kwargs: Any) -> tuple[list[dic
         return [], str(exc)
 
 
+def _merge_lookup_row(src: dict[str, Any], row: dict[str, Any], *, fallback_acc_id: str) -> dict[str, Any]:
+    enriched = dict(src)
+    enriched["futu_account_id"] = _extract_account_id(row, fallback_acc_id=fallback_acc_id)
+    for key, value in row.items():
+        if key in enriched and enriched.get(key) not in (None, ""):
+            continue
+        if value in (None, ""):
+            continue
+        enriched[key] = value
+    return enriched
+
+
 def enrich_trade_push_payload_with_account_id(
     payload: dict[str, Any] | Any,
     *,
@@ -106,8 +118,7 @@ def enrich_trade_push_payload_with_account_id(
                     diagnostics["query_errors"].append({"method": "get_order_list", **query_kwargs, "error": error})
                 for row in rows:
                     if _matches_identifier(row, order_id=order_id, deal_id=deal_id):
-                        enriched = dict(src)
-                        enriched["futu_account_id"] = _extract_account_id(row, fallback_acc_id=acc_id)
+                        enriched = _merge_lookup_row(src, row, fallback_acc_id=acc_id)
                         diagnostics["matched_via"] = "order_lookup_by_acc_id"
                         return TradePushAccountLookupResult(payload=enriched, diagnostics=diagnostics)
             if deal_id:
@@ -118,8 +129,7 @@ def enrich_trade_push_payload_with_account_id(
                     diagnostics["query_errors"].append({"method": "get_deal_list", **query_kwargs, "error": error})
                 for row in rows:
                     if _matches_identifier(row, order_id=order_id, deal_id=deal_id):
-                        enriched = dict(src)
-                        enriched["futu_account_id"] = _extract_account_id(row, fallback_acc_id=acc_id)
+                        enriched = _merge_lookup_row(src, row, fallback_acc_id=acc_id)
                         diagnostics["matched_via"] = "deal_lookup_by_acc_id"
                         return TradePushAccountLookupResult(payload=enriched, diagnostics=diagnostics)
         if order_id:
@@ -132,8 +142,7 @@ def enrich_trade_push_payload_with_account_id(
                 if _matches_identifier(row, order_id=order_id, deal_id=deal_id):
                     resolved_acc_id = _extract_account_id(row, fallback_acc_id="")
                     if resolved_acc_id:
-                        enriched = dict(src)
-                        enriched["futu_account_id"] = resolved_acc_id
+                        enriched = _merge_lookup_row(src, row, fallback_acc_id=resolved_acc_id)
                         diagnostics["matched_via"] = "order_lookup_without_acc_id"
                         return TradePushAccountLookupResult(payload=enriched, diagnostics=diagnostics)
         if deal_id:
@@ -146,8 +155,7 @@ def enrich_trade_push_payload_with_account_id(
                 if _matches_identifier(row, order_id=order_id, deal_id=deal_id):
                     resolved_acc_id = _extract_account_id(row, fallback_acc_id="")
                     if resolved_acc_id:
-                        enriched = dict(src)
-                        enriched["futu_account_id"] = resolved_acc_id
+                        enriched = _merge_lookup_row(src, row, fallback_acc_id=resolved_acc_id)
                         diagnostics["matched_via"] = "deal_lookup_without_acc_id"
                         return TradePushAccountLookupResult(payload=enriched, diagnostics=diagnostics)
     finally:

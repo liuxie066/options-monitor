@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+import re
 from typing import Any
 
 from scripts.option_positions_core.domain import normalize_currency, normalize_option_type
@@ -20,11 +21,23 @@ ACCOUNT_ID_KEYS = (
     "accID",
 )
 
+OPTION_CODE_RE = re.compile(
+    r"^(?P<market>[A-Z]{2})\.(?P<root>[A-Z]+)(?P<yy>\d{2})(?P<mm>\d{2})(?P<dd>\d{2})(?P<cp>[CP])(?P<strike>\d+)$"
+)
+
 
 def _pick(src: dict[str, Any], *keys: str) -> Any:
     for key in keys:
         if key in src and src.get(key) not in (None, ""):
             return src.get(key)
+    return None
+
+
+def _pick_first_normalized_symbol(src: dict[str, Any], *keys: str) -> str | None:
+    for key in keys:
+        value = normalize_symbol(str(src.get(key) or ""))
+        if value:
+            return value
     return None
 
 
@@ -37,6 +50,29 @@ def extract_visible_account_fields(src: dict[str, Any] | Any) -> dict[str, str]:
         if value:
             out[key] = value
     return out
+
+
+def _parse_futu_option_code(code: Any) -> dict[str, Any]:
+    raw = str(code or "").strip().upper()
+    match = OPTION_CODE_RE.match(raw)
+    if not match:
+        return {}
+    strike_digits = match.group("strike")
+    strike_value = None
+    if strike_digits:
+        try:
+            strike_value = int(strike_digits) / 1000.0
+        except Exception:
+            strike_value = None
+    expiration = f"20{match.group('yy')}-{match.group('mm')}-{match.group('dd')}"
+    option_type = "call" if match.group("cp") == "C" else "put"
+    return {
+        "option_code_market": match.group("market"),
+        "option_code_root": match.group("root"),
+        "option_type": option_type,
+        "expiration_ymd": expiration,
+        "strike": strike_value,
+    }
 
 
 def _norm_str(value: Any) -> str | None:
@@ -155,7 +191,19 @@ def normalize_trade_deal(
     src = payload if isinstance(payload, dict) else {}
     visible_account_fields = extract_visible_account_fields(src)
     futu_account_id = _norm_str(_pick(src, *ACCOUNT_ID_KEYS))
-    symbol = normalize_symbol(str(_pick(src, "symbol", "stock_code", "code", "underlying") or ""))
+    option_code_info = _parse_futu_option_code(_pick(src, "code", "stock_code", "symbol"))
+    symbol = _pick_first_normalized_symbol(
+        src,
+        "symbol",
+        "owner_stock_code",
+        "owner_code",
+        "underlying_code",
+        "stock_code",
+        "code",
+        "stock_name",
+        "name",
+        "underlying",
+    )
 
     option_type_raw = _pick(src, "option_type", "put_call", "call_or_put")
     option_type = None
@@ -164,6 +212,8 @@ def normalize_trade_deal(
             option_type = normalize_option_type(option_type_raw)
         except Exception:
             option_type = None
+    if option_type is None:
+        option_type = str(option_code_info.get("option_type") or "").strip() or None
 
     currency_raw = _pick(src, "currency", "currency_code", "ccy")
     currency = None
@@ -185,6 +235,13 @@ def normalize_trade_deal(
         allow_opend_refresh=True,
     )
 
+    strike = _norm_float(_pick(src, "strike", "strike_price"))
+    if strike is None and option_code_info.get("strike") is not None:
+        strike = float(option_code_info["strike"])
+    expiration_ymd = _normalize_expiration(_pick(src, "expiration", "expiration_ymd", "expiry", "expiry_date"))
+    if expiration_ymd is None:
+        expiration_ymd = str(option_code_info.get("expiration_ymd") or "").strip() or None
+
     return NormalizedTradeDeal(
         broker="富途",
         futu_account_id=futu_account_id,
@@ -197,10 +254,10 @@ def normalize_trade_deal(
         position_effect=position_effect,
         contracts=_norm_int(_pick(src, "contracts", "qty", "quantity", "dealt_qty")),
         price=_norm_float(_pick(src, "price", "dealt_avg_price", "dealt_price", "avg_price")),
-        strike=_norm_float(_pick(src, "strike", "strike_price")),
+        strike=strike,
         multiplier=multiplier,
         multiplier_source=multiplier_source,
-        expiration_ymd=_normalize_expiration(_pick(src, "expiration", "expiration_ymd", "expiry", "expiry_date")),
+        expiration_ymd=expiration_ymd,
         currency=currency,
         trade_time_ms=_normalize_trade_time_ms(_pick(src, "trade_time_ms", "create_time", "updated_time")),
         raw_payload=dict(src),
