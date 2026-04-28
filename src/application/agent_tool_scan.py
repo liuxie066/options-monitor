@@ -186,6 +186,8 @@ def close_advice_rows_summary(csv_path: Path, text_path: Path, *, safe_read_csv:
     for row in rows:
         if not isinstance(row, dict):
             continue
+        if str(row.get("evaluation_status") or "priced").strip().lower() != "priced":
+            continue
         tier = str(row.get("tier") or "").strip().lower() or "none"
         tier_counts[tier] = tier_counts.get(tier, 0) + 1
         account = str(row.get("account") or "").strip().lower()

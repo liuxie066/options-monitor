@@ -342,10 +342,10 @@ def test_run_close_advice_reports_quote_issue_summary(tmp_path: Path) -> None:
     assert result["notify_rows"] == 0
     assert result["quote_issue_rows"] == 1
     assert result["flag_counts"]["missing_quote"] == 1
-    assert result["flag_counts"]["required_data_missing_expiration"] == 1
-    assert result["tier_counts"]["none"] == 1
-    assert result["coverage_summary"]["positions_missing_expiration"] == 1
-    assert result["quote_issue_samples"] == ["AAPL put 2026-05-15 100.00P: 缺少到期日覆盖"]
+    assert result["flag_counts"]["required_data_fetch_error"] == 1
+    assert result["evaluation_gap_rows"] == 1
+    assert result["coverage_summary"]["coverage_fetch_errors"] == 1
+    assert result["quote_issue_samples"][0].startswith("AAPL put 2026-05-15 100.00P: 补拉持仓覆盖失败")
 
 
 def test_run_close_advice_reports_missing_expiration_coverage_without_opend_fetch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -410,11 +410,128 @@ def test_run_close_advice_reports_missing_expiration_coverage_without_opend_fetc
     )
 
     csv_text = (out_dir / "close_advice.csv").read_text(encoding="utf-8")
-    assert "required_data_missing_expiration" in csv_text
+    assert "required_data_fetch_error" in csv_text
     assert "opend_fetch_no_usable_quote" not in csv_text
-    assert result["coverage_summary"]["positions_missing_expiration"] == 1
+    assert result["coverage_summary"]["coverage_fetch_errors"] == 1
     assert result["quote_fetch_diagnostics"]["attempted"] == 0
-    assert result["quote_issue_samples"] == ["9992.HK put 2026-04-29 135.00P: 缺少到期日覆盖 | have=2026-05-28"]
+    assert result["quote_issue_samples"][0].startswith("9992.HK put 2026-04-29 135.00P: 补拉持仓覆盖失败")
+
+
+def test_run_close_advice_fetches_missing_position_coverage_before_pricing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    ctx_path = tmp_path / "option_positions_context.json"
+    ctx_path.write_text(
+        json.dumps(
+            {
+                "open_positions_min": [
+                    {
+                        "account": "sy",
+                        "symbol": "9992.HK",
+                        "option_type": "put",
+                        "side": "short",
+                        "contracts_open": 1,
+                        "currency": "HKD",
+                        "strike": 135,
+                        "multiplier": 100,
+                        "premium": 0.88,
+                        "expiration": "2026-04-29",
+                    },
+                    {
+                        "account": "sy",
+                        "symbol": "9992.HK",
+                        "option_type": "call",
+                        "side": "short",
+                        "contracts_open": 1,
+                        "currency": "HKD",
+                        "strike": 200,
+                        "multiplier": 100,
+                        "premium": 1.50,
+                        "expiration": "2026-06-29",
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    required_root = tmp_path / "required_data"
+    parsed = required_root / "parsed"
+    parsed.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "9992.HK",
+                "option_type": "put",
+                "expiration": "2026-05-28",
+                "strike": 135,
+                "mid": 0.04,
+                "bid": 0.03,
+                "ask": 0.05,
+                "dte": 30,
+                "multiplier": 100,
+                "spot": 150,
+                "currency": "HKD",
+            }
+        ]
+    ).to_csv(parsed / "9992.HK_required_data.csv", index=False)
+
+    calls: list[dict[str, object]] = []
+
+    def fake_fetch_symbol(symbol: str, **kwargs: object) -> dict[str, object]:
+        calls.append({"symbol": symbol, **kwargs})
+        assert symbol == "9992.HK"
+        assert kwargs["explicit_expirations"] == ["2026-04-29", "2026-06-29"]
+        return {
+            "rows": [
+                {
+                    "symbol": "9992.HK",
+                    "option_type": "put",
+                    "expiration": "2026-04-29",
+                    "strike": 135,
+                    "mid": 0.04,
+                    "bid": 0.03,
+                    "ask": 0.05,
+                    "dte": 1,
+                    "multiplier": 100,
+                    "spot": 140,
+                    "currency": "HKD",
+                },
+                {
+                    "symbol": "9992.HK",
+                    "option_type": "call",
+                    "expiration": "2026-06-29",
+                    "strike": 200,
+                    "mid": 1.50,
+                    "bid": 1.34,
+                    "ask": 1.52,
+                    "dte": 62,
+                    "multiplier": 100,
+                    "spot": 140,
+                    "currency": "HKD",
+                },
+            ]
+        }
+
+    monkeypatch.setattr("scripts.fetch_market_data_opend.fetch_symbol", fake_fetch_symbol)
+
+    out_dir = tmp_path / "reports"
+    result = run_close_advice(
+        config={
+            "close_advice": {"enabled": True},
+            "symbols": [{"symbol": "9992.HK", "fetch": {"source": "futu", "limit_expirations": 1}}],
+        },
+        context_path=ctx_path,
+        required_data_root=required_root,
+        output_dir=out_dir,
+        base_dir=Path.cwd(),
+    )
+
+    csv_text = (out_dir / "close_advice.csv").read_text(encoding="utf-8")
+    refreshed_text = (parsed / "9992.HK_required_data.csv").read_text(encoding="utf-8")
+    assert calls and calls[0]["symbol"] == "9992.HK"
+    assert result["evaluation_gap_rows"] == 0
+    assert result["coverage_summary"]["coverage_fetch_attempted_symbols"] == 1
+    assert "required_data_missing_expiration" not in csv_text
+    assert "2026-04-29" in refreshed_text
+    assert "2026-06-29" in refreshed_text
 
 
 def test_run_close_advice_fee_can_block_gross_strong_signal(tmp_path: Path) -> None:
