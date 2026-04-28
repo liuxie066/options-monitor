@@ -4,6 +4,10 @@ from fastapi import HTTPException
 from typing import Any
 
 from scripts.account_config import accounts_from_config
+from src.application.watchlist_mutations import (
+    ensure_symbols_list as _ensure_symbols_list,
+    find_symbol_entry as _find_symbol_entry,
+)
 
 
 def patch_close_advice(cfg: dict, payload: dict) -> None:
@@ -170,24 +174,15 @@ def patch_notifications(cfg: dict, payload: dict, *, notification_numeric_fields
 
 
 def find_symbol(cfg: dict, symbol: str) -> tuple[int | None, dict | None]:
-    symbols = cfg.get("symbols")
-    if not isinstance(symbols, list):
-        return None, None
-    needle = symbol.strip().upper()
-    for idx, item in enumerate(symbols):
-        if not isinstance(item, dict):
-            continue
-        if str(item.get("symbol") or "").strip().upper() == needle:
-            return idx, item
-    return None, None
+    return _find_symbol_entry(
+        cfg,
+        symbol,
+        resolve_watchlist_config=lambda data: [item for item in _ensure_symbols_list(data, error_factory=ValueError) if isinstance(item, dict)],
+    )
 
 
 def ensure_symbols_list(cfg: dict) -> list:
-    if cfg.get("symbols") is None:
-        cfg["symbols"] = []
-    if not isinstance(cfg.get("symbols"), list):
-        raise HTTPException(status_code=400, detail="config symbols must be a list")
-    return cfg["symbols"]
+    return _ensure_symbols_list(cfg, error_factory=lambda message: HTTPException(status_code=400, detail=message))
 
 
 def clean_symbol_level_strategy_fields(cfg: dict, *, forbidden_fields: list[str] | set[str] | tuple[str, ...]) -> None:

@@ -4,6 +4,12 @@ from copy import deepcopy
 from typing import Any, Callable, cast
 
 from scripts.agent_plugin.contracts import AgentToolError
+from src.application.watchlist_mutations import (
+    ensure_symbols_list as _ensure_symbols_list,
+    find_symbol_entry as _find_symbol_entry,
+    normalize_symbol as _normalize_symbol,
+    set_path as _shared_set_path,
+)
 
 
 def list_symbol_rows(cfg: dict[str, Any], *, resolve_watchlist_config, normalize_accounts) -> list[dict[str, Any]]:
@@ -27,25 +33,19 @@ def list_symbol_rows(cfg: dict[str, Any], *, resolve_watchlist_config, normalize
 
 
 def find_symbol_entry(cfg: dict[str, Any], symbol: str, *, resolve_watchlist_config) -> tuple[int | None, dict[str, Any] | None]:
-    needle = str(symbol or "").strip().upper()
-    for idx, item in enumerate(resolve_watchlist_config(cfg)):
-        if str(item.get("symbol") or "").strip().upper() == needle:
-            return idx, item
-    return None, None
+    return _find_symbol_entry(cfg, symbol, resolve_watchlist_config=resolve_watchlist_config)
 
 
 def set_path(obj: dict[str, Any], path: str, value: Any) -> None:
-    cur = obj
-    parts = [str(x).strip() for x in str(path).split(".") if str(x).strip()]
-    if not parts:
-        raise AgentToolError(code="INPUT_ERROR", message="set path cannot be empty")
-    for key in parts[:-1]:
-        nxt = cur.get(key)
-        if not isinstance(nxt, dict):
-            nxt = {}
-            cur[key] = nxt
-        cur = nxt
-    cur[parts[-1]] = value
+    try:
+        _shared_set_path(
+            obj,
+            path,
+            value,
+            error_factory=lambda message: AgentToolError(code="INPUT_ERROR", message=message),
+        )
+    except AgentToolError:
+        raise
 
 
 def require_int(payload: dict[str, Any], key: str) -> int:
@@ -64,13 +64,8 @@ def require_float(payload: dict[str, Any], key: str) -> float:
 
 def apply_symbol_mutation(cfg: dict[str, Any], payload: dict[str, Any], *, normalize_accounts, resolve_watchlist_config) -> dict[str, Any]:
     action = str(payload.get("action") or "list").strip().lower()
-    symbol = str(payload.get("symbol") or "").strip().upper()
-    symbols = cfg.get("symbols")
-    if symbols is None:
-        cfg["symbols"] = []
-        symbols = cfg["symbols"]
-    if not isinstance(symbols, list):
-        raise AgentToolError(code="CONFIG_ERROR", message="config symbols must be a list")
+    symbol = _normalize_symbol(str(payload.get("symbol") or ""))
+    symbols = _ensure_symbols_list(cfg, error_factory=lambda message: AgentToolError(code="CONFIG_ERROR", message=message))
     if action == "list":
         return cfg
     idx, found_entry = find_symbol_entry(cfg, symbol, resolve_watchlist_config=resolve_watchlist_config)
