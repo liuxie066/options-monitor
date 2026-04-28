@@ -463,12 +463,15 @@ def run_one_account(
                 missing_mid = int(flag_counts.get("missing_mid") or 0)
                 opend_fetch_error = int(flag_counts.get("opend_fetch_error") or 0)
                 opend_fetch_no_usable_quote = int(flag_counts.get("opend_fetch_no_usable_quote") or 0)
+                invalid_spread = int(flag_counts.get("invalid_spread") or 0)
+                spread_too_wide = int(flag_counts.get("spread_too_wide") or 0)
                 quote_issue_samples = close_result.get("quote_issue_samples") if isinstance(close_result.get("quote_issue_samples"), list) else []
                 summary = (
                     f"### [{acct}] 平仓建议\n"
                     f"- 本次未生成 strong/medium 提醒；报价异常 {int(close_result.get('quote_issue_rows') or 0)} 条\n"
                     f"- missing_quote={missing_quote} | missing_mid={missing_mid} | "
-                    f"opend_fetch_error={opend_fetch_error} | opend_fetch_no_usable_quote={opend_fetch_no_usable_quote}\n"
+                    f"opend_fetch_error={opend_fetch_error} | opend_fetch_no_usable_quote={opend_fetch_no_usable_quote} | "
+                    f"invalid_spread={invalid_spread} | spread_too_wide={spread_too_wide}\n"
                     f"- 说明: missing_quote 表示持仓已获取，但未取得可用报价，不是持仓缺失\n"
                 )
                 if quote_issue_samples:

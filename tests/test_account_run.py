@@ -318,6 +318,8 @@ def test_run_one_account_appends_close_advice_quote_issue_summary(monkeypatch, t
                 "missing_mid": 1,
                 "opend_fetch_error": 0,
                 "opend_fetch_no_usable_quote": 0,
+                "invalid_spread": 0,
+                "spread_too_wide": 1,
             },
             "quote_issue_samples": ["0700.HK put 2026-04-29 480.00P: OpenD 限频"],
         },
@@ -332,6 +334,7 @@ def test_run_one_account_appends_close_advice_quote_issue_summary(monkeypatch, t
 
     assert "本次未生成 strong/medium 提醒" in outcome.result.notification_text
     assert "missing_quote 表示持仓已获取，但未取得可用报价，不是持仓缺失" in outcome.result.notification_text
+    assert "spread_too_wide=1" in outcome.result.notification_text
     assert "样例: 0700.HK put 2026-04-29 480.00P: OpenD 限频" in outcome.result.notification_text
     close_events = [evt for evt in env["audit_events"] if evt["action"] == "close_advice"]
     assert close_events
