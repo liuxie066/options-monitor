@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.1.0-beta.12 - 2026-04-28
+
+### Changed
+- Hardened auto trade intake account enrichment by retrying OpenD order/deal lookups without `acc_id` when push payloads omit the futu account id
+- Added explicit trade-intake diagnostics for missing account mapping, including visible account fields, attempted lookup paths, and enrichment audit events
+
 ## 0.1.0-beta.11 - 2026-04-28
 
 ### Changed
