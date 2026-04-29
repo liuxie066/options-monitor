@@ -39,15 +39,15 @@ def _manual_open_record_id(result: dict[str, Any]) -> str:
 def _build_trade_open_command(deal: NormalizedTradeDeal) -> OpenPositionCommand:
     return OpenPositionCommand(
         broker="富途",
-        account=str(deal.internal_account),
-        symbol=str(deal.symbol),
-        option_type=str(deal.option_type),
+        account=str(deal.internal_account or ""),
+        symbol=str(deal.symbol or ""),
+        option_type=str(deal.option_type or ""),
         side="short",
         contracts=int(deal.contracts or 0),
-        currency=str(deal.currency),
-        strike=float(deal.strike),
+        currency=str(deal.currency or ""),
+        strike=(float(deal.strike) if deal.strike is not None else None),
         multiplier=float(deal.multiplier) if deal.multiplier is not None else None,
-        expiration_ymd=str(deal.expiration_ymd),
+        expiration_ymd=(str(deal.expiration_ymd or "").strip() or None),
         premium_per_share=float(deal.price),
         note=(
             f"source=opend_push "

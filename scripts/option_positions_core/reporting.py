@@ -13,6 +13,7 @@ from scripts.option_positions_core.domain import (
     EXPIRE_AUTO_CLOSE,
     effective_contracts_closed,
     effective_contracts,
+    effective_multiplier,
     normalize_account,
     normalize_broker,
     normalize_close_type,
@@ -120,9 +121,7 @@ def _read_premium(fields: dict[str, Any]) -> float | None:
 
 
 def _read_multiplier(fields: dict[str, Any]) -> int | None:
-    multiplier = safe_float(fields.get("multiplier"))
-    if multiplier is None:
-        multiplier = safe_float(parse_note_kv(fields.get("note") or "", "multiplier"))
+    multiplier = effective_multiplier(fields)
     if multiplier is not None and int(multiplier) > 0:
         return int(multiplier)
     resolved = resolve_multiplier(

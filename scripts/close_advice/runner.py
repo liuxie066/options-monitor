@@ -19,6 +19,7 @@ from domain.domain.close_advice import (
 )
 from scripts.fee_calc import calc_futu_option_fee
 from scripts.io_utils import atomic_write_text, read_json, safe_read_csv
+from scripts.option_positions_core.domain import effective_expiration_ymd, effective_multiplier
 from scripts.opend_utils import normalize_underlier, resolve_underlier_alias
 
 
@@ -608,6 +609,12 @@ def _mark_not_evaluable(
 
 
 def _position_expiration(pos: dict[str, Any]) -> str | None:
+    exp = normalize_expiration(pos.get("expiration_ymd"))
+    if exp:
+        return exp
+    exp = normalize_expiration(effective_expiration_ymd(pos))
+    if exp:
+        return exp
     exp = normalize_expiration(pos.get("expiration"))
     if exp:
         return exp
@@ -675,7 +682,7 @@ def _position_to_input(pos: dict[str, Any], quote: dict[str, Any] | None) -> tup
             bid=safe_float((quote or {}).get("bid")),
             ask=safe_float((quote or {}).get("ask")),
             dte=_calc_dte(expiration, quote),
-            multiplier=safe_float(pos.get("multiplier")) or safe_float((quote or {}).get("multiplier")),
+            multiplier=effective_multiplier(pos) or safe_float((quote or {}).get("multiplier")),
             spot=safe_float((quote or {}).get("spot")),
             currency=str(pos.get("currency") or (quote or {}).get("currency") or "").strip().upper(),
         ),

@@ -20,6 +20,8 @@ from scripts.option_positions_core.domain import (
     effective_contracts,
     effective_contracts_closed,
     effective_contracts_open,
+    effective_multiplier,
+    exp_ms_to_datetime,
     normalize_account,
     normalize_broker,
     normalize_close_type,
@@ -91,6 +93,7 @@ def build_context(records: list[dict], broker: str, account: str | None = None, 
 
     # Minimal open positions list for downstream (auto-close), keeps record_id.
     open_positions_min: list[dict] = []
+    as_of_date = datetime.now(timezone.utc).date()
 
     for it in selected_items:
         f = it.get('fields') or {}
@@ -103,6 +106,9 @@ def build_context(records: list[dict], broker: str, account: str | None = None, 
         contracts_closed = effective_contracts_closed(f)
         if contracts_open <= 0:
             continue
+        exp_dt = exp_ms_to_datetime(f.get("expiration"))
+        expiration_ymd = exp_dt.date().isoformat() if exp_dt is not None else None
+        days_to_expiration = (exp_dt.date() - as_of_date).days if exp_dt is not None else None
 
         open_positions_min.append({
             'record_id': it.get('record_id'),
@@ -120,9 +126,11 @@ def build_context(records: list[dict], broker: str, account: str | None = None, 
             'cash_secured_amount': f.get('cash_secured_amount'),
             'underlying_share_locked': f.get('underlying_share_locked') or f.get('underlying_shares_locked'),
             'strike': f.get('strike'),
-            'multiplier': f.get('multiplier') or parse_note_kv(note, 'multiplier') or None,
+            'multiplier': effective_multiplier(f),
             'premium': f.get('premium') if f.get('premium') is not None else parse_note_kv(note, 'premium_per_share'),
             'expiration': f.get('expiration'),
+            'expiration_ymd': expiration_ymd,
+            'days_to_expiration': days_to_expiration,
             'opened_at': f.get('opened_at'),
             'last_action_at': f.get('last_action_at'),
             'close_type': normalize_close_type(f.get('close_type')) if f.get('close_type') else None,

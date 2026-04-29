@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parents[1]
@@ -94,6 +95,78 @@ def test_option_positions_cli_rebuild_reports_summary(monkeypatch, tmp_path: Pat
     assert "[DONE] rebuilt position_lots" in out
     assert "trade_events=1" in out
     assert "position_lots=1" in out
+
+
+def test_option_positions_cli_list_filters_by_local_expiration(monkeypatch, tmp_path: Path, capsys) -> None:
+    import scripts.option_positions as cli_mod
+    import scripts.option_positions_core.service as svc
+    from scripts.option_positions_core.domain import OpenPositionCommand
+
+    near_exp = (datetime.now().date() + timedelta(days=1)).isoformat()
+    far_exp = (datetime.now().date() + timedelta(days=21)).isoformat()
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
+    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    repo.data_config_path = data_config  # type: ignore[attr-defined]
+    svc.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="TSLA",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=100.0,
+            multiplier=100,
+            expiration_ymd=near_exp,
+            premium_per_share=1.23,
+            opened_at_ms=1000,
+        ),
+    )
+    svc.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="NVDA",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=110.0,
+            multiplier=100,
+            expiration_ymd=far_exp,
+            premium_per_share=1.5,
+            opened_at_ms=2000,
+        ),
+    )
+
+    monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "option_positions.py",
+            "--data-config",
+            str(data_config),
+            "list",
+            "--account",
+            "lx",
+            "--format",
+            "json",
+            "--exp-within-days",
+            "7",
+        ],
+    )
+
+    cli_mod.main()
+
+    rows = json.loads(capsys.readouterr().out)
+    assert [row["symbol"] for row in rows] == ["TSLA"]
+    assert rows[0]["expiration_ymd"] == near_exp
+    assert rows[0]["strike"] == 100.0
+    assert rows[0]["multiplier"] == 100.0
 
 
 def test_option_positions_cli_void_event_reports_result(monkeypatch, tmp_path: Path, capsys) -> None:

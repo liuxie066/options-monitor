@@ -16,6 +16,9 @@ from scripts.option_positions_core.domain import (
     build_open_adjustment_patch,
     effective_contracts_open,
     effective_expiration,
+    effective_expiration_ymd,
+    effective_multiplier,
+    effective_strike,
     exp_ms_to_datetime,
     normalize_broker,
     now_ms,
@@ -133,6 +136,38 @@ def _validate_position_lot_fields(*, record_id: str, fields: dict[str, Any]) -> 
     if missing:
         joined = ", ".join(missing)
         raise ValueError(f"incomplete option position lot {record_id}: missing {joined}")
+
+
+def _position_lot_contract_scalars(fields: dict[str, Any]) -> tuple[int | None, float | None, float | None]:
+    expiration_ms, _ = effective_expiration(fields)
+    strike = safe_float(fields.get("strike"))
+    multiplier = safe_float(fields.get("multiplier"))
+    if multiplier is None:
+        multiplier = safe_float(parse_note_kv(fields.get("note") or "", "multiplier"))
+    return expiration_ms, strike, multiplier
+
+
+def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, decl: str) -> None:
+    cols = {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
+def _row_to_position_lot(row: sqlite3.Row) -> dict[str, Any]:
+    fields = json.loads(str(row["fields_json"]) or "{}")
+    if not isinstance(fields, dict):
+        fields = {}
+    if fields.get("expiration") in (None, "") and row["expiration"] not in (None, ""):
+        fields["expiration"] = int(row["expiration"])
+    if fields.get("strike") is None and row["strike"] is not None:
+        fields["strike"] = float(row["strike"])
+    if fields.get("multiplier") is None and row["multiplier"] is not None:
+        raw_multiplier = float(row["multiplier"])
+        fields["multiplier"] = int(raw_multiplier) if raw_multiplier.is_integer() else raw_multiplier
+    return {
+        "record_id": str(row["record_id"]),
+        "fields": fields,
+    }
 
 
 def _normalize_bootstrap_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -304,11 +339,63 @@ class SQLiteOptionPositionsRepository:
                   record_id TEXT PRIMARY KEY,
                   fields_json TEXT NOT NULL,
                   source_event_id TEXT,
+                  expiration INTEGER,
+                  strike REAL,
+                  multiplier REAL,
                   updated_at_ms INTEGER NOT NULL
                 )
                 """
             )
+            _add_column_if_missing(conn, "position_lots", "expiration", "INTEGER")
+            _add_column_if_missing(conn, "position_lots", "strike", "REAL")
+            _add_column_if_missing(conn, "position_lots", "multiplier", "REAL")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_position_lots_expiration ON position_lots(expiration, record_id)"
+            )
+            self._backfill_position_lot_contract_columns(conn)
             conn.commit()
+
+    def _backfill_position_lot_contract_columns(self, conn: sqlite3.Connection) -> None:
+        rows = conn.execute(
+            """
+            SELECT record_id, fields_json, expiration, strike, multiplier
+            FROM position_lots
+            """
+        ).fetchall()
+        for row in rows:
+            fields = json.loads(str(row["fields_json"]) or "{}")
+            if not isinstance(fields, dict):
+                fields = {}
+            expiration_ms, strike, multiplier = _position_lot_contract_scalars(fields)
+            if (
+                row["expiration"] == expiration_ms
+                and (
+                    (row["strike"] is None and strike is None)
+                    or (row["strike"] is not None and strike is not None and abs(float(row["strike"]) - float(strike)) < 1e-9)
+                )
+                and (
+                    (row["multiplier"] is None and multiplier is None)
+                    or (
+                        row["multiplier"] is not None
+                        and multiplier is not None
+                        and abs(float(row["multiplier"]) - float(multiplier)) < 1e-9
+                    )
+                )
+            ):
+                continue
+            conn.execute(
+                """
+                UPDATE position_lots
+                SET expiration = ?, strike = ?, multiplier = ?
+                WHERE record_id = ?
+                """,
+                (
+                    int(expiration_ms) if expiration_ms is not None else None,
+                    float(strike) if strike is not None else None,
+                    float(multiplier) if multiplier is not None else None,
+                    str(row["record_id"]),
+                ),
+            )
 
     def count_position_lots(self) -> int:
         with self._connect() as conn:
@@ -425,15 +512,20 @@ class SQLiteOptionPositionsRepository:
                 except ValueError as exc:
                     print(f"[WARN] option_positions replace_position_lots skipped {exc}", file=sys.stderr)
                     continue
+                expiration_ms, strike, multiplier = _position_lot_contract_scalars(fields)
                 conn.execute(
                     """
-                    INSERT INTO position_lots (record_id, fields_json, source_event_id, updated_at_ms)
-                    VALUES (?, ?, ?, ?)
+                    INSERT INTO position_lots (
+                      record_id, fields_json, source_event_id, expiration, strike, multiplier, updated_at_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         record_id,
                         json.dumps(fields, ensure_ascii=False, sort_keys=True),
                         (str(fields.get("source_event_id")) if fields.get("source_event_id") else None),
+                        int(expiration_ms) if expiration_ms is not None else None,
+                        float(strike) if strike is not None else None,
+                        float(multiplier) if multiplier is not None else None,
                         ts,
                     ),
                 )
@@ -449,27 +541,18 @@ class SQLiteOptionPositionsRepository:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT record_id, fields_json
+                SELECT record_id, fields_json, expiration, strike, multiplier
                 FROM position_lots
                 ORDER BY updated_at_ms DESC, record_id DESC
                 """
             ).fetchall()
-        out: list[dict[str, Any]] = []
-        for row in rows:
-            fields = json.loads(str(row["fields_json"]) or "{}")
-            out.append(
-                {
-                    "record_id": str(row["record_id"]),
-                    "fields": fields if isinstance(fields, dict) else {},
-                }
-            )
-        return out
+        return [_row_to_position_lot(row) for row in rows]
 
     def get_position_lot_fields(self, record_id: str) -> dict[str, Any]:
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT fields_json
+                SELECT record_id, fields_json, expiration, strike, multiplier
                 FROM position_lots
                 WHERE record_id = ?
                 """,
@@ -477,8 +560,7 @@ class SQLiteOptionPositionsRepository:
             ).fetchone()
         if row is None:
             raise ValueError(f"position lot not found: {record_id}")
-        fields = json.loads(str(row["fields_json"]) or "{}")
-        return fields if isinstance(fields, dict) else {}
+        return _row_to_position_lot(row)["fields"]
 
     def update_position_lot_fields(self, record_id: str, fields: dict[str, Any]) -> None:
         normalized_record_id = str(record_id or "").strip()
@@ -488,16 +570,20 @@ class SQLiteOptionPositionsRepository:
             raise TypeError("fields must be a dict")
         _validate_position_lot_fields(record_id=normalized_record_id, fields=fields)
         ts = int(now_ms())
+        expiration_ms, strike, multiplier = _position_lot_contract_scalars(fields)
         with self._connect() as conn:
             updated = conn.execute(
                 """
                 UPDATE position_lots
-                SET fields_json = ?, source_event_id = ?, updated_at_ms = ?
+                SET fields_json = ?, source_event_id = ?, expiration = ?, strike = ?, multiplier = ?, updated_at_ms = ?
                 WHERE record_id = ?
                 """,
                 (
                     json.dumps(fields, ensure_ascii=False, sort_keys=True),
                     (str(fields.get("source_event_id")) if fields.get("source_event_id") else None),
+                    int(expiration_ms) if expiration_ms is not None else None,
+                    float(strike) if strike is not None else None,
+                    float(multiplier) if multiplier is not None else None,
                     ts,
                     normalized_record_id,
                 ),
@@ -727,14 +813,8 @@ def persist_manual_close_event(
     broker = normalize_broker(fields.get("broker"))
     if not broker:
         raise ValueError(f"position lot missing broker: {record_id}")
-    exp_ms, _exp_source = effective_expiration(fields)
-    exp_dt = exp_ms_to_datetime(exp_ms)
-    multiplier = safe_float(fields.get("multiplier"))
-    if multiplier is None:
-        multiplier = safe_float(parse_note_kv(fields.get("note") or "", "multiplier"))
-    strike = safe_float(fields.get("strike"))
-    if strike is None:
-        strike = safe_float(parse_note_kv(fields.get("note") or "", "strike"))
+    multiplier = effective_multiplier(fields)
+    strike = effective_strike(fields)
     event = TradeEvent(
         event_id=f"manual-close-{record_id}-{uuid.uuid4().hex}",
         source_type="manual_trade_event",
@@ -749,7 +829,7 @@ def persist_manual_close_event(
         price=float(close_price or 0.0),
         strike=(float(strike) if strike is not None else None),
         multiplier=(int(float(multiplier)) if multiplier is not None else None),
-        expiration_ymd=(exp_dt.date().isoformat() if exp_dt is not None else None),
+        expiration_ymd=effective_expiration_ymd(fields),
         currency=str(fields.get("currency") or "").strip().upper(),
         trade_time_ms=int(as_of_ms or now_ms()),
         order_id=None,
