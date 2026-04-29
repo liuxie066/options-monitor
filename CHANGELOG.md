@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.3.5 - 2026-04-29
+
+### Changed
+- Tightened Claude Code / OpenClaw repository guidance so agents prefer read-first analysis, `./om-agent` / `./om` entry points, and low-risk validation steps before direct runtime Python scripts or live operational commands
+
 ## 0.3.4 - 2026-04-29
 
 ### Changed
