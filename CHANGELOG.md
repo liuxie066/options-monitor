@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.3.0 - 2026-04-29
+
+### Changed
+- Stabilized local option-position repair workflows around the canonical `trade_events -> position_lots` model by adding operator-safe rebuild, lot history inspection, event voiding, and controlled lot adjustment paths
+- Preserved Feishu mirror sync metadata across local reprojection, added optional remote orphan cleanup during repairs, and documented the repair playbook so invalid records no longer pollute downstream monthly income and premium reporting
+- Unified `position_id` generation on canonical `symbol` values instead of alias names so SQLite and Feishu stop drifting on underlier naming for new records
+
 ## 0.2.0-beta.9 - 2026-04-29
 
 ### Changed

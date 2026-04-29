@@ -104,7 +104,7 @@ def test_build_open_fields_canonicalizes_alias_symbol() -> None:
     )
 
     assert fields["symbol"] == "9992.HK"
-    assert fields["position_id"] == "POPMART_20260429_135P_short"
+    assert fields["position_id"] == "9992_HK_20260429_135P_short"
 
 
 def test_build_open_fields_for_short_call_sets_locked_shares() -> None:
