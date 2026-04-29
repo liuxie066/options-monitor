@@ -492,16 +492,32 @@ def run_one_account(
                 system_issues, quality_issues = _close_advice_issue_breakdown(flag_counts)
                 system_issue_rows = sum(system_issues.values())
                 quality_issue_rows = sum(quality_issues.values())
-                summary = (
-                    f"### [{acct}] 平仓建议\n"
-                    f"- 本次未生成 strong/medium 提醒；系统异常 {system_issue_rows} 条，行情质量不足 {quality_issue_rows} 条\n"
-                    f"- missing_quote={missing_quote} | missing_mid={missing_mid} | "
-                    f"required_data_missing_expiration={missing_expiration} | required_data_missing_contract={missing_contract} | required_data_fetch_error={coverage_fetch_error} | "
-                    f"opend_fetch_error={opend_fetch_error} | opend_fetch_no_usable_quote={opend_fetch_no_usable_quote} | "
-                    f"invalid_spread={invalid_spread} | spread_too_wide={spread_too_wide}\n"
-                    f"- 说明: evaluation_gap_rows={evaluation_gap_rows}；系统异常表示数据拉取/字段覆盖失败，行情质量不足表示有行情但定价可信度不够（如价差过大、无法形成可信 mid）\n"
+                suppress_quality_summary = (
+                    system_issue_rows == 0
+                    and quality_issue_rows == spread_too_wide
+                    and spread_too_wide > 0
+                    and missing_quote == 0
+                    and missing_mid == 0
+                    and missing_expiration == 0
+                    and missing_contract == 0
+                    and coverage_fetch_error == 0
+                    and opend_fetch_error == 0
+                    and opend_fetch_no_usable_quote == 0
+                    and invalid_spread == 0
                 )
-                if quote_issue_samples:
+                if suppress_quality_summary:
+                    summary = f"### [{acct}] 平仓建议\n- 本次未生成 strong/medium 提醒\n"
+                else:
+                    summary = (
+                        f"### [{acct}] 平仓建议\n"
+                        f"- 本次未生成 strong/medium 提醒；系统异常 {system_issue_rows} 条，行情质量不足 {quality_issue_rows} 条\n"
+                        f"- missing_quote={missing_quote} | missing_mid={missing_mid} | "
+                        f"required_data_missing_expiration={missing_expiration} | required_data_missing_contract={missing_contract} | required_data_fetch_error={coverage_fetch_error} | "
+                        f"opend_fetch_error={opend_fetch_error} | opend_fetch_no_usable_quote={opend_fetch_no_usable_quote} | "
+                        f"invalid_spread={invalid_spread} | spread_too_wide={spread_too_wide}\n"
+                        f"- 说明: evaluation_gap_rows={evaluation_gap_rows}；系统异常表示数据拉取/字段覆盖失败，行情质量不足表示有行情但定价可信度不够（如价差过大、无法形成可信 mid）\n"
+                    )
+                if quote_issue_samples and not suppress_quality_summary:
                     summary += f"- 样例: {' ; '.join(str(x) for x in quote_issue_samples[:3])}\n"
                 text = (text.strip() + "\n\n" + summary.strip()).strip()
         except Exception as exc:
