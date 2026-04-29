@@ -10,6 +10,38 @@ This repository is primarily maintained for personal use. Keep agent support lig
 - Reports: generated under `output/`, `output_accounts/`, and `output_shared/`.
 - Notification layout source of truth: `scripts/notify_symbols.py` for per-account notification content and `scripts/multi_tick/notify_format.py` for merged/account message wrappers.
 
+## Agent Operating Rules
+
+- Treat this repository as an operations-sensitive tool, not a generic Python sandbox.
+- If the user asks for explanation, investigation, or code reading, inspect files and summarize first. Do not run Python scripts just to see what happens.
+- Only execute commands when the user explicitly asks for execution, or when execution is needed to verify a concrete code/config change you made.
+- Prefer dry-run, validation, or test commands over live operational commands whenever both could answer the question.
+- Before running a command that can send notifications, write data, or mutate runtime state, verify that the user explicitly requested that action.
+
+## Research vs Execution
+
+- Requests such as "how does this work", "look into", "check", "why", or "explain" default to read/analyze mode.
+- In read/analyze mode, start from the relevant source files, config docs, and tests before considering command execution.
+- Escalate from reading to execution only when static inspection is insufficient and the command is low risk, or when the user explicitly asks you to run it.
+
+## Preferred Entry Points
+
+- For structured agent/programmatic usage, prefer `./om-agent` first.
+- For human-operated workflow commands, prefer the unified CLI `./om` when it covers the task.
+- Use direct `python3 scripts/...` entry points only when:
+  - the user explicitly asks for that script,
+  - the unified CLI / agent CLI does not expose the needed capability,
+  - or you are running tests / validation commands.
+- When showing examples to users, prefer `./om-agent` or `./om` over raw script paths when both are valid.
+
+## Task Routing Hints
+
+- Business rules and deterministic calculations: inspect `domain/` first.
+- Notification formatting and message layout: inspect `scripts/notify_symbols.py` and `scripts/multi_tick/notify_format.py` first.
+- Operator-facing command behavior: inspect `src/interfaces/cli/`, `./om`, and related docs first.
+- Agent-facing structured tooling: inspect `./om-agent`, `scripts/install_agent_plugin.sh`, and README agent sections first.
+- Configuration contracts and runtime expectations: inspect `CONFIGS.md`, `CONFIGURATION_GUIDE.md`, examples under `configs/examples/`, and `scripts/validate_config.py` before executing config-related commands.
+
 ## Safety Rules
 
 - Do not send real notifications unless the user explicitly asks for it.
@@ -18,6 +50,18 @@ This repository is primarily maintained for personal use. Keep agent support lig
 - Do not delete runtime artifacts, state files, reports, or output directories unless the user explicitly asks for cleanup.
 - Prefer dry-run modes for write operations, especially Feishu / option position writes.
 - Preserve user changes in a dirty worktree. Never reset or revert unrelated files without explicit permission.
+
+## Execution Guardrails for Claude Code / OpenClaw
+
+- Do not default to running `python3 ...` commands for first-pass exploration.
+- If a task can be answered by reading code, docs, config examples, or tests, do that first.
+- When execution is necessary, choose the highest-level safe entry point available in this order:
+  1. `./om-agent`
+  2. `./om`
+  3. `python3 -m ...`
+  4. `python3 scripts/...`
+- Prefer commands that validate or inspect state over commands that mutate state.
+- If a live command is risky but a dry-run or test exists, use the dry-run or test first.
 
 ## Common Checks
 
