@@ -134,6 +134,20 @@ def _matches_close(fields: dict[str, Any], event: TradeEvent) -> bool:
     )
 
 
+def _void_target_event_id(event: TradeEvent) -> str:
+    if str(event.position_effect).strip().lower() != "void":
+        return ""
+    payload = event.raw_payload or {}
+    return str(payload.get("void_target_event_id") or "").strip()
+
+
+def _adjust_target_source_event_id(event: TradeEvent) -> str:
+    if str(event.position_effect).strip().lower() != "adjust":
+        return ""
+    payload = event.raw_payload or {}
+    return str(payload.get("adjust_target_source_event_id") or "").strip()
+
+
 def project_position_lot_records(events: list[dict[str, Any]] | list[TradeEvent]) -> list[dict[str, Any]]:
     normalized_events: list[TradeEvent] = []
     for item in events:
@@ -145,8 +159,26 @@ def project_position_lot_records(events: list[dict[str, Any]] | list[TradeEvent]
         normalized_events.append(TradeEvent(**item))
 
     normalized_events.sort(key=lambda row: (int(row.trade_time_ms or 0), row.event_id))
+    voided_event_ids = {target for target in (_void_target_event_id(event) for event in normalized_events) if target}
     lots: list[dict[str, Any]] = []
     for event in normalized_events:
+        if _void_target_event_id(event):
+            continue
+        if event.event_id in voided_event_ids:
+            continue
+        adjust_target_source_event_id = _adjust_target_source_event_id(event)
+        if adjust_target_source_event_id:
+            patch = (event.raw_payload or {}).get("patch") or {}
+            if isinstance(patch, dict):
+                for lot in lots:
+                    fields = lot.get("fields") or {}
+                    if str(fields.get("source_event_id") or "").strip() != adjust_target_source_event_id:
+                        continue
+                    merged = dict(fields)
+                    merged.update(patch)
+                    lot["fields"] = merged
+                    break
+            continue
         if str(event.source_type).strip().lower() == "bootstrap_snapshot":
             seeded = _open_lot_record(event)
             if seeded.get("record_id") and isinstance(seeded.get("fields"), dict):

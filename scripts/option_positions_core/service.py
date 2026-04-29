@@ -13,6 +13,7 @@ from scripts.feishu_bitable import bitable_list_records, get_tenant_access_token
 from scripts.option_positions_core.domain import (
     OpenPositionCommand,
     build_expire_auto_close_patch,
+    build_open_adjustment_patch,
     effective_contracts_open,
     effective_expiration,
     exp_ms_to_datetime,
@@ -220,6 +221,41 @@ def _bootstrap_trade_events(records: list[dict[str, Any]], *, source_name: str) 
         if event is not None:
             events.append(event)
     return events
+
+
+PRESERVED_POSITION_LOT_META_KEYS = (
+    "feishu_record_id",
+    "feishu_sync_hash",
+    "feishu_last_synced_at_ms",
+)
+
+
+def _merge_preserved_position_lot_metadata(
+    records: list[dict[str, Any]],
+    existing_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    existing_by_record_id: dict[str, dict[str, Any]] = {}
+    for item in existing_rows:
+        record_id = str(item.get("record_id") or "").strip()
+        fields = item.get("fields") or {}
+        if record_id and isinstance(fields, dict):
+            existing_by_record_id[record_id] = fields
+
+    merged: list[dict[str, Any]] = []
+    for item in records:
+        record_id = str(item.get("record_id") or "").strip()
+        fields = item.get("fields") or {}
+        if not record_id or not isinstance(fields, dict):
+            merged.append(item)
+            continue
+        existing_fields = existing_by_record_id.get(record_id) or {}
+        patched_fields = dict(fields)
+        for key in PRESERVED_POSITION_LOT_META_KEYS:
+            value = existing_fields.get(key)
+            if value not in (None, ""):
+                patched_fields[key] = value
+        merged.append({"record_id": record_id, "fields": patched_fields})
+    return merged
 
 
 class SQLiteOptionPositionsRepository:
@@ -572,18 +608,59 @@ def require_option_positions_event_write_repo(repo: Any) -> OptionPositionsEvent
     raise TypeError("option_positions repo does not satisfy event write repository interface")
 
 
+def rebuild_position_lots_from_trade_events(repo: Any) -> dict[str, Any]:
+    sqlite_repo = require_option_positions_event_write_repo(repo)
+    conn = sqlite_repo._connect() if isinstance(sqlite_repo, SQLiteOptionPositionsRepository) else None
+    try:
+        if conn is not None:
+            existing_rows = sqlite_repo.list_position_lots()
+            events = sqlite_repo.list_trade_events(conn=conn)
+            projected = project_position_lot_records(events)
+            merged = _merge_preserved_position_lot_metadata(projected, existing_rows)
+            inserted = sqlite_repo.replace_position_lots(merged, conn=conn)
+            conn.commit()
+        else:
+            existing_rows = sqlite_repo.list_position_lots()
+            events = sqlite_repo.list_trade_events()
+            projected = project_position_lot_records(events)
+            merged = _merge_preserved_position_lot_metadata(projected, existing_rows)
+            inserted = sqlite_repo.replace_position_lots(merged)
+    except Exception:
+        if conn is not None:
+            conn.rollback()
+        raise
+    finally:
+        if conn is not None:
+            conn.close()
+    return {
+        "trade_event_count": int(len(events)),
+        "position_lot_count": int(inserted),
+        "preserved_sync_meta_record_count": int(
+            sum(
+                1
+                for item in merged
+                if any((item.get("fields") or {}).get(key) not in (None, "") for key in PRESERVED_POSITION_LOT_META_KEYS)
+            )
+        ),
+    }
+
+
 def _persist_trade_event_object(repo: Any, event: TradeEvent) -> dict[str, Any]:
     sqlite_repo = require_option_positions_event_write_repo(repo)
     conn = sqlite_repo._connect() if isinstance(sqlite_repo, SQLiteOptionPositionsRepository) else None
     try:
         if conn is not None:
             created = sqlite_repo.upsert_trade_event(event, conn=conn)
-            records = project_position_lot_records(sqlite_repo.list_trade_events(conn=conn))
+            existing_rows = sqlite_repo.list_position_lots()
+            projected = project_position_lot_records(sqlite_repo.list_trade_events(conn=conn))
+            records = _merge_preserved_position_lot_metadata(projected, existing_rows)
             lot_count = sqlite_repo.replace_position_lots(records, conn=conn)
             conn.commit()
         else:
             created = sqlite_repo.upsert_trade_event(event)
-            records = project_position_lot_records(sqlite_repo.list_trade_events())
+            existing_rows = sqlite_repo.list_position_lots()
+            projected = project_position_lot_records(sqlite_repo.list_trade_events())
+            records = _merge_preserved_position_lot_metadata(projected, existing_rows)
             lot_count = sqlite_repo.replace_position_lots(records)
     except Exception:
         if conn is not None:
@@ -685,6 +762,115 @@ def persist_manual_close_event(
         },
     )
     return _persist_trade_event_object(repo, event)
+
+
+def persist_manual_void_event(
+    repo: Any,
+    *,
+    target_event_id: str,
+    void_reason: str,
+    as_of_ms: int | None = None,
+) -> dict[str, Any]:
+    sqlite_repo = require_option_positions_event_write_repo(repo)
+    target = next(
+        (
+            item
+            for item in sqlite_repo.list_trade_events()
+            if str(item.get("event_id") or "").strip() == str(target_event_id or "").strip()
+        ),
+        None,
+    )
+    if target is None:
+        raise ValueError(f"trade event not found: {target_event_id}")
+    if str(target.get("position_effect") or "").strip().lower() == "void":
+        raise ValueError(f"cannot void a void event: {target_event_id}")
+
+    event = TradeEvent(
+        event_id=f"manual-void-{target_event_id}-{uuid.uuid4().hex}",
+        source_type="manual_trade_event",
+        source_name="cli_manual_void",
+        broker=str(target.get("broker") or ""),
+        account=str(target.get("account") or ""),
+        symbol=str(target.get("symbol") or "").strip().upper(),
+        option_type=str(target.get("option_type") or ""),
+        side=str(target.get("side") or "").strip().lower(),
+        position_effect="void",
+        contracts=0,
+        price=0.0,
+        strike=(float(target["strike"]) if target.get("strike") is not None else None),
+        multiplier=(int(target["multiplier"]) if target.get("multiplier") is not None else None),
+        expiration_ymd=(str(target.get("expiration_ymd") or "").strip() or None),
+        currency=str(target.get("currency") or "").strip().upper(),
+        trade_time_ms=int(as_of_ms or now_ms()),
+        order_id=None,
+        multiplier_source=None,
+        raw_payload={
+            "source": "option_positions.py",
+            "mode": "manual_void",
+            "void_target_event_id": str(target_event_id),
+            "void_reason": str(void_reason or ""),
+        },
+    )
+    return _persist_trade_event_object(repo, event)
+
+
+def persist_manual_adjust_event(
+    repo: Any,
+    *,
+    record_id: str,
+    fields: dict[str, Any],
+    contracts: int | None = None,
+    strike: float | None = None,
+    expiration_ymd: str | None = None,
+    premium_per_share: float | None = None,
+    multiplier: float | None = None,
+    opened_at_ms: int | None = None,
+    as_of_ms: int | None = None,
+) -> dict[str, Any]:
+    target_source_event_id = str(fields.get("source_event_id") or "").strip()
+    if not target_source_event_id:
+        raise ValueError(f"position lot missing source_event_id: {record_id}")
+    patch = build_open_adjustment_patch(
+        fields,
+        contracts=contracts,
+        strike=strike,
+        expiration_ymd=expiration_ymd,
+        premium_per_share=premium_per_share,
+        multiplier=multiplier,
+        opened_at_ms=opened_at_ms,
+        as_of_ms=as_of_ms,
+    )
+    event = TradeEvent(
+        event_id=f"manual-adjust-{record_id}-{uuid.uuid4().hex}",
+        source_type="manual_trade_event",
+        source_name="cli_manual_adjust",
+        broker=normalize_broker(fields.get("broker")),
+        account=str(fields.get("account") or ""),
+        symbol=str(fields.get("symbol") or "").strip().upper(),
+        option_type=str(fields.get("option_type") or ""),
+        side=str(fields.get("side") or "").strip().lower(),
+        position_effect="adjust",
+        contracts=0,
+        price=0.0,
+        strike=(float(fields["strike"]) if fields.get("strike") is not None else None),
+        multiplier=(int(float(raw_multiplier)) if (raw_multiplier := safe_float(fields.get("multiplier"))) is not None else None),
+        expiration_ymd=(exp_dt.date().isoformat() if (exp_dt := exp_ms_to_datetime(fields.get("expiration"))) is not None else None),
+        currency=str(fields.get("currency") or "").strip().upper(),
+        trade_time_ms=int(as_of_ms or now_ms()),
+        order_id=None,
+        multiplier_source=None,
+        raw_payload={
+            "source": "option_positions.py",
+            "mode": "manual_adjust",
+            "record_id": str(record_id),
+            "adjust_target_source_event_id": target_source_event_id,
+            "patch": patch,
+        },
+    )
+    result = _persist_trade_event_object(repo, event)
+    result["record_id"] = str(record_id)
+    result["patch"] = patch
+    return result
 
 
 def build_expired_close_decisions(

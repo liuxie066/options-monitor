@@ -422,6 +422,15 @@ def bitable_update_record(tenant_token: str, app_token: str, table_id: str, reco
     return res.get("data") or {}
 
 
+def bitable_delete_record(tenant_token: str, app_token: str, table_id: str, record_id: str) -> dict:
+    url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/{record_id}"
+    headers = {"Authorization": f"Bearer {tenant_token}"}
+    res = http_json("DELETE", url, None, headers=headers)
+    if res.get("code") != 0:
+        raise FeishuPermanentError(f"bitable delete record failed: {res}", code=res.get("code"), response=res)
+    return res.get("data") or {}
+
+
 def bitable_fields(tenant_token: str, app_token: str, table_id: str) -> list[dict]:
     url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/fields"
     res = http_json("GET", url, None, {"Authorization": f"Bearer {tenant_token}"})

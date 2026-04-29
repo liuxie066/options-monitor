@@ -409,6 +409,138 @@ def build_open_fields(cmd: OpenPositionCommand) -> dict[str, Any]:
     return fields
 
 
+def upsert_note_kv(note: str | None, kv: dict[str, str]) -> str:
+    raw = str(note or "").strip()
+    pairs: list[tuple[str, str]] = []
+    replaced_keys = {str(key).strip() for key, value in kv.items() if str(key).strip() and value not in (None, "")}
+    for part in raw.replace(",", ";").split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        if "=" not in part:
+            pairs.append((part, ""))
+            continue
+        key, value = part.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if key in replaced_keys:
+            continue
+        pairs.append((key, value))
+    for key, value in kv.items():
+        clean_key = str(key).strip()
+        if not clean_key or value in (None, ""):
+            continue
+        pairs.append((clean_key, str(value).strip()))
+    out: list[str] = []
+    for key, value in pairs:
+        out.append(key if value == "" else f"{key}={value}")
+    return ";".join(out)
+
+
+def build_open_adjustment_patch(
+    fields: dict[str, Any],
+    *,
+    contracts: int | None = None,
+    strike: float | None = None,
+    expiration_ymd: str | None = None,
+    premium_per_share: float | None = None,
+    multiplier: float | None = None,
+    opened_at_ms: int | None = None,
+    as_of_ms: int | None = None,
+) -> dict[str, Any]:
+    if all(value is None for value in (contracts, strike, expiration_ymd, premium_per_share, multiplier, opened_at_ms)):
+        raise ValueError("at least one adjustment field is required")
+
+    symbol = norm_symbol(fields.get("symbol") or "")
+    option_type = normalize_option_type(fields.get("option_type"), strict=True)
+    side = normalize_side(fields.get("side"), strict=True)
+    status = normalize_status(fields.get("status"), strict=True)
+    total_contracts = effective_contracts(fields)
+    closed_contracts = effective_contracts_closed(fields)
+
+    next_contracts = int(contracts) if contracts is not None else total_contracts
+    if next_contracts <= 0:
+        raise ValueError("contracts must be > 0")
+    if closed_contracts > next_contracts:
+        raise ValueError(f"contracts must be >= contracts_closed: {next_contracts} < {closed_contracts}")
+    if status == "close" and contracts is not None and next_contracts != closed_contracts:
+        raise ValueError("cannot change contracts on a closed lot unless it equals contracts_closed")
+
+    next_strike = strike if strike is not None else safe_float(fields.get("strike"))
+    next_multiplier = multiplier
+    if next_multiplier is None:
+        next_multiplier = safe_float(fields.get("multiplier"))
+    if next_multiplier is None:
+        next_multiplier = safe_float(parse_note_kv(fields.get("note") or "", "multiplier"))
+    if next_multiplier is None and side == "short":
+        next_multiplier = guess_multiplier(symbol)
+
+    next_expiration_ymd = expiration_ymd or parse_note_kv(fields.get("note") or "", "exp") or None
+    if expiration_ymd is not None:
+        exp_ms = parse_exp_to_ms(expiration_ymd)
+        if exp_ms is None:
+            raise ValueError("expiration_ymd must be YYYY-MM-DD")
+    else:
+        exp_ms = fields.get("expiration")
+
+    note_updates: dict[str, str] = {}
+    patch: dict[str, Any] = {"last_action_at": int(as_of_ms or now_ms())}
+
+    if contracts is not None:
+        patch["contracts"] = next_contracts
+        patch["contracts_closed"] = closed_contracts
+        patch["contracts_open"] = 0 if status == "close" else max(0, next_contracts - closed_contracts)
+    if strike is not None:
+        if next_strike is None:
+            raise ValueError("strike must be numeric")
+        patch["strike"] = float(next_strike)
+        note_updates["strike"] = str(next_strike)
+    if premium_per_share is not None:
+        patch["premium"] = float(premium_per_share)
+        note_updates["premium_per_share"] = str(premium_per_share)
+    if multiplier is not None:
+        if next_multiplier is None or float(next_multiplier) <= 0:
+            raise ValueError("multiplier must be > 0")
+        if float(next_multiplier).is_integer():
+            patch["multiplier"] = int(float(next_multiplier))
+        else:
+            patch["multiplier"] = float(next_multiplier)
+        note_updates["multiplier"] = str(multiplier)
+    if expiration_ymd is not None:
+        patch["expiration"] = int(exp_ms)  # type: ignore[arg-type]
+        note_updates["exp"] = expiration_ymd
+    if opened_at_ms is not None:
+        patch["opened_at"] = int(opened_at_ms)
+
+    if side == "short" and option_type == "put" and (
+        contracts is not None or strike is not None or multiplier is not None
+    ):
+        if next_strike is None:
+            raise ValueError("short put adjustment requires strike")
+        if next_multiplier is None or float(next_multiplier) <= 0:
+            raise ValueError("short put adjustment requires multiplier")
+        patch["cash_secured_amount"] = float(calc_cash_secured(float(next_strike), float(next_multiplier), next_contracts))
+
+    if side == "short" and option_type == "call" and (contracts is not None or multiplier is not None):
+        if next_multiplier is None or float(next_multiplier) <= 0:
+            raise ValueError("short call adjustment requires multiplier")
+        patch["underlying_share_locked"] = int(float(next_multiplier) * int(next_contracts))
+
+    if any(value is not None for value in (contracts, strike, expiration_ymd)):
+        patch["position_id"] = build_position_id(
+            symbol=symbol,
+            expiration_ymd=next_expiration_ymd,
+            strike=next_strike,
+            option_type=option_type,
+            side=side,
+            contracts=next_contracts,
+        )
+
+    if note_updates:
+        patch["note"] = upsert_note_kv(fields.get("note"), note_updates)
+    return patch
+
+
 def build_buy_to_close_patch(
     fields: dict[str, Any],
     *,
