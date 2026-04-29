@@ -10,6 +10,7 @@ from typing import Any
 
 from scripts.feishu_bitable import (
     bitable_create_record,
+    bitable_delete_record,
     bitable_fields,
     bitable_list_records,
     bitable_update_record,
@@ -351,7 +352,7 @@ def select_candidates(
 
 
 def summarize_result(action_rows: list[dict[str, Any]]) -> dict[str, int]:
-    summary = {"scanned": len(action_rows), "create": 0, "update": 0, "skip": 0, "conflict": 0, "failed": 0}
+    summary = {"scanned": len(action_rows), "create": 0, "update": 0, "delete": 0, "skip": 0, "conflict": 0, "failed": 0}
     for row in action_rows:
         action = str(row.get("action") or "")
         if action in summary:
@@ -368,6 +369,7 @@ def sync_option_positions(
     only_open: bool = False,
     since_updated_ms: int | None = None,
     limit: int | None = None,
+    prune_remote_missing_local: bool = False,
 ) -> list[dict[str, Any]]:
     table_ref = load_table_ref(data_config)
     try:
@@ -476,6 +478,33 @@ def sync_option_positions(
                 row["reason"] = f"update_failed: {exc}"
         action_rows.append(row)
 
+    if prune_remote_missing_local and not only_record_id and not only_open and since_updated_ms is None:
+        local_record_ids = {candidate.record_id for candidate in candidates}
+        for item in remote_records:
+            remote_record_id = extract_remote_record_id(item)
+            remote_fields = item.get("fields") or {}
+            if not remote_record_id or not isinstance(remote_fields, dict):
+                continue
+            remote_local_record_id = str(remote_fields.get("local_record_id") or "").strip()
+            if not remote_local_record_id:
+                continue
+            if remote_local_record_id in local_record_ids:
+                continue
+            row = {
+                "record_id": None,
+                "remote_record_id": remote_record_id,
+                "remote_local_record_id": remote_local_record_id,
+                "action": "delete",
+                "reason": "remote_local_record_missing_from_local_projection",
+            }
+            if apply_mode:
+                try:
+                    bitable_delete_record(token, table_ref.app_token, table_ref.table_id, remote_record_id)
+                except Exception as exc:
+                    row["action"] = "failed"
+                    row["reason"] = f"delete_failed: {exc}"
+            action_rows.append(row)
+
     return action_rows
 
 
@@ -503,6 +532,11 @@ def main() -> None:
     parser.add_argument("--only-record-id", default=None, help="sync a single local record_id")
     parser.add_argument("--only-open", action="store_true", help="only sync open positions")
     parser.add_argument("--since-updated-ms", type=int, default=None, help="only include rows last synced before this ms watermark")
+    parser.add_argument(
+        "--prune-remote-missing-local",
+        action="store_true",
+        help="delete remote rows whose local_record_id no longer exists locally; disabled by default",
+    )
     parser.add_argument("--verbose", action="store_true", help="print payload details")
     args = parser.parse_args()
 
@@ -519,6 +553,7 @@ def main() -> None:
         only_open=bool(args.only_open),
         since_updated_ms=args.since_updated_ms,
         limit=args.limit,
+        prune_remote_missing_local=bool(args.prune_remote_missing_local),
     )
 
     table_ref = load_table_ref(data_config)

@@ -4,8 +4,13 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from scripts.option_positions_core.domain import OpenPositionCommand, build_buy_to_close_patch, build_open_fields
-from scripts.option_positions_core.service import persist_manual_close_event, persist_manual_open_event
+from scripts.option_positions_core.domain import (
+    OpenPositionCommand,
+    build_buy_to_close_patch,
+    build_open_adjustment_patch,
+    build_open_fields,
+)
+from scripts.option_positions_core.service import persist_manual_adjust_event, persist_manual_close_event, persist_manual_open_event
 from scripts.sync_option_positions_to_feishu import sync_single_option_position_record
 from scripts.trade_event_normalizer import NormalizedTradeDeal
 
@@ -174,6 +179,45 @@ def execute_manual_close(
         contracts_to_close=int(contracts_to_close),
         close_price=close_price,
         close_reason=close_reason,
+    )
+    sync_result = _auto_sync_record_if_possible(repo, record_id=record_id)
+    return {"mode": "applied", "fields": fields, "patch": patch, "result": result, "sync_result": sync_result}
+
+
+def execute_manual_adjust(
+    repo: Any,
+    *,
+    record_id: str,
+    contracts: int | None,
+    strike: float | None,
+    expiration_ymd: str | None,
+    premium_per_share: float | None,
+    multiplier: float | None,
+    opened_at_ms: int | None,
+    dry_run: bool,
+) -> dict[str, Any]:
+    fields = repo.get_record_fields(record_id)
+    patch = build_open_adjustment_patch(
+        fields,
+        contracts=contracts,
+        strike=strike,
+        expiration_ymd=expiration_ymd,
+        premium_per_share=premium_per_share,
+        multiplier=multiplier,
+        opened_at_ms=opened_at_ms,
+    )
+    if dry_run:
+        return {"mode": "dry_run", "fields": fields, "patch": patch}
+    result = persist_manual_adjust_event(
+        repo,
+        record_id=record_id,
+        fields=fields,
+        contracts=contracts,
+        strike=strike,
+        expiration_ymd=expiration_ymd,
+        premium_per_share=premium_per_share,
+        multiplier=multiplier,
+        opened_at_ms=opened_at_ms,
     )
     sync_result = _auto_sync_record_if_possible(repo, record_id=record_id)
     return {"mode": "applied", "fields": fields, "patch": patch, "result": result, "sync_result": sync_result}

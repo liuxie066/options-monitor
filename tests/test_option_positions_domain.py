@@ -5,6 +5,7 @@ from scripts.option_positions_core.domain import (
     EXPIRE_AUTO_CLOSE,
     OpenPositionCommand,
     build_buy_to_close_patch,
+    build_open_adjustment_patch,
     build_expire_auto_close_patch,
     build_open_fields,
     normalize_broker,
@@ -195,3 +196,66 @@ def test_build_expire_auto_close_patch_closes_open_contracts() -> None:
     assert patch["close_type"] == EXPIRE_AUTO_CLOSE
     assert patch["close_reason"] == "expired"
     assert "auto_close_reason=expired" in patch["note"]
+
+
+def test_build_open_adjustment_patch_updates_key_open_fields() -> None:
+    patch = build_open_adjustment_patch(
+        {
+            "symbol": "NVDA",
+            "option_type": "put",
+            "side": "short",
+            "status": "open",
+            "contracts": 2,
+            "contracts_open": 2,
+            "contracts_closed": 0,
+            "currency": "USD",
+            "strike": 100.0,
+            "multiplier": 100,
+            "expiration": 1781827200000,
+            "premium": 2.5,
+            "note": "exp=2026-06-19;multiplier=100;premium_per_share=2.5;strike=100",
+        },
+        contracts=3,
+        strike=105.0,
+        expiration_ymd="2026-07-17",
+        premium_per_share=3.1,
+        multiplier=100,
+        opened_at_ms=2000,
+        as_of_ms=3000,
+    )
+
+    assert patch["contracts"] == 3
+    assert patch["contracts_open"] == 3
+    assert patch["contracts_closed"] == 0
+    assert patch["strike"] == 105.0
+    assert patch["premium"] == 3.1
+    assert patch["expiration"] > 0
+    assert patch["opened_at"] == 2000
+    assert patch["last_action_at"] == 3000
+    assert patch["cash_secured_amount"] == 31500.0
+    assert patch["position_id"] == "NVDA_20260717_105P_short"
+    assert "exp=2026-07-17" in patch["note"]
+    assert "premium_per_share=3.1" in patch["note"]
+
+
+def test_build_open_adjustment_patch_rejects_contracts_below_closed() -> None:
+    try:
+        build_open_adjustment_patch(
+            {
+                "symbol": "NVDA",
+                "option_type": "put",
+                "side": "short",
+                "status": "open",
+                "contracts": 3,
+                "contracts_open": 1,
+                "contracts_closed": 2,
+                "currency": "USD",
+                "strike": 100.0,
+                "multiplier": 100,
+            },
+            contracts=1,
+        )
+    except ValueError as exc:
+        assert "contracts must be >= contracts_closed" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
