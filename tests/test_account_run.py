@@ -340,3 +340,69 @@ def test_run_one_account_appends_close_advice_quote_issue_summary(monkeypatch, t
     close_events = [evt for evt in env["audit_events"] if evt["action"] == "close_advice"]
     assert close_events
     assert close_events[-1]["extra"]["quote_issue_rows"] == 2
+
+
+def test_run_one_account_suppresses_close_advice_spread_only_quality_summary(monkeypatch, tmp_path: Path) -> None:
+    from src.application.account_run import run_one_account
+
+    request = _make_request(tmp_path, prefetch_done=True)
+    request.base_cfg["close_advice"] = {"enabled": True}
+    env = _install_common_patches(monkeypatch, request)
+    runlog = _FakeRunlog()
+
+    monkeypatch.setattr(
+        env["mod"],
+        "decide_account_scan_gate",
+        lambda **kwargs: {
+            "run_pipeline": True,
+            "ran_scan": True,
+            "meaningful": True,
+            "result_reason": "run",
+        },
+    )
+
+    def _run_pipeline_script(**kwargs):
+        report_dir = kwargs["report_dir"]
+        report_dir.mkdir(parents=True, exist_ok=True)
+        (report_dir / "symbols_notification.txt").write_text("", encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(env["mod"], "run_pipeline_script", _run_pipeline_script)
+    monkeypatch.setattr(env["mod"], "normalize_pipeline_subprocess_output", lambda **kwargs: {"returncode": kwargs["returncode"], "adapter": "pipeline"})
+    monkeypatch.setattr(env["mod"], "decide_pipeline_execution_result", lambda **kwargs: {"ok": True, "ran_scan": True, "meaningful": True, "reason": "ok"})
+    monkeypatch.setattr(
+        env["mod"],
+        "run_close_advice",
+        lambda **kwargs: {
+            "enabled": True,
+            "rows": 1,
+            "notify_rows": 0,
+            "quote_issue_rows": 1,
+            "tier_counts": {"none": 1},
+            "flag_counts": {
+                "missing_quote": 0,
+                "missing_mid": 0,
+                "required_data_missing_expiration": 0,
+                "required_data_missing_contract": 0,
+                "required_data_fetch_error": 0,
+                "opend_fetch_error": 0,
+                "opend_fetch_no_usable_quote": 0,
+                "invalid_spread": 0,
+                "spread_too_wide": 1,
+            },
+            "quote_issue_samples": ["0700.HK put 2026-04-29 480.00P: spread too wide"],
+        },
+    )
+
+    outcome = run_one_account(
+        request=request,
+        runlog=runlog,
+        audit_fn=env["audit_fn"],
+        fail_schema_validation=lambda **kwargs: (_ for _ in ()).throw(AssertionError("schema validation should not fail")),
+    )
+
+    assert "### [lx] 平仓建议" in outcome.result.notification_text
+    assert "本次未生成 strong/medium 提醒" in outcome.result.notification_text
+    assert "行情质量不足" not in outcome.result.notification_text
+    assert "spread_too_wide=1" not in outcome.result.notification_text
+    assert "样例:" not in outcome.result.notification_text
