@@ -5,6 +5,7 @@ import hashlib
 import sqlite3
 import sys
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -211,6 +212,30 @@ def _stable_bootstrap_event_id(source_name: str, record_id: str, fields: dict[st
     return f"bootstrap:{source_name}:{record_id}:{digest}"
 
 
+def _safe_bootstrap_trade_time_ms(record_id: str, fields: dict[str, Any]) -> int | None:
+    saw_nonempty = False
+    for key in ("opened_at", "last_action_at"):
+        raw = fields.get(key)
+        if raw in (None, ""):
+            continue
+        saw_nonempty = True
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            continue
+    if not saw_nonempty:
+        return now_ms()
+    print(
+        (
+            f"[WARN] option_positions bootstrap skipped row with invalid timestamps "
+            f"record_id={record_id or '(missing)'} opened_at={fields.get('opened_at') or ''} "
+            f"last_action_at={fields.get('last_action_at') or ''}"
+        ),
+        file=sys.stderr,
+    )
+    return None
+
+
 def _bootstrap_trade_event(item: dict[str, Any], *, source_name: str) -> TradeEvent | None:
     record_id = str(item.get("record_id") or "").strip()
     fields = item.get("fields") or {}
@@ -219,7 +244,9 @@ def _bootstrap_trade_event(item: dict[str, Any], *, source_name: str) -> TradeEv
     broker = normalize_broker(fields.get("broker") or fields.get("market"))
     if not broker:
         return None
-    trade_time_ms = int(fields.get("opened_at") or fields.get("last_action_at") or now_ms())
+    trade_time_ms = _safe_bootstrap_trade_time_ms(record_id, fields)
+    if trade_time_ms is None:
+        return None
     raw_fields = dict(fields)
     raw_fields["broker"] = broker
     return TradeEvent(
@@ -308,6 +335,19 @@ class SQLiteOptionPositionsRepository:
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA busy_timeout=5000")
         return conn
+
+    @contextmanager
+    def _optional_conn(self, conn: sqlite3.Connection | None, *, commit: bool = False):
+        owned = conn is None
+        if conn is None:
+            conn = self._connect()
+        try:
+            yield conn
+            if owned and commit:
+                conn.commit()
+        finally:
+            if owned:
+                conn.close()
 
     def _table_exists(self, name: str) -> bool:
         with self._connect() as conn:
@@ -440,15 +480,12 @@ class SQLiteOptionPositionsRepository:
         payload = event.to_dict()
         ts = int(now_ms())
         trade_time_ms = int(event.trade_time_ms or 0)
-        close_conn = conn is None
-        if conn is None:
-            conn = self._connect()
-        try:
-            existing = conn.execute(
+        with self._optional_conn(conn, commit=True) as active_conn:
+            existing = active_conn.execute(
                 "SELECT event_id FROM trade_events WHERE event_id = ?",
                 (str(event.event_id),),
             ).fetchone()
-            conn.execute(
+            active_conn.execute(
                 """
                 INSERT OR REPLACE INTO trade_events (
                   event_id, event_json, trade_time_ms, created_at_ms, updated_at_ms
@@ -465,28 +502,17 @@ class SQLiteOptionPositionsRepository:
                     ts,
                 ),
             )
-            if close_conn:
-                conn.commit()
-        finally:
-            if close_conn:
-                conn.close()
         return existing is None
 
     def list_trade_events(self, *, conn: sqlite3.Connection | None = None) -> list[dict[str, Any]]:
-        close_conn = conn is None
-        if conn is None:
-            conn = self._connect()
-        try:
-            rows = conn.execute(
+        with self._optional_conn(conn) as active_conn:
+            rows = active_conn.execute(
                 """
                 SELECT event_json
                 FROM trade_events
                 ORDER BY trade_time_ms ASC, event_id ASC
                 """
             ).fetchall()
-        finally:
-            if close_conn:
-                conn.close()
         out: list[dict[str, Any]] = []
         for row in rows:
             item = json.loads(str(row["event_json"]) or "{}")
@@ -497,11 +523,8 @@ class SQLiteOptionPositionsRepository:
     def replace_position_lots(self, records: list[dict[str, Any]], *, conn: sqlite3.Connection | None = None) -> int:
         ts = int(now_ms())
         inserted = 0
-        close_conn = conn is None
-        if conn is None:
-            conn = self._connect()
-        try:
-            conn.execute("DELETE FROM position_lots")
+        with self._optional_conn(conn, commit=True) as active_conn:
+            active_conn.execute("DELETE FROM position_lots")
             for item in records:
                 record_id = str(item.get("record_id") or "").strip()
                 fields = item.get("fields") or {}
@@ -513,7 +536,7 @@ class SQLiteOptionPositionsRepository:
                     print(f"[WARN] option_positions replace_position_lots skipped {exc}", file=sys.stderr)
                     continue
                 expiration_ms, strike, multiplier = _position_lot_contract_scalars(fields)
-                conn.execute(
+                active_conn.execute(
                     """
                     INSERT INTO position_lots (
                       record_id, fields_json, source_event_id, expiration, strike, multiplier, updated_at_ms
@@ -530,11 +553,6 @@ class SQLiteOptionPositionsRepository:
                     ),
                 )
                 inserted += 1
-            if close_conn:
-                conn.commit()
-        finally:
-            if close_conn:
-                conn.close()
         return inserted
 
     def list_position_lots(self) -> list[dict[str, Any]]:
@@ -602,6 +620,39 @@ class SQLiteOptionPositionsRepository:
 OptionPositionsRepository = SQLiteOptionPositionsRepository
 
 
+def _materialize_bootstrap_events(repo: SQLiteOptionPositionsRepository, events: list[TradeEvent]) -> int:
+    for event in events:
+        repo.upsert_trade_event(event)
+    repo.replace_position_lots(project_position_lot_records(repo.list_trade_events()))
+    return len(events)
+
+
+def _apply_bootstrap_snapshot(
+    repo: SQLiteOptionPositionsRepository,
+    *,
+    records: list[dict[str, Any]],
+    source_name: str,
+    success_status: str,
+    success_message: str,
+    failure_status: str,
+    failure_message: str,
+    failure_log_prefix: str,
+) -> bool:
+    try:
+        count = _materialize_bootstrap_events(repo, _bootstrap_trade_events(records, source_name=source_name))
+        repo.bootstrap_status = success_status
+        repo.bootstrap_message = success_message.format(count=count)
+        return True
+    except Exception as exc:
+        repo.bootstrap_status = failure_status
+        repo.bootstrap_message = failure_message.format(error=exc)
+        print(
+            f"[WARN] {failure_log_prefix} for {repo.db_path}: {exc}",
+            file=sys.stderr,
+        )
+        return False
+
+
 def load_option_positions_repo(data_config: Path) -> SQLiteOptionPositionsRepository:
     repo = SQLiteOptionPositionsRepository(resolve_option_positions_sqlite_path(data_config))
     repo.data_config_path = Path(data_config).resolve()  # type: ignore[attr-defined]
@@ -613,32 +664,22 @@ def load_option_positions_repo(data_config: Path) -> SQLiteOptionPositionsReposi
         return repo
 
     if repo.count_position_lots() > 0:
-        try:
-            migrated = _bootstrap_trade_events(repo.list_position_lots(), source_name="sqlite_position_lots")
-            for event in migrated:
-                repo.upsert_trade_event(event)
-            repo.replace_position_lots(project_position_lot_records(repo.list_trade_events()))
-            repo.bootstrap_status = "migrated_local_position_lots"
-            repo.bootstrap_message = f"migrated {len(migrated)} bootstrap events from local position_lots"
-            return repo
-        except Exception as exc:
-            repo.bootstrap_status = "degraded_local_position_lots_migration_failed"
-            repo.bootstrap_message = f"local position_lots migration failed: {exc}"
-            print(
-                f"[WARN] option_positions local snapshot migration skipped for {repo.db_path}: {exc}",
-                file=sys.stderr,
-            )
-            return repo
+        _apply_bootstrap_snapshot(
+            repo,
+            records=repo.list_position_lots(),
+            source_name="sqlite_position_lots",
+            success_status="migrated_local_position_lots",
+            success_message="migrated {count} bootstrap events from local position_lots",
+            failure_status="degraded_local_position_lots_migration_failed",
+            failure_message="local position_lots migration failed: {error}",
+            failure_log_prefix="option_positions local snapshot migration skipped",
+        )
+        return repo
 
     feishu_ref = _try_load_table_ref(data_config)
     if feishu_ref is not None:
         try:
             bootstrap_records = _normalize_bootstrap_records(_list_feishu_option_position_records(feishu_ref))
-            for event in _bootstrap_trade_events(bootstrap_records, source_name="feishu_bootstrap"):
-                repo.upsert_trade_event(event)
-            repo.replace_position_lots(project_position_lot_records(repo.list_trade_events()))
-            repo.bootstrap_status = "bootstrapped_from_feishu"
-            repo.bootstrap_message = f"bootstrapped {repo.count_trade_events()} trade events from feishu"
         except Exception as exc:
             repo.bootstrap_status = "degraded_feishu_bootstrap_failed"
             repo.bootstrap_message = f"feishu bootstrap failed: {exc}"
@@ -646,25 +687,32 @@ def load_option_positions_repo(data_config: Path) -> SQLiteOptionPositionsReposi
                 f"[WARN] option_positions bootstrap skipped for {repo.db_path}: {exc}",
                 file=sys.stderr,
             )
+        else:
+            _apply_bootstrap_snapshot(
+                repo,
+                records=bootstrap_records,
+                source_name="feishu_bootstrap",
+                success_status="bootstrapped_from_feishu",
+                success_message="bootstrapped {count} trade events from feishu",
+                failure_status="degraded_feishu_bootstrap_failed",
+                failure_message="feishu bootstrap failed: {error}",
+                failure_log_prefix="option_positions bootstrap skipped",
+            )
     else:
         repo.bootstrap_status = "sqlite_only_no_feishu_bootstrap"
         repo.bootstrap_message = "no feishu option_positions bootstrap configured"
 
     if repo.count_trade_events() == 0 and repo.count_legacy_records() > 0:
-        try:
-            legacy_records = _normalize_bootstrap_records(repo.list_legacy_records())
-            for event in _bootstrap_trade_events(legacy_records, source_name="legacy_option_positions"):
-                repo.upsert_trade_event(event)
-            repo.replace_position_lots(project_position_lot_records(repo.list_trade_events()))
-            repo.bootstrap_status = "migrated_legacy_option_positions"
-            repo.bootstrap_message = f"migrated {repo.count_trade_events()} trade events from legacy option_positions"
-        except Exception as exc:
-            repo.bootstrap_status = "degraded_legacy_option_positions_migration_failed"
-            repo.bootstrap_message = f"legacy option_positions migration failed: {exc}"
-            print(
-                f"[WARN] option_positions legacy migration skipped for {repo.db_path}: {exc}",
-                file=sys.stderr,
-            )
+        _apply_bootstrap_snapshot(
+            repo,
+            records=_normalize_bootstrap_records(repo.list_legacy_records()),
+            source_name="legacy_option_positions",
+            success_status="migrated_legacy_option_positions",
+            success_message="migrated {count} trade events from legacy option_positions",
+            failure_status="degraded_legacy_option_positions_migration_failed",
+            failure_message="legacy option_positions migration failed: {error}",
+            failure_log_prefix="option_positions legacy migration skipped",
+        )
     return repo
 
 
@@ -694,81 +742,82 @@ def require_option_positions_event_write_repo(repo: Any) -> OptionPositionsEvent
     raise TypeError("option_positions repo does not satisfy event write repository interface")
 
 
-def rebuild_position_lots_from_trade_events(repo: Any) -> dict[str, Any]:
+def _with_sqlite_repo_transaction(repo: Any, fn: Any) -> Any:
     sqlite_repo = require_option_positions_event_write_repo(repo)
     conn = sqlite_repo._connect() if isinstance(sqlite_repo, SQLiteOptionPositionsRepository) else None
     try:
+        result = fn(sqlite_repo, conn)
+        if conn is not None:
+            conn.commit()
+        return result
+    except Exception:
+        if conn is not None:
+            conn.rollback()
+        raise
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def rebuild_position_lots_from_trade_events(repo: Any) -> dict[str, Any]:
+    def _run(sqlite_repo: Any, conn: sqlite3.Connection | None) -> dict[str, Any]:
         if conn is not None:
             existing_rows = sqlite_repo.list_position_lots()
             events = sqlite_repo.list_trade_events(conn=conn)
             projected = project_position_lot_records(events)
             merged = _merge_preserved_position_lot_metadata(projected, existing_rows)
             inserted = sqlite_repo.replace_position_lots(merged, conn=conn)
-            conn.commit()
         else:
             existing_rows = sqlite_repo.list_position_lots()
             events = sqlite_repo.list_trade_events()
             projected = project_position_lot_records(events)
             merged = _merge_preserved_position_lot_metadata(projected, existing_rows)
             inserted = sqlite_repo.replace_position_lots(merged)
-    except Exception:
-        if conn is not None:
-            conn.rollback()
-        raise
-    finally:
-        if conn is not None:
-            conn.close()
-    return {
-        "trade_event_count": int(len(events)),
-        "position_lot_count": int(inserted),
-        "preserved_sync_meta_record_count": int(
-            sum(
-                1
-                for item in merged
-                if any((item.get("fields") or {}).get(key) not in (None, "") for key in PRESERVED_POSITION_LOT_META_KEYS)
-            )
-        ),
-    }
+        return {
+            "trade_event_count": int(len(events)),
+            "position_lot_count": int(inserted),
+            "preserved_sync_meta_record_count": int(
+                sum(
+                    1
+                    for item in merged
+                    if any((item.get("fields") or {}).get(key) not in (None, "") for key in PRESERVED_POSITION_LOT_META_KEYS)
+                )
+            ),
+        }
+
+    return _with_sqlite_repo_transaction(repo, _run)
 
 
 def _persist_trade_event_object(repo: Any, event: TradeEvent) -> dict[str, Any]:
-    sqlite_repo = require_option_positions_event_write_repo(repo)
-    conn = sqlite_repo._connect() if isinstance(sqlite_repo, SQLiteOptionPositionsRepository) else None
-    try:
+    def _run(sqlite_repo: Any, conn: sqlite3.Connection | None) -> dict[str, Any]:
         if conn is not None:
             created = sqlite_repo.upsert_trade_event(event, conn=conn)
             existing_rows = sqlite_repo.list_position_lots()
             projected = project_position_lot_records(sqlite_repo.list_trade_events(conn=conn))
             records = _merge_preserved_position_lot_metadata(projected, existing_rows)
             lot_count = sqlite_repo.replace_position_lots(records, conn=conn)
-            conn.commit()
         else:
             created = sqlite_repo.upsert_trade_event(event)
             existing_rows = sqlite_repo.list_position_lots()
             projected = project_position_lot_records(sqlite_repo.list_trade_events())
             records = _merge_preserved_position_lot_metadata(projected, existing_rows)
             lot_count = sqlite_repo.replace_position_lots(records)
-    except Exception:
-        if conn is not None:
-            conn.rollback()
-        raise
-    finally:
-        if conn is not None:
-            conn.close()
-    record_id = next(
-        (
-            str(item.get("record_id") or "").strip()
-            for item in records
-            if str((item.get("fields") or {}).get("source_event_id") or "").strip() == str(event.event_id).strip()
-        ),
-        "",
-    )
-    return {
-        "event_id": event.event_id,
-        "record_id": record_id or None,
-        "created": bool(created),
-        "position_lot_count": int(lot_count),
-    }
+        record_id = next(
+            (
+                str(item.get("record_id") or "").strip()
+                for item in records
+                if str((item.get("fields") or {}).get("source_event_id") or "").strip() == str(event.event_id).strip()
+            ),
+            "",
+        )
+        return {
+            "event_id": event.event_id,
+            "record_id": record_id or None,
+            "created": bool(created),
+            "position_lot_count": int(lot_count),
+        }
+
+    return _with_sqlite_repo_transaction(repo, _run)
 
 
 def persist_trade_event(repo: Any, deal: Any) -> dict[str, Any]:

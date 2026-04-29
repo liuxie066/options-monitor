@@ -294,6 +294,78 @@ def test_shared_slice_matches_legacy_key_fields() -> None:
     assert sliced_option["open_positions_min"] == legacy_option["open_positions_min"]
 
 
+def test_load_holdings_records_falls_back_to_list_only_on_permanent_search_error(tmp_path: Path) -> None:
+    import scripts.fetch_portfolio_context as fpc
+
+    cfg = tmp_path / "data.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "feishu": {
+                    "app_id": "app_id",
+                    "app_secret": "app_secret",
+                    "tables": {"holdings": "app_token/table_id"},
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    old_retry = fpc.with_tenant_token_retry
+    old_search = fpc.bitable_search_records
+    old_list = fpc.bitable_list_records
+    try:
+        fpc.with_tenant_token_retry = lambda app_id, app_secret, fn: fn("token")  # type: ignore[assignment]
+        fpc.bitable_search_records = lambda *_args, **_kwargs: (_ for _ in ()).throw(fpc.FeishuPermanentError("unsupported"))  # type: ignore[assignment]
+        fpc.bitable_list_records = lambda *_args, **_kwargs: [{"record_id": "rec_1", "fields": {}}]  # type: ignore[assignment]
+
+        rows = fpc.load_holdings_records(cfg)
+    finally:
+        fpc.with_tenant_token_retry = old_retry  # type: ignore[assignment]
+        fpc.bitable_search_records = old_search  # type: ignore[assignment]
+        fpc.bitable_list_records = old_list  # type: ignore[assignment]
+
+    assert rows == [{"record_id": "rec_1", "fields": {}}]
+
+
+def test_load_holdings_records_does_not_fallback_on_permission_error(tmp_path: Path) -> None:
+    import scripts.fetch_portfolio_context as fpc
+
+    cfg = tmp_path / "data.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "feishu": {
+                    "app_id": "app_id",
+                    "app_secret": "app_secret",
+                    "tables": {"holdings": "app_token/table_id"},
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    old_retry = fpc.with_tenant_token_retry
+    old_search = fpc.bitable_search_records
+    old_list = fpc.bitable_list_records
+    try:
+        fpc.with_tenant_token_retry = lambda app_id, app_secret, fn: fn("token")  # type: ignore[assignment]
+        fpc.bitable_search_records = lambda *_args, **_kwargs: (_ for _ in ()).throw(fpc.FeishuPermissionError("denied"))  # type: ignore[assignment]
+        fpc.bitable_list_records = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("permission errors should not fall back to list"))  # type: ignore[assignment]
+
+        try:
+            fpc.load_holdings_records(cfg)
+            assert False, "should raise"
+        except fpc.FeishuPermissionError:
+            pass
+    finally:
+        fpc.with_tenant_token_retry = old_retry  # type: ignore[assignment]
+        fpc.bitable_search_records = old_search  # type: ignore[assignment]
+        fpc.bitable_list_records = old_list  # type: ignore[assignment]
+
+
 def test_load_portfolio_context_auto_prefers_futu_when_available() -> None:
     import scripts.pipeline_context as pc
 

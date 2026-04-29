@@ -202,6 +202,38 @@ def test_build_feishu_payload_coerces_numeric_fields_from_strings() -> None:
     assert isinstance(payload["cash_secured_amount"], int)
 
 
+def test_build_outgoing_payload_applies_schema_filter_and_type_hints() -> None:
+    import scripts.sync_option_positions_to_feishu as sync_mod
+
+    payload = sync_mod.build_outgoing_payload(
+        "rec_local_1",
+        {
+            "broker": "富途",
+            "account": "lx",
+            "symbol": "TSLA",
+            "option_type": "put",
+            "side": "short",
+            "contracts_open": "1",
+            "strike": "85",
+            "premium": "1.25",
+            "note": "keep",
+        },
+        [
+            {"field_name": "contracts_open", "type": "number"},
+            {"field_name": "strike", "type": "number"},
+            {"field_name": "premium", "type": "currency"},
+            {"field_name": "note", "type": "text"},
+        ],
+    )
+
+    assert payload == {
+        "contracts_open": 1,
+        "strike": 85,
+        "premium": 1.25,
+        "note": "keep",
+    }
+
+
 def test_sync_dry_run_accepts_read_only_repo(monkeypatch, tmp_path: Path) -> None:
     import scripts.sync_option_positions_to_feishu as sync_mod
 
@@ -284,6 +316,69 @@ def test_sync_dry_run_reports_remote_orphan_delete_when_enabled(monkeypatch, tmp
     assert len(delete_rows) == 1
     assert delete_rows[0]["remote_record_id"] == "rec_remote_orphan"
     assert delete_rows[0]["reason"] == "remote_local_record_missing_from_local_projection"
+
+
+def test_sync_dry_run_does_not_prune_remote_when_scan_is_limited(monkeypatch, tmp_path: Path) -> None:
+    import scripts.option_positions_core.service as svc
+    import scripts.sync_option_positions_to_feishu as sync_mod
+    from scripts.option_positions_core.domain import OpenPositionCommand
+
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
+    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    svc.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="TSLA",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=100.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            premium_per_share=1.23,
+            opened_at_ms=1000,
+        ),
+    )
+    second = svc.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="NVDA",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=90.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            premium_per_share=1.11,
+            opened_at_ms=2000,
+        ),
+    )
+
+    monkeypatch.setattr(sync_mod, "get_tenant_access_token", lambda *_args, **_kwargs: "token")
+    monkeypatch.setattr(sync_mod, "bitable_fields", lambda *_args, **_kwargs: [{"field_name": "broker"}, {"field_name": "local_record_id"}])
+    monkeypatch.setattr(
+        sync_mod,
+        "bitable_list_records",
+        lambda *_args, **_kwargs: [
+            {"record_id": "rec_remote_second", "fields": {"local_record_id": second["record_id"]}},
+        ],
+    )
+
+    rows = sync_mod.sync_option_positions(
+        repo=repo,
+        data_config=data_config,
+        apply_mode=False,
+        prune_remote_missing_local=True,
+        limit=1,
+    )
+
+    assert all(row.get("action") != "delete" for row in rows)
 
 
 def test_sync_apply_deletes_remote_orphan_when_enabled(monkeypatch, tmp_path: Path) -> None:
@@ -455,6 +550,124 @@ def test_match_remote_record_reports_conflict_for_duplicate_source_event_id() ->
 
     assert record_id is None
     assert reason.startswith("conflict: duplicate remote rows by source_event_id")
+
+
+def test_sync_skips_unchanged_payload_even_when_last_synced_at_changes(monkeypatch, tmp_path: Path) -> None:
+    import scripts.option_positions_core.service as svc
+    import scripts.sync_option_positions_to_feishu as sync_mod
+    from scripts.option_positions_core.domain import OpenPositionCommand
+
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
+    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    svc.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="NFLX",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=300.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            premium_per_share=1.5,
+            opened_at_ms=1000,
+        ),
+    )
+    lot = repo.list_position_lots()[0]
+    schema_fields = [
+        {"field_name": "position_id"},
+        {"field_name": "source_event_id"},
+        {"field_name": "broker"},
+        {"field_name": "account"},
+        {"field_name": "symbol"},
+        {"field_name": "option_type"},
+        {"field_name": "side"},
+        {"field_name": "contracts"},
+        {"field_name": "contracts_open"},
+        {"field_name": "currency"},
+        {"field_name": "strike"},
+        {"field_name": "expiration"},
+        {"field_name": "premium"},
+        {"field_name": "status"},
+        {"field_name": "opened_at"},
+        {"field_name": "last_action_at"},
+        {"field_name": "local_record_id"},
+        {"field_name": "last_synced_at"},
+    ]
+    payload = sync_mod.build_outgoing_payload(lot["record_id"], lot["fields"], schema_fields)
+    patched_fields = dict(lot["fields"])
+    patched_fields["feishu_record_id"] = "rec_existing"
+    patched_fields["feishu_sync_hash"] = sync_mod.sync_payload_hash(payload)
+    patched_fields["feishu_last_synced_at_ms"] = 1000
+    repo.update_position_lot_fields(lot["record_id"], patched_fields)
+
+    monkeypatch.setattr(sync_mod, "get_tenant_access_token", lambda *_args, **_kwargs: "token")
+    monkeypatch.setattr(
+        sync_mod,
+        "bitable_fields",
+        lambda *_args, **_kwargs: schema_fields,
+    )
+    monkeypatch.setattr(sync_mod, "bitable_list_records", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(sync_mod, "bitable_update_record", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unchanged payload should skip update")))
+
+    rows = sync_mod.sync_option_positions(repo=repo, data_config=data_config, apply_mode=True)
+
+    assert rows[0]["action"] == "skip"
+    assert rows[0]["reason"] == "payload_unchanged"
+
+
+def test_select_candidates_keeps_rows_older_than_since_updated_ms() -> None:
+    import scripts.sync_option_positions_to_feishu as sync_mod
+
+    rows = sync_mod.select_candidates(
+        [
+            {"record_id": "rec_old", "fields": {"feishu_last_synced_at_ms": 1000}},
+            {"record_id": "rec_new", "fields": {"feishu_last_synced_at_ms": 5000}},
+            {"record_id": "rec_never", "fields": {}},
+        ],
+        only_record_id=None,
+        only_open=False,
+        since_updated_ms=3000,
+        limit=None,
+    )
+
+    selected = [row.record_id for row in rows]
+    assert "rec_old" in selected
+    assert "rec_never" in selected
+    assert "rec_new" not in selected
+
+
+def test_with_table_token_refreshes_once_on_auth_error(monkeypatch) -> None:
+    import scripts.sync_option_positions_to_feishu as sync_mod
+
+    class _Ref:
+        app_id = "app_id"
+        app_secret = "app_secret"
+
+    calls: list[bool] = []
+
+    def _fake_get_token(_app_id: str, _app_secret: str, *, force_refresh: bool = False) -> str:
+        calls.append(force_refresh)
+        return "fresh-token" if force_refresh else "stale-token"
+
+    attempts = {"n": 0}
+
+    def _fn(token: str) -> str:
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise sync_mod.FeishuAuthError(f"expired:{token}")
+        return token
+
+    monkeypatch.setattr(sync_mod, "get_tenant_access_token", _fake_get_token)
+
+    out = sync_mod._with_table_token(_Ref(), _fn)
+
+    assert out == "fresh-token"
+    assert calls == [False, True]
+    assert attempts["n"] == 2
 
 
 def test_sync_apply_create_persists_metadata_without_touching_business_fields(monkeypatch, tmp_path: Path) -> None:

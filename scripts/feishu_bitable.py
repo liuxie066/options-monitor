@@ -347,6 +347,19 @@ def get_tenant_access_token(app_id: str, app_secret: str, *, force_refresh: bool
         return token
 
 
+def with_tenant_token_retry(
+    app_id: str,
+    app_secret: str,
+    fn: Callable[[str], Any],
+) -> Any:
+    token = get_tenant_access_token(app_id, app_secret)
+    try:
+        return fn(token)
+    except FeishuAuthError:
+        refreshed = get_tenant_access_token(app_id, app_secret, force_refresh=True)
+        return fn(refreshed)
+
+
 # -----------------
 # Bitable operations (backward compatible signatures)
 # -----------------
