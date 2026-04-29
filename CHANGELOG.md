@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.3.3 - 2026-04-29
+
+### Changed
+- Stopped writing canonical option contract fields (`expiration`, `strike`, `multiplier`, `premium`) into `note` for new or adjusted position lots, leaving them in structured fields only
+- Preserved backward-compatible readers for historical `note` tokens while making adjustment flows actively scrub legacy `exp=` / `strike=` / `multiplier=` / `premium_per_share=` tokens when those fields are updated
+- Kept close advice, reporting, context building, trade-intake matching, and manual close flows aligned on the structured lot fields so old note payloads are no longer required for steady-state behavior
+
 ## 0.3.2 - 2026-04-29
 
 ### Changed
