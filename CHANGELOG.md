@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.3.2 - 2026-04-29
+
+### Changed
+- Improved close-advice quote evaluation to accept reliable bid/ask-derived mids, reducing false `missing_quote` / `missing_mid` skips when required-data rows lack a precomputed mid
+- Split close-advice account summaries into system issues versus market-quality issues so wide spreads and thin liquidity no longer read like runtime failures
+- Hardened Feishu/bootstrap and repository write paths against incomplete option lots, and fixed legacy auto-close quantity fallback so records without `contracts_open` no longer report applied closes on zero contracts
+
 ## 0.3.1 - 2026-04-29
 
 ### Changed
