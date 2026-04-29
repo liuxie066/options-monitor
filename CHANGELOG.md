@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.3.4 - 2026-04-29
+
+### Changed
+- Suppressed the close-advice fallback `行情质量不足` summary in notifications when `spread_too_wide` is the sole quote-quality issue and no strong/medium close suggestions were generated, reducing expiry-day noise without changing evaluation logic
+
 ## 0.3.3 - 2026-04-29
 
 ### Changed
