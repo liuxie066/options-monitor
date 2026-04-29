@@ -83,6 +83,61 @@ def test_run_close_advice_builds_csv_and_markdown_from_local_fixtures(tmp_path: 
     assert "135.68085" in csv_text
 
 
+def test_run_close_advice_prefers_context_expiration_ymd_field(tmp_path: Path) -> None:
+    context = {
+        "open_positions_min": [
+            {
+                "account": "lx",
+                "symbol": "NVDA",
+                "option_type": "put",
+                "side": "short",
+                "status": "open",
+                "contracts_open": 1,
+                "currency": "USD",
+                "strike": 100,
+                "multiplier": 100,
+                "premium": 1.6,
+                "expiration_ymd": "2026-05-15",
+            }
+        ]
+    }
+    ctx_path = tmp_path / "option_positions_context.json"
+    ctx_path.write_text(json.dumps(context, ensure_ascii=False), encoding="utf-8")
+
+    required_root = tmp_path / "required_data"
+    parsed = required_root / "parsed"
+    parsed.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "NVDA",
+                "option_type": "put",
+                "expiration": "2026-05-15",
+                "strike": 100,
+                "mid": 0.22,
+                "bid": 0.21,
+                "ask": 0.23,
+                "dte": 29,
+                "multiplier": 100,
+                "spot": 120,
+                "currency": "USD",
+            }
+        ]
+    ).to_csv(parsed / "NVDA_required_data.csv", index=False)
+
+    out_dir = tmp_path / "reports"
+    result = run_close_advice(
+        config={"close_advice": {"enabled": True}},
+        context_path=ctx_path,
+        required_data_root=required_root,
+        output_dir=out_dir,
+        base_dir=Path.cwd(),
+    )
+
+    assert result["rows"] == 1
+    assert "NVDA Put 2026-05-15" in (out_dir / "close_advice.txt").read_text(encoding="utf-8")
+
+
 def test_run_close_advice_records_missing_quote_but_does_not_notify(tmp_path: Path) -> None:
     ctx_path = tmp_path / "option_positions_context.json"
     ctx_path.write_text(

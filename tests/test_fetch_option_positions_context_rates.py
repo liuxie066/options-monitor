@@ -14,8 +14,9 @@ from scripts.fetch_option_positions_context import build_context
 
 def _record(symbol: str, side: str, option_type: str, currency: str, cash_secured: float) -> dict:
     return {
+        "record_id": "r1",
         "fields": {
-            "market": "富途",
+            "broker": "富途",
             "account": "lx",
             "symbol": symbol,
             "status": "open",

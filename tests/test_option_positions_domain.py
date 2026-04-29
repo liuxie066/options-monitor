@@ -81,6 +81,9 @@ def test_build_open_fields_for_short_put_sets_open_contracts_and_cash() -> None:
     assert fields["contracts"] == 2
     assert fields["contracts_open"] == 2
     assert fields["contracts_closed"] == 0
+    assert fields["strike"] == 100.0
+    assert fields["expiration"] == 1776384000000
+    assert fields["multiplier"] == 100
     assert fields["cash_secured_amount"] == 20000.0
     assert fields["opened_at"] == 1000
     assert fields["last_action_at"] == 1000

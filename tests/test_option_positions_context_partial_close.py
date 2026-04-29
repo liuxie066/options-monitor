@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import sys
+from datetime import datetime, timezone
 
 BASE = Path(__file__).resolve().parents[1]
 if str(BASE) not in sys.path:
@@ -41,6 +42,8 @@ def test_build_context_preserves_record_id_without_position_id() -> None:
     assert ctx["open_positions_min"][0]["side"] == "short"
     assert ctx["open_positions_min"][0]["currency"] == "USD"
     assert ctx["open_positions_min"][0]["premium"] == 1.23
+    assert ctx["open_positions_min"][0]["expiration_ymd"] is None
+    assert ctx["open_positions_min"][0]["days_to_expiration"] is None
 
 
 def test_build_context_reads_premium_from_note_fallback() -> None:
@@ -66,6 +69,40 @@ def test_build_context_reads_premium_from_note_fallback() -> None:
     ctx = build_context(records, broker="富途", account="lx", rates={"USDCNY": 7.2})
 
     assert ctx["open_positions_min"][0]["premium"] == "0.88"
+
+
+def test_build_context_exposes_expiration_ymd_and_days_to_expiration() -> None:
+    expiration_ms = int(datetime(2026, 5, 3, tzinfo=timezone.utc).timestamp() * 1000)
+    as_of_days = (datetime(2026, 5, 3, tzinfo=timezone.utc).date() - datetime.now(timezone.utc).date()).days
+    records = [
+        {
+            "record_id": "rec_1",
+            "fields": {
+                "broker": "富途",
+                "account": "lx",
+                "symbol": "NVDA",
+                "status": "open",
+                "side": "short",
+                "option_type": "put",
+                "contracts": 1,
+                "contracts_open": 1,
+                "cash_secured_amount": 1000,
+                "currency": "USD",
+                "strike": 120.0,
+                "multiplier": 100,
+                "expiration": expiration_ms,
+            },
+        }
+    ]
+
+    ctx = build_context(records, broker="富途", account="lx", rates={"USDCNY": 7.2})
+
+    row = ctx["open_positions_min"][0]
+    assert row["expiration"] == expiration_ms
+    assert row["expiration_ymd"] == "2026-05-03"
+    assert row["days_to_expiration"] == as_of_days
+    assert row["strike"] == 120.0
+    assert row["multiplier"] == 100
 
 
 def test_build_context_requires_broker_on_persisted_rows() -> None:

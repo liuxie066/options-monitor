@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -7,6 +8,7 @@ from scripts.exchange_rates import get_exchange_rates_or_fetch_latest
 from scripts.config_loader import resolve_data_config_path
 from scripts.feishu_bitable import safe_float
 from scripts.option_positions_core.domain import (
+    exp_ms_to_datetime,
     normalize_account,
     normalize_broker,
     normalize_close_type,
@@ -56,10 +58,13 @@ def list_position_rows(
     account: str | None = None,
     status: str = "open",
     limit: int = 50,
+    expiration_within_days: int | None = None,
+    as_of_ms: int | None = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     normalized_broker = normalize_broker(broker)
     normalized_account = normalize_account(account) if account else None
+    as_of_date = datetime.fromtimestamp(int(as_of_ms) / 1000).date() if as_of_ms is not None else datetime.now().date()
     for item in repo.list_records(page_size=200):
         record_id = item.get("record_id")
         fields = item.get("fields") or {}
@@ -70,6 +75,12 @@ def list_position_rows(
         normalized_status = normalize_status(fields.get("status"))
         if status != "all" and normalized_status != status:
             continue
+        exp_dt = exp_ms_to_datetime(fields.get("expiration"))
+        expiration_ymd = exp_dt.date().isoformat() if exp_dt is not None else None
+        days_to_expiration = (exp_dt.date() - as_of_date).days if exp_dt is not None else None
+        if expiration_within_days is not None:
+            if days_to_expiration is None or days_to_expiration < 0 or days_to_expiration > int(expiration_within_days):
+                continue
         rows.append(
             {
                 "record_id": record_id,
@@ -78,6 +89,11 @@ def list_position_rows(
                 "symbol": fields.get("symbol"),
                 "option_type": normalize_option_type(fields.get("option_type")),
                 "side": normalize_side(fields.get("side")),
+                "strike": safe_float(fields.get("strike")),
+                "multiplier": safe_float(fields.get("multiplier")),
+                "expiration": fields.get("expiration"),
+                "expiration_ymd": expiration_ymd,
+                "days_to_expiration": days_to_expiration,
                 "contracts": fields.get("contracts"),
                 "contracts_open": fields.get("contracts_open"),
                 "contracts_closed": fields.get("contracts_closed"),

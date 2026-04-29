@@ -285,6 +285,26 @@ def effective_expiration(fields: dict[str, Any]) -> tuple[int | None, str]:
     return None, "none"
 
 
+def effective_expiration_ymd(fields: dict[str, Any]) -> str | None:
+    exp_ms, _source = effective_expiration(fields)
+    exp_dt = exp_ms_to_datetime(exp_ms)
+    return exp_dt.date().isoformat() if exp_dt is not None else None
+
+
+def effective_strike(fields: dict[str, Any]) -> float | None:
+    strike = safe_float(fields.get("strike"))
+    if strike is not None:
+        return float(strike)
+    return safe_float(parse_note_kv(fields.get("note") or "", "strike"))
+
+
+def effective_multiplier(fields: dict[str, Any]) -> float | None:
+    multiplier = safe_float(fields.get("multiplier"))
+    if multiplier is not None:
+        return float(multiplier)
+    return safe_float(parse_note_kv(fields.get("note") or "", "multiplier"))
+
+
 def _fmt_strike(value: float | None) -> str:
     if value is None:
         return "NA"
@@ -397,6 +417,8 @@ def build_open_fields(cmd: OpenPositionCommand) -> dict[str, Any]:
         fields["expiration"] = int(exp_ms)
     if cmd.premium_per_share is not None:
         fields["premium"] = float(cmd.premium_per_share)
+    if multiplier is not None:
+        fields["multiplier"] = int(float(multiplier)) if float(multiplier).is_integer() else float(multiplier)
     if underlying_locked is not None:
         fields["underlying_share_locked"] = int(underlying_locked)
     if cash_secured is not None:

@@ -3,11 +3,11 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any, Protocol
 
-from scripts.feishu_bitable import parse_note_kv, safe_float
+from scripts.feishu_bitable import safe_float
 from scripts.option_positions_core.domain import (
     effective_contracts_open,
-    effective_expiration,
-    exp_ms_to_datetime,
+    effective_expiration_ymd,
+    effective_strike,
     normalize_account,
     normalize_broker,
     normalize_option_type,
@@ -133,18 +133,11 @@ def _required_close_missing(deal: NormalizedTradeDeal) -> list[str]:
 
 
 def _record_strike(fields: dict[str, Any]) -> float | None:
-    strike = safe_float(fields.get("strike"))
-    if strike is not None:
-        return float(strike)
-    return safe_float(parse_note_kv(fields.get("note") or "", "strike"))
+    return effective_strike(fields)
 
 
 def _record_expiration_ymd(fields: dict[str, Any]) -> str | None:
-    exp_ms, _ = effective_expiration(fields)
-    if exp_ms is None:
-        return None
-    dt = exp_ms_to_datetime(exp_ms)
-    return dt.date().isoformat() if dt is not None else None
+    return effective_expiration_ymd(fields)
 
 
 def load_close_candidate_records(repo: OptionPositionsRepoLike) -> list[dict[str, Any]]:

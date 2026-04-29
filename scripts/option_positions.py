@@ -111,6 +111,7 @@ def main():
     p_list.add_argument('--status', default='open', choices=['open', 'close', 'all'])
     p_list.add_argument('--format', default='text', choices=['text', 'json'])
     p_list.add_argument('--limit', type=int, default=50)
+    p_list.add_argument('--exp-within-days', type=int, default=None, help='only include rows expiring within N days from today')
 
     p_add = sub.add_parser('add', help='add a record')
     p_add.add_argument('--broker', default='富途')
@@ -178,6 +179,7 @@ def main():
             account=account,
             status=args.status,
             limit=args.limit,
+            expiration_within_days=args.exp_within_days,
         )
         if args.format == 'json':
             print(json.dumps(rows, ensure_ascii=False, indent=2))
@@ -192,6 +194,7 @@ def main():
             cash_txt = format_cash_secured_amount(r.get('cash_secured_amount'), ccy)
             print(
                 f"- {r['record_id']} | {r.get('account')} | {r.get('symbol')} | {r.get('side')} {r.get('option_type')} | "
+                f"exp {r.get('expiration_ymd') or '-'} | strike {r.get('strike') if r.get('strike') is not None else '-'} | "
                 f"contracts {r.get('contracts')} open {r.get('contracts_open')} closed {r.get('contracts_closed')} | "
                 f"{ccy} cash_secured {cash_txt} | status {r.get('status')}"
             )

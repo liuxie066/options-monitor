@@ -66,6 +66,42 @@ def test_execute_manual_open_triggers_best_effort_sync(monkeypatch, tmp_path: Pa
     assert captured["apply_mode"] == "1"
 
 
+def test_build_trade_open_command_keeps_optional_contract_fields_null_instead_of_string_none() -> None:
+    import src.application.position_workflows as workflows
+    from scripts.trade_event_normalizer import NormalizedTradeDeal
+
+    command = workflows._build_trade_open_command(
+        NormalizedTradeDeal(
+            broker="富途",
+            futu_account_id="REAL_1",
+            internal_account="lx",
+            deal_id="deal-preview-1",
+            order_id="order-1",
+            symbol="NVDA",
+            option_type="put",
+            side="sell",
+            position_effect="open",
+            contracts=1,
+            price=1.23,
+            strike=None,
+            multiplier=None,
+            multiplier_source=None,
+            expiration_ymd=None,
+            currency="USD",
+            trade_time_ms=1000,
+            raw_payload={},
+        )
+    )
+
+    assert command.symbol == "NVDA"
+    assert command.currency == "USD"
+    assert command.strike is None
+    assert command.multiplier is None
+    assert command.expiration_ymd is None
+    assert "multiplier_source=" in str(command.note)
+    assert "None" not in str(command.note)
+
+
 def test_manual_open_record_id_prefers_explicit_record_id_before_event_id_guess() -> None:
     import src.application.position_workflows as workflows
 

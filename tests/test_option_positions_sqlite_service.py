@@ -445,6 +445,81 @@ def test_persist_trade_event_builds_position_lots_projection(tmp_path: Path) -> 
     assert fields["contracts_closed"] == 1
     assert fields["status"] == "open"
     assert fields["last_close_event_id"] == "deal-close-1"
+    assert fields["strike"] == 480.0
+    assert fields["expiration"] == 1777420800000
+    assert fields["multiplier"] == 100
+    with repo._connect() as conn:  # type: ignore[attr-defined]
+        row = conn.execute(
+            "SELECT expiration, strike, multiplier FROM position_lots WHERE record_id = ?",
+            (lots[0]["record_id"],),
+        ).fetchone()
+    assert row is not None
+    assert row["expiration"] == 1777420800000
+    assert row["strike"] == 480.0
+    assert row["multiplier"] == 100.0
+
+
+def test_sqlite_repo_migrates_and_backfills_position_lot_contract_columns(tmp_path: Path) -> None:
+    import sqlite3
+    import scripts.option_positions_core.service as svc
+
+    db_path = tmp_path / "option_positions.sqlite3"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE position_lots (
+              record_id TEXT PRIMARY KEY,
+              fields_json TEXT NOT NULL,
+              source_event_id TEXT,
+              updated_at_ms INTEGER NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO position_lots (record_id, fields_json, source_event_id, updated_at_ms)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                "lot_legacy_1",
+                json.dumps(
+                    {
+                        "broker": "富途",
+                        "account": "lx",
+                        "symbol": "TSLA",
+                        "option_type": "put",
+                        "side": "short",
+                        "contracts": 1,
+                        "contracts_open": 1,
+                        "strike": 100.0,
+                        "expiration": 1781827200000,
+                        "note": "multiplier=100",
+                    },
+                    ensure_ascii=False,
+                ),
+                "manual-open-legacy",
+                1000,
+            ),
+        )
+        conn.commit()
+
+    repo = svc.SQLiteOptionPositionsRepository(db_path)
+    lot = repo.list_position_lots()[0]
+    assert lot["fields"]["expiration"] == 1781827200000
+    assert lot["fields"]["strike"] == 100.0
+    assert lot["fields"]["multiplier"] == 100
+
+    with repo._connect() as conn:  # type: ignore[attr-defined]
+        cols = {str(row["name"]) for row in conn.execute("PRAGMA table_info(position_lots)").fetchall()}
+        row = conn.execute(
+            "SELECT expiration, strike, multiplier FROM position_lots WHERE record_id = ?",
+            ("lot_legacy_1",),
+        ).fetchone()
+    assert {"expiration", "strike", "multiplier"} <= cols
+    assert row is not None
+    assert row["expiration"] == 1781827200000
+    assert row["strike"] == 100.0
+    assert row["multiplier"] == 100.0
 
 
 def test_projection_does_not_treat_sync_metadata_as_canonical_state(tmp_path: Path) -> None:
