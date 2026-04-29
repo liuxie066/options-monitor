@@ -17,10 +17,12 @@ from datetime import datetime, timezone
 
 from scripts.feishu_bitable import (
     FeishuAuthError,
-    FeishuError,
-    get_tenant_access_token,
+    FeishuPermanentError,
+    FeishuPermissionError,
+    FeishuRateLimitError,
     bitable_search_records,
     bitable_list_records,
+    with_tenant_token_retry,
 )
 from scripts.config_loader import resolve_data_config_path
 from scripts.io_utils import atomic_write_json
@@ -57,7 +59,7 @@ def _as_text(v) -> str:
     return str(v)
 
 
-def _normalize_symbol(asset_type: str | None, asset_id: str, market_text: str = "") -> str | None:
+def _normalize_symbol(asset_type: str | None, asset_id: str) -> str | None:
     """Normalize asset_id into monitoring symbol.
 
     - us_stock: keep as upper (e.g., NVDA)
@@ -98,10 +100,6 @@ def _record_broker_text(fields: dict) -> str:
         return broker
     # Keep legacy `market` compatibility for older holdings tables.
     return _as_text(fields.get("market")).strip()
-
-
-def _filter_payload(*, broker: str | None, account: str | None) -> dict:
-    return {"broker": broker, "account": account}
 
 
 def build_context(
@@ -170,7 +168,7 @@ def build_context(
                 cash_by_currency[ccy_u] = cash_by_currency.get(ccy_u, 0.0) + qty
             continue
 
-        sym = _normalize_symbol(asset_type, asset_id, market_text=_as_text(f.get('market')))
+        sym = _normalize_symbol(asset_type, asset_id)
         if not sym or qty is None:
             continue
 
@@ -187,7 +185,7 @@ def build_context(
 
     return {
         "as_of_utc": datetime.now(timezone.utc).isoformat(),
-        "filters": _filter_payload(broker=broker_norm, account=account),
+        "filters": {"broker": broker_norm, "account": account},
         "cash_by_currency": cash_by_currency,
         "stocks_by_symbol": stocks_by_symbol,
         "raw_selected_count": len(selected),
@@ -212,7 +210,7 @@ def build_shared_context(records: list[dict], broker: str | None = None, *, mark
     by_account = {acct: build_context(records, broker=broker_norm, account=acct) for acct in sorted(accounts)}
     return {
         "as_of_utc": datetime.now(timezone.utc).isoformat(),
-        "filters": _filter_payload(broker=broker_norm, account=None),
+        "filters": {"broker": broker_norm, "account": None},
         "all_accounts": build_context(records, broker=broker_norm, account=None),
         "by_account": by_account,
     }
@@ -241,11 +239,16 @@ def load_holdings_records(data_config_path: Path) -> list[dict]:
         raise ValueError("data config missing feishu app_id/app_secret/holdings")
 
     app_token, table_id = holdings_ref.split("/", 1)
-    token = get_tenant_access_token(app_id, app_secret)
-    try:
-        return bitable_search_records(token, app_token, table_id)
-    except FeishuError:
-        return bitable_list_records(token, app_token, table_id)
+
+    def _list_records(token: str) -> list[dict]:
+        try:
+            return bitable_search_records(token, app_token, table_id)
+        except (FeishuAuthError, FeishuPermissionError, FeishuRateLimitError):
+            raise
+        except FeishuPermanentError:
+            return bitable_list_records(token, app_token, table_id)
+
+    return with_tenant_token_retry(str(app_id), str(app_secret), _list_records)
 
 
 def load_holdings_portfolio_context(

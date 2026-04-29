@@ -135,6 +135,51 @@ def test_load_option_positions_repo_skips_incomplete_feishu_option_bootstrap_row
     assert repo.count_trade_events() == 1
 
 
+def test_load_option_positions_repo_skips_invalid_timestamp_rows_without_degrading_bootstrap(tmp_path: Path) -> None:
+    import scripts.option_positions_core.service as svc
+
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
+    old_list = svc._list_feishu_option_position_records
+    try:
+        svc._list_feishu_option_position_records = lambda _ref: [  # type: ignore[assignment]
+            {
+                "record_id": "rec_bad_time",
+                "fields": {
+                    "account": "lx",
+                    "broker": "富途",
+                    "symbol": "0700.HK",
+                    "status": "open",
+                    "contracts": 1,
+                    "contracts_open": 1,
+                    "opened_at": "not-a-number",
+                    "last_action_at": "",
+                },
+            },
+            {
+                "record_id": "rec_good_time",
+                "fields": {
+                    "account": "lx",
+                    "broker": "富途",
+                    "symbol": "NVDA",
+                    "status": "open",
+                    "contracts": 1,
+                    "contracts_open": 1,
+                    "opened_at": 1000,
+                    "last_action_at": 1000,
+                },
+            },
+        ]
+        repo = svc.load_option_positions_repo(data_config)
+    finally:
+        svc._list_feishu_option_position_records = old_list  # type: ignore[assignment]
+
+    records = repo.list_records(page_size=10)
+    assert len(records) == 1
+    assert records[0]["record_id"] == "rec_good_time"
+    assert repo.bootstrap_status == "bootstrapped_from_feishu"
+    assert repo.count_trade_events() == 1
+
+
 def test_load_option_positions_repo_skips_legacy_rows_without_broker_or_market(tmp_path: Path) -> None:
     import scripts.option_positions_core.service as svc
 

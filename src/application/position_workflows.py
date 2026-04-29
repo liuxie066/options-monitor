@@ -26,6 +26,11 @@ def _auto_sync_record_if_possible(repo: Any, *, record_id: str) -> dict[str, Any
         return None
 
 
+def _apply_with_optional_sync(repo: Any, *, record_id: str, result: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    sync_result = _auto_sync_record_if_possible(repo, record_id=record_id) if record_id else None
+    return payload | {"mode": "applied", "result": result, "sync_result": sync_result}
+
+
 def _manual_open_record_id(result: dict[str, Any]) -> str:
     record_id = str(result.get("record_id") or "").strip()
     if record_id:
@@ -150,8 +155,12 @@ def execute_manual_open(
         raise ValueError("repo is required when dry_run is false")
     result = persist_manual_open_event(repo, command)
     synced_record_id = _manual_open_record_id(result)
-    sync_result = _auto_sync_record_if_possible(repo, record_id=synced_record_id) if synced_record_id else None
-    return {"mode": "applied", "fields": fields, "result": result, "command": command, "sync_result": sync_result}
+    return _apply_with_optional_sync(
+        repo,
+        record_id=synced_record_id,
+        result=result,
+        payload={"fields": fields, "command": command},
+    )
 
 
 def execute_manual_close(
@@ -180,8 +189,12 @@ def execute_manual_close(
         close_price=close_price,
         close_reason=close_reason,
     )
-    sync_result = _auto_sync_record_if_possible(repo, record_id=record_id)
-    return {"mode": "applied", "fields": fields, "patch": patch, "result": result, "sync_result": sync_result}
+    return _apply_with_optional_sync(
+        repo,
+        record_id=record_id,
+        result=result,
+        payload={"fields": fields, "patch": patch},
+    )
 
 
 def execute_manual_adjust(
@@ -219,5 +232,9 @@ def execute_manual_adjust(
         multiplier=multiplier,
         opened_at_ms=opened_at_ms,
     )
-    sync_result = _auto_sync_record_if_possible(repo, record_id=record_id)
-    return {"mode": "applied", "fields": fields, "patch": patch, "result": result, "sync_result": sync_result}
+    return _apply_with_optional_sync(
+        repo,
+        record_id=record_id,
+        result=result,
+        payload={"fields": fields, "patch": patch},
+    )

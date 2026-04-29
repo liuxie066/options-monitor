@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from scripts.feishu_bitable import (
+    FeishuAuthError,
     bitable_create_record,
     bitable_delete_record,
     bitable_fields,
@@ -33,11 +34,8 @@ from scripts.option_positions_core.service import (
 )
 from src.application.option_positions_facade import resolve_option_positions_repo
 
-
-SYNC_META_KEYS = {
-    "feishu_record_id",
-    "feishu_sync_hash",
-    "feishu_last_synced_at_ms",
+SYNC_HASH_EXCLUDED_FIELDS = {
+    "last_synced_at",
 }
 
 INTEGER_PAYLOAD_FIELDS = {
@@ -82,6 +80,7 @@ SCHEMA_INTEGER_FIELD_NAMES = {
 class SyncCandidate:
     record_id: str
     fields: dict[str, Any]
+
 
 def normalize_local_fields(fields: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(fields)
@@ -203,15 +202,14 @@ def build_feishu_payload(record_id: str, fields: dict[str, Any]) -> dict[str, An
     return normalize_payload_types(filtered)
 
 
-def filter_payload_for_schema(payload: dict[str, Any], allowed_fields: set[str]) -> dict[str, Any]:
-    if not allowed_fields:
-        return payload
-    return {key: value for key, value in payload.items() if key in allowed_fields}
-
-
 def payload_hash(payload: dict[str, Any]) -> str:
     serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def sync_payload_hash(payload: dict[str, Any]) -> str:
+    comparable = {key: value for key, value in payload.items() if key not in SYNC_HASH_EXCLUDED_FIELDS}
+    return payload_hash(comparable)
 
 
 def extract_remote_record_id(item: dict[str, Any]) -> str:
@@ -312,7 +310,15 @@ def match_remote_record(local_record_id: str, fields: dict[str, Any], remote_rec
     return None, "no_remote_match"
 
 
-def finalize_outgoing_payload(payload: dict[str, Any], schema_fields: list[dict[str, Any]]) -> dict[str, Any]:
+def build_outgoing_payload(record_id: str, fields: dict[str, Any], schema_fields: list[dict[str, Any]]) -> dict[str, Any]:
+    payload = build_feishu_payload(record_id, fields)
+    allowed_fields = {
+        str(item.get("field_name") or "").strip()
+        for item in schema_fields
+        if str(item.get("field_name") or "").strip()
+    }
+    if allowed_fields:
+        payload = {key: value for key, value in payload.items() if key in allowed_fields}
     return normalize_payload_types_by_schema(payload, schema_fields)
 
 
@@ -343,7 +349,7 @@ def select_candidates(
         if only_open and normalize_status(fields.get("status")) != "open":
             continue
         synced_at = fields.get("feishu_last_synced_at_ms")
-        if since_updated_ms is not None and synced_at is not None and int(synced_at) < int(since_updated_ms):
+        if since_updated_ms is not None and synced_at is not None and int(synced_at) >= int(since_updated_ms):
             continue
         out.append(SyncCandidate(record_id=record_id, fields=dict(fields)))
         if limit is not None and len(out) >= limit:
@@ -358,6 +364,34 @@ def summarize_result(action_rows: list[dict[str, Any]]) -> dict[str, int]:
         if action in summary:
             summary[action] += 1
     return summary
+
+
+def _with_table_token(table_ref: Any, fn: Any) -> Any:
+    app_id = str(table_ref.app_id)
+    app_secret = str(table_ref.app_secret)
+    token = get_tenant_access_token(app_id, app_secret)
+    try:
+        return fn(token)
+    except FeishuAuthError:
+        refreshed = get_tenant_access_token(app_id, app_secret, force_refresh=True)
+        return fn(refreshed)
+
+
+def can_prune_remote_missing_local(
+    *,
+    prune_remote_missing_local: bool,
+    only_record_id: str | None,
+    only_open: bool,
+    since_updated_ms: int | None,
+    limit: int | None,
+) -> bool:
+    return bool(
+        prune_remote_missing_local
+        and not only_record_id
+        and not only_open
+        and since_updated_ms is None
+        and limit is None
+    )
 
 
 def sync_option_positions(
@@ -388,17 +422,20 @@ def sync_option_positions(
         limit=limit,
     )
 
-    token = get_tenant_access_token(table_ref.app_id, table_ref.app_secret)
-    schema_fields = bitable_fields(token, table_ref.app_token, table_ref.table_id)
-    allowed_fields = {str(item.get("field_name") or "").strip() for item in schema_fields if str(item.get("field_name") or "").strip()}
-    remote_records = bitable_list_records(token, table_ref.app_token, table_ref.table_id, page_size=500)
+    schema_fields = _with_table_token(
+        table_ref,
+        lambda token: bitable_fields(token, table_ref.app_token, table_ref.table_id),
+    )
+    remote_records = _with_table_token(
+        table_ref,
+        lambda token: bitable_list_records(token, table_ref.app_token, table_ref.table_id, page_size=500),
+    )
 
     action_rows: list[dict[str, Any]] = []
     for candidate in candidates:
         feishu_record_id = str(candidate.fields.get("feishu_record_id") or "").strip()
-        outgoing_payload = filter_payload_for_schema(build_feishu_payload(candidate.record_id, candidate.fields), allowed_fields)
-        outgoing_payload = finalize_outgoing_payload(outgoing_payload, schema_fields)
-        outgoing_hash = payload_hash(outgoing_payload)
+        outgoing_payload = build_outgoing_payload(candidate.record_id, candidate.fields, schema_fields)
+        outgoing_hash = sync_payload_hash(outgoing_payload)
         existing_hash = str(candidate.fields.get("feishu_sync_hash") or "").strip()
         row: dict[str, Any] = {
             "record_id": candidate.record_id,
@@ -437,7 +474,10 @@ def sync_option_positions(
             row["reason"] = "missing_feishu_record_id"
             if apply_mode:
                 try:
-                    created = bitable_create_record(token, table_ref.app_token, table_ref.table_id, outgoing_payload)
+                    created = _with_table_token(
+                        table_ref,
+                        lambda token: bitable_create_record(token, table_ref.app_token, table_ref.table_id, outgoing_payload),
+                    )
                     created_record = created.get("record") if isinstance(created.get("record"), dict) else created
                     feishu_record_id = extract_remote_record_id(created_record if isinstance(created_record, dict) else {})
                     if not feishu_record_id:
@@ -463,7 +503,10 @@ def sync_option_positions(
         row["reason"] = "has_feishu_record_id"
         if apply_mode:
             try:
-                bitable_update_record(token, table_ref.app_token, table_ref.table_id, feishu_record_id, outgoing_payload)
+                _with_table_token(
+                    table_ref,
+                    lambda token: bitable_update_record(token, table_ref.app_token, table_ref.table_id, feishu_record_id, outgoing_payload),
+                )
                 synced_at_ms = int(now_ms())
                 patched_fields = sync_meta_patch(
                     candidate.fields,
@@ -478,7 +521,13 @@ def sync_option_positions(
                 row["reason"] = f"update_failed: {exc}"
         action_rows.append(row)
 
-    if prune_remote_missing_local and not only_record_id and not only_open and since_updated_ms is None:
+    if can_prune_remote_missing_local(
+        prune_remote_missing_local=prune_remote_missing_local,
+        only_record_id=only_record_id,
+        only_open=only_open,
+        since_updated_ms=since_updated_ms,
+        limit=limit,
+    ):
         local_record_ids = {candidate.record_id for candidate in candidates}
         for item in remote_records:
             remote_record_id = extract_remote_record_id(item)
@@ -499,7 +548,10 @@ def sync_option_positions(
             }
             if apply_mode:
                 try:
-                    bitable_delete_record(token, table_ref.app_token, table_ref.table_id, remote_record_id)
+                    _with_table_token(
+                        table_ref,
+                        lambda token: bitable_delete_record(token, table_ref.app_token, table_ref.table_id, remote_record_id),
+                    )
                 except Exception as exc:
                     row["action"] = "failed"
                     row["reason"] = f"delete_failed: {exc}"
@@ -557,9 +609,10 @@ def main() -> None:
     )
 
     table_ref = load_table_ref(data_config)
-    token = get_tenant_access_token(table_ref.app_id, table_ref.app_secret)
-    schema_fields = bitable_fields(token, table_ref.app_token, table_ref.table_id)
-    allowed_fields = {str(item.get("field_name") or "").strip() for item in schema_fields if str(item.get("field_name") or "").strip()}
+    schema_fields = _with_table_token(
+        table_ref,
+        lambda token: bitable_fields(token, table_ref.app_token, table_ref.table_id),
+    )
     local_records = getattr(getattr(repo, "primary_repo", repo), "list_position_lots")()
     candidates = select_candidates(
         local_records,
@@ -573,8 +626,7 @@ def main() -> None:
         if args.verbose:
             source = next((candidate for candidate in candidates if candidate.record_id == row.get("record_id")), None)
             if source is not None:
-                payload = filter_payload_for_schema(build_feishu_payload(source.record_id, source.fields), allowed_fields)
-                payload = finalize_outgoing_payload(payload, schema_fields)
+                payload = build_outgoing_payload(source.record_id, source.fields, schema_fields)
                 printable["payload"] = payload
         print(json.dumps(printable, ensure_ascii=False, sort_keys=True))
 

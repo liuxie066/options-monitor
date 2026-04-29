@@ -194,6 +194,51 @@ def test_get_tenant_access_token_reuses_cache_under_concurrency() -> None:
     assert urlopen_mock.call_count == 1
 
 
+def test_with_tenant_token_retry_refreshes_once_on_auth_error() -> None:
+    from scripts import feishu_bitable as fb
+
+    calls: list[tuple[str, bool]] = []
+
+    def fake_get_tenant_access_token(app_id: str, app_secret: str, *, force_refresh: bool = False) -> str:
+        calls.append((f"{app_id}:{app_secret}", force_refresh))
+        return "fresh-token" if force_refresh else "stale-token"
+
+    attempts = {"n": 0}
+
+    def fn(token: str) -> str:
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise fb.FeishuAuthError("expired")
+        return token
+
+    with patch.object(fb, "get_tenant_access_token", side_effect=fake_get_tenant_access_token):
+        out = fb.with_tenant_token_retry("app", "secret", fn)
+
+    assert out == "fresh-token"
+    assert calls == [("app:secret", False), ("app:secret", True)]
+    assert attempts["n"] == 2
+
+
+def test_with_tenant_token_retry_does_not_refresh_non_auth_errors() -> None:
+    from scripts import feishu_bitable as fb
+
+    attempts = {"n": 0}
+
+    def fn(_token: str) -> str:
+        attempts["n"] += 1
+        raise fb.FeishuPermissionError("denied")
+
+    with patch.object(fb, "get_tenant_access_token", return_value="token") as token_mock:
+        try:
+            fb.with_tenant_token_retry("app", "secret", fn)
+            assert False, "should raise"
+        except fb.FeishuPermissionError:
+            pass
+
+    token_mock.assert_called_once_with("app", "secret")
+    assert attempts["n"] == 1
+
+
 def test_http_json_logs_warn_retries_when_rate_limited() -> None:
     from scripts import feishu_bitable as fb
 
