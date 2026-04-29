@@ -68,6 +68,25 @@ class AccountRunOutcome:
     ran_pipeline: bool
 
 
+def _close_advice_issue_breakdown(flag_counts: dict[str, Any]) -> tuple[dict[str, int], dict[str, int]]:
+    system_issue_keys = {
+        "required_data_missing_expiration",
+        "required_data_missing_contract",
+        "required_data_fetch_error",
+        "opend_fetch_error",
+    }
+    quality_issue_keys = {
+        "missing_quote",
+        "missing_mid",
+        "opend_fetch_no_usable_quote",
+        "invalid_spread",
+        "spread_too_wide",
+    }
+    system = {key: int(flag_counts.get(key) or 0) for key in system_issue_keys}
+    quality = {key: int(flag_counts.get(key) or 0) for key in quality_issue_keys}
+    return system, quality
+
+
 def _record_account_run_degraded(
     *,
     runlog,
@@ -470,14 +489,17 @@ def run_one_account(
                 spread_too_wide = int(flag_counts.get("spread_too_wide") or 0)
                 evaluation_gap_rows = int(close_result.get("evaluation_gap_rows") or 0)
                 quote_issue_samples = close_result.get("quote_issue_samples") if isinstance(close_result.get("quote_issue_samples"), list) else []
+                system_issues, quality_issues = _close_advice_issue_breakdown(flag_counts)
+                system_issue_rows = sum(system_issues.values())
+                quality_issue_rows = sum(quality_issues.values())
                 summary = (
                     f"### [{acct}] 平仓建议\n"
-                    f"- 本次未生成 strong/medium 提醒；报价异常 {int(close_result.get('quote_issue_rows') or 0)} 条\n"
+                    f"- 本次未生成 strong/medium 提醒；系统异常 {system_issue_rows} 条，行情质量不足 {quality_issue_rows} 条\n"
                     f"- missing_quote={missing_quote} | missing_mid={missing_mid} | "
                     f"required_data_missing_expiration={missing_expiration} | required_data_missing_contract={missing_contract} | required_data_fetch_error={coverage_fetch_error} | "
                     f"opend_fetch_error={opend_fetch_error} | opend_fetch_no_usable_quote={opend_fetch_no_usable_quote} | "
                     f"invalid_spread={invalid_spread} | spread_too_wide={spread_too_wide}\n"
-                    f"- 说明: evaluation_gap_rows={evaluation_gap_rows}；持仓未完成 exact contract 定价时，不生成正式平仓建议\n"
+                    f"- 说明: evaluation_gap_rows={evaluation_gap_rows}；系统异常表示数据拉取/字段覆盖失败，行情质量不足表示有行情但定价可信度不够（如价差过大、无法形成可信 mid）\n"
                 )
                 if quote_issue_samples:
                     summary += f"- 样例: {' ; '.join(str(x) for x in quote_issue_samples[:3])}\n"
