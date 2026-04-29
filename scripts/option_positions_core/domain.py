@@ -302,15 +302,10 @@ def build_position_id(
     side: str,
     contracts: int,
 ) -> str:
-    alias = {
-        "0700.HK": "TENCENT",
-        "9992.HK": "POPMART",
-        "3690.HK": "MEITUAN",
-    }
     sym = norm_symbol(symbol)
     exp_compact = str(expiration_ymd or "").replace("-", "") or "NA"
     pc = "P" if str(option_type).strip().lower() == "put" else "C"
-    base = alias.get(sym, sym.replace(".", "_"))
+    base = sym.replace(".", "_")
     return f"{base}_{exp_compact}_{_fmt_strike(strike)}{pc}_{str(side).strip().lower()}"
 
 
