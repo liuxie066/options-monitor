@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.3.6 - 2026-04-29
+
+### Changed
+- Refined SQLite and Feishu sync flows by fixing incremental sync and remote-prune edge cases, refreshing Feishu tenant tokens once on auth failures, and simplifying bootstrap, transaction, payload, and context-building paths without adding extra fallback layers
+
 ## 0.3.5 - 2026-04-29
 
 ### Changed
