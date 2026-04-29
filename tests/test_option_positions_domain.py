@@ -84,6 +84,10 @@ def test_build_open_fields_for_short_put_sets_open_contracts_and_cash() -> None:
     assert fields["strike"] == 100.0
     assert fields["expiration"] == 1776384000000
     assert fields["multiplier"] == 100
+    assert "exp=" not in str(fields.get("note") or "")
+    assert "strike=" not in str(fields.get("note") or "")
+    assert "multiplier=" not in str(fields.get("note") or "")
+    assert "premium" not in str(fields.get("note") or "")
     assert fields["cash_secured_amount"] == 20000.0
     assert fields["opened_at"] == 1000
     assert fields["last_action_at"] == 1000
@@ -237,8 +241,10 @@ def test_build_open_adjustment_patch_updates_key_open_fields() -> None:
     assert patch["last_action_at"] == 3000
     assert patch["cash_secured_amount"] == 31500.0
     assert patch["position_id"] == "NVDA_20260717_105P_short"
-    assert "exp=2026-07-17" in patch["note"]
-    assert "premium_per_share=3.1" in patch["note"]
+    assert "exp=" not in patch["note"]
+    assert "strike=" not in patch["note"]
+    assert "multiplier=" not in patch["note"]
+    assert "premium_per_share=" not in patch["note"]
 
 
 def test_build_open_adjustment_patch_rejects_contracts_below_closed() -> None:

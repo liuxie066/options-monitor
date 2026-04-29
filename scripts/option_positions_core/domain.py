@@ -377,14 +377,6 @@ def build_open_fields(cmd: OpenPositionCommand) -> dict[str, Any]:
         underlying_locked = int(float(m) * contracts)
 
     note_kv: dict[str, str] = {}
-    if cmd.strike is not None:
-        note_kv["strike"] = str(cmd.strike)
-    if multiplier is not None:
-        note_kv["multiplier"] = str(multiplier)
-    if cmd.expiration_ymd:
-        note_kv["exp"] = str(cmd.expiration_ymd)
-    if cmd.premium_per_share is not None:
-        note_kv["premium_per_share"] = str(cmd.premium_per_share)
 
     opened_at = int(cmd.opened_at_ms or now_ms())
     fields: dict[str, Any] = {
@@ -426,10 +418,10 @@ def build_open_fields(cmd: OpenPositionCommand) -> dict[str, Any]:
     return fields
 
 
-def upsert_note_kv(note: str | None, kv: dict[str, str]) -> str:
+def upsert_note_kv(note: str | None, kv: dict[str, Any]) -> str:
     raw = str(note or "").strip()
     pairs: list[tuple[str, str]] = []
-    replaced_keys = {str(key).strip() for key, value in kv.items() if str(key).strip() and value not in (None, "")}
+    replaced_keys = {str(key).strip() for key in kv if str(key).strip()}
     for part in raw.replace(",", ";").split(";"):
         part = part.strip()
         if not part:
@@ -483,16 +475,14 @@ def build_open_adjustment_patch(
     if status == "close" and contracts is not None and next_contracts != closed_contracts:
         raise ValueError("cannot change contracts on a closed lot unless it equals contracts_closed")
 
-    next_strike = strike if strike is not None else safe_float(fields.get("strike"))
+    next_strike = strike if strike is not None else effective_strike(fields)
     next_multiplier = multiplier
     if next_multiplier is None:
-        next_multiplier = safe_float(fields.get("multiplier"))
-    if next_multiplier is None:
-        next_multiplier = safe_float(parse_note_kv(fields.get("note") or "", "multiplier"))
+        next_multiplier = effective_multiplier(fields)
     if next_multiplier is None and side == "short":
         next_multiplier = guess_multiplier(symbol)
 
-    next_expiration_ymd = expiration_ymd or parse_note_kv(fields.get("note") or "", "exp") or None
+    next_expiration_ymd = expiration_ymd or effective_expiration_ymd(fields) or None
     if expiration_ymd is not None:
         exp_ms = parse_exp_to_ms(expiration_ymd)
         if exp_ms is None:
@@ -500,7 +490,7 @@ def build_open_adjustment_patch(
     else:
         exp_ms = fields.get("expiration")
 
-    note_updates: dict[str, str] = {}
+    note_updates: dict[str, Any] = {}
     patch: dict[str, Any] = {"last_action_at": int(as_of_ms or now_ms())}
 
     if contracts is not None:
@@ -511,10 +501,10 @@ def build_open_adjustment_patch(
         if next_strike is None:
             raise ValueError("strike must be numeric")
         patch["strike"] = float(next_strike)
-        note_updates["strike"] = str(next_strike)
+        note_updates["strike"] = None
     if premium_per_share is not None:
         patch["premium"] = float(premium_per_share)
-        note_updates["premium_per_share"] = str(premium_per_share)
+        note_updates["premium_per_share"] = None
     if multiplier is not None:
         if next_multiplier is None or float(next_multiplier) <= 0:
             raise ValueError("multiplier must be > 0")
@@ -522,10 +512,10 @@ def build_open_adjustment_patch(
             patch["multiplier"] = int(float(next_multiplier))
         else:
             patch["multiplier"] = float(next_multiplier)
-        note_updates["multiplier"] = str(multiplier)
+        note_updates["multiplier"] = None
     if expiration_ymd is not None:
         patch["expiration"] = int(exp_ms)  # type: ignore[arg-type]
-        note_updates["exp"] = expiration_ymd
+        note_updates["exp"] = None
     if opened_at_ms is not None:
         patch["opened_at"] = int(opened_at_ms)
 
