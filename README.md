@@ -34,6 +34,8 @@ cd options-monitor
 
 如果你想手动安装环境：
 
+这属于本地环境准备，不是运行期业务命令；这里出现 `python3 -m ...` 不代表 Agent 应默认用 Python 脚本探索项目行为。
+
 ```bash
 python3 -m venv .venv
 ./.venv/bin/pip install -U pip
@@ -58,6 +60,18 @@ bash scripts/install_agent_plugin.sh
 ```
 
 `om-agent` 是面向程序/Agent 的结构化入口；`om` 是面向人工操作的 CLI 入口。
+
+给 Claude Code、OpenClaw 这类代理使用时，建议遵守下面的默认约束：
+
+- **先读后跑**：如果任务是“解释 / look into / check / why / explain”，先读代码、配置文档和测试，不要先执行脚本。
+- **默认不要直接运行 runtime scripts**：不要把 `python3 scripts/...` 当作第一选择，除非用户明确指定脚本，或更高层入口不覆盖该能力。
+- **入口优先级**：优先 `./om-agent`，其次 `./om`，再考虑 `python3 -m ...`，最后才是 `python3 scripts/...`。
+- **高风险动作先确认**：发送通知、写入持仓、修改生产配置、删除运行产物前，需要用户明确要求。
+- **优先 dry-run / validate / test**：如果一个问题可以通过健康检查、配置校验、测试或 dry-run 回答，就不要先跑真实流程。
+
+如果你要给代理一个最短指令，可以直接用这一段：
+
+> This repo is operations-sensitive. For explanation, investigation, or code-reading requests, inspect files and summarize first. Do not default to running `python3 scripts/...`. Prefer `./om-agent`, then `./om`, then `python3 -m ...`, and use `python3 scripts/...` only when the user explicitly asks for that script or no higher-level entry point exists. Never send notifications or mutate runtime state unless the user explicitly requests it.
 
 ---
 
@@ -160,7 +174,16 @@ cp configs/examples/portfolio.sqlite.example.json secrets/portfolio.sqlite.json
 
 ## 6. 常用命令
 
+对 Agent 来说，本节也建议按下面顺序选入口：
+
+1. `./om-agent`（结构化、最适合代理）
+2. `./om`（统一 CLI）
+3. `python3 -m ...`
+4. `python3 scripts/...`（仅兼容/兜底）
+
 ### 6.1 校验配置
+
+当前文档里配置校验示例仍使用脚本入口；这是低风险 validation / 兼容入口，可以保留，但不应把它和真实运行命令混用，也不应把它理解成 Agent 默认入口。
 
 ```bash
 ./.venv/bin/python scripts/validate_config.py --config config.us.json
@@ -168,6 +191,8 @@ cp configs/examples/portfolio.sqlite.example.json secrets/portfolio.sqlite.json
 ```
 
 ### 6.2 健康检查
+
+这是 Agent 排查问题时的首选入口之一，优先于直接跑 runtime pipeline。
 
 ```bash
 ./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'
@@ -186,6 +211,8 @@ cp configs/examples/portfolio.sqlite.example.json secrets/portfolio.sqlite.json
 ```
 
 ### 6.4 手动跑一次 pipeline
+
+下面命令会触发真实运行；如果你只是排查问题，优先先做 healthcheck、配置校验或只跑更小的阶段。
 
 ```bash
 ./om scan-pipeline --config config.us.json
@@ -208,24 +235,46 @@ cp configs/examples/portfolio.sqlite.example.json secrets/portfolio.sqlite.json
 ./om run tick --config config.us.json --accounts lx sy
 ```
 
+如果是 Agent 在排查问题，不要默认从这里开始；先做 healthcheck、配置校验，必要时再缩小到单阶段运行。
+
 兼容入口：
 
 ```bash
 python3 scripts/send_if_needed_multi.py --config config.us.json --accounts lx sy
 ```
 
+对 Agent 来说，这个兼容入口不应作为默认首选；只有在 `./om` / `./om-agent` 不覆盖，或用户明确指定脚本时再使用。
+
 ### 6.6 单账户入口
+
+如果只是想确认系统状态，优先仍然是 `./om-agent run --tool healthcheck ...`，不是这个脚本入口。
 
 ```bash
 python3 scripts/send_if_needed.py --config config.us.json
 ```
 
+这属于直接 runtime script 入口。对代理默认应视为“需要明确执行意图”的命令，而不是排查问题时的探测命令。
+
 ---
 
 ## 7. 常见排障
 
+对 Claude Code、OpenClaw 这类代理，排障默认顺序建议是：
+
+1. 先读相关代码、配置文档和测试
+2. 先跑 `./om-agent run --tool healthcheck ...`
+3. 再做配置校验、测试或 dry-run
+4. 最后才考虑真实 runtime 命令
+
 ### 7.1 配置校验失败
-先跑：
+
+如果是 Agent 在排查，先做健康检查：
+
+```bash
+./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'
+```
+
+再做配置校验（这是低风险校验脚本，不是 runtime 流程入口）：
 
 ```bash
 python3 scripts/validate_config.py --config config.us.json
@@ -238,9 +287,14 @@ python3 scripts/validate_config.py --config config.us.json
 - `account_settings.<account>.type`
 - `symbols[]`
 
+然后对照 [CONFIGURATION_GUIDE.md](CONFIGURATION_GUIDE.md) 和 [CONFIGS.md](CONFIGS.md) 核对配置来源与字段约束。
+
 ---
 
 ### 7.2 healthcheck 只看到一个 OpenD endpoint
+
+先确认不是配置映射问题，再怀疑运行态：
+
 优先检查：
 - 账户映射是否正确
 - OpenD 是否真的在线
@@ -248,9 +302,14 @@ python3 scripts/validate_config.py --config config.us.json
 
 详细字段说明见 [CONFIGURATION_GUIDE.md](CONFIGURATION_GUIDE.md)。
 
+如果只是 Agent 在分析问题，不要直接切到 runtime pipeline；先读配置和 healthcheck 输出。
+
 ---
 
 ### 7.3 两个账户持仓看起来一样
+
+先做只读排查：
+
 优先检查：
 - 是否两个账户都被映射到了同一个 Futu account id
 - 是否账户配置实际指向了同一份持仓来源
@@ -258,13 +317,20 @@ python3 scripts/validate_config.py --config config.us.json
 
 具体配置优先级见 [CONFIGURATION_GUIDE.md](CONFIGURATION_GUIDE.md)。
 
+必要时先复核 healthcheck / 配置输出，再决定是否运行多账户流程命令。
+
 ---
 
 ### 7.4 通知保存失败
+
+先做低风险检查，不要默认直接重跑发送流程：
+
 优先检查：
 - `notifications.target` 是否为空
 - `secrets/notifications.feishu.app.json` 是否存在
 - `app_id / app_secret` 是否完整
+
+如果需要进一步验证，优先使用配置校验、healthcheck 或相关测试，而不是直接触发通知发送。
 
 ---
 
