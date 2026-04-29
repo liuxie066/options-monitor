@@ -333,7 +333,8 @@ def test_run_one_account_appends_close_advice_quote_issue_summary(monkeypatch, t
     )
 
     assert "本次未生成 strong/medium 提醒" in outcome.result.notification_text
-    assert "持仓未完成 exact contract 定价时，不生成正式平仓建议" in outcome.result.notification_text
+    assert "系统异常 0 条，行情质量不足 3 条" in outcome.result.notification_text
+    assert "系统异常表示数据拉取/字段覆盖失败，行情质量不足表示有行情但定价可信度不够" in outcome.result.notification_text
     assert "spread_too_wide=1" in outcome.result.notification_text
     assert "样例: 0700.HK put 2026-04-29 480.00P: OpenD 限频" in outcome.result.notification_text
     close_events = [evt for evt in env["audit_events"] if evt["action"] == "close_advice"]
