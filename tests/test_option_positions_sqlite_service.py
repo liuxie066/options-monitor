@@ -489,6 +489,48 @@ def test_projection_does_not_treat_sync_metadata_as_canonical_state(tmp_path: Pa
     assert reprojection_fields["status"] == "open"
 
 
+def test_rebuild_position_lots_from_trade_events_preserves_sync_metadata(tmp_path: Path) -> None:
+    import scripts.option_positions_core.service as svc
+    from scripts.option_positions_core.domain import OpenPositionCommand
+
+    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    svc.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="TSLA",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=100.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            premium_per_share=1.23,
+            opened_at_ms=1000,
+        ),
+    )
+
+    lot = repo.list_position_lots()[0]
+    patched_fields = dict(lot["fields"])
+    patched_fields["feishu_record_id"] = "rec_sync_1"
+    patched_fields["feishu_sync_hash"] = "hash_sync_1"
+    patched_fields["feishu_last_synced_at_ms"] = 9999
+    repo.update_position_lot_fields(lot["record_id"], patched_fields)
+
+    result = svc.rebuild_position_lots_from_trade_events(repo)
+
+    rebuilt_fields = repo.get_position_lot_fields(lot["record_id"])
+    assert rebuilt_fields["feishu_record_id"] == "rec_sync_1"
+    assert rebuilt_fields["feishu_sync_hash"] == "hash_sync_1"
+    assert rebuilt_fields["feishu_last_synced_at_ms"] == 9999
+    assert rebuilt_fields["source_event_id"].startswith("manual-open-")
+    assert result["trade_event_count"] == 1
+    assert result["position_lot_count"] == 1
+    assert result["preserved_sync_meta_record_count"] == 1
+
+
 def test_close_projection_does_not_cross_match_other_account_seed_lot(tmp_path: Path) -> None:
     from scripts.option_positions_core.ledger import TradeEvent, project_position_lot_records
 
@@ -748,6 +790,182 @@ def test_persist_manual_close_event_requires_broker_on_position_lot(tmp_path: Pa
             close_reason="manual_buy_to_close",
             as_of_ms=2000,
         )
+
+
+def test_persist_manual_void_event_removes_open_lot_from_projection(tmp_path: Path) -> None:
+    import scripts.option_positions_core.service as svc
+    from scripts.option_positions_core.domain import OpenPositionCommand
+
+    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    open_result = svc.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="TSLA",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=100.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            premium_per_share=1.23,
+            opened_at_ms=1000,
+        ),
+    )
+
+    void_result = svc.persist_manual_void_event(
+        repo,
+        target_event_id=str(open_result["event_id"]),
+        void_reason="opened_by_mistake",
+        as_of_ms=2000,
+    )
+
+    assert repo.list_position_lots() == []
+    events = repo.list_trade_events()
+    assert len(events) == 2
+    assert events[-1]["position_effect"] == "void"
+    assert events[-1]["raw_payload"]["void_target_event_id"] == open_result["event_id"]
+    assert void_result["position_lot_count"] == 0
+
+
+def test_persist_manual_void_event_restores_lot_when_voiding_close_event(tmp_path: Path) -> None:
+    import scripts.option_positions_core.service as svc
+    from scripts.option_positions_core.domain import OpenPositionCommand
+
+    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    open_result = svc.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="TSLA",
+            option_type="put",
+            side="short",
+            contracts=2,
+            currency="USD",
+            strike=100.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            premium_per_share=1.23,
+            opened_at_ms=1000,
+        ),
+    )
+    lot = repo.list_position_lots()[0]
+    close_result = svc.persist_manual_close_event(
+        repo,
+        record_id=lot["record_id"],
+        fields=lot["fields"],
+        contracts_to_close=1,
+        close_price=0.5,
+        close_reason="manual_buy_to_close",
+        as_of_ms=1500,
+    )
+
+    void_result = svc.persist_manual_void_event(
+        repo,
+        target_event_id=str(close_result["event_id"]),
+        void_reason="close_recorded_by_mistake",
+        as_of_ms=2000,
+    )
+
+    rebuilt_lot = repo.list_position_lots()[0]
+    assert rebuilt_lot["record_id"] == f"lot_{open_result['event_id']}"
+    assert rebuilt_lot["fields"]["contracts_open"] == 2
+    assert rebuilt_lot["fields"]["contracts_closed"] == 0
+    assert rebuilt_lot["fields"]["status"] == "open"
+    assert void_result["position_lot_count"] == 1
+
+
+def test_persist_manual_adjust_event_updates_position_lot_projection(tmp_path: Path) -> None:
+    import scripts.option_positions_core.service as svc
+    from scripts.option_positions_core.domain import OpenPositionCommand
+
+    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    svc.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="NVDA",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=100.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            premium_per_share=2.5,
+            opened_at_ms=1000,
+        ),
+    )
+    lot = repo.list_position_lots()[0]
+
+    result = svc.persist_manual_adjust_event(
+        repo,
+        record_id=lot["record_id"],
+        fields=lot["fields"],
+        contracts=2,
+        strike=105.0,
+        expiration_ymd="2026-07-17",
+        premium_per_share=3.1,
+        multiplier=100,
+        opened_at_ms=2000,
+        as_of_ms=3000,
+    )
+
+    adjusted = repo.get_position_lot_fields(lot["record_id"])
+    assert result["created"] is True
+    assert adjusted["contracts"] == 2
+    assert adjusted["contracts_open"] == 2
+    assert adjusted["strike"] == 105.0
+    assert adjusted["premium"] == 3.1
+    assert adjusted["opened_at"] == 2000
+    assert adjusted["position_id"] == "NVDA_20260717_105P_short"
+    assert adjusted["cash_secured_amount"] == 21000.0
+
+
+def test_voiding_adjust_event_restores_prior_projection_state(tmp_path: Path) -> None:
+    import scripts.option_positions_core.service as svc
+    from scripts.option_positions_core.domain import OpenPositionCommand
+
+    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    svc.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="NVDA",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=100.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            premium_per_share=2.5,
+            opened_at_ms=1000,
+        ),
+    )
+    lot = repo.list_position_lots()[0]
+    adjust_result = svc.persist_manual_adjust_event(
+        repo,
+        record_id=lot["record_id"],
+        fields=lot["fields"],
+        premium_per_share=3.1,
+        as_of_ms=2000,
+    )
+    svc.persist_manual_void_event(
+        repo,
+        target_event_id=str(adjust_result["event_id"]),
+        void_reason="adjustment_was_wrong",
+        as_of_ms=3000,
+    )
+
+    restored = repo.get_position_lot_fields(lot["record_id"])
+    assert restored["premium"] == 2.5
+    assert restored["contracts"] == 1
 
 
 def test_load_option_positions_repo_raises_on_malformed_feishu_config(tmp_path: Path) -> None:

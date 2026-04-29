@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.2.0-beta.9 - 2026-04-29
+
+### Changed
+- Hardened local option-position repair workflows around the canonical `trade_events -> position_lots` model by adding CLI repair primitives for rebuild, lot history inspection, event voiding, and controlled lot adjustment
+- Preserved Feishu sync metadata across local reprojection, added optional remote orphan cleanup for mirror rows, and documented the operator repair playbook so repaired records no longer leak into downstream monthly income and premium reporting
+
 ## 0.2.0-beta.8 - 2026-04-28
 
 ### Changed

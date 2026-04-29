@@ -303,3 +303,176 @@ def test_build_monthly_income_report_skips_market_only_rows_for_broker_filter() 
     assert report["premium_rows"] == []
     assert report["summary"] == []
     assert report["warnings"] == []
+
+
+def test_monthly_income_report_excludes_voided_open_event_projection(tmp_path) -> None:
+    import scripts.option_positions_core.service as svc
+    from scripts.option_positions_core.domain import OpenPositionCommand
+
+    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    open_result = svc.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="NVDA",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=100.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            premium_per_share=2.5,
+            opened_at_ms=_ms("2026-04-03"),
+        ),
+    )
+    svc.persist_manual_void_event(
+        repo,
+        target_event_id=str(open_result["event_id"]),
+        void_reason="opened_by_mistake",
+        as_of_ms=_ms("2026-04-04"),
+    )
+
+    report = build_monthly_income_report(
+        repo.list_records(page_size=500),
+        account="lx",
+        broker="富途",
+        month="2026-04",
+    )
+
+    assert report["rows"] == []
+    assert report["premium_rows"] == []
+    assert report["summary"] == []
+    assert report["warnings"] == []
+
+
+def test_monthly_income_report_excludes_voided_close_event_but_keeps_open_premium(tmp_path) -> None:
+    import scripts.option_positions_core.service as svc
+    from scripts.option_positions_core.domain import OpenPositionCommand
+
+    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    svc.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="NVDA",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=100.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            premium_per_share=2.5,
+            opened_at_ms=_ms("2026-04-03"),
+        ),
+    )
+    lot = repo.list_position_lots()[0]
+    close_result = svc.persist_manual_close_event(
+        repo,
+        record_id=lot["record_id"],
+        fields=lot["fields"],
+        contracts_to_close=1,
+        close_price=1.0,
+        close_reason="manual_buy_to_close",
+        as_of_ms=_ms("2026-04-20"),
+    )
+    svc.persist_manual_void_event(
+        repo,
+        target_event_id=str(close_result["event_id"]),
+        void_reason="close_recorded_by_mistake",
+        as_of_ms=_ms("2026-04-21"),
+    )
+
+    report = build_monthly_income_report(
+        repo.list_records(page_size=500),
+        account="lx",
+        broker="富途",
+        month="2026-04",
+    )
+
+    assert report["rows"] == []
+    assert len(report["premium_rows"]) == 1
+    assert report["premium_rows"][0]["premium_received_gross"] == 250.0
+    assert report["summary"] == [
+        {
+            "month": "2026-04",
+            "account": "lx",
+            "currency": "USD",
+            "realized_gross": 0.0,
+            "realized_gross_cny": 0.0,
+            "closed_contracts": 0,
+            "positions": 0,
+            "premium_received_gross": 250.0,
+            "premium_received_gross_cny": None,
+            "premium_contracts": 1,
+            "premium_positions": 1,
+        }
+    ]
+    assert report["warnings"] == []
+
+
+def test_monthly_income_report_uses_adjusted_premium_and_opened_at(tmp_path) -> None:
+    import scripts.option_positions_core.service as svc
+    from scripts.option_positions_core.domain import OpenPositionCommand
+
+    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    svc.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="NVDA",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=100.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            premium_per_share=2.5,
+            opened_at_ms=_ms("2026-04-03"),
+        ),
+    )
+    lot = repo.list_position_lots()[0]
+    svc.persist_manual_adjust_event(
+        repo,
+        record_id=lot["record_id"],
+        fields=lot["fields"],
+        premium_per_share=3.1,
+        opened_at_ms=_ms("2026-05-02"),
+        as_of_ms=_ms("2026-05-03"),
+    )
+
+    april_report = build_monthly_income_report(
+        repo.list_records(page_size=500),
+        account="lx",
+        broker="富途",
+        month="2026-04",
+    )
+    may_report = build_monthly_income_report(
+        repo.list_records(page_size=500),
+        account="lx",
+        broker="富途",
+        month="2026-05",
+    )
+
+    assert april_report["premium_rows"] == []
+    assert may_report["premium_rows"][0]["premium_received_gross"] == 310.0
+    assert may_report["summary"] == [
+        {
+            "month": "2026-05",
+            "account": "lx",
+            "currency": "USD",
+            "realized_gross": 0.0,
+            "realized_gross_cny": 0.0,
+            "closed_contracts": 0,
+            "positions": 0,
+            "premium_received_gross": 310.0,
+            "premium_received_gross_cny": None,
+            "premium_contracts": 1,
+            "premium_positions": 1,
+        }
+    ]

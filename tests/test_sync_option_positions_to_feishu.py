@@ -236,6 +236,108 @@ def test_sync_dry_run_accepts_read_only_repo(monkeypatch, tmp_path: Path) -> Non
     assert rows[0]["record_id"] == "rec_local_1"
 
 
+def test_sync_dry_run_reports_remote_orphan_delete_when_enabled(monkeypatch, tmp_path: Path) -> None:
+    import scripts.option_positions_core.service as svc
+    import scripts.sync_option_positions_to_feishu as sync_mod
+    from scripts.option_positions_core.domain import OpenPositionCommand
+
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
+    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    svc.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="TSLA",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=100.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            premium_per_share=1.23,
+            opened_at_ms=1000,
+        ),
+    )
+    local_record_id = repo.list_position_lots()[0]["record_id"]
+
+    monkeypatch.setattr(sync_mod, "get_tenant_access_token", lambda *_args, **_kwargs: "token")
+    monkeypatch.setattr(sync_mod, "bitable_fields", lambda *_args, **_kwargs: [{"field_name": "broker"}, {"field_name": "local_record_id"}])
+    monkeypatch.setattr(
+        sync_mod,
+        "bitable_list_records",
+        lambda *_args, **_kwargs: [
+            {"record_id": "rec_remote_keep", "fields": {"local_record_id": local_record_id}},
+            {"record_id": "rec_remote_orphan", "fields": {"local_record_id": "lot_deleted"}},
+        ],
+    )
+
+    rows = sync_mod.sync_option_positions(
+        repo=repo,
+        data_config=data_config,
+        apply_mode=False,
+        prune_remote_missing_local=True,
+    )
+
+    delete_rows = [row for row in rows if row.get("action") == "delete"]
+    assert len(delete_rows) == 1
+    assert delete_rows[0]["remote_record_id"] == "rec_remote_orphan"
+    assert delete_rows[0]["reason"] == "remote_local_record_missing_from_local_projection"
+
+
+def test_sync_apply_deletes_remote_orphan_when_enabled(monkeypatch, tmp_path: Path) -> None:
+    import scripts.option_positions_core.service as svc
+    import scripts.sync_option_positions_to_feishu as sync_mod
+    from scripts.option_positions_core.domain import OpenPositionCommand
+
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
+    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    open_result = svc.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="TSLA",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=100.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            premium_per_share=1.23,
+            opened_at_ms=1000,
+        ),
+    )
+    svc.persist_manual_void_event(repo, target_event_id=str(open_result["event_id"]), void_reason="cleanup", as_of_ms=2000)
+
+    deleted: list[str] = []
+    monkeypatch.setattr(sync_mod, "get_tenant_access_token", lambda *_args, **_kwargs: "token")
+    monkeypatch.setattr(sync_mod, "bitable_fields", lambda *_args, **_kwargs: [{"field_name": "broker"}, {"field_name": "local_record_id"}])
+    monkeypatch.setattr(
+        sync_mod,
+        "bitable_list_records",
+        lambda *_args, **_kwargs: [
+            {"record_id": "rec_remote_orphan", "fields": {"local_record_id": open_result["record_id"]}},
+        ],
+    )
+    monkeypatch.setattr(sync_mod, "bitable_create_record", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should not create")))
+    monkeypatch.setattr(sync_mod, "bitable_update_record", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should not update")))
+    monkeypatch.setattr(sync_mod, "bitable_delete_record", lambda _t, _a, _tb, record_id: (deleted.append(record_id) or {}))
+
+    rows = sync_mod.sync_option_positions(
+        repo=repo,
+        data_config=data_config,
+        apply_mode=True,
+        prune_remote_missing_local=True,
+    )
+
+    assert deleted == ["rec_remote_orphan"]
+    assert any(row.get("action") == "delete" and row.get("remote_record_id") == "rec_remote_orphan" for row in rows)
+    assert sync_mod.summarize_result(rows)["delete"] == 1
+
+
 def test_match_remote_record_prefers_unique_local_record_id_before_duplicate_position_id() -> None:
     import scripts.sync_option_positions_to_feishu as sync_mod
 

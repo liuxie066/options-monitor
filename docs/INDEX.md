@@ -16,6 +16,7 @@
 
 ## 运行与运维
 - [../RUNBOOK.md](../RUNBOOK.md)：运维巡检、cron、应急处理
+- [OPTION_POSITIONS_REPAIR.md](OPTION_POSITIONS_REPAIR.md)：`option_positions` / `position_lots` 错账修复手册
 - [RELEASE_PROCESS.md](RELEASE_PROCESS.md)：维护者发布清单
 
 ## 业务规则
