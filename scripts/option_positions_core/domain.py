@@ -358,11 +358,15 @@ def build_open_fields(cmd: OpenPositionCommand) -> dict[str, Any]:
     if contracts <= 0:
         raise ValueError("contracts must be > 0")
 
+    if cmd.strike is None:
+        raise ValueError(f"{option_type} option requires strike")
+    exp_ms = parse_exp_to_ms(cmd.expiration_ymd)
+    if exp_ms is None:
+        raise ValueError(f"{option_type} option requires expiration_ymd")
+
     multiplier = cmd.multiplier
     cash_secured = None
     if side == "short" and option_type == "put":
-        if cmd.strike is None:
-            raise ValueError("short put requires strike")
         if multiplier is None:
             multiplier = guess_multiplier(sym)
         if multiplier is None:
@@ -404,9 +408,7 @@ def build_open_fields(cmd: OpenPositionCommand) -> dict[str, Any]:
     }
     if cmd.strike is not None:
         fields["strike"] = float(cmd.strike)
-    exp_ms = parse_exp_to_ms(cmd.expiration_ymd)
-    if exp_ms is not None:
-        fields["expiration"] = int(exp_ms)
+    fields["expiration"] = int(exp_ms)
     if cmd.premium_per_share is not None:
         fields["premium"] = float(cmd.premium_per_share)
     if multiplier is not None:

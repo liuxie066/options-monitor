@@ -325,6 +325,7 @@ def _projection_diagnostics_summary(diagnostics: list[ProjectionDiagnostic]) -> 
     return {
         "projection_diagnostic_count": int(len(diagnostics)),
         "unmatched_explicit_close_count": int(sum(1 for item in diagnostics if item.code in explicit_close_codes)),
+        "unmatched_heuristic_close_count": int(sum(1 for item in diagnostics if item.code == "close_unmatched_contracts")),
         "projection_diagnostics": [item.to_dict() for item in diagnostics],
     }
 
@@ -515,31 +516,40 @@ class SQLiteOptionPositionsRepository:
 
     def upsert_trade_event(self, event: TradeEvent, *, conn: sqlite3.Connection | None = None) -> bool:
         payload = event.to_dict()
+        event_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         ts = int(now_ms())
         trade_time_ms = int(event.trade_time_ms or 0)
         with self._optional_conn(conn, commit=True) as active_conn:
             existing = active_conn.execute(
-                "SELECT event_id FROM trade_events WHERE event_id = ?",
+                "SELECT event_json FROM trade_events WHERE event_id = ?",
                 (str(event.event_id),),
             ).fetchone()
+            if existing is not None:
+                try:
+                    existing_payload = json.loads(str(existing["event_json"]) or "{}")
+                except json.JSONDecodeError as exc:
+                    raise ValueError(f"existing trade event JSON is invalid: event_id={event.event_id}") from exc
+                existing_json = json.dumps(existing_payload, ensure_ascii=False, sort_keys=True)
+                if existing_json != event_json:
+                    raise ValueError(f"trade event conflict for event_id={event.event_id}")
+                return False
             active_conn.execute(
                 """
-                INSERT OR REPLACE INTO trade_events (
+                INSERT INTO trade_events (
                   event_id, event_json, trade_time_ms, created_at_ms, updated_at_ms
                 ) VALUES (
-                  ?, ?, ?, COALESCE((SELECT created_at_ms FROM trade_events WHERE event_id = ?), ?), ?
+                  ?, ?, ?, ?, ?
                 )
                 """,
                 (
                     str(event.event_id),
-                    json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                    event_json,
                     trade_time_ms,
-                    str(event.event_id),
                     ts,
                     ts,
                 ),
             )
-        return existing is None
+        return True
 
     def list_trade_events(self, *, conn: sqlite3.Connection | None = None) -> list[dict[str, Any]]:
         with self._optional_conn(conn) as active_conn:
@@ -567,11 +577,7 @@ class SQLiteOptionPositionsRepository:
                 fields = item.get("fields") or {}
                 if not record_id or not isinstance(fields, dict):
                     continue
-                try:
-                    _validate_position_lot_fields(record_id=record_id, fields=fields)
-                except ValueError as exc:
-                    print(f"[WARN] option_positions replace_position_lots skipped {exc}", file=sys.stderr)
-                    continue
+                _validate_position_lot_fields(record_id=record_id, fields=fields)
                 expiration_ms, strike, multiplier = _position_lot_contract_scalars(fields)
                 active_conn.execute(
                     """
@@ -659,10 +665,18 @@ OptionPositionsRepository = SQLiteOptionPositionsRepository
 
 
 def _materialize_bootstrap_events(repo: SQLiteOptionPositionsRepository, events: list[TradeEvent]) -> int:
-    for event in events:
-        repo.upsert_trade_event(event)
-    repo.replace_position_lots(project_position_lot_records(repo.list_trade_events()))
-    return len(events)
+    def _run(sqlite_repo: Any, conn: sqlite3.Connection | None) -> int:
+        if conn is not None:
+            for event in events:
+                sqlite_repo.upsert_trade_event(event, conn=conn)
+            sqlite_repo.replace_position_lots(project_position_lot_records(sqlite_repo.list_trade_events(conn=conn)), conn=conn)
+        else:
+            for event in events:
+                sqlite_repo.upsert_trade_event(event)
+            sqlite_repo.replace_position_lots(project_position_lot_records(sqlite_repo.list_trade_events()))
+        return len(events)
+
+    return int(_with_sqlite_repo_transaction(repo, _run))
 
 
 def _apply_bootstrap_snapshot(

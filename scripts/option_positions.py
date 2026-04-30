@@ -359,8 +359,8 @@ def main():
     p_add.add_argument('--currency', required=True, choices=['USD', 'HKD', 'CNY'])
     p_add.add_argument('--strike', type=float, default=None, help='required for auto cash_secured on short put')
     p_add.add_argument('--multiplier', type=float, default=None, help='default 100 for US; required for HK if strike provided')
-    p_add.add_argument('--exp', default=None, help='YYYY-MM-DD (stored in note)')
-    p_add.add_argument('--premium-per-share', type=float, default=None, help='stored in note')
+    p_add.add_argument('--exp', default=None, help='YYYY-MM-DD (required for option lots)')
+    p_add.add_argument('--premium-per-share', type=float, default=None, help='premium per share stored on the lot')
     p_add.add_argument('--underlying-share-locked', type=int, default=None, help='for covered call locking shares')
     p_add.add_argument('--note', default=None)
     p_add.add_argument('--dry-run', action='store_true')
@@ -591,7 +591,8 @@ def main():
             f"trade_events={result.get('trade_event_count')} "
             f"position_lots={result.get('position_lot_count')} "
             f"preserved_sync_meta={result.get('preserved_sync_meta_record_count')} "
-            f"unmatched_explicit_close={result.get('unmatched_explicit_close_count')}"
+            f"unmatched_explicit_close={result.get('unmatched_explicit_close_count')} "
+            f"unmatched_heuristic_close={result.get('unmatched_heuristic_close_count')}"
         )
         return
 
