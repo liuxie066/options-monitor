@@ -99,6 +99,9 @@ def _try_load_table_ref(data_config: Path) -> OptionPositionsTableRef | None:
     feishu_cfg = _get_feishu_cfg(cfg, allow_missing=True)
     if feishu_cfg is None or feishu_cfg == {}:
         return None
+    tables = feishu_cfg.get("tables") if isinstance(feishu_cfg.get("tables"), dict) else {}
+    if tables and not str(tables.get("option_positions") or "").strip():
+        return None
     return _load_table_ref_from_cfg(cfg)
 
 

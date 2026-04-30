@@ -399,6 +399,34 @@ def test_load_option_positions_repo_supports_sqlite_only_mode(tmp_path: Path) ->
     assert repo.bootstrap_status == "sqlite_only_no_feishu_bootstrap"
 
 
+def test_load_option_positions_repo_treats_holdings_only_feishu_as_sqlite_only(tmp_path: Path) -> None:
+    import json
+    import scripts.option_positions_core.service as svc
+
+    data_config = tmp_path / "data.json"
+    data_config.write_text(
+        json.dumps(
+            {
+                "option_positions": {"sqlite_path": str(tmp_path / "option_positions.sqlite3")},
+                "feishu": {
+                    "app_id": "cli_xxx",
+                    "app_secret": "secret_xxx",
+                    "tables": {"holdings": "app_token/table_id"},
+                },
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    repo = svc.load_option_positions_repo(data_config)
+
+    assert repo.bootstrap_status == "sqlite_only_no_feishu_bootstrap"
+    assert repo.bootstrap_message == "no feishu option_positions bootstrap configured"
+
+
 def test_load_option_positions_repo_marks_degraded_when_feishu_bootstrap_fails(tmp_path: Path) -> None:
     import scripts.option_positions_core.service as svc
 
