@@ -177,9 +177,17 @@
 ### 4.3 symbols[]：每个标的的个性化区间
 你通常只需要改：
 - sell_put：`min_dte/max_dte`、`min_strike/max_strike`
+  - put / call 现在统一按“边界模式”规划抓取窗口，只是方向相反。
+  - put 的近端边界是 `max_strike`；若只配置了 `max_strike`，抓取层会自动向下扩 `20%` 作为抓取下界。
+  - `min_strike=0` 已废弃；若不想设置下界，直接省略 `min_strike`。
 - sell_call（enabled 时）：`min_strike`（以及 dte 范围）
   - `avg_cost/shares` 已移除：sell_call 仅从 holdings 自动读取。
   - 若 holdings 取不到（该账户缺 holdings / 读取失败），则该账户的 sell_call 会被跳过。
+  - 抓取层现在会先为 sell_put / sell_call 分别规划 required_data 窗口，再按相同 expiration 尽量合并到底层 OpenD 请求。
+  - call 的近端边界是 `min_strike`；若只配置了 `min_strike`，抓取层会自动向上扩 `20%` 作为抓取上界。
+  - 若 call 未配置任何 strike 边界，抓取层会退回到基于 `spot` 的默认窗口 `[spot*1.03, spot*1.20]`。
+  - 旧的按 OTM% 定义 call 抓取窗口的配置已移除，避免与绝对价边界模式重复定义同一抓取窗口。
+  - call 抓取窗口允许小幅 buffer，仅用于避免边界漏抓；扫描阶段仍严格使用原始 `min_strike/max_strike`。
 - `use`: 选择使用哪些模板（例如 `["put_base","call_base"]`）
 - `fetch.source`: 行情源，新配置建议使用 `futu`（富途数据源，经本机 OpenD 网关 + Futu API）或 `yahoo`；旧值 `opend` 仍兼容。
 

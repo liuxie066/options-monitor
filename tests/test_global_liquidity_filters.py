@@ -106,6 +106,40 @@ def test_validate_config_rejects_removed_global_strategy_filter_keys() -> None:
         assert 'min_iv' in msg
 
 
+def test_validate_config_rejects_removed_legacy_sell_call_fetch_fields_in_templates() -> None:
+    _add_repo_to_syspath()
+    from scripts.validate_config import validate_config
+
+    cfg = {
+        'templates': {
+            'call_base': {
+                'sell_call': {
+                    'min_open_interest': 50,
+                    'min_volume': 10,
+                    'max_spread_ratio': 0.3,
+                    'target_otm_pct_min': 0.05,
+                }
+            }
+        },
+        'symbols': [
+            {
+                'symbol': 'AAPL',
+                'use': ['call_base'],
+                'sell_put': {'enabled': False},
+                'sell_call': {'enabled': False},
+            }
+        ],
+    }
+
+    try:
+        validate_config(cfg)
+        raise AssertionError('expected config validation failure')
+    except SystemExit as e:
+        msg = str(e)
+        assert 'templates.call_base.sell_call' in msg
+        assert 'removed legacy fetch planning keys' in msg
+
+
 def test_validate_config_rejects_fees_config() -> None:
     _add_repo_to_syspath()
     from scripts.validate_config import validate_config
@@ -174,6 +208,73 @@ def test_validate_config_accepts_external_holdings_account_settings() -> None:
                     'max_strike': 200,
                 },
                 'sell_call': {'enabled': False},
+            }
+        ],
+    }
+
+    validate_config(cfg)
+
+
+def test_validate_config_rejects_zero_strike_sentinels_and_removed_legacy_sell_call_fields() -> None:
+    _add_repo_to_syspath()
+    from scripts.validate_config import validate_config
+
+    cfg = {
+        'symbols': [
+            {
+                'symbol': '0700.HK',
+                'sell_put': {
+                    'enabled': True,
+                    'min_dte': 7,
+                    'max_dte': 45,
+                    'min_strike': 0,
+                    'max_strike': 420,
+                },
+                'sell_call': {'enabled': False},
+            }
+        ],
+    }
+
+    try:
+        validate_config(cfg)
+        raise AssertionError('expected config validation failure')
+    except SystemExit as e:
+        assert 'min_strike must be > 0' in str(e)
+
+    cfg['symbols'][0]['sell_put']['min_strike'] = 360
+    cfg['symbols'][0]['sell_call'] = {
+        'enabled': True,
+        'min_dte': 7,
+        'max_dte': 45,
+        'target_otm_pct_min': 0.05,
+    }
+    try:
+        validate_config(cfg)
+        raise AssertionError('expected config validation failure')
+    except SystemExit as e:
+        assert 'removed legacy fetch planning keys' in str(e)
+
+
+def test_validate_config_allows_single_near_bound_modes() -> None:
+    _add_repo_to_syspath()
+    from scripts.validate_config import validate_config
+
+    cfg = {
+        'symbols': [
+            {
+                'symbol': 'AAPL',
+                'sell_put': {
+                    'enabled': True,
+                    'min_dte': 7,
+                    'max_dte': 45,
+                    'max_strike': 200,
+                },
+                'sell_call': {
+                    'enabled': True,
+                    'min_dte': 7,
+                    'max_dte': 45,
+                    'min_strike': 220,
+                },
             }
         ],
     }
