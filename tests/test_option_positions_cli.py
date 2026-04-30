@@ -214,6 +214,92 @@ def test_option_positions_cli_inspect_reports_orphan_close_event_diagnostics(mon
     assert payload["projection_diagnostics"][0]["code"] == "close_explicit_target_not_found"
 
 
+def test_option_positions_cli_add_dry_run_infers_hkd_currency_from_hk_symbol(monkeypatch, tmp_path: Path, capsys) -> None:
+    import scripts.option_positions as cli_mod
+    import scripts.option_positions_core.service as svc
+
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
+    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+
+    monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "option_positions.py",
+            "--data-config",
+            str(data_config),
+            "add",
+            "--account",
+            "lx",
+            "--symbol",
+            "0700.HK",
+            "--option-type",
+            "put",
+            "--side",
+            "short",
+            "--contracts",
+            "1",
+            "--strike",
+            "510",
+            "--multiplier",
+            "100",
+            "--exp",
+            "2026-06-29",
+            "--dry-run",
+        ],
+    )
+
+    cli_mod.main()
+
+    out = capsys.readouterr().out
+    fields = json.loads(out[out.index("{"):])
+    assert fields["currency"] == "HKD"
+
+
+def test_option_positions_cli_add_dry_run_infers_usd_currency_from_us_symbol(monkeypatch, tmp_path: Path, capsys) -> None:
+    import scripts.option_positions as cli_mod
+    import scripts.option_positions_core.service as svc
+
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
+    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+
+    monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "option_positions.py",
+            "--data-config",
+            str(data_config),
+            "add",
+            "--account",
+            "lx",
+            "--symbol",
+            "PLTR",
+            "--option-type",
+            "put",
+            "--side",
+            "short",
+            "--contracts",
+            "1",
+            "--strike",
+            "30",
+            "--multiplier",
+            "100",
+            "--exp",
+            "2026-05-15",
+            "--dry-run",
+        ],
+    )
+
+    cli_mod.main()
+
+    out = capsys.readouterr().out
+    fields = json.loads(out[out.index("{"):])
+    assert fields["currency"] == "USD"
+
+
 def test_option_positions_cli_list_filters_by_local_expiration(monkeypatch, tmp_path: Path, capsys) -> None:
     import scripts.option_positions as cli_mod
     import scripts.option_positions_core.service as svc
