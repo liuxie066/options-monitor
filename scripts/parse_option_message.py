@@ -24,6 +24,7 @@ if str(repo_base) not in sys.path:
 
 from scripts.account_config import DEFAULT_ACCOUNTS, accounts_from_config_path, normalize_accounts
 from scripts.multiplier_cache import resolve_multiplier_with_source
+from scripts.option_positions_core.domain import infer_currency_from_symbol as infer_position_currency_from_symbol
 
 # Suppress noisy OpenAPI logs when multiplier_cache triggers futu/OpenD imports.
 os.environ.setdefault('OPENAPI_LOG_LEVEL', 'ERROR')
@@ -180,12 +181,7 @@ def infer_currency(s: str) -> str | None:
 
 
 def infer_currency_from_symbol(symbol: str | None) -> str | None:
-    raw = str(symbol or '').strip().upper()
-    if not raw:
-        return None
-    if raw.endswith('.HK'):
-        return 'HKD'
-    return 'USD'
+    return infer_position_currency_from_symbol(symbol)
 
 
 def infer_market(s: str) -> str | None:

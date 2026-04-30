@@ -23,6 +23,7 @@ from scripts.option_positions_core.domain import (
     exp_ms_to_datetime,
     normalize_broker,
     now_ms,
+    resolve_open_currency,
 )
 from scripts.option_positions_core.ledger import (
     ProjectionDiagnostic,
@@ -919,6 +920,7 @@ def persist_trade_event(repo: Any, deal: Any) -> dict[str, Any]:
 
 
 def persist_manual_open_event(repo: Any, command: OpenPositionCommand) -> dict[str, Any]:
+    currency = resolve_open_currency(command.symbol, command.currency)
     event = TradeEvent(
         event_id=f"manual-open-{uuid.uuid4().hex}",
         source_type="manual_trade_event",
@@ -934,7 +936,7 @@ def persist_manual_open_event(repo: Any, command: OpenPositionCommand) -> dict[s
         strike=(float(command.strike) if command.strike is not None else None),
         multiplier=(int(float(command.multiplier)) if command.multiplier is not None else None),
         expiration_ymd=(str(command.expiration_ymd or "").strip() or None),
-        currency=str(command.currency).strip().upper(),
+        currency=currency,
         trade_time_ms=int(command.opened_at_ms or now_ms()),
         order_id=None,
         multiplier_source=("payload" if command.multiplier is not None else None),

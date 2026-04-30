@@ -174,6 +174,21 @@ def normalize_currency(value: Any, *, strict: bool = False) -> str:
     return raw
 
 
+def infer_currency_from_symbol(symbol: Any) -> str | None:
+    sym = norm_symbol(str(symbol or ""))
+    if not sym:
+        return None
+    if sym.upper().endswith(".HK"):
+        return "HKD"
+    return "USD"
+
+
+def resolve_open_currency(symbol: Any, currency: Any) -> str:
+    normalized = normalize_currency(currency)
+    inferred = infer_currency_from_symbol(symbol)
+    return normalize_currency(normalized or inferred, strict=True)
+
+
 def normalize_close_type(value: Any, *, strict: bool = False) -> str:
     return _normalize_choice(
         value,
@@ -337,7 +352,7 @@ class OpenPositionCommand:
     option_type: str
     side: str
     contracts: int
-    currency: str
+    currency: str | None
     strike: float | None = None
     multiplier: float | None = None
     expiration_ymd: str | None = None
@@ -353,7 +368,7 @@ def build_open_fields(cmd: OpenPositionCommand) -> dict[str, Any]:
     account = normalize_account(cmd.account)
     side = normalize_side(cmd.side, strict=True)
     option_type = normalize_option_type(cmd.option_type, strict=True)
-    currency = normalize_currency(cmd.currency, strict=True)
+    currency = resolve_open_currency(sym, cmd.currency)
     contracts = int(cmd.contracts)
     if contracts <= 0:
         raise ValueError("contracts must be > 0")

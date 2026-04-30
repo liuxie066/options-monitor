@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.4.5 - 2026-05-01
+
+### Changed
+- Inferred manual option-position currency from normalized symbols when no explicit currency is provided, so HK symbols such as `0700.HK` record as `HKD` while US symbols default to `USD`
+- Reused the same symbol-based currency inference in chat-style trade intake and manual position writes to keep dry-run previews, persisted trade events, and position lots aligned
+
 ## 0.4.4 - 2026-05-01
 
 ### Changed

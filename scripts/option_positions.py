@@ -356,7 +356,7 @@ def main():
     p_add.add_argument('--option-type', required=True, choices=['put', 'call'])
     p_add.add_argument('--side', required=True, choices=['short', 'long'])
     p_add.add_argument('--contracts', type=int, required=True)
-    p_add.add_argument('--currency', required=True, choices=['USD', 'HKD', 'CNY'])
+    p_add.add_argument('--currency', default=None, choices=['USD', 'HKD', 'CNY'], help='optional; inferred from symbol when omitted (.HK => HKD, otherwise USD)')
     p_add.add_argument('--strike', type=float, default=None, help='required for auto cash_secured on short put')
     p_add.add_argument('--multiplier', type=float, default=None, help='default 100 for US; required for HK if strike provided')
     p_add.add_argument('--exp', default=None, help='YYYY-MM-DD (required for option lots)')

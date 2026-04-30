@@ -124,7 +124,7 @@ def execute_manual_open(
     option_type: str,
     side: str,
     contracts: int,
-    currency: str,
+    currency: str | None,
     strike: float | None,
     multiplier: float | None,
     expiration_ymd: str | None,

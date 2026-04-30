@@ -8,6 +8,7 @@ from scripts.option_positions_core.domain import (
     build_open_adjustment_patch,
     build_expire_auto_close_patch,
     build_open_fields,
+    infer_currency_from_symbol,
     normalize_broker,
     normalize_close_type,
     normalize_currency,
@@ -35,6 +36,12 @@ def test_normalize_option_position_enums() -> None:
     assert normalize_currency("rmb") == "CNY"
     assert normalize_close_type("买入平仓") == BUY_TO_CLOSE
     assert normalize_close_type("到期自动平仓") == EXPIRE_AUTO_CLOSE
+
+
+def test_infer_currency_from_symbol_uses_canonical_market_suffix() -> None:
+    assert infer_currency_from_symbol("0700.HK") == "HKD"
+    assert infer_currency_from_symbol("PLTR") == "USD"
+    assert infer_currency_from_symbol("") is None
 
 
 def test_strict_enum_normalization_rejects_invalid_values() -> None:
@@ -112,6 +119,62 @@ def test_build_open_fields_canonicalizes_alias_symbol() -> None:
 
     assert fields["symbol"] == "9992.HK"
     assert fields["position_id"] == "9992_HK_20260429_135P_short"
+
+
+def test_build_open_fields_infers_currency_from_symbol_when_missing() -> None:
+    hk_fields = build_open_fields(
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="0700.HK",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="",
+            strike=510,
+            multiplier=100,
+            expiration_ymd="2026-06-29",
+            opened_at_ms=1000,
+        )
+    )
+    us_fields = build_open_fields(
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="PLTR",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency=None,
+            strike=30,
+            multiplier=100,
+            expiration_ymd="2026-05-15",
+            opened_at_ms=1000,
+        )
+    )
+
+    assert hk_fields["currency"] == "HKD"
+    assert us_fields["currency"] == "USD"
+
+
+def test_build_open_fields_explicit_currency_overrides_symbol_inference() -> None:
+    fields = build_open_fields(
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="0700.HK",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=510,
+            multiplier=100,
+            expiration_ymd="2026-06-29",
+            opened_at_ms=1000,
+        )
+    )
+
+    assert fields["currency"] == "USD"
 
 
 def test_build_open_fields_for_short_call_sets_locked_shares() -> None:
