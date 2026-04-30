@@ -48,6 +48,16 @@ def _resolve_failure_budget(cfg: dict[str, Any]) -> tuple[int, int]:
     return (max(1, _to_int(max_consecutive, 3)), max(1, _to_int(max_total, 5)))
 
 
+def _resolve_option_chain_fetch_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
+    runtime = cfg.get("runtime") if isinstance(cfg.get("runtime"), dict) else {}
+    raw = runtime.get("option_chain_fetch") if isinstance(runtime.get("option_chain_fetch"), dict) else {}
+    return {
+        "window_sec": float(raw.get("window_sec") or 30.0),
+        "max_calls": int(raw.get("max_calls") or 10),
+        "max_wait_sec": float(raw.get("max_wait_sec") or 90.0),
+    }
+
+
 def _is_prefetch_error(payload: dict[str, Any]) -> bool:
     if not bool(payload.get("ok")):
         return True
@@ -88,6 +98,7 @@ def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required:
             return True
 
     exec_service = ToolExecutionService(base=base)
+    option_chain_fetch_cfg = _resolve_option_chain_fetch_cfg(cfg)
 
     def _fetch_one(symbol_cfg: dict) -> dict:
         symbol = str(symbol_cfg.get('symbol')).strip()
@@ -128,6 +139,9 @@ def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required:
             '--option-types', opt_types,
             '--output-root', str(shared_required),
             '--chain-cache',
+            '--option-chain-window-sec', str(option_chain_fetch_cfg["window_sec"]),
+            '--option-chain-max-calls', str(option_chain_fetch_cfg["max_calls"]),
+            '--option-chain-max-wait-sec', str(option_chain_fetch_cfg["max_wait_sec"]),
             '--quiet',
         ]
 
@@ -199,7 +213,7 @@ def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required:
                 fetch_cfg = (symbol_cfg.get("fetch") or {}) if isinstance(symbol_cfg, dict) else {}
                 src, _decision = resolve_symbol_fetch_source(fetch_cfg)
                 sym_class = _symbol_class(symbol)
-                if src == "opend" and sym_class in rate_limit_blocked_classes:
+                if is_futu_fetch_source(src) and sym_class in rate_limit_blocked_classes:
                     payload = normalize_tool_execution_payload(
                         tool_name='required_data_prefetch',
                         symbol=symbol,

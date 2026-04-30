@@ -539,7 +539,8 @@ def test_run_close_advice_fetches_missing_position_coverage_before_pricing(tmp_p
         calls.append({"symbol": symbol, **kwargs})
         assert symbol == "9992.HK"
         assert kwargs["explicit_expirations"] == ["2026-04-29", "2026-06-29"]
-        assert kwargs["chain_cache_force_refresh"] is True
+        assert kwargs["chain_cache_force_refresh"] is False
+        assert kwargs["freshness_policy"] == "refresh_missing"
         return {
             "rows": [
                 {
@@ -1508,6 +1509,93 @@ def test_run_close_advice_surfaces_rate_limit_sample_when_opend_is_limited(
     csv_text = ((tmp_path / "reports") / "close_advice.csv").read_text(encoding="utf-8")
     assert "opend_fetch_error_rate_limit" in csv_text
     assert result["quote_issue_samples"] == ["0700.HK put 2026-04-29 480.00P: OpenD 限频 | opend=HK.00700"]
+
+
+def test_run_close_advice_surfaces_required_data_rate_limit_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ctx_path = tmp_path / "option_positions_context.json"
+    ctx_path.write_text(
+        json.dumps(
+            {
+                "open_positions_min": [
+                    {
+                        "account": "lx",
+                        "symbol": "PDD",
+                        "option_type": "put",
+                        "side": "short",
+                        "contracts_open": 1,
+                        "currency": "USD",
+                        "strike": 100,
+                        "multiplier": 100,
+                        "premium": 2.0,
+                        "expiration": "2026-05-15",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    required_root = tmp_path / "required_data"
+    parsed = required_root / "parsed"
+    parsed.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "PDD",
+                "option_type": "put",
+                "expiration": "2026-06-19",
+                "strike": 100,
+                "mid": 1.0,
+                "bid": 0.95,
+                "ask": 1.05,
+                "dte": 50,
+                "multiplier": 100,
+                "spot": 120,
+                "currency": "USD",
+            }
+        ]
+    ).to_csv(parsed / "PDD_required_data.csv", index=False)
+    before_csv = (parsed / "PDD_required_data.csv").read_text(encoding="utf-8")
+
+    def fake_fetch_symbol(symbol: str, **kwargs: object) -> dict[str, object]:
+        assert symbol == "PDD"
+        assert kwargs["freshness_policy"] == "refresh_missing"
+        return {
+            "symbol": "PDD",
+            "underlier_code": "US.PDD",
+            "spot": None,
+            "expiration_count": 0,
+            "expirations": [],
+            "rows": [],
+            "meta": {
+                "source": "opend",
+                "status": "error",
+                "error_code": "RATE_LIMIT",
+                "error": "获取期权链频率太高，请求失败，每30秒最多10次。",
+            },
+        }
+
+    monkeypatch.setattr("scripts.fetch_market_data_opend.fetch_symbol", fake_fetch_symbol)
+
+    result = run_close_advice(
+        config={
+            "close_advice": {"enabled": True},
+            "symbols": [{"symbol": "PDD", "fetch": {"source": "futu"}}],
+        },
+        context_path=ctx_path,
+        required_data_root=required_root,
+        output_dir=(tmp_path / "reports"),
+        base_dir=Path.cwd(),
+    )
+
+    csv_text = ((tmp_path / "reports") / "close_advice.csv").read_text(encoding="utf-8")
+    text = ((tmp_path / "reports") / "close_advice.txt").read_text(encoding="utf-8")
+    assert "required_data_fetch_error_rate_limit" in csv_text
+    assert "OpenD 限频" in text
+    assert "缺少可用定价" not in text
+    assert result["quote_issue_samples"] == ["PDD put 2026-05-15 100.00P: OpenD 限频 | detail=获取期权链频率太高，请求失败，每30秒最多10次。"]
+    assert (parsed / "PDD_required_data.csv").read_text(encoding="utf-8") == before_csv
 
 
 def test_close_advice_text_can_drive_account_message_without_opening_candidates() -> None:

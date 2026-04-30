@@ -23,7 +23,6 @@ Usage:
 """
 
 import argparse
-from collections import deque
 import json
 import math
 import time
@@ -61,11 +60,6 @@ COLUMNS = [
     'in_the_money','currency','otm_pct','delta','multiplier'
 ]
 
-_OPTION_CHAIN_RATE_LIMIT_WINDOW_SEC = 30.0
-_OPTION_CHAIN_RATE_LIMIT_MAX_CALLS = 10
-_option_chain_call_timestamps: deque[float] = deque()
-
-
 # Allow running as a script (python scripts/xxx.py) without package install
 # by ensuring repo root is on sys.path.
 import sys
@@ -79,6 +73,12 @@ from scripts.futu_gateway import (
 )
 from scripts.opend_utils import normalize_underlier, get_trading_date
 from src.application.expiration_normalization import normalize_expiration_ymd
+from src.application.option_chain_fetching import (
+    OptionChainFetchRequest,
+    classify_option_chain_error,
+    fetch_option_chains,
+    prune_option_chain_cache,
+)
 
 def _chain_cache_path(base_dir: Path, u_code: str) -> Path:
     safe = u_code.replace('.', '_')
@@ -106,19 +106,7 @@ def _save_chain_cache(path: Path, payload: dict) -> None:
 
 def _prune_chain_cache(base_dir: Path, keep_days: int) -> None:
     try:
-        if keep_days <= 0:
-            return
-        root = base_dir / 'cache' / 'opend_option_chain'
-        if not root.exists():
-            return
-        import time
-        cutoff = time.time() - keep_days * 86400
-        for p in root.glob('*.json'):
-            try:
-                if p.stat().st_mtime < cutoff:
-                    p.unlink(missing_ok=True)
-            except Exception:
-                pass
+        prune_option_chain_cache(base_dir, keep_days)
     except Exception:
         pass
 
@@ -157,23 +145,6 @@ def _chain_cache_covers_explicit_expirations(obj: dict, explicit_expirations: li
         return all(exp in cached for exp in requested)
     except Exception:
         return False
-
-
-def _respect_option_chain_rate_limit() -> None:
-    now = time.monotonic()
-    while _option_chain_call_timestamps and (now - _option_chain_call_timestamps[0]) >= _OPTION_CHAIN_RATE_LIMIT_WINDOW_SEC:
-        _option_chain_call_timestamps.popleft()
-    if len(_option_chain_call_timestamps) < _OPTION_CHAIN_RATE_LIMIT_MAX_CALLS:
-        _option_chain_call_timestamps.append(now)
-        return
-    sleep_s = _OPTION_CHAIN_RATE_LIMIT_WINDOW_SEC - (now - _option_chain_call_timestamps[0]) + 0.05
-    if sleep_s > 0:
-        time.sleep(sleep_s)
-    now = time.monotonic()
-    while _option_chain_call_timestamps and (now - _option_chain_call_timestamps[0]) >= _OPTION_CHAIN_RATE_LIMIT_WINDOW_SEC:
-        _option_chain_call_timestamps.popleft()
-    _option_chain_call_timestamps.append(now)
-
 
 
 def to_float(v):
@@ -290,7 +261,7 @@ def list_option_expirations(symbol: str, *, host: str = "127.0.0.1", port: int =
             pass
 
 
-def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = '127.0.0.1', port: int = 11111, spot_override: float | None = None, *, base_dir: Path | None = None, option_types: str = 'put,call', min_strike: float | None = None, max_strike: float | None = None, side_strike_windows: dict[str, dict[str, float | None]] | None = None, min_dte: int | None = None, max_dte: int | None = None, explicit_expirations: list[str] | None = None, retry_max_attempts: int = 4, retry_time_budget_sec: float = 8.0, retry_base_delay_sec: float = 0.8, retry_max_delay_sec: float = 6.0, no_retry: bool = False, chain_cache: bool = False, chain_cache_force_refresh: bool = False) -> dict[str, Any]:
+def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = '127.0.0.1', port: int = 11111, spot_override: float | None = None, *, base_dir: Path | None = None, option_types: str = 'put,call', min_strike: float | None = None, max_strike: float | None = None, side_strike_windows: dict[str, dict[str, float | None]] | None = None, min_dte: int | None = None, max_dte: int | None = None, explicit_expirations: list[str] | None = None, retry_max_attempts: int = 4, retry_time_budget_sec: float = 8.0, retry_base_delay_sec: float = 0.8, retry_max_delay_sec: float = 6.0, no_retry: bool = False, chain_cache: bool = False, chain_cache_force_refresh: bool = False, freshness_policy: str = 'cache_first', max_wait_sec: float = 90.0, option_chain_window_sec: float = 30.0, option_chain_max_calls: int = 10) -> dict[str, Any]:
     u = normalize_underlier(symbol)
     explicit_expirations_norm = sorted({
         exp
@@ -315,109 +286,23 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
         # Trading-date anchor for DTE / cache freshness.
         today = get_trading_date(u.market)
 
-        # Option chain cache (day-level).
-        chain_obj = None
-        cache_path = None
-        if chain_cache and base_dir is not None:
-            cache_path = _chain_cache_path(base_dir, u.code)
-            cached = _load_chain_cache(cache_path)
-            if (
-                (not chain_cache_force_refresh)
-                and _is_chain_cache_fresh(cached, today)
-                and _chain_cache_covers_explicit_expirations(cached, explicit_expirations_norm)
-            ):
-                chain_obj = cached
-
-        if chain_obj is None:
-            # IMPORTANT:
-            # futu-api get_option_chain() defaults to an expiration date window of [today, today+30d]
-            # when start/end are None. For some underliers (e.g., HK.09992), the next expiry may be
-            # beyond 30 days, which makes the default call look like it has only 0DTE options.
-            #
-            # So we:
-            # 1) call get_option_expiration_date() to enumerate expirations
-            # 2) take the closest N expirations (limit_expirations)
-            # 3) call get_option_chain(code, start=exp, end=exp) for each expiration, then concat
-            if explicit_expirations_norm:
-                expirations_all = explicit_expirations_norm
-            else:
-                try:
-                    df_e = retry_futu_gateway_call(
-                        'get_option_expiration_date',
-                        lambda: gateway.get_option_expiration_dates(u.code),
-                        no_retry=no_retry,
-                        retry_max_attempts=retry_max_attempts,
-                        retry_time_budget_sec=retry_time_budget_sec,
-                        retry_base_delay_sec=retry_base_delay_sec,
-                        retry_max_delay_sec=retry_max_delay_sec,
-                        quiet=False,
-                    )
-                    if df_e is None or df_e.empty:
-                        expirations_all = []
-                    else:
-                        expirations_all = sorted({
-                            exp
-                            for exp in (normalize_expiration_ymd(x) for x in df_e.get('strike_time').tolist())
-                            if exp
-                        })
-                except Exception:
-                    expirations_all = []
-
-            expirations_pick0 = expirations_all
-            # If min_dte/max_dte is requested, filter expirations by DTE window.
-            if expirations_all and (not explicit_expirations_norm) and ((min_dte is not None) or (max_dte is not None)):
-                try:
-                    from datetime import datetime
-                    today0 = today
-                    filtered = []
-                    for e in expirations_all:
-                        try:
-                            d0 = datetime.fromisoformat(str(e)[:10]).date()
-                            dte0 = int((d0 - today0).days)
-                            if (min_dte is not None) and (dte0 < int(min_dte)):
-                                continue
-                            if (max_dte is not None) and (dte0 > int(max_dte)):
-                                continue
-                            filtered.append(str(e)[:10])
-                        except Exception:
-                            continue
-                    expirations_pick0 = filtered if filtered else expirations_all
-                except Exception:
-                    expirations_pick0 = expirations_all
-
-            if explicit_expirations_norm:
-                expirations_pick = expirations_pick0
-            elif limit_expirations and expirations_pick0:
-                expirations_pick = expirations_pick0[: int(limit_expirations)]
-            else:
-                expirations_pick = expirations_pick0
-
-            chains = []
-            if expirations_pick:
-                for exp0 in expirations_pick:
-                    chain0 = retry_futu_gateway_call(
-                        f'get_option_chain({exp0})',
-                        lambda exp=exp0: (_respect_option_chain_rate_limit(), gateway.get_option_chain(code=u.code, start=str(exp), end=str(exp), is_force_refresh=bool(chain_cache_force_refresh)))[1],
-                        no_retry=no_retry,
-                        retry_max_attempts=retry_max_attempts,
-                        retry_time_budget_sec=retry_time_budget_sec,
-                        retry_base_delay_sec=retry_base_delay_sec,
-                        retry_max_delay_sec=retry_max_delay_sec,
-                        quiet=True,
-                    )
-                    if chain0 is not None and (not chain0.empty):
-                        chains.append(chain0)
-
-            if chains:
-                try:
-                    chain = pd.concat(chains, ignore_index=True)
-                except Exception:
-                    chain = chains[0]
-            else:
-                # Fallback to legacy behavior (best-effort) if expiration_date not available.
-                chain = retry_futu_gateway_call(
-                    'get_option_chain',
-                    lambda: (_respect_option_chain_rate_limit(), gateway.get_option_chain(code=u.code, is_force_refresh=bool(chain_cache_force_refresh)))[1],
+        # IMPORTANT:
+        # futu-api get_option_chain() defaults to an expiration date window of [today, today+30d]
+        # when start/end are None. For some underliers (e.g., HK.09992), the next expiry may be
+        # beyond 30 days, which makes the default call look like it has only 0DTE options.
+        #
+        # So we:
+        # 1) call get_option_expiration_date() to enumerate expirations
+        # 2) take the closest N expirations (limit_expirations)
+        # 3) delegate per-expiration chain fetches to the shared coordinator, which owns
+        #    cross-process rate limiting and per-expiration cache shards.
+        if explicit_expirations_norm:
+            expirations_all = explicit_expirations_norm
+        else:
+            try:
+                df_e = retry_futu_gateway_call(
+                    'get_option_expiration_date',
+                    lambda: gateway.get_option_expiration_dates(u.code),
                     no_retry=no_retry,
                     retry_max_attempts=retry_max_attempts,
                     retry_time_budget_sec=retry_time_budget_sec,
@@ -425,28 +310,98 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
                     retry_max_delay_sec=retry_max_delay_sec,
                     quiet=False,
                 )
-
-            if chain is None or chain.empty:
-                raise RuntimeError(f"get_option_chain failed: {chain}")
-
-            # Persist a lightweight JSON cache (avoid pickling DataFrame).
-            try:
-                rows = chain.to_dict(orient='records')
+                if df_e is None or df_e.empty:
+                    expirations_all = []
+                else:
+                    expirations_all = sorted({
+                        exp
+                        for exp in (normalize_expiration_ymd(x) for x in df_e.get('strike_time').tolist())
+                        if exp
+                    })
             except Exception:
-                rows = []
-            chain_obj = {
-                'asof_date': today.isoformat(),
-                'underlier_code': u.code,
-                'rows': rows,
-                'expirations_all': expirations_all,
-                'expirations_pick': expirations_pick,
-            }
-            if cache_path is not None:
-                _save_chain_cache(cache_path, chain_obj)
+                expirations_all = []
+
+        expirations_pick0 = expirations_all
+        # If min_dte/max_dte is requested, filter expirations by DTE window.
+        if expirations_all and (not explicit_expirations_norm) and ((min_dte is not None) or (max_dte is not None)):
+            try:
+                from datetime import datetime
+                today0 = today
+                filtered = []
+                for e in expirations_all:
+                    try:
+                        d0 = datetime.fromisoformat(str(e)[:10]).date()
+                        dte0 = int((d0 - today0).days)
+                        if (min_dte is not None) and (dte0 < int(min_dte)):
+                            continue
+                        if (max_dte is not None) and (dte0 > int(max_dte)):
+                            continue
+                        filtered.append(str(e)[:10])
+                    except Exception:
+                        continue
+                expirations_pick0 = filtered if filtered else expirations_all
+            except Exception:
+                expirations_pick0 = expirations_all
+
+        if explicit_expirations_norm:
+            expirations_pick = expirations_pick0
+        elif limit_expirations and expirations_pick0:
+            expirations_pick = expirations_pick0[: int(limit_expirations)]
+        else:
+            expirations_pick = expirations_pick0
+
+        effective_policy = 'force_refresh' if chain_cache_force_refresh else str(freshness_policy or 'cache_first')
+        chain_result = fetch_option_chains(
+            gateway=gateway,
+            request=OptionChainFetchRequest(
+                symbol=symbol,
+                underlier_code=u.code,
+                expirations=list(expirations_pick),
+                host=host,
+                port=int(port),
+                option_types=option_types,
+                strike_windows=side_strike_windows or {},
+                base_dir=(Path(base_dir) if base_dir is not None else REPO_ROOT),
+                asof_date=today.isoformat(),
+                freshness_policy=effective_policy if effective_policy in {'cache_first', 'refresh_missing', 'force_refresh'} else 'cache_first',
+                chain_cache=bool(chain_cache),
+                max_wait_sec=float(max_wait_sec),
+                window_sec=float(option_chain_window_sec),
+                max_calls=int(option_chain_max_calls),
+                is_force_refresh=bool(chain_cache_force_refresh or effective_policy == 'force_refresh'),
+                no_retry=no_retry,
+                retry_max_attempts=retry_max_attempts,
+                retry_time_budget_sec=retry_time_budget_sec,
+                retry_base_delay_sec=retry_base_delay_sec,
+                retry_max_delay_sec=retry_max_delay_sec,
+            ),
+            retry_call=retry_futu_gateway_call,
+        )
+
+        chain_obj = {
+            'asof_date': today.isoformat(),
+            'underlier_code': u.code,
+            'rows': chain_result.rows,
+            'expirations_all': expirations_all,
+            'expirations_pick': expirations_pick,
+            'fetch_result': chain_result.to_meta(),
+        }
 
         # Rehydrate into a DataFrame for existing downstream logic.
         chain = pd.DataFrame(chain_obj.get('rows') or [])
         if chain is None or chain.empty:
+            fetch_meta = dict(chain_obj.get('fetch_result') or {})
+            status = str(fetch_meta.get('status') or 'error')
+            error_code = str(fetch_meta.get('error_code') or 'EMPTY_CHAIN')
+            fetch_errors = fetch_meta.get('errors') if isinstance(fetch_meta.get('errors'), list) else []
+            error_message = next(
+                (
+                    str(item.get('message'))
+                    for item in fetch_errors
+                    if isinstance(item, dict) and str(item.get('message') or '').strip()
+                ),
+                error_code.lower() if error_code else 'empty_chain',
+            )
             return {
                 'symbol': symbol,
                 'underlier_code': u.code,
@@ -454,7 +409,19 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
                 'expiration_count': 0,
                 'expirations': [],
                 'rows': [],
-                'meta': {'source': 'opend', 'error': 'empty_chain'},
+                'meta': {
+                    'source': 'opend',
+                    'host': host,
+                    'port': port,
+                    'status': status,
+                    'error_code': error_code,
+                    'error': error_message,
+                    'expiration_statuses': fetch_meta.get('expiration_statuses') or {},
+                    'errors': fetch_errors,
+                    'from_cache_expirations': fetch_meta.get('from_cache_expirations') or [],
+                    'fetched_expirations': fetch_meta.get('fetched_expirations') or [],
+                    'opend_call_count': int(fetch_meta.get('opend_call_count') or 0),
+                },
             }
 
         # Derive expirations (strike_time) and pick first N
@@ -690,6 +657,17 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
 
             rows.append(row)
 
+        fetch_result_meta = chain_obj.get('fetch_result') or {}
+        fetch_errors = fetch_result_meta.get('errors') if isinstance(fetch_result_meta.get('errors'), list) else []
+        fetch_error_message = next(
+            (
+                str(item.get('message'))
+                for item in fetch_errors
+                if isinstance(item, dict) and str(item.get('message') or '').strip()
+            ),
+            None,
+        )
+
         return {
             'symbol': symbol,
             'underlier_code': u.code,
@@ -701,12 +679,21 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
                 'source': 'opend',
                 'host': host,
                 'port': port,
+                'status': str(fetch_result_meta.get('status') or 'ok'),
+                'error_code': fetch_result_meta.get('error_code'),
+                'error': fetch_error_message,
+                'expiration_statuses': fetch_result_meta.get('expiration_statuses') or {},
+                'errors': fetch_errors,
+                'from_cache_expirations': fetch_result_meta.get('from_cache_expirations') or [],
+                'fetched_expirations': fetch_result_meta.get('fetched_expirations') or [],
+                'opend_call_count': int(fetch_result_meta.get('opend_call_count') or 0),
                 'option_codes': len(option_codes),
                 'snapshots_rows': int(len(snap_map)),
                 'side_strike_windows': side_strike_windows or {},
             },
         }
     except Exception as e:
+        error_text = f'{type(e).__name__}: {e}'
         return {
             'symbol': symbol,
             'underlier_code': (u.code if 'u' in locals() else None),
@@ -714,7 +701,14 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
             'expiration_count': 0,
             'expirations': [],
             'rows': [],
-            'meta': {'source': 'opend', 'host': host, 'port': port, 'error': f'{type(e).__name__}: {e}'},
+            'meta': {
+                'source': 'opend',
+                'host': host,
+                'port': port,
+                'status': 'error',
+                'error_code': classify_option_chain_error(e),
+                'error': error_text,
+            },
         }
 
     finally:
@@ -764,6 +758,10 @@ def save_outputs(base: Path, symbol: str, payload: dict[str, Any], *, output_roo
     atomic_write_text(raw_path, json.dumps(payload, ensure_ascii=False, indent=2, default=str) + '\n', encoding='utf-8')
 
     df = pd.DataFrame(payload.get('rows') or [])
+    meta = payload.get('meta') if isinstance(payload.get('meta'), dict) else {}
+    if df.empty and str((meta or {}).get('status') or '').lower() == 'error' and csv_path.exists() and csv_path.stat().st_size > 0:
+        return raw_path, csv_path
+
     if df.empty:
         df_out = pd.DataFrame(columns=COLUMNS)
     else:
@@ -799,6 +797,9 @@ def main():
     ap.add_argument('--retry-time-budget-sec', type=float, default=8.0)
     ap.add_argument('--retry-base-delay-sec', type=float, default=0.8)
     ap.add_argument('--retry-max-delay-sec', type=float, default=6.0)
+    ap.add_argument('--option-chain-max-wait-sec', type=float, default=90.0, help='Max seconds to wait for shared option-chain rate-limit budget')
+    ap.add_argument('--option-chain-window-sec', type=float, default=30.0, help='Shared option-chain rate-limit window seconds')
+    ap.add_argument('--option-chain-max-calls', type=int, default=10, help='Shared option-chain max calls per window')
     ap.add_argument('--output-root', default=None, help='Output root containing raw/ and parsed/ (default: ./output)')
     args = ap.parse_args()
 
@@ -835,6 +836,9 @@ def main():
             retry_base_delay_sec=float(args.retry_base_delay_sec),
             retry_max_delay_sec=float(args.retry_max_delay_sec),
             no_retry=bool(args.no_retry),
+            max_wait_sec=float(args.option_chain_max_wait_sec),
+            option_chain_window_sec=float(args.option_chain_window_sec),
+            option_chain_max_calls=int(args.option_chain_max_calls),
         )
         raw_path, csv_path = save_outputs(base, sym, payload, output_root=output_root)
         try:
