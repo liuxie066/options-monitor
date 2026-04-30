@@ -24,6 +24,10 @@ class RequiredDataFetchRequest:
     explicit_expirations: list[str] | None = None
     chain_cache: bool = True
     chain_cache_force_refresh: bool = False
+    freshness_policy: str = "cache_first"
+    max_wait_sec: float = 90.0
+    option_chain_window_sec: float = 30.0
+    option_chain_max_calls: int = 10
 
 
 def execute_required_data_opend(*, base: Path, request: RequiredDataFetchRequest) -> dict[str, object]:
@@ -47,6 +51,10 @@ def execute_required_data_opend(*, base: Path, request: RequiredDataFetchRequest
         min_dte=request.min_dte,
         max_dte=request.max_dte,
         explicit_expirations=explicit_expirations,
+        freshness_policy=str(request.freshness_policy or "cache_first"),
+        max_wait_sec=float(request.max_wait_sec),
+        option_chain_window_sec=float(request.option_chain_window_sec),
+        option_chain_max_calls=int(request.option_chain_max_calls),
     )
 
 
@@ -74,6 +82,7 @@ def build_fetch_request_from_spec(*, spec: RequiredDataFetchSpec, output_root: P
         explicit_expirations=list(spec.explicit_expirations),
         chain_cache=bool(chain_cache),
         chain_cache_force_refresh=bool(chain_cache_force_refresh),
+        freshness_policy=("force_refresh" if chain_cache_force_refresh else "cache_first"),
     )
 
 

@@ -56,6 +56,7 @@ QUOTE_ISSUE_FLAGS = {
     "required_data_missing_expiration",
     "required_data_missing_contract",
     "required_data_fetch_error",
+    "required_data_fetch_error_rate_limit",
     "required_data_fetch_skipped_non_futu_source",
     "opend_fetch_error",
     "opend_fetch_no_usable_quote",
@@ -250,6 +251,32 @@ def _quote_has_usable_price(quote: dict[str, Any] | None) -> bool:
     return bid is not None and ask is not None and bid > 0 and ask > 0 and ask >= bid
 
 
+def _fetch_payload_error_reason(payload: dict[str, Any] | None, *, prefix: str) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    meta = payload.get("meta")
+    meta = meta if isinstance(meta, dict) else {}
+    status = str(meta.get("status") or "").strip().lower()
+    error_code = str(meta.get("error_code") or "").strip().upper()
+    error_text = " ".join(
+        str(x)
+        for x in (
+            meta.get("error"),
+            meta.get("message"),
+            json.dumps(meta.get("errors"), ensure_ascii=False, default=str) if meta.get("errors") else "",
+        )
+        if str(x).strip()
+    )
+    low = error_text.lower()
+    is_rate_limited = error_code == "RATE_LIMIT" or "rate limit" in low or "too frequent" in low or "频率太高" in error_text or "最多10次" in error_text
+    rows = payload.get("rows") if isinstance(payload.get("rows"), list) else []
+    if status == "error" or (status == "partial" and error_code) or (error_code and not rows):
+        if is_rate_limited:
+            return f"{prefix}_rate_limit"
+        return prefix
+    return None
+
+
 def _build_position_fetch_specs(
     positions: list[dict[str, Any]],
     *,
@@ -369,16 +396,20 @@ def _ensure_required_data_coverage_for_positions(
                 max_strike=max(strikes) if strikes else None,
                 explicit_expirations=requested_expirations,
                 chain_cache=True,
-                chain_cache_force_refresh=True,
+                chain_cache_force_refresh=False,
+                freshness_policy="refresh_missing",
             )
         except Exception as exc:
             summary["errors"] += 1
+            err_text = str(exc or "")
+            err_low = err_text.lower()
+            reason = "required_data_fetch_error_rate_limit" if ("rate limit" in err_low or "too frequent" in err_low or "最多10次" in err_text or "频率太高" in err_text) else "required_data_fetch_error"
             for key in missing_keys:
                 near_miss = find_unique_near_miss_expiration(
                     key[2],
                     current_contract_expiration_index.get((key[0], key[1], key[3])) or set(),
                 )
-                fetch_reasons[key] = "required_data_fetch_error"
+                fetch_reasons[key] = reason
                 fetch_details[key] = {
                     "quote_key": "|".join(key),
                     "requested_expirations": requested_expirations,
@@ -391,6 +422,31 @@ def _ensure_required_data_coverage_for_positions(
                         "matched_expiration": near_miss,
                     }
             continue
+        payload_reason = _fetch_payload_error_reason(payload, prefix="required_data_fetch_error")
+        if payload_reason and not list(payload.get("rows") or []):
+            summary["errors"] += 1
+            for key in missing_keys:
+                near_miss = find_unique_near_miss_expiration(
+                    key[2],
+                    current_contract_expiration_index.get((key[0], key[1], key[3])) or set(),
+                )
+                fetch_reasons[key] = payload_reason
+                fetch_details[key] = {
+                    "quote_key": "|".join(key),
+                    "requested_expirations": requested_expirations,
+                    "available_expirations": sorted(current_expirations.get(symbol) or set()),
+                    "message": str(((payload.get("meta") or {}) if isinstance(payload.get("meta"), dict) else {}).get("error") or payload_reason),
+                }
+                if near_miss:
+                    fetch_details[key]["expiration_near_miss"] = {
+                        "requested_expiration": key[2],
+                        "matched_expiration": near_miss,
+                    }
+            try:
+                save_outputs(base_dir, symbol, payload, output_root=required_data_root)
+            except Exception:
+                pass
+            continue
         merged_rows = _merge_required_data_rows(
             _load_required_data_rows(required_data_root, symbol),
             list(payload.get("rows") or []),
@@ -401,6 +457,17 @@ def _ensure_required_data_coverage_for_positions(
         save_outputs(base_dir, symbol, payload, output_root=required_data_root)
         summary["fetched_symbols"] += 1
         current_covered, current_expirations = load_required_data_coverage(required_data_root, symbols=set(specs), base_dir=base_dir)
+        if payload_reason:
+            still_missing = [key for key in requested_keys if key not in current_covered]
+            if still_missing:
+                summary["errors"] += 1
+                for key in still_missing:
+                    fetch_reasons[key] = payload_reason
+                    fetch_details[key] = {
+                        "quote_key": "|".join(key),
+                        "requested_expirations": requested_expirations,
+                        "available_expirations": sorted(current_expirations.get(symbol) or set()),
+                    }
     return fetch_reasons, fetch_details, summary
 
 
@@ -491,6 +558,7 @@ def _fetch_missing_quotes_via_opend(
                 max_strike=max(strikes),
                 explicit_expirations=expirations,
                 chain_cache=True,
+                freshness_policy="refresh_missing",
             )
         except Exception as exc:
             err_low = str(exc or "").lower()
@@ -503,6 +571,7 @@ def _fetch_missing_quotes_via_opend(
                 if all(key):
                     attempted_reasons[key] = detail
             continue
+        payload_reason = _fetch_payload_error_reason(payload, prefix="opend_fetch_error")
         rows = payload.get("rows") if isinstance(payload, dict) else []
         _merge_quote_rows(quotes, rows if isinstance(rows, list) else [])
         for key in missing_keys:
@@ -510,7 +579,7 @@ def _fetch_missing_quotes_via_opend(
                 continue
             if _quote_has_usable_price(quotes.get(key)):
                 continue
-            attempted_reasons[key] = "opend_fetch_no_usable_quote"
+            attempted_reasons[key] = payload_reason or "opend_fetch_no_usable_quote"
     return attempted_reasons, attempted_details
 
 
@@ -559,6 +628,8 @@ def _quote_observability_flags(
         return []
     if _quote_has_usable_price(quote):
         return []
+    if reason == "required_data_fetch_error_rate_limit":
+        return ["required_data_fetch_error", reason]
     if reason in {"required_data_fetch_error", "required_data_fetch_skipped_non_futu_source"}:
         return [reason]
     if reason.startswith("opend_fetch_error_"):
@@ -604,6 +675,7 @@ def _build_quote_issue_samples(
             "required_data_missing_expiration": "缺少到期日覆盖",
             "required_data_missing_contract": "缺少合约覆盖",
             "required_data_fetch_error": "补拉持仓覆盖失败",
+            "required_data_fetch_error_rate_limit": "OpenD 限频",
             "required_data_fetch_skipped_non_futu_source": "非 Futu 行情源，无法补拉持仓覆盖",
             "opend_fetch_no_usable_quote": "无可用报价",
             "opend_fetch_error_rate_limit": "OpenD 限频",
@@ -621,7 +693,9 @@ def _build_quote_issue_samples(
         near_miss = detail.get("expiration_near_miss") if isinstance(detail.get("expiration_near_miss"), dict) else {}
         matched_expiration = str(near_miss.get("matched_expiration") or "").strip()
         requested_expiration = str(near_miss.get("requested_expiration") or "").strip()
-        if matched_expiration:
+        if "rate_limit" in reason and str(detail.get("message") or "").strip():
+            diag = f" | detail={str(detail.get('message')).strip()[:80]}"
+        elif matched_expiration:
             diag = f" | near_miss={requested_expiration or exp}->{matched_expiration}"
         elif available_expirations:
             diag = f" | have={','.join(available_expirations[:3])}"
@@ -852,6 +926,7 @@ def _gap_reason_label(row: dict[str, Any]) -> str:
         "required_data_missing_expiration": "缺少到期日覆盖",
         "required_data_missing_contract": "缺少合约覆盖",
         "required_data_fetch_error": "补拉持仓覆盖失败",
+        "required_data_fetch_error_rate_limit": "OpenD 限频",
         "required_data_fetch_skipped_non_futu_source": "非 Futu 行情源，无法补拉持仓覆盖",
         "opend_fetch_no_usable_quote": "无可用报价",
         "opend_fetch_error_rate_limit": "OpenD 限频",
@@ -862,6 +937,9 @@ def _gap_reason_label(row: dict[str, Any]) -> str:
         "spread_too_wide": "价差过宽",
         "invalid_spread": "价差无效",
     }
+    for flag in ("required_data_fetch_error_rate_limit", "opend_fetch_error_rate_limit"):
+        if flag in flags:
+            return mapping[flag]
     for flag in flags:
         if flag in mapping:
             return mapping[flag]
