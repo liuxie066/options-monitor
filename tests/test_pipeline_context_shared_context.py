@@ -563,6 +563,193 @@ def test_load_portfolio_context_auto_reuses_local_holdings_cache_when_futu_and_f
         pc.fetch_futu_portfolio_context = old_fetch  # type: ignore[assignment]
 
 
+def test_load_portfolio_context_rejects_stale_account_cache_with_wrong_filters_account() -> None:
+    import scripts.pipeline_context as pc
+
+    old_is_fresh = pc.is_fresh
+    old_load_cached_json = pc.load_cached_json
+    try:
+        shared_ctx = {
+            "as_of_utc": "2026-04-14T00:00:00+00:00",
+            "filters": {"broker": "富途", "account": None},
+            "all_accounts": _portfolio_ctx("", usd_cash=2000.0, shares=200),
+            "by_account": {
+                "lx": _portfolio_ctx("lx", usd_cash=1000.0, shares=100),
+                "sy": _portfolio_ctx("sy", usd_cash=1500.0, shares=200),
+            },
+        }
+
+        pc.is_fresh = lambda *_args, **_kwargs: True  # type: ignore[assignment]
+
+        def _load_cached(path: Path):  # type: ignore[no-untyped-def]
+            if path.name == "portfolio_context.json":
+                stale = _portfolio_ctx("lx", usd_cash=800.0, shares=100)
+                stale["portfolio_source_name"] = "external_holdings"
+                return stale
+            if path.name == "portfolio_context.shared.json":
+                return shared_ctx
+            return None
+
+        pc.load_cached_json = _load_cached  # type: ignore[assignment]
+
+        logs: list[str] = []
+        runtime_cfg = {
+            "accounts": ["sy"],
+            "account_settings": {"sy": {"type": "external_holdings", "holdings_account": "sy"}},
+            "portfolio": {"source_by_account": {"sy": "holdings"}},
+        }
+        with TemporaryDirectory() as td:
+            root = Path(td).resolve()
+            out = pc.load_portfolio_context(
+                base=root,
+                data_config="x.json",
+                market="富途",
+                account="sy",
+                ttl_sec=3600,
+                state_dir=(root / "state").resolve(),
+                shared_state_dir=(root / "shared").resolve(),
+                log=logs.append,
+                runtime_config=runtime_cfg,
+                portfolio_source="holdings",
+            )
+        assert out is not None
+        assert out["filters"]["account"] == "sy"
+        assert out["stocks_by_symbol"]["NVDA"]["account"] == "sy"
+        assert out["context_source"] == "shared_slice"
+        assert any("cache rejected due to account mismatch source=account_cache filters.account requested=sy cached=lx" in x for x in logs)
+        assert any("portfolio_context source=shared_slice account=sy" in x for x in logs)
+    finally:
+        pc.is_fresh = old_is_fresh  # type: ignore[assignment]
+        pc.load_cached_json = old_load_cached_json  # type: ignore[assignment]
+
+
+def test_load_portfolio_context_rejects_stale_account_cache_with_wrong_stock_account() -> None:
+    import scripts.pipeline_context as pc
+    import scripts.portfolio_context_service as pcs
+
+    old_is_fresh = pc.is_fresh
+    old_load_cached_json = pc.load_cached_json
+    old_load_holdings_portfolio_shared_context = pcs.load_holdings_portfolio_shared_context
+    try:
+        pc.is_fresh = lambda path, ttl_sec: Path(path).name == "portfolio_context.json"  # type: ignore[assignment]
+
+        def _load_cached(path: Path):  # type: ignore[no-untyped-def]
+            if path.name == "portfolio_context.json":
+                stale = _portfolio_ctx("sy", usd_cash=1500.0, shares=200)
+                stale["stocks_by_symbol"]["NVDA"]["account"] = "lx"
+                stale["portfolio_source_name"] = "external_holdings"
+                return stale
+            return None
+
+        shared_ctx = {
+            "as_of_utc": "2026-04-14T00:00:00+00:00",
+            "filters": {"broker": "富途", "account": None},
+            "all_accounts": _portfolio_ctx("", usd_cash=2000.0, shares=200),
+            "by_account": {
+                "sy": _portfolio_ctx("sy", usd_cash=1500.0, shares=200),
+            },
+        }
+
+        pc.load_cached_json = _load_cached  # type: ignore[assignment]
+        pcs.load_holdings_portfolio_shared_context = lambda **_kwargs: shared_ctx  # type: ignore[assignment]
+
+        logs: list[str] = []
+        runtime_cfg = {
+            "accounts": ["sy"],
+            "account_settings": {"sy": {"type": "external_holdings", "holdings_account": "sy"}},
+            "portfolio": {"source_by_account": {"sy": "holdings"}},
+        }
+        with TemporaryDirectory() as td:
+            root = Path(td).resolve()
+            out = pc.load_portfolio_context(
+                base=root,
+                data_config="x.json",
+                market="富途",
+                account="sy",
+                ttl_sec=3600,
+                state_dir=(root / "state").resolve(),
+                shared_state_dir=(root / "shared").resolve(),
+                log=logs.append,
+                runtime_config=runtime_cfg,
+                portfolio_source="holdings",
+            )
+        assert out is not None
+        assert out["filters"]["account"] == "sy"
+        assert out["stocks_by_symbol"]["NVDA"]["account"] == "sy"
+        assert out["context_source"] == "shared_refresh"
+        assert any("cache rejected due to account mismatch source=account_cache stocks_by_symbol[NVDA].account requested=sy cached=lx" in x for x in logs)
+        assert any("portfolio_context source=shared_refresh account=sy" in x for x in logs)
+    finally:
+        pc.is_fresh = old_is_fresh  # type: ignore[assignment]
+        pc.load_cached_json = old_load_cached_json  # type: ignore[assignment]
+        pcs.load_holdings_portfolio_shared_context = old_load_holdings_portfolio_shared_context  # type: ignore[assignment]
+
+
+def test_load_portfolio_context_futu_cache_still_reuses_account_label_when_holdings_alias_exists() -> None:
+    import scripts.pipeline_context as pc
+
+    old_is_fresh = pc.is_fresh
+    old_load_cached_json = pc.load_cached_json
+    old_fetch = pc.fetch_futu_portfolio_context
+    try:
+        pc.is_fresh = lambda path, ttl_sec: Path(path).name == "portfolio_context.json"  # type: ignore[assignment]
+
+        def _load_cached(path: Path):  # type: ignore[no-untyped-def]
+            if path.name == "portfolio_context.json":
+                return {
+                    "as_of_utc": "2026-04-14T00:00:00+00:00",
+                    "filters": {"broker": "富途", "account": "user1"},
+                    "cash_by_currency": {"USD": 88000.0},
+                    "stocks_by_symbol": {
+                        "NVDA": {
+                            "symbol": "NVDA",
+                            "shares": 300,
+                            "avg_cost": 100.0,
+                            "currency": "USD",
+                            "account": "user1",
+                        }
+                    },
+                    "raw_selected_count": 1,
+                    "portfolio_source_name": "futu",
+                }
+            return None
+
+        pc.load_cached_json = _load_cached  # type: ignore[assignment]
+        pc.fetch_futu_portfolio_context = lambda **_kwargs: (_ for _ in ()).throw(AssertionError("fresh futu cache should be reused"))  # type: ignore[assignment]
+
+        logs: list[str] = []
+        runtime_cfg = {
+            "accounts": ["user1"],
+            "account_settings": {"user1": {"type": "futu", "holdings_account": "lx"}},
+            "portfolio": {"source": "auto", "base_currency": "CNY", "source_by_account": {"user1": "auto"}},
+        }
+        with TemporaryDirectory() as td:
+            root = Path(td).resolve()
+            out = pc.load_portfolio_context(
+                base=root,
+                data_config="x.json",
+                market="富途",
+                account="user1",
+                ttl_sec=3600,
+                state_dir=(root / "state").resolve(),
+                shared_state_dir=(root / "shared").resolve(),
+                log=logs.append,
+                runtime_config=runtime_cfg,
+                portfolio_source="auto",
+            )
+        assert out is not None
+        assert out["portfolio_source_name"] == "futu"
+        assert out["filters"]["account"] == "user1"
+        assert out["stocks_by_symbol"]["NVDA"]["account"] == "user1"
+        assert out["context_source"] == "account_cache"
+        assert any("portfolio_context source=account_cache account=user1" in x for x in logs)
+        assert not any("cache rejected due to account mismatch" in x for x in logs)
+    finally:
+        pc.is_fresh = old_is_fresh  # type: ignore[assignment]
+        pc.load_cached_json = old_load_cached_json  # type: ignore[assignment]
+        pc.fetch_futu_portfolio_context = old_fetch  # type: ignore[assignment]
+
+
 def main() -> None:
     test_shared_context_reuses_fetch_calls_across_accounts()
     test_shared_slice_matches_legacy_key_fields()

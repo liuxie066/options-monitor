@@ -401,6 +401,116 @@ def test_get_portfolio_context_allows_futu_source_without_explicit_data_config(m
     assert out["data"]["portfolio_source_name"] == "futu"
 
 
+def test_get_portfolio_context_rejects_stale_external_holdings_cache_for_wrong_account(monkeypatch, tmp_path: Path) -> None:
+    from scripts.agent_plugin.main import run_tool
+    import scripts.pipeline_context as pipeline_context
+    import scripts.portfolio_context_service as pcs
+
+    cfg_path = tmp_path / "config.hk.json"
+    secrets_dir = tmp_path / "secrets"
+    secrets_dir.mkdir()
+    (secrets_dir / "portfolio.sqlite.json").write_text(
+        json.dumps(
+            {
+                "option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"},
+                "feishu": {
+                    "app_id": "cli_xxx",
+                    "app_secret": "secret_xxx",
+                    "tables": {"holdings": "app_token/table_id"},
+                },
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    cfg = _public_cfg_with_futu("secrets/portfolio.sqlite.json")
+    cfg["accounts"] = ["lx", "sy"]
+    cfg["account_settings"]["lx"] = {"type": "futu"}
+    cfg["account_settings"]["sy"] = {"type": "external_holdings", "holdings_account": "sy"}
+    cfg["portfolio"]["account"] = "sy"
+    cfg["portfolio"]["source"] = "auto"
+    cfg["portfolio"]["source_by_account"] = {"lx": "futu", "sy": "holdings"}
+    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    shared_ctx = {
+        "as_of_utc": "2026-04-14T00:00:00+00:00",
+        "filters": {"broker": "富途", "account": None},
+        "all_accounts": {
+            "filters": {"broker": "富途", "account": None},
+            "cash_by_currency": {},
+            "stocks_by_symbol": {},
+            "raw_selected_count": 0,
+        },
+        "by_account": {
+            "sy": {
+                "as_of_utc": "2026-04-14T00:00:00+00:00",
+                "filters": {"broker": "富途", "account": "sy"},
+                "cash_by_currency": {"HKD": 10000.0},
+                "stocks_by_symbol": {
+                    "0700.HK": {
+                        "symbol": "0700.HK",
+                        "shares": 1100,
+                        "avg_cost": 420.0,
+                        "currency": "HKD",
+                        "account": "sy",
+                    }
+                },
+                "raw_selected_count": 1,
+            }
+        },
+    }
+
+    def _is_fresh(path: Path, ttl_sec: int) -> bool:
+        return path.name in {"portfolio_context.json", "portfolio_context.shared.json"}
+
+    def _load_cached(path: Path):  # type: ignore[no-untyped-def]
+        if path.name == "portfolio_context.json":
+            return {
+                "as_of_utc": "2026-04-14T00:00:00+00:00",
+                "filters": {"broker": "富途", "account": "lx"},
+                "cash_by_currency": {"HKD": 8000.0},
+                "stocks_by_symbol": {
+                    "0700.HK": {
+                        "symbol": "0700.HK",
+                        "shares": 100,
+                        "avg_cost": 410.0,
+                        "currency": "HKD",
+                        "account": "lx",
+                    }
+                },
+                "raw_selected_count": 1,
+                "portfolio_source_name": "external_holdings",
+            }
+        if path.name == "portfolio_context.shared.json":
+            return shared_ctx
+        return None
+
+    monkeypatch.setattr(pipeline_context, "is_fresh", _is_fresh)
+    monkeypatch.setattr(pipeline_context, "load_cached_json", _load_cached)
+    monkeypatch.setattr(pcs, "load_holdings_portfolio_shared_context", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("should reuse shared cache")))  # type: ignore[assignment]
+
+    out_root = tmp_path / "output" / "agent_plugin"
+    out = run_tool(
+        "get_portfolio_context",
+        {
+            "config_path": str(cfg_path),
+            "account": "sy",
+            "output_dir": str(out_root),
+            "ttl_sec": 3600,
+        },
+    )
+
+    assert out["ok"] is True
+    assert out["data"]["filters"]["account"] == "sy"
+    assert out["data"]["stocks_by_symbol"]["0700.HK"]["account"] == "sy"
+    assert out["data"]["stocks_by_symbol"]["0700.HK"]["shares"] == 1100
+    state_path = out_root / "portfolio_context_state" / "portfolio_context.json"
+    payload = json.loads(state_path.read_text(encoding="utf-8"))
+    assert payload["filters"]["account"] == "sy"
+    assert payload["stocks_by_symbol"]["0700.HK"]["account"] == "sy"
+
+
 def test_spec_exposes_broker_as_public_field() -> None:
     from scripts.agent_plugin.main import build_spec
 
