@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.4.0 - 2026-04-30
+
+### Changed
+- Hardened option-position close projection so bootstrap seed lots and historical `manual-close-*` events rebuild correctly from canonical `trade_events -> position_lots`
+- Made manual close events carry explicit lot targets via `close_target_source_event_id` while preserving legacy `record_id` replay compatibility for existing repair history
+- Prevented explicit-target close events from partially applying during reprojection when event quantity exceeds the targeted lot's remaining open contracts
+
 ## 0.3.7 - 2026-04-30
 
 ### Changed

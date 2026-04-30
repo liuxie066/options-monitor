@@ -134,6 +134,31 @@ def _matches_close(fields: dict[str, Any], event: TradeEvent) -> bool:
     )
 
 
+def _close_target_source_event_id(event: TradeEvent) -> str:
+    if str(event.position_effect).strip().lower() != "close":
+        return ""
+    payload = event.raw_payload or {}
+    return str(payload.get("close_target_source_event_id") or "").strip()
+
+
+def _close_target_record_id(event: TradeEvent) -> str:
+    if str(event.position_effect).strip().lower() != "close":
+        return ""
+    payload = event.raw_payload or {}
+    return str(payload.get("record_id") or "").strip()
+
+
+def _matches_close_target(fields: dict[str, Any], event: TradeEvent) -> bool:
+    return (
+        normalize_broker(fields.get("broker")) == event.broker
+        and normalize_account(fields.get("account")) == event.account
+        and str(fields.get("symbol") or "").strip().upper() == event.symbol
+        and normalize_option_type(fields.get("option_type")) == event.option_type
+        and normalize_side(fields.get("side")) == "short"
+        and str(fields.get("source_event_id") or "") != event.event_id
+    )
+
+
 def _void_target_event_id(event: TradeEvent) -> str:
     if str(event.position_effect).strip().lower() != "void":
         return ""
@@ -193,11 +218,28 @@ def project_position_lot_records(events: list[dict[str, Any]] | list[TradeEvent]
             continue
 
         remaining = int(event.contracts)
+        close_target_source_event_id = _close_target_source_event_id(event)
+        close_target_record_id = _close_target_record_id(event)
+        explicit_target = bool(close_target_source_event_id or close_target_record_id)
         for lot in lots:
             fields = lot.get("fields") or {}
             open_qty = int(fields.get("contracts_open") or 0)
-            if open_qty <= 0 or not _matches_close(fields, event):
+            if open_qty <= 0:
                 continue
+            if close_target_source_event_id:
+                if str(fields.get("source_event_id") or "").strip() != close_target_source_event_id:
+                    continue
+                if not _matches_close_target(fields, event):
+                    break
+            elif close_target_record_id:
+                if str(lot.get("record_id") or "").strip() != close_target_record_id:
+                    continue
+                if not _matches_close_target(fields, event):
+                    break
+            elif not _matches_close(fields, event):
+                continue
+            if explicit_target and open_qty < remaining:
+                break
             take = min(open_qty, remaining)
             patch = build_buy_to_close_patch(
                 fields,
@@ -212,5 +254,7 @@ def project_position_lot_records(events: list[dict[str, Any]] | list[TradeEvent]
             lot["fields"] = merged
             remaining -= take
             if remaining <= 0:
+                break
+            if explicit_target:
                 break
     return lots

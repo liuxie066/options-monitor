@@ -651,6 +651,98 @@ def test_rebuild_position_lots_from_trade_events_preserves_sync_metadata(tmp_pat
     assert result["preserved_sync_meta_record_count"] == 1
 
 
+def test_rebuild_position_lots_applies_legacy_manual_close_to_bootstrap_seed(tmp_path: Path) -> None:
+    import scripts.option_positions_core.service as svc
+    from scripts.option_positions_core.ledger import TradeEvent
+
+    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    svc._persist_trade_event_object(
+        repo,
+        TradeEvent(
+            event_id="bootstrap:lx:seed",
+            source_type="bootstrap_snapshot",
+            source_name="feishu_bootstrap",
+            broker="富途",
+            account="lx",
+            symbol="AAPL",
+            option_type="put",
+            side="sell",
+            position_effect="open",
+            contracts=1,
+            price=1.0,
+            strike=150.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            currency="USD",
+            trade_time_ms=1000,
+            order_id=None,
+            multiplier_source="bootstrap_snapshot",
+            raw_payload={
+                "lot_record_id": "rec_lx_seed",
+                "fields": {
+                    "broker": "富途",
+                    "account": "lx",
+                    "symbol": "AAPL",
+                    "option_type": "put",
+                    "side": "short",
+                    "contracts": 1,
+                    "contracts_open": 1,
+                    "contracts_closed": 0,
+                    "status": "open",
+                    "currency": "USD",
+                    "strike": 150.0,
+                    "expiration": 1781827200000,
+                    "opened_at": 1000,
+                    "last_action_at": 1000,
+                    "position_id": "AAPL_20260619_150P_short",
+                    "note": "exp=2026-06-19;premium_per_share=1.0",
+                    "premium": 1.0,
+                },
+            },
+        )
+    )
+    svc._persist_trade_event_object(
+        repo,
+        TradeEvent(
+            event_id="manual-close-rec-lx-seed",
+            source_type="manual_trade_event",
+            source_name="cli_manual_close",
+            broker="富途",
+            account="lx",
+            symbol="AAPL",
+            option_type="put",
+            side="buy",
+            position_effect="close",
+            contracts=1,
+            price=0.0,
+            strike=150.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            currency="USD",
+            trade_time_ms=2000,
+            order_id=None,
+            multiplier_source="payload",
+            raw_payload={
+                "source": "option_positions.py",
+                "mode": "manual_close",
+                "record_id": "rec_lx_seed",
+                "close_reason": "expired",
+            },
+        )
+    )
+
+    result = svc.rebuild_position_lots_from_trade_events(repo)
+
+    lots = repo.list_position_lots()
+    assert result["trade_event_count"] == 2
+    assert result["position_lot_count"] == 1
+    assert lots[0]["record_id"] == "rec_lx_seed"
+    assert lots[0]["fields"]["contracts_open"] == 0
+    assert lots[0]["fields"]["contracts_closed"] == 1
+    assert lots[0]["fields"]["status"] == "close"
+    assert lots[0]["fields"]["last_close_event_id"] == "manual-close-rec-lx-seed"
+
+
 def test_close_projection_does_not_cross_match_other_account_seed_lot(tmp_path: Path) -> None:
     from scripts.option_positions_core.ledger import TradeEvent, project_position_lot_records
 
@@ -808,6 +900,300 @@ def test_close_projection_prefers_structured_expiration_over_missing_note_exp() 
     assert lots[0]["fields"]["last_close_event_id"] == "deal-close-lx-exp-structured"
 
 
+def test_close_projection_matches_bootstrap_lot_by_legacy_record_id() -> None:
+    from scripts.option_positions_core.ledger import TradeEvent, project_position_lot_records
+
+    events = [
+        TradeEvent(
+            event_id="bootstrap:lx:seed",
+            source_type="bootstrap_snapshot",
+            source_name="sqlite_position_lots",
+            broker="富途",
+            account="lx",
+            symbol="AAPL",
+            option_type="put",
+            side="sell",
+            position_effect="open",
+            contracts=2,
+            price=1.0,
+            strike=150.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            currency="USD",
+            trade_time_ms=1000,
+            order_id=None,
+            multiplier_source="bootstrap_snapshot",
+            raw_payload={
+                "lot_record_id": "rec_lx_seed",
+                "fields": {
+                    "broker": "富途",
+                    "account": "lx",
+                    "symbol": "AAPL",
+                    "option_type": "put",
+                    "side": "short",
+                    "contracts": 2,
+                    "contracts_open": 2,
+                    "contracts_closed": 0,
+                    "status": "open",
+                    "currency": "USD",
+                    "strike": 150.0,
+                    "expiration": 1781827200000,
+                    "opened_at": 1000,
+                    "last_action_at": 1000,
+                    "position_id": "AAPL_20260619_150P_short",
+                    "note": "premium_per_share=1.0",
+                    "premium": 1.0,
+                },
+            },
+        ),
+        TradeEvent(
+            event_id="manual-close-rec-lx-seed",
+            source_type="manual_trade_event",
+            source_name="cli_manual_close",
+            broker="富途",
+            account="lx",
+            symbol="AAPL",
+            option_type="put",
+            side="buy",
+            position_effect="close",
+            contracts=2,
+            price=0.0,
+            strike=150.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            currency="USD",
+            trade_time_ms=2000,
+            order_id=None,
+            multiplier_source="payload",
+            raw_payload={
+                "source": "option_positions.py",
+                "mode": "manual_close",
+                "record_id": "rec_lx_seed",
+                "close_reason": "expired",
+            },
+        ),
+    ]
+
+    lots = project_position_lot_records(events)
+
+    assert len(lots) == 1
+    assert lots[0]["record_id"] == "rec_lx_seed"
+    assert lots[0]["fields"]["contracts_open"] == 0
+    assert lots[0]["fields"]["contracts_closed"] == 2
+    assert lots[0]["fields"]["status"] == "close"
+    assert lots[0]["fields"]["last_close_event_id"] == "manual-close-rec-lx-seed"
+
+
+def test_close_projection_prefers_explicit_source_event_target() -> None:
+    from scripts.option_positions_core.ledger import TradeEvent, project_position_lot_records
+
+    events = [
+        TradeEvent(
+            event_id="open-1",
+            source_type="broker_trade_event",
+            source_name="opend_push",
+            broker="富途",
+            account="lx",
+            symbol="AAPL",
+            option_type="put",
+            side="sell",
+            position_effect="open",
+            contracts=1,
+            price=1.0,
+            strike=150.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            currency="USD",
+            trade_time_ms=1000,
+            order_id="order-1",
+            multiplier_source="payload",
+            raw_payload={"deal_id": "open-1"},
+        ),
+        TradeEvent(
+            event_id="open-2",
+            source_type="broker_trade_event",
+            source_name="opend_push",
+            broker="富途",
+            account="lx",
+            symbol="AAPL",
+            option_type="put",
+            side="sell",
+            position_effect="open",
+            contracts=1,
+            price=1.1,
+            strike=150.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            currency="USD",
+            trade_time_ms=1100,
+            order_id="order-2",
+            multiplier_source="payload",
+            raw_payload={"deal_id": "open-2"},
+        ),
+        TradeEvent(
+            event_id="manual-close-target-open-2",
+            source_type="manual_trade_event",
+            source_name="cli_manual_close",
+            broker="富途",
+            account="lx",
+            symbol="AAPL",
+            option_type="put",
+            side="buy",
+            position_effect="close",
+            contracts=1,
+            price=0.2,
+            strike=150.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            currency="USD",
+            trade_time_ms=2000,
+            order_id=None,
+            multiplier_source="payload",
+            raw_payload={
+                "source": "option_positions.py",
+                "mode": "manual_close",
+                "record_id": "lot_open-2",
+                "close_target_source_event_id": "open-2",
+                "close_reason": "expired",
+            },
+        ),
+    ]
+
+    lots = project_position_lot_records(events)
+    lots_by_id = {row["record_id"]: row["fields"] for row in lots}
+
+    assert lots_by_id["lot_open-1"]["contracts_open"] == 1
+    assert lots_by_id["lot_open-1"]["contracts_closed"] == 0
+    assert lots_by_id["lot_open-2"]["contracts_open"] == 0
+    assert lots_by_id["lot_open-2"]["contracts_closed"] == 1
+    assert lots_by_id["lot_open-2"]["last_close_event_id"] == "manual-close-target-open-2"
+
+
+def test_close_projection_does_not_fallback_when_explicit_target_is_missing() -> None:
+    from scripts.option_positions_core.ledger import TradeEvent, project_position_lot_records
+
+    events = [
+        TradeEvent(
+            event_id="open-1",
+            source_type="broker_trade_event",
+            source_name="opend_push",
+            broker="富途",
+            account="lx",
+            symbol="AAPL",
+            option_type="put",
+            side="sell",
+            position_effect="open",
+            contracts=1,
+            price=1.0,
+            strike=150.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            currency="USD",
+            trade_time_ms=1000,
+            order_id="order-1",
+            multiplier_source="payload",
+            raw_payload={"deal_id": "open-1"},
+        ),
+        TradeEvent(
+            event_id="manual-close-missing-target",
+            source_type="manual_trade_event",
+            source_name="cli_manual_close",
+            broker="富途",
+            account="lx",
+            symbol="AAPL",
+            option_type="put",
+            side="buy",
+            position_effect="close",
+            contracts=1,
+            price=0.2,
+            strike=150.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            currency="USD",
+            trade_time_ms=2000,
+            order_id=None,
+            multiplier_source="payload",
+            raw_payload={
+                "source": "option_positions.py",
+                "mode": "manual_close",
+                "record_id": "lot_does_not_exist",
+                "close_target_source_event_id": "open-missing",
+                "close_reason": "expired",
+            },
+        ),
+    ]
+
+    lots = project_position_lot_records(events)
+
+    assert len(lots) == 1
+    assert lots[0]["record_id"] == "lot_open-1"
+    assert lots[0]["fields"]["contracts_open"] == 1
+    assert lots[0]["fields"]["contracts_closed"] == 0
+
+
+def test_close_projection_does_not_partially_apply_oversized_explicit_target() -> None:
+    from scripts.option_positions_core.ledger import TradeEvent, project_position_lot_records
+
+    events = [
+        TradeEvent(
+            event_id="open-1",
+            source_type="broker_trade_event",
+            source_name="opend_push",
+            broker="富途",
+            account="lx",
+            symbol="AAPL",
+            option_type="put",
+            side="sell",
+            position_effect="open",
+            contracts=1,
+            price=1.0,
+            strike=150.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            currency="USD",
+            trade_time_ms=1000,
+            order_id="order-1",
+            multiplier_source="payload",
+            raw_payload={"deal_id": "open-1"},
+        ),
+        TradeEvent(
+            event_id="manual-close-oversized-target",
+            source_type="manual_trade_event",
+            source_name="cli_manual_close",
+            broker="富途",
+            account="lx",
+            symbol="AAPL",
+            option_type="put",
+            side="buy",
+            position_effect="close",
+            contracts=2,
+            price=0.2,
+            strike=150.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            currency="USD",
+            trade_time_ms=2000,
+            order_id=None,
+            multiplier_source="payload",
+            raw_payload={
+                "source": "option_positions.py",
+                "mode": "manual_close",
+                "record_id": "lot_open-1",
+                "close_target_source_event_id": "open-1",
+                "close_reason": "expired",
+            },
+        ),
+    ]
+
+    lots = project_position_lot_records(events)
+
+    assert len(lots) == 1
+    assert lots[0]["record_id"] == "lot_open-1"
+    assert lots[0]["fields"]["contracts_open"] == 1
+    assert lots[0]["fields"]["contracts_closed"] == 0
+    assert "last_close_event_id" not in lots[0]["fields"]
+
+
 def test_persist_manual_open_event_builds_position_lot(tmp_path: Path) -> None:
     import scripts.option_positions_core.service as svc
     from scripts.option_positions_core.domain import OpenPositionCommand
@@ -880,6 +1266,11 @@ def test_persist_manual_close_event_updates_position_lot(tmp_path: Path) -> None
     assert len(lots) == 1
     assert lots[0]["fields"]["contracts_open"] == 1
     assert lots[0]["fields"]["contracts_closed"] == 1
+    events = repo.list_trade_events()
+    assert events[-1]["raw_payload"]["record_id"] == "lot_manual"
+    assert events[-1]["raw_payload"]["close_target_source_event_id"] == lots[0]["fields"]["source_event_id"]
+    assert events[-1]["raw_payload"]["close_target_account"] == "lx"
+    assert events[-1]["raw_payload"]["close_target_broker"] == "富途"
 
 
 def test_persist_manual_close_event_requires_broker_on_position_lot(tmp_path: Path) -> None:

@@ -864,6 +864,7 @@ def persist_manual_close_event(
         raise ValueError(f"position lot missing broker: {record_id}")
     multiplier = effective_multiplier(fields)
     strike = effective_strike(fields)
+    target_source_event_id = str(fields.get("source_event_id") or "").strip()
     event = TradeEvent(
         event_id=f"manual-close-{record_id}-{uuid.uuid4().hex}",
         source_type="manual_trade_event",
@@ -887,6 +888,9 @@ def persist_manual_close_event(
             "source": "option_positions.py",
             "mode": "manual_close",
             "record_id": str(record_id),
+            "close_target_source_event_id": target_source_event_id,
+            "close_target_account": str(fields.get("account") or ""),
+            "close_target_broker": broker,
             "close_reason": str(close_reason or ""),
         },
     )
