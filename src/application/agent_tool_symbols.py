@@ -62,6 +62,13 @@ def require_float(payload: dict[str, Any], key: str) -> float:
     return float(value)
 
 
+def optional_float(payload: dict[str, Any], key: str) -> float | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    return float(value)
+
+
 def apply_symbol_mutation(cfg: dict[str, Any], payload: dict[str, Any], *, normalize_accounts, resolve_watchlist_config) -> dict[str, Any]:
     action = str(payload.get("action") or "list").strip().lower()
     symbol = _normalize_symbol(str(payload.get("symbol") or ""))
@@ -82,11 +89,11 @@ def apply_symbol_mutation(cfg: dict[str, Any], payload: dict[str, Any], *, norma
         sell_put_enabled = bool(payload.get("sell_put_enabled", False))
         sell_call_enabled = bool(payload.get("sell_call_enabled", False))
         if sell_put_enabled:
-            for key in ("sell_put_min_dte", "sell_put_max_dte", "sell_put_min_strike", "sell_put_max_strike"):
+            for key in ("sell_put_min_dte", "sell_put_max_dte"):
                 if payload.get(key) is None:
                     raise AgentToolError(code="INPUT_ERROR", message=f"{key} is required when sell_put_enabled=true")
         if sell_call_enabled:
-            for key in ("sell_call_min_dte", "sell_call_max_dte", "sell_call_min_strike"):
+            for key in ("sell_call_min_dte", "sell_call_max_dte"):
                 if payload.get(key) is None:
                     raise AgentToolError(code="INPUT_ERROR", message=f"{key} is required when sell_call_enabled=true")
         entry: dict[str, Any] = {
@@ -97,10 +104,22 @@ def apply_symbol_mutation(cfg: dict[str, Any], payload: dict[str, Any], *, norma
         }
         if sell_put_enabled:
             sell_put_entry = cast(dict[str, Any], entry["sell_put"])
-            sell_put_entry.update({"min_dte": require_int(payload, "sell_put_min_dte"), "max_dte": require_int(payload, "sell_put_max_dte"), "min_strike": require_float(payload, "sell_put_min_strike"), "max_strike": require_float(payload, "sell_put_max_strike")})
+            sell_put_entry.update({"min_dte": require_int(payload, "sell_put_min_dte"), "max_dte": require_int(payload, "sell_put_max_dte")})
+            min_strike = optional_float(payload, "sell_put_min_strike")
+            max_strike = optional_float(payload, "sell_put_max_strike")
+            if min_strike is not None:
+                sell_put_entry["min_strike"] = min_strike
+            if max_strike is not None:
+                sell_put_entry["max_strike"] = max_strike
         if sell_call_enabled:
             sell_call_entry = cast(dict[str, Any], entry["sell_call"])
-            sell_call_entry.update({"min_dte": require_int(payload, "sell_call_min_dte"), "max_dte": require_int(payload, "sell_call_max_dte"), "min_strike": require_float(payload, "sell_call_min_strike")})
+            sell_call_entry.update({"min_dte": require_int(payload, "sell_call_min_dte"), "max_dte": require_int(payload, "sell_call_max_dte")})
+            min_strike = optional_float(payload, "sell_call_min_strike")
+            max_strike = optional_float(payload, "sell_call_max_strike")
+            if min_strike is not None:
+                sell_call_entry["min_strike"] = min_strike
+            if max_strike is not None:
+                sell_call_entry["max_strike"] = max_strike
         if payload.get("broker") is not None:
             entry["broker"] = payload.get("broker")
         if payload.get("use") is not None:

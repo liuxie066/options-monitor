@@ -30,6 +30,7 @@ REMOVED_STRATEGY_FILTER_FIELDS = (
     'max_delta',
 )
 SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS = LIQUIDITY_ALLOWED_GLOBAL_FIELDS + REMOVED_STRATEGY_FILTER_FIELDS + ('event_risk',)
+LEGACY_SELL_CALL_FETCH_FIELDS = ('target_otm_pct_min', 'target_otm_pct_max')
 
 
 def die(msg: str):
@@ -176,6 +177,13 @@ def validate_config(cfg: dict):
                         f"templates.{profile_name}.{side} has unsupported strategy filter keys: "
                         f"{', '.join(bad_keys)}; only {', '.join(LIQUIDITY_ALLOWED_GLOBAL_FIELDS)} are allowed"
                     )
+                if side == 'sell_call':
+                    unsupported_fetch_keys = [k for k in LEGACY_SELL_CALL_FETCH_FIELDS if k in side_cfg]
+                    if unsupported_fetch_keys:
+                        die(
+                            f"templates.{profile_name}.{side} has removed legacy fetch planning keys: "
+                            f"{', '.join(unsupported_fetch_keys)}; use min_strike/max_strike only"
+                        )
 
     seen = set()
     for i, item in enumerate(cfg['symbols']):
@@ -206,31 +214,59 @@ def validate_config(cfg: dict):
             if bad_keys:
                 die(f"{sym}.sell_put has forbidden symbol-level strategy filter keys: {', '.join(bad_keys)}")
         if sp.get('enabled'):
-            for k in ('min_dte','max_dte','min_strike','max_strike'):
+            for k in ('min_dte','max_dte'):
                 if k not in sp:
                     die(f"{sym}.sell_put enabled but missing {k}")
             if sp['min_dte'] > sp['max_dte']:
                 die(f"{sym}.sell_put min_dte > max_dte")
-            if sp['min_strike'] > sp['max_strike']:
+            if ('min_strike' in sp) and (sp['min_strike'] is not None) and (float(sp['min_strike']) <= 0):
+                die(f"{sym}.sell_put min_strike must be > 0; use null or omit it instead of 0")
+            if ('max_strike' in sp) and (sp['max_strike'] is not None) and (float(sp['max_strike']) <= 0):
+                die(f"{sym}.sell_put max_strike must be > 0")
+            if (
+                ('min_strike' in sp) and (sp['min_strike'] is not None)
+                and ('max_strike' in sp) and (sp['max_strike'] is not None)
+                and (float(sp['min_strike']) > float(sp['max_strike']))
+            ):
                 die(f"{sym}.sell_put min_strike > max_strike")
+            if ('min_strike' in sp) and (sp.get('max_strike') is None):
+                warn(f"{sym}.sell_put only sets min_strike; near-bound max_strike is recommended")
 
         sc = item.get('sell_call') or {}
         if isinstance(sc, dict):
             bad_keys = [k for k in SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS if k in sc]
             if bad_keys:
                 die(f"{sym}.sell_call has forbidden symbol-level strategy filter keys: {', '.join(bad_keys)}")
+            unsupported_fetch_keys = [k for k in LEGACY_SELL_CALL_FETCH_FIELDS if k in sc]
+            if unsupported_fetch_keys:
+                die(
+                    f"{sym}.sell_call has removed legacy fetch planning keys: {', '.join(unsupported_fetch_keys)}; "
+                    "use min_strike/max_strike only"
+                )
         if sc.get('enabled'):
             # NOTE:
             # - sell_call cost basis/shares come from account portfolio_context at runtime.
             # - portfolio_context may be backed by OpenD or holdings depending on account/runtime settings.
             # - Therefore, do not require them in config validation.
             # - If portfolio_context is unavailable for an account, pipeline will skip sell_call for that account.
-            for k in ('min_dte', 'max_dte', 'min_strike'):
+            for k in ('min_dte', 'max_dte'):
                 if k not in sc:
                     die(f"{sym}.sell_call enabled but missing {k}")
 
             if sc['min_dte'] > sc['max_dte']:
                 die(f"{sym}.sell_call min_dte > max_dte")
+            if ('min_strike' in sc) and (sc['min_strike'] is not None) and (float(sc['min_strike']) <= 0):
+                die(f"{sym}.sell_call min_strike must be > 0")
+            if ('max_strike' in sc) and (sc['max_strike'] is not None) and (float(sc['max_strike']) <= 0):
+                die(f"{sym}.sell_call max_strike must be > 0 when set")
+            if (
+                ('min_strike' in sc) and (sc['min_strike'] is not None)
+                and ('max_strike' in sc) and (sc['max_strike'] is not None)
+                and (float(sc['min_strike']) > float(sc['max_strike']))
+            ):
+                die(f"{sym}.sell_call min_strike > max_strike")
+            if ('max_strike' in sc) and (sc.get('min_strike') is None):
+                warn(f"{sym}.sell_call only sets max_strike; near-bound min_strike is recommended")
 
 
 def main():

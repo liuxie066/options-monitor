@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.3.7 - 2026-04-30
+
+### Changed
+- Redesigned required-data fetch planning so `sell_put` and `sell_call` derive independent near/far strike bounds before merging compatible OpenD requests, ensuring covered-call target strikes are fetched instead of being filtered only at scan time
+- Removed legacy `target_otm_pct_*` planning semantics, standardized fetch/debug terminology on side-specific near/far bounds, and kept fetch-plan diagnostics backward compatible by emitting both `coverage` and `bounds_coverage`
+
 ## 0.3.6 - 2026-04-29
 
 ### Changed

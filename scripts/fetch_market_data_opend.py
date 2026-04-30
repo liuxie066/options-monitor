@@ -247,7 +247,50 @@ def get_spot_opend(gateway, underlier_code: str) -> float | None:
         return None
 
 
-def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = '127.0.0.1', port: int = 11111, spot_override: float | None = None, *, base_dir: Path | None = None, option_types: str = 'put,call', min_strike: float | None = None, max_strike: float | None = None, min_dte: int | None = None, max_dte: int | None = None, explicit_expirations: list[str] | None = None, retry_max_attempts: int = 4, retry_time_budget_sec: float = 8.0, retry_base_delay_sec: float = 0.8, retry_max_delay_sec: float = 6.0, no_retry: bool = False, chain_cache: bool = False, chain_cache_force_refresh: bool = False) -> dict[str, Any]:
+def get_underlier_spot(symbol: str, *, host: str = "127.0.0.1", port: int = 11111, base_dir: Path | None = None) -> float | None:
+    _ = base_dir
+    gateway = build_ready_futu_gateway(
+        host=host,
+        port=int(port),
+        is_option_chain_cache_enabled=False,
+    )
+    try:
+        return get_spot_opend(gateway, normalize_underlier(symbol).code)
+    finally:
+        try:
+            gateway.close()
+        except Exception:
+            pass
+
+
+def list_option_expirations(symbol: str, *, host: str = "127.0.0.1", port: int = 11111, base_dir: Path | None = None) -> list[str]:
+    _ = base_dir
+    gateway = build_ready_futu_gateway(
+        host=host,
+        port=int(port),
+        is_option_chain_cache_enabled=False,
+    )
+    try:
+        df_e = retry_futu_gateway_call(
+            'get_option_expiration_date',
+            lambda: gateway.get_option_expiration_dates(normalize_underlier(symbol).code),
+            quiet=False,
+        )
+        if df_e is None or df_e.empty:
+            return []
+        return sorted({
+            exp
+            for exp in (normalize_expiration_ymd(x) for x in df_e.get('strike_time').tolist())
+            if exp
+        })
+    finally:
+        try:
+            gateway.close()
+        except Exception:
+            pass
+
+
+def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = '127.0.0.1', port: int = 11111, spot_override: float | None = None, *, base_dir: Path | None = None, option_types: str = 'put,call', min_strike: float | None = None, max_strike: float | None = None, side_strike_windows: dict[str, dict[str, float | None]] | None = None, min_dte: int | None = None, max_dte: int | None = None, explicit_expirations: list[str] | None = None, retry_max_attempts: int = 4, retry_time_budget_sec: float = 8.0, retry_base_delay_sec: float = 0.8, retry_max_delay_sec: float = 6.0, no_retry: bool = False, chain_cache: bool = False, chain_cache_force_refresh: bool = False) -> dict[str, Any]:
     u = normalize_underlier(symbol)
     explicit_expirations_norm = sorted({
         exp
@@ -446,14 +489,41 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
             pass
 
         try:
-            if (min_strike is not None) or (max_strike is not None):
+            if (min_strike is not None) or (max_strike is not None) or side_strike_windows:
                 if 'strike_price' in chain.columns:
                     sp = pd.to_numeric(chain['strike_price'], errors='coerce')
-                    if min_strike is not None:
-                        chain = chain[sp >= float(min_strike)].copy()
-                        sp = pd.to_numeric(chain['strike_price'], errors='coerce')
-                    if max_strike is not None:
-                        chain = chain[sp <= float(max_strike)].copy()
+                    if side_strike_windows:
+                        def _row_keep(raw_option_type, raw_strike) -> bool:
+                            strike_v = to_float(raw_strike)
+                            if strike_v is None:
+                                return False
+                            opt = str(raw_option_type or '').lower()
+                            if opt not in ('put', 'call'):
+                                if 'put' in opt:
+                                    opt = 'put'
+                                elif 'call' in opt:
+                                    opt = 'call'
+                            side_window = (side_strike_windows or {}).get(opt) if opt else None
+                            side_min = to_float((side_window or {}).get('min_strike')) if isinstance(side_window, dict) else None
+                            side_max = to_float((side_window or {}).get('max_strike')) if isinstance(side_window, dict) else None
+                            effective_min = side_min if side_min is not None else min_strike
+                            effective_max = side_max if side_max is not None else max_strike
+                            if effective_min is not None and strike_v < float(effective_min):
+                                return False
+                            if effective_max is not None and strike_v > float(effective_max):
+                                return False
+                            return True
+                        mask = [
+                            _row_keep(raw_option_type, raw_strike)
+                            for raw_option_type, raw_strike in zip(chain.get('option_type'), chain.get('strike_price'))
+                        ]
+                        chain = chain[mask].copy()
+                    else:
+                        if min_strike is not None:
+                            chain = chain[sp >= float(min_strike)].copy()
+                            sp = pd.to_numeric(chain['strike_price'], errors='coerce')
+                        if max_strike is not None:
+                            chain = chain[sp <= float(max_strike)].copy()
         except Exception:
             pass
 
@@ -549,9 +619,14 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
 
             # Filter by strike range (best-effort)
             if strike is not None:
-                if (min_strike is not None) and (strike < float(min_strike)):
+                side_window = (side_strike_windows or {}).get(option_type) if option_type else None
+                side_min = to_float((side_window or {}).get('min_strike')) if isinstance(side_window, dict) else None
+                side_max = to_float((side_window or {}).get('max_strike')) if isinstance(side_window, dict) else None
+                effective_min = side_min if side_min is not None else min_strike
+                effective_max = side_max if side_max is not None else max_strike
+                if (effective_min is not None) and (strike < float(effective_min)):
                     continue
-                if (max_strike is not None) and (strike > float(max_strike)):
+                if (effective_max is not None) and (strike > float(effective_max)):
                     continue
 
             srow = snap_map.get(opt_code)
@@ -628,6 +703,7 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
                 'port': port,
                 'option_codes': len(option_codes),
                 'snapshots_rows': int(len(snap_map)),
+                'side_strike_windows': side_strike_windows or {},
             },
         }
     except Exception as e:

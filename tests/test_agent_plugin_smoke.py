@@ -938,6 +938,41 @@ def test_manage_symbols_write_applies_when_enabled(monkeypatch, tmp_path: Path) 
     assert "market" not in added
 
 
+def test_manage_symbols_add_allows_single_near_bound_modes(monkeypatch, tmp_path: Path) -> None:
+    from scripts.agent_plugin.main import run_tool
+
+    cfg_path = tmp_path / "config.us.json"
+    cfg_path.write_text(json.dumps(_minimal_cfg(), ensure_ascii=False, indent=2), encoding="utf-8")
+    monkeypatch.setenv("OM_AGENT_ENABLE_WRITE_TOOLS", "true")
+
+    out = run_tool(
+        "manage_symbols",
+        {
+            "config_path": str(cfg_path),
+            "action": "add",
+            "symbol": "TSLA",
+            "broker": "US",
+            "sell_put_enabled": True,
+            "sell_put_min_dte": 20,
+            "sell_put_max_dte": 45,
+            "sell_put_max_strike": 120,
+            "sell_call_enabled": True,
+            "sell_call_min_dte": 20,
+            "sell_call_max_dte": 45,
+            "sell_call_min_strike": 140,
+            "confirm": True,
+        },
+    )
+    assert out["ok"] is True
+
+    current = json.loads(cfg_path.read_text(encoding="utf-8"))
+    added = next(item for item in current["symbols"] if item["symbol"] == "TSLA")
+    assert added["sell_put"]["max_strike"] == 120
+    assert "min_strike" not in added["sell_put"]
+    assert added["sell_call"]["min_strike"] == 140
+    assert "max_strike" not in added["sell_call"]
+
+
 def test_preview_notification_is_read_only() -> None:
     from scripts.agent_plugin.main import run_tool
 

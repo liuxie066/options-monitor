@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from src.application.required_data_planning import build_required_data_fetch_plan
+
 
 @dataclass(frozen=True)
 class SymbolMonitoringInputs:
@@ -31,30 +33,6 @@ class SymbolMonitoringDependencies:
     empty_sell_put_summary_fn: Callable[..., dict]
     run_sell_call_scan_fn: Callable[..., dict]
     empty_sell_call_summary_fn: Callable[..., dict]
-
-
-def _resolve_dte_window(*, want_put: bool, want_call: bool, sp: dict, cc: dict) -> tuple[int | None, int | None]:
-    try:
-        min_dte = int(max(
-            float(sp.get("min_dte") or 0) if want_put else 0,
-            float(cc.get("min_dte") or 0) if want_call else 0,
-            0,
-        ))
-    except Exception:
-        min_dte = None
-
-    try:
-        max_dte = int(max(
-            float(sp.get("max_dte") or 0) if want_put else 0,
-            float(cc.get("max_dte") or 0) if want_call else 0,
-            0,
-        ))
-        if max_dte <= 0:
-            max_dte = None
-    except Exception:
-        max_dte = None
-
-    return min_dte, max_dte
 
 
 def run_symbol_monitoring(
@@ -103,11 +81,17 @@ def run_symbol_monitoring(
         pass
 
     fetch_cfg = dict(symbol_cfg.get("fetch", {}) or {})
-    min_dte, max_dte = _resolve_dte_window(
+    fetch_plan = build_required_data_fetch_plan(
+        base=inputs.base,
+        required_data_dir=inputs.required_data_dir,
+        symbol=symbol,
+        limit_expirations=int(limit_expirations),
         want_put=want_put,
         want_call=want_call,
-        sp=sp,
-        cc=cc,
+        sell_put_cfg=sp,
+        sell_call_cfg=cc,
+        fetch_host=str(fetch_cfg.get("host") or "127.0.0.1"),
+        fetch_port=int(fetch_cfg.get("port") or 11111),
     )
 
     deps.ensure_required_data_fn(
@@ -125,8 +109,10 @@ def run_symbol_monitoring(
         fetch_host=str(fetch_cfg.get("host") or "127.0.0.1"),
         fetch_port=int(fetch_cfg.get("port") or 11111),
         max_strike=(float(sp.get("max_strike")) if (want_put and sp.get("max_strike") is not None) else None),
-        min_dte=min_dte,
-        max_dte=max_dte,
+        min_dte=None,
+        max_dte=None,
+        fetch_plan=fetch_plan,
+        report_dir=inputs.report_dir,
     )
 
     summary_rows: list[dict] = []
