@@ -95,6 +95,123 @@ def test_option_positions_cli_rebuild_reports_summary(monkeypatch, tmp_path: Pat
     assert "[DONE] rebuilt position_lots" in out
     assert "trade_events=1" in out
     assert "position_lots=1" in out
+    assert "unmatched_explicit_close=0" in out
+
+
+def test_option_positions_cli_inspect_reports_projection_state(monkeypatch, tmp_path: Path, capsys) -> None:
+    import scripts.option_positions as cli_mod
+    import scripts.option_positions_core.service as svc
+    from scripts.option_positions_core.domain import OpenPositionCommand
+
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
+    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    repo.data_config_path = data_config  # type: ignore[attr-defined]
+    svc.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="TSLA",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=100.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            premium_per_share=1.23,
+            opened_at_ms=1000,
+        ),
+    )
+    lot = repo.list_position_lots()[0]
+    patched_fields = dict(lot["fields"])
+    patched_fields["feishu_record_id"] = "rec_sync_1"
+    repo.update_position_lot_fields(lot["record_id"], patched_fields)
+
+    monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "option_positions.py",
+            "--data-config",
+            str(data_config),
+            "inspect",
+            "--feishu-record-id",
+            "rec_sync_1",
+        ],
+    )
+
+    cli_mod.main()
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["matched_record_ids"] == [lot["record_id"]]
+    assert payload["current_lots"][0]["fields"]["feishu_record_id"] == "rec_sync_1"
+    assert payload["projected_lots"][0]["record_id"] == lot["record_id"]
+    assert payload["related_events"][0]["event_id"].startswith("manual-open-")
+
+
+def test_option_positions_cli_inspect_reports_orphan_close_event_diagnostics(monkeypatch, tmp_path: Path, capsys) -> None:
+    import scripts.option_positions as cli_mod
+    import scripts.option_positions_core.service as svc
+    from scripts.option_positions_core.ledger import TradeEvent
+
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
+    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    repo.data_config_path = data_config  # type: ignore[attr-defined]
+    svc._persist_trade_event_object(
+        repo,
+        TradeEvent(
+            event_id="manual-close-missing-lot",
+            source_type="manual_trade_event",
+            source_name="cli_manual_close",
+            broker="富途",
+            account="sy",
+            symbol="0700.HK",
+            option_type="put",
+            side="buy",
+            position_effect="close",
+            contracts=1,
+            price=1.2,
+            strike=480.0,
+            multiplier=100,
+            expiration_ymd="2026-04-29",
+            currency="HKD",
+            trade_time_ms=2000,
+            order_id=None,
+            multiplier_source="payload",
+            raw_payload={
+                "source": "option_positions.py",
+                "mode": "manual_close",
+                "record_id": "rec_missing",
+                "close_target_source_event_id": "open-missing",
+                "close_reason": "expired",
+            },
+        ),
+    )
+
+    monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "option_positions.py",
+            "--data-config",
+            str(data_config),
+            "inspect",
+            "--record-id",
+            "rec_missing",
+        ],
+    )
+
+    cli_mod.main()
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["matched_record_ids"] == []
+    assert payload["current_lots"] == []
+    assert payload["projected_lots"] == []
+    assert payload["related_events"][0]["event_id"] == "manual-close-missing-lot"
+    assert payload["projection_diagnostics"][0]["code"] == "close_explicit_target_not_found"
 
 
 def test_option_positions_cli_list_filters_by_local_expiration(monkeypatch, tmp_path: Path, capsys) -> None:

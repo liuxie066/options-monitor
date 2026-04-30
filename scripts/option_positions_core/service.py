@@ -24,7 +24,13 @@ from scripts.option_positions_core.domain import (
     normalize_broker,
     now_ms,
 )
-from scripts.option_positions_core.ledger import TradeEvent, project_position_lot_records, trade_event_from_normalized_deal
+from scripts.option_positions_core.ledger import (
+    ProjectionDiagnostic,
+    TradeEvent,
+    project_position_lot_records,
+    project_position_lot_records_with_diagnostics,
+    trade_event_from_normalized_deal,
+)
 
 
 REPO_BASE = Path(__file__).resolve().parents[2]
@@ -290,6 +296,37 @@ PRESERVED_POSITION_LOT_META_KEYS = (
     "feishu_sync_hash",
     "feishu_last_synced_at_ms",
 )
+
+
+def _sync_meta_only_patch(existing_fields: dict[str, Any], candidate_fields: dict[str, Any]) -> dict[str, Any]:
+    patched = dict(existing_fields)
+    for key in PRESERVED_POSITION_LOT_META_KEYS:
+        if key in candidate_fields:
+            value = candidate_fields.get(key)
+            if value in (None, ""):
+                patched.pop(key, None)
+            else:
+                patched[key] = value
+    return patched
+
+
+def _projection_diagnostics_summary(diagnostics: list[ProjectionDiagnostic]) -> dict[str, Any]:
+    explicit_close_codes = {
+        "close_explicit_target_not_found",
+        "close_explicit_target_conflict",
+        "close_explicit_target_already_closed",
+        "close_explicit_target_mismatch",
+        "close_explicit_target_oversized",
+        "close_explicit_source_event_target_not_found",
+        "close_explicit_source_event_target_already_closed",
+        "close_explicit_source_event_target_mismatch",
+        "close_explicit_source_event_target_oversized",
+    }
+    return {
+        "projection_diagnostic_count": int(len(diagnostics)),
+        "unmatched_explicit_close_count": int(sum(1 for item in diagnostics if item.code in explicit_close_codes)),
+        "projection_diagnostics": [item.to_dict() for item in diagnostics],
+    }
 
 
 def _merge_preserved_position_lot_metadata(
@@ -586,9 +623,10 @@ class SQLiteOptionPositionsRepository:
             raise ValueError("record_id is required")
         if not isinstance(fields, dict):
             raise TypeError("fields must be a dict")
-        _validate_position_lot_fields(record_id=normalized_record_id, fields=fields)
+        existing_fields = self.get_position_lot_fields(normalized_record_id)
+        patched_fields = _sync_meta_only_patch(existing_fields, fields)
         ts = int(now_ms())
-        expiration_ms, strike, multiplier = _position_lot_contract_scalars(fields)
+        expiration_ms, strike, multiplier = _position_lot_contract_scalars(patched_fields)
         with self._connect() as conn:
             updated = conn.execute(
                 """
@@ -597,8 +635,8 @@ class SQLiteOptionPositionsRepository:
                 WHERE record_id = ?
                 """,
                 (
-                    json.dumps(fields, ensure_ascii=False, sort_keys=True),
-                    (str(fields.get("source_event_id")) if fields.get("source_event_id") else None),
+                    json.dumps(patched_fields, ensure_ascii=False, sort_keys=True),
+                    (str(patched_fields.get("source_event_id")) if patched_fields.get("source_event_id") else None),
                     int(expiration_ms) if expiration_ms is not None else None,
                     float(strike) if strike is not None else None,
                     float(multiplier) if multiplier is not None else None,
@@ -742,6 +780,39 @@ def require_option_positions_event_write_repo(repo: Any) -> OptionPositionsEvent
     raise TypeError("option_positions repo does not satisfy event write repository interface")
 
 
+def _assert_position_lot_target_matches_current_state(
+    repo: Any,
+    *,
+    record_id: str,
+    fields: dict[str, Any],
+    operation: str,
+) -> dict[str, Any]:
+    get_record_fields = getattr(repo, "get_record_fields", None)
+    if not callable(get_record_fields):
+        raise TypeError("option_positions repo does not expose get_record_fields")
+    current_fields = get_record_fields(str(record_id))
+    comparisons = (
+        ("broker", normalize_broker(current_fields.get("broker")), normalize_broker(fields.get("broker"))),
+        ("account", str(current_fields.get("account") or "").strip(), str(fields.get("account") or "").strip()),
+        ("symbol", str(current_fields.get("symbol") or "").strip().upper(), str(fields.get("symbol") or "").strip().upper()),
+        ("option_type", str(current_fields.get("option_type") or "").strip().lower(), str(fields.get("option_type") or "").strip().lower()),
+        ("side", str(current_fields.get("side") or "").strip().lower(), str(fields.get("side") or "").strip().lower()),
+        ("currency", str(current_fields.get("currency") or "").strip().upper(), str(fields.get("currency") or "").strip().upper()),
+        ("strike", effective_strike(current_fields), effective_strike(fields)),
+        ("expiration_ymd", effective_expiration_ymd(current_fields), effective_expiration_ymd(fields)),
+        (
+            "source_event_id",
+            str(current_fields.get("source_event_id") or "").strip(),
+            str(fields.get("source_event_id") or "").strip(),
+        ),
+    )
+    mismatches = [name for name, left, right in comparisons if left != right]
+    if mismatches:
+        joined = ", ".join(mismatches)
+        raise ValueError(f"{operation} target fields do not match current lot state: {record_id} ({joined})")
+    return current_fields
+
+
 def _with_sqlite_repo_transaction(repo: Any, fn: Any) -> Any:
     sqlite_repo = require_option_positions_event_write_repo(repo)
     conn = sqlite_repo._connect() if isinstance(sqlite_repo, SQLiteOptionPositionsRepository) else None
@@ -764,16 +835,16 @@ def rebuild_position_lots_from_trade_events(repo: Any) -> dict[str, Any]:
         if conn is not None:
             existing_rows = sqlite_repo.list_position_lots()
             events = sqlite_repo.list_trade_events(conn=conn)
-            projected = project_position_lot_records(events)
-            merged = _merge_preserved_position_lot_metadata(projected, existing_rows)
+            projection = project_position_lot_records_with_diagnostics(events)
+            merged = _merge_preserved_position_lot_metadata(projection.lots, existing_rows)
             inserted = sqlite_repo.replace_position_lots(merged, conn=conn)
         else:
             existing_rows = sqlite_repo.list_position_lots()
             events = sqlite_repo.list_trade_events()
-            projected = project_position_lot_records(events)
-            merged = _merge_preserved_position_lot_metadata(projected, existing_rows)
+            projection = project_position_lot_records_with_diagnostics(events)
+            merged = _merge_preserved_position_lot_metadata(projection.lots, existing_rows)
             inserted = sqlite_repo.replace_position_lots(merged)
-        return {
+        result = {
             "trade_event_count": int(len(events)),
             "position_lot_count": int(inserted),
             "preserved_sync_meta_record_count": int(
@@ -784,6 +855,8 @@ def rebuild_position_lots_from_trade_events(repo: Any) -> dict[str, Any]:
                 )
             ),
         }
+        result.update(_projection_diagnostics_summary(projection.diagnostics))
+        return result
 
     return _with_sqlite_repo_transaction(repo, _run)
 
@@ -793,16 +866,18 @@ def _persist_trade_event_object(repo: Any, event: TradeEvent) -> dict[str, Any]:
         if conn is not None:
             created = sqlite_repo.upsert_trade_event(event, conn=conn)
             existing_rows = sqlite_repo.list_position_lots()
-            projected = project_position_lot_records(sqlite_repo.list_trade_events(conn=conn))
-            records = _merge_preserved_position_lot_metadata(projected, existing_rows)
+            projection = project_position_lot_records_with_diagnostics(sqlite_repo.list_trade_events(conn=conn))
+            records = _merge_preserved_position_lot_metadata(projection.lots, existing_rows)
             lot_count = sqlite_repo.replace_position_lots(records, conn=conn)
         else:
             created = sqlite_repo.upsert_trade_event(event)
             existing_rows = sqlite_repo.list_position_lots()
-            projected = project_position_lot_records(sqlite_repo.list_trade_events())
-            records = _merge_preserved_position_lot_metadata(projected, existing_rows)
+            projection = project_position_lot_records_with_diagnostics(sqlite_repo.list_trade_events())
+            records = _merge_preserved_position_lot_metadata(projection.lots, existing_rows)
             lot_count = sqlite_repo.replace_position_lots(records)
-        record_id = next(
+        payload = event.raw_payload or {}
+        explicit_record_id = str(payload.get("record_id") or "").strip()
+        record_id = explicit_record_id or next(
             (
                 str(item.get("record_id") or "").strip()
                 for item in records
@@ -810,12 +885,14 @@ def _persist_trade_event_object(repo: Any, event: TradeEvent) -> dict[str, Any]:
             ),
             "",
         )
-        return {
+        result = {
             "event_id": event.event_id,
             "record_id": record_id or None,
             "created": bool(created),
             "position_lot_count": int(lot_count),
         }
+        result.update(_projection_diagnostics_summary(projection.diagnostics))
+        return result
 
     return _with_sqlite_repo_transaction(repo, _run)
 
@@ -862,6 +939,12 @@ def persist_manual_close_event(
     broker = normalize_broker(fields.get("broker"))
     if not broker:
         raise ValueError(f"position lot missing broker: {record_id}")
+    fields = _assert_position_lot_target_matches_current_state(
+        repo,
+        record_id=record_id,
+        fields=fields,
+        operation="manual_close",
+    )
     multiplier = effective_multiplier(fields)
     strike = effective_strike(fields)
     target_source_event_id = str(fields.get("source_event_id") or "").strip()
@@ -960,9 +1043,13 @@ def persist_manual_adjust_event(
     opened_at_ms: int | None = None,
     as_of_ms: int | None = None,
 ) -> dict[str, Any]:
+    fields = _assert_position_lot_target_matches_current_state(
+        repo,
+        record_id=record_id,
+        fields=fields,
+        operation="manual_adjust",
+    )
     target_source_event_id = str(fields.get("source_event_id") or "").strip()
-    if not target_source_event_id:
-        raise ValueError(f"position lot missing source_event_id: {record_id}")
     patch = build_open_adjustment_patch(
         fields,
         contracts=contracts,
@@ -996,7 +1083,7 @@ def persist_manual_adjust_event(
             "source": "option_positions.py",
             "mode": "manual_adjust",
             "record_id": str(record_id),
-            "adjust_target_source_event_id": target_source_event_id,
+            "adjust_target_source_event_id": target_source_event_id or None,
             "patch": patch,
         },
     )

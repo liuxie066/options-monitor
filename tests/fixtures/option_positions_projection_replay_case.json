@@ -1,0 +1,103 @@
+{
+  "events": [
+    {
+      "event_id": "bootstrap:sy:fixture",
+      "source_type": "bootstrap_snapshot",
+      "source_name": "feishu_bootstrap",
+      "broker": "富途",
+      "account": "sy",
+      "symbol": "0700.HK",
+      "option_type": "put",
+      "side": "sell",
+      "position_effect": "open",
+      "contracts": 2,
+      "price": 3.93,
+      "strike": 480.0,
+      "multiplier": 100,
+      "expiration_ymd": "2026-04-29",
+      "currency": "HKD",
+      "trade_time_ms": 1000,
+      "order_id": null,
+      "multiplier_source": "bootstrap_snapshot",
+      "raw_payload": {
+        "lot_record_id": "rec_sy_fixture",
+        "fields": {
+          "broker": "富途",
+          "account": "sy",
+          "symbol": "0700.HK",
+          "option_type": "put",
+          "side": "short",
+          "contracts": 2,
+          "contracts_open": 2,
+          "contracts_closed": 0,
+          "status": "open",
+          "currency": "HKD",
+          "strike": 480.0,
+          "expiration": 1777420800000,
+          "opened_at": 1000,
+          "last_action_at": 1000,
+          "position_id": "0700.HK_20260429_480P_short",
+          "note": "exp=2026-04-29;premium_per_share=3.93",
+          "premium": 3.93
+        }
+      }
+    },
+    {
+      "event_id": "manual-close-rec-sy-fixture-1",
+      "source_type": "manual_trade_event",
+      "source_name": "cli_manual_close",
+      "broker": "富途",
+      "account": "sy",
+      "symbol": "0700.HK",
+      "option_type": "put",
+      "side": "buy",
+      "position_effect": "close",
+      "contracts": 1,
+      "price": 1.2,
+      "strike": 480.0,
+      "multiplier": 100,
+      "expiration_ymd": "2026-04-29",
+      "currency": "HKD",
+      "trade_time_ms": 2000,
+      "order_id": null,
+      "multiplier_source": "payload",
+      "raw_payload": {
+        "source": "option_positions.py",
+        "mode": "manual_close",
+        "record_id": "rec_sy_fixture",
+        "close_target_source_event_id": "bootstrap:sy:fixture",
+        "close_reason": "expired"
+      }
+    },
+    {
+      "event_id": "manual-close-rec-sy-fixture-2",
+      "source_type": "manual_trade_event",
+      "source_name": "cli_manual_close",
+      "broker": "富途",
+      "account": "sy",
+      "symbol": "0700.HK",
+      "option_type": "put",
+      "side": "buy",
+      "position_effect": "close",
+      "contracts": 1,
+      "price": 0.8,
+      "strike": 480.0,
+      "multiplier": 100,
+      "expiration_ymd": "2026-04-29",
+      "currency": "HKD",
+      "trade_time_ms": 3000,
+      "order_id": null,
+      "multiplier_source": "payload",
+      "raw_payload": {
+        "source": "option_positions.py",
+        "mode": "manual_close",
+        "record_id": "rec_sy_fixture",
+        "close_target_source_event_id": "bootstrap:sy:fixture",
+        "close_reason": "expired"
+      }
+    }
+  ],
+  "expected": {
+    "record_id": "rec_sy_fixture"
+  }
+}

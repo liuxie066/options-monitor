@@ -741,6 +741,110 @@ def test_rebuild_position_lots_applies_legacy_manual_close_to_bootstrap_seed(tmp
     assert lots[0]["fields"]["contracts_closed"] == 1
     assert lots[0]["fields"]["status"] == "close"
     assert lots[0]["fields"]["last_close_event_id"] == "manual-close-rec-lx-seed"
+    assert result["unmatched_explicit_close_count"] == 0
+
+
+def test_rebuild_position_lots_closes_bootstrap_seed_by_record_id_even_if_live_projection_source_event_id_drifted(
+    tmp_path: Path,
+) -> None:
+    import scripts.option_positions_core.service as svc
+    from scripts.option_positions_core.ledger import TradeEvent
+
+    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    svc._persist_trade_event_object(
+        repo,
+        TradeEvent(
+            event_id="bootstrap:lx:seed",
+            source_type="bootstrap_snapshot",
+            source_name="feishu_bootstrap",
+            broker="富途",
+            account="lx",
+            symbol="AAPL",
+            option_type="put",
+            side="sell",
+            position_effect="open",
+            contracts=1,
+            price=1.0,
+            strike=150.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            currency="USD",
+            trade_time_ms=1000,
+            order_id=None,
+            multiplier_source="bootstrap_snapshot",
+            raw_payload={
+                "lot_record_id": "rec_lx_seed",
+                "fields": {
+                    "broker": "富途",
+                    "account": "lx",
+                    "symbol": "AAPL",
+                    "option_type": "put",
+                    "side": "short",
+                    "contracts": 1,
+                    "contracts_open": 1,
+                    "contracts_closed": 0,
+                    "status": "open",
+                    "currency": "USD",
+                    "strike": 150.0,
+                    "expiration": 1781827200000,
+                    "opened_at": 1000,
+                    "last_action_at": 1000,
+                    "position_id": "AAPL_20260619_150P_short",
+                    "note": "exp=2026-06-19;premium_per_share=1.0",
+                    "premium": 1.0,
+                },
+            },
+        ),
+    )
+    svc._persist_trade_event_object(
+        repo,
+        TradeEvent(
+            event_id="manual-close-rec-lx-seed",
+            source_type="manual_trade_event",
+            source_name="cli_manual_close",
+            broker="富途",
+            account="lx",
+            symbol="AAPL",
+            option_type="put",
+            side="buy",
+            position_effect="close",
+            contracts=1,
+            price=0.0,
+            strike=150.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            currency="USD",
+            trade_time_ms=2000,
+            order_id=None,
+            multiplier_source="payload",
+            raw_payload={
+                "source": "option_positions.py",
+                "mode": "manual_close",
+                "record_id": "rec_lx_seed",
+                "close_target_source_event_id": "bootstrap:lx:seed",
+                "close_reason": "expired",
+            },
+        ),
+    )
+    with repo._connect() as conn:  # type: ignore[attr-defined]
+        conn.execute(
+            """
+            UPDATE position_lots
+            SET fields_json = json_set(fields_json, '$.source_event_id', 'legacy-drifted-open-event'),
+                source_event_id = 'legacy-drifted-open-event'
+            WHERE record_id = 'rec_lx_seed'
+            """
+        )
+        conn.commit()
+
+    result = svc.rebuild_position_lots_from_trade_events(repo)
+
+    lot = repo.list_position_lots()[0]
+    assert lot["record_id"] == "rec_lx_seed"
+    assert lot["fields"]["contracts_open"] == 0
+    assert lot["fields"]["contracts_closed"] == 1
+    assert lot["fields"]["status"] == "close"
+    assert result["unmatched_explicit_close_count"] == 0
 
 
 def test_close_projection_does_not_cross_match_other_account_seed_lot(tmp_path: Path) -> None:
@@ -1194,6 +1298,89 @@ def test_close_projection_does_not_partially_apply_oversized_explicit_target() -
     assert "last_close_event_id" not in lots[0]["fields"]
 
 
+def test_close_projection_reports_conflict_when_record_id_and_source_event_target_disagree() -> None:
+    from scripts.option_positions_core.ledger import TradeEvent, project_position_lot_records_with_diagnostics
+
+    events = [
+        TradeEvent(
+            event_id="open-1",
+            source_type="broker_trade_event",
+            source_name="opend_push",
+            broker="富途",
+            account="lx",
+            symbol="AAPL",
+            option_type="put",
+            side="sell",
+            position_effect="open",
+            contracts=1,
+            price=1.0,
+            strike=150.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            currency="USD",
+            trade_time_ms=1000,
+            order_id="order-1",
+            multiplier_source="payload",
+            raw_payload={"deal_id": "open-1"},
+        ),
+        TradeEvent(
+            event_id="open-2",
+            source_type="broker_trade_event",
+            source_name="opend_push",
+            broker="富途",
+            account="lx",
+            symbol="AAPL",
+            option_type="put",
+            side="sell",
+            position_effect="open",
+            contracts=1,
+            price=1.1,
+            strike=150.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            currency="USD",
+            trade_time_ms=1100,
+            order_id="order-2",
+            multiplier_source="payload",
+            raw_payload={"deal_id": "open-2"},
+        ),
+        TradeEvent(
+            event_id="manual-close-conflict",
+            source_type="manual_trade_event",
+            source_name="cli_manual_close",
+            broker="富途",
+            account="lx",
+            symbol="AAPL",
+            option_type="put",
+            side="buy",
+            position_effect="close",
+            contracts=1,
+            price=0.2,
+            strike=150.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            currency="USD",
+            trade_time_ms=2000,
+            order_id=None,
+            multiplier_source="payload",
+            raw_payload={
+                "source": "option_positions.py",
+                "mode": "manual_close",
+                "record_id": "lot_open-2",
+                "close_target_source_event_id": "open-1",
+                "close_reason": "expired",
+            },
+        ),
+    ]
+
+    projection = project_position_lot_records_with_diagnostics(events)
+    lots_by_id = {row["record_id"]: row["fields"] for row in projection.lots}
+
+    assert lots_by_id["lot_open-1"]["contracts_open"] == 1
+    assert lots_by_id["lot_open-2"]["contracts_open"] == 1
+    assert any(item.code == "close_explicit_target_conflict" for item in projection.diagnostics)
+
+
 def test_persist_manual_open_event_builds_position_lot(tmp_path: Path) -> None:
     import scripts.option_positions_core.service as svc
     from scripts.option_positions_core.domain import OpenPositionCommand
@@ -1250,10 +1437,11 @@ def test_persist_manual_close_event_updates_position_lot(tmp_path: Path) -> None
         ),
     )
 
-    fields = repo.list_position_lots()[0]["fields"]
+    lot = repo.list_position_lots()[0]
+    fields = lot["fields"]
     result = svc.persist_manual_close_event(
         repo,
-        record_id="lot_manual",
+        record_id=lot["record_id"],
         fields=fields,
         contracts_to_close=1,
         close_price=1.2,
@@ -1267,7 +1455,7 @@ def test_persist_manual_close_event_updates_position_lot(tmp_path: Path) -> None
     assert lots[0]["fields"]["contracts_open"] == 1
     assert lots[0]["fields"]["contracts_closed"] == 1
     events = repo.list_trade_events()
-    assert events[-1]["raw_payload"]["record_id"] == "lot_manual"
+    assert events[-1]["raw_payload"]["record_id"] == lot["record_id"]
     assert events[-1]["raw_payload"]["close_target_source_event_id"] == lots[0]["fields"]["source_event_id"]
     assert events[-1]["raw_payload"]["close_target_account"] == "lx"
     assert events[-1]["raw_payload"]["close_target_broker"] == "富途"
@@ -1298,6 +1486,60 @@ def test_persist_manual_close_event_requires_broker_on_position_lot(tmp_path: Pa
             },
             contracts_to_close=1,
             close_price=1.2,
+            close_reason="manual_buy_to_close",
+            as_of_ms=2000,
+        )
+
+
+def test_persist_manual_close_event_rejects_mismatched_record_id_and_fields(tmp_path: Path) -> None:
+    import pytest
+    import scripts.option_positions_core.service as svc
+    from scripts.option_positions_core.domain import OpenPositionCommand
+
+    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    svc.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="AAPL",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=150.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            premium_per_share=1.0,
+            opened_at_ms=1000,
+        ),
+    )
+    svc.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="NVDA",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=100.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            premium_per_share=1.1,
+            opened_at_ms=1100,
+        ),
+    )
+    lots = repo.list_position_lots()
+
+    with pytest.raises(ValueError, match="manual_close target fields do not match current lot state"):
+        svc.persist_manual_close_event(
+            repo,
+            record_id=lots[0]["record_id"],
+            fields=lots[1]["fields"],
+            contracts_to_close=1,
+            close_price=0.5,
             close_reason="manual_buy_to_close",
             as_of_ms=2000,
         )
@@ -1437,6 +1679,58 @@ def test_persist_manual_adjust_event_updates_position_lot_projection(tmp_path: P
     assert adjusted["cash_secured_amount"] == 21000.0
 
 
+def test_persist_manual_adjust_event_rejects_mismatched_record_id_and_fields(tmp_path: Path) -> None:
+    import pytest
+    import scripts.option_positions_core.service as svc
+    from scripts.option_positions_core.domain import OpenPositionCommand
+
+    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    svc.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="AAPL",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=150.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            premium_per_share=1.0,
+            opened_at_ms=1000,
+        ),
+    )
+    svc.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="NVDA",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=100.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            premium_per_share=1.1,
+            opened_at_ms=1100,
+        ),
+    )
+    lots = repo.list_position_lots()
+
+    with pytest.raises(ValueError, match="manual_adjust target fields do not match current lot state"):
+        svc.persist_manual_adjust_event(
+            repo,
+            record_id=lots[0]["record_id"],
+            fields=lots[1]["fields"],
+            premium_per_share=2.0,
+            as_of_ms=2000,
+        )
+
+
 def test_voiding_adjust_event_restores_prior_projection_state(tmp_path: Path) -> None:
     import scripts.option_positions_core.service as svc
     from scripts.option_positions_core.domain import OpenPositionCommand
@@ -1559,13 +1853,14 @@ def test_update_position_lot_fields_updates_single_row_and_sync_metadata(tmp_pat
     assert updated["feishu_record_id"] == "rec_test_1"
     assert updated["feishu_sync_hash"] == "hash_1"
     assert updated["feishu_last_synced_at_ms"] == 2222
+    assert updated["source_event_id"] == lot["fields"]["source_event_id"]
     with repo._connect() as conn:  # type: ignore[attr-defined]
         row = conn.execute(
             "SELECT source_event_id FROM position_lots WHERE record_id = ?",
             (lot["record_id"],),
         ).fetchone()
     assert row is not None
-    assert row["source_event_id"] == "manual-open-event-1"
+    assert row["source_event_id"] == lot["fields"]["source_event_id"]
 
 
 def test_replace_position_lots_skips_incomplete_option_lots(tmp_path: Path) -> None:
@@ -1620,8 +1915,7 @@ def test_replace_position_lots_skips_incomplete_option_lots(tmp_path: Path) -> N
     assert record_ids == {"lot_good_option", "lot_non_option"}
 
 
-def test_update_position_lot_fields_rejects_incomplete_option_lot(tmp_path: Path) -> None:
-    import pytest
+def test_update_position_lot_fields_ignores_non_sync_business_mutations(tmp_path: Path) -> None:
     import scripts.option_positions_core.service as svc
     from scripts.option_positions_core.domain import OpenPositionCommand
 
@@ -1646,8 +1940,35 @@ def test_update_position_lot_fields_rejects_incomplete_option_lot(tmp_path: Path
 
     lot = repo.list_position_lots()[0]
     patched_fields = dict(lot["fields"])
-    patched_fields["expiration"] = ""
-    patched_fields["strike"] = None
+    patched_fields["contracts_open"] = 0
+    patched_fields["status"] = "close"
+    repo.update_position_lot_fields(lot["record_id"], patched_fields)
 
-    with pytest.raises(ValueError, match="incomplete option position lot"):
-        repo.update_position_lot_fields(lot["record_id"], patched_fields)
+    refreshed = repo.get_position_lot_fields(lot["record_id"])
+    assert refreshed["contracts_open"] == lot["fields"]["contracts_open"]
+    assert refreshed["status"] == lot["fields"]["status"]
+
+
+def test_projection_replay_fixture_closes_lot_and_excludes_it_from_open_context(tmp_path: Path) -> None:
+    import scripts.option_positions_core.service as svc
+    from scripts.fetch_option_positions_context import build_context
+    from scripts.option_positions_core.ledger import TradeEvent
+
+    fixture_path = BASE / "tests" / "fixtures" / "option_positions_projection_replay_case.json"
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    for raw_event in fixture["events"]:
+        svc._persist_trade_event_object(repo, TradeEvent(**raw_event))
+
+    rebuild_result = svc.rebuild_position_lots_from_trade_events(repo)
+
+    lots = repo.list_position_lots()
+    assert len(lots) == 1
+    assert lots[0]["record_id"] == fixture["expected"]["record_id"]
+    assert lots[0]["fields"]["contracts_open"] == 0
+    assert lots[0]["fields"]["contracts_closed"] == 2
+    assert lots[0]["fields"]["status"] == "close"
+    assert rebuild_result["unmatched_explicit_close_count"] == 0
+
+    context = build_context(lots, broker="富途", account="sy", rates={})
+    assert context["open_positions_min"] == []

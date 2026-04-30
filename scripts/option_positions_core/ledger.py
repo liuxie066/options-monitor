@@ -42,6 +42,30 @@ class TradeEvent:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class ProjectionDiagnostic:
+    event_id: str
+    severity: str
+    code: str
+    message: str
+    details: dict[str, Any]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class ProjectionResult:
+    lots: list[dict[str, Any]]
+    diagnostics: list[ProjectionDiagnostic]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "lots": self.lots,
+            "diagnostics": [item.to_dict() for item in self.diagnostics],
+        }
+
+
 def trade_event_from_normalized_deal(deal: Any) -> TradeEvent:
     return TradeEvent(
         event_id=str(getattr(deal, "deal_id", "") or "").strip(),
@@ -173,7 +197,14 @@ def _adjust_target_source_event_id(event: TradeEvent) -> str:
     return str(payload.get("adjust_target_source_event_id") or "").strip()
 
 
-def project_position_lot_records(events: list[dict[str, Any]] | list[TradeEvent]) -> list[dict[str, Any]]:
+def _adjust_target_record_id(event: TradeEvent) -> str:
+    if str(event.position_effect).strip().lower() != "adjust":
+        return ""
+    payload = event.raw_payload or {}
+    return str(payload.get("record_id") or "").strip()
+
+
+def _normalize_events(events: list[dict[str, Any]] | list[TradeEvent]) -> list[TradeEvent]:
     normalized_events: list[TradeEvent] = []
     for item in events:
         if isinstance(item, TradeEvent):
@@ -182,27 +213,107 @@ def project_position_lot_records(events: list[dict[str, Any]] | list[TradeEvent]
         if not isinstance(item, dict):
             continue
         normalized_events.append(TradeEvent(**item))
-
     normalized_events.sort(key=lambda row: (int(row.trade_time_ms or 0), row.event_id))
+    return normalized_events
+
+
+def _append_diagnostic(
+    diagnostics: list[ProjectionDiagnostic],
+    *,
+    event: TradeEvent,
+    code: str,
+    message: str,
+    severity: str = "error",
+    details: dict[str, Any] | None = None,
+) -> None:
+    diagnostics.append(
+        ProjectionDiagnostic(
+            event_id=event.event_id,
+            severity=severity,
+            code=code,
+            message=message,
+            details=dict(details or {}),
+        )
+    )
+
+
+def _find_lot_by_record_id(lots: list[dict[str, Any]], record_id: str) -> dict[str, Any] | None:
+    target_record_id = str(record_id or "").strip()
+    if not target_record_id:
+        return None
+    for lot in lots:
+        if str(lot.get("record_id") or "").strip() == target_record_id:
+            return lot
+    return None
+
+
+def _find_lot_by_source_event_id(lots: list[dict[str, Any]], source_event_id: str) -> dict[str, Any] | None:
+    target_source_event_id = str(source_event_id or "").strip()
+    if not target_source_event_id:
+        return None
+    for lot in lots:
+        fields = lot.get("fields") or {}
+        if str(fields.get("source_event_id") or "").strip() == target_source_event_id:
+            return lot
+    return None
+
+
+def project_position_lot_records_with_diagnostics(
+    events: list[dict[str, Any]] | list[TradeEvent],
+) -> ProjectionResult:
+    normalized_events = _normalize_events(events)
     voided_event_ids = {target for target in (_void_target_event_id(event) for event in normalized_events) if target}
     lots: list[dict[str, Any]] = []
+    diagnostics: list[ProjectionDiagnostic] = []
     for event in normalized_events:
         if _void_target_event_id(event):
             continue
         if event.event_id in voided_event_ids:
             continue
+        payload = event.raw_payload or {}
         adjust_target_source_event_id = _adjust_target_source_event_id(event)
-        if adjust_target_source_event_id:
-            patch = (event.raw_payload or {}).get("patch") or {}
+        adjust_target_record_id = _adjust_target_record_id(event)
+        if adjust_target_source_event_id or adjust_target_record_id:
+            patch = payload.get("patch") or {}
             if isinstance(patch, dict):
-                for lot in lots:
-                    fields = lot.get("fields") or {}
-                    if str(fields.get("source_event_id") or "").strip() != adjust_target_source_event_id:
-                        continue
-                    merged = dict(fields)
-                    merged.update(patch)
-                    lot["fields"] = merged
-                    break
+                target_lot = (
+                    _find_lot_by_record_id(lots, adjust_target_record_id)
+                    if adjust_target_record_id
+                    else _find_lot_by_source_event_id(lots, adjust_target_source_event_id)
+                )
+                if target_lot is None:
+                    _append_diagnostic(
+                        diagnostics,
+                        event=event,
+                        code="adjust_explicit_target_not_found",
+                        message="adjust event target lot not found in projection",
+                        details={
+                            "record_id": adjust_target_record_id or None,
+                            "source_event_id": adjust_target_source_event_id or None,
+                        },
+                    )
+                    continue
+                fields = target_lot.get("fields") or {}
+                if (
+                    adjust_target_record_id
+                    and adjust_target_source_event_id
+                    and str(fields.get("source_event_id") or "").strip() != adjust_target_source_event_id
+                ):
+                    _append_diagnostic(
+                        diagnostics,
+                        event=event,
+                        code="adjust_explicit_target_conflict",
+                        message="adjust event target record_id conflicts with source_event_id target",
+                        details={
+                            "record_id": adjust_target_record_id,
+                            "source_event_id": adjust_target_source_event_id,
+                            "lot_source_event_id": str(fields.get("source_event_id") or "").strip() or None,
+                        },
+                    )
+                    continue
+                merged = dict(fields)
+                merged.update(patch)
+                target_lot["fields"] = merged
             continue
         if str(event.source_type).strip().lower() == "bootstrap_snapshot":
             seeded = _open_lot_record(event)
@@ -221,25 +332,143 @@ def project_position_lot_records(events: list[dict[str, Any]] | list[TradeEvent]
         close_target_source_event_id = _close_target_source_event_id(event)
         close_target_record_id = _close_target_record_id(event)
         explicit_target = bool(close_target_source_event_id or close_target_record_id)
+        if close_target_record_id:
+            target_lot = _find_lot_by_record_id(lots, close_target_record_id)
+            if target_lot is None:
+                _append_diagnostic(
+                    diagnostics,
+                    event=event,
+                    code="close_explicit_target_not_found",
+                    message="close event target record_id not found in projection",
+                    details={
+                        "record_id": close_target_record_id,
+                        "source_event_id": close_target_source_event_id or None,
+                    },
+                )
+                continue
+            fields = target_lot.get("fields") or {}
+            if close_target_source_event_id and str(fields.get("source_event_id") or "").strip() != close_target_source_event_id:
+                _append_diagnostic(
+                    diagnostics,
+                    event=event,
+                    code="close_explicit_target_conflict",
+                    message="close event target record_id conflicts with source_event_id target",
+                    details={
+                        "record_id": close_target_record_id,
+                        "source_event_id": close_target_source_event_id,
+                        "lot_source_event_id": str(fields.get("source_event_id") or "").strip() or None,
+                    },
+                )
+                continue
+            open_qty = int(fields.get("contracts_open") or 0)
+            if open_qty <= 0:
+                _append_diagnostic(
+                    diagnostics,
+                    event=event,
+                    code="close_explicit_target_already_closed",
+                    message="close event targeted a lot with no open contracts",
+                    severity="warn",
+                    details={"record_id": close_target_record_id},
+                )
+                continue
+            if not _matches_close_target(fields, event):
+                _append_diagnostic(
+                    diagnostics,
+                    event=event,
+                    code="close_explicit_target_mismatch",
+                    message="close event targeted lot does not match broker/account/symbol/option semantics",
+                    details={"record_id": close_target_record_id},
+                )
+                continue
+            if open_qty < remaining:
+                _append_diagnostic(
+                    diagnostics,
+                    event=event,
+                    code="close_explicit_target_oversized",
+                    message="close event contracts exceed remaining open contracts on target lot",
+                    details={
+                        "record_id": close_target_record_id,
+                        "contracts_requested": remaining,
+                        "contracts_open": open_qty,
+                    },
+                )
+                continue
+            patch = build_buy_to_close_patch(
+                fields,
+                contracts_to_close=remaining,
+                close_price=event.price,
+                close_reason="broker_trade_buy_to_close",
+                as_of_ms=event.trade_time_ms,
+            )
+            merged = dict(fields)
+            merged.update(patch)
+            merged["last_close_event_id"] = event.event_id
+            target_lot["fields"] = merged
+            continue
+        if close_target_source_event_id:
+            target_lot = _find_lot_by_source_event_id(lots, close_target_source_event_id)
+            if target_lot is None:
+                _append_diagnostic(
+                    diagnostics,
+                    event=event,
+                    code="close_explicit_source_event_target_not_found",
+                    message="close event source_event_id target not found in projection",
+                    details={"source_event_id": close_target_source_event_id},
+                )
+                continue
+            fields = target_lot.get("fields") or {}
+            open_qty = int(fields.get("contracts_open") or 0)
+            if open_qty <= 0:
+                _append_diagnostic(
+                    diagnostics,
+                    event=event,
+                    code="close_explicit_source_event_target_already_closed",
+                    message="close event targeted a source_event_id with no open contracts",
+                    severity="warn",
+                    details={"source_event_id": close_target_source_event_id},
+                )
+                continue
+            if not _matches_close_target(fields, event):
+                _append_diagnostic(
+                    diagnostics,
+                    event=event,
+                    code="close_explicit_source_event_target_mismatch",
+                    message="close event source_event_id target does not match broker/account/symbol/option semantics",
+                    details={"source_event_id": close_target_source_event_id},
+                )
+                continue
+            if open_qty < remaining:
+                _append_diagnostic(
+                    diagnostics,
+                    event=event,
+                    code="close_explicit_source_event_target_oversized",
+                    message="close event contracts exceed remaining open contracts on source_event_id target",
+                    details={
+                        "source_event_id": close_target_source_event_id,
+                        "contracts_requested": remaining,
+                        "contracts_open": open_qty,
+                    },
+                )
+                continue
+            patch = build_buy_to_close_patch(
+                fields,
+                contracts_to_close=remaining,
+                close_price=event.price,
+                close_reason="broker_trade_buy_to_close",
+                as_of_ms=event.trade_time_ms,
+            )
+            merged = dict(fields)
+            merged.update(patch)
+            merged["last_close_event_id"] = event.event_id
+            target_lot["fields"] = merged
+            continue
         for lot in lots:
             fields = lot.get("fields") or {}
             open_qty = int(fields.get("contracts_open") or 0)
             if open_qty <= 0:
                 continue
-            if close_target_source_event_id:
-                if str(fields.get("source_event_id") or "").strip() != close_target_source_event_id:
-                    continue
-                if not _matches_close_target(fields, event):
-                    break
-            elif close_target_record_id:
-                if str(lot.get("record_id") or "").strip() != close_target_record_id:
-                    continue
-                if not _matches_close_target(fields, event):
-                    break
-            elif not _matches_close(fields, event):
+            if not _matches_close(fields, event):
                 continue
-            if explicit_target and open_qty < remaining:
-                break
             take = min(open_qty, remaining)
             patch = build_buy_to_close_patch(
                 fields,
@@ -257,4 +486,8 @@ def project_position_lot_records(events: list[dict[str, Any]] | list[TradeEvent]
                 break
             if explicit_target:
                 break
-    return lots
+    return ProjectionResult(lots=lots, diagnostics=diagnostics)
+
+
+def project_position_lot_records(events: list[dict[str, Any]] | list[TradeEvent]) -> list[dict[str, Any]]:
+    return project_position_lot_records_with_diagnostics(events).lots
