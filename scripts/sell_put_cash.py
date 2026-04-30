@@ -25,6 +25,35 @@ from scripts.io_utils import safe_read_csv
 log = logging.getLogger(__name__)
 
 
+def _sum_cash_total_cny(
+    cash_by_ccy: dict[str, Any] | None,
+    *,
+    exchange_rate_converter: CurrencyConverter,
+) -> float | None:
+    if not isinstance(cash_by_ccy, dict):
+        return None
+
+    total = 0.0
+    ok = True
+    for ccy, value in cash_by_ccy.items():
+        try:
+            amount = float(value)
+        except Exception:
+            continue
+        if not amount:
+            continue
+        native_ccy = str(ccy or "").strip().upper()
+        if native_ccy in ("CNY", "RMB"):
+            total += amount
+            continue
+        converted = exchange_rate_converter.native_to_cny(amount, native_ccy=native_ccy)
+        if converted is None:
+            ok = False
+            break
+        total += float(converted)
+    return total if ok else None
+
+
 def enrich_sell_put_candidates_with_cash(
     *,
     df_labeled: pd.DataFrame,
@@ -89,6 +118,8 @@ def enrich_sell_put_candidates_with_cash(
     cash_avail_est = None
     cash_avail_cny = None
     cash_free_cny = None
+    cash_avail_total_cny = None
+    cash_free_total_cny = None
     try:
         cash_by_ccy = (portfolio_ctx.get('cash_by_currency') or {}) if isinstance(portfolio_ctx, dict) else {}
         v = cash_by_ccy.get('USD')
@@ -96,6 +127,10 @@ def enrich_sell_put_candidates_with_cash(
 
         cny = cash_by_ccy.get('CNY')
         cash_avail_cny = float(cny) if cny is not None else None
+        cash_avail_total_cny = _sum_cash_total_cny(
+            cash_by_ccy,
+            exchange_rate_converter=exchange_rate_converter,
+        )
 
         if cash_avail_cny is not None:
             if used_total_cny is not None:
@@ -104,12 +139,17 @@ def enrich_sell_put_candidates_with_cash(
                 k = exchange_rate_converter.native_to_cny(1.0, native_ccy='USD')
                 cash_free_cny = (cash_avail_cny - (used_total_usd * float(k))) if k else None
 
+        if cash_avail_total_cny is not None and used_total_cny is not None:
+            cash_free_total_cny = cash_avail_total_cny - used_total_cny
+
         if cash_avail is None and cash_avail_cny is not None:
             cash_avail_est = exchange_rate_converter.cny_to_native(cash_avail_cny, native_ccy='USD')
     except Exception as e:
         log.warning("sell_put_cash: cash_available calc failed: %s", e)
         cash_avail = None
         cash_avail_est = None
+        cash_avail_total_cny = None
+        cash_free_total_cny = None
 
     df_sp_lab['cash_secured_used_usd_total'] = used_total_usd
     df_sp_lab['cash_secured_used_usd_symbol'] = used_symbol_usd
@@ -141,6 +181,8 @@ def enrich_sell_put_candidates_with_cash(
 
     df_sp_lab['cash_available_cny'] = (cash_avail_cny if cash_avail_cny is not None else pd.NA)
     df_sp_lab['cash_free_cny'] = (cash_free_cny if cash_free_cny is not None else pd.NA)
+    df_sp_lab['cash_available_total_cny'] = (cash_avail_total_cny if cash_avail_total_cny is not None else pd.NA)
+    df_sp_lab['cash_free_total_cny'] = (cash_free_total_cny if cash_free_total_cny is not None else pd.NA)
 
     # Cash requirement
     try:

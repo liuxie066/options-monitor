@@ -165,6 +165,52 @@ def test_notify_symbols_markdown_put_chain_shows_same_symbol_usage_from_summary_
     assert "同标的Sell Put占用=¥45,000" in out
 
 
+def test_notify_symbols_markdown_put_chain_uses_total_cny_cash_guard_for_alert_engine() -> None:
+    out = _render_via_alert_engine(
+        {
+            "symbol": "0700.HK",
+            "strategy": "sell_put",
+            "candidate_count": 1,
+            "top_contract": "2026-06-29 450P",
+            "annualized_return": 0.1977,
+            "net_income": 1416.5,
+            "dte": 60,
+            "strike": 450.0,
+            "risk_label": "中性",
+            "delta": -0.35,
+            "cash_required_cny": 39280.0,
+            "cash_free_total_cny": 11666.0,
+            "mid": 14.375,
+            "option_ccy": "HKD",
+        }
+    )
+
+    assert "备注: 所需担保现金约 ¥39,280，但当前总可用折算约 ¥11,666" in out
+
+
+def test_notify_symbols_markdown_put_chain_uses_usd_cash_guard_for_alert_engine() -> None:
+    out = _render_via_alert_engine(
+        {
+            "symbol": "AAPL",
+            "strategy": "sell_put",
+            "candidate_count": 1,
+            "top_contract": "2026-06-29 180P",
+            "annualized_return": 0.18,
+            "net_income": 210.0,
+            "dte": 60,
+            "strike": 180.0,
+            "risk_label": "中性",
+            "delta": -0.21,
+            "cash_required_usd": 18000.0,
+            "cash_free_usd": 15000.0,
+            "mid": 2.15,
+            "option_ccy": "USD",
+        }
+    )
+
+    assert "备注: 所需担保现金约 $18,000，但当前账户可用担保现金约 $15,000" in out
+
+
 def test_notify_symbols_markdown_put_falls_back_to_usd_margin_when_cny_margin_missing() -> None:
     out = _render_via_alert_engine(
         {

@@ -14,7 +14,7 @@ from domain.domain.canonical_schema import (
     normalize_source_snapshot,
 )
 
-_ADAPTERS_PATH = BASE / "om" / "services" / "source_adapters.py"
+_ADAPTERS_PATH = BASE / "domain" / "services" / "source_adapters.py"
 _ADAPTERS_SPEC = importlib.util.spec_from_file_location("om_source_adapters", _ADAPTERS_PATH)
 assert _ADAPTERS_SPEC and _ADAPTERS_SPEC.loader
 _ADAPTERS_MOD = importlib.util.module_from_spec(_ADAPTERS_SPEC)
@@ -79,9 +79,11 @@ def test_normalize_processor_row_preserves_put_alert_fields() -> None:
             "cash_required_cny": 110720.0,
             "cash_required_usd": 15200.0,
             "cash_free_cny": 200000.0,
+            "cash_free_total_cny": 198000.0,
             "cash_free_usd": 25000.0,
             "cash_free_usd_est": 24800.0,
             "cash_available_cny": 260000.0,
+            "cash_available_total_cny": 258000.0,
             "cash_available_usd": 32000.0,
             "cash_available_usd_est": 31800.0,
             "mid": 5.72,
@@ -95,9 +97,11 @@ def test_normalize_processor_row_preserves_put_alert_fields() -> None:
     assert out["cash_required_cny"] == 110720.0
     assert out["cash_required_usd"] == 15200.0
     assert out["cash_free_cny"] == 200000.0
+    assert out["cash_free_total_cny"] == 198000.0
     assert out["cash_free_usd"] == 25000.0
     assert out["cash_free_usd_est"] == 24800.0
     assert out["cash_available_cny"] == 260000.0
+    assert out["cash_available_total_cny"] == 258000.0
     assert out["cash_available_usd"] == 32000.0
     assert out["cash_available_usd_est"] == 31800.0
     assert out["mid"] == 5.72

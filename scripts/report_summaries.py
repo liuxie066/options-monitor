@@ -45,6 +45,8 @@ SELL_PUT_EMPTY_FIELDS = {
     'cash_free_usd_est': None,
     'cash_available_cny': None,
     'cash_free_cny': None,
+    'cash_available_total_cny': None,
+    'cash_free_total_cny': None,
     'cash_required_cny': None,
 }
 
@@ -151,6 +153,8 @@ def _sell_put_extras(df: pd.DataFrame, top: pd.Series) -> dict[str, Any]:
         'cash_free_usd_est': _read_first_float(df, 'cash_free_usd_est'),
         'cash_available_cny': _read_first_float(df, 'cash_available_cny'),
         'cash_free_cny': _read_first_float(df, 'cash_free_cny'),
+        'cash_available_total_cny': _read_first_float(df, 'cash_available_total_cny'),
+        'cash_free_total_cny': _read_first_float(df, 'cash_free_total_cny'),
         'cash_required_cny': _read_first_float(df, 'cash_required_cny'),
     }
 

@@ -3,6 +3,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pandas as pd
+
 
 def _add_repo_to_syspath() -> Path:
     base = Path(__file__).resolve().parents[1]
@@ -343,6 +345,158 @@ def test_sell_put_steps_use_global_liquidity_filters_only() -> None:
     assert kwargs['max_spread_ratio'] == 0.31
     assert 'min_iv' not in kwargs
     assert 'require_bid_ask' not in kwargs
+
+
+def test_sell_put_steps_filter_uses_total_cny_when_base_cny_missing(tmp_path: Path) -> None:
+    base = _add_repo_to_syspath()
+    import scripts.sell_put_steps as steps
+    from scripts.exchange_rates import CurrencyConverter, ExchangeRates
+
+    report_dir = tmp_path / "reports"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    symbol_sp_labeled = report_dir / "aapl_sell_put_candidates_labeled.csv"
+
+    original_run_sell_put_scan = steps.run_sell_put_scan
+    original_add_sell_put_labels = steps.add_sell_put_labels
+    original_enrich = steps.enrich_sell_put_candidates_with_cash
+
+    def _fake_run_sell_put_scan(**kwargs):
+        pd.DataFrame([{"symbol": "AAPL"}]).to_csv(kwargs["output"], index=False)
+
+    def _fake_add_sell_put_labels(_base, _input, output):
+        pd.DataFrame(
+            [
+                {
+                    "symbol": "AAPL",
+                    "expiration": "2026-05-15",
+                    "dte": 30,
+                    "strike": 180.0,
+                    "spot": 200.0,
+                    "mid": 2.5,
+                    "net_income": 250.0,
+                    "annualized_net_return_on_cash_basis": 0.2,
+                    "otm_pct": 0.1,
+                    "risk_label": "中性",
+                    "spread_ratio": 0.1,
+                    "open_interest": 100,
+                    "volume": 50,
+                    "currency": "USD",
+                }
+            ]
+        ).to_csv(output, index=False)
+
+    def _fake_enrich(*, df_labeled, symbol, portfolio_ctx, exchange_rate_converter, out_path):
+        df = df_labeled.copy()
+        df["cash_required_cny"] = 39280.0
+        df["cash_free_cny"] = pd.NA
+        df["cash_free_total_cny"] = 11666.0
+        df.to_csv(out_path, index=False)
+        return df
+
+    steps.run_sell_put_scan = _fake_run_sell_put_scan
+    steps.add_sell_put_labels = _fake_add_sell_put_labels
+    steps.enrich_sell_put_candidates_with_cash = _fake_enrich
+    try:
+        out = steps.run_sell_put_scan_and_summarize(
+            py="python",
+            base=base,
+            sym="AAPL",
+            symbol="AAPL",
+            symbol_lower="aapl",
+            symbol_cfg={"symbol": "AAPL"},
+            sp={"enabled": True, "min_dte": 7, "max_dte": 45, "min_annualized_net_return": 0.1},
+            top_n=3,
+            required_data_dir=tmp_path,
+            report_dir=report_dir,
+            timeout_sec=10,
+            is_scheduled=True,
+            exchange_rate_converter=CurrencyConverter(ExchangeRates()),
+            portfolio_ctx={"cash_by_currency": {}},
+        )
+    finally:
+        steps.run_sell_put_scan = original_run_sell_put_scan
+        steps.add_sell_put_labels = original_add_sell_put_labels
+        steps.enrich_sell_put_candidates_with_cash = original_enrich
+
+    filtered = pd.read_csv(symbol_sp_labeled)
+    assert filtered.empty
+    assert out["candidate_count"] == 0
+
+
+def test_sell_put_steps_filter_prefers_base_cny_over_total_cny(tmp_path: Path) -> None:
+    base = _add_repo_to_syspath()
+    import scripts.sell_put_steps as steps
+    from scripts.exchange_rates import CurrencyConverter, ExchangeRates
+
+    report_dir = tmp_path / "reports"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    symbol_sp_labeled = report_dir / "aapl_sell_put_candidates_labeled.csv"
+
+    original_run_sell_put_scan = steps.run_sell_put_scan
+    original_add_sell_put_labels = steps.add_sell_put_labels
+    original_enrich = steps.enrich_sell_put_candidates_with_cash
+
+    def _fake_run_sell_put_scan(**kwargs):
+        pd.DataFrame([{"symbol": "AAPL"}]).to_csv(kwargs["output"], index=False)
+
+    def _fake_add_sell_put_labels(_base, _input, output):
+        pd.DataFrame(
+            [
+                {
+                    "symbol": "AAPL",
+                    "expiration": "2026-05-15",
+                    "dte": 30,
+                    "strike": 180.0,
+                    "spot": 200.0,
+                    "mid": 2.5,
+                    "net_income": 250.0,
+                    "annualized_net_return_on_cash_basis": 0.2,
+                    "otm_pct": 0.1,
+                    "risk_label": "中性",
+                    "spread_ratio": 0.1,
+                    "open_interest": 100,
+                    "volume": 50,
+                    "currency": "USD",
+                }
+            ]
+        ).to_csv(output, index=False)
+
+    def _fake_enrich(*, df_labeled, symbol, portfolio_ctx, exchange_rate_converter, out_path):
+        df = df_labeled.copy()
+        df["cash_required_cny"] = 20000.0
+        df["cash_free_cny"] = 15000.0
+        df["cash_free_total_cny"] = 50000.0
+        df.to_csv(out_path, index=False)
+        return df
+
+    steps.run_sell_put_scan = _fake_run_sell_put_scan
+    steps.add_sell_put_labels = _fake_add_sell_put_labels
+    steps.enrich_sell_put_candidates_with_cash = _fake_enrich
+    try:
+        out = steps.run_sell_put_scan_and_summarize(
+            py="python",
+            base=base,
+            sym="AAPL",
+            symbol="AAPL",
+            symbol_lower="aapl",
+            symbol_cfg={"symbol": "AAPL"},
+            sp={"enabled": True, "min_dte": 7, "max_dte": 45, "min_annualized_net_return": 0.1},
+            top_n=3,
+            required_data_dir=tmp_path,
+            report_dir=report_dir,
+            timeout_sec=10,
+            is_scheduled=True,
+            exchange_rate_converter=CurrencyConverter(ExchangeRates()),
+            portfolio_ctx={"cash_by_currency": {}},
+        )
+    finally:
+        steps.run_sell_put_scan = original_run_sell_put_scan
+        steps.add_sell_put_labels = original_add_sell_put_labels
+        steps.enrich_sell_put_candidates_with_cash = original_enrich
+
+    filtered = pd.read_csv(symbol_sp_labeled)
+    assert filtered.empty
+    assert out["candidate_count"] == 0
 
 
 def test_sell_call_steps_use_global_liquidity_filters_only() -> None:

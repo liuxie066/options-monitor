@@ -104,28 +104,55 @@ def run_sell_put_scan_and_summarize(
 
         # Enforce cash headroom as a hard filter at candidate-filter stage:
         # - Prefer base(CNY) gating when both required/free are known.
+        # - Fallback to total(CNY) only when base(CNY) is unavailable.
         # - Fallback to USD gating when CNY fields are unavailable.
         try:
             d = df_sp_lab.copy()
-            dropped = False
+            mask_drop = pd.Series(False, index=d.index, dtype=bool)
 
-            if ('cash_required_cny' in d.columns) and ('cash_free_cny' in d.columns):
+            if 'cash_required_cny' in d.columns:
                 req_cny = pd.to_numeric(d['cash_required_cny'], errors='coerce')
-                free_cny = pd.to_numeric(d['cash_free_cny'], errors='coerce')
-                mask_drop = req_cny.notna() & free_cny.notna() & (req_cny > free_cny)
-                if mask_drop.any():
-                    d = d.loc[~mask_drop].copy()
-                    dropped = True
+                free_cny = (
+                    pd.to_numeric(d['cash_free_cny'], errors='coerce')
+                    if 'cash_free_cny' in d.columns
+                    else pd.Series(pd.NA, index=d.index)
+                )
+                free_total_cny = (
+                    pd.to_numeric(d['cash_free_total_cny'], errors='coerce')
+                    if 'cash_free_total_cny' in d.columns
+                    else pd.Series(pd.NA, index=d.index)
+                )
+                mask_drop = mask_drop | (
+                    req_cny.notna()
+                    & (
+                        (free_cny.notna() & (req_cny > free_cny))
+                        | (free_cny.isna() & free_total_cny.notna() & (req_cny > free_total_cny))
+                    )
+                )
 
-            if (not dropped) and ('cash_required_usd' in d.columns) and ('cash_free_usd' in d.columns):
+            if ('cash_required_usd' in d.columns) and ('cash_free_usd' in d.columns):
                 req_usd = pd.to_numeric(d['cash_required_usd'], errors='coerce')
                 free_usd = pd.to_numeric(d['cash_free_usd'], errors='coerce')
-                mask_drop = req_usd.notna() & free_usd.notna() & (req_usd > free_usd)
-                if mask_drop.any():
-                    d = d.loc[~mask_drop].copy()
-                    dropped = True
+                free_cny = (
+                    pd.to_numeric(d['cash_free_cny'], errors='coerce')
+                    if 'cash_free_cny' in d.columns
+                    else pd.Series(pd.NA, index=d.index)
+                )
+                free_total_cny = (
+                    pd.to_numeric(d['cash_free_total_cny'], errors='coerce')
+                    if 'cash_free_total_cny' in d.columns
+                    else pd.Series(pd.NA, index=d.index)
+                )
+                mask_drop = mask_drop | (
+                    req_usd.notna()
+                    & free_usd.notna()
+                    & free_cny.isna()
+                    & free_total_cny.isna()
+                    & (req_usd > free_usd)
+                )
 
-            if dropped:
+            if mask_drop.any():
+                d = d.loc[~mask_drop].copy()
                 d.to_csv(symbol_sp_labeled, index=False)
                 df_sp_lab = d
         except Exception:
