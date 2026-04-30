@@ -188,15 +188,91 @@ def test_strategy_production_scripts_import_engine_directly() -> None:
     from pathlib import Path
 
     repo = Path(__file__).resolve().parents[1]
-    production_scripts = [
+    production_scripts = {
         repo / "scripts" / "scan_sell_put.py",
         repo / "scripts" / "scan_sell_call.py",
+    }
+    engine_scripts = {
         repo / "scripts" / "render_sell_put_alerts.py",
         repo / "scripts" / "render_sell_call_alerts.py",
         repo / "scripts" / "tools" / "compare_strategy_replay.py",
-    ]
+    }
 
-    for path in production_scripts:
+    for path in production_scripts | engine_scripts:
         text = path.read_text(encoding="utf-8")
-        assert "from domain.domain.engine import (" in text
         assert "from scripts.option_candidate_strategy import" not in text
+        if path in production_scripts:
+            assert "from src.application.candidate_scanning import (" in text
+        else:
+            assert "from domain.domain.engine import (" in text
+
+
+def test_run_candidate_scan_reuses_stage1_gate_once_per_contract(tmp_path: Path) -> None:
+    _add_repo_to_syspath()
+    import src.application.candidate_scanning as scan
+
+    parsed_dir = tmp_path / "input" / "parsed"
+    parsed_dir.mkdir(parents=True)
+    (parsed_dir / "NVDA_required_data.csv").write_text(
+        (
+            "symbol,option_type,expiration,contract_symbol,currency,dte,strike,spot,bid,ask,last_price,mid,"
+            "open_interest,volume,implied_volatility,delta,multiplier\n"
+            "NVDA,put,2026-06-19,NVDA240619P00100000,USD,30,100,110,1.0,1.2,1.1,1.1,100,50,0.3,-0.2,100\n"
+        ),
+        encoding="utf-8",
+    )
+
+    old_gate = scan.evaluate_candidate_hard_constraints
+    calls: list[dict] = []
+    try:
+        def _counting_gate(*args, **kwargs):  # type: ignore[no-untyped-def]
+            calls.append({"args": args, "kwargs": kwargs})
+            return old_gate(*args, **kwargs)
+
+        scan.evaluate_candidate_hard_constraints = _counting_gate  # type: ignore[assignment]
+        out = scan.run_candidate_scan(
+            config=scan.CandidateScanConfig(
+                mode="put",
+                symbols=["NVDA"],
+                input_root=tmp_path / "input",
+                output=tmp_path / "output.csv",
+                empty_output_columns=["symbol"],
+                min_dte=7,
+                max_dte=60,
+                min_strike=None,
+                max_strike=None,
+                min_open_interest=0,
+                min_volume=0,
+                max_spread_ratio=1.0,
+                min_annualized_net_return=0.01,
+                min_net_income=1,
+                quiet=True,
+            ),
+            deps=scan.CandidateScanDependencies(
+                compute_metrics_fn=lambda contract: {"net_income": 50.0, "annualized": 0.12},
+                build_row_fn=lambda contract, base_values, metrics: {
+                    "symbol": contract.symbol,
+                    "contract_symbol": contract.contract_symbol,
+                    "expiration": contract.expiration,
+                    "strike": contract.strike,
+                    "open_interest": base_values.open_interest,
+                    "volume": base_values.volume,
+                    "spread_ratio": base_values.spread_ratio,
+                    "annualized": metrics["annualized"],
+                    "net_income": metrics["net_income"],
+                },
+                build_hard_constraint_kwargs_fn=lambda contract: {},
+                annualized_return_value_fn=lambda metrics: float(metrics["annualized"]),
+                event_risk_flag_fn=lambda row: False,
+                event_risk_mode_fn=lambda cfg: "off",
+                annotate_event_risk_fn=lambda df, base_dir, cfg: df,
+                print_summary_fn=lambda df, out_path, reject_path: None,
+            ),
+            event_risk_cfg=None,
+            base_dir=tmp_path,
+        )
+    finally:
+        scan.evaluate_candidate_hard_constraints = old_gate  # type: ignore[assignment]
+
+    assert len(out) == 1
+    assert len(calls) == 1

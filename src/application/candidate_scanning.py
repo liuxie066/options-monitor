@@ -86,7 +86,7 @@ def _build_base_values(
     min_strike: float | None,
     max_strike: float | None,
     extra_hard_kwargs: dict,
-) -> CandidateBaseValues | None:
+) -> tuple[dict[str, object], CandidateBaseValues | None]:
     gate = evaluate_candidate_hard_constraints(
         contract.to_gate_payload(),
         mode=contract.mode,
@@ -98,10 +98,10 @@ def _build_base_values(
         **(extra_hard_kwargs or {}),
     )
     if not bool(gate.get("accepted")):
-        return None
+        return gate, None
 
     spread, spread_ratio = _spread_values(contract)
-    return CandidateBaseValues(
+    return gate, CandidateBaseValues(
         dte=int(contract.dte or 0),
         strike=float(contract.strike or 0.0),
         open_interest=float(contract.open_interest or 0.0),
@@ -135,7 +135,7 @@ def run_candidate_scan(
         for _, row in df.iterrows():
             contract = CandidateContractInput.from_row(row, mode=config.mode)
             hard_kwargs = deps.build_hard_constraint_kwargs_fn(contract)
-            base_values = _build_base_values(
+            stage1, base_values = _build_base_values(
                 contract,
                 min_dte=config.min_dte,
                 max_dte=config.max_dte,
@@ -148,16 +148,6 @@ def run_candidate_scan(
             metrics = deps.compute_metrics_fn(contract)
             if not metrics:
                 continue
-            stage1 = evaluate_candidate_hard_constraints(
-                contract.to_gate_payload(),
-                mode=contract.mode,
-                min_dte=config.min_dte,
-                max_dte=config.max_dte,
-                min_strike=config.min_strike,
-                max_strike=config.max_strike,
-                extra_required_fields=(),
-                **(hard_kwargs or {}),
-            )
             stage2 = evaluate_candidate_return_floor(
                 stage1,
                 min_annualized_return=config.min_annualized_net_return,
