@@ -125,12 +125,65 @@ def test_build_open_fields_for_short_call_sets_locked_shares() -> None:
             contracts=3,
             currency="USD",
             strike=200,
+            expiration_ymd="2026-05-15",
             opened_at_ms=1000,
         )
     )
 
     assert fields["underlying_share_locked"] == 300
     assert fields["contracts_open"] == 3
+    assert fields["expiration"] == 1778803200000
+
+
+def test_build_open_fields_requires_option_strike_and_expiration() -> None:
+    for command, expected in (
+        (
+            OpenPositionCommand(
+                broker="富途",
+                account="sy",
+                symbol="aapl",
+                option_type="call",
+                side="short",
+                contracts=1,
+                currency="USD",
+                expiration_ymd="2026-05-15",
+            ),
+            "call option requires strike",
+        ),
+        (
+            OpenPositionCommand(
+                broker="富途",
+                account="sy",
+                symbol="aapl",
+                option_type="call",
+                side="short",
+                contracts=1,
+                currency="USD",
+                strike=200,
+            ),
+            "call option requires expiration_ymd",
+        ),
+        (
+            OpenPositionCommand(
+                broker="富途",
+                account="sy",
+                symbol="aapl",
+                option_type="put",
+                side="short",
+                contracts=1,
+                currency="USD",
+                strike=200,
+                expiration_ymd="not-a-date",
+            ),
+            "put option requires expiration_ymd",
+        ),
+    ):
+        try:
+            build_open_fields(command)
+        except ValueError as exc:
+            assert expected in str(exc)
+        else:
+            raise AssertionError(f"expected ValueError: {expected}")
 
 
 def test_build_buy_to_close_patch_supports_partial_close() -> None:

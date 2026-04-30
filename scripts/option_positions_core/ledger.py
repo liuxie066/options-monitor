@@ -486,6 +486,19 @@ def project_position_lot_records_with_diagnostics(
                 break
             if explicit_target:
                 break
+        if remaining > 0:
+            _append_diagnostic(
+                diagnostics,
+                event=event,
+                code="close_unmatched_contracts",
+                message="close event contracts could not be fully matched to open lots",
+                severity="warn",
+                details={
+                    "contracts_requested": int(event.contracts),
+                    "contracts_matched": int(event.contracts) - int(remaining),
+                    "contracts_unmatched": int(remaining),
+                },
+            )
     return ProjectionResult(lots=lots, diagnostics=diagnostics)
 
 
