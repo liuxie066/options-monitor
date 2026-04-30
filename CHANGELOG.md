@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.4.4 - 2026-05-01
+
+### Changed
+- Routed OpenD option-chain requests through a shared coordinator with cross-process file limiting and per-expiration cache shards, reducing `get_option_chain` rate-limit failures during required-data refreshes
+- Preserved existing parsed required-data CSVs when OpenD returns structured empty errors, while surfacing rate-limit diagnostics as `OpenD 限频` in close-advice output
+- Allowed holdings-only Feishu data configs in agent healthcheck so external holdings accounts do not require an unrelated `feishu.tables.option_positions` bootstrap table
+
 ## 0.4.2 - 2026-04-30
 
 ### Changed
