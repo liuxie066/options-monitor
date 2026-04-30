@@ -652,6 +652,66 @@ def test_prepare_close_advice_inputs_builds_context_and_required_data(monkeypatc
     assert out["meta"]["required_data_root"] == ".../required_data"
 
 
+def test_prepare_close_advice_inputs_reuses_cached_required_data_when_coverage_is_complete(monkeypatch, tmp_path: Path) -> None:
+    from scripts.agent_plugin.main import run_tool
+    import scripts.agent_plugin.tools as tools
+
+    cfg_path = tmp_path / "config.us.json"
+    secrets_dir = tmp_path / "secrets"
+    secrets_dir.mkdir()
+    (secrets_dir / "portfolio.sqlite.json").write_text(
+        json.dumps({"option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"}}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    cfg = _public_cfg_with_futu("secrets/portfolio.sqlite.json")
+    cfg["close_advice"] = {"enabled": True}
+    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    required_root = (tmp_path / "output" / "agent_plugin" / "required_data" / "parsed")
+    required_root.mkdir(parents=True, exist_ok=True)
+    (required_root / "NVDA_required_data.csv").write_text(
+        "symbol,option_type,expiration,strike\n"
+        "NVDA,put,2026-06-19,100\n"
+        "NVDA,call,2026-07-17,120\n",
+        encoding="utf-8",
+    )
+
+    old_load = tools.load_option_positions_context
+    old_opend = tools.fetch_symbol_opend
+    old_save = tools.save_required_data_opend
+    try:
+        def _fake_load_option_positions_context(**kwargs):  # type: ignore[no-untyped-def]
+            return ({
+                "open_positions_min": [
+                    {"symbol": "NVDA", "option_type": "put", "strike": 100, "expiration": "2026-06-19"},
+                    {"symbol": "NVDA", "option_type": "call", "strike": 120, "expiration": "2026-07-17"},
+                ]
+            }, True)
+
+        def _fail_fetch_symbol_opend(*args, **kwargs):  # type: ignore[no-untyped-def]
+            raise AssertionError("fetch_symbol_opend should not be called when cached coverage is complete")
+
+        def _fail_save_required_data_opend(*args, **kwargs):  # type: ignore[no-untyped-def]
+            raise AssertionError("save_required_data_opend should not be called when cached coverage is complete")
+
+        tools.load_option_positions_context = _fake_load_option_positions_context  # type: ignore[assignment]
+        tools.fetch_symbol_opend = _fail_fetch_symbol_opend  # type: ignore[assignment]
+        tools.save_required_data_opend = _fail_save_required_data_opend  # type: ignore[assignment]
+        out = run_tool(
+            "prepare_close_advice_inputs",
+            {"config_path": str(cfg_path), "output_dir": str(tmp_path / "output" / "agent_plugin")},
+        )
+    finally:
+        tools.load_option_positions_context = old_load  # type: ignore[assignment]
+        tools.fetch_symbol_opend = old_opend  # type: ignore[assignment]
+        tools.save_required_data_opend = old_save  # type: ignore[assignment]
+
+    assert out["ok"] is True
+    assert out["data"]["symbols"][0]["position_coverage_ok"] is True
+    assert out["data"]["symbols"][0]["rows"] == 2
+    assert out["data"]["symbols"][0]["expiration_count"] == 2
+
+
 def test_prepare_close_advice_inputs_reports_missing_required_expirations(monkeypatch, tmp_path: Path) -> None:
     from scripts.agent_plugin.main import run_tool
     import scripts.agent_plugin.tools as tools
