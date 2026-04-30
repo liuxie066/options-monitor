@@ -116,6 +116,16 @@ def _read_required_data_coverage(csv_path: Path) -> tuple[set[tuple[str, str, st
     return contract_keys, expirations
 
 
+def _count_required_data_rows(csv_path: Path) -> int:
+    if not csv_path.exists():
+        return 0
+    try:
+        with csv_path.open("r", encoding="utf-8", newline="") as fh:
+            return sum(1 for row in csv.DictReader(fh) if isinstance(row, dict))
+    except Exception:
+        return 0
+
+
 def _find_contract_expiration_near_misses(
     requested_contracts: set[tuple[str, str, str, str]],
     available_contracts: set[tuple[str, str, str, str]],
@@ -476,26 +486,44 @@ def prepare_close_advice_inputs_tool(
         fetch_cfg = symbol_cfg.get("fetch") if isinstance(symbol_cfg.get("fetch"), dict) else {}
         src, _decision = resolve_symbol_fetch_source(fetch_cfg)
         limit_expirations = int(fetch_cfg.get("limit_expirations") or 8)
-        result = fetch_symbol_opend(
-            symbol,
-            limit_expirations=limit_expirations,
-            host=str(fetch_cfg.get("host") or "127.0.0.1"),
-            port=int(fetch_cfg.get("port") or 11111),
-            base_dir=repo_base(),
-            option_types=",".join(spec.get("option_types") or ["put", "call"]),
-            min_strike=spec.get("min_strike"),
-            max_strike=spec.get("max_strike"),
-            explicit_expirations=list(spec.get("requested_expirations") or []),
-            chain_cache=True,
-            chain_cache_force_refresh=force_required_data_refresh,
-        )
-        _raw_path, csv_path = save_required_data_opend(repo_base(), symbol, result, output_root=required_data_root)
-        meta = result.get("meta") if isinstance(result.get("meta"), dict) else {}
-        if meta.get("error"):
-            warnings.append(f"{symbol}: {meta['error']}")
-        fetched_contracts, fetched_expirations = _read_required_data_coverage(csv_path)
+        csv_path = (required_data_root / "parsed" / f"{symbol}_required_data.csv").resolve()
         requested_expirations = list(spec.get("requested_expirations") or [])
         requested_contracts = set(spec.get("requested_contracts") or set())
+        if force_required_data_refresh:
+            fetched_contracts: set[tuple[str, str, str, str]] = set()
+            fetched_expirations: set[str] = set()
+        else:
+            fetched_contracts, fetched_expirations = _read_required_data_coverage(csv_path)
+
+        cache_covers_all = (
+            not force_required_data_refresh
+            and bool(requested_contracts)
+            and all(item in fetched_contracts for item in requested_contracts)
+        )
+        if not cache_covers_all:
+            result = fetch_symbol_opend(
+                symbol,
+                limit_expirations=limit_expirations,
+                host=str(fetch_cfg.get("host") or "127.0.0.1"),
+                port=int(fetch_cfg.get("port") or 11111),
+                base_dir=repo_base(),
+                option_types=",".join(spec.get("option_types") or ["put", "call"]),
+                min_strike=spec.get("min_strike"),
+                max_strike=spec.get("max_strike"),
+                explicit_expirations=requested_expirations,
+                chain_cache=True,
+                chain_cache_force_refresh=force_required_data_refresh,
+            )
+            _raw_path, csv_path = save_required_data_opend(repo_base(), symbol, result, output_root=required_data_root)
+            meta = result.get("meta") if isinstance(result.get("meta"), dict) else {}
+            if meta.get("error"):
+                warnings.append(f"{symbol}: {meta['error']}")
+            fetched_contracts, fetched_expirations = _read_required_data_coverage(csv_path)
+            row_count = len(result.get("rows") or [])
+            expiration_count = int(result.get("expiration_count") or 0)
+        else:
+            row_count = _count_required_data_rows(csv_path)
+            expiration_count = len(fetched_expirations)
         missing_expirations = [exp for exp in requested_expirations if exp not in fetched_expirations]
         missing_contract_keys = [item for item in sorted(requested_contracts) if item not in fetched_contracts]
         missing_contracts = sorted(
@@ -506,8 +534,8 @@ def prepare_close_advice_inputs_tool(
         item = {
             "symbol": symbol,
             "source": src,
-            "rows": len(result.get("rows") or []),
-            "expiration_count": int(result.get("expiration_count") or 0),
+            "rows": row_count,
+            "expiration_count": expiration_count,
             "csv": mask_path(csv_path),
             "position_count": int(spec.get("position_count") or 0),
             "requested_expirations": requested_expirations,
