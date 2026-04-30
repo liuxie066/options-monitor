@@ -595,6 +595,73 @@ def test_run_close_advice_fetches_missing_position_coverage_before_pricing(tmp_p
     assert "2026-06-29" in refreshed_text
 
 
+def test_run_close_advice_reports_expiration_near_miss_in_quote_issue_samples(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    ctx_path = tmp_path / "option_positions_context.json"
+    ctx_path.write_text(
+        json.dumps(
+            {
+                "open_positions_min": [
+                    {
+                        "account": "lx",
+                        "symbol": "0700.HK",
+                        "option_type": "put",
+                        "side": "short",
+                        "contracts_open": 1,
+                        "currency": "HKD",
+                        "strike": 450,
+                        "multiplier": 100,
+                        "premium": 0.88,
+                        "expiration": "2026-05-27",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    required_root = tmp_path / "required_data"
+    parsed = required_root / "parsed"
+    parsed.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "0700.HK",
+                "option_type": "put",
+                "expiration": "2026-05-28",
+                "strike": 450,
+                "mid": 0.04,
+                "bid": 0.03,
+                "ask": 0.05,
+                "dte": 30,
+                "multiplier": 100,
+                "spot": 150,
+                "currency": "HKD",
+            }
+        ]
+    ).to_csv(parsed / "0700.HK_required_data.csv", index=False)
+
+    def fail_fetch_symbol(symbol: str, **kwargs: object) -> dict[str, object]:
+        raise AssertionError(f"unexpected OpenD fetch for {symbol}: {kwargs}")
+
+    monkeypatch.setattr("scripts.fetch_market_data_opend.fetch_symbol", fail_fetch_symbol)
+
+    out_dir = tmp_path / "reports"
+    result = run_close_advice(
+        config={
+            "close_advice": {"enabled": True},
+            "symbols": [{"symbol": "0700.HK", "fetch": {"source": "futu", "limit_expirations": 1}}],
+        },
+        context_path=ctx_path,
+        required_data_root=required_root,
+        output_dir=out_dir,
+        base_dir=Path.cwd(),
+    )
+
+    assert result["coverage_summary"]["expiration_near_miss_count"] == 1
+    assert result["quote_issue_samples"] == [
+        "0700.HK put 2026-05-27 450.00P: 补拉持仓覆盖失败 | near_miss=2026-05-27->2026-05-28"
+    ]
+
+
 def test_run_close_advice_fee_can_block_gross_strong_signal(tmp_path: Path) -> None:
     ctx_path = tmp_path / "option_positions_context.json"
     ctx_path.write_text(

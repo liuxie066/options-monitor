@@ -7,7 +7,7 @@ from typing import Any, Callable
 import json
 
 from scripts.agent_plugin.contracts import AgentToolError
-from src.application.expiration_normalization import normalize_expiration_ymd
+from src.application.expiration_normalization import find_unique_near_miss_expiration, normalize_expiration_ymd
 from src.application.watchlist_mutations import normalize_symbol_read
 
 
@@ -116,6 +116,36 @@ def _read_required_data_coverage(csv_path: Path) -> tuple[set[tuple[str, str, st
     return contract_keys, expirations
 
 
+def _find_contract_expiration_near_misses(
+    requested_contracts: set[tuple[str, str, str, str]],
+    available_contracts: set[tuple[str, str, str, str]],
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for key in sorted(requested_contracts):
+        if key in available_contracts or not all(key):
+            continue
+        symbol, option_type, expiration, strike = key
+        candidate_expirations = [
+            avail_exp
+            for avail_symbol, avail_option_type, avail_exp, avail_strike in available_contracts
+            if avail_symbol == symbol and avail_option_type == option_type and avail_strike == strike
+        ]
+        near_miss = find_unique_near_miss_expiration(expiration, candidate_expirations)
+        if not near_miss:
+            continue
+        out.append(
+            {
+                "symbol": symbol,
+                "option_type": option_type,
+                "strike": _as_float_or_none(strike),
+                "requested_expiration": expiration,
+                "matched_expiration": near_miss,
+                "quote_key": "|".join(key),
+            }
+        )
+    return out
+
+
 def _build_coverage_summary(symbol_rows: list[dict[str, Any]]) -> dict[str, Any]:
     missing_symbols = [
         str(item.get("symbol") or "")
@@ -128,6 +158,7 @@ def _build_coverage_summary(symbol_rows: list[dict[str, Any]]) -> dict[str, Any]
         "covered_symbol_count": sum(1 for item in symbol_rows if isinstance(item, dict) and bool(item.get("position_coverage_ok"))),
         "symbols_with_missing_coverage": missing_symbols,
         "positions_missing_coverage": sum(int(item.get("missing_contract_count") or 0) for item in symbol_rows if isinstance(item, dict)),
+        "expiration_near_miss_count": sum(len(item.get("expiration_near_misses") or []) for item in symbol_rows if isinstance(item, dict)),
     }
 
 
@@ -438,6 +469,7 @@ def prepare_close_advice_inputs_tool(
     symbol_map = symbol_fetch_config_map_fn(cfg)
     fetched: list[dict[str, Any]] = []
     warnings = [item for item in logs if item.startswith("[WARN]")]
+    force_required_data_refresh = bool(payload.get("force_required_data_refresh", False))
     for spec in position_requirements:
         symbol = str(spec.get("symbol") or "").strip()
         symbol_cfg = symbol_map.get(symbol) or {}
@@ -455,6 +487,7 @@ def prepare_close_advice_inputs_tool(
             max_strike=spec.get("max_strike"),
             explicit_expirations=list(spec.get("requested_expirations") or []),
             chain_cache=True,
+            chain_cache_force_refresh=force_required_data_refresh,
         )
         _raw_path, csv_path = save_required_data_opend(repo_base(), symbol, result, output_root=required_data_root)
         meta = result.get("meta") if isinstance(result.get("meta"), dict) else {}
@@ -464,11 +497,12 @@ def prepare_close_advice_inputs_tool(
         requested_expirations = list(spec.get("requested_expirations") or [])
         requested_contracts = set(spec.get("requested_contracts") or set())
         missing_expirations = [exp for exp in requested_expirations if exp not in fetched_expirations]
+        missing_contract_keys = [item for item in sorted(requested_contracts) if item not in fetched_contracts]
         missing_contracts = sorted(
             f"{item[2]} {item[3]}{'P' if item[1] == 'put' else 'C'}"
-            for item in requested_contracts
-            if item not in fetched_contracts
+            for item in missing_contract_keys
         )
+        near_misses = _find_contract_expiration_near_misses(requested_contracts, fetched_contracts)
         item = {
             "symbol": symbol,
             "source": src,
@@ -482,11 +516,27 @@ def prepare_close_advice_inputs_tool(
             "position_coverage_ok": not missing_contracts,
             "missing_contract_count": len(missing_contracts),
             "missing_contract_samples": missing_contracts[:3],
+            "missing_contracts": [
+                {
+                    "symbol": key[0],
+                    "option_type": key[1],
+                    "expiration": key[2],
+                    "strike": _as_float_or_none(key[3]),
+                    "quote_key": "|".join(key),
+                }
+                for key in missing_contract_keys
+            ],
+            "expiration_near_misses": near_misses,
         }
         if missing_expirations:
             warnings.append(f"{symbol}: missing required expirations {', '.join(missing_expirations)}")
         elif missing_contracts:
             warnings.append(f"{symbol}: missing required contracts after fetch ({', '.join(missing_contracts[:3])})")
+        for near_miss in near_misses:
+            warnings.append(
+                f"{symbol}: expiration near miss {near_miss['requested_expiration']} -> {near_miss['matched_expiration']} "
+                f"for {near_miss['option_type']} {near_miss['strike']}"
+            )
         fetched.append(item)
 
     return {
@@ -500,6 +550,7 @@ def prepare_close_advice_inputs_tool(
         "config_path": mask_path(config_path),
         "context_path": mask_path(context_path),
         "required_data_root": mask_path(required_data_root),
+        "force_required_data_refresh": force_required_data_refresh,
     }
 
 

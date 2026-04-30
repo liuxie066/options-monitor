@@ -511,6 +511,7 @@ def main() -> int:
                 legacy_output_tmp_dir=legacy_output_tmp_dir,
                 accounts_root=accounts_root,
                 prefetch_done=prefetch_done,
+                force_mode=force_mode,
             ),
             runlog=runlog,
             audit_fn=audit_helper.audit,

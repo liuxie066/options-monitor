@@ -58,6 +58,7 @@ class AccountRunRequest:
     legacy_output_tmp_dir: Path
     accounts_root: Path
     prefetch_done: bool
+    force_mode: bool = False
 
 
 @dataclass(frozen=True)
@@ -264,7 +265,8 @@ def run_one_account(
         )
 
     prefetch_done = bool(request.prefetch_done)
-    if not prefetch_done:
+    should_prefetch = bool(request.force_mode) or (not prefetch_done)
+    if should_prefetch:
         runlog.safe_event(
             "fetch_chain_cache",
             "start",
@@ -275,6 +277,7 @@ def run_one_account(
             base=request.base,
             cfg=cfg,
             shared_required=request.shared_required,
+            force_refresh=bool(request.force_mode),
         )
         audit_fn(
             "tool_call",
@@ -320,7 +323,7 @@ def run_one_account(
                 exc=exc,
             )
         runlog.safe_event("fetch_chain_cache", "ok", data=_safe_runlog_data(prefetch_stats))
-        prefetch_done = True
+        prefetch_done = (False if bool(request.force_mode) else True)
 
     acct_report_dir.mkdir(parents=True, exist_ok=True)
 

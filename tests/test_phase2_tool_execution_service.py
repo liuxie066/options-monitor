@@ -157,10 +157,56 @@ def test_tool_execution_service_idempotency_and_audit() -> None:
         assert len(rows) >= 2
 
 
+def test_tool_execution_service_force_refresh_bypasses_persisted_idempotency() -> None:
+    from domain.services import ToolExecutionIntent, ToolExecutionService
+
+    class _Proc:
+        returncode = 0
+        stdout = "ok\n"
+        stderr = ""
+
+    calls: list[list[str]] = []
+
+    def _runner(cmd, **kwargs):
+        calls.append(cmd)
+        return _Proc()
+
+    with TemporaryDirectory() as td:
+        base = Path(td)
+        svc = ToolExecutionService(base=base, runner=_runner)
+        base_intent = ToolExecutionIntent(
+            tool_name="required_data_prefetch",
+            symbol="AAPL",
+            source="yahoo",
+            limit_exp=8,
+            cmd=["python", "fake.py"],
+            cwd=base,
+            idempotency_scope="required_data_prefetch",
+        )
+        forced_intent = ToolExecutionIntent(
+            tool_name="required_data_prefetch",
+            symbol="AAPL",
+            source="yahoo",
+            limit_exp=8,
+            cmd=["python", "fake.py"],
+            cwd=base,
+            idempotency_scope="required_data_prefetch",
+            force_refresh=True,
+        )
+
+        p1 = svc.execute(base_intent)
+        p2 = svc.execute(forced_intent)
+
+        assert p1["status"] == "fetched"
+        assert p2["status"] == "fetched"
+        assert len(calls) == 2
+
+
 def main() -> None:
     test_subprocess_boundary_wrappers()
     test_state_repo_idempotency_and_audit_helpers()
     test_tool_execution_service_idempotency_and_audit()
+    test_tool_execution_service_force_refresh_bypasses_persisted_idempotency()
     print("OK (phase2 tool execution service)")
 
 

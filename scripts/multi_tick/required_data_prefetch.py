@@ -70,7 +70,7 @@ def _symbol_class(symbol: str) -> str:
     return "HK" if s.endswith(".HK") else "US"
 
 
-def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required: Path) -> dict:
+def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required: Path, force_refresh: bool = False) -> dict:
     syms = [it for it in resolve_watchlist_config(cfg) if it.get('symbol')]
     symbols = [str(it.get('symbol')).strip() for it in syms if str(it.get('symbol')).strip()]
 
@@ -80,6 +80,8 @@ def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required:
     parsed_dir.mkdir(parents=True, exist_ok=True)
 
     def _need_fetch(symbol: str) -> bool:
+        if force_refresh:
+            return True
         try:
             return (not has_shared_required_data(symbol, shared_required))
         except Exception:
@@ -140,6 +142,7 @@ def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required:
                 capture_output=True,
                 text=True,
                 idempotency_scope='required_data_prefetch',
+                force_refresh=bool(force_refresh),
             )
         )
         # Canonical adapter validation before entering next layer.
@@ -315,6 +318,7 @@ def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required:
         'fail_budget_total': fail_budget_total,
         'budget_triggered': budget_triggered,
         'opend_rate_limit_classes': sorted(rate_limit_blocked_classes),
+        'force_refresh': bool(force_refresh),
         'results': results,
         'audit': audit_items,
     }
