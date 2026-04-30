@@ -778,7 +778,7 @@ def test_sync_apply_update_sends_numeric_payload_types(monkeypatch, tmp_path: Pa
     patched_fields["contracts_open"] = "1"
     patched_fields["premium"] = "0.75"
     patched_fields["cash_secured_amount"] = "8500"
-    repo.update_position_lot_fields(lot["record_id"], patched_fields)
+    repo.replace_position_lots([{"record_id": lot["record_id"], "fields": patched_fields}])
 
     captured: dict[str, Any] = {}
 

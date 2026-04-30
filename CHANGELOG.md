@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.4.2 - 2026-04-30
+
+### Changed
+- Refactored option-position projection around stable local lot `record_id` targets so runtime close/adjust replay no longer depends on mutable projected `source_event_id` state
+- Added projection diagnostics and a read-only `option_positions inspect` flow to explain unmatched or conflicting close/adjust events and export reproducible local incident state
+- Restricted direct `position_lots` field updates to Feishu sync metadata only, preventing business-state drift outside canonical `trade_events -> position_lots` replay while keeping closed lots out of downstream context and notify paths
+
 ## 0.4.1 - 2026-04-30
 
 ### Changed
