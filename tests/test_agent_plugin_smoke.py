@@ -603,6 +603,81 @@ def test_prepare_close_advice_inputs_reports_missing_required_expirations(monkey
     assert "missing required expirations" in out["warnings"][0]
 
 
+def test_prepare_close_advice_inputs_reports_expiration_near_miss_without_silent_rewrite(monkeypatch, tmp_path: Path) -> None:
+    from scripts.agent_plugin.main import run_tool
+    import scripts.agent_plugin.tools as tools
+
+    cfg_path = tmp_path / "config.us.json"
+    secrets_dir = tmp_path / "secrets"
+    secrets_dir.mkdir()
+    (secrets_dir / "portfolio.sqlite.json").write_text(
+        json.dumps({"option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"}}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    cfg = _public_cfg_with_futu("secrets/portfolio.sqlite.json")
+    cfg["symbols"][0]["symbol"] = "0700.HK"
+    cfg["close_advice"] = {"enabled": True}
+    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    old_load = tools.load_option_positions_context
+    old_opend = tools.fetch_symbol_opend
+    old_save = tools.save_required_data_opend
+    try:
+        def _fake_load_option_positions_context(**kwargs):  # type: ignore[no-untyped-def]
+            return ({
+                "open_positions_min": [
+                    {"symbol": "0700.HK", "option_type": "put", "strike": 450, "expiration": "2026-05-27"},
+                ]
+            }, True)
+
+        def _fake_fetch_symbol_opend(symbol, **kwargs):  # type: ignore[no-untyped-def]
+            assert kwargs["chain_cache_force_refresh"] is True
+            return {"rows": [{"symbol": "0700.HK"}], "expiration_count": 1}
+
+        def _fake_save_required_data_opend(base, symbol, payload, *, output_root):  # type: ignore[no-untyped-def]
+            parsed = output_root / "parsed"
+            parsed.mkdir(parents=True, exist_ok=True)
+            csv_path = parsed / f"{symbol}_required_data.csv"
+            csv_path.write_text(
+                "symbol,option_type,expiration,strike\n"
+                "0700.HK,put,2026-05-28,450\n",
+                encoding="utf-8",
+            )
+            return output_root / "raw" / f"{symbol}_required_data.json", csv_path
+
+        tools.load_option_positions_context = _fake_load_option_positions_context  # type: ignore[assignment]
+        tools.fetch_symbol_opend = _fake_fetch_symbol_opend  # type: ignore[assignment]
+        tools.save_required_data_opend = _fake_save_required_data_opend  # type: ignore[assignment]
+        out = run_tool(
+            "prepare_close_advice_inputs",
+            {
+                "config_path": str(cfg_path),
+                "output_dir": str(tmp_path / "output" / "agent_plugin"),
+                "force_required_data_refresh": True,
+            },
+        )
+    finally:
+        tools.load_option_positions_context = old_load  # type: ignore[assignment]
+        tools.fetch_symbol_opend = old_opend  # type: ignore[assignment]
+        tools.save_required_data_opend = old_save  # type: ignore[assignment]
+
+    assert out["ok"] is True
+    assert out["data"]["symbols"][0]["position_coverage_ok"] is False
+    assert out["data"]["symbols"][0]["missing_expirations"] == ["2026-05-27"]
+    assert out["data"]["symbols"][0]["expiration_near_misses"] == [
+        {
+            "symbol": "0700.HK",
+            "option_type": "put",
+            "strike": 450.0,
+            "requested_expiration": "2026-05-27",
+            "matched_expiration": "2026-05-28",
+            "quote_key": "0700.HK|put|2026-05-27|450.000000",
+        }
+    ]
+    assert out["data"]["coverage_summary"]["expiration_near_miss_count"] == 1
+    assert any("expiration near miss 2026-05-27 -> 2026-05-28" in item for item in out["warnings"])
+
+
 def test_prepare_close_advice_inputs_normalizes_timestamp_expirations(monkeypatch, tmp_path: Path) -> None:
     from scripts.agent_plugin.main import run_tool
     import scripts.agent_plugin.tools as tools

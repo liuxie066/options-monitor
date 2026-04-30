@@ -297,6 +297,55 @@ def test_prefetch_required_data_defaults_to_opend_source() -> None:
         mod.ToolExecutionService.execute = old_exec
 
 
+def test_prefetch_required_data_force_refresh_ignores_existing_local_cache() -> None:
+    from scripts.multi_tick import required_data_prefetch as mod
+
+    old_has = mod.has_shared_required_data
+    old_exec = mod.ToolExecutionService.execute
+    mod.has_shared_required_data = lambda symbol, shared_dir: True
+
+    seen: list[tuple[str, bool]] = []
+
+    def _fake_execute(self, intent):
+        seen.append((str(intent.symbol), bool(intent.force_refresh)))
+        return {
+            "schema_kind": "tool_execution",
+            "schema_version": "1.0",
+            "tool_name": intent.tool_name,
+            "symbol": intent.symbol,
+            "source": intent.source,
+            "limit_exp": int(intent.limit_exp),
+            "idempotency_key": "k-force-cache",
+            "status": "fetched",
+            "ok": True,
+            "message": "fetched",
+            "returncode": 0,
+            "started_at_utc": "2026-01-01T00:00:00+00:00",
+            "finished_at_utc": "2026-01-01T00:00:01+00:00",
+        }
+
+    mod.ToolExecutionService.execute = _fake_execute
+    try:
+        with TemporaryDirectory() as td:
+            out = mod.prefetch_required_data(
+                vpy=Path("/usr/bin/python3"),
+                base=Path(td),
+                cfg={
+                    "symbols": [
+                        {"symbol": "AAPL", "fetch": {"source": "opend", "limit_expirations": 8}},
+                    ]
+                },
+                shared_required=Path(td) / "required_data",
+                force_refresh=True,
+            )
+        assert out["fetched_ok"] == 1
+        assert out["force_refresh"] is True
+        assert seen == [("AAPL", True)]
+    finally:
+        mod.has_shared_required_data = old_has
+        mod.ToolExecutionService.execute = old_exec
+
+
 def main() -> None:
     test_scheduler_decision_schema_boundary()
     test_tool_execution_schema_and_idempotency_key()
@@ -305,6 +354,7 @@ def main() -> None:
     test_prefetch_required_data_idempotency_audit()
     test_prefetch_required_data_protections_minimal()
     test_prefetch_required_data_defaults_to_opend_source()
+    test_prefetch_required_data_force_refresh_ignores_existing_local_cache()
     print("OK (phase1 tool boundary)")
 
 

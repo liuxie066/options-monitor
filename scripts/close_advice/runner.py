@@ -21,6 +21,7 @@ from scripts.fee_calc import calc_futu_option_fee
 from scripts.io_utils import atomic_write_text, read_json, safe_read_csv
 from scripts.option_positions_core.domain import effective_expiration_ymd, effective_multiplier
 from scripts.opend_utils import normalize_underlier, resolve_underlier_alias
+from src.application.expiration_normalization import find_unique_near_miss_expiration
 
 
 OUTPUT_COLUMNS = [
@@ -198,6 +199,17 @@ def load_required_data_coverage(
     return covered_keys, expirations_by_symbol
 
 
+def _build_contract_expiration_index(
+    covered_keys: set[tuple[str, str, str, str]],
+) -> dict[tuple[str, str, str], set[str]]:
+    index: dict[tuple[str, str, str], set[str]] = {}
+    for symbol, option_type, expiration, strike in covered_keys:
+        if not (symbol and option_type and expiration and strike):
+            continue
+        index.setdefault((symbol, option_type, strike), set()).add(expiration)
+    return index
+
+
 def _symbol_config_by_symbol(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
     items = config.get("symbols") if isinstance(config, dict) else []
     out: dict[str, dict[str, Any]] = {}
@@ -308,6 +320,7 @@ def _ensure_required_data_coverage_for_positions(
         return fetch_reasons, fetch_details, summary
 
     current_covered, current_expirations = load_required_data_coverage(required_data_root, symbols=set(specs), base_dir=base_dir)
+    current_contract_expiration_index = _build_contract_expiration_index(current_covered)
 
     try:
         from scripts.fetch_market_data_opend import fetch_symbol, save_outputs
@@ -326,12 +339,21 @@ def _ensure_required_data_coverage_for_positions(
         fetch_cfg = fetch_cfg if isinstance(fetch_cfg, dict) else {}
         if not is_futu_fetch_source(fetch_cfg.get("source")):
             for key in missing_keys:
+                near_miss = find_unique_near_miss_expiration(
+                    key[2],
+                    current_contract_expiration_index.get((key[0], key[1], key[3])) or set(),
+                )
                 fetch_reasons[key] = "required_data_fetch_skipped_non_futu_source"
                 fetch_details[key] = {
                     "quote_key": "|".join(key),
                     "requested_expirations": requested_expirations,
                     "available_expirations": sorted(current_expirations.get(symbol) or set()),
                 }
+                if near_miss:
+                    fetch_details[key]["expiration_near_miss"] = {
+                        "requested_expiration": key[2],
+                        "matched_expiration": near_miss,
+                    }
             continue
         strikes = [safe_float(v) for v in (spec.get("strikes") or [])]
         strikes = [v for v in strikes if v is not None]
@@ -352,6 +374,10 @@ def _ensure_required_data_coverage_for_positions(
         except Exception as exc:
             summary["errors"] += 1
             for key in missing_keys:
+                near_miss = find_unique_near_miss_expiration(
+                    key[2],
+                    current_contract_expiration_index.get((key[0], key[1], key[3])) or set(),
+                )
                 fetch_reasons[key] = "required_data_fetch_error"
                 fetch_details[key] = {
                     "quote_key": "|".join(key),
@@ -359,6 +385,11 @@ def _ensure_required_data_coverage_for_positions(
                     "available_expirations": sorted(current_expirations.get(symbol) or set()),
                     "message": str(exc),
                 }
+                if near_miss:
+                    fetch_details[key]["expiration_near_miss"] = {
+                        "requested_expiration": key[2],
+                        "matched_expiration": near_miss,
+                    }
             continue
         merged_rows = _merge_required_data_rows(
             _load_required_data_rows(required_data_root, symbol),
@@ -492,6 +523,7 @@ def _classify_required_data_coverage(
 ) -> tuple[dict[tuple[str, str, str, str], str], dict[tuple[str, str, str, str], dict[str, Any]]]:
     reasons: dict[tuple[str, str, str, str], str] = {}
     details: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    contract_expiration_index = _build_contract_expiration_index(covered_keys)
     for pos in positions:
         if not isinstance(pos, dict):
             continue
@@ -500,11 +532,20 @@ def _classify_required_data_coverage(
             continue
         available_expirations = sorted(expirations_by_symbol.get(key[0]) or set())
         has_expiration = bool(key[2] and key[2] in (expirations_by_symbol.get(key[0]) or set()))
+        near_miss = find_unique_near_miss_expiration(
+            key[2],
+            contract_expiration_index.get((key[0], key[1], key[3])) or set(),
+        )
         reasons[key] = "required_data_missing_contract" if has_expiration else "required_data_missing_expiration"
         details[key] = {
             "quote_key": "|".join(key),
             "available_expirations": available_expirations[:5],
         }
+        if near_miss:
+            details[key]["expiration_near_miss"] = {
+                "requested_expiration": key[2],
+                "matched_expiration": near_miss,
+            }
     return reasons, details
 
 
@@ -577,7 +618,12 @@ def _build_quote_issue_samples(
         resolved_underlier = str(detail.get("resolved_underlier") or "").strip()
         requested_symbol = str(detail.get("requested_symbol") or "").strip()
         available_expirations = [str(x).strip() for x in (detail.get("available_expirations") or []) if str(x).strip()]
-        if available_expirations:
+        near_miss = detail.get("expiration_near_miss") if isinstance(detail.get("expiration_near_miss"), dict) else {}
+        matched_expiration = str(near_miss.get("matched_expiration") or "").strip()
+        requested_expiration = str(near_miss.get("requested_expiration") or "").strip()
+        if matched_expiration:
+            diag = f" | near_miss={requested_expiration or exp}->{matched_expiration}"
+        elif available_expirations:
             diag = f" | have={','.join(available_expirations[:3])}"
         elif str(detail.get("message") or "").strip():
             diag = f" | detail={str(detail.get('message')).strip()[:80]}"
@@ -1020,6 +1066,11 @@ def run_close_advice(
         "covered_contracts": len(covered_keys),
         "positions_missing_expiration": sum(1 for reason in coverage_reasons.values() if reason == "required_data_missing_expiration"),
         "positions_missing_contract": sum(1 for reason in coverage_reasons.values() if reason == "required_data_missing_contract"),
+        "expiration_near_miss_count": sum(
+            1
+            for detail in coverage_details.values()
+            if isinstance(detail, dict) and isinstance(detail.get("expiration_near_miss"), dict)
+        ),
         "coverage_fetch_attempted_symbols": int(coverage_fetch_summary.get("attempted_symbols") or 0),
         "coverage_fetch_errors": int(coverage_fetch_summary.get("errors") or 0),
     }

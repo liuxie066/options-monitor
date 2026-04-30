@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any
 
 
@@ -28,3 +28,38 @@ def normalize_expiration_ymd(value: Any) -> str | None:
         except Exception:
             return None
     return None
+
+
+def parse_expiration_ymd(value: Any) -> date | None:
+    normalized = normalize_expiration_ymd(value)
+    if not normalized:
+        return None
+    try:
+        return datetime.strptime(normalized, "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+
+def find_unique_near_miss_expiration(
+    requested: Any,
+    available_expirations: list[Any] | set[Any] | tuple[Any, ...],
+    *,
+    max_delta_days: int = 1,
+) -> str | None:
+    requested_date = parse_expiration_ymd(requested)
+    if requested_date is None:
+        return None
+    matches = sorted(
+        {
+            normalized
+            for raw in (available_expirations or [])
+            for normalized in [normalize_expiration_ymd(raw)]
+            if normalized and (
+                (candidate_date := parse_expiration_ymd(normalized)) is not None
+                and abs((candidate_date - requested_date).days) <= int(max_delta_days)
+            )
+        }
+    )
+    if len(matches) != 1:
+        return None
+    return matches[0]
