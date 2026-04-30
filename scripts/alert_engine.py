@@ -159,6 +159,7 @@ def _build_sell_put_extra_parts(row: pd.Series) -> list[str]:
     req_cny = None
     avail_cny = None
     free_cny = None
+    free_total_cny = None
     req = None
     avail = row.get('cash_available_usd')
     free = row.get('cash_free_usd')
@@ -191,6 +192,11 @@ def _build_sell_put_extra_parts(row: pd.Series) -> list[str]:
     except Exception:
         free_cny = None
     try:
+        v = row.get('cash_free_total_cny')
+        free_total_cny = float(v) if v is not None and not pd.isna(v) else None
+    except Exception:
+        free_total_cny = None
+    try:
         raw_req = row.get('cash_required_usd')
         req = float(raw_req) if raw_req is not None and not pd.isna(raw_req) else None
     except Exception:
@@ -209,6 +215,8 @@ def _build_sell_put_extra_parts(row: pd.Series) -> list[str]:
         parts.append(f"cash_avail_cny ¥{avail_cny:,.0f}")
     if free_cny is not None and free_cny > 0:
         parts.append(f"cash_free_cny ¥{free_cny:,.0f}")
+    elif free_total_cny is not None and free_total_cny > 0:
+        parts.append(f"cash_free_total_cny ¥{free_total_cny:,.0f}")
 
     if not parts:
         if used_total is not None and used_total > 0:
@@ -264,20 +272,26 @@ def classify_alert(row: pd.Series) -> tuple[str | None, str]:
     annual = float(row.get('annualized_return', 0) or 0)
 
     if strategy == 'sell_put':
-        # cash-aware gating:
-        # Preferred: base-currency gating (CNY) using holdings base cash.
-        # Fallback: USD gating using real USD cash (cash_free_usd) or USD equivalent (cash_free_usd_est).
+        # Defensive guard for standalone summary->alert generation paths.
+        # The main pipeline should already filter cash-insufficient candidates
+        # upstream, but this public alert entrypoint can also consume replayed or
+        # externally supplied summary CSVs.
         cash_free = None
         cash_free_est = None
         cash_req = None
         cash_free_cny = None
+        cash_free_total_cny = None
         cash_req_cny = None
-        # Base-currency (CNY) gating first
         try:
             v = row.get('cash_free_cny')
             cash_free_cny = float(v) if v is not None and not pd.isna(v) else None
         except Exception:
             cash_free_cny = None
+        try:
+            v = row.get('cash_free_total_cny')
+            cash_free_total_cny = float(v) if v is not None and not pd.isna(v) else None
+        except Exception:
+            cash_free_total_cny = None
         try:
             v = row.get('cash_required_cny')
             cash_req_cny = float(v) if v is not None and not pd.isna(v) else None
@@ -286,8 +300,9 @@ def classify_alert(row: pd.Series) -> tuple[str | None, str]:
 
         if cash_free_cny is not None and cash_req_cny is not None and cash_req_cny > cash_free_cny:
             return 'low', f'所需担保现金约 ¥{cash_req_cny:,.0f}，但当前 base(CNY) 现金余量约 ¥{cash_free_cny:,.0f}（扣占用后折算），可能无法再加仓。'
+        if cash_free_cny is None and cash_free_total_cny is not None and cash_req_cny is not None and cash_req_cny > cash_free_total_cny:
+            return 'low', f'所需担保现金约 ¥{cash_req_cny:,.0f}，但当前总可用折算约 ¥{cash_free_total_cny:,.0f}（扣占用后折算），可能无法再加仓。'
 
-        # Fallback USD gating (only when base-currency is unavailable)
         try:
             v = row.get('cash_free_usd')
             cash_free = float(v) if v is not None and not pd.isna(v) else None
@@ -307,10 +322,9 @@ def classify_alert(row: pd.Series) -> tuple[str | None, str]:
         if cash_free is not None and cash_req is not None and cash_req > cash_free:
             return 'low', f'所需担保现金约 ${cash_req:,.0f}，但当前账户可用担保现金约 ${cash_free:,.0f}（已扣占用），可能无法再加仓。'
 
-        if (cash_free is None) and (cash_free_cny is None) and cash_free_est is not None and cash_req is not None and cash_req > cash_free_est:
+        if (cash_free is None) and (cash_free_cny is None) and (cash_free_total_cny is None) and cash_free_est is not None and cash_req is not None and cash_req > cash_free_est:
             return 'low', f'所需担保现金约 ${cash_req:,.0f}，但账户可用担保现金(折算USD)约 ${cash_free_est:,.0f}（已扣占用）；可能无法再加仓，仅供观察。'
 
-        # Passed scanner + cash gate => high priority.
         if annual > 0:
             return 'high', SELL_PUT_NOTIFICATION_HIGH
         return 'low', SELL_PUT_NOTIFICATION_LOW

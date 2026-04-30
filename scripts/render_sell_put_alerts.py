@@ -20,6 +20,58 @@ from domain.domain.engine import (
     rank_scored_candidates,
 )
 
+
+def _render_judgment(row) -> str:
+    def _to_float(value):
+        try:
+            return float(value) if value is not None and not pd.isna(value) else None
+        except Exception:
+            return None
+
+    cash_req_cny = _to_float(row.get("cash_required_cny"))
+    cash_free_cny = _to_float(row.get("cash_free_cny"))
+    cash_free_total_cny = _to_float(row.get("cash_free_total_cny"))
+    cash_req_usd = _to_float(row.get("cash_required_usd"))
+    cash_free_usd = _to_float(row.get("cash_free_usd"))
+    cash_free_usd_est = _to_float(row.get("cash_free_usd_est"))
+
+    if cash_req_cny is not None and cash_free_cny is not None and cash_req_cny > cash_free_cny:
+        return f"所需担保现金约 ¥{cash_req_cny:,.0f}，但当前 base(CNY) 现金余量约 ¥{cash_free_cny:,.0f}（扣占用后折算），可能无法再加仓。"
+    if cash_req_cny is not None and cash_free_cny is None and cash_free_total_cny is not None and cash_req_cny > cash_free_total_cny:
+        return f"所需担保现金约 ¥{cash_req_cny:,.0f}，但当前总可用折算约 ¥{cash_free_total_cny:,.0f}（扣占用后折算），可能无法再加仓。"
+    if cash_req_usd is not None and cash_free_usd is not None and cash_req_usd > cash_free_usd:
+        return f"所需担保现金约 ${cash_req_usd:,.0f}，但当前账户可用担保现金约 ${cash_free_usd:,.0f}（已扣占用），可能无法再加仓。"
+    if cash_req_usd is not None and cash_free_cny is None and cash_free_total_cny is None and cash_free_usd is None and cash_free_usd_est is not None and cash_req_usd > cash_free_usd_est:
+        return f"所需担保现金约 ${cash_req_usd:,.0f}，但账户可用担保现金(折算USD)约 ${cash_free_usd_est:,.0f}（已扣占用）；可能无法再加仓，仅供观察。"
+
+    return render_sell_put_comment(row)
+
+
+def _active_cash_view(row) -> tuple[str, str, float | None, float | None, float | None]:
+    def _to_float(value):
+        try:
+            return float(value) if value is not None and not pd.isna(value) else None
+        except Exception:
+            return None
+
+    cash_req_cny = _to_float(row.get("cash_required_cny"))
+    cash_free_cny = _to_float(row.get("cash_free_cny"))
+    cash_free_total_cny = _to_float(row.get("cash_free_total_cny"))
+    cash_req_usd = _to_float(row.get("cash_required_usd"))
+    cash_free_usd = _to_float(row.get("cash_free_usd"))
+    cash_free_usd_est = _to_float(row.get("cash_free_usd_est"))
+
+    if cash_req_cny is not None and cash_free_cny is not None:
+        return ("CNY", "base(CNY) 现金余量", cash_req_cny, cash_free_cny, cash_free_cny - cash_req_cny)
+    if cash_req_cny is not None and cash_free_total_cny is not None:
+        return ("CNY", "总可用折算(CNY)", cash_req_cny, cash_free_total_cny, cash_free_total_cny - cash_req_cny)
+    if cash_req_usd is not None and cash_free_usd is not None:
+        return ("USD", "账户可用担保现金(USD)", cash_req_usd, cash_free_usd, cash_free_usd - cash_req_usd)
+    if cash_req_usd is not None and cash_free_usd_est is not None:
+        return ("USD", "账户可用担保现金(折算USD)", cash_req_usd, cash_free_usd_est, cash_free_usd_est - cash_req_usd)
+    return ("CNY", "base(CNY) 现金余量", cash_req_cny, cash_free_cny, None)
+
+
 def render_one(row) -> str:
     symbol = row["symbol"]
     expiration = row["expiration"]
@@ -59,6 +111,8 @@ def render_one(row) -> str:
 
     cash_avail_cny = None
     cash_free_cny = None
+    cash_avail_total_cny = None
+    cash_free_total_cny = None
     try:
         v = row.get('cash_available_cny')
         cash_avail_cny = float(v) if v is not None and not pd.isna(v) else None
@@ -69,13 +123,30 @@ def render_one(row) -> str:
         cash_free_cny = float(v) if v is not None and not pd.isna(v) else None
     except Exception:
         cash_free_cny = None
+    try:
+        v = row.get('cash_available_total_cny')
+        cash_avail_total_cny = float(v) if v is not None and not pd.isna(v) else None
+    except Exception:
+        cash_avail_total_cny = None
+    try:
+        v = row.get('cash_free_total_cny')
+        cash_free_total_cny = float(v) if v is not None and not pd.isna(v) else None
+    except Exception:
+        cash_free_total_cny = None
 
     headroom = None
+    headroom_label = "加仓后余量(估算, CNY)"
     try:
         if cash_req_cny is not None and cash_free_cny is not None:
             headroom = float(cash_free_cny) - float(cash_req_cny)
+        elif cash_req_cny is not None and cash_free_total_cny is not None:
+            headroom = float(cash_free_total_cny) - float(cash_req_cny)
+            headroom_label = "加仓后余量(总折算估算, CNY)"
     except Exception:
         headroom = None
+
+    active_ccy, active_free_label, active_req, active_free, active_headroom = _active_cash_view(row)
+    active_symbol = "$" if active_ccy == "USD" else "¥"
 
     body = [
         title,
@@ -89,7 +160,12 @@ def render_one(row) -> str:
         f"其中该标的占用(估算, CNY口径): {('-' if cash_used_symbol is None else '¥' + num(cash_used_symbol, 0))}",
         f"富途现金(base, CNY): {('-' if cash_avail_cny is None else '¥' + num(cash_avail_cny, 0))}",
         f"现金余量(base, 扣占用折算, CNY): {('-' if cash_free_cny is None else '¥' + num(cash_free_cny, 0))}",
-        f"加仓后余量(估算, CNY): {('-' if headroom is None else '¥' + num(headroom, 0))}",
+        f"总现金折算(CNY): {('-' if cash_avail_total_cny is None else '¥' + num(cash_avail_total_cny, 0))}",
+        f"总可用折算(扣占用, CNY): {('-' if cash_free_total_cny is None else '¥' + num(cash_free_total_cny, 0))}",
+        f"{headroom_label}: {('-' if headroom is None else '¥' + num(headroom, 0))}",
+        f"担保现金需求(生效口径, {active_ccy}): {('-' if active_req is None else active_symbol + num(active_req, 0))}",
+        f"{active_free_label}: {('-' if active_free is None else active_symbol + num(active_free, 0))}",
+        f"加仓后余量(生效口径, {active_ccy}): {('-' if active_headroom is None else active_symbol + num(active_headroom, 0))}",
         "",
         f"净收入({str(row.get('currency') or row.get('option_ccy') or 'N/A').upper()}): {num(row['net_income'])}",
         f"净年化: {pct(row['annualized_net_return_on_cash_basis'])}",
@@ -99,7 +175,7 @@ def render_one(row) -> str:
         f"OI / Volume: {int(row.get('open_interest', 0) or 0)} / {int(row.get('volume', 0) or 0)}",
         f"Spread Ratio: {pct(row.get('spread_ratio', 0))}",
         "",
-        f"判断: {render_sell_put_comment(row)}",
+        f"判断: {_render_judgment(row)}",
     ]
     return "\n".join(body)
 
