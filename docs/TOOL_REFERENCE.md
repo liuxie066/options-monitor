@@ -71,6 +71,7 @@
 | `preview_notification` | `./om notify preview` |
 | `get_close_advice` | `./om close-advice` |
 | `query_cash_headroom` | `./om sell-put-cash` |
+| 无 agent tool | `./om version` |
 
 说明：
 - `om-agent` 更适合给程序调
@@ -208,7 +209,19 @@
 
 ---
 
-## 6. WebUI 能调用哪些工具
+## 6. 人工 CLI：版本检查
+
+`./om version` 是人工 CLI 能力，不是 `om-agent` tool。它读取本地 `VERSION`，再检查远端 `origin` 的 `v*` tags，用于判断当前本地版本是否落后于已发布版本。
+
+示例：
+
+```bash
+./om version
+```
+
+---
+
+## 7. WebUI 能调用哪些工具
 
 这点要特别说明：
 
@@ -226,7 +239,7 @@
 
 ---
 
-## 7. 字段口径
+## 8. 字段口径
 
 ### 优先使用
 - `broker`
@@ -238,7 +251,7 @@
 
 ---
 
-## 8. 相关文档
+## 9. 相关文档
 
 - Agent 合同：[`AGENT_INTEGRATION.md`](AGENT_INTEGRATION.md)
 - 快速开始：[`GETTING_STARTED.md`](GETTING_STARTED.md)
