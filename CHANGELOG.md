@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.0.0 - 2026-05-01
+
+### Changed
+- Promoted the agent-facing tool surface to the first stable release after adding local-runtime diagnostics and OpenClaw readiness checks for safer Codex, Claude Code, and OpenClaw usage.
+- Documented the release/update-check contract around Git tags, `VERSION`, and agent tool references so remote version checks have a stable source of truth.
+
 ## 0.4.8 - 2026-05-01
 
 ### Changed
