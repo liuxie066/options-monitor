@@ -139,6 +139,78 @@ def test_run_close_advice_prefers_context_expiration_ymd_field(tmp_path: Path) -
     assert "NVDA Put 2026-05-15" in (out_dir / "close_advice.txt").read_text(encoding="utf-8")
 
 
+def test_run_close_advice_normalizes_business_midnight_expiration_timestamp(tmp_path: Path) -> None:
+    context = {
+        "open_positions_min": [
+            {
+                "account": "sy",
+                "symbol": "PDD",
+                "option_type": "put",
+                "side": "short",
+                "status": "open",
+                "contracts_open": 1,
+                "currency": "USD",
+                "strike": 100,
+                "multiplier": 100,
+                "premium": 1.6,
+                "expiration": 1781712000000,
+            }
+        ]
+    }
+    ctx_path = tmp_path / "option_positions_context.json"
+    ctx_path.write_text(json.dumps(context, ensure_ascii=False), encoding="utf-8")
+
+    required_root = tmp_path / "required_data"
+    parsed = required_root / "parsed"
+    parsed.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "PDD",
+                "option_type": "put",
+                "expiration": "2026-06-18",
+                "strike": 100,
+                "mid": 0.22,
+                "bid": 0.21,
+                "ask": 0.23,
+                "dte": 48,
+                "multiplier": 100,
+                "spot": 120,
+                "currency": "USD",
+            }
+        ]
+    ).to_csv(parsed / "PDD_required_data.csv", index=False)
+
+    out_dir = tmp_path / "reports"
+    result = run_close_advice(
+        config={"close_advice": {"enabled": True, "notify_levels": ["strong", "medium"]}},
+        context_path=ctx_path,
+        required_data_root=required_root,
+        output_dir=out_dir,
+        base_dir=Path.cwd(),
+    )
+
+    text = (out_dir / "close_advice.txt").read_text(encoding="utf-8")
+    csv_text = (out_dir / "close_advice.csv").read_text(encoding="utf-8")
+    assert result["rows"] == 1
+    assert "PDD Put 2026-06-18" in text
+    assert "2026-06-17" not in text
+    assert "coverage_missing" not in csv_text
+
+
+def test_close_advice_recalculates_dte_from_business_today(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scripts.close_advice import runner
+
+    monkeypatch.setattr(
+        runner,
+        "expiration_business_today",
+        lambda: datetime(2026, 5, 1, tzinfo=timezone.utc).date(),
+    )
+
+    assert runner._calc_dte("2026-05-01", {"dte": 99}) == 0
+    assert runner._calc_dte("2026-05-02", {"dte": 99}) == 1
+
+
 def test_run_close_advice_records_missing_quote_but_does_not_notify(tmp_path: Path) -> None:
     ctx_path = tmp_path / "option_positions_context.json"
     ctx_path.write_text(

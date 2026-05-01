@@ -8,6 +8,8 @@ from scripts.option_positions_core.domain import (
     build_open_adjustment_patch,
     build_expire_auto_close_patch,
     build_open_fields,
+    effective_expiration_ymd,
+    exp_ms_to_ymd,
     infer_currency_from_symbol,
     normalize_broker,
     normalize_close_type,
@@ -42,6 +44,13 @@ def test_infer_currency_from_symbol_uses_canonical_market_suffix() -> None:
     assert infer_currency_from_symbol("0700.HK") == "HKD"
     assert infer_currency_from_symbol("PLTR") == "USD"
     assert infer_currency_from_symbol("") is None
+
+
+def test_expiration_ms_to_ymd_uses_business_date_timezone() -> None:
+    assert exp_ms_to_ymd(1777564800000) == "2026-05-01"
+    assert exp_ms_to_ymd(1781712000000) == "2026-06-18"
+    assert exp_ms_to_ymd(1778803200000) == "2026-05-15"
+    assert effective_expiration_ymd({"expiration": 1777564800000}) == "2026-05-01"
 
 
 def test_strict_enum_normalization_rejects_invalid_values() -> None:

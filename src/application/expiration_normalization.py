@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from typing import Any
+
+from domain.domain.expiration_dates import expiration_timestamp_to_ymd
 
 
 def normalize_expiration_ymd(value: Any) -> str | None:
@@ -18,15 +20,9 @@ def normalize_expiration_ymd(value: Any) -> str | None:
         except Exception:
             return None
     if len(digits) == 10:
-        try:
-            return datetime.fromtimestamp(int(digits), tz=timezone.utc).date().isoformat()
-        except Exception:
-            return None
+        return expiration_timestamp_to_ymd(digits)
     if len(digits) == 13:
-        try:
-            return datetime.fromtimestamp(int(digits) / 1000.0, tz=timezone.utc).date().isoformat()
-        except Exception:
-            return None
+        return expiration_timestamp_to_ymd(digits)
     return None
 
 

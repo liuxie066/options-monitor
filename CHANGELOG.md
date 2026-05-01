@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.0.1 - 2026-05-01
+
+### Fixed
+- Normalized option expiration timestamp display and DTE calculations to Asia/Shanghai business dates, so midnight Beijing records no longer render one UTC calendar day early in close-advice and position contexts.
+
 ## 1.0.0 - 2026-05-01
 
 ### Changed

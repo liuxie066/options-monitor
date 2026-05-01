@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from domain.domain.expiration_dates import expiration_business_today
 from domain.domain.fetch_source import is_futu_fetch_source
 from domain.domain.close_advice import (
     CloseAdviceConfig,
@@ -19,7 +20,11 @@ from domain.domain.close_advice import (
 )
 from scripts.fee_calc import calc_futu_option_fee
 from scripts.io_utils import atomic_write_text, read_json, safe_read_csv
-from scripts.option_positions_core.domain import effective_expiration_ymd, effective_multiplier
+from scripts.option_positions_core.domain import (
+    effective_expiration_ymd,
+    effective_multiplier,
+    exp_ms_to_ymd,
+)
 from scripts.opend_utils import normalize_underlier, resolve_underlier_alias
 from src.application.expiration_normalization import find_unique_near_miss_expiration
 from src.application.opend_fetch_config import opend_fetch_kwargs
@@ -89,17 +94,7 @@ def _market_for_symbol(symbol: Any) -> str:
 
 
 def _date_from_ms(value: Any) -> str | None:
-    try:
-        if value in (None, ""):
-            return None
-        n = int(float(value))
-        if n <= 0:
-            return None
-        if n > 10_000_000_000:
-            return datetime.fromtimestamp(n / 1000, tz=timezone.utc).date().isoformat()
-        return datetime.fromtimestamp(n, tz=timezone.utc).date().isoformat()
-    except Exception:
-        return None
+    return exp_ms_to_ymd(value)
 
 
 def normalize_expiration(value: Any) -> str | None:
@@ -775,7 +770,7 @@ def _calc_dte(expiration: str | None, quote: dict[str, Any] | None) -> int | Non
         if not expiration:
             raise ValueError("missing expiration")
         exp_date = datetime.strptime(expiration[:10], "%Y-%m-%d").date()
-        return (exp_date - datetime.now(timezone.utc).date()).days
+        return (exp_date - expiration_business_today()).days
     except Exception:
         return safe_int((quote or {}).get("dte"))
 

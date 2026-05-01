@@ -21,6 +21,7 @@ from scripts.option_positions_core.domain import (
     effective_multiplier,
     effective_strike,
     exp_ms_to_datetime,
+    exp_ms_to_ymd,
     normalize_broker,
     now_ms,
     resolve_open_currency,
@@ -273,7 +274,7 @@ def _bootstrap_trade_event(item: dict[str, Any], *, source_name: str) -> TradeEv
         price=float(safe_float(fields.get("premium")) or 0.0),
         strike=safe_float(fields.get("strike")),
         multiplier=(int(float(raw_multiplier)) if (raw_multiplier := safe_float(fields.get("multiplier"))) is not None else None),
-        expiration_ymd=(exp_dt.date().isoformat() if (exp_dt := exp_ms_to_datetime(fields.get("expiration"))) is not None else None),
+        expiration_ymd=exp_ms_to_ymd(fields.get("expiration")),
         currency=str(fields.get("currency") or "").strip().upper(),
         trade_time_ms=trade_time_ms,
         order_id=None,
@@ -1093,7 +1094,7 @@ def persist_manual_adjust_event(
         price=0.0,
         strike=(float(fields["strike"]) if fields.get("strike") is not None else None),
         multiplier=(int(float(raw_multiplier)) if (raw_multiplier := safe_float(fields.get("multiplier"))) is not None else None),
-        expiration_ymd=(exp_dt.date().isoformat() if (exp_dt := exp_ms_to_datetime(fields.get("expiration"))) is not None else None),
+        expiration_ymd=exp_ms_to_ymd(fields.get("expiration")),
         currency=str(fields.get("currency") or "").strip().upper(),
         trade_time_ms=int(as_of_ms or now_ms()),
         order_id=None,
@@ -1157,7 +1158,6 @@ def build_expired_close_decisions(
             )
             continue
 
-        exp_dt = exp_ms_to_datetime(exp_ms)
         should_close = int(exp_ms) <= cutoff_ms
         patch = (
             build_expire_auto_close_patch(
@@ -1178,7 +1178,7 @@ def build_expired_close_decisions(
                 "effective_exp_source": exp_source,
                 "should_close": should_close,
                 "reason": (
-                    f"expired: exp={exp_dt.date().isoformat() if exp_dt else exp_ms} "
+                    f"expired: exp={exp_ms_to_ymd(exp_ms) or exp_ms} "
                     f"grace_days={grace_days} as_of={as_of_dt.date().isoformat()}"
                 ),
                 "patch": patch,

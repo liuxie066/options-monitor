@@ -15,13 +15,17 @@ import argparse
 import json
 from datetime import datetime, timezone
 
+from domain.domain.expiration_dates import (
+    EXPIRATION_DATE_TZ,
+    expiration_timestamp_to_date,
+    expiration_timestamp_to_ymd,
+)
 from scripts.feishu_bitable import safe_float, parse_note_kv
 from scripts.option_positions_core.domain import (
     effective_contracts,
     effective_contracts_closed,
     effective_contracts_open,
     effective_multiplier,
-    exp_ms_to_datetime,
     normalize_account,
     normalize_broker,
     normalize_close_type,
@@ -93,7 +97,7 @@ def build_context(records: list[dict], broker: str, account: str | None = None, 
 
     # Minimal open positions list for downstream (auto-close), keeps record_id.
     open_positions_min: list[dict] = []
-    as_of_date = datetime.now(timezone.utc).date()
+    as_of_date = datetime.now(EXPIRATION_DATE_TZ).date()
 
     for it in selected_items:
         f = it.get('fields') or {}
@@ -106,9 +110,9 @@ def build_context(records: list[dict], broker: str, account: str | None = None, 
         contracts_closed = effective_contracts_closed(f)
         if contracts_open <= 0:
             continue
-        exp_dt = exp_ms_to_datetime(f.get("expiration"))
-        expiration_ymd = exp_dt.date().isoformat() if exp_dt is not None else None
-        days_to_expiration = (exp_dt.date() - as_of_date).days if exp_dt is not None else None
+        expiration_ymd = expiration_timestamp_to_ymd(f.get("expiration"))
+        expiration_date = expiration_timestamp_to_date(f.get("expiration"))
+        days_to_expiration = (expiration_date - as_of_date).days if expiration_date is not None else None
 
         open_positions_min.append({
             'record_id': it.get('record_id'),

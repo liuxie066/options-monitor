@@ -13,7 +13,7 @@ from pathlib import Path
 
 from scripts.option_positions_core.ledger import project_position_lot_records_with_diagnostics
 from scripts.option_positions_core.domain import (
-    exp_ms_to_datetime,
+    exp_ms_to_ymd,
     normalize_account,
     normalize_broker,
 )
@@ -131,8 +131,7 @@ def _matches_lot_selector(
         if current_strike is None or abs(float(current_strike) - float(strike)) >= 1e-9:
             return False
     if expiration_ymd:
-        current_expiration_dt = exp_ms_to_datetime(fields.get('expiration'))
-        current_expiration = current_expiration_dt.date().isoformat() if current_expiration_dt is not None else str(fields.get('expiration') or '')
+        current_expiration = exp_ms_to_ymd(fields.get('expiration')) or str(fields.get('expiration') or '')
         current_note = str(fields.get('note') or '')
         if expiration_ymd not in current_note and expiration_ymd not in current_expiration:
             return False

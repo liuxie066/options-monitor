@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from domain.domain.expiration_dates import expiration_timestamp_to_ymd
 from scripts.feishu_bitable import merge_note, parse_note_kv, safe_float
 from scripts.opend_utils import resolve_underlier_alias
 
@@ -239,6 +240,10 @@ def exp_ms_to_datetime(value: Any) -> datetime | None:
         return None
 
 
+def exp_ms_to_ymd(value: Any) -> str | None:
+    return expiration_timestamp_to_ymd(value)
+
+
 def calc_cash_secured(strike: float, multiplier: float, contracts: int | float) -> float:
     return float(strike) * float(multiplier) * int(float(contracts))
 
@@ -302,8 +307,7 @@ def effective_expiration(fields: dict[str, Any]) -> tuple[int | None, str]:
 
 def effective_expiration_ymd(fields: dict[str, Any]) -> str | None:
     exp_ms, _source = effective_expiration(fields)
-    exp_dt = exp_ms_to_datetime(exp_ms)
-    return exp_dt.date().isoformat() if exp_dt is not None else None
+    return exp_ms_to_ymd(exp_ms)
 
 
 def effective_strike(fields: dict[str, Any]) -> float | None:
