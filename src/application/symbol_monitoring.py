@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from src.application.opend_fetch_config import opend_discovery_kwargs, opend_fetch_kwargs
 from src.application.required_data_planning import build_required_data_fetch_plan
 
 
@@ -21,6 +22,7 @@ class SymbolMonitoringInputs:
     report_dir: Path
     state_dir: Path | None
     is_scheduled: bool
+    runtime_config: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -81,6 +83,13 @@ def run_symbol_monitoring(
         pass
 
     fetch_cfg = dict(symbol_cfg.get("fetch", {}) or {})
+    runtime_config = (
+        inputs.runtime_config
+        if isinstance(inputs.runtime_config, dict)
+        else symbol_cfg
+    )
+    discovery_fetch_kwargs = opend_discovery_kwargs(runtime_config)
+    fetch_request_kwargs = opend_fetch_kwargs(runtime_config)
     fetch_plan = build_required_data_fetch_plan(
         base=inputs.base,
         required_data_dir=inputs.required_data_dir,
@@ -92,6 +101,7 @@ def run_symbol_monitoring(
         sell_call_cfg=cc,
         fetch_host=str(fetch_cfg.get("host") or "127.0.0.1"),
         fetch_port=int(fetch_cfg.get("port") or 11111),
+        **discovery_fetch_kwargs,
     )
 
     deps.ensure_required_data_fn(
@@ -113,6 +123,7 @@ def run_symbol_monitoring(
         max_dte=None,
         fetch_plan=fetch_plan,
         report_dir=inputs.report_dir,
+        opend_fetch_config=fetch_request_kwargs,
     )
 
     summary_rows: list[dict] = []

@@ -22,6 +22,7 @@ from scripts.io_utils import atomic_write_text, read_json, safe_read_csv
 from scripts.option_positions_core.domain import effective_expiration_ymd, effective_multiplier
 from scripts.opend_utils import normalize_underlier, resolve_underlier_alias
 from src.application.expiration_normalization import find_unique_near_miss_expiration
+from src.application.opend_fetch_config import opend_fetch_kwargs
 
 
 OUTPUT_COLUMNS = [
@@ -53,6 +54,7 @@ OUTPUT_COLUMNS = [
 QUOTE_ISSUE_FLAGS = {
     "missing_quote",
     "missing_mid",
+    "mid_fallback_last_price",
     "required_data_missing_expiration",
     "required_data_missing_contract",
     "required_data_fetch_error",
@@ -244,11 +246,18 @@ def _quote_number(value: Any) -> float | None:
 def _quote_has_usable_price(quote: dict[str, Any] | None) -> bool:
     if not isinstance(quote, dict):
         return False
-    if _quote_number(quote.get("mid")) is not None or _quote_number(quote.get("last_price")) is not None:
-        return True
     bid = _quote_number(quote.get("bid"))
     ask = _quote_number(quote.get("ask"))
-    return bid is not None and ask is not None and bid > 0 and ask > 0 and ask >= bid
+    has_usable_bid_ask = bid is not None and ask is not None and bid > 0 and ask > 0 and ask >= bid
+    if has_usable_bid_ask:
+        return True
+    mid = _quote_number(quote.get("mid"))
+    if mid is None:
+        return False
+    last_price = _quote_number(quote.get("last_price"))
+    if last_price is not None and abs(float(mid) - float(last_price)) < 0.000001:
+        return False
+    return True
 
 
 def _fetch_payload_error_reason(payload: dict[str, Any] | None, *, prefix: str) -> str | None:
@@ -343,6 +352,9 @@ def _ensure_required_data_coverage_for_positions(
     fetch_reasons: dict[tuple[str, str, str, str], str] = {}
     fetch_details: dict[tuple[str, str, str, str], dict[str, Any]] = {}
     summary = {"attempted_symbols": 0, "fetched_symbols": 0, "errors": 0}
+    advice_cfg = config.get("close_advice") if isinstance(config, dict) else {}
+    if isinstance(advice_cfg, dict) and str(advice_cfg.get("quote_source") or "auto").strip().lower() == "required_data":
+        return fetch_reasons, fetch_details, summary
     if not specs:
         return fetch_reasons, fetch_details, summary
 
@@ -398,6 +410,7 @@ def _ensure_required_data_coverage_for_positions(
                 chain_cache=True,
                 chain_cache_force_refresh=False,
                 freshness_policy="refresh_missing",
+                **opend_fetch_kwargs(config),
             )
         except Exception as exc:
             summary["errors"] += 1
@@ -559,6 +572,7 @@ def _fetch_missing_quotes_via_opend(
                 explicit_expirations=expirations,
                 chain_cache=True,
                 freshness_policy="refresh_missing",
+                **opend_fetch_kwargs(config),
             )
         except Exception as exc:
             err_low = str(exc or "").lower()
@@ -757,27 +771,28 @@ def _position_premium(pos: dict[str, Any]) -> float | None:
 
 
 def _calc_dte(expiration: str | None, quote: dict[str, Any] | None) -> int | None:
-    q_dte = safe_int((quote or {}).get("dte"))
-    if q_dte is not None:
-        return q_dte
-    if not expiration:
-        return None
     try:
+        if not expiration:
+            raise ValueError("missing expiration")
         exp_date = datetime.strptime(expiration[:10], "%Y-%m-%d").date()
         return (exp_date - datetime.now(timezone.utc).date()).days
     except Exception:
-        return None
+        return safe_int((quote or {}).get("dte"))
 
 
 def _mid_from_quote(quote: dict[str, Any] | None) -> tuple[float | None, list[str]]:
     if not isinstance(quote, dict):
         return None, ["missing_quote"]
-    mid = _quote_number(quote.get("mid"))
-    if mid is not None:
-        return mid, []
     bid = _quote_number(quote.get("bid"))
     ask = _quote_number(quote.get("ask"))
-    if bid is not None and ask is not None and bid > 0 and ask > 0 and ask >= bid:
+    has_usable_bid_ask = bid is not None and ask is not None and bid > 0 and ask > 0 and ask >= bid
+    mid = _quote_number(quote.get("mid"))
+    if mid is not None:
+        last_price = _quote_number(quote.get("last_price"))
+        if not has_usable_bid_ask and last_price is not None and abs(float(mid) - float(last_price)) < 0.000001:
+            return mid, ["mid_fallback_last_price"]
+        return mid, []
+    if has_usable_bid_ask:
         return round((bid + ask) / 2, 6), ["mid_from_bid_ask"]
     last_price = _quote_number(quote.get("last_price"))
     if last_price is not None:
@@ -934,6 +949,7 @@ def _gap_reason_label(row: dict[str, Any]) -> str:
         "opend_fetch_error": "OpenD 拉取失败",
         "missing_quote": "缺少报价",
         "missing_mid": "缺少可用定价",
+        "mid_fallback_last_price": "只有最近成交价，缺少可用 bid/ask",
         "spread_too_wide": "价差过宽",
         "invalid_spread": "价差无效",
     }
@@ -1101,6 +1117,13 @@ def run_close_advice(
                 quote_status="quote_unusable",
                 reason="持仓对应合约已定位，但当前未取得可用价格，暂无法评估平仓建议",
             )
+        elif "mid_fallback_last_price" in quote_flags and not _quote_has_usable_price(quote):
+            row = _mark_not_evaluable(
+                row,
+                evaluation_status="quote_unusable",
+                quote_status="quote_unusable",
+                reason="持仓对应合约只有最近成交价，缺少可用 bid/ask，暂无法评估平仓建议",
+            )
         else:
             row["evaluation_status"] = "priced"
             row["quote_status"] = "priced"
@@ -1113,7 +1136,8 @@ def run_close_advice(
     rows = sort_advice_rows(rows)
     notify_levels = advice_cfg.get("notify_levels") or ["strong", "medium"]
     notify_level_set = {str(x).strip().lower() for x in notify_levels if str(x).strip()}
-    max_items = safe_int(advice_cfg.get("max_items_per_account")) or 5
+    max_items_raw = safe_int(advice_cfg.get("max_items_per_account"))
+    max_items = 5 if max_items_raw is None else max_items_raw
     text = render_markdown(rows, notify_levels=notify_level_set, max_items=max_items)
     selected_notify_rows = _selected_notify_rows(rows, notify_levels=notify_level_set, max_items=max_items)
     flag_counts: dict[str, int] = {}

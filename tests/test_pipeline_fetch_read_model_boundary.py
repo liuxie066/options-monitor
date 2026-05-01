@@ -205,19 +205,19 @@ def test_fetch_required_data_opend_normalizes_timestamp_explicit_expirations(tmp
     from src.application.required_data_fetching import RequiredDataFetchRequest
     import src.application.required_data_fetching as mod
 
-    old_fetch = mod.fetch_symbol
+    old_fetch = mod.fetch_symbol_request
     old_save = mod.save_outputs
     captured: dict[str, object] = {}
     try:
-        def _fake_fetch_symbol(symbol, **kwargs):  # type: ignore[no-untyped-def]
-            captured["symbol"] = symbol
-            captured["explicit_expirations"] = kwargs.get("explicit_expirations")
+        def _fake_fetch_symbol_request(request):  # type: ignore[no-untyped-def]
+            captured["symbol"] = request.symbol
+            captured["explicit_expirations"] = request.explicit_expirations
             return {"rows": [], "expiration_count": 0}
 
         def _fake_save_outputs(base, symbol, payload, *, output_root=None):  # type: ignore[no-untyped-def]
             return Path(base) / "raw.json", Path(base) / "parsed.csv"
 
-        mod.fetch_symbol = _fake_fetch_symbol  # type: ignore[assignment]
+        mod.fetch_symbol_request = _fake_fetch_symbol_request  # type: ignore[assignment]
         mod.save_outputs = _fake_save_outputs  # type: ignore[assignment]
         mod.fetch_required_data_opend(
             base=tmp_path,
@@ -228,7 +228,7 @@ def test_fetch_required_data_opend_normalizes_timestamp_explicit_expirations(tmp
             ),
         )
     finally:
-        mod.fetch_symbol = old_fetch  # type: ignore[assignment]
+        mod.fetch_symbol_request = old_fetch  # type: ignore[assignment]
         mod.save_outputs = old_save  # type: ignore[assignment]
 
     assert captured["symbol"] == "FUTU"
@@ -239,19 +239,19 @@ def test_fetch_required_data_opend_forwards_side_strike_windows(tmp_path: Path) 
     from src.application.required_data_fetching import RequiredDataFetchRequest
     import src.application.required_data_fetching as mod
 
-    old_fetch = mod.fetch_symbol
+    old_fetch = mod.fetch_symbol_request
     old_save = mod.save_outputs
     captured: dict[str, object] = {}
     try:
-        def _fake_fetch_symbol(symbol, **kwargs):  # type: ignore[no-untyped-def]
-            captured["symbol"] = symbol
-            captured["side_strike_windows"] = kwargs.get("side_strike_windows")
+        def _fake_fetch_symbol_request(request):  # type: ignore[no-untyped-def]
+            captured["symbol"] = request.symbol
+            captured["side_strike_windows"] = request.side_strike_windows
             return {"rows": [], "expiration_count": 0}
 
         def _fake_save_outputs(base, symbol, payload, *, output_root=None):  # type: ignore[no-untyped-def]
             return Path(base) / "raw.json", Path(base) / "parsed.csv"
 
-        mod.fetch_symbol = _fake_fetch_symbol  # type: ignore[assignment]
+        mod.fetch_symbol_request = _fake_fetch_symbol_request  # type: ignore[assignment]
         mod.save_outputs = _fake_save_outputs  # type: ignore[assignment]
         mod.fetch_required_data_opend(
             base=tmp_path,
@@ -266,7 +266,7 @@ def test_fetch_required_data_opend_forwards_side_strike_windows(tmp_path: Path) 
             ),
         )
     finally:
-        mod.fetch_symbol = old_fetch  # type: ignore[assignment]
+        mod.fetch_symbol_request = old_fetch  # type: ignore[assignment]
         mod.save_outputs = old_save  # type: ignore[assignment]
 
     assert captured["symbol"] == "0700.HK"
@@ -274,6 +274,146 @@ def test_fetch_required_data_opend_forwards_side_strike_windows(tmp_path: Path) 
         "put": {"min_strike": 420.0, "max_strike": 460.0},
         "call": {"min_strike": 505.0, "max_strike": 560.0},
     }
+
+
+def test_build_fetch_request_from_spec_applies_opend_fetch_config() -> None:
+    from src.application.required_data_fetching import build_fetch_request_from_spec
+    from src.application.required_data_planning import RequiredDataFetchSpec
+
+    request = build_fetch_request_from_spec(
+        spec=RequiredDataFetchSpec(
+            symbol="0700.HK",
+            limit_expirations=1,
+            host="127.0.0.1",
+            port=11111,
+            option_types=("call",),
+            explicit_expirations=["2026-05-29"],
+            min_dte=10,
+            max_dte=60,
+            side_strike_windows={"call": {"min_strike": 505.0, "max_strike": 560.0}},
+        ),
+        opend_fetch_config={
+            "max_wait_sec": 11,
+            "option_chain_window_sec": 12,
+            "option_chain_max_calls": 13,
+            "snapshot_max_wait_sec": 21,
+            "snapshot_window_sec": 22,
+            "snapshot_max_calls": 23,
+            "expiration_max_wait_sec": 31,
+            "expiration_window_sec": 32,
+            "expiration_max_calls": 33,
+        },
+    )
+
+    assert request.max_wait_sec == 11
+    assert request.option_chain_window_sec == 12
+    assert request.option_chain_max_calls == 13
+    assert request.snapshot_max_wait_sec == 21
+    assert request.snapshot_window_sec == 22
+    assert request.snapshot_max_calls == 23
+    assert request.expiration_max_wait_sec == 31
+    assert request.expiration_window_sec == 32
+    assert request.expiration_max_calls == 33
+
+
+def test_ensure_required_data_passes_opend_fetch_config_into_fetch_plan_requests() -> None:
+    import scripts.required_data_steps as mod
+    from src.application.required_data_planning import (
+        OptionSideFetchPlan,
+        RequiredDataFetchPlanBundle,
+        RequiredDataFetchSpec,
+        StrikeWindowPlan,
+    )
+
+    root = (BASE / "tests" / ".tmp_pipeline_fetch_opend_config").resolve()
+    if root.exists():
+        shutil.rmtree(root, ignore_errors=True)
+    root.mkdir(parents=True, exist_ok=True)
+    required, state_dir = _make_dirs(root)
+    symbol = "0700.HK"
+
+    fetch_plan = RequiredDataFetchPlanBundle(
+        symbol=symbol,
+        spot_reference=470.0,
+        side_plans=[
+            OptionSideFetchPlan(
+                option_type="call",
+                min_dte=10,
+                max_dte=60,
+                explicit_expirations=["2026-05-29"],
+                strike_window=StrikeWindowPlan(
+                    min_strike=505.0,
+                    max_strike=561.0,
+                    source="test",
+                    base_min_strike=505.0,
+                    base_max_strike=550.0,
+                ),
+                planning_reason="test",
+            )
+        ],
+        merged_specs=[
+            RequiredDataFetchSpec(
+                symbol=symbol,
+                limit_expirations=1,
+                host="127.0.0.1",
+                port=11111,
+                option_types=("call",),
+                explicit_expirations=["2026-05-29"],
+                min_dte=10,
+                max_dte=60,
+                side_strike_windows={"call": {"min_strike": 505.0, "max_strike": 561.0}},
+            )
+        ],
+    )
+
+    old_execute = mod.execute_required_data_opend
+    old_save = mod.save_outputs
+    called: list[object] = []
+    try:
+        mod.execute_required_data_opend = lambda **kwargs: (called.append(kwargs) or {"rows": [], "expirations": [], "meta": {}})  # type: ignore[assignment]
+        mod.save_outputs = lambda *args, **kwargs: None  # type: ignore[assignment]
+        mod.ensure_required_data(
+            py="python3",
+            base=BASE,
+            symbol=symbol,
+            required_data_dir=required,
+            limit_expirations=1,
+            want_put=False,
+            want_call=True,
+            timeout_sec=5,
+            is_scheduled=False,
+            state_dir=state_dir,
+            fetch_source="opend",
+            fetch_host="127.0.0.1",
+            fetch_port=11111,
+            fetch_plan=fetch_plan,
+            report_dir=root / "reports",
+            opend_fetch_config={
+                "max_wait_sec": 11,
+                "option_chain_window_sec": 12,
+                "option_chain_max_calls": 13,
+                "snapshot_max_wait_sec": 21,
+                "snapshot_window_sec": 22,
+                "snapshot_max_calls": 23,
+                "expiration_max_wait_sec": 31,
+                "expiration_window_sec": 32,
+                "expiration_max_calls": 33,
+            },
+        )
+    finally:
+        mod.execute_required_data_opend = old_execute  # type: ignore[assignment]
+        mod.save_outputs = old_save  # type: ignore[assignment]
+
+    request = called[0]["request"]
+    assert request.max_wait_sec == 11
+    assert request.option_chain_window_sec == 12
+    assert request.option_chain_max_calls == 13
+    assert request.snapshot_max_wait_sec == 21
+    assert request.snapshot_window_sec == 22
+    assert request.snapshot_max_calls == 23
+    assert request.expiration_max_wait_sec == 31
+    assert request.expiration_window_sec == 32
+    assert request.expiration_max_calls == 33
 
 
 def test_ensure_required_data_refetches_when_existing_bounds_do_not_cover_plan() -> None:
@@ -462,6 +602,8 @@ def main() -> None:
     test_ensure_required_data_does_not_read_raw_fetch_file_on_main_path()
     test_fetch_required_data_opend_normalizes_timestamp_explicit_expirations(Path("."))
     test_fetch_required_data_opend_forwards_side_strike_windows(Path("."))
+    test_build_fetch_request_from_spec_applies_opend_fetch_config()
+    test_ensure_required_data_passes_opend_fetch_config_into_fetch_plan_requests()
     test_ensure_required_data_refetches_when_existing_bounds_do_not_cover_plan()
     test_ensure_required_data_refetches_when_bounds_are_split_across_expirations()
     print("OK (pipeline-fetch-read-model-boundary)")

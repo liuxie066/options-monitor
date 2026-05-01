@@ -59,6 +59,7 @@ from scripts.webui.server import (
     _account_rows,
     _clean_symbol_level_strategy_fields,
     _global_summary,
+    _patch_close_advice,
     _patch_notifications,
     _repair_hint_from_error,
     _patch_entry,
@@ -150,6 +151,20 @@ def test_clean_symbol_level_strategy_fields_removes_stale_keys_from_all_symbols(
             side_cfg = item.get(side) or {}
             for field in SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS:
                 assert field not in side_cfg
+
+
+def test_patch_close_advice_rejects_unknown_quote_source() -> None:
+    cfg = {"close_advice": {"enabled": True, "quote_source": "auto"}}
+
+    try:
+        _patch_close_advice(cfg, {"closeAdvice": {"quote_source": "required-data"}})
+    except Exception as exc:
+        assert getattr(exc, "status_code", None) == 400
+        assert "quote_source" in str(getattr(exc, "detail", exc))
+    else:
+        raise AssertionError("expected closeAdvice.quote_source validation error")
+
+    assert cfg["close_advice"]["quote_source"] == "auto"
 
 
 def test_to_row_exposes_symbol_name_from_supported_config_fields() -> None:

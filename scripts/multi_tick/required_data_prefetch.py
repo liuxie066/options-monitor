@@ -17,6 +17,7 @@ from domain.domain.fetch_source import is_futu_fetch_source, resolve_symbol_fetc
 from domain.storage.repositories import state_repo
 from scripts.config_loader import resolve_watchlist_config
 from scripts.io_utils import has_shared_required_data
+from src.application.opend_fetch_config import resolve_opend_fetch_config
 
 
 def _to_int(v: Any, default: int) -> int:
@@ -48,13 +49,12 @@ def _resolve_failure_budget(cfg: dict[str, Any]) -> tuple[int, int]:
     return (max(1, _to_int(max_consecutive, 3)), max(1, _to_int(max_total, 5)))
 
 
-def _resolve_option_chain_fetch_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
-    runtime = cfg.get("runtime") if isinstance(cfg.get("runtime"), dict) else {}
-    raw = runtime.get("option_chain_fetch") if isinstance(runtime.get("option_chain_fetch"), dict) else {}
+def _resolve_opend_fetch_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
+    resolved = resolve_opend_fetch_config(cfg)
     return {
-        "window_sec": float(raw.get("window_sec") or 30.0),
-        "max_calls": int(raw.get("max_calls") or 10),
-        "max_wait_sec": float(raw.get("max_wait_sec") or 90.0),
+        "option_chain": dict(resolved["option_chain"]),
+        "market_snapshot": dict(resolved["market_snapshot"]),
+        "option_expiration": dict(resolved["option_expiration"]),
     }
 
 
@@ -98,7 +98,10 @@ def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required:
             return True
 
     exec_service = ToolExecutionService(base=base)
-    option_chain_fetch_cfg = _resolve_option_chain_fetch_cfg(cfg)
+    opend_fetch_cfg = _resolve_opend_fetch_cfg(cfg)
+    option_chain_fetch_cfg = opend_fetch_cfg["option_chain"]
+    snapshot_fetch_cfg = opend_fetch_cfg["market_snapshot"]
+    expiration_fetch_cfg = opend_fetch_cfg["option_expiration"]
 
     def _fetch_one(symbol_cfg: dict) -> dict:
         symbol = str(symbol_cfg.get('symbol')).strip()
@@ -142,6 +145,12 @@ def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required:
             '--option-chain-window-sec', str(option_chain_fetch_cfg["window_sec"]),
             '--option-chain-max-calls', str(option_chain_fetch_cfg["max_calls"]),
             '--option-chain-max-wait-sec', str(option_chain_fetch_cfg["max_wait_sec"]),
+            '--snapshot-window-sec', str(snapshot_fetch_cfg["window_sec"]),
+            '--snapshot-max-calls', str(snapshot_fetch_cfg["max_calls"]),
+            '--snapshot-max-wait-sec', str(snapshot_fetch_cfg["max_wait_sec"]),
+            '--expiration-window-sec', str(expiration_fetch_cfg["window_sec"]),
+            '--expiration-max-calls', str(expiration_fetch_cfg["max_calls"]),
+            '--expiration-max-wait-sec', str(expiration_fetch_cfg["max_wait_sec"]),
             '--quiet',
         ]
 

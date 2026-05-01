@@ -76,6 +76,95 @@ def test_run_symbol_monitoring_passes_fetch_plan_to_required_data_step(monkeypat
     assert captured["report_dir"] == tmp_path / "reports"
 
 
+def test_run_symbol_monitoring_uses_runtime_opend_fetch_config(monkeypatch, tmp_path: Path) -> None:
+    import src.application.symbol_monitoring as mod
+
+    captured_plan: dict[str, object] = {}
+    captured_required_data: dict[str, object] = {}
+
+    def _build_required_data_fetch_plan(**kwargs):  # type: ignore[no-untyped-def]
+        captured_plan.update(kwargs)
+        return {
+            "symbol": kwargs["symbol"],
+            "merged_specs": [],
+            "side_plans": [],
+            "to_debug_dict": lambda: {"ok": True},
+        }
+
+    monkeypatch.setattr(mod, "build_required_data_fetch_plan", _build_required_data_fetch_plan)
+
+    deps = mod.SymbolMonitoringDependencies(
+        build_converter_fn=lambda **kwargs: object(),
+        apply_prefilters_fn=lambda **kwargs: type(
+            "Prefilters",
+            (),
+            {
+                "want_put": kwargs["want_put"],
+                "want_call": kwargs["want_call"],
+                "sp": kwargs["sp"],
+                "cc": kwargs["cc"],
+                "stock": None,
+            },
+        )(),
+        apply_multiplier_cache_fn=lambda **kwargs: None,
+        ensure_required_data_fn=lambda **kwargs: captured_required_data.update(kwargs),
+        run_sell_put_scan_fn=lambda **kwargs: {"strategy": "sell_put"},
+        empty_sell_put_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_put"},
+        run_sell_call_scan_fn=lambda **kwargs: {"strategy": "sell_call"},
+        empty_sell_call_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_call"},
+    )
+
+    mod.run_symbol_monitoring(
+        inputs=mod.SymbolMonitoringInputs(
+            py="python3",
+            base=tmp_path,
+            symbol_cfg={
+                "symbol": "0700.HK",
+                "fetch": {"host": "127.0.0.1", "port": 11111, "limit_expirations": 8},
+                "sell_put": {"enabled": True, "min_strike": 420, "max_strike": 460},
+                "sell_call": {"enabled": False},
+            },
+            top_n=3,
+            portfolio_ctx=None,
+            usd_per_cny_exchange_rate=None,
+            cny_per_hkd_exchange_rate=None,
+            timeout_sec=10,
+            required_data_dir=tmp_path / "required_data",
+            report_dir=tmp_path / "reports",
+            state_dir=tmp_path / "state",
+            is_scheduled=False,
+            runtime_config={
+                "runtime": {
+                    "option_chain_fetch": {"max_calls": 13, "window_sec": 12, "max_wait_sec": 11},
+                    "opend_rate_limits": {
+                        "market_snapshot": {"max_calls": 23, "window_sec": 22, "max_wait_sec": 21},
+                        "option_expiration": {"max_calls": 33, "window_sec": 32, "max_wait_sec": 31},
+                    },
+                }
+            },
+        ),
+        deps=deps,
+    )
+
+    assert captured_plan["snapshot_max_wait_sec"] == 21
+    assert captured_plan["snapshot_window_sec"] == 22
+    assert captured_plan["snapshot_max_calls"] == 23
+    assert captured_plan["expiration_max_wait_sec"] == 31
+    assert captured_plan["expiration_window_sec"] == 32
+    assert captured_plan["expiration_max_calls"] == 33
+    assert captured_required_data["opend_fetch_config"] == {
+        "max_wait_sec": 11,
+        "option_chain_window_sec": 12,
+        "option_chain_max_calls": 13,
+        "snapshot_max_wait_sec": 21,
+        "snapshot_window_sec": 22,
+        "snapshot_max_calls": 23,
+        "expiration_max_wait_sec": 31,
+        "expiration_window_sec": 32,
+        "expiration_max_calls": 33,
+    }
+
+
 def test_run_symbol_monitoring_still_builds_plan_with_local_required_data(monkeypatch, tmp_path: Path) -> None:
     import src.application.symbol_monitoring as mod
 

@@ -14,6 +14,7 @@ from domain.domain.fetch_source import normalize_fetch_source
 from scripts.account_config import ACCOUNT_TYPES, account_settings_from_config, accounts_from_config
 from scripts.config_loader import resolve_templates_config, resolve_watchlist_config, set_watchlist_config
 from scripts.trade_account_mapping import resolve_trade_intake_config
+from src.application.opend_fetch_config import OPEND_RATE_LIMIT_ENDPOINT_KEYS
 
 LIQUIDITY_ALLOWED_GLOBAL_FIELDS = (
     'min_open_interest',
@@ -39,6 +40,44 @@ def die(msg: str):
 
 def warn(msg: str):
     print(f"[CONFIG_WARN] {msg}", file=sys.stderr)
+
+
+def validate_positive_number(value, path: str):
+    try:
+        if float(value) <= 0:
+            die(f'{path} must be > 0')
+    except Exception:
+        die(f'{path} must be a number')
+
+
+def validate_positive_integer(value, path: str):
+    try:
+        parsed = int(value)
+        if float(value) != float(parsed):
+            die(f'{path} must be an integer')
+        if parsed <= 0:
+            die(f'{path} must be > 0')
+    except Exception:
+        die(f'{path} must be an integer')
+
+
+def validate_rate_limit_object(raw: dict, path: str):
+    for key in ('window_sec', 'max_wait_sec'):
+        if key in raw and raw.get(key) is not None:
+            validate_positive_number(raw.get(key), f'{path}.{key}')
+    if 'max_calls' in raw and raw.get('max_calls') is not None:
+        validate_positive_integer(raw.get('max_calls'), f'{path}.max_calls')
+
+
+def validate_non_negative_integer(value, path: str):
+    try:
+        parsed = int(value)
+        if float(value) != float(parsed):
+            die(f'{path} must be an integer')
+        if parsed < 0:
+            die(f'{path} must be >= 0')
+    except Exception:
+        die(f'{path} must be an integer')
 
 
 def validate_config(cfg: dict):
@@ -95,7 +134,23 @@ def validate_config(cfg: dict):
             if pt is not None and int(pt) <= 0:
                 die('runtime.portfolio_timeout_sec must be > 0')
         except Exception:
-                die('runtime.portfolio_timeout_sec must be an integer')
+            die('runtime.portfolio_timeout_sec must be an integer')
+        chain_fetch = runtime.get('option_chain_fetch')
+        if chain_fetch is not None:
+            if not isinstance(chain_fetch, dict):
+                die('runtime.option_chain_fetch must be an object')
+            validate_rate_limit_object(chain_fetch, 'runtime.option_chain_fetch')
+        opend_rate_limits = runtime.get('opend_rate_limits')
+        if opend_rate_limits is not None:
+            if not isinstance(opend_rate_limits, dict):
+                die('runtime.opend_rate_limits must be an object')
+            for endpoint, raw in opend_rate_limits.items():
+                if str(endpoint) not in OPEND_RATE_LIMIT_ENDPOINT_KEYS:
+                    allowed = ', '.join(sorted(OPEND_RATE_LIMIT_ENDPOINT_KEYS))
+                    die(f'runtime.opend_rate_limits.{endpoint} is not supported; use one of: {allowed}')
+                if not isinstance(raw, dict):
+                    die(f'runtime.opend_rate_limits.{endpoint} must be an object')
+                validate_rate_limit_object(raw, f'runtime.opend_rate_limits.{endpoint}')
 
     notifications = cfg.get('notifications') or {}
     if notifications and not isinstance(notifications, dict):
@@ -126,6 +181,38 @@ def validate_config(cfg: dict):
             die(f'notification secrets missing feishu object: {secrets_path}')
         if not str(feishu.get('app_id') or '').strip() or not str(feishu.get('app_secret') or '').strip():
             die(f'notification secrets missing feishu.app_id/app_secret: {secrets_path}')
+
+    close_advice = cfg.get('close_advice') or {}
+    if close_advice and not isinstance(close_advice, dict):
+        die('close_advice must be an object')
+    if isinstance(close_advice, dict):
+        quote_source = str(close_advice.get('quote_source') or '').strip().lower()
+        if quote_source and quote_source not in {'auto', 'required_data'}:
+            die('close_advice.quote_source must be auto or required_data')
+        notify_levels = close_advice.get('notify_levels')
+        if notify_levels is not None:
+            if not isinstance(notify_levels, list):
+                die('close_advice.notify_levels must be a list')
+            bad_levels = [
+                str(item).strip().lower()
+                for item in notify_levels
+                if str(item).strip().lower() not in {'strong', 'medium', 'optional', 'weak'}
+            ]
+            if bad_levels:
+                die(f"close_advice.notify_levels has unsupported levels: {', '.join(bad_levels)}")
+        if 'max_items_per_account' in close_advice and close_advice.get('max_items_per_account') is not None:
+            validate_non_negative_integer(
+                close_advice.get('max_items_per_account'),
+                'close_advice.max_items_per_account',
+            )
+        for key in ('max_spread_ratio', 'strong_remaining_annualized_max', 'medium_remaining_annualized_max'):
+            if key not in close_advice or close_advice.get(key) is None:
+                continue
+            try:
+                if float(close_advice.get(key)) < 0:
+                    die(f'close_advice.{key} must be >= 0')
+            except Exception:
+                die(f'close_advice.{key} must be a number')
 
     account_settings = cfg.get('account_settings') or {}
     if account_settings and not isinstance(account_settings, dict):

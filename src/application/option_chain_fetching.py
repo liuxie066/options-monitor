@@ -81,6 +81,7 @@ class FileRateLimiter:
         max_calls: int = DEFAULT_OPTION_CHAIN_MAX_CALLS,
         window_sec: float = DEFAULT_OPTION_CHAIN_WINDOW_SEC,
         max_wait_sec: float = DEFAULT_OPTION_CHAIN_MAX_WAIT_SEC,
+        label: str = "option_chain",
         clock: Callable[[], float] | None = None,
         sleep: Callable[[float], None] | None = None,
     ) -> None:
@@ -89,6 +90,7 @@ class FileRateLimiter:
         self.max_calls = max(1, int(max_calls))
         self.window_sec = max(0.001, float(window_sec))
         self.max_wait_sec = max(0.0, float(max_wait_sec))
+        self.label = str(label or "opend")
         self.clock = clock or time.time
         self.sleep = sleep or time.sleep
 
@@ -116,7 +118,7 @@ class FileRateLimiter:
                     wait_s = max(0.0, self.window_sec - (now - oldest) + 0.05)
                     if now + wait_s > deadline:
                         raise OptionChainRateLimitExceeded(
-                            f"option_chain rate limit wait budget exceeded: "
+                            f"{self.label} rate limit wait budget exceeded: "
                             f"max_calls={self.max_calls} window_sec={self.window_sec:g} "
                             f"max_wait_sec={self.max_wait_sec:g}"
                         )

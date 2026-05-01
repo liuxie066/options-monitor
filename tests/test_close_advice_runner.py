@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -249,6 +250,9 @@ def test_run_close_advice_fetches_missing_quote_via_opend(tmp_path: Path, monkey
     def fake_fetch_symbol(symbol: str, **kwargs: object) -> dict[str, object]:
         calls.append({"symbol": symbol, **kwargs})
         assert kwargs["explicit_expirations"] == ["2026-04-29"]
+        assert kwargs["option_chain_max_calls"] == 6
+        assert kwargs["option_chain_window_sec"] == 21.0
+        assert kwargs["max_wait_sec"] == 22.0
         return {
             "rows": [
                 {
@@ -272,6 +276,7 @@ def test_run_close_advice_fetches_missing_quote_via_opend(tmp_path: Path, monkey
     run_close_advice(
         config={
             "close_advice": {"enabled": True},
+            "runtime": {"option_chain_fetch": {"max_calls": 6, "window_sec": 21, "max_wait_sec": 22}},
             "symbols": [
                 {
                     "symbol": "0700.HK",
@@ -359,6 +364,130 @@ def test_run_close_advice_uses_bid_ask_when_mid_missing(tmp_path: Path, monkeypa
     assert "mid_from_bid_ask" in csv_text
     assert "missing_quote" not in csv_text
     assert "missing_mid" not in csv_text
+
+
+def test_run_close_advice_recalculates_dte_from_position_expiration(tmp_path: Path) -> None:
+    expiration = (datetime.now(timezone.utc).date() + timedelta(days=40)).isoformat()
+    ctx_path = tmp_path / "option_positions_context.json"
+    ctx_path.write_text(
+        json.dumps(
+            {
+                "open_positions_min": [
+                    {
+                        "account": "lx",
+                        "symbol": "NVDA",
+                        "option_type": "put",
+                        "side": "short",
+                        "status": "open",
+                        "contracts_open": 1,
+                        "currency": "USD",
+                        "strike": 100,
+                        "multiplier": 100,
+                        "premium": 1.0,
+                        "expiration": expiration,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    required_root = tmp_path / "required_data"
+    parsed = required_root / "parsed"
+    parsed.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "NVDA",
+                "option_type": "put",
+                "expiration": expiration,
+                "strike": 100,
+                "mid": 0.20,
+                "bid": 0.19,
+                "ask": 0.21,
+                "dte": 1,
+                "multiplier": 100,
+                "spot": 120,
+                "currency": "USD",
+            }
+        ]
+    ).to_csv(parsed / "NVDA_required_data.csv", index=False)
+
+    out_dir = tmp_path / "reports"
+    result = run_close_advice(
+        config={"close_advice": {"enabled": True, "notify_levels": ["strong"]}},
+        context_path=ctx_path,
+        required_data_root=required_root,
+        output_dir=out_dir,
+        base_dir=Path.cwd(),
+    )
+
+    df = pd.read_csv(out_dir / "close_advice.csv")
+    assert result["notify_rows"] == 1
+    assert int(df.iloc[0]["dte"]) == 40
+    assert df.iloc[0]["tier"] == "strong"
+
+
+def test_run_close_advice_blocks_last_price_only_quote_from_notifications(tmp_path: Path) -> None:
+    expiration = (datetime.now(timezone.utc).date() + timedelta(days=3)).isoformat()
+    ctx_path = tmp_path / "option_positions_context.json"
+    ctx_path.write_text(
+        json.dumps(
+            {
+                "open_positions_min": [
+                    {
+                        "account": "lx",
+                        "symbol": "NVDA",
+                        "option_type": "put",
+                        "side": "short",
+                        "status": "open",
+                        "contracts_open": 1,
+                        "currency": "USD",
+                        "strike": 100,
+                        "multiplier": 100,
+                        "premium": 1.0,
+                        "expiration": expiration,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    required_root = tmp_path / "required_data"
+    parsed = required_root / "parsed"
+    parsed.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "NVDA",
+                "option_type": "put",
+                "expiration": expiration,
+                "strike": 100,
+                "mid": 0.04,
+                "last_price": 0.04,
+                "bid": 0.0,
+                "ask": 0.0,
+                "dte": 3,
+                "multiplier": 100,
+                "spot": 120,
+                "currency": "USD",
+            }
+        ]
+    ).to_csv(parsed / "NVDA_required_data.csv", index=False)
+
+    out_dir = tmp_path / "reports"
+    result = run_close_advice(
+        config={"close_advice": {"enabled": True, "quote_source": "required_data", "notify_levels": ["optional"]}},
+        context_path=ctx_path,
+        required_data_root=required_root,
+        output_dir=out_dir,
+        base_dir=Path.cwd(),
+    )
+
+    csv_text = (out_dir / "close_advice.csv").read_text(encoding="utf-8")
+    assert result["notify_rows"] == 0
+    assert result["evaluation_gap_rows"] == 1
+    assert "mid_fallback_last_price" in csv_text
+    assert "not_evaluable" in csv_text
 
 
 def test_run_close_advice_reports_quote_issue_summary(tmp_path: Path) -> None:
@@ -541,6 +670,15 @@ def test_run_close_advice_fetches_missing_position_coverage_before_pricing(tmp_p
         assert kwargs["explicit_expirations"] == ["2026-04-29", "2026-06-29"]
         assert kwargs["chain_cache_force_refresh"] is False
         assert kwargs["freshness_policy"] == "refresh_missing"
+        assert kwargs["option_chain_max_calls"] == 3
+        assert kwargs["option_chain_window_sec"] == 11.0
+        assert kwargs["max_wait_sec"] == 12.0
+        assert kwargs["snapshot_max_calls"] == 4
+        assert kwargs["snapshot_window_sec"] == 13.0
+        assert kwargs["snapshot_max_wait_sec"] == 14.0
+        assert kwargs["expiration_max_calls"] == 5
+        assert kwargs["expiration_window_sec"] == 15.0
+        assert kwargs["expiration_max_wait_sec"] == 16.0
         return {
             "rows": [
                 {
@@ -578,6 +716,13 @@ def test_run_close_advice_fetches_missing_position_coverage_before_pricing(tmp_p
     result = run_close_advice(
         config={
             "close_advice": {"enabled": True},
+            "runtime": {
+                "option_chain_fetch": {"max_calls": 3, "window_sec": 11, "max_wait_sec": 12},
+                "opend_rate_limits": {
+                    "market_snapshot": {"max_calls": 4, "window_sec": 13, "max_wait_sec": 14},
+                    "option_expiration": {"max_calls": 5, "window_sec": 15, "max_wait_sec": 16},
+                },
+            },
             "symbols": [{"symbol": "9992.HK", "fetch": {"source": "futu", "limit_expirations": 1}}],
         },
         context_path=ctx_path,
@@ -926,6 +1071,81 @@ def test_run_close_advice_groups_mixed_accounts_and_counts_rendered_rows(tmp_pat
     assert text.count("强烈建议平仓") == 2
 
 
+def test_run_close_advice_max_items_zero_means_unlimited(tmp_path: Path) -> None:
+    expiration = (datetime.now(timezone.utc).date() + timedelta(days=30)).isoformat()
+    ctx_path = tmp_path / "option_positions_context.json"
+    ctx_path.write_text(
+        json.dumps(
+            {
+                "open_positions_min": [
+                    {
+                        "account": "lx",
+                        "symbol": "NVDA",
+                        "option_type": "put",
+                        "side": "short",
+                        "status": "open",
+                        "contracts_open": 1,
+                        "currency": "USD",
+                        "strike": 100,
+                        "multiplier": 100,
+                        "premium": 5.0,
+                        "expiration": expiration,
+                    },
+                    {
+                        "account": "lx",
+                        "symbol": "AAPL",
+                        "option_type": "put",
+                        "side": "short",
+                        "status": "open",
+                        "contracts_open": 1,
+                        "currency": "USD",
+                        "strike": 100,
+                        "multiplier": 100,
+                        "premium": 5.0,
+                        "expiration": expiration,
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    required_root = tmp_path / "required_data"
+    parsed = required_root / "parsed"
+    parsed.mkdir(parents=True)
+    for symbol in ("NVDA", "AAPL"):
+        pd.DataFrame(
+            [
+                {
+                    "symbol": symbol,
+                    "option_type": "put",
+                    "expiration": expiration,
+                    "strike": 100,
+                    "mid": 0.4,
+                    "bid": 0.39,
+                    "ask": 0.41,
+                    "dte": 30,
+                    "multiplier": 100,
+                    "spot": 120,
+                    "currency": "USD",
+                }
+            ]
+        ).to_csv(parsed / f"{symbol}_required_data.csv", index=False)
+
+    out_dir = tmp_path / "reports"
+    result = run_close_advice(
+        config={"close_advice": {"enabled": True, "notify_levels": ["strong"], "max_items_per_account": 0}},
+        context_path=ctx_path,
+        required_data_root=required_root,
+        output_dir=out_dir,
+        base_dir=Path.cwd(),
+    )
+
+    text = (out_dir / "close_advice.txt").read_text(encoding="utf-8")
+    assert result["notify_rows"] == 2
+    assert "NVDA Put" in text
+    assert "AAPL Put" in text
+
+
 def test_run_close_advice_filters_positions_to_current_markets(tmp_path: Path) -> None:
     ctx_path = tmp_path / "option_positions_context.json"
     ctx_path.write_text(
@@ -1241,6 +1461,8 @@ def test_run_close_advice_fetches_quote_for_alias_symbol_via_opend(tmp_path: Pat
     assert "missing_quote" not in csv_text
     assert "missing_mid" not in csv_text
     assert "mid_fallback_last_price" in csv_text
+    assert result["notify_rows"] == 0
+    assert result["evaluation_gap_rows"] == 1
     assert result["flag_counts"]["mid_fallback_last_price"] == 1
 
 
@@ -1289,8 +1511,11 @@ def test_run_close_advice_required_data_mode_does_not_fetch(tmp_path: Path, monk
         ]
     ).to_csv(parsed / "AAPL_required_data.csv", index=False)
 
+    calls: list[str] = []
+
     def fake_fetch_symbol(symbol: str, **kwargs: object) -> dict[str, object]:
-        raise AssertionError(f"unexpected fetch for {symbol}")
+        calls.append(symbol)
+        return {"rows": []}
 
     monkeypatch.setattr("scripts.fetch_market_data_opend.fetch_symbol", fake_fetch_symbol)
 
@@ -1306,6 +1531,7 @@ def test_run_close_advice_required_data_mode_does_not_fetch(tmp_path: Path, monk
     )
 
     csv_text = ((tmp_path / "reports") / "close_advice.csv").read_text(encoding="utf-8")
+    assert calls == []
     assert "missing_quote" in csv_text
 
 

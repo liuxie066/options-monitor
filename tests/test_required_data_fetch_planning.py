@@ -38,6 +38,50 @@ def test_sell_call_min_strike_builds_configured_bounds_plan(monkeypatch, tmp_pat
     assert "near/far bounds" in call_plan.planning_reason
 
 
+def test_fetch_plan_forwards_opend_discovery_rate_limits(monkeypatch, tmp_path: Path) -> None:
+    import src.application.required_data_planning as mod
+
+    spot_calls: list[dict[str, object]] = []
+    expiration_calls: list[dict[str, object]] = []
+
+    def _get_underlier_spot(*args, **kwargs):  # type: ignore[no-untyped-def]
+        spot_calls.append(dict(kwargs))
+        return 470.0
+
+    def _list_option_expirations(*args, **kwargs):  # type: ignore[no-untyped-def]
+        expiration_calls.append(dict(kwargs))
+        return ["2026-05-29"]
+
+    monkeypatch.setattr(mod, "get_underlier_spot", _get_underlier_spot)
+    monkeypatch.setattr(mod, "list_option_expirations", _list_option_expirations)
+
+    mod.build_required_data_fetch_plan(
+        base=tmp_path,
+        required_data_dir=tmp_path,
+        symbol="0700.HK",
+        limit_expirations=1,
+        want_put=False,
+        want_call=True,
+        sell_put_cfg={},
+        sell_call_cfg={"enabled": True, "min_strike": 505},
+        fetch_host="127.0.0.1",
+        fetch_port=11111,
+        snapshot_max_wait_sec=21,
+        snapshot_window_sec=22,
+        snapshot_max_calls=23,
+        expiration_max_wait_sec=31,
+        expiration_window_sec=32,
+        expiration_max_calls=33,
+    )
+
+    assert spot_calls[0]["snapshot_max_wait_sec"] == 21
+    assert spot_calls[0]["snapshot_window_sec"] == 22
+    assert spot_calls[0]["snapshot_max_calls"] == 23
+    assert expiration_calls[0]["expiration_max_wait_sec"] == 31
+    assert expiration_calls[0]["expiration_window_sec"] == 32
+    assert expiration_calls[0]["expiration_max_calls"] == 33
+
+
 def test_sell_call_without_strikes_derives_bounds_from_spot(monkeypatch, tmp_path: Path) -> None:
     import src.application.required_data_planning as mod
 

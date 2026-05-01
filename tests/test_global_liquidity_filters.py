@@ -176,6 +176,101 @@ def test_validate_config_rejects_fees_config() -> None:
         assert 'fees is no longer supported' in msg
 
 
+def test_validate_config_rejects_invalid_close_advice_config() -> None:
+    _add_repo_to_syspath()
+    from scripts.validate_config import validate_config
+
+    cfg = {
+        'close_advice': {
+            'enabled': True,
+            'quote_source': 'required-data',
+            'notify_levels': ['strong'],
+        },
+        'templates': {
+            'put_base': {'sell_put': {'min_open_interest': 60, 'min_volume': 10, 'max_spread_ratio': 0.3}},
+        },
+        'symbols': [
+            {
+                'symbol': 'AAPL',
+                'use': ['put_base'],
+                'fetch': {'source': 'futu'},
+                'sell_put': {
+                    'enabled': True,
+                    'min_dte': 7,
+                    'max_dte': 45,
+                    'min_strike': 10,
+                    'max_strike': 200,
+                },
+            }
+        ],
+    }
+
+    try:
+        validate_config(cfg)
+        raise AssertionError('expected config validation failure')
+    except SystemExit as e:
+        msg = str(e)
+        assert '[CONFIG_ERROR]' in msg
+        assert 'close_advice.quote_source' in msg
+
+
+def test_validate_config_rejects_decimal_close_advice_max_items_per_account() -> None:
+    _add_repo_to_syspath()
+    from scripts.validate_config import validate_config
+
+    cfg = {
+        'close_advice': {
+            'enabled': True,
+            'max_items_per_account': 1.5,
+        },
+        'symbols': [
+            {
+                'symbol': 'AAPL',
+                'sell_put': {'enabled': False},
+                'sell_call': {'enabled': False},
+            }
+        ],
+    }
+
+    try:
+        validate_config(cfg)
+        raise AssertionError('expected config validation failure')
+    except SystemExit as e:
+        msg = str(e)
+        assert '[CONFIG_ERROR]' in msg
+        assert 'close_advice.max_items_per_account must be an integer' in msg
+
+
+def test_validate_config_rejects_unknown_opend_rate_limit_endpoint() -> None:
+    _add_repo_to_syspath()
+    from scripts.validate_config import validate_config
+
+    cfg = {
+        'runtime': {
+            'opend_rate_limits': {
+                'market_snapshots': {'max_calls': 10},
+            },
+        },
+        'symbols': [
+            {
+                'symbol': 'AAPL',
+                'sell_put': {'enabled': False},
+                'sell_call': {'enabled': False},
+            }
+        ],
+    }
+
+    try:
+        validate_config(cfg)
+        raise AssertionError('expected config validation failure')
+    except SystemExit as e:
+        msg = str(e)
+        assert '[CONFIG_ERROR]' in msg
+        assert 'runtime.opend_rate_limits.market_snapshots is not supported' in msg
+        assert 'market_snapshot' in msg
+        assert 'option_expiration' in msg
+
+
 def test_validate_config_accepts_external_holdings_account_settings() -> None:
     _add_repo_to_syspath()
     from scripts.validate_config import validate_config

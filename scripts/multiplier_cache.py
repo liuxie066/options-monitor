@@ -21,11 +21,18 @@ This module provides:
 
 import argparse
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
+try:
+    import fcntl
+except Exception:  # pragma: no cover - non-Unix fallback
+    fcntl = None  # type: ignore[assignment]
+
 from scripts.io_utils import utc_now
 from scripts.opend_utils import resolve_underlier_alias
+from src.application.opend_fetch_config import filter_opend_fetch_kwargs
 
 
 def default_cache_path(repo_base: Path) -> Path:
@@ -42,9 +49,48 @@ def load_cache(path: Path) -> dict:
     return {}
 
 
-def save_cache(path: Path, cache: dict) -> None:
+def _cache_lock_path(path: Path) -> Path:
+    return Path(path).with_suffix(Path(path).suffix + ".lock")
+
+
+def _write_cache_unlocked(path: Path, cache: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(cache, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(cache, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def save_cache(path: Path, cache: dict) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = _cache_lock_path(path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as lock_fp:
+        if fcntl is not None:
+            fcntl.flock(lock_fp.fileno(), fcntl.LOCK_EX)
+        try:
+            _write_cache_unlocked(path, cache)
+        finally:
+            if fcntl is not None:
+                fcntl.flock(lock_fp.fileno(), fcntl.LOCK_UN)
+
+
+def merge_cache_updates(path: Path, updates: dict) -> dict:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = _cache_lock_path(path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as lock_fp:
+        if fcntl is not None:
+            fcntl.flock(lock_fp.fileno(), fcntl.LOCK_EX)
+        try:
+            cache = load_cache(path)
+            cache.update({k: v for k, v in dict(updates or {}).items() if k})
+            _write_cache_unlocked(path, cache)
+            return cache
+        finally:
+            if fcntl is not None:
+                fcntl.flock(lock_fp.fileno(), fcntl.LOCK_UN)
 
 
 def normalize_symbol(symbol: str) -> str:
@@ -101,10 +147,18 @@ def get_cached_multiplier_source(cache: dict, symbol: str) -> str | None:
     return None
 
 
-def refresh_via_opend(*, repo_base: Path, symbol: str, host: str = "127.0.0.1", port: int = 11111, limit_expirations: int = 1) -> RefreshResult:
+def refresh_via_opend(
+    *,
+    repo_base: Path,
+    symbol: str,
+    host: str = "127.0.0.1",
+    port: int = 11111,
+    limit_expirations: int = 1,
+    opend_fetch_config: dict[str, float | int] | None = None,
+) -> RefreshResult:
     """Refresh multiplier by calling OpenD once for this underlier.
 
-    We import and call fetch_symbol() directly to avoid writing output files.
+    We call the request-based OpenD fetcher directly to avoid writing output files.
     """
     sym = normalize_symbol(symbol)
     try:
@@ -114,15 +168,18 @@ def refresh_via_opend(*, repo_base: Path, symbol: str, host: str = "127.0.0.1", 
         if str(repo_base) not in sys.path:
             sys.path.insert(0, str(repo_base))
 
-        from scripts.fetch_market_data_opend import fetch_symbol  # type: ignore
+        from src.application.opend_symbol_fetching import FetchSymbolRequest, fetch_symbol_request  # type: ignore
 
-        payload = fetch_symbol(
-            sym,
-            limit_expirations=int(limit_expirations),
-            host=str(host),
-            port=int(port),
-            spot_override=None,
-            base_dir=None,
+        payload = fetch_symbol_request(
+            FetchSymbolRequest(
+                symbol=sym,
+                limit_expirations=int(limit_expirations),
+                host=str(host),
+                port=int(port),
+                spot_override=None,
+                base_dir=Path(repo_base),
+                **filter_opend_fetch_kwargs(opend_fetch_config),
+            )
         )
         rows = payload.get("rows") or []
         m = None
@@ -162,6 +219,7 @@ def resolve_multiplier_with_source(
     host: str = "127.0.0.1",
     port: int = 11111,
     limit_expirations: int = 1,
+    opend_fetch_config: dict[str, float | int] | None = None,
 ) -> tuple[int | None, str | None]:
     if multiplier is not None:
         try:
@@ -188,11 +246,12 @@ def resolve_multiplier_with_source(
         host=host,
         port=port,
         limit_expirations=limit_expirations,
+        opend_fetch_config=opend_fetch_config,
     )
     if not refreshed.ok or not refreshed.multiplier or int(refreshed.multiplier) <= 0:
         return None, None
-    store_multiplier(cache, sym, int(refreshed.multiplier), source="opend")
-    save_cache(cache_path, cache)
+    update = store_multiplier({}, sym, int(refreshed.multiplier), source="opend")
+    merge_cache_updates(cache_path, update)
     return int(refreshed.multiplier), "opend"
 
 
@@ -205,6 +264,7 @@ def resolve_multiplier(
     host: str = "127.0.0.1",
     port: int = 11111,
     limit_expirations: int = 1,
+    opend_fetch_config: dict[str, float | int] | None = None,
 ) -> int | None:
     value, _source = resolve_multiplier_with_source(
         repo_base=repo_base,
@@ -214,6 +274,7 @@ def resolve_multiplier(
         host=host,
         port=port,
         limit_expirations=limit_expirations,
+        opend_fetch_config=opend_fetch_config,
     )
     return value
 
@@ -251,7 +312,12 @@ def cmd_refresh(cache_path: Path, symbols: list[str], *, host: str, port: int, l
             updated += 1
 
     if updated:
-        save_cache(cache_path, cache)
+        updates = {
+            normalize_symbol(r.symbol): cache[normalize_symbol(r.symbol)]
+            for r in results
+            if r.ok and r.multiplier and normalize_symbol(r.symbol) in cache
+        }
+        merge_cache_updates(cache_path, updates)
 
     # summary JSON (machine-friendly)
     out = {
