@@ -287,8 +287,8 @@ def test_main_orchestrator_guard_batch4_no_legacy_rule_reflow() -> None:
         'decide_trading_day_guard=decide_trading_day_guard',
         'resolve_multi_tick_engine_entrypoint=resolve_multi_tick_engine_entrypoint',
         'build_per_account_delivery_batch(',
-        'engine_filter_notify_candidates(',
-        'rank_notify_candidates(',
+        'filter_notify_candidates_fn=engine_filter_notify_candidates',
+        'rank_notify_candidates_fn=rank_notify_candidates',
     ):
         assert entrypoint in src
 

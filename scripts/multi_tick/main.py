@@ -93,7 +93,8 @@ from src.application.multi_tick_watchdog import run_multi_tick_watchdog
 from src.application.scheduled_notification import (
     build_per_account_delivery_batch,
     execute_per_account_delivery,
-    prepare_per_account_messages,
+    mark_no_candidate_notification_metrics,
+    prepare_multi_account_notification,
 )
 from scripts.infra.service import (
     normalize_feishu_app_send_output,
@@ -132,7 +133,7 @@ def _is_trading_day_guard_for_market(cfg: dict, market: str) -> tuple[bool | Non
     return trading_day_via_futu(cfg, market)
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description='Multi-account tick with per-account notifications')
     ap.add_argument('--config', default='config.us.json')
     ap.add_argument('--accounts', nargs='+', default=None)
@@ -143,7 +144,7 @@ def main() -> int:
     ap.add_argument('--force', action='store_true', help='Force running scan pipeline regardless of market hours / scan interval (sending still respects --no-send and should_notify decisions).')
     ap.add_argument('--debug', action='store_true', help='Verbose logs to stdout (for manual debugging).')
     ap.add_argument('--opend-phone-verify-continue', action='store_true', help='Clear OpenD phone-verify pending pause and continue running.')
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     set_debug(bool(getattr(args, 'debug', False)))
 
@@ -542,52 +543,37 @@ def main() -> int:
         except Exception:
             pass
 
-    runlog.safe_event(
-        'notify',
-        'prepare',
-        data=_safe_runlog_data({
-            'results_count': len(results),
-            'notify_candidates': len(engine_filter_notify_candidates(results)),
-        }),
-    )
-
-    cash_footer_lines: list[str] = []
-    try:
-        cfg = base_cfg or {}
-        cfg_market = str((cfg.get('portfolio') or {}).get('broker') or '富途')
-        notif_cfg = (cfg.get('notifications') or {}) if isinstance(cfg, dict) else {}
-        accts = cash_footer_accounts_from_config(cfg)
-        timeout_sec = int(notif_cfg.get('cash_footer_timeout_sec') or 180)
-        max_age_sec = int(notif_cfg.get('cash_snapshot_max_age_sec') or 900)
-        cash_footer_lines = query_cash_footer(
-            base,
-            config_path=str(cfg_path),
-            market=cfg_market,
-            accounts=accts,
-            timeout_sec=timeout_sec,
-            snapshot_max_age_sec=max_age_sec,
-        )
-    except Exception:
-        cash_footer_lines = []
-
     now_bj = bj_now()
-    notify_candidates = rank_notify_candidates(engine_filter_notify_candidates(results))
     try:
-        prepared_messages = prepare_per_account_messages(
-            notify_candidates=notify_candidates,
+        notification_prep = prepare_multi_account_notification(
             results=results,
+            base=base,
+            config_path=cfg_path,
+            config=base_cfg,
             now_bj=now_bj,
-            cash_footer_lines=cash_footer_lines,
+            as_of_utc=utc_now(),
+            filter_notify_candidates_fn=engine_filter_notify_candidates,
+            rank_notify_candidates_fn=rank_notify_candidates,
+            query_cash_footer_fn=query_cash_footer,
+            cash_footer_accounts_from_config_fn=cash_footer_accounts_from_config,
             cash_footer_for_account_fn=cash_footer_for_account,
             build_account_message_fn=build_account_message,
             build_account_messages_fn=build_account_messages,
             build_no_candidate_account_messages_fn=build_no_candidate_account_messages,
-            as_of_utc=utc_now(),
             snapshot_cls=SnapshotDTO,
             engine_entrypoint=resolve_multi_tick_engine_entrypoint,
         )
     except SchemaValidationError as e:
         audit_helper.fail_schema_validation(stage='account_messages_snapshot', exc=e, run_id=run_id)
+    runlog.safe_event(
+        'notify',
+        'prepare',
+        data=_safe_runlog_data({
+            'results_count': notification_prep.results_count,
+            'notify_candidates': len(notification_prep.notify_candidates),
+        }),
+    )
+    prepared_messages = notification_prep.prepared_messages
     account_messages = prepared_messages.messages_by_account
 
     if not bool(prepared_messages.threshold_met):
@@ -612,14 +598,10 @@ def main() -> int:
             message='no candidates; sending monitor heartbeat',
             data=_safe_runlog_data({'accounts': list(account_messages.keys())}),
         )
-        try:
-            for acct in account_messages:
-                for acct_metrics in tick_metrics.get('accounts', []):
-                    if str(acct_metrics.get('account') or '').strip().lower() == str(acct).strip().lower():
-                        acct_metrics['meaningful'] = True
-                        acct_metrics['notification_type'] = 'no_candidate'
-        except Exception:
-            pass
+        mark_no_candidate_notification_metrics(
+            tick_metrics=tick_metrics,
+            account_messages=account_messages,
+        )
 
     notify_route = resolve_notification_route_from_config(config=base_cfg)
     notif_cfg = notify_route.get('notifications') or {}

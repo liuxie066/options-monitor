@@ -37,6 +37,26 @@ PreparedAccountMessages = PreparedPerAccountMessages
 
 
 @dataclass(frozen=True)
+class PreparedMultiAccountNotification:
+    prepared_messages: PreparedPerAccountMessages
+    notify_candidates: list[Any]
+    cash_footer_lines: list[str]
+    results_count: int
+
+    @property
+    def messages_by_account(self) -> dict[str, str]:
+        return self.prepared_messages.messages_by_account
+
+    @property
+    def threshold_met(self) -> bool:
+        return self.prepared_messages.threshold_met
+
+    @property
+    def used_heartbeat(self) -> bool:
+        return self.prepared_messages.used_heartbeat
+
+
+@dataclass(frozen=True)
 class AccountDeliveryBatch:
     messages_by_account: dict[str, str]
     target: str
@@ -362,6 +382,111 @@ def prepare_per_account_messages(
 
 def prepare_multi_account_messages(**kwargs: Any) -> PreparedAccountMessages:
     return prepare_per_account_messages(**kwargs)
+
+
+def query_multi_account_cash_footer_lines(
+    *,
+    base,
+    config_path,
+    config: dict[str, Any],
+    query_cash_footer_fn: Callable[..., list[str]],
+    cash_footer_accounts_from_config_fn: Callable[[dict[str, Any]], list[str]],
+) -> list[str]:
+    try:
+        cfg = config or {}
+        portfolio = cfg.get("portfolio") if isinstance(cfg, dict) else {}
+        if not isinstance(portfolio, dict):
+            portfolio = {}
+        notifications = cfg.get("notifications") if isinstance(cfg, dict) else {}
+        if not isinstance(notifications, dict):
+            notifications = {}
+
+        market = str(portfolio.get("broker") or "富途")
+        accounts = cash_footer_accounts_from_config_fn(cfg)
+        timeout_sec = int(notifications.get("cash_footer_timeout_sec") or 180)
+        max_age_sec = int(notifications.get("cash_snapshot_max_age_sec") or 900)
+        return list(
+            query_cash_footer_fn(
+                base,
+                config_path=str(config_path),
+                market=market,
+                accounts=accounts,
+                timeout_sec=timeout_sec,
+                snapshot_max_age_sec=max_age_sec,
+            )
+            or []
+        )
+    except Exception:
+        return []
+
+
+def prepare_multi_account_notification(
+    *,
+    results: list[Any],
+    base,
+    config_path,
+    config: dict[str, Any],
+    now_bj: str,
+    as_of_utc: str,
+    filter_notify_candidates_fn: Callable[[list[Any]], list[Any]],
+    rank_notify_candidates_fn: Callable[[list[Any]], list[Any]],
+    query_cash_footer_fn: Callable[..., list[str]],
+    cash_footer_accounts_from_config_fn: Callable[[dict[str, Any]], list[str]],
+    cash_footer_for_account_fn: Callable[[list[str], str], list[str]],
+    build_account_message_fn: Callable[..., str],
+    build_account_messages_fn: Callable[..., dict[str, str]],
+    build_no_candidate_account_messages_fn: Callable[..., dict[str, str]],
+    snapshot_cls: type[SnapshotDTO] = SnapshotDTO,
+    engine_entrypoint: Callable[..., dict[str, Any]] = resolve_multi_tick_engine_entrypoint,
+) -> PreparedMultiAccountNotification:
+    notify_candidates = rank_notify_candidates_fn(filter_notify_candidates_fn(results))
+    cash_footer_lines = query_multi_account_cash_footer_lines(
+        base=base,
+        config_path=config_path,
+        config=config,
+        query_cash_footer_fn=query_cash_footer_fn,
+        cash_footer_accounts_from_config_fn=cash_footer_accounts_from_config_fn,
+    )
+    prepared_messages = prepare_per_account_messages(
+        notify_candidates=notify_candidates,
+        results=results,
+        now_bj=now_bj,
+        cash_footer_lines=cash_footer_lines,
+        cash_footer_for_account_fn=cash_footer_for_account_fn,
+        build_account_message_fn=build_account_message_fn,
+        build_account_messages_fn=build_account_messages_fn,
+        build_no_candidate_account_messages_fn=build_no_candidate_account_messages_fn,
+        as_of_utc=as_of_utc,
+        snapshot_cls=snapshot_cls,
+        engine_entrypoint=engine_entrypoint,
+    )
+    return PreparedMultiAccountNotification(
+        prepared_messages=prepared_messages,
+        notify_candidates=notify_candidates,
+        cash_footer_lines=cash_footer_lines,
+        results_count=len(results),
+    )
+
+
+def mark_no_candidate_notification_metrics(
+    *,
+    tick_metrics: dict[str, Any],
+    account_messages: dict[str, str],
+) -> None:
+    accounts = {
+        str(account).strip().lower()
+        for account in account_messages
+        if str(account).strip()
+    }
+    if not accounts:
+        return
+    for acct_metrics in tick_metrics.get("accounts", []):
+        if not isinstance(acct_metrics, dict):
+            continue
+        account = str(acct_metrics.get("account") or "").strip().lower()
+        if account in accounts:
+            acct_metrics["meaningful"] = True
+            acct_metrics["notification_type"] = "no_candidate"
 
 
 def prepare_single_account_delivery(

@@ -35,7 +35,7 @@ def test_multi_tick_main_has_phase3_idempotency_and_audit_hooks() -> None:
 
 
 def test_state_repo_has_current_read_model_writers() -> None:
-    src = (BASE / "om" / "storage" / "repositories" / "state_repo.py").read_text(encoding="utf-8")
+    src = (BASE / "domain" / "storage" / "repositories" / "state_repo.py").read_text(encoding="utf-8")
     assert "shared_current_read_model_dir" in src
     assert "write_shared_current_read_model" in src
     assert "tick_metrics.current.json" in src

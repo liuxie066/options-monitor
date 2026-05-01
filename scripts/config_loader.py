@@ -125,7 +125,7 @@ def normalize_portfolio_broker_config(cfg: dict | None) -> dict:
     return data
 
 
-def _should_validate_scheduled(*, cfg: dict, state_dir: Path) -> bool:
+def _scheduled_validation_cache_state(*, cfg: dict, state_dir: Path) -> tuple[bool, Path, str]:
     state_dir.mkdir(parents=True, exist_ok=True)
     cache_path = (state_dir / 'config_validation_cache.json').resolve()
 
@@ -140,13 +140,16 @@ def _should_validate_scheduled(*, cfg: dict, state_dir: Path) -> bool:
         prev = None
 
     if prev == sha256:
-        return False
+        return False, cache_path, sha256
 
+    return True, cache_path, sha256
+
+
+def _mark_scheduled_validation_cached(*, cache_path: Path, sha256: str) -> None:
     cache_path.write_text(
         json.dumps({'sha256': sha256}, ensure_ascii=False, indent=2) + '\n',
         encoding='utf-8',
     )
-    return True
 
 
 def load_config(
@@ -177,12 +180,18 @@ def load_config(
             from scripts.validate_config import validate_config as validate_config_fn  # type: ignore
 
         should_validate = True
+        validation_cache: tuple[Path, str] | None = None
         if is_scheduled:
             sd = state_dir if state_dir is not None else (base / 'output' / 'state').resolve()
-            should_validate = _should_validate_scheduled(cfg=cfg, state_dir=sd)
+            should_validate, cache_path, cfg_hash = _scheduled_validation_cache_state(cfg=cfg, state_dir=sd)
+            if should_validate:
+                validation_cache = (cache_path, cfg_hash)
 
         if should_validate:
             validate_config_fn(cfg)
+            if validation_cache is not None:
+                cache_path, cfg_hash = validation_cache
+                _mark_scheduled_validation_cached(cache_path=cache_path, sha256=cfg_hash)
     except SystemExit:
         raise
     except ImportError as e:

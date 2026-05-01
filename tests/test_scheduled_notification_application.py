@@ -252,6 +252,109 @@ def test_prepare_per_account_messages_falls_back_to_heartbeat() -> None:
     assert out.used_heartbeat is True
 
 
+def test_prepare_multi_account_notification_collects_candidates_and_cash_footer() -> None:
+    from src.application.scheduled_notification import prepare_multi_account_notification
+
+    seen: dict[str, object] = {}
+
+    class FakeSnapshot:
+        @classmethod
+        def from_payload(cls, payload):
+            return SimpleNamespace(payload=dict(payload["payload"]))
+
+    def _filter(results):
+        seen["filter_results"] = results
+        return ["candidate-b", "candidate-a"]
+
+    def _rank(candidates):
+        seen["rank_candidates"] = candidates
+        return ["candidate-a", "candidate-b"]
+
+    def _query_cash_footer(base, *, config_path, market, accounts, timeout_sec, snapshot_max_age_sec):
+        seen["cash_footer"] = {
+            "base": base,
+            "config_path": config_path,
+            "market": market,
+            "accounts": accounts,
+            "timeout_sec": timeout_sec,
+            "snapshot_max_age_sec": snapshot_max_age_sec,
+        }
+        return ["cash-line"]
+
+    def _build_account_messages(**kwargs):
+        seen["message_kwargs"] = kwargs
+        return {"lx": "candidate-message"}
+
+    out = prepare_multi_account_notification(
+        results=["raw-a", "raw-b"],
+        base="/repo",
+        config_path="/repo/config.us.json",
+        config={
+            "accounts": ["lx"],
+            "portfolio": {"broker": "富途"},
+            "notifications": {
+                "cash_footer_timeout_sec": 12,
+                "cash_snapshot_max_age_sec": 34,
+            },
+        },
+        now_bj="BJ_NOW",
+        as_of_utc="2026-04-25T00:00:00Z",
+        filter_notify_candidates_fn=_filter,
+        rank_notify_candidates_fn=_rank,
+        query_cash_footer_fn=_query_cash_footer,
+        cash_footer_accounts_from_config_fn=lambda cfg: list(cfg["accounts"]),
+        cash_footer_for_account_fn=lambda lines, account: [f"{account}:{len(lines)}"],
+        build_account_message_fn=lambda *args, **kwargs: "unused",
+        build_account_messages_fn=_build_account_messages,
+        build_no_candidate_account_messages_fn=lambda **kwargs: {"lx": "heartbeat"},
+        snapshot_cls=FakeSnapshot,
+        engine_entrypoint=lambda **kwargs: {"notify_threshold": {"threshold_met": True}},
+    )
+
+    assert out.results_count == 2
+    assert out.notify_candidates == ["candidate-a", "candidate-b"]
+    assert out.cash_footer_lines == ["cash-line"]
+    assert out.messages_by_account == {"lx": "candidate-message"}
+    assert out.threshold_met is True
+    assert out.used_heartbeat is False
+    assert seen["filter_results"] == ["raw-a", "raw-b"]
+    assert seen["rank_candidates"] == ["candidate-b", "candidate-a"]
+    assert seen["cash_footer"] == {
+        "base": "/repo",
+        "config_path": "/repo/config.us.json",
+        "market": "富途",
+        "accounts": ["lx"],
+        "timeout_sec": 12,
+        "snapshot_max_age_sec": 34,
+    }
+    assert seen["message_kwargs"]["notify_candidates"] == ["candidate-a", "candidate-b"]
+    assert seen["message_kwargs"]["cash_footer_lines"] == ["cash-line"]
+
+
+def test_mark_no_candidate_notification_metrics_updates_matching_accounts_only() -> None:
+    from src.application.scheduled_notification import mark_no_candidate_notification_metrics
+
+    tick_metrics = {
+        "accounts": [
+            {"account": "lx", "meaningful": False},
+            {"account": "sy", "meaningful": False},
+            {"account": "other", "meaningful": False},
+            "invalid",
+        ]
+    }
+
+    mark_no_candidate_notification_metrics(
+        tick_metrics=tick_metrics,
+        account_messages={"LX": "heartbeat", "sy": "heartbeat"},
+    )
+
+    assert tick_metrics["accounts"][0]["meaningful"] is True
+    assert tick_metrics["accounts"][0]["notification_type"] == "no_candidate"
+    assert tick_metrics["accounts"][1]["meaningful"] is True
+    assert tick_metrics["accounts"][1]["notification_type"] == "no_candidate"
+    assert tick_metrics["accounts"][2] == {"account": "other", "meaningful": False}
+
+
 def test_prepare_single_account_delivery_builds_messages_and_delivery() -> None:
     from src.application.scheduled_notification import prepare_single_account_delivery
 

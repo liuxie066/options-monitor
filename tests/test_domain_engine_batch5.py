@@ -45,10 +45,14 @@ def test_resolve_multi_tick_engine_entrypoint_notify_threshold_matches_legacy() 
 
 def test_main_uses_notify_threshold_entrypoint_batch5() -> None:
     base = Path(__file__).resolve().parents[1]
-    src = (base / 'scripts' / 'multi_tick' / 'main.py').read_text(encoding='utf-8')
-    assert 'notify_account_messages=account_messages' in src
-    assert 'notify_min_accounts=1' in src
-    assert 'decide_notify_threshold_met(' not in src
+    main_src = (base / 'scripts' / 'multi_tick' / 'main.py').read_text(encoding='utf-8')
+    notification_src = (base / 'src' / 'application' / 'scheduled_notification.py').read_text(encoding='utf-8')
+
+    assert 'prepare_multi_account_notification(' in main_src
+    assert 'prepare_per_account_messages(' in notification_src
+    assert 'notify_account_messages=account_messages' in notification_src
+    assert 'notify_min_accounts=1' in notification_src
+    assert 'decide_notify_threshold_met(' not in notification_src
 
 
 def test_resolve_multi_tick_engine_entrypoint_shape_guard_for_account_scheduler_map() -> None:

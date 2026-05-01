@@ -129,15 +129,19 @@ def test_decide_pipeline_execution_result_matches_legacy_branching() -> None:
 
 def test_main_uses_engine_decision_entrypoints_batch3() -> None:
     base = Path(__file__).resolve().parents[1]
-    src = (base / 'scripts' / 'multi_tick' / 'main.py').read_text(encoding='utf-8')
+    main_src = (base / 'scripts' / 'multi_tick' / 'main.py').read_text(encoding='utf-8')
+    account_run_src = (base / 'src' / 'application' / 'account_run.py').read_text(encoding='utf-8')
+    watchdog_src = (base / 'src' / 'application' / 'multi_tick_watchdog.py').read_text(encoding='utf-8')
+
     # Batch-3 accepted direct decision calls; later batches may route watchdog via
     # unified engine entrypoint. Keep this guard compatible with both forms.
+    assert 'resolve_multi_tick_engine_entrypoint=resolve_multi_tick_engine_entrypoint' in main_src
     assert (
-        'decide_opend_unhealthy_action' in src
-        or 'resolve_multi_tick_engine_entrypoint(' in src
+        'decide_opend_unhealthy_action' in watchdog_src
+        or 'resolve_multi_tick_engine_entrypoint(' in watchdog_src
     )
-    assert 'decide_account_scan_gate' in src
-    assert 'decide_pipeline_execution_result' in src
+    assert 'decide_account_scan_gate' in account_run_src
+    assert 'decide_pipeline_execution_result' in account_run_src
 
 
 def test_engine_package_exports_batch3_entrypoints() -> None:

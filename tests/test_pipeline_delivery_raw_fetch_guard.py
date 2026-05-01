@@ -10,7 +10,6 @@ if str(BASE) not in sys.path:
 
 
 DELIVERY_PIPELINE_FILES = [
-    BASE / "scripts" / "run_pipeline.py",
     BASE / "scripts" / "pipeline_runner.py",
     BASE / "scripts" / "pipeline_symbol.py",
     BASE / "scripts" / "pipeline_watchlist.py",
