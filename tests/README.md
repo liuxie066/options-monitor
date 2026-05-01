@@ -6,7 +6,7 @@
 
 - 纯函数 / Engine 契约测试：验证筛选、排序、调度、通知交付等确定性逻辑。
 - CLI / script 边界测试：验证命令参数、入口兼容和输出文件契约。
-- Pipeline / multi-account 测试：验证多账户状态隔离、共享 required data、共享 context 切片复用和通知聚合。
+- Pipeline / multi-account 测试：验证多账户状态隔离、共享 required data、共享 context 切片复用和 per-account notification batching。
 - Schema / guard 测试：验证 DTO、source snapshot、config gate、文档 wording 和部署参数约束。
 - 少量 subprocess 测试：依赖 `.venv/bin/python`，本地缺 venv 时会失败。
 
@@ -59,7 +59,7 @@ git diff --check
 
 - `test_candidate_*`：候选策略与 Engine 契约。
 - `test_domain_engine_*`：Engine 决策入口和 orchestration guard。
-- `test_multi_tick_*`：多账户 tick、通知聚合、状态隔离。
+- `test_multi_tick_*`：多账户 tick、per-account notification batching、状态隔离。
 - `test_pipeline_*`：pipeline 上下文、postprocess、阶段计划。
 - `test_*_batchN.py`：按阶段演进保留的回归批次，新增断言应尽量放入最相关文件，不要无意义新建批次。
 

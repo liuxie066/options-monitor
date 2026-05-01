@@ -21,7 +21,6 @@ from src.application.scheduled_notification import (
 
 @dataclass(frozen=True)
 class MultiTickSchedulerResult:
-    markets_to_run: list[str]
     state_path: Path
     scheduler_schedule_key: str
     scheduler_decision: dict[str, Any]
@@ -189,7 +188,6 @@ def run_scheduler_flow(
         smoke=smoke,
     )
     return MultiTickSchedulerResult(
-        markets_to_run=[],
         state_path=state_path,
         scheduler_schedule_key=scheduler_schedule_key,
         scheduler_decision=scheduler_decision,

@@ -273,7 +273,7 @@ def test_main_uses_notify_dispatch_gate_entrypoint_batch4() -> None:
     base = Path(__file__).resolve().parents[1]
     src = (base / 'scripts' / 'multi_tick' / 'main.py').read_text(encoding='utf-8')
     assert 'resolve_multi_tick_engine_entrypoint' in src
-    assert 'build_multi_account_delivery(' in src
+    assert 'build_per_account_delivery_batch(' in src
     assert 'decision_builder=decide_notification_delivery' in src
 
 
@@ -283,10 +283,10 @@ def test_main_orchestrator_guard_batch4_no_legacy_rule_reflow() -> None:
 
     # Keep main.py as orchestration-only for key Batch-4 decisions.
     for entrypoint in (
-        'build_opend_unhealthy_execution_plan(',
-        'decide_trading_day_guard(',
-        'resolve_multi_tick_engine_entrypoint(',
-        'build_multi_account_delivery(',
+        'build_opend_unhealthy_execution_plan=build_opend_unhealthy_execution_plan',
+        'decide_trading_day_guard=decide_trading_day_guard',
+        'resolve_multi_tick_engine_entrypoint=resolve_multi_tick_engine_entrypoint',
+        'build_per_account_delivery_batch(',
         'engine_filter_notify_candidates(',
         'rank_notify_candidates(',
     ):

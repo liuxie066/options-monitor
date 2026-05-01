@@ -44,8 +44,8 @@ def test_build_scheduler_decision_supports_injected_contracts() -> None:
     assert seen["scheduler_payload"] == {"should_run_scan": True, "reason": "ok"}
 
 
-def test_build_multi_account_delivery_supports_single_account_rendering() -> None:
-    from src.application.scheduled_notification import build_multi_account_delivery
+def test_build_per_account_delivery_batch_supports_single_account_rendering() -> None:
+    from src.application.scheduled_notification import build_per_account_delivery_batch
 
     seen: dict[str, object] = {}
 
@@ -65,7 +65,7 @@ def test_build_multi_account_delivery_supports_single_account_rendering() -> Non
             "reason": "send",
         }
 
-    decision, plan, target = build_multi_account_delivery(
+    decision, batch, target = build_per_account_delivery_batch(
         channel="feishu",
         target="user:test",
         account_messages={"sy": "[sy]\nhello"},
@@ -75,7 +75,9 @@ def test_build_multi_account_delivery_supports_single_account_rendering() -> Non
     )
 
     assert decision["should_send"] is True
-    assert plan["account_messages"] == {"sy": "[sy]\nhello"}
+    assert batch is not None
+    assert batch.messages_by_account == {"sy": "[sy]\nhello"}
+    assert batch.mode == "per_account"
     assert target == "user:test"
     assert seen["decision_kwargs"]["notification_text"] == "[sy]\nhello"
 
@@ -99,8 +101,8 @@ def test_infer_trading_day_guard_markets_supports_injected_resolver() -> None:
     assert seen["market_config"] == "auto"
 
 
-def test_build_multi_account_delivery_supports_skip_paths() -> None:
-    from src.application.scheduled_notification import build_multi_account_delivery
+def test_build_per_account_delivery_batch_supports_skip_paths() -> None:
+    from src.application.scheduled_notification import build_per_account_delivery_batch
 
     def _decision_builder(**kwargs):
         assert kwargs["notification_text"] == "hello\nworld"
@@ -113,7 +115,7 @@ def test_build_multi_account_delivery_supports_skip_paths() -> None:
             "action": "skip",
         }
 
-    decision, plan, target = build_multi_account_delivery(
+    decision, batch, target = build_per_account_delivery_batch(
         channel="feishu",
         target="user:test",
         account_messages={"lx": "hello", "sy": "world"},
@@ -122,19 +124,19 @@ def test_build_multi_account_delivery_supports_skip_paths() -> None:
     )
 
     assert decision["should_send"] is False
-    assert plan is None
+    assert batch is None
     assert target is None
 
 
-def test_build_multi_account_delivery_builds_delivery_plan() -> None:
-    from src.application.scheduled_notification import build_multi_account_delivery
+def test_build_per_account_delivery_batch_builds_delivery_batch() -> None:
+    from src.application.scheduled_notification import build_per_account_delivery_batch
 
     class FakeDeliveryPlan:
         @classmethod
         def from_payload(cls, payload):
             return payload
 
-    decision, plan, target = build_multi_account_delivery(
+    decision, batch, target = build_per_account_delivery_batch(
         channel="feishu",
         target="user:test",
         account_messages={"lx": "hello"},
@@ -151,8 +153,9 @@ def test_build_multi_account_delivery_builds_delivery_plan() -> None:
 
     assert decision["should_send"] is True
     assert target == "user:test"
-    assert plan["target"] == "user:test"
-    assert plan["account_messages"] == {"lx": "hello"}
+    assert batch is not None
+    assert batch.target == "user:test"
+    assert batch.messages_by_account == {"lx": "hello"}
 
 
 def test_build_single_account_messages_prefixes_account_header() -> None:
@@ -187,15 +190,15 @@ def test_snapshot_account_messages_normalizes_mapping() -> None:
     assert seen["payload"]["snapshot_name"] == "account_messages"
 
 
-def test_prepare_multi_account_messages_keeps_candidate_messages_when_threshold_met() -> None:
-    from src.application.scheduled_notification import prepare_multi_account_messages
+def test_prepare_per_account_messages_keeps_candidate_messages_when_threshold_met() -> None:
+    from src.application.scheduled_notification import prepare_per_account_messages
 
     class FakeSnapshot:
         @classmethod
         def from_payload(cls, payload):
             return SimpleNamespace(payload=dict(payload["payload"]))
 
-    out = prepare_multi_account_messages(
+    out = prepare_per_account_messages(
         notify_candidates=["candidate-a"],
         results=["result-a"],
         now_bj="BJ_NOW",
@@ -209,13 +212,14 @@ def test_prepare_multi_account_messages_keeps_candidate_messages_when_threshold_
         engine_entrypoint=lambda **kwargs: {"notify_threshold": {"threshold_met": True}},
     )
 
+    assert out.messages_by_account == {"lx": "hello"}
     assert out.account_messages == {"lx": "hello"}
     assert out.threshold_met is True
     assert out.used_heartbeat is False
 
 
-def test_prepare_multi_account_messages_falls_back_to_heartbeat() -> None:
-    from src.application.scheduled_notification import prepare_multi_account_messages
+def test_prepare_per_account_messages_falls_back_to_heartbeat() -> None:
+    from src.application.scheduled_notification import prepare_per_account_messages
 
     calls = {"n": 0}
 
@@ -229,7 +233,7 @@ def test_prepare_multi_account_messages_falls_back_to_heartbeat() -> None:
         threshold_met = calls["n"] == 2
         return {"notify_threshold": {"threshold_met": threshold_met}}
 
-    out = prepare_multi_account_messages(
+    out = prepare_per_account_messages(
         notify_candidates=[],
         results=["result-a"],
         now_bj="BJ_NOW",
@@ -243,7 +247,7 @@ def test_prepare_multi_account_messages_falls_back_to_heartbeat() -> None:
         engine_entrypoint=_engine,
     )
 
-    assert out.account_messages == {"lx": "heartbeat"}
+    assert out.messages_by_account == {"lx": "heartbeat"}
     assert out.threshold_met is True
     assert out.used_heartbeat is True
 

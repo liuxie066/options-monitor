@@ -91,9 +91,9 @@ from src.application.multi_tick_scheduler import (
 )
 from src.application.multi_tick_watchdog import run_multi_tick_watchdog
 from src.application.scheduled_notification import (
-    build_multi_account_delivery,
-    execute_multi_account_delivery,
-    prepare_multi_account_messages,
+    build_per_account_delivery_batch,
+    execute_per_account_delivery,
+    prepare_per_account_messages,
 )
 from scripts.infra.service import (
     normalize_feishu_app_send_output,
@@ -133,7 +133,7 @@ def _is_trading_day_guard_for_market(cfg: dict, market: str) -> tuple[bool | Non
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description='Multi-account tick with merged notification')
+    ap = argparse.ArgumentParser(description='Multi-account tick with per-account notifications')
     ap.add_argument('--config', default='config.us.json')
     ap.add_argument('--accounts', nargs='+', default=None)
     ap.add_argument('--default-account', default=None)
@@ -573,7 +573,7 @@ def main() -> int:
     now_bj = bj_now()
     notify_candidates = rank_notify_candidates(engine_filter_notify_candidates(results))
     try:
-        prepared_messages = prepare_multi_account_messages(
+        prepared_messages = prepare_per_account_messages(
             notify_candidates=notify_candidates,
             results=results,
             now_bj=now_bj,
@@ -588,7 +588,7 @@ def main() -> int:
         )
     except SchemaValidationError as e:
         audit_helper.fail_schema_validation(stage='account_messages_snapshot', exc=e, run_id=run_id)
-    account_messages = prepared_messages.account_messages
+    account_messages = prepared_messages.messages_by_account
 
     if not bool(prepared_messages.threshold_met):
         return finalize_no_account_notification(
@@ -640,7 +640,7 @@ def main() -> int:
         runlog.safe_event('notify', 'error', message=f'failed to parse quiet_hours: {parse_error}')
 
     try:
-        notify_delivery, delivery_plan, target = build_multi_account_delivery(
+        notify_delivery, delivery_batch, target = build_per_account_delivery_batch(
             channel=channel,
             target=target,
             account_messages=account_messages,
@@ -672,9 +672,9 @@ def main() -> int:
     sent_accounts: list[str] = []
     notify_failures: list[dict[str, object]] = []
     if bool(notify_delivery.get('should_send')):
-        assert delivery_plan is not None
-        execution = execute_multi_account_delivery(
-            delivery_plan=delivery_plan,
+        assert delivery_batch is not None
+        execution = execute_per_account_delivery(
+            delivery_batch=delivery_batch,
             run_id=run_id,
             runlog=runlog,
             audit_fn=audit_helper.audit,

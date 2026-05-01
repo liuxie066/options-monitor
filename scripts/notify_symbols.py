@@ -5,7 +5,7 @@ This is the same logic as the previous notify_watchlist.py, renamed for clarity.
 
 NOTE (template ownership):
 - This file is the *single source of truth* for notification layout (Put/Call sections, blank lines, bullet lists).
-- For multi-account merged notifications, send_if_needed_multi.py must treat per-account notification text as opaque
+- For multi-account per-account notifications, send_if_needed_multi.py must treat account notification text as opaque
   and must NOT reformat individual candidates.
 """
 

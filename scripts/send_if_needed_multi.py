@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Thin CLI wrapper for multi-account merged tick notifier."""
+"""Thin CLI wrapper for multi-account per-account tick notifications."""
 
 from __future__ import annotations
 
