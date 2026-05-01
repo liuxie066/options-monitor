@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.4.8 - 2026-05-01
+
+### Changed
+- Made scheduled config validation cache writes happen only after validation succeeds, preventing failed scheduled configs from being treated as already validated.
+- Removed `sys.argv` mutation from the multi-account tick application entrypoint and passed CLI arguments explicitly into the reusable multi-tick main function.
+- Moved multi-account notification preparation details into application helpers, keeping the operational multi-tick script focused on orchestration.
+
 ## 0.4.7 - 2026-05-01
 
 ### Changed
