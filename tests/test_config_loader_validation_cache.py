@@ -29,6 +29,38 @@ def test_scheduled_validation_is_cached() -> None:
     assert len(calls) == 1
 
 
+def test_scheduled_validation_failure_is_not_cached() -> None:
+    from scripts.config_loader import load_config
+
+    calls: list[int] = []
+
+    def _validate(cfg: dict) -> None:
+        calls.append(1)
+        raise RuntimeError("bad config")
+
+    with TemporaryDirectory() as td:
+        base = Path(td)
+        state_dir = base / 'state'
+        cfg_path = base / 'cfg.json'
+        cfg_path.write_text('{"symbols": [{"symbol": "0700.HK"}] }', encoding='utf-8')
+
+        def _log(_: str) -> None:
+            return
+
+        for _ in range(2):
+            try:
+                load_config(base=base, config_path=cfg_path, is_scheduled=True, log=_log, validate_config_fn=_validate, state_dir=state_dir)
+            except SystemExit as exc:
+                assert "validation failed" in str(exc)
+            else:
+                raise AssertionError("expected validation failure")
+
+        cache_path = state_dir / 'config_validation_cache.json'
+        assert not cache_path.exists()
+
+    assert len(calls) == 2
+
+
 def test_resolve_data_config_path_prefers_explicit_path() -> None:
     from scripts.config_loader import resolve_data_config_path
 

@@ -63,11 +63,15 @@ def test_delivery_plan_validation_blocks_empty_target() -> None:
 
 def test_main_uses_intermediate_objects_in_critical_path() -> None:
     base = Path(__file__).resolve().parents[1]
-    src = (base / "scripts" / "multi_tick" / "main.py").read_text(encoding="utf-8")
-    assert "SnapshotDTO.from_payload" in src
-    assert "Decision.from_payload" in src
-    assert "DeliveryPlan.from_payload" in src
-    assert "SCHEMA_VALIDATION_FAILED" in src
+    main_src = (base / "scripts" / "multi_tick" / "main.py").read_text(encoding="utf-8")
+    account_run_src = (base / "src" / "application" / "account_run.py").read_text(encoding="utf-8")
+    notification_src = (base / "src" / "application" / "scheduled_notification.py").read_text(encoding="utf-8")
+    audit_src = (base / "src" / "application" / "multi_tick_audit.py").read_text(encoding="utf-8")
+
+    assert "SnapshotDTO.from_payload" in main_src
+    assert "Decision.from_payload" in account_run_src
+    assert "delivery_plan_cls.from_payload" in notification_src
+    assert "SCHEMA_VALIDATION_FAILED" in audit_src
 
 
 def test_snapshot_schema_error_has_stable_error_code() -> None:

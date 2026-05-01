@@ -4,13 +4,13 @@ import sys
 from typing import Any
 
 
-def test_run_tick_prefixes_cli_argv_and_returns_main_exit_code(monkeypatch) -> None:
+def test_run_tick_forwards_cli_argv_and_returns_main_exit_code(monkeypatch) -> None:
     from src.application import multi_account_tick as mod
 
     seen: dict[str, Any] = {}
 
-    def fake_main() -> int:
-        seen["argv"] = list(sys.argv)
+    def fake_main(argv: list[str] | None = None) -> int:
+        seen["argv"] = list(argv or [])
         return 7
 
     monkeypatch.setattr(mod, "multi_tick_main", fake_main)
@@ -19,9 +19,6 @@ def test_run_tick_prefixes_cli_argv_and_returns_main_exit_code(monkeypatch) -> N
 
     assert out == 7
     assert seen["argv"] == [
-        "om",
-        "run",
-        "tick",
         "--config",
         "config.us.json",
         "--accounts",
@@ -30,13 +27,13 @@ def test_run_tick_prefixes_cli_argv_and_returns_main_exit_code(monkeypatch) -> N
     ]
 
 
-def test_run_tick_uses_default_cli_prefix_when_argv_is_none(monkeypatch) -> None:
+def test_run_tick_uses_empty_argv_when_argv_is_none(monkeypatch) -> None:
     from src.application import multi_account_tick as mod
 
     seen: dict[str, Any] = {}
 
-    def fake_main() -> int:
-        seen["argv"] = list(sys.argv)
+    def fake_main(argv: list[str] | None = None) -> int:
+        seen["argv"] = list(argv or [])
         return 0
 
     monkeypatch.setattr(mod, "multi_tick_main", fake_main)
@@ -44,7 +41,7 @@ def test_run_tick_uses_default_cli_prefix_when_argv_is_none(monkeypatch) -> None
     out = mod.run_tick()
 
     assert out == 0
-    assert seen["argv"] == ["om", "run", "tick"]
+    assert seen["argv"] == []
 
 
 def test_run_tick_restores_sys_argv_after_success(monkeypatch) -> None:
@@ -53,8 +50,8 @@ def test_run_tick_restores_sys_argv_after_success(monkeypatch) -> None:
     original = ["pytest", "-k", "multi-account"]
     monkeypatch.setattr(sys, "argv", list(original))
 
-    def fake_main() -> int:
-        assert sys.argv == ["om", "run", "tick", "--config", "config.hk.json"]
+    def fake_main(argv: list[str] | None = None) -> int:
+        assert argv == ["--config", "config.hk.json"]
         return 3
 
     monkeypatch.setattr(mod, "multi_tick_main", fake_main)
@@ -71,8 +68,8 @@ def test_run_tick_restores_sys_argv_after_exception(monkeypatch) -> None:
     original = ["pytest", "tests/test_multi_account_tick.py"]
     monkeypatch.setattr(sys, "argv", list(original))
 
-    def fake_main() -> int:
-        assert sys.argv == ["om", "run", "tick", "--no-send"]
+    def fake_main(argv: list[str] | None = None) -> int:
+        assert argv == ["--no-send"]
         raise RuntimeError("boom")
 
     monkeypatch.setattr(mod, "multi_tick_main", fake_main)
