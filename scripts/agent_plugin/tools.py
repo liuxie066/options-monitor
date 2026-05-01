@@ -20,6 +20,10 @@ from scripts.query_sell_put_cash import query_sell_put_cash
 from scripts.io_utils import safe_read_csv
 from src.application.agent_tool_healthcheck import run_healthcheck_tool
 from src.application.agent_tool_notifications import preview_notification_tool
+from src.application.agent_tool_openclaw import (
+    openclaw_readiness_tool,
+    runtime_status_tool,
+)
 from src.application.agent_tool_runtime import (
     as_float as _as_float,
     extract_context_symbols as _extract_context_symbols,
@@ -217,6 +221,26 @@ def _preview_notification_tool(payload: dict[str, Any]) -> tuple[dict[str, Any],
     return preview_notification_tool(payload, build_notification=build_notification)
 
 
+def _runtime_status_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    return runtime_status_tool(
+        payload,
+        load_runtime_config=load_runtime_config,
+        normalize_accounts=normalize_accounts,
+        accounts_from_config=accounts_from_config,
+        read_json_object_or_empty=_read_json_object_or_empty,
+        repo_base=repo_base,
+        mask_path=mask_path,
+    )
+
+
+def _openclaw_readiness_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    return openclaw_readiness_tool(
+        payload,
+        runtime_status_tool_fn=_runtime_status_tool,
+        healthcheck_tool_fn=_healthcheck_tool,
+    )
+
+
 TOOL_HANDLERS = {
     "healthcheck": _healthcheck_tool,
     "query_cash_headroom": _query_cash_headroom_tool,
@@ -227,4 +251,6 @@ TOOL_HANDLERS = {
     "get_close_advice": _get_close_advice_tool,
     "manage_symbols": _manage_symbols_tool,
     "preview_notification": _preview_notification_tool,
+    "runtime_status": _runtime_status_tool,
+    "openclaw_readiness": _openclaw_readiness_tool,
 }

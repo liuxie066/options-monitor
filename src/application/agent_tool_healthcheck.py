@@ -304,6 +304,8 @@ def run_healthcheck_tool(
         "get_close_advice": {"available": True, "mode": "read_with_local_cache"},
         "manage_symbols": {"available": True, "mode": ("write" if write_tools_enabled() else "read_preview_only")},
         "preview_notification": {"available": True, "mode": "read"},
+        "runtime_status": {"available": True, "mode": "read"},
+        "openclaw_readiness": {"available": True, "mode": "read"},
     }
     critical = [item for item in checks if item["status"] == "error"]
     return (

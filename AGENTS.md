@@ -51,10 +51,14 @@ This repository is primarily maintained for personal use. Keep agent support lig
 - Prefer dry-run modes for write operations, especially Feishu / option position writes.
 - Preserve user changes in a dirty worktree. Never reset or revert unrelated files without explicit permission.
 
-## Execution Guardrails for Claude Code / OpenClaw
+## Execution Guardrails for Codex / Claude Code / OpenClaw
 
 - Do not default to running `python3 ...` commands for first-pass exploration.
 - If a task can be answered by reading code, docs, config examples, or tests, do that first.
+- For system status or troubleshooting, prefer read-only agent tools before runtime commands:
+  - `./om-agent run --tool runtime_status --input-json '{"config_key":"us"}'`
+  - `./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'`
+- In OpenClaw environments, use `./om-agent run --tool openclaw_readiness --input-json '{"config_key":"us"}'` as the first readiness check.
 - When execution is necessary, choose the highest-level safe entry point available in this order:
   1. `./om-agent`
   2. `./om`

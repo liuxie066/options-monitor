@@ -47,6 +47,15 @@ openclaw cron run 9cba60f7-407b-4427-9120-0a176b818de9 --expect-final --timeout 
 
 ## 值班三步检查（先做这个）
 
+Agent / OpenClaw 优先使用只读聚合入口：
+
+```bash
+./om-agent run --tool openclaw_readiness --input-json '{"config_key":"us"}'
+./om-agent run --tool runtime_status --input-json '{"config_key":"us"}'
+```
+
+人工直接查看文件时，再用下面三步：
+
 1. 查看是否在跑：
 
 ```bash

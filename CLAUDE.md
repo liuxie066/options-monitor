@@ -38,7 +38,10 @@ Do not default to `python3 scripts/...` for first-pass exploration.
 
 ## Practical Defaults
 
-- For system status or troubleshooting, prefer `./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'` before runtime commands.
+- For system status or troubleshooting, prefer read-only agent tools before runtime commands:
+  - `./om-agent run --tool runtime_status --input-json '{"config_key":"us"}'`
+  - `./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'`
+- In OpenClaw, prefer `./om-agent run --tool openclaw_readiness --input-json '{"config_key":"us"}'` for first-pass readiness.
 - Use direct `python3 scripts/...` commands only when the user explicitly asks for that script, or no higher-level entry point covers the task.
 - Keep account labels lowercase, such as `lx` and `sy`.
 - Keep user-facing notifications Markdown-friendly and preserve the existing Chinese tone.

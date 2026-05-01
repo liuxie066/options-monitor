@@ -20,11 +20,20 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert "prepare_close_advice_inputs" in tool_names
     assert "close_advice" in tool_names
     assert "get_close_advice" in tool_names
+    assert "runtime_status" in tool_names
+    assert "openclaw_readiness" in tool_names
     assert spec["schema_version"] == "1.0"
     assert spec["recommended_flow"] == ["healthcheck", "scan_opportunities", "get_close_advice"]
     get_close_advice = next(item for item in spec["tools"] if item["name"] == "get_close_advice")
     assert "requires" in get_close_advice
     assert "capabilities" in get_close_advice
+    runtime_status = next(item for item in spec["tools"] if item["name"] == "runtime_status")
+    assert runtime_status["risk_level"] == "read_only"
+    assert runtime_status["requires_confirm"] is False
+    manage_symbols = next(item for item in spec["tools"] if item["name"] == "manage_symbols")
+    assert manage_symbols["risk_level"] == "local_write"
+    assert manage_symbols["requires_confirm"] is True
+    assert manage_symbols["safe_default_input"]["action"] == "list"
 
 
 def test_agent_run_unknown_tool_returns_structured_error() -> None:

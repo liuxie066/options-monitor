@@ -8,6 +8,83 @@ from scripts.agent_plugin.config import write_tools_enabled
 from scripts.agent_plugin.contracts import AgentToolError, build_error_payload, build_response
 
 
+_TOOL_METADATA: dict[str, dict[str, Any]] = {
+    "healthcheck": {
+        "risk_level": "read_only",
+        "safe_default_input": {"config_key": "us"},
+        "examples": [{"input": {"config_key": "us"}}],
+    },
+    "scan_opportunities": {
+        "risk_level": "local_write",
+        "safe_default_input": {"config_key": "us", "top_n": 5},
+        "examples": [{"input": {"config_key": "us", "top_n": 5}}],
+    },
+    "query_cash_headroom": {
+        "risk_level": "local_write",
+        "safe_default_input": {"config_key": "us"},
+        "examples": [{"input": {"config_key": "us", "account": "user1"}}],
+    },
+    "get_portfolio_context": {
+        "risk_level": "local_write",
+        "safe_default_input": {"config_key": "us"},
+        "examples": [{"input": {"config_key": "us", "account": "user1"}}],
+    },
+    "prepare_close_advice_inputs": {
+        "risk_level": "local_write",
+        "safe_default_input": {"config_key": "us"},
+        "examples": [{"input": {"config_key": "us"}}],
+    },
+    "close_advice": {
+        "risk_level": "local_write",
+        "safe_default_input": {"config_key": "us"},
+        "examples": [{"input": {"config_key": "us"}}],
+    },
+    "get_close_advice": {
+        "risk_level": "local_write",
+        "safe_default_input": {"config_key": "us"},
+        "examples": [{"input": {"config_key": "us"}}],
+    },
+    "manage_symbols": {
+        "risk_level": "local_write",
+        "requires_confirm": True,
+        "requires_env": ["OM_AGENT_ENABLE_WRITE_TOOLS=true for non-dry-run writes"],
+        "safe_default_input": {"config_key": "us", "action": "list"},
+        "examples": [
+            {"input": {"config_key": "us", "action": "list"}},
+            {"input": {"config_key": "us", "action": "add", "symbol": "NVDA", "dry_run": True}},
+        ],
+    },
+    "preview_notification": {
+        "risk_level": "read_only",
+        "safe_default_input": {"alerts_text": "", "changes_text": ""},
+        "examples": [{"input": {"alerts_path": "output/reports/symbols_alerts.txt", "changes_path": "output/reports/symbols_changes.txt"}}],
+    },
+    "runtime_status": {
+        "risk_level": "read_only",
+        "safe_default_input": {"config_key": "us"},
+        "examples": [{"input": {"config_key": "us", "max_notification_chars": 2000}}],
+    },
+    "openclaw_readiness": {
+        "risk_level": "read_only",
+        "safe_default_input": {"config_key": "us"},
+        "examples": [{"input": {"config_key": "us", "timeout_sec": 20}}],
+    },
+}
+
+
+def _annotate_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    for tool in tools:
+        name = str(tool.get("name") or "")
+        meta = dict(_TOOL_METADATA.get(name) or {})
+        side_effects = tool.get("side_effects") if isinstance(tool.get("side_effects"), list) else []
+        tool.setdefault("risk_level", meta.get("risk_level") or ("local_write" if side_effects else "read_only"))
+        tool.setdefault("requires_confirm", bool(meta.get("requires_confirm", False)))
+        tool.setdefault("requires_env", list(meta.get("requires_env") or []))
+        tool.setdefault("safe_default_input", dict(meta.get("safe_default_input") or {}))
+        tool.setdefault("examples", list(meta.get("examples") or []))
+    return tools
+
+
 def build_spec() -> dict[str, Any]:
     return {
         "schema_version": "1.0",
@@ -28,7 +105,7 @@ def build_spec() -> dict[str, Any]:
             "remote_hosted": False,
             "auto_trade": False,
         },
-        "tools": [
+        "tools": _annotate_tools([
             {
                 "name": "healthcheck",
                 "read_only": True,
@@ -177,7 +254,42 @@ def build_spec() -> dict[str, Any]:
                     "account_label": "optional account label",
                 },
             },
-        ],
+            {
+                "name": "runtime_status",
+                "read_only": True,
+                "description": "Summarize existing OpenClaw/runtime output files without running pipelines or sending notifications.",
+                "requires": ["runtime_config"],
+                "capabilities": ["status", "read_only", "openclaw"],
+                "side_effects": [],
+                "input_schema": {
+                    "config_key": "us|hk",
+                    "config_path": "optional explicit config path",
+                    "accounts": "optional list[str]",
+                    "report_dir": "optional report dir; defaults to output/reports",
+                    "state_dir": "optional legacy state dir; defaults to output/state",
+                    "shared_state_dir": "optional shared state dir; defaults to output_shared/state",
+                    "accounts_root": "optional accounts output root; defaults to output_accounts",
+                    "runs_root": "optional run history root; defaults to output_runs",
+                    "max_notification_chars": "optional int, capped at 20000",
+                },
+            },
+            {
+                "name": "openclaw_readiness",
+                "read_only": True,
+                "description": "OpenClaw-oriented readiness summary combining runtime_status, healthcheck, and local openclaw command availability.",
+                "requires": ["runtime_config"],
+                "capabilities": ["diagnostics", "read_only", "openclaw"],
+                "side_effects": [],
+                "input_schema": {
+                    "config_key": "us|hk",
+                    "config_path": "optional explicit config path",
+                    "accounts": "optional list[str]",
+                    "data_config": "optional explicit data config path for healthcheck",
+                    "timeout_sec": "optional int for healthcheck OpenD doctor",
+                    "max_notification_chars": "optional int, forwarded to runtime_status",
+                },
+            },
+        ]),
         "recommended_flow": [
             "healthcheck",
             "scan_opportunities",
