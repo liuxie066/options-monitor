@@ -4,11 +4,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from domain.domain.expiration_dates import (
+    EXPIRATION_DATE_TZ,
+    expiration_timestamp_to_date,
+    expiration_timestamp_to_ymd,
+)
 from scripts.exchange_rates import get_exchange_rates_or_fetch_latest
 from scripts.config_loader import resolve_data_config_path
 from scripts.feishu_bitable import safe_float
 from scripts.option_positions_core.domain import (
-    exp_ms_to_datetime,
     normalize_account,
     normalize_broker,
     normalize_close_type,
@@ -64,7 +68,11 @@ def list_position_rows(
     rows: list[dict[str, Any]] = []
     normalized_broker = normalize_broker(broker)
     normalized_account = normalize_account(account) if account else None
-    as_of_date = datetime.fromtimestamp(int(as_of_ms) / 1000).date() if as_of_ms is not None else datetime.now().date()
+    as_of_date = (
+        datetime.fromtimestamp(int(as_of_ms) / 1000, tz=EXPIRATION_DATE_TZ).date()
+        if as_of_ms is not None
+        else datetime.now(EXPIRATION_DATE_TZ).date()
+    )
     for item in repo.list_records(page_size=200):
         record_id = item.get("record_id")
         fields = item.get("fields") or {}
@@ -75,9 +83,9 @@ def list_position_rows(
         normalized_status = normalize_status(fields.get("status"))
         if status != "all" and normalized_status != status:
             continue
-        exp_dt = exp_ms_to_datetime(fields.get("expiration"))
-        expiration_ymd = exp_dt.date().isoformat() if exp_dt is not None else None
-        days_to_expiration = (exp_dt.date() - as_of_date).days if exp_dt is not None else None
+        expiration_ymd = expiration_timestamp_to_ymd(fields.get("expiration"))
+        expiration_date = expiration_timestamp_to_date(fields.get("expiration"))
+        days_to_expiration = (expiration_date - as_of_date).days if expiration_date is not None else None
         if expiration_within_days is not None:
             if days_to_expiration is None or days_to_expiration < 0 or days_to_expiration > int(expiration_within_days):
                 continue
