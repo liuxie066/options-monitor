@@ -22,10 +22,62 @@ from domain.domain.engine import (
 
 
 @dataclass(frozen=True)
-class PreparedAccountMessages:
-    account_messages: dict[str, str]
+class PreparedPerAccountMessages:
+    messages_by_account: dict[str, str]
     threshold_met: bool
     used_heartbeat: bool
+
+    @property
+    def account_messages(self) -> dict[str, str]:
+        """Compatibility alias for the persisted account_messages contract."""
+        return self.messages_by_account
+
+
+PreparedAccountMessages = PreparedPerAccountMessages
+
+
+@dataclass(frozen=True)
+class AccountDeliveryBatch:
+    messages_by_account: dict[str, str]
+    target: str
+    channel: str
+    mode: str = "per_account"
+    should_send: bool = True
+
+    @property
+    def account_messages(self) -> dict[str, str]:
+        """Compatibility alias for DeliveryPlan.account_messages callers."""
+        return self.messages_by_account
+
+    @classmethod
+    def from_delivery_contract(cls, delivery_contract: Any) -> "AccountDeliveryBatch":
+        if isinstance(delivery_contract, dict):
+            raw_messages = delivery_contract.get("account_messages") or {}
+            target = delivery_contract.get("target")
+            channel = delivery_contract.get("channel")
+            should_send = delivery_contract.get("should_send")
+        else:
+            raw_messages = getattr(delivery_contract, "account_messages", {}) or {}
+            target = getattr(delivery_contract, "target", None)
+            channel = getattr(delivery_contract, "channel", None)
+            should_send = getattr(delivery_contract, "should_send", True)
+
+        return cls(
+            messages_by_account={str(k): str(v) for k, v in dict(raw_messages).items()},
+            target=str(target or ""),
+            channel=str(channel or ""),
+            should_send=bool(should_send),
+        )
+
+    def to_delivery_payload(self) -> dict[str, Any]:
+        return {
+            "schema_kind": "delivery_plan",
+            "schema_version": "1.0",
+            "channel": str(self.channel),
+            "target": str(self.target),
+            "account_messages": dict(self.messages_by_account),
+            "should_send": bool(self.should_send),
+        }
 
 
 @dataclass(frozen=True)
@@ -53,9 +105,12 @@ class SingleAccountSendResult:
 
 
 @dataclass(frozen=True)
-class MultiAccountSendExecution:
+class PerAccountSendExecution:
     sent_accounts: list[str]
     notify_failures: list[dict[str, object]]
+
+
+MultiAccountSendExecution = PerAccountSendExecution
 
 
 NOTIFY_SEND_MAX_ATTEMPTS = 1
@@ -149,7 +204,7 @@ def evaluate_trading_day_guard(
     return results
 
 
-def build_multi_account_delivery(
+def build_per_account_delivery_batch(
     *,
     channel: str | None,
     target: str | None,
@@ -160,7 +215,7 @@ def build_multi_account_delivery(
     quiet_window: str = "",
     decision_builder: Callable[..., dict[str, Any]] = decide_notification_delivery,
     delivery_plan_cls: type[DeliveryPlan] = DeliveryPlan,
-) -> tuple[dict[str, Any], DeliveryPlan | None, str | None]:
+) -> tuple[dict[str, Any], AccountDeliveryBatch | None, str | None]:
     delivery_decision = decision_builder(
         should_notify_window=bool(should_notify_window),
         notification_text="\n".join(str(msg) for msg in account_messages.values()),
@@ -177,7 +232,7 @@ def build_multi_account_delivery(
     if not bool(delivery_decision.get("should_send")):
         return delivery_decision, None, effective_target
 
-    delivery_plan = delivery_plan_cls.from_payload(
+    delivery_contract = delivery_plan_cls.from_payload(
         {
             "schema_kind": "delivery_plan",
             "schema_version": "1.0",
@@ -187,7 +242,35 @@ def build_multi_account_delivery(
             "should_send": True,
         }
     )
-    return delivery_decision, delivery_plan, effective_target
+    return delivery_decision, AccountDeliveryBatch.from_delivery_contract(delivery_contract), effective_target
+
+
+def build_multi_account_delivery(
+    *,
+    channel: str | None,
+    target: str | None,
+    account_messages: dict[str, str],
+    should_notify_window: bool = True,
+    no_send: bool = False,
+    is_quiet: bool = False,
+    quiet_window: str = "",
+    decision_builder: Callable[..., dict[str, Any]] = decide_notification_delivery,
+    delivery_plan_cls: type[DeliveryPlan] = DeliveryPlan,
+) -> tuple[dict[str, Any], DeliveryPlan | None, str | None]:
+    delivery_decision, delivery_batch, effective_target = build_per_account_delivery_batch(
+        channel=channel,
+        target=target,
+        account_messages=account_messages,
+        should_notify_window=should_notify_window,
+        no_send=no_send,
+        is_quiet=is_quiet,
+        quiet_window=quiet_window,
+        decision_builder=decision_builder,
+        delivery_plan_cls=delivery_plan_cls,
+    )
+    if delivery_batch is None:
+        return delivery_decision, None, effective_target
+    return delivery_decision, delivery_plan_cls.from_payload(delivery_batch.to_delivery_payload()), effective_target
 
 
 def build_single_account_messages(
@@ -222,7 +305,7 @@ def snapshot_account_messages(
     return {str(k): str(v) for k, v in raw_account_messages.items()}
 
 
-def prepare_multi_account_messages(
+def prepare_per_account_messages(
     *,
     notify_candidates: list[Any],
     results: list[Any],
@@ -235,7 +318,7 @@ def prepare_multi_account_messages(
     as_of_utc: str,
     snapshot_cls: type[SnapshotDTO] = SnapshotDTO,
     engine_entrypoint: Callable[..., dict[str, Any]] = resolve_multi_tick_engine_entrypoint,
-) -> PreparedAccountMessages:
+) -> PreparedPerAccountMessages:
     account_messages = build_account_messages_fn(
         notify_candidates=notify_candidates,
         now_bj=now_bj,
@@ -254,8 +337,8 @@ def prepare_multi_account_messages(
         notify_min_accounts=1,
     ).get("notify_threshold") or {}
     if bool(notify_threshold.get("threshold_met")):
-        return PreparedAccountMessages(
-            account_messages=account_messages,
+        return PreparedPerAccountMessages(
+            messages_by_account=account_messages,
             threshold_met=True,
             used_heartbeat=False,
         )
@@ -270,11 +353,15 @@ def prepare_multi_account_messages(
         notify_account_messages=account_messages,
         notify_min_accounts=1,
     ).get("notify_threshold") or {}
-    return PreparedAccountMessages(
-        account_messages=account_messages,
+    return PreparedPerAccountMessages(
+        messages_by_account=account_messages,
         threshold_met=bool(notify_threshold.get("threshold_met")),
         used_heartbeat=bool(notify_threshold.get("threshold_met")),
     )
+
+
+def prepare_multi_account_messages(**kwargs: Any) -> PreparedAccountMessages:
+    return prepare_per_account_messages(**kwargs)
 
 
 def prepare_single_account_delivery(
@@ -301,7 +388,7 @@ def prepare_single_account_delivery(
         as_of_utc=as_of_utc,
         snapshot_cls=snapshot_cls,
     )
-    delivery_decision, delivery_plan, effective_target = build_multi_account_delivery(
+    delivery_decision, delivery_batch, effective_target = build_per_account_delivery_batch(
         channel=channel,
         target=target,
         account_messages=account_messages,
@@ -312,6 +399,7 @@ def prepare_single_account_delivery(
         decision_builder=decision_builder,
         delivery_plan_cls=delivery_plan_cls,
     )
+    delivery_plan = None if delivery_batch is None else delivery_plan_cls.from_payload(delivery_batch.to_delivery_payload())
     return PreparedSingleAccountDelivery(
         account_name=account_name,
         account_messages=account_messages,
@@ -542,9 +630,9 @@ def _normalize_delivery_output(*, normalize_notify_output: Callable[..., dict[st
         )
 
 
-def execute_multi_account_delivery(
+def execute_per_account_delivery(
     *,
-    delivery_plan: DeliveryPlan,
+    delivery_batch: AccountDeliveryBatch | DeliveryPlan,
     run_id: str,
     runlog,
     audit_fn,
@@ -554,13 +642,13 @@ def execute_multi_account_delivery(
     failure_fields_builder: Callable[..., dict[str, Any]],
     on_failure: Callable[[str], Any] | None = None,
     base,
-) -> MultiAccountSendExecution:
+) -> PerAccountSendExecution:
     sent_accounts: list[str] = []
     notify_failures: list[dict[str, object]] = []
-    target = str(delivery_plan.target)
-    channel = str(delivery_plan.channel)
+    target = str(delivery_batch.target)
+    channel = str(delivery_batch.channel)
 
-    for acct, msg in delivery_plan.account_messages.items():
+    for acct, msg in delivery_batch.account_messages.items():
         runlog.safe_event(
             "notify",
             "start",
@@ -605,9 +693,36 @@ def execute_multi_account_delivery(
             continue
         sent_accounts.append(acct)
 
-    return MultiAccountSendExecution(
+    return PerAccountSendExecution(
         sent_accounts=sent_accounts,
         notify_failures=notify_failures,
+    )
+
+
+def execute_multi_account_delivery(
+    *,
+    delivery_plan: DeliveryPlan,
+    run_id: str,
+    runlog,
+    audit_fn,
+    safe_data_fn: Callable[[dict[str, Any]], dict[str, Any]],
+    send_fn: Callable[..., Any],
+    normalize_fn: Callable[..., dict[str, Any]],
+    failure_fields_builder: Callable[..., dict[str, Any]],
+    on_failure: Callable[[str], Any] | None = None,
+    base,
+) -> MultiAccountSendExecution:
+    return execute_per_account_delivery(
+        delivery_batch=delivery_plan,
+        run_id=run_id,
+        runlog=runlog,
+        audit_fn=audit_fn,
+        safe_data_fn=safe_data_fn,
+        send_fn=send_fn,
+        normalize_fn=normalize_fn,
+        failure_fields_builder=failure_fields_builder,
+        on_failure=on_failure,
+        base=base,
     )
 
 

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.4.7 - 2026-05-01
+
+### Changed
+- Made multi-account notifications explicitly per-account by introducing account delivery batch naming in the application layer while preserving the existing delivery contract for compatibility.
+- Removed the unused merged notification formatter and updated multi-account CLI/docs/tests to state that each account sends one message to the configured target with isolated failures.
+- Simplified multi-tick scheduler result state by removing an always-empty `markets_to_run` field.
+
 ## 0.4.6 - 2026-05-01
 
 ### Changed

@@ -35,7 +35,15 @@ openclaw cron enable  9cba60f7-407b-4427-9120-0a176b818de9
 openclaw cron run 9cba60f7-407b-4427-9120-0a176b818de9 --expect-final --timeout 120000
 ```
 
-线上定时执行入口：`scripts/send_if_needed.py`
+线上定时执行入口：`scripts/send_if_needed.py`（单账户定时链路，保持不变）
+
+多账户手动/可选定时入口：
+
+```bash
+./om run tick --config config.us.json --accounts lx sy
+```
+
+多账户链路会复用共享运行数据，但通知按账户逐条发送到同一目标；每个账户一条消息，发送失败按账户隔离。
 
 ## 值班三步检查（先做这个）
 
@@ -56,6 +64,8 @@ cat /home/node/.openclaw/workspace/options-monitor-prod/output/state/last_run.js
 ```bash
 cat /home/node/.openclaw/workspace/options-monitor-prod/<report_dir>/symbols_notification.txt
 ```
+
+多账户运行的账户级状态和报告位于 `output_accounts/<account>/`，共享运行状态位于 `output_runs/<run_id>/`。
 
 ## 高频故障处理
 

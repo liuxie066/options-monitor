@@ -141,52 +141,6 @@ def flatten_auto_close_summary(text: str, *, always_show: bool = False) -> str:
     return ('\n'.join(lines).strip()).strip()
 
 
-def build_merged_message(
-    results: list[AccountResult],
-    *,
-    now_bj: str,
-    cash_footer_lines: list[str] | None = None,
-) -> str:
-    lines: list[str] = []
-    lines.append("# 📊 Options Monitor")
-    lines.append("## 合并提醒")
-    lines.append('')
-    lines.append(f"北京时间 {now_bj}")
-    lines.append('')
-    lines.append('---')
-    lines.append('')
-
-    any_content = False
-
-    for r in results:
-        if not (r.should_notify and r.notification_text.strip()):
-            continue
-        any_content = True
-
-        kept = r.notification_text.strip().splitlines()
-
-        put_n = sum(1 for ln in kept if ' 卖Put ' in ln)
-        call_n = sum(1 for ln in kept if ' 卖Call ' in ln)
-
-        lines.append(f"### {str(r.account).strip().lower()} · 本轮候选")
-        lines.append(f"- Put {put_n} / Call {call_n}")
-        lines.append('')
-        lines.append(annotate_notification(r.account, '\n'.join(kept).strip() + '\n').strip())
-        lines.append('')
-        lines.append('---')
-        lines.append('')
-
-    if not any_content:
-        return ''
-
-    footer_lines = cash_footer_lines or []
-    if footer_lines:
-        lines.extend(list(footer_lines))
-        lines.append('')
-
-    return '\n'.join(lines).strip() + '\n'
-
-
 def build_account_message(
     result: AccountResult,
     *,

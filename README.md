@@ -235,6 +235,8 @@ cp configs/examples/portfolio.sqlite.example.json secrets/portfolio.sqlite.json
 ./om run tick --config config.us.json --accounts lx sy
 ```
 
+多账户运行会复用共享行情/required data，再按账户生成和发送通知。通知语义固定为：同一通知目标下，**每个账户一条消息**；某个账户发送失败不会阻断其他账户，只有发送成功的账户会更新 notified 状态。
+
 如果是 Agent 在排查问题，不要默认从这里开始；先做 healthcheck、配置校验，必要时再缩小到单阶段运行。
 
 兼容入口：
