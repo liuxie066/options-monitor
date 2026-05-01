@@ -164,6 +164,13 @@ cp configs/examples/portfolio.sqlite.example.json secrets/portfolio.sqlite.json
 
 - 飞书开放平台应用发个人消息
 
+多账户 tick 的通知语义是固定的：
+
+- 同一个通知目标下，每个账户各发送一条消息
+- 账户消息内容由 `scripts/notify_symbols.py` 和 `scripts/multi_tick/notify_format.py` 负责排版
+- 多账户主流程在应用层准备候选、现金 footer 和 heartbeat 消息，脚本层只做运行编排
+- 某个账户发送失败不会阻断其他账户；只有发送成功的账户会更新 notified 状态
+
 通知凭证默认放在：
 
 - `secrets/notifications.feishu.app.json`
@@ -235,7 +242,7 @@ cp configs/examples/portfolio.sqlite.example.json secrets/portfolio.sqlite.json
 ./om run tick --config config.us.json --accounts lx sy
 ```
 
-多账户运行会复用共享行情/required data，再按账户生成和发送通知。通知语义固定为：同一通知目标下，**每个账户一条消息**；某个账户发送失败不会阻断其他账户，只有发送成功的账户会更新 notified 状态。
+多账户运行会复用共享行情/required data，再按账户生成和发送通知。通知发送和 notified 状态更新的口径见第 5 节。
 
 如果是 Agent 在排查问题，不要默认从这里开始；先做 healthcheck、配置校验，必要时再缩小到单阶段运行。
 
@@ -245,7 +252,7 @@ cp configs/examples/portfolio.sqlite.example.json secrets/portfolio.sqlite.json
 python3 scripts/send_if_needed_multi.py --config config.us.json --accounts lx sy
 ```
 
-对 Agent 来说，这个兼容入口不应作为默认首选；只有在 `./om` / `./om-agent` 不覆盖，或用户明确指定脚本时再使用。
+对 Agent 来说，这个兼容入口不应作为默认首选；只有在 `./om` / `./om-agent` 不覆盖，或用户明确指定脚本时再使用。该兼容入口现在会把参数显式传给 multi-tick 主函数，不依赖临时改写进程级 `sys.argv`。
 
 ### 6.6 单账户入口
 
@@ -281,6 +288,8 @@ python3 scripts/send_if_needed.py --config config.us.json
 ```bash
 python3 scripts/validate_config.py --config config.us.json
 ```
+
+定时运行里的配置校验缓存只会在校验成功后写入；如果配置校验失败，下次 scheduled 加载仍会重新校验同一份配置，不需要为了重试而手工清理 validation cache。
 
 优先检查：
 - `notifications.target`

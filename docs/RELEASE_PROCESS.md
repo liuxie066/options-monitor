@@ -15,7 +15,8 @@
 ## 发布前检查
 
 ```bash
-python3 scripts/release_check.py
+VERSION="$(cat VERSION)"
+python3 scripts/release_check.py --tag "v${VERSION}"
 python3 tests/run_smoke.py
 python3 -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py
 python3 scripts/validate_config.py --config configs/examples/config.example.us.json
@@ -34,9 +35,13 @@ python3 scripts/validate_config.py --config configs/examples/config.example.us.j
 ## 打 tag
 
 ```bash
-git tag v0.1.0-beta.1
-git push origin v0.1.0-beta.1
+VERSION="$(cat VERSION)"
+git tag "v${VERSION}"
+git push origin main
+git push origin "v${VERSION}"
 ```
+
+如果只是准备版本元数据，还没有准备发布，不要提前打 tag。正式发布时 tag 必须与 `VERSION` 完全一致，只是多一个 `v` 前缀。
 
 ---
 
