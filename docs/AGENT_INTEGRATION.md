@@ -49,6 +49,8 @@ Use the launcher as a local command tool. Typical pattern:
 
 ```bash
 ./om-agent spec
+./om-agent run --tool runtime_status --input-json '{"config_key":"us"}'
+./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'
 ./om-agent run --tool query_cash_headroom --input-json '{"config_key":"us","account":"user1"}'
 ./om-agent run --tool get_close_advice --input-json '{"config_key":"us"}'
 ./om-agent run --tool prepare_close_advice_inputs --input-json '{"config_key":"us"}'
@@ -65,6 +67,18 @@ Use the launcher as a local command tool. Typical pattern:
 
 Use the same launcher contract. Kimi Code only needs a local command invocation and JSON parsing.
 
+## Codex
+
+Use the same launcher contract as Claude Code. For first-pass troubleshooting, prefer:
+
+```bash
+./om-agent run --tool runtime_status --input-json '{"config_key":"us"}'
+./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'
+```
+
+Treat `openclaw_readiness` as OpenClaw-specific. It is safe to call outside OpenClaw, but the
+`openclaw_binary` check may return `warn` when the `openclaw` command is not installed.
+
 ## OpenClaw
 
 Treat `./om-agent` as a local tool host command.
@@ -76,6 +90,48 @@ Recommended environment:
 - use explicit `config_path` input only when you intentionally want to override the default repo-local config
 - keep `OM_AGENT_ENABLE_WRITE_TOOLS` unset unless you explicitly want config writes
 
+Recommended first commands:
+
+```bash
+./om-agent run --tool runtime_status --input-json '{"config_key":"us"}'
+./om-agent run --tool openclaw_readiness --input-json '{"config_key":"us"}'
+```
+
+Use `openclaw_readiness` when you need a one-shot readiness summary. It combines:
+
+- `runtime_status`
+- existing `healthcheck`
+- local `openclaw` command availability
+
+Use `runtime_status` when you only want to inspect existing runtime files. It does not run a pipeline, send
+notifications, or write state. It summarizes:
+
+- `output_shared/state/last_run.json`
+- `output/state/last_run.json`
+- `output/reports/symbols_notification.txt`
+- `output_accounts/<account>/state/last_run.json`
+- `output_accounts/<account>/reports/symbols_notification.txt`
+- the latest `output_runs/<run_id>` pointer when available
+
+If the production layout uses non-default paths, pass them explicitly:
+
+```bash
+./om-agent run --tool runtime_status --input-json '{
+  "config_path": "/home/node/.openclaw/workspace/options-monitor-prod/config.us.json",
+  "report_dir": "/home/node/.openclaw/workspace/options-monitor-prod/output/reports",
+  "state_dir": "/home/node/.openclaw/workspace/options-monitor-prod/output/state",
+  "shared_state_dir": "/home/node/.openclaw/workspace/options-monitor-prod/output_shared/state",
+  "accounts_root": "/home/node/.openclaw/workspace/options-monitor-prod/output_accounts",
+  "runs_root": "/home/node/.openclaw/workspace/options-monitor-prod/output_runs"
+}'
+```
+
+Default OpenClaw safety posture:
+
+- Prefer `openclaw_readiness` or `runtime_status` before any runtime command.
+- Do not run `./om run tick`, `scripts/send_if_needed.py`, or notification send commands unless the user explicitly asks for a live run.
+- Keep real writes behind both `OM_AGENT_ENABLE_WRITE_TOOLS=true` and a payload-level confirmation such as `confirm=true`.
+
 ## `spec` 的行为说明
 
 `./om-agent spec` 输出的是当前环境下的 tool manifest。
@@ -84,6 +140,7 @@ Recommended environment:
 
 - `write_tools_enabled`
 - 默认写工具可用性
+- 每个工具的 `risk_level` / `requires_confirm` / `requires_env` / `safe_default_input`
 
 如果你打开了：
 

@@ -59,9 +59,22 @@ bash scripts/install_agent_plugin.sh
 ./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'
 ```
 
+Codex / Claude Code / OpenClaw 排障优先用只读聚合入口：
+
+```bash
+./om-agent run --tool runtime_status --input-json '{"config_key":"us"}'
+./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'
+```
+
+OpenClaw 环境可以先跑：
+
+```bash
+./om-agent run --tool openclaw_readiness --input-json '{"config_key":"us"}'
+```
+
 `om-agent` 是面向程序/Agent 的结构化入口；`om` 是面向人工操作的 CLI 入口。
 
-给 Claude Code、OpenClaw 这类代理使用时，建议遵守下面的默认约束：
+给 Codex、Claude Code、OpenClaw 这类代理使用时，建议遵守下面的默认约束：
 
 - **先读后跑**：如果任务是“解释 / look into / check / why / explain”，先读代码、配置文档和测试，不要先执行脚本。
 - **默认不要直接运行 runtime scripts**：不要把 `python3 scripts/...` 当作第一选择，除非用户明确指定脚本，或更高层入口不覆盖该能力。

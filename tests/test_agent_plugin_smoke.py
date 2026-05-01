@@ -524,6 +524,107 @@ def test_spec_exposes_broker_as_public_field() -> None:
     assert "pm_config" not in query_tool["input_schema"]
 
 
+def test_runtime_status_summarizes_openclaw_runtime_files(tmp_path: Path) -> None:
+    from scripts.agent_plugin.main import run_tool
+
+    cfg_path = tmp_path / "config.us.json"
+    cfg_path.write_text(json.dumps(_minimal_cfg(), ensure_ascii=False, indent=2), encoding="utf-8")
+
+    state_dir = tmp_path / "output" / "state"
+    report_dir = tmp_path / "output" / "reports"
+    shared_state_dir = tmp_path / "output_shared" / "state"
+    accounts_root = tmp_path / "output_accounts"
+    runs_root = tmp_path / "output_runs"
+    for path in (state_dir, report_dir, shared_state_dir, accounts_root / "user1" / "state", accounts_root / "user1" / "reports"):
+        path.mkdir(parents=True, exist_ok=True)
+
+    (shared_state_dir / "last_run.json").write_text(json.dumps({"status": "ok", "run_id": "run-1"}), encoding="utf-8")
+    (state_dir / "last_run.json").write_text(json.dumps({"status": "legacy_ok"}), encoding="utf-8")
+    (report_dir / "symbols_notification.txt").write_text("shared notification\n", encoding="utf-8")
+    (accounts_root / "user1" / "state" / "last_run.json").write_text(json.dumps({"status": "account_ok"}), encoding="utf-8")
+    (accounts_root / "user1" / "reports" / "symbols_notification.txt").write_text("account notification\n", encoding="utf-8")
+
+    run_dir = runs_root / "run-1"
+    (run_dir / "state").mkdir(parents=True, exist_ok=True)
+    (run_dir / "accounts" / "user1").mkdir(parents=True, exist_ok=True)
+    (shared_state_dir / "last_run_dir.txt").write_text(str(run_dir), encoding="utf-8")
+    (run_dir / "state" / "tick_metrics.json").write_text(json.dumps({"notify_summary": {"sent": 1}}), encoding="utf-8")
+    (run_dir / "accounts" / "user1" / "symbols_notification.txt").write_text("run account notification\n", encoding="utf-8")
+
+    out = run_tool(
+        "runtime_status",
+        {
+            "config_path": str(cfg_path),
+            "state_dir": str(state_dir),
+            "report_dir": str(report_dir),
+            "shared_state_dir": str(shared_state_dir),
+            "accounts_root": str(accounts_root),
+            "runs_root": str(runs_root),
+        },
+    )
+
+    assert out["ok"] is True
+    assert out["warnings"] == []
+    assert out["data"]["summary"]["ok"] is True
+    assert out["data"]["summary"]["latest_status"] == "ok"
+    assert out["data"]["shared"]["notification"]["text"] == "shared notification\n"
+    assert out["data"]["accounts"]["user1"]["notification"]["text"] == "account notification\n"
+    assert out["data"]["latest_run"]["state"]["tick_metrics"]["json"]["notify_summary"]["sent"] == 1
+    assert out["data"]["latest_run"]["accounts"]["user1"]["notification"]["text"] == "run account notification\n"
+
+
+def test_openclaw_readiness_combines_status_and_healthcheck(monkeypatch, tmp_path: Path) -> None:
+    from scripts.agent_plugin.main import run_tool
+    import scripts.agent_plugin.tools as tools
+
+    cfg_path = tmp_path / "config.us.json"
+    secrets_dir = tmp_path / "secrets"
+    secrets_dir.mkdir()
+    (secrets_dir / "portfolio.sqlite.json").write_text(
+        json.dumps({"option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"}}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    cfg_path.write_text(
+        json.dumps(_public_cfg_with_futu("secrets/portfolio.sqlite.json"), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    shared_state_dir = tmp_path / "output_shared" / "state"
+    report_dir = tmp_path / "output" / "reports"
+    accounts_root = tmp_path / "output_accounts"
+    for path in (shared_state_dir, report_dir, accounts_root / "user1" / "reports"):
+        path.mkdir(parents=True, exist_ok=True)
+    (shared_state_dir / "last_run.json").write_text(json.dumps({"status": "ok"}), encoding="utf-8")
+    (report_dir / "symbols_notification.txt").write_text("ready\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        tools,
+        "_run_futu_doctor",
+        lambda **kwargs: {
+            "ok": True,
+            "sdk": {"ok": True},
+            "watchdog": {"ok": True},
+        },
+    )
+
+    out = run_tool(
+        "openclaw_readiness",
+        {
+            "config_path": str(cfg_path),
+            "shared_state_dir": str(shared_state_dir),
+            "report_dir": str(report_dir),
+            "accounts_root": str(accounts_root),
+        },
+    )
+
+    assert out["ok"] is True
+    assert out["data"]["summary"]["ready"] is True
+    checks = {item["name"]: item for item in out["data"]["checks"]}
+    assert checks["runtime_status"]["status"] == "ok"
+    assert checks["healthcheck"]["status"] == "ok"
+    assert checks["openclaw_binary"]["status"] in {"ok", "warn"}
+
+
 def test_close_advice_reads_cached_context_and_required_data(monkeypatch, tmp_path: Path) -> None:
     from scripts.agent_plugin.main import run_tool
     import scripts.agent_plugin.tools as tools
