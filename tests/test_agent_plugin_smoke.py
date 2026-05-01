@@ -4,6 +4,8 @@ import json
 import sys
 from pathlib import Path
 
+import pandas as pd
+
 BASE = Path(__file__).resolve().parents[1]
 if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
@@ -572,6 +574,27 @@ def test_close_advice_reads_cached_context_and_required_data(monkeypatch, tmp_pa
     assert out["meta"]["required_data_root"] == ".../required_data"
 
 
+def test_close_advice_summary_uses_domain_tier_order_for_optional(tmp_path: Path) -> None:
+    from scripts.io_utils import safe_read_csv
+    from src.application.agent_tool_runtime import as_float
+    from src.application.agent_tool_scan import close_advice_rows_summary
+
+    csv_path = tmp_path / "close_advice.csv"
+    text_path = tmp_path / "close_advice.txt"
+    pd.DataFrame(
+        [
+            {"account": "lx", "symbol": "WEAK", "tier": "weak", "tier_label": "可观察平仓", "evaluation_status": "priced", "realized_if_close": 300},
+            {"account": "lx", "symbol": "OPT", "tier": "optional", "tier_label": "低价买回可选", "evaluation_status": "priced", "realized_if_close": 100},
+            {"account": "lx", "symbol": "MED", "tier": "medium", "tier_label": "建议平仓", "evaluation_status": "priced", "realized_if_close": 200},
+        ]
+    ).to_csv(csv_path, index=False)
+    text_path.write_text("", encoding="utf-8")
+
+    summary = close_advice_rows_summary(csv_path, text_path, safe_read_csv=safe_read_csv, as_float=as_float)
+
+    assert [row["tier"] for row in summary["top_rows"]] == ["medium", "optional", "weak"]
+
+
 def test_close_advice_requires_cached_inputs(tmp_path: Path) -> None:
     from scripts.agent_plugin.main import run_tool
 
@@ -903,6 +926,66 @@ def test_prepare_close_advice_inputs_normalizes_timestamp_expirations(monkeypatc
         tools.save_required_data_opend = old_save  # type: ignore[assignment]
 
     assert out["ok"] is True
+    assert out["data"]["symbols"][0]["position_coverage_ok"] is True
+
+
+def test_prepare_close_advice_inputs_uses_expiration_ymd_for_position_requirements(monkeypatch, tmp_path: Path) -> None:
+    from scripts.agent_plugin.main import run_tool
+    import scripts.agent_plugin.tools as tools
+
+    cfg_path = tmp_path / "config.us.json"
+    secrets_dir = tmp_path / "secrets"
+    secrets_dir.mkdir()
+    (secrets_dir / "portfolio.sqlite.json").write_text(
+        json.dumps({"option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"}}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    cfg = _public_cfg_with_futu("secrets/portfolio.sqlite.json")
+    cfg["symbols"][0]["symbol"] = "FUTU"
+    cfg["close_advice"] = {"enabled": True}
+    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    old_load = tools.load_option_positions_context
+    old_opend = tools.fetch_symbol_opend
+    old_save = tools.save_required_data_opend
+    try:
+        def _fake_load_option_positions_context(**kwargs):  # type: ignore[no-untyped-def]
+            return ({
+                "open_positions_min": [
+                    {"symbol": "FUTU", "option_type": "put", "strike": 120, "expiration": None, "expiration_ymd": "2026-04-29"},
+                ]
+            }, True)
+
+        def _fake_fetch_symbol_opend(symbol, **kwargs):  # type: ignore[no-untyped-def]
+            assert symbol == "FUTU"
+            assert kwargs["explicit_expirations"] == ["2026-04-29"]
+            assert kwargs["option_types"] == "put"
+            assert kwargs["min_strike"] == 120
+            assert kwargs["max_strike"] == 120
+            return {"rows": [{"symbol": "FUTU"}], "expiration_count": 1}
+
+        def _fake_save_required_data_opend(base, symbol, payload, *, output_root):  # type: ignore[no-untyped-def]
+            parsed = output_root / "parsed"
+            parsed.mkdir(parents=True, exist_ok=True)
+            csv_path = parsed / f"{symbol}_required_data.csv"
+            csv_path.write_text(
+                "symbol,option_type,expiration,strike\n"
+                "FUTU,put,2026-04-29,120\n",
+                encoding="utf-8",
+            )
+            return output_root / "raw" / f"{symbol}_required_data.json", csv_path
+
+        tools.load_option_positions_context = _fake_load_option_positions_context  # type: ignore[assignment]
+        tools.fetch_symbol_opend = _fake_fetch_symbol_opend  # type: ignore[assignment]
+        tools.save_required_data_opend = _fake_save_required_data_opend  # type: ignore[assignment]
+        out = run_tool("prepare_close_advice_inputs", {"config_path": str(cfg_path), "output_dir": str(tmp_path / "output" / "agent_plugin")})
+    finally:
+        tools.load_option_positions_context = old_load  # type: ignore[assignment]
+        tools.fetch_symbol_opend = old_opend  # type: ignore[assignment]
+        tools.save_required_data_opend = old_save  # type: ignore[assignment]
+
+    assert out["ok"] is True
+    assert out["data"]["symbols"][0]["requested_expirations"] == ["2026-04-29"]
     assert out["data"]["symbols"][0]["position_coverage_ok"] is True
 
 

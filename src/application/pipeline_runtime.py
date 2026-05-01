@@ -14,6 +14,7 @@ from src.application.pipeline_reporting import (
     run_pipeline_alert_stage,
     run_pipeline_notification_stage,
 )
+from src.application.opend_fetch_config import opend_fetch_kwargs
 
 try:
     from domain.storage.repositories import report_repo
@@ -92,6 +93,8 @@ def main(argv: list[str] | None = None) -> int:
 
     base = Path(__file__).resolve().parents[2]
     cfg_path = Path(args.config)
+    if not cfg_path.is_absolute():
+        cfg_path = (base / cfg_path).resolve()
 
     report_dir, state_dir = report_repo.prepare_dirs(
         base=base,
@@ -107,6 +110,7 @@ def main(argv: list[str] | None = None) -> int:
 
             cache_path = multiplier_cache.default_cache_path(base)
             cfg0 = json.loads(cfg_path.read_text(encoding="utf-8"))
+            opend_kwargs = opend_fetch_kwargs(cfg0)
             syms = [
                 item
                 for item in resolve_watchlist_config(cfg0)
@@ -124,6 +128,7 @@ def main(argv: list[str] | None = None) -> int:
                     host=str(host),
                     port=int(port),
                     limit_expirations=1,
+                    opend_fetch_config=opend_kwargs,
                 )
                 if refreshed.ok and refreshed.multiplier:
                     cache[sym] = {
@@ -134,9 +139,6 @@ def main(argv: list[str] | None = None) -> int:
             multiplier_cache.save_cache(cache_path, cache)
         except Exception:
             pass
-
-    if not cfg_path.is_absolute():
-        cfg_path = (base / cfg_path).resolve()
 
     cfg = load_runtime_pipeline_config(
         base=base,

@@ -187,6 +187,7 @@ def run_watchlist_pipeline(
                     cny_per_hkd_exchange_rate=None,
                     timeout_sec=symbol_timeout_sec,
                     is_scheduled=is_scheduled,
+                    runtime_config=cfg,
                 )
                 continue
 
@@ -200,6 +201,7 @@ def run_watchlist_pipeline(
                 cny_per_hkd_exchange_rate=cny_per_hkd_exchange_rate,
                 timeout_sec=symbol_timeout_sec,
                 is_scheduled=is_scheduled,
+                runtime_config=cfg,
             )
             validated_rows = normalize_processor_rows(processor_rows)
             summary_rows.extend(validated_rows)

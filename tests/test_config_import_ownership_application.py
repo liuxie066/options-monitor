@@ -58,6 +58,18 @@ def test_pipeline_watchlist_imports_config_loader_helpers_from_owner_module() ->
     assert pipeline_watchlist_mod.resolve_watchlist_config is owner_mod.resolve_watchlist_config
 
 
+def test_required_data_uses_application_opend_symbol_fetching_owner() -> None:
+    required_data_mod = importlib.import_module("src.application.required_data_fetching")
+    planning_mod = importlib.import_module("src.application.required_data_planning")
+    owner_mod = importlib.import_module("src.application.opend_symbol_fetching")
+
+    assert required_data_mod.FetchSymbolRequest is owner_mod.FetchSymbolRequest
+    assert required_data_mod.fetch_symbol_request is owner_mod.fetch_symbol_request
+    assert required_data_mod.save_outputs is owner_mod.save_outputs
+    assert planning_mod.get_underlier_spot is owner_mod.get_underlier_spot
+    assert planning_mod.list_option_expirations is owner_mod.list_option_expirations
+
+
 def test_option_positions_and_pipeline_context_import_data_config_owner_module() -> None:
     option_positions_mod = importlib.import_module("src.application.option_positions_facade")
     pipeline_context_mod = importlib.import_module("scripts.pipeline_context")

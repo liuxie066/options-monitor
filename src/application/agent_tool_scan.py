@@ -7,7 +7,9 @@ from typing import Any, Callable
 import json
 
 from scripts.agent_plugin.contracts import AgentToolError
+from domain.domain.close_advice import TIER_PRIORITY
 from src.application.expiration_normalization import find_unique_near_miss_expiration, normalize_expiration_ymd
+from src.application.opend_fetch_config import opend_fetch_kwargs
 from src.application.watchlist_mutations import normalize_symbol_read
 
 
@@ -38,6 +40,21 @@ def _contract_key(symbol: Any, option_type: Any, expiration: Any, strike: Any) -
     return sym, opt, exp, strike_key
 
 
+def _position_expiration_for_fetch(row: dict[str, Any]) -> str:
+    for value in (
+        row.get("expiration_ymd"),
+        row.get("expiration"),
+    ):
+        exp = _normalize_expiration(value)
+        if exp:
+            return exp
+    note = str(row.get("note") or "")
+    for token in note.replace(";", " ").split():
+        if token.startswith("exp="):
+            return _normalize_expiration(token.split("=", 1)[1])
+    return ""
+
+
 def _extract_position_fetch_requirements(ctx: dict[str, Any]) -> list[dict[str, Any]]:
     rows = ctx.get("open_positions_min") if isinstance(ctx, dict) else []
     grouped: dict[str, dict[str, Any]] = {}
@@ -62,7 +79,7 @@ def _extract_position_fetch_requirements(ctx: dict[str, Any]) -> list[dict[str, 
             order.append(symbol)
         item["position_count"] += 1
         option_type = _normalize_option_type(row.get("option_type"))
-        expiration = _normalize_expiration(row.get("expiration"))
+        expiration = _position_expiration_for_fetch(row)
         strike_num = _as_float_or_none(row.get("strike"))
         if option_type:
             item["option_types"].add(option_type)
@@ -248,7 +265,7 @@ def close_advice_rows_summary(csv_path: Path, text_path: Path, *, safe_read_csv:
     top_rows = sorted(
         top_rows,
         key=lambda item: (
-            {"strong": 0, "medium": 1, "weak": 2, "none": 9}.get(str(item.get("tier") or "none"), 9),
+            TIER_PRIORITY.get(str(item.get("tier") or "none"), 9),
             -(item["realized_if_close"] if item["realized_if_close"] is not None else -10**12),
         ),
     )[:5]
@@ -513,6 +530,7 @@ def prepare_close_advice_inputs_tool(
                 explicit_expirations=requested_expirations,
                 chain_cache=True,
                 chain_cache_force_refresh=force_required_data_refresh,
+                **opend_fetch_kwargs(cfg),
             )
             _raw_path, csv_path = save_required_data_opend(repo_base(), symbol, result, output_root=required_data_root)
             meta = result.get("meta") if isinstance(result.get("meta"), dict) else {}

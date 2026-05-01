@@ -11,7 +11,7 @@ from pathlib import Path
 import json
 
 from scripts import pipeline_fetch_models
-from scripts.fetch_market_data_opend import save_outputs
+from src.application.opend_symbol_fetching import save_outputs
 from src.application.required_data_fetching import (
     RequiredDataFetchRequest,
     build_fetch_request_from_spec,
@@ -19,6 +19,7 @@ from src.application.required_data_fetching import (
     fetch_required_data_opend,
     merge_required_data_payloads,
 )
+from src.application.opend_fetch_config import filter_opend_fetch_kwargs
 from src.application.required_data_planning import RequiredDataFetchPlanBundle
 
 
@@ -42,6 +43,7 @@ def ensure_required_data(
     max_dte: int | None = None,
     fetch_plan: RequiredDataFetchPlanBundle | None = None,
     report_dir: Path | None = None,
+    opend_fetch_config: dict[str, float | int] | None = None,
 ) -> None:
     sym = symbol
     parsed = (required_data_dir / 'parsed' / f"{sym}_required_data.csv").resolve()
@@ -113,6 +115,7 @@ def ensure_required_data(
                 output_root=required_data_dir,
                 chain_cache=True,
                 chain_cache_force_refresh=False,
+                opend_fetch_config=opend_fetch_config,
             )
             for spec in fetch_plan.merged_specs
         ]
@@ -130,6 +133,7 @@ def ensure_required_data(
                 min_dte=(int(min_dte) if min_dte is not None else None),
                 max_dte=(int(max_dte) if max_dte is not None else None),
                 chain_cache=True,
+                **filter_opend_fetch_kwargs(opend_fetch_config),
             )
         ]
 

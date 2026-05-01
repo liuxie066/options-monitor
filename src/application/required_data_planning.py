@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from scripts.candidate_defaults import DEFAULT_SELL_CALL_WINDOW, DEFAULT_SELL_PUT_WINDOW, resolve_candidate_window
-from scripts.fetch_market_data_opend import get_underlier_spot, list_option_expirations
+from src.application.opend_symbol_fetching import get_underlier_spot, list_option_expirations
 
 
 OptionSide = Literal["put", "call"]
@@ -140,12 +140,23 @@ def _resolve_spot_reference(
     port: int,
     base_dir: Path,
     required_data_dir: Path,
+    snapshot_max_wait_sec: float = 30.0,
+    snapshot_window_sec: float = 30.0,
+    snapshot_max_calls: int = 60,
 ) -> float | None:
     existing = _load_existing_spot(required_data_dir=required_data_dir, symbol=symbol)
     if existing is not None and existing > 0:
         return existing
     try:
-        return get_underlier_spot(symbol, host=host, port=port, base_dir=base_dir)
+        return get_underlier_spot(
+            symbol,
+            host=host,
+            port=port,
+            base_dir=base_dir,
+            snapshot_max_wait_sec=snapshot_max_wait_sec,
+            snapshot_window_sec=snapshot_window_sec,
+            snapshot_max_calls=snapshot_max_calls,
+        )
     except Exception:
         return None
 
@@ -363,6 +374,12 @@ def build_required_data_fetch_plan(
     sell_call_cfg: dict | None,
     fetch_host: str,
     fetch_port: int,
+    snapshot_max_wait_sec: float = 30.0,
+    snapshot_window_sec: float = 30.0,
+    snapshot_max_calls: int = 60,
+    expiration_max_wait_sec: float = 30.0,
+    expiration_window_sec: float = 30.0,
+    expiration_max_calls: int = 30,
 ) -> RequiredDataFetchPlanBundle:
     sell_put_cfg = dict(sell_put_cfg or {})
     sell_call_cfg = dict(sell_call_cfg or {})
@@ -372,9 +389,20 @@ def build_required_data_fetch_plan(
         port=fetch_port,
         base_dir=base,
         required_data_dir=required_data_dir,
+        snapshot_max_wait_sec=snapshot_max_wait_sec,
+        snapshot_window_sec=snapshot_window_sec,
+        snapshot_max_calls=snapshot_max_calls,
     )
     try:
-        available_expirations = list_option_expirations(symbol, host=fetch_host, port=fetch_port, base_dir=base)
+        available_expirations = list_option_expirations(
+            symbol,
+            host=fetch_host,
+            port=fetch_port,
+            base_dir=base,
+            expiration_max_wait_sec=expiration_max_wait_sec,
+            expiration_window_sec=expiration_window_sec,
+            expiration_max_calls=expiration_max_calls,
+        )
     except Exception:
         available_expirations = []
 

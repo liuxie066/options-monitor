@@ -25,8 +25,10 @@ def patch_close_advice(cfg: dict, payload: dict) -> None:
     if "enabled" in close_advice:
         close_cfg["enabled"] = bool(close_advice.get("enabled"))
     if "quote_source" in close_advice:
-        value = str(close_advice.get("quote_source") or "").strip()
+        value = str(close_advice.get("quote_source") or "").strip().lower()
         if value:
+            if value not in {"auto", "required_data"}:
+                raise HTTPException(status_code=400, detail="closeAdvice.quote_source must be auto or required_data")
             close_cfg["quote_source"] = value
         else:
             close_cfg.pop("quote_source", None)

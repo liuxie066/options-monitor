@@ -3,7 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from scripts.fetch_market_data_opend import fetch_symbol, save_outputs
+from src.application.opend_symbol_fetching import FetchSymbolRequest, fetch_symbol_request, save_outputs
+from src.application.opend_fetch_config import filter_opend_fetch_kwargs
 from src.application.expiration_normalization import normalize_expiration_ymd
 from src.application.required_data_planning import RequiredDataFetchSpec
 
@@ -28,6 +29,12 @@ class RequiredDataFetchRequest:
     max_wait_sec: float = 90.0
     option_chain_window_sec: float = 30.0
     option_chain_max_calls: int = 10
+    snapshot_max_wait_sec: float = 30.0
+    snapshot_window_sec: float = 30.0
+    snapshot_max_calls: int = 60
+    expiration_max_wait_sec: float = 30.0
+    expiration_window_sec: float = 30.0
+    expiration_max_calls: int = 30
 
 
 def execute_required_data_opend(*, base: Path, request: RequiredDataFetchRequest) -> dict[str, object]:
@@ -36,25 +43,33 @@ def execute_required_data_opend(*, base: Path, request: RequiredDataFetchRequest
         for exp in (normalize_expiration_ymd(x) for x in (request.explicit_expirations or []))
         if exp
     }) or None
-    return fetch_symbol(
-        request.symbol,
-        limit_expirations=int(request.limit_expirations),
-        host=str(request.host),
-        port=int(request.port),
-        base_dir=Path(base),
-        chain_cache=bool(request.chain_cache),
-        chain_cache_force_refresh=bool(request.chain_cache_force_refresh),
-        option_types=str(request.option_types),
-        min_strike=request.min_strike,
-        max_strike=request.max_strike,
-        side_strike_windows=request.side_strike_windows,
-        min_dte=request.min_dte,
-        max_dte=request.max_dte,
-        explicit_expirations=explicit_expirations,
-        freshness_policy=str(request.freshness_policy or "cache_first"),
-        max_wait_sec=float(request.max_wait_sec),
-        option_chain_window_sec=float(request.option_chain_window_sec),
-        option_chain_max_calls=int(request.option_chain_max_calls),
+    return fetch_symbol_request(
+        FetchSymbolRequest(
+            symbol=request.symbol,
+            limit_expirations=int(request.limit_expirations),
+            host=str(request.host),
+            port=int(request.port),
+            base_dir=Path(base),
+            chain_cache=bool(request.chain_cache),
+            chain_cache_force_refresh=bool(request.chain_cache_force_refresh),
+            option_types=str(request.option_types),
+            min_strike=request.min_strike,
+            max_strike=request.max_strike,
+            side_strike_windows=request.side_strike_windows,
+            min_dte=request.min_dte,
+            max_dte=request.max_dte,
+            explicit_expirations=explicit_expirations,
+            freshness_policy=str(request.freshness_policy or "cache_first"),
+            max_wait_sec=float(request.max_wait_sec),
+            option_chain_window_sec=float(request.option_chain_window_sec),
+            option_chain_max_calls=int(request.option_chain_max_calls),
+            snapshot_max_wait_sec=float(request.snapshot_max_wait_sec),
+            snapshot_window_sec=float(request.snapshot_window_sec),
+            snapshot_max_calls=int(request.snapshot_max_calls),
+            expiration_max_wait_sec=float(request.expiration_max_wait_sec),
+            expiration_window_sec=float(request.expiration_window_sec),
+            expiration_max_calls=int(request.expiration_max_calls),
+        )
     )
 
 
@@ -68,7 +83,15 @@ def fetch_required_data_opend(*, base: Path, request: RequiredDataFetchRequest) 
     )
 
 
-def build_fetch_request_from_spec(*, spec: RequiredDataFetchSpec, output_root: Path | None = None, chain_cache: bool = True, chain_cache_force_refresh: bool = False) -> RequiredDataFetchRequest:
+def build_fetch_request_from_spec(
+    *,
+    spec: RequiredDataFetchSpec,
+    output_root: Path | None = None,
+    chain_cache: bool = True,
+    chain_cache_force_refresh: bool = False,
+    opend_fetch_config: dict[str, float | int] | None = None,
+) -> RequiredDataFetchRequest:
+    kwargs = filter_opend_fetch_kwargs(opend_fetch_config)
     return RequiredDataFetchRequest(
         symbol=spec.symbol,
         limit_expirations=int(spec.limit_expirations),
@@ -83,6 +106,7 @@ def build_fetch_request_from_spec(*, spec: RequiredDataFetchSpec, output_root: P
         chain_cache=bool(chain_cache),
         chain_cache_force_refresh=bool(chain_cache_force_refresh),
         freshness_policy=("force_refresh" if chain_cache_force_refresh else "cache_first"),
+        **kwargs,
     )
 
 

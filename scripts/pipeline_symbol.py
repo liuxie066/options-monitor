@@ -37,6 +37,7 @@ def process_symbol(
     report_dir: Path | None = None,
     state_dir: Path | None = None,
     is_scheduled: bool = False,
+    runtime_config: dict | None = None,
 ) -> list[dict]:
     """Thin wrapper around the canonical symbol monitoring use case."""
     if report_dir is None:
@@ -57,6 +58,7 @@ def process_symbol(
             report_dir=report_dir,
             state_dir=state_dir,
             is_scheduled=bool(is_scheduled),
+            runtime_config=runtime_config,
         ),
         deps=SymbolMonitoringDependencies(
             build_converter_fn=build_converter,

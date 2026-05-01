@@ -169,6 +169,57 @@ def test_watchlist_extracts_global_min_net_income_from_profiles() -> None:
     assert seen['call']['min_net_income'] == 200
 
 
+def test_watchlist_passes_runtime_config_to_symbol_processor() -> None:
+    from scripts.pipeline_watchlist import run_watchlist_pipeline
+
+    seen: list[dict] = []
+
+    def _apply_profiles(item: dict, profiles: dict) -> dict:
+        return dict(item)
+
+    def _process_symbol(*args, **kwargs):
+        seen.append(dict(kwargs.get("runtime_config") or {}))
+        item = args[2]
+        return [{"symbol": str(item.get("symbol")), "strategy": "sell_put", "candidate_count": 0}]
+
+    def _build_ctx(**kwargs):
+        return ({}, None, None, None)
+
+    def _noop(*args, **kwargs):
+        return None
+
+    cfg = {
+        "symbols": [
+            {"symbol": "0700.HK", "sell_put": {"enabled": True}, "sell_call": {"enabled": False}},
+        ],
+        "templates": {},
+        "runtime": {"option_chain_fetch": {"max_calls": 7}},
+    }
+
+    run_watchlist_pipeline(
+        py="python",
+        base=Path("."),
+        cfg=cfg,
+        report_dir=Path("."),
+        is_scheduled=True,
+        top_n=3,
+        symbol_timeout_sec=1,
+        portfolio_timeout_sec=1,
+        want_scan=True,
+        no_context=True,
+        symbols_arg=None,
+        log=lambda _: None,
+        want_fn=lambda _: True,
+        apply_profiles_fn=_apply_profiles,
+        process_symbol_fn=_process_symbol,
+        build_pipeline_context_fn=_build_ctx,
+        build_symbols_summary_fn=_noop,
+        build_symbols_digest_fn=_noop,
+    )
+
+    assert seen == [cfg]
+
+
 def test_resolve_watchlist_item_runtime_config_centralizes_template_expansion() -> None:
     from scripts.pipeline_watchlist import resolve_watchlist_item_runtime_config
 
