@@ -1288,6 +1288,24 @@ def build_expired_close_decisions(
             continue
 
         exp_ms, exp_source, exp_ymd, raw_exp_ms = _auto_close_expiration_anchor(fields)
+        contracts_open = effective_contracts_open(fields)
+        if normalize_status(fields.get("status")) == "close" or contracts_open <= 0:
+            decisions.append(
+                {
+                    "record_id": record_id,
+                    "position_id": position_id,
+                    "expiration_ms": int(exp_ms) if exp_ms is not None else None,
+                    "raw_expiration_ms": raw_exp_ms,
+                    "expiration_ymd": exp_ymd,
+                    "effective_exp_source": exp_source if exp_ms is not None else "none",
+                    "should_close": False,
+                    "reason": "already closed or no open contracts",
+                    "skip_reason": "already_closed_or_zero_open",
+                    "contracts_open": contracts_open,
+                    "patch": None,
+                }
+            )
+            continue
         if exp_ms is None:
             decisions.append(
                 {
@@ -1333,6 +1351,56 @@ def build_expired_close_decisions(
     return decisions
 
 
+def _refresh_position_lot_projection_from_trade_events(repo: Any) -> dict[str, Any] | None:
+    candidate = getattr(repo, "primary_repo", repo)
+    count_trade_events = getattr(candidate, "count_trade_events", None)
+    if not callable(count_trade_events):
+        return None
+    if int(count_trade_events() or 0) <= 0:
+        return None
+    return rebuild_position_lots_from_trade_events(candidate)
+
+
+def _fresh_auto_close_positions(repo: Any, positions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    get_record_fields = getattr(repo, "get_record_fields", None)
+    if not callable(get_record_fields):
+        return [dict(item) for item in positions if isinstance(item, dict)]
+
+    out: list[dict[str, Any]] = []
+    for item in positions:
+        if not isinstance(item, dict):
+            continue
+        original = dict(item)
+        record_id = str(original.get("record_id") or "").strip()
+        if not record_id:
+            out.append(original)
+            continue
+        try:
+            current = dict(get_record_fields(record_id))
+        except Exception:
+            out.append(original)
+            continue
+        current["record_id"] = record_id
+        if (
+            current.get("position_id") in (None, "")
+            and original.get("position_id") not in (None, "")
+        ):
+            current["position_id"] = original.get("position_id")
+        out.append(current)
+    return out
+
+
+def _mark_auto_close_decision_skipped_already_closed(
+    decision: dict[str, Any],
+    fields: dict[str, Any],
+) -> None:
+    decision["should_close"] = False
+    decision["reason"] = "already closed or no open contracts"
+    decision["skip_reason"] = "already_closed_or_zero_open"
+    decision["contracts_open"] = effective_contracts_open(fields)
+    decision["patch"] = None
+
+
 def auto_close_expired_positions(
     repo: OptionPositionsRepoLike,
     positions: list[dict[str, Any]],
@@ -1341,7 +1409,14 @@ def auto_close_expired_positions(
     grace_days: int,
     max_close: int,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
-    decisions = build_expired_close_decisions(positions, as_of_ms=as_of_ms, grace_days=grace_days)
+    try:
+        _refresh_position_lot_projection_from_trade_events(repo)
+    except Exception as exc:
+        decisions = build_expired_close_decisions(positions, as_of_ms=as_of_ms, grace_days=grace_days)
+        return decisions, [], [f"projection refresh failed before auto-close: {exc}"]
+
+    fresh_positions = _fresh_auto_close_positions(repo, positions)
+    decisions = build_expired_close_decisions(fresh_positions, as_of_ms=as_of_ms, grace_days=grace_days)
     to_close = [d for d in decisions if bool(d.get("should_close")) and d.get("record_id")]
     applied: list[dict[str, Any]] = []
     errors: list[str] = []
@@ -1358,9 +1433,7 @@ def auto_close_expired_positions(
             fields = repo.get_record_fields(record_id)
             contracts_to_close = effective_contracts_open(fields)
             if contracts_to_close <= 0:
-                errors.append(
-                    f"{record_id} {decision.get('position_id')}: contracts_open resolved to <= 0"
-                )
+                _mark_auto_close_decision_skipped_already_closed(decision, fields)
                 continue
             result = persist_expire_auto_close_event(
                 repo,

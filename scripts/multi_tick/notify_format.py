@@ -7,6 +7,7 @@ from .misc import (
     AUTO_CLOSE_APPLIED_RE,
     AUTO_CLOSE_CAND_RE,
     AUTO_CLOSE_ERR_RE,
+    AUTO_CLOSE_SKIPPED_ALREADY_CLOSED_RE,
     COVER_RE,
     CNY_RE,
 )
@@ -121,17 +122,22 @@ def flatten_auto_close_summary(text: str, *, always_show: bool = False) -> str:
     m_applied = AUTO_CLOSE_APPLIED_RE.search(text)
     m_cand = AUTO_CLOSE_CAND_RE.search(text)
     m_err = AUTO_CLOSE_ERR_RE.search(text)
+    m_skipped = AUTO_CLOSE_SKIPPED_ALREADY_CLOSED_RE.search(text)
 
     grace_label = m_grace.group('n') if m_grace else '1'
     grace_part = f"exp+{grace_label}d" if str(grace_label).isdigit() else "exp+?d"
     applied = int(m_applied.group('n')) if m_applied else 0
     cand = int(m_cand.group('n')) if m_cand else applied
     err = int(m_err.group('n')) if m_err else 0
+    skipped = int(m_skipped.group('n')) if m_skipped else 0
 
     if applied == 0 and err == 0 and (not always_show):
         return ''
 
-    header = f"Auto-close({grace_part}): closed {applied}/{cand}, errors {err}"
+    header = f"Auto-close({grace_part}): closed {applied}/{cand}"
+    if skipped > 0:
+        header += f", skipped {skipped}"
+    header += f", errors {err}"
     lines = [header]
 
     if err > 0 or applied > 0:

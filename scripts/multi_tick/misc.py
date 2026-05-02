@@ -88,6 +88,9 @@ COVER_RE = re.compile(r"cover\s+(?P<num>-?[0-9]+)")
 
 AUTO_CLOSE_APPLIED_RE = re.compile(r"applied_closed:\s*(?P<n>\d+)")
 AUTO_CLOSE_CAND_RE = re.compile(r"candidates_should_close:\s*(?P<n>\d+)")
+AUTO_CLOSE_SKIPPED_ALREADY_CLOSED_RE = re.compile(
+    r"skipped_already_closed:\s*(?P<n>\d+)"
+)
 AUTO_CLOSE_ERR_RE = re.compile(r"^(?:ERRORS|errors):\s*(?P<n>\d+)\s*$", re.M)
 
 

@@ -93,6 +93,48 @@ def test_position_maintenance_filters_account_and_broker_in_dry_run(monkeypatch,
     assert (report_dir / "auto_close_summary.txt").exists()
 
 
+def test_position_maintenance_refreshes_projection_before_apply(monkeypatch, tmp_path: Path) -> None:
+    from src.application import position_maintenance as mod
+
+    class FakeRepo:
+        def count_trade_events(self) -> int:
+            return 2
+
+    data_config = tmp_path / "data.json"
+    data_config.write_text(json.dumps({"option_positions": {"sqlite_path": str(tmp_path / "pos.sqlite3")}}), encoding="utf-8")
+    fake_repo = FakeRepo()
+    order: list[str] = []
+
+    monkeypatch.setattr(mod, "resolve_data_config_path", lambda **_kwargs: data_config)
+    monkeypatch.setattr(mod, "load_option_positions_repo", lambda _path: fake_repo)
+
+    def _refresh(repo):
+        assert repo is fake_repo
+        order.append("refresh")
+        return {"trade_event_count": 2, "position_lot_count": 1}
+
+    def _load_records(repo):
+        assert repo is fake_repo
+        order.append("load_records")
+        return []
+
+    monkeypatch.setattr(mod, "rebuild_position_lots_from_trade_events", _refresh)
+    monkeypatch.setattr(mod, "load_option_position_records", _load_records)
+    monkeypatch.setattr(mod, "auto_close_expired_positions", lambda *_args, **_kwargs: ([], [], []))
+
+    result = mod.run_expired_position_maintenance_for_account(
+        base=tmp_path,
+        cfg={"portfolio": {"data_config": str(data_config)}},
+        account="lx",
+        report_dir=tmp_path / "reports",
+        as_of_ms=1777766400000,
+    )
+
+    assert order == ["refresh", "load_records"]
+    assert result["projection_refresh"] == {"trade_event_count": 2, "position_lot_count": 1}
+    assert result["summary_text"] == ""
+
+
 def test_position_maintenance_rejects_invalid_auto_close_config(tmp_path: Path) -> None:
     from src.application import position_maintenance as mod
 

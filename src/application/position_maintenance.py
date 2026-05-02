@@ -15,6 +15,7 @@ from scripts.option_positions_core.service import (
     auto_close_expired_positions,
     build_expired_close_decisions,
     load_option_positions_repo,
+    rebuild_position_lots_from_trade_events,
 )
 from src.application.option_positions_facade import load_option_position_records
 
@@ -92,6 +93,7 @@ def _open_positions_for_account(
 def format_auto_close_summary(result: dict[str, Any]) -> str:
     candidates = int(result.get("candidates_should_close") or 0)
     applied = int(result.get("applied_closed") or 0)
+    skipped_already_closed = int(result.get("skipped_already_closed") or 0)
     errors = list(result.get("errors") or [])
     if candidates <= 0 and applied <= 0 and not errors:
         return ""
@@ -104,8 +106,19 @@ def format_auto_close_summary(result: dict[str, Any]) -> str:
         f"broker: {result.get('broker') or ''}",
         f"candidates_should_close: {candidates}",
         f"applied_closed: {applied}",
-        f"ERRORS: {len(errors)}",
     ]
+    if skipped_already_closed > 0:
+        lines.append(f"skipped_already_closed: {skipped_already_closed}")
+    lines.append(f"ERRORS: {len(errors)}")
+    projection_refresh = result.get("projection_refresh")
+    if isinstance(projection_refresh, dict):
+        trade_event_count = projection_refresh.get("trade_event_count")
+        position_lot_count = projection_refresh.get("position_lot_count")
+        if trade_event_count is not None and position_lot_count is not None:
+            lines.append(
+                f"projection_refresh: trade_events={trade_event_count}, "
+                f"position_lots={position_lot_count}"
+            )
     if errors:
         lines.append("")
         lines.append("Error details:")
@@ -123,6 +136,16 @@ def format_auto_close_summary(result: dict[str, Any]) -> str:
             )
 
     return "\n".join(lines).strip()
+
+
+def _refresh_position_projection_before_auto_close(repo: Any) -> dict[str, Any] | None:
+    candidate = getattr(repo, "primary_repo", repo)
+    count_trade_events = getattr(candidate, "count_trade_events", None)
+    if not callable(count_trade_events):
+        return None
+    if int(count_trade_events() or 0) <= 0:
+        return None
+    return rebuild_position_lots_from_trade_events(candidate)
 
 
 def _write_auto_close_summary(report_dir: Path, result: dict[str, Any]) -> str:
@@ -159,6 +182,11 @@ def run_expired_position_maintenance_for_account(
 
     repo = load_option_positions_repo(data_config)
     ts = int(as_of_ms if as_of_ms is not None else datetime.now(timezone.utc).timestamp() * 1000)
+    projection_refresh = (
+        None
+        if dry_run
+        else _refresh_position_projection_before_auto_close(repo)
+    )
     positions = _open_positions_for_account(
         load_option_position_records(repo),
         account=account,
@@ -180,7 +208,16 @@ def run_expired_position_maintenance_for_account(
             grace_days=int(auto_cfg["grace_days"]),
             max_close=int(auto_cfg["max_close"]),
         )
-    to_close = [item for item in decisions if isinstance(item, dict) and bool(item.get("should_close")) and item.get("record_id")]
+    to_close = [
+        item
+        for item in decisions
+        if isinstance(item, dict) and bool(item.get("should_close")) and item.get("record_id")
+    ]
+    skipped_already_closed = [
+        item
+        for item in decisions
+        if isinstance(item, dict) and item.get("skip_reason") == "already_closed_or_zero_open"
+    ]
     result = {
         "mode": "dry_run" if dry_run else "applied",
         "account": normalize_account(account) if account else None,
@@ -192,8 +229,11 @@ def run_expired_position_maintenance_for_account(
         "decisions": len(decisions),
         "candidates_should_close": len(to_close),
         "applied_closed": len(applied),
+        "skipped_already_closed": len(skipped_already_closed),
         "errors": errors,
         "applied": applied,
     }
+    if projection_refresh is not None:
+        result["projection_refresh"] = projection_refresh
     result["summary_text"] = _write_auto_close_summary(report_dir, result)
     return result

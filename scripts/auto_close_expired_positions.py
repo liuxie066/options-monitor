@@ -118,6 +118,11 @@ def main():
 
     lines.append(f"candidates_should_close: {len(to_close)}")
     lines.append(f"applied_closed: {len(applied)}")
+    skipped_already_closed = [
+        d for d in decisions if d.get("skip_reason") == "already_closed_or_zero_open"
+    ]
+    if skipped_already_closed:
+        lines.append(f"skipped_already_closed: {len(skipped_already_closed)}")
     lines.append(f"skipped_or_not_due: {len(decisions) - len(to_close)}")
     lines.append("")
 
