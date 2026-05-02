@@ -36,8 +36,8 @@ def test_multi_tick_and_webui_use_application_facades() -> None:
     assert "src.interfaces.cli.main" in service_src
     assert "src.interfaces.cli.main" in om_src
     assert "src.interfaces.agent.cli" in agent_src
-    assert "from src.application.scheduled_notification import (" in send_if_needed_src
-    assert "from src.application.cron_runtime import request_scheduler_update, write_last_run" in send_if_needed_src
+    assert "from src.application.multi_account_tick import current_run_id, run_tick" in send_if_needed_src
+    assert "run_pipeline_script" not in send_if_needed_src
     assert "run_scheduler_flow" in multi_tick_main_src
     assert "build_multi_tick_scheduler_decision" in multi_tick_scheduler_src
     assert "build_multi_tick_account_scheduler_view" in multi_tick_scheduler_src

@@ -12,7 +12,16 @@ from scripts.multi_tick.misc import AccountResult
 from scripts.multi_tick.notify_format import build_account_message
 
 
-def test_run_close_advice_builds_csv_and_markdown_from_local_fixtures(tmp_path: Path) -> None:
+def _freeze_close_advice_business_today(monkeypatch: pytest.MonkeyPatch, ymd: str = "2026-04-16") -> None:
+    frozen = datetime.fromisoformat(ymd).date()
+    monkeypatch.setattr("scripts.close_advice.runner.expiration_business_today", lambda: frozen)
+
+
+def test_run_close_advice_builds_csv_and_markdown_from_local_fixtures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _freeze_close_advice_business_today(monkeypatch)
     context = {
         "open_positions_min": [
             {
@@ -84,7 +93,11 @@ def test_run_close_advice_builds_csv_and_markdown_from_local_fixtures(tmp_path: 
     assert "135.68085" in csv_text
 
 
-def test_run_close_advice_prefers_context_expiration_ymd_field(tmp_path: Path) -> None:
+def test_run_close_advice_prefers_context_expiration_ymd_field(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _freeze_close_advice_business_today(monkeypatch)
     context = {
         "open_positions_min": [
             {
@@ -999,6 +1012,7 @@ def test_run_close_advice_renders_small_money_with_decimals(tmp_path: Path) -> N
 
 
 def test_run_close_advice_keeps_tier_when_fee_unavailable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _freeze_close_advice_business_today(monkeypatch)
     ctx_path = tmp_path / "option_positions_context.json"
     ctx_path.write_text(
         json.dumps(
@@ -1058,7 +1072,11 @@ def test_run_close_advice_keeps_tier_when_fee_unavailable(tmp_path: Path, monkey
     assert "strong" in csv_text
 
 
-def test_run_close_advice_groups_mixed_accounts_and_counts_rendered_rows(tmp_path: Path) -> None:
+def test_run_close_advice_groups_mixed_accounts_and_counts_rendered_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _freeze_close_advice_business_today(monkeypatch)
     ctx_path = tmp_path / "option_positions_context.json"
     ctx_path.write_text(
         json.dumps(

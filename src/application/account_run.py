@@ -31,6 +31,10 @@ from scripts.multi_tick.misc import (
 )
 from scripts.multi_tick.notify_format import flatten_auto_close_summary
 from scripts.multi_tick.required_data_prefetch import prefetch_required_data
+from src.application.position_maintenance import (
+    format_auto_close_summary,
+    run_expired_position_maintenance_for_account,
+)
 
 try:
     from domain.storage.repositories import run_repo, state_repo
@@ -59,6 +63,7 @@ class AccountRunRequest:
     accounts_root: Path
     prefetch_done: bool
     force_mode: bool = False
+    allow_mutations: bool = True
 
 
 @dataclass(frozen=True)
@@ -125,6 +130,62 @@ def _record_account_run_degraded(
     )
 
 
+def _status_for_position_maintenance(result: dict[str, Any]) -> str:
+    if str(result.get("mode") or "") == "skipped":
+        return "skipped"
+    if result.get("errors"):
+        return "error"
+    return "ok"
+
+
+def _maintenance_notification_text(result: dict[str, Any]) -> str:
+    summary_text = str(result.get("summary_text") or "").strip()
+    if not summary_text:
+        return ""
+    return flatten_auto_close_summary(summary_text, always_show=False)
+
+
+def _auto_close_grace_days_label(cfg: dict[str, Any]) -> str:
+    option_positions = cfg.get("option_positions") if isinstance(cfg, dict) else {}
+    auto_close = option_positions.get("auto_close") if isinstance(option_positions, dict) else {}
+    if not isinstance(auto_close, dict):
+        return "1"
+    raw = auto_close.get("grace_days", 1)
+    if isinstance(raw, bool):
+        return "invalid"
+    try:
+        value = int(raw)
+    except Exception:
+        return "invalid"
+    return str(value) if value >= 0 else "invalid"
+
+
+def _position_maintenance_error_result(
+    *,
+    cfg: dict[str, Any],
+    account: str,
+    broker: Any,
+    exc: Exception,
+) -> dict[str, Any]:
+    errors = [f"expired_position_maintenance failed for {account}: {type(exc).__name__}: {exc}"]
+    result: dict[str, Any] = {
+        "mode": "error",
+        "account": account,
+        "broker": str(broker or ""),
+        "as_of_utc": utc_now(),
+        "grace_days": _auto_close_grace_days_label(cfg),
+        "max_close": None,
+        "positions_checked": 0,
+        "decisions": 0,
+        "candidates_should_close": 0,
+        "applied_closed": 0,
+        "errors": errors,
+        "applied": [],
+    }
+    result["summary_text"] = format_auto_close_summary(result)
+    return result
+
+
 def run_one_account(
     *,
     request: AccountRunRequest,
@@ -163,6 +224,14 @@ def run_one_account(
     except Exception:
         pass
 
+    acct_report_dir = run_repo.get_run_account_dir(request.base, request.run_id, acct)
+    acct_state_dir = run_repo.get_run_account_state_dir(request.base, request.run_id, acct)
+    runtime_meta = cfg.get("_runtime")
+    if not isinstance(runtime_meta, dict):
+        runtime_meta = {}
+        cfg["_runtime"] = runtime_meta
+    runtime_meta["expired_position_maintenance_owner"] = "account_run"
+
     cfg_override = state_repo.write_account_state_json_text(
         request.base,
         acct,
@@ -171,8 +240,6 @@ def run_one_account(
     )
     audit_fn("write", "write_account_state_json_text:config.override.json", run_id=request.run_id, account=acct)
 
-    acct_report_dir = run_repo.get_run_account_dir(request.base, request.run_id, acct)
-    acct_state_dir = run_repo.get_run_account_state_dir(request.base, request.run_id, acct)
     try:
         run_repo.ensure_run_account_state_dir(request.base, request.run_id, acct)
     except Exception as exc:
@@ -199,7 +266,24 @@ def run_one_account(
                 exc=exc,
             )
 
+    def _write_account_metrics_state() -> None:
+        payload = {
+            "as_of_utc": utc_now(),
+            "account": acct,
+            "markets_to_run": request.markets_to_run,
+            "scheduler_ms": acct_metrics.get("scheduler_ms"),
+            "pipeline_ms": acct_metrics.get("pipeline_ms"),
+            "ran_scan": acct_metrics.get("ran_scan"),
+            "should_notify": acct_metrics.get("should_notify"),
+            "meaningful": acct_metrics.get("meaningful"),
+            "reason": acct_metrics.get("reason"),
+            "notification_type": acct_metrics.get("notification_type"),
+            "run_dir": str(request.run_dir),
+        }
+        _write_acct_run_state("account_metrics.json", payload)
+
     notif_path = (acct_report_dir / "symbols_notification.txt").resolve()
+    maintenance_notification = ""
 
     should_notify_raw = decide_should_notify(
         account=acct,
@@ -226,21 +310,88 @@ def run_one_account(
     acct_metrics["should_notify"] = bool(should_notify)
     acct_metrics["reason"] = str(reason)
 
-    _write_acct_run_state(
-        "account_metrics.json",
-        {
-            "as_of_utc": utc_now(),
-            "account": acct,
-            "markets_to_run": request.markets_to_run,
-            "scheduler_ms": acct_metrics.get("scheduler_ms"),
-            "pipeline_ms": acct_metrics.get("pipeline_ms"),
-            "ran_scan": acct_metrics.get("ran_scan"),
-            "should_notify": acct_metrics.get("should_notify"),
-            "meaningful": acct_metrics.get("meaningful"),
-            "reason": acct_metrics.get("reason"),
-            "run_dir": str(request.run_dir),
-        },
-    )
+    _write_account_metrics_state()
+
+    try:
+        portfolio_cfg = cfg.get("portfolio") if isinstance(cfg, dict) else {}
+        maintenance_result = run_expired_position_maintenance_for_account(
+            base=request.base,
+            cfg=cfg,
+            account=acct,
+            report_dir=acct_report_dir,
+            broker=(portfolio_cfg.get("broker") if isinstance(portfolio_cfg, dict) else None),
+            dry_run=(not bool(request.allow_mutations)),
+        )
+        maintenance_notification = _maintenance_notification_text(maintenance_result)
+        maintenance_status = _status_for_position_maintenance(maintenance_result)
+        audit_fn(
+            "tool_call",
+            "expired_position_maintenance",
+            run_id=request.run_id,
+            account=acct,
+            status=maintenance_status,
+            tool_name="expired_position_maintenance",
+            extra={
+                "mode": maintenance_result.get("mode"),
+                "positions_checked": maintenance_result.get("positions_checked"),
+                "candidates_should_close": maintenance_result.get("candidates_should_close"),
+                "applied_closed": maintenance_result.get("applied_closed"),
+                "errors": len(maintenance_result.get("errors") or []),
+            },
+        )
+        _write_acct_run_state("expired_position_maintenance.json", maintenance_result)
+        if maintenance_status == "error":
+            runlog.safe_event(
+                "expired_position_maintenance",
+                "error",
+                message=f"expired position maintenance had errors for {acct}",
+                data=_safe_runlog_data(
+                    {
+                        "account": acct,
+                        "errors": len(maintenance_result.get("errors") or []),
+                    }
+                ),
+            )
+        elif int(maintenance_result.get("applied_closed") or 0) > 0:
+            runlog.safe_event(
+                "expired_position_maintenance",
+                "ok",
+                data=_safe_runlog_data(
+                    {
+                        "account": acct,
+                        "applied_closed": int(maintenance_result.get("applied_closed") or 0),
+                    }
+                ),
+            )
+    except Exception as exc:
+        portfolio_cfg = cfg.get("portfolio") if isinstance(cfg, dict) else {}
+        maintenance_result = _position_maintenance_error_result(
+            cfg=cfg,
+            account=acct,
+            broker=(portfolio_cfg.get("broker") if isinstance(portfolio_cfg, dict) else None),
+            exc=exc,
+        )
+        maintenance_notification = _maintenance_notification_text(maintenance_result)
+        _write_acct_run_state("expired_position_maintenance.json", maintenance_result)
+        runlog.safe_event(
+            "expired_position_maintenance",
+            "error",
+            message=f"expired position maintenance failed for {acct}",
+            data=_safe_runlog_data(
+                {
+                    "account": acct,
+                    "errors": len(maintenance_result.get("errors") or []),
+                }
+            ),
+        )
+        _record_account_run_degraded(
+            runlog=runlog,
+            audit_fn=audit_fn,
+            run_id=request.run_id,
+            account=acct,
+            action="expired_position_maintenance",
+            exc=exc,
+        )
 
     scan_gate = decide_account_scan_gate(
         should_run=should_run,
@@ -248,16 +399,21 @@ def run_one_account(
         reason=reason,
     )
     if not bool(scan_gate.get("run_pipeline")):
+        result_should_notify = bool(should_notify or maintenance_notification)
         acct_metrics["ran_scan"] = bool(scan_gate.get("ran_scan"))
-        acct_metrics["meaningful"] = bool(scan_gate.get("meaningful"))
+        acct_metrics["should_notify"] = result_should_notify
+        acct_metrics["meaningful"] = bool(scan_gate.get("meaningful") or maintenance_notification)
         acct_metrics["reason"] = str(scan_gate.get("result_reason") or reason)
+        if maintenance_notification:
+            acct_metrics["notification_type"] = "auto_close"
+        _write_account_metrics_state()
         return AccountRunOutcome(
             result=AccountResult(
                 acct,
                 bool(scan_gate.get("ran_scan")),
-                should_notify,
+                result_should_notify,
                 str(scan_gate.get("result_reason") or reason),
-                "",
+                maintenance_notification,
             ),
             acct_metrics=acct_metrics,
             prefetch_done=request.prefetch_done,
@@ -390,16 +546,21 @@ def run_one_account(
         if out:
             tail = "\n".join(out.splitlines()[-60:])
             print(f"[ERR] pipeline failed ({acct})\n{tail}")
+        result_should_notify = bool(should_notify or maintenance_notification)
         acct_metrics["ran_scan"] = bool(pipeline_result.get("ran_scan"))
-        acct_metrics["meaningful"] = bool(pipeline_result.get("meaningful"))
+        acct_metrics["should_notify"] = result_should_notify
+        acct_metrics["meaningful"] = bool(pipeline_result.get("meaningful") or maintenance_notification)
         acct_metrics["reason"] = str(pipeline_result.get("reason") or "pipeline failed")
+        if maintenance_notification:
+            acct_metrics["notification_type"] = "auto_close"
+        _write_account_metrics_state()
         return AccountRunOutcome(
             result=AccountResult(
                 acct,
                 bool(pipeline_result.get("ran_scan")),
-                should_notify,
+                result_should_notify,
                 str(pipeline_result.get("reason") or "pipeline failed"),
-                "",
+                maintenance_notification,
             ),
             acct_metrics=acct_metrics,
             prefetch_done=prefetch_done,
@@ -443,11 +604,8 @@ def run_one_account(
             exc=exc,
         )
 
-    auto_close_path = acct_report_dir / "auto_close_summary.txt"
-    auto_close_text = auto_close_path.read_text(encoding="utf-8", errors="replace").strip() if auto_close_path.exists() else ""
-    auto_close_flat = flatten_auto_close_summary(auto_close_text, always_show=False)
-    if auto_close_flat:
-        text = (text.strip() + "\n\n" + auto_close_flat.strip()).strip()
+    if maintenance_notification:
+        text = (text.strip() + "\n\n" + maintenance_notification.strip()).strip()
 
     close_advice_cfg = (cfg.get("close_advice") or {}) if isinstance(cfg, dict) else {}
     if bool(close_advice_cfg.get("enabled", False)):
@@ -536,10 +694,14 @@ def run_one_account(
             runlog.safe_event("close_advice", "error", message=f"close advice failed for {acct}: {exc}")
 
     acct_metrics["ran_scan"] = True
-    acct_metrics["should_notify"] = bool(should_notify)
+    acct_metrics["should_notify"] = bool(should_notify or maintenance_notification)
     acct_metrics["reason"] = str(reason)
+    if maintenance_notification:
+        acct_metrics["meaningful"] = True
+        acct_metrics["notification_type"] = "auto_close"
+    _write_account_metrics_state()
     return AccountRunOutcome(
-        result=AccountResult(acct, True, should_notify, reason, text),
+        result=AccountResult(acct, True, bool(should_notify or maintenance_notification), reason, text),
         acct_metrics=acct_metrics,
         prefetch_done=prefetch_done,
         ran_pipeline=True,

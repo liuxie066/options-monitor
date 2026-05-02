@@ -267,7 +267,7 @@ python3 scripts/send_if_needed_multi.py --config config.us.json --accounts lx sy
 
 对 Agent 来说，这个兼容入口不应作为默认首选；只有在 `./om` / `./om-agent` 不覆盖，或用户明确指定脚本时再使用。该兼容入口现在会把参数显式传给 multi-tick 主函数，不依赖临时改写进程级 `sys.argv`。
 
-### 6.6 单账户入口
+### 6.6 兼容入口
 
 如果只是想确认系统状态，优先仍然是 `./om-agent run --tool healthcheck ...`，不是这个脚本入口。
 
@@ -275,7 +275,7 @@ python3 scripts/send_if_needed_multi.py --config config.us.json --accounts lx sy
 python3 scripts/send_if_needed.py --config config.us.json
 ```
 
-这属于直接 runtime script 入口。对代理默认应视为“需要明确执行意图”的命令，而不是排查问题时的探测命令。
+这是旧单账户定时脚本的兼容文件名；内部会转调统一的 multi-account tick。新定时任务应直接使用 `./om run tick`。
 
 ---
 

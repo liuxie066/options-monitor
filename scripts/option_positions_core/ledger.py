@@ -4,8 +4,10 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from scripts.option_positions_core.domain import (
+    EXPIRE_AUTO_CLOSE,
     OpenPositionCommand,
     build_buy_to_close_patch,
+    build_expire_auto_close_patch,
     build_open_fields,
     effective_expiration,
     effective_contracts_open,
@@ -170,6 +172,45 @@ def _close_target_record_id(event: TradeEvent) -> str:
         return ""
     payload = event.raw_payload or {}
     return str(payload.get("record_id") or "").strip()
+
+
+def _is_expire_auto_close_event(event: TradeEvent) -> bool:
+    if str(event.position_effect).strip().lower() != "close":
+        return False
+    payload = event.raw_payload or {}
+    close_type = str(payload.get("close_type") or "").strip().lower()
+    mode = str(payload.get("mode") or "").strip().lower()
+    return close_type == EXPIRE_AUTO_CLOSE or mode == EXPIRE_AUTO_CLOSE
+
+
+def _auto_close_grace_days(event: TradeEvent) -> int | None:
+    payload = event.raw_payload or {}
+    raw = payload.get("auto_close_grace_days")
+    if raw is None:
+        raw = payload.get("grace_days")
+    try:
+        return int(raw) if raw not in (None, "") else None
+    except Exception:
+        return None
+
+
+def _build_close_projection_patch(fields: dict[str, Any], event: TradeEvent, *, contracts_to_close: int) -> dict[str, Any]:
+    if _is_expire_auto_close_event(event):
+        payload = event.raw_payload or {}
+        return build_expire_auto_close_patch(
+            fields,
+            as_of_ms=event.trade_time_ms,
+            close_reason=str(payload.get("close_reason") or "expired"),
+            exp_source=(str(payload.get("auto_close_exp_src") or payload.get("effective_exp_source") or "").strip() or None),
+            grace_days=_auto_close_grace_days(event),
+        )
+    return build_buy_to_close_patch(
+        fields,
+        contracts_to_close=contracts_to_close,
+        close_price=event.price,
+        close_reason="broker_trade_buy_to_close",
+        as_of_ms=event.trade_time_ms,
+    )
 
 
 def _matches_close_target(fields: dict[str, Any], event: TradeEvent) -> bool:
@@ -360,7 +401,7 @@ def project_position_lot_records_with_diagnostics(
                     },
                 )
                 continue
-            open_qty = int(fields.get("contracts_open") or 0)
+            open_qty = effective_contracts_open(fields)
             if open_qty <= 0:
                 _append_diagnostic(
                     diagnostics,
@@ -393,12 +434,10 @@ def project_position_lot_records_with_diagnostics(
                     },
                 )
                 continue
-            patch = build_buy_to_close_patch(
+            patch = _build_close_projection_patch(
                 fields,
+                event,
                 contracts_to_close=remaining,
-                close_price=event.price,
-                close_reason="broker_trade_buy_to_close",
-                as_of_ms=event.trade_time_ms,
             )
             merged = dict(fields)
             merged.update(patch)
@@ -417,7 +456,7 @@ def project_position_lot_records_with_diagnostics(
                 )
                 continue
             fields = target_lot.get("fields") or {}
-            open_qty = int(fields.get("contracts_open") or 0)
+            open_qty = effective_contracts_open(fields)
             if open_qty <= 0:
                 _append_diagnostic(
                     diagnostics,
@@ -450,12 +489,10 @@ def project_position_lot_records_with_diagnostics(
                     },
                 )
                 continue
-            patch = build_buy_to_close_patch(
+            patch = _build_close_projection_patch(
                 fields,
+                event,
                 contracts_to_close=remaining,
-                close_price=event.price,
-                close_reason="broker_trade_buy_to_close",
-                as_of_ms=event.trade_time_ms,
             )
             merged = dict(fields)
             merged.update(patch)
@@ -464,18 +501,16 @@ def project_position_lot_records_with_diagnostics(
             continue
         for lot in lots:
             fields = lot.get("fields") or {}
-            open_qty = int(fields.get("contracts_open") or 0)
+            open_qty = effective_contracts_open(fields)
             if open_qty <= 0:
                 continue
             if not _matches_close(fields, event):
                 continue
             take = min(open_qty, remaining)
-            patch = build_buy_to_close_patch(
+            patch = _build_close_projection_patch(
                 fields,
+                event,
                 contracts_to_close=take,
-                close_price=event.price,
-                close_reason="broker_trade_buy_to_close",
-                as_of_ms=event.trade_time_ms,
             )
             merged = dict(fields)
             merged.update(patch)

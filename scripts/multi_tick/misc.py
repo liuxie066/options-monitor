@@ -88,7 +88,7 @@ COVER_RE = re.compile(r"cover\s+(?P<num>-?[0-9]+)")
 
 AUTO_CLOSE_APPLIED_RE = re.compile(r"applied_closed:\s*(?P<n>\d+)")
 AUTO_CLOSE_CAND_RE = re.compile(r"candidates_should_close:\s*(?P<n>\d+)")
-AUTO_CLOSE_ERR_RE = re.compile(r"^ERRORS:\s*(?P<n>\d+)\s*$", re.M)
+AUTO_CLOSE_ERR_RE = re.compile(r"^(?:ERRORS|errors):\s*(?P<n>\d+)\s*$", re.M)
 
 
 def _safe_runlog_data(data: dict[str, Any] | None, max_items: int = 16) -> dict[str, Any]:
