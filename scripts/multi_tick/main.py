@@ -65,6 +65,7 @@ from domain.domain import (
 )
 from domain.domain.engine import (
     AccountSchedulerDecisionView,
+    SchedulerDecisionView,
     build_opend_unhealthy_execution_plan,
     decide_notification_delivery,
     decide_trading_day_guard,
@@ -86,7 +87,7 @@ from src.application.multi_tick_finalization import (
     finalize_no_account_notification,
 )
 from src.application.multi_tick_scheduler import (
-    resolve_markets_to_run,
+    resolve_market_run,
     run_scheduler_flow,
 )
 from src.application.multi_tick_watchdog import run_multi_tick_watchdog
@@ -374,72 +375,6 @@ def main(argv: list[str] | None = None) -> int:
 
     results: list[AccountResult] = []
 
-    now_utc = datetime.now(timezone.utc)
-    markets_to_run = resolve_markets_to_run(
-        now_utc=now_utc,
-        base_cfg=base_cfg,
-        market_config=str(getattr(args, 'market_config', 'auto') or 'auto'),
-        force_mode=force_mode,
-        runlog=runlog,
-        safe_data_fn=_safe_runlog_data,
-        domain_select_markets_to_run=domain_select_markets_to_run,
-        domain_markets_for_trading_day_guard=domain_markets_for_trading_day_guard,
-        decide_trading_day_guard=decide_trading_day_guard,
-        reduce_trading_day_guard=reduce_trading_day_guard,
-        check_trading_day_for_market=lambda gm: _is_trading_day_guard_for_market(base_cfg, gm),
-        on_skip=audit_helper.guard_mark_success,
-    )
-
-    state_repo.shared_state_dir(base)
-    state_path = storage_paths.shared_state_path(base, select_scheduler_state_filename(markets_to_run))
-
-    try:
-        if (not state_path.exists()) or state_path.stat().st_size <= 0:
-            state_repo.write_shared_state(base, state_path.name, {
-                'last_scan_utc': None,
-                'last_notify_utc': None,
-            })
-    except Exception:
-        pass
-
-    scheduler_schedule_key = 'schedule_hk' if (markets_to_run == ['HK'] and ('schedule_hk' in (base_cfg or {}))) else 'schedule'
-    try:
-        scheduler_result = run_scheduler_flow(
-            vpy=vpy,
-            base=base,
-            cfg_path=cfg_path,
-            base_cfg=base_cfg,
-            state_path=state_path,
-            scheduler_schedule_key=scheduler_schedule_key,
-            accounts=[str(a).strip() for a in (args.accounts or []) if str(a).strip()],
-            force_mode=force_mode,
-            smoke=smoke,
-            snapshot_cls=SnapshotDTO,
-            engine_entrypoint=resolve_multi_tick_engine_entrypoint,
-            account_view_cls=AccountSchedulerDecisionView,
-            run_scan_scheduler_cli=run_scan_scheduler_cli,
-            build_failure_audit_fields=build_failure_audit_fields,
-            audit_fn=audit_helper.audit,
-            fail_schema_validation=audit_helper.fail_schema_validation,
-        )
-        scheduler_ms = scheduler_result.scheduler_ms
-        scheduler_decision = scheduler_result.scheduler_decision
-        scheduler_view = scheduler_result.scheduler_view
-        notify_decision_by_account = scheduler_result.notify_decision_by_account
-        should_run_global = scheduler_result.should_run_global
-        reason_global = scheduler_result.reason_global
-    except RuntimeError as exc:
-        err = str(exc)
-        for acct in args.accounts:
-            acct0 = str(acct).strip()
-            if acct0:
-                results.append(AccountResult(acct0, False, False, err, ''))
-        runlog.safe_event('run_end', 'error', error_code='SCHEDULER_FAILED', message=err)
-        audit_helper.guard_mark_failure('SCHEDULER_FAILED', 'scan_scheduler')
-        return 0
-
-    ran_any_pipeline = False
-
     run_id = utc_now().replace(':', '').replace('-', '').split('.')[0]
     run_dir = run_repo.ensure_run_dir(base, run_id)
     required_dir = (run_dir / 'required_data').resolve()
@@ -456,9 +391,99 @@ def main(argv: list[str] | None = None) -> int:
         state_repo.write_last_run_dir_pointer(base, run_id)
     except Exception:
         pass
+
+    now_utc = datetime.now(timezone.utc)
+    market_resolution = resolve_market_run(
+        now_utc=now_utc,
+        base_cfg=base_cfg,
+        market_config=str(getattr(args, 'market_config', 'auto') or 'auto'),
+        force_mode=force_mode,
+        runlog=runlog,
+        safe_data_fn=_safe_runlog_data,
+        domain_select_markets_to_run=domain_select_markets_to_run,
+        domain_markets_for_trading_day_guard=domain_markets_for_trading_day_guard,
+        decide_trading_day_guard=decide_trading_day_guard,
+        reduce_trading_day_guard=reduce_trading_day_guard,
+        check_trading_day_for_market=lambda gm: _is_trading_day_guard_for_market(base_cfg, gm),
+    )
+    markets_to_run = list(market_resolution.markets_to_run)
+    scheduler_markets = list(market_resolution.scheduler_markets)
+
+    state_repo.shared_state_dir(base)
+    state_path = storage_paths.shared_state_path(base, select_scheduler_state_filename(scheduler_markets))
+
+    try:
+        if (not state_path.exists()) or state_path.stat().st_size <= 0:
+            state_repo.write_shared_state(base, state_path.name, {
+                'last_scan_utc': None,
+                'last_notify_utc': None,
+            })
+    except Exception:
+        pass
+
+    scheduler_schedule_key = 'schedule_hk' if (scheduler_markets == ['HK'] and ('schedule_hk' in (base_cfg or {}))) else 'schedule'
+    if bool(market_resolution.trading_day_blocked):
+        reason_global = str(market_resolution.skip_message or "trading_day_guard_skip")
+        scheduler_ms = 0
+        scheduler_decision = {
+            "schema_kind": "scheduler_decision",
+            "schema_version": "1.0",
+            "should_run_scan": False,
+            "is_notify_window_open": False,
+            "reason": reason_global,
+        }
+        scheduler_view = SchedulerDecisionView.from_payload(scheduler_decision)
+        notify_decision_by_account = {}
+        should_run_global = False
+        audit_helper.audit(
+            'guard',
+            'trading_day_blocked',
+            status='skip',
+            run_id=run_id,
+            message=reason_global,
+            extra={'guard_results': market_resolution.guard_results},
+        )
+    else:
+        try:
+            scheduler_result = run_scheduler_flow(
+                vpy=vpy,
+                base=base,
+                cfg_path=cfg_path,
+                base_cfg=base_cfg,
+                state_path=state_path,
+                scheduler_schedule_key=scheduler_schedule_key,
+                accounts=[str(a).strip() for a in (args.accounts or []) if str(a).strip()],
+                force_mode=force_mode,
+                smoke=smoke,
+                snapshot_cls=SnapshotDTO,
+                engine_entrypoint=resolve_multi_tick_engine_entrypoint,
+                account_view_cls=AccountSchedulerDecisionView,
+                run_scan_scheduler_cli=run_scan_scheduler_cli,
+                build_failure_audit_fields=build_failure_audit_fields,
+                audit_fn=audit_helper.audit,
+                fail_schema_validation=audit_helper.fail_schema_validation,
+            )
+            scheduler_ms = scheduler_result.scheduler_ms
+            scheduler_decision = scheduler_result.scheduler_decision
+            scheduler_view = scheduler_result.scheduler_view
+            notify_decision_by_account = scheduler_result.notify_decision_by_account
+            should_run_global = scheduler_result.should_run_global
+            reason_global = scheduler_result.reason_global
+        except RuntimeError as exc:
+            err = str(exc)
+            for acct in args.accounts:
+                acct0 = str(acct).strip()
+                if acct0:
+                    results.append(AccountResult(acct0, False, False, err, ''))
+            runlog.safe_event('run_end', 'error', error_code='SCHEDULER_FAILED', message=err)
+            audit_helper.guard_mark_failure('SCHEDULER_FAILED', 'scan_scheduler')
+            return 0
+
+    ran_any_pipeline = False
     tick_metrics = {
         'as_of_utc': utc_now(),
         'markets_to_run': markets_to_run,
+        'scheduler_markets': scheduler_markets,
         'run_dir': str(run_dir),
         'scheduler_ms': scheduler_ms,
         'scheduler_decision': scheduler_decision,
@@ -513,6 +538,7 @@ def main(argv: list[str] | None = None) -> int:
                 accounts_root=accounts_root,
                 prefetch_done=prefetch_done,
                 force_mode=force_mode,
+                allow_mutations=(not smoke),
             ),
             runlog=runlog,
             audit_fn=audit_helper.audit,

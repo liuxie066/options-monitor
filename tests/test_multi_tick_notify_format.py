@@ -51,3 +51,22 @@ def test_account_message_skips_accounts_without_notification_text() -> None:
     )
 
     assert message == ''
+
+
+def test_flatten_auto_close_summary_keeps_error_only_summary() -> None:
+    from scripts.multi_tick.notify_format import flatten_auto_close_summary
+
+    text = "\n".join(
+        [
+            "Auto-close expired positions (grace_days=2)",
+            "candidates_should_close: 1",
+            "applied_closed: 0",
+            "errors: 1",
+            "- rec_1 | close failed",
+        ]
+    )
+
+    out = flatten_auto_close_summary(text)
+
+    assert "Auto-close(exp+2d): closed 0/1, errors 1" in out
+    assert "- rec_1 | close failed" in out

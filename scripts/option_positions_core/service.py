@@ -12,6 +12,7 @@ from typing import Any, Protocol
 
 from scripts.feishu_bitable import bitable_list_records, get_tenant_access_token, parse_note_kv, safe_float
 from scripts.option_positions_core.domain import (
+    EXPIRE_AUTO_CLOSE,
     OpenPositionCommand,
     build_expire_auto_close_patch,
     build_open_adjustment_patch,
@@ -22,8 +23,11 @@ from scripts.option_positions_core.domain import (
     effective_strike,
     exp_ms_to_datetime,
     exp_ms_to_ymd,
+    normalize_close_type,
     normalize_broker,
+    normalize_status,
     now_ms,
+    parse_exp_to_ms,
     resolve_open_currency,
 )
 from scripts.option_positions_core.ledger import (
@@ -666,9 +670,6 @@ class SQLiteOptionPositionsRepository:
         return self.get_position_lot_fields(record_id)
 
 
-OptionPositionsRepository = SQLiteOptionPositionsRepository
-
-
 def _materialize_bootstrap_events(repo: SQLiteOptionPositionsRepository, events: list[TradeEvent]) -> int:
     def _run(sqlite_repo: Any, conn: sqlite3.Connection | None) -> int:
         if conn is not None:
@@ -1000,6 +1001,91 @@ def persist_manual_close_event(
     return _persist_trade_event_object(repo, event)
 
 
+def _close_event_trade_time_ms(repo: Any, *, target_source_event_id: str, as_of_ms: int | None) -> int:
+    ts = int(as_of_ms or now_ms())
+    if not target_source_event_id:
+        return ts
+    list_trade_events = getattr(repo, "list_trade_events", None)
+    if not callable(list_trade_events):
+        return ts
+    try:
+        for item in list_trade_events():
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("event_id") or "").strip() != target_source_event_id:
+                continue
+            source_ts = int(item.get("trade_time_ms") or 0)
+            if source_ts >= ts:
+                return source_ts + 1
+            return ts
+    except Exception:
+        return ts
+    return ts
+
+
+def persist_expire_auto_close_event(
+    repo: Any,
+    *,
+    record_id: str,
+    fields: dict[str, Any],
+    contracts_to_close: int,
+    close_reason: str,
+    as_of_ms: int | None = None,
+    exp_source: str | None = None,
+    grace_days: int | None = None,
+) -> dict[str, Any]:
+    broker = normalize_broker(fields.get("broker"))
+    if not broker:
+        raise ValueError(f"position lot missing broker: {record_id}")
+    fields = _assert_position_lot_target_matches_current_state(
+        repo,
+        record_id=record_id,
+        fields=fields,
+        operation="expire_auto_close",
+    )
+    multiplier = effective_multiplier(fields)
+    strike = effective_strike(fields)
+    target_source_event_id = str(fields.get("source_event_id") or "").strip()
+    trade_time_ms = _close_event_trade_time_ms(
+        repo,
+        target_source_event_id=target_source_event_id,
+        as_of_ms=as_of_ms,
+    )
+    event = TradeEvent(
+        event_id=f"auto-close-{record_id}-{uuid.uuid4().hex}",
+        source_type="system_trade_event",
+        source_name="auto_close_expired_positions",
+        broker=broker,
+        account=str(fields.get("account") or ""),
+        symbol=str(fields.get("symbol") or "").strip().upper(),
+        option_type=str(fields.get("option_type") or ""),
+        side="buy" if str(fields.get("side") or "").strip().lower() == "short" else "sell",
+        position_effect="close",
+        contracts=int(contracts_to_close),
+        price=0.0,
+        strike=(float(strike) if strike is not None else None),
+        multiplier=(int(float(multiplier)) if multiplier is not None else None),
+        expiration_ymd=effective_expiration_ymd(fields),
+        currency=str(fields.get("currency") or "").strip().upper(),
+        trade_time_ms=trade_time_ms,
+        order_id=None,
+        multiplier_source=("payload" if multiplier is not None else None),
+        raw_payload={
+            "source": "option_positions.py",
+            "mode": EXPIRE_AUTO_CLOSE,
+            "record_id": str(record_id),
+            "close_target_source_event_id": target_source_event_id,
+            "close_target_account": str(fields.get("account") or ""),
+            "close_target_broker": broker,
+            "close_type": EXPIRE_AUTO_CLOSE,
+            "close_reason": str(close_reason or "expired"),
+            "auto_close_exp_src": str(exp_source or ""),
+            "auto_close_grace_days": int(grace_days) if grace_days is not None else None,
+        },
+    )
+    return _persist_trade_event_object(repo, event)
+
+
 def persist_manual_void_event(
     repo: Any,
     *,
@@ -1113,6 +1199,64 @@ def persist_manual_adjust_event(
     return result
 
 
+def _auto_close_expiration_anchor(fields: dict[str, Any]) -> tuple[int | None, str, str | None, int | None]:
+    exp_ms, exp_source = effective_expiration(fields)
+    if exp_ms is None:
+        return None, "none", None, None
+    exp_ymd = exp_ms_to_ymd(exp_ms)
+    normalized_ms = parse_exp_to_ms(exp_ymd) if exp_ymd else None
+    if normalized_ms is None:
+        normalized_ms = int(exp_ms)
+    return int(normalized_ms), exp_source, exp_ymd, int(exp_ms)
+
+
+def _bootstrap_records_before(records: list[dict[str, Any]], *, before_ms: int | None) -> list[dict[str, Any]]:
+    if before_ms is None:
+        return records
+    fallback_ms = max(0, int(before_ms) - 1)
+    out: list[dict[str, Any]] = []
+    for item in records:
+        if not isinstance(item, dict):
+            continue
+        fields = item.get("fields")
+        if not isinstance(fields, dict):
+            out.append(item)
+            continue
+        patched_fields = dict(fields)
+        if patched_fields.get("opened_at") in (None, "") and patched_fields.get("last_action_at") in (None, ""):
+            exp_ms, _exp_source = effective_expiration(patched_fields)
+            if exp_ms is not None and int(exp_ms) < fallback_ms:
+                patched_fields["opened_at"] = max(0, int(exp_ms) - 1)
+            else:
+                patched_fields["opened_at"] = fallback_ms
+        patched = dict(item)
+        patched["fields"] = patched_fields
+        out.append(patched)
+    return out
+
+
+def _ensure_existing_position_lots_have_bootstrap_events(repo: Any, *, before_ms: int | None = None) -> None:
+    candidate = require_option_positions_event_write_repo(repo)
+    count_trade_events = getattr(candidate, "count_trade_events", None)
+    count_position_lots = getattr(candidate, "count_position_lots", None)
+    if not callable(count_trade_events) or not callable(count_position_lots):
+        return
+    if int(count_trade_events() or 0) > 0 or int(count_position_lots() or 0) <= 0:
+        return
+    ok = _apply_bootstrap_snapshot(
+        candidate,
+        records=_bootstrap_records_before(candidate.list_position_lots(), before_ms=before_ms),
+        source_name="sqlite_position_lots",
+        success_status="migrated_local_position_lots",
+        success_message="migrated {count} bootstrap events from local position_lots",
+        failure_status="degraded_local_position_lots_migration_failed",
+        failure_message="local position_lots migration failed: {error}",
+        failure_log_prefix="option_positions local snapshot migration skipped",
+    )
+    if not ok:
+        raise ValueError(getattr(candidate, "bootstrap_message", None) or "local position_lots migration failed")
+
+
 def build_expired_close_decisions(
     positions: list[dict[str, Any]],
     *,
@@ -1143,7 +1287,7 @@ def build_expired_close_decisions(
             )
             continue
 
-        exp_ms, exp_source = effective_expiration(fields)
+        exp_ms, exp_source, exp_ymd, raw_exp_ms = _auto_close_expiration_anchor(fields)
         if exp_ms is None:
             decisions.append(
                 {
@@ -1175,11 +1319,13 @@ def build_expired_close_decisions(
                 "record_id": record_id,
                 "position_id": position_id,
                 "expiration_ms": int(exp_ms),
+                "raw_expiration_ms": raw_exp_ms,
+                "expiration_ymd": exp_ymd,
                 "effective_exp_source": exp_source,
                 "should_close": should_close,
                 "reason": (
                     f"expired: exp={exp_ms_to_ymd(exp_ms) or exp_ms} "
-                    f"grace_days={grace_days} as_of={as_of_dt.date().isoformat()}"
+                    f"grace_days={grace_days} as_of_utc={as_of_dt.isoformat()}"
                 ),
                 "patch": patch,
             }
@@ -1201,25 +1347,41 @@ def auto_close_expired_positions(
     errors: list[str] = []
     if len(to_close) > int(max_close):
         return decisions, applied, [f"too many to close: {len(to_close)} > max_close={max_close}; abort"]
+    if to_close:
+        try:
+            _ensure_existing_position_lots_have_bootstrap_events(repo, before_ms=as_of_ms)
+        except Exception as exc:
+            return decisions, applied, [f"bootstrap migration failed before auto-close: {exc}"]
     for decision in to_close:
         try:
-            fields = repo.get_record_fields(str(decision["record_id"]))
+            record_id = str(decision["record_id"])
+            fields = repo.get_record_fields(record_id)
             contracts_to_close = effective_contracts_open(fields)
             if contracts_to_close <= 0:
                 errors.append(
-                    f"{decision.get('record_id')} {decision.get('position_id')}: contracts_open resolved to <= 0"
+                    f"{record_id} {decision.get('position_id')}: contracts_open resolved to <= 0"
                 )
                 continue
-            persist_manual_close_event(
+            result = persist_expire_auto_close_event(
                 repo,
-                record_id=str(decision["record_id"]),
+                record_id=record_id,
                 fields=fields,
                 contracts_to_close=contracts_to_close,
-                close_price=None,
                 close_reason="expired",
                 as_of_ms=as_of_ms,
+                exp_source=str(decision.get("effective_exp_source") or ""),
+                grace_days=grace_days,
             )
-            applied.append(decision)
+            updated_fields = repo.get_record_fields(record_id)
+            if effective_contracts_open(updated_fields) > 0 or normalize_status(updated_fields.get("status")) != "close":
+                errors.append(f"{record_id} {decision.get('position_id')}: auto-close event did not close target lot")
+                continue
+            if normalize_close_type(updated_fields.get("close_type")) != EXPIRE_AUTO_CLOSE:
+                errors.append(f"{record_id} {decision.get('position_id')}: auto-close projected wrong close_type")
+                continue
+            applied_decision = dict(decision)
+            applied_decision["result"] = result
+            applied.append(applied_decision)
         except Exception as exc:
             errors.append(f"{decision.get('record_id')} {decision.get('position_id')}: {exc}")
     return decisions, applied, errors

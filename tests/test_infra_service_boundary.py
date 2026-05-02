@@ -17,7 +17,7 @@ def test_entry_imports_service_module() -> None:
     send_if_needed = _read("scripts/send_if_needed.py")
 
     assert "from scripts.infra.service import (" in multi_tick
-    assert "from scripts.infra.service import (" in send_if_needed
+    assert "from src.application.multi_account_tick import current_run_id, run_tick" in send_if_needed
 
 
 def test_entry_external_is_compat_reexport() -> None:

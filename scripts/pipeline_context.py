@@ -24,8 +24,6 @@ from scripts.fetch_option_positions_context import (
 from scripts.futu_portfolio_context import fetch_futu_portfolio_context
 from scripts.io_utils import is_fresh, load_cached_json
 from scripts.option_positions_core.service import (
-    auto_close_expired_positions,
-    build_expired_close_decisions,
     load_option_positions_repo,
 )
 from scripts.portfolio_context_service import load_account_portfolio_context, with_context_source
@@ -170,53 +168,17 @@ def load_option_positions_context(
 
 def maybe_auto_close_expired_positions(
     *,
+    base: Path,
     data_config: str,
     report_dir: Path,
     state_dir: Path,
     refreshed: bool,
     log,
+    runtime_config: dict | None = None,
 ) -> None:
-    # Auto-close expired open lots without extra scans.
-    # Only run when we refreshed context (avoid repeated close calls during rapid dev loops).
-    if not refreshed:
-        return
-    try:
-        from datetime import datetime, timezone
-
-        ctx_path = (state_dir / 'option_positions_context.json').resolve()
-        ctx = json.loads(ctx_path.read_text(encoding='utf-8')) if ctx_path.exists() else {}
-        positions = [p for p in (ctx.get('open_positions_min') or []) if isinstance(p, dict)]
-        as_of_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-        decisions = build_expired_close_decisions(
-            positions,
-            as_of_ms=as_of_ms,
-            grace_days=1,
-        )
-        to_close = [d for d in decisions if bool(d.get('should_close')) and d.get('record_id')]
-        applied: list[dict] = []
-        errors: list[str] = []
-        if to_close:
-            repo, _records = _load_option_position_records(data_config)
-            decisions, applied, errors = auto_close_expired_positions(
-                repo,
-                positions,
-                as_of_ms=as_of_ms,
-                grace_days=1,
-                max_close=20,
-            )
-            to_close = [d for d in decisions if bool(d.get('should_close')) and d.get('record_id')]
-
-        lines: list[str] = []
-        lines.append("Auto-close expired positions (grace_days=1)")
-        lines.append(f"context: {ctx_path}")
-        lines.append(f"candidates_should_close: {len(to_close)}")
-        lines.append(f"applied_closed: {len(applied)}")
-        lines.append(f"errors: {len(errors)}")
-        summary_path = (report_dir / 'auto_close_summary.txt').resolve()
-        summary_path.parent.mkdir(parents=True, exist_ok=True)
-        summary_path.write_text("\n".join(lines).strip() + "\n", encoding='utf-8')
-    except Exception as e2:
-        log(f"[WARN] auto-close expired position lots failed: {e2}")
+    # Deprecated compatibility hook. Auto-close writes are owned by account_run
+    # so context building remains read-only even when direct pipeline entrypoints run.
+    return
 
 
 def _load_option_position_exchange_rates(*, base: Path, state_dir: Path, log) -> dict | None:
@@ -333,10 +295,12 @@ def build_pipeline_context(
     )
 
     maybe_auto_close_expired_positions(
+        base=base,
         data_config=str(data_config),
         report_dir=report_dir,
         state_dir=state_dir,
         refreshed=refreshed,
+        runtime_config=cfg,
         log=log,
     )
 

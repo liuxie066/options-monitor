@@ -25,7 +25,7 @@ from src.application.multi_account_tick import run_tick as _multi_main
 #   scripts/send_if_needed_multi.py -> src.application.multi_account_tick.run_tick
 # Preferred human-facing path is the unified CLI:
 #   ./om run tick --config ... --accounts ...
-# Production scheduler entrypoint remains scripts/send_if_needed.py (unchanged).
+# scripts/send_if_needed.py is now also a deprecated wrapper over the same path.
 
 
 if __name__ == '__main__':

@@ -4,7 +4,6 @@ import importlib
 import json
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, Callable
 
 import pytest
@@ -68,13 +67,7 @@ def send_if_needed_module():
 @pytest.fixture
 def send_if_needed_common_patches(monkeypatch, send_if_needed_module):
     mod = send_if_needed_module
-    calls: list[tuple[list[str], Path]] = []
+    calls: list[list[str]] = []
 
-    monkeypatch.setattr(mod, "_acquire_lock", lambda _lock_path: 1)
-    monkeypatch.setattr(mod, "_release_lock", lambda _fd, _lock_path: None)
-    monkeypatch.setattr(mod, "sh", lambda cmd, cwd, capture=True: calls.append((cmd, cwd)) or SimpleNamespace(returncode=0))
-    monkeypatch.setattr(mod, "trading_day_via_futu", lambda _cfg, market: (True, str(market)))
-    monkeypatch.setattr(mod, "run_pipeline_script", lambda **_kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""))
-    monkeypatch.setattr(mod, "send_openclaw_message", lambda **_kwargs: SimpleNamespace(returncode=0, stdout='{"messageId":"m1"}', stderr=""))
-    monkeypatch.setattr(mod, "ensure_runtime_canonical_config", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(mod, "run_tick", lambda argv: calls.append(list(argv)) or 0)
     return {"module": mod, "calls": calls}

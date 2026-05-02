@@ -144,7 +144,7 @@ def test_production_entrypoints_enable_sibling_external_guard() -> None:
     send_src = Path("scripts/send_if_needed.py").read_text(encoding="utf-8")
     multi_src = Path("scripts/multi_tick/main.py").read_text(encoding="utf-8")
 
-    assert "require_sibling_external=True" in send_src
-    assert "ensure_runtime_canonical_config(" in send_src
+    assert "src.application.multi_account_tick" in send_src
+    assert "run_tick(" in send_src
     assert "require_sibling_external=True" in multi_src
     assert "config_source_path" in multi_src

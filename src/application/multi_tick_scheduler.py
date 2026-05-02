@@ -31,6 +31,92 @@ class MultiTickSchedulerResult:
     reason_global: str
 
 
+@dataclass(frozen=True)
+class MarketRunResolution:
+    markets_to_run: list[str]
+    scheduler_markets: list[str]
+    trading_day_blocked: bool
+    skip_message: str
+    guard_results: list[dict[str, Any]]
+
+
+def _normalized_guard_markets(values: list[Any]) -> list[str]:
+    out: list[str] = []
+    for value in values or []:
+        market = str(value or "").strip().upper()
+        if market in ("HK", "US", "CN") and market not in out:
+            out.append(market)
+    return out
+
+
+def resolve_market_run(
+    *,
+    now_utc: datetime,
+    base_cfg: dict[str, Any],
+    market_config: str,
+    force_mode: bool,
+    runlog,
+    safe_data_fn: Callable[[dict[str, Any]], dict[str, Any]],
+    domain_select_markets_to_run: Callable[..., list[str]],
+    domain_markets_for_trading_day_guard: Callable[..., list[str]],
+    decide_trading_day_guard: Callable[..., dict[str, Any]],
+    reduce_trading_day_guard,
+    check_trading_day_for_market: Callable[[str], tuple[bool | None, str]],
+    on_skip: Callable[[], Any] | None = None,
+) -> MarketRunResolution:
+    markets_to_run = domain_select_markets_to_run(now_utc, base_cfg, market_config)
+    if force_mode:
+        print("force: bypass guard")
+        runlog.safe_event(
+            "trading_day_guard",
+            "skip",
+            message="force: bypass guard",
+            data=safe_data_fn({"markets_to_run": markets_to_run, "market_config": market_config}),
+        )
+        return MarketRunResolution(
+            markets_to_run=markets_to_run,
+            scheduler_markets=markets_to_run,
+            trading_day_blocked=False,
+            skip_message="",
+            guard_results=[],
+        )
+
+    guard_markets = domain_markets_for_trading_day_guard(markets_to_run, base_cfg, market_config)
+    scheduler_markets = _normalized_guard_markets(markets_to_run) or _normalized_guard_markets(guard_markets)
+    guard_decision = decide_trading_day_guard(
+        markets_to_run=markets_to_run,
+        guard_markets=guard_markets,
+        check_trading_day_for_market=lambda gm: check_trading_day_for_market(gm),
+        reduce_guard_fn=reduce_trading_day_guard,
+    )
+    guard_results = list(guard_decision.get("guard_results") or [])
+    runlog.safe_event(
+        "trading_day_guard",
+        "check",
+        data=safe_data_fn({"results": guard_results, "markets_to_run": markets_to_run, "market_config": market_config}),
+    )
+    markets_to_run = list(guard_decision.get("markets_to_run") or [])
+    if bool(guard_decision.get("should_skip")):
+        skip_message = str(guard_decision.get("skip_message") or "")
+        runlog.safe_event("trading_day_guard", "skip", message=skip_message)
+        if on_skip is not None:
+            on_skip()
+        return MarketRunResolution(
+            markets_to_run=[],
+            scheduler_markets=scheduler_markets,
+            trading_day_blocked=True,
+            skip_message=skip_message,
+            guard_results=guard_results,
+        )
+    return MarketRunResolution(
+        markets_to_run=markets_to_run,
+        scheduler_markets=_normalized_guard_markets(markets_to_run) or scheduler_markets,
+        trading_day_blocked=False,
+        skip_message="",
+        guard_results=guard_results,
+    )
+
+
 def resolve_markets_to_run(
     *,
     now_utc: datetime,
@@ -46,36 +132,24 @@ def resolve_markets_to_run(
     check_trading_day_for_market: Callable[[str], tuple[bool | None, str]],
     on_skip: Callable[[], Any],
 ) -> list[str]:
-    markets_to_run = domain_select_markets_to_run(now_utc, base_cfg, market_config)
-    if force_mode:
-        print("force: bypass guard")
-        runlog.safe_event(
-            "trading_day_guard",
-            "skip",
-            message="force: bypass guard",
-            data=safe_data_fn({"markets_to_run": markets_to_run, "market_config": market_config}),
-        )
-        return markets_to_run
-
-    guard_markets = domain_markets_for_trading_day_guard(markets_to_run, base_cfg, market_config)
-    guard_decision = decide_trading_day_guard(
-        markets_to_run=markets_to_run,
-        guard_markets=guard_markets,
-        check_trading_day_for_market=lambda gm: check_trading_day_for_market(gm),
-        reduce_guard_fn=reduce_trading_day_guard,
+    resolution = resolve_market_run(
+        now_utc=now_utc,
+        base_cfg=base_cfg,
+        market_config=market_config,
+        force_mode=force_mode,
+        runlog=runlog,
+        safe_data_fn=safe_data_fn,
+        domain_select_markets_to_run=domain_select_markets_to_run,
+        domain_markets_for_trading_day_guard=domain_markets_for_trading_day_guard,
+        decide_trading_day_guard=decide_trading_day_guard,
+        reduce_trading_day_guard=reduce_trading_day_guard,
+        check_trading_day_for_market=check_trading_day_for_market,
+        on_skip=on_skip,
     )
-    guard_results = list(guard_decision.get("guard_results") or [])
-    runlog.safe_event(
-        "trading_day_guard",
-        "check",
-        data=safe_data_fn({"results": guard_results, "markets_to_run": markets_to_run, "market_config": market_config}),
-    )
-    markets_to_run = list(guard_decision.get("markets_to_run") or [])
-    if bool(guard_decision.get("should_skip")):
-        runlog.safe_event("run_end", "skip", message=str(guard_decision.get("skip_message") or ""))
-        on_skip()
+    if resolution.trading_day_blocked:
+        runlog.safe_event("run_end", "skip", message=resolution.skip_message)
         raise SystemExit(0)
-    return markets_to_run
+    return resolution.markets_to_run
 
 
 def run_scheduler_flow(

@@ -117,10 +117,13 @@ def flatten_auto_close_summary(text: str, *, always_show: bool = False) -> str:
     if not text:
         return ''
 
+    m_grace = re.search(r"grace_days=(?P<n>[^)\s]+)", text)
     m_applied = AUTO_CLOSE_APPLIED_RE.search(text)
     m_cand = AUTO_CLOSE_CAND_RE.search(text)
     m_err = AUTO_CLOSE_ERR_RE.search(text)
 
+    grace_label = m_grace.group('n') if m_grace else '1'
+    grace_part = f"exp+{grace_label}d" if str(grace_label).isdigit() else "exp+?d"
     applied = int(m_applied.group('n')) if m_applied else 0
     cand = int(m_cand.group('n')) if m_cand else applied
     err = int(m_err.group('n')) if m_err else 0
@@ -128,7 +131,7 @@ def flatten_auto_close_summary(text: str, *, always_show: bool = False) -> str:
     if applied == 0 and err == 0 and (not always_show):
         return ''
 
-    header = f"Auto-close(exp+1d): closed {applied}/{cand}, errors {err}"
+    header = f"Auto-close({grace_part}): closed {applied}/{cand}, errors {err}"
     lines = [header]
 
     if err > 0 or applied > 0:

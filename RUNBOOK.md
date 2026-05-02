@@ -35,7 +35,9 @@ openclaw cron enable  9cba60f7-407b-4427-9120-0a176b818de9
 openclaw cron run 9cba60f7-407b-4427-9120-0a176b818de9 --expect-final --timeout 120000
 ```
 
-线上定时执行入口：`scripts/send_if_needed.py`（单账户定时链路，保持不变）
+线上定时执行入口：`./om run tick --config config.us.json --accounts lx sy`
+
+`scripts/send_if_needed.py` 仅保留为兼容 wrapper，会转调统一 tick 链路；不要再把它当作单账户业务实现维护。
 
 多账户手动/可选定时入口：
 
