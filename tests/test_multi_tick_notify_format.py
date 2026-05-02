@@ -53,6 +53,33 @@ def test_account_message_skips_accounts_without_notification_text() -> None:
     assert message == ''
 
 
+def test_account_message_uses_compact_auto_close_template_when_scan_skipped() -> None:
+    from scripts.multi_tick.misc import AccountResult
+    from scripts.multi_tick.notify_format import build_account_message
+
+    message = build_account_message(
+        AccountResult(
+            account='lx',
+            ran_scan=False,
+            should_notify=True,
+            decision_reason='scheduler_skip',
+            notification_text=(
+                "Auto-close(exp+2d): closed 1/1, errors 0\n"
+                "- rec_1 | pos_1 | exp=2026-05-01"
+            ),
+        ),
+        now_bj='2026-05-02 22:31:00',
+        cash_footer_lines=["LX 持有 ¥1,000 (CNY) | 可用 ¥200 (CNY)"],
+    )
+
+    assert "# Auto-close\n## 账户提醒（lx）" in message
+    assert "Auto-close(exp+2d): closed 1/1, errors 0" in message
+    assert "- rec_1 | pos_1 | exp=2026-05-01" in message
+    assert "本轮候选" not in message
+    assert "Put 0 / Call 0" not in message
+    assert "LX 持有" not in message
+
+
 def test_flatten_auto_close_summary_keeps_error_only_summary() -> None:
     from scripts.multi_tick.notify_format import flatten_auto_close_summary
 

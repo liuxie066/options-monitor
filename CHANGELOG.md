@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.0.3 - 2026-05-02
+
+### Fixed
+- Used a compact auto-close notification template when scan gating skips the options monitor, preventing skipped-scan auto-close alerts from including regular candidate counts and cash footers.
+
 ## 1.0.2 - 2026-05-02
 
 ### Fixed
