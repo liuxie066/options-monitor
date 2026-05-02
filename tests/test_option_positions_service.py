@@ -110,6 +110,32 @@ def test_build_expired_close_decisions_closes_at_expiration_plus_full_grace_day(
     assert decisions[0]["expiration_ymd"] == "2026-05-01"
 
 
+def test_build_expired_close_decisions_skips_already_closed_or_zero_open() -> None:
+    as_of_ms = parse_exp_to_ms("2026-05-03")
+    assert as_of_ms is not None
+
+    decisions = build_expired_close_decisions(
+        [
+            {
+                "record_id": "rec_closed",
+                "position_id": "NVDA_20260501_100P_short",
+                "status": "close",
+                "contracts": 1,
+                "contracts_open": 0,
+                "expiration": parse_exp_to_ms("2026-05-01"),
+                "note": "",
+            }
+        ],
+        as_of_ms=as_of_ms,
+        grace_days=1,
+    )
+
+    assert decisions[0]["should_close"] is False
+    assert decisions[0]["skip_reason"] == "already_closed_or_zero_open"
+    assert decisions[0]["contracts_open"] == 0
+    assert decisions[0]["patch"] is None
+
+
 def test_auto_close_expired_positions_uses_effective_contracts_open_fallback(tmp_path: Path) -> None:
     import scripts.option_positions_core.service as svc
 
@@ -170,6 +196,77 @@ def test_auto_close_expired_positions_uses_effective_contracts_open_fallback(tmp
     assert len(events) == 2
     assert events[-1]["source_name"] == "auto_close_expired_positions"
     assert events[-1]["raw_payload"]["close_type"] == EXPIRE_AUTO_CLOSE
+
+
+def test_auto_close_expired_positions_skips_stale_open_input_when_current_lot_closed(tmp_path: Path) -> None:
+    import scripts.option_positions_core.service as svc
+
+    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    expiration = parse_exp_to_ms("2026-05-01")
+    assert expiration is not None
+    repo.replace_position_lots(
+        [
+            {
+                "record_id": "rec_nvda",
+                "fields": {
+                    "record_id": "rec_nvda",
+                    "position_id": "NVDA_20260501_160P_short",
+                    "status": "close",
+                    "contracts": 1,
+                    "contracts_open": 0,
+                    "contracts_closed": 1,
+                    "broker": "富途",
+                    "account": "lx",
+                    "symbol": "NVDA",
+                    "option_type": "put",
+                    "side": "short",
+                    "currency": "USD",
+                    "strike": 160,
+                    "multiplier": 100,
+                    "expiration": expiration,
+                    "note": "",
+                },
+            }
+        ]
+    )
+
+    stale_positions = [
+        {
+            "record_id": "rec_nvda",
+            "position_id": "NVDA_20260501_160P_short",
+            "status": "open",
+            "contracts": 1,
+            "contracts_open": 1,
+            "contracts_closed": 0,
+            "broker": "富途",
+            "account": "lx",
+            "symbol": "NVDA",
+            "option_type": "put",
+            "side": "short",
+            "currency": "USD",
+            "strike": 160,
+            "multiplier": 100,
+            "expiration": expiration,
+            "note": "",
+        }
+    ]
+    as_of_ms = parse_exp_to_ms("2026-05-03")
+    assert as_of_ms is not None
+
+    decisions, applied, errors = auto_close_expired_positions(
+        repo,
+        stale_positions,
+        as_of_ms=as_of_ms,
+        grace_days=1,
+        max_close=5,
+    )
+
+    assert applied == []
+    assert errors == []
+    assert decisions[0]["should_close"] is False
+    assert decisions[0]["skip_reason"] == "already_closed_or_zero_open"
+    assert decisions[0]["contracts_open"] == 0
+    assert repo.count_trade_events() == 0
 
 
 def test_position_maintenance_closes_legacy_sqlite_lot_after_load_repo_bootstrap(tmp_path: Path) -> None:

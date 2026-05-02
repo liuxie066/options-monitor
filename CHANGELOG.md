@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 1.0.4 - 2026-05-02
+
+### Fixed
+- Refreshed local option-position projections before expired-position auto-close runs so stale `position_lots` cannot create duplicate close attempts after trade events have already closed a lot.
+- Treated already-closed or zero-open expired lots as skipped auto-close decisions instead of errors, preventing stale local candidates from producing false `contracts_open <= 0` alerts.
+- Included skipped auto-close counts in summaries only when there is an actual close or error, while keeping skipped-only maintenance runs silent.
+
 ## 1.0.3 - 2026-05-02
 
 ### Fixed

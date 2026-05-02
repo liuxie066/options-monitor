@@ -179,6 +179,7 @@ def _position_maintenance_error_result(
         "decisions": 0,
         "candidates_should_close": 0,
         "applied_closed": 0,
+        "skipped_already_closed": 0,
         "errors": errors,
         "applied": [],
     }
@@ -336,6 +337,7 @@ def run_one_account(
                 "positions_checked": maintenance_result.get("positions_checked"),
                 "candidates_should_close": maintenance_result.get("candidates_should_close"),
                 "applied_closed": maintenance_result.get("applied_closed"),
+                "skipped_already_closed": maintenance_result.get("skipped_already_closed"),
                 "errors": len(maintenance_result.get("errors") or []),
             },
         )

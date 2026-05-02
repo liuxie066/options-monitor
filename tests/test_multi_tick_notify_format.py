@@ -97,3 +97,39 @@ def test_flatten_auto_close_summary_keeps_error_only_summary() -> None:
 
     assert "Auto-close(exp+2d): closed 0/1, errors 1" in out
     assert "- rec_1 | close failed" in out
+
+
+def test_flatten_auto_close_summary_includes_skipped_already_closed_count() -> None:
+    from scripts.multi_tick.notify_format import flatten_auto_close_summary
+
+    text = "\n".join(
+        [
+            "Auto-close expired positions (grace_days=1)",
+            "candidates_should_close: 1",
+            "applied_closed: 1",
+            "skipped_already_closed: 1",
+            "ERRORS: 0",
+            "- rec_1 | pos_1 | exp=2026-05-01",
+        ]
+    )
+
+    out = flatten_auto_close_summary(text)
+
+    assert "Auto-close(exp+1d): closed 1/1, skipped 1, errors 0" in out
+    assert "errors 1" not in out
+
+
+def test_flatten_auto_close_summary_suppresses_skipped_only_summary() -> None:
+    from scripts.multi_tick.notify_format import flatten_auto_close_summary
+
+    text = "\n".join(
+        [
+            "Auto-close expired positions (grace_days=1)",
+            "candidates_should_close: 0",
+            "applied_closed: 0",
+            "skipped_already_closed: 1",
+            "ERRORS: 0",
+        ]
+    )
+
+    assert flatten_auto_close_summary(text) == ""
