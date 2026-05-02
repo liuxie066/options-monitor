@@ -144,6 +144,27 @@ def flatten_auto_close_summary(text: str, *, always_show: bool = False) -> str:
     return ('\n'.join(lines).strip()).strip()
 
 
+def _is_auto_close_only_result(result: AccountResult) -> bool:
+    text = str(result.notification_text or '').strip()
+    return (not bool(result.ran_scan)) and text.startswith('Auto-close(')
+
+
+def _build_auto_close_message(result: AccountResult, *, now_bj: str) -> str:
+    acct = str(result.account).strip().lower()
+    text = str(result.notification_text or '').strip()
+    if not (result.should_notify and text):
+        return ''
+
+    lines: list[str] = []
+    lines.append("# Auto-close")
+    lines.append(f"## 账户提醒（{acct}）")
+    lines.append('')
+    lines.append(f"北京时间 {now_bj}")
+    lines.append('')
+    lines.append(text)
+    return '\n'.join(lines).strip() + '\n'
+
+
 def build_account_message(
     result: AccountResult,
     *,
@@ -152,6 +173,8 @@ def build_account_message(
 ) -> str:
     if not (result.should_notify and result.notification_text.strip()):
         return ''
+    if _is_auto_close_only_result(result):
+        return _build_auto_close_message(result, now_bj=now_bj)
 
     kept = result.notification_text.strip().splitlines()
     put_n = sum(1 for ln in kept if ' 卖Put ' in ln)
