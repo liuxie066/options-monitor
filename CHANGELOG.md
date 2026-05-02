@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 1.0.2 - 2026-05-02
+
+### Fixed
+- Moved expired option-position auto-close into per-account maintenance so it can run, report, and notify even when scan gating skips the pipeline.
+- Preserved scheduler state selection when trading-day guards block scans, preventing blocked-market runs from falling back to the shared scheduler state file.
+- Hardened auto-close configuration validation and summary formatting so invalid grace/max-close values fail explicitly instead of silently changing close timing.
+
 ## 1.0.1 - 2026-05-01
 
 ### Fixed
