@@ -37,14 +37,30 @@ def write_trade_intake_state(path: str | Path, state: dict[str, Any]) -> Path:
 
 
 def lookup_deal_state(state: dict[str, Any] | None, deal_id: str | None) -> dict[str, Any] | None:
+    item = lookup_deal_state_entry(state, deal_id)
+    if item is None:
+        return None
+    _bucket, payload = item
+    return payload
+
+
+def lookup_deal_state_entry(state: dict[str, Any] | None, deal_id: str | None) -> tuple[str, dict[str, Any]] | None:
     key = str(deal_id or "").strip()
     if not key or not isinstance(state, dict):
         return None
     for bucket_name in STATE_BUCKETS:
         bucket = state.get(bucket_name)
         if isinstance(bucket, dict) and isinstance(bucket.get(key), dict):
-            return dict(bucket[key])
+            return bucket_name, dict(bucket[key])
     return None
+
+
+def is_retryable_unresolved_deal(state: dict[str, Any] | None, deal_id: str | None) -> bool:
+    item = lookup_deal_state_entry(state, deal_id)
+    if item is None:
+        return False
+    bucket, payload = item
+    return bucket == "unresolved_deal_ids" and str(payload.get("status") or "").strip().lower() == "unresolved" and bool(payload.get("retryable"))
 
 
 def upsert_deal_state(

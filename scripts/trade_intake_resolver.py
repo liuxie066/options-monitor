@@ -16,7 +16,8 @@ from scripts.option_positions_core.domain import (
 )
 from scripts.option_positions_core.service import persist_trade_event
 from scripts.trade_event_normalizer import NormalizedTradeDeal
-from scripts.trade_intake_state import lookup_deal_state
+from scripts.trade_intake_state import is_retryable_unresolved_deal, lookup_deal_state
+from scripts.trade_symbol_identity import normalize_symbol_candidate
 from src.application.position_workflows import (
     apply_trade_close_with,
     apply_trade_open_with,
@@ -102,6 +103,26 @@ def _missing_account_mapping_diagnostics(deal: NormalizedTradeDeal) -> dict[str,
     }
 
 
+def _canonical_symbol(value: Any) -> str:
+    return normalize_symbol_candidate(value) or str(value or "").strip().upper()
+
+
+def _missing_required_fields_diagnostics(deal: NormalizedTradeDeal, missing: list[str]) -> dict[str, Any]:
+    normalization = dict(getattr(deal, "normalization_diagnostics", {}) or {})
+    multiplier_resolution = dict(normalization.get("multiplier_resolution") or {})
+    symbol_info = dict(normalization.get("symbol") or {})
+    retryable = set(missing) == {"multiplier"}
+    return {
+        "retryable": retryable,
+        "missing_fields": list(missing),
+        "canonical_symbol": deal.symbol,
+        "raw_symbol_fields": dict(symbol_info.get("raw_fields") or {}),
+        "multiplier_resolution": multiplier_resolution,
+        "futu_account_id": deal.futu_account_id,
+        "visible_account_fields": dict(deal.visible_account_fields or {}),
+    }
+
+
 def _required_open_missing(deal: NormalizedTradeDeal) -> list[str]:
     src = {
         "deal_id": deal.deal_id,
@@ -153,7 +174,7 @@ def _normalize_close_candidate(item: dict[str, Any]) -> CloseCandidate | None:
         record_id=record_id,
         broker=normalize_broker(fields.get("broker")),
         account=normalize_account(fields.get("account")),
-        symbol=str(fields.get("symbol") or "").strip().upper(),
+        symbol=_canonical_symbol(fields.get("symbol")),
         option_type=normalize_option_type(fields.get("option_type")),
         side=normalize_side(fields.get("side")),
         status=normalize_status(fields.get("status")),
@@ -168,7 +189,7 @@ def _normalize_close_candidate(item: dict[str, Any]) -> CloseCandidate | None:
 def _iter_open_candidates(repo: OptionPositionsRepoLike, deal: NormalizedTradeDeal) -> list[CloseCandidate]:
     out: list[CloseCandidate] = []
     deal_account = normalize_account(deal.internal_account)
-    deal_symbol = str(deal.symbol or "").strip().upper()
+    deal_symbol = _canonical_symbol(deal.symbol)
     deal_option_type = normalize_option_type(deal.option_type)
     deal_strike = float(deal.strike) if deal.strike is not None else None
     deal_expiration_ymd = str(deal.expiration_ymd or "").strip() or None
@@ -238,7 +259,7 @@ def resolve_trade_deal(
     persist_trade_event_fn=None,
 ) -> IntakeResolution:
     persist_fn = persist_trade_event_fn or persist_trade_event
-    if lookup_deal_state(state, deal.deal_id) is not None:
+    if lookup_deal_state(state, deal.deal_id) is not None and not is_retryable_unresolved_deal(state, deal.deal_id):
         return _failure(status="skipped", action=None, reason="duplicate_deal_id", deal=deal)
 
     if not deal.deal_id:
@@ -271,6 +292,7 @@ def resolve_trade_deal(
                 action="open",
                 reason="missing_required_fields:" + ",".join(missing),
                 deal=deal,
+                diagnostics=_missing_required_fields_diagnostics(deal, missing),
             )
         if apply_changes:
             return IntakeResolution(

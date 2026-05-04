@@ -23,6 +23,7 @@ from scripts.trade_intake_state import (
     write_trade_intake_state,
 )
 from scripts.trade_push_listener import OpenDTradePushListener
+from src.application.opend_fetch_config import opend_fetch_kwargs
 from src.application.option_positions_facade import resolve_option_positions_repo
 from src.application.trade_intake import process_trade_payload
 
@@ -56,7 +57,20 @@ def _process_payload(
     apply_changes: bool,
     host: str,
     port: int,
+    config: dict | None = None,
 ) -> dict:
+    opend_config = opend_fetch_kwargs(config) if isinstance(config, dict) else None
+    normalize_fn = normalize_trade_deal
+    if isinstance(config, dict):
+        normalize_fn = lambda raw, *, futu_account_mapping=None: normalize_trade_deal(
+            raw,
+            futu_account_mapping=futu_account_mapping,
+            repo_base=repo_base,
+            config=config,
+            host=host,
+            port=port,
+            opend_fetch_config=opend_config,
+        )
     return process_trade_payload(
         payload,
         repo=repo,
@@ -74,7 +88,7 @@ def _process_payload(
             port=port,
             futu_account_ids=futu_account_ids,
         ),
-        normalize_trade_deal_fn=normalize_trade_deal,
+        normalize_trade_deal_fn=normalize_fn,
         resolve_trade_deal_fn=resolve_trade_deal,
     )
 
@@ -144,6 +158,7 @@ def main(argv: list[str] | None = None) -> int:
             apply_changes=apply_changes,
             host=args.host,
             port=args.port,
+            config=cfg,
         )
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
@@ -166,6 +181,7 @@ def main(argv: list[str] | None = None) -> int:
             apply_changes=apply_changes,
             host=args.host,
             port=args.port,
+            config=cfg,
         ),
     )
     while True:

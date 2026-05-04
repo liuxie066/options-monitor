@@ -263,6 +263,17 @@
 - 旧的全局 `portfolio.futu` 和 `symbols[].fetch.host/port` 仍可继续作为兼容默认来源。
 - 这次升级完成的是 **持仓/现金 context 的 per-account OpenD runtime 支持**，不是所有市场数据缓存都已经做成多 gateway 完全隔离。
 
+#### 4.4.2 auto trade intake multiplier fallback
+
+自动成交 intake 写入 open 事件前会先把 broker raw payload 里的 symbol canonicalize 到共享格式（例如 `POP` / `HK.09992` / `HK.POP260528P150000` -> `9992.HK`），再解析 multiplier。fallback 顺序固定为：
+
+1. payload / lookup row 显式字段：`multiplier`、`contract_multiplier`、`lot_size`
+2. contract metadata：本地 `output_shared/state/multiplier_cache.json`，缺失时可按 listener 的 OpenD `host/port` 和 `runtime.option_chain_fetch` 限频刷新
+3. `intake.multiplier_by_symbol[canonical_symbol]`
+4. 显式配置的 market default：`intake.default_multiplier_hk` / `intake.default_multiplier_us`
+
+当所有来源都失败时，open deal 会进入 `unresolved_deal_ids`，并带 `retryable=true`、`missing_fields`、`multiplier_resolution.attempted_sources` 等诊断，方便补 cache/config 后重试。market default 只在配置中存在时使用，不作为代码里的隐式假设。
+
 ### 4.5 notifications：推送目标
 - `channel`: `feishu`，或本机 `openclaw` 已支持的其他通道
 - `target`: `user:open_id` 或 `chat:chat_id`

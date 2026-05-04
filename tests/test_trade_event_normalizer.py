@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from pathlib import Path
+from types import SimpleNamespace
+
 from scripts.trade_event_normalizer import normalize_trade_deal
 
 
@@ -173,3 +176,120 @@ def test_normalize_trade_deal_canonicalizes_us_prefixed_underlying_symbol() -> N
     )
 
     assert deal.symbol == "NVDA"
+
+
+def test_normalize_trade_deal_uses_contract_metadata_multiplier_with_runtime_context(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_resolver(**kwargs):  # type: ignore[no-untyped-def]
+        captured.update(kwargs)
+        return 500, "cache", {
+            "canonical_symbol": kwargs["symbol"],
+            "selected_source": "cache",
+            "attempted_sources": [{"source": "cache", "status": "resolved", "value": 500}],
+        }
+
+    monkeypatch.setattr("scripts.trade_event_normalizer.resolve_multiplier_with_source_and_diagnostics", _fake_resolver)
+
+    deal = normalize_trade_deal(
+        {
+            "deal_id": "deal-8",
+            "futu_account_id": "REAL_HK_1",
+            "code": "HK.POP260528P150000",
+            "owner_stock_code": "HK.09992",
+            "trd_side": "SELL_SHORT",
+            "qty": 1,
+            "price": 6.3,
+        },
+        futu_account_mapping={"REAL_HK_1": "lx"},
+        repo_base=tmp_path,
+        config={"runtime": {"option_chain_fetch": {"max_calls": 7}}},
+        host="opend-host",
+        port=22222,
+        opend_fetch_config={"option_chain_max_calls": 7},
+    )
+
+    assert deal.symbol == "9992.HK"
+    assert deal.multiplier == 500
+    assert deal.multiplier_source == "cache"
+    assert captured["repo_base"] == tmp_path.resolve()
+    assert captured["host"] == "opend-host"
+    assert captured["port"] == 22222
+    assert captured["opend_fetch_config"] == {"option_chain_max_calls": 7}
+    assert deal.normalization_diagnostics["multiplier_resolution"]["selected_source"] == "cache"
+
+
+def test_normalize_trade_deal_uses_static_symbol_multiplier_after_metadata_miss(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        "scripts.multiplier_cache.refresh_via_opend",
+        lambda **_kwargs: SimpleNamespace(ok=False, multiplier=None, error="not available in test"),
+    )
+
+    deal = normalize_trade_deal(
+        {
+            "deal_id": "deal-9",
+            "futu_account_id": "REAL_HK_1",
+            "code": "HK.POP260528P150000",
+            "trd_side": "SELL_SHORT",
+            "qty": 1,
+            "price": 6.3,
+        },
+        futu_account_mapping={"REAL_HK_1": "lx"},
+        repo_base=tmp_path,
+        config={"intake": {"multiplier_by_symbol": {"9992.HK": 1000}}},
+    )
+
+    assert deal.symbol == "9992.HK"
+    assert deal.multiplier == 1000
+    assert deal.multiplier_source == "config:intake.multiplier_by_symbol"
+    attempts = deal.normalization_diagnostics["multiplier_resolution"]["attempted_sources"]
+    assert any(item["source"] == "config:intake.multiplier_by_symbol" and item["status"] == "resolved" for item in attempts)
+
+
+def test_normalize_trade_deal_uses_configured_market_default_multiplier(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        "scripts.multiplier_cache.refresh_via_opend",
+        lambda **_kwargs: SimpleNamespace(ok=False, multiplier=None, error="not available in test"),
+    )
+
+    hk_deal = normalize_trade_deal(
+        {
+            "deal_id": "deal-10",
+            "futu_account_id": "REAL_HK_1",
+            "owner_stock_code": "HK.09992",
+            "option_type": "PUT",
+            "position_effect": "OPEN",
+            "trade_side": "SELL",
+            "qty": 1,
+            "price": 6.3,
+            "strike": 150,
+            "expiry_date": "260528",
+            "currency": "HKD",
+        },
+        futu_account_mapping={"REAL_HK_1": "lx"},
+        repo_base=tmp_path,
+        config={"intake": {"default_multiplier_hk": 1000}},
+    )
+    us_deal = normalize_trade_deal(
+        {
+            "deal_id": "deal-11",
+            "futu_account_id": "REAL_US_1",
+            "underlying_symbol": "US.NVDA",
+            "option_type": "CALL",
+            "position_effect": "OPEN",
+            "trade_side": "SELL",
+            "qty": 1,
+            "price": 1.23,
+            "strike": 100,
+            "expiry_date": "260618",
+            "currency_code": "USD",
+        },
+        futu_account_mapping={"REAL_US_1": "lx"},
+        repo_base=tmp_path,
+        config={"intake": {"default_multiplier_us": 100}},
+    )
+
+    assert hk_deal.multiplier == 1000
+    assert hk_deal.multiplier_source == "config:intake.default_multiplier_hk"
+    assert us_deal.multiplier == 100
+    assert us_deal.multiplier_source == "config:intake.default_multiplier_us"

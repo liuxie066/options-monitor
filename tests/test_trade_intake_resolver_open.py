@@ -81,11 +81,54 @@ def test_resolve_trade_open_rejects_duplicate_deal_id() -> None:
     assert result.reason == "duplicate_deal_id"
 
 
+def test_resolve_trade_open_retries_retryable_unresolved_deal_id() -> None:
+    result = resolve_trade_deal(
+        _deal(),
+        repo=FakeRepo(),
+        state={"unresolved_deal_ids": {"deal-open-1": {"status": "unresolved", "retryable": True}}},
+        apply_changes=False,
+    )
+
+    assert result.status == "dry_run"
+    assert result.reason == "preview_open"
+
+
 def test_resolve_trade_open_rejects_non_sell_side() -> None:
     result = resolve_trade_deal(_deal(side="buy"), repo=FakeRepo(), state={}, apply_changes=False)
 
     assert result.status == "unresolved"
     assert result.reason == "unsupported_open_side"
+
+
+def test_resolve_trade_open_missing_multiplier_is_retryable_with_diagnostics() -> None:
+    result = resolve_trade_deal(
+        _deal(
+            multiplier=None,
+            multiplier_source=None,
+            normalization_diagnostics={
+                "symbol": {"canonical": "9992.HK", "raw_fields": {"code": "HK.POP260528P150000"}},
+                "multiplier_resolution": {
+                    "canonical_symbol": "9992.HK",
+                    "selected_source": None,
+                    "attempted_sources": [
+                        {"source": "payload", "status": "missing"},
+                        {"source": "cache", "status": "miss"},
+                        {"source": "config:intake.multiplier_by_symbol", "status": "miss"},
+                    ],
+                },
+            },
+        ),
+        repo=FakeRepo(),
+        state={},
+        apply_changes=False,
+    )
+
+    assert result.status == "unresolved"
+    assert result.reason == "missing_required_fields:multiplier"
+    assert result.diagnostics["retryable"] is True
+    assert result.diagnostics["missing_fields"] == ["multiplier"]
+    assert result.diagnostics["multiplier_resolution"]["canonical_symbol"] == "9992.HK"
+    assert result.diagnostics["raw_symbol_fields"] == {"code": "HK.POP260528P150000"}
 
 
 def test_resolve_trade_open_missing_account_mapping_exposes_diagnostics() -> None:

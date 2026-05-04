@@ -16,6 +16,11 @@ from scripts.option_positions_core.domain import (
     normalize_option_type,
     normalize_side,
 )
+from scripts.trade_symbol_identity import normalize_symbol_candidate
+
+
+def _canonical_trade_symbol(value: Any) -> str:
+    return normalize_symbol_candidate(value) or str(value or "").strip().upper()
 
 
 @dataclass(frozen=True)
@@ -75,7 +80,7 @@ def trade_event_from_normalized_deal(deal: Any) -> TradeEvent:
         source_name="opend_push",
         broker=normalize_broker(getattr(deal, "broker", None) or "富途"),
         account=normalize_account(getattr(deal, "internal_account", None) or ""),
-        symbol=str(getattr(deal, "symbol", "") or "").strip().upper(),
+        symbol=_canonical_trade_symbol(getattr(deal, "symbol", "")),
         option_type=normalize_option_type(getattr(deal, "option_type", None) or ""),
         side=str(getattr(deal, "side", "") or "").strip().lower(),
         position_effect=str(getattr(deal, "position_effect", "") or "").strip().lower(),
