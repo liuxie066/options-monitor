@@ -132,6 +132,7 @@ def execute_manual_open(
     underlying_share_locked: int | None,
     note: str | None,
     dry_run: bool,
+    opened_at_ms: int | None = None,
 ) -> dict[str, Any]:
     command = OpenPositionCommand(
         broker=broker,
@@ -147,6 +148,7 @@ def execute_manual_open(
         premium_per_share=premium_per_share,
         underlying_share_locked=underlying_share_locked,
         note=note,
+        opened_at_ms=opened_at_ms,
     )
     fields = build_open_fields(command)
     if dry_run:
