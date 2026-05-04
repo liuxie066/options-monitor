@@ -239,6 +239,7 @@ def main():
                 premium_per_share=(float(p['premium_per_share']) if p.get('premium_per_share') is not None else None),
                 underlying_share_locked=None,
                 note=f"user_input: {parsed.get('raw')}",
+                opened_at_ms=p.get('fill_time_ms'),
                 dry_run=bool(args.dry_run and not args.apply),
             )
         except ValueError as exc:
