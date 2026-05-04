@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.0.8 - 2026-05-04
+
+### Fixed
+- Restored spaced broker trade-side aliases such as `sell short`, `short sell`, and `buy to close` so valid option fills continue to normalize to open/close effects after the shared contract identity refactor.
+
 ## 1.0.7 - 2026-05-04
 
 ### Changed

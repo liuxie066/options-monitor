@@ -16,11 +16,15 @@ def _compact_choice(value: Any) -> str:
         .strip()
         .replace("（", "(")
         .replace("）", ")")
-        .replace(" ", "")
-        .replace("\u3000", "")
+        .replace(" ", "_")
+        .replace("\u3000", "_")
         .replace("-", "_")
         .lower()
     )
+
+
+def _alias_lookup(aliases: dict[str, str], compact: str) -> str | None:
+    return aliases.get(compact) or aliases.get(compact.replace("_", ""))
 
 
 def normalize_trade_side(value: Any) -> str | None:
@@ -62,7 +66,7 @@ def normalize_trade_side(value: Any) -> str | None:
         "卖开": "sell",
         "賣開": "sell",
     }
-    return aliases.get(compact)
+    return _alias_lookup(aliases, compact)
 
 
 def normalize_position_effect(value: Any) -> str | None:
@@ -112,7 +116,7 @@ def normalize_position_effect(value: Any) -> str | None:
         "adjusted": "adjust",
         "adjustment": "adjust",
     }
-    return aliases.get(compact)
+    return _alias_lookup(aliases, compact)
 
 
 def normalize_contract_expiration(value: Any, *, fallback_raw: bool = False) -> str | None:
