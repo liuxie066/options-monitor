@@ -160,35 +160,64 @@ def _positive_int(value: Any) -> int | None:
     return None
 
 
-def _static_config_multiplier(config: dict[str, Any] | None, symbol: str) -> tuple[int | None, str | None, dict[str, Any]]:
-    diagnostics: dict[str, Any] = {"attempted_sources": []}
+def _intake_config_candidates(
+    *,
+    repo_base: Path,
+    config: dict[str, Any] | None,
+) -> list[tuple[str, dict[str, Any]]]:
+    candidates: list[tuple[str, dict[str, Any]]] = []
     cfg = config if isinstance(config, dict) else {}
-    intake = cfg.get("intake") if isinstance(cfg.get("intake"), dict) else {}
+    intake = cfg.get("intake") if isinstance(cfg.get("intake"), dict) else None
+    if isinstance(intake, dict):
+        candidates.append(("config", intake))
+    else:
+        candidates.append(("config", {}))
+
+    for filename in ("config.hk.json", "config.us.json"):
+        path = Path(repo_base) / filename
+        try:
+            obj = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        file_intake = obj.get("intake") if isinstance(obj, dict) else None
+        if isinstance(file_intake, dict):
+            candidates.append((f"config-file:{filename}", file_intake))
+    return candidates
+
+
+def _static_config_multiplier(
+    *,
+    repo_base: Path,
+    config: dict[str, Any] | None,
+    symbol: str,
+) -> tuple[int | None, str | None, dict[str, Any]]:
+    diagnostics: dict[str, Any] = {"attempted_sources": []}
     sym = normalize_symbol(symbol)
 
-    by_symbol = intake.get("multiplier_by_symbol") if isinstance(intake, dict) else None
-    source = "config:intake.multiplier_by_symbol"
-    if isinstance(by_symbol, dict):
-        normalized_map = {
-            normalize_symbol(str(key or "")): value
-            for key, value in by_symbol.items()
-            if str(key or "").strip()
-        }
-        value = _positive_int(normalized_map.get(sym))
+    for prefix, intake in _intake_config_candidates(repo_base=repo_base, config=config):
+        by_symbol = intake.get("multiplier_by_symbol")
+        source = f"{prefix}:intake.multiplier_by_symbol"
+        if isinstance(by_symbol, dict):
+            normalized_map = {
+                normalize_symbol(str(key or "")): value
+                for key, value in by_symbol.items()
+                if str(key or "").strip()
+            }
+            value = _positive_int(normalized_map.get(sym))
+            if value is not None:
+                diagnostics["attempted_sources"].append({"source": source, "status": "resolved", "value": value})
+                return value, source, diagnostics
+            diagnostics["attempted_sources"].append({"source": source, "status": "miss", "symbol": sym})
+        else:
+            diagnostics["attempted_sources"].append({"source": source, "status": "missing_config"})
+
+        default_key = "default_multiplier_hk" if sym.endswith(".HK") else "default_multiplier_us"
+        source = f"{prefix}:intake.{default_key}"
+        value = _positive_int(intake.get(default_key))
         if value is not None:
             diagnostics["attempted_sources"].append({"source": source, "status": "resolved", "value": value})
             return value, source, diagnostics
-        diagnostics["attempted_sources"].append({"source": source, "status": "miss", "symbol": sym})
-    else:
-        diagnostics["attempted_sources"].append({"source": source, "status": "missing_config"})
-
-    default_key = "default_multiplier_hk" if sym.endswith(".HK") else "default_multiplier_us"
-    source = f"config:intake.{default_key}"
-    value = _positive_int(intake.get(default_key) if isinstance(intake, dict) else None)
-    if value is not None:
-        diagnostics["attempted_sources"].append({"source": source, "status": "resolved", "value": value})
-        return value, source, diagnostics
-    diagnostics["attempted_sources"].append({"source": source, "status": "missing_or_invalid"})
+        diagnostics["attempted_sources"].append({"source": source, "status": "missing_or_invalid"})
     return None, None, diagnostics
 
 
@@ -262,7 +291,11 @@ def resolve_multiplier_with_source_and_diagnostics(
     else:
         diagnostics["attempted_sources"].append({"source": "opend", "status": "skipped"})
 
-    static_value, static_source, static_diagnostics = _static_config_multiplier(config, sym)
+    static_value, static_source, static_diagnostics = _static_config_multiplier(
+        repo_base=repo_base,
+        config=config,
+        symbol=sym,
+    )
     diagnostics["attempted_sources"].extend(static_diagnostics.get("attempted_sources") or [])
     if static_value is not None and static_source:
         diagnostics["selected_source"] = static_source

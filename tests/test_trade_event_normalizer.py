@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -293,3 +294,88 @@ def test_normalize_trade_deal_uses_configured_market_default_multiplier(monkeypa
     assert hk_deal.multiplier_source == "config:intake.default_multiplier_hk"
     assert us_deal.multiplier == 100
     assert us_deal.multiplier_source == "config:intake.default_multiplier_us"
+
+
+def test_normalize_trade_deal_uses_repo_hk_intake_config_when_active_config_has_no_intake(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        "scripts.multiplier_cache.refresh_via_opend",
+        lambda **_kwargs: SimpleNamespace(ok=False, multiplier=None, error="not available in test"),
+    )
+    (tmp_path / "config.hk.json").write_text(
+        json.dumps(
+            {
+                "intake": {
+                    "default_multiplier_hk": 1000,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    deal = normalize_trade_deal(
+        {
+            "deal_id": "deal-12",
+            "futu_account_id": "REAL_HK_1",
+            "owner_stock_code": "HK.09992",
+            "option_type": "PUT",
+            "position_effect": "OPEN",
+            "trade_side": "SELL",
+            "qty": 1,
+            "price": 6.3,
+            "strike": 150,
+            "expiry_date": "260528",
+            "currency": "HKD",
+        },
+        futu_account_mapping={"REAL_HK_1": "lx"},
+        repo_base=tmp_path,
+        config={"trade_intake": {"mode": "dry-run"}},
+    )
+
+    assert deal.symbol == "9992.HK"
+    assert deal.multiplier == 1000
+    assert deal.multiplier_source == "config-file:config.hk.json:intake.default_multiplier_hk"
+
+
+def test_normalize_trade_deal_does_not_let_hk_option_display_name_block_code_fallback(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        "scripts.multiplier_cache.refresh_via_opend",
+        lambda **_kwargs: SimpleNamespace(ok=False, multiplier=None, error="not available in test"),
+    )
+    (tmp_path / "config.hk.json").write_text(
+        json.dumps(
+            {
+                "intake": {
+                    "default_multiplier_hk": 1000,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    deal = normalize_trade_deal(
+        {
+            "deal_id": "deal-13",
+            "futu_account_id": "REAL_HK_1",
+            "symbol": "泡泡玛特 260528 135.00 沽",
+            "code": "HK.POP260528P135000",
+            "trd_side": "SELL_SHORT",
+            "qty": 1,
+            "price": 5.5,
+        },
+        futu_account_mapping={"REAL_HK_1": "lx"},
+        repo_base=tmp_path,
+        config={"trade_intake": {"mode": "dry-run"}},
+    )
+
+    assert deal.symbol == "9992.HK"
+    assert deal.option_type == "put"
+    assert deal.strike == 135.0
+    assert deal.expiration_ymd == "2026-05-28"
+    assert deal.multiplier == 1000
+    assert deal.multiplier_source == "config-file:config.hk.json:intake.default_multiplier_hk"
