@@ -26,6 +26,8 @@ def build_trade_intake_audit_event(
         out["futu_account_id"] = deal_dict.get("futu_account_id")
         out["visible_account_fields"] = deal_dict.get("visible_account_fields")
         out["account_mapping_keys"] = deal_dict.get("account_mapping_keys")
+        if deal_dict.get("normalization_diagnostics"):
+            out["normalization_diagnostics"] = deal_dict.get("normalization_diagnostics")
     if isinstance(result, dict):
         out["result"] = result
         out["deal_id"] = out.get("deal_id") or result.get("deal_id")
@@ -106,6 +108,12 @@ def process_trade_payload(
                 },
             )
         elif result.status == "unresolved":
+            try:
+                prior = dict((state.get("unresolved_deal_ids") or {}).get(deal.deal_id) or {})
+            except Exception:
+                prior = {}
+            diagnostics = dict(result_dict.get("diagnostics") or {})
+            retryable = bool(diagnostics.get("retryable"))
             state = upsert_deal_state_fn(
                 state,
                 bucket="unresolved_deal_ids",
@@ -116,6 +124,9 @@ def process_trade_payload(
                     "account": result.account,
                     "applied_record_ids": [],
                     "reason": result.reason,
+                    "retryable": retryable,
+                    "attempt_count": int(prior.get("attempt_count") or 0) + 1,
+                    "diagnostics": diagnostics,
                 },
             )
             write_trade_intake_state_fn(state_path, state)

@@ -24,6 +24,7 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 try:
     import fcntl
@@ -147,6 +148,129 @@ def get_cached_multiplier_source(cache: dict, symbol: str) -> str | None:
     return None
 
 
+def _positive_int(value: Any) -> int | None:
+    try:
+        if value in (None, ""):
+            return None
+        out = int(float(value))
+        if out > 0:
+            return out
+    except Exception:
+        return None
+    return None
+
+
+def _static_config_multiplier(config: dict[str, Any] | None, symbol: str) -> tuple[int | None, str | None, dict[str, Any]]:
+    diagnostics: dict[str, Any] = {"attempted_sources": []}
+    cfg = config if isinstance(config, dict) else {}
+    intake = cfg.get("intake") if isinstance(cfg.get("intake"), dict) else {}
+    sym = normalize_symbol(symbol)
+
+    by_symbol = intake.get("multiplier_by_symbol") if isinstance(intake, dict) else None
+    source = "config:intake.multiplier_by_symbol"
+    if isinstance(by_symbol, dict):
+        normalized_map = {
+            normalize_symbol(str(key or "")): value
+            for key, value in by_symbol.items()
+            if str(key or "").strip()
+        }
+        value = _positive_int(normalized_map.get(sym))
+        if value is not None:
+            diagnostics["attempted_sources"].append({"source": source, "status": "resolved", "value": value})
+            return value, source, diagnostics
+        diagnostics["attempted_sources"].append({"source": source, "status": "miss", "symbol": sym})
+    else:
+        diagnostics["attempted_sources"].append({"source": source, "status": "missing_config"})
+
+    default_key = "default_multiplier_hk" if sym.endswith(".HK") else "default_multiplier_us"
+    source = f"config:intake.{default_key}"
+    value = _positive_int(intake.get(default_key) if isinstance(intake, dict) else None)
+    if value is not None:
+        diagnostics["attempted_sources"].append({"source": source, "status": "resolved", "value": value})
+        return value, source, diagnostics
+    diagnostics["attempted_sources"].append({"source": source, "status": "missing_or_invalid"})
+    return None, None, diagnostics
+
+
+def resolve_multiplier_with_source_and_diagnostics(
+    *,
+    repo_base: Path,
+    symbol: str | None,
+    multiplier: int | float | None = None,
+    allow_opend_refresh: bool = False,
+    host: str = "127.0.0.1",
+    port: int = 11111,
+    limit_expirations: int = 1,
+    opend_fetch_config: dict[str, float | int] | None = None,
+    config: dict[str, Any] | None = None,
+) -> tuple[int | None, str | None, dict[str, Any]]:
+    sym = normalize_symbol(str(symbol or ""))
+    diagnostics: dict[str, Any] = {
+        "canonical_symbol": sym,
+        "selected_source": None,
+        "attempted_sources": [],
+    }
+
+    explicit = _positive_int(multiplier)
+    if explicit is not None:
+        diagnostics["selected_source"] = "payload"
+        diagnostics["attempted_sources"].append({"source": "payload", "status": "resolved", "value": explicit})
+        return explicit, "payload", diagnostics
+    diagnostics["attempted_sources"].append(
+        {
+            "source": "payload",
+            "status": "missing" if multiplier in (None, "") else "invalid",
+        }
+    )
+
+    if not sym:
+        diagnostics["attempted_sources"].append({"source": "contract_metadata", "status": "skipped_no_symbol"})
+        return None, None, diagnostics
+
+    cache_path = default_cache_path(repo_base)
+    cache = load_cache(cache_path)
+    cached = get_cached_multiplier(cache, sym)
+    if cached:
+        source = get_cached_multiplier_source(cache, sym) or "cache"
+        diagnostics["selected_source"] = source
+        diagnostics["attempted_sources"].append({"source": "cache", "status": "resolved", "value": int(cached)})
+        return int(cached), source, diagnostics
+    diagnostics["attempted_sources"].append({"source": "cache", "status": "miss"})
+
+    if allow_opend_refresh:
+        refreshed = refresh_via_opend(
+            repo_base=repo_base,
+            symbol=sym,
+            host=host,
+            port=port,
+            limit_expirations=limit_expirations,
+            opend_fetch_config=opend_fetch_config,
+        )
+        if refreshed.ok and refreshed.multiplier and int(refreshed.multiplier) > 0:
+            update = store_multiplier({}, sym, int(refreshed.multiplier), source="opend")
+            merge_cache_updates(cache_path, update)
+            diagnostics["selected_source"] = "opend"
+            diagnostics["attempted_sources"].append({"source": "opend", "status": "resolved", "value": int(refreshed.multiplier)})
+            return int(refreshed.multiplier), "opend", diagnostics
+        diagnostics["attempted_sources"].append(
+            {
+                "source": "opend",
+                "status": "miss" if not refreshed.error else "error",
+                "error": refreshed.error,
+            }
+        )
+    else:
+        diagnostics["attempted_sources"].append({"source": "opend", "status": "skipped"})
+
+    static_value, static_source, static_diagnostics = _static_config_multiplier(config, sym)
+    diagnostics["attempted_sources"].extend(static_diagnostics.get("attempted_sources") or [])
+    if static_value is not None and static_source:
+        diagnostics["selected_source"] = static_source
+        return int(static_value), static_source, diagnostics
+
+    return None, None, diagnostics
+
+
 def refresh_via_opend(
     *,
     repo_base: Path,
@@ -221,38 +345,17 @@ def resolve_multiplier_with_source(
     limit_expirations: int = 1,
     opend_fetch_config: dict[str, float | int] | None = None,
 ) -> tuple[int | None, str | None]:
-    if multiplier is not None:
-        try:
-            explicit = int(float(multiplier))
-        except Exception:
-            explicit = 0
-        if explicit > 0:
-            return explicit, "payload"
-    sym = normalize_symbol(str(symbol or ""))
-    if not sym:
-        return None, None
-
-    cache_path = default_cache_path(repo_base)
-    cache = load_cache(cache_path)
-    cached = get_cached_multiplier(cache, sym)
-    if cached:
-        return int(cached), (get_cached_multiplier_source(cache, sym) or "cache")
-    if not allow_opend_refresh:
-        return None, None
-
-    refreshed = refresh_via_opend(
+    value, source, _diagnostics = resolve_multiplier_with_source_and_diagnostics(
         repo_base=repo_base,
-        symbol=sym,
+        symbol=symbol,
+        multiplier=multiplier,
+        allow_opend_refresh=allow_opend_refresh,
         host=host,
         port=port,
         limit_expirations=limit_expirations,
         opend_fetch_config=opend_fetch_config,
     )
-    if not refreshed.ok or not refreshed.multiplier or int(refreshed.multiplier) <= 0:
-        return None, None
-    update = store_multiplier({}, sym, int(refreshed.multiplier), source="opend")
-    merge_cache_updates(cache_path, update)
-    return int(refreshed.multiplier), "opend"
+    return value, source
 
 
 def resolve_multiplier(

@@ -7,7 +7,7 @@ import re
 from typing import Any
 
 from scripts.option_positions_core.domain import normalize_currency, normalize_option_type
-from scripts.multiplier_cache import resolve_multiplier_with_source
+from scripts.multiplier_cache import resolve_multiplier_with_source_and_diagnostics
 from scripts.parse_option_message import parse_exp
 from scripts.trade_account_mapping import resolve_internal_account
 from scripts.trade_account_identity import (
@@ -136,6 +136,26 @@ def _normalize_trade_time_ms(value: Any) -> int | None:
     return None
 
 
+_SYMBOL_KEYS = (
+    "symbol",
+    "underlying_symbol",
+    "owner_symbol",
+    "owner_stock_code",
+    "owner_stock_code_full",
+    "underlying_stock_code",
+    "owner_code",
+    "underlying_code",
+    "stock_code",
+    "code",
+    "owner_stock_name",
+    "underlying_stock_name",
+    "owner_name",
+    "stock_name",
+    "name",
+    "underlying",
+)
+
+
 @dataclass(frozen=True)
 class NormalizedTradeDeal:
     broker: str
@@ -158,6 +178,7 @@ class NormalizedTradeDeal:
     raw_payload: dict[str, Any]
     visible_account_fields: dict[str, str] = field(default_factory=dict)
     account_mapping_keys: list[str] = field(default_factory=list)
+    normalization_diagnostics: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -167,30 +188,22 @@ def normalize_trade_deal(
     payload: dict[str, Any] | Any,
     *,
     futu_account_mapping: dict[str, str] | None = None,
+    repo_base: Path | None = None,
+    config: dict[str, Any] | None = None,
+    host: str = "127.0.0.1",
+    port: int = 11111,
+    opend_fetch_config: dict[str, float | int] | None = None,
 ) -> NormalizedTradeDeal:
     src = payload if isinstance(payload, dict) else {}
     visible_account_fields = extract_visible_account_fields(src)
     futu_account_id = extract_primary_account_id(src)
     option_code_info = _parse_futu_option_code(_pick(src, "code", "stock_code", "symbol"))
-    symbol = pick_first_normalized_symbol(
-        src,
-        "symbol",
-        "underlying_symbol",
-        "owner_symbol",
-        "owner_stock_code",
-        "owner_stock_code_full",
-        "underlying_stock_code",
-        "owner_code",
-        "underlying_code",
-        "stock_code",
-        "code",
-        "owner_stock_name",
-        "underlying_stock_name",
-        "owner_name",
-        "stock_name",
-        "name",
-        "underlying",
-    )
+    raw_symbol_fields = {
+        key: src.get(key)
+        for key in _SYMBOL_KEYS
+        if key in src and src.get(key) not in (None, "")
+    }
+    symbol = pick_first_normalized_symbol(src, *_SYMBOL_KEYS)
     if symbol is None:
         root_symbol = normalize_symbol_candidate(option_code_info.get("option_code_root"))
         if root_symbol:
@@ -224,13 +237,17 @@ def normalize_trade_deal(
     position_effect = _normalize_position_effect(
         _pick(src, "position_effect", "position_side", "offset_type", "open_close", "trd_side", "trade_side", "side")
     )
-    repo_base = Path(__file__).resolve().parents[1]
+    base = Path(repo_base).resolve() if repo_base is not None else Path(__file__).resolve().parents[1]
     multiplier = _norm_int(_pick(src, "multiplier", "contract_multiplier", "lot_size"))
-    multiplier, multiplier_source = resolve_multiplier_with_source(
-        repo_base=repo_base,
+    multiplier, multiplier_source, multiplier_diagnostics = resolve_multiplier_with_source_and_diagnostics(
+        repo_base=base,
         symbol=symbol,
         multiplier=multiplier,
         allow_opend_refresh=True,
+        host=host,
+        port=port,
+        opend_fetch_config=opend_fetch_config,
+        config=config,
     )
 
     strike = _norm_float(_pick(src, "strike", "strike_price"))
@@ -261,4 +278,12 @@ def normalize_trade_deal(
         raw_payload=dict(src),
         visible_account_fields=visible_account_fields,
         account_mapping_keys=sorted(str(key).strip() for key in (futu_account_mapping or {}).keys() if str(key).strip()),
+        normalization_diagnostics={
+            "symbol": {
+                "canonical": symbol,
+                "raw_fields": raw_symbol_fields,
+                "option_code": option_code_info,
+            },
+            "multiplier_resolution": multiplier_diagnostics,
+        },
     )

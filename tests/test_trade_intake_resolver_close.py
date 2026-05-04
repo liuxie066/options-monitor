@@ -88,6 +88,16 @@ def test_match_close_positions_ignores_market_only_persisted_rows() -> None:
     assert [(m.record_id, m.contracts_to_close) for m in matches] == [("rec2", 3)]
 
 
+def test_match_close_positions_canonicalizes_candidate_and_deal_symbols() -> None:
+    raw_alias = _record("rec-pop", 100, 1)
+    raw_alias["fields"]["symbol"] = "POP"
+    repo = FakeRepo([raw_alias])
+
+    matches = match_close_positions(repo, _deal(symbol="HK.09992", contracts=1))
+
+    assert [(m.record_id, m.contracts_to_close) for m in matches] == [("rec-pop", 1)]
+
+
 def test_resolve_trade_close_dry_run_builds_patches() -> None:
     repo = FakeRepo([_record("rec1", 100, 1), _record("rec2", 200, 2)])
 

@@ -3,7 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from scripts.trade_event_normalizer import NormalizedTradeDeal
-from src.application.trade_intake import build_trade_intake_audit_event
+from scripts.trade_intake_state import upsert_deal_state
+from src.application.trade_intake import build_trade_intake_audit_event, process_trade_payload
 
 
 def test_build_audit_event_promotes_multiplier_source_to_top_level() -> None:
@@ -28,6 +29,7 @@ def test_build_audit_event_promotes_multiplier_source_to_top_level() -> None:
         raw_payload={"deal_id": "deal-1"},
         visible_account_fields={"trade_acc_id": "REAL_1"},
         account_mapping_keys=["REAL_1"],
+        normalization_diagnostics={"multiplier_resolution": {"selected_source": "cache"}},
     )
 
     event = build_trade_intake_audit_event("normalized", deal=deal)
@@ -41,6 +43,7 @@ def test_build_audit_event_promotes_multiplier_source_to_top_level() -> None:
     assert event["deal"]["multiplier_source"] == "cache"
     assert event["visible_account_fields"] == {"trade_acc_id": "REAL_1"}
     assert event["account_mapping_keys"] == ["REAL_1"]
+    assert event["normalization_diagnostics"]["multiplier_resolution"]["selected_source"] == "cache"
 
 
 def test_process_payload_appends_ledger_persist_audit_on_applied(monkeypatch, tmp_path: Path) -> None:
@@ -269,3 +272,85 @@ def test_build_audit_event_keeps_shared_visible_account_fields_after_normalizati
         "account_id": "ACCOUNT_1",
         "trade_acc_id": "TRADE_1",
     }
+
+
+def test_process_payload_records_retryable_unresolved_diagnostics(tmp_path: Path) -> None:
+    deal = NormalizedTradeDeal(
+        broker="富途",
+        futu_account_id="REAL_1",
+        internal_account="lx",
+        deal_id="deal-retry-1",
+        order_id="order-retry-1",
+        symbol="9992.HK",
+        option_type="put",
+        side="sell",
+        position_effect="open",
+        contracts=1,
+        price=6.3,
+        strike=150.0,
+        multiplier=None,
+        multiplier_source=None,
+        expiration_ymd="2026-05-28",
+        currency="HKD",
+        trade_time_ms=1000,
+        raw_payload={"deal_id": "deal-retry-1"},
+        normalization_diagnostics={
+            "symbol": {"canonical": "9992.HK", "raw_fields": {"code": "HK.POP260528P150000"}},
+            "multiplier_resolution": {"canonical_symbol": "9992.HK", "attempted_sources": []},
+        },
+    )
+
+    class _Result:
+        status = "unresolved"
+        action = "open"
+        reason = "missing_required_fields:multiplier"
+        deal_id = "deal-retry-1"
+        account = "lx"
+        operations: list[dict] = []
+        diagnostics = {
+            "retryable": True,
+            "missing_fields": ["multiplier"],
+            "multiplier_resolution": {"canonical_symbol": "9992.HK"},
+        }
+
+        def to_dict(self) -> dict:
+            return {
+                "status": self.status,
+                "action": self.action,
+                "reason": self.reason,
+                "deal_id": self.deal_id,
+                "account": self.account,
+                "operations": self.operations,
+                "diagnostics": self.diagnostics,
+            }
+
+    events: list[dict] = []
+    writes: list[dict] = []
+    initial_state = {
+        "processed_deal_ids": {},
+        "failed_deal_ids": {},
+        "unresolved_deal_ids": {"deal-retry-1": {"status": "unresolved", "retryable": True, "attempt_count": 2}},
+    }
+
+    out = process_trade_payload(
+        {"deal_id": "deal-retry-1"},
+        repo=object(),
+        state_path=tmp_path / "state.json",
+        audit_path=tmp_path / "audit.jsonl",
+        account_mapping={"REAL_1": "lx"},
+        apply_changes=True,
+        load_trade_intake_state_fn=lambda _path: initial_state,
+        write_trade_intake_state_fn=lambda _path, state: writes.append(dict(state)),
+        upsert_deal_state_fn=upsert_deal_state,
+        append_trade_intake_audit_fn=lambda _path, event: events.append(dict(event)),
+        enrich_trade_payload_fn=None,
+        normalize_trade_deal_fn=lambda payload, futu_account_mapping=None: deal,
+        resolve_trade_deal_fn=lambda *_args, **_kwargs: _Result(),
+    )
+
+    assert out["status"] == "unresolved"
+    state_item = writes[-1]["unresolved_deal_ids"]["deal-retry-1"]
+    assert state_item["retryable"] is True
+    assert state_item["attempt_count"] == 3
+    assert state_item["diagnostics"]["missing_fields"] == ["multiplier"]
+    assert any(event.get("phase") == "resolved" and event.get("diagnostics", {}).get("retryable") is True for event in events)
