@@ -13,10 +13,18 @@ from scripts.trade_contract_identity import (
 
 def test_trade_side_and_position_effect_aliases_are_centralized() -> None:
     assert normalize_trade_side("SELL_SHORT") == "sell"
+    assert normalize_trade_side("sell short") == "sell"
+    assert normalize_trade_side("short sell") == "sell"
+    assert normalize_trade_side("buy to close") == "buy"
     assert normalize_trade_side("buy back") == "buy"
     assert normalize_trade_side("买平") == "buy"
+    assert normalize_trade_side("买 平") == "buy"
     assert normalize_position_effect("SELL_SHORT") == "open"
+    assert normalize_position_effect("sell short") == "open"
+    assert normalize_position_effect("short sell") == "open"
+    assert normalize_position_effect("buy to close") == "close"
     assert normalize_position_effect("buy back") == "close"
+    assert normalize_position_effect("买 平") == "close"
     assert normalize_position_effect("voided") == "void"
     assert normalize_position_effect("adjustment") == "adjust"
 
