@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.0.5 - 2026-05-04
+
+### Fixed
+- Preserved broker fill timestamps from Futu trade messages during option intake so persisted events no longer fall back to local execution time.
+- Persisted valid Futu option open fills that omit multiplier by resolving multiplier from payload data, contract metadata, configured symbol overrides, or market defaults.
+- Canonicalized Futu option symbols before intake persistence and close matching, preventing non-canonical broker payload text from drifting ledger and timeline state.
+- Stored retryable unresolved intake records with structured diagnostics when required normalization fields are still missing.
+
 ## 1.0.4 - 2026-05-02
 
 ### Fixed
