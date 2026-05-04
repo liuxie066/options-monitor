@@ -267,6 +267,61 @@ def parse_underlying_name(s: str) -> str | None:
     return None
 
 
+try:
+    from zoneinfo import ZoneInfo as _ZoneInfo, ZoneInfoNotFoundError as _ZoneInfoNotFoundError
+    _ZONEINFO_AVAILABLE = True
+except ImportError:
+    _ZoneInfo = None  # type: ignore[assignment]
+
+    class _ZoneInfoNotFoundError(Exception):  # type: ignore[no-redef]
+        pass
+
+    _ZONEINFO_AVAILABLE = False
+
+
+_TZ_HINTS: dict[str, str] = {
+    '香港': 'Asia/Hong_Kong',
+    '美国': 'America/New_York',
+}
+
+
+def parse_fill_timestamp(s: str) -> int | None:
+    """Parse fill timestamp from Futu trade message.
+
+    Supports:
+    - '2026/05/04 10:52:11 (香港)' -> UTC milliseconds
+    - '2026/04/26 15:30:00 (美国)' -> UTC milliseconds
+    - '2026/05/04 10:52:11' (no hint, treated as UTC) -> UTC milliseconds
+
+    Returns None when no timestamp is found or parsing fails.
+    """
+    m = re.search(r'(\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2})\s*\(([^)]+)\)', s)
+    if m:
+        dt_str = m.group(1)
+        tz_hint = m.group(2).strip()
+    else:
+        m2 = re.search(r'(\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2})', s)
+        if not m2:
+            return None
+        dt_str = m2.group(1)
+        tz_hint = ''
+
+    try:
+        dt_naive = datetime.strptime(dt_str, '%Y/%m/%d %H:%M:%S')
+        tz_name = _TZ_HINTS.get(tz_hint)
+        if tz_name and _ZONEINFO_AVAILABLE:
+            try:
+                tz = _ZoneInfo(tz_name)
+                dt = dt_naive.replace(tzinfo=tz)
+            except _ZoneInfoNotFoundError:
+                dt = dt_naive.replace(tzinfo=timezone.utc)
+        else:
+            dt = dt_naive.replace(tzinfo=timezone.utc)
+        return int(dt.timestamp() * 1000)
+    except Exception:
+        return None
+
+
 def parse_option_message_text(text: str, *, accounts: list[str] | tuple[str, ...] | None = None) -> dict:
     """解析单条期权消息，返回结构化字段。"""
     raw = (text or '').strip()
@@ -320,6 +375,8 @@ def parse_option_message_text(text: str, *, accounts: list[str] | tuple[str, ...
 
     ok = all([symbol, exp, opt_type, side, strike is not None, multiplier, contracts, account, currency])
 
+    fill_time_ms = parse_fill_timestamp(raw2)
+
     out = {
         'ok': ok,
         'raw': raw,
@@ -337,6 +394,7 @@ def parse_option_message_text(text: str, *, accounts: list[str] | tuple[str, ...
             'account': account,
             'currency': currency,
             'market': market,
+            'fill_time_ms': fill_time_ms,
         },
         'missing': [
             k for k, v in {
