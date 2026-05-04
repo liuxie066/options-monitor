@@ -32,7 +32,7 @@ except Exception:  # pragma: no cover - non-Unix fallback
     fcntl = None  # type: ignore[assignment]
 
 from scripts.io_utils import utc_now
-from scripts.opend_utils import resolve_underlier_alias
+from scripts.trade_symbol_identity import canonical_symbol_aliases, is_hk_symbol, resolve_underlier_alias
 from src.application.opend_fetch_config import filter_opend_fetch_kwargs
 
 
@@ -95,22 +95,15 @@ def merge_cache_updates(path: Path, updates: dict) -> dict:
 
 
 def normalize_symbol(symbol: str) -> str:
-    sym = resolve_underlier_alias(str(symbol or ""))
-    if sym.endswith(".HK"):
-        code = sym[:-3]
-        if code.isdigit():
-            return f"{int(code):04d}.HK"
-    return sym
+    return resolve_underlier_alias(str(symbol or ""))
 
 
 def _symbol_aliases(symbol: str) -> list[str]:
+    aliases = canonical_symbol_aliases(symbol)
+    if aliases:
+        return aliases
     sym = normalize_symbol(symbol)
-    out = [sym]
-    if sym.endswith(".HK"):
-        code = sym[:-3]
-        if code.isdigit():
-            out.append(f"{int(code):05d}.HK")
-    return list(dict.fromkeys(out))
+    return [sym] if sym else []
 
 
 def get_cached_multiplier(cache: dict, symbol: str) -> int | None:
@@ -211,7 +204,7 @@ def _static_config_multiplier(
         else:
             diagnostics["attempted_sources"].append({"source": source, "status": "missing_config"})
 
-        default_key = "default_multiplier_hk" if sym.endswith(".HK") else "default_multiplier_us"
+        default_key = "default_multiplier_hk" if is_hk_symbol(sym) else "default_multiplier_us"
         source = f"{prefix}:intake.{default_key}"
         value = _positive_int(intake.get(default_key))
         if value is not None:

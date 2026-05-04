@@ -8,18 +8,23 @@ import json
 
 from scripts.agent_plugin.contracts import AgentToolError
 from domain.domain.close_advice import TIER_PRIORITY
-from src.application.expiration_normalization import find_unique_near_miss_expiration, normalize_expiration_ymd
+from scripts.option_positions_core.domain import normalize_account
+from scripts.trade_contract_identity import (
+    contract_key,
+    normalize_contract_expiration,
+    normalize_contract_option_type,
+)
+from src.application.expiration_normalization import find_unique_near_miss_expiration
 from src.application.opend_fetch_config import opend_fetch_kwargs
 from src.application.watchlist_mutations import normalize_symbol_read
 
 
 def _normalize_expiration(value: Any) -> str:
-    return normalize_expiration_ymd(value) or str(value or "").strip()
+    return normalize_contract_expiration(value, fallback_raw=True) or ""
 
 
 def _normalize_option_type(value: Any) -> str:
-    raw = str(value or "").strip().lower()
-    return raw if raw in {"put", "call"} else ""
+    return normalize_contract_option_type(value)
 
 
 def _as_float_or_none(value: Any) -> float | None:
@@ -32,12 +37,7 @@ def _as_float_or_none(value: Any) -> float | None:
 
 
 def _contract_key(symbol: Any, option_type: Any, expiration: Any, strike: Any) -> tuple[str, str, str, str]:
-    sym = normalize_symbol_read(symbol)
-    opt = _normalize_option_type(option_type)
-    exp = _normalize_expiration(expiration)
-    strike_num = _as_float_or_none(strike)
-    strike_key = f"{strike_num:.6f}" if strike_num is not None else ""
-    return sym, opt, exp, strike_key
+    return contract_key(symbol, option_type, expiration, strike, expiration_fallback_raw=True)
 
 
 def _position_expiration_for_fetch(row: dict[str, Any]) -> str:
@@ -200,7 +200,7 @@ def scan_summary_rows(summary_rows: list[dict[str, Any]], *, as_float: Callable[
         strategy = str(row.get("side") or row.get("strategy") or row.get("option_strategy") or "").strip().lower()
         if strategy in strategy_counts:
             strategy_counts[strategy] += 1
-        account = str(row.get("account") or row.get("account_label") or "").strip().lower()
+        account = normalize_account(row.get("account") or row.get("account_label"))
         if account:
             account_counts[account] = account_counts.get(account, 0) + 1
         symbol = str(row.get("symbol") or "").strip().upper()
@@ -246,7 +246,7 @@ def close_advice_rows_summary(csv_path: Path, text_path: Path, *, safe_read_csv:
             continue
         tier = str(row.get("tier") or "").strip().lower() or "none"
         tier_counts[tier] = tier_counts.get(tier, 0) + 1
-        account = str(row.get("account") or "").strip().lower()
+        account = normalize_account(row.get("account"))
         if account:
             account_counts[account] = account_counts.get(account, 0) + 1
         top_rows.append(

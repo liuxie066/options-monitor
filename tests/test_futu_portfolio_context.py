@@ -93,14 +93,14 @@ def test_build_futu_portfolio_context_merges_cash_and_fund_assets_and_normalizes
 
     out = build_futu_portfolio_context(
         balance_rows=[
-            {"currency": "CNY", "cash": 100000, "fund_assets": 25000},
+            {"currency": "rmb", "cash": 100000, "fund_assets": 25000},
             {"currency": "USD", "cash": 1000},
         ],
         position_rows=[
             {"code": "US.NVDA", "qty": 100, "cost_price": 120, "currency": "USD", "stock_name": "NVIDIA"},
-            {"code": "HK.00700", "qty": 200, "cost_price": 380, "currency": "HKD", "stock_name": "Tencent"},
+            {"code": "HK.00700", "qty": 200, "cost_price": 380, "currency": "港币", "stock_name": "Tencent"},
         ],
-        account="lx",
+        account=" LX ",
         market="富途",
         base_currency="CNY",
     )
@@ -113,6 +113,7 @@ def test_build_futu_portfolio_context_merges_cash_and_fund_assets_and_normalizes
     assert out["stocks_by_symbol"]["NVDA"]["shares"] == 100
     assert out["stocks_by_symbol"]["0700.HK"]["shares"] == 200
     assert out["stocks_by_symbol"]["0700.HK"]["currency"] == "HKD"
+    assert out["stocks_by_symbol"]["0700.HK"]["account"] == "lx"
 
 
 def test_build_futu_portfolio_context_canonicalizes_alias_and_hk_prefixed_codes() -> None:

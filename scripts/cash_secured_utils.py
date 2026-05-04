@@ -4,9 +4,17 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from scripts.option_positions_core.domain import normalize_currency
+from scripts.trade_symbol_identity import canonical_symbol
+
 
 def normalize_symbol(symbol: Any) -> str:
-    return str(symbol or "").strip().upper()
+    raw = str(symbol or "").strip()
+    return canonical_symbol(raw) or raw.upper()
+
+
+def _normalize_currency(value: Any) -> str:
+    return normalize_currency(value)
 
 
 def normalize_cash_secured_by_symbol_by_ccy(option_ctx: dict | None) -> dict[str, dict[str, float]]:
@@ -28,7 +36,7 @@ def normalize_cash_secured_by_symbol_by_ccy(option_ctx: dict | None) -> dict[str
                     continue
                 if not fv:
                     continue
-                ccy_u = normalize_symbol(ccy) or "USD"
+                ccy_u = _normalize_currency(ccy) or "USD"
                 norm.setdefault(sym_u, {})
                 norm[sym_u][ccy_u] = norm[sym_u].get(ccy_u, 0.0) + fv
         return norm
@@ -66,7 +74,7 @@ def normalize_cash_secured_total_by_ccy(
                 continue
             if not fv:
                 continue
-            ccy_u = normalize_symbol(ccy)
+            ccy_u = _normalize_currency(ccy)
             if not ccy_u:
                 continue
             norm[ccy_u] = fv
@@ -84,7 +92,7 @@ def normalize_cash_secured_total_by_ccy(
                 continue
             if not fv:
                 continue
-            ccy_u = normalize_symbol(ccy)
+            ccy_u = _normalize_currency(ccy)
             if not ccy_u:
                 continue
             norm[ccy_u] = norm.get(ccy_u, 0.0) + fv
@@ -123,10 +131,9 @@ def cash_secured_symbol_cny(
 
     m_cny = ctx.get("cash_secured_by_symbol_cny") or {}
     if isinstance(m_cny, dict):
-        v = m_cny.get(sym_u)
-        if v is None:
-            v = m_cny.get(symbol)
-        if v is not None:
+        for key, v in m_cny.items():
+            if normalize_symbol(key) != sym_u and key != symbol:
+                continue
             try:
                 return float(v)
             except Exception:
@@ -143,7 +150,7 @@ def cash_secured_symbol_cny(
             fv = float(amount)
         except Exception:
             continue
-        ccy_u = normalize_symbol(ccy)
+        ccy_u = _normalize_currency(ccy)
         if ccy_u == "CNY":
             total += fv
             has_any = True

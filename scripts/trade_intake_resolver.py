@@ -17,7 +17,7 @@ from scripts.option_positions_core.domain import (
 from scripts.option_positions_core.service import persist_trade_event
 from scripts.trade_event_normalizer import NormalizedTradeDeal
 from scripts.trade_intake_state import is_retryable_unresolved_deal, lookup_deal_state
-from scripts.trade_symbol_identity import normalize_symbol_candidate
+from scripts.trade_symbol_identity import canonical_symbol
 from src.application.position_workflows import (
     apply_trade_close_with,
     apply_trade_open_with,
@@ -104,7 +104,7 @@ def _missing_account_mapping_diagnostics(deal: NormalizedTradeDeal) -> dict[str,
 
 
 def _canonical_symbol(value: Any) -> str:
-    return normalize_symbol_candidate(value) or str(value or "").strip().upper()
+    return canonical_symbol(value) or str(value or "").strip().upper()
 
 
 def _missing_required_fields_diagnostics(deal: NormalizedTradeDeal, missing: list[str]) -> dict[str, Any]:

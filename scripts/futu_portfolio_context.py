@@ -5,7 +5,8 @@ from typing import Any, Mapping
 
 from domain.domain.fetch_source import is_futu_fetch_source, normalize_fetch_source
 from scripts.futu_gateway import build_ready_futu_gateway
-from scripts.opend_utils import resolve_underlier_alias
+from scripts.option_positions_core.domain import normalize_account, normalize_currency
+from scripts.trade_symbol_identity import canonical_symbol, symbol_currency
 
 
 def _rows(data: Any) -> list[dict[str, Any]]:
@@ -73,54 +74,20 @@ def _to_futu_acc_id(value: Any) -> int:
 
 
 def _normalize_currency(value: Any, *, fallback: str = "CNY") -> str:
-    raw = str(value or "").strip().upper()
-    if raw in ("", "RMB", "CNH"):
-        return fallback.upper()
-    if raw == "CNY":
-        return "CNY"
-    if raw in ("USD", "HKD"):
-        return raw
-    return raw
+    return normalize_currency(value) or normalize_currency(fallback) or "CNY"
 
 
 def _normalize_symbol(value: Any) -> str | None:
-    raw = str(value or "").strip().upper()
-    if not raw:
-        return None
-
-    if raw.startswith("US."):
-        return resolve_underlier_alias(raw[3:]) or None
-    elif raw.startswith("HK."):
-        digits = "".join(ch for ch in raw[3:] if ch.isdigit())
-        if digits:
-            return resolve_underlier_alias(f"{str(int(digits)).zfill(4)}.HK") or None
-        return None
-
-    if raw.endswith(".US"):
-        return resolve_underlier_alias(raw[:-3]) or None
-
-    if raw.endswith(".HK"):
-        digits = "".join(ch for ch in raw[:-3] if ch.isdigit())
-        if digits:
-            return resolve_underlier_alias(f"{str(int(digits)).zfill(4)}.HK") or None
-        return None
-
-    if raw.isdigit():
-        return resolve_underlier_alias(f"{str(int(raw)).zfill(4)}.HK") or None
-
-    if raw and raw[0].isalpha() and len(raw) <= 10 and all(ch.isalnum() or ch in ".-" for ch in raw):
-        return resolve_underlier_alias(raw) or None
-
-    return None
+    return canonical_symbol(value)
 
 
 def _normalize_account_ids(raw: Mapping[str, Any] | Any, *, account: str | None) -> list[str]:
     if not account or not isinstance(raw, Mapping):
         return []
-    want = str(account).strip().lower()
+    want = normalize_account(account)
     out: list[str] = []
     for acc_id, mapped in raw.items():
-        if str(mapped or "").strip().lower() != want:
+        if normalize_account(mapped) != want:
             continue
         key = str(acc_id or "").strip()
         if key:
@@ -283,7 +250,7 @@ def build_futu_portfolio_context(
         avg_cost = _to_float(_pick(row, "cost_price", "average_cost", "avg_cost", "cost"))
         currency = _normalize_currency(
             _pick(row, "currency", "currency_code", "ccy"),
-            fallback=("HKD" if symbol.endswith(".HK") else base_ccy),
+            fallback=(symbol_currency(symbol) or base_ccy),
         )
         name = str(_pick(row, "stock_name", "name", "asset_name") or "").strip() or None
 
@@ -296,7 +263,7 @@ def build_futu_portfolio_context(
                 "avg_cost": avg_cost,
                 "currency": currency,
                 "broker": str(market),
-                "account": (str(account).strip().lower() if account else ""),
+                "account": (normalize_account(account) if account else ""),
             }
             continue
 

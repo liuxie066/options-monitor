@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 1.0.7 - 2026-05-04
+
+### Changed
+- Centralized symbol identity normalization across intake, multiplier fallback, OpenD lookup, cash-secured usage, portfolio context, and watchlist paths so HK display names and Futu codes resolve through the same canonical contract.
+- Consolidated trade contract identity normalization for side, position effect, expiration, option type, strike keys, and quote keys across auto-intake, ledger projection, close-advice, and agent scan summaries.
+- Reused shared account and currency normalization in position-event persistence, portfolio context, close-advice, cash-secured aggregation, fee calculation, and agent summaries to keep HK/CNY/USD aliases and account labels consistent.
+
 ## 1.0.6 - 2026-05-04
 
 ### Fixed

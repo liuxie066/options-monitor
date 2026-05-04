@@ -17,6 +17,7 @@ from domain.domain.fetch_source import is_futu_fetch_source, resolve_symbol_fetc
 from domain.storage.repositories import state_repo
 from scripts.config_loader import resolve_watchlist_config
 from scripts.io_utils import has_shared_required_data
+from scripts.trade_symbol_identity import symbol_market
 from src.application.opend_fetch_config import resolve_opend_fetch_config
 
 
@@ -76,8 +77,7 @@ def _is_opend_rate_limit_payload(payload: dict[str, Any]) -> bool:
 
 
 def _symbol_class(symbol: str) -> str:
-    s = str(symbol or "").strip().upper()
-    return "HK" if s.endswith(".HK") else "US"
+    return symbol_market(symbol) or "US"
 
 
 def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required: Path, force_refresh: bool = False) -> dict:

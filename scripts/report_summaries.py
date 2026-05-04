@@ -12,6 +12,7 @@ from typing import Any
 import pandas as pd
 
 from domain.domain.engine import rank_candidate_rows
+from scripts.trade_symbol_identity import symbol_currency
 
 
 COMMON_EMPTY_ROW = {
@@ -61,7 +62,7 @@ def _empty_summary_row(symbol: str, strategy: str, *, extra_fields: dict[str, An
 
 
 def _option_ccy(symbol: str) -> str:
-    return 'HKD' if str(symbol).upper().endswith('.HK') else 'USD'
+    return symbol_currency(symbol) or 'USD'
 
 
 def _safe_float(value: Any) -> float | None:

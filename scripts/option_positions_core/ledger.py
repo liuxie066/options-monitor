@@ -13,14 +13,20 @@ from scripts.option_positions_core.domain import (
     effective_contracts_open,
     normalize_account,
     normalize_broker,
+    normalize_currency,
     normalize_option_type,
     normalize_side,
 )
-from scripts.trade_symbol_identity import normalize_symbol_candidate
+from scripts.trade_contract_identity import (
+    canonical_contract_symbol,
+    normalize_contract_expiration,
+    normalize_position_effect,
+    normalize_trade_side,
+)
 
 
 def _canonical_trade_symbol(value: Any) -> str:
-    return normalize_symbol_candidate(value) or str(value or "").strip().upper()
+    return canonical_contract_symbol(value)
 
 
 @dataclass(frozen=True)
@@ -82,14 +88,14 @@ def trade_event_from_normalized_deal(deal: Any) -> TradeEvent:
         account=normalize_account(getattr(deal, "internal_account", None) or ""),
         symbol=_canonical_trade_symbol(getattr(deal, "symbol", "")),
         option_type=normalize_option_type(getattr(deal, "option_type", None) or ""),
-        side=str(getattr(deal, "side", "") or "").strip().lower(),
-        position_effect=str(getattr(deal, "position_effect", "") or "").strip().lower(),
+        side=normalize_trade_side(getattr(deal, "side", None)) or "",
+        position_effect=normalize_position_effect(getattr(deal, "position_effect", None)) or "",
         contracts=int(getattr(deal, "contracts", 0) or 0),
         price=float(getattr(deal, "price", 0.0) or 0.0),
         strike=(float(getattr(deal, "strike")) if getattr(deal, "strike", None) is not None else None),
         multiplier=(int(getattr(deal, "multiplier")) if getattr(deal, "multiplier", None) is not None else None),
-        expiration_ymd=(str(getattr(deal, "expiration_ymd", "") or "").strip() or None),
-        currency=str(getattr(deal, "currency", "") or "").strip().upper(),
+        expiration_ymd=normalize_contract_expiration(getattr(deal, "expiration_ymd", None)),
+        currency=normalize_currency(getattr(deal, "currency", None)),
         trade_time_ms=(int(getattr(deal, "trade_time_ms")) if getattr(deal, "trade_time_ms", None) is not None else None),
         order_id=(str(getattr(deal, "order_id", "") or "").strip() or None),
         multiplier_source=(str(getattr(deal, "multiplier_source", "") or "").strip() or None),
@@ -156,7 +162,7 @@ def _matches_close(fields: dict[str, Any], event: TradeEvent) -> bool:
     return (
         normalize_broker(fields.get("broker")) == event.broker
         and normalize_account(fields.get("account")) == event.account
-        and str(fields.get("symbol") or "").strip().upper() == event.symbol
+        and _canonical_trade_symbol(fields.get("symbol")) == event.symbol
         and normalize_option_type(fields.get("option_type")) == event.option_type
         and normalize_side(fields.get("side")) == "short"
         and _same_strike(fields.get("strike"), event.strike)
@@ -222,7 +228,7 @@ def _matches_close_target(fields: dict[str, Any], event: TradeEvent) -> bool:
     return (
         normalize_broker(fields.get("broker")) == event.broker
         and normalize_account(fields.get("account")) == event.account
-        and str(fields.get("symbol") or "").strip().upper() == event.symbol
+        and _canonical_trade_symbol(fields.get("symbol")) == event.symbol
         and normalize_option_type(fields.get("option_type")) == event.option_type
         and normalize_side(fields.get("side")) == "short"
         and str(fields.get("source_event_id") or "") != event.event_id

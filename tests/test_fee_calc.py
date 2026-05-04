@@ -63,6 +63,15 @@ def test_calc_futu_option_fee_requires_positive_multiplier() -> None:
         raise AssertionError("expected ValueError")
 
 
+def test_calc_futu_option_fee_uses_shared_currency_aliases() -> None:
+    _add_repo_to_syspath()
+    from scripts.fee_calc import calc_futu_option_fee
+
+    out = calc_futu_option_fee("港币", 1.0, contracts=1, multiplier=100, is_sell=True)
+
+    assert out == 21.0
+
+
 def test_sell_put_compute_metrics_uses_full_fee_formula() -> None:
     _add_repo_to_syspath()
     from scripts.scan_sell_put import compute_metrics

@@ -18,6 +18,7 @@ from scripts.candidate_defaults import (
     resolve_event_risk_config,
 )
 from scripts.exchange_rates import CurrencyConverter
+from scripts.trade_symbol_identity import symbol_currency
 from scripts.io_utils import safe_read_csv
 from scripts.render_sell_call_alerts import render_sell_call_alerts
 from scripts.report_summaries import summarize_sell_call
@@ -88,7 +89,7 @@ def run_sell_call_scan_and_summarize(
         min_net_income_native = (
             exchange_rate_converter.cny_to_native(
                 min_net_income_cny,
-                native_ccy=('HKD' if str(symbol).upper().endswith('.HK') else 'USD'),
+                native_ccy=(symbol_currency(symbol) or 'USD'),
             )
             or 0.0
         )

@@ -5,6 +5,8 @@ from typing import Any
 
 import pandas as pd
 
+from scripts.option_positions_core.domain import normalize_currency
+
 
 def _as_float(value: Any) -> float | None:
     try:
@@ -56,7 +58,7 @@ class CandidateContractInput:
             option_type=str(row.get("option_type") or "").strip().lower(),
             expiration=str(row.get("expiration") or "").strip(),
             contract_symbol=str(row.get("contract_symbol") or "").strip(),
-            currency=str(row.get("currency") or "").strip().upper(),
+            currency=normalize_currency(row.get("currency")),
             dte=_as_int(row.get("dte")),
             strike=_as_float(row.get("strike")),
             spot=_as_float(row.get("spot")),

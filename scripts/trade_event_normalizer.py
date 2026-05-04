@@ -3,12 +3,15 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-import re
 from typing import Any
 
 from scripts.option_positions_core.domain import normalize_currency, normalize_option_type
 from scripts.multiplier_cache import resolve_multiplier_with_source_and_diagnostics
-from scripts.parse_option_message import parse_exp
+from scripts.trade_contract_identity import (
+    normalize_contract_expiration,
+    normalize_position_effect,
+    normalize_trade_side,
+)
 from scripts.trade_account_mapping import resolve_internal_account
 from scripts.trade_account_identity import (
     ACCOUNT_ID_KEYS,
@@ -73,47 +76,15 @@ def _norm_float(value: Any) -> float | None:
 
 
 def _normalize_side(value: Any) -> str | None:
-    raw = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
-    if raw in ("buy", "buy_to_close", "buy_to_open", "b", "1"):
-        return "buy"
-    if raw in ("buy_back", "buyback"):
-        return "buy"
-    if raw in ("sell", "sell_to_open", "sell_to_close", "sell_short", "short_sell", "s", "2"):
-        return "sell"
-    return None
+    return normalize_trade_side(value)
 
 
 def _normalize_position_effect(value: Any) -> str | None:
-    raw = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
-    aliases = {
-        "open": "open",
-        "open_position": "open",
-        "open_only": "open",
-        "buy_to_open": "open",
-        "sell_to_open": "open",
-        "sell_short": "open",
-        "short_sell": "open",
-        "close": "close",
-        "close_position": "close",
-        "close_only": "close",
-        "buy_to_close": "close",
-        "sell_to_close": "close",
-        "buy_back": "close",
-        "buyback": "close",
-    }
-    return aliases.get(raw)
+    return normalize_position_effect(value)
 
 
 def _normalize_expiration(value: Any) -> str | None:
-    raw = str(value or "").strip()
-    if not raw:
-        return None
-    if len(raw) == 10 and raw[4] == "-" and raw[7] == "-":
-        return raw
-    digits = "".join(ch for ch in raw if ch.isdigit())
-    if len(digits) in (6, 8):
-        return parse_exp(digits)
-    return None
+    return normalize_contract_expiration(value)
 
 
 def _normalize_trade_time_ms(value: Any) -> int | None:

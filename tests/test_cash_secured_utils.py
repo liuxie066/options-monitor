@@ -61,6 +61,29 @@ class TestCashSecuredUtils(unittest.TestCase):
         self.assertEqual(cash_secured_symbol_cny(ctx, 'tsla', by_symbol_by_ccy=by_ccy), 3600.0)
         self.assertEqual(read_cash_secured_total_cny(ctx), 9999.0)
 
+    def test_cash_secured_utils_matches_hk_symbol_aliases(self) -> None:
+        ctx = {
+            'cash_secured_by_symbol_by_ccy': {'00700.HK': {'hkd': '1000'}},
+            'cash_secured_by_symbol_cny': {'00700.HK': '920'},
+        }
+
+        by_ccy = normalize_cash_secured_by_symbol_by_ccy(ctx)
+
+        self.assertEqual(by_ccy, {'0700.HK': {'HKD': 1000.0}})
+        self.assertEqual(cash_secured_symbol_by_ccy(ctx, '700', by_symbol_by_ccy=by_ccy), {'HKD': 1000.0})
+        self.assertEqual(cash_secured_symbol_cny(ctx, '0700.HK', by_symbol_by_ccy=by_ccy), 920.0)
+
+    def test_cash_secured_utils_uses_shared_currency_aliases(self) -> None:
+        ctx = {
+            'cash_secured_by_symbol_by_ccy': {'NVDA': {'rmb': '100', '港币': '200'}},
+        }
+
+        by_ccy = normalize_cash_secured_by_symbol_by_ccy(ctx)
+        total_by_ccy = normalize_cash_secured_total_by_ccy(ctx, by_symbol_by_ccy=by_ccy)
+
+        self.assertEqual(by_ccy, {'NVDA': {'CNY': 100.0, 'HKD': 200.0}})
+        self.assertEqual(total_by_ccy, {'CNY': 100.0, 'HKD': 200.0})
+
 
 if __name__ == '__main__':
     unittest.main()

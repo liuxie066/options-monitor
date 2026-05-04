@@ -33,7 +33,7 @@ def test_load_option_positions_repo_bootstraps_position_lots_from_feishu(tmp_pat
             {
                 "record_id": "rec_1",
                 "fields": {
-                    "account": "lx",
+                    "account": " LX ",
                     "broker": "富途",
                     "symbol": "NVDA",
                     "status": "open",
@@ -41,6 +41,7 @@ def test_load_option_positions_repo_bootstraps_position_lots_from_feishu(tmp_pat
                     "contracts_open": 1,
                     "opened_at": 1000,
                     "last_action_at": 1000,
+                    "currency": "港币",
                 },
             }
         ]
@@ -55,6 +56,8 @@ def test_load_option_positions_repo_bootstraps_position_lots_from_feishu(tmp_pat
     assert repo.count_trade_events() == 1
     events = repo.list_trade_events()
     assert events[0]["source_type"] == "bootstrap_snapshot"
+    assert events[0]["account"] == "lx"
+    assert events[0]["currency"] == "HKD"
     assert events[0]["raw_payload"]["lot_record_id"] == "rec_1"
 
 
@@ -1607,7 +1610,9 @@ def test_persist_manual_close_event_updates_position_lot(tmp_path: Path) -> None
     )
 
     lot = repo.list_position_lots()[0]
-    fields = lot["fields"]
+    fields = dict(lot["fields"])
+    fields["account"] = " LX "
+    fields["currency"] = "港币"
     result = svc.persist_manual_close_event(
         repo,
         record_id=lot["record_id"],
@@ -1626,6 +1631,8 @@ def test_persist_manual_close_event_updates_position_lot(tmp_path: Path) -> None
     events = repo.list_trade_events()
     assert events[-1]["raw_payload"]["record_id"] == lot["record_id"]
     assert events[-1]["raw_payload"]["close_target_source_event_id"] == lots[0]["fields"]["source_event_id"]
+    assert events[-1]["account"] == "lx"
+    assert events[-1]["currency"] == "HKD"
     assert events[-1]["raw_payload"]["close_target_account"] == "lx"
     assert events[-1]["raw_payload"]["close_target_broker"] == "富途"
 
