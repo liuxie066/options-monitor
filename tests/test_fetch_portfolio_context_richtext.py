@@ -15,11 +15,11 @@ def test_build_context_requires_broker_field_and_normalizes_hk_symbol() -> None:
         {
             "fields": {
                 "broker": [{"text": "富途", "type": "text"}],
-                "account": [{"text": "lx", "type": "text"}],
+                "account": [{"text": " LX ", "type": "text"}],
                 "asset_type": "hk_stock",
                 "asset_id": [{"text": "00700", "type": "text"}],
                 "asset_name": [{"text": "腾讯控股", "type": "text"}],
-                "currency": "HKD",
+                "currency": "港币",
                 "quantity": 500,
                 "avg_cost": 503.916,
                 "asset_class": "港股资产",
@@ -32,7 +32,7 @@ def test_build_context_requires_broker_field_and_normalizes_hk_symbol() -> None:
                 "asset_type": "cash",
                 "asset_id": [{"text": "CNY-CASH", "type": "text"}],
                 "asset_name": [{"text": "账户余额", "type": "text"}],
-                "currency": "CNY",
+                "currency": "rmb",
                 "quantity": 406.24,
                 "asset_class": "现金",
             }
@@ -60,6 +60,8 @@ def test_build_context_requires_broker_field_and_normalizes_hk_symbol() -> None:
     stocks = ctx["stocks_by_symbol"]
     assert "0700.HK" in stocks
     assert stocks["0700.HK"]["shares"] == 500
+    assert stocks["0700.HK"]["currency"] == "HKD"
+    assert stocks["0700.HK"]["account"] == "lx"
 
     assert "NVDA" in stocks
     assert stocks["NVDA"]["shares"] == 160

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from scripts.trade_symbol_identity import canonical_symbol, symbol_currency
+
 
 def derive_put_max_strike_from_cash(
     symbol: str,
@@ -35,8 +37,8 @@ def derive_put_max_strike_from_cash(
     if not portfolio_ctx:
         return None
 
-    sym_u = str(symbol).strip().upper()
-    want_ccy = 'HKD' if sym_u.endswith('.HK') else 'USD'
+    sym_u = canonical_symbol(symbol) or str(symbol or '').strip().upper()
+    want_ccy = symbol_currency(sym_u) or 'USD'
 
     # 1) cash available in native currency (from holdings)
     # Preferred: direct native-currency cash (USD for US symbols, HKD for HK symbols).

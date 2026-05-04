@@ -23,6 +23,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from scripts.trade_symbol_identity import symbol_market
+
 
 def _read_json_list(path: Path) -> list[dict]:
     try:
@@ -134,8 +136,7 @@ def build_summary(
         sym = str(r.get("symbol") or "")
         if not sym:
             continue
-        is_hk = sym.upper().endswith(".HK")
-        if (m == "HK") != is_hk:
+        if symbol_market(sym) != m:
             continue
 
         op_cnt += 1

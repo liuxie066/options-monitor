@@ -23,9 +23,18 @@ from scripts.io_utils import atomic_write_text, read_json, safe_read_csv
 from scripts.option_positions_core.domain import (
     effective_expiration_ymd,
     effective_multiplier,
-    exp_ms_to_ymd,
+    normalize_account,
+    normalize_currency,
 )
-from scripts.opend_utils import normalize_underlier, resolve_underlier_alias
+from scripts.opend_utils import normalize_underlier
+from scripts.trade_contract_identity import (
+    canonical_contract_symbol,
+    contract_key,
+    contract_strike_key,
+    normalize_contract_expiration,
+    normalize_contract_option_type,
+)
+from scripts.trade_symbol_identity import resolve_underlier_alias, symbol_market
 from src.application.expiration_normalization import find_unique_near_miss_expiration
 from src.application.opend_fetch_config import opend_fetch_kwargs
 
@@ -73,57 +82,38 @@ QUOTE_ISSUE_FLAGS = {
 
 
 def _norm_symbol(value: Any, *, base_dir: Path | None = None) -> str:
-    raw = str(value or "").strip()
-    if not raw:
-        return ""
-    resolved = resolve_underlier_alias(raw, base_dir=base_dir)
-    return str(resolved or raw).strip().upper()
+    return canonical_contract_symbol(value, base_dir=base_dir)
 
 
 def _norm_option_type(value: Any) -> str:
-    return str(value or "").strip().lower()
+    return normalize_contract_option_type(value, fallback_raw=True)
 
 
 def _market_for_symbol(symbol: Any) -> str:
-    sym = _norm_symbol(symbol)
-    if sym.endswith(".HK"):
-        return "HK"
-    if sym:
-        return "US"
-    return ""
-
-
-def _date_from_ms(value: Any) -> str | None:
-    return exp_ms_to_ymd(value)
+    return symbol_market(symbol) or ""
 
 
 def normalize_expiration(value: Any) -> str | None:
-    if value in (None, ""):
-        return None
-    if isinstance(value, str):
-        s = value.strip()
-        if not s:
-            return None
-        if len(s) >= 10 and s[4:5] == "-" and s[7:8] == "-":
-            return s[:10]
-        parsed = _date_from_ms(s)
-        return parsed or s
-    return _date_from_ms(value)
+    return normalize_contract_expiration(value, fallback_raw=True)
 
 
 def _strike_key(value: Any) -> str:
-    v = safe_float(value)
-    if v is None:
-        return ""
-    return f"{v:.6f}"
+    return contract_strike_key(value)
+
+
+def _row_account(value: Any, *, default: str = "当前账户") -> str:
+    return normalize_account(value) or default
 
 
 def _quote_key(symbol: Any, option_type: Any, expiration: Any, strike: Any, *, base_dir: Path | None = None) -> tuple[str, str, str, str]:
-    return (
-        _norm_symbol(symbol, base_dir=base_dir),
-        _norm_option_type(option_type),
-        normalize_expiration(expiration) or "",
-        _strike_key(strike),
+    return contract_key(
+        symbol,
+        option_type,
+        expiration,
+        strike,
+        base_dir=base_dir,
+        option_type_fallback_raw=True,
+        expiration_fallback_raw=True,
     )
 
 
@@ -800,7 +790,7 @@ def _position_to_input(pos: dict[str, Any], quote: dict[str, Any] | None) -> tup
     mid, quote_flags = _mid_from_quote(quote)
     return (
         CloseAdviceInput(
-            account=str(pos.get("account") or "").strip().lower(),
+            account=normalize_account(pos.get("account")),
             symbol=_norm_symbol(pos.get("symbol")),
             option_type=_norm_option_type(pos.get("option_type")),
             side=str(pos.get("side") or "").strip().lower(),
@@ -814,7 +804,7 @@ def _position_to_input(pos: dict[str, Any], quote: dict[str, Any] | None) -> tup
             dte=_calc_dte(expiration, quote),
             multiplier=effective_multiplier(pos) or safe_float((quote or {}).get("multiplier")),
             spot=safe_float((quote or {}).get("spot")),
-            currency=str(pos.get("currency") or (quote or {}).get("currency") or "").strip().upper(),
+            currency=normalize_currency(pos.get("currency") or (quote or {}).get("currency")),
         ),
         quote_flags,
     )
@@ -873,7 +863,7 @@ def _money(value: Any, currency: Any) -> str:
     v = safe_float(value)
     if v is None:
         return "-"
-    ccy = str(currency or "").strip().upper()
+    ccy = normalize_currency(currency)
     prefix = "$" if ccy == "USD" else ("HK$" if ccy == "HKD" else "")
     abs_v = abs(v)
     fmt = f"{v:,.2f}" if abs_v < 100 else f"{v:,.0f}"
@@ -903,7 +893,7 @@ def _selected_notify_rows(rows: list[dict[str, Any]], *, notify_levels: set[str]
             continue
         if str(row.get("tier") or "").strip().lower() not in notify_levels:
             continue
-        acct = str(row.get("account") or "当前账户").strip().lower() or "当前账户"
+        acct = _row_account(row.get("account"))
         grouped.setdefault(acct, []).append(row)
     selected: list[dict[str, Any]] = []
     for acct_rows in grouped.values():
@@ -919,7 +909,7 @@ def _selected_evaluation_gap_rows(rows: list[dict[str, Any]], *, max_items: int)
     for row in sort_advice_rows(rows):
         if str(row.get("evaluation_status") or "").strip().lower() == "priced":
             continue
-        acct = str(row.get("account") or "当前账户").strip().lower() or "当前账户"
+        acct = _row_account(row.get("account"))
         grouped.setdefault(acct, []).append(row)
     selected: list[dict[str, Any]] = []
     for acct_rows in grouped.values():
@@ -965,11 +955,11 @@ def render_markdown(rows: list[dict[str, Any]], *, notify_levels: set[str], max_
 
     grouped: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
     for row in selected:
-        acct = str(row.get("account") or "当前账户").strip().lower() or "当前账户"
+        acct = _row_account(row.get("account"))
         grouped.setdefault(acct, []).append(row)
     gap_grouped: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
     for row in gap_rows:
-        acct = str(row.get("account") or "当前账户").strip().lower() or "当前账户"
+        acct = _row_account(row.get("account"))
         gap_grouped.setdefault(acct, []).append(row)
 
     lines: list[str] = []

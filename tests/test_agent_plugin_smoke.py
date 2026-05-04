@@ -696,6 +696,21 @@ def test_close_advice_summary_uses_domain_tier_order_for_optional(tmp_path: Path
     assert [row["tier"] for row in summary["top_rows"]] == ["medium", "optional", "weak"]
 
 
+def test_scan_summary_rows_normalizes_account_labels() -> None:
+    from src.application.agent_tool_scan import scan_summary_rows
+
+    summary = scan_summary_rows(
+        [
+            {"account": " LX ", "symbol": "NVDA", "side": "sell_put", "net_income": 100},
+            {"account_label": "lx", "symbol": "TSLA", "side": "sell_call", "net_income": 50},
+        ],
+        as_float=lambda value: float(value) if value not in (None, "") else None,
+    )
+
+    assert summary["account_counts"] == {"lx": 2}
+    assert [item["account"] for item in summary["top_candidates"]] == ["lx", "lx"]
+
+
 def test_close_advice_requires_cached_inputs(tmp_path: Path) -> None:
     from scripts.agent_plugin.main import run_tool
 

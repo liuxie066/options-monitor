@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import pandas as pd
 
+from scripts.option_positions_core.domain import normalize_currency
+
 
 def _require_positive(name: str, value: float | None) -> float:
     if value is None or value <= 0:
@@ -71,7 +73,7 @@ def calc_futu_option_fee(
     multiplier: int = 100,
     is_sell: bool = True,
 ) -> float:
-    ccy = str(currency or "USD").strip().upper()
+    ccy = normalize_currency(currency) or "USD"
     if ccy == "HKD":
         return calc_futu_hk_option_fee(
             order_price,

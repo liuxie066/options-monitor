@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from scripts.opend_utils import resolve_underlier_alias
+from scripts.trade_symbol_identity import resolve_underlier_alias
 
 
 def normalize_symbol(value: str) -> str:

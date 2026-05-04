@@ -12,6 +12,30 @@ from scripts.multi_tick.misc import AccountResult
 from scripts.multi_tick.notify_format import build_account_message
 
 
+def test_close_advice_input_uses_shared_account_and_currency_normalization() -> None:
+    from scripts.close_advice.runner import _money, _position_to_input
+
+    input_row, _flags = _position_to_input(
+        {
+            "account": " LX ",
+            "symbol": "HK.00700",
+            "option_type": "认沽",
+            "side": "short",
+            "expiration": "2026-06-18",
+            "strike": 100,
+            "contracts_open": 1,
+            "premium": 1.0,
+            "multiplier": 100,
+            "currency": "港币",
+        },
+        {"bid": 0.5, "ask": 0.6},
+    )
+
+    assert input_row.account == "lx"
+    assert input_row.currency == "HKD"
+    assert _money(12.3, "港币") == "HK$12.30"
+
+
 def _freeze_close_advice_business_today(monkeypatch: pytest.MonkeyPatch, ymd: str = "2026-04-16") -> None:
     frozen = datetime.fromisoformat(ymd).date()
     monkeypatch.setattr("scripts.close_advice.runner.expiration_business_today", lambda: frozen)

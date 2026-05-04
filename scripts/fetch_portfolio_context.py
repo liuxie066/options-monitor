@@ -24,8 +24,10 @@ from scripts.feishu_bitable import (
     bitable_list_records,
     with_tenant_token_retry,
 )
+from scripts.trade_symbol_identity import canonical_symbol
 from scripts.config_loader import resolve_data_config_path
 from scripts.io_utils import atomic_write_json
+from scripts.option_positions_core.domain import normalize_account, normalize_currency
 
 from scripts.feishu_bitable import safe_float
 
@@ -71,25 +73,10 @@ def _normalize_symbol(asset_type: str | None, asset_id: str) -> str | None:
         return None
 
     if t == 'us_stock':
-        return aid.upper()
+        return canonical_symbol(aid)
 
     if t == 'hk_stock':
-        # Accept forms: 00700 / 0700 / 700 / HK.00700 / 0700.HK
-        s = aid.upper()
-        if s.endswith('.HK'):
-            core = s[:-3]
-        else:
-            core = s
-        if core.startswith('HK.'):
-            core = core[3:]
-        core = core.strip()
-        # keep digits only
-        digits = ''.join(ch for ch in core if ch.isdigit())
-        if not digits:
-            return None
-        digits = str(int(digits))  # strip leading zeros
-        digits = digits.zfill(4)
-        return f"{digits}.HK"
+        return canonical_symbol(aid)
 
     return None
 
@@ -114,7 +101,7 @@ def build_context(
     selected = []
     broker_raw = broker if broker is not None else market
     broker_norm = str(broker_raw).strip() if broker_raw else None
-    account_norm = str(account).strip() if account else None
+    account_norm = normalize_account(account) if account else None
 
     for rec in records:
         fields0 = rec.get("fields") or {}
@@ -122,7 +109,7 @@ def build_context(
             continue
 
         b = _record_broker_text(fields0)
-        a = _as_text(fields0.get("account")).strip()
+        a = normalize_account(_as_text(fields0.get("account")))
 
         # Be tolerant: broker/legacy market column is free-text; accept values that contain the target broker string.
         # Still keeps the "only 富途" constraint when market_norm is set.
@@ -133,9 +120,11 @@ def build_context(
 
         # Normalize selected fields (avoid leaking rich-text arrays downstream)
         fields = dict(fields0)
-        for k in ("broker", "account", "asset_id", "asset_name"):
+        for k in ("broker", "asset_id", "asset_name"):
             if k in fields:
                 fields[k] = _as_text(fields.get(k)).strip()
+        if "account" in fields:
+            fields["account"] = normalize_account(_as_text(fields.get("account")))
         selected.append(fields)
 
     stocks_by_symbol: dict[str, dict] = {}
@@ -146,7 +135,7 @@ def build_context(
         asset_class = _as_text(f.get("asset_class")).strip()
         asset_id = _as_text(f.get("asset_id")).strip()
         asset_name = _as_text(f.get("asset_name")).strip()
-        currency = _as_text(f.get("currency")).strip() or None
+        currency = normalize_currency(_as_text(f.get("currency"))) or None
         qty = safe_float(f.get("quantity"))
         avg_cost = safe_float(f.get("avg_cost"))
 
@@ -164,7 +153,7 @@ def build_context(
         if inferred_cash:
             # holdings 表里 cash 的 quantity 可能是字符串；currency 是单选，值为 'USD'/'CNY'/...
             if currency and qty is not None:
-                ccy_u = str(currency).strip().upper()
+                ccy_u = normalize_currency(currency)
                 cash_by_currency[ccy_u] = cash_by_currency.get(ccy_u, 0.0) + qty
             continue
 
@@ -180,12 +169,12 @@ def build_context(
             "avg_cost": avg_cost,
             "currency": currency,
             "broker": _record_broker_text(f),
-            "account": _as_text(f.get("account")).strip(),
+            "account": normalize_account(_as_text(f.get("account"))),
         }
 
     return {
         "as_of_utc": datetime.now(timezone.utc).isoformat(),
-        "filters": {"broker": broker_norm, "account": account},
+        "filters": {"broker": broker_norm, "account": account_norm},
         "cash_by_currency": cash_by_currency,
         "stocks_by_symbol": stocks_by_symbol,
         "raw_selected_count": len(selected),
@@ -203,7 +192,7 @@ def build_shared_context(records: list[dict], broker: str | None = None, *, mark
         b = _record_broker_text(fields0)
         if broker_norm and broker_norm not in b:
             continue
-        a = _as_text(fields0.get("account")).strip()
+        a = normalize_account(_as_text(fields0.get("account")))
         if a:
             accounts.add(a)
 
@@ -225,7 +214,7 @@ def slice_shared_context_for_account(shared_ctx: dict, account: str | None) -> d
     by_account = shared_ctx.get("by_account")
     if not isinstance(by_account, dict):
         return None
-    out = by_account.get(str(account))
+    out = by_account.get(normalize_account(account))
     return (dict(out) if isinstance(out, dict) else None)
 
 

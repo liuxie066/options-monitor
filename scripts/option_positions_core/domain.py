@@ -6,7 +6,7 @@ from typing import Any
 
 from domain.domain.expiration_dates import expiration_timestamp_to_ymd
 from scripts.feishu_bitable import merge_note, parse_note_kv, safe_float
-from scripts.opend_utils import resolve_underlier_alias
+from scripts.trade_symbol_identity import resolve_underlier_alias, symbol_currency
 
 
 BUY_TO_CLOSE = "buy_to_close"
@@ -176,12 +176,7 @@ def normalize_currency(value: Any, *, strict: bool = False) -> str:
 
 
 def infer_currency_from_symbol(symbol: Any) -> str | None:
-    sym = norm_symbol(str(symbol or ""))
-    if not sym:
-        return None
-    if sym.upper().endswith(".HK"):
-        return "HKD"
-    return "USD"
+    return symbol_currency(symbol)
 
 
 def resolve_open_currency(symbol: Any, currency: Any) -> str:

@@ -25,76 +25,14 @@ if str(repo_base) not in sys.path:
 from scripts.account_config import DEFAULT_ACCOUNTS, accounts_from_config_path, normalize_accounts
 from scripts.multiplier_cache import resolve_multiplier_with_source
 from scripts.option_positions_core.domain import infer_currency_from_symbol as infer_position_currency_from_symbol
+from scripts.trade_symbol_identity import canonical_symbol
 
 # Suppress noisy OpenAPI logs when multiplier_cache triggers futu/OpenD imports.
 os.environ.setdefault('OPENAPI_LOG_LEVEL', 'ERROR')
 
 
-# NOTE: symbol aliases are now configurable in config.us.json/config.hk.json:intake.symbol_aliases.
-# Keep a small built-in fallback for robustness.
-ALIASES = {
-    '腾讯': '0700.HK',
-    '腾讯控股': '0700.HK',
-    'POP': '9992.HK',
-    '泡泡玛特': '9992.HK',
-    '美团': '3690.HK',
-    '美团w': '3690.HK',
-    '美团-w': '3690.HK',
-    '美团-W': '3690.HK',
-    '中海油': '0883.HK',
-    '中国海洋石油': '0883.HK',
-}
-
-
-def load_intake_config() -> dict:
-    """Load intake config from runtime entry configs (best-effort)."""
-    base = Path(__file__).resolve().parents[1]
-    merged: dict = {}
-    for name in ("config.us.json", "config.hk.json"):
-        try:
-            cfg = json.loads((base / name).read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        intake = cfg.get("intake") or {}
-        if not isinstance(intake, dict):
-            continue
-        for k, v in intake.items():
-            if isinstance(v, dict):
-                cur = merged.get(k)
-                if isinstance(cur, dict):
-                    cur.update(v)
-                else:
-                    merged[k] = dict(v)
-            else:
-                merged[k] = v
-    return merged
-
-
 def normalize_symbol(s: str) -> str | None:
-    s = (s or '').strip()
-    if not s:
-        return None
-
-    intake = load_intake_config()
-    aliases = (intake.get('symbol_aliases') or {}) if isinstance(intake, dict) else {}
-
-    if s in aliases:
-        return str(aliases[s]).strip().upper()
-
-    if s in ALIASES:
-        return ALIASES[s]
-
-    s2 = s.upper().replace(' ', '')
-
-    # allow direct hk code 0700.HK / 9992.HK etc.
-    if re.fullmatch(r"\d{4}\.HK", s2) or re.fullmatch(r"\d{5}\.HK", s2):
-        return s2
-
-    # allow US ticker like NVDA/TSLA/AAPL
-    if re.fullmatch(r"[A-Z][A-Z0-9\.\-]{0,9}", s2):
-        return s2
-
-    return None
+    return canonical_symbol(s)
 
 
 def parse_exp(s: str) -> str | None:
