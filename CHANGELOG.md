@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.0.6 - 2026-05-04
+
+### Fixed
+- Normalized Futu HK option display names such as `泡泡玛特 260528 135.00 沽` to their canonical underlier before multiplier resolution.
+- Resolved the remaining auto-trade intake multiplier fallback gap when the active listener config lacks HK `intake` defaults but receives valid HK Futu option fills.
+
 ## 1.0.5 - 2026-05-04
 
 ### Fixed

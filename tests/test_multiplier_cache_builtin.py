@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -11,6 +12,7 @@ from scripts.multiplier_cache import (
     normalize_symbol,
     refresh_via_opend,
     resolve_multiplier,
+    resolve_multiplier_with_source_and_diagnostics,
     resolve_multiplier_with_source,
     save_cache,
 )
@@ -52,6 +54,34 @@ def test_resolve_multiplier_uses_cached_value(tmp_path: Path) -> None:
         symbol="00700.HK",
         allow_opend_refresh=False,
     ) == (500, "test")
+
+
+def test_resolve_multiplier_uses_repo_market_config_when_active_config_lacks_intake(tmp_path: Path) -> None:
+    (tmp_path / "config.hk.json").write_text(
+        json.dumps(
+            {
+                "intake": {
+                    "default_multiplier_hk": 1000,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    value, source, diagnostics = resolve_multiplier_with_source_and_diagnostics(
+        repo_base=tmp_path,
+        symbol="9992.HK",
+        config={"trade_intake": {"mode": "dry-run"}},
+        allow_opend_refresh=False,
+    )
+
+    assert value == 1000
+    assert source == "config-file:config.hk.json:intake.default_multiplier_hk"
+    assert diagnostics["selected_source"] == source
+    assert any(
+        item["source"] == "config:intake.default_multiplier_hk" and item["status"] == "missing_or_invalid"
+        for item in diagnostics["attempted_sources"]
+    )
 
 
 def test_merge_cache_updates_preserves_existing_entries(tmp_path: Path) -> None:
