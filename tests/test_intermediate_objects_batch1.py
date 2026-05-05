@@ -63,7 +63,7 @@ def test_delivery_plan_validation_blocks_empty_target() -> None:
 
 def test_main_uses_intermediate_objects_in_critical_path() -> None:
     base = Path(__file__).resolve().parents[1]
-    main_src = (base / "scripts" / "multi_tick" / "main.py").read_text(encoding="utf-8")
+    main_src = (base / "src" / "application" / "multi_account_tick.py").read_text(encoding="utf-8")
     account_run_src = (base / "src" / "application" / "account_run.py").read_text(encoding="utf-8")
     notification_src = (base / "src" / "application" / "scheduled_notification.py").read_text(encoding="utf-8")
     audit_src = (base / "src" / "application" / "multi_tick_audit.py").read_text(encoding="utf-8")

@@ -45,7 +45,7 @@ def test_market_session_and_opend_alert_use_single_source_of_truth() -> None:
 
 
 def test_multi_tick_main_enforces_canonical_runtime_config_without_derived_gate() -> None:
-    src = Path("scripts/multi_tick/main.py").read_text(encoding="utf-8")
+    src = Path("src/application/multi_account_tick.py").read_text(encoding="utf-8")
     assert "OM_ALLOW_DERIVED_CONFIG" not in src
     assert "resolve_allow_derived_config_gate(" not in src
     assert "allow_derived=" not in src
@@ -142,7 +142,7 @@ def test_ensure_runtime_canonical_config_allows_repo_local_when_no_sibling_exter
 
 def test_production_entrypoints_enable_sibling_external_guard() -> None:
     send_src = Path("scripts/send_if_needed.py").read_text(encoding="utf-8")
-    multi_src = Path("scripts/multi_tick/main.py").read_text(encoding="utf-8")
+    multi_src = Path("src/application/multi_account_tick.py").read_text(encoding="utf-8")
 
     assert "src.application.multi_account_tick" in send_src
     assert "run_tick(" in send_src

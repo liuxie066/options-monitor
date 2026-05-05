@@ -129,7 +129,7 @@ def test_decide_pipeline_execution_result_matches_legacy_branching() -> None:
 
 def test_main_uses_engine_decision_entrypoints_batch3() -> None:
     base = Path(__file__).resolve().parents[1]
-    main_src = (base / 'scripts' / 'multi_tick' / 'main.py').read_text(encoding='utf-8')
+    main_src = (base / 'src' / 'application' / 'multi_account_tick.py').read_text(encoding='utf-8')
     account_run_src = (base / 'src' / 'application' / 'account_run.py').read_text(encoding='utf-8')
     watchdog_src = (base / 'src' / 'application' / 'multi_tick_watchdog.py').read_text(encoding='utf-8')
 

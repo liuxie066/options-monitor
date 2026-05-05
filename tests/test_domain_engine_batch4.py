@@ -83,7 +83,7 @@ def test_build_opend_unhealthy_execution_plan_matches_legacy_branching() -> None
 
 def test_main_uses_opend_unhealthy_execution_plan_batch4() -> None:
     base = Path(__file__).resolve().parents[1]
-    src = (base / 'scripts' / 'multi_tick' / 'main.py').read_text(encoding='utf-8')
+    src = (base / 'src' / 'application' / 'multi_account_tick.py').read_text(encoding='utf-8')
     assert 'build_opend_unhealthy_execution_plan' in src
 
 
@@ -271,7 +271,7 @@ def test_decide_notify_dispatch_gate_matches_legacy_branching() -> None:
 
 def test_main_uses_notify_dispatch_gate_entrypoint_batch4() -> None:
     base = Path(__file__).resolve().parents[1]
-    src = (base / 'scripts' / 'multi_tick' / 'main.py').read_text(encoding='utf-8')
+    src = (base / 'src' / 'application' / 'multi_account_tick.py').read_text(encoding='utf-8')
     assert 'resolve_multi_tick_engine_entrypoint' in src
     assert 'build_per_account_delivery_batch(' in src
     assert 'decision_builder=decide_notification_delivery' in src
@@ -279,7 +279,7 @@ def test_main_uses_notify_dispatch_gate_entrypoint_batch4() -> None:
 
 def test_main_orchestrator_guard_batch4_no_legacy_rule_reflow() -> None:
     base = Path(__file__).resolve().parents[1]
-    src = (base / 'scripts' / 'multi_tick' / 'main.py').read_text(encoding='utf-8')
+    src = (base / 'src' / 'application' / 'multi_account_tick.py').read_text(encoding='utf-8')
 
     # Keep main.py as orchestration-only for key Batch-4 decisions.
     for entrypoint in (

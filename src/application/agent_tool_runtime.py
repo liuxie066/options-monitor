@@ -7,7 +7,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any, Callable
 
-from scripts.agent_plugin.contracts import AgentToolError
+from src.application.agent_tool_contracts import AgentToolError
 from src.application.runtime_config_paths import (
     read_json_object_or_empty,
     resolve_data_config_ref,

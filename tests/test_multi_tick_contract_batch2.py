@@ -17,7 +17,7 @@ class _FakeRunLogger:
 
 def test_multi_tick_account_messages_snapshot_contract_guard_present() -> None:
     base = Path(__file__).resolve().parents[1]
-    src = (base / "scripts" / "multi_tick" / "main.py").read_text(encoding="utf-8")
+    src = (base / "src" / "application" / "multi_account_tick.py").read_text(encoding="utf-8")
     helper_src = (base / "src" / "application" / "scheduled_notification.py").read_text(encoding="utf-8")
     audit_src = (base / "src" / "application" / "multi_tick_audit.py").read_text(encoding="utf-8")
     assert 'snapshot_name": "account_messages"' in helper_src
@@ -45,7 +45,7 @@ def test_multi_tick_trading_day_guard_decision_delegates_to_engine() -> None:
     base = Path(__file__).resolve().parents[1]
     src = (base / "src" / "application" / "multi_tick_scheduler.py").read_text(encoding="utf-8")
     watchdog_src = (base / "src" / "application" / "multi_tick_watchdog.py").read_text(encoding="utf-8")
-    main_src = (base / "scripts" / "multi_tick" / "main.py").read_text(encoding="utf-8")
+    main_src = (base / "src" / "application" / "multi_account_tick.py").read_text(encoding="utf-8")
     helper_src = (base / "src" / "application" / "scheduled_notification.py").read_text(encoding="utf-8")
     assert "decide_trading_day_guard(" in src
     assert "opend_unhealthy={" in watchdog_src
@@ -57,7 +57,7 @@ def test_multi_tick_io_and_decision_failure_audit_fields_are_distinguishable() -
     base = Path(__file__).resolve().parents[1]
     scheduler_src = (base / "src" / "application" / "multi_tick_scheduler.py").read_text(encoding="utf-8")
     audit_src = (base / "src" / "application" / "multi_tick_audit.py").read_text(encoding="utf-8")
-    main_src = (base / "scripts" / "multi_tick" / "main.py").read_text(encoding="utf-8")
+    main_src = (base / "src" / "application" / "multi_account_tick.py").read_text(encoding="utf-8")
     helper_src = (base / "src" / "application" / "scheduled_notification.py").read_text(encoding="utf-8")
     account_run_src = (base / "src" / "application" / "account_run.py").read_text(encoding="utf-8")
     assert "normalize_subprocess_adapter_payload(" in scheduler_src
@@ -75,7 +75,7 @@ def test_multi_tick_pipeline_calls_share_context_dir() -> None:
 
 def test_multi_tick_notify_failure_is_account_isolated() -> None:
     base = Path(__file__).resolve().parents[1]
-    src = (base / "scripts" / "multi_tick" / "main.py").read_text(encoding="utf-8")
+    src = (base / "src" / "application" / "multi_account_tick.py").read_text(encoding="utf-8")
     finalization_src = (base / "src" / "application" / "multi_tick_finalization.py").read_text(encoding="utf-8")
     helper_src = (base / "src" / "application" / "scheduled_notification.py").read_text(encoding="utf-8")
     cron_runtime_src = (base / "src" / "application" / "cron_runtime.py").read_text(encoding="utf-8")

@@ -55,6 +55,20 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert manage_symbols["safe_default_input"]["action"] == "list"
 
 
+def test_agent_registry_manifest_and_handlers_stay_in_sync() -> None:
+    from scripts.agent_plugin.main import build_spec
+    from src.application.agent_tool_handlers import TOOL_HANDLERS
+    from src.application.agent_tool_registry import tool_names
+
+    spec = build_spec()
+    manifest_names = [str(x.get("name")) for x in spec.get("tools", [])]
+    registry_names = list(tool_names())
+
+    assert manifest_names == registry_names
+    assert sorted(TOOL_HANDLERS) == sorted(registry_names)
+    assert '"user1"' not in json.dumps([x.get("examples") for x in spec.get("tools", [])], ensure_ascii=False)
+
+
 def test_agent_run_unknown_tool_returns_structured_error() -> None:
     from scripts.agent_plugin.main import run_tool
 

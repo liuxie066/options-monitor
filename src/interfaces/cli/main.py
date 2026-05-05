@@ -6,7 +6,7 @@ import sys
 from typing import Any
 
 from scripts.agent_plugin.config import load_runtime_config
-from scripts.agent_plugin.contracts import AgentToolError, build_error_payload, build_response
+from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response
 from scripts.validate_config import validate_config
 from src.application.account_management import add_account, edit_account, remove_account
 from src.application.close_advice_pipeline import run_close_advice
