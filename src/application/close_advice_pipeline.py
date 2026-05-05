@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from src.application.agent_tools import run_agent_tool
+from src.application.tool_execution import execute_tool
 
 
 def run_close_advice(
@@ -21,5 +21,4 @@ def run_close_advice(
         payload["account"] = str(account)
     if output_dir:
         payload["output_dir"] = str(output_dir)
-    return run_agent_tool("get_close_advice", payload)
-
+    return execute_tool("get_close_advice", payload)

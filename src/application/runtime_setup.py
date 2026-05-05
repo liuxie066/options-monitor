@@ -3,8 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from scripts.agent_plugin.config import repo_base as agent_repo_base
-from scripts.agent_plugin.init_local import init_local_config
+from src.application.agent_tool_config import repo_base as agent_repo_base
+from src.application.agent_tool_init_local import init_local_config
 
 
 def init_runtime(

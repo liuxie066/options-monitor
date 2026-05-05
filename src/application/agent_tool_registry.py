@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass, field
-import os
 from typing import Any
+
+from src.application.agent_tool_config import write_tools_enabled as _write_tools_enabled_from_config
 
 
 @dataclass(frozen=True)
@@ -380,8 +381,7 @@ RECOMMENDED_FLOW: tuple[str, ...] = ("healthcheck", "scan_opportunities", "get_c
 
 
 def write_tools_enabled_from_env() -> bool:
-    raw = str(os.environ.get("OM_AGENT_ENABLE_WRITE_TOOLS") or "").strip().lower()
-    return raw in {"1", "true", "yes", "on"}
+    return _write_tools_enabled_from_config()
 
 
 def tool_names() -> tuple[str, ...]:

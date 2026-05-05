@@ -8,6 +8,7 @@ BASE = Path(__file__).resolve().parents[1]
 if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
+from domain.domain.expiration_dates import expiration_business_today
 from scripts.fetch_option_positions_context import build_context, build_shared_context
 from src.application.option_positions_facade import load_option_position_records, list_position_rows
 
@@ -73,7 +74,7 @@ def test_build_context_reads_premium_from_note_fallback() -> None:
 
 def test_build_context_exposes_expiration_ymd_and_days_to_expiration() -> None:
     expiration_ms = int(datetime(2026, 5, 3, tzinfo=timezone.utc).timestamp() * 1000)
-    as_of_days = (datetime(2026, 5, 3, tzinfo=timezone.utc).date() - datetime.now(timezone.utc).date()).days
+    as_of_days = (datetime(2026, 5, 3, tzinfo=timezone.utc).date() - expiration_business_today()).days
     records = [
         {
             "record_id": "rec_1",

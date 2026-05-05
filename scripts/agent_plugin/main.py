@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from scripts.agent_plugin.config import write_tools_enabled
+from src.application.agent_tool_config import write_tools_enabled
 from src.application.agent_tool_registry import build_agent_spec
 from src.application.tool_execution import execute_tool
 

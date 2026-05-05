@@ -7,6 +7,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from domain.domain.expiration_dates import expiration_business_today
 from scripts.close_advice.runner import run_close_advice
 from scripts.multi_tick.misc import AccountResult
 from scripts.multi_tick.notify_format import build_account_message
@@ -476,7 +477,7 @@ def test_run_close_advice_uses_bid_ask_when_mid_missing(tmp_path: Path, monkeypa
 
 
 def test_run_close_advice_recalculates_dte_from_position_expiration(tmp_path: Path) -> None:
-    expiration = (datetime.now(timezone.utc).date() + timedelta(days=40)).isoformat()
+    expiration = (expiration_business_today() + timedelta(days=40)).isoformat()
     ctx_path = tmp_path / "option_positions_context.json"
     ctx_path.write_text(
         json.dumps(

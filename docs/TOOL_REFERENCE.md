@@ -80,7 +80,7 @@
 说明：
 - `om-agent` 更适合给程序调
 - `om` 更适合人工操作
-- `om-agent` 的 manifest 由 `src/application/agent_tool_registry.py` 维护，handler 由 `src/application/agent_tool_handlers.py` 维护；`scripts/agent_plugin/*` 只是兼容 facade。
+- `om-agent` 的 manifest 由 `src/application/agent_tool_registry.py` 维护，handler 由 `src/application/agent_tool_handlers.py` 维护，runtime config helper 由 `src/application/agent_tool_config.py` / `src/application/agent_tool_init_local.py` 维护；`scripts/agent_plugin/*` 只是兼容 facade。
 
 ### Tick 入口关系
 

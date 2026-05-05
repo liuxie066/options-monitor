@@ -3,8 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from scripts.agent_plugin.config import repo_base as agent_repo_base
-from scripts.agent_plugin.init_local import (
+from src.application.agent_tool_config import repo_base as agent_repo_base
+from src.application.agent_tool_init_local import (
     add_account_to_local_config,
     edit_account_in_local_config,
     remove_account_from_local_config,
