@@ -49,9 +49,14 @@ Use the launcher as a local command tool. Typical pattern:
 
 ```bash
 ./om-agent spec
+./om-agent run --tool version_check --input-json '{"remote_name":"origin"}'
+./om-agent run --tool config_validate --input-json '{"config_key":"us"}'
 ./om-agent run --tool runtime_status --input-json '{"config_key":"us"}'
 ./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'
+./om-agent run --tool scheduler_status --input-json '{"config_key":"us","account":"user1"}'
 ./om-agent run --tool query_cash_headroom --input-json '{"config_key":"us","account":"user1"}'
+./om-agent run --tool monthly_income_report --input-json '{"config_key":"us","account":"user1","month":"2026-04"}'
+./om-agent run --tool option_positions_read --input-json '{"config_key":"us","action":"list","account":"user1","status":"open"}'
 ./om-agent run --tool get_close_advice --input-json '{"config_key":"us"}'
 ./om-agent run --tool prepare_close_advice_inputs --input-json '{"config_key":"us"}'
 ./om-agent run --tool close_advice --input-json '{"config_key":"us"}'

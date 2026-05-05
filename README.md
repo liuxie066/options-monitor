@@ -203,11 +203,11 @@ cp configs/examples/portfolio.sqlite.example.json secrets/portfolio.sqlite.json
 
 ### 6.1 校验配置
 
-当前文档里配置校验示例仍使用脚本入口；这是低风险 validation / 兼容入口，可以保留，但不应把它和真实运行命令混用，也不应把它理解成 Agent 默认入口。
+Agent 默认使用结构化配置校验工具；它只读 runtime config，不检查 OpenD，也不运行 pipeline。
 
 ```bash
-./.venv/bin/python scripts/validate_config.py --config config.us.json
-./.venv/bin/python scripts/validate_config.py --config config.hk.json
+./om-agent run --tool config_validate --input-json '{"config_key":"us"}'
+./om-agent run --tool config_validate --input-json '{"config_path":"config.us.json"}'
 ```
 
 ### 6.2 健康检查
@@ -227,8 +227,10 @@ cp configs/examples/portfolio.sqlite.example.json secrets/portfolio.sqlite.json
 ### 6.3 检查版本更新
 
 ```bash
-./om version
+./om-agent run --tool version_check --input-json '{"remote_name":"origin"}'
 ```
+
+人工 CLI 仍可使用 `./om version`。
 
 ### 6.4 手动跑一次 pipeline
 

@@ -67,11 +67,15 @@
 | `om-agent` tool | `om` / CLI 对应能力 |
 |---|---|
 | `healthcheck` | `./om healthcheck` |
+| `version_check` | `./om version` |
+| `config_validate` | `./om config validate` |
+| `scheduler_status` | `./om scheduler` 的只读判定部分 |
 | `scan_opportunities` | `./om scan` / `./om scan-pipeline` |
 | `preview_notification` | `./om notify preview` |
 | `get_close_advice` | `./om close-advice` |
 | `query_cash_headroom` | `./om sell-put-cash` |
-| 无 agent tool | `./om version` |
+| `monthly_income_report` | `scripts/option_positions_report.py monthly-income` |
+| `option_positions_read` | `scripts/option_positions.py list/events/history/inspect` 的只读部分 |
 
 说明：
 - `om-agent` 更适合给程序调
@@ -96,7 +100,52 @@
 
 ---
 
-## 5.2 `scan_opportunities`
+## 5.2 `version_check`
+
+用途：
+- 检查本地 `VERSION` 与 git 远端发布 tag
+- 不运行监控流程
+
+示例：
+
+```bash
+./om-agent run --tool version_check --input-json '{"remote_name":"origin"}'
+```
+
+---
+
+## 5.3 `config_validate`
+
+用途：
+- 只校验 runtime config
+- 不检查 OpenD
+- 不运行 pipeline
+
+示例：
+
+```bash
+./om-agent run --tool config_validate --input-json '{"config_key":"us"}'
+```
+
+---
+
+## 5.4 `scheduler_status`
+
+用途：
+- 读取现有 scheduler state
+- 返回当前调度判定、下次运行时间、是否处于通知窗口
+- 不执行 `run-if-due`
+- 不写 `mark-scanned` / `mark-notified`
+
+示例：
+
+```bash
+./om-agent run --tool scheduler_status --input-json '{"config_key":"us","account":"user1"}'
+```
+
+---
+
+## 5.5 `scan_opportunities`
 
 用途：
 - 跑扫描流程
@@ -110,7 +159,7 @@
 
 ---
 
-## 5.3 `query_cash_headroom`
+## 5.6 `query_cash_headroom`
 
 用途：
 - 查询 Sell Put 现金占用与余量
@@ -127,7 +176,43 @@
 
 ---
 
-## 5.4 `get_portfolio_context`
+## 5.7 `monthly_income_report`
+
+用途：
+- 读取本地 option positions
+- 返回月度已实现收益和开仓权利金收入统计
+- 默认只返回 summary；`include_rows=true` 时返回明细
+
+示例：
+
+```bash
+./om-agent run --tool monthly_income_report --input-json '{"config_key":"us","account":"user1","month":"2026-04"}'
+```
+
+---
+
+## 5.8 `option_positions_read`
+
+用途：
+- `action=list`：读取 position lots
+- `action=events`：读取 canonical trade events
+- `action=history`：读取单个 lot 的事件链
+- `action=inspect`：读取投影诊断状态
+
+示例：
+
+```bash
+./om-agent run --tool option_positions_read --input-json '{"config_key":"us","action":"list","account":"user1","status":"open"}'
+./om-agent run --tool option_positions_read --input-json '{"config_key":"us","action":"history","record_id":"rec_xxx"}'
+```
+
+注意：
+- 这个工具只开放读和诊断动作
+- `add` / `buy-close` / `void-event` / `adjust-lot` / `rebuild` 不在此工具中开放
+
+---
+
+## 5.9 `get_portfolio_context`
 
 用途：
 - 获取账户持仓 / 现金 context
@@ -140,7 +225,7 @@
 
 ---
 
-## 5.5 `prepare_close_advice_inputs`
+## 5.10 `prepare_close_advice_inputs`
 
 用途：
 - 预先刷新 close advice 依赖的本地输入
@@ -149,7 +234,7 @@
 
 ---
 
-## 5.6 `close_advice`
+## 5.11 `close_advice`
 
 用途：
 - 基于本地 context 和 quotes 构建平仓建议
@@ -162,7 +247,7 @@
 
 ---
 
-## 5.7 `get_close_advice`
+## 5.12 `get_close_advice`
 
 用途：
 - 一次性执行 close advice 推荐路径
@@ -177,7 +262,7 @@
 
 ---
 
-## 5.8 `manage_symbols`
+## 5.13 `manage_symbols`
 
 用途：
 - 读取或修改 `symbols[]`
@@ -196,7 +281,7 @@
 
 ---
 
-## 5.9 `preview_notification`
+## 5.14 `preview_notification`
 
 用途：
 - 只生成通知内容，不发送
@@ -211,7 +296,7 @@
 
 ## 6. 人工 CLI：版本检查
 
-`./om version` 是人工 CLI 能力，不是 `om-agent` tool。它读取本地 `VERSION`，再检查远端 `origin` 的 `v*` tags，用于判断当前本地版本是否落后于已发布版本。
+`./om version` 仍然保留为人工 CLI 能力。Agent 使用 `version_check`，二者读取同一个本地 `VERSION` 和远端 `v*` tags。
 
 示例：
 

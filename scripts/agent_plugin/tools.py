@@ -14,15 +14,28 @@ from scripts.validate_config import validate_config
 from domain.domain.fetch_source import resolve_symbol_fetch_source
 from scripts.futu_portfolio_context import infer_futu_portfolio_settings
 from scripts.notify_symbols import build_notification
+from scripts.option_positions import build_lot_event_history, inspect_projection_state
+from scripts.option_positions_core.domain import normalize_account as _normalize_account
 from scripts.option_positions_core.service import load_option_positions_repo
+from scripts.option_positions_core.reporting import build_monthly_income_report
 from scripts.pipeline_context import load_option_positions_context, load_portfolio_context
 from scripts.query_sell_put_cash import query_sell_put_cash
+from scripts.scan_scheduler import decide as scheduler_decide, read_state as read_scheduler_state
+from scripts.exchange_rates import get_cached_exchange_rates as _get_cached_exchange_rates_impl
 from scripts.io_utils import safe_read_csv
+from src.application.option_positions_facade import resolve_option_positions_repo
+from src.application.option_positions_facade import list_position_rows as _list_position_rows
 from src.application.agent_tool_healthcheck import run_healthcheck_tool
 from src.application.agent_tool_notifications import preview_notification_tool
 from src.application.agent_tool_openclaw import (
     openclaw_readiness_tool,
     runtime_status_tool,
+)
+from src.application.agent_tool_operations import (
+    config_validate_tool,
+    option_positions_read_tool,
+    scheduler_status_tool,
+    version_check_tool,
 )
 from src.application.agent_tool_runtime import (
     as_float as _as_float,
@@ -44,6 +57,7 @@ from src.application.agent_tool_scan import (
     close_advice_tool,
     get_close_advice_tool,
     get_portfolio_context_tool,
+    monthly_income_report_tool,
     prepare_close_advice_inputs_tool,
     query_cash_headroom_tool,
     scan_opportunities_tool,
@@ -56,6 +70,7 @@ from src.application.agent_tool_symbols import (
     manage_symbols_tool,
     set_path as _set_path,
 )
+from src.application.version_check import check_version_update
 
 
 def fetch_symbol_opend(*args: Any, **kwargs: Any) -> Any:
@@ -124,6 +139,37 @@ def _healthcheck_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str
     )
 
 
+def _version_check_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    return version_check_tool(
+        payload,
+        check_version_update=check_version_update,
+        repo_base=repo_base,
+        mask_path=mask_path,
+    )
+
+
+def _config_validate_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    return config_validate_tool(
+        payload,
+        load_runtime_config=load_runtime_config,
+        validate_runtime_config=_validate_runtime_config,
+        accounts_from_config=accounts_from_config,
+        resolve_watchlist_config=resolve_watchlist_config,
+        mask_path=mask_path,
+    )
+
+
+def _scheduler_status_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    return scheduler_status_tool(
+        payload,
+        load_runtime_config=load_runtime_config,
+        read_state=read_scheduler_state,
+        decide=scheduler_decide,
+        repo_base=repo_base,
+        mask_path=mask_path,
+    )
+
+
 def _query_cash_headroom_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     return query_cash_headroom_tool(
         payload,
@@ -132,6 +178,40 @@ def _query_cash_headroom_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], 
         normalize_broker=_normalize_broker,
         resolve_output_root=resolve_output_root,
         query_sell_put_cash=query_sell_put_cash,
+        repo_base=repo_base,
+        mask_path=mask_path,
+    )
+
+
+def _get_cached_exchange_rates(*, cache_path):
+    return _get_cached_exchange_rates_impl(cache_path=cache_path)
+
+
+def _monthly_income_report_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    return monthly_income_report_tool(
+        payload,
+        load_runtime_config=load_runtime_config,
+        resolve_public_data_config_path=_resolve_public_data_config_path,
+        normalize_broker=_normalize_broker,
+        resolve_option_positions_repo=resolve_option_positions_repo,
+        build_monthly_income_report=build_monthly_income_report,
+        get_cached_exchange_rates=_get_cached_exchange_rates,
+        repo_base=repo_base,
+        mask_path=mask_path,
+    )
+
+
+def _option_positions_read_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    return option_positions_read_tool(
+        payload,
+        load_runtime_config=load_runtime_config,
+        resolve_public_data_config_path=_resolve_public_data_config_path,
+        normalize_broker=_normalize_broker,
+        normalize_account=_normalize_account,
+        resolve_option_positions_repo=resolve_option_positions_repo,
+        list_position_rows=_list_position_rows,
+        build_lot_event_history=build_lot_event_history,
+        inspect_projection_state=inspect_projection_state,
         repo_base=repo_base,
         mask_path=mask_path,
     )
@@ -243,7 +323,12 @@ def _openclaw_readiness_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], l
 
 TOOL_HANDLERS = {
     "healthcheck": _healthcheck_tool,
+    "version_check": _version_check_tool,
+    "config_validate": _config_validate_tool,
+    "scheduler_status": _scheduler_status_tool,
     "query_cash_headroom": _query_cash_headroom_tool,
+    "monthly_income_report": _monthly_income_report_tool,
+    "option_positions_read": _option_positions_read_tool,
     "get_portfolio_context": _get_portfolio_context_tool,
     "scan_opportunities": _scan_opportunities_tool,
     "prepare_close_advice_inputs": _prepare_close_advice_inputs_tool,
