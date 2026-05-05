@@ -314,6 +314,65 @@ def query_cash_headroom_tool(
     return result, [], {"config_path": mask_path(config_path), "output_dir": mask_path(out_dir)}
 
 
+def monthly_income_report_tool(
+    payload: dict[str, Any],
+    *,
+    load_runtime_config,
+    resolve_public_data_config_path,
+    normalize_broker,
+    resolve_option_positions_repo,
+    build_monthly_income_report,
+    get_cached_exchange_rates,
+    repo_base,
+    mask_path,
+) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    config_path, cfg = load_runtime_config(config_key=payload.get("config_key"), config_path=payload.get("config_path"))
+    portfolio_cfg = cfg.get("portfolio") if isinstance(cfg.get("portfolio"), dict) else {}
+    data_config_path = resolve_public_data_config_path(payload, portfolio_cfg)
+    _resolved_data_config, repo = resolve_option_positions_repo(base=repo_base(), data_config=data_config_path)
+
+    broker = normalize_broker(payload.get("broker") or portfolio_cfg.get("broker") or "富途")
+    account = str(payload.get("account") or "").strip() or None
+    month = str(payload.get("month") or "").strip() or None
+    include_rows = bool(payload.get("include_rows", False))
+
+    rate_cache_path = (repo_base() / "output" / "state" / "rate_cache.json").resolve()
+    rates = get_cached_exchange_rates(cache_path=rate_cache_path)
+    warnings: list[str] = []
+    if rates is None:
+        warnings.append("exchange_rate cache unavailable; *_cny fields may be null")
+
+    report = build_monthly_income_report(
+        repo.list_records(page_size=500),
+        account=account,
+        broker=broker,
+        month=month,
+        rates=rates,
+    )
+    report_warnings = [str(item) for item in (report.get("warnings") or []) if str(item).strip()]
+    warnings.extend(report_warnings)
+
+    rows = report.get("rows") if isinstance(report.get("rows"), list) else []
+    premium_rows = report.get("premium_rows") if isinstance(report.get("premium_rows"), list) else []
+    data: dict[str, Any] = {
+        "summary": report.get("summary") if isinstance(report.get("summary"), list) else [],
+        "filters": dict(report.get("filters") or {}),
+        "row_count": len(rows),
+        "premium_row_count": len(premium_rows),
+        "report_warnings": report_warnings,
+    }
+    if include_rows:
+        data["rows"] = rows
+        data["premium_rows"] = premium_rows
+
+    meta = {
+        "config_path": mask_path(config_path),
+        "data_config": mask_path(data_config_path),
+        "rate_cache": mask_path(rate_cache_path),
+    }
+    return data, warnings, meta
+
+
 def get_portfolio_context_tool(
     payload: dict[str, Any],
     *,

@@ -296,8 +296,13 @@ def run_healthcheck_tool(
 
     tools = {
         "healthcheck": {"available": True, "mode": "read"},
+        "version_check": {"available": True, "mode": "read"},
+        "config_validate": {"available": True, "mode": "read"},
+        "scheduler_status": {"available": True, "mode": "read"},
         "scan_opportunities": {"available": True, "mode": "read_with_local_cache"},
         "query_cash_headroom": {"available": True, "mode": "read_with_local_cache"},
+        "monthly_income_report": {"available": True, "mode": "read"},
+        "option_positions_read": {"available": True, "mode": "read"},
         "get_portfolio_context": {"available": True, "mode": "read_with_local_cache"},
         "prepare_close_advice_inputs": {"available": True, "mode": "read_with_local_cache"},
         "close_advice": {"available": True, "mode": "read_with_local_cache"},

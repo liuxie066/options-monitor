@@ -2,8 +2,12 @@
 
 ## Unreleased
 
+## 1.0.10 - 2026-05-05
+
 ### Changed
 - Calculated covered-call net premium annualized return against current spot opportunity cost while keeping exercised total return on the holding cost basis.
+- Promoted monthly option income statistics to the agent-facing `monthly_income_report` tool.
+- Added agent-facing read tools for version checks, config validation, scheduler decisions, and option-position ledger diagnostics.
 
 ## 1.0.9 - 2026-05-04
 

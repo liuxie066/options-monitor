@@ -524,6 +524,268 @@ def test_spec_exposes_broker_as_public_field() -> None:
     assert "pm_config" not in query_tool["input_schema"]
 
 
+def test_monthly_income_report_returns_agent_summary(monkeypatch, tmp_path: Path) -> None:
+    from scripts.agent_plugin.main import run_tool
+    import scripts.agent_plugin.tools as tools
+    import scripts.option_positions_core.service as svc
+    from scripts.option_positions_core.domain import OpenPositionCommand, parse_exp_to_ms
+
+    def _ms(value: str) -> int:
+        out = parse_exp_to_ms(value)
+        assert out is not None
+        return out
+
+    sqlite_path = tmp_path / "output_shared" / "state" / "option_positions.sqlite3"
+    data_cfg_path = tmp_path / "secrets" / "portfolio.sqlite.json"
+    data_cfg_path.parent.mkdir(parents=True)
+    data_cfg_path.write_text(
+        json.dumps({"option_positions": {"sqlite_path": str(sqlite_path)}}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    cfg_path = tmp_path / "config.us.json"
+    cfg_path.write_text(
+        json.dumps(_public_cfg_with_futu(str(data_cfg_path)), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    repo = svc.SQLiteOptionPositionsRepository(sqlite_path)
+    svc.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="user1",
+            symbol="NVDA",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=100.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            premium_per_share=2.5,
+            opened_at_ms=_ms("2026-04-03"),
+        ),
+    )
+    lot = repo.list_position_lots()[0]
+    svc.persist_manual_close_event(
+        repo,
+        record_id=lot["record_id"],
+        fields=lot["fields"],
+        contracts_to_close=1,
+        close_price=1.0,
+        close_reason="manual_buy_to_close",
+        as_of_ms=_ms("2026-04-20"),
+    )
+
+    monkeypatch.setattr(
+        tools,
+        "_get_cached_exchange_rates",
+        lambda **_kwargs: {"rates": {"USDCNY": 7.2, "HKDCNY": 0.92}},
+    )
+
+    out = run_tool(
+        "monthly_income_report",
+        {
+            "config_path": str(cfg_path),
+            "account": "user1",
+            "month": "2026-04",
+            "include_rows": True,
+        },
+    )
+
+    assert out["ok"] is True
+    assert out["warnings"] == []
+    assert out["data"]["row_count"] == 1
+    assert out["data"]["premium_row_count"] == 1
+    assert out["data"]["summary"] == [
+        {
+            "month": "2026-04",
+            "account": "user1",
+            "currency": "USD",
+            "realized_gross": 150.0,
+            "realized_gross_cny": 1080.0,
+            "closed_contracts": 1,
+            "positions": 1,
+            "premium_received_gross": 250.0,
+            "premium_received_gross_cny": 1800.0,
+            "premium_contracts": 1,
+            "premium_positions": 1,
+        }
+    ]
+    assert out["data"]["rows"][0]["realized_gross"] == 150.0
+    assert out["data"]["premium_rows"][0]["premium_received_gross"] == 250.0
+    assert out["meta"]["data_config"] == ".../portfolio.sqlite.json"
+
+
+def test_version_check_returns_agent_diagnostic(monkeypatch) -> None:
+    from scripts.agent_plugin.main import run_tool
+    import scripts.agent_plugin.tools as tools
+
+    monkeypatch.setattr(
+        tools,
+        "check_version_update",
+        lambda **kwargs: {
+            "ok": True,
+            "current_version": "1.0.9",
+            "latest_version": "1.0.9",
+            "update_available": False,
+            "remote_name": kwargs["remote_name"],
+            "release_tag": "v1.0.9",
+            "checked_at": "2026-05-05T00:00:00Z",
+            "message": "当前已是最新版本 1.0.9",
+            "error": None,
+        },
+    )
+
+    out = run_tool("version_check", {"remote_name": "origin"})
+
+    assert out["ok"] is True
+    assert out["warnings"] == []
+    assert out["data"]["current_version"] == "1.0.9"
+    assert out["data"]["remote_name"] == "origin"
+
+
+def test_config_validate_runs_without_opend(monkeypatch, tmp_path: Path) -> None:
+    from scripts.agent_plugin.main import run_tool
+
+    cfg_path = tmp_path / "config.us.json"
+    cfg_path.write_text(json.dumps(_minimal_cfg(), ensure_ascii=False, indent=2), encoding="utf-8")
+
+    out = run_tool("config_validate", {"config_path": str(cfg_path)})
+
+    assert out["ok"] is True
+    assert out["data"]["ok"] is True
+    assert out["data"]["account_count"] == 1
+    assert out["data"]["symbol_count"] == 1
+    assert out["meta"]["config_path"] == ".../config.us.json"
+
+
+def test_scheduler_status_reads_decision_without_writing_state(tmp_path: Path) -> None:
+    from scripts.agent_plugin.main import run_tool
+
+    cfg = _minimal_cfg()
+    cfg["schedule"] = {
+        "enabled": True,
+        "market_timezone": "America/New_York",
+        "market_open": "09:30",
+        "market_close": "16:00",
+        "first_notify_after_open_min": 30,
+        "notify_interval_min": 60,
+        "final_notify_before_close_min": 10,
+    }
+    cfg_path = tmp_path / "config.us.json"
+    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    state_path = tmp_path / "state" / "scheduler_state.json"
+
+    out = run_tool(
+        "scheduler_status",
+        {
+            "config_path": str(cfg_path),
+            "state": str(state_path),
+            "account": "user1",
+        },
+    )
+
+    assert out["ok"] is True
+    assert out["data"]["decision"]["schedule_key"] == "schedule"
+    assert out["data"]["decision"]["schedule_enabled"] is True
+    assert out["data"]["filters"]["account"] == "user1"
+    assert out["meta"]["state_path"] == ".../scheduler_state.json"
+    assert not state_path.exists()
+
+
+def test_option_positions_read_lists_events_history_and_inspect(tmp_path: Path) -> None:
+    from scripts.agent_plugin.main import run_tool
+    import scripts.option_positions_core.service as svc
+    from scripts.option_positions_core.domain import OpenPositionCommand, parse_exp_to_ms
+
+    def _ms(value: str) -> int:
+        out = parse_exp_to_ms(value)
+        assert out is not None
+        return out
+
+    sqlite_path = tmp_path / "output_shared" / "state" / "option_positions.sqlite3"
+    data_cfg_path = tmp_path / "secrets" / "portfolio.sqlite.json"
+    data_cfg_path.parent.mkdir(parents=True)
+    data_cfg_path.write_text(
+        json.dumps({"option_positions": {"sqlite_path": str(sqlite_path)}}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    cfg_path = tmp_path / "config.us.json"
+    cfg_path.write_text(
+        json.dumps(_public_cfg_with_futu(str(data_cfg_path)), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    repo = svc.SQLiteOptionPositionsRepository(sqlite_path)
+    svc.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="user1",
+            symbol="NVDA",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=100.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            premium_per_share=2.5,
+            opened_at_ms=_ms("2026-04-03"),
+        ),
+    )
+    lot = repo.list_position_lots()[0]
+    record_id = str(lot["record_id"])
+
+    listed = run_tool(
+        "option_positions_read",
+        {
+            "config_path": str(cfg_path),
+            "action": "list",
+            "account": "user1",
+            "status": "open",
+        },
+    )
+    events = run_tool(
+        "option_positions_read",
+        {
+            "config_path": str(cfg_path),
+            "action": "events",
+            "account": "user1",
+            "limit": 5,
+        },
+    )
+    history = run_tool(
+        "option_positions_read",
+        {
+            "config_path": str(cfg_path),
+            "action": "history",
+            "record_id": record_id,
+        },
+    )
+    inspected = run_tool(
+        "option_positions_read",
+        {
+            "config_path": str(cfg_path),
+            "action": "inspect",
+            "record_id": record_id,
+        },
+    )
+
+    assert listed["ok"] is True
+    assert listed["data"]["row_count"] == 1
+    assert listed["data"]["rows"][0]["record_id"] == record_id
+    assert events["ok"] is True
+    assert events["data"]["row_count"] == 1
+    assert events["data"]["rows"][0]["symbol"] == "NVDA"
+    assert history["ok"] is True
+    assert history["data"]["event_count"] == 1
+    assert inspected["ok"] is True
+    assert inspected["data"]["matched_record_ids"] == [record_id]
+    assert inspected["meta"]["data_config"] == ".../portfolio.sqlite.json"
+
+
 def test_runtime_status_summarizes_openclaw_runtime_files(tmp_path: Path) -> None:
     from scripts.agent_plugin.main import run_tool
 
