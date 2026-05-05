@@ -354,3 +354,51 @@ def test_process_payload_records_retryable_unresolved_diagnostics(tmp_path: Path
     assert state_item["attempt_count"] == 3
     assert state_item["diagnostics"]["missing_fields"] == ["multiplier"]
     assert any(event.get("phase") == "resolved" and event.get("diagnostics", {}).get("retryable") is True for event in events)
+
+
+def test_process_payload_records_failed_state_when_resolver_raises(tmp_path: Path) -> None:
+    deal = NormalizedTradeDeal(
+        broker="富途",
+        futu_account_id="REAL_1",
+        internal_account="lx",
+        deal_id="deal-failed-1",
+        order_id="order-failed-1",
+        symbol="0700.HK",
+        option_type="put",
+        side="sell",
+        position_effect="open",
+        contracts=1,
+        price=3.93,
+        strike=480.0,
+        multiplier=100,
+        multiplier_source="payload",
+        expiration_ymd="2026-04-29",
+        currency="HKD",
+        trade_time_ms=1000,
+        raw_payload={"deal_id": "deal-failed-1"},
+    )
+    events: list[dict] = []
+    writes: list[dict] = []
+
+    out = process_trade_payload(
+        {"deal_id": "deal-failed-1"},
+        repo=object(),
+        state_path=tmp_path / "state.json",
+        audit_path=tmp_path / "audit.jsonl",
+        account_mapping={"REAL_1": "lx"},
+        apply_changes=True,
+        load_trade_intake_state_fn=lambda _path: {"processed_deal_ids": {}, "failed_deal_ids": {}, "unresolved_deal_ids": {}},
+        write_trade_intake_state_fn=lambda _path, state: writes.append(dict(state)),
+        upsert_deal_state_fn=upsert_deal_state,
+        append_trade_intake_audit_fn=lambda _path, event: events.append(dict(event)),
+        enrich_trade_payload_fn=None,
+        normalize_trade_deal_fn=lambda payload, futu_account_mapping=None: deal,
+        resolve_trade_deal_fn=lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    assert out["status"] == "failed"
+    assert out["reason"] == "exception:RuntimeError"
+    failed = writes[-1]["failed_deal_ids"]["deal-failed-1"]
+    assert failed["status"] == "failed"
+    assert failed["diagnostics"]["exception_type"] == "RuntimeError"
+    assert any(event.get("phase") == "failed" and event.get("deal_id") == "deal-failed-1" for event in events)

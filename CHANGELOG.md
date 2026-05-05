@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Changed
+- Calculated covered-call net premium annualized return against current spot opportunity cost while keeping exercised total return on the holding cost basis.
+
+## 1.0.9 - 2026-05-04
+
+### Fixed
+- Recorded structured failed intake state and audit diagnostics when trade normalization or resolver persistence raises, preventing received Futu fills from disappearing without a terminal state.
+- Isolated per-fill OpenD push callback failures so one bad deal cannot interrupt later rows in the same push batch.
+- Canonicalized option-position trade event symbols and close projection matching on both sides, allowing legacy HK aliases such as `00700.HK` to close the canonical `0700.HK` lot.
+- Returned structured unresolved diagnostics for invalid open-fill numeric fields such as zero contracts instead of letting validation exceptions bypass intake state recording.
+- Moved deal IDs between intake state buckets on status changes so retryable unresolved entries are removed after a later applied or failed outcome.
+
 ## 1.0.8 - 2026-05-04
 
 ### Fixed

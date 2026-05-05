@@ -33,7 +33,7 @@ def render_one(row) -> str:
         f"可覆盖张数: {int(row.get('covered_contracts_available', 0) or 0)} | fully-covered: {'是' if bool(row.get('is_fully_covered_available', False)) else '否'}",
         "",
         f"DTE: {int(row['dte'])}",
-        f"卖出参考价(mid): {num(row['mid'])}  (收益率按 mid 价计算)",
+        f"卖出参考价(mid): {num(row['mid'])}  (净权利金年化按 mid / spot 口径计算)",
         "",
         f"净收入({str(row.get('currency') or row.get('option_ccy') or 'N/A').upper()}): {num(row['net_income'])}",
         f"净权利金年化: {pct(row['annualized_net_premium_return'])}",

@@ -131,6 +131,14 @@ def test_resolve_trade_open_missing_multiplier_is_retryable_with_diagnostics() -
     assert result.diagnostics["raw_symbol_fields"] == {"code": "HK.POP260528P150000"}
 
 
+def test_resolve_trade_open_rejects_zero_contracts_as_unresolved() -> None:
+    result = resolve_trade_deal(_deal(contracts=0), repo=FakeRepo(), state={}, apply_changes=False)
+
+    assert result.status == "unresolved"
+    assert result.reason == "invalid_required_fields:contracts"
+    assert result.diagnostics["invalid_fields"] == ["contracts"]
+
+
 def test_resolve_trade_open_missing_account_mapping_exposes_diagnostics() -> None:
     result = resolve_trade_deal(
         _deal(

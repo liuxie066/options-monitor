@@ -3,6 +3,72 @@ from __future__ import annotations
 from typing import Any, Callable
 
 
+def _payload_deal_id(payload: dict[str, Any] | None) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    for key in ("deal_id", "dealID", "id"):
+        raw = payload.get(key)
+        value = str(raw or "").strip()
+        if value:
+            return value
+    return None
+
+
+def _exception_result_dict(
+    exc: Exception,
+    *,
+    payload: dict[str, Any] | None = None,
+    deal: object | None = None,
+    stage: str,
+) -> dict[str, Any]:
+    action = None
+    if deal is not None:
+        position_effect = str(getattr(deal, "position_effect", "") or "").strip().lower()
+        if position_effect in {"open", "close"}:
+            action = position_effect
+    return {
+        "status": "failed",
+        "action": action,
+        "reason": f"exception:{type(exc).__name__}",
+        "deal_id": (str(getattr(deal, "deal_id", "") or "").strip() or _payload_deal_id(payload)),
+        "account": (str(getattr(deal, "internal_account", "") or "").strip() or None),
+        "operations": [],
+        "diagnostics": {
+            "exception_stage": str(stage),
+            "exception_type": type(exc).__name__,
+            "exception_message": str(exc),
+        },
+    }
+
+
+def _record_failed_deal_state(
+    *,
+    state: dict[str, Any],
+    state_path: Any,
+    result_dict: dict[str, Any],
+    write_trade_intake_state_fn: Callable[[Any, dict[str, Any]], Any],
+    upsert_deal_state_fn: Callable[..., dict[str, Any]],
+) -> dict[str, Any]:
+    deal_id = str(result_dict.get("deal_id") or "").strip()
+    if not deal_id:
+        return state
+    state = upsert_deal_state_fn(
+        state,
+        bucket="failed_deal_ids",
+        deal_id=deal_id,
+        payload={
+            "status": "failed",
+            "action": result_dict.get("action"),
+            "account": result_dict.get("account"),
+            "applied_record_ids": [],
+            "reason": result_dict.get("reason"),
+            "diagnostics": dict(result_dict.get("diagnostics") or {}),
+        },
+    )
+    write_trade_intake_state_fn(state_path, state)
+    return state
+
+
 def build_trade_intake_audit_event(
     phase: str,
     *,
@@ -77,11 +143,43 @@ def process_trade_payload(
                 audit_path,
                 build_trade_intake_audit_event("enrichment_lookup", payload=effective_payload, extra={"enrichment": enrich_diagnostics}),
             )
-    deal = normalize_trade_deal_fn(effective_payload, futu_account_mapping=account_mapping)
+    try:
+        deal = normalize_trade_deal_fn(effective_payload, futu_account_mapping=account_mapping)
+    except Exception as exc:
+        result_dict = _exception_result_dict(exc, payload=effective_payload, stage="normalize")
+        append_trade_intake_audit_fn(
+            audit_path,
+            build_trade_intake_audit_event("failed", payload=effective_payload, result=result_dict),
+        )
+        if apply_changes:
+            state = _record_failed_deal_state(
+                state=state,
+                state_path=state_path,
+                result_dict=result_dict,
+                write_trade_intake_state_fn=write_trade_intake_state_fn,
+                upsert_deal_state_fn=upsert_deal_state_fn,
+            )
+        return result_dict
     append_trade_intake_audit_fn(audit_path, build_trade_intake_audit_event("normalized", deal=deal))
-    result = resolve_trade_deal_fn(deal, repo=repo, state=state, apply_changes=apply_changes)
-    result_dict = result.to_dict()
-    append_trade_intake_audit_fn(audit_path, build_trade_intake_audit_event("resolved", deal=deal, result=result_dict))
+    try:
+        result = resolve_trade_deal_fn(deal, repo=repo, state=state, apply_changes=apply_changes)
+        result_dict = result.to_dict()
+        append_trade_intake_audit_fn(audit_path, build_trade_intake_audit_event("resolved", deal=deal, result=result_dict))
+    except Exception as exc:
+        result_dict = _exception_result_dict(exc, payload=effective_payload, deal=deal, stage="resolve")
+        append_trade_intake_audit_fn(
+            audit_path,
+            build_trade_intake_audit_event("failed", deal=deal, result=result_dict),
+        )
+        if apply_changes:
+            state = _record_failed_deal_state(
+                state=state,
+                state_path=state_path,
+                result_dict=result_dict,
+                write_trade_intake_state_fn=write_trade_intake_state_fn,
+                upsert_deal_state_fn=upsert_deal_state_fn,
+            )
+        return result_dict
 
     if apply_changes and deal.deal_id:
         if result.status == "applied":
@@ -141,6 +239,7 @@ def process_trade_payload(
                     "account": result.account,
                     "applied_record_ids": [],
                     "reason": result.reason,
+                    "diagnostics": dict(result_dict.get("diagnostics") or {}),
                 },
             )
             write_trade_intake_state_fn(state_path, state)

@@ -107,7 +107,7 @@ def compute_metrics(contract: CandidateContractInput | pd.Series, avg_cost: floa
     if net_income <= 0:
         return None
 
-    annualized_net_premium_return = (net_income / (avg_cost * m)) * (365 / dte)
+    annualized_net_premium_return = (net_income / (spot * m)) * (365 / dte)
     if_exercised_total_return = (((strike - avg_cost) * m) + net_income) / (avg_cost * m)
     strike_above_spot_pct = (strike - spot) / spot
     strike_above_cost_pct = (strike - avg_cost) / avg_cost

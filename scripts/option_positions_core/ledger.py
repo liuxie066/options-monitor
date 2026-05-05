@@ -162,7 +162,7 @@ def _matches_close(fields: dict[str, Any], event: TradeEvent) -> bool:
     return (
         normalize_broker(fields.get("broker")) == event.broker
         and normalize_account(fields.get("account")) == event.account
-        and _canonical_trade_symbol(fields.get("symbol")) == event.symbol
+        and _canonical_trade_symbol(fields.get("symbol")) == _canonical_trade_symbol(event.symbol)
         and normalize_option_type(fields.get("option_type")) == event.option_type
         and normalize_side(fields.get("side")) == "short"
         and _same_strike(fields.get("strike"), event.strike)
@@ -228,7 +228,7 @@ def _matches_close_target(fields: dict[str, Any], event: TradeEvent) -> bool:
     return (
         normalize_broker(fields.get("broker")) == event.broker
         and normalize_account(fields.get("account")) == event.account
-        and _canonical_trade_symbol(fields.get("symbol")) == event.symbol
+        and _canonical_trade_symbol(fields.get("symbol")) == _canonical_trade_symbol(event.symbol)
         and normalize_option_type(fields.get("option_type")) == event.option_type
         and normalize_side(fields.get("side")) == "short"
         and str(fields.get("source_event_id") or "") != event.event_id

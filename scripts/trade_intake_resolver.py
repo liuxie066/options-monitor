@@ -123,6 +123,13 @@ def _missing_required_fields_diagnostics(deal: NormalizedTradeDeal, missing: lis
     }
 
 
+def _invalid_required_fields_diagnostics(invalid: list[str]) -> dict[str, Any]:
+    return {
+        "retryable": False,
+        "invalid_fields": list(invalid),
+    }
+
+
 def _required_open_missing(deal: NormalizedTradeDeal) -> list[str]:
     src = {
         "deal_id": deal.deal_id,
@@ -137,6 +144,26 @@ def _required_open_missing(deal: NormalizedTradeDeal) -> list[str]:
         "currency": deal.currency,
     }
     return [k for k, v in src.items() if v in (None, "")]
+
+
+def _required_open_invalid(deal: NormalizedTradeDeal) -> list[str]:
+    invalid: list[str] = []
+    try:
+        if deal.contracts is not None and int(deal.contracts) <= 0:
+            invalid.append("contracts")
+    except Exception:
+        invalid.append("contracts")
+    try:
+        if deal.strike is not None and float(deal.strike) <= 0:
+            invalid.append("strike")
+    except Exception:
+        invalid.append("strike")
+    try:
+        if deal.multiplier is not None and int(deal.multiplier) <= 0:
+            invalid.append("multiplier")
+    except Exception:
+        invalid.append("multiplier")
+    return invalid
 
 
 def _required_close_missing(deal: NormalizedTradeDeal) -> list[str]:
@@ -293,6 +320,15 @@ def resolve_trade_deal(
                 reason="missing_required_fields:" + ",".join(missing),
                 deal=deal,
                 diagnostics=_missing_required_fields_diagnostics(deal, missing),
+            )
+        invalid = _required_open_invalid(deal)
+        if invalid:
+            return _failure(
+                status="unresolved",
+                action="open",
+                reason="invalid_required_fields:" + ",".join(invalid),
+                deal=deal,
+                diagnostics=_invalid_required_fields_diagnostics(invalid),
             )
         if apply_changes:
             return IntakeResolution(

@@ -57,3 +57,22 @@ def test_retryable_unresolved_state_is_distinguishable_from_terminal_state() -> 
     assert is_retryable_unresolved_deal(terminal, "deal-retry-1") is True
     assert lookup_deal_state_entry(terminal, "deal-retry-1")[0] == "unresolved_deal_ids"
     assert is_retryable_unresolved_deal(terminal, "deal-done-1") is False
+
+
+def test_upsert_deal_state_moves_deal_between_buckets() -> None:
+    state = upsert_deal_state(
+        {},
+        bucket="unresolved_deal_ids",
+        deal_id="deal-retry-1",
+        payload={"status": "unresolved", "retryable": True, "attempt_count": 1},
+    )
+    state = upsert_deal_state(
+        state,
+        bucket="processed_deal_ids",
+        deal_id="deal-retry-1",
+        payload={"status": "applied", "action": "open", "account": "lx"},
+    )
+
+    assert lookup_deal_state_entry(state, "deal-retry-1")[0] == "processed_deal_ids"
+    assert "deal-retry-1" not in state["unresolved_deal_ids"]
+    assert is_retryable_unresolved_deal(state, "deal-retry-1") is False

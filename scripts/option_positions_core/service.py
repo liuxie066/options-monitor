@@ -39,9 +39,14 @@ from scripts.option_positions_core.ledger import (
     project_position_lot_records_with_diagnostics,
     trade_event_from_normalized_deal,
 )
+from scripts.trade_contract_identity import canonical_contract_symbol
 
 
 REPO_BASE = Path(__file__).resolve().parents[2]
+
+
+def _canonical_trade_symbol(value: Any) -> str:
+    return canonical_contract_symbol(value)
 
 
 @dataclass(frozen=True)
@@ -272,7 +277,7 @@ def _bootstrap_trade_event(item: dict[str, Any], *, source_name: str) -> TradeEv
         source_name=source_name,
         broker=broker,
         account=normalize_account(fields.get("account")),
-        symbol=str(fields.get("symbol") or "").strip().upper(),
+        symbol=_canonical_trade_symbol(fields.get("symbol")),
         option_type=str(fields.get("option_type") or ""),
         side="sell" if str(fields.get("side") or "").strip().lower() == "short" else str(fields.get("side") or "").strip().lower(),
         position_effect="open",
@@ -816,7 +821,7 @@ def _assert_position_lot_target_matches_current_state(
     comparisons = (
         ("broker", normalize_broker(current_fields.get("broker")), normalize_broker(fields.get("broker"))),
         ("account", normalize_account(current_fields.get("account")), normalize_account(fields.get("account"))),
-        ("symbol", str(current_fields.get("symbol") or "").strip().upper(), str(fields.get("symbol") or "").strip().upper()),
+        ("symbol", _canonical_trade_symbol(current_fields.get("symbol")), _canonical_trade_symbol(fields.get("symbol"))),
         ("option_type", str(current_fields.get("option_type") or "").strip().lower(), str(fields.get("option_type") or "").strip().lower()),
         ("side", str(current_fields.get("side") or "").strip().lower(), str(fields.get("side") or "").strip().lower()),
         ("currency", normalize_currency(current_fields.get("currency")), normalize_currency(fields.get("currency"))),
@@ -931,7 +936,7 @@ def persist_manual_open_event(repo: Any, command: OpenPositionCommand) -> dict[s
         source_name="cli_manual_open",
         broker=str(command.broker),
         account=str(command.account),
-        symbol=str(command.symbol).strip().upper(),
+        symbol=_canonical_trade_symbol(command.symbol),
         option_type=str(command.option_type),
         side="sell" if str(command.side).strip().lower() == "short" else "buy",
         position_effect="open",
@@ -977,7 +982,7 @@ def persist_manual_close_event(
         source_name="cli_manual_close",
         broker=broker,
         account=normalize_account(fields.get("account")),
-        symbol=str(fields.get("symbol") or "").strip().upper(),
+        symbol=_canonical_trade_symbol(fields.get("symbol")),
         option_type=str(fields.get("option_type") or ""),
         side="buy" if str(fields.get("side") or "").strip().lower() == "short" else "sell",
         position_effect="close",
@@ -1059,7 +1064,7 @@ def persist_expire_auto_close_event(
         source_name="auto_close_expired_positions",
         broker=broker,
         account=normalize_account(fields.get("account")),
-        symbol=str(fields.get("symbol") or "").strip().upper(),
+        symbol=_canonical_trade_symbol(fields.get("symbol")),
         option_type=str(fields.get("option_type") or ""),
         side="buy" if str(fields.get("side") or "").strip().lower() == "short" else "sell",
         position_effect="close",
@@ -1115,7 +1120,7 @@ def persist_manual_void_event(
         source_name="cli_manual_void",
         broker=str(target.get("broker") or ""),
         account=normalize_account(target.get("account")),
-        symbol=str(target.get("symbol") or "").strip().upper(),
+        symbol=_canonical_trade_symbol(target.get("symbol")),
         option_type=str(target.get("option_type") or ""),
         side=str(target.get("side") or "").strip().lower(),
         position_effect="void",
@@ -1174,7 +1179,7 @@ def persist_manual_adjust_event(
         source_name="cli_manual_adjust",
         broker=normalize_broker(fields.get("broker")),
         account=normalize_account(fields.get("account")),
-        symbol=str(fields.get("symbol") or "").strip().upper(),
+        symbol=_canonical_trade_symbol(fields.get("symbol")),
         option_type=str(fields.get("option_type") or ""),
         side=str(fields.get("side") or "").strip().lower(),
         position_effect="adjust",
