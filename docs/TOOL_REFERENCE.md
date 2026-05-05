@@ -73,7 +73,7 @@
 | `scan_opportunities` | `./om scan` / `./om scan-pipeline` |
 | `preview_notification` | `./om notify preview` |
 | `get_close_advice` | `./om close-advice` |
-| `query_cash_headroom` | `./om sell-put-cash` |
+| `query_cash_headroom` | `./om sell-put-cash` / `scripts/query_sell_put_cash.py::query_sell_put_cash(...)` |
 | `monthly_income_report` | `scripts/option_positions_report.py monthly-income` |
 | `option_positions_read` | `scripts/option_positions.py list/events/history/inspect` 的只读部分 |
 
@@ -140,7 +140,7 @@
 示例：
 
 ```bash
-./om-agent run --tool scheduler_status --input-json '{"config_key":"us","account":"user1"}'
+./om-agent run --tool scheduler_status --input-json '{"config_key":"us","account":"lx"}'
 ```
 
 ---
@@ -162,17 +162,22 @@
 ## 5.6 `query_cash_headroom`
 
 用途：
-- 查询 Sell Put 现金占用与余量
+- Agent 查询 Sell Put 现金占用与余量的标准入口
+- 包装 `scripts/query_sell_put_cash.py` 的 `query_sell_put_cash(...)`
+- 返回账户现金、Sell Put 担保占用、剩余可用现金
+- 支持按账户筛选，并按可用汇率折算到 CNY
 
 示例：
 
 ```bash
-./om-agent run --tool query_cash_headroom --input-json '{"config_key":"us","account":"user1"}'
+./om-agent run --tool query_cash_headroom --input-json '{"config_key":"us","account":"lx"}'
+./om-agent run --tool query_cash_headroom --input-json '{"config_key":"us","account":"sy"}'
 ```
 
 注意：
-- 公开输入优先用 `broker`
-- `market` 仍作为兼容别名存在
+- Agent payload 使用 `broker` 表示券商口径；未传时读取 runtime config 的 `portfolio.broker`
+- 底层函数参数仍是 `market=broker`，这是脚本兼容层的命名，不是 Agent 输入字段
+- 该工具不会发送通知或写 Feishu；它会把查询产物写到本地 agent 输出目录
 
 ---
 
@@ -186,7 +191,7 @@
 示例：
 
 ```bash
-./om-agent run --tool monthly_income_report --input-json '{"config_key":"us","account":"user1","month":"2026-04"}'
+./om-agent run --tool monthly_income_report --input-json '{"config_key":"us","account":"lx","month":"2026-04"}'
 ```
 
 ---
@@ -202,7 +207,7 @@
 示例：
 
 ```bash
-./om-agent run --tool option_positions_read --input-json '{"config_key":"us","action":"list","account":"user1","status":"open"}'
+./om-agent run --tool option_positions_read --input-json '{"config_key":"us","action":"list","account":"lx","status":"open"}'
 ./om-agent run --tool option_positions_read --input-json '{"config_key":"us","action":"history","record_id":"rec_xxx"}'
 ```
 
@@ -220,7 +225,7 @@
 示例：
 
 ```bash
-./om-agent run --tool get_portfolio_context --input-json '{"config_key":"us","account":"user1"}'
+./om-agent run --tool get_portfolio_context --input-json '{"config_key":"us","account":"lx"}'
 ```
 
 ---
@@ -289,7 +294,7 @@
 示例：
 
 ```bash
-./om-agent run --tool preview_notification --input-json '{"alerts_path":"output/reports/symbols_alerts.txt","changes_path":"output/reports/symbols_changes.txt","account_label":"user1"}'
+./om-agent run --tool preview_notification --input-json '{"alerts_path":"output/reports/symbols_alerts.txt","changes_path":"output/reports/symbols_changes.txt","account_label":"lx"}'
 ```
 
 ---

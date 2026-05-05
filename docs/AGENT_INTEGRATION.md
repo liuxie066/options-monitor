@@ -53,14 +53,19 @@ Use the launcher as a local command tool. Typical pattern:
 ./om-agent run --tool config_validate --input-json '{"config_key":"us"}'
 ./om-agent run --tool runtime_status --input-json '{"config_key":"us"}'
 ./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'
-./om-agent run --tool scheduler_status --input-json '{"config_key":"us","account":"user1"}'
-./om-agent run --tool query_cash_headroom --input-json '{"config_key":"us","account":"user1"}'
-./om-agent run --tool monthly_income_report --input-json '{"config_key":"us","account":"user1","month":"2026-04"}'
-./om-agent run --tool option_positions_read --input-json '{"config_key":"us","action":"list","account":"user1","status":"open"}'
+./om-agent run --tool scheduler_status --input-json '{"config_key":"us","account":"lx"}'
+./om-agent run --tool query_cash_headroom --input-json '{"config_key":"us","account":"lx"}'
+./om-agent run --tool query_cash_headroom --input-json '{"config_key":"us","account":"sy"}'
+./om-agent run --tool monthly_income_report --input-json '{"config_key":"us","account":"lx","month":"2026-04"}'
+./om-agent run --tool option_positions_read --input-json '{"config_key":"us","action":"list","account":"lx","status":"open"}'
 ./om-agent run --tool get_close_advice --input-json '{"config_key":"us"}'
 ./om-agent run --tool prepare_close_advice_inputs --input-json '{"config_key":"us"}'
 ./om-agent run --tool close_advice --input-json '{"config_key":"us"}'
 ```
+
+Sell Put 现金余量的标准 Agent 工具是 `query_cash_headroom`。它包装
+`scripts/query_sell_put_cash.py` 里的 `query_sell_put_cash(...)`，用于返回账户现金、
+Sell Put 担保占用和剩余可用现金，并支持按账户和币种折算到 CNY。
 
 如果 payload 很长，优先用：
 

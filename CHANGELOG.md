@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Documentation
+- Clarified that `query_cash_headroom` is the agent-facing wrapper for `query_sell_put_cash(...)` and documented `lx` / `sy` account examples.
+
 ## 1.0.10 - 2026-05-05
 
 ### Changed
