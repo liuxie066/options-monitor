@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from src.application.agent_tools import run_agent_tool
+from src.application.tool_execution import execute_tool
 
 
 def run_scan(
@@ -24,5 +24,4 @@ def run_scan(
         payload["top_n"] = int(top_n)
     if no_context:
         payload["no_context"] = True
-    return run_agent_tool("scan_opportunities", payload)
-
+    return execute_tool("scan_opportunities", payload)

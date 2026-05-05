@@ -6,7 +6,7 @@ from typing import Any
 from copy import deepcopy
 
 from scripts.account_config import accounts_from_config, list_account_config_views, normalize_accounts
-from scripts.agent_plugin.config import load_runtime_config, repo_base, resolve_output_root, write_tools_enabled
+from src.application.agent_tool_config import load_runtime_config, repo_base, resolve_output_root, write_tools_enabled
 from src.application.agent_tool_contracts import AgentToolError, mask_path
 from scripts.close_advice import run_close_advice
 from scripts.config_loader import load_config as load_runtime_pipeline_config, resolve_watchlist_config

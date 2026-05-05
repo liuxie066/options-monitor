@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from src.application.agent_tools import run_agent_tool
+from src.application.tool_execution import execute_tool
 
 
 def preview_notification(
@@ -22,5 +22,4 @@ def preview_notification(
         payload["changes_text"] = str(changes_text)
     if account_label:
         payload["account_label"] = str(account_label)
-    return run_agent_tool("preview_notification", payload)
-
+    return execute_tool("preview_notification", payload)
