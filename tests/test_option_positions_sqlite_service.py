@@ -2161,3 +2161,85 @@ def test_projection_replay_fixture_closes_lot_and_excludes_it_from_open_context(
 
     context = build_context(lots, broker="富途", account="sy", rates={})
     assert context["open_positions_min"] == []
+
+
+def test_projection_matches_explicit_close_with_legacy_hk_symbol_alias() -> None:
+    from scripts.option_positions_core.ledger import TradeEvent, project_position_lot_records_with_diagnostics
+
+    events = [
+        TradeEvent(
+            event_id="bootstrap:hk:legacy-700",
+            source_type="bootstrap_snapshot",
+            source_name="feishu_bootstrap",
+            broker="富途",
+            account="lx",
+            symbol="00700.HK",
+            option_type="put",
+            side="sell",
+            position_effect="open",
+            contracts=1,
+            price=1.0,
+            strike=480.0,
+            multiplier=100,
+            expiration_ymd="2026-04-29",
+            currency="HKD",
+            trade_time_ms=1000,
+            order_id=None,
+            multiplier_source="bootstrap_snapshot",
+            raw_payload={
+                "lot_record_id": "rec_legacy_700",
+                "fields": {
+                    "broker": "富途",
+                    "account": "lx",
+                    "symbol": "00700.HK",
+                    "option_type": "put",
+                    "side": "short",
+                    "contracts": 1,
+                    "contracts_open": 1,
+                    "contracts_closed": 0,
+                    "status": "open",
+                    "currency": "HKD",
+                    "strike": 480.0,
+                    "expiration": 1777420800000,
+                    "opened_at": 1000,
+                    "last_action_at": 1000,
+                    "position_id": "00700.HK_20260429_480P_short",
+                    "note": "exp=2026-04-29;premium_per_share=1.0",
+                    "premium": 1.0,
+                },
+            },
+        ),
+        TradeEvent(
+            event_id="manual-close-legacy-700",
+            source_type="manual_trade_event",
+            source_name="cli_manual_close",
+            broker="富途",
+            account="lx",
+            symbol="00700.HK",
+            option_type="put",
+            side="buy",
+            position_effect="close",
+            contracts=1,
+            price=0.2,
+            strike=480.0,
+            multiplier=100,
+            expiration_ymd="2026-04-29",
+            currency="HKD",
+            trade_time_ms=2000,
+            order_id=None,
+            multiplier_source="payload",
+            raw_payload={
+                "source": "option_positions.py",
+                "mode": "manual_close",
+                "record_id": "rec_legacy_700",
+                "close_reason": "manual_buy_to_close",
+            },
+        ),
+    ]
+
+    projection = project_position_lot_records_with_diagnostics(events)
+
+    assert projection.lots[0]["fields"]["contracts_open"] == 0
+    assert projection.lots[0]["fields"]["contracts_closed"] == 1
+    assert projection.lots[0]["fields"]["status"] == "close"
+    assert [item.code for item in projection.diagnostics] == []

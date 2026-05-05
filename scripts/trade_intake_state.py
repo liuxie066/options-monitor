@@ -81,6 +81,8 @@ def upsert_deal_state(
             cur[name] = dict(state.get(name) or {})
     item = dict(payload or {})
     item.setdefault("updated_at", utc_now())
+    for name in STATE_BUCKETS:
+        cur[name].pop(key, None)
     cur[bucket][key] = item
     return cur
 

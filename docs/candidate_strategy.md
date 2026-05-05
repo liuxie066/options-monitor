@@ -226,7 +226,7 @@ Covered Call 会结合持仓 context 计算：
 ### Covered Call
 主要按：
 
-1. 年化权利金收益
+1. 年化权利金收益（净权利金 / spot 机会成本）
 2. 单笔净收益
 
 最终 CSV、summary 和 alerts 使用的是当前生产实现里的简单稳定排序，不再把旧文档里的理想化阶段图当成唯一真相。

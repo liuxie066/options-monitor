@@ -114,3 +114,5 @@ def test_sell_call_compute_metrics_uses_full_fee_formula() -> None:
     assert out is not None
     assert out["futu_fee"] == 21.0
     assert out["net_income"] == 779.0
+    assert out["annualized_net_premium_return"] == round((779.0 / (500.0 * 100)) * (365 / 21), 6)
+    assert out["if_exercised_total_return"] == round((((480.0 - 430.0) * 100) + 779.0) / (430.0 * 100), 6)

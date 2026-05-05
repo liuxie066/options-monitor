@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from typing import Any, Callable
 
 
@@ -35,7 +36,14 @@ class OpenDTradePushListener:
                     if isinstance(rows, list):
                         for row in rows:
                             if isinstance(row, dict):
-                                self._callback(row)
+                                try:
+                                    self._callback(row)
+                                except Exception as exc:
+                                    print(
+                                        f"[WARN] trade push callback failed: {type(exc).__name__}: {exc}",
+                                        file=sys.stderr,
+                                        flush=True,
+                                    )
                 return ret, data
 
         ctx = None
