@@ -13,7 +13,7 @@ def _read(path: str) -> str:
 
 
 def test_entry_imports_service_module() -> None:
-    multi_tick = _read("scripts/multi_tick/main.py")
+    multi_tick = _read("src/application/multi_account_tick.py")
     send_if_needed = _read("scripts/send_if_needed.py")
 
     assert "from scripts.infra.service import (" in multi_tick

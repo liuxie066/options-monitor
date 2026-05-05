@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from scripts.agent_plugin.contracts import AgentToolError
+from src.application.agent_tool_contracts import AgentToolError
 
 
 def _as_int(value: Any, *, default: int, minimum: int = 1, maximum: int = 500) -> int:

@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from scripts.agent_plugin.contracts import AgentToolError
+from src.application.agent_tool_contracts import AgentToolError
 
 
 def _resolve_under_base(value: Any, *, base: Path, default: Path) -> Path:

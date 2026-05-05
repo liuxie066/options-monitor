@@ -3,7 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any, Callable, cast
 
-from scripts.agent_plugin.contracts import AgentToolError
+from src.application.agent_tool_contracts import AgentToolError
 from src.application.watchlist_mutations import (
     ensure_symbols_list as _ensure_symbols_list,
     find_symbol_entry as _find_symbol_entry,

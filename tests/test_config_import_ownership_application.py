@@ -20,10 +20,14 @@ def test_cli_uses_owner_modules_for_runtime_config_validation() -> None:
 
 def test_agent_plugin_tools_imports_owner_modules() -> None:
     tools_mod = importlib.import_module("scripts.agent_plugin.tools")
+    app_tools_mod = importlib.import_module("src.application.agent_tool_handlers")
     agent_config_mod = importlib.import_module("scripts.agent_plugin.config")
+    contracts_mod = importlib.import_module("scripts.agent_plugin.contracts")
+    app_contracts_mod = importlib.import_module("src.application.agent_tool_contracts")
     config_loader_mod = importlib.import_module("scripts.config_loader")
     validate_mod = importlib.import_module("scripts.validate_config")
 
+    assert tools_mod is app_tools_mod
     assert tools_mod.write_tools_enabled is agent_config_mod.write_tools_enabled
     assert tools_mod.resolve_output_root is agent_config_mod.resolve_output_root
     assert tools_mod.repo_base is agent_config_mod.repo_base
@@ -31,6 +35,7 @@ def test_agent_plugin_tools_imports_owner_modules() -> None:
     assert tools_mod.load_runtime_pipeline_config is config_loader_mod.load_config
     assert tools_mod.resolve_watchlist_config is config_loader_mod.resolve_watchlist_config
     assert tools_mod.validate_config is validate_mod.validate_config
+    assert contracts_mod.AgentToolError is app_contracts_mod.AgentToolError
 
 
 def test_account_run_imports_watchlist_helpers_from_owner_module() -> None:

@@ -5,7 +5,7 @@ import json
 import sys
 from pathlib import Path
 
-from scripts.agent_plugin.contracts import AgentToolError, build_error_payload, build_response
+from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response
 from src.application.account_management import add_account, edit_account, remove_account
 from src.application.tool_execution import build_tool_manifest, execute_tool
 
@@ -103,4 +103,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

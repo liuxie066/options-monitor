@@ -28,7 +28,7 @@ def test_state_repo_normalize_audit_event_requires_minimal_fields() -> None:
 
 
 def test_multi_tick_main_has_phase3_idempotency_and_audit_hooks() -> None:
-    src = (BASE / "scripts" / "multi_tick" / "main.py").read_text(encoding="utf-8")
+    src = (BASE / "src" / "application" / "multi_account_tick.py").read_text(encoding="utf-8")
     assert "scope='tick_execution'" in src
     assert "append_audit_event" in src
     assert "execution_idempotency_key" in src
