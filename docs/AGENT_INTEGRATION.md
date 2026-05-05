@@ -14,6 +14,13 @@ It exposes a stable JSON contract intended for local agent usage:
 
 其中 `--input-file` 会覆盖 `--input-json`。
 
+Implementation ownership:
+- Tool manifest source of truth: `src/application/agent_tool_registry.py`
+- Tool response contract: `src/application/agent_tool_contracts.py`
+- Tool handlers: `src/application/agent_tool_handlers.py`
+- `scripts/agent_plugin/*` files are compatibility facades for older imports.
+- Runtime tick is not a separate single-account / multi-account split. The live chain is `./om run tick` -> `src.application.multi_account_tick.run_tick`; pass one account for single-account execution or multiple accounts for multi-account execution.
+
 ## Contract
 
 All tool responses return:
@@ -139,7 +146,7 @@ If the production layout uses non-default paths, pass them explicitly:
 Default OpenClaw safety posture:
 
 - Prefer `openclaw_readiness` or `runtime_status` before any runtime command.
-- Do not run `./om run tick`, the deprecated `scripts/send_if_needed.py` wrapper, or notification send commands unless the user explicitly asks for a live run.
+- Do not run `./om run tick`, the deprecated `scripts/send_if_needed.py` wrapper, `scripts/send_if_needed_multi.py`, or notification send commands unless the user explicitly asks for a live run.
 - Keep real writes behind both `OM_AGENT_ENABLE_WRITE_TOOLS=true` and a payload-level confirmation such as `confirm=true`.
 
 ## `spec` 的行为说明

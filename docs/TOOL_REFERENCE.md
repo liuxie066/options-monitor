@@ -80,6 +80,20 @@
 说明：
 - `om-agent` 更适合给程序调
 - `om` 更适合人工操作
+- `om-agent` 的 manifest 由 `src/application/agent_tool_registry.py` 维护，handler 由 `src/application/agent_tool_handlers.py` 维护；`scripts/agent_plugin/*` 只是兼容 facade。
+
+### Tick 入口关系
+
+`om-agent` 当前不提供“直接发送通知”的 tool。实时 tick / 扫描 / 通知运行使用人工 CLI：
+
+```bash
+./om run tick --config config.us.json --accounts lx
+./om run tick --config config.us.json --accounts lx sy
+```
+
+这是一条统一链路，单账户只是传一个账户的特例。旧脚本
+`scripts/send_if_needed.py` 和 `scripts/send_if_needed_multi.py` 仍可兼容转调，
+但不作为新的 agent 默认入口。
 
 ---
 
@@ -317,7 +331,8 @@
 
 > `om-agent` 有很多工具，但 **WebUI 并不会全部开放。**
 
-当前 `scripts/webui/server.py` 里，`/api/tools/run` 只允许：
+当前 WebUI 实现 owner 是 `src/interfaces/webui/server.py`；`scripts/webui/server.py`
+只是兼容 facade。`/api/tools/run` 只允许：
 
 - `healthcheck`
 - `scan_opportunities`

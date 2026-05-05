@@ -74,6 +74,10 @@ OpenClaw 环境可以先跑：
 
 `om-agent` 是面向程序/Agent 的结构化入口；`om` 是面向人工操作的 CLI 入口。
 
+当前 tick / 扫描 / 通知主流程只有一条统一链路：`src/application/multi_account_tick.py`。
+单账户运行只是传一个账户的特例，例如 `--accounts lx`；多账户运行传多个账户，
+例如 `--accounts lx sy`。旧脚本名仍保留，但只作为兼容包装。
+
 给 Codex、Claude Code、OpenClaw 这类代理使用时，建议遵守下面的默认约束：
 
 - **先读后跑**：如果任务是“解释 / look into / check / why / explain”，先读代码、配置文档和测试，不要先执行脚本。
@@ -177,11 +181,11 @@ cp configs/examples/portfolio.sqlite.example.json secrets/portfolio.sqlite.json
 
 - 飞书开放平台应用发个人消息
 
-多账户 tick 的通知语义是固定的：
+统一 tick 的通知语义是固定的：
 
 - 同一个通知目标下，每个账户各发送一条消息
 - 账户消息内容由 `scripts/notify_symbols.py` 和 `scripts/multi_tick/notify_format.py` 负责排版
-- 多账户主流程在应用层准备候选、现金 footer 和 heartbeat 消息，脚本层只做运行编排
+- 主流程在 `src/application/multi_account_tick.py` 准备候选、现金 footer 和 heartbeat 消息
 - 某个账户发送失败不会阻断其他账户；只有发送成功的账户会更新 notified 状态
 
 通知凭证默认放在：
@@ -266,15 +270,18 @@ Agent 使用 `query_cash_headroom`。它是 `scripts/query_sell_put_cash.py` 中
 ./om scan-pipeline --config config.us.json --stage notify
 ```
 
-### 6.6 多账户运行
+### 6.6 统一 tick 运行
 
 推荐：
 
 ```bash
+./om run tick --config config.us.json --accounts lx
 ./om run tick --config config.us.json --accounts lx sy
 ```
 
-多账户运行会复用共享行情/required data，再按账户生成和发送通知。通知发送和 notified 状态更新的口径见第 5 节。
+`./om run tick` 是正式入口。传一个账户就是单账户运行，传多个账户就是多账户运行；
+不传 `--accounts` 时读取 runtime config 顶层 `accounts`。统一链路会复用共享行情 /
+required data，再按账户生成和发送通知。通知发送和 notified 状态更新的口径见第 5 节。
 
 如果是 Agent 在排查问题，不要默认从这里开始；先做 healthcheck、配置校验，必要时再缩小到单阶段运行。
 
@@ -284,7 +291,9 @@ Agent 使用 `query_cash_headroom`。它是 `scripts/query_sell_put_cash.py` 中
 python3 scripts/send_if_needed_multi.py --config config.us.json --accounts lx sy
 ```
 
-对 Agent 来说，这个兼容入口不应作为默认首选；只有在 `./om` / `./om-agent` 不覆盖，或用户明确指定脚本时再使用。该兼容入口现在会把参数显式传给 multi-tick 主函数，不依赖临时改写进程级 `sys.argv`。
+对 Agent 来说，这个兼容入口不应作为默认首选；只有在 `./om` / `./om-agent` 不覆盖，
+或用户明确指定脚本时再使用。该兼容入口会转调同一个
+`src.application.multi_account_tick.run_tick`。
 
 ### 6.7 兼容入口
 
@@ -294,7 +303,8 @@ python3 scripts/send_if_needed_multi.py --config config.us.json --accounts lx sy
 python3 scripts/send_if_needed.py --config config.us.json
 ```
 
-这是旧单账户定时脚本的兼容文件名；内部会转调统一的 multi-account tick。新定时任务应直接使用 `./om run tick`。
+这是旧单账户定时脚本的兼容文件名；旧单账户业务实现已经退役，内部会转调统一 tick。
+新定时任务应直接使用 `./om run tick`。
 
 ---
 
