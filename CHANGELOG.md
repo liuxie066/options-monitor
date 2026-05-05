@@ -2,8 +2,18 @@
 
 ## Unreleased
 
+## 1.0.11 - 2026-05-06
+
+### Changed
+- Moved the agent tool manifest, response contract, and handler ownership into `src/application` while keeping `scripts/agent_plugin/*` as compatibility facades.
+- Moved unified tick and WebUI implementation ownership behind `src/application/multi_account_tick.py` and `src/interfaces/webui/server.py`, leaving script paths as thin compatibility entry points.
+
+### Fixed
+- Restored direct `python3 scripts/multi_tick/main.py --help` compatibility by bootstrapping the repository root before importing the application owner.
+
 ### Documentation
 - Clarified that `query_cash_headroom` is the agent-facing wrapper for `query_sell_put_cash(...)` and documented `lx` / `sy` account examples.
+- Documented that single-account tick execution is now a one-account invocation of the unified tick chain rather than a separate business path.
 
 ## 1.0.10 - 2026-05-05
 
