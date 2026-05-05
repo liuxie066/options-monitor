@@ -12,7 +12,10 @@ bash scripts/setup_git_hooks.sh
 Enabled checks:
 
 - Reject commits if repo path/name matches `options-monitor-prod`
-- Enforce commit message format: `<type>(<scope>): <subject>`
+- Enforce the repository Lore commit protocol:
+  - first line states intent / reason, not just touched files
+  - trailers such as `Constraint:`, `Rejected:`, `Confidence:`, `Scope-risk:`, `Directive:`, `Tested:`, `Not-tested:`
+  - `Co-authored-by: OmX <omx@oh-my-codex.dev>` trailer when commits are made through OMX/Codex automation
 
 ## B) Remote Merge Gate (CI)
 

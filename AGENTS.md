@@ -6,7 +6,7 @@ This repository is primarily maintained for personal use. Keep agent support lig
 
 - Purpose: options monitoring and notifications for Sell Put and Covered Call workflows.
 - Accounts: use lowercase account labels. Read the default list from top-level `accounts` in the runtime config; examples currently use `lx` and `sy`.
-- Core code: `domain/` contains deterministic business logic; `scripts/` contains operational entry points.
+- Core code: `domain/` contains deterministic business logic; `src/application/` owns application services and unified tick orchestration; `scripts/` contains compatibility entry points and operational helpers.
 - Reports: generated under `output/`, `output_accounts/`, and `output_shared/`.
 - Notification layout source of truth: `scripts/notify_symbols.py` for per-account notification content and `scripts/multi_tick/notify_format.py` for account message wrappers.
 
@@ -28,6 +28,7 @@ This repository is primarily maintained for personal use. Keep agent support lig
 
 - For structured agent/programmatic usage, prefer `./om-agent` first.
 - For human-operated workflow commands, prefer the unified CLI `./om` when it covers the task.
+- For tick / scan / notification orchestration, there is one unified chain: `./om run tick` -> `src.application.multi_account_tick.run_tick`. A single account is just `--accounts lx`; multiple accounts are `--accounts lx sy`. Do not treat `scripts/send_if_needed.py` as a separate single-account implementation.
 - Use direct `python3 scripts/...` entry points only when:
   - the user explicitly asks for that script,
   - the unified CLI / agent CLI does not expose the needed capability,
@@ -75,7 +76,7 @@ For notification formatting changes:
 python3 -m pytest tests/test_notify_symbols_markdown.py tests/test_multi_tick_notify_format.py
 ```
 
-For multi-account or multi-tick behavior:
+For unified tick behavior:
 
 ```bash
 python3 -m pytest tests/test_multi_tick_*.py
@@ -104,9 +105,10 @@ Build per-account notification text from generated alerts:
 python3 scripts/notify_symbols.py --alerts-input output/reports/symbols_alerts.txt --changes-input output/reports/symbols_changes.txt --output output/reports/symbols_notification.txt
 ```
 
-Run the multi-account flow (preferred unified CLI):
+Run the unified tick flow (preferred unified CLI):
 
 ```bash
+./om run tick --config config.us.json --accounts lx
 ./om run tick --config config.us.json --accounts lx sy
 ```
 
@@ -115,6 +117,14 @@ Compatibility launcher:
 ```bash
 python3 scripts/send_if_needed_multi.py --config config.us.json --accounts lx sy
 ```
+
+Deprecated single-account filename:
+
+```bash
+python3 scripts/send_if_needed.py --config config.us.json
+```
+
+This filename is compatibility only; it forwards to the same unified tick path.
 
 Query Sell Put cash usage:
 

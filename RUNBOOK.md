@@ -39,13 +39,16 @@ openclaw cron run 9cba60f7-407b-4427-9120-0a176b818de9 --expect-final --timeout 
 
 `scripts/send_if_needed.py` 仅保留为兼容 wrapper，会转调统一 tick 链路；不要再把它当作单账户业务实现维护。
 
-多账户手动/可选定时入口：
+统一 tick 手动/可选定时入口：
 
 ```bash
+./om run tick --config config.us.json --accounts lx
 ./om run tick --config config.us.json --accounts lx sy
 ```
 
-多账户链路会复用共享运行数据，但通知按账户逐条发送到同一目标；每个账户一条消息，发送失败按账户隔离。
+传一个账户就是单账户运行，传多个账户就是多账户运行；二者使用同一条
+`src.application.multi_account_tick.run_tick` 链路。统一 tick 会复用共享运行数据，
+但通知按账户逐条发送到同一目标；每个账户一条消息，发送失败按账户隔离。
 
 ## 值班三步检查（先做这个）
 
@@ -76,7 +79,7 @@ cat /home/node/.openclaw/workspace/options-monitor-prod/output/state/last_run.js
 cat /home/node/.openclaw/workspace/options-monitor-prod/<report_dir>/symbols_notification.txt
 ```
 
-多账户运行的账户级状态和报告位于 `output_accounts/<account>/`，共享运行状态位于 `output_runs/<run_id>/`。
+统一 tick 的账户级状态和报告位于 `output_accounts/<account>/`，共享运行状态位于 `output_runs/<run_id>/`。
 
 ## 高频故障处理
 

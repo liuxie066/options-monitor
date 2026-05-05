@@ -162,7 +162,8 @@
 - `feishu.*`
 
 ### 4.1 accounts：账户列表
-- `accounts`: 多账户运行和辅助脚本的默认账户列表，例如 `["user1"]`。
+- `accounts`: 统一 tick 运行和辅助脚本的默认账户列表，例如 `["lx", "sy"]`。
+- 当前没有独立的“单账户链路”和“多账户链路”；`./om run tick --accounts lx` 是单账户运行，`./om run tick --accounts lx sy` 是多账户运行。
 - 脚本命令行显式传 `--accounts` 时，以命令行为准。
 - `notifications.cash_footer_accounts` 仅在你要指定“部分账户带现金 footer”时才配置；未配置时会回退到 `accounts`，避免与账户列表重复维护。
 
@@ -352,8 +353,8 @@
 ```
 
 默认输出文件：
-- 单账户：`output/reports/close_advice.csv` / `output/reports/close_advice.txt`
-- 多账户：`output_runs/<run_id>/accounts/<account>/close_advice.csv|txt`
+- 独立 close-advice 命令：默认写到 `output/reports/close_advice.csv` / `output/reports/close_advice.txt`
+- 统一 tick 运行：按账户写到 `output_runs/<run_id>/accounts/<account>/close_advice.csv|txt`
 
 ### 4.10 手续费：内置规则
 - `fees` 已不再支持配置。
