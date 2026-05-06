@@ -11,6 +11,7 @@ from typing import Any
 
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$")
 TAG_RE = re.compile(r"^v(?P<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$")
+BUMP_KINDS = {"major", "minor", "patch"}
 
 
 @dataclass(frozen=True)
@@ -82,6 +83,73 @@ def compare_versions(left: str, right: str) -> int:
     if len(a.prerelease) == len(b.prerelease):
         return 0
     return -1 if len(a.prerelease) < len(b.prerelease) else 1
+
+
+def bump_version(current_version: str, bump: str = "patch") -> str:
+    parsed = parse_version(current_version)
+    kind = str(bump or "patch").strip().lower()
+    if kind not in BUMP_KINDS:
+        raise ValueError(f"bump must be one of: {', '.join(sorted(BUMP_KINDS))}")
+    if kind == "major":
+        return f"{parsed.major + 1}.0.0"
+    if kind == "minor":
+        return f"{parsed.major}.{parsed.minor + 1}.0"
+    return f"{parsed.major}.{parsed.minor}.{parsed.patch + 1}"
+
+
+def update_local_version(
+    *,
+    base_dir: Path | None = None,
+    target_version: str | None = None,
+    bump: str | None = None,
+    apply: bool = False,
+    allow_downgrade: bool = False,
+    now_fn=None,
+) -> dict[str, Any]:
+    base = (base_dir or repo_base()).resolve()
+    version_path = (base / "VERSION").resolve()
+    current_version = _read_current_version(base)
+    explicit_target = str(target_version or "").strip()
+    explicit_bump = str(bump or "").strip().lower()
+    if explicit_target and explicit_bump:
+        raise ValueError("provide either target_version/version or bump, not both")
+    if explicit_target:
+        if not VERSION_RE.match(explicit_target):
+            raise ValueError(f"invalid target version: {explicit_target}")
+        next_version = explicit_target
+    else:
+        next_version = bump_version(current_version, explicit_bump or "patch")
+
+    cmp = compare_versions(current_version, next_version)
+    if cmp > 0 and not allow_downgrade:
+        raise ValueError(f"target version {next_version} is lower than current VERSION {current_version}")
+
+    changed = current_version != next_version
+    if apply and changed:
+        tmp_path = version_path.with_name(f"{version_path.name}.tmp")
+        tmp_path.write_text(next_version + "\n", encoding="utf-8")
+        tmp_path.replace(version_path)
+
+    mode = "applied" if apply else "dry_run"
+    if not changed:
+        message = f"VERSION already at {current_version}"
+    elif apply:
+        message = f"VERSION updated from {current_version} to {next_version}"
+    else:
+        message = f"VERSION would update from {current_version} to {next_version}"
+
+    return {
+        "ok": True,
+        "mode": mode,
+        "current_version": current_version,
+        "target_version": next_version,
+        "changed": bool(changed and apply),
+        "would_change": bool(changed),
+        "allow_downgrade": bool(allow_downgrade),
+        "version_path": str(version_path),
+        "updated_at": _checked_at(now_fn),
+        "message": message,
+    }
 
 
 def _extract_release_tags(stdout: str) -> list[tuple[str, str]]:

@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import subprocess
 
-from src.application.version_check import check_version_update, compare_versions
+from src.application.version_check import bump_version, check_version_update, compare_versions, update_local_version
 
 
 def _write_version(tmp_path: Path, value: str) -> Path:
@@ -20,6 +20,51 @@ def test_parse_version_orders_prerelease_before_stable() -> None:
     assert compare_versions("0.1.0-beta.3", "0.1.0") < 0
     assert compare_versions("0.1.0-beta.3", "0.1.0-beta.10") < 0
     assert compare_versions("0.2.0", "0.1.9") > 0
+
+
+def test_bump_version_increments_core_and_drops_prerelease() -> None:
+    assert bump_version("1.2.3", "patch") == "1.2.4"
+    assert bump_version("1.2.3", "minor") == "1.3.0"
+    assert bump_version("1.2.3-beta.1", "major") == "2.0.0"
+
+
+def test_update_local_version_dry_run_does_not_write(tmp_path: Path) -> None:
+    base = _write_version(tmp_path, "1.0.0")
+
+    out = update_local_version(base_dir=base, bump="patch", apply=False, now_fn=_fixed_now)
+
+    assert out["mode"] == "dry_run"
+    assert out["current_version"] == "1.0.0"
+    assert out["target_version"] == "1.0.1"
+    assert out["would_change"] is True
+    assert out["changed"] is False
+    assert out["updated_at"] == "2026-04-27T12:00:00Z"
+    assert (base / "VERSION").read_text(encoding="utf-8").strip() == "1.0.0"
+
+
+def test_update_local_version_apply_writes_version(tmp_path: Path) -> None:
+    base = _write_version(tmp_path, "1.0.0")
+
+    out = update_local_version(base_dir=base, target_version="1.1.0", apply=True, now_fn=_fixed_now)
+
+    assert out["mode"] == "applied"
+    assert out["current_version"] == "1.0.0"
+    assert out["target_version"] == "1.1.0"
+    assert out["changed"] is True
+    assert (base / "VERSION").read_text(encoding="utf-8").strip() == "1.1.0"
+
+
+def test_update_local_version_rejects_downgrade_by_default(tmp_path: Path) -> None:
+    base = _write_version(tmp_path, "1.0.0")
+
+    try:
+        update_local_version(base_dir=base, target_version="0.9.9", apply=True)
+    except ValueError as exc:
+        assert "lower than current VERSION" in str(exc)
+    else:
+        raise AssertionError("expected downgrade rejection")
+
+    assert (base / "VERSION").read_text(encoding="utf-8").strip() == "1.0.0"
 
 
 def test_check_version_update_reports_newer_release(tmp_path: Path) -> None:

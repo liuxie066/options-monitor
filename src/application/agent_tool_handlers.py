@@ -36,6 +36,7 @@ from src.application.agent_tool_operations import (
     option_positions_read_tool,
     scheduler_status_tool,
     version_check_tool,
+    version_update_tool,
 )
 from src.application.agent_tool_runtime import (
     as_float as _as_float,
@@ -70,7 +71,7 @@ from src.application.agent_tool_symbols import (
     manage_symbols_tool,
     set_path as _set_path,
 )
-from src.application.version_check import check_version_update
+from src.application.version_check import check_version_update, update_local_version
 
 
 def fetch_symbol_opend(*args: Any, **kwargs: Any) -> Any:
@@ -143,6 +144,15 @@ def _version_check_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[s
     return version_check_tool(
         payload,
         check_version_update=check_version_update,
+        repo_base=repo_base,
+        mask_path=mask_path,
+    )
+
+
+def _version_update_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    return version_update_tool(
+        payload,
+        update_local_version=update_local_version,
         repo_base=repo_base,
         mask_path=mask_path,
     )
@@ -324,6 +334,7 @@ def _openclaw_readiness_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], l
 TOOL_HANDLERS = {
     "healthcheck": _healthcheck_tool,
     "version_check": _version_check_tool,
+    "version_update": _version_update_tool,
     "config_validate": _config_validate_tool,
     "scheduler_status": _scheduler_status_tool,
     "query_cash_headroom": _query_cash_headroom_tool,

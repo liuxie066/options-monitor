@@ -72,6 +72,28 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
         examples=({"input": {"remote_name": "origin"}},),
     ),
     AgentToolDefinition(
+        name="version_update",
+        read_only=False,
+        description="Preview or update local VERSION. Does not create git tags, commit, push, or run release workflows.",
+        requires=("local_repo",),
+        capabilities=("version_update", "local_write", "release_metadata"),
+        side_effects=("writes_VERSION",),
+        input_schema={
+            "version": "optional explicit semver target such as 1.2.3",
+            "target_version": "optional alias of version",
+            "bump": "optional major|minor|patch; defaults to patch when no version is provided",
+            "apply": "optional bool; default false previews only",
+            "allow_downgrade": "optional bool; default false rejects lower target versions",
+        },
+        risk_level="local_write",
+        requires_confirm=True,
+        safe_default_input={"bump": "patch", "apply": False},
+        examples=(
+            {"input": {"bump": "patch", "apply": False}},
+            {"input": {"version": "1.2.3", "apply": True}},
+        ),
+    ),
+    AgentToolDefinition(
         name="config_validate",
         read_only=True,
         description="Validate runtime config only, without OpenD checks or pipeline execution.",

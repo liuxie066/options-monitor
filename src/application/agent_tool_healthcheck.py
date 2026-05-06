@@ -297,6 +297,7 @@ def run_healthcheck_tool(
     tools = {
         "healthcheck": {"available": True, "mode": "read"},
         "version_check": {"available": True, "mode": "read"},
+        "version_update": {"available": True, "mode": "write_preview_default"},
         "config_validate": {"available": True, "mode": "read"},
         "scheduler_status": {"available": True, "mode": "read"},
         "scan_opportunities": {"available": True, "mode": "read_with_local_cache"},

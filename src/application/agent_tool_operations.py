@@ -65,6 +65,47 @@ def version_check_tool(
     return result, warnings, {"repo_base": mask_path(repo_base()), "remote_name": remote_name}
 
 
+def version_update_tool(
+    payload: dict[str, Any],
+    *,
+    update_local_version: Callable[..., dict[str, Any]],
+    repo_base: Callable[[], Path],
+    mask_path: Callable[[Any], str],
+) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    target_version = _optional_text(payload.get("target_version"))
+    version_alias = _optional_text(payload.get("version"))
+    if target_version and version_alias and target_version != version_alias:
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message="version and target_version must match when both are provided",
+        )
+    target_version = target_version or version_alias
+    bump = _optional_text(payload.get("bump"))
+    apply_mode = bool(payload.get("apply", False))
+    allow_downgrade = bool(payload.get("allow_downgrade", False))
+    try:
+        result = update_local_version(
+            base_dir=repo_base(),
+            target_version=target_version,
+            bump=bump,
+            apply=apply_mode,
+            allow_downgrade=allow_downgrade,
+        )
+    except ValueError as exc:
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message=str(exc),
+            hint="Use a semver value like 1.2.3 or a bump value: major, minor, patch.",
+        ) from exc
+
+    data = dict(result)
+    data["version_path"] = mask_path(data.get("version_path"))
+    warnings: list[str] = []
+    if not apply_mode and bool(data.get("would_change")):
+        warnings.append("dry-run only; pass apply=true to write VERSION")
+    return data, warnings, {"repo_base": mask_path(repo_base()), "version_path": data["version_path"]}
+
+
 def config_validate_tool(
     payload: dict[str, Any],
     *,
