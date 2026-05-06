@@ -505,6 +505,120 @@ def test_ensure_required_data_refetches_when_existing_bounds_do_not_cover_plan()
     assert len(called) == 1
 
 
+def test_ensure_required_data_fetches_yield_enhancement_call_side_when_local_cache_has_only_puts() -> None:
+    import scripts.required_data_steps as mod
+    from src.application.required_data_planning import (
+        OptionSideFetchPlan,
+        RequiredDataFetchPlanBundle,
+        RequiredDataFetchSpec,
+        StrikeWindowPlan,
+    )
+
+    root = (BASE / "tests" / ".tmp_pipeline_fetch_yield_call_gap").resolve()
+    if root.exists():
+        shutil.rmtree(root, ignore_errors=True)
+    root.mkdir(parents=True, exist_ok=True)
+    required, state_dir = _make_dirs(root)
+    symbol = "NVDA"
+    (required / "parsed" / f"{symbol}_required_data.csv").write_text(
+        "\n".join(
+            [
+                "symbol,option_type,expiration,dte,contract_symbol,strike,spot,bid,ask,last_price,mid,volume,open_interest,implied_volatility,in_the_money,currency,otm_pct,delta,multiplier",
+                "NVDA,put,2026-06-19,44,P1,90,100,3,3.2,3.1,3.1,80,1200,0.42,,USD,0.10,-0.25,100",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    fetch_plan = RequiredDataFetchPlanBundle(
+        symbol=symbol,
+        spot_reference=100.0,
+        side_plans=[
+            OptionSideFetchPlan(
+                option_type="put",
+                min_dte=20,
+                max_dte=60,
+                explicit_expirations=["2026-06-19"],
+                strike_window=StrikeWindowPlan(
+                    min_strike=90.0,
+                    max_strike=96.0,
+                    source="sell_put.configured_bounds",
+                    base_min_strike=90.0,
+                    base_max_strike=96.0,
+                ),
+                planning_reason="test put",
+            ),
+            OptionSideFetchPlan(
+                option_type="call",
+                min_dte=20,
+                max_dte=60,
+                explicit_expirations=["2026-06-19"],
+                strike_window=StrikeWindowPlan(
+                    min_strike=103.0,
+                    max_strike=127.5,
+                    source="yield_enhancement.call.spot_derived_bounds",
+                    buffer_applied=True,
+                    buffer_pct=0.02,
+                    base_min_strike=103.0,
+                    base_max_strike=125.0,
+                ),
+                planning_reason="test yield enhancement call",
+            ),
+        ],
+        merged_specs=[
+            RequiredDataFetchSpec(
+                symbol=symbol,
+                limit_expirations=1,
+                host="127.0.0.1",
+                port=11111,
+                option_types=("put", "call"),
+                explicit_expirations=["2026-06-19"],
+                min_dte=20,
+                max_dte=60,
+                side_strike_windows={
+                    "put": {"min_strike": 90.0, "max_strike": 96.0},
+                    "call": {"min_strike": 103.0, "max_strike": 127.5},
+                },
+            )
+        ],
+    )
+
+    old_execute = mod.execute_required_data_opend
+    old_save = mod.save_outputs
+    called: list[object] = []
+    try:
+        mod.execute_required_data_opend = lambda **kwargs: (called.append(kwargs) or {"rows": [], "expirations": [], "meta": {}})  # type: ignore[assignment]
+        mod.save_outputs = lambda *args, **kwargs: None  # type: ignore[assignment]
+        mod.ensure_required_data(
+            py="python3",
+            base=BASE,
+            symbol=symbol,
+            required_data_dir=required,
+            limit_expirations=1,
+            want_put=True,
+            want_call=True,
+            timeout_sec=5,
+            is_scheduled=False,
+            state_dir=state_dir,
+            fetch_source="opend",
+            fetch_host="127.0.0.1",
+            fetch_port=11111,
+            fetch_plan=fetch_plan,
+            report_dir=root / "reports",
+        )
+    finally:
+        mod.execute_required_data_opend = old_execute  # type: ignore[assignment]
+        mod.save_outputs = old_save  # type: ignore[assignment]
+
+    assert len(called) == 1
+    request = called[0]["request"]
+    assert request.option_types == "put,call"
+    assert request.explicit_expirations == ["2026-06-19"]
+    assert request.side_strike_windows["call"] == {"min_strike": 103.0, "max_strike": 127.5}
+    assert request.chain_cache is True
+    assert request.freshness_policy == "cache_first"
+
+
 def test_ensure_required_data_refetches_when_bounds_are_split_across_expirations() -> None:
     import scripts.required_data_steps as mod
     from src.application.required_data_planning import (
@@ -605,6 +719,7 @@ def main() -> None:
     test_build_fetch_request_from_spec_applies_opend_fetch_config()
     test_ensure_required_data_passes_opend_fetch_config_into_fetch_plan_requests()
     test_ensure_required_data_refetches_when_existing_bounds_do_not_cover_plan()
+    test_ensure_required_data_fetches_yield_enhancement_call_side_when_local_cache_has_only_puts()
     test_ensure_required_data_refetches_when_bounds_are_split_across_expirations()
     print("OK (pipeline-fetch-read-model-boundary)")
 

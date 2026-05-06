@@ -6,6 +6,7 @@ from typing import Callable
 
 from src.application.opend_fetch_config import opend_discovery_kwargs, opend_fetch_kwargs
 from src.application.required_data_planning import build_required_data_fetch_plan
+from src.application.yield_enhancement_config import resolve_yield_enhancement_cfg
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,18 @@ class SymbolMonitoringDependencies:
     empty_sell_call_summary_fn: Callable[..., dict]
 
 
+def _append_summary_result(summary_rows: list[dict], result: object) -> None:
+    if result is None:
+        return
+    if isinstance(result, list):
+        for item in result:
+            if isinstance(item, dict):
+                summary_rows.append(item)
+        return
+    if isinstance(result, dict):
+        summary_rows.append(result)
+
+
 def run_symbol_monitoring(
     *,
     inputs: SymbolMonitoringInputs,
@@ -49,6 +62,7 @@ def run_symbol_monitoring(
 
     sp = dict(symbol_cfg.get("sell_put", {}) or {})
     cc = dict(symbol_cfg.get("sell_call", {}) or {})
+    yield_enhancement_cfg = resolve_yield_enhancement_cfg(symbol_cfg)
     want_put = bool(sp.get("enabled", False))
     want_call = bool(cc.get("enabled", False))
 
@@ -71,7 +85,14 @@ def run_symbol_monitoring(
     want_call = bool(prefilters.want_call)
     sp = dict(prefilters.sp)
     cc = dict(prefilters.cc)
+    symbol_cfg["sell_put"] = sp
+    symbol_cfg["sell_call"] = cc
+    yield_enhancement_cfg = resolve_yield_enhancement_cfg(symbol_cfg)
+    if yield_enhancement_cfg:
+        symbol_cfg["yield_enhancement"] = yield_enhancement_cfg
     stock = prefilters.stock
+    fetch_want_put = bool(want_put)
+    fetch_want_call = bool(want_call or (want_put and yield_enhancement_cfg.get("enabled", False)))
 
     try:
         deps.apply_multiplier_cache_fn(
@@ -99,6 +120,7 @@ def run_symbol_monitoring(
         want_call=want_call,
         sell_put_cfg=sp,
         sell_call_cfg=cc,
+        yield_enhancement_cfg=yield_enhancement_cfg,
         fetch_host=str(fetch_cfg.get("host") or "127.0.0.1"),
         fetch_port=int(fetch_cfg.get("port") or 11111),
         **discovery_fetch_kwargs,
@@ -110,8 +132,8 @@ def run_symbol_monitoring(
         symbol=symbol,
         required_data_dir=inputs.required_data_dir,
         limit_expirations=limit_expirations,
-        want_put=want_put,
-        want_call=want_call,
+        want_put=fetch_want_put,
+        want_call=fetch_want_call,
         timeout_sec=inputs.timeout_sec,
         is_scheduled=bool(inputs.is_scheduled),
         state_dir=inputs.state_dir,
@@ -129,7 +151,8 @@ def run_symbol_monitoring(
     summary_rows: list[dict] = []
 
     if want_put:
-        summary_rows.append(
+        _append_summary_result(
+            summary_rows,
             deps.run_sell_put_scan_fn(
                 py=inputs.py,
                 base=inputs.base,
@@ -150,10 +173,11 @@ def run_symbol_monitoring(
             )
         )
     else:
-        summary_rows.append(deps.empty_sell_put_summary_fn(symbol, symbol_cfg=symbol_cfg))
+        _append_summary_result(summary_rows, deps.empty_sell_put_summary_fn(symbol, symbol_cfg=symbol_cfg))
 
     if want_call:
-        summary_rows.append(
+        _append_summary_result(
+            summary_rows,
             deps.run_sell_call_scan_fn(
                 py=inputs.py,
                 base=inputs.base,
@@ -174,6 +198,6 @@ def run_symbol_monitoring(
             )
         )
     else:
-        summary_rows.append(deps.empty_sell_call_summary_fn(symbol, symbol_cfg=symbol_cfg))
+        _append_summary_result(summary_rows, deps.empty_sell_call_summary_fn(symbol, symbol_cfg=symbol_cfg))
 
     return summary_rows

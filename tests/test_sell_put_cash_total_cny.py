@@ -126,3 +126,51 @@ def test_render_sell_put_alerts_shows_usd_cash_guard_when_cny_missing(tmp_path: 
     assert "担保现金需求(生效口径, USD): $18,000" in text
     assert "账户可用担保现金(USD): $15,000" in text
     assert "加仓后余量(生效口径, USD): $-3,000" in text
+
+
+def test_render_sell_put_alerts_shows_linked_call_summary(tmp_path: Path) -> None:
+    from scripts.render_sell_put_alerts import render_sell_put_alerts
+
+    csv_path = tmp_path / "sell_put_candidates_labeled.csv"
+    out_path = tmp_path / "sell_put_alerts.txt"
+
+    pd.DataFrame(
+        [
+            {
+                "symbol": "NVDA",
+                "expiration": "2026-06-19",
+                "strike": 95.0,
+                "spot": 100.0,
+                "dte": 44,
+                "mid": 3.1,
+                "net_income": 307.65,
+                "annualized_net_return_on_cash_basis": 0.273,
+                "otm_pct": 0.05,
+                "risk_label": "中性",
+                "spread_ratio": 0.1,
+                "open_interest": 1200,
+                "volume": 80,
+                "currency": "USD",
+                "linked_call_contract": "2026-06-19 110C",
+                "linked_call_ask": 1.5,
+                "linked_call_delta": 0.32,
+                "linked_call_net_credit": 145.33,
+                "linked_call_scenario_score": 0.0458,
+                "linked_call_annualized_scenario_score": 0.38,
+                "linked_call_count": 2,
+            }
+        ]
+    ).to_csv(csv_path, index=False)
+
+    text = render_sell_put_alerts(
+        input_path=csv_path,
+        output_path=out_path,
+        top=1,
+        layered=True,
+    )
+
+    assert "推荐 Call: 2026-06-19 110C  (候选 2 个)" in text
+    assert "买入参考: ask=1.50 | delta=0.32" in text
+    assert "组合估算: 净权利金=145.33 | 场景评分=4.58% | 场景年化=38.00%" in text
+    assert "目标价" not in text
+    assert "目标收益" not in text

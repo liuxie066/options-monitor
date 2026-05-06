@@ -18,6 +18,7 @@ def list_symbol_rows(cfg: dict[str, Any], *, resolve_watchlist_config, normalize
         fetch = item.get("fetch") if isinstance(item.get("fetch"), dict) else {}
         sell_put = item.get("sell_put") if isinstance(item.get("sell_put"), dict) else {}
         sell_call = item.get("sell_call") if isinstance(item.get("sell_call"), dict) else {}
+        yield_enhancement = item.get("yield_enhancement") if isinstance(item.get("yield_enhancement"), dict) else {}
         rows.append(
             {
                 "symbol": str(item.get("symbol") or "").strip().upper(),
@@ -27,6 +28,7 @@ def list_symbol_rows(cfg: dict[str, Any], *, resolve_watchlist_config, normalize
                 "limit_expirations": fetch.get("limit_expirations"),
                 "sell_put": dict(sell_put),
                 "sell_call": dict(sell_call),
+                "yield_enhancement": dict(yield_enhancement),
             }
         )
     return rows

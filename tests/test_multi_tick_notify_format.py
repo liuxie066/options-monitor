@@ -80,6 +80,33 @@ def test_account_message_uses_compact_auto_close_template_when_scan_skipped() ->
     assert "LX 持有" not in message
 
 
+def test_account_message_counts_yield_enhancement_when_present() -> None:
+    from scripts.multi_tick.misc import AccountResult
+    from scripts.multi_tick.notify_format import build_account_message
+
+    notif = (
+        "Put\n"
+        "腾讯 卖Put 2026-04-29 460P\n"
+        "\n"
+        "Enhancement\n"
+        "英伟达 收益增强 2026-06-19 95P+110C\n"
+    )
+
+    message = build_account_message(
+        AccountResult(
+            account='lx',
+            ran_scan=True,
+            should_notify=True,
+            decision_reason='dense',
+            notification_text=notif,
+        ),
+        now_bj='2026-04-08 22:31:00',
+        cash_footer_lines=[],
+    )
+
+    assert "### 账户 lx · 本轮候选\n- Put 1 / Call 0 / Enhance 1" in message
+
+
 def test_flatten_auto_close_summary_keeps_error_only_summary() -> None:
     from scripts.multi_tick.notify_format import flatten_auto_close_summary
 

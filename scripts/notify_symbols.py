@@ -203,7 +203,7 @@ def _parse_alert_line(raw_line: str) -> ParsedAlertLine | None:
     extras: dict[str, str] = {}
     comment = ''
     for p in parts[3:]:
-        if p.startswith('通过准入') or p.startswith('已通过准入') or p.startswith('当前') or p.startswith('所需'):
+        if p.startswith('通过准入') or p.startswith('已通过准入') or p.startswith('已通过组合准入') or p.startswith('已通过收益增强准入') or p.startswith('当前') or p.startswith('所需') or p.startswith('组合所需'):
             comment = p
             continue
         if ' ' in p:
@@ -326,15 +326,33 @@ def _format_alert_line(line: str, *, account_label: str = '当前账户') -> str
         cash_used_sym = parsed.extras.get('cash_used_sym', '')
         delta = parsed.extras.get('delta', '')
         iv = parsed.extras.get('iv', '') or parsed.extras.get('IV', '')
+        linked_call = parsed.extras.get('linked_call', '')
+        linked_call_count = parsed.extras.get('linked_call_count', '')
+        linked_call_ask = parsed.extras.get('linked_call_ask', '')
+        linked_call_delta = parsed.extras.get('linked_call_delta', '')
+        linked_net_credit = parsed.extras.get('linked_net_credit', '')
+        linked_scenario_score = parsed.extras.get('linked_scenario_score', '')
         delta_show = _present_or_missing(delta, reason='告警未提供delta')
         iv_show = _present_or_missing(iv, reason='告警未提供iv')
         note = parsed.comment or SELL_PUT_NOTIFICATION_HIGH
         used_symbol = cash_used_sym_cny if not _is_missing_value(cash_used_sym_cny) else cash_used_sym
-        extra_detail_line = ''
+        extra_detail_lines: list[str] = []
         if not _is_missing_value(used_symbol):
-            extra_detail_line = (
+            extra_detail_lines.append(
                 f"- 已持仓: 同标的Sell Put占用="
                 f"{_present_money_or_zero(used_symbol, reason='告警未提供cash_used_sym')}"
+            )
+        if not _is_missing_value(linked_call):
+            count_part = ''
+            if not _is_missing_value(linked_call_count):
+                count_part = f"候选Call={linked_call_count}个 | "
+            extra_detail_lines.append(
+                f"- 收益增强: 推荐Call={linked_call} | "
+                f"{count_part}"
+                f"参考买价={_present_or_missing(linked_call_ask, reason='告警未提供linked_call_ask')} | "
+                f"delta={_present_or_missing(linked_call_delta, reason='告警未提供linked_call_delta')} | "
+                f"净权利金={_present_or_missing(linked_net_credit, reason='告警未提供linked_net_credit')} | "
+                f"场景评分={_present_or_missing(linked_scenario_score, reason='告警未提供linked_scenario_score')}"
             )
         return _build_notification_block(
             account_label=account_label,
@@ -345,7 +363,7 @@ def _format_alert_line(line: str, *, account_label: str = '当前账户') -> str
             contract_line=f"- 合约: 行权价={parsed.strike_show} | 数量=1张(默认) | DTE={parsed.dte_show}",
             risk_line=f"- 风控: 风险={parsed.risk_tag} | delta={delta_show} | IV={iv_show}",
             detail_line=f"- 资金: 保证金占用={_format_margin(cash_req_cny=cash_req_cny, cash_req_usd=cash_req_usd)}",
-            extra_detail_line=extra_detail_line,
+            extra_detail_line="\n".join(extra_detail_lines),
             note=note,
             suggestion=parsed.suggestion,
         )
@@ -378,19 +396,63 @@ def _format_alert_line(line: str, *, account_label: str = '当前账户') -> str
             suggestion=parsed.suggestion,
         )
 
+    if parsed.strategy == 'yield_enhancement':
+        put_strike = parsed.extras.get('put_strike', '')
+        call_strike = parsed.extras.get('call_strike', '')
+        call_ask = parsed.extras.get('call_ask', '')
+        call_delta = parsed.extras.get('call_delta', '')
+        call_candidate_count = parsed.extras.get('call_candidate_count', '')
+        net_credit = parsed.extras.get('net_credit', '')
+        expected_move = parsed.extras.get('expected_move', '')
+        expected_move_iv = parsed.extras.get('expected_move_iv', '')
+        scenario_score = parsed.extras.get('scenario_score', '')
+        candidate_tail = ""
+        if not _is_missing_value(call_candidate_count):
+            candidate_tail = f" | 备选Call={call_candidate_count}个"
+        note = parsed.comment or '已按组合收益筛出推荐 Call，可作为该 Sell Put 的收益增强方案。'
+        return _build_notification_block(
+            account_label=account_label,
+            symbol_name=parsed.symbol_name,
+            action_label='收益增强',
+            contract=parsed.contract,
+            income_line=(
+                f"- 收益: 组合净权利金={_present_or_missing(net_credit, reason='告警未提供net_credit')} | "
+                f"{parsed.annual_show} | "
+                f"场景评分={_present_or_missing(scenario_score, reason='告警未提供scenario_score')}"
+            ),
+            contract_line=(
+                f"- 组合: Put={_present_or_missing(put_strike, reason='告警未提供put_strike')} | "
+                f"Call={_present_or_missing(call_strike, reason='告警未提供call_strike')} | "
+                f"DTE={parsed.dte_show}"
+                f"{candidate_tail}"
+            ),
+            risk_line=(
+                f"- 风控: 风险={parsed.risk_tag} | "
+                f"Call delta={_present_or_missing(call_delta, reason='告警未提供call_delta')} | "
+                f"Call ask={_present_or_missing(call_ask, reason='告警未提供call_ask')}"
+            ),
+            detail_line=(
+                f"- 预期波动: expected_move={_present_or_missing(expected_move, reason='告警未提供expected_move')} | "
+                f"IV={_present_or_missing(expected_move_iv, reason='告警未提供expected_move_iv')}"
+            ),
+            note=note,
+        )
+
     return parsed.raw
 
 
 
 
 def _group_by_strategy(raw_lines: list[str]) -> dict[str, list[str]]:
-    g = {'sell_put': [], 'sell_call': [], 'other': []}
+    g = {'sell_put': [], 'sell_call': [], 'yield_enhancement': [], 'other': []}
     for ln in raw_lines:
         s = ln
         if '| sell_put |' in s:
             g['sell_put'].append(ln)
         elif '| sell_call |' in s:
             g['sell_call'].append(ln)
+        elif '| yield_enhancement |' in s:
+            g['yield_enhancement'].append(ln)
         else:
             g['other'].append(ln)
     return g
@@ -455,6 +517,8 @@ def build_notification(
             emit_plain('Put', groups['sell_put'])
         if groups['sell_call']:
             emit_plain('Call', groups['sell_call'])
+        if groups['yield_enhancement']:
+            emit_plain('Enhancement', groups['yield_enhancement'])
         if groups['other']:
             emit_plain('Other', groups['other'])
 

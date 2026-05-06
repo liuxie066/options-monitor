@@ -244,8 +244,10 @@ def main(argv: list[str] | None = None) -> int:
                     patterns = [
                         str((report_dir / "*sell_put_candidates*.csv").resolve()),
                         str((report_dir / "*sell_call_candidates*.csv").resolve()),
+                        str((report_dir / "*yield_enhancement_candidates*.csv").resolve()),
                         str((report_dir / "*sell_put_alerts*.txt").resolve()),
                         str((report_dir / "*sell_call_alerts*.txt").resolve()),
+                        str((report_dir / "*yield_enhancement_alerts*.txt").resolve()),
                         str((report_dir / "symbols_summary.txt").resolve()),
                         str((report_dir / "symbols_digest.txt").resolve()),
                         str((report_dir / "symbols_alerts.txt").resolve()),

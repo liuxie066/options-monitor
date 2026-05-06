@@ -90,6 +90,10 @@ def test_normalize_processor_row_preserves_put_alert_fields() -> None:
             "bid": 5.58,
             "ask": 5.86,
             "option_ccy": "HKD",
+            "linked_call_contract": "2026-06-19 110C",
+            "linked_call_ask": 1.5,
+            "linked_call_delta": 0.32,
+            "linked_call_net_credit": 145.33,
         }
     )
     assert out["delta"] == -0.23
@@ -108,6 +112,10 @@ def test_normalize_processor_row_preserves_put_alert_fields() -> None:
     assert out["bid"] == 5.58
     assert out["ask"] == 5.86
     assert out["option_ccy"] == "HKD"
+    assert out["linked_call_contract"] == "2026-06-19 110C"
+    assert out["linked_call_ask"] == 1.5
+    assert out["linked_call_delta"] == 0.32
+    assert out["linked_call_net_credit"] == 145.33
 
 
 def test_source_snapshot_validates_and_normalizes() -> None:

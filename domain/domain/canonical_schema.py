@@ -42,6 +42,33 @@ def normalize_processor_row(raw: dict[str, Any] | Any) -> dict[str, Any]:
     if not strategy:
         raise ValueError("processor output requires strategy")
 
+    combo_fields = (
+        "put_strike",
+        "call_strike",
+        "put_bid",
+        "call_ask",
+        "put_delta",
+        "call_delta",
+        "net_credit",
+        "net_debit",
+        "funding_ratio",
+        "cash_required",
+        "cash_headroom_after_trade",
+        "cash_headroom_after_trade_cny",
+        "downside_breakeven",
+        "upside_breakeven",
+        "max_loss_if_zero",
+        "expected_move_iv",
+        "expected_move",
+        "scenario_score",
+        "annualized_scenario_score",
+        "put_otm_pct",
+        "call_otm_pct",
+        "gap_width_pct",
+        "upside_breakeven_pct_above_spot",
+        "combo_spread_ratio",
+    )
+
     out = {
         "schema_kind": SCHEMA_KIND_PROCESSOR_OUTPUT,
         "schema_version": CANONICAL_SCHEMA_VERSION_V1,
@@ -78,7 +105,22 @@ def normalize_processor_row(raw: dict[str, Any] | Any) -> dict[str, Any]:
         "cash_secured_used_cny": src.get("cash_secured_used_cny", None),
         "cash_secured_used_cny_total": src.get("cash_secured_used_cny_total", None),
         "cash_secured_used_cny_symbol": src.get("cash_secured_used_cny_symbol", None),
+        "linked_call_contract": src.get("linked_call_contract", None),
+        "linked_call_contract_symbol": src.get("linked_call_contract_symbol", None),
+        "linked_call_strike": src.get("linked_call_strike", None),
+        "linked_call_ask": src.get("linked_call_ask", None),
+        "linked_call_delta": src.get("linked_call_delta", None),
+        "linked_call_iv": src.get("linked_call_iv", None),
+        "linked_call_net_credit": src.get("linked_call_net_credit", None),
+        "linked_call_expected_move": src.get("linked_call_expected_move", None),
+        "linked_call_expected_move_iv": src.get("linked_call_expected_move_iv", None),
+        "linked_call_scenario_score": src.get("linked_call_scenario_score", None),
+        "linked_call_annualized_scenario_score": src.get("linked_call_annualized_scenario_score", None),
+        "linked_call_count": src.get("linked_call_count", None),
+        "call_candidate_count": src.get("call_candidate_count", None),
     }
+    for key in combo_fields:
+        out[key] = src.get(key, None)
     for key in ("market", "account", "source", "run_id"):
         if key in src:
             out[key] = src.get(key)

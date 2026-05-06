@@ -72,6 +72,66 @@ def _active_cash_view(row) -> tuple[str, str, float | None, float | None, float 
     return ("CNY", "base(CNY) 现金余量", cash_req_cny, cash_free_cny, None)
 
 
+def _linked_call_lines(row) -> list[str]:
+    contract = str(row.get("linked_call_contract") or "").strip()
+    if not contract:
+        return []
+
+    ask = None
+    delta = None
+    net_credit = None
+    annualized_scenario_score = None
+    scenario_score = None
+    count = None
+    try:
+        value = row.get("linked_call_ask")
+        ask = float(value) if value is not None and not pd.isna(value) else None
+    except Exception:
+        ask = None
+    try:
+        value = row.get("linked_call_delta")
+        delta = float(value) if value is not None and not pd.isna(value) else None
+    except Exception:
+        delta = None
+    try:
+        value = row.get("linked_call_net_credit")
+        net_credit = float(value) if value is not None and not pd.isna(value) else None
+    except Exception:
+        net_credit = None
+    try:
+        value = row.get("linked_call_annualized_scenario_score")
+        annualized_scenario_score = float(value) if value is not None and not pd.isna(value) else None
+    except Exception:
+        annualized_scenario_score = None
+    try:
+        value = row.get("linked_call_scenario_score")
+        scenario_score = float(value) if value is not None and not pd.isna(value) else None
+    except Exception:
+        scenario_score = None
+    try:
+        value = row.get("linked_call_count")
+        count = int(value) if value is not None and not pd.isna(value) else None
+    except Exception:
+        count = None
+
+    lines = [
+        "",
+        f"推荐 Call: {contract}" + ("" if count is None or count <= 1 else f"  (候选 {count} 个)"),
+        (
+            "买入参考: "
+            f"ask={('-' if ask is None else num(ask))} | "
+            f"delta={('-' if delta is None else f'{delta:.2f}')}"
+        ),
+        (
+            "组合估算: "
+            f"净权利金={('-' if net_credit is None else num(net_credit))} | "
+            f"场景评分={('-' if scenario_score is None else pct(scenario_score))} | "
+            f"场景年化={('-' if annualized_scenario_score is None else pct(annualized_scenario_score))}"
+        ),
+    ]
+    return lines
+
+
 def render_one(row) -> str:
     symbol = row["symbol"]
     expiration = row["expiration"]
@@ -171,6 +231,7 @@ def render_one(row) -> str:
         f"净年化: {pct(row['annualized_net_return_on_cash_basis'])}",
         f"OTM: {pct(row['otm_pct'])}",
         f"风险标签: {row.get('risk_label', '-')}",
+        *_linked_call_lines(row),
         "",
         f"OI / Volume: {int(row.get('open_interest', 0) or 0)} / {int(row.get('volume', 0) or 0)}",
         f"Spread Ratio: {pct(row.get('spread_ratio', 0))}",

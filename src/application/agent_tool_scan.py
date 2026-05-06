@@ -190,7 +190,7 @@ def _build_coverage_summary(symbol_rows: list[dict[str, Any]]) -> dict[str, Any]
 
 
 def scan_summary_rows(summary_rows: list[dict[str, Any]], *, as_float: Callable[[Any], float | None]) -> dict[str, Any]:
-    strategy_counts = {"sell_put": 0, "sell_call": 0}
+    strategy_counts = {"sell_put": 0, "sell_call": 0, "yield_enhancement": 0}
     account_counts: dict[str, int] = {}
     symbol_counts: dict[str, int] = {}
     candidates: list[dict[str, Any]] = []

@@ -19,6 +19,10 @@ from scripts.config_loader import resolve_templates_config, resolve_watchlist_co
 from scripts.sell_call_config import resolve_min_annualized_net_premium_return
 from scripts.sell_put_config import resolve_min_annualized_net_return
 from domain.domain import normalize_processor_row, normalize_processor_rows
+from src.application.yield_enhancement_config import (
+    resolve_yield_enhancement_cfg,
+    wants_yield_enhancement_separate,
+)
 from src.application.watchlist_mutations import normalize_symbol_read
 
 LIQUIDITY_COMMON_FIELDS = (
@@ -52,7 +56,7 @@ def _iter_watchlist(cfg: dict) -> Iterable[dict]:
     return resolve_watchlist_config(cfg)
 
 
-def _resolve_profile_side_cfg(item: dict, profiles: dict, side: str) -> dict:
+def _resolve_profile_cfg(item: dict, profiles: dict) -> dict:
     use = item.get('use')
     if not use:
         return {}
@@ -68,12 +72,18 @@ def _resolve_profile_side_cfg(item: dict, profiles: dict, side: str) -> dict:
         p = profiles.get(name)
         if isinstance(p, dict):
             merged = deep_merge(merged, p)
+    return merged
+
+
+def _resolve_profile_side_cfg(item: dict, profiles: dict, side: str) -> dict:
+    merged = _resolve_profile_cfg(item, profiles)
     side_cfg = merged.get(side)
     return dict(side_cfg) if isinstance(side_cfg, dict) else {}
 
 
-def _extract_liquidity_fields(side_cfg: dict, *, is_put: bool) -> dict:
-    keys = list(LIQUIDITY_COMMON_FIELDS)
+def _extract_liquidity_fields(side_cfg: dict, *, is_put: bool, fields: tuple[str, ...] = LIQUIDITY_COMMON_FIELDS) -> dict:
+    del is_put
+    keys = list(fields)
     return {k: side_cfg[k] for k in keys if k in side_cfg}
 
 
@@ -97,6 +107,9 @@ def resolve_watchlist_item_runtime_config(
     sell_call_cfg['min_annualized_net_premium_return'] = resolved_call_min
     sell_call_cfg.pop('min_annualized_net_return', None)
     resolved['sell_call'] = sell_call_cfg
+    resolved_yield_enhancement_cfg = resolve_yield_enhancement_cfg(resolved)
+    if resolved_yield_enhancement_cfg:
+        resolved['yield_enhancement'] = resolved_yield_enhancement_cfg
 
     resolved['_global_sell_put_liquidity'] = _extract_liquidity_fields(
         _resolve_profile_side_cfg(item, profiles, 'sell_put'),
@@ -105,6 +118,12 @@ def resolve_watchlist_item_runtime_config(
     resolved['_global_sell_call_liquidity'] = _extract_liquidity_fields(
         _resolve_profile_side_cfg(item, profiles, 'sell_call'),
         is_put=False,
+    )
+    yield_enhancement_profile = resolve_yield_enhancement_cfg(_resolve_profile_cfg(item, profiles))
+    resolved['_global_yield_enhancement_liquidity'] = _extract_liquidity_fields(
+        yield_enhancement_profile,
+        is_put=False,
+        fields=LIQUIDITY_COMMON_FIELDS + ('max_combo_spread_ratio',),
     )
     resolved['_global_sell_put_event_risk'] = _extract_event_risk_cfg(
         _resolve_profile_side_cfg(item, profiles, 'sell_put'),
@@ -228,6 +247,17 @@ def run_watchlist_pipeline(
                     }
                 )
             )
+            if wants_yield_enhancement_separate(resolve_yield_enhancement_cfg(item0)):
+                summary_rows.append(
+                    normalize_processor_row(
+                        {
+                            'symbol': symbol,
+                            'strategy': 'yield_enhancement',
+                            'candidate_count': 0,
+                            'note': f'处理失败: {e}',
+                        }
+                    )
+                )
 
     if want_fn('scan'):
         build_symbols_summary_fn(summary_rows)

@@ -24,7 +24,13 @@ DEFAULT_EVENT_RISK_CONFIG = {
 
 DEFAULT_SELL_PUT_WINDOW = CandidateWindowDefaults(min_dte=20, max_dte=60)
 DEFAULT_SELL_CALL_WINDOW = CandidateWindowDefaults(min_dte=20, max_dte=90)
+DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_WINDOW = CandidateWindowDefaults(min_dte=20, max_dte=90)
 DEFAULT_CANDIDATE_LIQUIDITY = CandidateLiquidityDefaults()
+DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_LIQUIDITY = CandidateLiquidityDefaults(
+    min_open_interest=100.0,
+    min_volume=5.0,
+    max_spread_ratio=0.35,
+)
 
 
 def _coerce_int(value: Any, *, default: int) -> int:
@@ -49,20 +55,24 @@ def resolve_candidate_window(raw: dict | None, *, defaults: CandidateWindowDefau
     )
 
 
-def resolve_candidate_liquidity(raw: dict | None) -> CandidateLiquidityDefaults:
+def resolve_candidate_liquidity(
+    raw: dict | None,
+    *,
+    defaults: CandidateLiquidityDefaults = DEFAULT_CANDIDATE_LIQUIDITY,
+) -> CandidateLiquidityDefaults:
     src = raw or {}
     return CandidateLiquidityDefaults(
         min_open_interest=_coerce_float(
             src.get("min_open_interest"),
-            default=DEFAULT_CANDIDATE_LIQUIDITY.min_open_interest,
+            default=defaults.min_open_interest,
         ),
         min_volume=_coerce_float(
             src.get("min_volume"),
-            default=DEFAULT_CANDIDATE_LIQUIDITY.min_volume,
+            default=defaults.min_volume,
         ),
         max_spread_ratio=_coerce_float(
             src.get("max_spread_ratio"),
-            default=DEFAULT_CANDIDATE_LIQUIDITY.max_spread_ratio,
+            default=defaults.max_spread_ratio,
         ),
     )
 

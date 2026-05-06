@@ -23,6 +23,8 @@ from scripts.alert_rules import (
 from scripts.alert_policy import DEFAULT_ALERT_POLICY, load_alert_policy
 from scripts.report_formatting import num, pct, strike_text
 
+YIELD_ENHANCEMENT_NOTIFICATION_HIGH = '已按组合收益筛出推荐 Call，可作为该 Sell Put 的收益增强方案。'
+
 def _load_symbol_display_map(base: Path, *, state_dir: Path | None = None) -> dict[str, str]:
     """Best-effort load display name mapping.
 
@@ -239,6 +241,106 @@ def _build_sell_put_extra_parts(row: pd.Series) -> list[str]:
             pass
 
     _append_option_quote_parts(parts, row, prepend=True)
+
+    linked_call_contract = str(row.get('linked_call_contract') or '').strip()
+    if linked_call_contract:
+        parts.append(f"linked_call {linked_call_contract}")
+        try:
+            value = row.get('linked_call_ask')
+            if value is not None and not pd.isna(value):
+                parts.append(f"linked_call_ask {float(value):.3f}")
+        except Exception:
+            pass
+        try:
+            value = row.get('linked_call_delta')
+            if value is not None and not pd.isna(value):
+                parts.append(f"linked_call_delta {float(value):.2f}")
+        except Exception:
+            pass
+        try:
+            value = row.get('linked_call_net_credit')
+            if value is not None and not pd.isna(value):
+                parts.append(f"linked_net_credit {num(value)}")
+        except Exception:
+            pass
+        try:
+            value = row.get('linked_call_scenario_score')
+            if value is not None and not pd.isna(value):
+                parts.append(f"linked_scenario_score {pct(value)}")
+        except Exception:
+            pass
+        try:
+            value = row.get('linked_call_count')
+            if value is not None and not pd.isna(value):
+                parts.append(f"linked_call_count {int(value)}")
+        except Exception:
+            pass
+    return parts
+
+
+def _build_yield_enhancement_extra_parts(row: pd.Series) -> list[str]:
+    parts: list[str] = []
+    _append_option_quote_parts(parts, row)
+    try:
+        value = row.get('put_strike')
+        if value is not None and not pd.isna(value):
+            parts.append(f"put_strike {strike_text(value)}")
+    except Exception:
+        pass
+    try:
+        value = row.get('call_strike')
+        if value is not None and not pd.isna(value):
+            parts.append(f"call_strike {strike_text(value)}")
+    except Exception:
+        pass
+    try:
+        value = row.get('call_ask')
+        if value is not None and not pd.isna(value):
+            parts.append(f"call_ask {float(value):.3f}")
+    except Exception:
+        pass
+    try:
+        value = row.get('call_delta')
+        if value is not None and not pd.isna(value):
+            parts.append(f"call_delta {float(value):.2f}")
+    except Exception:
+        pass
+    try:
+        value = row.get('net_credit')
+        if value is not None and not pd.isna(value):
+            parts.append(f"net_credit {num(value)}")
+    except Exception:
+        pass
+    try:
+        value = row.get('expected_move')
+        if value is not None and not pd.isna(value):
+            parts.append(f"expected_move {num(value)}")
+    except Exception:
+        pass
+    try:
+        value = row.get('expected_move_iv')
+        if value is not None and not pd.isna(value):
+            parts.append(f"expected_move_iv {pct(value)}")
+    except Exception:
+        pass
+    try:
+        value = row.get('scenario_score')
+        if value is not None and not pd.isna(value):
+            parts.append(f"scenario_score {pct(value)}")
+    except Exception:
+        pass
+    try:
+        value = row.get('combo_spread_ratio')
+        if value is not None and not pd.isna(value):
+            parts.append(f"combo_spread {pct(value)}")
+    except Exception:
+        pass
+    try:
+        value = row.get('call_candidate_count')
+        if value is not None and not pd.isna(value):
+            parts.append(f"call_candidate_count {int(value)}")
+    except Exception:
+        pass
     return parts
 
 
@@ -248,8 +350,12 @@ def top_pick_line(row: pd.Series) -> str:
         if row.get('strategy') == 'sell_call':
             parts = _build_sell_call_extra_parts(row)
             extra = " | " + " | ".join(parts)
-        if row.get('strategy') == 'sell_put':
+        elif row.get('strategy') == 'sell_put':
             parts = _build_sell_put_extra_parts(row)
+            if parts:
+                extra = " | " + " | ".join(parts)
+        elif row.get('strategy') == 'yield_enhancement':
+            parts = _build_yield_enhancement_extra_parts(row)
             if parts:
                 extra = " | " + " | ".join(parts)
     except Exception:
@@ -341,6 +447,11 @@ def classify_alert(row: pd.Series) -> tuple[str | None, str]:
         if annual > 0:
             return 'high', SELL_CALL_NOTIFICATION_HIGH
         return 'low', SELL_CALL_NOTIFICATION_LOW
+
+    if strategy == 'yield_enhancement':
+        if annual > 0:
+            return 'high', YIELD_ENHANCEMENT_NOTIFICATION_HIGH
+        return 'low', '当前收益增强推荐未通过优先级阈值，仅供观察。'
 
     return None, ''
 
