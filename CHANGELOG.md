@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 1.0.12 - 2026-05-06
+
+### Added
+- Added the agent-facing `version_update` tool for dry-run-first local `VERSION` updates with explicit apply mode.
+
+### Changed
+- Documented scheduled and long-running task entry points for tick monitoring, scheduler checks, trade intake, Feishu mirroring, and version checks.
+- Tightened manual `/om` option-intake command parsing around account/action flags, apply/dry-run aliases, and record-id shorthand.
+
+### Fixed
+- Restored close-message parsing for common close-price aliases and buy-to-close wording.
+
 ## 1.0.11 - 2026-05-06
 
 ### Changed

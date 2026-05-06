@@ -4,8 +4,8 @@
 Usage examples:
   ./scripts/option_intake.py --text "期权：腾讯20260330 put，strike500，成本5.425每股，乘数100，short 10张，sy，HKD" --dry-run
   ./scripts/option_intake.py --text "期权：腾讯20260330 put，strike500，成本5.425每股，乘数100，short 10张，sy，HKD" --apply
-  ./scripts/option_intake.py --text "/om -r -lx open 【成交提醒】成功卖出2张$腾讯 260429 480.00 沽$，成交价格：3.93..."
-  ./scripts/option_intake.py --text "/om -r -lx close --record-id recxxx 【成交提醒】成功买入1张$腾讯 260429 480.00 沽$，成交价格：1.20..."
+  ./scripts/option_intake.py --text "/om open lx -r -- 【成交提醒】成功卖出2张$腾讯 260429 480.00 沽$，成交价格：3.93..."
+  ./scripts/option_intake.py --text "/om close sy -id recxxx -a -- 【成交提醒】成功买入1张$腾讯 260429 480.00 沽$，成交价格：1.20..."
 
 Design:
 - Parses message with scripts.parse_option_message.parse_option_message_text
@@ -42,15 +42,64 @@ class IntakeCommand:
     apply: bool | None = None
 
 
+def _account_from_token(token: str) -> str | None:
+    raw = str(token or "").strip()
+    low = raw.lower()
+    if low in ("-lx", "--lx", "lx"):
+        return "lx"
+    if low in ("-sy", "--sy", "sy"):
+        return "sy"
+    for prefix in ("@", "acct:", "account:"):
+        if low.startswith(prefix) and len(raw) > len(prefix):
+            return raw[len(prefix):].strip().lower()
+    return None
+
+
+def _record_id_from_token(token: str) -> str | None:
+    raw = str(token or "").strip()
+    low = raw.lower()
+    for prefix in ("id:", "rec:", "record:"):
+        if low.startswith(prefix) and len(raw) > len(prefix):
+            return raw[len(prefix):].strip()
+    if low.startswith("rec") and len(raw) > 3:
+        return raw
+    if low.startswith("lot_") and len(raw) > 4:
+        return raw
+    return None
+
+
+def _is_close_token(token: str) -> bool:
+    return str(token or "").strip().lower() in {
+        "close",
+        "c",
+        "btc",
+        "buy-close",
+        "buy_close",
+        "buytoclose",
+        "平",
+        "平仓",
+        "平倉",
+        "买平",
+        "買平",
+        "买入平仓",
+        "買入平倉",
+    }
+
+
 def parse_om_command(text: str) -> IntakeCommand:
     """Parse lightweight chat command prefixes.
 
     Supported forms:
+    - /om open lx -r -- <message>
+    - /om close sy -id recxxx -a -- <message>
+    - /om btc sy recxxx -r -- <message>
+    - /om open @account --apply -- <message>
     - /om -r -lx open <message>
     - /om --apply --account lx close --record-id recxxx <message>
     - /om -r -sy c -id recxxx <message>
 
-    Unknown tokens after /om are treated as the beginning of the message body.
+    Use "--" before the broker message when possible. Without it, the first
+    unknown token after /om is treated as the beginning of the message body.
     """
     raw = str(text or "").strip()
     if not raw.startswith("/om"):
@@ -73,22 +122,26 @@ def parse_om_command(text: str) -> IntakeCommand:
     while i < len(tokens):
         tok = tokens[i]
         low = tok.lower()
-        if low in ("-r", "--review", "--dry-run", "dry-run"):
+        if low == "--":
+            body_start = i + 1
+            break
+        if low == "buy" and i + 2 < len(tokens) and tokens[i + 1].lower() == "to" and tokens[i + 2].lower() == "close":
+            action = "close"
+            i += 3
+            continue
+        if low in ("-r", "--review", "--dry-run", "dry-run", "review", "预览", "检查"):
             dry_run = True
             apply_flag = False
             i += 1
             continue
-        if low in ("--apply", "-a", "apply"):
+        if low in ("--apply", "-a", "apply", "确认", "写入"):
             apply_flag = True
             dry_run = False
             i += 1
             continue
-        if low in ("-lx", "--lx"):
-            account = "lx"
-            i += 1
-            continue
-        if low in ("-sy", "--sy"):
-            account = "sy"
+        token_account = _account_from_token(tok)
+        if token_account:
+            account = token_account
             i += 1
             continue
         if low in ("--account", "-acct") and i + 1 < len(tokens):
@@ -107,11 +160,16 @@ def parse_om_command(text: str) -> IntakeCommand:
             record_id = tok.split("=", 1)[1].strip()
             i += 1
             continue
+        token_record_id = _record_id_from_token(tok)
+        if token_record_id:
+            record_id = token_record_id
+            i += 1
+            continue
         if low in ("open", "o", "开仓", "開倉"):
             action = "open"
             i += 1
             continue
-        if low in ("close", "c", "平仓", "平倉", "buy-close", "buy_close"):
+        if _is_close_token(tok):
             action = "close"
             i += 1
             continue

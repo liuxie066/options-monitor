@@ -86,8 +86,8 @@ def parse_futu_strike(s: str) -> float | None:
 
 
 def parse_futu_premium(s: str) -> float | None:
-    # 成交价格：0.24
-    m = re.search(r"成交价格\s*[:：]\s*([0-9]+(?:\.[0-9]+)?)", s)
+    # 成交价格：0.24 / 成交价：0.24 / 成交均价：0.24
+    m = re.search(r"(?:成交价格|成交价|成交價|成交均价|成交均價|平均成交价|平均成交價)\s*[:：]\s*([0-9]+(?:\.[0-9]+)?)", s)
     if m:
         return float(m.group(1))
     return None
@@ -291,7 +291,7 @@ def parse_option_message_text(text: str, *, accounts: list[str] | tuple[str, ...
         side = parse_side(raw2)
         strike = parse_float_after(['strike', '行权价', '行权'], raw2)
         multiplier = parse_int_after(['乘数', 'multiplier'], raw2)
-        premium = parse_float_after(['成本', 'premium', '权利金'], raw2)
+        premium = parse_float_after(['成本', 'premium', '权利金', 'close_price', 'close price', '平仓价', '平倉價', '价格', '價格', 'price'], raw2)
         contracts = parse_contracts(raw2)
         account = parse_account(raw2, accounts=accounts)
         currency = infer_currency(raw2)

@@ -68,6 +68,7 @@
 |---|---|
 | `healthcheck` | `./om healthcheck` |
 | `version_check` | `./om version` |
+| `version_update` | Agent-only local `VERSION` update helper |
 | `config_validate` | `./om config validate` |
 | `scheduler_status` | `./om scheduler` 的只读判定部分 |
 | `scan_opportunities` | `./om scan` / `./om scan-pipeline` |
@@ -124,6 +125,22 @@
 
 ```bash
 ./om-agent run --tool version_check --input-json '{"remote_name":"origin"}'
+```
+
+---
+
+## 5.2.1 `version_update`
+
+用途：
+- 预览或更新本地 `VERSION`
+- 默认 dry-run；只有 `apply=true` 才写入
+- 不创建 git tag、不 commit、不 push、不运行发布流程
+
+示例：
+
+```bash
+./om-agent run --tool version_update --input-json '{"bump":"patch"}'
+./om-agent run --tool version_update --input-json '{"version":"1.2.3","apply":true}'
 ```
 
 ---

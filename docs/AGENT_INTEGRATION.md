@@ -59,6 +59,7 @@ Use the launcher as a local command tool. Typical pattern:
 ```bash
 ./om-agent spec
 ./om-agent run --tool version_check --input-json '{"remote_name":"origin"}'
+./om-agent run --tool version_update --input-json '{"bump":"patch"}'
 ./om-agent run --tool config_validate --input-json '{"config_key":"us"}'
 ./om-agent run --tool runtime_status --input-json '{"config_key":"us"}'
 ./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'

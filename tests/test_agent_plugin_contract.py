@@ -27,6 +27,7 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert "option_positions_read" in tool_names
     assert "runtime_status" in tool_names
     assert "openclaw_readiness" in tool_names
+    assert "version_update" in tool_names
     assert spec["schema_version"] == "1.0"
     assert spec["recommended_flow"] == ["healthcheck", "scan_opportunities", "get_close_advice"]
     get_close_advice = next(item for item in spec["tools"] if item["name"] == "get_close_advice")
@@ -49,6 +50,10 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert scheduler_status["side_effects"] == []
     version_check = next(item for item in spec["tools"] if item["name"] == "version_check")
     assert version_check["safe_default_input"]["remote_name"] == "origin"
+    version_update = next(item for item in spec["tools"] if item["name"] == "version_update")
+    assert version_update["risk_level"] == "local_write"
+    assert version_update["requires_confirm"] is True
+    assert version_update["safe_default_input"] == {"bump": "patch", "apply": False}
     manage_symbols = next(item for item in spec["tools"] if item["name"] == "manage_symbols")
     assert manage_symbols["risk_level"] == "local_write"
     assert manage_symbols["requires_confirm"] is True

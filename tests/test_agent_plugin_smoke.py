@@ -645,6 +645,43 @@ def test_version_check_returns_agent_diagnostic(monkeypatch) -> None:
     assert out["data"]["remote_name"] == "origin"
 
 
+def test_version_update_defaults_to_dry_run(monkeypatch, tmp_path: Path) -> None:
+    from scripts.agent_plugin.main import run_tool
+    import src.application.agent_tool_handlers as handlers
+
+    (tmp_path / "VERSION").write_text("1.0.0\n", encoding="utf-8")
+    monkeypatch.setattr(handlers, "repo_base", lambda: tmp_path)
+
+    out = run_tool("version_update", {"bump": "patch"})
+
+    assert out["ok"] is True
+    assert out["warnings"] == ["dry-run only; pass apply=true to write VERSION"]
+    assert out["data"]["mode"] == "dry_run"
+    assert out["data"]["current_version"] == "1.0.0"
+    assert out["data"]["target_version"] == "1.0.1"
+    assert out["data"]["would_change"] is True
+    assert out["data"]["changed"] is False
+    assert out["meta"]["version_path"] == ".../VERSION"
+    assert (tmp_path / "VERSION").read_text(encoding="utf-8").strip() == "1.0.0"
+
+
+def test_version_update_apply_writes_version(monkeypatch, tmp_path: Path) -> None:
+    from scripts.agent_plugin.main import run_tool
+    import src.application.agent_tool_handlers as handlers
+
+    (tmp_path / "VERSION").write_text("1.0.0\n", encoding="utf-8")
+    monkeypatch.setattr(handlers, "repo_base", lambda: tmp_path)
+
+    out = run_tool("version_update", {"version": "1.1.0", "apply": True})
+
+    assert out["ok"] is True
+    assert out["warnings"] == []
+    assert out["data"]["mode"] == "applied"
+    assert out["data"]["target_version"] == "1.1.0"
+    assert out["data"]["changed"] is True
+    assert (tmp_path / "VERSION").read_text(encoding="utf-8").strip() == "1.1.0"
+
+
 def test_config_validate_runs_without_opend(monkeypatch, tmp_path: Path) -> None:
     from scripts.agent_plugin.main import run_tool
 
