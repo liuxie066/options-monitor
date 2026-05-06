@@ -432,7 +432,8 @@ def test_sell_put_steps_use_global_liquidity_filters_only() -> None:
         steps.run_sell_put_scan = orig_run_sell_put_scan
         steps.add_sell_put_labels = orig_add_labels
 
-    assert out['strategy'] == 'sell_put'
+    assert len(out) == 1
+    assert out[0]['strategy'] == 'sell_put'
     assert calls
     kwargs = calls[0]
     assert kwargs['min_open_interest'] == 50.0
@@ -515,7 +516,8 @@ def test_sell_put_steps_filter_uses_total_cny_when_base_cny_missing(tmp_path: Pa
 
     filtered = pd.read_csv(symbol_sp_labeled)
     assert filtered.empty
-    assert out["candidate_count"] == 0
+    assert len(out) == 1
+    assert out[0]["candidate_count"] == 0
 
 
 def test_sell_put_steps_filter_prefers_base_cny_over_total_cny(tmp_path: Path) -> None:
@@ -591,7 +593,8 @@ def test_sell_put_steps_filter_prefers_base_cny_over_total_cny(tmp_path: Path) -
 
     filtered = pd.read_csv(symbol_sp_labeled)
     assert filtered.empty
-    assert out["candidate_count"] == 0
+    assert len(out) == 1
+    assert out[0]["candidate_count"] == 0
 
 
 def test_sell_call_steps_use_global_liquidity_filters_only() -> None:
@@ -696,7 +699,8 @@ def test_sell_put_steps_fallback_to_global_min_net_income() -> None:
         steps.run_sell_put_scan = orig_run_sell_put_scan
         steps.add_sell_put_labels = orig_add_labels
 
-    assert out['strategy'] == 'sell_put'
+    assert len(out) == 1
+    assert out[0]['strategy'] == 'sell_put'
     assert calls
     kwargs = calls[0]
     assert kwargs['min_net_income'] == 14.000000000000002

@@ -15,11 +15,15 @@ from scripts.account_config import ACCOUNT_TYPES, account_settings_from_config, 
 from scripts.config_loader import resolve_templates_config, resolve_watchlist_config, set_watchlist_config
 from scripts.trade_account_mapping import resolve_trade_intake_config
 from src.application.opend_fetch_config import OPEND_RATE_LIMIT_ENDPOINT_KEYS
+from src.application.yield_enhancement_config import YIELD_ENHANCEMENT_OUTPUT_MODES
 
 LIQUIDITY_ALLOWED_GLOBAL_FIELDS = (
     'min_open_interest',
     'min_volume',
     'max_spread_ratio',
+)
+YIELD_ENHANCEMENT_LIQUIDITY_FIELDS = LIQUIDITY_ALLOWED_GLOBAL_FIELDS + (
+    'max_combo_spread_ratio',
 )
 REMOVED_STRATEGY_FILTER_FIELDS = (
     'require_bid_ask',
@@ -32,6 +36,17 @@ REMOVED_STRATEGY_FILTER_FIELDS = (
 )
 SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS = LIQUIDITY_ALLOWED_GLOBAL_FIELDS + REMOVED_STRATEGY_FILTER_FIELDS + ('event_risk',)
 LEGACY_SELL_CALL_FETCH_FIELDS = ('target_otm_pct_min', 'target_otm_pct_max')
+YIELD_ENHANCEMENT_FUNDING_MODES = {'credit_or_even', 'max_debit'}
+YIELD_ENHANCEMENT_REMOVED_TARGET_FIELDS = (
+    'target_price',
+    'target_price_mode',
+    'target_upside_pct',
+    'default_target_upside_pct',
+    'target_move_factor',
+    'expected_move_factor',
+    'min_target_return',
+    'min_annualized_target_return',
+)
 
 
 def die(msg: str):
@@ -78,6 +93,125 @@ def validate_non_negative_integer(value, path: str):
             die(f'{path} must be >= 0')
     except Exception:
         die(f'{path} must be an integer')
+
+
+def _validate_optional_non_negative_number(cfg: dict, key: str, path: str):
+    if key not in cfg or cfg.get(key) is None:
+        return
+    try:
+        if float(cfg.get(key)) < 0:
+            die(f'{path}.{key} must be >= 0')
+    except Exception:
+        die(f'{path}.{key} must be a number')
+
+
+def _validate_optional_positive_number(cfg: dict, key: str, path: str):
+    if key not in cfg or cfg.get(key) is None:
+        return
+    try:
+        if float(cfg.get(key)) <= 0:
+            die(f'{path}.{key} must be > 0')
+    except Exception:
+        die(f'{path}.{key} must be a number')
+
+
+def _validate_optional_non_negative_number_list(cfg: dict, key: str, path: str):
+    if key not in cfg or cfg.get(key) is None:
+        return
+    values = cfg.get(key)
+    if not isinstance(values, list) or not values:
+        die(f'{path}.{key} must be a non-empty array')
+    for index, value in enumerate(values):
+        try:
+            if float(value) < 0:
+                die(f'{path}.{key}[{index}] must be >= 0')
+        except Exception:
+            die(f'{path}.{key}[{index}] must be a number')
+
+
+def _validate_optional_strike_bounds(cfg: dict, path: str):
+    min_strike = cfg.get('min_strike')
+    max_strike = cfg.get('max_strike')
+    if min_strike is not None:
+        _validate_optional_positive_number(cfg, 'min_strike', path)
+    if max_strike is not None:
+        _validate_optional_positive_number(cfg, 'max_strike', path)
+    if (min_strike is not None) and (max_strike is not None):
+        try:
+            if float(min_strike) > float(max_strike):
+                die(f'{path}.min_strike > {path}.max_strike')
+        except Exception:
+            die(f'{path}.min_strike/max_strike must be numbers')
+
+
+def _validate_optional_dte_window(cfg: dict, path: str):
+    min_dte = cfg.get('min_dte')
+    max_dte = cfg.get('max_dte')
+    if min_dte is not None:
+        validate_non_negative_integer(min_dte, f'{path}.min_dte')
+    if max_dte is not None:
+        validate_non_negative_integer(max_dte, f'{path}.max_dte')
+    if (min_dte is not None) and (max_dte is not None):
+        try:
+            if int(min_dte) > int(max_dte):
+                die(f'{path}.min_dte > {path}.max_dte')
+        except Exception:
+            die(f'{path}.min_dte/max_dte must be integers')
+
+
+def _validate_yield_enhancement_cfg(cfg: dict, path: str):
+    if not isinstance(cfg, dict):
+        die(f'{path} must be an object')
+    bad_keys = [k for k in REMOVED_STRATEGY_FILTER_FIELDS if k in cfg]
+    if bad_keys:
+        die(f"{path} has unsupported strategy filter keys: {', '.join(bad_keys)}")
+    removed_target_keys = [k for k in YIELD_ENHANCEMENT_REMOVED_TARGET_FIELDS if k in cfg]
+    if removed_target_keys:
+        die(
+            f"{path} has removed target-price fields: {', '.join(removed_target_keys)}; "
+            "yield_enhancement now uses expected_move scenario scoring"
+        )
+    if 'output_mode' in cfg and cfg.get('output_mode') is not None:
+        output_mode = str(cfg.get('output_mode') or '').strip().lower()
+        if output_mode not in YIELD_ENHANCEMENT_OUTPUT_MODES:
+            die(f"{path}.output_mode must be one of: {', '.join(sorted(YIELD_ENHANCEMENT_OUTPUT_MODES))}")
+    for key in YIELD_ENHANCEMENT_LIQUIDITY_FIELDS:
+        _validate_optional_non_negative_number(cfg, key, path)
+    for key in (
+        'min_scenario_score',
+        'min_annualized_scenario_score',
+        'min_put_otm_pct',
+        'min_call_otm_pct',
+        'max_call_otm_pct',
+    ):
+        _validate_optional_non_negative_number(cfg, key, path)
+    min_call_otm_pct = cfg.get('min_call_otm_pct')
+    max_call_otm_pct = cfg.get('max_call_otm_pct')
+    if (min_call_otm_pct is not None) and (max_call_otm_pct is not None):
+        try:
+            if float(min_call_otm_pct) > float(max_call_otm_pct):
+                die(f'{path}.min_call_otm_pct > {path}.max_call_otm_pct')
+        except Exception:
+            die(f'{path}.min_call_otm_pct/max_call_otm_pct must be numbers')
+    _validate_optional_non_negative_number_list(cfg, 'scenario_move_factors', path)
+    _validate_optional_non_negative_number_list(cfg, 'scenario_weights', path)
+    if 'funding_mode' in cfg and cfg.get('funding_mode') is not None:
+        mode = str(cfg.get('funding_mode') or '').strip().lower()
+        if mode not in YIELD_ENHANCEMENT_FUNDING_MODES:
+            die(f"{path}.funding_mode must be one of: {', '.join(sorted(YIELD_ENHANCEMENT_FUNDING_MODES))}")
+    if str(cfg.get('funding_mode') or '').strip().lower() == 'max_debit':
+        if (cfg.get('max_debit') is None) and (cfg.get('max_debit_native') is None):
+            die(f"{path}.funding_mode=max_debit requires max_debit or max_debit_native")
+    _validate_optional_positive_number(cfg, 'max_debit', path)
+    _validate_optional_positive_number(cfg, 'max_debit_native', path)
+    _validate_optional_dte_window(cfg, path)
+
+    call_leg = cfg.get('call')
+    if call_leg is not None and not isinstance(call_leg, dict):
+        die(f'{path}.call must be an object')
+    if isinstance(call_leg, dict):
+        _validate_optional_dte_window(call_leg, f'{path}.call')
+        _validate_optional_strike_bounds(call_leg, f'{path}.call')
 
 
 def validate_config(cfg: dict):
@@ -249,7 +383,7 @@ def validate_config(cfg: dict):
         die('templates must be an object')
     templates = resolve_templates_config(cfg)
 
-# Strict config contract: global liquidity filters only support 3 hard fields.
+    # Strict config contract: global liquidity filters only support 3 hard fields.
     if isinstance(templates, dict):
         for profile_name, profile in templates.items():
             if not isinstance(profile, dict):
@@ -271,6 +405,24 @@ def validate_config(cfg: dict):
                             f"templates.{profile_name}.{side} has removed legacy fetch planning keys: "
                             f"{', '.join(unsupported_fetch_keys)}; use min_strike/max_strike only"
                         )
+                if side == 'sell_put':
+                    yield_enhancement_cfg = side_cfg.get('yield_enhancement')
+                    if yield_enhancement_cfg is not None:
+                        die(
+                            f"templates.{profile_name}.sell_put.yield_enhancement has been removed; "
+                            f"use templates.{profile_name}.yield_enhancement instead"
+                        )
+            yield_enhancement_cfg = profile.get('yield_enhancement')
+            if yield_enhancement_cfg is not None:
+                _validate_yield_enhancement_cfg(
+                    yield_enhancement_cfg,
+                    f'templates.{profile_name}.yield_enhancement',
+                )
+            if profile.get('rebound_combo') is not None:
+                die(
+                    f"templates.{profile_name}.rebound_combo has been removed; "
+                    "use templates.<name>.yield_enhancement instead"
+                )
 
     seen = set()
     for i, item in enumerate(cfg['symbols']):
@@ -296,12 +448,22 @@ def validate_config(cfg: dict):
 
         # sell_put basic checks if enabled
         sp = item.get('sell_put') or {}
-        if isinstance(sp, dict):
-            bad_keys = [k for k in SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS if k in sp]
-            if bad_keys:
-                die(f"{sym}.sell_put has forbidden symbol-level strategy filter keys: {', '.join(bad_keys)}")
+        if sp and not isinstance(sp, dict):
+            die(f"{sym}.sell_put must be an object")
+        bad_keys = [k for k in SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS if k in sp]
+        if bad_keys:
+            die(f"{sym}.sell_put has forbidden symbol-level strategy filter keys: {', '.join(bad_keys)}")
+        yield_enhancement_cfg = sp.get('yield_enhancement')
+        if yield_enhancement_cfg is not None:
+            die(f"{sym}.sell_put.yield_enhancement has been removed; use {sym}.yield_enhancement instead")
+        yield_enhancement_cfg = item.get('yield_enhancement')
+        if yield_enhancement_cfg is not None:
+            _validate_yield_enhancement_cfg(
+                yield_enhancement_cfg,
+                f'{sym}.yield_enhancement',
+            )
         if sp.get('enabled'):
-            for k in ('min_dte','max_dte'):
+            for k in ('min_dte', 'max_dte'):
                 if k not in sp:
                     die(f"{sym}.sell_put enabled but missing {k}")
             if sp['min_dte'] > sp['max_dte']:
@@ -318,18 +480,21 @@ def validate_config(cfg: dict):
                 die(f"{sym}.sell_put min_strike > max_strike")
             if ('min_strike' in sp) and (sp.get('max_strike') is None):
                 warn(f"{sym}.sell_put only sets min_strike; near-bound max_strike is recommended")
+        elif isinstance(item.get('yield_enhancement'), dict) and item['yield_enhancement'].get('enabled'):
+            warn(f"{sym}.yield_enhancement is enabled but sell_put is disabled; it will be ignored")
 
         sc = item.get('sell_call') or {}
-        if isinstance(sc, dict):
-            bad_keys = [k for k in SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS if k in sc]
-            if bad_keys:
-                die(f"{sym}.sell_call has forbidden symbol-level strategy filter keys: {', '.join(bad_keys)}")
-            unsupported_fetch_keys = [k for k in LEGACY_SELL_CALL_FETCH_FIELDS if k in sc]
-            if unsupported_fetch_keys:
-                die(
-                    f"{sym}.sell_call has removed legacy fetch planning keys: {', '.join(unsupported_fetch_keys)}; "
-                    "use min_strike/max_strike only"
-                )
+        if sc and not isinstance(sc, dict):
+            die(f"{sym}.sell_call must be an object")
+        bad_keys = [k for k in SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS if k in sc]
+        if bad_keys:
+            die(f"{sym}.sell_call has forbidden symbol-level strategy filter keys: {', '.join(bad_keys)}")
+        unsupported_fetch_keys = [k for k in LEGACY_SELL_CALL_FETCH_FIELDS if k in sc]
+        if unsupported_fetch_keys:
+            die(
+                f"{sym}.sell_call has removed legacy fetch planning keys: {', '.join(unsupported_fetch_keys)}; "
+                "use min_strike/max_strike only"
+            )
         if sc.get('enabled'):
             # NOTE:
             # - sell_call cost basis/shares come from account portfolio_context at runtime.
@@ -354,6 +519,9 @@ def validate_config(cfg: dict):
                 die(f"{sym}.sell_call min_strike > max_strike")
             if ('max_strike' in sc) and (sc.get('min_strike') is None):
                 warn(f"{sym}.sell_call only sets max_strike; near-bound min_strike is recommended")
+
+        if item.get('rebound_combo') is not None:
+            die(f"{sym}.rebound_combo has been removed; use {sym}.yield_enhancement instead")
 
 
 def main():

@@ -21,11 +21,22 @@ from scripts.exchange_rates import CurrencyConverter
 from scripts.trade_symbol_identity import symbol_currency
 from scripts.io_utils import safe_read_csv
 from scripts.render_sell_put_alerts import render_sell_put_alerts
+from scripts.render_yield_enhancement_alerts import render_yield_enhancement_alerts
 from scripts.report_labels import add_sell_put_labels
-from scripts.report_summaries import summarize_sell_put
+from scripts.report_summaries import summarize_sell_put, summarize_yield_enhancement
 from scripts.scan_sell_put import run_sell_put_scan
+from scripts.sell_put_call_helper import (
+    attach_best_linked_calls,
+    find_sell_put_yield_enhancement_pairs,
+    select_best_yield_enhancement_pairs,
+)
 from scripts.sell_put_cash import enrich_sell_put_candidates_with_cash
 from scripts.sell_put_config import validate_min_annualized_net_return
+from src.application.yield_enhancement_config import (
+    resolve_yield_enhancement_cfg,
+    wants_yield_enhancement_inline,
+    wants_yield_enhancement_separate,
+)
 
 
 def run_sell_put_scan_and_summarize(
@@ -46,9 +57,14 @@ def run_sell_put_scan_and_summarize(
     portfolio_ctx: dict | None,
     global_sell_put_liquidity: dict | None = None,
     global_sell_put_event_risk: dict | None = None,
-) -> dict:
+) -> list[dict]:
     symbol_sp = (report_dir / f'{symbol_lower}_sell_put_candidates.csv').resolve()
     symbol_sp_labeled = (report_dir / f'{symbol_lower}_sell_put_candidates_labeled.csv').resolve()
+    symbol_yield_enhancement = (report_dir / f'{symbol_lower}_yield_enhancement_candidates.csv').resolve()
+    yield_enhancement_alerts = (report_dir / f'{symbol_lower}_yield_enhancement_alerts.txt').resolve()
+    yield_enhancement_cfg = resolve_yield_enhancement_cfg(symbol_cfg)
+    yield_enhancement_inline = wants_yield_enhancement_inline(yield_enhancement_cfg)
+    yield_enhancement_separate = wants_yield_enhancement_separate(yield_enhancement_cfg)
 
     resolved_min_annualized_net_return = validate_min_annualized_net_return(
         sp.get('min_annualized_net_return'),
@@ -92,7 +108,6 @@ def run_sell_put_scan_and_summarize(
 
     add_sell_put_labels(base, symbol_sp, symbol_sp_labeled)
 
-    # account-aware: attach cash secured usage from position lots (open short puts)
     df_sp_lab = safe_read_csv(symbol_sp_labeled)
     if not df_sp_lab.empty:
         df_sp_lab = enrich_sell_put_candidates_with_cash(
@@ -159,6 +174,27 @@ def run_sell_put_scan_and_summarize(
         except Exception:
             pass
 
+    raw_yield_pairs_df = find_sell_put_yield_enhancement_pairs(
+        df_candidates=df_sp_lab,
+        symbol=symbol,
+        input_root=required_data_dir,
+        yield_enhancement_cfg=yield_enhancement_cfg,
+        global_yield_enhancement_liquidity=(symbol_cfg.get('_global_yield_enhancement_liquidity') or {}),
+        output_path=None,
+    )
+    recommended_yield_pairs_df = select_best_yield_enhancement_pairs(raw_yield_pairs_df)
+    if yield_enhancement_separate:
+        try:
+            recommended_yield_pairs_df.to_csv(symbol_yield_enhancement, index=False)
+        except Exception:
+            pass
+    if yield_enhancement_inline:
+        df_sp_lab = attach_best_linked_calls(
+            df_candidates=df_sp_lab,
+            pairs_df=recommended_yield_pairs_df,
+            out_path=symbol_sp_labeled,
+        )
+
     if not is_scheduled:
         render_sell_put_alerts(
             input_path=report_dir / f'{symbol_lower}_sell_put_candidates_labeled.csv',
@@ -168,8 +204,19 @@ def run_sell_put_scan_and_summarize(
             output_path=report_dir / f'{symbol_lower}_sell_put_alerts.txt',
             base_dir=base,
         )
+        if yield_enhancement_separate:
+            render_yield_enhancement_alerts(
+                input_path=symbol_yield_enhancement,
+                symbol=symbol,
+                top=int(top_n),
+                output_path=yield_enhancement_alerts,
+                base_dir=base,
+            )
 
-    return summarize_sell_put(safe_read_csv(symbol_sp_labeled), symbol, symbol_cfg=symbol_cfg)
+    rows = [summarize_sell_put(safe_read_csv(symbol_sp_labeled), symbol, symbol_cfg=symbol_cfg)]
+    if yield_enhancement_separate:
+        rows.append(summarize_yield_enhancement(recommended_yield_pairs_df, symbol, symbol_cfg=symbol_cfg))
+    return rows
 
 
 def empty_sell_put_summary(symbol: str, *, symbol_cfg: dict) -> dict:

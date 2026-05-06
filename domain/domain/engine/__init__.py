@@ -68,6 +68,14 @@ from .candidate_strategy import (
     score_candidates,
     sort_columns,
 )
+from .yield_enhancement import (
+    YieldEnhancementLeg,
+    YieldEnhancementMetrics,
+    compute_yield_enhancement_metrics,
+    rank_yield_enhancement_rows,
+    validate_yield_enhancement_pair,
+    yield_enhancement_rank_key,
+)
 
 __all__ = [
     'AccountSchedulerDecisionView',
@@ -134,4 +142,10 @@ __all__ = [
     'rank_scored_candidates',
     'score_candidates',
     'sort_columns',
+    'YieldEnhancementLeg',
+    'YieldEnhancementMetrics',
+    'compute_yield_enhancement_metrics',
+    'rank_yield_enhancement_rows',
+    'validate_yield_enhancement_pair',
+    'yield_enhancement_rank_key',
 ]

@@ -5,7 +5,7 @@ import json
 import sqlite3
 import sys
 from pathlib import Path
-from typing import Callable, cast
+from typing import Callable, Optional, cast
 
 BASE = Path(__file__).resolve().parents[1]
 if str(BASE) not in sys.path:
@@ -59,10 +59,10 @@ def _read_fields(db_path: Path, table_name: str, record_id: str) -> dict[str, ob
     conn = sqlite3.connect(str(db_path))
     try:
         row = cast(
-            tuple[object] | None,
+            Optional[tuple[object]],
             conn.execute(
-            f"SELECT fields_json FROM {table_name} WHERE record_id = ?",
-            (record_id,),
+                f"SELECT fields_json FROM {table_name} WHERE record_id = ?",
+                (record_id,),
             ).fetchone(),
         )
     finally:

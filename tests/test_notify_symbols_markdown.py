@@ -266,4 +266,77 @@ def test_notify_symbols_markdown_put_shows_same_symbol_position_usage() -> None:
     out = build_notification("", alerts, account_label="LX")
 
     assert "同标的Sell Put占用=¥45,000" in out
+
+
+def test_notify_symbols_markdown_put_chain_shows_linked_call_hint() -> None:
+    out = _render_via_alert_engine(
+        {
+            "symbol": "NVDA",
+            "strategy": "sell_put",
+            "candidate_count": 1,
+            "top_contract": "2026-06-19 95P",
+            "annualized_return": 0.273,
+            "net_income": 307.65,
+            "dte": 44,
+            "strike": 95.0,
+            "risk_label": "中性",
+            "delta": -0.25,
+            "iv": 0.42,
+            "cash_required_usd": 9500.0,
+            "mid": 3.1,
+            "bid": 3.0,
+            "ask": 3.2,
+            "option_ccy": "USD",
+            "linked_call_contract": "2026-06-19 110C",
+            "linked_call_count": 2,
+            "linked_call_ask": 1.5,
+            "linked_call_delta": 0.32,
+            "linked_call_net_credit": 145.33,
+            "linked_call_scenario_score": 0.0458,
+        }
+    )
+
+    assert "收益增强: 推荐Call=2026-06-19 110C" in out
+    assert "候选Call=2个" in out
+    assert "参考买价=1.500" in out
+    assert "净权利金=145.33" in out
+    assert "场景评分=4.58%" in out
+    assert "目标收益" not in out
     assert "全账户Sell Put占用" not in out
+
+
+def test_notify_symbols_markdown_yield_enhancement_layout() -> None:
+    out = _render_via_alert_engine(
+        {
+            "symbol": "NVDA",
+            "strategy": "yield_enhancement",
+            "candidate_count": 1,
+            "top_contract": "2026-06-19 95P+110C",
+            "annualized_return": 1.0142,
+            "net_income": 145.33,
+            "dte": 44,
+            "strike": 95.0,
+            "risk_label": "中性",
+            "option_ccy": "USD",
+            "put_strike": 95.0,
+            "call_strike": 110.0,
+            "call_ask": 1.5,
+            "call_delta": 0.32,
+            "call_candidate_count": 2,
+            "net_credit": 145.33,
+            "scenario_score": 0.0458,
+            "expected_move": 14.24,
+            "expected_move_iv": 0.41,
+            "combo_spread_ratio": 0.18,
+        }
+    )
+
+    assert "Enhancement" in out
+    assert "### [sy] NVDA · 收益增强" in out
+    assert "组合净权利金=145.33" in out
+    assert "场景评分=4.58%" in out
+    assert "Put=95" in out
+    assert "Call=110" in out
+    assert "备选Call=2个" in out
+    assert "Call delta=0.32" in out
+    assert "目标价" not in out

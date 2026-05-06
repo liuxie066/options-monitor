@@ -82,6 +82,9 @@
         "min_strike": 1,
         "max_strike": 999999
       },
+      "yield_enhancement": {
+        "enabled": true
+      },
       "sell_call": {
         "enabled": false
       }

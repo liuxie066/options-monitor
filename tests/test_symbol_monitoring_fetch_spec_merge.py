@@ -247,3 +247,76 @@ def test_run_symbol_monitoring_still_builds_plan_with_local_required_data(monkey
 
     assert len(captured_plan_calls) == 1
     assert captured["fetch_plan"]["symbol"] == "0700.HK"
+
+
+def test_run_symbol_monitoring_fetches_calls_for_sell_put_yield_enhancement(monkeypatch, tmp_path: Path) -> None:
+    import src.application.symbol_monitoring as mod
+
+    captured_plan: dict[str, object] = {}
+    captured_required_data: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        mod,
+        "build_required_data_fetch_plan",
+        lambda **kwargs: captured_plan.update(kwargs) or {
+            "symbol": kwargs["symbol"],
+            "merged_specs": [],
+            "side_plans": [],
+            "to_debug_dict": lambda: {"ok": True},
+        },
+    )
+
+    deps = mod.SymbolMonitoringDependencies(
+        build_converter_fn=lambda **kwargs: object(),
+        apply_prefilters_fn=lambda **kwargs: type(
+            "Prefilters",
+            (),
+            {
+                "want_put": kwargs["want_put"],
+                "want_call": kwargs["want_call"],
+                "sp": kwargs["sp"],
+                "cc": kwargs["cc"],
+                "stock": None,
+            },
+        )(),
+        apply_multiplier_cache_fn=lambda **kwargs: None,
+        ensure_required_data_fn=lambda **kwargs: captured_required_data.update(kwargs),
+        run_sell_put_scan_fn=lambda **kwargs: [{"strategy": "sell_put"}, {"strategy": "yield_enhancement"}],
+        empty_sell_put_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_put"},
+        run_sell_call_scan_fn=lambda **kwargs: {"strategy": "sell_call"},
+        empty_sell_call_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_call"},
+    )
+
+    out = mod.run_symbol_monitoring(
+        inputs=mod.SymbolMonitoringInputs(
+            py="python3",
+            base=tmp_path,
+            symbol_cfg={
+                "symbol": "NVDA",
+                "fetch": {"host": "127.0.0.1", "port": 11111, "limit_expirations": 8},
+                "sell_put": {
+                    "enabled": True,
+                    "min_dte": 20,
+                    "max_dte": 60,
+                },
+                "yield_enhancement": {"enabled": True},
+                "sell_call": {"enabled": False},
+            },
+            top_n=3,
+            portfolio_ctx=None,
+            usd_per_cny_exchange_rate=None,
+            cny_per_hkd_exchange_rate=None,
+            timeout_sec=10,
+            required_data_dir=tmp_path / "required_data",
+            report_dir=tmp_path / "reports",
+            state_dir=tmp_path / "state",
+            is_scheduled=False,
+        ),
+        deps=deps,
+    )
+
+    assert len(out) == 3
+    assert [row["strategy"] for row in out] == ["sell_put", "yield_enhancement", "sell_call"]
+    assert captured_plan["yield_enhancement_cfg"] == {"enabled": True, "output_mode": "separate"}
+    assert captured_required_data["want_put"] is True
+    assert captured_required_data["want_call"] is True

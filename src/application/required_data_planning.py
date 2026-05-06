@@ -4,7 +4,13 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from scripts.candidate_defaults import DEFAULT_SELL_CALL_WINDOW, DEFAULT_SELL_PUT_WINDOW, resolve_candidate_window
+from scripts.candidate_defaults import (
+    DEFAULT_SELL_CALL_WINDOW,
+    DEFAULT_SELL_PUT_WINDOW,
+    DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_WINDOW,
+    CandidateWindowDefaults,
+    resolve_candidate_window,
+)
 from src.application.opend_symbol_fetching import get_underlier_spot, list_option_expirations
 
 
@@ -13,6 +19,7 @@ OptionSide = Literal["put", "call"]
 DEFAULT_SELL_CALL_SPOT_FALLBACK_MIN_PCT = 0.03
 DEFAULT_SELL_CALL_STRIKE_BUFFER_PCT = 0.02
 DEFAULT_FETCH_NEAR_BOUND_EXPAND_PCT = 0.20
+DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_MAX_CALL_OTM_PCT = 0.25
 
 
 @dataclass(frozen=True)
@@ -193,8 +200,10 @@ def _resolve_put_side_plan(
     limit_expirations: int,
     available_expirations: list[str],
     spot_reference: float | None,
+    defaults: CandidateWindowDefaults = DEFAULT_SELL_PUT_WINDOW,
+    source_prefix: str = "sell_put",
 ) -> OptionSideFetchPlan:
-    window = resolve_candidate_window(sell_put_cfg, defaults=DEFAULT_SELL_PUT_WINDOW)
+    window = resolve_candidate_window(sell_put_cfg, defaults=defaults)
     filtered = _filter_expirations_by_dte(
         symbol=symbol,
         available_expirations=available_expirations,
@@ -204,12 +213,12 @@ def _resolve_put_side_plan(
     expirations = filtered[: int(limit_expirations)] if limit_expirations and filtered else filtered
     min_strike = _safe_float(sell_put_cfg.get("min_strike"))
     max_strike = _safe_float(sell_put_cfg.get("max_strike"))
-    planning_reason = "use configured sell_put near/far bounds"
-    source_fields = ["sell_put.min_strike", "sell_put.max_strike", "sell_put.min_dte", "sell_put.max_dte"]
+    planning_reason = f"use configured {source_prefix} near/far bounds"
+    source_fields = [f"{source_prefix}.min_strike", f"{source_prefix}.max_strike", f"{source_prefix}.min_dte", f"{source_prefix}.max_dte"]
     if min_strike is None and max_strike is not None:
         min_strike = max_strike * (1.0 - DEFAULT_FETCH_NEAR_BOUND_EXPAND_PCT)
-        planning_reason = "derive sell_put far bound from configured near bound -20%"
-        source_fields = source_fields + ["sell_put.max_strike"]
+        planning_reason = f"derive {source_prefix} far bound from configured near bound -20%"
+        source_fields = source_fields + [f"{source_prefix}.max_strike"]
     return OptionSideFetchPlan(
         option_type="put",
         min_dte=window.min_dte,
@@ -218,7 +227,7 @@ def _resolve_put_side_plan(
         strike_window=StrikeWindowPlan(
             min_strike=min_strike,
             max_strike=max_strike,
-            source="sell_put.configured_bounds",
+            source=f"{source_prefix}.configured_bounds",
             buffer_applied=False,
             buffer_pct=0.0,
             base_min_strike=min_strike,
@@ -230,7 +239,14 @@ def _resolve_put_side_plan(
     )
 
 
-def _resolve_sell_call_strike_window(*, sell_call_cfg: dict, spot_reference: float | None) -> tuple[StrikeWindowPlan, str, list[str]]:
+def _resolve_sell_call_strike_window(
+    *,
+    sell_call_cfg: dict,
+    spot_reference: float | None,
+    source_prefix: str = "sell_call",
+    fallback_min_pct: float = DEFAULT_SELL_CALL_SPOT_FALLBACK_MIN_PCT,
+    fallback_max_pct: float = DEFAULT_FETCH_NEAR_BOUND_EXPAND_PCT,
+) -> tuple[StrikeWindowPlan, str, list[str]]:
     min_strike = _safe_float(sell_call_cfg.get("min_strike"))
     max_strike = _safe_float(sell_call_cfg.get("max_strike"))
     if min_strike is not None or max_strike is not None:
@@ -250,21 +266,21 @@ def _resolve_sell_call_strike_window(*, sell_call_cfg: dict, spot_reference: flo
             StrikeWindowPlan(
                 min_strike=fetch_min,
                 max_strike=fetch_max,
-                source="sell_call.configured_bounds",
+                source=f"{source_prefix}.configured_bounds",
                 buffer_applied=(fetch_max is not None and base_max is not None and fetch_max != base_max),
                 buffer_pct=DEFAULT_SELL_CALL_STRIKE_BUFFER_PCT,
                 base_min_strike=base_min,
                 base_max_strike=base_max,
             ),
-            "use configured sell_call near/far bounds",
-            ["sell_call.min_strike", "sell_call.max_strike"],
+            f"use configured {source_prefix} near/far bounds",
+            [f"{source_prefix}.min_strike", f"{source_prefix}.max_strike"],
         )
     if spot_reference is None or spot_reference <= 0:
         return (
             StrikeWindowPlan(
                 min_strike=None,
                 max_strike=None,
-                source="sell_call.no_spot_no_bounds",
+                source=f"{source_prefix}.no_spot_no_bounds",
                 buffer_applied=False,
                 buffer_pct=0.0,
                 base_min_strike=None,
@@ -273,19 +289,22 @@ def _resolve_sell_call_strike_window(*, sell_call_cfg: dict, spot_reference: flo
             "spot unavailable; no near/far bounds could be derived",
             ["spot"],
         )
-    base_min = spot_reference * (1.0 + DEFAULT_SELL_CALL_SPOT_FALLBACK_MIN_PCT)
-    base_max = spot_reference * (1.0 + DEFAULT_FETCH_NEAR_BOUND_EXPAND_PCT)
+    base_min = spot_reference * (1.0 + float(fallback_min_pct))
+    max_pct = max(float(fallback_max_pct), float(fallback_min_pct))
+    if max_pct <= float(fallback_min_pct):
+        max_pct = float(fallback_min_pct) + 0.05
+    base_max = spot_reference * (1.0 + max_pct)
     return (
         StrikeWindowPlan(
             min_strike=base_min,
             max_strike=base_max * (1.0 + DEFAULT_SELL_CALL_STRIKE_BUFFER_PCT),
-            source="sell_call.spot_derived_bounds",
+            source=f"{source_prefix}.spot_derived_bounds",
             buffer_applied=True,
             buffer_pct=DEFAULT_SELL_CALL_STRIKE_BUFFER_PCT,
             base_min_strike=base_min,
             base_max_strike=base_max,
         ),
-        "derive sell_call near/far bounds from spot reference",
+        f"derive {source_prefix} near/far bounds from spot reference",
         ["spot"],
     )
 
@@ -297,8 +316,12 @@ def _resolve_call_side_plan(
     limit_expirations: int,
     available_expirations: list[str],
     spot_reference: float | None,
+    defaults: CandidateWindowDefaults = DEFAULT_SELL_CALL_WINDOW,
+    source_prefix: str = "sell_call",
+    fallback_min_pct: float = DEFAULT_SELL_CALL_SPOT_FALLBACK_MIN_PCT,
+    fallback_max_pct: float = DEFAULT_FETCH_NEAR_BOUND_EXPAND_PCT,
 ) -> OptionSideFetchPlan:
-    window = resolve_candidate_window(sell_call_cfg, defaults=DEFAULT_SELL_CALL_WINDOW)
+    window = resolve_candidate_window(sell_call_cfg, defaults=defaults)
     filtered = _filter_expirations_by_dte(
         symbol=symbol,
         available_expirations=available_expirations,
@@ -309,6 +332,9 @@ def _resolve_call_side_plan(
     strike_window, reason, source_fields = _resolve_sell_call_strike_window(
         sell_call_cfg=sell_call_cfg,
         spot_reference=spot_reference,
+        source_prefix=source_prefix,
+        fallback_min_pct=fallback_min_pct,
+        fallback_max_pct=fallback_max_pct,
     )
     return OptionSideFetchPlan(
         option_type="call",
@@ -317,9 +343,106 @@ def _resolve_call_side_plan(
         explicit_expirations=expirations,
         strike_window=strike_window,
         planning_reason=reason,
-        source_fields=source_fields + ["sell_call.min_dte", "sell_call.max_dte"],
+        source_fields=source_fields + [f"{source_prefix}.min_dte", f"{source_prefix}.max_dte"],
         spot_reference=spot_reference,
     )
+
+
+def _resolve_sell_put_yield_enhancement_call_plan(
+    *,
+    symbol: str,
+    sell_put_cfg: dict,
+    yield_enhancement_cfg: dict,
+    limit_expirations: int,
+    available_expirations: list[str],
+    spot_reference: float | None,
+) -> OptionSideFetchPlan:
+    cfg = dict(yield_enhancement_cfg or {})
+    call_cfg = dict(cfg.get("call") or {})
+    for key in ("min_dte", "max_dte"):
+        if key in cfg and key not in call_cfg:
+            call_cfg[key] = cfg.get(key)
+        elif key in sell_put_cfg and key not in call_cfg:
+            call_cfg[key] = sell_put_cfg.get(key)
+    fallback_min_pct = _safe_float(cfg.get("min_call_otm_pct"))
+    fallback_max_pct = _safe_float(cfg.get("max_call_otm_pct"))
+    sell_put_window = resolve_candidate_window(
+        sell_put_cfg,
+        defaults=DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_WINDOW,
+    )
+    return _resolve_call_side_plan(
+        symbol=symbol,
+        sell_call_cfg=call_cfg,
+        limit_expirations=limit_expirations,
+        available_expirations=available_expirations,
+        spot_reference=spot_reference,
+        defaults=sell_put_window,
+        source_prefix="yield_enhancement.call",
+        fallback_min_pct=(
+            float(fallback_min_pct)
+            if fallback_min_pct is not None
+            else 0.03
+        ),
+        fallback_max_pct=(
+            float(fallback_max_pct)
+            if fallback_max_pct is not None
+            else DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_MAX_CALL_OTM_PCT
+        ),
+    )
+
+
+def _unique_preserve_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
+
+
+def _merge_same_side_plans(side_plans: list[OptionSideFetchPlan]) -> list[OptionSideFetchPlan]:
+    grouped: dict[OptionSide, list[OptionSideFetchPlan]] = {"put": [], "call": []}
+    for plan in side_plans:
+        grouped.setdefault(plan.option_type, []).append(plan)
+
+    merged: list[OptionSideFetchPlan] = []
+    for option_type in ("put", "call"):
+        plans = grouped.get(option_type) or []
+        if not plans:
+            continue
+        if len(plans) == 1:
+            merged.append(plans[0])
+            continue
+
+        expirations = _unique_preserve_order([exp for plan in plans for exp in plan.explicit_expirations])
+        min_values = [plan.strike_window.min_strike for plan in plans if plan.strike_window.min_strike is not None]
+        max_values = [plan.strike_window.max_strike for plan in plans if plan.strike_window.max_strike is not None]
+        base_min_values = [plan.strike_window.base_min_strike for plan in plans if plan.strike_window.base_min_strike is not None]
+        base_max_values = [plan.strike_window.base_max_strike for plan in plans if plan.strike_window.base_max_strike is not None]
+        source_fields = _unique_preserve_order([field for plan in plans for field in plan.source_fields])
+        merged.append(
+            OptionSideFetchPlan(
+                option_type=option_type,
+                min_dte=min((plan.min_dte for plan in plans if plan.min_dte is not None), default=None),
+                max_dte=max((plan.max_dte for plan in plans if plan.max_dte is not None), default=None),
+                explicit_expirations=expirations,
+                strike_window=StrikeWindowPlan(
+                    min_strike=(min(min_values) if min_values else None),
+                    max_strike=(max(max_values) if max_values else None),
+                    source="+".join(_unique_preserve_order([plan.strike_window.source for plan in plans])),
+                    buffer_applied=any(plan.strike_window.buffer_applied for plan in plans),
+                    buffer_pct=max((plan.strike_window.buffer_pct for plan in plans), default=0.0),
+                    base_min_strike=(min(base_min_values) if base_min_values else None),
+                    base_max_strike=(max(base_max_values) if base_max_values else None),
+                ),
+                planning_reason=f"merged {option_type} requirements across enabled strategies",
+                source_fields=source_fields,
+                spot_reference=next((plan.spot_reference for plan in plans if plan.spot_reference is not None), None),
+            )
+        )
+    return merged
 
 
 def _merge_side_plans(
@@ -370,10 +493,11 @@ def build_required_data_fetch_plan(
     limit_expirations: int,
     want_put: bool,
     want_call: bool,
-    sell_put_cfg: dict | None,
-    sell_call_cfg: dict | None,
-    fetch_host: str,
-    fetch_port: int,
+    sell_put_cfg: dict | None = None,
+    sell_call_cfg: dict | None = None,
+    yield_enhancement_cfg: dict | None = None,
+    fetch_host: str = "127.0.0.1",
+    fetch_port: int = 11111,
     snapshot_max_wait_sec: float = 30.0,
     snapshot_window_sec: float = 30.0,
     snapshot_max_calls: int = 60,
@@ -383,6 +507,7 @@ def build_required_data_fetch_plan(
 ) -> RequiredDataFetchPlanBundle:
     sell_put_cfg = dict(sell_put_cfg or {})
     sell_call_cfg = dict(sell_call_cfg or {})
+    resolved_yield_enhancement_cfg = dict(yield_enhancement_cfg or {})
     spot_reference = _resolve_spot_reference(
         symbol=symbol,
         host=fetch_host,
@@ -427,6 +552,18 @@ def build_required_data_fetch_plan(
                 spot_reference=spot_reference,
             )
         )
+    if want_put and bool(resolved_yield_enhancement_cfg.get("enabled", False)):
+        side_plans.append(
+            _resolve_sell_put_yield_enhancement_call_plan(
+                symbol=symbol,
+                sell_put_cfg=sell_put_cfg,
+                yield_enhancement_cfg=resolved_yield_enhancement_cfg,
+                limit_expirations=limit_expirations,
+                available_expirations=available_expirations,
+                spot_reference=spot_reference,
+            )
+        )
+    side_plans = _merge_same_side_plans(side_plans)
     return RequiredDataFetchPlanBundle(
         symbol=symbol,
         spot_reference=spot_reference,

@@ -47,3 +47,28 @@ def test_build_symbols_summary_tolerates_missing_annualized_return_column() -> N
         assert 'net_income' in df.columns
         assert pd.isna(df.loc[0, 'annualized_return'])
         assert pd.isna(df.loc[0, 'net_income'])
+
+
+def test_build_symbols_digest_deduplicates_symbols_with_yield_enhancement_section() -> None:
+    base = Path(__file__).resolve().parents[1]
+    if str(base) not in sys.path:
+        sys.path.insert(0, str(base))
+
+    from scripts.report_builders import build_symbols_digest
+
+    with TemporaryDirectory() as td:
+        report_dir = Path(td)
+        (report_dir / "nvda_sell_put_alerts.txt").write_text("put alert\n", encoding="utf-8")
+        (report_dir / "nvda_sell_call_alerts.txt").write_text("call alert\n", encoding="utf-8")
+        (report_dir / "nvda_yield_enhancement_alerts.txt").write_text("enhance alert\n", encoding="utf-8")
+
+        build_symbols_digest(["NVDA", "NVDA", "NVDA"], report_dir)
+
+        text = (report_dir / "symbols_digest.txt").read_text(encoding="utf-8")
+        assert text.count("## NVDA") == 1
+        assert "### Sell Put" in text
+        assert "### Sell Call" in text
+        assert "### Yield Enhancement" in text
+        assert "enhance alert" in text
+        assert "### Rebound Combo" not in text
+        assert "combo alert" not in text

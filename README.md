@@ -2,12 +2,13 @@
 
 期权监控与提醒工具，面向 **Sell Put / Covered Call** 工作流。
 
-它解决的核心问题只有 4 件：
+它解决的核心问题只有 5 件：
 
 1. 扫描你关注的标的期权链
 2. 按策略阈值筛选 Sell Put / Covered Call 候选
 3. 结合账户持仓与现金判断是否可做
-4. 生成提醒、平仓建议和运行结果
+4. 为合格 Sell Put 推荐可买入的 Call strike 做收益增强
+5. 生成提醒、平仓建议和运行结果
 
 这份 README 只保留产品使用需要的信息：
 - 安装
@@ -147,6 +148,56 @@ cp configs/examples/portfolio.sqlite.example.json secrets/portfolio.sqlite.json
 - 持仓与现金：Futu / OpenD
 - 期权持仓存储：SQLite
 - Feishu `option_positions` 不是稳态主存储；只用于可选的空库 bootstrap 和远端镜像
+
+### 3.1 Sell Put 收益增强
+
+收益增强是独立功能，配置在标的顶层 `yield_enhancement`，开关是 `enabled`。它依赖
+`sell_put.enabled=true`：系统会先筛 Sell Put，再为每个合格 Put 在同到期日 Call 链里找最合适的买入 Call strike。
+即使 `sell_call.enabled=false`，启用收益增强后也会自动补取 Call 期权链。
+
+最小配置示例：
+
+```json
+{
+  "symbol": "NVDA",
+  "sell_put": {
+    "enabled": true,
+    "min_dte": 20,
+    "max_dte": 90,
+    "min_strike": 150,
+    "max_strike": 160
+  },
+  "yield_enhancement": {
+    "enabled": true
+  }
+}
+```
+
+只需要这个顶层开关，不需要新增 `put_enhanced` 之类的模板或实体。默认会独立输出收益增强候选，
+并用内置 DTE、OTM、流动性和组合价差阈值筛选 Call。
+
+可选调优项：
+
+- `output_mode`: `separate`（默认）、`inline`、`both`。
+- `call.min_strike` / `call.max_strike`: 明确限制可买 Call 的 strike 范围。
+- `min_call_otm_pct` / `max_call_otm_pct`: 限制 Call 相对现价的虚值距离。
+- `funding_mode`: 默认 `credit_or_even`，要求 Sell Put 收入覆盖买 Call 成本；若用 `max_debit`，再配 `max_debit_native`。
+- `min_open_interest` / `min_volume` / `max_spread_ratio` / `max_combo_spread_ratio`: 流动性和组合价差过滤。
+- `scenario_move_factors` / `scenario_weights` / `min_scenario_score`: 调整 expected move 场景打分。
+
+核心逻辑：
+
+- `funding_mode=credit_or_even` 要求卖 Put 的净收入覆盖买 Call 的成本。
+- 使用期权链 IV、DTE 和当前价生成 expected move 场景，对组合收益做加权评分。
+- 排序先看组合 `scenario_score`，再看年化场景评分、上行盈亏平衡、净权利金、Put 距离、组合价差和流动性。
+- `output_mode=separate` 会生成独立收益增强候选和通知；`inline` 只把推荐 Call 附到 Sell Put 候选；`both` 两者都输出。
+
+主要输出：
+
+- `<symbol>_yield_enhancement_candidates.csv`
+- `<symbol>_yield_enhancement_alerts.txt`
+- `symbols_summary.csv` 中的 `strategy=yield_enhancement`
+- 通知里的 `Enhancement` 分区，或 Sell Put 候选下的 `收益增强: 推荐Call=...` 行
 
 ---
 

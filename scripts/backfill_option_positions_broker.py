@@ -7,7 +7,7 @@ import shutil
 import sqlite3
 import sys
 from pathlib import Path
-from typing import TypedDict, cast
+from typing import Optional, TypedDict, cast
 
 
 REPO_BASE = Path(__file__).resolve().parents[1]
@@ -117,10 +117,10 @@ def _row_value(row: sqlite3.Row, key: str) -> object:
 
 def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
     row = cast(
-        sqlite3.Row | None,
+        Optional[sqlite3.Row],
         conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name = ?",
-        (str(table_name),),
+            "SELECT name FROM sqlite_master WHERE type='table' AND name = ?",
+            (str(table_name),),
         ).fetchone(),
     )
     return row is not None
@@ -385,7 +385,7 @@ def main() -> None:
     _ = ap.add_argument("--apply", action="store_true", help="write broker backfill into persisted sqlite tables")
     args = ap.parse_args()
     arg_map = vars(args)
-    data_config = cast(str | None, args.data_config)
+    data_config = cast(Optional[str], args.data_config)
     sample_limit = int(cast(int, arg_map["sample_limit"]))
     output_format = cast(str, args.format)
     should_apply = bool(cast(bool, arg_map["apply"]))

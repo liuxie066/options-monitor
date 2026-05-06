@@ -23,9 +23,7 @@ def build_symbols_summary(summary_rows: list[dict], report_dir: Path, *, is_sche
     if df.empty:
         lines.append('无结果。')
     else:
-        ordered = df.copy()
-        ordered['annualized_return_sort'] = ordered['annualized_return'].fillna(-1)
-        ordered = ordered.sort_values(['symbol', 'strategy'])
+        ordered = df.sort_values(['symbol', 'strategy'])
         for _, r in ordered.iterrows():
             lines.append(format_summary_row(r))
 
@@ -39,10 +37,20 @@ def build_symbols_summary(summary_rows: list[dict], report_dir: Path, *, is_sche
 def build_symbols_digest(symbols: list[str], report_dir: Path):
     lines = ['# Symbols Strategy Digest', '']
 
-    for symbol in symbols:
+    seen: set[str] = set()
+    ordered_symbols: list[str] = []
+    for raw_symbol in symbols:
+        symbol = str(raw_symbol or '').strip()
+        if not symbol or symbol in seen:
+            continue
+        seen.add(symbol)
+        ordered_symbols.append(symbol)
+
+    for symbol in ordered_symbols:
         lines.append(f'## {symbol}')
         sp_path = report_dir / f'{symbol.lower()}_sell_put_alerts.txt'
         cc_path = report_dir / f'{symbol.lower()}_sell_call_alerts.txt'
+        ye_path = report_dir / f'{symbol.lower()}_yield_enhancement_alerts.txt'
 
         lines.append('### Sell Put')
         if sp_path.exists() and sp_path.stat().st_size > 0:
@@ -54,6 +62,13 @@ def build_symbols_digest(symbols: list[str], report_dir: Path):
         lines.append('### Sell Call')
         if cc_path.exists() and cc_path.stat().st_size > 0:
             lines.append(cc_path.read_text(encoding='utf-8').strip())
+        else:
+            lines.append('无候选。')
+        lines.append('')
+
+        lines.append('### Yield Enhancement')
+        if ye_path.exists() and ye_path.stat().st_size > 0:
+            lines.append(ye_path.read_text(encoding='utf-8').strip())
         else:
             lines.append('无候选。')
         lines.append('')

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from scripts.account_config import build_account_portfolio_source_plan
 import scripts.fetch_portfolio_context as holdings_context
@@ -12,7 +12,7 @@ load_holdings_portfolio_shared_context = holdings_context.load_holdings_portfoli
 slice_shared_context_for_account = holdings_context.slice_shared_context_for_account
 
 
-JsonLoader = Callable[[Path], dict | None]
+JsonLoader = Callable[[Path], Optional[dict]]
 FreshnessChecker = Callable[[Path, int], bool]
 Logger = Callable[[str], None]
 

@@ -81,7 +81,6 @@ def annotate_notification(acct: str, text: str) -> str:
                 out.append('- ' + s)
             last_line1_idx = len(out) - 1
             continue
-
         if in_put and s.startswith('担保') and ('加仓后余量' in s):
             headroom = _parse_cny(s)
             tag = ''
@@ -185,6 +184,7 @@ def build_account_message(
     kept = result.notification_text.strip().splitlines()
     put_n = sum(1 for ln in kept if ' 卖Put ' in ln)
     call_n = sum(1 for ln in kept if ' 卖Call ' in ln)
+    enhancement_n = sum(1 for ln in kept if ' 收益增强 ' in ln)
     acct = str(result.account).strip().lower()
 
     lines: list[str] = []
@@ -194,7 +194,10 @@ def build_account_message(
     lines.append(f"北京时间 {now_bj}")
     lines.append('')
     lines.append(f"### 账户 {acct} · 本轮候选")
-    lines.append(f"- Put {put_n} / Call {call_n}")
+    counts_line = f"- Put {put_n} / Call {call_n}"
+    if enhancement_n > 0:
+        counts_line += f" / Enhance {enhancement_n}"
+    lines.append(counts_line)
     lines.append('')
     lines.append(annotate_notification(result.account, '\n'.join(kept).strip() + '\n').strip())
     lines.append('')
