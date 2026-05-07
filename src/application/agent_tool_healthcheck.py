@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Callable
 
 
@@ -71,6 +72,44 @@ def run_healthcheck_tool(
     feishu_ready = bool(str(feishu_cfg.get("app_id") or "").strip()) and bool(str(feishu_cfg.get("app_secret") or "").strip())
     holdings_ref = str(feishu_tables.get("holdings") or "").strip()
     holdings_ready = feishu_ready and ("/" in holdings_ref)
+
+    notifications = cfg.get("notifications") if isinstance(cfg.get("notifications"), dict) else {}
+    if isinstance(notifications, dict) and str(notifications.get("channel") or "").strip().lower() == "feishu":
+        secrets_file_value = str(notifications.get("secrets_file") or "secrets/notifications.feishu.app.json").strip()
+        secrets_path = Path(secrets_file_value)
+        if not secrets_path.is_absolute():
+            secrets_path = (config_path.parent / secrets_path).resolve()
+        if not secrets_path.exists():
+            checks.append(
+                {
+                    "name": "notification_secrets",
+                    "status": "error",
+                    "message": f"notification secrets file not found: {secrets_path}",
+                }
+            )
+            warnings.append("Notification credentials missing; notifications cannot be sent until the secrets file is restored.")
+        else:
+            secrets_payload = read_json_object_or_empty(secrets_path)
+            feishu_secret_cfg = secrets_payload.get("feishu") if isinstance(secrets_payload.get("feishu"), dict) else {}
+            if not str(feishu_secret_cfg.get("app_id") or "").strip() or not str(feishu_secret_cfg.get("app_secret") or "").strip():
+                checks.append(
+                    {
+                        "name": "notification_secrets",
+                        "status": "error",
+                        "message": f"notification secrets missing feishu.app_id/app_secret: {secrets_path}",
+                    }
+                )
+                warnings.append("Notification credentials are incomplete; fix app_id/app_secret before enabling sends.")
+            else:
+                checks.append(
+                    {
+                        "name": "notification_secrets",
+                        "status": "ok",
+                        "message": "notification secrets found",
+                        "value": mask_path(secrets_path),
+                    }
+                )
+
     option_positions_bootstrap_status = None
     option_positions_bootstrap_message = None
     if data_config_path.exists():

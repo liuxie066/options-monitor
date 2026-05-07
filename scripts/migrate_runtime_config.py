@@ -23,6 +23,7 @@ if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
 from scripts.io_utils import atomic_write_text
+from scripts.validate_config import validate_config
 
 
 LEGACY_SCHEDULE_KEYS = (
@@ -165,6 +166,7 @@ def main() -> None:
             continue
 
         changed_paths.append(path)
+        validate_config(migrated)
         if args.apply:
             backup = _backup(path)
             atomic_write_text(path, _dump_json(migrated))
