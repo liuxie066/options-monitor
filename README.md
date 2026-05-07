@@ -148,6 +148,9 @@ cp configs/examples/portfolio.sqlite.example.json secrets/portfolio.sqlite.json
 - `secrets/portfolio.sqlite.json`
 - `secrets/notifications.feishu.app.json`（如果启用通知）
 
+配置优先级、`config_validate` / `healthcheck` / `runtime_status` / `openclaw_readiness` 的边界，请以 [CONFIGURATION_GUIDE.md](CONFIGURATION_GUIDE.md) 为准。
+哪些命令会写本地状态、写远端或发通知，请以 [RUNBOOK.md](RUNBOOK.md) 的“命令副作用总表”为准。
+
 ### 最小配置默认数据来源
 
 - 行情与期权链：OpenD / Futu API
