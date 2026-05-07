@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.1.2 - 2026-05-07
+
+### Changed
+- Aligned shipped starter configs with current runtime defaults so US/HK DTE windows and close-advice spread defaults no longer drift from code behavior.
+- Removed market-level multiplier starter defaults from onboarding configs so new installs prefer payload/cache/per-symbol multiplier sources over silent money-math fallbacks.
+
+### Fixed
+- Split pure config validation from runtime notification readiness checks and surfaced placeholder starter values through healthcheck/init warnings instead of hiding them.
+- Removed the ineffective `notifications.enabled` WebUI toggle so saved config fields now match actual notification send logic.
+
 ## 1.1.1 - 2026-05-07
 
 ### Fixed
