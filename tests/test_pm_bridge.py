@@ -19,6 +19,7 @@ def test_fetch_spot_with_fallback_logs_removed_message(tmp_path: Path) -> None:
 def test_resolve_spot_fallback_enabled_always_false() -> None:
     from scripts.pm_bridge import resolve_spot_fallback_enabled
 
+    # Legacy config keys may still mention Yahoo, but runtime spot fallback is retired.
     out = resolve_spot_fallback_enabled(
         {"spot_from_yahoo": False, "spot_from_portfolio_management": True},
         symbol="NVDA",

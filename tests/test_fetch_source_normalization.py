@@ -25,7 +25,7 @@ def test_resolve_symbol_fetch_source_preserves_explicit_source_choice() -> None:
     assert resolve_symbol_fetch_source({}) == ("opend", "default_opend")
     assert resolve_symbol_fetch_source({"source": "yahoo"}) == ("yahoo", "configured_yahoo")
     assert resolve_symbol_fetch_source({"source": "futu"}) == ("opend", "configured_opend")
-    assert resolve_symbol_fetch_source({"source": "futu", "_source_resolution": "degraded_to_yahoo"}) == (
+    assert resolve_symbol_fetch_source({"source": "futu", "_source_resolution": "ignored_legacy_resolution"}) == (
         "opend",
         "configured_opend",
     )

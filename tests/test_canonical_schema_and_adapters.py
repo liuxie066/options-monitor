@@ -183,7 +183,7 @@ def test_three_source_adapters_produce_unified_dto() -> None:
         assert isinstance(dto["payload"], dict)
 
 
-def test_opend_adapter_marks_fallback_and_unified_error_code() -> None:
+def test_opend_adapter_labels_non_futu_upstream_and_unifies_error_code() -> None:
     timeout_case = adapt_opend_tool_payload(
         {
             "schema_kind": "tool_execution",
@@ -202,6 +202,8 @@ def test_opend_adapter_marks_fallback_and_unified_error_code() -> None:
     assert timeout_case["error_code"] == "ERR_TIMEOUT"
     assert timeout_case["error_category"] == "timeout"
 
+    # A non-Futu upstream source is labeled as fallback in the unified snapshot.
+    # This is an audit/status shape only, not a runtime Yahoo fallback path.
     fallback_ok = adapt_opend_tool_payload(
         {
             "schema_kind": "tool_execution",
