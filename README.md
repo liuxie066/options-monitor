@@ -155,6 +155,9 @@ cp configs/examples/portfolio.sqlite.example.json secrets/portfolio.sqlite.json
 - 期权持仓存储：SQLite
 - Feishu `option_positions` 不是稳态主存储；只用于可选的空库 bootstrap 和远端镜像
 
+补充说明：当前 symbol required-data 运行时**不支持**从 OpenD / Futu 自动降级到 Yahoo。
+如果看到 `yahoo` / `yfinance` 相关字样，它们只用于显式非 Futu source 语义或独立的事件风险数据抓取，不属于 OpenD fallback。
+
 ### 3.1 Sell Put 收益增强
 
 收益增强是独立功能，配置在标的顶层 `yield_enhancement`，开关是 `enabled`。它依赖
