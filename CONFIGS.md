@@ -8,9 +8,11 @@
 - `config.hk.json`
 
 规则：
-- 线上推荐将以上两份放在仓库外管理，例如 `/opt/options-monitor/configs/config.us.json` / `/opt/options-monitor/configs/config.hk.json`。
-- 仓内同名文件仅作为开发机或临时本地运行的兼容默认，已被 `.gitignore` 忽略。
-- runtime 入口配置以 canonical 为准，生产 cron 应显式传入仓外配置的绝对路径。
+- `config.us.json` / `config.hk.json` 是当前 runtime 的 canonical market configs。
+- 线上可以把这两份 canonical config 放在仓库外管理，例如 `/opt/options-monitor/configs/config.us.json` / `/opt/options-monitor/configs/config.hk.json`，并在运行入口显式传入绝对路径。
+- 仓内同名文件仍是受支持的 repo-local runtime config 形态，适合本地开发、WebUI 初始化和默认本地运行。
+- `.gitignore` 只忽略额外的本地 runtime 变体（例如 `config.local*.json`、`config.market_*.json`、旧兼容文件名），不会自动忽略 canonical 的 `config.us.json` / `config.hk.json`。
+- runtime 入口始终以传入的 market-specific canonical config 为准；生产 cron 若使用仓外配置，应显式传入对应绝对路径。
 
 ## Data Configs（独立数据配置）
 
