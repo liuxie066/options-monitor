@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import subprocess
 import sys
 from pathlib import Path
@@ -48,6 +49,19 @@ FORBIDDEN_CONFIG_MARKERS = (
     "config.market_hk",
 )
 
+ROOT_RUNTIME_CONFIG_EXACT = {
+    "config.json",
+    "config.us.json",
+    "config.hk.json",
+    "config.scheduled.json",
+}
+ROOT_RUNTIME_CONFIG_PATTERNS = (
+    "config.market_*.json",
+    "config.market_*.json.deprecated",
+    "config.local*.json",
+    "config.*.bak.*",
+)
+
 EXPLICIT_TERMS = (
     "显式",
     "explicit",
@@ -72,7 +86,7 @@ class Violation:
         return f"{self.path}:{self.line_no}: {self.reason}\n  {self.line.strip()}"
 
 
-def tracked_files() -> list[Path]:
+def tracked_file_paths() -> list[Path]:
     try:
         out = subprocess.check_output(["git", "ls-files"], cwd=str(ROOT), text=True)
     except Exception as exc:
@@ -85,9 +99,26 @@ def tracked_files() -> list[Path]:
         p = ROOT / rel
         if not p.is_file():
             continue
+        files.append(Path(rel))
+    return files
+
+
+def text_tracked_files(paths: list[Path]) -> list[Path]:
+    files: list[Path] = []
+    for rel in paths:
+        p = ROOT / rel
         if p.name in TEXT_FILENAMES or p.suffix in TEXT_SUFFIXES:
             files.append(p)
     return files
+
+
+def is_root_runtime_config_path(path: Path) -> bool:
+    if len(path.parts) != 1:
+        return False
+    name = path.name
+    if name in ROOT_RUNTIME_CONFIG_EXACT:
+        return True
+    return any(fnmatch.fnmatchcase(name, pattern) for pattern in ROOT_RUNTIME_CONFIG_PATTERNS)
 
 
 def is_doc_file(path: Path) -> bool:
@@ -150,25 +181,51 @@ def check_deploy_include_runtime_default(files: list[Path]) -> list[Violation]:
     return issues
 
 
+def check_runtime_config_tracking(files: list[Path]) -> list[Violation]:
+    issues: list[Violation] = []
+    for path in files:
+        if not is_root_runtime_config_path(path):
+            continue
+        issues.append(
+            Violation(
+                path,
+                1,
+                "root runtime config must stay untracked; commit templates under configs/examples/ instead",
+                "<tracked runtime config>",
+            )
+        )
+    return issues
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Guardrails checks for docs and deploy examples")
     parser.add_argument("--check-doc-wording", action="store_true", help="check docs wording for runtime entry")
     parser.add_argument("--check-deploy-args", action="store_true", help="check deploy examples/scripts")
+    parser.add_argument(
+        "--check-runtime-config-tracking",
+        action="store_true",
+        help="check that root runtime configs are not tracked by git",
+    )
     args = parser.parse_args()
 
     run_doc = args.check_doc_wording
     run_deploy = args.check_deploy_args
-    if not run_doc and not run_deploy:
+    run_tracking = args.check_runtime_config_tracking
+    if not run_doc and not run_deploy and not run_tracking:
         run_doc = True
         run_deploy = True
+        run_tracking = True
 
-    files = tracked_files()
+    tracked_paths = tracked_file_paths()
+    files = text_tracked_files(tracked_paths)
     issues: list[Violation] = []
 
     if run_doc:
         issues.extend(check_runtime_entry_wording(files))
     if run_deploy:
         issues.extend(check_deploy_include_runtime_default(files))
+    if run_tracking:
+        issues.extend(check_runtime_config_tracking(tracked_paths))
 
     if issues:
         print(f"[guardrails] FAILED ({len(issues)} issue(s))")

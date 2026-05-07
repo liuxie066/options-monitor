@@ -11,8 +11,16 @@
 - `config.us.json` / `config.hk.json` 是当前 runtime 的 canonical market configs。
 - 线上可以把这两份 canonical config 放在仓库外管理，例如 `/opt/options-monitor/configs/config.us.json` / `/opt/options-monitor/configs/config.hk.json`，并在运行入口显式传入绝对路径。
 - 仓内同名文件仍是受支持的 repo-local runtime config 形态，适合本地开发、WebUI 初始化和默认本地运行。
-- `.gitignore` 只忽略额外的本地 runtime 变体（例如 `config.local*.json`、`config.market_*.json`、旧兼容文件名），不会自动忽略 canonical 的 `config.us.json` / `config.hk.json`。
+- 仓库只跟踪 `configs/examples/config.example.*.json` 模板；用户实际 runtime config 不随版本发布。
+- `.gitignore` 会忽略仓内 `config.us.json` / `config.hk.json`、`config.local*.json`、`config.market_*.json`、旧兼容文件名和 config 备份，避免代码更新覆盖用户本地配置。
 - runtime 入口始终以传入的 market-specific canonical config 为准；生产 cron 若使用仓外配置，应显式传入对应绝对路径。
+
+## 版本更新保护
+
+- 代码更新和发布同步只更新代码、文档与 `configs/examples/` 模板，不覆盖用户 runtime config。
+- `scripts/publish_to_prod.sh` 即使遇到被误跟踪的根目录 runtime config，也会显式跳过。
+- CI guardrails 会拒绝提交根目录 `config.us.json` / `config.hk.json` / `config.json` / `config.market_*.json` 等 runtime config。
+- 需要适配新版配置字段时，使用 `scripts/migrate_runtime_config.py` 先 dry-run，再 `--apply` 写入；脚本会先创建 `*.bak.YYYYmmdd-HHMMSS` 备份。
 
 ## Data Configs（独立数据配置）
 

@@ -5,7 +5,8 @@ set -Eeuo pipefail
 #
 # Design goals:
 # - Avoid editing prod directly (no drift): always publish from dev.
-# - Copy ONLY tracked files from dev (git ls-files), so local prod config.us.json/config.hk.json/output/.venv are untouched.
+# - Copy ONLY tracked code/template files from dev.
+# - Never copy root runtime configs, even if they were accidentally force-tracked.
 # - Create an auditable publish commit on a timestamped branch in prod, then merge into a target branch.
 #
 # Default dirs match this OpenClaw workspace layout.
@@ -36,7 +37,7 @@ Examples:
 Notes:
 - This script performs ONLY local git commits/merges; it does NOT push to GitHub.
 - It copies files from dev using: git ls-files (tracked only).
-  So ignored local files like config.us.json/config.hk.json/output/.venv are NOT overwritten.
+  So local files like config.us.json/config.hk.json/output/.venv are NOT overwritten.
 EOF
 }
 
@@ -180,6 +181,10 @@ echo "[INFO] publish branch: $PUBLISH_BRANCH"
 TRACKED=$(cd "$DEV_DIR" && git ls-files)
 while IFS= read -r f; do
   case "$f" in
+    config.json|config.us.json|config.hk.json|config.scheduled.json|config.market_*.json|config.market_*.json.deprecated|config.local*.json|config.*.bak.* )
+      # Runtime configs are user-owned. A code publish must not overwrite them
+      # even if one is accidentally force-added to git.
+      continue;;
     output*|output_accounts*|secrets*|.venv*|.tmp_* )
       continue;;
   esac

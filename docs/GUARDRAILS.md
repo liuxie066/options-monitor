@@ -23,6 +23,7 @@ Workflow: `.github/workflows/guardrails.yml`
 
 - Docs wording check: forbid treating `config.json` / `config.scheduled` / `config.market_*` as OM runtime entry
 - Deploy args check: forbid `deploy_to_prod.py --include-runtime-config` as default path
+- Runtime config tracking check: forbid committing root runtime configs such as `config.us.json` / `config.hk.json`; commit only templates under `configs/examples/`
 - Minimal regression: run `tests/run_smoke.py`
 
 Trigger: `push` and `pull_request` to `main`
