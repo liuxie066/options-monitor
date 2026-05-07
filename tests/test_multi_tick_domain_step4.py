@@ -85,11 +85,14 @@ def test_notification_channel_helpers_accept_wechat_clawbot() -> None:
         is_openclaw_notification_channel,
         is_supported_notification_channel,
         normalize_notification_channel,
+        resolve_openclaw_transport_channel,
     )
 
     assert normalize_notification_channel(" WeChat_Clawbot ") == "wechat_clawbot"
     assert is_supported_notification_channel("wechat_clawbot") is True
     assert is_openclaw_notification_channel("wechat_clawbot") is True
+    assert resolve_openclaw_transport_channel("wechat_clawbot") == "openclaw-weixin"
+    assert resolve_openclaw_transport_channel("openclaw-weixin") == "openclaw-weixin"
     assert is_supported_notification_channel("sms") is False
 
 

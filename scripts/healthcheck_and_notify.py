@@ -21,7 +21,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-from domain.domain import normalize_notify_subprocess_output, normalize_pipeline_subprocess_output
+from domain.domain import (
+    normalize_notify_subprocess_output,
+    normalize_pipeline_subprocess_output,
+    resolve_openclaw_transport_channel,
+)
 from scripts.account_config import accounts_from_config
 
 
@@ -86,6 +90,7 @@ def main() -> int:
 
     notif = cfg.get('notifications') or {}
     channel = notif.get('channel') or 'feishu'
+    transport_channel = resolve_openclaw_transport_channel(channel)
     target = notif.get('target')
     if not target:
         sys.stderr.write('[CONFIG_ERROR] notifications.target missing\n')
@@ -95,12 +100,12 @@ def main() -> int:
     msg = f"options-monitor healthcheck: {title}\n\n" + out.strip() + "\n"
 
     if args.dry_run:
-        print('[DRY_RUN] would send to', channel, target)
+        print('[DRY_RUN] would send to', transport_channel, target)
         print(msg)
         return 0
 
     send = subprocess.run(
-        ['openclaw', 'message', 'send', '--channel', str(channel), '--target', str(target), '--message', msg],
+        ['openclaw', 'message', 'send', '--channel', str(transport_channel), '--target', str(target), '--message', msg],
         cwd=str(base),
         capture_output=True,
         text=True,

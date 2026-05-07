@@ -4,6 +4,7 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
+from domain.domain import resolve_openclaw_transport_channel
 from scripts.io_utils import read_json, atomic_write_json as write_json, utc_now
 
 
@@ -155,6 +156,7 @@ def send_opend_alert(base: Path, cfg: dict, *, error_code: str, message_text: st
 
     notif = cfg.get('notifications') or {}
     channel = notif.get('channel') or 'feishu'
+    transport_channel = resolve_openclaw_transport_channel(channel)
     target = notif.get('target')
     if not target:
         return False
@@ -169,7 +171,7 @@ def send_opend_alert(base: Path, cfg: dict, *, error_code: str, message_text: st
         msg += f"\ndetail: {detail[:1200]}"
 
     send = subprocess.run(
-        ['openclaw', 'message', 'send', '--channel', str(channel), '--target', str(target), '--message', msg, '--json'],
+        ['openclaw', 'message', 'send', '--channel', str(transport_channel), '--target', str(target), '--message', msg, '--json'],
         cwd=str(base),
         capture_output=True,
         text=True,

@@ -334,6 +334,8 @@
 }
 ```
 
+说明：配置里继续写语义名 `wechat_clawbot`；发送时程序会自动转换为 OpenClaw 实际通道名 `openclaw-weixin`。不要在 `notifications.channel` 里直接写 `openclaw-weixin`，否则配置校验会拒绝。
+
 ### 4.6 schedule：监控时间窗口
 - 非交易日 / 非交易时段：不监控、不通知。
 - 交易时段：开盘后 30 分钟通知一次，之后每小时通知一次，收盘前 10 分钟通知一次。
