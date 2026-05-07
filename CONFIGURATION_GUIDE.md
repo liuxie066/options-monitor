@@ -190,7 +190,8 @@
   - 旧的按 OTM% 定义 call 抓取窗口的配置已移除，避免与绝对价边界模式重复定义同一抓取窗口。
   - call 抓取窗口允许小幅 buffer，仅用于避免边界漏抓；扫描阶段仍严格使用原始 `min_strike/max_strike`。
 - `use`: 选择使用哪些模板（例如 `["put_base","call_base"]`）
-- `fetch.source`: 行情源，新配置建议使用 `futu`（富途数据源，经本机 OpenD 网关 + Futu API）或 `yahoo`；旧值 `opend` 仍兼容。
+- `fetch.source`: 行情源，当前 symbol required-data 运行时仅支持 `futu`（富途数据源，经本机 OpenD 网关 + Futu API）；旧值 `opend` 仍兼容。
+- `yahoo` / `yfinance` 不作为 symbol required-data 的受支持运行时来源；它们只保留给独立的事件风险数据抓取等非 OpenD fallback 场景。
 
 ### 4.4 portfolio：账户约束来源
 - `data_config`: 最小配置建议指向 `secrets/portfolio.sqlite.json`，只负责 `option_positions.sqlite_path`
