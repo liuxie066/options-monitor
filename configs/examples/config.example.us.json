@@ -76,7 +76,7 @@
       "sell_put": {
         "enabled": true,
         "min_dte": 20,
-        "max_dte": 90,
+        "max_dte": 60,
         "min_strike": 150,
         "max_strike": 160
       },
@@ -84,7 +84,9 @@
         "enabled": true
       },
       "sell_call": {
-        "enabled": false
+        "enabled": false,
+        "min_dte": 20,
+        "max_dte": 60
       }
     }
   ],
@@ -96,9 +98,7 @@
     "multiplier_by_symbol": {
       "0883.HK": 1000,
       "0700.HK": 1000
-    },
-    "default_multiplier_us": 100,
-    "default_multiplier_hk": 1000
+    }
   },
   "outputs": {
     "top_n_alerts": 3
@@ -138,7 +138,7 @@
       "medium"
     ],
     "max_items_per_account": 5,
-    "max_spread_ratio": 0.4,
+    "max_spread_ratio": 0.3,
     "strong_remaining_annualized_max": 0.08,
     "medium_remaining_annualized_max": 0.12
   }

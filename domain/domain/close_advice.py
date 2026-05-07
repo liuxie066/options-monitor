@@ -6,7 +6,7 @@ from typing import Any
 
 
 CLOSE_ADVICE_DEFAULTS = {
-    "max_spread_ratio": 0.4,
+    "max_spread_ratio": 0.3,
     "strong_remaining_annualized_max": 0.08,
     "medium_remaining_annualized_max": 0.12,
 }
