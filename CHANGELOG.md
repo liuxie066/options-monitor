@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.1.5 - 2026-05-08
+
+### Fixed
+- Mapped the config-level `wechat_clawbot` notification channel to the actual OpenClaw transport channel `openclaw-weixin` so unified tick, WebUI test sends, healthcheck notifications, and OpenD alerts no longer call OpenClaw with an unknown channel.
+
 ## 1.1.4 - 2026-05-07
 
 ### Added

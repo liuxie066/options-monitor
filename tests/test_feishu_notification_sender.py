@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 
 def test_load_feishu_notification_app_config_uses_default_path(tmp_path: Path) -> None:
@@ -170,6 +171,32 @@ def test_select_notification_delivery_adapter_routes_wechat_clawbot_to_openclaw(
     assert adapter.send_fn is send_openclaw_message_process
     assert adapter.normalize_fn is normalize_notify_subprocess_output
     assert adapter.failure_stage == "send_openclaw_message"
+
+
+def test_send_openclaw_message_translates_wechat_clawbot_channel(monkeypatch, tmp_path: Path) -> None:
+    from scripts.infra import service
+
+    captured: dict[str, object] = {}
+
+    def fake_run_command(cmd, *, cwd, capture_output=False, text=False, timeout_sec=None, env=None):
+        captured["cmd"] = cmd
+        captured["cwd"] = cwd
+        return SimpleNamespace(returncode=0, stdout='{"message_id":"msg_1"}', stderr="")
+
+    monkeypatch.setattr(service, "run_command", fake_run_command)
+
+    out = service.send_openclaw_message(
+        base=tmp_path,
+        channel="wechat_clawbot",
+        target="clawbot:test",
+        message="hello",
+    )
+
+    assert out.returncode == 0
+    assert captured["cwd"] == tmp_path
+    cmd = captured["cmd"]
+    assert cmd[cmd.index("--channel") + 1] == "openclaw-weixin"
+    assert cmd[cmd.index("--target") + 1] == "clawbot:test"
 
 
 def test_select_notification_delivery_adapter_rejects_unknown_channel() -> None:

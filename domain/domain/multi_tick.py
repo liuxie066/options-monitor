@@ -15,6 +15,7 @@ from .engine import (
 
 FEISHU_NOTIFICATION_CHANNEL = 'feishu'
 WECHAT_CLAWBOT_NOTIFICATION_CHANNEL = 'wechat_clawbot'
+OPENCLAW_WEIXIN_TRANSPORT_CHANNEL = 'openclaw-weixin'
 SUPPORTED_NOTIFICATION_CHANNELS = (
     FEISHU_NOTIFICATION_CHANNEL,
     WECHAT_CLAWBOT_NOTIFICATION_CHANNEL,
@@ -22,6 +23,9 @@ SUPPORTED_NOTIFICATION_CHANNELS = (
 OPENCLAW_NOTIFICATION_CHANNELS = (
     WECHAT_CLAWBOT_NOTIFICATION_CHANNEL,
 )
+OPENCLAW_TRANSPORT_CHANNEL_BY_NOTIFICATION_CHANNEL = {
+    WECHAT_CLAWBOT_NOTIFICATION_CHANNEL: OPENCLAW_WEIXIN_TRANSPORT_CHANNEL,
+}
 
 
 def _resolve_watchlist_config(cfg: dict | None) -> list[dict[str, Any]]:
@@ -333,6 +337,13 @@ def is_supported_notification_channel(channel: Any) -> bool:
 
 def is_openclaw_notification_channel(channel: Any) -> bool:
     return normalize_notification_channel(channel) in OPENCLAW_NOTIFICATION_CHANNELS
+
+
+def resolve_openclaw_transport_channel(channel: Any) -> str:
+    value = normalize_notification_channel(channel)
+    if value in OPENCLAW_TRANSPORT_CHANNEL_BY_NOTIFICATION_CHANNEL:
+        return OPENCLAW_TRANSPORT_CHANNEL_BY_NOTIFICATION_CHANNEL[value]
+    return str(channel or '').strip()
 
 
 def resolve_notification_route_from_config(

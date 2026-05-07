@@ -255,7 +255,7 @@ cp configs/examples/portfolio.sqlite.example.json secrets/portfolio.sqlite.json
 通知凭证默认放在：
 
 - 飞书：`secrets/notifications.feishu.app.json`
-- 微信 Clawbot：不使用飞书 App 凭证，配置 `notifications.channel=wechat_clawbot` 和 OpenClaw 目标字符串
+- 微信 Clawbot：不使用飞书 App 凭证，配置 `notifications.channel=wechat_clawbot` 和 OpenClaw 目标字符串；程序发送时会转换为 OpenClaw 实际通道 `openclaw-weixin`
 
 具体字段和配置方式见 [CONFIGURATION_GUIDE.md](CONFIGURATION_GUIDE.md)。
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from tempfile import TemporaryDirectory
 
 
@@ -66,3 +67,31 @@ def test_opend_alert_family_dedupe_and_burst_limit() -> None:
         # Burst limit should cap project-level alert storms.
         assert should_send_opend_alert(base, 'OPEND_RATE_LIMIT', cooldown_sec=1, burst_window_sec=600, burst_max=2) is True
         assert should_send_opend_alert(base, 'OPEND_NEEDS_PHONE_VERIFY', cooldown_sec=1, burst_window_sec=600, burst_max=2) is False
+
+
+def test_opend_alert_translates_wechat_clawbot_to_openclaw_weixin(monkeypatch) -> None:
+    _ensure_repo_path()
+    from scripts.multi_tick import opend_guard
+
+    captured: dict[str, object] = {}
+
+    def fake_run(cmd, *, cwd, capture_output=False, text=False):
+        captured["cmd"] = cmd
+        captured["cwd"] = cwd
+        return SimpleNamespace(returncode=0, stdout='{"message_id":"msg_1"}', stderr="")
+
+    monkeypatch.setattr(opend_guard.subprocess, "run", fake_run)
+
+    with TemporaryDirectory() as td:
+        base = Path(td)
+        ok = opend_guard.send_opend_alert(
+            base,
+            {"notifications": {"channel": "wechat_clawbot", "target": "clawbot:test"}},
+            error_code="OPEND_RATE_LIMIT",
+            message_text="rate limited",
+        )
+
+    assert ok is True
+    cmd = captured["cmd"]
+    assert cmd[cmd.index("--channel") + 1] == "openclaw-weixin"
+    assert cmd[cmd.index("--target") + 1] == "clawbot:test"

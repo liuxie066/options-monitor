@@ -14,6 +14,7 @@ from domain.domain.multi_tick import (
     OPENCLAW_NOTIFICATION_CHANNELS,
     SUPPORTED_NOTIFICATION_CHANNELS,
     normalize_notification_channel,
+    resolve_openclaw_transport_channel,
 )
 from domain.domain.fetch_source import is_futu_fetch_source
 from domain.domain.tool_boundary import normalize_notify_subprocess_output, normalize_subprocess_adapter_payload
@@ -162,12 +163,13 @@ def run_opend_watchdog(
 
 
 def send_openclaw_message(*, base: Path, channel: str, target: str, message: str) -> subprocess.CompletedProcess:
+    transport_channel = resolve_openclaw_transport_channel(channel)
     cmd = [
         'openclaw',
         'message',
         'send',
         '--channel',
-        str(channel),
+        str(transport_channel),
         '--target',
         str(target),
         '--message',
