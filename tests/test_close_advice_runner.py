@@ -1703,6 +1703,8 @@ def test_run_close_advice_non_futu_source_skips_opend_fetch(tmp_path: Path, monk
     run_close_advice(
         config={
             "close_advice": {"enabled": True},
+            # Explicit non-Futu source example: runtime should skip OpenD fetches,
+            # not auto-downgrade or rewrite the configured source.
             "symbols": [{"symbol": "AAPL", "fetch": {"source": "yahoo"}}],
         },
         context_path=ctx_path,
