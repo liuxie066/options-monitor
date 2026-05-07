@@ -17,6 +17,11 @@ def resolve_spot_fallback_enabled(
     *,
     symbol: str,
 ) -> bool:
+    """Compatibility shim.
+
+    External spot fallback has been retired; OpenD is the only supported runtime
+    spot source for this bridge.
+    """
     return False
 
 
@@ -27,6 +32,7 @@ def fetch_spot_with_fallback(
     pm_root: Path | None = None,
     log: Callable[[str], None] | None = None,
 ) -> float | None:
+    """Compatibility shim kept to surface explicit retired-fallback diagnostics."""
     symbol = str(ticker or "").strip().upper()
     if not symbol:
         _warn(log, "[WARN] spot fetch skipped: empty ticker")
