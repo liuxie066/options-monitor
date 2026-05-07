@@ -72,6 +72,29 @@ def run_healthcheck_tool(
     feishu_ready = bool(str(feishu_cfg.get("app_id") or "").strip()) and bool(str(feishu_cfg.get("app_secret") or "").strip())
     holdings_ref = str(feishu_tables.get("holdings") or "").strip()
     holdings_ready = feishu_ready and ("/" in holdings_ref)
+    symbol_names = {
+        str(item.get("symbol") or "").strip().upper()
+        for item in (cfg.get("symbols") or [])
+        if isinstance(item, dict)
+    }
+    if symbol_names & {"NVDA", "0700.HK"}:
+        checks.append(
+            {
+                "name": "starter_symbols",
+                "status": "warn",
+                "message": "example starter symbol is still present",
+            }
+        )
+        warnings.append("Replace example starter symbols before enabling long-term use or sends.")
+    if str((cfg.get("portfolio") or {}).get("data_config") or "").strip() == "secrets/portfolio.sqlite.json":
+        checks.append(
+            {
+                "name": "starter_data_config",
+                "status": "warn",
+                "message": "repo-local starter SQLite data_config is still in use",
+            }
+        )
+        warnings.append("The repo-local starter SQLite data_config is fine for local testing, but review it before production use.")
 
     notifications = cfg.get("notifications") if isinstance(cfg.get("notifications"), dict) else {}
     if isinstance(notifications, dict) and str(notifications.get("channel") or "").strip().lower() == "feishu":

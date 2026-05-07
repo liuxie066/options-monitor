@@ -475,13 +475,12 @@ async def api_notifications_check(req: Request):
     output_root = output_root(BASE_DIR)
     reports_dir = (output_root / "reports").resolve()
     checks = [
-        {"name": "notifications_enabled", "ok": bool(notifications.get("enabled", False)), "message": ("enabled" if notifications.get("enabled", False) else "disabled")},
         {"name": "target", "ok": bool(str(notifications.get("target") or "").strip()), "message": (str(notifications.get("target") or "").strip() or "notifications.target missing")},
         {"name": "channel", "ok": bool(str(notifications.get("channel") or "").strip()), "message": (str(notifications.get("channel") or "").strip() or "notifications.channel missing")},
         {"name": "preview_source", "ok": (reports_dir / "symbols_notification.txt").exists(), "message": ("symbols_notification.txt found" if (reports_dir / "symbols_notification.txt").exists() else "run scan first to generate symbols_notification.txt")},
         {"name": "sender_binary", "ok": shutil.which("openclaw") is not None, "message": ("openclaw found" if shutil.which("openclaw") is not None else "openclaw command not found")},
     ]
-    return {"checks": checks, "ok": all(bool(item["ok"]) for item in checks if item["name"] != "notifications_enabled")}
+    return {"checks": checks, "ok": all(bool(item["ok"]) for item in checks)}
 
 
 @app.post("/api/notifications/preview")
