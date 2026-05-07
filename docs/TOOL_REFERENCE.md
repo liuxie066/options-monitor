@@ -330,6 +330,35 @@
 
 ---
 
+## 5.15 `runtime_status`
+
+用途：
+- 只读汇总现有 runtime / OpenClaw 输出文件
+- 不运行 pipeline
+- 不发送通知
+
+示例：
+
+```bash
+./om-agent run --tool runtime_status --input-json '{"config_key":"us"}'
+```
+
+---
+
+## 5.16 `openclaw_readiness`
+
+用途：
+- 面向 OpenClaw 的一站式 readiness 摘要
+- 组合 `runtime_status`、`healthcheck` 和本地 `openclaw` 命令可用性
+
+示例：
+
+```bash
+./om-agent run --tool openclaw_readiness --input-json '{"config_key":"us"}'
+```
+
+---
+
 ## 6. 人工 CLI：版本检查
 
 `./om version` 仍然保留为人工 CLI 能力。Agent 使用 `version_check`，二者读取同一个本地 `VERSION` 和远端 `v*` tags。
