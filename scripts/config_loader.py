@@ -14,8 +14,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
+
+from src.application.runtime_config_paths import write_json_atomic
 
 
 def data_config_candidates(*, base: Path) -> list[Path]:
@@ -135,7 +138,9 @@ def _scheduled_validation_cache_state(*, cfg: dict, state_dir: Path) -> tuple[bo
     prev = None
     try:
         if cache_path.exists() and cache_path.stat().st_size > 0:
-            prev = json.loads(cache_path.read_text(encoding='utf-8')).get('sha256')
+            data = json.loads(cache_path.read_text(encoding='utf-8'))
+            if isinstance(data, dict):
+                prev = data.get('sha256')
     except (OSError, json.JSONDecodeError, ValueError, TypeError):
         prev = None
 
@@ -146,9 +151,13 @@ def _scheduled_validation_cache_state(*, cfg: dict, state_dir: Path) -> tuple[bo
 
 
 def _mark_scheduled_validation_cached(*, cache_path: Path, sha256: str) -> None:
-    cache_path.write_text(
-        json.dumps({'sha256': sha256}, ensure_ascii=False, indent=2) + '\n',
-        encoding='utf-8',
+    write_json_atomic(
+        cache_path,
+        {
+            'sha256': sha256,
+            'validator_version': 'v1',
+            'written_at_utc': datetime.now(timezone.utc).isoformat(),
+        },
     )
 
 
