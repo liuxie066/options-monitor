@@ -112,6 +112,11 @@ export default function App() {
   const currentRows = useMemo(() => rows.filter((row) => row.configKey === selectedMarket), [rows, selectedMarket]);
   const filteredRows = useMemo(() => filterRowsByKeyword(currentRows, q), [currentRows, q]);
   const marketMeta = marketMetaFor(selectedMarket);
+  const starterWarnings = Array.isArray(configSummaries[selectedMarket]?.starterDefaults?.warnings)
+    ? configSummaries[selectedMarket].starterDefaults.warnings
+    : Array.isArray(editorData?.starterDefaults?.warnings)
+      ? editorData.starterDefaults.warnings
+      : [];
 
   function setVersionStatusFromPayload(payload) {
     if (!payload || payload.ok === false) {
@@ -158,6 +163,14 @@ export default function App() {
           <div className="Status">{versionStatus}</div>
         </div>
       </div>
+
+      {!!starterWarnings.length && (
+        <div className="Page">
+          <div className="InlineWarn" role="alert">
+            当前仍在使用 starter defaults：{starterWarnings.join('；')}
+          </div>
+        </div>
+      )}
 
       <div className="Page">
         <div className="WorkspaceShell">

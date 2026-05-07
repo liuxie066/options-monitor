@@ -146,6 +146,20 @@ def global_summary(
     call_template = templates.get("call_base") if isinstance(templates.get("call_base"), dict) else {}
     put_strategy = put_template.get("sell_put") if isinstance(put_template.get("sell_put"), dict) else {}
     call_strategy = call_template.get("sell_call") if isinstance(call_template.get("sell_call"), dict) else {}
+    starter_default_warnings: list[str] = []
+    accounts = accounts_from_config(cfg)
+    if accounts == ["user1"]:
+        starter_default_warnings.append("default account label 'user1' in use")
+    example_symbols = {
+        str(item.get("symbol") or "").strip().upper()
+        for item in symbols
+        if isinstance(item, dict)
+    }
+    if example_symbols & {"NVDA", "0700.HK"}:
+        starter_default_warnings.append("example starter symbol still present")
+    portfolio_cfg = cfg.get("portfolio") if isinstance(cfg.get("portfolio"), dict) else {}
+    if str(portfolio_cfg.get("data_config") or "").strip() == "secrets/portfolio.sqlite.json":
+        starter_default_warnings.append("repo-local starter SQLite data_config in use")
     if not market_data:
         for item in symbols:
             if not isinstance(item, dict):
@@ -167,9 +181,13 @@ def global_summary(
         "recommendedPathExists": recommended_path.exists(),
         "canonicalPathWarning": path_warning,
         "exists": True,
-        "accounts": accounts_from_config(cfg),
+        "accounts": accounts,
         "symbolCount": len(symbols),
         "enabledSymbolCount": sum(1 for item in symbols if isinstance(item, dict) and (bool((item.get("sell_put") or {}).get("enabled")) or bool((item.get("sell_call") or {}).get("enabled")))),
+        "starterDefaults": {
+            "warnings": starter_default_warnings,
+            "hasWarnings": bool(starter_default_warnings),
+        },
         "sections": {
             "schedule": schedule,
             "market_data": {k: v for k, v in market_data.items() if v is not None},
