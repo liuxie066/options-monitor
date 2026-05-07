@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any, Callable
 
@@ -8,7 +9,30 @@ from typing import Any, Callable
 def resolve_data_config_ref(payload: dict[str, Any], portfolio_cfg: dict[str, Any]) -> str | None:
     value = payload.get("data_config") or portfolio_cfg.get("data_config")
     raw = str(value or "").strip()
-    return raw or None
+    if raw:
+        return raw
+    env_ref = str(os.environ.get("OM_DATA_CONFIG") or "").strip()
+    return env_ref or None
+
+
+def absolutize_portfolio_data_config(cfg: dict[str, Any], *, config_path: Path) -> dict[str, Any]:
+    out = dict(cfg or {})
+    portfolio = out.get("portfolio")
+    if not isinstance(portfolio, dict):
+        return out
+
+    portfolio_out = dict(portfolio)
+    data_ref = resolve_data_config_ref({}, portfolio_out)
+    if not data_ref:
+        out["portfolio"] = portfolio_out
+        return out
+
+    data_path = Path(data_ref).expanduser()
+    if not data_path.is_absolute():
+        data_path = (config_path.parent / data_path).resolve()
+    portfolio_out["data_config"] = str(data_path)
+    out["portfolio"] = portfolio_out
+    return out
 
 
 def resolve_public_data_config_path(

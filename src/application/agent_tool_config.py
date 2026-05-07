@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import json
 import os
-from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
 from scripts.config_loader import normalize_portfolio_broker_config
 from src.application.agent_tool_contracts import AgentToolError
+from src.application.runtime_config_paths import absolutize_portfolio_data_config
 
 
 DEFAULT_CONFIGS = {
@@ -40,24 +40,6 @@ def resolve_runtime_config_path(
 
     return (repo_base() / DEFAULT_CONFIGS[key]).resolve()
 
-
-def _absolutize_portfolio_data_config(cfg: dict[str, Any], *, config_path: Path) -> dict[str, Any]:
-    out = deepcopy(cfg)
-    portfolio = out.get("portfolio")
-    if not isinstance(portfolio, dict):
-        return out
-
-    data_ref = portfolio.get("data_config")
-    if data_ref is None or not str(data_ref).strip():
-        return out
-
-    data_path = Path(str(data_ref).strip()).expanduser()
-    if not data_path.is_absolute():
-        data_path = (config_path.parent / data_path).resolve()
-    portfolio["data_config"] = str(data_path)
-    return out
-
-
 def load_runtime_config(
     *,
     config_key: str | None = None,
@@ -84,7 +66,7 @@ def load_runtime_config(
             message="runtime config must be a JSON object",
             details={"path": path.name},
         )
-    cfg = _absolutize_portfolio_data_config(raw, config_path=path)
+    cfg = absolutize_portfolio_data_config(raw, config_path=path)
     cfg = normalize_portfolio_broker_config(cfg)
     cfg["config_source_path"] = str(path)
     return path, cfg

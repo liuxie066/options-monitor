@@ -9,7 +9,7 @@ from typing import Any, Callable
 
 from fastapi import HTTPException, Request
 
-from src.application.runtime_config_paths import read_json_file, write_json_atomic
+from src.application.runtime_config_paths import read_json_file, resolve_public_data_config_path, write_json_atomic
 
 
 def runtime_config_path(config_key: str, filename: str, *, default_runtime_config_dir: Path) -> Path:
@@ -90,21 +90,10 @@ def require_token_for_write(req: Request) -> None:
     if got != token:
         raise HTTPException(status_code=401, detail="missing/invalid X-OM-Token")
 
-
-def resolve_portfolio_data_config_path(cfg: dict[str, Any], *, config_path: Path) -> Path | None:
-    portfolio = cfg.get("portfolio") if isinstance(cfg.get("portfolio"), dict) else {}
-    raw = portfolio.get("data_config")
-    if raw is None or not str(raw).strip():
-        return None
-    path = Path(str(raw).strip()).expanduser()
-    if not path.is_absolute():
-        path = (config_path.parent / path).resolve()
-    return path
-
-
 def load_data_config_for_runtime(cfg: dict[str, Any], *, config_path: Path) -> dict[str, Any]:
-    data_path = resolve_portfolio_data_config_path(cfg, config_path=config_path)
-    if data_path is None or not data_path.exists():
+    portfolio = cfg.get("portfolio") if isinstance(cfg.get("portfolio"), dict) else {}
+    data_path = resolve_public_data_config_path({"config_path": str(config_path)}, portfolio, repo_base=lambda: config_path.parent)
+    if not data_path.exists():
         return {}
     payload = read_json_file(data_path)
     return payload if isinstance(payload, dict) else {}
