@@ -300,6 +300,7 @@ def add_account_to_local_config(
     bitable_app_token: str | None = None,
     bitable_table_id: str | None = None,
     bitable_view_name: str | None = None,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     normalized_market = _normalize_market(market)
     normalized_account = _normalize_account_label(account_label)
@@ -388,7 +389,8 @@ def add_account_to_local_config(
     runtime_cfg["trade_intake"] = trade_intake
 
     _validate_runtime_config_or_raise(runtime_cfg)
-    target_config_path.write_text(json.dumps(runtime_cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    if not dry_run:
+        target_config_path.write_text(json.dumps(runtime_cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     result: dict[str, Any] = {
         "market": normalized_market,
@@ -396,6 +398,8 @@ def add_account_to_local_config(
         "account_type": normalized_type,
         "config_path": str(target_config_path),
         "accounts": runtime_cfg["accounts"],
+        "dry_run": bool(dry_run),
+        "write_applied": not bool(dry_run),
     }
     if holdings_value:
         result["holdings_account"] = holdings_value
@@ -422,6 +426,7 @@ def edit_account_in_local_config(
     bitable_app_token: str | None = None,
     bitable_table_id: str | None = None,
     bitable_view_name: str | None = None,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     target_config_path = _target_runtime_config_path(repo_root=repo_root, market=market, config_path=config_path)
     runtime_cfg = _load_runtime_config_for_update(target_config_path)
@@ -545,7 +550,8 @@ def edit_account_in_local_config(
     runtime_cfg["portfolio"] = portfolio
 
     _validate_runtime_config_or_raise(runtime_cfg)
-    target_config_path.write_text(json.dumps(runtime_cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    if not dry_run:
+        target_config_path.write_text(json.dumps(runtime_cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     result: dict[str, Any] = {
         "market": _normalize_market(market),
@@ -553,6 +559,8 @@ def edit_account_in_local_config(
         "account_type": new_type,
         "config_path": str(target_config_path),
         "accounts": accounts,
+        "dry_run": bool(dry_run),
+        "write_applied": not bool(dry_run),
     }
     if str(setting.get("holdings_account") or "").strip():
         result["holdings_account"] = str(setting["holdings_account"])
@@ -567,6 +575,7 @@ def remove_account_from_local_config(
     market: str,
     account_label: str,
     config_path: str | Path | None = None,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     target_config_path = _target_runtime_config_path(repo_root=repo_root, market=market, config_path=config_path)
     runtime_cfg = _load_runtime_config_for_update(target_config_path)
@@ -606,7 +615,8 @@ def remove_account_from_local_config(
     runtime_cfg["trade_intake"] = trade_intake
 
     _validate_runtime_config_or_raise(runtime_cfg)
-    target_config_path.write_text(json.dumps(runtime_cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    if not dry_run:
+        target_config_path.write_text(json.dumps(runtime_cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     return {
         "market": _normalize_market(market),
@@ -614,4 +624,6 @@ def remove_account_from_local_config(
         "config_path": str(target_config_path),
         "accounts": remaining_accounts,
         "portfolio_account": str((runtime_cfg.get("portfolio") or {}).get("account") or ""),
+        "dry_run": bool(dry_run),
+        "write_applied": not bool(dry_run),
     }
