@@ -69,6 +69,8 @@ def test_infer_futu_portfolio_settings_falls_back_to_symbol_fetch_config() -> No
     cfg = {
         "portfolio": {"source": "auto"},
         "symbols": [
+            # Explicit non-Futu source example: this symbol should be ignored when
+            # searching for Futu/OpenD connection settings.
             {"symbol": "NVDA", "fetch": {"source": "yahoo"}},
             {
                 "symbol": "AAPL",
