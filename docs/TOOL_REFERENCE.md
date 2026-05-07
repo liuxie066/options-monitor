@@ -83,6 +83,8 @@
 - `om` 更适合人工操作
 - `om-agent` 的 manifest 由 `src/application/agent_tool_registry.py` 维护，handler 由 `src/application/agent_tool_handlers.py` 维护，runtime config helper 由 `src/application/agent_tool_config.py` / `src/application/agent_tool_init_local.py` 维护；`scripts/agent_plugin/*` 只是兼容 facade。
 
+配置优先级和 `config_validate` / `healthcheck` / `runtime_status` / `openclaw_readiness` 的正式边界，请以根目录 `CONFIGURATION_GUIDE.md` 为准。这里只保留工具说明，不再重复完整配置规则。
+
 ### Tick 入口关系
 
 `om-agent` 当前不提供“直接发送通知”的 tool。实时 tick / 扫描 / 通知运行使用人工 CLI：

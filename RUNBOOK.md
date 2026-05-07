@@ -18,6 +18,24 @@ cd /home/node/.openclaw/workspace/options-monitor-prod
 - 运行入口配置：`config.us.json`（US）/ `config.hk.json`（HK）
 - 产出：`<report_dir>/symbols_*` 与每标的 `*_sell_put_* / *_sell_call_*`（默认 `report_dir=output/reports`）
 
+## 命令副作用总表（先看这个）
+
+| 命令 / 工具 | 写本地状态 | 写远端 | 发通知 | 备注 |
+|---|---:|---:|---:|---|
+| `./om-agent run --tool config_validate ...` | 否 | 否 | 否 | 只做纯配置语义校验 |
+| `./om-agent run --tool healthcheck ...` | 否 | 否 | 否 | 检查 runtime readiness |
+| `./om-agent run --tool runtime_status ...` | 否 | 否 | 否 | 只读汇总现有输出 |
+| `./om run tick --config ... --no-send` | 是 | 可能 | 否 | 会写本地运行产物，但禁发通知 |
+| `./om run tick --config ...` | 是 | 可能 | 是 | 正式运行入口 |
+| `python3 scripts/send_if_needed_multi.py ...` | 是 | 可能 | 是 | 兼容 wrapper，不是首选入口 |
+| `python3 scripts/send_if_needed.py ...` | 是 | 可能 | 是 | 兼容 wrapper，不是首选入口 |
+| `python3 scripts/auto_trade_intake.py --mode apply` | 是 | 否 | 否 | 会写本地 option_positions / intake state |
+| `python3 scripts/sync_option_positions_to_feishu.py --apply` | 是 | 是 | 否 | 先跑 `--dry-run` |
+
+判断原则：
+- 只想确认配置或状态时，优先 `config_validate` / `healthcheck` / `runtime_status`
+- 只要命令会写本地、写远端或发通知，就不要把它当成“只读检查”来使用
+
 ## 定时任务（OpenClaw cron）
 
 Cron Job:
