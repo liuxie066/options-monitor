@@ -75,7 +75,6 @@ export function buildGlobalForm(summary, editor) {
       medium_remaining_annualized_max: closeAdvice.medium_remaining_annualized_max == null ? '' : String(closeAdvice.medium_remaining_annualized_max),
     },
     notifications: {
-      enabled: !!notifications.enabled,
       channel: String(editor?.notifications?.channel || notifications.channel || 'feishu'),
       target: String(editor?.notifications?.target || notifications.target || ''),
       appId: String(editor?.notifications?.appId || ''),

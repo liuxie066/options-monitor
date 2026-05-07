@@ -94,7 +94,6 @@ export function createSaveGlobalAction(ctx) {
         medium_remaining_annualized_max: globalForm.closeAdvice.medium_remaining_annualized_max === '' ? null : Number(globalForm.closeAdvice.medium_remaining_annualized_max),
       },
       notifications: {
-        enabled: !!globalForm.notifications.enabled,
         channel: String(globalForm.notifications.channel || '').trim() || null,
         target: String(globalForm.notifications.target || '').trim() || null,
         include_cash_footer: !!globalForm.notifications.include_cash_footer,

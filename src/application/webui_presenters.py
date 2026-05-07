@@ -192,7 +192,6 @@ def global_summary(
             "schedule": schedule,
             "market_data": {k: v for k, v in market_data.items() if v is not None},
             "notifications": {k: v for k, v in {
-                "enabled": notifications.get("enabled"),
                 "channel": notifications.get("channel"),
                 "target": notifications.get("target"),
                 "include_cash_footer": notifications.get("include_cash_footer"),
