@@ -341,7 +341,6 @@ def test_global_summary_exposes_notification_config_fields() -> None:
                         "accounts": ["user1"],
                         "symbols": [{"symbol": "NVDA", "sell_put": {"enabled": True}, "sell_call": {"enabled": False}}],
                         "notifications": {
-                            "enabled": True,
                             "channel": "feishu",
                             "target": "user:abc",
                             "include_cash_footer": False,
@@ -359,7 +358,6 @@ def test_global_summary_exposes_notification_config_fields() -> None:
 
             summary = _global_summary("us")
             notifications = summary["sections"]["notifications"]
-            assert notifications["enabled"] is True
             assert notifications["channel"] == "feishu"
             assert notifications["target"] == "user:abc"
             assert notifications["include_cash_footer"] is False
