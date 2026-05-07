@@ -123,6 +123,14 @@ def build_editor_summary(
     credentials = load_notification_credentials(cfg, config_path=config_path)
     notifications = cfg.get("notifications") if isinstance(cfg.get("notifications"), dict) else {}
     quiet_hours = notifications.get("quiet_hours_beijing") if isinstance(notifications.get("quiet_hours_beijing"), dict) else {}
+    starter_default_warnings: list[str] = []
+    if accounts_from_config(cfg) == ["user1"]:
+        starter_default_warnings.append("default account label 'user1' in use")
+    if any(str(item.get("symbol") or "").strip().upper() in {"NVDA", "0700.HK"} for item in symbols if isinstance(item, dict)):
+        starter_default_warnings.append("example starter symbol still present")
+    portfolio_cfg = cfg.get("portfolio") if isinstance(cfg.get("portfolio"), dict) else {}
+    if str(portfolio_cfg.get("data_config") or "").strip() == "secrets/portfolio.sqlite.json":
+        starter_default_warnings.append("repo-local starter SQLite data_config in use")
     return {
         "configKey": config_key,
         "marketData": {
@@ -164,6 +172,10 @@ def build_editor_summary(
             "cashFooterAccounts": cash_footer_accounts_from_config(cfg),
             "quietHoursStart": str(quiet_hours.get("start") or ""),
             "quietHoursEnd": str(quiet_hours.get("end") or ""),
+        },
+        "starterDefaults": {
+            "warnings": starter_default_warnings,
+            "hasWarnings": bool(starter_default_warnings),
         },
         "summary": summary or {},
     }
