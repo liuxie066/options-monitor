@@ -28,4 +28,6 @@ def test_entry_external_is_compat_reexport() -> None:
     assert entry_external.run_pipeline_script is service.run_pipeline_script
     assert entry_external.run_opend_watchdog is service.run_opend_watchdog
     assert entry_external.send_openclaw_message is service.send_openclaw_message
+    assert entry_external.send_openclaw_message_process is service.send_openclaw_message_process
+    assert entry_external.select_notification_delivery_adapter is service.select_notification_delivery_adapter
     assert entry_external.trading_day_via_futu is service.trading_day_via_futu

@@ -72,3 +72,44 @@ def test_validate_config_accepts_valid_notification_open_id(tmp_path: Path, monk
     cfg["notifications"] = {"channel": "feishu", "target": "ou_valid", "secrets_file": "notif.json"}
 
     mod.validate_config(cfg)
+
+
+def test_validate_config_accepts_wechat_clawbot_without_feishu_secrets(tmp_path: Path, monkeypatch) -> None:
+    import scripts.validate_config as mod
+
+    monkeypatch.setattr(mod, "repo_base", tmp_path)
+
+    cfg = _base_cfg()
+    cfg["notifications"] = {"channel": "wechat_clawbot", "target": "clawbot:test-room"}
+
+    mod.validate_config(cfg)
+
+
+def test_validate_config_rejects_empty_wechat_clawbot_target(tmp_path: Path, monkeypatch) -> None:
+    import scripts.validate_config as mod
+
+    monkeypatch.setattr(mod, "repo_base", tmp_path)
+
+    cfg = _base_cfg()
+    cfg["notifications"] = {"channel": "wechat_clawbot", "target": ""}
+
+    try:
+        mod.validate_config(cfg)
+        raise AssertionError("expected SystemExit")
+    except SystemExit as exc:
+        assert "notifications.target must be a non-empty openclaw target string" in str(exc)
+
+
+def test_validate_config_rejects_unsupported_notification_channel(tmp_path: Path, monkeypatch) -> None:
+    import scripts.validate_config as mod
+
+    monkeypatch.setattr(mod, "repo_base", tmp_path)
+
+    cfg = _base_cfg()
+    cfg["notifications"] = {"channel": "sms", "target": "user:test"}
+
+    try:
+        mod.validate_config(cfg)
+        raise AssertionError("expected SystemExit")
+    except SystemExit as exc:
+        assert "notifications.channel must be one of: feishu, wechat_clawbot" in str(exc)

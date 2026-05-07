@@ -31,6 +31,7 @@ def test_execute_per_account_delivery_collects_mixed_success_and_unconfirmed(fak
         failure_fields_builder=lambda **_kwargs: {},
         on_failure=lambda error_code: failure_codes.append(error_code),
         base="/tmp/base",
+        failure_stage="send_wechat_clawbot_message",
     )
 
     assert out.sent_accounts == ["lx"]
@@ -42,7 +43,7 @@ def test_execute_per_account_delivery_collects_mixed_success_and_unconfirmed(fak
     assert out.notify_failures[0]["command_ok"] is True
     assert out.notify_failures[0]["delivery_confirmed"] is False
     assert failure_codes == ["SEND_UNCONFIRMED"]
-    assert [e["status"] for e in audit_events if e["action"] == "send_openclaw_message"] == ["ok", "unconfirmed"]
+    assert [e["status"] for e in audit_events if e["action"] == "send_wechat_clawbot_message"] == ["ok", "unconfirmed"]
     assert [e["status"] for e in events if e["step"] == "notify"] == ["start", "ok", "start", "error"]
 
 

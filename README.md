@@ -146,7 +146,7 @@ cp configs/examples/portfolio.sqlite.example.json secrets/portfolio.sqlite.json
 - `config.us.json`
 - `config.hk.json`
 - `secrets/portfolio.sqlite.json`
-- `secrets/notifications.feishu.app.json`（如果启用通知）
+- `secrets/notifications.feishu.app.json`（如果启用飞书通知）
 
 配置优先级、`config_validate` / `healthcheck` / `runtime_status` / `openclaw_readiness` 的边界，请以 [CONFIGURATION_GUIDE.md](CONFIGURATION_GUIDE.md) 为准。
 哪些命令会写本地状态、写远端或发通知，请以 [RUNBOOK.md](RUNBOOK.md) 的“命令副作用总表”为准。
@@ -243,6 +243,7 @@ cp configs/examples/portfolio.sqlite.example.json secrets/portfolio.sqlite.json
 当前正式通知链路支持：
 
 - 飞书开放平台应用发个人消息
+- 微信 Clawbot（通过 OpenClaw `message send` 通用通道）
 
 统一 tick 的通知语义是固定的：
 
@@ -253,7 +254,8 @@ cp configs/examples/portfolio.sqlite.example.json secrets/portfolio.sqlite.json
 
 通知凭证默认放在：
 
-- `secrets/notifications.feishu.app.json`
+- 飞书：`secrets/notifications.feishu.app.json`
+- 微信 Clawbot：不使用飞书 App 凭证，配置 `notifications.channel=wechat_clawbot` 和 OpenClaw 目标字符串
 
 具体字段和配置方式见 [CONFIGURATION_GUIDE.md](CONFIGURATION_GUIDE.md)。
 
@@ -505,8 +507,9 @@ python3 scripts/validate_config.py --config config.us.json
 
 优先检查：
 - `notifications.target` 是否为空
-- `secrets/notifications.feishu.app.json` 是否存在
-- `app_id / app_secret` 是否完整
+- `notifications.channel` 是否为 `feishu` 或 `wechat_clawbot`
+- 飞书通道：`secrets/notifications.feishu.app.json` 是否存在，`app_id / app_secret` 是否完整
+- 微信 Clawbot 通道：本机 OpenClaw 是否支持目标 `notifications.target`
 
 如果需要进一步验证，优先使用配置校验、healthcheck 或相关测试，而不是直接触发通知发送。
 

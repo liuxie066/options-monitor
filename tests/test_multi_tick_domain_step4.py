@@ -80,6 +80,19 @@ def test_resolve_notification_channel_target_keeps_fallback_order() -> None:
     assert out_cli == {'channel': 'cli-chan', 'target': 'user:cli'}
 
 
+def test_notification_channel_helpers_accept_wechat_clawbot() -> None:
+    from domain.domain.multi_tick import (
+        is_openclaw_notification_channel,
+        is_supported_notification_channel,
+        normalize_notification_channel,
+    )
+
+    assert normalize_notification_channel(" WeChat_Clawbot ") == "wechat_clawbot"
+    assert is_supported_notification_channel("wechat_clawbot") is True
+    assert is_openclaw_notification_channel("wechat_clawbot") is True
+    assert is_supported_notification_channel("sms") is False
+
+
 def test_resolve_notification_route_from_config_centralizes_notifications_reads() -> None:
     from domain.domain.multi_tick import resolve_notification_route_from_config
 

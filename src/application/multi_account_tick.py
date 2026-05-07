@@ -99,10 +99,9 @@ from src.application.scheduled_notification import (
     prepare_multi_account_notification,
 )
 from scripts.infra.service import (
-    normalize_feishu_app_send_output,
     run_opend_watchdog,
     run_scan_scheduler_cli,
-    send_feishu_app_message_process,
+    select_notification_delivery_adapter,
     trading_day_via_futu,
 )
 
@@ -738,20 +737,26 @@ def main(argv: list[str] | None = None) -> int:
     notify_failures: list[dict[str, object]] = []
     if bool(notify_delivery.get('should_send')):
         assert delivery_batch is not None
+        try:
+            delivery_adapter = select_notification_delivery_adapter(delivery_batch.channel)
+        except ValueError as err:
+            runlog.safe_event('notify', 'error', error_code='CONFIG_ERROR', message=str(err))
+            raise SystemExit(f'[CONFIG_ERROR] {err}') from err
         execution = execute_per_account_delivery(
             delivery_batch=delivery_batch,
             run_id=run_id,
             runlog=runlog,
             audit_fn=audit_helper.audit,
             safe_data_fn=_safe_runlog_data,
-            send_fn=lambda **kwargs: send_feishu_app_message_process(
+            send_fn=lambda **kwargs: delivery_adapter.send_fn(
                 **kwargs,
                 notifications=notify_route.get('notifications') or {},
             ),
-            normalize_fn=normalize_feishu_app_send_output,
+            normalize_fn=delivery_adapter.normalize_fn,
             failure_fields_builder=build_failure_audit_fields,
-            on_failure=lambda error_code: audit_helper.guard_mark_failure(error_code, 'send_feishu_app_message'),
+            on_failure=lambda error_code: audit_helper.guard_mark_failure(error_code, delivery_adapter.failure_stage),
             base=base,
+            failure_stage=delivery_adapter.failure_stage,
         )
         sent_accounts = execution.sent_accounts
         notify_failures = execution.notify_failures

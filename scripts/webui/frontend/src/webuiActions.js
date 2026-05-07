@@ -72,6 +72,8 @@ export function createSaveGlobalAction(ctx) {
     const { globalForm, selectedMarket, marketMeta, withWriteToken, loadEditor, setConfigSummaries, pushToast } = ctx;
     const quietStart = String(globalForm.notifications.quiet_hours_start || '').trim();
     const quietEnd = String(globalForm.notifications.quiet_hours_end || '').trim();
+    const notificationChannel = String(globalForm.notifications.channel || '').trim();
+    const isFeishuNotification = notificationChannel.toLowerCase() === 'feishu';
     const payload = {
       configKey: selectedMarket,
       marketData: {
@@ -94,13 +96,13 @@ export function createSaveGlobalAction(ctx) {
         medium_remaining_annualized_max: globalForm.closeAdvice.medium_remaining_annualized_max === '' ? null : Number(globalForm.closeAdvice.medium_remaining_annualized_max),
       },
       notifications: {
-        channel: String(globalForm.notifications.channel || '').trim() || null,
+        channel: notificationChannel || null,
         target: String(globalForm.notifications.target || '').trim() || null,
         include_cash_footer: !!globalForm.notifications.include_cash_footer,
         cash_footer_accounts: ctx.toAccountsList(globalForm.notifications.cash_footer_accounts),
         quiet_hours_beijing: (quietStart || quietEnd) ? { start: quietStart, end: quietEnd } : null,
-        ...(String(globalForm.notifications.appId || '').trim() ? { appId: String(globalForm.notifications.appId || '').trim() } : {}),
-        ...(String(globalForm.notifications.appSecret || '').trim() ? { appSecret: String(globalForm.notifications.appSecret || '').trim() } : {}),
+        ...(isFeishuNotification && String(globalForm.notifications.appId || '').trim() ? { appId: String(globalForm.notifications.appId || '').trim() } : {}),
+        ...(isFeishuNotification && String(globalForm.notifications.appSecret || '').trim() ? { appSecret: String(globalForm.notifications.appSecret || '').trim() } : {}),
         secretsFile: String(globalForm.notifications.secretsFile || '').trim() || 'secrets/notifications.feishu.app.json',
       },
     };

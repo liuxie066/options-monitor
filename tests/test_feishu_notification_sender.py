@@ -142,3 +142,41 @@ def test_normalize_feishu_app_send_output_marks_failed_on_feishu_code() -> None:
     assert out["returncode"] == 0
     assert out["feishu_code"] == 230001
     assert out["feishu_msg"] == "denied"
+
+
+def test_select_notification_delivery_adapter_keeps_feishu_on_app_sender() -> None:
+    from scripts.infra.service import (
+        normalize_feishu_app_send_output,
+        select_notification_delivery_adapter,
+        send_feishu_app_message_process,
+    )
+
+    adapter = select_notification_delivery_adapter("feishu")
+
+    assert adapter.send_fn is send_feishu_app_message_process
+    assert adapter.normalize_fn is normalize_feishu_app_send_output
+    assert adapter.failure_stage == "send_feishu_app_message"
+
+
+def test_select_notification_delivery_adapter_routes_wechat_clawbot_to_openclaw() -> None:
+    from domain.domain import normalize_notify_subprocess_output
+    from scripts.infra.service import (
+        select_notification_delivery_adapter,
+        send_openclaw_message_process,
+    )
+
+    adapter = select_notification_delivery_adapter("wechat_clawbot")
+
+    assert adapter.send_fn is send_openclaw_message_process
+    assert adapter.normalize_fn is normalize_notify_subprocess_output
+    assert adapter.failure_stage == "send_openclaw_message"
+
+
+def test_select_notification_delivery_adapter_rejects_unknown_channel() -> None:
+    from scripts.infra.service import select_notification_delivery_adapter
+
+    try:
+        select_notification_delivery_adapter("sms")
+        raise AssertionError("expected ValueError")
+    except ValueError as exc:
+        assert "unsupported notification channel" in str(exc)

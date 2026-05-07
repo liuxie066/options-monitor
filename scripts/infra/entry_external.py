@@ -9,9 +9,11 @@ from scripts.infra.service import (
     run_opend_watchdog,
     run_pipeline_script,
     run_scan_scheduler_cli,
+    select_notification_delivery_adapter,
     send_feishu_app_message,
     send_feishu_app_message_process,
     send_openclaw_message,
+    send_openclaw_message_process,
     trading_day_via_futu,
 )
 
@@ -25,5 +27,7 @@ __all__ = [
     "send_feishu_app_message_process",
     "normalize_feishu_app_send_output",
     "send_openclaw_message",
+    "send_openclaw_message_process",
+    "select_notification_delivery_adapter",
     "trading_day_via_futu",
 ]
