@@ -43,6 +43,12 @@ python3 -m venv .venv
 ./.venv/bin/pip install -r requirements.txt
 ```
 
+如果需要可复现安装，使用随版本维护的约束文件：
+
+```bash
+./.venv/bin/pip install -r requirements.txt -c constraints.txt
+```
+
 `requirements.txt` 已包含 `futu-api`，缺少 Futu SDK 时会随安装流程一起补齐。
 
 ### 1.2 给 Agent 使用（可选）

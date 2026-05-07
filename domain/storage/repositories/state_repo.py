@@ -312,6 +312,76 @@ def put_idempotency_success(
     return {"created": True, "path": p, "record": body}
 
 
+def claim_idempotency_record(
+    base: Path,
+    *,
+    scope: str,
+    key: str,
+    payload: dict[str, Any] | None = None,
+    stale_after_sec: int = 900,
+) -> dict[str, Any]:
+    """Claim an idempotency key without recording success prematurely."""
+    p = _idempotency_path(base, scope=scope, key=key)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    now = datetime.now(timezone.utc)
+    body = {
+        "idempotency_key": str(key),
+        "scope": str(scope or "tool_execution"),
+        "ok": False,
+        "status": "in_progress",
+        "updated_at_utc": now.isoformat(),
+    }
+    if isinstance(payload, dict):
+        body.update(payload)
+        body["ok"] = False
+        body["status"] = str(body.get("status") or "in_progress")
+    raw = (json.dumps(body, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+
+    try:
+        fd = os.open(str(p), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError:
+        prev = read_idempotency_record(base, scope=scope, key=key) or {}
+        status = str(prev.get("status") or "").strip().lower()
+        if bool(prev.get("ok")) or status in {"success", "completed", "fetched"}:
+            return {"claimed": False, "created": False, "stale": False, "path": p, "record": prev}
+
+        stale = False
+        pid_raw = prev.get("pid")
+        try:
+            pid = int(pid_raw)
+            if pid > 0:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    stale = True
+                except PermissionError:
+                    stale = False
+        except Exception:
+            pass
+
+        updated_raw = str(prev.get("updated_at_utc") or "").strip()
+        if not stale:
+            try:
+                updated = datetime.fromisoformat(updated_raw.replace("Z", "+00:00"))
+                if updated.tzinfo is None:
+                    updated = updated.replace(tzinfo=timezone.utc)
+                stale = (now - updated.astimezone(timezone.utc)).total_seconds() >= max(1, int(stale_after_sec))
+            except Exception:
+                stale = True
+        if not stale:
+            return {"claimed": False, "created": False, "stale": False, "path": p, "record": prev}
+
+        write_json(p, body)
+        return {"claimed": True, "created": False, "stale": True, "path": p, "record": body}
+    try:
+        written = os.write(fd, raw)
+        if written != len(raw):
+            raise OSError(f"short write: {written}/{len(raw)} bytes")
+    finally:
+        os.close(fd)
+    return {"claimed": True, "created": True, "stale": False, "path": p, "record": body}
+
+
 def query_tool_execution_audit(
     base: Path,
     *,

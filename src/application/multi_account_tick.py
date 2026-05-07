@@ -6,6 +6,7 @@ import os
 from hashlib import sha256
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 from zoneinfo import ZoneInfo
 
 try:
@@ -126,6 +127,34 @@ def account_run_state_dir(run_dir: Path, account: str) -> Path:
     return (run_dir / 'accounts' / str(account).strip() / 'state').resolve()
 
 
+def _complete_tick_idempotency(
+    *,
+    base: Path,
+    key: str,
+    run_id: str,
+    market_config: str,
+    accounts: list[str],
+    status: str = "completed",
+    message: str | None = None,
+) -> None:
+    payload = {
+        "ok": True,
+        "status": status,
+        "run_id": run_id,
+        "market_config": market_config,
+        "accounts": list(accounts),
+        "finished_at_utc": datetime.now(timezone.utc).isoformat(),
+    }
+    if message:
+        payload["message"] = message
+    state_repo.write_idempotency_record(
+        base,
+        scope="tick_execution",
+        key=key,
+        payload=payload,
+    )
+
+
 def _is_trading_day_guard_for_market(cfg: dict, market: str) -> tuple[bool | None, str]:
     """Return (is_trading_day, market_used) for one market.
 
@@ -158,6 +187,7 @@ def main(argv: list[str] | None = None) -> int:
     runlog = RunLogger(base)
     global _CURRENT_RUN_ID
     _CURRENT_RUN_ID = runlog.run_id
+    run_id = runlog.run_id
 
     cfg_path = Path(args.config)
     if not cfg_path.is_absolute():
@@ -223,9 +253,30 @@ def main(argv: list[str] | None = None) -> int:
         record_project_failure=record_project_failure,
         record_project_success=record_project_success,
         build_failure_audit_fields=build_failure_audit_fields,
-        run_id=runlog.run_id,
+        run_id=run_id,
         idempotency_key=execution_idempotency_key,
     )
+    idempotency_accounts = [str(a).strip().lower() for a in (args.accounts or []) if str(a).strip()]
+
+    def complete_tick_idempotency(status: str = "completed", message: str | None = None) -> None:
+        try:
+            _complete_tick_idempotency(
+                base=base,
+                key=execution_idempotency_key,
+                run_id=run_id,
+                market_config=market_cfg,
+                accounts=idempotency_accounts,
+                status=status,
+                message=message,
+            )
+        except Exception:
+            pass
+
+    def finish_success(fn: Callable[[], int], *, status: str = "completed", message: str | None = None) -> int:
+        rc = int(fn())
+        if rc == 0:
+            complete_tick_idempotency(status=status, message=message)
+        return rc
 
     for it in syms0:
         if not isinstance(it, dict):
@@ -242,19 +293,19 @@ def main(argv: list[str] | None = None) -> int:
             extra={'symbol': sym, 'source': src, 'decision': decision},
         )
 
-    dedupe = state_repo.put_idempotency_success(
+    dedupe = state_repo.claim_idempotency_record(
         base,
         scope='tick_execution',
         key=execution_idempotency_key,
         payload={
-            'ok': True,
-            'status': 'started',
-            'run_id': runlog.run_id,
+            'status': 'in_progress',
+            'run_id': run_id,
+            'pid': os.getpid(),
             'market_config': market_cfg,
-            'accounts': [str(a).strip().lower() for a in (args.accounts or []) if str(a).strip()],
+            'accounts': idempotency_accounts,
         },
     )
-    if not bool(dedupe.get('created')):
+    if not bool(dedupe.get('claimed')):
         audit_helper.audit(
             'idempotency',
             'skip_duplicate_tick',
@@ -272,6 +323,7 @@ def main(argv: list[str] | None = None) -> int:
         err = str(guard_admission.get('error_code') or 'PROJECT_GUARD_BLOCKED')
         runlog.safe_event('project_guard', 'skip', error_code=err, message=msg)
         runlog.safe_event('run_end', 'skip', error_code=err, message=msg)
+        complete_tick_idempotency(status="skipped", message=msg)
         return 0
 
     accounts_normalized = [str(a).strip() for a in (args.accounts or []) if str(a).strip()]
@@ -310,6 +362,7 @@ def main(argv: list[str] | None = None) -> int:
         audit_helper.audit('guard', 'opend_phone_verify_pending', status='skip')
         runlog.safe_event('run_end', 'skip', message='opend phone verify pending; paused until user confirmation')
         audit_helper.guard_mark_success()
+        complete_tick_idempotency(status="skipped", message="opend_phone_verify_pending")
         return 0
     watchdog_outcome = run_multi_tick_watchdog(
         base=base,
@@ -375,7 +428,6 @@ def main(argv: list[str] | None = None) -> int:
 
     results: list[AccountResult] = []
 
-    run_id = utc_now().replace(':', '').replace('-', '').split('.')[0]
     run_dir = run_repo.ensure_run_dir(base, run_id)
     required_dir = (run_dir / 'required_data').resolve()
     required_raw = (required_dir / 'raw').resolve()
@@ -603,18 +655,22 @@ def main(argv: list[str] | None = None) -> int:
     account_messages = prepared_messages.messages_by_account
 
     if not bool(prepared_messages.threshold_met):
-        return finalize_no_account_notification(
-            base=base,
-            run_id=run_id,
-            runlog=runlog,
-            results=results,
-            tick_metrics=tick_metrics,
-            no_send=no_send,
-            state_repo=state_repo,
-            utc_now_fn=utc_now,
-            audit_fn=audit_helper.audit,
-            safe_data_fn=_safe_runlog_data,
-            on_success=audit_helper.guard_mark_success,
+        return finish_success(
+            lambda: finalize_no_account_notification(
+                base=base,
+                run_id=run_id,
+                runlog=runlog,
+                results=results,
+                tick_metrics=tick_metrics,
+                no_send=no_send,
+                state_repo=state_repo,
+                utc_now_fn=utc_now,
+                audit_fn=audit_helper.audit,
+                safe_data_fn=_safe_runlog_data,
+                on_success=audit_helper.guard_mark_success,
+            ),
+            status="completed",
+            message="no_account_notification",
         )
 
     if prepared_messages.used_heartbeat:
@@ -675,6 +731,7 @@ def main(argv: list[str] | None = None) -> int:
         runlog.safe_event('notify', 'skip', message=f'in quiet hours ({quiet_window})')
         print(f"[SKIP] Currently in quiet hours (DND). Target was: {target}")
         audit_helper.guard_mark_success()
+        complete_tick_idempotency(status="skipped", message="quiet_hours")
         return 0
 
     sent_accounts: list[str] = []
@@ -735,25 +792,27 @@ def main(argv: list[str] | None = None) -> int:
         audit_helper.audit('write', 'write_tick_metrics', run_id=run_id, extra={'sent': bool(tick_metrics.get('sent'))})
     except Exception:
         pass
-    return finalize_multi_tick_run(
-        base=base,
-        run_id=run_id,
-        runlog=runlog,
-        results=results,
-        tick_metrics=tick_metrics,
-        no_send=no_send,
-        sent_accounts=sent_accounts,
-        notify_failures=notify_failures,
-        notify_summary=notify_summary,
-        channel=(str(channel) if channel else None),
-        target=(str(target) if target else None),
-        state_repo=state_repo,
-        read_json_fn=read_json,
-        shared_state_dir_getter=state_repo.shared_state_dir,
-        utc_now_fn=utc_now,
-        audit_fn=audit_helper.audit,
-        safe_data_fn=_safe_runlog_data,
-        on_success=audit_helper.guard_mark_success,
+    return finish_success(
+        lambda: finalize_multi_tick_run(
+            base=base,
+            run_id=run_id,
+            runlog=runlog,
+            results=results,
+            tick_metrics=tick_metrics,
+            no_send=no_send,
+            sent_accounts=sent_accounts,
+            notify_failures=notify_failures,
+            notify_summary=notify_summary,
+            channel=(str(channel) if channel else None),
+            target=(str(target) if target else None),
+            state_repo=state_repo,
+            read_json_fn=read_json,
+            shared_state_dir_getter=state_repo.shared_state_dir,
+            utc_now_fn=utc_now,
+            audit_fn=audit_helper.audit,
+            safe_data_fn=_safe_runlog_data,
+            on_success=audit_helper.guard_mark_success,
+        )
     )
 
 

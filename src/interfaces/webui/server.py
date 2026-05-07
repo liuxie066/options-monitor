@@ -21,6 +21,8 @@ from scripts.option_positions_core.service import load_option_positions_repo
 from scripts.validate_config import SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS as VALIDATOR_SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS
 from src.application.account_management import add_account, edit_account, remove_account
 from src.application.tool_execution import build_tool_manifest, execute_tool
+from src.application.agent_tool_registry import get_tool_definition
+from src.application.watchlist_mutations import normalize_symbol
 from src.application.webui_config_service import (
     backup as _backup_impl,
     load_config as _load_config_impl,
@@ -236,6 +238,29 @@ def _patch_entry(entry: dict, payload: dict):
     return _patch_entry_impl(entry, payload, forbidden_fields=SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS)
 
 
+def _is_under(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _validate_webui_tool_paths(input_payload: dict[str, Any]) -> None:
+    allowed_roots = [
+        BASE_DIR.resolve(),
+        (BASE_DIR / DEFAULT_RUNTIME_CONFIG_DIR).resolve(),
+    ]
+    for key in ("config_path", "data_config", "output_dir", "context_path", "required_data_root"):
+        raw = input_payload.get(key)
+        if raw in (None, ""):
+            continue
+        path = Path(str(raw)).expanduser()
+        resolved = path.resolve() if path.is_absolute() else (BASE_DIR / path).resolve()
+        if not any(_is_under(resolved, root) for root in allowed_roots):
+            raise HTTPException(status_code=400, detail=f"{key} is outside allowed WebUI roots")
+
+
 @app.get("/", response_class=HTMLResponse)
 def index():
     return FileResponse(
@@ -410,8 +435,14 @@ async def api_tools_run(req: Request):
     tool_name = str(payload.get("toolName") or "").strip()
     if tool_name not in {"healthcheck", "scan_opportunities", "get_close_advice"}:
         raise HTTPException(status_code=400, detail="unsupported tool for WebUI")
+    definition = get_tool_definition(tool_name)
+    if definition is None:
+        raise HTTPException(status_code=400, detail="unsupported tool for WebUI")
+    if str(definition.risk_level or "").strip().lower() != "read_only":
+        _require_token_for_write_impl(req)
 
     input_payload = payload.get("input") if isinstance(payload.get("input"), dict) else {}
+    _validate_webui_tool_paths(input_payload)
     config_key = str(input_payload.get("config_key") or payload.get("configKey") or "").strip().lower()
     if config_key in {"us", "hk"} and "config_key" not in input_payload:
         input_payload = {**input_payload, "config_key": config_key}
@@ -521,7 +552,7 @@ async def api_upsert(req: Request):
     payload = await req.json()
 
     config_key = str(payload.get("configKey") or "").strip().lower()
-    symbol = str(payload.get("symbol") or "").strip().upper()
+    symbol = normalize_symbol(str(payload.get("symbol") or ""))
     if config_key not in CONFIG_FILES:
         raise HTTPException(status_code=400, detail="configKey must be us|hk")
     if not symbol:
@@ -553,7 +584,7 @@ async def api_delete(req: Request):
     payload = await req.json()
 
     config_key = str(payload.get("configKey") or "").strip().lower()
-    symbol = str(payload.get("symbol") or "").strip().upper()
+    symbol = normalize_symbol(str(payload.get("symbol") or ""))
     if config_key not in CONFIG_FILES:
         raise HTTPException(status_code=400, detail="configKey must be us|hk")
     if not symbol:

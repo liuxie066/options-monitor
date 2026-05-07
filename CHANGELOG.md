@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 1.1.1 - 2026-05-07
+
+### Fixed
+- Changed unified tick idempotency from start-time success writes to in-progress claims with stale recovery and final completion writes.
+- Required the WebUI token before running local-write tools and rejected WebUI tool path inputs outside the repository/runtime-config roots.
+- Reused shared symbol and account normalization for WebUI/watchlist mutations so aliases and account labels persist canonically.
+
+### Changed
+- Reused the RunLogger run id for run directories, audit events, and current-run pointers.
+- Added install constraints for reproducible dependency resolution.
+
 ## 1.1.0 - 2026-05-06
 
 ### Added

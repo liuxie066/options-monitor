@@ -17,6 +17,7 @@ import json
 import sys
 from pathlib import Path
 
+from scripts.account_config import normalize_accounts
 from scripts.config_loader import resolve_watchlist_config, set_watchlist_config
 from scripts.validate_config import validate_config
 from src.application.runtime_config_paths import write_json_atomic
@@ -106,7 +107,7 @@ def cmd_add(cfg: dict, symbol: str, use: str, limit_exp: int, put: bool, call: b
     }
 
     if accounts is not None:
-        entry['accounts'] = [normalize_symbol(a) for a in accounts if str(a).strip()]
+        entry['accounts'] = normalize_accounts(accounts, fallback=())
 
     ensure_symbols_list(cfg, error_factory=SystemExit).append(entry)
 
