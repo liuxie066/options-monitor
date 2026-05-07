@@ -25,6 +25,7 @@ cd /home/node/.openclaw/workspace/options-monitor-prod
 | `./om-agent run --tool config_validate ...` | 否 | 否 | 否 | 只做纯配置语义校验 |
 | `./om-agent run --tool healthcheck ...` | 否 | 否 | 否 | 检查 runtime readiness |
 | `./om-agent run --tool runtime_status ...` | 否 | 否 | 否 | 只读汇总现有输出 |
+| `./om-agent run --tool openclaw_readiness ...` | 否 | 否 | 否 | 只读汇总 runtime / healthcheck / 可选 cron 状态 |
 | `./om run tick --config ... --no-send` | 是 | 可能 | 否 | 会写本地运行产物，但禁发通知 |
 | `./om run tick --config ...` | 是 | 可能 | 是 | 正式运行入口 |
 | `python3 scripts/send_if_needed_multi.py ...` | 是 | 可能 | 是 | 兼容 wrapper，不是首选入口 |
@@ -76,6 +77,15 @@ Agent / OpenClaw 优先使用只读聚合入口：
 ./om-agent run --tool openclaw_readiness --input-json '{"config_key":"us"}'
 ./om-agent run --tool runtime_status --input-json '{"config_key":"us"}'
 ```
+
+如果生产路径或 cron id 不想每次手填，可以复制并维护：
+
+```bash
+cp configs/examples/openclaw.profile.example.json openclaw.profile.json
+./om-agent run --tool openclaw_readiness --input-json '{"profile_path":"openclaw.profile.json"}'
+```
+
+`openclaw.profile.json` 只放路径、账户、cron id 和 freshness 阈值，不放密钥。
 
 人工直接查看文件时，再用下面三步：
 

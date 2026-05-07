@@ -15,6 +15,7 @@ echo "[install-agent] step: install python deps"
 
 echo "[install-agent] step: verify public launcher"
 ./om-agent spec >/dev/null
+./om-agent run --tool openclaw_readiness --input-json '{"config_key":"us"}' >/dev/null || true
 
 echo "[install-agent] step: prepare local secrets directory"
 mkdir -p secrets
@@ -24,3 +25,4 @@ echo "[install-agent] next:"
 echo "  1) start OpenD and confirm it is logged in"
 echo "  2) run ./run_webui.sh"
 echo "  3) finish first-time initialization in the local WebUI"
+echo "  4) optional: copy configs/examples/openclaw.profile.example.json to openclaw.profile.json and fill cron/path values"

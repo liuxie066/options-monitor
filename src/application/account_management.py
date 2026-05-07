@@ -27,6 +27,7 @@ def add_account(
     bitable_app_token: str | None = None,
     bitable_table_id: str | None = None,
     bitable_view_name: str | None = None,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     return add_account_to_local_config(
         repo_root=agent_repo_base(),
@@ -44,6 +45,7 @@ def add_account(
         bitable_app_token=bitable_app_token,
         bitable_table_id=bitable_table_id,
         bitable_view_name=bitable_view_name,
+        dry_run=bool(dry_run),
     )
 
 
@@ -64,6 +66,7 @@ def edit_account(
     bitable_app_token: str | None = None,
     bitable_table_id: str | None = None,
     bitable_view_name: str | None = None,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     return edit_account_in_local_config(
         repo_root=agent_repo_base(),
@@ -82,6 +85,7 @@ def edit_account(
         bitable_app_token=bitable_app_token,
         bitable_table_id=bitable_table_id,
         bitable_view_name=bitable_view_name,
+        dry_run=bool(dry_run),
     )
 
 
@@ -90,10 +94,12 @@ def remove_account(
     market: str,
     account_label: str,
     config_path: str | Path | None = None,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     return remove_account_from_local_config(
         repo_root=agent_repo_base(),
         market=str(market),
         account_label=str(account_label),
         config_path=config_path,
+        dry_run=bool(dry_run),
     )

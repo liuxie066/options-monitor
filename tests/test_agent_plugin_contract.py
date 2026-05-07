@@ -104,3 +104,5 @@ def test_agent_cli_spec_prints_json_manifest() -> None:
     assert payload["launcher"]["add_account_command"][0:2] == ["./om-agent", "add-account"]
     assert payload["launcher"]["edit_account_command"][0:2] == ["./om-agent", "edit-account"]
     assert payload["launcher"]["remove_account_command"][0:2] == ["./om-agent", "remove-account"]
+    assert "--dry-run" in payload["launcher"]["add_account_command"]
+    assert payload["config"]["openclaw_profile_names"] == ["openclaw.profile.json", ".openclaw-profile.json"]

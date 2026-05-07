@@ -133,6 +133,7 @@ def test_agent_launcher_add_external_holdings_account() -> None:
         cfg_path = Path(td) / "config.us.json"
         data_cfg_path = Path(td) / "portfolio.sqlite.json"
         _init_minimal_config(cfg_path=cfg_path, data_cfg_path=data_cfg_path)
+        write_env = {**os.environ, "OM_AGENT_ENABLE_WRITE_TOOLS": "true"}
 
         add_p = subprocess.run(
             [
@@ -148,12 +149,13 @@ def test_agent_launcher_add_external_holdings_account() -> None:
                 "external_holdings",
                 "--holdings-account",
                 "Feishu EXT",
+                "--confirm",
             ],
             cwd=str(base),
             capture_output=True,
             text=True,
             check=True,
-            env={**os.environ},
+            env=write_env,
         )
         payload = json.loads(add_p.stdout)
         current = json.loads(cfg_path.read_text(encoding="utf-8"))
@@ -163,6 +165,65 @@ def test_agent_launcher_add_external_holdings_account() -> None:
         assert current["portfolio"]["source_by_account"]["ext1"] == "holdings"
 
 
+def test_agent_launcher_account_write_gate_and_dry_run() -> None:
+    base = _ensure_repo_on_path()
+    om_agent = (base / "om-agent").resolve()
+    with tempfile.TemporaryDirectory() as td:
+        cfg_path = Path(td) / "config.us.json"
+        data_cfg_path = Path(td) / "portfolio.sqlite.json"
+        _init_minimal_config(cfg_path=cfg_path, data_cfg_path=data_cfg_path)
+
+        blocked = subprocess.run(
+            [
+                str(om_agent),
+                "add-account",
+                "--market",
+                "us",
+                "--config-path",
+                str(cfg_path),
+                "--account-label",
+                "ext1",
+                "--account-type",
+                "external_holdings",
+            ],
+            cwd=str(base),
+            capture_output=True,
+            text=True,
+            check=False,
+            env={**os.environ, "OM_AGENT_ENABLE_WRITE_TOOLS": ""},
+        )
+        assert blocked.returncode == 2
+        blocked_payload = json.loads(blocked.stdout)
+        assert blocked_payload["error"]["code"] == "PERMISSION_DENIED"
+
+        dry_run = subprocess.run(
+            [
+                str(om_agent),
+                "add-account",
+                "--market",
+                "us",
+                "--config-path",
+                str(cfg_path),
+                "--account-label",
+                "ext1",
+                "--account-type",
+                "external_holdings",
+                "--dry-run",
+            ],
+            cwd=str(base),
+            capture_output=True,
+            text=True,
+            check=True,
+            env={**os.environ},
+        )
+        payload = json.loads(dry_run.stdout)
+        current = json.loads(cfg_path.read_text(encoding="utf-8"))
+        assert payload["ok"] is True
+        assert payload["data"]["dry_run"] is True
+        assert payload["data"]["write_applied"] is False
+        assert "ext1" not in current.get("accounts", [])
+
+
 def test_agent_launcher_add_futu_account_with_holdings_fallback() -> None:
     base = _ensure_repo_on_path()
     om_agent = (base / "om-agent").resolve()
@@ -170,6 +231,7 @@ def test_agent_launcher_add_futu_account_with_holdings_fallback() -> None:
         cfg_path = Path(td) / "config.us.json"
         data_cfg_path = Path(td) / "portfolio.sqlite.json"
         _init_minimal_config(cfg_path=cfg_path, data_cfg_path=data_cfg_path)
+        write_env = {**os.environ, "OM_AGENT_ENABLE_WRITE_TOOLS": "true"}
 
         add_p = subprocess.run(
             [
@@ -187,12 +249,13 @@ def test_agent_launcher_add_futu_account_with_holdings_fallback() -> None:
                 "381756479859383816",
                 "--holdings-account",
                 "sy",
+                "--confirm",
             ],
             cwd=str(base),
             capture_output=True,
             text=True,
             check=True,
-            env={**os.environ},
+            env=write_env,
         )
         payload = json.loads(add_p.stdout)
         current = json.loads(cfg_path.read_text(encoding="utf-8"))
@@ -210,6 +273,7 @@ def test_agent_launcher_edit_account_updates_type_and_mappings() -> None:
         cfg_path = Path(td) / "config.us.json"
         data_cfg_path = Path(td) / "portfolio.sqlite.json"
         _init_minimal_config(cfg_path=cfg_path, data_cfg_path=data_cfg_path)
+        write_env = {**os.environ, "OM_AGENT_ENABLE_WRITE_TOOLS": "true"}
         subprocess.run(
             [
                 str(om_agent), "add-account",
@@ -218,8 +282,9 @@ def test_agent_launcher_edit_account_updates_type_and_mappings() -> None:
                 "--account-label", "ext1",
                 "--account-type", "external_holdings",
                 "--holdings-account", "Feishu EXT",
+                "--confirm",
             ],
-            cwd=str(base), capture_output=True, text=True, check=True, env={**os.environ},
+            cwd=str(base), capture_output=True, text=True, check=True, env=write_env,
         )
 
         edit_p = subprocess.run(
@@ -231,8 +296,9 @@ def test_agent_launcher_edit_account_updates_type_and_mappings() -> None:
                 "--account-type", "futu",
                 "--futu-acc-id", "381756479859383816",
                 "--holdings-account", "sy",
+                "--confirm",
             ],
-            cwd=str(base), capture_output=True, text=True, check=True, env={**os.environ},
+            cwd=str(base), capture_output=True, text=True, check=True, env=write_env,
         )
         payload = json.loads(edit_p.stdout)
         current = json.loads(cfg_path.read_text(encoding="utf-8"))
@@ -252,6 +318,7 @@ def test_agent_launcher_remove_account_updates_runtime_config() -> None:
         cfg_path = Path(td) / "config.us.json"
         data_cfg_path = Path(td) / "portfolio.sqlite.json"
         _init_minimal_config(cfg_path=cfg_path, data_cfg_path=data_cfg_path)
+        write_env = {**os.environ, "OM_AGENT_ENABLE_WRITE_TOOLS": "true"}
         subprocess.run(
             [
                 str(om_agent), "add-account",
@@ -260,8 +327,9 @@ def test_agent_launcher_remove_account_updates_runtime_config() -> None:
                 "--account-label", "sy",
                 "--account-type", "futu",
                 "--futu-acc-id", "381756479859383816",
+                "--confirm",
             ],
-            cwd=str(base), capture_output=True, text=True, check=True, env={**os.environ},
+            cwd=str(base), capture_output=True, text=True, check=True, env=write_env,
         )
 
         remove_p = subprocess.run(
@@ -270,8 +338,9 @@ def test_agent_launcher_remove_account_updates_runtime_config() -> None:
                 "--market", "us",
                 "--config-path", str(cfg_path),
                 "--account-label", "user1",
+                "--confirm",
             ],
-            cwd=str(base), capture_output=True, text=True, check=True, env={**os.environ},
+            cwd=str(base), capture_output=True, text=True, check=True, env=write_env,
         )
         payload = json.loads(remove_p.stdout)
         current = json.loads(cfg_path.read_text(encoding="utf-8"))

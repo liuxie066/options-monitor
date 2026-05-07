@@ -135,15 +135,18 @@
 
 用途：
 - 预览或更新本地 `VERSION`
-- 默认 dry-run；只有 `apply=true` 才写入
+- 默认 dry-run；写入需要 `apply=true`、`confirm=true` 和 `OM_AGENT_ENABLE_WRITE_TOOLS=true`
 - 不创建 git tag、不 commit、不 push、不运行发布流程
 
 示例：
 
 ```bash
 ./om-agent run --tool version_update --input-json '{"bump":"patch"}'
-./om-agent run --tool version_update --input-json '{"version":"1.2.3","apply":true}'
+OM_AGENT_ENABLE_WRITE_TOOLS=true ./om-agent run --tool version_update --input-json '{"version":"1.2.3","apply":true,"confirm":true}'
 ```
+
+`apply=true` 是本地写入动作，还需要 `confirm=true` 和
+`OM_AGENT_ENABLE_WRITE_TOOLS=true`。固定频率任务只应使用 dry-run 预览或版本检查。
 
 ---
 
@@ -338,11 +341,14 @@
 - 只读汇总现有 runtime / OpenClaw 输出文件
 - 不运行 pipeline
 - 不发送通知
+- 可读取 `openclaw.profile.json` / `.openclaw-profile.json` 或 payload 里的
+  `profile_path` 作为 OpenClaw 路径、账户和 freshness 阈值
 
 示例：
 
 ```bash
 ./om-agent run --tool runtime_status --input-json '{"config_key":"us"}'
+./om-agent run --tool runtime_status --input-json '{"profile_path":"openclaw.profile.json"}'
 ```
 
 ---
@@ -352,11 +358,17 @@
 用途：
 - 面向 OpenClaw 的一站式 readiness 摘要
 - 组合 `runtime_status`、`healthcheck` 和本地 `openclaw` 命令可用性
+- 读取可选 OpenClaw profile，输出 `next_actions.safe_next_actions` 和
+  `next_actions.blocked_actions`
+- profile 或 payload 提供 `cron_jobs` / `include_cron_status=true` 时，会运行只读
+  `openclaw cron list` / `openclaw cron runs`
+- 检查通知 route 是否已配置，且不会返回完整通知 target
 
 示例：
 
 ```bash
 ./om-agent run --tool openclaw_readiness --input-json '{"config_key":"us"}'
+./om-agent run --tool openclaw_readiness --input-json '{"profile_path":"openclaw.profile.json"}'
 ```
 
 ---

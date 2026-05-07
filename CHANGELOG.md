@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.1.6 - 2026-05-08
+
+### Added
+- Added OpenClaw profile support for agent runtime and readiness tools, including path, account, cron job, and freshness defaults.
+- Added OpenClaw readiness diagnostics for runtime freshness, per-account output summaries, notification route checks, optional cron inspection, and machine-readable next actions.
+
+### Changed
+- Hardened agent write-capable surfaces so VERSION updates and account config mutations require explicit write-tool enablement and confirmation, with account commands supporting dry-run previews.
+
 ## 1.1.5 - 2026-05-08
 
 ### Fixed

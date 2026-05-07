@@ -4,7 +4,7 @@ The public launcher is `./om-agent`.
 
 It exposes a stable JSON contract intended for local agent usage:
 
-- `./om-agent add-account --market us|hk --account-label <label> --account-type futu|external_holdings`
+- `./om-agent add-account --market us|hk --account-label <label> --account-type futu|external_holdings --dry-run`
 - `./om-agent spec`
 - `./om-agent run --tool <name> --input-json '<json>'`
 
@@ -109,6 +109,8 @@ Recommended environment:
 - complete first-time initialization from the local WebUI after OpenD is ready
 - use explicit `config_path` input only when you intentionally want to override the default repo-local config
 - keep `OM_AGENT_ENABLE_WRITE_TOOLS` unset unless you explicitly want config writes
+- optionally copy `configs/examples/openclaw.profile.example.json` to `openclaw.profile.json`
+  and fill in production paths/accounts/cron job ids
 
 Recommended first commands:
 
@@ -122,6 +124,9 @@ Use `openclaw_readiness` when you need a one-shot readiness summary. It combines
 - `runtime_status`
 - existing `healthcheck`
 - local `openclaw` command availability
+- optional profile-backed cron checks
+- notification route shape checks
+- machine-readable next actions
 
 Use `runtime_status` when you only want to inspect existing runtime files. It does not run a pipeline, send
 notifications, or write state. It summarizes:
@@ -132,6 +137,7 @@ notifications, or write state. It summarizes:
 - `output_accounts/<account>/state/last_run.json`
 - `output_accounts/<account>/reports/symbols_notification.txt`
 - the latest `output_runs/<run_id>` pointer when available
+- freshness and per-account summary fields
 
 If the production layout uses non-default paths, pass them explicitly:
 
@@ -151,6 +157,8 @@ Default OpenClaw safety posture:
 - Prefer `openclaw_readiness` or `runtime_status` before any runtime command.
 - Do not run `./om run tick`, the deprecated `scripts/send_if_needed.py` wrapper, `scripts/send_if_needed_multi.py`, or notification send commands unless the user explicitly asks for a live run.
 - Keep real writes behind both `OM_AGENT_ENABLE_WRITE_TOOLS=true` and a payload-level confirmation such as `confirm=true`.
+- `add-account` / `edit-account` / `remove-account` are write-capable commands; use `--dry-run`
+  first, then rerun with `OM_AGENT_ENABLE_WRITE_TOOLS=true` and `--confirm` only when the config write is intended.
 
 ## `spec` 的行为说明
 

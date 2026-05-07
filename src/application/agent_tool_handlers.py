@@ -328,6 +328,9 @@ def _openclaw_readiness_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], l
         payload,
         runtime_status_tool_fn=_runtime_status_tool,
         healthcheck_tool_fn=_healthcheck_tool,
+        load_runtime_config=load_runtime_config,
+        repo_base=repo_base,
+        mask_path=mask_path,
     )
 
 
