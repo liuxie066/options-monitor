@@ -309,6 +309,11 @@
 
 当所有来源都失败时，open deal 会进入 `unresolved_deal_ids`，并带 `retryable=true`、`missing_fields`、`multiplier_resolution.attempted_sources` 等诊断，方便补 cache/config 后重试。market default 只在配置中存在时使用，不作为代码里的隐式假设。
 
+对 onboarding / starter config，不建议预置 `default_multiplier_hk` / `default_multiplier_us`。更安全的顺序是：
+- 先依赖 payload / lookup row 的显式 multiplier
+- 再依赖本地 `multiplier_cache.json` 或 OpenD 刷新
+- 若仍不够，再按具体标的显式配置 `intake.multiplier_by_symbol`
+
 ### 4.5 notifications：推送目标
 - `channel`: `feishu`，或本机 `openclaw` 已支持的其他通道
 - `target`: `user:open_id` 或 `chat:chat_id`
@@ -379,10 +384,10 @@
     "quote_source": "auto",
     "notify_levels": ["strong", "medium"],
     "max_items_per_account": 5,
-    "max_spread_ratio": 0.4,
-    "strong_remaining_annualized_max": 0.08,
-    "medium_remaining_annualized_max": 0.12
-  }
+      "max_spread_ratio": 0.3,
+      "strong_remaining_annualized_max": 0.08,
+      "medium_remaining_annualized_max": 0.12
+    }
 }
 ```
 
