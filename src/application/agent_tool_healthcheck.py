@@ -75,10 +75,20 @@ def run_healthcheck_tool(
 
     notifications = cfg.get("notifications") if isinstance(cfg.get("notifications"), dict) else {}
     if isinstance(notifications, dict) and str(notifications.get("channel") or "").strip().lower() == "feishu":
+        target = str(notifications.get("target") or "").strip()
         secrets_file_value = str(notifications.get("secrets_file") or "secrets/notifications.feishu.app.json").strip()
         secrets_path = Path(secrets_file_value)
         if not secrets_path.is_absolute():
             secrets_path = (config_path.parent / secrets_path).resolve()
+        if target in {"ou_xxx", "user:ou_xxx", "chat:chat_xxx"}:
+            checks.append(
+                {
+                    "name": "notification_target_placeholder",
+                    "status": "warn",
+                    "message": "notifications.target is still using the example placeholder value",
+                }
+            )
+            warnings.append("Replace the example notifications.target placeholder before enabling real sends.")
         if not secrets_path.exists():
             checks.append(
                 {
@@ -101,6 +111,15 @@ def run_healthcheck_tool(
                 )
                 warnings.append("Notification credentials are incomplete; fix app_id/app_secret before enabling sends.")
             else:
+                if str(feishu_secret_cfg.get("app_id") or "").strip() == "cli_xxx" or str(feishu_secret_cfg.get("app_secret") or "").strip() == "xxx":
+                    checks.append(
+                        {
+                            "name": "notification_secrets_placeholder",
+                            "status": "warn",
+                            "message": "notification secrets are still using example placeholder values",
+                        }
+                    )
+                    warnings.append("Replace example notification credentials before enabling real sends.")
                 checks.append(
                     {
                         "name": "notification_secrets",
@@ -208,6 +227,8 @@ def run_healthcheck_tool(
     )
     if mapping_errors:
         warnings.append("Use `./om-agent add-account --account-type futu|external_holdings` and complete the matching mapping/config fields.")
+    elif any(str(value) == "user1" for value in accounts):
+        warnings.append("You are still using the starter account label 'user1'; rename it before long-term use if this is not intentional.")
 
     # Build account-specific health checks for OpenD
     opend_endpoints: dict[str, dict[str, Any]] = {}
