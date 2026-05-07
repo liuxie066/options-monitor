@@ -13,6 +13,16 @@ from .engine import (
     filter_notify_candidates as filter_notify_candidates_engine,
 )
 
+FEISHU_NOTIFICATION_CHANNEL = 'feishu'
+WECHAT_CLAWBOT_NOTIFICATION_CHANNEL = 'wechat_clawbot'
+SUPPORTED_NOTIFICATION_CHANNELS = (
+    FEISHU_NOTIFICATION_CHANNEL,
+    WECHAT_CLAWBOT_NOTIFICATION_CHANNEL,
+)
+OPENCLAW_NOTIFICATION_CHANNELS = (
+    WECHAT_CLAWBOT_NOTIFICATION_CHANNEL,
+)
+
 
 def _resolve_watchlist_config(cfg: dict | None) -> list[dict[str, Any]]:
     data = cfg if isinstance(cfg, dict) else {}
@@ -307,9 +317,22 @@ def resolve_notification_channel_target(
     """Resolve channel/target with compat defaults at domain boundary."""
     notif_cfg = notifications if isinstance(notifications, dict) else {}
     return {
-        'channel': (cli_channel or notif_cfg.get('channel') or default_channel),
+        'channel': normalize_notification_channel(cli_channel or notif_cfg.get('channel') or default_channel),
         'target': (cli_target or notif_cfg.get('target')),
     }
+
+
+def normalize_notification_channel(channel: Any, *, default_channel: str | None = None) -> str:
+    value = str(channel or default_channel or '').strip().lower()
+    return value
+
+
+def is_supported_notification_channel(channel: Any) -> bool:
+    return normalize_notification_channel(channel) in SUPPORTED_NOTIFICATION_CHANNELS
+
+
+def is_openclaw_notification_channel(channel: Any) -> bool:
+    return normalize_notification_channel(channel) in OPENCLAW_NOTIFICATION_CHANNELS
 
 
 def resolve_notification_route_from_config(

@@ -63,6 +63,7 @@ def test_multi_tick_io_and_decision_failure_audit_fields_are_distinguishable() -
     assert "normalize_subprocess_adapter_payload(" in scheduler_src
     assert "normalize_pipeline_subprocess_output(" in account_run_src
     assert "normalize_notify_subprocess_output" in main_src
+    assert "select_notification_delivery_adapter" in main_src
     assert 'failure_kind="io_error"' in helper_src
     assert 'failure_kind="decision_error"' in audit_src
 

@@ -364,6 +364,7 @@ def send_account_message_with_retry(
     normalize_fn: Callable[..., dict[str, Any]],
     safe_data_fn: Callable[[dict[str, Any]], dict[str, Any]],
     failure_fields_builder: Callable[..., dict[str, Any]],
+    failure_stage: str = "send_openclaw_message",
     sleep_fn: Callable[[float], Any] = sleep,
     max_attempts: int = NOTIFY_SEND_MAX_ATTEMPTS,
     retry_delays_sec: tuple[float, ...] = NOTIFY_SEND_RETRY_DELAYS_SEC,
@@ -403,13 +404,13 @@ def send_account_message_with_retry(
             audit_extra.update(
                 failure_fields_builder(
                     failure_kind="io_error",
-                    failure_stage="send_openclaw_message",
+                    failure_stage=str(failure_stage),
                     failure_adapter=str(send_tool_dto.get("adapter") or "notify"),
                 )
             )
         audit_fn(
             "notify",
-            "send_openclaw_message",
+            str(failure_stage),
             run_id=run_id,
             account=account,
             status=("ok" if ok else ("unconfirmed" if error_code == "SEND_UNCONFIRMED" else "error")),
@@ -496,6 +497,7 @@ def execute_per_account_delivery(
     failure_fields_builder: Callable[..., dict[str, Any]],
     on_failure: Callable[[str], Any] | None = None,
     base,
+    failure_stage: str = "send_openclaw_message",
 ) -> PerAccountSendExecution:
     sent_accounts: list[str] = []
     notify_failures: list[dict[str, object]] = []
@@ -528,6 +530,7 @@ def execute_per_account_delivery(
             normalize_fn=normalize_fn,
             safe_data_fn=safe_data_fn,
             failure_fields_builder=failure_fields_builder,
+            failure_stage=failure_stage,
         )
         if not bool(send_result.get("ok")):
             error_code = str(send_result.get("error_code") or "SEND_FAILED")

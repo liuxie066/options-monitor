@@ -315,12 +315,24 @@
 - 若仍不够，再按具体标的显式配置 `intake.multiplier_by_symbol`
 
 ### 4.5 notifications：推送目标
-- `channel`: `feishu`，或本机 `openclaw` 已支持的其他通道
-- `target`: `user:open_id` 或 `chat:chat_id`
+- `channel`: 支持 `feishu` 和 `wechat_clawbot`
+- `target`: `feishu` 使用飞书 `open_id`；`wechat_clawbot` 使用 OpenClaw 微信 Clawbot 目标字符串
+- `secrets_file`: 仅 `feishu` 需要，默认 `secrets/notifications.feishu.app.json`
 - `quiet_hours_beijing`: 可选，北京时间免打扰窗口；不需要时直接省略，不要写 `null`
 - `cash_footer_accounts` / `cash_footer_timeout_sec` / `cash_snapshot_max_age_sec`: 可选，现金摘要账户与查询参数
 - `include_cash_footer`: 兼容旧 `scripts/run_pipeline.py` 的字段；多账户主流程不把它作为开关，主示例不再配置
 - 不再推荐配置 `enabled` / `mode`，当前主流程不读取它们作为行为开关
+
+微信 Clawbot 示例：
+
+```json
+{
+  "notifications": {
+    "channel": "wechat_clawbot",
+    "target": "clawbot_target"
+  }
+}
+```
 
 ### 4.6 schedule：监控时间窗口
 - 非交易日 / 非交易时段：不监控、不通知。

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.1.4 - 2026-05-07
+
+### Added
+- Added `wechat_clawbot` as a supported notification channel, routing it through OpenClaw message sending while preserving the Feishu App sender for `feishu`.
+- Exposed 微信 Clawbot as a WebUI notification channel option and documented its target/secrets semantics.
+
 ## 1.1.3 - 2026-05-07
 
 ### Changed

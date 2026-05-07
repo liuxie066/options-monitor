@@ -4,12 +4,19 @@ from __future__ import annotations
 
 import json
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Callable
 
+from domain.domain.multi_tick import (
+    FEISHU_NOTIFICATION_CHANNEL,
+    OPENCLAW_NOTIFICATION_CHANNELS,
+    SUPPORTED_NOTIFICATION_CHANNELS,
+    normalize_notification_channel,
+)
 from domain.domain.fetch_source import is_futu_fetch_source
-from domain.domain.tool_boundary import normalize_subprocess_adapter_payload
+from domain.domain.tool_boundary import normalize_notify_subprocess_output, normalize_subprocess_adapter_payload
 from scripts.config_loader import resolve_watchlist_config
 from scripts.feishu_bitable import FeishuError, get_tenant_access_token, http_json
 
@@ -17,6 +24,13 @@ from scripts.feishu_bitable import FeishuError, get_tenant_access_token, http_js
 DEFAULT_OPEND_HOST = '127.0.0.1'
 DEFAULT_OPEND_PORT = 11111
 DEFAULT_NOTIFICATION_FEISHU_APP_SECRETS = 'secrets/notifications.feishu.app.json'
+
+
+@dataclass(frozen=True)
+class NotificationDeliveryAdapter:
+    send_fn: Callable[..., Any]
+    normalize_fn: Callable[..., dict[str, Any]]
+    failure_stage: str
 
 
 def run_command(
@@ -161,6 +175,17 @@ def send_openclaw_message(*, base: Path, channel: str, target: str, message: str
         '--json',
     ]
     return run_command(cmd, cwd=base, capture_output=True, text=True)
+
+
+def send_openclaw_message_process(
+    *,
+    base: Path,
+    channel: str,
+    target: str,
+    message: str,
+    notifications: dict[str, Any] | None = None,
+) -> subprocess.CompletedProcess:
+    return send_openclaw_message(base=base, channel=channel, target=target, message=message)
 
 
 def _resolve_notification_secrets_file(
@@ -344,6 +369,24 @@ def send_feishu_app_message_process(*, base: Path, channel: str, target: str, me
             stdout = str(send_result.get('response_tail') or '')
     stderr = '' if bool(normalized.get('command_ok')) else str(normalized.get('message') or '')
     return SimpleNamespace(returncode=int(normalized.get('returncode') or 0), stdout=stdout, stderr=stderr, raw=send_result)
+
+
+def select_notification_delivery_adapter(channel: Any) -> NotificationDeliveryAdapter:
+    resolved_channel = normalize_notification_channel(channel)
+    if resolved_channel == FEISHU_NOTIFICATION_CHANNEL:
+        return NotificationDeliveryAdapter(
+            send_fn=send_feishu_app_message_process,
+            normalize_fn=normalize_feishu_app_send_output,
+            failure_stage='send_feishu_app_message',
+        )
+    if resolved_channel in OPENCLAW_NOTIFICATION_CHANNELS:
+        return NotificationDeliveryAdapter(
+            send_fn=send_openclaw_message_process,
+            normalize_fn=normalize_notify_subprocess_output,
+            failure_stage='send_openclaw_message',
+        )
+    allowed = ', '.join(SUPPORTED_NOTIFICATION_CHANNELS)
+    raise ValueError(f'unsupported notification channel: {channel}; expected one of: {allowed}')
 
 
 def _resolve_opend_endpoint_for_market(cfg_obj: dict, market: str) -> tuple[str, int]:

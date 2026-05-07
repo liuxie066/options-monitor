@@ -2,6 +2,11 @@ import React from 'react';
 import { Dialog, Field, InlineNote, SaveBar, formatAccounts, formatBool } from './webuiShared.jsx';
 import { STRATEGY_FIELDS } from './webuiModel.js';
 
+const NOTIFICATION_CHANNEL_OPTIONS = [
+  { value: 'feishu', label: '飞书 App' },
+  { value: 'wechat_clawbot', label: '微信 Clawbot' },
+];
+
 export function MarketPanel({ globalForm, setGlobalForm, onSave }) {
   const bootstrap = globalForm.marketData.optionPositionsBootstrap;
   const bootstrapText = bootstrap ? `Option Positions 启动状态：${bootstrap.status}${bootstrap.message ? `；${bootstrap.message}` : ''}` : null;
@@ -111,22 +116,23 @@ export function CloseAdvicePanel({ globalForm, setGlobalForm, onSave }) {
 
 export function NotificationPanel({ globalForm, setGlobalForm, notificationCheck, notificationPreview, notificationSendResult, onSave, onCheck, onPreview, onDryRun, onSend }) {
   const cfg = globalForm.notifications;
+  const isFeishu = String(cfg.channel || 'feishu').trim().toLowerCase() === 'feishu';
   return (
     <div className="GlobalPanel">
-      <div className="GlobalOverview"><div><div className="Eyebrow">消息通知</div><h2 className="PanelTitle">飞书通知</h2><p className="PanelText">凭证在 UI 中编辑，但仍落到 notifications.secrets_file 指向的 secrets 文件。</p></div></div>
+      <div className="GlobalOverview"><div><div className="Eyebrow">消息通知</div><h2 className="PanelTitle">飞书通知 / 微信 Clawbot</h2><p className="PanelText">飞书使用 App 凭证发送；微信 Clawbot 使用 OpenClaw 通用消息通道。</p></div></div>
       <section className="StrategyCard">
         <div className="StrategyHeader"><div><div className="StrategyTitle">消息配置</div><div className="StrategySub">notifications + secrets file</div></div><span className="StrategyPill">SEND</span></div>
         <div className="StrategyGrid">
-          <Field label="通知渠道"><input className="Control" value={cfg.channel} onChange={(e) => setGlobalForm((prev) => ({ ...prev, notifications: { ...prev.notifications, channel: e.target.value } }))} /></Field>
-          <Field label="接收对象 open_id"><input className="Control" value={cfg.target} onChange={(e) => setGlobalForm((prev) => ({ ...prev, notifications: { ...prev.notifications, target: e.target.value } }))} /></Field>
-          <Field label="App ID"><input className="Control" value={cfg.appId} onChange={(e) => setGlobalForm((prev) => ({ ...prev, notifications: { ...prev.notifications, appId: e.target.value } }))} placeholder={cfg.hasCredentials ? '已保存，留空表示不修改' : 'cli_xxx'} /></Field>
-          <Field label="App Secret"><input className="Control" type="password" value={cfg.appSecret} onChange={(e) => setGlobalForm((prev) => ({ ...prev, notifications: { ...prev.notifications, appSecret: e.target.value } }))} placeholder={cfg.hasCredentials ? '已保存，留空表示不修改' : 'app_secret'} /></Field>
+          <Field label="通知渠道"><select className="Control" value={cfg.channel} onChange={(e) => setGlobalForm((prev) => ({ ...prev, notifications: { ...prev.notifications, channel: e.target.value } }))}>{NOTIFICATION_CHANNEL_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></Field>
+          <Field label={isFeishu ? '接收对象 open_id' : 'OpenClaw 目标'}><input className="Control" value={cfg.target} onChange={(e) => setGlobalForm((prev) => ({ ...prev, notifications: { ...prev.notifications, target: e.target.value } }))} placeholder={isFeishu ? 'ou_xxx' : 'clawbot target'} /></Field>
+          {isFeishu && <Field label="App ID"><input className="Control" value={cfg.appId} onChange={(e) => setGlobalForm((prev) => ({ ...prev, notifications: { ...prev.notifications, appId: e.target.value } }))} placeholder={cfg.hasCredentials ? '已保存，留空表示不修改' : 'cli_xxx'} /></Field>}
+          {isFeishu && <Field label="App Secret"><input className="Control" type="password" value={cfg.appSecret} onChange={(e) => setGlobalForm((prev) => ({ ...prev, notifications: { ...prev.notifications, appSecret: e.target.value } }))} placeholder={cfg.hasCredentials ? '已保存，留空表示不修改' : 'app_secret'} /></Field>}
           <Field label="静默开始"><input className="Control" value={cfg.quiet_hours_start} onChange={(e) => setGlobalForm((prev) => ({ ...prev, notifications: { ...prev.notifications, quiet_hours_start: e.target.value } }))} placeholder="23:00" /></Field>
           <Field label="静默结束"><input className="Control" value={cfg.quiet_hours_end} onChange={(e) => setGlobalForm((prev) => ({ ...prev, notifications: { ...prev.notifications, quiet_hours_end: e.target.value } }))} placeholder="08:30" /></Field>
           <Field label="附带现金信息"><select className="Control" value={cfg.include_cash_footer ? 'true' : 'false'} onChange={(e) => setGlobalForm((prev) => ({ ...prev, notifications: { ...prev.notifications, include_cash_footer: e.target.value === 'true' } }))}><option value="true">开启</option><option value="false">关闭</option></select></Field>
           <Field label="现金适用账户"><input className="Control" value={cfg.cash_footer_accounts} onChange={(e) => setGlobalForm((prev) => ({ ...prev, notifications: { ...prev.notifications, cash_footer_accounts: e.target.value } }))} placeholder="lx,sy" /></Field>
         </div>
-        <div className="PreviewPanel"><InlineNote>{cfg.hasCredentials ? '已检测到已保存的飞书凭证。留空不会覆盖旧凭证。' : '当前还没有检测到已保存凭证；保存前请填写 App ID 与 App Secret。'}</InlineNote></div>
+        <div className="PreviewPanel"><InlineNote>{isFeishu ? (cfg.hasCredentials ? '已检测到已保存的飞书凭证。留空不会覆盖旧凭证。' : '当前还没有检测到已保存凭证；保存前请填写 App ID 与 App Secret。') : '微信 Clawbot 不使用飞书 App 凭证；发送时会透传 notifications.channel 和 target 给 OpenClaw。'}</InlineNote></div>
       </section>
       <div className="OpsToolbar"><button className="Button" onClick={onCheck}>连通检测</button><button className="Button" onClick={onPreview}>消息预览</button><button className="Button" onClick={onDryRun}>dry-run</button><button className="Button ButtonDanger" onClick={onSend}>测试发送</button></div>
       {!!notificationCheck?.checks?.length && <div className="CheckList">{notificationCheck.checks.map((item) => <div key={item.name} className={`CheckItem ${item.ok ? 'CheckItemOk' : 'CheckItemBad'}`}><strong>{item.name}</strong><span>{item.message}</span></div>)}</div>}

@@ -10,6 +10,12 @@ repo_base = Path(__file__).resolve().parents[1]
 if str(repo_base) not in sys.path:
     sys.path.insert(0, str(repo_base))
 
+from domain.domain import (
+    FEISHU_NOTIFICATION_CHANNEL,
+    SUPPORTED_NOTIFICATION_CHANNELS,
+    WECHAT_CLAWBOT_NOTIFICATION_CHANNEL,
+    normalize_notification_channel,
+)
 from domain.domain.fetch_source import normalize_fetch_source
 from scripts.account_config import ACCOUNT_TYPES, account_settings_from_config, accounts_from_config
 from scripts.config_loader import resolve_templates_config, resolve_watchlist_config, set_watchlist_config
@@ -290,17 +296,21 @@ def validate_config(cfg: dict):
     if notifications and not isinstance(notifications, dict):
         die('notifications must be an object')
     if isinstance(notifications, dict) and notifications:
-        channel = str(notifications.get('channel') or '').strip().lower()
-        if channel != 'feishu':
-            die('notifications.channel must be feishu')
+        channel = normalize_notification_channel(notifications.get('channel'))
+        if channel not in SUPPORTED_NOTIFICATION_CHANNELS:
+            allowed = ', '.join(SUPPORTED_NOTIFICATION_CHANNELS)
+            die(f'notifications.channel must be one of: {allowed}')
 
         target = notifications.get('target')
         if not isinstance(target, str) or not str(target).strip():
+            if channel == WECHAT_CLAWBOT_NOTIFICATION_CHANNEL:
+                die('notifications.target must be a non-empty openclaw target string')
             die('notifications.target must be a non-empty open_id string')
 
-        secrets_file_value = str(notifications.get('secrets_file') or 'secrets/notifications.feishu.app.json').strip()
-        if not secrets_file_value:
-            die('notifications.secrets_file must be a non-empty path when notifications are enabled')
+        if channel == FEISHU_NOTIFICATION_CHANNEL:
+            secrets_file_value = str(notifications.get('secrets_file') or 'secrets/notifications.feishu.app.json').strip()
+            if not secrets_file_value:
+                die('notifications.secrets_file must be a non-empty path for feishu notifications')
 
     close_advice = cfg.get('close_advice') or {}
     if close_advice and not isinstance(close_advice, dict):
