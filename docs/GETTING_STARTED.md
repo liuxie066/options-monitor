@@ -71,6 +71,14 @@ http://127.0.0.1:8000
 ./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'
 ```
 
+如果你想先确认“配置本身是否合法”，优先跑：
+
+```bash
+./om-agent run --tool config_validate --input-json '{"config_key":"us"}'
+```
+
+配置优先级和工具边界的完整解释，以根目录 `CONFIGURATION_GUIDE.md` 为准。
+
 如果你配置了 Feishu `option_positions` bootstrap，这个 healthcheck 会额外给出 `option_positions_bootstrap` 状态，区分：
 - 未配置 bootstrap
 - 已配置且成功

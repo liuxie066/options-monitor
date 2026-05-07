@@ -130,6 +130,23 @@
 
 安装版默认文件：`config.us.json` 或 `config.hk.json`
 
+### 4.0A 配置优先级（只认这一套主路径）
+
+对于操作者，运行时配置只需要理解这一套优先级：
+
+1. 显式传入的 `config_path`
+2. 显式传入的 `config_key`（`us` / `hk`）对应的 canonical config：`config.us.json` / `config.hk.json`
+3. 未显式传入时，按入口默认值回落到 repo-local canonical config
+
+`portfolio.data_config` 的解析规则也只认一套：
+
+1. payload/命令里显式传入的 `data_config`
+2. runtime config 里的 `portfolio.data_config`
+3. 若都未提供，则按当前 runtime config 所在目录推导 `secrets/portfolio.sqlite.json`
+4. `OM_DATA_CONFIG` 只作为显式 override 使用，不属于主配置心智
+
+不要把历史兼容文件名、旧 market-specific 变体、或额外 fallback 路径当作正式入口来理解。
+
 ### 4.0 先看最小配置：哪些字段一定要有？
 
 #### runtime config 最小必需
@@ -160,6 +177,22 @@
 - `intake.*`
 - `portfolio.source_by_account`
 - `feishu.*`
+
+#### 配置检查与运行检查的边界
+
+只需要记住这一张表：
+
+| 工具 | 负责什么 | 不负责什么 |
+|---|---|---|
+| `config_validate` | 配置结构、字段语义、removed/legacy 字段、数值约束 | OpenD 是否在线、secrets 文件是否存在、runtime 输出是否健康 |
+| `healthcheck` | runtime config 可读、data config/SQLite 存在性、OpenD readiness、option_positions bootstrap 状态 | 不负责替代主配置语义文档 |
+| `runtime_status` | 只读汇总现有 runtime / OpenClaw 输出文件 | 不校验配置语义，不检查 OpenD |
+| `openclaw_readiness` | 组合 `runtime_status` + `healthcheck` + 本地 openclaw 可用性 | 不替代 `config_validate` 的纯配置语义检查 |
+
+判断规则很简单：
+- 配置本身写得对不对，看 `config_validate`
+- 环境能不能跑起来，看 `healthcheck` / `openclaw_readiness`
+- 历史运行结果长什么样，看 `runtime_status`
 
 ### 4.1 accounts：账户列表
 - `accounts`: 统一 tick 运行和辅助脚本的默认账户列表，例如 `["lx", "sy"]`。

@@ -21,6 +21,8 @@
 
 运行时配置里的 `portfolio.data_config` 指向这类数据配置文件。
 
+字段优先级、`config_path` / `config_key` / `portfolio.data_config` 的正式解释，请以 `CONFIGURATION_GUIDE.md` 为准；本文件只保留 canonical config 约定与迁移操作。
+
 ## 变更流程（编辑 canonical -> 校验）
 
 1. 编辑仓外 canonical：`/opt/options-monitor/configs/config.us.json` / `/opt/options-monitor/configs/config.hk.json`。
