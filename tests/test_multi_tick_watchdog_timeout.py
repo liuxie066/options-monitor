@@ -30,7 +30,7 @@ def test_watchdog_timeout_should_not_degrade_and_should_skip_pipeline(
     monkeypatch.setattr(mt, "send_opend_alert", lambda *a, **k: None)
     monkeypatch.setattr(mt, "admit_project_run", lambda *_a, **_k: {"allowed": True})
     monkeypatch.setattr(mt.state_repo, "write_account_last_run", lambda *a, **k: None)
-    monkeypatch.setattr(mt.state_repo, "put_idempotency_success", lambda *a, **k: {"created": True})
+    monkeypatch.setattr(mt.state_repo, "claim_idempotency_record", lambda *a, **k: {"claimed": True})
     monkeypatch.setattr(mt.state_repo, "append_audit_event", lambda *a, **k: None)
     monkeypatch.setattr(mt, "is_opend_phone_verify_pending", lambda _base: False)
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import asyncio
 import sys
 import types
 from pathlib import Path
@@ -52,6 +53,15 @@ def _install_fastapi_stubs() -> None:
 
 
 _install_fastapi_stubs()
+
+
+class _FakeRequest:
+    def __init__(self, payload: dict, *, headers: dict[str, str] | None = None):
+        self._payload = payload
+        self.headers = headers or {}
+
+    async def json(self) -> dict:
+        return self._payload
 
 from src.application.webui_editor_adapter import build_editor_summary
 from scripts.webui.server import (
@@ -488,6 +498,63 @@ def test_repair_hint_maps_common_config_error() -> None:
     assert out["code"] == "CONFIG_ERROR"
     assert "repo-local config file" in out["summary"]
     assert any("om-agent init" in item for item in out["actions"])
+
+
+def test_webui_tool_run_requires_token_for_local_write_tools(monkeypatch) -> None:
+    monkeypatch.setenv("OM_WEBUI_TOKEN", "secret")
+    called = {"execute": False}
+    monkeypatch.setattr(webui_server, "execute_tool", lambda *_a, **_k: called.__setitem__("execute", True))
+
+    try:
+        asyncio.run(webui_server.api_tools_run(_FakeRequest({"toolName": "scan_opportunities", "input": {"config_key": "us"}})))
+    except Exception as exc:
+        assert getattr(exc, "status_code", None) == 401
+    else:
+        raise AssertionError("expected token rejection")
+
+    assert called["execute"] is False
+
+
+def test_webui_tool_run_rejects_paths_outside_allowed_roots(monkeypatch) -> None:
+    monkeypatch.delenv("OM_WEBUI_TOKEN", raising=False)
+    called = {"execute": False}
+    monkeypatch.setattr(webui_server, "execute_tool", lambda *_a, **_k: called.__setitem__("execute", True))
+
+    try:
+        asyncio.run(webui_server.api_tools_run(_FakeRequest({"toolName": "healthcheck", "input": {"config_path": "/tmp/config.us.json"}})))
+    except Exception as exc:
+        assert getattr(exc, "status_code", None) == 400
+        assert "outside allowed WebUI roots" in str(getattr(exc, "detail", exc))
+    else:
+        raise AssertionError("expected path boundary rejection")
+
+    assert called["execute"] is False
+
+
+def test_webui_watchlist_upsert_canonicalizes_symbol_alias(monkeypatch) -> None:
+    cfg = {"symbols": []}
+    written: dict[str, object] = {}
+
+    monkeypatch.delenv("OM_WEBUI_TOKEN", raising=False)
+    monkeypatch.setattr(webui_server, "_load_config", lambda _key: cfg)
+    monkeypatch.setattr(webui_server, "_write_validated_config", lambda path, data, *, base_dir: written.update({"data": data}))
+    monkeypatch.setattr(webui_server, "_list_rows", lambda: [])
+
+    out = asyncio.run(
+        webui_server.api_upsert(
+            _FakeRequest(
+                {
+                    "configKey": "hk",
+                    "symbol": "POP",
+                    "sell_put_enabled": True,
+                }
+            )
+        )
+    )
+
+    assert out["ok"] is True
+    assert cfg["symbols"][0]["symbol"] == "9992.HK"
+    assert written["data"] is cfg
 
 
 def test_webui_frontend_shows_resolved_path_and_warning_copy() -> None:
