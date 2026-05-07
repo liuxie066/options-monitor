@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.1.3 - 2026-05-07
+
+### Changed
+- Tightened shipped starter defaults so onboarding configs no longer silently rely on market-level multiplier fallbacks and now surface starter placeholder warnings more clearly across healthcheck and WebUI.
+
+### Fixed
+- Removed remaining default-config/runtime drift in the WebUI notification model so saved config fields now match actual send semantics.
+
 ## 1.1.2 - 2026-05-07
 
 ### Changed
