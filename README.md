@@ -175,7 +175,7 @@ cp configs/examples/portfolio.sqlite.example.json secrets/portfolio.sqlite.json
   "sell_put": {
     "enabled": true,
     "min_dte": 20,
-    "max_dte": 90,
+    "max_dte": 60,
     "min_strike": 150,
     "max_strike": 160
   },
