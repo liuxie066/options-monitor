@@ -96,7 +96,7 @@ def test_close_advice_data_quality_blocks_notifications() -> None:
             multiplier=100,
             currency="USD",
         ),
-        CloseAdviceConfig(max_spread_ratio=0.4),
+        CloseAdviceConfig(max_spread_ratio=0.3),
     )
     assert wide["tier"] == "none"
     assert "spread_too_wide" in wide["data_quality_flags"]
