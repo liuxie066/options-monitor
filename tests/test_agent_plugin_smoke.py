@@ -135,6 +135,7 @@ def test_healthcheck_works_with_explicit_config_path(monkeypatch, tmp_path: Path
     primary = next(item for item in out["data"]["checks"] if item["name"] == "account_primary_paths")
     assert primary["status"] == "ok"
     assert primary["value"]["user1"]["source"] == "futu"
+    assert any("starter account label 'user1'" in item for item in out["warnings"])
 
 
 def test_healthcheck_rejects_placeholder_futu_mapping(monkeypatch, tmp_path: Path) -> None:
@@ -373,6 +374,48 @@ def test_healthcheck_reports_option_positions_bootstrap_ok_for_sqlite_only(monke
     bootstrap = next(item for item in out["data"]["checks"] if item["name"] == "option_positions_bootstrap")
     assert bootstrap["status"] == "ok"
     assert bootstrap["value"]["status"] == "sqlite_only_no_feishu_bootstrap"
+
+
+def test_healthcheck_warns_on_notification_placeholder_values(monkeypatch, tmp_path: Path) -> None:
+    from scripts.agent_plugin.main import run_tool
+    import scripts.agent_plugin.tools as tools
+
+    cfg_path = tmp_path / "config.us.json"
+    secrets_dir = tmp_path / "secrets"
+    secrets_dir.mkdir()
+    (secrets_dir / "portfolio.sqlite.json").write_text(
+        json.dumps({"option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"}}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (secrets_dir / "notifications.feishu.app.json").write_text(
+        json.dumps({"feishu": {"app_id": "cli_xxx", "app_secret": "xxx"}}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    cfg = _public_cfg_with_futu("secrets/portfolio.sqlite.json")
+    cfg["notifications"] = {
+        "channel": "feishu",
+        "target": "ou_xxx",
+        "secrets_file": "secrets/notifications.feishu.app.json",
+    }
+    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    monkeypatch.setattr(
+        tools,
+        "_run_futu_doctor",
+        lambda **kwargs: {
+            "ok": True,
+            "sdk": {"ok": True},
+            "watchdog": {"ok": True},
+        },
+    )
+
+    out = run_tool("healthcheck", {"config_path": str(cfg_path)})
+
+    assert out["ok"] is True
+    assert any(item["name"] == "notification_target_placeholder" and item["status"] == "warn" for item in out["data"]["checks"])
+    assert any(item["name"] == "notification_secrets_placeholder" and item["status"] == "warn" for item in out["data"]["checks"])
+    assert any("example notifications.target placeholder" in item for item in out["warnings"])
+    assert any("example notification credentials" in item for item in out["warnings"])
 
 
 def test_get_portfolio_context_allows_futu_source_without_explicit_data_config(monkeypatch, tmp_path: Path) -> None:
@@ -920,7 +963,7 @@ def test_openclaw_readiness_combines_status_and_healthcheck(monkeypatch, tmp_pat
     assert out["data"]["summary"]["ready"] is True
     checks = {item["name"]: item for item in out["data"]["checks"]}
     assert checks["runtime_status"]["status"] == "ok"
-    assert checks["healthcheck"]["status"] == "ok"
+    assert checks["healthcheck"]["status"] == "warn"
     assert checks["openclaw_binary"]["status"] in {"ok", "warn"}
 
 

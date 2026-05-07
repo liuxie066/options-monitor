@@ -101,6 +101,14 @@ def test_agent_internal_init_minimal_config() -> None:
         assert "market" not in cfg["portfolio"]
         assert cfg["symbols"][0]["broker"] == "US"
         assert "market" not in cfg["symbols"][0]
+        assert cfg["templates"]["put_base"]["sell_put"]["min_annualized_net_return"] == 0.1
+        assert cfg["runtime"]["symbol_timeout_sec"] == 120
+        assert cfg["close_advice"]["max_spread_ratio"] == 0.3
+        assert cfg["alert_policy"]["change_annual_threshold"] == 0.02
+        assert "default_multiplier_us" not in cfg["intake"]
+        assert "default_multiplier_hk" not in cfg["intake"]
+        assert payload["used_defaults"] == []
+        assert payload["warnings"] == []
 
 
 def test_agent_internal_init_reuses_existing_data_config_across_markets() -> None:

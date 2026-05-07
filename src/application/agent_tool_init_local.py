@@ -139,9 +139,18 @@ def init_local_config(
     force: bool = False,
 ) -> dict[str, Any]:
     normalized_market = _normalize_market(market)
+    raw_account_label = str(account_label or "").strip()
     normalized_account = _normalize_account_label(account_label)
     normalized_acc_id = _normalize_futu_acc_id(futu_acc_id)
     normalized_symbols = _normalize_symbols(symbols, market=normalized_market)
+    used_defaults: list[str] = []
+    warnings: list[str] = []
+    if not raw_account_label:
+        used_defaults.append("account_label")
+    if not list(symbols or []):
+        used_defaults.append("symbols")
+    if data_config_path is None:
+        used_defaults.append("data_config")
 
     runtime_template_path = _example_runtime_config_path(repo_root=repo_root, market=normalized_market)
     data_template_path = _example_data_config_path(repo_root=repo_root)
@@ -206,6 +215,11 @@ def init_local_config(
     if not reuse_existing_data_config or force:
         target_data_config_path.write_text(json.dumps(data_cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
+    if used_defaults:
+        warnings.append(
+            "Starter defaults applied: " + ", ".join(used_defaults) + ". Review account label, symbols, and local data_config before long-term use."
+        )
+
     return {
         "market": normalized_market,
         "account_label": normalized_account,
@@ -215,6 +229,8 @@ def init_local_config(
         "config_path": str(target_config_path),
         "data_config_path": str(target_data_config_path),
         "data_config_reused": reuse_existing_data_config,
+        "used_defaults": used_defaults,
+        "warnings": warnings,
         "opend": {
             "host": str(opend_host).strip() or "127.0.0.1",
             "port": int(opend_port),
