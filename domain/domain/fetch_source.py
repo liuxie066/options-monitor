@@ -16,7 +16,12 @@ _FUTU_ALIASES = {
 }
 
 def normalize_fetch_source(value: Any, *, default: str = FUTU_INTERNAL_SOURCE) -> str:
-    """Normalize user-facing fetch source names to the only supported source id."""
+    """Normalize user-facing fetch source names.
+
+    Non-Futu source names are preserved for compatibility, schema, and audit flows.
+    Acceptance here does not imply that symbol required-data runtime fetching supports
+    those sources.
+    """
     raw = str(value if value is not None else default).strip().lower()
     raw = raw.replace("-", "_").replace(" ", "_")
     compact = raw.replace("_", "")

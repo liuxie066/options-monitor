@@ -12,6 +12,8 @@ def adapt_opend_tool_payload(payload: dict[str, Any] | Any) -> dict[str, Any]:
     src = validate_schema_payload((payload if isinstance(payload, dict) else {}), kind=SCHEMA_KIND_TOOL_EXECUTION)
     ok = bool(src.get("ok"))
     source_norm = str(src.get("source") or "").strip().lower()
+    # fallback_used is an audit/status flag for non-primary source snapshots.
+    # It does not mean the runtime automatically downgraded from Futu/OpenD to Yahoo.
     fallback_used = bool(source_norm and not is_futu_fetch_source(source_norm))
     status_norm = ("ok" if ok and (not fallback_used) else ("fallback" if ok else "error"))
     message = str(src.get("message") or "").strip()
