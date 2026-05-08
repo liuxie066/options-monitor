@@ -44,6 +44,12 @@ def _record(record_id: str, opened_at: int, contracts_open: int) -> dict:
     }
 
 
+def _long_record(record_id: str, opened_at: int, contracts_open: int) -> dict:
+    row = _record(record_id, opened_at, contracts_open)
+    row["fields"]["side"] = "long"
+    return row
+
+
 def _deal(**overrides: object) -> NormalizedTradeDeal:
     base = {
         "broker": "富途",
@@ -106,7 +112,22 @@ def test_resolve_trade_close_dry_run_builds_patches() -> None:
     assert result.status == "dry_run"
     assert result.action == "close"
     assert len(result.operations) == 2
+    assert result.operations[0]["action"] == "buy_close"
     assert result.operations[0]["patch"]["contracts_open"] == 0
+    assert result.operations[0]["patch"]["close_type"] == "buy_to_close"
+
+
+def test_resolve_trade_long_close_dry_run_builds_patches() -> None:
+    repo = FakeRepo([_long_record("rec1", 100, 1), _long_record("rec2", 200, 2)])
+
+    result = resolve_trade_deal(_deal(side="sell"), repo=repo, state={}, apply_changes=False)
+
+    assert result.status == "dry_run"
+    assert result.action == "close"
+    assert len(result.operations) == 2
+    assert result.operations[0]["action"] == "sell_close"
+    assert result.operations[0]["patch"]["contracts_open"] == 0
+    assert result.operations[0]["patch"]["close_type"] == "sell_to_close"
 
 
 def test_resolve_trade_close_apply_updates_records() -> None:
@@ -125,6 +146,23 @@ def test_resolve_trade_close_apply_updates_records() -> None:
     assert repo.updated == []
 
 
+def test_resolve_trade_long_close_apply_updates_records() -> None:
+    repo = FakeRepo([_long_record("rec1", 100, 1), _long_record("rec2", 200, 2)])
+    import scripts.trade_intake_resolver as tir
+
+    old_persist = tir.persist_trade_event
+    try:
+        tir.persist_trade_event = lambda repo, deal: {"event_id": deal.deal_id, "created": True}  # type: ignore[assignment]
+        result = resolve_trade_deal(_deal(side="sell"), repo=repo, state={}, apply_changes=True)
+    finally:
+        tir.persist_trade_event = old_persist  # type: ignore[assignment]
+
+    assert result.status == "applied"
+    assert [row["record_id"] for row in result.operations] == ["rec1", "rec2"]
+    assert [row["action"] for row in result.operations] == ["sell_close", "sell_close"]
+    assert repo.updated == []
+
+
 def test_resolve_trade_close_rejects_insufficient_contracts() -> None:
     repo = FakeRepo([_record("rec1", 100, 1)])
 
@@ -134,13 +172,21 @@ def test_resolve_trade_close_rejects_insufficient_contracts() -> None:
     assert "close_match_insufficient_contracts" in result.reason
 
 
-def test_resolve_trade_close_rejects_non_buy_side() -> None:
+def test_resolve_trade_close_rejects_unknown_side() -> None:
     repo = FakeRepo([_record("rec1", 100, 3)])
 
-    result = resolve_trade_deal(_deal(side="sell"), repo=repo, state={}, apply_changes=False)
+    result = resolve_trade_deal(_deal(side="hold"), repo=repo, state={}, apply_changes=False)
 
     assert result.status == "unresolved"
     assert result.reason == "unsupported_close_side"
+
+
+def test_match_close_positions_matches_long_lots_for_sell_close() -> None:
+    repo = FakeRepo([_long_record("rec1", 100, 1), _long_record("rec2", 200, 2)])
+
+    matches = match_close_positions(repo, _deal(side="sell"))
+
+    assert [(m.record_id, m.contracts_to_close) for m in matches] == [("rec1", 1), ("rec2", 2)]
 
 
 def test_load_close_candidate_records_prefers_position_lots_projection() -> None:
