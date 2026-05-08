@@ -1643,6 +1643,39 @@ def test_persist_manual_open_event_builds_position_lot(tmp_path: Path) -> None:
     assert lots[0]["fields"]["status"] == "open"
 
 
+def test_persist_manual_open_event_is_idempotent_on_retry(tmp_path: Path) -> None:
+    """Retrying manual-open with identical parameters must not create duplicate lots."""
+    import scripts.option_positions_core.service as svc
+    from scripts.option_positions_core.domain import OpenPositionCommand
+
+    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    command = OpenPositionCommand(
+        broker="富途",
+        account="sy",
+        symbol="9992.HK",
+        option_type="put",
+        side="short",
+        contracts=1,
+        currency="HKD",
+        strike=145.0,
+        multiplier=100,
+        expiration_ymd="2026-07-30",
+        premium_per_share=6.0,
+        opened_at_ms=1_700_000_000_000,
+    )
+
+    result1 = svc.persist_manual_open_event(repo, command)
+    result2 = svc.persist_manual_open_event(repo, command)
+
+    assert result1["created"] is True
+    assert result2["created"] is False
+    assert result1["event_id"] == result2["event_id"]
+    lots = repo.list_position_lots()
+    assert len(lots) == 1
+    events = repo.list_trade_events()
+    assert len(events) == 1
+
+
 def test_persist_manual_close_event_updates_position_lot(tmp_path: Path) -> None:
     import scripts.option_positions_core.service as svc
     from scripts.option_positions_core.domain import OpenPositionCommand
