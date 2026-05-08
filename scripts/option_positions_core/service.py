@@ -928,25 +928,80 @@ def persist_trade_event(repo: Any, deal: Any) -> dict[str, Any]:
     return _persist_trade_event_object(repo, trade_event_from_normalized_deal(deal))
 
 
+def _manual_open_event_id(
+    *,
+    broker: str,
+    account: str,
+    symbol: str,
+    option_type: str,
+    side: str,
+    contracts: int,
+    price: float,
+    strike: float | None,
+    expiration_ymd: str | None,
+    trade_time_ms: int,
+) -> str:
+    """Return a deterministic event_id for a manual-open trade event.
+
+    Using a stable hash of the normalised trade fields means that retrying
+    the same trade with identical parameters produces the same event_id.
+    The upsert layer then recognises it as a duplicate and skips insertion,
+    preventing the duplicate-open-lot problem.
+    """
+    key_parts = [
+        str(broker).strip().lower(),
+        str(account).strip().lower(),
+        str(symbol).strip().upper(),
+        str(option_type).strip().lower(),
+        str(side).strip().lower(),
+        "open",
+        str(int(contracts)),
+        repr(float(price)),
+        repr(float(strike)) if strike is not None else "",
+        str(expiration_ymd or "").strip(),
+        str(int(trade_time_ms)),
+    ]
+    key_str = "|".join(key_parts)
+    h = hashlib.sha256(key_str.encode()).hexdigest()[:16]
+    return f"manual-open-{h}"
+
+
 def persist_manual_open_event(repo: Any, command: OpenPositionCommand) -> dict[str, Any]:
     currency = resolve_open_currency(command.symbol, command.currency)
+    normalized_side = "sell" if str(command.side).strip().lower() == "short" else "buy"
+    canonical_symbol = _canonical_trade_symbol(command.symbol)
+    strike = float(command.strike) if command.strike is not None else None
+    expiration_ymd = str(command.expiration_ymd or "").strip() or None
+    trade_time_ms = int(command.opened_at_ms or now_ms())
+    event_id = _manual_open_event_id(
+        broker=str(command.broker),
+        account=str(command.account),
+        symbol=canonical_symbol,
+        option_type=str(command.option_type),
+        side=normalized_side,
+        contracts=int(command.contracts),
+        price=float(command.premium_per_share or 0.0),
+        strike=strike,
+        expiration_ymd=expiration_ymd,
+        trade_time_ms=trade_time_ms,
+    )
     event = TradeEvent(
-        event_id=f"manual-open-{uuid.uuid4().hex}",
+        event_id=event_id,
         source_type="manual_trade_event",
         source_name="cli_manual_open",
         broker=str(command.broker),
         account=str(command.account),
-        symbol=_canonical_trade_symbol(command.symbol),
+        symbol=canonical_symbol,
         option_type=str(command.option_type),
-        side="sell" if str(command.side).strip().lower() == "short" else "buy",
+        side=normalized_side,
         position_effect="open",
         contracts=int(command.contracts),
         price=float(command.premium_per_share or 0.0),
-        strike=(float(command.strike) if command.strike is not None else None),
+        strike=strike,
         multiplier=(int(float(command.multiplier)) if command.multiplier is not None else None),
-        expiration_ymd=(str(command.expiration_ymd or "").strip() or None),
+        expiration_ymd=expiration_ymd,
         currency=currency,
-        trade_time_ms=int(command.opened_at_ms or now_ms()),
+        trade_time_ms=trade_time_ms,
         order_id=None,
         multiplier_source=("payload" if command.multiplier is not None else None),
         raw_payload={"source": "option_positions.py", "mode": "manual_open"},
