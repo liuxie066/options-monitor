@@ -50,7 +50,17 @@ def test_resolve_trade_open_dry_run_returns_fields_preview() -> None:
     assert result.status == "dry_run"
     assert result.action == "open"
     assert result.operations[0]["fields"]["account"] == "lx"
+    assert result.operations[0]["fields"]["side"] == "short"
     assert "multiplier_source=cache" in result.operations[0]["fields"]["note"]
+
+
+def test_resolve_trade_long_open_dry_run_returns_long_fields_preview() -> None:
+    result = resolve_trade_deal(_deal(side="buy"), repo=FakeRepo(), state={}, apply_changes=False)
+
+    assert result.status == "dry_run"
+    assert result.action == "open"
+    assert result.operations[0]["fields"]["account"] == "lx"
+    assert result.operations[0]["fields"]["side"] == "long"
 
 
 def test_resolve_trade_open_apply_creates_record() -> None:
@@ -93,8 +103,8 @@ def test_resolve_trade_open_retries_retryable_unresolved_deal_id() -> None:
     assert result.reason == "preview_open"
 
 
-def test_resolve_trade_open_rejects_non_sell_side() -> None:
-    result = resolve_trade_deal(_deal(side="buy"), repo=FakeRepo(), state={}, apply_changes=False)
+def test_resolve_trade_open_rejects_unknown_side() -> None:
+    result = resolve_trade_deal(_deal(side="hold"), repo=FakeRepo(), state={}, apply_changes=False)
 
     assert result.status == "unresolved"
     assert result.reason == "unsupported_open_side"

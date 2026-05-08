@@ -218,6 +218,8 @@ def _iter_open_candidates(repo: OptionPositionsRepoLike, deal: NormalizedTradeDe
     deal_account = normalize_account(deal.internal_account)
     deal_symbol = _canonical_symbol(deal.symbol)
     deal_option_type = normalize_option_type(deal.option_type)
+    deal_side = str(deal.side or "").strip().lower()
+    target_position_side = "short" if deal_side == "buy" else "long"
     deal_strike = float(deal.strike) if deal.strike is not None else None
     deal_expiration_ymd = str(deal.expiration_ymd or "").strip() or None
     for item in load_close_candidate_records(repo):
@@ -232,7 +234,7 @@ def _iter_open_candidates(repo: OptionPositionsRepoLike, deal: NormalizedTradeDe
             continue
         if candidate.option_type != deal_option_type:
             continue
-        if candidate.side != "short":
+        if candidate.side != target_position_side:
             continue
         if candidate.status != "open":
             continue
@@ -310,7 +312,7 @@ def resolve_trade_deal(
         return _failure(status="unresolved", action=None, reason="unknown_position_effect", deal=deal)
 
     if deal.position_effect == "open":
-        if deal.side != "sell":
+        if deal.side not in {"sell", "buy"}:
             return _failure(status="unresolved", action="open", reason="unsupported_open_side", deal=deal)
         missing = _required_open_missing(deal)
         if missing:
@@ -352,7 +354,7 @@ def resolve_trade_deal(
         )
 
     missing = _required_close_missing(deal)
-    if deal.side != "buy":
+    if deal.side not in {"buy", "sell"}:
         return _failure(status="unresolved", action="close", reason="unsupported_close_side", deal=deal)
     if missing:
         return _failure(
