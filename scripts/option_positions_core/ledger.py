@@ -6,6 +6,7 @@ from typing import Any
 from scripts.option_positions_core.domain import (
     EXPIRE_AUTO_CLOSE,
     OpenPositionCommand,
+    build_buy_to_close_patch,
     build_close_patch,
     build_expire_auto_close_patch,
     build_open_fields,
