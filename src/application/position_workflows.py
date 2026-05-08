@@ -6,7 +6,7 @@ from typing import Any
 
 from scripts.option_positions_core.domain import (
     OpenPositionCommand,
-    build_buy_to_close_patch,
+    build_close_patch,
     build_open_adjustment_patch,
     build_open_fields,
 )
@@ -42,12 +42,13 @@ def _manual_open_record_id(result: dict[str, Any]) -> str:
 
 
 def _build_trade_open_command(deal: NormalizedTradeDeal) -> OpenPositionCommand:
+    side = str(deal.side or "").strip().lower()
     return OpenPositionCommand(
         broker="富途",
         account=str(deal.internal_account or ""),
         symbol=str(deal.symbol or ""),
         option_type=str(deal.option_type or ""),
-        side="short",
+        side="short" if side == "sell" else "long",
         contracts=int(deal.contracts or 0),
         currency=str(deal.currency or ""),
         strike=(float(deal.strike) if deal.strike is not None else None),
@@ -77,18 +78,20 @@ def apply_trade_open_with(repo: Any, deal: NormalizedTradeDeal, *, persist_trade
 
 def preview_trade_close(repo: Any, *, matches: list[Any], deal: NormalizedTradeDeal) -> list[dict[str, Any]]:
     operations: list[dict[str, Any]] = []
+    close_action = "buy_close" if str(deal.side or "").strip().lower() == "buy" else "sell_close"
+    close_reason = "auto_trade_buy_to_close" if close_action == "buy_close" else "auto_trade_sell_to_close"
     for match in matches:
         fields = repo.get_record_fields(match.record_id)
         operations.append(
             {
-                "action": "buy_close",
+                "action": close_action,
                 "record_id": match.record_id,
                 "contracts_to_close": match.contracts_to_close,
-                "patch": build_buy_to_close_patch(
+                "patch": build_close_patch(
                     fields,
                     contracts_to_close=match.contracts_to_close,
                     close_price=float(deal.price),
-                    close_reason="auto_trade_buy_to_close",
+                    close_reason=close_reason,
                     as_of_ms=deal.trade_time_ms,
                 ),
                 "matched_by": match.matched_by,
@@ -105,9 +108,10 @@ def apply_trade_close_with(
     persist_trade_event_fn: Any,
 ) -> list[dict[str, Any]]:
     persist_trade_event_fn(repo, deal)
+    close_action = "buy_close" if str(deal.side or "").strip().lower() == "buy" else "sell_close"
     return [
         {
-            "action": "buy_close",
+            "action": close_action,
             "record_id": match.record_id,
             "contracts_to_close": match.contracts_to_close,
         }
@@ -175,7 +179,7 @@ def execute_manual_close(
     dry_run: bool,
 ) -> dict[str, Any]:
     fields = repo.get_record_fields(record_id)
-    patch = build_buy_to_close_patch(
+    patch = build_close_patch(
         fields,
         contracts_to_close=int(contracts_to_close),
         close_price=close_price,
