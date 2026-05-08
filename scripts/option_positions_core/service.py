@@ -956,8 +956,8 @@ def _manual_open_event_id(
         str(side).strip().lower(),
         "open",
         str(int(contracts)),
-        f"{float(price):.8g}",
-        f"{float(strike):.8g}" if strike is not None else "",
+        repr(float(price)),
+        repr(float(strike)) if strike is not None else "",
         str(expiration_ymd or "").strip(),
         str(int(trade_time_ms)),
     ]
