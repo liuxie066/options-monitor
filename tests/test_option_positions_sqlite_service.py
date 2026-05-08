@@ -1117,6 +1117,63 @@ def test_close_projection_prefers_structured_expiration_over_missing_note_exp() 
     assert lots[0]["fields"]["last_close_event_id"] == "deal-close-lx-exp-structured"
 
 
+def test_close_projection_buy_side_marks_buy_to_close_type() -> None:
+    from scripts.option_positions_core.domain import BUY_TO_CLOSE
+    from scripts.option_positions_core.ledger import TradeEvent, project_position_lot_records
+
+    events = [
+        TradeEvent(
+            event_id="open-1",
+            source_type="broker_trade_event",
+            source_name="opend_push",
+            broker="富途",
+            account="lx",
+            symbol="AAPL",
+            option_type="put",
+            side="sell",
+            position_effect="open",
+            contracts=1,
+            price=1.0,
+            strike=150.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            currency="USD",
+            trade_time_ms=1000,
+            order_id="order-open-1",
+            multiplier_source="payload",
+            raw_payload={"deal_id": "open-1"},
+        ),
+        TradeEvent(
+            event_id="close-1",
+            source_type="broker_trade_event",
+            source_name="opend_push",
+            broker="富途",
+            account="lx",
+            symbol="AAPL",
+            option_type="put",
+            side="buy",
+            position_effect="close",
+            contracts=1,
+            price=0.5,
+            strike=150.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            currency="USD",
+            trade_time_ms=2000,
+            order_id="order-close-1",
+            multiplier_source="payload",
+            raw_payload={"deal_id": "close-1"},
+        ),
+    ]
+
+    lots = project_position_lot_records(events)
+
+    assert len(lots) == 1
+    assert lots[0]["fields"]["contracts_open"] == 0
+    assert lots[0]["fields"]["status"] == "close"
+    assert lots[0]["fields"]["close_type"] == BUY_TO_CLOSE
+
+
 def test_close_projection_matches_bootstrap_lot_by_legacy_record_id() -> None:
     from scripts.option_positions_core.ledger import TradeEvent, project_position_lot_records
 
