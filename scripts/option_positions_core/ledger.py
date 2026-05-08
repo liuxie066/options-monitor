@@ -6,7 +6,7 @@ from typing import Any
 from scripts.option_positions_core.domain import (
     EXPIRE_AUTO_CLOSE,
     OpenPositionCommand,
-    build_buy_to_close_patch,
+    build_close_patch,
     build_expire_auto_close_patch,
     build_open_fields,
     effective_expiration,
@@ -109,6 +109,22 @@ def _same_strike(left: float | None, right: float | None) -> bool:
     return abs(float(left) - float(right)) < 1e-9
 
 
+def _event_position_side(event: TradeEvent) -> str | None:
+    side = str(event.side or "").strip().lower()
+    effect = str(event.position_effect or "").strip().lower()
+    if effect == "open":
+        if side == "sell":
+            return "short"
+        if side == "buy":
+            return "long"
+    if effect == "close":
+        if side == "buy":
+            return "short"
+        if side == "sell":
+            return "long"
+    return None
+
+
 def _open_lot_record(event: TradeEvent) -> dict[str, Any]:
     if str(event.source_type).strip().lower() == "bootstrap_snapshot":
         payload = dict(event.raw_payload or {})
@@ -125,7 +141,7 @@ def _open_lot_record(event: TradeEvent) -> dict[str, Any]:
         account=event.account,
         symbol=event.symbol,
         option_type=event.option_type,
-        side="short",
+        side=_event_position_side(event) or "short",
         contracts=int(event.contracts),
         currency=event.currency,
         strike=event.strike,
@@ -148,6 +164,9 @@ def _open_lot_record(event: TradeEvent) -> dict[str, Any]:
 
 
 def _matches_close(fields: dict[str, Any], event: TradeEvent) -> bool:
+    position_side = _event_position_side(event)
+    if position_side is None:
+        return False
     if effective_contracts_open(fields) <= 0:
         return False
     expiration_matches = False
@@ -164,7 +183,7 @@ def _matches_close(fields: dict[str, Any], event: TradeEvent) -> bool:
         and normalize_account(fields.get("account")) == event.account
         and _canonical_trade_symbol(fields.get("symbol")) == _canonical_trade_symbol(event.symbol)
         and normalize_option_type(fields.get("option_type")) == event.option_type
-        and normalize_side(fields.get("side")) == "short"
+        and normalize_side(fields.get("side")) == position_side
         and _same_strike(fields.get("strike"), event.strike)
         and str(fields.get("source_event_id") or "") != event.event_id
         and expiration_matches
@@ -219,18 +238,27 @@ def _build_close_projection_patch(fields: dict[str, Any], event: TradeEvent, *, 
         fields,
         contracts_to_close=contracts_to_close,
         close_price=event.price,
-        close_reason="broker_trade_buy_to_close",
+        close_reason="broker_trade_buy_to_close" if str(event.side or "").strip().lower() == "buy" else "broker_trade_sell_to_close",
+        as_of_ms=event.trade_time_ms,
+    ) if str(event.side or "").strip().lower() == "buy" else build_close_patch(
+        fields,
+        contracts_to_close=contracts_to_close,
+        close_price=event.price,
+        close_reason="broker_trade_sell_to_close",
         as_of_ms=event.trade_time_ms,
     )
 
 
 def _matches_close_target(fields: dict[str, Any], event: TradeEvent) -> bool:
+    position_side = _event_position_side(event)
+    if position_side is None:
+        return False
     return (
         normalize_broker(fields.get("broker")) == event.broker
         and normalize_account(fields.get("account")) == event.account
         and _canonical_trade_symbol(fields.get("symbol")) == _canonical_trade_symbol(event.symbol)
         and normalize_option_type(fields.get("option_type")) == event.option_type
-        and normalize_side(fields.get("side")) == "short"
+        and normalize_side(fields.get("side")) == position_side
         and str(fields.get("source_event_id") or "") != event.event_id
     )
 
@@ -374,10 +402,10 @@ def project_position_lot_records_with_diagnostics(
             continue
         if not event.event_id or event.contracts <= 0:
             continue
-        if event.position_effect == "open" and event.side == "sell":
+        if event.position_effect == "open" and _event_position_side(event) in {"short", "long"}:
             lots.append(_open_lot_record(event))
             continue
-        if event.position_effect != "close" or event.side != "buy":
+        if event.position_effect != "close" or _event_position_side(event) not in {"short", "long"}:
             continue
 
         remaining = int(event.contracts)

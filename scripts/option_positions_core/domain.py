@@ -10,6 +10,7 @@ from scripts.trade_symbol_identity import resolve_underlier_alias, symbol_curren
 
 
 BUY_TO_CLOSE = "buy_to_close"
+SELL_TO_CLOSE = "sell_to_close"
 EXPIRE_AUTO_CLOSE = "expire_auto_close"
 
 
@@ -564,12 +565,13 @@ def build_open_adjustment_patch(
     return patch
 
 
-def build_buy_to_close_patch(
+def build_close_patch(
     fields: dict[str, Any],
     *,
     contracts_to_close: int,
     close_price: float | None = None,
-    close_reason: str = "manual_buy_to_close",
+    close_reason: str = "manual_close",
+    close_type: str | None = None,
     as_of_ms: int | None = None,
 ) -> dict[str, Any]:
     qty = int(contracts_to_close)
@@ -583,13 +585,15 @@ def build_buy_to_close_patch(
     closed = effective_contracts_closed(fields) + qty
     remaining = max(0, open_qty - qty)
     ts = int(as_of_ms or now_ms())
+    normalized_side = normalize_side(fields.get("side"), strict=True)
+    effective_close_type = str(close_type or (BUY_TO_CLOSE if normalized_side == "short" else SELL_TO_CLOSE)).strip().lower()
 
     patch: dict[str, Any] = {
         "contracts_open": remaining,
         "contracts_closed": min(closed, total) if total > 0 else closed,
         "last_action_at": ts,
-        "close_type": BUY_TO_CLOSE,
-        "close_reason": str(close_reason or "manual_buy_to_close"),
+        "close_type": effective_close_type,
+        "close_reason": str(close_reason or "manual_close"),
     }
     if close_price is not None:
         patch["close_price"] = float(close_price)
@@ -599,6 +603,24 @@ def build_buy_to_close_patch(
     else:
         patch["status"] = "open"
     return patch
+
+
+def build_buy_to_close_patch(
+    fields: dict[str, Any],
+    *,
+    contracts_to_close: int,
+    close_price: float | None = None,
+    close_reason: str = "manual_buy_to_close",
+    as_of_ms: int | None = None,
+) -> dict[str, Any]:
+    return build_close_patch(
+        fields,
+        contracts_to_close=contracts_to_close,
+        close_price=close_price,
+        close_reason=close_reason,
+        close_type=BUY_TO_CLOSE,
+        as_of_ms=as_of_ms,
+    )
 
 
 def build_expire_auto_close_patch(
