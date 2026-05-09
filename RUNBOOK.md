@@ -6,7 +6,24 @@
 
 - 快速上手与常用命令：`README.md`
 - 配置来源与同步：`CONFIGS.md`
+- option positions 升级迁移：`docs/OPTION_POSITIONS_MIGRATION.md`
+- option positions 错账修复：`docs/OPTION_POSITIONS_REPAIR.md`
 - 发布/回滚：仅在本地私有运维仓执行（本仓不公开流程细节）
+
+## Option Positions 升级迁移入口
+
+如果线上是从旧 option positions 方案升级到当前 v2 兼容 / verification 方案，先看：
+
+- `docs/OPTION_POSITIONS_MIGRATION.md`
+
+最小执行顺序：
+
+1. 不清旧 `trade_events` / `position_lots`
+2. 先跑一次 `python3 scripts/option_positions.py rebuild`
+3. 用 `python3 scripts/option_positions.py inspect ...` 抽查关键仓位
+4. 用真实仓位 snapshot 跑 `python3 scripts/option_positions.py reconcile --snapshot-file ...`
+
+不要把迁移理解成一次性重写历史 lot；正确方式是先让 v2 compat 读路径接管旧数据，再用 verification / reconciliation 落新的运维基线。
 
 ## 日常运行（prod）
 

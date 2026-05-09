@@ -77,6 +77,7 @@ _MODULE_EXPORTS = {
     'multi_tick_result',
     'tool_boundary',
     'canonical_schema',
+    'option_positions_v2',
     'error_policy',
     'config_contract',
     'intermediate_objects',

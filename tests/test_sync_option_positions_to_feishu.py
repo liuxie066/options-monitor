@@ -202,6 +202,36 @@ def test_build_feishu_payload_coerces_numeric_fields_from_strings() -> None:
     assert isinstance(payload["cash_secured_amount"], int)
 
 
+def test_build_feishu_payload_normalizes_compat_shape_fields() -> None:
+    import scripts.sync_option_positions_to_feishu as sync_mod
+
+    payload = sync_mod.build_feishu_payload(
+        "rec_local_legacy",
+        {
+            "broker": "富途证券（香港）",
+            "account": "LX",
+            "symbol": "tsla",
+            "option_type": "认沽",
+            "side": "Sell To Open",
+            "contracts": "1",
+            "contracts_open": "1",
+            "currency": "美元",
+            "strike": "85",
+            "status": "OPEN",
+            "note": "premium_per_share=0.75",
+        },
+    )
+
+    assert payload["broker"] == "富途"
+    assert payload["account"] == "lx"
+    assert payload["symbol"] == "TSLA"
+    assert payload["option_type"] == "put"
+    assert payload["side"] == "short"
+    assert payload["currency"] == "USD"
+    assert payload["status"] == "open"
+    assert payload["premium"] == 0.75
+
+
 def test_build_outgoing_payload_applies_schema_filter_and_type_hints() -> None:
     import scripts.sync_option_positions_to_feishu as sync_mod
 
