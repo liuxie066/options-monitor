@@ -343,7 +343,7 @@ def option_positions_read_tool(
         if not record_id:
             raise AgentToolError(code="INPUT_ERROR", message="record_id is required for option_positions_read history")
         try:
-            history = build_lot_event_history(repo, record_id=record_id)
+            history = build_lot_event_history(repo, base=repo_base(), record_id=record_id)
         except ValueError as exc:
             raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from exc
         data = {
@@ -364,7 +364,7 @@ def option_positions_read_tool(
         }
         if not any(value not in (None, "") for value in selectors.values()):
             raise AgentToolError(code="INPUT_ERROR", message="inspect requires at least one selector")
-        inspected = inspect_projection_state(repo, **selectors)
+        inspected = inspect_projection_state(repo, base=repo_base(), **selectors)
         data = {"action": action, **inspected}
 
     data["bootstrap"] = {
