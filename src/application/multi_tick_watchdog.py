@@ -56,10 +56,12 @@ def run_multi_tick_watchdog(
             retry_interval_sec = float(wd_cfg.get("retry_interval_sec", 3.0))
             retry_timeout_sec = float(wd_cfg.get("retry_timeout_sec", 25.0))
             success_threshold = int(wd_cfg.get("success_threshold", 2))
-            # Increase subprocess timeout to accommodate the retry window.
-            base_timeout_sec = 35
+            # Base subprocess timeout; enough for port check + get_global_state.
+            # When retry is enabled the subprocess itself runs the window, so
+            # add the retry budget on top.
+            _BASE_WATCHDOG_TIMEOUT_SEC = 35
             watchdog_timeout_sec = (
-                int(retry_timeout_sec) + base_timeout_sec if retry_enabled else base_timeout_sec
+                int(retry_timeout_sec) + _BASE_WATCHDOG_TIMEOUT_SEC if retry_enabled else _BASE_WATCHDOG_TIMEOUT_SEC
             )
             for host, port in sorted(ports):
                 try:

@@ -224,6 +224,8 @@ def _port_retry_loop(
     h.retrycount = 0
 
     # Optionally start OpenD on first failure (before the retry loop).
+    # action_taken is set here; get_global_state may overwrite it later
+    # with a finer-grained value (e.g. 'retry_once'), which is intentional.
     if ensure:
         ok_start, _msg = try_start_opend()
         h.startedbywatchdog = ok_start
@@ -236,7 +238,11 @@ def _port_retry_loop(
     deadline = firstfail + retry_timeout_sec
 
     while time.time() < deadline:
-        time.sleep(min(retry_interval_sec, max(0.0, deadline - time.time())))
+        # Sleep for at most retry_interval_sec but cap at remaining window
+        # so we don't overshoot the deadline.
+        remaining = deadline - time.time()
+        sleep_duration = min(retry_interval_sec, max(0.0, remaining))
+        time.sleep(sleep_duration)
         h.retrycount += 1
         if port_open(host, port):
             consecutive_success += 1
