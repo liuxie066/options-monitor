@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha1
 from pathlib import Path
+import sys
 from typing import Any
 
 from domain.domain.option_positions_v2 import (
@@ -92,7 +93,11 @@ def _list_legacy_position_lots(repo: Any) -> list[dict[str, Any]]:
 def _event_ms_to_iso(value: Any) -> str:
     try:
         return datetime.fromtimestamp(int(value or 0) / 1000, tz=timezone.utc).isoformat()
-    except Exception:
+    except Exception as exc:
+        print(
+            f"[WARN] option_positions_v2 invalid legacy trade_time_ms={value!r}; fallback to utc_now_iso ({type(exc).__name__}: {exc})",
+            file=sys.stderr,
+        )
         return utc_now_iso()
 
 

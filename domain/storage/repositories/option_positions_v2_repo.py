@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import shutil
 from typing import Any
 
 from domain.domain.option_positions_v2 import (
@@ -112,15 +113,24 @@ def load_position_events(base: Path) -> list[dict[str, Any]]:
 
 
 def _replace_json_dir_contents(path: Path, payloads: list[dict[str, Any]], *, id_field: str) -> None:
-    path.mkdir(parents=True, exist_ok=True)
-    for child in path.iterdir():
-        if child.is_file():
-            child.unlink()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    staging = (path.parent / f".{path.name}.staging").resolve()
+    backup = (path.parent / f".{path.name}.backup").resolve()
+    if staging.exists():
+        shutil.rmtree(staging, ignore_errors=True)
+    if backup.exists():
+        shutil.rmtree(backup, ignore_errors=True)
+    staging.mkdir(parents=True, exist_ok=True)
     for item in payloads:
         identifier = str(item.get(id_field) or "").strip()
         if not identifier:
             continue
-        _write_json(path / f"{identifier}.json", item)
+        _write_json(staging / f"{identifier}.json", item)
+    if path.exists():
+        path.rename(backup)
+    staging.rename(path)
+    if backup.exists():
+        shutil.rmtree(backup, ignore_errors=True)
 
 
 def replace_position_snapshots(base: Path, payloads: list[dict[str, Any]]) -> dict[str, Path | None]:
