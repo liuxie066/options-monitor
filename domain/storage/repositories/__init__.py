@@ -1,5 +1,23 @@
-"""Repository adapters for storage."""
+from __future__ import annotations
 
-from . import report_repo, run_repo, state_repo
+from importlib import import_module
 
-__all__ = ["report_repo", "run_repo", "state_repo"]
+
+_MODULE_EXPORTS = {
+    "report_repo",
+    "run_repo",
+    "state_repo",
+    "option_positions_v2_repo",
+}
+
+__all__ = sorted(_MODULE_EXPORTS)
+
+
+def __getattr__(name: str):
+    if name not in _MODULE_EXPORTS:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    return import_module(f".{name}", __name__)
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(__all__))
