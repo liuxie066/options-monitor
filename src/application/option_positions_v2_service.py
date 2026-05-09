@@ -100,7 +100,7 @@ def _event_ms_to_iso(value: Any) -> str:
         return datetime.fromtimestamp(int(value or 0) / 1000, tz=timezone.utc).isoformat()
     except Exception as exc:
         print(
-            f"[WARN] option_positions_v2 invalid legacy trade_time_ms={value!r}; fallback to utc_now_iso ({type(exc).__name__}: {exc})",
+            f"[WARN] option_positions_v2 invalid legacy trade_time_ms={value!r}; falling back to utc_now_iso ({type(exc).__name__}: {exc})",
             file=sys.stderr,
         )
         return utc_now_iso()
@@ -186,7 +186,10 @@ def _native_baseline_snapshot(
             continue
         if earliest_event_ms is None or event_ms < earliest_event_ms:
             earliest_event_ms = event_ms
-    snapshot_at_utc = _event_ms_to_iso(max(int(earliest_event_ms or 0) - 1, 0)) if earliest_event_ms is not None else utc_now_iso()
+    if earliest_event_ms is None:
+        snapshot_at_utc = utc_now_iso()
+    else:
+        snapshot_at_utc = _event_ms_to_iso(max(int(earliest_event_ms) - 1, 0))
     return _empty_baseline_snapshot(snapshot_at_utc=snapshot_at_utc)
 
 
@@ -241,12 +244,7 @@ def _merge_native_and_legacy_events(
 
 def _events_after_snapshot(events: list[dict[str, Any]], snapshot: dict[str, Any]) -> list[dict[str, Any]]:
     snapshot_key = _iso_sort_key(snapshot.get("snapshot_at_utc"))
-    filtered: list[dict[str, Any]] = []
-    for event in events:
-        event_key = _iso_sort_key(event.get("event_at_utc"))
-        if event_key > snapshot_key:
-            filtered.append(event)
-    return filtered
+    return [event for event in events if _iso_sort_key(event.get("event_at_utc")) > snapshot_key]
 
 
 def _build_snapshot_from_legacy_rows(
