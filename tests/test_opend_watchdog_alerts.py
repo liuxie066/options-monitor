@@ -95,3 +95,112 @@ def test_opend_alert_translates_wechat_clawbot_to_openclaw_weixin(monkeypatch) -
     cmd = captured["cmd"]
     assert cmd[cmd.index("--channel") + 1] == "openclaw-weixin"
     assert cmd[cmd.index("--target") + 1] == "clawbot:test"
+
+
+def test_port_retry_loop_recovers_within_window(monkeypatch) -> None:
+    """Port recovers after 2 closed checks → retry loop returns True."""
+    _ensure_repo_path()
+    import scripts.opend_watchdog as w
+
+    call_count = {"n": 0}
+
+    def fake_port_open(host, port, timeout=0.8):
+        call_count["n"] += 1
+        # First two calls return False; from 3rd onwards True.
+        return call_count["n"] >= 3
+
+    monkeypatch.setattr(w, "port_open", fake_port_open)
+    monkeypatch.setattr(w, "try_start_opend", lambda: (True, "started"))
+    monkeypatch.setattr(w.time, "sleep", lambda _s: None)
+
+    h = w.Health(ok=False, ports_open=False)
+    recovered = w._port_retry_loop(
+        h,
+        "127.0.0.1",
+        11111,
+        ensure=True,
+        retry_interval_sec=0.01,
+        retry_timeout_sec=10.0,
+        success_threshold=2,
+    )
+
+    assert recovered is True
+    assert h.recoveredts is not None
+    assert h.startedbywatchdog is True
+    assert h.retrycount is not None and h.retrycount >= 2
+    assert h.firstfailts is not None
+    assert h.retryelapsedms is not None
+
+
+def test_port_retry_loop_exhausts_window(monkeypatch) -> None:
+    """Port never opens → retry loop returns False after timeout."""
+    _ensure_repo_path()
+    import scripts.opend_watchdog as w
+
+    monkeypatch.setattr(w, "port_open", lambda *_a, **_k: False)
+    monkeypatch.setattr(w, "try_start_opend", lambda: (False, "failed"))
+
+    # Use a very short timeout so the test completes instantly.
+    sleep_calls = {"n": 0}
+
+    def fake_sleep(s):
+        sleep_calls["n"] += 1
+
+    monkeypatch.setattr(w.time, "sleep", fake_sleep)
+
+    # Patch time.time to simulate fast-forward: after initial call, advance
+    # past the deadline immediately.
+    _t = [0.0]
+
+    def fake_time():
+        v = _t[0]
+        _t[0] += 5.0  # advance 5 seconds per call
+        return v
+
+    monkeypatch.setattr(w.time, "time", fake_time)
+
+    h = w.Health(ok=False, ports_open=False)
+    recovered = w._port_retry_loop(
+        h,
+        "127.0.0.1",
+        11111,
+        ensure=False,
+        retry_interval_sec=3.0,
+        retry_timeout_sec=10.0,
+        success_threshold=2,
+    )
+
+    assert recovered is False
+    assert h.recoveredts is None
+    assert h.retryelapsedms is not None
+    assert h.firstfailts is not None
+
+
+def test_port_retry_loop_no_start_when_ensure_false(monkeypatch) -> None:
+    """With ensure=False, try_start_opend must not be called."""
+    _ensure_repo_path()
+    import scripts.opend_watchdog as w
+
+    start_called = {"n": 0}
+
+    def fake_start():
+        start_called["n"] += 1
+        return (True, "started")
+
+    monkeypatch.setattr(w, "try_start_opend", fake_start)
+    monkeypatch.setattr(w, "port_open", lambda *_a, **_k: True)
+    monkeypatch.setattr(w.time, "sleep", lambda _s: None)
+
+    h = w.Health(ok=False, ports_open=False)
+    w._port_retry_loop(
+        h,
+        "127.0.0.1",
+        11111,
+        ensure=False,
+        retry_interval_sec=0.01,
+        retry_timeout_sec=5.0,
+        success_threshold=1,
+    )
+
+    assert start_called["n"] == 0
+    assert h.startedbywatchdog is None

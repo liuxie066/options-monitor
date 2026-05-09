@@ -141,6 +141,10 @@ def run_opend_watchdog(
     port: int,
     ensure: bool = True,
     timeout_sec: int = 35,
+    retry_enabled: bool = False,
+    retry_interval_sec: float = 3.0,
+    retry_timeout_sec: float = 25.0,
+    success_threshold: int = 2,
 ) -> subprocess.CompletedProcess:
     cmd = [
         str(vpy),
@@ -153,6 +157,13 @@ def run_opend_watchdog(
     ]
     if ensure:
         cmd.append('--ensure')
+    if retry_enabled:
+        cmd.extend([
+            '--retry-enabled',
+            '--retry-interval-sec', str(retry_interval_sec),
+            '--retry-timeout-sec', str(retry_timeout_sec),
+            '--success-threshold', str(success_threshold),
+        ])
     return run_command(
         cmd,
         cwd=base,

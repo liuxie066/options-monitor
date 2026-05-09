@@ -42,6 +42,12 @@ class Health:
     action_taken: str | None = None
     error_code: str | None = None
     message: str | None = None
+    # Retry-window audit fields (populated when retry is active)
+    retrycount: int | None = None
+    retryelapsedms: int | None = None
+    firstfailts: float | None = None
+    recoveredts: float | None = None
+    startedbywatchdog: bool | None = None
 
 
 def port_open(host: str, port: int, timeout: float = 0.8) -> bool:
@@ -198,6 +204,59 @@ def try_start_opend() -> tuple[bool, str]:
         return (False, f"start_opend exception: {type(e).__name__}: {e}")
 
 
+def _port_retry_loop(
+    h: Health,
+    host: str,
+    port: int,
+    *,
+    ensure: bool,
+    retry_interval_sec: float,
+    retry_timeout_sec: float,
+    success_threshold: int,
+) -> bool:
+    """Run the retry window after an initial port-open failure.
+
+    Returns True if the port recovered within the window, False otherwise.
+    Populates audit fields on *h* in-place.
+    """
+    firstfail = time.time()
+    h.firstfailts = firstfail
+    h.retrycount = 0
+
+    # Optionally start OpenD on first failure (before the retry loop).
+    # action_taken is set here; get_global_state may overwrite it later
+    # with a finer-grained value (e.g. 'retry_once'), which is intentional.
+    if ensure:
+        ok_start, _msg = try_start_opend()
+        h.startedbywatchdog = ok_start
+        if ok_start:
+            h.action_taken = 'start_opend'
+        else:
+            h.action_taken = 'start_opend_failed'
+
+    consecutive_success = 0
+    deadline = firstfail + retry_timeout_sec
+
+    while time.time() < deadline:
+        # Sleep for at most retry_interval_sec but cap at remaining window
+        # so we don't overshoot the deadline.
+        remaining = deadline - time.time()
+        sleep_duration = min(retry_interval_sec, max(0.0, remaining))
+        time.sleep(sleep_duration)
+        h.retrycount += 1
+        if port_open(host, port):
+            consecutive_success += 1
+            if consecutive_success >= success_threshold:
+                h.recoveredts = time.time()
+                h.retryelapsedms = int((h.recoveredts - firstfail) * 1000)
+                return True
+        else:
+            consecutive_success = 0
+
+    h.retryelapsedms = int((time.time() - firstfail) * 1000)
+    return False
+
+
 def _emit(h: Health, as_json: bool) -> None:
     if not h.error_code and not h.ok:
         h.error_code, h.message = classify_watchdog_result(h.state, h.error)
@@ -218,30 +277,56 @@ def main():
     ap.add_argument('--port', type=int, default=11111)
     ap.add_argument('--ensure', action='store_true', help='try to start OpenD if port closed')
     ap.add_argument('--json', action='store_true')
+    # Retry-window parameters
+    ap.add_argument('--retry-enabled', action='store_true', default=False,
+                    help='enable retry window on initial port-open failure')
+    ap.add_argument('--retry-interval-sec', type=float, default=3.0,
+                    help='seconds between port checks inside the retry window (default: 3)')
+    ap.add_argument('--retry-timeout-sec', type=float, default=25.0,
+                    help='total retry window in seconds (default: 25)')
+    ap.add_argument('--success-threshold', type=int, default=2,
+                    help='consecutive successes required to declare healthy (default: 2)')
     args = ap.parse_args()
 
     h = Health(ok=False, ports_open=False)
 
     if not port_open(args.host, args.port):
         h.ports_open = False
-        if args.ensure:
-            ok, _msg = try_start_opend()
-            h.action_taken = 'start_opend' if ok else 'start_opend_failed'
+        if args.retry_enabled:
+            recovered = _port_retry_loop(
+                h,
+                args.host,
+                args.port,
+                ensure=args.ensure,
+                retry_interval_sec=args.retry_interval_sec,
+                retry_timeout_sec=args.retry_timeout_sec,
+                success_threshold=args.success_threshold,
+            )
+            if not recovered:
+                h.error = f"OpenD port not open: {args.host}:{args.port}"
+                h.error_code, h.message = classify_watchdog_result(None, h.error)
+                _emit(h, args.json)
+                raise SystemExit(2)
+        else:
+            # Legacy path: optionally start OpenD, then wait briefly.
+            if args.ensure:
+                ok, _msg = try_start_opend()
+                h.action_taken = 'start_opend' if ok else 'start_opend_failed'
 
-            # OpenD may take a few seconds to bind the port after starting.
-            # Wait briefly and re-check to avoid false alarms.
-            if ok:
-                deadline = time.time() + 8.0
-                while time.time() < deadline and (not port_open(args.host, args.port)):
-                    time.sleep(0.8)
-            else:
-                time.sleep(1.0)
+                # OpenD may take a few seconds to bind the port after starting.
+                # Wait briefly and re-check to avoid false alarms.
+                if ok:
+                    deadline = time.time() + 8.0
+                    while time.time() < deadline and (not port_open(args.host, args.port)):
+                        time.sleep(0.8)
+                else:
+                    time.sleep(1.0)
 
-        if not port_open(args.host, args.port):
-            h.error = f"OpenD port not open: {args.host}:{args.port}"
-            h.error_code, h.message = classify_watchdog_result(None, h.error)
-            _emit(h, args.json)
-            raise SystemExit(2)
+            if not port_open(args.host, args.port):
+                h.error = f"OpenD port not open: {args.host}:{args.port}"
+                h.error_code, h.message = classify_watchdog_result(None, h.error)
+                _emit(h, args.json)
+                raise SystemExit(2)
 
     h.ports_open = True
 
