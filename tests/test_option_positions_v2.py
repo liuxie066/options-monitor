@@ -36,7 +36,7 @@ def test_option_positions_v2_projects_baseline_events_and_manual_adjustment() ->
             "lots": [
                 {
                     "snapshot_lot_id": "lot_t0_nvda_put",
-                    "account": "LX",
+                    "account": "lx",
                     "broker": "富途证券（香港）",
                     "symbol": "nvda",
                     "option_type": "put",
