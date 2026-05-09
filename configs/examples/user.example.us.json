@@ -1,0 +1,25 @@
+{
+  "account_settings": {
+    "user1": {
+      "type": "futu",
+      "futu": {
+        "account_id": "REAL_12345678"
+      }
+    }
+  },
+  "symbols": [
+    {
+      "symbol": "NVDA",
+      "sell_put": {
+        "max_strike": 160
+      },
+      "sell_call": {
+        "enabled": true,
+        "min_strike": 190
+      },
+      "yield_enhancement": {
+        "enabled": true
+      }
+    }
+  ]
+}

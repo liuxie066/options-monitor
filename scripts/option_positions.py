@@ -11,6 +11,7 @@ import argparse
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from scripts.option_positions_core.domain import (
     effective_expiration_ymd,
@@ -32,6 +33,25 @@ from src.application.option_positions_facade import (
 )
 from src.application.option_positions_v2_service import load_option_positions_v2_records, refresh_option_positions_v2_state
 from src.application.option_positions_v2_service import reconcile_option_positions_snapshot, snapshot_current_positions_as_verification
+
+
+def _safe_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _optional_text(value: object) -> str | None:
+    text = str(value or "").strip()
+    return text or None
 
 
 def _iso_to_trade_time_ms(value: object) -> int | None:
@@ -61,8 +81,8 @@ def _identity_matches_payload(
     if option_type and normalize_option_type(payload.get('option_type')) != normalize_option_type(option_type):
         return False
     if strike is not None:
-        current_strike = payload.get('strike')
-        if current_strike is None or abs(float(current_strike) - float(strike)) >= 1e-9:
+        current_strike = _safe_float(payload.get('strike'))
+        if current_strike is None or abs(current_strike - float(strike)) >= 1e-9:
             return False
     if expiration_ymd:
         current_expiration = str(payload.get('expiration_ymd') or '').strip() or effective_expiration_ymd(payload)
@@ -85,7 +105,9 @@ def _related_legacy_void_rows(repo, *, related_event_ids: set[str], record_id: s
     if not callable(list_trade_events):
         return []
     rows: list[dict[str, object]] = []
-    for event in list_trade_events() or []:
+    raw_events = list_trade_events()
+    events = raw_events if isinstance(raw_events, list) else []
+    for event in events:
         if not isinstance(event, dict):
             continue
         if str(event.get("position_effect") or "").strip().lower() != "void":
@@ -134,7 +156,9 @@ def _related_legacy_adjust_rows(
     if not callable(list_trade_events):
         return []
     rows: list[dict[str, object]] = []
-    for event in list_trade_events() or []:
+    raw_events = list_trade_events()
+    events = raw_events if isinstance(raw_events, list) else []
+    for event in events:
         if not isinstance(event, dict):
             continue
         if str(event.get("position_effect") or "").strip().lower() != "adjust":
@@ -142,9 +166,9 @@ def _related_legacy_adjust_rows(
         if not _matches_event_selector(
             event,
             record_id=record_id,
-            account=fields.get("account"),
-            symbol=fields.get("symbol"),
-            option_type=fields.get("option_type"),
+            account=_optional_text(fields.get("account")),
+            symbol=_optional_text(fields.get("symbol")),
+            option_type=_optional_text(fields.get("option_type")),
             strike=effective_strike(fields),
             expiration_ymd=effective_expiration_ymd(fields),
         ):
@@ -263,7 +287,7 @@ def build_lot_event_history(repo, *, base: Path, record_id: str) -> list[dict[st
             related_event_ids.add(event_id)
             history.append(row)
     history.extend(_related_legacy_void_rows(repo, related_event_ids=related_event_ids, record_id=record_id))
-    history.sort(key=lambda row: (int(row.get('trade_time_ms') or 0), str(row.get('event_id') or '')))
+    history.sort(key=lambda row: (_safe_int(row.get('trade_time_ms')), str(row.get('event_id') or '')))
     return history
 
 
@@ -293,8 +317,8 @@ def _matches_lot_selector(
     if option_type and str(fields.get('option_type') or '').strip().lower() != str(option_type).strip().lower():
         return False
     if strike is not None:
-        current_strike = fields.get('strike')
-        if current_strike is None or abs(float(current_strike) - float(strike)) >= 1e-9:
+        current_strike = _safe_float(fields.get('strike'))
+        if current_strike is None or abs(current_strike - float(strike)) >= 1e-9:
             return False
     if expiration_ymd:
         current_expiration = exp_ms_to_ymd(fields.get('expiration')) or str(fields.get('expiration') or '')
@@ -326,8 +350,8 @@ def _matches_event_selector(
     if option_type and str(event.get('option_type') or '').strip().lower() != str(option_type).strip().lower():
         return False
     if strike is not None:
-        current_strike = event.get('strike')
-        if current_strike is None or abs(float(current_strike) - float(strike)) >= 1e-9:
+        current_strike = _safe_float(event.get('strike'))
+        if current_strike is None or abs(current_strike - float(strike)) >= 1e-9:
             return False
     if expiration_ymd and str(event.get('expiration_ymd') or '').strip() != str(expiration_ymd).strip():
         return False
@@ -335,11 +359,11 @@ def _matches_event_selector(
 
 
 def _should_show_projected_position(row: dict[str, object]) -> bool:
-    if int(row.get('baseline_contracts') or 0) > 0:
+    if _safe_int(row.get('baseline_contracts')) > 0:
         return True
-    if int(row.get('current_contracts') or 0) > 0:
+    if _safe_int(row.get('current_contracts')) > 0:
         return True
-    return bool(row.get('applied_events'))
+    return bool(row.get('applied_events') or row.get('applied_verifications'))
 
 
 def inspect_projection_state(
@@ -463,9 +487,10 @@ def inspect_projection_state(
         'current_lots': matched_current,
         'projected_lots': matched_projected,
         'persisted_baseline_snapshot_id': state.persisted_baseline_snapshot.get('snapshot_id'),
-        'projection_checkpoint_snapshot_id': baseline_snapshot.get('snapshot_id'),
+        'projection_checkpoint_snapshot_id': (state.latest_verification_snapshot or {}).get('snapshot_id'),
         'baseline_snapshot_id': baseline_snapshot.get('snapshot_id'),
         'verification_snapshot_count': len(state.verification_snapshots),
+        'accepted_verification_snapshot_count': len(state.accepted_verification_snapshots),
         'latest_verification_snapshot_id': (state.latest_verification_snapshot or {}).get('snapshot_id'),
         'baseline_lots': baseline_lots,
         'related_events': related_events,
@@ -583,7 +608,7 @@ def main():
             return
         print('# position_lots')
         for r in rows:
-            ccy = (r.get('currency') or 'USD').upper()
+            ccy = str(r.get('currency') or 'USD').upper()
             cash_txt = format_cash_secured_amount(r.get('cash_secured_amount'), ccy)
             print(
                 f"- {r['record_id']} | {r.get('account')} | {r.get('symbol')} | {r.get('side')} {r.get('option_type')} | "
@@ -736,6 +761,7 @@ def main():
             'baseline_snapshot_id': state.baseline_snapshot.get('snapshot_id'),
             'latest_verification_snapshot_id': (state.latest_verification_snapshot or {}).get('snapshot_id'),
             'verification_snapshot_count': int(len(state.verification_snapshots)),
+            'accepted_verification_snapshot_count': int(len(state.accepted_verification_snapshots)),
             'baseline_lot_count': int(len(state.baseline_snapshot.get('lots') or [])),
             'trade_event_count': int(len(state.events)),
             'position_lot_count': int(len(state.projection.get('positions') or [])),

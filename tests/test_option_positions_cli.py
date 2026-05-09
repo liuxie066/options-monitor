@@ -293,8 +293,10 @@ def test_option_positions_cli_reconcile_writes_verification_snapshot_and_report(
     payload = json.loads(capsys.readouterr().out)
     assert payload["snapshot_id"] == "verify_cli_1"
     assert payload["summary"]["quantity_mismatch"] == 1
+    assert payload["baseline_snapshot_id"] == "legacy_baseline"
     assert payload["projection_checkpoint_snapshot_id"] == "verify_cli_1"
     assert payload["latest_verification_snapshot_id"] == "verify_cli_1"
+    assert payload["accepted_verification_snapshot_count"] == 1
     assert (
         tmp_path
         / "output_shared"
@@ -395,8 +397,10 @@ def test_option_positions_cli_inspect_surfaces_verification_and_reconciliation_s
     payload = json.loads(capsys.readouterr().out)
     assert payload["persisted_baseline_snapshot_id"] == "legacy_baseline"
     assert payload["projection_checkpoint_snapshot_id"] == "verify_cli_2"
+    assert payload["baseline_snapshot_id"] == "legacy_baseline"
     assert payload["latest_verification_snapshot_id"] == "verify_cli_2"
     assert payload["verification_snapshot_count"] == 1
+    assert payload["accepted_verification_snapshot_count"] == 1
     assert payload["projected_lots"][0]["current_contracts"] == 2
     assert payload["latest_reconciliation_summary"]["quantity_mismatch"] == 1
     assert payload["latest_reconciliation_report"]["snapshot_id"] == "verify_cli_2"

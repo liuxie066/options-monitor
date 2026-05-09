@@ -93,8 +93,9 @@ Some send tests expect local runtime config files such as `config.us.json`. If t
 For config validation:
 
 ```bash
-python3 scripts/validate_config.py --config configs/examples/config.example.us.json
-python3 scripts/validate_config.py --config configs/examples/config.example.hk.json
+python3 -m pytest tests/test_layered_config.py
+./om config build --market us --user-config configs/examples/user.example.us.json --dry-run
+./om config build --market hk --user-config configs/examples/user.example.hk.json --dry-run
 ```
 
 ## Common Commands

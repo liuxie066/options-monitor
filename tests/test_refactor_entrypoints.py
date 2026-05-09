@@ -80,7 +80,7 @@ def test_multi_tick_script_path_help_bootstraps_repo_root() -> None:
     assert "--config" in proc.stdout
 
 
-def test_unified_cli_validate_command_works_with_example_config() -> None:
+def test_unified_cli_validate_command_works_with_example_config(example_config_path: Path) -> None:
     proc = subprocess.run(
         [
             str((ROOT / ".venv" / "bin" / "python").resolve()),
@@ -89,7 +89,7 @@ def test_unified_cli_validate_command_works_with_example_config() -> None:
             "config",
             "validate",
             "--config-path",
-            str((ROOT / "configs" / "examples" / "config.example.us.json").resolve()),
+            str(example_config_path),
         ],
         cwd=str(ROOT),
         capture_output=True,

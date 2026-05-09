@@ -1,0 +1,22 @@
+{
+  "account_settings": {
+    "user1": {
+      "type": "futu",
+      "futu": {
+        "account_id": "REAL_87654321"
+      }
+    }
+  },
+  "symbols": [
+    {
+      "symbol": "0700.HK",
+      "sell_put": {
+        "max_strike": 420
+      },
+      "sell_call": {
+        "enabled": true,
+        "min_strike": 550
+      }
+    }
+  ]
+}

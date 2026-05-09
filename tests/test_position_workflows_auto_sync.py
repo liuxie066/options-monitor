@@ -178,6 +178,55 @@ def test_execute_manual_close_warns_when_best_effort_sync_fails(monkeypatch, tmp
     assert "post-write Feishu sync skipped" in capsys.readouterr().err
 
 
+def test_execute_manual_close_full_close_retry_is_idempotent_without_masking_validation(tmp_path: Path) -> None:
+    import scripts.option_positions_core.service as svc
+    import src.application.position_workflows as workflows
+    from scripts.option_positions_core.domain import OpenPositionCommand
+
+    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    svc.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="0700.HK",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="HKD",
+            strike=480.0,
+            multiplier=100,
+            expiration_ymd="2026-04-29",
+            premium_per_share=3.93,
+            opened_at_ms=1000,
+        ),
+    )
+    lot = repo.list_position_lots()[0]
+
+    first = workflows.execute_manual_close(
+        repo,
+        record_id=lot["record_id"],
+        contracts_to_close=1,
+        close_price=1.2,
+        close_reason="manual_buy_to_close",
+        dry_run=False,
+    )
+    second = workflows.execute_manual_close(
+        repo,
+        record_id=lot["record_id"],
+        contracts_to_close=1,
+        close_price=1.2,
+        close_reason="manual_buy_to_close",
+        dry_run=False,
+    )
+
+    assert first["result"]["created"] is True
+    assert second["idempotent_duplicate"] is True
+    assert second["result"]["created"] is False
+    assert second["result"]["event_id"] == first["result"]["event_id"]
+    assert len(repo.list_trade_events()) == 2
+
+
 def test_execute_manual_open_keeps_local_lot_when_best_effort_sync_fails(monkeypatch, tmp_path: Path, capsys) -> None:
     import scripts.option_positions_core.service as svc
     import src.application.position_workflows as workflows

@@ -12,7 +12,12 @@ from scripts.option_positions_core.domain import (
     build_open_fields,
     effective_expiration_ymd,
 )
-from scripts.option_positions_core.service import persist_manual_adjust_event, persist_manual_close_event, persist_manual_open_event
+from scripts.option_positions_core.service import (
+    existing_manual_close_event_result,
+    persist_manual_adjust_event,
+    persist_manual_close_event,
+    persist_manual_open_event,
+)
 from scripts.sync_option_positions_to_feishu import sync_single_option_position_record
 from scripts.trade_event_normalizer import NormalizedTradeDeal
 from src.application.option_positions_v2_service import (
@@ -84,7 +89,8 @@ def _apply_with_optional_sync(
     verification_snapshot_id: str | None = None,
     verification_note: str | None = None,
 ) -> dict[str, Any]:
-    native_event_result = _append_native_event(repo, payload=native_event)
+    idempotent_duplicate = result.get("created") is False
+    native_event_result = None if idempotent_duplicate else _append_native_event(repo, payload=native_event)
     verification_snapshot = _write_verification_snapshot(
         repo,
         snapshot_id=verification_snapshot_id,
@@ -105,7 +111,13 @@ def _apply_with_optional_sync(
     except Exception as exc:
         print(f"[WARN] option_positions v2 refresh skipped ({type(exc).__name__}): {exc}", file=sys.stderr)
     sync_result = _auto_sync_record_if_possible(repo, record_id=record_id) if record_id else None
-    return payload | {"mode": "applied", "result": result, "v2_result": v2_result, "sync_result": sync_result}
+    return payload | {
+        "mode": "applied",
+        "result": result,
+        "v2_result": v2_result,
+        "sync_result": sync_result,
+        "idempotent_duplicate": bool(idempotent_duplicate),
+    }
 
 
 def _manual_open_record_id(result: dict[str, Any]) -> str:
@@ -131,7 +143,7 @@ def _build_trade_open_command(deal: NormalizedTradeDeal) -> OpenPositionCommand:
         strike=(float(deal.strike) if deal.strike is not None else None),
         multiplier=float(deal.multiplier) if deal.multiplier is not None else None,
         expiration_ymd=(str(deal.expiration_ymd or "").strip() or None),
-        premium_per_share=float(deal.price),
+        premium_per_share=float(deal.price or 0.0),
         note=(
             f"source=opend_push "
             f"deal_id={deal.deal_id} "
@@ -167,7 +179,7 @@ def preview_trade_close(repo: Any, *, matches: list[Any], deal: NormalizedTradeD
                 "patch": build_close_patch(
                     fields,
                     contracts_to_close=match.contracts_to_close,
-                    close_price=float(deal.price),
+                    close_price=(float(deal.price) if deal.price is not None else None),
                     close_reason=close_reason,
                     as_of_ms=deal.trade_time_ms,
                 ),
@@ -274,6 +286,23 @@ def execute_manual_close(
     dry_run: bool,
 ) -> dict[str, Any]:
     fields = repo.get_record_fields(record_id)
+    if not dry_run:
+        duplicate_result = existing_manual_close_event_result(
+            repo,
+            record_id=record_id,
+            fields=fields,
+            contracts_to_close=int(contracts_to_close),
+            close_price=close_price,
+            close_reason=close_reason,
+        )
+        if duplicate_result is not None:
+            return _apply_with_optional_sync(
+                repo,
+                record_id=record_id,
+                result=duplicate_result,
+                payload={"fields": fields, "patch": {}, "duplicate_checked_before_patch": True},
+                native_event=None,
+            )
     patch = build_close_patch(
         fields,
         contracts_to_close=int(contracts_to_close),
@@ -351,6 +380,9 @@ def execute_manual_adjust(
         multiplier=multiplier,
         opened_at_ms=opened_at_ms,
     )
+    raw_target_contracts = patch.get("contracts_open")
+    if raw_target_contracts is None:
+        raw_target_contracts = fields.get("contracts_open") or fields.get("contracts") or 0
     return _apply_with_optional_sync(
         repo,
         record_id=record_id,
@@ -371,11 +403,7 @@ def execute_manual_adjust(
             "expiration_ymd": expiration_ymd or effective_expiration_ymd(fields),
             "currency": fields.get("currency"),
             "multiplier": patch.get("multiplier", fields.get("multiplier")),
-            "target_contracts": int(
-                patch.get("contracts_open")
-                if patch.get("contracts_open") is not None
-                else fields.get("contracts_open") or fields.get("contracts") or 0
-            ),
+            "target_contracts": int(raw_target_contracts or 0),
             "snapshot_lot_id": record_id,
         },
         verification_snapshot_id=f"verify-{result.get('event_id')}",

@@ -1,7 +1,7 @@
 # options-monitor 配置与表结构说明（实战版）
 
 > 目标：你只要维护：
-> - 仓内 `config.us.json` / `config.hk.json`（策略与监控）
+> - `configs/user.us.json` / `configs/user.hk.json`（账号与 symbols；通知目标等私有覆盖按需放这里）
 > - `portfolio.data_config`（最小配置下只需要 SQLite `option_positions` 路径）
 > - Feishu App 凭证和 Bitable 配置是可选项，只在 `holdings` / `external_holdings` 数据源场景需要；`option_positions` 的稳态读写主存储仍是 SQLite
 
@@ -9,22 +9,44 @@
 
 ## 0) 最终保留哪几个配置文件？
 
-### 你实际维护的运行时文件
+### 推荐编辑入口（分层配置）
+- `configs/system.json`：系统默认值，通常不需要用户改
+- `configs/user.us.json`
+- `configs/user.hk.json`
+- `secrets/portfolio.sqlite.json`
+- `secrets/portfolio.external_holdings.json`（可选，只在 external_holdings 账号场景需要）
+
+用户日常只维护 `configs/user.us.json` / `configs/user.hk.json` 里的账号和 symbols；如果启用通知，再在同一个 user 文件里补 `notifications.target` 这类私有覆盖。运行前生成 canonical runtime config：
+
+```bash
+cp configs/examples/user.example.us.json configs/user.us.json
+cp configs/examples/user.example.hk.json configs/user.hk.json
+./om config build --market us
+./om config build --market hk
+```
+
+生成产物仍是 runtime 唯一入口：
+- `config.us.json`
+- `config.hk.json`
+
+### 兼容的运行时文件
 - `config.us.json`
 - `config.hk.json`
 - `secrets/portfolio.sqlite.json`
 - `secrets/portfolio.external_holdings.json`（可选，只在 external_holdings 账号场景需要）
-- `secrets/portfolio.feishu.json`（可选，只在 `holdings` / `external_holdings` 数据源场景需要）
 
 ### 仓库里保留的模板文件
-- `configs/examples/config.example.us.json`
-- `configs/examples/config.example.hk.json`
+- `configs/system.json`
+- `configs/examples/user.example.us.json`
+- `configs/examples/user.example.hk.json`
 - `configs/examples/portfolio.sqlite.example.json`
 - `configs/examples/portfolio.external_holdings.example.json`
-- `configs/examples/portfolio.feishu.example.json`
+- `configs/examples/notifications.feishu.app.example.json`
+- `configs/examples/openclaw.profile.example.json`
 
 ### 最小配置和补充配置怎么区分？
-- 最小配置：`config.us.json` / `config.hk.json` + `secrets/portfolio.sqlite.json`
+- 最小编辑配置：`configs/user.us.json` / `configs/user.hk.json` 里的账号和 symbols；通知目标等私有字段属于按需覆盖
+- 最小运行配置：生成后的 `config.us.json` / `config.hk.json` + `secrets/portfolio.sqlite.json`
 - 补充配置：在同一套结构上继续补 `notifications.*`、`runtime.*`、`alert_policy.change_annual_threshold`、`intake.*`、`portfolio.source_by_account`、`feishu.*`
 - 不再维护“两套 schema”或“两份不同风格文档”；只有一套结构，只是填写程度不同。
 
@@ -434,12 +456,6 @@
   }
 }
 ```
-
-### 可选方式（启用 Feishu holdings 数据源）
-- 从 `configs/examples/portfolio.feishu.example.json` 复制到本地安全路径，例如 `secrets/portfolio.feishu.json` 或 `/opt/options-monitor/secrets/portfolio.feishu.json`。
-- 在该文件内填写 `feishu.app_id/app_secret` 和 `tables.holdings`。
-- 如需让 `option_positions` 支持空库 bootstrap 或写回远端镜像，再额外填写 `tables.option_positions`。
-- 在 `config.us.json` / `config.hk.json` 内把 `portfolio.data_config` 指向该文件。
 
 ### 可选方式（增加 external_holdings 账号）
 - 先执行：

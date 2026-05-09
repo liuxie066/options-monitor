@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from typing import Any
+
+import pytest  # pyright: ignore[reportMissingImports]
 
 BASE = Path(__file__).resolve().parents[1]
 if str(BASE) not in sys.path:
@@ -500,8 +503,6 @@ def test_sqlite_repo_enables_wal_and_busy_timeout(tmp_path: Path) -> None:
 
 def test_sqlite_trade_event_upsert_is_idempotent_and_rejects_conflicting_payload(tmp_path: Path) -> None:
     from dataclasses import replace
-
-    import pytest
 
     import scripts.option_positions_core.service as svc
     from scripts.option_positions_core.ledger import TradeEvent
@@ -1556,7 +1557,7 @@ def test_rebuild_position_lots_reports_unmatched_heuristic_close_contracts(tmp_p
     from scripts.option_positions_core.ledger import TradeEvent
 
     def make_event(**overrides: object) -> TradeEvent:
-        payload = {
+        payload: dict[str, Any] = {
             "event_id": "open-1",
             "source_type": "broker_trade_event",
             "source_name": "opend_push",
@@ -1727,8 +1728,59 @@ def test_persist_manual_close_event_updates_position_lot(tmp_path: Path) -> None
     assert events[-1]["raw_payload"]["close_target_broker"] == "富途"
 
 
+def test_persist_manual_close_event_is_idempotent_on_retry(tmp_path: Path) -> None:
+    import scripts.option_positions_core.service as svc
+    from scripts.option_positions_core.domain import OpenPositionCommand
+
+    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    svc.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="0700.HK",
+            option_type="put",
+            side="short",
+            contracts=2,
+            currency="HKD",
+            strike=480.0,
+            multiplier=100,
+            expiration_ymd="2026-04-29",
+            premium_per_share=3.93,
+            opened_at_ms=1000,
+        ),
+    )
+
+    lot = repo.list_position_lots()[0]
+    result1 = svc.persist_manual_close_event(
+        repo,
+        record_id=lot["record_id"],
+        fields=lot["fields"],
+        contracts_to_close=1,
+        close_price=1.2,
+        close_reason="manual_buy_to_close",
+        as_of_ms=2000,
+    )
+    result2 = svc.persist_manual_close_event(
+        repo,
+        record_id=lot["record_id"],
+        fields=repo.get_position_lot_fields(lot["record_id"]),
+        contracts_to_close=1,
+        close_price=1.2,
+        close_reason="manual_buy_to_close",
+        as_of_ms=3000,
+    )
+
+    assert result1["created"] is True
+    assert result2["created"] is False
+    assert result1["event_id"] == result2["event_id"]
+    lots = repo.list_position_lots()
+    assert lots[0]["fields"]["contracts_open"] == 1
+    assert lots[0]["fields"]["contracts_closed"] == 1
+    assert len(repo.list_trade_events()) == 2
+
+
 def test_persist_manual_close_event_requires_broker_on_position_lot(tmp_path: Path) -> None:
-    import pytest
     import scripts.option_positions_core.service as svc
 
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
@@ -1758,7 +1810,6 @@ def test_persist_manual_close_event_requires_broker_on_position_lot(tmp_path: Pa
 
 
 def test_persist_manual_close_event_rejects_mismatched_record_id_and_fields(tmp_path: Path) -> None:
-    import pytest
     import scripts.option_positions_core.service as svc
     from scripts.option_positions_core.domain import OpenPositionCommand
 
@@ -1945,8 +1996,53 @@ def test_persist_manual_adjust_event_updates_position_lot_projection(tmp_path: P
     assert adjusted["cash_secured_amount"] == 21000.0
 
 
+def test_persist_manual_adjust_event_is_idempotent_on_retry(tmp_path: Path) -> None:
+    import scripts.option_positions_core.service as svc
+    from scripts.option_positions_core.domain import OpenPositionCommand
+
+    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    svc.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="NVDA",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=100.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            premium_per_share=2.5,
+            opened_at_ms=1000,
+        ),
+    )
+    lot = repo.list_position_lots()[0]
+
+    result1 = svc.persist_manual_adjust_event(
+        repo,
+        record_id=lot["record_id"],
+        fields=lot["fields"],
+        premium_per_share=3.1,
+        as_of_ms=2000,
+    )
+    result2 = svc.persist_manual_adjust_event(
+        repo,
+        record_id=lot["record_id"],
+        fields=repo.get_position_lot_fields(lot["record_id"]),
+        premium_per_share=3.1,
+        as_of_ms=3000,
+    )
+
+    assert result1["created"] is True
+    assert result2["created"] is False
+    assert result1["event_id"] == result2["event_id"]
+    assert repo.get_position_lot_fields(lot["record_id"])["premium"] == 3.1
+    assert len(repo.list_trade_events()) == 2
+
+
 def test_persist_manual_adjust_event_rejects_mismatched_record_id_and_fields(tmp_path: Path) -> None:
-    import pytest
     import scripts.option_positions_core.service as svc
     from scripts.option_positions_core.domain import OpenPositionCommand
 
@@ -2040,7 +2136,6 @@ def test_voiding_adjust_event_restores_prior_projection_state(tmp_path: Path) ->
 
 
 def test_load_option_positions_repo_raises_on_malformed_feishu_config(tmp_path: Path) -> None:
-    import pytest
     import scripts.option_positions_core.service as svc
 
     data_config = tmp_path / "data.json"
@@ -2062,7 +2157,6 @@ def test_load_option_positions_repo_raises_on_malformed_feishu_config(tmp_path: 
 
 
 def test_load_option_positions_repo_rejects_non_object_feishu_config(tmp_path: Path) -> None:
-    import pytest
     import scripts.option_positions_core.service as svc
 
     data_config = tmp_path / "data.json"

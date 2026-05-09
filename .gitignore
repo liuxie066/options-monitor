@@ -39,6 +39,7 @@ htmlcov/
 # Local runtime configs (do not commit)
 config.us.json
 config.hk.json
+configs/user.*.json
 config.market_us.json
 config.market_hk.json
 config.scheduled.json

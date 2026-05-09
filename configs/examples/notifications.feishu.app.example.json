@@ -1,6 +1,6 @@
 {
   "feishu": {
-    "app_id": "cli_xxx",
-    "app_secret": "xxx"
+    "app_id": "cli_YOUR_APP_ID",
+    "app_secret": "YOUR_APP_SECRET"
   }
 }
