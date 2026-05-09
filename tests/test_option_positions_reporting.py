@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
 from scripts.option_positions_core.domain import BUY_TO_CLOSE, EXPIRE_AUTO_CLOSE, parse_exp_to_ms
 from scripts.option_positions_core.reporting import (
     build_income_row,
@@ -269,6 +272,54 @@ def test_build_monthly_income_report_leaves_cny_fields_empty_without_rates() -> 
             "premium_positions": 1,
         }
     ]
+
+
+def test_facade_monthly_income_report_uses_canonical_compat_records() -> None:
+    import src.application.option_positions_facade as facade
+
+    class _Repo:
+        def list_position_lots(self) -> list[dict]:
+            return [
+                {
+                    "record_id": "rec_1",
+                    "fields": {
+                        "broker": "富途证券（香港）",
+                        "account": "LX",
+                        "symbol": "0700.HK",
+                        "side": "short",
+                        "status": "close",
+                        "contracts": 2,
+                        "contracts_closed": 2,
+                        "currency": "港币",
+                        "premium": 3.93,
+                        "close_price": 1.2,
+                        "close_type": BUY_TO_CLOSE,
+                        "opened_at": _ms("2026-04-02"),
+                        "closed_at": _ms("2026-04-20"),
+                        "note": "multiplier=100",
+                    },
+                }
+            ]
+
+    with TemporaryDirectory() as td:
+        base = Path(td)
+        original = facade.get_exchange_rates_or_fetch_latest
+        facade.get_exchange_rates_or_fetch_latest = lambda **_kwargs: {"rates": {"HKDCNY": 0.92}}
+        try:
+            report = facade.build_option_positions_monthly_income_report(
+                _Repo(),
+                base=base,
+                broker="富途",
+                account="lx",
+                month="2026-04",
+            )
+        finally:
+            facade.get_exchange_rates_or_fetch_latest = original
+
+    assert report["warnings"] == []
+    assert report["summary"][0]["account"] == "lx"
+    assert report["summary"][0]["currency"] == "HKD"
+    assert report["summary"][0]["realized_gross"] == 546.0
 
 
 def test_build_monthly_income_report_skips_market_only_rows_for_broker_filter() -> None:

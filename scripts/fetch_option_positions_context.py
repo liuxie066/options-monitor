@@ -17,25 +17,14 @@ from datetime import datetime, timezone
 
 from domain.domain.expiration_dates import (
     EXPIRATION_DATE_TZ,
-    expiration_timestamp_to_date,
-    expiration_timestamp_to_ymd,
 )
-from scripts.feishu_bitable import safe_float, parse_note_kv
-from scripts.option_positions_core.domain import (
-    effective_contracts,
-    effective_contracts_closed,
-    effective_contracts_open,
-    effective_multiplier,
-    normalize_account,
-    normalize_broker,
-    normalize_close_type,
-    normalize_currency,
-    normalize_option_type,
-    normalize_side,
-    normalize_status,
-)
+from scripts.option_positions_core.domain import normalize_account, normalize_broker
 from scripts.io_utils import atomic_write_json
-from src.application.option_positions_facade import load_option_position_records, resolve_option_position_records
+from src.application.option_positions_facade import (
+    build_option_position_view,
+    canonicalize_option_position_record,
+    resolve_option_position_records,
+)
 
 # Local helper to get exchange rates (USDCNY/HKDCNY) for base-currency normalization.
 # This file lives in the same scripts/ directory, so plain import works.
@@ -53,21 +42,17 @@ def build_context(records: list[dict], broker: str, account: str | None = None, 
 
     broker_norm = normalize_broker(broker)
     account_norm = normalize_account(account) if account else None
-    selected_items: list[dict] = []  # each: {record_id, fields}
+    selected_items: list[dict] = []
     for rec in records:
-        fields = rec.get("fields") or {}
+        view = build_option_position_view(rec)
+        fields = view.get("fields") or {}
         if not fields:
             continue
-        if broker_norm:
-            rec_broker = normalize_broker(fields.get("broker"))
-            if rec_broker != broker_norm:
-                continue
-        if account_norm and normalize_account(fields.get("account")) != account_norm:
+        if broker_norm and view.get("broker") != broker_norm:
             continue
-        selected_items.append({
-            'record_id': rec.get('record_id') or rec.get('id'),
-            'fields': fields,
-        })
+        if account_norm and view.get("account") != account_norm:
+            continue
+        selected_items.append(view)
 
     # Aggregate open short positions for constraints
     locked_shares_by_symbol: dict[str, int] = {}
@@ -101,60 +86,54 @@ def build_context(records: list[dict], broker: str, account: str | None = None, 
 
     for it in selected_items:
         f = it.get('fields') or {}
-        note = f.get('note') or ''
-        status = normalize_status(f.get("status") or parse_note_kv(note, 'status'))
+        status = it.get("status")
         if status and status != "open":
             continue
-        contracts_total = effective_contracts(f)
-        contracts_open = effective_contracts_open(f)
-        contracts_closed = effective_contracts_closed(f)
+        contracts_total = int(it.get("contracts") or 0)
+        contracts_open = int(it.get("contracts_open") or 0)
+        contracts_closed = int(it.get("contracts_closed") or 0)
         if contracts_open <= 0:
             continue
-        expiration_ymd = expiration_timestamp_to_ymd(f.get("expiration"))
-        expiration_date = expiration_timestamp_to_date(f.get("expiration"))
+        expiration_date = it.get("expiration_date")
         days_to_expiration = (expiration_date - as_of_date).days if expiration_date is not None else None
 
         open_positions_min.append({
             'record_id': it.get('record_id'),
-            'position_id': (f.get('position_id') or '').strip() or None,
-            'broker': normalize_broker(f.get('broker')),
-            'account': normalize_account(f.get('account')) or f.get('account'),
-            'symbol': (f.get('symbol') or '').strip().upper() or None,
-            'option_type': normalize_option_type(f.get('option_type') or parse_note_kv(note, 'option_type')) or None,
-            'side': normalize_side(f.get('side') or parse_note_kv(note, 'side')) or None,
+            'position_id': it.get('position_id'),
+            'broker': it.get('broker'),
+            'account': it.get('account'),
+            'symbol': it.get('symbol'),
+            'option_type': it.get('option_type'),
+            'side': it.get('side'),
             'status': 'open',
-            'contracts': f.get('contracts'),
+            'contracts': contracts_total,
             'contracts_open': contracts_open,
             'contracts_closed': contracts_closed,
-            'currency': normalize_currency(f.get('currency')) or f.get('currency'),
-            'cash_secured_amount': f.get('cash_secured_amount'),
-            'underlying_share_locked': f.get('underlying_share_locked') or f.get('underlying_shares_locked'),
-            'strike': f.get('strike'),
-            'multiplier': effective_multiplier(f),
-            'premium': f.get('premium') if f.get('premium') is not None else parse_note_kv(note, 'premium_per_share'),
-            'expiration': f.get('expiration'),
-            'expiration_ymd': expiration_ymd,
+            'currency': it.get('currency'),
+            'cash_secured_amount': it.get('cash_secured_amount'),
+            'underlying_share_locked': it.get('underlying_share_locked'),
+            'strike': it.get('strike'),
+            'multiplier': it.get('multiplier'),
+            'premium': it.get('premium'),
+            'expiration': it.get('expiration'),
+            'expiration_ymd': it.get('expiration_ymd'),
             'days_to_expiration': days_to_expiration,
-            'opened_at': f.get('opened_at'),
-            'last_action_at': f.get('last_action_at'),
-            'close_type': normalize_close_type(f.get('close_type')) if f.get('close_type') else None,
+            'opened_at': it.get('opened_at'),
+            'last_action_at': it.get('last_action_at'),
+            'close_type': it.get('close_type'),
             'close_reason': f.get('close_reason'),
-            'note': note,
+            'note': it.get('note'),
         })
 
-        symbol = (f.get("symbol") or "").strip().upper()
+        symbol = str(it.get("symbol") or "").strip().upper()
         if not symbol:
             continue
 
-        option_type = normalize_option_type(f.get("option_type") or parse_note_kv(note, 'option_type'))
-        side = normalize_side(f.get("side") or parse_note_kv(note, 'side'))
-
-        locked = safe_float(f.get("underlying_share_locked"))
-        if locked is None:
-            locked = safe_float(f.get("underlying_shares_locked"))
-
-        cash_secured = safe_float(f.get("cash_secured_amount"))
-        currency = normalize_currency(f.get('currency'))
+        option_type = it.get("option_type")
+        side = it.get("side")
+        locked = it.get("underlying_share_locked")
+        cash_secured = it.get("cash_secured_amount")
+        currency = it.get("currency")
 
         if side == "short" and option_type == "call":
             if locked is None:
@@ -212,13 +191,12 @@ def build_shared_context(records: list[dict], broker: str, rates: dict | None = 
     broker_norm = normalize_broker(broker)
     accounts: set[str] = set()
     for rec in records:
-        fields = rec.get("fields") or {}
+        fields = canonicalize_option_position_record(rec).get("fields") or {}
         if not fields:
             continue
-        rec_broker = normalize_broker(fields.get("broker"))
-        if broker_norm and rec_broker != broker_norm:
+        if broker_norm and fields.get("broker") != broker_norm:
             continue
-        acct = normalize_account(fields.get("account"))
+        acct = fields.get("account")
         if acct:
             accounts.add(acct)
     by_account = {acct: build_context(records, broker=broker_norm, account=acct, rates=rates) for acct in sorted(accounts)}
