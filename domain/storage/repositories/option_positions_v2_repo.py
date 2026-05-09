@@ -66,6 +66,9 @@ def write_current_projection(base: Path, payload: dict[str, Any]) -> Path:
 
 def write_reconciliation_report(base: Path, payload: dict[str, Any]) -> dict[str, Path]:
     report_id = str((payload or {}).get("report_id") or "reconciliation").strip()
+    if report_id == "reconciliation":
+        generated_at = str((payload or {}).get("generated_at_utc") or "").strip().replace(":", "-")
+        report_id = f"reconciliation-{generated_at or 'latest'}"
     return {
         "report": _write_json(
             _state_dir(base) / "reconciliation_reports" / f"{report_id}.json",

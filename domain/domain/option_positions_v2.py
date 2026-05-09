@@ -60,7 +60,7 @@ def _normalize_event_kind(value: Any) -> str:
     event_kind = str(value or "").strip().lower()
     if event_kind not in ALLOWED_EVENT_KINDS:
         raise ValueError(
-            "event_kind must be one of: close_trade, manual_adjustment, open_trade"
+            "event_kind must be one of: open_trade, close_trade, manual_adjustment"
         )
     return event_kind
 
@@ -548,7 +548,7 @@ def _legacy_trade_side_to_position_side(*, side: Any, position_effect: str) -> s
         raise ValueError(
             "unsupported legacy trade side mapping: "
             f"effect={effect_norm or 'missing'} side={side_norm or 'missing'}. "
-            "Valid combinations are: (open, sell), (open, buy), (close, buy), (close, sell)"
+            "Valid combinations are: open+sell, open+buy, close+buy, close+sell"
         )
     return position_side
 
