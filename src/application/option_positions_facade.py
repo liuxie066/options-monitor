@@ -23,6 +23,7 @@ from scripts.option_positions_core.domain import (
 )
 from scripts.option_positions_core.reporting import build_monthly_income_report
 from scripts.option_positions_core.service import load_option_positions_repo, require_option_positions_read_repo
+from src.application.option_positions_v2_service import load_option_positions_v2_records
 
 
 def resolve_option_positions_repo(*, base: Path, data_config: str | Path | None) -> tuple[Path, Any]:
@@ -30,7 +31,13 @@ def resolve_option_positions_repo(*, base: Path, data_config: str | Path | None)
     return resolved_data_config, load_option_positions_repo(resolved_data_config)
 
 
-def load_option_position_records(repo: Any) -> list[dict[str, Any]]:
+def load_option_position_records(repo: Any, *, base: Path | None = None) -> list[dict[str, Any]]:
+    try:
+        compat = load_option_positions_v2_records(base=base, repo=repo)
+        if compat.records:
+            return compat.records
+    except Exception:
+        pass
     try:
         primary_repo = require_option_positions_read_repo(repo)
     except Exception:
@@ -52,7 +59,7 @@ def load_option_position_records(repo: Any) -> list[dict[str, Any]]:
 
 def resolve_option_position_records(*, base: Path, data_config: str | Path | None) -> tuple[Path, Any, list[dict[str, Any]]]:
     resolved_data_config, repo = resolve_option_positions_repo(base=base, data_config=data_config)
-    return resolved_data_config, repo, load_option_position_records(repo)
+    return resolved_data_config, repo, load_option_position_records(repo, base=base)
 
 
 def list_position_rows(
@@ -73,7 +80,7 @@ def list_position_rows(
         if as_of_ms is not None
         else datetime.now(EXPIRATION_DATE_TZ).date()
     )
-    for item in repo.list_records(page_size=200):
+    for item in load_option_position_records(repo):
         record_id = item.get("record_id")
         fields = item.get("fields") or {}
         if normalized_broker and normalize_broker(fields.get("broker")) != normalized_broker:
@@ -126,7 +133,7 @@ def build_option_positions_monthly_income_report(
     month: str | None = None,
 ) -> dict[str, Any]:
     return build_monthly_income_report(
-        repo.list_records(page_size=500),
+        load_option_position_records(repo, base=base),
         account=account,
         broker=broker,
         month=month,

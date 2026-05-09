@@ -24,6 +24,7 @@ from domain.domain.option_positions_v2 import (
 )
 from domain.storage.repositories import option_positions_v2_repo
 from scripts.option_positions_core.domain import parse_exp_to_ms
+from src.application.option_positions_facade import load_option_position_records
 
 
 def test_option_positions_v2_projects_baseline_events_and_manual_adjustment() -> None:
@@ -353,3 +354,34 @@ def test_option_positions_v2_repo_persists_snapshot_event_and_report() -> None:
     assert latest_report["summary"]["matched"] == 1
 
     shutil.rmtree(root, ignore_errors=True)
+
+
+def test_option_positions_v2_facade_returns_projection_compatible_rows(tmp_path: Path) -> None:
+    import scripts.option_positions_core.service as svc
+    from scripts.option_positions_core.domain import OpenPositionCommand
+
+    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    repo.data_config_path = tmp_path / "data.json"  # type: ignore[attr-defined]
+    svc.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="NVDA",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=100.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            premium_per_share=1.5,
+            opened_at_ms=1000,
+        ),
+    )
+
+    records = load_option_position_records(repo, base=tmp_path)
+    assert len(records) == 1
+    assert records[0]["fields"]["position_key"]
+    assert records[0]["fields"]["contracts_open"] == 1
+    assert records[0]["fields"]["expiration_ymd"] == "2026-06-19"

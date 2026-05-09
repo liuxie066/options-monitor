@@ -32,7 +32,7 @@ from scripts.option_positions_core.service import (
     require_option_positions_read_repo,
     require_option_positions_sync_meta_repo,
 )
-from src.application.option_positions_facade import resolve_option_positions_repo
+from src.application.option_positions_facade import load_option_position_records, resolve_option_positions_repo
 
 SYNC_HASH_EXCLUDED_FIELDS = {
     "last_synced_at",
@@ -398,6 +398,7 @@ def sync_option_positions(
     *,
     repo: Any,
     data_config: Path,
+    base: Path | None = None,
     apply_mode: bool,
     only_record_id: str | None = None,
     only_open: bool = False,
@@ -410,10 +411,9 @@ def sync_option_positions(
         primary_repo = require_option_positions_sync_meta_repo(repo) if apply_mode else require_option_positions_read_repo(repo)
     except TypeError as exc:
         raise SystemExit(str(exc))
-    list_position_lots = primary_repo.list_position_lots
     update_position_lot_fields = getattr(primary_repo, "update_position_lot_fields", None)
 
-    local_records = list_position_lots()
+    local_records = load_option_position_records(repo, base=base)
     candidates = select_candidates(
         local_records,
         only_record_id=only_record_id,
@@ -564,6 +564,7 @@ def sync_single_option_position_record(*, repo: Any, data_config: Path, record_i
     rows = sync_option_positions(
         repo=repo,
         data_config=data_config,
+        base=Path(data_config).resolve().parent,
         apply_mode=apply_mode,
         only_record_id=record_id,
         only_open=False,
@@ -600,6 +601,7 @@ def main() -> None:
     action_rows = sync_option_positions(
         repo=repo,
         data_config=data_config,
+        base=base,
         apply_mode=apply_mode,
         only_record_id=args.only_record_id,
         only_open=bool(args.only_open),
@@ -613,7 +615,7 @@ def main() -> None:
         table_ref,
         lambda token: bitable_fields(token, table_ref.app_token, table_ref.table_id),
     )
-    local_records = getattr(getattr(repo, "primary_repo", repo), "list_position_lots")()
+    local_records = load_option_position_records(repo, base=base)
     candidates = select_candidates(
         local_records,
         only_record_id=args.only_record_id,
