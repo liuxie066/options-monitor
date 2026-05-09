@@ -29,6 +29,10 @@ EVENT_KIND_OPEN_TRADE = "open_trade"
 EVENT_KIND_CLOSE_TRADE = "close_trade"
 EVENT_KIND_MANUAL_ADJUSTMENT = "manual_adjustment"
 
+SNAPSHOT_ACCEPTANCE_ACCEPTED = "accepted"
+SNAPSHOT_ACCEPTANCE_PENDING = "pending"
+SNAPSHOT_ACCEPTANCE_REJECTED = "rejected"
+
 ALLOWED_SNAPSHOT_TYPES = {SNAPSHOT_TYPE_BASELINE, SNAPSHOT_TYPE_VERIFICATION}
 ALLOWED_EVENT_KINDS = {
     EVENT_KIND_OPEN_TRADE,
@@ -36,6 +40,11 @@ ALLOWED_EVENT_KINDS = {
     EVENT_KIND_MANUAL_ADJUSTMENT,
 }
 ALLOWED_VERIFICATION_STATUS = {"confirmed", "unverified", "disputed"}
+ALLOWED_SNAPSHOT_ACCEPTANCE_STATUS = {
+    SNAPSHOT_ACCEPTANCE_ACCEPTED,
+    SNAPSHOT_ACCEPTANCE_PENDING,
+    SNAPSHOT_ACCEPTANCE_REJECTED,
+}
 
 
 def utc_now_iso() -> str:
@@ -69,6 +78,13 @@ def _normalize_verification_status(value: Any) -> str:
     status = str(value or "unverified").strip().lower()
     if status not in ALLOWED_VERIFICATION_STATUS:
         raise ValueError("verification_status must be confirmed, unverified, or disputed")
+    return status
+
+
+def _normalize_snapshot_acceptance_status(value: Any) -> str:
+    status = str(value or SNAPSHOT_ACCEPTANCE_ACCEPTED).strip().lower()
+    if status not in ALLOWED_SNAPSHOT_ACCEPTANCE_STATUS:
+        raise ValueError("acceptance_status must be accepted, pending, or rejected")
     return status
 
 
@@ -194,6 +210,46 @@ def normalize_snapshot_lot(raw: dict[str, Any] | Any, *, snapshot_id: str) -> di
     }
 
 
+def _normalize_snapshot_scope(raw_scope: Any, lots: list[dict[str, Any]]) -> list[dict[str, str]]:
+    entries: list[Any]
+    if isinstance(raw_scope, list):
+        entries = list(raw_scope)
+    elif isinstance(raw_scope, dict):
+        raw_accounts = raw_scope.get("accounts")
+        if isinstance(raw_accounts, list):
+            broker = raw_scope.get("broker")
+            entries = [
+                {"broker": broker, "account": account}
+                if not isinstance(account, dict)
+                else {"broker": account.get("broker", broker), "account": account.get("account")}
+                for account in raw_accounts
+            ]
+        else:
+            entries = [raw_scope]
+    else:
+        entries = [
+            {"broker": lot.get("broker"), "account": lot.get("account")}
+            for lot in lots
+        ]
+
+    seen: set[tuple[str, str]] = set()
+    scope: list[dict[str, str]] = []
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        broker = normalize_broker(item.get("broker"))
+        account = normalize_account(item.get("account"))
+        if not broker or not account:
+            continue
+        key = (broker, account)
+        if key in seen:
+            continue
+        seen.add(key)
+        scope.append({"broker": broker, "account": account})
+    scope.sort(key=lambda item: (item["broker"], item["account"]))
+    return scope
+
+
 def normalize_position_snapshot(raw: dict[str, Any] | Any) -> dict[str, Any]:
     src = raw if isinstance(raw, dict) else {}
     snapshot_id = _require_text(src.get("snapshot_id"), "snapshot_id")
@@ -202,15 +258,18 @@ def normalize_position_snapshot(raw: dict[str, Any] | Any) -> dict[str, Any]:
     if not isinstance(lots, list):
         raise ValueError("lots must be a list")
     normalized_lots = [normalize_snapshot_lot(item, snapshot_id=snapshot_id) for item in lots]
+    scope = _normalize_snapshot_scope(src.get("scope"), normalized_lots)
     return {
         "schema_kind": SCHEMA_KIND_POSITION_SNAPSHOT,
         "schema_version": OPTION_POSITIONS_V2_SCHEMA_VERSION,
         "snapshot_id": snapshot_id,
         "snapshot_type": snapshot_type,
+        "acceptance_status": _normalize_snapshot_acceptance_status(src.get("acceptance_status")),
         "snapshot_at_utc": str(src.get("snapshot_at_utc") or utc_now_iso()),
         "source_name": _require_text(src.get("source_name"), "source_name"),
         "source_type": (str(src.get("source_type") or "").strip() or None),
         "note": (str(src.get("note") or "").strip() or None),
+        "scope": scope,
         "lots": normalized_lots,
         "lot_count": len(normalized_lots),
     }
@@ -268,18 +327,170 @@ def _position_state_from_identity(
         "current_contracts": baseline_contracts,
         "status": ("open" if baseline_contracts > 0 else "closed"),
         "applied_events": [],
+        "applied_verifications": [],
+        "last_verification_snapshot_id": None,
+        "last_verification_snapshot_lot_id": None,
     }
+
+
+def _snapshot_sort_key(snapshot: dict[str, Any]) -> tuple[str, str]:
+    return (str(snapshot.get("snapshot_at_utc") or ""), str(snapshot.get("snapshot_id") or ""))
+
+
+def _event_sort_key(event: dict[str, Any]) -> tuple[str, str]:
+    return (str(event.get("event_at_utc") or ""), str(event.get("event_id") or ""))
+
+
+def _position_scope_key(item: dict[str, Any]) -> tuple[str, str]:
+    return (normalize_broker(item.get("broker")), normalize_account(item.get("account")))
+
+
+def _apply_position_event(
+    positions: dict[str, dict[str, Any]],
+    diagnostics: list[dict[str, Any]],
+    event: dict[str, Any],
+) -> None:
+    key = event["position_key"]
+    state = positions.get(key)
+    if state is None:
+        state = _position_state_from_identity(
+            event,
+            baseline_snapshot_id=None,
+            baseline_snapshot_lot_id=event.get("snapshot_lot_id"),
+            baseline_contracts=0,
+        )
+        positions[key] = state
+
+    if event["event_kind"] == EVENT_KIND_OPEN_TRADE:
+        state["current_contracts"] += int(event["contracts"] or 0)
+    elif event["event_kind"] == EVENT_KIND_CLOSE_TRADE:
+        contracts = int(event["contracts"] or 0)
+        if state["current_contracts"] <= 0:
+            diagnostics.append(
+                {
+                    "code": "close_without_open_position",
+                    "severity": "error",
+                    "event_id": event["event_id"],
+                    "position_key": key,
+                    "message": "close event does not have an open position to consume",
+                }
+            )
+            return
+        if contracts > state["current_contracts"]:
+            diagnostics.append(
+                {
+                    "code": "close_exceeds_current_contracts",
+                    "severity": "error",
+                    "event_id": event["event_id"],
+                    "position_key": key,
+                    "message": "close event exceeds current contracts",
+                    "details": {
+                        "current_contracts": state["current_contracts"],
+                        "close_contracts": contracts,
+                    },
+                }
+            )
+        state["current_contracts"] = max(0, state["current_contracts"] - contracts)
+    else:
+        state["current_contracts"] = int(event["target_contracts"] or 0)
+
+    state["status"] = "open" if state["current_contracts"] > 0 else "closed"
+    state["applied_events"].append(
+        {
+            "event_id": event["event_id"],
+            "event_kind": event["event_kind"],
+            "event_at_utc": event["event_at_utc"],
+            "contracts": event.get("contracts"),
+            "target_contracts": event.get("target_contracts"),
+            "source_name": event["source_name"],
+        }
+    )
+
+
+def _apply_verification_snapshot(
+    positions: dict[str, dict[str, Any]],
+    snapshot: dict[str, Any],
+) -> None:
+    verified_keys: set[str] = set()
+    scope_pairs = {
+        (str(item.get("broker") or ""), str(item.get("account") or ""))
+        for item in (snapshot.get("scope") or [])
+        if isinstance(item, dict)
+    }
+
+    for lot in snapshot["lots"]:
+        key = lot["position_key"]
+        verified_keys.add(key)
+        state = positions.get(key)
+        if state is None:
+            state = _position_state_from_identity(
+                lot,
+                baseline_snapshot_id=None,
+                baseline_snapshot_lot_id=None,
+                baseline_contracts=0,
+            )
+            positions[key] = state
+        state["currency"] = lot.get("currency")
+        if lot.get("multiplier") is not None:
+            state["multiplier"] = lot.get("multiplier")
+        state["current_contracts"] = int(lot["contracts"])
+        state["status"] = "open" if state["current_contracts"] > 0 else "closed"
+        state["last_verification_snapshot_id"] = snapshot["snapshot_id"]
+        state["last_verification_snapshot_lot_id"] = lot["snapshot_lot_id"]
+        state["applied_verifications"].append(
+            {
+                "snapshot_id": snapshot["snapshot_id"],
+                "snapshot_at_utc": snapshot["snapshot_at_utc"],
+                "snapshot_lot_id": lot["snapshot_lot_id"],
+                "contracts": int(lot["contracts"]),
+                "source_name": snapshot["source_name"],
+            }
+        )
+
+    if not scope_pairs:
+        return
+    for key, state in positions.items():
+        if key in verified_keys:
+            continue
+        if _position_scope_key(state) not in scope_pairs:
+            continue
+        if int(state.get("current_contracts") or 0) <= 0:
+            continue
+        state["current_contracts"] = 0
+        state["status"] = "closed"
+        state["last_verification_snapshot_id"] = snapshot["snapshot_id"]
+        state["last_verification_snapshot_lot_id"] = None
+        state["applied_verifications"].append(
+            {
+                "snapshot_id": snapshot["snapshot_id"],
+                "snapshot_at_utc": snapshot["snapshot_at_utc"],
+                "snapshot_lot_id": None,
+                "contracts": 0,
+                "source_name": snapshot["source_name"],
+            }
+        )
 
 
 def project_current_positions(
     baseline_snapshot: dict[str, Any] | Any,
     events: list[dict[str, Any] | Any] | None = None,
+    accepted_verification_snapshots: list[dict[str, Any] | Any] | None = None,
 ) -> dict[str, Any]:
     snapshot = normalize_position_snapshot(baseline_snapshot)
     if snapshot["snapshot_type"] != SNAPSHOT_TYPE_BASELINE:
         raise ValueError("baseline snapshot is required for projection")
     normalized_events = [normalize_position_event(item) for item in (events or [])]
-    normalized_events.sort(key=lambda item: (str(item["event_at_utc"]), str(item["event_id"])))
+    normalized_events.sort(key=_event_sort_key)
+    normalized_verifications = [
+        normalize_position_snapshot(item)
+        for item in (accepted_verification_snapshots or [])
+    ]
+    for verification in normalized_verifications:
+        if verification["snapshot_type"] != SNAPSHOT_TYPE_VERIFICATION:
+            raise ValueError("accepted verification snapshots must have snapshot_type=verification")
+        if verification["acceptance_status"] != SNAPSHOT_ACCEPTANCE_ACCEPTED:
+            raise ValueError("accepted verification snapshots must have acceptance_status=accepted")
+    normalized_verifications.sort(key=_snapshot_sort_key)
 
     positions: dict[str, dict[str, Any]] = {}
     diagnostics: list[dict[str, Any]] = []
@@ -292,62 +503,18 @@ def project_current_positions(
             baseline_contracts=int(lot["contracts"]),
         )
 
-    for event in normalized_events:
-        key = event["position_key"]
-        state = positions.get(key)
-        if state is None:
-            state = _position_state_from_identity(
-                event,
-                baseline_snapshot_id=None,
-                baseline_snapshot_lot_id=event.get("snapshot_lot_id"),
-                baseline_contracts=0,
-            )
-            positions[key] = state
-
-        if event["event_kind"] == EVENT_KIND_OPEN_TRADE:
-            state["current_contracts"] += int(event["contracts"] or 0)
-        elif event["event_kind"] == EVENT_KIND_CLOSE_TRADE:
-            contracts = int(event["contracts"] or 0)
-            if state["current_contracts"] <= 0:
-                diagnostics.append(
-                    {
-                        "code": "close_without_open_position",
-                        "severity": "error",
-                        "event_id": event["event_id"],
-                        "position_key": key,
-                        "message": "close event does not have an open position to consume",
-                    }
-                )
-                continue
-            if contracts > state["current_contracts"]:
-                diagnostics.append(
-                    {
-                        "code": "close_exceeds_current_contracts",
-                        "severity": "error",
-                        "event_id": event["event_id"],
-                        "position_key": key,
-                        "message": "close event exceeds current contracts",
-                        "details": {
-                            "current_contracts": state["current_contracts"],
-                            "close_contracts": contracts,
-                        },
-                    }
-                )
-            state["current_contracts"] = max(0, state["current_contracts"] - contracts)
+    timeline: list[tuple[str, int, str, dict[str, Any]]] = []
+    timeline.extend((event["event_at_utc"], 0, event["event_id"], event) for event in normalized_events)
+    timeline.extend(
+        (item["snapshot_at_utc"], 1, item["snapshot_id"], item)
+        for item in normalized_verifications
+    )
+    timeline.sort(key=lambda item: (str(item[0]), item[1], str(item[2])))
+    for _, item_type, _, payload in timeline:
+        if item_type == 0:
+            _apply_position_event(positions, diagnostics, payload)
         else:
-            state["current_contracts"] = int(event["target_contracts"] or 0)
-
-        state["status"] = "open" if state["current_contracts"] > 0 else "closed"
-        state["applied_events"].append(
-            {
-                "event_id": event["event_id"],
-                "event_kind": event["event_kind"],
-                "event_at_utc": event["event_at_utc"],
-                "contracts": event.get("contracts"),
-                "target_contracts": event.get("target_contracts"),
-                "source_name": event["source_name"],
-            }
-        )
+            _apply_verification_snapshot(positions, payload)
 
     sorted_positions = sorted(
         positions.values(),
@@ -367,6 +534,10 @@ def project_current_positions(
         "positions": sorted_positions,
         "open_position_count": sum(1 for item in sorted_positions if int(item["current_contracts"]) > 0),
         "processed_event_count": len(normalized_events),
+        "accepted_verification_snapshot_count": len(normalized_verifications),
+        "accepted_verification_snapshot_ids": [
+            item["snapshot_id"] for item in normalized_verifications
+        ],
         "diagnostics": diagnostics,
     }
 

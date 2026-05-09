@@ -19,7 +19,9 @@ VERSION="$(cat VERSION)"
 python3 scripts/release_check.py --tag "v${VERSION}"
 python3 tests/run_smoke.py
 python3 -m pytest tests/test_agent_plugin_contract.py tests/test_agent_plugin_smoke.py
-python3 scripts/validate_config.py --config configs/examples/config.example.us.json
+python3 -m pytest tests/test_layered_config.py
+./om config build --market us --user-config configs/examples/user.example.us.json --dry-run
+./om config build --market hk --user-config configs/examples/user.example.hk.json --dry-run
 ./om-agent spec
 ```
 

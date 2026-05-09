@@ -6,7 +6,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from scripts.feishu_bitable import (
     FeishuAuthError,
@@ -393,11 +393,16 @@ def sync_option_positions(
     prune_remote_missing_local: bool = False,
 ) -> list[dict[str, Any]]:
     table_ref = load_table_ref(data_config)
+    update_position_lot_fields: Callable[[str, dict[str, Any]], None] | None
     try:
-        primary_repo = require_option_positions_sync_meta_repo(repo) if apply_mode else require_option_positions_read_repo(repo)
+        if apply_mode:
+            primary_repo = require_option_positions_sync_meta_repo(repo)
+            update_position_lot_fields = primary_repo.update_position_lot_fields
+        else:
+            primary_repo = require_option_positions_read_repo(repo)
+            update_position_lot_fields = None
     except TypeError as exc:
         raise SystemExit(str(exc))
-    update_position_lot_fields = getattr(primary_repo, "update_position_lot_fields", None)
 
     local_records = load_canonical_option_position_records(repo, base=base)
     candidates = select_candidates(
@@ -460,6 +465,8 @@ def sync_option_positions(
             row["reason"] = "missing_feishu_record_id"
             if apply_mode:
                 try:
+                    if update_position_lot_fields is None:
+                        raise TypeError("option_positions repo does not satisfy sync metadata repository interface")
                     created = _with_table_token(
                         table_ref,
                         lambda token: bitable_create_record(token, table_ref.app_token, table_ref.table_id, outgoing_payload),
@@ -489,6 +496,8 @@ def sync_option_positions(
         row["reason"] = "has_feishu_record_id"
         if apply_mode:
             try:
+                if update_position_lot_fields is None:
+                    raise TypeError("option_positions repo does not satisfy sync metadata repository interface")
                 _with_table_token(
                     table_ref,
                     lambda token: bitable_update_record(token, table_ref.app_token, table_ref.table_id, feishu_record_id, outgoing_payload),
@@ -584,10 +593,11 @@ def main() -> None:
 
     base = Path(__file__).resolve().parents[1]
     data_config, repo = resolve_option_positions_repo(base=base, data_config=args.data_config)
+    state_base = data_config.resolve().parent
     action_rows = sync_option_positions(
         repo=repo,
         data_config=data_config,
-        base=base,
+        base=state_base,
         apply_mode=apply_mode,
         only_record_id=args.only_record_id,
         only_open=bool(args.only_open),
@@ -601,7 +611,7 @@ def main() -> None:
         table_ref,
         lambda token: bitable_fields(token, table_ref.app_token, table_ref.table_id),
     )
-    local_records = load_canonical_option_position_records(repo, base=base)
+    local_records = load_canonical_option_position_records(repo, base=state_base)
     candidates = select_candidates(
         local_records,
         only_record_id=args.only_record_id,

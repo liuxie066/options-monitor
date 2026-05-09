@@ -1,6 +1,14 @@
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
+
+
+class TradePayloadEnrichmentResult(Protocol):
+    payload: dict[str, Any]
+    diagnostics: dict[str, Any]
+
+
+TradePayloadEnrichmentReturn = dict[str, Any] | TradePayloadEnrichmentResult
 
 
 def _payload_deal_id(payload: dict[str, Any] | None) -> str | None:
@@ -72,16 +80,18 @@ def _record_failed_deal_state(
 def build_trade_intake_audit_event(
     phase: str,
     *,
-    payload: dict | None = None,
+    payload: dict[str, Any] | None = None,
     deal: object | None = None,
-    result: dict | None = None,
-    extra: dict | None = None,
+    result: dict[str, Any] | None = None,
+    extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     out: dict[str, Any] = {"phase": str(phase)}
     if isinstance(payload, dict):
         out["payload"] = payload
-    if deal is not None and hasattr(deal, "to_dict"):
-        deal_dict = deal.to_dict()
+    to_dict = getattr(deal, "to_dict", None)
+    if callable(to_dict):
+        raw_deal_dict = to_dict()
+        deal_dict: dict[str, Any] = raw_deal_dict if isinstance(raw_deal_dict, dict) else {}
         out["deal"] = deal_dict
         out["deal_id"] = deal_dict.get("deal_id")
         out["account"] = deal_dict.get("internal_account")
@@ -121,7 +131,7 @@ def process_trade_payload(
     write_trade_intake_state_fn: Callable[[Any, dict[str, Any]], Any],
     upsert_deal_state_fn: Callable[..., dict[str, Any]],
     append_trade_intake_audit_fn: Callable[[Any, dict[str, Any]], Any],
-    enrich_trade_payload_fn: Callable[[dict[str, Any]], dict[str, Any]] | None,
+    enrich_trade_payload_fn: Callable[[dict[str, Any]], TradePayloadEnrichmentReturn] | None,
     normalize_trade_deal_fn: Callable[..., Any],
     resolve_trade_deal_fn: Callable[..., Any],
 ) -> dict[str, Any]:
@@ -134,8 +144,10 @@ def process_trade_payload(
         if hasattr(enrich_result, "payload") and hasattr(enrich_result, "diagnostics"):
             effective_payload = dict(getattr(enrich_result, "payload") or {})
             enrich_diagnostics = dict(getattr(enrich_result, "diagnostics") or {})
-        else:
+        elif isinstance(enrich_result, dict):
             effective_payload = enrich_result
+        else:
+            raise TypeError("enrich_trade_payload_fn must return a dict or an object with payload and diagnostics")
         if effective_payload != payload:
             append_trade_intake_audit_fn(audit_path, build_trade_intake_audit_event("enriched", payload=effective_payload))
         if enrich_diagnostics:

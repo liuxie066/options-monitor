@@ -15,15 +15,19 @@ import importlib
 import inspect
 import json
 import subprocess
+import sys
 import traceback
 import types
 import unittest
 from pathlib import Path
+from typing import Any
 
 
 BASE = Path(__file__).resolve().parents[1]
 VPY = BASE / '.venv' / 'bin' / 'python'
 TESTS_DIR = Path(__file__).resolve().parent
+if str(BASE) not in sys.path:
+    sys.path.insert(0, str(BASE))
 
 # Keep default scope as key regressions so minimal environments stay stable.
 CRITICAL_MODULES = [
@@ -38,7 +42,6 @@ CRITICAL_MODULES = [
     "test_scan_scheduler_scan_per_account",
     "test_market_session_single_source_of_truth",
     "test_config_loader_validation_cache",
-    "test_runtime_config_sync",
     "test_atomic_write_json",
     "test_pipeline_watchlist_whitelist",
     "test_pipeline_runner_stage_plan",
@@ -70,7 +73,7 @@ CRITICAL_EXCLUDED_TESTS: dict[str, set[str]] = {
 }
 
 
-def run_parser(text: str) -> dict:
+def run_parser(text: str) -> dict[str, Any]:
     p = subprocess.run(
         [str(VPY), 'scripts/parse_option_message.py', '--text', text, '--accounts', 'lx', 'sy'],
         cwd=str(BASE),

@@ -138,10 +138,12 @@ WebUI 现在按 6 个模块组织：
 如果你不用 WebUI，也可以手工复制模板：
 
 ```bash
-cp configs/examples/config.example.us.json config.us.json
-cp configs/examples/config.example.hk.json config.hk.json
+cp configs/examples/user.example.us.json configs/user.us.json
+cp configs/examples/user.example.hk.json configs/user.hk.json
 mkdir -p secrets
 cp configs/examples/portfolio.sqlite.example.json secrets/portfolio.sqlite.json
+./om config build --market us
+./om config build --market hk
 ```
 
 ---
@@ -150,10 +152,12 @@ cp configs/examples/portfolio.sqlite.example.json secrets/portfolio.sqlite.json
 
 你日常维护的文件通常只有：
 
-- `config.us.json`
-- `config.hk.json`
+- `configs/user.us.json`
+- `configs/user.hk.json`
 - `secrets/portfolio.sqlite.json`
 - `secrets/notifications.feishu.app.json`（如果启用飞书通知）
+
+`config.us.json` / `config.hk.json` 是生成后的运行时入口，通常不手工编辑。
 
 配置优先级、`config_validate` / `healthcheck` / `runtime_status` / `openclaw_readiness` 的边界，请以 [CONFIGURATION_GUIDE.md](CONFIGURATION_GUIDE.md) 为准。
 哪些命令会写本地状态、写远端或发通知，请以 [RUNBOOK.md](RUNBOOK.md) 的“命令副作用总表”为准。

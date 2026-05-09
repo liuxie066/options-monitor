@@ -500,12 +500,11 @@ def build_open_adjustment_patch(
         next_multiplier = guess_multiplier(symbol)
 
     next_expiration_ymd = expiration_ymd or effective_expiration_ymd(fields) or None
+    parsed_exp_ms: int | None = None
     if expiration_ymd is not None:
-        exp_ms = parse_exp_to_ms(expiration_ymd)
-        if exp_ms is None:
+        parsed_exp_ms = parse_exp_to_ms(expiration_ymd)
+        if parsed_exp_ms is None:
             raise ValueError("expiration_ymd must be YYYY-MM-DD")
-    else:
-        exp_ms = fields.get("expiration")
 
     note_updates: dict[str, Any] = {}
     patch: dict[str, Any] = {"last_action_at": int(as_of_ms or now_ms())}
@@ -531,7 +530,8 @@ def build_open_adjustment_patch(
             patch["multiplier"] = float(next_multiplier)
         note_updates["multiplier"] = None
     if expiration_ymd is not None:
-        patch["expiration"] = int(exp_ms)  # type: ignore[arg-type]
+        assert parsed_exp_ms is not None
+        patch["expiration"] = int(parsed_exp_ms)
         note_updates["exp"] = None
     if opened_at_ms is not None:
         patch["opened_at"] = int(opened_at_ms)
@@ -585,8 +585,11 @@ def build_close_patch(
     closed = effective_contracts_closed(fields) + qty
     remaining = max(0, open_qty - qty)
     ts = int(as_of_ms or now_ms())
-    normalized_side = normalize_side(fields.get("side"), strict=True)
-    effective_close_type = str(close_type or (BUY_TO_CLOSE if normalized_side == "short" else SELL_TO_CLOSE)).strip().lower()
+    if close_type:
+        effective_close_type = str(close_type).strip().lower()
+    else:
+        normalized_side = normalize_side(fields.get("side"), strict=True)
+        effective_close_type = (BUY_TO_CLOSE if normalized_side == "short" else SELL_TO_CLOSE)
 
     patch: dict[str, Any] = {
         "contracts_open": remaining,

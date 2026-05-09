@@ -204,6 +204,119 @@ def test_option_positions_v2_reconcile_reports_mismatch_and_projection_orphans()
     assert report["summary"]["missing_in_snapshot"] == 1
 
 
+def test_option_positions_v2_applies_accepted_verifications_without_replacing_baseline() -> None:
+    baseline = normalize_position_snapshot(
+        {
+            "snapshot_id": "baseline_t0",
+            "snapshot_type": SNAPSHOT_TYPE_BASELINE,
+            "snapshot_at_utc": "2026-05-01T00:00:00+00:00",
+            "source_name": "manual_bootstrap",
+            "lots": [
+                {
+                    "account": "lx",
+                    "broker": "富途",
+                    "symbol": "NVDA",
+                    "option_type": "put",
+                    "side": "short",
+                    "strike": 100,
+                    "expiration_ymd": "2026-06-19",
+                    "currency": "USD",
+                    "multiplier": 100,
+                    "contracts": 2,
+                }
+            ],
+        }
+    )
+    events = [
+        {
+            "event_id": "evt_close_1",
+            "event_kind": EVENT_KIND_CLOSE_TRADE,
+            "event_at_utc": "2026-05-02T00:00:00+00:00",
+            "source_name": "manual_trade_log",
+            "account": "lx",
+            "broker": "富途",
+            "symbol": "NVDA",
+            "option_type": "put",
+            "side": "short",
+            "strike": 100,
+            "expiration_ymd": "2026-06-19",
+            "currency": "USD",
+            "multiplier": 100,
+            "contracts": 1,
+        },
+        {
+            "event_id": "evt_open_other_account",
+            "event_kind": EVENT_KIND_OPEN_TRADE,
+            "event_at_utc": "2026-05-03T00:00:00+00:00",
+            "source_name": "manual_trade_log",
+            "account": "sy",
+            "broker": "富途",
+            "symbol": "AAPL",
+            "option_type": "call",
+            "side": "short",
+            "strike": 220,
+            "expiration_ymd": "2026-06-19",
+            "currency": "USD",
+            "multiplier": 100,
+            "contracts": 1,
+        },
+        {
+            "event_id": "evt_close_after_verify",
+            "event_kind": EVENT_KIND_CLOSE_TRADE,
+            "event_at_utc": "2026-05-05T00:00:00+00:00",
+            "source_name": "manual_trade_log",
+            "account": "lx",
+            "broker": "富途",
+            "symbol": "NVDA",
+            "option_type": "put",
+            "side": "short",
+            "strike": 100,
+            "expiration_ymd": "2026-06-19",
+            "currency": "USD",
+            "multiplier": 100,
+            "contracts": 2,
+        },
+    ]
+    verification = normalize_position_snapshot(
+        {
+            "snapshot_id": "verify_t1",
+            "snapshot_type": SNAPSHOT_TYPE_VERIFICATION,
+            "snapshot_at_utc": "2026-05-04T00:00:00+00:00",
+            "source_name": "broker_statement",
+            "lots": [
+                {
+                    "account": "lx",
+                    "broker": "富途",
+                    "symbol": "NVDA",
+                    "option_type": "put",
+                    "side": "short",
+                    "strike": 100,
+                    "expiration_ymd": "2026-06-19",
+                    "currency": "USD",
+                    "multiplier": 100,
+                    "contracts": 5,
+                }
+            ],
+        }
+    )
+
+    projection = project_current_positions(
+        baseline,
+        events,
+        accepted_verification_snapshots=[verification],
+    )
+
+    assert projection["baseline_snapshot_id"] == "baseline_t0"
+    assert projection["accepted_verification_snapshot_ids"] == ["verify_t1"]
+    by_account_symbol = {
+        (item["account"], item["symbol"]): item for item in projection["positions"]
+    }
+    assert by_account_symbol[("lx", "NVDA")]["current_contracts"] == 3
+    assert by_account_symbol[("lx", "NVDA")]["baseline_contracts"] == 2
+    assert by_account_symbol[("lx", "NVDA")]["last_verification_snapshot_id"] == "verify_t1"
+    assert by_account_symbol[("sy", "AAPL")]["current_contracts"] == 1
+
+
 def test_option_positions_v2_adapts_legacy_rows_and_skips_bootstrap_events() -> None:
     exp_ms = parse_exp_to_ms("2026-06-19")
     assert exp_ms is not None
@@ -441,12 +554,15 @@ def test_option_positions_v2_reconciliation_persists_verification_checkpoint(tmp
     )
 
     assert report["summary"]["quantity_mismatch"] == 1
+    assert report["baseline_snapshot_id"] == "legacy_baseline"
     assert report["projection_checkpoint_snapshot_id"] == "verify_t1"
     assert report["latest_verification_snapshot_id"] == "verify_t1"
     assert report["verification_snapshot_count"] == 1
+    assert report["accepted_verification_snapshot_count"] == 1
     refreshed = refresh_option_positions_v2_state(base=tmp_path, repo=repo)
-    assert refreshed.baseline_snapshot["snapshot_id"] == "verify_t1"
+    assert refreshed.baseline_snapshot["snapshot_id"] == "legacy_baseline"
     assert refreshed.projection["positions"][0]["current_contracts"] == 2
+    assert refreshed.projection["accepted_verification_snapshot_ids"] == ["verify_t1"]
     assert refreshed.latest_reconciliation_report is not None
     assert refreshed.latest_reconciliation_report["snapshot_id"] == "verify_t1"
 
@@ -493,9 +609,11 @@ def test_option_positions_v2_manual_adjust_persists_native_event_and_verificatio
     assert out["v2_result"]["native_event_id"] == out["result"]["event_id"]
     assert out["v2_result"]["verification_snapshot_id"] == verification_snapshot_id
     refreshed = refresh_option_positions_v2_state(base=tmp_path, repo=repo)
-    assert refreshed.baseline_snapshot["snapshot_id"] == verification_snapshot_id
+    assert refreshed.baseline_snapshot["snapshot_id"] == "legacy_baseline"
+    assert refreshed.latest_verification_snapshot is not None
     assert refreshed.latest_verification_snapshot["snapshot_id"] == verification_snapshot_id
     assert refreshed.projection["positions"][0]["current_contracts"] == 2
+    assert refreshed.projection["accepted_verification_snapshot_ids"] == [verification_snapshot_id]
     assert any(
         item["event_kind"] == EVENT_KIND_MANUAL_ADJUSTMENT and item["event_id"] == out["result"]["event_id"]
         for item in refreshed.events

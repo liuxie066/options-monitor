@@ -8,16 +8,13 @@ from typing import Any
 from scripts.account_config import ACCOUNT_TYPE_EXTERNAL_HOLDINGS, ACCOUNT_TYPE_FUTU, normalize_accounts
 from scripts.validate_config import validate_config
 from src.application.agent_tool_contracts import AgentToolError
+from src.application.layered_config import build_layered_runtime_config_from_user_config
 
 
 DEFAULT_SYMBOLS = {
     "us": "NVDA",
     "hk": "0700.HK",
 }
-
-
-def _example_runtime_config_path(*, repo_root: Path, market: str) -> Path:
-    return (repo_root / "configs" / "examples" / f"config.example.{market}.json").resolve()
 
 
 def _example_data_config_path(*, repo_root: Path) -> Path:
@@ -98,32 +95,6 @@ def _relative_or_absolute(*, base_dir: Path, target: Path) -> str:
         return str(target)
 
 
-def _build_symbols(template_cfg: dict[str, Any], *, market: str, symbols: list[str], host: str, port: int) -> list[dict[str, Any]]:
-    template_symbols = template_cfg.get("symbols")
-    if not isinstance(template_symbols, list) or not template_symbols:
-        raise AgentToolError(code="CONFIG_ERROR", message="runtime config template must contain at least one symbol")
-    template_symbol = template_symbols[0]
-    if not isinstance(template_symbol, dict):
-        raise AgentToolError(code="CONFIG_ERROR", message="runtime config template symbol must be an object")
-
-    market_name = market.upper()
-    rows: list[dict[str, Any]] = []
-    for symbol in symbols:
-        row = deepcopy(template_symbol)
-        row["symbol"] = symbol
-        row.pop("market", None)
-        row["broker"] = market_name
-        fetch = row.get("fetch")
-        if not isinstance(fetch, dict):
-            fetch = {}
-        fetch["source"] = "futu"
-        fetch["host"] = str(host)
-        fetch["port"] = int(port)
-        row["fetch"] = fetch
-        rows.append(row)
-    return rows
-
-
 def init_local_config(
     *,
     repo_root: Path,
@@ -152,9 +123,7 @@ def init_local_config(
     if data_config_path is None:
         used_defaults.append("data_config")
 
-    runtime_template_path = _example_runtime_config_path(repo_root=repo_root, market=normalized_market)
     data_template_path = _example_data_config_path(repo_root=repo_root)
-    runtime_cfg = _read_json_object(runtime_template_path)
     data_cfg = _read_json_object(data_template_path)
 
     target_config_path = Path(config_path).expanduser().resolve() if config_path else default_runtime_config_path(repo_root=repo_root, market=normalized_market)
@@ -170,42 +139,52 @@ def init_local_config(
     if reuse_existing_data_config:
         _read_json_object(target_data_config_path)
 
-    runtime_cfg["accounts"] = [normalized_account]
-    runtime_cfg["account_settings"] = {
-        normalized_account: {
-            "type": ACCOUNT_TYPE_FUTU,
-            **({"holdings_account": str(holdings_account).strip()} if str(holdings_account or "").strip() else {}),
-        }
-    }
-    portfolio = runtime_cfg.get("portfolio")
-    if not isinstance(portfolio, dict):
-        portfolio = {}
-    portfolio["account"] = normalized_account
-    portfolio["broker"] = "富途"
-    portfolio["source"] = "futu"
-    portfolio["source_by_account"] = {normalized_account: "futu"}
-    portfolio["data_config"] = _relative_or_absolute(
+    opend_host_value = str(opend_host).strip() or "127.0.0.1"
+    opend_port_value = int(opend_port)
+    data_config_ref = _relative_or_absolute(
         base_dir=target_config_path.parent,
         target=target_data_config_path,
     )
-    runtime_cfg["portfolio"] = portfolio
+    account_setting: dict[str, Any] = {
+        "type": ACCOUNT_TYPE_FUTU,
+        "futu": {
+            "account_id": normalized_acc_id,
+        },
+    }
+    if str(holdings_account or "").strip():
+        account_setting["holdings_account"] = str(holdings_account).strip()
 
-    trade_intake = runtime_cfg.get("trade_intake")
-    if not isinstance(trade_intake, dict):
-        trade_intake = {}
-    trade_intake["enabled"] = True
-    account_mapping = trade_intake.get("account_mapping")
-    if not isinstance(account_mapping, dict):
-        account_mapping = {}
-    account_mapping["futu"] = {normalized_acc_id: normalized_account}
-    trade_intake["account_mapping"] = account_mapping
-    runtime_cfg["trade_intake"] = trade_intake
-    runtime_cfg["symbols"] = _build_symbols(
-        runtime_cfg,
+    user_cfg: dict[str, Any] = {
+        "account_settings": {
+            normalized_account: account_setting,
+        },
+        "portfolio": {
+            "account": normalized_account,
+            "data_config": data_config_ref,
+            "futu": {
+                "host": opend_host_value,
+                "port": opend_port_value,
+            },
+        },
+        "trade_intake": {
+            "mode": "dry-run",
+        },
+        "symbols": [
+            {
+                "symbol": symbol,
+                "fetch": {
+                    "host": opend_host_value,
+                    "port": opend_port_value,
+                },
+            }
+            for symbol in normalized_symbols
+        ],
+    }
+    runtime_cfg, _meta = build_layered_runtime_config_from_user_config(
+        repo_root=repo_root,
         market=normalized_market,
-        symbols=normalized_symbols,
-        host=str(opend_host).strip() or "127.0.0.1",
-        port=int(opend_port),
+        user_config=user_cfg,
+        user_config_ref="init_local_config",
     )
 
     _validate_runtime_config_or_raise(runtime_cfg)
@@ -232,8 +211,8 @@ def init_local_config(
         "used_defaults": used_defaults,
         "warnings": warnings,
         "opend": {
-            "host": str(opend_host).strip() or "127.0.0.1",
-            "port": int(opend_port),
+            "host": opend_host_value,
+            "port": opend_port_value,
         },
         "next_steps": [
             f"./om-agent run --tool healthcheck --input-json '{{\"config_path\":\"{target_config_path}\"}}'",
@@ -474,8 +453,9 @@ def edit_account_in_local_config(
         setting["holdings_account"] = normalized_account
 
     if new_type == ACCOUNT_TYPE_FUTU:
-        futu_cfg = current_setting.get("futu") if isinstance(current_setting.get("futu"), dict) else {}
-        merged_futu: dict[str, Any] = dict(futu_cfg)
+        raw_futu_cfg = current_setting.get("futu")
+        futu_cfg = raw_futu_cfg if isinstance(raw_futu_cfg, dict) else {}
+        merged_futu: dict[str, Any] = {str(key): value for key, value in futu_cfg.items()}
         if futu_host is not None:
             host = str(futu_host).strip()
             if host:
@@ -489,8 +469,9 @@ def edit_account_in_local_config(
         if merged_futu:
             setting["futu"] = merged_futu
     else:
-        bitable_cfg = current_setting.get("bitable") if isinstance(current_setting.get("bitable"), dict) else {}
-        merged_bitable: dict[str, Any] = dict(bitable_cfg)
+        raw_bitable_cfg = current_setting.get("bitable")
+        bitable_cfg = raw_bitable_cfg if isinstance(raw_bitable_cfg, dict) else {}
+        merged_bitable: dict[str, Any] = {str(key): value for key, value in bitable_cfg.items()}
         for key, value in {
             "app_token": bitable_app_token,
             "table_id": bitable_table_id,
