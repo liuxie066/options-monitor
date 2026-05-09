@@ -441,6 +441,62 @@ def test_option_positions_v2_reconciliation_persists_verification_checkpoint(tmp
     )
 
     assert report["summary"]["quantity_mismatch"] == 1
+    assert report["projection_checkpoint_snapshot_id"] == "verify_t1"
+    assert report["latest_verification_snapshot_id"] == "verify_t1"
+    assert report["verification_snapshot_count"] == 1
     refreshed = refresh_option_positions_v2_state(base=tmp_path, repo=repo)
     assert refreshed.baseline_snapshot["snapshot_id"] == "verify_t1"
     assert refreshed.projection["positions"][0]["current_contracts"] == 2
+    assert refreshed.latest_reconciliation_report is not None
+    assert refreshed.latest_reconciliation_report["snapshot_id"] == "verify_t1"
+
+
+def test_option_positions_v2_manual_adjust_persists_native_event_and_verification_checkpoint(tmp_path: Path) -> None:
+    import scripts.option_positions_core.service as svc
+    from scripts.option_positions_core.domain import OpenPositionCommand
+    from src.application.position_workflows import execute_manual_adjust
+
+    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    repo.data_config_path = tmp_path / "data.json"  # type: ignore[attr-defined]
+    svc.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="NVDA",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=100.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            premium_per_share=1.5,
+            opened_at_ms=1000,
+        ),
+    )
+    lot = repo.list_position_lots()[0]
+
+    out = execute_manual_adjust(
+        repo,
+        record_id=str(lot["record_id"]),
+        contracts=2,
+        strike=None,
+        expiration_ymd=None,
+        premium_per_share=2.2,
+        multiplier=None,
+        opened_at_ms=None,
+        dry_run=False,
+    )
+
+    verification_snapshot_id = f"verify-{out['result']['event_id']}"
+    assert out["v2_result"]["native_event_id"] == out["result"]["event_id"]
+    assert out["v2_result"]["verification_snapshot_id"] == verification_snapshot_id
+    refreshed = refresh_option_positions_v2_state(base=tmp_path, repo=repo)
+    assert refreshed.baseline_snapshot["snapshot_id"] == verification_snapshot_id
+    assert refreshed.latest_verification_snapshot["snapshot_id"] == verification_snapshot_id
+    assert refreshed.projection["positions"][0]["current_contracts"] == 2
+    assert any(
+        item["event_kind"] == EVENT_KIND_MANUAL_ADJUSTMENT and item["event_id"] == out["result"]["event_id"]
+        for item in refreshed.events
+    )

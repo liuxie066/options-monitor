@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha1
@@ -45,9 +46,13 @@ APP_BASE = Path(__file__).resolve().parents[2]
 @dataclass(frozen=True)
 class OptionPositionsV2State:
     base: Path
+    persisted_baseline_snapshot: dict[str, Any]
     baseline_snapshot: dict[str, Any]
+    verification_snapshots: list[dict[str, Any]]
+    latest_verification_snapshot: dict[str, Any] | None
     events: list[dict[str, Any]]
     projection: dict[str, Any]
+    latest_reconciliation_report: dict[str, Any] | None
     skipped_legacy_events: list[dict[str, Any]]
 
 
@@ -149,6 +154,17 @@ def _load_persisted_events(base: Path) -> list[dict[str, Any]]:
             continue
     events.sort(key=lambda item: (_iso_sort_key(item.get("event_at_utc")), str(item.get("event_id") or "")))
     return events
+
+
+def _load_current_reconciliation_report(base: Path) -> dict[str, Any] | None:
+    path = (Path(base).resolve() / "output_shared" / "state" / "option_positions_v2" / "current" / "reconciliation.latest.json")
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 def _latest_snapshot_by_type(
@@ -365,28 +381,32 @@ def refresh_option_positions_v2_state(*, base: Path | None = None, repo: Any) ->
     legacy_events = _list_legacy_trade_events(repo)
     legacy_rows = _list_legacy_position_lots(repo)
     persisted_snapshots = _load_persisted_snapshots(resolved_base)
-    baseline_snapshot = _latest_snapshot_by_type(persisted_snapshots, SNAPSHOT_TYPE_BASELINE)
+    persisted_baseline_snapshot = _latest_snapshot_by_type(persisted_snapshots, SNAPSHOT_TYPE_BASELINE)
     verification_snapshots = [
         item for item in persisted_snapshots if str(item.get("snapshot_type") or "") == SNAPSHOT_TYPE_VERIFICATION
     ]
-    if baseline_snapshot is None:
-        baseline_snapshot = _native_baseline_snapshot(legacy_events=legacy_events, legacy_rows=legacy_rows)
+    if persisted_baseline_snapshot is None:
+        persisted_baseline_snapshot = _native_baseline_snapshot(legacy_events=legacy_events, legacy_rows=legacy_rows)
     persisted_events = _load_persisted_events(resolved_base)
     adapted = adapt_legacy_trade_events(legacy_events)
     merged_events = _merge_native_and_legacy_events(persisted_events, list(adapted["events"]))
-    checkpoint_snapshot = _projection_checkpoint_snapshot(baseline_snapshot, verification_snapshots)
+    checkpoint_snapshot = _projection_checkpoint_snapshot(persisted_baseline_snapshot, verification_snapshots)
     projection = project_current_positions(checkpoint_snapshot, _events_after_snapshot(merged_events, checkpoint_snapshot))
     option_positions_v2_repo.replace_position_snapshots(
         resolved_base,
-        [baseline_snapshot, *verification_snapshots],
+        [persisted_baseline_snapshot, *verification_snapshots],
     )
     option_positions_v2_repo.replace_position_events(resolved_base, merged_events)
     option_positions_v2_repo.write_current_projection(resolved_base, projection)
     return OptionPositionsV2State(
         base=resolved_base,
+        persisted_baseline_snapshot=persisted_baseline_snapshot,
         baseline_snapshot=checkpoint_snapshot,
+        verification_snapshots=list(verification_snapshots),
+        latest_verification_snapshot=_latest_snapshot_by_type(verification_snapshots, SNAPSHOT_TYPE_VERIFICATION),
         events=list(merged_events),
         projection=projection,
+        latest_reconciliation_report=_load_current_reconciliation_report(resolved_base),
         skipped_legacy_events=list(adapted["skipped"]),
     )
 
@@ -429,8 +449,9 @@ def snapshot_current_positions_as_verification(
             legacy_events=_list_legacy_trade_events(repo),
             legacy_rows=_list_legacy_position_lots(repo),
         )
+    compat = load_option_positions_v2_records(base=resolved_base, repo=repo)
     verification_snapshot = _build_snapshot_from_legacy_rows(
-        _list_legacy_position_lots(repo),
+        compat.records,
         snapshot_id=snapshot_id,
         snapshot_type=SNAPSHOT_TYPE_VERIFICATION,
         snapshot_at_utc=snapshot_at_utc or utc_now_iso(),
@@ -664,4 +685,12 @@ def reconcile_option_positions_snapshot(
     verification_snapshots.append(snapshot)
     option_positions_v2_repo.replace_position_snapshots(resolved_base, [baseline_snapshot, *verification_snapshots])
     option_positions_v2_repo.write_reconciliation_report(resolved_base, report)
-    return report
+    refreshed_state = refresh_option_positions_v2_state(base=resolved_base, repo=repo)
+    return report | {
+        "projection_checkpoint_snapshot_id": refreshed_state.baseline_snapshot.get("snapshot_id"),
+        "latest_verification_snapshot_id": (
+            (refreshed_state.latest_verification_snapshot or {}).get("snapshot_id")
+        ),
+        "verification_snapshot_count": len(refreshed_state.verification_snapshots),
+        "post_reconcile_open_position_count": int(refreshed_state.projection.get("open_position_count") or 0),
+    }
