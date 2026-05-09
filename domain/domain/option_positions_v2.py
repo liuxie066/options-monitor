@@ -534,6 +534,21 @@ def build_baseline_snapshot_from_legacy_records(
     return snapshot
 
 
+def _legacy_trade_side_to_position_side(*, side: Any, position_effect: str) -> str:
+    side_norm = str(side or "").strip().lower()
+    effect_norm = str(position_effect or "").strip().lower()
+    mapping = {
+        ("open", "sell"): "short",
+        ("open", "buy"): "long",
+        ("close", "buy"): "short",
+        ("close", "sell"): "long",
+    }
+    position_side = mapping.get((effect_norm, side_norm))
+    if not position_side:
+        raise ValueError(f"unsupported legacy trade side mapping: effect={effect_norm or 'missing'} side={side_norm or 'missing'}")
+    return position_side
+
+
 def adapt_legacy_trade_events(events: list[dict[str, Any]] | Any) -> dict[str, Any]:
     rows = events if isinstance(events, list) else []
     normalized_events: list[dict[str, Any]] = []
@@ -571,7 +586,10 @@ def adapt_legacy_trade_events(events: list[dict[str, Any]] | Any) -> dict[str, A
                             "broker": event.get("broker"),
                             "symbol": event.get("symbol"),
                             "option_type": event.get("option_type"),
-                            "side": "short" if str(event.get("side") or "").strip().lower() == "sell" else "long",
+                            "side": _legacy_trade_side_to_position_side(
+                                side=event.get("side"),
+                                position_effect=position_effect,
+                            ),
                             "strike": event.get("strike"),
                             "expiration_ymd": event.get("expiration_ymd"),
                             "currency": event.get("currency"),
@@ -597,7 +615,10 @@ def adapt_legacy_trade_events(events: list[dict[str, Any]] | Any) -> dict[str, A
                             "broker": event.get("broker"),
                             "symbol": event.get("symbol"),
                             "option_type": event.get("option_type"),
-                            "side": "short" if str(event.get("side") or "").strip().lower() == "buy" else "long",
+                            "side": _legacy_trade_side_to_position_side(
+                                side=event.get("side"),
+                                position_effect=position_effect,
+                            ),
                             "strike": event.get("strike"),
                             "expiration_ymd": event.get("expiration_ymd"),
                             "currency": event.get("currency"),
