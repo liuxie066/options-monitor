@@ -41,7 +41,7 @@ python3 scripts/validate_config.py --config configs/examples/config.example.us.j
 - 运行 smoke / agent plugin 测试
 - 发布对应 GitHub Release
 
-因此常规发布只需要把版本元数据改好并推到 `main`；不需要再手动补打同名 tag。
+因此常规发布只需要把版本元数据改好并推到 `main`；不需要再手动补打上同名 tag。
 
 ---
 
