@@ -98,9 +98,9 @@ def _list_legacy_position_lots(repo: Any) -> list[dict[str, Any]]:
 def _event_ms_to_iso(value: Any) -> str:
     try:
         return datetime.fromtimestamp(int(value or 0) / 1000, tz=timezone.utc).isoformat()
-    except Exception as exc:
+    except Exception as conversion_error:
         print(
-            f"[WARN] option_positions_v2 invalid legacy trade_time_ms={value!r}; falling back to utc_now_iso ({type(exc).__name__}: {exc})",
+            f"[WARN] option_positions_v2 invalid legacy trade_time_ms={value!r}; falling back to utc_now_iso ({type(conversion_error).__name__}: {conversion_error})",
             file=sys.stderr,
         )
         return utc_now_iso()

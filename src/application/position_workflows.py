@@ -28,9 +28,9 @@ def _auto_sync_record_if_possible(repo: Any, *, record_id: str) -> dict[str, Any
         if data_config is None:
             return None
         return sync_single_option_position_record(repo=repo, data_config=Path(str(data_config)), record_id=record_id, apply_mode=True)
-    except Exception as exc:
+    except Exception as sync_error:
         print(
-            f"[WARN] option_positions post-write Feishu sync skipped for {record_id} ({type(exc).__name__}): {exc}",
+            f"[WARN] option_positions post-write Feishu sync skipped for {record_id} ({type(sync_error).__name__}): {sync_error}",
             file=sys.stderr,
         )
         return None
