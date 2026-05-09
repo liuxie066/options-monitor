@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -11,8 +11,13 @@ from domain.domain.expiration_dates import (
 )
 from scripts.exchange_rates import get_exchange_rates_or_fetch_latest
 from scripts.config_loader import resolve_data_config_path
-from scripts.feishu_bitable import safe_float
+from scripts.feishu_bitable import parse_note_kv, safe_float
 from scripts.option_positions_core.domain import (
+    effective_contracts,
+    effective_contracts_closed,
+    effective_contracts_open,
+    effective_multiplier,
+    parse_exp_to_ms,
     normalize_account,
     normalize_broker,
     normalize_close_type,
@@ -31,13 +36,115 @@ def resolve_option_positions_repo(*, base: Path, data_config: str | Path | None)
     return resolved_data_config, load_option_positions_repo(resolved_data_config)
 
 
+def canonicalize_option_position_fields(fields: dict[str, Any]) -> dict[str, Any]:
+    raw = dict(fields or {})
+    note = str(raw.get("note") or "")
+    expiration = raw.get("expiration")
+    expiration_ymd = (
+        str(raw.get("expiration_ymd") or raw.get("exp") or expiration_timestamp_to_ymd(expiration) or "").strip() or None
+    )
+    locked_shares = safe_float(raw.get("underlying_share_locked"))
+    if locked_shares is None:
+        locked_shares = safe_float(raw.get("underlying_shares_locked"))
+
+    normalized = dict(raw)
+    normalized.update(
+        {
+            "broker": normalize_broker(raw.get("broker")) or None,
+            "account": normalize_account(raw.get("account")) or raw.get("account"),
+            "symbol": (str(raw.get("symbol") or "").strip().upper() or None),
+            "option_type": normalize_option_type(raw.get("option_type") or parse_note_kv(note, "option_type")) or None,
+            "side": normalize_side(raw.get("side") or parse_note_kv(note, "side")) or None,
+            "status": normalize_status(raw.get("status") or parse_note_kv(note, "status")) or None,
+            "currency": normalize_currency(raw.get("currency")) or raw.get("currency") or None,
+            "contracts": effective_contracts(raw),
+            "contracts_open": effective_contracts_open(raw),
+            "contracts_closed": effective_contracts_closed(raw),
+            "multiplier": effective_multiplier(raw),
+            "premium": raw.get("premium") if raw.get("premium") is not None else parse_note_kv(note, "premium_per_share"),
+            "underlying_share_locked": locked_shares,
+            "cash_secured_amount": safe_float(raw.get("cash_secured_amount")),
+            "close_type": normalize_close_type(raw.get("close_type")) if raw.get("close_type") else None,
+            "position_id": (str(raw.get("position_id") or raw.get("position_key") or "").strip() or None),
+            "source_event_id": (str(raw.get("source_event_id") or "").strip() or None),
+            "last_close_event_id": (str(raw.get("last_close_event_id") or "").strip() or None),
+            "expiration_ymd": expiration_ymd,
+        }
+    )
+    strike = safe_float(raw.get("strike"))
+    if strike is not None:
+        normalized["strike"] = strike
+    if normalized.get("expiration") in (None, "") and expiration_ymd:
+        normalized["expiration"] = parse_exp_to_ms(expiration_ymd)
+    return normalized
+
+
+def canonicalize_option_position_record(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "record_id": item.get("record_id"),
+        "fields": canonicalize_option_position_fields(item.get("fields") or {}),
+    }
+
+
+def load_canonical_option_position_records(repo: Any, *, base: Path | None = None) -> list[dict[str, Any]]:
+    return [canonicalize_option_position_record(item) for item in load_option_position_records(repo, base=base)]
+
+
+def build_option_position_view(
+    item: dict[str, Any],
+    *,
+    as_of_date: date | None = None,
+) -> dict[str, Any]:
+    record = canonicalize_option_position_record(item)
+    fields = record.get("fields") or {}
+    expiration_date = expiration_timestamp_to_date(fields.get("expiration"))
+    resolved_as_of_date = as_of_date or datetime.now(EXPIRATION_DATE_TZ).date()
+    days_to_expiration = (expiration_date - resolved_as_of_date).days if expiration_date is not None else None
+    return {
+        "record_id": record.get("record_id"),
+        "fields": fields,
+        "position_id": fields.get("position_id"),
+        "broker": fields.get("broker"),
+        "account": fields.get("account"),
+        "symbol": fields.get("symbol"),
+        "option_type": fields.get("option_type"),
+        "side": fields.get("side"),
+        "status": fields.get("status"),
+        "strike": fields.get("strike"),
+        "multiplier": fields.get("multiplier"),
+        "expiration": fields.get("expiration"),
+        "expiration_ymd": fields.get("expiration_ymd"),
+        "expiration_date": expiration_date,
+        "days_to_expiration": days_to_expiration,
+        "contracts": fields.get("contracts"),
+        "contracts_open": fields.get("contracts_open"),
+        "contracts_closed": fields.get("contracts_closed"),
+        "currency": fields.get("currency"),
+        "cash_secured_amount": fields.get("cash_secured_amount"),
+        "underlying_share_locked": fields.get("underlying_share_locked"),
+        "premium": fields.get("premium"),
+        "opened_at": fields.get("opened_at"),
+        "closed_at": fields.get("closed_at"),
+        "last_action_at": fields.get("last_action_at"),
+        "close_type": fields.get("close_type"),
+        "close_reason": fields.get("close_reason"),
+        "note": fields.get("note"),
+    }
+
+
 def load_option_position_records(repo: Any, *, base: Path | None = None) -> list[dict[str, Any]]:
-    try:
-        compat = load_option_positions_v2_records(base=base, repo=repo)
-        if compat.records:
-            return compat.records
-    except Exception:
-        pass
+    resolved_v2_base = base
+    if resolved_v2_base is None:
+        data_config = getattr(repo, "data_config_path", None)
+        db_path = getattr(getattr(repo, "primary_repo", repo), "db_path", None)
+        resolved_v2_base = Path(str(data_config)).resolve().parent if data_config else (Path(str(db_path)).resolve().parent if db_path else None)
+    if resolved_v2_base is not None:
+        try:
+            compat = load_option_positions_v2_records(base=resolved_v2_base, repo=repo)
+            if compat.records:
+                return compat.records
+        except Exception:
+            pass
     try:
         primary_repo = require_option_positions_read_repo(repo)
     except Exception:
@@ -75,50 +182,47 @@ def list_position_rows(
     rows: list[dict[str, Any]] = []
     normalized_broker = normalize_broker(broker)
     normalized_account = normalize_account(account) if account else None
-    as_of_date = (
+    resolved_as_of_date = (
         datetime.fromtimestamp(int(as_of_ms) / 1000, tz=EXPIRATION_DATE_TZ).date()
         if as_of_ms is not None
         else datetime.now(EXPIRATION_DATE_TZ).date()
     )
-    for item in load_option_position_records(repo):
-        record_id = item.get("record_id")
-        fields = item.get("fields") or {}
-        if normalized_broker and normalize_broker(fields.get("broker")) != normalized_broker:
+    for item in load_canonical_option_position_records(repo):
+        view = build_option_position_view(item, as_of_date=resolved_as_of_date)
+        if normalized_broker and view.get("broker") != normalized_broker:
             continue
-        if normalized_account and normalize_account(fields.get("account")) != normalized_account:
+        if normalized_account and view.get("account") != normalized_account:
             continue
-        normalized_status = normalize_status(fields.get("status"))
+        normalized_status = view.get("status")
         if status != "all" and normalized_status != status:
             continue
-        expiration_ymd = expiration_timestamp_to_ymd(fields.get("expiration"))
-        expiration_date = expiration_timestamp_to_date(fields.get("expiration"))
-        days_to_expiration = (expiration_date - as_of_date).days if expiration_date is not None else None
+        days_to_expiration = view.get("days_to_expiration")
         if expiration_within_days is not None:
             if days_to_expiration is None or days_to_expiration < 0 or days_to_expiration > int(expiration_within_days):
                 continue
         rows.append(
             {
-                "record_id": record_id,
-                "broker": normalize_broker(fields.get("broker")),
-                "account": normalize_account(fields.get("account")) or fields.get("account"),
-                "symbol": fields.get("symbol"),
-                "option_type": normalize_option_type(fields.get("option_type")),
-                "side": normalize_side(fields.get("side")),
-                "strike": safe_float(fields.get("strike")),
-                "multiplier": safe_float(fields.get("multiplier")),
-                "expiration": fields.get("expiration"),
-                "expiration_ymd": expiration_ymd,
+                "record_id": view.get("record_id"),
+                "broker": view.get("broker"),
+                "account": view.get("account"),
+                "symbol": view.get("symbol"),
+                "option_type": view.get("option_type"),
+                "side": view.get("side"),
+                "strike": view.get("strike"),
+                "multiplier": view.get("multiplier"),
+                "expiration": view.get("expiration"),
+                "expiration_ymd": view.get("expiration_ymd"),
                 "days_to_expiration": days_to_expiration,
-                "contracts": fields.get("contracts"),
-                "contracts_open": fields.get("contracts_open"),
-                "contracts_closed": fields.get("contracts_closed"),
-                "currency": normalize_currency(fields.get("currency")),
-                "cash_secured_amount": fields.get("cash_secured_amount"),
-                "underlying_share_locked": fields.get("underlying_share_locked"),
-                "close_type": normalize_close_type(fields.get("close_type")) if fields.get("close_type") else None,
-                "close_reason": fields.get("close_reason"),
+                "contracts": view.get("contracts"),
+                "contracts_open": view.get("contracts_open"),
+                "contracts_closed": view.get("contracts_closed"),
+                "currency": view.get("currency"),
+                "cash_secured_amount": view.get("cash_secured_amount"),
+                "underlying_share_locked": view.get("underlying_share_locked"),
+                "close_type": view.get("close_type"),
+                "close_reason": view.get("close_reason"),
                 "status": normalized_status,
-                "note": fields.get("note"),
+                "note": view.get("note"),
             }
         )
     return rows[: max(limit, 1)]
@@ -133,7 +237,7 @@ def build_option_positions_monthly_income_report(
     month: str | None = None,
 ) -> dict[str, Any]:
     return build_monthly_income_report(
-        load_option_position_records(repo, base=base),
+        load_canonical_option_position_records(repo, base=base),
         account=account,
         broker=broker,
         month=month,

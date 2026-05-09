@@ -17,22 +17,17 @@ from scripts.feishu_bitable import (
     bitable_update_record,
     get_tenant_access_token,
 )
-from scripts.option_positions_core.domain import (
-    normalize_account,
-    normalize_broker,
-    normalize_close_type,
-    normalize_currency,
-    normalize_option_type,
-    normalize_side,
-    normalize_status,
-    now_ms,
-)
+from scripts.option_positions_core.domain import normalize_account, normalize_broker, normalize_option_type, normalize_side, now_ms
 from scripts.option_positions_core.service import (
     load_table_ref,
     require_option_positions_read_repo,
     require_option_positions_sync_meta_repo,
 )
-from src.application.option_positions_facade import load_option_position_records, resolve_option_positions_repo
+from src.application.option_positions_facade import (
+    canonicalize_option_position_fields,
+    load_canonical_option_position_records,
+    resolve_option_positions_repo,
+)
 
 SYNC_HASH_EXCLUDED_FIELDS = {
     "last_synced_at",
@@ -83,17 +78,7 @@ class SyncCandidate:
 
 
 def normalize_local_fields(fields: dict[str, Any]) -> dict[str, Any]:
-    normalized = dict(fields)
-    normalized["broker"] = normalize_broker(fields.get("broker"))
-    normalized["account"] = normalize_account(fields.get("account"))
-    normalized["symbol"] = str(fields.get("symbol") or "").strip().upper() or None
-    normalized["option_type"] = normalize_option_type(fields.get("option_type")) or None
-    normalized["side"] = normalize_side(fields.get("side")) or None
-    normalized["status"] = normalize_status(fields.get("status")) or None
-    normalized["currency"] = normalize_currency(fields.get("currency")) or None
-    if fields.get("close_type"):
-        normalized["close_type"] = normalize_close_type(fields.get("close_type"))
-    return normalized
+    return canonicalize_option_position_fields(fields)
 
 
 def _coerce_int(value: Any) -> int | None:
@@ -244,15 +229,16 @@ def _match_remote_record_by_key(
 
 
 def _same_business_lot(fields: dict[str, Any], remote_fields: dict[str, Any]) -> bool:
-    local_account = normalize_account(fields.get("account"))
+    local_fields = normalize_local_fields(fields)
+    local_account = normalize_account(local_fields.get("account"))
     remote_account = normalize_account(remote_fields.get("account"))
     if local_account != remote_account:
         return False
     return (
-        normalize_broker(fields.get("broker")) == normalize_broker(remote_fields.get("broker"))
-        and str(fields.get("symbol") or "").strip().upper() == str(remote_fields.get("symbol") or "").strip().upper()
-        and normalize_option_type(fields.get("option_type")) == normalize_option_type(remote_fields.get("option_type"))
-        and normalize_side(fields.get("side")) == normalize_side(remote_fields.get("side"))
+        normalize_broker(local_fields.get("broker")) == normalize_broker(remote_fields.get("broker"))
+        and str(local_fields.get("symbol") or "").strip().upper() == str(remote_fields.get("symbol") or "").strip().upper()
+        and normalize_option_type(local_fields.get("option_type")) == normalize_option_type(remote_fields.get("option_type"))
+        and normalize_side(local_fields.get("side")) == normalize_side(remote_fields.get("side"))
     )
 
 
@@ -341,12 +327,12 @@ def select_candidates(
     out: list[SyncCandidate] = []
     for item in records:
         record_id = str(item.get("record_id") or "").strip()
-        fields = item.get("fields") or {}
+        fields = normalize_local_fields(item.get("fields") or {})
         if not record_id or not isinstance(fields, dict):
             continue
         if only_record_id and record_id != only_record_id:
             continue
-        if only_open and normalize_status(fields.get("status")) != "open":
+        if only_open and str(fields.get("status") or "") != "open":
             continue
         synced_at = fields.get("feishu_last_synced_at_ms")
         if since_updated_ms is not None and synced_at is not None and int(synced_at) >= int(since_updated_ms):
@@ -413,7 +399,7 @@ def sync_option_positions(
         raise SystemExit(str(exc))
     update_position_lot_fields = getattr(primary_repo, "update_position_lot_fields", None)
 
-    local_records = load_option_position_records(repo, base=base)
+    local_records = load_canonical_option_position_records(repo, base=base)
     candidates = select_candidates(
         local_records,
         only_record_id=only_record_id,
@@ -615,7 +601,7 @@ def main() -> None:
         table_ref,
         lambda token: bitable_fields(token, table_ref.app_token, table_ref.table_id),
     )
-    local_records = load_option_position_records(repo, base=base)
+    local_records = load_canonical_option_position_records(repo, base=base)
     candidates = select_candidates(
         local_records,
         only_record_id=args.only_record_id,

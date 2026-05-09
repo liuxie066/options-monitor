@@ -293,6 +293,8 @@ def test_option_positions_cli_reconcile_writes_verification_snapshot_and_report(
     payload = json.loads(capsys.readouterr().out)
     assert payload["snapshot_id"] == "verify_cli_1"
     assert payload["summary"]["quantity_mismatch"] == 1
+    assert payload["projection_checkpoint_snapshot_id"] == "verify_cli_1"
+    assert payload["latest_verification_snapshot_id"] == "verify_cli_1"
     assert (
         tmp_path
         / "output_shared"
@@ -301,6 +303,103 @@ def test_option_positions_cli_reconcile_writes_verification_snapshot_and_report(
         / "current"
         / "reconciliation.latest.json"
     ).exists()
+
+
+def test_option_positions_cli_inspect_surfaces_verification_and_reconciliation_state(monkeypatch, tmp_path: Path, capsys) -> None:
+    import scripts.option_positions as cli_mod
+    import scripts.option_positions_core.service as svc
+    from scripts.option_positions_core.domain import OpenPositionCommand
+
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
+    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    repo.data_config_path = data_config  # type: ignore[attr-defined]
+    svc.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="TSLA",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=100.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            premium_per_share=1.23,
+            opened_at_ms=1000,
+        ),
+    )
+    lot = repo.list_position_lots()[0]
+    snapshot_path = tmp_path / "verify.json"
+    snapshot_path.write_text(
+        json.dumps(
+            {
+                "snapshot_id": "verify_cli_2",
+                "snapshot_type": "verification",
+                "snapshot_at_utc": "2026-05-09T00:00:00+00:00",
+                "source_name": "test_cli",
+                "lots": [
+                    {
+                        "account": "lx",
+                        "broker": "富途",
+                        "symbol": "TSLA",
+                        "option_type": "put",
+                        "side": "short",
+                        "strike": 100,
+                        "expiration_ymd": "2026-06-19",
+                        "currency": "USD",
+                        "multiplier": 100,
+                        "contracts": 2,
+                    }
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "option_positions.py",
+            "--data-config",
+            str(data_config),
+            "reconcile",
+            "--snapshot-file",
+            str(snapshot_path),
+            "--format",
+            "json",
+        ],
+    )
+    cli_mod.main()
+    capsys.readouterr()
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "option_positions.py",
+            "--data-config",
+            str(data_config),
+            "inspect",
+            "--record-id",
+            lot["record_id"],
+        ],
+    )
+    cli_mod.main()
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["persisted_baseline_snapshot_id"] == "legacy_baseline"
+    assert payload["projection_checkpoint_snapshot_id"] == "verify_cli_2"
+    assert payload["latest_verification_snapshot_id"] == "verify_cli_2"
+    assert payload["verification_snapshot_count"] == 1
+    assert payload["projected_lots"][0]["current_contracts"] == 2
+    assert payload["latest_reconciliation_summary"]["quantity_mismatch"] == 1
+    assert payload["latest_reconciliation_report"]["snapshot_id"] == "verify_cli_2"
 
 
 def test_option_positions_cli_add_dry_run_infers_hkd_currency_from_hk_symbol(monkeypatch, tmp_path: Path, capsys) -> None:

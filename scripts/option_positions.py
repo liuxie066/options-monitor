@@ -356,9 +356,10 @@ def inspect_projection_state(
 ) -> dict[str, object]:
     compat = load_option_positions_v2_records(base=base, repo=repo)
     current_rows = compat.records
-    projection = compat.state.projection
-    baseline_snapshot = compat.state.baseline_snapshot
-    events = compat.state.events
+    state = compat.state
+    projection = state.projection
+    baseline_snapshot = state.baseline_snapshot
+    events = state.events
 
     matched_current = [
         row for row in current_rows
@@ -447,6 +448,7 @@ def inspect_projection_state(
         if str(item.get('position_key') or '').strip() in matched_position_keys
         or str(item.get('event_id') or '').strip() in {str(event.get('event_id') or '').strip() for event in related_events}
     ]
+    latest_reconciliation_report = state.latest_reconciliation_report or None
     return {
         'selectors': {
             'record_id': record_id,
@@ -460,11 +462,17 @@ def inspect_projection_state(
         'matched_record_ids': sorted(matched_record_ids),
         'current_lots': matched_current,
         'projected_lots': matched_projected,
+        'persisted_baseline_snapshot_id': state.persisted_baseline_snapshot.get('snapshot_id'),
+        'projection_checkpoint_snapshot_id': baseline_snapshot.get('snapshot_id'),
         'baseline_snapshot_id': baseline_snapshot.get('snapshot_id'),
+        'verification_snapshot_count': len(state.verification_snapshots),
+        'latest_verification_snapshot_id': (state.latest_verification_snapshot or {}).get('snapshot_id'),
         'baseline_lots': baseline_lots,
         'related_events': related_events,
         'projection_diagnostics': filtered_diagnostics,
         'all_projection_diagnostic_count': len(projection.get('diagnostics') or []),
+        'latest_reconciliation_report': latest_reconciliation_report,
+        'latest_reconciliation_summary': (latest_reconciliation_report or {}).get('summary') or {},
     }
 
 
@@ -724,11 +732,15 @@ def main():
     if args.cmd == 'rebuild':
         state = refresh_option_positions_v2_state(base=state_base, repo=repo)
         result = {
+            'persisted_baseline_snapshot_id': state.persisted_baseline_snapshot.get('snapshot_id'),
             'baseline_snapshot_id': state.baseline_snapshot.get('snapshot_id'),
+            'latest_verification_snapshot_id': (state.latest_verification_snapshot or {}).get('snapshot_id'),
+            'verification_snapshot_count': int(len(state.verification_snapshots)),
             'baseline_lot_count': int(len(state.baseline_snapshot.get('lots') or [])),
             'trade_event_count': int(len(state.events)),
             'position_lot_count': int(len(state.projection.get('positions') or [])),
             'diagnostic_count': int(len(state.projection.get('diagnostics') or [])),
+            'latest_reconciliation_report_id': (state.latest_reconciliation_report or {}).get('report_id'),
             'skipped_legacy_event_count': int(len(state.skipped_legacy_events)),
         }
         if args.format == 'json':
