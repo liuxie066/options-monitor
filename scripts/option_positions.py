@@ -9,13 +9,18 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import datetime
 from pathlib import Path
 
 from scripts.option_positions_core.ledger import project_position_lot_records_with_diagnostics
 from scripts.option_positions_core.domain import (
+    effective_expiration_ymd,
+    effective_strike,
     exp_ms_to_ymd,
     normalize_account,
     normalize_broker,
+    normalize_option_type,
+    normalize_side,
 )
 from scripts.option_positions_core.service import rebuild_position_lots_from_trade_events
 from scripts.option_positions_core.service import persist_manual_void_event
@@ -26,57 +31,60 @@ from src.application.option_positions_facade import (
     list_position_rows,
     resolve_option_positions_repo,
 )
+from src.application.option_positions_v2_service import load_option_positions_v2_records, refresh_option_positions_v2_state
 
 
-def build_lot_event_history(repo, *, record_id: str) -> list[dict[str, object]]:
-    fields = repo.get_record_fields(record_id)
-    events = repo.list_trade_events()
-    seed_ids = {
-        str(fields.get('source_event_id') or '').strip(),
-        str(fields.get('last_close_event_id') or '').strip(),
-    }
-    seed_ids.discard("")
-    for event in events:
-        payload = event.get('raw_payload') or {}
-        if not isinstance(payload, dict):
-            continue
-        if str(payload.get('record_id') or '').strip() == str(record_id).strip():
-            event_id = str(event.get('event_id') or '').strip()
-            if event_id:
-                seed_ids.add(event_id)
-    selected_ids = set(seed_ids)
-    changed = True
-    while changed:
-        changed = False
-        for event in events:
-            event_id = str(event.get('event_id') or '').strip()
-            payload = event.get('raw_payload') or {}
-            if not isinstance(payload, dict):
-                payload = {}
-            adjust_target_source_event_id = str(payload.get('adjust_target_source_event_id') or '').strip()
-            void_target_event_id = str(payload.get('void_target_event_id') or '').strip()
-            if event_id in selected_ids or adjust_target_source_event_id in selected_ids or void_target_event_id in selected_ids:
-                before = len(selected_ids)
-                if event_id:
-                    selected_ids.add(event_id)
-                if adjust_target_source_event_id:
-                    selected_ids.add(adjust_target_source_event_id)
-                if void_target_event_id:
-                    selected_ids.add(void_target_event_id)
-                changed = changed or len(selected_ids) != before
+def _identity_matches_payload(
+    payload: dict[str, object],
+    *,
+    account: str | None,
+    symbol: str | None,
+    option_type: str | None,
+    strike: float | None,
+    expiration_ymd: str | None,
+) -> bool:
+    if account and normalize_account(payload.get('account')) != normalize_account(account):
+        return False
+    if symbol and str(payload.get('symbol') or '').strip().upper() != str(symbol).strip().upper():
+        return False
+    if option_type and normalize_option_type(payload.get('option_type')) != normalize_option_type(option_type):
+        return False
+    if strike is not None:
+        current_strike = payload.get('strike')
+        if current_strike is None or abs(float(current_strike) - float(strike)) >= 1e-9:
+            return False
+    if expiration_ymd:
+        current_expiration = str(payload.get('expiration_ymd') or '').strip() or effective_expiration_ymd(payload)
+        if current_expiration != str(expiration_ymd).strip():
+            return False
+    return True
 
+
+def build_lot_event_history(repo, *, base: Path, record_id: str) -> list[dict[str, object]]:
+    compat = load_option_positions_v2_records(base=base, repo=repo)
+    current = next((item for item in compat.records if str(item.get('record_id') or '').strip() == str(record_id).strip()), None)
+    if current is None:
+        raise ValueError(f"position lot not found: {record_id}")
+    fields = current.get('fields') or {}
+    if not isinstance(fields, dict):
+        fields = {}
     history: list[dict[str, object]] = []
-    for event in events:
-        event_id = str(event.get('event_id') or '').strip()
-        if event_id not in selected_ids:
+    for event in compat.state.events:
+        if not _identity_matches_payload(
+            event,
+            account=fields.get('account'),
+            symbol=fields.get('symbol'),
+            option_type=fields.get('option_type'),
+            strike=effective_strike(fields),
+            expiration_ymd=effective_expiration_ymd(fields),
+        ):
             continue
-        payload = event.get('raw_payload') or {}
-        if not isinstance(payload, dict):
-            payload = {}
         history.append(
             {
-                'event_id': event_id,
-                'trade_time_ms': event.get('trade_time_ms'),
+                'event_id': event.get('event_id'),
+                'trade_time_ms': int(datetime.fromisoformat(str(event.get('event_at_utc'))).timestamp() * 1000)
+                if event.get('event_at_utc')
+                else None,
                 'source_type': event.get('source_type'),
                 'source_name': event.get('source_name'),
                 'broker': normalize_broker(event.get('broker')),
@@ -84,17 +92,17 @@ def build_lot_event_history(repo, *, record_id: str) -> list[dict[str, object]]:
                 'symbol': event.get('symbol'),
                 'option_type': event.get('option_type'),
                 'side': event.get('side'),
-                'position_effect': event.get('position_effect'),
+                'position_effect': event.get('event_kind'),
                 'contracts': event.get('contracts'),
-                'price': event.get('price'),
+                'price': None,
                 'strike': event.get('strike'),
                 'expiration_ymd': event.get('expiration_ymd'),
                 'currency': event.get('currency'),
-                'void_target_event_id': payload.get('void_target_event_id'),
-                'adjust_target_source_event_id': payload.get('adjust_target_source_event_id'),
-                'close_target_source_event_id': payload.get('close_target_source_event_id'),
-                'record_id': payload.get('record_id'),
-                'patch': payload.get('patch'),
+                'void_target_event_id': None,
+                'adjust_target_source_event_id': None,
+                'close_target_source_event_id': None,
+                'record_id': record_id,
+                'patch': {'target_contracts': event.get('target_contracts')} if event.get('target_contracts') is not None else None,
             }
         )
     history.sort(key=lambda row: (int(row.get('trade_time_ms') or 0), str(row.get('event_id') or '')))
@@ -171,6 +179,7 @@ def _matches_event_selector(
 def inspect_projection_state(
     repo,
     *,
+    base: Path,
     record_id: str | None = None,
     feishu_record_id: str | None = None,
     account: str | None = None,
@@ -179,9 +188,11 @@ def inspect_projection_state(
     strike: float | None = None,
     expiration_ymd: str | None = None,
 ) -> dict[str, object]:
-    current_rows = repo.list_position_lots()
-    events = repo.list_trade_events()
-    projection = project_position_lot_records_with_diagnostics(events)
+    compat = load_option_positions_v2_records(base=base, repo=repo)
+    current_rows = compat.records
+    projection = compat.state.projection
+    baseline_snapshot = compat.state.baseline_snapshot
+    events = compat.state.events
 
     matched_current = [
         row for row in current_rows
@@ -197,121 +208,77 @@ def inspect_projection_state(
         )
     ]
     matched_record_ids = {str(row.get('record_id') or '').strip() for row in matched_current if str(row.get('record_id') or '').strip()}
+    matched_position_keys = {
+        str(((row.get('fields') or {}).get('position_key') or '')).strip()
+        for row in matched_current
+        if isinstance(row.get('fields'), dict)
+    }
     matched_projected = [
-        row for row in projection.lots
-        if (
-            str(row.get('record_id') or '').strip() in matched_record_ids
-            or _matches_lot_selector(
-                row,
-                record_id=record_id,
-                feishu_record_id=None,
-                account=account,
-                symbol=symbol,
-                option_type=option_type,
-                strike=strike,
-                expiration_ymd=expiration_ymd,
-            )
-        )
-    ]
-    matched_record_ids.update(str(row.get('record_id') or '').strip() for row in matched_projected if str(row.get('record_id') or '').strip())
-
-    direct_event_ids = {
-        str(event.get('event_id') or '').strip()
-        for event in events
-        if _matches_event_selector(
-            event,
-            record_id=record_id,
+        row for row in (projection.get('positions') or [])
+        if str(row.get('position_key') or '').strip() in matched_position_keys
+        or _identity_matches_payload(
+            row,
             account=account,
             symbol=symbol,
             option_type=option_type,
             strike=strike,
             expiration_ymd=expiration_ymd,
         )
-    }
-    tracked_ids: set[str] = set(matched_record_ids)
-    if record_id:
-        tracked_ids.add(str(record_id).strip())
-    tracked_ids.update(item for item in direct_event_ids if item)
-    for row in matched_current + matched_projected:
-        fields = row.get('fields') or {}
-        if not isinstance(fields, dict):
-            continue
-        for key in ('source_event_id', 'last_close_event_id'):
-            value = str(fields.get(key) or '').strip()
-            if value:
-                tracked_ids.add(value)
-
-    related_events: list[dict[str, object]] = []
-    changed = True
-    while changed:
-        changed = False
-        for event in events:
-            event_id = str(event.get('event_id') or '').strip()
-            payload = event.get('raw_payload') or {}
-            if not isinstance(payload, dict):
-                payload = {}
-            seeds = {
-                event_id,
-                str(payload.get('record_id') or '').strip(),
-                str(payload.get('close_target_source_event_id') or '').strip(),
-                str(payload.get('adjust_target_source_event_id') or '').strip(),
-                str(payload.get('void_target_event_id') or '').strip(),
-            }
-            if tracked_ids.isdisjoint({item for item in seeds if item}):
-                continue
-            before = len(tracked_ids)
-            tracked_ids.update(item for item in seeds if item)
-            if len(tracked_ids) != before:
-                changed = True
-
-    diagnostic_map: dict[str, list[dict[str, object]]] = {}
-    for item in projection.diagnostics:
-        diagnostic_map.setdefault(item.event_id, []).append(item.to_dict())
-
-    for event in events:
-        event_id = str(event.get('event_id') or '').strip()
-        payload = event.get('raw_payload') or {}
-        if not isinstance(payload, dict):
-            payload = {}
-        seeds = {
-            event_id,
-            str(payload.get('record_id') or '').strip(),
-            str(payload.get('close_target_source_event_id') or '').strip(),
-            str(payload.get('adjust_target_source_event_id') or '').strip(),
-            str(payload.get('void_target_event_id') or '').strip(),
-        }
-        if event_id not in direct_event_ids and tracked_ids.isdisjoint({item for item in seeds if item}):
-            continue
-        related_events.append(
-            {
-                'event_id': event_id,
-                'trade_time_ms': event.get('trade_time_ms'),
-                'source_type': event.get('source_type'),
-                'source_name': event.get('source_name'),
-                'broker': event.get('broker'),
-                'account': event.get('account'),
-                'symbol': event.get('symbol'),
-                'option_type': event.get('option_type'),
-                'side': event.get('side'),
-                'position_effect': event.get('position_effect'),
-                'contracts': event.get('contracts'),
-                'price': event.get('price'),
-                'strike': event.get('strike'),
-                'expiration_ymd': event.get('expiration_ymd'),
-                'currency': event.get('currency'),
-                'record_id': payload.get('record_id'),
-                'close_target_source_event_id': payload.get('close_target_source_event_id'),
-                'adjust_target_source_event_id': payload.get('adjust_target_source_event_id'),
-                'void_target_event_id': payload.get('void_target_event_id'),
-                'projection_diagnostics': diagnostic_map.get(event_id, []),
-            }
+    ]
+    matched_position_keys.update(str(row.get('position_key') or '').strip() for row in matched_projected if str(row.get('position_key') or '').strip())
+    baseline_lots = [
+        row for row in (baseline_snapshot.get('lots') or [])
+        if str(row.get('position_key') or '').strip() in matched_position_keys
+        or _identity_matches_payload(
+            row,
+            account=account,
+            symbol=symbol,
+            option_type=option_type,
+            strike=strike,
+            expiration_ymd=expiration_ymd,
         )
+    ]
+    related_events = [
+        {
+            'event_id': str(event.get('event_id') or '').strip(),
+            'trade_time_ms': int(datetime.fromisoformat(str(event.get('event_at_utc'))).timestamp() * 1000)
+            if event.get('event_at_utc')
+            else None,
+            'source_type': event.get('source_type'),
+            'source_name': event.get('source_name'),
+            'broker': event.get('broker'),
+            'account': event.get('account'),
+            'symbol': event.get('symbol'),
+            'option_type': event.get('option_type'),
+            'side': event.get('side'),
+            'position_effect': event.get('event_kind'),
+            'contracts': event.get('contracts'),
+            'price': None,
+            'strike': event.get('strike'),
+            'expiration_ymd': event.get('expiration_ymd'),
+            'currency': event.get('currency'),
+            'record_id': record_id,
+            'close_target_source_event_id': None,
+            'adjust_target_source_event_id': None,
+            'void_target_event_id': None,
+        }
+        for event in events
+        if str(event.get('position_key') or '').strip() in matched_position_keys
+        or _identity_matches_payload(
+            event,
+            account=account,
+            symbol=symbol,
+            option_type=option_type,
+            strike=strike,
+            expiration_ymd=expiration_ymd,
+        )
+    ]
     related_events.sort(key=lambda row: (int(row.get('trade_time_ms') or 0), str(row.get('event_id') or '')))
 
     filtered_diagnostics = [
-        item.to_dict()
-        for item in projection.diagnostics
-        if str(item.event_id or '').strip() in {str(event.get('event_id') or '').strip() for event in related_events}
+        item for item in (projection.get('diagnostics') or [])
+        if str(item.get('position_key') or '').strip() in matched_position_keys
+        or str(item.get('event_id') or '').strip() in {str(event.get('event_id') or '').strip() for event in related_events}
     ]
     return {
         'selectors': {
@@ -326,9 +293,11 @@ def inspect_projection_state(
         'matched_record_ids': sorted(matched_record_ids),
         'current_lots': matched_current,
         'projected_lots': matched_projected,
+        'baseline_snapshot_id': baseline_snapshot.get('snapshot_id'),
+        'baseline_lots': baseline_lots,
         'related_events': related_events,
         'projection_diagnostics': filtered_diagnostics,
-        'all_projection_diagnostic_count': len(projection.diagnostics),
+        'all_projection_diagnostic_count': len(projection.get('diagnostics') or []),
     }
 
 
@@ -555,7 +524,7 @@ def main():
 
     if args.cmd == 'history':
         try:
-            history = build_lot_event_history(repo, record_id=args.record_id)
+            history = build_lot_event_history(repo, base=base, record_id=args.record_id)
         except ValueError as e:
             raise SystemExit(str(e))
         if args.format == 'json':
@@ -581,17 +550,26 @@ def main():
         return
 
     if args.cmd == 'rebuild':
-        result = rebuild_position_lots_from_trade_events(repo)
+        state = refresh_option_positions_v2_state(base=base, repo=repo)
+        result = {
+            'baseline_snapshot_id': state.baseline_snapshot.get('snapshot_id'),
+            'baseline_lot_count': int(len(state.baseline_snapshot.get('lots') or [])),
+            'trade_event_count': int(len(state.events)),
+            'position_lot_count': int(len(state.projection.get('positions') or [])),
+            'diagnostic_count': int(len(state.projection.get('diagnostics') or [])),
+            'skipped_legacy_event_count': int(len(state.skipped_legacy_events)),
+        }
         if args.format == 'json':
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return
         print(
-            "[DONE] rebuilt position_lots "
+            "[DONE] rebuilt option_positions_v2 projection "
+            f"baseline_snapshot={result.get('baseline_snapshot_id')} "
+            f"baseline_lots={result.get('baseline_lot_count')} "
             f"trade_events={result.get('trade_event_count')} "
             f"position_lots={result.get('position_lot_count')} "
-            f"preserved_sync_meta={result.get('preserved_sync_meta_record_count')} "
-            f"unmatched_explicit_close={result.get('unmatched_explicit_close_count')} "
-            f"unmatched_heuristic_close={result.get('unmatched_heuristic_close_count')}"
+            f"diagnostics={result.get('diagnostic_count')} "
+            f"skipped_legacy_events={result.get('skipped_legacy_event_count')}"
         )
         return
 
@@ -603,6 +581,7 @@ def main():
             raise SystemExit("inspect requires at least one selector")
         payload = inspect_projection_state(
             repo,
+            base=base,
             record_id=args.record_id,
             feishu_record_id=args.feishu_record_id,
             account=args.account,
@@ -623,6 +602,15 @@ def main():
             )
         except ValueError as e:
             raise SystemExit(str(e))
+        try:
+            v2_state = refresh_option_positions_v2_state(base=base, repo=repo)
+            result["v2_result"] = {
+                'baseline_snapshot_id': v2_state.baseline_snapshot.get('snapshot_id'),
+                'processed_event_count': len(v2_state.events),
+                'diagnostic_count': len(v2_state.projection.get('diagnostics') or []),
+            }
+        except Exception:
+            result["v2_result"] = None
         print(
             f"[DONE] voided event_id={args.event_id} "
             f"via={result.get('event_id')} "

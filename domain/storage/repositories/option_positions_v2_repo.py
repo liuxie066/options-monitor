@@ -22,6 +22,18 @@ def _current_dir(base: Path) -> Path:
     return out
 
 
+def _snapshots_dir(base: Path) -> Path:
+    out = (_state_dir(base) / "snapshots").resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+
+def _events_dir(base: Path) -> Path:
+    out = (_state_dir(base) / "events").resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+
 def _write_json(path: Path, payload: dict[str, Any]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -44,7 +56,7 @@ def append_position_snapshot(base: Path, payload: dict[str, Any]) -> dict[str, P
             snapshot,
         ),
         "snapshot": _write_json(
-            _state_dir(base) / "snapshots" / f"{snapshot['snapshot_id']}.json",
+            _snapshots_dir(base) / f"{snapshot['snapshot_id']}.json",
             snapshot,
         ),
     }
@@ -56,7 +68,7 @@ def append_position_event(base: Path, payload: dict[str, Any]) -> dict[str, Path
     return {
         "events": _append_jsonl(_state_dir(base) / "events.jsonl", event),
         "current": _write_json(_current_dir(base) / "event.latest.json", event),
-        "event": _write_json(_state_dir(base) / "events" / f"{event['event_id']}.json", event),
+        "event": _write_json(_events_dir(base) / f"{event['event_id']}.json", event),
     }
 
 
@@ -97,3 +109,47 @@ def load_position_snapshots(base: Path) -> list[dict[str, Any]]:
 
 def load_position_events(base: Path) -> list[dict[str, Any]]:
     return _load_jsonl(_state_dir(base) / "events.jsonl")
+
+
+def _replace_json_dir_contents(path: Path, payloads: list[dict[str, Any]], *, id_field: str) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    for child in path.iterdir():
+        if child.is_file():
+            child.unlink()
+    for item in payloads:
+        identifier = str(item.get(id_field) or "").strip()
+        if not identifier:
+            continue
+        _write_json(path / f"{identifier}.json", item)
+
+
+def replace_position_snapshots(base: Path, payloads: list[dict[str, Any]]) -> dict[str, Path | None]:
+    snapshots = [normalize_position_snapshot(item) for item in payloads]
+    jsonl_path = _state_dir(base) / "snapshots.jsonl"
+    jsonl_path.write_text(
+        "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in snapshots),
+        encoding="utf-8",
+    )
+    _replace_json_dir_contents(_snapshots_dir(base), snapshots, id_field="snapshot_id")
+    latest = snapshots[-1] if snapshots else None
+    current_path = None
+    if latest is not None:
+        current_path = _write_json(
+            _current_dir(base) / f"snapshot.{latest['snapshot_type']}.latest.json",
+            latest,
+        )
+    return {"events": jsonl_path, "current": current_path}
+
+
+def replace_position_events(base: Path, payloads: list[dict[str, Any]]) -> dict[str, Path | None]:
+    events = [normalize_position_event(item) for item in payloads]
+    jsonl_path = _state_dir(base) / "events.jsonl"
+    jsonl_path.write_text(
+        "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in events),
+        encoding="utf-8",
+    )
+    _replace_json_dir_contents(_events_dir(base), events, id_field="event_id")
+    current_path = None
+    if events:
+        current_path = _write_json(_current_dir(base) / "event.latest.json", events[-1])
+    return {"events": jsonl_path, "current": current_path}

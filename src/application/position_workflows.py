@@ -13,6 +13,7 @@ from scripts.option_positions_core.domain import (
 from scripts.option_positions_core.service import persist_manual_adjust_event, persist_manual_close_event, persist_manual_open_event
 from scripts.sync_option_positions_to_feishu import sync_single_option_position_record
 from scripts.trade_event_normalizer import NormalizedTradeDeal
+from src.application.option_positions_v2_service import refresh_option_positions_v2_state
 
 
 def _auto_sync_record_if_possible(repo: Any, *, record_id: str) -> dict[str, Any] | None:
@@ -27,8 +28,19 @@ def _auto_sync_record_if_possible(repo: Any, *, record_id: str) -> dict[str, Any
 
 
 def _apply_with_optional_sync(repo: Any, *, record_id: str, result: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    v2_result = None
+    try:
+        v2_state = refresh_option_positions_v2_state(repo=repo)
+        v2_result = {
+            "baseline_snapshot_id": v2_state.baseline_snapshot.get("snapshot_id"),
+            "processed_event_count": v2_state.projection.get("processed_event_count"),
+            "open_position_count": v2_state.projection.get("open_position_count"),
+            "diagnostic_count": len(v2_state.projection.get("diagnostics") or []),
+        }
+    except Exception as exc:
+        print(f"[WARN] option_positions v2 refresh skipped: {exc}", file=sys.stderr)
     sync_result = _auto_sync_record_if_possible(repo, record_id=record_id) if record_id else None
-    return payload | {"mode": "applied", "result": result, "sync_result": sync_result}
+    return payload | {"mode": "applied", "result": result, "v2_result": v2_result, "sync_result": sync_result}
 
 
 def _manual_open_record_id(result: dict[str, Any]) -> str:

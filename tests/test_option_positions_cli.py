@@ -92,10 +92,12 @@ def test_option_positions_cli_rebuild_reports_summary(monkeypatch, tmp_path: Pat
     cli_mod.main()
 
     out = capsys.readouterr().out
-    assert "[DONE] rebuilt position_lots" in out
+    assert "[DONE] rebuilt option_positions_v2 projection" in out
+    assert "baseline_snapshot=legacy_baseline" in out
+    assert "baseline_lots=0" in out
     assert "trade_events=1" in out
     assert "position_lots=1" in out
-    assert "unmatched_explicit_close=0" in out
+    assert "diagnostics=0" in out
 
 
 def test_option_positions_cli_inspect_reports_projection_state(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -147,7 +149,9 @@ def test_option_positions_cli_inspect_reports_projection_state(monkeypatch, tmp_
     payload = json.loads(capsys.readouterr().out)
     assert payload["matched_record_ids"] == [lot["record_id"]]
     assert payload["current_lots"][0]["fields"]["feishu_record_id"] == "rec_sync_1"
-    assert payload["projected_lots"][0]["record_id"] == lot["record_id"]
+    assert payload["baseline_snapshot_id"] == "legacy_baseline"
+    assert payload["projected_lots"][0]["current_contracts"] == 1
+    assert payload["baseline_lots"] == []
     assert payload["related_events"][0]["event_id"].startswith("manual-open-")
 
 
@@ -211,7 +215,7 @@ def test_option_positions_cli_inspect_reports_orphan_close_event_diagnostics(mon
     assert payload["current_lots"] == []
     assert payload["projected_lots"] == []
     assert payload["related_events"][0]["event_id"] == "manual-close-missing-lot"
-    assert payload["projection_diagnostics"][0]["code"] == "close_explicit_target_not_found"
+    assert payload["projection_diagnostics"][0]["code"] == "close_without_open_position"
 
 
 def test_option_positions_cli_add_dry_run_infers_hkd_currency_from_hk_symbol(monkeypatch, tmp_path: Path, capsys) -> None:
