@@ -475,9 +475,12 @@ def _legacy_position_key(fields: dict[str, Any]) -> str | None:
         return None
 
 
-def _legacy_row_maps(rows: list[dict[str, Any]]) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+def _legacy_row_maps(
+    rows: list[dict[str, Any]]
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
     by_key: dict[str, dict[str, Any]] = {}
     by_record_id: dict[str, dict[str, Any]] = {}
+    by_source_event_id: dict[str, dict[str, Any]] = {}
     for item in rows:
         if not isinstance(item, dict):
             continue
@@ -487,10 +490,13 @@ def _legacy_row_maps(rows: list[dict[str, Any]]) -> tuple[dict[str, dict[str, An
             continue
         if record_id:
             by_record_id[record_id] = item
+        source_event_id = str(fields.get("source_event_id") or "").strip()
+        if source_event_id and source_event_id not in by_source_event_id:
+            by_source_event_id[source_event_id] = item
         position_key = _legacy_position_key(fields)
         if position_key and position_key not in by_key:
             by_key[position_key] = item
-    return by_key, by_record_id
+    return by_key, by_record_id, by_source_event_id
 
 
 def _source_event_id_from_position(position: dict[str, Any]) -> str | None:
@@ -527,6 +533,17 @@ def _compat_record_id(position: dict[str, Any], legacy_row: dict[str, Any] | Non
 def _compat_fields_from_projection(position: dict[str, Any], legacy_row: dict[str, Any] | None) -> dict[str, Any]:
     legacy_fields = dict((legacy_row or {}).get("fields") or {})
     current_contracts = int(position.get("current_contracts") or 0)
+    resolved_strike = effective_strike(legacy_fields)
+    if resolved_strike is None:
+        resolved_strike = position.get("strike")
+    resolved_expiration_ymd = effective_expiration_ymd(legacy_fields) or position.get("expiration_ymd")
+    resolved_expiration = legacy_fields.get("expiration")
+    if resolved_expiration in (None, ""):
+        resolved_expiration = parse_exp_to_ms(resolved_expiration_ymd)
+    resolved_currency = normalize_currency(legacy_fields.get("currency")) or normalize_currency(position.get("currency"))
+    resolved_multiplier = effective_multiplier(legacy_fields)
+    if resolved_multiplier is None:
+        resolved_multiplier = position.get("multiplier")
     closed_contracts = legacy_fields.get("contracts_closed")
     if closed_contracts in (None, ""):
         base_total = legacy_fields.get("contracts")
@@ -545,11 +562,11 @@ def _compat_fields_from_projection(position: dict[str, Any], legacy_row: dict[st
             "symbol": position.get("symbol"),
             "option_type": position.get("option_type"),
             "side": position.get("side"),
-            "strike": position.get("strike"),
-            "expiration": parse_exp_to_ms(position.get("expiration_ymd")),
-            "expiration_ymd": position.get("expiration_ymd"),
-            "currency": normalize_currency(position.get("currency")),
-            "multiplier": position.get("multiplier"),
+            "strike": resolved_strike,
+            "expiration": resolved_expiration,
+            "expiration_ymd": resolved_expiration_ymd,
+            "currency": resolved_currency,
+            "multiplier": resolved_multiplier,
             "contracts": int(total_contracts or 0),
             "contracts_open": current_contracts,
             "contracts_closed": int(closed_contracts or 0),
@@ -578,13 +595,18 @@ def _should_materialize_compat_position(position: dict[str, Any], legacy_row: di
 def load_option_positions_v2_records(*, base: Path | None = None, repo: Any) -> CompatPositionRecords:
     state = refresh_option_positions_v2_state(base=base, repo=repo)
     legacy_rows = _list_legacy_position_lots(repo)
-    by_key, _by_record_id = _legacy_row_maps(legacy_rows)
+    by_key, by_record_id, by_source_event_id = _legacy_row_maps(legacy_rows)
     matched_record_ids: set[str] = set()
     records: list[dict[str, Any]] = []
     for position in state.projection.get("positions") or []:
         if not isinstance(position, dict):
             continue
-        legacy_row = by_key.get(str(position.get("position_key") or ""))
+        projected_source_event_id = _source_event_id_from_position(position)
+        legacy_row = (
+            by_key.get(str(position.get("position_key") or ""))
+            or by_source_event_id.get(str(projected_source_event_id or "").strip())
+            or by_record_id.get(str(position.get("baseline_snapshot_lot_id") or "").strip())
+        )
         if not _should_materialize_compat_position(position, legacy_row):
             continue
         if legacy_row is not None:
