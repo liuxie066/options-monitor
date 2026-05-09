@@ -4,6 +4,10 @@
 
 > 本地 `option_positions` / `position_lots` 发现错账后，应该怎么安全修。
 
+如果你现在问的是“线上升级后怎么从旧方案迁到新方案”，先看：
+
+- `docs/OPTION_POSITIONS_MIGRATION.md`
+
 适用前提：
 - canonical model 仍然是 `trade_events -> projection -> position_lots`
 - 不直接手改 SQLite 行
