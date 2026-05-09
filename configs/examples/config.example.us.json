@@ -127,6 +127,12 @@
       }
     }
   },
+  "watchdog": {
+    "retry_enabled": true,
+    "retry_interval_sec": 3,
+    "retry_timeout_sec": 25,
+    "success_threshold": 2
+  },
   "alert_policy": {
     "change_annual_threshold": 0.02
   },
