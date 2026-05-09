@@ -41,7 +41,7 @@ def _iso_to_trade_time_ms(value: object) -> int | None:
     try:
         return int(datetime.fromisoformat(text).timestamp() * 1000)
     except ValueError:
-        print(f"[WARN] invalid v2 event_at_utc timestamp: {text}")
+        print(f"[WARN] invalid v2 event_at_utc timestamp: {text}; using null trade_time_ms")
         return None
 
 
