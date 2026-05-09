@@ -6,6 +6,7 @@
 
 ### Changed
 - Completed release metadata alignment for `v1.1.7`.
+- Added automatic GitHub Release publishing from `main` when the top-level `VERSION` changes, so `1.1.7` no longer waits on a separate manual tag push.
 
 ## 1.1.6 - 2026-05-08
 
