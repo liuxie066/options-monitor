@@ -51,6 +51,16 @@ def run_multi_tick_watchdog(
 
         if need_opend:
             unhealthy = None
+            wd_cfg = (base_cfg or {}).get("watchdog") or {}
+            retry_enabled = bool(wd_cfg.get("retry_enabled", False))
+            retry_interval_sec = float(wd_cfg.get("retry_interval_sec", 3.0))
+            retry_timeout_sec = float(wd_cfg.get("retry_timeout_sec", 25.0))
+            success_threshold = int(wd_cfg.get("success_threshold", 2))
+            # Increase subprocess timeout to accommodate the retry window.
+            base_timeout_sec = 35
+            watchdog_timeout_sec = (
+                int(retry_timeout_sec) + base_timeout_sec if retry_enabled else base_timeout_sec
+            )
             for host, port in sorted(ports):
                 try:
                     wd0 = run_opend_watchdog(
@@ -59,7 +69,11 @@ def run_multi_tick_watchdog(
                         host=str(host),
                         port=int(port),
                         ensure=True,
-                        timeout_sec=35,
+                        timeout_sec=watchdog_timeout_sec,
+                        retry_enabled=retry_enabled,
+                        retry_interval_sec=retry_interval_sec,
+                        retry_timeout_sec=retry_timeout_sec,
+                        success_threshold=success_threshold,
                     )
                     payload0 = parse_last_json_obj((wd0.stdout or "") + "\n" + (wd0.stderr or ""))
                     ok0 = bool(payload0.get("ok")) if payload0 else (wd0.returncode == 0)
