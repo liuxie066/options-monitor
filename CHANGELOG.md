@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.1.7 - 2026-05-09
+
+### Changed
+- Completed release metadata alignment for `v1.1.7`.
+
 ## 1.1.6 - 2026-05-08
 
 ### Added
