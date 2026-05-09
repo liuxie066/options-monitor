@@ -545,7 +545,11 @@ def _legacy_trade_side_to_position_side(*, side: Any, position_effect: str) -> s
     }
     position_side = mapping.get((effect_norm, side_norm))
     if not position_side:
-        raise ValueError(f"unsupported legacy trade side mapping: effect={effect_norm or 'missing'} side={side_norm or 'missing'}")
+        raise ValueError(
+            "unsupported legacy trade side mapping: "
+            f"effect={effect_norm or 'missing'} side={side_norm or 'missing'}. "
+            "Valid combinations are: (open, sell), (open, buy), (close, buy), (close, sell)"
+        )
     return position_side
 
 
