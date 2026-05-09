@@ -23,7 +23,10 @@ def _auto_sync_record_if_possible(repo: Any, *, record_id: str) -> dict[str, Any
             return None
         return sync_single_option_position_record(repo=repo, data_config=Path(str(data_config)), record_id=record_id, apply_mode=True)
     except Exception as exc:
-        print(f"[WARN] option_positions post-write Feishu sync skipped for {record_id}: {exc}", file=sys.stderr)
+        print(
+            f"[WARN] option_positions post-write Feishu sync skipped for {record_id} ({type(exc).__name__}): {exc}",
+            file=sys.stderr,
+        )
         return None
 
 
@@ -38,7 +41,7 @@ def _apply_with_optional_sync(repo: Any, *, record_id: str, result: dict[str, An
             "diagnostic_count": len(v2_state.projection.get("diagnostics") or []),
         }
     except Exception as exc:
-        print(f"[WARN] option_positions v2 refresh skipped: {exc}", file=sys.stderr)
+        print(f"[WARN] option_positions v2 refresh skipped ({type(exc).__name__}): {exc}", file=sys.stderr)
     sync_result = _auto_sync_record_if_possible(repo, record_id=record_id) if record_id else None
     return payload | {"mode": "applied", "result": result, "v2_result": v2_result, "sync_result": sync_result}
 

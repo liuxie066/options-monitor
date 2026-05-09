@@ -12,7 +12,6 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from scripts.option_positions_core.ledger import project_position_lot_records_with_diagnostics
 from scripts.option_positions_core.domain import (
     effective_expiration_ymd,
     effective_strike,
@@ -22,8 +21,8 @@ from scripts.option_positions_core.domain import (
     normalize_option_type,
     normalize_side,
 )
-from scripts.option_positions_core.service import rebuild_position_lots_from_trade_events
 from scripts.option_positions_core.service import persist_manual_void_event
+from scripts.trade_contract_identity import canonical_contract_symbol
 from src.application.position_workflows import execute_manual_adjust, execute_manual_close, execute_manual_open
 from src.application.option_positions_facade import (
     format_cash_secured_amount,
@@ -32,6 +31,16 @@ from src.application.option_positions_facade import (
     resolve_option_positions_repo,
 )
 from src.application.option_positions_v2_service import load_option_positions_v2_records, refresh_option_positions_v2_state
+
+
+def _iso_to_trade_time_ms(value: object) -> int | None:
+    text = str(value or '').strip()
+    if not text:
+        return None
+    try:
+        return int(datetime.fromisoformat(text).timestamp() * 1000)
+    except ValueError:
+        return None
 
 
 def _identity_matches_payload(
@@ -45,7 +54,7 @@ def _identity_matches_payload(
 ) -> bool:
     if account and normalize_account(payload.get('account')) != normalize_account(account):
         return False
-    if symbol and str(payload.get('symbol') or '').strip().upper() != str(symbol).strip().upper():
+    if symbol and canonical_contract_symbol(payload.get('symbol')) != canonical_contract_symbol(symbol):
         return False
     if option_type and normalize_option_type(payload.get('option_type')) != normalize_option_type(option_type):
         return False
@@ -82,9 +91,7 @@ def build_lot_event_history(repo, *, base: Path, record_id: str) -> list[dict[st
         history.append(
             {
                 'event_id': event.get('event_id'),
-                'trade_time_ms': int(datetime.fromisoformat(str(event.get('event_at_utc'))).timestamp() * 1000)
-                if event.get('event_at_utc')
-                else None,
+                'trade_time_ms': _iso_to_trade_time_ms(event.get('event_at_utc')),
                 'source_type': event.get('source_type'),
                 'source_name': event.get('source_name'),
                 'broker': normalize_broker(event.get('broker')),
@@ -130,7 +137,7 @@ def _matches_lot_selector(
         return False
     if account and normalize_account(fields.get('account')) != normalize_account(account):
         return False
-    if symbol and str(fields.get('symbol') or '').strip().upper() != str(symbol).strip().upper():
+    if symbol and canonical_contract_symbol(fields.get('symbol')) != canonical_contract_symbol(symbol):
         return False
     if option_type and str(fields.get('option_type') or '').strip().lower() != str(option_type).strip().lower():
         return False
@@ -163,7 +170,7 @@ def _matches_event_selector(
         return False
     if account and normalize_account(event.get('account')) != normalize_account(account):
         return False
-    if symbol and str(event.get('symbol') or '').strip().upper() != str(symbol).strip().upper():
+    if symbol and canonical_contract_symbol(event.get('symbol')) != canonical_contract_symbol(symbol):
         return False
     if option_type and str(event.get('option_type') or '').strip().lower() != str(option_type).strip().lower():
         return False
@@ -241,9 +248,7 @@ def inspect_projection_state(
     related_events = [
         {
             'event_id': str(event.get('event_id') or '').strip(),
-            'trade_time_ms': int(datetime.fromisoformat(str(event.get('event_at_utc'))).timestamp() * 1000)
-            if event.get('event_at_utc')
-            else None,
+            'trade_time_ms': _iso_to_trade_time_ms(event.get('event_at_utc')),
             'source_type': event.get('source_type'),
             'source_name': event.get('source_name'),
             'broker': event.get('broker'),
