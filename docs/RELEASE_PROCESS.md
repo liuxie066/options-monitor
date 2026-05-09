@@ -32,7 +32,20 @@ python3 scripts/validate_config.py --config configs/examples/config.example.us.j
 
 ---
 
-## 打 tag
+## 自动发布
+
+合并到 `main` 的版本提交如果修改了顶层 `VERSION`，GitHub Actions 会自动：
+
+- 读取 `VERSION` 生成 `v<version>` tag
+- 校验 `CHANGELOG.md` 是否存在对应版本段落
+- 运行 smoke / agent plugin 测试
+- 发布对应 GitHub Release
+
+因此常规发布只需要把版本元数据改好并推到 `main`；不需要再手动补打同名 tag。
+
+---
+
+## 手动打 tag（补发 / 重跑）
 
 ```bash
 VERSION="$(cat VERSION)"
@@ -41,7 +54,7 @@ git push origin main
 git push origin "v${VERSION}"
 ```
 
-如果只是准备版本元数据，还没有准备发布，不要提前打 tag。正式发布时 tag 必须与 `VERSION` 完全一致，只是多一个 `v` 前缀。
+如果需要补发历史版本，或者需要显式重跑 tag 驱动的发布流程，仍可手动打 tag。正式发布时 tag 必须与 `VERSION` 完全一致，只是多一个 `v` 前缀。
 
 ---
 
