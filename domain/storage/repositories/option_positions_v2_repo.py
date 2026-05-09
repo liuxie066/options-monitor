@@ -141,12 +141,14 @@ def replace_position_snapshots(base: Path, payloads: list[dict[str, Any]]) -> di
         encoding="utf-8",
     )
     _replace_json_dir_contents(_snapshots_dir(base), snapshots, id_field="snapshot_id")
-    latest = snapshots[-1] if snapshots else None
     current_path = None
-    if latest is not None:
+    latest_by_type: dict[str, dict[str, Any]] = {}
+    for snapshot in snapshots:
+        latest_by_type[str(snapshot.get("snapshot_type") or "")] = snapshot
+    for snapshot_type, snapshot in latest_by_type.items():
         current_path = _write_json(
-            _current_dir(base) / f"snapshot.{latest['snapshot_type']}.latest.json",
-            latest,
+            _current_dir(base) / f"snapshot.{snapshot_type}.latest.json",
+            snapshot,
         )
     return {"events": jsonl_path, "current": current_path}
 

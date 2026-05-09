@@ -31,6 +31,7 @@ from src.application.option_positions_facade import (
     resolve_option_positions_repo,
 )
 from src.application.option_positions_v2_service import load_option_positions_v2_records, refresh_option_positions_v2_state
+from src.application.option_positions_v2_service import reconcile_option_positions_snapshot, snapshot_current_positions_as_verification
 
 
 def _iso_to_trade_time_ms(value: object) -> int | None:
@@ -70,6 +71,87 @@ def _identity_matches_payload(
     return True
 
 
+def _v2_position_effect(event_kind: object) -> str:
+    mapping = {
+        "open_trade": "open",
+        "close_trade": "close",
+        "manual_adjustment": "adjust",
+    }
+    return mapping.get(str(event_kind or "").strip(), str(event_kind or "").strip())
+
+
+def _related_legacy_void_rows(repo, *, related_event_ids: set[str], record_id: str | None) -> list[dict[str, object]]:
+    list_trade_events = getattr(repo, "list_trade_events", None)
+    if not callable(list_trade_events):
+        return []
+    rows: list[dict[str, object]] = []
+    for event in list_trade_events() or []:
+        if not isinstance(event, dict):
+            continue
+        if str(event.get("position_effect") or "").strip().lower() != "void":
+            continue
+        payload = event.get("raw_payload") or {}
+        if not isinstance(payload, dict):
+            payload = {}
+        target_event_id = str(payload.get("void_target_event_id") or "").strip()
+        target_record_id = str(payload.get("record_id") or "").strip()
+        if target_event_id not in related_event_ids and (record_id is None or target_record_id != str(record_id).strip()):
+            continue
+        rows.append(
+            {
+                "event_id": str(event.get("event_id") or "").strip(),
+                "trade_time_ms": event.get("trade_time_ms"),
+                "source_type": event.get("source_type"),
+                "source_name": event.get("source_name"),
+                "broker": normalize_broker(event.get("broker")),
+                "account": normalize_account(event.get("account")) if event.get("account") else None,
+                "symbol": event.get("symbol"),
+                "option_type": event.get("option_type"),
+                "side": event.get("side"),
+                "position_effect": "void",
+                "contracts": event.get("contracts"),
+                "price": event.get("price"),
+                "strike": event.get("strike"),
+                "expiration_ymd": event.get("expiration_ymd"),
+                "currency": event.get("currency"),
+                "void_target_event_id": target_event_id or None,
+                "adjust_target_source_event_id": None,
+                "close_target_source_event_id": None,
+                "record_id": target_record_id or record_id,
+                "patch": None,
+            }
+        )
+    return rows
+
+
+def _load_verification_snapshot_payload(path: str) -> dict[str, object]:
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    if isinstance(payload, dict) and payload.get("snapshot_type"):
+        return payload
+    if isinstance(payload, dict) and isinstance(payload.get("lots"), list):
+        lots = payload.get("lots") or []
+        snapshot_id = str(payload.get("snapshot_id") or f"verify-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}").strip()
+        return {
+            "snapshot_id": snapshot_id,
+            "snapshot_type": "verification",
+            "snapshot_at_utc": str(payload.get("snapshot_at_utc") or datetime.now().astimezone().isoformat()),
+            "source_name": str(payload.get("source_name") or "cli_reconcile"),
+            "source_type": str(payload.get("source_type") or "manual_verification"),
+            "note": payload.get("note"),
+            "lots": lots,
+        }
+    if isinstance(payload, list):
+        return {
+            "snapshot_id": f"verify-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}",
+            "snapshot_type": "verification",
+            "snapshot_at_utc": datetime.now().astimezone().isoformat(),
+            "source_name": "cli_reconcile",
+            "source_type": "manual_verification",
+            "lots": payload,
+        }
+    raise ValueError("verification snapshot file must be a snapshot object or a lots array")
+
+
 def build_lot_event_history(repo, *, base: Path, record_id: str) -> list[dict[str, object]]:
     compat = load_option_positions_v2_records(base=base, repo=repo)
     current = next((item for item in compat.records if str(item.get('record_id') or '').strip() == str(record_id).strip()), None)
@@ -79,6 +161,7 @@ def build_lot_event_history(repo, *, base: Path, record_id: str) -> list[dict[st
     if not isinstance(fields, dict):
         fields = {}
     history: list[dict[str, object]] = []
+    related_event_ids: set[str] = set()
     for event in compat.state.events:
         if not _identity_matches_payload(
             event,
@@ -89,9 +172,12 @@ def build_lot_event_history(repo, *, base: Path, record_id: str) -> list[dict[st
             expiration_ymd=effective_expiration_ymd(fields),
         ):
             continue
+        event_id = str(event.get('event_id') or '').strip()
+        if event_id:
+            related_event_ids.add(event_id)
         history.append(
             {
-                'event_id': event.get('event_id'),
+                'event_id': event_id,
                 'trade_time_ms': _iso_to_trade_time_ms(event.get('event_at_utc')),
                 'source_type': event.get('source_type'),
                 'source_name': event.get('source_name'),
@@ -100,7 +186,7 @@ def build_lot_event_history(repo, *, base: Path, record_id: str) -> list[dict[st
                 'symbol': event.get('symbol'),
                 'option_type': event.get('option_type'),
                 'side': event.get('side'),
-                'position_effect': event.get('event_kind'),
+                'position_effect': _v2_position_effect(event.get('event_kind')),
                 'contracts': event.get('contracts'),
                 'price': None,
                 'strike': event.get('strike'),
@@ -113,6 +199,7 @@ def build_lot_event_history(repo, *, base: Path, record_id: str) -> list[dict[st
                 'patch': {'target_contracts': event.get('target_contracts')} if event.get('target_contracts') is not None else None,
             }
         )
+    history.extend(_related_legacy_void_rows(repo, related_event_ids=related_event_ids, record_id=record_id))
     history.sort(key=lambda row: (int(row.get('trade_time_ms') or 0), str(row.get('event_id') or '')))
     return history
 
@@ -370,6 +457,10 @@ def main():
     p_inspect.add_argument('--exp', default=None, help='YYYY-MM-DD')
     p_inspect.add_argument('--format', default='json', choices=['json'])
 
+    p_reconcile = sub.add_parser('reconcile', help='store a verification snapshot and generate a reconciliation report')
+    p_reconcile.add_argument('--snapshot-file', required=True, help='JSON file with a verification snapshot object or lots array')
+    p_reconcile.add_argument('--format', default='text', choices=['text', 'json'])
+
     p_void_event = sub.add_parser('void-event', help='append a void event for a canonical trade event')
     p_void_event.add_argument('--event-id', required=True)
     p_void_event.add_argument('--void-reason', default='manual_void')
@@ -599,6 +690,31 @@ def main():
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return
 
+    if args.cmd == 'reconcile':
+        try:
+            snapshot = _load_verification_snapshot_payload(args.snapshot_file)
+            report = reconcile_option_positions_snapshot(
+                base=base,
+                repo=repo,
+                verification_snapshot=snapshot,
+            )
+        except ValueError as e:
+            raise SystemExit(str(e))
+        if args.format == 'json':
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+            return
+        summary = report.get('summary') or {}
+        print(
+            "[DONE] wrote verification snapshot and reconciliation report "
+            f"snapshot_id={report.get('snapshot_id')} "
+            f"matched={int(summary.get('matched', 0))} "
+            f"quantity_mismatch={int(summary.get('quantity_mismatch', 0))} "
+            f"missing_in_projection={int(summary.get('missing_in_projection', 0))} "
+            f"missing_in_snapshot={int(summary.get('missing_in_snapshot', 0))} "
+            f"field_mismatch={int(summary.get('field_mismatch', 0))}"
+        )
+        return
+
     if args.cmd == 'void-event':
         try:
             result = persist_manual_void_event(
@@ -609,6 +725,14 @@ def main():
         except ValueError as e:
             raise SystemExit(str(e))
         try:
+            snapshot_current_positions_as_verification(
+                base=base,
+                repo=repo,
+                snapshot_id=f"verify-{result.get('event_id')}",
+                source_name="cli_manual_void",
+                source_type="manual_verification",
+                note="manual_void checkpoint",
+            )
             v2_state = refresh_option_positions_v2_state(base=base, repo=repo)
             result["v2_result"] = {
                 'baseline_snapshot_id': v2_state.baseline_snapshot.get('snapshot_id'),

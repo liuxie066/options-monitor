@@ -8,10 +8,15 @@ import sys
 from typing import Any
 
 from domain.domain.option_positions_v2 import (
+    EVENT_KIND_CLOSE_TRADE,
+    EVENT_KIND_MANUAL_ADJUSTMENT,
+    EVENT_KIND_OPEN_TRADE,
     SNAPSHOT_TYPE_BASELINE,
+    SNAPSHOT_TYPE_VERIFICATION,
     adapt_legacy_trade_events,
     build_baseline_snapshot_from_legacy_records,
     build_position_key,
+    normalize_position_event,
     normalize_position_snapshot,
     project_current_positions,
     reconcile_snapshot_against_projection,
@@ -101,6 +106,178 @@ def _event_ms_to_iso(value: Any) -> str:
         return utc_now_iso()
 
 
+def _iso_sort_key(value: Any) -> tuple[float, str]:
+    text = str(value or "").strip()
+    if not text:
+        return (0.0, "")
+    try:
+        return (datetime.fromisoformat(text).timestamp(), text)
+    except ValueError:
+        return (0.0, text)
+
+
+def _empty_baseline_snapshot(*, snapshot_id: str = "legacy_baseline", snapshot_at_utc: str | None = None) -> dict[str, Any]:
+    return normalize_position_snapshot(
+        {
+            "snapshot_id": snapshot_id,
+            "snapshot_type": SNAPSHOT_TYPE_BASELINE,
+            "snapshot_at_utc": snapshot_at_utc or utc_now_iso(),
+            "source_name": "empty_baseline",
+            "source_type": "system",
+            "lots": [],
+        }
+    )
+
+
+def _load_persisted_snapshots(base: Path) -> list[dict[str, Any]]:
+    snapshots: list[dict[str, Any]] = []
+    for item in option_positions_v2_repo.load_position_snapshots(base):
+        try:
+            snapshots.append(normalize_position_snapshot(item))
+        except Exception:
+            continue
+    snapshots.sort(key=lambda item: (_iso_sort_key(item.get("snapshot_at_utc")), str(item.get("snapshot_id") or "")))
+    return snapshots
+
+
+def _load_persisted_events(base: Path) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    for item in option_positions_v2_repo.load_position_events(base):
+        try:
+            events.append(normalize_position_event(item))
+        except Exception:
+            continue
+    events.sort(key=lambda item: (_iso_sort_key(item.get("event_at_utc")), str(item.get("event_id") or "")))
+    return events
+
+
+def _latest_snapshot_by_type(
+    snapshots: list[dict[str, Any]], snapshot_type: str
+) -> dict[str, Any] | None:
+    matches = [item for item in snapshots if str(item.get("snapshot_type") or "") == snapshot_type]
+    return matches[-1] if matches else None
+
+
+def _native_baseline_snapshot(
+    *,
+    legacy_events: list[dict[str, Any]],
+    legacy_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    baseline_snapshot = _baseline_snapshot_from_bootstrap_events(legacy_events)
+    if baseline_snapshot is not None:
+        return baseline_snapshot
+    non_bootstrap_events = [
+        item
+        for item in legacy_events
+        if str((item or {}).get("source_type") or "").strip().lower() != "bootstrap_snapshot"
+    ]
+    if not non_bootstrap_events and legacy_rows:
+        return build_baseline_snapshot_from_legacy_records(
+            legacy_rows,
+            snapshot_id="legacy_baseline",
+            snapshot_at_utc=utc_now_iso(),
+            source_name="legacy_position_lots",
+        )
+    earliest_event_ms: int | None = None
+    for item in non_bootstrap_events:
+        try:
+            event_ms = int(item.get("trade_time_ms") or 0)
+        except Exception:
+            continue
+        if earliest_event_ms is None or event_ms < earliest_event_ms:
+            earliest_event_ms = event_ms
+    snapshot_at_utc = _event_ms_to_iso(max(int(earliest_event_ms or 0) - 1, 0)) if earliest_event_ms is not None else utc_now_iso()
+    return _empty_baseline_snapshot(snapshot_at_utc=snapshot_at_utc)
+
+
+def _projection_checkpoint_snapshot(
+    baseline_snapshot: dict[str, Any],
+    verification_snapshots: list[dict[str, Any]],
+) -> dict[str, Any]:
+    latest_verification = _latest_snapshot_by_type(verification_snapshots, SNAPSHOT_TYPE_VERIFICATION)
+    if latest_verification is None:
+        return baseline_snapshot
+    return normalize_position_snapshot(
+        {
+            "snapshot_id": latest_verification.get("snapshot_id"),
+            "snapshot_type": SNAPSHOT_TYPE_BASELINE,
+            "snapshot_at_utc": latest_verification.get("snapshot_at_utc"),
+            "source_name": latest_verification.get("source_name") or "verification_checkpoint",
+            "source_type": latest_verification.get("source_type"),
+            "note": latest_verification.get("note"),
+            "lots": list(latest_verification.get("lots") or []),
+        }
+    )
+
+
+def _merge_native_and_legacy_events(
+    native_events: list[dict[str, Any]],
+    legacy_events: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    ordered: list[dict[str, Any]] = []
+    for event in legacy_events:
+        event_id = str(event.get("event_id") or "").strip()
+        if not event_id or event_id in merged:
+            continue
+        merged[event_id] = event
+        ordered.append(event)
+    for event in native_events:
+        event_id = str(event.get("event_id") or "").strip()
+        if not event_id:
+            continue
+        if event_id in merged:
+            merged[event_id] = event
+            for idx, current in enumerate(ordered):
+                if str(current.get("event_id") or "").strip() == event_id:
+                    ordered[idx] = event
+                    break
+            continue
+        merged[event_id] = event
+        ordered.append(event)
+    ordered.sort(key=lambda item: (_iso_sort_key(item.get("event_at_utc")), str(item.get("event_id") or "")))
+    return ordered
+
+
+def _events_after_snapshot(events: list[dict[str, Any]], snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    snapshot_key = _iso_sort_key(snapshot.get("snapshot_at_utc"))
+    filtered: list[dict[str, Any]] = []
+    for event in events:
+        event_key = _iso_sort_key(event.get("event_at_utc"))
+        if event_key > snapshot_key:
+            filtered.append(event)
+    return filtered
+
+
+def _build_snapshot_from_legacy_rows(
+    rows: list[dict[str, Any]],
+    *,
+    snapshot_id: str,
+    snapshot_type: str,
+    snapshot_at_utc: str,
+    source_name: str,
+    source_type: str,
+    note: str | None = None,
+) -> dict[str, Any]:
+    baseline = build_baseline_snapshot_from_legacy_records(
+        rows,
+        snapshot_id=snapshot_id,
+        snapshot_at_utc=snapshot_at_utc,
+        source_name=source_name,
+    )
+    return normalize_position_snapshot(
+        {
+            "snapshot_id": snapshot_id,
+            "snapshot_type": snapshot_type,
+            "snapshot_at_utc": snapshot_at_utc,
+            "source_name": source_name,
+            "source_type": source_type,
+            "note": note,
+            "lots": list(baseline.get("lots") or []),
+        }
+    )
+
+
 def _baseline_snapshot_from_bootstrap_events(events: list[dict[str, Any]]) -> dict[str, Any] | None:
     lots: list[dict[str, Any]] = []
     bootstrap_events = [
@@ -188,21 +365,90 @@ def _fallback_baseline_snapshot(repo: Any) -> dict[str, Any]:
 def refresh_option_positions_v2_state(*, base: Path | None = None, repo: Any) -> OptionPositionsV2State:
     resolved_base = resolve_option_positions_v2_base(base=base, repo=repo)
     legacy_events = _list_legacy_trade_events(repo)
-    baseline_snapshot = _baseline_snapshot_from_bootstrap_events(legacy_events)
+    legacy_rows = _list_legacy_position_lots(repo)
+    persisted_snapshots = _load_persisted_snapshots(resolved_base)
+    baseline_snapshot = _latest_snapshot_by_type(persisted_snapshots, SNAPSHOT_TYPE_BASELINE)
+    verification_snapshots = [
+        item for item in persisted_snapshots if str(item.get("snapshot_type") or "") == SNAPSHOT_TYPE_VERIFICATION
+    ]
     if baseline_snapshot is None:
-        baseline_snapshot = _fallback_baseline_snapshot(repo)
+        baseline_snapshot = _native_baseline_snapshot(legacy_events=legacy_events, legacy_rows=legacy_rows)
+    persisted_events = _load_persisted_events(resolved_base)
     adapted = adapt_legacy_trade_events(legacy_events)
-    projection = project_current_positions(baseline_snapshot, adapted["events"])
-    option_positions_v2_repo.replace_position_snapshots(resolved_base, [baseline_snapshot])
-    option_positions_v2_repo.replace_position_events(resolved_base, adapted["events"])
+    merged_events = _merge_native_and_legacy_events(persisted_events, list(adapted["events"]))
+    checkpoint_snapshot = _projection_checkpoint_snapshot(baseline_snapshot, verification_snapshots)
+    projection = project_current_positions(checkpoint_snapshot, _events_after_snapshot(merged_events, checkpoint_snapshot))
+    option_positions_v2_repo.replace_position_snapshots(
+        resolved_base,
+        [baseline_snapshot, *verification_snapshots],
+    )
+    option_positions_v2_repo.replace_position_events(resolved_base, merged_events)
     option_positions_v2_repo.write_current_projection(resolved_base, projection)
     return OptionPositionsV2State(
         base=resolved_base,
-        baseline_snapshot=baseline_snapshot,
-        events=list(adapted["events"]),
+        baseline_snapshot=checkpoint_snapshot,
+        events=list(merged_events),
         projection=projection,
         skipped_legacy_events=list(adapted["skipped"]),
     )
+
+
+def append_option_positions_v2_event(
+    *,
+    base: Path | None = None,
+    repo: Any,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    resolved_base = resolve_option_positions_v2_base(base=base, repo=repo)
+    event = normalize_position_event(payload)
+    persisted_events = _load_persisted_events(resolved_base)
+    events = _merge_native_and_legacy_events(
+        [item for item in persisted_events if str(item.get("event_id") or "").strip() != str(event.get("event_id") or "").strip()] + [event],
+        [],
+    )
+    option_positions_v2_repo.replace_position_events(resolved_base, events)
+    return event
+
+
+def snapshot_current_positions_as_verification(
+    *,
+    base: Path | None = None,
+    repo: Any,
+    snapshot_id: str,
+    source_name: str,
+    source_type: str,
+    snapshot_at_utc: str | None = None,
+    note: str | None = None,
+) -> dict[str, Any]:
+    resolved_base = resolve_option_positions_v2_base(base=base, repo=repo)
+    persisted_snapshots = _load_persisted_snapshots(resolved_base)
+    baseline_snapshot = _latest_snapshot_by_type(persisted_snapshots, SNAPSHOT_TYPE_BASELINE)
+    verification_snapshots = [
+        item for item in persisted_snapshots if str(item.get("snapshot_type") or "") == SNAPSHOT_TYPE_VERIFICATION
+    ]
+    if baseline_snapshot is None:
+        baseline_snapshot = _native_baseline_snapshot(
+            legacy_events=_list_legacy_trade_events(repo),
+            legacy_rows=_list_legacy_position_lots(repo),
+        )
+    verification_snapshot = _build_snapshot_from_legacy_rows(
+        _list_legacy_position_lots(repo),
+        snapshot_id=snapshot_id,
+        snapshot_type=SNAPSHOT_TYPE_VERIFICATION,
+        snapshot_at_utc=snapshot_at_utc or utc_now_iso(),
+        source_name=source_name,
+        source_type=source_type,
+        note=note,
+    )
+    verification_snapshots = [
+        item for item in verification_snapshots if str(item.get("snapshot_id") or "").strip() != str(snapshot_id).strip()
+    ]
+    verification_snapshots.append(verification_snapshot)
+    option_positions_v2_repo.replace_position_snapshots(
+        resolved_base,
+        [baseline_snapshot, *verification_snapshots],
+    )
+    return verification_snapshot
 
 
 def _legacy_position_key(fields: dict[str, Any]) -> str | None:
@@ -319,6 +565,16 @@ def _compat_fields_from_projection(position: dict[str, Any], legacy_row: dict[st
     return fields
 
 
+def _should_materialize_compat_position(position: dict[str, Any], legacy_row: dict[str, Any] | None) -> bool:
+    if legacy_row is not None:
+        return True
+    if int(position.get("baseline_contracts") or 0) > 0:
+        return True
+    if int(position.get("current_contracts") or 0) > 0:
+        return True
+    return bool(position.get("applied_events"))
+
+
 def load_option_positions_v2_records(*, base: Path | None = None, repo: Any) -> CompatPositionRecords:
     state = refresh_option_positions_v2_state(base=base, repo=repo)
     legacy_rows = _list_legacy_position_lots(repo)
@@ -329,6 +585,8 @@ def load_option_positions_v2_records(*, base: Path | None = None, repo: Any) -> 
         if not isinstance(position, dict):
             continue
         legacy_row = by_key.get(str(position.get("position_key") or ""))
+        if not _should_materialize_compat_position(position, legacy_row):
+            continue
         if legacy_row is not None:
             record_id = str(legacy_row.get("record_id") or "").strip()
             if record_id:
@@ -362,7 +620,28 @@ def reconcile_option_positions_snapshot(
     repo: Any,
     verification_snapshot: dict[str, Any],
 ) -> dict[str, Any]:
-    state = refresh_option_positions_v2_state(base=base, repo=repo)
-    report = reconcile_snapshot_against_projection(verification_snapshot, state.projection)
-    option_positions_v2_repo.write_reconciliation_report(state.base, report)
+    snapshot = normalize_position_snapshot(verification_snapshot)
+    if str(snapshot.get("snapshot_type") or "") != SNAPSHOT_TYPE_VERIFICATION:
+        raise ValueError("verification snapshot is required for reconciliation")
+    resolved_base = resolve_option_positions_v2_base(base=base, repo=repo)
+    state = refresh_option_positions_v2_state(base=resolved_base, repo=repo)
+    report = reconcile_snapshot_against_projection(snapshot, state.projection)
+    persisted_snapshots = _load_persisted_snapshots(resolved_base)
+    baseline_snapshot = _latest_snapshot_by_type(persisted_snapshots, SNAPSHOT_TYPE_BASELINE)
+    verification_snapshots = [
+        item for item in persisted_snapshots if str(item.get("snapshot_type") or "") == SNAPSHOT_TYPE_VERIFICATION
+    ]
+    if baseline_snapshot is None:
+        baseline_snapshot = _native_baseline_snapshot(
+            legacy_events=_list_legacy_trade_events(repo),
+            legacy_rows=_list_legacy_position_lots(repo),
+        )
+    verification_snapshots = [
+        item
+        for item in verification_snapshots
+        if str(item.get("snapshot_id") or "").strip() != str(snapshot.get("snapshot_id") or "").strip()
+    ]
+    verification_snapshots.append(snapshot)
+    option_positions_v2_repo.replace_position_snapshots(resolved_base, [baseline_snapshot, *verification_snapshots])
+    option_positions_v2_repo.write_reconciliation_report(resolved_base, report)
     return report
