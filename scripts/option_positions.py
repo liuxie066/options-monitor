@@ -124,6 +124,61 @@ def _related_legacy_void_rows(repo, *, related_event_ids: set[str], record_id: s
     return rows
 
 
+def _related_legacy_adjust_rows(
+    repo,
+    *,
+    record_id: str,
+    fields: dict[str, object],
+) -> list[dict[str, object]]:
+    list_trade_events = getattr(repo, "list_trade_events", None)
+    if not callable(list_trade_events):
+        return []
+    rows: list[dict[str, object]] = []
+    for event in list_trade_events() or []:
+        if not isinstance(event, dict):
+            continue
+        if str(event.get("position_effect") or "").strip().lower() != "adjust":
+            continue
+        if not _matches_event_selector(
+            event,
+            record_id=record_id,
+            account=fields.get("account"),
+            symbol=fields.get("symbol"),
+            option_type=fields.get("option_type"),
+            strike=effective_strike(fields),
+            expiration_ymd=effective_expiration_ymd(fields),
+        ):
+            continue
+        payload = event.get("raw_payload") or {}
+        if not isinstance(payload, dict):
+            payload = {}
+        rows.append(
+            {
+                "event_id": str(event.get("event_id") or "").strip(),
+                "trade_time_ms": event.get("trade_time_ms"),
+                "source_type": event.get("source_type"),
+                "source_name": event.get("source_name"),
+                "broker": normalize_broker(event.get("broker")),
+                "account": normalize_account(event.get("account")) if event.get("account") else None,
+                "symbol": event.get("symbol"),
+                "option_type": event.get("option_type"),
+                "side": event.get("side"),
+                "position_effect": "adjust",
+                "contracts": event.get("contracts"),
+                "price": event.get("price"),
+                "strike": event.get("strike"),
+                "expiration_ymd": event.get("expiration_ymd"),
+                "currency": event.get("currency"),
+                "void_target_event_id": None,
+                "adjust_target_source_event_id": payload.get("adjust_target_source_event_id"),
+                "close_target_source_event_id": None,
+                "record_id": payload.get("record_id") or record_id,
+                "patch": payload.get("patch") if isinstance(payload.get("patch"), dict) else None,
+            }
+        )
+    return rows
+
+
 def _load_verification_snapshot_payload(path: str) -> dict[str, object]:
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
     if isinstance(payload, dict) and payload.get("snapshot_type"):
@@ -199,6 +254,11 @@ def build_lot_event_history(repo, *, base: Path, record_id: str) -> list[dict[st
                 'patch': {'target_contracts': event.get('target_contracts')} if event.get('target_contracts') is not None else None,
             }
         )
+    for row in _related_legacy_adjust_rows(repo, record_id=record_id, fields=fields):
+        event_id = str(row.get('event_id') or '').strip()
+        if event_id and event_id not in related_event_ids:
+            related_event_ids.add(event_id)
+            history.append(row)
     history.extend(_related_legacy_void_rows(repo, related_event_ids=related_event_ids, record_id=record_id))
     history.sort(key=lambda row: (int(row.get('trade_time_ms') or 0), str(row.get('event_id') or '')))
     return history
@@ -271,6 +331,14 @@ def _matches_event_selector(
     return True
 
 
+def _should_show_projected_position(row: dict[str, object]) -> bool:
+    if int(row.get('baseline_contracts') or 0) > 0:
+        return True
+    if int(row.get('current_contracts') or 0) > 0:
+        return True
+    return bool(row.get('applied_events'))
+
+
 def inspect_projection_state(
     repo,
     *,
@@ -310,14 +378,17 @@ def inspect_projection_state(
     }
     matched_projected = [
         row for row in (projection.get('positions') or [])
-        if str(row.get('position_key') or '').strip() in matched_position_keys
-        or _identity_matches_payload(
-            row,
-            account=account,
-            symbol=symbol,
-            option_type=option_type,
-            strike=strike,
-            expiration_ymd=expiration_ymd,
+        if _should_show_projected_position(row)
+        and (
+            str(row.get('position_key') or '').strip() in matched_position_keys
+            or _identity_matches_payload(
+                row,
+                account=account,
+                symbol=symbol,
+                option_type=option_type,
+                strike=strike,
+                expiration_ymd=expiration_ymd,
+            )
         )
     ]
     matched_position_keys.update(str(row.get('position_key') or '').strip() for row in matched_projected if str(row.get('position_key') or '').strip())
@@ -479,6 +550,7 @@ def main():
 
     base = Path(__file__).resolve().parents[1]
     _data_config, repo = resolve_option_positions_repo(base=base, data_config=args.data_config)
+    state_base = Path(str(_data_config)).resolve().parent
 
     if args.cmd == 'list':
         broker = normalize_broker(args.market or args.broker)
@@ -621,7 +693,7 @@ def main():
 
     if args.cmd == 'history':
         try:
-            history = build_lot_event_history(repo, base=base, record_id=args.record_id)
+            history = build_lot_event_history(repo, base=state_base, record_id=args.record_id)
         except ValueError as e:
             raise SystemExit(str(e))
         if args.format == 'json':
@@ -647,7 +719,7 @@ def main():
         return
 
     if args.cmd == 'rebuild':
-        state = refresh_option_positions_v2_state(base=base, repo=repo)
+        state = refresh_option_positions_v2_state(base=state_base, repo=repo)
         result = {
             'baseline_snapshot_id': state.baseline_snapshot.get('snapshot_id'),
             'baseline_lot_count': int(len(state.baseline_snapshot.get('lots') or [])),
@@ -678,7 +750,7 @@ def main():
             raise SystemExit("inspect requires at least one selector")
         payload = inspect_projection_state(
             repo,
-            base=base,
+            base=state_base,
             record_id=args.record_id,
             feishu_record_id=args.feishu_record_id,
             account=args.account,
@@ -694,7 +766,7 @@ def main():
         try:
             snapshot = _load_verification_snapshot_payload(args.snapshot_file)
             report = reconcile_option_positions_snapshot(
-                base=base,
+                base=state_base,
                 repo=repo,
                 verification_snapshot=snapshot,
             )
@@ -726,14 +798,14 @@ def main():
             raise SystemExit(str(e))
         try:
             snapshot_current_positions_as_verification(
-                base=base,
+                base=state_base,
                 repo=repo,
                 snapshot_id=f"verify-{result.get('event_id')}",
                 source_name="cli_manual_void",
                 source_type="manual_verification",
                 note="manual_void checkpoint",
             )
-            v2_state = refresh_option_positions_v2_state(base=base, repo=repo)
+            v2_state = refresh_option_positions_v2_state(base=state_base, repo=repo)
             result["v2_result"] = {
                 'baseline_snapshot_id': v2_state.baseline_snapshot.get('snapshot_id'),
                 'processed_event_count': len(v2_state.events),
