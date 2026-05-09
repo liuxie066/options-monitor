@@ -179,7 +179,7 @@ def _related_legacy_adjust_rows(
     return rows
 
 def _generate_verification_snapshot_id() -> str:
-    return f"verify-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+    return f"verify-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}"
 
 
 def _load_verification_snapshot_payload(path: str) -> dict[str, object]:
