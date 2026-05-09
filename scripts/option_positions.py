@@ -40,6 +40,7 @@ def _iso_to_trade_time_ms(value: object) -> int | None:
     try:
         return int(datetime.fromisoformat(text).timestamp() * 1000)
     except ValueError:
+        print(f"[WARN] invalid v2 event_at_utc timestamp: {text}")
         return None
 
 
@@ -108,7 +109,7 @@ def build_lot_event_history(repo, *, base: Path, record_id: str) -> list[dict[st
                 'void_target_event_id': None,
                 'adjust_target_source_event_id': None,
                 'close_target_source_event_id': None,
-                'record_id': record_id,
+                'record_id': event.get('snapshot_lot_id') or record_id,
                 'patch': {'target_contracts': event.get('target_contracts')} if event.get('target_contracts') is not None else None,
             }
         )
@@ -262,7 +263,7 @@ def inspect_projection_state(
             'strike': event.get('strike'),
             'expiration_ymd': event.get('expiration_ymd'),
             'currency': event.get('currency'),
-            'record_id': record_id,
+            'record_id': event.get('snapshot_lot_id'),
             'close_target_source_event_id': None,
             'adjust_target_source_event_id': None,
             'void_target_event_id': None,
