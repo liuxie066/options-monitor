@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from scripts.option_positions_core.domain import (
@@ -178,6 +178,9 @@ def _related_legacy_adjust_rows(
         )
     return rows
 
+def _generate_verification_snapshot_id() -> str:
+    return f"verify-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+
 
 def _load_verification_snapshot_payload(path: str) -> dict[str, object]:
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -185,7 +188,7 @@ def _load_verification_snapshot_payload(path: str) -> dict[str, object]:
         return payload
     if isinstance(payload, dict) and isinstance(payload.get("lots"), list):
         lots = payload.get("lots") or []
-        snapshot_id = str(payload.get("snapshot_id") or f"verify-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}").strip()
+        snapshot_id = str(payload.get("snapshot_id") or _generate_verification_snapshot_id()).strip()
         return {
             "snapshot_id": snapshot_id,
             "snapshot_type": "verification",
@@ -197,7 +200,7 @@ def _load_verification_snapshot_payload(path: str) -> dict[str, object]:
         }
     if isinstance(payload, list):
         return {
-            "snapshot_id": f"verify-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}",
+            "snapshot_id": _generate_verification_snapshot_id(),
             "snapshot_type": "verification",
             "snapshot_at_utc": datetime.now().astimezone().isoformat(),
             "source_name": "cli_reconcile",

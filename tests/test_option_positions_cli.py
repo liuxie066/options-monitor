@@ -218,7 +218,7 @@ def test_option_positions_cli_inspect_reports_orphan_close_event_diagnostics(mon
     assert payload["projection_diagnostics"][0]["code"] == "close_without_open_position"
 
 
-def test_option_positions_cli_reconcile_writes_report(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_option_positions_cli_reconcile_writes_verification_snapshot_and_report(monkeypatch, tmp_path: Path, capsys) -> None:
     import scripts.option_positions as cli_mod
     import scripts.option_positions_core.service as svc
     from scripts.option_positions_core.domain import OpenPositionCommand
