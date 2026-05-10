@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from scripts.parse_option_message import parse_fill_timestamp, parse_option_message_text
+from src.application.parse_option_message import parse_fill_timestamp, parse_option_message_text
 
 
 # ---------------------------------------------------------------------------
@@ -98,7 +98,7 @@ def test_unknown_tz_hint_treated_as_utc() -> None:
 
 def test_parse_option_message_includes_fill_time_ms_for_hk_message(monkeypatch) -> None:
     monkeypatch.setattr(
-        "scripts.parse_option_message.resolve_multiplier_with_source",
+        "src.application.parse_option_message.resolve_multiplier_with_source",
         lambda **_kwargs: (100, "cache"),
     )
     msg = (
@@ -118,7 +118,7 @@ def test_parse_option_message_includes_fill_time_ms_for_hk_message(monkeypatch) 
 
 def test_parse_option_message_fill_time_ms_is_none_when_absent(monkeypatch) -> None:
     monkeypatch.setattr(
-        "scripts.parse_option_message.resolve_multiplier_with_source",
+        "src.application.parse_option_message.resolve_multiplier_with_source",
         lambda **_kwargs: (100, "cache"),
     )
     msg = "期权：腾讯20260330 put，strike500，成本5.425每股，乘数100，short 10张，sy，HKD"

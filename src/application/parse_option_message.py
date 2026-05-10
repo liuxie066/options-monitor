@@ -18,7 +18,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-repo_base = Path(__file__).resolve().parents[1]
+repo_base = Path(__file__).resolve().parents[2]
 if str(repo_base) not in sys.path:
     sys.path.insert(0, str(repo_base))
 

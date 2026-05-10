@@ -15,7 +15,7 @@ def test_parse_option_message_domain_and_cli() -> None:
     if str(BASE) not in sys.path:
         sys.path.insert(0, str(BASE))
 
-    from scripts.parse_option_message import parse_option_message_text
+    from src.application.parse_option_message import parse_option_message_text
 
     text = '期权：腾讯20260330 put，strike500，成本5.425每股，乘数100，short 10张，sy，HKD'
     out = parse_option_message_text(text, accounts=['lx', 'sy'])
@@ -23,7 +23,16 @@ def test_parse_option_message_domain_and_cli() -> None:
     assert out['parsed']['symbol'] == '0700.HK'
 
     p = subprocess.run(
-        [str(BASE / '.venv' / 'bin' / 'python'), 'scripts/parse_option_message.py', '--text', text, '--accounts', 'lx', 'sy'],
+        [
+            str(BASE / '.venv' / 'bin' / 'python'),
+            '-m',
+            'src.application.parse_option_message',
+            '--text',
+            text,
+            '--accounts',
+            'lx',
+            'sy',
+        ],
         cwd=str(BASE),
         capture_output=True,
         text=True,

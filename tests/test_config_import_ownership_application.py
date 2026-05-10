@@ -232,11 +232,15 @@ def test_exchange_rates_imports_infrastructure_owner_module() -> None:
 def test_multiplier_cache_imports_infrastructure_owner_module() -> None:
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module("scripts.multiplier_cache")
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("scripts.parse_option_message")
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("scripts.option_intake")
 
     infra_mod = importlib.import_module("src.infrastructure.multiplier_cache")
     reporting_mod = importlib.import_module("src.application.option_positions_reporting")
     trade_normalizer_mod = importlib.import_module("src.application.trade_event_normalizer")
-    parse_message_mod = importlib.import_module("scripts.parse_option_message")
+    parse_message_mod = importlib.import_module("src.application.parse_option_message")
 
     assert reporting_mod.resolve_multiplier is infra_mod.resolve_multiplier
     assert trade_normalizer_mod.resolve_multiplier_with_source_and_diagnostics is infra_mod.resolve_multiplier_with_source_and_diagnostics

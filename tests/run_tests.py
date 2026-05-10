@@ -77,7 +77,7 @@ CRITICAL_EXCLUDED_TESTS: dict[str, set[str]] = {
 
 def run_parser(text: str) -> dict[str, Any]:
     p = subprocess.run(
-        [str(VPY), 'scripts/parse_option_message.py', '--text', text, '--accounts', 'lx', 'sy'],
+        [str(VPY), '-m', 'src.application.parse_option_message', '--text', text, '--accounts', 'lx', 'sy'],
         cwd=str(BASE),
         capture_output=True,
         text=True,
