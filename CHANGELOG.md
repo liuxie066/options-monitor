@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.2.2 - 2026-05-10
+
+### Added
+- Added an optional `configs/user.common.json` authoring layer for shared US/HK user overrides, with CLI controls, example config, and documentation.
+
+### Changed
+- Changed the multi-tick OpenD watchdog fallback so `retry_enabled` defaults to enabled when `watchdog.retry_enabled` is omitted, matching the shipped system default.
+
 ## 1.2.1 - 2026-05-10
 
 ### Changed
