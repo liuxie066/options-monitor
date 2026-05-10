@@ -121,7 +121,6 @@ def main(argv: list[str] | None = None) -> int:
         formatter_class=argparse.RawTextHelpFormatter,
     )
     p_monthly.add_argument('--broker', default='富途')
-    p_monthly.add_argument('--market', default=None, help='DEPRECATED alias of --broker')
     p_monthly.add_argument('--account', default=None)
     p_monthly.add_argument('--month', default=None, help='YYYY-MM')
     p_monthly.add_argument('--format', choices=['text', 'json'], default='text')
@@ -189,7 +188,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         if args.format == 'json':
             print(json.dumps(rows, ensure_ascii=False, indent=2))
-            return
+            return 0
 
         if not rows:
             print('(no records)')

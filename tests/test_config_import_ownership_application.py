@@ -156,6 +156,8 @@ def test_option_positions_inspection_imports_application_owner_module() -> None:
     owner_mod = importlib.import_module("src.application.option_positions_inspection")
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module("scripts.option_positions")
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("scripts.backfill_option_positions_broker")
     cli_mod = importlib.import_module("src.interfaces.cli.option_positions")
     agent_tools_mod = importlib.import_module("src.application.agent_tool_handlers")
 
