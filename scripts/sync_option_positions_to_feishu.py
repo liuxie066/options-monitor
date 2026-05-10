@@ -19,8 +19,8 @@ from scripts.feishu_bitable import (
     bitable_update_record,
     get_tenant_access_token,
 )
-from scripts.option_positions_core.domain import normalize_account, normalize_broker, normalize_option_type, normalize_side, now_ms
-from scripts.option_positions_core.service import (
+from domain.domain.option_position_lots import normalize_account, normalize_broker, normalize_option_type, normalize_side, now_ms
+from src.application.option_positions_service import (
     load_table_ref,
     require_option_positions_read_repo,
     require_option_positions_sync_meta_repo,

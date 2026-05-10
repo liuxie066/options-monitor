@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from scripts.option_positions_core.domain import (
+from domain.domain.option_position_lots import (
     EXPIRE_AUTO_CLOSE,
     OpenPositionCommand,
     build_buy_to_close_patch,

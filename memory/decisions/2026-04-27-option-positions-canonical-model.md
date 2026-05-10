@@ -24,8 +24,8 @@ option positions 采用以下 canonical model：
 
 ## Rationale
 
-- 当前 `scripts/option_positions_core/service.py` 已经在每次事件写入后重新投影 `position_lots`，说明事件流才是真正驱动状态的层。
-- 当前 `scripts/option_positions_core/ledger.py` 负责 open/close 匹配与 lot 投影，天然适合作为仓位状态的唯一推导路径。
+- 当前 `src/application/option_positions_service.py` 已经在每次事件写入后重新投影 `position_lots`，说明事件流才是真正驱动状态的层。
+- 当前 `domain/domain/option_position_ledger.py` 负责 open/close 匹配与 lot 投影，天然适合作为仓位状态的唯一推导路径。
 - bootstrap snapshot 虽然会被包装成 `TradeEvent(source_type="bootstrap_snapshot")`，但它的职责应该是把历史状态导入 canonical event flow，而不是长期与事件流并列。
 - Feishu sync metadata 回写到本地 lot 是工程上的必要妥协，但这些字段必须被视为集成状态，不能反向决定本地业务语义。
 - `position_id` 当前不包含 account，也不保证全局唯一，因此不能承担跨账户 identity；最近的 collision 修复说明这一点必须显式固定。

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from scripts.option_positions_core.ledger import TradeEvent, project_position_lot_records_with_diagnostics
+from domain.domain.option_position_ledger import TradeEvent, project_position_lot_records_with_diagnostics
 
 
 def _event(*, event_id: str, side: str, position_effect: str, contracts: int, price: float, trade_time_ms: int) -> TradeEvent:

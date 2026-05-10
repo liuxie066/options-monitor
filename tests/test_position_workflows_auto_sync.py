@@ -10,7 +10,7 @@ if str(BASE) not in sys.path:
 
 
 def test_execute_manual_open_triggers_best_effort_sync(monkeypatch, tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
+    import src.application.option_positions_service as svc
     import src.application.position_workflows as workflows
 
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
@@ -70,7 +70,7 @@ def test_execute_manual_open_triggers_best_effort_sync(monkeypatch, tmp_path: Pa
 
 
 def test_execute_manual_open_skips_best_effort_sync_when_switch_is_off(monkeypatch, tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
+    import src.application.option_positions_service as svc
     import src.application.position_workflows as workflows
 
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
@@ -123,7 +123,7 @@ def test_execute_manual_open_skips_best_effort_sync_when_switch_is_off(monkeypat
 
 
 def test_execute_manual_open_uses_runtime_sync_override_when_data_config_is_off(monkeypatch, tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
+    import src.application.option_positions_service as svc
     import src.application.position_workflows as workflows
     from src.application.option_positions_sync_config import apply_option_positions_runtime_config
 
@@ -185,7 +185,7 @@ def test_execute_manual_open_uses_runtime_sync_override_when_data_config_is_off(
 
 
 def test_execute_manual_open_runtime_sync_override_can_disable_data_config_on(monkeypatch, tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
+    import src.application.option_positions_service as svc
     import src.application.position_workflows as workflows
     from src.application.option_positions_sync_config import apply_option_positions_runtime_config
 
@@ -291,9 +291,9 @@ def test_manual_open_record_id_prefers_explicit_record_id_before_event_id_guess(
 
 
 def test_execute_manual_close_warns_when_best_effort_sync_fails(monkeypatch, tmp_path: Path, capsys) -> None:
-    import scripts.option_positions_core.service as svc
+    import src.application.option_positions_service as svc
     import src.application.position_workflows as workflows
-    from scripts.option_positions_core.domain import OpenPositionCommand
+    from domain.domain.option_position_lots import OpenPositionCommand
 
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     repo.data_config_path = tmp_path / "data.json"  # type: ignore[attr-defined]
@@ -355,9 +355,9 @@ def test_execute_manual_close_warns_when_best_effort_sync_fails(monkeypatch, tmp
 
 
 def test_execute_manual_close_full_close_retry_is_idempotent_without_masking_validation(tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
+    import src.application.option_positions_service as svc
     import src.application.position_workflows as workflows
-    from scripts.option_positions_core.domain import OpenPositionCommand
+    from domain.domain.option_position_lots import OpenPositionCommand
 
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     svc.persist_manual_open_event(
@@ -404,7 +404,7 @@ def test_execute_manual_close_full_close_retry_is_idempotent_without_masking_val
 
 
 def test_execute_manual_open_keeps_local_lot_when_best_effort_sync_fails(monkeypatch, tmp_path: Path, capsys) -> None:
-    import scripts.option_positions_core.service as svc
+    import src.application.option_positions_service as svc
     import src.application.position_workflows as workflows
 
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")

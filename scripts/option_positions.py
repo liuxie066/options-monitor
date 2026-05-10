@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from scripts.option_positions_core.domain import (
+from domain.domain.option_position_lots import (
     effective_expiration_ymd,
     effective_strike,
     exp_ms_to_ymd,
@@ -22,7 +22,7 @@ from scripts.option_positions_core.domain import (
     normalize_option_type,
     normalize_side,
 )
-from scripts.option_positions_core.service import persist_manual_void_event
+from src.application.option_positions_service import persist_manual_void_event
 from domain.domain.trade_contract_identity import canonical_contract_symbol
 from src.application.position_workflows import execute_manual_adjust, execute_manual_close, execute_manual_open
 from src.application.option_positions_facade import (

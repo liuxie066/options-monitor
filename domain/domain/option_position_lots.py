@@ -23,28 +23,43 @@ from domain.domain.option_position_identity import (
     parse_exp_to_ms,
     resolve_open_currency,
 )
-from scripts.feishu_bitable import merge_note, parse_note_kv, safe_float
+
+
+def safe_float(value: Any) -> float | None:
+    try:
+        if value is None or value == "":
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def parse_note_kv(note: str, key: str) -> str:
+    if not note:
+        return ""
+    for part in str(note).replace(",", ";").split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        if part.startswith(f"{key}="):
+            return part.split("=", 1)[1].strip()
+    return ""
+
+
+def merge_note(note: str | None, kv: dict[str, str]) -> str:
+    parts: list[str] = []
+    base = str(note or "").strip()
+    if base:
+        parts.append(base)
+    for key, value in kv.items():
+        if value in (None, ""):
+            continue
+        parts.append(f"{key}={value}")
+    return ";".join(parts)
 
 
 def calc_cash_secured(strike: float, multiplier: float, contracts: int | float) -> float:
     return float(strike) * float(multiplier) * int(float(contracts))
-
-
-def guess_multiplier(symbol: str) -> float | None:
-    try:
-        from pathlib import Path as _Path
-        from scripts.multiplier_cache import resolve_multiplier
-
-        return float(
-            resolve_multiplier(
-                repo_base=_Path(__file__).resolve().parents[2],
-                symbol=norm_symbol(symbol),
-                allow_opend_refresh=False,
-            )
-            or 0
-        ) or None
-    except Exception:
-        return None
 
 
 def effective_contracts(fields: dict[str, Any]) -> int:
@@ -169,17 +184,14 @@ def build_open_fields(cmd: OpenPositionCommand) -> dict[str, Any]:
     cash_secured = None
     if side == "short" and option_type == "put":
         if multiplier is None:
-            multiplier = guess_multiplier(sym)
-        if multiplier is None:
             raise ValueError("short put requires multiplier")
         cash_secured = calc_cash_secured(float(cmd.strike), float(multiplier), contracts)
 
     underlying_locked = cmd.underlying_share_locked
     if side == "short" and option_type == "call" and underlying_locked is None:
-        m = multiplier if multiplier is not None else guess_multiplier(sym)
-        if m is None:
-            m = 100
-        underlying_locked = int(float(m) * contracts)
+        if multiplier is None:
+            raise ValueError("short call requires multiplier or underlying_share_locked")
+        underlying_locked = int(float(multiplier) * contracts)
 
     note_kv: dict[str, str] = {}
 
@@ -282,8 +294,6 @@ def build_open_adjustment_patch(
     next_multiplier = multiplier
     if next_multiplier is None:
         next_multiplier = effective_multiplier(fields)
-    if next_multiplier is None and side == "short":
-        next_multiplier = guess_multiplier(symbol)
 
     next_expiration_ymd = expiration_ymd or effective_expiration_ymd(fields) or None
     parsed_exp_ms: int | None = None

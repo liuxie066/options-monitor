@@ -23,7 +23,7 @@ from domain.domain.option_positions_v2 import (
     reconcile_snapshot_against_projection,
 )
 from domain.storage.repositories import option_positions_v2_repo
-from scripts.option_positions_core.domain import parse_exp_to_ms
+from domain.domain.option_position_lots import parse_exp_to_ms
 from src.application.option_positions_facade import load_option_position_records
 from src.application.option_positions_v2_service import (
     reconcile_option_positions_snapshot,
@@ -474,8 +474,8 @@ def test_option_positions_v2_repo_persists_snapshot_event_and_report() -> None:
 
 
 def test_option_positions_v2_facade_returns_projection_compatible_rows(tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
-    from scripts.option_positions_core.domain import OpenPositionCommand
+    import src.application.option_positions_service as svc
+    from domain.domain.option_position_lots import OpenPositionCommand
 
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     repo.data_config_path = tmp_path / "data.json"  # type: ignore[attr-defined]
@@ -505,8 +505,8 @@ def test_option_positions_v2_facade_returns_projection_compatible_rows(tmp_path:
 
 
 def test_option_positions_v2_reconciliation_persists_verification_checkpoint(tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
-    from scripts.option_positions_core.domain import OpenPositionCommand
+    import src.application.option_positions_service as svc
+    from domain.domain.option_position_lots import OpenPositionCommand
 
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     repo.data_config_path = tmp_path / "data.json"  # type: ignore[attr-defined]
@@ -568,8 +568,8 @@ def test_option_positions_v2_reconciliation_persists_verification_checkpoint(tmp
 
 
 def test_option_positions_v2_manual_adjust_persists_native_event_and_verification_checkpoint(tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
-    from scripts.option_positions_core.domain import OpenPositionCommand
+    import src.application.option_positions_service as svc
+    from domain.domain.option_position_lots import OpenPositionCommand
     from src.application.position_workflows import execute_manual_adjust
 
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")

@@ -4,7 +4,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Protocol
 
 from scripts.feishu_bitable import safe_float
-from scripts.option_positions_core.domain import (
+from domain.domain.option_position_lots import (
     effective_contracts_open,
     effective_expiration_ymd,
     effective_strike,
@@ -14,7 +14,7 @@ from scripts.option_positions_core.domain import (
     normalize_side,
     normalize_status,
 )
-from scripts.option_positions_core.service import persist_trade_event
+from src.application.option_positions_service import persist_trade_event
 from scripts.trade_event_normalizer import NormalizedTradeDeal
 from scripts.trade_intake_state import is_retryable_unresolved_deal, lookup_deal_state
 from domain.domain.symbol_identity import canonical_symbol

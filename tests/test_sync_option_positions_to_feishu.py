@@ -27,9 +27,9 @@ def _write_data_config(path: Path, *, sqlite_path: Path, sync_to_feishu_enabled:
 
 
 def test_sync_script_dry_run_reports_create(monkeypatch, tmp_path: Path, capsys) -> None:
-    import scripts.option_positions_core.service as svc
+    import src.application.option_positions_service as svc
     import scripts.sync_option_positions_to_feishu as sync_mod
-    from scripts.option_positions_core.domain import OpenPositionCommand
+    from domain.domain.option_position_lots import OpenPositionCommand
 
     data_config = _write_data_config(
         tmp_path / "data.json",
@@ -97,9 +97,9 @@ def test_sync_script_dry_run_reports_create(monkeypatch, tmp_path: Path, capsys)
 
 
 def test_sync_script_apply_updates_existing_feishu_row_and_persists_metadata(monkeypatch, tmp_path: Path, capsys) -> None:
-    import scripts.option_positions_core.service as svc
+    import src.application.option_positions_service as svc
     import scripts.sync_option_positions_to_feishu as sync_mod
-    from scripts.option_positions_core.domain import OpenPositionCommand
+    from domain.domain.option_position_lots import OpenPositionCommand
 
     data_config = _write_data_config(
         tmp_path / "data.json",
@@ -315,9 +315,9 @@ def test_sync_dry_run_accepts_read_only_repo(monkeypatch, tmp_path: Path) -> Non
 
 
 def test_sync_dry_run_reports_remote_orphan_delete_when_enabled(monkeypatch, tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
+    import src.application.option_positions_service as svc
     import scripts.sync_option_positions_to_feishu as sync_mod
-    from scripts.option_positions_core.domain import OpenPositionCommand
+    from domain.domain.option_position_lots import OpenPositionCommand
 
     data_config = _write_data_config(
         tmp_path / "data.json",
@@ -369,9 +369,9 @@ def test_sync_dry_run_reports_remote_orphan_delete_when_enabled(monkeypatch, tmp
 
 
 def test_sync_dry_run_does_not_prune_remote_when_scan_is_limited(monkeypatch, tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
+    import src.application.option_positions_service as svc
     import scripts.sync_option_positions_to_feishu as sync_mod
-    from scripts.option_positions_core.domain import OpenPositionCommand
+    from domain.domain.option_position_lots import OpenPositionCommand
 
     data_config = _write_data_config(
         tmp_path / "data.json",
@@ -436,9 +436,9 @@ def test_sync_dry_run_does_not_prune_remote_when_scan_is_limited(monkeypatch, tm
 
 
 def test_sync_apply_deletes_remote_orphan_when_enabled(monkeypatch, tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
+    import src.application.option_positions_service as svc
     import scripts.sync_option_positions_to_feishu as sync_mod
-    from scripts.option_positions_core.domain import OpenPositionCommand
+    from domain.domain.option_position_lots import OpenPositionCommand
 
     data_config = _write_data_config(
         tmp_path / "data.json",
@@ -611,9 +611,9 @@ def test_match_remote_record_reports_conflict_for_duplicate_source_event_id() ->
 
 
 def test_sync_skips_unchanged_payload_even_when_last_synced_at_changes(monkeypatch, tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
+    import src.application.option_positions_service as svc
     import scripts.sync_option_positions_to_feishu as sync_mod
-    from scripts.option_positions_core.domain import OpenPositionCommand
+    from domain.domain.option_position_lots import OpenPositionCommand
 
     data_config = _write_data_config(
         tmp_path / "data.json",
@@ -733,9 +733,9 @@ def test_with_table_token_refreshes_once_on_auth_error(monkeypatch) -> None:
 
 
 def test_sync_apply_create_persists_metadata_without_touching_business_fields(monkeypatch, tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
+    import src.application.option_positions_service as svc
     import scripts.sync_option_positions_to_feishu as sync_mod
-    from scripts.option_positions_core.domain import OpenPositionCommand
+    from domain.domain.option_position_lots import OpenPositionCommand
 
     data_config = _write_data_config(
         tmp_path / "data.json",
@@ -814,9 +814,9 @@ def test_sync_apply_create_persists_metadata_without_touching_business_fields(mo
 
 
 def test_sync_apply_update_sends_numeric_payload_types(monkeypatch, tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
+    import src.application.option_positions_service as svc
     import scripts.sync_option_positions_to_feishu as sync_mod
-    from scripts.option_positions_core.domain import OpenPositionCommand
+    from domain.domain.option_position_lots import OpenPositionCommand
 
     data_config = _write_data_config(
         tmp_path / "data.json",
@@ -891,9 +891,9 @@ def test_sync_apply_update_sends_numeric_payload_types(monkeypatch, tmp_path: Pa
 
 
 def test_sync_apply_reports_disabled_when_sync_to_feishu_switch_is_off(monkeypatch, tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
+    import src.application.option_positions_service as svc
     import scripts.sync_option_positions_to_feishu as sync_mod
-    from scripts.option_positions_core.domain import OpenPositionCommand
+    from domain.domain.option_position_lots import OpenPositionCommand
 
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
@@ -930,9 +930,9 @@ def test_sync_apply_reports_disabled_when_sync_to_feishu_switch_is_off(monkeypat
 
 
 def test_sync_apply_runtime_config_can_enable_data_config_off(monkeypatch, tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
+    import src.application.option_positions_service as svc
     import scripts.sync_option_positions_to_feishu as sync_mod
-    from scripts.option_positions_core.domain import OpenPositionCommand
+    from domain.domain.option_position_lots import OpenPositionCommand
 
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
@@ -979,9 +979,9 @@ def test_sync_apply_runtime_config_can_enable_data_config_off(monkeypatch, tmp_p
 
 
 def test_sync_single_uses_repo_runtime_override_when_data_config_is_off(monkeypatch, tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
+    import src.application.option_positions_service as svc
     import scripts.sync_option_positions_to_feishu as sync_mod
-    from scripts.option_positions_core.domain import OpenPositionCommand
+    from domain.domain.option_position_lots import OpenPositionCommand
     from src.application.option_positions_sync_config import apply_option_positions_runtime_config
 
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")

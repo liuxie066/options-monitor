@@ -3,8 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from scripts.option_positions_core.domain import BUY_TO_CLOSE, EXPIRE_AUTO_CLOSE, parse_exp_to_ms
-from scripts.option_positions_core.reporting import (
+from domain.domain.option_position_lots import BUY_TO_CLOSE, EXPIRE_AUTO_CLOSE, parse_exp_to_ms
+from src.application.option_positions_reporting import (
     build_income_row,
     build_monthly_income_report,
     build_premium_income_row,
@@ -357,8 +357,8 @@ def test_build_monthly_income_report_skips_market_only_rows_for_broker_filter() 
 
 
 def test_monthly_income_report_excludes_voided_open_event_projection(tmp_path) -> None:
-    import scripts.option_positions_core.service as svc
-    from scripts.option_positions_core.domain import OpenPositionCommand
+    import src.application.option_positions_service as svc
+    from domain.domain.option_position_lots import OpenPositionCommand
 
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     open_result = svc.persist_manual_open_event(
@@ -399,8 +399,8 @@ def test_monthly_income_report_excludes_voided_open_event_projection(tmp_path) -
 
 
 def test_monthly_income_report_excludes_voided_close_event_but_keeps_open_premium(tmp_path) -> None:
-    import scripts.option_positions_core.service as svc
-    from scripts.option_positions_core.domain import OpenPositionCommand
+    import src.application.option_positions_service as svc
+    from domain.domain.option_position_lots import OpenPositionCommand
 
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     svc.persist_manual_open_event(
@@ -466,8 +466,8 @@ def test_monthly_income_report_excludes_voided_close_event_but_keeps_open_premiu
 
 
 def test_monthly_income_report_uses_adjusted_premium_and_opened_at(tmp_path) -> None:
-    import scripts.option_positions_core.service as svc
-    from scripts.option_positions_core.domain import OpenPositionCommand
+    import src.application.option_positions_service as svc
+    from domain.domain.option_position_lots import OpenPositionCommand
 
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     svc.persist_manual_open_event(

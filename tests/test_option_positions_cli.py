@@ -20,8 +20,8 @@ def _write_data_config(path: Path, *, sqlite_path: Path) -> Path:
 
 def test_option_positions_cli_events_json(monkeypatch, tmp_path: Path, capsys) -> None:
     import scripts.option_positions as cli_mod
-    import scripts.option_positions_core.service as svc
-    from scripts.option_positions_core.domain import OpenPositionCommand
+    import src.application.option_positions_service as svc
+    from domain.domain.option_position_lots import OpenPositionCommand
 
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
@@ -62,8 +62,8 @@ def test_option_positions_cli_events_json(monkeypatch, tmp_path: Path, capsys) -
 
 def test_option_positions_cli_rebuild_reports_summary(monkeypatch, tmp_path: Path, capsys) -> None:
     import scripts.option_positions as cli_mod
-    import scripts.option_positions_core.service as svc
-    from scripts.option_positions_core.domain import OpenPositionCommand
+    import src.application.option_positions_service as svc
+    from domain.domain.option_position_lots import OpenPositionCommand
 
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
@@ -102,8 +102,8 @@ def test_option_positions_cli_rebuild_reports_summary(monkeypatch, tmp_path: Pat
 
 def test_option_positions_cli_inspect_reports_projection_state(monkeypatch, tmp_path: Path, capsys) -> None:
     import scripts.option_positions as cli_mod
-    import scripts.option_positions_core.service as svc
-    from scripts.option_positions_core.domain import OpenPositionCommand
+    import src.application.option_positions_service as svc
+    from domain.domain.option_position_lots import OpenPositionCommand
 
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
@@ -157,8 +157,8 @@ def test_option_positions_cli_inspect_reports_projection_state(monkeypatch, tmp_
 
 def test_option_positions_cli_inspect_reports_orphan_close_event_diagnostics(monkeypatch, tmp_path: Path, capsys) -> None:
     import scripts.option_positions as cli_mod
-    import scripts.option_positions_core.service as svc
-    from scripts.option_positions_core.ledger import TradeEvent
+    import src.application.option_positions_service as svc
+    from domain.domain.option_position_ledger import TradeEvent
 
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
@@ -220,8 +220,8 @@ def test_option_positions_cli_inspect_reports_orphan_close_event_diagnostics(mon
 
 def test_option_positions_cli_reconcile_writes_verification_snapshot_and_report(monkeypatch, tmp_path: Path, capsys) -> None:
     import scripts.option_positions as cli_mod
-    import scripts.option_positions_core.service as svc
-    from scripts.option_positions_core.domain import OpenPositionCommand
+    import src.application.option_positions_service as svc
+    from domain.domain.option_position_lots import OpenPositionCommand
 
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
@@ -309,8 +309,8 @@ def test_option_positions_cli_reconcile_writes_verification_snapshot_and_report(
 
 def test_option_positions_cli_inspect_surfaces_verification_and_reconciliation_state(monkeypatch, tmp_path: Path, capsys) -> None:
     import scripts.option_positions as cli_mod
-    import scripts.option_positions_core.service as svc
-    from scripts.option_positions_core.domain import OpenPositionCommand
+    import src.application.option_positions_service as svc
+    from domain.domain.option_position_lots import OpenPositionCommand
 
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
@@ -408,7 +408,7 @@ def test_option_positions_cli_inspect_surfaces_verification_and_reconciliation_s
 
 def test_option_positions_cli_add_dry_run_infers_hkd_currency_from_hk_symbol(monkeypatch, tmp_path: Path, capsys) -> None:
     import scripts.option_positions as cli_mod
-    import scripts.option_positions_core.service as svc
+    import src.application.option_positions_service as svc
 
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
@@ -451,7 +451,7 @@ def test_option_positions_cli_add_dry_run_infers_hkd_currency_from_hk_symbol(mon
 
 def test_option_positions_cli_add_dry_run_infers_usd_currency_from_us_symbol(monkeypatch, tmp_path: Path, capsys) -> None:
     import scripts.option_positions as cli_mod
-    import scripts.option_positions_core.service as svc
+    import src.application.option_positions_service as svc
 
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
@@ -494,8 +494,8 @@ def test_option_positions_cli_add_dry_run_infers_usd_currency_from_us_symbol(mon
 
 def test_option_positions_cli_list_filters_by_local_expiration(monkeypatch, tmp_path: Path, capsys) -> None:
     import scripts.option_positions as cli_mod
-    import scripts.option_positions_core.service as svc
-    from scripts.option_positions_core.domain import OpenPositionCommand
+    import src.application.option_positions_service as svc
+    from domain.domain.option_position_lots import OpenPositionCommand
 
     near_exp = (datetime.now().date() + timedelta(days=1)).isoformat()
     far_exp = (datetime.now().date() + timedelta(days=21)).isoformat()
@@ -566,8 +566,8 @@ def test_option_positions_cli_list_filters_by_local_expiration(monkeypatch, tmp_
 
 def test_option_positions_cli_void_event_reports_result(monkeypatch, tmp_path: Path, capsys) -> None:
     import scripts.option_positions as cli_mod
-    import scripts.option_positions_core.service as svc
-    from scripts.option_positions_core.domain import OpenPositionCommand
+    import src.application.option_positions_service as svc
+    from domain.domain.option_position_lots import OpenPositionCommand
 
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
@@ -606,8 +606,8 @@ def test_option_positions_cli_void_event_reports_result(monkeypatch, tmp_path: P
 
 def test_option_positions_cli_adjust_lot_dry_run_outputs_patch(monkeypatch, tmp_path: Path, capsys) -> None:
     import scripts.option_positions as cli_mod
-    import scripts.option_positions_core.service as svc
-    from scripts.option_positions_core.domain import OpenPositionCommand
+    import src.application.option_positions_service as svc
+    from domain.domain.option_position_lots import OpenPositionCommand
 
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
@@ -657,8 +657,8 @@ def test_option_positions_cli_adjust_lot_dry_run_outputs_patch(monkeypatch, tmp_
 
 def test_option_positions_cli_history_json_includes_related_events(monkeypatch, tmp_path: Path, capsys) -> None:
     import scripts.option_positions as cli_mod
-    import scripts.option_positions_core.service as svc
-    from scripts.option_positions_core.domain import OpenPositionCommand
+    import src.application.option_positions_service as svc
+    from domain.domain.option_position_lots import OpenPositionCommand
 
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")

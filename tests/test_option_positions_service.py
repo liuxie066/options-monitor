@@ -4,8 +4,8 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from scripts.option_positions_core.domain import EXPIRE_AUTO_CLOSE, parse_exp_to_ms
-from scripts.option_positions_core.service import auto_close_expired_positions, build_expired_close_decisions
+from domain.domain.option_position_lots import EXPIRE_AUTO_CLOSE, parse_exp_to_ms
+from src.application.option_positions_service import auto_close_expired_positions, build_expired_close_decisions
 
 
 def test_build_expired_close_decisions_marks_expired_position() -> None:
@@ -137,7 +137,7 @@ def test_build_expired_close_decisions_skips_already_closed_or_zero_open() -> No
 
 
 def test_auto_close_expired_positions_uses_effective_contracts_open_fallback(tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
+    import src.application.option_positions_service as svc
 
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     inserted = repo.replace_position_lots(
@@ -199,7 +199,7 @@ def test_auto_close_expired_positions_uses_effective_contracts_open_fallback(tmp
 
 
 def test_auto_close_expired_positions_skips_stale_open_input_when_current_lot_closed(tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
+    import src.application.option_positions_service as svc
 
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     expiration = parse_exp_to_ms("2026-05-01")
@@ -270,7 +270,7 @@ def test_auto_close_expired_positions_skips_stale_open_input_when_current_lot_cl
 
 
 def test_position_maintenance_closes_legacy_sqlite_lot_after_load_repo_bootstrap(tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
+    import src.application.option_positions_service as svc
     from src.application.position_maintenance import run_expired_position_maintenance_for_account
 
     db_path = tmp_path / "option_positions.sqlite3"

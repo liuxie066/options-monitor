@@ -30,7 +30,7 @@ import json
 import argparse
 from datetime import datetime, timezone
 
-from scripts.option_positions_core.service import (
+from src.application.option_positions_service import (
     auto_close_expired_positions,
     build_expired_close_decisions,
 )

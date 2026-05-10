@@ -20,7 +20,7 @@ from domain.domain.close_advice import (
 )
 from scripts.fee_calc import calc_futu_option_fee
 from scripts.io_utils import atomic_write_text, read_json, safe_read_csv
-from scripts.option_positions_core.domain import (
+from domain.domain.option_position_lots import (
     effective_expiration_ymd,
     effective_multiplier,
     normalize_account,

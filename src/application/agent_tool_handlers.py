@@ -15,9 +15,9 @@ from domain.domain.fetch_source import resolve_symbol_fetch_source
 from scripts.futu_portfolio_context import infer_futu_portfolio_settings
 from scripts.notify_symbols import build_notification
 from scripts.option_positions import build_lot_event_history, inspect_projection_state
-from scripts.option_positions_core.domain import normalize_account as _normalize_account
-from scripts.option_positions_core.service import load_option_positions_repo
-from scripts.option_positions_core.reporting import build_monthly_income_report
+from domain.domain.option_position_lots import normalize_account as _normalize_account
+from src.application.option_positions_service import load_option_positions_repo
+from src.application.option_positions_reporting import build_monthly_income_report
 from scripts.pipeline_context import load_option_positions_context, load_portfolio_context
 from scripts.query_sell_put_cash import query_sell_put_cash
 from scripts.scan_scheduler import decide as scheduler_decide, read_state as read_scheduler_state

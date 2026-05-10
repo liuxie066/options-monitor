@@ -23,7 +23,7 @@ from scripts.fetch_option_positions_context import (
 )
 from scripts.futu_portfolio_context import fetch_futu_portfolio_context
 from scripts.io_utils import is_fresh, load_cached_json
-from scripts.option_positions_core.service import (
+from src.application.option_positions_service import (
     load_option_positions_repo,
 )
 from scripts.portfolio_context_service import load_account_portfolio_context, with_context_source

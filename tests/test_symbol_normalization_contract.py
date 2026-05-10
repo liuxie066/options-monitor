@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from scripts.multiplier_cache import normalize_symbol as normalize_multiplier_symbol
 from scripts.opend_utils import resolve_underlier_alias
-from scripts.option_positions_core.ledger import trade_event_from_normalized_deal
-from scripts.option_positions_core.domain import norm_symbol as normalize_position_symbol
+from domain.domain.option_position_ledger import trade_event_from_normalized_deal
+from domain.domain.option_position_lots import norm_symbol as normalize_position_symbol
 from scripts.trade_event_normalizer import NormalizedTradeDeal
 from scripts.trade_event_normalizer import normalize_trade_deal
 from src.application.watchlist_mutations import normalize_symbol as normalize_watchlist_symbol

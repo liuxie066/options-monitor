@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from domain.domain.expiration_dates import (
     EXPIRATION_DATE_TZ,
 )
-from scripts.option_positions_core.domain import normalize_account, normalize_broker
+from domain.domain.option_position_lots import normalize_account, normalize_broker
 from scripts.io_utils import atomic_write_json
 from src.application.option_positions_facade import (
     build_option_position_view,

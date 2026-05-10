@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Protocol, cast
 
 from scripts.feishu_bitable import bitable_list_records, get_tenant_access_token, parse_note_kv, safe_float
-from scripts.option_positions_core.domain import (
+from domain.domain.option_position_lots import (
     EXPIRE_AUTO_CLOSE,
     OpenPositionCommand,
     build_close_patch,
@@ -34,7 +34,7 @@ from scripts.option_positions_core.domain import (
     parse_exp_to_ms,
     resolve_open_currency,
 )
-from scripts.option_positions_core.ledger import (
+from domain.domain.option_position_ledger import (
     ProjectionDiagnostic,
     TradeEvent,
     project_position_lot_records,

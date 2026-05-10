@@ -27,7 +27,7 @@ def _write_data_config(path: Path, *, sqlite_path: Path, with_feishu: bool = Tru
 
 
 def test_load_option_positions_repo_bootstraps_position_lots_from_feishu(tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
+    import src.application.option_positions_service as svc
 
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
     old_list = svc._list_feishu_option_position_records
@@ -65,7 +65,7 @@ def test_load_option_positions_repo_bootstraps_position_lots_from_feishu(tmp_pat
 
 
 def test_load_option_positions_repo_normalizes_market_only_feishu_bootstrap_rows(tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
+    import src.application.option_positions_service as svc
 
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
     old_list = svc._list_feishu_option_position_records
@@ -93,7 +93,7 @@ def test_load_option_positions_repo_normalizes_market_only_feishu_bootstrap_rows
 
 
 def test_load_option_positions_repo_skips_incomplete_feishu_option_bootstrap_rows(tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
+    import src.application.option_positions_service as svc
 
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
     old_list = svc._list_feishu_option_position_records
@@ -142,7 +142,7 @@ def test_load_option_positions_repo_skips_incomplete_feishu_option_bootstrap_row
 
 
 def test_load_option_positions_repo_skips_invalid_timestamp_rows_without_degrading_bootstrap(tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
+    import src.application.option_positions_service as svc
 
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
     old_list = svc._list_feishu_option_position_records
@@ -187,7 +187,7 @@ def test_load_option_positions_repo_skips_invalid_timestamp_rows_without_degradi
 
 
 def test_load_option_positions_repo_skips_legacy_rows_without_broker_or_market(tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
+    import src.application.option_positions_service as svc
 
     db_path = tmp_path / "option_positions.sqlite3"
     repo = svc.SQLiteOptionPositionsRepository(db_path)
@@ -224,7 +224,7 @@ def test_load_option_positions_repo_skips_legacy_rows_without_broker_or_market(t
 
 
 def test_load_option_positions_repo_migrates_legacy_rows_with_market_to_broker(tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
+    import src.application.option_positions_service as svc
 
     db_path = tmp_path / "option_positions.sqlite3"
     repo = svc.SQLiteOptionPositionsRepository(db_path)
@@ -264,7 +264,7 @@ def test_load_option_positions_repo_migrates_legacy_rows_with_market_to_broker(t
 
 
 def test_load_option_positions_repo_migrates_existing_position_lots_into_trade_events(tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
+    import src.application.option_positions_service as svc
 
     db_path = tmp_path / "option_positions.sqlite3"
     repo = svc.SQLiteOptionPositionsRepository(db_path)
@@ -306,7 +306,7 @@ def test_load_option_positions_repo_migrates_existing_position_lots_into_trade_e
 
 
 def test_bootstrap_seed_lot_survives_later_trade_event_projection(tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
+    import src.application.option_positions_service as svc
     from scripts.trade_event_normalizer import NormalizedTradeDeal
 
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
@@ -371,8 +371,8 @@ def test_bootstrap_seed_lot_survives_later_trade_event_projection(tmp_path: Path
 
 
 def test_load_option_positions_repo_supports_sqlite_only_mode(tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
-    from scripts.option_positions_core.domain import OpenPositionCommand
+    import src.application.option_positions_service as svc
+    from domain.domain.option_position_lots import OpenPositionCommand
 
     data_config = _write_data_config(
         tmp_path / "data.json",
@@ -407,7 +407,7 @@ def test_load_option_positions_repo_supports_sqlite_only_mode(tmp_path: Path) ->
 
 def test_load_option_positions_repo_treats_holdings_only_feishu_as_sqlite_only(tmp_path: Path) -> None:
     import json
-    import scripts.option_positions_core.service as svc
+    import src.application.option_positions_service as svc
 
     data_config = tmp_path / "data.json"
     data_config.write_text(
@@ -434,7 +434,7 @@ def test_load_option_positions_repo_treats_holdings_only_feishu_as_sqlite_only(t
 
 
 def test_load_option_positions_repo_marks_degraded_when_feishu_bootstrap_fails(tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
+    import src.application.option_positions_service as svc
 
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
     old_list = svc._list_feishu_option_position_records
@@ -451,7 +451,7 @@ def test_load_option_positions_repo_marks_degraded_when_feishu_bootstrap_fails(t
 
 def test_load_option_positions_repo_rolls_back_failed_local_projection_migration(tmp_path: Path) -> None:
     import json
-    import scripts.option_positions_core.service as svc
+    import src.application.option_positions_service as svc
 
     db_path = tmp_path / "option_positions.sqlite3"
     repo = svc.SQLiteOptionPositionsRepository(db_path)
@@ -490,7 +490,7 @@ def test_load_option_positions_repo_rolls_back_failed_local_projection_migration
 
 
 def test_sqlite_repo_enables_wal_and_busy_timeout(tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
+    import src.application.option_positions_service as svc
 
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     with repo._connect() as conn:  # type: ignore[attr-defined]
@@ -504,8 +504,8 @@ def test_sqlite_repo_enables_wal_and_busy_timeout(tmp_path: Path) -> None:
 def test_sqlite_trade_event_upsert_is_idempotent_and_rejects_conflicting_payload(tmp_path: Path) -> None:
     from dataclasses import replace
 
-    import scripts.option_positions_core.service as svc
-    from scripts.option_positions_core.ledger import TradeEvent
+    import src.application.option_positions_service as svc
+    from domain.domain.option_position_ledger import TradeEvent
 
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     event = TradeEvent(
@@ -542,7 +542,7 @@ def test_sqlite_trade_event_upsert_is_idempotent_and_rejects_conflicting_payload
 
 
 def test_persist_trade_event_builds_position_lots_projection(tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
+    import src.application.option_positions_service as svc
     from scripts.trade_event_normalizer import NormalizedTradeDeal
 
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
@@ -620,7 +620,7 @@ def test_persist_trade_event_builds_position_lots_projection(tmp_path: Path) -> 
 
 def test_sqlite_repo_migrates_and_backfills_position_lot_contract_columns(tmp_path: Path) -> None:
     import sqlite3
-    import scripts.option_positions_core.service as svc
+    import src.application.option_positions_service as svc
 
     db_path = tmp_path / "option_positions.sqlite3"
     with sqlite3.connect(db_path) as conn:
@@ -682,9 +682,9 @@ def test_sqlite_repo_migrates_and_backfills_position_lot_contract_columns(tmp_pa
 
 
 def test_projection_does_not_treat_sync_metadata_as_canonical_state(tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
-    from scripts.option_positions_core.domain import OpenPositionCommand
-    from scripts.option_positions_core.ledger import project_position_lot_records
+    import src.application.option_positions_service as svc
+    from domain.domain.option_position_lots import OpenPositionCommand
+    from domain.domain.option_position_ledger import project_position_lot_records
 
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     svc.persist_manual_open_event(
@@ -724,8 +724,8 @@ def test_projection_does_not_treat_sync_metadata_as_canonical_state(tmp_path: Pa
 
 
 def test_rebuild_position_lots_from_trade_events_preserves_sync_metadata(tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
-    from scripts.option_positions_core.domain import OpenPositionCommand
+    import src.application.option_positions_service as svc
+    from domain.domain.option_position_lots import OpenPositionCommand
 
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     svc.persist_manual_open_event(
@@ -766,8 +766,8 @@ def test_rebuild_position_lots_from_trade_events_preserves_sync_metadata(tmp_pat
 
 
 def test_rebuild_position_lots_applies_legacy_manual_close_to_bootstrap_seed(tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
-    from scripts.option_positions_core.ledger import TradeEvent
+    import src.application.option_positions_service as svc
+    from domain.domain.option_position_ledger import TradeEvent
 
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     svc._persist_trade_event_object(
@@ -861,8 +861,8 @@ def test_rebuild_position_lots_applies_legacy_manual_close_to_bootstrap_seed(tmp
 def test_rebuild_position_lots_closes_bootstrap_seed_by_record_id_even_if_live_projection_source_event_id_drifted(
     tmp_path: Path,
 ) -> None:
-    import scripts.option_positions_core.service as svc
-    from scripts.option_positions_core.ledger import TradeEvent
+    import src.application.option_positions_service as svc
+    from domain.domain.option_position_ledger import TradeEvent
 
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     svc._persist_trade_event_object(
@@ -962,7 +962,7 @@ def test_rebuild_position_lots_closes_bootstrap_seed_by_record_id_even_if_live_p
 
 
 def test_close_projection_does_not_cross_match_other_account_seed_lot(tmp_path: Path) -> None:
-    from scripts.option_positions_core.ledger import TradeEvent, project_position_lot_records
+    from domain.domain.option_position_ledger import TradeEvent, project_position_lot_records
 
     events = [
         TradeEvent(
@@ -1041,7 +1041,7 @@ def test_close_projection_does_not_cross_match_other_account_seed_lot(tmp_path: 
 
 
 def test_close_projection_prefers_structured_expiration_over_missing_note_exp() -> None:
-    from scripts.option_positions_core.ledger import TradeEvent, project_position_lot_records
+    from domain.domain.option_position_ledger import TradeEvent, project_position_lot_records
 
     events = [
         TradeEvent(
@@ -1119,8 +1119,8 @@ def test_close_projection_prefers_structured_expiration_over_missing_note_exp() 
 
 
 def test_close_projection_buy_side_marks_buy_to_close_type() -> None:
-    from scripts.option_positions_core.domain import BUY_TO_CLOSE
-    from scripts.option_positions_core.ledger import TradeEvent, project_position_lot_records
+    from domain.domain.option_position_lots import BUY_TO_CLOSE
+    from domain.domain.option_position_ledger import TradeEvent, project_position_lot_records
 
     events = [
         TradeEvent(
@@ -1176,7 +1176,7 @@ def test_close_projection_buy_side_marks_buy_to_close_type() -> None:
 
 
 def test_close_projection_matches_bootstrap_lot_by_legacy_record_id() -> None:
-    from scripts.option_positions_core.ledger import TradeEvent, project_position_lot_records
+    from domain.domain.option_position_ledger import TradeEvent, project_position_lot_records
 
     events = [
         TradeEvent(
@@ -1260,7 +1260,7 @@ def test_close_projection_matches_bootstrap_lot_by_legacy_record_id() -> None:
 
 
 def test_close_projection_prefers_explicit_source_event_target() -> None:
-    from scripts.option_positions_core.ledger import TradeEvent, project_position_lot_records
+    from domain.domain.option_position_ledger import TradeEvent, project_position_lot_records
 
     events = [
         TradeEvent(
@@ -1345,7 +1345,7 @@ def test_close_projection_prefers_explicit_source_event_target() -> None:
 
 
 def test_close_projection_does_not_fallback_when_explicit_target_is_missing() -> None:
-    from scripts.option_positions_core.ledger import TradeEvent, project_position_lot_records
+    from domain.domain.option_position_ledger import TradeEvent, project_position_lot_records
 
     events = [
         TradeEvent(
@@ -1407,7 +1407,7 @@ def test_close_projection_does_not_fallback_when_explicit_target_is_missing() ->
 
 
 def test_close_projection_does_not_partially_apply_oversized_explicit_target() -> None:
-    from scripts.option_positions_core.ledger import TradeEvent, project_position_lot_records
+    from domain.domain.option_position_ledger import TradeEvent, project_position_lot_records
 
     events = [
         TradeEvent(
@@ -1470,7 +1470,7 @@ def test_close_projection_does_not_partially_apply_oversized_explicit_target() -
 
 
 def test_close_projection_reports_conflict_when_record_id_and_source_event_target_disagree() -> None:
-    from scripts.option_positions_core.ledger import TradeEvent, project_position_lot_records_with_diagnostics
+    from domain.domain.option_position_ledger import TradeEvent, project_position_lot_records_with_diagnostics
 
     events = [
         TradeEvent(
@@ -1553,8 +1553,8 @@ def test_close_projection_reports_conflict_when_record_id_and_source_event_targe
 
 
 def test_rebuild_position_lots_reports_unmatched_heuristic_close_contracts(tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
-    from scripts.option_positions_core.ledger import TradeEvent
+    import src.application.option_positions_service as svc
+    from domain.domain.option_position_ledger import TradeEvent
 
     def make_event(**overrides: object) -> TradeEvent:
         payload: dict[str, Any] = {
@@ -1612,8 +1612,8 @@ def test_rebuild_position_lots_reports_unmatched_heuristic_close_contracts(tmp_p
 
 
 def test_persist_manual_open_event_builds_position_lot(tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
-    from scripts.option_positions_core.domain import OpenPositionCommand
+    import src.application.option_positions_service as svc
+    from domain.domain.option_position_lots import OpenPositionCommand
 
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     result = svc.persist_manual_open_event(
@@ -1646,8 +1646,8 @@ def test_persist_manual_open_event_builds_position_lot(tmp_path: Path) -> None:
 
 def test_persist_manual_open_event_is_idempotent_on_retry(tmp_path: Path) -> None:
     """Retrying manual-open with identical parameters must not create duplicate lots."""
-    import scripts.option_positions_core.service as svc
-    from scripts.option_positions_core.domain import OpenPositionCommand
+    import src.application.option_positions_service as svc
+    from domain.domain.option_position_lots import OpenPositionCommand
 
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     command = OpenPositionCommand(
@@ -1678,8 +1678,8 @@ def test_persist_manual_open_event_is_idempotent_on_retry(tmp_path: Path) -> Non
 
 
 def test_persist_manual_close_event_updates_position_lot(tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
-    from scripts.option_positions_core.domain import OpenPositionCommand
+    import src.application.option_positions_service as svc
+    from domain.domain.option_position_lots import OpenPositionCommand
 
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     svc.persist_manual_open_event(
@@ -1729,8 +1729,8 @@ def test_persist_manual_close_event_updates_position_lot(tmp_path: Path) -> None
 
 
 def test_persist_manual_close_event_is_idempotent_on_retry(tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
-    from scripts.option_positions_core.domain import OpenPositionCommand
+    import src.application.option_positions_service as svc
+    from domain.domain.option_position_lots import OpenPositionCommand
 
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     svc.persist_manual_open_event(
@@ -1781,7 +1781,7 @@ def test_persist_manual_close_event_is_idempotent_on_retry(tmp_path: Path) -> No
 
 
 def test_persist_manual_close_event_requires_broker_on_position_lot(tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
+    import src.application.option_positions_service as svc
 
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
 
@@ -1810,8 +1810,8 @@ def test_persist_manual_close_event_requires_broker_on_position_lot(tmp_path: Pa
 
 
 def test_persist_manual_close_event_rejects_mismatched_record_id_and_fields(tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
-    from scripts.option_positions_core.domain import OpenPositionCommand
+    import src.application.option_positions_service as svc
+    from domain.domain.option_position_lots import OpenPositionCommand
 
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     svc.persist_manual_open_event(
@@ -1863,8 +1863,8 @@ def test_persist_manual_close_event_rejects_mismatched_record_id_and_fields(tmp_
 
 
 def test_persist_manual_void_event_removes_open_lot_from_projection(tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
-    from scripts.option_positions_core.domain import OpenPositionCommand
+    import src.application.option_positions_service as svc
+    from domain.domain.option_position_lots import OpenPositionCommand
 
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     open_result = svc.persist_manual_open_event(
@@ -1901,8 +1901,8 @@ def test_persist_manual_void_event_removes_open_lot_from_projection(tmp_path: Pa
 
 
 def test_persist_manual_void_event_restores_lot_when_voiding_close_event(tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
-    from scripts.option_positions_core.domain import OpenPositionCommand
+    import src.application.option_positions_service as svc
+    from domain.domain.option_position_lots import OpenPositionCommand
 
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     open_result = svc.persist_manual_open_event(
@@ -1949,8 +1949,8 @@ def test_persist_manual_void_event_restores_lot_when_voiding_close_event(tmp_pat
 
 
 def test_persist_manual_adjust_event_updates_position_lot_projection(tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
-    from scripts.option_positions_core.domain import OpenPositionCommand
+    import src.application.option_positions_service as svc
+    from domain.domain.option_position_lots import OpenPositionCommand
 
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     svc.persist_manual_open_event(
@@ -1997,8 +1997,8 @@ def test_persist_manual_adjust_event_updates_position_lot_projection(tmp_path: P
 
 
 def test_persist_manual_adjust_event_is_idempotent_on_retry(tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
-    from scripts.option_positions_core.domain import OpenPositionCommand
+    import src.application.option_positions_service as svc
+    from domain.domain.option_position_lots import OpenPositionCommand
 
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     svc.persist_manual_open_event(
@@ -2043,8 +2043,8 @@ def test_persist_manual_adjust_event_is_idempotent_on_retry(tmp_path: Path) -> N
 
 
 def test_persist_manual_adjust_event_rejects_mismatched_record_id_and_fields(tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
-    from scripts.option_positions_core.domain import OpenPositionCommand
+    import src.application.option_positions_service as svc
+    from domain.domain.option_position_lots import OpenPositionCommand
 
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     svc.persist_manual_open_event(
@@ -2094,8 +2094,8 @@ def test_persist_manual_adjust_event_rejects_mismatched_record_id_and_fields(tmp
 
 
 def test_voiding_adjust_event_restores_prior_projection_state(tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
-    from scripts.option_positions_core.domain import OpenPositionCommand
+    import src.application.option_positions_service as svc
+    from domain.domain.option_position_lots import OpenPositionCommand
 
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     svc.persist_manual_open_event(
@@ -2136,7 +2136,7 @@ def test_voiding_adjust_event_restores_prior_projection_state(tmp_path: Path) ->
 
 
 def test_load_option_positions_repo_raises_on_malformed_feishu_config(tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
+    import src.application.option_positions_service as svc
 
     data_config = tmp_path / "data.json"
     data_config.write_text(
@@ -2157,7 +2157,7 @@ def test_load_option_positions_repo_raises_on_malformed_feishu_config(tmp_path: 
 
 
 def test_load_option_positions_repo_rejects_non_object_feishu_config(tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
+    import src.application.option_positions_service as svc
 
     data_config = tmp_path / "data.json"
     data_config.write_text(
@@ -2178,7 +2178,7 @@ def test_load_option_positions_repo_rejects_non_object_feishu_config(tmp_path: P
 
 
 def test_option_positions_sync_to_feishu_enabled_defaults_false(tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
+    import src.application.option_positions_service as svc
 
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
 
@@ -2186,7 +2186,7 @@ def test_option_positions_sync_to_feishu_enabled_defaults_false(tmp_path: Path) 
 
 
 def test_option_positions_sync_to_feishu_enabled_reads_boolean(tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
+    import src.application.option_positions_service as svc
 
     data_config = tmp_path / "data.json"
     data_config.write_text(
@@ -2208,7 +2208,7 @@ def test_option_positions_sync_to_feishu_enabled_reads_boolean(tmp_path: Path) -
 
 
 def test_option_positions_sync_to_feishu_enabled_rejects_non_boolean(tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
+    import src.application.option_positions_service as svc
 
     data_config = tmp_path / "data.json"
     data_config.write_text(
@@ -2231,8 +2231,8 @@ def test_option_positions_sync_to_feishu_enabled_rejects_non_boolean(tmp_path: P
 
 
 def test_update_position_lot_fields_updates_single_row_and_sync_metadata(tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
-    from scripts.option_positions_core.domain import OpenPositionCommand
+    import src.application.option_positions_service as svc
+    from domain.domain.option_position_lots import OpenPositionCommand
 
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     svc.persist_manual_open_event(
@@ -2277,7 +2277,7 @@ def test_update_position_lot_fields_updates_single_row_and_sync_metadata(tmp_pat
 
 
 def test_replace_position_lots_rejects_incomplete_option_lots_atomically(tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
+    import src.application.option_positions_service as svc
 
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     repo.replace_position_lots(
@@ -2342,8 +2342,8 @@ def test_replace_position_lots_rejects_incomplete_option_lots_atomically(tmp_pat
 
 
 def test_update_position_lot_fields_ignores_non_sync_business_mutations(tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
-    from scripts.option_positions_core.domain import OpenPositionCommand
+    import src.application.option_positions_service as svc
+    from domain.domain.option_position_lots import OpenPositionCommand
 
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     svc.persist_manual_open_event(
@@ -2376,9 +2376,9 @@ def test_update_position_lot_fields_ignores_non_sync_business_mutations(tmp_path
 
 
 def test_projection_replay_fixture_closes_lot_and_excludes_it_from_open_context(tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
+    import src.application.option_positions_service as svc
     from scripts.fetch_option_positions_context import build_context
-    from scripts.option_positions_core.ledger import TradeEvent
+    from domain.domain.option_position_ledger import TradeEvent
 
     fixture_path = BASE / "tests" / "fixtures" / "option_positions_projection_replay_case.json"
     fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
@@ -2401,7 +2401,7 @@ def test_projection_replay_fixture_closes_lot_and_excludes_it_from_open_context(
 
 
 def test_projection_matches_explicit_close_with_legacy_hk_symbol_alias() -> None:
-    from scripts.option_positions_core.ledger import TradeEvent, project_position_lot_records_with_diagnostics
+    from domain.domain.option_position_ledger import TradeEvent, project_position_lot_records_with_diagnostics
 
     events = [
         TradeEvent(
