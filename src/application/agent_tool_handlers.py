@@ -13,7 +13,7 @@ from src.application.config_loader import load_config as load_runtime_pipeline_c
 from src.application.config_validator import validate_config
 from domain.domain.fetch_source import resolve_symbol_fetch_source
 from src.application.futu_portfolio_context import infer_futu_portfolio_settings
-from scripts.notify_symbols import build_notification
+from src.application.notify_symbols import build_notification
 from scripts.option_positions import build_lot_event_history, inspect_projection_state
 from domain.domain.option_position_lots import normalize_account as _normalize_account
 from src.application.option_positions_service import load_option_positions_repo

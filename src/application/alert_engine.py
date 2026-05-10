@@ -7,7 +7,7 @@ import shutil
 import sys
 from pathlib import Path
 
-repo_base = Path(__file__).resolve().parents[1]
+repo_base = Path(__file__).resolve().parents[2]
 if str(repo_base) not in sys.path:
     sys.path.insert(0, str(repo_base))
 
@@ -668,7 +668,7 @@ def run_alert_engine(
     """执行提醒文本构建，不包含 CLI 参数解析。"""
     global POLICY
 
-    base = Path(__file__).resolve().parents[1]
+    base = Path(__file__).resolve().parents[2]
     POLICY = _load_policy(policy_json, repo_base=base)
 
     summary_path = _resolve_repo_path(repo_base=base, value=summary_input)

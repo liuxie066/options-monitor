@@ -261,7 +261,7 @@ cp configs/examples/portfolio.sqlite.example.json secrets/portfolio.sqlite.json
 统一 tick 的通知语义是固定的：
 
 - 同一个通知目标下，每个账户各发送一条消息
-- 账户消息内容由 `scripts/notify_symbols.py` 和 `src/application/multi_tick/notify_format.py` 负责排版
+- 账户消息内容由 `src/application/notify_symbols.py` 和 `src/application/multi_tick/notify_format.py` 负责排版
 - 主流程在 `src/application/multi_account_tick.py` 准备候选、现金 footer 和 heartbeat 消息
 - 某个账户发送失败不会阻断其他账户；只有发送成功的账户会更新 notified 状态
 
