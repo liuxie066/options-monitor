@@ -31,6 +31,17 @@ def test_domain_package_does_not_import_outer_layers() -> None:
     assert offenders == []
 
 
+def test_application_package_does_not_import_scripts_layer() -> None:
+    modules = sorted((ROOT / "src" / "application").rglob("*.py"))
+    offenders: list[str] = []
+    for path in modules:
+        for lineno, module in _imports_from(path):
+            if module == "scripts" or module.startswith("scripts."):
+                offenders.append(f"{path.relative_to(ROOT)}:{lineno}:{module}")
+
+    assert offenders == []
+
+
 def test_legacy_wrapper_modules_are_removed() -> None:
     assert not (ROOT / "scripts" / "trade_symbol_identity.py").exists()
     assert not (ROOT / "scripts" / "trade_contract_identity.py").exists()

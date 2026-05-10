@@ -76,7 +76,7 @@
 | `get_close_advice` | `./om close-advice` |
 | `query_cash_headroom` | `./om sell-put-cash` / `src.application.cash_headroom_query::query_sell_put_cash(...)` |
 | `monthly_income_report` | `scripts/option_positions_report.py monthly-income` |
-| `option_positions_read` | `scripts/option_positions.py list/events/history/inspect` 的只读部分 |
+| `option_positions_read` | `src.application.option_positions_facade` / `src.application.option_positions_inspection` 的只读部分 |
 
 说明：
 - `om-agent` 更适合给程序调
