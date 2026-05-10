@@ -105,7 +105,7 @@ def test_repository_audit_and_text_writers() -> None:
 
 
 def test_prefetch_required_data_idempotency_audit() -> None:
-    from scripts.multi_tick import required_data_prefetch as mod
+    from src.application.multi_tick import required_data_prefetch as mod
 
     calls: list[tuple[str, str, int]] = []
     old_has = mod.has_shared_required_data
@@ -154,7 +154,7 @@ def test_prefetch_required_data_idempotency_audit() -> None:
 
 
 def test_prefetch_required_data_protections_minimal() -> None:
-    from scripts.multi_tick import required_data_prefetch as mod
+    from src.application.multi_tick import required_data_prefetch as mod
 
     old_has = mod.has_shared_required_data
     old_exec = mod.ToolExecutionService.execute
@@ -251,7 +251,7 @@ def test_prefetch_required_data_protections_minimal() -> None:
 
 
 def test_prefetch_required_data_defaults_to_opend_source() -> None:
-    from scripts.multi_tick import required_data_prefetch as mod
+    from src.application.multi_tick import required_data_prefetch as mod
 
     old_has = mod.has_shared_required_data
     old_exec = mod.ToolExecutionService.execute
@@ -298,7 +298,7 @@ def test_prefetch_required_data_defaults_to_opend_source() -> None:
 
 
 def test_prefetch_required_data_force_refresh_ignores_existing_local_cache() -> None:
-    from scripts.multi_tick import required_data_prefetch as mod
+    from src.application.multi_tick import required_data_prefetch as mod
 
     old_has = mod.has_shared_required_data
     old_exec = mod.ToolExecutionService.execute

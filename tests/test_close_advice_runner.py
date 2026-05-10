@@ -9,8 +9,8 @@ import pytest
 
 from domain.domain.expiration_dates import expiration_business_today
 from scripts.close_advice.runner import run_close_advice
-from scripts.multi_tick.misc import AccountResult
-from scripts.multi_tick.notify_format import build_account_message
+from src.application.multi_tick.misc import AccountResult
+from src.application.multi_tick.notify_format import build_account_message
 
 
 def test_close_advice_input_uses_shared_account_and_currency_normalization() -> None:

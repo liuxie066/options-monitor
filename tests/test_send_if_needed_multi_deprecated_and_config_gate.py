@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 
 def test_market_session_and_opend_alert_use_single_source_of_truth() -> None:
     from domain.domain import select_markets_to_run
-    from scripts.multi_tick.opend_guard import should_send_opend_alert
+    from src.application.multi_tick.opend_guard import should_send_opend_alert
 
     cfg = {
         'schedule_hk': {
@@ -53,10 +53,10 @@ def test_multi_tick_main_enforces_canonical_runtime_config_without_derived_gate(
     assert "resolve_allow_derived_config_gate" not in contract_src
 
 
-def test_multi_tick_main_current_run_id_accessor_is_public_compat() -> None:
+def test_multi_account_tick_current_run_id_accessor_is_public() -> None:
     import importlib
 
-    mod = importlib.import_module("scripts.multi_tick.main")
+    mod = importlib.import_module("src.application.multi_account_tick")
 
     old = mod._CURRENT_RUN_ID
     try:

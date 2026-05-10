@@ -9,7 +9,7 @@ BASE = Path(__file__).resolve().parents[1]
 if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
-from scripts.multi_tick.project_guard import (  # noqa: E402
+from src.application.multi_tick.project_guard import (  # noqa: E402
     admit_project_run,
     apply_project_load_shed,
     project_guard_state_path,

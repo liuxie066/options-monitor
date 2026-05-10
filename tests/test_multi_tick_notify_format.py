@@ -2,8 +2,8 @@ from __future__ import annotations
 
 
 def test_account_message_is_plain_text_for_weixin() -> None:
-    from scripts.multi_tick.misc import AccountResult
-    from scripts.multi_tick.notify_format import build_account_message
+    from src.application.multi_tick.misc import AccountResult
+    from src.application.multi_tick.notify_format import build_account_message
 
     notif = (
         "Put\n"
@@ -35,8 +35,8 @@ def test_account_message_is_plain_text_for_weixin() -> None:
 
 
 def test_account_message_skips_accounts_without_notification_text() -> None:
-    from scripts.multi_tick.misc import AccountResult
-    from scripts.multi_tick.notify_format import build_account_message
+    from src.application.multi_tick.misc import AccountResult
+    from src.application.multi_tick.notify_format import build_account_message
 
     message = build_account_message(
         AccountResult(
@@ -54,8 +54,8 @@ def test_account_message_skips_accounts_without_notification_text() -> None:
 
 
 def test_account_message_uses_compact_auto_close_template_when_scan_skipped() -> None:
-    from scripts.multi_tick.misc import AccountResult
-    from scripts.multi_tick.notify_format import build_account_message
+    from src.application.multi_tick.misc import AccountResult
+    from src.application.multi_tick.notify_format import build_account_message
 
     message = build_account_message(
         AccountResult(
@@ -81,8 +81,8 @@ def test_account_message_uses_compact_auto_close_template_when_scan_skipped() ->
 
 
 def test_account_message_counts_yield_enhancement_when_present() -> None:
-    from scripts.multi_tick.misc import AccountResult
-    from scripts.multi_tick.notify_format import build_account_message
+    from src.application.multi_tick.misc import AccountResult
+    from src.application.multi_tick.notify_format import build_account_message
 
     notif = (
         "Put\n"
@@ -108,7 +108,7 @@ def test_account_message_counts_yield_enhancement_when_present() -> None:
 
 
 def test_flatten_auto_close_summary_keeps_error_only_summary() -> None:
-    from scripts.multi_tick.notify_format import flatten_auto_close_summary
+    from src.application.multi_tick.notify_format import flatten_auto_close_summary
 
     text = "\n".join(
         [
@@ -127,7 +127,7 @@ def test_flatten_auto_close_summary_keeps_error_only_summary() -> None:
 
 
 def test_flatten_auto_close_summary_includes_skipped_already_closed_count() -> None:
-    from scripts.multi_tick.notify_format import flatten_auto_close_summary
+    from src.application.multi_tick.notify_format import flatten_auto_close_summary
 
     text = "\n".join(
         [
@@ -147,7 +147,7 @@ def test_flatten_auto_close_summary_includes_skipped_already_closed_count() -> N
 
 
 def test_flatten_auto_close_summary_suppresses_skipped_only_summary() -> None:
-    from scripts.multi_tick.notify_format import flatten_auto_close_summary
+    from src.application.multi_tick.notify_format import flatten_auto_close_summary
 
     text = "\n".join(
         [

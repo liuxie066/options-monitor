@@ -291,7 +291,7 @@ def test_build_failure_audit_fields_distinguishes_io_vs_decision() -> None:
 
 def test_filter_notify_candidates_matches_existing_predicate() -> None:
     from domain.domain.multi_tick import filter_notify_candidates
-    from scripts.multi_tick.misc import AccountResult
+    from src.application.multi_tick.misc import AccountResult
 
     results = [
         AccountResult('a', True, True, 'ok', 'x'),
@@ -323,7 +323,7 @@ def test_filter_notify_candidates_delegates_to_engine() -> None:
 
 def test_build_account_messages_aggregates_non_empty_messages() -> None:
     from domain.domain.multi_tick_result import build_account_messages
-    from scripts.multi_tick.misc import AccountResult
+    from src.application.multi_tick.misc import AccountResult
 
     def _cash_footer_for_account(lines: list[str], account: str) -> list[str]:
         return [f"{account}:{len(lines)}"]
@@ -350,7 +350,7 @@ def test_build_account_messages_aggregates_non_empty_messages() -> None:
 
 def test_build_no_candidate_account_messages_emits_monitor_heartbeat() -> None:
     from domain.domain.multi_tick_result import build_no_candidate_account_messages
-    from scripts.multi_tick.misc import AccountResult
+    from src.application.multi_tick.misc import AccountResult
 
     results = [
         AccountResult('a', True, True, 'ok', ''),
@@ -373,7 +373,7 @@ def test_build_no_candidate_account_messages_emits_monitor_heartbeat() -> None:
 
 def test_build_no_account_notification_payloads_keeps_existing_fields() -> None:
     from domain.domain.multi_tick_result import build_no_account_notification_payloads
-    from scripts.multi_tick.misc import AccountResult
+    from src.application.multi_tick.misc import AccountResult
 
     calls = {'n': 0}
 

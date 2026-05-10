@@ -30,10 +30,7 @@ from scripts.portfolio_context_service import load_account_portfolio_context, wi
 from domain.services import adapt_holdings_context, adapt_option_positions_context
 from scripts.fetch_option_positions_context import slice_shared_context_for_account as slice_shared_option_context_for_account
 from src.application.option_positions_facade import load_option_position_records
-try:
-    from domain.storage.repositories import state_repo
-except Exception:
-    from scripts.domain.storage.repositories import state_repo  # type: ignore
+from domain.storage.repositories import state_repo
 
 
 def _persist_source_snapshot(base: Path, snapshot: dict) -> None:

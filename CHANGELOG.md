@@ -126,7 +126,7 @@
 - Moved unified tick and WebUI implementation ownership behind `src/application/multi_account_tick.py` and `src/interfaces/webui/server.py`, leaving script paths as thin compatibility entry points.
 
 ### Fixed
-- Restored direct `python3 scripts/multi_tick/main.py --help` compatibility by bootstrapping the repository root before importing the application owner.
+- Restored direct multi-account tick help via the unified `./om run tick --help` entrypoint.
 
 ### Documentation
 - Clarified that `query_cash_headroom` is the agent-facing wrapper for `query_sell_put_cash(...)` and documented `lx` / `sy` account examples.

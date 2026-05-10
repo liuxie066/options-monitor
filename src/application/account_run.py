@@ -23,23 +23,20 @@ from src.application.config_loader import resolve_watchlist_config, set_watchlis
 from scripts.close_advice import run_close_advice
 from src.infrastructure.external_services import run_pipeline_script
 from src.infrastructure.io_utils import utc_now
-from scripts.multi_tick.misc import (
+from src.application.multi_tick.misc import (
     AccountResult,
     _safe_runlog_data,
     ensure_account_output_dir,
     update_legacy_output_link,
 )
-from scripts.multi_tick.notify_format import flatten_auto_close_summary
-from scripts.multi_tick.required_data_prefetch import prefetch_required_data
+from src.application.multi_tick.notify_format import flatten_auto_close_summary
+from src.application.multi_tick.required_data_prefetch import prefetch_required_data
 from src.application.position_maintenance import (
     format_auto_close_summary,
     run_expired_position_maintenance_for_account,
 )
 
-try:
-    from domain.storage.repositories import run_repo, state_repo
-except Exception:
-    from scripts.domain.storage.repositories import run_repo, state_repo  # type: ignore
+from domain.storage.repositories import run_repo, state_repo
 
 
 @dataclass(frozen=True)

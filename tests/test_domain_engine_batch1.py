@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from scripts.multi_tick.misc import AccountResult
+from src.application.multi_tick.misc import AccountResult
 
 
 def test_notify_candidate_filter_and_rank_keep_semantics() -> None:

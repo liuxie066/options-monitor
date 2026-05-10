@@ -17,10 +17,7 @@ from src.application.pipeline_reporting import (
 from src.infrastructure.logging_config import get_logger
 from src.application.opend_fetch_config import opend_fetch_kwargs
 
-try:
-    from domain.storage.repositories import report_repo
-except Exception:
-    from scripts.domain.storage.repositories import report_repo  # type: ignore
+from domain.storage.repositories import report_repo
 
 
 LOG = get_logger("run_pipeline")

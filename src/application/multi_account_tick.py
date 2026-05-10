@@ -22,22 +22,22 @@ from src.application.account_config import accounts_from_config, cash_footer_acc
 from src.application.config_loader import resolve_watchlist_config, set_watchlist_config
 from domain.domain.fetch_source import is_futu_fetch_source, resolve_symbol_fetch_source
 
-from scripts.multi_tick.cash_footer import query_cash_footer
-from scripts.multi_tick.notify_format import build_account_message
-from scripts.multi_tick.opend_guard import (
+from src.application.multi_tick.cash_footer import query_cash_footer
+from src.application.multi_tick.notify_format import build_account_message
+from src.application.multi_tick.opend_guard import (
     clear_opend_phone_verify_pending,
     is_opend_phone_verify_pending,
     mark_opend_phone_verify_pending,
     send_opend_alert,
     send_opend_recovery_notice,
 )
-from scripts.multi_tick.project_guard import (
+from src.application.multi_tick.project_guard import (
     admit_project_run,
     apply_project_load_shed,
     record_project_failure,
     record_project_success,
 )
-from scripts.multi_tick.misc import (
+from src.application.multi_tick.misc import (
     set_debug,
     log,
     parse_hhmm,
@@ -104,12 +104,8 @@ from src.infrastructure.external_services import (
     trading_day_via_futu,
 )
 
-try:
-    from domain.storage import paths as storage_paths
-    from domain.storage.repositories import run_repo, state_repo
-except Exception:
-    from scripts.domain.storage import paths as storage_paths  # type: ignore
-    from scripts.domain.storage.repositories import run_repo, state_repo  # type: ignore
+from domain.storage import paths as storage_paths
+from domain.storage.repositories import run_repo, state_repo
 
 
 _CURRENT_RUN_ID: str | None = None

@@ -6,10 +6,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-try:
-    from domain.storage.repositories import state_repo
-except Exception:
-    from scripts.domain.storage.repositories import state_repo  # type: ignore
+from domain.storage.repositories import state_repo
 
 
 def main():
