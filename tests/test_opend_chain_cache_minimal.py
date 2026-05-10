@@ -101,7 +101,7 @@ def test_chain_cache_prune_by_mtime() -> None:
         old = time.time() - 10 * 86400
         os_utime = __import__('os').utime
         os_utime(p1, (old, old))
-        m._prune_chain_cache(root, keep_days=7)
+        m.prune_chain_cache(root, keep_days=7)
         assert not p1.exists()
         assert p2.exists()
 

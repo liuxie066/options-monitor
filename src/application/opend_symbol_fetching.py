@@ -27,7 +27,7 @@ import pandas as pd
 
 
 
-def _append_metrics_json(metrics_path: Path, payload: dict, max_entries: int = 400):
+def append_metrics_json(metrics_path: Path, payload: dict, max_entries: int = 400):
     """Append payload into a bounded JSON list file. Keeps last max_entries records."""
     try:
         metrics_path.parent.mkdir(parents=True, exist_ok=True)
@@ -99,7 +99,7 @@ def _save_chain_cache(path: Path, payload: dict) -> None:
         pass
 
 
-def _prune_chain_cache(base_dir: Path, keep_days: int) -> None:
+def prune_chain_cache(base_dir: Path, keep_days: int) -> None:
     try:
         prune_option_chain_cache(base_dir, keep_days)
     except Exception:

@@ -10,9 +10,9 @@ import time
 
 from src.application.opend_symbol_fetching import (
     FetchSymbolRequest,
-    _append_metrics_json,
-    _prune_chain_cache,
+    append_metrics_json,
     fetch_symbol_request,
+    prune_chain_cache,
     save_outputs,
 )
 
@@ -61,7 +61,7 @@ def main() -> None:
     output_root = Path(args.output_root).resolve() if args.output_root else None
 
     if args.chain_cache:
-        _prune_chain_cache(base, int(args.chain_cache_keep_days))
+        prune_chain_cache(base, int(args.chain_cache_keep_days))
 
     opend_metrics_path = (base / "output_shared" / "state" / "opend_metrics.json").resolve()
 
@@ -101,7 +101,7 @@ def main() -> None:
         raw_path, csv_path = save_outputs(base, sym, payload, output_root=output_root)
         try:
             meta = payload.get("meta") or {}
-            _append_metrics_json(
+            append_metrics_json(
                 opend_metrics_path,
                 {
                     "as_of_utc": datetime.now().astimezone().isoformat(),
