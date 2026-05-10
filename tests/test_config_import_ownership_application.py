@@ -260,13 +260,22 @@ def test_trade_intake_imports_owner_modules() -> None:
         importlib.import_module("scripts.trade_account_mapping")
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module("scripts.trade_event_normalizer")
+    for old_module in (
+        "scripts.auto_trade_intake",
+        "scripts.futu_trade_detail_lookup",
+        "scripts.trade_intake_resolver",
+        "scripts.trade_intake_state",
+        "scripts.trade_push_listener",
+    ):
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module(old_module)
 
     identity_mod = importlib.import_module("domain.domain.trade_account_identity")
     mapping_mod = importlib.import_module("src.application.trade_account_mapping")
     normalizer_mod = importlib.import_module("src.application.trade_event_normalizer")
-    auto_trade_mod = importlib.import_module("scripts.auto_trade_intake")
-    lookup_mod = importlib.import_module("scripts.futu_trade_detail_lookup")
-    resolver_mod = importlib.import_module("scripts.trade_intake_resolver")
+    auto_trade_mod = importlib.import_module("src.application.auto_trade_intake")
+    lookup_mod = importlib.import_module("src.application.futu_trade_detail_lookup")
+    resolver_mod = importlib.import_module("src.application.trade_intake_resolver")
     validate_mod = importlib.import_module("src.application.config_validator")
     workflows_mod = importlib.import_module("src.application.position_workflows")
 

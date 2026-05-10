@@ -16,7 +16,7 @@ from domain.domain.option_position_lots import (
 )
 from src.application.option_positions_service import persist_trade_event
 from src.application.trade_event_normalizer import NormalizedTradeDeal
-from scripts.trade_intake_state import is_retryable_unresolved_deal, lookup_deal_state
+from src.application.trade_intake_state import is_retryable_unresolved_deal, lookup_deal_state
 from domain.domain.symbol_identity import canonical_symbol
 from src.application.position_workflows import (
     apply_trade_close_with,

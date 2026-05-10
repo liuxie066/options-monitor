@@ -57,7 +57,8 @@ def test_auto_trade_intake_open_example_dry_run_without_explicit_data_config(tmp
     result = subprocess.run(
         [
             sys.executable,
-            "scripts/auto_trade_intake.py",
+            "-m",
+            "src.application.auto_trade_intake",
             "--config",
             str(config_path),
             "--mode",
@@ -102,7 +103,8 @@ def test_auto_trade_intake_open_dry_run_accepts_futu_option_code_with_lookup_fie
         result = subprocess.run(
             [
                 sys.executable,
-                "scripts/auto_trade_intake.py",
+                "-m",
+                "src.application.auto_trade_intake",
                 "--config",
                 str(config_path),
                 "--mode",
