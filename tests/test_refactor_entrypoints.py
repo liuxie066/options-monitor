@@ -36,6 +36,7 @@ def test_multi_tick_and_webui_use_application_facades() -> None:
 
     assert not (ROOT / "scripts" / "send_if_needed.py").exists()
     assert not (ROOT / "scripts" / "send_if_needed_multi.py").exists()
+    assert not (ROOT / "scripts" / "option_positions.py").exists()
     assert not (ROOT / "scripts" / "webui" / "server.py").exists()
     assert not (ROOT / "scripts" / "webui" / "__init__.py").exists()
     assert "src.interfaces.webui.server:app" in run_webui_src
@@ -46,6 +47,7 @@ def test_multi_tick_and_webui_use_application_facades() -> None:
     assert "src.interfaces.agent.cli" in agent_src
     assert "from src.application.multi_account_tick import run_tick" in cli_src
     assert "return int(run_tick(tick_argv))" in cli_src
+    assert "src.interfaces.cli.option_positions" in cli_src
     assert "src.application.multi_tick.main" not in multi_account_tick_src
     assert not (ROOT / "scripts" / "multi_tick" / "main.py").exists()
     assert not (ROOT / "scripts" / "infra" / "service.py").exists()
@@ -160,3 +162,22 @@ def test_unified_cli_option_positions_sync_feishu_command_exists() -> None:
     assert "--dry-run" in proc.stdout
     assert "--prune-remote-missing-local" in proc.stdout
     assert "scripts/sync_option_positions_to_feishu.py" not in proc.stdout
+
+
+def test_unified_cli_option_positions_management_command_exists_without_legacy_market_alias() -> None:
+    proc = subprocess.run(
+        [
+            str((ROOT / ".venv" / "bin" / "python").resolve()),
+            "-m",
+            "src.interfaces.cli.main",
+            "option-positions",
+            "list",
+            "--help",
+        ],
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "--broker" in proc.stdout
+    assert "--market" not in proc.stdout

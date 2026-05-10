@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Manage position lots via trade events.
 
 Supports open, buy-to-close, and list flows on top of the
@@ -9,19 +8,14 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from pathlib import Path
-
-repo_base = Path(__file__).resolve().parents[1]
-if str(repo_base) not in sys.path:
-    sys.path.insert(0, str(repo_base))
 
 from domain.domain.option_position_lots import (
     normalize_account,
     normalize_broker,
-    normalize_side,
 )
 from src.application.option_positions_service import persist_manual_void_event
+from src.application.option_positions_feishu_sync import main as run_option_positions_feishu_sync
 from src.application.position_workflows import execute_manual_adjust, execute_manual_close, execute_manual_open
 from src.application.option_positions_facade import (
     format_cash_secured_amount,
@@ -35,7 +29,7 @@ from src.application.option_positions_v2_service import reconcile_option_positio
 from src.application.verification_snapshot_io import load_verification_snapshot_payload
 
 
-def main():
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description='Manage position lots via trade events')
     ap.add_argument('--data-config', default=None, help='portfolio data config path; auto-resolves when omitted')
 
@@ -43,7 +37,6 @@ def main():
 
     p_list = sub.add_parser('list', help='list records')
     p_list.add_argument('--broker', default='富途')
-    p_list.add_argument('--market', default=None, help='DEPRECATED alias of --broker')
     p_list.add_argument('--account', default=None)
     p_list.add_argument('--status', default='open', choices=['open', 'close', 'all'])
     p_list.add_argument('--format', default='text', choices=['text', 'json'])
@@ -52,7 +45,6 @@ def main():
 
     p_add = sub.add_parser('add', help='add a record')
     p_add.add_argument('--broker', default='富途')
-    p_add.add_argument('--market', default=None, help='DEPRECATED alias of --broker')
     p_add.add_argument('--account', required=True)
     p_add.add_argument('--symbol', required=True)
     p_add.add_argument('--option-type', required=True, choices=['put', 'call'])
@@ -76,7 +68,6 @@ def main():
 
     p_events = sub.add_parser('events', help='list canonical trade events')
     p_events.add_argument('--broker', default=None)
-    p_events.add_argument('--market', default=None, help='DEPRECATED alias of --broker')
     p_events.add_argument('--account', default=None)
     p_events.add_argument('--format', default='text', choices=['text', 'json'])
     p_events.add_argument('--limit', type=int, default=50)
@@ -116,14 +107,57 @@ def main():
     p_adjust.add_argument('--opened-at-ms', type=int, default=None)
     p_adjust.add_argument('--dry-run', action='store_true')
 
-    args = ap.parse_args()
+    p_sync_feishu = sub.add_parser('sync-feishu', help='sync option positions to Feishu')
+    p_sync_feishu.add_argument("--config", dest="sync_config", default=None, help="runtime config path; when provided, portfolio.data_config and runtime sync switch are used")
+    p_sync_feishu.add_argument("--data-config", dest="sync_data_config", default=None, help="portfolio data config path; auto-resolves when omitted")
+    p_sync_feishu.add_argument("--apply", action="store_true", help="apply changes to Feishu and persist local sync metadata")
+    p_sync_feishu.add_argument("--dry-run", action="store_true", help="preview actions without writing to Feishu")
+    p_sync_feishu.add_argument("--limit", type=int, default=None, help="maximum number of local lots to inspect")
+    p_sync_feishu.add_argument("--only-record-id", default=None, help="sync a single local record_id")
+    p_sync_feishu.add_argument("--only-open", action="store_true", help="only sync open positions")
+    p_sync_feishu.add_argument("--since-updated-ms", type=int, default=None, help="only include rows last synced before this ms watermark")
+    p_sync_feishu.add_argument(
+        "--prune-remote-missing-local",
+        action="store_true",
+        help="delete remote rows whose local_record_id no longer exists locally; disabled by default",
+    )
+    p_sync_feishu.add_argument("--verbose", action="store_true", help="print payload details")
 
-    base = Path(__file__).resolve().parents[1]
+    args = ap.parse_args(argv)
+
+    base = Path(__file__).resolve().parents[3]
+    if args.cmd == 'sync-feishu':
+        sync_argv: list[str] = []
+        if args.sync_config:
+            sync_argv.extend(["--config", str(args.sync_config)])
+        if args.sync_data_config:
+            sync_argv.extend(["--data-config", str(args.sync_data_config)])
+        elif args.data_config:
+            sync_argv.extend(["--data-config", str(args.data_config)])
+        if args.apply:
+            sync_argv.append("--apply")
+        if args.dry_run:
+            sync_argv.append("--dry-run")
+        if args.limit is not None:
+            sync_argv.extend(["--limit", str(args.limit)])
+        if args.only_record_id:
+            sync_argv.extend(["--only-record-id", str(args.only_record_id)])
+        if args.only_open:
+            sync_argv.append("--only-open")
+        if args.since_updated_ms is not None:
+            sync_argv.extend(["--since-updated-ms", str(args.since_updated_ms)])
+        if args.prune_remote_missing_local:
+            sync_argv.append("--prune-remote-missing-local")
+        if args.verbose:
+            sync_argv.append("--verbose")
+        run_option_positions_feishu_sync(sync_argv)
+        return 0
+
     _data_config, repo = resolve_option_positions_repo(base=base, data_config=args.data_config)
     state_base = Path(str(_data_config)).resolve().parent
 
     if args.cmd == 'list':
-        broker = normalize_broker(args.market or args.broker)
+        broker = normalize_broker(args.broker)
         account = normalize_account(args.account) if args.account else None
         rows = list_position_rows(
             repo,
@@ -139,7 +173,7 @@ def main():
 
         if not rows:
             print('(no records)')
-            return
+            return 0
         print('# position_lots')
         for r in rows:
             ccy = str(r.get('currency') or 'USD').upper()
@@ -150,13 +184,10 @@ def main():
                 f"contracts {r.get('contracts')} open {r.get('contracts_open')} closed {r.get('contracts_closed')} | "
                 f"{ccy} cash_secured {cash_txt} | status {r.get('status')}"
             )
-        return
+        return 0
 
     if args.cmd == 'add':
         broker = normalize_broker(args.broker)
-        if args.market:
-            broker = normalize_broker(args.market)
-            print('[WARN] --market is deprecated; use --broker')
         try:
             out = execute_manual_open(
                 repo,
@@ -182,7 +213,7 @@ def main():
         if args.dry_run:
             print('[DRY_RUN] create fields:')
             print(json.dumps(fields, ensure_ascii=False, indent=2))
-            return
+            return 0
 
         res = out["result"]
         print(f"[DONE] created event_id={res.get('event_id')}")
@@ -190,7 +221,7 @@ def main():
             print(
                 f"cash_secured_amount={format_position_money(float(fields['cash_secured_amount']), fields.get('currency') or '')}"
             )
-        return
+        return 0
 
     if args.cmd == 'buy-close':
         try:
@@ -208,13 +239,13 @@ def main():
         if args.dry_run:
             print('[DRY_RUN] update fields:')
             print(json.dumps(patch, ensure_ascii=False, indent=2))
-            return
+            return 0
         res = out["result"]
         print(f"[DONE] buy-closed {args.record_id} contracts={int(args.contracts)} event_id={res.get('event_id')}")
-        return
+        return 0
 
     if args.cmd == 'events':
-        broker = normalize_broker(args.market or args.broker) if (args.market or args.broker) else None
+        broker = normalize_broker(args.broker) if args.broker else None
         account = normalize_account(args.account) if args.account else None
         events = repo.list_trade_events()
         rows: list[dict[str, object]] = []
@@ -248,10 +279,10 @@ def main():
                 break
         if args.format == 'json':
             print(json.dumps(rows, ensure_ascii=False, indent=2))
-            return
+            return 0
         if not rows:
             print('(no events)')
-            return
+            return 0
         print('# trade_events')
         for row in rows:
             print(
@@ -259,7 +290,7 @@ def main():
                 f"{row.get('side')} {row.get('option_type')} {row.get('position_effect')} | "
                 f"contracts {row.get('contracts')} | source {row.get('source_type')}:{row.get('source_name')}"
             )
-        return
+        return 0
 
     if args.cmd == 'history':
         try:
@@ -268,10 +299,10 @@ def main():
             raise SystemExit(str(e))
         if args.format == 'json':
             print(json.dumps(history, ensure_ascii=False, indent=2))
-            return
+            return 0
         if not history:
             print('(no related events)')
-            return
+            return 0
         print(f'# lot_history {args.record_id}')
         for row in history:
             extra = []
@@ -286,7 +317,7 @@ def main():
                 f"contracts {row.get('contracts')} | source {row.get('source_type')}:{row.get('source_name')}"
                 + (f" | {' '.join(extra)}" if extra else "")
             )
-        return
+        return 0
 
     if args.cmd == 'rebuild':
         state = refresh_option_positions_v2_state(base=state_base, repo=repo)
@@ -305,7 +336,7 @@ def main():
         }
         if args.format == 'json':
             print(json.dumps(result, ensure_ascii=False, indent=2))
-            return
+            return 0
         print(
             "[DONE] rebuilt option_positions_v2 projection "
             f"baseline_snapshot={result.get('baseline_snapshot_id')} "
@@ -315,7 +346,7 @@ def main():
             f"diagnostics={result.get('diagnostic_count')} "
             f"skipped_legacy_events={result.get('skipped_legacy_event_count')}"
         )
-        return
+        return 0
 
     if args.cmd == 'inspect':
         if not any(
@@ -335,7 +366,7 @@ def main():
             expiration_ymd=((args.exp or '').strip() or None),
         )
         print(json.dumps(payload, ensure_ascii=False, indent=2))
-        return
+        return 0
 
     if args.cmd == 'reconcile':
         try:
@@ -349,7 +380,7 @@ def main():
             raise SystemExit(str(e))
         if args.format == 'json':
             print(json.dumps(report, ensure_ascii=False, indent=2))
-            return
+            return 0
         summary = report.get('summary') or {}
         print(
             "[DONE] wrote verification snapshot and reconciliation report "
@@ -360,7 +391,7 @@ def main():
             f"missing_in_snapshot={int(summary.get('missing_in_snapshot', 0))} "
             f"field_mismatch={int(summary.get('field_mismatch', 0))}"
         )
-        return
+        return 0
 
     if args.cmd == 'void-event':
         try:
@@ -394,7 +425,7 @@ def main():
             f"position_lots={result.get('position_lot_count')}"
         )
         print("[WARN] Feishu mirror rows are not auto-deleted by void-event; rerun review/sync before trusting remote mirror.")
-        return
+        return 0
 
     if args.cmd == 'adjust-lot':
         try:
@@ -415,10 +446,12 @@ def main():
         if args.dry_run:
             print('[DRY_RUN] adjust fields:')
             print(json.dumps(patch, ensure_ascii=False, indent=2))
-            return
+            return 0
         res = out["result"]
         print(f"[DONE] adjusted {args.record_id} event_id={res.get('event_id')}")
-        return
+        return 0
+
+    raise SystemExit("unknown cmd")
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())
