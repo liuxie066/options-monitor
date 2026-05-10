@@ -12,7 +12,7 @@ def test_add_sell_put_labels_overwrites_on_empty() -> None:
     if str(base) not in sys.path:
         sys.path.insert(0, str(base))
 
-    from scripts.report_labels import add_sell_put_labels
+    from src.application.report_labels import add_sell_put_labels
 
     with TemporaryDirectory() as td:
         root = Path(td)

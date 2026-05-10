@@ -16,7 +16,7 @@ def test_sell_put_metrics_requires_multiplier() -> None:
         sys.path.insert(0, str(base))
 
     import pandas as pd
-    from scripts.scan_sell_put import compute_metrics
+    from src.application.scan_sell_put import compute_metrics
 
     row = pd.Series({
         'mid': 1.0,
@@ -35,7 +35,7 @@ def test_sell_call_metrics_requires_multiplier() -> None:
         sys.path.insert(0, str(base))
 
     import pandas as pd
-    from scripts.scan_sell_call import compute_metrics
+    from src.application.scan_sell_call import compute_metrics
 
     row = pd.Series({
         'mid': 1.0,

@@ -39,8 +39,8 @@ def test_render_alerts_domain_and_cli() -> None:
     if str(BASE) not in sys.path:
         sys.path.insert(0, str(BASE))
 
-    from scripts.render_sell_put_alerts import render_sell_put_alerts
-    from scripts.render_sell_call_alerts import render_sell_call_alerts
+    from src.application.render_sell_put_alerts import render_sell_put_alerts
+    from src.application.render_sell_call_alerts import render_sell_call_alerts
 
     root = TEST_ROOT / 'render'
     _clean_dir(root)
@@ -106,7 +106,8 @@ def test_render_alerts_domain_and_cli() -> None:
     p = subprocess.run(
         [
             str(VPY),
-            'scripts/render_sell_put_alerts.py',
+            '-m',
+            'src.application.render_sell_put_alerts',
             '--input',
             str(put_in),
             '--output',
@@ -207,14 +208,14 @@ def test_query_sell_put_cash_domain_minimal() -> None:
         m.build_option_positions_context = old_build_context
 
 
-def test_new_cli_files_exist_and_help_ok() -> None:
-    cli_files = [
-        'scripts/render_sell_put_alerts.py',
-        'scripts/render_sell_call_alerts.py',
+def test_new_cli_modules_help_ok() -> None:
+    cli_modules = [
+        'src.application.render_sell_put_alerts',
+        'src.application.render_sell_call_alerts',
     ]
-    for rel in cli_files:
+    for module in cli_modules:
         p = subprocess.run(
-            [str(VPY), rel, '--help'],
+            [str(VPY), '-m', module, '--help'],
             cwd=str(BASE),
             capture_output=True,
             text=True,

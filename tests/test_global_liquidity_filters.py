@@ -381,7 +381,7 @@ def test_validate_config_allows_single_near_bound_modes() -> None:
 
 def test_sell_put_steps_use_global_liquidity_filters_only() -> None:
     base = _add_repo_to_syspath()
-    import scripts.sell_put_steps as steps
+    import src.application.sell_put_steps as steps
     import pandas as pd
     from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
@@ -445,7 +445,7 @@ def test_sell_put_steps_use_global_liquidity_filters_only() -> None:
 
 def test_sell_put_steps_filter_uses_total_cny_when_base_cny_missing(tmp_path: Path) -> None:
     base = _add_repo_to_syspath()
-    import scripts.sell_put_steps as steps
+    import src.application.sell_put_steps as steps
     from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
     report_dir = tmp_path / "reports"
@@ -522,7 +522,7 @@ def test_sell_put_steps_filter_uses_total_cny_when_base_cny_missing(tmp_path: Pa
 
 def test_sell_put_steps_filter_prefers_base_cny_over_total_cny(tmp_path: Path) -> None:
     base = _add_repo_to_syspath()
-    import scripts.sell_put_steps as steps
+    import src.application.sell_put_steps as steps
     from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
     report_dir = tmp_path / "reports"
@@ -599,7 +599,7 @@ def test_sell_put_steps_filter_prefers_base_cny_over_total_cny(tmp_path: Path) -
 
 def test_sell_call_steps_use_global_liquidity_filters_only() -> None:
     base = _add_repo_to_syspath()
-    import scripts.sell_call_steps as steps
+    import src.application.sell_call_steps as steps
     import pandas as pd
     from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
@@ -657,7 +657,7 @@ def test_sell_call_steps_use_global_liquidity_filters_only() -> None:
 
 def test_sell_put_steps_fallback_to_global_min_net_income() -> None:
     base = _add_repo_to_syspath()
-    import scripts.sell_put_steps as steps
+    import src.application.sell_put_steps as steps
     import pandas as pd
     from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
@@ -708,7 +708,7 @@ def test_sell_put_steps_fallback_to_global_min_net_income() -> None:
 
 def test_sell_call_steps_fallback_to_global_min_net_income() -> None:
     base = _add_repo_to_syspath()
-    import scripts.sell_call_steps as steps
+    import src.application.sell_call_steps as steps
     import pandas as pd
     from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
@@ -753,7 +753,7 @@ def test_sell_put_reject_stage_is_strategy_gate() -> None:
     from tempfile import TemporaryDirectory
 
     import pandas as pd
-    from scripts.scan_sell_put import run_sell_put_scan
+    from src.application.scan_sell_put import run_sell_put_scan
 
     with TemporaryDirectory() as td:
         root = Path(td)

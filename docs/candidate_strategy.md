@@ -57,11 +57,11 @@
 - 报表与 alerts 输出
 
 主要路径：
-- `scripts/scan_sell_put.py`
-- `scripts/scan_sell_call.py`
-- `scripts/sell_put_steps.py`
-- `scripts/sell_call_steps.py`
-- `scripts/event_risk_filter.py`
+- `src/application/scan_sell_put.py`
+- `src/application/scan_sell_call.py`
+- `src/application/sell_put_steps.py`
+- `src/application/sell_call_steps.py`
+- `src/application/event_risk_filter.py`
 
 ---
 
@@ -167,7 +167,7 @@
 更准确地说：
 
 - 候选先扫描出来
-- 再由 `scripts/event_risk_filter.py` 做标注 / 风险附加信息处理
+- 再由 `src/application/event_risk_filter.py` 做标注 / 风险附加信息处理
 
 也就是说：
 
@@ -184,7 +184,7 @@
 更准确地说：
 
 - 先跑 Sell Put 基础扫描
-- 再在 `scripts/sell_put_steps.py` 里结合账户现金 context 做补充过滤
+- 再在 `src/application/sell_put_steps.py` 里结合账户现金 context 做补充过滤
 
 关键逻辑：
 
@@ -241,19 +241,19 @@ Covered Call 会结合持仓 context 计算：
 - `domain/domain/engine/candidate_engine.py`
 
 ### Put 路径
-- `scripts/scan_sell_put.py`
-- `scripts/sell_put_steps.py`
-- `scripts/sell_put_cash.py`
+- `src/application/scan_sell_put.py`
+- `src/application/sell_put_steps.py`
+- `src/application/sell_put_cash.py`
 - `domain/domain/sell_put_config.py`
 
 ### Call 路径
-- `scripts/scan_sell_call.py`
-- `scripts/sell_call_steps.py`
+- `src/application/scan_sell_call.py`
+- `src/application/sell_call_steps.py`
 - `domain/domain/sell_call_config.py`
 
 ### 风险 / 报表 / 汇总
-- `scripts/event_risk_filter.py`
-- `scripts/report_summaries.py`
+- `src/application/event_risk_filter.py`
+- `src/application/report_summaries.py`
 - `scripts/alert_engine.py`
 
 ---

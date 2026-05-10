@@ -28,7 +28,7 @@ def _extract_title_strikes(text: str) -> list[float]:
 
 def test_scan_sell_call_filter_and_rank_baseline() -> None:
     _add_repo_to_syspath()
-    from scripts.scan_sell_call import run_sell_call_scan
+    from src.application.scan_sell_call import run_sell_call_scan
 
     with TemporaryDirectory() as td:
         root = Path(td)
@@ -163,7 +163,7 @@ def test_scan_sell_call_filter_and_rank_baseline() -> None:
 
 def test_sell_call_risk_bands_are_stable() -> None:
     _add_repo_to_syspath()
-    from scripts.sell_call_risk_bands import classify_sell_call_risk
+    from domain.domain.sell_call_risk_bands import classify_sell_call_risk
 
     aggressive = classify_sell_call_risk(0.02)
     neutral = classify_sell_call_risk(0.05)
@@ -177,7 +177,7 @@ def test_sell_call_risk_bands_are_stable() -> None:
 def test_render_sell_call_rank_order_consistent_with_strategy() -> None:
     _add_repo_to_syspath()
     from domain.domain.engine import build_strategy_config, rank_scored_candidates
-    from scripts.render_sell_call_alerts import render_sell_call_alerts
+    from src.application.render_sell_call_alerts import render_sell_call_alerts
 
     with TemporaryDirectory() as td:
         root = Path(td)

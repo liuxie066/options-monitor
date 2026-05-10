@@ -20,7 +20,7 @@ from domain.domain.candidate_defaults import (
     resolve_candidate_window,
 )
 from domain.domain.fee_calc import calc_futu_option_fee
-from scripts.sell_put_risk_bands import classify_sell_put_risk
+from domain.domain.sell_put_risk_bands import classify_sell_put_risk
 from src.application.candidate_models import CandidateContractInput
 
 

@@ -12,7 +12,7 @@ from pathlib import Path
 import pandas as pd
 from pandas.errors import EmptyDataError
 
-from scripts.sell_put_risk_bands import classify_sell_put_risk
+from domain.domain.sell_put_risk_bands import classify_sell_put_risk
 
 
 def _safe_read_csv(path: Path) -> pd.DataFrame:

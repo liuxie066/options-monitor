@@ -78,6 +78,53 @@ def test_pipeline_watchlist_imports_config_loader_helpers_from_owner_module() ->
     assert pipeline_watchlist_mod.resolve_watchlist_config is owner_mod.resolve_watchlist_config
 
 
+def test_pipeline_symbol_stack_imports_owner_modules() -> None:
+    for old_module in (
+        "scripts.pipeline_symbol",
+        "scripts.exchange_rate_loader",
+        "scripts.prefilters",
+        "scripts.multiplier_steps",
+        "scripts.required_data_steps",
+        "scripts.sell_call_steps",
+        "scripts.sell_put_steps",
+        "scripts.pipeline_fetch_models",
+        "scripts.pipeline_steps",
+        "scripts.sell_put_cash",
+        "scripts.scan_sell_put",
+        "scripts.scan_sell_call",
+        "scripts.render_sell_put_alerts",
+        "scripts.render_sell_call_alerts",
+        "scripts.render_yield_enhancement_alerts",
+        "scripts.report_labels",
+        "scripts.report_summaries",
+        "scripts.sell_put_call_helper",
+        "scripts.event_risk_filter",
+        "scripts.sell_call_risk_bands",
+        "scripts.sell_put_risk_bands",
+    ):
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module(old_module)
+
+    pipeline_symbol_mod = importlib.import_module("src.application.pipeline_symbol")
+    required_steps_mod = importlib.import_module("src.application.required_data_steps")
+    prefilters_mod = importlib.import_module("src.application.prefilters")
+    sell_put_steps_mod = importlib.import_module("src.application.sell_put_steps")
+    sell_call_steps_mod = importlib.import_module("src.application.sell_call_steps")
+    sell_put_mod = importlib.import_module("src.application.scan_sell_put")
+    sell_call_mod = importlib.import_module("src.application.scan_sell_call")
+    event_risk_mod = importlib.import_module("src.application.event_risk_filter")
+    put_risk_mod = importlib.import_module("domain.domain.sell_put_risk_bands")
+    call_risk_mod = importlib.import_module("domain.domain.sell_call_risk_bands")
+
+    assert pipeline_symbol_mod.ensure_required_data is required_steps_mod.ensure_required_data
+    assert pipeline_symbol_mod.apply_prefilters is prefilters_mod.apply_prefilters
+    assert sell_put_steps_mod.run_sell_put_scan is sell_put_mod.run_sell_put_scan
+    assert sell_call_steps_mod.run_sell_call_scan is sell_call_mod.run_sell_call_scan
+    assert sell_put_mod.annotate_candidates_with_event_risk is event_risk_mod.annotate_candidates_with_event_risk
+    assert sell_call_mod.classify_sell_call_risk is call_risk_mod.classify_sell_call_risk
+    assert importlib.import_module("src.application.report_labels").classify_sell_put_risk is put_risk_mod.classify_sell_put_risk
+
+
 def test_required_data_uses_application_opend_symbol_fetching_owner() -> None:
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module("scripts.fetch_market_data_opend")
@@ -161,7 +208,7 @@ def test_exchange_rates_imports_infrastructure_owner_module() -> None:
     facade_mod = importlib.import_module("src.application.option_positions_facade")
     reporting_mod = importlib.import_module("src.application.option_positions_reporting")
     agent_tools_mod = importlib.import_module("src.application.agent_tool_handlers")
-    cash_mod = importlib.import_module("scripts.sell_put_cash")
+    cash_mod = importlib.import_module("src.application.sell_put_cash")
     notify_mod = importlib.import_module("scripts.notify_symbols")
 
     assert facade_mod.get_exchange_rates_or_fetch_latest is infra_mod.get_exchange_rates_or_fetch_latest
@@ -348,8 +395,8 @@ def test_fee_calc_imports_domain_owner_module() -> None:
 
     owner_mod = importlib.import_module("domain.domain.fee_calc")
     close_advice_mod = importlib.import_module("src.application.close_advice_runner")
-    sell_put_mod = importlib.import_module("scripts.scan_sell_put")
-    sell_call_mod = importlib.import_module("scripts.scan_sell_call")
+    sell_put_mod = importlib.import_module("src.application.scan_sell_put")
+    sell_call_mod = importlib.import_module("src.application.scan_sell_call")
 
     assert close_advice_mod.calc_futu_option_fee is owner_mod.calc_futu_option_fee
     assert sell_put_mod.calc_futu_option_fee is owner_mod.calc_futu_option_fee
@@ -374,7 +421,7 @@ def test_opend_support_imports_owner_modules() -> None:
     candidate_defaults_mod = importlib.import_module("domain.domain.candidate_defaults")
     fetching_mod = importlib.import_module("src.application.opend_symbol_fetching")
     planning_mod = importlib.import_module("src.application.required_data_planning")
-    sell_put_mod = importlib.import_module("scripts.sell_put_steps")
+    sell_put_mod = importlib.import_module("src.application.sell_put_steps")
 
     assert fetching_mod.build_ready_futu_gateway is gateway_mod.build_ready_futu_gateway
     assert fetching_mod.normalize_underlier is opend_utils_mod.normalize_underlier
@@ -439,7 +486,7 @@ def test_cash_secured_utils_imports_domain_owner_module() -> None:
 
     owner_mod = importlib.import_module("domain.domain.cash_secured_utils")
     query_mod = importlib.import_module("src.application.cash_headroom_query")
-    sell_put_cash_mod = importlib.import_module("scripts.sell_put_cash")
+    sell_put_cash_mod = importlib.import_module("src.application.sell_put_cash")
 
     assert query_mod.normalize_cash_secured_by_symbol_by_ccy is owner_mod.normalize_cash_secured_by_symbol_by_ccy
     assert sell_put_cash_mod.cash_secured_symbol_cny is owner_mod.cash_secured_symbol_cny

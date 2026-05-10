@@ -90,8 +90,8 @@ def test_alert_engine_domain_and_cli() -> None:
 def test_step4_domain_files_no_argparse_or_main() -> None:
     targets = [
         BASE / 'src' / 'application' / 'scan_scheduler.py',
-        BASE / 'scripts' / 'render_sell_put_alerts.py',
-        BASE / 'scripts' / 'render_sell_call_alerts.py',
+        BASE / 'src' / 'application' / 'render_sell_put_alerts.py',
+        BASE / 'src' / 'application' / 'render_sell_call_alerts.py',
         BASE / 'src' / 'application' / 'cash_headroom_query.py',
     ]
     for path in targets:
@@ -161,7 +161,7 @@ def test_render_sell_put_domain_and_cli() -> None:
     if str(BASE) not in sys.path:
         sys.path.insert(0, str(BASE))
 
-    from scripts.render_sell_put_alerts import render_sell_put_alerts
+    from src.application.render_sell_put_alerts import render_sell_put_alerts
 
     with TemporaryDirectory() as td:
         root = Path(td)
@@ -195,7 +195,8 @@ def test_render_sell_put_domain_and_cli() -> None:
         subprocess.run(
             [
                 str(BASE / '.venv' / 'bin' / 'python'),
-                'scripts/render_sell_put_alerts.py',
+                '-m',
+                'src.application.render_sell_put_alerts',
                 '--input',
                 str(csv_path),
                 '--output',
@@ -216,7 +217,7 @@ def test_render_sell_call_domain_and_cli() -> None:
     if str(BASE) not in sys.path:
         sys.path.insert(0, str(BASE))
 
-    from scripts.render_sell_call_alerts import render_sell_call_alerts
+    from src.application.render_sell_call_alerts import render_sell_call_alerts
 
     with TemporaryDirectory() as td:
         root = Path(td)
@@ -257,7 +258,8 @@ def test_render_sell_call_domain_and_cli() -> None:
         subprocess.run(
             [
                 str(BASE / '.venv' / 'bin' / 'python'),
-                'scripts/render_sell_call_alerts.py',
+                '-m',
+                'src.application.render_sell_call_alerts',
                 '--input',
                 str(csv_path),
                 '--output',

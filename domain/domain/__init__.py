@@ -90,6 +90,8 @@ _MODULE_EXPORTS = {
     'trade_contract_identity',
     'error_policy',
     'fee_calc',
+    'sell_call_risk_bands',
+    'sell_put_risk_bands',
     'sell_call_config',
     'sell_put_config',
     'config_contract',

@@ -19,8 +19,8 @@ def _make_dirs(root: Path) -> tuple[Path, Path]:
 
 
 def test_ensure_required_data_uses_read_model_error_to_force_refetch() -> None:
-    from scripts import pipeline_fetch_models as models
-    import scripts.required_data_steps as mod
+    from src.application import pipeline_fetch_models as models
+    import src.application.required_data_steps as mod
 
     root = (BASE / "tests" / ".tmp_pipeline_fetch_read_model_error").resolve()
     if root.exists():
@@ -67,8 +67,8 @@ def test_ensure_required_data_uses_read_model_error_to_force_refetch() -> None:
 
 
 def test_ensure_required_data_skips_when_read_model_is_ok_and_dte_satisfies() -> None:
-    from scripts import pipeline_fetch_models as models
-    import scripts.required_data_steps as mod
+    from src.application import pipeline_fetch_models as models
+    import src.application.required_data_steps as mod
 
     root = (BASE / "tests" / ".tmp_pipeline_fetch_read_model_ok").resolve()
     if root.exists():
@@ -112,7 +112,7 @@ def test_ensure_required_data_skips_when_read_model_is_ok_and_dte_satisfies() ->
 
 
 def test_ensure_required_data_treats_futu_source_as_opend_path() -> None:
-    import scripts.required_data_steps as mod
+    import src.application.required_data_steps as mod
 
     root = (BASE / "tests" / ".tmp_pipeline_fetch_futu_source").resolve()
     if root.exists():
@@ -150,7 +150,7 @@ def test_ensure_required_data_treats_futu_source_as_opend_path() -> None:
 
 def test_ensure_required_data_does_not_read_raw_fetch_file_on_main_path() -> None:
     import pathlib
-    import scripts.required_data_steps as mod
+    import src.application.required_data_steps as mod
 
     root = (BASE / "tests" / ".tmp_pipeline_fetch_read_model_no_raw").resolve()
     if root.exists():
@@ -317,7 +317,7 @@ def test_build_fetch_request_from_spec_applies_opend_fetch_config() -> None:
 
 
 def test_ensure_required_data_passes_opend_fetch_config_into_fetch_plan_requests() -> None:
-    import scripts.required_data_steps as mod
+    import src.application.required_data_steps as mod
     from src.application.required_data_planning import (
         OptionSideFetchPlan,
         RequiredDataFetchPlanBundle,
@@ -417,7 +417,7 @@ def test_ensure_required_data_passes_opend_fetch_config_into_fetch_plan_requests
 
 
 def test_ensure_required_data_refetches_when_existing_bounds_do_not_cover_plan() -> None:
-    import scripts.required_data_steps as mod
+    import src.application.required_data_steps as mod
     from src.application.required_data_planning import (
         OptionSideFetchPlan,
         RequiredDataFetchPlanBundle,
@@ -506,7 +506,7 @@ def test_ensure_required_data_refetches_when_existing_bounds_do_not_cover_plan()
 
 
 def test_ensure_required_data_fetches_yield_enhancement_call_side_when_local_cache_has_only_puts() -> None:
-    import scripts.required_data_steps as mod
+    import src.application.required_data_steps as mod
     from src.application.required_data_planning import (
         OptionSideFetchPlan,
         RequiredDataFetchPlanBundle,
@@ -620,7 +620,7 @@ def test_ensure_required_data_fetches_yield_enhancement_call_side_when_local_cac
 
 
 def test_ensure_required_data_refetches_when_bounds_are_split_across_expirations() -> None:
-    import scripts.required_data_steps as mod
+    import src.application.required_data_steps as mod
     from src.application.required_data_planning import (
         OptionSideFetchPlan,
         RequiredDataFetchPlanBundle,

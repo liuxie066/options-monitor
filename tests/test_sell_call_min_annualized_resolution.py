@@ -95,7 +95,8 @@ def test_scan_sell_call_requires_min_annualized_arg() -> None:
     p = subprocess.run(
         [
             str(VPY),
-            'scripts/scan_sell_call.py',
+            '-m',
+            'src.application.scan_sell_call',
             '--symbols',
             'AAPL',
             '--avg-cost',
@@ -121,7 +122,8 @@ def test_scan_sell_call_rejects_out_of_range_arg() -> None:
     p = subprocess.run(
         [
             str(VPY),
-            'scripts/scan_sell_call.py',
+            '-m',
+            'src.application.scan_sell_call',
             '--symbols',
             'AAPL',
             '--avg-cost',
@@ -148,7 +150,7 @@ def test_scan_sell_call_rejects_out_of_range_arg() -> None:
 def test_sell_call_steps_passes_resolved_threshold_to_scanner() -> None:
     _add_repo_to_syspath()
 
-    import scripts.sell_call_steps as steps
+    import src.application.sell_call_steps as steps
     import pandas as pd
     from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
@@ -190,7 +192,7 @@ def test_sell_call_steps_passes_resolved_threshold_to_scanner() -> None:
 def test_sell_call_steps_converts_min_net_income_from_cny_to_native() -> None:
     _add_repo_to_syspath()
 
-    import scripts.sell_call_steps as steps
+    import src.application.sell_call_steps as steps
     import pandas as pd
     from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
@@ -231,7 +233,7 @@ def test_sell_call_steps_converts_min_net_income_from_cny_to_native() -> None:
 def test_sell_call_steps_converts_hk_min_net_income_from_cny_to_hkd() -> None:
     _add_repo_to_syspath()
 
-    import scripts.sell_call_steps as steps
+    import src.application.sell_call_steps as steps
     import pandas as pd
     from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
