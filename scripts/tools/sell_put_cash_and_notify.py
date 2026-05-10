@@ -24,7 +24,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from src.infrastructure.io_utils import money_cny
 from src.application.config_loader import resolve_data_config_path
-from scripts.query_sell_put_cash import query_sell_put_cash
+from src.application.cash_headroom_query import query_sell_put_cash
 
 
 def _money_cny(v: float | None) -> str:

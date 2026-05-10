@@ -36,7 +36,7 @@ def test_resolve_trade_intake_futu_account_ids_uses_runtime_mapping() -> None:
 
 
 def test_infer_futu_portfolio_settings_prefers_account_settings() -> None:
-    from scripts.futu_portfolio_context import infer_futu_portfolio_settings
+    from src.application.futu_portfolio_context import infer_futu_portfolio_settings
 
     cfg = {
         "portfolio": {"futu": {"host": "global-host", "port": 11111}},
@@ -64,7 +64,7 @@ def test_infer_futu_portfolio_settings_prefers_account_settings() -> None:
 
 
 def test_infer_futu_portfolio_settings_falls_back_to_symbol_fetch_config() -> None:
-    from scripts.futu_portfolio_context import infer_futu_portfolio_settings
+    from src.application.futu_portfolio_context import infer_futu_portfolio_settings
 
     cfg = {
         "portfolio": {"source": "auto"},
@@ -91,7 +91,7 @@ def test_infer_futu_portfolio_settings_falls_back_to_symbol_fetch_config() -> No
 
 
 def test_build_futu_portfolio_context_merges_cash_and_fund_assets_and_normalizes_symbols() -> None:
-    from scripts.futu_portfolio_context import build_futu_portfolio_context
+    from src.application.futu_portfolio_context import build_futu_portfolio_context
 
     out = build_futu_portfolio_context(
         balance_rows=[
@@ -119,7 +119,7 @@ def test_build_futu_portfolio_context_merges_cash_and_fund_assets_and_normalizes
 
 
 def test_build_futu_portfolio_context_canonicalizes_alias_and_hk_prefixed_codes() -> None:
-    from scripts.futu_portfolio_context import build_futu_portfolio_context
+    from src.application.futu_portfolio_context import build_futu_portfolio_context
 
     out = build_futu_portfolio_context(
         balance_rows=[],
@@ -138,7 +138,7 @@ def test_build_futu_portfolio_context_canonicalizes_alias_and_hk_prefixed_codes(
 
 
 def test_fetch_futu_portfolio_context_filters_rows_by_mapped_account_ids() -> None:
-    import scripts.futu_portfolio_context as fc
+    import src.application.futu_portfolio_context as fc
 
     class _FakeGateway:
         balance_calls: list[int] = []
@@ -207,7 +207,7 @@ def test_fetch_futu_portfolio_context_filters_rows_by_mapped_account_ids() -> No
 def test_fetch_futu_portfolio_context_rejects_non_numeric_mapped_account_id() -> None:
     import pytest
 
-    import scripts.futu_portfolio_context as fc
+    import src.application.futu_portfolio_context as fc
 
     class _FakeGateway:
         def get_account_balance(self, **kwargs):

@@ -9,7 +9,7 @@ if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
 from domain.domain.expiration_dates import expiration_business_today
-from scripts.fetch_option_positions_context import build_context, build_shared_context
+from src.application.option_positions_context_builder import build_context, build_shared_context
 from src.application.option_positions_facade import load_option_position_records, list_position_rows
 
 

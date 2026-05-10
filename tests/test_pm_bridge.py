@@ -29,7 +29,7 @@ def test_resolve_spot_fallback_enabled_always_false() -> None:
 
 
 def test_fetch_symbol_keeps_us_spot_missing_without_fallback(monkeypatch) -> None:
-    import scripts.fetch_market_data_opend as mod
+    import src.application.opend_symbol_fetching as mod
 
     class _Gateway:
         @staticmethod

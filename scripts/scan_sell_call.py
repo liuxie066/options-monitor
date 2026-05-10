@@ -66,7 +66,7 @@ SELL_CALL_EMPTY_OUTPUT_COLUMNS = [
     "reject_stage_candidate",
 ]
 
-from scripts.fee_calc import calc_futu_option_fee
+from domain.domain.fee_calc import calc_futu_option_fee
 from src.application.candidate_models import CandidateBaseValues, CandidateContractInput
 
 

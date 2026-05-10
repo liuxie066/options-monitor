@@ -7,7 +7,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from src.infrastructure.io_utils import money_cny
-from scripts.query_sell_put_cash import query_sell_put_cash
+from src.application.cash_headroom_query import query_sell_put_cash
 
 
 def snapshot_fresh(payload: dict, max_age_sec: int) -> bool:

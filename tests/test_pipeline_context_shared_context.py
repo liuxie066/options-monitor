@@ -102,7 +102,7 @@ def test_build_pipeline_context_resolves_portfolio_source_by_account() -> None:
 
 def test_shared_context_reuses_fetch_calls_across_accounts() -> None:
     import scripts.pipeline_context as pc
-    import scripts.portfolio_context_service as pcs
+    import src.application.portfolio_context_service as pcs
 
     shared_portfolio = {
         "as_of_utc": "2026-04-14T00:00:00+00:00",
@@ -222,12 +222,12 @@ def test_shared_context_reuses_fetch_calls_across_accounts() -> None:
 
 
 def test_shared_slice_matches_legacy_key_fields() -> None:
-    from scripts.fetch_option_positions_context import (
+    from src.application.option_positions_context_builder import (
         build_context as build_option_context,
         build_shared_context as build_option_shared_context,
         slice_shared_context_for_account as slice_option_shared_context,
     )
-    from scripts.fetch_portfolio_context import (
+    from src.application.portfolio_context_builder import (
         build_context as build_portfolio_context,
         build_shared_context as build_portfolio_shared_context,
         slice_shared_context_for_account as slice_portfolio_shared_context,
@@ -269,18 +269,18 @@ def test_shared_slice_matches_legacy_key_fields() -> None:
         },
     ]
 
-    legacy_portfolio = build_portfolio_context(holdings_records, market="富途", account="lx")
-    shared_portfolio = build_portfolio_shared_context(holdings_records, market="富途")
+    single_portfolio = build_portfolio_context(holdings_records, broker="富途", account="lx")
+    shared_portfolio = build_portfolio_shared_context(holdings_records, broker="富途")
     sliced_portfolio = slice_portfolio_shared_context(shared_portfolio, "lx")
     assert sliced_portfolio is not None
-    assert sliced_portfolio["filters"] == legacy_portfolio["filters"]
-    assert sliced_portfolio["cash_by_currency"] == legacy_portfolio["cash_by_currency"]
+    assert sliced_portfolio["filters"] == single_portfolio["filters"]
+    assert sliced_portfolio["cash_by_currency"] == single_portfolio["cash_by_currency"]
     assert {
         k: {kk: vv for kk, vv in v.items() if kk != "market"}
         for k, v in sliced_portfolio["stocks_by_symbol"].items()
     } == {
         k: {kk: vv for kk, vv in v.items() if kk != "market"}
-        for k, v in legacy_portfolio["stocks_by_symbol"].items()
+        for k, v in single_portfolio["stocks_by_symbol"].items()
     }
 
     rates = {"rates": {"USDCNY": 7.2}}
@@ -295,7 +295,7 @@ def test_shared_slice_matches_legacy_key_fields() -> None:
 
 
 def test_load_holdings_records_falls_back_to_list_only_on_permanent_search_error(tmp_path: Path) -> None:
-    import scripts.fetch_portfolio_context as fpc
+    import src.application.portfolio_context_builder as fpc
 
     cfg = tmp_path / "data.json"
     cfg.write_text(
@@ -330,7 +330,7 @@ def test_load_holdings_records_falls_back_to_list_only_on_permanent_search_error
 
 
 def test_load_holdings_records_does_not_fallback_on_permission_error(tmp_path: Path) -> None:
-    import scripts.fetch_portfolio_context as fpc
+    import src.application.portfolio_context_builder as fpc
 
     cfg = tmp_path / "data.json"
     cfg.write_text(
@@ -461,7 +461,7 @@ def test_load_portfolio_context_auto_skips_fresh_holdings_cache_and_uses_futu() 
 
 def test_load_portfolio_context_auto_falls_back_to_holdings_when_futu_unavailable() -> None:
     import scripts.pipeline_context as pc
-    import scripts.portfolio_context_service as pcs
+    import src.application.portfolio_context_service as pcs
 
     old_fetch = pc.fetch_futu_portfolio_context
     old_load_holdings_portfolio_shared_context = pcs.load_holdings_portfolio_shared_context
@@ -625,7 +625,7 @@ def test_load_portfolio_context_rejects_stale_account_cache_with_wrong_filters_a
 
 def test_load_portfolio_context_rejects_stale_account_cache_with_wrong_stock_account() -> None:
     import scripts.pipeline_context as pc
-    import scripts.portfolio_context_service as pcs
+    import src.application.portfolio_context_service as pcs
 
     old_is_fresh = pc.is_fresh
     old_load_cached_json = pc.load_cached_json

@@ -11,7 +11,7 @@ FAKE_FUTU_ACC_ID_LX = "123456789012345678"
 
 
 def test_query_sell_put_cash_uses_futu_portfolio_context_when_runtime_config_allows_it() -> None:
-    import scripts.query_sell_put_cash as m
+    import src.application.cash_headroom_query as m
 
     def fake_fetch_futu_portfolio_context(**_kwargs):  # type: ignore[no-untyped-def]
         return {
@@ -63,7 +63,7 @@ def test_query_sell_put_cash_uses_futu_portfolio_context_when_runtime_config_all
 
 
 def test_query_sell_put_cash_uses_account_scoped_portfolio_source_override() -> None:
-    import scripts.query_sell_put_cash as m
+    import src.application.cash_headroom_query as m
 
     def fake_fetch_futu_portfolio_context(**_kwargs):  # type: ignore[no-untyped-def]
         raise AssertionError("futu portfolio context should not run for holdings override")
@@ -121,7 +121,7 @@ def test_query_sell_put_cash_uses_account_scoped_portfolio_source_override() -> 
 
 
 def test_query_sell_put_cash_uses_holdings_account_mapping_for_external_account() -> None:
-    import scripts.query_sell_put_cash as m
+    import src.application.cash_headroom_query as m
 
     def fake_load_account_portfolio_context(**kwargs):  # type: ignore[no-untyped-def]
         assert kwargs.get("account") == "ext1"

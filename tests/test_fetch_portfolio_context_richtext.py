@@ -7,7 +7,7 @@ BASE = Path(__file__).resolve().parents[1]
 if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
-from scripts.fetch_portfolio_context import build_context
+from src.application.portfolio_context_builder import build_context
 
 
 def test_build_context_requires_broker_field_and_normalizes_hk_symbol() -> None:
@@ -52,7 +52,7 @@ def test_build_context_requires_broker_field_and_normalizes_hk_symbol() -> None:
         },
     ]
 
-    ctx = build_context(records, market="富途", account="lx")
+    ctx = build_context(records, broker="富途", account="lx")
 
     assert ctx["raw_selected_count"] == 3
     assert ctx["cash_by_currency"]["CNY"] == 406.24

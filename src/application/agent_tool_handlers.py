@@ -8,18 +8,18 @@ from copy import deepcopy
 from src.application.account_config import accounts_from_config, list_account_config_views, normalize_accounts
 from src.application.agent_tool_config import load_runtime_config, repo_base, resolve_output_root, write_tools_enabled
 from src.application.agent_tool_contracts import AgentToolError, mask_path
-from scripts.close_advice import run_close_advice
+from src.application.close_advice_runner import run_close_advice
 from src.application.config_loader import load_config as load_runtime_pipeline_config, resolve_watchlist_config
 from src.application.config_validator import validate_config
 from domain.domain.fetch_source import resolve_symbol_fetch_source
-from scripts.futu_portfolio_context import infer_futu_portfolio_settings
+from src.application.futu_portfolio_context import infer_futu_portfolio_settings
 from scripts.notify_symbols import build_notification
 from scripts.option_positions import build_lot_event_history, inspect_projection_state
 from domain.domain.option_position_lots import normalize_account as _normalize_account
 from src.application.option_positions_service import load_option_positions_repo
 from src.application.option_positions_reporting import build_monthly_income_report
 from scripts.pipeline_context import load_option_positions_context, load_portfolio_context
-from scripts.query_sell_put_cash import query_sell_put_cash
+from src.application.cash_headroom_query import query_sell_put_cash
 from src.application.scan_scheduler import decide as scheduler_decide, read_state as read_scheduler_state
 from src.infrastructure.exchange_rates import get_cached_exchange_rates as _get_cached_exchange_rates_impl
 from src.infrastructure.io_utils import safe_read_csv
@@ -75,13 +75,13 @@ from src.application.version_check import check_version_update, update_local_ver
 
 
 def fetch_symbol_opend(*args: Any, **kwargs: Any) -> Any:
-    from scripts.fetch_market_data_opend import fetch_symbol as _fetch_symbol_opend
+    from src.application.opend_symbol_fetching import fetch_symbol as _fetch_symbol_opend
 
     return _fetch_symbol_opend(*args, **kwargs)
 
 
 def save_required_data_opend(*args: Any, **kwargs: Any) -> Any:
-    from scripts.fetch_market_data_opend import save_outputs as _save_required_data_opend
+    from src.application.opend_symbol_fetching import save_outputs as _save_required_data_opend
 
     return _save_required_data_opend(*args, **kwargs)
 

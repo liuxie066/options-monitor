@@ -74,7 +74,7 @@ Use the launcher as a local command tool. Typical pattern:
 ```
 
 Sell Put 现金余量的标准 Agent 工具是 `query_cash_headroom`。它包装
-`scripts/query_sell_put_cash.py` 里的 `query_sell_put_cash(...)`，用于返回账户现金、
+`src.application.cash_headroom_query` 里的 `query_sell_put_cash(...)`，用于返回账户现金、
 Sell Put 担保占用和剩余可用现金，并支持按账户和币种折算到 CNY。
 
 如果 payload 很长，优先用：

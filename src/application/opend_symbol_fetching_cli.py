@@ -6,171 +6,18 @@ from __future__ import annotations
 import argparse
 from datetime import datetime
 from pathlib import Path
-import sys
 import time
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
-from src.application import opend_symbol_fetching as _fetching
-
-FetchSymbolRequest = _fetching.FetchSymbolRequest
-COLUMNS = _fetching.COLUMNS
-_append_metrics_json = _fetching._append_metrics_json
-_chain_cache_covers_explicit_expirations = _fetching._chain_cache_covers_explicit_expirations
-_chain_cache_path = _fetching._chain_cache_path
-_is_chain_cache_fresh = _fetching._is_chain_cache_fresh
-_load_chain_cache = _fetching._load_chain_cache
-_prune_chain_cache = _fetching._prune_chain_cache
-_save_chain_cache = _fetching._save_chain_cache
-calc_mid = _fetching.calc_mid
-get_spot_opend = _fetching.get_spot_opend
-rate_limited_opend_call = _fetching.rate_limited_opend_call
-save_outputs = _fetching.save_outputs
-
-# Backward-compatible monkeypatch surface for tests and ad-hoc callers that patch
-# dependencies on this script module.
-build_ready_futu_gateway = _fetching.build_ready_futu_gateway
-retry_futu_gateway_call = _fetching.retry_futu_gateway_call
-normalize_underlier = _fetching.normalize_underlier
-get_trading_date = _fetching.get_trading_date
+from src.application.opend_symbol_fetching import (
+    FetchSymbolRequest,
+    _append_metrics_json,
+    _prune_chain_cache,
+    fetch_symbol_request,
+    save_outputs,
+)
 
 
-def _call_with_compat_hooks(fn, *args, **kwargs):
-    hooks = {
-        "build_ready_futu_gateway": build_ready_futu_gateway,
-        "retry_futu_gateway_call": retry_futu_gateway_call,
-        "normalize_underlier": normalize_underlier,
-        "get_trading_date": get_trading_date,
-        "rate_limited_opend_call": rate_limited_opend_call,
-        "get_spot_opend": get_spot_opend,
-    }
-    old = {name: getattr(_fetching, name) for name in hooks}
-    try:
-        for name, value in hooks.items():
-            setattr(_fetching, name, value)
-        return fn(*args, **kwargs)
-    finally:
-        for name, value in old.items():
-            setattr(_fetching, name, value)
-
-
-def fetch_symbol_request(request: FetchSymbolRequest) -> dict:
-    return _call_with_compat_hooks(_fetching.fetch_symbol_request, request)
-
-
-def get_underlier_spot(
-    symbol: str,
-    *,
-    host: str = "127.0.0.1",
-    port: int = 11111,
-    base_dir: Path | None = None,
-    snapshot_max_wait_sec: float = 30.0,
-    snapshot_window_sec: float = 30.0,
-    snapshot_max_calls: int = 60,
-) -> float | None:
-    return _call_with_compat_hooks(
-        _fetching.get_underlier_spot,
-        symbol,
-        host=host,
-        port=port,
-        base_dir=base_dir,
-        snapshot_max_wait_sec=snapshot_max_wait_sec,
-        snapshot_window_sec=snapshot_window_sec,
-        snapshot_max_calls=snapshot_max_calls,
-    )
-
-
-def list_option_expirations(
-    symbol: str,
-    *,
-    host: str = "127.0.0.1",
-    port: int = 11111,
-    base_dir: Path | None = None,
-    expiration_max_wait_sec: float = 30.0,
-    expiration_window_sec: float = 30.0,
-    expiration_max_calls: int = 30,
-) -> list[str]:
-    return _call_with_compat_hooks(
-        _fetching.list_option_expirations,
-        symbol,
-        host=host,
-        port=port,
-        base_dir=base_dir,
-        expiration_max_wait_sec=expiration_max_wait_sec,
-        expiration_window_sec=expiration_window_sec,
-        expiration_max_calls=expiration_max_calls,
-    )
-
-
-def fetch_symbol(
-    symbol: str,
-    limit_expirations: int | None = None,
-    host: str = "127.0.0.1",
-    port: int = 11111,
-    spot_override: float | None = None,
-    *,
-    base_dir: Path | None = None,
-    option_types: str = "put,call",
-    min_strike: float | None = None,
-    max_strike: float | None = None,
-    side_strike_windows: dict[str, dict[str, float | None]] | None = None,
-    min_dte: int | None = None,
-    max_dte: int | None = None,
-    explicit_expirations: list[str] | None = None,
-    retry_max_attempts: int = 4,
-    retry_time_budget_sec: float = 8.0,
-    retry_base_delay_sec: float = 0.8,
-    retry_max_delay_sec: float = 6.0,
-    no_retry: bool = False,
-    chain_cache: bool = False,
-    chain_cache_force_refresh: bool = False,
-    freshness_policy: str = "cache_first",
-    max_wait_sec: float = 90.0,
-    option_chain_window_sec: float = 30.0,
-    option_chain_max_calls: int = 10,
-    snapshot_max_wait_sec: float = 30.0,
-    snapshot_window_sec: float = 30.0,
-    snapshot_max_calls: int = 60,
-    expiration_max_wait_sec: float = 30.0,
-    expiration_window_sec: float = 30.0,
-    expiration_max_calls: int = 30,
-) -> dict:
-    return fetch_symbol_request(
-        FetchSymbolRequest(
-            symbol=symbol,
-            limit_expirations=limit_expirations,
-            host=host,
-            port=port,
-            spot_override=spot_override,
-            base_dir=base_dir,
-            option_types=option_types,
-            min_strike=min_strike,
-            max_strike=max_strike,
-            side_strike_windows=side_strike_windows,
-            min_dte=min_dte,
-            max_dte=max_dte,
-            explicit_expirations=explicit_expirations,
-            retry_max_attempts=retry_max_attempts,
-            retry_time_budget_sec=retry_time_budget_sec,
-            retry_base_delay_sec=retry_base_delay_sec,
-            retry_max_delay_sec=retry_max_delay_sec,
-            no_retry=no_retry,
-            chain_cache=chain_cache,
-            chain_cache_force_refresh=chain_cache_force_refresh,
-            freshness_policy=freshness_policy,
-            max_wait_sec=max_wait_sec,
-            option_chain_window_sec=option_chain_window_sec,
-            option_chain_max_calls=option_chain_max_calls,
-            snapshot_max_wait_sec=snapshot_max_wait_sec,
-            snapshot_window_sec=snapshot_window_sec,
-            snapshot_max_calls=snapshot_max_calls,
-            expiration_max_wait_sec=expiration_max_wait_sec,
-            expiration_window_sec=expiration_window_sec,
-            expiration_max_calls=expiration_max_calls,
-        )
-    )
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def main() -> None:

@@ -337,7 +337,7 @@ push 或部署。
 
 ### 6.4 查询 Sell Put 现金余量
 
-Agent 使用 `query_cash_headroom`。它是 `scripts/query_sell_put_cash.py` 中
+Agent 使用 `query_cash_headroom`。它是 `src.application.cash_headroom_query` 中
 `query_sell_put_cash(...)` 的结构化入口，用于查询账户现金、Sell Put 担保占用和剩余可用现金。
 
 ```bash

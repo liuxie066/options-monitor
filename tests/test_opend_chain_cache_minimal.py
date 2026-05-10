@@ -11,14 +11,14 @@ from tempfile import TemporaryDirectory
 
 
 def test_chain_cache_helpers_roundtrip() -> None:
-    # Ensure repo root on sys.path so `scripts.*` is importable when running tests/run_tests.py
+    # Ensure repo root on sys.path when running tests/run_tests.py directly.
     import sys
     base = Path(__file__).resolve().parents[1]
     if str(base) not in sys.path:
         sys.path.insert(0, str(base))
 
-    # Import helpers from script (ok for minimal tests)
-    import scripts.fetch_market_data_opend as m
+    # Import helpers from the application owner.
+    import src.application.opend_symbol_fetching as m
 
     with TemporaryDirectory() as td:
         base = Path(td)
@@ -36,7 +36,7 @@ def test_chain_cache_fresh_check() -> None:
     if str(base) not in sys.path:
         sys.path.insert(0, str(base))
 
-    import scripts.fetch_market_data_opend as m
+    import src.application.opend_symbol_fetching as m
     from datetime import date
 
     assert m._is_chain_cache_fresh({"asof_date": "2026-03-29"}, date(2026, 3, 29)) is True
@@ -50,7 +50,7 @@ def test_chain_cache_must_cover_explicit_expirations() -> None:
     if str(base) not in sys.path:
         sys.path.insert(0, str(base))
 
-    import scripts.fetch_market_data_opend as m
+    import src.application.opend_symbol_fetching as m
 
     cached = {
         "asof_date": "2026-04-28",
@@ -67,7 +67,7 @@ def test_chain_cache_does_not_trust_declared_expirations_without_rows() -> None:
     if str(base) not in sys.path:
         sys.path.insert(0, str(base))
 
-    import scripts.fetch_market_data_opend as m
+    import src.application.opend_symbol_fetching as m
 
     cached = {
         "asof_date": "2026-04-28",
@@ -88,7 +88,7 @@ def test_chain_cache_prune_by_mtime() -> None:
     if str(base) not in sys.path:
         sys.path.insert(0, str(base))
 
-    import scripts.fetch_market_data_opend as m
+    import src.application.opend_symbol_fetching as m
 
     with TemporaryDirectory() as td:
         root = Path(td)
@@ -230,7 +230,7 @@ def test_save_outputs_preserves_existing_parsed_csv_on_fetch_error() -> None:
     if str(base) not in sys.path:
         sys.path.insert(0, str(base))
 
-    import scripts.fetch_market_data_opend as m
+    import src.application.opend_symbol_fetching as m
 
     with TemporaryDirectory() as td:
         root = Path(td)

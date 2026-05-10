@@ -14,7 +14,7 @@ TEST_ROOT = BASE / 'output' / 'state' / 'test_cli_domain_split_step4'
 
 DOMAIN_FILES = [
     BASE / 'src' / 'application' / 'scan_scheduler.py',
-    BASE / 'scripts' / 'query_sell_put_cash.py',
+    BASE / 'src' / 'application' / 'cash_headroom_query.py',
 ]
 
 
@@ -178,7 +178,7 @@ def test_query_sell_put_cash_domain_minimal() -> None:
     if str(BASE) not in sys.path:
         sys.path.insert(0, str(BASE))
 
-    import scripts.query_sell_put_cash as m
+    import src.application.cash_headroom_query as m
 
     def fake_load_account_portfolio_context(**_kwargs):
         return {'cash_by_currency': {'CNY': 100000.0, 'USD': 1000.0}, 'stocks_by_symbol': {}, 'portfolio_source_name': 'holdings'}

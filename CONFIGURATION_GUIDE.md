@@ -80,9 +80,9 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 
 ---
 
-## 2) holdings 表：字段要求（fetch_portfolio_context.py）
+## 2) holdings 表：字段要求（portfolio_context_builder）
 
-脚本：`scripts/fetch_portfolio_context.py`
+应用模块：`src.application.portfolio_context_builder`
 
 ### 2.1 过滤逻辑
 - 读取全表后按两列过滤：
@@ -118,9 +118,9 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 
 ---
 
-## 3) option_positions 表：字段要求（fetch_option_positions_context.py）
+## 3) option_positions 表：字段要求（option_positions_context_builder）
 
-脚本：`scripts/fetch_option_positions_context.py`
+应用模块：`src.application.option_positions_context_builder`
 
 ### 3.1 过滤逻辑（更严格）
 - `market`：要求字段值 **完全等于** config 里传入的 market（如 `富途`）

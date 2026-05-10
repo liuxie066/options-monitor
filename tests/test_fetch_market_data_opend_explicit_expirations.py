@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 def test_fetch_symbol_explicit_expirations_override_limit_and_cache(monkeypatch, tmp_path: Path) -> None:
-    import scripts.fetch_market_data_opend as mod
+    import src.application.opend_symbol_fetching as mod
 
     requested_chain_dates: list[str] = []
 
@@ -87,7 +87,7 @@ def test_fetch_symbol_explicit_expirations_override_limit_and_cache(monkeypatch,
 
 
 def test_fetch_symbol_normalizes_timestamp_explicit_expirations(monkeypatch, tmp_path: Path) -> None:
-    import scripts.fetch_market_data_opend as mod
+    import src.application.opend_symbol_fetching as mod
 
     requested_chain_dates: list[str] = []
 
@@ -147,7 +147,7 @@ def test_fetch_symbol_normalizes_timestamp_explicit_expirations(monkeypatch, tmp
 
 
 def test_list_option_expirations_uses_shared_endpoint_limiter(monkeypatch, tmp_path: Path) -> None:
-    import scripts.fetch_market_data_opend as mod
+    import src.application.opend_symbol_fetching as mod
 
     endpoints: list[tuple[str, int, float, float]] = []
 
@@ -189,7 +189,7 @@ def test_list_option_expirations_uses_shared_endpoint_limiter(monkeypatch, tmp_p
 
 
 def test_fetch_symbol_uses_shared_snapshot_limiter(monkeypatch, tmp_path: Path) -> None:
-    import scripts.fetch_market_data_opend as mod
+    import src.application.opend_symbol_fetching as mod
 
     endpoints: list[tuple[str, int, float, float]] = []
 
@@ -253,7 +253,7 @@ def test_fetch_symbol_uses_shared_snapshot_limiter(monkeypatch, tmp_path: Path) 
 
 
 def test_fetch_symbol_reports_underlier_snapshot_errors(monkeypatch, tmp_path: Path) -> None:
-    import scripts.fetch_market_data_opend as mod
+    import src.application.opend_symbol_fetching as mod
 
     class _Gateway:
         def get_snapshot(self, codes):  # noqa: ANN001
@@ -314,7 +314,7 @@ def test_fetch_symbol_reports_underlier_snapshot_errors(monkeypatch, tmp_path: P
 
 
 def test_fetch_symbol_does_not_retry_legacy_spot_signature(monkeypatch, tmp_path: Path) -> None:
-    import scripts.fetch_market_data_opend as mod
+    import src.application.opend_symbol_fetching as mod
 
     calls: list[dict] = []
 
@@ -353,7 +353,7 @@ def test_fetch_symbol_does_not_retry_legacy_spot_signature(monkeypatch, tmp_path
 
 
 def test_fetch_symbol_reports_snapshot_rate_limit_errors(monkeypatch, tmp_path: Path) -> None:
-    import scripts.fetch_market_data_opend as mod
+    import src.application.opend_symbol_fetching as mod
 
     class _Gateway:
         def get_snapshot(self, codes):  # noqa: ANN001

@@ -2377,7 +2377,7 @@ def test_update_position_lot_fields_ignores_non_sync_business_mutations(tmp_path
 
 def test_projection_replay_fixture_closes_lot_and_excludes_it_from_open_context(tmp_path: Path) -> None:
     import src.application.option_positions_service as svc
-    from scripts.fetch_option_positions_context import build_context
+    from src.application.option_positions_context_builder import build_context
     from domain.domain.option_position_ledger import TradeEvent
 
     fixture_path = BASE / "tests" / "fixtures" / "option_positions_projection_replay_case.json"
