@@ -5,8 +5,8 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from scripts.account_config import ACCOUNT_TYPE_EXTERNAL_HOLDINGS, ACCOUNT_TYPE_FUTU, normalize_accounts
-from scripts.validate_config import validate_config
+from src.application.account_config import ACCOUNT_TYPE_EXTERNAL_HOLDINGS, ACCOUNT_TYPE_FUTU, normalize_accounts
+from src.application.config_validator import validate_config
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.layered_config import build_layered_runtime_config_from_user_config
 

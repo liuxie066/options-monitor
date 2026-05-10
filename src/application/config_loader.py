@@ -186,7 +186,7 @@ def load_config(
 
     try:
         if validate_config_fn is None:
-            from scripts.validate_config import validate_config as validate_config_fn  # type: ignore
+            from src.application.config_validator import validate_config as validate_config_fn  # type: ignore
 
         should_validate = True
         validation_cache: tuple[Path, str] | None = None

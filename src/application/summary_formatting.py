@@ -4,7 +4,7 @@ from typing import Any
 
 import pandas as pd
 
-from scripts.report_formatting import num, pct, strike_text
+from src.application.report_formatting import num, pct, strike_text
 
 
 SUMMARY_DEFAULTS = {

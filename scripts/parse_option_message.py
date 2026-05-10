@@ -22,8 +22,8 @@ repo_base = Path(__file__).resolve().parents[1]
 if str(repo_base) not in sys.path:
     sys.path.insert(0, str(repo_base))
 
-from scripts.account_config import DEFAULT_ACCOUNTS, accounts_from_config_path, normalize_accounts
-from scripts.multiplier_cache import resolve_multiplier_with_source
+from src.application.account_config import DEFAULT_ACCOUNTS, accounts_from_config_path, normalize_accounts
+from src.infrastructure.multiplier_cache import resolve_multiplier_with_source
 from domain.domain.option_position_lots import infer_currency_from_symbol as infer_position_currency_from_symbol
 from domain.domain.symbol_identity import canonical_symbol
 

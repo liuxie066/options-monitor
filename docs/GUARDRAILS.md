@@ -48,4 +48,4 @@ make deploy-safe
 
 - Any entrypoint that accepts user-entered symbol, broker raw payload, or OpenD/Futu underlying identifier must canonicalize to the shared symbol format before business logic.
 - Canonical market symbols are values like `NVDA`, `0700.HK`, `9992.HK`; aliases such as `POP` must not be persisted as runtime/watchlist/position symbols.
-- Shared alias handling lives in `scripts/opend_utils.py:resolve_underlier_alias`; new entrypoints should reuse it instead of adding ad hoc `upper()` or market-specific parsing branches.
+- Shared alias handling lives in `src/application/opend_utils.py:resolve_underlier_alias`; new entrypoints should reuse it instead of adding ad hoc `upper()` or market-specific parsing branches.

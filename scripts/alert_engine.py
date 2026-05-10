@@ -14,14 +14,14 @@ if str(repo_base) not in sys.path:
 import pandas as pd
 from pandas.errors import EmptyDataError
 
-from scripts.alert_rules import (
+from domain.domain.alert_rules import (
     SELL_CALL_NOTIFICATION_HIGH,
     SELL_CALL_NOTIFICATION_LOW,
     SELL_PUT_NOTIFICATION_HIGH,
     SELL_PUT_NOTIFICATION_LOW,
 )
-from scripts.alert_policy import DEFAULT_ALERT_POLICY, load_alert_policy
-from scripts.report_formatting import num, pct, strike_text
+from domain.domain.alert_policy import DEFAULT_ALERT_POLICY, load_alert_policy
+from src.application.report_formatting import num, pct, strike_text
 
 YIELD_ENHANCEMENT_NOTIFICATION_HIGH = '已按组合收益筛出推荐 Call，可作为该 Sell Put 的收益增强方案。'
 

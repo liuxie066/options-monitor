@@ -26,8 +26,8 @@ repo_base = Path(__file__).resolve().parents[1]
 if str(repo_base) not in sys.path:
     sys.path.insert(0, str(repo_base))
 
-from scripts.account_config import accounts_from_config_path
-from scripts.config_loader import load_config
+from src.application.account_config import accounts_from_config_path
+from src.application.config_loader import load_config
 from scripts.parse_option_message import parse_option_message_text
 from src.application.option_positions_facade import resolve_option_positions_repo, resolve_option_positions_repo_from_config
 from src.application.position_workflows import execute_manual_close, execute_manual_open

@@ -136,3 +136,23 @@ def test_unified_cli_scan_pipeline_command_exposes_canonical_flags() -> None:
     assert "--shared-context-dir" in proc.stdout
     assert "--shared-scan-dir" not in proc.stdout
     assert "--reuse-shared-scan" not in proc.stdout
+
+
+def test_unified_cli_option_positions_sync_feishu_command_exists() -> None:
+    proc = subprocess.run(
+        [
+            str((ROOT / ".venv" / "bin" / "python").resolve()),
+            "-m",
+            "src.interfaces.cli.main",
+            "option-positions",
+            "sync-feishu",
+            "--help",
+        ],
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "--dry-run" in proc.stdout
+    assert "--prune-remote-missing-local" in proc.stdout
+    assert "scripts/sync_option_positions_to_feishu.py" not in proc.stdout

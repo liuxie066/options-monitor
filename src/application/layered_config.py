@@ -5,9 +5,9 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from scripts.account_config import ACCOUNT_TYPE_EXTERNAL_HOLDINGS, ACCOUNT_TYPE_FUTU, ACCOUNT_TYPES, normalize_accounts
-from scripts.config_loader import normalize_portfolio_broker_config, set_watchlist_config
-from scripts.validate_config import validate_config
+from src.application.account_config import ACCOUNT_TYPE_EXTERNAL_HOLDINGS, ACCOUNT_TYPE_FUTU, ACCOUNT_TYPES, normalize_accounts
+from src.application.config_loader import normalize_portfolio_broker_config, set_watchlist_config
+from src.application.config_validator import validate_config
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.runtime_config_paths import write_json_atomic
 

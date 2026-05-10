@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from scripts.account_config import build_account_portfolio_source_plan
+from src.application.account_config import build_account_portfolio_source_plan
 import scripts.fetch_portfolio_context as holdings_context
 
 load_holdings_portfolio_context = holdings_context.load_holdings_portfolio_context

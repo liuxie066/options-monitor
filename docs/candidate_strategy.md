@@ -156,7 +156,7 @@
 ### 约束
 - 全局模板层允许的硬过滤主要围绕这几个字段
 - symbol 级某些旧的快捷风险字段已不再允许
-- 具体门禁由 `scripts/validate_config.py` 保证
+- 具体门禁由 `src/application/config_validator.py` 保证
 
 ---
 

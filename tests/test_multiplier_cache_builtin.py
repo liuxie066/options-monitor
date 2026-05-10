@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
-from scripts.multiplier_cache import (
+from src.infrastructure.multiplier_cache import (
     get_cached_multiplier,
     load_cache,
     merge_cache_updates,

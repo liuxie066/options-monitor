@@ -41,7 +41,7 @@ This repository is primarily maintained for personal use. Keep agent support lig
 - Notification formatting and message layout: inspect `scripts/notify_symbols.py` and `scripts/multi_tick/notify_format.py` first.
 - Operator-facing command behavior: inspect `src/interfaces/cli/`, `./om`, and related docs first.
 - Agent-facing structured tooling: inspect `./om-agent`, `scripts/install_agent_plugin.sh`, and README agent sections first.
-- Configuration contracts and runtime expectations: inspect `CONFIGS.md`, `CONFIGURATION_GUIDE.md`, examples under `configs/examples/`, and `scripts/validate_config.py` before executing config-related commands.
+- Configuration contracts and runtime expectations: inspect `CONFIGS.md`, `CONFIGURATION_GUIDE.md`, examples under `configs/examples/`, and `src/application/config_validator.py` before executing config-related commands.
 
 ## Safety Rules
 

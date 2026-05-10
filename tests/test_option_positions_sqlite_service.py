@@ -307,7 +307,7 @@ def test_load_option_positions_repo_migrates_existing_position_lots_into_trade_e
 
 def test_bootstrap_seed_lot_survives_later_trade_event_projection(tmp_path: Path) -> None:
     import src.application.option_positions_service as svc
-    from scripts.trade_event_normalizer import NormalizedTradeDeal
+    from src.application.trade_event_normalizer import NormalizedTradeDeal
 
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
     old_list = svc._list_feishu_option_position_records
@@ -543,7 +543,7 @@ def test_sqlite_trade_event_upsert_is_idempotent_and_rejects_conflicting_payload
 
 def test_persist_trade_event_builds_position_lots_projection(tmp_path: Path) -> None:
     import src.application.option_positions_service as svc
-    from scripts.trade_event_normalizer import NormalizedTradeDeal
+    from src.application.trade_event_normalizer import NormalizedTradeDeal
 
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     open_deal = NormalizedTradeDeal(

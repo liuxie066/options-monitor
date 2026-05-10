@@ -45,7 +45,7 @@ def read_state(path: Path) -> dict:
 
 def write_state(path: Path, state: dict):
     path.parent.mkdir(parents=True, exist_ok=True)
-    from scripts.io_utils import atomic_write_text
+    from src.infrastructure.io_utils import atomic_write_text
     atomic_write_text(path, json.dumps(state, ensure_ascii=False, indent=2) + "\n")
 
 
@@ -322,7 +322,7 @@ def run_scheduler(
     base_dir: Path | None = None,
 ) -> dict:
     """执行调度判定并处理状态副作用。"""
-    base = (base_dir or Path(__file__).resolve().parents[1]).resolve()
+    base = (base_dir or Path(__file__).resolve().parents[2]).resolve()
 
     config_path = Path(config)
     if not config_path.is_absolute():

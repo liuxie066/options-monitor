@@ -5,12 +5,12 @@ from typing import Any
 
 from copy import deepcopy
 
-from scripts.account_config import accounts_from_config, list_account_config_views, normalize_accounts
+from src.application.account_config import accounts_from_config, list_account_config_views, normalize_accounts
 from src.application.agent_tool_config import load_runtime_config, repo_base, resolve_output_root, write_tools_enabled
 from src.application.agent_tool_contracts import AgentToolError, mask_path
 from scripts.close_advice import run_close_advice
-from scripts.config_loader import load_config as load_runtime_pipeline_config, resolve_watchlist_config
-from scripts.validate_config import validate_config
+from src.application.config_loader import load_config as load_runtime_pipeline_config, resolve_watchlist_config
+from src.application.config_validator import validate_config
 from domain.domain.fetch_source import resolve_symbol_fetch_source
 from scripts.futu_portfolio_context import infer_futu_portfolio_settings
 from scripts.notify_symbols import build_notification
@@ -20,9 +20,9 @@ from src.application.option_positions_service import load_option_positions_repo
 from src.application.option_positions_reporting import build_monthly_income_report
 from scripts.pipeline_context import load_option_positions_context, load_portfolio_context
 from scripts.query_sell_put_cash import query_sell_put_cash
-from scripts.scan_scheduler import decide as scheduler_decide, read_state as read_scheduler_state
-from scripts.exchange_rates import get_cached_exchange_rates as _get_cached_exchange_rates_impl
-from scripts.io_utils import safe_read_csv
+from src.application.scan_scheduler import decide as scheduler_decide, read_state as read_scheduler_state
+from src.infrastructure.exchange_rates import get_cached_exchange_rates as _get_cached_exchange_rates_impl
+from src.infrastructure.io_utils import safe_read_csv
 from src.application.option_positions_facade import resolve_option_positions_repo
 from src.application.option_positions_facade import list_position_rows as _list_position_rows
 from src.application.agent_tool_healthcheck import run_healthcheck_tool

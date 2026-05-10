@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 
 
 def test_scheduled_validation_is_cached() -> None:
-    from scripts.config_loader import load_config
+    from src.application.config_loader import load_config
 
     calls: list[int] = []
 
@@ -30,7 +30,7 @@ def test_scheduled_validation_is_cached() -> None:
 
 
 def test_scheduled_validation_failure_is_not_cached() -> None:
-    from scripts.config_loader import load_config
+    from src.application.config_loader import load_config
 
     calls: list[int] = []
 
@@ -62,7 +62,7 @@ def test_scheduled_validation_failure_is_not_cached() -> None:
 
 
 def test_resolve_data_config_path_prefers_explicit_path() -> None:
-    from scripts.config_loader import resolve_data_config_path
+    from src.application.config_loader import resolve_data_config_path
 
     with TemporaryDirectory() as td:
         base = Path(td)
@@ -75,7 +75,7 @@ def test_resolve_data_config_path_prefers_explicit_path() -> None:
 
 
 def test_default_data_config_path_prefers_new_secret_location_when_present() -> None:
-    from scripts.config_loader import default_data_config_path
+    from src.application.config_loader import default_data_config_path
 
     with TemporaryDirectory() as td:
         base = Path(td)
@@ -89,7 +89,7 @@ def test_default_data_config_path_prefers_new_secret_location_when_present() -> 
 
 
 def test_default_data_config_path_falls_back_to_legacy_location_when_missing() -> None:
-    from scripts.config_loader import default_data_config_path
+    from src.application.config_loader import default_data_config_path
 
     with TemporaryDirectory() as td:
         base = Path(td)
@@ -99,7 +99,7 @@ def test_default_data_config_path_falls_back_to_legacy_location_when_missing() -
 
 
 def test_resolve_data_config_path_prefers_env_override(monkeypatch) -> None:
-    from scripts.config_loader import resolve_data_config_path
+    from src.application.config_loader import resolve_data_config_path
 
     with TemporaryDirectory() as td:
         base = Path(td)
@@ -112,7 +112,7 @@ def test_resolve_data_config_path_prefers_env_override(monkeypatch) -> None:
 
 
 def test_resolve_data_config_path_ignores_legacy_om_pm_config(monkeypatch) -> None:
-    from scripts.config_loader import resolve_data_config_path
+    from src.application.config_loader import resolve_data_config_path
 
     with TemporaryDirectory() as td:
         base = Path(td)
@@ -126,7 +126,7 @@ def test_resolve_data_config_path_ignores_legacy_om_pm_config(monkeypatch) -> No
 
 
 def test_resolve_watchlist_and_templates_config_require_canonical_keys() -> None:
-    from scripts.config_loader import resolve_templates_config, resolve_watchlist_config
+    from src.application.config_loader import resolve_templates_config, resolve_watchlist_config
 
     cfg = {
         "symbols": [{"symbol": "0700.HK"}, {"symbol": "3690.HK"}],
@@ -138,7 +138,7 @@ def test_resolve_watchlist_and_templates_config_require_canonical_keys() -> None
 
 
 def test_resolve_watchlist_config_canonicalizes_legacy_market_to_broker() -> None:
-    from scripts.config_loader import resolve_watchlist_config
+    from src.application.config_loader import resolve_watchlist_config
 
     cfg = {
         "symbols": [
@@ -156,7 +156,7 @@ def test_resolve_watchlist_config_canonicalizes_legacy_market_to_broker() -> Non
 
 
 def test_normalize_portfolio_broker_config_converts_legacy_fields_to_canonical() -> None:
-    from scripts.config_loader import normalize_portfolio_broker_config
+    from src.application.config_loader import normalize_portfolio_broker_config
 
     out = normalize_portfolio_broker_config({"portfolio": {"broker": "富途", "data_config": "x.json", "account": "lx"}})
 
@@ -174,7 +174,7 @@ def test_normalize_portfolio_broker_config_converts_legacy_fields_to_canonical()
 
 
 def test_set_watchlist_config_updates_symbols_only() -> None:
-    from scripts.config_loader import set_watchlist_config
+    from src.application.config_loader import set_watchlist_config
 
     cfg = {}
     out = set_watchlist_config(cfg, [{"symbol": "0700.HK"}])
@@ -183,7 +183,7 @@ def test_set_watchlist_config_updates_symbols_only() -> None:
 
 
 def test_set_watchlist_config_writes_broker_only() -> None:
-    from scripts.config_loader import set_watchlist_config
+    from src.application.config_loader import set_watchlist_config
 
     cfg = {}
     out = set_watchlist_config(cfg, [{"symbol": "0700.HK", "market": "HK"}])

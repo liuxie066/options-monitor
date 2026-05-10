@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from scripts.io_utils import atomic_write_json, ensure_dir, read_json
+    from src.infrastructure.io_utils import atomic_write_json, ensure_dir, read_json
 except ModuleNotFoundError:
     from io_utils import atomic_write_json, ensure_dir, read_json
 

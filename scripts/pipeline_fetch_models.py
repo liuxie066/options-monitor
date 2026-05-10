@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from scripts.io_utils import atomic_write_json, read_json
+from src.infrastructure.io_utils import atomic_write_json, read_json
 
 
 def _utc_now() -> str:

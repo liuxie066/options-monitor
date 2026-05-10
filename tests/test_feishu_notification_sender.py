@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 
 def test_load_feishu_notification_app_config_uses_default_path(tmp_path: Path) -> None:
-    from scripts.infra.service import load_feishu_notification_app_config
+    from src.infrastructure.external_services import load_feishu_notification_app_config
 
     secrets_dir = tmp_path / "secrets"
     secrets_dir.mkdir()
@@ -24,7 +24,7 @@ def test_load_feishu_notification_app_config_uses_default_path(tmp_path: Path) -
 
 
 def test_load_feishu_notification_app_config_supports_explicit_path(tmp_path: Path) -> None:
-    from scripts.infra.service import load_feishu_notification_app_config
+    from src.infrastructure.external_services import load_feishu_notification_app_config
 
     secrets_path = tmp_path / "custom.json"
     secrets_path.write_text(
@@ -42,7 +42,7 @@ def test_load_feishu_notification_app_config_supports_explicit_path(tmp_path: Pa
 
 
 def test_load_feishu_notification_app_config_fails_when_file_missing(tmp_path: Path) -> None:
-    from scripts.infra.service import load_feishu_notification_app_config
+    from src.infrastructure.external_services import load_feishu_notification_app_config
 
     try:
         load_feishu_notification_app_config(base=tmp_path)
@@ -52,7 +52,7 @@ def test_load_feishu_notification_app_config_fails_when_file_missing(tmp_path: P
 
 
 def test_load_feishu_notification_app_config_fails_when_credentials_missing(tmp_path: Path) -> None:
-    from scripts.infra.service import load_feishu_notification_app_config
+    from src.infrastructure.external_services import load_feishu_notification_app_config
 
     secrets_path = tmp_path / "custom.json"
     secrets_path.write_text(json.dumps({"feishu": {"app_id": "cli_only"}}), encoding="utf-8")
@@ -65,7 +65,7 @@ def test_load_feishu_notification_app_config_fails_when_credentials_missing(tmp_
 
 
 def test_normalize_feishu_app_send_output_marks_success_with_message_id() -> None:
-    from scripts.infra.service import normalize_feishu_app_send_output
+    from src.infrastructure.external_services import normalize_feishu_app_send_output
 
     out = normalize_feishu_app_send_output(
         send_result={
@@ -84,7 +84,7 @@ def test_normalize_feishu_app_send_output_marks_success_with_message_id() -> Non
 
 
 def test_normalize_feishu_app_send_output_marks_unconfirmed_when_message_id_missing() -> None:
-    from scripts.infra.service import normalize_feishu_app_send_output
+    from src.infrastructure.external_services import normalize_feishu_app_send_output
 
     out = normalize_feishu_app_send_output(
         send_result={
@@ -104,7 +104,7 @@ def test_normalize_feishu_app_send_output_marks_unconfirmed_when_message_id_miss
 
 
 def test_normalize_feishu_app_send_output_marks_failed_on_non_200() -> None:
-    from scripts.infra.service import normalize_feishu_app_send_output
+    from src.infrastructure.external_services import normalize_feishu_app_send_output
 
     out = normalize_feishu_app_send_output(
         send_result={
@@ -126,7 +126,7 @@ def test_normalize_feishu_app_send_output_marks_failed_on_non_200() -> None:
 
 
 def test_normalize_feishu_app_send_output_marks_failed_on_feishu_code() -> None:
-    from scripts.infra.service import normalize_feishu_app_send_output
+    from src.infrastructure.external_services import normalize_feishu_app_send_output
 
     out = normalize_feishu_app_send_output(
         send_result={
@@ -146,7 +146,7 @@ def test_normalize_feishu_app_send_output_marks_failed_on_feishu_code() -> None:
 
 
 def test_select_notification_delivery_adapter_keeps_feishu_on_app_sender() -> None:
-    from scripts.infra.service import (
+    from src.infrastructure.external_services import (
         normalize_feishu_app_send_output,
         select_notification_delivery_adapter,
         send_feishu_app_message_process,
@@ -161,7 +161,7 @@ def test_select_notification_delivery_adapter_keeps_feishu_on_app_sender() -> No
 
 def test_select_notification_delivery_adapter_routes_wechat_clawbot_to_openclaw() -> None:
     from domain.domain import normalize_notify_subprocess_output
-    from scripts.infra.service import (
+    from src.infrastructure.external_services import (
         select_notification_delivery_adapter,
         send_openclaw_message_process,
     )
@@ -174,7 +174,7 @@ def test_select_notification_delivery_adapter_routes_wechat_clawbot_to_openclaw(
 
 
 def test_send_openclaw_message_translates_wechat_clawbot_channel(monkeypatch, tmp_path: Path) -> None:
-    from scripts.infra import service
+    from src.infrastructure import external_services as service
 
     captured: dict[str, object] = {}
 
@@ -200,7 +200,7 @@ def test_send_openclaw_message_translates_wechat_clawbot_channel(monkeypatch, tm
 
 
 def test_select_notification_delivery_adapter_rejects_unknown_channel() -> None:
-    from scripts.infra.service import select_notification_delivery_adapter
+    from src.infrastructure.external_services import select_notification_delivery_adapter
 
     try:
         select_notification_delivery_adapter("sms")

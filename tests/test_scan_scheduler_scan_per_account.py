@@ -6,7 +6,7 @@ from datetime import datetime, timezone, timedelta
 
 
 def test_scan_scheduler_scan_is_per_account() -> None:
-    from scripts.scan_scheduler import decide
+    from src.application.scan_scheduler import decide
 
     schedule_cfg = {
         'enabled': True,

@@ -8,7 +8,7 @@ from tempfile import TemporaryDirectory
 
 
 def test_atomic_write_json_writes_valid_json() -> None:
-    from scripts.io_utils import atomic_write_json
+    from src.infrastructure.io_utils import atomic_write_json
 
     with TemporaryDirectory() as td:
         p = Path(td) / 'a.json'

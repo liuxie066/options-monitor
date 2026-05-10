@@ -19,7 +19,7 @@ from domain.domain.expiration_dates import (
     EXPIRATION_DATE_TZ,
 )
 from domain.domain.option_position_lots import normalize_account, normalize_broker
-from scripts.io_utils import atomic_write_json
+from src.infrastructure.io_utils import atomic_write_json
 from src.application.option_positions_facade import (
     build_option_position_view,
     canonicalize_option_position_record,
@@ -31,7 +31,7 @@ from src.application.option_positions_facade import (
 try:
     from exchange_rates import get_exchange_rates_or_fetch_latest
 except Exception:
-    from scripts.exchange_rates import get_exchange_rates_or_fetch_latest
+    from src.infrastructure.exchange_rates import get_exchange_rates_or_fetch_latest
 
 def build_context(records: list[dict], broker: str, account: str | None = None, rates: dict | None = None) -> dict:
     """Build context from raw Bitable records.

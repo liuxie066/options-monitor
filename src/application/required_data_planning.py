@@ -4,7 +4,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from scripts.candidate_defaults import (
+from domain.domain.candidate_defaults import (
     DEFAULT_SELL_CALL_WINDOW,
     DEFAULT_SELL_PUT_WINDOW,
     DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_WINDOW,
@@ -173,7 +173,7 @@ def _filter_expirations_by_dte(*, symbol: str, available_expirations: list[str],
         return []
     try:
         from datetime import datetime
-        from scripts.opend_utils import get_trading_date, normalize_underlier
+        from src.application.opend_utils import get_trading_date, normalize_underlier
 
         today = get_trading_date(normalize_underlier(symbol).market)
         out: list[str] = []

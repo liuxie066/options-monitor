@@ -10,10 +10,13 @@ def test_config_management_module_is_removed() -> None:
 
 
 def test_cli_uses_owner_modules_for_runtime_config_validation() -> None:
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("scripts.validate_config")
+
     cli_mod = importlib.import_module("src.interfaces.cli.main")
     app_config_mod = importlib.import_module("src.application.agent_tool_config")
     agent_config_mod = importlib.import_module("scripts.agent_plugin.config")
-    validate_mod = importlib.import_module("scripts.validate_config")
+    validate_mod = importlib.import_module("src.application.config_validator")
 
     assert agent_config_mod is app_config_mod
     assert cli_mod.load_runtime_config is app_config_mod.load_runtime_config
@@ -21,14 +24,19 @@ def test_cli_uses_owner_modules_for_runtime_config_validation() -> None:
 
 
 def test_agent_plugin_tools_imports_owner_modules() -> None:
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("scripts.config_loader")
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("scripts.account_config")
+
     tools_mod = importlib.import_module("scripts.agent_plugin.tools")
     app_tools_mod = importlib.import_module("src.application.agent_tool_handlers")
     app_config_mod = importlib.import_module("src.application.agent_tool_config")
     agent_config_mod = importlib.import_module("scripts.agent_plugin.config")
     contracts_mod = importlib.import_module("scripts.agent_plugin.contracts")
     app_contracts_mod = importlib.import_module("src.application.agent_tool_contracts")
-    config_loader_mod = importlib.import_module("scripts.config_loader")
-    validate_mod = importlib.import_module("scripts.validate_config")
+    config_loader_mod = importlib.import_module("src.application.config_loader")
+    validate_mod = importlib.import_module("src.application.config_validator")
 
     assert tools_mod is app_tools_mod
     assert agent_config_mod is app_config_mod
@@ -44,7 +52,7 @@ def test_agent_plugin_tools_imports_owner_modules() -> None:
 
 def test_account_run_imports_watchlist_helpers_from_owner_module() -> None:
     account_run_mod = importlib.import_module("src.application.account_run")
-    owner_mod = importlib.import_module("scripts.config_loader")
+    owner_mod = importlib.import_module("src.application.config_loader")
 
     assert account_run_mod.resolve_watchlist_config is owner_mod.resolve_watchlist_config
     assert account_run_mod.set_watchlist_config is owner_mod.set_watchlist_config
@@ -52,7 +60,7 @@ def test_account_run_imports_watchlist_helpers_from_owner_module() -> None:
 
 def test_pipeline_runtime_imports_config_loader_helpers_from_owner_module() -> None:
     pipeline_runtime_mod = importlib.import_module("src.application.pipeline_runtime")
-    owner_mod = importlib.import_module("scripts.config_loader")
+    owner_mod = importlib.import_module("src.application.config_loader")
 
     assert pipeline_runtime_mod.load_runtime_pipeline_config is owner_mod.load_config
     assert pipeline_runtime_mod.resolve_data_config_path is owner_mod.resolve_data_config_path
@@ -61,7 +69,7 @@ def test_pipeline_runtime_imports_config_loader_helpers_from_owner_module() -> N
 
 def test_pipeline_watchlist_imports_config_loader_helpers_from_owner_module() -> None:
     pipeline_watchlist_mod = importlib.import_module("scripts.pipeline_watchlist")
-    owner_mod = importlib.import_module("scripts.config_loader")
+    owner_mod = importlib.import_module("src.application.config_loader")
 
     assert pipeline_watchlist_mod.resolve_templates_config is owner_mod.resolve_templates_config
     assert pipeline_watchlist_mod.resolve_watchlist_config is owner_mod.resolve_watchlist_config
@@ -82,18 +90,249 @@ def test_required_data_uses_application_opend_symbol_fetching_owner() -> None:
 def test_option_positions_and_pipeline_context_import_data_config_owner_module() -> None:
     option_positions_mod = importlib.import_module("src.application.option_positions_facade")
     pipeline_context_mod = importlib.import_module("scripts.pipeline_context")
-    owner_mod = importlib.import_module("scripts.config_loader")
+    owner_mod = importlib.import_module("src.application.config_loader")
 
     assert option_positions_mod.resolve_data_config_path is owner_mod.resolve_data_config_path
     assert pipeline_context_mod.resolve_data_config_path is owner_mod.resolve_data_config_path
+
+
+def test_feishu_bitable_imports_infrastructure_owner_module() -> None:
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("scripts.feishu_bitable")
+
+    infra_mod = importlib.import_module("src.infrastructure.feishu_bitable")
+    service_mod = importlib.import_module("src.application.option_positions_service")
+    reporting_mod = importlib.import_module("src.application.option_positions_reporting")
+    facade_mod = importlib.import_module("src.application.option_positions_facade")
+    healthcheck_mod = importlib.import_module("scripts.healthcheck")
+
+    assert service_mod.bitable_list_records is infra_mod.bitable_list_records
+    assert service_mod.get_tenant_access_token is infra_mod.get_tenant_access_token
+    assert reporting_mod.safe_float is infra_mod.safe_float
+    assert facade_mod.parse_note_kv is infra_mod.parse_note_kv
+    assert healthcheck_mod.get_tenant_access_token is infra_mod.get_tenant_access_token
+
+
+def test_exchange_rates_imports_infrastructure_owner_module() -> None:
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("scripts.exchange_rates")
+
+    infra_mod = importlib.import_module("src.infrastructure.exchange_rates")
+    facade_mod = importlib.import_module("src.application.option_positions_facade")
+    reporting_mod = importlib.import_module("src.application.option_positions_reporting")
+    agent_tools_mod = importlib.import_module("src.application.agent_tool_handlers")
+    cash_mod = importlib.import_module("scripts.sell_put_cash")
+    notify_mod = importlib.import_module("scripts.notify_symbols")
+
+    assert facade_mod.get_exchange_rates_or_fetch_latest is infra_mod.get_exchange_rates_or_fetch_latest
+    assert reporting_mod.CurrencyConverter is infra_mod.CurrencyConverter
+    assert agent_tools_mod._get_cached_exchange_rates_impl is infra_mod.get_cached_exchange_rates
+    assert cash_mod.CurrencyConverter is infra_mod.CurrencyConverter
+    assert notify_mod.load_exchange_rate_info is infra_mod.load_exchange_rate_info
+
+
+def test_multiplier_cache_imports_infrastructure_owner_module() -> None:
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("scripts.multiplier_cache")
+
+    infra_mod = importlib.import_module("src.infrastructure.multiplier_cache")
+    reporting_mod = importlib.import_module("src.application.option_positions_reporting")
+    trade_normalizer_mod = importlib.import_module("src.application.trade_event_normalizer")
+    parse_message_mod = importlib.import_module("scripts.parse_option_message")
+
+    assert reporting_mod.resolve_multiplier is infra_mod.resolve_multiplier
+    assert trade_normalizer_mod.resolve_multiplier_with_source_and_diagnostics is infra_mod.resolve_multiplier_with_source_and_diagnostics
+    assert parse_message_mod.resolve_multiplier_with_source is infra_mod.resolve_multiplier_with_source
+
+
+def test_option_positions_feishu_sync_imports_application_owner_module() -> None:
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("scripts.sync_option_positions_to_feishu")
+
+    owner_mod = importlib.import_module("src.application.option_positions_feishu_sync")
+    workflows_mod = importlib.import_module("src.application.position_workflows")
+
+    assert workflows_mod.sync_single_option_position_record is owner_mod.sync_single_option_position_record
+
+
+def test_trade_intake_imports_owner_modules() -> None:
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("scripts.trade_account_identity")
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("scripts.trade_account_mapping")
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("scripts.trade_event_normalizer")
+
+    identity_mod = importlib.import_module("domain.domain.trade_account_identity")
+    mapping_mod = importlib.import_module("src.application.trade_account_mapping")
+    normalizer_mod = importlib.import_module("src.application.trade_event_normalizer")
+    auto_trade_mod = importlib.import_module("scripts.auto_trade_intake")
+    lookup_mod = importlib.import_module("scripts.futu_trade_detail_lookup")
+    resolver_mod = importlib.import_module("scripts.trade_intake_resolver")
+    validate_mod = importlib.import_module("src.application.config_validator")
+    workflows_mod = importlib.import_module("src.application.position_workflows")
+
+    assert lookup_mod.extract_primary_account_id is identity_mod.extract_primary_account_id
+    assert validate_mod.resolve_trade_intake_config is mapping_mod.resolve_trade_intake_config
+    assert auto_trade_mod.resolve_trade_intake_config is mapping_mod.resolve_trade_intake_config
+    assert auto_trade_mod.normalize_trade_deal is normalizer_mod.normalize_trade_deal
+    assert resolver_mod.NormalizedTradeDeal is normalizer_mod.NormalizedTradeDeal
+    assert workflows_mod.NormalizedTradeDeal is normalizer_mod.NormalizedTradeDeal
 
 
 def test_healthcheck_and_init_local_import_validate_config_from_owner_module() -> None:
     healthcheck_mod = importlib.import_module("scripts.healthcheck")
     app_init_local_mod = importlib.import_module("src.application.agent_tool_init_local")
     init_local_mod = importlib.import_module("scripts.agent_plugin.init_local")
-    validate_mod = importlib.import_module("scripts.validate_config")
+    validate_mod = importlib.import_module("src.application.config_validator")
 
     assert init_local_mod is app_init_local_mod
     assert healthcheck_mod.validate_config is validate_mod.validate_config
     assert app_init_local_mod.validate_config is validate_mod.validate_config
+
+
+def test_account_config_imports_owner_module() -> None:
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("scripts.account_config")
+
+    owner_mod = importlib.import_module("src.application.account_config")
+    layered_mod = importlib.import_module("src.application.layered_config")
+    multi_tick_mod = importlib.import_module("src.application.multi_account_tick")
+    webui_server_mod = importlib.import_module("src.interfaces.webui.server")
+
+    assert layered_mod.normalize_accounts is owner_mod.normalize_accounts
+    assert multi_tick_mod.accounts_from_config is owner_mod.accounts_from_config
+    assert webui_server_mod.list_account_config_views is owner_mod.list_account_config_views
+
+
+def test_shared_infrastructure_imports_owner_modules() -> None:
+    for old_module in (
+        "scripts.io_utils",
+        "scripts.run_log",
+        "scripts.subprocess_utils",
+        "scripts.logging_config",
+    ):
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module(old_module)
+
+    io_mod = importlib.import_module("src.infrastructure.io_utils")
+    run_log_mod = importlib.import_module("src.infrastructure.run_log")
+    subprocess_mod = importlib.import_module("src.infrastructure.subprocess_utils")
+    logging_mod = importlib.import_module("src.infrastructure.logging_config")
+    multi_tick_mod = importlib.import_module("src.application.multi_account_tick")
+    pipeline_runtime_mod = importlib.import_module("src.application.pipeline_runtime")
+    account_run_mod = importlib.import_module("src.application.account_run")
+
+    assert multi_tick_mod.RunLogger is run_log_mod.RunLogger
+    assert multi_tick_mod.read_json is io_mod.read_json
+    assert account_run_mod.utc_now is io_mod.utc_now
+    assert pipeline_runtime_mod.run_cmd is subprocess_mod.run_cmd
+    assert pipeline_runtime_mod.get_logger is logging_mod.get_logger
+
+
+def test_external_services_imports_infrastructure_owner_module() -> None:
+    for old_module in (
+        "scripts.infra.service",
+        "scripts.infra.entry_external",
+    ):
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module(old_module)
+
+    owner_mod = importlib.import_module("src.infrastructure.external_services")
+    multi_tick_mod = importlib.import_module("src.application.multi_account_tick")
+    account_run_mod = importlib.import_module("src.application.account_run")
+    webui_server_mod = importlib.import_module("src.interfaces.webui.server")
+
+    assert multi_tick_mod.run_scan_scheduler_cli is owner_mod.run_scan_scheduler_cli
+    assert multi_tick_mod.select_notification_delivery_adapter is owner_mod.select_notification_delivery_adapter
+    assert account_run_mod.run_pipeline_script is owner_mod.run_pipeline_script
+    assert webui_server_mod.send_openclaw_message is owner_mod.send_openclaw_message
+
+
+def test_opend_support_imports_owner_modules() -> None:
+    for old_module in (
+        "scripts.futu_gateway",
+        "scripts.opend_utils",
+        "scripts.opend_normalize",
+        "scripts.required_data_validate",
+        "scripts.candidate_defaults",
+    ):
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module(old_module)
+
+    gateway_mod = importlib.import_module("src.infrastructure.futu_gateway")
+    opend_utils_mod = importlib.import_module("src.application.opend_utils")
+    opend_normalize_mod = importlib.import_module("src.application.opend_normalize")
+    required_validation_mod = importlib.import_module("src.application.required_data_validation")
+    candidate_defaults_mod = importlib.import_module("domain.domain.candidate_defaults")
+    fetching_mod = importlib.import_module("src.application.opend_symbol_fetching")
+    planning_mod = importlib.import_module("src.application.required_data_planning")
+    sell_put_mod = importlib.import_module("scripts.sell_put_steps")
+
+    assert fetching_mod.build_ready_futu_gateway is gateway_mod.build_ready_futu_gateway
+    assert fetching_mod.normalize_underlier is opend_utils_mod.normalize_underlier
+    assert opend_normalize_mod.normalize_iv(25) == 0.25
+    assert required_validation_mod.validate_required_rows([])[1].total_rows == 0
+    assert planning_mod.DEFAULT_SELL_PUT_WINDOW is candidate_defaults_mod.DEFAULT_SELL_PUT_WINDOW
+    assert sell_put_mod.resolve_candidate_window is candidate_defaults_mod.resolve_candidate_window
+
+
+def test_report_builders_import_owner_modules() -> None:
+    for old_module in (
+        "scripts.report_builders",
+        "scripts.summary_formatting",
+        "scripts.report_formatting",
+    ):
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module(old_module)
+
+    report_builders_mod = importlib.import_module("src.application.report_builders")
+    summary_formatting_mod = importlib.import_module("src.application.summary_formatting")
+    report_formatting_mod = importlib.import_module("src.application.report_formatting")
+    pipeline_runtime_mod = importlib.import_module("src.application.pipeline_runtime")
+
+    assert report_builders_mod.format_summary_row is summary_formatting_mod.format_summary_row
+    assert summary_formatting_mod.pct is report_formatting_mod.pct
+    assert pipeline_runtime_mod.build_symbols_summary is report_builders_mod.build_symbols_summary
+
+
+def test_alert_policy_imports_domain_owner_modules() -> None:
+    for old_module in ("scripts.alert_policy", "scripts.alert_rules"):
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module(old_module)
+
+    policy_mod = importlib.import_module("domain.domain.alert_policy")
+    rules_mod = importlib.import_module("domain.domain.alert_rules")
+    alert_engine_mod = importlib.import_module("scripts.alert_engine")
+    notify_mod = importlib.import_module("scripts.notify_symbols")
+
+    assert rules_mod.DEFAULT_ALERT_POLICY is policy_mod.DEFAULT_ALERT_POLICY
+    assert alert_engine_mod.load_alert_policy is policy_mod.load_alert_policy
+    assert notify_mod.SELL_PUT_NOTIFICATION_HIGH == rules_mod.SELL_PUT_NOTIFICATION_HIGH
+
+
+def test_scan_scheduler_imports_application_owner_module() -> None:
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("scripts.scan_scheduler")
+
+    owner_mod = importlib.import_module("src.application.scan_scheduler")
+    cli_mod = importlib.import_module("src.interfaces.cli.main")
+    agent_tools_mod = importlib.import_module("src.application.agent_tool_handlers")
+    healthcheck_mod = importlib.import_module("scripts.healthcheck")
+
+    assert cli_mod.run_scheduler is owner_mod.run_scheduler
+    assert agent_tools_mod.scheduler_decide is owner_mod.decide
+    assert agent_tools_mod.read_scheduler_state is owner_mod.read_state
+    assert healthcheck_mod.run_scheduler is owner_mod.run_scheduler
+
+
+def test_cash_secured_utils_imports_domain_owner_module() -> None:
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("scripts.cash_secured_utils")
+
+    owner_mod = importlib.import_module("domain.domain.cash_secured_utils")
+    query_mod = importlib.import_module("scripts.query_sell_put_cash")
+    sell_put_cash_mod = importlib.import_module("scripts.sell_put_cash")
+
+    assert query_mod.normalize_cash_secured_by_symbol_by_ccy is owner_mod.normalize_cash_secured_by_symbol_by_ccy
+    assert sell_put_cash_mod.cash_secured_symbol_cny is owner_mod.cash_secured_symbol_cny

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from scripts.exchange_rates import CurrencyConverter, ExchangeRates
+from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
 
 def build_converter(

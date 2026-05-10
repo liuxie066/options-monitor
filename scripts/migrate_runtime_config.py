@@ -22,8 +22,8 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
-from scripts.io_utils import atomic_write_text
-from scripts.validate_config import validate_config
+from src.infrastructure.io_utils import atomic_write_text
+from src.application.config_validator import validate_config
 
 
 LEGACY_SCHEDULE_KEYS = (

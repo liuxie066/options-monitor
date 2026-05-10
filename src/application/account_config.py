@@ -3,9 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
-
-from scripts.futu_portfolio_context import resolve_trade_intake_futu_account_ids
+from typing import Any, Mapping
 
 
 DEFAULT_ACCOUNTS = ("user1",)
@@ -233,6 +231,33 @@ def cash_footer_accounts_from_config(
     if explicit is not None:
         return normalize_accounts(explicit, fallback=fallback)
     return accounts_from_config(cfg, fallback=fallback)
+
+
+def _normalize_account_ids(raw: Mapping[str, Any] | Any, *, account: str | None) -> list[str]:
+    if not account or not isinstance(raw, Mapping):
+        return []
+    want = str(account or "").strip().lower()
+    out: list[str] = []
+    for acc_id, mapped in raw.items():
+        if str(mapped or "").strip().lower() != want:
+            continue
+        key = str(acc_id or "").strip()
+        if key:
+            out.append(key)
+    return out
+
+
+def resolve_trade_intake_futu_account_ids(config: Mapping[str, Any] | Any, *, account: str | None) -> list[str]:
+    if not isinstance(config, Mapping):
+        return []
+    trade_intake = config.get("trade_intake")
+    if not isinstance(trade_intake, Mapping):
+        return []
+    account_mapping = trade_intake.get("account_mapping")
+    if not isinstance(account_mapping, Mapping):
+        return []
+    futu_mapping = account_mapping.get("futu")
+    return _normalize_account_ids(futu_mapping, account=account)
 
 
 def build_account_config_view(config: dict[str, Any] | None, *, account: str) -> AccountConfigView:

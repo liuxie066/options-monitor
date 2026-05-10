@@ -14,7 +14,7 @@ def test_build_symbols_summary_tolerates_missing_annualized_return_column() -> N
     if str(base) not in sys.path:
         sys.path.insert(0, str(base))
 
-    from scripts.report_builders import build_symbols_summary
+    from src.application.report_builders import build_symbols_summary
 
     summary_rows = [
         {
@@ -54,7 +54,7 @@ def test_build_symbols_digest_deduplicates_symbols_with_yield_enhancement_sectio
     if str(base) not in sys.path:
         sys.path.insert(0, str(base))
 
-    from scripts.report_builders import build_symbols_digest
+    from src.application.report_builders import build_symbols_digest
 
     with TemporaryDirectory() as td:
         report_dir = Path(td)

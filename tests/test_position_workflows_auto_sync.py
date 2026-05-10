@@ -241,7 +241,7 @@ def test_execute_manual_open_runtime_sync_override_can_disable_data_config_on(mo
 
 def test_build_trade_open_command_keeps_optional_contract_fields_null_instead_of_string_none() -> None:
     import src.application.position_workflows as workflows
-    from scripts.trade_event_normalizer import NormalizedTradeDeal
+    from src.application.trade_event_normalizer import NormalizedTradeDeal
 
     command = workflows._build_trade_open_command(
         NormalizedTradeDeal(

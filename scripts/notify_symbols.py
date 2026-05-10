@@ -23,8 +23,8 @@ if str(repo_base) not in sys.path:
     sys.path.insert(0, str(repo_base))
 
 from domain.domain import build_no_candidate_notification_text
-from scripts.exchange_rates import load_exchange_rate_info
-from scripts.alert_rules import (
+from src.infrastructure.exchange_rates import load_exchange_rate_info
+from domain.domain.alert_rules import (
     SELL_CALL_NOTIFICATION_MEDIUM,
     SELL_PUT_NOTIFICATION_HIGH,
 )

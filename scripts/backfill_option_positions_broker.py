@@ -14,7 +14,7 @@ REPO_BASE = Path(__file__).resolve().parents[1]
 if str(REPO_BASE) not in sys.path:
     sys.path.insert(0, str(REPO_BASE))
 
-from scripts.config_loader import resolve_data_config_path
+from src.application.config_loader import resolve_data_config_path
 from domain.domain.option_position_lots import normalize_broker, now_ms
 from src.application.option_positions_service import resolve_option_positions_sqlite_path
 

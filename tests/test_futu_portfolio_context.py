@@ -13,7 +13,7 @@ FAKE_FUTU_ACC_ID_SY = "123456789012345680"
 
 
 def test_resolve_trade_intake_futu_account_ids_uses_runtime_mapping() -> None:
-    from scripts.futu_portfolio_context import resolve_trade_intake_futu_account_ids
+    from src.application.account_config import resolve_trade_intake_futu_account_ids
 
     cfg = {
         "trade_intake": {

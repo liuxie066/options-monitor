@@ -23,13 +23,14 @@ import sys
 from pathlib import Path
 from datetime import datetime, timezone
 
-from scripts.feishu_bitable import (
+from src.infrastructure.feishu_bitable import (
     get_tenant_access_token,
     bitable_fields,
 )
-from scripts.account_config import accounts_from_config
-from scripts.config_loader import normalize_portfolio_broker_config, resolve_data_config_path
-from scripts.validate_config import validate_config
+from src.application.account_config import accounts_from_config
+from src.application.config_loader import normalize_portfolio_broker_config, resolve_data_config_path
+from src.application.config_validator import validate_config
+from src.application.scan_scheduler import run_scheduler
 
 
 REQUIRED_HOLDINGS_FIELDS = {'asset_id', 'asset_name', 'quantity', 'account', 'currency', 'asset_type'}
@@ -113,8 +114,6 @@ def main():
     try:
         import io
         from contextlib import redirect_stdout
-        from scripts.scan_scheduler import run_scheduler
-
         for acct in accounts:
             cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
             cfg.setdefault('portfolio', {})

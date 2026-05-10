@@ -7,19 +7,20 @@ from typing import Any
 
 from src.application.agent_tool_config import load_runtime_config
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response
-from scripts.validate_config import validate_config
+from src.application.config_validator import validate_config
 from src.application.account_management import add_account, edit_account, remove_account
 from src.application.close_advice_pipeline import run_close_advice
 from src.application.healthcheck import run_healthcheck
 from src.application.layered_config import build_layered_runtime_config_file, explain_layered_runtime_config_key
 from src.application.multi_account_tick import run_tick
 from src.application.notification_pipeline import preview_notification
+from src.application.option_positions_feishu_sync import main as run_option_positions_feishu_sync
 from src.application.pipeline_runtime import main as run_scan_pipeline
 from src.application.runtime_setup import init_runtime
 from src.application.scan_pipeline import run_scan
+from src.application.scan_scheduler import run_scheduler
 from src.application.version_check import check_version_update
 from scripts.query_sell_put_cash import query_sell_put_cash
-from scripts.scan_scheduler import run_scheduler
 
 
 def _dumps(payload: dict[str, Any]) -> str:
@@ -123,6 +124,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     sell_put_cash.add_argument("--top", type=int, default=10)
     sell_put_cash.add_argument("--no-exchange-rates", action="store_true")
     sell_put_cash.add_argument("--out-dir", default="output/state")
+
+    option_positions = sub.add_parser("option-positions", help="option position operations")
+    option_positions_sub = option_positions.add_subparsers(dest="option_positions_command", required=True)
+    sync_feishu = option_positions_sub.add_parser("sync-feishu", help="sync option positions to Feishu")
+    sync_feishu.add_argument("--config", default=None, help="runtime config path; when provided, portfolio.data_config and runtime sync switch are used")
+    sync_feishu.add_argument("--data-config", default=None, help="portfolio data config path; auto-resolves when omitted")
+    sync_feishu.add_argument("--apply", action="store_true", help="apply changes to Feishu and persist local sync metadata")
+    sync_feishu.add_argument("--dry-run", action="store_true", help="preview actions without writing to Feishu")
+    sync_feishu.add_argument("--limit", type=int, default=None, help="maximum number of local lots to inspect")
+    sync_feishu.add_argument("--only-record-id", default=None, help="sync a single local record_id")
+    sync_feishu.add_argument("--only-open", action="store_true", help="only sync open positions")
+    sync_feishu.add_argument("--since-updated-ms", type=int, default=None, help="only include rows last synced before this ms watermark")
+    sync_feishu.add_argument(
+        "--prune-remote-missing-local",
+        action="store_true",
+        help="delete remote rows whose local_record_id no longer exists locally; disabled by default",
+    )
+    sync_feishu.add_argument("--verbose", action="store_true", help="print payload details")
 
     init_cmd = sub.add_parser("init", help="initialize runtime config")
     init_sub = init_cmd.add_subparsers(dest="init_command", required=True)
@@ -282,6 +301,31 @@ def main(argv: list[str] | None = None) -> int:
                 no_exchange_rates=bool(args.no_exchange_rates),
                 out_dir=args.out_dir,
             )
+            return 0
+
+        if args.command == "option-positions" and args.option_positions_command == "sync-feishu":
+            sync_argv: list[str] = []
+            if args.config:
+                sync_argv.extend(["--config", str(args.config)])
+            if args.data_config:
+                sync_argv.extend(["--data-config", str(args.data_config)])
+            if args.apply:
+                sync_argv.append("--apply")
+            if args.dry_run:
+                sync_argv.append("--dry-run")
+            if args.limit is not None:
+                sync_argv.extend(["--limit", str(args.limit)])
+            if args.only_record_id:
+                sync_argv.extend(["--only-record-id", str(args.only_record_id)])
+            if args.only_open:
+                sync_argv.append("--only-open")
+            if args.since_updated_ms is not None:
+                sync_argv.extend(["--since-updated-ms", str(args.since_updated_ms)])
+            if args.prune_remote_missing_local:
+                sync_argv.append("--prune-remote-missing-local")
+            if args.verbose:
+                sync_argv.append("--verbose")
+            run_option_positions_feishu_sync(sync_argv)
             return 0
 
         if args.command == "init" and args.init_command == "runtime":

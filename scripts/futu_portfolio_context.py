@@ -4,9 +4,10 @@ from datetime import datetime, timezone
 from typing import Any, Mapping
 
 from domain.domain.fetch_source import is_futu_fetch_source, normalize_fetch_source
-from scripts.futu_gateway import build_ready_futu_gateway
+from src.infrastructure.futu_gateway import build_ready_futu_gateway
 from domain.domain.option_position_lots import normalize_account, normalize_currency
 from domain.domain.symbol_identity import canonical_symbol, symbol_currency
+from src.application.account_config import resolve_trade_intake_futu_account_ids as _resolve_trade_intake_futu_account_ids
 
 
 def _rows(data: Any) -> list[dict[str, Any]]:
@@ -81,33 +82,6 @@ def _normalize_symbol(value: Any) -> str | None:
     return canonical_symbol(value)
 
 
-def _normalize_account_ids(raw: Mapping[str, Any] | Any, *, account: str | None) -> list[str]:
-    if not account or not isinstance(raw, Mapping):
-        return []
-    want = normalize_account(account)
-    out: list[str] = []
-    for acc_id, mapped in raw.items():
-        if normalize_account(mapped) != want:
-            continue
-        key = str(acc_id or "").strip()
-        if key:
-            out.append(key)
-    return out
-
-
-def resolve_trade_intake_futu_account_ids(cfg: Mapping[str, Any] | Any, *, account: str | None) -> list[str]:
-    if not isinstance(cfg, Mapping):
-        return []
-    trade_intake = cfg.get("trade_intake")
-    if not isinstance(trade_intake, Mapping):
-        return []
-    account_mapping = trade_intake.get("account_mapping")
-    if not isinstance(account_mapping, Mapping):
-        return []
-    futu_mapping = account_mapping.get("futu")
-    return _normalize_account_ids(futu_mapping, account=account)
-
-
 def infer_futu_portfolio_settings(cfg: Mapping[str, Any] | Any, *, account: str | None = None) -> dict[str, Any]:
     if not isinstance(cfg, Mapping):
         return {}
@@ -162,7 +136,7 @@ def should_try_futu_portfolio(cfg: Mapping[str, Any] | Any, *, account: str | No
     settings = infer_futu_portfolio_settings(cfg, account=account)
     if not settings.get("host") or not settings.get("port"):
         return False
-    return bool(resolve_trade_intake_futu_account_ids(cfg, account=account))
+    return bool(_resolve_trade_intake_futu_account_ids(cfg, account=account))
 
 
 def _filter_rows_for_account_ids(rows: list[dict[str, Any]], account_ids: set[str]) -> list[dict[str, Any]]:
@@ -305,7 +279,7 @@ def fetch_futu_portfolio_context(
     if not host or not port:
         raise ValueError("futu portfolio settings missing host/port")
 
-    account_ids = set(resolve_trade_intake_futu_account_ids(cfg, account=account))
+    account_ids = set(_resolve_trade_intake_futu_account_ids(cfg, account=account))
     if not account_ids:
         raise ValueError(f"no futu account mapping for account={account}")
 

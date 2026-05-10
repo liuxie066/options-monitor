@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from domain.domain import resolve_openclaw_transport_channel
-from scripts.io_utils import read_json, atomic_write_json as write_json, utc_now
+from src.infrastructure.io_utils import read_json, atomic_write_json as write_json, utc_now
 
 
 def opend_alert_rl_path(base: Path) -> Path:

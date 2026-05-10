@@ -11,10 +11,10 @@ repo_base = Path(__file__).resolve().parents[1]
 if str(repo_base) not in sys.path:
     sys.path.insert(0, str(repo_base))
 
-from scripts.config_loader import load_config
+from src.application.config_loader import load_config
 from scripts.futu_trade_detail_lookup import enrich_trade_push_payload_with_account_id
-from scripts.trade_account_mapping import resolve_trade_intake_config
-from scripts.trade_event_normalizer import normalize_trade_deal
+from src.application.trade_account_mapping import resolve_trade_intake_config
+from src.application.trade_event_normalizer import normalize_trade_deal
 from scripts.trade_intake_resolver import resolve_trade_deal
 from scripts.trade_intake_state import (
     append_trade_intake_audit,

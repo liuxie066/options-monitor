@@ -1185,7 +1185,7 @@ def test_close_advice_reads_cached_context_and_required_data(monkeypatch, tmp_pa
 
 
 def test_close_advice_summary_uses_domain_tier_order_for_optional(tmp_path: Path) -> None:
-    from scripts.io_utils import safe_read_csv
+    from src.infrastructure.io_utils import safe_read_csv
     from src.application.agent_tool_runtime import as_float
     from src.application.agent_tool_scan import close_advice_rows_summary
 
@@ -1698,12 +1698,12 @@ def test_scan_opportunities_returns_summary_fields(monkeypatch, tmp_path: Path) 
     old_build_pipeline_context = None
     old_build_symbols_summary = None
     old_build_symbols_digest = None
-    import scripts.config_loader as config_loader
+    import src.application.config_loader as config_loader
     import scripts.config_profiles as config_profiles
     import scripts.pipeline_symbol as pipeline_symbol
     import scripts.pipeline_context as pipeline_context
     import scripts.pipeline_watchlist as pipeline_watchlist
-    import scripts.report_builders as report_builders
+    import src.application.report_builders as report_builders
     old_load_config = tools.__dict__.get("load_config")
     try:
         monkeypatch.setattr(config_loader, "load_config", lambda **kwargs: _minimal_cfg())

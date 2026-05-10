@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from scripts.io_utils import atomic_write_json, ensure_dir, read_json, utc_now
+from src.infrastructure.io_utils import atomic_write_json, ensure_dir, read_json, utc_now
 
 
 STATE_BUCKETS = ("processed_deal_ids", "failed_deal_ids", "unresolved_deal_ids")

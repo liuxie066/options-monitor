@@ -9,7 +9,7 @@ if str(BASE) not in sys.path:
 
 
 def test_validate_config_accepts_minimal_sell_put_yield_enhancement_symbol() -> None:
-    from scripts.validate_config import validate_config
+    from src.application.config_validator import validate_config
 
     cfg = {
         "templates": {},
@@ -33,7 +33,7 @@ def test_validate_config_accepts_minimal_sell_put_yield_enhancement_symbol() -> 
 
 
 def test_validate_config_rejects_invalid_sell_put_yield_enhancement_funding_mode() -> None:
-    from scripts.validate_config import validate_config
+    from src.application.config_validator import validate_config
 
     cfg = {
         "templates": {},
@@ -63,7 +63,7 @@ def test_validate_config_rejects_invalid_sell_put_yield_enhancement_funding_mode
 
 
 def test_validate_config_rejects_invalid_template_yield_enhancement_call_bounds() -> None:
-    from scripts.validate_config import validate_config
+    from src.application.config_validator import validate_config
 
     cfg = {
         "templates": {
@@ -91,7 +91,7 @@ def test_validate_config_rejects_invalid_template_yield_enhancement_call_bounds(
 
 
 def test_validate_config_rejects_nested_sell_put_yield_enhancement_template_path() -> None:
-    from scripts.validate_config import validate_config
+    from src.application.config_validator import validate_config
 
     cfg = {
         "templates": {
@@ -119,7 +119,7 @@ def test_validate_config_rejects_nested_sell_put_yield_enhancement_template_path
 
 
 def test_validate_config_rejects_nested_sell_put_yield_enhancement_symbol_path() -> None:
-    from scripts.validate_config import validate_config
+    from src.application.config_validator import validate_config
 
     cfg = {
         "templates": {},
@@ -145,7 +145,7 @@ def test_validate_config_rejects_nested_sell_put_yield_enhancement_symbol_path()
 
 
 def test_validate_config_rejects_legacy_rebound_combo_template_path() -> None:
-    from scripts.validate_config import validate_config
+    from src.application.config_validator import validate_config
 
     cfg = {
         "templates": {
@@ -171,7 +171,7 @@ def test_validate_config_rejects_legacy_rebound_combo_template_path() -> None:
 
 
 def test_validate_config_rejects_legacy_rebound_combo_symbol_path() -> None:
-    from scripts.validate_config import validate_config
+    from src.application.config_validator import validate_config
 
     cfg = {
         "templates": {},
@@ -193,7 +193,7 @@ def test_validate_config_rejects_legacy_rebound_combo_symbol_path() -> None:
 
 
 def test_validate_config_rejects_removed_yield_enhancement_target_price_fields() -> None:
-    from scripts.validate_config import validate_config
+    from src.application.config_validator import validate_config
 
     cfg = {
         "templates": {},

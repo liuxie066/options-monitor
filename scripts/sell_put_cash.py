@@ -12,15 +12,15 @@ from typing import Any
 
 import pandas as pd
 
-from scripts.cash_secured_utils import (
+from domain.domain.cash_secured_utils import (
     cash_secured_symbol_by_ccy,
     cash_secured_symbol_cny,
     normalize_cash_secured_by_symbol_by_ccy,
     normalize_cash_secured_total_by_ccy,
     read_cash_secured_total_cny,
 )
-from scripts.exchange_rates import CurrencyConverter
-from scripts.io_utils import safe_read_csv
+from src.infrastructure.exchange_rates import CurrencyConverter
+from src.infrastructure.io_utils import safe_read_csv
 
 log = logging.getLogger(__name__)
 

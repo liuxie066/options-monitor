@@ -11,15 +11,15 @@ from pathlib import Path
 
 import pandas as pd
 
-from scripts.candidate_defaults import (
+from domain.domain.candidate_defaults import (
     DEFAULT_SELL_CALL_WINDOW,
     resolve_candidate_liquidity,
     resolve_candidate_window,
     resolve_event_risk_config,
 )
-from scripts.exchange_rates import CurrencyConverter
+from src.infrastructure.exchange_rates import CurrencyConverter
 from domain.domain.symbol_identity import symbol_currency
-from scripts.io_utils import safe_read_csv
+from src.infrastructure.io_utils import safe_read_csv
 from scripts.render_sell_call_alerts import render_sell_call_alerts
 from scripts.report_summaries import summarize_sell_call
 from scripts.scan_sell_call import run_sell_call_scan

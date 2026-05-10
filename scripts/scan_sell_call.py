@@ -12,7 +12,7 @@ if str(repo_base) not in sys.path:
     sys.path.insert(0, str(repo_base))
 
 from scripts.event_risk_filter import annotate_candidates_with_event_risk
-from scripts.candidate_defaults import (
+from domain.domain.candidate_defaults import (
     DEFAULT_CANDIDATE_LIQUIDITY,
     DEFAULT_SELL_CALL_WINDOW,
     resolve_event_risk_config,

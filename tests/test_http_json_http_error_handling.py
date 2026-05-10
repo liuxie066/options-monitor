@@ -1,4 +1,4 @@
-"""Regression: legacy http_json behavior still available via feishu_bitable.http_json.
+"""Regression: http_json behavior is available via infrastructure feishu_bitable.http_json.
 
 Now http_json is centralized and raises typed exceptions instead of returning error dict.
 """
@@ -32,7 +32,7 @@ def _make_http_error(status: int, body: str | bytes | None):
 
 
 def test_http_json_404_non_json_body_raises_permanent_error() -> None:
-    from scripts import feishu_bitable as fb
+    from src.infrastructure import feishu_bitable as fb
 
     fake_error = _make_http_error(404, "Not Found")
 
@@ -45,7 +45,7 @@ def test_http_json_404_non_json_body_raises_permanent_error() -> None:
 
 
 def test_http_json_500_json_body_raises_transient_error() -> None:
-    from scripts import feishu_bitable as fb
+    from src.infrastructure import feishu_bitable as fb
 
     payload = {"code": 123, "message": "internal error", "detail": "db down"}
     fake_error = _make_http_error(500, json.dumps(payload))
@@ -59,7 +59,7 @@ def test_http_json_500_json_body_raises_transient_error() -> None:
 
 
 def test_http_json_urlerror_raises_transient_error() -> None:
-    from scripts import feishu_bitable as fb
+    from src.infrastructure import feishu_bitable as fb
     import urllib.error
 
     with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("network unreachable")):
@@ -71,7 +71,7 @@ def test_http_json_urlerror_raises_transient_error() -> None:
 
 
 def test_http_json_socket_timeout_raises_transient_error() -> None:
-    from scripts import feishu_bitable as fb
+    from src.infrastructure import feishu_bitable as fb
     import socket
 
     with patch("urllib.request.urlopen", side_effect=socket.timeout("read timed out")):

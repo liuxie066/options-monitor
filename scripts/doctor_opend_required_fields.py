@@ -65,7 +65,7 @@ def main():
 
     # local import to keep module lightweight
     from futu import OpenQuoteContext, RET_OK
-    from scripts.opend_utils import normalize_underlier
+    from src.application.opend_utils import normalize_underlier
 
     results: list[SymResult] = []
     any_fail = False

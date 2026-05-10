@@ -11,15 +11,15 @@ from pathlib import Path
 
 import pandas as pd
 
-from scripts.candidate_defaults import (
+from domain.domain.candidate_defaults import (
     DEFAULT_SELL_PUT_WINDOW,
     resolve_candidate_liquidity,
     resolve_candidate_window,
     resolve_event_risk_config,
 )
-from scripts.exchange_rates import CurrencyConverter
+from src.infrastructure.exchange_rates import CurrencyConverter
 from domain.domain.symbol_identity import symbol_currency
-from scripts.io_utils import safe_read_csv
+from src.infrastructure.io_utils import safe_read_csv
 from scripts.render_sell_put_alerts import render_sell_put_alerts
 from scripts.render_yield_enhancement_alerts import render_yield_enhancement_alerts
 from scripts.report_labels import add_sell_put_labels

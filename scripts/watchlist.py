@@ -17,9 +17,9 @@ import json
 import sys
 from pathlib import Path
 
-from scripts.account_config import normalize_accounts
-from scripts.config_loader import resolve_watchlist_config, set_watchlist_config
-from scripts.validate_config import validate_config
+from src.application.account_config import normalize_accounts
+from src.application.config_loader import resolve_watchlist_config, set_watchlist_config
+from src.application.config_validator import validate_config
 from src.application.runtime_config_paths import write_json_atomic
 from src.application.watchlist_mutations import ensure_symbols_list, find_symbol_entry, normalize_symbol, set_path
 

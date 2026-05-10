@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from scripts.trade_event_normalizer import NormalizedTradeDeal
+from src.application.trade_event_normalizer import NormalizedTradeDeal
 from scripts.trade_intake_state import upsert_deal_state
 from src.application.trade_intake import build_trade_intake_audit_event, process_trade_payload
 

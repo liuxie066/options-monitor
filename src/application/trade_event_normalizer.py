@@ -6,14 +6,14 @@ from pathlib import Path
 from typing import Any
 
 from domain.domain.option_position_lots import normalize_currency, normalize_option_type
-from scripts.multiplier_cache import resolve_multiplier_with_source_and_diagnostics
+from src.infrastructure.multiplier_cache import resolve_multiplier_with_source_and_diagnostics
 from domain.domain.trade_contract_identity import (
     normalize_contract_expiration,
     normalize_position_effect,
     normalize_trade_side,
 )
-from scripts.trade_account_mapping import resolve_internal_account
-from scripts.trade_account_identity import (
+from src.application.trade_account_mapping import resolve_internal_account
+from domain.domain.trade_account_identity import (
     ACCOUNT_ID_KEYS,
     extract_primary_account_id,
     extract_visible_account_fields,
@@ -213,7 +213,7 @@ def normalize_trade_deal(
     position_effect = _normalize_position_effect(
         _pick(src, "position_effect", "position_side", "offset_type", "open_close", "trd_side", "trade_side", "side")
     )
-    base = Path(repo_base).resolve() if repo_base is not None else Path(__file__).resolve().parents[1]
+    base = Path(repo_base).resolve() if repo_base is not None else Path(__file__).resolve().parents[2]
     multiplier = _norm_int(_pick(src, "multiplier", "contract_multiplier", "lot_size"))
     multiplier, multiplier_source, multiplier_diagnostics = resolve_multiplier_with_source_and_diagnostics(
         repo_base=base,

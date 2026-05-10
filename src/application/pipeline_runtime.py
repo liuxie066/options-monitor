@@ -5,15 +5,16 @@ import json
 import sys
 from pathlib import Path
 
-from scripts.account_config import cash_footer_accounts_from_config
-from scripts.config_loader import load_config as load_runtime_pipeline_config
-from scripts.config_loader import resolve_data_config_path, resolve_watchlist_config
-from scripts.report_builders import build_symbols_digest, build_symbols_summary
-from scripts.subprocess_utils import run_cmd
+from src.application.account_config import cash_footer_accounts_from_config
+from src.application.config_loader import load_config as load_runtime_pipeline_config
+from src.application.config_loader import resolve_data_config_path, resolve_watchlist_config
+from src.application.report_builders import build_symbols_digest, build_symbols_summary
+from src.infrastructure.subprocess_utils import run_cmd
 from src.application.pipeline_reporting import (
     run_pipeline_alert_stage,
     run_pipeline_notification_stage,
 )
+from src.infrastructure.logging_config import get_logger
 from src.application.opend_fetch_config import opend_fetch_kwargs
 
 try:
@@ -22,7 +23,7 @@ except Exception:
     from scripts.domain.storage.repositories import report_repo  # type: ignore
 
 
-LOG = __import__("scripts.logging_config", fromlist=["get_logger"]).get_logger("run_pipeline")
+LOG = get_logger("run_pipeline")
 RUNTIME_MODE = "dev"
 IS_SCHEDULED = False
 STAGE = "all"
@@ -106,7 +107,7 @@ def main(argv: list[str] | None = None) -> int:
     if bool(getattr(args, "refresh_multiplier_cache", False)):
         try:
             from domain.domain.fetch_source import is_futu_fetch_source
-            from scripts import multiplier_cache
+            from src.infrastructure import multiplier_cache
 
             cache_path = multiplier_cache.default_cache_path(base)
             cfg0 = json.loads(cfg_path.read_text(encoding="utf-8"))
@@ -213,6 +214,15 @@ def main(argv: list[str] | None = None) -> int:
                 policy_json = str(policy_path)
             elif isinstance(policy, str) and policy.strip():
                 policy_json = policy.strip()
+        except Exception:
+            pass
+        try:
+            from domain.domain import alert_rules as _alert_rules
+            from domain.domain.alert_policy import resolve_alert_policy as _resolve_alert_policy
+            _raw_policy = cfg.get("alert_policy") if isinstance(cfg, dict) else None
+            _alert_rules.set_active_alert_policy(
+                _resolve_alert_policy(_raw_policy if isinstance(_raw_policy, dict) else None)
+            )
         except Exception:
             pass
         if _want("alert"):

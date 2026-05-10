@@ -36,11 +36,11 @@
 - Added `option_positions.sync_to_feishu.enabled` as an explicit data-config switch for Feishu `option_positions` mirror writes, defaulting to off.
 
 ### Changed
-- Guarded post-write option-position auto sync and `sync_option_positions_to_feishu.py --apply` writes behind the new switch, reporting disabled writes as skipped instead of creating remote rows.
+- Guarded post-write option-position auto sync and `./om option-positions sync-feishu --apply` writes behind the new switch, reporting disabled writes as skipped instead of creating remote rows.
 - Updated portfolio data-config examples, configuration docs, and repair guidance to show the default-off Feishu mirror switch.
 
 ### Fixed
-- Rejected `sync_option_positions_to_feishu.py --apply --dry-run` as an invalid mixed mode to prevent accidental remote writes.
+- Rejected `./om option-positions sync-feishu --apply --dry-run` as an invalid mixed mode to prevent accidental remote writes.
 
 ## 1.1.7 - 2026-05-09
 
