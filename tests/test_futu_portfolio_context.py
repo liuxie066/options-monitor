@@ -240,3 +240,96 @@ def test_fetch_futu_portfolio_context_rejects_non_numeric_mapped_account_id() ->
             )
     finally:
         fc.build_ready_futu_gateway = old_build_gateway  # type: ignore[assignment]
+
+
+def test_build_futu_portfolio_context_excludes_short_positions_and_options() -> None:
+    from src.application.futu_portfolio_context import build_futu_portfolio_context
+
+    out = build_futu_portfolio_context(
+        balance_rows=[],
+        position_rows=[
+            {"code": "US.NVDA", "qty": 100, "cost_price": 120, "currency": "USD", "position_side": "LONG", "sec_type": "STOCK"},
+            {"code": "US.AAPL", "qty": 100, "cost_price": 180, "currency": "USD", "position_side": "SHORT", "sec_type": "STOCK"},
+            {"code": "US.TSLA", "qty": 50, "cost_price": 200, "currency": "USD", "sec_type": "DRVT"},
+            {"code": "US.AAPL250117C00175000", "qty": 1, "cost_price": 5, "currency": "USD"},
+        ],
+        account="lx",
+        market="富途",
+        base_currency="USD",
+    )
+
+    assert sorted(out["stocks_by_symbol"].keys()) == ["NVDA"]
+    assert out["stocks_by_symbol"]["NVDA"]["shares"] == 100
+
+
+def test_build_futu_portfolio_context_ignores_legacy_balance_aliases() -> None:
+    from src.application.futu_portfolio_context import build_futu_portfolio_context
+
+    out = build_futu_portfolio_context(
+        balance_rows=[
+            {"currency": "USD", "available_funds": 9999, "withdraw_cash": 8888, "power": 7777},
+            {"currency": "USD", "cash": 100},
+        ],
+        position_rows=[],
+        account="lx",
+    )
+
+    assert out["cash_by_currency"] == {"USD": 100.0}
+
+
+def test_build_futu_portfolio_context_dedups_balance_rows_by_acc_env_currency() -> None:
+    from src.application.futu_portfolio_context import build_futu_portfolio_context
+
+    out = build_futu_portfolio_context(
+        balance_rows=[
+            {"acc_id": "1", "trd_env": "REAL", "currency": "USD", "cash": 1000},
+            {"acc_id": "1", "trd_env": "REAL", "currency": "USD", "cash": 1000},
+            {"acc_id": "1", "trd_env": "REAL", "currency": "HKD", "cash": 500},
+        ],
+        position_rows=[],
+        account="lx",
+    )
+
+    assert out["cash_by_currency"] == {"USD": 1000.0, "HKD": 500.0}
+
+
+def test_fetch_futu_portfolio_context_passes_trd_env_and_filters_simulate_rows() -> None:
+    import src.application.futu_portfolio_context as fc
+
+    captured: dict[str, list] = {"balance_kwargs": [], "position_kwargs": []}
+
+    class _FakeGateway:
+        def get_account_balance(self, **kwargs):
+            captured["balance_kwargs"].append(dict(kwargs))
+            return [
+                {"acc_id": str(int(FAKE_FUTU_ACC_ID_LX_PRIMARY)), "trd_env": "REAL", "currency": "USD", "cash": 1000},
+                {"acc_id": str(int(FAKE_FUTU_ACC_ID_LX_PRIMARY)), "trd_env": "SIMULATE", "currency": "USD", "cash": 9999},
+            ]
+
+        def get_positions(self, **kwargs):
+            captured["position_kwargs"].append(dict(kwargs))
+            return []
+
+        def close(self):
+            return None
+
+    old_build_gateway = fc.build_ready_futu_gateway
+    try:
+        fc.build_ready_futu_gateway = lambda **_kwargs: _FakeGateway()  # type: ignore[assignment]
+        out = fc.fetch_futu_portfolio_context(
+            cfg={
+                "account_settings": {
+                    "lx": {"futu": {"host": "127.0.0.1", "port": 11111, "trd_env": "REAL"}},
+                },
+                "trade_intake": {
+                    "account_mapping": {"futu": {FAKE_FUTU_ACC_ID_LX_PRIMARY: "lx"}}
+                },
+            },
+            account="lx",
+        )
+    finally:
+        fc.build_ready_futu_gateway = old_build_gateway  # type: ignore[assignment]
+
+    assert captured["balance_kwargs"][0].get("trd_env") == "REAL"
+    assert captured["position_kwargs"][0].get("trd_env") == "REAL"
+    assert out["cash_by_currency"] == {"USD": 1000.0}

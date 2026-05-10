@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
@@ -8,6 +9,67 @@ from src.infrastructure.futu_gateway import build_ready_futu_gateway
 from domain.domain.option_position_lots import normalize_account, normalize_currency
 from domain.domain.symbol_identity import canonical_symbol, symbol_currency
 from src.application.account_config import resolve_trade_intake_futu_account_ids as _resolve_trade_intake_futu_account_ids
+
+
+_DEFAULT_TRD_ENV = "REAL"
+_VALID_TRD_ENVS = {"REAL", "SIMULATE"}
+_LONG_POSITION_SIDE = "LONG"
+_NON_STOCK_SEC_TYPES = {"DRVT", "FUTURE", "IDX", "NONE", "N/A"}
+# Futu option code shape e.g. US.AAPL250117C00175000 — used as fallback when sec_type is absent.
+_OPTION_CODE_PATTERN = re.compile(r"\d{6}[CP]\d{6,}")
+
+
+def _resolve_trd_env(value: Any) -> str:
+    raw = str(value or "").strip().upper()
+    if raw in _VALID_TRD_ENVS:
+        return raw
+    return _DEFAULT_TRD_ENV
+
+
+def _row_trd_env(row: Mapping[str, Any]) -> str | None:
+    raw = _pick(row, "trd_env", "trdEnv", "trade_env", "tradeEnv")
+    if raw in (None, ""):
+        return None
+    return str(raw).strip().upper()
+
+
+def _is_long_position(row: Mapping[str, Any]) -> bool:
+    side = _pick(row, "position_side", "positionSide", "side")
+    if side in (None, ""):
+        return True
+    return str(side).strip().upper() == _LONG_POSITION_SIDE
+
+
+def _looks_like_option_code(code: Any) -> bool:
+    if not code:
+        return False
+    return bool(_OPTION_CODE_PATTERN.search(str(code)))
+
+
+def _is_stock_position(row: Mapping[str, Any]) -> bool:
+    sec_type = _pick(row, "sec_type", "secType", "security_type")
+    if sec_type in (None, ""):
+        code = _pick(row, "code", "symbol", "stock_code", "asset_id")
+        return not _looks_like_option_code(code)
+    return str(sec_type).strip().upper() not in _NON_STOCK_SEC_TYPES
+
+
+def _dedup_balance_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[tuple[str, str, str]] = set()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        acc = str(_pick(row, "acc_id", "account_id", "trd_acc_id", "trade_acc_id", "accID") or "").strip()
+        if not acc:
+            out.append(row)
+            continue
+        env = (_row_trd_env(row) or "").strip()
+        ccy = str(_pick(row, "currency", "cash_currency", "currency_code", "ccy") or "").strip().upper()
+        key = (acc, env, ccy)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(row)
+    return out
 
 
 def _rows(data: Any) -> list[dict[str, Any]]:
@@ -139,12 +201,21 @@ def should_try_futu_portfolio(cfg: Mapping[str, Any] | Any, *, account: str | No
     return bool(_resolve_trade_intake_futu_account_ids(cfg, account=account))
 
 
-def _filter_rows_for_account_ids(rows: list[dict[str, Any]], account_ids: set[str]) -> list[dict[str, Any]]:
+def _filter_rows_for_account_ids(
+    rows: list[dict[str, Any]],
+    account_ids: set[str],
+    *,
+    trd_env: str | None = None,
+) -> list[dict[str, Any]]:
     if not account_ids:
         return []
     out: list[dict[str, Any]] = []
     saw_account_column = False
     for row in rows:
+        row_env = _row_trd_env(row)
+        if trd_env and row_env and row_env != trd_env:
+            saw_account_column = True
+            continue
         acc_id = str(
             _pick(
                 row,
@@ -165,20 +236,37 @@ def _filter_rows_for_account_ids(rows: list[dict[str, Any]], account_ids: set[st
     return out if saw_account_column else rows
 
 
-def _query_rows_for_account_id(gateway: Any, method_name: str, account_id: str) -> list[dict[str, Any]]:
+def _query_rows_for_account_id(
+    gateway: Any,
+    method_name: str,
+    account_id: str,
+    *,
+    trd_env: str | None = None,
+) -> list[dict[str, Any]]:
     method = getattr(gateway, method_name)
     try:
-        return _rows(method(acc_id=_to_futu_acc_id(account_id)))
+        kwargs: dict[str, Any] = {"acc_id": _to_futu_acc_id(account_id)}
+        if trd_env:
+            kwargs["trd_env"] = trd_env
+        return _rows(method(**kwargs))
     except Exception as exc:
         raise ValueError(
             f"{method_name} failed for mapped account_id={account_id} via acc_id selector"
         ) from exc
 
 
-def _query_rows_for_account_ids(gateway: Any, method_name: str, account_ids: set[str]) -> list[dict[str, Any]]:
+def _query_rows_for_account_ids(
+    gateway: Any,
+    method_name: str,
+    account_ids: set[str],
+    *,
+    trd_env: str | None = None,
+) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for account_id in sorted(account_ids):
-        rows.extend(_query_rows_for_account_id(gateway, method_name, account_id))
+        rows.extend(
+            _query_rows_for_account_id(gateway, method_name, account_id, trd_env=trd_env)
+        )
     return rows
 
 
@@ -194,12 +282,12 @@ def build_futu_portfolio_context(
     stocks_by_symbol: dict[str, dict[str, Any]] = {}
 
     base_ccy = _normalize_currency(base_currency, fallback="CNY")
-    for row in balance_rows:
+    for row in _dedup_balance_rows(balance_rows):
         ccy = _normalize_currency(
             _pick(row, "currency", "cash_currency", "currency_code", "ccy"),
             fallback=base_ccy,
         )
-        cash_v = _to_float(_pick(row, "cash", "available_funds", "withdraw_cash", "power"))
+        cash_v = _to_float(_pick(row, "cash"))
         fund_v = _to_float(_pick(row, "fund_assets", "mmf_assets", "money_fund_assets"))
         total = 0.0
         has_value = False
@@ -213,6 +301,10 @@ def build_futu_portfolio_context(
             cash_by_currency[ccy] = cash_by_currency.get(ccy, 0.0) + total
 
     for row in position_rows:
+        if not _is_long_position(row):
+            continue
+        if not _is_stock_position(row):
+            continue
         symbol = _normalize_symbol(_pick(row, "code", "symbol", "stock_code", "asset_id"))
         if not symbol:
             continue
@@ -278,6 +370,7 @@ def fetch_futu_portfolio_context(
     port = settings.get("port")
     if not host or not port:
         raise ValueError("futu portfolio settings missing host/port")
+    trd_env = _resolve_trd_env(settings.get("trd_env"))
 
     account_ids = set(_resolve_trade_intake_futu_account_ids(cfg, account=account))
     if not account_ids:
@@ -289,13 +382,17 @@ def fetch_futu_portfolio_context(
         is_option_chain_cache_enabled=False,
     )
     try:
-        balance_rows = _query_rows_for_account_ids(gateway, "get_account_balance", account_ids)
-        position_rows = _query_rows_for_account_ids(gateway, "get_positions", account_ids)
+        balance_rows = _query_rows_for_account_ids(
+            gateway, "get_account_balance", account_ids, trd_env=trd_env
+        )
+        position_rows = _query_rows_for_account_ids(
+            gateway, "get_positions", account_ids, trd_env=trd_env
+        )
     finally:
         gateway.close()
 
-    balance_rows = _filter_rows_for_account_ids(balance_rows, account_ids)
-    position_rows = _filter_rows_for_account_ids(position_rows, account_ids)
+    balance_rows = _filter_rows_for_account_ids(balance_rows, account_ids, trd_env=trd_env)
+    position_rows = _filter_rows_for_account_ids(position_rows, account_ids, trd_env=trd_env)
 
     return build_futu_portfolio_context(
         balance_rows=balance_rows,
