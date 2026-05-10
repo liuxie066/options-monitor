@@ -52,7 +52,7 @@ def run_multi_tick_watchdog(
         if need_opend:
             unhealthy = None
             wd_cfg = (base_cfg or {}).get("watchdog") or {}
-            retry_enabled = bool(wd_cfg.get("retry_enabled", False))
+            retry_enabled = bool(wd_cfg.get("retry_enabled", True))
             retry_interval_sec = float(wd_cfg.get("retry_interval_sec", 3.0))
             retry_timeout_sec = float(wd_cfg.get("retry_timeout_sec", 25.0))
             success_threshold = int(wd_cfg.get("success_threshold", 2))

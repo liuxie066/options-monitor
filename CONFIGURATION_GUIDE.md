@@ -1,7 +1,8 @@
 # options-monitor 配置与表结构说明（实战版）
 
 > 目标：你只要维护：
-> - `configs/user.us.json` / `configs/user.hk.json`（账号与 symbols；通知目标等私有覆盖按需放这里）
+> - 可选 `configs/user.common.json`（US/HK 共用的用户覆盖）
+> - `configs/user.us.json` / `configs/user.hk.json`（市场账号与 symbols；市场私有覆盖按需放这里）
 > - `portfolio.data_config`（最小配置下只需要 SQLite `option_positions` 路径）
 > - Feishu App 凭证和 Bitable 配置是可选项，只在 `holdings` / `external_holdings` 数据源，或 `option_positions` bootstrap / 镜像场景需要；`option_positions` 的稳态读写主存储仍是 SQLite
 
@@ -11,14 +12,16 @@
 
 ### 推荐编辑入口（分层配置）
 - `configs/system.json`：系统默认值，通常不需要用户改
+- `configs/user.common.json`（可选）：US/HK 共用用户覆盖，同字段会被 market user 覆盖
 - `configs/user.us.json`
 - `configs/user.hk.json`
 - `secrets/portfolio.sqlite.json`
 - `secrets/portfolio.external_holdings.json`（可选，只在 external_holdings 账号场景需要）
 
-用户日常只维护 `configs/user.us.json` / `configs/user.hk.json` 里的账号和 symbols；如果启用通知，再在同一个 user 文件里补 `notifications.target` 这类私有覆盖。运行前生成 canonical runtime config：
+用户日常只维护 `configs/user.us.json` / `configs/user.hk.json` 里的 market-specific 账号和 symbols；如果某些覆盖 US/HK 都相同，放到可选的 `configs/user.common.json`。运行前生成 canonical runtime config：
 
 ```bash
+cp configs/examples/user.common.example.json configs/user.common.json  # 可选
 cp configs/examples/user.example.us.json configs/user.us.json
 cp configs/examples/user.example.hk.json configs/user.hk.json
 ./om config build --market us
@@ -37,6 +40,7 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 
 ### 仓库里保留的模板文件
 - `configs/system.json`
+- `configs/examples/user.common.example.json`
 - `configs/examples/user.example.us.json`
 - `configs/examples/user.example.hk.json`
 - `configs/examples/portfolio.sqlite.example.json`
@@ -45,9 +49,9 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 - `configs/examples/openclaw.profile.example.json`
 
 ### 最小配置和补充配置怎么区分？
-- 最小编辑配置：`configs/user.us.json` / `configs/user.hk.json` 里的账号和 symbols；通知目标等私有字段属于按需覆盖
+- 最小编辑配置：`configs/user.us.json` / `configs/user.hk.json` 里的账号和 symbols；共用覆盖可放 `configs/user.common.json`
 - 最小运行配置：生成后的 `config.us.json` / `config.hk.json` + `secrets/portfolio.sqlite.json`
-- 补充配置：在同一套结构上继续补 `notifications.*`、`runtime.*`、`alert_policy.change_annual_threshold`、`intake.*`、`portfolio.source_by_account`、`feishu.*`
+- 补充配置：在同一套结构上继续补 `watchdog.*`、`notifications.*`、`runtime.*`、`alert_policy.change_annual_threshold`、`intake.*`、`portfolio.source_by_account`、`feishu.*`
 - 不再维护“两套 schema”或“两份不同风格文档”；只有一套结构，只是填写程度不同。
 
 ---
