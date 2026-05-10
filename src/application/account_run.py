@@ -64,6 +64,10 @@ class AccountRunRequest:
     prefetch_done: bool
     force_mode: bool = False
     allow_mutations: bool = True
+    update_legacy_output: bool = True
+    prefetch_lock: Any | None = None
+    prefetch_state: dict[str, Any] | None = None
+    maintenance_lock: Any | None = None
 
 
 @dataclass(frozen=True)
@@ -207,10 +211,11 @@ def run_one_account(
     }
     ensure_account_output_dir(acct_out)
 
-    try:
-        update_legacy_output_link(request.out_link, acct_out, tmp_dir=request.legacy_output_tmp_dir)
-    except RuntimeError as exc:
-        raise SystemExit(str(exc))
+    if bool(request.update_legacy_output):
+        try:
+            update_legacy_output_link(request.out_link, acct_out, tmp_dir=request.legacy_output_tmp_dir)
+        except RuntimeError as exc:
+            raise SystemExit(str(exc))
 
     cfg = json.loads(json.dumps(request.base_cfg))
     cfg["config_source_path"] = str(request.cfg_path.resolve())
@@ -313,9 +318,9 @@ def run_one_account(
 
     _write_account_metrics_state()
 
-    try:
+    def _run_position_maintenance() -> dict[str, Any]:
         portfolio_cfg = cfg.get("portfolio") if isinstance(cfg, dict) else {}
-        maintenance_result = run_expired_position_maintenance_for_account(
+        return run_expired_position_maintenance_for_account(
             base=request.base,
             cfg=cfg,
             account=acct,
@@ -323,6 +328,13 @@ def run_one_account(
             broker=(portfolio_cfg.get("broker") if isinstance(portfolio_cfg, dict) else None),
             dry_run=(not bool(request.allow_mutations)),
         )
+
+    try:
+        if request.maintenance_lock is None:
+            maintenance_result = _run_position_maintenance()
+        else:
+            with request.maintenance_lock:
+                maintenance_result = _run_position_maintenance()
         maintenance_notification = _maintenance_notification_text(maintenance_result)
         maintenance_status = _status_for_position_maintenance(maintenance_result)
         audit_fn(
@@ -422,9 +434,16 @@ def run_one_account(
             ran_pipeline=False,
         )
 
-    prefetch_done = bool(request.prefetch_done)
-    should_prefetch = bool(request.force_mode) or (not prefetch_done)
-    if should_prefetch:
+    def _shared_prefetch_done() -> bool:
+        state = request.prefetch_state
+        return bool(state.get("done")) if isinstance(state, dict) else False
+
+    def _mark_shared_prefetch_done(done: bool) -> None:
+        state = request.prefetch_state
+        if done and isinstance(state, dict):
+            state["done"] = True
+
+    def _run_required_data_prefetch() -> bool:
         runlog.safe_event(
             "fetch_chain_cache",
             "start",
@@ -481,7 +500,20 @@ def run_one_account(
                 exc=exc,
             )
         runlog.safe_event("fetch_chain_cache", "ok", data=_safe_runlog_data(prefetch_stats))
-        prefetch_done = (False if bool(request.force_mode) else True)
+        done = (False if bool(request.force_mode) else True)
+        _mark_shared_prefetch_done(done)
+        return done
+
+    prefetch_done = bool(request.prefetch_done or _shared_prefetch_done())
+    should_prefetch = bool(request.force_mode) or (not prefetch_done)
+    if should_prefetch:
+        if request.prefetch_lock is None:
+            prefetch_done = _run_required_data_prefetch()
+        else:
+            with request.prefetch_lock:
+                prefetch_done = bool(request.prefetch_done or _shared_prefetch_done())
+                if bool(request.force_mode) or (not prefetch_done):
+                    prefetch_done = _run_required_data_prefetch()
 
     acct_report_dir.mkdir(parents=True, exist_ok=True)
 

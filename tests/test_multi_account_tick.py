@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 from typing import Any
 
 
@@ -88,3 +89,38 @@ def test_current_run_id_is_reexported_from_multi_tick_main() -> None:
     from scripts.multi_tick.main import current_run_id as source_current_run_id
 
     assert mod.current_run_id is source_current_run_id
+
+
+def test_run_account_outcomes_runs_parallel_and_preserves_account_order() -> None:
+    from src.application import multi_account_tick as mod
+
+    started: list[str] = []
+    lock = threading.Lock()
+    both_started = threading.Event()
+
+    def run_account(acct: str) -> str:
+        with lock:
+            started.append(acct)
+            if len(started) == 2:
+                both_started.set()
+        assert both_started.wait(1.0), "account runs did not overlap"
+        return f"done-{acct}"
+
+    out = mod._run_account_outcomes(
+        account_ids=["lx", "sy"],
+        max_workers=2,
+        run_account_fn=run_account,
+    )
+
+    assert out == ["done-lx", "done-sy"]
+    assert sorted(started) == ["lx", "sy"]
+
+
+def test_account_worker_count_is_bounded_by_runtime_config() -> None:
+    from src.application import multi_account_tick as mod
+
+    assert mod._resolve_account_run_max_workers({"runtime": {}}, 3) == 3
+    assert mod._resolve_account_run_max_workers({"runtime": {"multi_account_max_workers": 2}}, 5) == 2
+    assert mod._resolve_account_run_max_workers({"runtime": {"multi_account_max_workers": 0}}, 5) == 1
+    assert mod._should_update_account_legacy_output(1) is True
+    assert mod._should_update_account_legacy_output(2) is False
