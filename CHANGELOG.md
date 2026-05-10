@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.2.3 - 2026-05-10
+
 ### Added
 - Added `./om config explain` to show the final layered value, source layer, and override trace for a config key.
 
