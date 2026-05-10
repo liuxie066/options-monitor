@@ -75,7 +75,7 @@
 | `preview_notification` | `./om notify preview` |
 | `get_close_advice` | `./om close-advice` |
 | `query_cash_headroom` | `./om sell-put-cash` / `src.application.cash_headroom_query::query_sell_put_cash(...)` |
-| `monthly_income_report` | `scripts/option_positions_report.py monthly-income` |
+| `monthly_income_report` | `./om option-positions report monthly-income` |
 | `option_positions_read` | `src.application.option_positions_facade` / `src.application.option_positions_inspection` 的只读部分 |
 
 说明：
