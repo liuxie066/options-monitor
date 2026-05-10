@@ -54,6 +54,7 @@ def test_legacy_wrapper_modules_are_removed() -> None:
     assert not (ROOT / "scripts" / "exchange_rates.py").exists()
     assert not (ROOT / "scripts" / "multiplier_cache.py").exists()
     assert not (ROOT / "scripts" / "sync_option_positions_to_feishu.py").exists()
+    assert not (ROOT / "scripts" / "backfill_option_positions_broker.py").exists()
     assert not (ROOT / "scripts" / "trade_account_identity.py").exists()
     assert not (ROOT / "scripts" / "trade_account_mapping.py").exists()
     assert not (ROOT / "scripts" / "trade_event_normalizer.py").exists()

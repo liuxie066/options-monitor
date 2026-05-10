@@ -106,12 +106,11 @@ def run_report(args, *, base, repo) -> int:
     """Dispatch `option-positions report <subcmd>` against an already-resolved repo."""
     sub = getattr(args, "report_cmd", None)
     if sub == "monthly-income":
-        broker = args.market or args.broker
         report = build_option_positions_monthly_income_report(
             repo,
             base=base,
             account=args.account,
-            broker=broker,
+            broker=args.broker,
             month=args.month,
         )
         if args.format == "json":

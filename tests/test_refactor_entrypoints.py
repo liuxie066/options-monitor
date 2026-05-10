@@ -181,3 +181,23 @@ def test_unified_cli_option_positions_management_command_exists_without_legacy_m
     )
     assert "--broker" in proc.stdout
     assert "--market" not in proc.stdout
+
+
+def test_unified_cli_option_positions_report_command_exists_without_legacy_market_alias() -> None:
+    proc = subprocess.run(
+        [
+            str((ROOT / ".venv" / "bin" / "python").resolve()),
+            "-m",
+            "src.interfaces.cli.main",
+            "option-positions",
+            "report",
+            "monthly-income",
+            "--help",
+        ],
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "--broker" in proc.stdout
+    assert "--market" not in proc.stdout
