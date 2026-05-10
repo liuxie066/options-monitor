@@ -117,16 +117,6 @@ def run_multi_tick_watchdog(
                     break
 
             if unhealthy is not None:
-                # ... existing unhealthy handling below ...
-                pass
-            else:
-                # OpenD healthy: reset consecutive failure counter and send recovery notice if applicable.
-                try:
-                    send_opend_recovery_notice(base, base_cfg, no_send=no_send)
-                except Exception:
-                    pass
-
-            if unhealthy is not None:
                 payload = unhealthy.get("payload") or {}
                 error_code = str(payload.get("error_code") or "OPEND_API_ERROR")
                 msg = str(payload.get("message") or payload.get("error") or "OpenD 不健康")
@@ -234,6 +224,12 @@ def run_multi_tick_watchdog(
                     message=msg,
                 )
                 return MultiTickWatchdogOutcome(should_continue=False, return_code=0)
+            else:
+                # OpenD healthy: reset consecutive failure counter and send recovery notice if applicable.
+                try:
+                    send_opend_recovery_notice(base, base_cfg, no_send=no_send)
+                except Exception:
+                    pass
     except SystemExit:
         raise
     except Exception as exc:
