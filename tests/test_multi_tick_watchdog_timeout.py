@@ -70,7 +70,7 @@ def test_watchdog_timeout_should_not_degrade_and_should_skip_pipeline(
     monkeypatch,
     runtime_config_copy,
 ) -> None:
-    mt = importlib.import_module("scripts.multi_tick.main")
+    mt = importlib.import_module("src.application.multi_account_tick")
 
     events: list[dict] = []
     scheduler_called = {"value": 0}

@@ -16,7 +16,7 @@ def _write_snapshot(state_dir: Path, payload: dict) -> None:
 
 
 def test_query_cash_footer_uses_base_cny_labels_when_present(tmp_path: Path) -> None:
-    from scripts.multi_tick.cash_footer import query_cash_footer
+    from src.application.multi_tick.cash_footer import query_cash_footer
 
     state_dir = tmp_path / 'output_accounts' / 'lx' / 'state'
     _write_snapshot(
@@ -36,7 +36,7 @@ def test_query_cash_footer_uses_base_cny_labels_when_present(tmp_path: Path) -> 
 
 
 def test_query_cash_footer_uses_total_labels_when_only_total_is_present(tmp_path: Path) -> None:
-    from scripts.multi_tick.cash_footer import query_cash_footer
+    from src.application.multi_tick.cash_footer import query_cash_footer
 
     state_dir = tmp_path / 'output_accounts' / 'lx' / 'state'
     _write_snapshot(
@@ -55,7 +55,7 @@ def test_query_cash_footer_uses_total_labels_when_only_total_is_present(tmp_path
 
 
 def test_query_cash_footer_keeps_dash_when_all_cash_fields_missing(tmp_path: Path) -> None:
-    from scripts.multi_tick.cash_footer import query_cash_footer
+    from src.application.multi_tick.cash_footer import query_cash_footer
 
     state_dir = tmp_path / 'output_accounts' / 'lx' / 'state'
     _write_snapshot(

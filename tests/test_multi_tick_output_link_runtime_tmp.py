@@ -10,7 +10,7 @@ BASE = Path(__file__).resolve().parents[1]
 if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
-from scripts.multi_tick.misc import atomic_symlink, update_legacy_output_link
+from src.application.multi_tick.misc import atomic_symlink, update_legacy_output_link
 
 
 def test_atomic_symlink_uses_runtime_tmp_dir_not_repo_root() -> None:

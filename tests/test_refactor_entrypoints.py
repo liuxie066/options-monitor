@@ -20,11 +20,10 @@ def test_shell_entrypoints_target_src_interfaces() -> None:
 def test_multi_tick_and_webui_use_application_facades() -> None:
     multi_src = (ROOT / "scripts" / "send_if_needed_multi.py").read_text(encoding="utf-8")
     webui_src = (ROOT / "scripts" / "webui" / "server.py").read_text(encoding="utf-8")
-    service_src = (ROOT / "scripts" / "infra" / "service.py").read_text(encoding="utf-8")
+    service_src = (ROOT / "src" / "infrastructure" / "external_services.py").read_text(encoding="utf-8")
     om_src = (ROOT / "om").read_text(encoding="utf-8")
     agent_src = (ROOT / "om-agent").read_text(encoding="utf-8")
     send_if_needed_src = (ROOT / "scripts" / "send_if_needed.py").read_text(encoding="utf-8")
-    multi_tick_main_src = (ROOT / "scripts" / "multi_tick" / "main.py").read_text(encoding="utf-8")
     multi_account_tick_src = (ROOT / "src" / "application" / "multi_account_tick.py").read_text(encoding="utf-8")
     webui_interface_src = (ROOT / "src" / "interfaces" / "webui" / "server.py").read_text(encoding="utf-8")
     multi_tick_scheduler_src = (ROOT / "src" / "application" / "multi_tick_scheduler.py").read_text(encoding="utf-8")
@@ -46,8 +45,9 @@ def test_multi_tick_and_webui_use_application_facades() -> None:
     assert "src.interfaces.agent.cli" in agent_src
     assert "from src.application.multi_account_tick import current_run_id, run_tick" in send_if_needed_src
     assert "run_pipeline_script" not in send_if_needed_src
-    assert "src.application.multi_account_tick" in multi_tick_main_src
-    assert "scripts.multi_tick.main" not in multi_account_tick_src
+    assert "src.application.multi_tick.main" not in multi_account_tick_src
+    assert not (ROOT / "scripts" / "multi_tick" / "main.py").exists()
+    assert not (ROOT / "scripts" / "infra" / "service.py").exists()
     assert "run_scheduler_flow" in multi_account_tick_src
     assert "build_multi_tick_scheduler_decision" in multi_tick_scheduler_src
     assert "build_multi_tick_account_scheduler_view" in multi_tick_scheduler_src
@@ -64,11 +64,14 @@ def test_multi_tick_and_webui_use_application_facades() -> None:
     assert "src.application.agent_tool_registry" in tool_execution_src
 
 
-def test_multi_tick_script_path_help_bootstraps_repo_root() -> None:
+def test_unified_tick_help_works() -> None:
     proc = subprocess.run(
         [
             sys.executable,
-            "scripts/multi_tick/main.py",
+            "-m",
+            "src.interfaces.cli.main",
+            "run",
+            "tick",
             "--help",
         ],
         cwd=str(ROOT),
@@ -76,7 +79,7 @@ def test_multi_tick_script_path_help_bootstraps_repo_root() -> None:
         text=True,
         check=True,
     )
-    assert "Multi-account tick" in proc.stdout
+    assert "run tick" in proc.stdout
     assert "--config" in proc.stdout
 
 

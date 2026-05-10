@@ -65,8 +65,11 @@ def test_legacy_wrapper_modules_are_removed() -> None:
     assert not (ROOT / "scripts" / "alert_rules.py").exists()
     assert not (ROOT / "scripts" / "scan_scheduler.py").exists()
     assert not (ROOT / "scripts" / "cash_secured_utils.py").exists()
+    assert not (ROOT / "scripts" / "multi_tick").exists()
     assert not (ROOT / "scripts" / "infra" / "service.py").exists()
     assert not (ROOT / "scripts" / "infra" / "entry_external.py").exists()
+    assert not (ROOT / "scripts" / "infra").exists()
+    assert not (ROOT / "scripts" / "domain" / "storage").exists()
 
 
 def test_symbol_identity_has_no_runtime_config_file_io() -> None:

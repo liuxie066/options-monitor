@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 def test_account_run_state_dir_isolated_by_account() -> None:
-    from scripts.multi_tick.main import account_run_state_dir
+    from src.application.multi_account_tick import account_run_state_dir
 
     run_dir = Path("/tmp/output_runs/20260407T220000")
     lx = account_run_state_dir(run_dir, "lx")

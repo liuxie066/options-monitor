@@ -40,7 +40,7 @@ def test_watchdog_error_code_mapping() -> None:
 
 def test_opend_alert_rate_limit() -> None:
     _ensure_repo_path()
-    from scripts.multi_tick.opend_guard import should_send_opend_alert
+    from src.application.multi_tick.opend_guard import should_send_opend_alert
 
     with TemporaryDirectory() as td:
         base = Path(td)
@@ -55,7 +55,7 @@ def test_opend_alert_rate_limit() -> None:
 
 def test_opend_alert_family_dedupe_and_burst_limit() -> None:
     _ensure_repo_path()
-    from scripts.multi_tick.opend_guard import should_send_opend_alert
+    from src.application.multi_tick.opend_guard import should_send_opend_alert
 
     with TemporaryDirectory() as td:
         base = Path(td)
@@ -71,7 +71,7 @@ def test_opend_alert_family_dedupe_and_burst_limit() -> None:
 
 def test_opend_alert_translates_wechat_clawbot_to_openclaw_weixin(monkeypatch) -> None:
     _ensure_repo_path()
-    from scripts.multi_tick import opend_guard
+    from src.application.multi_tick import opend_guard
 
     captured: dict[str, object] = {}
 
@@ -209,7 +209,7 @@ def test_port_retry_loop_no_start_when_ensure_false(monkeypatch) -> None:
 
 def test_record_opend_failure_increments_count() -> None:
     _ensure_repo_path()
-    from scripts.multi_tick.opend_guard import record_opend_failure, record_opend_recovery
+    from src.application.multi_tick.opend_guard import record_opend_failure, record_opend_recovery
 
     with TemporaryDirectory() as td:
         base = Path(td)
@@ -232,7 +232,7 @@ def test_record_opend_failure_increments_count() -> None:
 def test_record_opend_recovery_on_clean_state() -> None:
     """record_opend_recovery on a fresh base returns 0 without error."""
     _ensure_repo_path()
-    from scripts.multi_tick.opend_guard import record_opend_recovery
+    from src.application.multi_tick.opend_guard import record_opend_recovery
 
     with TemporaryDirectory() as td:
         assert record_opend_recovery(Path(td)) == 0
@@ -241,7 +241,7 @@ def test_record_opend_recovery_on_clean_state() -> None:
 def test_consecutive_threshold_gates_alert() -> None:
     """send_opend_alert is suppressed until consecutive_threshold is reached."""
     _ensure_repo_path()
-    from scripts.multi_tick import opend_guard
+    from src.application.multi_tick import opend_guard
     import unittest.mock as mock
 
     calls: list[str] = []
@@ -276,7 +276,7 @@ def test_consecutive_threshold_gates_alert() -> None:
 def test_consecutive_threshold_skip_gate_sends_immediately() -> None:
     """skip_consecutive_gate=True bypasses the consecutive failure check."""
     _ensure_repo_path()
-    from scripts.multi_tick import opend_guard
+    from src.application.multi_tick import opend_guard
     import unittest.mock as mock
 
     calls: list[str] = []
@@ -309,7 +309,7 @@ def test_consecutive_threshold_skip_gate_sends_immediately() -> None:
 def test_send_opend_recovery_notice_after_threshold_failures() -> None:
     """Recovery notice is sent only when prev_count >= threshold."""
     _ensure_repo_path()
-    from scripts.multi_tick import opend_guard
+    from src.application.multi_tick import opend_guard
     import unittest.mock as mock
 
     calls: list[list] = []
@@ -357,7 +357,7 @@ def test_send_opend_recovery_notice_after_threshold_failures() -> None:
 def test_send_opend_recovery_notice_disabled_by_config() -> None:
     """Recovery notice is suppressed when opend_alert_send_recovery_notice is false."""
     _ensure_repo_path()
-    from scripts.multi_tick import opend_guard
+    from src.application.multi_tick import opend_guard
     import unittest.mock as mock
 
     with TemporaryDirectory() as td:

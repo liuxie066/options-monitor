@@ -249,6 +249,36 @@ def test_external_services_imports_infrastructure_owner_module() -> None:
     assert webui_server_mod.send_openclaw_message is owner_mod.send_openclaw_message
 
 
+def test_multi_tick_helpers_import_application_owner_modules() -> None:
+    for old_module in (
+        "scripts.multi_tick.main",
+        "scripts.multi_tick.misc",
+        "scripts.multi_tick.notify_format",
+        "scripts.multi_tick.cash_footer",
+        "scripts.multi_tick.opend_guard",
+        "scripts.multi_tick.project_guard",
+        "scripts.multi_tick.required_data_prefetch",
+    ):
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module(old_module)
+
+    misc_mod = importlib.import_module("src.application.multi_tick.misc")
+    notify_mod = importlib.import_module("src.application.multi_tick.notify_format")
+    cash_footer_mod = importlib.import_module("src.application.multi_tick.cash_footer")
+    opend_guard_mod = importlib.import_module("src.application.multi_tick.opend_guard")
+    project_guard_mod = importlib.import_module("src.application.multi_tick.project_guard")
+    prefetch_mod = importlib.import_module("src.application.multi_tick.required_data_prefetch")
+    multi_tick_mod = importlib.import_module("src.application.multi_account_tick")
+    account_run_mod = importlib.import_module("src.application.account_run")
+
+    assert multi_tick_mod.AccountResult is misc_mod.AccountResult
+    assert multi_tick_mod.build_account_message is notify_mod.build_account_message
+    assert multi_tick_mod.query_cash_footer is cash_footer_mod.query_cash_footer
+    assert multi_tick_mod.send_opend_alert is opend_guard_mod.send_opend_alert
+    assert multi_tick_mod.admit_project_run is project_guard_mod.admit_project_run
+    assert account_run_mod.prefetch_required_data is prefetch_mod.prefetch_required_data
+
+
 def test_opend_support_imports_owner_modules() -> None:
     for old_module in (
         "scripts.futu_gateway",
