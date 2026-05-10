@@ -251,6 +251,7 @@ def test_external_services_imports_infrastructure_owner_module() -> None:
 
 def test_multi_tick_helpers_import_application_owner_modules() -> None:
     for old_module in (
+        "scripts.multi_tick",
         "scripts.multi_tick.main",
         "scripts.multi_tick.misc",
         "scripts.multi_tick.notify_format",
@@ -258,6 +259,11 @@ def test_multi_tick_helpers_import_application_owner_modules() -> None:
         "scripts.multi_tick.opend_guard",
         "scripts.multi_tick.project_guard",
         "scripts.multi_tick.required_data_prefetch",
+        # Locks removed `scripts.domain.storage` try/except fallback.
+        "scripts.domain",
+        "scripts.domain.storage",
+        "scripts.domain.storage.paths",
+        "scripts.domain.storage.repositories",
     ):
         with pytest.raises(ModuleNotFoundError):
             importlib.import_module(old_module)
