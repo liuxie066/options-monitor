@@ -5,7 +5,7 @@ from typing import Any, Mapping
 
 from domain.domain.fetch_source import is_futu_fetch_source, normalize_fetch_source
 from scripts.futu_gateway import build_ready_futu_gateway
-from scripts.option_positions_core.domain import normalize_account, normalize_currency
+from domain.domain.option_position_lots import normalize_account, normalize_currency
 from domain.domain.symbol_identity import canonical_symbol, symbol_currency
 
 

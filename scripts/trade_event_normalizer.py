@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from scripts.option_positions_core.domain import normalize_currency, normalize_option_type
+from domain.domain.option_position_lots import normalize_currency, normalize_option_type
 from scripts.multiplier_cache import resolve_multiplier_with_source_and_diagnostics
 from domain.domain.trade_contract_identity import (
     normalize_contract_expiration,

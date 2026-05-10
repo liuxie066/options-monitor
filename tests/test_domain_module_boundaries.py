@@ -31,9 +31,14 @@ def test_domain_package_does_not_import_outer_layers() -> None:
     assert offenders == []
 
 
-def test_legacy_identity_wrapper_modules_are_removed() -> None:
+def test_legacy_wrapper_modules_are_removed() -> None:
     assert not (ROOT / "scripts" / "trade_symbol_identity.py").exists()
     assert not (ROOT / "scripts" / "trade_contract_identity.py").exists()
+    assert not (ROOT / "scripts" / "option_positions_core" / "domain.py").exists()
+    assert not (ROOT / "scripts" / "option_positions_core" / "ledger.py").exists()
+    assert not (ROOT / "scripts" / "option_positions_core" / "service.py").exists()
+    assert not (ROOT / "scripts" / "option_positions_core" / "reporting.py").exists()
+    assert not (ROOT / "scripts" / "option_positions_core" / "__init__.py").exists()
 
 
 def test_symbol_identity_has_no_runtime_config_file_io() -> None:

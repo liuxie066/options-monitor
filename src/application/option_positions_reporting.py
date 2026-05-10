@@ -8,7 +8,7 @@ from typing import Any
 from scripts.feishu_bitable import parse_note_kv, safe_float
 from scripts.exchange_rates import CurrencyConverter, ExchangeRates
 from scripts.multiplier_cache import resolve_multiplier
-from scripts.option_positions_core.domain import (
+from domain.domain.option_position_lots import (
     BUY_TO_CLOSE,
     EXPIRE_AUTO_CLOSE,
     effective_contracts_closed,

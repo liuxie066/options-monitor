@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from scripts.option_positions_core.service import option_positions_sync_to_feishu_enabled
+from src.application.option_positions_service import option_positions_sync_to_feishu_enabled
 
 
 SYNC_TO_FEISHU_OVERRIDE_ATTR = "option_positions_sync_to_feishu_enabled_override"

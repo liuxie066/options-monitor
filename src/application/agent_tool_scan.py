@@ -8,7 +8,7 @@ import json
 
 from src.application.agent_tool_contracts import AgentToolError
 from domain.domain.close_advice import TIER_PRIORITY
-from scripts.option_positions_core.domain import normalize_account
+from domain.domain.option_position_lots import normalize_account
 from domain.domain.trade_contract_identity import (
     contract_key,
     normalize_contract_expiration,

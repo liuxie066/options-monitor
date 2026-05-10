@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from scripts.option_positions_core.domain import (
+from domain.domain.option_position_lots import (
     BUY_TO_CLOSE,
     EXPIRE_AUTO_CLOSE,
     OpenPositionCommand,
@@ -197,6 +197,7 @@ def test_build_open_fields_for_short_call_sets_locked_shares() -> None:
             contracts=3,
             currency="USD",
             strike=200,
+            multiplier=100,
             expiration_ymd="2026-05-15",
             opened_at_ms=1000,
         )

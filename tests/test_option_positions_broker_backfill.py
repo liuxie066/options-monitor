@@ -72,7 +72,7 @@ def _read_fields(db_path: Path, table_name: str, record_id: str) -> dict[str, ob
 
 
 def test_build_option_positions_broker_backfill_audit_finds_market_only_rows(tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
+    import src.application.option_positions_service as svc
 
     build_option_positions_broker_backfill_audit = _load_audit_fn("build_option_positions_broker_backfill_audit")
 
@@ -118,7 +118,7 @@ def test_build_option_positions_broker_backfill_audit_finds_market_only_rows(tmp
 
 
 def test_apply_option_positions_broker_backfill_updates_candidates_only(tmp_path: Path) -> None:
-    import scripts.option_positions_core.service as svc
+    import src.application.option_positions_service as svc
 
     apply_option_positions_broker_backfill = _load_audit_fn("apply_option_positions_broker_backfill")
 

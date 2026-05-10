@@ -17,7 +17,7 @@ from scripts.account_config import (
     list_account_config_views,
 )
 from scripts.infra.service import send_openclaw_message
-from scripts.option_positions_core.service import load_option_positions_repo
+from src.application.option_positions_service import load_option_positions_repo
 from scripts.validate_config import SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS as VALIDATOR_SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS
 from src.application.account_management import add_account, edit_account, remove_account
 from src.application.tool_execution import build_tool_manifest, execute_tool

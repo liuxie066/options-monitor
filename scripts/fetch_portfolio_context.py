@@ -27,7 +27,7 @@ from scripts.feishu_bitable import (
 from domain.domain.symbol_identity import canonical_symbol
 from scripts.config_loader import resolve_data_config_path
 from scripts.io_utils import atomic_write_json
-from scripts.option_positions_core.domain import normalize_account, normalize_currency
+from domain.domain.option_position_lots import normalize_account, normalize_currency
 
 from scripts.feishu_bitable import safe_float
 

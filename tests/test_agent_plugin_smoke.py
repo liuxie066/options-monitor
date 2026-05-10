@@ -570,8 +570,8 @@ def test_spec_exposes_broker_as_public_field() -> None:
 def test_monthly_income_report_returns_agent_summary(monkeypatch, tmp_path: Path) -> None:
     from scripts.agent_plugin.main import run_tool
     import scripts.agent_plugin.tools as tools
-    import scripts.option_positions_core.service as svc
-    from scripts.option_positions_core.domain import OpenPositionCommand, parse_exp_to_ms
+    import src.application.option_positions_service as svc
+    from domain.domain.option_position_lots import OpenPositionCommand, parse_exp_to_ms
 
     def _ms(value: str) -> int:
         out = parse_exp_to_ms(value)
@@ -796,8 +796,8 @@ def test_scheduler_status_reads_decision_without_writing_state(tmp_path: Path) -
 
 def test_option_positions_read_lists_events_history_and_inspect(tmp_path: Path) -> None:
     from scripts.agent_plugin.main import run_tool
-    import scripts.option_positions_core.service as svc
-    from scripts.option_positions_core.domain import OpenPositionCommand, parse_exp_to_ms
+    import src.application.option_positions_service as svc
+    from domain.domain.option_position_lots import OpenPositionCommand, parse_exp_to_ms
 
     def _ms(value: str) -> int:
         out = parse_exp_to_ms(value)

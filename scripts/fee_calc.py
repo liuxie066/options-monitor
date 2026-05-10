@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from scripts.option_positions_core.domain import normalize_currency
+from domain.domain.option_position_lots import normalize_currency
 
 
 def _require_positive(name: str, value: float | None) -> float:

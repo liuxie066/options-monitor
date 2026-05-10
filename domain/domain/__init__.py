@@ -79,6 +79,8 @@ _MODULE_EXPORTS = {
     'canonical_schema',
     'option_positions_v2',
     'option_position_identity',
+    'option_position_ledger',
+    'option_position_lots',
     'symbol_identity',
     'trade_contract_identity',
     'error_policy',

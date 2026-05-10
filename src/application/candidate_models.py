@@ -5,7 +5,7 @@ from typing import Any
 
 import pandas as pd
 
-from scripts.option_positions_core.domain import normalize_currency
+from domain.domain.option_position_lots import normalize_currency
 
 
 def _as_float(value: Any) -> float | None:

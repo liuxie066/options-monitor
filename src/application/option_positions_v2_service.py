@@ -25,7 +25,7 @@ from domain.domain.option_positions_v2 import (
     utc_now_iso,
 )
 from domain.storage.repositories import option_positions_v2_repo
-from scripts.option_positions_core.domain import (
+from domain.domain.option_position_lots import (
     effective_expiration_ymd,
     effective_multiplier,
     effective_strike,
@@ -37,7 +37,7 @@ from scripts.option_positions_core.domain import (
     normalize_status,
     parse_exp_to_ms,
 )
-from scripts.option_positions_core.service import require_option_positions_read_repo
+from src.application.option_positions_service import require_option_positions_read_repo
 from domain.domain.trade_contract_identity import canonical_contract_symbol
 
 

@@ -5,13 +5,13 @@ from pathlib import Path
 from typing import Any
 
 from scripts.config_loader import resolve_data_config_path
-from scripts.option_positions_core.domain import (
+from domain.domain.option_position_lots import (
     effective_contracts_open,
     normalize_account,
     normalize_broker,
     normalize_status,
 )
-from scripts.option_positions_core.service import (
+from src.application.option_positions_service import (
     auto_close_expired_positions,
     build_expired_close_decisions,
     load_option_positions_repo,

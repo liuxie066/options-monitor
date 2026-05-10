@@ -12,7 +12,7 @@ from domain.domain.expiration_dates import (
 from scripts.exchange_rates import get_exchange_rates_or_fetch_latest
 from scripts.config_loader import resolve_data_config_path
 from scripts.feishu_bitable import parse_note_kv, safe_float
-from scripts.option_positions_core.domain import (
+from domain.domain.option_position_lots import (
     effective_contracts,
     effective_contracts_closed,
     effective_contracts_open,
@@ -26,8 +26,8 @@ from scripts.option_positions_core.domain import (
     normalize_side,
     normalize_status,
 )
-from scripts.option_positions_core.reporting import build_monthly_income_report
-from scripts.option_positions_core.service import load_option_positions_repo, require_option_positions_read_repo
+from src.application.option_positions_reporting import build_monthly_income_report
+from src.application.option_positions_service import load_option_positions_repo, require_option_positions_read_repo
 from src.application.option_positions_sync_config import apply_option_positions_runtime_config
 from src.application.option_positions_v2_service import load_option_positions_v2_records
 
