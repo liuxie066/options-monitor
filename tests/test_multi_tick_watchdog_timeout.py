@@ -54,6 +54,7 @@ def test_watchdog_retry_defaults_to_enabled_but_allows_explicit_disable(
         build_opend_unhealthy_execution_plan=lambda **_kwargs: {},
         mark_opend_phone_verify_pending=lambda *_args, **_kwargs: None,
         send_opend_alert=lambda *_args, **_kwargs: None,
+        send_opend_recovery_notice=lambda *_args, **_kwargs: None,
         state_repo=object(),
     )
 

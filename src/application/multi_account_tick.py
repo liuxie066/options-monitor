@@ -33,6 +33,7 @@ from scripts.multi_tick.opend_guard import (
     is_opend_phone_verify_pending,
     mark_opend_phone_verify_pending,
     send_opend_alert,
+    send_opend_recovery_notice,
 )
 from scripts.multi_tick.project_guard import (
     admit_project_run,
@@ -430,6 +431,7 @@ def main(argv: list[str] | None = None) -> int:
         build_opend_unhealthy_execution_plan=build_opend_unhealthy_execution_plan,
         mark_opend_phone_verify_pending=mark_opend_phone_verify_pending,
         send_opend_alert=send_opend_alert,
+        send_opend_recovery_notice=send_opend_recovery_notice,
         state_repo=state_repo,
     )
     if not watchdog_outcome.should_continue:
