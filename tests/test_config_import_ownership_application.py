@@ -92,7 +92,10 @@ def test_required_data_uses_application_opend_symbol_fetching_owner() -> None:
 
 def test_option_positions_and_pipeline_context_import_data_config_owner_module() -> None:
     option_positions_mod = importlib.import_module("src.application.option_positions_facade")
-    pipeline_context_mod = importlib.import_module("scripts.pipeline_context")
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("scripts.pipeline_context")
+
+    pipeline_context_mod = importlib.import_module("src.application.pipeline_context")
     owner_mod = importlib.import_module("src.application.config_loader")
 
     assert option_positions_mod.resolve_data_config_path is owner_mod.resolve_data_config_path
@@ -118,7 +121,7 @@ def test_portfolio_context_and_cash_query_import_application_owner_modules() -> 
     cli_mod = importlib.import_module("src.interfaces.cli.main")
     multi_cash_mod = importlib.import_module("src.application.multi_tick.cash_footer")
     agent_tools_mod = importlib.import_module("src.application.agent_tool_handlers")
-    pipeline_context_mod = importlib.import_module("scripts.pipeline_context")
+    pipeline_context_mod = importlib.import_module("src.application.pipeline_context")
 
     assert cash_mod.build_option_positions_context is option_ctx_mod.build_context
     assert portfolio_service_mod.load_holdings_portfolio_context is portfolio_ctx_mod.load_holdings_portfolio_context

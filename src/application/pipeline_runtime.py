@@ -155,7 +155,7 @@ def main(argv: list[str] | None = None) -> int:
         portfolio_timeout_sec = int(runtime.get("portfolio_timeout_sec", 60))
 
         if STAGE_ONLY is not None:
-            from scripts.pipeline_alert_steps import run_stage_only_alert_notify
+            from src.application.pipeline_alert_steps import run_stage_only_alert_notify
 
             run_stage_only_alert_notify(
                 report_dir=report_dir,

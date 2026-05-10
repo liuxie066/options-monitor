@@ -448,7 +448,7 @@ def test_get_portfolio_context_allows_futu_source_without_explicit_data_config(m
 
 def test_get_portfolio_context_rejects_stale_external_holdings_cache_for_wrong_account(monkeypatch, tmp_path: Path) -> None:
     from scripts.agent_plugin.main import run_tool
-    import scripts.pipeline_context as pipeline_context
+    import src.application.pipeline_context as pipeline_context
     import src.application.portfolio_context_service as pcs
 
     cfg_path = tmp_path / "config.hk.json"
@@ -1701,7 +1701,7 @@ def test_scan_opportunities_returns_summary_fields(monkeypatch, tmp_path: Path) 
     import src.application.config_loader as config_loader
     import scripts.config_profiles as config_profiles
     import scripts.pipeline_symbol as pipeline_symbol
-    import scripts.pipeline_context as pipeline_context
+    import src.application.pipeline_context as pipeline_context
     import scripts.pipeline_watchlist as pipeline_watchlist
     import src.application.report_builders as report_builders
     old_load_config = tools.__dict__.get("load_config")

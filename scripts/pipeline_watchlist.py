@@ -328,7 +328,7 @@ def run_watchlist_pipeline_default(
     want_fn: Callable[[str], bool],
 ) -> list[dict]:
     from scripts.config_profiles import apply_profiles
-    from scripts.pipeline_context import build_pipeline_context
+    from src.application.pipeline_context import build_pipeline_context
     from scripts.pipeline_symbol import process_symbol
     from src.application.report_builders import build_symbols_digest, build_symbols_summary
 
