@@ -14,12 +14,14 @@ def _read(path: str) -> str:
 
 def test_entry_imports_service_module() -> None:
     multi_tick = _read("src/application/multi_account_tick.py")
-    send_if_needed = _read("scripts/send_if_needed.py")
+    cli = _read("src/interfaces/cli/main.py")
 
     assert "from src.infrastructure.external_services import (" in multi_tick
-    assert "from src.application.multi_account_tick import current_run_id, run_tick" in send_if_needed
+    assert "from src.application.multi_account_tick import run_tick" in cli
 
 
 def test_legacy_infra_service_wrappers_are_removed() -> None:
     assert not (ROOT / "scripts" / "infra" / "service.py").exists()
     assert not (ROOT / "scripts" / "infra" / "entry_external.py").exists()
+    assert not (ROOT / "scripts" / "send_if_needed.py").exists()
+    assert not (ROOT / "scripts" / "send_if_needed_multi.py").exists()

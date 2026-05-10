@@ -28,7 +28,7 @@ This repository is primarily maintained for personal use. Keep agent support lig
 
 - For structured agent/programmatic usage, prefer `./om-agent` first.
 - For human-operated workflow commands, prefer the unified CLI `./om` when it covers the task.
-- For tick / scan / notification orchestration, there is one unified chain: `./om run tick` -> `src.application.multi_account_tick.run_tick`. A single account is just `--accounts lx`; multiple accounts are `--accounts lx sy`. Do not treat `scripts/send_if_needed.py` as a separate single-account implementation.
+- For tick / scan / notification orchestration, there is one unified chain: `./om run tick` -> `src.application.multi_account_tick.run_tick`. A single account is just `--accounts lx`; multiple accounts are `--accounts lx sy`. Legacy `scripts/send_if_needed*.py` launchers have been removed.
 - Use direct `python3 scripts/...` entry points only when:
   - the user explicitly asks for that script,
   - the unified CLI / agent CLI does not expose the needed capability,
@@ -82,13 +82,11 @@ For unified tick behavior:
 python3 -m pytest tests/test_multi_tick_*.py
 ```
 
-For send gate / notification dispatch changes:
+For unified tick / notification dispatch changes:
 
 ```bash
-python3 -m pytest tests/test_send_if_needed_batch3.py tests/test_send_if_needed_batch4.py tests/test_send_if_needed_multi_deprecated_and_config_gate.py
+python3 -m pytest tests/test_unified_tick_entrypoint.py tests/test_multi_tick_*.py
 ```
-
-Some send tests expect local runtime config files such as `config.us.json`. If those files are absent, report that clearly instead of treating it as a code failure.
 
 For config validation:
 
@@ -113,19 +111,7 @@ Run the unified tick flow (preferred unified CLI):
 ./om run tick --config config.us.json --accounts lx sy
 ```
 
-Compatibility launcher:
-
-```bash
-python3 scripts/send_if_needed_multi.py --config config.us.json --accounts lx sy
-```
-
-Deprecated single-account filename:
-
-```bash
-python3 scripts/send_if_needed.py --config config.us.json
-```
-
-This filename is compatibility only; it forwards to the same unified tick path.
+Legacy `scripts/send_if_needed.py` and `scripts/send_if_needed_multi.py` launchers have been removed. Upgrade old cron jobs to `./om run tick`.
 
 Query Sell Put cash usage:
 

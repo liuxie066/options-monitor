@@ -384,28 +384,10 @@ required data，再按账户生成和发送通知。通知发送和 notified 状
 
 如果是 Agent 在排查问题，不要默认从这里开始；先做 healthcheck、配置校验，必要时再缩小到单阶段运行。
 
-兼容入口：
+旧的 `scripts/send_if_needed.py` / `scripts/send_if_needed_multi.py` 入口已移除；
+旧定时任务需要升级到 `./om run tick`。
 
-```bash
-python3 scripts/send_if_needed_multi.py --config config.us.json --accounts lx sy
-```
-
-对 Agent 来说，这个兼容入口不应作为默认首选；只有在 `./om` / `./om-agent` 不覆盖，
-或用户明确指定脚本时再使用。该兼容入口会转调同一个
-`src.application.multi_account_tick.run_tick`。
-
-### 6.7 兼容入口
-
-如果只是想确认系统状态，优先仍然是 `./om-agent run --tool healthcheck ...`，不是这个脚本入口。
-
-```bash
-python3 scripts/send_if_needed.py --config config.us.json
-```
-
-这是旧单账户定时脚本的兼容文件名；旧单账户业务实现已经退役，内部会转调统一 tick。
-新定时任务应直接使用 `./om run tick`。
-
-### 6.8 定时 / 常驻任务清单
+### 6.7 定时 / 常驻任务清单
 
 README 只记录公开入口和安全边界；生产 OpenClaw cron 的具体 id、启停和排障步骤见
 [RUNBOOK.md](RUNBOOK.md)。

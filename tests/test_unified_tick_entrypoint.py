@@ -5,41 +5,96 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_cli_run_tick_delegates_to_application_tick(
+    example_config_path: Path,
+    monkeypatch,
+) -> None:
+    from src.interfaces.cli import main as cli_main
+
+    seen: list[list[str]] = []
+    monkeypatch.setattr(cli_main, "run_tick", lambda argv: seen.append(list(argv)) or 7)
+
+    rc = cli_main.main(
+        [
+            "run",
+            "tick",
+            "--config",
+            str(example_config_path),
+            "--accounts",
+            "lx",
+            "sy",
+            "--default-account",
+            "sy",
+            "--market-config",
+            "us",
+            "--no-send",
+            "--force",
+            "--debug",
+        ]
+    )
+
+    assert rc == 7
+    assert seen == [
+        [
+            "--config",
+            str(example_config_path),
+            "--accounts",
+            "lx",
+            "sy",
+            "--default-account",
+            "sy",
+            "--market-config",
+            "us",
+            "--no-send",
+            "--force",
+            "--debug",
+        ]
+    ]
+
+
+def test_legacy_tick_script_entrypoints_are_removed() -> None:
+    assert not (ROOT / "scripts" / "send_if_needed.py").exists()
+    assert not (ROOT / "scripts" / "send_if_needed_multi.py").exists()
+
+
 def test_market_session_and_opend_alert_use_single_source_of_truth() -> None:
     from domain.domain import select_markets_to_run
     from src.application.multi_tick.opend_guard import should_send_opend_alert
 
     cfg = {
-        'schedule_hk': {
-            'enabled': True,
-            'market_timezone': 'Asia/Hong_Kong',
-            'market_open': '09:30',
-            'market_close': '16:00',
-            'monitor_off_hours': False,
-            'market_break_start': '12:00',
-            'market_break_end': '13:00',
-            'beijing_timezone': 'Asia/Shanghai',
-            'sparse_after_beijing': '02:00',
+        "schedule_hk": {
+            "enabled": True,
+            "market_timezone": "Asia/Hong_Kong",
+            "market_open": "09:30",
+            "market_close": "16:00",
+            "monitor_off_hours": False,
+            "market_break_start": "12:00",
+            "market_break_end": "13:00",
+            "beijing_timezone": "Asia/Shanghai",
+            "sparse_after_beijing": "02:00",
         },
-        'schedule': {
-            'enabled': False,
-            'market_timezone': 'America/New_York',
-            'market_open': '09:30',
-            'market_close': '16:00',
-            'monitor_off_hours': False,
-            'beijing_timezone': 'Asia/Shanghai',
-            'sparse_after_beijing': '02:00',
+        "schedule": {
+            "enabled": False,
+            "market_timezone": "America/New_York",
+            "market_open": "09:30",
+            "market_close": "16:00",
+            "monitor_off_hours": False,
+            "beijing_timezone": "Asia/Shanghai",
+            "sparse_after_beijing": "02:00",
         },
     }
     now_utc = datetime(2026, 4, 1, 4, 30, 0, tzinfo=timezone.utc)
 
-    direct_out = select_markets_to_run(now_utc, cfg, 'auto')
+    direct_out = select_markets_to_run(now_utc, cfg, "auto")
     assert direct_out == []
 
     with TemporaryDirectory() as td:
         base = Path(td)
-        direct_first = should_send_opend_alert(base, 'OPEND_RATE_LIMIT', cooldown_sec=600)
-        direct_second = should_send_opend_alert(base, 'OPEND_RATE_LIMIT', cooldown_sec=600)
+        direct_first = should_send_opend_alert(base, "OPEND_RATE_LIMIT", cooldown_sec=600)
+        direct_second = should_send_opend_alert(base, "OPEND_RATE_LIMIT", cooldown_sec=600)
         assert direct_first is True
         assert direct_second is False
 
@@ -64,13 +119,6 @@ def test_multi_account_tick_current_run_id_accessor_is_public() -> None:
         assert mod.current_run_id() == "test-run-id"
     finally:
         mod._CURRENT_RUN_ID = old
-
-
-def test_multi_entrypoint_uses_public_run_id_accessor() -> None:
-    src = Path("scripts/send_if_needed_multi.py").read_text(encoding="utf-8")
-    assert "importlib" not in src
-    assert "current_run_id" in src
-    assert "run_tick" in src
 
 
 def test_ensure_runtime_canonical_config_rejects_derived_configs() -> None:
@@ -140,11 +188,11 @@ def test_ensure_runtime_canonical_config_allows_repo_local_when_no_sibling_exter
         assert out["sibling_canonical_exists"] is False
 
 
-def test_production_entrypoints_enable_sibling_external_guard() -> None:
-    send_src = Path("scripts/send_if_needed.py").read_text(encoding="utf-8")
+def test_production_tick_entrypoints_enable_sibling_external_guard() -> None:
+    cli_src = Path("src/interfaces/cli/main.py").read_text(encoding="utf-8")
     multi_src = Path("src/application/multi_account_tick.py").read_text(encoding="utf-8")
 
-    assert "src.application.multi_account_tick" in send_src
-    assert "run_tick(" in send_src
+    assert "from src.application.multi_account_tick import run_tick" in cli_src
+    assert "return int(run_tick(tick_argv))" in cli_src
     assert "require_sibling_external=True" in multi_src
     assert "config_source_path" in multi_src

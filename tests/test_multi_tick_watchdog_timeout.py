@@ -96,7 +96,7 @@ def test_watchdog_timeout_should_not_degrade_and_should_skip_pipeline(
 
     argv_scope(
         [
-            "send_if_needed_multi.py",
+            "om",
             "--config",
             str(runtime_config_copy),
             "--accounts",

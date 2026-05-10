@@ -61,8 +61,7 @@ CRITICAL_MODULES = [
     "test_storage_boundary",
     "test_domain_engine_batch4",
     "test_domain_engine_batch5",
-    "test_send_if_needed_batch3",
-    "test_send_if_needed_batch4",
+    "test_unified_tick_entrypoint",
     "test_agent_plugin_contract",
     "test_agent_plugin_smoke",
 ]

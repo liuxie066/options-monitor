@@ -95,8 +95,8 @@
 ```
 
 这是一条统一链路，单账户只是传一个账户的特例。旧脚本
-`scripts/send_if_needed.py` 和 `scripts/send_if_needed_multi.py` 仍可兼容转调，
-但不作为新的 agent 默认入口。
+`scripts/send_if_needed.py` 和 `scripts/send_if_needed_multi.py` 已移除；升级后的定时任务应直接调用
+`./om run tick`。
 
 ---
 
