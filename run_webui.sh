@@ -25,4 +25,4 @@ else
 fi
 
 echo "[run-webui] start: http://${HOST}:${PORT}"
-exec ./.venv/bin/python -m uvicorn scripts.webui.server:app --host "${HOST}" --port "${PORT}"
+exec ./.venv/bin/python -m uvicorn src.interfaces.webui.server:app --host "${HOST}" --port "${PORT}"

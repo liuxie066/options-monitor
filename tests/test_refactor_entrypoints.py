@@ -19,7 +19,7 @@ def test_shell_entrypoints_target_src_interfaces() -> None:
 
 def test_multi_tick_and_webui_use_application_facades() -> None:
     multi_src = (ROOT / "scripts" / "send_if_needed_multi.py").read_text(encoding="utf-8")
-    webui_src = (ROOT / "scripts" / "webui" / "server.py").read_text(encoding="utf-8")
+    run_webui_src = (ROOT / "run_webui.sh").read_text(encoding="utf-8")
     service_src = (ROOT / "src" / "infrastructure" / "external_services.py").read_text(encoding="utf-8")
     om_src = (ROOT / "om").read_text(encoding="utf-8")
     agent_src = (ROOT / "om-agent").read_text(encoding="utf-8")
@@ -37,7 +37,9 @@ def test_multi_tick_and_webui_use_application_facades() -> None:
 
     assert "src.application.multi_account_tick" in multi_src
     assert "run_tick" in multi_src
-    assert "src.interfaces.webui" in webui_src
+    assert not (ROOT / "scripts" / "webui" / "server.py").exists()
+    assert not (ROOT / "scripts" / "webui" / "__init__.py").exists()
+    assert "src.interfaces.webui.server:app" in run_webui_src
     assert "from src.application.account_management import add_account, edit_account, remove_account" in webui_interface_src
     assert "from src.application.tool_execution import build_tool_manifest, execute_tool" in webui_interface_src
     assert "src.interfaces.cli.main" in service_src

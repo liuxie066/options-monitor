@@ -40,7 +40,7 @@ def test_webui_version_check_endpoint_uses_shared_service(monkeypatch) -> None:
     if str(BASE) not in sys.path:
         sys.path.insert(0, str(BASE))
 
-    import scripts.webui.server as webui_server
+    import src.interfaces.webui.server as webui_server
 
     monkeypatch.setattr(
         webui_server,

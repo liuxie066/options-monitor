@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from scripts.deploy_observability import append_event, classify_lag, load_state
+from src.application.deploy_observability import append_event, classify_lag, load_state
 
 
 def test_append_event_success_sync() -> None:

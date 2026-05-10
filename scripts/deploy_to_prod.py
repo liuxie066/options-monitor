@@ -23,10 +23,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-try:
-    from scripts.deploy_observability import append_event, build_summary, make_machine_json, utc_now
-except ModuleNotFoundError:
-    from deploy_observability import append_event, build_summary, make_machine_json, utc_now
+repo_base = Path(__file__).resolve().parents[1]
+if str(repo_base) not in sys.path:
+    sys.path.insert(0, str(repo_base))
+
+from src.application.deploy_observability import append_event, build_summary, make_machine_json, utc_now
 
 ROOT_DEV = Path("/home/node/.openclaw/workspace/options-monitor")
 ROOT_PROD = Path("/home/node/.openclaw/workspace/options-monitor-prod")
