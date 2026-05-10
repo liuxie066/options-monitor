@@ -19,9 +19,9 @@
 最小执行顺序：
 
 1. 不清旧 `trade_events` / `position_lots`
-2. 先跑一次 `python3 scripts/option_positions.py rebuild`
-3. 用 `python3 scripts/option_positions.py inspect ...` 抽查关键仓位
-4. 用真实仓位 snapshot 跑 `python3 scripts/option_positions.py reconcile --snapshot-file ...`
+2. 先跑一次 `./om option-positions rebuild`
+3. 用 `./om option-positions inspect ...` 抽查关键仓位
+4. 用真实仓位 snapshot 跑 `./om option-positions reconcile --snapshot-file ...`
 
 不要把迁移理解成一次性重写历史 lot；正确方式是先让 v2 compat 读路径接管旧数据，再用 verification / reconciliation 落新的运维基线。
 
@@ -45,9 +45,7 @@ cd /home/node/.openclaw/workspace/options-monitor-prod
 | `./om-agent run --tool openclaw_readiness ...` | 否 | 否 | 否 | 只读汇总 runtime / healthcheck / 可选 cron 状态 |
 | `./om run tick --config ... --no-send` | 是 | 可能 | 否 | 会写本地运行产物，但禁发通知 |
 | `./om run tick --config ...` | 是 | 可能 | 是 | 正式运行入口 |
-| `python3 scripts/send_if_needed_multi.py ...` | 是 | 可能 | 是 | 兼容 wrapper，不是首选入口 |
-| `python3 scripts/send_if_needed.py ...` | 是 | 可能 | 是 | 兼容 wrapper，不是首选入口 |
-| `python3 scripts/auto_trade_intake.py --mode apply` | 是 | 否 | 否 | 会写本地 option_positions / intake state |
+| `python3 -m src.application.auto_trade_intake --mode apply` | 是 | 否 | 否 | 会写本地 option_positions / intake state |
 | `./om option-positions sync-feishu --apply` | 是 | 是 | 否 | 先跑 `--dry-run` |
 
 判断原则：
@@ -73,7 +71,7 @@ openclaw cron run 9cba60f7-407b-4427-9120-0a176b818de9 --expect-final --timeout 
 
 线上定时执行入口：`./om run tick --config config.us.json --accounts lx sy`
 
-`scripts/send_if_needed.py` 仅保留为兼容 wrapper，会转调统一 tick 链路；不要再把它当作单账户业务实现维护。
+旧的 `scripts/send_if_needed.py` / `scripts/send_if_needed_multi.py` 兼容 wrapper 已删除；任何老定时任务都应直接调用 `./om run tick`。
 
 统一 tick 手动/可选定时入口：
 
