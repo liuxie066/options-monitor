@@ -107,6 +107,26 @@ def main(argv: list[str] | None = None) -> int:
     p_adjust.add_argument('--opened-at-ms', type=int, default=None)
     p_adjust.add_argument('--dry-run', action='store_true')
 
+    p_report = sub.add_parser('report', help='read-only reports for position lots')
+    report_sub = p_report.add_subparsers(dest='report_cmd', required=True)
+    p_monthly = report_sub.add_parser(
+        'monthly-income',
+        help='monthly option income report (realized_gross by closed_at, premium_received_gross by opened_at)',
+        description=(
+            'Monthly option income report.\n'
+            '- realized_gross: groups closed positions by closed_at month.\n'
+            '- premium_received_gross: groups short option premium receipts by opened_at month.\n'
+            '- *_cny columns are best-effort exchange-rate conversions from rate_cache.json.'
+        ),
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
+    p_monthly.add_argument('--broker', default='富途')
+    p_monthly.add_argument('--market', default=None, help='DEPRECATED alias of --broker')
+    p_monthly.add_argument('--account', default=None)
+    p_monthly.add_argument('--month', default=None, help='YYYY-MM')
+    p_monthly.add_argument('--format', choices=['text', 'json'], default='text')
+    p_monthly.add_argument('--include-rows', action='store_true')
+
     p_sync_feishu = sub.add_parser('sync-feishu', help='sync option positions to Feishu')
     p_sync_feishu.add_argument("--config", dest="sync_config", default=None, help="runtime config path; when provided, portfolio.data_config and runtime sync switch are used")
     p_sync_feishu.add_argument("--data-config", dest="sync_data_config", default=None, help="portfolio data config path; auto-resolves when omitted")
@@ -367,6 +387,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
+
+    if args.cmd == 'report':
+        from src.interfaces.cli.option_positions_report import run_report
+
+        return run_report(args, base=base, repo=repo)
 
     if args.cmd == 'reconcile':
         try:

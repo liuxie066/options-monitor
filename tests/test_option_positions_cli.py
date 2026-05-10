@@ -729,3 +729,118 @@ def test_option_positions_cli_history_json_includes_related_events(monkeypatch, 
     assert event_ids[2].startswith("manual-adjust-")
     assert rows[3]["void_target_event_id"] == close_result["event_id"]
     assert rows[4]["void_target_event_id"] == adjust_result["event_id"]
+
+
+def test_option_positions_cli_report_monthly_income_json(monkeypatch, tmp_path: Path, capsys) -> None:
+    import src.interfaces.cli.option_positions as cli_mod
+    import src.application.option_positions_facade as facade
+    import src.application.option_positions_service as svc
+    from domain.domain.option_position_lots import OpenPositionCommand, parse_exp_to_ms
+
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
+    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    repo.data_config_path = data_config  # type: ignore[attr-defined]
+
+    opened_at = parse_exp_to_ms("2026-04-03")
+    assert opened_at is not None
+    svc.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="NVDA",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=100.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            premium_per_share=2.5,
+            opened_at_ms=opened_at,
+        ),
+    )
+
+    monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
+    monkeypatch.setattr(facade, "get_exchange_rates_or_fetch_latest", lambda **_kwargs: {"rates": {"USDCNY": 7.2}})
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "om option-positions",
+            "--data-config",
+            str(data_config),
+            "report",
+            "monthly-income",
+            "--broker",
+            "富途",
+            "--account",
+            "lx",
+            "--month",
+            "2026-04",
+            "--format",
+            "json",
+        ],
+    )
+
+    cli_mod.main()
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["filters"]["account"] == "lx"
+    assert payload["filters"]["broker"] == "富途"
+    assert payload["filters"]["month"] == "2026-04"
+    assert payload["summary"] == [
+        {
+            "month": "2026-04",
+            "account": "lx",
+            "currency": "USD",
+            "realized_gross": 0.0,
+            "realized_gross_cny": 0.0,
+            "closed_contracts": 0,
+            "positions": 0,
+            "premium_received_gross": 250.0,
+            "premium_received_gross_cny": 1800.0,
+            "premium_contracts": 1,
+            "premium_positions": 1,
+        }
+    ]
+
+
+def test_option_positions_cli_report_monthly_income_text(monkeypatch, tmp_path: Path, capsys) -> None:
+    import src.interfaces.cli.option_positions as cli_mod
+    import src.application.option_positions_facade as facade
+
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
+
+    class _EmptyRepo:
+        def list_records(self, *, page_size: int = 500):
+            return []
+
+        def list_position_lots(self):
+            return []
+
+    monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, _EmptyRepo()))
+    monkeypatch.setattr(facade, "get_exchange_rates_or_fetch_latest", lambda **_kwargs: {"rates": {}})
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "om option-positions",
+            "--data-config",
+            str(data_config),
+            "report",
+            "monthly-income",
+            "--account",
+            "lx",
+            "--month",
+            "2026-04",
+        ],
+    )
+
+    cli_mod.main()
+
+    out = capsys.readouterr().out
+    assert "# Position Lots Monthly Income" in out
+    assert "filters: month=2026-04 | account=lx | broker=富途" in out
+    assert "| - | - | - | - | - | - | - | 0 | 0 | 0 | 0 |" in out
+

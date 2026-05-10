@@ -130,7 +130,7 @@
 ```bash
 ./om option-positions history --record-id <record_id>
 ./om option-positions list --broker 富途 --account lx --status all
-python3 scripts/option_positions_report.py monthly-income --broker 富途 --account lx --month 2026-04
+./om option-positions report monthly-income --broker 富途 --account lx --month 2026-04
 ```
 
 你要确认三件事：
