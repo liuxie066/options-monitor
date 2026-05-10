@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from scripts.trade_intake_state import (
+from src.application.trade_intake_state import (
     append_trade_intake_audit,
     is_retryable_unresolved_deal,
     load_trade_intake_state,

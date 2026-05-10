@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from src.application.trade_event_normalizer import NormalizedTradeDeal
-from scripts.trade_intake_state import upsert_deal_state
+from src.application.trade_intake_state import upsert_deal_state
 from src.application.trade_intake import build_trade_intake_audit_event, process_trade_payload
 
 
@@ -47,7 +47,7 @@ def test_build_audit_event_promotes_multiplier_source_to_top_level() -> None:
 
 
 def test_process_payload_appends_ledger_persist_audit_on_applied(monkeypatch, tmp_path: Path) -> None:
-    import scripts.auto_trade_intake as intake
+    import src.application.auto_trade_intake as intake
 
     deal = NormalizedTradeDeal(
         broker="富途",
@@ -118,7 +118,7 @@ def test_process_payload_appends_ledger_persist_audit_on_applied(monkeypatch, tm
 
 
 def test_process_payload_appends_enriched_audit_when_lookup_adds_account(monkeypatch, tmp_path: Path) -> None:
-    import scripts.auto_trade_intake as intake
+    import src.application.auto_trade_intake as intake
 
     events: list[dict] = []
 

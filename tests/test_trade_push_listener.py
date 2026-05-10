@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 from types import SimpleNamespace
 
-from scripts.trade_push_listener import OpenDTradePushListener
+from src.application.trade_push_listener import OpenDTradePushListener
 
 
 def test_trade_push_listener_isolates_callback_exception(monkeypatch) -> None:

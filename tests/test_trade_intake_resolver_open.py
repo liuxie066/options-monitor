@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from src.application.trade_event_normalizer import NormalizedTradeDeal
-from scripts.trade_intake_resolver import resolve_trade_deal
+from src.application.trade_intake_resolver import resolve_trade_deal
 
 
 class FakeRepo:
@@ -65,7 +65,7 @@ def test_resolve_trade_long_open_dry_run_returns_long_fields_preview() -> None:
 
 def test_resolve_trade_open_apply_creates_record() -> None:
     repo = FakeRepo()
-    import scripts.trade_intake_resolver as tir
+    import src.application.trade_intake_resolver as tir
 
     old_persist = tir.persist_trade_event
     try:

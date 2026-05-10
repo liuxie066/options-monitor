@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from src.application.trade_event_normalizer import NormalizedTradeDeal
-from scripts.trade_intake_resolver import load_close_candidate_records, match_close_positions, resolve_trade_deal
+from src.application.trade_intake_resolver import load_close_candidate_records, match_close_positions, resolve_trade_deal
 
 
 class FakeRepo:
@@ -132,7 +132,7 @@ def test_resolve_trade_long_close_dry_run_builds_patches() -> None:
 
 def test_resolve_trade_close_apply_updates_records() -> None:
     repo = FakeRepo([_record("rec1", 100, 1), _record("rec2", 200, 2)])
-    import scripts.trade_intake_resolver as tir
+    import src.application.trade_intake_resolver as tir
 
     old_persist = tir.persist_trade_event
     try:
@@ -148,7 +148,7 @@ def test_resolve_trade_close_apply_updates_records() -> None:
 
 def test_resolve_trade_long_close_apply_updates_records() -> None:
     repo = FakeRepo([_long_record("rec1", 100, 1), _long_record("rec2", 200, 2)])
-    import scripts.trade_intake_resolver as tir
+    import src.application.trade_intake_resolver as tir
 
     old_persist = tir.persist_trade_event
     try:

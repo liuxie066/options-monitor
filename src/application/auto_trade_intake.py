@@ -7,22 +7,22 @@ import sys
 import time
 from pathlib import Path
 
-repo_base = Path(__file__).resolve().parents[1]
+repo_base = Path(__file__).resolve().parents[2]
 if str(repo_base) not in sys.path:
     sys.path.insert(0, str(repo_base))
 
 from src.application.config_loader import load_config
-from scripts.futu_trade_detail_lookup import enrich_trade_push_payload_with_account_id
+from src.application.futu_trade_detail_lookup import enrich_trade_push_payload_with_account_id
 from src.application.trade_account_mapping import resolve_trade_intake_config
 from src.application.trade_event_normalizer import normalize_trade_deal
-from scripts.trade_intake_resolver import resolve_trade_deal
-from scripts.trade_intake_state import (
+from src.application.trade_intake_resolver import resolve_trade_deal
+from src.application.trade_intake_state import (
     append_trade_intake_audit,
     load_trade_intake_state,
     upsert_deal_state,
     write_trade_intake_state,
 )
-from scripts.trade_push_listener import OpenDTradePushListener
+from src.application.trade_push_listener import OpenDTradePushListener
 from src.application.opend_fetch_config import opend_fetch_kwargs
 from src.application.option_positions_facade import resolve_option_positions_repo_from_config
 from src.application.trade_intake import process_trade_payload
