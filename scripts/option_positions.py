@@ -10,7 +10,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
 repo_base = Path(__file__).resolve().parents[1]
@@ -33,38 +32,7 @@ from src.application.option_positions_facade import (
 from src.application.option_positions_inspection import build_lot_event_history, inspect_projection_state
 from src.application.option_positions_v2_service import refresh_option_positions_v2_state
 from src.application.option_positions_v2_service import reconcile_option_positions_snapshot, snapshot_current_positions_as_verification
-
-
-def _generate_verification_snapshot_id() -> str:
-    return f"verify-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}"
-
-
-def _load_verification_snapshot_payload(path: str) -> dict[str, object]:
-    payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    if isinstance(payload, dict) and payload.get("snapshot_type"):
-        return payload
-    if isinstance(payload, dict) and isinstance(payload.get("lots"), list):
-        lots = payload.get("lots") or []
-        snapshot_id = str(payload.get("snapshot_id") or _generate_verification_snapshot_id()).strip()
-        return {
-            "snapshot_id": snapshot_id,
-            "snapshot_type": "verification",
-            "snapshot_at_utc": str(payload.get("snapshot_at_utc") or datetime.now().astimezone().isoformat()),
-            "source_name": str(payload.get("source_name") or "cli_reconcile"),
-            "source_type": str(payload.get("source_type") or "manual_verification"),
-            "note": payload.get("note"),
-            "lots": lots,
-        }
-    if isinstance(payload, list):
-        return {
-            "snapshot_id": _generate_verification_snapshot_id(),
-            "snapshot_type": "verification",
-            "snapshot_at_utc": datetime.now().astimezone().isoformat(),
-            "source_name": "cli_reconcile",
-            "source_type": "manual_verification",
-            "lots": payload,
-        }
-    raise ValueError("verification snapshot file must be a snapshot object or a lots array")
+from src.application.verification_snapshot_io import load_verification_snapshot_payload
 
 
 def main():
@@ -371,7 +339,7 @@ def main():
 
     if args.cmd == 'reconcile':
         try:
-            snapshot = _load_verification_snapshot_payload(args.snapshot_file)
+            snapshot = load_verification_snapshot_payload(args.snapshot_file)
             report = reconcile_option_positions_snapshot(
                 base=state_base,
                 repo=repo,
