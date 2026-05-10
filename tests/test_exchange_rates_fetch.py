@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 def test_get_rates_or_fetch_latest_prefers_cache(tmp_path: Path) -> None:
-    from scripts.exchange_rates import get_exchange_rates_or_fetch_latest
+    from src.infrastructure.exchange_rates import get_exchange_rates_or_fetch_latest
 
     cache_path = tmp_path / "rate_cache.json"
     cache_path.write_text(
@@ -19,7 +19,7 @@ def test_get_rates_or_fetch_latest_prefers_cache(tmp_path: Path) -> None:
 
 
 def test_get_rates_or_fetch_latest_fetches_sina_when_cache_missing(tmp_path: Path, monkeypatch) -> None:
-    from scripts import exchange_rates
+    from src.infrastructure import exchange_rates
     cache_path = tmp_path / "state" / "rate_cache.json"
     monkeypatch.setattr(
         exchange_rates,
@@ -35,7 +35,7 @@ def test_get_rates_or_fetch_latest_fetches_sina_when_cache_missing(tmp_path: Pat
 
 
 def test_get_rates_or_fetch_latest_falls_back_to_stale_cache_when_live_fetch_fails(tmp_path: Path, monkeypatch) -> None:
-    from scripts import exchange_rates
+    from src.infrastructure import exchange_rates
 
     cache_path = tmp_path / "state" / "rate_cache.json"
     cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -54,7 +54,7 @@ def test_get_rates_or_fetch_latest_falls_back_to_stale_cache_when_live_fetch_fai
 
 
 def test_load_exchange_rate_info_can_read_cache_without_fetch(tmp_path: Path) -> None:
-    from scripts.exchange_rates import load_exchange_rate_info
+    from src.infrastructure.exchange_rates import load_exchange_rate_info
 
     cache_path = tmp_path / "rate_cache.json"
     cache_path.write_text(

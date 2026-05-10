@@ -19,14 +19,14 @@ from domain.domain.close_advice import (
     sort_advice_rows,
 )
 from scripts.fee_calc import calc_futu_option_fee
-from scripts.io_utils import atomic_write_text, read_json, safe_read_csv
+from src.infrastructure.io_utils import atomic_write_text, read_json, safe_read_csv
 from domain.domain.option_position_lots import (
     effective_expiration_ymd,
     effective_multiplier,
     normalize_account,
     normalize_currency,
 )
-from scripts.opend_utils import normalize_underlier
+from src.application.opend_utils import normalize_underlier
 from domain.domain.trade_contract_identity import (
     canonical_contract_symbol,
     contract_key,

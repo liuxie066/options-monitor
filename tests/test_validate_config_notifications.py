@@ -27,13 +27,11 @@ def _base_cfg() -> dict[str, object]:
     }
 
 
-def test_validate_config_rejects_empty_notification_target(tmp_path: Path, monkeypatch) -> None:
-    import scripts.validate_config as mod
+def test_validate_config_rejects_empty_notification_target(tmp_path: Path) -> None:
+    import src.application.config_validator as mod
 
     secrets = tmp_path / "notif.json"
     secrets.write_text(json.dumps({"feishu": {"app_id": "cli", "app_secret": "sec"}}), encoding="utf-8")
-    monkeypatch.setattr(mod, "repo_base", tmp_path)
-
     cfg = _base_cfg()
     cfg["notifications"] = {"channel": "feishu", "target": "", "secrets_file": "notif.json"}
 
@@ -44,13 +42,11 @@ def test_validate_config_rejects_empty_notification_target(tmp_path: Path, monke
         assert "notifications.target must be a non-empty open_id string" in str(exc)
 
 
-def test_validate_config_rejects_non_string_notification_target(tmp_path: Path, monkeypatch) -> None:
-    import scripts.validate_config as mod
+def test_validate_config_rejects_non_string_notification_target(tmp_path: Path) -> None:
+    import src.application.config_validator as mod
 
     secrets = tmp_path / "notif.json"
     secrets.write_text(json.dumps({"feishu": {"app_id": "cli", "app_secret": "sec"}}), encoding="utf-8")
-    monkeypatch.setattr(mod, "repo_base", tmp_path)
-
     cfg = _base_cfg()
     cfg["notifications"] = {"channel": "feishu", "target": ["ou_x"], "secrets_file": "notif.json"}
 
@@ -61,23 +57,19 @@ def test_validate_config_rejects_non_string_notification_target(tmp_path: Path, 
         assert "notifications.target must be a non-empty open_id string" in str(exc)
 
 
-def test_validate_config_accepts_valid_notification_open_id(tmp_path: Path, monkeypatch) -> None:
-    import scripts.validate_config as mod
+def test_validate_config_accepts_valid_notification_open_id(tmp_path: Path) -> None:
+    import src.application.config_validator as mod
 
     secrets = tmp_path / "notif.json"
     secrets.write_text(json.dumps({"feishu": {"app_id": "cli", "app_secret": "sec"}}), encoding="utf-8")
-    monkeypatch.setattr(mod, "repo_base", tmp_path)
-
     cfg = _base_cfg()
     cfg["notifications"] = {"channel": "feishu", "target": "ou_valid", "secrets_file": "notif.json"}
 
     mod.validate_config(cfg)
 
 
-def test_validate_config_accepts_wechat_clawbot_without_feishu_secrets(tmp_path: Path, monkeypatch) -> None:
-    import scripts.validate_config as mod
-
-    monkeypatch.setattr(mod, "repo_base", tmp_path)
+def test_validate_config_accepts_wechat_clawbot_without_feishu_secrets() -> None:
+    import src.application.config_validator as mod
 
     cfg = _base_cfg()
     cfg["notifications"] = {"channel": "wechat_clawbot", "target": "clawbot:test-room"}
@@ -85,10 +77,8 @@ def test_validate_config_accepts_wechat_clawbot_without_feishu_secrets(tmp_path:
     mod.validate_config(cfg)
 
 
-def test_validate_config_rejects_empty_wechat_clawbot_target(tmp_path: Path, monkeypatch) -> None:
-    import scripts.validate_config as mod
-
-    monkeypatch.setattr(mod, "repo_base", tmp_path)
+def test_validate_config_rejects_empty_wechat_clawbot_target() -> None:
+    import src.application.config_validator as mod
 
     cfg = _base_cfg()
     cfg["notifications"] = {"channel": "wechat_clawbot", "target": ""}
@@ -100,10 +90,8 @@ def test_validate_config_rejects_empty_wechat_clawbot_target(tmp_path: Path, mon
         assert "notifications.target must be a non-empty openclaw target string" in str(exc)
 
 
-def test_validate_config_rejects_unsupported_notification_channel(tmp_path: Path, monkeypatch) -> None:
-    import scripts.validate_config as mod
-
-    monkeypatch.setattr(mod, "repo_base", tmp_path)
+def test_validate_config_rejects_unsupported_notification_channel() -> None:
+    import src.application.config_validator as mod
 
     cfg = _base_cfg()
     cfg["notifications"] = {"channel": "sms", "target": "user:test"}
@@ -115,10 +103,8 @@ def test_validate_config_rejects_unsupported_notification_channel(tmp_path: Path
         assert "notifications.channel must be one of: feishu, wechat_clawbot" in str(exc)
 
 
-def test_validate_config_accepts_option_positions_sync_to_feishu_enabled_boolean(tmp_path: Path, monkeypatch) -> None:
-    import scripts.validate_config as mod
-
-    monkeypatch.setattr(mod, "repo_base", tmp_path)
+def test_validate_config_accepts_option_positions_sync_to_feishu_enabled_boolean() -> None:
+    import src.application.config_validator as mod
 
     cfg = _base_cfg()
     cfg["option_positions"] = {"sync_to_feishu": {"enabled": False}}
@@ -126,10 +112,8 @@ def test_validate_config_accepts_option_positions_sync_to_feishu_enabled_boolean
     mod.validate_config(cfg)
 
 
-def test_validate_config_rejects_non_boolean_option_positions_sync_to_feishu_enabled(tmp_path: Path, monkeypatch) -> None:
-    import scripts.validate_config as mod
-
-    monkeypatch.setattr(mod, "repo_base", tmp_path)
+def test_validate_config_rejects_non_boolean_option_positions_sync_to_feishu_enabled() -> None:
+    import src.application.config_validator as mod
 
     cfg = _base_cfg()
     cfg["option_positions"] = {"sync_to_feishu": {"enabled": "no"}}

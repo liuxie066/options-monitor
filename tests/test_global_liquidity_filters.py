@@ -15,7 +15,7 @@ def _add_repo_to_syspath() -> Path:
 
 def test_validate_config_rejects_symbol_level_strategy_filter_keys() -> None:
     _add_repo_to_syspath()
-    from scripts.validate_config import validate_config
+    from src.application.config_validator import validate_config
 
     cfg = {
         'templates': {
@@ -68,7 +68,7 @@ def test_validate_config_rejects_symbol_level_strategy_filter_keys() -> None:
 
 def test_validate_config_rejects_removed_global_strategy_filter_keys() -> None:
     _add_repo_to_syspath()
-    from scripts.validate_config import validate_config
+    from src.application.config_validator import validate_config
 
     cfg = {
         'templates': {
@@ -110,7 +110,7 @@ def test_validate_config_rejects_removed_global_strategy_filter_keys() -> None:
 
 def test_validate_config_rejects_removed_legacy_sell_call_fetch_fields_in_templates() -> None:
     _add_repo_to_syspath()
-    from scripts.validate_config import validate_config
+    from src.application.config_validator import validate_config
 
     cfg = {
         'templates': {
@@ -144,7 +144,7 @@ def test_validate_config_rejects_removed_legacy_sell_call_fetch_fields_in_templa
 
 def test_validate_config_rejects_fees_config() -> None:
     _add_repo_to_syspath()
-    from scripts.validate_config import validate_config
+    from src.application.config_validator import validate_config
 
     cfg = {
         'fees': {'US': {'model': 'futu_us_simplified'}},
@@ -178,7 +178,7 @@ def test_validate_config_rejects_fees_config() -> None:
 
 def test_validate_config_rejects_invalid_close_advice_config() -> None:
     _add_repo_to_syspath()
-    from scripts.validate_config import validate_config
+    from src.application.config_validator import validate_config
 
     cfg = {
         'close_advice': {
@@ -216,7 +216,7 @@ def test_validate_config_rejects_invalid_close_advice_config() -> None:
 
 def test_validate_config_rejects_decimal_close_advice_max_items_per_account() -> None:
     _add_repo_to_syspath()
-    from scripts.validate_config import validate_config
+    from src.application.config_validator import validate_config
 
     cfg = {
         'close_advice': {
@@ -243,7 +243,7 @@ def test_validate_config_rejects_decimal_close_advice_max_items_per_account() ->
 
 def test_validate_config_rejects_unknown_opend_rate_limit_endpoint() -> None:
     _add_repo_to_syspath()
-    from scripts.validate_config import validate_config
+    from src.application.config_validator import validate_config
 
     cfg = {
         'runtime': {
@@ -273,7 +273,7 @@ def test_validate_config_rejects_unknown_opend_rate_limit_endpoint() -> None:
 
 def test_validate_config_accepts_external_holdings_account_settings() -> None:
     _add_repo_to_syspath()
-    from scripts.validate_config import validate_config
+    from src.application.config_validator import validate_config
 
     cfg = {
         'accounts': ['user1', 'ext1'],
@@ -314,7 +314,7 @@ def test_validate_config_accepts_external_holdings_account_settings() -> None:
 
 def test_validate_config_rejects_zero_strike_sentinels_and_removed_legacy_sell_call_fields() -> None:
     _add_repo_to_syspath()
-    from scripts.validate_config import validate_config
+    from src.application.config_validator import validate_config
 
     cfg = {
         'symbols': [
@@ -354,7 +354,7 @@ def test_validate_config_rejects_zero_strike_sentinels_and_removed_legacy_sell_c
 
 def test_validate_config_allows_single_near_bound_modes() -> None:
     _add_repo_to_syspath()
-    from scripts.validate_config import validate_config
+    from src.application.config_validator import validate_config
 
     cfg = {
         'symbols': [
@@ -383,7 +383,7 @@ def test_sell_put_steps_use_global_liquidity_filters_only() -> None:
     base = _add_repo_to_syspath()
     import scripts.sell_put_steps as steps
     import pandas as pd
-    from scripts.exchange_rates import CurrencyConverter, ExchangeRates
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
     calls: list[dict] = []
     orig_run_sell_put_scan = steps.run_sell_put_scan
@@ -446,7 +446,7 @@ def test_sell_put_steps_use_global_liquidity_filters_only() -> None:
 def test_sell_put_steps_filter_uses_total_cny_when_base_cny_missing(tmp_path: Path) -> None:
     base = _add_repo_to_syspath()
     import scripts.sell_put_steps as steps
-    from scripts.exchange_rates import CurrencyConverter, ExchangeRates
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
     report_dir = tmp_path / "reports"
     report_dir.mkdir(parents=True, exist_ok=True)
@@ -523,7 +523,7 @@ def test_sell_put_steps_filter_uses_total_cny_when_base_cny_missing(tmp_path: Pa
 def test_sell_put_steps_filter_prefers_base_cny_over_total_cny(tmp_path: Path) -> None:
     base = _add_repo_to_syspath()
     import scripts.sell_put_steps as steps
-    from scripts.exchange_rates import CurrencyConverter, ExchangeRates
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
     report_dir = tmp_path / "reports"
     report_dir.mkdir(parents=True, exist_ok=True)
@@ -601,7 +601,7 @@ def test_sell_call_steps_use_global_liquidity_filters_only() -> None:
     base = _add_repo_to_syspath()
     import scripts.sell_call_steps as steps
     import pandas as pd
-    from scripts.exchange_rates import CurrencyConverter, ExchangeRates
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
     calls: list[dict] = []
     orig_run_sell_call_scan = steps.run_sell_call_scan
@@ -659,7 +659,7 @@ def test_sell_put_steps_fallback_to_global_min_net_income() -> None:
     base = _add_repo_to_syspath()
     import scripts.sell_put_steps as steps
     import pandas as pd
-    from scripts.exchange_rates import CurrencyConverter, ExchangeRates
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
     calls: list[dict] = []
     orig_run_sell_put_scan = steps.run_sell_put_scan
@@ -710,7 +710,7 @@ def test_sell_call_steps_fallback_to_global_min_net_income() -> None:
     base = _add_repo_to_syspath()
     import scripts.sell_call_steps as steps
     import pandas as pd
-    from scripts.exchange_rates import CurrencyConverter, ExchangeRates
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
     calls: list[dict] = []
     orig_run_sell_call_scan = steps.run_sell_call_scan

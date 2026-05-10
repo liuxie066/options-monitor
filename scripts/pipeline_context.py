@@ -15,14 +15,14 @@ Design constraints:
 import json
 from pathlib import Path
 
-from scripts.account_config import build_account_portfolio_source_plan
-from scripts.config_loader import resolve_data_config_path
+from src.application.account_config import build_account_portfolio_source_plan
+from src.application.config_loader import resolve_data_config_path
 from scripts.fetch_option_positions_context import (
     build_context as build_option_positions_context,
     build_shared_context as build_shared_option_positions_context,
 )
 from scripts.futu_portfolio_context import fetch_futu_portfolio_context
-from scripts.io_utils import is_fresh, load_cached_json
+from src.infrastructure.io_utils import is_fresh, load_cached_json
 from src.application.option_positions_service import (
     load_option_positions_repo,
 )
@@ -183,7 +183,7 @@ def maybe_auto_close_expired_positions(
 
 def _load_option_position_exchange_rates(*, base: Path, state_dir: Path, log) -> dict | None:
     try:
-        from scripts.exchange_rates import get_exchange_rates_or_fetch_latest
+        from src.infrastructure.exchange_rates import get_exchange_rates_or_fetch_latest
 
         return get_exchange_rates_or_fetch_latest(
             cache_path=(state_dir / 'rate_cache.json').resolve(),
@@ -196,25 +196,15 @@ def _load_option_position_exchange_rates(*, base: Path, state_dir: Path, log) ->
 def load_exchange_rates(*, base: Path, state_dir: Path, log, shared_state_dir: Path | None = None) -> tuple[float | None, float | None]:
     """Best-effort exchange-rate loader.
 
-    Keep the original importlib boundary from run_pipeline, but use the
-    repo-local exchange-rate helper so cache miss behavior stays consistent with other
-    entrypoints.
+    Use the shared infrastructure exchange-rate helper so cache miss behavior
+    stays consistent with other entrypoints.
     """
     usd_per_cny_exchange_rate = None
     cny_per_hkd_exchange_rate = None
     try:
-        import importlib.util
-        import sys as _sys
+        from src.infrastructure.exchange_rates import get_exchange_rates_or_fetch_latest
 
-        exchange_rate_path = (base / 'scripts' / 'exchange_rates.py').resolve()
-        spec = importlib.util.spec_from_file_location('exchange_rates', exchange_rate_path)
-        assert spec and spec.loader
-        mod = importlib.util.module_from_spec(spec)
-        # dataclasses expects module to exist in sys.modules during exec
-        _sys.modules['exchange_rates'] = mod
-        spec.loader.exec_module(mod)  # type: ignore
-
-        rates_obj = mod.get_exchange_rates_or_fetch_latest(  # type: ignore
+        rates_obj = get_exchange_rates_or_fetch_latest(
             cache_path=(state_dir / 'rate_cache.json').resolve(),
             max_age_hours=24,
             log=log,

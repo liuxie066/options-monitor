@@ -48,7 +48,7 @@ cd /home/node/.openclaw/workspace/options-monitor-prod
 | `python3 scripts/send_if_needed_multi.py ...` | 是 | 可能 | 是 | 兼容 wrapper，不是首选入口 |
 | `python3 scripts/send_if_needed.py ...` | 是 | 可能 | 是 | 兼容 wrapper，不是首选入口 |
 | `python3 scripts/auto_trade_intake.py --mode apply` | 是 | 否 | 否 | 会写本地 option_positions / intake state |
-| `python3 scripts/sync_option_positions_to_feishu.py --apply` | 是 | 是 | 否 | 先跑 `--dry-run` |
+| `./om option-positions sync-feishu --apply` | 是 | 是 | 否 | 先跑 `--dry-run` |
 
 判断原则：
 - 只想确认配置或状态时，优先 `config_validate` / `healthcheck` / `runtime_status`

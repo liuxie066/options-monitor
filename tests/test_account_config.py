@@ -2,19 +2,19 @@ from __future__ import annotations
 
 
 def test_accounts_from_config_normalizes_and_dedupes() -> None:
-    from scripts.account_config import accounts_from_config
+    from src.application.account_config import accounts_from_config
 
     assert accounts_from_config({"accounts": [" LX ", "sy", "lx", ""]}) == ["lx", "sy"]
 
 
 def test_accounts_from_config_keeps_legacy_fallback() -> None:
-    from scripts.account_config import accounts_from_config
+    from src.application.account_config import accounts_from_config
 
     assert accounts_from_config({}) == ["user1"]
 
 
 def test_cash_footer_accounts_prefers_notification_override_then_accounts() -> None:
-    from scripts.account_config import cash_footer_accounts_from_config
+    from src.application.account_config import cash_footer_accounts_from_config
 
     assert cash_footer_accounts_from_config({"accounts": ["alpha"]}) == ["alpha"]
     assert cash_footer_accounts_from_config(
@@ -26,7 +26,7 @@ def test_cash_footer_accounts_prefers_notification_override_then_accounts() -> N
 
 
 def test_resolve_portfolio_source_prefers_account_override_then_global_then_auto() -> None:
-    from scripts.account_config import resolve_portfolio_source
+    from src.application.account_config import resolve_portfolio_source
 
     cfg = {
         "portfolio": {
@@ -45,7 +45,7 @@ def test_resolve_portfolio_source_prefers_account_override_then_global_then_auto
 
 
 def test_resolve_account_type_uses_account_settings_then_legacy_holdings_override() -> None:
-    from scripts.account_config import resolve_account_type
+    from src.application.account_config import resolve_account_type
 
     cfg = {
         "accounts": ["user1", "ext1", "ext2"],
@@ -66,7 +66,7 @@ def test_resolve_account_type_uses_account_settings_then_legacy_holdings_overrid
 
 
 def test_resolve_holdings_account_uses_explicit_mapping_then_account_label() -> None:
-    from scripts.account_config import resolve_holdings_account
+    from src.application.account_config import resolve_holdings_account
 
     cfg = {
         "accounts": ["user1", "ext1"],
@@ -81,7 +81,7 @@ def test_resolve_holdings_account_uses_explicit_mapping_then_account_label() -> 
 
 
 def test_resolve_portfolio_source_keeps_auto_for_futu_account() -> None:
-    from scripts.account_config import resolve_portfolio_source
+    from src.application.account_config import resolve_portfolio_source
 
     cfg = {
         "accounts": ["lx"],
@@ -98,7 +98,7 @@ def test_resolve_portfolio_source_keeps_auto_for_futu_account() -> None:
 
 
 def test_build_account_portfolio_source_plan_for_auto_futu_account() -> None:
-    from scripts.account_config import build_account_portfolio_source_plan
+    from src.application.account_config import build_account_portfolio_source_plan
 
     cfg = {
         "accounts": ["lx"],
@@ -118,7 +118,7 @@ def test_build_account_portfolio_source_plan_for_auto_futu_account() -> None:
 
 
 def test_build_account_portfolio_source_plan_for_external_holdings_account() -> None:
-    from scripts.account_config import build_account_portfolio_source_plan
+    from src.application.account_config import build_account_portfolio_source_plan
 
     cfg = {
         "accounts": ["ext1"],

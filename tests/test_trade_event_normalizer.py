@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from scripts.trade_event_normalizer import normalize_trade_deal
+from src.application.trade_event_normalizer import normalize_trade_deal
 
 
 def test_normalize_trade_deal_maps_core_fields() -> None:
@@ -190,7 +190,7 @@ def test_normalize_trade_deal_uses_contract_metadata_multiplier_with_runtime_con
             "attempted_sources": [{"source": "cache", "status": "resolved", "value": 500}],
         }
 
-    monkeypatch.setattr("scripts.trade_event_normalizer.resolve_multiplier_with_source_and_diagnostics", _fake_resolver)
+    monkeypatch.setattr("src.application.trade_event_normalizer.resolve_multiplier_with_source_and_diagnostics", _fake_resolver)
 
     deal = normalize_trade_deal(
         {
@@ -222,7 +222,7 @@ def test_normalize_trade_deal_uses_contract_metadata_multiplier_with_runtime_con
 
 def test_normalize_trade_deal_uses_static_symbol_multiplier_after_metadata_miss(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
-        "scripts.multiplier_cache.refresh_via_opend",
+        "src.infrastructure.multiplier_cache.refresh_via_opend",
         lambda **_kwargs: SimpleNamespace(ok=False, multiplier=None, error="not available in test"),
     )
 
@@ -249,7 +249,7 @@ def test_normalize_trade_deal_uses_static_symbol_multiplier_after_metadata_miss(
 
 def test_normalize_trade_deal_uses_configured_market_default_multiplier(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
-        "scripts.multiplier_cache.refresh_via_opend",
+        "src.infrastructure.multiplier_cache.refresh_via_opend",
         lambda **_kwargs: SimpleNamespace(ok=False, multiplier=None, error="not available in test"),
     )
 
@@ -301,7 +301,7 @@ def test_normalize_trade_deal_uses_repo_hk_intake_config_when_active_config_has_
     tmp_path: Path,
 ) -> None:
     monkeypatch.setattr(
-        "scripts.multiplier_cache.refresh_via_opend",
+        "src.infrastructure.multiplier_cache.refresh_via_opend",
         lambda **_kwargs: SimpleNamespace(ok=False, multiplier=None, error="not available in test"),
     )
     (tmp_path / "config.hk.json").write_text(
@@ -344,7 +344,7 @@ def test_normalize_trade_deal_does_not_let_hk_option_display_name_block_code_fal
     tmp_path: Path,
 ) -> None:
     monkeypatch.setattr(
-        "scripts.multiplier_cache.refresh_via_opend",
+        "src.infrastructure.multiplier_cache.refresh_via_opend",
         lambda **_kwargs: SimpleNamespace(ok=False, multiplier=None, error="not available in test"),
     )
     (tmp_path / "config.hk.json").write_text(

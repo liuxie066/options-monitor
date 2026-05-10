@@ -7,14 +7,14 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from scripts.cash_secured_utils import (
+from domain.domain.cash_secured_utils import (
     cash_secured_symbol_cny,
     normalize_cash_secured_by_symbol_by_ccy,
     normalize_cash_secured_total_by_ccy,
     read_cash_secured_total_cny,
 )
-from scripts.config_loader import normalize_portfolio_broker_config, resolve_data_config_path
-from scripts.exchange_rates import get_exchange_rates_or_fetch_latest
+from src.application.config_loader import normalize_portfolio_broker_config, resolve_data_config_path
+from src.infrastructure.exchange_rates import get_exchange_rates_or_fetch_latest
 from scripts.fetch_option_positions_context import build_context as build_option_positions_context
 from scripts.futu_portfolio_context import fetch_futu_portfolio_context
 from src.application.option_positions_service import load_option_positions_repo

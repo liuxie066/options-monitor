@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from scripts.config_profiles import deep_merge
-from scripts.config_loader import resolve_templates_config, resolve_watchlist_config
+from src.application.config_loader import resolve_templates_config, resolve_watchlist_config
 from scripts.sell_call_config import resolve_min_annualized_net_premium_return
 from scripts.sell_put_config import resolve_min_annualized_net_return
 from domain.domain import normalize_processor_row, normalize_processor_rows
@@ -330,7 +330,7 @@ def run_watchlist_pipeline_default(
     from scripts.config_profiles import apply_profiles
     from scripts.pipeline_context import build_pipeline_context
     from scripts.pipeline_symbol import process_symbol
-    from scripts.report_builders import build_symbols_digest, build_symbols_summary
+    from src.application.report_builders import build_symbols_digest, build_symbols_summary
 
     return run_watchlist_pipeline(
         py=py,

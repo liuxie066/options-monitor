@@ -13,7 +13,7 @@ US cron 的实际生效配置已经是 `config.us.json`，HK 对应 `config.hk.j
 
 ## Rationale
 
-- 当前代码已经完成绝大多数治理：`scripts/agent_plugin/config.py`、`src/interfaces/cli/main.py`、`scripts/validate_config.py`、`scripts/send_if_needed.py`、`scripts/multi_tick/main.py` 等都默认使用 `config.us.json` / `config.hk.json`。
+- 当前代码已经完成绝大多数治理：`scripts/agent_plugin/config.py`、`src/interfaces/cli/main.py`、`src/application/config_validator.py`、`scripts/send_if_needed.py`、`scripts/multi_tick/main.py` 等都默认使用 `config.us.json` / `config.hk.json`。
 - `domain/domain/config_contract.py` 已将 canonical configs 固定为 `config.us.json` / `config.hk.json`。
 - `CONFIGS.md` 和 `docs/GUARDRAILS.md` 已明确禁止把 `config.json` 当作 runtime 入口。
 - 因此这里不需要代码大重构，真正需要的是清除认知层歧义，防止 legacy 文件继续被误认为“活配置”。

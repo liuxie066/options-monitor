@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from scripts.trade_event_normalizer import NormalizedTradeDeal
+from src.application.trade_event_normalizer import NormalizedTradeDeal
 from scripts.trade_intake_resolver import load_close_candidate_records, match_close_positions, resolve_trade_deal
 
 

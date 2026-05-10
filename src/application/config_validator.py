@@ -1,14 +1,6 @@
-#!/usr/bin/env python3
 from __future__ import annotations
 
-import argparse
-import json
 import sys
-from pathlib import Path
-
-repo_base = Path(__file__).resolve().parents[1]
-if str(repo_base) not in sys.path:
-    sys.path.insert(0, str(repo_base))
 
 from domain.domain import (
     FEISHU_NOTIFICATION_CHANNEL,
@@ -17,9 +9,9 @@ from domain.domain import (
     normalize_notification_channel,
 )
 from domain.domain.fetch_source import normalize_fetch_source
-from scripts.account_config import ACCOUNT_TYPES, account_settings_from_config, accounts_from_config
-from scripts.config_loader import resolve_templates_config, resolve_watchlist_config, set_watchlist_config
-from scripts.trade_account_mapping import resolve_trade_intake_config
+from src.application.account_config import ACCOUNT_TYPES, account_settings_from_config, accounts_from_config
+from src.application.config_loader import resolve_templates_config, resolve_watchlist_config, set_watchlist_config
+from src.application.trade_account_mapping import resolve_trade_intake_config
 from src.application.opend_fetch_config import OPEND_RATE_LIMIT_ENDPOINT_KEYS
 from src.application.yield_enhancement_config import YIELD_ENHANCEMENT_OUTPUT_MODES
 
@@ -346,6 +338,36 @@ def validate_config(cfg: dict):
             except Exception:
                 die(f'close_advice.{key} must be a number')
 
+    alert_policy = cfg.get('alert_policy')
+    if alert_policy is not None and not isinstance(alert_policy, (dict, str)):
+        die('alert_policy must be an object or a path string')
+    if isinstance(alert_policy, dict):
+        if 'change_annual_threshold' in alert_policy and alert_policy.get('change_annual_threshold') is not None:
+            try:
+                if float(alert_policy.get('change_annual_threshold')) < 0:
+                    die('alert_policy.change_annual_threshold must be >= 0')
+            except Exception:
+                die('alert_policy.change_annual_threshold must be a number')
+        for sub_key, allowed_keys in (
+            ('sell_put', {'high_annual', 'high_spread_max', 'medium_annual'}),
+            ('sell_call', {'high_annual', 'high_total', 'medium_annual'}),
+        ):
+            sub = alert_policy.get(sub_key)
+            if sub is None:
+                continue
+            if not isinstance(sub, dict):
+                die(f'alert_policy.{sub_key} must be an object')
+            for k, v in sub.items():
+                if k not in allowed_keys:
+                    die(f'alert_policy.{sub_key}.{k} is not a supported key; use one of: {", ".join(sorted(allowed_keys))}')
+                if v is None:
+                    continue
+                try:
+                    if float(v) < 0:
+                        die(f'alert_policy.{sub_key}.{k} must be >= 0')
+                except Exception:
+                    die(f'alert_policy.{sub_key}.{k} must be a number')
+
     account_settings = cfg.get('account_settings') or {}
     if account_settings and not isinstance(account_settings, dict):
         die('account_settings must be an object')
@@ -531,25 +553,3 @@ def validate_config(cfg: dict):
 
         if item.get('rebound_combo') is not None:
             die(f"{sym}.rebound_combo has been removed; use {sym}.yield_enhancement instead")
-
-
-def main():
-    ap = argparse.ArgumentParser(description='Validate options-monitor config.us.json/config.hk.json')
-    ap.add_argument('--config', default='config.us.json')
-    args = ap.parse_args()
-
-    base = Path(__file__).resolve().parents[1]
-    p = Path(args.config)
-    if not p.is_absolute():
-        p = (base / p).resolve()
-
-    if not p.exists():
-        die(f"config not found: {p}")
-
-    cfg = json.loads(p.read_text(encoding='utf-8'))
-    validate_config(cfg)
-    print('[OK] config valid')
-
-
-if __name__ == '__main__':
-    main()

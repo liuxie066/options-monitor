@@ -13,11 +13,7 @@ if str(_repo_root) not in sys.path:
 
 from pathlib import Path
 
-try:
-    from scripts.run_log import RunLogger
-except Exception:
-    from run_log import RunLogger
-
+from src.infrastructure.run_log import RunLogger
 from src.application.multi_account_tick import current_run_id as _current_run_id
 from src.application.multi_account_tick import run_tick as _multi_main
 

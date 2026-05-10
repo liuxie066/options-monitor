@@ -5,7 +5,7 @@ from typing import Any
 
 from fastapi import HTTPException
 
-from scripts.account_config import (
+from src.application.account_config import (
     account_settings_from_config,
     accounts_from_config,
     cash_footer_accounts_from_config,

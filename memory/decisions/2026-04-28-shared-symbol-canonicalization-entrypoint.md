@@ -9,7 +9,7 @@
 
 ## Decision
 
-1. 仓库内需要处理用户输入、broker 原始 payload、或 OpenD/Futu underlier 的入口，统一复用 `scripts/opend_utils.py:resolve_underlier_alias`。
+1. 仓库内需要处理用户输入、broker 原始 payload、或 OpenD/Futu underlier 的入口，统一复用 `src/application/opend_utils.py:resolve_underlier_alias`。
 2. canonical symbol 以业务 symbol 为准，例如 `NVDA`、`0700.HK`、`9992.HK`。
 3. alias（例如 `POP`）允许作为输入，但不能作为 watchlist、持仓、multiplier cache、或后续业务链路中的持久 symbol 继续传播。
 4. 纯下游消费层如果只做展示、聚合、比较，可以继续假设上游已提供 canonical symbol；不要求机械替换所有 `upper()`。

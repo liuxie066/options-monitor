@@ -89,7 +89,7 @@ def test_alert_engine_domain_and_cli() -> None:
 
 def test_step4_domain_files_no_argparse_or_main() -> None:
     targets = [
-        BASE / 'scripts' / 'scan_scheduler.py',
+        BASE / 'src' / 'application' / 'scan_scheduler.py',
         BASE / 'scripts' / 'render_sell_put_alerts.py',
         BASE / 'scripts' / 'render_sell_call_alerts.py',
         BASE / 'scripts' / 'query_sell_put_cash.py',
@@ -105,7 +105,7 @@ def test_scan_scheduler_domain_and_cli() -> None:
     if str(BASE) not in sys.path:
         sys.path.insert(0, str(BASE))
 
-    from scripts.scan_scheduler import run_scheduler
+    from src.application.scan_scheduler import run_scheduler
 
     with TemporaryDirectory() as td:
         root = Path(td)

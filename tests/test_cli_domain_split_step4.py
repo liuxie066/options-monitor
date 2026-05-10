@@ -13,7 +13,7 @@ TEST_ROOT = BASE / 'output' / 'state' / 'test_cli_domain_split_step4'
 
 
 DOMAIN_FILES = [
-    BASE / 'scripts' / 'scan_scheduler.py',
+    BASE / 'src' / 'application' / 'scan_scheduler.py',
     BASE / 'scripts' / 'query_sell_put_cash.py',
 ]
 
@@ -126,7 +126,7 @@ def test_scan_scheduler_domain_and_cli() -> None:
     if str(BASE) not in sys.path:
         sys.path.insert(0, str(BASE))
 
-    from scripts.scan_scheduler import run_scheduler
+    from src.application.scan_scheduler import run_scheduler
 
     root = TEST_ROOT / 'scheduler'
     _clean_dir(root)

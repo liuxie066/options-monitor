@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 from __future__ import annotations
 
 """Multiplier cache and resolver.
@@ -23,6 +22,7 @@ import argparse
 import json
 import os
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -31,10 +31,13 @@ try:
 except Exception:  # pragma: no cover - non-Unix fallback
     fcntl = None  # type: ignore[assignment]
 
-from scripts.io_utils import utc_now
 from domain.domain.symbol_identity import canonical_symbol_aliases, is_hk_symbol, resolve_underlier_alias
 from src.application.opend_fetch_config import filter_opend_fetch_kwargs
 from src.application.symbol_aliases import symbol_aliases_from_config
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def default_cache_path(repo_base: Path) -> Path:
@@ -316,7 +319,7 @@ def refresh_via_opend(
     sym = normalize_symbol(symbol)
     try:
         # Local import to avoid futu dependency for non-refresh paths.
-        # Ensure repo root is on sys.path so `import scripts.*` works when running as a script.
+        # Ensure repo root is on sys.path when running this module directly.
         import sys
         if str(repo_base) not in sys.path:
             sys.path.insert(0, str(repo_base))
@@ -437,7 +440,7 @@ def cmd_refresh(cache_path: Path, symbols: list[str], *, host: str, port: int, l
             results.append(RefreshResult(symbol=sym, ok=True, multiplier=get_cached_multiplier(cache, sym), error="cached"))
             continue
 
-        r = refresh_via_opend(repo_base=Path(__file__).resolve().parents[1], symbol=sym, host=host, port=port, limit_expirations=limit_expirations)
+        r = refresh_via_opend(repo_base=Path(__file__).resolve().parents[2], symbol=sym, host=host, port=port, limit_expirations=limit_expirations)
         results.append(r)
         if r.ok and r.multiplier:
             store_multiplier(cache, sym, int(r.multiplier), source="opend")
@@ -480,7 +483,7 @@ def main():
 
     args = ap.parse_args()
 
-    repo_base = Path(__file__).resolve().parents[1]
+    repo_base = Path(__file__).resolve().parents[2]
     cache_path = Path(args.cache).expanduser().resolve() if args.cache else default_cache_path(repo_base)
 
     if args.cmd == "list":

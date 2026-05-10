@@ -26,7 +26,7 @@ from domain.domain import (
     normalize_pipeline_subprocess_output,
     resolve_openclaw_transport_channel,
 )
-from scripts.account_config import accounts_from_config
+from src.application.account_config import accounts_from_config
 
 
 def load_json(p: Path) -> dict:

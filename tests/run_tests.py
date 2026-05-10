@@ -123,7 +123,7 @@ def test_run_log_writer_create_and_append() -> None:
     if str(BASE) not in sys.path:
         sys.path.insert(0, str(BASE))
 
-    from scripts.run_log import RunLogger
+    from src.infrastructure.run_log import RunLogger
 
     with TemporaryDirectory() as td:
         root = Path(td)
@@ -149,7 +149,7 @@ def test_run_log_data_small() -> None:
     if str(BASE) not in sys.path:
         sys.path.insert(0, str(BASE))
 
-    from scripts.run_log import _compact_data
+    from src.infrastructure.run_log import _compact_data
 
     big = {
         'k1': 'x' * 2000,

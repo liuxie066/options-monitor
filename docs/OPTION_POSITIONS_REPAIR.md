@@ -150,15 +150,15 @@ python3 scripts/option_positions_report.py monthly-income --broker 富途 --acco
 普通同步：
 
 ```bash
-python3 scripts/sync_option_positions_to_feishu.py --config config.us.json --dry-run
-python3 scripts/sync_option_positions_to_feishu.py --config config.us.json --apply
+./om option-positions sync-feishu --config config.us.json --dry-run
+./om option-positions sync-feishu --config config.us.json --apply
 ```
 
 如果本地已经把某条 lot 作废掉，需要顺便删除远端孤儿镜像：
 
 ```bash
-python3 scripts/sync_option_positions_to_feishu.py --config config.us.json --dry-run --prune-remote-missing-local
-python3 scripts/sync_option_positions_to_feishu.py --config config.us.json --apply --prune-remote-missing-local
+./om option-positions sync-feishu --config config.us.json --dry-run --prune-remote-missing-local
+./om option-positions sync-feishu --config config.us.json --apply --prune-remote-missing-local
 ```
 
 注意：

@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import HTTPException
 from typing import Any
 
-from scripts.account_config import accounts_from_config
+from src.application.account_config import accounts_from_config
 from src.application.watchlist_mutations import (
     ensure_symbols_list as _ensure_symbols_list,
     find_symbol_entry as _find_symbol_entry,

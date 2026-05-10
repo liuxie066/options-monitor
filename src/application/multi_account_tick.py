@@ -11,19 +11,15 @@ from threading import Lock
 from typing import Callable
 from zoneinfo import ZoneInfo
 
-try:
-    from scripts.run_log import RunLogger
-except Exception:
-    from run_log import RunLogger
-
-from scripts.io_utils import (
+from src.infrastructure.io_utils import (
     parse_last_json_obj,
     read_json,
     utc_now,
     bj_now,
 )
-from scripts.account_config import accounts_from_config, cash_footer_accounts_from_config
-from scripts.config_loader import resolve_watchlist_config, set_watchlist_config
+from src.infrastructure.run_log import RunLogger
+from src.application.account_config import accounts_from_config, cash_footer_accounts_from_config
+from src.application.config_loader import resolve_watchlist_config, set_watchlist_config
 from domain.domain.fetch_source import is_futu_fetch_source, resolve_symbol_fetch_source
 
 from scripts.multi_tick.cash_footer import query_cash_footer
@@ -101,7 +97,7 @@ from src.application.scheduled_notification import (
     mark_no_candidate_notification_metrics,
     prepare_multi_account_notification,
 )
-from scripts.infra.service import (
+from src.infrastructure.external_services import (
     run_opend_watchdog,
     run_scan_scheduler_cli,
     select_notification_delivery_adapter,

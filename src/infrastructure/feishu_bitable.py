@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Feishu Bitable helper module.
 
 Goal:
@@ -10,7 +9,7 @@ Goal:
   - Tenant access token caching + proactive refresh
 
 Design constraints:
-- Keep consumer function signatures backward compatible.
+- Keep consumer function signatures stable.
 - Keep style: pure functions + module-level cache (no classes for client objects).
 """
 
@@ -361,7 +360,7 @@ def with_tenant_token_retry(
 
 
 # -----------------
-# Bitable operations (backward compatible signatures)
+# Bitable operations
 # -----------------
 
 

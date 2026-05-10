@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from scripts.config_loader import normalize_portfolio_broker_config
+from src.application.config_loader import normalize_portfolio_broker_config
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.runtime_config_paths import absolutize_portfolio_data_config
 

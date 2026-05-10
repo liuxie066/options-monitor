@@ -60,11 +60,11 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.futu_gateway import (
+from src.infrastructure.futu_gateway import (
     build_ready_futu_gateway,
     retry_futu_gateway_call,
 )
-from scripts.opend_utils import normalize_underlier, get_trading_date
+from src.application.opend_utils import normalize_underlier, get_trading_date
 from src.application.opend_call_coordinator import rate_limited_opend_call
 from src.application.expiration_normalization import normalize_expiration_ymd
 from src.application.opend_fetch_config import OpenDFetchLimits
@@ -852,7 +852,7 @@ def fetch_symbol_request(request: FetchSymbolRequest) -> dict[str, Any]:
             iv = to_float(iv)
             # Normalize OpenD IV to decimal (e.g. 25 -> 0.25)
             try:
-                from scripts.opend_normalize import normalize_iv
+                from src.application.opend_normalize import normalize_iv
                 iv = normalize_iv(iv)
             except Exception:
                 # fallback: keep existing heuristic
@@ -988,7 +988,7 @@ def save_outputs(base: Path, symbol: str, payload: dict[str, Any], *, output_roo
 
     # Boundary validation: drop rows missing critical fields (strike/expiration/dte/option_type)
     try:
-        from scripts.required_data_validate import validate_required_rows
+        from src.application.required_data_validation import validate_required_rows
 
         rows0 = payload.get('rows') or []
         rows1, st = validate_required_rows(rows0)
@@ -1010,7 +1010,7 @@ def save_outputs(base: Path, symbol: str, payload: dict[str, Any], *, output_roo
         pass
 
     # Atomic writes: avoid half-written json/csv when process is killed mid-write.
-    from scripts.io_utils import atomic_write_text
+    from src.infrastructure.io_utils import atomic_write_text
     import io
 
     atomic_write_text(raw_path, json.dumps(payload, ensure_ascii=False, indent=2, default=str) + '\n', encoding='utf-8')

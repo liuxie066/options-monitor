@@ -8,7 +8,7 @@ BASE = Path(__file__).resolve().parents[1]
 if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
-from scripts.cash_secured_utils import (
+from domain.domain.cash_secured_utils import (
     cash_secured_symbol_by_ccy,
     cash_secured_symbol_cny,
     normalize_cash_secured_by_symbol_by_ccy,

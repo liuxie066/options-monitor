@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from scripts.io_utils import atomic_write_json as write_json, read_json
+from src.infrastructure.io_utils import atomic_write_json as write_json, read_json
 
 
 def project_guard_state_path(base: Path) -> Path:

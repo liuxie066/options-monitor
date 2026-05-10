@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from scripts.trade_account_mapping import (
+from src.application.trade_account_mapping import (
     resolve_futu_account_mapping,
     resolve_futu_lookup_account_ids,
     resolve_internal_account,
     resolve_trade_intake_config,
 )
-from scripts.trade_account_identity import extract_primary_account_id, extract_visible_account_fields
+from domain.domain.trade_account_identity import extract_primary_account_id, extract_visible_account_fields
 
 
 def test_resolve_futu_account_mapping_accepts_known_accounts() -> None:

@@ -12,7 +12,7 @@ def test_build_gateway_with_mock_backend_and_snapshot_call() -> None:
     if str(base) not in sys.path:
         sys.path.insert(0, str(base))
 
-    from scripts.futu_gateway import build_futu_gateway
+    from src.infrastructure.futu_gateway import build_futu_gateway
 
     class FakeBackend:
         def __init__(self, *, host: str, port: int) -> None:
@@ -49,7 +49,7 @@ def test_gateway_error_mapping_need_2fa() -> None:
     if str(base) not in sys.path:
         sys.path.insert(0, str(base))
 
-    from scripts.futu_gateway import build_futu_gateway, FutuGatewayNeed2FAError
+    from src.infrastructure.futu_gateway import build_futu_gateway, FutuGatewayNeed2FAError
 
     class FakeBackend:
         def __init__(self, *, host: str, port: int) -> None:
@@ -82,7 +82,7 @@ def test_build_ready_gateway_ensures_quote_ready() -> None:
     if str(base) not in sys.path:
         sys.path.insert(0, str(base))
 
-    from scripts.futu_gateway import build_ready_futu_gateway
+    from src.infrastructure.futu_gateway import build_ready_futu_gateway
 
     class FakeQuote:
         def __init__(self) -> None:
@@ -122,7 +122,7 @@ def test_retry_futu_gateway_call_retries_transient_once(monkeypatch) -> None:
     if str(base) not in sys.path:
         sys.path.insert(0, str(base))
 
-    from scripts.futu_gateway import FutuGatewayTransientError, retry_futu_gateway_call
+    from src.infrastructure.futu_gateway import FutuGatewayTransientError, retry_futu_gateway_call
 
     calls = {"count": 0}
     monkeypatch.setattr("time.sleep", lambda _seconds: None)

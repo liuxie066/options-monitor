@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from scripts.account_config import (
+from src.application.account_config import (
     ACCOUNT_TYPE_FUTU,
     account_settings_from_config,
     accounts_from_config,

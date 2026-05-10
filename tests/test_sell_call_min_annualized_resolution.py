@@ -150,7 +150,7 @@ def test_sell_call_steps_passes_resolved_threshold_to_scanner() -> None:
 
     import scripts.sell_call_steps as steps
     import pandas as pd
-    from scripts.exchange_rates import CurrencyConverter, ExchangeRates
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
     calls: list[dict] = []
     orig_run_sell_call_scan = steps.run_sell_call_scan
@@ -192,7 +192,7 @@ def test_sell_call_steps_converts_min_net_income_from_cny_to_native() -> None:
 
     import scripts.sell_call_steps as steps
     import pandas as pd
-    from scripts.exchange_rates import CurrencyConverter, ExchangeRates
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
     calls: list[dict] = []
     orig_run_sell_call_scan = steps.run_sell_call_scan
@@ -233,7 +233,7 @@ def test_sell_call_steps_converts_hk_min_net_income_from_cny_to_hkd() -> None:
 
     import scripts.sell_call_steps as steps
     import pandas as pd
-    from scripts.exchange_rates import CurrencyConverter, ExchangeRates
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
 
     calls: list[dict] = []
     orig_run_sell_call_scan = steps.run_sell_call_scan

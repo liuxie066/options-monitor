@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from scripts.opend_utils import normalize_underlier, resolve_underlier_alias
+from src.application.opend_utils import normalize_underlier, resolve_underlier_alias
 
 
 def test_resolve_underlier_alias_uses_builtin_fallbacks() -> None:

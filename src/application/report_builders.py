@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from scripts.summary_formatting import apply_summary_defaults, format_summary_row
+from src.application.summary_formatting import apply_summary_defaults, format_summary_row
 
 def build_symbols_summary(summary_rows: list[dict], report_dir: Path, *, is_scheduled: bool = False):
     df = apply_summary_defaults(pd.DataFrame(summary_rows))

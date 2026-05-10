@@ -8,7 +8,7 @@ from datetime import datetime, time
 from pathlib import Path
 from typing import Any
 
-from scripts.io_utils import read_json, atomic_write_json as write_json
+from src.infrastructure.io_utils import read_json, atomic_write_json as write_json
 
 
 DEBUG = False

@@ -1,4 +1,4 @@
-"""Unit tests for scripts/feishu_bitable.py.
+"""Unit tests for src/infrastructure/feishu_bitable.py.
 
 Focus:
 - retry behavior for transient/rate limit
@@ -33,7 +33,7 @@ def _make_http_error(status: int, body: str | bytes | None):
 
 
 def test_http_json_retries_on_429_then_succeeds() -> None:
-    from scripts import feishu_bitable as fb
+    from src.infrastructure import feishu_bitable as fb
 
     ok_body = json.dumps({"code": 0, "msg": "ok", "data": {"x": 1}}).encode("utf-8")
 
@@ -70,7 +70,7 @@ def test_http_json_retries_on_429_then_succeeds() -> None:
 
 
 def test_http_json_does_not_retry_on_permission() -> None:
-    from scripts import feishu_bitable as fb
+    from src.infrastructure import feishu_bitable as fb
 
     err_body = json.dumps({"code": 99991401, "msg": "no permission"})
     fake_403 = _make_http_error(403, err_body)
@@ -86,7 +86,7 @@ def test_http_json_does_not_retry_on_permission() -> None:
 
 
 def test_get_tenant_access_token_cache_and_force_refresh() -> None:
-    from scripts import feishu_bitable as fb
+    from src.infrastructure import feishu_bitable as fb
 
     # reset cache
     fb._token_cache.clear()
@@ -128,7 +128,7 @@ def test_get_tenant_access_token_cache_and_force_refresh() -> None:
 
 
 def test_get_tenant_access_token_isolated_by_app_credentials() -> None:
-    from scripts import feishu_bitable as fb
+    from src.infrastructure import feishu_bitable as fb
 
     fb._token_cache.clear()
 
@@ -160,7 +160,7 @@ def test_get_tenant_access_token_isolated_by_app_credentials() -> None:
 
 
 def test_get_tenant_access_token_reuses_cache_under_concurrency() -> None:
-    from scripts import feishu_bitable as fb
+    from src.infrastructure import feishu_bitable as fb
 
     fb._token_cache.clear()
 
@@ -195,7 +195,7 @@ def test_get_tenant_access_token_reuses_cache_under_concurrency() -> None:
 
 
 def test_with_tenant_token_retry_refreshes_once_on_auth_error() -> None:
-    from scripts import feishu_bitable as fb
+    from src.infrastructure import feishu_bitable as fb
 
     calls: list[tuple[str, bool]] = []
 
@@ -220,7 +220,7 @@ def test_with_tenant_token_retry_refreshes_once_on_auth_error() -> None:
 
 
 def test_with_tenant_token_retry_does_not_refresh_non_auth_errors() -> None:
-    from scripts import feishu_bitable as fb
+    from src.infrastructure import feishu_bitable as fb
 
     attempts = {"n": 0}
 
@@ -240,7 +240,7 @@ def test_with_tenant_token_retry_does_not_refresh_non_auth_errors() -> None:
 
 
 def test_http_json_logs_warn_retries_when_rate_limited() -> None:
-    from scripts import feishu_bitable as fb
+    from src.infrastructure import feishu_bitable as fb
 
     ok_body = json.dumps({"code": 0, "msg": "ok", "data": {"x": 1}}).encode("utf-8")
 
@@ -287,7 +287,7 @@ def test_http_json_logs_warn_retries_when_rate_limited() -> None:
 
 
 def test_http_json_logs_error_when_all_retries_fail() -> None:
-    from scripts import feishu_bitable as fb
+    from src.infrastructure import feishu_bitable as fb
 
     err_body = json.dumps({"code": 0, "msg": "server error"})
     fake_500 = _make_http_error(500, err_body)

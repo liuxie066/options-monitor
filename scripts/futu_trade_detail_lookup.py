@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
-from scripts.futu_gateway import build_futu_gateway
-from scripts.trade_account_identity import extract_primary_account_id
+from src.infrastructure.futu_gateway import build_futu_gateway
+from domain.domain.trade_account_identity import extract_primary_account_id
 from domain.domain.symbol_identity import resolve_symbol_identity
 
 

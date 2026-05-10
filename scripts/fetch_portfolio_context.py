@@ -15,7 +15,7 @@ import argparse
 import json
 from datetime import datetime, timezone
 
-from scripts.feishu_bitable import (
+from src.infrastructure.feishu_bitable import (
     FeishuAuthError,
     FeishuPermanentError,
     FeishuPermissionError,
@@ -25,11 +25,11 @@ from scripts.feishu_bitable import (
     with_tenant_token_retry,
 )
 from domain.domain.symbol_identity import canonical_symbol
-from scripts.config_loader import resolve_data_config_path
-from scripts.io_utils import atomic_write_json
+from src.application.config_loader import resolve_data_config_path
+from src.infrastructure.io_utils import atomic_write_json
 from domain.domain.option_position_lots import normalize_account, normalize_currency
 
-from scripts.feishu_bitable import safe_float
+from src.infrastructure.feishu_bitable import safe_float
 
 
 def _as_text(v) -> str:

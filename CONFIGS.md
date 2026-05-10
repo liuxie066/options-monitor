@@ -83,7 +83,7 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 
 1. 编辑仓外 canonical：`/opt/options-monitor/configs/config.us.json` / `/opt/options-monitor/configs/config.hk.json`。
 2. 运行入口显式使用仓外路径：`--config /opt/options-monitor/configs/config.us.json`。
-3. 校验配置：`./.venv/bin/python scripts/validate_config.py --config /opt/options-monitor/configs/config.us.json`。
+3. 校验配置：`./om config validate --config-path /opt/options-monitor/configs/config.us.json`。
 
 ## Runtime Config 迁移
 

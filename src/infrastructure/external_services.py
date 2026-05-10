@@ -18,8 +18,8 @@ from domain.domain.multi_tick import (
 )
 from domain.domain.fetch_source import is_futu_fetch_source
 from domain.domain.tool_boundary import normalize_notify_subprocess_output, normalize_subprocess_adapter_payload
-from scripts.config_loader import resolve_watchlist_config
-from scripts.feishu_bitable import FeishuError, get_tenant_access_token, http_json
+from src.application.config_loader import resolve_watchlist_config
+from src.infrastructure.feishu_bitable import FeishuError, get_tenant_access_token, http_json
 
 
 DEFAULT_OPEND_HOST = '127.0.0.1'
@@ -440,7 +440,7 @@ def trading_day_via_futu(cfg_obj: dict, market: str) -> tuple[bool | None, str]:
         return (None, market_used)
 
     try:
-        from scripts.opend_utils import is_trading_day_via_futu
+        from src.application.opend_utils import is_trading_day_via_futu
     except Exception:
         return (None, market_used)
 

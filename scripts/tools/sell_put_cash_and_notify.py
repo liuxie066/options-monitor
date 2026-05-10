@@ -22,8 +22,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.io_utils import money_cny
-from scripts.config_loader import resolve_data_config_path
+from src.infrastructure.io_utils import money_cny
+from src.application.config_loader import resolve_data_config_path
 from scripts.query_sell_put_cash import query_sell_put_cash
 
 

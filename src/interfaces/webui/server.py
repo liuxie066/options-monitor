@@ -12,13 +12,13 @@ from fastapi.staticfiles import StaticFiles
 
 from domain.domain.close_advice import CloseAdviceConfig
 from domain.storage.repositories import state_repo
-from scripts.account_config import (
+from src.application.account_config import (
     accounts_from_config,
     list_account_config_views,
 )
-from scripts.infra.service import send_openclaw_message
+from src.infrastructure.external_services import send_openclaw_message
 from src.application.option_positions_service import load_option_positions_repo
-from scripts.validate_config import SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS as VALIDATOR_SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS
+from src.application.config_validator import SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS as VALIDATOR_SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS
 from src.application.account_management import add_account, edit_account, remove_account
 from src.application.tool_execution import build_tool_manifest, execute_tool
 from src.application.agent_tool_registry import get_tool_definition

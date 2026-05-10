@@ -15,8 +15,8 @@ from domain.services import (
 )
 from domain.domain.fetch_source import is_futu_fetch_source, resolve_symbol_fetch_source
 from domain.storage.repositories import state_repo
-from scripts.config_loader import resolve_watchlist_config
-from scripts.io_utils import has_shared_required_data
+from src.application.config_loader import resolve_watchlist_config
+from src.infrastructure.io_utils import has_shared_required_data
 from domain.domain.symbol_identity import symbol_market
 from src.application.opend_fetch_config import resolve_opend_fetch_config
 

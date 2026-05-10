@@ -34,7 +34,7 @@ Do not default to `python3 scripts/...` for first-pass exploration.
 - Notification formatting: `scripts/notify_symbols.py`, `scripts/multi_tick/notify_format.py`
 - Operator CLI behavior: `src/interfaces/cli/`, `./om`
 - Agent entry points: `./om-agent`, `scripts/install_agent_plugin.sh`
-- Config contracts: `CONFIGS.md`, `CONFIGURATION_GUIDE.md`, `configs/examples/`, `scripts/validate_config.py`
+- Config contracts: `CONFIGS.md`, `CONFIGURATION_GUIDE.md`, `configs/examples/`, `src/application/config_validator.py`
 
 ## Practical Defaults
 

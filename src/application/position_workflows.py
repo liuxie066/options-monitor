@@ -18,8 +18,8 @@ from src.application.option_positions_service import (
     persist_manual_close_event,
     persist_manual_open_event,
 )
-from scripts.sync_option_positions_to_feishu import sync_single_option_position_record
-from scripts.trade_event_normalizer import NormalizedTradeDeal
+from src.application.option_positions_feishu_sync import sync_single_option_position_record
+from src.application.trade_event_normalizer import NormalizedTradeDeal
 from src.application.option_positions_sync_config import effective_option_positions_sync_to_feishu_enabled
 from src.application.option_positions_v2_service import (
     append_option_positions_v2_event,

@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import os
 import shutil
-import subprocess
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from fastapi import HTTPException, Request
 
+from src.application.config_validator import validate_config as validate_runtime_config
 from src.application.runtime_config_paths import read_json_file, resolve_public_data_config_path, write_json_atomic
 
 
@@ -70,16 +70,19 @@ def backup(path: Path) -> Path:
 
 
 def validate_config(path: Path, *, base_dir: Path) -> None:
-    py = (base_dir / ".venv" / "bin" / "python").resolve()
-    if not py.exists():
-        raise HTTPException(status_code=500, detail="python venv not found; run ./run_webui.sh once")
-    cmd = [str(py), "scripts/validate_config.py", "--config", str(path)]
+    config_path = resolve_config_path(path, base_dir=base_dir)
     try:
-        result = subprocess.run(cmd, cwd=str(base_dir), capture_output=True, text=True, timeout=30)
+        payload = read_json_file(config_path)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"validate failed to run: {exc}") from exc
-    if result.returncode != 0:
-        raise HTTPException(status_code=400, detail=(result.stderr.strip() or result.stdout.strip() or "validate failed"))
+        raise HTTPException(status_code=500, detail=f"failed to read config: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="config must be a JSON object")
+    try:
+        validate_runtime_config(dict(payload))
+    except SystemExit as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"validate failed: {exc}") from exc
 
 
 def require_token_for_write(req: Request) -> None:

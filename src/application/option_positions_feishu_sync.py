@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 from __future__ import annotations
 
 import argparse
@@ -9,8 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from scripts.config_loader import load_config
-from scripts.feishu_bitable import (
+from src.application.config_loader import load_config
+from src.infrastructure.feishu_bitable import (
     FeishuAuthError,
     bitable_create_record,
     bitable_delete_record,
@@ -602,7 +601,7 @@ def sync_single_option_position_record(*, repo: Any, data_config: Path, record_i
     return rows[0]
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Sync local option_positions SQLite lots to Feishu bitable")
     parser.add_argument("--config", default=None, help="runtime config path; when provided, portfolio.data_config and runtime sync switch are used")
     parser.add_argument("--data-config", default=None, help="portfolio data config path; auto-resolves when omitted")
@@ -618,7 +617,7 @@ def main() -> None:
         help="delete remote rows whose local_record_id no longer exists locally; disabled by default",
     )
     parser.add_argument("--verbose", action="store_true", help="print payload details")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if args.apply and args.dry_run:
         raise SystemExit("--apply and --dry-run cannot be used together")
@@ -626,7 +625,7 @@ def main() -> None:
     apply_mode = bool(args.apply)
     dry_run = not apply_mode or bool(args.dry_run)
 
-    base = Path(__file__).resolve().parents[1]
+    base = Path(__file__).resolve().parents[2]
     runtime_config: dict[str, Any] | None = None
     data_config_ref = args.data_config
     if args.config:

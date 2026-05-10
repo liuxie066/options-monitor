@@ -6,7 +6,7 @@ import pandas as pd
 
 
 def test_enrich_sell_put_candidates_with_cash_adds_total_cny_columns(tmp_path: Path) -> None:
-    from scripts.exchange_rates import CurrencyConverter, ExchangeRates
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
     from scripts.sell_put_cash import enrich_sell_put_candidates_with_cash
 
     df = pd.DataFrame(

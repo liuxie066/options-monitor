@@ -13,7 +13,7 @@ from domain.domain.engine import (
     rank_yield_enhancement_rows,
     validate_yield_enhancement_pair,
 )
-from scripts.candidate_defaults import (
+from domain.domain.candidate_defaults import (
     DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_LIQUIDITY,
     DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_WINDOW,
     resolve_candidate_liquidity,

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from scripts.validate_config import validate_config
+from src.application.config_validator import validate_config
 from src.application.layered_config import build_layered_runtime_config, explain_layered_runtime_config_key
 
 

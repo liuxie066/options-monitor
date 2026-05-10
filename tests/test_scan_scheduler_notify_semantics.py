@@ -10,7 +10,7 @@ from pathlib import Path
 def test_scan_scheduler_emits_is_notify_window_open_and_backcompat_should_notify() -> None:
     base = Path(__file__).resolve().parents[1]
 
-    from scripts.scan_scheduler import decide
+    from src.application.scan_scheduler import decide
 
     schedule_cfg = {
         'enabled': True,
@@ -38,7 +38,7 @@ def test_scan_scheduler_emits_is_notify_window_open_and_backcompat_should_notify
 
 
 def test_scan_scheduler_uses_simple_market_day_targets() -> None:
-    from scripts.scan_scheduler import decide
+    from src.application.scan_scheduler import decide
 
     schedule_cfg = {
         'enabled': True,
