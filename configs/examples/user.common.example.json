@@ -8,6 +8,11 @@
   "alert_policy": {
     "change_annual_threshold": 0.02
   },
+  "option_positions": {
+    "sync_to_feishu": {
+      "enabled": false
+    }
+  },
   "notifications": {
     "channel": "feishu",
     "target": "ou_xxx",

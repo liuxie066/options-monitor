@@ -11,7 +11,7 @@ from scripts.validate_config import validate_config
 from src.application.account_management import add_account, edit_account, remove_account
 from src.application.close_advice_pipeline import run_close_advice
 from src.application.healthcheck import run_healthcheck
-from src.application.layered_config import build_layered_runtime_config_file
+from src.application.layered_config import build_layered_runtime_config_file, explain_layered_runtime_config_key
 from src.application.multi_account_tick import run_tick
 from src.application.notification_pipeline import preview_notification
 from src.application.pipeline_runtime import main as run_scan_pipeline
@@ -92,6 +92,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     build.add_argument("--user-config", default=None)
     build.add_argument("--output", default=None)
     build.add_argument("--dry-run", action="store_true")
+    explain = config_sub.add_parser("explain", help="explain a layered config key")
+    explain.add_argument("--market", required=True, choices=("us", "hk"))
+    explain.add_argument("--key", required=True)
+    explain.add_argument("--system-config", default=None)
+    explain.add_argument("--common-user-config", default=None)
+    explain.add_argument("--no-common-user-config", action="store_true")
+    explain.add_argument("--user-config", default=None)
 
     sub.add_parser("version", help="check latest released version from git tags")
 
@@ -230,6 +237,19 @@ def main(argv: list[str] | None = None) -> int:
                 user_config_path=args.user_config,
                 output_config_path=args.output,
                 dry_run=bool(args.dry_run),
+            ))
+
+        if args.command == "config" and args.config_command == "explain":
+            from src.application.agent_tool_config import repo_base
+
+            return _print(explain_layered_runtime_config_key(
+                repo_root=repo_base(),
+                market=args.market,
+                key=args.key,
+                system_config_path=args.system_config,
+                common_user_config_path=args.common_user_config,
+                include_common_user_config=not bool(args.no_common_user_config),
+                user_config_path=args.user_config,
             ))
 
         if args.command == "version":

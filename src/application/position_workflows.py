@@ -14,13 +14,13 @@ from scripts.option_positions_core.domain import (
 )
 from scripts.option_positions_core.service import (
     existing_manual_close_event_result,
-    option_positions_sync_to_feishu_enabled,
     persist_manual_adjust_event,
     persist_manual_close_event,
     persist_manual_open_event,
 )
 from scripts.sync_option_positions_to_feishu import sync_single_option_position_record
 from scripts.trade_event_normalizer import NormalizedTradeDeal
+from src.application.option_positions_sync_config import effective_option_positions_sync_to_feishu_enabled
 from src.application.option_positions_v2_service import (
     append_option_positions_v2_event,
     refresh_option_positions_v2_state,
@@ -34,7 +34,7 @@ def _auto_sync_record_if_possible(repo: Any, *, record_id: str) -> dict[str, Any
         if data_config is None:
             return None
         resolved_data_config = Path(str(data_config))
-        if not option_positions_sync_to_feishu_enabled(resolved_data_config):
+        if not effective_option_positions_sync_to_feishu_enabled(data_config=resolved_data_config, repo=repo):
             return None
         return sync_single_option_position_record(repo=repo, data_config=resolved_data_config, record_id=record_id, apply_mode=True)
     except Exception as sync_error:

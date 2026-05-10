@@ -79,7 +79,67 @@ def _deep_merge(base: Any, override: Any) -> Any:
     return deepcopy(override)
 
 
-def _system_market_payload(system_cfg: dict[str, Any], *, market: str) -> dict[str, Any]:
+def _key_parts(key: str) -> list[str]:
+    parts = [part.strip() for part in str(key or "").split(".")]
+    if not parts or any(not part for part in parts):
+        raise AgentToolError(code="INPUT_ERROR", message="config key must be a non-empty dot path")
+    return parts
+
+
+def _path_get(data: Any, parts: list[str]) -> tuple[bool, Any]:
+    current = data
+    for part in parts:
+        if isinstance(current, dict):
+            if part not in current:
+                return False, None
+            current = current[part]
+            continue
+        if isinstance(current, list) and part.isdigit():
+            index = int(part)
+            if index < 0 or index >= len(current):
+                return False, None
+            current = current[index]
+            continue
+        return False, None
+    return True, current
+
+
+def _path_join(prefix: str, parts: list[str]) -> str:
+    return ".".join([prefix, *parts]) if parts else prefix
+
+
+def _trace_value(*, source: str, path: str, data: Any, parts: list[str]) -> dict[str, Any] | None:
+    exists, value = _path_get(data, parts)
+    if not exists:
+        return None
+    return {"source": source, "path": path, "value": deepcopy(value)}
+
+
+def _append_trace(
+    trace: list[dict[str, Any]],
+    *,
+    source: str,
+    path: str,
+    data: Any,
+    parts: list[str],
+) -> None:
+    entry = _trace_value(source=source, path=path, data=data, parts=parts)
+    if entry is not None:
+        trace.append(entry)
+
+
+def _symbol_defaults_override(raw: dict[str, Any] | None, *, label: str) -> dict[str, Any]:
+    if raw is None:
+        return {}
+    value = raw.get("symbol_defaults")
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise AgentToolError(code="CONFIG_ERROR", message=f"{label}.symbol_defaults must be an object")
+    return deepcopy(value)
+
+
+def _system_defaults_and_market_payload(system_cfg: dict[str, Any], *, market: str) -> tuple[dict[str, Any], dict[str, Any]]:
     defaults = system_cfg.get("defaults")
     if defaults is None:
         defaults = {}
@@ -96,7 +156,11 @@ def _system_market_payload(system_cfg: dict[str, Any], *, market: str) -> dict[s
         market_payload = {}
     if not isinstance(market_payload, dict):
         raise AgentToolError(code="CONFIG_ERROR", message=f"system.markets.{market} must be an object")
+    return defaults, market_payload
 
+
+def _system_market_payload(system_cfg: dict[str, Any], *, market: str) -> dict[str, Any]:
+    defaults, market_payload = _system_defaults_and_market_payload(system_cfg, market=market)
     return _deep_merge(defaults, market_payload)
 
 
@@ -173,13 +237,7 @@ def _derive_portfolio(cfg: dict[str, Any], *, accounts: list[str]) -> None:
     portfolio["source_by_account"] = source_by_account
 
     if not str(portfolio.get("data_config") or "").strip():
-        has_external_holdings = any(
-            str((account_settings.get(account) or {}).get("type") or "").strip().lower() == ACCOUNT_TYPE_EXTERNAL_HOLDINGS
-            for account in accounts
-        )
-        portfolio["data_config"] = (
-            "secrets/portfolio.external_holdings.json" if has_external_holdings else "secrets/portfolio.sqlite.json"
-        )
+        portfolio["data_config"] = "secrets/portfolio.sqlite.json"
 
     cfg["portfolio"] = portfolio
 
@@ -259,6 +317,14 @@ def build_layered_runtime_config_from_user_config(
     symbol_defaults = system_market.pop("symbol_defaults", {})
     if not isinstance(symbol_defaults, dict):
         raise AgentToolError(code="CONFIG_ERROR", message=f"system.markets.{normalized_market}.symbol_defaults must be an object")
+    symbol_defaults = _deep_merge(
+        symbol_defaults,
+        _symbol_defaults_override(common_user_config, label="common user config"),
+    )
+    symbol_defaults = _deep_merge(
+        symbol_defaults,
+        _symbol_defaults_override(user_config, label="user config"),
+    )
 
     cfg = _deep_merge(system_market, common_user_config or {})
     cfg = _deep_merge(cfg, user_config)
@@ -287,6 +353,251 @@ def build_layered_runtime_config_from_user_config(
         "symbols": [str(item.get("symbol") or "") for item in cfg.get("symbols", []) if isinstance(item, dict)],
     }
     return cfg, meta
+
+
+def _symbol_defaults_trace(
+    *,
+    system_cfg: dict[str, Any],
+    market: str,
+    common_user_config: dict[str, Any] | None,
+    user_config: dict[str, Any],
+    parts: list[str],
+) -> tuple[list[dict[str, Any]], bool, Any]:
+    defaults, market_payload = _system_defaults_and_market_payload(system_cfg, market=market)
+    system_market = _system_market_payload(system_cfg, market=market)
+    symbol_defaults = system_market.get("symbol_defaults") or {}
+    if not isinstance(symbol_defaults, dict):
+        raise AgentToolError(code="CONFIG_ERROR", message=f"system.markets.{market}.symbol_defaults must be an object")
+    symbol_defaults = _deep_merge(
+        symbol_defaults,
+        _symbol_defaults_override(common_user_config, label="common user config"),
+    )
+    symbol_defaults = _deep_merge(
+        symbol_defaults,
+        _symbol_defaults_override(user_config, label="user config"),
+    )
+
+    trace: list[dict[str, Any]] = []
+    _append_trace(
+        trace,
+        source="system.defaults",
+        path=_path_join("defaults.symbol_defaults", parts),
+        data=defaults,
+        parts=["symbol_defaults", *parts],
+    )
+    _append_trace(
+        trace,
+        source="system.market",
+        path=_path_join(f"markets.{market}.symbol_defaults", parts),
+        data=market_payload,
+        parts=["symbol_defaults", *parts],
+    )
+    if common_user_config is not None:
+        _append_trace(
+            trace,
+            source="common_user_config",
+            path=_path_join("symbol_defaults", parts),
+            data=common_user_config,
+            parts=["symbol_defaults", *parts],
+        )
+    _append_trace(
+        trace,
+        source="user_config",
+        path=_path_join("symbol_defaults", parts),
+        data=user_config,
+        parts=["symbol_defaults", *parts],
+    )
+    exists, value = _path_get(symbol_defaults, parts)
+    return trace, exists, deepcopy(value)
+
+
+def _regular_key_trace(
+    *,
+    system_cfg: dict[str, Any],
+    market: str,
+    common_user_config: dict[str, Any] | None,
+    user_config: dict[str, Any],
+    parts: list[str],
+) -> list[dict[str, Any]]:
+    defaults, market_payload = _system_defaults_and_market_payload(system_cfg, market=market)
+    trace: list[dict[str, Any]] = []
+    _append_trace(
+        trace,
+        source="system.defaults",
+        path=_path_join("defaults", parts),
+        data=defaults,
+        parts=parts,
+    )
+    _append_trace(
+        trace,
+        source="system.market",
+        path=_path_join(f"markets.{market}", parts),
+        data=market_payload,
+        parts=parts,
+    )
+    if common_user_config is not None:
+        _append_trace(
+            trace,
+            source="common_user_config",
+            path=_path_join("", parts).lstrip("."),
+            data=common_user_config,
+            parts=parts,
+        )
+    _append_trace(
+        trace,
+        source="user_config",
+        path=_path_join("", parts).lstrip("."),
+        data=user_config,
+        parts=parts,
+    )
+    return trace
+
+
+def _symbol_key_trace(
+    *,
+    system_cfg: dict[str, Any],
+    market: str,
+    common_user_config: dict[str, Any] | None,
+    user_config: dict[str, Any],
+    parts: list[str],
+) -> list[dict[str, Any]]:
+    if len(parts) < 3 or parts[0] != "symbols" or not parts[1].isdigit():
+        return _regular_key_trace(
+            system_cfg=system_cfg,
+            market=market,
+            common_user_config=common_user_config,
+            user_config=user_config,
+            parts=parts,
+        )
+
+    symbol_index = parts[1]
+    symbol_parts = parts[2:]
+    trace, _exists, _value = _symbol_defaults_trace(
+        system_cfg=system_cfg,
+        market=market,
+        common_user_config=common_user_config,
+        user_config=user_config,
+        parts=symbol_parts,
+    )
+    user_has_symbols, _user_symbols = _path_get(user_config, ["symbols"])
+    if common_user_config is not None and not user_has_symbols:
+        _append_trace(
+            trace,
+            source="common_user_config",
+            path=_path_join(f"symbols.{symbol_index}", symbol_parts),
+            data=common_user_config,
+            parts=parts,
+        )
+    if user_has_symbols:
+        _append_trace(
+            trace,
+            source="user_config",
+            path=_path_join(f"symbols.{symbol_index}", symbol_parts),
+            data=user_config,
+            parts=parts,
+        )
+    return trace
+
+
+def explain_layered_runtime_config_key(
+    *,
+    repo_root: Path,
+    market: str,
+    key: str,
+    system_config_path: str | Path | None = None,
+    common_user_config_path: str | Path | None = None,
+    include_common_user_config: bool = True,
+    user_config_path: str | Path | None = None,
+) -> dict[str, Any]:
+    normalized_market = _normalize_market(market)
+    parts = _key_parts(key)
+    explicit_user_path = bool(user_config_path is not None and str(user_config_path).strip())
+    system_path = _resolve_path(system_config_path, default=default_system_config_path(repo_root=repo_root))
+    user_path = _resolve_path(user_config_path, default=default_user_config_path(repo_root=repo_root, market=normalized_market))
+    user_cfg = _read_json_object(
+        user_path,
+        label="user config",
+        hint=f"Copy configs/examples/user.example.{normalized_market}.json to configs/user.{normalized_market}.json, then edit accounts and symbols.",
+    )
+
+    common_cfg = None
+    common_path = None
+    if include_common_user_config:
+        if common_user_config_path is not None and str(common_user_config_path).strip():
+            common_path = _resolve_path(common_user_config_path, default=default_common_user_config_path(repo_root=repo_root))
+            common_cfg = _read_json_object(common_path, label="common user config")
+        elif not explicit_user_path:
+            common_path = default_common_user_config_path(repo_root=repo_root)
+            if common_path.exists():
+                common_cfg = _read_json_object(common_path, label="common user config")
+
+    system_cfg = _read_json_object(system_path, label="system config")
+    cfg, meta = build_layered_runtime_config_from_user_config(
+        repo_root=repo_root,
+        market=normalized_market,
+        user_config=user_cfg,
+        common_user_config=common_cfg,
+        system_config_path=system_path,
+        common_user_config_ref=str(common_path) if common_cfg is not None and common_path is not None else None,
+        user_config_ref=str(user_path),
+    )
+    if common_path is not None:
+        meta["common_user_config_path"] = str(common_path)
+    meta["user_config_path"] = str(user_path)
+
+    notes: list[str] = []
+    runtime_path: str | None = str(key)
+    applies_to: str | None = None
+    if parts[0] == "symbol_defaults":
+        symbol_parts = parts[1:]
+        trace, exists, value = _symbol_defaults_trace(
+            system_cfg=system_cfg,
+            market=normalized_market,
+            common_user_config=common_cfg,
+            user_config=user_cfg,
+            parts=symbol_parts,
+        )
+        runtime_path = None
+        applies_to = _path_join("symbols[]", symbol_parts)
+        notes.append("symbol_defaults is an authoring-only section; it is merged into each symbols[] item before validation.")
+    else:
+        exists, value = _path_get(cfg, parts)
+        if parts[0] == "symbols":
+            trace = _symbol_key_trace(
+                system_cfg=system_cfg,
+                market=normalized_market,
+                common_user_config=common_cfg,
+                user_config=user_cfg,
+                parts=parts,
+            )
+            notes.append("symbols[] values may include merged symbol_defaults before per-symbol overrides.")
+        else:
+            trace = _regular_key_trace(
+                system_cfg=system_cfg,
+                market=normalized_market,
+                common_user_config=common_cfg,
+                user_config=user_cfg,
+                parts=parts,
+            )
+
+    source = trace[-1]["source"] if trace else None
+    if exists and source is None:
+        source = "derived"
+        notes.append("No direct authoring-layer value was found; layered_config filled this value during derivation.")
+
+    return {
+        "ok": True,
+        "market": normalized_market,
+        "key": str(key),
+        "exists": bool(exists),
+        "value": value if exists else None,
+        "source": source,
+        "runtime_path": runtime_path,
+        "applies_to": applies_to,
+        "trace": trace,
+        "notes": notes,
+        **meta,
+    }
 
 
 def build_layered_runtime_config(

@@ -27,8 +27,9 @@ if str(repo_base) not in sys.path:
     sys.path.insert(0, str(repo_base))
 
 from scripts.account_config import accounts_from_config_path
+from scripts.config_loader import load_config
 from scripts.parse_option_message import parse_option_message_text
-from src.application.option_positions_facade import resolve_option_positions_repo
+from src.application.option_positions_facade import resolve_option_positions_repo, resolve_option_positions_repo_from_config
 from src.application.position_workflows import execute_manual_close, execute_manual_open
 
 
@@ -232,11 +233,16 @@ def main():
         else:
             args.dry_run = True
 
-    accounts = args.accounts
-    if accounts is None and args.config:
+    runtime_config = None
+    cfg_path = None
+    if args.config:
         cfg_path = Path(args.config)
         if not cfg_path.is_absolute():
             cfg_path = (base / cfg_path).resolve()
+        runtime_config = load_config(base=base, config_path=cfg_path, is_scheduled=False, log=lambda msg: print(msg, file=sys.stderr))
+
+    accounts = args.accounts
+    if accounts is None and args.config:
         accounts = accounts_from_config_path(cfg_path)
 
     parsed = parse_option_message_text(text, accounts=accounts)
@@ -255,7 +261,10 @@ def main():
     need_repo = action == 'close' or bool(args.apply)
     repo = None
     if need_repo:
-        _data_config, repo = resolve_option_positions_repo(base=base, data_config=args.data_config)
+        if runtime_config is not None:
+            _data_config, repo = resolve_option_positions_repo_from_config(base=base, cfg=runtime_config, data_config=args.data_config)
+        else:
+            _data_config, repo = resolve_option_positions_repo(base=base, data_config=args.data_config)
 
     if action == 'close':
         if not record_id:

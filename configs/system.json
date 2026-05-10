@@ -35,6 +35,11 @@
       "enabled": true,
       "mode": "apply"
     },
+    "option_positions": {
+      "sync_to_feishu": {
+        "enabled": false
+      }
+    },
     "intake": {
       "symbol_aliases": {
         "中海油": "0883.HK",

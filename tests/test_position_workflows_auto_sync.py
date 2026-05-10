@@ -122,6 +122,123 @@ def test_execute_manual_open_skips_best_effort_sync_when_switch_is_off(monkeypat
     assert out["sync_result"] is None
 
 
+def test_execute_manual_open_uses_runtime_sync_override_when_data_config_is_off(monkeypatch, tmp_path: Path) -> None:
+    import scripts.option_positions_core.service as svc
+    import src.application.position_workflows as workflows
+    from src.application.option_positions_sync_config import apply_option_positions_runtime_config
+
+    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    repo.data_config_path = tmp_path / "data.json"  # type: ignore[attr-defined]
+    repo.data_config_path.write_text(
+        json.dumps(
+            {
+                "option_positions": {
+                    "sqlite_path": str(repo.db_path),
+                    "sync_to_feishu": {"enabled": False},
+                },
+                "feishu": {
+                    "app_id": "app_id",
+                    "app_secret": "app_secret",
+                    "tables": {"option_positions": "app_token/table_id"},
+                },
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    apply_option_positions_runtime_config(repo, {"option_positions": {"sync_to_feishu": {"enabled": True}}})
+    captured: dict[str, str] = {}
+
+    def _fake_sync(*, repo, data_config, record_id, apply_mode):
+        captured["record_id"] = record_id
+        captured["data_config"] = str(data_config)
+        captured["apply_mode"] = str(int(apply_mode))
+        return {"record_id": record_id, "action": "update"}
+
+    monkeypatch.setattr(workflows, "sync_single_option_position_record", _fake_sync)
+
+    out = workflows.execute_manual_open(
+        repo,
+        broker="富途",
+        account="lx",
+        symbol="TSLA",
+        option_type="put",
+        side="short",
+        contracts=1,
+        currency="USD",
+        strike=100.0,
+        multiplier=100.0,
+        expiration_ymd="2026-06-19",
+        premium_per_share=1.23,
+        underlying_share_locked=None,
+        note=None,
+        dry_run=False,
+    )
+
+    assert out["mode"] == "applied"
+    assert out["sync_result"]["action"] == "update"
+    assert captured["record_id"].startswith("lot_manual-open-")
+    assert captured["data_config"] == str(repo.data_config_path)
+    assert captured["apply_mode"] == "1"
+
+
+def test_execute_manual_open_runtime_sync_override_can_disable_data_config_on(monkeypatch, tmp_path: Path) -> None:
+    import scripts.option_positions_core.service as svc
+    import src.application.position_workflows as workflows
+    from src.application.option_positions_sync_config import apply_option_positions_runtime_config
+
+    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    repo.data_config_path = tmp_path / "data.json"  # type: ignore[attr-defined]
+    repo.data_config_path.write_text(
+        json.dumps(
+            {
+                "option_positions": {
+                    "sqlite_path": str(repo.db_path),
+                    "sync_to_feishu": {"enabled": True},
+                },
+                "feishu": {
+                    "app_id": "app_id",
+                    "app_secret": "app_secret",
+                    "tables": {"option_positions": "app_token/table_id"},
+                },
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    apply_option_positions_runtime_config(repo, {"option_positions": {"sync_to_feishu": {"enabled": False}}})
+
+    def _should_not_sync(*, repo, data_config, record_id, apply_mode):
+        raise AssertionError("runtime override should disable post-write sync")
+
+    monkeypatch.setattr(workflows, "sync_single_option_position_record", _should_not_sync)
+
+    out = workflows.execute_manual_open(
+        repo,
+        broker="富途",
+        account="lx",
+        symbol="TSLA",
+        option_type="put",
+        side="short",
+        contracts=1,
+        currency="USD",
+        strike=100.0,
+        multiplier=100.0,
+        expiration_ymd="2026-06-19",
+        premium_per_share=1.23,
+        underlying_share_locked=None,
+        note=None,
+        dry_run=False,
+    )
+
+    assert out["mode"] == "applied"
+    assert out["sync_result"] is None
+
+
 def test_build_trade_open_command_keeps_optional_contract_fields_null_instead_of_string_none() -> None:
     import src.application.position_workflows as workflows
     from scripts.trade_event_normalizer import NormalizedTradeDeal

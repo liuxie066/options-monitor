@@ -4,10 +4,12 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from scripts.config_loader import load_config
 from scripts.feishu_bitable import (
     FeishuAuthError,
     bitable_create_record,
@@ -20,9 +22,12 @@ from scripts.feishu_bitable import (
 from scripts.option_positions_core.domain import normalize_account, normalize_broker, normalize_option_type, normalize_side, now_ms
 from scripts.option_positions_core.service import (
     load_table_ref,
-    option_positions_sync_to_feishu_enabled,
     require_option_positions_read_repo,
     require_option_positions_sync_meta_repo,
+)
+from src.application.option_positions_sync_config import (
+    apply_option_positions_runtime_config,
+    effective_option_positions_sync_to_feishu_enabled,
 )
 from src.application.option_positions_facade import (
     canonicalize_option_position_fields,
@@ -381,8 +386,17 @@ def can_prune_remote_missing_local(
     )
 
 
-def sync_writes_enabled(data_config: Path) -> bool:
-    return option_positions_sync_to_feishu_enabled(data_config)
+def sync_writes_enabled(
+    data_config: Path,
+    *,
+    runtime_config: dict[str, Any] | None = None,
+    repo: Any | None = None,
+) -> bool:
+    return effective_option_positions_sync_to_feishu_enabled(
+        data_config=data_config,
+        runtime_config=runtime_config,
+        repo=repo,
+    )
 
 
 def sync_option_positions(
@@ -396,8 +410,9 @@ def sync_option_positions(
     since_updated_ms: int | None = None,
     limit: int | None = None,
     prune_remote_missing_local: bool = False,
+    runtime_config: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    writes_enabled = sync_writes_enabled(data_config)
+    writes_enabled = sync_writes_enabled(data_config, runtime_config=runtime_config, repo=repo)
     effective_apply_mode = bool(apply_mode and writes_enabled)
     table_ref = load_table_ref(data_config)
     update_position_lot_fields: Callable[[str, dict[str, Any]], None] | None
@@ -589,6 +604,7 @@ def sync_single_option_position_record(*, repo: Any, data_config: Path, record_i
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Sync local option_positions SQLite lots to Feishu bitable")
+    parser.add_argument("--config", default=None, help="runtime config path; when provided, portfolio.data_config and runtime sync switch are used")
     parser.add_argument("--data-config", default=None, help="portfolio data config path; auto-resolves when omitted")
     parser.add_argument("--apply", action="store_true", help="apply changes to Feishu and persist local sync metadata")
     parser.add_argument("--dry-run", action="store_true", help="preview actions without writing to Feishu")
@@ -611,7 +627,20 @@ def main() -> None:
     dry_run = not apply_mode or bool(args.dry_run)
 
     base = Path(__file__).resolve().parents[1]
-    data_config, repo = resolve_option_positions_repo(base=base, data_config=args.data_config)
+    runtime_config: dict[str, Any] | None = None
+    data_config_ref = args.data_config
+    if args.config:
+        cfg_path = Path(args.config)
+        if not cfg_path.is_absolute():
+            cfg_path = (base / cfg_path).resolve()
+        runtime_config = load_config(base=base, config_path=cfg_path, is_scheduled=False, log=lambda msg: print(msg, file=sys.stderr))
+        portfolio_cfg = runtime_config.get("portfolio") if isinstance(runtime_config.get("portfolio"), dict) else {}
+        if data_config_ref is None or not str(data_config_ref).strip():
+            data_config_ref = portfolio_cfg.get("data_config") if isinstance(portfolio_cfg, dict) else None
+
+    data_config, repo = resolve_option_positions_repo(base=base, data_config=data_config_ref)
+    if runtime_config is not None:
+        apply_option_positions_runtime_config(repo, runtime_config)
     state_base = data_config.resolve().parent
     action_rows = sync_option_positions(
         repo=repo,
@@ -623,6 +652,7 @@ def main() -> None:
         since_updated_ms=args.since_updated_ms,
         limit=args.limit,
         prune_remote_missing_local=bool(args.prune_remote_missing_local),
+        runtime_config=runtime_config,
     )
 
     table_ref = load_table_ref(data_config)
