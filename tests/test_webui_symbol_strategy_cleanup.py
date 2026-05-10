@@ -64,7 +64,7 @@ class _FakeRequest:
         return self._payload
 
 from src.application.webui_editor_adapter import build_editor_summary
-from scripts.webui.server import (
+from src.interfaces.webui.server import (
     SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS,
     _account_rows,
     _clean_symbol_level_strategy_fields,
@@ -75,7 +75,7 @@ from scripts.webui.server import (
     _patch_entry,
     _to_row,
 )
-import scripts.webui.server as webui_server
+import src.interfaces.webui.server as webui_server
 
 
 def test_patch_entry_removes_forbidden_symbol_level_strategy_fields() -> None:

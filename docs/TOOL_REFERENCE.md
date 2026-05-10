@@ -391,8 +391,7 @@ OM_AGENT_ENABLE_WRITE_TOOLS=true ./om-agent run --tool version_update --input-js
 
 > `om-agent` 有很多工具，但 **WebUI 并不会全部开放。**
 
-当前 WebUI 实现 owner 是 `src/interfaces/webui/server.py`；`scripts/webui/server.py`
-只是兼容 facade。`/api/tools/run` 只允许：
+当前 WebUI 实现 owner 是 `src/interfaces/webui/server.py`。`/api/tools/run` 只允许：
 
 - `healthcheck`
 - `scan_opportunities`

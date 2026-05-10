@@ -7,10 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-try:
-    from src.infrastructure.io_utils import atomic_write_json, ensure_dir, read_json
-except ModuleNotFoundError:
-    from io_utils import atomic_write_json, ensure_dir, read_json
+from src.infrastructure.io_utils import atomic_write_json, ensure_dir, read_json
 
 ROOT_DEV = Path("/home/node/.openclaw/workspace/options-monitor")
 DEFAULT_STATE_PATH = ROOT_DEV / "output_shared" / "state" / "deploy_observability.json"

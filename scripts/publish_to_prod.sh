@@ -133,7 +133,7 @@ dev_dir = os.environ.get("OBS_DEV_DIR", "")
 if dev_dir:
     sys.path.insert(0, dev_dir)
 
-from scripts.deploy_observability import append_event, build_summary, make_machine_json, utc_now
+from src.application.deploy_observability import append_event, build_summary, make_machine_json, utc_now
 
 status = os.environ.get("OBS_STATUS", "failed")
 reason = os.environ.get("OBS_REASON", "")
