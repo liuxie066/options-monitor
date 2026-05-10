@@ -407,6 +407,34 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 
 ### 4.8 alert_policy：提醒变化阈值
 - `change_annual_threshold`：年化变化达到该阈值才写入 changes
+- `sell_put`：Sell Put 候选评级阈值（可选；缺省即下表默认值）
+  - `high_annual`：年化净收益≥该值且 `high_spread_max` 同时满足，归为「优先」（默认 0.20）
+  - `high_spread_max`：买卖价差比≤该值，配合 `high_annual` 触发「优先」（默认 0.20）
+  - `medium_annual`：年化净收益≥该值，归为「可考虑」（默认 0.12）
+- `sell_call`：Sell Call 候选评级阈值（可选；缺省即下表默认值）
+  - `high_annual`：年化权利金回报≥该值且 `high_total` 同时满足，归为「优先」（默认 0.10）
+  - `high_total`：行权情形下总收益≥该值，配合 `high_annual` 触发「优先」（默认 0.15）
+  - `medium_annual`：年化权利金回报≥该值，归为「可考虑」（默认 0.06）
+
+不写 `sell_put` / `sell_call` 时使用上述默认值，与历史硬编码行为一致。完整示例：
+
+```json
+{
+  "alert_policy": {
+    "change_annual_threshold": 0.02,
+    "sell_put": {
+      "high_annual": 0.20,
+      "high_spread_max": 0.20,
+      "medium_annual": 0.12
+    },
+    "sell_call": {
+      "high_annual": 0.10,
+      "high_total": 0.15,
+      "medium_annual": 0.06
+    }
+  }
+}
+```
 
 ### 4.9 close_advice：平仓建议
 - `enabled`: 是否生成平仓建议；关闭时仍会产出空文件，不会报错

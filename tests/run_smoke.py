@@ -105,6 +105,16 @@ def test_agent_internal_init_minimal_config() -> None:
         assert cfg["runtime"]["symbol_timeout_sec"] == 120
         assert cfg["close_advice"]["max_spread_ratio"] == 0.3
         assert cfg["alert_policy"]["change_annual_threshold"] == 0.02
+        assert cfg["alert_policy"]["sell_put"] == {
+            "high_annual": 0.20,
+            "high_spread_max": 0.20,
+            "medium_annual": 0.12,
+        }
+        assert cfg["alert_policy"]["sell_call"] == {
+            "high_annual": 0.10,
+            "high_total": 0.15,
+            "medium_annual": 0.06,
+        }
         assert "default_multiplier_us" not in cfg["intake"]
         assert "default_multiplier_hk" not in cfg["intake"]
         assert payload["used_defaults"] == []

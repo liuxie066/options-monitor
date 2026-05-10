@@ -6,7 +6,17 @@
     "success_threshold": 2
   },
   "alert_policy": {
-    "change_annual_threshold": 0.02
+    "change_annual_threshold": 0.02,
+    "sell_put": {
+      "high_annual": 0.20,
+      "high_spread_max": 0.20,
+      "medium_annual": 0.12
+    },
+    "sell_call": {
+      "high_annual": 0.10,
+      "high_total": 0.15,
+      "medium_annual": 0.06
+    }
   },
   "option_positions": {
     "sync_to_feishu": {
