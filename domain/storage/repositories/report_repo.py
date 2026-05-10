@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from scripts.io_utils import atomic_write_json as write_json
+from domain.storage.json_io import atomic_write_json as write_json
 
 
 def prepare_dirs(base: Path, report_dir: str | None, state_dir: str | None) -> tuple[Path, Path]:
@@ -39,4 +39,3 @@ def write_state_json_text(state_dir: Path, name: str, payload: dict[str, Any]) -
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return out
-
