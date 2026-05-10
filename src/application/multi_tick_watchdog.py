@@ -33,6 +33,7 @@ def run_multi_tick_watchdog(
     build_opend_unhealthy_execution_plan,
     mark_opend_phone_verify_pending,
     send_opend_alert,
+    send_opend_recovery_notice,
     state_repo,
 ) -> MultiTickWatchdogOutcome:
     t_watchdog0 = monotonic()
@@ -150,6 +151,7 @@ def run_multi_tick_watchdog(
                         message_text=alert_message_text,
                         detail=alert_detail,
                         no_send=no_send,
+                        skip_consecutive_gate=True,
                     )
                     runlog.safe_event(
                         "run_end",
@@ -222,6 +224,12 @@ def run_multi_tick_watchdog(
                     message=msg,
                 )
                 return MultiTickWatchdogOutcome(should_continue=False, return_code=0)
+            else:
+                # OpenD healthy: reset consecutive failure counter and send recovery notice if applicable.
+                try:
+                    send_opend_recovery_notice(base, base_cfg, no_send=no_send)
+                except Exception:
+                    pass
     except SystemExit:
         raise
     except Exception as exc:

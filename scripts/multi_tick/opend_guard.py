@@ -50,6 +50,55 @@ def is_opend_phone_verify_pending(base: Path) -> bool:
         return False
 
 
+def record_opend_failure(base: Path, scope: str = 'project') -> int:
+    """Increment the consecutive failure counter for *scope* and return the new count."""
+    p = opend_alert_rl_path(base)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    st = read_json(p, {}) if p.exists() else {}
+    if not isinstance(st, dict):
+        st = {}
+    fail_st = st.get('consecutive_fail_state')
+    if not isinstance(fail_st, dict):
+        fail_st = {}
+    scope_key = str(scope or 'project')
+    entry = fail_st.get(scope_key)
+    if not isinstance(entry, dict):
+        entry = {'count': 0}
+    count = int(entry.get('count') or 0) + 1
+    entry['count'] = count
+    entry['last_fail_utc'] = datetime.now(timezone.utc).isoformat()
+    fail_st[scope_key] = entry
+    st['consecutive_fail_state'] = fail_st
+    write_json(p, st)
+    return count
+
+
+def record_opend_recovery(base: Path, scope: str = 'project') -> int:
+    """Reset the consecutive failure counter for *scope*; return the count before reset."""
+    p = opend_alert_rl_path(base)
+    if not p.exists():
+        return 0
+    st = read_json(p, {})
+    if not isinstance(st, dict):
+        return 0
+    fail_st = st.get('consecutive_fail_state')
+    if not isinstance(fail_st, dict):
+        return 0
+    scope_key = str(scope or 'project')
+    entry = fail_st.get(scope_key)
+    if not isinstance(entry, dict):
+        return 0
+    prev_count = int(entry.get('count') or 0)
+    if prev_count == 0:
+        return 0
+    entry['count'] = 0
+    entry['last_ok_utc'] = datetime.now(timezone.utc).isoformat()
+    fail_st[scope_key] = entry
+    st['consecutive_fail_state'] = fail_st
+    write_json(p, st)
+    return prev_count
+
+
 def _opend_alert_family(error_code: str) -> str:
     code = str(error_code or '').strip().upper()
     if code in {'OPEND_PORT_CLOSED', 'OPEND_NOT_READY', 'OPEND_QOT_NOT_LOGINED', 'OPEND_API_ERROR'}:
@@ -122,10 +171,11 @@ def should_send_opend_alert(
     return True
 
 
-def send_opend_alert(base: Path, cfg: dict, *, error_code: str, message_text: str, detail: str = '', no_send: bool = False) -> bool:
+def send_opend_alert(base: Path, cfg: dict, *, error_code: str, message_text: str, detail: str = '', no_send: bool = False, skip_consecutive_gate: bool = False) -> bool:
     cooldown_sec = 600
     burst_window_sec = 900
     burst_max = 3
+    consecutive_threshold = 3
     try:
         notif_cfg = (cfg.get('notifications') or {})
         v = notif_cfg.get('opend_alert_cooldown_sec')
@@ -137,10 +187,23 @@ def send_opend_alert(base: Path, cfg: dict, *, error_code: str, message_text: st
         bm = notif_cfg.get('opend_alert_burst_max')
         if bm is not None:
             burst_max = max(1, int(bm))
+        ct = notif_cfg.get('opend_alert_after_consecutive_failures')
+        if ct is not None:
+            consecutive_threshold = max(1, int(ct))
     except Exception:
         cooldown_sec = 600
         burst_window_sec = 900
         burst_max = 3
+        consecutive_threshold = 3
+
+    # Gate: only alert after consecutive_threshold watchdog failures.
+    if not skip_consecutive_gate:
+        try:
+            fail_count = record_opend_failure(base)
+            if fail_count < consecutive_threshold:
+                return False
+        except Exception:
+            pass
 
     if not should_send_opend_alert(
         base,
@@ -169,6 +232,58 @@ def send_opend_alert(base: Path, cfg: dict, *, error_code: str, message_text: st
     )
     if detail:
         msg += f"\ndetail: {detail[:1200]}"
+
+    send = subprocess.run(
+        ['openclaw', 'message', 'send', '--channel', str(transport_channel), '--target', str(target), '--message', msg, '--json'],
+        cwd=str(base),
+        capture_output=True,
+        text=True,
+    )
+    return send.returncode == 0
+
+
+def send_opend_recovery_notice(base: Path, cfg: dict, *, scope: str = 'project', no_send: bool = False) -> bool:
+    """Reset consecutive failure counter and send a recovery notice if configured.
+
+    Only sends when:
+    - ``opend_alert_send_recovery_notice`` is true (default true).
+    - The previous consecutive failure count was >= ``opend_alert_after_consecutive_failures``.
+    """
+    notif_cfg = (cfg.get('notifications') or {})
+    send_recovery = True
+    consecutive_threshold = 3
+    try:
+        v = notif_cfg.get('opend_alert_send_recovery_notice')
+        if v is not None:
+            send_recovery = bool(v)
+        ct = notif_cfg.get('opend_alert_after_consecutive_failures')
+        if ct is not None:
+            consecutive_threshold = max(1, int(ct))
+    except Exception:
+        pass
+
+    try:
+        prev_count = record_opend_recovery(base, scope=scope)
+    except Exception:
+        prev_count = 0
+
+    if not send_recovery or prev_count < consecutive_threshold:
+        return False
+
+    if no_send:
+        return False
+
+    notif = cfg.get('notifications') or {}
+    channel = notif.get('channel') or 'feishu'
+    transport_channel = resolve_openclaw_transport_channel(channel)
+    target = notif.get('target')
+    if not target:
+        return False
+
+    msg = (
+        f"options-monitor OpenD 已恢复\n"
+        f"time_utc: {utc_now()}"
+    )
 
     send = subprocess.run(
         ['openclaw', 'message', 'send', '--channel', str(transport_channel), '--target', str(target), '--message', msg, '--json'],

@@ -91,6 +91,13 @@
         }
       }
     },
+    "notifications": {
+      "opend_alert_cooldown_sec": 600,
+      "opend_alert_burst_window_sec": 900,
+      "opend_alert_burst_max": 3,
+      "opend_alert_after_consecutive_failures": 3,
+      "opend_alert_send_recovery_notice": true
+    },
     "watchdog": {
       "retry_enabled": true,
       "retry_interval_sec": 3,

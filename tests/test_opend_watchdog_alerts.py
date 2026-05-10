@@ -84,9 +84,10 @@ def test_opend_alert_translates_wechat_clawbot_to_openclaw_weixin(monkeypatch) -
 
     with TemporaryDirectory() as td:
         base = Path(td)
+        cfg = {"notifications": {"channel": "wechat_clawbot", "target": "clawbot:test", "opend_alert_after_consecutive_failures": 1}}
         ok = opend_guard.send_opend_alert(
             base,
-            {"notifications": {"channel": "wechat_clawbot", "target": "clawbot:test"}},
+            cfg,
             error_code="OPEND_RATE_LIMIT",
             message_text="rate limited",
         )
@@ -204,3 +205,176 @@ def test_port_retry_loop_no_start_when_ensure_false(monkeypatch) -> None:
 
     assert start_called["n"] == 0
     assert h.startedbywatchdog is None
+
+
+def test_record_opend_failure_increments_count() -> None:
+    _ensure_repo_path()
+    from scripts.multi_tick.opend_guard import record_opend_failure, record_opend_recovery
+
+    with TemporaryDirectory() as td:
+        base = Path(td)
+
+        assert record_opend_failure(base) == 1
+        assert record_opend_failure(base) == 2
+        assert record_opend_failure(base) == 3
+
+        # Recovery should return the previous count and reset to 0.
+        prev = record_opend_recovery(base)
+        assert prev == 3
+
+        # After recovery the count is 0; recovery again returns 0.
+        assert record_opend_recovery(base) == 0
+
+        # Failures restart from 1.
+        assert record_opend_failure(base) == 1
+
+
+def test_record_opend_recovery_on_clean_state() -> None:
+    """record_opend_recovery on a fresh base returns 0 without error."""
+    _ensure_repo_path()
+    from scripts.multi_tick.opend_guard import record_opend_recovery
+
+    with TemporaryDirectory() as td:
+        assert record_opend_recovery(Path(td)) == 0
+
+
+def test_consecutive_threshold_gates_alert() -> None:
+    """send_opend_alert is suppressed until consecutive_threshold is reached."""
+    _ensure_repo_path()
+    from scripts.multi_tick import opend_guard
+    import unittest.mock as mock
+
+    calls: list[str] = []
+
+    def fake_run(cmd, *, cwd, capture_output=False, text=False):
+        calls.append("send")
+        return SimpleNamespace(returncode=0, stdout='{"message_id":"msg_1"}', stderr="")
+
+    with TemporaryDirectory() as td:
+        base = Path(td)
+        cfg = {
+            "notifications": {
+                "channel": "feishu",
+                "target": "test_target",
+                "opend_alert_after_consecutive_failures": 3,
+                "opend_alert_cooldown_sec": 1,
+            }
+        }
+
+        with mock.patch.object(opend_guard.subprocess, "run", fake_run):
+            # First two calls should be gated (below threshold).
+            r1 = opend_guard.send_opend_alert(base, cfg, error_code="OPEND_PORT_CLOSED", message_text="test")
+            assert r1 is False, "should be gated at count=1"
+            r2 = opend_guard.send_opend_alert(base, cfg, error_code="OPEND_PORT_CLOSED", message_text="test")
+            assert r2 is False, "should be gated at count=2"
+            # Third call reaches threshold.
+            r3 = opend_guard.send_opend_alert(base, cfg, error_code="OPEND_PORT_CLOSED", message_text="test")
+            assert r3 is True, "should pass threshold at count=3"
+            assert calls == ["send"]
+
+
+def test_consecutive_threshold_skip_gate_sends_immediately() -> None:
+    """skip_consecutive_gate=True bypasses the consecutive failure check."""
+    _ensure_repo_path()
+    from scripts.multi_tick import opend_guard
+    import unittest.mock as mock
+
+    calls: list[str] = []
+
+    def fake_run(cmd, *, cwd, capture_output=False, text=False):
+        calls.append("send")
+        return SimpleNamespace(returncode=0, stdout='{"message_id":"msg_1"}', stderr="")
+
+    with TemporaryDirectory() as td:
+        base = Path(td)
+        cfg = {
+            "notifications": {
+                "channel": "feishu",
+                "target": "test_target",
+                "opend_alert_after_consecutive_failures": 3,
+                "opend_alert_cooldown_sec": 1,
+            }
+        }
+        with mock.patch.object(opend_guard.subprocess, "run", fake_run):
+            r = opend_guard.send_opend_alert(
+                base, cfg,
+                error_code="OPEND_NEEDS_PHONE_VERIFY",
+                message_text="needs phone",
+                skip_consecutive_gate=True,
+            )
+        assert r is True
+        assert calls == ["send"]
+
+
+def test_send_opend_recovery_notice_after_threshold_failures() -> None:
+    """Recovery notice is sent only when prev_count >= threshold."""
+    _ensure_repo_path()
+    from scripts.multi_tick import opend_guard
+    import unittest.mock as mock
+
+    calls: list[list] = []
+
+    def fake_run(cmd, *, cwd, capture_output=False, text=False):
+        calls.append(list(cmd))
+        return SimpleNamespace(returncode=0, stdout='{"message_id":"msg_1"}', stderr="")
+
+    with TemporaryDirectory() as td:
+        base = Path(td)
+        cfg = {
+            "notifications": {
+                "channel": "feishu",
+                "target": "test_target",
+                "opend_alert_after_consecutive_failures": 3,
+                "opend_alert_send_recovery_notice": True,
+            }
+        }
+
+        with mock.patch.object(opend_guard.subprocess, "run", fake_run):
+            # No failures recorded yet; recovery notice should NOT be sent.
+            r = opend_guard.send_opend_recovery_notice(base, cfg)
+            assert r is False
+            assert calls == []
+
+            # Record 3 failures (reach threshold).
+            for _ in range(3):
+                opend_guard.record_opend_failure(base)
+
+            # Now recovery notice should be sent.
+            r = opend_guard.send_opend_recovery_notice(base, cfg)
+            assert r is True
+            assert len(calls) == 1
+            # Message should indicate recovery.
+            sent_cmd = calls[0]
+            sent_msg = sent_cmd[sent_cmd.index("--message") + 1]
+            assert "已恢复" in sent_msg
+
+            # Counter reset: second recovery sends nothing.
+            r = opend_guard.send_opend_recovery_notice(base, cfg)
+            assert r is False
+            assert len(calls) == 1
+
+
+def test_send_opend_recovery_notice_disabled_by_config() -> None:
+    """Recovery notice is suppressed when opend_alert_send_recovery_notice is false."""
+    _ensure_repo_path()
+    from scripts.multi_tick import opend_guard
+    import unittest.mock as mock
+
+    with TemporaryDirectory() as td:
+        base = Path(td)
+        cfg = {
+            "notifications": {
+                "channel": "feishu",
+                "target": "test_target",
+                "opend_alert_send_recovery_notice": False,
+            }
+        }
+        for _ in range(5):
+            opend_guard.record_opend_failure(base)
+
+        calls: list[object] = []
+        with mock.patch.object(opend_guard.subprocess, "run", lambda *a, **k: calls.append(a) or SimpleNamespace(returncode=0, stdout="", stderr="")):
+            r = opend_guard.send_opend_recovery_notice(base, cfg)
+        assert r is False
+        assert calls == []
+
