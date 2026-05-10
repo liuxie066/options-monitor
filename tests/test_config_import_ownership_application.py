@@ -152,6 +152,17 @@ def test_option_positions_and_pipeline_context_import_data_config_owner_module()
     assert pipeline_context_mod.resolve_data_config_path is owner_mod.resolve_data_config_path
 
 
+def test_option_positions_inspection_imports_application_owner_module() -> None:
+    owner_mod = importlib.import_module("src.application.option_positions_inspection")
+    cli_mod = importlib.import_module("scripts.option_positions")
+    agent_tools_mod = importlib.import_module("src.application.agent_tool_handlers")
+
+    assert cli_mod.build_lot_event_history is owner_mod.build_lot_event_history
+    assert cli_mod.inspect_projection_state is owner_mod.inspect_projection_state
+    assert agent_tools_mod.build_lot_event_history is owner_mod.build_lot_event_history
+    assert agent_tools_mod.inspect_projection_state is owner_mod.inspect_projection_state
+
+
 def test_portfolio_context_and_cash_query_import_application_owner_modules() -> None:
     for old_module in (
         "scripts.query_sell_put_cash",
