@@ -41,7 +41,7 @@ from scripts.option_positions_core.ledger import (
     project_position_lot_records_with_diagnostics,
     trade_event_from_normalized_deal,
 )
-from scripts.trade_contract_identity import canonical_contract_symbol
+from domain.domain.trade_contract_identity import canonical_contract_symbol
 
 
 REPO_BASE = Path(__file__).resolve().parents[2]

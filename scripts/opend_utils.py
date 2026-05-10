@@ -18,7 +18,8 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 from typing import Any
 
-from scripts.trade_symbol_identity import resolve_symbol_identity, resolve_underlier_alias as _resolve_underlier_alias
+from domain.domain.symbol_identity import resolve_symbol_identity, resolve_underlier_alias as _resolve_underlier_alias
+from src.application.symbol_aliases import load_runtime_symbol_aliases
 
 
 def market_to_futu_trade_date_market(market: str):
@@ -108,11 +109,13 @@ class Underlier:
 
 
 def resolve_underlier_alias(symbol: str, *, base_dir: Path | None = None) -> str:
-    return _resolve_underlier_alias(symbol, base_dir=base_dir)
+    aliases = load_runtime_symbol_aliases(base_dir) if base_dir is not None else None
+    return _resolve_underlier_alias(symbol, symbol_aliases=aliases)
 
 
-def normalize_underlier(symbol: str) -> Underlier:
-    identity = resolve_symbol_identity(symbol)
+def normalize_underlier(symbol: str, *, base_dir: Path | None = None) -> Underlier:
+    aliases = load_runtime_symbol_aliases(base_dir) if base_dir is not None else None
+    identity = resolve_symbol_identity(symbol, symbol_aliases=aliases)
     if identity is not None:
         return Underlier(
             symbol=identity.canonical,

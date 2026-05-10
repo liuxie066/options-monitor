@@ -66,7 +66,7 @@ def test_fetch_symbol_keeps_us_spot_missing_without_fallback(monkeypatch) -> Non
     monkeypatch.setattr(
         mod,
         "normalize_underlier",
-        lambda _symbol: SimpleNamespace(code="US.NVDA", market="US", currency="USD"),
+        lambda _symbol, **_kwargs: SimpleNamespace(code="US.NVDA", market="US", currency="USD"),
     )
     monkeypatch.setattr(mod, "get_trading_date", lambda _market: pd.Timestamp("2026-04-21").date())
     out = mod.fetch_symbol("NVDA", base_dir=Path("."))

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from scripts.trade_symbol_identity import (
+from domain.domain.symbol_identity import (
     canonical_symbol_aliases,
     futu_underlier_code,
     normalize_symbol_candidate,
@@ -36,3 +36,13 @@ def test_symbol_identity_helpers_share_the_same_canonical_parser() -> None:
     assert symbol_market("US.NVDA") == "US"
     assert symbol_currency("US.NVDA") == "USD"
     assert canonical_symbol_aliases("0700.HK") == ["0700.HK", "00700.HK"]
+
+
+def test_symbol_identity_accepts_explicit_aliases_without_runtime_config_io() -> None:
+    aliases = {"MELIHK": "3690.HK"}
+
+    identity = resolve_symbol_identity("MELIHK", symbol_aliases=aliases)
+
+    assert identity is not None
+    assert identity.canonical == "3690.HK"
+    assert normalize_symbol_candidate("MELIHK", symbol_aliases=aliases) == "3690.HK"

@@ -56,6 +56,7 @@ CRITICAL_MODULES = [
     "test_option_candidate_strategy",
     "test_candidate_engine_contract",
     "test_candidate_engine_parity",
+    "test_domain_module_boundaries",
     "test_phase1_tool_boundary",
     "test_storage_boundary",
     "test_domain_engine_batch4",

@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 from typing import Any
 
-from scripts.option_positions_core.domain import (
+from domain.domain.option_position_identity import (
     exp_ms_to_ymd,
     normalize_account,
     normalize_broker,
@@ -13,7 +13,7 @@ from scripts.option_positions_core.domain import (
     normalize_option_type,
     normalize_side,
 )
-from scripts.trade_contract_identity import canonical_contract_symbol
+from domain.domain.trade_contract_identity import canonical_contract_symbol
 
 
 OPTION_POSITIONS_V2_SCHEMA_VERSION = "1.0"

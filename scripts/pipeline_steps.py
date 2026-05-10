@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from scripts.trade_symbol_identity import canonical_symbol, symbol_currency
+from domain.domain.symbol_identity import canonical_symbol, symbol_currency
 
 
 def derive_put_max_strike_from_cash(

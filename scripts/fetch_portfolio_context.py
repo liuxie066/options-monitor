@@ -24,7 +24,7 @@ from scripts.feishu_bitable import (
     bitable_list_records,
     with_tenant_token_retry,
 )
-from scripts.trade_symbol_identity import canonical_symbol
+from domain.domain.symbol_identity import canonical_symbol
 from scripts.config_loader import resolve_data_config_path
 from scripts.io_utils import atomic_write_json
 from scripts.option_positions_core.domain import normalize_account, normalize_currency

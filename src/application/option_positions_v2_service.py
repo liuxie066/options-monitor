@@ -38,7 +38,7 @@ from scripts.option_positions_core.domain import (
     parse_exp_to_ms,
 )
 from scripts.option_positions_core.service import require_option_positions_read_repo
-from scripts.trade_contract_identity import canonical_contract_symbol
+from domain.domain.trade_contract_identity import canonical_contract_symbol
 
 
 APP_BASE = Path(__file__).resolve().parents[2]
