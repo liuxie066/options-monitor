@@ -18,7 +18,7 @@ from scripts.option_positions import build_lot_event_history, inspect_projection
 from domain.domain.option_position_lots import normalize_account as _normalize_account
 from src.application.option_positions_service import load_option_positions_repo
 from src.application.option_positions_reporting import build_monthly_income_report
-from scripts.pipeline_context import load_option_positions_context, load_portfolio_context
+from src.application.pipeline_context import load_option_positions_context, load_portfolio_context
 from src.application.cash_headroom_query import query_sell_put_cash
 from src.application.scan_scheduler import decide as scheduler_decide, read_state as read_scheduler_state
 from src.infrastructure.exchange_rates import get_cached_exchange_rates as _get_cached_exchange_rates_impl

@@ -43,7 +43,7 @@ def _option_ctx(account: str, *, locked: int) -> dict:
 
 
 def test_build_pipeline_context_resolves_portfolio_source_by_account() -> None:
-    import scripts.pipeline_context as pc
+    import src.application.pipeline_context as pc
 
     captured: dict[str, object] = {}
     old_load_portfolio_context = pc.load_portfolio_context
@@ -101,7 +101,7 @@ def test_build_pipeline_context_resolves_portfolio_source_by_account() -> None:
 
 
 def test_shared_context_reuses_fetch_calls_across_accounts() -> None:
-    import scripts.pipeline_context as pc
+    import src.application.pipeline_context as pc
     import src.application.portfolio_context_service as pcs
 
     shared_portfolio = {
@@ -367,7 +367,7 @@ def test_load_holdings_records_does_not_fallback_on_permission_error(tmp_path: P
 
 
 def test_load_portfolio_context_auto_prefers_futu_when_available() -> None:
-    import scripts.pipeline_context as pc
+    import src.application.pipeline_context as pc
 
     old_fetch = pc.fetch_futu_portfolio_context
     try:
@@ -404,7 +404,7 @@ def test_load_portfolio_context_auto_prefers_futu_when_available() -> None:
 
 
 def test_load_portfolio_context_auto_skips_fresh_holdings_cache_and_uses_futu() -> None:
-    import scripts.pipeline_context as pc
+    import src.application.pipeline_context as pc
 
     old_is_fresh = pc.is_fresh
     old_load_cached_json = pc.load_cached_json
@@ -460,7 +460,7 @@ def test_load_portfolio_context_auto_skips_fresh_holdings_cache_and_uses_futu() 
 
 
 def test_load_portfolio_context_auto_falls_back_to_holdings_when_futu_unavailable() -> None:
-    import scripts.pipeline_context as pc
+    import src.application.pipeline_context as pc
     import src.application.portfolio_context_service as pcs
 
     old_fetch = pc.fetch_futu_portfolio_context
@@ -514,7 +514,7 @@ def test_load_portfolio_context_auto_falls_back_to_holdings_when_futu_unavailabl
 
 
 def test_load_portfolio_context_auto_reuses_local_holdings_cache_when_futu_and_fetch_fail() -> None:
-    import scripts.pipeline_context as pc
+    import src.application.pipeline_context as pc
 
     old_is_fresh = pc.is_fresh
     old_load_cached_json = pc.load_cached_json
@@ -564,7 +564,7 @@ def test_load_portfolio_context_auto_reuses_local_holdings_cache_when_futu_and_f
 
 
 def test_load_portfolio_context_rejects_stale_account_cache_with_wrong_filters_account() -> None:
-    import scripts.pipeline_context as pc
+    import src.application.pipeline_context as pc
 
     old_is_fresh = pc.is_fresh
     old_load_cached_json = pc.load_cached_json
@@ -624,7 +624,7 @@ def test_load_portfolio_context_rejects_stale_account_cache_with_wrong_filters_a
 
 
 def test_load_portfolio_context_rejects_stale_account_cache_with_wrong_stock_account() -> None:
-    import scripts.pipeline_context as pc
+    import src.application.pipeline_context as pc
     import src.application.portfolio_context_service as pcs
 
     old_is_fresh = pc.is_fresh
@@ -686,7 +686,7 @@ def test_load_portfolio_context_rejects_stale_account_cache_with_wrong_stock_acc
 
 
 def test_load_portfolio_context_futu_cache_still_reuses_account_label_when_holdings_alias_exists() -> None:
-    import scripts.pipeline_context as pc
+    import src.application.pipeline_context as pc
 
     old_is_fresh = pc.is_fresh
     old_load_cached_json = pc.load_cached_json

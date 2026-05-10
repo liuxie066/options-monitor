@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 def test_load_exchange_rates_fetches_latest_when_cache_missing(monkeypatch, tmp_path: Path) -> None:
-    from scripts import pipeline_context as ctx
+    from src.application import pipeline_context as ctx
     from src.infrastructure import exchange_rates
 
     base = Path(__file__).resolve().parents[1]

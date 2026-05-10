@@ -73,6 +73,8 @@ def test_legacy_wrapper_modules_are_removed() -> None:
     assert not (ROOT / "scripts" / "fetch_portfolio_context.py").exists()
     assert not (ROOT / "scripts" / "portfolio_context_service.py").exists()
     assert not (ROOT / "scripts" / "futu_portfolio_context.py").exists()
+    assert not (ROOT / "scripts" / "pipeline_context.py").exists()
+    assert not (ROOT / "scripts" / "pipeline_alert_steps.py").exists()
     assert not (ROOT / "scripts" / "multi_tick").exists()
     assert not (ROOT / "scripts" / "infra" / "service.py").exists()
     assert not (ROOT / "scripts" / "infra" / "entry_external.py").exists()

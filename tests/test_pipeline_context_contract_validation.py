@@ -9,7 +9,7 @@ if str(BASE) not in sys.path:
 
 
 def test_load_portfolio_context_rejects_invalid_cached_contract() -> None:
-    import scripts.pipeline_context as pc
+    import src.application.pipeline_context as pc
 
     old_is_fresh = pc.is_fresh
     old_load_cached_json = pc.load_cached_json
@@ -39,7 +39,7 @@ def test_load_portfolio_context_rejects_invalid_cached_contract() -> None:
 
 
 def test_load_option_positions_context_rejects_invalid_cached_contract() -> None:
-    import scripts.pipeline_context as pc
+    import src.application.pipeline_context as pc
 
     old_is_fresh = pc.is_fresh
     old_load_cached_json = pc.load_cached_json
@@ -70,7 +70,7 @@ def test_load_option_positions_context_rejects_invalid_cached_contract() -> None
 
 
 def test_load_context_persists_source_snapshots_for_valid_cached_contracts() -> None:
-    import scripts.pipeline_context as pc
+    import src.application.pipeline_context as pc
 
     old_is_fresh = pc.is_fresh
     old_load_cached_json = pc.load_cached_json
