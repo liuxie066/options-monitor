@@ -3,9 +3,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from hashlib import sha256
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path
+from threading import Lock
 from typing import Callable
 from zoneinfo import ZoneInfo
 
@@ -81,7 +83,7 @@ from src.application.cron_runtime import (
     mark_accounts_notified,
     request_scheduler_update,
 )
-from src.application.account_run import AccountRunRequest, run_one_account
+from src.application.account_run import AccountRunOutcome, AccountRunRequest, run_one_account
 from src.application.multi_tick_audit import MultiTickAuditHelper
 from src.application.multi_tick_finalization import (
     finalize_multi_tick_run,
@@ -114,6 +116,51 @@ except Exception:
 
 
 _CURRENT_RUN_ID: str | None = None
+
+
+def _to_positive_int(value, default: int) -> int:
+    try:
+        parsed = int(value)
+    except Exception:
+        parsed = int(default)
+    return max(1, parsed)
+
+
+def _resolve_account_run_max_workers(cfg: dict, account_count: int) -> int:
+    if account_count <= 1:
+        return 1
+    runtime = cfg.get("runtime") if isinstance(cfg.get("runtime"), dict) else {}
+    raw = runtime.get("multi_account_max_workers")
+    if raw is None:
+        raw = runtime.get("account_max_workers")
+    workers = _to_positive_int(raw, min(4, account_count))
+    return min(account_count, workers)
+
+
+def _should_update_account_legacy_output(account_count: int) -> bool:
+    return int(account_count) == 1
+
+
+def _run_account_outcomes(
+    *,
+    account_ids: list[str],
+    max_workers: int,
+    run_account_fn: Callable[[str], AccountRunOutcome],
+) -> list[AccountRunOutcome]:
+    if len(account_ids) <= 1 or max_workers <= 1:
+        return [run_account_fn(acct) for acct in account_ids]
+
+    outcomes_by_account: dict[str, AccountRunOutcome] = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_by_account = {
+            executor.submit(run_account_fn, acct): acct
+            for acct in account_ids
+        }
+        for future in as_completed(future_by_account):
+            acct = future_by_account[future]
+            outcomes_by_account[acct] = future.result()
+
+    return [outcomes_by_account[acct] for acct in account_ids]
 
 
 def current_run_id() -> str | None:
@@ -413,13 +460,16 @@ def main(argv: list[str] | None = None) -> int:
     legacy_output_tmp_dir.mkdir(parents=True, exist_ok=True)
 
     out_link = base / 'output'
-    if not out_link.exists():
+    if not out_link.exists() or out_link.is_symlink():
         dst = accounts_root / args.default_account
         ensure_account_output_dir(dst)
-        try:
-            update_legacy_output_link(out_link, dst, tmp_dir=legacy_output_tmp_dir)
-        except RuntimeError as exc:
-            raise SystemExit(str(exc))
+        if (not out_link.exists()) or os.access(out_link.parent, os.W_OK):
+            try:
+                update_legacy_output_link(out_link, dst, tmp_dir=legacy_output_tmp_dir)
+            except RuntimeError as exc:
+                raise SystemExit(str(exc))
+        else:
+            log(f'skip legacy output link refresh on read-only repo root: {out_link}')
     elif not out_link.is_symlink():
         if os.access(out_link.parent, os.W_OK):
             raise SystemExit(f"./output must be a symlink for multi-account mode: {out_link}")
@@ -564,11 +614,17 @@ def main(argv: list[str] | None = None) -> int:
     except Exception:
         pass
 
-    for acct in args.accounts:
+    account_ids = [str(acct).strip() for acct in (args.accounts or []) if str(acct).strip()]
+    account_count = len(account_ids)
+    account_workers = _resolve_account_run_max_workers(base_cfg, account_count)
+    update_account_legacy_output = _should_update_account_legacy_output(account_count)
+    shared_prefetch_state: dict[str, object] = {"done": bool(prefetch_done)}
+    shared_prefetch_lock = Lock() if account_count > 1 else None
+    shared_maintenance_lock = Lock() if account_count > 1 else None
+
+    def _run_account(acct: str) -> AccountRunOutcome:
         acct = str(acct).strip()
-        if not acct:
-            continue
-        outcome = run_one_account(
+        return run_one_account(
             request=AccountRunRequest(
                 acct=acct,
                 base=base,
@@ -590,6 +646,10 @@ def main(argv: list[str] | None = None) -> int:
                 prefetch_done=prefetch_done,
                 force_mode=force_mode,
                 allow_mutations=(not smoke),
+                update_legacy_output=update_account_legacy_output,
+                prefetch_lock=shared_prefetch_lock,
+                prefetch_state=shared_prefetch_state,
+                maintenance_lock=shared_maintenance_lock,
             ),
             runlog=runlog,
             audit_fn=audit_helper.audit,
@@ -599,6 +659,12 @@ def main(argv: list[str] | None = None) -> int:
                 run_id=run_id,
             ),
         )
+
+    for outcome in _run_account_outcomes(
+        account_ids=account_ids,
+        max_workers=account_workers,
+        run_account_fn=_run_account,
+    ):
         prefetch_done = bool(outcome.prefetch_done)
         ran_any_pipeline = bool(ran_any_pipeline or outcome.ran_pipeline)
         tick_metrics['accounts'].append(outcome.acct_metrics)

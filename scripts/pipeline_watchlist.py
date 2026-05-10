@@ -11,6 +11,7 @@ Design:
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -31,6 +32,26 @@ LIQUIDITY_COMMON_FIELDS = (
     'min_volume',
     'max_spread_ratio',
 )
+DEFAULT_PIPELINE_SYMBOL_MAX_WORKERS = 4
+
+
+def _to_positive_int(value, default: int) -> int:
+    try:
+        parsed = int(value)
+    except Exception:
+        parsed = int(default)
+    return max(1, parsed)
+
+
+def _resolve_pipeline_symbol_max_workers(cfg: dict, symbol_count: int) -> int:
+    if symbol_count <= 1:
+        return 1
+    runtime = cfg.get('runtime') if isinstance(cfg.get('runtime'), dict) else {}
+    raw = runtime.get('pipeline_symbol_max_workers')
+    if raw is None:
+        raw = runtime.get('watchlist_max_workers')
+    workers = _to_positive_int(raw, DEFAULT_PIPELINE_SYMBOL_MAX_WORKERS)
+    return min(symbol_count, workers)
 
 
 def _extract_event_risk_cfg(side_cfg: dict) -> dict:
@@ -173,24 +194,60 @@ def run_watchlist_pipeline(
         want_scan=want_fn('scan'),
     )
 
-    summary_rows: list[dict] = []
-
+    watchlist_items = []
     for item0 in _iter_watchlist(cfg):
-        try:
-            if sym_whitelist is not None:
-                s0 = normalize_symbol_read(item0.get('symbol'))
-                if s0 and s0 not in sym_whitelist:
-                    continue
+        if sym_whitelist is not None:
+            s0 = normalize_symbol_read(item0.get('symbol'))
+            if s0 and s0 not in sym_whitelist:
+                continue
+        watchlist_items.append(item0)
 
+    if portfolio_ctx is not None and option_ctx is not None:
+        portfolio_ctx = dict(portfolio_ctx)
+        portfolio_ctx['option_ctx'] = option_ctx
+
+    def _failure_rows(item0: dict, exc: Exception) -> list[dict]:
+        symbol = item0.get('symbol', 'UNKNOWN')
+        log(f'[WARN] {symbol} processing failed: {exc}')
+        rows = [
+            normalize_processor_row(
+                {
+                    'symbol': symbol,
+                    'strategy': 'sell_put',
+                    'candidate_count': 0,
+                    'note': f'处理失败: {exc}',
+                }
+            ),
+            normalize_processor_row(
+                {
+                    'symbol': symbol,
+                    'strategy': 'sell_call',
+                    'candidate_count': 0,
+                    'note': f'处理失败: {exc}',
+                }
+            ),
+        ]
+        if wants_yield_enhancement_separate(resolve_yield_enhancement_cfg(item0)):
+            rows.append(
+                normalize_processor_row(
+                    {
+                        'symbol': symbol,
+                        'strategy': 'yield_enhancement',
+                        'candidate_count': 0,
+                        'note': f'处理失败: {exc}',
+                    }
+                )
+            )
+        return rows
+
+    def _process_item(item0: dict) -> list[dict]:
+        try:
             item = resolve_watchlist_item_runtime_config(
                 item=item0,
                 profiles=profiles,
                 apply_profiles_fn=apply_profiles_fn,
             )
-
-            # inject option_ctx into portfolio_ctx for now (minimal change)
-            if portfolio_ctx is not None and option_ctx is not None:
-                portfolio_ctx['option_ctx'] = option_ctx
+            item_portfolio_ctx = dict(portfolio_ctx) if isinstance(portfolio_ctx, dict) else None
 
             if not want_scan:
                 item_fetch = dict(item)
@@ -208,14 +265,14 @@ def run_watchlist_pipeline(
                     is_scheduled=is_scheduled,
                     runtime_config=cfg,
                 )
-                continue
+                return []
 
             processor_rows = process_symbol_fn(
                 py,
                 base,
                 item,
                 top_n,
-                portfolio_ctx=portfolio_ctx,
+                portfolio_ctx=item_portfolio_ctx,
                 usd_per_cny_exchange_rate=usd_per_cny_exchange_rate,
                 cny_per_hkd_exchange_rate=cny_per_hkd_exchange_rate,
                 timeout_sec=symbol_timeout_sec,
@@ -223,41 +280,26 @@ def run_watchlist_pipeline(
                 runtime_config=cfg,
             )
             validated_rows = normalize_processor_rows(processor_rows)
-            summary_rows.extend(validated_rows)
+            return list(validated_rows)
         except Exception as e:
-            symbol = item0.get('symbol', 'UNKNOWN')
-            log(f'[WARN] {symbol} processing failed: {e}')
-            summary_rows.append(
-                normalize_processor_row(
-                    {
-                        'symbol': symbol,
-                        'strategy': 'sell_put',
-                        'candidate_count': 0,
-                        'note': f'处理失败: {e}',
-                    }
-                )
-            )
-            summary_rows.append(
-                normalize_processor_row(
-                    {
-                        'symbol': symbol,
-                        'strategy': 'sell_call',
-                        'candidate_count': 0,
-                        'note': f'处理失败: {e}',
-                    }
-                )
-            )
-            if wants_yield_enhancement_separate(resolve_yield_enhancement_cfg(item0)):
-                summary_rows.append(
-                    normalize_processor_row(
-                        {
-                            'symbol': symbol,
-                            'strategy': 'yield_enhancement',
-                            'candidate_count': 0,
-                            'note': f'处理失败: {e}',
-                        }
-                    )
-                )
+            return _failure_rows(item0, e)
+
+    summary_rows: list[dict] = []
+    max_workers = _resolve_pipeline_symbol_max_workers(cfg, len(watchlist_items))
+    if max_workers <= 1:
+        for item0 in watchlist_items:
+            summary_rows.extend(_process_item(item0))
+    else:
+        rows_by_index: dict[int, list[dict]] = {}
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_by_index = {
+                executor.submit(_process_item, item0): idx
+                for idx, item0 in enumerate(watchlist_items)
+            }
+            for future in as_completed(future_by_index):
+                rows_by_index[future_by_index[future]] = future.result()
+        for idx in range(len(watchlist_items)):
+            summary_rows.extend(rows_by_index.get(idx, []))
 
     if want_fn('scan'):
         build_symbols_summary_fn(summary_rows)

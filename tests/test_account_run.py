@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -166,6 +167,37 @@ def test_run_one_account_skips_pipeline_when_scan_gate_blocks(monkeypatch, tmp_p
     assert len(env["maintenance_calls"]) == 1
     assert env["maintenance_calls"][0]["account"] == "lx"
     assert any(name == "account_metrics.json" for name, _ in env["state_writes"])
+
+
+def test_run_one_account_can_skip_legacy_output_link_update(monkeypatch, tmp_path: Path) -> None:
+    from src.application.account_run import run_one_account
+
+    request = replace(_make_request(tmp_path), update_legacy_output=False)
+    env = _install_common_patches(monkeypatch, request)
+    runlog = _FakeRunlog()
+    legacy_calls: list[tuple] = []
+
+    monkeypatch.setattr(env["mod"], "update_legacy_output_link", lambda *args, **kwargs: legacy_calls.append(args))
+    monkeypatch.setattr(
+        env["mod"],
+        "decide_account_scan_gate",
+        lambda **kwargs: {
+            "run_pipeline": False,
+            "ran_scan": False,
+            "meaningful": False,
+            "result_reason": "not due",
+        },
+    )
+
+    outcome = run_one_account(
+        request=request,
+        runlog=runlog,
+        audit_fn=env["audit_fn"],
+        fail_schema_validation=lambda **kwargs: (_ for _ in ()).throw(AssertionError("schema validation should not fail")),
+    )
+
+    assert outcome.ran_pipeline is False
+    assert legacy_calls == []
     assert any(name == "expired_position_maintenance.json" for name, _ in env["state_writes"])
 
 
@@ -197,6 +229,66 @@ def test_run_one_account_uses_dry_run_when_mutations_are_disabled(monkeypatch, t
     )
 
     assert env["maintenance_calls"][0]["dry_run"] is True
+
+
+def test_run_one_account_runs_position_maintenance_under_shared_lock(monkeypatch, tmp_path: Path) -> None:
+    from src.application.account_run import run_one_account
+
+    class _RecordingLock:
+        def __init__(self) -> None:
+            self.depth = 0
+            self.events: list[str] = []
+
+        def __enter__(self):
+            assert self.depth == 0
+            self.depth += 1
+            self.events.append("enter")
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            self.events.append("exit")
+            self.depth -= 1
+
+    lock = _RecordingLock()
+    request = replace(_make_request(tmp_path), maintenance_lock=lock)
+    env = _install_common_patches(monkeypatch, request)
+    runlog = _FakeRunlog()
+
+    monkeypatch.setattr(
+        env["mod"],
+        "decide_account_scan_gate",
+        lambda **kwargs: {
+            "run_pipeline": False,
+            "ran_scan": False,
+            "meaningful": False,
+            "result_reason": "scheduler_skip",
+        },
+    )
+    monkeypatch.setattr(env["mod"], "prefetch_required_data", lambda **kwargs: (_ for _ in ()).throw(AssertionError("prefetch should not run")))
+    monkeypatch.setattr(env["mod"], "run_pipeline_script", lambda **kwargs: (_ for _ in ()).throw(AssertionError("pipeline should not run")))
+
+    def _maintenance(**kwargs):
+        assert lock.depth == 1
+        return {
+            "mode": "skipped",
+            "reason": "test_noop",
+            "positions_checked": 0,
+            "candidates_should_close": 0,
+            "applied_closed": 0,
+            "errors": [],
+        }
+
+    monkeypatch.setattr(env["mod"], "run_expired_position_maintenance_for_account", _maintenance)
+
+    outcome = run_one_account(
+        request=request,
+        runlog=runlog,
+        audit_fn=env["audit_fn"],
+        fail_schema_validation=lambda **kwargs: (_ for _ in ()).throw(AssertionError("schema validation should not fail")),
+    )
+
+    assert outcome.ran_pipeline is False
+    assert lock.events == ["enter", "exit"]
 
 
 def test_run_one_account_notifies_auto_close_even_when_scan_gate_blocks(monkeypatch, tmp_path: Path) -> None:
