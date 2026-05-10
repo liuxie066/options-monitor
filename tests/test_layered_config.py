@@ -102,6 +102,108 @@ def test_layered_config_derives_external_holdings_defaults(tmp_path: Path) -> No
     validate_config(json.loads(json.dumps(cfg)))
 
 
+def test_layered_config_auto_loads_common_user_config_for_default_user_path(tmp_path: Path) -> None:
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir()
+    _write_json(
+        config_dir / "user.common.json",
+        {
+            "watchdog": {"retry_enabled": False},
+            "runtime": {"portfolio_context_ttl_sec": 1200},
+            "account_settings": {
+                "lx": {
+                    "type": "futu",
+                    "futu": {"account_id": "REAL_12345678"},
+                }
+            },
+        },
+    )
+    _write_json(
+        config_dir / "user.us.json",
+        {
+            "symbols": [{"symbol": "NVDA", "sell_put": {"max_strike": 160}}],
+        },
+    )
+
+    cfg, meta = build_layered_runtime_config(
+        repo_root=tmp_path,
+        market="us",
+        system_config_path=REPO_ROOT / "configs" / "system.json",
+    )
+
+    assert cfg["watchdog"]["retry_enabled"] is False
+    assert cfg["runtime"]["portfolio_context_ttl_sec"] == 1200
+    assert cfg["accounts"] == ["lx"]
+    assert cfg["trade_intake"]["account_mapping"]["futu"] == {"REAL_12345678": "lx"}
+    assert meta["common_user_config_loaded"] is True
+    assert meta["common_user_config_path"] == str((config_dir / "user.common.json").resolve())
+    validate_config(json.loads(json.dumps(cfg)))
+
+
+def test_layered_config_explicit_user_path_does_not_auto_load_common_user_config(tmp_path: Path) -> None:
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir()
+    _write_json(config_dir / "user.common.json", {"watchdog": {"retry_enabled": False}})
+    user_path = _write_json(
+        tmp_path / "explicit.user.us.json",
+        {
+            "account_settings": {
+                "lx": {
+                    "type": "futu",
+                    "futu": {"account_id": "REAL_12345678"},
+                }
+            },
+            "symbols": [{"symbol": "NVDA", "sell_put": {"max_strike": 160}}],
+        },
+    )
+
+    cfg, meta = build_layered_runtime_config(
+        repo_root=tmp_path,
+        market="us",
+        system_config_path=REPO_ROOT / "configs" / "system.json",
+        user_config_path=user_path,
+    )
+
+    assert cfg["watchdog"]["retry_enabled"] is True
+    assert meta["common_user_config_loaded"] is False
+    assert "common_user_config_path" not in meta
+
+
+def test_layered_config_market_user_overrides_explicit_common_user_config(tmp_path: Path) -> None:
+    common_path = _write_json(
+        tmp_path / "user.common.json",
+        {
+            "watchdog": {"retry_enabled": False},
+            "account_settings": {
+                "lx": {
+                    "type": "futu",
+                    "futu": {"account_id": "REAL_12345678"},
+                }
+            },
+        },
+    )
+    user_path = _write_json(
+        tmp_path / "user.us.json",
+        {
+            "watchdog": {"retry_enabled": True},
+            "symbols": [{"symbol": "NVDA", "sell_put": {"max_strike": 160}}],
+        },
+    )
+
+    cfg, meta = build_layered_runtime_config(
+        repo_root=REPO_ROOT,
+        market="us",
+        common_user_config_path=common_path,
+        user_config_path=user_path,
+    )
+
+    assert cfg["watchdog"]["retry_enabled"] is True
+    assert cfg["accounts"] == ["lx"]
+    assert meta["common_user_config_loaded"] is True
+    assert meta["common_user_config_path"] == str(common_path.resolve())
+    validate_config(json.loads(json.dumps(cfg)))
+
+
 def test_tracked_layered_examples_validate() -> None:
     for market in ("us", "hk"):
         cfg, meta = build_layered_runtime_config(
@@ -184,3 +286,49 @@ def test_config_build_cli_dry_run_does_not_write_output(tmp_path: Path, capsys) 
     assert payload["dry_run"] is True
     assert payload["write_applied"] is False
     assert not output_path.exists()
+
+
+def test_config_build_cli_accepts_explicit_common_user_config(tmp_path: Path, capsys) -> None:
+    from src.interfaces.cli.main import main
+
+    common_path = _write_json(
+        tmp_path / "user.common.json",
+        {
+            "watchdog": {"retry_enabled": False},
+            "account_settings": {
+                "lx": {
+                    "type": "futu",
+                    "futu": {"account_id": "REAL_12345678"},
+                }
+            },
+        },
+    )
+    user_path = _write_json(
+        tmp_path / "user.us.json",
+        {
+            "symbols": [{"symbol": "NVDA", "sell_put": {"max_strike": 160}}],
+        },
+    )
+    output_path = tmp_path / "config.us.json"
+
+    rc = main([
+        "config",
+        "build",
+        "--market",
+        "us",
+        "--common-user-config",
+        str(common_path),
+        "--user-config",
+        str(user_path),
+        "--output",
+        str(output_path),
+    ])
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["common_user_config_loaded"] is True
+    cfg = json.loads(output_path.read_text(encoding="utf-8"))
+    assert cfg["watchdog"]["retry_enabled"] is False
+    assert cfg["accounts"] == ["lx"]
+    validate_config(json.loads(json.dumps(cfg)))

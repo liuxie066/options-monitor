@@ -23,6 +23,10 @@ def default_user_config_path(*, repo_root: Path, market: str) -> Path:
     return (repo_root / "configs" / f"user.{market}.json").resolve()
 
 
+def default_common_user_config_path(*, repo_root: Path) -> Path:
+    return (repo_root / "configs" / "user.common.json").resolve()
+
+
 def default_output_config_path(*, repo_root: Path, market: str) -> Path:
     return (repo_root / f"config.{market}.json").resolve()
 
@@ -236,7 +240,9 @@ def build_layered_runtime_config_from_user_config(
     repo_root: Path,
     market: str,
     user_config: dict[str, Any],
+    common_user_config: dict[str, Any] | None = None,
     system_config_path: str | Path | None = None,
+    common_user_config_ref: str | None = None,
     user_config_ref: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     normalized_market = _normalize_market(market)
@@ -244,6 +250,8 @@ def build_layered_runtime_config_from_user_config(
 
     if not isinstance(user_config, dict):
         raise AgentToolError(code="CONFIG_ERROR", message="user config must be a JSON object")
+    if common_user_config is not None and not isinstance(common_user_config, dict):
+        raise AgentToolError(code="CONFIG_ERROR", message="common user config must be a JSON object")
 
     system_cfg = _read_json_object(system_path, label="system config")
     system_market = _system_market_payload(system_cfg, market=normalized_market)
@@ -252,7 +260,8 @@ def build_layered_runtime_config_from_user_config(
     if not isinstance(symbol_defaults, dict):
         raise AgentToolError(code="CONFIG_ERROR", message=f"system.markets.{normalized_market}.symbol_defaults must be an object")
 
-    cfg = _deep_merge(system_market, user_config)
+    cfg = _deep_merge(system_market, common_user_config or {})
+    cfg = _deep_merge(cfg, user_config)
     for internal_key in ("defaults", "markets", "symbol_defaults"):
         cfg.pop(internal_key, None)
 
@@ -271,6 +280,8 @@ def build_layered_runtime_config_from_user_config(
     meta = {
         "market": normalized_market,
         "system_config_path": str(system_path),
+        "common_user_config_ref": str(common_user_config_ref or "<none>"),
+        "common_user_config_loaded": common_user_config is not None,
         "user_config_ref": str(user_config_ref or "<memory>"),
         "accounts": accounts,
         "symbols": [str(item.get("symbol") or "") for item in cfg.get("symbols", []) if isinstance(item, dict)],
@@ -283,22 +294,41 @@ def build_layered_runtime_config(
     repo_root: Path,
     market: str,
     system_config_path: str | Path | None = None,
+    common_user_config_path: str | Path | None = None,
+    include_common_user_config: bool = True,
     user_config_path: str | Path | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     normalized_market = _normalize_market(market)
+    explicit_user_path = bool(user_config_path is not None and str(user_config_path).strip())
     user_path = _resolve_path(user_config_path, default=default_user_config_path(repo_root=repo_root, market=normalized_market))
     user_cfg = _read_json_object(
         user_path,
         label="user config",
         hint=f"Copy configs/examples/user.example.{normalized_market}.json to configs/user.{normalized_market}.json, then edit accounts and symbols.",
     )
+
+    common_cfg = None
+    common_path = None
+    if include_common_user_config:
+        if common_user_config_path is not None and str(common_user_config_path).strip():
+            common_path = _resolve_path(common_user_config_path, default=default_common_user_config_path(repo_root=repo_root))
+            common_cfg = _read_json_object(common_path, label="common user config")
+        elif not explicit_user_path:
+            common_path = default_common_user_config_path(repo_root=repo_root)
+            if common_path.exists():
+                common_cfg = _read_json_object(common_path, label="common user config")
+
     cfg, meta = build_layered_runtime_config_from_user_config(
         repo_root=repo_root,
         market=normalized_market,
         user_config=user_cfg,
+        common_user_config=common_cfg,
         system_config_path=system_config_path,
+        common_user_config_ref=str(common_path) if common_cfg is not None and common_path is not None else None,
         user_config_ref=str(user_path),
     )
+    if common_path is not None:
+        meta["common_user_config_path"] = str(common_path)
     meta["user_config_path"] = str(user_path)
     return cfg, meta
 
@@ -308,6 +338,8 @@ def build_layered_runtime_config_file(
     repo_root: Path,
     market: str,
     system_config_path: str | Path | None = None,
+    common_user_config_path: str | Path | None = None,
+    include_common_user_config: bool = True,
     user_config_path: str | Path | None = None,
     output_config_path: str | Path | None = None,
     dry_run: bool = False,
@@ -317,6 +349,8 @@ def build_layered_runtime_config_file(
         repo_root=repo_root,
         market=normalized_market,
         system_config_path=system_config_path,
+        common_user_config_path=common_user_config_path,
+        include_common_user_config=include_common_user_config,
         user_config_path=user_config_path,
     )
     output_path = _resolve_path(

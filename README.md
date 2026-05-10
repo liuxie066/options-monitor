@@ -138,6 +138,7 @@ WebUI 现在按 6 个模块组织：
 如果你不用 WebUI，也可以手工复制模板：
 
 ```bash
+cp configs/examples/user.common.example.json configs/user.common.json  # 可选：US/HK 共用覆盖
 cp configs/examples/user.example.us.json configs/user.us.json
 cp configs/examples/user.example.hk.json configs/user.hk.json
 mkdir -p secrets
@@ -154,6 +155,7 @@ cp configs/examples/portfolio.sqlite.example.json secrets/portfolio.sqlite.json
 
 - `configs/user.us.json`
 - `configs/user.hk.json`
+- `configs/user.common.json`（可选，US/HK 共用覆盖）
 - `secrets/portfolio.sqlite.json`
 - `secrets/notifications.feishu.app.json`（如果启用飞书通知）
 

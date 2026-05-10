@@ -87,6 +87,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     build = config_sub.add_parser("build", help="build canonical runtime config from system/user config")
     build.add_argument("--market", required=True, choices=("us", "hk"))
     build.add_argument("--system-config", default=None)
+    build.add_argument("--common-user-config", default=None)
+    build.add_argument("--no-common-user-config", action="store_true")
     build.add_argument("--user-config", default=None)
     build.add_argument("--output", default=None)
     build.add_argument("--dry-run", action="store_true")
@@ -223,6 +225,8 @@ def main(argv: list[str] | None = None) -> int:
                 repo_root=repo_base(),
                 market=args.market,
                 system_config_path=args.system_config,
+                common_user_config_path=args.common_user_config,
+                include_common_user_config=not bool(args.no_common_user_config),
                 user_config_path=args.user_config,
                 output_config_path=args.output,
                 dry_run=bool(args.dry_run),
