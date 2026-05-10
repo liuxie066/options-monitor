@@ -27,7 +27,7 @@
 
 原因：
 
-- 新方案会先通过 compat 读路径接管旧数据
+- 新方案会先通过统一读路径接管旧数据
 - canonical truth 已经固定为 `trade_events`
 - `position_lots` 只是当前投影视图
 - Feishu 只是 bootstrap / 镜像，不再定义本地业务状态
@@ -54,8 +54,8 @@
 先做一次只面向本地状态的重建：
 
 ```bash
-python3 scripts/option_positions.py rebuild
-python3 scripts/option_positions.py rebuild --format json
+./om option-positions rebuild
+./om option-positions rebuild --format json
 ```
 
 这一步的目标不是“修数据”，而是把 v2 当前状态正式落盘。
@@ -87,13 +87,13 @@ python3 scripts/option_positions.py rebuild --format json
 示例：
 
 ```bash
-python3 scripts/option_positions.py inspect --record-id <record_id>
-python3 scripts/option_positions.py inspect --account lx --symbol TSLA --option-type put --strike 100 --exp 2026-06-19
+./om option-positions inspect --record-id <record_id>
+./om option-positions inspect --account lx --symbol TSLA --option-type put --strike 100 --exp 2026-06-19
 ```
 
 重点确认：
 
-- 当前 compat lot 是否正确
+- 当前 lot 是否正确
 - projection 结果是否正确
 - `diagnostics` 是否有异常
 - baseline / verification / reconciliation 状态是否合理
@@ -114,8 +114,8 @@ python3 scripts/option_positions.py inspect --account lx --symbol TSLA --option-
 示例：
 
 ```bash
-python3 scripts/option_positions.py reconcile --snapshot-file /path/to/verification.json
-python3 scripts/option_positions.py reconcile --snapshot-file /path/to/verification.json --format json
+./om option-positions reconcile --snapshot-file /path/to/verification.json
+./om option-positions reconcile --snapshot-file /path/to/verification.json --format json
 ```
 
 `verification.json` 可以是：
@@ -199,7 +199,7 @@ python3 scripts/option_positions.py reconcile --snapshot-file /path/to/verificat
 - rebuild 稳定
 - inspect 抽查无异常
 - reconcile 已经落正式基线
-- Feishu sync / context / report 都围绕 compat 输出稳定
+- Feishu sync / context / report 都围绕统一输出稳定
 
 在这之前，不要急着清：
 
@@ -214,7 +214,7 @@ python3 scripts/option_positions.py reconcile --snapshot-file /path/to/verificat
 推荐按下面顺序执行：
 
 1. 升级版本，但不清旧数据
-2. 跑一次 `option_positions.py rebuild`
+2. 跑一次 `./om option-positions rebuild`
 3. 用 `inspect` 抽查关键仓位
 4. 准备真实仓位 verification snapshot
 5. 跑一次正式 `reconcile`

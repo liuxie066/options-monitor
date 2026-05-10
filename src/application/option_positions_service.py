@@ -1190,7 +1190,7 @@ def persist_manual_open_event(repo: Any, command: OpenPositionCommand) -> dict[s
         trade_time_ms=trade_time_ms,
         order_id=None,
         multiplier_source=("payload" if command.multiplier is not None else None),
-        raw_payload={"source": "option_positions.py", "mode": "manual_open"},
+        raw_payload={"source": "om option-positions", "mode": "manual_open"},
     )
     return _persist_trade_event_object(repo, event)
 
@@ -1267,7 +1267,7 @@ def persist_manual_close_event(
         order_id=None,
         multiplier_source=("payload" if multiplier is not None else None),
         raw_payload={
-            "source": "option_positions.py",
+            "source": "om option-positions",
             "mode": "manual_close",
             "record_id": str(record_id),
             "close_target_source_event_id": target_source_event_id,
@@ -1353,7 +1353,7 @@ def persist_expire_auto_close_event(
         order_id=None,
         multiplier_source=("payload" if multiplier is not None else None),
         raw_payload={
-            "source": "option_positions.py",
+            "source": "om option-positions",
             "mode": EXPIRE_AUTO_CLOSE,
             "record_id": str(record_id),
             "close_target_source_event_id": target_source_event_id,
@@ -1409,7 +1409,7 @@ def persist_manual_void_event(
         order_id=None,
         multiplier_source=None,
         raw_payload={
-            "source": "option_positions.py",
+            "source": "om option-positions",
             "mode": "manual_void",
             "void_target_event_id": str(target_event_id),
             "void_reason": str(void_reason or ""),
@@ -1488,7 +1488,7 @@ def persist_manual_adjust_event(
         order_id=None,
         multiplier_source=None,
         raw_payload={
-            "source": "option_positions.py",
+            "source": "om option-positions",
             "mode": "manual_adjust",
             "record_id": str(record_id),
             "adjust_target_source_event_id": target_source_event_id or None,

@@ -20,21 +20,21 @@
 先看当前 lot：
 
 ```bash
-python3 scripts/option_positions.py list --broker 富途 --account lx --status all
+./om option-positions list --broker 富途 --account lx --status all
 ```
 
 如果已经知道 `record_id`，先看这条 lot 的事件链：
 
 ```bash
-python3 scripts/option_positions.py history --record-id <record_id>
-python3 scripts/option_positions.py history --record-id <record_id> --format json
+./om option-positions history --record-id <record_id>
+./om option-positions history --record-id <record_id> --format json
 ```
 
 如果你需要看整个 canonical 账本：
 
 ```bash
-python3 scripts/option_positions.py events --account lx
-python3 scripts/option_positions.py events --account lx --format json
+./om option-positions events --account lx
+./om option-positions events --account lx --format json
 ```
 
 判断原则：
@@ -51,7 +51,7 @@ python3 scripts/option_positions.py events --account lx --format json
 动作：
 
 ```bash
-python3 scripts/option_positions.py void-event --event-id <open_event_id>
+./om option-positions void-event --event-id <open_event_id>
 ```
 
 效果：
@@ -65,7 +65,7 @@ python3 scripts/option_positions.py void-event --event-id <open_event_id>
 动作：
 
 ```bash
-python3 scripts/option_positions.py void-event --event-id <close_event_id>
+./om option-positions void-event --event-id <close_event_id>
 ```
 
 效果：
@@ -88,14 +88,14 @@ python3 scripts/option_positions.py void-event --event-id <close_event_id>
 先 dry-run：
 
 ```bash
-python3 scripts/option_positions.py adjust-lot --record-id <record_id> --premium-per-share 3.1 --dry-run
+./om option-positions adjust-lot --record-id <record_id> --premium-per-share 3.1 --dry-run
 ```
 
 确认后再 apply：
 
 ```bash
-python3 scripts/option_positions.py adjust-lot --record-id <record_id> --premium-per-share 3.1
-python3 scripts/option_positions.py adjust-lot --record-id <record_id> --exp 2026-07-17 --strike 105
+./om option-positions adjust-lot --record-id <record_id> --premium-per-share 3.1
+./om option-positions adjust-lot --record-id <record_id> --exp 2026-07-17 --strike 105
 ```
 
 效果：
@@ -110,7 +110,7 @@ python3 scripts/option_positions.py adjust-lot --record-id <record_id> --exp 202
 动作：
 
 ```bash
-python3 scripts/option_positions.py rebuild
+./om option-positions rebuild
 ```
 
 效果：
@@ -128,8 +128,8 @@ python3 scripts/option_positions.py rebuild
 最小验证顺序：
 
 ```bash
-python3 scripts/option_positions.py history --record-id <record_id>
-python3 scripts/option_positions.py list --broker 富途 --account lx --status all
+./om option-positions history --record-id <record_id>
+./om option-positions list --broker 富途 --account lx --status all
 python3 scripts/option_positions_report.py monthly-income --broker 富途 --account lx --month 2026-04
 ```
 
@@ -178,7 +178,7 @@ python3 scripts/option_positions_report.py monthly-income --broker 富途 --acco
 如果你已经直接改了投影表，先跑：
 
 ```bash
-python3 scripts/option_positions.py rebuild
+./om option-positions rebuild
 ```
 
 再重新检查结果。

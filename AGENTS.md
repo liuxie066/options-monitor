@@ -132,8 +132,8 @@ python3 scripts/watchlist.py rm TCOM
 Maintain option positions, using dry-run first:
 
 ```bash
-python3 scripts/option_positions.py list --market 富途 --account lx --status open
-python3 scripts/option_positions.py add --account lx --symbol 0700.HK --option-type put --side short --contracts 1 --currency HKD --strike 420 --multiplier 100 --exp 2026-04-29 --dry-run
+./om option-positions list --broker 富途 --account lx --status open
+./om option-positions add --account lx --symbol 0700.HK --option-type put --side short --contracts 1 --currency HKD --strike 420 --multiplier 100 --exp 2026-04-29 --dry-run
 ```
 
 ## Style Notes
