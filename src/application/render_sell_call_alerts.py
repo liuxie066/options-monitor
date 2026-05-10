@@ -5,7 +5,7 @@ import argparse
 import sys
 from pathlib import Path
 
-repo_base = Path(__file__).resolve().parents[1]
+repo_base = Path(__file__).resolve().parents[2]
 if str(repo_base) not in sys.path:
     sys.path.insert(0, str(repo_base))
 
@@ -61,7 +61,7 @@ def render_sell_call_alerts(
     base_dir: Path | None = None,
 ) -> str:
     """渲染 Sell Call 候选提醒文本并写入文件。"""
-    base = (base_dir or Path(__file__).resolve().parents[1]).resolve()
+    base = (base_dir or Path(__file__).resolve().parents[2]).resolve()
 
     report_dir_path = Path(report_dir)
     if not report_dir_path.is_absolute():

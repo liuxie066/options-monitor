@@ -82,7 +82,7 @@ def derive_put_max_strike_from_cash(
     mult = None
     try:
         from src.infrastructure import multiplier_cache
-        repo_base = Path(__file__).resolve().parents[1]
+        repo_base = Path(__file__).resolve().parents[2]
         mult = multiplier_cache.resolve_multiplier(
             repo_base=repo_base,
             symbol=sym_u,

@@ -30,7 +30,7 @@ def _sample_candidate(symbol: str = "NVDA") -> dict:
 
 
 def test_render_yield_enhancement_alerts_defaults_to_symbol_scoped_paths(tmp_path: Path) -> None:
-    from scripts.render_yield_enhancement_alerts import render_yield_enhancement_alerts
+    from src.application.render_yield_enhancement_alerts import render_yield_enhancement_alerts
 
     report_dir = tmp_path / "reports"
     report_dir.mkdir()
@@ -52,7 +52,7 @@ def test_render_yield_enhancement_alerts_defaults_to_symbol_scoped_paths(tmp_pat
 
 
 def test_render_yield_enhancement_alerts_keeps_aggregate_fallback_without_symbol(tmp_path: Path) -> None:
-    from scripts.render_yield_enhancement_alerts import render_yield_enhancement_alerts
+    from src.application.render_yield_enhancement_alerts import render_yield_enhancement_alerts
 
     report_dir = tmp_path / "reports"
     report_dir.mkdir()
@@ -73,7 +73,7 @@ def test_render_yield_enhancement_alerts_keeps_aggregate_fallback_without_symbol
 
 
 def test_render_yield_enhancement_alerts_preserves_explicit_paths(tmp_path: Path) -> None:
-    from scripts.render_yield_enhancement_alerts import render_yield_enhancement_alerts
+    from src.application.render_yield_enhancement_alerts import render_yield_enhancement_alerts
 
     report_dir = tmp_path / "reports"
     report_dir.mkdir()

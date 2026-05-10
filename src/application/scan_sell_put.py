@@ -6,11 +6,11 @@ import sys
 from pathlib import Path
 import pandas as pd
 
-repo_base = Path(__file__).resolve().parents[1]
+repo_base = Path(__file__).resolve().parents[2]
 if str(repo_base) not in sys.path:
     sys.path.insert(0, str(repo_base))
 
-from scripts.event_risk_filter import annotate_candidates_with_event_risk
+from src.application.event_risk_filter import annotate_candidates_with_event_risk
 from domain.domain.candidate_defaults import (
     DEFAULT_CANDIDATE_LIQUIDITY,
     DEFAULT_SELL_PUT_WINDOW,
@@ -219,7 +219,7 @@ def run_sell_put_scan(
             print_summary_fn=_print_summary,
         ),
         event_risk_cfg=event_risk_cfg,
-        base_dir=Path(__file__).resolve().parents[1],
+        base_dir=Path(__file__).resolve().parents[2],
         reject_log_output=reject_log_output,
     )
 
@@ -249,7 +249,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
 
-    base = Path(__file__).resolve().parents[1]
+    base = Path(__file__).resolve().parents[2]
     input_root = Path(args.input_root).resolve() if args.input_root else (base / "output").resolve()
     out_path = Path(args.output).resolve() if args.output else (base / "output" / "reports" / "sell_put_candidates.csv")
 

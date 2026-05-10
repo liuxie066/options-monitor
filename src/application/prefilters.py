@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from scripts.pipeline_steps import derive_put_max_strike_from_cash
+from src.application.pipeline_steps import derive_put_max_strike_from_cash
 
 
 @dataclass

@@ -41,8 +41,8 @@ def test_scanners_require_multiplier() -> None:
     _ensure_repo_on_path()
 
     import pandas as pd
-    from scripts.scan_sell_put import compute_metrics as put_metrics
-    from scripts.scan_sell_call import compute_metrics as call_metrics
+    from src.application.scan_sell_put import compute_metrics as put_metrics
+    from src.application.scan_sell_call import compute_metrics as call_metrics
 
     put_row = pd.Series({'mid': 1.0, 'strike': 90.0, 'spot': 100.0, 'dte': 14, 'currency': 'HKD'})
     assert put_metrics(put_row) is None
@@ -54,7 +54,7 @@ def test_scanners_require_multiplier() -> None:
 def test_cash_cap_is_best_effort() -> None:
     _ensure_repo_on_path()
 
-    from scripts.pipeline_steps import derive_put_max_strike_from_cash
+    from src.application.pipeline_steps import derive_put_max_strike_from_cash
 
     # This is best-effort and depends on a local multiplier cache.
     ctx = {

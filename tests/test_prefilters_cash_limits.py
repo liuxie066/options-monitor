@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-from scripts.pipeline_steps import derive_put_max_strike_from_cash
-from scripts.prefilters import apply_prefilters
+from src.application.pipeline_steps import derive_put_max_strike_from_cash
+from src.application.prefilters import apply_prefilters
 
 
 def test_apply_prefilters_disables_sell_call_without_portfolio_context() -> None:

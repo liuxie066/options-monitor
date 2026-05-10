@@ -20,9 +20,9 @@ from domain.domain.candidate_defaults import (
 from src.infrastructure.exchange_rates import CurrencyConverter
 from domain.domain.symbol_identity import symbol_currency
 from src.infrastructure.io_utils import safe_read_csv
-from scripts.render_sell_call_alerts import render_sell_call_alerts
-from scripts.report_summaries import summarize_sell_call
-from scripts.scan_sell_call import run_sell_call_scan
+from src.application.render_sell_call_alerts import render_sell_call_alerts
+from src.application.report_summaries import summarize_sell_call
+from src.application.scan_sell_call import run_sell_call_scan
 from domain.domain.sell_call_config import resolve_min_annualized_net_premium_return_from_sell_call_cfg
 
 

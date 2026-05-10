@@ -189,12 +189,12 @@ def test_strategy_production_scripts_import_engine_directly() -> None:
 
     repo = Path(__file__).resolve().parents[1]
     production_scripts = {
-        repo / "scripts" / "scan_sell_put.py",
-        repo / "scripts" / "scan_sell_call.py",
+        repo / "src" / "application" / "scan_sell_put.py",
+        repo / "src" / "application" / "scan_sell_call.py",
     }
     engine_scripts = {
-        repo / "scripts" / "render_sell_put_alerts.py",
-        repo / "scripts" / "render_sell_call_alerts.py",
+        repo / "src" / "application" / "render_sell_put_alerts.py",
+        repo / "src" / "application" / "render_sell_call_alerts.py",
         repo / "scripts" / "tools" / "compare_strategy_replay.py",
     }
 

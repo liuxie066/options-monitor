@@ -16,7 +16,7 @@ def _add_repo_to_syspath() -> Path:
 
 def test_sell_put_enforces_min_volume_flag_in_cli() -> None:
     _add_repo_to_syspath()
-    import scripts.scan_sell_put as scan_sell_put
+    import src.application.scan_sell_put as scan_sell_put
 
     with TemporaryDirectory() as td:
         root = Path(td)

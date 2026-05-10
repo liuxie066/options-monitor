@@ -74,7 +74,7 @@ def test_calc_futu_option_fee_uses_shared_currency_aliases() -> None:
 
 def test_sell_put_compute_metrics_uses_full_fee_formula() -> None:
     _add_repo_to_syspath()
-    from scripts.scan_sell_put import compute_metrics
+    from src.application.scan_sell_put import compute_metrics
 
     row = pd.Series(
         {
@@ -96,7 +96,7 @@ def test_sell_put_compute_metrics_uses_full_fee_formula() -> None:
 
 def test_sell_call_compute_metrics_uses_full_fee_formula() -> None:
     _add_repo_to_syspath()
-    from scripts.scan_sell_call import compute_metrics
+    from src.application.scan_sell_call import compute_metrics
 
     row = pd.Series(
         {

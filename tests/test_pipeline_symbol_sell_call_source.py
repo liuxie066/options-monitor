@@ -9,7 +9,7 @@ if str(BASE) not in sys.path:
 
 
 def test_process_symbol_passes_futu_portfolio_stock_to_sell_call_chain() -> None:
-    import scripts.pipeline_symbol as ps
+    import src.application.pipeline_symbol as ps
 
     old_ensure_required_data = ps.ensure_required_data
     old_run_sell_call_scan_and_summarize = ps.run_sell_call_scan_and_summarize

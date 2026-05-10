@@ -329,7 +329,7 @@ def run_watchlist_pipeline_default(
 ) -> list[dict]:
     from src.application.config_profiles import apply_profiles
     from src.application.pipeline_context import build_pipeline_context
-    from scripts.pipeline_symbol import process_symbol
+    from src.application.pipeline_symbol import process_symbol
     from src.application.report_builders import build_symbols_digest, build_symbols_summary
 
     return run_watchlist_pipeline(

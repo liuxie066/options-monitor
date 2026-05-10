@@ -20,17 +20,17 @@ from domain.domain.candidate_defaults import (
 from src.infrastructure.exchange_rates import CurrencyConverter
 from domain.domain.symbol_identity import symbol_currency
 from src.infrastructure.io_utils import safe_read_csv
-from scripts.render_sell_put_alerts import render_sell_put_alerts
-from scripts.render_yield_enhancement_alerts import render_yield_enhancement_alerts
-from scripts.report_labels import add_sell_put_labels
-from scripts.report_summaries import summarize_sell_put, summarize_yield_enhancement
-from scripts.scan_sell_put import run_sell_put_scan
-from scripts.sell_put_call_helper import (
+from src.application.render_sell_put_alerts import render_sell_put_alerts
+from src.application.render_yield_enhancement_alerts import render_yield_enhancement_alerts
+from src.application.report_labels import add_sell_put_labels
+from src.application.report_summaries import summarize_sell_put, summarize_yield_enhancement
+from src.application.scan_sell_put import run_sell_put_scan
+from src.application.sell_put_call_helper import (
     attach_best_linked_calls,
     find_sell_put_yield_enhancement_pairs,
     select_best_yield_enhancement_pairs,
 )
-from scripts.sell_put_cash import enrich_sell_put_candidates_with_cash
+from src.application.sell_put_cash import enrich_sell_put_candidates_with_cash
 from domain.domain.sell_put_config import validate_min_annualized_net_return
 from src.application.yield_enhancement_config import (
     resolve_yield_enhancement_cfg,

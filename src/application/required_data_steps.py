@@ -10,7 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 import json
 
-from scripts import pipeline_fetch_models
+from src.application import pipeline_fetch_models
 from src.application.opend_symbol_fetching import save_outputs
 from src.application.required_data_fetching import (
     RequiredDataFetchRequest,

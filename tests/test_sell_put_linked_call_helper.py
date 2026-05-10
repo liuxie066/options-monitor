@@ -6,7 +6,7 @@ import pandas as pd
 
 
 def test_enrich_sell_put_candidates_with_linked_calls_selects_best_call(tmp_path: Path) -> None:
-    from scripts.sell_put_call_helper import (
+    from src.application.sell_put_call_helper import (
         attach_best_linked_calls,
         find_sell_put_yield_enhancement_pairs,
         select_best_yield_enhancement_pairs,
@@ -121,7 +121,7 @@ def test_enrich_sell_put_candidates_with_linked_calls_selects_best_call(tmp_path
 
 
 def test_yield_enhancement_requires_iv_for_expected_move_scoring(tmp_path: Path) -> None:
-    from scripts.sell_put_call_helper import find_sell_put_yield_enhancement_pairs
+    from src.application.sell_put_call_helper import find_sell_put_yield_enhancement_pairs
 
     parsed = tmp_path / "parsed"
     parsed.mkdir(parents=True)

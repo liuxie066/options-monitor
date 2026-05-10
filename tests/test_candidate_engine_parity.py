@@ -38,7 +38,7 @@ def test_candidate_engine_call_rank_matches_option_candidate_strategy() -> None:
 
 def test_candidate_engine_put_summary_uses_simple_rank() -> None:
     from domain.domain.engine import rank_candidate_rows
-    from scripts.report_summaries import summarize_sell_put
+    from src.application.report_summaries import summarize_sell_put
 
     rows = [
         {
@@ -72,7 +72,7 @@ def test_candidate_engine_put_summary_uses_simple_rank() -> None:
 
 
 def test_candidate_engine_put_summary_keeps_same_symbol_usage_fields() -> None:
-    from scripts.report_summaries import summarize_sell_put
+    from src.application.report_summaries import summarize_sell_put
 
     rows = [
         {
@@ -101,7 +101,7 @@ def test_candidate_engine_put_summary_keeps_same_symbol_usage_fields() -> None:
 
 def test_candidate_engine_call_summary_uses_simple_rank() -> None:
     from domain.domain.engine import rank_candidate_rows
-    from scripts.report_summaries import summarize_sell_call
+    from src.application.report_summaries import summarize_sell_call
 
     rows = [
         {

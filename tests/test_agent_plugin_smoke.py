@@ -1700,7 +1700,7 @@ def test_scan_opportunities_returns_summary_fields(monkeypatch, tmp_path: Path) 
     old_build_symbols_digest = None
     import src.application.config_loader as config_loader
     import src.application.config_profiles as config_profiles
-    import scripts.pipeline_symbol as pipeline_symbol
+    import src.application.pipeline_symbol as pipeline_symbol
     import src.application.pipeline_context as pipeline_context
     import src.application.pipeline_watchlist as pipeline_watchlist
     import src.application.report_builders as report_builders

@@ -17,7 +17,7 @@ def test_event_risk_hit_is_flagged_but_not_blocked() -> None:
     from tempfile import TemporaryDirectory
 
     _add_repo_to_syspath()
-    from scripts.event_risk_filter import annotate_candidates_with_event_risk
+    from src.application.event_risk_filter import annotate_candidates_with_event_risk
 
     df = pd.DataFrame(
         [

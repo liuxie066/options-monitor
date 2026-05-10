@@ -7,7 +7,7 @@ import pandas as pd
 
 def test_enrich_sell_put_candidates_with_cash_adds_total_cny_columns(tmp_path: Path) -> None:
     from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
-    from scripts.sell_put_cash import enrich_sell_put_candidates_with_cash
+    from src.application.sell_put_cash import enrich_sell_put_candidates_with_cash
 
     df = pd.DataFrame(
         [
@@ -44,7 +44,7 @@ def test_enrich_sell_put_candidates_with_cash_adds_total_cny_columns(tmp_path: P
 
 
 def test_render_sell_put_alerts_shows_total_cny_when_base_cny_missing(tmp_path: Path) -> None:
-    from scripts.render_sell_put_alerts import render_sell_put_alerts
+    from src.application.render_sell_put_alerts import render_sell_put_alerts
 
     csv_path = tmp_path / "sell_put_candidates_labeled.csv"
     out_path = tmp_path / "sell_put_alerts.txt"
@@ -87,7 +87,7 @@ def test_render_sell_put_alerts_shows_total_cny_when_base_cny_missing(tmp_path: 
 
 
 def test_render_sell_put_alerts_shows_usd_cash_guard_when_cny_missing(tmp_path: Path) -> None:
-    from scripts.render_sell_put_alerts import render_sell_put_alerts
+    from src.application.render_sell_put_alerts import render_sell_put_alerts
 
     csv_path = tmp_path / "sell_put_candidates_labeled.csv"
     out_path = tmp_path / "sell_put_alerts.txt"
@@ -129,7 +129,7 @@ def test_render_sell_put_alerts_shows_usd_cash_guard_when_cny_missing(tmp_path: 
 
 
 def test_render_sell_put_alerts_shows_linked_call_summary(tmp_path: Path) -> None:
-    from scripts.render_sell_put_alerts import render_sell_put_alerts
+    from src.application.render_sell_put_alerts import render_sell_put_alerts
 
     csv_path = tmp_path / "sell_put_candidates_labeled.csv"
     out_path = tmp_path / "sell_put_alerts.txt"
