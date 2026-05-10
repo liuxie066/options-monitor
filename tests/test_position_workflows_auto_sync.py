@@ -18,7 +18,10 @@ def test_execute_manual_open_triggers_best_effort_sync(monkeypatch, tmp_path: Pa
     repo.data_config_path.write_text(
         json.dumps(
             {
-                "option_positions": {"sqlite_path": str(repo.db_path)},
+                "option_positions": {
+                    "sqlite_path": str(repo.db_path),
+                    "sync_to_feishu": {"enabled": True},
+                },
                 "feishu": {
                     "app_id": "app_id",
                     "app_secret": "app_secret",
@@ -64,6 +67,59 @@ def test_execute_manual_open_triggers_best_effort_sync(monkeypatch, tmp_path: Pa
     assert captured["record_id"].startswith("lot_manual-open-")
     assert captured["data_config"] == str(repo.data_config_path)
     assert captured["apply_mode"] == "1"
+
+
+def test_execute_manual_open_skips_best_effort_sync_when_switch_is_off(monkeypatch, tmp_path: Path) -> None:
+    import scripts.option_positions_core.service as svc
+    import src.application.position_workflows as workflows
+
+    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    repo.data_config_path = tmp_path / "data.json"  # type: ignore[attr-defined]
+    repo.data_config_path.write_text(
+        json.dumps(
+            {
+                "option_positions": {
+                    "sqlite_path": str(repo.db_path),
+                    "sync_to_feishu": {"enabled": False},
+                },
+                "feishu": {
+                    "app_id": "app_id",
+                    "app_secret": "app_secret",
+                    "tables": {"option_positions": "app_token/table_id"},
+                },
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    def _should_not_sync(*, repo, data_config, record_id, apply_mode):
+        raise AssertionError("disabled sync should not call sync_single_option_position_record")
+
+    monkeypatch.setattr(workflows, "sync_single_option_position_record", _should_not_sync)
+
+    out = workflows.execute_manual_open(
+        repo,
+        broker="富途",
+        account="lx",
+        symbol="TSLA",
+        option_type="put",
+        side="short",
+        contracts=1,
+        currency="USD",
+        strike=100.0,
+        multiplier=100.0,
+        expiration_ymd="2026-06-19",
+        premium_per_share=1.23,
+        underlying_share_locked=None,
+        note=None,
+        dry_run=False,
+    )
+
+    assert out["mode"] == "applied"
+    assert out["sync_result"] is None
 
 
 def test_build_trade_open_command_keeps_optional_contract_fields_null_instead_of_string_none() -> None:
@@ -127,7 +183,10 @@ def test_execute_manual_close_warns_when_best_effort_sync_fails(monkeypatch, tmp
     repo.data_config_path.write_text(
         json.dumps(
             {
-                "option_positions": {"sqlite_path": str(repo.db_path)},
+                "option_positions": {
+                    "sqlite_path": str(repo.db_path),
+                    "sync_to_feishu": {"enabled": True},
+                },
                 "feishu": {
                     "app_id": "app_id",
                     "app_secret": "app_secret",
@@ -236,7 +295,10 @@ def test_execute_manual_open_keeps_local_lot_when_best_effort_sync_fails(monkeyp
     repo.data_config_path.write_text(
         json.dumps(
             {
-                "option_positions": {"sqlite_path": str(repo.db_path)},
+                "option_positions": {
+                    "sqlite_path": str(repo.db_path),
+                    "sync_to_feishu": {"enabled": True},
+                },
                 "feishu": {
                     "app_id": "app_id",
                     "app_secret": "app_secret",

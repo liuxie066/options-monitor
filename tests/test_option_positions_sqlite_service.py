@@ -2177,6 +2177,59 @@ def test_load_option_positions_repo_rejects_non_object_feishu_config(tmp_path: P
         svc.load_option_positions_repo(data_config)
 
 
+def test_option_positions_sync_to_feishu_enabled_defaults_false(tmp_path: Path) -> None:
+    import scripts.option_positions_core.service as svc
+
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
+
+    assert svc.option_positions_sync_to_feishu_enabled(data_config) is False
+
+
+def test_option_positions_sync_to_feishu_enabled_reads_boolean(tmp_path: Path) -> None:
+    import scripts.option_positions_core.service as svc
+
+    data_config = tmp_path / "data.json"
+    data_config.write_text(
+        json.dumps(
+            {
+                "option_positions": {
+                    "sqlite_path": str(tmp_path / "option_positions.sqlite3"),
+                    "sync_to_feishu": {"enabled": True},
+                }
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert svc.option_positions_sync_to_feishu_enabled(data_config) is True
+
+
+def test_option_positions_sync_to_feishu_enabled_rejects_non_boolean(tmp_path: Path) -> None:
+    import scripts.option_positions_core.service as svc
+
+    data_config = tmp_path / "data.json"
+    data_config.write_text(
+        json.dumps(
+            {
+                "option_positions": {
+                    "sqlite_path": str(tmp_path / "option_positions.sqlite3"),
+                    "sync_to_feishu": {"enabled": "yes"},
+                }
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit, match="data config option_positions.sync_to_feishu.enabled must be a boolean"):
+        svc.option_positions_sync_to_feishu_enabled(data_config)
+
+
 def test_update_position_lot_fields_updates_single_row_and_sync_metadata(tmp_path: Path) -> None:
     import scripts.option_positions_core.service as svc
     from scripts.option_positions_core.domain import OpenPositionCommand

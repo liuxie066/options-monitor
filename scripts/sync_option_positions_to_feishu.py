@@ -20,6 +20,7 @@ from scripts.feishu_bitable import (
 from scripts.option_positions_core.domain import normalize_account, normalize_broker, normalize_option_type, normalize_side, now_ms
 from scripts.option_positions_core.service import (
     load_table_ref,
+    option_positions_sync_to_feishu_enabled,
     require_option_positions_read_repo,
     require_option_positions_sync_meta_repo,
 )
@@ -380,6 +381,10 @@ def can_prune_remote_missing_local(
     )
 
 
+def sync_writes_enabled(data_config: Path) -> bool:
+    return option_positions_sync_to_feishu_enabled(data_config)
+
+
 def sync_option_positions(
     *,
     repo: Any,
@@ -392,10 +397,12 @@ def sync_option_positions(
     limit: int | None = None,
     prune_remote_missing_local: bool = False,
 ) -> list[dict[str, Any]]:
+    writes_enabled = sync_writes_enabled(data_config)
+    effective_apply_mode = bool(apply_mode and writes_enabled)
     table_ref = load_table_ref(data_config)
     update_position_lot_fields: Callable[[str, dict[str, Any]], None] | None
     try:
-        if apply_mode:
+        if effective_apply_mode:
             primary_repo = require_option_positions_sync_meta_repo(repo)
             update_position_lot_fields = primary_repo.update_position_lot_fields
         else:
@@ -463,7 +470,10 @@ def sync_option_positions(
         if not feishu_record_id:
             row["action"] = "create"
             row["reason"] = "missing_feishu_record_id"
-            if apply_mode:
+            if apply_mode and not writes_enabled:
+                row["action"] = "skip"
+                row["reason"] = "sync_to_feishu_disabled"
+            elif effective_apply_mode:
                 try:
                     if update_position_lot_fields is None:
                         raise TypeError("option_positions repo does not satisfy sync metadata repository interface")
@@ -494,7 +504,10 @@ def sync_option_positions(
 
         row["action"] = "update"
         row["reason"] = "has_feishu_record_id"
-        if apply_mode:
+        if apply_mode and not writes_enabled:
+            row["action"] = "skip"
+            row["reason"] = "sync_to_feishu_disabled"
+        elif effective_apply_mode:
             try:
                 if update_position_lot_fields is None:
                     raise TypeError("option_positions repo does not satisfy sync metadata repository interface")
@@ -541,7 +554,10 @@ def sync_option_positions(
                 "action": "delete",
                 "reason": "remote_local_record_missing_from_local_projection",
             }
-            if apply_mode:
+            if apply_mode and not writes_enabled:
+                row["action"] = "skip"
+                row["reason"] = "sync_to_feishu_disabled"
+            elif effective_apply_mode:
                 try:
                     _with_table_token(
                         table_ref,
@@ -587,6 +603,9 @@ def main() -> None:
     )
     parser.add_argument("--verbose", action="store_true", help="print payload details")
     args = parser.parse_args()
+
+    if args.apply and args.dry_run:
+        raise SystemExit("--apply and --dry-run cannot be used together")
 
     apply_mode = bool(args.apply)
     dry_run = not apply_mode or bool(args.dry_run)

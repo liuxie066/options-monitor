@@ -3,7 +3,7 @@
 > 目标：你只要维护：
 > - `configs/user.us.json` / `configs/user.hk.json`（账号与 symbols；通知目标等私有覆盖按需放这里）
 > - `portfolio.data_config`（最小配置下只需要 SQLite `option_positions` 路径）
-> - Feishu App 凭证和 Bitable 配置是可选项，只在 `holdings` / `external_holdings` 数据源场景需要；`option_positions` 的稳态读写主存储仍是 SQLite
+> - Feishu App 凭证和 Bitable 配置是可选项，只在 `holdings` / `external_holdings` 数据源，或 `option_positions` bootstrap / 镜像场景需要；`option_positions` 的稳态读写主存储仍是 SQLite
 
 ---
 
@@ -55,7 +55,7 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 ## 1) 本项目需要哪些外部“表”（Bitable）？
 
 目前本项目通过 `portfolio.data_config` 指向本地 portfolio 配置文件。
-最小配置下它只需要提供 SQLite `option_positions` 路径；如果你要启用 Feishu holdings 数据源，再在同一个文件里补 `feishu` 配置。
+最小配置下它只需要提供 SQLite `option_positions` 路径；如果你要启用 Feishu holdings 数据源，或启用 Feishu `option_positions` bootstrap / 镜像，再在同一个文件里补 `feishu` 配置。
 - `holdings`：可选主数据源，提供现金与股票持仓（用于 base 现金、shares、avg_cost）
 - `option_positions`：SQLite 主存储，提供已卖出期权占用（用于：
   - covered call 锁股数 `locked_shares_by_symbol`
@@ -452,10 +452,17 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 ```json
 {
   "option_positions": {
-    "sqlite_path": "output_shared/state/option_positions.sqlite3"
+    "sqlite_path": "output_shared/state/option_positions.sqlite3",
+    "sync_to_feishu": {
+      "enabled": false
+    }
   }
 }
 ```
+
+- `option_positions.sync_to_feishu.enabled` 默认是 `false`。
+- 只有你明确把它改成 `true` 时，`scripts/sync_option_positions_to_feishu.py --apply` 和本地手工持仓写入后的 post-write auto sync 才会真正写 Feishu `option_positions` 镜像表。
+- 这个开关只影响“写远端镜像”；不改变本地 SQLite 主存储，也不关闭 Feishu bootstrap/read 侧行为。
 
 ### 可选方式（增加 external_holdings 账号）
 - 先执行：
@@ -477,7 +484,10 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 ```json
 {
   "option_positions": {
-    "sqlite_path": "output_shared/state/option_positions.sqlite3"
+    "sqlite_path": "output_shared/state/option_positions.sqlite3",
+    "sync_to_feishu": {
+      "enabled": false
+    }
   },
   "feishu": {
     "app_id": "cli_YOUR_APP_ID",
@@ -497,6 +507,11 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 
 ```json
 {
+  "option_positions": {
+    "sync_to_feishu": {
+      "enabled": false
+    }
+  },
   "feishu": {
     "app_id": "cli_YOUR_APP_ID",
     "app_secret": "YOUR_APP_SECRET",
@@ -511,6 +526,9 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 当前仓库已加入 `.gitignore`（忽略 `secrets/` 与 `output/`）。
 
 > 注意：不要在聊天里发送 app_secret。
+>
+> 如果你要把本地 `option_positions` 同步回 Feishu 多维表，还需要在 data config 里显式打开
+> `option_positions.sync_to_feishu.enabled=true`；默认关闭，避免误写远端。
 >
 > `option_positions` bootstrap 的当前状态会出现在两处：
 > - `./om-agent run --tool healthcheck ...` 的 `option_positions_bootstrap`

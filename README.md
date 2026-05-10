@@ -443,6 +443,20 @@ python3 scripts/sync_option_positions_to_feishu.py --dry-run
 python3 scripts/sync_option_positions_to_feishu.py --apply
 ```
 
+要真正写 Feishu `option_positions` 镜像，还需要在 `portfolio.data_config` 指向的数据配置文件里显式设置：
+
+```json
+{
+  "option_positions": {
+    "sync_to_feishu": {
+      "enabled": true
+    }
+  }
+}
+```
+
+默认是关闭的，避免误写远端多维表。
+
 `--prune-remote-missing-local` 会删除远端多余行，只用于明确的维护窗口，不能放进普通定时任务。
 版本更新同理，普通定时任务只做检查或 dry-run；不要把 `{"bump":"patch","apply":true,"confirm":true}` 放进固定频率任务。
 

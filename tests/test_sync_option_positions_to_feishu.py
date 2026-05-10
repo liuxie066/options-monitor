@@ -3,15 +3,19 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 BASE = Path(__file__).resolve().parents[1]
 if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
 
-def _write_data_config(path: Path, *, sqlite_path: Path) -> Path:
+def _write_data_config(path: Path, *, sqlite_path: Path, sync_to_feishu_enabled: bool = False) -> Path:
     payload = {
-        "option_positions": {"sqlite_path": str(sqlite_path)},
+        "option_positions": {
+            "sqlite_path": str(sqlite_path),
+            "sync_to_feishu": {"enabled": bool(sync_to_feishu_enabled)},
+        },
         "feishu": {
             "app_id": "app_id",
             "app_secret": "app_secret",
@@ -27,7 +31,11 @@ def test_sync_script_dry_run_reports_create(monkeypatch, tmp_path: Path, capsys)
     import scripts.sync_option_positions_to_feishu as sync_mod
     from scripts.option_positions_core.domain import OpenPositionCommand
 
-    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
+    data_config = _write_data_config(
+        tmp_path / "data.json",
+        sqlite_path=tmp_path / "option_positions.sqlite3",
+        sync_to_feishu_enabled=True,
+    )
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     svc.persist_manual_open_event(
         repo,
@@ -93,7 +101,11 @@ def test_sync_script_apply_updates_existing_feishu_row_and_persists_metadata(mon
     import scripts.sync_option_positions_to_feishu as sync_mod
     from scripts.option_positions_core.domain import OpenPositionCommand
 
-    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
+    data_config = _write_data_config(
+        tmp_path / "data.json",
+        sqlite_path=tmp_path / "option_positions.sqlite3",
+        sync_to_feishu_enabled=True,
+    )
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     svc.persist_manual_open_event(
         repo,
@@ -267,7 +279,11 @@ def test_build_outgoing_payload_applies_schema_filter_and_type_hints() -> None:
 def test_sync_dry_run_accepts_read_only_repo(monkeypatch, tmp_path: Path) -> None:
     import scripts.sync_option_positions_to_feishu as sync_mod
 
-    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
+    data_config = _write_data_config(
+        tmp_path / "data.json",
+        sqlite_path=tmp_path / "option_positions.sqlite3",
+        sync_to_feishu_enabled=True,
+    )
 
     class _ReadOnlyRepo:
         def list_position_lots(self) -> list[dict[str, Any]]:
@@ -303,7 +319,11 @@ def test_sync_dry_run_reports_remote_orphan_delete_when_enabled(monkeypatch, tmp
     import scripts.sync_option_positions_to_feishu as sync_mod
     from scripts.option_positions_core.domain import OpenPositionCommand
 
-    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
+    data_config = _write_data_config(
+        tmp_path / "data.json",
+        sqlite_path=tmp_path / "option_positions.sqlite3",
+        sync_to_feishu_enabled=True,
+    )
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     svc.persist_manual_open_event(
         repo,
@@ -353,7 +373,11 @@ def test_sync_dry_run_does_not_prune_remote_when_scan_is_limited(monkeypatch, tm
     import scripts.sync_option_positions_to_feishu as sync_mod
     from scripts.option_positions_core.domain import OpenPositionCommand
 
-    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
+    data_config = _write_data_config(
+        tmp_path / "data.json",
+        sqlite_path=tmp_path / "option_positions.sqlite3",
+        sync_to_feishu_enabled=True,
+    )
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     svc.persist_manual_open_event(
         repo,
@@ -416,7 +440,11 @@ def test_sync_apply_deletes_remote_orphan_when_enabled(monkeypatch, tmp_path: Pa
     import scripts.sync_option_positions_to_feishu as sync_mod
     from scripts.option_positions_core.domain import OpenPositionCommand
 
-    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
+    data_config = _write_data_config(
+        tmp_path / "data.json",
+        sqlite_path=tmp_path / "option_positions.sqlite3",
+        sync_to_feishu_enabled=True,
+    )
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     open_result = svc.persist_manual_open_event(
         repo,
@@ -587,7 +615,11 @@ def test_sync_skips_unchanged_payload_even_when_last_synced_at_changes(monkeypat
     import scripts.sync_option_positions_to_feishu as sync_mod
     from scripts.option_positions_core.domain import OpenPositionCommand
 
-    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
+    data_config = _write_data_config(
+        tmp_path / "data.json",
+        sqlite_path=tmp_path / "option_positions.sqlite3",
+        sync_to_feishu_enabled=True,
+    )
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     svc.persist_manual_open_event(
         repo,
@@ -705,7 +737,11 @@ def test_sync_apply_create_persists_metadata_without_touching_business_fields(mo
     import scripts.sync_option_positions_to_feishu as sync_mod
     from scripts.option_positions_core.domain import OpenPositionCommand
 
-    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
+    data_config = _write_data_config(
+        tmp_path / "data.json",
+        sqlite_path=tmp_path / "option_positions.sqlite3",
+        sync_to_feishu_enabled=True,
+    )
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     svc.persist_manual_open_event(
         repo,
@@ -782,7 +818,11 @@ def test_sync_apply_update_sends_numeric_payload_types(monkeypatch, tmp_path: Pa
     import scripts.sync_option_positions_to_feishu as sync_mod
     from scripts.option_positions_core.domain import OpenPositionCommand
 
-    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
+    data_config = _write_data_config(
+        tmp_path / "data.json",
+        sqlite_path=tmp_path / "option_positions.sqlite3",
+        sync_to_feishu_enabled=True,
+    )
     repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     svc.persist_manual_open_event(
         repo,
@@ -848,3 +888,54 @@ def test_sync_apply_update_sends_numeric_payload_types(monkeypatch, tmp_path: Pa
     assert isinstance(sent["premium"], float)
     assert sent["cash_secured_amount"] == 8500
     assert isinstance(sent["cash_secured_amount"], int)
+
+
+def test_sync_apply_reports_disabled_when_sync_to_feishu_switch_is_off(monkeypatch, tmp_path: Path) -> None:
+    import scripts.option_positions_core.service as svc
+    import scripts.sync_option_positions_to_feishu as sync_mod
+    from scripts.option_positions_core.domain import OpenPositionCommand
+
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
+    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    svc.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="TSLA",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=100.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            premium_per_share=1.23,
+            opened_at_ms=1000,
+        ),
+    )
+
+    monkeypatch.setattr(sync_mod, "get_tenant_access_token", lambda *_args, **_kwargs: "token")
+    monkeypatch.setattr(sync_mod, "bitable_fields", lambda *_args, **_kwargs: [{"field_name": "broker"}, {"field_name": "local_record_id"}])
+    monkeypatch.setattr(sync_mod, "bitable_list_records", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(sync_mod, "bitable_create_record", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("disabled sync should not create")))
+    monkeypatch.setattr(sync_mod, "bitable_update_record", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("disabled sync should not update")))
+    monkeypatch.setattr(sync_mod, "bitable_delete_record", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("disabled sync should not delete")))
+
+    rows = sync_mod.sync_option_positions(repo=repo, data_config=data_config, apply_mode=True)
+
+    assert rows[0]["action"] == "skip"
+    assert rows[0]["reason"] == "sync_to_feishu_disabled"
+    assert sync_mod.summarize_result(rows)["skip"] == 1
+
+
+def test_sync_script_rejects_apply_and_dry_run_together(monkeypatch) -> None:
+    import scripts.sync_option_positions_to_feishu as sync_mod
+
+    monkeypatch.setattr(sys, "argv", ["sync_option_positions_to_feishu.py", "--apply", "--dry-run"])
+
+    try:
+        sync_mod.main()
+        raise AssertionError("expected SystemExit")
+    except SystemExit as exc:
+        assert "--apply and --dry-run cannot be used together" in str(exc)

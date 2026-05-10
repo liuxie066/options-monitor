@@ -85,6 +85,25 @@ def _load_data_config(data_config: Path) -> dict[str, Any]:
     return cfg
 
 
+def _get_option_positions_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
+    raw = cfg.get("option_positions")
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise SystemExit("data config option_positions must be a JSON object")
+    return raw
+
+
+def _get_option_positions_sync_to_feishu_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
+    option_positions_cfg = _get_option_positions_cfg(cfg)
+    raw = option_positions_cfg.get("sync_to_feishu")
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise SystemExit("data config option_positions.sync_to_feishu must be a JSON object")
+    return raw
+
+
 def _get_feishu_cfg(cfg: dict[str, Any], *, allow_missing: bool) -> dict[str, Any] | None:
     raw = cfg.get("feishu")
     if raw is None:
@@ -118,6 +137,17 @@ def _try_load_table_ref(data_config: Path) -> OptionPositionsTableRef | None:
     if tables and not str(tables.get("option_positions") or "").strip():
         return None
     return _load_table_ref_from_cfg(cfg)
+
+
+def option_positions_sync_to_feishu_enabled(data_config: Path) -> bool:
+    cfg = _load_data_config(data_config)
+    sync_cfg = _get_option_positions_sync_to_feishu_cfg(cfg)
+    enabled = sync_cfg.get("enabled")
+    if enabled is None:
+        return False
+    if not isinstance(enabled, bool):
+        raise SystemExit("data config option_positions.sync_to_feishu.enabled must be a boolean")
+    return bool(enabled)
 
 
 def resolve_option_positions_sqlite_path(data_config: Path) -> Path:
