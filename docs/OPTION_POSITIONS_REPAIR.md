@@ -144,6 +144,9 @@ python3 scripts/option_positions_report.py monthly-income --broker 富途 --acco
 
 如果你启用了 Feishu `option_positions` 镜像，修完本地后再决定是否同步。
 
+另外，远端写入默认关闭；只有 data config 里显式设置
+`option_positions.sync_to_feishu.enabled=true` 后，下面的 `--apply` 才会真正写 Feishu。
+
 普通同步：
 
 ```bash

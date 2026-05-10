@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 
-def _base_cfg() -> dict:
+def _base_cfg() -> dict[str, object]:
     return {
         "accounts": ["user1"],
         "account_settings": {"user1": {"type": "futu"}},
@@ -113,3 +113,29 @@ def test_validate_config_rejects_unsupported_notification_channel(tmp_path: Path
         raise AssertionError("expected SystemExit")
     except SystemExit as exc:
         assert "notifications.channel must be one of: feishu, wechat_clawbot" in str(exc)
+
+
+def test_validate_config_accepts_option_positions_sync_to_feishu_enabled_boolean(tmp_path: Path, monkeypatch) -> None:
+    import scripts.validate_config as mod
+
+    monkeypatch.setattr(mod, "repo_base", tmp_path)
+
+    cfg = _base_cfg()
+    cfg["option_positions"] = {"sync_to_feishu": {"enabled": False}}
+
+    mod.validate_config(cfg)
+
+
+def test_validate_config_rejects_non_boolean_option_positions_sync_to_feishu_enabled(tmp_path: Path, monkeypatch) -> None:
+    import scripts.validate_config as mod
+
+    monkeypatch.setattr(mod, "repo_base", tmp_path)
+
+    cfg = _base_cfg()
+    cfg["option_positions"] = {"sync_to_feishu": {"enabled": "no"}}
+
+    try:
+        mod.validate_config(cfg)
+        raise AssertionError("expected SystemExit")
+    except SystemExit as exc:
+        assert "option_positions.sync_to_feishu.enabled must be a boolean" in str(exc)

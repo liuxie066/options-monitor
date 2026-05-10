@@ -374,6 +374,17 @@ def validate_config(cfg: dict):
         except ValueError as exc:
             die(str(exc))
 
+    option_positions = cfg.get('option_positions') or {}
+    if option_positions and not isinstance(option_positions, dict):
+        die('option_positions must be an object')
+    if isinstance(option_positions, dict):
+        sync_to_feishu = option_positions.get('sync_to_feishu') or {}
+        if sync_to_feishu and not isinstance(sync_to_feishu, dict):
+            die('option_positions.sync_to_feishu must be an object')
+        if isinstance(sync_to_feishu, dict) and 'enabled' in sync_to_feishu and sync_to_feishu.get('enabled') is not None:
+            if not isinstance(sync_to_feishu.get('enabled'), bool):
+                die('option_positions.sync_to_feishu.enabled must be a boolean')
+
     raw_templates = cfg.get('templates')
     if raw_templates is not None and not isinstance(raw_templates, dict):
         die('templates must be an object')

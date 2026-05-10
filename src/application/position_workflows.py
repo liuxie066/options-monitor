@@ -14,6 +14,7 @@ from scripts.option_positions_core.domain import (
 )
 from scripts.option_positions_core.service import (
     existing_manual_close_event_result,
+    option_positions_sync_to_feishu_enabled,
     persist_manual_adjust_event,
     persist_manual_close_event,
     persist_manual_open_event,
@@ -32,7 +33,10 @@ def _auto_sync_record_if_possible(repo: Any, *, record_id: str) -> dict[str, Any
         data_config = getattr(repo, "data_config_path", None)
         if data_config is None:
             return None
-        return sync_single_option_position_record(repo=repo, data_config=Path(str(data_config)), record_id=record_id, apply_mode=True)
+        resolved_data_config = Path(str(data_config))
+        if not option_positions_sync_to_feishu_enabled(resolved_data_config):
+            return None
+        return sync_single_option_position_record(repo=repo, data_config=resolved_data_config, record_id=record_id, apply_mode=True)
     except Exception as sync_error:
         print(
             f"[WARN] option_positions post-write Feishu sync skipped for {record_id} ({type(sync_error).__name__}): {sync_error}",
