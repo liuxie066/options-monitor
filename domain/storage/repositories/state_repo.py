@@ -8,10 +8,10 @@ from pathlib import Path
 from typing import Any
 
 from domain.storage import paths
+from domain.storage.json_io import atomic_write_json as write_json
+from domain.storage.json_io import read_json
 from domain.storage.repositories import run_repo
 from domain.domain.intermediate_objects import SnapshotDTO
-from scripts.io_utils import atomic_write_json as write_json
-from scripts.io_utils import read_json
 
 
 AUDIT_SCHEMA_KIND = "audit_event"
