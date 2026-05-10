@@ -31,7 +31,7 @@ from scripts.sell_put_call_helper import (
     select_best_yield_enhancement_pairs,
 )
 from scripts.sell_put_cash import enrich_sell_put_candidates_with_cash
-from scripts.sell_put_config import validate_min_annualized_net_return
+from domain.domain.sell_put_config import validate_min_annualized_net_return
 from src.application.yield_enhancement_config import (
     resolve_yield_enhancement_cfg,
     wants_yield_enhancement_inline,

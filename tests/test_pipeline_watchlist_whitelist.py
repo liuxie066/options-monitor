@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 def test_watchlist_whitelist_filters_symbols() -> None:
-    from scripts.pipeline_watchlist import run_watchlist_pipeline
+    from src.application.pipeline_watchlist import run_watchlist_pipeline
 
     calls: list[str] = []
 
@@ -60,7 +60,7 @@ def test_watchlist_whitelist_filters_symbols() -> None:
 
 
 def test_watchlist_whitelist_is_case_insensitive_and_trimmed() -> None:
-    from scripts.pipeline_watchlist import run_watchlist_pipeline
+    from src.application.pipeline_watchlist import run_watchlist_pipeline
 
     calls: list[str] = []
 
@@ -113,7 +113,7 @@ def test_watchlist_whitelist_is_case_insensitive_and_trimmed() -> None:
 
 
 def test_watchlist_extracts_global_min_net_income_from_profiles() -> None:
-    from scripts.pipeline_watchlist import run_watchlist_pipeline
+    from src.application.pipeline_watchlist import run_watchlist_pipeline
 
     seen: dict[str, dict] = {}
 
@@ -171,7 +171,7 @@ def test_watchlist_extracts_global_min_net_income_from_profiles() -> None:
 
 
 def test_watchlist_passes_runtime_config_to_symbol_processor() -> None:
-    from scripts.pipeline_watchlist import run_watchlist_pipeline
+    from src.application.pipeline_watchlist import run_watchlist_pipeline
 
     seen: list[dict] = []
 
@@ -222,7 +222,7 @@ def test_watchlist_passes_runtime_config_to_symbol_processor() -> None:
 
 
 def test_watchlist_pipeline_processes_symbols_in_parallel_when_configured() -> None:
-    from scripts.pipeline_watchlist import run_watchlist_pipeline
+    from src.application.pipeline_watchlist import run_watchlist_pipeline
 
     started: list[str] = []
     lock = threading.Lock()
@@ -284,7 +284,7 @@ def test_watchlist_pipeline_processes_symbols_in_parallel_when_configured() -> N
 
 
 def test_resolve_watchlist_item_runtime_config_centralizes_template_expansion() -> None:
-    from scripts.pipeline_watchlist import resolve_watchlist_item_runtime_config
+    from src.application.pipeline_watchlist import resolve_watchlist_item_runtime_config
 
     def _apply_profiles(item: dict, profiles: dict) -> dict:
         out = dict(item)

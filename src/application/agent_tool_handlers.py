@@ -241,7 +241,7 @@ def _get_portfolio_context_tool(payload: dict[str, Any]) -> tuple[dict[str, Any]
 
 
 def _scan_opportunities_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    from scripts.pipeline_watchlist import run_watchlist_pipeline_default
+    from src.application.pipeline_watchlist import run_watchlist_pipeline_default
     return scan_opportunities_tool(
         payload,
         load_runtime_config=load_runtime_config,

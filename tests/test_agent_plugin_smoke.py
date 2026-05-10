@@ -1699,10 +1699,10 @@ def test_scan_opportunities_returns_summary_fields(monkeypatch, tmp_path: Path) 
     old_build_symbols_summary = None
     old_build_symbols_digest = None
     import src.application.config_loader as config_loader
-    import scripts.config_profiles as config_profiles
+    import src.application.config_profiles as config_profiles
     import scripts.pipeline_symbol as pipeline_symbol
     import src.application.pipeline_context as pipeline_context
-    import scripts.pipeline_watchlist as pipeline_watchlist
+    import src.application.pipeline_watchlist as pipeline_watchlist
     import src.application.report_builders as report_builders
     old_load_config = tools.__dict__.get("load_config")
     try:

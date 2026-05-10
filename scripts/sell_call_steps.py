@@ -23,7 +23,7 @@ from src.infrastructure.io_utils import safe_read_csv
 from scripts.render_sell_call_alerts import render_sell_call_alerts
 from scripts.report_summaries import summarize_sell_call
 from scripts.scan_sell_call import run_sell_call_scan
-from scripts.sell_call_config import resolve_min_annualized_net_premium_return_from_sell_call_cfg
+from domain.domain.sell_call_config import resolve_min_annualized_net_premium_return_from_sell_call_cfg
 
 
 def run_sell_call_scan_and_summarize(

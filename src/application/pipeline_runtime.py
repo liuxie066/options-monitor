@@ -167,7 +167,7 @@ def main(argv: list[str] | None = None) -> int:
 
         report_repo.ensure_report_dir(report_dir)
 
-        from scripts.pipeline_watchlist import run_watchlist_pipeline_default
+        from src.application.pipeline_watchlist import run_watchlist_pipeline_default
 
         required_data_dir = Path(SHARED_REQUIRED_DATA).resolve() if SHARED_REQUIRED_DATA else (base / "output").resolve()
 
