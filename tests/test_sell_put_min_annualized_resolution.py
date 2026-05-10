@@ -12,7 +12,7 @@ def _add_repo_to_syspath() -> None:
 
 def test_symbol_sell_put_min_overrides_template() -> None:
     _add_repo_to_syspath()
-    from scripts.sell_put_config import resolve_min_annualized_net_return
+    from domain.domain.sell_put_config import resolve_min_annualized_net_return
 
     symbol_cfg = {
         'symbol': 'NVDA',
@@ -26,7 +26,7 @@ def test_symbol_sell_put_min_overrides_template() -> None:
 
 def test_template_sell_put_min_overrides_default() -> None:
     _add_repo_to_syspath()
-    from scripts.sell_put_config import resolve_min_annualized_net_return
+    from domain.domain.sell_put_config import resolve_min_annualized_net_return
 
     symbol_cfg = {
         'symbol': 'NVDA',
@@ -40,7 +40,7 @@ def test_template_sell_put_min_overrides_default() -> None:
 
 def test_none_sell_put_min_uses_default() -> None:
     _add_repo_to_syspath()
-    from scripts.sell_put_config import DEFAULT_MIN_ANNUALIZED_NET_RETURN, resolve_min_annualized_net_return
+    from domain.domain.sell_put_config import DEFAULT_MIN_ANNUALIZED_NET_RETURN, resolve_min_annualized_net_return
 
     symbol_cfg = {
         'symbol': 'NVDA',
@@ -54,7 +54,7 @@ def test_none_sell_put_min_uses_default() -> None:
 
 def test_invalid_sell_put_min_raises() -> None:
     _add_repo_to_syspath()
-    from scripts.sell_put_config import resolve_min_annualized_net_return
+    from domain.domain.sell_put_config import resolve_min_annualized_net_return
 
     symbol_cfg = {
         'symbol': 'NVDA',

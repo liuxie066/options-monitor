@@ -18,7 +18,7 @@ from domain.domain.candidate_defaults import (
     resolve_event_risk_config,
 )
 from scripts.sell_call_risk_bands import classify_sell_call_risk
-from scripts.sell_call_config import validate_min_annualized_net_premium_return
+from domain.domain.sell_call_config import validate_min_annualized_net_premium_return
 from src.application.candidate_scanning import (
     CandidateScanConfig,
     CandidateScanDependencies,

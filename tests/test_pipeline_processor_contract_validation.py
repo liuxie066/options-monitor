@@ -9,7 +9,7 @@ if str(BASE) not in sys.path:
 
 
 def test_watchlist_pipeline_validates_processor_rows_before_aggregation() -> None:
-    from scripts.pipeline_watchlist import run_watchlist_pipeline
+    from src.application.pipeline_watchlist import run_watchlist_pipeline
 
     def _apply_profiles(item: dict, profiles: dict) -> dict:
         return dict(item)
@@ -69,7 +69,7 @@ def test_watchlist_pipeline_validates_processor_rows_before_aggregation() -> Non
 
 
 def test_watchlist_pipeline_rejects_non_list_processor_rows_contract() -> None:
-    from scripts.pipeline_watchlist import run_watchlist_pipeline
+    from src.application.pipeline_watchlist import run_watchlist_pipeline
 
     def _apply_profiles(item: dict, profiles: dict) -> dict:
         return dict(item)

@@ -16,7 +16,7 @@ from domain.domain.candidate_defaults import (
     DEFAULT_SELL_PUT_WINDOW,
     resolve_event_risk_config,
 )
-from scripts.sell_put_config import validate_min_annualized_net_return
+from domain.domain.sell_put_config import validate_min_annualized_net_return
 from src.application.candidate_scanning import (
     CandidateScanConfig,
     CandidateScanDependencies,

@@ -140,8 +140,8 @@
 文档不再写死具体默认数值，因为默认值可能在脚本配置中调整。
 如果你要看当前默认值，请直接看：
 
-- `scripts/sell_put_config.py`
-- `scripts/sell_call_config.py`
+- `domain/domain/sell_put_config.py`
+- `domain/domain/sell_call_config.py`
 
 ---
 
@@ -244,12 +244,12 @@ Covered Call 会结合持仓 context 计算：
 - `scripts/scan_sell_put.py`
 - `scripts/sell_put_steps.py`
 - `scripts/sell_put_cash.py`
-- `scripts/sell_put_config.py`
+- `domain/domain/sell_put_config.py`
 
 ### Call 路径
 - `scripts/scan_sell_call.py`
 - `scripts/sell_call_steps.py`
-- `scripts/sell_call_config.py`
+- `domain/domain/sell_call_config.py`
 
 ### 风险 / 报表 / 汇总
 - `scripts/event_risk_filter.py`

@@ -68,7 +68,10 @@ def test_pipeline_runtime_imports_config_loader_helpers_from_owner_module() -> N
 
 
 def test_pipeline_watchlist_imports_config_loader_helpers_from_owner_module() -> None:
-    pipeline_watchlist_mod = importlib.import_module("scripts.pipeline_watchlist")
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("scripts.pipeline_watchlist")
+
+    pipeline_watchlist_mod = importlib.import_module("src.application.pipeline_watchlist")
     owner_mod = importlib.import_module("src.application.config_loader")
 
     assert pipeline_watchlist_mod.resolve_templates_config is owner_mod.resolve_templates_config

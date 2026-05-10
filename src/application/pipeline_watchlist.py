@@ -15,10 +15,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable, Iterable
 
-from scripts.config_profiles import deep_merge
+from src.application.config_profiles import deep_merge
 from src.application.config_loader import resolve_templates_config, resolve_watchlist_config
-from scripts.sell_call_config import resolve_min_annualized_net_premium_return
-from scripts.sell_put_config import resolve_min_annualized_net_return
+from domain.domain.sell_call_config import resolve_min_annualized_net_premium_return
+from domain.domain.sell_put_config import resolve_min_annualized_net_return
 from domain.domain import normalize_processor_row, normalize_processor_rows
 from src.application.yield_enhancement_config import (
     resolve_yield_enhancement_cfg,
@@ -327,7 +327,7 @@ def run_watchlist_pipeline_default(
     log: Callable[[str], None],
     want_fn: Callable[[str], bool],
 ) -> list[dict]:
-    from scripts.config_profiles import apply_profiles
+    from src.application.config_profiles import apply_profiles
     from src.application.pipeline_context import build_pipeline_context
     from scripts.pipeline_symbol import process_symbol
     from src.application.report_builders import build_symbols_digest, build_symbols_summary
