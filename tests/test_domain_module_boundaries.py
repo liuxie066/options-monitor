@@ -118,6 +118,8 @@ def test_legacy_wrapper_modules_are_removed() -> None:
     assert not (ROOT / "scripts" / "trade_intake_resolver.py").exists()
     assert not (ROOT / "scripts" / "trade_intake_state.py").exists()
     assert not (ROOT / "scripts" / "trade_push_listener.py").exists()
+    assert not (ROOT / "scripts" / "option_intake.py").exists()
+    assert not (ROOT / "scripts" / "parse_option_message.py").exists()
     assert not (ROOT / "scripts" / "multi_tick").exists()
     assert not (ROOT / "scripts" / "infra" / "service.py").exists()
     assert not (ROOT / "scripts" / "infra" / "entry_external.py").exists()

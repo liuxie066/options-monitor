@@ -2,13 +2,13 @@
 """Chat-friendly option intake -> trade-events / position-lots writer.
 
 Usage examples:
-  ./scripts/option_intake.py --text "期权：腾讯20260330 put，strike500，成本5.425每股，乘数100，short 10张，sy，HKD" --dry-run
-  ./scripts/option_intake.py --text "期权：腾讯20260330 put，strike500，成本5.425每股，乘数100，short 10张，sy，HKD" --apply
-  ./scripts/option_intake.py --text "/om open lx -r -- 【成交提醒】成功卖出2张$腾讯 260429 480.00 沽$，成交价格：3.93..."
-  ./scripts/option_intake.py --text "/om close sy -id recxxx -a -- 【成交提醒】成功买入1张$腾讯 260429 480.00 沽$，成交价格：1.20..."
+  python3 -m src.application.option_intake --text "期权：腾讯20260330 put，strike500，成本5.425每股，乘数100，short 10张，sy，HKD" --dry-run
+  python3 -m src.application.option_intake --text "期权：腾讯20260330 put，strike500，成本5.425每股，乘数100，short 10张，sy，HKD" --apply
+  python3 -m src.application.option_intake --text "/om open lx -r -- 【成交提醒】成功卖出2张$腾讯 260429 480.00 沽$，成交价格：3.93..."
+  python3 -m src.application.option_intake --text "/om close sy -id recxxx -a -- 【成交提醒】成功买入1张$腾讯 260429 480.00 沽$，成交价格：1.20..."
 
 Design:
-- Parses message with scripts.parse_option_message.parse_option_message_text
+- Parses message with src.application.parse_option_message.parse_option_message_text
 - Writes through shared position workflow application helpers
 - Default dry-run (safe). Use --apply to persist.
 """
@@ -22,13 +22,13 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-repo_base = Path(__file__).resolve().parents[1]
+repo_base = Path(__file__).resolve().parents[2]
 if str(repo_base) not in sys.path:
     sys.path.insert(0, str(repo_base))
 
 from src.application.account_config import accounts_from_config_path
 from src.application.config_loader import load_config
-from scripts.parse_option_message import parse_option_message_text
+from src.application.parse_option_message import parse_option_message_text
 from src.application.option_positions_facade import resolve_option_positions_repo, resolve_option_positions_repo_from_config
 from src.application.position_workflows import execute_manual_close, execute_manual_open
 

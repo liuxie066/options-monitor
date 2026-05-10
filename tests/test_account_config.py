@@ -138,7 +138,7 @@ def test_build_account_portfolio_source_plan_for_external_holdings_account() -> 
 
 
 def test_parse_option_message_accepts_configured_account_labels() -> None:
-    from scripts.parse_option_message import parse_account
+    from src.application.parse_option_message import parse_account
 
     assert parse_account("成交 accountA账户", accounts=["accountA"]) == "accounta"
     assert parse_account("成交 lx", accounts=["accountA"]) is None
