@@ -254,7 +254,7 @@ Covered Call 会结合持仓 context 计算：
 ### 风险 / 报表 / 汇总
 - `src/application/event_risk_filter.py`
 - `src/application/report_summaries.py`
-- `scripts/alert_engine.py`
+- `src/application/alert_engine.py`
 
 ---
 

@@ -209,7 +209,7 @@ def test_exchange_rates_imports_infrastructure_owner_module() -> None:
     reporting_mod = importlib.import_module("src.application.option_positions_reporting")
     agent_tools_mod = importlib.import_module("src.application.agent_tool_handlers")
     cash_mod = importlib.import_module("src.application.sell_put_cash")
-    notify_mod = importlib.import_module("scripts.notify_symbols")
+    notify_mod = importlib.import_module("src.application.notify_symbols")
 
     assert facade_mod.get_exchange_rates_or_fetch_latest is infra_mod.get_exchange_rates_or_fetch_latest
     assert reporting_mod.CurrencyConverter is infra_mod.CurrencyConverter
@@ -457,12 +457,27 @@ def test_alert_policy_imports_domain_owner_modules() -> None:
 
     policy_mod = importlib.import_module("domain.domain.alert_policy")
     rules_mod = importlib.import_module("domain.domain.alert_rules")
-    alert_engine_mod = importlib.import_module("scripts.alert_engine")
-    notify_mod = importlib.import_module("scripts.notify_symbols")
+    alert_engine_mod = importlib.import_module("src.application.alert_engine")
+    notify_mod = importlib.import_module("src.application.notify_symbols")
 
     assert rules_mod.DEFAULT_ALERT_POLICY is policy_mod.DEFAULT_ALERT_POLICY
     assert alert_engine_mod.load_alert_policy is policy_mod.load_alert_policy
     assert notify_mod.SELL_PUT_NOTIFICATION_HIGH == rules_mod.SELL_PUT_NOTIFICATION_HIGH
+
+
+def test_notification_modules_import_application_owner_modules() -> None:
+    for old_module in ("scripts.alert_engine", "scripts.notify_symbols"):
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module(old_module)
+
+    alert_engine_mod = importlib.import_module("src.application.alert_engine")
+    notify_mod = importlib.import_module("src.application.notify_symbols")
+    pipeline_reporting_mod = importlib.import_module("src.application.pipeline_reporting")
+    agent_tools_mod = importlib.import_module("src.application.agent_tool_handlers")
+
+    assert pipeline_reporting_mod.run_alert_engine is alert_engine_mod.run_alert_engine
+    assert pipeline_reporting_mod.build_notification is notify_mod.build_notification
+    assert agent_tools_mod.build_notification is notify_mod.build_notification
 
 
 def test_scan_scheduler_imports_application_owner_module() -> None:

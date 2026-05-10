@@ -18,7 +18,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-repo_base = Path(__file__).resolve().parents[1]
+repo_base = Path(__file__).resolve().parents[2]
 if str(repo_base) not in sys.path:
     sys.path.insert(0, str(repo_base))
 
@@ -536,7 +536,7 @@ def main():
     parser.add_argument('--state-dir', default=None, help='[optional] state dir for rate_cache.json')
     args = parser.parse_args()
 
-    base = Path(__file__).resolve().parents[1]
+    base = Path(__file__).resolve().parents[2]
     alerts_path = base / args.alerts_input
     changes_path = base / args.changes_input
     output_path = base / args.output

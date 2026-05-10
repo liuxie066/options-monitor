@@ -38,7 +38,7 @@ def test_alert_engine_domain_and_cli() -> None:
     if str(BASE) not in sys.path:
         sys.path.insert(0, str(BASE))
 
-    from scripts.alert_engine import run_alert_engine
+    from src.application.alert_engine import run_alert_engine
 
     with TemporaryDirectory() as td:
         root = Path(td)
@@ -73,7 +73,8 @@ def test_alert_engine_domain_and_cli() -> None:
         subprocess.run(
             [
                 str(BASE / '.venv' / 'bin' / 'python'),
-                'scripts/alert_engine.py',
+                '-m',
+                'src.application.alert_engine',
                 '--summary-input', str(summary_path),
                 '--output', str(out_path),
                 '--changes-output', str(changes_path),

@@ -7,8 +7,8 @@ import pandas as pd
 
 def _render_via_alert_engine(summary_row: dict) -> str:
     from domain.domain import normalize_processor_row
-    from scripts.alert_engine import build_alert_text
-    from scripts.notify_symbols import build_notification
+    from src.application.alert_engine import build_alert_text
+    from src.application.notify_symbols import build_notification
 
     normalized = normalize_processor_row(summary_row)
     df = pd.DataFrame([normalized])
@@ -17,7 +17,7 @@ def _render_via_alert_engine(summary_row: dict) -> str:
 
 
 def test_notify_symbols_markdown_put_layout() -> None:
-    from scripts.notify_symbols import build_notification
+    from src.application.notify_symbols import build_notification
 
     alerts = """# Symbols Alerts
 
@@ -42,7 +42,7 @@ def test_notify_symbols_markdown_put_layout() -> None:
 
 
 def test_notify_symbols_no_candidate_message_is_heartbeat() -> None:
-    from scripts.notify_symbols import build_notification
+    from src.application.notify_symbols import build_notification
 
     out = build_notification('', '', account_label='LX')
 
@@ -51,7 +51,7 @@ def test_notify_symbols_no_candidate_message_is_heartbeat() -> None:
 
 
 def test_notify_symbols_markdown_put_layout_missing_fields_have_reasons() -> None:
-    from scripts.notify_symbols import build_notification
+    from src.application.notify_symbols import build_notification
 
     alerts = """# Symbols Alerts
 
@@ -70,7 +70,7 @@ def test_notify_symbols_markdown_put_layout_missing_fields_have_reasons() -> Non
 
 
 def test_notify_symbols_markdown_call_layout_ignores_changes_input() -> None:
-    from scripts.notify_symbols import build_notification
+    from src.application.notify_symbols import build_notification
 
     alerts = """# Symbols Alerts
 
@@ -91,7 +91,7 @@ def test_notify_symbols_markdown_call_layout_ignores_changes_input() -> None:
 
 
 def test_notify_symbols_markdown_call_layout_missing_fields_have_reasons() -> None:
-    from scripts.notify_symbols import build_notification
+    from src.application.notify_symbols import build_notification
 
     alerts = """# Symbols Alerts
 
@@ -256,7 +256,7 @@ def test_notify_symbols_markdown_put_chain_missing_fields_keep_reasons() -> None
 
 
 def test_notify_symbols_markdown_put_shows_same_symbol_position_usage() -> None:
-    from scripts.notify_symbols import build_notification
+    from src.application.notify_symbols import build_notification
 
     alerts = """# Symbols Alerts
 

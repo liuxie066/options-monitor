@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from scripts.alert_engine import run_alert_engine
-from scripts.notify_symbols import (
+from src.application.alert_engine import run_alert_engine
+from src.application.notify_symbols import (
     _infer_account_label,
     build_notification,
     read_text,

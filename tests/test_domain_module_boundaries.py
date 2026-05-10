@@ -100,6 +100,8 @@ def test_legacy_wrapper_modules_are_removed() -> None:
     assert not (ROOT / "scripts" / "event_risk_filter.py").exists()
     assert not (ROOT / "scripts" / "sell_call_risk_bands.py").exists()
     assert not (ROOT / "scripts" / "sell_put_risk_bands.py").exists()
+    assert not (ROOT / "scripts" / "alert_engine.py").exists()
+    assert not (ROOT / "scripts" / "notify_symbols.py").exists()
     assert not (ROOT / "scripts" / "multi_tick").exists()
     assert not (ROOT / "scripts" / "infra" / "service.py").exists()
     assert not (ROOT / "scripts" / "infra" / "entry_external.py").exists()

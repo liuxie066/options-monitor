@@ -8,7 +8,7 @@ This repository is primarily maintained for personal use. Keep agent support lig
 - Accounts: use lowercase account labels. Read the default list from top-level `accounts` in the runtime config; examples currently use `lx` and `sy`.
 - Core code: `domain/` contains deterministic business logic; `src/application/` owns application services and unified tick orchestration; `scripts/` contains compatibility entry points and operational helpers.
 - Reports: generated under `output/`, `output_accounts/`, and `output_shared/`.
-- Notification layout source of truth: `scripts/notify_symbols.py` for per-account notification content and `src/application/multi_tick/notify_format.py` for account message wrappers.
+- Notification layout source of truth: `src/application/notify_symbols.py` for per-account notification content and `src/application/multi_tick/notify_format.py` for account message wrappers.
 
 ## Agent Operating Rules
 
@@ -38,7 +38,7 @@ This repository is primarily maintained for personal use. Keep agent support lig
 ## Task Routing Hints
 
 - Business rules and deterministic calculations: inspect `domain/` first.
-- Notification formatting and message layout: inspect `scripts/notify_symbols.py` and `src/application/multi_tick/notify_format.py` first.
+- Notification formatting and message layout: inspect `src/application/notify_symbols.py` and `src/application/multi_tick/notify_format.py` first.
 - Operator-facing command behavior: inspect `src/interfaces/cli/`, `./om`, and related docs first.
 - Agent-facing structured tooling: inspect `./om-agent`, `scripts/install_agent_plugin.sh`, and README agent sections first.
 - Configuration contracts and runtime expectations: inspect `CONFIGS.md`, `CONFIGURATION_GUIDE.md`, examples under `configs/examples/`, and `src/application/config_validator.py` before executing config-related commands.
@@ -103,7 +103,7 @@ python3 -m pytest tests/test_layered_config.py
 Build per-account notification text from generated alerts:
 
 ```bash
-python3 scripts/notify_symbols.py --alerts-input output/reports/symbols_alerts.txt --changes-input output/reports/symbols_changes.txt --output output/reports/symbols_notification.txt
+python3 -m src.application.notify_symbols --alerts-input output/reports/symbols_alerts.txt --changes-input output/reports/symbols_changes.txt --output output/reports/symbols_notification.txt
 ```
 
 Run the unified tick flow (preferred unified CLI):
