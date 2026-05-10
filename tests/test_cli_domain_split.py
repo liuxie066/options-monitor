@@ -92,11 +92,11 @@ def test_step4_domain_files_no_argparse_or_main() -> None:
         BASE / 'src' / 'application' / 'scan_scheduler.py',
         BASE / 'scripts' / 'render_sell_put_alerts.py',
         BASE / 'scripts' / 'render_sell_call_alerts.py',
-        BASE / 'scripts' / 'query_sell_put_cash.py',
+        BASE / 'src' / 'application' / 'cash_headroom_query.py',
     ]
     for path in targets:
         text = path.read_text(encoding='utf-8')
-        if path.name in ('scan_scheduler.py', 'query_sell_put_cash.py'):
+        if path.name in ('scan_scheduler.py', 'cash_headroom_query.py'):
             assert 'import argparse' not in text
             assert '__main__' not in text
 

@@ -76,6 +76,9 @@ def test_pipeline_watchlist_imports_config_loader_helpers_from_owner_module() ->
 
 
 def test_required_data_uses_application_opend_symbol_fetching_owner() -> None:
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("scripts.fetch_market_data_opend")
+
     required_data_mod = importlib.import_module("src.application.required_data_fetching")
     planning_mod = importlib.import_module("src.application.required_data_planning")
     owner_mod = importlib.import_module("src.application.opend_symbol_fetching")
@@ -94,6 +97,37 @@ def test_option_positions_and_pipeline_context_import_data_config_owner_module()
 
     assert option_positions_mod.resolve_data_config_path is owner_mod.resolve_data_config_path
     assert pipeline_context_mod.resolve_data_config_path is owner_mod.resolve_data_config_path
+
+
+def test_portfolio_context_and_cash_query_import_application_owner_modules() -> None:
+    for old_module in (
+        "scripts.query_sell_put_cash",
+        "scripts.fetch_option_positions_context",
+        "scripts.fetch_portfolio_context",
+        "scripts.portfolio_context_service",
+        "scripts.futu_portfolio_context",
+    ):
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module(old_module)
+
+    cash_mod = importlib.import_module("src.application.cash_headroom_query")
+    option_ctx_mod = importlib.import_module("src.application.option_positions_context_builder")
+    portfolio_ctx_mod = importlib.import_module("src.application.portfolio_context_builder")
+    portfolio_service_mod = importlib.import_module("src.application.portfolio_context_service")
+    futu_portfolio_mod = importlib.import_module("src.application.futu_portfolio_context")
+    cli_mod = importlib.import_module("src.interfaces.cli.main")
+    multi_cash_mod = importlib.import_module("src.application.multi_tick.cash_footer")
+    agent_tools_mod = importlib.import_module("src.application.agent_tool_handlers")
+    pipeline_context_mod = importlib.import_module("scripts.pipeline_context")
+
+    assert cash_mod.build_option_positions_context is option_ctx_mod.build_context
+    assert portfolio_service_mod.load_holdings_portfolio_context is portfolio_ctx_mod.load_holdings_portfolio_context
+    assert cli_mod.query_sell_put_cash is cash_mod.query_sell_put_cash
+    assert multi_cash_mod.query_sell_put_cash is cash_mod.query_sell_put_cash
+    assert agent_tools_mod.query_sell_put_cash is cash_mod.query_sell_put_cash
+    assert agent_tools_mod.infer_futu_portfolio_settings is futu_portfolio_mod.infer_futu_portfolio_settings
+    assert pipeline_context_mod.fetch_futu_portfolio_context is futu_portfolio_mod.fetch_futu_portfolio_context
+    assert pipeline_context_mod.load_account_portfolio_context is portfolio_service_mod.load_account_portfolio_context
 
 
 def test_feishu_bitable_imports_infrastructure_owner_module() -> None:
@@ -285,6 +319,37 @@ def test_multi_tick_helpers_import_application_owner_modules() -> None:
     assert account_run_mod.prefetch_required_data is prefetch_mod.prefetch_required_data
 
 
+def test_close_advice_imports_application_owner_module() -> None:
+    for old_module in (
+        "scripts.close_advice",
+        "scripts.close_advice.runner",
+        "scripts.close_advice.main",
+    ):
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module(old_module)
+
+    owner_mod = importlib.import_module("src.application.close_advice_runner")
+    account_run_mod = importlib.import_module("src.application.account_run")
+    agent_tools_mod = importlib.import_module("src.application.agent_tool_handlers")
+
+    assert account_run_mod.run_close_advice is owner_mod.run_close_advice
+    assert agent_tools_mod.run_close_advice is owner_mod.run_close_advice
+
+
+def test_fee_calc_imports_domain_owner_module() -> None:
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("scripts.fee_calc")
+
+    owner_mod = importlib.import_module("domain.domain.fee_calc")
+    close_advice_mod = importlib.import_module("src.application.close_advice_runner")
+    sell_put_mod = importlib.import_module("scripts.scan_sell_put")
+    sell_call_mod = importlib.import_module("scripts.scan_sell_call")
+
+    assert close_advice_mod.calc_futu_option_fee is owner_mod.calc_futu_option_fee
+    assert sell_put_mod.calc_futu_option_fee is owner_mod.calc_futu_option_fee
+    assert sell_call_mod.calc_futu_option_fee is owner_mod.calc_futu_option_fee
+
+
 def test_opend_support_imports_owner_modules() -> None:
     for old_module in (
         "scripts.futu_gateway",
@@ -367,7 +432,7 @@ def test_cash_secured_utils_imports_domain_owner_module() -> None:
         importlib.import_module("scripts.cash_secured_utils")
 
     owner_mod = importlib.import_module("domain.domain.cash_secured_utils")
-    query_mod = importlib.import_module("scripts.query_sell_put_cash")
+    query_mod = importlib.import_module("src.application.cash_headroom_query")
     sell_put_cash_mod = importlib.import_module("scripts.sell_put_cash")
 
     assert query_mod.normalize_cash_secured_by_symbol_by_ccy is owner_mod.normalize_cash_secured_by_symbol_by_ccy

@@ -1,15 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-# Allow running as a script without installation.
-# When executed as `python scripts/fetch_option_positions_context.py`, ensure repo root is on sys.path
-# so `import scripts.*` works consistently.
-import sys
 from pathlib import Path
-
-repo_base = Path(__file__).resolve().parents[1]
-if str(repo_base) not in sys.path:
-    sys.path.insert(0, str(repo_base))
 
 import argparse
 import json
@@ -26,12 +18,7 @@ from src.application.option_positions_facade import (
     resolve_option_position_records,
 )
 
-# Local helper to get exchange rates (USDCNY/HKDCNY) for base-currency normalization.
-# This file lives in the same scripts/ directory, so plain import works.
-try:
-    from exchange_rates import get_exchange_rates_or_fetch_latest
-except Exception:
-    from src.infrastructure.exchange_rates import get_exchange_rates_or_fetch_latest
+from src.infrastructure.exchange_rates import get_exchange_rates_or_fetch_latest
 
 def build_context(records: list[dict], broker: str, account: str | None = None, rates: dict | None = None) -> dict:
     """Build context from raw Bitable records.
@@ -225,7 +212,6 @@ def main():
     parser = argparse.ArgumentParser(description="Fetch projected position lot context")
     parser.add_argument("--data-config", default=None, help="portfolio data config path; auto-resolves when omitted")
     parser.add_argument("--broker", default="富途")
-    parser.add_argument("--market", default=None, help="DEPRECATED alias of --broker")
     parser.add_argument("--account", default=None)
     parser.add_argument("--shared-out", default=None, help="Optional output path for shared context cache")
     parser.add_argument("--out", default=None, help="Output JSON path (default: <state-dir>/option_positions_context.json)")
@@ -233,11 +219,11 @@ def main():
     parser.add_argument("--quiet", action="store_true", help="suppress stdout (scheduled/cron)")
     args = parser.parse_args()
 
-    base = Path(__file__).resolve().parents[1]
+    base = Path(__file__).resolve().parents[2]
     _data_config_path, _repo, records = resolve_option_position_records(base=base, data_config=args.data_config)
     # Load exchange rates for base-currency normalization (CNY).
     # Uses current-project cache plus live refresh when needed.
-    base = Path(__file__).resolve().parents[1]
+    base = Path(__file__).resolve().parents[2]
     # Resolve output path/state_dir
     if args.out:
         out_path = Path(args.out)
@@ -259,10 +245,6 @@ def main():
         max_age_hours=24,
     )
     broker = normalize_broker(args.broker)
-    if args.market:
-        broker = normalize_broker(args.market)
-        if not args.quiet:
-            print("[WARN] --market is deprecated; use --broker")
 
     ctx = build_context(records, broker=broker, account=args.account, rates=rates)
 

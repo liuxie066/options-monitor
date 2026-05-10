@@ -18,7 +18,7 @@ from domain.domain.close_advice import (
     safe_int,
     sort_advice_rows,
 )
-from scripts.fee_calc import calc_futu_option_fee
+from domain.domain.fee_calc import calc_futu_option_fee
 from src.infrastructure.io_utils import atomic_write_text, read_json, safe_read_csv
 from domain.domain.option_position_lots import (
     effective_expiration_ymd,
@@ -350,7 +350,7 @@ def _ensure_required_data_coverage_for_positions(
     current_contract_expiration_index = _build_contract_expiration_index(current_covered)
 
     try:
-        from scripts.fetch_market_data_opend import fetch_symbol, save_outputs
+        from src.application.opend_symbol_fetching import fetch_symbol, save_outputs
     except Exception:
         return fetch_reasons, fetch_details, summary
 
@@ -499,7 +499,7 @@ def _fetch_missing_quotes_via_opend(
         return {}, {}
 
     try:
-        from scripts.fetch_market_data_opend import fetch_symbol
+        from src.application.opend_symbol_fetching import fetch_symbol
     except Exception:
         return {}, {}
 

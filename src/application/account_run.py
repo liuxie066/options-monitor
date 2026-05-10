@@ -20,7 +20,7 @@ from domain.domain.engine import (
     decide_pipeline_execution_result,
 )
 from src.application.config_loader import resolve_watchlist_config, set_watchlist_config
-from scripts.close_advice import run_close_advice
+from src.application.close_advice_runner import run_close_advice
 from src.infrastructure.external_services import run_pipeline_script
 from src.infrastructure.io_utils import utc_now
 from src.application.multi_tick.misc import (

@@ -8,13 +8,13 @@ import pandas as pd
 import pytest
 
 from domain.domain.expiration_dates import expiration_business_today
-from scripts.close_advice.runner import run_close_advice
+from src.application.close_advice_runner import run_close_advice
 from src.application.multi_tick.misc import AccountResult
 from src.application.multi_tick.notify_format import build_account_message
 
 
 def test_close_advice_input_uses_shared_account_and_currency_normalization() -> None:
-    from scripts.close_advice.runner import _money, _position_to_input
+    from src.application.close_advice_runner import _money, _position_to_input
 
     input_row, _flags = _position_to_input(
         {
@@ -39,7 +39,7 @@ def test_close_advice_input_uses_shared_account_and_currency_normalization() -> 
 
 def _freeze_close_advice_business_today(monkeypatch: pytest.MonkeyPatch, ymd: str = "2026-04-16") -> None:
     frozen = datetime.fromisoformat(ymd).date()
-    monkeypatch.setattr("scripts.close_advice.runner.expiration_business_today", lambda: frozen)
+    monkeypatch.setattr("src.application.close_advice_runner.expiration_business_today", lambda: frozen)
 
 
 def test_run_close_advice_builds_csv_and_markdown_from_local_fixtures(
@@ -237,7 +237,7 @@ def test_run_close_advice_normalizes_business_midnight_expiration_timestamp(tmp_
 
 
 def test_close_advice_recalculates_dte_from_business_today(monkeypatch: pytest.MonkeyPatch) -> None:
-    from scripts.close_advice import runner
+    from src.application import close_advice_runner as runner
 
     monkeypatch.setattr(
         runner,
@@ -381,7 +381,7 @@ def test_run_close_advice_fetches_missing_quote_via_opend(tmp_path: Path, monkey
             ]
         }
 
-    monkeypatch.setattr("scripts.fetch_market_data_opend.fetch_symbol", fake_fetch_symbol)
+    monkeypatch.setattr("src.application.opend_symbol_fetching.fetch_symbol", fake_fetch_symbol)
 
     run_close_advice(
         config={
@@ -455,7 +455,7 @@ def test_run_close_advice_uses_bid_ask_when_mid_missing(tmp_path: Path, monkeypa
     def fail_fetch_symbol(symbol: str, **kwargs: object) -> dict[str, object]:
         raise AssertionError(f"unexpected OpenD fetch for {symbol}: {kwargs}")
 
-    monkeypatch.setattr("scripts.fetch_market_data_opend.fetch_symbol", fail_fetch_symbol)
+    monkeypatch.setattr("src.application.opend_symbol_fetching.fetch_symbol", fail_fetch_symbol)
 
     out_dir = tmp_path / "reports"
     result = run_close_advice(
@@ -691,7 +691,7 @@ def test_run_close_advice_reports_missing_expiration_coverage_without_opend_fetc
     def fail_fetch_symbol(symbol: str, **kwargs: object) -> dict[str, object]:
         raise AssertionError(f"unexpected OpenD fetch for {symbol}: {kwargs}")
 
-    monkeypatch.setattr("scripts.fetch_market_data_opend.fetch_symbol", fail_fetch_symbol)
+    monkeypatch.setattr("src.application.opend_symbol_fetching.fetch_symbol", fail_fetch_symbol)
 
     out_dir = tmp_path / "reports"
     result = run_close_advice(
@@ -820,7 +820,7 @@ def test_run_close_advice_fetches_missing_position_coverage_before_pricing(tmp_p
             ]
         }
 
-    monkeypatch.setattr("scripts.fetch_market_data_opend.fetch_symbol", fake_fetch_symbol)
+    monkeypatch.setattr("src.application.opend_symbol_fetching.fetch_symbol", fake_fetch_symbol)
 
     out_dir = tmp_path / "reports"
     result = run_close_advice(
@@ -898,7 +898,7 @@ def test_run_close_advice_reports_expiration_near_miss_in_quote_issue_samples(tm
     def fail_fetch_symbol(symbol: str, **kwargs: object) -> dict[str, object]:
         raise AssertionError(f"unexpected OpenD fetch for {symbol}: {kwargs}")
 
-    monkeypatch.setattr("scripts.fetch_market_data_opend.fetch_symbol", fail_fetch_symbol)
+    monkeypatch.setattr("src.application.opend_symbol_fetching.fetch_symbol", fail_fetch_symbol)
 
     out_dir = tmp_path / "reports"
     result = run_close_advice(
@@ -1081,7 +1081,7 @@ def test_run_close_advice_keeps_tier_when_fee_unavailable(tmp_path: Path, monkey
         ]
     ).to_csv(parsed / "NVDA_required_data.csv", index=False)
 
-    monkeypatch.setattr("scripts.close_advice.runner.calc_futu_option_fee", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("fee unavailable")))
+    monkeypatch.setattr("src.application.close_advice_runner.calc_futu_option_fee", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("fee unavailable")))
 
     out_dir = tmp_path / "reports"
     run_close_advice(
@@ -1414,7 +1414,7 @@ def test_run_close_advice_fetches_quote_when_required_data_row_has_no_usable_pri
             ]
         }
 
-    monkeypatch.setattr("scripts.fetch_market_data_opend.fetch_symbol", fake_fetch_symbol)
+    monkeypatch.setattr("src.application.opend_symbol_fetching.fetch_symbol", fake_fetch_symbol)
 
     run_close_advice(
         config={
@@ -1558,7 +1558,7 @@ def test_run_close_advice_fetches_quote_for_alias_symbol_via_opend(tmp_path: Pat
             ]
         }
 
-    monkeypatch.setattr("scripts.fetch_market_data_opend.fetch_symbol", fake_fetch_symbol)
+    monkeypatch.setattr("src.application.opend_symbol_fetching.fetch_symbol", fake_fetch_symbol)
 
     result = run_close_advice(
         config={
@@ -1632,7 +1632,7 @@ def test_run_close_advice_required_data_mode_does_not_fetch(tmp_path: Path, monk
         calls.append(symbol)
         return {"rows": []}
 
-    monkeypatch.setattr("scripts.fetch_market_data_opend.fetch_symbol", fake_fetch_symbol)
+    monkeypatch.setattr("src.application.opend_symbol_fetching.fetch_symbol", fake_fetch_symbol)
 
     run_close_advice(
         config={
@@ -1698,7 +1698,7 @@ def test_run_close_advice_non_futu_source_skips_opend_fetch(tmp_path: Path, monk
     def fake_fetch_symbol(symbol: str, **kwargs: object) -> dict[str, object]:
         raise AssertionError(f"unexpected OpenD fetch for {symbol}")
 
-    monkeypatch.setattr("scripts.fetch_market_data_opend.fetch_symbol", fake_fetch_symbol)
+    monkeypatch.setattr("src.application.opend_symbol_fetching.fetch_symbol", fake_fetch_symbol)
 
     run_close_advice(
         config={
@@ -1768,7 +1768,7 @@ def test_run_close_advice_preserves_missing_flag_when_opend_fetch_errors(
     def fake_fetch_symbol(symbol: str, **kwargs: object) -> dict[str, object]:
         raise RuntimeError("opend unavailable")
 
-    monkeypatch.setattr("scripts.fetch_market_data_opend.fetch_symbol", fake_fetch_symbol)
+    monkeypatch.setattr("src.application.opend_symbol_fetching.fetch_symbol", fake_fetch_symbol)
 
     run_close_advice(
         config={
@@ -1836,7 +1836,7 @@ def test_run_close_advice_surfaces_rate_limit_sample_when_opend_is_limited(
     def fake_fetch_symbol(symbol: str, **kwargs: object) -> dict[str, object]:
         raise RuntimeError("get_option_chain failed after 4 attempts: rate limit 最多10次")
 
-    monkeypatch.setattr("scripts.fetch_market_data_opend.fetch_symbol", fake_fetch_symbol)
+    monkeypatch.setattr("src.application.opend_symbol_fetching.fetch_symbol", fake_fetch_symbol)
 
     result = run_close_advice(
         config={
@@ -1919,7 +1919,7 @@ def test_run_close_advice_surfaces_required_data_rate_limit_payload(
             },
         }
 
-    monkeypatch.setattr("scripts.fetch_market_data_opend.fetch_symbol", fake_fetch_symbol)
+    monkeypatch.setattr("src.application.opend_symbol_fetching.fetch_symbol", fake_fetch_symbol)
 
     result = run_close_advice(
         config={

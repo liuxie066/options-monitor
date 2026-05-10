@@ -20,7 +20,7 @@ from src.application.runtime_setup import init_runtime
 from src.application.scan_pipeline import run_scan
 from src.application.scan_scheduler import run_scheduler
 from src.application.version_check import check_version_update
-from scripts.query_sell_put_cash import query_sell_put_cash
+from src.application.cash_headroom_query import query_sell_put_cash
 
 
 def _dumps(payload: dict[str, Any]) -> str:

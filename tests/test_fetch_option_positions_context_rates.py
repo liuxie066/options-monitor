@@ -9,7 +9,7 @@ if str(BASE) not in sys.path:
 if str(BASE / 'scripts') not in sys.path:
     sys.path.insert(0, str(BASE / 'scripts'))
 
-from scripts.fetch_option_positions_context import build_context
+from src.application.option_positions_context_builder import build_context
 
 
 def _record(symbol: str, side: str, option_type: str, currency: str, cash_secured: float) -> dict:

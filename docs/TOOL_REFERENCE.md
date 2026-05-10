@@ -74,7 +74,7 @@
 | `scan_opportunities` | `./om scan` / `./om scan-pipeline` |
 | `preview_notification` | `./om notify preview` |
 | `get_close_advice` | `./om close-advice` |
-| `query_cash_headroom` | `./om sell-put-cash` / `scripts/query_sell_put_cash.py::query_sell_put_cash(...)` |
+| `query_cash_headroom` | `./om sell-put-cash` / `src.application.cash_headroom_query::query_sell_put_cash(...)` |
 | `monthly_income_report` | `scripts/option_positions_report.py monthly-income` |
 | `option_positions_read` | `scripts/option_positions.py list/events/history/inspect` 的只读部分 |
 
@@ -199,7 +199,7 @@ OM_AGENT_ENABLE_WRITE_TOOLS=true ./om-agent run --tool version_update --input-js
 
 用途：
 - Agent 查询 Sell Put 现金占用与余量的标准入口
-- 包装 `scripts/query_sell_put_cash.py` 的 `query_sell_put_cash(...)`
+- 包装 `src.application.cash_headroom_query` 的 `query_sell_put_cash(...)`
 - 返回账户现金、Sell Put 担保占用、剩余可用现金
 - 支持按账户筛选，并按可用汇率折算到 CNY
 
@@ -212,7 +212,7 @@ OM_AGENT_ENABLE_WRITE_TOOLS=true ./om-agent run --tool version_update --input-js
 
 注意：
 - Agent payload 使用 `broker` 表示券商口径；未传时读取 runtime config 的 `portfolio.broker`
-- 底层函数参数仍是 `market=broker`，这是脚本兼容层的命名，不是 Agent 输入字段
+- Agent 工具输入不再公开 `market` 别名；新调用统一使用 `broker`
 - 该工具不会发送通知或写 Feishu；它会把查询产物写到本地 agent 输出目录
 
 ---
@@ -406,13 +406,13 @@ OM_AGENT_ENABLE_WRITE_TOOLS=true ./om-agent run --tool version_update --input-js
 
 ## 8. 字段口径
 
-### 优先使用
+### 工具输入
 - `broker`
 
-### 兼容存在
+### 历史数据字段
 - `market`
 
-对于 agent 工具输入，文档和新调用建议优先使用 `broker`；旧调用仍可能继续接受 `market`。
+Agent 工具输入统一使用 `broker`。`market` 只可能出现在历史数据表或迁移说明里，不作为新的工具 payload 字段。
 
 ---
 

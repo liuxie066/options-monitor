@@ -1,15 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-# Allow running as a script without installation.
-# When executed as `python scripts/fetch_portfolio_context.py`, ensure repo root is on sys.path
-# so `import scripts.*` works consistently.
-import sys
 from pathlib import Path
-
-repo_base = Path(__file__).resolve().parents[1]
-if str(repo_base) not in sys.path:
-    sys.path.insert(0, str(repo_base))
 
 import argparse
 import json
@@ -93,14 +85,11 @@ def build_context(
     records: list[dict],
     broker: str | None = None,
     account: str | None = None,
-    *,
-    market: str | None = None,
 ) -> dict:
     # holding schema fields we saw:
     # asset_id, asset_type, broker/market, account, quantity, avg_cost, currency
     selected = []
-    broker_raw = broker if broker is not None else market
-    broker_norm = str(broker_raw).strip() if broker_raw else None
+    broker_norm = str(broker).strip() if broker else None
     account_norm = normalize_account(account) if account else None
 
     for rec in records:
@@ -181,9 +170,8 @@ def build_context(
     }
 
 
-def build_shared_context(records: list[dict], broker: str | None = None, *, market: str | None = None) -> dict:
-    broker_raw = broker if broker is not None else market
-    broker_norm = str(broker_raw).strip() if broker_raw else None
+def build_shared_context(records: list[dict], broker: str | None = None) -> dict:
+    broker_norm = str(broker).strip() if broker else None
     accounts: set[str] = set()
     for rec in records:
         fields0 = rec.get("fields") or {}
@@ -261,7 +249,6 @@ def main():
     parser = argparse.ArgumentParser(description="Fetch portfolio context from Feishu holdings table")
     parser.add_argument("--data-config", default=None, help="portfolio data config path; auto-resolves when omitted")
     parser.add_argument("--broker", default="富途")
-    parser.add_argument("--market", default=None, help="DEPRECATED alias of --broker")
     parser.add_argument("--account", default=None)
     parser.add_argument("--shared-out", default=None, help="Optional output path for shared context cache")
     parser.add_argument("--out", default=None, help="Output JSON path (default: <state-dir>/portfolio_context.json)")
@@ -269,18 +256,14 @@ def main():
     parser.add_argument("--quiet", action="store_true", help="suppress stdout (scheduled/cron)")
     args = parser.parse_args()
 
-    base = Path(__file__).resolve().parents[1]
+    base = Path(__file__).resolve().parents[2]
     data_config_path = resolve_data_config_path(base=base, data_config=args.data_config)
-
-    broker = args.market if args.market is not None else args.broker
-    if args.market and not args.quiet:
-        print("[WARN] --market is deprecated; use --broker")
 
     try:
         records = load_holdings_records(data_config_path)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
-    ctx = build_context(records, broker=broker, account=args.account)
+    ctx = build_context(records, broker=args.broker, account=args.account)
 
     if args.out:
         out_path = Path(args.out)
@@ -297,12 +280,12 @@ def main():
         shared_out = Path(args.shared_out)
         if not shared_out.is_absolute():
             shared_out = (base / shared_out).resolve()
-        atomic_write_json(shared_out, build_shared_context(records, broker=broker))
+        atomic_write_json(shared_out, build_shared_context(records, broker=args.broker))
 
     if not args.quiet:
         usd_cash = ctx["cash_by_currency"].get("USD")
         print(f"[DONE] portfolio context -> {out_path}")
-        print(f"broker={broker} account={args.account or '-'} selected={ctx['raw_selected_count']}")
+        print(f"broker={args.broker} account={args.account or '-'} selected={ctx['raw_selected_count']}")
         print(f"usd_cash={usd_cash if usd_cash is not None else 'N/A'}")
         print(f"us_stocks={len(ctx['stocks_by_symbol'])}")
 

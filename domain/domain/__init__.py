@@ -89,6 +89,7 @@ _MODULE_EXPORTS = {
     'trade_account_identity',
     'trade_contract_identity',
     'error_policy',
+    'fee_calc',
     'config_contract',
     'intermediate_objects',
     'engine',

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 """Fetch required option data using Futu OpenD.
 
-This module owns the reusable OpenD symbol-fetch orchestration. The script entry
-point in ``scripts/fetch_market_data_opend.py`` is only a CLI adapter.
+This module owns the reusable OpenD symbol-fetch orchestration. The CLI adapter
+is ``python -m src.application.opend_symbol_fetching_cli``.
 
 This is intentionally **minimal and pragmatic**:
 - Fetch option contracts via `get_option_chain(underlier_code)`

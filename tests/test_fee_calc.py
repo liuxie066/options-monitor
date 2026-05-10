@@ -15,7 +15,7 @@ def _add_repo_to_syspath() -> Path:
 
 def test_calc_futu_hk_option_fee_applies_minimum_commission_and_system_fee() -> None:
     _add_repo_to_syspath()
-    from scripts.fee_calc import calc_futu_hk_option_fee
+    from domain.domain.fee_calc import calc_futu_hk_option_fee
 
     # 交易金额 1 * 100 * 1 = 100，佣金 0.2 = 最低 3.0，另加平台费 15 和系统费 3
     out = calc_futu_hk_option_fee(1.0, contracts=1, multiplier=100, is_sell=True)
@@ -25,7 +25,7 @@ def test_calc_futu_hk_option_fee_applies_minimum_commission_and_system_fee() -> 
 
 def test_calc_futu_hk_option_fee_scales_system_fee_by_contracts() -> None:
     _add_repo_to_syspath()
-    from scripts.fee_calc import calc_futu_hk_option_fee
+    from domain.domain.fee_calc import calc_futu_hk_option_fee
 
     # 交易金额 2 * 100 * 3 = 600，佣金 1.2 -> 最低 3.0，平台费 15，系统费 9
     out = calc_futu_hk_option_fee(2.0, contracts=3, multiplier=100, is_sell=False)
@@ -35,7 +35,7 @@ def test_calc_futu_hk_option_fee_scales_system_fee_by_contracts() -> None:
 
 def test_calc_futu_us_option_fee_uses_standard_commission_and_sell_regulatory_fees() -> None:
     _add_repo_to_syspath()
-    from scripts.fee_calc import calc_futu_us_option_fee
+    from domain.domain.fee_calc import calc_futu_us_option_fee
 
     out = calc_futu_us_option_fee(0.5, contracts=2, multiplier=100, is_sell=True)
 
@@ -44,7 +44,7 @@ def test_calc_futu_us_option_fee_uses_standard_commission_and_sell_regulatory_fe
 
 def test_calc_futu_us_option_fee_uses_low_premium_tier_and_buy_has_no_sell_only_fees() -> None:
     _add_repo_to_syspath()
-    from scripts.fee_calc import calc_futu_us_option_fee
+    from domain.domain.fee_calc import calc_futu_us_option_fee
 
     out = calc_futu_us_option_fee(0.05, contracts=1, multiplier=100, is_sell=False)
 
@@ -53,7 +53,7 @@ def test_calc_futu_us_option_fee_uses_low_premium_tier_and_buy_has_no_sell_only_
 
 def test_calc_futu_option_fee_requires_positive_multiplier() -> None:
     _add_repo_to_syspath()
-    from scripts.fee_calc import calc_futu_option_fee
+    from domain.domain.fee_calc import calc_futu_option_fee
 
     try:
         calc_futu_option_fee("USD", 1.0, contracts=1, multiplier=0, is_sell=True)
@@ -65,7 +65,7 @@ def test_calc_futu_option_fee_requires_positive_multiplier() -> None:
 
 def test_calc_futu_option_fee_uses_shared_currency_aliases() -> None:
     _add_repo_to_syspath()
-    from scripts.fee_calc import calc_futu_option_fee
+    from domain.domain.fee_calc import calc_futu_option_fee
 
     out = calc_futu_option_fee("港币", 1.0, contracts=1, multiplier=100, is_sell=True)
 

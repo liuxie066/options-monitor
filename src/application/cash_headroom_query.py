@@ -15,10 +15,10 @@ from domain.domain.cash_secured_utils import (
 )
 from src.application.config_loader import normalize_portfolio_broker_config, resolve_data_config_path
 from src.infrastructure.exchange_rates import get_exchange_rates_or_fetch_latest
-from scripts.fetch_option_positions_context import build_context as build_option_positions_context
-from scripts.futu_portfolio_context import fetch_futu_portfolio_context
+from src.application.option_positions_context_builder import build_context as build_option_positions_context
+from src.application.futu_portfolio_context import fetch_futu_portfolio_context
 from src.application.option_positions_service import load_option_positions_repo
-from scripts.portfolio_context_service import load_account_portfolio_context
+from src.application.portfolio_context_service import load_account_portfolio_context
 from src.application.option_positions_facade import load_option_position_records
 
 
@@ -104,7 +104,7 @@ def query_sell_put_cash(
     runtime_config: dict | None = None,
 ) -> dict:
     """执行卖 put 现金占用查询并按指定格式输出。"""
-    base = (base_dir or Path(__file__).resolve().parents[1]).resolve()
+    base = (base_dir or Path(__file__).resolve().parents[2]).resolve()
 
     runtime_cfg = _load_runtime_config(base=base, config=config, runtime_config=runtime_config)
     data_config_path = resolve_data_config_path(base=base, data_config=data_config)

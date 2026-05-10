@@ -134,7 +134,7 @@ def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required:
         opt_types = 'put,call'
 
         cmd = [
-            str(vpy), 'scripts/fetch_market_data_opend.py',
+            str(vpy), '-m', 'src.application.opend_symbol_fetching_cli',
             '--symbols', symbol,
             '--limit-expirations', str(limit_exp),
             '--host', str(fetch_cfg.get('host') or '127.0.0.1'),
