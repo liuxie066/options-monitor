@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.2.1 - 2026-05-10
+
+### Changed
+- Added bounded account-level and watchlist-symbol parallelism for unified tick scans while preserving deterministic account and symbol output ordering.
+- Reused shared required-data prefetch state across concurrent account workers to avoid duplicate fetch work in one tick run.
+
+### Fixed
+- Serialized option-position maintenance across concurrent account workers so auto-close projection writes do not race on the shared option positions store.
+- Avoided concurrent legacy `output` symlink refreshes during multi-account runs by keeping that compatibility update to single-account execution.
+
 ## 1.2.0 - 2026-05-10
 
 ### Added
