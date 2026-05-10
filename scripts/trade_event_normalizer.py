@@ -7,7 +7,7 @@ from typing import Any
 
 from scripts.option_positions_core.domain import normalize_currency, normalize_option_type
 from scripts.multiplier_cache import resolve_multiplier_with_source_and_diagnostics
-from scripts.trade_contract_identity import (
+from domain.domain.trade_contract_identity import (
     normalize_contract_expiration,
     normalize_position_effect,
     normalize_trade_side,
@@ -18,7 +18,8 @@ from scripts.trade_account_identity import (
     extract_primary_account_id,
     extract_visible_account_fields,
 )
-from scripts.trade_symbol_identity import OPTION_CODE_RE, normalize_symbol_candidate, pick_first_normalized_symbol
+from domain.domain.symbol_identity import OPTION_CODE_RE, normalize_symbol_candidate, pick_first_normalized_symbol
+from src.application.symbol_aliases import symbol_aliases_from_config
 
 
 def _pick(src: dict[str, Any], *keys: str) -> Any:
@@ -169,14 +170,18 @@ def normalize_trade_deal(
     visible_account_fields = extract_visible_account_fields(src)
     futu_account_id = extract_primary_account_id(src)
     option_code_info = _parse_futu_option_code(_pick(src, "code", "stock_code", "symbol"))
+    symbol_aliases = symbol_aliases_from_config(config)
     raw_symbol_fields = {
         key: src.get(key)
         for key in _SYMBOL_KEYS
         if key in src and src.get(key) not in (None, "")
     }
-    symbol = pick_first_normalized_symbol(src, *_SYMBOL_KEYS)
+    symbol = pick_first_normalized_symbol(src, *_SYMBOL_KEYS, symbol_aliases=symbol_aliases)
     if symbol is None:
-        root_symbol = normalize_symbol_candidate(option_code_info.get("option_code_root"))
+        root_symbol = normalize_symbol_candidate(
+            option_code_info.get("option_code_root"),
+            symbol_aliases=symbol_aliases,
+        )
         if root_symbol:
             symbol = root_symbol
 

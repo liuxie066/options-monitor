@@ -12,7 +12,7 @@ from typing import Any
 import pandas as pd
 
 from domain.domain.engine import rank_candidate_rows, rank_yield_enhancement_rows
-from scripts.trade_symbol_identity import symbol_currency
+from domain.domain.symbol_identity import symbol_currency
 
 
 COMMON_EMPTY_ROW = {

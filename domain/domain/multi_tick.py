@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, time
 from pathlib import Path
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 from .engine import (
     AccountSchedulerDecisionView,
@@ -36,6 +37,39 @@ def _resolve_watchlist_config(cfg: dict | None) -> list[dict[str, Any]]:
     return [item for item in symbols if isinstance(item, dict)]
 
 
+def _parse_hhmm(value: str) -> time:
+    hour, minute = str(value or "").split(":", 1)
+    return time(hour=int(hour), minute=int(minute))
+
+
+def _time_in_range(value: time, start: time, end: time) -> bool:
+    if start <= end:
+        return start <= value <= end
+    return value >= start or value <= end
+
+
+def _is_market_hours_for_schedule(now_utc: datetime, schedule_cfg: dict[str, Any]) -> bool:
+    if not isinstance(schedule_cfg, dict) or not bool(schedule_cfg.get("enabled", True)):
+        return False
+    market_tz = ZoneInfo(str(schedule_cfg.get("market_timezone") or "America/New_York"))
+    now_market = now_utc.astimezone(market_tz)
+    if now_market.weekday() >= 5:
+        return False
+
+    market_open = _parse_hhmm(str(schedule_cfg.get("market_open") or "09:30"))
+    market_close = _parse_hhmm(str(schedule_cfg.get("market_close") or "16:00"))
+    current = now_market.time()
+    if not (market_open <= current <= market_close):
+        return False
+
+    if schedule_cfg.get("market_break_start") and schedule_cfg.get("market_break_end"):
+        break_start = _parse_hhmm(str(schedule_cfg.get("market_break_start")))
+        break_end = _parse_hhmm(str(schedule_cfg.get("market_break_end")))
+        if _time_in_range(current, break_start, break_end) and current != break_end:
+            return False
+    return True
+
+
 def select_markets_to_run(now_utc: datetime, cfg: dict, market_config: str) -> list[str]:
     mc = str(market_config or 'auto').lower()
     if mc == 'hk':
@@ -48,23 +82,11 @@ def select_markets_to_run(now_utc: datetime, cfg: dict, market_config: str) -> l
     schedule_hk = (cfg.get('schedule_hk') or {}) if isinstance(cfg, dict) else {}
     schedule_us = (cfg.get('schedule') or {}) if isinstance(cfg, dict) else {}
 
-    try:
-        from scripts.scan_scheduler import decide
+    if _is_market_hours_for_schedule(now_utc, schedule_hk):
+        return ['HK']
 
-        state0: dict = {
-            'last_scan_utc': None,
-            'last_notify_utc': None,
-        }
-
-        d_hk = decide(schedule_hk, state0, now_utc, account=None, schedule_key='schedule_hk')
-        if d_hk.in_market_hours:
-            return ['HK']
-
-        d_us = decide(schedule_us, state0, now_utc, account=None, schedule_key='schedule')
-        if d_us.in_market_hours:
-            return ['US']
-    except Exception:
-        pass
+    if _is_market_hours_for_schedule(now_utc, schedule_us):
+        return ['US']
 
     return []
 

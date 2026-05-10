@@ -295,10 +295,11 @@ def get_underlier_spot(
         is_option_chain_cache_enabled=False,
     )
     try:
+        effective_base_dir = Path(base_dir) if base_dir is not None else REPO_ROOT
         return get_spot_opend(
             gateway,
-            normalize_underlier(symbol).code,
-            base_dir=(Path(base_dir) if base_dir is not None else REPO_ROOT),
+            normalize_underlier(symbol, base_dir=effective_base_dir).code,
+            base_dir=effective_base_dir,
             snapshot_max_wait_sec=snapshot_max_wait_sec,
             snapshot_window_sec=snapshot_window_sec,
             snapshot_max_calls=snapshot_max_calls,
@@ -338,7 +339,9 @@ def list_option_expirations(
                 base_dir=effective_base_dir,
                 endpoint="option_expiration",
                 **expiration_limit.call_kwargs(),
-                call=lambda: gateway.get_option_expiration_dates(normalize_underlier(symbol).code),
+                call=lambda: gateway.get_option_expiration_dates(
+                    normalize_underlier(symbol, base_dir=effective_base_dir).code
+                ),
             ),
             quiet=False,
         )
@@ -466,8 +469,8 @@ def fetch_symbol_request(request: FetchSymbolRequest) -> dict[str, Any]:
     chain_cache = request.chain_cache
     chain_cache_force_refresh = request.chain_cache_force_refresh
     freshness_policy = request.freshness_policy
-    u = normalize_underlier(symbol)
     effective_base_dir = request.effective_base_dir
+    u = normalize_underlier(symbol, base_dir=effective_base_dir)
     opend_limits = request.limits
     option_chain_limit = opend_limits.option_chain
     snapshot_limit = opend_limits.market_snapshot
@@ -1029,4 +1032,3 @@ def save_outputs(base: Path, symbol: str, payload: dict[str, Any], *, output_roo
     df_out.to_csv(buf, index=False)
     atomic_write_text(csv_path, buf.getvalue(), encoding='utf-8')
     return raw_path, csv_path
-

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from scripts.trade_contract_identity import (
+from domain.domain.trade_contract_identity import (
     canonical_contract_symbol,
     contract_key,
     contract_strike_key,

@@ -5,7 +5,7 @@ from typing import Any, Iterable
 
 from scripts.futu_gateway import build_futu_gateway
 from scripts.trade_account_identity import extract_primary_account_id
-from scripts.trade_symbol_identity import resolve_symbol_identity
+from domain.domain.symbol_identity import resolve_symbol_identity
 
 
 def _rows(data: Any) -> list[dict[str, Any]]:

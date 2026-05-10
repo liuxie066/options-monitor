@@ -1,8 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-import json
-from pathlib import Path
 import re
 from typing import Any
 
@@ -11,7 +10,6 @@ OPTION_CODE_RE = re.compile(
     r"^(?P<market>[A-Z]{2})\.(?P<root>[A-Z]+)(?P<yy>\d{2})(?P<mm>\d{2})(?P<dd>\d{2})(?P<cp>[CP])(?P<strike>\d+)$"
 )
 _US_SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9\.-]{0,10}$")
-REPO_ROOT = Path(__file__).resolve().parents[1]
 _UNDERLIER_ALIAS_FALLBACKS = {
     "腾讯": "0700.HK",
     "腾讯控股": "0700.HK",
@@ -23,6 +21,7 @@ _UNDERLIER_ALIAS_FALLBACKS = {
     "中海油": "0883.HK",
     "中国海洋石油": "0883.HK",
 }
+SymbolAliases = Mapping[str, Any] | None
 
 
 @dataclass(frozen=True)
@@ -35,26 +34,22 @@ class SymbolIdentity:
     source_kind: str
 
 
-def _load_runtime_symbol_aliases(base_dir: Path | None = None) -> dict[str, str]:
-    root = Path(base_dir).resolve() if base_dir is not None else REPO_ROOT
-    out: dict[str, str] = {}
-    for name in ("config.us.json", "config.hk.json"):
-        path = root / name
-        try:
-            cfg = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        intake = cfg.get("intake") if isinstance(cfg, dict) else None
-        aliases = intake.get("symbol_aliases") if isinstance(intake, dict) else None
-        if not isinstance(aliases, dict):
-            continue
-        for alias, symbol in aliases.items():
-            alias_key = str(alias or "").strip().upper()
-            symbol_value = str(symbol or "").strip()
-            if not alias_key or not symbol_value:
-                continue
-            out[alias_key] = symbol_value
-    return out
+def _explicit_alias_value(symbol_aliases: SymbolAliases, candidate: str) -> str | None:
+    if not isinstance(symbol_aliases, Mapping):
+        return None
+    raw = str(candidate or "").strip()
+    if not raw:
+        return None
+    keys = (raw, raw.upper())
+    for key in keys:
+        value = symbol_aliases.get(key)
+        if value not in (None, ""):
+            return str(value).strip()
+    upper = raw.upper()
+    for key, value in symbol_aliases.items():
+        if str(key or "").strip().upper() == upper and value not in (None, ""):
+            return str(value).strip()
+    return None
 
 
 def _normalize_hk_symbol(raw: str) -> str | None:
@@ -135,16 +130,25 @@ def _identity_from_canonical(*, raw: str, candidate: str, source_kind: str) -> S
     return None
 
 
-def _identity_from_alias(*, raw: str, candidate: str, base_dir: Path | None, source_kind: str) -> SymbolIdentity | None:
-    aliases = _load_runtime_symbol_aliases(base_dir=base_dir)
+def _identity_from_alias(
+    *,
+    raw: str,
+    candidate: str,
+    symbol_aliases: SymbolAliases,
+    source_kind: str,
+) -> SymbolIdentity | None:
     alias_key = str(candidate or "").strip().upper()
-    mapped = aliases.get(alias_key) or _UNDERLIER_ALIAS_FALLBACKS.get(candidate) or _UNDERLIER_ALIAS_FALLBACKS.get(alias_key)
+    mapped = (
+        _explicit_alias_value(symbol_aliases, candidate)
+        or _UNDERLIER_ALIAS_FALLBACKS.get(candidate)
+        or _UNDERLIER_ALIAS_FALLBACKS.get(alias_key)
+    )
     if not mapped:
         return None
     return _identity_from_canonical(raw=raw, candidate=str(mapped), source_kind=source_kind)
 
 
-def resolve_symbol_identity(value: Any, *, base_dir: Path | None = None) -> SymbolIdentity | None:
+def resolve_symbol_identity(value: Any, *, symbol_aliases: SymbolAliases = None) -> SymbolIdentity | None:
     raw = str(value or "").strip()
     if not raw:
         return None
@@ -153,12 +157,12 @@ def resolve_symbol_identity(value: Any, *, base_dir: Path | None = None) -> Symb
     if option_code_match:
         root = option_code_match.group("root")
         return (
-            _identity_from_alias(raw=raw, candidate=root, base_dir=base_dir, source_kind="option_code")
+            _identity_from_alias(raw=raw, candidate=root, symbol_aliases=symbol_aliases, source_kind="option_code")
             or _identity_from_canonical(raw=raw, candidate=root, source_kind="option_code")
         )
     if upper.startswith("US."):
         return (
-            _identity_from_alias(raw=raw, candidate=upper[3:], base_dir=base_dir, source_kind="futu_code")
+            _identity_from_alias(raw=raw, candidate=upper[3:], symbol_aliases=symbol_aliases, source_kind="futu_code")
             or _identity_from_canonical(raw=raw, candidate=upper[3:], source_kind="futu_code")
         )
     if upper.startswith("HK."):
@@ -169,11 +173,11 @@ def resolve_symbol_identity(value: Any, *, base_dir: Path | None = None) -> Symb
 
     if upper.endswith(".US"):
         return (
-            _identity_from_alias(raw=raw, candidate=upper[:-3], base_dir=base_dir, source_kind="market_suffix")
+            _identity_from_alias(raw=raw, candidate=upper[:-3], symbol_aliases=symbol_aliases, source_kind="market_suffix")
             or _identity_from_canonical(raw=raw, candidate=upper[:-3], source_kind="market_suffix")
         )
 
-    alias = _identity_from_alias(raw=raw, candidate=raw, base_dir=base_dir, source_kind="alias")
+    alias = _identity_from_alias(raw=raw, candidate=raw, symbol_aliases=symbol_aliases, source_kind="alias")
     if alias:
         return alias
 
@@ -182,38 +186,43 @@ def resolve_symbol_identity(value: Any, *, base_dir: Path | None = None) -> Symb
         return direct
 
     for candidate in _display_name_candidates(raw):
-        alias = _identity_from_alias(raw=raw, candidate=candidate, base_dir=base_dir, source_kind="display_name")
+        alias = _identity_from_alias(
+            raw=raw,
+            candidate=candidate,
+            symbol_aliases=symbol_aliases,
+            source_kind="display_name",
+        )
         if alias:
             return alias
     return None
 
 
-def canonical_symbol(value: Any, *, base_dir: Path | None = None) -> str | None:
-    identity = resolve_symbol_identity(value, base_dir=base_dir)
+def canonical_symbol(value: Any, *, symbol_aliases: SymbolAliases = None) -> str | None:
+    identity = resolve_symbol_identity(value, symbol_aliases=symbol_aliases)
     return identity.canonical if identity else None
 
 
-def futu_underlier_code(value: Any, *, base_dir: Path | None = None) -> str | None:
-    identity = resolve_symbol_identity(value, base_dir=base_dir)
+def futu_underlier_code(value: Any, *, symbol_aliases: SymbolAliases = None) -> str | None:
+    identity = resolve_symbol_identity(value, symbol_aliases=symbol_aliases)
     return identity.futu_code if identity else None
 
 
-def symbol_market(value: Any, *, base_dir: Path | None = None) -> str | None:
-    identity = resolve_symbol_identity(value, base_dir=base_dir)
+def symbol_market(value: Any, *, symbol_aliases: SymbolAliases = None) -> str | None:
+    identity = resolve_symbol_identity(value, symbol_aliases=symbol_aliases)
     return identity.market if identity else None
 
 
-def symbol_currency(value: Any, *, base_dir: Path | None = None) -> str | None:
-    identity = resolve_symbol_identity(value, base_dir=base_dir)
+def symbol_currency(value: Any, *, symbol_aliases: SymbolAliases = None) -> str | None:
+    identity = resolve_symbol_identity(value, symbol_aliases=symbol_aliases)
     return identity.currency if identity else None
 
 
-def is_hk_symbol(value: Any, *, base_dir: Path | None = None) -> bool:
-    return symbol_market(value, base_dir=base_dir) == "HK"
+def is_hk_symbol(value: Any, *, symbol_aliases: SymbolAliases = None) -> bool:
+    return symbol_market(value, symbol_aliases=symbol_aliases) == "HK"
 
 
-def canonical_symbol_aliases(value: Any, *, base_dir: Path | None = None) -> list[str]:
-    identity = resolve_symbol_identity(value, base_dir=base_dir)
+def canonical_symbol_aliases(value: Any, *, symbol_aliases: SymbolAliases = None) -> list[str]:
+    identity = resolve_symbol_identity(value, symbol_aliases=symbol_aliases)
     if identity is None:
         raw = str(value or "").strip().upper()
         return [raw] if raw else []
@@ -225,20 +234,24 @@ def canonical_symbol_aliases(value: Any, *, base_dir: Path | None = None) -> lis
     return list(dict.fromkeys(out))
 
 
-def resolve_underlier_alias(symbol: str, *, base_dir: Path | None = None) -> str:
+def resolve_underlier_alias(symbol: str, *, symbol_aliases: SymbolAliases = None) -> str:
     raw = str(symbol or "").strip()
     if not raw:
         return ""
-    return canonical_symbol(raw, base_dir=base_dir) or raw.upper()
+    return canonical_symbol(raw, symbol_aliases=symbol_aliases) or raw.upper()
 
 
-def normalize_symbol_candidate(value: Any) -> str | None:
-    return canonical_symbol(value)
+def normalize_symbol_candidate(value: Any, *, symbol_aliases: SymbolAliases = None) -> str | None:
+    return canonical_symbol(value, symbol_aliases=symbol_aliases)
 
 
-def pick_first_normalized_symbol(src: dict[str, Any], *keys: str) -> str | None:
+def pick_first_normalized_symbol(
+    src: dict[str, Any],
+    *keys: str,
+    symbol_aliases: SymbolAliases = None,
+) -> str | None:
     for key in keys:
-        value = normalize_symbol_candidate(src.get(key))
+        value = normalize_symbol_candidate(src.get(key), symbol_aliases=symbol_aliases)
         if value:
             return value
     return None

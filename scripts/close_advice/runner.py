@@ -27,16 +27,17 @@ from scripts.option_positions_core.domain import (
     normalize_currency,
 )
 from scripts.opend_utils import normalize_underlier
-from scripts.trade_contract_identity import (
+from domain.domain.trade_contract_identity import (
     canonical_contract_symbol,
     contract_key,
     contract_strike_key,
     normalize_contract_expiration,
     normalize_contract_option_type,
 )
-from scripts.trade_symbol_identity import resolve_underlier_alias, symbol_market
+from domain.domain.symbol_identity import symbol_market
 from src.application.expiration_normalization import find_unique_near_miss_expiration
 from src.application.opend_fetch_config import opend_fetch_kwargs
+from src.application.symbol_aliases import load_runtime_symbol_aliases
 
 
 OUTPUT_COLUMNS = [
@@ -82,7 +83,8 @@ QUOTE_ISSUE_FLAGS = {
 
 
 def _norm_symbol(value: Any, *, base_dir: Path | None = None) -> str:
-    return canonical_contract_symbol(value, base_dir=base_dir)
+    aliases = load_runtime_symbol_aliases(base_dir) if base_dir is not None else None
+    return canonical_contract_symbol(value, symbol_aliases=aliases)
 
 
 def _norm_option_type(value: Any) -> str:
@@ -106,12 +108,13 @@ def _row_account(value: Any, *, default: str = "当前账户") -> str:
 
 
 def _quote_key(symbol: Any, option_type: Any, expiration: Any, strike: Any, *, base_dir: Path | None = None) -> tuple[str, str, str, str]:
+    aliases = load_runtime_symbol_aliases(base_dir) if base_dir is not None else None
     return contract_key(
         symbol,
         option_type,
         expiration,
         strike,
-        base_dir=base_dir,
+        symbol_aliases=aliases,
         option_type_fallback_raw=True,
         expiration_fallback_raw=True,
     )
@@ -507,7 +510,7 @@ def _fetch_missing_quotes_via_opend(
         requested_symbol = symbol
         resolved_underlier = None
         try:
-            resolved_underlier = normalize_underlier(symbol).code
+            resolved_underlier = normalize_underlier(symbol, base_dir=base_dir).code
         except Exception:
             resolved_underlier = None
         missing_keys = [

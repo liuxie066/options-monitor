@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from scripts.trade_symbol_identity import symbol_market
+from domain.domain.symbol_identity import symbol_market
 
 
 def _read_json_list(path: Path) -> list[dict]:

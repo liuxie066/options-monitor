@@ -25,7 +25,7 @@ if str(repo_base) not in sys.path:
 from scripts.account_config import DEFAULT_ACCOUNTS, accounts_from_config_path, normalize_accounts
 from scripts.multiplier_cache import resolve_multiplier_with_source
 from scripts.option_positions_core.domain import infer_currency_from_symbol as infer_position_currency_from_symbol
-from scripts.trade_symbol_identity import canonical_symbol
+from domain.domain.symbol_identity import canonical_symbol
 
 # Suppress noisy OpenAPI logs when multiplier_cache triggers futu/OpenD imports.
 os.environ.setdefault('OPENAPI_LOG_LEVEL', 'ERROR')

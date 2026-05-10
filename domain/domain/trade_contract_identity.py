@@ -1,13 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
 import math
-from pathlib import Path
 from typing import Any
 
-from scripts.option_positions_core.domain import normalize_option_type
-from scripts.trade_symbol_identity import canonical_symbol
-from src.application.expiration_normalization import normalize_expiration_ymd
+from domain.domain.expiration_dates import expiration_timestamp_to_ymd
+from domain.domain.option_position_identity import normalize_option_type
+from domain.domain.symbol_identity import canonical_symbol
 
 
 def _compact_choice(value: Any) -> str:
@@ -119,11 +119,26 @@ def normalize_position_effect(value: Any) -> str | None:
     return _alias_lookup(aliases, compact)
 
 
+def _normalize_expiration_ymd(value: Any) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    if len(raw) >= 10 and raw[4:5] == "-" and raw[7:8] == "-":
+        return raw[:10]
+
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    if len(digits) == 8:
+        return f"{digits[:4]}-{digits[4:6]}-{digits[6:8]}"
+    if len(digits) in {10, 13}:
+        return expiration_timestamp_to_ymd(digits)
+    return None
+
+
 def normalize_contract_expiration(value: Any, *, fallback_raw: bool = False) -> str | None:
     raw = str(value or "").strip()
     if not raw:
         return None
-    normalized = normalize_expiration_ymd(raw)
+    normalized = _normalize_expiration_ymd(raw)
     if normalized:
         return normalized
     digits = "".join(ch for ch in raw if ch.isdigit())
@@ -150,11 +165,11 @@ def normalize_contract_option_type(value: Any, *, fallback_raw: bool = False) ->
     return raw.lower() if fallback_raw else ""
 
 
-def canonical_contract_symbol(value: Any, *, base_dir: Path | None = None) -> str:
+def canonical_contract_symbol(value: Any, *, symbol_aliases: Mapping[str, Any] | None = None) -> str:
     raw = str(value or "").strip()
     if not raw:
         return ""
-    return canonical_symbol(raw, base_dir=base_dir) or raw.upper()
+    return canonical_symbol(raw, symbol_aliases=symbol_aliases) or raw.upper()
 
 
 def contract_strike_key(value: Any) -> str:
@@ -175,12 +190,12 @@ def contract_key(
     expiration: Any,
     strike: Any,
     *,
-    base_dir: Path | None = None,
+    symbol_aliases: Mapping[str, Any] | None = None,
     option_type_fallback_raw: bool = False,
     expiration_fallback_raw: bool = False,
 ) -> tuple[str, str, str, str]:
     return (
-        canonical_contract_symbol(symbol, base_dir=base_dir),
+        canonical_contract_symbol(symbol, symbol_aliases=symbol_aliases),
         normalize_contract_option_type(option_type, fallback_raw=option_type_fallback_raw),
         normalize_contract_expiration(expiration, fallback_raw=expiration_fallback_raw) or "",
         contract_strike_key(strike),

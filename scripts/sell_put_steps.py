@@ -18,7 +18,7 @@ from scripts.candidate_defaults import (
     resolve_event_risk_config,
 )
 from scripts.exchange_rates import CurrencyConverter
-from scripts.trade_symbol_identity import symbol_currency
+from domain.domain.symbol_identity import symbol_currency
 from scripts.io_utils import safe_read_csv
 from scripts.render_sell_put_alerts import render_sell_put_alerts
 from scripts.render_yield_enhancement_alerts import render_yield_enhancement_alerts

@@ -1,4 +1,4 @@
-"""Regression: market session detection should rely on scan_scheduler (single source of truth)."""
+"""Regression: market session detection should honor the shared schedule contract."""
 
 from __future__ import annotations
 

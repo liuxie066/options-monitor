@@ -32,8 +32,9 @@ except Exception:  # pragma: no cover - non-Unix fallback
     fcntl = None  # type: ignore[assignment]
 
 from scripts.io_utils import utc_now
-from scripts.trade_symbol_identity import canonical_symbol_aliases, is_hk_symbol, resolve_underlier_alias
+from domain.domain.symbol_identity import canonical_symbol_aliases, is_hk_symbol, resolve_underlier_alias
 from src.application.opend_fetch_config import filter_opend_fetch_kwargs
+from src.application.symbol_aliases import symbol_aliases_from_config
 
 
 def default_cache_path(repo_base: Path) -> Path:
@@ -94,15 +95,15 @@ def merge_cache_updates(path: Path, updates: dict) -> dict:
                 fcntl.flock(lock_fp.fileno(), fcntl.LOCK_UN)
 
 
-def normalize_symbol(symbol: str) -> str:
-    return resolve_underlier_alias(str(symbol or ""))
+def normalize_symbol(symbol: str, *, symbol_aliases: dict[str, str] | None = None) -> str:
+    return resolve_underlier_alias(str(symbol or ""), symbol_aliases=symbol_aliases)
 
 
-def _symbol_aliases(symbol: str) -> list[str]:
-    aliases = canonical_symbol_aliases(symbol)
+def _symbol_aliases(symbol: str, *, symbol_aliases: dict[str, str] | None = None) -> list[str]:
+    aliases = canonical_symbol_aliases(symbol, symbol_aliases=symbol_aliases)
     if aliases:
         return aliases
-    sym = normalize_symbol(symbol)
+    sym = normalize_symbol(symbol, symbol_aliases=symbol_aliases)
     return [sym] if sym else []
 
 
@@ -185,14 +186,15 @@ def _static_config_multiplier(
     symbol: str,
 ) -> tuple[int | None, str | None, dict[str, Any]]:
     diagnostics: dict[str, Any] = {"attempted_sources": []}
-    sym = normalize_symbol(symbol)
+    symbol_aliases = symbol_aliases_from_config(config)
+    sym = normalize_symbol(symbol, symbol_aliases=symbol_aliases)
 
     for prefix, intake in _intake_config_candidates(repo_base=repo_base, config=config):
         by_symbol = intake.get("multiplier_by_symbol")
         source = f"{prefix}:intake.multiplier_by_symbol"
         if isinstance(by_symbol, dict):
             normalized_map = {
-                normalize_symbol(str(key or "")): value
+                normalize_symbol(str(key or ""), symbol_aliases=symbol_aliases): value
                 for key, value in by_symbol.items()
                 if str(key or "").strip()
             }
@@ -204,7 +206,7 @@ def _static_config_multiplier(
         else:
             diagnostics["attempted_sources"].append({"source": source, "status": "missing_config"})
 
-        default_key = "default_multiplier_hk" if is_hk_symbol(sym) else "default_multiplier_us"
+        default_key = "default_multiplier_hk" if is_hk_symbol(sym, symbol_aliases=symbol_aliases) else "default_multiplier_us"
         source = f"{prefix}:intake.{default_key}"
         value = _positive_int(intake.get(default_key))
         if value is not None:
@@ -226,7 +228,8 @@ def resolve_multiplier_with_source_and_diagnostics(
     opend_fetch_config: dict[str, float | int] | None = None,
     config: dict[str, Any] | None = None,
 ) -> tuple[int | None, str | None, dict[str, Any]]:
-    sym = normalize_symbol(str(symbol or ""))
+    symbol_aliases = symbol_aliases_from_config(config)
+    sym = normalize_symbol(str(symbol or ""), symbol_aliases=symbol_aliases)
     diagnostics: dict[str, Any] = {
         "canonical_symbol": sym,
         "selected_source": None,

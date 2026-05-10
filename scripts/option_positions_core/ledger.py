@@ -18,7 +18,7 @@ from scripts.option_positions_core.domain import (
     normalize_option_type,
     normalize_side,
 )
-from scripts.trade_contract_identity import (
+from domain.domain.trade_contract_identity import (
     canonical_contract_symbol,
     normalize_contract_expiration,
     normalize_position_effect,
