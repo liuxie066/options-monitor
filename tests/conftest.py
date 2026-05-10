@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib
 import json
 import sys
 from pathlib import Path
@@ -66,17 +65,3 @@ def fake_runlog_factory() -> Callable[[list[dict[str, Any]] | None], FakeRunLogg
         return logger
 
     return _factory
-
-
-@pytest.fixture
-def send_if_needed_module():
-    return importlib.import_module("scripts.send_if_needed")
-
-
-@pytest.fixture
-def send_if_needed_common_patches(monkeypatch, send_if_needed_module):
-    mod = send_if_needed_module
-    calls: list[list[str]] = []
-
-    monkeypatch.setattr(mod, "run_tick", lambda argv: calls.append(list(argv)) or 0)
-    return {"module": mod, "calls": calls}

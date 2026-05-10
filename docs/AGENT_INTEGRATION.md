@@ -155,7 +155,7 @@ If the production layout uses non-default paths, pass them explicitly:
 Default OpenClaw safety posture:
 
 - Prefer `openclaw_readiness` or `runtime_status` before any runtime command.
-- Do not run `./om run tick`, the deprecated `scripts/send_if_needed.py` wrapper, `scripts/send_if_needed_multi.py`, or notification send commands unless the user explicitly asks for a live run.
+- Do not run `./om run tick` or notification send commands unless the user explicitly asks for a live run.
 - Keep real writes behind both `OM_AGENT_ENABLE_WRITE_TOOLS=true` and a payload-level confirmation such as `confirm=true`.
 - `add-account` / `edit-account` / `remove-account` are write-capable commands; use `--dry-run`
   first, then rerun with `OM_AGENT_ENABLE_WRITE_TOOLS=true` and `--confirm` only when the config write is intended.

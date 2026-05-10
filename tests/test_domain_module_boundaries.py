@@ -123,6 +123,8 @@ def test_legacy_wrapper_modules_are_removed() -> None:
     assert not (ROOT / "scripts" / "webui" / "server.py").exists()
     assert not (ROOT / "scripts" / "webui" / "__init__.py").exists()
     assert not (ROOT / "scripts" / "deploy_observability.py").exists()
+    assert not (ROOT / "scripts" / "send_if_needed.py").exists()
+    assert not (ROOT / "scripts" / "send_if_needed_multi.py").exists()
     assert not (ROOT / "scripts" / "multi_tick").exists()
     assert not (ROOT / "scripts" / "infra" / "service.py").exists()
     assert not (ROOT / "scripts" / "infra" / "entry_external.py").exists()

@@ -43,7 +43,6 @@ git diff --check
 ## 本地环境注意事项
 
 - `tests/run_tests.py` 中部分用例会调用 `./.venv/bin/python`。
-- 部分 `send_if_needed` 用例默认读取本地运行配置；没有本地配置时会在配置读取阶段失败。
 - 不要把本地 secrets、真实 token、私钥或个人运行状态提交进测试 fixture。
 
 ## 新增测试规则

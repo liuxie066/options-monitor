@@ -18,12 +18,11 @@ def test_shell_entrypoints_target_src_interfaces() -> None:
 
 
 def test_multi_tick_and_webui_use_application_facades() -> None:
-    multi_src = (ROOT / "scripts" / "send_if_needed_multi.py").read_text(encoding="utf-8")
     run_webui_src = (ROOT / "run_webui.sh").read_text(encoding="utf-8")
     service_src = (ROOT / "src" / "infrastructure" / "external_services.py").read_text(encoding="utf-8")
+    cli_src = (ROOT / "src" / "interfaces" / "cli" / "main.py").read_text(encoding="utf-8")
     om_src = (ROOT / "om").read_text(encoding="utf-8")
     agent_src = (ROOT / "om-agent").read_text(encoding="utf-8")
-    send_if_needed_src = (ROOT / "scripts" / "send_if_needed.py").read_text(encoding="utf-8")
     multi_account_tick_src = (ROOT / "src" / "application" / "multi_account_tick.py").read_text(encoding="utf-8")
     webui_interface_src = (ROOT / "src" / "interfaces" / "webui" / "server.py").read_text(encoding="utf-8")
     multi_tick_scheduler_src = (ROOT / "src" / "application" / "multi_tick_scheduler.py").read_text(encoding="utf-8")
@@ -35,8 +34,8 @@ def test_multi_tick_and_webui_use_application_facades() -> None:
     notification_pipeline_src = (ROOT / "src" / "application" / "notification_pipeline.py").read_text(encoding="utf-8")
     close_advice_pipeline_src = (ROOT / "src" / "application" / "close_advice_pipeline.py").read_text(encoding="utf-8")
 
-    assert "src.application.multi_account_tick" in multi_src
-    assert "run_tick" in multi_src
+    assert not (ROOT / "scripts" / "send_if_needed.py").exists()
+    assert not (ROOT / "scripts" / "send_if_needed_multi.py").exists()
     assert not (ROOT / "scripts" / "webui" / "server.py").exists()
     assert not (ROOT / "scripts" / "webui" / "__init__.py").exists()
     assert "src.interfaces.webui.server:app" in run_webui_src
@@ -45,8 +44,8 @@ def test_multi_tick_and_webui_use_application_facades() -> None:
     assert "src.interfaces.cli.main" in service_src
     assert "src.interfaces.cli.main" in om_src
     assert "src.interfaces.agent.cli" in agent_src
-    assert "from src.application.multi_account_tick import current_run_id, run_tick" in send_if_needed_src
-    assert "run_pipeline_script" not in send_if_needed_src
+    assert "from src.application.multi_account_tick import run_tick" in cli_src
+    assert "return int(run_tick(tick_argv))" in cli_src
     assert "src.application.multi_tick.main" not in multi_account_tick_src
     assert not (ROOT / "scripts" / "multi_tick" / "main.py").exists()
     assert not (ROOT / "scripts" / "infra" / "service.py").exists()
