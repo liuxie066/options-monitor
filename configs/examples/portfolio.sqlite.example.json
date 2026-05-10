@@ -4,5 +4,13 @@
     "sync_to_feishu": {
       "enabled": false
     }
+  },
+  "feishu": {
+    "app_id": "",
+    "app_secret": "",
+    "tables": {
+      "holdings": "",
+      "option_positions": ""
+    }
   }
 }

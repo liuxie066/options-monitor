@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from scripts.validate_config import validate_config
-from src.application.layered_config import build_layered_runtime_config
+from src.application.layered_config import build_layered_runtime_config, explain_layered_runtime_config_key
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -110,6 +110,11 @@ def test_layered_config_auto_loads_common_user_config_for_default_user_path(tmp_
         {
             "watchdog": {"retry_enabled": False},
             "runtime": {"portfolio_context_ttl_sec": 1200},
+            "option_positions": {"sync_to_feishu": {"enabled": True}},
+            "symbol_defaults": {
+                "fetch": {"limit_expirations": 7},
+                "sell_put": {"min_dte": 25},
+            },
             "account_settings": {
                 "lx": {
                     "type": "futu",
@@ -133,6 +138,9 @@ def test_layered_config_auto_loads_common_user_config_for_default_user_path(tmp_
 
     assert cfg["watchdog"]["retry_enabled"] is False
     assert cfg["runtime"]["portfolio_context_ttl_sec"] == 1200
+    assert cfg["option_positions"]["sync_to_feishu"]["enabled"] is True
+    assert cfg["symbols"][0]["fetch"]["limit_expirations"] == 7
+    assert cfg["symbols"][0]["sell_put"]["min_dte"] == 25
     assert cfg["accounts"] == ["lx"]
     assert cfg["trade_intake"]["account_mapping"]["futu"] == {"REAL_12345678": "lx"}
     assert meta["common_user_config_loaded"] is True
@@ -202,6 +210,142 @@ def test_layered_config_market_user_overrides_explicit_common_user_config(tmp_pa
     assert meta["common_user_config_loaded"] is True
     assert meta["common_user_config_path"] == str(common_path.resolve())
     validate_config(json.loads(json.dumps(cfg)))
+
+
+def test_layered_config_market_user_symbol_defaults_override_common_symbol_defaults(tmp_path: Path) -> None:
+    common_path = _write_json(
+        tmp_path / "user.common.json",
+        {
+            "account_settings": {
+                "lx": {
+                    "type": "futu",
+                    "futu": {"account_id": "REAL_12345678"},
+                }
+            },
+            "symbol_defaults": {
+                "fetch": {"limit_expirations": 6},
+                "sell_put": {"min_dte": 24},
+            },
+        },
+    )
+    user_path = _write_json(
+        tmp_path / "user.us.json",
+        {
+            "symbol_defaults": {
+                "fetch": {"limit_expirations": 4},
+            },
+            "symbols": [{"symbol": "NVDA", "sell_put": {"max_strike": 160}}],
+        },
+    )
+
+    cfg, _meta = build_layered_runtime_config(
+        repo_root=REPO_ROOT,
+        market="us",
+        common_user_config_path=common_path,
+        user_config_path=user_path,
+    )
+
+    assert cfg["symbols"][0]["fetch"]["limit_expirations"] == 4
+    assert cfg["symbols"][0]["sell_put"]["min_dte"] == 24
+    assert "symbol_defaults" not in cfg
+    validate_config(json.loads(json.dumps(cfg)))
+
+
+def test_config_explain_reports_common_user_override_for_regular_key(tmp_path: Path) -> None:
+    common_path = _write_json(
+        tmp_path / "user.common.json",
+        {
+            "watchdog": {"retry_enabled": False},
+            "account_settings": {
+                "lx": {
+                    "type": "futu",
+                    "futu": {"account_id": "REAL_12345678"},
+                }
+            },
+        },
+    )
+    user_path = _write_json(
+        tmp_path / "user.us.json",
+        {
+            "symbols": [{"symbol": "NVDA", "sell_put": {"max_strike": 160}}],
+        },
+    )
+
+    out = explain_layered_runtime_config_key(
+        repo_root=REPO_ROOT,
+        market="us",
+        key="watchdog.retry_enabled",
+        common_user_config_path=common_path,
+        user_config_path=user_path,
+    )
+
+    assert out["value"] is False
+    assert out["source"] == "common_user_config"
+    assert [item["source"] for item in out["trace"]] == ["system.defaults", "common_user_config"]
+
+
+def test_config_explain_reports_symbol_defaults_override_chain(tmp_path: Path) -> None:
+    common_path = _write_json(
+        tmp_path / "user.common.json",
+        {
+            "account_settings": {
+                "lx": {
+                    "type": "futu",
+                    "futu": {"account_id": "REAL_12345678"},
+                }
+            },
+            "symbol_defaults": {"fetch": {"limit_expirations": 6}},
+        },
+    )
+    user_path = _write_json(
+        tmp_path / "user.us.json",
+        {
+            "symbol_defaults": {"fetch": {"limit_expirations": 4}},
+            "symbols": [{"symbol": "NVDA", "sell_put": {"max_strike": 160}}],
+        },
+    )
+
+    out = explain_layered_runtime_config_key(
+        repo_root=REPO_ROOT,
+        market="us",
+        key="symbol_defaults.fetch.limit_expirations",
+        common_user_config_path=common_path,
+        user_config_path=user_path,
+    )
+
+    assert out["value"] == 4
+    assert out["source"] == "user_config"
+    assert out["runtime_path"] is None
+    assert out["applies_to"] == "symbols[].fetch.limit_expirations"
+    assert [item["source"] for item in out["trace"]] == ["system.market", "common_user_config", "user_config"]
+
+
+def test_config_explain_reports_symbol_value_from_symbol_defaults(tmp_path: Path) -> None:
+    user_path = _write_json(
+        tmp_path / "user.us.json",
+        {
+            "account_settings": {
+                "lx": {
+                    "type": "futu",
+                    "futu": {"account_id": "REAL_12345678"},
+                }
+            },
+            "symbol_defaults": {"fetch": {"limit_expirations": 4}},
+            "symbols": [{"symbol": "NVDA", "sell_put": {"max_strike": 160}}],
+        },
+    )
+
+    out = explain_layered_runtime_config_key(
+        repo_root=REPO_ROOT,
+        market="us",
+        key="symbols.0.fetch.limit_expirations",
+        user_config_path=user_path,
+    )
+
+    assert out["value"] == 4
+    assert out["source"] == "user_config"
+    assert out["runtime_path"] == "symbols.0.fetch.limit_expirations"
+    assert "symbol_defaults" in out["notes"][0]
 
 
 def test_tracked_layered_examples_validate() -> None:
@@ -332,3 +476,45 @@ def test_config_build_cli_accepts_explicit_common_user_config(tmp_path: Path, ca
     assert cfg["watchdog"]["retry_enabled"] is False
     assert cfg["accounts"] == ["lx"]
     validate_config(json.loads(json.dumps(cfg)))
+
+
+def test_config_explain_cli_outputs_source_trace(tmp_path: Path, capsys) -> None:
+    from src.interfaces.cli.main import main
+
+    common_path = _write_json(
+        tmp_path / "user.common.json",
+        {
+            "option_positions": {"sync_to_feishu": {"enabled": True}},
+            "account_settings": {
+                "lx": {
+                    "type": "futu",
+                    "futu": {"account_id": "REAL_12345678"},
+                }
+            },
+        },
+    )
+    user_path = _write_json(
+        tmp_path / "user.us.json",
+        {
+            "symbols": [{"symbol": "NVDA", "sell_put": {"max_strike": 160}}],
+        },
+    )
+
+    rc = main([
+        "config",
+        "explain",
+        "--market",
+        "us",
+        "--key",
+        "option_positions.sync_to_feishu.enabled",
+        "--common-user-config",
+        str(common_path),
+        "--user-config",
+        str(user_path),
+    ])
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["value"] is True
+    assert payload["source"] == "common_user_config"
+    assert [item["source"] for item in payload["trace"]] == ["system.defaults", "common_user_config"]

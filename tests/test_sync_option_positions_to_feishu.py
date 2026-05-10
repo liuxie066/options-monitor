@@ -929,6 +929,107 @@ def test_sync_apply_reports_disabled_when_sync_to_feishu_switch_is_off(monkeypat
     assert sync_mod.summarize_result(rows)["skip"] == 1
 
 
+def test_sync_apply_runtime_config_can_enable_data_config_off(monkeypatch, tmp_path: Path) -> None:
+    import scripts.option_positions_core.service as svc
+    import scripts.sync_option_positions_to_feishu as sync_mod
+    from scripts.option_positions_core.domain import OpenPositionCommand
+
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
+    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    svc.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="TSLA",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=100.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            premium_per_share=1.23,
+            opened_at_ms=1000,
+        ),
+    )
+    captured: dict[str, Any] = {}
+
+    def _fake_create(_token, _app_token, _table_id, fields):
+        captured["fields"] = dict(fields)
+        return {"record": {"record_id": "remote_rec_1"}}
+
+    monkeypatch.setattr(sync_mod, "get_tenant_access_token", lambda *_args, **_kwargs: "token")
+    monkeypatch.setattr(sync_mod, "bitable_fields", lambda *_args, **_kwargs: [{"field_name": "broker"}, {"field_name": "local_record_id"}])
+    monkeypatch.setattr(sync_mod, "bitable_list_records", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(sync_mod, "bitable_create_record", _fake_create)
+    monkeypatch.setattr(sync_mod, "bitable_update_record", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should not update")))
+    monkeypatch.setattr(sync_mod, "bitable_delete_record", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should not delete")))
+
+    rows = sync_mod.sync_option_positions(
+        repo=repo,
+        data_config=data_config,
+        apply_mode=True,
+        runtime_config={"option_positions": {"sync_to_feishu": {"enabled": True}}},
+    )
+
+    assert rows[0]["action"] == "create"
+    assert rows[0]["feishu_record_id"] == "remote_rec_1"
+    assert captured["fields"]["broker"] == "富途"
+
+
+def test_sync_single_uses_repo_runtime_override_when_data_config_is_off(monkeypatch, tmp_path: Path) -> None:
+    import scripts.option_positions_core.service as svc
+    import scripts.sync_option_positions_to_feishu as sync_mod
+    from scripts.option_positions_core.domain import OpenPositionCommand
+    from src.application.option_positions_sync_config import apply_option_positions_runtime_config
+
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
+    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    apply_option_positions_runtime_config(repo, {"option_positions": {"sync_to_feishu": {"enabled": True}}})
+    open_result = svc.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="TSLA",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=100.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            premium_per_share=1.23,
+            opened_at_ms=1000,
+        ),
+    )
+
+    captured: dict[str, Any] = {}
+
+    def _fake_create(_token, _app_token, _table_id, fields):
+        captured["fields"] = dict(fields)
+        return {"record": {"record_id": "remote_rec_1"}}
+
+    monkeypatch.setattr(sync_mod, "get_tenant_access_token", lambda *_args, **_kwargs: "token")
+    monkeypatch.setattr(sync_mod, "bitable_fields", lambda *_args, **_kwargs: [{"field_name": "broker"}, {"field_name": "local_record_id"}])
+    monkeypatch.setattr(sync_mod, "bitable_list_records", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(sync_mod, "bitable_create_record", _fake_create)
+    monkeypatch.setattr(sync_mod, "bitable_update_record", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should not update")))
+    monkeypatch.setattr(sync_mod, "bitable_delete_record", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should not delete")))
+
+    row = sync_mod.sync_single_option_position_record(
+        repo=repo,
+        data_config=data_config,
+        record_id=str(open_result["record_id"]),
+        apply_mode=True,
+    )
+
+    assert row["action"] == "create"
+    assert row["feishu_record_id"] == "remote_rec_1"
+    assert captured["fields"]["broker"] == "富途"
+
+
 def test_sync_script_rejects_apply_and_dry_run_together(monkeypatch) -> None:
     import scripts.sync_option_positions_to_feishu as sync_mod
 

@@ -144,21 +144,21 @@ python3 scripts/option_positions_report.py monthly-income --broker 富途 --acco
 
 如果你启用了 Feishu `option_positions` 镜像，修完本地后再决定是否同步。
 
-另外，远端写入默认关闭；只有 data config 里显式设置
-`option_positions.sync_to_feishu.enabled=true` 后，下面的 `--apply` 才会真正写 Feishu。
+另外，远端写入默认关闭；推荐在 `configs/user.common.json` 里显式设置
+`option_positions.sync_to_feishu.enabled=true`，重新生成 runtime config 后，下面的 `--apply` 才会真正写 Feishu。
 
 普通同步：
 
 ```bash
-python3 scripts/sync_option_positions_to_feishu.py --dry-run
-python3 scripts/sync_option_positions_to_feishu.py --apply
+python3 scripts/sync_option_positions_to_feishu.py --config config.us.json --dry-run
+python3 scripts/sync_option_positions_to_feishu.py --config config.us.json --apply
 ```
 
 如果本地已经把某条 lot 作废掉，需要顺便删除远端孤儿镜像：
 
 ```bash
-python3 scripts/sync_option_positions_to_feishu.py --dry-run --prune-remote-missing-local
-python3 scripts/sync_option_positions_to_feishu.py --apply --prune-remote-missing-local
+python3 scripts/sync_option_positions_to_feishu.py --config config.us.json --dry-run --prune-remote-missing-local
+python3 scripts/sync_option_positions_to_feishu.py --config config.us.json --apply --prune-remote-missing-local
 ```
 
 注意：

@@ -28,12 +28,28 @@ from scripts.option_positions_core.domain import (
 )
 from scripts.option_positions_core.reporting import build_monthly_income_report
 from scripts.option_positions_core.service import load_option_positions_repo, require_option_positions_read_repo
+from src.application.option_positions_sync_config import apply_option_positions_runtime_config
 from src.application.option_positions_v2_service import load_option_positions_v2_records
 
 
 def resolve_option_positions_repo(*, base: Path, data_config: str | Path | None) -> tuple[Path, Any]:
     resolved_data_config = resolve_data_config_path(base=base, data_config=data_config)
     return resolved_data_config, load_option_positions_repo(resolved_data_config)
+
+
+def resolve_option_positions_repo_from_config(
+    *,
+    base: Path,
+    cfg: dict[str, Any] | None,
+    data_config: str | Path | None = None,
+) -> tuple[Path, Any]:
+    portfolio_cfg = cfg.get("portfolio") if isinstance(cfg, dict) and isinstance(cfg.get("portfolio"), dict) else {}
+    data_config_ref = data_config
+    if data_config_ref is None or not str(data_config_ref).strip():
+        data_config_ref = portfolio_cfg.get("data_config") if isinstance(portfolio_cfg, dict) else None
+    resolved_data_config, repo = resolve_option_positions_repo(base=base, data_config=data_config_ref)
+    apply_option_positions_runtime_config(repo, cfg)
+    return resolved_data_config, repo
 
 
 def canonicalize_option_position_fields(fields: dict[str, Any]) -> dict[str, Any]:

@@ -16,7 +16,6 @@
 - `configs/user.us.json`
 - `configs/user.hk.json`
 - `secrets/portfolio.sqlite.json`
-- `secrets/portfolio.external_holdings.json`（可选，只在 external_holdings 账号场景需要）
 
 用户日常只维护 `configs/user.us.json` / `configs/user.hk.json` 里的 market-specific 账号和 symbols；如果某些覆盖 US/HK 都相同，放到可选的 `configs/user.common.json`。运行前生成 canonical runtime config：
 
@@ -28,6 +27,13 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 ./om config build --market hk
 ```
 
+不确定某个值来自哪里时，用 explain 查看覆盖链：
+
+```bash
+./om config explain --market us --key option_positions.sync_to_feishu.enabled
+./om config explain --market us --key symbol_defaults.fetch.limit_expirations
+```
+
 生成产物仍是 runtime 唯一入口：
 - `config.us.json`
 - `config.hk.json`
@@ -36,7 +42,6 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 - `config.us.json`
 - `config.hk.json`
 - `secrets/portfolio.sqlite.json`
-- `secrets/portfolio.external_holdings.json`（可选，只在 external_holdings 账号场景需要）
 
 ### 仓库里保留的模板文件
 - `configs/system.json`
@@ -44,14 +49,13 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 - `configs/examples/user.example.us.json`
 - `configs/examples/user.example.hk.json`
 - `configs/examples/portfolio.sqlite.example.json`
-- `configs/examples/portfolio.external_holdings.example.json`
 - `configs/examples/notifications.feishu.app.example.json`
 - `configs/examples/openclaw.profile.example.json`
 
 ### 最小配置和补充配置怎么区分？
 - 最小编辑配置：`configs/user.us.json` / `configs/user.hk.json` 里的账号和 symbols；共用覆盖可放 `configs/user.common.json`
 - 最小运行配置：生成后的 `config.us.json` / `config.hk.json` + `secrets/portfolio.sqlite.json`
-- 补充配置：在同一套结构上继续补 `watchdog.*`、`notifications.*`、`runtime.*`、`alert_policy.change_annual_threshold`、`intake.*`、`portfolio.source_by_account`、`feishu.*`
+- 补充配置：在同一套结构上继续补 `watchdog.*`、`notifications.*`、`runtime.*`、`alert_policy.change_annual_threshold`、`intake.*`、`symbol_defaults.*`、`portfolio.source_by_account`、`feishu.*`
 - 不再维护“两套 schema”或“两份不同风格文档”；只有一套结构，只是填写程度不同。
 
 ---
@@ -460,12 +464,21 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
     "sync_to_feishu": {
       "enabled": false
     }
+  },
+  "feishu": {
+    "app_id": "",
+    "app_secret": "",
+    "tables": {
+      "holdings": "",
+      "option_positions": ""
+    }
   }
 }
 ```
 
 - `option_positions.sync_to_feishu.enabled` 默认是 `false`。
-- 只有你明确把它改成 `true` 时，`scripts/sync_option_positions_to_feishu.py --apply` 和本地手工持仓写入后的 post-write auto sync 才会真正写 Feishu `option_positions` 镜像表。
+- 推荐在 `configs/user.common.json` 里把 runtime 开关覆盖成 `true`，再重新生成 `config.us.json` / `config.hk.json`。此时使用 `--config config.us.json` 的同步脚本，以及携带 runtime config 的本地持仓写入流程，才会真正写 Feishu `option_positions` 镜像表。
+- 直接只传 `--data-config` 的低层脚本仍读取 data config 里的同名开关，保持默认安全关闭。
 - 这个开关只影响“写远端镜像”；不改变本地 SQLite 主存储，也不关闭 Feishu bootstrap/read 侧行为。
 
 ### 可选方式（增加 external_holdings 账号）
@@ -475,13 +488,12 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 ./om-agent add-account --market us --account-label ext1 --account-type external_holdings --holdings-account "Feishu EXT"
 ```
 
-- 再从 `configs/examples/portfolio.external_holdings.example.json` 复制到本地安全路径，例如 `secrets/portfolio.external_holdings.json`。
-- 在该文件内填写：
-  - `option_positions.sqlite_path`
+- 继续使用同一份 `secrets/portfolio.sqlite.json`。
+- 在该文件内补充：
   - `feishu.app_id`
   - `feishu.app_secret`
   - `feishu.tables.holdings`
-- 然后把 `config.us.json` / `config.hk.json` 里的 `portfolio.data_config` 指向这个本地文件。
+- `config.us.json` / `config.hk.json` 里的 `portfolio.data_config` 默认仍指向 `secrets/portfolio.sqlite.json`。
 
 示例：
 
@@ -497,7 +509,8 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
     "app_id": "cli_YOUR_APP_ID",
     "app_secret": "YOUR_APP_SECRET",
     "tables": {
-      "holdings": "app_token/table_id"
+      "holdings": "app_token/table_id",
+      "option_positions": ""
     }
   }
 }
@@ -531,8 +544,8 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 
 > 注意：不要在聊天里发送 app_secret。
 >
-> 如果你要把本地 `option_positions` 同步回 Feishu 多维表，还需要在 data config 里显式打开
-> `option_positions.sync_to_feishu.enabled=true`；默认关闭，避免误写远端。
+> 如果你要把本地 `option_positions` 同步回 Feishu 多维表，推荐在 `configs/user.common.json` 里显式打开
+> `option_positions.sync_to_feishu.enabled=true`，再重新 `./om config build --market us|hk`；默认关闭，避免误写远端。
 >
 > `option_positions` bootstrap 的当前状态会出现在两处：
 > - `./om-agent run --tool healthcheck ...` 的 `option_positions_bootstrap`

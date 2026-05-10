@@ -24,7 +24,7 @@ from scripts.trade_intake_state import (
 )
 from scripts.trade_push_listener import OpenDTradePushListener
 from src.application.opend_fetch_config import opend_fetch_kwargs
-from src.application.option_positions_facade import resolve_option_positions_repo
+from src.application.option_positions_facade import resolve_option_positions_repo_from_config
 from src.application.trade_intake import process_trade_payload
 
 
@@ -145,7 +145,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.deal_json:
         payload = json.loads(Path(args.deal_json).read_text(encoding="utf-8"))
         if apply_changes:
-            _data_config, repo = resolve_option_positions_repo(base=base, data_config=args.data_config)
+            _data_config, repo = resolve_option_positions_repo_from_config(base=base, cfg=cfg, data_config=args.data_config)
         else:
             repo = _ReplayRepo()
         result = _process_payload(
@@ -163,7 +163,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
 
-    _data_config, repo = resolve_option_positions_repo(base=base, data_config=args.data_config)
+    _data_config, repo = resolve_option_positions_repo_from_config(base=base, cfg=cfg, data_config=args.data_config)
 
     if not bool(intake_cfg["enabled"]):
         raise SystemExit("trade_intake.enabled=false; refusing to start listener")

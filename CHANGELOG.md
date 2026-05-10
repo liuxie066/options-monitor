@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Added
+- Added `./om config explain` to show the final layered value, source layer, and override trace for a config key.
+
+### Changed
+- Consolidated portfolio data-config examples around a single `portfolio.sqlite.json` shape that can also hold optional Feishu holdings and option-position mirror table refs.
+- Made `option_positions.sync_to_feishu.enabled` available as a runtime config override, so `configs/user.common.json` can enable or disable Feishu option-position mirror writes across US/HK.
+- Allowed `symbol_defaults` in user/common config to override system defaults before they are applied to each `symbols[]` item.
+
 ## 1.2.2 - 2026-05-10
 
 ### Added

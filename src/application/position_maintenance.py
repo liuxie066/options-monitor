@@ -18,6 +18,7 @@ from scripts.option_positions_core.service import (
     rebuild_position_lots_from_trade_events,
 )
 from src.application.option_positions_facade import load_option_position_records
+from src.application.option_positions_sync_config import apply_option_positions_runtime_config
 
 
 def _bool_config(data: dict[str, Any], key: str, default: bool) -> bool:
@@ -181,6 +182,7 @@ def run_expired_position_maintenance_for_account(
         return {"mode": "skipped", "reason": "missing_data_config", "data_config": str(data_config)}
 
     repo = load_option_positions_repo(data_config)
+    apply_option_positions_runtime_config(repo, cfg)
     ts = int(as_of_ms if as_of_ms is not None else datetime.now(timezone.utc).timestamp() * 1000)
     projection_refresh = (
         None
