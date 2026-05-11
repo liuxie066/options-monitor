@@ -640,23 +640,44 @@ def test_monthly_income_report_returns_agent_summary(monkeypatch, tmp_path: Path
     assert out["warnings"] == []
     assert out["data"]["row_count"] == 1
     assert out["data"]["premium_row_count"] == 1
-    assert out["data"]["summary"] == [
-        {
-            "month": "2026-04",
-            "account": "user1",
-            "currency": "USD",
-            "realized_gross": 150.0,
-            "realized_gross_cny": 1080.0,
-            "closed_contracts": 1,
-            "positions": 1,
-            "premium_received_gross": 250.0,
-            "premium_received_gross_cny": 1800.0,
-            "premium_contracts": 1,
-            "premium_positions": 1,
-        }
-    ]
+    assert out["data"]["calculation_method"] == "trade_events"
+    assert len(out["data"]["summary"]) == 1
+    row = out["data"]["summary"][0]
+    assert {key: row.get(key) for key in {
+        "month",
+        "account",
+        "currency",
+        "net_cashflow_gross",
+        "realized_pnl_gross",
+        "open_basis_lifecycle_pnl_gross",
+        "realized_gross",
+        "realized_gross_cny",
+        "closed_contracts",
+        "positions",
+        "premium_received_gross",
+        "premium_received_gross_cny",
+        "premium_contracts",
+        "premium_positions",
+    }} == {
+        "month": "2026-04",
+        "account": "user1",
+        "currency": "USD",
+        "net_cashflow_gross": 150.0,
+        "realized_pnl_gross": 150.0,
+        "open_basis_lifecycle_pnl_gross": 150.0,
+        "realized_gross": 150.0,
+        "realized_gross_cny": 1080.0,
+        "closed_contracts": 1,
+        "positions": 1,
+        "premium_received_gross": 250.0,
+        "premium_received_gross_cny": 1800.0,
+        "premium_contracts": 1,
+        "premium_positions": 1,
+    }
     assert out["data"]["rows"][0]["realized_gross"] == 150.0
     assert out["data"]["premium_rows"][0]["premium_received_gross"] == 250.0
+    assert out["data"]["cashflow_rows"][0]["net_cashflow_gross"] == 250.0
+    assert out["data"]["cashflow_rows"][1]["net_cashflow_gross"] == -100.0
     assert out["meta"]["data_config"] == ".../portfolio.sqlite.json"
 
 

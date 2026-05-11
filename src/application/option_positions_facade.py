@@ -252,6 +252,9 @@ def build_option_positions_monthly_income_report(
     account: str | None = None,
     month: str | None = None,
 ) -> dict[str, Any]:
+    primary_repo = getattr(repo, "primary_repo", repo)
+    list_trade_events = getattr(primary_repo, "list_trade_events", None)
+    trade_events = list_trade_events() if callable(list_trade_events) else None
     return build_monthly_income_report(
         load_canonical_option_position_records(repo, base=base),
         account=account,
@@ -260,6 +263,7 @@ def build_option_positions_monthly_income_report(
         rates=get_exchange_rates_or_fetch_latest(
             cache_path=(base / "output" / "state" / "rate_cache.json").resolve(),
         ),
+        trade_events=trade_events,
     )
 
 
