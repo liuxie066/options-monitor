@@ -181,6 +181,12 @@ def _validate_yield_enhancement_cfg(cfg: dict, path: str):
         'min_put_otm_pct',
         'min_call_otm_pct',
         'max_call_otm_pct',
+        'min_combo_net_credit',
+        'max_downside_worsen_pct',
+        'min_scenario_score_lift',
+        'min_annualized_scenario_score_lift',
+        'min_lift_to_downside_ratio',
+        'max_combo_spread_worsen_ratio',
     ):
         _validate_optional_non_negative_number(cfg, key, path)
     min_call_otm_pct = cfg.get('min_call_otm_pct')
