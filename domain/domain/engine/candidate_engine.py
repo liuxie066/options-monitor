@@ -106,6 +106,21 @@ class CandidateReject:
         return normalize_candidate_reject(self)
 
 
+@dataclass(frozen=True)
+class CandidateScoreWeights:
+    annualized_return: float = 1.0
+    net_income: float = 1e-6
+    liquidity: float = 0.0
+    risk_distance: float = 0.0
+
+
+@dataclass(frozen=True)
+class CandidateStrategyScore:
+    total: float
+    components: dict[str, float]
+    warnings: tuple[str, ...] = ()
+
+
 def normalize_strategy_mode(mode: Any) -> StrategyMode:
     mode_norm = str(mode or "").strip().lower()
     if mode_norm not in {"put", "call"}:
@@ -133,6 +148,91 @@ def _coerce_float(value: Any) -> float | None:
         return float(value)
     except Exception:
         return None
+
+
+def _bounded(value: float, *, low: float = 0.0, high: float = 1.0) -> float:
+    return max(float(low), min(float(high), float(value)))
+
+
+def _score_average(parts: list[float]) -> float:
+    values = [float(p) for p in parts if p is not None]
+    if not values:
+        return 0.0
+    return sum(values) / len(values)
+
+
+def _liquidity_quality(
+    *,
+    spread_ratio: float | None = None,
+    open_interest: float | None = None,
+    volume: float | None = None,
+) -> float:
+    parts: list[float] = []
+    if spread_ratio is not None:
+        parts.append(_bounded(1.0 - max(float(spread_ratio), 0.0)))
+    if open_interest is not None:
+        parts.append(_bounded(float(open_interest) / 100.0))
+    if volume is not None:
+        parts.append(_bounded(float(volume) / 10.0))
+    return _score_average(parts)
+
+
+def _risk_distance_quality(
+    *,
+    mode: StrategyMode,
+    delta: float | None = None,
+    otm_pct: float | None = None,
+    dte: float | None = None,
+) -> float:
+    del mode
+    parts: list[float] = []
+    if delta is not None:
+        parts.append(_bounded(1.0 - abs(float(delta))))
+    if otm_pct is not None:
+        parts.append(_bounded(float(otm_pct) / 0.20))
+    if dte is not None:
+        parts.append(_bounded(float(dte) / 45.0))
+    return _score_average(parts)
+
+
+def compute_candidate_strategy_score(
+    *,
+    mode: StrategyMode | str,
+    annualized_return: float | None = None,
+    net_income: float | None = None,
+    spread_ratio: float | None = None,
+    open_interest: float | None = None,
+    volume: float | None = None,
+    delta: float | None = None,
+    otm_pct: float | None = None,
+    dte: float | None = None,
+    weights: CandidateScoreWeights | None = None,
+) -> CandidateStrategyScore:
+    mode_norm = normalize_strategy_mode(mode)
+    score_weights = weights or CandidateScoreWeights()
+    components = {
+        "annualized_return": (_coerce_float(annualized_return) or 0.0) * float(score_weights.annualized_return),
+        "net_income": (_coerce_float(net_income) or 0.0) * float(score_weights.net_income),
+        "liquidity": _liquidity_quality(
+            spread_ratio=_coerce_float(spread_ratio),
+            open_interest=_coerce_float(open_interest),
+            volume=_coerce_float(volume),
+        )
+        * float(score_weights.liquidity),
+        "risk_distance": _risk_distance_quality(
+            mode=mode_norm,
+            delta=_coerce_float(delta),
+            otm_pct=_coerce_float(otm_pct),
+            dte=_coerce_float(dte),
+        )
+        * float(score_weights.risk_distance),
+    }
+    warnings: list[str] = []
+    spread_value = _coerce_float(spread_ratio)
+    if spread_value is not None and spread_value >= 0.30:
+        warnings.append("wide_spread")
+    total = sum(components.values())
+    return CandidateStrategyScore(total=float(total), components=components, warnings=tuple(warnings))
 
 
 def _reject(
@@ -686,29 +786,56 @@ def build_candidate_rank_key(
     row: dict[str, Any] | Any,
     *,
     mode: StrategyMode | str,
+    score_weights: CandidateScoreWeights | None = None,
 ) -> dict[str, Any]:
     mode_norm = normalize_strategy_mode(mode)
     src = row if isinstance(row, dict) else {}
     if mode_norm == "put":
         annual = _coerce_float(src.get("annualized_net_return_on_cash_basis"))
         net = _coerce_float(src.get("net_income"))
-        score = (annual or 0.0) + ((net or 0.0) * 1e-6)
+        score = compute_candidate_strategy_score(
+            mode=mode_norm,
+            annualized_return=annual,
+            net_income=net,
+            spread_ratio=_coerce_float(src.get("spread_ratio")),
+            open_interest=_coerce_float(src.get("open_interest")),
+            volume=_coerce_float(src.get("volume")),
+            delta=_coerce_float(src.get("delta")),
+            otm_pct=_coerce_float(src.get("otm_pct")),
+            dte=_coerce_float(src.get("dte")),
+            weights=score_weights,
+        )
         out: dict[str, Any] = {
-            "strategy_score": score,
+            "strategy_score": score.total,
             "annualized_return": annual,
             "net_income": net,
-            "sort_tuple": (-score, -(annual or 0.0), -(net or 0.0)),
+            "score_components": dict(score.components),
+            "score_warnings": list(score.warnings),
+            "sort_tuple": (-score.total, -(annual or 0.0), -(net or 0.0)),
         }
         return out
 
     annual = _coerce_float(src.get("annualized_net_premium_return"))
     net = _coerce_float(src.get("net_income"))
-    score = (annual or 0.0) + ((net or 0.0) * 1e-6)
+    score = compute_candidate_strategy_score(
+        mode=mode_norm,
+        annualized_return=annual,
+        net_income=net,
+        spread_ratio=_coerce_float(src.get("spread_ratio")),
+        open_interest=_coerce_float(src.get("open_interest")),
+        volume=_coerce_float(src.get("volume")),
+        delta=_coerce_float(src.get("delta")),
+        otm_pct=_coerce_float(src.get("otm_pct") or src.get("strike_above_spot_pct")),
+        dte=_coerce_float(src.get("dte")),
+        weights=score_weights,
+    )
     out = {
-        "strategy_score": score,
+        "strategy_score": score.total,
         "annualized_return": annual,
         "net_income": net,
-        "sort_tuple": (-score, -(annual or 0.0), -(net or 0.0)),
+        "score_components": dict(score.components),
+        "score_warnings": list(score.warnings),
+        "sort_tuple": (-score.total, -(annual or 0.0), -(net or 0.0)),
     }
     return out
 
@@ -717,9 +844,10 @@ def rank_candidate_rows(
     rows: list[dict[str, Any]],
     *,
     mode: StrategyMode | str,
+    score_weights: CandidateScoreWeights | None = None,
 ) -> list[dict[str, Any]]:
     mode_norm = normalize_strategy_mode(mode)
     return sorted(
         [r for r in rows if isinstance(r, dict)],
-        key=lambda row: build_candidate_rank_key(row, mode=mode_norm)["sort_tuple"],
+        key=lambda row: build_candidate_rank_key(row, mode=mode_norm, score_weights=score_weights)["sort_tuple"],
     )

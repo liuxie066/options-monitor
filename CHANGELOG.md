@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 1.2.15 - 2026-05-11
+
+### Changed
+- Rewrote the README into a product-oriented guide covering user onboarding, common workflows, strategy models, configuration, notifications, Agent safety defaults, scheduling, troubleshooting, and documentation navigation.
+- Extracted candidate ranking score calculation into the canonical candidate engine with explicit score weights and explainable score components.
+- Made the legacy DataFrame candidate strategy wrapper delegate sorting to `candidate_engine.rank_candidate_rows()`, leaving it as an adapter for DataFrame/reject-log/layered selection behavior instead of a separate ranking implementation.
+
 ## 1.2.14 - 2026-05-11
 
 ### Changed

@@ -1,114 +1,59 @@
 # options-monitor
 
-期权监控与提醒工具，面向 **Sell Put / Covered Call** 工作流。
+`options-monitor` 是一个本地运行的期权监控与提醒工具，主要服务 **Sell Put**、**Covered Call** 和 **Sell Put 收益增强**工作流。
 
-它解决的核心问题只有 5 件：
+它不是自动交易系统，也不直接替你下单。它负责把行情、账户、持仓、现金、策略阈值和通知串起来，帮助你判断“现在有没有值得进一步人工复核的机会”。
 
-1. 扫描你关注的标的期权链
-2. 按策略阈值筛选 Sell Put / Covered Call 候选
-3. 结合账户持仓与现金判断是否可做
-4. 为合格 Sell Put 推荐可买入的 Call strike 做收益增强
-5. 生成提醒、平仓建议和运行结果
+## 它解决什么
 
-这份 README 只保留产品使用需要的信息：
-- 安装
-- 初始化
-- 运行
-- 排障入口
+核心能力：
 
-更细的配置契约和运维细节见：
-- [CONFIGS.md](CONFIGS.md)
-- [CONFIGURATION_GUIDE.md](CONFIGURATION_GUIDE.md)
-- [RUNBOOK.md](RUNBOOK.md)
-- [docs/OPTION_POSITIONS_MIGRATION.md](docs/OPTION_POSITIONS_MIGRATION.md)
-- [docs/OPTION_POSITIONS_REPAIR.md](docs/OPTION_POSITIONS_REPAIR.md)
+- 扫描关注标的的期权链
+- 按 Sell Put / Covered Call 规则筛选候选
+- 结合账户现金、股票持仓和已开期权仓位计算可用空间
+- 为合格 Sell Put 候选寻找可搭配买入的 Call，形成收益增强候选
+- 生成报告、通知文本、平仓建议和运行状态
+- 给本地 Agent 提供结构化工具入口，便于安全排查和自动化读取
 
----
+主要入口：
 
-## 1. 快速开始
+| 入口 | 面向对象 | 用途 |
+|---|---|---|
+| WebUI | 普通用户 | 首次初始化、编辑配置、查看常用设置 |
+| `./om` | 人工 CLI | 手动运行、配置构建、持仓维护、现金查询 |
+| `./om-agent` | Agent / 程序 | JSON 工具清单、只读诊断、结构化查询 |
 
-### 1.1 安装依赖
+## 快速开始
+
+### 1. 安装
 
 ```bash
 git clone <repo-url> options-monitor
 cd options-monitor
-./run_watchlist.sh
-```
-
-如果你想手动安装环境：
-
-这属于本地环境准备，不是运行期业务命令；这里出现 `python3 -m ...` 不代表 Agent 应默认用 Python 脚本探索项目行为。
-
-```bash
 python3 -m venv .venv
 ./.venv/bin/pip install -U pip
 ./.venv/bin/pip install -r requirements.txt
 ```
 
-如果需要可复现安装，使用随版本维护的约束文件：
+需要可复现安装时使用约束文件：
 
 ```bash
 ./.venv/bin/pip install -r requirements.txt -c constraints.txt
 ```
 
-`requirements.txt` 已包含 `futu-api`，缺少 Futu SDK 时会随安装流程一起补齐。
+`requirements.txt` 已包含 `futu-api`。本项目的行情、期权链、现金和持仓默认依赖本机 OpenD / Futu API。
 
-### 1.2 给 Agent 使用（可选）
-
-如果你是把它作为本地 Agent 工具来用，执行：
+已有 `config.us.json` 时，可以用一键脚本安装依赖并运行 watchlist pipeline：
 
 ```bash
-bash scripts/install_agent_plugin.sh
-./om-agent spec
+./run_watchlist.sh
 ```
 
-常用方式：
+如果只是首次安装或排障，先完成下面的初始化和验证，不要从真实 pipeline 开始。
 
-```bash
-./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'
-```
+### 2. 初始化配置
 
-Codex / Claude Code / OpenClaw 排障优先用只读聚合入口：
-
-```bash
-./om-agent run --tool runtime_status --input-json '{"config_key":"us"}'
-./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'
-```
-
-OpenClaw 环境可以先跑：
-
-```bash
-./om-agent run --tool openclaw_readiness --input-json '{"config_key":"us"}'
-```
-
-如果 OpenClaw 的生产目录、账户或 cron id 与默认路径不同，可以复制
-`configs/examples/openclaw.profile.example.json` 为仓库根目录 `openclaw.profile.json`，
-或在 payload 中传 `profile_path`。`openclaw_readiness` 会读取该 profile 作为默认路径、
-账户、cron job 和 freshness 阈值。
-
-`om-agent` 是面向程序/Agent 的结构化入口；`om` 是面向人工操作的 CLI 入口。
-
-当前 tick / 扫描 / 通知主流程只有一条统一链路：`src/application/multi_account_tick.py`。
-单账户运行只是传一个账户的特例，例如 `--accounts lx`；多账户运行传多个账户，
-例如 `--accounts lx sy`。旧 tick 脚本入口已移除，定时任务应升级到 `./om run tick`。
-
-给 Codex、Claude Code、OpenClaw 这类代理使用时，建议遵守下面的默认约束：
-
-- **先读后跑**：如果任务是“解释 / look into / check / why / explain”，先读代码、配置文档和测试，不要先执行脚本。
-- **默认不要直接运行 runtime scripts**：不要把 `python3 scripts/...` 当作第一选择，除非用户明确指定脚本，或更高层入口不覆盖该能力。
-- **入口优先级**：优先 `./om-agent`，其次 `./om`，再考虑 `python3 -m ...`，最后才是 `python3 scripts/...`。
-- **高风险动作先确认**：发送通知、写入持仓、修改生产配置、删除运行产物前，需要用户明确要求。
-- **优先 dry-run / validate / test**：如果一个问题可以通过健康检查、配置校验、测试或 dry-run 回答，就不要先跑真实流程。
-
-如果你要给代理一个最短指令，可以直接用这一段：
-
-> This repo is operations-sensitive. For explanation, investigation, or code-reading requests, inspect files and summarize first. Do not default to running `python3 scripts/...`. Prefer `./om-agent`, then `./om`, then `python3 -m ...`, and use `python3 scripts/...` only when the user explicitly asks for that script or no higher-level entry point exists. Never send notifications or mutate runtime state unless the user explicitly requests it.
-
----
-
-## 2. 初始化
-
-### 2.1 启动 WebUI
+推荐先用 WebUI：
 
 ```bash
 ./run_webui.sh
@@ -120,25 +65,16 @@ OpenClaw 环境可以先跑：
 http://127.0.0.1:8000
 ```
 
-WebUI 现在按 6 个模块组织：
+首次初始化通常会生成：
 
-- 行情设置
-- 账户设置
-- 选股策略
-- 平仓建议
-- 消息通知
-- 高级设置
+- `config.us.json` 或 `config.hk.json`
+- `secrets/portfolio.sqlite.json`
+- 可选通知、Feishu、OpenClaw 相关配置
 
-首次初始化建议直接在 WebUI 中完成。
-
----
-
-### 2.2 手工初始化（可选）
-
-如果你不用 WebUI，也可以手工复制模板：
+如果不用 WebUI，可以复制模板：
 
 ```bash
-cp configs/examples/user.common.example.json configs/user.common.json  # 可选：US/HK 共用覆盖
+cp configs/examples/user.common.example.json configs/user.common.json  # 可选
 cp configs/examples/user.example.us.json configs/user.us.json
 cp configs/examples/user.example.hk.json configs/user.hk.json
 mkdir -p secrets
@@ -147,40 +83,166 @@ cp configs/examples/portfolio.sqlite.example.json secrets/portfolio.sqlite.json
 ./om config build --market hk
 ```
 
----
-
-## 3. 配置文件说明
-
-你日常维护的文件通常只有：
+日常通常只编辑：
 
 - `configs/user.us.json`
 - `configs/user.hk.json`
-- `configs/user.common.json`（可选，US/HK 共用覆盖）
+- `configs/user.common.json`（可选，共用覆盖）
 - `secrets/portfolio.sqlite.json`
-- `secrets/notifications.feishu.app.json`（如果启用飞书通知）
+- `secrets/notifications.feishu.app.json`（启用飞书通知时）
 
-`config.us.json` / `config.hk.json` 是生成后的运行时入口，通常不手工编辑。
+生成后的 `config.us.json` / `config.hk.json` 是运行时入口，通常不手工编辑。
 
-配置优先级、`config_validate` / `healthcheck` / `runtime_status` / `openclaw_readiness` 的边界，请以 [CONFIGURATION_GUIDE.md](CONFIGURATION_GUIDE.md) 为准。
-哪些命令会写本地状态、写远端或发通知，请以 [RUNBOOK.md](RUNBOOK.md) 的“命令副作用总表”为准。
+### 3. 验证配置
 
-### 最小配置默认数据来源
+纯配置语义校验：
 
-- 行情与期权链：OpenD / Futu API
-- 持仓与现金：Futu / OpenD
-- 期权持仓存储：SQLite
-- Feishu `option_positions` 不是稳态主存储；只用于可选的空库 bootstrap 和远端镜像
+```bash
+./om config validate --config-path config.us.json
+```
 
-补充说明：当前 symbol required-data 运行时**不支持**从 OpenD / Futu 自动降级到 Yahoo。
-如果看到 `yahoo` / `yfinance` 相关字样，它们只用于显式非 Futu source 语义或独立的事件风险数据抓取，不属于 OpenD fallback。
+Agent 推荐使用结构化入口：
 
-### 3.1 Sell Put 收益增强
+```bash
+./om-agent run --tool config_validate --input-json '{"config_key":"us"}'
+./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'
+```
 
-收益增强是独立功能，配置在标的顶层 `yield_enhancement`，开关是 `enabled`。它依赖
-`sell_put.enabled=true`：系统会先筛 Sell Put，再为每个合格 Put 在同到期日 Call 链里找最合适的买入 Call strike。
-即使 `sell_call.enabled=false`，启用收益增强后也会自动补取 Call 期权链。
+判断规则：
 
-最小配置示例：
+| 想确认 | 用什么 |
+|---|---|
+| 配置字段是否合法 | `config_validate` |
+| 本机环境、OpenD、SQLite、通知前置条件是否可用 | `healthcheck` |
+| 已有运行产物和通知内容长什么样 | `runtime_status` |
+| OpenClaw 环境是否 ready | `openclaw_readiness` |
+
+## 常用工作流
+
+### 运行一次监控
+
+正式 tick 入口只有一条：
+
+```bash
+./om run tick --config config.us.json --accounts lx
+./om run tick --config config.us.json --accounts lx sy
+```
+
+传一个账户就是单账户运行，传多个账户就是多账户运行。不传 `--accounts` 时读取 runtime config 顶层 `accounts`。
+
+排障或演练时先禁发通知：
+
+```bash
+./om run tick --config config.us.json --accounts lx sy --no-send
+```
+
+旧的 `scripts/send_if_needed.py` / `scripts/send_if_needed_multi.py` 入口已移除；定时任务应使用 `./om run tick`。
+
+### 扫描机会
+
+人工 CLI：
+
+```bash
+./om scan --config-key us --symbols NVDA,TSLA --top-n 5
+```
+
+Agent：
+
+```bash
+./om-agent run --tool scan_opportunities --input-json '{"config_key":"us","symbols":["NVDA"],"top_n":5}'
+```
+
+该流程会读取行情并写本地报告；它不会发送通知。
+
+### 查询 Sell Put 现金余量
+
+人工 CLI：
+
+```bash
+./om sell-put-cash --market 富途 --account lx
+./om sell-put-cash --market 富途 --account sy
+```
+
+Agent：
+
+```bash
+./om-agent run --tool query_cash_headroom --input-json '{"config_key":"us","account":"lx"}'
+```
+
+返回账户现金、Sell Put 担保占用和剩余可用现金，并支持折算到 CNY。
+
+### 查看平仓建议
+
+人工 CLI：
+
+```bash
+./om close-advice --config-key us
+```
+
+Agent 推荐用一站式工具：
+
+```bash
+./om-agent run --tool get_close_advice --input-json '{"config_key":"us"}'
+```
+
+平仓建议依赖本地 option positions、required data 和行情缓存；如果结果异常，先跑 `healthcheck`，再确认本地持仓数据。
+
+### 管理 watchlist
+
+```bash
+./om watchlist list
+./om watchlist add TCOM --put
+./om watchlist edit TCOM --set sell_put.max_strike=45
+./om watchlist rm TCOM
+```
+
+Agent 可先只读列出：
+
+```bash
+./om-agent run --tool manage_symbols --input-json '{"config_key":"us","action":"list"}'
+```
+
+写入 symbol 配置需要 `dry_run` 或显式写入门禁。不要让 Agent 默认直接改 runtime config。
+
+### 维护 option positions
+
+本地 SQLite 是 option positions 的稳态主存储。
+
+```bash
+./om option-positions list --broker 富途 --account lx --status open
+./om option-positions add --account lx --symbol 0700.HK --option-type put --side short --contracts 1 --currency HKD --strike 420 --multiplier 100 --exp 2026-04-29 --dry-run
+```
+
+写入前先 `--dry-run`。Feishu `option_positions` 只用于可选 bootstrap 和远端镜像，不是稳态主存储。
+
+## 策略模型
+
+### Sell Put
+
+Sell Put 规则通常配置：
+
+- DTE 区间：`sell_put.min_dte` / `sell_put.max_dte`
+- strike 区间：`sell_put.min_strike` / `sell_put.max_strike`
+- 最低年化净收益：`sell_put.min_annualized_net_return`
+- 最低净收入：模板或 symbol 级 `min_net_income`
+- 流动性与价差过滤：`min_open_interest`、`min_volume`、`max_spread_ratio`
+
+扫描会结合现金占用、已开 short put、当前价格和期权链报价做过滤。
+
+### Covered Call
+
+Covered Call 规则通常配置：
+
+- `sell_call.enabled=true`
+- DTE 区间
+- call strike 下限或上下限
+- `min_if_exercised_total_return`
+
+Covered Call 可卖数量来自持仓数据，系统会扣除已被 short call 锁定的股票数量。`avg_cost` / `shares` 不再写在 symbol 配置里，而是从 holdings 读取。
+
+### Sell Put 收益增强
+
+收益增强配置在标的顶层 `yield_enhancement`：
 
 ```json
 {
@@ -198,345 +260,213 @@ cp configs/examples/portfolio.sqlite.example.json secrets/portfolio.sqlite.json
 }
 ```
 
-只需要这个顶层开关，不需要新增 `put_enhanced` 之类的模板或实体。默认会独立输出收益增强候选，
-并用内置 DTE、OTM、流动性和组合价差阈值筛选 Call。
+它依赖 `sell_put.enabled=true`。系统会先筛 Sell Put，再在同到期日 Call 链中寻找可买入 Call strike。即使 `sell_call.enabled=false`，启用收益增强后也会补取 Call 期权链。
 
-可选调优项：
+常用调优项：
 
-- `output_mode`: `separate`（默认）、`inline`、`both`。
-- `call.min_strike` / `call.max_strike`: 明确限制可买 Call 的 strike 范围。
-- `min_call_otm_pct` / `max_call_otm_pct`: 限制 Call 相对现价的虚值距离。
-- `funding_mode`: 默认 `credit_or_even`，要求 Sell Put 收入覆盖买 Call 成本；若用 `max_debit`，再配 `max_debit_native`。
-- `min_open_interest` / `min_volume` / `max_spread_ratio` / `max_combo_spread_ratio`: 流动性和组合价差过滤。
-- `scenario_move_factors` / `scenario_weights` / `min_scenario_score`: 调整 expected move 场景打分。
-
-核心逻辑：
-
-- `funding_mode=credit_or_even` 要求卖 Put 的净收入覆盖买 Call 的成本。
-- 使用期权链 IV、DTE 和当前价生成 expected move 场景，对组合收益做加权评分。
-- 排序先看组合 `scenario_score`，再看年化场景评分、上行盈亏平衡、净权利金、Put 距离、组合价差和流动性。
-- `output_mode=separate` 会生成独立收益增强候选和通知；`inline` 只把推荐 Call 附到 Sell Put 候选；`both` 两者都输出。
+- `output_mode`: `separate`、`inline`、`both`
+- `call.min_strike` / `call.max_strike`
+- `min_call_otm_pct` / `max_call_otm_pct`
+- `funding_mode`: 默认 `credit_or_even`
+- `max_debit_native`: 配合 `funding_mode=max_debit`
+- `min_open_interest` / `min_volume` / `max_spread_ratio` / `max_combo_spread_ratio`
+- `scenario_move_factors` / `scenario_weights` / `min_scenario_score`
 
 主要输出：
 
 - `<symbol>_yield_enhancement_candidates.csv`
 - `<symbol>_yield_enhancement_alerts.txt`
 - `symbols_summary.csv` 中的 `strategy=yield_enhancement`
-- 通知里的 `Enhancement` 分区，或 Sell Put 候选下的 `收益增强: 推荐Call=...` 行
+- 通知里的 `Enhancement` 分区，或 Sell Put 候选下的 `收益增强: 推荐Call=...`
 
----
+## 配置心智模型
 
-## 4. 账户与持仓
+### Canonical runtime config
 
-- 支持多账户配置
-- 持仓与现金默认来自 Futu / OpenD
-- Feishu holdings 可作为 `holdings` 或 `external_holdings` 来源
-- 运行时 Feishu holdings 连接只认 `portfolio.data_config.feishu.tables.holdings`
-- 账户级 `bitable_*` 字段当前只是历史/预留展示，不参与运行时读取
+运行时只认两类 canonical config：
 
-如果你启用了 Feishu `option_positions` bootstrap：
-- SQLite 非空时不会再触发 bootstrap
-- SQLite 空库但远端读取失败时，healthcheck 和 WebUI 会明确显示 degraded 状态
+- `config.us.json`
+- `config.hk.json`
 
-如果你需要：
-- 多账户配置
-- 账户级持仓来源
-- 每账户 OpenD 持仓连接
-- 通知凭证与高级配置
+如果使用分层配置，编辑源是：
 
-请直接查看：
+- `configs/system.json`
+- `configs/user.common.json`（可选）
+- `configs/user.us.json`
+- `configs/user.hk.json`
 
-- [CONFIGURATION_GUIDE.md](CONFIGURATION_GUIDE.md)
-- [CONFIGS.md](CONFIGS.md)
+然后生成 runtime config：
 
----
+```bash
+./om config build --market us
+./om config build --market hk
+```
 
-## 5. 通知
+查看某个值来自哪里：
 
-当前正式通知链路支持：
+```bash
+./om config explain --market us --key option_positions.sync_to_feishu.enabled
+./om config explain --market us --key symbol_defaults.fetch.limit_expirations
+```
+
+更完整的配置规则见 [CONFIGS.md](CONFIGS.md) 和 [CONFIGURATION_GUIDE.md](CONFIGURATION_GUIDE.md)。
+
+### 数据来源
+
+最小配置默认：
+
+- 行情与期权链：OpenD / Futu API
+- 持仓与现金：OpenD / Futu API
+- option positions：本地 SQLite
+- 通知：默认不启用，需要显式配置
+
+Feishu 只在这些场景需要：
+
+- holdings / external_holdings 数据源
+- option positions 空库 bootstrap
+- option positions 远端镜像
+- 飞书通知
+
+当前 symbol required-data 运行时不支持从 OpenD / Futu 自动降级到 Yahoo。`yahoo` / `yfinance` 只用于显式非 Futu source 语义或独立事件风险数据抓取，不是 OpenD fallback。
+
+### 多账户
+
+- 账户标签使用小写，例如 `lx`、`sy`
+- 默认账户列表来自 runtime config 顶层 `accounts`
+- 单账户和多账户使用同一条 tick 链路
+- Feishu-backed 账户应使用 `external_holdings` account type，并通过 `portfolio.source_by_account` 指向 `holdings`
+
+## 通知
+
+支持的正式通知链路：
 
 - 飞书开放平台应用发个人消息
-- 微信 Clawbot（通过 OpenClaw `message send` 通用通道）
+- 微信 Clawbot，通过 OpenClaw `message send` 通道发送
 
-统一 tick 的通知语义是固定的：
+统一 tick 通知语义：
 
 - 同一个通知目标下，每个账户各发送一条消息
-- 账户消息内容由 `src/application/notify_symbols.py` 和 `src/application/multi_tick/notify_format.py` 负责排版
-- 主流程在 `src/application/multi_account_tick.py` 准备候选、现金 footer 和 heartbeat 消息
-- 某个账户发送失败不会阻断其他账户；只有发送成功的账户会更新 notified 状态
+- 某个账户发送失败不会阻断其他账户
+- 只有发送成功的账户会更新 notified 状态
+- 通知内容保持 Markdown-friendly，不做卡片化纯文本
 
-通知凭证默认放在：
+通知凭证默认位置：
 
 - 飞书：`secrets/notifications.feishu.app.json`
-- 微信 Clawbot：不使用飞书 App 凭证，配置 `notifications.channel=wechat_clawbot` 和 OpenClaw 目标字符串；程序发送时会转换为 OpenClaw 实际通道 `openclaw-weixin`
+- 微信 Clawbot：配置 `notifications.channel=wechat_clawbot` 和 OpenClaw 目标字符串
 
-具体字段和配置方式见 [CONFIGURATION_GUIDE.md](CONFIGURATION_GUIDE.md)。
+具体字段见 [CONFIGURATION_GUIDE.md](CONFIGURATION_GUIDE.md)。命令副作用见 [RUNBOOK.md](RUNBOOK.md)。
 
----
+## Agent 使用指南
 
-## 6. 常用命令
-
-对 Agent 来说，本节也建议按下面顺序选入口：
-
-1. `./om-agent`（结构化、最适合代理）
-2. `./om`（统一 CLI）
-3. `python3 -m ...`
-4. `python3 scripts/...`（仅兼容/兜底）
-
-### 6.1 校验配置
-
-Agent 默认使用结构化配置校验工具；它只读 runtime config，不检查 OpenD，也不运行 pipeline。
+### 安装 Agent 工具
 
 ```bash
+bash scripts/install_agent_plugin.sh
+./om-agent spec
+```
+
+常用只读入口：
+
+```bash
+./om-agent run --tool runtime_status --input-json '{"config_key":"us"}'
+./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'
 ./om-agent run --tool config_validate --input-json '{"config_key":"us"}'
-./om-agent run --tool config_validate --input-json '{"config_path":"config.us.json"}'
 ```
 
-### 6.2 健康检查
-
-这是 Agent 排查问题时的首选入口之一，优先于直接跑 runtime pipeline。
+OpenClaw 环境：
 
 ```bash
-./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'
+./om-agent run --tool openclaw_readiness --input-json '{"config_key":"us"}'
 ```
 
-如果你要指定配置路径：
+如果生产目录、账户或 cron id 与默认路径不同，可以复制：
 
 ```bash
-./om-agent run --tool healthcheck --input-json '{"config_path":"config.us.json"}'
+cp configs/examples/openclaw.profile.example.json openclaw.profile.json
 ```
 
-### 6.3 检查和更新版本
+然后传入：
 
 ```bash
-./om-agent run --tool version_check --input-json '{"remote_name":"origin"}'
+./om-agent run --tool openclaw_readiness --input-json '{"profile_path":"openclaw.profile.json"}'
 ```
 
-Agent 可用 `version_update` 预览或更新本地 `VERSION`；默认只预览。写入需要同时满足
-`apply=true`、`confirm=true` 和 `OM_AGENT_ENABLE_WRITE_TOOLS=true`。
+### Agent 默认规则
 
-```bash
-./om-agent run --tool version_update --input-json '{"bump":"patch"}'
-OM_AGENT_ENABLE_WRITE_TOOLS=true ./om-agent run --tool version_update --input-json '{"version":"1.2.3","apply":true,"confirm":true}'
-```
+Agent 处理这个仓库时应遵守：
 
-如果要放进定时任务，默认只放只读检查或 dry-run 预览：
+- 解释、调查、代码阅读类任务先读文件，不要先跑脚本
+- 优先使用 `./om-agent`，其次 `./om`，再考虑 `python3 -m ...`
+- 不要把 `python3 scripts/...` 当作第一选择
+- 发送通知、写持仓、写 Feishu、修改生产配置、删除运行产物前必须获得用户明确要求
+- 有 dry-run、validate、healthcheck 或 test 时，先用低风险入口
+- 写工具需要 `OM_AGENT_ENABLE_WRITE_TOOLS=true` 和 payload/CLI 里的显式确认
 
-```bash
-./om-agent run --tool version_check --input-json '{"remote_name":"origin"}'
-./om-agent run --tool version_update --input-json '{"bump":"patch"}'
-```
+可直接给 Agent 的最短提示：
 
-不要把 `{"bump":"patch","apply":true,"confirm":true}` 直接放进固定频率定时任务；它每次执行都会把本地
-`VERSION` 递增一次。真正需要自动写入时，应由上游发布流程传入明确目标版本，例如
-`{"version":"1.2.3","apply":true,"confirm":true}`，并显式设置
-`OM_AGENT_ENABLE_WRITE_TOOLS=true`。这个工具只改本地 `VERSION`，不会创建 tag、commit、
-push 或部署。
+> This repo is operations-sensitive. For explanation, investigation, or code-reading requests, inspect files and summarize first. Prefer `./om-agent`, then `./om`, then `python3 -m ...`. Use `python3 scripts/...` only when explicitly requested or when no higher-level entry point covers the task. Never send notifications, mutate runtime state, write Feishu, or edit production config unless the user explicitly asks for it.
 
-人工 CLI 仍可使用 `./om version`。
+更多工具合同见 [docs/AGENT_INTEGRATION.md](docs/AGENT_INTEGRATION.md) 和 [docs/TOOL_REFERENCE.md](docs/TOOL_REFERENCE.md)。
 
-### 6.4 查询 Sell Put 现金余量
+## 定时与长驻任务
 
-Agent 使用 `query_cash_headroom`。它是 `src.application.cash_headroom_query` 中
-`query_sell_put_cash(...)` 的结构化入口，用于查询账户现金、Sell Put 担保占用和剩余可用现金。
+README 只记录公开入口和安全边界；生产 OpenClaw cron 的具体 id、启停和排障步骤见 [RUNBOOK.md](RUNBOOK.md)。
 
-```bash
-./om-agent run --tool query_cash_headroom --input-json '{"config_key":"us","account":"lx"}'
-./om-agent run --tool query_cash_headroom --input-json '{"config_key":"us","account":"sy"}'
-```
-
-人工 CLI 对应命令：
-
-```bash
-./om sell-put-cash --market 富途 --account lx
-./om sell-put-cash --market 富途 --account sy
-```
-
-### 6.5 手动跑一次 pipeline
-
-下面命令会触发真实运行；如果你只是排查问题，优先先做 healthcheck、配置校验或只跑更小的阶段。
-
-```bash
-./om scan-pipeline --config config.us.json
-```
-
-只跑某个阶段：
-
-```bash
-./om scan-pipeline --config config.us.json --stage fetch
-./om scan-pipeline --config config.us.json --stage scan
-./om scan-pipeline --config config.us.json --stage alert
-./om scan-pipeline --config config.us.json --stage notify
-```
-
-### 6.6 统一 tick 运行
-
-推荐：
-
-```bash
-./om run tick --config config.us.json --accounts lx
-./om run tick --config config.us.json --accounts lx sy
-```
-
-`./om run tick` 是正式入口。传一个账户就是单账户运行，传多个账户就是多账户运行；
-不传 `--accounts` 时读取 runtime config 顶层 `accounts`。统一链路会复用共享行情 /
-required data，再按账户生成和发送通知。通知发送和 notified 状态更新的口径见第 5 节。
-
-如果是 Agent 在排查问题，不要默认从这里开始；先做 healthcheck、配置校验，必要时再缩小到单阶段运行。
-
-旧的 `scripts/send_if_needed.py` / `scripts/send_if_needed_multi.py` 入口已移除；
-旧定时任务需要升级到 `./om run tick`。
-
-### 6.7 定时 / 常驻任务清单
-
-README 只记录公开入口和安全边界；生产 OpenClaw cron 的具体 id、启停和排障步骤见
-[RUNBOOK.md](RUNBOOK.md)。
-
-| 任务 | 推荐入口 | 适合的运行方式 | 主要副作用 |
+| 任务 | 推荐入口 | 运行方式 | 主要副作用 |
 |---|---|---|---|
-| 期权监控 / 扫描通知 | `./om run tick --config config.us.json --accounts lx sy` | 交易时段内定时执行 | 读取行情和持仓，生成报告，可能发送通知并写运行状态 |
-| 调度状态检查 | `./om-agent run --tool scheduler_status --input-json '{"config_key":"us","account":"lx"}'` | 定时或排障时只读检查 | 无业务写入 |
-| 交易监听 / 自动入账 | `python3 -m src.application.auto_trade_intake --config config.us.json --mode apply` | 长驻进程，由 supervisor / service 管理 | 监听 OpenD 成交推送，写本地 `option_positions` 和 intake state |
+| 期权监控 / 扫描通知 | `./om run tick --config config.us.json --accounts lx sy` | 交易时段定时执行 | 读取行情和持仓，生成报告，可能发送通知并写运行状态 |
+| 调度状态检查 | `./om-agent run --tool scheduler_status --input-json '{"config_key":"us","account":"lx"}'` | 定时或排障只读检查 | 无业务写入 |
+| 交易监听 / 自动入账 | `python3 -m src.application.auto_trade_intake --config config.us.json --mode apply` | 长驻进程 | 监听 OpenD 成交推送，写本地 option positions 和 intake state |
 | 持仓镜像同步 | `./om option-positions sync-feishu --config config.us.json --apply` | 低频定时或人工触发 | 写 Feishu 镜像表，并更新本地 sync metadata |
-| 版本检查 | `./om-agent run --tool version_check --input-json '{"remote_name":"origin"}'` | 低频定时只读检查 | 无业务写入 |
-| 版本更新预览 | `./om-agent run --tool version_update --input-json '{"bump":"patch"}'` | 低频定时 dry-run | 不写 `VERSION` |
+| 版本检查 | `./om-agent run --tool version_check --input-json '{"remote_name":"origin"}'` | 低频只读检查 | 无业务写入 |
+| 版本更新预览 | `./om-agent run --tool version_update --input-json '{"bump":"patch"}'` | dry-run | 不写 `VERSION` |
 
-期权监控定时任务使用统一 tick 入口：
+不要把 `{"bump":"patch","apply":true,"confirm":true}` 放进固定频率任务；它每次都会递增本地 `VERSION`。真正发布时应由发布流程传入明确目标版本。
 
-```bash
-./om run tick --config config.us.json --accounts lx sy
-```
+## 排障顺序
 
-排障或演练时可先禁发通知：
+优先顺序：
 
-```bash
-./om run tick --config config.us.json --accounts lx sy --no-send
-```
+1. 读相关代码、配置文档和测试
+2. 跑 `healthcheck`
+3. 跑 `config_validate`、测试或 dry-run
+4. 必要时再运行真实 tick 或其他会写状态的命令
 
-交易监听不是短周期 cron 任务。它会持续连接 OpenD，适合用进程管理器拉起和重启；
-首次上线前先做配置检查：
+常见问题：
 
-```bash
-python3 -m src.application.auto_trade_intake --config config.us.json --once
-```
+| 症状 | 先看什么 |
+|---|---|
+| 配置校验失败 | `notifications.*`、`trade_intake.account_mapping.futu`、`account_settings.*`、`symbols[]` |
+| 只看到一个 OpenD endpoint | 账户映射、OpenD 在线状态、账户级持仓连接 |
+| 两个账户持仓一样 | Futu account id 映射、`portfolio.source_by_account`、账户级 data source |
+| 通知保存或发送失败 | `notifications.channel`、`notifications.target`、secrets 文件、OpenClaw 目标 |
+| option positions 异常 | SQLite 路径、lot/event 状态、rebuild / inspect / reconcile 输出 |
 
-Feishu `option_positions` 是镜像，不是主存储。同步任务默认先 dry-run：
+副作用边界：
 
-```bash
-./om option-positions sync-feishu --config config.us.json --dry-run
-./om option-positions sync-feishu --config config.us.json --apply
-```
+| 命令 / 工具 | 写本地 | 写远端 | 发通知 |
+|---|---:|---:|---:|
+| `./om-agent run --tool config_validate ...` | 否 | 否 | 否 |
+| `./om-agent run --tool healthcheck ...` | 否 | 否 | 否 |
+| `./om-agent run --tool runtime_status ...` | 否 | 否 | 否 |
+| `./om run tick --config ... --no-send` | 是 | 可能 | 否 |
+| `./om run tick --config ...` | 是 | 可能 | 是 |
+| `python3 -m src.application.auto_trade_intake --mode apply` | 是 | 否 | 否 |
+| `./om option-positions sync-feishu --apply` | 是 | 是 | 否 |
 
-要真正写 Feishu `option_positions` 镜像，推荐在 `configs/user.common.json` 里显式设置，再重新生成 runtime config：
+## 文档导航
 
-```json
-{
-  "option_positions": {
-    "sync_to_feishu": {
-      "enabled": true
-    }
-  }
-}
-```
-
-默认是关闭的，避免误写远端多维表。
-
-同步时传入 runtime config，脚本会同时使用其中的 `portfolio.data_config` 和同步开关。
-
-`--prune-remote-missing-local` 会删除远端多余行，只用于明确的维护窗口，不能放进普通定时任务。
-版本更新同理，普通定时任务只做检查或 dry-run；不要把 `{"bump":"patch","apply":true,"confirm":true}` 放进固定频率任务。
-
----
-
-## 7. 常见排障
-
-对 Claude Code、OpenClaw 这类代理，排障默认顺序建议是：
-
-1. 先读相关代码、配置文档和测试
-2. 先跑 `./om-agent run --tool healthcheck ...`
-3. 再做配置校验、测试或 dry-run
-4. 最后才考虑真实 runtime 命令
-
-### 7.1 配置校验失败
-
-如果是 Agent 在排查，先做健康检查：
-
-```bash
-./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'
-```
-
-再做配置校验（这是低风险校验命令，不是 runtime 流程入口）：
-
-```bash
-./om config validate --config-path config.us.json
-```
-
-定时运行里的配置校验缓存只会在校验成功后写入；如果配置校验失败，下次 scheduled 加载仍会重新校验同一份配置，不需要为了重试而手工清理 validation cache。
-
-优先检查：
-- `notifications.target`
-- `notifications.secrets_file`
-- `trade_intake.account_mapping.futu`
-- `account_settings.<account>.type`
-- `symbols[]`
-
-然后对照 [CONFIGURATION_GUIDE.md](CONFIGURATION_GUIDE.md) 和 [CONFIGS.md](CONFIGS.md) 核对配置来源与字段约束。
-
----
-
-### 7.2 healthcheck 只看到一个 OpenD endpoint
-
-先确认不是配置映射问题，再怀疑运行态：
-
-优先检查：
-- 账户映射是否正确
-- OpenD 是否真的在线
-- 账户级持仓连接配置是否填写完整
-
-详细字段说明见 [CONFIGURATION_GUIDE.md](CONFIGURATION_GUIDE.md)。
-
-如果只是 Agent 在分析问题，不要直接切到 runtime pipeline；先读配置和 healthcheck 输出。
-
----
-
-### 7.3 两个账户持仓看起来一样
-
-先做只读排查：
-
-优先检查：
-- 是否两个账户都被映射到了同一个 Futu account id
-- 是否账户配置实际指向了同一份持仓来源
-- 是否仍然回退到了全局持仓配置
-
-具体配置优先级见 [CONFIGURATION_GUIDE.md](CONFIGURATION_GUIDE.md)。
-
-必要时先复核 healthcheck / 配置输出，再决定是否运行多账户流程命令。
-
----
-
-### 7.4 通知保存失败
-
-先做低风险检查，不要默认直接重跑发送流程：
-
-优先检查：
-- `notifications.target` 是否为空
-- `notifications.channel` 是否为 `feishu` 或 `wechat_clawbot`
-- 飞书通道：`secrets/notifications.feishu.app.json` 是否存在，`app_id / app_secret` 是否完整
-- 微信 Clawbot 通道：本机 OpenClaw 是否支持目标 `notifications.target`
-
-如果需要进一步验证，优先使用配置校验、healthcheck 或相关测试，而不是直接触发通知发送。
-
----
-
-## 8. 文档导航
-
-- [CONFIGS.md](CONFIGS.md)：配置来源与 canonical config 约定
-- [CONFIGURATION_GUIDE.md](CONFIGURATION_GUIDE.md)：详细配置字段说明
-- [RUNBOOK.md](RUNBOOK.md)：运维巡检与应急操作
+- [CONFIGS.md](CONFIGS.md)：canonical config、分层配置和迁移规则
+- [CONFIGURATION_GUIDE.md](CONFIGURATION_GUIDE.md)：字段说明、数据来源和配置边界
+- [RUNBOOK.md](RUNBOOK.md)：运维巡检、定时任务和应急操作
+- [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md)：Agent 接入快速开始
+- [docs/AGENT_INTEGRATION.md](docs/AGENT_INTEGRATION.md)：Agent JSON 合同
+- [docs/TOOL_REFERENCE.md](docs/TOOL_REFERENCE.md)：`om-agent` 工具说明
+- [docs/OPTION_POSITIONS_MIGRATION.md](docs/OPTION_POSITIONS_MIGRATION.md)：option positions 迁移
+- [docs/OPTION_POSITIONS_REPAIR.md](docs/OPTION_POSITIONS_REPAIR.md)：option positions 修复
 - [tests/README.md](tests/README.md)：测试分层和运行方式
 
----
+## 风险提示
 
-## 9. 风险提示
-
-本工具只做监控、筛选和提醒，不构成投资建议。期权交易风险较高，任何下单都需要自行复核标的、价格、仓位、保证金、流动性和事件风险。
+本工具只做监控、筛选、报告和提醒，不构成投资建议。期权交易风险较高，任何下单都需要自行复核标的、价格、仓位、保证金、流动性和事件风险。

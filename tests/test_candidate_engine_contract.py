@@ -340,6 +340,60 @@ def test_candidate_engine_stage4_rank_keys_match_put_call_policy() -> None:
     assert [r["contract_symbol"] for r in rank_candidate_rows(call_rows, mode="call")] == ["C1", "C2"]
 
 
+def test_candidate_engine_strategy_score_keeps_legacy_default_components() -> None:
+    from domain.domain.engine import compute_candidate_strategy_score
+
+    score = compute_candidate_strategy_score(
+        mode="put",
+        annualized_return=0.12,
+        net_income=70,
+        spread_ratio=0.1,
+        open_interest=500,
+        volume=20,
+        delta=-0.2,
+        otm_pct=0.08,
+        dte=30,
+    )
+
+    assert round(score.total, 6) == round(0.12 + 70 * 1e-6, 6)
+    assert score.components["liquidity"] == 0.0
+    assert score.components["risk_distance"] == 0.0
+
+
+def test_candidate_engine_rank_can_use_independent_liquidity_score() -> None:
+    from domain.domain.engine import CandidateScoreWeights, rank_candidate_rows
+
+    rows = [
+        {
+            "contract_symbol": "HIGH_RETURN_WIDE",
+            "annualized_net_return_on_cash_basis": 0.120,
+            "net_income": 100,
+            "spread_ratio": 0.95,
+            "open_interest": 1,
+            "volume": 0,
+        },
+        {
+            "contract_symbol": "LOWER_RETURN_LIQUID",
+            "annualized_net_return_on_cash_basis": 0.115,
+            "net_income": 100,
+            "spread_ratio": 0.05,
+            "open_interest": 500,
+            "volume": 20,
+        },
+    ]
+
+    assert [r["contract_symbol"] for r in rank_candidate_rows(rows, mode="put")] == [
+        "HIGH_RETURN_WIDE",
+        "LOWER_RETURN_LIQUID",
+    ]
+    ranked = rank_candidate_rows(
+        rows,
+        mode="put",
+        score_weights=CandidateScoreWeights(liquidity=0.02),
+    )
+    assert [r["contract_symbol"] for r in ranked] == ["LOWER_RETURN_LIQUID", "HIGH_RETURN_WIDE"]
+
+
 def test_candidate_engine_rejects_unknown_legacy_reject_rule() -> None:
     from domain.domain.engine import map_legacy_reject_rule, normalize_legacy_reject_log_row
 
