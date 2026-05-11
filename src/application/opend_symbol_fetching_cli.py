@@ -15,6 +15,7 @@ from src.application.opend_symbol_fetching import (
     prune_chain_cache,
     save_outputs,
 )
+from src.application.opend_fetch_config import DEFAULT_OPEND_BATCH_MARKET_SNAPSHOT, OpenDBatchConfig
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -47,6 +48,9 @@ def main() -> None:
     ap.add_argument("--snapshot-max-wait-sec", type=float, default=30.0, help="Max seconds to wait for shared market-snapshot rate-limit budget")
     ap.add_argument("--snapshot-window-sec", type=float, default=30.0, help="Shared market-snapshot rate-limit window seconds")
     ap.add_argument("--snapshot-max-calls", type=int, default=60, help="Shared market-snapshot max calls per window")
+    ap.add_argument("--snapshot-batch-size", type=int, default=DEFAULT_OPEND_BATCH_MARKET_SNAPSHOT)
+    ap.add_argument("--snapshot-fallback-max-codes", type=int, default=100)
+    ap.add_argument("--snapshot-fallback-batch-size", type=int, default=20)
     ap.add_argument("--expiration-max-wait-sec", type=float, default=30.0, help="Max seconds to wait for shared option-expiration rate-limit budget")
     ap.add_argument("--expiration-window-sec", type=float, default=30.0, help="Shared option-expiration rate-limit window seconds")
     ap.add_argument("--expiration-max-calls", type=int, default=30, help="Shared option-expiration max calls per window")
@@ -62,6 +66,12 @@ def main() -> None:
 
     if args.chain_cache:
         prune_chain_cache(base, int(args.chain_cache_keep_days))
+
+    batch_cfg = OpenDBatchConfig.from_values(
+        market_snapshot=args.snapshot_batch_size,
+        market_snapshot_fallback_max_codes=args.snapshot_fallback_max_codes,
+        market_snapshot_fallback_batch_size=args.snapshot_fallback_batch_size,
+    )
 
     opend_metrics_path = (base / "output_shared" / "state" / "opend_metrics.json").resolve()
 
@@ -93,6 +103,9 @@ def main() -> None:
                 snapshot_max_wait_sec=float(args.snapshot_max_wait_sec),
                 snapshot_window_sec=float(args.snapshot_window_sec),
                 snapshot_max_calls=int(args.snapshot_max_calls),
+                snapshot_batch_size=batch_cfg.market_snapshot,
+                snapshot_fallback_max_codes=batch_cfg.market_snapshot_fallback_max_codes,
+                snapshot_fallback_batch_size=batch_cfg.market_snapshot_fallback_batch_size,
                 expiration_max_wait_sec=float(args.expiration_max_wait_sec),
                 expiration_window_sec=float(args.expiration_window_sec),
                 expiration_max_calls=int(args.expiration_max_calls),

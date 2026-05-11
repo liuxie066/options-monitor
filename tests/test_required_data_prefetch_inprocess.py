@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import time
 
 from src.application.multi_tick import required_data_prefetch as mod
 
@@ -172,3 +173,75 @@ def test_prefetch_required_data_subprocess_mode_preserves_existing_dispatch(tmp_
     assert result["execution_mode"] == "subprocess"
     assert result["fetched_ok"] == 3
     assert len(execute_calls) == 3
+    for intent in execute_calls:
+        cmd = list(getattr(intent, "cmd"))
+        assert "--snapshot-batch-size" in cmd
+        assert "--snapshot-fallback-max-codes" in cmd
+        assert "--snapshot-fallback-batch-size" in cmd
+
+
+def test_prefetch_worker_count_defaults_to_two() -> None:
+    assert mod._resolve_prefetch_max_workers({}) == 2
+
+
+def test_prefetch_worker_count_reads_runtime_value() -> None:
+    assert mod._resolve_prefetch_max_workers({"runtime": {"prefetch_max_workers": 3}}) == 3
+    assert mod._resolve_prefetch_max_workers({"runtime": {"prefetch": {"max_workers": 4}}}) == 4
+    assert mod._resolve_prefetch_max_workers({"prefetch": {"max_workers": 5}}) == 5
+
+
+def test_prefetch_worker_count_prefers_flat_runtime_override() -> None:
+    assert mod._resolve_prefetch_max_workers(
+        {"runtime": {"prefetch_max_workers": 3, "prefetch": {"max_workers": 4}}, "prefetch": {"max_workers": 5}}
+    ) == 3
+
+
+def test_prefetch_worker_count_invalid_value_falls_back_to_default() -> None:
+    assert mod._resolve_prefetch_max_workers({"runtime": {"prefetch_max_workers": "bad"}}) == 2
+    assert mod._resolve_prefetch_max_workers({"runtime": {"prefetch_max_workers": 0}}) == 2
+    assert mod._resolve_prefetch_max_workers({"prefetch": {"max_workers": -1}}) == 2
+
+
+def test_inprocess_prefetch_summary_includes_symbol_duration(tmp_path: Path, monkeypatch) -> None:
+    watchlist = [{"symbol": "AAPL", "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111, "limit_expirations": 8}}]
+    built: list[_Gateway] = []
+
+    def fake_build_ready_futu_gateway(**kwargs):
+        gw = _Gateway()
+        built.append(gw)
+        return gw
+
+    def fake_fetch_symbol(symbol: str, **kwargs: object) -> dict[str, object]:
+        time.sleep(0.01)
+        return {
+            "symbol": symbol,
+            "rows": [{"symbol": symbol, "option_type": "put", "expiration": "2026-06-19", "strike": 100}],
+            "meta": {"status": "ok", "error": "", "source": "opend"},
+        }
+
+    monkeypatch.setattr("src.infrastructure.futu_gateway.build_ready_futu_gateway", fake_build_ready_futu_gateway)
+    monkeypatch.setattr(mod, "resolve_watchlist_config", lambda cfg: watchlist)
+    monkeypatch.setattr(mod, "has_shared_required_data", lambda symbol, root: False)
+    monkeypatch.setattr(mod, "fetch_symbol", fake_fetch_symbol)
+    monkeypatch.setattr(mod, "save_outputs", lambda *args, **kwargs: None)
+    monkeypatch.setattr(mod, "adapt_opend_tool_payload", lambda payload: {"source_name": "opend", "payload": payload})
+    monkeypatch.setattr(mod.state_repo, "append_source_snapshot_event", lambda *args, **kwargs: None)
+
+    result = mod.prefetch_required_data(
+        vpy=tmp_path / "python",
+        base=tmp_path,
+        cfg={"runtime": {"prefetch": {"execution_mode": "inprocess"}}},
+        shared_required=tmp_path / "shared_required",
+    )
+
+    assert result["prefetch_max_workers"] == 2
+    assert result["effective_prefetch_workers"] == 1
+    assert result["submitted_count"] == 1
+    assert result["completed_count"] == 1
+    assert result["skipped_count"] == 0
+    assert result["failed_count"] == 0
+    assert result["symbols"][0]["symbol"] == "AAPL"
+    assert result["symbols"][0]["execution_mode"] == "inprocess"
+    assert result["symbols"][0]["duration_sec"] >= 0.0
+    assert result["audit"][0]["duration_sec"] >= 0.0
+    assert built and built[0].close_calls >= 1
