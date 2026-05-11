@@ -1086,6 +1086,173 @@ def render_markdown(rows: list[dict[str, Any]], *, notify_levels: set[str], max_
     return "\n".join(lines).strip() + "\n"
 
 
+def _tier_emoji_compact(tier: str) -> str:
+    tier_map = {
+        "optimizer_switch": "🔴",
+        "optimizer_close": "🟠",
+        "optimizer_hold": "🟢",
+        "strong": "🔴",
+        "medium": "🟠",
+        "weak": "🟡",
+        "optional": "⚪",
+        "defer": "⚪",
+        "none": "⚪",
+    }
+    return tier_map.get(str(tier).strip().lower(), "⚪")
+
+
+def _tier_verb_compact(tier: str) -> str:
+    verb_map = {
+        "optimizer_switch": "换仓",
+        "optimizer_close": "平仓",
+        "optimizer_hold": "持有",
+        "strong": "强烈平仓",
+        "medium": "建议平仓",
+        "weak": "考虑平仓",
+        "optional": "可选平仓",
+        "defer": "观察",
+        "none": "观察",
+    }
+    return verb_map.get(str(tier).strip().lower(), "评估")
+
+
+def _fmt_date_compact_ca(exp: str) -> str:
+    if not exp or exp == "-":
+        return ""
+    try:
+        from datetime import datetime
+        dt = datetime.strptime(str(exp), "%Y-%m-%d")
+        now = datetime.now()
+        if dt.year == now.year:
+            return f"@ {dt.strftime('%m-%d')}"
+        return f"@ {exp}"
+    except Exception:
+        return f"@ {exp}"
+
+
+def _pct_compact(val) -> str:
+    try:
+        n = float(val)
+        if n >= 0.1:
+            return f"{int(round(n * 100))}%"
+        return f"{n * 100:.1f}%"
+    except Exception:
+        return str(val) if val is not None else "-"
+
+
+def _money_compact(val, currency: str | None) -> str:
+    try:
+        n = float(val)
+        prefix = "$" if currency == "USD" else "¥"
+        if abs(n) >= 1000:
+            return f"{prefix}{n:,.0f}"
+        if abs(n) >= 10:
+            return f"{prefix}{n:.0f}"
+        return f"{prefix}{n:.2f}".rstrip("0").rstrip(".")
+    except Exception:
+        return str(val) if val is not None else "-"
+
+
+def _strike_compact(val: Any) -> str:
+    try:
+        n = float(val)
+        if n.is_integer():
+            return str(int(n))
+        return f"{n:.2f}".rstrip("0").rstrip(".")
+    except Exception:
+        return str(val) if val is not None else "-"
+
+
+def _optimizer_detail_compact(row: dict[str, Any]) -> str:
+    opt_tier = str(row.get("optimizer_tier") or "").strip()
+    if opt_tier in ("defer", ""):
+        return ""
+    parts = []
+    eff_ann = _pct_compact(row.get("effective_annualized_return"))
+    tail = row.get("tail_risk_score")
+    tail_str = f"{tail:.3f}" if isinstance(tail, (int, float)) else "-"
+    if opt_tier == "optimizer_switch":
+        alt_ann = _pct_compact(row.get("alternative_annualized_return"))
+        parts.append(f"持有 {eff_ann} → 替代 {alt_ann}")
+        parts.append(f"风险 {tail_str}")
+    elif opt_tier == "optimizer_close":
+        parts.append(f"持有 {eff_ann}")
+        parts.append(f"风险 {tail_str}")
+        parts.append("无替代")
+    elif opt_tier == "optimizer_hold":
+        risk_adj = _pct_compact(row.get("risk_adjusted_return"))
+        delta_val = row.get("delta")
+        delta_str = f"{delta_val:.2f}" if isinstance(delta_val, (int, float)) else "-"
+        parts.append(f"风险调整 {risk_adj}")
+        parts.append(f"Δ={delta_str}")
+    if parts:
+        return "  💡 " + " · ".join(parts)
+    return ""
+
+
+def render_markdown_compact(
+    rows: list[dict[str, Any]], *, notify_levels: set[str], max_items: int
+) -> str:
+    selected = _selected_notify_rows(rows, notify_levels=notify_levels, max_items=max_items)
+    gap_rows = _selected_evaluation_gap_rows(rows, max_items=max_items)
+    if not selected and not gap_rows:
+        return ""
+
+    grouped: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
+    for row in selected:
+        acct = _row_account(row.get("account"))
+        grouped.setdefault(acct, []).append(row)
+    gap_grouped: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
+    for row in gap_rows:
+        acct = _row_account(row.get("account"))
+        gap_grouped.setdefault(acct, []).append(row)
+
+    lines: list[str] = []
+    for acct in list(grouped.keys()) + [x for x in gap_grouped.keys() if x not in grouped]:
+        acct_rows = grouped.get(acct) or []
+        acct_gap_rows = gap_grouped.get(acct) or []
+        if lines:
+            lines.append("")
+        lines.append(f"### [{acct}] 平仓建议 ({len(acct_rows)})")
+        if acct_rows:
+            for row in acct_rows:
+                opt = "Put" if str(row.get("option_type")) == "put" else "Call"
+                exp = row.get("expiration") or "-"
+                strike = _strike_compact(row.get("strike"))
+                suffix = "P" if opt == "Put" else "C"
+                currency = row.get("currency")
+                tier = str(row.get("tier") or "").strip().lower()
+                emoji = _tier_emoji_compact(tier)
+                verb = _tier_verb_compact(tier)
+                l1 = f"{emoji} {verb} {row.get('symbol')} {opt} {strike}{suffix} {_fmt_date_compact_ca(exp)}"
+                capture = _pct_compact(row.get("capture_ratio"))
+                dte = row.get("dte")
+                dte_str = f"{int(dte)} 天" if dte is not None else "-"
+                l2 = f"  已锁定 {capture} · 剩余 {dte_str}"
+                realized = _money_compact(row.get("realized_if_close"), currency)
+                remaining = _money_compact(row.get("remaining_premium"), currency)
+                l3 = f"  平仓收益 {realized}（剩余 {remaining}）"
+                opt_detail = _optimizer_detail_compact(row)
+                lines.append(l1)
+                lines.append(l2)
+                lines.append(l3)
+                if opt_detail:
+                    lines.append(opt_detail)
+        else:
+            lines.append("- 本次无 strong/medium 平仓建议")
+        if acct_gap_rows:
+            lines.append("- 待补数据:")
+            for row in acct_gap_rows:
+                opt = "Put" if str(row.get("option_type")) == "put" else "Call"
+                exp = row.get("expiration") or "-"
+                strike = _num(row.get("strike"))
+                suffix = "P" if opt == "Put" else "C"
+                lines.append(
+                    f"- {row.get('symbol')} {opt} {exp} {strike}{suffix} · 无法评估 | {_gap_reason_label(row)}"
+                )
+    return "\n".join(lines).strip() + "\n"
+
+
 def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     from io import StringIO
@@ -1288,7 +1455,11 @@ def run_close_advice(
     notify_level_set = {str(x).strip().lower() for x in notify_levels if str(x).strip()}
     max_items_raw = safe_int(advice_cfg.get("max_items_per_account"))
     max_items = 5 if max_items_raw is None else max_items_raw
-    text = render_markdown(rows, notify_levels=notify_level_set, max_items=max_items)
+    render_style = str(advice_cfg.get("render_style") or "legacy").strip().lower()
+    if render_style == "compact":
+        text = render_markdown_compact(rows, notify_levels=notify_level_set, max_items=max_items)
+    else:
+        text = render_markdown(rows, notify_levels=notify_level_set, max_items=max_items)
     selected_notify_rows = _selected_notify_rows(rows, notify_levels=notify_level_set, max_items=max_items)
     flag_counts: dict[str, int] = {}
     tier_counts: dict[str, int] = {}
