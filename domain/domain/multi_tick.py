@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, time
 from pathlib import Path
 from typing import Any, Callable
@@ -48,6 +49,85 @@ def _time_in_range(value: time, start: time, end: time) -> bool:
     return value >= start or value <= end
 
 
+_SCHEDULE_TZ_HK: tuple[str, ...] = (
+    'Asia/Hong_Kong',
+)
+
+
+@dataclass(frozen=True)
+class AutoMarketRuleEvaluation:
+    schedule_key: str
+    default_market: str
+    configured: bool
+    in_market_hours: bool
+    inferred_market_from_timezone: str | None
+    resolved_market: str | None
+
+
+def _collect_schedule_configs_for_auto_market(cfg: dict[str, Any]) -> tuple[tuple[str, dict[str, Any] | None, str], ...]:
+    data = cfg if isinstance(cfg, dict) else {}
+    out: list[tuple[str, dict[str, Any] | None, str]] = []
+    for schedule_key, default_market in (('schedule_hk', 'HK'), ('schedule', 'US')):
+        schedule_cfg = data.get(schedule_key)
+        out.append((schedule_key, schedule_cfg if isinstance(schedule_cfg, dict) else None, default_market))
+    return tuple(out)
+
+
+def _infer_timezone_market_override(schedule_cfg: dict[str, Any]) -> str | None:
+    """Return a timezone-specific market override for auto selection.
+
+    This only handles the legacy case where `schedule` uses an HK timezone
+    instead of `schedule_hk`; US continues to use the default `schedule` label.
+    """
+    tz = str(schedule_cfg.get('market_timezone', '')).strip()
+    if tz in _SCHEDULE_TZ_HK:
+        return 'HK'
+    return None
+
+
+def _resolve_auto_market_for_schedule(
+    *,
+    schedule_key: str,
+    inferred_market_from_timezone: str | None,
+    default_market: str,
+) -> str:
+    if schedule_key == 'schedule_hk':
+        return 'HK'
+    if inferred_market_from_timezone:
+        return inferred_market_from_timezone
+    return default_market
+
+
+def _evaluate_auto_market_rules(now_utc: datetime, cfg: dict[str, Any]) -> tuple[AutoMarketRuleEvaluation, ...]:
+    out: list[AutoMarketRuleEvaluation] = []
+    for schedule_key, schedule_cfg, default_market in _collect_schedule_configs_for_auto_market(cfg):
+        configured = isinstance(schedule_cfg, dict)
+        in_market_hours = _is_market_hours_for_schedule(now_utc, schedule_cfg) if configured else False
+        inferred_market_from_timezone = (
+            _infer_timezone_market_override(schedule_cfg)
+            if configured else None
+        )
+        resolved_market = (
+            _resolve_auto_market_for_schedule(
+                schedule_key=schedule_key,
+                inferred_market_from_timezone=inferred_market_from_timezone,
+                default_market=default_market,
+            )
+            if in_market_hours else None
+        )
+        out.append(
+            AutoMarketRuleEvaluation(
+                schedule_key=schedule_key,
+                default_market=default_market,
+                configured=configured,
+                in_market_hours=in_market_hours,
+                inferred_market_from_timezone=inferred_market_from_timezone,
+                resolved_market=resolved_market,
+            )
+        )
+    return tuple(out)
+
+
 def _is_market_hours_for_schedule(now_utc: datetime, schedule_cfg: dict[str, Any]) -> bool:
     if not isinstance(schedule_cfg, dict) or not bool(schedule_cfg.get("enabled", True)):
         return False
@@ -79,14 +159,9 @@ def select_markets_to_run(now_utc: datetime, cfg: dict, market_config: str) -> l
     if mc == 'all':
         return ['HK', 'US']
 
-    schedule_hk = (cfg.get('schedule_hk') or {}) if isinstance(cfg, dict) else {}
-    schedule_us = (cfg.get('schedule') or {}) if isinstance(cfg, dict) else {}
-
-    if _is_market_hours_for_schedule(now_utc, schedule_hk):
-        return ['HK']
-
-    if _is_market_hours_for_schedule(now_utc, schedule_us):
-        return ['US']
+    for evaluation in _evaluate_auto_market_rules(now_utc, cfg):
+        if evaluation.resolved_market:
+            return [evaluation.resolved_market]
 
     return []
 
