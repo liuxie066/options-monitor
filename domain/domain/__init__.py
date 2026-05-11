@@ -80,6 +80,7 @@ _MODULE_EXPORTS = {
     'alert_policy',
     'alert_rules',
     'cash_secured_utils',
+    'risk_capacity',
     'candidate_defaults',
     'option_positions_v2',
     'option_position_identity',

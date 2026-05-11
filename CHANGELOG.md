@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 1.2.7 - 2026-05-11
+
+### Added
+- Added shared risk-capacity helpers for Sell Put cash headroom and Covered Call share coverage decisions.
+
+### Changed
+- Hardened Sell Put and Covered Call gating so missing multiplier, currency, cash-secured basis, or cash requirement data fails closed instead of using guessed defaults.
+- Propagated cash-secured unavailable diagnostics through candidate filtering, cash-headroom queries, and cash footers so unknown cash usage is visible instead of silently reported as available.
+
+### Fixed
+- Stopped defaulting short-call locked shares to multiplier 100 when the real contract multiplier is missing.
+- Stopped defaulting short-put secured cash currency or candidate cash requirement currency to USD when the real currency is missing.
+- Stopped summary generation from inventing `cash_required_usd` with `strike * 100`.
+
 ## 1.2.3 - 2026-05-10
 
 ### Added

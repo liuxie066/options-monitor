@@ -176,6 +176,7 @@ def run_symbol_monitoring(
         _append_summary_result(summary_rows, deps.empty_sell_put_summary_fn(symbol, symbol_cfg=symbol_cfg))
 
     if want_call:
+        option_ctx = (inputs.portfolio_ctx or {}).get("option_ctx") or {}
         _append_summary_result(
             summary_rows,
             deps.run_sell_call_scan_fn(
@@ -192,7 +193,8 @@ def run_symbol_monitoring(
                 is_scheduled=bool(inputs.is_scheduled),
                 stock=stock,
                 exchange_rate_converter=exchange_rate_converter,
-                locked_shares_by_symbol=((inputs.portfolio_ctx or {}).get("option_ctx") or {}).get("locked_shares_by_symbol"),
+                locked_shares_by_symbol=option_ctx.get("locked_shares_by_symbol"),
+                locked_shares_unavailable_by_symbol=option_ctx.get("locked_shares_unavailable_by_symbol"),
                 global_sell_call_liquidity=(symbol_cfg.get("_global_sell_call_liquidity") or {}),
                 global_sell_call_event_risk=(symbol_cfg.get("_global_sell_call_event_risk") or {}),
             )

@@ -42,6 +42,6 @@ def test_build_context_reads_plain_rates_payload() -> None:
     records = [_record('700.HK', 'short', 'put', 'HKD', 100.0)]
     ctx = build_context(records, broker="富途", account="lx", rates={"USDCNY": "7.2", "HKDCNY": "7.9"})
 
-    assert ctx["cash_secured_by_symbol_by_ccy"]["700.HK"]["HKD"] == 100.0
+    assert ctx["cash_secured_by_symbol_by_ccy"]["0700.HK"]["HKD"] == 100.0
     assert ctx["cash_secured_total_by_ccy"]["HKD"] == 100.0
     assert ctx["cash_secured_total_cny"] == 100.0 * 7.9
