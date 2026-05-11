@@ -32,6 +32,11 @@ def test_multi_tick_and_webui_use_application_facades() -> None:
     cron_runtime_src = (ROOT / "src" / "application" / "cron_runtime.py").read_text(encoding="utf-8")
     tool_execution_src = (ROOT / "src" / "application" / "tool_execution.py").read_text(encoding="utf-8")
     healthcheck_src = (ROOT / "src" / "application" / "healthcheck.py").read_text(encoding="utf-8")
+    healthcheck_runner_src = (ROOT / "src" / "application" / "healthcheck_runner.py").read_text(encoding="utf-8")
+    healthcheck_script_src = (ROOT / "scripts" / "healthcheck.py").read_text(encoding="utf-8")
+    healthcheck_notify_src = (ROOT / "scripts" / "healthcheck_and_notify.py").read_text(encoding="utf-8")
+    required_data_prefetch_src = (ROOT / "src" / "application" / "multi_tick" / "required_data_prefetch.py").read_text(encoding="utf-8")
+    prefetch_coordinator_src = (ROOT / "src" / "application" / "multi_tick" / "prefetch_coordinator.py").read_text(encoding="utf-8")
     scan_pipeline_src = (ROOT / "src" / "application" / "scan_pipeline.py").read_text(encoding="utf-8")
     notification_pipeline_src = (ROOT / "src" / "application" / "notification_pipeline.py").read_text(encoding="utf-8")
     close_advice_pipeline_src = (ROOT / "src" / "application" / "close_advice_pipeline.py").read_text(encoding="utf-8")
@@ -69,6 +74,18 @@ def test_multi_tick_and_webui_use_application_facades() -> None:
     assert not (ROOT / "src" / "application" / "agent_tools.py").exists()
     assert not (ROOT / "scripts" / "agent_plugin").exists()
     assert "from src.application.tool_execution import execute_tool" in healthcheck_src
+    assert "from src.application.healthcheck_runner import main" in healthcheck_script_src
+    assert "get_tenant_access_token" not in healthcheck_script_src
+    assert "bitable_fields" not in healthcheck_script_src
+    assert "validate_config" not in healthcheck_script_src
+    assert "run_scheduler" not in healthcheck_script_src
+    assert "get_tenant_access_token" in healthcheck_runner_src
+    assert "run_scheduler" in healthcheck_runner_src
+    assert "scripts/healthcheck.py" not in healthcheck_notify_src
+    assert "run_healthcheck_runner" in healthcheck_notify_src
+    assert "from src.application.multi_tick.prefetch_coordinator import PrefetchCoordinator" in required_data_prefetch_src
+    assert "ThreadPoolExecutor" not in required_data_prefetch_src
+    assert "ThreadPoolExecutor" in prefetch_coordinator_src
     assert "from src.application.tool_execution import execute_tool" in scan_pipeline_src
     assert "from src.application.tool_execution import execute_tool" in notification_pipeline_src
     assert "from src.application.tool_execution import execute_tool" in close_advice_pipeline_src

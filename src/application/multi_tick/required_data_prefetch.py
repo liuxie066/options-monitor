@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-import threading
-import time
 from typing import Any
 
 from domain.domain.tool_boundary import SCHEMA_VERSION_V1, normalize_tool_execution_payload
@@ -12,20 +9,17 @@ from domain.services import (
     ToolExecutionService,
     adapt_opend_tool_payload,
 )
-from domain.domain.fetch_source import is_futu_fetch_source, resolve_symbol_fetch_source
+from domain.domain.fetch_source import resolve_symbol_fetch_source
 from domain.storage.repositories import state_repo
 from src.application.config_loader import resolve_watchlist_config
+from src.application.multi_tick.prefetch_coordinator import PrefetchCoordinator
 from src.application.opend_fetch_config import resolve_opend_batch_config, resolve_opend_fetch_config
 from src.application.opend_symbol_fetching import fetch_symbol, save_outputs
+from src.infrastructure.futu_gateway_pool import ThreadLocalFutuGatewayPool
 from src.infrastructure.io_utils import has_shared_required_data
-from src.infrastructure.opend_retcodes import classify_opend_error
-from domain.domain.symbol_identity import symbol_market
 
 
-_thread_gateway = threading.local()
-_thread_gateway_failures = threading.local()
-_thread_gateway_registry_lock = threading.Lock()
-_thread_gateway_registry: list[Any] = []
+_gateway_pool = ThreadLocalFutuGatewayPool()
 _DEFAULT_PREFETCH_MAX_WORKERS = 2
 
 
@@ -81,128 +75,6 @@ def _resolve_opend_fetch_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _is_prefetch_error(payload: dict[str, Any]) -> bool:
-    if not bool(payload.get("ok")):
-        return True
-    status = str(payload.get("status") or "").strip().lower()
-    return status in {"error", "fail", "failed"}
-
-
-def _is_opend_rate_limit_payload(payload: dict[str, Any]) -> bool:
-    return classify_opend_error(payload).is_rate_limit
-
-
-def _get_thread_gateway(host: str, port: int, chain_cache: bool):
-    key = (str(host), int(port), bool(chain_cache))
-    gateways = getattr(_thread_gateway, "gateways", None)
-    if not isinstance(gateways, dict):
-        gateways = {}
-        _thread_gateway.gateways = gateways
-    g = gateways.get(key)
-    if g is not None:
-        try:
-            checker = getattr(g, "is_connected", None)
-            if checker is None or checker():
-                return g
-        except Exception:
-            pass
-        try:
-            g.close()
-        except Exception:
-            pass
-        gateways.pop(key, None)
-    from src.infrastructure.futu_gateway import build_ready_futu_gateway
-
-    g = build_ready_futu_gateway(host=host, port=int(port), is_option_chain_cache_enabled=bool(chain_cache))
-    gateways[key] = g
-    with _thread_gateway_registry_lock:
-        _thread_gateway_registry.append(g)
-    return g
-
-
-def _close_thread_gateway():
-    gateways = getattr(_thread_gateway, "gateways", None)
-    if isinstance(gateways, dict):
-        values = list(gateways.values())
-        gateways.clear()
-    else:
-        values = []
-    legacy_gw = getattr(_thread_gateway, "gw", None)
-    if legacy_gw is not None:
-        values.append(legacy_gw)
-        _thread_gateway.gw = None
-    seen: set[int] = set()
-    for g in values:
-        if id(g) in seen:
-            continue
-        seen.add(id(g))
-        try:
-            g.close()
-        except Exception:
-            pass
-    _thread_gateway_failures.count = 0
-
-
-def _close_registered_gateways() -> None:
-    with _thread_gateway_registry_lock:
-        gateways = list(_thread_gateway_registry)
-        _thread_gateway_registry.clear()
-    for g in gateways:
-        try:
-            g.close()
-        except Exception:
-            pass
-
-
-def _is_thread_gateway_connection_error(exc: Exception) -> bool:
-    text = str(exc or "")
-    low = text.lower()
-    if "ret_error" in low:
-        return True
-    keys = ("disconnected", "connection", "broken pipe", "connection reset", "timeout", "temporarily unavailable")
-    return any(k in low for k in keys)
-
-
-def _mark_thread_gateway_failure(exc: Exception) -> None:
-    count = int(getattr(_thread_gateway_failures, "count", 0) or 0)
-    if _is_thread_gateway_connection_error(exc):
-        count += 1
-    else:
-        count = 0
-    _thread_gateway_failures.count = count
-    if count >= 2:
-        _close_thread_gateway()
-
-
-def _mark_thread_gateway_success() -> None:
-    _thread_gateway_failures.count = 0
-
-
-def _symbol_class(symbol: str) -> str:
-    return symbol_market(symbol) or "US"
-
-
-def _annotate_prefetch_payload(
-    payload: dict[str, Any],
-    *,
-    execution_mode: str,
-    duration_sec: float | None,
-) -> dict[str, Any]:
-    payload["execution_mode"] = execution_mode
-    if duration_sec is not None:
-        payload["duration_sec"] = float(duration_sec)
-    return payload
-
-
-def _safe_duration_sec(started_at: float | None) -> float | None:
-    if started_at is None:
-        return None
-    try:
-        return max(0.0, float(time.monotonic() - started_at))
-    except Exception:
-        return None
-
-
 def _fetch_one_inprocess(
     symbol_cfg: dict,
     *,
@@ -237,7 +109,7 @@ def _fetch_one_inprocess(
     host = str(fetch_cfg.get('host') or '127.0.0.1')
     port = _to_int(fetch_cfg.get('port') or 11111, 11111)
     try:
-        gateway = _get_thread_gateway(host, port, True)
+        gateway = _gateway_pool.get_gateway(host=host, port=port, chain_cache=True)
         payload0 = fetch_symbol(
             symbol,
             limit_expirations=limit_exp,
@@ -262,7 +134,7 @@ def _fetch_one_inprocess(
             expiration_window_sec=float(opend_fetch_cfg['option_expiration']['window_sec']),
             expiration_max_calls=int(opend_fetch_cfg['option_expiration']['max_calls']),
         )
-        _mark_thread_gateway_success()
+        _gateway_pool.mark_success()
         save_outputs(base, symbol, payload0, output_root=shared_required)
         meta = payload0.get('meta') if isinstance(payload0.get('meta'), dict) else {}
         ok = str(meta.get('status') or '').strip().lower() not in {'error', 'fail', 'failed'}
@@ -280,7 +152,7 @@ def _fetch_one_inprocess(
         if isinstance(payload0, dict):
             payload['payload'] = payload0
     except Exception as exc:
-        _mark_thread_gateway_failure(exc)
+        _gateway_pool.mark_failure(exc)
         message = str(exc or '')
         payload = normalize_tool_execution_payload(
             tool_name='required_data_prefetch',
@@ -407,14 +279,6 @@ def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required:
 
     todo_cfgs = [it for it in syms if _need_fetch(str(it.get('symbol')).strip())]
 
-    ok = 0
-    err = 0
-    skipped = 0
-    submitted_count = 0
-    completed_count = 0
-    results: dict[str, str] = {}
-    audit_items: list[dict] = []
-
     if not todo_cfgs:
         return {
             'schema_version': SCHEMA_VERSION_V1,
@@ -439,180 +303,31 @@ def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required:
     configured_max_workers = _resolve_prefetch_max_workers(cfg)
     max_workers = max(1, min(configured_max_workers, len(todo_cfgs)))
     fail_budget_consecutive, fail_budget_total = _resolve_failure_budget(cfg)
-    fail_consecutive = 0
-    fail_total = 0
-    rate_limit_blocked_classes: set[str] = set()
-    budget_triggered = False
-    budget_summary_emitted = False
 
-    def _budget_exceeded() -> bool:
-        return (fail_consecutive >= fail_budget_consecutive) or (fail_total >= fail_budget_total)
+    def _dispatch(symbol_cfg: dict[str, Any]) -> dict[str, Any]:
+        if execution_mode == 'subprocess':
+            return _fetch_one(symbol_cfg)
+        return _fetch_one_inprocess(
+            symbol_cfg,
+            base=base,
+            shared_required=shared_required,
+            opend_fetch_cfg=opend_fetch_cfg,
+            batch_cfg=batch_cfg,
+        )
 
-    q = list(todo_cfgs)
-    q_idx = 0
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futs: dict[Any, dict[str, Any]] = {}
-
-        def _dispatch(symbol_cfg: dict) -> dict:
-            if execution_mode == 'subprocess':
-                return _fetch_one(symbol_cfg)
-            return _fetch_one_inprocess(
-                symbol_cfg,
-                base=base,
-                shared_required=shared_required,
-                opend_fetch_cfg=opend_fetch_cfg,
-                batch_cfg=batch_cfg,
-            )
-
-        def _dispatch_timed(symbol_cfg: dict) -> dict:
-            started_at: float | None
-            try:
-                started_at = time.monotonic()
-            except Exception:
-                started_at = None
-            payload = _dispatch(symbol_cfg)
-            if isinstance(payload, dict):
-                return _annotate_prefetch_payload(
-                    payload,
-                    execution_mode=execution_mode,
-                    duration_sec=_safe_duration_sec(started_at),
-                )
-            return payload
-
-        def _submit_next() -> bool:
-            nonlocal q_idx, skipped, submitted_count
-            while q_idx < len(q):
-                symbol_cfg = q[q_idx]
-                q_idx += 1
-                symbol = str((symbol_cfg or {}).get("symbol") or "").strip()
-                fetch_cfg = (symbol_cfg.get("fetch") or {}) if isinstance(symbol_cfg, dict) else {}
-                src, _decision = resolve_symbol_fetch_source(fetch_cfg)
-                sym_class = _symbol_class(symbol)
-                if is_futu_fetch_source(src) and sym_class in rate_limit_blocked_classes:
-                    payload = normalize_tool_execution_payload(
-                        tool_name='required_data_prefetch',
-                        symbol=symbol,
-                        source=src,
-                        limit_exp=int(fetch_cfg.get('limit_expirations') or 8),
-                        status='skipped',
-                        ok=True,
-                        message=f'opend_rate_limit_short_circuit class={sym_class}',
-                        returncode=None,
-                    )
-                    audit_items.append(_annotate_prefetch_payload(payload, execution_mode=execution_mode, duration_sec=0.0))
-                    if symbol:
-                        results[symbol] = str(payload.get("message") or "")
-                    skipped += 1
-                    continue
-                fut = ex.submit(_dispatch_timed, symbol_cfg)
-                futs[fut] = symbol_cfg
-                submitted_count += 1
-                return True
-            return False
-
-        while len(futs) < max_workers and _submit_next():
-            pass
-
-        while futs:
-            fut = next(as_completed(futs))
-            symbol_cfg = futs.pop(fut)
-            payload = fut.result()
-            audit_items.append(payload)
-            completed_count += 1
-
-            sym = str(payload.get('symbol') or '').strip()
-            msg = str(payload.get('message') or '')
-            if sym:
-                results[sym] = msg
-            status = str(payload.get('status') or '').strip().lower()
-            if status == 'skipped':
-                skipped += 1
-            elif _is_prefetch_error(payload):
-                err += 1
-                fail_consecutive += 1
-                fail_total += 1
-                if is_futu_fetch_source(payload.get("source")) and _is_opend_rate_limit_payload(payload):
-                    rate_limit_blocked_classes.add(_symbol_class(sym))
-                if (not budget_triggered) and _budget_exceeded():
-                    budget_triggered = True
-                    if not budget_summary_emitted:
-                        budget_summary_emitted = True
-                        summary = normalize_tool_execution_payload(
-                            tool_name='required_data_prefetch',
-                            symbol='*',
-                            source='budget',
-                            limit_exp=0,
-                            status='error',
-                            ok=False,
-                            message=(
-                                f'prefetch_failure_budget_exceeded consecutive={fail_consecutive}/{fail_budget_consecutive} '
-                                f'total={fail_total}/{fail_budget_total}; stopped_early'
-                            ),
-                            returncode=None,
-                        )
-                        audit_items.append(summary)
-            else:
-                ok += 1
-                fail_consecutive = 0
-
-            if budget_triggered:
-                for pending in list(futs.keys()):
-                    if pending.cancel():
-                        cfg0 = futs.pop(pending)
-                        symbol0 = str((cfg0 or {}).get("symbol") or "").strip()
-                        payload0 = normalize_tool_execution_payload(
-                            tool_name='required_data_prefetch',
-                            symbol=symbol0,
-                            source=str(((cfg0.get('fetch') or {}) if isinstance(cfg0, dict) else {}).get('source') or 'unknown'),
-                            limit_exp=int((((cfg0.get('fetch') or {}) if isinstance(cfg0, dict) else {}).get('limit_expirations') or 8)),
-                            status='skipped',
-                            ok=True,
-                            message='prefetch_stopped_by_failure_budget',
-                            returncode=None,
-                        )
-                        audit_items.append(_annotate_prefetch_payload(payload0, execution_mode=execution_mode, duration_sec=0.0))
-                        if symbol0:
-                            results[symbol0] = str(payload0.get("message") or "")
-                        skipped += 1
-                while q_idx < len(q):
-                    cfg1 = q[q_idx]
-                    q_idx += 1
-                    symbol1 = str((cfg1 or {}).get("symbol") or "").strip()
-                    payload1 = normalize_tool_execution_payload(
-                        tool_name='required_data_prefetch',
-                        symbol=symbol1,
-                        source=str(((cfg1.get('fetch') or {}) if isinstance(cfg1, dict) else {}).get('source') or 'unknown'),
-                        limit_exp=int((((cfg1.get('fetch') or {}) if isinstance(cfg1, dict) else {}).get('limit_expirations') or 8)),
-                        status='skipped',
-                        ok=True,
-                        message='prefetch_stopped_by_failure_budget',
-                        returncode=None,
-                    )
-                    audit_items.append(_annotate_prefetch_payload(payload1, execution_mode=execution_mode, duration_sec=0.0))
-                    if symbol1:
-                        results[symbol1] = str(payload1.get("message") or "")
-                    skipped += 1
-                continue
-
-            while len(futs) < max_workers and _submit_next():
-                pass
-
-        if execution_mode == 'inprocess':
-            list(ex.map(lambda _idx: _close_thread_gateway(), range(max_workers)))
+    coordinator = PrefetchCoordinator(
+        symbol_cfgs=todo_cfgs,
+        max_workers=max_workers,
+        execution_mode=execution_mode,
+        fail_budget_consecutive=fail_budget_consecutive,
+        fail_budget_total=fail_budget_total,
+        dispatch_fn=_dispatch,
+        cleanup_worker_fn=(_gateway_pool.close_current_thread if execution_mode == 'inprocess' else None),
+    )
+    coordinator_result = coordinator.run()
 
     if execution_mode == 'inprocess':
-        _close_registered_gateways()
-
-    symbol_items = [
-        {
-            'symbol': str(item.get('symbol') or ''),
-            'status': str(item.get('status') or ''),
-            'execution_mode': str(item.get('execution_mode') or execution_mode),
-            **({'duration_sec': float(duration_sec)} if (duration_sec := item.get('duration_sec')) is not None else {}),
-        }
-        for item in audit_items
-        if isinstance(item, dict) and str(item.get('symbol') or '').strip() and str(item.get('symbol') or '') != '*'
-    ]
+        _gateway_pool.close_registered()
 
     return {
         'schema_version': SCHEMA_VERSION_V1,
@@ -622,19 +337,19 @@ def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required:
         'prefetch_max_workers': configured_max_workers,
         'effective_prefetch_workers': max_workers,
         'execution_mode': execution_mode,
-        'fetched_ok': ok,
-        'errors': err,
-        'skipped': skipped,
-        'submitted_count': submitted_count,
-        'completed_count': completed_count,
-        'skipped_count': skipped,
-        'failed_count': err,
+        'fetched_ok': coordinator_result.fetched_ok,
+        'errors': coordinator_result.errors,
+        'skipped': coordinator_result.skipped,
+        'submitted_count': coordinator_result.submitted_count,
+        'completed_count': coordinator_result.completed_count,
+        'skipped_count': coordinator_result.skipped,
+        'failed_count': coordinator_result.errors,
         'fail_budget_consecutive': fail_budget_consecutive,
         'fail_budget_total': fail_budget_total,
-        'budget_triggered': budget_triggered,
-        'opend_rate_limit_classes': sorted(rate_limit_blocked_classes),
+        'budget_triggered': coordinator_result.budget_triggered,
+        'opend_rate_limit_classes': sorted(coordinator_result.opend_rate_limit_classes),
         'force_refresh': bool(force_refresh),
-        'results': results,
-        'symbols': symbol_items,
-        'audit': audit_items,
+        'results': coordinator_result.results,
+        'symbols': coordinator_result.symbol_items,
+        'audit': coordinator_result.audit_items,
     }

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.2.13 - 2026-05-11
+
+### Changed
+- Moved the operational healthcheck owner from `scripts/healthcheck.py` into `src.application.healthcheck_runner`, with structured results and the legacy human report formatter kept behind the application service.
+- Extracted OpenD required-data prefetch lifecycle pieces into `src.infrastructure.futu_gateway_pool` and `src.application.multi_tick.prefetch_coordinator`, separating gateway reuse and prefetch scheduling from the hot-path fetch entrypoint.
+
+### Fixed
+- Removed the healthcheck notify wrapper's subprocess dependency on `scripts/healthcheck.py`.
+- Kept OpenD prefetch endpoint reuse keyed by host/port/cache settings while moving the lifecycle policy out of `required_data_prefetch.py`.
+
 ## 1.2.12 - 2026-05-11
 
 ### Changed
