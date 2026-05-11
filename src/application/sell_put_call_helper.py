@@ -9,7 +9,9 @@ import pandas as pd
 
 from domain.domain.engine import (
     YieldEnhancementLeg,
+    YieldEnhancementOptimizerScore,
     compute_yield_enhancement_metrics,
+    compute_yield_enhancement_optimizer_score,
     rank_yield_enhancement_rows,
     validate_yield_enhancement_pair,
 )
@@ -197,6 +199,42 @@ def _float_list(value: Any, *, default: tuple[float, ...]) -> tuple[float, ...]:
     return tuple(parsed) if parsed else default
 
 
+def _cfg_float(cfg: dict[str, Any], key: str, default: float) -> float:
+    value = _safe_float(cfg.get(key))
+    return float(default if value is None else value)
+
+
+def _optimizer_row_fields(score: YieldEnhancementOptimizerScore) -> dict[str, Any]:
+    components = ";".join(
+        f"{name}={value:.6f}"
+        for name, value in sorted(score.score_components.items())
+    )
+    return {
+        "optimizer_accepted": bool(score.accepted),
+        "optimizer_score": score.optimizer_score,
+        "optimizer_reject_reasons": "|".join(score.reject_reasons),
+        "put_net_credit": score.put_net_credit,
+        "call_total_cost": score.call_total_cost,
+        "combo_net_credit": score.combo_net_credit,
+        "base_cash_required": score.base_cash_required,
+        "combo_cash_required": score.combo_cash_required,
+        "base_downside_breakeven": score.base_downside_breakeven,
+        "combo_downside_breakeven": score.combo_downside_breakeven,
+        "downside_worsen": score.downside_worsen,
+        "downside_worsen_pct": score.downside_worsen_pct,
+        "base_scenario_score": score.base_scenario_score,
+        "combo_scenario_score": score.combo_scenario_score,
+        "scenario_score_lift": score.scenario_score_lift,
+        "base_annualized_scenario_score": score.base_annualized_scenario_score,
+        "combo_annualized_scenario_score": score.combo_annualized_scenario_score,
+        "annualized_scenario_score_lift": score.annualized_scenario_score_lift,
+        "call_cost_ratio": score.call_cost_ratio,
+        "combo_spread_worsen_ratio": score.combo_spread_worsen_ratio,
+        "spread_penalty": score.spread_penalty,
+        "optimizer_score_components": components,
+    }
+
+
 def _build_pair_row(
     *,
     put_leg: YieldEnhancementLeg,
@@ -205,6 +243,7 @@ def _build_pair_row(
     scenario_move_factors: tuple[float, ...],
     scenario_weights: tuple[float, ...],
     min_combo_notional_floor: float,
+    optimizer_cfg: dict[str, Any],
 ) -> dict[str, Any]:
     multiplier = int(put_leg.multiplier)
     put_sell_fee = calc_futu_option_fee(put_leg.currency, put_leg.bid, contracts=1, multiplier=multiplier, is_sell=True)
@@ -220,7 +259,7 @@ def _build_pair_row(
         min_combo_notional_floor=min_combo_notional_floor,
     )
     risk = classify_sell_put_risk(metrics.put_otm_pct)
-    return {
+    row = {
         "symbol": put_leg.symbol,
         "expiration": put_leg.expiration,
         "dte": min(put_leg.dte, call_leg.dte),
@@ -276,6 +315,28 @@ def _build_pair_row(
         "iv": put_leg.implied_volatility,
         "risk_label": risk.risk_label,
     }
+    optimizer_enabled = bool(optimizer_cfg.get("optimizer_enabled", True))
+    if optimizer_enabled:
+        optimizer = compute_yield_enhancement_optimizer_score(
+            put_leg=put_leg,
+            call_leg=call_leg,
+            put_sell_fee=put_sell_fee,
+            call_buy_fee=call_buy_fee,
+            combo_metrics=metrics,
+            min_combo_net_credit=_cfg_float(optimizer_cfg, "min_combo_net_credit", 0.0),
+            max_downside_worsen_pct=_cfg_float(optimizer_cfg, "max_downside_worsen_pct", 0.003),
+            min_scenario_score_lift=_cfg_float(optimizer_cfg, "min_scenario_score_lift", 0.01),
+            min_annualized_scenario_score_lift=_cfg_float(
+                optimizer_cfg,
+                "min_annualized_scenario_score_lift",
+                0.08,
+            ),
+            min_lift_to_downside_ratio=_cfg_float(optimizer_cfg, "min_lift_to_downside_ratio", 2.0),
+            max_combo_spread_ratio=_cfg_float(optimizer_cfg, "max_combo_spread_ratio", 0.35),
+            max_combo_spread_worsen_ratio=_cfg_float(optimizer_cfg, "max_combo_spread_worsen_ratio", 0.15),
+        )
+        row.update(_optimizer_row_fields(optimizer))
+    return row
 
 
 def _empty_pairs_df() -> pd.DataFrame:
@@ -294,6 +355,12 @@ def _empty_pairs_df() -> pd.DataFrame:
             "scenario_score",
             "annualized_scenario_score",
             "call_candidate_count",
+            "optimizer_accepted",
+            "optimizer_score",
+            "optimizer_reject_reasons",
+            "scenario_score_lift",
+            "annualized_scenario_score_lift",
+            "downside_worsen_pct",
         ]
     )
 
@@ -356,6 +423,7 @@ def find_sell_put_yield_enhancement_pairs(
         max_debit_native = _safe_float(cfg.get("max_debit"))
     max_combo_spread_ratio = _safe_float(cfg.get("max_combo_spread_ratio", 0.50))
     min_combo_notional_floor = 1.0
+    optimizer_enabled = bool(cfg.get("optimizer_enabled", True))
 
     raw_calls = _load_required_data_calls(input_root=Path(input_root), symbol=symbol)
     call_legs_by_expiration: dict[str, list[YieldEnhancementLeg]] = {}
@@ -410,8 +478,11 @@ def find_sell_put_yield_enhancement_pairs(
                     scenario_move_factors=scenario_move_factors,
                     scenario_weights=scenario_weights,
                     min_combo_notional_floor=min_combo_notional_floor,
+                    optimizer_cfg=cfg,
                 )
             except Exception:
+                continue
+            if optimizer_enabled and not bool(candidate.get("optimizer_accepted")):
                 continue
             if funding_mode == "credit_or_even" and float(candidate["net_credit"]) < 0:
                 continue
@@ -506,6 +577,9 @@ def attach_best_linked_calls(
                 "linked_call_scenario_score": _safe_float(top.get("scenario_score")),
                 "linked_call_annualized_scenario_score": _safe_float(top.get("annualized_scenario_score")),
                 "linked_call_count": int(_safe_float(top.get("call_candidate_count")) or 1),
+                "linked_call_optimizer_score": _safe_float(top.get("optimizer_score")),
+                "linked_call_scenario_score_lift": _safe_float(top.get("scenario_score_lift")),
+                "linked_call_downside_worsen_pct": _safe_float(top.get("downside_worsen_pct")),
             }
         )
 

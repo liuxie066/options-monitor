@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.2.17 - 2026-05-11
+
+### Added
+- Added a stricter Sell Put yield-enhancement optimizer score that compares Sell Put alone against Sell Put + Long Call before recommending the long Call.
+
+### Changed
+- Yield-enhancement ranking now prioritizes optimizer score, scenario-score lift, downside breakeven deterioration, and combo spread before falling back to the existing scenario score ordering.
+
 ## 1.2.16 - 2026-05-11
 
 ### Added

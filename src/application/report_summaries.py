@@ -63,6 +63,9 @@ SELL_PUT_EMPTY_FIELDS = {
     'linked_call_scenario_score': None,
     'linked_call_annualized_scenario_score': None,
     'linked_call_count': None,
+    'linked_call_optimizer_score': None,
+    'linked_call_scenario_score_lift': None,
+    'linked_call_downside_worsen_pct': None,
 }
 
 YIELD_ENHANCEMENT_EMPTY_FIELDS = {
@@ -89,6 +92,28 @@ YIELD_ENHANCEMENT_EMPTY_FIELDS = {
     'gap_width_pct': None,
     'upside_breakeven_pct_above_spot': None,
     'combo_spread_ratio': None,
+    'optimizer_accepted': None,
+    'optimizer_score': None,
+    'optimizer_reject_reasons': None,
+    'put_net_credit': None,
+    'call_total_cost': None,
+    'combo_net_credit': None,
+    'base_cash_required': None,
+    'combo_cash_required': None,
+    'base_downside_breakeven': None,
+    'combo_downside_breakeven': None,
+    'downside_worsen': None,
+    'downside_worsen_pct': None,
+    'base_scenario_score': None,
+    'combo_scenario_score': None,
+    'scenario_score_lift': None,
+    'base_annualized_scenario_score': None,
+    'combo_annualized_scenario_score': None,
+    'annualized_scenario_score_lift': None,
+    'call_cost_ratio': None,
+    'combo_spread_worsen_ratio': None,
+    'spread_penalty': None,
+    'optimizer_score_components': None,
 }
 
 def _empty_summary_row(symbol: str, strategy: str, *, extra_fields: dict[str, Any] | None = None) -> dict[str, Any]:

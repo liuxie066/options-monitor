@@ -62,6 +62,35 @@ def test_validate_config_rejects_invalid_sell_put_yield_enhancement_funding_mode
         assert "NVDA.yield_enhancement.funding_mode" in str(exc)
 
 
+def test_validate_config_rejects_invalid_yield_enhancement_optimizer_threshold() -> None:
+    from src.application.config_validator import validate_config
+
+    cfg = {
+        "templates": {},
+        "symbols": [
+            {
+                "symbol": "NVDA",
+                "sell_put": {
+                    "enabled": True,
+                    "min_dte": 20,
+                    "max_dte": 60,
+                },
+                "yield_enhancement": {
+                    "enabled": True,
+                    "max_downside_worsen_pct": -0.01,
+                },
+                "sell_call": {"enabled": False},
+            }
+        ],
+    }
+
+    try:
+        validate_config(cfg)
+        raise AssertionError("expected config validation failure")
+    except SystemExit as exc:
+        assert "NVDA.yield_enhancement.max_downside_worsen_pct" in str(exc)
+
+
 def test_validate_config_rejects_invalid_template_yield_enhancement_call_bounds() -> None:
     from src.application.config_validator import validate_config
 

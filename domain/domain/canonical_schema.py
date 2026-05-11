@@ -67,6 +67,28 @@ def normalize_processor_row(raw: dict[str, Any] | Any) -> dict[str, Any]:
         "gap_width_pct",
         "upside_breakeven_pct_above_spot",
         "combo_spread_ratio",
+        "optimizer_accepted",
+        "optimizer_score",
+        "optimizer_reject_reasons",
+        "put_net_credit",
+        "call_total_cost",
+        "combo_net_credit",
+        "base_cash_required",
+        "combo_cash_required",
+        "base_downside_breakeven",
+        "combo_downside_breakeven",
+        "downside_worsen",
+        "downside_worsen_pct",
+        "base_scenario_score",
+        "combo_scenario_score",
+        "scenario_score_lift",
+        "base_annualized_scenario_score",
+        "combo_annualized_scenario_score",
+        "annualized_scenario_score_lift",
+        "call_cost_ratio",
+        "combo_spread_worsen_ratio",
+        "spread_penalty",
+        "optimizer_score_components",
     )
 
     out = {
@@ -117,6 +139,9 @@ def normalize_processor_row(raw: dict[str, Any] | Any) -> dict[str, Any]:
         "linked_call_scenario_score": src.get("linked_call_scenario_score", None),
         "linked_call_annualized_scenario_score": src.get("linked_call_annualized_scenario_score", None),
         "linked_call_count": src.get("linked_call_count", None),
+        "linked_call_optimizer_score": src.get("linked_call_optimizer_score", None),
+        "linked_call_scenario_score_lift": src.get("linked_call_scenario_score_lift", None),
+        "linked_call_downside_worsen_pct": src.get("linked_call_downside_worsen_pct", None),
         "call_candidate_count": src.get("call_candidate_count", None),
     }
     for key in combo_fields:

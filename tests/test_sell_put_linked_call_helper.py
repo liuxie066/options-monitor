@@ -95,6 +95,7 @@ def test_enrich_sell_put_candidates_with_linked_calls_selects_best_call(tmp_path
             "min_open_interest": 100,
             "min_volume": 5,
             "max_combo_spread_ratio": 0.50,
+            "optimizer_enabled": False,
         },
         output_path=tmp_path / "sell_put_linked_calls.csv",
     )
@@ -176,3 +177,139 @@ def test_yield_enhancement_requires_iv_for_expected_move_scoring(tmp_path: Path)
     )
 
     assert pairs.empty
+
+
+def test_yield_enhancement_optimizer_rejects_expensive_call_by_default(tmp_path: Path) -> None:
+    from src.application.sell_put_call_helper import find_sell_put_yield_enhancement_pairs
+
+    parsed = tmp_path / "parsed"
+    parsed.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "NVDA",
+                "option_type": "call",
+                "expiration": "2026-06-19",
+                "dte": 44,
+                "contract_symbol": "NVDA_C110",
+                "strike": 110,
+                "spot": 100,
+                "bid": 1.4,
+                "ask": 1.5,
+                "mid": 1.45,
+                "volume": 65,
+                "open_interest": 980,
+                "implied_volatility": 0.40,
+                "currency": "USD",
+                "delta": 0.32,
+                "multiplier": 100,
+            }
+        ]
+    ).to_csv(parsed / "NVDA_required_data.csv", index=False)
+
+    df = pd.DataFrame(
+        [
+            {
+                "symbol": "NVDA",
+                "expiration": "2026-06-19",
+                "dte": 44,
+                "contract_symbol": "NVDA_P95",
+                "multiplier": 100,
+                "currency": "USD",
+                "strike": 95.0,
+                "spot": 100.0,
+                "bid": 3.0,
+                "ask": 3.2,
+                "mid": 3.1,
+                "open_interest": 1200,
+                "volume": 80,
+                "implied_volatility": 0.42,
+                "delta": -0.25,
+            }
+        ]
+    )
+
+    pairs = find_sell_put_yield_enhancement_pairs(
+        df_candidates=df,
+        symbol="NVDA",
+        input_root=tmp_path,
+        yield_enhancement_cfg={
+            "enabled": True,
+            "min_open_interest": 100,
+            "min_volume": 5,
+            "min_scenario_score": 0.0,
+        },
+    )
+
+    assert pairs.empty
+
+
+def test_yield_enhancement_optimizer_accepts_low_cost_call_with_clear_lift(tmp_path: Path) -> None:
+    from src.application.sell_put_call_helper import find_sell_put_yield_enhancement_pairs
+
+    parsed = tmp_path / "parsed"
+    parsed.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "NVDA",
+                "option_type": "call",
+                "expiration": "2026-06-19",
+                "dte": 44,
+                "contract_symbol": "NVDA_C110_LOW",
+                "strike": 110,
+                "spot": 100,
+                "bid": 0.24,
+                "ask": 0.25,
+                "mid": 0.245,
+                "volume": 65,
+                "open_interest": 980,
+                "implied_volatility": 0.40,
+                "currency": "USD",
+                "delta": 0.20,
+                "multiplier": 100,
+            }
+        ]
+    ).to_csv(parsed / "NVDA_required_data.csv", index=False)
+
+    df = pd.DataFrame(
+        [
+            {
+                "symbol": "NVDA",
+                "expiration": "2026-06-19",
+                "dte": 44,
+                "contract_symbol": "NVDA_P95",
+                "multiplier": 100,
+                "currency": "USD",
+                "strike": 95.0,
+                "spot": 100.0,
+                "bid": 3.0,
+                "ask": 3.2,
+                "mid": 3.1,
+                "open_interest": 1200,
+                "volume": 80,
+                "implied_volatility": 0.42,
+                "delta": -0.25,
+            }
+        ]
+    )
+
+    pairs = find_sell_put_yield_enhancement_pairs(
+        df_candidates=df,
+        symbol="NVDA",
+        input_root=tmp_path,
+        yield_enhancement_cfg={
+            "enabled": True,
+            "min_open_interest": 100,
+            "min_volume": 5,
+            "min_scenario_score": 0.0,
+        },
+    )
+
+    assert len(pairs) == 1
+    row = pairs.iloc[0]
+    assert bool(row["optimizer_accepted"]) is True
+    assert row["call_contract_symbol"] == "NVDA_C110_LOW"
+    assert float(row["scenario_score_lift"]) >= 0.01
+    assert float(row["downside_worsen_pct"]) <= 0.003
+    assert float(row["optimizer_score"]) > 0
