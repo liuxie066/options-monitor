@@ -274,6 +274,150 @@ def _build_notification_block(
     return "\n".join(out)
 
 
+def _fmt_date_compact(contract: str) -> str:
+    exp, _ = _parse_contract(contract)
+    if exp == '-':
+        return ''
+    try:
+        from datetime import datetime
+        dt = datetime.strptime(exp, "%Y-%m-%d")
+        now = datetime.now()
+        if dt.year == now.year:
+            return f"@ {dt.strftime('%m-%d')}"
+        return f"@ {exp}"
+    except Exception:
+        return f"@ {exp}"
+
+
+def _fmt_pct_compact(token: str) -> str:
+    try:
+        raw = str(token).strip()
+        has_pct = '%' in raw
+        v = raw.replace('%', '').strip()
+        n = float(v)
+        if not has_pct and abs(n) <= 1:
+            n *= 100
+        if n >= 10:
+            return f"{int(round(n))}%"
+        return f"{n:.1f}%"
+    except Exception:
+        return str(token) if token else '-'
+
+
+def _fmt_money_compact(token: str) -> str:
+    if not token or _is_missing_value(token):
+        return '-'
+    s = str(token).strip()
+    if s.startswith('¥') or s.startswith('$'):
+        return s
+    try:
+        n = float(s.replace(',', ''))
+        return f"{n:,.0f}"
+    except Exception:
+        return s
+
+
+def _fmt_dte_compact(dte_token: str) -> str:
+    try:
+        n = int(float(dte_token))
+        return f"{n} 天"
+    except Exception:
+        return str(dte_token) if dte_token else '-'
+
+
+def _build_notification_block_compact(
+    *,
+    symbol_name: str,
+    action_label: str,
+    contract: str,
+    income_line: str,
+    contract_line: str,
+    risk_line: str,
+    detail_line: str,
+    note: str,
+    suggestion: str = '',
+    extra_detail_line: str = '',
+) -> str:
+    exp_part = _fmt_date_compact(contract)
+    _, strike_raw = _parse_contract(contract)
+    strike = _normalize_contract_strike(strike_raw)
+    emoji = _action_emoji(action_label, risk_line)
+    option_type = 'P' if 'Put' in action_label else 'C'
+    if '收益增强' in action_label:
+        option_type = ''
+
+    if option_type:
+        l1 = f"{emoji} {action_label} {symbol_name} {strike}{option_type} {exp_part}"
+    else:
+        l1 = f"{emoji} {action_label} {symbol_name} {exp_part}"
+
+    l2_parts = []
+    if '权利金' in income_line:
+        premium_match = re.search(r'权利金[=:]([^|]+)', income_line)
+        annual_match = re.search(r'年化\s*([\d.]+)%?', income_line)
+        if premium_match:
+            l2_parts.append(f"权利金 {_fmt_money_compact(premium_match.group(1))}")
+        if annual_match:
+            l2_parts.append(f"年化 {_fmt_pct_compact(annual_match.group(1) + '%')}")
+
+    dte_match = re.search(r'DTE[=:](\d+)', contract_line)
+    if dte_match:
+        l2_parts.append(_fmt_dte_compact(dte_match.group(1)))
+
+    l2 = f"  {' · '.join(l2_parts)}" if l2_parts else ''
+
+    l3_parts = []
+    risk_match = re.search(r'风险[=:]([^|]+)', risk_line)
+    if risk_match:
+        risk_val = risk_match.group(1).strip()
+        if risk_val and risk_val != '-':
+            l3_parts.append(f"风险 {risk_val}")
+
+    delta_match = re.search(r'delta[=:]([^|]+)', risk_line)
+    if delta_match:
+        delta_val = delta_match.group(1).strip()
+        if delta_val and delta_val != '-':
+            l3_parts.append(f"Δ={delta_val}")
+
+    if '保证金' in detail_line or '担保' in detail_line:
+        margin_match = re.search(r'[=:]([^|]+)', detail_line)
+        if margin_match:
+            margin_val = margin_match.group(1).strip()
+            if margin_val and margin_val != '-':
+                l3_parts.append(f"担保 {_fmt_money_compact(margin_val)}")
+
+    l3 = f"  {' · '.join(l3_parts)}" if l3_parts else ''
+
+    l4 = ''
+    if extra_detail_line:
+        if '收益增强' in extra_detail_line:
+            call_match = re.search(r'推荐Call=([^|]+)', extra_detail_line)
+            if call_match:
+                l4 = f"  💡 推荐Call={call_match.group(1).strip()}"
+
+    out_lines = [l1]
+    if l2:
+        out_lines.append(l2)
+    if l3:
+        out_lines.append(l3)
+    if l4:
+        out_lines.append(l4)
+
+    return "\n".join(out_lines)
+
+
+def _action_emoji(action_label: str, risk_line: str = '') -> str:
+    if '收益增强' in action_label:
+        return '💎'
+    if '卖Call' in action_label:
+        if '不可覆盖' in risk_line or 'cover=0' in risk_line:
+            return '🟡'
+        return '🟢'
+    if '卖Put' in action_label:
+        return '🟢'
+    return '⚪'
+
+
 def _parse_shares_summary(shares: str) -> tuple[str, str, str]:
     shares_total = ''
     shares_locked = ''
@@ -441,6 +585,117 @@ def _format_alert_line(line: str, *, account_label: str = '当前账户') -> str
     return parsed.raw
 
 
+def _format_alert_line_compact(line: str, *, account_label: str = '当前账户') -> str:
+    account_label = _normalize_account_label(account_label)
+    parsed = _parse_alert_line(line)
+    if parsed is None:
+        return line
+
+    if parsed.strategy == 'sell_put':
+        cash_req_cny = parsed.extras.get('cash_req_cny', '')
+        cash_req_usd = parsed.extras.get('cash_req', '')
+        delta = parsed.extras.get('delta', '')
+        iv = parsed.extras.get('iv', '') or parsed.extras.get('IV', '')
+        linked_call = parsed.extras.get('linked_call', '')
+        linked_call_count = parsed.extras.get('linked_call_count', '')
+        linked_call_delta = parsed.extras.get('linked_call_delta', '')
+        linked_scenario_score = parsed.extras.get('linked_scenario_score', '')
+        note = parsed.comment or SELL_PUT_NOTIFICATION_HIGH
+        delta_show = _present_or_missing(delta, reason='告警未提供delta')
+        iv_show = _present_or_missing(iv, reason='告警未提供iv')
+        extra_detail_lines: list[str] = []
+        if not _is_missing_value(linked_call):
+            count_part = ''
+            if not _is_missing_value(linked_call_count):
+                count_part = f"候选Call={linked_call_count}个 | "
+            extra_detail_lines.append(
+                f"- 收益增强: 推荐Call={linked_call} | "
+                f"{count_part}"
+                f"delta={_present_or_missing(linked_call_delta, reason='告警未提供linked_call_delta')} | "
+                f"场景评分={_present_or_missing(linked_scenario_score, reason='告警未提供linked_scenario_score')}"
+            )
+        return _build_notification_block_compact(
+            symbol_name=parsed.symbol_name,
+            action_label='卖Put',
+            contract=parsed.contract,
+            income_line=f"- 收益: 权利金={parsed.premium} | {parsed.annual_show} | {parsed.income_show}",
+            contract_line=f"- 合约: 行权价={parsed.strike_show} | 数量=1张(默认) | DTE={parsed.dte_show}",
+            risk_line=f"- 风控: 风险={parsed.risk_tag} | delta={delta_show} | IV={iv_show}",
+            detail_line=f"- 资金: 保证金占用={_format_margin(cash_req_cny=cash_req_cny, cash_req_usd=cash_req_usd)}",
+            extra_detail_line="\n".join(extra_detail_lines),
+            note=note,
+            suggestion=parsed.suggestion,
+        )
+
+    if parsed.strategy == 'sell_call':
+        cover = parsed.extras.get('cover', '')
+        shares = parsed.extras.get('shares', '')
+        delta = parsed.extras.get('delta', '')
+        iv = parsed.extras.get('iv', '') or parsed.extras.get('IV', '')
+        delta_show = _present_or_missing(delta, reason='告警未提供delta')
+        iv_show = _present_or_missing(iv, reason='告警未提供iv')
+        qty = f"{cover}张(可覆盖)" if (not _is_missing_value(cover)) else '1张(默认)'
+        note = parsed.comment or SELL_CALL_NOTIFICATION_MEDIUM
+        shares_total, shares_locked, shares_available = _parse_shares_summary(shares)
+        return _build_notification_block_compact(
+            symbol_name=parsed.symbol_name,
+            action_label='卖Call',
+            contract=parsed.contract,
+            income_line=f"- 收益: 权利金={parsed.premium} | {parsed.annual_show} | {parsed.income_show}",
+            contract_line=f"- 合约: 行权价={parsed.strike_show} | 数量={qty} | DTE={parsed.dte_show}",
+            risk_line=f"- 风控: 风险={parsed.risk_tag} | delta={delta_show} | IV={iv_show}",
+            detail_line=(
+                f"- 持仓: 总股数={_present_or_missing(shares_total, reason='告警未提供shares')} | "
+                f"已占用={_present_or_missing(shares_locked, reason='告警未提供shares')} | "
+                f"可用={_present_or_missing(shares_available, reason='告警未提供shares')} | "
+                f"可覆盖={_present_or_missing(cover, reason='告警未提供cover')}张"
+            ),
+            note=note,
+            suggestion=parsed.suggestion,
+        )
+
+    if parsed.strategy == 'yield_enhancement':
+        put_strike = parsed.extras.get('put_strike', '')
+        call_strike = parsed.extras.get('call_strike', '')
+        call_ask = parsed.extras.get('call_ask', '')
+        call_delta = parsed.extras.get('call_delta', '')
+        call_candidate_count = parsed.extras.get('call_candidate_count', '')
+        net_credit = parsed.extras.get('net_credit', '')
+        expected_move = parsed.extras.get('expected_move', '')
+        expected_move_iv = parsed.extras.get('expected_move_iv', '')
+        scenario_score = parsed.extras.get('scenario_score', '')
+        candidate_tail = ""
+        if not _is_missing_value(call_candidate_count):
+            candidate_tail = f" | 备选Call={call_candidate_count}个"
+        note = parsed.comment or '已按组合收益筛出推荐 Call，可作为该 Sell Put 的收益增强方案。'
+        return _build_notification_block_compact(
+            symbol_name=parsed.symbol_name,
+            action_label='收益增强',
+            contract=parsed.contract,
+            income_line=(
+                f"- 收益: 组合净权利金={_present_or_missing(net_credit, reason='告警未提供net_credit')} | "
+                f"{parsed.annual_show} | "
+                f"场景评分={_present_or_missing(scenario_score, reason='告警未提供scenario_score')}"
+            ),
+            contract_line=(
+                f"- 组合: Put={_present_or_missing(put_strike, reason='告警未提供put_strike')} | "
+                f"Call={_present_or_missing(call_strike, reason='告警未提供call_strike')} | "
+                f"DTE={parsed.dte_show}"
+                f"{candidate_tail}"
+            ),
+            risk_line=(
+                f"- 风控: 风险={parsed.risk_tag} | "
+                f"Call delta={_present_or_missing(call_delta, reason='告警未提供call_delta')} | "
+                f"Call ask={_present_or_missing(call_ask, reason='告警未提供call_ask')}"
+            ),
+            detail_line=(
+                f"- 预期波动: expected_move={_present_or_missing(expected_move, reason='告警未提供expected_move')} | "
+                f"IV={_present_or_missing(expected_move_iv, reason='告警未提供expected_move_iv')}"
+            ),
+            note=note,
+        )
+
+    return parsed.raw
 
 
 def _group_by_strategy(raw_lines: list[str]) -> dict[str, list[str]]:
@@ -464,24 +719,15 @@ def build_notification(
     exchange_rate_info: dict | None = None,
     *,
     account_label: str = '当前账户',
+    render_style: str = 'legacy',
 ) -> str:
-    """Build markdown-ish notification text.
-
-    User preference:
-    - Two-line candidates
-    - Notes are not folded
-
-    Note: Some chat clients won't render markdown; we still gain readability.
-    """
-
     high_lines = extract_section(alerts_text, '## 高优先级')
     medium_lines = extract_section(alerts_text, '## 中优先级')
     low_lines = extract_section(alerts_text, '## 低优先级')
 
     lines: list[str] = []
+    use_compact = render_style == 'compact'
 
-    # ===== Candidates (align with existing US-option notification style) =====
-    # Prefer: high > medium > low
     candidate_lines: list[str] = []
     if high_lines:
         candidate_lines = high_lines[:5]
@@ -497,7 +743,7 @@ def build_notification(
             if not items:
                 return
             lines.append(title)
-            lines.append('')  # blank line after section heading (Feishu plaintext friendly)
+            lines.append('')
             for x in items:
                 block = _format_alert_line(x, account_label=account_label).strip()
                 if not block:
@@ -513,14 +759,28 @@ def build_notification(
                     lines.append(s)
                 lines.append('')
 
+        def emit_compact(title: str, items: list[str]):
+            if not items:
+                return
+            lines.append(title)
+            lines.append('')
+            for x in items:
+                block = _format_alert_line_compact(x, account_label=account_label).strip()
+                if not block:
+                    continue
+                lines.append(block)
+                lines.append('')
+
+        emit_fn = emit_compact if use_compact else emit_plain
+
         if groups['sell_put']:
-            emit_plain('Put', groups['sell_put'])
+            emit_fn('🔵 Put' if use_compact else 'Put', groups['sell_put'])
         if groups['sell_call']:
-            emit_plain('Call', groups['sell_call'])
+            emit_fn('🔵 Call' if use_compact else 'Call', groups['sell_call'])
         if groups['yield_enhancement']:
-            emit_plain('Enhancement', groups['yield_enhancement'])
+            emit_fn('💎 Enhancement' if use_compact else 'Enhancement', groups['yield_enhancement'])
         if groups['other']:
-            emit_plain('Other', groups['other'])
+            emit_fn('⚪ Other' if use_compact else 'Other', groups['other'])
 
     if not candidate_lines:
         return build_no_candidate_notification_text(account_label=account_label)

@@ -251,3 +251,58 @@ def build_account_message(
         lines.append('')
 
     return '\n'.join(lines).strip() + '\n'
+
+
+SECTION_DIVIDER = "─────────────────────"
+
+
+def build_account_message_compact(
+    result: AccountResult,
+    *,
+    now_bj: str,
+    cash_footer_lines: list[str] | None = None,
+) -> str:
+    if not (result.should_notify and result.notification_text.strip()):
+        return ''
+    if _is_auto_close_only_result(result):
+        return _build_auto_close_message(result, now_bj=now_bj)
+
+    text = result.notification_text.strip()
+    put_n = sum(1 for ln in text.splitlines() if ' 卖Put ' in ln)
+    call_n = sum(1 for ln in text.splitlines() if ' 卖Call ' in ln)
+    enhancement_n = sum(1 for ln in text.splitlines() if ' 收益增强 ' in ln)
+    switch_n, close_n = count_optimizer_actions(text)
+    acct = str(result.account).strip().lower()
+
+    lines: list[str] = []
+    lines.append("# 📊 Options Monitor")
+    lines.append(f"## 账户提醒（{acct}）")
+    lines.append('')
+    lines.append(f"⏰ 北京时间 {now_bj}")
+    lines.append('')
+    lines.append("📋 本轮概览")
+    overview_parts = [f"Put {put_n}", f"Call {call_n}"]
+    if enhancement_n > 0:
+        overview_parts.append(f"增强 {enhancement_n}")
+    lines.append(f"  {' · '.join(overview_parts)}")
+    if switch_n > 0 or close_n > 0:
+        lines.append(f"  🔴 优化器 换仓 {switch_n} · 平仓 {close_n}")
+    lines.append('')
+    lines.append(SECTION_DIVIDER)
+    lines.append('')
+
+    body = annotate_notification(result.account, text + '\n').strip()
+    body = _highlight_optimizer_lines(body)
+    lines.append(body)
+    lines.append('')
+    lines.append(SECTION_DIVIDER)
+    lines.append('')
+
+    footer_lines = cash_footer_lines or []
+    if footer_lines:
+        lines.append("💰 资金概览")
+        for ln in footer_lines:
+            lines.append(f"  {ln}")
+        lines.append('')
+
+    return '\n'.join(lines).strip() + '\n'
