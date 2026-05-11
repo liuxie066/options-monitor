@@ -220,6 +220,8 @@ def _fetch_one_inprocess(
             freshness_policy='cache_first',
             gateway=gateway,
             snapshot_batch_size=int(getattr(batch_cfg, 'market_snapshot', 0) or 0),
+            snapshot_fallback_max_codes=int(getattr(batch_cfg, 'market_snapshot_fallback_max_codes', 100) or 0),
+            snapshot_fallback_batch_size=int(getattr(batch_cfg, 'market_snapshot_fallback_batch_size', 20) or 20),
             max_wait_sec=float(opend_fetch_cfg['option_chain']['max_wait_sec']),
             option_chain_window_sec=float(opend_fetch_cfg['option_chain']['window_sec']),
             option_chain_max_calls=int(opend_fetch_cfg['option_chain']['max_calls']),

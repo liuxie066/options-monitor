@@ -16,6 +16,8 @@ _EXPIRATION_DEFAULT_MAX_CALLS = 30
 _EXPIRATION_DEFAULT_WINDOW_SEC = 30.0
 _EXPIRATION_DEFAULT_MAX_WAIT_SEC = 30.0
 _BATCH_DEFAULT_MARKET_SNAPSHOT = 200
+_FALLBACK_MAX_CODES_DEFAULT = 100
+_FALLBACK_BATCH_SIZE_DEFAULT = 20
 DEFAULT_OPEND_BATCH_MARKET_SNAPSHOT = 200
 OPEND_FETCH_KWARG_KEYS = frozenset(
     {
@@ -152,10 +154,26 @@ class OpenDFetchLimits:
 @dataclass(frozen=True)
 class OpenDBatchConfig:
     market_snapshot: int
+    market_snapshot_fallback_max_codes: int
+    market_snapshot_fallback_batch_size: int
 
     @classmethod
-    def from_values(cls, *, market_snapshot: Any) -> "OpenDBatchConfig":
-        return cls(market_snapshot=max(1, _as_int(market_snapshot, _BATCH_DEFAULT_MARKET_SNAPSHOT)))
+    def from_values(
+        cls,
+        *,
+        market_snapshot: Any,
+        market_snapshot_fallback_max_codes: Any = _FALLBACK_MAX_CODES_DEFAULT,
+        market_snapshot_fallback_batch_size: Any = _FALLBACK_BATCH_SIZE_DEFAULT,
+    ) -> "OpenDBatchConfig":
+        fallback_max_codes = max(0, _as_int(market_snapshot_fallback_max_codes, _FALLBACK_MAX_CODES_DEFAULT))
+        fallback_batch_size = _as_int(market_snapshot_fallback_batch_size, _FALLBACK_BATCH_SIZE_DEFAULT)
+        if fallback_batch_size <= 0:
+            fallback_batch_size = _FALLBACK_BATCH_SIZE_DEFAULT
+        return cls(
+            market_snapshot=max(1, _as_int(market_snapshot, _BATCH_DEFAULT_MARKET_SNAPSHOT)),
+            market_snapshot_fallback_max_codes=fallback_max_codes,
+            market_snapshot_fallback_batch_size=fallback_batch_size,
+        )
 
 
 _OPTION_CHAIN_DEFAULTS = {
@@ -277,4 +295,8 @@ def resolve_opend_batch_config(config: dict[str, Any] | None) -> OpenDBatchConfi
     runtime = config.get("runtime") if isinstance(config, dict) and isinstance(config.get("runtime"), dict) else {}
     raw = runtime.get("opend_batch") if isinstance(runtime, dict) and isinstance(runtime.get("opend_batch"), dict) else {}
     raw = raw if isinstance(raw, dict) else {}
-    return OpenDBatchConfig.from_values(market_snapshot=raw.get("market_snapshot"))
+    return OpenDBatchConfig.from_values(
+        market_snapshot=raw.get("market_snapshot"),
+        market_snapshot_fallback_max_codes=raw.get("snapshot_fallback_max_codes"),
+        market_snapshot_fallback_batch_size=raw.get("snapshot_fallback_batch_size"),
+    )
