@@ -1,31 +1,18 @@
 from __future__ import annotations
 
+import importlib
 from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 
 
-def test_fetch_spot_with_fallback_logs_removed_message(tmp_path: Path) -> None:
-    from scripts import pm_bridge
+def test_pm_bridge_script_is_removed() -> None:
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("scripts.pm_bridge")
 
-    messages: list[str] = []
-    out = pm_bridge.fetch_spot_with_fallback("NVDA", pm_root=tmp_path, log=messages.append)
-
-    assert out is None
-    assert any("external spot fallback removed" in msg for msg in messages)
-
-
-def test_resolve_spot_fallback_enabled_always_false() -> None:
-    from scripts.pm_bridge import resolve_spot_fallback_enabled
-
-    # Legacy config keys may still mention Yahoo, but runtime spot fallback is retired.
-    out = resolve_spot_fallback_enabled(
-        {"spot_from_yahoo": False, "spot_from_portfolio_management": True},
-        symbol="NVDA",
-    )
-
-    assert out is False
+    assert not (Path(__file__).resolve().parents[1] / "scripts" / "pm_bridge.py").exists()
 
 
 def test_fetch_symbol_keeps_us_spot_missing_without_fallback(monkeypatch) -> None:

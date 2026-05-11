@@ -126,6 +126,8 @@ def test_legacy_wrapper_modules_are_removed() -> None:
     assert not (ROOT / "scripts" / "parse_option_message.py").exists()
     assert not (ROOT / "scripts" / "option_positions.py").exists()
     assert not (ROOT / "scripts" / "watchlist.py").exists()
+    assert not (ROOT / "scripts" / "option_candidate_strategy.py").exists()
+    assert not (ROOT / "scripts" / "pm_bridge.py").exists()
     assert not (ROOT / "scripts" / "webui" / "server.py").exists()
     assert not (ROOT / "scripts" / "webui" / "__init__.py").exists()
     assert not (ROOT / "scripts" / "deploy_observability.py").exists()

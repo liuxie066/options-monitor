@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import importlib
 import sys
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 
 def _add_repo_to_syspath() -> None:
@@ -176,12 +178,13 @@ def test_filter_rank_candidates_with_reject_log_matches_manual_pipeline() -> Non
     assert reject_log.to_dict("records") == manual_reject_log.to_dict("records")
 
 
-def test_option_candidate_strategy_script_is_engine_compat_wrapper() -> None:
+def test_option_candidate_strategy_script_is_removed() -> None:
     _add_repo_to_syspath()
-    from domain.domain.engine import build_strategy_config as engine_build_strategy_config
-    from scripts.option_candidate_strategy import build_strategy_config as script_build_strategy_config
+    from domain.domain.engine import build_strategy_config
 
-    assert script_build_strategy_config is engine_build_strategy_config
+    assert callable(build_strategy_config)
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("scripts.option_candidate_strategy")
 
 
 def test_strategy_production_scripts_import_engine_directly() -> None:
