@@ -23,7 +23,7 @@ from src.application.config_loader import resolve_watchlist_config, set_watchlis
 from domain.domain.fetch_source import is_futu_fetch_source, resolve_symbol_fetch_source
 
 from src.application.multi_tick.cash_footer import query_cash_footer
-from src.application.multi_tick.notify_format import build_account_message
+from src.application.multi_tick.notify_format import build_account_message, build_account_message_compact
 from src.application.multi_tick.opend_guard import (
     clear_opend_phone_verify_pending,
     is_opend_phone_verify_pending,
@@ -682,6 +682,9 @@ def main(argv: list[str] | None = None) -> int:
 
     now_bj = bj_now()
     try:
+        notifications_cfg = base_cfg.get("notifications", {}) or {}
+        render_style = str(notifications_cfg.get("render_style") or "compact").strip().lower()
+        build_account_message_fn = build_account_message_compact if render_style == "compact" else build_account_message
         notification_prep = prepare_multi_account_notification(
             results=results,
             base=base,
@@ -694,7 +697,7 @@ def main(argv: list[str] | None = None) -> int:
             query_cash_footer_fn=query_cash_footer,
             cash_footer_accounts_from_config_fn=cash_footer_accounts_from_config,
             cash_footer_for_account_fn=cash_footer_for_account,
-            build_account_message_fn=build_account_message,
+            build_account_message_fn=build_account_message_fn,
             build_account_messages_fn=build_account_messages,
             build_no_candidate_account_messages_fn=build_no_candidate_account_messages,
             snapshot_cls=SnapshotDTO,
