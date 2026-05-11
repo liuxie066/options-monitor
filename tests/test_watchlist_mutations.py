@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from src.application.watchlist_mutations import find_symbol_entry, normalize_symbol
 
 
@@ -21,7 +24,7 @@ def test_find_symbol_entry_matches_alias_against_canonical_symbol() -> None:
 
 
 def test_watchlist_cli_add_normalizes_accounts_as_labels() -> None:
-    from scripts.watchlist import cmd_add
+    from src.interfaces.cli.watchlist import cmd_add
 
     cfg = {"symbols": []}
 
@@ -29,3 +32,31 @@ def test_watchlist_cli_add_normalizes_accounts_as_labels() -> None:
 
     assert cfg["symbols"][0]["symbol"] == "NVDA"
     assert cfg["symbols"][0]["accounts"] == ["lx", "sy"]
+
+
+def test_watchlist_cli_list_reads_config_path(tmp_path: Path, capsys) -> None:
+    from src.interfaces.cli import watchlist as watchlist_cli
+
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(
+        json.dumps(
+            {
+                "symbols": [
+                    {
+                        "symbol": "NVDA",
+                        "accounts": ["lx"],
+                        "sell_put": {"enabled": True, "max_strike": 120},
+                        "sell_call": {"enabled": False},
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    assert watchlist_cli.main(["--config", str(cfg_path), "list"]) == 0
+
+    out = capsys.readouterr().out
+    assert "# options-monitor symbols" in out
+    assert "NVDA" in out

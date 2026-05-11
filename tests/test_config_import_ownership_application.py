@@ -51,11 +51,17 @@ def test_agent_plugin_tools_imports_owner_modules() -> None:
 
 
 def test_account_run_imports_watchlist_helpers_from_owner_module() -> None:
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("scripts.watchlist")
+
     account_run_mod = importlib.import_module("src.application.account_run")
+    watchlist_cli_mod = importlib.import_module("src.interfaces.cli.watchlist")
     owner_mod = importlib.import_module("src.application.config_loader")
 
     assert account_run_mod.resolve_watchlist_config is owner_mod.resolve_watchlist_config
     assert account_run_mod.set_watchlist_config is owner_mod.set_watchlist_config
+    assert watchlist_cli_mod.resolve_watchlist_config is owner_mod.resolve_watchlist_config
+    assert watchlist_cli_mod.set_watchlist_config is owner_mod.set_watchlist_config
 
 
 def test_pipeline_runtime_imports_config_loader_helpers_from_owner_module() -> None:
