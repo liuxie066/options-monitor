@@ -51,6 +51,7 @@ def run_pipeline_notification_stage(
     alerts_input: Path,
     changes_input: Path,
     output: Path,
+    render_style: str = "compact",
 ) -> str:
     alerts_text = read_text(alerts_input)
     account_label = _infer_account_label(output, alerts_input)
@@ -59,6 +60,7 @@ def run_pipeline_notification_stage(
         alerts_text,
         exchange_rate_info=None,
         account_label=account_label,
+        render_style=render_style,
     )
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(notification, encoding="utf-8")
