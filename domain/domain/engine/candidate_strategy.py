@@ -6,14 +6,17 @@ from typing import Literal
 import pandas as pd
 
 from .candidate_engine import (
+    CandidateScoreWeights,
     REJECT_RETURN_ANNUALIZED,
     REJECT_RETURN_IF_EXERCISED_TOTAL,
     REJECT_RETURN_NET_INCOME,
     REJECT_RISK_SPREAD,
     build_candidate_decision,
+    build_candidate_rank_key,
     evaluate_candidate_return_floor,
     evaluate_candidate_risk_filter,
     normalize_legacy_reject_log_rows,
+    rank_candidate_rows,
 )
 
 StrategyMode = Literal["put", "call"]
@@ -44,6 +47,8 @@ STRATEGY_PARAM_TABLE_V1: dict[StrategyMode, dict[str, dict[str, float | None]]] 
             "annualized_return": 1.0,
             "net_income": 1e-6,
             "if_exercised_total_return": 0.0,
+            "liquidity": 0.0,
+            "risk_distance": 0.0,
         },
     },
     "call": {
@@ -56,6 +61,8 @@ STRATEGY_PARAM_TABLE_V1: dict[StrategyMode, dict[str, dict[str, float | None]]] 
         "score_weights": {
             "annualized_return": 1.0,
             "net_income": 1e-6,
+            "liquidity": 0.0,
+            "risk_distance": 0.0,
         },
     },
 }
@@ -70,9 +77,19 @@ class StrategyConfig:
     min_if_exercised_total_return: float | None = None
     score_weight_annualized_return: float = 1.0
     score_weight_net_income: float = 1e-6
+    score_weight_liquidity: float = 0.0
+    score_weight_risk_distance: float = 0.0
     param_table_version: str = "v1"
     layer_order: tuple[str, ...] = ("激进", "中性", "保守")
     layered_fill_limit: int = 5
+
+    def score_weights(self) -> CandidateScoreWeights:
+        return CandidateScoreWeights(
+            annualized_return=float(self.score_weight_annualized_return),
+            net_income=float(self.score_weight_net_income),
+            liquidity=float(self.score_weight_liquidity),
+            risk_distance=float(self.score_weight_risk_distance),
+        )
 
 
 def build_strategy_config(mode: StrategyMode, **kwargs) -> StrategyConfig:
@@ -87,6 +104,8 @@ def build_strategy_config(mode: StrategyMode, **kwargs) -> StrategyConfig:
         "min_if_exercised_total_return": hard.get("min_if_exercised_total_return"),
         "score_weight_annualized_return": float(score.get("annualized_return", 1.0) or 0.0),
         "score_weight_net_income": float(score.get("net_income", 0.0) or 0.0),
+        "score_weight_liquidity": float(score.get("liquidity", 0.0) or 0.0),
+        "score_weight_risk_distance": float(score.get("risk_distance", 0.0) or 0.0),
         "param_table_version": "v1",
     }
     defaults.update(kwargs)
@@ -109,14 +128,6 @@ def _to_numeric(df: pd.DataFrame, column: str) -> pd.Series:
     if column not in df.columns:
         return pd.Series([float("nan")] * len(df), index=df.index, dtype="float64")
     return pd.to_numeric(df[column], errors="coerce")
-
-
-def _sort_df(df: pd.DataFrame, mode: StrategyMode) -> pd.DataFrame:
-    cols = [c for c in sort_columns(mode) if c in df.columns]
-    if not cols:
-        return df
-    asc = [False] * len(cols)
-    return df.sort_values(cols, ascending=asc)
 
 
 def filter_candidates(df: pd.DataFrame, cfg: StrategyConfig) -> pd.DataFrame:
@@ -251,13 +262,16 @@ def score_candidates(df: pd.DataFrame, cfg: StrategyConfig) -> pd.DataFrame:
         return df.copy()
 
     out = df.copy()
-    annual = _to_numeric(out, annualized_return_column(cfg.mode)).fillna(0.0)
-    score = annual * float(cfg.score_weight_annualized_return)
-
-    if "net_income" in out.columns:
-        score = score + (_to_numeric(out, "net_income").fillna(0.0) * float(cfg.score_weight_net_income))
-
-    out["_strategy_score"] = score
+    score_weights = cfg.score_weights()
+    scores: list[float] = []
+    for _, row in out.iterrows():
+        rank_key = build_candidate_rank_key(
+            row.to_dict(),
+            mode=cfg.mode,
+            score_weights=score_weights,
+        )
+        scores.append(float(rank_key.get("strategy_score") or 0.0))
+    out["_strategy_score"] = scores
     return out
 
 
@@ -301,12 +315,12 @@ def rank_candidates(
     if df.empty:
         return df.copy()
 
-    ranked = df.copy()
-    if "_strategy_score" in ranked.columns:
-        tie_cols = [c for c in sort_columns(cfg.mode) if c in ranked.columns]
-        ranked = ranked.sort_values(["_strategy_score", *tie_cols], ascending=[False] * (1 + len(tie_cols)))
-    else:
-        ranked = _sort_df(ranked, cfg.mode)
+    ranked_rows = rank_candidate_rows(
+        df.to_dict("records"),
+        mode=cfg.mode,
+        score_weights=cfg.score_weights(),
+    )
+    ranked = pd.DataFrame(ranked_rows, columns=df.columns)
     if not layered or "risk_label" not in ranked.columns:
         return ranked.head(top) if top is not None else ranked
 

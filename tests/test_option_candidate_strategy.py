@@ -92,6 +92,65 @@ def test_strategy_param_table_v1_default_weights_split_put_call() -> None:
     assert call_cfg.param_table_version == "v1"
     assert put_cfg.score_weight_net_income == 1e-6
     assert call_cfg.score_weight_net_income == 1e-6
+    assert put_cfg.score_weight_liquidity == 0.0
+    assert call_cfg.score_weight_risk_distance == 0.0
+
+
+def test_score_candidates_uses_independent_strategy_score_method() -> None:
+    _add_repo_to_syspath()
+    from domain.domain.engine import build_strategy_config, rank_candidates, score_candidates
+
+    df = pd.DataFrame(
+        [
+            {
+                "contract_symbol": "HIGH_RETURN_WIDE",
+                "annualized_net_return_on_cash_basis": 0.120,
+                "net_income": 100,
+                "spread_ratio": 0.95,
+                "open_interest": 1,
+                "volume": 0,
+            },
+            {
+                "contract_symbol": "LOWER_RETURN_LIQUID",
+                "annualized_net_return_on_cash_basis": 0.115,
+                "net_income": 100,
+                "spread_ratio": 0.05,
+                "open_interest": 500,
+                "volume": 20,
+            },
+        ]
+    )
+    cfg = build_strategy_config("put", score_weight_liquidity=0.02)
+
+    ranked = rank_candidates(score_candidates(df, cfg), cfg)
+
+    assert list(ranked["contract_symbol"]) == ["LOWER_RETURN_LIQUID", "HIGH_RETURN_WIDE"]
+
+
+def test_rank_candidates_delegates_to_candidate_engine_ranker(monkeypatch) -> None:
+    _add_repo_to_syspath()
+    import domain.domain.engine.candidate_strategy as strategy
+
+    calls: list[dict] = []
+
+    def _fake_rank_candidate_rows(rows, *, mode, score_weights=None):  # type: ignore[no-untyped-def]
+        calls.append({"rows": rows, "mode": mode, "score_weights": score_weights})
+        return [rows[1], rows[0]]
+
+    monkeypatch.setattr(strategy, "rank_candidate_rows", _fake_rank_candidate_rows)
+    df = pd.DataFrame(
+        [
+            {"contract_symbol": "A", "annualized_net_return_on_cash_basis": 0.12, "net_income": 100},
+            {"contract_symbol": "B", "annualized_net_return_on_cash_basis": 0.11, "net_income": 100},
+        ]
+    )
+    cfg = strategy.build_strategy_config("put", score_weight_liquidity=0.02)
+
+    ranked = strategy.rank_candidates(df, cfg)
+
+    assert list(ranked["contract_symbol"]) == ["B", "A"]
+    assert calls[0]["mode"] == "put"
+    assert calls[0]["score_weights"].liquidity == 0.02
 
 
 def test_filter_candidates_with_reject_log_contains_required_fields() -> None:
