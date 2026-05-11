@@ -92,7 +92,7 @@ class OpenDRateGate:
             return
         wall_now = self._wall_clock()
         offset = wall_now - now
-        seen = {round(ts, 6) for ts in self._timestamps}
+        seen_wall = [ts + offset for ts in self._timestamps]
         merged = list(self._timestamps)
         for item in raw:
             try:
@@ -104,10 +104,9 @@ class OpenDRateGate:
             mono_ts = wall_ts - offset
             if now - mono_ts >= self._window:
                 continue
-            key = round(mono_ts, 6)
-            if key in seen:
+            if any(abs(wall_ts - existing) <= 0.001 for existing in seen_wall):
                 continue
-            seen.add(key)
+            seen_wall.append(wall_ts)
             merged.append(mono_ts)
         if not merged:
             self._timestamps.clear()
