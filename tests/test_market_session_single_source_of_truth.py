@@ -107,3 +107,29 @@ def test_select_markets_to_run_prefers_schedule_hk_when_both_markets_are_open() 
     t_both_open = datetime(2026, 4, 1, 14, 0, 0, tzinfo=timezone.utc)
     out = select_markets_to_run(t_both_open, cfg, 'auto')
     assert out == ['HK']
+
+
+def test_evaluate_auto_market_rules_makes_hk_us_resolution_explicit() -> None:
+    from domain.domain import multi_tick as mod
+
+    cfg = {
+        'schedule': {
+            'enabled': True,
+            'market_timezone': 'Asia/Hong_Kong',
+            'market_open': '09:30',
+            'market_close': '16:00',
+        },
+    }
+
+    t_in_hours = datetime(2026, 4, 1, 5, 0, 0, tzinfo=timezone.utc)
+    rules = mod._evaluate_auto_market_rules(t_in_hours, cfg)
+
+    assert [rule.schedule_key for rule in rules] == ['schedule_hk', 'schedule']
+    assert rules[0].configured is False
+    assert rules[0].in_market_hours is False
+    assert rules[0].resolved_market is None
+
+    assert rules[1].configured is True
+    assert rules[1].in_market_hours is True
+    assert rules[1].inferred_market_from_timezone == 'HK'
+    assert rules[1].resolved_market == 'HK'
