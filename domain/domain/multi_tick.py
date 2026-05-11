@@ -50,7 +50,6 @@ def _time_in_range(value: time, start: time, end: time) -> bool:
 
 _SCHEDULE_TZ_HK: frozenset[str] = frozenset({
     'Asia/Hong_Kong',
-    'Hongkong',
 })
 
 
@@ -64,11 +63,11 @@ def _auto_market_schedule_candidates(cfg: dict[str, Any]) -> tuple[tuple[str, di
     return tuple(out)
 
 
-def _infer_market_from_schedule_timezone(schedule_cfg: dict[str, Any]) -> str | None:
-    """Infer market label from schedule market_timezone.
+def _infer_timezone_market_override(schedule_cfg: dict[str, Any]) -> str | None:
+    """Return a timezone-specific market override for auto selection.
 
-    Returns 'HK' when the timezone is a known HK timezone,
-    None otherwise; callers apply the default market label.
+    Only HK needs an override today because `schedule_hk` is optional,
+    while US continues to use the default market label for `schedule`.
     """
     tz = str(schedule_cfg.get('market_timezone', '')).strip()
     if tz in _SCHEDULE_TZ_HK:
@@ -125,7 +124,7 @@ def select_markets_to_run(now_utc: datetime, cfg: dict, market_config: str) -> l
             return [
                 _resolve_auto_market_for_schedule(
                     schedule_key=schedule_key,
-                    timezone_market=_infer_market_from_schedule_timezone(schedule_cfg),
+                    timezone_market=_infer_timezone_market_override(schedule_cfg),
                     default_market=default_market,
                 )
             ]
