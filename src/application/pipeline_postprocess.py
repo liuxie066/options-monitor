@@ -38,23 +38,23 @@ def postprocess_scan_results(
     notify_symbols_fn: Callable[[dict, str], None],
     log: Callable[[str], None],
 ) -> PostprocessResult:
-    if want_fn('scan'):
+    if want_fn("scan"):
         build_symbols_summary_fn(summary_rows)
         if not is_scheduled:
             build_symbols_digest_fn(summary_rows, int(top_n))
 
-    if not want_fn('notify'):
-        return PostprocessResult(meaningful=False, notification_text='')
+    if not want_fn("notify"):
+        return PostprocessResult(meaningful=False, notification_text="")
 
-    alert_text = ''
-    if want_fn('alert'):
+    alert_text = ""
+    if want_fn("alert"):
         try:
             sp = render_sell_put_alerts_fn(report_dir, int(top_n))
             sc = render_sell_call_alerts_fn(report_dir, int(top_n))
-            alert_text = (sp + '\n\n' + sc).strip()
+            alert_text = (sp + "\n\n" + sc).strip()
         except Exception as e:
             log(f"[WARN] render alerts failed: {e}")
-            alert_text = ''
+            alert_text = ""
 
     notification_text = alert_text
     meaningful = bool(notification_text.strip())
