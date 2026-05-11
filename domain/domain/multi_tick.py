@@ -79,14 +79,13 @@ def _infer_market_from_schedule_timezone(schedule_cfg: dict[str, Any]) -> str | 
 def _resolve_auto_market_for_schedule(
     *,
     schedule_key: str,
-    schedule_cfg: dict[str, Any],
+    timezone_market: str | None,
     default_market: str,
 ) -> str:
     if schedule_key == 'schedule_hk':
         return 'HK'
-    inferred_market = _infer_market_from_schedule_timezone(schedule_cfg)
-    if inferred_market:
-        return inferred_market
+    if timezone_market:
+        return timezone_market
     return default_market
 
 
@@ -126,7 +125,7 @@ def select_markets_to_run(now_utc: datetime, cfg: dict, market_config: str) -> l
             return [
                 _resolve_auto_market_for_schedule(
                     schedule_key=schedule_key,
-                    schedule_cfg=schedule_cfg,
+                    timezone_market=_infer_market_from_schedule_timezone(schedule_cfg),
                     default_market=default_market,
                 )
             ]
