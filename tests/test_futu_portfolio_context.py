@@ -293,6 +293,24 @@ def test_build_futu_portfolio_context_dedups_balance_rows_by_acc_env_currency() 
     assert out["cash_by_currency"] == {"USD": 1000.0, "HKD": 500.0}
 
 
+def test_filter_rows_for_account_ids_keeps_legacy_rows_without_acc_id_across_trd_env() -> None:
+    from src.application.futu_portfolio_context import _filter_rows_for_account_ids
+
+    rows = [
+        {"trd_env": "SIMULATE", "currency": "USD", "cash": 100},
+        {"acc_id": FAKE_FUTU_ACC_ID_LX_PRIMARY, "trd_env": "SIMULATE", "currency": "USD", "cash": 999},
+        {"acc_id": FAKE_FUTU_ACC_ID_LX_PRIMARY, "trd_env": "REAL", "currency": "USD", "cash": 1000},
+        {"acc_id": FAKE_FUTU_ACC_ID_SY, "trd_env": "REAL", "currency": "USD", "cash": 2000},
+    ]
+
+    out = _filter_rows_for_account_ids(rows, {FAKE_FUTU_ACC_ID_LX_PRIMARY}, trd_env="REAL")
+
+    assert out == [
+        {"trd_env": "SIMULATE", "currency": "USD", "cash": 100},
+        {"acc_id": FAKE_FUTU_ACC_ID_LX_PRIMARY, "trd_env": "REAL", "currency": "USD", "cash": 1000},
+    ]
+
+
 def test_fetch_futu_portfolio_context_passes_trd_env_and_filters_simulate_rows() -> None:
     import src.application.futu_portfolio_context as fc
 
