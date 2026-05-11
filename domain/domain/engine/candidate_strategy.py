@@ -29,6 +29,7 @@ STRATEGY_PARAM_TABLE_V1: dict[StrategyMode, dict[str, dict[str, float | None]]] 
             "min_annualized_return": None,
             "min_net_income": None,
             "max_spread_ratio": None,
+            "min_if_exercised_total_return": None,
         },
         "score_weights": {
             "annualized_return": 1.0,
@@ -41,6 +42,7 @@ STRATEGY_PARAM_TABLE_V1: dict[StrategyMode, dict[str, dict[str, float | None]]] 
             "min_annualized_return": None,
             "min_net_income": None,
             "max_spread_ratio": None,
+            "min_if_exercised_total_return": None,
         },
         "score_weights": {
             "annualized_return": 1.0,
@@ -56,6 +58,7 @@ class StrategyConfig:
     min_annualized_return: float | None = None
     min_net_income: float | None = None
     max_spread_ratio: float | None = None
+    min_if_exercised_total_return: float | None = None
     score_weight_annualized_return: float = 1.0
     score_weight_net_income: float = 1e-6
     param_table_version: str = "v1"
@@ -72,6 +75,7 @@ def build_strategy_config(mode: StrategyMode, **kwargs) -> StrategyConfig:
         "min_annualized_return": hard.get("min_annualized_return"),
         "min_net_income": hard.get("min_net_income"),
         "max_spread_ratio": hard.get("max_spread_ratio"),
+        "min_if_exercised_total_return": hard.get("min_if_exercised_total_return"),
         "score_weight_annualized_return": float(score.get("annualized_return", 1.0) or 0.0),
         "score_weight_net_income": float(score.get("net_income", 0.0) or 0.0),
         "param_table_version": "v1",
@@ -194,6 +198,21 @@ def filter_candidates_with_reject_log(
             rejected_df=rejected,
             metric=net_income,
             reject_rule="min_net_income",
+            reject_stage=reject_stage,
+            threshold=threshold,
+            mode=cfg.mode,
+        )
+        out = out[mask]
+    if cfg.mode == "call" and cfg.min_if_exercised_total_return is not None:
+        total_ret = _to_numeric(out, "if_exercised_total_return")
+        threshold = float(cfg.min_if_exercised_total_return)
+        mask = total_ret >= threshold
+        rejected = out[~mask]
+        _append_reject_rows(
+            sink=reject_rows,
+            rejected_df=rejected,
+            metric=total_ret,
+            reject_rule="min_if_exercised_total_return",
             reject_stage=reject_stage,
             threshold=threshold,
             mode=cfg.mode,

@@ -118,6 +118,26 @@ def test_scan_sell_call_filter_and_rank_baseline() -> None:
                     "implied_volatility": 0.30,
                     "delta": 0.45,
                 },
+                # fail if-exercised total return versus avg_cost
+                {
+                    "symbol": "AAPL",
+                    "option_type": "call",
+                    "expiration": "2026-05-15",
+                    "dte": 30,
+                    "contract_symbol": "F",
+                    "multiplier": 100,
+                    "currency": "USD",
+                    "strike": 95.0,
+                    "spot": 100.0,
+                    "bid": 1.4,
+                    "ask": 1.6,
+                    "last_price": 1.5,
+                    "mid": 1.5,
+                    "open_interest": 200,
+                    "volume": 50,
+                    "implied_volatility": 0.30,
+                    "delta": 0.65,
+                },
                 # fail liquidity open-interest
                 {
                     "symbol": "AAPL",
@@ -159,6 +179,7 @@ def test_scan_sell_call_filter_and_rank_baseline() -> None:
         assert not reject_log.empty
         assert set(reject_log["reject_stage"].dropna().astype(str).tolist()) == {"step3_risk_gate"}
         assert set(["engine_reject_stage", "engine_reject_reason"]).issubset(set(reject_log.columns))
+        assert "min_if_exercised_total_return" in set(reject_log["reject_rule"].dropna().astype(str).tolist())
 
 
 def test_sell_call_risk_bands_are_stable() -> None:

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.11 - 2026-05-11
+
+### Changed
+- Restored Covered Call/Sell Call assigned-return hard filtering with `min_if_exercised_total_return`, using account `avg_cost` as the cost basis.
+- Documented the default `0.0` assigned-return floor in system config and strategy docs.
+
 ## 1.2.10 - 2026-05-11
 
 ### Changed

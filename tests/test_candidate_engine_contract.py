@@ -260,11 +260,13 @@ def test_candidate_engine_stage2_rejects_return_floor() -> None:
         _accepted_base_candidate("call"),
         min_annualized_return=0.1,
         min_net_income=100,
+        min_if_exercised_total_return=0.05,
         annualized_return=0.11,
         net_income=90,
+        if_exercised_total_return=0.02,
     )
     assert call["accepted"] is False
-    assert [r["reason"] for r in call["rejects"]] == ["return_net_income"]
+    assert [r["reason"] for r in call["rejects"]] == ["return_net_income", "return_if_exercised_total"]
 
 
 def test_candidate_engine_stage3_risk_warn_does_not_reject_but_reject_mode_does() -> None:

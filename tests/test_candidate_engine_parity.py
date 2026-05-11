@@ -193,6 +193,7 @@ def test_candidate_engine_legacy_call_reject_rule_mapping_matches_filter_reject_
             {"symbol": "AAPL", "contract_symbol": "PASS", "annualized_net_premium_return": 0.12, "if_exercised_total_return": 0.08, "net_income": 80, "spread_ratio": 0.20},
             {"symbol": "AAPL", "contract_symbol": "FAIL_RET", "annualized_net_premium_return": 0.08, "if_exercised_total_return": 0.08, "net_income": 90, "spread_ratio": 0.20},
             {"symbol": "AAPL", "contract_symbol": "FAIL_NET", "annualized_net_premium_return": 0.12, "if_exercised_total_return": 0.02, "net_income": 40, "spread_ratio": 0.20},
+            {"symbol": "AAPL", "contract_symbol": "FAIL_COST", "annualized_net_premium_return": 0.12, "if_exercised_total_return": 0.02, "net_income": 80, "spread_ratio": 0.20},
             {"symbol": "AAPL", "contract_symbol": "FAIL_SPREAD", "annualized_net_premium_return": 0.12, "if_exercised_total_return": 0.08, "net_income": 80, "spread_ratio": 0.40},
         ]
     )
@@ -200,6 +201,7 @@ def test_candidate_engine_legacy_call_reject_rule_mapping_matches_filter_reject_
         "call",
         min_annualized_return=0.10,
         min_net_income=50,
+        min_if_exercised_total_return=0.05,
         max_spread_ratio=0.30,
     )
     out, reject_log = filter_candidates_with_reject_log(df, cfg, reject_stage="step3_risk_gate")
@@ -209,16 +211,19 @@ def test_candidate_engine_legacy_call_reject_rule_mapping_matches_filter_reject_
     assert list(reject_log["engine_reject_stage"]) == [
         "stage2_return_floor",
         "stage2_return_floor",
+        "stage2_return_floor",
         "stage3_risk_filter",
     ]
     assert list(reject_log["engine_reject_reason"]) == [
         "return_annualized",
         "return_net_income",
+        "return_if_exercised_total",
         "risk_spread",
     ]
     assert [(m["stage"], m["reason"]) for m in mapped] == [
         ("stage2_return_floor", "return_annualized"),
         ("stage2_return_floor", "return_net_income"),
+        ("stage2_return_floor", "return_if_exercised_total"),
         ("stage3_risk_filter", "risk_spread"),
     ]
     assert mapped[0]["contract_symbol"] == "FAIL_RET"
