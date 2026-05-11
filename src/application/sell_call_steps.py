@@ -114,6 +114,11 @@ def run_sell_call_scan_and_summarize(
         min_strike=(float(cc.get('min_strike')) if cc.get('min_strike') is not None else None),
         max_strike=(float(cc.get('max_strike')) if cc.get('max_strike') is not None else None),
         min_annualized_net_return=min_annualized,
+        min_if_exercised_total_return=(
+            float(cc.get('min_if_exercised_total_return'))
+            if cc.get('min_if_exercised_total_return') is not None
+            else 0.0
+        ),
         min_net_income=float(min_net_income_native),
         min_open_interest=liquidity.min_open_interest,
         min_volume=liquidity.min_volume,

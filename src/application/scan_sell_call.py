@@ -18,7 +18,10 @@ from domain.domain.candidate_defaults import (
     resolve_event_risk_config,
 )
 from domain.domain.sell_call_risk_bands import classify_sell_call_risk
-from domain.domain.sell_call_config import validate_min_annualized_net_premium_return
+from domain.domain.sell_call_config import (
+    validate_min_annualized_net_premium_return,
+    validate_min_if_exercised_total_return,
+)
 from domain.domain.risk_capacity import compute_covered_call_share_capacity
 from src.application.candidate_scanning import (
     CandidateScanConfig,
@@ -229,6 +232,7 @@ def run_sell_call_scan(
     min_strike: float | None = None,
     max_strike: float | None = None,
     min_annualized_net_return: float | None = None,
+    min_if_exercised_total_return: float = 0.0,
     min_net_income: float = 50.0,
     min_open_interest: float = DEFAULT_CANDIDATE_LIQUIDITY.min_open_interest,
     min_volume: float = DEFAULT_CANDIDATE_LIQUIDITY.min_volume,
@@ -244,6 +248,10 @@ def run_sell_call_scan(
     threshold = validate_min_annualized_net_premium_return(
         min_annualized_net_return,
         source="--min-annualized-net-return",
+    )
+    if_exercised_threshold = validate_min_if_exercised_total_return(
+        min_if_exercised_total_return,
+        source="--min-if-exercised-total-return",
     )
 
     return run_candidate_scan(
@@ -262,6 +270,7 @@ def run_sell_call_scan(
             max_spread_ratio=max_spread_ratio,
             min_annualized_net_return=threshold,
             min_net_income=float(min_net_income),
+            min_if_exercised_total_return=if_exercised_threshold,
             quiet=bool(quiet),
         ),
         deps=CandidateScanDependencies(
@@ -308,6 +317,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--min-strike", type=float, default=None)
     parser.add_argument("--max-strike", type=float, default=None)
     parser.add_argument("--min-annualized-net-return", type=float, default=None, help="required; min annualized net premium return in [0,1]")
+    parser.add_argument("--min-if-exercised-total-return", type=float, default=0.0, help="min total return if assigned, based on avg_cost")
     parser.add_argument("--min-net-income", type=float, default=50.0)
     parser.add_argument("--min-open-interest", type=float, default=DEFAULT_CANDIDATE_LIQUIDITY.min_open_interest)
     parser.add_argument("--min-volume", type=float, default=DEFAULT_CANDIDATE_LIQUIDITY.min_volume)
@@ -343,6 +353,7 @@ def main(argv: list[str] | None = None) -> int:
             min_strike=args.min_strike,
             max_strike=args.max_strike,
             min_annualized_net_return=args.min_annualized_net_return,
+            min_if_exercised_total_return=args.min_if_exercised_total_return,
             min_net_income=args.min_net_income,
             min_open_interest=args.min_open_interest,
             min_volume=args.min_volume,

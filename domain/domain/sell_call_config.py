@@ -39,6 +39,20 @@ def validate_min_annualized_net_premium_return(value, *, source: str) -> float:
     return out
 
 
+def validate_min_if_exercised_total_return(value, *, source: str) -> float:
+    if value is None:
+        raise ValueError(f"{source} is required and must be a finite number")
+    if isinstance(value, bool):
+        raise ValueError(f"{source} must be a finite number, got bool")
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{source} must be a finite number, got {value!r}") from None
+    if not math.isfinite(out):
+        raise ValueError(f"{source} must be a finite number, got {value!r}")
+    return out
+
+
 def _pick_compatible_field(section: dict, *, source_prefix: str) -> tuple[object | None, str | None]:
     if not isinstance(section, dict):
         return None, None
