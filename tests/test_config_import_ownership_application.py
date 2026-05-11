@@ -146,6 +146,18 @@ def test_pipeline_symbol_stack_imports_owner_modules() -> None:
     assert importlib.import_module("src.application.report_labels").classify_sell_put_risk is put_risk_mod.classify_sell_put_risk
 
 
+def test_strategy_and_spot_fallback_legacy_script_owners_are_removed() -> None:
+    for old_module in ("scripts.option_candidate_strategy", "scripts.pm_bridge"):
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module(old_module)
+
+    strategy_mod = importlib.import_module("domain.domain.engine.candidate_strategy")
+    opend_mod = importlib.import_module("src.application.opend_symbol_fetching")
+
+    assert callable(strategy_mod.build_strategy_config)
+    assert callable(opend_mod.fetch_symbol)
+
+
 def test_required_data_uses_application_opend_symbol_fetching_owner() -> None:
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module("scripts.fetch_market_data_opend")
