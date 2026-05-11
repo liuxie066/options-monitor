@@ -151,6 +151,8 @@ def main(argv: list[str] | None = None) -> int:
     if "symbols" in cfg:
         top_n = cfg.get("outputs", {}).get("top_n_alerts", 3)
         runtime = cfg.get("runtime", {}) or {}
+        notifications_cfg = cfg.get("notifications", {}) or {}
+        render_style = str(notifications_cfg.get("render_style") or "compact").strip().lower()
         symbol_timeout_sec = int(runtime.get("symbol_timeout_sec", 120))
         portfolio_timeout_sec = int(runtime.get("portfolio_timeout_sec", 60))
 
@@ -162,6 +164,7 @@ def main(argv: list[str] | None = None) -> int:
                 stage_only=STAGE_ONLY,
                 want=_want,
                 log=log,
+                render_style=render_style,
             )
             return 0
 
@@ -238,6 +241,7 @@ def main(argv: list[str] | None = None) -> int:
                 alerts_input=(report_dir / "symbols_alerts.txt").resolve(),
                 changes_input=changes_path,
                 output=(report_dir / "symbols_notification.txt").resolve(),
+                render_style=render_style,
             )
 
             if IS_SCHEDULED and (report_dir == (base / "output" / "reports").resolve()):
