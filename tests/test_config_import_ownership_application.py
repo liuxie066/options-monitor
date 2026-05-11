@@ -87,6 +87,18 @@ def test_pipeline_watchlist_imports_config_loader_helpers_from_owner_module() ->
     assert pipeline_watchlist_mod.resolve_watchlist_config is owner_mod.resolve_watchlist_config
 
 
+def test_pipeline_orchestration_helpers_use_application_owner_modules() -> None:
+    for old_module in ("scripts.pipeline_runner", "scripts.pipeline_postprocess"):
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module(old_module)
+
+    runner_mod = importlib.import_module("src.application.pipeline_runner")
+    postprocess_mod = importlib.import_module("src.application.pipeline_postprocess")
+
+    assert runner_mod.build_stage_plan(stage="all", stage_only=None).want("notify") is True
+    assert postprocess_mod.PostprocessResult.__name__ == "PostprocessResult"
+
+
 def test_pipeline_symbol_stack_imports_owner_modules() -> None:
     for old_module in (
         "scripts.pipeline_symbol",
