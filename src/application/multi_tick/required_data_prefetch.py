@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 import threading
+import time
 from typing import Any
 
 from domain.domain.tool_boundary import SCHEMA_VERSION_V1, normalize_tool_execution_payload
@@ -25,6 +26,7 @@ _thread_gateway = threading.local()
 _thread_gateway_failures = threading.local()
 _thread_gateway_registry_lock = threading.Lock()
 _thread_gateway_registry: list[Any] = []
+_DEFAULT_PREFETCH_MAX_WORKERS = 2
 
 
 def _to_int(v: Any, default: int) -> int:
@@ -34,26 +36,33 @@ def _to_int(v: Any, default: int) -> int:
         return int(default)
 
 
+def _as_dict(v: Any) -> dict[str, Any]:
+    return v if isinstance(v, dict) else {}
+
+
 def _resolve_prefetch_max_workers(cfg: dict[str, Any]) -> int:
-    runtime = cfg.get("runtime") if isinstance(cfg.get("runtime"), dict) else {}
-    prefetch_cfg = cfg.get("prefetch") if isinstance(cfg.get("prefetch"), dict) else {}
+    runtime = _as_dict(cfg.get("runtime"))
+    runtime_prefetch_cfg = _as_dict(runtime.get("prefetch"))
+    prefetch_cfg = _as_dict(cfg.get("prefetch"))
     v = runtime.get("prefetch_max_workers")
     if v is None:
+        v = runtime_prefetch_cfg.get("max_workers")
+    if v is None:
         v = prefetch_cfg.get("max_workers")
-    n = _to_int(v, 2)
-    return max(1, n)
+    n = _to_int(v, _DEFAULT_PREFETCH_MAX_WORKERS)
+    return n if n > 0 else _DEFAULT_PREFETCH_MAX_WORKERS
 
 
 def _resolve_execution_mode(cfg: dict[str, Any]) -> str:
-    runtime = cfg.get("runtime") if isinstance(cfg.get("runtime"), dict) else {}
-    prefetch_cfg = runtime.get("prefetch") if isinstance(runtime.get("prefetch"), dict) else {}
+    runtime = _as_dict(cfg.get("runtime"))
+    prefetch_cfg = _as_dict(runtime.get("prefetch"))
     mode = str(prefetch_cfg.get("execution_mode") or "inprocess").strip().lower()
     return mode if mode in {"inprocess", "subprocess"} else "inprocess"
 
 
 def _resolve_failure_budget(cfg: dict[str, Any]) -> tuple[int, int]:
-    runtime = cfg.get("runtime") if isinstance(cfg.get("runtime"), dict) else {}
-    prefetch_cfg = cfg.get("prefetch") if isinstance(cfg.get("prefetch"), dict) else {}
+    runtime = _as_dict(cfg.get("runtime"))
+    prefetch_cfg = _as_dict(cfg.get("prefetch"))
     max_consecutive = runtime.get("prefetch_fail_budget_consecutive")
     if max_consecutive is None:
         max_consecutive = prefetch_cfg.get("fail_budget_consecutive")
@@ -171,6 +180,27 @@ def _mark_thread_gateway_success() -> None:
 
 def _symbol_class(symbol: str) -> str:
     return symbol_market(symbol) or "US"
+
+
+def _annotate_prefetch_payload(
+    payload: dict[str, Any],
+    *,
+    execution_mode: str,
+    duration_sec: float | None,
+) -> dict[str, Any]:
+    payload["execution_mode"] = execution_mode
+    if duration_sec is not None:
+        payload["duration_sec"] = float(duration_sec)
+    return payload
+
+
+def _safe_duration_sec(started_at: float | None) -> float | None:
+    if started_at is None:
+        return None
+    try:
+        return max(0.0, float(time.monotonic() - started_at))
+    except Exception:
+        return None
 
 
 def _fetch_one_inprocess(
@@ -343,6 +373,9 @@ def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required:
             '--snapshot-window-sec', str(snapshot_fetch_cfg["window_sec"]),
             '--snapshot-max-calls', str(snapshot_fetch_cfg["max_calls"]),
             '--snapshot-max-wait-sec', str(snapshot_fetch_cfg["max_wait_sec"]),
+            '--snapshot-batch-size', str(int(getattr(batch_cfg, 'market_snapshot', 0) or 0)),
+            '--snapshot-fallback-max-codes', str(int(getattr(batch_cfg, 'market_snapshot_fallback_max_codes', 100) or 0)),
+            '--snapshot-fallback-batch-size', str(int(getattr(batch_cfg, 'market_snapshot_fallback_batch_size', 20) or 20)),
             '--expiration-window-sec', str(expiration_fetch_cfg["window_sec"]),
             '--expiration-max-calls', str(expiration_fetch_cfg["max_calls"]),
             '--expiration-max-wait-sec', str(expiration_fetch_cfg["max_wait_sec"]),
@@ -377,6 +410,8 @@ def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required:
     ok = 0
     err = 0
     skipped = 0
+    submitted_count = 0
+    completed_count = 0
     results: dict[str, str] = {}
     audit_items: list[dict] = []
 
@@ -389,10 +424,20 @@ def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required:
             'cached': len(symbols),
             'errors': 0,
             'skipped': 0,
+            'max_workers': 0,
+            'prefetch_max_workers': _resolve_prefetch_max_workers(cfg),
+            'effective_prefetch_workers': 0,
+            'submitted_count': 0,
+            'completed_count': 0,
+            'skipped_count': 0,
+            'failed_count': 0,
+            'execution_mode': _resolve_execution_mode(cfg),
+            'symbols': [],
             'audit': [],
         }
 
-    max_workers = min(_resolve_prefetch_max_workers(cfg), max(1, len(todo_cfgs)))
+    configured_max_workers = _resolve_prefetch_max_workers(cfg)
+    max_workers = max(1, min(configured_max_workers, len(todo_cfgs)))
     fail_budget_consecutive, fail_budget_total = _resolve_failure_budget(cfg)
     fail_consecutive = 0
     fail_total = 0
@@ -419,8 +464,23 @@ def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required:
                 batch_cfg=batch_cfg,
             )
 
+        def _dispatch_timed(symbol_cfg: dict) -> dict:
+            started_at: float | None
+            try:
+                started_at = time.monotonic()
+            except Exception:
+                started_at = None
+            payload = _dispatch(symbol_cfg)
+            if isinstance(payload, dict):
+                return _annotate_prefetch_payload(
+                    payload,
+                    execution_mode=execution_mode,
+                    duration_sec=_safe_duration_sec(started_at),
+                )
+            return payload
+
         def _submit_next() -> bool:
-            nonlocal q_idx, skipped
+            nonlocal q_idx, skipped, submitted_count
             while q_idx < len(q):
                 symbol_cfg = q[q_idx]
                 q_idx += 1
@@ -439,13 +499,14 @@ def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required:
                         message=f'opend_rate_limit_short_circuit class={sym_class}',
                         returncode=None,
                     )
-                    audit_items.append(payload)
+                    audit_items.append(_annotate_prefetch_payload(payload, execution_mode=execution_mode, duration_sec=0.0))
                     if symbol:
                         results[symbol] = str(payload.get("message") or "")
                     skipped += 1
                     continue
-                fut = ex.submit(_dispatch, symbol_cfg)
+                fut = ex.submit(_dispatch_timed, symbol_cfg)
                 futs[fut] = symbol_cfg
+                submitted_count += 1
                 return True
             return False
 
@@ -457,6 +518,7 @@ def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required:
             symbol_cfg = futs.pop(fut)
             payload = fut.result()
             audit_items.append(payload)
+            completed_count += 1
 
             sym = str(payload.get('symbol') or '').strip()
             msg = str(payload.get('message') or '')
@@ -508,7 +570,7 @@ def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required:
                             message='prefetch_stopped_by_failure_budget',
                             returncode=None,
                         )
-                        audit_items.append(payload0)
+                        audit_items.append(_annotate_prefetch_payload(payload0, execution_mode=execution_mode, duration_sec=0.0))
                         if symbol0:
                             results[symbol0] = str(payload0.get("message") or "")
                         skipped += 1
@@ -526,7 +588,7 @@ def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required:
                         message='prefetch_stopped_by_failure_budget',
                         returncode=None,
                     )
-                    audit_items.append(payload1)
+                    audit_items.append(_annotate_prefetch_payload(payload1, execution_mode=execution_mode, duration_sec=0.0))
                     if symbol1:
                         results[symbol1] = str(payload1.get("message") or "")
                     skipped += 1
@@ -541,20 +603,38 @@ def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required:
     if execution_mode == 'inprocess':
         _close_registered_gateways()
 
+    symbol_items = [
+        {
+            'symbol': str(item.get('symbol') or ''),
+            'status': str(item.get('status') or ''),
+            'execution_mode': str(item.get('execution_mode') or execution_mode),
+            **({'duration_sec': float(duration_sec)} if (duration_sec := item.get('duration_sec')) is not None else {}),
+        }
+        for item in audit_items
+        if isinstance(item, dict) and str(item.get('symbol') or '').strip() and str(item.get('symbol') or '') != '*'
+    ]
+
     return {
         'schema_version': SCHEMA_VERSION_V1,
         'symbols_total': len(symbols),
         'to_fetch': len(todo_cfgs),
         'max_workers': max_workers,
+        'prefetch_max_workers': configured_max_workers,
+        'effective_prefetch_workers': max_workers,
         'execution_mode': execution_mode,
         'fetched_ok': ok,
         'errors': err,
         'skipped': skipped,
+        'submitted_count': submitted_count,
+        'completed_count': completed_count,
+        'skipped_count': skipped,
+        'failed_count': err,
         'fail_budget_consecutive': fail_budget_consecutive,
         'fail_budget_total': fail_budget_total,
         'budget_triggered': budget_triggered,
         'opend_rate_limit_classes': sorted(rate_limit_blocked_classes),
         'force_refresh': bool(force_refresh),
         'results': results,
+        'symbols': symbol_items,
         'audit': audit_items,
     }
