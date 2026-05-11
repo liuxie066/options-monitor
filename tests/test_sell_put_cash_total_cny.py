@@ -43,6 +43,117 @@ def test_enrich_sell_put_candidates_with_cash_adds_total_cny_columns(tmp_path: P
     assert row["cash_free_cny"] == 9540.0
 
 
+def test_enrich_sell_put_candidates_with_cash_marks_unknown_cash_secured_fail_closed(tmp_path: Path) -> None:
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+    from src.application.sell_put_cash import enrich_sell_put_candidates_with_cash
+
+    df = pd.DataFrame(
+        [
+            {
+                "symbol": "0700.HK",
+                "strike": 450.0,
+                "multiplier": 100,
+                "currency": "HKD",
+            }
+        ]
+    )
+    out_path = tmp_path / "sell_put_candidates_labeled.csv"
+
+    result = enrich_sell_put_candidates_with_cash(
+        df_labeled=df,
+        symbol="0700.HK",
+        portfolio_ctx={
+            "cash_by_currency": {"CNY": 10000.0, "HKD": 1000.0},
+            "option_ctx": {
+                "cash_secured_unavailable_by_symbol": {
+                    "0700.HK": "short_put_cash_secured_basis_missing",
+                },
+            },
+        },
+        exchange_rate_converter=CurrencyConverter(ExchangeRates(cny_per_hkd=0.92)),
+        out_path=out_path,
+    )
+
+    row = result.iloc[0]
+    assert row["cash_secured_unavailable_reason"] == "0700.HK:short_put_cash_secured_basis_missing"
+    assert pd.isna(row["cash_free_cny"])
+    assert pd.isna(row["cash_free_total_cny"])
+    assert pd.isna(row["cash_free_usd"])
+
+
+def test_enrich_sell_put_candidates_with_cash_does_not_guess_missing_candidate_currency(tmp_path: Path) -> None:
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+    from src.application.sell_put_cash import enrich_sell_put_candidates_with_cash
+
+    df = pd.DataFrame(
+        [
+            {
+                "symbol": "0700.HK",
+                "strike": 450.0,
+                "multiplier": 500,
+            }
+        ]
+    )
+    out_path = tmp_path / "sell_put_candidates_labeled.csv"
+
+    result = enrich_sell_put_candidates_with_cash(
+        df_labeled=df,
+        symbol="0700.HK",
+        portfolio_ctx={
+            "cash_by_currency": {"CNY": 10000.0, "USD": 10000.0},
+            "option_ctx": {
+                "cash_secured_total_by_ccy": {},
+                "cash_secured_total_cny": 0.0,
+                "cash_secured_by_symbol_by_ccy": {},
+            },
+        },
+        exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14, cny_per_hkd=0.92)),
+        out_path=out_path,
+    )
+
+    row = result.iloc[0]
+    assert row["cash_requirement_unavailable_reason"] == "sell_put_candidate_currency_missing"
+    assert pd.isna(row["cash_required_usd"])
+    assert pd.isna(row["cash_required_cny"])
+
+
+def test_enrich_sell_put_candidates_with_cash_does_not_treat_hkd_requirement_as_usd(tmp_path: Path) -> None:
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+    from src.application.sell_put_cash import enrich_sell_put_candidates_with_cash
+
+    df = pd.DataFrame(
+        [
+            {
+                "symbol": "0700.HK",
+                "strike": 450.0,
+                "multiplier": 500,
+                "currency": "HKD",
+            }
+        ]
+    )
+    out_path = tmp_path / "sell_put_candidates_labeled.csv"
+
+    result = enrich_sell_put_candidates_with_cash(
+        df_labeled=df,
+        symbol="0700.HK",
+        portfolio_ctx={
+            "cash_by_currency": {"USD": 1_000_000.0},
+            "option_ctx": {
+                "cash_secured_total_by_ccy": {},
+                "cash_secured_total_cny": 0.0,
+                "cash_secured_by_symbol_by_ccy": {},
+            },
+        },
+        exchange_rate_converter=CurrencyConverter(ExchangeRates()),
+        out_path=out_path,
+    )
+
+    row = result.iloc[0]
+    assert pd.isna(row["cash_required_usd"])
+    assert pd.isna(row["cash_required_cny"])
+    assert row["cash_requirement_unavailable_reason"] == "sell_put_candidate_cny_rate_missing:HKD"
+
+
 def test_render_sell_put_alerts_shows_total_cny_when_base_cny_missing(tmp_path: Path) -> None:
     from src.application.render_sell_put_alerts import render_sell_put_alerts
 

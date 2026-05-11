@@ -10,7 +10,12 @@ from datetime import datetime, timezone
 from domain.domain.expiration_dates import (
     EXPIRATION_DATE_TZ,
 )
-from domain.domain.option_position_lots import normalize_account, normalize_broker
+from domain.domain.option_position_lots import normalize_account, normalize_broker, normalize_currency
+from domain.domain.risk_capacity import (
+    compute_short_call_locked_shares,
+    compute_short_put_cash_secured,
+)
+from domain.domain.symbol_identity import canonical_symbol
 from src.infrastructure.io_utils import atomic_write_json
 from src.application.option_positions_facade import (
     build_option_position_view,
@@ -43,6 +48,7 @@ def build_context(records: list[dict], broker: str, account: str | None = None, 
 
     # Aggregate open short positions for constraints
     locked_shares_by_symbol: dict[str, int] = {}
+    locked_shares_unavailable_by_symbol: dict[str, str] = {}
 
     # cash_secured_amount is stored on projected position lots with an explicit currency field (USD/CNY/HKD).
     # We aggregate:
@@ -50,6 +56,7 @@ def build_context(records: list[dict], broker: str, account: str | None = None, 
     # - total_base_cny: unified base currency (CNY) using exchange rates when available
     cash_secured_by_symbol_by_ccy: dict[str, dict[str, float]] = {}
     cash_secured_total_by_ccy: dict[str, float] = {}
+    cash_secured_unavailable_by_symbol: dict[str, str] = {}
 
     cash_secured_total_cny: float | None = 0.0
 
@@ -84,12 +91,15 @@ def build_context(records: list[dict], broker: str, account: str | None = None, 
         expiration_date = it.get("expiration_date")
         days_to_expiration = (expiration_date - as_of_date).days if expiration_date is not None else None
 
+        raw_symbol = str(it.get("symbol") or "").strip().upper()
+        symbol = canonical_symbol(raw_symbol) or raw_symbol
+
         open_positions_min.append({
             'record_id': it.get('record_id'),
             'position_id': it.get('position_id'),
             'broker': it.get('broker'),
             'account': it.get('account'),
-            'symbol': it.get('symbol'),
+            'symbol': symbol,
             'option_type': it.get('option_type'),
             'side': it.get('side'),
             'status': 'open',
@@ -111,31 +121,45 @@ def build_context(records: list[dict], broker: str, account: str | None = None, 
             'close_reason': f.get('close_reason'),
             'note': it.get('note'),
         })
-
-        symbol = str(it.get("symbol") or "").strip().upper()
         if not symbol:
             continue
 
         option_type = it.get("option_type")
         side = it.get("side")
-        locked = it.get("underlying_share_locked")
-        cash_secured = it.get("cash_secured_amount")
-        currency = it.get("currency")
+        currency = normalize_currency(it.get("currency"))
 
         if side == "short" and option_type == "call":
+            locked = compute_short_call_locked_shares(
+                contracts_open=contracts_open,
+                contracts_total=contracts_total,
+                multiplier=it.get("multiplier"),
+                underlying_share_locked=it.get("underlying_share_locked"),
+            )
             if locked is None:
-                locked = contracts_open * 100
-            elif contracts_total > 0 and contracts_open < contracts_total:
-                locked = float(locked) / float(contracts_total) * float(contracts_open)
+                locked_shares_unavailable_by_symbol[symbol] = "short_call_locked_shares_basis_missing"
+                continue
             locked_shares_by_symbol[symbol] = locked_shares_by_symbol.get(symbol, 0) + int(locked)
 
         if side == "short" and option_type == "put":
+            cash_secured = compute_short_put_cash_secured(
+                contracts_open=contracts_open,
+                contracts_total=contracts_total,
+                cash_secured_amount=it.get("cash_secured_amount"),
+                strike=it.get("strike"),
+                multiplier=it.get("multiplier"),
+            )
             if cash_secured is None:
+                cash_secured_unavailable_by_symbol[symbol] = "short_put_cash_secured_basis_missing"
+                cash_secured_total_cny = None
                 continue
             if not currency:
-                currency = 'USD'  # backward compatible default
-            if contracts_total > 0 and contracts_open < contracts_total:
-                cash_secured = float(cash_secured) / float(contracts_total) * float(contracts_open)
+                cash_secured_unavailable_by_symbol[symbol] = "short_put_cash_secured_currency_missing"
+                cash_secured_total_cny = None
+                continue
+            if currency not in {"CNY", "USD", "HKD"}:
+                cash_secured_unavailable_by_symbol[symbol] = f"short_put_cash_secured_currency_unsupported:{currency}"
+                cash_secured_total_cny = None
+                continue
 
             # bucket per symbol per currency
             m = cash_secured_by_symbol_by_ccy.get(symbol) or {}
@@ -165,8 +189,10 @@ def build_context(records: list[dict], broker: str, account: str | None = None, 
         "as_of_utc": datetime.now(timezone.utc).isoformat(),
         "filters": {"broker": broker_norm, "account": account_norm or account},
         "locked_shares_by_symbol": locked_shares_by_symbol,
+        "locked_shares_unavailable_by_symbol": locked_shares_unavailable_by_symbol,
         "cash_secured_by_symbol_by_ccy": cash_secured_by_symbol_by_ccy,
         "cash_secured_total_by_ccy": cash_secured_total_by_ccy,
+        "cash_secured_unavailable_by_symbol": cash_secured_unavailable_by_symbol,
         "cash_secured_total_cny": cash_secured_total_cny,
         "exchange_rates": (rates or {}),
         "raw_selected_count": len(selected_items),

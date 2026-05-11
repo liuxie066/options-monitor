@@ -19,6 +19,7 @@ from domain.domain.candidate_defaults import (
 )
 from domain.domain.sell_call_risk_bands import classify_sell_call_risk
 from domain.domain.sell_call_config import validate_min_annualized_net_premium_return
+from domain.domain.risk_capacity import compute_covered_call_share_capacity
 from src.application.candidate_scanning import (
     CandidateScanConfig,
     CandidateScanDependencies,
@@ -134,29 +135,17 @@ def _make_compute_metrics(avg_cost: float) -> Callable[[CandidateContractInput],
 
 
 def _resolve_covered_contracts(*, multiplier: float | None, shares: int, shares_locked: int, shares_available_for_cover: int | None) -> tuple[int, int, bool]:
-    m = multiplier
-    m_int = int(m) if m is not None and m > 0 else 0
-    shares_total = int(shares)
-    shares_locked_value = int(shares_locked or 0)
-    available = shares_available_for_cover
-    try:
-        if available is not None:
-            available = int(available)
-    except Exception:
-        available = None
-    if available is None:
-        available = max(0, shares_total - shares_locked_value)
-    covered_contracts_available = 0
-    is_fully_covered_available = False
-    try:
-        m_int = int(m) if m is not None and m > 0 else 0
-        if m_int > 0:
-            covered_contracts_available = max(0, int(available)) // m_int
-            is_fully_covered_available = covered_contracts_available >= 1
-    except Exception:
-        covered_contracts_available = 0
-        is_fully_covered_available = False
-    return int(available), covered_contracts_available, is_fully_covered_available
+    capacity = compute_covered_call_share_capacity(
+        shares_total=shares,
+        shares_locked=shares_locked,
+        shares_available_for_cover=shares_available_for_cover,
+        multiplier=multiplier,
+    )
+    return (
+        int(capacity.shares_available_for_cover),
+        int(capacity.covered_contracts_available),
+        bool(capacity.is_fully_covered_available),
+    )
 
 
 def _build_candidate_row_factory(*, avg_cost: float, shares: int, shares_locked: int, shares_available_for_cover: int | None) -> Callable[[CandidateContractInput, CandidateBaseValues, dict], dict | None]:

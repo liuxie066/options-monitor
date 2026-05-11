@@ -19,6 +19,7 @@ from domain.domain.cash_secured_utils import (
     normalize_cash_secured_total_by_ccy,
     read_cash_secured_total_cny,
 )
+from domain.domain.option_position_lots import normalize_currency
 from src.infrastructure.exchange_rates import CurrencyConverter
 from src.infrastructure.io_utils import safe_read_csv
 
@@ -91,8 +92,18 @@ def enrich_sell_put_candidates_with_cash(
     used_total_usd = 0.0
     used_total_cny = None
     used_symbol_cny = None
+    cash_secured_unavailable_reason = ""
 
     if option_ctx:
+        unavailable = option_ctx.get("cash_secured_unavailable_by_symbol")
+        if isinstance(unavailable, dict) and unavailable:
+            cash_secured_unavailable_reason = ";".join(
+                f"{sym}:{reason}" for sym, reason in sorted(unavailable.items())
+            )
+            log.warning(
+                "sell_put_cash: cash_secured unavailable; fail-closed cash gating: %s",
+                cash_secured_unavailable_reason,
+            )
         try:
             norm_by_ccy = normalize_cash_secured_by_symbol_by_ccy(option_ctx)
             total_by_ccy_norm = normalize_cash_secured_total_by_ccy(option_ctx, by_symbol_by_ccy=norm_by_ccy)
@@ -115,7 +126,6 @@ def enrich_sell_put_candidates_with_cash(
             used_symbol_cny = None
 
     cash_avail = None
-    cash_avail_est = None
     cash_avail_cny = None
     cash_free_cny = None
     cash_avail_total_cny = None
@@ -133,21 +143,13 @@ def enrich_sell_put_candidates_with_cash(
         )
 
         if cash_avail_cny is not None:
-            if used_total_cny is not None:
-                cash_free_cny = cash_avail_cny - used_total_cny
-            else:
-                k = exchange_rate_converter.native_to_cny(1.0, native_ccy='USD')
-                cash_free_cny = (cash_avail_cny - (used_total_usd * float(k))) if k else None
+            cash_free_cny = (cash_avail_cny - used_total_cny) if used_total_cny is not None else None
 
         if cash_avail_total_cny is not None and used_total_cny is not None:
             cash_free_total_cny = cash_avail_total_cny - used_total_cny
-
-        if cash_avail is None and cash_avail_cny is not None:
-            cash_avail_est = exchange_rate_converter.cny_to_native(cash_avail_cny, native_ccy='USD')
     except Exception as e:
         log.warning("sell_put_cash: cash_available calc failed: %s", e)
         cash_avail = None
-        cash_avail_est = None
         cash_avail_total_cny = None
         cash_free_total_cny = None
 
@@ -173,16 +175,25 @@ def enrich_sell_put_candidates_with_cash(
     else:
         df_sp_lab['cash_available_usd'] = pd.NA
         df_sp_lab['cash_free_usd'] = pd.NA
-        df_sp_lab['cash_available_usd_est'] = (cash_avail_est if cash_avail_est is not None else pd.NA)
-        if cash_avail_est is not None:
-            df_sp_lab['cash_free_usd_est'] = cash_avail_est - used_total_usd
-        else:
-            df_sp_lab['cash_free_usd_est'] = pd.NA
+        df_sp_lab['cash_available_usd_est'] = pd.NA
+        df_sp_lab['cash_free_usd_est'] = pd.NA
 
     df_sp_lab['cash_available_cny'] = (cash_avail_cny if cash_avail_cny is not None else pd.NA)
     df_sp_lab['cash_free_cny'] = (cash_free_cny if cash_free_cny is not None else pd.NA)
     df_sp_lab['cash_available_total_cny'] = (cash_avail_total_cny if cash_avail_total_cny is not None else pd.NA)
     df_sp_lab['cash_free_total_cny'] = (cash_free_total_cny if cash_free_total_cny is not None else pd.NA)
+    df_sp_lab['cash_secured_unavailable_reason'] = cash_secured_unavailable_reason or pd.NA
+    if cash_secured_unavailable_reason:
+        df_sp_lab['cash_secured_used_usd_total'] = pd.NA
+        df_sp_lab['cash_secured_used_usd_symbol'] = pd.NA
+        df_sp_lab['cash_secured_used_usd'] = pd.NA
+        df_sp_lab['cash_secured_used_cny_total'] = pd.NA
+        df_sp_lab['cash_secured_used_cny_symbol'] = pd.NA
+        df_sp_lab['cash_secured_used_cny'] = pd.NA
+        df_sp_lab['cash_free_usd'] = pd.NA
+        df_sp_lab['cash_free_usd_est'] = pd.NA
+        df_sp_lab['cash_free_cny'] = pd.NA
+        df_sp_lab['cash_free_total_cny'] = pd.NA
 
     # Cash requirement
     try:
@@ -193,35 +204,57 @@ def enrich_sell_put_candidates_with_cash(
 
         strike = pd.to_numeric(df_sp_lab['strike'], errors='coerce')
         native_req = strike.astype(float) * m.astype(float)
-        df_sp_lab['cash_required_usd'] = native_req
-        # If multiplier missing, cash requirement is unknown.
+        df_sp_lab['cash_requirement_unavailable_reason'] = pd.NA
+
+        missing_strike = strike.isna() | (strike.astype(float) <= 0)
+        missing_m = m.isna() | (m.astype(float) <= 0)
+        if missing_strike.any():
+            df_sp_lab.loc[missing_strike, 'cash_requirement_unavailable_reason'] = 'sell_put_candidate_strike_missing'
+        if missing_m.any():
+            df_sp_lab.loc[missing_m, 'cash_requirement_unavailable_reason'] = 'sell_put_candidate_multiplier_missing'
+
+        ccy = ""
+        if 'currency' in df_sp_lab.columns and len(df_sp_lab) > 0:
+            ccy = normalize_currency(df_sp_lab['currency'].iloc[0])
+        if not ccy:
+            df_sp_lab['cash_requirement_unavailable_reason'] = (
+                df_sp_lab['cash_requirement_unavailable_reason']
+                .fillna('')
+                .astype(str)
+                .where(lambda s: s.str.strip() != '', 'sell_put_candidate_currency_missing')
+            )
+
+        if ccy == 'USD':
+            df_sp_lab['cash_required_usd'] = native_req
+        else:
+            df_sp_lab['cash_required_usd'] = pd.NA
+
         try:
-            missing_m = m.isna() | (m.astype(float) <= 0)
-            if missing_m.any():
-                df_sp_lab.loc[missing_m, 'cash_required_usd'] = pd.NA
+            missing_req = missing_strike | missing_m
+            if missing_req.any():
+                df_sp_lab.loc[missing_req, 'cash_required_usd'] = pd.NA
         except Exception:
             pass
 
-        ccy = None
-        if 'currency' in df_sp_lab.columns and len(df_sp_lab) > 0:
-            ccy = str(df_sp_lab['currency'].iloc[0] or '').upper()
-
-        c = (ccy or 'USD')
-        k = exchange_rate_converter.native_to_cny(1.0, native_ccy=c)
+        k = exchange_rate_converter.native_to_cny(1.0, native_ccy=ccy) if ccy else None
         if k is None or k <= 0:
             df_sp_lab['cash_required_cny'] = pd.NA
+            if ccy:
+                empty_reason = df_sp_lab['cash_requirement_unavailable_reason'].fillna('').astype(str).str.strip() == ''
+                df_sp_lab.loc[empty_reason, 'cash_requirement_unavailable_reason'] = f'sell_put_candidate_cny_rate_missing:{ccy}'
         else:
             df_sp_lab['cash_required_cny'] = native_req.astype(float) * float(k)
             try:
-                missing_m = m.isna() | (m.astype(float) <= 0)
-                if missing_m.any():
-                    df_sp_lab.loc[missing_m, 'cash_required_cny'] = pd.NA
+                missing_req = missing_strike | missing_m
+                if missing_req.any():
+                    df_sp_lab.loc[missing_req, 'cash_required_cny'] = pd.NA
             except Exception:
                 pass
     except Exception as e:
         log.warning("sell_put_cash: cash_required calc failed: %s", e)
         df_sp_lab['cash_required_usd'] = pd.NA
         df_sp_lab['cash_required_cny'] = pd.NA
+        df_sp_lab['cash_requirement_unavailable_reason'] = 'sell_put_candidate_cash_requirement_calc_failed'
 
     try:
         df_sp_lab.to_csv(out_path, index=False)

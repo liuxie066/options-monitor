@@ -209,6 +209,158 @@ def test_build_context_scales_locked_shares_for_partial_close() -> None:
     assert ctx["locked_shares_by_symbol"]["AAPL"] == 200
 
 
+def test_build_context_uses_multiplier_when_locked_shares_missing() -> None:
+    records = [
+        {
+            "record_id": "rec_1",
+            "fields": {
+                "broker": "富途",
+                "account": "sy",
+                "symbol": "700.HK",
+                "status": "open",
+                "side": "short",
+                "option_type": "call",
+                "contracts": 1,
+                "contracts_open": 1,
+                "multiplier": 500,
+            },
+        }
+    ]
+
+    ctx = build_context(records, broker="富途", account="sy")
+
+    assert ctx["locked_shares_by_symbol"]["0700.HK"] == 500
+    assert ctx["open_positions_min"][0]["symbol"] == "0700.HK"
+
+
+def test_build_context_marks_short_call_lock_unavailable_without_real_multiplier() -> None:
+    records = [
+        {
+            "record_id": "rec_1",
+            "fields": {
+                "broker": "富途",
+                "account": "sy",
+                "symbol": "700.HK",
+                "status": "open",
+                "side": "short",
+                "option_type": "call",
+                "contracts": 1,
+                "contracts_open": 1,
+            },
+        }
+    ]
+
+    ctx = build_context(records, broker="富途", account="sy")
+
+    assert "0700.HK" not in ctx["locked_shares_by_symbol"]
+    assert ctx["locked_shares_unavailable_by_symbol"]["0700.HK"] == "short_call_locked_shares_basis_missing"
+
+
+def test_build_context_derives_missing_cash_secured_from_strike_multiplier() -> None:
+    records = [
+        {
+            "record_id": "rec_1",
+            "fields": {
+                "broker": "富途",
+                "account": "lx",
+                "symbol": "700.HK",
+                "status": "open",
+                "side": "short",
+                "option_type": "put",
+                "contracts": 1,
+                "contracts_open": 1,
+                "strike": 480,
+                "multiplier": 500,
+                "currency": "HKD",
+            },
+        }
+    ]
+
+    ctx = build_context(records, broker="富途", account="lx", rates={"HKDCNY": 0.92})
+
+    assert ctx["cash_secured_by_symbol_by_ccy"]["0700.HK"]["HKD"] == 240000.0
+    assert ctx["cash_secured_total_cny"] == 220800.0
+
+
+def test_build_context_marks_short_put_cash_secured_unavailable_when_basis_missing() -> None:
+    records = [
+        {
+            "record_id": "rec_1",
+            "fields": {
+                "broker": "富途",
+                "account": "lx",
+                "symbol": "700.HK",
+                "status": "open",
+                "side": "short",
+                "option_type": "put",
+                "contracts": 1,
+                "contracts_open": 1,
+                "strike": 480,
+                "currency": "HKD",
+            },
+        }
+    ]
+
+    ctx = build_context(records, broker="富途", account="lx", rates={"HKDCNY": 0.92})
+
+    assert ctx["cash_secured_by_symbol_by_ccy"] == {}
+    assert ctx["cash_secured_total_cny"] is None
+    assert ctx["cash_secured_unavailable_by_symbol"]["0700.HK"] == "short_put_cash_secured_basis_missing"
+
+
+def test_build_context_marks_short_put_cash_secured_unavailable_when_currency_missing() -> None:
+    records = [
+        {
+            "record_id": "rec_1",
+            "fields": {
+                "broker": "富途",
+                "account": "lx",
+                "symbol": "700.HK",
+                "status": "open",
+                "side": "short",
+                "option_type": "put",
+                "contracts": 1,
+                "contracts_open": 1,
+                "strike": 480,
+                "multiplier": 500,
+            },
+        }
+    ]
+
+    ctx = build_context(records, broker="富途", account="lx", rates={"HKDCNY": 0.92})
+
+    assert ctx["cash_secured_by_symbol_by_ccy"] == {}
+    assert ctx["cash_secured_total_cny"] is None
+    assert ctx["cash_secured_unavailable_by_symbol"]["0700.HK"] == "short_put_cash_secured_currency_missing"
+
+
+def test_build_context_derives_missing_cash_secured_then_scales_partial_close() -> None:
+    records = [
+        {
+            "record_id": "rec_1",
+            "fields": {
+                "broker": "富途",
+                "account": "lx",
+                "symbol": "AAPL",
+                "status": "open",
+                "side": "short",
+                "option_type": "put",
+                "contracts": 4,
+                "contracts_open": 1,
+                "contracts_closed": 3,
+                "strike": 100,
+                "multiplier": 100,
+                "currency": "USD",
+            },
+        }
+    ]
+
+    ctx = build_context(records, broker="富途", account="lx", rates={"USDCNY": 7.2})
+
+    assert ctx["cash_secured_by_symbol_by_ccy"]["AAPL"]["USD"] == 10000.0
+    assert ctx["cash_secured_total_cny"] == 72000.0
+
+
 def test_build_context_excludes_closed_or_zero_open_records() -> None:
     records = [
         {

@@ -230,6 +230,45 @@ def test_sell_call_steps_converts_min_net_income_from_cny_to_native() -> None:
     assert kwargs['min_net_income'] == 14.000000000000002
 
 
+def test_sell_call_steps_blocks_when_locked_shares_basis_unavailable() -> None:
+    _add_repo_to_syspath()
+
+    import src.application.sell_call_steps as steps
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+
+    calls: list[dict] = []
+    orig_run_sell_call_scan = steps.run_sell_call_scan
+
+    def _fake_run_sell_call_scan(**kwargs):
+        calls.append(kwargs)
+
+    steps.run_sell_call_scan = _fake_run_sell_call_scan
+    try:
+        out = steps.run_sell_call_scan_and_summarize(
+            py='python',
+            base=BASE,
+            symbol='0700.HK',
+            symbol_lower='0700.hk',
+            symbol_cfg={'symbol': '0700.HK', 'sell_call': {}},
+            cc={'enabled': True, 'min_net_income': 100},
+            top_n=3,
+            required_data_dir=BASE / 'output',
+            report_dir=BASE / 'output' / 'reports',
+            timeout_sec=10,
+            is_scheduled=True,
+            stock={'shares': 500, 'avg_cost': 400},
+            exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14, cny_per_hkd=0.92)),
+            locked_shares_by_symbol={},
+            locked_shares_unavailable_by_symbol={'0700.HK': 'short_call_locked_shares_basis_missing'},
+        )
+    finally:
+        steps.run_sell_call_scan = orig_run_sell_call_scan
+
+    assert out['strategy'] == 'sell_call'
+    assert out['candidate_count'] == 0
+    assert calls == []
+
+
 def test_sell_call_steps_converts_hk_min_net_income_from_cny_to_hkd() -> None:
     _add_repo_to_syspath()
 

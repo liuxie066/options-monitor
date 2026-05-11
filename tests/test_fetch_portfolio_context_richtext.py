@@ -131,3 +131,38 @@ def test_build_context_accepts_broker_field_without_market() -> None:
     assert ctx["raw_selected_count"] == 2
     assert ctx["cash_by_currency"]["USD"] == 123.45
     assert ctx["stocks_by_symbol"]["AAPL"]["broker"] == "富途"
+
+
+def test_build_context_aggregates_duplicate_stock_rows_for_same_account() -> None:
+    records = [
+        {
+            "fields": {
+                "broker": "富途",
+                "account": "lx",
+                "asset_type": "us_stock",
+                "asset_id": "AAPL",
+                "asset_name": "Apple",
+                "currency": "USD",
+                "quantity": "50",
+                "avg_cost": "100",
+            }
+        },
+        {
+            "fields": {
+                "broker": "富途",
+                "account": "lx",
+                "asset_type": "us_stock",
+                "asset_id": "AAPL",
+                "asset_name": "Apple",
+                "currency": "USD",
+                "quantity": "150",
+                "avg_cost": "120",
+            }
+        },
+    ]
+
+    ctx = build_context(records, broker="富途", account="lx")
+
+    stock = ctx["stocks_by_symbol"]["AAPL"]
+    assert stock["shares"] == 200
+    assert stock["avg_cost"] == 115.0

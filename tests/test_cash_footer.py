@@ -71,3 +71,26 @@ def test_query_cash_footer_keeps_dash_when_all_cash_fields_missing(tmp_path: Pat
     out = query_cash_footer(tmp_path, market='富途', accounts=['lx'])
 
     assert out[1] == '- **LX** CNY 持有 - | CNY 可用 -'
+
+
+def test_query_cash_footer_surfaces_unavailable_cash_secured_reason(tmp_path: Path) -> None:
+    from src.application.multi_tick.cash_footer import query_cash_footer
+
+    state_dir = tmp_path / 'output_accounts' / 'lx' / 'state'
+    _write_snapshot(
+        state_dir,
+        {
+            'cash_available_cny': 1000.0,
+            'cash_free_cny': None,
+            'cash_available_total_cny': 5000.0,
+            'cash_free_total_cny': None,
+            'cash_secured_unavailable_reason': '0700.HK:short_put_cash_secured_basis_missing',
+        },
+    )
+
+    out = query_cash_footer(tmp_path, market='富途', accounts=['lx'])
+
+    assert (
+        out[1]
+        == '- **LX** CNY 持有 ¥1,000 (CNY) | CNY 可用 - | 占用待确认 0700.HK:short_put_cash_secured_basis_missing'
+    )
