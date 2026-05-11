@@ -15,10 +15,8 @@ def test_cli_uses_owner_modules_for_runtime_config_validation() -> None:
 
     cli_mod = importlib.import_module("src.interfaces.cli.main")
     app_config_mod = importlib.import_module("src.application.agent_tool_config")
-    agent_config_mod = importlib.import_module("scripts.agent_plugin.config")
     validate_mod = importlib.import_module("src.application.config_validator")
 
-    assert agent_config_mod is app_config_mod
     assert cli_mod.load_runtime_config is app_config_mod.load_runtime_config
     assert cli_mod.validate_config is validate_mod.validate_config
 
@@ -28,26 +26,31 @@ def test_agent_plugin_tools_imports_owner_modules() -> None:
         importlib.import_module("scripts.config_loader")
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module("scripts.account_config")
+    for old_module in (
+        "scripts.agent_plugin",
+        "scripts.agent_plugin.config",
+        "scripts.agent_plugin.contracts",
+        "scripts.agent_plugin.init_local",
+        "scripts.agent_plugin.main",
+        "scripts.agent_plugin.tools",
+    ):
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module(old_module)
 
-    tools_mod = importlib.import_module("scripts.agent_plugin.tools")
     app_tools_mod = importlib.import_module("src.application.agent_tool_handlers")
     app_config_mod = importlib.import_module("src.application.agent_tool_config")
-    agent_config_mod = importlib.import_module("scripts.agent_plugin.config")
-    contracts_mod = importlib.import_module("scripts.agent_plugin.contracts")
     app_contracts_mod = importlib.import_module("src.application.agent_tool_contracts")
     config_loader_mod = importlib.import_module("src.application.config_loader")
     validate_mod = importlib.import_module("src.application.config_validator")
 
-    assert tools_mod is app_tools_mod
-    assert agent_config_mod is app_config_mod
-    assert tools_mod.write_tools_enabled is app_config_mod.write_tools_enabled
-    assert tools_mod.resolve_output_root is app_config_mod.resolve_output_root
-    assert tools_mod.repo_base is app_config_mod.repo_base
-    assert tools_mod.load_runtime_config is app_config_mod.load_runtime_config
-    assert tools_mod.load_runtime_pipeline_config is config_loader_mod.load_config
-    assert tools_mod.resolve_watchlist_config is config_loader_mod.resolve_watchlist_config
-    assert tools_mod.validate_config is validate_mod.validate_config
-    assert contracts_mod.AgentToolError is app_contracts_mod.AgentToolError
+    assert app_tools_mod.write_tools_enabled is app_config_mod.write_tools_enabled
+    assert app_tools_mod.resolve_output_root is app_config_mod.resolve_output_root
+    assert app_tools_mod.repo_base is app_config_mod.repo_base
+    assert app_tools_mod.load_runtime_config is app_config_mod.load_runtime_config
+    assert app_tools_mod.load_runtime_pipeline_config is config_loader_mod.load_config
+    assert app_tools_mod.resolve_watchlist_config is config_loader_mod.resolve_watchlist_config
+    assert app_tools_mod.validate_config is validate_mod.validate_config
+    assert app_contracts_mod.AgentToolError.__name__ == "AgentToolError"
 
 
 def test_account_run_imports_watchlist_helpers_from_owner_module() -> None:
@@ -304,10 +307,8 @@ def test_trade_intake_imports_owner_modules() -> None:
 def test_healthcheck_and_init_local_import_validate_config_from_owner_module() -> None:
     healthcheck_mod = importlib.import_module("scripts.healthcheck")
     app_init_local_mod = importlib.import_module("src.application.agent_tool_init_local")
-    init_local_mod = importlib.import_module("scripts.agent_plugin.init_local")
     validate_mod = importlib.import_module("src.application.config_validator")
 
-    assert init_local_mod is app_init_local_mod
     assert healthcheck_mod.validate_config is validate_mod.validate_config
     assert app_init_local_mod.validate_config is validate_mod.validate_config
 

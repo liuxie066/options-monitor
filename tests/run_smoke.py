@@ -25,7 +25,7 @@ def _ensure_repo_on_path() -> Path:
 def _init_minimal_config(*, cfg_path: Path, data_cfg_path: Path, market: str = "us", symbols: list[str] | None = None) -> dict[str, object]:
     _ensure_repo_on_path()
 
-    from scripts.agent_plugin.init_local import init_local_config
+    from src.application.agent_tool_init_local import init_local_config
 
     return init_local_config(
         repo_root=Path(__file__).resolve().parents[1],
