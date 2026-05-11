@@ -38,6 +38,7 @@ from domain.domain.symbol_identity import symbol_market
 from src.application.expiration_normalization import find_unique_near_miss_expiration
 from src.application.opend_fetch_config import opend_fetch_kwargs
 from src.application.symbol_aliases import load_runtime_symbol_aliases
+from src.infrastructure.opend_retcodes import classify_opend_error
 
 
 OUTPUT_COLUMNS = [
@@ -264,8 +265,7 @@ def _fetch_payload_error_reason(payload: dict[str, Any] | None, *, prefix: str) 
         )
         if str(x).strip()
     )
-    low = error_text.lower()
-    is_rate_limited = error_code == "RATE_LIMIT" or "rate limit" in low or "too frequent" in low or "频率太高" in error_text or "最多10次" in error_text
+    is_rate_limited = classify_opend_error({"error_code": error_code, "message": error_text}).is_rate_limit
     rows = payload.get("rows") if isinstance(payload.get("rows"), list) else []
     if status == "error" or (status == "partial" and error_code) or (error_code and not rows):
         if is_rate_limited:
@@ -334,6 +334,7 @@ def _ensure_required_data_coverage_for_positions(
     positions: list[dict[str, Any]],
     required_data_root: Path,
     base_dir: Path,
+    gateway: Any = None,
 ) -> tuple[dict[tuple[str, str, str, str], str], dict[tuple[str, str, str, str], dict[str, Any]], dict[str, Any]]:
     symbol_cfgs = _symbol_config_by_symbol(config)
     specs = _build_position_fetch_specs(positions, base_dir=base_dir)
@@ -354,121 +355,143 @@ def _ensure_required_data_coverage_for_positions(
     except Exception:
         return fetch_reasons, fetch_details, summary
 
-    for symbol, spec in specs.items():
-        requested_keys = set(spec.get("requested_keys") or set())
-        requested_expirations = sorted(spec.get("requested_expirations") or set())
-        missing_keys = [key for key in requested_keys if key not in current_covered]
-        if not missing_keys:
-            continue
-        summary["attempted_symbols"] += 1
-        symbol_cfg = symbol_cfgs.get(symbol) or {}
-        fetch_cfg = symbol_cfg.get("fetch") if isinstance(symbol_cfg, dict) else {}
-        fetch_cfg = fetch_cfg if isinstance(fetch_cfg, dict) else {}
-        if not is_futu_fetch_source(fetch_cfg.get("source")):
-            for key in missing_keys:
-                near_miss = find_unique_near_miss_expiration(
-                    key[2],
-                    current_contract_expiration_index.get((key[0], key[1], key[3])) or set(),
-                )
-                fetch_reasons[key] = "required_data_fetch_skipped_non_futu_source"
-                fetch_details[key] = {
-                    "quote_key": "|".join(key),
-                    "requested_expirations": requested_expirations,
-                    "available_expirations": sorted(current_expirations.get(symbol) or set()),
-                }
-                if near_miss:
-                    fetch_details[key]["expiration_near_miss"] = {
-                        "requested_expiration": key[2],
-                        "matched_expiration": near_miss,
-                    }
-            continue
-        strikes = [safe_float(v) for v in (spec.get("strikes") or [])]
-        strikes = [v for v in strikes if v is not None]
-        try:
-            payload = fetch_symbol(
-                symbol,
-                limit_expirations=safe_int(fetch_cfg.get("limit_expirations")) or max(len(requested_expirations), 8),
-                host=str(fetch_cfg.get("host") or "127.0.0.1"),
-                port=safe_int(fetch_cfg.get("port")) or 11111,
-                base_dir=base_dir,
-                option_types=",".join(sorted(spec.get("option_types") or {"put", "call"})),
-                min_strike=min(strikes) if strikes else None,
-                max_strike=max(strikes) if strikes else None,
-                explicit_expirations=requested_expirations,
-                chain_cache=True,
-                chain_cache_force_refresh=False,
-                freshness_policy="refresh_missing",
-                **opend_fetch_kwargs(config),
-            )
-        except Exception as exc:
-            summary["errors"] += 1
-            err_text = str(exc or "")
-            err_low = err_text.lower()
-            reason = "required_data_fetch_error_rate_limit" if ("rate limit" in err_low or "too frequent" in err_low or "最多10次" in err_text or "频率太高" in err_text) else "required_data_fetch_error"
-            for key in missing_keys:
-                near_miss = find_unique_near_miss_expiration(
-                    key[2],
-                    current_contract_expiration_index.get((key[0], key[1], key[3])) or set(),
-                )
-                fetch_reasons[key] = reason
-                fetch_details[key] = {
-                    "quote_key": "|".join(key),
-                    "requested_expirations": requested_expirations,
-                    "available_expirations": sorted(current_expirations.get(symbol) or set()),
-                    "message": str(exc),
-                }
-                if near_miss:
-                    fetch_details[key]["expiration_near_miss"] = {
-                        "requested_expiration": key[2],
-                        "matched_expiration": near_miss,
-                    }
-            continue
-        payload_reason = _fetch_payload_error_reason(payload, prefix="required_data_fetch_error")
-        if payload_reason and not list(payload.get("rows") or []):
-            summary["errors"] += 1
-            for key in missing_keys:
-                near_miss = find_unique_near_miss_expiration(
-                    key[2],
-                    current_contract_expiration_index.get((key[0], key[1], key[3])) or set(),
-                )
-                fetch_reasons[key] = payload_reason
-                fetch_details[key] = {
-                    "quote_key": "|".join(key),
-                    "requested_expirations": requested_expirations,
-                    "available_expirations": sorted(current_expirations.get(symbol) or set()),
-                    "message": str(((payload.get("meta") or {}) if isinstance(payload.get("meta"), dict) else {}).get("error") or payload_reason),
-                }
-                if near_miss:
-                    fetch_details[key]["expiration_near_miss"] = {
-                        "requested_expiration": key[2],
-                        "matched_expiration": near_miss,
-                    }
-            try:
-                save_outputs(base_dir, symbol, payload, output_root=required_data_root)
-            except Exception:
-                pass
-            continue
-        merged_rows = _merge_required_data_rows(
-            _load_required_data_rows(required_data_root, symbol),
-            list(payload.get("rows") or []),
-            base_dir=base_dir,
-        )
-        payload = dict(payload)
-        payload["rows"] = merged_rows
-        save_outputs(base_dir, symbol, payload, output_root=required_data_root)
-        summary["fetched_symbols"] += 1
-        current_covered, current_expirations = load_required_data_coverage(required_data_root, symbols=set(specs), base_dir=base_dir)
-        if payload_reason:
-            still_missing = [key for key in requested_keys if key not in current_covered]
-            if still_missing:
-                summary["errors"] += 1
-                for key in still_missing:
-                    fetch_reasons[key] = payload_reason
+    external_gateway = gateway is not None
+    shared_gw = gateway
+
+    try:
+        for symbol, spec in specs.items():
+            requested_keys = set(spec.get("requested_keys") or set())
+            requested_expirations = sorted(spec.get("requested_expirations") or set())
+            missing_keys = [key for key in requested_keys if key not in current_covered]
+            if not missing_keys:
+                continue
+            summary["attempted_symbols"] += 1
+            symbol_cfg = symbol_cfgs.get(symbol) or {}
+            fetch_cfg = symbol_cfg.get("fetch") if isinstance(symbol_cfg, dict) else {}
+            fetch_cfg = fetch_cfg if isinstance(fetch_cfg, dict) else {}
+            if not is_futu_fetch_source(fetch_cfg.get("source")):
+                for key in missing_keys:
+                    near_miss = find_unique_near_miss_expiration(
+                        key[2],
+                        current_contract_expiration_index.get((key[0], key[1], key[3])) or set(),
+                    )
+                    fetch_reasons[key] = "required_data_fetch_skipped_non_futu_source"
                     fetch_details[key] = {
                         "quote_key": "|".join(key),
                         "requested_expirations": requested_expirations,
                         "available_expirations": sorted(current_expirations.get(symbol) or set()),
                     }
+                    if near_miss:
+                        fetch_details[key]["expiration_near_miss"] = {
+                            "requested_expiration": key[2],
+                            "matched_expiration": near_miss,
+                        }
+                continue
+            strikes = [safe_float(v) for v in (spec.get("strikes") or [])]
+            strikes = [v for v in strikes if v is not None]
+            try:
+                if shared_gw is None:
+                    try:
+                        from src.infrastructure.futu_gateway import build_ready_futu_gateway
+
+                        shared_gw = build_ready_futu_gateway(
+                            host=str(fetch_cfg.get("host") or "127.0.0.1"),
+                            port=safe_int(fetch_cfg.get("port")) or 11111,
+                            is_option_chain_cache_enabled=True,
+                        )
+                    except Exception:
+                        # Graceful degradation: fall back to per-call gateway built by fetch_symbol.
+                        shared_gw = None
+                payload = fetch_symbol(
+                    symbol,
+                    limit_expirations=safe_int(fetch_cfg.get("limit_expirations")) or max(len(requested_expirations), 8),
+                    host=str(fetch_cfg.get("host") or "127.0.0.1"),
+                    port=safe_int(fetch_cfg.get("port")) or 11111,
+                    base_dir=base_dir,
+                    option_types=",".join(sorted(spec.get("option_types") or {"put", "call"})),
+                    min_strike=min(strikes) if strikes else None,
+                    max_strike=max(strikes) if strikes else None,
+                    explicit_expirations=requested_expirations,
+                    chain_cache=True,
+                    chain_cache_force_refresh=False,
+                    freshness_policy="refresh_missing",
+                    gateway=shared_gw,
+                    **opend_fetch_kwargs(config),
+                )
+            except Exception as exc:
+                summary["errors"] += 1
+                err_text = str(exc or "")
+                reason = "required_data_fetch_error_rate_limit" if classify_opend_error({"error_code": err_text.lower(), "message": err_text}).is_rate_limit else "required_data_fetch_error"
+                for key in missing_keys:
+                    near_miss = find_unique_near_miss_expiration(
+                        key[2],
+                        current_contract_expiration_index.get((key[0], key[1], key[3])) or set(),
+                    )
+                    fetch_reasons[key] = reason
+                    fetch_details[key] = {
+                        "quote_key": "|".join(key),
+                        "requested_expirations": requested_expirations,
+                        "available_expirations": sorted(current_expirations.get(symbol) or set()),
+                        "message": str(exc),
+                    }
+                    if near_miss:
+                        fetch_details[key]["expiration_near_miss"] = {
+                            "requested_expiration": key[2],
+                            "matched_expiration": near_miss,
+                        }
+                continue
+            payload_reason = _fetch_payload_error_reason(payload, prefix="required_data_fetch_error")
+            if payload_reason and not list(payload.get("rows") or []):
+                summary["errors"] += 1
+                for key in missing_keys:
+                    near_miss = find_unique_near_miss_expiration(
+                        key[2],
+                        current_contract_expiration_index.get((key[0], key[1], key[3])) or set(),
+                    )
+                    fetch_reasons[key] = payload_reason
+                    fetch_details[key] = {
+                        "quote_key": "|".join(key),
+                        "requested_expirations": requested_expirations,
+                        "available_expirations": sorted(current_expirations.get(symbol) or set()),
+                        "message": str(((payload.get("meta") or {}) if isinstance(payload.get("meta"), dict) else {}).get("error") or payload_reason),
+                    }
+                    if near_miss:
+                        fetch_details[key]["expiration_near_miss"] = {
+                            "requested_expiration": key[2],
+                            "matched_expiration": near_miss,
+                        }
+                try:
+                    save_outputs(base_dir, symbol, payload, output_root=required_data_root)
+                except Exception:
+                    pass
+                continue
+            merged_rows = _merge_required_data_rows(
+                _load_required_data_rows(required_data_root, symbol),
+                list(payload.get("rows") or []),
+                base_dir=base_dir,
+            )
+            payload = dict(payload)
+            payload["rows"] = merged_rows
+            save_outputs(base_dir, symbol, payload, output_root=required_data_root)
+            summary["fetched_symbols"] += 1
+            current_covered, current_expirations = load_required_data_coverage(required_data_root, symbols=set(specs), base_dir=base_dir)
+            if payload_reason:
+                still_missing = [key for key in requested_keys if key not in current_covered]
+                if still_missing:
+                    summary["errors"] += 1
+                    for key in still_missing:
+                        fetch_reasons[key] = payload_reason
+                        fetch_details[key] = {
+                            "quote_key": "|".join(key),
+                            "requested_expirations": requested_expirations,
+                            "available_expirations": sorted(current_expirations.get(symbol) or set()),
+                        }
+    finally:
+        if (not external_gateway) and shared_gw is not None:
+            try:
+                shared_gw.close()
+            except Exception:
+                pass
     return fetch_reasons, fetch_details, summary
 
 
@@ -563,11 +586,10 @@ def _fetch_missing_quotes_via_opend(
                 **opend_fetch_kwargs(config),
             )
         except Exception as exc:
-            err_low = str(exc or "").lower()
             detail = "opend_fetch_error"
-            if "rate limit" in err_low or "too frequent" in err_low or "最多10次" in str(exc or "") or "频率太高" in str(exc or ""):
+            if classify_opend_error(exc).is_rate_limit:
                 detail = "opend_fetch_error_rate_limit"
-            elif "retry budget" in err_low:
+            elif "retry budget" in str(exc or "").lower():
                 detail = "opend_fetch_error_retry_budget"
             for key in missing_keys:
                 if all(key):
@@ -1036,6 +1058,7 @@ def run_close_advice(
     output_dir: Path,
     base_dir: Path,
     markets_to_run: list[str] | None = None,
+    gateway: Any = None,
 ) -> dict[str, Any]:
     advice_cfg_raw = config.get("close_advice") if isinstance(config, dict) else {}
     advice_cfg = advice_cfg_raw if isinstance(advice_cfg_raw, dict) else {}
@@ -1057,6 +1080,7 @@ def run_close_advice(
         positions=positions,
         required_data_root=Path(required_data_root),
         base_dir=Path(base_dir),
+        gateway=gateway,
     )
     symbols = {_norm_symbol(p.get("symbol"), base_dir=Path(base_dir)) for p in positions if isinstance(p, dict) and p.get("symbol")}
     quotes = load_required_data_quotes(Path(required_data_root), symbols=symbols, base_dir=Path(base_dir))

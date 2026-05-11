@@ -296,7 +296,10 @@ def test_run_close_advice_records_missing_quote_but_does_not_notify(tmp_path: Pa
     out_dir = tmp_path / "reports"
 
     run_close_advice(
-        config={"close_advice": {"enabled": True}},
+        config={
+            "close_advice": {"enabled": True},
+            "symbols": [{"symbol": "AAPL", "fetch": {"source": "yahoo"}}],
+        },
         context_path=ctx_path,
         required_data_root=required_root,
         output_dir=out_dir,

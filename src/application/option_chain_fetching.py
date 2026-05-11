@@ -1,18 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import importlib
 from pathlib import Path
 from typing import Any, Callable, Literal
 import json
 import os
+import threading
 import time
 
-try:
-    import fcntl
-except Exception:  # pragma: no cover - non-Unix fallback
-    fcntl = None  # type: ignore[assignment]
-
-from src.application.expiration_normalization import normalize_expiration_ymd
+from .expiration_normalization import normalize_expiration_ymd
 
 
 FreshnessPolicy = Literal["cache_first", "refresh_missing", "force_refresh"]
@@ -20,6 +17,9 @@ FreshnessPolicy = Literal["cache_first", "refresh_missing", "force_refresh"]
 DEFAULT_OPTION_CHAIN_WINDOW_SEC = 30.0
 DEFAULT_OPTION_CHAIN_MAX_CALLS = 10
 DEFAULT_OPTION_CHAIN_MAX_WAIT_SEC = 90.0
+
+_RATE_GATE_CACHE_LOCK = threading.Lock()
+_RATE_GATE_CACHE: dict[tuple[str, int, float], Any] = {}
 
 
 class OptionChainRateLimitExceeded(RuntimeError):
@@ -93,68 +93,50 @@ class FileRateLimiter:
         self.label = str(label or "opend")
         self.clock = clock or time.time
         self.sleep = sleep or time.sleep
+        self._gate = _get_or_create_gate(
+            state_path=self.state_path,
+            max_calls=self.max_calls,
+            window_sec=self.window_sec,
+            max_wait_sec=self.max_wait_sec,
+            label=self.label,
+            clock=self.clock,
+            sleep=self.sleep,
+        )
 
     def acquire(self) -> float:
-        start = self.clock()
-        slept = 0.0
-        deadline = start + self.max_wait_sec
-
-        while True:
-            wait_s = 0.0
-            self.state_path.parent.mkdir(parents=True, exist_ok=True)
-            self.lock_path.parent.mkdir(parents=True, exist_ok=True)
-            with self.lock_path.open("a+", encoding="utf-8") as lock_fp:
-                if fcntl is not None:
-                    fcntl.flock(lock_fp.fileno(), fcntl.LOCK_EX)
-                try:
-                    now = self.clock()
-                    timestamps = self._read_timestamps(now)
-                    if len(timestamps) < self.max_calls:
-                        timestamps.append(now)
-                        self._write_timestamps(timestamps)
-                        return slept
-
-                    oldest = min(timestamps)
-                    wait_s = max(0.0, self.window_sec - (now - oldest) + 0.05)
-                    if now + wait_s > deadline:
-                        raise OptionChainRateLimitExceeded(
-                            f"{self.label} rate limit wait budget exceeded: "
-                            f"max_calls={self.max_calls} window_sec={self.window_sec:g} "
-                            f"max_wait_sec={self.max_wait_sec:g}"
-                        )
-                    self._write_timestamps(timestamps)
-                finally:
-                    if fcntl is not None:
-                        fcntl.flock(lock_fp.fileno(), fcntl.LOCK_UN)
-
-            if wait_s > 0:
-                self.sleep(wait_s)
-                slept += wait_s
-
-    def _read_timestamps(self, now: float) -> list[float]:
         try:
-            obj = json.loads(self.state_path.read_text(encoding="utf-8"))
-            raw = obj.get("timestamps") if isinstance(obj, dict) else []
-        except Exception:
-            raw = []
-        timestamps: list[float] = []
-        for item in raw or []:
-            try:
-                value = float(item)
-            except Exception:
-                continue
-            if now - value < self.window_sec:
-                timestamps.append(value)
-        return timestamps
+            return self._gate.acquire()
+        except TimeoutError as exc:
+            raise OptionChainRateLimitExceeded(str(exc)) from exc
 
-    def _write_timestamps(self, timestamps: list[float]) -> None:
-        payload = {
-            "updated_at": self.clock(),
-            "window_sec": self.window_sec,
-            "max_calls": self.max_calls,
-            "timestamps": timestamps,
-        }
-        _atomic_write_json(self.state_path, payload)
+
+def _get_or_create_gate(
+    *,
+    state_path: Path,
+    max_calls: int,
+    window_sec: float,
+    max_wait_sec: float,
+    label: str,
+    clock: Callable[[], float] | None = None,
+    sleep: Callable[[float], None] | None = None,
+) -> Any:
+    gate_cls = _load_opend_rate_gate_class()
+    path = Path(state_path)
+    key = (str(path), int(max_calls), float(window_sec), float(max_wait_sec))
+    with _RATE_GATE_CACHE_LOCK:
+        gate = _RATE_GATE_CACHE.get(key)
+        if gate is None:
+            gate = gate_cls(
+                state_path=path,
+                max_calls=max_calls,
+                window_sec=window_sec,
+                max_wait_sec=max_wait_sec,
+                label=label,
+                clock=clock,
+                sleep=sleep,
+            )
+            _RATE_GATE_CACHE[key] = gate
+        return gate
 
 
 def option_chain_limiter_state_path(base_dir: Path) -> Path:
@@ -373,15 +355,17 @@ def fetch_option_chains(
 
 
 def classify_option_chain_error(exc: Any) -> str:
-    msg = str(exc or "")
-    low = msg.lower()
-    if "rate limit" in low or "too frequent" in low or "频率太高" in msg or "最多10次" in msg:
-        return "RATE_LIMIT"
-    if "timeout" in low or "disconnected" in low or "connection reset" in low or "broken pipe" in low:
-        return "TRANSIENT"
-    if "empty_chain" in low or "empty" in low:
-        return "EMPTY_CHAIN"
-    return "UNKNOWN"
+    return _classify_opend_error(exc).value
+
+
+def _classify_opend_error(exc: Any) -> Any:
+    module = importlib.import_module("src.infrastructure.opend_retcodes")
+    return module.classify_opend_error(exc)
+
+
+def _load_opend_rate_gate_class() -> Any:
+    module = importlib.import_module("src.application.opend_rate_gate")
+    return module.OpenDRateGate
 
 
 def _fetch_one_chain(

@@ -15,6 +15,8 @@ import random
 import time
 from typing import Any, Iterable
 
+from src.infrastructure.opend_retcodes import OpenDRetCode, classify_opend_error
+
 
 LOG = logging.getLogger(__name__)
 
@@ -128,24 +130,20 @@ class FutuGatewayTransientError(FutuGatewayError):
     code = "TRANSIENT"
 
 
-def _contains_any(text: str, hints: tuple[str, ...]) -> bool:
-    return any(h in text for h in hints)
-
-
 def _map_error(exc: Exception, *, action: str) -> FutuGatewayError:
     msg = str(exc or "")
-    low = msg.lower()
+    code = classify_opend_error(exc)
 
-    if _contains_any(low, ("2fa", "phone verification", "verify code")) or _contains_any(msg, ("手机验证码", "短信验证", "手机验证", "验证码")):
+    if code is OpenDRetCode.NEED_2FA:
         return FutuGatewayNeed2FAError(f"{action} failed: {msg}", raw_error=exc)
 
-    if _contains_any(low, ("login expired", "auth expired", "token expired", "not logged", "not login")):
+    if code is OpenDRetCode.AUTH_EXPIRED:
         return FutuGatewayAuthExpiredError(f"{action} failed: {msg}", raw_error=exc)
 
-    if _contains_any(low, ("rate limit", "too frequent")) or _contains_any(msg, ("频率太高", "最多10次")):
+    if code is OpenDRetCode.RATE_LIMIT:
         return FutuGatewayRateLimitError(f"{action} failed: {msg}", raw_error=exc)
 
-    if _contains_any(low, ("timeout", "disconnected", "connection reset", "broken pipe", "temporarily unavailable")):
+    if code is OpenDRetCode.TRANSIENT:
         return FutuGatewayTransientError(f"{action} failed: {msg}", raw_error=exc)
 
     return FutuGatewayError(f"{action} failed: {msg}", raw_error=exc)
