@@ -394,6 +394,42 @@ def test_candidate_engine_rank_can_use_independent_liquidity_score() -> None:
     assert [r["contract_symbol"] for r in ranked] == ["LOWER_RETURN_LIQUID", "HIGH_RETURN_WIDE"]
 
 
+def test_candidate_engine_explains_rank_score_components() -> None:
+    from domain.domain.engine import CandidateScoreWeights, build_candidate_rank_key, explain_candidate_rank
+
+    row = {
+        "symbol": "nvda",
+        "contract_symbol": "NVDA_PUT_100",
+        "option_type": "put",
+        "expiration": "2026-06-19",
+        "strike": 100,
+        "annualized_net_return_on_cash_basis": 0.12,
+        "net_income": 80,
+        "spread_ratio": 0.35,
+        "open_interest": 500,
+        "volume": 20,
+        "delta": -0.2,
+        "otm_pct": 0.08,
+        "dte": 30,
+    }
+    weights = CandidateScoreWeights(liquidity=0.02, risk_distance=0.01)
+
+    rank_key = build_candidate_rank_key(row, mode="put", score_weights=weights)
+    explanation = explain_candidate_rank(row, mode="put", score_weights=weights)
+
+    assert explanation["symbol"] == "NVDA"
+    assert explanation["contract_symbol"] == "NVDA_PUT_100"
+    assert explanation["strategy_score"] == rank_key["strategy_score"]
+    assert explanation["score_components"] == rank_key["score_components"]
+    assert explanation["score_inputs"]["annualized_return"] == 0.12
+    assert explanation["score_inputs"]["spread_ratio"] == 0.35
+    assert explanation["score_warnings"] == ["wide_spread"]
+    assert explanation["risk_notes"] == ["价差偏宽"]
+    assert "annualized_return" in explanation["primary_drivers"]
+    assert "年化收益" in explanation["primary_driver_labels"]
+    assert "年化收益" in explanation["rank_reason"]
+
+
 def test_candidate_engine_rejects_unknown_legacy_reject_rule() -> None:
     from domain.domain.engine import map_legacy_reject_rule, normalize_legacy_reject_log_row
 

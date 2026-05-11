@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.16 - 2026-05-11
+
+### Added
+- Added `candidate_rank_explain` as a read-only Agent diagnostic tool for explaining existing candidate CSV ranking scores, score components, inputs, warnings, and optional baseline rank changes.
+- Added `explain_candidate_rank()` to the candidate engine so ranking explanations reuse the canonical score calculation instead of introducing another ranking path.
+
 ## 1.2.15 - 2026-05-11
 
 ### Changed

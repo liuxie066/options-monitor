@@ -154,6 +154,15 @@ Agent：
 
 该流程会读取行情并写本地报告；它不会发送通知。
 
+解释最近候选为什么这样排序：
+
+```bash
+./om-agent run --tool candidate_rank_explain --input-json '{"mode":"put","top_n":5}'
+```
+
+该工具只读取已有候选 CSV，不重新扫描、不发送通知、不写报告。需要指定文件时传
+`candidate_path`，需要看权重变化影响时传 `score_weights` 和 `compare_baseline=true`。
+
 ### 查询 Sell Put 现金余量
 
 人工 CLI：

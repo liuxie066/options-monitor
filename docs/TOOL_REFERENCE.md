@@ -72,6 +72,7 @@
 | `config_validate` | `./om config validate` |
 | `scheduler_status` | `./om scheduler` 的只读判定部分 |
 | `scan_opportunities` | `./om scan` / `./om scan-pipeline` |
+| `candidate_rank_explain` | Agent-only read existing candidate CSV ranking explanations |
 | `preview_notification` | `./om notify preview` |
 | `get_close_advice` | `./om close-advice` |
 | `query_cash_headroom` | `./om sell-put-cash` / `src.application.cash_headroom_query::query_sell_put_cash(...)` |
@@ -192,6 +193,28 @@ OM_AGENT_ENABLE_WRITE_TOOLS=true ./om-agent run --tool version_update --input-js
 ```bash
 ./om-agent run --tool scan_opportunities --input-json '{"config_key":"us","symbols":["NVDA"],"top_n":3}'
 ```
+
+---
+
+## 5.5.1 `candidate_rank_explain`
+
+用途：
+- 读取已有候选 CSV
+- 返回 Top N 的排序分数、分数组件、输入指标、主要排序原因和风险提示
+- 可用 `compare_baseline=true` 对比“收益率优先”的基线排序
+
+示例：
+
+```bash
+./om-agent run --tool candidate_rank_explain --input-json '{"mode":"put","top_n":5}'
+./om-agent run --tool candidate_rank_explain --input-json '{"candidate_path":"output/reports/sell_call_candidates.csv","mode":"call","top_n":5}'
+./om-agent run --tool candidate_rank_explain --input-json '{"mode":"put","score_weights":{"liquidity":0.02},"compare_baseline":true}'
+```
+
+注意：
+- 该工具只读本地 CSV，不重新扫描、不发通知、不写 Feishu、不写报告。
+- 默认先找 `output/reports`，再找 `output/agent_plugin/reports`；也可传 `report_dir`、`output_dir` 或 `candidate_path`。
+- `score_weights` 只影响本次解释输出，不修改配置，也不改变生产排序默认值。
 
 ---
 
