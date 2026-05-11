@@ -13,7 +13,11 @@ from domain.domain.fetch_source import is_futu_fetch_source
 from domain.domain.close_advice import (
     CloseAdviceConfig,
     CloseAdviceInput,
+    CloseOptimizerConfig,
     evaluate_close_advice,
+    evaluate_close_optimizer,
+    OPTIMIZER_TIER_LABELS,
+    OPTIMIZER_TIER_PRIORITY,
     safe_float,
     safe_int,
     sort_advice_rows,
@@ -65,6 +69,15 @@ OUTPUT_COLUMNS = [
     "tier_label",
     "reason",
     "data_quality_flags",
+    "optimizer_tier",
+    "optimizer_reason",
+    "effective_annualized_return",
+    "tail_risk_score",
+    "risk_adjusted_return",
+    "switch_value_ratio",
+    "alternative_annualized_return",
+    "delta",
+    "otm_pct",
 ]
 
 QUOTE_ISSUE_FLAGS = {
@@ -845,6 +858,8 @@ def _position_to_input(pos: dict[str, Any], quote: dict[str, Any] | None) -> tup
             multiplier=effective_multiplier(pos) or safe_float((quote or {}).get("multiplier")),
             spot=safe_float((quote or {}).get("spot")),
             currency=normalize_currency(pos.get("currency") or (quote or {}).get("currency")),
+            delta=safe_float((quote or {}).get("delta")),
+            otm_pct=safe_float((quote or {}).get("otm_pct")),
         ),
         quote_flags,
     )
@@ -931,7 +946,8 @@ def _selected_notify_rows(rows: list[dict[str, Any]], *, notify_levels: set[str]
     for row in sort_advice_rows(rows):
         if str(row.get("evaluation_status") or "priced").strip().lower() != "priced":
             continue
-        if str(row.get("tier") or "").strip().lower() not in notify_levels:
+        tier = str(row.get("tier") or "").strip().lower()
+        if tier not in notify_levels and tier not in ("optimizer_switch", "optimizer_close"):
             continue
         acct = _row_account(row.get("account"))
         grouped.setdefault(acct, []).append(row)
@@ -987,6 +1003,27 @@ def _gap_reason_label(row: dict[str, Any]) -> str:
     return str(row.get("reason") or "无法评估").strip() or "无法评估"
 
 
+def _optimizer_detail_lines(row: dict[str, Any]) -> list[str]:
+    opt_tier = str(row.get("optimizer_tier") or "").strip()
+    if opt_tier in ("defer", ""):
+        return []
+    lines: list[str] = []
+    eff_ann = _pct(row.get("effective_annualized_return"))
+    tail = row.get("tail_risk_score")
+    tail_str = f"{tail:.3f}" if isinstance(tail, (int, float)) else "-"
+    if opt_tier == "optimizer_switch":
+        alt_ann = _pct(row.get("alternative_annualized_return"))
+        lines.append(f"- 优化器: 持有年化={eff_ann} → 替代候选年化={alt_ann} | 尾部风险={tail_str}")
+    elif opt_tier == "optimizer_close":
+        lines.append(f"- 优化器: 持有年化={eff_ann} | 尾部风险={tail_str} | 无可替换候选")
+    elif opt_tier == "optimizer_hold":
+        risk_adj = _pct(row.get("risk_adjusted_return"))
+        delta_val = row.get("delta")
+        delta_str = f"{delta_val:.2f}" if isinstance(delta_val, (int, float)) else "-"
+        lines.append(f"- 优化器: 风险调整收益={risk_adj} | delta={delta_str} | 继续持有")
+    return lines
+
+
 def render_markdown(rows: list[dict[str, Any]], *, notify_levels: set[str], max_items: int) -> str:
     selected = _selected_notify_rows(rows, notify_levels=notify_levels, max_items=max_items)
     gap_rows = _selected_evaluation_gap_rows(rows, max_items=max_items)
@@ -1030,6 +1067,7 @@ def render_markdown(rows: list[dict[str, Any]], *, notify_levels: set[str], max_
                             f"剩余权利金 {_money(row.get('remaining_premium'), currency)}"
                         ),
                         f"- 理由: {row.get('reason') or '-'}",
+                        *_optimizer_detail_lines(row),
                         "---",
                     ]
                 )
@@ -1063,6 +1101,44 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
 def _load_context(context_path: Path) -> dict[str, Any]:
     obj = read_json(context_path, default={})
     return obj if isinstance(obj, dict) else {}
+
+
+def _load_alternative_annualized_from_scan(
+    output_dir: Path,
+) -> float | None:
+    """从最近的 Sell Put scan 输出中读取 top 候选年化作为替代基准。
+
+    查找 output_dir 下最新的 <symbol>_sell_put_candidates.csv，
+    取 annualized_net_return_on_cash_basis 最大值。
+    如果找不到任何候选数据，返回 None。
+    """
+    try:
+        candidates_dir = output_dir
+        if not candidates_dir.exists():
+            return None
+        csv_paths = sorted(
+            candidates_dir.glob("*_sell_put_candidates.csv"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        if not csv_paths:
+            return None
+        df = safe_read_csv(csv_paths[0])
+        if df.empty:
+            return None
+        for col in (
+            "annualized_net_return_on_cash_basis",
+            "annualized_net_return_on_strike",
+            "annualized_return",
+        ):
+            if col in df.columns:
+                vals = df[col].dropna()
+                if not vals.empty:
+                    return float(vals.max())
+                break
+        return None
+    except Exception:
+        return None
 
 
 def run_close_advice(
@@ -1159,6 +1235,53 @@ def run_close_advice(
         status = str(row.get("evaluation_status") or "unknown").strip().lower() or "unknown"
         evaluation_status_counts[status] = evaluation_status_counts.get(status, 0) + 1
         rows.append(row)
+
+    optimizer_cfg_raw = advice_cfg.get("optimizer") if isinstance(advice_cfg, dict) else {}
+    optimizer_enabled = bool(
+        (optimizer_cfg_raw.get("enabled") if isinstance(optimizer_cfg_raw, dict) else False)
+    )
+    if optimizer_enabled:
+        optimizer_cfg = CloseOptimizerConfig.from_mapping(
+            optimizer_cfg_raw if isinstance(optimizer_cfg_raw, dict) else None
+        )
+        alt_annualized = _load_alternative_annualized_from_scan(
+            Path(output_dir)
+        )
+        for row in rows:
+            if str(row.get("evaluation_status") or "").strip().lower() != "priced":
+                continue
+            inp = CloseAdviceInput(
+                account=str(row.get("account") or ""),
+                symbol=str(row.get("symbol") or ""),
+                option_type=str(row.get("option_type") or ""),
+                side="short",
+                expiration=str(row.get("expiration") or ""),
+                strike=safe_float(row.get("strike")),
+                contracts_open=safe_int(row.get("contracts_open")),
+                premium=safe_float(row.get("premium")),
+                close_mid=safe_float(row.get("close_mid")),
+                bid=safe_float(row.get("bid")),
+                ask=safe_float(row.get("ask")),
+                dte=safe_int(row.get("dte")),
+                multiplier=safe_float(row.get("multiplier")),
+                spot=safe_float(row.get("spot")),
+                currency=str(row.get("currency") or ""),
+                delta=safe_float(row.get("delta")),
+                otm_pct=safe_float(row.get("otm_pct")),
+            )
+            opt_result = evaluate_close_optimizer(
+                inp, optimizer_cfg,
+                alternative_annualized_return=alt_annualized,
+            )
+            for key, val in opt_result.items():
+                row[key] = val
+            opt_tier = str(opt_result.get("optimizer_tier") or "")
+            if opt_tier in ("optimizer_switch", "optimizer_close"):
+                row["tier"] = opt_tier
+                row["tier_label"] = OPTIMIZER_TIER_LABELS.get(opt_tier, opt_tier)
+                row["reason"] = str(
+                    opt_result.get("optimizer_reason") or row.get("reason")
+                )
 
     rows = sort_advice_rows(rows)
     notify_levels = advice_cfg.get("notify_levels") or ["strong", "medium"]
