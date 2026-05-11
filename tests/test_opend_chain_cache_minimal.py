@@ -26,6 +26,7 @@ def test_chain_cache_helpers_roundtrip() -> None:
         payload = {"asof_date": "2099-01-01", "underlier_code": "US.NVDA", "rows": [{"x": 1}]}
         m._save_chain_cache(p, payload)
         obj = m._load_chain_cache(p)
+        assert obj is not None
         assert obj["underlier_code"] == "US.NVDA"
         assert obj["rows"][0]["x"] == 1
 
@@ -191,6 +192,7 @@ def test_option_chain_error_shard_does_not_count_as_cache_coverage() -> None:
 
 def test_file_rate_limiter_coordinates_instances_through_state_file() -> None:
     import sys
+    import time
     from tempfile import TemporaryDirectory
 
     base = Path(__file__).resolve().parents[1]
@@ -200,26 +202,16 @@ def test_file_rate_limiter_coordinates_instances_through_state_file() -> None:
     from src.application.option_chain_fetching import FileRateLimiter
 
     with TemporaryDirectory() as td:
-        now = [1000.0]
-        sleeps: list[float] = []
-
-        def _clock() -> float:
-            return now[0]
-
-        def _sleep(seconds: float) -> None:
-            sleeps.append(seconds)
-            now[0] += seconds
-
         state_path = Path(td) / "limiter.json"
-        one = FileRateLimiter(state_path=state_path, max_calls=2, window_sec=1.0, max_wait_sec=5.0, clock=_clock, sleep=_sleep)
-        two = FileRateLimiter(state_path=state_path, max_calls=2, window_sec=1.0, max_wait_sec=5.0, clock=_clock, sleep=_sleep)
+        one = FileRateLimiter(state_path=state_path, max_calls=2, window_sec=0.05, max_wait_sec=2.0, clock=time.monotonic)
+        two = FileRateLimiter(state_path=state_path, max_calls=2, window_sec=0.05, max_wait_sec=2.0, clock=time.monotonic)
 
+        started = time.monotonic()
         one.acquire()
         two.acquire()
         one.acquire()
 
-        assert sleeps
-        assert now[0] > 1000.0
+        assert time.monotonic() - started >= 0.045
 
 
 def test_save_outputs_preserves_existing_parsed_csv_on_fetch_error() -> None:
