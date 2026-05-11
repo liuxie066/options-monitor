@@ -5,7 +5,7 @@ import json
 import sys
 from pathlib import Path
 
-from src.application.account_config import cash_footer_accounts_from_config
+from src.application.cash_summary_footer import append_cash_summary_footer
 from src.application.config_loader import load_config as load_runtime_pipeline_config
 from src.application.config_loader import resolve_data_config_path, resolve_watchlist_config
 from src.application.report_builders import build_symbols_digest, build_symbols_summary
@@ -283,24 +283,12 @@ def main(argv: list[str] | None = None) -> int:
             include_cash_footer = True
 
         if include_cash_footer and (not IS_SCHEDULED):
-            cash_footer_accounts = cash_footer_accounts_from_config(cfg)
-            run_cmd(
-                [
-                    py,
-                    "scripts/append_cash_summary.py",
-                    "--config",
-                    str(cfg_path),
-                    "--data-config",
-                    str(data_config),
-                    "--market",
-                    str(broker),
-                    "--accounts",
-                    *cash_footer_accounts,
-                    "--notification",
-                    str((report_dir / "symbols_notification.txt").as_posix()),
-                ],
-                cwd=base,
-                is_scheduled=IS_SCHEDULED,
+            append_cash_summary_footer(
+                base=base,
+                notification=report_dir / "symbols_notification.txt",
+                config=cfg_path,
+                data_config=data_config,
+                market=str(broker),
             )
 
         notifications_cfg = cfg.get("notifications", {}) or {}

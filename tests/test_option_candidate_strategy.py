@@ -178,6 +178,33 @@ def test_filter_rank_candidates_with_reject_log_matches_manual_pipeline() -> Non
     assert reject_log.to_dict("records") == manual_reject_log.to_dict("records")
 
 
+def test_filter_candidates_uses_candidate_engine_return_floor(monkeypatch) -> None:
+    _add_repo_to_syspath()
+    import domain.domain.engine.candidate_strategy as strategy
+
+    calls: list[dict] = []
+    original = strategy.evaluate_candidate_return_floor
+
+    def _counting_return_floor(*args, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append(dict(kwargs))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(strategy, "evaluate_candidate_return_floor", _counting_return_floor)
+    df = pd.DataFrame(
+        [
+            {"contract_symbol": "PASS", "annualized_net_return_on_cash_basis": 0.12, "net_income": 80},
+            {"contract_symbol": "FAIL_RET", "annualized_net_return_on_cash_basis": 0.08, "net_income": 80},
+        ]
+    )
+    cfg = strategy.build_strategy_config("put", min_annualized_return=0.10)
+
+    out, reject_log = strategy.filter_candidates_with_reject_log(df, cfg)
+
+    assert list(out["contract_symbol"]) == ["PASS"]
+    assert list(reject_log["engine_reject_reason"]) == ["return_annualized"]
+    assert [call["min_annualized_return"] for call in calls] == [0.10, 0.10]
+
+
 def test_option_candidate_strategy_script_is_removed() -> None:
     _add_repo_to_syspath()
     from domain.domain.engine import build_strategy_config

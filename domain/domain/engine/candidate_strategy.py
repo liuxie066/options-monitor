@@ -5,7 +5,16 @@ from typing import Literal
 
 import pandas as pd
 
-from .candidate_engine import normalize_legacy_reject_log_rows
+from .candidate_engine import (
+    REJECT_RETURN_ANNUALIZED,
+    REJECT_RETURN_IF_EXERCISED_TOTAL,
+    REJECT_RETURN_NET_INCOME,
+    REJECT_RISK_SPREAD,
+    build_candidate_decision,
+    evaluate_candidate_return_floor,
+    evaluate_candidate_risk_filter,
+    normalize_legacy_reject_log_rows,
+)
 
 StrategyMode = Literal["put", "call"]
 
@@ -115,30 +124,46 @@ def filter_candidates(df: pd.DataFrame, cfg: StrategyConfig) -> pd.DataFrame:
     return out
 
 
-def _append_reject_rows(
+def _row_identity(row: pd.Series, mode: StrategyMode) -> dict:
+    return {
+        "symbol": row.get("symbol"),
+        "contract_symbol": row.get("contract_symbol"),
+        "expiration": row.get("expiration"),
+        "strike": row.get("strike"),
+        "mode": row.get("option_type") or mode,
+    }
+
+
+def _append_engine_reject_rows(
     *,
     sink: list[dict],
-    rejected_df: pd.DataFrame,
-    metric: pd.Series,
-    reject_rule: str,
+    row: pd.Series,
+    decision: dict,
     reject_stage: str,
-    threshold: float,
     mode: StrategyMode,
 ) -> None:
-    if rejected_df.empty:
-        return
-    for idx, row in rejected_df.iterrows():
+    reason_to_rule = {
+        REJECT_RETURN_ANNUALIZED: "min_annualized_return",
+        REJECT_RETURN_NET_INCOME: "min_net_income",
+        REJECT_RETURN_IF_EXERCISED_TOTAL: "min_if_exercised_total_return",
+        REJECT_RISK_SPREAD: "max_spread_ratio",
+    }
+    identity = _row_identity(row, mode)
+    for reject in decision.get("rejects") or []:
+        if not isinstance(reject, dict):
+            continue
+        rule = reason_to_rule.get(str(reject.get("reason") or ""))
+        if not rule:
+            continue
         sink.append(
             {
                 "reject_stage": reject_stage,
-                "reject_rule": reject_rule,
-                "metric_value": (metric.get(idx) if metric is not None else None),
-                "threshold": threshold,
-                "symbol": row.get("symbol"),
-                "contract_symbol": row.get("contract_symbol"),
-                "expiration": row.get("expiration"),
-                "strike": row.get("strike"),
-                "mode": row.get("option_type") or mode,
+                "reject_rule": rule,
+                "metric_value": reject.get("metric_value"),
+                "threshold": reject.get("threshold"),
+                **identity,
+                "engine_reject_stage": reject.get("stage"),
+                "engine_reject_reason": reject.get("reason"),
             }
         )
 
@@ -169,71 +194,56 @@ def filter_candidates_with_reject_log(
     if df.empty:
         return df.copy(), empty_reject_log_dataframe()
 
-    out = df.copy()
+    out_rows: list[pd.Series] = []
     reject_rows: list[dict] = []
     annual_col = annualized_return_column(cfg.mode)
+    annual_values = _to_numeric(df, annual_col)
+    net_income_values = _to_numeric(df, "net_income")
+    if_exercised_values = _to_numeric(df, "if_exercised_total_return")
+    spread_ratio_values = _to_numeric(df, "spread_ratio")
 
-    if cfg.min_annualized_return is not None:
-        annual = _to_numeric(out, annual_col)
-        threshold = float(cfg.min_annualized_return)
-        mask = annual >= threshold
-        rejected = out[~mask]
-        _append_reject_rows(
-            sink=reject_rows,
-            rejected_df=rejected,
-            metric=annual,
-            reject_rule="min_annualized_return",
-            reject_stage=reject_stage,
-            threshold=threshold,
+    for idx, row in df.iterrows():
+        base = build_candidate_decision(
             mode=cfg.mode,
+            symbol=str(row.get("symbol") or ""),
+            contract_symbol=str(row.get("contract_symbol") or ""),
+            accepted=True,
+            rejects=[],
+            normalized_input=row.to_dict(),
         )
-        out = out[mask]
-    if cfg.min_net_income is not None:
-        net_income = _to_numeric(out, "net_income")
-        threshold = float(cfg.min_net_income)
-        mask = net_income >= threshold
-        rejected = out[~mask]
-        _append_reject_rows(
-            sink=reject_rows,
-            rejected_df=rejected,
-            metric=net_income,
-            reject_rule="min_net_income",
-            reject_stage=reject_stage,
-            threshold=threshold,
-            mode=cfg.mode,
+        return_decision = evaluate_candidate_return_floor(
+            base,
+            min_annualized_return=cfg.min_annualized_return,
+            min_net_income=cfg.min_net_income,
+            min_if_exercised_total_return=cfg.min_if_exercised_total_return,
+            annualized_return=annual_values.get(idx),
+            net_income=net_income_values.get(idx),
+            if_exercised_total_return=if_exercised_values.get(idx),
         )
-        out = out[mask]
-    if cfg.mode == "call" and cfg.min_if_exercised_total_return is not None:
-        total_ret = _to_numeric(out, "if_exercised_total_return")
-        threshold = float(cfg.min_if_exercised_total_return)
-        mask = total_ret >= threshold
-        rejected = out[~mask]
-        _append_reject_rows(
-            sink=reject_rows,
-            rejected_df=rejected,
-            metric=total_ret,
-            reject_rule="min_if_exercised_total_return",
-            reject_stage=reject_stage,
-            threshold=threshold,
-            mode=cfg.mode,
+        risk_decision = evaluate_candidate_risk_filter(
+            return_decision,
+            max_spread_ratio=cfg.max_spread_ratio,
+            spread_ratio=spread_ratio_values.get(idx),
         )
-        out = out[mask]
-    if cfg.max_spread_ratio is not None and "spread_ratio" in out.columns:
-        spread_ratio = _to_numeric(out, "spread_ratio")
-        threshold = float(cfg.max_spread_ratio)
-        mask = spread_ratio.isna() | (spread_ratio <= threshold)
-        rejected = out[~mask]
-        _append_reject_rows(
-            sink=reject_rows,
-            rejected_df=rejected,
-            metric=spread_ratio,
-            reject_rule="max_spread_ratio",
-            reject_stage=reject_stage,
-            threshold=threshold,
-            mode=cfg.mode,
-        )
-        out = out[mask]
-    return out.copy(), add_engine_reject_columns(pd.DataFrame(reject_rows))
+        if bool(risk_decision.get("accepted")):
+            out_rows.append(row)
+        else:
+            _append_engine_reject_rows(
+                sink=reject_rows,
+                row=row,
+                decision=risk_decision,
+                reject_stage=reject_stage,
+                mode=cfg.mode,
+            )
+
+    out = pd.DataFrame(out_rows, columns=df.columns)
+    reject_log = pd.DataFrame(reject_rows)
+    if reject_log.empty:
+        return out.copy(), empty_reject_log_dataframe()
+    for col in REJECT_LOG_COLUMNS:
+        if col not in reject_log.columns:
+            reject_log[col] = None
+    return out.copy(), reject_log[REJECT_LOG_COLUMNS]
 
 
 def score_candidates(df: pd.DataFrame, cfg: StrategyConfig) -> pd.DataFrame:

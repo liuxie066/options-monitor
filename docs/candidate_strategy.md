@@ -241,6 +241,7 @@ Covered Call 会结合持仓 context 计算：
 
 ### 核心引擎
 - `domain/domain/engine/candidate_engine.py`
+- `domain/domain/engine/candidate_strategy.py` 只保留 DataFrame 适配、排序、分层和 reject log 转换；收益/成本/价差门禁委托给 `candidate_engine.py`
 
 ### Put 路径
 - `src/application/scan_sell_put.py`

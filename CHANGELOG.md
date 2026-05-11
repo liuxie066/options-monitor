@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.2.12 - 2026-05-11
+
+### Changed
+- Moved OpenD watchdog, Futu doctor, and cash footer runtime logic out of `scripts/` into application/infrastructure modules, leaving scripts as operational CLI wrappers.
+- Consolidated DataFrame candidate filtering around `candidate_engine` return and risk gates so `candidate_strategy` only adapts, ranks, and formats reject logs.
+
+### Fixed
+- Removed application-layer subprocess/JSON-stdout coupling for watchdog, doctor, and cash footer flows.
+
 ## 1.2.11 - 2026-05-11
 
 ### Changed

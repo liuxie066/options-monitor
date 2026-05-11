@@ -20,6 +20,7 @@ from domain.domain.fetch_source import is_futu_fetch_source
 from domain.domain.tool_boundary import normalize_notify_subprocess_output, normalize_subprocess_adapter_payload
 from src.application.config_loader import resolve_watchlist_config
 from src.infrastructure.feishu_bitable import FeishuError, get_tenant_access_token, http_json
+from src.infrastructure.opend_watchdog import run_watchdog_check
 
 
 DEFAULT_OPEND_HOST = '127.0.0.1'
@@ -145,32 +146,18 @@ def run_opend_watchdog(
     retry_interval_sec: float = 3.0,
     retry_timeout_sec: float = 25.0,
     success_threshold: int = 2,
-) -> subprocess.CompletedProcess:
-    cmd = [
-        str(vpy),
-        'scripts/opend_watchdog.py',
-        '--host',
-        str(host),
-        '--port',
-        str(port),
-        '--json',
-    ]
-    if ensure:
-        cmd.append('--ensure')
-    if retry_enabled:
-        cmd.extend([
-            '--retry-enabled',
-            '--retry-interval-sec', str(retry_interval_sec),
-            '--retry-timeout-sec', str(retry_timeout_sec),
-            '--success-threshold', str(success_threshold),
-        ])
-    return run_command(
-        cmd,
-        cwd=base,
-        capture_output=True,
-        text=True,
-        timeout_sec=timeout_sec,
+) -> dict[str, Any]:
+    del vpy, base, timeout_sec
+    health = run_watchdog_check(
+        host=str(host),
+        port=int(port),
+        ensure=bool(ensure),
+        retry_enabled=bool(retry_enabled),
+        retry_interval_sec=float(retry_interval_sec),
+        retry_timeout_sec=float(retry_timeout_sec),
+        success_threshold=int(success_threshold),
     )
+    return health.to_payload()
 
 
 def send_openclaw_message(*, base: Path, channel: str, target: str, message: str) -> subprocess.CompletedProcess:
