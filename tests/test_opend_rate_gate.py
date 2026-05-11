@@ -111,6 +111,24 @@ def test_opend_rate_gate_merges_external_state_file() -> None:
         state_path.unlink(missing_ok=True)
 
 
+def test_opend_rate_gate_does_not_remerge_own_file_timestamps(tmp_path: Path) -> None:
+    OpenDRateGate, _, _ = _imports()
+    state_path = tmp_path / "opend_rate_gate.json"
+    gate = OpenDRateGate(
+        max_calls=60,
+        window_sec=30.0,
+        max_wait_sec=0.01,
+        label="dedupe",
+        state_path=state_path,
+    )
+
+    for _ in range(10):
+        gate.acquire()
+
+    payload = json.loads(state_path.read_text(encoding="utf-8"))
+    assert len(payload["timestamps"]) == 10
+
+
 def test_file_rate_limiter_shim_preserves_api_and_exception_type(tmp_path: Path) -> None:
     _, FileRateLimiter, _ = _imports()
     limiter = FileRateLimiter(
