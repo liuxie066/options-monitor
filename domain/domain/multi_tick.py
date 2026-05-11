@@ -68,7 +68,7 @@ def _infer_market_from_schedule_timezone(schedule_cfg: dict[str, Any]) -> str | 
     """Infer market label from schedule market_timezone.
 
     Returns 'HK' when the timezone is a known HK timezone,
-    None otherwise (including US or unrecognized timezones).
+    None otherwise; callers apply the default market label.
     """
     tz = str(schedule_cfg.get('market_timezone', '')).strip()
     if tz in _SCHEDULE_TZ_HK:
