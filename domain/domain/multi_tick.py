@@ -49,9 +49,9 @@ def _time_in_range(value: time, start: time, end: time) -> bool:
     return value >= start or value <= end
 
 
-_SCHEDULE_TZ_HK: frozenset[str] = frozenset({
+_SCHEDULE_TZ_HK: tuple[str, ...] = (
     'Asia/Hong_Kong',
-})
+)
 
 
 @dataclass(frozen=True)
