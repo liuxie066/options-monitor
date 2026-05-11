@@ -60,7 +60,7 @@ def test_ensure_required_data_coverage_reuses_single_lazy_gateway(tmp_path: Path
     monkeypatch.setattr(mod, "_load_required_data_rows", lambda *args, **kwargs: [])
     monkeypatch.setattr(mod, "_merge_required_data_rows", lambda existing_rows, new_rows, *, base_dir: list(new_rows))
     monkeypatch.setattr("src.application.opend_symbol_fetching.fetch_symbol", fake_fetch_symbol)
-    monkeypatch.setattr("src.application.opend_symbol_fetching.save_outputs", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.application.opend_symbol_outputs.save_outputs", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.infrastructure.futu_gateway.build_ready_futu_gateway", fake_build_ready_futu_gateway)
 
     _fetch_reasons, _fetch_details, summary = mod._ensure_required_data_coverage_for_positions(
@@ -114,7 +114,7 @@ def test_ensure_required_data_coverage_isolates_lazy_gateways_by_endpoint(tmp_pa
     monkeypatch.setattr(mod, "_load_required_data_rows", lambda *args, **kwargs: [])
     monkeypatch.setattr(mod, "_merge_required_data_rows", lambda existing_rows, new_rows, *, base_dir: list(new_rows))
     monkeypatch.setattr("src.application.opend_symbol_fetching.fetch_symbol", fake_fetch_symbol)
-    monkeypatch.setattr("src.application.opend_symbol_fetching.save_outputs", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.application.opend_symbol_outputs.save_outputs", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.infrastructure.futu_gateway.build_ready_futu_gateway", fake_build_ready_futu_gateway)
 
     _fetch_reasons, _fetch_details, summary = mod._ensure_required_data_coverage_for_positions(
@@ -154,7 +154,7 @@ def test_ensure_required_data_coverage_uses_external_gateway_without_closing(tmp
     monkeypatch.setattr(mod, "_load_required_data_rows", lambda *args, **kwargs: [])
     monkeypatch.setattr(mod, "_merge_required_data_rows", lambda existing_rows, new_rows, *, base_dir: list(new_rows))
     monkeypatch.setattr("src.application.opend_symbol_fetching.fetch_symbol", fake_fetch_symbol)
-    monkeypatch.setattr("src.application.opend_symbol_fetching.save_outputs", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.application.opend_symbol_outputs.save_outputs", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.infrastructure.futu_gateway.build_ready_futu_gateway", lambda **kwargs: build_calls.append(kwargs))
 
     mod._ensure_required_data_coverage_for_positions(

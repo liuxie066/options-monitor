@@ -14,7 +14,8 @@ from domain.storage.repositories import state_repo
 from src.application.config_loader import resolve_watchlist_config
 from src.application.multi_tick.prefetch_coordinator import PrefetchCoordinator
 from src.application.opend_fetch_config import resolve_opend_batch_config, resolve_opend_fetch_config
-from src.application.opend_symbol_fetching import fetch_symbol, save_outputs
+from src.application.opend_symbol_fetching import fetch_symbol
+from src.application.opend_symbol_outputs import save_outputs
 from src.infrastructure.futu_gateway_pool import ThreadLocalFutuGatewayPool
 from src.infrastructure.io_utils import has_shared_required_data
 

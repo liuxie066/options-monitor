@@ -17,18 +17,25 @@ def test_chain_cache_helpers_roundtrip() -> None:
     if str(base) not in sys.path:
         sys.path.insert(0, str(base))
 
-    # Import helpers from the application owner.
-    import src.application.opend_symbol_fetching as m
+    from src.application.option_chain_fetching import (
+        load_option_chain_shard,
+        option_chain_shard_cache_path,
+        save_option_chain_shard,
+    )
 
     with TemporaryDirectory() as td:
         base = Path(td)
-        p = m._chain_cache_path(base, "US.NVDA")
-        payload = {"asof_date": "2099-01-01", "underlier_code": "US.NVDA", "rows": [{"x": 1}]}
-        m._save_chain_cache(p, payload)
-        obj = m._load_chain_cache(p)
+        p = option_chain_shard_cache_path(base, "US.NVDA", "2099-01-15")
+        save_option_chain_shard(
+            p,
+            asof_date="2099-01-01",
+            underlier_code="US.NVDA",
+            expiration="2099-01-15",
+            rows=[{"x": 1}],
+        )
+        obj = load_option_chain_shard(p, asof_date="2099-01-01")
         assert obj is not None
-        assert obj["underlier_code"] == "US.NVDA"
-        assert obj["rows"][0]["x"] == 1
+        assert obj[0]["x"] == 1
 
 
 def test_chain_cache_fresh_check() -> None:
@@ -37,12 +44,25 @@ def test_chain_cache_fresh_check() -> None:
     if str(base) not in sys.path:
         sys.path.insert(0, str(base))
 
-    import src.application.opend_symbol_fetching as m
-    from datetime import date
+    from src.application.option_chain_fetching import (
+        load_option_chain_shard,
+        option_chain_shard_cache_path,
+        save_option_chain_shard,
+    )
 
-    assert m._is_chain_cache_fresh({"asof_date": "2026-03-29"}, date(2026, 3, 29)) is True
-    assert m._is_chain_cache_fresh({"asof_date": "2026-03-28"}, date(2026, 3, 29)) is False
-    assert m._is_chain_cache_fresh({}, date(2026, 3, 29)) is False
+    with TemporaryDirectory() as td:
+        root = Path(td)
+        path = option_chain_shard_cache_path(root, "US.NVDA", "2026-03-29")
+        save_option_chain_shard(
+            path,
+            asof_date="2026-03-29",
+            underlier_code="US.NVDA",
+            expiration="2026-03-29",
+            rows=[{"code": "US.NVDA.2026-03-29.P100"}],
+        )
+
+        assert load_option_chain_shard(path, asof_date="2026-03-29") is not None
+        assert load_option_chain_shard(path, asof_date="2026-03-28") is None
 
 
 def test_chain_cache_must_cover_explicit_expirations() -> None:
@@ -51,15 +71,10 @@ def test_chain_cache_must_cover_explicit_expirations() -> None:
     if str(base) not in sys.path:
         sys.path.insert(0, str(base))
 
-    import src.application.opend_symbol_fetching as m
+    from src.application.option_chain_fetching import option_chain_shard_cache_path
 
-    cached = {
-        "asof_date": "2026-04-28",
-        "expirations_all": ["2026-05-28"],
-        "rows": [{"strike_time": "2026-05-28", "code": "HK.TEST"}],
-    }
-    assert m._chain_cache_covers_explicit_expirations(cached, ["2026-05-28"]) is True
-    assert m._chain_cache_covers_explicit_expirations(cached, ["2026-04-29"]) is False
+    root = Path("/tmp/cache-root")
+    assert option_chain_shard_cache_path(root, "US.NVDA", "2026-05-28") != option_chain_shard_cache_path(root, "US.NVDA", "2026-04-29")
 
 
 def test_chain_cache_does_not_trust_declared_expirations_without_rows() -> None:
@@ -68,16 +83,16 @@ def test_chain_cache_does_not_trust_declared_expirations_without_rows() -> None:
     if str(base) not in sys.path:
         sys.path.insert(0, str(base))
 
-    import src.application.opend_symbol_fetching as m
+    from src.application.option_chain_fetching import (
+        load_option_chain_shard,
+        option_chain_shard_cache_path,
+    )
 
-    cached = {
-        "asof_date": "2026-04-28",
-        "expirations_all": ["2026-04-29", "2026-06-29"],
-        "expirations_pick": ["2026-04-29", "2026-06-29"],
-        "rows": [{"strike_time": "2026-04-29", "code": "HK.TEST.2026-04-29.P135"}],
-    }
-    assert m._chain_cache_covers_explicit_expirations(cached, ["2026-04-29"]) is True
-    assert m._chain_cache_covers_explicit_expirations(cached, ["2026-06-29"]) is False
+    with TemporaryDirectory() as td:
+        root = Path(td)
+        declared_only = option_chain_shard_cache_path(root, "HK.TEST", "2026-06-29")
+        declared_only.parent.mkdir(parents=True, exist_ok=True)
+        assert load_option_chain_shard(declared_only, asof_date="2026-04-28") is None
 
 
 def test_chain_cache_prune_by_mtime() -> None:
@@ -89,20 +104,33 @@ def test_chain_cache_prune_by_mtime() -> None:
     if str(base) not in sys.path:
         sys.path.insert(0, str(base))
 
-    import src.application.opend_symbol_fetching as m
+    from src.application.opend_symbol_chain_fetching import prune_chain_cache
+    from src.application.option_chain_fetching import option_chain_shard_cache_path, save_option_chain_shard
 
     with TemporaryDirectory() as td:
         root = Path(td)
         # create fake cache files
-        p1 = m._chain_cache_path(root, "US.AAPL")
-        p2 = m._chain_cache_path(root, "US.NVDA")
-        m._save_chain_cache(p1, {"asof_date": "2000-01-01", "underlier_code": "US.AAPL", "rows": []})
-        m._save_chain_cache(p2, {"asof_date": "2000-01-01", "underlier_code": "US.NVDA", "rows": []})
+        p1 = option_chain_shard_cache_path(root, "US.AAPL", "2026-05-15")
+        p2 = option_chain_shard_cache_path(root, "US.NVDA", "2026-05-15")
+        save_option_chain_shard(
+            p1,
+            asof_date="2000-01-01",
+            underlier_code="US.AAPL",
+            expiration="2026-05-15",
+            rows=[{"code": "US.AAPL.2026-05-15.P100"}],
+        )
+        save_option_chain_shard(
+            p2,
+            asof_date="2000-01-01",
+            underlier_code="US.NVDA",
+            expiration="2026-05-15",
+            rows=[{"code": "US.NVDA.2026-05-15.P100"}],
+        )
         # set p1 very old, p2 recent
         old = time.time() - 10 * 86400
         os_utime = __import__('os').utime
         os_utime(p1, (old, old))
-        m.prune_chain_cache(root, keep_days=7)
+        prune_chain_cache(root, keep_days=7)
         assert not p1.exists()
         assert p2.exists()
 
@@ -222,7 +250,7 @@ def test_save_outputs_preserves_existing_parsed_csv_on_fetch_error() -> None:
     if str(base) not in sys.path:
         sys.path.insert(0, str(base))
 
-    import src.application.opend_symbol_fetching as m
+    import src.application.opend_symbol_outputs as m
 
     with TemporaryDirectory() as td:
         root = Path(td)

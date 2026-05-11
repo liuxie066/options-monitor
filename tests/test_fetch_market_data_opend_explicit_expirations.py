@@ -61,17 +61,6 @@ def test_fetch_symbol_explicit_expirations_override_limit_and_cache(monkeypatch,
     monkeypatch.setattr(mod, "retry_futu_gateway_call", lambda _name, fn, **kwargs: fn())
     monkeypatch.setattr(mod, "get_trading_date", lambda market: date(2026, 4, 28))
     monkeypatch.setattr(mod, "get_spot_opend", lambda gateway, code, **kwargs: 100.0)
-    monkeypatch.setattr(
-        mod,
-        "_load_chain_cache",
-        lambda path: {
-            "asof_date": "2026-04-28",
-            "underlier_code": "US.NVDA",
-            "expirations_all": ["2026-05-28"],
-            "rows": [{"strike_time": "2026-05-28", "code": "US.NVDA.2026-05-28.P135"}],
-        },
-    )
-
     payload = mod.fetch_symbol(
         "NVDA",
         limit_expirations=1,
@@ -147,7 +136,7 @@ def test_fetch_symbol_normalizes_timestamp_explicit_expirations(monkeypatch, tmp
 
 
 def test_list_option_expirations_uses_shared_endpoint_limiter(monkeypatch, tmp_path: Path) -> None:
-    import src.application.opend_symbol_fetching as mod
+    import src.application.opend_symbol_chain_fetching as mod
 
     endpoints: list[tuple[str, int, float, float]] = []
 

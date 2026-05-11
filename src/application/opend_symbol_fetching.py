@@ -16,7 +16,6 @@ Notes:
   In that case you can pass `--spot` manually.
 """
 
-import json
 import math
 from dataclasses import dataclass, replace
 from datetime import date, datetime
@@ -25,33 +24,6 @@ from typing import Any
 
 import pandas as pd
 
-
-
-def append_metrics_json(metrics_path: Path, payload: dict, max_entries: int = 400):
-    """Append payload into a bounded JSON list file. Keeps last max_entries records."""
-    try:
-        metrics_path.parent.mkdir(parents=True, exist_ok=True)
-        arr = []
-        if metrics_path.exists() and metrics_path.stat().st_size > 0:
-            try:
-                obj = json.loads(metrics_path.read_text(encoding='utf-8'))
-                if isinstance(obj, list):
-                    arr = obj
-            except Exception:
-                arr = []
-        arr.append(payload)
-        if len(arr) > int(max_entries):
-            arr = arr[-int(max_entries):]
-        metrics_path.write_text(json.dumps(arr, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-    except Exception:
-        pass
-
-
-COLUMNS = [
-    'symbol','option_type','expiration','dte','contract_symbol','strike','spot',
-    'bid','ask','last_price','mid','volume','open_interest','implied_volatility',
-    'in_the_money','currency','otm_pct','delta','multiplier'
-]
 
 # Allow running as a script (python scripts/xxx.py) without package install
 # by ensuring repo root is on sys.path.
@@ -67,97 +39,10 @@ from src.infrastructure.futu_gateway import (
 from src.application.opend_utils import normalize_underlier, get_trading_date
 from src.application.opend_call_coordinator import rate_limited_opend_call
 from src.application.expiration_normalization import normalize_expiration_ymd
-from src.application.opend_fetch_config import DEFAULT_OPEND_BATCH_MARKET_SNAPSHOT, OpenDFetchLimits
-from src.application.option_chain_fetching import (
-    OptionChainFetchRequest,
-    classify_option_chain_error,
-    fetch_option_chains,
-    prune_option_chain_cache,
-)
-
-_SNAPSHOT_KEEP_COLUMNS = [
-    'code',
-    'last_price',
-    'bid_price',
-    'ask_price',
-    'volume',
-    'option_open_interest',
-    'option_implied_volatility',
-    'option_delta',
-    'option_contract_multiplier',
-    'lot_size',
-    'open_interest',
-    'implied_volatility',
-    'delta',
-    'bid',
-    'ask',
-]
-
-def _chain_cache_path(base_dir: Path, u_code: str) -> Path:
-    safe = u_code.replace('.', '_')
-    return base_dir / 'cache' / 'opend_option_chain' / f'{safe}.json'
-
-
-def _load_chain_cache(path: Path) -> dict | None:
-    try:
-        if not path.exists() or path.stat().st_size == 0:
-            return None
-        import json
-        return json.loads(path.read_text(encoding='utf-8'))
-    except Exception:
-        return None
-
-
-def _save_chain_cache(path: Path, payload: dict) -> None:
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        import json
-        path.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding='utf-8')
-    except Exception:
-        pass
-
-
-def prune_chain_cache(base_dir: Path, keep_days: int) -> None:
-    try:
-        prune_option_chain_cache(base_dir, keep_days)
-    except Exception:
-        pass
-
-
-def _is_chain_cache_fresh(obj: dict, today: date) -> bool:
-    try:
-        if not isinstance(obj, dict):
-            return False
-        asof = obj.get('asof_date')
-        if not asof:
-            return False
-        return str(asof) == today.isoformat()
-    except Exception:
-        return False
-
-
-def _chain_cache_covers_explicit_expirations(obj: dict, explicit_expirations: list[str] | None) -> bool:
-    try:
-        requested = sorted({
-            exp
-            for exp in (normalize_expiration_ymd(x) for x in (explicit_expirations or []))
-            if exp
-        })
-        if not requested:
-            return True
-        if not isinstance(obj, dict):
-            return False
-        rows = obj.get('rows') or []
-        cached = {
-            exp
-            for row in rows
-            if isinstance(row, dict)
-            for exp in [normalize_expiration_ymd((row or {}).get('strike_time') or (row or {}).get('expiration'))]
-            if exp
-        }
-        return all(exp in cached for exp in requested)
-    except Exception:
-        return False
+from src.application.opend_fetch_config import OpenDFetchLimits
+from src.application.opend_market_snapshot_fetching import fetch_option_snapshots, get_spot_opend
+from src.application.opend_symbol_chain_fetching import fetch_symbol_option_chain
+from src.application.option_chain_fetching import classify_option_chain_error
 
 
 def to_float(v):
@@ -212,295 +97,6 @@ def _pick_col(row: Any, *cands: str):
         return None
     except Exception:
         return None
-
-
-def _append_opend_observation_error(
-    errors: list[dict[str, Any]] | None,
-    *,
-    stage: str,
-    code: str,
-    error_code: str,
-    message: str,
-) -> None:
-    if errors is None:
-        return
-    errors.append(
-        {
-            "stage": stage,
-            "code": code,
-            "error_code": error_code,
-            "message": message,
-        }
-    )
-
-
-def _keep_snapshot_record_columns(snap: Any, keep_columns: list[str]) -> tuple[list[dict[str, Any]], list[str]]:
-    cols = set(snap.columns)
-    keep = [c for c in keep_columns if c in cols]
-    if not keep or 'code' not in keep:
-        return [], []
-    records: list[dict[str, Any]] = []
-    try:
-        records = [
-            dict(rec)
-            for rec in snap[keep].to_dict(orient='records')
-            if isinstance(rec, dict)
-        ]
-    except Exception:
-        try:
-            for _, row in snap.iterrows():
-                records.append({k: row.get(k) for k in keep})
-        except Exception:
-            return [], keep
-    return records, keep
-
-
-def _fallback_fetch_missing_snapshots(
-    *,
-    missing_codes: list[str],
-    gateway: Any,
-    snapshot_limit: Any,
-    effective_base_dir: Path,
-    snap_map: dict[str, dict[str, Any]],
-    snapshot_errors: list[dict[str, Any]],
-    max_fallback_codes: int,
-    fallback_batch_size: int,
-    keep_columns: list[str],
-    no_retry: bool,
-    retry_max_attempts: int,
-    retry_time_budget_sec: float,
-    retry_base_delay_sec: float,
-    retry_max_delay_sec: float,
-) -> tuple[int, int]:
-    if not missing_codes or int(max_fallback_codes) <= 0:
-        return 0, 0
-
-    allowed = list(missing_codes[: int(max_fallback_codes)])
-    dropped = max(0, len(missing_codes) - len(allowed))
-    failed_count = 0
-    if dropped > 0:
-        snapshot_errors.append(
-            {
-                'stage': 'market_snapshot_fallback',
-                'batch_start': len(allowed),
-                'batch_size': dropped,
-                'error_code': 'FALLBACK_BUDGET_EXCEEDED',
-                'message': f'fallback budget exceeded: dropped {dropped} codes',
-            }
-        )
-        failed_count += dropped
-
-    filled_count = 0
-    batch_size = max(1, int(fallback_batch_size))
-    for i in range(0, len(allowed), batch_size):
-        batch = allowed[i:i + batch_size]
-        try:
-            snap = retry_futu_gateway_call(
-                'get_market_snapshot(fallback)',
-                lambda: rate_limited_opend_call(
-                    base_dir=effective_base_dir,
-                    endpoint='market_snapshot',
-                    **snapshot_limit.call_kwargs(),
-                    call=lambda: gateway.get_snapshot(batch),
-                ),
-                no_retry=no_retry,
-                retry_max_attempts=retry_max_attempts,
-                retry_time_budget_sec=retry_time_budget_sec,
-                retry_base_delay_sec=retry_base_delay_sec,
-                retry_max_delay_sec=retry_max_delay_sec,
-                quiet=True,
-            )
-        except Exception as exc:
-            snapshot_errors.append(
-                {
-                    'stage': 'market_snapshot_fallback',
-                    'batch_start': i,
-                    'batch_size': len(batch),
-                    'error_code': 'FALLBACK_FAILED',
-                    'message': str(exc),
-                }
-            )
-            failed_count += len(batch)
-            continue
-
-        if snap is None or snap.empty:
-            snapshot_errors.append(
-                {
-                    'stage': 'market_snapshot_fallback',
-                    'batch_start': i,
-                    'batch_size': len(batch),
-                    'error_code': 'FALLBACK_FAILED',
-                    'message': 'empty fallback snapshot',
-                }
-            )
-            failed_count += len(batch)
-            continue
-
-        records, keep = _keep_snapshot_record_columns(snap, keep_columns)
-        if not keep:
-            snapshot_errors.append(
-                {
-                    'stage': 'market_snapshot_fallback',
-                    'batch_start': i,
-                    'batch_size': len(batch),
-                    'error_code': 'FALLBACK_FAILED',
-                    'message': 'fallback snapshot missing code column',
-                }
-            )
-            failed_count += len(batch)
-            continue
-
-        filled_before = len(snap_map)
-        for rec in records:
-            code = str(rec.get('code') or '')
-            if code:
-                snap_map[code] = rec
-        filled_count += max(0, len(snap_map) - filled_before)
-
-    return filled_count, failed_count
-
-
-def get_spot_opend(
-    gateway,
-    underlier_code: str,
-    *,
-    base_dir: Path | None = None,
-    snapshot_max_wait_sec: float = 30.0,
-    snapshot_window_sec: float = 30.0,
-    snapshot_max_calls: int = 60,
-    errors: list[dict[str, Any]] | None = None,
-) -> float | None:
-    """Try to get underlying spot from OpenD."""
-    snapshot_limit = OpenDFetchLimits.from_flat_kwargs(
-        snapshot_max_wait_sec=snapshot_max_wait_sec,
-        snapshot_window_sec=snapshot_window_sec,
-        snapshot_max_calls=snapshot_max_calls,
-    ).market_snapshot
-    try:
-        def _call_snapshot():
-            return gateway.get_snapshot([underlier_code])
-
-        if base_dir is not None:
-            df = rate_limited_opend_call(
-                base_dir=Path(base_dir),
-                endpoint="market_snapshot",
-                **snapshot_limit.call_kwargs(),
-                call=_call_snapshot,
-            )
-        else:
-            df = _call_snapshot()
-        if df is None or df.empty:
-            _append_opend_observation_error(
-                errors,
-                stage="underlier_snapshot",
-                code=underlier_code,
-                error_code="EMPTY_SNAPSHOT",
-                message="empty underlier snapshot",
-            )
-            return None
-        row = df.iloc[0]
-        # Prefer last_price; fallback to other common fields.
-        for k in ['last_price', 'price', 'cur_price', 'close_price_5min', 'open_price', 'prev_close_price']:
-            v = to_float(row.get(k))
-            if v is not None and v > 0:
-                return v
-        _append_opend_observation_error(
-            errors,
-            stage="underlier_snapshot",
-            code=underlier_code,
-            error_code="MISSING_PRICE",
-            message="underlier snapshot has no positive price field",
-        )
-        return None
-    except Exception as exc:
-        _append_opend_observation_error(
-            errors,
-            stage="underlier_snapshot",
-            code=underlier_code,
-            error_code=classify_option_chain_error(exc),
-            message=str(exc),
-        )
-        return None
-
-
-def get_underlier_spot(
-    symbol: str,
-    *,
-    host: str = "127.0.0.1",
-    port: int = 11111,
-    base_dir: Path | None = None,
-    snapshot_max_wait_sec: float = 30.0,
-    snapshot_window_sec: float = 30.0,
-    snapshot_max_calls: int = 60,
-) -> float | None:
-    gateway = build_ready_futu_gateway(
-        host=host,
-        port=int(port),
-        is_option_chain_cache_enabled=False,
-    )
-    try:
-        effective_base_dir = Path(base_dir) if base_dir is not None else REPO_ROOT
-        return get_spot_opend(
-            gateway,
-            normalize_underlier(symbol, base_dir=effective_base_dir).code,
-            base_dir=effective_base_dir,
-            snapshot_max_wait_sec=snapshot_max_wait_sec,
-            snapshot_window_sec=snapshot_window_sec,
-            snapshot_max_calls=snapshot_max_calls,
-        )
-    finally:
-        try:
-            gateway.close()
-        except Exception:
-            pass
-
-
-def list_option_expirations(
-    symbol: str,
-    *,
-    host: str = "127.0.0.1",
-    port: int = 11111,
-    base_dir: Path | None = None,
-    expiration_max_wait_sec: float = 30.0,
-    expiration_window_sec: float = 30.0,
-    expiration_max_calls: int = 30,
-) -> list[str]:
-    gateway = build_ready_futu_gateway(
-        host=host,
-        port=int(port),
-        is_option_chain_cache_enabled=False,
-    )
-    try:
-        expiration_limit = OpenDFetchLimits.from_flat_kwargs(
-            expiration_max_wait_sec=expiration_max_wait_sec,
-            expiration_window_sec=expiration_window_sec,
-            expiration_max_calls=expiration_max_calls,
-        ).option_expiration
-        effective_base_dir = Path(base_dir) if base_dir is not None else REPO_ROOT
-        df_e = retry_futu_gateway_call(
-            'get_option_expiration_date',
-            lambda: rate_limited_opend_call(
-                base_dir=effective_base_dir,
-                endpoint="option_expiration",
-                **expiration_limit.call_kwargs(),
-                call=lambda: gateway.get_option_expiration_dates(
-                    normalize_underlier(symbol, base_dir=effective_base_dir).code
-                ),
-            ),
-            quiet=False,
-        )
-        if df_e is None or df_e.empty:
-            return []
-        return sorted({
-            exp
-            for exp in (normalize_expiration_ymd(x) for x in df_e.get('strike_time').tolist())
-            if exp
-        })
-    finally:
-        try:
-            gateway.close()
-        except Exception:
-            pass
 
 
 @dataclass(frozen=True)
@@ -621,7 +217,6 @@ def fetch_symbol_request(
             ),
         )
     symbol = request.symbol
-    limit_expirations = request.limit_expirations
     host = request.host
     port = request.port
     spot_override = request.spot_override
@@ -638,14 +233,10 @@ def fetch_symbol_request(
     retry_max_delay_sec = request.retry_max_delay_sec
     no_retry = request.no_retry
     chain_cache = request.chain_cache
-    chain_cache_force_refresh = request.chain_cache_force_refresh
-    freshness_policy = request.freshness_policy
     effective_base_dir = request.effective_base_dir
     u = normalize_underlier(symbol, base_dir=effective_base_dir)
     opend_limits = request.limits
-    option_chain_limit = opend_limits.option_chain
     snapshot_limit = opend_limits.market_snapshot
-    expiration_limit = opend_limits.option_expiration
     external_gateway = request.gateway is not None
     explicit_expirations_norm = sorted({
         exp
@@ -677,121 +268,27 @@ def fetch_symbol_request(
                 snapshot_window_sec=snapshot_limit.window_sec,
                 snapshot_max_calls=snapshot_limit.max_calls,
                 errors=spot_errors,
+                rate_limited_call=rate_limited_opend_call,
             )
 
         # Trading-date anchor for DTE / cache freshness.
         today = get_trading_date(u.market)
 
-        # IMPORTANT:
-        # futu-api get_option_chain() defaults to an expiration date window of [today, today+30d]
-        # when start/end are None. For some underliers (e.g., HK.09992), the next expiry may be
-        # beyond 30 days, which makes the default call look like it has only 0DTE options.
-        #
-        # So we:
-        # 1) call get_option_expiration_date() to enumerate expirations
-        # 2) take the closest N expirations (limit_expirations)
-        # 3) delegate per-expiration chain fetches to the shared coordinator, which owns
-        #    cross-process rate limiting and per-expiration cache shards.
-        if explicit_expirations_norm:
-            expirations_all = explicit_expirations_norm
-        else:
-            try:
-                df_e = retry_futu_gateway_call(
-                    'get_option_expiration_date',
-                    lambda: rate_limited_opend_call(
-                        base_dir=effective_base_dir,
-                        endpoint="option_expiration",
-                        **expiration_limit.call_kwargs(),
-                        call=lambda: gateway.get_option_expiration_dates(u.code),
-                    ),
-                    no_retry=no_retry,
-                    retry_max_attempts=retry_max_attempts,
-                    retry_time_budget_sec=retry_time_budget_sec,
-                    retry_base_delay_sec=retry_base_delay_sec,
-                    retry_max_delay_sec=retry_max_delay_sec,
-                    quiet=False,
-                )
-                if df_e is None or df_e.empty:
-                    expirations_all = []
-                else:
-                    expirations_all = sorted({
-                        exp
-                        for exp in (normalize_expiration_ymd(x) for x in df_e.get('strike_time').tolist())
-                        if exp
-                    })
-            except Exception:
-                expirations_all = []
-
-        expirations_pick0 = expirations_all
-        # If min_dte/max_dte is requested, filter expirations by DTE window.
-        if expirations_all and (not explicit_expirations_norm) and ((min_dte is not None) or (max_dte is not None)):
-            try:
-                from datetime import datetime
-                today0 = today
-                filtered = []
-                for e in expirations_all:
-                    try:
-                        d0 = datetime.fromisoformat(str(e)[:10]).date()
-                        dte0 = int((d0 - today0).days)
-                        if (min_dte is not None) and (dte0 < int(min_dte)):
-                            continue
-                        if (max_dte is not None) and (dte0 > int(max_dte)):
-                            continue
-                        filtered.append(str(e)[:10])
-                    except Exception:
-                        continue
-                expirations_pick0 = filtered if filtered else expirations_all
-            except Exception:
-                expirations_pick0 = expirations_all
-
-        if explicit_expirations_norm:
-            expirations_pick = expirations_pick0
-        elif limit_expirations and expirations_pick0:
-            expirations_pick = expirations_pick0[: int(limit_expirations)]
-        else:
-            expirations_pick = expirations_pick0
-
-        effective_policy = 'force_refresh' if chain_cache_force_refresh else str(freshness_policy or 'cache_first')
-        chain_result = fetch_option_chains(
+        chain_bundle = fetch_symbol_option_chain(
             gateway=gateway,
-            request=OptionChainFetchRequest(
-                symbol=symbol,
-                underlier_code=u.code,
-                expirations=list(expirations_pick),
-                host=host,
-                port=int(port),
-                option_types=option_types,
-                strike_windows=side_strike_windows or {},
-                base_dir=effective_base_dir,
-                asof_date=today.isoformat(),
-                freshness_policy=effective_policy if effective_policy in {'cache_first', 'refresh_missing', 'force_refresh'} else 'cache_first',
-                chain_cache=bool(chain_cache),
-                max_wait_sec=option_chain_limit.max_wait_sec,
-                window_sec=option_chain_limit.window_sec,
-                max_calls=option_chain_limit.max_calls,
-                is_force_refresh=bool(chain_cache_force_refresh or effective_policy == 'force_refresh'),
-                no_retry=no_retry,
-                retry_max_attempts=retry_max_attempts,
-                retry_time_budget_sec=retry_time_budget_sec,
-                retry_base_delay_sec=retry_base_delay_sec,
-                retry_max_delay_sec=retry_max_delay_sec,
-            ),
+            request=request,
+            underlier_code=u.code,
+            today=today,
+            explicit_expirations_norm=explicit_expirations_norm,
+            limits=opend_limits,
             retry_call=retry_futu_gateway_call,
+            rate_limited_call=rate_limited_opend_call,
         )
 
-        chain_obj = {
-            'asof_date': today.isoformat(),
-            'underlier_code': u.code,
-            'rows': chain_result.rows,
-            'expirations_all': expirations_all,
-            'expirations_pick': expirations_pick,
-            'fetch_result': chain_result.to_meta(),
-        }
-
         # Rehydrate into a DataFrame for existing downstream logic.
-        chain = pd.DataFrame(chain_obj.get('rows') or [])
+        chain = pd.DataFrame(chain_bundle.rows or [])
         if chain is None or chain.empty:
-            fetch_meta = dict(chain_obj.get('fetch_result') or {})
+            fetch_meta = dict(chain_bundle.fetch_meta or {})
             status = str(fetch_meta.get('status') or 'error')
             error_code = str(fetch_meta.get('error_code') or 'EMPTY_CHAIN')
             fetch_errors = fetch_meta.get('errors') if isinstance(fetch_meta.get('errors'), list) else []
@@ -832,8 +329,8 @@ def fetch_symbol_request(
         expirations = sorted({x for x in chain['expiration'].tolist() if isinstance(x, str) and len(x) >= 10})
         if explicit_expirations_norm:
             expirations = [exp for exp in explicit_expirations_norm if exp in set(expirations)]
-        elif limit_expirations:
-            expirations = expirations[: int(limit_expirations)]
+        elif request.limit_expirations:
+            expirations = expirations[: int(request.limit_expirations)]
 
         chain = chain[chain['expiration'].isin(expirations)].copy()
 
@@ -899,73 +396,27 @@ def fetch_symbol_request(
         # Fetch snapshots for option codes in batches
         option_codes = [str(x) for x in chain['code'].tolist() if isinstance(x, str) and x]
 
-        # Build a minimal snapshot map directly (avoid concatenating large DataFrames / storing Series for memory efficiency)
-        snap_map: dict[str, dict[str, Any]] = {}
-        snapshot_errors: list[dict[str, Any]] = []
-        snapshot_fallback_filled = 0
-        snapshot_fallback_failed = 0
-        BATCH = int(request.snapshot_batch_size) if request.snapshot_batch_size else DEFAULT_OPEND_BATCH_MARKET_SNAPSHOT
-        keep_columns = list(_SNAPSHOT_KEEP_COLUMNS)
-        for i in range(0, len(option_codes), BATCH):
-            batch = option_codes[i:i+BATCH]
-            try:
-                snap = retry_futu_gateway_call(
-                    'get_market_snapshot(batch)',
-                    lambda: rate_limited_opend_call(
-                        base_dir=effective_base_dir,
-                        endpoint="market_snapshot",
-                        **snapshot_limit.call_kwargs(),
-                        call=lambda: gateway.get_snapshot(batch),
-                    ),
-                    no_retry=no_retry,
-                    retry_max_attempts=retry_max_attempts,
-                    retry_time_budget_sec=retry_time_budget_sec,
-                    retry_base_delay_sec=retry_base_delay_sec,
-                    retry_max_delay_sec=retry_max_delay_sec,
-                    quiet=True,
-                )
-            except Exception as exc:
-                snapshot_errors.append(
-                    {
-                        "stage": "market_snapshot",
-                        "batch_start": i,
-                        "batch_size": len(batch),
-                        "error_code": classify_option_chain_error(exc),
-                        "message": str(exc),
-                    }
-                )
-                snap = None
-            if snap is None or snap.empty:
-                continue
-
-            records, keep = _keep_snapshot_record_columns(snap, keep_columns)
-            if not keep:
-                continue
-
-            for rec in records:
-                code = str(rec.get('code') or '')
-                if code:
-                    snap_map[code] = rec
-
-        if option_codes and request.snapshot_fallback_max_codes > 0:
-            missing = [c for c in option_codes if c not in snap_map]
-            if missing:
-                snapshot_fallback_filled, snapshot_fallback_failed = _fallback_fetch_missing_snapshots(
-                    missing_codes=missing,
-                    gateway=gateway,
-                    snapshot_limit=snapshot_limit,
-                    effective_base_dir=effective_base_dir,
-                    snap_map=snap_map,
-                    snapshot_errors=snapshot_errors,
-                    max_fallback_codes=request.snapshot_fallback_max_codes,
-                    fallback_batch_size=request.snapshot_fallback_batch_size,
-                    keep_columns=keep_columns,
-                    no_retry=no_retry,
-                    retry_max_attempts=retry_max_attempts,
-                    retry_time_budget_sec=retry_time_budget_sec,
-                    retry_base_delay_sec=retry_base_delay_sec,
-                    retry_max_delay_sec=retry_max_delay_sec,
-                )
+        snapshot_result = fetch_option_snapshots(
+            option_codes=option_codes,
+            gateway=gateway,
+            snapshot_limit=snapshot_limit,
+            base_dir=effective_base_dir,
+            snapshot_batch_size=request.snapshot_batch_size,
+            snapshot_fallback_max_codes=request.snapshot_fallback_max_codes,
+            snapshot_fallback_batch_size=request.snapshot_fallback_batch_size,
+            no_retry=no_retry,
+            retry_max_attempts=retry_max_attempts,
+            retry_time_budget_sec=retry_time_budget_sec,
+            retry_base_delay_sec=retry_base_delay_sec,
+            retry_max_delay_sec=retry_max_delay_sec,
+            retry_call=retry_futu_gateway_call,
+            rate_limited_call=rate_limited_opend_call,
+            classify_error=classify_option_chain_error,
+        )
+        snap_map = snapshot_result.snap_map
+        snapshot_errors = snapshot_result.errors
+        snapshot_fallback_filled = snapshot_result.fallback_filled
+        snapshot_fallback_failed = snapshot_result.fallback_failed
 
         rows: list[dict[str, Any]] = []
 
@@ -1066,7 +517,7 @@ def fetch_symbol_request(
 
             rows.append(row)
 
-        fetch_result_meta = chain_obj.get('fetch_result') or {}
+        fetch_result_meta = chain_bundle.fetch_meta or {}
         fetch_errors = fetch_result_meta.get('errors') if isinstance(fetch_result_meta.get('errors'), list) else []
         combined_errors = [*fetch_errors, *snapshot_errors]
         snapshot_error_code = next(
@@ -1144,61 +595,3 @@ def fetch_symbol_request(
                 gateway.close()
             except Exception:
                 pass
-
-
-def save_outputs(base: Path, symbol: str, payload: dict[str, Any], *, output_root: Path | None = None):
-    root = (output_root.resolve() if output_root is not None else (base / 'output').resolve())
-    raw_dir = root / 'raw'
-    parsed_dir = root / 'parsed'
-    raw_dir.mkdir(parents=True, exist_ok=True)
-    parsed_dir.mkdir(parents=True, exist_ok=True)
-
-    raw_path = raw_dir / f"{symbol}_required_data.json"
-    csv_path = parsed_dir / f"{symbol}_required_data.csv"
-
-    # Boundary validation: drop rows missing critical fields (strike/expiration/dte/option_type)
-    try:
-        from src.application.required_data_validation import validate_required_rows
-
-        rows0 = payload.get('rows') or []
-        rows1, st = validate_required_rows(rows0)
-        payload['rows'] = rows1
-        meta = payload.get('meta') or {}
-        if not isinstance(meta, dict):
-            meta = {'meta': str(meta)}
-        meta['validation'] = {
-            'total_rows': int(st.total_rows),
-            'kept_rows': int(st.kept_rows),
-            'dropped_rows': int(st.dropped_rows),
-            'missing_strike': int(st.missing_strike),
-            'missing_expiration': int(st.missing_expiration),
-            'missing_dte': int(st.missing_dte),
-            'missing_option_type': int(st.missing_option_type),
-        }
-        payload['meta'] = meta
-    except Exception:
-        pass
-
-    # Atomic writes: avoid half-written json/csv when process is killed mid-write.
-    from src.infrastructure.io_utils import atomic_write_text
-    import io
-
-    atomic_write_text(raw_path, json.dumps(payload, ensure_ascii=False, indent=2, default=str) + '\n', encoding='utf-8')
-
-    df = pd.DataFrame(payload.get('rows') or [])
-    meta = payload.get('meta') if isinstance(payload.get('meta'), dict) else {}
-    if df.empty and str((meta or {}).get('status') or '').lower() == 'error' and csv_path.exists() and csv_path.stat().st_size > 0:
-        return raw_path, csv_path
-
-    if df.empty:
-        df_out = pd.DataFrame(columns=COLUMNS)
-    else:
-        for c in COLUMNS:
-            if c not in df.columns:
-                df[c] = pd.NA
-        df_out = df[COLUMNS]
-
-    buf = io.StringIO()
-    df_out.to_csv(buf, index=False)
-    atomic_write_text(csv_path, buf.getvalue(), encoding='utf-8')
-    return raw_path, csv_path

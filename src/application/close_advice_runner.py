@@ -351,7 +351,8 @@ def _ensure_required_data_coverage_for_positions(
     current_contract_expiration_index = _build_contract_expiration_index(current_covered)
 
     try:
-        from src.application.opend_symbol_fetching import fetch_symbol, save_outputs
+        from src.application.opend_symbol_fetching import fetch_symbol
+        from src.application.opend_symbol_outputs import save_outputs
     except Exception:
         return fetch_reasons, fetch_details, summary
 

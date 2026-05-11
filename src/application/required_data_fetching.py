@@ -3,7 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from src.application.opend_symbol_fetching import FetchSymbolRequest, fetch_symbol_request, save_outputs
+from src.application.opend_symbol_fetching import FetchSymbolRequest, fetch_symbol_request
+from src.application.opend_symbol_outputs import save_outputs
 from src.application.opend_fetch_config import filter_opend_fetch_kwargs
 from src.application.expiration_normalization import normalize_expiration_ymd
 from src.application.required_data_planning import RequiredDataFetchSpec
