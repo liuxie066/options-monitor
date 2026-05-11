@@ -53,7 +53,7 @@ _SCHEDULE_TZ_HK: frozenset[str] = frozenset({
 })
 
 
-def _auto_market_schedule_candidates(cfg: dict[str, Any]) -> tuple[tuple[str, dict[str, Any], str], ...]:
+def _collect_schedule_configs_for_auto_market(cfg: dict[str, Any]) -> tuple[tuple[str, dict[str, Any], str], ...]:
     data = cfg if isinstance(cfg, dict) else {}
     out: list[tuple[str, dict[str, Any], str]] = []
     for schedule_key, default_market in (('schedule_hk', 'HK'), ('schedule', 'US')):
@@ -66,8 +66,8 @@ def _auto_market_schedule_candidates(cfg: dict[str, Any]) -> tuple[tuple[str, di
 def _infer_timezone_market_override(schedule_cfg: dict[str, Any]) -> str | None:
     """Return a timezone-specific market override for auto selection.
 
-    Only HK needs an override today because `schedule_hk` is optional,
-    while US continues to use the default market label for `schedule`.
+    This only handles the legacy case where `schedule` uses an HK timezone
+    instead of `schedule_hk`; US continues to use the default `schedule` label.
     """
     tz = str(schedule_cfg.get('market_timezone', '')).strip()
     if tz in _SCHEDULE_TZ_HK:
@@ -78,13 +78,13 @@ def _infer_timezone_market_override(schedule_cfg: dict[str, Any]) -> str | None:
 def _resolve_auto_market_for_schedule(
     *,
     schedule_key: str,
-    timezone_market: str | None,
+    inferred_market_from_timezone: str | None,
     default_market: str,
 ) -> str:
     if schedule_key == 'schedule_hk':
         return 'HK'
-    if timezone_market:
-        return timezone_market
+    if inferred_market_from_timezone:
+        return inferred_market_from_timezone
     return default_market
 
 
@@ -119,12 +119,12 @@ def select_markets_to_run(now_utc: datetime, cfg: dict, market_config: str) -> l
     if mc == 'all':
         return ['HK', 'US']
 
-    for schedule_key, schedule_cfg, default_market in _auto_market_schedule_candidates(cfg):
+    for schedule_key, schedule_cfg, default_market in _collect_schedule_configs_for_auto_market(cfg):
         if _is_market_hours_for_schedule(now_utc, schedule_cfg):
             return [
                 _resolve_auto_market_for_schedule(
                     schedule_key=schedule_key,
-                    timezone_market=_infer_timezone_market_override(schedule_cfg),
+                    inferred_market_from_timezone=_infer_timezone_market_override(schedule_cfg),
                     default_market=default_market,
                 )
             ]
