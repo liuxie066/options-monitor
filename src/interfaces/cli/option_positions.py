@@ -111,11 +111,13 @@ def main(argv: list[str] | None = None) -> int:
     report_sub = p_report.add_subparsers(dest='report_cmd', required=True)
     p_monthly = report_sub.add_parser(
         'monthly-income',
-        help='monthly option income report (realized_gross by closed_at, premium_received_gross by opened_at)',
+        help='monthly option income report (cashflow, realized PnL, and open-basis attribution)',
         description=(
             'Monthly option income report.\n'
-            '- realized_gross: groups closed positions by closed_at month.\n'
-            '- premium_received_gross: groups short option premium receipts by opened_at month.\n'
+            '- net_cashflow_gross: groups account cash movements by trade month.\n'
+            '- realized_pnl_gross: groups closed option PnL by close month.\n'
+            '- open_basis_lifecycle_pnl_gross: attributes lifecycle PnL back to open month.\n'
+            '- premium_received_gross/realized_gross are compatibility aliases.\n'
             '- *_cny columns are best-effort exchange-rate conversions from rate_cache.json.'
         ),
         formatter_class=argparse.RawTextHelpFormatter,

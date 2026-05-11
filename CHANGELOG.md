@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.2.9 - 2026-05-11
+
+### Changed
+- Redesigned monthly option income reporting around cashflow, realized PnL, and open-basis attribution views.
+- Updated CLI and agent monthly income output to expose cashflow, realized, open-basis, and yield-enhancement detail rows while keeping `premium_received_gross` and `realized_gross` as compatibility fields.
+
+### Fixed
+- Counted buy-to-close cash outflows and long call open/close cashflows in monthly income reports.
+- Calculated long option realized PnL as close proceeds minus open cost instead of using the short-option premium formula.
+
 ## 1.2.7 - 2026-05-11
 
 ### Added

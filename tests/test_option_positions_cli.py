@@ -789,21 +789,37 @@ def test_option_positions_cli_report_monthly_income_json(monkeypatch, tmp_path: 
     assert payload["filters"]["account"] == "lx"
     assert payload["filters"]["broker"] == "富途"
     assert payload["filters"]["month"] == "2026-04"
-    assert payload["summary"] == [
-        {
-            "month": "2026-04",
-            "account": "lx",
-            "currency": "USD",
-            "realized_gross": 0.0,
-            "realized_gross_cny": 0.0,
-            "closed_contracts": 0,
-            "positions": 0,
-            "premium_received_gross": 250.0,
-            "premium_received_gross_cny": 1800.0,
-            "premium_contracts": 1,
-            "premium_positions": 1,
-        }
-    ]
+    assert len(payload["summary"]) == 1
+    row = payload["summary"][0]
+    assert {key: row.get(key) for key in {
+        "month",
+        "account",
+        "currency",
+        "net_cashflow_gross",
+        "realized_pnl_gross",
+        "open_basis_lifecycle_pnl_gross",
+        "realized_gross",
+        "premium_received_gross",
+        "premium_received_gross_cny",
+        "closed_contracts",
+        "positions",
+        "premium_contracts",
+        "premium_positions",
+    }} == {
+        "month": "2026-04",
+        "account": "lx",
+        "currency": "USD",
+        "net_cashflow_gross": 250.0,
+        "realized_pnl_gross": 0.0,
+        "open_basis_lifecycle_pnl_gross": 250.0,
+        "realized_gross": 0.0,
+        "premium_received_gross": 250.0,
+        "premium_received_gross_cny": 1800.0,
+        "closed_contracts": 0,
+        "positions": 0,
+        "premium_contracts": 1,
+        "premium_positions": 1,
+    }
 
 
 def test_option_positions_cli_report_monthly_income_text(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -843,4 +859,3 @@ def test_option_positions_cli_report_monthly_income_text(monkeypatch, tmp_path: 
     assert "# Position Lots Monthly Income" in out
     assert "filters: month=2026-04 | account=lx | broker=富途" in out
     assert "| - | - | - | - | - | - | - | 0 | 0 | 0 | 0 |" in out
-

@@ -173,7 +173,10 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
     AgentToolDefinition(
         name="monthly_income_report",
         read_only=True,
-        description="Return monthly option income statistics from local option positions without running market data or notification workflows.",
+        description=(
+            "Return monthly option income statistics by cashflow, realized PnL, and open-basis attribution "
+            "from local option positions without running market data or notification workflows."
+        ),
         requires=("runtime_config", "sqlite_data_config"),
         capabilities=("income_report", "option_positions", "read_only"),
         input_schema={
@@ -183,7 +186,7 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
             "account": "optional account label",
             "broker": "optional broker name, preferred public field",
             "month": "optional YYYY-MM filter",
-            "include_rows": "optional bool; include realized and premium detail rows",
+            "include_rows": "optional bool; include cashflow, realized, open-basis, and premium detail rows",
         },
         risk_level="read_only",
         safe_default_input={"config_key": "us"},

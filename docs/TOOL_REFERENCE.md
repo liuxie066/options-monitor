@@ -221,8 +221,21 @@ OM_AGENT_ENABLE_WRITE_TOOLS=true ./om-agent run --tool version_update --input-js
 
 用途：
 - 读取本地 option positions
-- 返回月度已实现收益和开仓权利金收入统计
-- 默认只返回 summary；`include_rows=true` 时返回明细
+- 返回月度期权收益的三类统计口径
+- 默认只返回 summary；`include_rows=true` 时返回资金流、实现收益、开仓归因明细
+
+核心字段：
+- `net_cashflow_gross`：资金流口径，按交易发生月统计；short 开仓收款为正，
+  long 开仓成本和平仓买回支出为负，long 平仓卖出为正。
+- `realized_pnl_gross`：已实现口径，按平仓/到期月统计；short 为开仓权利金减平仓成本，
+  long 为平仓卖出减开仓成本。
+- `open_basis_lifecycle_pnl_gross`：开仓归因口径，按开仓月回填生命周期收益，
+  公式为：
+  `sell_open_premium - sell_close_cost_actual - enhancement_call_buy_cost + enhancement_call_sell_proceeds_actual`。
+- `yield_enhancement_realized_pnl_gross`：收益增强 call 腿按实现口径统计，
+  只有带 `yield_enhancement` / `enhancement_call` 标记的 long call 平仓收益进入该字段。
+- `premium_received_gross` / `realized_gross`：兼容字段，分别对应 short 开仓权利金和已实现收益；
+  新消费方优先使用上面的明确口径字段。
 
 示例：
 

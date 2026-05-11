@@ -342,12 +342,16 @@ def monthly_income_report_tool(
     if rates is None:
         warnings.append("exchange_rate cache unavailable; *_cny fields may be null")
 
+    primary_repo = getattr(repo, "primary_repo", repo)
+    list_trade_events = getattr(primary_repo, "list_trade_events", None)
+    trade_events = list_trade_events() if callable(list_trade_events) else None
     report = build_monthly_income_report(
         repo.list_records(page_size=500),
         account=account,
         broker=broker,
         month=month,
         rates=rates,
+        trade_events=trade_events,
     )
     report_warnings = [str(item) for item in (report.get("warnings") or []) if str(item).strip()]
     warnings.extend(report_warnings)
@@ -357,6 +361,7 @@ def monthly_income_report_tool(
     data: dict[str, Any] = {
         "summary": report.get("summary") if isinstance(report.get("summary"), list) else [],
         "filters": dict(report.get("filters") or {}),
+        "calculation_method": str(report.get("calculation_method") or ""),
         "row_count": len(rows),
         "premium_row_count": len(premium_rows),
         "report_warnings": report_warnings,
@@ -364,6 +369,9 @@ def monthly_income_report_tool(
     if include_rows:
         data["rows"] = rows
         data["premium_rows"] = premium_rows
+        for key in ("cashflow_rows", "realized_rows", "open_basis_rows", "enhancement_rows"):
+            value = report.get(key)
+            data[key] = value if isinstance(value, list) else []
 
     meta = {
         "config_path": mask_path(config_path),
