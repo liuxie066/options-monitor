@@ -137,6 +137,7 @@ def test_prefetch_required_data_idempotency_audit() -> None:
                 vpy=Path("/usr/bin/python3"),
                 base=Path(td),
                 cfg={
+                    "runtime": {"prefetch": {"execution_mode": "subprocess"}},
                     "symbols": [
                         {"symbol": "AAPL", "fetch": {"source": "yahoo", "limit_expirations": 8}},
                         {"symbol": "AAPL", "fetch": {"source": "yahoo", "limit_expirations": 8}},
@@ -222,6 +223,7 @@ def test_prefetch_required_data_protections_minimal() -> None:
                 base=Path(td),
                 cfg={
                     "runtime": {
+                        "prefetch": {"execution_mode": "subprocess"},
                         "prefetch_max_workers": 1,
                         "prefetch_fail_budget_consecutive": 2,
                         "prefetch_fail_budget_total": 2,
@@ -284,6 +286,7 @@ def test_prefetch_required_data_defaults_to_opend_source() -> None:
                 vpy=Path("/usr/bin/python3"),
                 base=Path(td),
                 cfg={
+                    "runtime": {"prefetch": {"execution_mode": "subprocess"}},
                     "symbols": [
                         {"symbol": "CRDO", "fetch": {"limit_expirations": 8}},
                     ]
@@ -331,6 +334,7 @@ def test_prefetch_required_data_force_refresh_ignores_existing_local_cache() -> 
                 vpy=Path("/usr/bin/python3"),
                 base=Path(td),
                 cfg={
+                    "runtime": {"prefetch": {"execution_mode": "subprocess"}},
                     "symbols": [
                         {"symbol": "AAPL", "fetch": {"source": "opend", "limit_expirations": 8}},
                     ]
