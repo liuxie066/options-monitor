@@ -17,6 +17,44 @@ def is_high_priority_notification(text: str) -> bool:
     return bool(re.search(r"(?m)^重点:\s*$", text or ""))
 
 
+OPTIMIZER_SWITCH_LABEL = "强烈建议平仓换仓"
+OPTIMIZER_CLOSE_LABEL = "建议平仓"
+OPTIMIZER_SWITCH_TAG = " 🔄"
+OPTIMIZER_CLOSE_TAG = " ⚠️"
+
+
+def _highlight_optimizer_lines(text: str) -> str:
+    if not text:
+        return text
+    out_lines: list[str] = []
+    for ln in text.splitlines():
+        stripped = ln.rstrip()
+        if OPTIMIZER_SWITCH_LABEL in stripped and not stripped.endswith(OPTIMIZER_SWITCH_TAG):
+            out_lines.append(stripped + OPTIMIZER_SWITCH_TAG)
+        elif (
+            OPTIMIZER_CLOSE_LABEL in stripped
+            and OPTIMIZER_SWITCH_LABEL not in stripped
+            and not stripped.endswith(OPTIMIZER_CLOSE_TAG)
+        ):
+            out_lines.append(stripped + OPTIMIZER_CLOSE_TAG)
+        else:
+            out_lines.append(ln)
+    return "\n".join(out_lines)
+
+
+def count_optimizer_actions(text: str) -> tuple[int, int]:
+    if not text:
+        return (0, 0)
+    switch_n = 0
+    close_n = 0
+    for ln in text.splitlines():
+        if OPTIMIZER_SWITCH_LABEL in ln:
+            switch_n += 1
+        elif OPTIMIZER_CLOSE_LABEL in ln:
+            close_n += 1
+    return (switch_n, close_n)
+
+
 def _parse_cny(s: str) -> float | None:
     m = CNY_RE.search(s)
     if not m:
@@ -185,6 +223,7 @@ def build_account_message(
     put_n = sum(1 for ln in kept if ' 卖Put ' in ln)
     call_n = sum(1 for ln in kept if ' 卖Call ' in ln)
     enhancement_n = sum(1 for ln in kept if ' 收益增强 ' in ln)
+    switch_n, close_n = count_optimizer_actions(result.notification_text)
     acct = str(result.account).strip().lower()
 
     lines: list[str] = []
@@ -197,9 +236,13 @@ def build_account_message(
     counts_line = f"- Put {put_n} / Call {call_n}"
     if enhancement_n > 0:
         counts_line += f" / Enhance {enhancement_n}"
+    if switch_n > 0 or close_n > 0:
+        counts_line += f" / 优化器 换仓{switch_n} 平仓{close_n}"
     lines.append(counts_line)
     lines.append('')
-    lines.append(annotate_notification(result.account, '\n'.join(kept).strip() + '\n').strip())
+    body = annotate_notification(result.account, '\n'.join(kept).strip() + '\n').strip()
+    body = _highlight_optimizer_lines(body)
+    lines.append(body)
     lines.append('')
 
     footer_lines = cash_footer_lines or []
