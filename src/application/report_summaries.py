@@ -49,6 +49,8 @@ SELL_PUT_EMPTY_FIELDS = {
     'cash_available_total_cny': None,
     'cash_free_total_cny': None,
     'cash_required_cny': None,
+    'cash_requirement_unavailable_reason': None,
+    'cash_secured_unavailable_reason': None,
     'linked_call_contract': None,
     'linked_call_contract_symbol': None,
     'linked_call_strike': None,
@@ -98,8 +100,8 @@ def _empty_summary_row(symbol: str, strategy: str, *, extra_fields: dict[str, An
     }
 
 
-def _option_ccy(symbol: str) -> str:
-    return symbol_currency(symbol) or 'USD'
+def _option_ccy(symbol: str) -> str | None:
+    return symbol_currency(symbol)
 
 
 def _safe_float(value: Any) -> float | None:
@@ -180,19 +182,13 @@ def _rank_top(df: pd.DataFrame, *, mode: str) -> pd.Series | None:
 
 
 def _sell_put_extras(df: pd.DataFrame, top: pd.Series) -> dict[str, Any]:
-    cash_required_usd = None
-    try:
-        cash_required_usd = float(top['strike']) * 100.0
-    except Exception:
-        cash_required_usd = None
-
     return {
-        'cash_secured_used_usd': (_read_first_float(df, 'cash_secured_used_usd') or 0.0),
+        'cash_secured_used_usd': _read_first_float(df, 'cash_secured_used_usd'),
         'cash_secured_used_usd_symbol': _read_first_float(df, 'cash_secured_used_usd_symbol'),
         'cash_secured_used_cny': _read_first_float(df, 'cash_secured_used_cny'),
         'cash_secured_used_cny_total': _read_first_float(df, 'cash_secured_used_cny_total'),
         'cash_secured_used_cny_symbol': _read_first_float(df, 'cash_secured_used_cny_symbol'),
-        'cash_required_usd': cash_required_usd,
+        'cash_required_usd': _safe_float(top.get('cash_required_usd')),
         'cash_available_usd': _read_first_float(df, 'cash_available_usd'),
         'cash_free_usd': _read_first_float(df, 'cash_free_usd'),
         'cash_available_usd_est': _read_first_float(df, 'cash_available_usd_est'),
@@ -202,6 +198,8 @@ def _sell_put_extras(df: pd.DataFrame, top: pd.Series) -> dict[str, Any]:
         'cash_available_total_cny': _read_first_float(df, 'cash_available_total_cny'),
         'cash_free_total_cny': _read_first_float(df, 'cash_free_total_cny'),
         'cash_required_cny': _read_first_float(df, 'cash_required_cny'),
+        'cash_requirement_unavailable_reason': top.get('cash_requirement_unavailable_reason'),
+        'cash_secured_unavailable_reason': top.get('cash_secured_unavailable_reason'),
         'linked_call_contract': top.get('linked_call_contract'),
         'linked_call_contract_symbol': top.get('linked_call_contract_symbol'),
         'linked_call_strike': _safe_float(top.get('linked_call_strike')),

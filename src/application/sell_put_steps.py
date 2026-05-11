@@ -7,6 +7,7 @@ Goal: minimal/no behavior change.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pandas as pd
@@ -32,11 +33,42 @@ from src.application.sell_put_call_helper import (
 )
 from src.application.sell_put_cash import enrich_sell_put_candidates_with_cash
 from domain.domain.sell_put_config import validate_min_annualized_net_return
+from domain.domain.risk_capacity import compute_sell_put_cash_capacity
 from src.application.yield_enhancement_config import (
     resolve_yield_enhancement_cfg,
     wants_yield_enhancement_inline,
     wants_yield_enhancement_separate,
 )
+
+log = logging.getLogger(__name__)
+
+
+def _row_value(row: pd.Series, column: str):
+    if column in row.index:
+        return row.get(column)
+    return None
+
+
+def _sell_put_cash_block_mask(df: pd.DataFrame) -> pd.Series:
+    # Risk control is fail-closed: if no trustworthy cash basis is available,
+    # do not keep the sell-put candidate.
+    mask = df.apply(
+        lambda row: not compute_sell_put_cash_capacity(
+            cash_required_cny=_row_value(row, 'cash_required_cny'),
+            cash_free_cny=_row_value(row, 'cash_free_cny'),
+            cash_free_total_cny=_row_value(row, 'cash_free_total_cny'),
+            cash_required_usd=_row_value(row, 'cash_required_usd'),
+            cash_free_usd=_row_value(row, 'cash_free_usd'),
+        ).accepted,
+        axis=1,
+    ).astype(bool)
+    if 'cash_secured_unavailable_reason' in df.columns:
+        unavailable = df['cash_secured_unavailable_reason'].fillna('').astype(str).str.strip() != ''
+        mask = mask | unavailable
+    if 'cash_requirement_unavailable_reason' in df.columns:
+        unavailable = df['cash_requirement_unavailable_reason'].fillna('').astype(str).str.strip() != ''
+        mask = mask | unavailable
+    return mask
 
 
 def run_sell_put_scan_and_summarize(
@@ -77,17 +109,20 @@ def run_sell_put_scan_and_summarize(
     global_min_net_income = float((global_sell_put_liquidity or {}).get('min_net_income', 0.0) or 0.0)
     min_net_income_cny = float(sp.get('min_net_income', global_min_net_income) or 0.0)
 
-    min_net_income_native = (
-        0.0
-        if min_net_income_cny <= 0
-        else (
-            exchange_rate_converter.cny_to_native(
-                min_net_income_cny,
-                native_ccy=(symbol_currency(symbol) or 'USD'),
-            )
-            or 0.0
+    min_net_income_native = 0.0
+    if min_net_income_cny > 0:
+        native_ccy = symbol_currency(symbol)
+        if not native_ccy:
+            log.warning("sell_put_steps: currency unresolved for %s; fail closed", symbol)
+            return [summarize_sell_put(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg)]
+        converted_min_income = exchange_rate_converter.cny_to_native(
+            min_net_income_cny,
+            native_ccy=native_ccy,
         )
-    )
+        if converted_min_income is None:
+            log.warning("sell_put_steps: min_net_income conversion unavailable for %s/%s; fail closed", symbol, native_ccy)
+            return [summarize_sell_put(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg)]
+        min_net_income_native = float(converted_min_income)
 
     run_sell_put_scan(
         symbols=[sym],
@@ -124,55 +159,19 @@ def run_sell_put_scan_and_summarize(
         # - Fallback to USD gating when CNY fields are unavailable.
         try:
             d = df_sp_lab.copy()
-            mask_drop = pd.Series(False, index=d.index, dtype=bool)
-
-            if 'cash_required_cny' in d.columns:
-                req_cny = pd.to_numeric(d['cash_required_cny'], errors='coerce')
-                free_cny = (
-                    pd.to_numeric(d['cash_free_cny'], errors='coerce')
-                    if 'cash_free_cny' in d.columns
-                    else pd.Series(pd.NA, index=d.index)
-                )
-                free_total_cny = (
-                    pd.to_numeric(d['cash_free_total_cny'], errors='coerce')
-                    if 'cash_free_total_cny' in d.columns
-                    else pd.Series(pd.NA, index=d.index)
-                )
-                mask_drop = mask_drop | (
-                    req_cny.notna()
-                    & (
-                        (free_cny.notna() & (req_cny > free_cny))
-                        | (free_cny.isna() & free_total_cny.notna() & (req_cny > free_total_cny))
-                    )
-                )
-
-            if ('cash_required_usd' in d.columns) and ('cash_free_usd' in d.columns):
-                req_usd = pd.to_numeric(d['cash_required_usd'], errors='coerce')
-                free_usd = pd.to_numeric(d['cash_free_usd'], errors='coerce')
-                free_cny = (
-                    pd.to_numeric(d['cash_free_cny'], errors='coerce')
-                    if 'cash_free_cny' in d.columns
-                    else pd.Series(pd.NA, index=d.index)
-                )
-                free_total_cny = (
-                    pd.to_numeric(d['cash_free_total_cny'], errors='coerce')
-                    if 'cash_free_total_cny' in d.columns
-                    else pd.Series(pd.NA, index=d.index)
-                )
-                mask_drop = mask_drop | (
-                    req_usd.notna()
-                    & free_usd.notna()
-                    & free_cny.isna()
-                    & free_total_cny.isna()
-                    & (req_usd > free_usd)
-                )
+            mask_drop = _sell_put_cash_block_mask(d)
 
             if mask_drop.any():
                 d = d.loc[~mask_drop].copy()
                 d.to_csv(symbol_sp_labeled, index=False)
                 df_sp_lab = d
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("sell_put_steps: cash hard filter failed for %s; fail closed: %s", symbol, exc)
+            df_sp_lab = df_sp_lab.iloc[0:0].copy()
+            try:
+                df_sp_lab.to_csv(symbol_sp_labeled, index=False)
+            except Exception as write_exc:
+                log.warning("sell_put_steps: failed to write fail-closed CSV for %s: %s", symbol, write_exc)
 
     raw_yield_pairs_df = find_sell_put_yield_enhancement_pairs(
         df_candidates=df_sp_lab,

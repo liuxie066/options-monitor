@@ -174,3 +174,58 @@ def test_query_sell_put_cash_uses_holdings_account_mapping_for_external_account(
     assert result["portfolio_source_name"] == "holdings"
     assert result["cash_available_cny"] == 50000.0
     assert result["cash_free_cny"] == 42000.0
+
+
+def test_query_sell_put_cash_marks_free_cash_unknown_when_cash_secured_unavailable() -> None:
+    import src.application.cash_headroom_query as m
+
+    def fake_load_account_portfolio_context(**kwargs):  # type: ignore[no-untyped-def]
+        assert kwargs.get("account") == "lx"
+        return {"cash_by_currency": {"CNY": 130000.0}, "stocks_by_symbol": {}, "portfolio_source_name": "holdings"}
+
+    old_load_portfolio = m.load_account_portfolio_context
+    old_load_repo = m.load_option_positions_repo
+    old_load_option_position_records = m.load_option_position_records
+    old_build_context = m.build_option_positions_context
+    old_exchange_rates = m.get_exchange_rates_or_fetch_latest
+    try:
+        m.load_account_portfolio_context = fake_load_account_portfolio_context
+        m.load_option_positions_repo = lambda *_a, **_k: object()  # type: ignore[assignment]
+        m.load_option_position_records = lambda *_a, **_k: []  # type: ignore[assignment]
+        m.build_option_positions_context = lambda *_a, **_k: {  # type: ignore[assignment]
+            "cash_secured_by_symbol_by_ccy": {"NVDA": {"CNY": 12000.0}},
+            "cash_secured_total_by_ccy": {"CNY": 12000.0},
+            "cash_secured_total_cny": None,
+            "cash_secured_unavailable_by_symbol": {
+                "0700.HK": "short_put_cash_secured_basis_missing",
+            },
+        }
+        m.get_exchange_rates_or_fetch_latest = lambda **_kwargs: {}  # type: ignore[assignment]
+
+        out_dir = BASE / "output" / "state" / "test_query_sell_put_cash_unavailable"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        result = m.query_sell_put_cash(
+            config="config.us.json",
+            market="富途",
+            account="lx",
+            out_dir=str(out_dir),
+            base_dir=BASE,
+            runtime_config={
+                "portfolio": {"source": "auto", "base_currency": "CNY"},
+            },
+            no_exchange_rates=True,
+        )
+    finally:
+        m.load_account_portfolio_context = old_load_portfolio
+        m.load_option_positions_repo = old_load_repo  # type: ignore[assignment]
+        m.load_option_position_records = old_load_option_position_records  # type: ignore[assignment]
+        m.build_option_positions_context = old_build_context  # type: ignore[assignment]
+        m.get_exchange_rates_or_fetch_latest = old_exchange_rates  # type: ignore[assignment]
+
+    assert result["cash_secured_usage_reliable"] is False
+    assert result["cash_secured_used_cny"] is None
+    assert result["cash_free_cny"] is None
+    assert result["cash_free_total_cny"] is None
+    assert result["cash_secured_total_by_ccy"] == {}
+    assert result["cash_secured_known_total_by_ccy"] == {"CNY": 12000.0}
+    assert result["cash_secured_unavailable_reason"] == "0700.HK:short_put_cash_secured_basis_missing"

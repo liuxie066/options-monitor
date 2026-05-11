@@ -18,7 +18,7 @@ from domain.domain.candidate_defaults import (
     resolve_event_risk_config,
 )
 from src.infrastructure.exchange_rates import CurrencyConverter
-from domain.domain.symbol_identity import symbol_currency
+from domain.domain.symbol_identity import canonical_symbol, symbol_currency
 from src.infrastructure.io_utils import safe_read_csv
 from src.application.render_sell_call_alerts import render_sell_call_alerts
 from src.application.report_summaries import summarize_sell_call
@@ -42,6 +42,7 @@ def run_sell_call_scan_and_summarize(
     stock: dict | None,
     exchange_rate_converter: CurrencyConverter,
     locked_shares_by_symbol: dict[str, int] | None = None,
+    locked_shares_unavailable_by_symbol: dict[str, str] | None = None,
     global_sell_call_liquidity: dict | None = None,
     global_sell_call_event_risk: dict | None = None,
 ) -> dict:
@@ -65,10 +66,13 @@ def run_sell_call_scan_and_summarize(
 
     locked = 0
     try:
+        symbol_key = canonical_symbol(symbol) or str(symbol).upper()
+        if locked_shares_unavailable_by_symbol and symbol_key in locked_shares_unavailable_by_symbol:
+            return summarize_sell_call(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg)
         if locked_shares_by_symbol and symbol:
-            locked = int(locked_shares_by_symbol.get(str(symbol).upper(), 0) or 0)
+            locked = int(locked_shares_by_symbol.get(symbol_key, 0) or 0)
     except Exception:
-        locked = 0
+        return summarize_sell_call(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg)
     shares_available_for_cover = max(0, int(shares_total) - int(locked))
 
     symbol_cc = report_dir / f'{symbol_lower}_sell_call_candidates.csv'
@@ -86,13 +90,16 @@ def run_sell_call_scan_and_summarize(
     min_net_income_cny = float(cc.get('min_net_income', global_min_net_income) or 0.0)
     min_net_income_native = 0.0
     if min_net_income_cny > 0:
-        min_net_income_native = (
-            exchange_rate_converter.cny_to_native(
-                min_net_income_cny,
-                native_ccy=(symbol_currency(symbol) or 'USD'),
-            )
-            or 0.0
+        native_ccy = symbol_currency(symbol)
+        if not native_ccy:
+            return summarize_sell_call(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg)
+        converted_min_income = exchange_rate_converter.cny_to_native(
+            min_net_income_cny,
+            native_ccy=native_ccy,
         )
+        if converted_min_income is None:
+            return summarize_sell_call(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg)
+        min_net_income_native = float(converted_min_income)
 
     run_sell_call_scan(
         symbols=[symbol],

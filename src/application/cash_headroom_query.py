@@ -90,6 +90,22 @@ def _load_option_position_records(data_config_path: Path) -> list[dict]:
     return list(load_option_position_records(option_repo))
 
 
+def _cash_secured_unavailable_reason(option_ctx: dict | None) -> tuple[dict[str, str], str | None]:
+    unavailable = option_ctx.get("cash_secured_unavailable_by_symbol") if isinstance(option_ctx, dict) else None
+    if not isinstance(unavailable, dict) or not unavailable:
+        return {}, None
+
+    normalized: dict[str, str] = {}
+    for sym, reason in unavailable.items():
+        symbol = str(sym or "").strip().upper()
+        if not symbol:
+            continue
+        normalized[symbol] = str(reason or "cash_secured_basis_missing").strip() or "cash_secured_basis_missing"
+    if not normalized:
+        return {}, None
+    return normalized, ";".join(f"{sym}:{reason}" for sym, reason in sorted(normalized.items()))
+
+
 def query_sell_put_cash(
     *,
     config: str | Path | None = None,
@@ -156,9 +172,11 @@ def query_sell_put_cash(
 
     norm_by_ccy = normalize_cash_secured_by_symbol_by_ccy(opt)
     total_by_ccy_norm = normalize_cash_secured_total_by_ccy(opt, by_symbol_by_ccy=norm_by_ccy)
-    cash_secured_total_cny = read_cash_secured_total_cny(opt)
+    cash_secured_unavailable_by_symbol, cash_secured_unavailable_reason = _cash_secured_unavailable_reason(opt)
+    cash_secured_reliable = not cash_secured_unavailable_by_symbol
+    cash_secured_total_cny = read_cash_secured_total_cny(opt) if cash_secured_reliable else None
 
-    cash_secured_total_usd = total_by_ccy_norm.get('USD')
+    cash_secured_total_usd = total_by_ccy_norm.get('USD') if cash_secured_reliable else None
     cash_free_usd = None
     if cash_avail_usd is not None and cash_secured_total_usd is not None:
         cash_free_usd = cash_avail_usd - cash_secured_total_usd
@@ -235,8 +253,12 @@ def query_sell_put_cash(
         'cash_available_total_cny': cash_avail_total_cny,
         'cash_free_total_cny': cash_free_total_cny,
         'exchange_rates': {'USDCNY': usdcny_exchange_rate, 'HKDCNY': cny_per_hkd_exchange_rate},
-        'cash_secured_total_by_ccy': total_by_ccy_norm,
+        'cash_secured_total_by_ccy': (total_by_ccy_norm if cash_secured_reliable else {}),
+        'cash_secured_known_total_by_ccy': total_by_ccy_norm,
         'cash_secured_by_symbol_by_ccy': norm_by_ccy,
+        'cash_secured_unavailable_by_symbol': cash_secured_unavailable_by_symbol,
+        'cash_secured_unavailable_reason': cash_secured_unavailable_reason,
+        'cash_secured_usage_reliable': cash_secured_reliable,
     }
 
     if output_format == 'json':
@@ -248,6 +270,8 @@ def query_sell_put_cash(
     lines.append(f"as_of_utc: {payload['as_of_utc']}")
     lines.append(f"market: {market} | account: {account or '-'}")
     lines.append(f"portfolio_source: {portfolio_source_name}")
+    if cash_secured_unavailable_reason:
+        lines.append(f"warning: short put 担保现金依据缺失，剩余现金不可计算: {cash_secured_unavailable_reason}")
     lines.append('')
 
     lines.append(f"- base(CNY) 现金（账户口径）: {money(cash_avail_cny, 'CNY')}")
@@ -272,7 +296,10 @@ def query_sell_put_cash(
     lines.append(f"- USD free（仅扣 USD 占用）: {money(cash_free_usd, 'USD')}")
 
     lines.append('')
-    lines.append(f'## 占用明细（Top {top}，按币种）')
+    detail_title = '## 占用明细（Top {top}，按币种）'
+    if cash_secured_unavailable_reason:
+        detail_title = '## 已知占用明细（Top {top}，按币种；总占用不可靠）'
+    lines.append(detail_title.format(top=top))
     if not norm_by_ccy:
         lines.append('- (无记录：要么没有 open short puts，要么持仓 lot 视图缺少 cash_secured_amount/currency)')
     else:
@@ -304,6 +331,12 @@ def query_sell_put_cash(
             )
             cny_part = f" | ≈ {money(cny_eq, 'CNY')}" if cny_eq is not None else ''
             lines.append(f'- {sym}: {detail}{cny_part}')
+
+    if cash_secured_unavailable_by_symbol:
+        lines.append('')
+        lines.append('## 占用缺失诊断')
+        for sym, reason in sorted(cash_secured_unavailable_by_symbol.items()):
+            lines.append(f'- {sym}: {reason}')
 
     print('\n'.join(lines) + '\n')
     return payload

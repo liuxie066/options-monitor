@@ -23,9 +23,9 @@ class StagePlan:
     def want(self, name: str) -> bool:
         if self.stage_only is not None:
             return name == self.stage_only
-        if self.stage == 'all':
+        if self.stage == "all":
             return True
-        order = ['fetch', 'scan', 'alert', 'notify']
+        order = ["fetch", "scan", "alert", "notify"]
         try:
             return order.index(name) <= order.index(self.stage)
         except ValueError:
@@ -87,7 +87,7 @@ def run_pipeline(
         top_n=top_n,
         symbol_timeout_sec=symbol_timeout_sec,
         portfolio_timeout_sec=portfolio_timeout_sec,
-        want_scan=plan.want('scan'),
+        want_scan=plan.want("scan"),
         no_context=bool(no_context),
         symbols_arg=symbols_arg,
         log=log,
@@ -99,8 +99,8 @@ def run_pipeline(
         build_symbols_digest_fn=build_symbols_digest_fn,
     )
 
-    symbols = [str(r.get('symbol')) for r in summary_rows if r.get('symbol')]
-    runtime = cfg.get('runtime', {}) or {}
+    symbols = [str(r.get("symbol")) for r in summary_rows if r.get("symbol")]
+    runtime = cfg.get("runtime", {}) or {}
 
     postprocess_scan_results_fn(
         summary_rows=summary_rows,

@@ -69,6 +69,7 @@ def test_candidate_engine_put_summary_uses_simple_rank() -> None:
 
     assert engine_top["contract_symbol"] == "P_FAR_DELTA"
     assert summary["top_contract"] == "2026-06-18 140P"
+    assert summary["cash_required_usd"] is None
 
 
 def test_candidate_engine_put_summary_keeps_same_symbol_usage_fields() -> None:
