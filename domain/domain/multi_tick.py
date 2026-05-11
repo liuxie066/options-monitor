@@ -48,6 +48,24 @@ def _time_in_range(value: time, start: time, end: time) -> bool:
     return value >= start or value <= end
 
 
+_SCHEDULE_TZ_HK: frozenset[str] = frozenset({
+    'Asia/Hong_Kong',
+    'Hongkong',
+})
+
+
+def _infer_market_from_schedule_timezone(schedule_cfg: dict[str, Any]) -> str | None:
+    """Infer market label from schedule market_timezone.
+
+    Returns 'HK' when the timezone is a known HK timezone,
+    None otherwise (including US or unrecognized timezones).
+    """
+    tz = str(schedule_cfg.get('market_timezone', '')).strip()
+    if tz in _SCHEDULE_TZ_HK:
+        return 'HK'
+    return None
+
+
 def _is_market_hours_for_schedule(now_utc: datetime, schedule_cfg: dict[str, Any]) -> bool:
     if not isinstance(schedule_cfg, dict) or not bool(schedule_cfg.get("enabled", True)):
         return False
@@ -86,6 +104,10 @@ def select_markets_to_run(now_utc: datetime, cfg: dict, market_config: str) -> l
         return ['HK']
 
     if _is_market_hours_for_schedule(now_utc, schedule_us):
+        # When schedule_hk is absent but schedule fires, infer market from timezone.
+        # Prevents HK-timezone schedules from being misclassified as US.
+        if not schedule_hk and _infer_market_from_schedule_timezone(schedule_us) == 'HK':
+            return ['HK']
         return ['US']
 
     return []
