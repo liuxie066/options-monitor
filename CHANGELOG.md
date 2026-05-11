@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.10 - 2026-05-11
+
+### Changed
+- Removed legacy `scripts.option_candidate_strategy` and `scripts.pm_bridge` compatibility owners after callers moved to domain/application modules.
+- Added boundary coverage so tests fail if removed business-script owners are reintroduced.
+
 ## 1.2.9 - 2026-05-11
 
 ### Changed
