@@ -239,7 +239,7 @@ def test_feishu_bitable_imports_infrastructure_owner_module() -> None:
     service_mod = importlib.import_module("src.application.option_positions_service")
     reporting_mod = importlib.import_module("src.application.option_positions_reporting")
     facade_mod = importlib.import_module("src.application.option_positions_facade")
-    healthcheck_mod = importlib.import_module("scripts.healthcheck")
+    healthcheck_mod = importlib.import_module("src.application.healthcheck_runner")
 
     assert service_mod.bitable_list_records is infra_mod.bitable_list_records
     assert service_mod.get_tenant_access_token is infra_mod.get_tenant_access_token
@@ -329,7 +329,7 @@ def test_trade_intake_imports_owner_modules() -> None:
 
 
 def test_healthcheck_and_init_local_import_validate_config_from_owner_module() -> None:
-    healthcheck_mod = importlib.import_module("scripts.healthcheck")
+    healthcheck_mod = importlib.import_module("src.application.healthcheck_runner")
     app_init_local_mod = importlib.import_module("src.application.agent_tool_init_local")
     validate_mod = importlib.import_module("src.application.config_validator")
 
@@ -546,7 +546,7 @@ def test_scan_scheduler_imports_application_owner_module() -> None:
     owner_mod = importlib.import_module("src.application.scan_scheduler")
     cli_mod = importlib.import_module("src.interfaces.cli.main")
     agent_tools_mod = importlib.import_module("src.application.agent_tool_handlers")
-    healthcheck_mod = importlib.import_module("scripts.healthcheck")
+    healthcheck_mod = importlib.import_module("src.application.healthcheck_runner")
 
     assert cli_mod.run_scheduler is owner_mod.run_scheduler
     assert agent_tools_mod.scheduler_decide is owner_mod.decide

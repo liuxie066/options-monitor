@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from src.application import close_advice_runner as close_mod
 from src.application import option_chain_fetching as ocf_mod
-from src.application.multi_tick import required_data_prefetch as prefetch_mod
+from src.application.multi_tick import prefetch_coordinator as prefetch_coord_mod
 
 
 def test_close_advice_runner_rate_limit_reason_compatibility() -> None:
@@ -30,7 +30,7 @@ def test_required_data_prefetch_rate_limit_payload_hints_compatible() -> None:
         {"message": "请求过快"},
     ]
     for payload in cases:
-        assert prefetch_mod._is_opend_rate_limit_payload(payload) is True
+        assert prefetch_coord_mod._is_opend_rate_limit_payload(payload) is True
 
 
 def test_rate_gate_cache_key_includes_max_wait_sec(tmp_path) -> None:

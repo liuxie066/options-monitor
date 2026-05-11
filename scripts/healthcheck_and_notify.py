@@ -4,7 +4,7 @@
 This is intended to be run by cron.
 
 Behavior:
-- Runs scripts/healthcheck.py
+- Runs the application healthcheck runner
 - If output contains '## CRITICAL' or '## WARN': send the full report to notifications target
 - If output is OK: stay silent (default)
 
@@ -23,10 +23,10 @@ from pathlib import Path
 
 from domain.domain import (
     normalize_notify_subprocess_output,
-    normalize_pipeline_subprocess_output,
     resolve_openclaw_transport_channel,
 )
 from src.application.account_config import accounts_from_config
+from src.application.healthcheck_runner import format_healthcheck_report, run_healthcheck_runner
 
 
 def load_json(p: Path) -> dict:
@@ -43,7 +43,6 @@ def main() -> int:
     args = ap.parse_args()
 
     base = Path(__file__).resolve().parents[1]
-    vpy = base / '.venv' / 'bin' / 'python'
 
     cfg_path = Path(args.config)
     if not cfg_path.is_absolute():
@@ -51,28 +50,15 @@ def main() -> int:
     cfg = load_json(cfg_path)
     accounts = accounts_from_config(cfg) if args.accounts is None else accounts_from_config({'accounts': args.accounts})
 
-    # Run healthcheck
-    hc = subprocess.run(
-        [str(vpy), 'scripts/healthcheck.py', '--config', str(cfg_path), '--accounts', *accounts],
-        cwd=str(base),
-        capture_output=True,
-        text=True,
-    )
-    hc_payload = normalize_pipeline_subprocess_output(
-        returncode=int(hc.returncode),
-        stdout=str(hc.stdout or ""),
-        stderr=str(hc.stderr or ""),
-    )
-    out = (hc.stdout or '')
-    err = (hc.stderr or '')
-
-    if int(hc_payload.get("returncode") or 0) not in (0, 2):
-        # healthcheck itself failed unexpectedly
-        sys.stderr.write(err or out)
+    try:
+        healthcheck_result = run_healthcheck_runner(config=cfg_path, accounts=accounts, base=base)
+    except Exception as exc:
+        sys.stderr.write(f"healthcheck failed unexpectedly: {type(exc).__name__}: {exc}\n")
         return 2
 
-    is_critical = ('## CRITICAL' in out)
-    is_warn = ('## WARN' in out)
+    out = format_healthcheck_report(healthcheck_result)
+    is_critical = bool(healthcheck_result.get("errors"))
+    is_warn = bool(healthcheck_result.get("warnings"))
 
     should_notify = False
     if args.notify_on == 'both':
