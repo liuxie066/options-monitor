@@ -81,7 +81,7 @@ def fetch_symbol_opend(*args: Any, **kwargs: Any) -> Any:
 
 
 def save_required_data_opend(*args: Any, **kwargs: Any) -> Any:
-    from src.application.opend_symbol_fetching import save_outputs as _save_required_data_opend
+    from src.application.opend_symbol_outputs import save_outputs as _save_required_data_opend
 
     return _save_required_data_opend(*args, **kwargs)
 

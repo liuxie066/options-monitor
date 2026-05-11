@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.2.14 - 2026-05-11
+
+### Changed
+- Split OpenD symbol required-data ownership so option-chain fetching, market-snapshot fetching, and required-data output writing live in separate application modules.
+- Updated required-data, close-advice, CLI, agent-tool, and prefetch callers to use the new output/planning owners instead of treating `opend_symbol_fetching.py` as the owner for every OpenD concern.
+
+### Fixed
+- Kept snapshot fallback, expiration rate limiting, output preservation on fetch errors, and owner-boundary coverage intact after the OpenD hot-path split.
+
 ## 1.2.13 - 2026-05-11
 
 ### Changed
