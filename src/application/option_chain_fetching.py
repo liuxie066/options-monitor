@@ -19,7 +19,7 @@ DEFAULT_OPTION_CHAIN_MAX_CALLS = 10
 DEFAULT_OPTION_CHAIN_MAX_WAIT_SEC = 90.0
 
 _RATE_GATE_CACHE_LOCK = threading.Lock()
-_RATE_GATE_CACHE: dict[tuple[str, int, float], Any] = {}
+_RATE_GATE_CACHE: dict[tuple[str, int, float, float], Any] = {}
 
 
 class OptionChainRateLimitExceeded(RuntimeError):

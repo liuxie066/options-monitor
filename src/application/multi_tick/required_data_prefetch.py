@@ -84,7 +84,12 @@ def _is_opend_rate_limit_payload(payload: dict[str, Any]) -> bool:
 
 
 def _get_thread_gateway(host: str, port: int, chain_cache: bool):
-    g = getattr(_thread_gateway, "gw", None)
+    key = (str(host), int(port), bool(chain_cache))
+    gateways = getattr(_thread_gateway, "gateways", None)
+    if not isinstance(gateways, dict):
+        gateways = {}
+        _thread_gateway.gateways = gateways
+    g = gateways.get(key)
     if g is not None:
         try:
             checker = getattr(g, "is_connected", None)
@@ -96,24 +101,36 @@ def _get_thread_gateway(host: str, port: int, chain_cache: bool):
             g.close()
         except Exception:
             pass
-        _thread_gateway.gw = None
+        gateways.pop(key, None)
     from src.infrastructure.futu_gateway import build_ready_futu_gateway
 
     g = build_ready_futu_gateway(host=host, port=int(port), is_option_chain_cache_enabled=bool(chain_cache))
-    _thread_gateway.gw = g
+    gateways[key] = g
     with _thread_gateway_registry_lock:
         _thread_gateway_registry.append(g)
     return g
 
 
 def _close_thread_gateway():
-    g = getattr(_thread_gateway, "gw", None)
-    if g is not None:
+    gateways = getattr(_thread_gateway, "gateways", None)
+    if isinstance(gateways, dict):
+        values = list(gateways.values())
+        gateways.clear()
+    else:
+        values = []
+    legacy_gw = getattr(_thread_gateway, "gw", None)
+    if legacy_gw is not None:
+        values.append(legacy_gw)
+        _thread_gateway.gw = None
+    seen: set[int] = set()
+    for g in values:
+        if id(g) in seen:
+            continue
+        seen.add(id(g))
         try:
             g.close()
         except Exception:
             pass
-        _thread_gateway.gw = None
     _thread_gateway_failures.count = 0
 
 

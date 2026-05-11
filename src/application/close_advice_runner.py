@@ -356,7 +356,7 @@ def _ensure_required_data_coverage_for_positions(
         return fetch_reasons, fetch_details, summary
 
     external_gateway = gateway is not None
-    shared_gw = gateway
+    shared_gateways: dict[tuple[str, int], Any] = {}
 
     try:
         for symbol, spec in specs.items():
@@ -389,24 +389,33 @@ def _ensure_required_data_coverage_for_positions(
                 continue
             strikes = [safe_float(v) for v in (spec.get("strikes") or [])]
             strikes = [v for v in strikes if v is not None]
+            host = str(fetch_cfg.get("host") or "127.0.0.1")
+            port = safe_int(fetch_cfg.get("port")) or 11111
+            endpoint = (host, int(port))
             try:
+                if external_gateway:
+                    shared_gw = gateway
+                else:
+                    shared_gw = shared_gateways.get(endpoint)
                 if shared_gw is None:
                     try:
                         from src.infrastructure.futu_gateway import build_ready_futu_gateway
 
                         shared_gw = build_ready_futu_gateway(
-                            host=str(fetch_cfg.get("host") or "127.0.0.1"),
-                            port=safe_int(fetch_cfg.get("port")) or 11111,
+                            host=host,
+                            port=port,
                             is_option_chain_cache_enabled=True,
                         )
+                        if not external_gateway:
+                            shared_gateways[endpoint] = shared_gw
                     except Exception:
                         # Graceful degradation: fall back to per-call gateway built by fetch_symbol.
                         shared_gw = None
                 payload = fetch_symbol(
                     symbol,
                     limit_expirations=safe_int(fetch_cfg.get("limit_expirations")) or max(len(requested_expirations), 8),
-                    host=str(fetch_cfg.get("host") or "127.0.0.1"),
-                    port=safe_int(fetch_cfg.get("port")) or 11111,
+                    host=host,
+                    port=port,
                     base_dir=base_dir,
                     option_types=",".join(sorted(spec.get("option_types") or {"put", "call"})),
                     min_strike=min(strikes) if strikes else None,
@@ -487,11 +496,16 @@ def _ensure_required_data_coverage_for_positions(
                             "available_expirations": sorted(current_expirations.get(symbol) or set()),
                         }
     finally:
-        if (not external_gateway) and shared_gw is not None:
-            try:
-                shared_gw.close()
-            except Exception:
-                pass
+        if not external_gateway:
+            seen: set[int] = set()
+            for shared_gw in shared_gateways.values():
+                if id(shared_gw) in seen:
+                    continue
+                seen.add(id(shared_gw))
+                try:
+                    shared_gw.close()
+                except Exception:
+                    pass
     return fetch_reasons, fetch_details, summary
 
 

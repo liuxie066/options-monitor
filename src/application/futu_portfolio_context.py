@@ -212,10 +212,6 @@ def _filter_rows_for_account_ids(
     out: list[dict[str, Any]] = []
     saw_account_column = False
     for row in rows:
-        row_env = _row_trd_env(row)
-        if trd_env and row_env and row_env != trd_env:
-            saw_account_column = True
-            continue
         acc_id = str(
             _pick(
                 row,
@@ -227,10 +223,14 @@ def _filter_rows_for_account_ids(
             )
             or ""
         ).strip()
-        if acc_id:
-            saw_account_column = True
-            if acc_id in account_ids:
-                out.append(row)
+        if not acc_id:
+            out.append(row)
+            continue
+        saw_account_column = True
+        if acc_id not in account_ids:
+            continue
+        row_env = _row_trd_env(row)
+        if trd_env and row_env and row_env != trd_env:
             continue
         out.append(row)
     return out if saw_account_column else rows
