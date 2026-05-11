@@ -15,6 +15,8 @@ _SNAPSHOT_DEFAULT_MAX_WAIT_SEC = 30.0
 _EXPIRATION_DEFAULT_MAX_CALLS = 30
 _EXPIRATION_DEFAULT_WINDOW_SEC = 30.0
 _EXPIRATION_DEFAULT_MAX_WAIT_SEC = 30.0
+_BATCH_DEFAULT_MARKET_SNAPSHOT = 200
+DEFAULT_OPEND_BATCH_MARKET_SNAPSHOT = 200
 OPEND_FETCH_KWARG_KEYS = frozenset(
     {
         "max_wait_sec",
@@ -147,6 +149,15 @@ class OpenDFetchLimits:
         }
 
 
+@dataclass(frozen=True)
+class OpenDBatchConfig:
+    market_snapshot: int
+
+    @classmethod
+    def from_values(cls, *, market_snapshot: Any) -> "OpenDBatchConfig":
+        return cls(market_snapshot=max(1, _as_int(market_snapshot, _BATCH_DEFAULT_MARKET_SNAPSHOT)))
+
+
 _OPTION_CHAIN_DEFAULTS = {
     "window_sec": DEFAULT_OPTION_CHAIN_WINDOW_SEC,
     "max_calls": DEFAULT_OPTION_CHAIN_MAX_CALLS,
@@ -260,3 +271,10 @@ def option_chain_fetch_kwargs(config: dict[str, Any] | None) -> dict[str, float 
         "option_chain_window_sec": resolved["window_sec"],
         "option_chain_max_calls": resolved["max_calls"],
     }
+
+
+def resolve_opend_batch_config(config: dict[str, Any] | None) -> OpenDBatchConfig:
+    runtime = config.get("runtime") if isinstance(config, dict) and isinstance(config.get("runtime"), dict) else {}
+    raw = runtime.get("opend_batch") if isinstance(runtime, dict) and isinstance(runtime.get("opend_batch"), dict) else {}
+    raw = raw if isinstance(raw, dict) else {}
+    return OpenDBatchConfig.from_values(market_snapshot=raw.get("market_snapshot"))

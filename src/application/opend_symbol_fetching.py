@@ -67,7 +67,7 @@ from src.infrastructure.futu_gateway import (
 from src.application.opend_utils import normalize_underlier, get_trading_date
 from src.application.opend_call_coordinator import rate_limited_opend_call
 from src.application.expiration_normalization import normalize_expiration_ymd
-from src.application.opend_fetch_config import OpenDFetchLimits
+from src.application.opend_fetch_config import DEFAULT_OPEND_BATCH_MARKET_SNAPSHOT, OpenDFetchLimits
 from src.application.option_chain_fetching import (
     OptionChainFetchRequest,
     classify_option_chain_error,
@@ -391,6 +391,8 @@ class FetchSymbolRequest:
     expiration_max_wait_sec: float = 30.0
     expiration_window_sec: float = 30.0
     expiration_max_calls: int = 30
+    gateway: Any = None
+    snapshot_batch_size: int | None = None
 
     @property
     def effective_base_dir(self) -> Path:
@@ -411,7 +413,7 @@ class FetchSymbolRequest:
         )
 
 
-def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = '127.0.0.1', port: int = 11111, spot_override: float | None = None, *, base_dir: Path | None = None, option_types: str = 'put,call', min_strike: float | None = None, max_strike: float | None = None, side_strike_windows: dict[str, dict[str, float | None]] | None = None, min_dte: int | None = None, max_dte: int | None = None, explicit_expirations: list[str] | None = None, retry_max_attempts: int = 4, retry_time_budget_sec: float = 8.0, retry_base_delay_sec: float = 0.8, retry_max_delay_sec: float = 6.0, no_retry: bool = False, chain_cache: bool = False, chain_cache_force_refresh: bool = False, freshness_policy: str = 'cache_first', max_wait_sec: float = 90.0, option_chain_window_sec: float = 30.0, option_chain_max_calls: int = 10, snapshot_max_wait_sec: float = 30.0, snapshot_window_sec: float = 30.0, snapshot_max_calls: int = 60, expiration_max_wait_sec: float = 30.0, expiration_window_sec: float = 30.0, expiration_max_calls: int = 30) -> dict[str, Any]:
+def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = '127.0.0.1', port: int = 11111, spot_override: float | None = None, *, base_dir: Path | None = None, option_types: str = 'put,call', min_strike: float | None = None, max_strike: float | None = None, side_strike_windows: dict[str, dict[str, float | None]] | None = None, min_dte: int | None = None, max_dte: int | None = None, explicit_expirations: list[str] | None = None, retry_max_attempts: int = 4, retry_time_budget_sec: float = 8.0, retry_base_delay_sec: float = 0.8, retry_max_delay_sec: float = 6.0, no_retry: bool = False, chain_cache: bool = False, chain_cache_force_refresh: bool = False, freshness_policy: str = 'cache_first', max_wait_sec: float = 90.0, option_chain_window_sec: float = 30.0, option_chain_max_calls: int = 10, snapshot_max_wait_sec: float = 30.0, snapshot_window_sec: float = 30.0, snapshot_max_calls: int = 60, expiration_max_wait_sec: float = 30.0, expiration_window_sec: float = 30.0, expiration_max_calls: int = 30, gateway: Any = None, snapshot_batch_size: int | None = None) -> dict[str, Any]:
     return fetch_symbol_request(
         FetchSymbolRequest(
             symbol=symbol,
@@ -444,6 +446,8 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
             expiration_max_wait_sec=expiration_max_wait_sec,
             expiration_window_sec=expiration_window_sec,
             expiration_max_calls=expiration_max_calls,
+            gateway=gateway,
+            snapshot_batch_size=snapshot_batch_size,
         )
     )
 
@@ -475,17 +479,21 @@ def fetch_symbol_request(request: FetchSymbolRequest) -> dict[str, Any]:
     option_chain_limit = opend_limits.option_chain
     snapshot_limit = opend_limits.market_snapshot
     expiration_limit = opend_limits.option_expiration
+    external_gateway = request.gateway is not None
     explicit_expirations_norm = sorted({
         exp
         for exp in (normalize_expiration_ymd(x) for x in (explicit_expirations or []))
         if exp
     })
     spot_errors: list[dict[str, Any]] = []
-    gateway = build_ready_futu_gateway(
-        host=host,
-        port=int(port),
-        is_option_chain_cache_enabled=bool(chain_cache),
-    )
+    if external_gateway:
+        gateway = request.gateway
+    else:
+        gateway = build_ready_futu_gateway(
+            host=host,
+            port=int(port),
+            is_option_chain_cache_enabled=bool(chain_cache),
+        )
 
     try:
         spot = spot_override
@@ -727,7 +735,7 @@ def fetch_symbol_request(request: FetchSymbolRequest) -> dict[str, Any]:
         # Build a minimal snapshot map directly (avoid concatenating large DataFrames / storing Series for memory efficiency)
         snap_map: dict[str, dict[str, Any]] = {}
         snapshot_errors: list[dict[str, Any]] = []
-        BATCH = 200
+        BATCH = int(request.snapshot_batch_size) if request.snapshot_batch_size else DEFAULT_OPEND_BATCH_MARKET_SNAPSHOT
         for i in range(0, len(option_codes), BATCH):
             batch = option_codes[i:i+BATCH]
             try:
@@ -970,10 +978,11 @@ def fetch_symbol_request(request: FetchSymbolRequest) -> dict[str, Any]:
         }
 
     finally:
-        try:
-            gateway.close()
-        except Exception:
-            pass
+        if not external_gateway:
+            try:
+                gateway.close()
+            except Exception:
+                pass
 
 
 def save_outputs(base: Path, symbol: str, payload: dict[str, Any], *, output_root: Path | None = None):
