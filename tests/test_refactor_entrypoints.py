@@ -201,3 +201,22 @@ def test_unified_cli_option_positions_report_command_exists_without_legacy_marke
     )
     assert "--broker" in proc.stdout
     assert "--market" not in proc.stdout
+
+
+def test_unified_cli_watchlist_command_exists_without_legacy_script_path() -> None:
+    proc = subprocess.run(
+        [
+            str((ROOT / ".venv" / "bin" / "python").resolve()),
+            "-m",
+            "src.interfaces.cli.main",
+            "watchlist",
+            "list",
+            "--help",
+        ],
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "--format" in proc.stdout
+    assert "scripts/watchlist.py" not in proc.stdout

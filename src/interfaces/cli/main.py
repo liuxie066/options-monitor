@@ -124,6 +124,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     sell_put_cash.add_argument("--no-exchange-rates", action="store_true")
     sell_put_cash.add_argument("--out-dir", default="output/state")
 
+    sub.add_parser("watchlist", help="manage monitored symbols")
     sub.add_parser("option-positions", help="option position operations")
 
     init_cmd = sub.add_parser("init", help="initialize runtime config")
@@ -179,6 +180,10 @@ def main(argv: list[str] | None = None) -> int:
         from src.interfaces.cli.option_positions import main as run_option_positions_cli
 
         return int(run_option_positions_cli(actual_argv[1:]))
+    if actual_argv and actual_argv[0] == "watchlist":
+        from src.interfaces.cli.watchlist import main as run_watchlist_cli
+
+        return int(run_watchlist_cli(actual_argv[1:]))
 
     args = parse_args(actual_argv)
     try:

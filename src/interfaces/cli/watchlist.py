@@ -1,5 +1,4 @@
-#!/usr/bin/env python3
-"""Manage monitored symbols in options-monitor config.us.json/config.hk.json.
+"""Manage monitored symbols in options-monitor runtime configs.
 
 Supports:
 - list: show current symbols and basic config
@@ -51,7 +50,7 @@ def parse_value(s: str):
         return s
 
 
-def cmd_list(cfg: dict, fmt: str):
+def cmd_list(cfg: dict, fmt: str) -> None:
     rows = []
     for e in (cfg.get("symbols") or []):
         rows.append(
@@ -135,7 +134,7 @@ def cmd_edit(cfg: dict, symbol: str, sets: list[str]):
     ensure_symbols_list(cfg, error_factory=SystemExit)[idx] = entry
 
 
-def main():
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Manage options-monitor symbols config (config.us.json/config.hk.json)")
     ap.add_argument("--config", default="config.us.json")
 
@@ -159,9 +158,9 @@ def main():
     p_edit.add_argument("symbol")
     p_edit.add_argument("--set", action="append", default=[], help="patch path=value (repeatable)")
 
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
-    base = Path(__file__).resolve().parents[1]
+    base = Path(__file__).resolve().parents[3]
     cfg_path = Path(args.config)
     if not cfg_path.is_absolute():
         cfg_path = (base / cfg_path).resolve()
@@ -170,7 +169,7 @@ def main():
 
     if args.cmd == "list":
         cmd_list(cfg, args.format)
-        return
+        return 0
 
     if args.cmd == "add":
         if not (args.put or args.call):
@@ -178,13 +177,13 @@ def main():
         cmd_add(cfg, args.symbol, args.use, args.limit_exp, args.put, args.call, accounts=args.accounts)
         _save_validated_json(cfg_path, cfg)
         print(f"[DONE] added {normalize_symbol(args.symbol)} -> {cfg_path}")
-        return
+        return 0
 
     if args.cmd == "rm":
         cmd_rm(cfg, args.symbol)
         _save_validated_json(cfg_path, cfg)
         print(f"[DONE] removed {normalize_symbol(args.symbol)} -> {cfg_path}")
-        return
+        return 0
 
     if args.cmd == "edit":
         if not args.set:
@@ -192,10 +191,10 @@ def main():
         cmd_edit(cfg, args.symbol, args.set)
         _save_validated_json(cfg_path, cfg)
         print(f"[DONE] edited {normalize_symbol(args.symbol)} -> {cfg_path}")
-        return
+        return 0
 
     raise SystemExit("unknown cmd")
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

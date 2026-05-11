@@ -90,7 +90,7 @@ OpenClaw 环境可以先跑：
 
 当前 tick / 扫描 / 通知主流程只有一条统一链路：`src/application/multi_account_tick.py`。
 单账户运行只是传一个账户的特例，例如 `--accounts lx`；多账户运行传多个账户，
-例如 `--accounts lx sy`。旧脚本名仍保留，但只作为兼容包装。
+例如 `--accounts lx sy`。旧 tick 脚本入口已移除，定时任务应升级到 `./om run tick`。
 
 给 Codex、Claude Code、OpenClaw 这类代理使用时，建议遵守下面的默认约束：
 

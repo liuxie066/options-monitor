@@ -123,10 +123,10 @@ python3 -m src.interfaces.cli.main sell-put-cash --market 富途 --account sy
 Manage watchlist:
 
 ```bash
-python3 scripts/watchlist.py list
-python3 scripts/watchlist.py add TCOM --put
-python3 scripts/watchlist.py edit TCOM --set sell_put.max_strike=45
-python3 scripts/watchlist.py rm TCOM
+./om watchlist list
+./om watchlist add TCOM --put
+./om watchlist edit TCOM --set sell_put.max_strike=45
+./om watchlist rm TCOM
 ```
 
 Maintain option positions, using dry-run first:
