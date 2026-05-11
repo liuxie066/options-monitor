@@ -45,6 +45,7 @@ def test_application_package_does_not_import_scripts_layer() -> None:
 def test_legacy_wrapper_modules_are_removed() -> None:
     assert not (ROOT / "scripts" / "trade_symbol_identity.py").exists()
     assert not (ROOT / "scripts" / "trade_contract_identity.py").exists()
+    assert not (ROOT / "scripts" / "agent_plugin").exists()
     assert not (ROOT / "scripts" / "option_positions_core" / "domain.py").exists()
     assert not (ROOT / "scripts" / "option_positions_core" / "ledger.py").exists()
     assert not (ROOT / "scripts" / "option_positions_core" / "service.py").exists()

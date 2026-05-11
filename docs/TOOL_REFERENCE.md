@@ -81,7 +81,7 @@
 说明：
 - `om-agent` 更适合给程序调
 - `om` 更适合人工操作
-- `om-agent` 的 manifest 由 `src/application/agent_tool_registry.py` 维护，handler 由 `src/application/agent_tool_handlers.py` 维护，runtime config helper 由 `src/application/agent_tool_config.py` / `src/application/agent_tool_init_local.py` 维护；`scripts/agent_plugin/*` 只是兼容 facade。
+- `om-agent` 的 CLI 由 `src/interfaces/agent/cli.py` 维护；manifest 由 `src/application/agent_tool_registry.py` 维护，handler 由 `src/application/agent_tool_handlers.py` 维护，runtime config helper 由 `src/application/agent_tool_config.py` / `src/application/agent_tool_init_local.py` 维护。
 
 配置优先级和 `config_validate` / `healthcheck` / `runtime_status` / `openclaw_readiness` 的正式边界，请以根目录 `CONFIGURATION_GUIDE.md` 为准。这里只保留工具说明，不再重复完整配置规则。
 

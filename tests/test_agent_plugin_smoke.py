@@ -96,8 +96,8 @@ def _public_cfg_with_external_holdings(data_config_ref: str) -> dict:
 
 
 def test_healthcheck_works_with_explicit_config_path(monkeypatch, tmp_path: Path) -> None:
-    from scripts.agent_plugin.main import run_tool
-    import scripts.agent_plugin.tools as tools
+    from src.application.tool_execution import execute_tool as run_tool
+    import src.application.agent_tool_handlers as tools
 
     cfg_path = tmp_path / "config.us.json"
     secrets_dir = tmp_path / "secrets"
@@ -139,8 +139,8 @@ def test_healthcheck_works_with_explicit_config_path(monkeypatch, tmp_path: Path
 
 
 def test_healthcheck_rejects_placeholder_futu_mapping(monkeypatch, tmp_path: Path) -> None:
-    from scripts.agent_plugin.main import run_tool
-    import scripts.agent_plugin.tools as tools
+    from src.application.tool_execution import execute_tool as run_tool
+    import src.application.agent_tool_handlers as tools
 
     cfg_path = tmp_path / "config.us.json"
     secrets_dir = tmp_path / "secrets"
@@ -174,8 +174,8 @@ def test_healthcheck_rejects_placeholder_futu_mapping(monkeypatch, tmp_path: Pat
 
 
 def test_healthcheck_accepts_futu_auto_source_without_fallback_checks(monkeypatch, tmp_path: Path) -> None:
-    from scripts.agent_plugin.main import run_tool
-    import scripts.agent_plugin.tools as tools
+    from src.application.tool_execution import execute_tool as run_tool
+    import src.application.agent_tool_handlers as tools
 
     cfg_path = tmp_path / "config.us.json"
     secrets_dir = tmp_path / "secrets"
@@ -212,8 +212,8 @@ def test_healthcheck_accepts_futu_auto_source_without_fallback_checks(monkeypatc
 
 
 def test_healthcheck_rejects_account_settings_acc_id_missing_from_trade_intake_mapping(monkeypatch, tmp_path: Path) -> None:
-    from scripts.agent_plugin.main import run_tool
-    import scripts.agent_plugin.tools as tools
+    from src.application.tool_execution import execute_tool as run_tool
+    import src.application.agent_tool_handlers as tools
 
     cfg_path = tmp_path / "config.us.json"
     secrets_dir = tmp_path / "secrets"
@@ -246,8 +246,8 @@ def test_healthcheck_rejects_account_settings_acc_id_missing_from_trade_intake_m
 
 
 def test_healthcheck_accepts_external_holdings_account_without_futu_mapping(monkeypatch, tmp_path: Path) -> None:
-    from scripts.agent_plugin.main import run_tool
-    import scripts.agent_plugin.tools as tools
+    from src.application.tool_execution import execute_tool as run_tool
+    import src.application.agent_tool_handlers as tools
 
     cfg_path = tmp_path / "config.us.json"
     secrets_dir = tmp_path / "secrets"
@@ -297,8 +297,8 @@ def test_healthcheck_accepts_external_holdings_account_without_futu_mapping(monk
 
 
 def test_healthcheck_reports_option_positions_bootstrap_degraded(monkeypatch, tmp_path: Path) -> None:
-    from scripts.agent_plugin.main import run_tool
-    import scripts.agent_plugin.tools as tools
+    from src.application.tool_execution import execute_tool as run_tool
+    import src.application.agent_tool_handlers as tools
 
     cfg_path = tmp_path / "config.us.json"
     secrets_dir = tmp_path / "secrets"
@@ -338,8 +338,8 @@ def test_healthcheck_reports_option_positions_bootstrap_degraded(monkeypatch, tm
 
 
 def test_healthcheck_reports_option_positions_bootstrap_ok_for_sqlite_only(monkeypatch, tmp_path: Path) -> None:
-    from scripts.agent_plugin.main import run_tool
-    import scripts.agent_plugin.tools as tools
+    from src.application.tool_execution import execute_tool as run_tool
+    import src.application.agent_tool_handlers as tools
 
     cfg_path = tmp_path / "config.us.json"
     secrets_dir = tmp_path / "secrets"
@@ -377,8 +377,8 @@ def test_healthcheck_reports_option_positions_bootstrap_ok_for_sqlite_only(monke
 
 
 def test_healthcheck_warns_on_notification_placeholder_values(monkeypatch, tmp_path: Path) -> None:
-    from scripts.agent_plugin.main import run_tool
-    import scripts.agent_plugin.tools as tools
+    from src.application.tool_execution import execute_tool as run_tool
+    import src.application.agent_tool_handlers as tools
 
     cfg_path = tmp_path / "config.us.json"
     secrets_dir = tmp_path / "secrets"
@@ -419,8 +419,8 @@ def test_healthcheck_warns_on_notification_placeholder_values(monkeypatch, tmp_p
 
 
 def test_get_portfolio_context_allows_futu_source_without_explicit_data_config(monkeypatch, tmp_path: Path) -> None:
-    from scripts.agent_plugin.main import run_tool
-    import scripts.agent_plugin.tools as tools
+    from src.application.tool_execution import execute_tool as run_tool
+    import src.application.agent_tool_handlers as tools
 
     cfg_path = tmp_path / "config.us.json"
     cfg = _minimal_cfg()
@@ -447,7 +447,7 @@ def test_get_portfolio_context_allows_futu_source_without_explicit_data_config(m
 
 
 def test_get_portfolio_context_rejects_stale_external_holdings_cache_for_wrong_account(monkeypatch, tmp_path: Path) -> None:
-    from scripts.agent_plugin.main import run_tool
+    from src.application.tool_execution import execute_tool as run_tool
     import src.application.pipeline_context as pipeline_context
     import src.application.portfolio_context_service as pcs
 
@@ -557,7 +557,7 @@ def test_get_portfolio_context_rejects_stale_external_holdings_cache_for_wrong_a
 
 
 def test_spec_exposes_broker_as_public_field() -> None:
-    from scripts.agent_plugin.main import build_spec
+    from src.application.tool_execution import build_tool_manifest as build_spec
 
     spec = build_spec()
     query_tool = next(item for item in spec["tools"] if item["name"] == "query_cash_headroom")
@@ -568,8 +568,8 @@ def test_spec_exposes_broker_as_public_field() -> None:
 
 
 def test_monthly_income_report_returns_agent_summary(monkeypatch, tmp_path: Path) -> None:
-    from scripts.agent_plugin.main import run_tool
-    import scripts.agent_plugin.tools as tools
+    from src.application.tool_execution import execute_tool as run_tool
+    import src.application.agent_tool_handlers as tools
     import src.application.option_positions_service as svc
     from domain.domain.option_position_lots import OpenPositionCommand, parse_exp_to_ms
 
@@ -661,8 +661,8 @@ def test_monthly_income_report_returns_agent_summary(monkeypatch, tmp_path: Path
 
 
 def test_version_check_returns_agent_diagnostic(monkeypatch) -> None:
-    from scripts.agent_plugin.main import run_tool
-    import scripts.agent_plugin.tools as tools
+    from src.application.tool_execution import execute_tool as run_tool
+    import src.application.agent_tool_handlers as tools
 
     monkeypatch.setattr(
         tools,
@@ -689,7 +689,7 @@ def test_version_check_returns_agent_diagnostic(monkeypatch) -> None:
 
 
 def test_version_update_defaults_to_dry_run(monkeypatch, tmp_path: Path) -> None:
-    from scripts.agent_plugin.main import run_tool
+    from src.application.tool_execution import execute_tool as run_tool
     import src.application.agent_tool_handlers as handlers
 
     (tmp_path / "VERSION").write_text("1.0.0\n", encoding="utf-8")
@@ -709,7 +709,7 @@ def test_version_update_defaults_to_dry_run(monkeypatch, tmp_path: Path) -> None
 
 
 def test_version_update_apply_writes_version(monkeypatch, tmp_path: Path) -> None:
-    from scripts.agent_plugin.main import run_tool
+    from src.application.tool_execution import execute_tool as run_tool
     import src.application.agent_tool_handlers as handlers
 
     (tmp_path / "VERSION").write_text("1.0.0\n", encoding="utf-8")
@@ -727,7 +727,7 @@ def test_version_update_apply_writes_version(monkeypatch, tmp_path: Path) -> Non
 
 
 def test_version_update_apply_requires_write_gate(monkeypatch, tmp_path: Path) -> None:
-    from scripts.agent_plugin.main import run_tool
+    from src.application.tool_execution import execute_tool as run_tool
     import src.application.agent_tool_handlers as handlers
 
     (tmp_path / "VERSION").write_text("1.0.0\n", encoding="utf-8")
@@ -746,7 +746,7 @@ def test_version_update_apply_requires_write_gate(monkeypatch, tmp_path: Path) -
 
 
 def test_config_validate_runs_without_opend(monkeypatch, tmp_path: Path) -> None:
-    from scripts.agent_plugin.main import run_tool
+    from src.application.tool_execution import execute_tool as run_tool
 
     cfg_path = tmp_path / "config.us.json"
     cfg_path.write_text(json.dumps(_minimal_cfg(), ensure_ascii=False, indent=2), encoding="utf-8")
@@ -761,7 +761,7 @@ def test_config_validate_runs_without_opend(monkeypatch, tmp_path: Path) -> None
 
 
 def test_scheduler_status_reads_decision_without_writing_state(tmp_path: Path) -> None:
-    from scripts.agent_plugin.main import run_tool
+    from src.application.tool_execution import execute_tool as run_tool
 
     cfg = _minimal_cfg()
     cfg["schedule"] = {
@@ -795,7 +795,7 @@ def test_scheduler_status_reads_decision_without_writing_state(tmp_path: Path) -
 
 
 def test_option_positions_read_lists_events_history_and_inspect(tmp_path: Path) -> None:
-    from scripts.agent_plugin.main import run_tool
+    from src.application.tool_execution import execute_tool as run_tool
     import src.application.option_positions_service as svc
     from domain.domain.option_position_lots import OpenPositionCommand, parse_exp_to_ms
 
@@ -887,7 +887,7 @@ def test_option_positions_read_lists_events_history_and_inspect(tmp_path: Path) 
 
 
 def test_runtime_status_summarizes_openclaw_runtime_files(tmp_path: Path) -> None:
-    from scripts.agent_plugin.main import run_tool
+    from src.application.tool_execution import execute_tool as run_tool
 
     cfg_path = tmp_path / "config.us.json"
     cfg_path.write_text(json.dumps(_minimal_cfg(), ensure_ascii=False, indent=2), encoding="utf-8")
@@ -936,7 +936,7 @@ def test_runtime_status_summarizes_openclaw_runtime_files(tmp_path: Path) -> Non
 
 
 def test_runtime_status_loads_openclaw_profile_and_masks_external_paths(tmp_path: Path) -> None:
-    from scripts.agent_plugin.main import run_tool
+    from src.application.tool_execution import execute_tool as run_tool
 
     cfg_path = tmp_path / "config.us.json"
     cfg_path.write_text(json.dumps(_minimal_cfg(), ensure_ascii=False, indent=2), encoding="utf-8")
@@ -980,8 +980,8 @@ def test_runtime_status_loads_openclaw_profile_and_masks_external_paths(tmp_path
 
 
 def test_openclaw_readiness_combines_status_and_healthcheck(monkeypatch, tmp_path: Path) -> None:
-    from scripts.agent_plugin.main import run_tool
-    import scripts.agent_plugin.tools as tools
+    from src.application.tool_execution import execute_tool as run_tool
+    import src.application.agent_tool_handlers as tools
 
     cfg_path = tmp_path / "config.us.json"
     secrets_dir = tmp_path / "secrets"
@@ -1135,8 +1135,8 @@ def test_openclaw_readiness_next_actions_preserve_profile_path(tmp_path: Path) -
 
 
 def test_close_advice_reads_cached_context_and_required_data(monkeypatch, tmp_path: Path) -> None:
-    from scripts.agent_plugin.main import run_tool
-    import scripts.agent_plugin.tools as tools
+    from src.application.tool_execution import execute_tool as run_tool
+    import src.application.agent_tool_handlers as tools
 
     cfg_path = tmp_path / "config.us.json"
     cfg = _minimal_cfg()
@@ -1221,7 +1221,7 @@ def test_scan_summary_rows_normalizes_account_labels() -> None:
 
 
 def test_close_advice_requires_cached_inputs(tmp_path: Path) -> None:
-    from scripts.agent_plugin.main import run_tool
+    from src.application.tool_execution import execute_tool as run_tool
 
     cfg_path = tmp_path / "config.us.json"
     cfg = _minimal_cfg()
@@ -1235,8 +1235,8 @@ def test_close_advice_requires_cached_inputs(tmp_path: Path) -> None:
 
 
 def test_prepare_close_advice_inputs_builds_context_and_required_data(monkeypatch, tmp_path: Path) -> None:
-    from scripts.agent_plugin.main import run_tool
-    import scripts.agent_plugin.tools as tools
+    from src.application.tool_execution import execute_tool as run_tool
+    import src.application.agent_tool_handlers as tools
 
     cfg_path = tmp_path / "config.us.json"
     secrets_dir = tmp_path / "secrets"
@@ -1301,8 +1301,8 @@ def test_prepare_close_advice_inputs_builds_context_and_required_data(monkeypatc
 
 
 def test_prepare_close_advice_inputs_reuses_cached_required_data_when_coverage_is_complete(monkeypatch, tmp_path: Path) -> None:
-    from scripts.agent_plugin.main import run_tool
-    import scripts.agent_plugin.tools as tools
+    from src.application.tool_execution import execute_tool as run_tool
+    import src.application.agent_tool_handlers as tools
 
     cfg_path = tmp_path / "config.us.json"
     secrets_dir = tmp_path / "secrets"
@@ -1361,8 +1361,8 @@ def test_prepare_close_advice_inputs_reuses_cached_required_data_when_coverage_i
 
 
 def test_prepare_close_advice_inputs_reports_missing_required_expirations(monkeypatch, tmp_path: Path) -> None:
-    from scripts.agent_plugin.main import run_tool
-    import scripts.agent_plugin.tools as tools
+    from src.application.tool_execution import execute_tool as run_tool
+    import src.application.agent_tool_handlers as tools
 
     cfg_path = tmp_path / "config.us.json"
     secrets_dir = tmp_path / "secrets"
@@ -1422,8 +1422,8 @@ def test_prepare_close_advice_inputs_reports_missing_required_expirations(monkey
 
 
 def test_prepare_close_advice_inputs_reports_expiration_near_miss_without_silent_rewrite(monkeypatch, tmp_path: Path) -> None:
-    from scripts.agent_plugin.main import run_tool
-    import scripts.agent_plugin.tools as tools
+    from src.application.tool_execution import execute_tool as run_tool
+    import src.application.agent_tool_handlers as tools
 
     cfg_path = tmp_path / "config.us.json"
     secrets_dir = tmp_path / "secrets"
@@ -1497,8 +1497,8 @@ def test_prepare_close_advice_inputs_reports_expiration_near_miss_without_silent
 
 
 def test_prepare_close_advice_inputs_normalizes_timestamp_expirations(monkeypatch, tmp_path: Path) -> None:
-    from scripts.agent_plugin.main import run_tool
-    import scripts.agent_plugin.tools as tools
+    from src.application.tool_execution import execute_tool as run_tool
+    import src.application.agent_tool_handlers as tools
 
     cfg_path = tmp_path / "config.us.json"
     secrets_dir = tmp_path / "secrets"
@@ -1555,8 +1555,8 @@ def test_prepare_close_advice_inputs_normalizes_timestamp_expirations(monkeypatc
 
 
 def test_prepare_close_advice_inputs_uses_expiration_ymd_for_position_requirements(monkeypatch, tmp_path: Path) -> None:
-    from scripts.agent_plugin.main import run_tool
-    import scripts.agent_plugin.tools as tools
+    from src.application.tool_execution import execute_tool as run_tool
+    import src.application.agent_tool_handlers as tools
 
     cfg_path = tmp_path / "config.us.json"
     secrets_dir = tmp_path / "secrets"
@@ -1615,7 +1615,7 @@ def test_prepare_close_advice_inputs_uses_expiration_ymd_for_position_requiremen
 
 
 def test_prepare_close_advice_inputs_returns_empty_result_when_context_has_no_positions(tmp_path: Path) -> None:
-    from scripts.agent_plugin.main import run_tool
+    from src.application.tool_execution import execute_tool as run_tool
 
     cfg_path = tmp_path / "config.us.json"
     cfg = _minimal_cfg()
@@ -1630,8 +1630,8 @@ def test_prepare_close_advice_inputs_returns_empty_result_when_context_has_no_po
 
 
 def test_get_close_advice_runs_prepare_then_render(monkeypatch, tmp_path: Path) -> None:
-    from scripts.agent_plugin.main import run_tool
-    import scripts.agent_plugin.tools as tools
+    from src.application.tool_execution import execute_tool as run_tool
+    import src.application.agent_tool_handlers as tools
 
     cfg_path = tmp_path / "config.us.json"
     cfg = _minimal_cfg()
@@ -1685,8 +1685,8 @@ def test_get_close_advice_runs_prepare_then_render(monkeypatch, tmp_path: Path) 
 
 
 def test_scan_opportunities_returns_summary_fields(monkeypatch, tmp_path: Path) -> None:
-    from scripts.agent_plugin.main import run_tool
-    import scripts.agent_plugin.tools as tools
+    from src.application.tool_execution import execute_tool as run_tool
+    import src.application.agent_tool_handlers as tools
 
     cfg_path = tmp_path / "config.us.json"
     cfg_path.write_text(json.dumps(_minimal_cfg(), ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1730,7 +1730,7 @@ def test_scan_opportunities_returns_summary_fields(monkeypatch, tmp_path: Path) 
 
 
 def test_manage_symbols_list_and_dry_run_add(monkeypatch, tmp_path: Path) -> None:
-    from scripts.agent_plugin.main import run_tool
+    from src.application.tool_execution import execute_tool as run_tool
 
     cfg_path = tmp_path / "config.us.json"
     cfg_path.write_text(json.dumps(_minimal_cfg(), ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1767,7 +1767,7 @@ def test_manage_symbols_list_and_dry_run_add(monkeypatch, tmp_path: Path) -> Non
 
 
 def test_manage_symbols_write_requires_gate_and_confirm(tmp_path: Path) -> None:
-    from scripts.agent_plugin.main import run_tool
+    from src.application.tool_execution import execute_tool as run_tool
 
     cfg_path = tmp_path / "config.us.json"
     cfg_path.write_text(json.dumps(_minimal_cfg(), ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1785,7 +1785,7 @@ def test_manage_symbols_write_requires_gate_and_confirm(tmp_path: Path) -> None:
 
 
 def test_manage_symbols_write_applies_when_enabled(monkeypatch, tmp_path: Path) -> None:
-    from scripts.agent_plugin.main import run_tool
+    from src.application.tool_execution import execute_tool as run_tool
 
     cfg_path = tmp_path / "config.us.json"
     cfg_path.write_text(json.dumps(_minimal_cfg(), ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1817,7 +1817,7 @@ def test_manage_symbols_write_applies_when_enabled(monkeypatch, tmp_path: Path) 
 
 
 def test_manage_symbols_add_allows_single_near_bound_modes(monkeypatch, tmp_path: Path) -> None:
-    from scripts.agent_plugin.main import run_tool
+    from src.application.tool_execution import execute_tool as run_tool
 
     cfg_path = tmp_path / "config.us.json"
     cfg_path.write_text(json.dumps(_minimal_cfg(), ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1852,7 +1852,7 @@ def test_manage_symbols_add_allows_single_near_bound_modes(monkeypatch, tmp_path
 
 
 def test_preview_notification_is_read_only() -> None:
-    from scripts.agent_plugin.main import run_tool
+    from src.application.tool_execution import execute_tool as run_tool
 
     alerts = """# Symbols Alerts
 

@@ -59,6 +59,7 @@ def test_multi_tick_and_webui_use_application_facades() -> None:
     assert "build_run_end_payload" in multi_tick_finalization_src
     assert "def build_notify_summary(" in cron_runtime_src
     assert not (ROOT / "src" / "application" / "agent_tools.py").exists()
+    assert not (ROOT / "scripts" / "agent_plugin").exists()
     assert "from src.application.tool_execution import execute_tool" in healthcheck_src
     assert "from src.application.tool_execution import execute_tool" in scan_pipeline_src
     assert "from src.application.tool_execution import execute_tool" in notification_pipeline_src

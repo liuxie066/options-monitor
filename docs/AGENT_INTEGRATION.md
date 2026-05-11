@@ -20,7 +20,7 @@ Implementation ownership:
 - Tool handlers: `src/application/agent_tool_handlers.py`
 - Runtime config helpers: `src/application/agent_tool_config.py`
 - Runtime config initialization/account mutation helpers: `src/application/agent_tool_init_local.py`
-- `scripts/agent_plugin/*` files are compatibility facades for older imports.
+- Public CLI owner: `src/interfaces/agent/cli.py`
 - Runtime tick is not a separate single-account / multi-account split. The live chain is `./om run tick` -> `src.application.multi_account_tick.run_tick`; pass one account for single-account execution or multiple accounts for multi-account execution.
 
 ## Contract

@@ -10,7 +10,7 @@ if str(BASE) not in sys.path:
 
 
 def test_agent_spec_uses_symbols_public_name() -> None:
-    from scripts.agent_plugin.main import build_spec
+    from src.application.tool_execution import build_tool_manifest as build_spec
 
     spec = build_spec()
     tool_names = [str(x.get("name")) for x in spec.get("tools", [])]
@@ -61,7 +61,7 @@ def test_agent_spec_uses_symbols_public_name() -> None:
 
 
 def test_agent_registry_manifest_and_handlers_stay_in_sync() -> None:
-    from scripts.agent_plugin.main import build_spec
+    from src.application.tool_execution import build_tool_manifest as build_spec
     from src.application.agent_tool_handlers import TOOL_HANDLERS
     from src.application.agent_tool_registry import tool_names
 
@@ -75,7 +75,7 @@ def test_agent_registry_manifest_and_handlers_stay_in_sync() -> None:
 
 
 def test_agent_run_unknown_tool_returns_structured_error() -> None:
-    from scripts.agent_plugin.main import run_tool
+    from src.application.tool_execution import execute_tool as run_tool
 
     out = run_tool("does_not_exist", {})
 
