@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from dataclasses import dataclass
 from time import monotonic
@@ -57,9 +58,9 @@ def run_multi_tick_watchdog(
             retry_interval_sec = float(wd_cfg.get("retry_interval_sec", 3.0))
             retry_timeout_sec = float(wd_cfg.get("retry_timeout_sec", 25.0))
             success_threshold = int(wd_cfg.get("success_threshold", 2))
-            # Base subprocess timeout; enough for port check + get_global_state.
-            # When retry is enabled the subprocess itself runs the window, so
-            # add the retry budget on top.
+            # Base watchdog timeout budget; enough for port check + get_global_state.
+            # When retry is enabled the watchdog itself runs the window, so add
+            # the retry budget on top.
             _BASE_WATCHDOG_TIMEOUT_SEC = 35
             watchdog_timeout_sec = (
                 int(retry_timeout_sec) + _BASE_WATCHDOG_TIMEOUT_SEC if retry_enabled else _BASE_WATCHDOG_TIMEOUT_SEC
@@ -78,21 +79,29 @@ def run_multi_tick_watchdog(
                         retry_timeout_sec=retry_timeout_sec,
                         success_threshold=success_threshold,
                     )
-                    payload0 = parse_last_json_obj((wd0.stdout or "") + "\n" + (wd0.stderr or ""))
-                    ok0 = bool(payload0.get("ok")) if payload0 else (wd0.returncode == 0)
+                    if isinstance(wd0, dict):
+                        payload0 = wd0
+                        ok0 = bool(payload0.get("ok"))
+                        returncode = 0 if ok0 else 2
+                        detail_text = json.dumps(payload0, ensure_ascii=False)
+                    else:
+                        payload0 = parse_last_json_obj((wd0.stdout or "") + "\n" + (wd0.stderr or ""))
+                        ok0 = bool(payload0.get("ok")) if payload0 else (wd0.returncode == 0)
+                        returncode = int(wd0.returncode)
+                        detail_text = ((wd0.stdout or "") + "\n" + (wd0.stderr or "")).strip()
                     audit_fn(
                         "tool_call",
                         "opend_watchdog_result",
                         status=("ok" if ok0 else "error"),
                         tool_name="opend_watchdog",
-                        extra={"host": str(host), "port": int(port), "returncode": int(wd0.returncode)},
+                        extra={"host": str(host), "port": int(port), "returncode": returncode},
                     )
                     if not ok0:
                         unhealthy = {
                             "host": host,
                             "port": port,
                             "payload": payload0,
-                            "detail": ((wd0.stdout or "") + "\n" + (wd0.stderr or "")).strip(),
+                            "detail": detail_text,
                         }
                         break
                 except Exception as exc:

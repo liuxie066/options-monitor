@@ -17,7 +17,7 @@ def _ensure_repo_path() -> None:
 
 def test_watchdog_error_code_mapping() -> None:
     _ensure_repo_path()
-    import scripts.opend_watchdog as w
+    import src.infrastructure.opend_watchdog as w
 
     c, _ = w.classify_watchdog_result(None, 'OpenD port not open: 127.0.0.1:11111')
     assert c == 'OPEND_PORT_CLOSED'
@@ -101,7 +101,7 @@ def test_opend_alert_translates_wechat_clawbot_to_openclaw_weixin(monkeypatch) -
 def test_port_retry_loop_recovers_within_window(monkeypatch) -> None:
     """Port recovers after 2 closed checks → retry loop returns True."""
     _ensure_repo_path()
-    import scripts.opend_watchdog as w
+    import src.infrastructure.opend_watchdog as w
 
     call_count = {"n": 0}
 
@@ -136,7 +136,7 @@ def test_port_retry_loop_recovers_within_window(monkeypatch) -> None:
 def test_port_retry_loop_exhausts_window(monkeypatch) -> None:
     """Port never opens → retry loop returns False after timeout."""
     _ensure_repo_path()
-    import scripts.opend_watchdog as w
+    import src.infrastructure.opend_watchdog as w
 
     monkeypatch.setattr(w, "port_open", lambda *_a, **_k: False)
     monkeypatch.setattr(w, "try_start_opend", lambda: (False, "failed"))
@@ -180,7 +180,7 @@ def test_port_retry_loop_exhausts_window(monkeypatch) -> None:
 def test_port_retry_loop_no_start_when_ensure_false(monkeypatch) -> None:
     """With ensure=False, try_start_opend must not be called."""
     _ensure_repo_path()
-    import scripts.opend_watchdog as w
+    import src.infrastructure.opend_watchdog as w
 
     start_called = {"n": 0}
 
@@ -377,4 +377,3 @@ def test_send_opend_recovery_notice_disabled_by_config() -> None:
             r = opend_guard.send_opend_recovery_notice(base, cfg)
         assert r is False
         assert calls == []
-

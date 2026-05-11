@@ -20,6 +20,8 @@ def test_shell_entrypoints_target_src_interfaces() -> None:
 def test_multi_tick_and_webui_use_application_facades() -> None:
     run_webui_src = (ROOT / "run_webui.sh").read_text(encoding="utf-8")
     service_src = (ROOT / "src" / "infrastructure" / "external_services.py").read_text(encoding="utf-8")
+    agent_runtime_src = (ROOT / "src" / "application" / "agent_tool_runtime.py").read_text(encoding="utf-8")
+    pipeline_runtime_src = (ROOT / "src" / "application" / "pipeline_runtime.py").read_text(encoding="utf-8")
     cli_src = (ROOT / "src" / "interfaces" / "cli" / "main.py").read_text(encoding="utf-8")
     om_src = (ROOT / "om").read_text(encoding="utf-8")
     agent_src = (ROOT / "om-agent").read_text(encoding="utf-8")
@@ -43,6 +45,12 @@ def test_multi_tick_and_webui_use_application_facades() -> None:
     assert "from src.application.account_management import add_account, edit_account, remove_account" in webui_interface_src
     assert "from src.application.tool_execution import build_tool_manifest, execute_tool" in webui_interface_src
     assert "src.interfaces.cli.main" in service_src
+    assert "scripts/opend_watchdog.py" not in service_src
+    assert "scripts/doctor_futu.py" not in agent_runtime_src
+    assert "scripts/append_cash_summary.py" not in pipeline_runtime_src
+    assert "from src.application.futu_doctor import run_futu_doctor_checks" in agent_runtime_src
+    assert "from src.application.cash_summary_footer import append_cash_summary_footer" in pipeline_runtime_src
+    assert "from src.infrastructure.opend_watchdog import run_watchdog_check" in service_src
     assert "src.interfaces.cli.main" in om_src
     assert "src.interfaces.agent.cli" in agent_src
     assert "from src.application.multi_account_tick import run_tick" in cli_src

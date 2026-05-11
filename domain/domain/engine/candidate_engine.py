@@ -539,7 +539,7 @@ def evaluate_candidate_return_floor(
 
     annual_v = _coerce_float(annualized_return if annualized_return is not None else normalized.get("annualized_return"))
     min_annual_v = _coerce_float(min_annualized_return)
-    if min_annual_v is not None and annual_v is not None and annual_v < min_annual_v:
+    if min_annual_v is not None and (annual_v is None or annual_v < min_annual_v):
         _reject(
             rejects,
             stage=STAGE_RETURN_FLOOR,
@@ -551,7 +551,7 @@ def evaluate_candidate_return_floor(
 
     net_v = _coerce_float(net_income if net_income is not None else normalized.get("net_income"))
     min_net_v = _coerce_float(min_net_income)
-    if min_net_v is not None and net_v is not None and net_v < min_net_v:
+    if min_net_v is not None and (net_v is None or net_v < min_net_v):
         _reject(
             rejects,
             stage=STAGE_RETURN_FLOOR,
@@ -568,7 +568,7 @@ def evaluate_candidate_return_floor(
             else normalized.get("if_exercised_total_return")
         )
         min_if_exercised_v = _coerce_float(min_if_exercised_total_return)
-        if min_if_exercised_v is not None and if_exercised_v is not None and if_exercised_v < min_if_exercised_v:
+        if min_if_exercised_v is not None and (if_exercised_v is None or if_exercised_v < min_if_exercised_v):
             _reject(
                 rejects,
                 stage=STAGE_RETURN_FLOOR,

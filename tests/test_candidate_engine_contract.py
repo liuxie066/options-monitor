@@ -269,6 +269,24 @@ def test_candidate_engine_stage2_rejects_return_floor() -> None:
     assert [r["reason"] for r in call["rejects"]] == ["return_net_income", "return_if_exercised_total"]
 
 
+def test_candidate_engine_stage2_rejects_missing_threshold_metrics() -> None:
+    from domain.domain.engine import evaluate_candidate_return_floor
+
+    payload = evaluate_candidate_return_floor(
+        _accepted_base_candidate("call"),
+        min_annualized_return=0.1,
+        min_net_income=100,
+        min_if_exercised_total_return=0.05,
+    )
+
+    assert payload["accepted"] is False
+    assert [r["reason"] for r in payload["rejects"]] == [
+        "return_annualized",
+        "return_net_income",
+        "return_if_exercised_total",
+    ]
+
+
 def test_candidate_engine_stage3_risk_warn_does_not_reject_but_reject_mode_does() -> None:
     from domain.domain.engine import evaluate_candidate_risk_filter
 
