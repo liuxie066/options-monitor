@@ -38,7 +38,9 @@ def derive_put_max_strike_from_cash(
         return None
 
     sym_u = canonical_symbol(symbol) or str(symbol or '').strip().upper()
-    want_ccy = symbol_currency(sym_u) or 'USD'
+    want_ccy = symbol_currency(sym_u)
+    if not want_ccy:
+        return None
 
     # 1) cash available in native currency (from holdings)
     # Preferred: direct native-currency cash (USD for US symbols, HKD for HK symbols).

@@ -150,16 +150,35 @@ def build_context(
         if not sym or qty is None:
             continue
 
-        # Keep only what downstream needs.
-        stocks_by_symbol[sym] = {
-            "symbol": sym,
-            "name": asset_name or None,
-            "shares": int(qty),
-            "avg_cost": avg_cost,
-            "currency": currency,
-            "broker": _record_broker_text(f),
-            "account": normalize_account(_as_text(f.get("account"))),
-        }
+        # Keep only what downstream needs. Multiple holdings rows for the same
+        # account/symbol must aggregate; otherwise covered-call capacity can be
+        # undercounted or overwritten by the last row.
+        shares = int(qty)
+        existing = stocks_by_symbol.get(sym)
+        if existing is None:
+            stocks_by_symbol[sym] = {
+                "symbol": sym,
+                "name": asset_name or None,
+                "shares": shares,
+                "avg_cost": avg_cost,
+                "currency": currency,
+                "broker": _record_broker_text(f),
+                "account": normalize_account(_as_text(f.get("account"))),
+            }
+            continue
+
+        prev_shares = int(existing.get("shares") or 0)
+        new_shares = prev_shares + shares
+        prev_cost = safe_float(existing.get("avg_cost"))
+        if prev_cost is not None and avg_cost is not None and new_shares > 0:
+            existing["avg_cost"] = ((prev_cost * prev_shares) + (avg_cost * shares)) / float(new_shares)
+        elif existing.get("avg_cost") in (None, "") and avg_cost is not None:
+            existing["avg_cost"] = avg_cost
+        existing["shares"] = new_shares
+        if not existing.get("name") and asset_name:
+            existing["name"] = asset_name
+        if not existing.get("currency") and currency:
+            existing["currency"] = currency
 
     return {
         "as_of_utc": datetime.now(timezone.utc).isoformat(),
