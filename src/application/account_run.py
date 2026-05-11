@@ -641,8 +641,15 @@ def run_one_account(
     close_advice_cfg = (cfg.get("close_advice") or {}) if isinstance(cfg, dict) else {}
     if bool(close_advice_cfg.get("enabled", False)):
         try:
+            close_advice_run_cfg = cfg
+            if isinstance(cfg, dict):
+                cfg_copy = dict(cfg)
+                close_advice_cfg_copy = dict(close_advice_cfg)
+                close_advice_cfg_copy.setdefault("render_style", "compact")
+                cfg_copy["close_advice"] = close_advice_cfg_copy
+                close_advice_run_cfg = cfg_copy
             close_result = run_close_advice(
-                config=cfg,
+                config=close_advice_run_cfg,
                 context_path=(acct_state_dir / "option_positions_context.json").resolve(),
                 required_data_root=request.shared_required,
                 output_dir=acct_report_dir,
