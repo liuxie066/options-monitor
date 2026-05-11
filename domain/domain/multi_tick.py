@@ -54,6 +54,16 @@ _SCHEDULE_TZ_HK: frozenset[str] = frozenset({
 })
 
 
+def _auto_market_schedule_candidates(cfg: dict[str, Any]) -> tuple[tuple[str, dict[str, Any], str], ...]:
+    data = cfg if isinstance(cfg, dict) else {}
+    out: list[tuple[str, dict[str, Any], str]] = []
+    for schedule_key, default_market in (('schedule_hk', 'HK'), ('schedule', 'US')):
+        schedule_cfg = data.get(schedule_key)
+        if isinstance(schedule_cfg, dict):
+            out.append((schedule_key, schedule_cfg, default_market))
+    return tuple(out)
+
+
 def _infer_market_from_schedule_timezone(schedule_cfg: dict[str, Any]) -> str | None:
     """Infer market label from schedule market_timezone.
 
@@ -64,6 +74,20 @@ def _infer_market_from_schedule_timezone(schedule_cfg: dict[str, Any]) -> str | 
     if tz in _SCHEDULE_TZ_HK:
         return 'HK'
     return None
+
+
+def _resolve_auto_market_for_schedule(
+    *,
+    schedule_key: str,
+    schedule_cfg: dict[str, Any],
+    default_market: str,
+) -> str:
+    if schedule_key == 'schedule_hk':
+        return 'HK'
+    inferred_market = _infer_market_from_schedule_timezone(schedule_cfg)
+    if inferred_market:
+        return inferred_market
+    return default_market
 
 
 def _is_market_hours_for_schedule(now_utc: datetime, schedule_cfg: dict[str, Any]) -> bool:
@@ -97,18 +121,15 @@ def select_markets_to_run(now_utc: datetime, cfg: dict, market_config: str) -> l
     if mc == 'all':
         return ['HK', 'US']
 
-    schedule_hk = (cfg.get('schedule_hk') or {}) if isinstance(cfg, dict) else {}
-    schedule_us = (cfg.get('schedule') or {}) if isinstance(cfg, dict) else {}
-
-    if _is_market_hours_for_schedule(now_utc, schedule_hk):
-        return ['HK']
-
-    if _is_market_hours_for_schedule(now_utc, schedule_us):
-        # When schedule_hk is absent but schedule fires, infer market from timezone.
-        # Prevents HK-timezone schedules from being misclassified as US.
-        if not schedule_hk and _infer_market_from_schedule_timezone(schedule_us) == 'HK':
-            return ['HK']
-        return ['US']
+    for schedule_key, schedule_cfg, default_market in _auto_market_schedule_candidates(cfg):
+        if _is_market_hours_for_schedule(now_utc, schedule_cfg):
+            return [
+                _resolve_auto_market_for_schedule(
+                    schedule_key=schedule_key,
+                    schedule_cfg=schedule_cfg,
+                    default_market=default_market,
+                )
+            ]
 
     return []
 

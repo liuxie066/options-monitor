@@ -67,3 +67,43 @@ def test_select_markets_to_run_schedule_only_hk_timezone_resolves_to_hk() -> Non
     t_before_open = datetime(2026, 4, 1, 0, 0, 0, tzinfo=timezone.utc)
     out2 = select_markets_to_run(t_before_open, cfg, 'auto')
     assert out2 == [], f"Expected [], got {out2}"
+
+
+def test_select_markets_to_run_schedule_only_us_timezone_resolves_to_us() -> None:
+    from domain.domain import select_markets_to_run
+
+    cfg = {
+        'schedule': {
+            'enabled': True,
+            'market_timezone': 'America/New_York',
+            'market_open': '09:30',
+            'market_close': '16:00',
+        },
+    }
+
+    t_in_hours = datetime(2026, 4, 1, 14, 0, 0, tzinfo=timezone.utc)
+    out = select_markets_to_run(t_in_hours, cfg, 'auto')
+    assert out == ['US']
+
+
+def test_select_markets_to_run_prefers_schedule_hk_when_both_markets_are_open() -> None:
+    from domain.domain import select_markets_to_run
+
+    cfg = {
+        'schedule_hk': {
+            'enabled': True,
+            'market_timezone': 'Asia/Hong_Kong',
+            'market_open': '00:00',
+            'market_close': '23:59',
+        },
+        'schedule': {
+            'enabled': True,
+            'market_timezone': 'America/New_York',
+            'market_open': '00:00',
+            'market_close': '23:59',
+        },
+    }
+
+    t_both_open = datetime(2026, 4, 1, 14, 0, 0, tzinfo=timezone.utc)
+    out = select_markets_to_run(t_both_open, cfg, 'auto')
+    assert out == ['HK']
