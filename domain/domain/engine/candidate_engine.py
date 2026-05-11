@@ -235,6 +235,112 @@ def compute_candidate_strategy_score(
     return CandidateStrategyScore(total=float(total), components=components, warnings=tuple(warnings))
 
 
+def _first_float(src: dict[str, Any], *names: str) -> float | None:
+    for name in names:
+        value = _coerce_float(src.get(name))
+        if value is not None:
+            return value
+    return None
+
+
+def _candidate_score_inputs(src: dict[str, Any], *, mode: StrategyMode) -> dict[str, float | None]:
+    if mode == "put":
+        annualized_return = _first_float(src, "annualized_net_return_on_cash_basis")
+        otm_pct = _first_float(src, "otm_pct")
+    else:
+        annualized_return = _first_float(src, "annualized_net_premium_return")
+        otm_pct = _first_float(src, "otm_pct", "strike_above_spot_pct")
+    return {
+        "annualized_return": annualized_return,
+        "net_income": _first_float(src, "net_income"),
+        "spread_ratio": _first_float(src, "spread_ratio"),
+        "open_interest": _first_float(src, "open_interest"),
+        "volume": _first_float(src, "volume"),
+        "delta": _first_float(src, "delta"),
+        "otm_pct": otm_pct,
+        "dte": _first_float(src, "dte"),
+    }
+
+
+_SCORE_COMPONENT_LABELS: dict[str, str] = {
+    "annualized_return": "年化收益",
+    "net_income": "净收入",
+    "liquidity": "流动性",
+    "risk_distance": "风险距离",
+}
+
+_SCORE_WARNING_LABELS: dict[str, str] = {
+    "wide_spread": "价差偏宽",
+}
+
+
+def _primary_score_drivers(components: dict[str, float], *, limit: int = 2) -> list[str]:
+    positive = [
+        (name, float(value))
+        for name, value in components.items()
+        if _coerce_float(value) is not None and float(value) > 0.0
+    ]
+    positive.sort(key=lambda item: (-item[1], item[0]))
+    return [name for name, _value in positive[: max(1, int(limit or 1))]]
+
+
+def _rank_reason(primary_drivers: list[str], warnings: list[str]) -> str:
+    parts: list[str] = []
+    for driver in primary_drivers:
+        if driver == "annualized_return":
+            parts.append("年化收益贡献领先")
+        elif driver == "net_income":
+            parts.append("净收入贡献较高")
+        elif driver == "liquidity":
+            parts.append("流动性评分有正向贡献")
+        elif driver == "risk_distance":
+            parts.append("价外/Delta/DTE 风险距离有正向贡献")
+    if not parts:
+        parts.append("候选通过准入，排序分数主要由默认收益项决定")
+    if warnings:
+        warning_text = "、".join(_SCORE_WARNING_LABELS.get(item, item) for item in warnings)
+        parts.append(f"存在{warning_text}提示")
+    return "；".join(parts)
+
+
+def explain_candidate_rank(
+    row: dict[str, Any] | Any,
+    *,
+    mode: StrategyMode | str,
+    score_weights: CandidateScoreWeights | None = None,
+) -> dict[str, Any]:
+    mode_norm = normalize_strategy_mode(mode)
+    src = row if isinstance(row, dict) else {}
+    rank_key = build_candidate_rank_key(src, mode=mode_norm, score_weights=score_weights)
+    components = {
+        str(name): float(value)
+        for name, value in (rank_key.get("score_components") or {}).items()
+        if _coerce_float(value) is not None
+    }
+    warnings = [str(item) for item in (rank_key.get("score_warnings") or []) if str(item).strip()]
+    primary_drivers = _primary_score_drivers(components)
+    score_inputs = _candidate_score_inputs(src, mode=mode_norm)
+    return {
+        "mode": mode_norm,
+        "symbol": str(src.get("symbol") or "").strip().upper() or None,
+        "contract_symbol": str(src.get("contract_symbol") or src.get("option_symbol") or "").strip() or None,
+        "option_type": str(src.get("option_type") or ("put" if mode_norm == "put" else "call")).strip().lower() or None,
+        "expiration": str(src.get("expiration") or "").strip() or None,
+        "strike": _first_float(src, "strike"),
+        "strategy_score": float(rank_key.get("strategy_score") or 0.0),
+        "annualized_return": rank_key.get("annualized_return"),
+        "net_income": rank_key.get("net_income"),
+        "score_components": components,
+        "score_component_labels": {name: _SCORE_COMPONENT_LABELS.get(name, name) for name in components},
+        "score_inputs": score_inputs,
+        "score_warnings": warnings,
+        "risk_notes": [_SCORE_WARNING_LABELS.get(item, item) for item in warnings],
+        "primary_drivers": primary_drivers,
+        "primary_driver_labels": [_SCORE_COMPONENT_LABELS.get(item, item) for item in primary_drivers],
+        "rank_reason": _rank_reason(primary_drivers, warnings),
+    }
+
+
 def _reject(
     sink: list[dict[str, Any]],
     *,
@@ -791,18 +897,19 @@ def build_candidate_rank_key(
     mode_norm = normalize_strategy_mode(mode)
     src = row if isinstance(row, dict) else {}
     if mode_norm == "put":
-        annual = _coerce_float(src.get("annualized_net_return_on_cash_basis"))
-        net = _coerce_float(src.get("net_income"))
+        score_inputs = _candidate_score_inputs(src, mode=mode_norm)
+        annual = score_inputs["annualized_return"]
+        net = score_inputs["net_income"]
         score = compute_candidate_strategy_score(
             mode=mode_norm,
             annualized_return=annual,
             net_income=net,
-            spread_ratio=_coerce_float(src.get("spread_ratio")),
-            open_interest=_coerce_float(src.get("open_interest")),
-            volume=_coerce_float(src.get("volume")),
-            delta=_coerce_float(src.get("delta")),
-            otm_pct=_coerce_float(src.get("otm_pct")),
-            dte=_coerce_float(src.get("dte")),
+            spread_ratio=score_inputs["spread_ratio"],
+            open_interest=score_inputs["open_interest"],
+            volume=score_inputs["volume"],
+            delta=score_inputs["delta"],
+            otm_pct=score_inputs["otm_pct"],
+            dte=score_inputs["dte"],
             weights=score_weights,
         )
         out: dict[str, Any] = {
@@ -815,18 +922,19 @@ def build_candidate_rank_key(
         }
         return out
 
-    annual = _coerce_float(src.get("annualized_net_premium_return"))
-    net = _coerce_float(src.get("net_income"))
+    score_inputs = _candidate_score_inputs(src, mode=mode_norm)
+    annual = score_inputs["annualized_return"]
+    net = score_inputs["net_income"]
     score = compute_candidate_strategy_score(
         mode=mode_norm,
         annualized_return=annual,
         net_income=net,
-        spread_ratio=_coerce_float(src.get("spread_ratio")),
-        open_interest=_coerce_float(src.get("open_interest")),
-        volume=_coerce_float(src.get("volume")),
-        delta=_coerce_float(src.get("delta")),
-        otm_pct=_coerce_float(src.get("otm_pct") or src.get("strike_above_spot_pct")),
-        dte=_coerce_float(src.get("dte")),
+        spread_ratio=score_inputs["spread_ratio"],
+        open_interest=score_inputs["open_interest"],
+        volume=score_inputs["volume"],
+        delta=score_inputs["delta"],
+        otm_pct=score_inputs["otm_pct"],
+        dte=score_inputs["dte"],
         weights=score_weights,
     )
     out = {

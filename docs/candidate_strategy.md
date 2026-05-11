@@ -233,6 +233,14 @@ Covered Call 会结合持仓 context 计算：
 
 最终 CSV、summary 和 alerts 使用的是当前生产实现里的简单稳定排序，不再把旧文档里的理想化阶段图当成唯一真相。
 
+需要解释“为什么这个候选排在前面”时，用同一套排序核心：
+
+- `build_candidate_rank_key(...)` 生成排序分数和排序 tuple
+- `explain_candidate_rank(...)` 返回分数组件、输入指标、风险提示和中文排序原因
+- Agent 可通过 `candidate_rank_explain` 读取已有候选 CSV 做只读诊断
+
+`candidate_rank_explain` 不重新扫描、不发通知、不写报告，只解释已有候选。
+
 ---
 
 ## 7. 当前真实代码入口

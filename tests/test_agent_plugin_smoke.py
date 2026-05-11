@@ -1750,6 +1750,65 @@ def test_scan_opportunities_returns_summary_fields(monkeypatch, tmp_path: Path) 
     assert out["data"]["top_candidates"][0]["symbol"] == "NVDA"
 
 
+def test_candidate_rank_explain_reads_existing_candidate_csv(tmp_path: Path) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    candidate_path = tmp_path / "sell_put_candidates_labeled.csv"
+    pd.DataFrame(
+        [
+            {
+                "symbol": "NVDA",
+                "contract_symbol": "NVDA_PUT_WIDE",
+                "option_type": "put",
+                "expiration": "2026-06-19",
+                "strike": 100,
+                "annualized_net_return_on_cash_basis": 0.120,
+                "net_income": 100,
+                "spread_ratio": 0.95,
+                "open_interest": 1,
+                "volume": 0,
+                "delta": -0.20,
+                "otm_pct": 0.08,
+                "dte": 30,
+            },
+            {
+                "symbol": "NVDA",
+                "contract_symbol": "NVDA_PUT_LIQUID",
+                "option_type": "put",
+                "expiration": "2026-06-19",
+                "strike": 95,
+                "annualized_net_return_on_cash_basis": 0.115,
+                "net_income": 100,
+                "spread_ratio": 0.05,
+                "open_interest": 500,
+                "volume": 20,
+                "delta": -0.15,
+                "otm_pct": 0.10,
+                "dte": 30,
+            },
+        ]
+    ).to_csv(candidate_path, index=False)
+
+    out = run_tool(
+        "candidate_rank_explain",
+        {
+            "candidate_path": str(candidate_path),
+            "mode": "put",
+            "top_n": 1,
+            "score_weights": {"liquidity": 0.02},
+            "compare_baseline": True,
+        },
+    )
+
+    assert out["ok"] is True
+    assert out["data"]["row_count"] == 2
+    assert out["data"]["ranked"][0]["contract_symbol"] == "NVDA_PUT_LIQUID"
+    assert out["data"]["ranked"][0]["score_components"]["liquidity"] > 0
+    assert "流动性" in out["data"]["ranked"][0]["primary_driver_labels"]
+    assert out["data"]["groups"][0]["baseline"]["changes"][0]["contract_symbol"] == "NVDA_PUT_LIQUID"
+    assert out["meta"]["source_files"][0]["path"].endswith("sell_put_candidates_labeled.csv")
+
+
 def test_manage_symbols_list_and_dry_run_add(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 
