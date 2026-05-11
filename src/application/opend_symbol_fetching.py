@@ -18,7 +18,7 @@ Notes:
 
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -74,6 +74,24 @@ from src.application.option_chain_fetching import (
     fetch_option_chains,
     prune_option_chain_cache,
 )
+
+_SNAPSHOT_KEEP_COLUMNS = [
+    'code',
+    'last_price',
+    'bid_price',
+    'ask_price',
+    'volume',
+    'option_open_interest',
+    'option_implied_volatility',
+    'option_delta',
+    'option_contract_multiplier',
+    'lot_size',
+    'open_interest',
+    'implied_volatility',
+    'delta',
+    'bid',
+    'ask',
+]
 
 def _chain_cache_path(base_dir: Path, u_code: str) -> Path:
     safe = u_code.replace('.', '_')
@@ -214,6 +232,132 @@ def _append_opend_observation_error(
             "message": message,
         }
     )
+
+
+def _keep_snapshot_record_columns(snap: Any, keep_columns: list[str]) -> tuple[list[dict[str, Any]], list[str]]:
+    cols = set(snap.columns)
+    keep = [c for c in keep_columns if c in cols]
+    if not keep or 'code' not in keep:
+        return [], []
+    records: list[dict[str, Any]] = []
+    try:
+        records = [
+            dict(rec)
+            for rec in snap[keep].to_dict(orient='records')
+            if isinstance(rec, dict)
+        ]
+    except Exception:
+        try:
+            for _, row in snap.iterrows():
+                records.append({k: row.get(k) for k in keep})
+        except Exception:
+            return [], keep
+    return records, keep
+
+
+def _fallback_fetch_missing_snapshots(
+    *,
+    missing_codes: list[str],
+    gateway: Any,
+    snapshot_limit: Any,
+    effective_base_dir: Path,
+    snap_map: dict[str, dict[str, Any]],
+    snapshot_errors: list[dict[str, Any]],
+    max_fallback_codes: int,
+    fallback_batch_size: int,
+    keep_columns: list[str],
+    no_retry: bool,
+    retry_max_attempts: int,
+    retry_time_budget_sec: float,
+    retry_base_delay_sec: float,
+    retry_max_delay_sec: float,
+) -> tuple[int, int]:
+    if not missing_codes or int(max_fallback_codes) <= 0:
+        return 0, 0
+
+    allowed = list(missing_codes[: int(max_fallback_codes)])
+    dropped = max(0, len(missing_codes) - len(allowed))
+    failed_count = 0
+    if dropped > 0:
+        snapshot_errors.append(
+            {
+                'stage': 'market_snapshot_fallback',
+                'batch_start': len(allowed),
+                'batch_size': dropped,
+                'error_code': 'FALLBACK_BUDGET_EXCEEDED',
+                'message': f'fallback budget exceeded: dropped {dropped} codes',
+            }
+        )
+        failed_count += dropped
+
+    filled_count = 0
+    batch_size = max(1, int(fallback_batch_size))
+    for i in range(0, len(allowed), batch_size):
+        batch = allowed[i:i + batch_size]
+        try:
+            snap = retry_futu_gateway_call(
+                'get_market_snapshot(fallback)',
+                lambda: rate_limited_opend_call(
+                    base_dir=effective_base_dir,
+                    endpoint='market_snapshot',
+                    **snapshot_limit.call_kwargs(),
+                    call=lambda: gateway.get_snapshot(batch),
+                ),
+                no_retry=no_retry,
+                retry_max_attempts=retry_max_attempts,
+                retry_time_budget_sec=retry_time_budget_sec,
+                retry_base_delay_sec=retry_base_delay_sec,
+                retry_max_delay_sec=retry_max_delay_sec,
+                quiet=True,
+            )
+        except Exception as exc:
+            snapshot_errors.append(
+                {
+                    'stage': 'market_snapshot_fallback',
+                    'batch_start': i,
+                    'batch_size': len(batch),
+                    'error_code': 'FALLBACK_FAILED',
+                    'message': str(exc),
+                }
+            )
+            failed_count += len(batch)
+            continue
+
+        if snap is None or snap.empty:
+            snapshot_errors.append(
+                {
+                    'stage': 'market_snapshot_fallback',
+                    'batch_start': i,
+                    'batch_size': len(batch),
+                    'error_code': 'FALLBACK_FAILED',
+                    'message': 'empty fallback snapshot',
+                }
+            )
+            failed_count += len(batch)
+            continue
+
+        records, keep = _keep_snapshot_record_columns(snap, keep_columns)
+        if not keep:
+            snapshot_errors.append(
+                {
+                    'stage': 'market_snapshot_fallback',
+                    'batch_start': i,
+                    'batch_size': len(batch),
+                    'error_code': 'FALLBACK_FAILED',
+                    'message': 'fallback snapshot missing code column',
+                }
+            )
+            failed_count += len(batch)
+            continue
+
+        filled_before = len(snap_map)
+        for rec in records:
+            code = str(rec.get('code') or '')
+            if code:
+                snap_map[code] = rec
+        filled_count += max(0, len(snap_map) - filled_before)
+
+    return filled_count, failed_count
 
 
 def get_spot_opend(
@@ -393,6 +537,8 @@ class FetchSymbolRequest:
     expiration_max_calls: int = 30
     gateway: Any = None
     snapshot_batch_size: int | None = None
+    snapshot_fallback_max_codes: int = 100
+    snapshot_fallback_batch_size: int = 20
 
     @property
     def effective_base_dir(self) -> Path:
@@ -413,7 +559,7 @@ class FetchSymbolRequest:
         )
 
 
-def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = '127.0.0.1', port: int = 11111, spot_override: float | None = None, *, base_dir: Path | None = None, option_types: str = 'put,call', min_strike: float | None = None, max_strike: float | None = None, side_strike_windows: dict[str, dict[str, float | None]] | None = None, min_dte: int | None = None, max_dte: int | None = None, explicit_expirations: list[str] | None = None, retry_max_attempts: int = 4, retry_time_budget_sec: float = 8.0, retry_base_delay_sec: float = 0.8, retry_max_delay_sec: float = 6.0, no_retry: bool = False, chain_cache: bool = False, chain_cache_force_refresh: bool = False, freshness_policy: str = 'cache_first', max_wait_sec: float = 90.0, option_chain_window_sec: float = 30.0, option_chain_max_calls: int = 10, snapshot_max_wait_sec: float = 30.0, snapshot_window_sec: float = 30.0, snapshot_max_calls: int = 60, expiration_max_wait_sec: float = 30.0, expiration_window_sec: float = 30.0, expiration_max_calls: int = 30, gateway: Any = None, snapshot_batch_size: int | None = None) -> dict[str, Any]:
+def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = '127.0.0.1', port: int = 11111, spot_override: float | None = None, *, base_dir: Path | None = None, option_types: str = 'put,call', min_strike: float | None = None, max_strike: float | None = None, side_strike_windows: dict[str, dict[str, float | None]] | None = None, min_dte: int | None = None, max_dte: int | None = None, explicit_expirations: list[str] | None = None, retry_max_attempts: int = 4, retry_time_budget_sec: float = 8.0, retry_base_delay_sec: float = 0.8, retry_max_delay_sec: float = 6.0, no_retry: bool = False, chain_cache: bool = False, chain_cache_force_refresh: bool = False, freshness_policy: str = 'cache_first', max_wait_sec: float = 90.0, option_chain_window_sec: float = 30.0, option_chain_max_calls: int = 10, snapshot_max_wait_sec: float = 30.0, snapshot_window_sec: float = 30.0, snapshot_max_calls: int = 60, expiration_max_wait_sec: float = 30.0, expiration_window_sec: float = 30.0, expiration_max_calls: int = 30, gateway: Any = None, snapshot_batch_size: int | None = None, snapshot_fallback_max_codes: int = 100, snapshot_fallback_batch_size: int = 20) -> dict[str, Any]:
     return fetch_symbol_request(
         FetchSymbolRequest(
             symbol=symbol,
@@ -448,11 +594,32 @@ def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = 
             expiration_max_calls=expiration_max_calls,
             gateway=gateway,
             snapshot_batch_size=snapshot_batch_size,
+            snapshot_fallback_max_codes=snapshot_fallback_max_codes,
+            snapshot_fallback_batch_size=snapshot_fallback_batch_size,
         )
     )
 
 
-def fetch_symbol_request(request: FetchSymbolRequest) -> dict[str, Any]:
+def fetch_symbol_request(
+    request: FetchSymbolRequest,
+    *,
+    snapshot_fallback_max_codes: int | None = None,
+    snapshot_fallback_batch_size: int | None = None,
+) -> dict[str, Any]:
+    if snapshot_fallback_max_codes is not None or snapshot_fallback_batch_size is not None:
+        request = replace(
+            request,
+            snapshot_fallback_max_codes=(
+                int(snapshot_fallback_max_codes)
+                if snapshot_fallback_max_codes is not None
+                else request.snapshot_fallback_max_codes
+            ),
+            snapshot_fallback_batch_size=(
+                int(snapshot_fallback_batch_size)
+                if snapshot_fallback_batch_size is not None
+                else request.snapshot_fallback_batch_size
+            ),
+        )
     symbol = request.symbol
     limit_expirations = request.limit_expirations
     host = request.host
@@ -735,7 +902,10 @@ def fetch_symbol_request(request: FetchSymbolRequest) -> dict[str, Any]:
         # Build a minimal snapshot map directly (avoid concatenating large DataFrames / storing Series for memory efficiency)
         snap_map: dict[str, dict[str, Any]] = {}
         snapshot_errors: list[dict[str, Any]] = []
+        snapshot_fallback_filled = 0
+        snapshot_fallback_failed = 0
         BATCH = int(request.snapshot_batch_size) if request.snapshot_batch_size else DEFAULT_OPEND_BATCH_MARKET_SNAPSHOT
+        keep_columns = list(_SNAPSHOT_KEEP_COLUMNS)
         for i in range(0, len(option_codes), BATCH):
             batch = option_codes[i:i+BATCH]
             try:
@@ -768,45 +938,34 @@ def fetch_symbol_request(request: FetchSymbolRequest) -> dict[str, Any]:
             if snap is None or snap.empty:
                 continue
 
-            # Extract only the columns we actually use downstream.
-            cols = set(snap.columns)
-            want = [
-                'code',
-                'last_price',
-                'bid_price',
-                'ask_price',
-                'volume',
-                'option_open_interest',
-                'option_implied_volatility',
-                'option_delta',
-                'option_contract_multiplier',
-                # fallbacks that sometimes appear
-                'lot_size',
-                'open_interest',
-                'implied_volatility',
-                'delta',
-                'bid',
-                'ask',
-            ]
-            keep = [c for c in want if c in cols]
-            if not keep or 'code' not in keep:
+            records, keep = _keep_snapshot_record_columns(snap, keep_columns)
+            if not keep:
                 continue
 
-            try:
-                for rec in snap[keep].to_dict(orient='records'):
-                    code = str(rec.get('code') or '')
-                    if code:
-                        snap_map[code] = rec
-            except Exception:
-                # Fallback: slower but robust
-                try:
-                    for _, r in snap.iterrows():
-                        code = str(r.get('code') or '')
-                        if not code:
-                            continue
-                        snap_map[code] = {k: r.get(k) for k in keep}
-                except Exception:
-                    pass
+            for rec in records:
+                code = str(rec.get('code') or '')
+                if code:
+                    snap_map[code] = rec
+
+        if option_codes and request.snapshot_fallback_max_codes > 0:
+            missing = [c for c in option_codes if c not in snap_map]
+            if missing:
+                snapshot_fallback_filled, snapshot_fallback_failed = _fallback_fetch_missing_snapshots(
+                    missing_codes=missing,
+                    gateway=gateway,
+                    snapshot_limit=snapshot_limit,
+                    effective_base_dir=effective_base_dir,
+                    snap_map=snap_map,
+                    snapshot_errors=snapshot_errors,
+                    max_fallback_codes=request.snapshot_fallback_max_codes,
+                    fallback_batch_size=request.snapshot_fallback_batch_size,
+                    keep_columns=keep_columns,
+                    no_retry=no_retry,
+                    retry_max_attempts=retry_max_attempts,
+                    retry_time_budget_sec=retry_time_budget_sec,
+                    retry_base_delay_sec=retry_base_delay_sec,
+                    retry_max_delay_sec=retry_max_delay_sec,
+                )
 
         rows: list[dict[str, Any]] = []
 
@@ -952,6 +1111,8 @@ def fetch_symbol_request(request: FetchSymbolRequest) -> dict[str, Any]:
                 'opend_call_count': int(fetch_result_meta.get('opend_call_count') or 0),
                 'option_codes': len(option_codes),
                 'snapshots_rows': int(len(snap_map)),
+                'snapshot_fallback_filled': int(snapshot_fallback_filled),
+                'snapshot_fallback_failed': int(snapshot_fallback_failed),
                 'snapshot_errors': snapshot_errors,
                 'spot_errors': spot_errors,
                 'side_strike_windows': side_strike_windows or {},
