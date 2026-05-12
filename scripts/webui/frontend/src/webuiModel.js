@@ -39,11 +39,19 @@ export function emptyEditor(configKey) {
     marketData: { source: 'OpenD', host: '', port: '', mode: 'compat_global' },
     accounts: [],
     notifications: {
-      channel: 'feishu', target: '', appId: '', appSecret: '',
+      provider: 'openclaw', channel: 'openclaw-weixin', target: '', appId: '', appSecret: '',
       secretsFile: 'secrets/notifications.feishu.app.json',
       includeCashFooter: true, cashFooterAccounts: [], quietHoursStart: '', quietHoursEnd: '', hasCredentials: false,
     },
   };
+}
+
+function normalizeNotificationProvider(provider, channel) {
+  const value = String(provider || '').trim().toLowerCase();
+  if (value) return value;
+  const channelValue = String(channel || '').trim().toLowerCase();
+  if (channelValue === 'feishu' || channelValue === 'feishu_app') return 'feishu_app';
+  return 'openclaw';
 }
 
 export function buildGlobalForm(summary, editor) {
@@ -75,7 +83,8 @@ export function buildGlobalForm(summary, editor) {
       medium_remaining_annualized_max: closeAdvice.medium_remaining_annualized_max == null ? '' : String(closeAdvice.medium_remaining_annualized_max),
     },
     notifications: {
-      channel: String(editor?.notifications?.channel || notifications.channel || 'feishu'),
+      provider: normalizeNotificationProvider(editor?.notifications?.provider || notifications.provider, editor?.notifications?.channel || notifications.channel),
+      channel: String(editor?.notifications?.channel || notifications.channel || 'openclaw-weixin'),
       target: String(editor?.notifications?.target || notifications.target || ''),
       appId: String(editor?.notifications?.appId || ''),
       appSecret: String(editor?.notifications?.appSecret || ''),

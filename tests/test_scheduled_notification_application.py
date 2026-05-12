@@ -25,7 +25,7 @@ def test_build_per_account_delivery_batch_supports_one_account_message() -> None
         }
 
     decision, batch, target = build_per_account_delivery_batch(
-        channel="feishu",
+        channel="openclaw-weixin",
         target="user:test",
         account_messages={"sy": "[sy]\nhello"},
         should_notify_window=True,
@@ -56,7 +56,7 @@ def test_build_per_account_delivery_batch_supports_skip_paths() -> None:
         }
 
     decision, batch, target = build_per_account_delivery_batch(
-        channel="feishu",
+        channel="openclaw-weixin",
         target="user:test",
         account_messages={"lx": "hello", "sy": "world"},
         no_send=True,
@@ -77,7 +77,7 @@ def test_build_per_account_delivery_batch_builds_delivery_batch() -> None:
             return payload
 
     decision, batch, target = build_per_account_delivery_batch(
-        channel="feishu",
+        channel="openclaw-weixin",
         target="user:test",
         account_messages={"lx": "hello"},
         delivery_plan_cls=FakeDeliveryPlan,
@@ -145,6 +145,69 @@ def test_prepare_per_account_messages_keeps_candidate_messages_when_threshold_me
     assert out.account_messages == {"lx": "hello"}
     assert out.threshold_met is True
     assert out.used_heartbeat is False
+    assert out.heartbeat_accounts == ()
+
+
+def test_prepare_per_account_messages_adds_heartbeat_for_missing_accounts_when_candidates_exist() -> None:
+    from src.application.scheduled_notification import prepare_per_account_messages
+
+    class FakeSnapshot:
+        @classmethod
+        def from_payload(cls, payload):
+            return SimpleNamespace(payload=dict(payload["payload"]))
+
+    out = prepare_per_account_messages(
+        notify_candidates=["candidate-a"],
+        results=["result-a", "result-b"],
+        now_bj="BJ_NOW",
+        cash_footer_lines=["cash"],
+        cash_footer_for_account_fn=lambda lines, account: [f"{account}:{len(lines)}"],
+        build_account_message_fn=lambda *args, **kwargs: "unused",
+        build_account_messages_fn=lambda **kwargs: {"lx": "candidate"},
+        build_no_candidate_account_messages_fn=lambda **kwargs: {
+            "lx": "lx-heartbeat",
+            "sy": "sy-heartbeat",
+        },
+        as_of_utc="2026-04-25T00:00:00Z",
+        snapshot_cls=FakeSnapshot,
+        engine_entrypoint=lambda **kwargs: {"notify_threshold": {"threshold_met": True}},
+    )
+
+    assert out.messages_by_account == {"lx": "candidate", "sy": "sy-heartbeat"}
+    assert out.threshold_met is True
+    assert out.used_heartbeat is True
+    assert out.heartbeat_accounts == ("sy",)
+
+
+def test_prepare_per_account_messages_adds_heartbeat_for_lx_when_sy_has_candidates() -> None:
+    from src.application.scheduled_notification import prepare_per_account_messages
+
+    class FakeSnapshot:
+        @classmethod
+        def from_payload(cls, payload):
+            return SimpleNamespace(payload=dict(payload["payload"]))
+
+    out = prepare_per_account_messages(
+        notify_candidates=["candidate-a"],
+        results=["result-a", "result-b"],
+        now_bj="BJ_NOW",
+        cash_footer_lines=["cash"],
+        cash_footer_for_account_fn=lambda lines, account: [f"{account}:{len(lines)}"],
+        build_account_message_fn=lambda *args, **kwargs: "unused",
+        build_account_messages_fn=lambda **kwargs: {"sy": "candidate"},
+        build_no_candidate_account_messages_fn=lambda **kwargs: {
+            "lx": "lx-heartbeat",
+            "sy": "sy-heartbeat",
+        },
+        as_of_utc="2026-04-25T00:00:00Z",
+        snapshot_cls=FakeSnapshot,
+        engine_entrypoint=lambda **kwargs: {"notify_threshold": {"threshold_met": True}},
+    )
+
+    assert out.messages_by_account == {"sy": "candidate", "lx": "lx-heartbeat"}
+    assert out.threshold_met is True
+    assert out.used_heartbeat is True
+    assert out.heartbeat_accounts == ("lx",)
 
 
 def test_prepare_per_account_messages_falls_back_to_heartbeat() -> None:
@@ -179,6 +242,7 @@ def test_prepare_per_account_messages_falls_back_to_heartbeat() -> None:
     assert out.messages_by_account == {"lx": "heartbeat"}
     assert out.threshold_met is True
     assert out.used_heartbeat is True
+    assert out.heartbeat_accounts == ("lx",)
 
 
 def test_prepare_multi_account_notification_collects_candidates_and_cash_footer() -> None:
@@ -258,6 +322,35 @@ def test_prepare_multi_account_notification_collects_candidates_and_cash_footer(
     }
     assert seen["message_kwargs"]["notify_candidates"] == ["candidate-a", "candidate-b"]
     assert seen["message_kwargs"]["cash_footer_lines"] == ["cash-line"]
+
+
+def test_build_notify_summary_records_run_level_delivery_counts() -> None:
+    from src.application.cron_runtime import apply_notify_results_to_tick_metrics, build_notify_summary
+
+    summary = build_notify_summary(
+        sent_accounts=["lx"],
+        notify_failures=[{"account": "sy", "error_code": "SEND_TIMEOUT"}],
+        total_accounts=2,
+        send_attempted_count=2,
+        send_confirmed_count=1,
+    )
+    tick_metrics: dict[str, object] = {}
+
+    apply_notify_results_to_tick_metrics(
+        tick_metrics=tick_metrics,
+        no_send=False,
+        sent_accounts=["lx"],
+        notify_failures=[{"account": "sy", "error_code": "SEND_TIMEOUT"}],
+        notify_summary=summary,
+    )
+
+    assert summary["account_messages_count"] == 2
+    assert summary["send_attempted_count"] == 2
+    assert summary["send_confirmed_count"] == 1
+    assert tick_metrics["account_messages_count"] == 2
+    assert tick_metrics["send_attempted_count"] == 2
+    assert tick_metrics["send_confirmed_count"] == 1
+    assert tick_metrics["reason"] == "sent_partial_notify_failure"
 
 
 def test_mark_no_candidate_notification_metrics_updates_matching_accounts_only() -> None:

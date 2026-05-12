@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from dataclasses import dataclass
 from time import monotonic, sleep
 from typing import Any, Callable
@@ -22,6 +23,7 @@ class PreparedPerAccountMessages:
     messages_by_account: dict[str, str]
     threshold_met: bool
     used_heartbeat: bool
+    heartbeat_accounts: tuple[str, ...] = ()
 
     @property
     def account_messages(self) -> dict[str, str]:
@@ -96,9 +98,23 @@ class AccountDeliveryBatch:
 class PerAccountSendExecution:
     sent_accounts: list[str]
     notify_failures: list[dict[str, object]]
+    attempted_accounts: list[str]
 
-NOTIFY_SEND_MAX_ATTEMPTS = 1
-NOTIFY_SEND_RETRY_DELAYS_SEC: tuple[float, ...] = ()
+    @property
+    def send_attempted_count(self) -> int:
+        return len(self.attempted_accounts)
+
+    @property
+    def send_confirmed_count(self) -> int:
+        return len(self.sent_accounts)
+
+    @property
+    def send_failed_count(self) -> int:
+        return len(self.notify_failures)
+
+NOTIFY_SEND_MAX_ATTEMPTS = 2
+NOTIFY_SEND_RETRY_DELAYS_SEC: tuple[float, ...] = (1.0,)
+NOTIFY_SEND_RETRYABLE_ERROR_CODES = {"SEND_FAILED", "SEND_EXCEPTION"}
 
 
 def _snapshot_payload_dict(
@@ -187,6 +203,35 @@ def snapshot_account_messages(
     return {str(k): str(v) for k, v in raw_account_messages.items()}
 
 
+def _normalized_account_label(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _merge_missing_account_messages(
+    *,
+    primary_messages: dict[str, str],
+    fallback_messages: dict[str, str],
+) -> tuple[dict[str, str], tuple[str, ...]]:
+    merged = dict(primary_messages)
+    present_accounts = {
+        account
+        for account in (_normalized_account_label(key) for key in primary_messages)
+        if account
+    }
+    added_accounts: list[str] = []
+
+    for raw_account, raw_message in fallback_messages.items():
+        account = _normalized_account_label(raw_account)
+        message = str(raw_message or "")
+        if not account or account in present_accounts or not message.strip():
+            continue
+        merged[str(raw_account)] = message
+        present_accounts.add(account)
+        added_accounts.append(account)
+
+    return merged, tuple(added_accounts)
+
+
 def prepare_per_account_messages(
     *,
     notify_candidates: list[Any],
@@ -219,10 +264,27 @@ def prepare_per_account_messages(
         notify_min_accounts=1,
     ).get("notify_threshold") or {}
     if bool(notify_threshold.get("threshold_met")):
+        no_candidate_messages = build_no_candidate_account_messages_fn(
+            results=results,
+            now_bj=now_bj,
+            cash_footer_lines=cash_footer_lines,
+            cash_footer_for_account_fn=cash_footer_for_account_fn,
+        )
+        account_messages, heartbeat_accounts = _merge_missing_account_messages(
+            primary_messages=account_messages,
+            fallback_messages=no_candidate_messages,
+        )
+        if heartbeat_accounts:
+            account_messages = snapshot_account_messages(
+                account_messages=account_messages,
+                as_of_utc=as_of_utc,
+                snapshot_cls=snapshot_cls,
+            )
         return PreparedPerAccountMessages(
             messages_by_account=account_messages,
             threshold_met=True,
-            used_heartbeat=False,
+            used_heartbeat=bool(heartbeat_accounts),
+            heartbeat_accounts=heartbeat_accounts,
         )
 
     account_messages = build_no_candidate_account_messages_fn(
@@ -239,6 +301,13 @@ def prepare_per_account_messages(
         messages_by_account=account_messages,
         threshold_met=bool(notify_threshold.get("threshold_met")),
         used_heartbeat=bool(notify_threshold.get("threshold_met")),
+        heartbeat_accounts=tuple(
+            account
+            for account in (_normalized_account_label(key) for key in account_messages)
+            if account
+        )
+        if bool(notify_threshold.get("threshold_met"))
+        else (),
     )
 
 def query_multi_account_cash_footer_lines(
@@ -350,6 +419,76 @@ def _notify_error_code(send_tool_dto: dict[str, Any]) -> str:
     return "SEND_UNCONFIRMED" if bool(send_tool_dto.get("command_ok")) else "SEND_FAILED"
 
 
+def _tail_text(value: Any, *, limit: int = 500) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        text = value.decode("utf-8", errors="replace")
+    else:
+        text = str(value)
+    return text[-int(limit):]
+
+
+def _coerce_returncode(value: Any, *, default: int) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return int(default)
+
+
+def _retry_delay_for_attempt(attempt: int, retry_delays_sec: tuple[float, ...]) -> float:
+    if not retry_delays_sec:
+        return 0.0
+    idx = min(max(0, int(attempt) - 1), len(retry_delays_sec) - 1)
+    try:
+        return max(0.0, float(retry_delays_sec[idx] or 0.0))
+    except Exception:
+        return 0.0
+
+
+def _should_retry_send(*, error_code: str | None, attempt: int, attempts: int, message_id: Any) -> bool:
+    if int(attempt) >= int(attempts):
+        return False
+    if message_id:
+        return False
+    return str(error_code or "") in NOTIFY_SEND_RETRYABLE_ERROR_CODES
+
+
+def _confirmed_from_send_tool(send_tool_dto: dict[str, Any], message_id: Any) -> bool:
+    if not message_id:
+        return False
+    return bool(
+        send_tool_dto.get("delivery_confirmed")
+        or send_tool_dto.get("ok")
+        or send_tool_dto.get("command_ok")
+    )
+
+
+def build_notify_failure_summary_message(
+    *,
+    run_id: str,
+    sent_accounts: list[str],
+    notify_failures: list[dict[str, object]],
+) -> str:
+    lines = [
+        "# 多账户通知投递异常",
+        "",
+        f"- run_id: `{run_id}`",
+        f"- 已确认账户: {', '.join(sent_accounts) if sent_accounts else '无'}",
+        "- 失败账户:",
+    ]
+    for failure in notify_failures:
+        account = str(failure.get("account") or "").strip() or "unknown"
+        error_code = str(failure.get("error_code") or "SEND_FAILED")
+        attempts = int(failure.get("attempts") or 0)
+        message_id = failure.get("message_id") or "none"
+        confirmed = bool(failure.get("delivery_confirmed"))
+        lines.append(
+            f"  - {account}: {error_code} attempts={attempts} confirmed={confirmed} message_id={message_id}"
+        )
+    return "\n".join(lines).strip()
+
+
 def send_account_message_with_retry(
     *,
     base,
@@ -375,27 +514,90 @@ def send_account_message_with_retry(
 
     for attempt in range(1, attempts + 1):
         t_notify0 = monotonic()
-        send = send_fn(
-            base=base,
-            channel=str(channel),
-            target=str(target),
-            message=message,
-        )
-        send_tool_dto = _normalize_delivery_output(normalize_notify_output=normalize_fn, send=send)
-        message_id = send_tool_dto.get("message_id")
-        ok = bool(send_tool_dto.get("ok") or (bool(send_tool_dto.get("command_ok")) and message_id))
-        error_code = None if ok else _notify_error_code(send_tool_dto)
-        record = {
+        start_record = {
             "account": account,
             "attempt": attempt,
             "max_attempts": attempts,
-            "returncode": int(send.returncode),
-            "message_id": message_id,
-            "command_ok": bool(send_tool_dto.get("command_ok")),
-            "delivery_confirmed": bool(ok),
-            "stdout_tail": send_tool_dto.get("stdout_tail"),
-            "stderr_tail": send_tool_dto.get("stderr_tail"),
+            "channel": str(channel),
+            "target_set": bool(str(target or "")),
+            "message_len": len(str(message or "")),
         }
+        audit_fn(
+            "notify",
+            "send_start",
+            run_id=run_id,
+            account=account,
+            status="start",
+            target=str(target),
+            extra=dict(start_record),
+        )
+
+        send_tool_dto: dict[str, Any] = {}
+        try:
+            send = send_fn(
+                base=base,
+                channel=str(channel),
+                target=str(target),
+                message=message,
+            )
+            send_tool_dto = _normalize_delivery_output(normalize_notify_output=normalize_fn, send=send)
+            raw_message_id = send_tool_dto.get("message_id")
+            message_id = None if raw_message_id is None or str(raw_message_id).strip() == "" else str(raw_message_id)
+            ok = _confirmed_from_send_tool(send_tool_dto, message_id)
+            error_code = None if ok else _notify_error_code(send_tool_dto)
+            returncode = _coerce_returncode(
+                getattr(send, "returncode", send_tool_dto.get("returncode")),
+                default=(0 if bool(send_tool_dto.get("command_ok")) else 1),
+            )
+            record = {
+                **start_record,
+                "returncode": returncode,
+                "message_id": message_id,
+                "command_ok": bool(send_tool_dto.get("command_ok")),
+                "delivery_confirmed": bool(ok),
+                "stdout_tail": send_tool_dto.get("stdout_tail"),
+                "stderr_tail": send_tool_dto.get("stderr_tail"),
+                "error_code": error_code,
+            }
+        except subprocess.TimeoutExpired as exc:
+            message_id = None
+            ok = False
+            error_code = "SEND_TIMEOUT"
+            record = {
+                **start_record,
+                "returncode": 124,
+                "message_id": None,
+                "command_ok": False,
+                "delivery_confirmed": False,
+                "stdout_tail": _tail_text(getattr(exc, "stdout", None) or getattr(exc, "output", None)),
+                "stderr_tail": _tail_text(getattr(exc, "stderr", None)),
+                "error_code": error_code,
+                "timeout_sec": getattr(exc, "timeout", None),
+                "exception_type": type(exc).__name__,
+            }
+        except Exception as exc:
+            message_id = None
+            ok = False
+            error_code = "SEND_EXCEPTION"
+            record = {
+                **start_record,
+                "returncode": 1,
+                "message_id": None,
+                "command_ok": False,
+                "delivery_confirmed": False,
+                "stdout_tail": "",
+                "stderr_tail": _tail_text(f"{type(exc).__name__}: {exc}"),
+                "error_code": error_code,
+                "exception_type": type(exc).__name__,
+            }
+
+        will_retry = _should_retry_send(
+            error_code=error_code,
+            attempt=attempt,
+            attempts=attempts,
+            message_id=message_id,
+        )
+        record["will_retry"] = bool(will_retry)
         attempt_records.append(record)
         final_record = record
 
@@ -410,11 +612,13 @@ def send_account_message_with_retry(
             )
         audit_fn(
             "notify",
-            str(failure_stage),
+            ("send_done" if ok else "send_fail"),
             run_id=run_id,
             account=account,
             status=("ok" if ok else ("unconfirmed" if error_code == "SEND_UNCONFIRMED" else "error")),
             target=str(target),
+            message_id=record.get("message_id"),
+            confirmed=bool(record.get("delivery_confirmed")),
             error_code=error_code,
             extra=audit_extra,
         )
@@ -430,8 +634,13 @@ def send_account_message_with_retry(
                 "ok": True,
                 "account": account,
                 "attempts": attempt,
+                "max_attempts": attempts,
                 "attempt_records": attempt_records,
                 "final": final_record,
+                "final_returncode": int(record.get("returncode") or 0),
+                "message_id": record.get("message_id"),
+                "command_ok": bool(record.get("command_ok")),
+                "delivery_confirmed": bool(record.get("delivery_confirmed")),
             }
 
         runlog.safe_event(
@@ -443,10 +652,12 @@ def send_account_message_with_retry(
             data=safe_data_fn(record),
         )
 
-        if attempt < attempts:
-            delay = float(retry_delays_sec[min(attempt - 1, len(retry_delays_sec) - 1)] or 0.0) if retry_delays_sec else 0.0
+        if will_retry:
+            delay = _retry_delay_for_attempt(attempt, retry_delays_sec)
             if delay > 0:
                 sleep_fn(delay)
+            continue
+        break
 
     final = final_record or {
         "account": account,
@@ -458,13 +669,15 @@ def send_account_message_with_retry(
         "delivery_confirmed": False,
         "stdout_tail": "",
         "stderr_tail": "",
+        "error_code": "SEND_FAILED",
     }
     command_ok = bool(final.get("command_ok"))
     return {
         "ok": False,
         "account": account,
-        "error_code": "SEND_UNCONFIRMED" if command_ok else "SEND_FAILED",
-        "attempts": attempts,
+        "error_code": str(final.get("error_code") or ("SEND_UNCONFIRMED" if command_ok else "SEND_FAILED")),
+        "attempts": len(attempt_records),
+        "max_attempts": attempts,
         "attempt_records": attempt_records,
         "final": final,
         "final_returncode": int(final.get("returncode") or 0),
@@ -498,13 +711,16 @@ def execute_per_account_delivery(
     on_failure: Callable[[str], Any] | None = None,
     base,
     failure_stage: str = "send_openclaw_message",
+    sleep_fn: Callable[[float], Any] = sleep,
 ) -> PerAccountSendExecution:
     sent_accounts: list[str] = []
     notify_failures: list[dict[str, object]] = []
+    attempted_accounts: list[str] = []
     target = str(delivery_batch.target)
     channel = str(delivery_batch.channel)
 
     for acct, msg in delivery_batch.account_messages.items():
+        attempted_accounts.append(str(acct))
         runlog.safe_event(
             "notify",
             "start",
@@ -531,9 +747,11 @@ def execute_per_account_delivery(
             safe_data_fn=safe_data_fn,
             failure_fields_builder=failure_fields_builder,
             failure_stage=failure_stage,
+            sleep_fn=sleep_fn,
         )
         if not bool(send_result.get("ok")):
             error_code = str(send_result.get("error_code") or "SEND_FAILED")
+            final_record = send_result.get("final") if isinstance(send_result.get("final"), dict) else {}
             if on_failure is not None:
                 on_failure(error_code)
             notify_failures.append(
@@ -545,6 +763,10 @@ def execute_per_account_delivery(
                     "message_id": send_result.get("message_id"),
                     "command_ok": bool(send_result.get("command_ok")),
                     "delivery_confirmed": bool(send_result.get("delivery_confirmed")),
+                    "stdout_tail": final_record.get("stdout_tail"),
+                    "stderr_tail": final_record.get("stderr_tail"),
+                    "timeout_sec": final_record.get("timeout_sec"),
+                    "exception_type": final_record.get("exception_type"),
                 }
             )
             continue
@@ -553,6 +775,7 @@ def execute_per_account_delivery(
     return PerAccountSendExecution(
         sent_accounts=sent_accounts,
         notify_failures=notify_failures,
+        attempted_accounts=attempted_accounts,
     )
 
 def build_multi_tick_scheduler_decision(

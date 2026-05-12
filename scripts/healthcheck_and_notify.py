@@ -75,7 +75,7 @@ def main() -> int:
         return 0
 
     notif = cfg.get('notifications') or {}
-    channel = notif.get('channel') or 'feishu'
+    channel = notif.get('channel') or 'openclaw-weixin'
     transport_channel = resolve_openclaw_transport_channel(channel)
     target = notif.get('target')
     if not target:

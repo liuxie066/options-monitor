@@ -33,13 +33,13 @@ def test_validate_config_rejects_empty_notification_target(tmp_path: Path) -> No
     secrets = tmp_path / "notif.json"
     secrets.write_text(json.dumps({"feishu": {"app_id": "cli", "app_secret": "sec"}}), encoding="utf-8")
     cfg = _base_cfg()
-    cfg["notifications"] = {"channel": "feishu", "target": "", "secrets_file": "notif.json"}
+    cfg["notifications"] = {"provider": "openclaw", "channel": "openclaw-weixin", "target": ""}
 
     try:
         mod.validate_config(cfg)
         raise AssertionError("expected SystemExit")
     except SystemExit as exc:
-        assert "notifications.target must be a non-empty open_id string" in str(exc)
+        assert "notifications.target must be a non-empty openclaw target string" in str(exc)
 
 
 def test_validate_config_rejects_non_string_notification_target(tmp_path: Path) -> None:
@@ -48,22 +48,22 @@ def test_validate_config_rejects_non_string_notification_target(tmp_path: Path) 
     secrets = tmp_path / "notif.json"
     secrets.write_text(json.dumps({"feishu": {"app_id": "cli", "app_secret": "sec"}}), encoding="utf-8")
     cfg = _base_cfg()
-    cfg["notifications"] = {"channel": "feishu", "target": ["ou_x"], "secrets_file": "notif.json"}
+    cfg["notifications"] = {"provider": "openclaw", "channel": "openclaw-weixin", "target": ["ou_x"]}
 
     try:
         mod.validate_config(cfg)
         raise AssertionError("expected SystemExit")
     except SystemExit as exc:
-        assert "notifications.target must be a non-empty open_id string" in str(exc)
+        assert "notifications.target must be a non-empty openclaw target string" in str(exc)
 
 
-def test_validate_config_accepts_valid_notification_open_id(tmp_path: Path) -> None:
+def test_validate_config_accepts_valid_openclaw_notification_route(tmp_path: Path) -> None:
     import src.application.config_validator as mod
 
     secrets = tmp_path / "notif.json"
     secrets.write_text(json.dumps({"feishu": {"app_id": "cli", "app_secret": "sec"}}), encoding="utf-8")
     cfg = _base_cfg()
-    cfg["notifications"] = {"channel": "feishu", "target": "ou_valid", "secrets_file": "notif.json"}
+    cfg["notifications"] = {"provider": "openclaw", "channel": "openclaw-weixin", "target": "clawbot:test-room"}
 
     mod.validate_config(cfg)
 
@@ -94,13 +94,13 @@ def test_validate_config_rejects_unsupported_notification_channel() -> None:
     import src.application.config_validator as mod
 
     cfg = _base_cfg()
-    cfg["notifications"] = {"channel": "sms", "target": "user:test"}
+    cfg["notifications"] = {"provider": "sms", "target": "user:test"}
 
     try:
         mod.validate_config(cfg)
         raise AssertionError("expected SystemExit")
     except SystemExit as exc:
-        assert "notifications.channel must be one of: feishu, wechat_clawbot" in str(exc)
+        assert "notifications.provider must be one of: openclaw, feishu_app" in str(exc)
 
 
 def test_validate_config_accepts_option_positions_sync_to_feishu_enabled_boolean() -> None:

@@ -267,7 +267,8 @@ def test_global_summary_suppresses_canonical_warning_when_webui_config_override_
 def test_patch_notifications_updates_runtime_notification_fields() -> None:
     cfg = {
         "notifications": {
-            "channel": "feishu",
+            "provider": "openclaw",
+            "channel": "openclaw-weixin",
             "target": "user:old",
             "quiet_hours_beijing": {"start": "01:00", "end": "07:00"},
         }
@@ -278,7 +279,8 @@ def test_patch_notifications_updates_runtime_notification_fields() -> None:
         {
             "notifications": {
                 "enabled": True,
-                "channel": "feishu",
+                "provider": "openclaw",
+                "channel": "openclaw-weixin",
                 "target": "user:new_target",
                 "include_cash_footer": False,
                 "cash_footer_accounts": ["user1", "sy"],
@@ -294,7 +296,8 @@ def test_patch_notifications_updates_runtime_notification_fields() -> None:
 
     notif = cfg["notifications"]
     assert notif["enabled"] is True
-    assert notif["channel"] == "feishu"
+    assert notif["provider"] == "openclaw"
+    assert notif["channel"] == "openclaw-weixin"
     assert notif["target"] == "user:new_target"
     assert notif["include_cash_footer"] is False
     assert notif["cash_footer_accounts"] == ["user1", "sy"]
@@ -310,7 +313,8 @@ def test_patch_notifications_drops_redundant_cash_footer_override() -> None:
     cfg = {
         "accounts": ["lx", "sy"],
         "notifications": {
-            "channel": "feishu",
+            "provider": "openclaw",
+            "channel": "openclaw-weixin",
             "target": "user:old",
             "cash_footer_accounts": ["lx"],
         },
@@ -341,7 +345,8 @@ def test_global_summary_exposes_notification_config_fields() -> None:
                         "accounts": ["user1"],
                         "symbols": [{"symbol": "NVDA", "sell_put": {"enabled": True}, "sell_call": {"enabled": False}}],
                         "notifications": {
-                            "channel": "feishu",
+                            "provider": "openclaw",
+                            "channel": "openclaw-weixin",
                             "target": "user:abc",
                             "include_cash_footer": False,
                             "cash_footer_accounts": ["user1"],
@@ -358,7 +363,8 @@ def test_global_summary_exposes_notification_config_fields() -> None:
 
             summary = _global_summary("us")
             notifications = summary["sections"]["notifications"]
-            assert notifications["channel"] == "feishu"
+            assert notifications["provider"] == "openclaw"
+            assert notifications["channel"] == "openclaw-weixin"
             assert notifications["target"] == "user:abc"
             assert notifications["include_cash_footer"] is False
             assert notifications["cash_footer_accounts"] == ["user1"]
@@ -413,7 +419,8 @@ def test_editor_summary_exposes_effective_cash_footer_accounts_when_override_abs
         cfg = {
             "accounts": ["lx", "sy"],
             "notifications": {
-                "channel": "feishu",
+                "provider": "openclaw",
+                "channel": "openclaw-weixin",
                 "target": "user:abc",
             },
         }
@@ -571,7 +578,7 @@ def test_webui_frontend_shows_resolved_path_and_warning_copy() -> None:
     assert 'ToolbarSpacer' not in src
     assert "配置中心" in src
     assert "当前版本使用兼容双写：这里保存后，会同步更新旧的 symbol fetch 配置" in panels_src
-    assert "飞书通知" in panels_src
+    assert "OpenClaw / 飞书 App" in panels_src
     assert "Close Advice" in panels_src
     assert "/api/history" in api_src
     assert "/api/version/check" in api_src

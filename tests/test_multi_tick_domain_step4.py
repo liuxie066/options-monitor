@@ -70,25 +70,30 @@ def test_resolve_notification_channel_target_keeps_fallback_order() -> None:
         cli_channel=None,
         cli_target=None,
     )
-    assert out_default == {'channel': 'feishu', 'target': 'user:cfg'}
+    assert out_default == {'provider': 'openclaw', 'channel': 'openclaw-weixin', 'target': 'user:cfg'}
 
     out_cli = resolve_notification_channel_target(
         notifications={'channel': 'cfg-chan', 'target': 'user:cfg'},
         cli_channel='cli-chan',
         cli_target='user:cli',
     )
-    assert out_cli == {'channel': 'cli-chan', 'target': 'user:cli'}
+    assert out_cli == {'provider': 'openclaw', 'channel': 'cli-chan', 'target': 'user:cli'}
 
 
 def test_notification_channel_helpers_accept_wechat_clawbot() -> None:
     from domain.domain.multi_tick import (
         is_openclaw_notification_channel,
+        is_supported_notification_provider,
         is_supported_notification_channel,
         normalize_notification_channel,
+        normalize_notification_provider,
         resolve_openclaw_transport_channel,
     )
 
+    assert normalize_notification_provider("openclaw-weixin") == "openclaw"
     assert normalize_notification_channel(" WeChat_Clawbot ") == "wechat_clawbot"
+    assert is_supported_notification_provider("openclaw") is True
+    assert is_supported_notification_channel("openclaw-weixin") is True
     assert is_supported_notification_channel("wechat_clawbot") is True
     assert is_openclaw_notification_channel("wechat_clawbot") is True
     assert resolve_openclaw_transport_channel("wechat_clawbot") == "openclaw-weixin"
@@ -104,7 +109,8 @@ def test_resolve_notification_route_from_config_centralizes_notifications_reads(
     )
     assert out == {
         'notifications': {'target': 'user:cfg'},
-        'channel': 'feishu',
+        'provider': 'openclaw',
+        'channel': 'openclaw-weixin',
         'target': 'user:cfg',
     }
 
@@ -115,6 +121,7 @@ def test_resolve_notification_route_from_config_centralizes_notifications_reads(
     )
     assert out_cli == {
         'notifications': {'channel': 'cfg-chan', 'target': 'user:cfg'},
+        'provider': 'openclaw',
         'channel': 'cli-chan',
         'target': 'user:cli',
     }

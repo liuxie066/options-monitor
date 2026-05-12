@@ -98,11 +98,28 @@ def mark_accounts_notified(
         )
 
 
-def build_notify_summary(*, sent_accounts: list[str], notify_failures: list[dict[str, object]], total_accounts: int) -> dict[str, int]:
+def build_notify_summary(
+    *,
+    sent_accounts: list[str],
+    notify_failures: list[dict[str, object]],
+    total_accounts: int,
+    send_attempted_count: int | None = None,
+    send_confirmed_count: int | None = None,
+) -> dict[str, int]:
+    attempted_count = (
+        int(send_attempted_count)
+        if send_attempted_count is not None
+        else len(sent_accounts) + len(notify_failures)
+    )
+    confirmed_count = int(send_confirmed_count) if send_confirmed_count is not None else len(sent_accounts)
     return {
         "success_count": len(sent_accounts),
         "failure_count": len(notify_failures),
         "total_accounts": int(total_accounts),
+        "account_messages_count": int(total_accounts),
+        "send_attempted_count": attempted_count,
+        "send_confirmed_count": confirmed_count,
+        "send_failed_count": len(notify_failures),
     }
 
 
@@ -117,6 +134,13 @@ def apply_notify_results_to_tick_metrics(
     tick_metrics["sent"] = (not no_send) and bool(sent_accounts)
     tick_metrics["sent_accounts"] = sent_accounts
     tick_metrics["notify_summary"] = notify_summary
+    for key in (
+        "account_messages_count",
+        "send_attempted_count",
+        "send_confirmed_count",
+        "send_failed_count",
+    ):
+        tick_metrics[key] = int(notify_summary.get(key, 0))
     if notify_failures:
         tick_metrics["reason"] = "sent_partial_notify_failure" if sent_accounts else "notify_failed"
         tick_metrics["notify_failures"] = notify_failures

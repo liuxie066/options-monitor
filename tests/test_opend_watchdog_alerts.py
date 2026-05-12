@@ -254,7 +254,8 @@ def test_consecutive_threshold_gates_alert() -> None:
         base = Path(td)
         cfg = {
             "notifications": {
-                "channel": "feishu",
+                "provider": "openclaw",
+                "channel": "openclaw-weixin",
                 "target": "test_target",
                 "opend_alert_after_consecutive_failures": 3,
                 "opend_alert_cooldown_sec": 1,
@@ -289,7 +290,8 @@ def test_consecutive_threshold_skip_gate_sends_immediately() -> None:
         base = Path(td)
         cfg = {
             "notifications": {
-                "channel": "feishu",
+                "provider": "openclaw",
+                "channel": "openclaw-weixin",
                 "target": "test_target",
                 "opend_alert_after_consecutive_failures": 3,
                 "opend_alert_cooldown_sec": 1,
@@ -322,7 +324,8 @@ def test_send_opend_recovery_notice_after_threshold_failures() -> None:
         base = Path(td)
         cfg = {
             "notifications": {
-                "channel": "feishu",
+                "provider": "openclaw",
+                "channel": "openclaw-weixin",
                 "target": "test_target",
                 "opend_alert_after_consecutive_failures": 3,
                 "opend_alert_send_recovery_notice": True,
@@ -364,7 +367,8 @@ def test_send_opend_recovery_notice_disabled_by_config() -> None:
         base = Path(td)
         cfg = {
             "notifications": {
-                "channel": "feishu",
+                "provider": "openclaw",
+                "channel": "openclaw-weixin",
                 "target": "test_target",
                 "opend_alert_send_recovery_notice": False,
             }

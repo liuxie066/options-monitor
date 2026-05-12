@@ -9,9 +9,9 @@ from typing import Any, Callable
 
 from src.application.agent_tool_contracts import AgentToolError
 from domain.domain.multi_tick import (
-    is_openclaw_notification_channel,
-    is_supported_notification_channel,
-    normalize_notification_channel,
+    OPENCLAW_NOTIFICATION_PROVIDER,
+    is_supported_notification_provider,
+    resolve_notification_route_from_config,
     resolve_openclaw_transport_channel,
 )
 
@@ -591,34 +591,37 @@ def _notification_route_check(cfg: dict[str, Any], *, openclaw_path: str | None)
             "message": "notifications config is absent; live tick can generate reports but cannot send notifications",
             "value": {"configured": False},
         }
-    channel = normalize_notification_channel(notifications.get("channel") or "feishu")
+    route = resolve_notification_route_from_config(config=cfg)
+    provider = str(route.get("provider") or "")
+    channel = str(route.get("channel") or "")
     target = str(notifications.get("target") or "").strip()
-    if not is_supported_notification_channel(channel):
+    if not is_supported_notification_provider(provider):
         return {
             "name": "notification_route",
             "status": "error",
-            "message": f"unsupported notifications.channel: {channel}",
-            "value": {"configured": True, "channel": channel, "target_configured": bool(target)},
+            "message": f"unsupported notifications.provider: {provider}",
+            "value": {"configured": True, "provider": provider, "channel": channel, "target_configured": bool(target)},
         }
     if not target:
         return {
             "name": "notification_route",
             "status": "error",
             "message": "notifications.target is missing",
-            "value": {"configured": True, "channel": channel, "target_configured": False},
+            "value": {"configured": True, "provider": provider, "channel": channel, "target_configured": False},
         }
-    transport_channel = resolve_openclaw_transport_channel(channel) if is_openclaw_notification_channel(channel) else channel
+    transport_channel = resolve_openclaw_transport_channel(channel) if provider == OPENCLAW_NOTIFICATION_PROVIDER else channel
     status = "ok"
     message = "notification route configured"
-    if is_openclaw_notification_channel(channel) and not openclaw_path:
+    if provider == OPENCLAW_NOTIFICATION_PROVIDER and not openclaw_path:
         status = "warn"
-        message = "wechat_clawbot route is configured but openclaw command is not on PATH"
+        message = "openclaw notification provider is configured but openclaw command is not on PATH"
     return {
         "name": "notification_route",
         "status": status,
         "message": message,
         "value": {
             "configured": True,
+            "provider": provider,
             "channel": channel,
             "transport_channel": transport_channel,
             "target_configured": True,

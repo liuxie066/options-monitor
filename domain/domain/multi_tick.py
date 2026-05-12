@@ -15,17 +15,25 @@ from .engine import (
     filter_notify_candidates as filter_notify_candidates_engine,
 )
 
-FEISHU_NOTIFICATION_CHANNEL = 'feishu'
+OPENCLAW_NOTIFICATION_PROVIDER = 'openclaw'
+FEISHU_APP_NOTIFICATION_PROVIDER = 'feishu_app'
+DEFAULT_NOTIFICATION_PROVIDER = OPENCLAW_NOTIFICATION_PROVIDER
 WECHAT_CLAWBOT_NOTIFICATION_CHANNEL = 'wechat_clawbot'
 OPENCLAW_WEIXIN_TRANSPORT_CHANNEL = 'openclaw-weixin'
+SUPPORTED_NOTIFICATION_PROVIDERS = (
+    OPENCLAW_NOTIFICATION_PROVIDER,
+    FEISHU_APP_NOTIFICATION_PROVIDER,
+)
 SUPPORTED_NOTIFICATION_CHANNELS = (
-    FEISHU_NOTIFICATION_CHANNEL,
+    OPENCLAW_WEIXIN_TRANSPORT_CHANNEL,
     WECHAT_CLAWBOT_NOTIFICATION_CHANNEL,
 )
 OPENCLAW_NOTIFICATION_CHANNELS = (
+    OPENCLAW_WEIXIN_TRANSPORT_CHANNEL,
     WECHAT_CLAWBOT_NOTIFICATION_CHANNEL,
 )
 OPENCLAW_TRANSPORT_CHANNEL_BY_NOTIFICATION_CHANNEL = {
+    OPENCLAW_WEIXIN_TRANSPORT_CHANNEL: OPENCLAW_WEIXIN_TRANSPORT_CHANNEL,
     WECHAT_CLAWBOT_NOTIFICATION_CHANNEL: OPENCLAW_WEIXIN_TRANSPORT_CHANNEL,
 }
 
@@ -413,19 +421,47 @@ def resolve_notification_channel_target(
     notifications: Any,
     cli_channel: Any = None,
     cli_target: Any = None,
-    default_channel: str = 'feishu',
+    default_channel: str = OPENCLAW_WEIXIN_TRANSPORT_CHANNEL,
+    default_provider: str = DEFAULT_NOTIFICATION_PROVIDER,
 ) -> dict[str, Any]:
     """Resolve channel/target with compat defaults at domain boundary."""
     notif_cfg = notifications if isinstance(notifications, dict) else {}
+    cli_provider = normalize_notification_provider(cli_channel, default_provider=None)
+    cfg_channel_provider = normalize_notification_provider(notif_cfg.get('channel'), default_provider=None)
+    provider = normalize_notification_provider(
+        notif_cfg.get('provider')
+        or (cli_provider if cli_provider in SUPPORTED_NOTIFICATION_PROVIDERS else None)
+        or (cfg_channel_provider if cfg_channel_provider in SUPPORTED_NOTIFICATION_PROVIDERS else None)
+        or default_provider
+    )
+    raw_channel = cli_channel or notif_cfg.get('transport_channel') or notif_cfg.get('channel') or default_channel
+    if provider == OPENCLAW_NOTIFICATION_PROVIDER:
+        channel = resolve_openclaw_transport_channel(raw_channel)
+    else:
+        channel = FEISHU_APP_NOTIFICATION_PROVIDER
     return {
-        'channel': normalize_notification_channel(cli_channel or notif_cfg.get('channel') or default_channel),
+        'provider': provider,
+        'channel': channel,
         'target': (cli_target or notif_cfg.get('target')),
     }
+
+
+def normalize_notification_provider(provider: Any, *, default_provider: str | None = DEFAULT_NOTIFICATION_PROVIDER) -> str:
+    value = str(provider or default_provider or '').strip().lower()
+    if value in OPENCLAW_NOTIFICATION_CHANNELS or value == OPENCLAW_NOTIFICATION_PROVIDER:
+        return OPENCLAW_NOTIFICATION_PROVIDER
+    if value == FEISHU_APP_NOTIFICATION_PROVIDER:
+        return FEISHU_APP_NOTIFICATION_PROVIDER
+    return value
 
 
 def normalize_notification_channel(channel: Any, *, default_channel: str | None = None) -> str:
     value = str(channel or default_channel or '').strip().lower()
     return value
+
+
+def is_supported_notification_provider(provider: Any) -> bool:
+    return normalize_notification_provider(provider) in SUPPORTED_NOTIFICATION_PROVIDERS
 
 
 def is_supported_notification_channel(channel: Any) -> bool:
@@ -448,7 +484,8 @@ def resolve_notification_route_from_config(
     config: Any,
     cli_channel: Any = None,
     cli_target: Any = None,
-    default_channel: str = 'feishu',
+    default_channel: str = OPENCLAW_WEIXIN_TRANSPORT_CHANNEL,
+    default_provider: str = DEFAULT_NOTIFICATION_PROVIDER,
 ) -> dict[str, Any]:
     """Resolve notification route while centralizing config notifications fallback reads."""
     cfg = config if isinstance(config, dict) else {}
@@ -459,9 +496,11 @@ def resolve_notification_route_from_config(
         cli_channel=cli_channel,
         cli_target=cli_target,
         default_channel=default_channel,
+        default_provider=default_provider,
     )
     return {
         'notifications': notif_cfg,
+        'provider': route.get('provider'),
         'channel': route.get('channel'),
         'target': route.get('target'),
     }

@@ -162,7 +162,8 @@ def build_editor_summary(
         ],
         "marketAccounts": accounts_from_config(cfg),
         "notifications": {
-            "channel": str(notifications.get("channel") or "feishu"),
+            "provider": str(notifications.get("provider") or "openclaw"),
+            "channel": str(notifications.get("channel") or "openclaw-weixin"),
             "target": str(notifications.get("target") or ""),
             "appId": "",
             "appSecret": "",

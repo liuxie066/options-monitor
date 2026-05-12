@@ -92,10 +92,12 @@ from src.application.multi_tick_scheduler import (
 )
 from src.application.multi_tick_watchdog import run_multi_tick_watchdog
 from src.application.scheduled_notification import (
+    build_notify_failure_summary_message,
     build_per_account_delivery_batch,
     execute_per_account_delivery,
     mark_no_candidate_notification_metrics,
     prepare_multi_account_notification,
+    send_account_message_with_retry,
 )
 from src.infrastructure.external_services import (
     run_opend_watchdog,
@@ -736,19 +738,32 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     if prepared_messages.used_heartbeat:
+        heartbeat_accounts = {
+            str(account or '').strip().lower()
+            for account in getattr(prepared_messages, 'heartbeat_accounts', ())
+            if str(account or '').strip()
+        }
+        heartbeat_account_messages = dict(account_messages)
+        if heartbeat_accounts:
+            heartbeat_account_messages = {
+                account: message
+                for account, message in account_messages.items()
+                if str(account or '').strip().lower() in heartbeat_accounts
+            }
         runlog.safe_event(
             'notify',
             'prepare',
-            message='no candidates; sending monitor heartbeat',
-            data=_safe_runlog_data({'accounts': list(account_messages.keys())}),
+            message='sending no-candidate monitor heartbeat',
+            data=_safe_runlog_data({'accounts': list(heartbeat_account_messages.keys())}),
         )
         mark_no_candidate_notification_metrics(
             tick_metrics=tick_metrics,
-            account_messages=account_messages,
+            account_messages=heartbeat_account_messages,
         )
 
     notify_route = resolve_notification_route_from_config(config=base_cfg)
     notif_cfg = notify_route.get('notifications') or {}
+    provider = notify_route.get('provider')
     channel = notify_route.get('channel')
     target = notify_route.get('target')
     schedule_cfg0 = base_cfg.get('schedule') or {}
@@ -786,7 +801,17 @@ def main(argv: list[str] | None = None) -> int:
         run_id=run_id,
         status=('ok' if not notify_delivery.get('config_error') else 'error'),
         target=(str(target) if target else None),
-        extra={'reason': notify_delivery.get('reason'), 'should_send': bool(notify_delivery.get('should_send'))},
+        extra={
+            'reason': notify_delivery.get('reason'),
+            'should_send': bool(notify_delivery.get('should_send')),
+            'account_keys': list(account_messages.keys()),
+            'account_count': len(account_messages),
+            'account_messages_count': len(account_messages),
+            'message_len_by_account': {str(acct): len(str(msg)) for acct, msg in account_messages.items()},
+            'provider': str(provider) if provider else None,
+            'channel': str(channel) if channel else None,
+            'target_set': bool(target),
+        },
     )
     if str(notify_delivery.get('action') or '') == 'skip_quiet_hours':
         quiet_window = str(notify_delivery.get('quiet_window') or '')
@@ -798,23 +823,30 @@ def main(argv: list[str] | None = None) -> int:
 
     sent_accounts: list[str] = []
     notify_failures: list[dict[str, object]] = []
+    send_attempted_count = 0
+    send_confirmed_count = 0
+    failure_summary_delivery: dict[str, object] | None = None
     if bool(notify_delivery.get('should_send')):
         assert delivery_batch is not None
         try:
-            delivery_adapter = select_notification_delivery_adapter(delivery_batch.channel)
+            delivery_adapter = select_notification_delivery_adapter(provider)
         except ValueError as err:
             runlog.safe_event('notify', 'error', error_code='CONFIG_ERROR', message=str(err))
             raise SystemExit(f'[CONFIG_ERROR] {err}') from err
+
+        def _send_with_route_notifications(**kwargs):
+            return delivery_adapter.send_fn(
+                **kwargs,
+                notifications=notify_route.get('notifications') or {},
+            )
+
         execution = execute_per_account_delivery(
             delivery_batch=delivery_batch,
             run_id=run_id,
             runlog=runlog,
             audit_fn=audit_helper.audit,
             safe_data_fn=_safe_runlog_data,
-            send_fn=lambda **kwargs: delivery_adapter.send_fn(
-                **kwargs,
-                notifications=notify_route.get('notifications') or {},
-            ),
+            send_fn=_send_with_route_notifications,
             normalize_fn=delivery_adapter.normalize_fn,
             failure_fields_builder=build_failure_audit_fields,
             on_failure=lambda error_code: audit_helper.guard_mark_failure(error_code, delivery_adapter.failure_stage),
@@ -823,6 +855,37 @@ def main(argv: list[str] | None = None) -> int:
         )
         sent_accounts = execution.sent_accounts
         notify_failures = execution.notify_failures
+        send_attempted_count = execution.send_attempted_count
+        send_confirmed_count = execution.send_confirmed_count
+        if notify_failures:
+            failure_summary_result = send_account_message_with_retry(
+                base=base,
+                channel=delivery_batch.channel,
+                target=delivery_batch.target,
+                account="notify_failure_summary",
+                message=build_notify_failure_summary_message(
+                    run_id=run_id,
+                    sent_accounts=sent_accounts,
+                    notify_failures=notify_failures,
+                ),
+                run_id=run_id,
+                runlog=runlog,
+                audit_fn=audit_helper.audit,
+                send_fn=_send_with_route_notifications,
+                normalize_fn=delivery_adapter.normalize_fn,
+                safe_data_fn=_safe_runlog_data,
+                failure_fields_builder=build_failure_audit_fields,
+                failure_stage=delivery_adapter.failure_stage,
+                max_attempts=1,
+                retry_delays_sec=(),
+            )
+            failure_summary_delivery = {
+                'ok': bool(failure_summary_result.get('ok')),
+                'error_code': failure_summary_result.get('error_code'),
+                'attempts': int(failure_summary_result.get('attempts') or 0),
+                'message_id': failure_summary_result.get('message_id'),
+                'delivery_confirmed': bool(failure_summary_result.get('delivery_confirmed')),
+            }
     else:
         sent_accounts = list(account_messages.keys())
         runlog.safe_event('notify', 'skip', message='no_send mode')
@@ -847,6 +910,8 @@ def main(argv: list[str] | None = None) -> int:
             sent_accounts=sent_accounts,
             notify_failures=notify_failures,
             total_accounts=len(account_messages),
+            send_attempted_count=send_attempted_count,
+            send_confirmed_count=send_confirmed_count,
         )
         apply_notify_results_to_tick_metrics(
             tick_metrics=tick_metrics,
@@ -855,6 +920,8 @@ def main(argv: list[str] | None = None) -> int:
             notify_failures=notify_failures,
             notify_summary=notify_summary,
         )
+        if failure_summary_delivery is not None:
+            tick_metrics['notify_failure_summary_delivery'] = failure_summary_delivery
         state_repo.write_tick_metrics(base, run_id, tick_metrics)
         state_repo.append_tick_metrics_history(base, run_id, tick_metrics)
         audit_helper.audit('write', 'write_tick_metrics', run_id=run_id, extra={'sent': bool(tick_metrics.get('sent'))})

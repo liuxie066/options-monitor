@@ -347,10 +347,11 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 - 若仍不够，再按具体标的显式配置 `intake.multiplier_by_symbol`
 
 ### 4.5 notifications：推送目标
-- `channel`: 支持 `feishu` 和 `wechat_clawbot`
-- `target`: `feishu` 使用飞书 `open_id`；`wechat_clawbot` 使用 OpenClaw 微信 Clawbot 目标字符串
-- `secrets_file`: 仅 `feishu` 需要，默认 `secrets/notifications.feishu.app.json`
+- `provider`: 通用投递器，当前主流程使用 `openclaw`
+- `channel`: OpenClaw 传输通道，当前微信 Clawbot 使用 `openclaw-weixin`
+- `target`: OpenClaw 目标字符串
 - `quiet_hours_beijing`: 可选，北京时间免打扰窗口；不需要时直接省略，不要写 `null`
+- `send_timeout_sec`: 可选，OpenClaw 单次发送超时，默认 60 秒，上限 300 秒
 - `cash_footer_accounts` / `cash_footer_timeout_sec` / `cash_snapshot_max_age_sec`: 可选，现金摘要账户与查询参数
 - `include_cash_footer`: 兼容旧 `scripts/run_pipeline.py` 的字段；多账户主流程不把它作为开关，主示例不再配置
 - 不再推荐配置 `enabled` / `mode`，当前主流程不读取它们作为行为开关
@@ -360,13 +361,14 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 ```json
 {
   "notifications": {
-    "channel": "wechat_clawbot",
+    "provider": "openclaw",
+    "channel": "openclaw-weixin",
     "target": "clawbot_target"
   }
 }
 ```
 
-说明：配置里继续写语义名 `wechat_clawbot`；发送时程序会自动转换为 OpenClaw 实际通道名 `openclaw-weixin`。不要在 `notifications.channel` 里直接写 `openclaw-weixin`，否则配置校验会拒绝。
+说明：旧配置里的 `channel: "wechat_clawbot"` 会继续兼容并转换为 OpenClaw 实际通道名 `openclaw-weixin`。
 
 ### 4.6 schedule：监控时间窗口
 - 非交易日 / 非交易时段：不监控、不通知。
