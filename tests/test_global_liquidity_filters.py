@@ -108,6 +108,93 @@ def test_validate_config_rejects_removed_global_strategy_filter_keys() -> None:
         assert 'min_iv' in msg
 
 
+def test_validate_config_accepts_candidate_score_weights() -> None:
+    _add_repo_to_syspath()
+    from src.application.config_validator import validate_config
+
+    cfg = {
+        'templates': {
+            'put_base': {
+                'sell_put': {
+                    'min_open_interest': 60,
+                    'min_volume': 10,
+                    'max_spread_ratio': 0.3,
+                    'score_weights': {
+                        'annualized_return': 1.0,
+                        'net_income': 0.000001,
+                        'liquidity': 0.02,
+                        'risk_distance': 0.03,
+                    },
+                }
+            },
+            'call_base': {
+                'sell_call': {
+                    'min_open_interest': 50,
+                    'min_volume': 10,
+                    'max_spread_ratio': 0.3,
+                    'score_weights': {'liquidity': 0.02, 'risk_distance': 0.015},
+                }
+            },
+        },
+        'symbols': [
+            {
+                'symbol': 'AAPL',
+                'use': ['put_base', 'call_base'],
+                'sell_put': {
+                    'enabled': True,
+                    'min_dte': 7,
+                    'max_dte': 45,
+                    'min_strike': 10,
+                    'max_strike': 200,
+                    'score_weights': {'liquidity': 0.01},
+                },
+                'sell_call': {'enabled': False},
+            }
+        ],
+    }
+
+    validate_config(cfg)
+
+
+def test_validate_config_rejects_invalid_candidate_score_weights() -> None:
+    _add_repo_to_syspath()
+    from src.application.config_validator import validate_config
+
+    cfg = {
+        'templates': {
+            'put_base': {
+                'sell_put': {
+                    'min_open_interest': 60,
+                    'min_volume': 10,
+                    'max_spread_ratio': 0.3,
+                    'score_weights': {'liquidity': -0.01},
+                }
+            },
+        },
+        'symbols': [
+            {
+                'symbol': 'AAPL',
+                'use': ['put_base'],
+                'sell_put': {
+                    'enabled': True,
+                    'min_dte': 7,
+                    'max_dte': 45,
+                    'min_strike': 10,
+                    'max_strike': 200,
+                },
+                'sell_call': {'enabled': False},
+            }
+        ],
+    }
+
+    try:
+        validate_config(cfg)
+        raise AssertionError('expected config validation failure')
+    except SystemExit as e:
+        msg = str(e)
+        assert 'templates.put_base.sell_put.score_weights.liquidity must be >= 0' in msg
+
+
 def test_validate_config_rejects_removed_legacy_sell_call_fetch_fields_in_templates() -> None:
     _add_repo_to_syspath()
     from src.application.config_validator import validate_config
@@ -412,6 +499,7 @@ def test_sell_put_steps_use_global_liquidity_filters_only() -> None:
                 'max_strike': 200,
                 'min_annualized_net_return': 0.1,
                 'min_open_interest': 999,
+                'score_weights': {'liquidity': 0.02, 'risk_distance': 0.03},
             },
             top_n=3,
             required_data_dir=base / 'output',
@@ -439,6 +527,7 @@ def test_sell_put_steps_use_global_liquidity_filters_only() -> None:
     assert kwargs['min_open_interest'] == 50.0
     assert kwargs['min_volume'] == 12.0
     assert kwargs['max_spread_ratio'] == 0.31
+    assert kwargs['score_weights'] == {'liquidity': 0.02, 'risk_distance': 0.03}
     assert 'min_iv' not in kwargs
     assert 'require_bid_ask' not in kwargs
 
@@ -768,6 +857,7 @@ def test_sell_call_steps_use_global_liquidity_filters_only() -> None:
                 'min_strike': 110,
                 'min_open_interest': 999,
                 'min_annualized_net_premium_return': 0.12,
+                'score_weights': {'liquidity': 0.02, 'risk_distance': 0.015},
             },
             top_n=3,
             required_data_dir=base / 'output',
@@ -793,6 +883,7 @@ def test_sell_call_steps_use_global_liquidity_filters_only() -> None:
     assert kwargs['min_open_interest'] == 60.0
     assert kwargs['min_volume'] == 8.0
     assert kwargs['max_spread_ratio'] == 0.22
+    assert kwargs['score_weights'] == {'liquidity': 0.02, 'risk_distance': 0.015}
     assert 'min_delta' not in kwargs
     assert 'max_delta' not in kwargs
 

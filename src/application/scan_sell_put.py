@@ -20,6 +20,7 @@ from domain.domain.sell_put_config import validate_min_annualized_net_return
 from src.application.candidate_scanning import (
     CandidateScanConfig,
     CandidateScanDependencies,
+    resolve_candidate_score_weights,
     run_candidate_scan,
 )
 
@@ -177,6 +178,7 @@ def run_sell_put_scan(
     min_volume: float = DEFAULT_CANDIDATE_LIQUIDITY.min_volume,
     max_spread_ratio: float | None = DEFAULT_CANDIDATE_LIQUIDITY.max_spread_ratio,
     event_risk_cfg: dict | None = None,
+    score_weights: dict | None = None,
     reject_log_output: Path | None = None,
     quiet: bool = False,
 ) -> pd.DataFrame:
@@ -202,6 +204,7 @@ def run_sell_put_scan(
             max_spread_ratio=max_spread_ratio,
             min_annualized_net_return=threshold,
             min_net_income=float(min_net_income),
+            score_weights=resolve_candidate_score_weights(score_weights),
             quiet=bool(quiet),
         ),
         deps=CandidateScanDependencies(

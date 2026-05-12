@@ -365,3 +365,107 @@ def test_run_candidate_scan_reuses_stage1_gate_once_per_contract(tmp_path: Path)
 
     assert len(out) == 1
     assert len(calls) == 1
+
+
+def test_run_candidate_scan_uses_configured_score_weights(tmp_path: Path) -> None:
+    _add_repo_to_syspath()
+    import src.application.candidate_scanning as scan
+
+    parsed = tmp_path / "input" / "parsed"
+    parsed.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "NVDA",
+                "option_type": "put",
+                "expiration": "2026-06-18",
+                "dte": 30,
+                "contract_symbol": "HIGH_RETURN_WIDE",
+                "multiplier": 100,
+                "currency": "USD",
+                "strike": 100,
+                "spot": 110,
+                "bid": 0.025,
+                "ask": 0.975,
+                "last_price": 0.5,
+                "mid": 0.5,
+                "open_interest": 1,
+                "volume": 0,
+                "implied_volatility": 0.3,
+                "delta": -0.35,
+            },
+            {
+                "symbol": "NVDA",
+                "option_type": "put",
+                "expiration": "2026-06-18",
+                "dte": 30,
+                "contract_symbol": "LOWER_RETURN_LIQUID",
+                "multiplier": 100,
+                "currency": "USD",
+                "strike": 95,
+                "spot": 110,
+                "bid": 0.4875,
+                "ask": 0.5125,
+                "last_price": 0.5,
+                "mid": 0.5,
+                "open_interest": 500,
+                "volume": 20,
+                "implied_volatility": 0.3,
+                "delta": -0.18,
+            },
+        ]
+    ).to_csv(parsed / "NVDA_required_data.csv", index=False)
+
+    annualized_by_contract = {
+        "HIGH_RETURN_WIDE": 0.120,
+        "LOWER_RETURN_LIQUID": 0.115,
+    }
+
+    out = scan.run_candidate_scan(
+        config=scan.CandidateScanConfig(
+            mode="put",
+            symbols=["NVDA"],
+            input_root=tmp_path / "input",
+            output=tmp_path / "output.csv",
+            empty_output_columns=["symbol"],
+            min_dte=7,
+            max_dte=60,
+            min_strike=None,
+            max_strike=None,
+            min_open_interest=0,
+            min_volume=0,
+            max_spread_ratio=2.0,
+            min_annualized_net_return=0.01,
+            min_net_income=1,
+            score_weights=scan.resolve_candidate_score_weights({"liquidity": 0.02}),
+            quiet=True,
+        ),
+        deps=scan.CandidateScanDependencies(
+            compute_metrics_fn=lambda contract: {
+                "net_income": 100.0,
+                "annualized_net_return_on_cash_basis": annualized_by_contract[contract.contract_symbol],
+            },
+            build_row_fn=lambda contract, base_values, metrics: {
+                "symbol": contract.symbol,
+                "contract_symbol": contract.contract_symbol,
+                "expiration": contract.expiration,
+                "dte": contract.dte,
+                "strike": contract.strike,
+                "open_interest": base_values.open_interest,
+                "volume": base_values.volume,
+                "spread_ratio": base_values.spread_ratio,
+                "annualized_net_return_on_cash_basis": metrics["annualized_net_return_on_cash_basis"],
+                "net_income": metrics["net_income"],
+            },
+            build_hard_constraint_kwargs_fn=lambda contract: {},
+            annualized_return_value_fn=lambda metrics: float(metrics["annualized_net_return_on_cash_basis"]),
+            event_risk_flag_fn=lambda row: False,
+            event_risk_mode_fn=lambda cfg: "off",
+            annotate_event_risk_fn=lambda df, base_dir, cfg: df,
+            print_summary_fn=lambda df, out_path, reject_path: None,
+        ),
+        event_risk_cfg=None,
+        base_dir=tmp_path,
+    )
+
+    assert list(out["contract_symbol"]) == ["LOWER_RETURN_LIQUID", "HIGH_RETURN_WIDE"]
