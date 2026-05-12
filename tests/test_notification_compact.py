@@ -72,9 +72,22 @@ def test_build_notification_compact_style() -> None:
     alerts_text = "## 高优先级\n腾讯 | sell_put | 2026-04-29 460 | 年化 12% | 净收入 2300 | DTE 29 | Strike 460 | mid 2.3 | ccy USD | 风险 保守 | 通过准入\n"
     out = build_notification("", alerts_text, render_style="compact")
 
-    assert "🔵 Put" in out
+    assert "### Put" in out
     assert "🟢 卖Put 腾讯" in out
     assert "---" not in out
+
+
+def test_build_notification_compact_style_uses_markdown_enhancement_heading() -> None:
+    from src.application.notify_symbols import build_notification
+
+    alerts_text = (
+        "## 高优先级\n"
+        "NVDA | yield_enhancement | 2026-06-19 95P+110C | 年化 8% | DTE 45 | 保守 | "
+        "net_credit 95 | scenario_score 0.82 | put_strike 95 | call_strike 110 | call_delta 0.15 | call_ask 1.2 | 通过准入\n"
+    )
+    out = build_notification("", alerts_text, render_style="compact")
+
+    assert "### Enhancement" in out
 
 
 def test_build_notification_legacy_style_unchanged() -> None:
