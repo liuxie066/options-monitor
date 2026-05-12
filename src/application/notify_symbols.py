@@ -368,7 +368,16 @@ def _build_notification_block_compact(
         premium_match = re.search(r'权利金[=:]([^|]+)', income_line)
         annual_match = re.search(r'年化\s*([\d.]+)%?', income_line)
         if premium_match:
-            l2_parts.append(f"权利金 {_fmt_money_compact(premium_match.group(1))}")
+            premium_raw = premium_match.group(1).strip()
+            ccy_match = re.search(r'\((\w+)\)', premium_raw)
+            ccy = ccy_match.group(1) if ccy_match else ''
+            num_match = re.search(r'([\d.]+)', premium_raw)
+            premium_num = num_match.group(1) if num_match else premium_raw
+            try:
+                premium_num_fmt = f"{float(premium_num):.2f}".rstrip('0').rstrip('.')
+            except Exception:
+                premium_num_fmt = premium_num
+            l2_parts.append(f"权利金 {premium_num_fmt}{ccy}")
         if annual_match:
             l2_parts.append(f"年化 {_fmt_pct_compact(annual_match.group(1) + '%')}")
 
@@ -376,7 +385,7 @@ def _build_notification_block_compact(
     if dte_match:
         l2_parts.append(_fmt_dte_compact(dte_match.group(1)))
 
-    l2 = f"  {' · '.join(l2_parts)}" if l2_parts else ''
+    l2 = f"- {' · '.join(l2_parts)}" if l2_parts else ''
 
     l3_parts = []
     risk_match = re.search(r'风险[=:]([^|]+)', risk_line)
@@ -389,23 +398,34 @@ def _build_notification_block_compact(
     if delta_match:
         delta_val = delta_match.group(1).strip()
         if delta_val and delta_val != '-':
-            l3_parts.append(f"Δ={delta_val}")
+            try:
+                delta_f = float(delta_val)
+                l3_parts.append(f"Δ {delta_f:.2f}")
+            except Exception:
+                l3_parts.append(f"Δ {delta_val}")
 
     if '保证金' in detail_line or '担保' in detail_line:
-        margin_match = re.search(r'[=:]([^|]+)', detail_line)
-        if margin_match:
+        margin_match = re.search(r'保证金占用[=:]([^|]+)', detail_line)
+        if (margin_match):
             margin_val = margin_match.group(1).strip()
-            if margin_val and margin_val != '-':
+        else:
+            margin_match = re.search(r'担保[=:]([^|]+)', detail_line)
+            margin_val = margin_match.group(1).strip() if margin_match else ''
+        if margin_val and margin_val != '-':
+            currency_match = re.search(r'([¥$][^\s(]+)', margin_val)
+            if currency_match:
+                l3_parts.append(f"担保 {currency_match.group(1)}")
+            else:
                 l3_parts.append(f"担保 {_fmt_money_compact(margin_val)}")
 
-    l3 = f"  {' · '.join(l3_parts)}" if l3_parts else ''
+    l3 = f"- {' · '.join(l3_parts)}" if l3_parts else ''
 
     l4 = ''
     if extra_detail_line:
         if '收益增强' in extra_detail_line:
             call_match = re.search(r'推荐Call=([^|]+)', extra_detail_line)
             if call_match:
-                l4 = f"  💡 推荐Call={call_match.group(1).strip()}"
+                l4 = f"- 💡 推荐Call={call_match.group(1).strip()}"
 
     out_lines = [l1]
     if l2:
