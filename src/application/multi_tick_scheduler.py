@@ -26,6 +26,7 @@ class MultiTickSchedulerResult:
     scheduler_decision: dict[str, Any]
     scheduler_view: Any
     notify_decision_by_account: dict[str, AccountSchedulerDecisionView | None]
+    scan_decision_by_account: dict[str, dict[str, Any]]
     scheduler_ms: int
     should_run_global: bool
     reason_global: str
@@ -224,7 +225,22 @@ def run_scheduler_flow(
         stage = "scheduler_decision" if isinstance(exc, SchemaValidationError) else "scheduler_parse"
         fail_schema_validation(stage=stage, exc=exc)
 
+    should_run_global, reason_global = apply_scan_run_decision(
+        should_run_global=bool(scheduler_view.should_run_scan),
+        reason_global=str(scheduler_view.reason),
+        force_mode=force_mode,
+        smoke=smoke,
+    )
+
+    def _global_scan_fallback(source: str) -> dict[str, Any]:
+        return {
+            "should_run": bool(should_run_global),
+            "reason": str(reason_global),
+            "source": str(source),
+        }
+
     notify_decision_by_account: dict[str, AccountSchedulerDecisionView | None] = {}
+    scan_decision_by_account: dict[str, dict[str, Any]] = {}
     for acct0 in [str(a).strip() for a in accounts if str(a).strip()]:
         try:
             sch_acct = run_scan_scheduler_cli(
@@ -237,36 +253,92 @@ def run_scheduler_flow(
                 account=str(acct0),
                 capture_output=True,
             )
-            notify_decision_by_account[acct0] = (
-                build_multi_tick_account_scheduler_view(
-                    account=str(acct0),
-                    scheduler_stdout=str(sch_acct.stdout or ""),
-                    scheduler_decision=scheduler_decision,
-                    as_of_utc=datetime.now(timezone.utc).isoformat(),
-                    snapshot_cls=snapshot_cls,
-                    engine_entrypoint=engine_entrypoint,
-                    account_view_cls=account_view_cls,
+            account_extra = {
+                "returncode": int(sch_acct.returncode),
+                "account": str(acct0),
+            }
+            if sch_acct.returncode != 0:
+                account_extra.update(
+                    build_failure_audit_fields(
+                        failure_kind="io_error",
+                        failure_stage="scan_scheduler_account",
+                        failure_adapter="scheduler",
+                    )
                 )
-                if sch_acct.returncode == 0
-                else None
+                audit_fn(
+                    "tool_call",
+                    "scan_scheduler_account",
+                    status="error",
+                    tool_name="scan_scheduler_cli",
+                    account=str(acct0),
+                    extra=account_extra,
+                )
+                notify_decision_by_account[acct0] = None
+                scan_decision_by_account[acct0] = _global_scan_fallback("global_fallback_account_scheduler_error")
+                continue
+
+            audit_fn(
+                "tool_call",
+                "scan_scheduler_account",
+                status="ok",
+                tool_name="scan_scheduler_cli",
+                account=str(acct0),
+                extra=account_extra,
+            )
+            account_scheduler_decision, account_scheduler_view = build_multi_tick_scheduler_decision(
+                scheduler_stdout=str(sch_acct.stdout or ""),
+                as_of_utc=datetime.now(timezone.utc).isoformat(),
+                snapshot_cls=snapshot_cls,
+                engine_entrypoint=engine_entrypoint,
+            )
+            account_should_run, account_reason = apply_scan_run_decision(
+                should_run_global=bool(account_scheduler_view.should_run_scan),
+                reason_global=str(account_scheduler_view.reason),
+                force_mode=force_mode,
+                smoke=smoke,
+            )
+            scan_decision_by_account[acct0] = {
+                "should_run": bool(account_should_run),
+                "reason": str(account_reason),
+                "source": "account_scheduler",
+                "scheduler_decision": account_scheduler_decision,
+            }
+            notify_decision_by_account[acct0] = build_multi_tick_account_scheduler_view(
+                account=str(acct0),
+                scheduler_stdout=str(sch_acct.stdout or ""),
+                scheduler_decision=scheduler_decision,
+                as_of_utc=datetime.now(timezone.utc).isoformat(),
+                snapshot_cls=snapshot_cls,
+                engine_entrypoint=engine_entrypoint,
+                account_view_cls=account_view_cls,
             )
         except SchemaValidationError as exc:
-            fail_schema_validation(stage="account_scheduler_decision", exc=exc)
-        except Exception:
             notify_decision_by_account[acct0] = None
+            scan_decision_by_account[acct0] = _global_scan_fallback("global_fallback_account_scheduler_schema_error")
+            fail_schema_validation(stage="account_scheduler_decision", exc=exc)
+        except Exception as exc:
+            audit_fn(
+                "tool_call",
+                "scan_scheduler_account",
+                status="error",
+                tool_name="scan_scheduler_cli",
+                account=str(acct0),
+                message=str(exc),
+                extra={
+                    "account": str(acct0),
+                    "exception_type": type(exc).__name__,
+                },
+            )
+            notify_decision_by_account[acct0] = None
+            scan_decision_by_account[acct0] = _global_scan_fallback("global_fallback_account_scheduler_exception")
 
-    should_run_global, reason_global = apply_scan_run_decision(
-        should_run_global=bool(scheduler_view.should_run_scan),
-        reason_global=str(scheduler_view.reason),
-        force_mode=force_mode,
-        smoke=smoke,
-    )
     return MultiTickSchedulerResult(
         state_path=state_path,
         scheduler_schedule_key=scheduler_schedule_key,
         scheduler_decision=scheduler_decision,
         scheduler_view=scheduler_view,
         notify_decision_by_account=notify_decision_by_account,
+        scan_decision_by_account=scan_decision_by_account,
         scheduler_ms=scheduler_ms,
         should_run_global=should_run_global,
         reason_global=reason_global,

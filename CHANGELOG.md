@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 1.2.24 - 2026-05-12
+
+### Changed
+- Validated `--default-account` against the active account set for the current tick run.
+
+### Fixed
+- Made multi-account tick scan scheduling account-scoped so one account's scheduler state no longer suppresses or drives another account's pipeline run.
+- Marked scheduler scans only for accounts whose pipeline actually ran.
+- Kept `--no-send` shared last-run metadata observable without marking dry runs as sent.
+
+## 1.2.23 - 2026-05-12
+
+### Changed
+- Refined compact notification wording and Markdown layout for per-account reports.
+
 ## 1.2.22 - 2026-05-12
 
 ### Changed

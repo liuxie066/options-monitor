@@ -162,6 +162,7 @@ def finalize_multi_tick_run(
             sent_accounts=sent_accounts,
             notify_failures=notify_failures,
             notify_summary=notify_summary,
+            no_send=no_send,
         )
         state_repo.write_shared_last_run(
             base,

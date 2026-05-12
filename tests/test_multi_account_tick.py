@@ -123,3 +123,40 @@ def test_account_worker_count_is_bounded_by_runtime_config() -> None:
     assert mod._resolve_account_run_max_workers({"runtime": {"multi_account_max_workers": 0}}, 5) == 1
     assert mod._should_update_account_legacy_output(1) is True
     assert mod._should_update_account_legacy_output(2) is False
+
+
+def test_default_account_must_be_active_account() -> None:
+    from src.application import multi_account_tick as mod
+
+    assert mod._resolve_default_account(None, ["lx", "sy"]) == "lx"
+    assert mod._resolve_default_account("SY", ["lx", "sy"]) == "sy"
+
+    try:
+        mod._resolve_default_account("other", ["lx", "sy"])
+        raise AssertionError("expected config error")
+    except SystemExit as exc:
+        assert "--default-account must be one of active accounts" in str(exc)
+
+
+def test_mark_scanned_accounts_updates_each_ran_account() -> None:
+    from pathlib import Path
+    from src.application import multi_account_tick as mod
+
+    calls: list[dict[str, Any]] = []
+
+    def fake_runner(**kwargs):
+        calls.append(dict(kwargs))
+
+    mod._mark_scanned_accounts(
+        runner=fake_runner,
+        vpy=Path("/repo/.venv/bin/python"),
+        base=Path("/repo"),
+        config=Path("/repo/config.us.json"),
+        state=Path("/repo/output_shared/state/scheduler_state.json"),
+        state_dir=Path("/repo/output_runs/run-1/state"),
+        schedule_key="schedule",
+        accounts=["lx", "sy"],
+    )
+
+    assert [call["account"] for call in calls] == ["lx", "sy"]
+    assert all(call["mark_scanned"] is True for call in calls)

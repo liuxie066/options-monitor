@@ -65,6 +65,7 @@ class AccountRunRequest:
     prefetch_lock: Any | None = None
     prefetch_state: dict[str, Any] | None = None
     maintenance_lock: Any | None = None
+    scan_decision_by_account: dict[str, dict[str, Any]] | None = None
 
 
 @dataclass(frozen=True)
@@ -188,6 +189,26 @@ def _position_maintenance_error_result(
     return result
 
 
+def _resolve_account_scan_decision(
+    *,
+    account: str,
+    scan_decision_by_account: dict[str, dict[str, Any]] | None,
+    should_run_global: bool,
+    reason_global: str,
+) -> tuple[bool, str]:
+    should_run = bool(should_run_global)
+    reason = str(reason_global)
+    decisions = scan_decision_by_account if isinstance(scan_decision_by_account, dict) else {}
+    account_key = str(account or "").strip()
+    raw = decisions.get(account_key) or decisions.get(account_key.lower())
+    if isinstance(raw, dict):
+        if "should_run" in raw:
+            should_run = bool(raw.get("should_run"))
+        if "reason" in raw:
+            reason = str(raw.get("reason") or "")
+    return should_run, reason
+
+
 def run_one_account(
     *,
     request: AccountRunRequest,
@@ -293,15 +314,21 @@ def run_one_account(
         notify_decision_by_account=request.notify_decision_by_account,
         scheduler_decision=request.scheduler_view,
     )
+    scan_should_run, scan_reason = _resolve_account_scan_decision(
+        account=acct,
+        scan_decision_by_account=request.scan_decision_by_account,
+        should_run_global=request.should_run_global,
+        reason_global=request.reason_global,
+    )
     try:
         decision = Decision.from_payload(
             {
                 "schema_kind": "decision",
                 "schema_version": "1.0",
                 "account": acct,
-                "should_run": bool(request.should_run_global),
+                "should_run": bool(scan_should_run),
                 "should_notify": bool(should_notify_raw),
-                "reason": str(request.reason_global),
+                "reason": str(scan_reason),
             }
         )
     except SchemaValidationError as e:

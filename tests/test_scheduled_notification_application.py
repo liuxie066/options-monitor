@@ -353,6 +353,27 @@ def test_build_notify_summary_records_run_level_delivery_counts() -> None:
     assert tick_metrics["reason"] == "sent_partial_notify_failure"
 
 
+def test_shared_last_run_meta_marks_no_send_as_not_sent() -> None:
+    from types import SimpleNamespace
+    from src.application.cron_runtime import build_shared_last_run_meta
+
+    meta = build_shared_last_run_meta(
+        now_utc="2026-05-12T00:00:00Z",
+        channel="openclaw-weixin",
+        target="group://test",
+        results=[SimpleNamespace(account="lx")],
+        sent_accounts=["lx"],
+        notify_failures=[],
+        notify_summary={"success_count": 1},
+        no_send=True,
+    )
+
+    assert meta["sent"] is False
+    assert meta["no_send"] is True
+    assert meta["sent_accounts"] == []
+    assert meta["would_send_accounts"] == ["lx"]
+
+
 def test_mark_no_candidate_notification_metrics_updates_matching_accounts_only() -> None:
     from src.application.scheduled_notification import mark_no_candidate_notification_metrics
 
