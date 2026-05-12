@@ -1942,5 +1942,5 @@ def test_preview_notification_is_read_only() -> None:
     out = run_tool("preview_notification", {"alerts_text": alerts, "account_label": "user1"})
 
     assert out["ok"] is True
-    assert "🔵 Put" in out["data"]["notification_text"]
+    assert "### Put" in out["data"]["notification_text"]
     assert "🟢 卖Put NVDA 156P @ 06-18" in out["data"]["notification_text"]

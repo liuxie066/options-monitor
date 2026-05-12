@@ -774,13 +774,13 @@ def build_notification(
         emit_fn = emit_compact if use_compact else emit_plain
 
         if groups['sell_put']:
-            emit_fn('🔵 Put' if use_compact else 'Put', groups['sell_put'])
+            emit_fn('### Put' if use_compact else 'Put', groups['sell_put'])
         if groups['sell_call']:
-            emit_fn('🔵 Call' if use_compact else 'Call', groups['sell_call'])
+            emit_fn('### Call' if use_compact else 'Call', groups['sell_call'])
         if groups['yield_enhancement']:
-            emit_fn('💎 Enhancement' if use_compact else 'Enhancement', groups['yield_enhancement'])
+            emit_fn('### Enhancement' if use_compact else 'Enhancement', groups['yield_enhancement'])
         if groups['other']:
-            emit_fn('⚪ Other' if use_compact else 'Other', groups['other'])
+            emit_fn('### Other' if use_compact else 'Other', groups['other'])
 
     if not candidate_lines:
         return build_no_candidate_notification_text(account_label=account_label)
