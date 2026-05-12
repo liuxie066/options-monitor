@@ -16,7 +16,13 @@ from domain.domain.option_position_lots import (
 )
 from src.application.option_positions_service import persist_manual_void_event
 from src.application.option_positions_feishu_sync import main as run_option_positions_feishu_sync
-from src.application.position_workflows import execute_manual_adjust, execute_manual_close, execute_manual_open
+from src.application.position_workflows import (
+    ManualCloseMatchError,
+    execute_manual_adjust,
+    execute_manual_close,
+    execute_manual_open,
+    format_manual_close_match_error,
+)
 from src.application.option_positions_facade import (
     format_cash_secured_amount,
     format_position_money,
@@ -59,8 +65,15 @@ def main(argv: list[str] | None = None) -> int:
     p_add.add_argument('--note', default=None)
     p_add.add_argument('--dry-run', action='store_true')
 
-    p_buy_close = sub.add_parser('buy-close', help='buy to close a position by record_id')
-    p_buy_close.add_argument('--record-id', required=True)
+    p_buy_close = sub.add_parser('buy-close', help='buy to close a position by record_id or strict unique selector')
+    p_buy_close.add_argument('--record-id', default=None)
+    p_buy_close.add_argument('--broker', default='富途')
+    p_buy_close.add_argument('--account', default=None, help='required when --record-id is omitted')
+    p_buy_close.add_argument('--symbol', default=None, help='required when --record-id is omitted')
+    p_buy_close.add_argument('--option-type', default=None, choices=['put', 'call'], help='required when --record-id is omitted')
+    p_buy_close.add_argument('--side', default='short', choices=['short', 'long'], help='target position side; buy-close normally targets short')
+    p_buy_close.add_argument('--strike', type=float, default=None, help='required when --record-id is omitted')
+    p_buy_close.add_argument('--exp', default=None, help='YYYY-MM-DD; required when --record-id is omitted')
     p_buy_close.add_argument('--contracts', type=int, required=True, help='contracts to close; supports partial close')
     p_buy_close.add_argument('--close-price', type=float, default=None, help='buy-to-close price per share/contract unit')
     p_buy_close.add_argument('--close-reason', default='manual_buy_to_close')
@@ -253,16 +266,29 @@ def main(argv: list[str] | None = None) -> int:
                 close_price=args.close_price,
                 close_reason=args.close_reason,
                 dry_run=bool(args.dry_run),
+                broker=args.broker,
+                account=args.account,
+                symbol=args.symbol,
+                option_type=args.option_type,
+                position_side=args.side,
+                strike=args.strike,
+                expiration_ymd=((args.exp or '').strip() or None),
             )
+        except ManualCloseMatchError as e:
+            raise SystemExit(format_manual_close_match_error(e))
         except ValueError as e:
             raise SystemExit(str(e))
+        match = out.get("match") if isinstance(out.get("match"), dict) else {}
+        if match.get("rule") == "strict_contract_unique":
+            print(f"[MATCH] rule={match.get('rule')} record_id={match.get('record_id')}")
         patch = out["patch"]
         if args.dry_run:
             print('[DRY_RUN] update fields:')
             print(json.dumps(patch, ensure_ascii=False, indent=2))
             return 0
         res = out["result"]
-        print(f"[DONE] buy-closed {args.record_id} contracts={int(args.contracts)} event_id={res.get('event_id')}")
+        closed_record_id = (match.get("record_id") if match else None) or args.record_id
+        print(f"[DONE] buy-closed {closed_record_id} contracts={int(args.contracts)} event_id={res.get('event_id')}")
         return 0
 
     if args.cmd == 'events':

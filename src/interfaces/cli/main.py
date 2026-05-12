@@ -126,6 +126,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     sub.add_parser("watchlist", help="manage monitored symbols")
     sub.add_parser("option-positions", help="option position operations")
+    sub.add_parser("trade-events", help="review, repair, replay, and void trade events")
 
     init_cmd = sub.add_parser("init", help="initialize runtime config")
     init_sub = init_cmd.add_subparsers(dest="init_command", required=True)
@@ -180,6 +181,10 @@ def main(argv: list[str] | None = None) -> int:
         from src.interfaces.cli.option_positions import main as run_option_positions_cli
 
         return int(run_option_positions_cli(actual_argv[1:]))
+    if actual_argv and actual_argv[0] == "trade-events":
+        from src.interfaces.cli.trade_events import main as run_trade_events_cli
+
+        return int(run_trade_events_cli(actual_argv[1:]))
     if actual_argv and actual_argv[0] == "watchlist":
         from src.interfaces.cli.watchlist import main as run_watchlist_cli
 

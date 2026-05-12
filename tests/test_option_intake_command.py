@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from src.application.option_intake import _missing_for_action, parse_om_command
@@ -143,3 +144,139 @@ def test_option_intake_no_longer_shells_out_to_parser_or_option_positions() -> N
     assert "import subprocess" not in text
     assert "from src.application.parse_option_message import parse_option_message_text" in text
     assert "scripts/option_positions.py" not in text
+
+
+def test_option_intake_close_auto_matches_unique_selector(monkeypatch, tmp_path: Path, capsys) -> None:
+    import src.application.option_intake as intake
+    import src.application.option_positions_service as svc
+    from domain.domain.option_position_lots import OpenPositionCommand
+
+    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    svc.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="0700.HK",
+            option_type="put",
+            side="short",
+            contracts=2,
+            currency="HKD",
+            strike=480.0,
+            multiplier=100,
+            expiration_ymd="2026-04-29",
+            premium_per_share=3.93,
+            opened_at_ms=1000,
+        ),
+    )
+    lot = repo.list_position_lots()[0]
+
+    monkeypatch.setattr(intake, "resolve_option_positions_repo", lambda **_kwargs: (tmp_path / "data.json", repo))
+    monkeypatch.setattr(
+        intake,
+        "parse_option_message_text",
+        lambda *_args, **_kwargs: {
+            "ok": True,
+            "raw": "close",
+            "missing": [],
+            "parsed": {
+                "account": "lx",
+                "symbol": "0700.HK",
+                "option_type": "put",
+                "side": "long",
+                "strike": 480.0,
+                "exp": "2026-04-29",
+                "premium_per_share": 1.2,
+                "contracts": 1,
+                "currency": "HKD",
+                "market": "富途",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "option_intake",
+            "--text",
+            "【成交提醒】成功买入1张$腾讯 260429 480.00 沽$，成交价格：1.20",
+            "--action",
+            "close",
+            "--apply",
+        ],
+    )
+
+    assert intake.main() == 0
+
+    out = capsys.readouterr().out
+    assert f"[MATCH] rule=strict_contract_unique record_id={lot['record_id']}" in out
+    assert f"[DONE] buy-closed {lot['record_id']} contracts=1" in out
+    assert repo.get_record_fields(lot["record_id"])["contracts_open"] == 1
+
+
+def test_option_intake_close_parser_skips_multiplier_resolution(monkeypatch, tmp_path: Path, capsys) -> None:
+    import src.application.option_intake as intake
+    import src.application.option_positions_service as svc
+    from domain.domain.option_position_lots import OpenPositionCommand
+
+    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    svc.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="0700.HK",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="HKD",
+            strike=480.0,
+            multiplier=100,
+            expiration_ymd="2026-04-29",
+            premium_per_share=3.93,
+            opened_at_ms=1000,
+        ),
+    )
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(intake, "resolve_option_positions_repo", lambda **_kwargs: (tmp_path / "data.json", repo))
+
+    def _fake_parse(*_args, **kwargs):
+        captured.update(kwargs)
+        return {
+            "ok": False,
+            "raw": "close",
+            "missing": ["multiplier"],
+            "parsed": {
+                "account": "lx",
+                "symbol": "0700.HK",
+                "option_type": "put",
+                "side": "long",
+                "strike": 480.0,
+                "exp": "2026-04-29",
+                "premium_per_share": 1.2,
+                "contracts": 1,
+                "currency": "HKD",
+                "market": "富途",
+                "multiplier": None,
+            },
+        }
+
+    monkeypatch.setattr(intake, "parse_option_message_text", _fake_parse)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "option_intake",
+            "--text",
+            "【成交提醒】成功买入1张$腾讯 260429 480.00 沽$，成交价格：1.20",
+            "--action",
+            "close",
+            "--dry-run",
+        ],
+    )
+
+    assert intake.main() == 0
+
+    assert captured["resolve_multiplier"] is False
+    assert "[DRY_RUN] update fields:" in capsys.readouterr().out

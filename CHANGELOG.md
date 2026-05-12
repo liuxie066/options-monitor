@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 1.2.28 - 2026-05-12
+
+### Added
+- Added trade intent normalization for manual intake and Futu normalized deals, making trade side, position effect, and target position side explicit.
+- Added `om trade-events` review, replay, void, and repair commands for manual intervention on the trade event ledger.
+
+### Changed
+- Allow manual close flows to auto-match a strict unique open lot when `record_id` is omitted, while listing candidates and refusing ambiguous matches.
+- Made manual close parsing skip multiplier resolution and rely on contract selectors for safe matching.
+
+### Fixed
+- Guarded manual trade-event repair against repeated repair of an already voided event.
+- Blocked open-event repair when downstream close or adjust events depend on the original lot identity.
+- Included projection previews in trade-event void and repair dry runs before applying ledger changes.
+
 ## 1.2.27 - 2026-05-12
 
 ### Changed

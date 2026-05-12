@@ -30,7 +30,13 @@ from src.application.account_config import accounts_from_config_path
 from src.application.config_loader import load_config
 from src.application.parse_option_message import parse_option_message_text
 from src.application.option_positions_facade import resolve_option_positions_repo, resolve_option_positions_repo_from_config
-from src.application.position_workflows import execute_manual_close, execute_manual_open
+from src.application.position_workflows import (
+    ManualCloseMatchError,
+    execute_manual_close,
+    execute_manual_open,
+    format_manual_close_match_error,
+)
+from src.application.trade_intent import trade_intent_from_manual_parse
 
 
 @dataclass(frozen=True)
@@ -201,6 +207,18 @@ def _missing_for_action(parsed: dict, action: str) -> list[str]:
     return list(parsed.get("missing") or [])
 
 
+def _target_position_side_for_close(parsed_fields: dict, raw_text: str) -> str | None:
+    raw = str(raw_text or "").strip().lower()
+    if "买" in raw or "買" in raw or "buy" in raw:
+        return "short"
+    if "卖" in raw or "賣" in raw or "sell" in raw:
+        return "long"
+    side = str(parsed_fields.get("side") or "").strip().lower()
+    if side in {"short", "long"}:
+        return side
+    return None
+
+
 def main():
     ap = argparse.ArgumentParser(description='Option intake (parse + write)')
     ap.add_argument('--text', required=True)
@@ -210,7 +228,7 @@ def main():
     ap.add_argument('--data-config', default=None, help='portfolio data config path; auto-resolves when omitted')
     ap.add_argument('--action', choices=['open', 'close'], default=None, help='explicit action; /om command can also provide open/close')
     ap.add_argument('--account', default=None, help='override parsed account, e.g. lx/sy')
-    ap.add_argument('--record-id', default=None, help='required for close/buy-close; no auto matching')
+    ap.add_argument('--record-id', default=None, help='optional for close/buy-close; omitted close uses strict unique auto matching')
     ap.add_argument('--close-reason', default='manual_buy_to_close')
     ap.add_argument('--dry-run', action='store_true', help='default behavior if neither --dry-run nor --apply specified')
     ap.add_argument('--apply', action='store_true')
@@ -245,7 +263,7 @@ def main():
     if accounts is None and args.config:
         accounts = accounts_from_config_path(cfg_path)
 
-    parsed = parse_option_message_text(text, accounts=accounts)
+    parsed = parse_option_message_text(text, accounts=accounts, resolve_multiplier=(action == 'open'))
     p = parsed['parsed']
     if account_override:
         p['account'] = str(account_override).strip().lower()
@@ -258,6 +276,13 @@ def main():
         return 2
 
     market = (p.get('market') or args.market)
+    intent = trade_intent_from_manual_parse(
+        parsed,
+        action=action,
+        raw_text=text,
+        broker=market,
+        record_id=record_id,
+    )
     need_repo = action == 'close' or bool(args.apply)
     repo = None
     if need_repo:
@@ -267,46 +292,57 @@ def main():
             _data_config, repo = resolve_option_positions_repo(base=base, data_config=args.data_config)
 
     if action == 'close':
-        if not record_id:
-            print('[PARSE_FAIL] missing: record_id')
-            print(json.dumps(parsed, ensure_ascii=False, indent=2))
-            return 2
+        target_position_side = intent.target_position_side or _target_position_side_for_close(p, text)
         try:
             out = execute_manual_close(
                 repo,
-                record_id=record_id,
-                contracts_to_close=int(p['contracts']),
-                close_price=(float(p['premium_per_share']) if p.get('premium_per_share') is not None else None),
+                record_id=intent.record_id,
+                contracts_to_close=int(intent.contracts or 0),
+                close_price=intent.price,
                 close_reason=args.close_reason,
                 dry_run=bool(args.dry_run and not args.apply),
+                broker=intent.broker,
+                account=intent.account,
+                symbol=intent.symbol,
+                option_type=intent.option_type,
+                position_side=target_position_side,
+                strike=intent.strike,
+                expiration_ymd=intent.expiration_ymd,
             )
+        except ManualCloseMatchError as exc:
+            print(format_manual_close_match_error(exc))
+            return 2
         except ValueError as exc:
             print(str(exc))
             return 2
+        match = out.get("match") if isinstance(out.get("match"), dict) else {}
+        if match.get("rule") == "strict_contract_unique":
+            print(f"[MATCH] rule={match.get('rule')} record_id={match.get('record_id')}")
         if args.dry_run and (not args.apply):
             print('[DRY_RUN] update fields:')
             print(json.dumps(out['patch'], ensure_ascii=False, indent=2))
             return 0
-        print(f"[DONE] buy-closed {record_id} contracts={int(p['contracts'])} event_id={out['result'].get('event_id')}")
+        closed_record_id = (match.get("record_id") if match else None) or intent.record_id
+        print(f"[DONE] buy-closed {closed_record_id} contracts={int(intent.contracts or 0)} event_id={out['result'].get('event_id')}")
         return 0
     else:
         try:
             out = execute_manual_open(
                 repo,
-                broker=market,
-                account=p['account'],
-                symbol=p['symbol'],
-                option_type=p['option_type'],
-                side=p['side'],
-                contracts=int(p['contracts']),
-                currency=p['currency'],
-                strike=float(p['strike']),
-                multiplier=float(p['multiplier']) if p.get('multiplier') is not None else None,
-                expiration_ymd=p['exp'],
-                premium_per_share=(float(p['premium_per_share']) if p.get('premium_per_share') is not None else None),
+                broker=intent.broker,
+                account=str(intent.account or ""),
+                symbol=str(intent.symbol or ""),
+                option_type=str(intent.option_type or ""),
+                side=str(intent.target_position_side or ""),
+                contracts=int(intent.contracts or 0),
+                currency=intent.currency,
+                strike=intent.strike,
+                multiplier=float(intent.multiplier) if intent.multiplier is not None else None,
+                expiration_ymd=intent.expiration_ymd,
+                premium_per_share=intent.price,
                 underlying_share_locked=None,
                 note=f"user_input: {parsed.get('raw')}",
-                opened_at_ms=p.get('fill_time_ms'),
+                opened_at_ms=intent.trade_time_ms,
                 dry_run=bool(args.dry_run and not args.apply),
             )
         except ValueError as exc:
