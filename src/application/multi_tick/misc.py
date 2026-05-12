@@ -81,7 +81,7 @@ class AccountResult:
     notification_text: str
 
 
-HEADROOM_RE = re.compile(r"加仓后余量\s+(?P<val>[-+]?¥?\$?[0-9,]+(?:\.[0-9]+)?)")
+HEADROOM_RE = re.compile(r"余量\s+(?P<val>[-+]?¥?\$?[0-9,]+(?:\.[0-9]+)?)")
 CNY_RE = re.compile(r"¥\s*(?P<num>[-+]?[0-9][0-9,]*(?:\.[0-9]+)?)")
 COVER_RE = re.compile(r"cover\s+(?P<num>-?[0-9]+)")
 

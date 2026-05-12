@@ -119,7 +119,7 @@ def annotate_notification(acct: str, text: str) -> str:
                 out.append('- ' + s)
             last_line1_idx = len(out) - 1
             continue
-        if in_put and s.startswith('担保') and ('加仓后余量' in s):
+        if in_put and s.startswith('担保') and ('余量' in s):
             headroom = _parse_cny(s)
             tag = ''
             if headroom is not None:
@@ -253,7 +253,7 @@ def build_account_message(
     return '\n'.join(lines).strip() + '\n'
 
 
-SECTION_DIVIDER = "─────────────────────"
+SECTION_DIVIDER = "──────────────"
 
 
 def build_account_message_compact(
@@ -300,7 +300,9 @@ def build_account_message_compact(
 
     footer_lines = cash_footer_lines or []
     if footer_lines:
-        lines.append("💰 资金概览")
+        has_emoji_header = any('💰' in str(ln) for ln in footer_lines[:1])
+        if not has_emoji_header:
+            lines.append("💰 资金概览")
         for ln in footer_lines:
             lines.append(f"  {ln}")
         lines.append('')

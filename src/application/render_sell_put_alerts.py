@@ -195,13 +195,13 @@ def render_one(row) -> str:
         cash_free_total_cny = None
 
     headroom = None
-    headroom_label = "加仓后余量(估算, CNY)"
+    headroom_label = "余量(估算, CNY)"
     try:
         if cash_req_cny is not None and cash_free_cny is not None:
             headroom = float(cash_free_cny) - float(cash_req_cny)
         elif cash_req_cny is not None and cash_free_total_cny is not None:
             headroom = float(cash_free_total_cny) - float(cash_req_cny)
-            headroom_label = "加仓后余量(总折算估算, CNY)"
+            headroom_label = "余量(总折算估算, CNY)"
     except Exception:
         headroom = None
 
@@ -225,7 +225,7 @@ def render_one(row) -> str:
         f"{headroom_label}: {('-' if headroom is None else '¥' + num(headroom, 0))}",
         f"担保现金需求(生效口径, {active_ccy}): {('-' if active_req is None else active_symbol + num(active_req, 0))}",
         f"{active_free_label}: {('-' if active_free is None else active_symbol + num(active_free, 0))}",
-        f"加仓后余量(生效口径, {active_ccy}): {('-' if active_headroom is None else active_symbol + num(active_headroom, 0))}",
+        f"余量(生效口径, {active_ccy}): {('-' if active_headroom is None else active_symbol + num(active_headroom, 0))}",
         "",
         f"净收入({str(row.get('currency') or row.get('option_ccy') or 'N/A').upper()}): {num(row['net_income'])}",
         f"净年化: {pct(row['annualized_net_return_on_cash_basis'])}",

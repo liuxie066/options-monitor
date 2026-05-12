@@ -46,7 +46,7 @@ def test_notify_symbols_no_candidate_message_is_heartbeat() -> None:
 
     out = build_notification('', '', account_label='LX')
 
-    assert '监控正常触发：本轮无候选。' in out
+    assert '📋 本轮扫描完成，暂无符合条件的候选。' in out
     assert '今日无需要主动提醒的内容。' not in out
 
 

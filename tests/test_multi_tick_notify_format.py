@@ -8,7 +8,7 @@ def test_account_message_is_plain_text_for_weixin() -> None:
     notif = (
         "Put\n"
         "腾讯 卖Put 2026-04-29 460P\n"
-        "担保 1张 加仓后余量 ¥-100\n"
+        "担保 1张 余量 ¥-100\n"
         "\n"
         "Call\n"
         "英伟达 卖Call 2026-06-18 180C\n"

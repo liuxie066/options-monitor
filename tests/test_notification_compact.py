@@ -183,7 +183,7 @@ def test_build_account_message_compact() -> None:
     notif = (
         "Put\n"
         "腾讯 卖Put 2026-04-29 460P\n"
-        "担保 1张 加仓后余量 ¥-100\n"
+        "担保 1张 余量 ¥-100\n"
         "\n"
         "### [lx] 平仓建议\n"
         "- NVDA Put 2026-06-19 150P · 强烈建议平仓换仓\n"
@@ -205,7 +205,7 @@ def test_build_account_message_compact() -> None:
     assert "⏰ 北京时间 2026-05-12 22:31:00" in message
     assert "📋 本轮概览" in message
     assert "Put 1 · Call 0" in message
-    assert "─────────────────────" in message
+    assert "──────────────" in message
     assert "💰 资金概览" in message
     assert "  LX 持有 ¥1,000 (CNY) | 可用 ¥200 (CNY)" in message
     assert "🔴 优化器" in message

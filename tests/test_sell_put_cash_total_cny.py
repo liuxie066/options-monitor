@@ -193,7 +193,7 @@ def test_render_sell_put_alerts_shows_total_cny_when_base_cny_missing(tmp_path: 
 
     assert "总现金折算(CNY): ¥531,694" in text
     assert "总可用折算(扣占用, CNY): ¥11,666" in text
-    assert "加仓后余量(总折算估算, CNY): ¥-27,614" in text
+    assert "余量(总折算估算, CNY): ¥-27,614" in text
     assert "判断: 所需担保现金约 ¥39,280，但当前总可用折算约 ¥11,666" in text
 
 
@@ -236,7 +236,7 @@ def test_render_sell_put_alerts_shows_usd_cash_guard_when_cny_missing(tmp_path: 
     assert "判断: 所需担保现金约 $18,000，但当前账户可用担保现金约 $15,000" in text
     assert "担保现金需求(生效口径, USD): $18,000" in text
     assert "账户可用担保现金(USD): $15,000" in text
-    assert "加仓后余量(生效口径, USD): $-3,000" in text
+    assert "余量(生效口径, USD): $-3,000" in text
 
 
 def test_render_sell_put_alerts_shows_linked_call_summary(tmp_path: Path) -> None:
