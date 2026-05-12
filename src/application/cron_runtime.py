@@ -158,14 +158,18 @@ def build_shared_last_run_meta(
     sent_accounts: list[str],
     notify_failures: list[dict[str, object]],
     notify_summary: dict[str, int],
+    no_send: bool = False,
 ) -> dict[str, Any]:
+    actual_sent_accounts = [] if no_send else list(sent_accounts)
     return {
         "last_run_utc": str(now_utc),
-        "sent": bool(sent_accounts),
+        "sent": (not no_send) and bool(sent_accounts),
+        "no_send": bool(no_send),
         "channel": str(channel),
         "target": str(target),
         "accounts": [r.account for r in results],
-        "sent_accounts": sent_accounts,
+        "sent_accounts": actual_sent_accounts,
+        "would_send_accounts": list(sent_accounts) if no_send else [],
         "notify_failures": notify_failures,
         "notify_summary": notify_summary,
         "results": [r.__dict__ for r in results],

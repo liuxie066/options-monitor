@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 
@@ -43,3 +46,66 @@ def test_resolve_market_run_reports_trading_day_block_without_exiting() -> None:
     assert out.scheduler_markets == ["US"]
     assert out.skip_message == "non-trading day: US"
     assert any(evt["step"] == "trading_day_guard" and evt["status"] == "skip" for evt in runlog.events)
+
+
+def test_run_scheduler_flow_uses_account_scan_decisions() -> None:
+    from domain.domain.engine import AccountSchedulerDecisionView, resolve_multi_tick_engine_entrypoint
+    from domain.domain import SnapshotDTO
+    from src.application.multi_tick_scheduler import run_scheduler_flow
+
+    payloads = {
+        None: {
+            "should_run_scan": False,
+            "is_notify_window_open": True,
+            "reason": "global_not_due",
+        },
+        "lx": {
+            "should_run_scan": False,
+            "is_notify_window_open": True,
+            "reason": "lx_not_due",
+        },
+        "sy": {
+            "should_run_scan": True,
+            "is_notify_window_open": True,
+            "reason": "sy_due",
+        },
+    }
+    calls: list[str | None] = []
+    audit_events: list[dict[str, Any]] = []
+
+    def fake_scheduler_cli(**kwargs):
+        account = kwargs.get("account")
+        calls.append(account)
+        return SimpleNamespace(returncode=0, stdout=json.dumps(payloads[account]), stderr="")
+
+    out = run_scheduler_flow(
+        vpy=Path("/repo/.venv/bin/python"),
+        base=Path("/repo"),
+        cfg_path=Path("/repo/config.us.json"),
+        base_cfg={},
+        state_path=Path("/repo/output_shared/state/scheduler_state.json"),
+        scheduler_schedule_key="schedule",
+        accounts=["lx", "sy"],
+        force_mode=False,
+        smoke=False,
+        snapshot_cls=SnapshotDTO,
+        engine_entrypoint=resolve_multi_tick_engine_entrypoint,
+        account_view_cls=AccountSchedulerDecisionView,
+        run_scan_scheduler_cli=fake_scheduler_cli,
+        build_failure_audit_fields=lambda **_kwargs: {},
+        audit_fn=lambda event_type, action, **kwargs: audit_events.append({"event_type": event_type, "action": action, **kwargs}),
+        fail_schema_validation=lambda **kwargs: (_ for _ in ()).throw(AssertionError(kwargs)),
+    )
+
+    assert calls == [None, "lx", "sy"]
+    assert out.should_run_global is False
+    assert out.reason_global == "global_not_due"
+    assert out.scan_decision_by_account["lx"]["should_run"] is False
+    assert out.scan_decision_by_account["lx"]["reason"] == "lx_not_due"
+    assert out.scan_decision_by_account["sy"]["should_run"] is True
+    assert out.scan_decision_by_account["sy"]["reason"] == "sy_due"
+    assert out.notify_decision_by_account["sy"].is_notify_window_open is True
+    assert [event["action"] for event in audit_events if event["action"] == "scan_scheduler_account"] == [
+        "scan_scheduler_account",
+        "scan_scheduler_account",
+    ]

@@ -136,6 +136,23 @@ def _should_update_account_legacy_output(account_count: int) -> bool:
     return int(account_count) == 1
 
 
+def _resolve_default_account(default_account: str | None, accounts: list[str]) -> str:
+    account_ids = [str(a).strip().lower() for a in (accounts or []) if str(a).strip()]
+    if not account_ids:
+        raise SystemExit("[CONFIG_ERROR] at least one account is required")
+    if default_account is None:
+        return account_ids[0]
+    resolved = str(default_account).strip().lower()
+    if not resolved:
+        raise SystemExit("[CONFIG_ERROR] --default-account cannot be empty")
+    if resolved not in account_ids:
+        raise SystemExit(
+            "[CONFIG_ERROR] --default-account must be one of active accounts: "
+            + ", ".join(account_ids)
+        )
+    return resolved
+
+
 def _run_account_outcomes(
     *,
     account_ids: list[str],
@@ -156,6 +173,32 @@ def _run_account_outcomes(
             outcomes_by_account[acct] = future.result()
 
     return [outcomes_by_account[acct] for acct in account_ids]
+
+
+def _mark_scanned_accounts(
+    *,
+    runner: Callable[..., object],
+    vpy: Path,
+    base: Path,
+    config: Path,
+    state: Path,
+    state_dir: Path,
+    schedule_key: str,
+    accounts: list[str],
+) -> None:
+    for acct in [str(a).strip() for a in accounts if str(a).strip()]:
+        request_scheduler_update(
+            runner=runner,
+            vpy=vpy,
+            base=base,
+            config=config,
+            state=state,
+            state_dir=state_dir,
+            mark_scanned=True,
+            schedule_key=str(schedule_key),
+            account=acct,
+            capture_output=False,
+        )
 
 
 def current_run_id() -> str | None:
@@ -249,10 +292,7 @@ def main(argv: list[str] | None = None) -> int:
         args.accounts = accounts_from_config(base_cfg)
     else:
         args.accounts = accounts_from_config({'accounts': args.accounts})
-    if args.default_account is None:
-        args.default_account = args.accounts[0]
-    else:
-        args.default_account = str(args.default_account).strip().lower()
+    args.default_account = _resolve_default_account(args.default_account, args.accounts)
 
     syms0 = resolve_watchlist_config(base_cfg)
     src_counts: dict[str, int] = {}
@@ -371,6 +411,13 @@ def main(argv: list[str] | None = None) -> int:
     accounts_effective = apply_project_load_shed(accounts_normalized, guard_admission)
     if accounts_effective != accounts_normalized:
         args.accounts = accounts_effective
+        default_after_load_shed = (
+            args.default_account
+            if str(args.default_account or '').strip().lower()
+            in {str(a).strip().lower() for a in accounts_effective if str(a).strip()}
+            else None
+        )
+        args.default_account = _resolve_default_account(default_after_load_shed, accounts_effective)
         runlog.safe_event(
             'project_guard',
             'degraded',
@@ -531,6 +578,7 @@ def main(argv: list[str] | None = None) -> int:
         }
         scheduler_view = SchedulerDecisionView.from_payload(scheduler_decision)
         notify_decision_by_account = {}
+        scan_decision_by_account = {}
         should_run_global = False
         audit_helper.audit(
             'guard',
@@ -564,6 +612,7 @@ def main(argv: list[str] | None = None) -> int:
             scheduler_decision = scheduler_result.scheduler_decision
             scheduler_view = scheduler_result.scheduler_view
             notify_decision_by_account = scheduler_result.notify_decision_by_account
+            scan_decision_by_account = scheduler_result.scan_decision_by_account
             should_run_global = scheduler_result.should_run_global
             reason_global = scheduler_result.reason_global
         except RuntimeError as exc:
@@ -646,6 +695,7 @@ def main(argv: list[str] | None = None) -> int:
                 prefetch_lock=shared_prefetch_lock,
                 prefetch_state=shared_prefetch_state,
                 maintenance_lock=shared_maintenance_lock,
+                scan_decision_by_account=scan_decision_by_account,
             ),
             runlog=runlog,
             audit_fn=audit_helper.audit,
@@ -656,6 +706,7 @@ def main(argv: list[str] | None = None) -> int:
             ),
         )
 
+    ran_pipeline_accounts: list[str] = []
     for outcome in _run_account_outcomes(
         account_ids=account_ids,
         max_workers=account_workers,
@@ -663,21 +714,22 @@ def main(argv: list[str] | None = None) -> int:
     ):
         prefetch_done = bool(outcome.prefetch_done)
         ran_any_pipeline = bool(ran_any_pipeline or outcome.ran_pipeline)
+        if outcome.ran_pipeline:
+            ran_pipeline_accounts.append(str(outcome.result.account))
         tick_metrics['accounts'].append(outcome.acct_metrics)
         results.append(outcome.result)
 
     if ran_any_pipeline:
         try:
-            request_scheduler_update(
+            _mark_scanned_accounts(
                 runner=run_scan_scheduler_cli,
                 vpy=vpy,
                 base=base,
                 config=cfg_path,
                 state=state_path,
                 state_dir=run_repo.get_run_state_dir(base, run_id),
-                mark_scanned=True,
                 schedule_key=str(scheduler_schedule_key),
-                capture_output=False,
+                accounts=ran_pipeline_accounts,
             )
         except Exception:
             pass

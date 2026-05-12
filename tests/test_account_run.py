@@ -451,6 +451,58 @@ def test_run_one_account_prefetches_and_runs_pipeline_successfully(monkeypatch, 
     assert any(evt["step"] == "snapshot_batches" and evt["status"] == "ok" for evt in runlog.events)
 
 
+def test_run_one_account_uses_account_scan_decision_over_global_skip(monkeypatch, tmp_path: Path) -> None:
+    from src.application.account_run import run_one_account
+
+    request = replace(
+        _make_request(tmp_path, prefetch_done=True),
+        should_run_global=False,
+        reason_global="global_not_due",
+        scan_decision_by_account={
+            "lx": {
+                "should_run": True,
+                "reason": "lx_due",
+            }
+        },
+    )
+    env = _install_common_patches(monkeypatch, request)
+    runlog = _FakeRunlog()
+    seen_gate: dict[str, Any] = {}
+
+    def _decide_account_scan_gate(**kwargs):
+        seen_gate.update(kwargs)
+        return {
+            "run_pipeline": True,
+            "ran_scan": True,
+            "meaningful": True,
+            "result_reason": "run",
+        }
+
+    monkeypatch.setattr(env["mod"], "decide_account_scan_gate", _decide_account_scan_gate)
+
+    def _run_pipeline_script(**kwargs):
+        report_dir = kwargs["report_dir"]
+        report_dir.mkdir(parents=True, exist_ok=True)
+        (report_dir / "symbols_notification.txt").write_text("account due\n", encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(env["mod"], "run_pipeline_script", _run_pipeline_script)
+    monkeypatch.setattr(env["mod"], "normalize_pipeline_subprocess_output", lambda **kwargs: {"returncode": kwargs["returncode"], "adapter": "pipeline"})
+    monkeypatch.setattr(env["mod"], "decide_pipeline_execution_result", lambda **kwargs: {"ok": True, "ran_scan": True, "meaningful": True, "reason": "ok"})
+
+    outcome = run_one_account(
+        request=request,
+        runlog=runlog,
+        audit_fn=env["audit_fn"],
+        fail_schema_validation=lambda **kwargs: (_ for _ in ()).throw(AssertionError("schema validation should not fail")),
+    )
+
+    assert seen_gate["should_run"] is True
+    assert seen_gate["reason"] == "lx_due"
+    assert outcome.ran_pipeline is True
+    assert outcome.result.notification_text == "account due"
+
+
 def test_run_one_account_passes_force_mode_to_prefetch(monkeypatch, tmp_path: Path) -> None:
     from src.application.account_run import run_one_account
 
