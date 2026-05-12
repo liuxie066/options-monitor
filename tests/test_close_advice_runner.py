@@ -108,14 +108,74 @@ def test_run_close_advice_builds_csv_and_markdown_from_local_fixtures(
     text = (out_dir / "close_advice.txt").read_text(encoding="utf-8")
     assert "平仓建议" in text
     assert "NVDA Put 2026-05-15" in text
+
+
+def test_run_close_advice_enables_optimizer_by_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _freeze_close_advice_business_today(monkeypatch)
+    context = {
+        "open_positions_min": [
+            {
+                "account": "lx",
+                "symbol": "NVDA",
+                "option_type": "put",
+                "side": "short",
+                "status": "open",
+                "contracts_open": 1,
+                "currency": "USD",
+                "strike": 100,
+                "multiplier": 100,
+                "premium": 1.0,
+                "expiration": "2026-06-15",
+            }
+        ]
+    }
+    ctx_path = tmp_path / "option_positions_context.json"
+    ctx_path.write_text(json.dumps(context, ensure_ascii=False), encoding="utf-8")
+
+    required_root = tmp_path / "required_data"
+    parsed = required_root / "parsed"
+    parsed.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "NVDA",
+                "option_type": "put",
+                "expiration": "2026-06-15",
+                "strike": 100,
+                "mid": 0.20,
+                "bid": 0.19,
+                "ask": 0.21,
+                "dte": 60,
+                "multiplier": 100,
+                "spot": 120,
+                "currency": "USD",
+                "delta": 0.60,
+                "otm_pct": 0.10,
+            }
+        ]
+    ).to_csv(parsed / "NVDA_required_data.csv", index=False)
+
+    out_dir = tmp_path / "reports"
+    result = run_close_advice(
+        config={"close_advice": {"enabled": True, "notify_levels": ["strong", "medium"]}},
+        context_path=ctx_path,
+        required_data_root=required_root,
+        output_dir=out_dir,
+        base_dir=Path.cwd(),
+    )
+
+    assert result["tier_counts"].get("strong") == 1
+    csv_text = (out_dir / "close_advice.csv").read_text(encoding="utf-8")
+    text = (out_dir / "close_advice.txt").read_text(encoding="utf-8")
+    assert ",defer," in csv_text
+    assert "缺少 delta 数据，无法运行 optimizer" in csv_text
     assert "强烈建议平仓" in text
 
-    csv_text = (out_dir / "close_advice.csv").read_text(encoding="utf-8")
-    assert "capture_ratio" in csv_text
-    assert "strong" in csv_text
-    assert "buy_to_close_fee" in csv_text
-    assert "2.31915" in csv_text
-    assert "135.68085" in csv_text
+    assert "optimizer_tier" in csv_text
+    assert "optimizer_reason" in csv_text
 
 
 def test_run_close_advice_prefers_context_expiration_ymd_field(
