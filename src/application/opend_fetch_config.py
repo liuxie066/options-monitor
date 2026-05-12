@@ -33,6 +33,7 @@ OPEND_FETCH_KWARG_KEYS = frozenset(
     }
 )
 OPEND_RATE_LIMIT_ENDPOINT_ALIASES = {
+    "option_chain": ("option_chain", "chain", "get_option_chain"),
     "market_snapshot": ("market_snapshot", "snapshot", "get_market_snapshot"),
     "option_expiration": ("option_expiration", "expiration", "get_option_expiration_date"),
 }
@@ -213,7 +214,9 @@ def _as_int(value: Any, default: int) -> int:
 
 def resolve_option_chain_fetch_limit(config: dict[str, Any] | None) -> OpenDEndpointRateLimit:
     runtime = config.get("runtime") if isinstance(config, dict) and isinstance(config.get("runtime"), dict) else {}
-    raw = runtime.get("option_chain_fetch") if isinstance(runtime, dict) and isinstance(runtime.get("option_chain_fetch"), dict) else {}
+    raw = _raw_opend_endpoint_rate_limit(config, endpoint="option_chain")
+    if not raw:
+        raw = runtime.get("option_chain_fetch") if isinstance(runtime, dict) and isinstance(runtime.get("option_chain_fetch"), dict) else {}
     raw = raw if isinstance(raw, dict) else {}
     return OpenDEndpointRateLimit.from_values(
         window_sec=raw.get("window_sec"),
@@ -233,21 +236,25 @@ def _endpoint_rate_limit(
     endpoint: str,
     defaults: dict[str, float | int],
 ) -> OpenDEndpointRateLimit:
-    runtime = config.get("runtime") if isinstance(config, dict) and isinstance(config.get("runtime"), dict) else {}
-    opend = runtime.get("opend_rate_limits") if isinstance(runtime, dict) and isinstance(runtime.get("opend_rate_limits"), dict) else {}
-    raw = {}
-    if isinstance(opend, dict):
-        for key in OPEND_RATE_LIMIT_ENDPOINT_ALIASES[endpoint]:
-            candidate = opend.get(key)
-            if isinstance(candidate, dict):
-                raw = candidate
-                break
+    raw = _raw_opend_endpoint_rate_limit(config, endpoint=endpoint)
     return OpenDEndpointRateLimit.from_values(
         window_sec=raw.get("window_sec"),
         max_calls=raw.get("max_calls"),
         max_wait_sec=raw.get("max_wait_sec"),
         defaults=defaults,
     )
+
+
+def _raw_opend_endpoint_rate_limit(config: dict[str, Any] | None, *, endpoint: str) -> dict[str, Any]:
+    runtime = config.get("runtime") if isinstance(config, dict) and isinstance(config.get("runtime"), dict) else {}
+    opend = runtime.get("opend_rate_limits") if isinstance(runtime, dict) and isinstance(runtime.get("opend_rate_limits"), dict) else {}
+    if not isinstance(opend, dict):
+        return {}
+    for key in OPEND_RATE_LIMIT_ENDPOINT_ALIASES[endpoint]:
+        candidate = opend.get(key)
+        if isinstance(candidate, dict):
+            return candidate
+    return {}
 
 
 def resolve_opend_fetch_limits(config: dict[str, Any] | None) -> OpenDFetchLimits:

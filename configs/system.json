@@ -86,11 +86,6 @@
       "pipeline_timeout_sec": 600,
       "option_positions_context_ttl_sec": 900,
       "portfolio_context_ttl_sec": 900,
-      "option_chain_fetch": {
-        "max_calls": 10,
-        "window_sec": 30,
-        "max_wait_sec": 90
-      },
       "opend_rate_limits": {
         "market_snapshot": {
           "max_calls": 60,
