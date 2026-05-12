@@ -425,6 +425,11 @@ def _build_notification_block_compact(
             except Exception:
                 l3_parts.append(f"Δ {delta_val}")
 
+    if 'Call' in action_label:
+        qty_match = re.search(r'数量=(\d+)张', contract_line)
+        if qty_match:
+            l3_parts.append(f"可卖{qty_match.group(1)}张")
+
     if is_enhancement:
         ask_match = re.search(r'Call\s+ask[=:](\d+\.?\d*)', risk_line)
         if ask_match:
