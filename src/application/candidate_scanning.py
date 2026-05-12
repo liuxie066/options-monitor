@@ -17,7 +17,6 @@ from domain.domain.engine import (
 )
 from domain.domain.engine.candidate_engine import (
     REJECT_RETURN_ANNUALIZED,
-    REJECT_RETURN_IF_EXERCISED_TOTAL,
     REJECT_RETURN_NET_INCOME,
     REJECT_RISK_SPREAD,
 )
@@ -40,7 +39,6 @@ class CandidateScanConfig:
     max_spread_ratio: float | None
     min_annualized_net_return: float | None
     min_net_income: float
-    min_if_exercised_total_return: float | None = None
     reject_stage: str = "step3_risk_gate"
     quiet: bool = False
 
@@ -154,10 +152,8 @@ def run_candidate_scan(
                 stage1,
                 min_annualized_return=config.min_annualized_net_return,
                 min_net_income=config.min_net_income,
-                min_if_exercised_total_return=config.min_if_exercised_total_return,
                 annualized_return=deps.annualized_return_value_fn(metrics),
                 net_income=metrics.get("net_income"),
-                if_exercised_total_return=metrics.get("if_exercised_total_return"),
             )
             stage3 = evaluate_candidate_risk_filter(
                 stage2,
@@ -216,8 +212,6 @@ def _decision_reject_log_rows(*, decision: dict, reject_stage: str) -> list[dict
             rule = "min_annualized_return"
         elif reason == REJECT_RETURN_NET_INCOME:
             rule = "min_net_income"
-        elif reason == REJECT_RETURN_IF_EXERCISED_TOTAL:
-            rule = "min_if_exercised_total_return"
         elif reason == REJECT_RISK_SPREAD:
             rule = "max_spread_ratio"
         else:

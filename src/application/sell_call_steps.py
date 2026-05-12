@@ -23,7 +23,10 @@ from src.infrastructure.io_utils import safe_read_csv
 from src.application.render_sell_call_alerts import render_sell_call_alerts
 from src.application.report_summaries import summarize_sell_call
 from src.application.scan_sell_call import run_sell_call_scan
-from domain.domain.sell_call_config import resolve_min_annualized_net_premium_return_from_sell_call_cfg
+from domain.domain.sell_call_config import (
+    resolve_effective_sell_call_min_strike,
+    resolve_min_annualized_net_premium_return_from_sell_call_cfg,
+)
 
 
 def run_sell_call_scan_and_summarize(
@@ -111,14 +114,14 @@ def run_sell_call_scan_and_summarize(
         shares_available_for_cover=int(shares_available_for_cover),
         min_dte=window.min_dte,
         max_dte=window.max_dte,
-        min_strike=(float(cc.get('min_strike')) if cc.get('min_strike') is not None else None),
+        min_strike=resolve_effective_sell_call_min_strike(
+            min_strike=cc.get('min_strike'),
+            avg_cost=avg_cost,
+            cost_multiplier=cc.get('min_strike_cost_multiplier', 1.0),
+        ),
         max_strike=(float(cc.get('max_strike')) if cc.get('max_strike') is not None else None),
         min_annualized_net_return=min_annualized,
-        min_if_exercised_total_return=(
-            float(cc.get('min_if_exercised_total_return'))
-            if cc.get('min_if_exercised_total_return') is not None
-            else 0.0
-        ),
+        min_strike_cost_multiplier=float(cc.get('min_strike_cost_multiplier', 1.0) or 1.0),
         min_net_income=float(min_net_income_native),
         min_open_interest=liquidity.min_open_interest,
         min_volume=liquidity.min_volume,

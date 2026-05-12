@@ -233,7 +233,7 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 ### 4.2 templates：通用底线（复用）
 - `templates.put_base.sell_put.min_annualized_net_return`：全局 put 最低年化（例如 0.10）
 - `templates.*.*.min_net_income`：全局最低单笔净收益，统一按 CNY 配置；运行时会按标的币种换算为 USD/HKD 后传给扫描器。
-- `templates.call_base.sell_call.min_if_exercised_total_return`：call 若被行权后的最低总收益，按账户持仓 `avg_cost` 计算；默认 `0.0` 表示不接受行权后亏损。
+- `templates.call_base.sell_call.min_strike_cost_multiplier`：sell_call 的成本价 strike 下限倍数；模板默认 `1.02`，表示有效 `min_strike` 至少为 `avg_cost * 1.02`。
 - `sell_put.min_annualized_net_return` 统一解析优先级：
   `symbol.sell_put.min_annualized_net_return` > `templates.<name>.sell_put.min_annualized_net_return` > 代码默认 `DEFAULT_MIN_ANNUALIZED_NET_RETURN(0.07)`。
 - 全局流动性/价差硬过滤仅允许 3 个键：`min_open_interest`、`min_volume`、`max_spread_ratio`
@@ -247,7 +247,7 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
   - `min_strike=0` 已废弃；若不想设置下界，直接省略 `min_strike`。
 - sell_call（enabled 时）：`min_strike`（以及 dte 范围）
   - `avg_cost/shares` 已移除：sell_call 仅从 holdings 自动读取。
-  - `min_if_exercised_total_return` 会用自动读取的 `avg_cost` 做硬过滤；例如 `0.0` 表示 strike 加净权利金覆盖成本才进入候选。
+  - `min_strike_cost_multiplier` 会用自动读取的 `avg_cost` 做硬过滤；例如 `1.02` 表示有效 `min_strike` 不低于 `avg_cost * 1.02`。
   - 若 holdings 取不到（该账户缺 holdings / 读取失败），则该账户的 sell_call 会被跳过。
   - 抓取层现在会先为 sell_put / sell_call 分别规划 required_data 窗口，再按相同 expiration 尽量合并到底层 OpenD 请求。
   - call 的近端边界是 `min_strike`；若只配置了 `min_strike`，抓取层会自动向上扩 `20%` 作为抓取上界。

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.27 - 2026-05-12
+
+### Changed
+- Simplified Sell Call strike-floor configuration by replacing `min_if_exercised_total_return` with `min_strike_cost_multiplier`.
+- Raised the system Sell Call template floor to `avg_cost * 1.02` while preserving the configured `min_strike` floor.
+
 ## 1.2.26 - 2026-05-12
 
 ### Changed

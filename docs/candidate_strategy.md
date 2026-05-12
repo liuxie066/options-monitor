@@ -102,9 +102,8 @@
 主要硬约束包括：
 
 - `min_dte <= dte <= max_dte`
-- `min_strike <= strike <= max_strike`
+- `min_strike <= strike <= max_strike`，其中 Covered Call 的有效 `min_strike` 不低于持仓 `avg_cost * min_strike_cost_multiplier`
 - 必须有足够股票可覆盖 short call
-- `if_exercised_total_return >= min_if_exercised_total_return`，按账户持仓 `avg_cost` 计算若被行权后的总收益底线
 
 ### 说明
 这些硬约束主要由候选引擎和扫描脚本共同完成。
@@ -129,7 +128,6 @@
 - `min_annualized_net_return`（Put）
 - `min_annualized_net_premium_return`（Call）
 - `min_net_income`
-- `min_if_exercised_total_return`（Call，基于 `avg_cost` 的若被行权总收益）
 
 ### 优先级
 字段优先级仍然是：

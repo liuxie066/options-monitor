@@ -8,7 +8,6 @@ import pandas as pd
 from .candidate_engine import (
     CandidateScoreWeights,
     REJECT_RETURN_ANNUALIZED,
-    REJECT_RETURN_IF_EXERCISED_TOTAL,
     REJECT_RETURN_NET_INCOME,
     REJECT_RISK_SPREAD,
     build_candidate_decision,
@@ -41,12 +40,10 @@ STRATEGY_PARAM_TABLE_V1: dict[StrategyMode, dict[str, dict[str, float | None]]] 
             "min_annualized_return": None,
             "min_net_income": None,
             "max_spread_ratio": None,
-            "min_if_exercised_total_return": None,
         },
         "score_weights": {
             "annualized_return": 1.0,
             "net_income": 1e-6,
-            "if_exercised_total_return": 0.0,
             "liquidity": 0.0,
             "risk_distance": 0.0,
         },
@@ -56,7 +53,6 @@ STRATEGY_PARAM_TABLE_V1: dict[StrategyMode, dict[str, dict[str, float | None]]] 
             "min_annualized_return": None,
             "min_net_income": None,
             "max_spread_ratio": None,
-            "min_if_exercised_total_return": None,
         },
         "score_weights": {
             "annualized_return": 1.0,
@@ -74,7 +70,6 @@ class StrategyConfig:
     min_annualized_return: float | None = None
     min_net_income: float | None = None
     max_spread_ratio: float | None = None
-    min_if_exercised_total_return: float | None = None
     score_weight_annualized_return: float = 1.0
     score_weight_net_income: float = 1e-6
     score_weight_liquidity: float = 0.0
@@ -101,7 +96,6 @@ def build_strategy_config(mode: StrategyMode, **kwargs) -> StrategyConfig:
         "min_annualized_return": hard.get("min_annualized_return"),
         "min_net_income": hard.get("min_net_income"),
         "max_spread_ratio": hard.get("max_spread_ratio"),
-        "min_if_exercised_total_return": hard.get("min_if_exercised_total_return"),
         "score_weight_annualized_return": float(score.get("annualized_return", 1.0) or 0.0),
         "score_weight_net_income": float(score.get("net_income", 0.0) or 0.0),
         "score_weight_liquidity": float(score.get("liquidity", 0.0) or 0.0),
@@ -156,7 +150,6 @@ def _append_engine_reject_rows(
     reason_to_rule = {
         REJECT_RETURN_ANNUALIZED: "min_annualized_return",
         REJECT_RETURN_NET_INCOME: "min_net_income",
-        REJECT_RETURN_IF_EXERCISED_TOTAL: "min_if_exercised_total_return",
         REJECT_RISK_SPREAD: "max_spread_ratio",
     }
     identity = _row_identity(row, mode)
@@ -210,7 +203,6 @@ def filter_candidates_with_reject_log(
     annual_col = annualized_return_column(cfg.mode)
     annual_values = _to_numeric(df, annual_col)
     net_income_values = _to_numeric(df, "net_income")
-    if_exercised_values = _to_numeric(df, "if_exercised_total_return")
     spread_ratio_values = _to_numeric(df, "spread_ratio")
 
     for idx, row in df.iterrows():
@@ -226,10 +218,8 @@ def filter_candidates_with_reject_log(
             base,
             min_annualized_return=cfg.min_annualized_return,
             min_net_income=cfg.min_net_income,
-            min_if_exercised_total_return=cfg.min_if_exercised_total_return,
             annualized_return=annual_values.get(idx),
             net_income=net_income_values.get(idx),
-            if_exercised_total_return=if_exercised_values.get(idx),
         )
         risk_decision = evaluate_candidate_risk_filter(
             return_decision,

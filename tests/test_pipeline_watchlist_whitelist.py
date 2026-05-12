@@ -311,6 +311,7 @@ def test_resolve_watchlist_item_runtime_config_centralizes_template_expansion() 
             'sell_call': {
                 'min_annualized_net_return': 0.11,
                 'min_volume': 12,
+                'min_strike_cost_multiplier': 1.02,
             }
         },
     }
@@ -332,6 +333,7 @@ def test_resolve_watchlist_item_runtime_config_centralizes_template_expansion() 
     assert resolved['sell_put']['min_annualized_net_return'] == 0.12
     assert resolved['sell_call']['enabled'] is True
     assert resolved['sell_call']['min_annualized_net_premium_return'] == 0.11
+    assert resolved['sell_call']['min_strike_cost_multiplier'] == 1.02
     assert 'min_annualized_net_return' not in resolved['sell_call']
     assert resolved['_global_sell_put_liquidity'] == {'min_net_income': 100, 'min_open_interest': 50}
     assert resolved['_global_sell_call_liquidity'] == {'min_volume': 12}

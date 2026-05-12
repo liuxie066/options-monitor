@@ -179,7 +179,95 @@ def test_scan_sell_call_filter_and_rank_baseline() -> None:
         assert not reject_log.empty
         assert set(reject_log["reject_stage"].dropna().astype(str).tolist()) == {"step3_risk_gate"}
         assert set(["engine_reject_stage", "engine_reject_reason"]).issubset(set(reject_log.columns))
-        assert "min_if_exercised_total_return" in set(reject_log["reject_rule"].dropna().astype(str).tolist())
+
+
+def test_scan_sell_call_applies_cost_multiplier_strike_floor() -> None:
+    _add_repo_to_syspath()
+    from src.application.scan_sell_call import run_sell_call_scan
+
+    with TemporaryDirectory() as td:
+        root = Path(td)
+        parsed = root / "parsed"
+        parsed.mkdir(parents=True, exist_ok=True)
+        out_path = root / "sell_call_candidates.csv"
+
+        pd.DataFrame(
+            [
+                {
+                    "symbol": "AAPL",
+                    "option_type": "call",
+                    "expiration": "2026-05-15",
+                    "dte": 30,
+                    "contract_symbol": "BELOW_COST",
+                    "multiplier": 100,
+                    "currency": "USD",
+                    "strike": 99.0,
+                    "spot": 100.0,
+                    "bid": 3.9,
+                    "ask": 4.1,
+                    "last_price": 4.0,
+                    "mid": 4.0,
+                    "open_interest": 200,
+                    "volume": 50,
+                    "implied_volatility": 0.30,
+                    "delta": 0.55,
+                },
+                {
+                    "symbol": "AAPL",
+                    "option_type": "call",
+                    "expiration": "2026-05-15",
+                    "dte": 30,
+                    "contract_symbol": "AT_COST",
+                    "multiplier": 100,
+                    "currency": "USD",
+                    "strike": 100.0,
+                    "spot": 100.0,
+                    "bid": 3.9,
+                    "ask": 4.1,
+                    "last_price": 4.0,
+                    "mid": 4.0,
+                    "open_interest": 200,
+                    "volume": 50,
+                    "implied_volatility": 0.30,
+                    "delta": 0.50,
+                },
+                {
+                    "symbol": "AAPL",
+                    "option_type": "call",
+                    "expiration": "2026-05-15",
+                    "dte": 30,
+                    "contract_symbol": "AT_COST_MULTIPLIER",
+                    "multiplier": 100,
+                    "currency": "USD",
+                    "strike": 102.0,
+                    "spot": 100.0,
+                    "bid": 3.9,
+                    "ask": 4.1,
+                    "last_price": 4.0,
+                    "mid": 4.0,
+                    "open_interest": 200,
+                    "volume": 50,
+                    "implied_volatility": 0.30,
+                    "delta": 0.45,
+                },
+            ]
+        ).to_csv(parsed / "AAPL_required_data.csv", index=False)
+
+        out = run_sell_call_scan(
+            symbols=["AAPL"],
+            input_root=root,
+            output=out_path,
+            avg_cost=100.0,
+            shares=100,
+            min_strike_cost_multiplier=1.02,
+            min_annualized_net_return=0.10,
+            min_net_income=100,
+            min_open_interest=10,
+            quiet=True,
+        )
+
+        assert list(out["contract_symbol"]) == ["AT_COST_MULTIPLIER"]
+        assert float(out["strike"].min()) >= 102.0
 
 
 def test_sell_call_risk_bands_are_stable() -> None:
