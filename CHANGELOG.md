@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 1.2.21 - 2026-05-12
+
+### Added
+- Added per-account notification delivery audits for send start, confirmation, failure reason, message id, retry attempts, and run-level attempted/confirmed counters.
+- Added no-candidate heartbeat backfill for scanned accounts that have no candidates when another account in the same run does have candidate messages.
+- Added an operator failure-summary notification when one or more per-account notification sends fail.
+
+### Changed
+- Changed notification routing to use `notifications.provider` for the delivery adapter and `notifications.channel` for the OpenClaw transport channel, while keeping the legacy `wechat_clawbot` alias compatible.
+- Changed OpenClaw notification sending to require a confirmed `message_id` before marking an account notified.
+- Updated WebUI, docs, examples, healthcheck, and validation surfaces to default to `provider: openclaw` with `channel: openclaw-weixin`.
+
+### Fixed
+- Prevented one account's notification send timeout or failure from silently stopping later account sends.
+- Marked scheduler `sent_accounts` only for confirmed per-account deliveries.
+
 ## 1.2.17 - 2026-05-11
 
 ### Added

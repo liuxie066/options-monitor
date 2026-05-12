@@ -2,9 +2,14 @@ import React from 'react';
 import { Dialog, Field, InlineNote, SaveBar, formatAccounts, formatBool } from './webuiShared.jsx';
 import { STRATEGY_FIELDS } from './webuiModel.js';
 
-const NOTIFICATION_CHANNEL_OPTIONS = [
-  { value: 'feishu', label: '飞书 App' },
-  { value: 'wechat_clawbot', label: '微信 Clawbot' },
+const NOTIFICATION_PROVIDER_OPTIONS = [
+  { value: 'openclaw', label: 'OpenClaw' },
+  { value: 'feishu_app', label: '飞书 App' },
+];
+
+const OPENCLAW_CHANNEL_OPTIONS = [
+  { value: 'openclaw-weixin', label: '微信 Clawbot' },
+  { value: 'wechat_clawbot', label: '微信 Clawbot 旧别名' },
 ];
 
 export function MarketPanel({ globalForm, setGlobalForm, onSave }) {
@@ -116,14 +121,16 @@ export function CloseAdvicePanel({ globalForm, setGlobalForm, onSave }) {
 
 export function NotificationPanel({ globalForm, setGlobalForm, notificationCheck, notificationPreview, notificationSendResult, onSave, onCheck, onPreview, onDryRun, onSend }) {
   const cfg = globalForm.notifications;
-  const isFeishu = String(cfg.channel || 'feishu').trim().toLowerCase() === 'feishu';
+  const provider = String(cfg.provider || 'openclaw').trim().toLowerCase();
+  const isFeishu = provider === 'feishu_app';
   return (
     <div className="GlobalPanel">
-      <div className="GlobalOverview"><div><div className="Eyebrow">消息通知</div><h2 className="PanelTitle">飞书通知 / 微信 Clawbot</h2><p className="PanelText">飞书使用 App 凭证发送；微信 Clawbot 使用 OpenClaw 通用消息通道。</p></div></div>
+      <div className="GlobalOverview"><div><div className="Eyebrow">消息通知</div><h2 className="PanelTitle">OpenClaw / 飞书 App</h2><p className="PanelText">主流程使用通用 provider 选择投递器；OpenClaw 再选择实际传输通道。</p></div></div>
       <section className="StrategyCard">
-        <div className="StrategyHeader"><div><div className="StrategyTitle">消息配置</div><div className="StrategySub">notifications + secrets file</div></div><span className="StrategyPill">SEND</span></div>
+        <div className="StrategyHeader"><div><div className="StrategyTitle">消息配置</div><div className="StrategySub">notifications.provider + channel</div></div><span className="StrategyPill">SEND</span></div>
         <div className="StrategyGrid">
-          <Field label="通知渠道"><select className="Control" value={cfg.channel} onChange={(e) => setGlobalForm((prev) => ({ ...prev, notifications: { ...prev.notifications, channel: e.target.value } }))}>{NOTIFICATION_CHANNEL_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></Field>
+          <Field label="投递器"><select className="Control" value={provider} onChange={(e) => setGlobalForm((prev) => ({ ...prev, notifications: { ...prev.notifications, provider: e.target.value, channel: e.target.value === 'openclaw' ? (prev.notifications.channel || 'openclaw-weixin') : prev.notifications.channel } }))}>{NOTIFICATION_PROVIDER_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></Field>
+          {!isFeishu && <Field label="OpenClaw 通道"><select className="Control" value={cfg.channel || 'openclaw-weixin'} onChange={(e) => setGlobalForm((prev) => ({ ...prev, notifications: { ...prev.notifications, channel: e.target.value } }))}>{OPENCLAW_CHANNEL_OPTIONS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}</select></Field>}
           <Field label={isFeishu ? '接收对象 open_id' : 'OpenClaw 目标'}><input className="Control" value={cfg.target} onChange={(e) => setGlobalForm((prev) => ({ ...prev, notifications: { ...prev.notifications, target: e.target.value } }))} placeholder={isFeishu ? 'ou_xxx' : 'clawbot target'} /></Field>
           {isFeishu && <Field label="App ID"><input className="Control" value={cfg.appId} onChange={(e) => setGlobalForm((prev) => ({ ...prev, notifications: { ...prev.notifications, appId: e.target.value } }))} placeholder={cfg.hasCredentials ? '已保存，留空表示不修改' : 'cli_xxx'} /></Field>}
           {isFeishu && <Field label="App Secret"><input className="Control" type="password" value={cfg.appSecret} onChange={(e) => setGlobalForm((prev) => ({ ...prev, notifications: { ...prev.notifications, appSecret: e.target.value } }))} placeholder={cfg.hasCredentials ? '已保存，留空表示不修改' : 'app_secret'} /></Field>}
@@ -132,7 +139,7 @@ export function NotificationPanel({ globalForm, setGlobalForm, notificationCheck
           <Field label="附带现金信息"><select className="Control" value={cfg.include_cash_footer ? 'true' : 'false'} onChange={(e) => setGlobalForm((prev) => ({ ...prev, notifications: { ...prev.notifications, include_cash_footer: e.target.value === 'true' } }))}><option value="true">开启</option><option value="false">关闭</option></select></Field>
           <Field label="现金适用账户"><input className="Control" value={cfg.cash_footer_accounts} onChange={(e) => setGlobalForm((prev) => ({ ...prev, notifications: { ...prev.notifications, cash_footer_accounts: e.target.value } }))} placeholder="lx,sy" /></Field>
         </div>
-        <div className="PreviewPanel"><InlineNote>{isFeishu ? (cfg.hasCredentials ? '已检测到已保存的飞书凭证。留空不会覆盖旧凭证。' : '当前还没有检测到已保存凭证；保存前请填写 App ID 与 App Secret。') : '微信 Clawbot 不使用飞书 App 凭证；发送时会透传 notifications.channel 和 target 给 OpenClaw。'}</InlineNote></div>
+        <div className="PreviewPanel"><InlineNote>{isFeishu ? (cfg.hasCredentials ? '已检测到已保存的飞书凭证。留空不会覆盖旧凭证。' : '当前还没有检测到已保存凭证；保存前请填写 App ID 与 App Secret。') : 'OpenClaw 不使用飞书 App 凭证；发送时会透传 notifications.channel 和 target。'}</InlineNote></div>
       </section>
       <div className="OpsToolbar"><button className="Button" onClick={onCheck}>连通检测</button><button className="Button" onClick={onPreview}>消息预览</button><button className="Button" onClick={onDryRun}>dry-run</button><button className="Button ButtonDanger" onClick={onSend}>测试发送</button></div>
       {!!notificationCheck?.checks?.length && <div className="CheckList">{notificationCheck.checks.map((item) => <div key={item.name} className={`CheckItem ${item.ok ? 'CheckItemOk' : 'CheckItemBad'}`}><strong>{item.name}</strong><span>{item.message}</span></div>)}</div>}

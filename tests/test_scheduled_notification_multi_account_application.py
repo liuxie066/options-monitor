@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import importlib
+import subprocess
 from types import SimpleNamespace
 
 
 def _plan(account_messages: dict[str, str]) -> SimpleNamespace:
-    return SimpleNamespace(channel="feishu", target="group://test", account_messages=account_messages)
+    return SimpleNamespace(channel="openclaw-weixin", target="group://test", account_messages=account_messages)
 
 
 def test_execute_per_account_delivery_collects_mixed_success_and_unconfirmed(fake_runlog_factory) -> None:
@@ -43,7 +44,8 @@ def test_execute_per_account_delivery_collects_mixed_success_and_unconfirmed(fak
     assert out.notify_failures[0]["command_ok"] is True
     assert out.notify_failures[0]["delivery_confirmed"] is False
     assert failure_codes == ["SEND_UNCONFIRMED"]
-    assert [e["status"] for e in audit_events if e["action"] == "send_wechat_clawbot_message"] == ["ok", "unconfirmed"]
+    assert [e["action"] for e in audit_events] == ["send_start", "send_done", "send_start", "send_fail"]
+    assert [e["status"] for e in audit_events if e["action"] in {"send_done", "send_fail"}] == ["ok", "unconfirmed"]
     assert [e["status"] for e in events if e["step"] == "notify"] == ["start", "ok", "start", "error"]
 
 
@@ -51,6 +53,11 @@ def test_execute_per_account_delivery_collects_all_failures(fake_runlog_factory)
     mod = importlib.import_module("src.application.scheduled_notification")
     normalize = importlib.import_module("domain.domain").normalize_notify_subprocess_output
     failure_codes: list[str] = []
+    send_calls: list[dict] = []
+
+    def _send_failure(**kwargs):
+        send_calls.append(dict(kwargs))
+        return SimpleNamespace(returncode=2, stdout="", stderr="boom")
 
     out = mod.execute_per_account_delivery(
         delivery_batch=_plan({"lx": "msg-lx", "sy": "msg-sy"}),
@@ -58,11 +65,12 @@ def test_execute_per_account_delivery_collects_all_failures(fake_runlog_factory)
         runlog=fake_runlog_factory([]),
         audit_fn=lambda *_args, **_kwargs: None,
         safe_data_fn=lambda payload: payload,
-        send_fn=lambda **_kwargs: SimpleNamespace(returncode=2, stdout="", stderr="boom"),
+        send_fn=_send_failure,
         normalize_fn=normalize,
         failure_fields_builder=lambda **_kwargs: {},
         on_failure=lambda error_code: failure_codes.append(error_code),
         base="/tmp/base",
+        sleep_fn=lambda _seconds: None,
     )
 
     assert out.sent_accounts == []
@@ -70,9 +78,11 @@ def test_execute_per_account_delivery_collects_all_failures(fake_runlog_factory)
     assert [item["account"] for item in out.notify_failures] == ["lx", "sy"]
     assert [item["error_code"] for item in out.notify_failures] == ["SEND_FAILED", "SEND_FAILED"]
     assert [item["final_returncode"] for item in out.notify_failures] == [2, 2]
+    assert [item["attempts"] for item in out.notify_failures] == [2, 2]
     assert [item["command_ok"] for item in out.notify_failures] == [False, False]
     assert [item["delivery_confirmed"] for item in out.notify_failures] == [False, False]
     assert failure_codes == ["SEND_FAILED", "SEND_FAILED"]
+    assert [call["message"] for call in send_calls] == ["msg-lx", "msg-lx", "msg-sy", "msg-sy"]
 
 
 def test_execute_per_account_delivery_preserves_success_order(fake_runlog_factory) -> None:
@@ -112,7 +122,7 @@ def test_execute_per_account_delivery_sends_one_message_per_account_to_same_targ
         return SimpleNamespace(returncode=0, stdout="", stderr="", raw={"http_status": 200, "response_json": {"code": 0, "data": {"message_id": suffix}}})
 
     out = mod.execute_per_account_delivery(
-        delivery_batch=SimpleNamespace(channel="feishu", target="ou_same", account_messages={"lx": "msg-lx", "sy": "msg-sy"}),
+        delivery_batch=SimpleNamespace(channel="openclaw-weixin", target="ou_same", account_messages={"lx": "msg-lx", "sy": "msg-sy"}),
         run_id="run-4",
         runlog=fake_runlog_factory([]),
         audit_fn=lambda *_args, **_kwargs: None,
@@ -133,3 +143,43 @@ def test_execute_per_account_delivery_sends_one_message_per_account_to_same_targ
     assert out.sent_accounts == ["lx", "sy"]
     assert seen_targets == ["ou_same", "ou_same"]
     assert seen_messages == ["msg-lx", "msg-sy"]
+
+
+def test_execute_per_account_delivery_timeout_is_account_isolated(fake_runlog_factory) -> None:
+    mod = importlib.import_module("src.application.scheduled_notification")
+    normalize = importlib.import_module("domain.domain").normalize_notify_subprocess_output
+    events: list[dict] = []
+    audit_events: list[dict] = []
+    failure_codes: list[str] = []
+
+    def _send_fn(*, message: str, **_kwargs):
+        if message == "msg-lx":
+            raise subprocess.TimeoutExpired(cmd=["openclaw", "message", "send"], timeout=60)
+        return SimpleNamespace(returncode=0, stdout='{"message_id":"sy-1"}', stderr="")
+
+    out = mod.execute_per_account_delivery(
+        delivery_batch=_plan({"lx": "msg-lx", "sy": "msg-sy"}),
+        run_id="run-timeout",
+        runlog=fake_runlog_factory(events),
+        audit_fn=lambda kind, action, **kwargs: audit_events.append({"kind": kind, "action": action, **kwargs}),
+        safe_data_fn=lambda payload: payload,
+        send_fn=_send_fn,
+        normalize_fn=normalize,
+        failure_fields_builder=lambda **_kwargs: {},
+        on_failure=lambda error_code: failure_codes.append(error_code),
+        base="/tmp/base",
+    )
+
+    assert out.attempted_accounts == ["lx", "sy"]
+    assert out.send_attempted_count == 2
+    assert out.sent_accounts == ["sy"]
+    assert out.send_confirmed_count == 1
+    assert len(out.notify_failures) == 1
+    assert out.notify_failures[0]["account"] == "lx"
+    assert out.notify_failures[0]["error_code"] == "SEND_TIMEOUT"
+    assert out.notify_failures[0]["final_returncode"] == 124
+    assert out.notify_failures[0]["attempts"] == 1
+    assert failure_codes == ["SEND_TIMEOUT"]
+    assert [e["action"] for e in audit_events] == ["send_start", "send_fail", "send_start", "send_done"]
+    assert [e["account"] for e in audit_events if e["action"] == "send_start"] == ["lx", "sy"]
+    assert [e["status"] for e in events if e["step"] == "notify"] == ["start", "error", "start", "ok"]

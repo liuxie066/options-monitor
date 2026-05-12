@@ -72,8 +72,9 @@ export function createSaveGlobalAction(ctx) {
     const { globalForm, selectedMarket, marketMeta, withWriteToken, loadEditor, setConfigSummaries, pushToast } = ctx;
     const quietStart = String(globalForm.notifications.quiet_hours_start || '').trim();
     const quietEnd = String(globalForm.notifications.quiet_hours_end || '').trim();
+    const notificationProvider = String(globalForm.notifications.provider || 'openclaw').trim();
     const notificationChannel = String(globalForm.notifications.channel || '').trim();
-    const isFeishuNotification = notificationChannel.toLowerCase() === 'feishu';
+    const isFeishuNotification = notificationProvider.toLowerCase() === 'feishu_app';
     const payload = {
       configKey: selectedMarket,
       marketData: {
@@ -96,7 +97,8 @@ export function createSaveGlobalAction(ctx) {
         medium_remaining_annualized_max: globalForm.closeAdvice.medium_remaining_annualized_max === '' ? null : Number(globalForm.closeAdvice.medium_remaining_annualized_max),
       },
       notifications: {
-        channel: notificationChannel || null,
+        provider: notificationProvider || 'openclaw',
+        channel: isFeishuNotification ? null : (notificationChannel || 'openclaw-weixin'),
         target: String(globalForm.notifications.target || '').trim() || null,
         include_cash_footer: !!globalForm.notifications.include_cash_footer,
         cash_footer_accounts: ctx.toAccountsList(globalForm.notifications.cash_footer_accounts),

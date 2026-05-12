@@ -218,7 +218,7 @@ def send_opend_alert(base: Path, cfg: dict, *, error_code: str, message_text: st
         return False
 
     notif = cfg.get('notifications') or {}
-    channel = notif.get('channel') or 'feishu'
+    channel = notif.get('channel') or 'openclaw-weixin'
     transport_channel = resolve_openclaw_transport_channel(channel)
     target = notif.get('target')
     if not target:
@@ -274,7 +274,7 @@ def send_opend_recovery_notice(base: Path, cfg: dict, *, scope: str = 'project',
         return False
 
     notif = cfg.get('notifications') or {}
-    channel = notif.get('channel') or 'feishu'
+    channel = notif.get('channel') or 'openclaw-weixin'
     transport_channel = resolve_openclaw_transport_channel(channel)
     target = notif.get('target')
     if not target:

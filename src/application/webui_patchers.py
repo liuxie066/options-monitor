@@ -124,7 +124,7 @@ def patch_notifications(cfg: dict, payload: dict, *, notification_numeric_fields
                 notif_cfg.pop(key, None)
             else:
                 notif_cfg[key] = bool(value)
-    for key in ("channel", "target"):
+    for key in ("provider", "channel", "target"):
         if key in notifications:
             value = str(notifications.get(key) or "").strip()
             if value:

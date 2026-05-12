@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from domain.domain.close_advice import CloseAdviceConfig
+from domain.domain.multi_tick import OPENCLAW_NOTIFICATION_PROVIDER, resolve_notification_route_from_config
 from domain.storage.repositories import state_repo
 from src.application.account_config import (
     accounts_from_config,
@@ -471,14 +472,19 @@ async def api_notifications_check(req: Request):
         raise HTTPException(status_code=400, detail="configKey must be us|hk")
     cfg = _load_config(config_key)
     notifications = cfg.get("notifications") if isinstance(cfg.get("notifications"), dict) else {}
+    route = resolve_notification_route_from_config(config=cfg)
+    provider = str(route.get("provider") or "").strip()
+    channel = str(route.get("channel") or "").strip()
     from src.application.webui_presenters import output_root
     output_root = output_root(BASE_DIR)
     reports_dir = (output_root / "reports").resolve()
+    is_openclaw = provider == OPENCLAW_NOTIFICATION_PROVIDER
     checks = [
         {"name": "target", "ok": bool(str(notifications.get("target") or "").strip()), "message": (str(notifications.get("target") or "").strip() or "notifications.target missing")},
-        {"name": "channel", "ok": bool(str(notifications.get("channel") or "").strip()), "message": (str(notifications.get("channel") or "").strip() or "notifications.channel missing")},
+        {"name": "provider", "ok": bool(provider), "message": (provider or "notifications.provider missing")},
+        {"name": "channel", "ok": (not is_openclaw) or bool(channel), "message": (channel or ("not required" if not is_openclaw else "notifications.channel missing"))},
         {"name": "preview_source", "ok": (reports_dir / "symbols_notification.txt").exists(), "message": ("symbols_notification.txt found" if (reports_dir / "symbols_notification.txt").exists() else "run scan first to generate symbols_notification.txt")},
-        {"name": "sender_binary", "ok": shutil.which("openclaw") is not None, "message": ("openclaw found" if shutil.which("openclaw") is not None else "openclaw command not found")},
+        {"name": "sender_binary", "ok": (not is_openclaw) or shutil.which("openclaw") is not None, "message": ("openclaw found" if shutil.which("openclaw") is not None else ("not required" if not is_openclaw else "openclaw command not found"))},
     ]
     return {"checks": checks, "ok": all(bool(item["ok"]) for item in checks)}
 
@@ -515,9 +521,11 @@ async def api_notifications_test_send(req: Request):
     if config_key not in CONFIG_FILES:
         raise HTTPException(status_code=400, detail="configKey must be us|hk")
     cfg = _load_config(config_key)
-    notifications = cfg.get("notifications") if isinstance(cfg.get("notifications"), dict) else {}
-    channel = str(notifications.get("channel") or "").strip() or "feishu"
-    target = str(notifications.get("target") or "").strip()
+    route = resolve_notification_route_from_config(config=cfg)
+    channel = str(route.get("channel") or "").strip()
+    target = str(route.get("target") or "").strip()
+    if str(route.get("provider") or "") != OPENCLAW_NOTIFICATION_PROVIDER:
+        raise HTTPException(status_code=400, detail="notification test-send currently supports provider=openclaw only")
     if not target:
         raise HTTPException(status_code=400, detail="notifications.target missing")
 
@@ -529,6 +537,7 @@ async def api_notifications_test_send(req: Request):
         return {
             "ok": True,
             "mode": "dry_run",
+            "provider": route.get("provider"),
             "channel": channel,
             "target": target,
             "message": message,
@@ -538,6 +547,7 @@ async def api_notifications_test_send(req: Request):
     return {
         "ok": send.returncode == 0,
         "mode": "send",
+        "provider": route.get("provider"),
         "channel": channel,
         "target": target,
         "stdout": str(send.stdout or ""),

@@ -393,7 +393,7 @@ def test_healthcheck_warns_on_notification_placeholder_values(monkeypatch, tmp_p
     )
     cfg = _public_cfg_with_futu("secrets/portfolio.sqlite.json")
     cfg["notifications"] = {
-        "channel": "feishu",
+        "provider": "feishu_app",
         "target": "ou_xxx",
         "secrets_file": "secrets/notifications.feishu.app.json",
     }

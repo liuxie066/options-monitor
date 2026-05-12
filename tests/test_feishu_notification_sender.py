@@ -145,14 +145,14 @@ def test_normalize_feishu_app_send_output_marks_failed_on_feishu_code() -> None:
     assert out["feishu_msg"] == "denied"
 
 
-def test_select_notification_delivery_adapter_keeps_feishu_on_app_sender() -> None:
+def test_select_notification_delivery_adapter_keeps_feishu_app_provider_on_app_sender() -> None:
     from src.infrastructure.external_services import (
         normalize_feishu_app_send_output,
         select_notification_delivery_adapter,
         send_feishu_app_message_process,
     )
 
-    adapter = select_notification_delivery_adapter("feishu")
+    adapter = select_notification_delivery_adapter("feishu_app")
 
     assert adapter.send_fn is send_feishu_app_message_process
     assert adapter.normalize_fn is normalize_feishu_app_send_output
@@ -181,6 +181,7 @@ def test_send_openclaw_message_translates_wechat_clawbot_channel(monkeypatch, tm
     def fake_run_command(cmd, *, cwd, capture_output=False, text=False, timeout_sec=None, env=None):
         captured["cmd"] = cmd
         captured["cwd"] = cwd
+        captured["timeout_sec"] = timeout_sec
         return SimpleNamespace(returncode=0, stdout='{"message_id":"msg_1"}', stderr="")
 
     monkeypatch.setattr(service, "run_command", fake_run_command)
@@ -194,16 +195,42 @@ def test_send_openclaw_message_translates_wechat_clawbot_channel(monkeypatch, tm
 
     assert out.returncode == 0
     assert captured["cwd"] == tmp_path
+    assert captured["timeout_sec"] is None
     cmd = captured["cmd"]
     assert cmd[cmd.index("--channel") + 1] == "openclaw-weixin"
     assert cmd[cmd.index("--target") + 1] == "clawbot:test"
 
 
-def test_select_notification_delivery_adapter_rejects_unknown_channel() -> None:
+def test_send_openclaw_message_process_uses_configured_timeout(monkeypatch, tmp_path: Path) -> None:
+    from src.infrastructure import external_services as service
+
+    captured: dict[str, object] = {}
+
+    def fake_run_command(cmd, *, cwd, capture_output=False, text=False, timeout_sec=None, env=None):
+        captured["cmd"] = cmd
+        captured["cwd"] = cwd
+        captured["timeout_sec"] = timeout_sec
+        return SimpleNamespace(returncode=0, stdout='{"message_id":"msg_1"}', stderr="")
+
+    monkeypatch.setattr(service, "run_command", fake_run_command)
+
+    out = service.send_openclaw_message_process(
+        base=tmp_path,
+        channel="wechat_clawbot",
+        target="clawbot:test",
+        message="hello",
+        notifications={"send_timeout_sec": 12},
+    )
+
+    assert out.returncode == 0
+    assert captured["timeout_sec"] == 12
+
+
+def test_select_notification_delivery_adapter_rejects_unknown_provider() -> None:
     from src.infrastructure.external_services import select_notification_delivery_adapter
 
     try:
         select_notification_delivery_adapter("sms")
         raise AssertionError("expected ValueError")
     except ValueError as exc:
-        assert "unsupported notification channel" in str(exc)
+        assert "unsupported notification provider" in str(exc)

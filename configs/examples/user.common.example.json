@@ -24,8 +24,8 @@
     }
   },
   "notifications": {
-    "channel": "feishu",
-    "target": "ou_xxx",
-    "secrets_file": "secrets/notifications.feishu.app.json"
+    "provider": "openclaw",
+    "channel": "openclaw-weixin",
+    "target": "clawbot_target"
   }
 }

@@ -3,10 +3,13 @@ from __future__ import annotations
 import sys
 
 from domain.domain import (
-    FEISHU_NOTIFICATION_CHANNEL,
+    FEISHU_APP_NOTIFICATION_PROVIDER,
+    OPENCLAW_NOTIFICATION_PROVIDER,
+    SUPPORTED_NOTIFICATION_PROVIDERS,
     SUPPORTED_NOTIFICATION_CHANNELS,
-    WECHAT_CLAWBOT_NOTIFICATION_CHANNEL,
     normalize_notification_channel,
+    normalize_notification_provider,
+    resolve_openclaw_transport_channel,
 )
 from domain.domain.fetch_source import normalize_fetch_source
 from src.application.account_config import ACCOUNT_TYPES, account_settings_from_config, accounts_from_config
@@ -294,23 +297,29 @@ def validate_config(cfg: dict):
     if notifications and not isinstance(notifications, dict):
         die('notifications must be an object')
     if isinstance(notifications, dict) and notifications:
-        has_routing = any(notifications.get(k) for k in ('channel', 'target', 'secrets_file'))
+        has_routing = any(notifications.get(k) for k in ('provider', 'channel', 'target', 'secrets_file'))
         if has_routing:
-            channel = normalize_notification_channel(notifications.get('channel'))
-            if channel not in SUPPORTED_NOTIFICATION_CHANNELS:
-                allowed = ', '.join(SUPPORTED_NOTIFICATION_CHANNELS)
-                die(f'notifications.channel must be one of: {allowed}')
+            provider = normalize_notification_provider(notifications.get('provider') or notifications.get('channel'))
+            if provider not in SUPPORTED_NOTIFICATION_PROVIDERS:
+                allowed = ', '.join(SUPPORTED_NOTIFICATION_PROVIDERS)
+                die(f'notifications.provider must be one of: {allowed}')
 
             target = notifications.get('target')
             if not isinstance(target, str) or not str(target).strip():
-                if channel == WECHAT_CLAWBOT_NOTIFICATION_CHANNEL:
+                if provider == OPENCLAW_NOTIFICATION_PROVIDER:
                     die('notifications.target must be a non-empty openclaw target string')
                 die('notifications.target must be a non-empty open_id string')
 
-            if channel == FEISHU_NOTIFICATION_CHANNEL:
+            if provider == OPENCLAW_NOTIFICATION_PROVIDER:
+                channel = normalize_notification_channel(notifications.get('channel') or 'openclaw-weixin')
+                if resolve_openclaw_transport_channel(channel) not in SUPPORTED_NOTIFICATION_CHANNELS:
+                    allowed = ', '.join(SUPPORTED_NOTIFICATION_CHANNELS)
+                    die(f'notifications.channel must be one of: {allowed}')
+
+            if provider == FEISHU_APP_NOTIFICATION_PROVIDER:
                 secrets_file_value = str(notifications.get('secrets_file') or 'secrets/notifications.feishu.app.json').strip()
                 if not secrets_file_value:
-                    die('notifications.secrets_file must be a non-empty path for feishu notifications')
+                    die('notifications.secrets_file must be a non-empty path for feishu_app notifications')
 
     close_advice = cfg.get('close_advice') or {}
     if close_advice and not isinstance(close_advice, dict):

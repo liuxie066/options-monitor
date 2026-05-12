@@ -10,10 +10,10 @@ from types import SimpleNamespace
 from typing import Any, Callable
 
 from domain.domain.multi_tick import (
-    FEISHU_NOTIFICATION_CHANNEL,
-    OPENCLAW_NOTIFICATION_CHANNELS,
-    SUPPORTED_NOTIFICATION_CHANNELS,
-    normalize_notification_channel,
+    FEISHU_APP_NOTIFICATION_PROVIDER,
+    OPENCLAW_NOTIFICATION_PROVIDER,
+    SUPPORTED_NOTIFICATION_PROVIDERS,
+    normalize_notification_provider,
     resolve_openclaw_transport_channel,
 )
 from domain.domain.fetch_source import is_futu_fetch_source
@@ -26,6 +26,8 @@ from src.infrastructure.opend_watchdog import run_watchdog_check
 DEFAULT_OPEND_HOST = '127.0.0.1'
 DEFAULT_OPEND_PORT = 11111
 DEFAULT_NOTIFICATION_FEISHU_APP_SECRETS = 'secrets/notifications.feishu.app.json'
+DEFAULT_NOTIFICATION_SEND_TIMEOUT_SEC = 60
+MAX_NOTIFICATION_SEND_TIMEOUT_SEC = 300
 
 
 @dataclass(frozen=True)
@@ -160,7 +162,28 @@ def run_opend_watchdog(
     return health.to_payload()
 
 
-def send_openclaw_message(*, base: Path, channel: str, target: str, message: str) -> subprocess.CompletedProcess:
+def _resolve_notification_send_timeout_sec(
+    notifications: dict[str, Any] | None,
+    *,
+    default: int = DEFAULT_NOTIFICATION_SEND_TIMEOUT_SEC,
+    max_value: int = MAX_NOTIFICATION_SEND_TIMEOUT_SEC,
+) -> int:
+    raw_value = notifications.get('send_timeout_sec') if isinstance(notifications, dict) else None
+    try:
+        timeout_sec = int(raw_value or default)
+    except Exception:
+        timeout_sec = int(default)
+    return max(1, min(int(timeout_sec), int(max_value)))
+
+
+def send_openclaw_message(
+    *,
+    base: Path,
+    channel: str,
+    target: str,
+    message: str,
+    timeout_sec: int | None = None,
+) -> subprocess.CompletedProcess:
     transport_channel = resolve_openclaw_transport_channel(channel)
     cmd = [
         'openclaw',
@@ -174,7 +197,7 @@ def send_openclaw_message(*, base: Path, channel: str, target: str, message: str
         str(message),
         '--json',
     ]
-    return run_command(cmd, cwd=base, capture_output=True, text=True)
+    return run_command(cmd, cwd=base, capture_output=True, text=True, timeout_sec=timeout_sec)
 
 
 def send_openclaw_message_process(
@@ -185,7 +208,13 @@ def send_openclaw_message_process(
     message: str,
     notifications: dict[str, Any] | None = None,
 ) -> subprocess.CompletedProcess:
-    return send_openclaw_message(base=base, channel=channel, target=target, message=message)
+    return send_openclaw_message(
+        base=base,
+        channel=channel,
+        target=target,
+        message=message,
+        timeout_sec=_resolve_notification_send_timeout_sec(notifications),
+    )
 
 
 def _resolve_notification_secrets_file(
@@ -245,8 +274,8 @@ def send_feishu_app_message(
     receive_id_type: str = 'open_id',
 ) -> dict[str, Any]:
     resolved_channel = str(channel or '').strip().lower()
-    if resolved_channel != 'feishu':
-        raise ValueError(f'unsupported notification channel for feishu app sender: {channel}')
+    if resolved_channel != FEISHU_APP_NOTIFICATION_PROVIDER:
+        raise ValueError(f'unsupported notification provider for feishu app sender: {channel}')
 
     receive_id = str(target or '').strip()
     if not receive_id:
@@ -371,22 +400,22 @@ def send_feishu_app_message_process(*, base: Path, channel: str, target: str, me
     return SimpleNamespace(returncode=int(normalized.get('returncode') or 0), stdout=stdout, stderr=stderr, raw=send_result)
 
 
-def select_notification_delivery_adapter(channel: Any) -> NotificationDeliveryAdapter:
-    resolved_channel = normalize_notification_channel(channel)
-    if resolved_channel == FEISHU_NOTIFICATION_CHANNEL:
+def select_notification_delivery_adapter(provider: Any) -> NotificationDeliveryAdapter:
+    resolved_provider = normalize_notification_provider(provider)
+    if resolved_provider == FEISHU_APP_NOTIFICATION_PROVIDER:
         return NotificationDeliveryAdapter(
             send_fn=send_feishu_app_message_process,
             normalize_fn=normalize_feishu_app_send_output,
             failure_stage='send_feishu_app_message',
         )
-    if resolved_channel in OPENCLAW_NOTIFICATION_CHANNELS:
+    if resolved_provider == OPENCLAW_NOTIFICATION_PROVIDER:
         return NotificationDeliveryAdapter(
             send_fn=send_openclaw_message_process,
             normalize_fn=normalize_notify_subprocess_output,
             failure_stage='send_openclaw_message',
         )
-    allowed = ', '.join(SUPPORTED_NOTIFICATION_CHANNELS)
-    raise ValueError(f'unsupported notification channel: {channel}; expected one of: {allowed}')
+    allowed = ', '.join(SUPPORTED_NOTIFICATION_PROVIDERS)
+    raise ValueError(f'unsupported notification provider: {provider}; expected one of: {allowed}')
 
 
 def _resolve_opend_endpoint_for_market(cfg_obj: dict, market: str) -> tuple[str, int]:

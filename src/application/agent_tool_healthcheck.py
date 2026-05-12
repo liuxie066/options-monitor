@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable
 
+from domain.domain import FEISHU_APP_NOTIFICATION_PROVIDER, normalize_notification_provider
+
 
 def run_healthcheck_tool(
     payload: dict[str, Any],
@@ -97,7 +99,11 @@ def run_healthcheck_tool(
         warnings.append("The repo-local starter SQLite data_config is fine for local testing, but review it before production use.")
 
     notifications = cfg.get("notifications") if isinstance(cfg.get("notifications"), dict) else {}
-    if isinstance(notifications, dict) and str(notifications.get("channel") or "").strip().lower() == "feishu":
+    if (
+        isinstance(notifications, dict)
+        and normalize_notification_provider(notifications.get("provider") or notifications.get("channel"))
+        == FEISHU_APP_NOTIFICATION_PROVIDER
+    ):
         target = str(notifications.get("target") or "").strip()
         secrets_file_value = str(notifications.get("secrets_file") or "secrets/notifications.feishu.app.json").strip()
         secrets_path = Path(secrets_file_value)

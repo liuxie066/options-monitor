@@ -81,8 +81,8 @@ def test_multi_tick_notify_failure_is_account_isolated() -> None:
     helper_src = (base / "src" / "application" / "scheduled_notification.py").read_text(encoding="utf-8")
     cron_runtime_src = (base / "src" / "application" / "cron_runtime.py").read_text(encoding="utf-8")
     assert "notify_failures: list[dict[str, object]] = []" in src
-    assert "NOTIFY_SEND_MAX_ATTEMPTS = 1" in helper_src
-    assert "NOTIFY_SEND_RETRY_DELAYS_SEC: tuple[float, ...] = ()" in helper_src
+    assert "NOTIFY_SEND_MAX_ATTEMPTS = 2" in helper_src
+    assert "NOTIFY_SEND_RETRY_DELAYS_SEC: tuple[float, ...] = (1.0,)" in helper_src
     assert "notify_failures.append(" in helper_src
     assert '"final_returncode": int(send_result.get("final_returncode") or 0)' in helper_src
     assert "sent_accounts.append(acct)" in helper_src
@@ -91,6 +91,8 @@ def test_multi_tick_notify_failure_is_account_isolated() -> None:
     assert "NOTIFY_PARTIAL_FAILED" in finalization_src
     assert "build_run_end_payload(" in finalization_src
     assert '"notify_summary": notify_summary' in cron_runtime_src
+    assert '"send_confirmed_count"' in cron_runtime_src
+    assert "'delivery_decision'" in src and "'account_messages_count'" in src
 
 
 def test_multi_tick_notify_unconfirmed_is_not_retried() -> None:
@@ -110,7 +112,7 @@ def test_multi_tick_notify_unconfirmed_is_not_retried() -> None:
 
     result = helper.send_account_message_with_retry(
         base=Path("/tmp/options-monitor-test"),
-        channel="feishu",
+        channel="openclaw-weixin",
         target="user:test",
         account="lx",
         message="hello",
@@ -129,8 +131,9 @@ def test_multi_tick_notify_unconfirmed_is_not_retried() -> None:
     assert result["attempts"] == 1
     assert len(send_calls) == 1
     assert sleeps == []
-    assert [e["status"] for e in audit_events] == ["unconfirmed"]
-    assert audit_events[0]["extra"]["delivery_confirmed"] is False
+    assert [e["action"] for e in audit_events] == ["send_start", "send_fail"]
+    assert [e["status"] for e in audit_events] == ["start", "unconfirmed"]
+    assert audit_events[-1]["extra"]["delivery_confirmed"] is False
     assert [e["status"] for e in runlog.events] == ["error"]
 
 
@@ -162,7 +165,7 @@ def test_multi_tick_notify_does_not_retry_when_message_id_exists() -> None:
 
     result = helper.send_account_message_with_retry(
         base=Path("/tmp/options-monitor-test"),
-        channel="feishu",
+        channel="openclaw-weixin",
         target="user:test",
         account="lx",
         message="hello",
@@ -180,12 +183,13 @@ def test_multi_tick_notify_does_not_retry_when_message_id_exists() -> None:
     assert result["attempts"] == 1
     assert len(send_calls) == 1
     assert sleeps == []
-    assert audit_events[0]["status"] == "ok"
-    assert audit_events[0]["extra"]["delivery_confirmed"] is True
-    assert audit_events[0]["extra"]["message_id"] == "lx-1"
+    assert [e["action"] for e in audit_events] == ["send_start", "send_done"]
+    assert audit_events[-1]["status"] == "ok"
+    assert audit_events[-1]["extra"]["delivery_confirmed"] is True
+    assert audit_events[-1]["extra"]["message_id"] == "lx-1"
 
 
-def test_multi_tick_notify_unconfirmed_can_retry_when_explicitly_requested() -> None:
+def test_multi_tick_notify_unconfirmed_is_not_retried_even_when_explicitly_requested() -> None:
     helper = importlib.import_module("src.application.scheduled_notification")
 
     audit_events: list[dict] = []
@@ -200,7 +204,7 @@ def test_multi_tick_notify_unconfirmed_can_retry_when_explicitly_requested() -> 
 
     result = helper.send_account_message_with_retry(
         base=Path("/tmp/options-monitor-test"),
-        channel="feishu",
+        channel="openclaw-weixin",
         target="user:test",
         account="lx",
         message="hello",
@@ -218,16 +222,17 @@ def test_multi_tick_notify_unconfirmed_can_retry_when_explicitly_requested() -> 
 
     assert result["ok"] is False
     assert result["error_code"] == "SEND_UNCONFIRMED"
-    assert result["attempts"] == 3
+    assert result["attempts"] == 1
     assert result["final_returncode"] == 0
     assert result["command_ok"] is True
     assert result["delivery_confirmed"] is False
-    assert sleeps == [1.0, 3.0]
-    assert [e["status"] for e in audit_events] == ["unconfirmed", "unconfirmed", "unconfirmed"]
-    assert all(e["extra"]["attempt"] in {1, 2, 3} for e in audit_events)
+    assert sleeps == []
+    assert [e["action"] for e in audit_events] == ["send_start", "send_fail"]
+    assert [e["status"] for e in audit_events] == ["start", "unconfirmed"]
+    assert audit_events[-1]["extra"]["attempt"] == 1
 
 
-def test_multi_tick_notify_failed_send_is_not_retried() -> None:
+def test_multi_tick_notify_failed_send_retries_once_by_default() -> None:
     helper = importlib.import_module("src.application.scheduled_notification")
 
     audit_events: list[dict] = []
@@ -244,7 +249,7 @@ def test_multi_tick_notify_failed_send_is_not_retried() -> None:
 
     result = helper.send_account_message_with_retry(
         base=Path("/tmp/options-monitor-test"),
-        channel="feishu",
+        channel="openclaw-weixin",
         target="user:test",
         account="sy",
         message="hello",
@@ -260,10 +265,11 @@ def test_multi_tick_notify_failed_send_is_not_retried() -> None:
 
     assert result["ok"] is False
     assert result["error_code"] == "SEND_FAILED"
-    assert result["attempts"] == 1
+    assert result["attempts"] == 2
     assert result["final_returncode"] == 2
     assert result["command_ok"] is False
     assert result["delivery_confirmed"] is False
-    assert len(send_calls) == 1
-    assert sleeps == []
-    assert [e["status"] for e in audit_events] == ["error"]
+    assert len(send_calls) == 2
+    assert sleeps == [1.0]
+    assert [e["action"] for e in audit_events] == ["send_start", "send_fail", "send_start", "send_fail"]
+    assert [e["status"] for e in audit_events] == ["start", "error", "start", "error"]
