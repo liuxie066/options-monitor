@@ -1148,7 +1148,7 @@ def _money_compact(val, currency: str | None) -> str:
             return f"{prefix}{n:,.0f}"
         if abs(n) >= 10:
             return f"{prefix}{n:.0f}"
-        return f"{prefix}{n:.2f}".rstrip("0").rstrip(".")
+        return f"{prefix}{n:.2f}"
     except Exception:
         return str(val) if val is not None else "-"
 
@@ -1186,7 +1186,7 @@ def _optimizer_detail_compact(row: dict[str, Any]) -> str:
         parts.append(f"风险调整 {risk_adj}")
         parts.append(f"Δ={delta_str}")
     if parts:
-        return "  💡 " + " · ".join(parts)
+        return "- 💡 " + " · ".join(parts)
     return ""
 
 
@@ -1227,11 +1227,13 @@ def render_markdown_compact(
                 l1 = f"{emoji} {verb} {row.get('symbol')} {opt} {strike}{suffix} {_fmt_date_compact_ca(exp)}"
                 capture = _pct_compact(row.get("capture_ratio"))
                 dte = row.get("dte")
-                dte_str = f"{int(dte)} 天" if dte is not None else "-"
-                l2 = f"  已锁定 {capture} · 剩余 {dte_str}"
+                dte_str = f"{int(dte)}天" if dte is not None else "-"
+                remaining_ann = _pct_compact(row.get("remaining_annualized_return"))
+                l2 = f"- 已锁定 {capture} · {dte_str} · 余年化 {remaining_ann}"
+                close_mid = _money_compact(row.get("close_mid"), currency)
                 realized = _money_compact(row.get("realized_if_close"), currency)
                 remaining = _money_compact(row.get("remaining_premium"), currency)
-                l3 = f"  平仓收益 {realized}（剩余 {remaining}）"
+                l3 = f"- 建议价 {close_mid} · 收益 {realized}（余 {remaining}）"
                 opt_detail = _optimizer_detail_compact(row)
                 lines.append(l1)
                 lines.append(l2)
