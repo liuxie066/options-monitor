@@ -5,6 +5,8 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 BASE = Path(__file__).resolve().parents[1]
 if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
@@ -562,6 +564,131 @@ def test_option_positions_cli_list_filters_by_local_expiration(monkeypatch, tmp_
     assert rows[0]["expiration_ymd"] == near_exp
     assert rows[0]["strike"] == 100.0
     assert rows[0]["multiplier"] == 100.0
+
+
+def test_option_positions_cli_buy_close_auto_matches_unique_selector(monkeypatch, tmp_path: Path, capsys) -> None:
+    import src.interfaces.cli.option_positions as cli_mod
+    import src.application.option_positions_service as svc
+    from domain.domain.option_position_lots import OpenPositionCommand
+
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
+    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    repo.data_config_path = data_config  # type: ignore[attr-defined]
+    svc.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="0700.HK",
+            option_type="put",
+            side="short",
+            contracts=2,
+            currency="HKD",
+            strike=480.0,
+            multiplier=100,
+            expiration_ymd="2026-04-29",
+            premium_per_share=3.93,
+            opened_at_ms=1000,
+        ),
+    )
+
+    monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "om option-positions",
+            "--data-config",
+            str(data_config),
+            "buy-close",
+            "--account",
+            "lx",
+            "--symbol",
+            "0700.HK",
+            "--option-type",
+            "put",
+            "--strike",
+            "480",
+            "--exp",
+            "2026-04-29",
+            "--contracts",
+            "1",
+            "--close-price",
+            "1.2",
+            "--dry-run",
+        ],
+    )
+
+    cli_mod.main()
+
+    out = capsys.readouterr().out
+    lot = repo.list_position_lots()[0]
+    assert f"[MATCH] rule=strict_contract_unique record_id={lot['record_id']}" in out
+    assert '"contracts_open": 1' in out
+    assert repo.get_record_fields(lot["record_id"])["contracts_open"] == 2
+
+
+def test_option_positions_cli_buy_close_auto_match_lists_multiple_candidates(monkeypatch, tmp_path: Path) -> None:
+    import src.interfaces.cli.option_positions as cli_mod
+    import src.application.option_positions_service as svc
+    from domain.domain.option_position_lots import OpenPositionCommand
+
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
+    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    repo.data_config_path = data_config  # type: ignore[attr-defined]
+    for opened_at in (1000, 2000):
+        svc.persist_manual_open_event(
+            repo,
+            OpenPositionCommand(
+                broker="富途",
+                account="lx",
+                symbol="0700.HK",
+                option_type="put",
+                side="short",
+                contracts=1,
+                currency="HKD",
+                strike=480.0,
+                multiplier=100,
+                expiration_ymd="2026-04-29",
+                premium_per_share=3.93,
+                opened_at_ms=opened_at,
+            ),
+        )
+
+    monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "om option-positions",
+            "--data-config",
+            str(data_config),
+            "buy-close",
+            "--account",
+            "lx",
+            "--symbol",
+            "0700.HK",
+            "--option-type",
+            "put",
+            "--strike",
+            "480",
+            "--exp",
+            "2026-04-29",
+            "--contracts",
+            "1",
+            "--close-price",
+            "1.2",
+            "--dry-run",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli_mod.main()
+
+    message = str(exc_info.value)
+    assert "[MATCH_FAIL] multiple_matches" in message
+    for lot in repo.list_position_lots():
+        assert lot["record_id"] in message
 
 
 def test_option_positions_cli_void_event_reports_result(monkeypatch, tmp_path: Path, capsys) -> None:

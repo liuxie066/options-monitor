@@ -260,7 +260,12 @@ def parse_fill_timestamp(s: str) -> int | None:
         return None
 
 
-def parse_option_message_text(text: str, *, accounts: list[str] | tuple[str, ...] | None = None) -> dict:
+def parse_option_message_text(
+    text: str,
+    *,
+    accounts: list[str] | tuple[str, ...] | None = None,
+    resolve_multiplier: bool = True,
+) -> dict:
     """解析单条期权消息，返回结构化字段。"""
     raw = (text or '').strip()
 
@@ -300,16 +305,18 @@ def parse_option_message_text(text: str, *, accounts: list[str] | tuple[str, ...
     if not currency:
         currency = infer_currency_from_symbol(symbol)
 
-    base = Path(__file__).resolve().parents[1]
-    multiplier, multiplier_source = resolve_multiplier_with_source(
-        repo_base=base,
-        symbol=symbol,
-        multiplier=multiplier,
-        allow_opend_refresh=True,
-        host='127.0.0.1',
-        port=11111,
-        limit_expirations=1,
-    )
+    multiplier_source = None
+    if resolve_multiplier:
+        base = Path(__file__).resolve().parents[1]
+        multiplier, multiplier_source = resolve_multiplier_with_source(
+            repo_base=base,
+            symbol=symbol,
+            multiplier=multiplier,
+            allow_opend_refresh=True,
+            host='127.0.0.1',
+            port=11111,
+            limit_expirations=1,
+        )
 
     ok = all([symbol, exp, opt_type, side, strike is not None, multiplier, contracts, account, currency])
 
