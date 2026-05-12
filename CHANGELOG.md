@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.22 - 2026-05-12
+
+### Changed
+- Extracted reusable release workflow to DRY `release.yml` and `release-from-version.yml`.
+- Opted into Node.js 24 for GitHub Actions to resolve Node 20 deprecation warnings.
+
 ## 1.2.21 - 2026-05-12
 
 ### Added
