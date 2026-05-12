@@ -35,7 +35,13 @@ def test_build_notification_block_compact_yield_enhancement() -> None:
         note="收益增强推荐",
     )
 
-    assert "💎 收益增强 英伟达 @ 06-19" in out
+    assert "💎 收益增强 英伟达 95P+110C @ 06-19" in out
+    assert "净权利金 95" in out
+    assert "评分 0.820" in out
+    assert "Call Δ 0.15" in out
+    assert "ask 1.2" in out
+    assert "预期波动 5.2" in out
+    assert "IV 0.35" in out
     assert "---" not in out
 
 

@@ -352,20 +352,26 @@ def _build_notification_block_compact(
     _, strike_raw = _parse_contract(contract)
     strike = _normalize_contract_strike(strike_raw)
     emoji = _action_emoji(action_label, risk_line)
-    option_type = 'P' if 'Put' in action_label else 'C'
-    if '收益增强' in action_label:
-        option_type = ''
+    is_enhancement = '收益增强' in action_label
 
-    if option_type:
+    if not is_enhancement:
+        option_type = 'P' if 'Put' in action_label else 'C'
         l1 = f"{emoji} {action_label} {symbol_name} {strike}{option_type} {exp_part}"
     else:
-        l1 = f"{emoji} {action_label} {symbol_name} {exp_part}"
+        put_match = re.search(r'Put=([\d.]+)', contract_line)
+        call_match = re.search(r'Call=([\d.]+)', contract_line)
+        put_s = put_match.group(1) if put_match else ''
+        call_s = call_match.group(1) if call_match else ''
+        if put_s and call_s:
+            l1 = f"{emoji} {action_label} {symbol_name} {put_s}P+{call_s}C {exp_part}"
+        else:
+            l1 = f"{emoji} {action_label} {symbol_name} {exp_part}"
     if suggestion:
         l1 += f" | 🎯{suggestion}"
 
     l2_parts = []
     if '权利金' in income_line:
-        premium_match = re.search(r'权利金[=:]([^|]+)', income_line)
+        premium_match = re.search(r'(?:组合净)?权利金[=:]([^|]+)', income_line)
         annual_match = re.search(r'年化\s*([\d.]+)%?', income_line)
         if premium_match:
             premium_raw = premium_match.group(1).strip()
@@ -377,13 +383,27 @@ def _build_notification_block_compact(
                 premium_num_fmt = f"{float(premium_num):.2f}".rstrip('0').rstrip('.')
             except Exception:
                 premium_num_fmt = premium_num
-            l2_parts.append(f"权利金 {premium_num_fmt}{ccy}")
+            label = "净权利金" if is_enhancement else "权利金"
+            l2_parts.append(f"{label} {premium_num_fmt}{ccy}")
         if annual_match:
             l2_parts.append(f"年化 {_fmt_pct_compact(annual_match.group(1) + '%')}")
+        if is_enhancement:
+            score_match = re.search(r'场景评分[=:](\d+\.?\d*)', income_line)
+            if score_match:
+                try:
+                    score_val = float(score_match.group(1))
+                    l2_parts.append(f"评分 {score_val:.3f}")
+                except Exception:
+                    pass
 
     dte_match = re.search(r'DTE[=:](\d+)', contract_line)
     if dte_match:
         l2_parts.append(_fmt_dte_compact(dte_match.group(1)))
+
+    if is_enhancement:
+        candidate_match = re.search(r'备选Call=(\d+)', contract_line)
+        if candidate_match:
+            l2_parts.append(f"备选 {candidate_match.group(1)}个")
 
     l2 = f"- {' · '.join(l2_parts)}" if l2_parts else ''
 
@@ -394,17 +414,23 @@ def _build_notification_block_compact(
         if risk_val and risk_val != '-':
             l3_parts.append(f"风险 {risk_val}")
 
-    delta_match = re.search(r'delta[=:]([^|]+)', risk_line)
+    delta_match = re.search(r'(?:Call\s+)?delta[=:]([^|]+)', risk_line)
     if delta_match:
         delta_val = delta_match.group(1).strip()
         if delta_val and delta_val != '-':
             try:
                 delta_f = float(delta_val)
-                l3_parts.append(f"Δ {delta_f:.2f}")
+                label = "Call Δ" if is_enhancement else "Δ"
+                l3_parts.append(f"{label} {delta_f:.2f}")
             except Exception:
                 l3_parts.append(f"Δ {delta_val}")
 
-    if '保证金' in detail_line or '担保' in detail_line:
+    if is_enhancement:
+        ask_match = re.search(r'Call\s+ask[=:](\d+\.?\d*)', risk_line)
+        if ask_match:
+            l3_parts.append(f"ask {ask_match.group(1)}")
+
+    if not is_enhancement and ('保证金' in detail_line or '担保' in detail_line):
         margin_match = re.search(r'保证金占用[=:]([^|]+)', detail_line)
         if (margin_match):
             margin_val = margin_match.group(1).strip()
@@ -421,7 +447,17 @@ def _build_notification_block_compact(
     l3 = f"- {' · '.join(l3_parts)}" if l3_parts else ''
 
     l4 = ''
-    if extra_detail_line:
+    if is_enhancement:
+        em_match = re.search(r'expected_move[=:]([\d.]+)', detail_line)
+        iv_match = re.search(r'IV[=:]([\d.]+)', detail_line)
+        if em_match or iv_match:
+            l4_parts = []
+            if em_match:
+                l4_parts.append(f"预期波动 {em_match.group(1)}")
+            if iv_match:
+                l4_parts.append(f"IV {iv_match.group(1)}")
+            l4 = f"- {' · '.join(l4_parts)}"
+    elif extra_detail_line:
         if '收益增强' in extra_detail_line:
             call_match = re.search(r'推荐Call=([^|]+)', extra_detail_line)
             if call_match:
@@ -700,6 +736,10 @@ def _format_alert_line_compact(line: str, *, account_label: str = '当前账户'
         if not _is_missing_value(call_candidate_count):
             candidate_tail = f" | 备选Call={call_candidate_count}个"
         note = parsed.comment or '已按组合收益筛出推荐 Call，可作为该 Sell Put 的收益增强方案。'
+        enh_suggestion = parsed.suggestion
+        if not _is_missing_value(call_ask):
+            ask_val = _present_compact(call_ask)
+            enh_suggestion = f"卖{enh_suggestion}/买{ask_val}" if enh_suggestion else f"买{ask_val}"
         return _build_notification_block_compact(
             symbol_name=parsed.symbol_name,
             action_label='收益增强',
@@ -725,6 +765,7 @@ def _format_alert_line_compact(line: str, *, account_label: str = '当前账户'
                 f"IV={_present_compact(expected_move_iv)}"
             ),
             note=note,
+            suggestion=enh_suggestion,
         )
 
     return parsed.raw
