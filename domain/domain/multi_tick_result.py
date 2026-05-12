@@ -28,7 +28,7 @@ def build_no_candidate_notification_text(
             lines.append('')
         return '\n'.join(lines).strip() + '\n'
 
-    return '监控正常触发：本轮无候选。\n'
+    return '📋 本轮扫描完成，暂无符合条件的候选。\n'
 
 
 def build_account_messages(

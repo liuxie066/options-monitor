@@ -93,6 +93,16 @@ def _present_money_or_zero(value: str | None, *, reason: str) -> str:
     return v
 
 
+def _present_compact(value: str | None) -> str:
+    """Simplified presentation for compact render style."""
+    if _is_missing_value(value):
+        return "-"
+    v = str(value).strip()
+    if v in {"0", "0.0", "0.00"}:
+        return "0"
+    return v
+
+
 def _value_after_prefix(token: str | None, prefix: str) -> str:
     if not token:
         return ''
@@ -320,7 +330,7 @@ def _fmt_money_compact(token: str) -> str:
 def _fmt_dte_compact(dte_token: str) -> str:
     try:
         n = int(float(dte_token))
-        return f"{n} 天"
+        return f"{n}天"
     except Exception:
         return str(dte_token) if dte_token else '-'
 
@@ -350,6 +360,8 @@ def _build_notification_block_compact(
         l1 = f"{emoji} {action_label} {symbol_name} {strike}{option_type} {exp_part}"
     else:
         l1 = f"{emoji} {action_label} {symbol_name} {exp_part}"
+    if suggestion:
+        l1 += f" | 🎯{suggestion}"
 
     l2_parts = []
     if '权利金' in income_line:
@@ -601,8 +613,8 @@ def _format_alert_line_compact(line: str, *, account_label: str = '当前账户'
         linked_call_delta = parsed.extras.get('linked_call_delta', '')
         linked_scenario_score = parsed.extras.get('linked_scenario_score', '')
         note = parsed.comment or SELL_PUT_NOTIFICATION_HIGH
-        delta_show = _present_or_missing(delta, reason='告警未提供delta')
-        iv_show = _present_or_missing(iv, reason='告警未提供iv')
+        delta_show = _present_compact(delta)
+        iv_show = _present_compact(iv)
         extra_detail_lines: list[str] = []
         if not _is_missing_value(linked_call):
             count_part = ''
@@ -611,8 +623,8 @@ def _format_alert_line_compact(line: str, *, account_label: str = '当前账户'
             extra_detail_lines.append(
                 f"- 收益增强: 推荐Call={linked_call} | "
                 f"{count_part}"
-                f"delta={_present_or_missing(linked_call_delta, reason='告警未提供linked_call_delta')} | "
-                f"场景评分={_present_or_missing(linked_scenario_score, reason='告警未提供linked_scenario_score')}"
+                f"delta={_present_compact(linked_call_delta)} | "
+                f"场景评分={_present_compact(linked_scenario_score)}"
             )
         return _build_notification_block_compact(
             symbol_name=parsed.symbol_name,
@@ -632,8 +644,8 @@ def _format_alert_line_compact(line: str, *, account_label: str = '当前账户'
         shares = parsed.extras.get('shares', '')
         delta = parsed.extras.get('delta', '')
         iv = parsed.extras.get('iv', '') or parsed.extras.get('IV', '')
-        delta_show = _present_or_missing(delta, reason='告警未提供delta')
-        iv_show = _present_or_missing(iv, reason='告警未提供iv')
+        delta_show = _present_compact(delta)
+        iv_show = _present_compact(iv)
         qty = f"{cover}张(可覆盖)" if (not _is_missing_value(cover)) else '1张(默认)'
         note = parsed.comment or SELL_CALL_NOTIFICATION_MEDIUM
         shares_total, shares_locked, shares_available = _parse_shares_summary(shares)
@@ -645,10 +657,10 @@ def _format_alert_line_compact(line: str, *, account_label: str = '当前账户'
             contract_line=f"- 合约: 行权价={parsed.strike_show} | 数量={qty} | DTE={parsed.dte_show}",
             risk_line=f"- 风控: 风险={parsed.risk_tag} | delta={delta_show} | IV={iv_show}",
             detail_line=(
-                f"- 持仓: 总股数={_present_or_missing(shares_total, reason='告警未提供shares')} | "
-                f"已占用={_present_or_missing(shares_locked, reason='告警未提供shares')} | "
-                f"可用={_present_or_missing(shares_available, reason='告警未提供shares')} | "
-                f"可覆盖={_present_or_missing(cover, reason='告警未提供cover')}张"
+                f"- 持仓: 总股数={_present_compact(shares_total)} | "
+                f"已占用={_present_compact(shares_locked)} | "
+                f"可用={_present_compact(shares_available)} | "
+                f"可覆盖={_present_compact(cover)}张"
             ),
             note=note,
             suggestion=parsed.suggestion,
@@ -673,24 +685,24 @@ def _format_alert_line_compact(line: str, *, account_label: str = '当前账户'
             action_label='收益增强',
             contract=parsed.contract,
             income_line=(
-                f"- 收益: 组合净权利金={_present_or_missing(net_credit, reason='告警未提供net_credit')} | "
+                f"- 收益: 组合净权利金={_present_compact(net_credit)} | "
                 f"{parsed.annual_show} | "
-                f"场景评分={_present_or_missing(scenario_score, reason='告警未提供scenario_score')}"
+                f"场景评分={_present_compact(scenario_score)}"
             ),
             contract_line=(
-                f"- 组合: Put={_present_or_missing(put_strike, reason='告警未提供put_strike')} | "
-                f"Call={_present_or_missing(call_strike, reason='告警未提供call_strike')} | "
+                f"- 组合: Put={_present_compact(put_strike)} | "
+                f"Call={_present_compact(call_strike)} | "
                 f"DTE={parsed.dte_show}"
                 f"{candidate_tail}"
             ),
             risk_line=(
                 f"- 风控: 风险={parsed.risk_tag} | "
-                f"Call delta={_present_or_missing(call_delta, reason='告警未提供call_delta')} | "
-                f"Call ask={_present_or_missing(call_ask, reason='告警未提供call_ask')}"
+                f"Call delta={_present_compact(call_delta)} | "
+                f"Call ask={_present_compact(call_ask)}"
             ),
             detail_line=(
-                f"- 预期波动: expected_move={_present_or_missing(expected_move, reason='告警未提供expected_move')} | "
-                f"IV={_present_or_missing(expected_move_iv, reason='告警未提供expected_move_iv')}"
+                f"- 预期波动: expected_move={_present_compact(expected_move)} | "
+                f"IV={_present_compact(expected_move_iv)}"
             ),
             note=note,
         )
