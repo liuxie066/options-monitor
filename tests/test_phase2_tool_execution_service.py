@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -80,6 +81,8 @@ def test_state_repo_idempotency_and_audit_helpers() -> None:
 
     with TemporaryDirectory() as td:
         base = Path(td)
+        started_at = (datetime.now(timezone.utc) - timedelta(days=1)).replace(microsecond=0)
+        finished_at = started_at + timedelta(seconds=1)
         r1 = state_repo.put_idempotency_success(
             base,
             scope="required_data_prefetch",
@@ -109,8 +112,8 @@ def test_state_repo_idempotency_and_audit_helpers() -> None:
                 "ok": True,
                 "message": "fetched",
                 "returncode": 0,
-                "started_at_utc": "2026-04-12T00:00:00+00:00",
-                "finished_at_utc": "2026-04-12T00:00:01+00:00",
+                "started_at_utc": started_at.isoformat(),
+                "finished_at_utc": finished_at.isoformat(),
             },
         )
         rows = state_repo.query_tool_execution_audit(base, tool_name="required_data_prefetch", limit=10)
