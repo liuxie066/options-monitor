@@ -7,6 +7,8 @@ on:
 
 jobs:
   release:
+    permissions:
+      contents: write
     uses: ./.github/workflows/_release-reusable.yml
     with:
       tag: ${{ github.ref_name }}

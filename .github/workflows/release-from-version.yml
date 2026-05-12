@@ -25,6 +25,8 @@ jobs:
 
   release:
     needs: resolve-tag
+    permissions:
+      contents: write
     uses: ./.github/workflows/_release-reusable.yml
     with:
       tag: ${{ needs.resolve-tag.outputs.tag }}
