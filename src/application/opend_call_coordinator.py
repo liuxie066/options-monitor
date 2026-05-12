@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from src.application.option_chain_fetching import FileRateLimiter
+from src.infrastructure.opend_retcodes import classify_opend_error
 
 
 def opend_endpoint_limiter_state_path(base_dir: Path, endpoint: str) -> Path:
@@ -28,4 +29,9 @@ def rate_limited_opend_call(
         label=f"opend_{endpoint}",
     )
     limiter.acquire()
-    return call()
+    try:
+        return call()
+    except Exception as exc:
+        if classify_opend_error(exc).is_rate_limit:
+            limiter.record_rate_limit()
+        raise

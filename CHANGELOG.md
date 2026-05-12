@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.2.31 - 2026-05-12
+
+### Changed
+- Moved the OpenD option-chain rate-limit configuration surface to `runtime.opend_rate_limits.option_chain`, while keeping `runtime.option_chain_fetch` compatible for older local configs.
+- Removed the legacy `runtime.option_chain_fetch` default from `configs/system.json`; the built-in `10 calls / 30 seconds` option-chain limit now comes from code defaults unless explicitly configured.
+
+### Fixed
+- Serialized file-backed OpenD rate-limit acquisition across independent in-process/subprocess workers to prevent bursts from exceeding shared OpenD windows.
+- Recorded server-side OpenD rate-limit responses as a shared cooldown so retries wait for the configured window instead of immediately hammering the endpoint again.
+
 ## 1.2.30 - 2026-05-12
 
 ### Changed

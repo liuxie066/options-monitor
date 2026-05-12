@@ -355,7 +355,30 @@ def test_validate_config_rejects_unknown_opend_rate_limit_endpoint() -> None:
         assert '[CONFIG_ERROR]' in msg
         assert 'runtime.opend_rate_limits.market_snapshots is not supported' in msg
         assert 'market_snapshot' in msg
+        assert 'option_chain' in msg
         assert 'option_expiration' in msg
+
+
+def test_validate_config_accepts_option_chain_opend_rate_limit_endpoint() -> None:
+    _add_repo_to_syspath()
+    from src.application.config_validator import validate_config
+
+    cfg = {
+        'runtime': {
+            'opend_rate_limits': {
+                'option_chain': {'max_calls': 10, 'window_sec': 30, 'max_wait_sec': 90},
+            },
+        },
+        'symbols': [
+            {
+                'symbol': 'AAPL',
+                'sell_put': {'enabled': False},
+                'sell_call': {'enabled': False},
+            }
+        ],
+    }
+
+    validate_config(cfg)
 
 
 def test_validate_config_accepts_external_holdings_account_settings() -> None:

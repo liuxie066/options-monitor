@@ -82,9 +82,9 @@ def test_opend_rate_gate_times_out_when_budget_exceeded() -> None:
         raise AssertionError("expected TimeoutError")
 
 
-def test_opend_rate_gate_merges_external_state_file() -> None:
+def test_opend_rate_gate_merges_external_state_file(tmp_path: Path) -> None:
     OpenDRateGate, _, _ = _imports()
-    state_path = Path(__file__).resolve().parent / ".tmp_opend_rate_gate_state.json"
+    state_path = tmp_path / "opend_rate_gate_state.json"
     try:
         payload = {
             "updated_at": time.time(),
@@ -129,6 +129,36 @@ def test_opend_rate_gate_does_not_remerge_own_file_timestamps(tmp_path: Path) ->
     assert len(payload["timestamps"]) == 10
 
 
+def test_opend_rate_gate_file_backing_serializes_independent_instances(tmp_path: Path) -> None:
+    OpenDRateGate, _, _ = _imports()
+    state_path = tmp_path / "shared_opend_rate_gate.json"
+    gates = [
+        OpenDRateGate(max_calls=1, window_sec=0.2, max_wait_sec=2.0, label="shared", state_path=state_path),
+        OpenDRateGate(max_calls=1, window_sec=0.2, max_wait_sec=2.0, label="shared", state_path=state_path),
+    ]
+    start = threading.Barrier(2)
+    errors: list[BaseException] = []
+
+    def _worker(gate) -> None:  # noqa: ANN001
+        try:
+            start.wait()
+            gate.acquire()
+        except BaseException as exc:  # pragma: no cover - failure path
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_worker, args=(gate,)) for gate in gates]
+    started = time.monotonic()
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    elapsed = time.monotonic() - started
+
+    assert not errors
+    assert elapsed >= 0.15
+    assert state_path.with_suffix(state_path.suffix + ".lock").exists()
+
+
 def test_file_rate_limiter_shim_preserves_api_and_exception_type(tmp_path: Path) -> None:
     _, FileRateLimiter, _ = _imports()
     limiter = FileRateLimiter(
@@ -149,3 +179,28 @@ def test_file_rate_limiter_shim_preserves_api_and_exception_type(tmp_path: Path)
         assert "rate limit wait budget exceeded" in str(exc)
     else:  # pragma: no cover - failure path
         raise AssertionError("expected OptionChainRateLimitExceeded")
+
+
+def test_file_rate_limiter_records_server_rate_limit_cooldown(tmp_path: Path) -> None:
+    _, FileRateLimiter, _ = _imports()
+    first = FileRateLimiter(
+        state_path=tmp_path / "limiter.json",
+        max_calls=10,
+        window_sec=0.2,
+        max_wait_sec=1.0,
+        clock=time.monotonic,
+    )
+    second = FileRateLimiter(
+        state_path=tmp_path / "limiter.json",
+        max_calls=10,
+        window_sec=0.2,
+        max_wait_sec=1.0,
+        clock=time.monotonic,
+    )
+
+    first.record_rate_limit()
+    started = time.monotonic()
+    second.acquire()
+    elapsed = time.monotonic() - started
+
+    assert elapsed >= 0.15

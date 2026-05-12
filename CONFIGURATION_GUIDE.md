@@ -379,7 +379,7 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 ### 4.7 runtime：超时（线上稳定）
 - `symbol_timeout_sec`：单标的 fetch/scan 超时
 - `portfolio_timeout_sec`：读取 holdings/positions 超时
-- `option_chain_fetch`：OpenD 期权链拉取的共享频控，字段为 `max_calls`、`window_sec`、`max_wait_sec`
+- `opend_rate_limits.option_chain`：OpenD `get_option_chain` 共享频控，字段为 `max_calls`、`window_sec`、`max_wait_sec`；旧字段 `option_chain_fetch` 仍兼容
 - `opend_rate_limits.market_snapshot`：OpenD `get_market_snapshot` 共享频控，用于正股 spot 和期权报价快照
 - `opend_rate_limits.option_expiration`：OpenD `get_option_expiration_date` 共享频控，用于到期日发现
 
@@ -388,12 +388,12 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 ```json
 {
   "runtime": {
-    "option_chain_fetch": {
-      "max_calls": 10,
-      "window_sec": 30,
-      "max_wait_sec": 90
-    },
     "opend_rate_limits": {
+      "option_chain": {
+        "max_calls": 10,
+        "window_sec": 30,
+        "max_wait_sec": 90
+      },
       "market_snapshot": {
         "max_calls": 60,
         "window_sec": 30,

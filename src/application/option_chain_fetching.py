@@ -109,6 +109,11 @@ class FileRateLimiter:
         except TimeoutError as exc:
             raise OptionChainRateLimitExceeded(str(exc)) from exc
 
+    def record_rate_limit(self, *, cooldown_sec: float | None = None) -> None:
+        recorder = getattr(self._gate, "record_rate_limit", None)
+        if callable(recorder):
+            recorder(cooldown_sec=cooldown_sec)
+
 
 def _get_or_create_gate(
     *,
@@ -383,7 +388,12 @@ def _fetch_one_chain(
     if expiration:
         kwargs["start"] = str(expiration)
         kwargs["end"] = str(expiration)
-    return gateway.get_option_chain(**kwargs)
+    try:
+        return gateway.get_option_chain(**kwargs)
+    except Exception as exc:
+        if classify_option_chain_error(exc) == "RATE_LIMIT":
+            limiter.record_rate_limit()
+        raise
 
 
 def _dataframe_to_records(value: Any) -> list[dict[str, Any]]:
