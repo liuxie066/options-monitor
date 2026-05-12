@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.29 - 2026-05-12
+
+### Changed
+- Relaxed default Sell Put yield-enhancement optimizer thresholds for US/HK symbol defaults so volatile names can surface candidates while keeping funding mode and combo-spread limits unchanged.
+
 ## 1.2.28 - 2026-05-12
 
 ### Added
