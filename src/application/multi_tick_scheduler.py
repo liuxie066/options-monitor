@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,6 +18,7 @@ from src.application.scheduled_notification import (
     build_multi_tick_account_scheduler_view,
     build_multi_tick_scheduler_decision,
 )
+from src.application.scan_scheduler import build_scheduler_decision_payload
 
 
 @dataclass(frozen=True)
@@ -171,6 +173,7 @@ def run_scheduler_flow(
     build_failure_audit_fields,
     audit_fn: Callable[..., Any],
     fail_schema_validation: Callable[..., Any],
+    build_scheduler_decision_payload_fn: Callable[..., dict[str, Any]] = build_scheduler_decision_payload,
 ) -> MultiTickSchedulerResult:
     t_sch0 = monotonic()
     scheduler_proc = run_scan_scheduler_cli(
@@ -243,50 +246,29 @@ def run_scheduler_flow(
     scan_decision_by_account: dict[str, dict[str, Any]] = {}
     for acct0 in [str(a).strip() for a in accounts if str(a).strip()]:
         try:
-            sch_acct = run_scan_scheduler_cli(
-                vpy=vpy,
-                base=base,
-                config=cfg_path,
+            account_payload = build_scheduler_decision_payload_fn(
+                config=base_cfg,
                 state=state_path,
-                jsonl=True,
                 schedule_key=str(scheduler_schedule_key),
                 account=str(acct0),
-                capture_output=True,
+                base_dir=base,
             )
+            account_stdout = json.dumps(account_payload, ensure_ascii=False)
             account_extra = {
-                "returncode": int(sch_acct.returncode),
+                "returncode": 0,
                 "account": str(acct0),
+                "adapter": "scheduler_inprocess",
             }
-            if sch_acct.returncode != 0:
-                account_extra.update(
-                    build_failure_audit_fields(
-                        failure_kind="io_error",
-                        failure_stage="scan_scheduler_account",
-                        failure_adapter="scheduler",
-                    )
-                )
-                audit_fn(
-                    "tool_call",
-                    "scan_scheduler_account",
-                    status="error",
-                    tool_name="scan_scheduler_cli",
-                    account=str(acct0),
-                    extra=account_extra,
-                )
-                notify_decision_by_account[acct0] = None
-                scan_decision_by_account[acct0] = _global_scan_fallback("global_fallback_account_scheduler_error")
-                continue
-
             audit_fn(
                 "tool_call",
                 "scan_scheduler_account",
                 status="ok",
-                tool_name="scan_scheduler_cli",
+                tool_name="scan_scheduler_inprocess",
                 account=str(acct0),
                 extra=account_extra,
             )
             account_scheduler_decision, account_scheduler_view = build_multi_tick_scheduler_decision(
-                scheduler_stdout=str(sch_acct.stdout or ""),
+                scheduler_stdout=account_stdout,
                 as_of_utc=datetime.now(timezone.utc).isoformat(),
                 snapshot_cls=snapshot_cls,
                 engine_entrypoint=engine_entrypoint,
@@ -305,7 +287,7 @@ def run_scheduler_flow(
             }
             notify_decision_by_account[acct0] = build_multi_tick_account_scheduler_view(
                 account=str(acct0),
-                scheduler_stdout=str(sch_acct.stdout or ""),
+                scheduler_stdout=account_stdout,
                 scheduler_decision=scheduler_decision,
                 as_of_utc=datetime.now(timezone.utc).isoformat(),
                 snapshot_cls=snapshot_cls,
@@ -321,7 +303,7 @@ def run_scheduler_flow(
                 "tool_call",
                 "scan_scheduler_account",
                 status="error",
-                tool_name="scan_scheduler_cli",
+                tool_name="scan_scheduler_inprocess",
                 account=str(acct0),
                 message=str(exc),
                 extra={

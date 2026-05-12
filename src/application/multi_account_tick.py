@@ -78,8 +78,8 @@ from src.application.cron_runtime import (
     apply_notify_results_to_tick_metrics,
     build_notify_summary,
     mark_accounts_notified,
-    request_scheduler_update,
 )
+from src.application.scan_scheduler import mark_scheduler_accounts
 from src.application.account_run import AccountRunOutcome, AccountRunRequest, run_one_account
 from src.application.multi_tick_audit import MultiTickAuditHelper
 from src.application.multi_tick_finalization import (
@@ -128,7 +128,7 @@ def _resolve_account_run_max_workers(cfg: dict, account_count: int) -> int:
     raw = runtime.get("multi_account_max_workers")
     if raw is None:
         raw = runtime.get("account_max_workers")
-    workers = _to_positive_int(raw, min(4, account_count))
+    workers = _to_positive_int(raw, 1)
     return min(account_count, workers)
 
 
@@ -177,8 +177,6 @@ def _run_account_outcomes(
 
 def _mark_scanned_accounts(
     *,
-    runner: Callable[..., object],
-    vpy: Path,
     base: Path,
     config: Path,
     state: Path,
@@ -186,19 +184,15 @@ def _mark_scanned_accounts(
     schedule_key: str,
     accounts: list[str],
 ) -> None:
-    for acct in [str(a).strip() for a in accounts if str(a).strip()]:
-        request_scheduler_update(
-            runner=runner,
-            vpy=vpy,
-            base=base,
-            config=config,
-            state=state,
-            state_dir=state_dir,
-            mark_scanned=True,
-            schedule_key=str(schedule_key),
-            account=acct,
-            capture_output=False,
-        )
+    mark_scheduler_accounts(
+        config=config,
+        state=state,
+        state_dir=state_dir,
+        schedule_key=str(schedule_key),
+        accounts=[str(a).strip() for a in accounts if str(a).strip()],
+        mark_scanned=True,
+        base_dir=base,
+    )
 
 
 def current_run_id() -> str | None:
@@ -722,8 +716,6 @@ def main(argv: list[str] | None = None) -> int:
     if ran_any_pipeline:
         try:
             _mark_scanned_accounts(
-                runner=run_scan_scheduler_cli,
-                vpy=vpy,
                 base=base,
                 config=cfg_path,
                 state=state_path,

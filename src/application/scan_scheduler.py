@@ -49,6 +49,154 @@ def write_state(path: Path, state: dict):
     atomic_write_text(path, json.dumps(state, ensure_ascii=False, indent=2) + "\n")
 
 
+def _resolve_base(base_dir: Path | None = None) -> Path:
+    return (base_dir or Path(__file__).resolve().parents[2]).resolve()
+
+
+def _resolve_config_path(config: str | Path, *, base: Path) -> Path:
+    config_path = Path(config)
+    if not config_path.is_absolute():
+        config_path = (base / config_path).resolve()
+    return config_path
+
+
+def _resolve_state_path(
+    *,
+    base: Path,
+    state_dir: str | Path = 'output/state',
+    state: str | Path | None = None,
+) -> Path:
+    state_dir_path = Path(state_dir)
+    if not state_dir_path.is_absolute():
+        state_dir_path = (base / state_dir_path).resolve()
+    state_dir_path.mkdir(parents=True, exist_ok=True)
+
+    if state:
+        state_path = Path(state)
+        if not state_path.is_absolute():
+            state_path = (base / state_path).resolve()
+        return state_path
+    return (state_dir_path / 'scheduler_state.json').resolve()
+
+
+def _load_scheduler_config(config: str | Path | dict, *, base: Path) -> dict:
+    if isinstance(config, dict):
+        return config
+    config_path = _resolve_config_path(config, base=base)
+    if config_path.suffix.lower() != '.json':
+        raise SystemExit('[CONFIG_ERROR] scheduler config must be a .json file')
+    return json.loads(config_path.read_text(encoding='utf-8'))
+
+
+def build_scheduler_decision_payload(
+    *,
+    config: str | Path | dict,
+    state: str | Path,
+    schedule_key: str = 'schedule',
+    account: str | None = None,
+    force: bool = False,
+    base_dir: Path | None = None,
+    now_utc: datetime | None = None,
+) -> dict:
+    """Build one scheduler decision without spawning the scheduler CLI."""
+    base = _resolve_base(base_dir)
+    cfg = _load_scheduler_config(config, base=base)
+    state_path = Path(state)
+    if not state_path.is_absolute():
+        state_path = (base / state_path).resolve()
+
+    schedule_key_val = str(schedule_key or 'schedule')
+    schedule_cfg = cfg.get(schedule_key_val, {}) or {}
+    state_data = read_state(state_path)
+    decision = decide(
+        schedule_cfg,
+        state_data,
+        now_utc or datetime.now(timezone.utc),
+        account=(str(account) if account else None),
+        schedule_key=schedule_key_val,
+        force=bool(force),
+    )
+    payload = asdict(decision)
+    payload['should_notify'] = bool(payload.get('is_notify_window_open'))
+    return payload
+
+
+def mark_scheduler_accounts(
+    *,
+    config: str | Path | dict,
+    state: str | Path,
+    state_dir: str | Path = 'output/state',
+    schedule_key: str = 'schedule',
+    accounts: list[str],
+    mark_notified: bool = False,
+    mark_scanned: bool = False,
+    force: bool = False,
+    base_dir: Path | None = None,
+    now_utc: datetime | None = None,
+) -> dict:
+    """Batch account scheduler state writes in-process.
+
+    This keeps multi-account tick from spawning one scheduler process per
+    account for simple state updates.
+    """
+    base = _resolve_base(base_dir)
+    cfg = _load_scheduler_config(config, base=base)
+    state_path = Path(state)
+    if not state_path.is_absolute():
+        state_path = _resolve_state_path(base=base, state_dir=state_dir, state=state)
+
+    schedule_cfg = cfg.get(str(schedule_key or 'schedule'), {}) or {}
+    schedule_enabled = bool(schedule_cfg.get('enabled', True))
+    account_ids = [str(a).strip() for a in accounts if str(a).strip()]
+    if not account_ids or not (mark_notified or mark_scanned):
+        return {
+            'updated': False,
+            'state_path': str(state_path),
+            'accounts': account_ids,
+            'mark_notified': bool(mark_notified),
+            'mark_scanned': bool(mark_scanned),
+        }
+
+    state_data = read_state(state_path)
+    if not schedule_enabled and not force:
+        return {
+            'updated': False,
+            'state_path': str(state_path),
+            'reason': 'schedule_disabled',
+            'accounts': account_ids,
+        }
+
+    now_s = to_iso(now_utc or datetime.now(timezone.utc))
+    if mark_notified:
+        state_data['last_notify_utc'] = now_s
+        if account_ids:
+            m = state_data.get('last_notify_utc_by_account')
+            if not isinstance(m, dict):
+                m = {}
+            for account in account_ids:
+                m[str(account)] = now_s
+            state_data['last_notify_utc_by_account'] = m
+    if mark_scanned:
+        state_data['last_scan_utc'] = now_s
+        if account_ids:
+            m = state_data.get('last_scan_utc_by_account')
+            if not isinstance(m, dict):
+                m = {}
+            for account in account_ids:
+                m[str(account)] = now_s
+            state_data['last_scan_utc_by_account'] = m
+
+    if mark_notified or mark_scanned:
+        write_state(state_path, state_data)
+    return {
+        'updated': bool(mark_notified or mark_scanned),
+        'state_path': str(state_path),
+        'accounts': account_ids,
+        'mark_notified': bool(mark_notified),
+        'mark_scanned': bool(mark_scanned),
+    }
+
+
 def parse_hhmm(value: str) -> time:
     hour, minute = value.split(':', 1)
     return time(hour=int(hour), minute=int(minute))
@@ -322,23 +470,9 @@ def run_scheduler(
     base_dir: Path | None = None,
 ) -> dict:
     """执行调度判定并处理状态副作用。"""
-    base = (base_dir or Path(__file__).resolve().parents[2]).resolve()
-
-    config_path = Path(config)
-    if not config_path.is_absolute():
-        config_path = (base / config_path).resolve()
-
-    state_dir_path = Path(state_dir)
-    if not state_dir_path.is_absolute():
-        state_dir_path = (base / state_dir_path).resolve()
-    state_dir_path.mkdir(parents=True, exist_ok=True)
-
-    if state:
-        state_path = Path(state)
-        if not state_path.is_absolute():
-            state_path = (base / state_path).resolve()
-    else:
-        state_path = (state_dir_path / 'scheduler_state.json').resolve()
+    base = _resolve_base(base_dir)
+    config_path = _resolve_config_path(config, base=base)
+    state_path = _resolve_state_path(base=base, state_dir=state_dir, state=state)
 
     if config_path.suffix.lower() != '.json':
         raise SystemExit('[CONFIG_ERROR] scheduler config must be a .json file')
