@@ -118,7 +118,7 @@ def test_run_account_outcomes_runs_parallel_and_preserves_account_order() -> Non
 def test_account_worker_count_is_bounded_by_runtime_config() -> None:
     from src.application import multi_account_tick as mod
 
-    assert mod._resolve_account_run_max_workers({"runtime": {}}, 3) == 3
+    assert mod._resolve_account_run_max_workers({"runtime": {}}, 3) == 1
     assert mod._resolve_account_run_max_workers({"runtime": {"multi_account_max_workers": 2}}, 5) == 2
     assert mod._resolve_account_run_max_workers({"runtime": {"multi_account_max_workers": 0}}, 5) == 1
     assert mod._should_update_account_legacy_output(1) is True
@@ -138,25 +138,25 @@ def test_default_account_must_be_active_account() -> None:
         assert "--default-account must be one of active accounts" in str(exc)
 
 
-def test_mark_scanned_accounts_updates_each_ran_account() -> None:
+def test_mark_scanned_accounts_updates_each_ran_account(tmp_path) -> None:
+    import json
     from pathlib import Path
     from src.application import multi_account_tick as mod
 
-    calls: list[dict[str, Any]] = []
-
-    def fake_runner(**kwargs):
-        calls.append(dict(kwargs))
+    base = tmp_path
+    config = tmp_path / "config.us.json"
+    config.write_text(json.dumps({"schedule": {"enabled": True}}), encoding="utf-8")
+    state = tmp_path / "scheduler_state.json"
 
     mod._mark_scanned_accounts(
-        runner=fake_runner,
-        vpy=Path("/repo/.venv/bin/python"),
-        base=Path("/repo"),
-        config=Path("/repo/config.us.json"),
-        state=Path("/repo/output_shared/state/scheduler_state.json"),
-        state_dir=Path("/repo/output_runs/run-1/state"),
+        base=base,
+        config=config,
+        state=state,
+        state_dir=Path("output_runs/run-1/state"),
         schedule_key="schedule",
         accounts=["lx", "sy"],
     )
 
-    assert [call["account"] for call in calls] == ["lx", "sy"]
-    assert all(call["mark_scanned"] is True for call in calls)
+    data = json.loads(state.read_text(encoding="utf-8"))
+    assert data["last_scan_utc"]
+    assert set(data["last_scan_utc_by_account"]) == {"lx", "sy"}

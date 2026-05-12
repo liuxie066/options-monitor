@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable
 
+from src.application.scan_scheduler import mark_scheduler_accounts
+
 
 def write_last_run(
     *,
@@ -83,19 +85,16 @@ def mark_accounts_notified(
     schedule_key: str | None,
     accounts: list[str],
 ) -> None:
-    for acct in [str(a).strip() for a in accounts if str(a).strip()]:
-        request_scheduler_update(
-            runner=runner,
-            vpy=vpy,
-            base=base,
-            config=config,
-            state=state,
-            state_dir=state_dir,
-            mark_notified=True,
-            schedule_key=schedule_key,
-            account=acct,
-            capture_output=False,
-        )
+    del runner, vpy
+    mark_scheduler_accounts(
+        config=config,
+        state=state,
+        state_dir=state_dir or "output/state",
+        schedule_key=str(schedule_key or "schedule"),
+        accounts=[str(a).strip() for a in accounts if str(a).strip()],
+        mark_notified=True,
+        base_dir=base,
+    )
 
 
 def build_notify_summary(

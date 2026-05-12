@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.2.26 - 2026-05-12
+
+### Changed
+- Made multi-account tick default to sequential account execution unless `runtime.multi_account_max_workers` or `runtime.account_max_workers` explicitly opts into account-level parallelism.
+- Replaced per-account scheduler CLI subprocess calls with in-process scheduler decisions while keeping the run-level scheduler CLI audit surface.
+
+### Fixed
+- Batched scheduler state updates for scanned/notified accounts to reduce OpenClaw cron overhead.
+- Reduced nested OpenD/Futu pressure from account-level and symbol-level worker pools that could push cron runs into the 120s timeout.
+
 ## 1.2.24 - 2026-05-12
 
 ### Changed

@@ -78,6 +78,9 @@ def test_run_scheduler_flow_uses_account_scan_decisions() -> None:
         calls.append(account)
         return SimpleNamespace(returncode=0, stdout=json.dumps(payloads[account]), stderr="")
 
+    def fake_account_scheduler_payload(**kwargs):
+        return payloads[kwargs["account"]]
+
     out = run_scheduler_flow(
         vpy=Path("/repo/.venv/bin/python"),
         base=Path("/repo"),
@@ -95,9 +98,10 @@ def test_run_scheduler_flow_uses_account_scan_decisions() -> None:
         build_failure_audit_fields=lambda **_kwargs: {},
         audit_fn=lambda event_type, action, **kwargs: audit_events.append({"event_type": event_type, "action": action, **kwargs}),
         fail_schema_validation=lambda **kwargs: (_ for _ in ()).throw(AssertionError(kwargs)),
+        build_scheduler_decision_payload_fn=fake_account_scheduler_payload,
     )
 
-    assert calls == [None, "lx", "sy"]
+    assert calls == [None]
     assert out.should_run_global is False
     assert out.reason_global == "global_not_due"
     assert out.scan_decision_by_account["lx"]["should_run"] is False
