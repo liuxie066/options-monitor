@@ -1405,7 +1405,7 @@ def run_close_advice(
 
     optimizer_cfg_raw = advice_cfg.get("optimizer") if isinstance(advice_cfg, dict) else {}
     optimizer_enabled = bool(
-        (optimizer_cfg_raw.get("enabled") if isinstance(optimizer_cfg_raw, dict) else False)
+        optimizer_cfg_raw.get("enabled", True) if isinstance(optimizer_cfg_raw, dict) else True
     )
     if optimizer_enabled:
         optimizer_cfg = CloseOptimizerConfig.from_mapping(
