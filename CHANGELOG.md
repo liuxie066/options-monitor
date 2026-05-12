@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.30 - 2026-05-12
+
+### Changed
+- Enabled default Sell Put and Sell Call candidate ranking weights for liquidity and risk distance through the system templates.
+- Wired configured candidate `score_weights` through the sell-put/sell-call scan pipeline so ranking can use the risk-adjusted score instead of remaining return-only by default.
+
 ## 1.2.29 - 2026-05-12
 
 ### Changed

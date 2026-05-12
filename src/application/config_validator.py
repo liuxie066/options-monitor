@@ -23,6 +23,12 @@ LIQUIDITY_ALLOWED_GLOBAL_FIELDS = (
     'min_volume',
     'max_spread_ratio',
 )
+SCORE_WEIGHT_FIELDS = (
+    'annualized_return',
+    'net_income',
+    'liquidity',
+    'risk_distance',
+)
 YIELD_ENHANCEMENT_LIQUIDITY_FIELDS = LIQUIDITY_ALLOWED_GLOBAL_FIELDS + (
     'max_combo_spread_ratio',
 )
@@ -114,6 +120,22 @@ def _validate_optional_positive_number(cfg: dict, key: str, path: str):
             die(f'{path}.{key} must be > 0')
     except Exception:
         die(f'{path}.{key} must be a number')
+
+
+def _validate_score_weights(cfg: dict, path: str) -> None:
+    if 'score_weights' not in cfg or cfg.get('score_weights') is None:
+        return
+    raw = cfg.get('score_weights')
+    if not isinstance(raw, dict):
+        die(f'{path}.score_weights must be an object')
+    unsupported = [str(k) for k in raw.keys() if k not in SCORE_WEIGHT_FIELDS]
+    if unsupported:
+        die(
+            f"{path}.score_weights has unsupported keys: {', '.join(unsupported)}; "
+            f"allowed keys: {', '.join(SCORE_WEIGHT_FIELDS)}"
+        )
+    for key in SCORE_WEIGHT_FIELDS:
+        _validate_optional_non_negative_number(raw, key, f'{path}.score_weights')
 
 
 def _validate_optional_non_negative_number_list(cfg: dict, key: str, path: str):
@@ -444,6 +466,7 @@ def validate_config(cfg: dict):
                         f"templates.{profile_name}.{side} has unsupported strategy filter keys: "
                         f"{', '.join(bad_keys)}; only {', '.join(LIQUIDITY_ALLOWED_GLOBAL_FIELDS)} are allowed"
                     )
+                _validate_score_weights(side_cfg, f'templates.{profile_name}.{side}')
                 if side == 'sell_call':
                     _validate_optional_positive_number(
                         side_cfg,
@@ -501,6 +524,7 @@ def validate_config(cfg: dict):
         sp = item.get('sell_put') or {}
         if sp and not isinstance(sp, dict):
             die(f"{sym}.sell_put must be an object")
+        _validate_score_weights(sp, f'{sym}.sell_put')
         bad_keys = [k for k in SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS if k in sp]
         if bad_keys:
             die(f"{sym}.sell_put has forbidden symbol-level strategy filter keys: {', '.join(bad_keys)}")
@@ -537,6 +561,7 @@ def validate_config(cfg: dict):
         sc = item.get('sell_call') or {}
         if sc and not isinstance(sc, dict):
             die(f"{sym}.sell_call must be an object")
+        _validate_score_weights(sc, f'{sym}.sell_call')
         bad_keys = [k for k in SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS if k in sc]
         if bad_keys:
             die(f"{sym}.sell_call has forbidden symbol-level strategy filter keys: {', '.join(bad_keys)}")

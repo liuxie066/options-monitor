@@ -7,6 +7,7 @@ from typing import Callable
 import pandas as pd
 
 from domain.domain.engine import (
+    CandidateScoreWeights,
     evaluate_candidate_hard_constraints,
     evaluate_candidate_return_floor,
     evaluate_candidate_risk_filter,
@@ -39,6 +40,7 @@ class CandidateScanConfig:
     max_spread_ratio: float | None
     min_annualized_net_return: float | None
     min_net_income: float
+    score_weights: CandidateScoreWeights | None = None
     reject_stage: str = "step3_risk_gate"
     quiet: bool = False
 
@@ -53,6 +55,38 @@ class CandidateScanDependencies:
     event_risk_mode_fn: Callable[[dict | None], str]
     annotate_event_risk_fn: Callable[[pd.DataFrame, Path, dict | None], pd.DataFrame]
     print_summary_fn: Callable[[pd.DataFrame, Path, Path], None]
+
+
+def resolve_candidate_score_weights(raw: CandidateScoreWeights | dict | None) -> CandidateScoreWeights | None:
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, CandidateScoreWeights):
+        return raw
+    if not isinstance(raw, dict):
+        raise ValueError("score_weights must be an object")
+
+    defaults = CandidateScoreWeights()
+    allowed = {"annualized_return", "net_income", "liquidity", "risk_distance"}
+    unsupported = [str(key) for key in raw.keys() if key not in allowed]
+    if unsupported:
+        raise ValueError(f"score_weights has unsupported keys: {', '.join(unsupported)}")
+
+    def _weight(name: str, default: float) -> float:
+        value = raw.get(name, default)
+        try:
+            parsed = float(value)
+        except Exception as exc:
+            raise ValueError(f"score_weights.{name} must be numeric") from exc
+        if parsed < 0:
+            raise ValueError(f"score_weights.{name} must be >= 0")
+        return parsed
+
+    return CandidateScoreWeights(
+        annualized_return=_weight("annualized_return", defaults.annualized_return),
+        net_income=_weight("net_income", defaults.net_income),
+        liquidity=_weight("liquidity", defaults.liquidity),
+        risk_distance=_weight("risk_distance", defaults.risk_distance),
+    )
 
 
 def _load_required_data_rows(*, input_root: Path, symbol: str, mode: str) -> pd.DataFrame:
@@ -181,7 +215,11 @@ def run_candidate_scan(
     out = pd.DataFrame(rows)
     reject_log = pd.DataFrame(reject_rows)
     if not out.empty:
-        ranked_rows = rank_candidate_rows(out.to_dict("records"), mode=config.mode)
+        ranked_rows = rank_candidate_rows(
+            out.to_dict("records"),
+            mode=config.mode,
+            score_weights=config.score_weights,
+        )
         out = pd.DataFrame(ranked_rows)
         out = deps.annotate_event_risk_fn(out, base_dir, event_risk_cfg)
         if "_strategy_score" in out.columns:

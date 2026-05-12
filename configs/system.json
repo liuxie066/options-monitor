@@ -8,7 +8,13 @@
           "min_net_income": 300.0,
           "min_open_interest": 50,
           "min_volume": 10,
-          "max_spread_ratio": 0.3
+          "max_spread_ratio": 0.3,
+          "score_weights": {
+            "annualized_return": 1.0,
+            "net_income": 0.000001,
+            "liquidity": 0.02,
+            "risk_distance": 0.03
+          }
         }
       },
       "call_base": {
@@ -18,7 +24,13 @@
           "min_volume": 10,
           "max_spread_ratio": 0.3,
           "min_strike_cost_multiplier": 1.02,
-          "min_net_income": 300.0
+          "min_net_income": 300.0,
+          "score_weights": {
+            "annualized_return": 1.0,
+            "net_income": 0.000001,
+            "liquidity": 0.02,
+            "risk_distance": 0.015
+          }
         }
       }
     },

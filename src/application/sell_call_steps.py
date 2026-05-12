@@ -127,6 +127,7 @@ def run_sell_call_scan_and_summarize(
         min_volume=liquidity.min_volume,
         max_spread_ratio=liquidity.max_spread_ratio,
         event_risk_cfg=event_risk,
+        score_weights=cc.get('score_weights'),
         quiet=bool(is_scheduled),
     )
 
