@@ -39,18 +39,38 @@ def validate_min_annualized_net_premium_return(value, *, source: str) -> float:
     return out
 
 
-def validate_min_if_exercised_total_return(value, *, source: str) -> float:
-    if value is None:
-        raise ValueError(f"{source} is required and must be a finite number")
+def _optional_positive_float(value) -> float | None:
+    if value is None or value == "":
+        return None
     if isinstance(value, bool):
-        raise ValueError(f"{source} must be a finite number, got bool")
+        return None
     try:
         out = float(value)
     except (TypeError, ValueError):
-        raise ValueError(f"{source} must be a finite number, got {value!r}") from None
-    if not math.isfinite(out):
-        raise ValueError(f"{source} must be a finite number, got {value!r}")
+        return None
+    if not math.isfinite(out) or out <= 0.0:
+        return None
     return out
+
+
+def validate_min_strike_cost_multiplier(value, *, source: str) -> float:
+    out = _optional_positive_float(value)
+    if out is None:
+        raise ValueError(f"{source} must be a positive finite number")
+    return out
+
+
+def resolve_effective_sell_call_min_strike(*, min_strike, avg_cost, cost_multiplier=1.0) -> float | None:
+    """Covered call strike floor: never recommend selling below stock cost."""
+    configured = _optional_positive_float(min_strike)
+    multiplier = _optional_positive_float(cost_multiplier) or 1.0
+    cost_value = _optional_positive_float(avg_cost)
+    cost_floor = cost_value * multiplier if cost_value is not None else None
+    if configured is None:
+        return cost_floor
+    if cost_floor is None:
+        return configured
+    return max(configured, cost_floor)
 
 
 def _pick_compatible_field(section: dict, *, source_prefix: str) -> tuple[object | None, str | None]:

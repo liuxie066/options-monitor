@@ -17,7 +17,7 @@
           "min_open_interest": 50,
           "min_volume": 10,
           "max_spread_ratio": 0.3,
-          "min_if_exercised_total_return": 0.0,
+          "min_strike_cost_multiplier": 1.02,
           "min_net_income": 300.0
         }
       }

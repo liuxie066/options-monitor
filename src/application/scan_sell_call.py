@@ -19,8 +19,9 @@ from domain.domain.candidate_defaults import (
 )
 from domain.domain.sell_call_risk_bands import classify_sell_call_risk
 from domain.domain.sell_call_config import (
+    resolve_effective_sell_call_min_strike,
     validate_min_annualized_net_premium_return,
-    validate_min_if_exercised_total_return,
+    validate_min_strike_cost_multiplier,
 )
 from domain.domain.risk_capacity import compute_covered_call_share_capacity
 from src.application.candidate_scanning import (
@@ -231,8 +232,8 @@ def run_sell_call_scan(
     max_dte: int = DEFAULT_SELL_CALL_WINDOW.max_dte,
     min_strike: float | None = None,
     max_strike: float | None = None,
+    min_strike_cost_multiplier: float = 1.0,
     min_annualized_net_return: float | None = None,
-    min_if_exercised_total_return: float = 0.0,
     min_net_income: float = 50.0,
     min_open_interest: float = DEFAULT_CANDIDATE_LIQUIDITY.min_open_interest,
     min_volume: float = DEFAULT_CANDIDATE_LIQUIDITY.min_volume,
@@ -249,9 +250,14 @@ def run_sell_call_scan(
         min_annualized_net_return,
         source="--min-annualized-net-return",
     )
-    if_exercised_threshold = validate_min_if_exercised_total_return(
-        min_if_exercised_total_return,
-        source="--min-if-exercised-total-return",
+    cost_multiplier = validate_min_strike_cost_multiplier(
+        min_strike_cost_multiplier,
+        source="--min-strike-cost-multiplier",
+    )
+    effective_min_strike = resolve_effective_sell_call_min_strike(
+        min_strike=min_strike,
+        avg_cost=avg_cost,
+        cost_multiplier=cost_multiplier,
     )
 
     return run_candidate_scan(
@@ -263,14 +269,13 @@ def run_sell_call_scan(
             empty_output_columns=SELL_CALL_EMPTY_OUTPUT_COLUMNS,
             min_dte=int(min_dte),
             max_dte=int(max_dte),
-            min_strike=min_strike,
+            min_strike=effective_min_strike,
             max_strike=max_strike,
             min_open_interest=float(min_open_interest),
             min_volume=float(min_volume),
             max_spread_ratio=max_spread_ratio,
             min_annualized_net_return=threshold,
             min_net_income=float(min_net_income),
-            min_if_exercised_total_return=if_exercised_threshold,
             quiet=bool(quiet),
         ),
         deps=CandidateScanDependencies(
@@ -316,8 +321,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-dte", type=int, default=DEFAULT_SELL_CALL_WINDOW.max_dte)
     parser.add_argument("--min-strike", type=float, default=None)
     parser.add_argument("--max-strike", type=float, default=None)
+    parser.add_argument("--min-strike-cost-multiplier", type=float, default=1.0, help="effective min strike also floors at avg_cost multiplied by this value")
     parser.add_argument("--min-annualized-net-return", type=float, default=None, help="required; min annualized net premium return in [0,1]")
-    parser.add_argument("--min-if-exercised-total-return", type=float, default=0.0, help="min total return if assigned, based on avg_cost")
     parser.add_argument("--min-net-income", type=float, default=50.0)
     parser.add_argument("--min-open-interest", type=float, default=DEFAULT_CANDIDATE_LIQUIDITY.min_open_interest)
     parser.add_argument("--min-volume", type=float, default=DEFAULT_CANDIDATE_LIQUIDITY.min_volume)
@@ -352,8 +357,8 @@ def main(argv: list[str] | None = None) -> int:
             max_dte=args.max_dte,
             min_strike=args.min_strike,
             max_strike=args.max_strike,
+            min_strike_cost_multiplier=args.min_strike_cost_multiplier,
             min_annualized_net_return=args.min_annualized_net_return,
-            min_if_exercised_total_return=args.min_if_exercised_total_return,
             min_net_income=args.min_net_income,
             min_open_interest=args.min_open_interest,
             min_volume=args.min_volume,

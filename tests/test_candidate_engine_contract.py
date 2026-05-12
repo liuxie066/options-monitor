@@ -260,13 +260,11 @@ def test_candidate_engine_stage2_rejects_return_floor() -> None:
         _accepted_base_candidate("call"),
         min_annualized_return=0.1,
         min_net_income=100,
-        min_if_exercised_total_return=0.05,
         annualized_return=0.11,
         net_income=90,
-        if_exercised_total_return=0.02,
     )
     assert call["accepted"] is False
-    assert [r["reason"] for r in call["rejects"]] == ["return_net_income", "return_if_exercised_total"]
+    assert [r["reason"] for r in call["rejects"]] == ["return_net_income"]
 
 
 def test_candidate_engine_stage2_rejects_missing_threshold_metrics() -> None:
@@ -276,14 +274,12 @@ def test_candidate_engine_stage2_rejects_missing_threshold_metrics() -> None:
         _accepted_base_candidate("call"),
         min_annualized_return=0.1,
         min_net_income=100,
-        min_if_exercised_total_return=0.05,
     )
 
     assert payload["accepted"] is False
     assert [r["reason"] for r in payload["rejects"]] == [
         "return_annualized",
         "return_net_income",
-        "return_if_exercised_total",
     ]
 
 

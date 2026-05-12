@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from domain.domain.sell_call_config import resolve_effective_sell_call_min_strike
 from src.application.opend_fetch_config import opend_discovery_kwargs, opend_fetch_kwargs
 from src.application.required_data_planning import build_required_data_fetch_plan
 from src.application.yield_enhancement_config import resolve_yield_enhancement_cfg
@@ -91,6 +92,15 @@ def run_symbol_monitoring(
     if yield_enhancement_cfg:
         symbol_cfg["yield_enhancement"] = yield_enhancement_cfg
     stock = prefilters.stock
+    if want_call and isinstance(stock, dict):
+        effective_min_strike = resolve_effective_sell_call_min_strike(
+            min_strike=cc.get("min_strike"),
+            avg_cost=stock.get("avg_cost"),
+            cost_multiplier=cc.get("min_strike_cost_multiplier", 1.0),
+        )
+        if effective_min_strike is not None:
+            cc["min_strike"] = effective_min_strike
+            symbol_cfg["sell_call"] = cc
     fetch_want_put = bool(want_put)
     fetch_want_call = bool(want_call or (want_put and yield_enhancement_cfg.get("enabled", False)))
 

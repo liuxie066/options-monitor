@@ -445,6 +445,11 @@ def validate_config(cfg: dict):
                         f"{', '.join(bad_keys)}; only {', '.join(LIQUIDITY_ALLOWED_GLOBAL_FIELDS)} are allowed"
                     )
                 if side == 'sell_call':
+                    _validate_optional_positive_number(
+                        side_cfg,
+                        'min_strike_cost_multiplier',
+                        f'templates.{profile_name}.{side}',
+                    )
                     unsupported_fetch_keys = [k for k in LEGACY_SELL_CALL_FETCH_FIELDS if k in side_cfg]
                     if unsupported_fetch_keys:
                         die(
@@ -541,6 +546,7 @@ def validate_config(cfg: dict):
                 f"{sym}.sell_call has removed legacy fetch planning keys: {', '.join(unsupported_fetch_keys)}; "
                 "use min_strike/max_strike only"
             )
+        _validate_optional_positive_number(sc, 'min_strike_cost_multiplier', f'{sym}.sell_call')
         if sc.get('enabled'):
             # NOTE:
             # - sell_call cost basis/shares come from account portfolio_context at runtime.

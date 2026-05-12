@@ -245,9 +245,10 @@ Covered Call 规则通常配置：
 - `sell_call.enabled=true`
 - DTE 区间
 - call strike 下限或上下限
-- `min_if_exercised_total_return`
+- `min_strike_cost_multiplier`
 
 Covered Call 可卖数量来自持仓数据，系统会扣除已被 short call 锁定的股票数量。`avg_cost` / `shares` 不再写在 symbol 配置里，而是从 holdings 读取。
+扫描会按 `avg_cost * min_strike_cost_multiplier` 抬高有效 call strike 下限，避免推荐低于成本底线的 Covered Call。
 
 ### Sell Put 收益增强
 

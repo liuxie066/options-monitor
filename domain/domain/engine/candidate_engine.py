@@ -30,7 +30,6 @@ REJECT_HARD_CAPACITY_PUT = "hard_capacity_put"
 REJECT_HARD_CAPACITY_CALL = "hard_capacity_call"
 REJECT_RETURN_ANNUALIZED = "return_annualized"
 REJECT_RETURN_NET_INCOME = "return_net_income"
-REJECT_RETURN_IF_EXERCISED_TOTAL = "return_if_exercised_total"
 REJECT_RISK_OPEN_INTEREST = "risk_open_interest"
 REJECT_RISK_VOLUME = "risk_volume"
 REJECT_RISK_SPREAD = "risk_spread"
@@ -45,7 +44,6 @@ CANDIDATE_REJECT_REASONS: tuple[str, ...] = (
     REJECT_HARD_CAPACITY_CALL,
     REJECT_RETURN_ANNUALIZED,
     REJECT_RETURN_NET_INCOME,
-    REJECT_RETURN_IF_EXERCISED_TOTAL,
     REJECT_RISK_OPEN_INTEREST,
     REJECT_RISK_VOLUME,
     REJECT_RISK_SPREAD,
@@ -56,14 +54,12 @@ CANDIDATE_REJECT_REASONS: tuple[str, ...] = (
 LEGACY_REJECT_RULE_REASON_MAP: dict[str, str] = {
     "min_annualized_return": REJECT_RETURN_ANNUALIZED,
     "min_net_income": REJECT_RETURN_NET_INCOME,
-    "min_if_exercised_total_return": REJECT_RETURN_IF_EXERCISED_TOTAL,
     "max_spread_ratio": REJECT_RISK_SPREAD,
 }
 
 LEGACY_REJECT_RULE_STAGE_MAP: dict[str, str] = {
     "min_annualized_return": STAGE_RETURN_FLOOR,
     "min_net_income": STAGE_RETURN_FLOOR,
-    "min_if_exercised_total_return": STAGE_RETURN_FLOOR,
     "max_spread_ratio": STAGE_RISK_FILTER,
 }
 
@@ -719,10 +715,8 @@ def evaluate_candidate_return_floor(
     *,
     min_annualized_return: int | float | None = None,
     min_net_income: int | float | None = None,
-    min_if_exercised_total_return: int | float | None = None,
     annualized_return: int | float | None = None,
     net_income: int | float | None = None,
-    if_exercised_total_return: int | float | None = None,
 ) -> dict[str, Any]:
     """Stage 2 return floor gate.
 
@@ -766,23 +760,6 @@ def evaluate_candidate_return_floor(
             metric_value=net_v,
             threshold=min_net_v,
         )
-
-    if mode_norm == "call":
-        if_exercised_v = _coerce_float(
-            if_exercised_total_return
-            if if_exercised_total_return is not None
-            else normalized.get("if_exercised_total_return")
-        )
-        min_if_exercised_v = _coerce_float(min_if_exercised_total_return)
-        if min_if_exercised_v is not None and (if_exercised_v is None or if_exercised_v < min_if_exercised_v):
-            _reject(
-                rejects,
-                stage=STAGE_RETURN_FLOOR,
-                reason=REJECT_RETURN_IF_EXERCISED_TOTAL,
-                message="if exercised total return below minimum",
-                metric_value=if_exercised_v,
-                threshold=min_if_exercised_v,
-            )
 
     return build_candidate_decision(
         mode=mode_norm,

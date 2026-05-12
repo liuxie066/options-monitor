@@ -170,7 +170,7 @@ def test_sell_call_steps_passes_resolved_threshold_to_scanner() -> None:
             symbol='AAPL',
             symbol_lower='aapl',
             symbol_cfg={'symbol': 'AAPL', 'sell_call': {}},
-            cc={'enabled': True, 'min_annualized_net_premium_return': 0.123, 'min_if_exercised_total_return': 0.02},
+            cc={'enabled': True, 'min_annualized_net_premium_return': 0.123, 'min_strike_cost_multiplier': 1.02},
             top_n=3,
             required_data_dir=BASE / 'output',
             report_dir=BASE / 'output' / 'reports',
@@ -187,7 +187,8 @@ def test_sell_call_steps_passes_resolved_threshold_to_scanner() -> None:
     assert len(calls) >= 1
     kwargs = calls[0]
     assert kwargs['min_annualized_net_return'] == 0.123
-    assert kwargs['min_if_exercised_total_return'] == 0.02
+    assert kwargs['min_strike'] == 102.0
+    assert kwargs['min_strike_cost_multiplier'] == 1.02
 
 
 def test_sell_call_steps_converts_min_net_income_from_cny_to_native() -> None:
