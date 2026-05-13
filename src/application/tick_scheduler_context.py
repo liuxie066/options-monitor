@@ -5,9 +5,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from domain.domain import (
-    SchemaValidationError,
-    SnapshotDTO,
+from domain.domain.intermediate_objects import SchemaValidationError, SnapshotDTO
+from domain.domain.multi_tick import (
     markets_for_trading_day_guard as domain_markets_for_trading_day_guard,
     reduce_trading_day_guard,
     select_markets_to_run as domain_select_markets_to_run,
@@ -56,7 +55,7 @@ class TickSchedulerContext:
     scheduler_decision: dict[str, Any]
     scheduler_view: SchedulerDecisionView
     notify_decision_by_account: dict[str, AccountSchedulerDecisionView | None]
-    scan_decision_by_account: dict[str, AccountSchedulerDecisionView | None]
+    scan_decision_by_account: dict[str, dict[str, Any]]
     should_run_global: bool
     reason_global: str
 
@@ -93,24 +92,11 @@ def build_tick_scheduler_context(request: TickSchedulerRequest) -> TickScheduler
         select_scheduler_state_filename(scheduler_markets),
     )
 
-    try:
-        if (not state_path.exists()) or state_path.stat().st_size <= 0:
-            state_repo.write_shared_state(
-                request.base,
-                state_path.name,
-                {
-                    "last_scan_utc": None,
-                    "last_notify_utc": None,
-                },
-            )
-    except Exception:
-        pass
+    _ensure_scheduler_state_file(request.base, state_path)
+    scheduler_schedule_key = "schedule"
+    if scheduler_markets == ["HK"] and "schedule_hk" in (request.base_cfg or {}):
+        scheduler_schedule_key = "schedule_hk"
 
-    scheduler_schedule_key = (
-        "schedule_hk"
-        if (scheduler_markets == ["HK"] and ("schedule_hk" in (request.base_cfg or {})))
-        else "schedule"
-    )
     if bool(market_resolution.trading_day_blocked):
         reason_global = str(market_resolution.skip_message or "trading_day_guard_skip")
         scheduler_ms = 0
@@ -122,8 +108,8 @@ def build_tick_scheduler_context(request: TickSchedulerRequest) -> TickScheduler
             "reason": reason_global,
         }
         scheduler_view = SchedulerDecisionView.from_payload(scheduler_decision)
-        notify_decision_by_account = {}
-        scan_decision_by_account = {}
+        notify_decision_by_account: dict[str, AccountSchedulerDecisionView | None] = {}
+        scan_decision_by_account: dict[str, dict[str, Any]] = {}
         should_run_global = False
         request.audit_helper.audit(
             "guard",
@@ -186,6 +172,21 @@ def build_tick_scheduler_context(request: TickSchedulerRequest) -> TickScheduler
     )
     _write_scheduler_snapshot(request, context)
     return TickSchedulerOutcome(True, 0, context, [])
+
+
+def _ensure_scheduler_state_file(base: Path, state_path: Path) -> None:
+    try:
+        if (not state_path.exists()) or state_path.stat().st_size <= 0:
+            state_repo.write_shared_state(
+                base,
+                state_path.name,
+                {
+                    "last_scan_utc": None,
+                    "last_notify_utc": None,
+                },
+            )
+    except Exception:
+        pass
 
 
 def _write_scheduler_snapshot(request: TickSchedulerRequest, context: TickSchedulerContext) -> None:

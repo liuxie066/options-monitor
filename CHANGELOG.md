@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.2.38 - 2026-05-13
+
+### Changed
+- Simplified recently split tick helper modules without changing runtime behavior.
+- Inlined low-value single-use helper code while preserving compatibility exports and tick orchestration boundaries.
+
+### Tests
+- Re-ran focused tick helper, import-boundary, watchdog, and unified tick regression suites.
+
 ## 1.2.37 - 2026-05-13
 
 ### Added

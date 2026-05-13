@@ -1,35 +1,37 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
 from typing import Any, Callable, TypeVar
 
+from domain.storage.repositories import run_repo
 from src.application.account_run import AccountRunOutcome, AccountRunRequest, run_one_account
 from src.application.scan_scheduler import mark_scheduler_accounts
-from domain.storage.repositories import run_repo
 
 
 T = TypeVar("T")
 
 
-def to_positive_int(value, default: int) -> int:
+def to_positive_int(value: object, default: int) -> int:
     try:
-        parsed = int(value)
+        parsed = int(value)  # pyright: ignore[reportArgumentType]
     except Exception:
         parsed = int(default)
     return max(1, parsed)
 
 
-def resolve_account_run_max_workers(cfg: dict, account_count: int) -> int:
+def resolve_account_run_max_workers(cfg: Mapping[str, object], account_count: int) -> int:
     if account_count <= 1:
         return 1
-    runtime = cfg.get("runtime") if isinstance(cfg.get("runtime"), dict) else {}
-    raw = runtime.get("multi_account_max_workers")
-    if raw is None:
-        raw = runtime.get("account_max_workers")
-    workers = to_positive_int(raw, 1)
+    runtime_cfg = cfg.get("runtime")
+    runtime = runtime_cfg if isinstance(runtime_cfg, Mapping) else {}
+    raw_workers = runtime.get("multi_account_max_workers")
+    if raw_workers is None:
+        raw_workers = runtime.get("account_max_workers")
+    workers = to_positive_int(raw_workers, 1)
     return min(account_count, workers)
 
 
@@ -119,7 +121,7 @@ class TickAccountExecutionRequest:
     prefetch_done: bool
     force_mode: bool
     smoke: bool
-    scan_decision_by_account: dict[str, Any]
+    scan_decision_by_account: dict[str, dict[str, Any]]
     state_path: Path
     scheduler_schedule_key: str
     update_legacy_output: bool

@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
-from domain.domain import classify_failure
+from domain.domain.error_policy import classify_failure
 from domain.domain.engine import build_opend_unhealthy_execution_plan, resolve_multi_tick_engine_entrypoint
 from domain.domain.fetch_source import is_futu_fetch_source
 from domain.storage.repositories import state_repo
@@ -85,12 +85,16 @@ def run_tick_guard_flow(request: TickGuardRequest) -> TickGuardOutcome:
 
     accounts_effective = request.apply_project_load_shed_fn(accounts, guard_admission)
     if accounts_effective != accounts:
-        default_after_load_shed = (
-            default_account
-            if str(default_account or "").strip().lower()
-            in {str(a).strip().lower() for a in accounts_effective if str(a).strip()}
-            else None
-        )
+        active_account_ids = {
+            str(account).strip().lower()
+            for account in accounts_effective
+            if str(account).strip()
+        }
+        default_account_id = str(default_account or "").strip().lower()
+        default_after_load_shed = None
+        if default_account_id in active_account_ids:
+            default_after_load_shed = default_account
+
         accounts = accounts_effective
         default_account = resolve_default_account(default_after_load_shed, accounts_effective)
         request.runlog.safe_event(
@@ -111,14 +115,12 @@ def run_tick_guard_flow(request: TickGuardRequest) -> TickGuardOutcome:
         try:
             base_cfg = dict(base_cfg)
             syms = resolve_watchlist_config(base_cfg)
-            set_watchlist_config(
-                base_cfg,
-                [
-                    it
-                    for it in syms
-                    if isinstance(it, dict) and (it.get("broker") == market_cfg.upper())
-                ],
-            )
+            market_symbols = [
+                it
+                for it in syms
+                if isinstance(it, dict) and (it.get("broker") == market_cfg.upper())
+            ]
+            set_watchlist_config(base_cfg, market_symbols)
         except Exception:
             pass
 
