@@ -26,8 +26,10 @@ def test_multi_tick_and_webui_use_application_facades() -> None:
     om_src = (ROOT / "om").read_text(encoding="utf-8")
     agent_src = (ROOT / "om-agent").read_text(encoding="utf-8")
     multi_account_tick_src = (ROOT / "src" / "application" / "multi_account_tick.py").read_text(encoding="utf-8")
+    tick_notification_flow_src = (ROOT / "src" / "application" / "tick_notification_flow.py").read_text(encoding="utf-8")
     webui_interface_src = (ROOT / "src" / "interfaces" / "webui" / "server.py").read_text(encoding="utf-8")
     multi_tick_scheduler_src = (ROOT / "src" / "application" / "multi_tick_scheduler.py").read_text(encoding="utf-8")
+    tick_scheduler_context_src = (ROOT / "src" / "application" / "tick_scheduler_context.py").read_text(encoding="utf-8")
     multi_tick_finalization_src = (ROOT / "src" / "application" / "multi_tick_finalization.py").read_text(encoding="utf-8")
     cron_runtime_src = (ROOT / "src" / "application" / "cron_runtime.py").read_text(encoding="utf-8")
     tool_execution_src = (ROOT / "src" / "application" / "tool_execution.py").read_text(encoding="utf-8")
@@ -64,10 +66,10 @@ def test_multi_tick_and_webui_use_application_facades() -> None:
     assert "src.application.multi_tick.main" not in multi_account_tick_src
     assert not (ROOT / "scripts" / "multi_tick" / "main.py").exists()
     assert not (ROOT / "scripts" / "infra" / "service.py").exists()
-    assert "run_scheduler_flow" in multi_account_tick_src
+    assert "run_scheduler_flow" in tick_scheduler_context_src
     assert "build_multi_tick_scheduler_decision" in multi_tick_scheduler_src
     assert "build_multi_tick_account_scheduler_view" in multi_tick_scheduler_src
-    assert "apply_notify_results_to_tick_metrics" in multi_account_tick_src
+    assert "apply_notify_results_to_tick_metrics" in tick_notification_flow_src
     assert "build_shared_last_run_meta" in multi_tick_finalization_src
     assert "build_run_end_payload" in multi_tick_finalization_src
     assert "def build_notify_summary(" in cron_runtime_src

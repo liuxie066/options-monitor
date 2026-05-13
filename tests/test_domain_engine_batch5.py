@@ -45,10 +45,10 @@ def test_resolve_multi_tick_engine_entrypoint_notify_threshold_matches_legacy() 
 
 def test_main_uses_notify_threshold_entrypoint_batch5() -> None:
     base = Path(__file__).resolve().parents[1]
-    main_src = (base / 'src' / 'application' / 'multi_account_tick.py').read_text(encoding='utf-8')
+    notification_flow_src = (base / 'src' / 'application' / 'tick_notification_flow.py').read_text(encoding='utf-8')
     notification_src = (base / 'src' / 'application' / 'scheduled_notification.py').read_text(encoding='utf-8')
 
-    assert 'prepare_multi_account_notification(' in main_src
+    assert 'prepare_multi_account_notification(' in notification_flow_src
     assert 'prepare_per_account_messages(' in notification_src
     assert 'notify_account_messages=account_messages' in notification_src
     assert 'notify_min_accounts=1' in notification_src

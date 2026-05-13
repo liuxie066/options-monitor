@@ -83,7 +83,7 @@ def test_build_opend_unhealthy_execution_plan_matches_legacy_branching() -> None
 
 def test_main_uses_opend_unhealthy_execution_plan_batch4() -> None:
     base = Path(__file__).resolve().parents[1]
-    src = (base / 'src' / 'application' / 'multi_account_tick.py').read_text(encoding='utf-8')
+    src = (base / 'src' / 'application' / 'tick_guard_flow.py').read_text(encoding='utf-8')
     assert 'build_opend_unhealthy_execution_plan' in src
 
 
@@ -271,26 +271,37 @@ def test_decide_notify_dispatch_gate_matches_legacy_branching() -> None:
 
 def test_main_uses_notify_dispatch_gate_entrypoint_batch4() -> None:
     base = Path(__file__).resolve().parents[1]
-    src = (base / 'src' / 'application' / 'multi_account_tick.py').read_text(encoding='utf-8')
-    assert 'resolve_multi_tick_engine_entrypoint' in src
-    assert 'build_per_account_delivery_batch(' in src
-    assert 'decision_builder=decide_notification_delivery' in src
+    notification_flow_src = (base / 'src' / 'application' / 'tick_notification_flow.py').read_text(encoding='utf-8')
+    assert 'resolve_multi_tick_engine_entrypoint' in notification_flow_src
+    assert 'build_per_account_delivery_batch(' in notification_flow_src
+    assert 'decision_builder=decide_notification_delivery' in notification_flow_src
 
 
 def test_main_orchestrator_guard_batch4_no_legacy_rule_reflow() -> None:
     base = Path(__file__).resolve().parents[1]
     src = (base / 'src' / 'application' / 'multi_account_tick.py').read_text(encoding='utf-8')
+    scheduler_context_src = (base / 'src' / 'application' / 'tick_scheduler_context.py').read_text(encoding='utf-8')
+    guard_flow_src = (base / 'src' / 'application' / 'tick_guard_flow.py').read_text(encoding='utf-8')
+    notification_flow_src = (base / 'src' / 'application' / 'tick_notification_flow.py').read_text(encoding='utf-8')
 
-    # Keep main.py as orchestration-only for key Batch-4 decisions.
+    # Keep main.py as orchestration-only and check delegated owner modules for key Batch-4 decisions.
+    assert 'TickSchedulerRequest(' in src
+
     for entrypoint in (
-        'build_opend_unhealthy_execution_plan=build_opend_unhealthy_execution_plan',
         'decide_trading_day_guard=decide_trading_day_guard',
-        'resolve_multi_tick_engine_entrypoint=resolve_multi_tick_engine_entrypoint',
+        'engine_entrypoint=resolve_multi_tick_engine_entrypoint',
+    ):
+        assert entrypoint in scheduler_context_src
+
+    assert 'build_opend_unhealthy_execution_plan=build_opend_unhealthy_execution_plan' in guard_flow_src
+    assert 'resolve_multi_tick_engine_entrypoint=resolve_multi_tick_engine_entrypoint' in guard_flow_src
+
+    for entrypoint in (
         'build_per_account_delivery_batch(',
         'filter_notify_candidates_fn=engine_filter_notify_candidates',
         'rank_notify_candidates_fn=rank_notify_candidates',
     ):
-        assert entrypoint in src
+        assert entrypoint in notification_flow_src
 
     # Guard against legacy business predicates drifting back into main.py.
     for legacy_fragment in (
