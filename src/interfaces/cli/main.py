@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 from typing import Any
 
 from src.application.agent_tool_config import load_runtime_config
@@ -18,6 +19,7 @@ from src.application.pipeline_runtime import main as run_scan_pipeline
 from src.application.runtime_setup import init_runtime
 from src.application.scan_pipeline import run_scan
 from src.application.scan_scheduler import run_scheduler
+from src.application.strategy_replay import analyze_strategy_replay, read_strategy_replay_file
 from src.application.version_check import check_version_update
 from src.application.cash_headroom_query import query_sell_put_cash
 
@@ -123,6 +125,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     sell_put_cash.add_argument("--top", type=int, default=10)
     sell_put_cash.add_argument("--no-exchange-rates", action="store_true")
     sell_put_cash.add_argument("--out-dir", default="output/state")
+
+    strategy_replay = sub.add_parser("strategy-replay", help="offline strategy replay analysis")
+    strategy_replay_sub = strategy_replay.add_subparsers(dest="strategy_replay_command", required=True)
+    strategy_replay_analyze = strategy_replay_sub.add_parser("analyze", help="analyze replay rows for parameter learning")
+    strategy_replay_analyze.add_argument("--replay-path", action="append", required=True, help="CSV/JSON/JSONL replay file; can be repeated")
+    strategy_replay_analyze.add_argument("--min-sample", type=int, default=5)
+    strategy_replay_analyze.add_argument("--win-return-threshold", type=float, default=0.0)
+    strategy_replay_analyze.add_argument("--bad-drawdown-threshold", type=float, default=-0.15)
 
     sub.add_parser("watchlist", help="manage monitored symbols")
     sub.add_parser("option-positions", help="option position operations")
@@ -300,6 +310,25 @@ def main(argv: list[str] | None = None) -> int:
                 out_dir=args.out_dir,
             )
             return 0
+
+        if args.command == "strategy-replay" and args.strategy_replay_command == "analyze":
+            rows: list[dict[str, Any]] = []
+            for replay_path in args.replay_path:
+                try:
+                    rows.extend(read_strategy_replay_file(Path(replay_path)))
+                except Exception as exc:
+                    raise AgentToolError(
+                        code="INPUT_ERROR",
+                        message=f"failed to read strategy replay file: {Path(replay_path).name}",
+                        details={"error": f"{type(exc).__name__}: {exc}"},
+                    ) from exc
+            data = analyze_strategy_replay(
+                rows,
+                min_sample=args.min_sample,
+                win_return_threshold=args.win_return_threshold,
+                bad_drawdown_threshold=args.bad_drawdown_threshold,
+            )
+            return _print(build_response(tool_name="strategy-replay.analyze", ok=True, data=data))
 
         if args.command == "init" and args.init_command == "runtime":
             return _print(build_response(tool_name="init.runtime", ok=True, data=init_runtime(

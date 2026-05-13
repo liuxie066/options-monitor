@@ -27,6 +27,7 @@ from src.application.option_positions_facade import resolve_option_positions_rep
 from src.application.option_positions_facade import list_position_rows as _list_position_rows
 from src.application.agent_tool_healthcheck import run_healthcheck_tool
 from src.application.agent_tool_candidate_rank import candidate_rank_explain_tool
+from src.application.agent_tool_strategy_replay import strategy_replay_analyze_tool
 from src.application.agent_tool_notifications import preview_notification_tool
 from src.application.agent_tool_openclaw import (
     openclaw_readiness_tool,
@@ -264,6 +265,14 @@ def _candidate_rank_explain_tool(payload: dict[str, Any]) -> tuple[dict[str, Any
     )
 
 
+def _strategy_replay_analyze_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    return strategy_replay_analyze_tool(
+        payload,
+        repo_base=repo_base,
+        mask_path=mask_path,
+    )
+
+
 def _prepare_close_advice_inputs_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     return prepare_close_advice_inputs_tool(
         payload,
@@ -356,6 +365,7 @@ TOOL_HANDLERS = {
     "get_portfolio_context": _get_portfolio_context_tool,
     "scan_opportunities": _scan_opportunities_tool,
     "candidate_rank_explain": _candidate_rank_explain_tool,
+    "strategy_replay_analyze": _strategy_replay_analyze_tool,
     "prepare_close_advice_inputs": _prepare_close_advice_inputs_tool,
     "close_advice": _close_advice_tool,
     "get_close_advice": _get_close_advice_tool,
