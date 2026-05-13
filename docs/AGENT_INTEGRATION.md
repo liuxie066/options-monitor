@@ -67,6 +67,7 @@ Use the launcher as a local command tool. Typical pattern:
 ./om-agent run --tool query_cash_headroom --input-json '{"config_key":"us","account":"lx"}'
 ./om-agent run --tool query_cash_headroom --input-json '{"config_key":"us","account":"sy"}'
 ./om-agent run --tool candidate_rank_explain --input-json '{"mode":"put","top_n":5}'
+./om-agent run --tool strategy_replay_analyze --input-json '{"replay_path":"output/reports/strategy_replay.csv","min_sample":5}'
 ./om-agent run --tool monthly_income_report --input-json '{"config_key":"us","account":"lx","month":"2026-04"}'
 ./om-agent run --tool option_positions_read --input-json '{"config_key":"us","action":"list","account":"lx","status":"open"}'
 ./om-agent run --tool get_close_advice --input-json '{"config_key":"us"}'

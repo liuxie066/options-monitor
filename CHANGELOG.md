@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 1.2.32 - 2026-05-13
+
+### Added
+- Added offline strategy replay analysis for joined candidate outcome rows, including DTE effectiveness, Delta win-rate buckets, symbol risk/return summaries, filter-value diagnostics, and shadow-only dry-run parameter suggestions.
+- Exposed the replay analyzer through `./om-agent run --tool strategy_replay_analyze` and `./om strategy-replay analyze`.
+- Documented the replay input contract and evidence model in `docs/STRATEGY_REPLAY.md`.
+
 ## 1.2.31 - 2026-05-12
 
 ### Changed

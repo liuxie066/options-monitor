@@ -29,6 +29,7 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert "openclaw_readiness" in tool_names
     assert "version_update" in tool_names
     assert "candidate_rank_explain" in tool_names
+    assert "strategy_replay_analyze" in tool_names
     assert spec["schema_version"] == "1.0"
     assert spec["recommended_flow"] == ["healthcheck", "scan_opportunities", "get_close_advice"]
     get_close_advice = next(item for item in spec["tools"] if item["name"] == "get_close_advice")
@@ -63,6 +64,10 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert candidate_rank_explain["risk_level"] == "read_only"
     assert candidate_rank_explain["requires_confirm"] is False
     assert candidate_rank_explain["safe_default_input"]["mode"] == "all"
+    strategy_replay = next(item for item in spec["tools"] if item["name"] == "strategy_replay_analyze")
+    assert strategy_replay["risk_level"] == "read_only"
+    assert strategy_replay["requires_confirm"] is False
+    assert strategy_replay["safe_default_input"]["min_sample"] == 5
 
 
 def test_agent_registry_manifest_and_handlers_stay_in_sync() -> None:
@@ -106,6 +111,7 @@ def test_agent_cli_spec_prints_json_manifest() -> None:
     assert any(str(x.get("name")) == "option_positions_read" for x in payload.get("tools", []))
     assert any(str(x.get("name")) == "config_validate" for x in payload.get("tools", []))
     assert any(str(x.get("name")) == "candidate_rank_explain" for x in payload.get("tools", []))
+    assert any(str(x.get("name")) == "strategy_replay_analyze" for x in payload.get("tools", []))
     assert "init_command" not in payload["launcher"]
     assert payload["launcher"]["add_account_command"][0:2] == ["./om-agent", "add-account"]
     assert payload["launcher"]["edit_account_command"][0:2] == ["./om-agent", "edit-account"]

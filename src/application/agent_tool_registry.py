@@ -171,6 +171,30 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
         ),
     ),
     AgentToolDefinition(
+        name="strategy_replay_analyze",
+        read_only=True,
+        description=(
+            "Analyze offline candidate replay rows to learn DTE, Delta, symbol drawdown, and filter value. "
+            "Returns advisory dry-run suggestions only and never mutates production config."
+        ),
+        requires=("strategy_replay_rows",),
+        capabilities=("strategy_replay", "parameter_learning", "read_only"),
+        input_schema={
+            "replay_path": "optional CSV/JSON/JSONL path with candidate replay rows",
+            "replay_paths": "optional list of CSV/JSON/JSONL replay paths",
+            "rows": "optional inline list[object] replay rows",
+            "min_sample": "optional int; default 5; guards learning confidence",
+            "win_return_threshold": "optional decimal return threshold; default 0.0",
+            "bad_drawdown_threshold": "optional decimal drawdown threshold; default -0.15",
+        },
+        risk_level="read_only",
+        safe_default_input={"min_sample": 5},
+        examples=(
+            {"input": {"replay_path": "output/reports/strategy_replay.csv", "min_sample": 5}},
+            {"input": {"rows": [{"symbol": "NVDA", "dte": 30, "delta": -0.2, "actual_return": 0.03}], "min_sample": 1}},
+        ),
+    ),
+    AgentToolDefinition(
         name="query_cash_headroom",
         read_only=True,
         description="Return sell-put cash usage and available/free cash summary.",

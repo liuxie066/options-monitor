@@ -1809,6 +1809,32 @@ def test_candidate_rank_explain_reads_existing_candidate_csv(tmp_path: Path) -> 
     assert out["meta"]["source_files"][0]["path"].endswith("sell_put_candidates_labeled.csv")
 
 
+def test_strategy_replay_analyze_reads_existing_replay_csv(tmp_path: Path) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    replay_path = tmp_path / "strategy_replay.csv"
+    pd.DataFrame(
+        [
+            {"symbol": "NVDA", "dte": 20, "delta": -0.18, "predicted_return": 0.04, "actual_return": 0.05, "max_drawdown": -0.04, "accepted": True},
+            {"symbol": "NVDA", "dte": 24, "delta": -0.19, "predicted_return": 0.03, "actual_return": 0.04, "max_drawdown": -0.05, "accepted": True},
+            {"symbol": "AAPL", "dte": 12, "delta": -0.14, "predicted_return": 0.02, "actual_return": -0.03, "max_drawdown": -0.20, "filter_reason": "max_spread_ratio", "accepted": False},
+            {"symbol": "AAPL", "dte": 13, "delta": -0.16, "predicted_return": 0.02, "actual_return": -0.02, "max_drawdown": -0.18, "filter_reason": "max_spread_ratio", "accepted": False},
+        ]
+    ).to_csv(replay_path, index=False)
+
+    out = run_tool(
+        "strategy_replay_analyze",
+        {"replay_path": str(replay_path), "min_sample": 2, "bad_drawdown_threshold": -0.15},
+    )
+
+    assert out["ok"] is True
+    assert out["data"]["summary"]["row_count"] == 4
+    assert out["data"]["dte_effectiveness"]["best_ranges"][0]["range"] == "15-30"
+    assert out["data"]["filter_value"][0]["filter"] == "max_spread_ratio"
+    assert out["data"]["filter_value"][0]["status"] == "valuable"
+    assert out["meta"]["source_files"][0]["path"].endswith("strategy_replay.csv")
+
+
 def test_manage_symbols_list_and_dry_run_add(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 

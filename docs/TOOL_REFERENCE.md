@@ -73,6 +73,7 @@
 | `scheduler_status` | `./om scheduler` 的只读判定部分 |
 | `scan_opportunities` | `./om scan` / `./om scan-pipeline` |
 | `candidate_rank_explain` | Agent-only read existing candidate CSV ranking explanations |
+| `strategy_replay_analyze` | `./om strategy-replay analyze` |
 | `preview_notification` | `./om notify preview` |
 | `get_close_advice` | `./om close-advice` |
 | `query_cash_headroom` | `./om sell-put-cash` / `src.application.cash_headroom_query::query_sell_put_cash(...)` |
@@ -215,6 +216,27 @@ OM_AGENT_ENABLE_WRITE_TOOLS=true ./om-agent run --tool version_update --input-js
 - 该工具只读本地 CSV，不重新扫描、不发通知、不写 Feishu、不写报告。
 - 默认先找 `output/reports`，再找 `output/agent_plugin/reports`；也可传 `report_dir`、`output_dir` 或 `candidate_path`。
 - `score_weights` 只影响本次解释输出，不修改配置，也不改变生产排序默认值。
+
+---
+
+## 5.5.2 `strategy_replay_analyze`
+
+用途：
+- 读取离线策略复盘 CSV / JSON / JSONL
+- 回答哪些 DTE、Delta 区间更有效，哪些标的收益高但回撤差，哪些过滤条件最有价值
+- 输出 `dry_run_config_suggestions`，但不修改生产配置
+
+示例：
+
+```bash
+./om-agent run --tool strategy_replay_analyze --input-json '{"replay_path":"output/reports/strategy_replay.csv","min_sample":5}'
+./om strategy-replay analyze --replay-path output/reports/strategy_replay.csv --min-sample 5
+```
+
+注意：
+- 该工具只分析已存在的复盘记录，不重新扫描、不发通知、不写 Feishu。
+- 复盘记录应覆盖通过和被拒绝候选，否则过滤条件价值会缺少 shadow outcome 依据。
+- 详细字段约定见 [STRATEGY_REPLAY.md](STRATEGY_REPLAY.md)。
 
 ---
 

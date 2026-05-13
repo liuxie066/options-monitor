@@ -21,6 +21,7 @@
 
 ## 业务规则
 - [candidate_strategy.md](candidate_strategy.md)：候选筛选与排序规则
+- [STRATEGY_REPLAY.md](STRATEGY_REPLAY.md)：策略复盘与参数学习
 
 ## 安全与约束
 - [GUARDRAILS.md](GUARDRAILS.md)：guardrails 与安全门禁
