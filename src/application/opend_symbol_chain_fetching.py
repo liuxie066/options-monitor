@@ -31,6 +31,7 @@ class SymbolOptionChainResult:
     expirations_all: list[str]
     expirations_pick: list[str]
     fetch_meta: dict[str, Any]
+    frame: Any | None = None
 
 
 def prune_chain_cache(base_dir: Path, keep_days: int) -> None:
@@ -256,6 +257,7 @@ def fetch_symbol_option_chain(
         expirations_all=expirations_all,
         expirations_pick=expirations_pick,
         fetch_meta=fetch_meta,
+        frame=fetch_result.frame,
     )
 
 

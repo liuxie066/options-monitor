@@ -388,6 +388,54 @@ def test_prefetch_skips_cached_required_data_when_strategy_bounds_are_covered(tm
     assert result["fetched"] == 0
 
 
+def test_prefetch_cache_check_reads_required_data_csv_once(tmp_path: Path, monkeypatch) -> None:
+    import pandas as pd
+
+    shared_required = tmp_path / "shared_required"
+    (shared_required / "raw").mkdir(parents=True)
+    (shared_required / "parsed").mkdir(parents=True)
+    (shared_required / "raw" / "0700.HK_required_data.json").write_text("{}\n", encoding="utf-8")
+    parsed = shared_required / "parsed" / "0700.HK_required_data.csv"
+    parsed.write_text("symbol,option_type,expiration,dte,strike\n", encoding="utf-8")
+    watchlist = [
+        {
+            "symbol": "0700.HK",
+            "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111, "limit_expirations": 8},
+            "sell_put": {"enabled": True, "min_dte": 20, "max_dte": 60, "max_strike": 450},
+            "sell_call": {"enabled": False},
+        }
+    ]
+    read_calls: list[Path] = []
+
+    def fake_safe_read_csv(path: Path):
+        read_calls.append(path)
+        return pd.DataFrame(
+            [
+                {"symbol": "0700.HK", "option_type": "put", "expiration": "2026-06-19", "dte": 30, "strike": 360},
+                {"symbol": "0700.HK", "option_type": "put", "expiration": "2026-06-19", "dte": 30, "strike": 400},
+                {"symbol": "0700.HK", "option_type": "put", "expiration": "2026-06-19", "dte": 30, "strike": 450},
+                {"symbol": "0700.HK", "option_type": "put", "expiration": "2026-07-17", "dte": 60, "strike": 360},
+                {"symbol": "0700.HK", "option_type": "put", "expiration": "2026-07-17", "dte": 60, "strike": 400},
+                {"symbol": "0700.HK", "option_type": "put", "expiration": "2026-07-17", "dte": 60, "strike": 450},
+            ]
+        )
+
+    monkeypatch.setattr(mod, "resolve_watchlist_config", lambda cfg: watchlist)
+    monkeypatch.setattr(mod, "safe_read_csv", fake_safe_read_csv)
+    monkeypatch.setattr(mod, "fetch_symbol", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("cache should cover")))
+
+    result = mod.prefetch_required_data(
+        vpy=tmp_path / "python",
+        base=tmp_path,
+        cfg={"runtime": {"prefetch": {"execution_mode": "inprocess", "max_workers": 1}}},
+        shared_required=shared_required,
+    )
+
+    assert result["cached"] == 1
+    assert result["fetched"] == 0
+    assert read_calls == [parsed]
+
+
 def test_prefetch_refetches_when_cached_required_data_misses_strategy_side(tmp_path: Path, monkeypatch) -> None:
     shared_required = tmp_path / "shared_required"
     (shared_required / "raw").mkdir(parents=True)

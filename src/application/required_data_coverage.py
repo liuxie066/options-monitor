@@ -111,6 +111,27 @@ def required_data_csv_covers_strategy_bounds(
     side_strike_windows: dict[str, dict[str, float | None]] | None = None,
 ) -> bool:
     df = _read_required_data_csv(parsed)
+    return required_data_frame_covers_strategy_bounds(
+        df=df,
+        option_types=option_types,
+        min_dte=min_dte,
+        max_dte=max_dte,
+        min_strike=min_strike,
+        max_strike=max_strike,
+        side_strike_windows=side_strike_windows,
+    )
+
+
+def required_data_frame_covers_strategy_bounds(
+    *,
+    df: pd.DataFrame,
+    option_types: str,
+    min_dte: int | None = None,
+    max_dte: int | None = None,
+    min_strike: float | None = None,
+    max_strike: float | None = None,
+    side_strike_windows: dict[str, dict[str, float | None]] | None = None,
+) -> bool:
     if df.empty:
         return False
     wanted_types = _parse_option_types(option_types)

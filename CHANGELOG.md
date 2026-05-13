@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.2.35 - 2026-05-13
+
+### Changed
+- Reused parsed required_data CSV reads during prefetch cache coverage checks instead of reading the same CSV twice per symbol.
+- Preserved option-chain DataFrames through OpenD symbol fetch processing and used tuple iteration for final row assembly to reduce pandas round trips.
+
+### Fixed
+- Removed duplicate option type and strike filtering during OpenD row construction after the existing pre-snapshot pruning already applied those bounds.
+
 ## 1.2.34 - 2026-05-13
 
 ### Changed

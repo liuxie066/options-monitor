@@ -201,6 +201,8 @@ def test_option_chain_shard_cache_hit_does_not_call_opend() -> None:
         assert result.to_meta()["rate_gate_wait_sec"] == 0.0
         assert result.from_cache_expirations == ["2026-05-15"]
         assert result.rows[0]["code"] == "US.PDD.2026-05-15.P100"
+        assert result.frame is not None
+        assert result.frame.iloc[0]["code"] == "US.PDD.2026-05-15.P100"
 
 
 def test_option_chain_single_side_request_passes_option_type_to_opend() -> None:

@@ -17,7 +17,7 @@ from src.application.multi_tick.prefetch_coordinator import PrefetchCoordinator
 from src.application.opend_fetch_config import resolve_opend_batch_config, resolve_opend_fetch_config
 from src.application.opend_symbol_fetching import fetch_symbol
 from src.application.opend_symbol_outputs import save_outputs
-from src.application.required_data_coverage import required_data_csv_covers_strategy_bounds
+from src.application.required_data_coverage import required_data_frame_covers_strategy_bounds
 from src.application.required_data_observability import (
     summarize_prefetch_fetch_metrics,
     summarize_required_data_prefetch_run,
@@ -27,12 +27,15 @@ from src.application.required_data_prefetch_planning import (
     strategy_prefetch_kwargs as _strategy_prefetch_kwargs,
 )
 from src.infrastructure.futu_gateway_pool import ThreadLocalFutuGatewayPool
-from src.infrastructure.io_utils import has_shared_required_data
+from src.infrastructure.io_utils import has_shared_required_data as _has_shared_required_data, safe_read_csv
 from src.infrastructure.opend_retcodes import classify_opend_error
 
 
 _gateway_pool = ThreadLocalFutuGatewayPool()
 _DEFAULT_PREFETCH_MAX_WORKERS = 2
+
+# Compatibility surface for older tests and operational monkeypatches.
+has_shared_required_data = _has_shared_required_data
 
 
 def _to_int(v: Any, default: int) -> int:
@@ -193,6 +196,22 @@ def _fetch_one_inprocess(
     return payload
 
 
+def _load_cached_required_data_frame(symbol: str, shared_required: Path) -> Any | None:
+    sym = str(symbol).strip()
+    if not sym:
+        return None
+    raw_src = shared_required / 'raw' / f"{sym}_required_data.json"
+    parsed_src = shared_required / 'parsed' / f"{sym}_required_data.csv"
+    try:
+        if not (raw_src.exists() and raw_src.stat().st_size > 0):
+            return None
+        if not (parsed_src.exists() and parsed_src.stat().st_size > 0):
+            return None
+        return safe_read_csv(parsed_src)
+    except Exception:
+        return None
+
+
 def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required: Path, force_refresh: bool = False) -> dict:
     profiles = resolve_templates_config(cfg)
     syms = [apply_profiles(it, profiles) for it in resolve_watchlist_config(cfg) if it.get('symbol')]
@@ -212,12 +231,12 @@ def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required:
         if force_refresh:
             return True
         try:
-            if not has_shared_required_data(symbol, shared_required):
+            cached_df = _load_cached_required_data_frame(symbol, shared_required)
+            if cached_df is None:
                 return True
             strategy_kwargs = _strategy_prefetch_kwargs(symbol_cfg, enabled=True)
-            parsed = shared_required / 'parsed' / f"{symbol}_required_data.csv"
-            return not required_data_csv_covers_strategy_bounds(
-                parsed=parsed,
+            return not required_data_frame_covers_strategy_bounds(
+                df=cached_df,
                 option_types=str(strategy_kwargs["option_types"]),
                 min_dte=strategy_kwargs.get("min_dte"),
                 max_dte=strategy_kwargs.get("max_dte"),
