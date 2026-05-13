@@ -27,11 +27,12 @@ def build_tick_idempotency_context(
     market_cfg = str(market_config or "auto").strip().lower()
     effective_now = now_utc or datetime.now(timezone.utc)
     bucket = effective_now.strftime("%Y%m%dT%H%M")
-    idempotency_accounts = [
-        str(a).strip().lower()
-        for a in (accounts or [])
-        if str(a).strip()
-    ]
+    idempotency_accounts: list[str] = []
+    for account in accounts or []:
+        account_id = str(account).strip().lower()
+        if account_id:
+            idempotency_accounts.append(account_id)
+
     key = sha256(
         (
             f"{Path(cfg_path).resolve()}|{market_cfg}|"

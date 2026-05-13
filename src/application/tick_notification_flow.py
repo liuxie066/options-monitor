@@ -6,14 +6,15 @@ from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
-from domain.domain import (
-    SchemaValidationError,
-    SnapshotDTO,
-    build_account_messages,
-    build_no_candidate_account_messages,
+from domain.domain.intermediate_objects import SchemaValidationError, SnapshotDTO
+from domain.domain.multi_tick import (
     cash_footer_for_account,
     evaluate_dnd_quiet_hours,
     resolve_notification_route_from_config,
+)
+from domain.domain.multi_tick_result import (
+    build_account_messages,
+    build_no_candidate_account_messages,
 )
 from domain.domain.engine import (
     build_failure_audit_fields,
@@ -85,7 +86,11 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
     try:
         notifications_cfg = request.base_cfg.get("notifications", {}) or {}
         render_style = str(notifications_cfg.get("render_style") or "compact").strip().lower()
-        build_account_message_fn = build_account_message_compact if render_style == "compact" else build_account_message
+        if render_style == "compact":
+            build_account_message_fn = build_account_message_compact
+        else:
+            build_account_message_fn = build_account_message
+
         notification_prep = prepare_multi_account_notification(
             results=request.results,
             base=request.base,
@@ -169,8 +174,9 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
     provider = notify_route.get("provider")
     channel = notify_route.get("channel")
     target = notify_route.get("target")
-    schedule_cfg0 = request.base_cfg.get("schedule") or {}
-    schedule_v2_enabled = bool((schedule_cfg0.get("schedule_v2") or {}).get("enabled", False))
+    schedule_cfg = request.base_cfg.get("schedule") or {}
+    schedule_v2_cfg = schedule_cfg.get("schedule_v2") or {}
+    schedule_v2_enabled = bool(schedule_v2_cfg.get("enabled", False))
     quiet_hours = notif_cfg.get("quiet_hours_beijing")
     dnd_decision = evaluate_dnd_quiet_hours(
         schedule_v2_enabled=schedule_v2_enabled,
@@ -196,9 +202,6 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
     except ValueError as err:
         request.runlog.safe_event("notify", "error", error_code="CONFIG_ERROR", message=str(err))
         raise SystemExit(f"[CONFIG_ERROR] {err}") from err
-    except SchemaValidationError as exc:
-        request.audit_helper.fail_schema_validation(stage="delivery_plan", exc=exc, run_id=request.run_id)
-        raise
 
     request.audit_helper.audit(
         "notify",
@@ -239,7 +242,7 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
             request.runlog.safe_event("notify", "error", error_code="CONFIG_ERROR", message=str(err))
             raise SystemExit(f"[CONFIG_ERROR] {err}") from err
 
-        def _send_with_route_notifications(**kwargs):
+        def _send_with_route_notifications(**kwargs: Any) -> Any:
             return delivery_adapter.send_fn(
                 **kwargs,
                 notifications=notify_route.get("notifications") or {},
@@ -290,7 +293,7 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
             failure_summary_delivery = {
                 "ok": bool(failure_summary_result.get("ok")),
                 "error_code": failure_summary_result.get("error_code"),
-                "attempts": int(failure_summary_result.get("attempts") or 0),
+                "attempts": int(failure_summary_result.get("attempts") or 0),  # pyright: ignore[reportArgumentType]
                 "message_id": failure_summary_result.get("message_id"),
                 "delivery_confirmed": bool(failure_summary_result.get("delivery_confirmed")),
             }
