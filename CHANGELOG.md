@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.2.34 - 2026-05-13
+
+### Changed
+- Ordered alert rows within each priority section by strategy and then by candidate strength so same-strategy candidates stay consistently ranked.
+- Updated notification candidate selection to preserve cross-strategy coverage across high, medium, and low sections while keeping the existing global 5-item budget.
+
+### Fixed
+- Prevented high-priority Sell Put rows from crowding out medium-priority Sell Call notifications when capacity-limited strategy coverage is needed.
+- Kept compact and legacy notification renderers aligned on the same capped cross-strategy selection behavior.
+
 ## 1.2.33 - 2026-05-13
 
 ### Added

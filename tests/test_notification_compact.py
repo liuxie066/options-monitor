@@ -107,6 +107,38 @@ def test_build_notification_legacy_style_unchanged() -> None:
     assert "---" in out
 
 
+def test_build_notification_compact_keeps_medium_strategy_with_total_limit() -> None:
+    from src.application.notify_symbols import build_notification
+
+    put_lines = [
+        (
+            f"PUT{i} | sell_put | 2026-06-19 10{i}P | 年化 {20 - i:.2f}% | 净收入 {100 + i:.2f} | "
+            f"DTE 30 | Strike 10{i} | 中性 | ccy USD | mid 1.000 | 通过准入后，收益/风险组合较强，值得优先看。"
+        )
+        for i in range(1, 7)
+    ]
+    medium_call = (
+        "CALL1 | sell_call | 2026-06-19 180C | 年化 6.50% | 净收入 80.00 | "
+        "DTE 30 | Strike 180 | 保守 | ccy USD | mid 0.800 | cover 1 | shares 100(-0) | 已通过准入，可作为 sell call 备选。"
+    )
+    alerts_text = (
+        "## 高优先级\n"
+        + "\n".join(put_lines)
+        + "\n\n## 中优先级\n"
+        + medium_call
+        + "\n"
+    )
+
+    out = build_notification("", alerts_text, render_style="compact")
+
+    assert out.count("卖Put") == 4
+    assert "PUT5" not in out
+    assert "PUT6" not in out
+    assert "CALL1" in out
+    assert out.count("卖Call") == 1
+    assert out.index("### Put") < out.index("### Call")
+
+
 def test_render_markdown_compact_close_advice() -> None:
     from src.application.close_advice_runner import render_markdown_compact
 

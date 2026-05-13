@@ -89,6 +89,12 @@ DEFAULT_POLICY = DEFAULT_ALERT_POLICY.to_mapping()
 # Initialized in main() from --policy-json (or DEFAULT_POLICY).
 POLICY = DEFAULT_POLICY.copy()
 
+_ALERT_STRATEGY_ORDER = {
+    "sell_put": 0,
+    "sell_call": 1,
+    "yield_enhancement": 2,
+}
+
 
 def safe_read_csv(path: Path) -> pd.DataFrame:
     try:
@@ -456,6 +462,29 @@ def classify_alert(row: pd.Series) -> tuple[str | None, str]:
     return None, ''
 
 
+def _numeric_sort_desc(value: object) -> float:
+    try:
+        parsed = float(value)
+        if pd.isna(parsed):
+            return float("inf")
+        return -parsed
+    except Exception:
+        return float("inf")
+
+
+def _alert_row_sort_key(row: pd.Series) -> tuple[object, ...]:
+    strategy = str(row.get('strategy') or '').strip()
+    symbol = str(row.get('symbol') or '').strip().upper()
+    contract = str(row.get('top_contract') or '').strip()
+    return (
+        _ALERT_STRATEGY_ORDER.get(strategy, 99),
+        _numeric_sort_desc(row.get('annualized_return')),
+        _numeric_sort_desc(row.get('net_income')),
+        symbol,
+        contract,
+    )
+
+
 def build_alert_text(summary: pd.DataFrame, *, symbol_display_map: dict[str, str] | None = None) -> str:
     lines: list[str] = ['# Symbols Alerts', '']
     mp = symbol_display_map or {}
@@ -464,12 +493,11 @@ def build_alert_text(summary: pd.DataFrame, *, symbol_display_map: dict[str, str
         lines.append('无提醒。')
         return '\n'.join(lines) + '\n'
 
-    high_rows: list[str] = []
-    medium_rows: list[str] = []
-    low_rows: list[str] = []
+    high_rows: list[tuple[tuple[object, ...], str]] = []
+    medium_rows: list[tuple[tuple[object, ...], str]] = []
+    low_rows: list[tuple[tuple[object, ...], str]] = []
 
-    ordered = summary.sort_values(['symbol', 'strategy']).copy()
-    for _, row in ordered.iterrows():
+    for _, row in summary.iterrows():
         level, comment = classify_alert(row)
         if not level:
             continue
@@ -488,26 +516,27 @@ def build_alert_text(summary: pd.DataFrame, *, symbol_display_map: dict[str, str
             line_core = base_line
 
         line = f"- {line_core} | {comment}"
+        entry = (_alert_row_sort_key(row), line)
         if level == 'high':
-            high_rows.append(line)
+            high_rows.append(entry)
         elif level == 'medium':
-            medium_rows.append(line)
+            medium_rows.append(entry)
         else:
-            low_rows.append(line)
+            low_rows.append(entry)
 
     if high_rows:
         lines.append('## 高优先级')
-        lines.extend(high_rows)
+        lines.extend(line for _key, line in sorted(high_rows, key=lambda item: item[0]))
         lines.append('')
 
     if medium_rows:
         lines.append('## 中优先级')
-        lines.extend(medium_rows)
+        lines.extend(line for _key, line in sorted(medium_rows, key=lambda item: item[0]))
         lines.append('')
 
     if low_rows:
         lines.append('## 低优先级')
-        lines.extend(low_rows)
+        lines.extend(line for _key, line in sorted(low_rows, key=lambda item: item[0]))
         lines.append('')
 
     if not (high_rows or medium_rows or low_rows):
