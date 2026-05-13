@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.2.39 - 2026-05-14
+
+### Changed
+- Tightened close-advice remaining annualized thresholds: `strong` now requires remaining annualized return at or below 4.5%, and `medium` now requires at or below 7%.
+- Kept close-advice system defaults, no-config domain fallbacks, and operator documentation aligned on the new thresholds.
+
+### Tests
+- Re-ran focused close-advice, web UI presenter, layered config, and config dry-run validation.
+
 ## 1.2.38 - 2026-05-13
 
 ### Changed
