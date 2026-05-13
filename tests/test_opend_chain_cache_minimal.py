@@ -77,6 +77,23 @@ def test_chain_cache_must_cover_explicit_expirations() -> None:
     assert option_chain_shard_cache_path(root, "US.NVDA", "2026-05-28") != option_chain_shard_cache_path(root, "US.NVDA", "2026-04-29")
 
 
+def test_chain_cache_separates_single_side_option_type_scope() -> None:
+    import sys
+    base = Path(__file__).resolve().parents[1]
+    if str(base) not in sys.path:
+        sys.path.insert(0, str(base))
+
+    from src.application.option_chain_fetching import option_chain_shard_cache_path
+
+    root = Path("/tmp/cache-root")
+    all_path = option_chain_shard_cache_path(root, "US.NVDA", "2026-05-28")
+    put_path = option_chain_shard_cache_path(root, "US.NVDA", "2026-05-28", option_type_scope="put")
+    call_path = option_chain_shard_cache_path(root, "US.NVDA", "2026-05-28", option_type_scope="call")
+    assert all_path != put_path
+    assert all_path != call_path
+    assert put_path != call_path
+
+
 def test_chain_cache_does_not_trust_declared_expirations_without_rows() -> None:
     import sys
     base = Path(__file__).resolve().parents[1]
@@ -180,8 +197,88 @@ def test_option_chain_shard_cache_hit_does_not_call_opend() -> None:
 
         assert result.status == "ok"
         assert result.opend_call_count == 0
+        assert result.rate_gate_wait_sec == 0.0
+        assert result.to_meta()["rate_gate_wait_sec"] == 0.0
         assert result.from_cache_expirations == ["2026-05-15"]
         assert result.rows[0]["code"] == "US.PDD.2026-05-15.P100"
+
+
+def test_option_chain_single_side_request_passes_option_type_to_opend() -> None:
+    import sys
+    from tempfile import TemporaryDirectory
+
+    base = Path(__file__).resolve().parents[1]
+    if str(base) not in sys.path:
+        sys.path.insert(0, str(base))
+
+    from src.application.option_chain_fetching import OptionChainFetchRequest, fetch_option_chains
+
+    with TemporaryDirectory() as td:
+        root = Path(td)
+        captured: list[dict] = []
+
+        class _Gateway:
+            def get_option_chain(self, **kwargs):  # noqa: ANN001
+                captured.append(dict(kwargs))
+                return [{"code": "US.PDD.2026-05-15.P100", "strike_time": "2026-05-15", "option_type": "PUT"}]
+
+        result = fetch_option_chains(
+            gateway=_Gateway(),
+            request=OptionChainFetchRequest(
+                symbol="PDD",
+                underlier_code="US.PDD",
+                expirations=["2026-05-15"],
+                option_types="put",
+                base_dir=root,
+                asof_date="2026-04-30",
+                chain_cache=False,
+            ),
+            retry_call=lambda _name, fn, **kwargs: fn(),
+        )
+
+        assert result.status == "ok"
+        assert captured[0]["option_type"] == "PUT"
+
+
+def test_option_chain_legacy_option_type_fallback_records_rate_limit() -> None:
+    import sys
+
+    base = Path(__file__).resolve().parents[1]
+    if str(base) not in sys.path:
+        sys.path.insert(0, str(base))
+
+    from src.application.option_chain_fetching import OptionChainFetchRequest, _fetch_one_chain
+
+    class _Limiter:
+        def __init__(self) -> None:
+            self.recorded = 0
+
+        def acquire(self) -> float:
+            return 0.0
+
+        def record_rate_limit(self) -> None:
+            self.recorded += 1
+
+    class _Gateway:
+        def get_option_chain(self, **kwargs):  # noqa: ANN001
+            if "option_type" in kwargs:
+                raise TypeError("got an unexpected keyword argument 'option_type'")
+            raise RuntimeError("rate limit")
+
+    limiter = _Limiter()
+    try:
+        _fetch_one_chain(
+            _Gateway(),
+            OptionChainFetchRequest(symbol="PDD", underlier_code="US.PDD", option_types="put"),
+            limiter,
+            "2026-05-15",
+        )
+    except RuntimeError as exc:
+        assert "rate limit" in str(exc)
+    else:
+        raise AssertionError("expected fallback OpenD call to raise rate limit")
+
+    assert limiter.recorded == 1
 
 
 def test_option_chain_error_shard_does_not_count_as_cache_coverage() -> None:

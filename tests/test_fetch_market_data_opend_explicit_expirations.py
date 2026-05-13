@@ -177,6 +177,65 @@ def test_list_option_expirations_uses_shared_endpoint_limiter(monkeypatch, tmp_p
     assert endpoints == [("option_expiration", 7, 17.0, 27.0)]
 
 
+def test_list_option_expirations_caches_by_underlier_and_asof_date(tmp_path: Path) -> None:
+    import pandas as pd
+    import src.application.opend_symbol_chain_fetching as mod
+    from src.application.opend_fetch_config import OpenDFetchLimits
+
+    calls: list[str] = []
+
+    class _Gateway:
+        def get_option_expiration_dates(self, code):  # noqa: ANN001
+            calls.append(str(code))
+            return pd.DataFrame([{"strike_time": "2026-04-29"}, {"strike_time": "2026-06-29"}])
+
+    def _fake_rate_limited_call(**kwargs):  # type: ignore[no-untyped-def]
+        return kwargs["call"]()
+
+    limit = OpenDFetchLimits.from_flat_kwargs(expiration_max_calls=60).option_expiration
+    first_metrics: dict[str, int] = {}
+    first = mod.list_option_expirations_with_gateway(
+        _Gateway(),
+        underlier_code="US.NVDA",
+        base_dir=tmp_path,
+        asof_date="2026-04-28",
+        expiration_limit=limit,
+        retry_call=lambda _name, fn, **kwargs: fn(),
+        rate_limited_call=_fake_rate_limited_call,
+        metrics=first_metrics,
+    )
+    second_metrics: dict[str, int] = {}
+    second = mod.list_option_expirations_with_gateway(
+        _Gateway(),
+        underlier_code="US.NVDA",
+        base_dir=tmp_path,
+        asof_date="2026-04-28",
+        expiration_limit=limit,
+        retry_call=lambda _name, fn, **kwargs: fn(),
+        rate_limited_call=_fake_rate_limited_call,
+        metrics=second_metrics,
+    )
+    third_metrics: dict[str, int] = {}
+    third = mod.list_option_expirations_with_gateway(
+        _Gateway(),
+        underlier_code="US.NVDA",
+        base_dir=tmp_path,
+        asof_date="2026-04-29",
+        expiration_limit=limit,
+        retry_call=lambda _name, fn, **kwargs: fn(),
+        rate_limited_call=_fake_rate_limited_call,
+        metrics=third_metrics,
+    )
+
+    assert first == ["2026-04-29", "2026-06-29"]
+    assert second == first
+    assert third == first
+    assert calls == ["US.NVDA", "US.NVDA"]
+    assert first_metrics["expiration_opend_calls"] == 1
+    assert second_metrics["expiration_cache_hits"] == 1
+    assert third_metrics["expiration_opend_calls"] == 1
+
+
 def test_fetch_symbol_uses_shared_snapshot_limiter(monkeypatch, tmp_path: Path) -> None:
     import src.application.opend_symbol_fetching as mod
 

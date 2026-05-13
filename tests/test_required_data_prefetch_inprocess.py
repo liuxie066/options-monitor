@@ -202,6 +202,266 @@ def test_prefetch_worker_count_invalid_value_falls_back_to_default() -> None:
     assert mod._resolve_prefetch_max_workers({"prefetch": {"max_workers": -1}}) == 2
 
 
+def test_strategy_prefetch_kwargs_uses_strategy_dte_and_strike_bounds() -> None:
+    out = mod._strategy_prefetch_kwargs(
+        {
+            "symbol": "0700.HK",
+            "sell_put": {"enabled": True, "min_dte": 20, "max_dte": 60, "max_strike": 450},
+            "sell_call": {"enabled": True, "min_dte": 30, "max_dte": 90, "min_strike": 550},
+            "yield_enhancement": {"enabled": True, "max_dte": 120},
+        },
+        enabled=True,
+    )
+
+    assert out["option_types"] == "put,call"
+    assert out["min_dte"] == 20
+    assert out["max_dte"] == 120
+    assert out["side_strike_windows"]["put"]["min_strike"] == 360
+    assert out["side_strike_windows"]["put"]["max_strike"] == 450
+    assert out["side_strike_windows"]["call"]["min_strike"] == 550
+    assert out["side_strike_windows"]["call"]["max_strike"] > 660
+
+
+def test_inprocess_prefetch_passes_strategy_bounds_to_fetch_symbol(tmp_path: Path, monkeypatch) -> None:
+    watchlist = [
+        {
+            "symbol": "0700.HK",
+            "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111, "limit_expirations": 8},
+            "sell_put": {"enabled": True, "min_dte": 20, "max_dte": 60, "max_strike": 450},
+            "sell_call": {"enabled": False},
+        }
+    ]
+    built: list[_Gateway] = []
+    captured: dict[str, object] = {}
+
+    def fake_build_ready_futu_gateway(**kwargs):
+        gw = _Gateway()
+        built.append(gw)
+        return gw
+
+    def fake_fetch_symbol(symbol: str, **kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {
+            "symbol": symbol,
+            "rows": [{"symbol": symbol, "option_type": "put", "expiration": "2026-06-19", "strike": 400}],
+            "meta": {"status": "ok", "error": "", "source": "opend"},
+        }
+
+    monkeypatch.setattr("src.infrastructure.futu_gateway.build_ready_futu_gateway", fake_build_ready_futu_gateway)
+    monkeypatch.setattr(mod, "resolve_watchlist_config", lambda cfg: watchlist)
+    monkeypatch.setattr(mod, "has_shared_required_data", lambda symbol, root: False)
+    monkeypatch.setattr(mod, "fetch_symbol", fake_fetch_symbol)
+    monkeypatch.setattr(mod, "save_outputs", lambda *args, **kwargs: None)
+    monkeypatch.setattr(mod, "adapt_opend_tool_payload", lambda payload: {"source_name": "opend", "payload": payload})
+    monkeypatch.setattr(mod.state_repo, "append_source_snapshot_event", lambda *args, **kwargs: None)
+
+    result = mod.prefetch_required_data(
+        vpy=tmp_path / "python",
+        base=tmp_path,
+        cfg={"runtime": {"prefetch": {"execution_mode": "inprocess", "max_workers": 1}}},
+        shared_required=tmp_path / "shared_required",
+    )
+
+    assert captured["option_types"] == "put"
+    assert captured["min_dte"] == 20
+    assert captured["max_dte"] == 60
+    assert captured["side_strike_windows"] == {"put": {"min_strike": 360.0, "max_strike": 450.0}}
+
+
+def test_prefetch_dedupes_same_run_symbol_and_merges_strategy_bounds(tmp_path: Path, monkeypatch) -> None:
+    watchlist = [
+        {
+            "symbol": "0700.HK",
+            "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111, "limit_expirations": 4},
+            "sell_put": {"enabled": True, "min_dte": 20, "max_dte": 60, "max_strike": 450},
+            "sell_call": {"enabled": False},
+        },
+        {
+            "symbol": "0700.HK",
+            "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111, "limit_expirations": 8},
+            "sell_put": {"enabled": False},
+            "sell_call": {"enabled": True, "min_dte": 30, "max_dte": 90, "min_strike": 550},
+        },
+    ]
+    captured_calls: list[dict[str, object]] = []
+
+    def fake_build_ready_futu_gateway(**kwargs):
+        return _Gateway()
+
+    def fake_fetch_symbol(symbol: str, **kwargs: object) -> dict[str, object]:
+        captured_calls.append({"symbol": symbol, **kwargs})
+        return {
+            "symbol": symbol,
+            "expiration_count": 1,
+            "rows": [{"symbol": symbol, "option_type": "put", "expiration": "2026-06-19", "strike": 400}],
+            "meta": {
+                "status": "ok",
+                "error": "",
+                "source": "opend",
+                "expiration_opend_calls": 1,
+                "expiration_cache_hits": 0,
+                "opend_call_count": 2,
+                "rate_gate_wait_sec": 0.5,
+                "from_cache_expirations": [],
+                "fetched_expirations": ["2026-06-19"],
+                "snapshot_requested_codes": 12,
+                "snapshot_opend_call_count": 1,
+                "snapshots_rows": 12,
+            },
+        }
+
+    monkeypatch.setattr("src.infrastructure.futu_gateway.build_ready_futu_gateway", fake_build_ready_futu_gateway)
+    monkeypatch.setattr(mod, "resolve_watchlist_config", lambda cfg: watchlist)
+    monkeypatch.setattr(mod, "has_shared_required_data", lambda symbol, root: False)
+    monkeypatch.setattr(mod, "fetch_symbol", fake_fetch_symbol)
+    monkeypatch.setattr(mod, "save_outputs", lambda *args, **kwargs: None)
+    monkeypatch.setattr(mod, "adapt_opend_tool_payload", lambda payload: {"source_name": "opend", "payload": payload})
+    monkeypatch.setattr(mod.state_repo, "append_source_snapshot_event", lambda *args, **kwargs: None)
+
+    result = mod.prefetch_required_data(
+        vpy=tmp_path / "python",
+        base=tmp_path,
+        cfg={"runtime": {"prefetch": {"execution_mode": "inprocess", "max_workers": 2}}},
+        shared_required=tmp_path / "shared_required",
+    )
+
+    assert len(captured_calls) == 1
+    captured = captured_calls[0]
+    assert captured["symbol"] == "0700.HK"
+    assert captured["limit_expirations"] == 8
+    assert captured["option_types"] == "put,call"
+    assert captured["min_dte"] == 20
+    assert captured["max_dte"] == 90
+    assert captured["side_strike_windows"]["put"] == {"min_strike": 360.0, "max_strike": 450.0}
+    assert captured["side_strike_windows"]["call"]["min_strike"] == 550
+    assert result["symbols_total"] == 2
+    assert result["unique_symbols_total"] == 1
+    assert result["deduped_count"] == 1
+    assert result["to_fetch"] == 1
+    assert result["fetched_ok"] == 1
+    assert result["fetch_metrics"]["expiration_opend_calls"] == 1
+    assert result["run_fetch_summary"]["opend_calls"]["total"] == 4
+    assert result["run_fetch_summary"]["bottleneck"] == "option_chain_rate_gate"
+
+
+def test_prefetch_skips_cached_required_data_when_strategy_bounds_are_covered(tmp_path: Path, monkeypatch) -> None:
+    shared_required = tmp_path / "shared_required"
+    (shared_required / "raw").mkdir(parents=True)
+    (shared_required / "parsed").mkdir(parents=True)
+    (shared_required / "raw" / "0700.HK_required_data.json").write_text("{}\n", encoding="utf-8")
+    (shared_required / "parsed" / "0700.HK_required_data.csv").write_text(
+        "\n".join(
+            [
+                "symbol,option_type,expiration,dte,strike",
+                "0700.HK,put,2026-06-19,30,360",
+                "0700.HK,put,2026-06-19,30,400",
+                "0700.HK,put,2026-06-19,30,450",
+                "0700.HK,put,2026-07-17,60,360",
+                "0700.HK,put,2026-07-17,60,400",
+                "0700.HK,put,2026-07-17,60,450",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    watchlist = [
+        {
+            "symbol": "0700.HK",
+            "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111, "limit_expirations": 8},
+            "sell_put": {"enabled": True, "min_dte": 20, "max_dte": 60, "max_strike": 450},
+            "sell_call": {"enabled": False},
+        }
+    ]
+
+    monkeypatch.setattr(mod, "resolve_watchlist_config", lambda cfg: watchlist)
+    monkeypatch.setattr(mod, "fetch_symbol", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("cache should cover")))
+
+    result = mod.prefetch_required_data(
+        vpy=tmp_path / "python",
+        base=tmp_path,
+        cfg={"runtime": {"prefetch": {"execution_mode": "inprocess", "max_workers": 1}}},
+        shared_required=shared_required,
+    )
+
+    assert result["symbols_total"] == 1
+    assert result["cached"] == 1
+    assert result["fetched"] == 0
+
+
+def test_prefetch_refetches_when_cached_required_data_misses_strategy_side(tmp_path: Path, monkeypatch) -> None:
+    shared_required = tmp_path / "shared_required"
+    (shared_required / "raw").mkdir(parents=True)
+    (shared_required / "parsed").mkdir(parents=True)
+    (shared_required / "raw" / "0700.HK_required_data.json").write_text("{}\n", encoding="utf-8")
+    (shared_required / "parsed" / "0700.HK_required_data.csv").write_text(
+        "\n".join(
+            [
+                "symbol,option_type,expiration,dte,strike",
+                "0700.HK,call,2026-06-19,30,560",
+                "0700.HK,call,2026-06-19,30,600",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    watchlist = [
+        {
+            "symbol": "0700.HK",
+            "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111, "limit_expirations": 8},
+            "sell_put": {"enabled": True, "min_dte": 20, "max_dte": 60, "max_strike": 450},
+            "sell_call": {"enabled": False},
+        }
+    ]
+    built: list[_Gateway] = []
+    fetched: list[str] = []
+
+    def fake_build_ready_futu_gateway(**kwargs):
+        gw = _Gateway()
+        built.append(gw)
+        return gw
+
+    def fake_fetch_symbol(symbol: str, **kwargs: object) -> dict[str, object]:
+        fetched.append(symbol)
+        return {
+            "symbol": symbol,
+            "expiration_count": 1,
+            "rows": [{"symbol": symbol, "option_type": "put", "expiration": "2026-06-19", "strike": 400}],
+            "meta": {
+                "status": "ok",
+                "error": "",
+                "source": "opend",
+                "opend_call_count": 2,
+                "rate_gate_wait_sec": 1.25,
+                "from_cache_expirations": ["2026-06-19"],
+                "fetched_expirations": ["2026-07-17"],
+                "option_codes": 12,
+                "snapshot_opend_call_count": 1,
+                "snapshots_rows": 12,
+            },
+        }
+
+    monkeypatch.setattr("src.infrastructure.futu_gateway.build_ready_futu_gateway", fake_build_ready_futu_gateway)
+    monkeypatch.setattr(mod, "resolve_watchlist_config", lambda cfg: watchlist)
+    monkeypatch.setattr(mod, "fetch_symbol", fake_fetch_symbol)
+    monkeypatch.setattr(mod, "save_outputs", lambda *args, **kwargs: None)
+    monkeypatch.setattr(mod, "adapt_opend_tool_payload", lambda payload: {"source_name": "opend", "payload": payload})
+    monkeypatch.setattr(mod.state_repo, "append_source_snapshot_event", lambda *args, **kwargs: None)
+
+    result = mod.prefetch_required_data(
+        vpy=tmp_path / "python",
+        base=tmp_path,
+        cfg={"runtime": {"prefetch": {"execution_mode": "inprocess", "max_workers": 1}}},
+        shared_required=shared_required,
+    )
+
+    assert fetched == ["0700.HK"]
+    assert result["fetched_ok"] == 1
+    assert result["fetch_metrics"]["option_chain_opend_calls"] == 2
+    assert result["fetch_metrics"]["option_chain_rate_gate_wait_sec"] == 1.25
+    assert result["fetch_metrics"]["snapshot_opend_calls"] == 1
+    assert result["fetch_metrics"]["snapshot_requested_codes"] == 12
+
+
 def test_inprocess_prefetch_summary_includes_symbol_duration(tmp_path: Path, monkeypatch) -> None:
     watchlist = [{"symbol": "AAPL", "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111, "limit_expirations": 8}}]
     built: list[_Gateway] = []

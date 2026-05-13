@@ -15,6 +15,7 @@ from src.application.opend_symbol_fetching import (
 from src.application.opend_fetch_config import DEFAULT_OPEND_BATCH_MARKET_SNAPSHOT, OpenDBatchConfig
 from src.application.opend_symbol_chain_fetching import prune_chain_cache
 from src.application.opend_symbol_outputs import append_metrics_json, save_outputs
+from src.application.required_data_observability import extract_fetch_payload_metrics
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -52,7 +53,7 @@ def main() -> None:
     ap.add_argument("--snapshot-fallback-batch-size", type=int, default=20)
     ap.add_argument("--expiration-max-wait-sec", type=float, default=30.0, help="Max seconds to wait for shared option-expiration rate-limit budget")
     ap.add_argument("--expiration-window-sec", type=float, default=30.0, help="Shared option-expiration rate-limit window seconds")
-    ap.add_argument("--expiration-max-calls", type=int, default=30, help="Shared option-expiration max calls per window")
+    ap.add_argument("--expiration-max-calls", type=int, default=60, help="Shared option-expiration max calls per window")
     ap.add_argument("--output-root", default=None, help="Output root containing raw/ and parsed/ (default: ./output)")
     args = ap.parse_args()
 
@@ -113,6 +114,7 @@ def main() -> None:
         raw_path, csv_path = save_outputs(base, sym, payload, output_root=output_root)
         try:
             meta = payload.get("meta") or {}
+            fetch_metrics = extract_fetch_payload_metrics(payload)
             append_metrics_json(
                 opend_metrics_path,
                 {
@@ -125,6 +127,7 @@ def main() -> None:
                     "host": meta.get("host"),
                     "port": meta.get("port"),
                     "error": meta.get("error"),
+                    "fetch_metrics": fetch_metrics,
                 },
             )
         except Exception:

@@ -292,6 +292,7 @@ def test_build_fetch_request_from_spec_applies_opend_fetch_config() -> None:
             max_dte=60,
             side_strike_windows={"call": {"min_strike": 505.0, "max_strike": 560.0}},
         ),
+        spot_override=470.0,
         opend_fetch_config={
             "max_wait_sec": 11,
             "option_chain_window_sec": 12,
@@ -305,6 +306,7 @@ def test_build_fetch_request_from_spec_applies_opend_fetch_config() -> None:
         },
     )
 
+    assert request.spot_override == 470.0
     assert request.max_wait_sec == 11
     assert request.option_chain_window_sec == 12
     assert request.option_chain_max_calls == 13
@@ -405,6 +407,7 @@ def test_ensure_required_data_passes_opend_fetch_config_into_fetch_plan_requests
         mod.save_outputs = old_save  # type: ignore[assignment]
 
     request = called[0]["request"]
+    assert request.spot_override == 470.0
     assert request.max_wait_sec == 11
     assert request.option_chain_window_sec == 12
     assert request.option_chain_max_calls == 13

@@ -16,6 +16,7 @@ class RequiredDataFetchRequest:
     limit_expirations: int
     host: str = "127.0.0.1"
     port: int = 11111
+    spot_override: float | None = None
     output_root: Path | None = None
     option_types: str = "put,call"
     min_strike: float | None = None
@@ -35,7 +36,7 @@ class RequiredDataFetchRequest:
     snapshot_max_calls: int = 60
     expiration_max_wait_sec: float = 30.0
     expiration_window_sec: float = 30.0
-    expiration_max_calls: int = 30
+    expiration_max_calls: int = 60
 
 
 def execute_required_data_opend(*, base: Path, request: RequiredDataFetchRequest) -> dict[str, object]:
@@ -50,6 +51,7 @@ def execute_required_data_opend(*, base: Path, request: RequiredDataFetchRequest
             limit_expirations=int(request.limit_expirations),
             host=str(request.host),
             port=int(request.port),
+            spot_override=request.spot_override,
             base_dir=Path(base),
             chain_cache=bool(request.chain_cache),
             chain_cache_force_refresh=bool(request.chain_cache_force_refresh),
@@ -91,6 +93,7 @@ def build_fetch_request_from_spec(
     chain_cache: bool = True,
     chain_cache_force_refresh: bool = False,
     opend_fetch_config: dict[str, float | int] | None = None,
+    spot_override: float | None = None,
 ) -> RequiredDataFetchRequest:
     kwargs = filter_opend_fetch_kwargs(opend_fetch_config)
     return RequiredDataFetchRequest(
@@ -98,6 +101,7 @@ def build_fetch_request_from_spec(
         limit_expirations=int(spec.limit_expirations),
         host=str(spec.host),
         port=int(spec.port),
+        spot_override=spot_override,
         output_root=output_root,
         option_types=",".join(spec.option_types),
         side_strike_windows={k: dict(v) for k, v in spec.side_strike_windows.items()},

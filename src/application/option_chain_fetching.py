@@ -56,6 +56,7 @@ class OptionChainFetchResult:
     from_cache_expirations: list[str]
     fetched_expirations: list[str]
     opend_call_count: int
+    rate_gate_wait_sec: float
     status: str
     error_code: str | None
     errors: list[dict[str, Any]]
@@ -68,6 +69,7 @@ class OptionChainFetchResult:
             "from_cache_expirations": list(self.from_cache_expirations),
             "fetched_expirations": list(self.fetched_expirations),
             "opend_call_count": int(self.opend_call_count),
+            "rate_gate_wait_sec": float(self.rate_gate_wait_sec),
             "expiration_statuses": dict(self.expiration_statuses),
             "errors": list(self.errors),
         }
@@ -152,15 +154,33 @@ def option_chain_cache_root(base_dir: Path) -> Path:
     return Path(base_dir) / "cache" / "opend_option_chain"
 
 
-def option_chain_shard_cache_path(base_dir: Path, underlier_code: str, expiration: str | None) -> Path:
+def option_chain_shard_cache_path(
+    base_dir: Path,
+    underlier_code: str,
+    expiration: str | None,
+    *,
+    option_type_scope: str | None = None,
+) -> Path:
     safe_underlier = str(underlier_code or "").replace(".", "_")
     safe_exp = _cache_expiration_key(expiration)
+    scope = _option_type_cache_scope(option_type_scope)
+    if scope:
+        safe_exp = f"{safe_exp}.{scope}"
     return option_chain_cache_root(base_dir) / safe_underlier / f"{safe_exp}.json"
 
 
-def option_chain_diagnostic_path(base_dir: Path, underlier_code: str, expiration: str | None) -> Path:
+def option_chain_diagnostic_path(
+    base_dir: Path,
+    underlier_code: str,
+    expiration: str | None,
+    *,
+    option_type_scope: str | None = None,
+) -> Path:
     safe_underlier = str(underlier_code or "").replace(".", "_")
     safe_exp = _cache_expiration_key(expiration)
+    scope = _option_type_cache_scope(option_type_scope)
+    if scope:
+        safe_exp = f"{safe_exp}.{scope}"
     return option_chain_cache_root(base_dir) / safe_underlier / f"{safe_exp}.error.json"
 
 
@@ -270,13 +290,23 @@ def fetch_option_chains(
     errors: list[dict[str, Any]] = []
     statuses: dict[str, str] = {}
     opend_calls = 0
+    rate_gate_wait_sec = 0.0
+    option_type_scope = _single_option_type(request.option_types)
 
     for exp in targets:
         exp_norm = normalize_expiration_ymd(exp) if exp else None
         exp_key = _cache_expiration_key(exp_norm)
-        cache_path = option_chain_shard_cache_path(base_dir, request.underlier_code, exp_norm)
+        cache_path = option_chain_shard_cache_path(
+            base_dir,
+            request.underlier_code,
+            exp_norm,
+            option_type_scope=option_type_scope,
+        )
+        fallback_cache_path = option_chain_shard_cache_path(base_dir, request.underlier_code, exp_norm)
         if request.chain_cache and (not force_refresh) and asof_date:
             cached_rows = load_option_chain_shard(cache_path, asof_date=asof_date)
+            if not cached_rows and option_type_scope:
+                cached_rows = load_option_chain_shard(fallback_cache_path, asof_date=asof_date)
             if cached_rows:
                 rows.extend(cached_rows)
                 from_cache.append(exp_key)
@@ -288,7 +318,18 @@ def fetch_option_chains(
                 nonlocal opend_calls
                 opend_calls += 1
 
-            return _fetch_one_chain(gateway, request, limiter, exp0, on_opend_call=_mark_opend_call)
+            def _mark_rate_gate_wait(wait_sec: float) -> None:
+                nonlocal rate_gate_wait_sec
+                rate_gate_wait_sec += max(0.0, float(wait_sec))
+
+            return _fetch_one_chain(
+                gateway,
+                request,
+                limiter,
+                exp0,
+                on_opend_call=_mark_opend_call,
+                on_rate_gate_wait=_mark_rate_gate_wait,
+            )
 
         try:
             chain = retry_call(
@@ -308,7 +349,12 @@ def fetch_option_chains(
             errors.append({"expiration": exp_norm, "error_code": code, "message": msg})
             if request.chain_cache and asof_date:
                 save_option_chain_diagnostic(
-                    option_chain_diagnostic_path(base_dir, request.underlier_code, exp_norm),
+                    option_chain_diagnostic_path(
+                        base_dir,
+                        request.underlier_code,
+                        exp_norm,
+                        option_type_scope=option_type_scope,
+                    ),
                     asof_date=asof_date,
                     underlier_code=request.underlier_code,
                     expiration=exp_norm,
@@ -324,7 +370,12 @@ def fetch_option_chains(
             errors.append({"expiration": exp_norm, "error_code": "EMPTY_CHAIN", "message": "empty_chain"})
             if request.chain_cache and asof_date:
                 save_option_chain_diagnostic(
-                    option_chain_diagnostic_path(base_dir, request.underlier_code, exp_norm),
+                    option_chain_diagnostic_path(
+                        base_dir,
+                        request.underlier_code,
+                        exp_norm,
+                        option_type_scope=option_type_scope,
+                    ),
                     asof_date=asof_date,
                     underlier_code=request.underlier_code,
                     expiration=exp_norm,
@@ -352,6 +403,7 @@ def fetch_option_chains(
         from_cache_expirations=from_cache,
         fetched_expirations=fetched,
         opend_call_count=opend_calls,
+        rate_gate_wait_sec=rate_gate_wait_sec,
         status=status,
         error_code=_primary_error_code(errors),
         errors=errors,
@@ -380,20 +432,36 @@ def _fetch_one_chain(
     expiration: str | None,
     *,
     on_opend_call: Callable[[], None] | None = None,
+    on_rate_gate_wait: Callable[[float], None] | None = None,
 ) -> Any:
-    limiter.acquire()
+    wait_sec = limiter.acquire()
+    if on_rate_gate_wait is not None:
+        on_rate_gate_wait(wait_sec)
     if on_opend_call is not None:
         on_opend_call()
     kwargs = {"code": request.underlier_code, "is_force_refresh": bool(request.is_force_refresh)}
     if expiration:
         kwargs["start"] = str(expiration)
         kwargs["end"] = str(expiration)
+    option_type = _single_option_type(request.option_types)
+    if option_type:
+        kwargs["option_type"] = option_type
+
+    def _call_gateway(call_kwargs: dict[str, Any]) -> Any:
+        try:
+            return gateway.get_option_chain(**call_kwargs)
+        except Exception as exc:
+            if classify_option_chain_error(exc) == "RATE_LIMIT":
+                limiter.record_rate_limit()
+            raise
+
     try:
-        return gateway.get_option_chain(**kwargs)
-    except Exception as exc:
-        if classify_option_chain_error(exc) == "RATE_LIMIT":
-            limiter.record_rate_limit()
-        raise
+        return _call_gateway(kwargs)
+    except TypeError as exc:
+        if "option_type" not in str(exc):
+            raise
+        kwargs.pop("option_type", None)
+        return _call_gateway(kwargs)
 
 
 def _dataframe_to_records(value: Any) -> list[dict[str, Any]]:
@@ -432,6 +500,40 @@ def _result_status(*, rows: list[dict[str, Any]], errors: list[dict[str, Any]], 
 def _cache_expiration_key(expiration: str | None) -> str:
     exp = normalize_expiration_ymd(expiration) if expiration else None
     return exp or "__all__"
+
+
+def _single_option_type(option_types: str | None) -> str | None:
+    values = {
+        _normalize_option_type(value)
+        for value in str(option_types or "").split(",")
+        if str(value or "").strip()
+    }
+    values.discard("")
+    if values == {"put"}:
+        return "PUT"
+    if values == {"call"}:
+        return "CALL"
+    return None
+
+
+def _normalize_option_type(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    if raw in {"put", "call"}:
+        return raw
+    if "put" in raw:
+        return "put"
+    if "call" in raw:
+        return "call"
+    return raw
+
+
+def _option_type_cache_scope(option_types: str | None) -> str | None:
+    single = _single_option_type(option_types)
+    if single == "PUT":
+        return "put"
+    if single == "CALL":
+        return "call"
+    return None
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:

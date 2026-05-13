@@ -8,7 +8,12 @@ from typing import Any, Callable
 from src.application.expiration_normalization import normalize_expiration_ymd
 from src.application.opend_call_coordinator import rate_limited_opend_call
 from src.application.opend_fetch_config import OpenDEndpointRateLimit, OpenDFetchLimits
-from src.application.opend_utils import normalize_underlier
+from src.application.opend_utils import get_trading_date, normalize_underlier
+from src.application.opend_expiration_cache import (
+    load_option_expiration_cache,
+    option_expiration_cache_path,
+    save_option_expiration_cache,
+)
 from src.application.option_chain_fetching import (
     OptionChainFetchRequest,
     fetch_option_chains,
@@ -43,7 +48,7 @@ def list_option_expirations(
     base_dir: Path | None = None,
     expiration_max_wait_sec: float = 30.0,
     expiration_window_sec: float = 30.0,
-    expiration_max_calls: int = 30,
+    expiration_max_calls: int = 60,
 ) -> list[str]:
     gateway = build_ready_futu_gateway(
         host=host,
@@ -51,16 +56,18 @@ def list_option_expirations(
         is_option_chain_cache_enabled=False,
     )
     try:
+        effective_base_dir = Path(base_dir) if base_dir is not None else REPO_ROOT
+        underlier = normalize_underlier(symbol, base_dir=effective_base_dir)
         expiration_limit = OpenDFetchLimits.from_flat_kwargs(
             expiration_max_wait_sec=expiration_max_wait_sec,
             expiration_window_sec=expiration_window_sec,
             expiration_max_calls=expiration_max_calls,
         ).option_expiration
-        effective_base_dir = Path(base_dir) if base_dir is not None else REPO_ROOT
         return list_option_expirations_with_gateway(
             gateway,
-            underlier_code=normalize_underlier(symbol, base_dir=effective_base_dir).code,
+            underlier_code=underlier.code,
             base_dir=effective_base_dir,
+            asof_date=get_trading_date(underlier.market).isoformat(),
             expiration_limit=expiration_limit,
             retry_call=retry_futu_gateway_call,
             rate_limited_call=rate_limited_opend_call,
@@ -85,14 +92,29 @@ def list_option_expirations_with_gateway(
     retry_max_delay_sec: float = 6.0,
     retry_call: Callable[..., Any] = retry_futu_gateway_call,
     rate_limited_call: Callable[..., Any] = rate_limited_opend_call,
+    asof_date: str | None = None,
+    use_cache: bool = True,
+    metrics: dict[str, Any] | None = None,
 ) -> list[str]:
+    cache_path = None
+    if use_cache and asof_date:
+        cache_path = option_expiration_cache_path(base_dir, underlier_code, str(asof_date))
+        cached = load_option_expiration_cache(cache_path, asof_date=str(asof_date))
+        if cached is not None:
+            _increment_metric(metrics, "expiration_cache_hits")
+            return cached
+
+    def _call_expiration_dates() -> Any:
+        _increment_metric(metrics, "expiration_opend_calls")
+        return gateway.get_option_expiration_dates(underlier_code)
+
     df_e = retry_call(
         "get_option_expiration_date",
         lambda: rate_limited_call(
             base_dir=base_dir,
             endpoint="option_expiration",
             **expiration_limit.call_kwargs(),
-            call=lambda: gateway.get_option_expiration_dates(underlier_code),
+            call=_call_expiration_dates,
         ),
         no_retry=no_retry,
         retry_max_attempts=retry_max_attempts,
@@ -103,11 +125,19 @@ def list_option_expirations_with_gateway(
     )
     if df_e is None or df_e.empty:
         return []
-    return sorted({
+    expirations = sorted({
         exp
         for exp in (normalize_expiration_ymd(value) for value in df_e.get("strike_time").tolist())
         if exp
     })
+    if cache_path is not None and asof_date:
+        save_option_expiration_cache(
+            cache_path,
+            asof_date=str(asof_date),
+            underlier_code=underlier_code,
+            expirations=expirations,
+        )
+    return expirations
 
 
 def select_symbol_expirations(
@@ -156,6 +186,10 @@ def fetch_symbol_option_chain(
     retry_call: Callable[..., Any] = retry_futu_gateway_call,
     rate_limited_call: Callable[..., Any] = rate_limited_opend_call,
 ) -> SymbolOptionChainResult:
+    expiration_fetch_meta: dict[str, Any] = {
+        "expiration_opend_calls": 0,
+        "expiration_cache_hits": 0,
+    }
     if explicit_expirations_norm:
         expirations_all = list(explicit_expirations_norm)
     else:
@@ -172,6 +206,8 @@ def fetch_symbol_option_chain(
                 retry_max_delay_sec=float(request.retry_max_delay_sec),
                 retry_call=retry_call,
                 rate_limited_call=rate_limited_call,
+                asof_date=today.isoformat(),
+                metrics=expiration_fetch_meta,
             )
         except Exception:
             expirations_all = []
@@ -213,9 +249,20 @@ def fetch_symbol_option_chain(
         retry_call=retry_call,
     )
 
+    fetch_meta = dict(fetch_result.to_meta())
+    fetch_meta.update(expiration_fetch_meta)
     return SymbolOptionChainResult(
         rows=fetch_result.rows,
         expirations_all=expirations_all,
         expirations_pick=expirations_pick,
-        fetch_meta=fetch_result.to_meta(),
+        fetch_meta=fetch_meta,
     )
+
+
+def _increment_metric(metrics: dict[str, Any] | None, key: str, value: int = 1) -> None:
+    if metrics is None:
+        return
+    try:
+        metrics[key] = int(metrics.get(key) or 0) + int(value)
+    except Exception:
+        metrics[key] = int(value)

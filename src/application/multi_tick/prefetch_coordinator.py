@@ -106,6 +106,8 @@ class PrefetchCoordinator:
         fail_budget_total: int,
         dispatch_fn: DispatchFn,
         cleanup_worker_fn: CleanupFn | None = None,
+        short_circuit_rate_limits: bool = True,
+        stop_on_failure_budget: bool = True,
     ) -> None:
         self._symbol_cfgs = list(symbol_cfgs)
         self._max_workers = max(1, int(max_workers))
@@ -114,6 +116,8 @@ class PrefetchCoordinator:
         self._fail_budget_total = max(1, int(fail_budget_total))
         self._dispatch_fn = dispatch_fn
         self._cleanup_worker_fn = cleanup_worker_fn
+        self._short_circuit_rate_limits = bool(short_circuit_rate_limits)
+        self._stop_on_failure_budget = bool(stop_on_failure_budget)
 
     def _make_short_circuit_payload(self, symbol_cfg: dict[str, Any], sym_class: str) -> dict[str, Any]:
         symbol = str((symbol_cfg or {}).get("symbol") or "").strip()
@@ -199,7 +203,11 @@ class PrefetchCoordinator:
                     fetch_cfg = _fetch_cfg(symbol_cfg)
                     source, _decision = resolve_symbol_fetch_source(fetch_cfg)
                     sym_class = _symbol_class(symbol)
-                    if is_futu_fetch_source(source) and sym_class in result.opend_rate_limit_classes:
+                    if (
+                        self._short_circuit_rate_limits
+                        and is_futu_fetch_source(source)
+                        and sym_class in result.opend_rate_limit_classes
+                    ):
                         payload = self._make_short_circuit_payload(symbol_cfg, sym_class)
                         result.audit_items.append(
                             _annotate_prefetch_payload(payload, execution_mode=self._execution_mode, duration_sec=0.0)
@@ -238,7 +246,7 @@ class PrefetchCoordinator:
                     fail_total += 1
                     if is_futu_fetch_source(payload.get("source")) and _is_opend_rate_limit_payload(payload):
                         result.opend_rate_limit_classes.add(_symbol_class(symbol))
-                    if (not result.budget_triggered) and budget_exceeded():
+                    if self._stop_on_failure_budget and (not result.budget_triggered) and budget_exceeded():
                         result.budget_triggered = True
                         if not budget_summary_emitted:
                             budget_summary_emitted = True
@@ -279,4 +287,3 @@ class PrefetchCoordinator:
                 list(executor.map(lambda _idx: self._cleanup_worker_fn(), range(self._max_workers)))
 
         return result
-

@@ -929,10 +929,40 @@ def test_runtime_status_summarizes_openclaw_runtime_files(tmp_path: Path) -> Non
 
     run_dir = runs_root / "run-1"
     (run_dir / "state").mkdir(parents=True, exist_ok=True)
-    (run_dir / "accounts" / "user1").mkdir(parents=True, exist_ok=True)
+    (run_dir / "accounts" / "user1" / "state").mkdir(parents=True, exist_ok=True)
     (shared_state_dir / "last_run_dir.txt").write_text(str(run_dir), encoding="utf-8")
     (run_dir / "state" / "tick_metrics.json").write_text(json.dumps({"notify_summary": {"sent": 1}}), encoding="utf-8")
     (run_dir / "accounts" / "user1" / "symbols_notification.txt").write_text("run account notification\n", encoding="utf-8")
+    (run_dir / "accounts" / "user1" / "state" / "required_data_prefetch_summary.json").write_text(
+        json.dumps(
+            {
+                "to_fetch": 3,
+                "deduped_count": 1,
+                "errors": 0,
+                "run_fetch_summary": {
+                    "bottleneck": "option_chain_rate_gate",
+                    "opend_calls": {
+                        "total": 6,
+                        "option_chain": 4,
+                        "option_expiration": 1,
+                        "market_snapshot": 1,
+                    },
+                    "cache": {
+                        "option_chain_hits": 2,
+                        "option_expiration_hits": 3,
+                    },
+                    "rate_gate_wait_sec": {
+                        "option_chain": 12.5,
+                    },
+                    "snapshot": {
+                        "requested_codes": 20,
+                    },
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
 
     out = run_tool(
         "runtime_status",
@@ -954,6 +984,13 @@ def test_runtime_status_summarizes_openclaw_runtime_files(tmp_path: Path) -> Non
     assert out["data"]["accounts"]["user1"]["notification"]["text"] == "account notification\n"
     assert out["data"]["latest_run"]["state"]["tick_metrics"]["json"]["notify_summary"]["sent"] == 1
     assert out["data"]["latest_run"]["accounts"]["user1"]["notification"]["text"] == "run account notification\n"
+    assert out["data"]["latest_run"]["accounts"]["user1"]["required_data_prefetch"]["exists"] is True
+    assert out["data"]["summary"]["prefetch_available"] is True
+    assert out["data"]["summary"]["prefetch_bottleneck"] == "option_chain_rate_gate"
+    assert out["data"]["required_data_prefetch"]["total_opend_calls"] == 6
+    assert out["data"]["required_data_prefetch"]["total_rate_gate_wait_sec"] == 12.5
+    assert out["data"]["required_data_prefetch"]["accounts"]["user1"]["deduped_count"] == 1
+    assert out["data"]["required_data_prefetch"]["accounts"]["user1"]["cache"]["option_expiration_hits"] == 3
 
 
 def test_runtime_status_loads_openclaw_profile_and_masks_external_paths(tmp_path: Path) -> None:
