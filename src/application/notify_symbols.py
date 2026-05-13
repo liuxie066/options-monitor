@@ -791,6 +791,69 @@ def _group_by_strategy(raw_lines: list[str]) -> dict[str, list[str]]:
     return g
 
 
+def _empty_strategy_groups() -> dict[str, list[str]]:
+    return {'sell_put': [], 'sell_call': [], 'yield_enhancement': [], 'other': []}
+
+
+def _select_notification_groups(
+    high_lines: list[str],
+    medium_lines: list[str],
+    low_lines: list[str],
+    *,
+    total_limit: int = 5,
+) -> dict[str, list[str]]:
+    limit = max(1, int(total_limit or 1))
+    strategy_order = ('sell_put', 'sell_call', 'yield_enhancement', 'other')
+    priority_groups = [
+        _group_by_strategy(section_lines)
+        for section_lines in (high_lines, medium_lines, low_lines)
+        if section_lines
+    ]
+    if not priority_groups:
+        return _empty_strategy_groups()
+
+    selected = _empty_strategy_groups()
+    used: set[tuple[int, str, int]] = set()
+    selected_count = 0
+
+    def add(priority_idx: int, strategy: str, item_idx: int, item: str) -> bool:
+        nonlocal selected_count
+        if selected_count >= limit:
+            return False
+        key = (priority_idx, strategy, item_idx)
+        if key in used:
+            return True
+        selected[strategy].append(item)
+        used.add(key)
+        selected_count += 1
+        return True
+
+    # Coverage pass: keep at least one visible candidate per available strategy,
+    # preferring higher alert priority within each strategy.
+    for strategy in strategy_order:
+        if selected_count >= limit:
+            break
+        for priority_idx, groups in enumerate(priority_groups):
+            items = groups.get(strategy) or []
+            if items:
+                add(priority_idx, strategy, 0, items[0])
+                break
+
+    for priority_idx, groups in enumerate(priority_groups):
+        if selected_count >= limit:
+            break
+        for strategy in strategy_order:
+            if selected_count >= limit:
+                break
+            for item_idx, item in enumerate(groups.get(strategy) or []):
+                if not add(priority_idx, strategy, item_idx, item):
+                    break
+
+    if any(selected.values()):
+        return selected
+    return _empty_strategy_groups()
+
+
 def build_notification(
     changes_text: str,
     alerts_text: str,
@@ -805,17 +868,8 @@ def build_notification(
 
     lines: list[str] = []
     use_compact = render_style == 'compact'
-
-    candidate_lines: list[str] = []
-    if high_lines:
-        candidate_lines = high_lines[:5]
-    elif medium_lines:
-        candidate_lines = medium_lines[:5]
-    elif low_lines:
-        candidate_lines = low_lines[:5]
-
-    if candidate_lines:
-        groups = _group_by_strategy(candidate_lines)
+    groups = _select_notification_groups(high_lines, medium_lines, low_lines)
+    if any(groups.values()):
 
         def emit_plain(title: str, items: list[str]):
             if not items:
@@ -860,7 +914,7 @@ def build_notification(
         if groups['other']:
             emit_fn('### Other' if use_compact else 'Other', groups['other'])
 
-    if not candidate_lines:
+    if not any(groups.values()):
         return build_no_candidate_notification_text(account_label=account_label)
 
     return '\n'.join(lines).strip() + '\n'

@@ -340,3 +340,117 @@ def test_notify_symbols_markdown_yield_enhancement_layout() -> None:
     assert "备选Call=2个" in out
     assert "Call delta=0.32" in out
     assert "目标价" not in out
+
+
+def test_alert_engine_high_priority_orders_by_strategy_then_strength() -> None:
+    from src.application.alert_engine import build_alert_text
+    from src.application.notify_symbols import extract_section
+
+    rows = [
+        {
+            "symbol": "AAPL",
+            "strategy": "sell_put",
+            "candidate_count": 1,
+            "top_contract": "2026-06-19 180P",
+            "annualized_return": 0.12,
+            "net_income": 120.0,
+            "dte": 30,
+            "strike": 180.0,
+            "risk_label": "中性",
+        },
+        {
+            "symbol": "NVDA",
+            "strategy": "sell_put",
+            "candidate_count": 1,
+            "top_contract": "2026-06-19 150P",
+            "annualized_return": 0.25,
+            "net_income": 250.0,
+            "dte": 30,
+            "strike": 150.0,
+            "risk_label": "中性",
+        },
+        {
+            "symbol": "MSFT",
+            "strategy": "sell_call",
+            "candidate_count": 1,
+            "top_contract": "2026-06-19 430C",
+            "annualized_return": 0.11,
+            "net_income": 110.0,
+            "dte": 30,
+            "strike": 430.0,
+            "risk_label": "保守",
+            "cover_avail": 1,
+            "shares_total": 100,
+            "shares_locked": 0,
+        },
+        {
+            "symbol": "BABA",
+            "strategy": "yield_enhancement",
+            "candidate_count": 1,
+            "top_contract": "2026-06-19 80P+95C",
+            "annualized_return": 0.30,
+            "net_income": 90.0,
+            "dte": 30,
+            "strike": 80.0,
+            "risk_label": "保守",
+        },
+    ]
+
+    alerts = build_alert_text(pd.DataFrame(rows))
+    high_lines = extract_section(alerts, "## 高优先级")
+
+    assert "NVDA | sell_put" in high_lines[0]
+    assert "AAPL | sell_put" in high_lines[1]
+    assert "MSFT | sell_call" in high_lines[2]
+    assert "BABA | yield_enhancement" in high_lines[3]
+
+
+def test_build_notification_keeps_per_strategy_capacity() -> None:
+    from src.application.notify_symbols import build_notification
+
+    put_lines = [
+        (
+            f"- PUT{i} | sell_put | 2026-06-19 10{i}P | 年化 {20 - i:.2f}% | 净收入 {100 + i:.2f} | "
+            f"DTE 30 | Strike 10{i} | 中性 | ccy USD | mid 1.000 | 通过准入后，收益/风险组合较强，值得优先看。"
+        )
+        for i in range(1, 7)
+    ]
+    call_line = (
+        "- CALL1 | sell_call | 2026-06-19 180C | 年化 9.00% | 净收入 90.00 | "
+        "DTE 30 | Strike 180 | 保守 | ccy USD | mid 1.000 | cover 1 | shares 100(-0) | 已通过准入，可作为 sell call 备选。"
+    )
+    alerts = "# Symbols Alerts\n\n## 高优先级\n" + "\n".join(put_lines + [call_line]) + "\n"
+
+    out = build_notification("", alerts, account_label="LX")
+
+    assert out.count("· 卖Put") == 4
+    assert "PUT5" not in out
+    assert "PUT6" not in out
+    assert "CALL1" in out
+    assert out.count("· 卖Call") == 1
+
+
+def test_build_notification_keeps_medium_strategy_when_high_exists() -> None:
+    from src.application.notify_symbols import build_notification
+
+    high_put = (
+        "- NVDA | sell_put | 2026-06-19 150P | 年化 20.00% | 净收入 200.00 | "
+        "DTE 30 | Strike 150 | 中性 | ccy USD | mid 2.000 | 通过准入后，收益/风险组合较强，值得优先看。"
+    )
+    medium_call = (
+        "- MSFT | sell_call | 2026-06-19 430C | 年化 6.50% | 净收入 80.00 | "
+        "DTE 30 | Strike 430 | 保守 | ccy USD | mid 0.800 | cover 1 | shares 100(-0) | 已通过准入，可作为 sell call 备选。"
+    )
+    alerts = (
+        "# Symbols Alerts\n\n"
+        "## 高优先级\n"
+        f"{high_put}\n\n"
+        "## 中优先级\n"
+        f"{medium_call}\n"
+    )
+
+    out = build_notification("", alerts, account_label="LX")
+
+    assert "NVDA" in out
+    assert "MSFT" in out
+    assert out.index("Put") < out.index("Call")
