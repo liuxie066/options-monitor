@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.2.36 - 2026-05-13
+
+### Changed
+- Consolidated candidate reject-rule mapping so scanner and pandas adapter reject logs share the same engine reason vocabulary.
+- Removed unused event-risk gate hooks from the candidate scanner wiring because current production behavior remains post-scan annotation.
+
+### Fixed
+- Logged Stage 1 hard-constraint rejects plus open-interest, volume, and spread-quality rejects in candidate reject CSVs.
+- Treated unavailable or invalid bid/ask spread quality as a `max_spread_ratio` rejection when spread filtering is enabled.
+
 ## 1.2.35 - 2026-05-13
 
 ### Changed

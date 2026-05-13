@@ -52,15 +52,37 @@ CANDIDATE_REJECT_REASONS: tuple[str, ...] = (
 )
 
 LEGACY_REJECT_RULE_REASON_MAP: dict[str, str] = {
+    "input_missing": REJECT_INPUT_MISSING,
+    "dte": REJECT_HARD_DTE,
+    "strike": REJECT_HARD_STRIKE,
+    "put_cash_capacity": REJECT_HARD_CAPACITY_PUT,
+    "call_cover_capacity": REJECT_HARD_CAPACITY_CALL,
     "min_annualized_return": REJECT_RETURN_ANNUALIZED,
     "min_net_income": REJECT_RETURN_NET_INCOME,
+    "min_open_interest": REJECT_RISK_OPEN_INTEREST,
+    "min_volume": REJECT_RISK_VOLUME,
     "max_spread_ratio": REJECT_RISK_SPREAD,
+    "event_risk_warn": REJECT_RISK_EVENT_WARN,
+    "event_risk_reject": REJECT_RISK_EVENT_REJECT,
 }
 
 LEGACY_REJECT_RULE_STAGE_MAP: dict[str, str] = {
+    "input_missing": STAGE_INPUT_NORMALIZATION,
+    "dte": STAGE_HARD_CONSTRAINTS,
+    "strike": STAGE_HARD_CONSTRAINTS,
+    "put_cash_capacity": STAGE_HARD_CONSTRAINTS,
+    "call_cover_capacity": STAGE_HARD_CONSTRAINTS,
     "min_annualized_return": STAGE_RETURN_FLOOR,
     "min_net_income": STAGE_RETURN_FLOOR,
+    "min_open_interest": STAGE_RISK_FILTER,
+    "min_volume": STAGE_RISK_FILTER,
     "max_spread_ratio": STAGE_RISK_FILTER,
+    "event_risk_warn": STAGE_RISK_FILTER,
+    "event_risk_reject": STAGE_RISK_FILTER,
+}
+
+CANDIDATE_REJECT_REASON_RULE_MAP: dict[str, str] = {
+    reason: rule for rule, reason in LEGACY_REJECT_RULE_REASON_MAP.items()
 }
 
 COMMON_CRITICAL_FIELDS: tuple[str, ...] = (
@@ -824,15 +846,25 @@ def evaluate_candidate_risk_filter(
 
     spread_v = _coerce_float(spread_ratio if spread_ratio is not None else normalized.get("spread_ratio"))
     max_spread_v = _coerce_float(max_spread_ratio)
-    if max_spread_v is not None and spread_v is not None and spread_v > max_spread_v:
-        _reject(
-            rejects,
-            stage=STAGE_RISK_FILTER,
-            reason=REJECT_RISK_SPREAD,
-            message="spread ratio above maximum",
-            metric_value=spread_v,
-            threshold=max_spread_v,
-        )
+    if max_spread_v is not None:
+        if spread_v is None:
+            _reject(
+                rejects,
+                stage=STAGE_RISK_FILTER,
+                reason=REJECT_RISK_SPREAD,
+                message="spread ratio unavailable",
+                metric_value=spread_v,
+                threshold=max_spread_v,
+            )
+        elif spread_v > max_spread_v:
+            _reject(
+                rejects,
+                stage=STAGE_RISK_FILTER,
+                reason=REJECT_RISK_SPREAD,
+                message="spread ratio above maximum",
+                metric_value=spread_v,
+                threshold=max_spread_v,
+            )
 
     event_mode_norm = str(event_mode or "warn").strip().lower() or "warn"
     if bool(event_flag):

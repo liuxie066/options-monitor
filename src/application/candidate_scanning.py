@@ -7,6 +7,7 @@ from typing import Callable
 import pandas as pd
 
 from domain.domain.engine import (
+    CANDIDATE_REJECT_REASON_RULE_MAP,
     CandidateScoreWeights,
     evaluate_candidate_hard_constraints,
     evaluate_candidate_return_floor,
@@ -15,11 +16,6 @@ from domain.domain.engine import (
 )
 from domain.domain.engine import (
     empty_reject_log_dataframe,
-)
-from domain.domain.engine.candidate_engine import (
-    REJECT_RETURN_ANNUALIZED,
-    REJECT_RETURN_NET_INCOME,
-    REJECT_RISK_SPREAD,
 )
 from src.application.candidate_models import CandidateBaseValues, CandidateContractInput
 
@@ -51,8 +47,6 @@ class CandidateScanDependencies:
     build_row_fn: Callable[[CandidateContractInput, CandidateBaseValues, dict], dict | None]
     build_hard_constraint_kwargs_fn: Callable[[CandidateContractInput], dict]
     annualized_return_value_fn: Callable[[dict], float | None]
-    event_risk_flag_fn: Callable[[dict], bool]
-    event_risk_mode_fn: Callable[[dict | None], str]
     annotate_event_risk_fn: Callable[[pd.DataFrame, Path, dict | None], pd.DataFrame]
     print_summary_fn: Callable[[pd.DataFrame, Path, Path], None]
 
@@ -104,7 +98,7 @@ def _spread_values(contract: CandidateContractInput) -> tuple[float | None, floa
     bid_value = contract.bid
     ask_value = contract.ask
     mid_value = contract.mid
-    if bid_value is None or ask_value is None or ask_value < bid_value:
+    if bid_value is None or ask_value is None or bid_value <= 0 or ask_value <= 0 or ask_value < bid_value:
         return None, None
     spread = ask_value - bid_value
     if mid_value is None or mid_value <= 0:
@@ -178,6 +172,12 @@ def run_candidate_scan(
                 extra_hard_kwargs=hard_kwargs,
             )
             if base_values is None:
+                reject_rows.extend(
+                    _decision_reject_log_rows(
+                        decision=stage1,
+                        reject_stage=config.reject_stage,
+                    )
+                )
                 continue
             metrics = deps.compute_metrics_fn(contract)
             if not metrics:
@@ -194,8 +194,6 @@ def run_candidate_scan(
                 min_open_interest=config.min_open_interest,
                 min_volume=config.min_volume,
                 max_spread_ratio=config.max_spread_ratio,
-                event_flag=False,
-                event_mode=deps.event_risk_mode_fn(event_risk_cfg),
                 open_interest=base_values.open_interest,
                 volume=base_values.volume,
                 spread_ratio=base_values.spread_ratio,
@@ -246,13 +244,8 @@ def _decision_reject_log_rows(*, decision: dict, reject_stage: str) -> list[dict
     normalized = dict(decision.get("normalized_input") or {})
     for reject in list(decision.get("rejects") or []):
         reason = str(reject.get("reason") or "")
-        if reason == REJECT_RETURN_ANNUALIZED:
-            rule = "min_annualized_return"
-        elif reason == REJECT_RETURN_NET_INCOME:
-            rule = "min_net_income"
-        elif reason == REJECT_RISK_SPREAD:
-            rule = "max_spread_ratio"
-        else:
+        rule = CANDIDATE_REJECT_REASON_RULE_MAP.get(reason)
+        if not rule:
             continue
         rows.append(
             {

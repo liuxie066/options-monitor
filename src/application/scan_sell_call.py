@@ -298,8 +298,6 @@ def run_sell_call_scan(
                 )[1]
             },
             annualized_return_value_fn=lambda metrics: metrics.get("annualized_net_premium_return"),
-            event_risk_flag_fn=lambda _row: False,
-            event_risk_mode_fn=lambda cfg: str((cfg or {}).get("mode") or "warn"),
             annotate_event_risk_fn=lambda df, base_dir, cfg: annotate_candidates_with_event_risk(
                 df,
                 base_dir=base_dir,

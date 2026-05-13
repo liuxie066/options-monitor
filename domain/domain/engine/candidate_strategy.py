@@ -7,9 +7,7 @@ import pandas as pd
 
 from .candidate_engine import (
     CandidateScoreWeights,
-    REJECT_RETURN_ANNUALIZED,
-    REJECT_RETURN_NET_INCOME,
-    REJECT_RISK_SPREAD,
+    CANDIDATE_REJECT_REASON_RULE_MAP,
     build_candidate_decision,
     build_candidate_rank_key,
     evaluate_candidate_return_floor,
@@ -147,16 +145,11 @@ def _append_engine_reject_rows(
     reject_stage: str,
     mode: StrategyMode,
 ) -> None:
-    reason_to_rule = {
-        REJECT_RETURN_ANNUALIZED: "min_annualized_return",
-        REJECT_RETURN_NET_INCOME: "min_net_income",
-        REJECT_RISK_SPREAD: "max_spread_ratio",
-    }
     identity = _row_identity(row, mode)
     for reject in decision.get("rejects") or []:
         if not isinstance(reject, dict):
             continue
-        rule = reason_to_rule.get(str(reject.get("reason") or ""))
+        rule = CANDIDATE_REJECT_REASON_RULE_MAP.get(str(reject.get("reason") or ""))
         if not rule:
             continue
         sink.append(

@@ -26,6 +26,7 @@ from .decision_engine import (
 from .candidate_engine import (
     CANDIDATE_ENGINE_SCHEMA_VERSION,
     CANDIDATE_REJECT_REASONS,
+    CANDIDATE_REJECT_REASON_RULE_MAP,
     CANDIDATE_STAGE_ORDER,
     CandidateScoreWeights,
     CandidateStrategyScore,
@@ -109,6 +110,7 @@ __all__ = [
     'score_notify_candidate',
     'CANDIDATE_ENGINE_SCHEMA_VERSION',
     'CANDIDATE_REJECT_REASONS',
+    'CANDIDATE_REJECT_REASON_RULE_MAP',
     'CANDIDATE_STAGE_ORDER',
     'CandidateScoreWeights',
     'CandidateStrategyScore',
