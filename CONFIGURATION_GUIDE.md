@@ -457,10 +457,10 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
     "quote_source": "auto",
     "notify_levels": ["strong", "medium"],
     "max_items_per_account": 5,
-      "max_spread_ratio": 0.3,
-      "strong_remaining_annualized_max": 0.08,
-      "medium_remaining_annualized_max": 0.12
-    }
+    "max_spread_ratio": 0.3,
+    "strong_remaining_annualized_max": 0.045,
+    "medium_remaining_annualized_max": 0.07
+  }
 }
 ```
 
