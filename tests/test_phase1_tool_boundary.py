@@ -146,9 +146,10 @@ def test_prefetch_required_data_idempotency_audit() -> None:
                 shared_required=Path(td) / "required_data",
             )
         assert out["fetched_ok"] == 1
-        assert out["skipped"] == 1
-        assert len(out["audit"]) == 2
-        assert len(calls) == 2
+        assert out["skipped"] == 0
+        assert out["deduped_count"] == 1
+        assert len(out["audit"]) == 1
+        assert len(calls) == 1
     finally:
         mod.has_shared_required_data = old_has
         mod.ToolExecutionService.execute = old_exec
@@ -238,15 +239,12 @@ def test_prefetch_required_data_protections_minimal() -> None:
                 shared_required=Path(td) / "required_data",
             )
         assert out["max_workers"] == 1
-        assert out["errors"] == 1
-        assert out["fetched_ok"] >= 1
+        assert out["errors"] == 3
+        assert out["fetched_ok"] == 1
+        assert out["skipped"] == 0
+        assert out["budget_triggered"] is False
         assert "US" in (out.get("opend_rate_limit_classes") or [])
-        assert "TSLA" not in calls
-        assert "BABA" not in calls
-        tsla_msg = str((out.get("results") or {}).get("TSLA") or "")
-        baba_msg = str((out.get("results") or {}).get("BABA") or "")
-        assert "short_circuit" in tsla_msg or "stopped_by_failure_budget" in tsla_msg
-        assert "short_circuit" in baba_msg or "stopped_by_failure_budget" in baba_msg
+        assert calls == ["AAPL", "MSFT", "TSLA", "BABA"]
     finally:
         mod.has_shared_required_data = old_has
         mod.ToolExecutionService.execute = old_exec

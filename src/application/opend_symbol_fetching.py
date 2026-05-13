@@ -130,7 +130,7 @@ class FetchSymbolRequest:
     snapshot_max_calls: int = 60
     expiration_max_wait_sec: float = 30.0
     expiration_window_sec: float = 30.0
-    expiration_max_calls: int = 30
+    expiration_max_calls: int = 60
     gateway: Any = None
     snapshot_batch_size: int | None = None
     snapshot_fallback_max_codes: int = 100
@@ -155,7 +155,7 @@ class FetchSymbolRequest:
         )
 
 
-def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = '127.0.0.1', port: int = 11111, spot_override: float | None = None, *, base_dir: Path | None = None, option_types: str = 'put,call', min_strike: float | None = None, max_strike: float | None = None, side_strike_windows: dict[str, dict[str, float | None]] | None = None, min_dte: int | None = None, max_dte: int | None = None, explicit_expirations: list[str] | None = None, retry_max_attempts: int = 4, retry_time_budget_sec: float = 8.0, retry_base_delay_sec: float = 0.8, retry_max_delay_sec: float = 6.0, no_retry: bool = False, chain_cache: bool = False, chain_cache_force_refresh: bool = False, freshness_policy: str = 'cache_first', max_wait_sec: float = 90.0, option_chain_window_sec: float = 30.0, option_chain_max_calls: int = 10, snapshot_max_wait_sec: float = 30.0, snapshot_window_sec: float = 30.0, snapshot_max_calls: int = 60, expiration_max_wait_sec: float = 30.0, expiration_window_sec: float = 30.0, expiration_max_calls: int = 30, gateway: Any = None, snapshot_batch_size: int | None = None, snapshot_fallback_max_codes: int = 100, snapshot_fallback_batch_size: int = 20) -> dict[str, Any]:
+def fetch_symbol(symbol: str, limit_expirations: int | None = None, host: str = '127.0.0.1', port: int = 11111, spot_override: float | None = None, *, base_dir: Path | None = None, option_types: str = 'put,call', min_strike: float | None = None, max_strike: float | None = None, side_strike_windows: dict[str, dict[str, float | None]] | None = None, min_dte: int | None = None, max_dte: int | None = None, explicit_expirations: list[str] | None = None, retry_max_attempts: int = 4, retry_time_budget_sec: float = 8.0, retry_base_delay_sec: float = 0.8, retry_max_delay_sec: float = 6.0, no_retry: bool = False, chain_cache: bool = False, chain_cache_force_refresh: bool = False, freshness_policy: str = 'cache_first', max_wait_sec: float = 90.0, option_chain_window_sec: float = 30.0, option_chain_max_calls: int = 10, snapshot_max_wait_sec: float = 30.0, snapshot_window_sec: float = 30.0, snapshot_max_calls: int = 60, expiration_max_wait_sec: float = 30.0, expiration_window_sec: float = 30.0, expiration_max_calls: int = 60, gateway: Any = None, snapshot_batch_size: int | None = None, snapshot_fallback_max_codes: int = 100, snapshot_fallback_batch_size: int = 20) -> dict[str, Any]:
     return fetch_symbol_request(
         FetchSymbolRequest(
             symbol=symbol,
@@ -244,6 +244,10 @@ def fetch_symbol_request(
         if exp
     })
     spot_errors: list[dict[str, Any]] = []
+    spot_fetch_meta: dict[str, Any] = {
+        "spot_snapshot_opend_calls": 0,
+        "spot_snapshot_requested_codes": 0,
+    }
     if external_gateway:
         gateway = request.gateway
     else:
@@ -269,6 +273,7 @@ def fetch_symbol_request(
                 snapshot_max_calls=snapshot_limit.max_calls,
                 errors=spot_errors,
                 rate_limited_call=rate_limited_opend_call,
+                metrics=spot_fetch_meta,
             )
 
         # Trading-date anchor for DTE / cache freshness.
@@ -319,7 +324,12 @@ def fetch_symbol_request(
                     'spot_errors': spot_errors,
                     'from_cache_expirations': fetch_meta.get('from_cache_expirations') or [],
                     'fetched_expirations': fetch_meta.get('fetched_expirations') or [],
+                    'expiration_opend_calls': int(fetch_meta.get('expiration_opend_calls') or 0),
+                    'expiration_cache_hits': int(fetch_meta.get('expiration_cache_hits') or 0),
                     'opend_call_count': int(fetch_meta.get('opend_call_count') or 0),
+                    'rate_gate_wait_sec': float(fetch_meta.get('rate_gate_wait_sec') or 0.0),
+                    'spot_snapshot_opend_calls': int(spot_fetch_meta.get('spot_snapshot_opend_calls') or 0),
+                    'spot_snapshot_requested_codes': int(spot_fetch_meta.get('spot_snapshot_requested_codes') or 0),
                 },
             }
 
@@ -417,6 +427,8 @@ def fetch_symbol_request(
         snapshot_errors = snapshot_result.errors
         snapshot_fallback_filled = snapshot_result.fallback_filled
         snapshot_fallback_failed = snapshot_result.fallback_failed
+        snapshot_opend_call_count = snapshot_result.opend_call_count
+        snapshot_requested_codes = snapshot_result.requested_codes_count
 
         rows: list[dict[str, Any]] = []
 
@@ -559,8 +571,15 @@ def fetch_symbol_request(
                 'errors': combined_errors,
                 'from_cache_expirations': fetch_result_meta.get('from_cache_expirations') or [],
                 'fetched_expirations': fetch_result_meta.get('fetched_expirations') or [],
+                'expiration_opend_calls': int(fetch_result_meta.get('expiration_opend_calls') or 0),
+                'expiration_cache_hits': int(fetch_result_meta.get('expiration_cache_hits') or 0),
                 'opend_call_count': int(fetch_result_meta.get('opend_call_count') or 0),
+                'rate_gate_wait_sec': float(fetch_result_meta.get('rate_gate_wait_sec') or 0.0),
+                'spot_snapshot_opend_calls': int(spot_fetch_meta.get('spot_snapshot_opend_calls') or 0),
+                'spot_snapshot_requested_codes': int(spot_fetch_meta.get('spot_snapshot_requested_codes') or 0),
                 'option_codes': len(option_codes),
+                'snapshot_requested_codes': int(snapshot_requested_codes),
+                'snapshot_opend_call_count': int(snapshot_opend_call_count),
                 'snapshots_rows': int(len(snap_map)),
                 'snapshot_fallback_filled': int(snapshot_fallback_filled),
                 'snapshot_fallback_failed': int(snapshot_fallback_failed),

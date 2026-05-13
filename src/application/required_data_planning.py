@@ -504,7 +504,7 @@ def build_required_data_fetch_plan(
     snapshot_max_calls: int = 60,
     expiration_max_wait_sec: float = 30.0,
     expiration_window_sec: float = 30.0,
-    expiration_max_calls: int = 30,
+    expiration_max_calls: int = 60,
 ) -> RequiredDataFetchPlanBundle:
     sell_put_cfg = dict(sell_put_cfg or {})
     sell_call_cfg = dict(sell_call_cfg or {})

@@ -335,7 +335,7 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 自动成交 intake 写入 open 事件前会先把 broker raw payload 里的 symbol canonicalize 到共享格式（例如 `POP` / `HK.09992` / `HK.POP260528P150000` -> `9992.HK`），再解析 multiplier。fallback 顺序固定为：
 
 1. payload / lookup row 显式字段：`multiplier`、`contract_multiplier`、`lot_size`
-2. contract metadata：本地 `output_shared/state/multiplier_cache.json`，缺失时可按 listener 的 OpenD `host/port` 和 `runtime.option_chain_fetch` 限频刷新
+2. contract metadata：本地 `output_shared/state/multiplier_cache.json`，缺失时可按 listener 的 OpenD `host/port` 和 `runtime.opend_rate_limits.option_chain` 限频刷新；旧字段 `runtime.option_chain_fetch` 仍兼容
 3. `intake.multiplier_by_symbol[canonical_symbol]`
 4. 显式配置的 market default：`intake.default_multiplier_hk` / `intake.default_multiplier_us`
 
@@ -379,30 +379,27 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 ### 4.7 runtime：超时（线上稳定）
 - `symbol_timeout_sec`：单标的 fetch/scan 超时
 - `portfolio_timeout_sec`：读取 holdings/positions 超时
-- `opend_rate_limits.option_chain`：OpenD `get_option_chain` 共享频控，字段为 `max_calls`、`window_sec`、`max_wait_sec`；旧字段 `option_chain_fetch` 仍兼容
-- `opend_rate_limits.market_snapshot`：OpenD `get_market_snapshot` 共享频控，用于正股 spot 和期权报价快照
-- `opend_rate_limits.option_expiration`：OpenD `get_option_expiration_date` 共享频控，用于到期日发现
+- `prefetch.max_workers`：required_data 预取并发；OpenD 限流敏感场景建议 US/HK 统一设为 `1`
+- required_data 预取固定采用“完成优先”：即使某个标的触发 OpenD 限频或失败，也继续排队尝试剩余标的
+- required_data 预取固定按启用策略的 DTE/行权价边界收窄抓取范围，减少冷缓存请求和 snapshot 面积
+- required_data 同一轮会自动合并相同标的/同一 OpenD endpoint 的重复抓取请求，并在 `required_data_prefetch_summary.json` 写入 run 级取数汇总；这不是配置项
+- OpenD option expiration 会按标的和交易日做本地缓存，减少同一轮和同一天重复发现到期日的请求；这不是配置项
+- `opend_rate_limits.option_chain`：OpenD `get_option_chain` 共享频控，官方限频为 `10/30s`；当前可按完成优先把 `max_wait_sec` 调大；旧字段 `option_chain_fetch` 仍兼容
+- `get_market_snapshot` 和 `get_option_expiration_date` 也有共享频控保护，默认按 OpenD 官方 `60/30s` 规则由代码兜底；通常不需要写进配置，除非官方规则变化或本机环境需要单独覆盖
 
 示例：
 
 ```json
 {
   "runtime": {
+    "prefetch": {
+      "max_workers": 1
+    },
     "opend_rate_limits": {
       "option_chain": {
-        "max_calls": 10,
+        "max_calls": 9,
         "window_sec": 30,
-        "max_wait_sec": 90
-      },
-      "market_snapshot": {
-        "max_calls": 60,
-        "window_sec": 30,
-        "max_wait_sec": 30
-      },
-      "option_expiration": {
-        "max_calls": 30,
-        "window_sec": 30,
-        "max_wait_sec": 30
+        "max_wait_sec": 600
       }
     }
   }

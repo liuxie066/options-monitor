@@ -11,13 +11,24 @@ from domain.services import (
 )
 from domain.domain.fetch_source import resolve_symbol_fetch_source
 from domain.storage.repositories import state_repo
-from src.application.config_loader import resolve_watchlist_config
+from src.application.config_loader import resolve_templates_config, resolve_watchlist_config
+from src.application.config_profiles import apply_profiles
 from src.application.multi_tick.prefetch_coordinator import PrefetchCoordinator
 from src.application.opend_fetch_config import resolve_opend_batch_config, resolve_opend_fetch_config
 from src.application.opend_symbol_fetching import fetch_symbol
 from src.application.opend_symbol_outputs import save_outputs
+from src.application.required_data_coverage import required_data_csv_covers_strategy_bounds
+from src.application.required_data_observability import (
+    summarize_prefetch_fetch_metrics,
+    summarize_required_data_prefetch_run,
+)
+from src.application.required_data_prefetch_planning import (
+    build_prefetch_symbol_plan,
+    strategy_prefetch_kwargs as _strategy_prefetch_kwargs,
+)
 from src.infrastructure.futu_gateway_pool import ThreadLocalFutuGatewayPool
 from src.infrastructure.io_utils import has_shared_required_data
+from src.infrastructure.opend_retcodes import classify_opend_error
 
 
 _gateway_pool = ThreadLocalFutuGatewayPool()
@@ -109,6 +120,7 @@ def _fetch_one_inprocess(
     limit_exp = int(fetch_cfg.get('limit_expirations') or symbol_cfg.get('fetch', {}).get('limit_expirations', 8) or 8)
     host = str(fetch_cfg.get('host') or '127.0.0.1')
     port = _to_int(fetch_cfg.get('port') or 11111, 11111)
+    strategy_kwargs = _strategy_prefetch_kwargs(symbol_cfg, enabled=True)
     try:
         gateway = _gateway_pool.get_gateway(host=host, port=port, chain_cache=True)
         payload0 = fetch_symbol(
@@ -117,7 +129,12 @@ def _fetch_one_inprocess(
             host=host,
             port=port,
             base_dir=base,
-            option_types='put,call',
+            option_types=str(strategy_kwargs["option_types"]),
+            min_strike=strategy_kwargs.get("min_strike"),
+            max_strike=strategy_kwargs.get("max_strike"),
+            side_strike_windows=strategy_kwargs.get("side_strike_windows"),
+            min_dte=strategy_kwargs.get("min_dte"),
+            max_dte=strategy_kwargs.get("max_dte"),
             chain_cache=True,
             chain_cache_force_refresh=False,
             freshness_policy='cache_first',
@@ -165,7 +182,7 @@ def _fetch_one_inprocess(
             message=message,
             returncode=None,
         )
-        if _is_opend_rate_limit_payload({"message": message}):
+        if classify_opend_error({"message": message}).is_rate_limit:
             payload['error_code'] = 'RATE_LIMIT'
     source_snapshot = adapt_opend_tool_payload(payload)
     payload["source_snapshot"] = source_snapshot
@@ -177,19 +194,37 @@ def _fetch_one_inprocess(
 
 
 def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required: Path, force_refresh: bool = False) -> dict:
-    syms = [it for it in resolve_watchlist_config(cfg) if it.get('symbol')]
+    profiles = resolve_templates_config(cfg)
+    syms = [apply_profiles(it, profiles) for it in resolve_watchlist_config(cfg) if it.get('symbol')]
     symbols = [str(it.get('symbol')).strip() for it in syms if str(it.get('symbol')).strip()]
+    symbol_plan = build_prefetch_symbol_plan(syms)
+    fetch_syms = symbol_plan.symbol_cfgs
 
     raw_dir = (shared_required / 'raw').resolve()
     parsed_dir = (shared_required / 'parsed').resolve()
     raw_dir.mkdir(parents=True, exist_ok=True)
     parsed_dir.mkdir(parents=True, exist_ok=True)
 
-    def _need_fetch(symbol: str) -> bool:
+    def _need_fetch(symbol_cfg: dict[str, Any]) -> bool:
+        symbol = str(symbol_cfg.get('symbol')).strip()
+        if not symbol:
+            return True
         if force_refresh:
             return True
         try:
-            return (not has_shared_required_data(symbol, shared_required))
+            if not has_shared_required_data(symbol, shared_required):
+                return True
+            strategy_kwargs = _strategy_prefetch_kwargs(symbol_cfg, enabled=True)
+            parsed = shared_required / 'parsed' / f"{symbol}_required_data.csv"
+            return not required_data_csv_covers_strategy_bounds(
+                parsed=parsed,
+                option_types=str(strategy_kwargs["option_types"]),
+                min_dte=strategy_kwargs.get("min_dte"),
+                max_dte=strategy_kwargs.get("max_dte"),
+                min_strike=strategy_kwargs.get("min_strike"),
+                max_strike=strategy_kwargs.get("max_strike"),
+                side_strike_windows=strategy_kwargs.get("side_strike_windows"),
+            )
         except Exception:
             return True
 
@@ -214,7 +249,7 @@ def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required:
                 message='empty_symbol',
                 returncode=None,
             )
-        if not _need_fetch(symbol):
+        if not _need_fetch(symbol_cfg):
             return normalize_tool_execution_payload(
                 tool_name='required_data_prefetch',
                 symbol=symbol,
@@ -222,14 +257,15 @@ def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required:
                 limit_exp=8,
                 status='cached',
                 ok=True,
-                message='cached',
+                message='cached_strategy_covered',
                 returncode=0,
             )
 
         fetch_cfg = (symbol_cfg.get('fetch') or {}) if isinstance(symbol_cfg, dict) else {}
         src, _decision = resolve_symbol_fetch_source(fetch_cfg)
         limit_exp = int(fetch_cfg.get('limit_expirations') or symbol_cfg.get('fetch', {}).get('limit_expirations', 8) or 8)
-        opt_types = 'put,call'
+        strategy_kwargs = _strategy_prefetch_kwargs(symbol_cfg, enabled=True)
+        opt_types = str(strategy_kwargs["option_types"])
 
         cmd = [
             str(vpy), '-m', 'src.application.opend_symbol_fetching_cli',
@@ -254,6 +290,14 @@ def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required:
             '--expiration-max-wait-sec', str(expiration_fetch_cfg["max_wait_sec"]),
             '--quiet',
         ]
+        if strategy_kwargs.get("min_dte") is not None:
+            cmd.extend(['--min-dte', str(strategy_kwargs["min_dte"])])
+        if strategy_kwargs.get("max_dte") is not None:
+            cmd.extend(['--max-dte', str(strategy_kwargs["max_dte"])])
+        if strategy_kwargs.get("min_strike") is not None:
+            cmd.extend(['--min-strike', str(strategy_kwargs["min_strike"])])
+        if strategy_kwargs.get("max_strike") is not None:
+            cmd.extend(['--max-strike', str(strategy_kwargs["max_strike"])])
 
         payload = exec_service.execute(
             ToolExecutionIntent(
@@ -278,15 +322,34 @@ def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required:
             pass
         return payload
 
-    todo_cfgs = [it for it in syms if _need_fetch(str(it.get('symbol')).strip())]
+    todo_cfgs = [it for it in fetch_syms if _need_fetch(it)]
+    unique_cached_count = max(0, len(fetch_syms) - len(todo_cfgs))
 
     if not todo_cfgs:
+        fetch_metrics = summarize_prefetch_fetch_metrics([])
+        run_fetch_summary = summarize_required_data_prefetch_run(
+            symbols_total=len(symbols),
+            unique_symbols_total=len(fetch_syms),
+            to_fetch=0,
+            cached_unique_symbols=unique_cached_count,
+            submitted_count=0,
+            completed_count=0,
+            skipped_count=0,
+            failed_count=0,
+            fetch_metrics=fetch_metrics,
+            dedupe=symbol_plan.summary(),
+        )
         return {
             'schema_version': SCHEMA_VERSION_V1,
             'symbols_total': len(symbols),
+            'unique_symbols_total': len(fetch_syms),
+            'deduped_count': symbol_plan.deduped_count,
+            'dedupe': symbol_plan.summary(),
+            'to_fetch': 0,
             'fetched': 0,
             'fetched_ok': 0,
             'cached': len(symbols),
+            'cached_unique_symbols': unique_cached_count,
             'errors': 0,
             'skipped': 0,
             'max_workers': 0,
@@ -297,6 +360,8 @@ def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required:
             'skipped_count': 0,
             'failed_count': 0,
             'execution_mode': _resolve_execution_mode(cfg),
+            'fetch_metrics': fetch_metrics,
+            'run_fetch_summary': run_fetch_summary,
             'symbols': [],
             'audit': [],
         }
@@ -324,8 +389,23 @@ def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required:
         fail_budget_total=fail_budget_total,
         dispatch_fn=_dispatch,
         cleanup_worker_fn=(_gateway_pool.close_current_thread if execution_mode == 'inprocess' else None),
+        short_circuit_rate_limits=False,
+        stop_on_failure_budget=False,
     )
     coordinator_result = coordinator.run()
+    fetch_metrics = summarize_prefetch_fetch_metrics(coordinator_result.audit_items)
+    run_fetch_summary = summarize_required_data_prefetch_run(
+        symbols_total=len(symbols),
+        unique_symbols_total=len(fetch_syms),
+        to_fetch=len(todo_cfgs),
+        cached_unique_symbols=unique_cached_count,
+        submitted_count=coordinator_result.submitted_count,
+        completed_count=coordinator_result.completed_count,
+        skipped_count=coordinator_result.skipped,
+        failed_count=coordinator_result.errors,
+        fetch_metrics=fetch_metrics,
+        dedupe=symbol_plan.summary(),
+    )
 
     if execution_mode == 'inprocess':
         _gateway_pool.close_registered()
@@ -333,7 +413,11 @@ def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required:
     return {
         'schema_version': SCHEMA_VERSION_V1,
         'symbols_total': len(symbols),
+        'unique_symbols_total': len(fetch_syms),
+        'deduped_count': symbol_plan.deduped_count,
+        'dedupe': symbol_plan.summary(),
         'to_fetch': len(todo_cfgs),
+        'cached_unique_symbols': unique_cached_count,
         'max_workers': max_workers,
         'prefetch_max_workers': configured_max_workers,
         'effective_prefetch_workers': max_workers,
@@ -349,6 +433,8 @@ def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required:
         'fail_budget_total': fail_budget_total,
         'budget_triggered': coordinator_result.budget_triggered,
         'opend_rate_limit_classes': sorted(coordinator_result.opend_rate_limit_classes),
+        'fetch_metrics': fetch_metrics,
+        'run_fetch_summary': run_fetch_summary,
         'force_refresh': bool(force_refresh),
         'results': coordinator_result.results,
         'symbols': coordinator_result.symbol_items,

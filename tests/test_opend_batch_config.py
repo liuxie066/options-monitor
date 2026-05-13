@@ -99,3 +99,5 @@ def test_resolve_opend_fetch_config_uses_code_default_when_option_chain_absent()
     cfg = resolve_opend_fetch_config({"runtime": {"opend_rate_limits": {}}})
 
     assert cfg["option_chain"] == {"max_calls": 10, "window_sec": 30.0, "max_wait_sec": 90.0}
+    assert cfg["market_snapshot"] == {"max_calls": 60, "window_sec": 30.0, "max_wait_sec": 30.0}
+    assert cfg["option_expiration"] == {"max_calls": 60, "window_sec": 30.0, "max_wait_sec": 30.0}

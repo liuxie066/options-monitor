@@ -259,6 +259,109 @@ def _account_summary(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _number_or_none(value: Any) -> int | float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        number = float(text)
+    except ValueError:
+        return None
+    if number.is_integer():
+        return int(number)
+    return number
+
+
+def _numeric_dict(value: Any) -> dict[str, int | float]:
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, int | float] = {}
+    for key, item in value.items():
+        parsed = _number_or_none(item)
+        if parsed is not None:
+            out[str(key)] = parsed
+    return out
+
+
+def _prefetch_account_summary(info: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "exists": bool(info.get("exists")),
+        "path": info.get("path"),
+    }
+    if not info.get("exists"):
+        return out
+
+    payload = info.get("json") if isinstance(info.get("json"), dict) else {}
+    run_summary = payload.get("run_fetch_summary") if isinstance(payload.get("run_fetch_summary"), dict) else {}
+    out.update(
+        {
+            "bottleneck": run_summary.get("bottleneck"),
+            "to_fetch": _number_or_none(payload.get("to_fetch")),
+            "deduped_count": _number_or_none(payload.get("deduped_count")),
+            "errors": _number_or_none(payload.get("errors")),
+            "opend_calls": _numeric_dict(run_summary.get("opend_calls")),
+            "cache": _numeric_dict(run_summary.get("cache")),
+            "rate_gate_wait_sec": _numeric_dict(run_summary.get("rate_gate_wait_sec")),
+        }
+    )
+    snapshot = run_summary.get("snapshot")
+    if isinstance(snapshot, dict):
+        out["snapshot"] = snapshot
+    return out
+
+
+def _latest_run_prefetch_summary(latest_run_payload: dict[str, Any] | None) -> dict[str, Any]:
+    latest_accounts = latest_run_payload.get("accounts") if isinstance(latest_run_payload, dict) else {}
+    if not isinstance(latest_accounts, dict):
+        latest_accounts = {}
+
+    accounts: dict[str, Any] = {}
+    bottlenecks: dict[str, int] = {}
+    total_opend_calls = 0
+    total_rate_gate_wait_sec = 0.0
+    total_errors = 0
+    available_account_count = 0
+
+    for account, item in latest_accounts.items():
+        if not isinstance(item, dict):
+            continue
+        info = item.get("required_data_prefetch") if isinstance(item.get("required_data_prefetch"), dict) else {}
+        account_summary = _prefetch_account_summary(info)
+        accounts[str(account)] = account_summary
+        if not account_summary.get("exists"):
+            continue
+        available_account_count += 1
+        bottleneck = str(account_summary.get("bottleneck") or "unknown")
+        bottlenecks[bottleneck] = bottlenecks.get(bottleneck, 0) + 1
+        opend_calls = account_summary.get("opend_calls") if isinstance(account_summary.get("opend_calls"), dict) else {}
+        total_opend_calls += int(opend_calls.get("total") or 0)
+        waits = account_summary.get("rate_gate_wait_sec") if isinstance(account_summary.get("rate_gate_wait_sec"), dict) else {}
+        total_rate_gate_wait_sec += sum(float(value) for value in waits.values())
+        total_errors += int(account_summary.get("errors") or 0)
+
+    primary_bottleneck = None
+    if bottlenecks:
+        primary_bottleneck = max(bottlenecks.items(), key=lambda item: (item[1], item[0]))[0]
+
+    return {
+        "available": available_account_count > 0,
+        "account_count": len(accounts),
+        "available_account_count": available_account_count,
+        "primary_bottleneck": primary_bottleneck,
+        "bottlenecks": bottlenecks,
+        "total_opend_calls": total_opend_calls,
+        "total_rate_gate_wait_sec": round(total_rate_gate_wait_sec, 3),
+        "total_errors": total_errors,
+        "accounts": accounts,
+    }
+
+
 def _latest_run_dir(base: Path, *, pointer_path: Path, runs_root: Path) -> Path | None:
     raw_pointer = _read_text(pointer_path)
     if raw_pointer:
@@ -387,6 +490,11 @@ def runtime_status_tool(
                     base=base,
                     max_chars=max_notification_chars,
                 ),
+                "required_data_prefetch": _json_file_info(
+                    run_account_root / "state" / "required_data_prefetch_summary.json",
+                    base=base,
+                    read_json_object_or_empty=read_json_object_or_empty,
+                ),
             }
         latest_run_payload = {
             "path": _relative_path(latest_run, base=base),
@@ -404,6 +512,8 @@ def runtime_status_tool(
             },
             "accounts": run_accounts,
         }
+
+    prefetch_summary = _latest_run_prefetch_summary(latest_run_payload)
 
     warnings: list[str] = []
     if not shared_last_run.get("exists") and not legacy_last_run.get("exists"):
@@ -439,6 +549,7 @@ def runtime_status_tool(
         },
         "accounts": account_status,
         "latest_run": latest_run_payload,
+        "required_data_prefetch": prefetch_summary,
         "account_summary": {},
         "freshness": {},
         "openclaw_profile": profile_meta or {"loaded": False},
@@ -452,6 +563,8 @@ def runtime_status_tool(
     data["freshness"] = _freshness_from_runtime_status(data, max_age_minutes=max_run_age_minutes)
     data["summary"]["freshness_status"] = data["freshness"].get("status")
     data["summary"]["account_count"] = data["account_summary"].get("account_count")
+    data["summary"]["prefetch_available"] = prefetch_summary.get("available")
+    data["summary"]["prefetch_bottleneck"] = prefetch_summary.get("primary_bottleneck")
     return data, warnings, {"config_path": mask_path(config_path)}
 
 

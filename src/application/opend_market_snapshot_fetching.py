@@ -43,6 +43,8 @@ class MarketSnapshotFetchResult:
     errors: list[dict[str, Any]]
     fallback_filled: int = 0
     fallback_failed: int = 0
+    opend_call_count: int = 0
+    requested_codes_count: int = 0
 
 
 def get_spot_opend(
@@ -55,6 +57,7 @@ def get_spot_opend(
     snapshot_max_calls: int = 60,
     errors: list[dict[str, Any]] | None = None,
     rate_limited_call: Callable[..., Any] = rate_limited_opend_call,
+    metrics: dict[str, Any] | None = None,
 ) -> float | None:
     """Try to get underlying spot from OpenD."""
     snapshot_limit = OpenDFetchLimits.from_flat_kwargs(
@@ -64,6 +67,8 @@ def get_spot_opend(
     ).market_snapshot
     try:
         def _call_snapshot() -> Any:
+            _increment_metric(metrics, "spot_snapshot_opend_calls")
+            _increment_metric(metrics, "spot_snapshot_requested_codes")
             return gateway.get_snapshot([underlier_code])
 
         if base_dir is not None:
@@ -106,6 +111,15 @@ def get_spot_opend(
             message=str(exc),
         )
         return None
+
+
+def _increment_metric(metrics: dict[str, Any] | None, key: str, value: int = 1) -> None:
+    if metrics is None:
+        return
+    try:
+        metrics[key] = int(metrics.get(key) or 0) + int(value)
+    except Exception:
+        metrics[key] = int(value)
 
 
 def get_underlier_spot(
@@ -164,18 +178,27 @@ def fetch_option_snapshots(
     batch_size = int(snapshot_batch_size) if snapshot_batch_size else DEFAULT_OPEND_BATCH_MARKET_SNAPSHOT
     batch_size = max(1, batch_size)
     keep_columns = list(SNAPSHOT_KEEP_COLUMNS)
+    opend_call_count = 0
 
     for start in range(0, len(option_codes), batch_size):
         batch = option_codes[start : start + batch_size]
         try:
-            snap = retry_call(
-                "get_market_snapshot(batch)",
-                lambda batch0=batch: rate_limited_call(
+            def _call_snapshot(batch0: list[str] = batch) -> Any:
+                def _gateway_snapshot_call() -> Any:
+                    nonlocal opend_call_count
+                    opend_call_count += 1
+                    return gateway.get_snapshot(batch0)
+
+                return rate_limited_call(
                     base_dir=base_dir,
                     endpoint="market_snapshot",
                     **snapshot_limit.call_kwargs(),
-                    call=lambda: gateway.get_snapshot(batch0),
-                ),
+                    call=_gateway_snapshot_call,
+                )
+
+            snap = retry_call(
+                "get_market_snapshot(batch)",
+                _call_snapshot,
                 no_retry=no_retry,
                 retry_max_attempts=retry_max_attempts,
                 retry_time_budget_sec=retry_time_budget_sec,
@@ -211,7 +234,7 @@ def fetch_option_snapshots(
     if option_codes and int(snapshot_fallback_max_codes) > 0:
         missing = [code for code in option_codes if code not in snap_map]
         if missing:
-            fallback_filled, fallback_failed = _fallback_fetch_missing_snapshots(
+            fallback_filled, fallback_failed, fallback_opend_calls = _fallback_fetch_missing_snapshots(
                 missing_codes=missing,
                 gateway=gateway,
                 snapshot_limit=snapshot_limit,
@@ -229,12 +252,15 @@ def fetch_option_snapshots(
                 retry_call=retry_call,
                 rate_limited_call=rate_limited_call,
             )
+            opend_call_count += fallback_opend_calls
 
     return MarketSnapshotFetchResult(
         snap_map=snap_map,
         errors=snapshot_errors,
         fallback_filled=fallback_filled,
         fallback_failed=fallback_failed,
+        opend_call_count=opend_call_count,
+        requested_codes_count=len(option_codes),
     )
 
 
@@ -277,13 +303,14 @@ def _fallback_fetch_missing_snapshots(
     retry_max_delay_sec: float,
     retry_call: Callable[..., Any],
     rate_limited_call: Callable[..., Any],
-) -> tuple[int, int]:
+) -> tuple[int, int, int]:
     if not missing_codes or int(max_fallback_codes) <= 0:
-        return 0, 0
+        return 0, 0, 0
 
     allowed = list(missing_codes[: int(max_fallback_codes)])
     dropped = max(0, len(missing_codes) - len(allowed))
     failed_count = 0
+    opend_call_count = 0
     if dropped > 0:
         snapshot_errors.append(
             {
@@ -301,14 +328,22 @@ def _fallback_fetch_missing_snapshots(
     for start in range(0, len(allowed), batch_size):
         batch = allowed[start : start + batch_size]
         try:
-            snap = retry_call(
-                "get_market_snapshot(fallback)",
-                lambda batch0=batch: rate_limited_call(
+            def _call_fallback_snapshot(batch0: list[str] = batch) -> Any:
+                def _gateway_fallback_snapshot_call() -> Any:
+                    nonlocal opend_call_count
+                    opend_call_count += 1
+                    return gateway.get_snapshot(batch0)
+
+                return rate_limited_call(
                     base_dir=base_dir,
                     endpoint="market_snapshot",
                     **snapshot_limit.call_kwargs(),
-                    call=lambda: gateway.get_snapshot(batch0),
-                ),
+                    call=_gateway_fallback_snapshot_call,
+                )
+
+            snap = retry_call(
+                "get_market_snapshot(fallback)",
+                _call_fallback_snapshot,
                 no_retry=no_retry,
                 retry_max_attempts=retry_max_attempts,
                 retry_time_budget_sec=retry_time_budget_sec,
@@ -363,7 +398,7 @@ def _fallback_fetch_missing_snapshots(
                 snap_map[code] = rec
         filled_count += max(0, len(snap_map) - filled_before)
 
-    return filled_count, failed_count
+    return filled_count, failed_count, opend_call_count
 
 
 def _append_opend_observation_error(

@@ -12,6 +12,11 @@ import json
 
 from src.application import pipeline_fetch_models
 from src.application.opend_symbol_outputs import save_outputs
+from src.application.required_data_coverage import (
+    build_required_data_coverage,
+    load_required_data_payload_from_csv,
+    required_data_csv_covers_fetch_plan,
+)
 from src.application.required_data_fetching import (
     RequiredDataFetchRequest,
     build_fetch_request_from_spec,
@@ -82,13 +87,13 @@ def ensure_required_data(
         if not should_refetch:
             if fetch_plan is not None:
                 try:
-                    if _existing_required_data_covers_bounds_plan(parsed=parsed, fetch_plan=fetch_plan):
+                    if required_data_csv_covers_fetch_plan(parsed=parsed, fetch_plan=fetch_plan):
                         _write_fetch_plan_debug(
                             symbol=sym,
                             required_data_dir=required_data_dir,
                             report_dir=report_dir,
                             fetch_plan=fetch_plan,
-                            merged_payload=_load_existing_payload(parsed=parsed, symbol=sym),
+                            merged_payload=load_required_data_payload_from_csv(parsed=parsed, symbol=sym),
                         )
                         return
                 except Exception:
@@ -116,6 +121,7 @@ def ensure_required_data(
                 chain_cache=True,
                 chain_cache_force_refresh=False,
                 opend_fetch_config=opend_fetch_config,
+                spot_override=fetch_plan.spot_reference,
             )
             for spec in fetch_plan.merged_specs
         ]
@@ -143,7 +149,7 @@ def ensure_required_data(
                 base=base,
                 request=requests[0],
             )
-            merged_payload = _load_existing_payload(parsed=parsed, symbol=sym)
+            merged_payload = load_required_data_payload_from_csv(parsed=parsed, symbol=sym)
         else:
             payloads = [
                 execute_required_data_opend(
@@ -195,28 +201,7 @@ def _write_fetch_plan_debug(
 ) -> None:
     try:
         rows = merged_payload.get("rows") or []
-        bounds_coverage: dict[str, dict[str, float | int | None]] = {}
-        for option_type in ("put", "call"):
-            strikes = [
-                float(row.get("strike"))
-                for row in rows
-                if isinstance(row, dict)
-                and str(row.get("option_type") or "").lower() == option_type
-                and row.get("strike") is not None
-            ]
-            expirations = sorted({
-                str(row.get("expiration"))
-                for row in rows
-                if isinstance(row, dict)
-                and str(row.get("option_type") or "").lower() == option_type
-                and row.get("expiration")
-            })
-            bounds_coverage[option_type] = {
-                "row_count": len([row for row in rows if isinstance(row, dict) and str(row.get("option_type") or "").lower() == option_type]),
-                "min_strike": (min(strikes) if strikes else None),
-                "max_strike": (max(strikes) if strikes else None),
-                "expirations": expirations,
-            }
+        bounds_coverage = build_required_data_coverage(rows if isinstance(rows, list) else [])
         root = report_dir or (required_data_dir / "reports")
         root.mkdir(parents=True, exist_ok=True)
         payload = {
@@ -229,91 +214,3 @@ def _write_fetch_plan_debug(
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     except Exception:
         pass
-
-
-def _existing_required_data_covers_bounds_plan(*, parsed: Path, fetch_plan: RequiredDataFetchPlanBundle) -> bool:
-    try:
-        import pandas as pd
-
-        df = pd.read_csv(parsed)
-    except Exception:
-        return False
-    if df.empty:
-        return False
-    for side_plan in fetch_plan.side_plans:
-        side_df = df[df.get("option_type").astype(str).str.lower() == side_plan.option_type].copy() if "option_type" in df.columns else pd.DataFrame()
-        if side_df.empty:
-            return False
-        requested_expirations = list(side_plan.explicit_expirations or [])
-        base_min = side_plan.strike_window.base_min_strike
-        base_max = side_plan.strike_window.base_max_strike
-        if requested_expirations:
-            expirations_to_check = requested_expirations
-        elif "expiration" in side_df.columns:
-            expirations_to_check = sorted({
-                str(value)
-                for value in side_df["expiration"].astype(str).tolist()
-                if str(value)
-            })
-        else:
-            expirations_to_check = []
-        if not expirations_to_check:
-            return False
-        for expiration in expirations_to_check:
-            exp_df = side_df[side_df["expiration"].astype(str) == str(expiration)].copy() if "expiration" in side_df.columns else pd.DataFrame()
-            if exp_df.empty:
-                return False
-            strikes = pd.to_numeric(exp_df.get("strike"), errors="coerce").dropna() if "strike" in exp_df.columns else pd.Series(dtype=float)
-            if not _strikes_cover_bounds(
-                strikes=strikes,
-                base_min=base_min,
-                base_max=base_max,
-            ):
-                return False
-    return True
-
-
-def _strikes_cover_bounds(*, strikes, base_min: float | None, base_max: float | None) -> bool:
-    if strikes.empty:
-        return False
-    unique_strikes = sorted({float(v) for v in strikes.tolist()})
-    if not unique_strikes:
-        return False
-    if base_min is not None and max(unique_strikes) < float(base_min):
-        return False
-    if base_max is not None and min(unique_strikes) > float(base_max):
-        return False
-
-    in_bounds = [
-        strike
-        for strike in unique_strikes
-        if (base_min is None or strike >= float(base_min))
-        and (base_max is None or strike <= float(base_max))
-    ]
-
-    if base_min is not None and base_max is not None and float(base_max) > float(base_min):
-        return len(in_bounds) >= 3
-    if base_min is not None or base_max is not None:
-        return len(in_bounds) >= 1
-    return len(unique_strikes) >= 1
-
-
-def _load_existing_payload(*, parsed: Path, symbol: str) -> dict[str, object]:
-    try:
-        import pandas as pd
-
-        df = pd.read_csv(parsed)
-    except Exception:
-        return {"symbol": symbol, "rows": []}
-    rows = df.to_dict(orient="records") if not df.empty else []
-    expirations = sorted({
-        str(row.get("expiration"))
-        for row in rows
-        if isinstance(row, dict) and row.get("expiration")
-    })
-    return {
-        "symbol": symbol,
-        "rows": rows,
-        "expirations": expirations,
-        "expiration_count": len(expirations),
-    }

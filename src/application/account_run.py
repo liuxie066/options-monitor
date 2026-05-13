@@ -460,12 +460,18 @@ def run_one_account(
 
     def _shared_prefetch_done() -> bool:
         state = request.prefetch_state
-        return bool(state.get("done")) if isinstance(state, dict) else False
+        if not isinstance(state, dict):
+            return False
+        if bool(request.force_mode):
+            return bool(state.get("force_done"))
+        return bool(state.get("done"))
 
     def _mark_shared_prefetch_done(done: bool) -> None:
         state = request.prefetch_state
         if done and isinstance(state, dict):
             state["done"] = True
+            if bool(request.force_mode):
+                state["force_done"] = True
 
     def _run_required_data_prefetch() -> bool:
         runlog.safe_event(
@@ -524,19 +530,19 @@ def run_one_account(
                 exc=exc,
             )
         runlog.safe_event("fetch_chain_cache", "ok", data=_safe_runlog_data(prefetch_stats))
-        done = (False if bool(request.force_mode) else True)
+        done = int(prefetch_stats.get("errors") or 0) == 0
         _mark_shared_prefetch_done(done)
         return done
 
     prefetch_done = bool(request.prefetch_done or _shared_prefetch_done())
-    should_prefetch = bool(request.force_mode) or (not prefetch_done)
+    should_prefetch = not prefetch_done
     if should_prefetch:
         if request.prefetch_lock is None:
             prefetch_done = _run_required_data_prefetch()
         else:
             with request.prefetch_lock:
                 prefetch_done = bool(request.prefetch_done or _shared_prefetch_done())
-                if bool(request.force_mode) or (not prefetch_done):
+                if not prefetch_done:
                     prefetch_done = _run_required_data_prefetch()
 
     acct_report_dir.mkdir(parents=True, exist_ok=True)

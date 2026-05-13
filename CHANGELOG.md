@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## 1.2.33 - 2026-05-13
+
+### Added
+- Added run-level required_data prefetch metrics and `required_data_prefetch_summary.json` status exposure through OpenClaw runtime status.
+- Added OpenD option-expiration caching by underlier and trading date to reduce repeated `get_option_expiration_date` calls.
+- Added same-run required_data prefetch dedupe that merges matching OpenD endpoints while preserving strategy DTE and strike bounds.
+
+### Changed
+- Narrowed required_data prefetches by enabled strategy bounds and pushed single-side option-chain requests down to OpenD when only put or call data is needed.
+- Kept prefetch completion-first without adding complete/best-effort mode switches, expiration cache switches, or dedupe switches.
+- Removed repeated OpenD snapshot and expiration endpoint defaults from `configs/system.json`; code defaults still protect those endpoints and explicit config overrides remain compatible.
+
+### Fixed
+- Recorded OpenD rate-limit cooldowns for legacy option-type fallback calls during option-chain fetches.
+- Required cached required_data coverage to satisfy requested max DTE before skipping a fetch.
+- Avoided marking shared force-prefetch state done when a prefetch run fails, so later accounts can retry.
+
 ## 1.2.32 - 2026-05-13
 
 ### Added
