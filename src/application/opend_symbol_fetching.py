@@ -99,6 +99,16 @@ def _pick_col(row: Any, *cands: str):
         return None
 
 
+def _tuple_col(row: tuple[Any, ...], columns: dict[str, int], name: str) -> Any:
+    idx = columns.get(name)
+    if idx is None:
+        return None
+    try:
+        return row[idx]
+    except Exception:
+        return None
+
+
 @dataclass(frozen=True)
 class FetchSymbolRequest:
     symbol: str
@@ -290,8 +300,10 @@ def fetch_symbol_request(
             rate_limited_call=rate_limited_opend_call,
         )
 
-        # Rehydrate into a DataFrame for existing downstream logic.
-        chain = pd.DataFrame(chain_bundle.rows or [])
+        # Reuse the fetched DataFrame when available to avoid records <-> DataFrame round trips.
+        chain = chain_bundle.frame
+        if not isinstance(chain, pd.DataFrame):
+            chain = pd.DataFrame(chain_bundle.rows or [])
         if chain is None or chain.empty:
             fetch_meta = dict(chain_bundle.fetch_meta or {})
             status = str(fetch_meta.get('status') or 'error')
@@ -389,9 +401,14 @@ def fetch_symbol_request(
                             if effective_max is not None and strike_v > float(effective_max):
                                 return False
                             return True
+                        option_type_values = (
+                            chain['option_type'].tolist()
+                            if 'option_type' in chain.columns
+                            else [None] * len(chain)
+                        )
                         mask = [
                             _row_keep(raw_option_type, raw_strike)
-                            for raw_option_type, raw_strike in zip(chain.get('option_type'), chain.get('strike_price'))
+                            for raw_option_type, raw_strike in zip(option_type_values, chain['strike_price'].tolist())
                         ]
                         chain = chain[mask].copy()
                     else:
@@ -432,16 +449,17 @@ def fetch_symbol_request(
 
         rows: list[dict[str, Any]] = []
 
-        for _, r in chain.iterrows():
-            opt_code = str(r.get('code'))
-            exp = str(r.get('expiration'))
+        chain_columns = {str(column): idx for idx, column in enumerate(chain.columns)}
+        for r in chain.itertuples(index=False, name=None):
+            opt_code = str(_tuple_col(r, chain_columns, 'code'))
+            exp = str(_tuple_col(r, chain_columns, 'expiration'))
             try:
                 dte = (_as_date(exp) - today).days
             except Exception:
                 dte = None
 
-            strike = to_float(r.get('strike_price'))
-            option_type = str(r.get('option_type') or '').lower()
+            strike = to_float(_tuple_col(r, chain_columns, 'strike_price'))
+            option_type = str(_tuple_col(r, chain_columns, 'option_type') or '').lower()
             if option_type in ('call', 'put'):
                 pass
             else:
@@ -450,23 +468,6 @@ def fetch_symbol_request(
                     option_type = 'call'
                 elif 'put' in option_type:
                     option_type = 'put'
-
-            # Filter by option type
-            ot_set = set([s.strip().lower() for s in str(option_types or '').split(',') if s.strip()])
-            if ot_set and option_type and (option_type not in ot_set):
-                continue
-
-            # Filter by strike range (best-effort)
-            if strike is not None:
-                side_window = (side_strike_windows or {}).get(option_type) if option_type else None
-                side_min = to_float((side_window or {}).get('min_strike')) if isinstance(side_window, dict) else None
-                side_max = to_float((side_window or {}).get('max_strike')) if isinstance(side_window, dict) else None
-                effective_min = side_min if side_min is not None else min_strike
-                effective_max = side_max if side_max is not None else max_strike
-                if (effective_min is not None) and (strike < float(effective_min)):
-                    continue
-                if (effective_max is not None) and (strike > float(effective_max)):
-                    continue
 
             srow = snap_map.get(opt_code)
             # srow is a dict of minimal snapshot fields
@@ -495,7 +496,7 @@ def fetch_symbol_request(
             snap_mult = _safe_int(_pick_col(srow, 'option_contract_multiplier', 'option_contract_size', 'lot_size')) if srow is not None else None
 
             # OpenD provides lot_size in option_chain; for stock options this is usually the contract multiplier.
-            lot_size = _safe_int(r.get('lot_size'))
+            lot_size = _safe_int(_tuple_col(r, chain_columns, 'lot_size'))
             multiplier = snap_mult or lot_size
 
             row = {

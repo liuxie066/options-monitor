@@ -9,6 +9,8 @@ import os
 import threading
 import time
 
+import pandas as pd
+
 from .expiration_normalization import normalize_expiration_ymd
 
 
@@ -61,6 +63,7 @@ class OptionChainFetchResult:
     error_code: str | None
     errors: list[dict[str, Any]]
     expiration_statuses: dict[str, str]
+    frame: pd.DataFrame | None = None
 
     def to_meta(self) -> dict[str, Any]:
         return {
@@ -285,6 +288,7 @@ def fetch_option_chains(
     )
 
     rows: list[dict[str, Any]] = []
+    frame_parts: list[pd.DataFrame] = []
     from_cache: list[str] = []
     fetched: list[str] = []
     errors: list[dict[str, Any]] = []
@@ -309,6 +313,9 @@ def fetch_option_chains(
                 cached_rows = load_option_chain_shard(fallback_cache_path, asof_date=asof_date)
             if cached_rows:
                 rows.extend(cached_rows)
+                cached_frame = _records_to_frame(cached_rows)
+                if cached_frame is not None and not cached_frame.empty:
+                    frame_parts.append(cached_frame)
                 from_cache.append(exp_key)
                 statuses[exp_key] = "cache"
                 continue
@@ -364,7 +371,8 @@ def fetch_option_chains(
                 )
             continue
 
-        chain_rows = _dataframe_to_records(chain)
+        chain_frame = _chain_value_to_frame(chain)
+        chain_rows = _chain_value_to_records(chain, frame=chain_frame)
         if not chain_rows:
             statuses[exp_key] = "empty"
             errors.append({"expiration": exp_norm, "error_code": "EMPTY_CHAIN", "message": "empty_chain"})
@@ -386,6 +394,8 @@ def fetch_option_chains(
             continue
 
         rows.extend(chain_rows)
+        if chain_frame is not None and not chain_frame.empty:
+            frame_parts.append(chain_frame)
         fetched.append(exp_key)
         statuses[exp_key] = "fetched"
         if request.chain_cache and asof_date:
@@ -408,6 +418,7 @@ def fetch_option_chains(
         error_code=_primary_error_code(errors),
         errors=errors,
         expiration_statuses=statuses,
+        frame=_concat_frames(frame_parts),
     )
 
 
@@ -464,19 +475,55 @@ def _fetch_one_chain(
         return _call_gateway(kwargs)
 
 
-def _dataframe_to_records(value: Any) -> list[dict[str, Any]]:
+def _chain_value_to_frame(value: Any) -> pd.DataFrame | None:
     try:
-        if value is None or value.empty:
-            return []
-    except Exception:
         if value is None:
-            return []
+            return None
+        if isinstance(value, pd.DataFrame):
+            return value if not value.empty else None
+        if isinstance(value, list):
+            return _records_to_frame(value)
+        if getattr(value, "empty", False):
+            return None
+        if hasattr(value, "to_dict"):
+            frame = pd.DataFrame(value.to_dict(orient="records"))
+            return frame if not frame.empty else None
+        return None
+    except Exception:
+        return None
+
+
+def _chain_value_to_records(value: Any, *, frame: pd.DataFrame | None = None) -> list[dict[str, Any]]:
+    if frame is not None:
+        return [dict(row) for row in frame.to_dict(orient="records")]
     if isinstance(value, list):
         return [dict(row) for row in value if isinstance(row, dict)]
     try:
         return [dict(row) for row in value.to_dict(orient="records")]
     except Exception:
         return []
+
+
+def _records_to_frame(rows: list[dict[str, Any]]) -> pd.DataFrame | None:
+    try:
+        if not rows:
+            return None
+        frame = pd.DataFrame([dict(row) for row in rows if isinstance(row, dict)])
+        return frame if not frame.empty else None
+    except Exception:
+        return None
+
+
+def _concat_frames(frames: list[pd.DataFrame]) -> pd.DataFrame | None:
+    usable = [frame for frame in frames if frame is not None and not frame.empty]
+    if not usable:
+        return None
+    try:
+        if len(usable) == 1:
+            return usable[0]
+        return pd.concat(usable, ignore_index=True)
+    except Exception:
+        return None
 
 
 def _primary_error_code(errors: list[dict[str, Any]]) -> str | None:
