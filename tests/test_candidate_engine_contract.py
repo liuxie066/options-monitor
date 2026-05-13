@@ -320,6 +320,22 @@ def test_candidate_engine_stage3_risk_warn_does_not_reject_but_reject_mode_does(
     ]
 
 
+def test_candidate_engine_stage3_rejects_missing_spread_when_threshold_enabled() -> None:
+    from domain.domain.engine import evaluate_candidate_risk_filter
+
+    payload = evaluate_candidate_risk_filter(
+        _accepted_base_candidate("put"),
+        max_spread_ratio=0.3,
+        spread_ratio=None,
+    )
+
+    assert payload["accepted"] is False
+    assert [r["reason"] for r in payload["rejects"]] == ["risk_spread"]
+    assert payload["rejects"][0]["message"] == "spread ratio unavailable"
+    assert payload["rejects"][0]["metric_value"] is None
+    assert payload["rejects"][0]["threshold"] == 0.3
+
+
 def test_candidate_engine_stage4_rank_keys_match_put_call_policy() -> None:
     from domain.domain.engine import build_candidate_rank_key, rank_candidate_rows
 

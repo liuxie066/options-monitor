@@ -212,8 +212,6 @@ def run_sell_put_scan(
             build_row_fn=_build_candidate_row,
             build_hard_constraint_kwargs_fn=lambda _contract: {},
             annualized_return_value_fn=lambda metrics: metrics.get("annualized_net_return_on_cash_basis"),
-            event_risk_flag_fn=lambda _row: False,
-            event_risk_mode_fn=lambda cfg: str((cfg or {}).get("mode") or "warn"),
             annotate_event_risk_fn=lambda df, base_dir, cfg: annotate_candidates_with_event_risk(
                 df,
                 base_dir=base_dir,
