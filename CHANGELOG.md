@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 1.2.37 - 2026-05-13
+
+### Added
+- Added `docs/ARCHITECTURE.md` to document module layers, public entry points, tick orchestration, scan/candidate ownership, option positions, close advice, and runtime state boundaries.
+- Added narrow tick helper modules for idempotency context, guard admission, run workspace setup, scheduler context, account execution, and notification delivery.
+
+### Changed
+- Reduced `multi_account_tick` to a public orchestration spine while preserving the `./om run tick` chain and compatibility exports.
+- Updated architecture guard tests to assert against the new owner modules instead of relying on implementation details inside the main tick entry point.
+
+### Tests
+- Added coverage for tick idempotency context and tick run workspace preparation.
+
 ## 1.2.36 - 2026-05-13
 
 ### Changed
