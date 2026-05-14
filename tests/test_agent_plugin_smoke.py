@@ -991,6 +991,16 @@ def test_runtime_status_summarizes_openclaw_runtime_files(tmp_path: Path) -> Non
         ),
         encoding="utf-8",
     )
+    (run_dir / "accounts" / "user1" / "state" / "expired_position_maintenance.json").write_text(
+        json.dumps(
+            {
+                "mode": "applied",
+                "applied_closed": 1,
+                "receipt": {"status": "sent", "delivery_confirmed": True, "message_id": "msg-auto-1"},
+            }
+        ),
+        encoding="utf-8",
+    )
 
     out = run_tool(
         "runtime_status",
@@ -1013,6 +1023,7 @@ def test_runtime_status_summarizes_openclaw_runtime_files(tmp_path: Path) -> Non
     assert out["data"]["latest_run"]["state"]["tick_metrics"]["json"]["notify_summary"]["sent"] == 1
     assert out["data"]["latest_run"]["accounts"]["user1"]["notification"]["text"] == "run account notification\n"
     assert out["data"]["latest_run"]["accounts"]["user1"]["required_data_prefetch"]["exists"] is True
+    assert out["data"]["latest_run"]["accounts"]["user1"]["expired_position_maintenance"]["json"]["receipt"]["status"] == "sent"
     assert out["data"]["summary"]["prefetch_available"] is True
     assert out["data"]["summary"]["prefetch_bottleneck"] == "option_chain_rate_gate"
     assert out["data"]["required_data_prefetch"]["total_opend_calls"] == 6

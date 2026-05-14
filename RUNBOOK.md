@@ -44,7 +44,7 @@ cd /home/node/.openclaw/workspace/options-monitor-prod
 | `./om-agent run --tool runtime_status ...` | 否 | 否 | 否 | 只读汇总现有输出 |
 | `./om-agent run --tool openclaw_readiness ...` | 否 | 否 | 否 | 只读汇总 runtime / healthcheck / 可选 cron 状态 |
 | `./om run tick --config ... --no-send` | 是 | 可能 | 否 | 会写本地运行产物，但禁发通知 |
-| `./om run tick --config ...` | 是 | 可能 | 是 | 正式运行入口 |
+| `./om run tick --config ...` | 是 | 可能 | 是 | 正式运行入口；过期自动平仓写入后默认发送回执 |
 | `python3 -m src.application.auto_trade_intake --mode apply` | 是 | 否 | 是 | 会写本地 option_positions / intake state/status，并默认发送入账回执 |
 | `./om option-positions sync-feishu --apply` | 是 | 是 | 否 | 先跑 `--dry-run` |
 

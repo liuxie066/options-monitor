@@ -22,6 +22,7 @@ def _make_request(
     prefetch_done: bool = False,
     force_mode: bool = False,
     allow_mutations: bool = True,
+    allow_notifications: bool = True,
 ) -> Any:
     from src.application.account_run import AccountRunRequest
 
@@ -63,6 +64,7 @@ def _make_request(
         prefetch_done=prefetch_done,
         force_mode=force_mode,
         allow_mutations=allow_mutations,
+        allow_notifications=allow_notifications,
     )
 
 
@@ -351,6 +353,11 @@ def test_run_one_account_notifies_auto_close_even_when_scan_gate_blocks(monkeypa
     assert metrics_states[-1]["should_notify"] is True
     assert metrics_states[-1]["meaningful"] is True
     assert metrics_states[-1]["notification_type"] == "auto_close"
+    maintenance_states = [payload for name, payload in env["state_writes"] if name == "expired_position_maintenance.json"]
+    assert maintenance_states[-1]["receipt"]["status"] == "skipped"
+    assert maintenance_states[-1]["receipt"]["reason"] == "skipped_no_route"
+    maintenance_audits = [evt for evt in env["audit_events"] if evt["action"] == "expired_position_maintenance"]
+    assert maintenance_audits[-1]["extra"]["receipt_status"] == "skipped"
 
 
 def test_run_one_account_notifies_auto_close_error_when_maintenance_raises(monkeypatch, tmp_path: Path) -> None:
@@ -399,7 +406,68 @@ def test_run_one_account_notifies_auto_close_error_when_maintenance_raises(monke
     maintenance_states = [payload for name, payload in env["state_writes"] if name == "expired_position_maintenance.json"]
     assert maintenance_states
     assert maintenance_states[-1]["mode"] == "error"
+    assert maintenance_states[-1]["receipt"]["status"] == "skipped"
+    assert maintenance_states[-1]["receipt"]["reason"] == "skipped_no_route"
     assert any(evt["step"] == "expired_position_maintenance" and evt["status"] == "error" for evt in runlog.events)
+
+
+def test_run_one_account_skips_auto_close_receipt_when_notifications_disabled(monkeypatch, tmp_path: Path) -> None:
+    from src.application.account_run import run_one_account
+
+    request = _make_request(tmp_path, allow_notifications=False)
+    env = _install_common_patches(monkeypatch, request)
+    runlog = _FakeRunlog()
+
+    monkeypatch.setattr(env["mod"], "decide_should_notify", lambda **kwargs: False)
+    monkeypatch.setattr(
+        env["mod"],
+        "decide_account_scan_gate",
+        lambda **kwargs: {
+            "run_pipeline": False,
+            "ran_scan": False,
+            "meaningful": False,
+            "result_reason": "scheduler_skip",
+        },
+    )
+    monkeypatch.setattr(env["mod"], "prefetch_required_data", lambda **kwargs: (_ for _ in ()).throw(AssertionError("prefetch should not run")))
+    monkeypatch.setattr(env["mod"], "run_pipeline_script", lambda **kwargs: (_ for _ in ()).throw(AssertionError("pipeline should not run")))
+    monkeypatch.setattr(
+        env["mod"],
+        "safe_send_auto_close_receipt",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("no-send must not call receipt sender")),
+    )
+    monkeypatch.setattr(
+        env["mod"],
+        "run_expired_position_maintenance_for_account",
+        lambda **kwargs: {
+            "mode": "applied",
+            "positions_checked": 1,
+            "candidates_should_close": 1,
+            "applied_closed": 1,
+            "errors": [],
+            "summary_text": "\n".join(
+                [
+                    "Auto-close expired positions (grace_days=1)",
+                    "candidates_should_close: 1",
+                    "applied_closed: 1",
+                    "ERRORS: 0",
+                ]
+            ),
+            "send_receipt_arg": kwargs.get("send_receipt"),
+        },
+    )
+
+    run_one_account(
+        request=request,
+        runlog=runlog,
+        audit_fn=env["audit_fn"],
+        fail_schema_validation=lambda **kwargs: (_ for _ in ()).throw(AssertionError("schema validation should not fail")),
+    )
+
+    maintenance_states = [payload for name, payload in env["state_writes"] if name == "expired_position_maintenance.json"]
+    assert maintenance_states[-1]["send_receipt_arg"] is False
+    assert maintenance_states[-1]["receipt"]["status"] == "skipped"
+    assert maintenance_states[-1]["receipt"]["reason"] == "skipped_no_send"
 
 
 def test_run_one_account_prefetches_and_runs_pipeline_successfully(monkeypatch, tmp_path: Path) -> None:

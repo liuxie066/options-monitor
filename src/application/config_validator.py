@@ -15,6 +15,7 @@ from domain.domain.fetch_source import normalize_fetch_source
 from src.application.account_config import ACCOUNT_TYPES, account_settings_from_config, accounts_from_config
 from src.application.config_loader import resolve_templates_config, resolve_watchlist_config, set_watchlist_config
 from src.application.trade_account_mapping import resolve_trade_intake_config
+from src.application.position_maintenance_receipt import resolve_auto_close_receipt_config
 from src.application.opend_fetch_config import OPEND_RATE_LIMIT_ENDPOINT_KEYS
 from src.application.yield_enhancement_config import (
     YIELD_ENHANCEMENT_FUNDING_MODES,
@@ -485,6 +486,33 @@ def validate_config(cfg: dict):
         if isinstance(sync_to_feishu, dict) and 'enabled' in sync_to_feishu and sync_to_feishu.get('enabled') is not None:
             if not isinstance(sync_to_feishu.get('enabled'), bool):
                 die('option_positions.sync_to_feishu.enabled must be a boolean')
+        auto_close = option_positions.get('auto_close') or {}
+        if auto_close and not isinstance(auto_close, dict):
+            die('option_positions.auto_close must be an object')
+        if isinstance(auto_close, dict):
+            for key in ('enabled', 'run_on_tick'):
+                if key in auto_close and auto_close.get(key) is not None and not isinstance(auto_close.get(key), bool):
+                    die(f'option_positions.auto_close.{key} must be a boolean')
+            for key, min_value in (('grace_days', 0), ('max_close_per_run', 1), ('max_close', 1)):
+                if key not in auto_close or auto_close.get(key) in (None, ''):
+                    continue
+                value = auto_close.get(key)
+                if isinstance(value, bool):
+                    die(f'option_positions.auto_close.{key} must be an integer')
+                    continue
+                if isinstance(value, int):
+                    resolved = value
+                elif isinstance(value, str) and value.strip().lstrip('-').isdigit():
+                    resolved = int(value)
+                else:
+                    die(f'option_positions.auto_close.{key} must be an integer')
+                    continue
+                if resolved < min_value:
+                    die(f'option_positions.auto_close.{key} must be >= {min_value}')
+            try:
+                resolve_auto_close_receipt_config(auto_close.get('receipt'))
+            except ValueError as exc:
+                die(str(exc))
 
     raw_templates = cfg.get('templates')
     if raw_templates is not None and not isinstance(raw_templates, dict):

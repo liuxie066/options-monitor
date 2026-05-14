@@ -91,6 +91,8 @@ def test_position_maintenance_filters_account_and_broker_in_dry_run(monkeypatch,
     assert captured["kwargs"]["grace_days"] == 2
     assert "Auto-close expired positions (grace_days=2)" in result["summary_text"]
     assert (report_dir / "auto_close_summary.txt").exists()
+    assert result["receipt"]["status"] == "skipped"
+    assert result["receipt"]["reason"] == "dry_run"
 
 
 def test_position_maintenance_refreshes_projection_before_apply(monkeypatch, tmp_path: Path) -> None:
@@ -133,6 +135,127 @@ def test_position_maintenance_refreshes_projection_before_apply(monkeypatch, tmp
     assert order == ["refresh", "load_records"]
     assert result["projection_refresh"] == {"trade_event_count": 2, "position_lot_count": 1}
     assert result["summary_text"] == ""
+    assert result["receipt"]["status"] == "skipped"
+    assert result["receipt"]["reason"] == "noop"
+
+
+def test_position_maintenance_attaches_receipt_after_apply(monkeypatch, tmp_path: Path) -> None:
+    from src.application import position_maintenance as mod
+
+    data_config = tmp_path / "data.json"
+    data_config.write_text(json.dumps({"option_positions": {"sqlite_path": str(tmp_path / "pos.sqlite3")}}), encoding="utf-8")
+    fake_repo = object()
+    receipt_calls: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(mod, "resolve_data_config_path", lambda **_kwargs: data_config)
+    monkeypatch.setattr(mod, "load_option_positions_repo", lambda _path: fake_repo)
+    monkeypatch.setattr(
+        mod,
+        "load_option_position_records",
+        lambda _repo: [
+            {
+                "record_id": "rec_1",
+                "fields": {
+                    "broker": "富途",
+                    "account": "lx",
+                    "status": "open",
+                    "contracts": 1,
+                    "position_id": "pos_1",
+                },
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        mod,
+        "auto_close_expired_positions",
+        lambda *_args, **_kwargs: (
+            [
+                {
+                    "record_id": "rec_1",
+                    "position_id": "pos_1",
+                    "should_close": True,
+                    "expiration_ymd": "2026-05-01",
+                }
+            ],
+            [
+                {
+                    "record_id": "rec_1",
+                    "position_id": "pos_1",
+                    "should_close": True,
+                    "expiration_ymd": "2026-05-01",
+                }
+            ],
+            [],
+        ),
+    )
+
+    def _send_receipt(**kwargs):
+        receipt_calls.append(dict(kwargs))
+        return {"status": "sent", "delivery_confirmed": True, "message_id": "msg-auto-1"}
+
+    monkeypatch.setattr(mod, "safe_send_auto_close_receipt", _send_receipt)
+
+    result = mod.run_expired_position_maintenance_for_account(
+        base=tmp_path,
+        cfg={"portfolio": {"data_config": str(data_config), "broker": "富途"}},
+        account="lx",
+        report_dir=tmp_path / "reports",
+        as_of_ms=1777766400000,
+    )
+
+    assert result["applied_closed"] == 1
+    assert result["receipt"]["status"] == "sent"
+    assert result["receipt"]["message_id"] == "msg-auto-1"
+    assert receipt_calls[0]["dry_run"] is False
+    assert receipt_calls[0]["result"]["applied_closed"] == 1
+
+
+def test_position_maintenance_skips_receipt_in_no_send_mode(monkeypatch, tmp_path: Path) -> None:
+    from src.application import position_maintenance as mod
+
+    data_config = tmp_path / "data.json"
+    data_config.write_text(json.dumps({"option_positions": {"sqlite_path": str(tmp_path / "pos.sqlite3")}}), encoding="utf-8")
+    fake_repo = object()
+
+    monkeypatch.setattr(mod, "resolve_data_config_path", lambda **_kwargs: data_config)
+    monkeypatch.setattr(mod, "load_option_positions_repo", lambda _path: fake_repo)
+    monkeypatch.setattr(
+        mod,
+        "load_option_position_records",
+        lambda _repo: [
+            {
+                "record_id": "rec_1",
+                "fields": {"broker": "富途", "account": "lx", "status": "open", "contracts": 1},
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        mod,
+        "auto_close_expired_positions",
+        lambda *_args, **_kwargs: (
+            [{"record_id": "rec_1", "position_id": "pos_1", "should_close": True}],
+            [{"record_id": "rec_1", "position_id": "pos_1", "should_close": True}],
+            [],
+        ),
+    )
+    monkeypatch.setattr(
+        mod,
+        "safe_send_auto_close_receipt",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("no-send must not call receipt sender")),
+    )
+
+    result = mod.run_expired_position_maintenance_for_account(
+        base=tmp_path,
+        cfg={"portfolio": {"data_config": str(data_config), "broker": "富途"}},
+        account="lx",
+        report_dir=tmp_path / "reports",
+        as_of_ms=1777766400000,
+        send_receipt=False,
+    )
+
+    assert result["applied_closed"] == 1
+    assert result["receipt"]["status"] == "skipped"
+    assert result["receipt"]["reason"] == "skipped_no_send"
 
 
 def test_position_maintenance_rejects_invalid_auto_close_config(tmp_path: Path) -> None:
@@ -160,6 +283,14 @@ def test_position_maintenance_rejects_invalid_auto_close_config(tmp_path: Path) 
         mod.run_expired_position_maintenance_for_account(
             base=tmp_path,
             cfg={**base_cfg, "option_positions": {"auto_close": {"max_close_per_run": 0}}},
+            account="lx",
+            report_dir=tmp_path / "reports",
+        )
+
+    with pytest.raises(ValueError, match="receipt.enabled must be a boolean"):
+        mod.run_expired_position_maintenance_for_account(
+            base=tmp_path,
+            cfg={**base_cfg, "option_positions": {"auto_close": {"receipt": {"enabled": "yes"}}}},
             account="lx",
             report_dir=tmp_path / "reports",
         )

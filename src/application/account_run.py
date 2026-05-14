@@ -35,6 +35,7 @@ from src.application.position_maintenance import (
     format_auto_close_summary,
     run_expired_position_maintenance_for_account,
 )
+from src.application.position_maintenance_receipt import safe_send_auto_close_receipt
 
 from domain.storage.repositories import run_repo, state_repo
 
@@ -61,6 +62,7 @@ class AccountRunRequest:
     prefetch_done: bool
     force_mode: bool = False
     allow_mutations: bool = True
+    allow_notifications: bool = True
     update_legacy_output: bool = True
     prefetch_lock: Any | None = None
     prefetch_state: dict[str, Any] | None = None
@@ -145,6 +147,48 @@ def _maintenance_notification_text(result: dict[str, Any]) -> str:
     if not summary_text:
         return ""
     return flatten_auto_close_summary(summary_text, always_show=False)
+
+
+def _position_maintenance_receipt_audit_fields(result: dict[str, Any]) -> dict[str, Any]:
+    receipt = result.get("receipt")
+    if not isinstance(receipt, dict):
+        return {}
+    return {
+        "receipt_status": receipt.get("status"),
+        "receipt_reason": receipt.get("reason"),
+        "receipt_delivery_confirmed": bool(receipt.get("delivery_confirmed")),
+        "receipt_message_id": receipt.get("message_id"),
+        "receipt_error_code": receipt.get("error_code"),
+    }
+
+
+def _ensure_position_maintenance_receipt(
+    *,
+    base: Path,
+    cfg: dict[str, Any],
+    allow_mutations: bool,
+    allow_notifications: bool,
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    if isinstance(result.get("receipt"), dict):
+        return result
+    out = dict(result)
+    if allow_notifications:
+        out["receipt"] = safe_send_auto_close_receipt(
+            base=base,
+            config=cfg,
+            dry_run=(not bool(allow_mutations)),
+            result=out,
+        )
+    else:
+        out["receipt"] = {
+            "enabled": True,
+            "status": "skipped",
+            "reason": "skipped_no_send",
+            "delivery_confirmed": False,
+            "message_id": None,
+        }
+    return out
 
 
 def _auto_close_grace_days_label(cfg: dict[str, Any]) -> str:
@@ -351,6 +395,7 @@ def run_one_account(
             report_dir=acct_report_dir,
             broker=(portfolio_cfg.get("broker") if isinstance(portfolio_cfg, dict) else None),
             dry_run=(not bool(request.allow_mutations)),
+            send_receipt=bool(request.allow_notifications),
         )
 
     try:
@@ -359,6 +404,13 @@ def run_one_account(
         else:
             with request.maintenance_lock:
                 maintenance_result = _run_position_maintenance()
+        maintenance_result = _ensure_position_maintenance_receipt(
+            base=request.base,
+            cfg=cfg,
+            allow_mutations=request.allow_mutations,
+            allow_notifications=request.allow_notifications,
+            result=maintenance_result,
+        )
         maintenance_notification = _maintenance_notification_text(maintenance_result)
         maintenance_status = _status_for_position_maintenance(maintenance_result)
         audit_fn(
@@ -375,6 +427,7 @@ def run_one_account(
                 "applied_closed": maintenance_result.get("applied_closed"),
                 "skipped_already_closed": maintenance_result.get("skipped_already_closed"),
                 "errors": len(maintenance_result.get("errors") or []),
+                **_position_maintenance_receipt_audit_fields(maintenance_result),
             },
         )
         _write_acct_run_state("expired_position_maintenance.json", maintenance_result)
@@ -408,6 +461,13 @@ def run_one_account(
             account=acct,
             broker=(portfolio_cfg.get("broker") if isinstance(portfolio_cfg, dict) else None),
             exc=exc,
+        )
+        maintenance_result = _ensure_position_maintenance_receipt(
+            base=request.base,
+            cfg=cfg,
+            allow_mutations=request.allow_mutations,
+            allow_notifications=request.allow_notifications,
+            result=maintenance_result,
         )
         maintenance_notification = _maintenance_notification_text(maintenance_result)
         _write_acct_run_state("expired_position_maintenance.json", maintenance_result)

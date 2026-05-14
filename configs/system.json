@@ -57,6 +57,19 @@
       }
     },
     "option_positions": {
+      "auto_close": {
+        "enabled": true,
+        "run_on_tick": true,
+        "grace_days": 1,
+        "max_close_per_run": 20,
+        "receipt": {
+          "enabled": true,
+          "notify_applied": true,
+          "notify_failed": true,
+          "notify_noop": false,
+          "notify_dry_run": false
+        }
+      },
       "sync_to_feishu": {
         "enabled": false
       }
