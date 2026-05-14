@@ -10,9 +10,13 @@
 - [../CONFIGS.md](../CONFIGS.md)：配置来源与 canonical config 约定
 - [../CONFIGURATION_GUIDE.md](../CONFIGURATION_GUIDE.md)：详细配置字段说明
 
-## Agent / Tool
+## Agent / LLM Wiki
+- [../AGENTS.md](../AGENTS.md)：Agent 通用上下文、安全规则、入口层级、模块地图（静态前缀，Prompt Cache 友好）
+- [../CLAUDE.md](../CLAUDE.md)：Claude / OpenClaw 特有补充指令
 - [AGENT_INTEGRATION.md](AGENT_INTEGRATION.md)：Agent 集成合同
+- [AGENT_WIKI.md](AGENT_WIKI.md)：Agent 专用代码库速查（模块地图、关键接口、数据流）
 - [TOOL_REFERENCE.md](TOOL_REFERENCE.md)：工具参考
+- [SESSION_SUMMARY.md](SESSION_SUMMARY.md)：Session 间记忆摘要模板
 
 ## 运行与运维
 - [../RUNBOOK.md](../RUNBOOK.md)：运维巡检、cron、应急处理
@@ -25,3 +29,6 @@
 
 ## 安全与约束
 - [GUARDRAILS.md](GUARDRAILS.md)：guardrails 与安全门禁
+
+## 架构
+- [ARCHITECTURE.md](ARCHITECTURE.md)：系统分层、入口点、运行时流程（面向人类开发者）

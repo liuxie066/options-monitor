@@ -1,144 +1,121 @@
-# Agent Notes
+# Agent Context — options-monitor
 
-This repository is primarily maintained for personal use. Keep agent support lightweight: prefer this shared guide plus the existing scripts instead of adding MCP servers, new agent-specific frameworks, or large directory restructures unless explicitly requested.
+> Operations-sensitive local options monitoring tool. Python + pandas + SQLite.
+> Treat as a controlled operational system, not a generic sandbox.
 
-## Project Context
+## Project Identity
 
-- Purpose: options monitoring and notifications for Sell Put and Covered Call workflows.
-- Accounts: use lowercase account labels. Read the default list from top-level `accounts` in the runtime config; examples currently use `lx` and `sy`.
-- Core code: `domain/` contains deterministic business logic; `src/application/` owns application services and unified tick orchestration; `scripts/` contains compatibility entry points and operational helpers.
-- Reports: generated under `output/`, `output_accounts/`, and `output_shared/`.
-- Notification layout source of truth: `src/application/notify_symbols.py` for per-account notification content and `src/application/multi_tick/notify_format.py` for account message wrappers.
+| Property | Value |
+|---|---|
+| Purpose | Sell Put / Covered Call option scanning, filtering, reporting, and notification |
+| Stack | Python 3, pandas, SQLite, OpenD/Futu API, Feishu webhooks |
+| Accounts | Lowercase labels: `lx`, `sy`. Read from top-level `accounts` in runtime config. |
+| Canonical Configs | `config.us.json`, `config.hk.json` (built from `configs/system.json` + user overlays) |
+| Reports | `output/`, `output_accounts/<account>/`, `output_shared/` |
+| Notification Content | `src/application/notify_symbols.py` (per-account), `src/application/multi_tick/notify_format.py` (wrapper) |
 
-## Agent Operating Rules
+## Module Map
 
-- Treat this repository as an operations-sensitive tool, not a generic Python sandbox.
-- If the user asks for explanation, investigation, or code reading, inspect files and summarize first. Do not run Python scripts just to see what happens.
-- Only execute commands when the user explicitly asks for execution, or when execution is needed to verify a concrete code/config change you made.
-- Prefer dry-run, validation, or test commands over live operational commands whenever both could answer the question.
-- Before running a command that can send notifications, write data, or mutate runtime state, verify that the user explicitly requested that action.
+| Task | Primary File(s) | Guardrails |
+|---|---|---|
+| Change candidate filter/rank logic | `domain/domain/engine/candidate_engine.py` | Do NOT add parallel ranking in `src/application/scan_*.py` |
+| Change notification text format | `src/application/notify_symbols.py`, `src/application/multi_tick/notify_format.py` | Keep Markdown-friendly, not card-like plain text |
+| Change close-advice policy | `domain/domain/close_advice.py` | Do NOT add scoring policy in `src/application/close_advice_runner.py` |
+| Change option-position projection | `domain/domain/option_position_ledger.py` | Feishu `option_positions` is bootstrap/mirror only |
+| Change tick orchestration | `src/application/multi_account_tick.py` | Keep subflows in narrow helper modules (see AGENT_WIKI) |
+| Change config validation | `src/application/config_validator.py`, `src/application/layered_config.py` | — |
+| Change agent tools | `src/application/agent_tool_registry.py`, `src/application/agent_tool_handlers.py` | — |
+| Change CLI behavior | `src/interfaces/cli/main.py` (human), `src/interfaces/agent/cli.py` (agent) | Prefer facade-preserving changes |
+| Read business rules | `domain/domain/` | Must not import `src/` or `scripts/` |
 
-## Research vs Execution
+## Entry Point Hierarchy
 
-- Requests such as "how does this work", "look into", "check", "why", or "explain" default to read/analyze mode.
-- In read/analyze mode, start from the relevant source files, config docs, and tests before considering command execution.
-- Escalate from reading to execution only when static inspection is insufficient and the command is low risk, or when the user explicitly asks you to run it.
+Use the highest-level safe entry point available, in this order:
 
-## Preferred Entry Points
+1. `./om-agent` — structured JSON tools (preferred for agents)
+2. `./om` — human CLI
+3. `python3 -m src.application.<module>` — module entry
+4. `python3 scripts/...` — compatibility/operational wrappers only
 
-- For structured agent/programmatic usage, prefer `./om-agent` first.
-- For human-operated workflow commands, prefer the unified CLI `./om` when it covers the task.
-- For tick / scan / notification orchestration, there is one unified chain: `./om run tick` -> `src.application.multi_account_tick.run_tick`. A single account is just `--accounts lx`; multiple accounts are `--accounts lx sy`. Legacy `scripts/send_if_needed*.py` launchers have been removed.
-- Use direct `python3 scripts/...` entry points only when:
-  - the user explicitly asks for that script,
-  - the unified CLI / agent CLI does not expose the needed capability,
-  - or you are running tests / validation commands.
-- When showing examples to users, prefer `./om-agent` or `./om` over raw script paths when both are valid.
+Tick / scan / notification unified chain:
+```bash
+./om run tick --config config.us.json --accounts lx [sy]
+```
 
-## Task Routing Hints
+Legacy `scripts/send_if_needed*.py` removed. Do not use.
 
-- Business rules and deterministic calculations: inspect `domain/` first.
-- Notification formatting and message layout: inspect `src/application/notify_symbols.py` and `src/application/multi_tick/notify_format.py` first.
-- Operator-facing command behavior: inspect `src/interfaces/cli/`, `./om`, and related docs first.
-- Agent-facing structured tooling: inspect `./om-agent`, `scripts/install_agent_plugin.sh`, and README agent sections first.
-- Configuration contracts and runtime expectations: inspect `CONFIGS.md`, `CONFIGURATION_GUIDE.md`, examples under `configs/examples/`, and `src/application/config_validator.py` before executing config-related commands.
+## Safety Red Lines
 
-## Safety Rules
+Before executing any command, confirm user explicitly wants it if it involves:
 
-- Do not send real notifications unless the user explicitly asks for it.
-- Do not deploy unless the user explicitly asks for it.
-- Do not modify production config files unless the user explicitly asks for it.
-- Do not delete runtime artifacts, state files, reports, or output directories unless the user explicitly asks for cleanup.
-- Prefer dry-run modes for write operations, especially Feishu / option position writes.
-- Preserve user changes in a dirty worktree. Never reset or revert unrelated files without explicit permission.
+- [ ] Sending real notifications (Feishu, webhook, email)
+- [ ] Deploying to production (`make deploy-safe` or similar)
+- [ ] Modifying `config.us.json` / `config.hk.json` or any production runtime config
+- [ ] Deleting `output/`, `output_runs/`, `output_shared/`, state files, or runtime artifacts
+- [ ] Any write operation without `--dry-run` first (especially Feishu / option-position writes)
 
-## Execution Guardrails for Codex / Claude Code / OpenClaw
+Preserve user changes in a dirty worktree. Never reset or revert unrelated files without explicit permission.
 
-- Do not default to running `python3 ...` commands for first-pass exploration.
-- If a task can be answered by reading code, docs, config examples, or tests, do that first.
-- For system status or troubleshooting, prefer read-only agent tools before runtime commands:
-  - `./om-agent run --tool runtime_status --input-json '{"config_key":"us"}'`
-  - `./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'`
-- In OpenClaw environments, use `./om-agent run --tool openclaw_readiness --input-json '{"config_key":"us"}'` as the first readiness check.
-- When execution is necessary, choose the highest-level safe entry point available in this order:
-  1. `./om-agent`
-  2. `./om`
-  3. `python3 -m ...`
-  4. `python3 scripts/...`
-- Prefer commands that validate or inspect state over commands that mutate state.
-- If a live command is risky but a dry-run or test exists, use the dry-run or test first.
+## Default Mode
 
-## Common Checks
+| User Request | Default Response |
+|---|---|
+| explain / look into / check / why / how does this work | Read/analyze mode: inspect source, docs, config examples, and tests first. Summarize before executing. |
+| fix / add / change / run | Confirm scope, prefer `--dry-run` or tests, then execute. |
 
-For notification formatting changes:
+Do not run Python scripts just to see what happens.
+
+## Style Contract
+
+- Account labels lowercase: `lx`, `sy`
+- User-facing reports remain Markdown-friendly; preserve existing Chinese tone
+- Missing data explicit: do not invent values when upstream data is absent
+- Symbol canonicalization: `NVDA`, `0700.HK`, `9992.HK`; aliases such as `POP` must not persist (use `src/application/opend_utils.py:resolve_underlier_alias`)
+
+---
+
+<!-- DYNAMIC SECTION: content below may change between sessions -->
+
+## Current Iteration Context
+
+_Reserved: current sprint focus, recent refactors, known blockers._
+_See `docs/AGENT_WIKI.md` for detailed architecture and `docs/SESSION_SUMMARY.md` for session handoff template._
+
+## Quick Checks
 
 ```bash
+# Notification formatting
 python3 -m pytest tests/test_notify_symbols_markdown.py tests/test_multi_tick_notify_format.py
-```
 
-For unified tick behavior:
+# Tick behavior
+python3 -m pytest tests/test_multi_tick_*.py tests/test_unified_tick_entrypoint.py
 
-```bash
-python3 -m pytest tests/test_multi_tick_*.py
-```
-
-For unified tick / notification dispatch changes:
-
-```bash
-python3 -m pytest tests/test_unified_tick_entrypoint.py tests/test_multi_tick_*.py
-```
-
-For config validation:
-
-```bash
+# Config validation
 python3 -m pytest tests/test_layered_config.py
 ./om config build --market us --user-config configs/examples/user.example.us.json --dry-run
 ./om config build --market hk --user-config configs/examples/user.example.hk.json --dry-run
 ```
 
-## Common Commands
-
-Build per-account notification text from generated alerts:
+## Common Workflows
 
 ```bash
-python3 -m src.application.notify_symbols --alerts-input output/reports/symbols_alerts.txt --changes-input output/reports/symbols_changes.txt --output output/reports/symbols_notification.txt
-```
-
-Run the unified tick flow (preferred unified CLI):
-
-```bash
+# Run unified tick
 ./om run tick --config config.us.json --accounts lx
 ./om run tick --config config.us.json --accounts lx sy
-```
 
-Legacy `scripts/send_if_needed.py` and `scripts/send_if_needed_multi.py` launchers have been removed. Upgrade old cron jobs to `./om run tick`.
+# Read-only diagnostics (preferred first step)
+./om-agent run --tool runtime_status --input-json '{"config_key":"us"}'
+./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'
 
-Query Sell Put cash usage:
-
-```bash
+# Sell Put cash headroom
 python3 -m src.interfaces.cli.main sell-put-cash --market 富途 --account lx
-python3 -m src.interfaces.cli.main sell-put-cash --market 富途 --account sy
-```
 
-Manage watchlist:
-
-```bash
+# Watchlist management
 ./om watchlist list
 ./om watchlist add TCOM --put
 ./om watchlist edit TCOM --set sell_put.max_strike=45
-./om watchlist rm TCOM
-```
 
-Maintain option positions, using dry-run first:
-
-```bash
+# Option positions (dry-run first)
 ./om option-positions list --broker 富途 --account lx --status open
 ./om option-positions add --account lx --symbol 0700.HK --option-type put --side short --contracts 1 --currency HKD --strike 420 --multiplier 100 --exp 2026-04-29 --dry-run
 ```
-
-## Style Notes
-
-- Notification content should remain Markdown-friendly, not card-like plain text.
-- Keep account labels lowercase: `lx`, `sy`.
-- Keep missing data explicit. Do not invent values when upstream data is absent.
-- Preserve the existing Chinese user-facing tone in reports and notifications.
