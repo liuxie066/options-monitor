@@ -16,6 +16,7 @@ from domain.domain.engine import (
     validate_yield_enhancement_pair,
 )
 from domain.domain.candidate_defaults import (
+    DEFAULT_SELL_PUT_WINDOW,
     DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_LIQUIDITY,
     DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_WINDOW,
     resolve_candidate_liquidity,
@@ -44,12 +45,19 @@ def _safe_int(value: Any) -> int | None:
     return int(out) if out is not None else None
 
 
-def _merged_dict(*items: dict | None) -> dict:
-    out: dict = {}
+def _merged_dict(*items: dict[str, Any] | None) -> dict[str, Any]:
+    out: dict[str, Any] = {}
     for item in items:
         if isinstance(item, dict):
             out.update(item)
     return out
+
+
+def _cfg_field_explicit(raw_cfg: dict[str, Any], field: str) -> bool:
+    explicit_fields = raw_cfg.get("_explicit_fields")
+    if isinstance(explicit_fields, (list, tuple, set)):
+        return field in {str(item) for item in explicit_fields}
+    return field in raw_cfg
 
 
 def _format_contract(expiration: str, strike: float, option_suffix: str) -> str:
@@ -306,6 +314,9 @@ def _build_pair_row(
     min_combo_net_credit = _safe_float(enhancement_cfg.get("min_combo_net_credit"))
     if funding_mode == "max_debit":
         min_combo_net_credit = None
+    max_call_cost_to_put_credit = _safe_float(enhancement_cfg.get("max_call_cost_to_put_credit"))
+    if funding_mode == "max_debit" and not bool(enhancement_cfg.get("_max_call_cost_to_put_credit_explicit")):
+        max_call_cost_to_put_credit = None
     decision = compute_yield_enhancement_funding_decision(
         put_leg=put_leg,
         call_leg=call_leg,
@@ -313,7 +324,7 @@ def _build_pair_row(
         call_buy_fee=call_buy_fee,
         combo_metrics=metrics,
         min_combo_net_credit=min_combo_net_credit,
-        max_call_cost_to_put_credit=_safe_float(enhancement_cfg.get("max_call_cost_to_put_credit")),
+        max_call_cost_to_put_credit=max_call_cost_to_put_credit,
         min_upside_lift_to_call_cost=_safe_float(enhancement_cfg.get("min_upside_lift_to_call_cost")),
         min_upside_lift_to_put_credit=_safe_float(enhancement_cfg.get("min_upside_lift_to_put_credit")),
         max_combo_spread_ratio=_safe_float(enhancement_cfg.get("max_combo_spread_ratio")),
@@ -372,12 +383,15 @@ def find_sell_put_yield_enhancement_pairs(
     df_candidates: pd.DataFrame,
     symbol: str,
     input_root: Path,
-    yield_enhancement_cfg: dict | None,
-    global_yield_enhancement_liquidity: dict | None = None,
+    yield_enhancement_cfg: dict[str, Any] | None,
+    sell_put_cfg: dict[str, Any] | None = None,
+    global_yield_enhancement_liquidity: dict[str, Any] | None = None,
     output_path: Path | None = None,
 ) -> pd.DataFrame:
     df = df_candidates.copy()
+    raw_cfg = dict(yield_enhancement_cfg or {})
     cfg = apply_yield_enhancement_defaults(yield_enhancement_cfg)
+    cfg["_max_call_cost_to_put_credit_explicit"] = _cfg_field_explicit(raw_cfg, "max_call_cost_to_put_credit")
     if df.empty or not cfg.get("enabled"):
         pairs_df = _empty_pairs_df()
         if output_path is not None:
@@ -390,7 +404,10 @@ def find_sell_put_yield_enhancement_pairs(
     call_cfg = dict(cfg.get("call") or {})
     liquidity_cfg = _merged_dict(global_yield_enhancement_liquidity, cfg)
     liquidity = resolve_candidate_liquidity(liquidity_cfg, defaults=DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_LIQUIDITY)
-    window = resolve_candidate_window(cfg, defaults=DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_WINDOW)
+    window = resolve_candidate_window(
+        sell_put_cfg if sell_put_cfg is not None else cfg,
+        defaults=DEFAULT_SELL_PUT_WINDOW if sell_put_cfg is not None else DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_WINDOW,
+    )
 
     min_put_otm_pct = float(cfg.get("min_put_otm_pct", 0.05) or 0.0)
     min_call_otm = float(call_cfg.get("min_otm_pct", 0.03) or 0.0)

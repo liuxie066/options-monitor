@@ -47,6 +47,9 @@ def render_one(row: pd.Series) -> str:
     option_ccy = str(row.get("option_ccy") or row.get("currency") or "").strip().upper() or "N/A"
     dte = _safe_float(row.get("dte"))
     put_delta = _safe_float(row.get("put_delta"))
+    put_bid = _safe_float(row.get("put_bid"))
+    if put_bid is None:
+        put_bid = _safe_float(row.get("bid"))
     call_ask = _safe_float(row.get("call_ask"))
     call_delta = _safe_float(row.get("call_delta"))
     expected_move = _safe_float(row.get("expected_move"))
@@ -71,7 +74,7 @@ def render_one(row: pd.Series) -> str:
             f"上行弹性: 潜在收益={('-' if upside_lift is None else num(upside_lift))} | 成本倍数={('-' if upside_lift_to_call_cost is None else f'{upside_lift_to_call_cost:.2f}x')} | 权利金倍数={('-' if upside_lift_to_put_credit is None else f'{upside_lift_to_put_credit:.2f}x')}",
             f"场景评分: {('-' if scenario_score is None else pct(scenario_score))}",
             f"场景年化: {('-' if annualized_scenario_score is None else pct(annualized_scenario_score))}",
-            f"Put: strike={put_strike} | delta={('-' if put_delta is None else f'{put_delta:.2f}')}",
+            f"Put: strike={put_strike} | bid={('-' if put_bid is None else num(put_bid))} | delta={('-' if put_delta is None else f'{put_delta:.2f}')}",
             f"Call: strike={call_strike} | ask={('-' if call_ask is None else num(call_ask))} | delta={('-' if call_delta is None else f'{call_delta:.2f}')}",
             *( [candidate_line] if candidate_line else [] ),
             f"Expected Move: {('-' if expected_move is None else num(expected_move))} | IV={('-' if expected_move_iv is None else pct(expected_move_iv))}",

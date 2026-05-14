@@ -7,7 +7,6 @@ from typing import Any, Literal
 from domain.domain.candidate_defaults import (
     DEFAULT_SELL_CALL_WINDOW,
     DEFAULT_SELL_PUT_WINDOW,
-    DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_WINDOW,
     CandidateWindowDefaults,
     resolve_candidate_window,
 )
@@ -320,6 +319,7 @@ def _resolve_call_side_plan(
     spot_reference: float | None,
     defaults: CandidateWindowDefaults = DEFAULT_SELL_CALL_WINDOW,
     source_prefix: str = "sell_call",
+    dte_source_prefix: str | None = None,
     fallback_min_pct: float = DEFAULT_SELL_CALL_SPOT_FALLBACK_MIN_PCT,
     fallback_max_pct: float = DEFAULT_FETCH_NEAR_BOUND_EXPAND_PCT,
 ) -> OptionSideFetchPlan:
@@ -345,7 +345,10 @@ def _resolve_call_side_plan(
         explicit_expirations=expirations,
         strike_window=strike_window,
         planning_reason=reason,
-        source_fields=source_fields + [f"{source_prefix}.min_dte", f"{source_prefix}.max_dte"],
+        source_fields=source_fields + [
+            f"{dte_source_prefix or source_prefix}.min_dte",
+            f"{dte_source_prefix or source_prefix}.max_dte",
+        ],
         spot_reference=spot_reference,
     )
 
@@ -361,17 +364,17 @@ def _resolve_sell_put_yield_enhancement_call_plan(
 ) -> OptionSideFetchPlan:
     cfg = dict(yield_enhancement_cfg or {})
     call_cfg = dict(cfg.get("call") or {})
+    call_cfg.pop("min_dte", None)
+    call_cfg.pop("max_dte", None)
     for key in ("min_dte", "max_dte"):
-        if key in cfg and key not in call_cfg:
-            call_cfg[key] = cfg.get(key)
-        elif key in sell_put_cfg and key not in call_cfg:
+        if key in sell_put_cfg:
             call_cfg[key] = sell_put_cfg.get(key)
     default_call_cfg = dict(YIELD_ENHANCEMENT_DEFAULTS["call"])
     fallback_min_pct = _safe_float(call_cfg.get("min_otm_pct", default_call_cfg.get("min_otm_pct")))
     fallback_max_pct = _safe_float(call_cfg.get("max_otm_pct", default_call_cfg.get("max_otm_pct")))
     sell_put_window = resolve_candidate_window(
         sell_put_cfg,
-        defaults=DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_WINDOW,
+        defaults=DEFAULT_SELL_PUT_WINDOW,
     )
     return _resolve_call_side_plan(
         symbol=symbol,
@@ -381,6 +384,7 @@ def _resolve_sell_put_yield_enhancement_call_plan(
         spot_reference=spot_reference,
         defaults=sell_put_window,
         source_prefix="yield_enhancement.call",
+        dte_source_prefix="sell_put",
         fallback_min_pct=(
             float(fallback_min_pct)
             if fallback_min_pct is not None

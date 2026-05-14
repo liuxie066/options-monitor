@@ -240,6 +240,7 @@ def run_sell_put_scan_and_summarize(
         symbol=symbol,
         input_root=required_data_dir,
         yield_enhancement_cfg=yield_enhancement_cfg,
+        sell_put_cfg=sp,
         global_yield_enhancement_liquidity=(symbol_cfg.get('_global_yield_enhancement_liquidity') or {}),
         output_path=None,
     )

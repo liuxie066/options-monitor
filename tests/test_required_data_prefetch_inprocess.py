@@ -216,7 +216,7 @@ def test_strategy_prefetch_kwargs_uses_strategy_dte_and_strike_bounds() -> None:
 
     assert out["option_types"] == "put,call"
     assert out["min_dte"] == 20
-    assert out["max_dte"] == 120
+    assert out["max_dte"] == 90
     assert out["side_strike_windows"]["put"]["min_strike"] == 360
     assert out["side_strike_windows"]["put"]["max_strike"] == 450
     assert out["side_strike_windows"]["call"]["min_strike"] == 550
