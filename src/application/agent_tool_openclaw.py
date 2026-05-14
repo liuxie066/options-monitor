@@ -586,6 +586,11 @@ def runtime_status_tool(
                     base=base,
                     read_json_object_or_empty=read_json_object_or_empty,
                 ),
+                "expired_position_maintenance": _json_file_info(
+                    run_account_root / "state" / "expired_position_maintenance.json",
+                    base=base,
+                    read_json_object_or_empty=read_json_object_or_empty,
+                ),
                 "notification": _text_file_info(
                     run_account_root / "symbols_notification.txt",
                     base=base,

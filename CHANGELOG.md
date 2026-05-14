@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 1.2.46 - 2026-05-15
+
+### Added
+- Added default-on receipt delivery for expired auto-close maintenance after local `option_positions` events/projection are updated.
+- Added `option_positions.auto_close.receipt` controls for applied, failed, noop, and dry-run receipt behavior, with `--no-send` suppressing receipt delivery.
+- Added `runtime_status` visibility for the latest run's `expired_position_maintenance` state and receipt result.
+
+### Changed
+- Kept receipt delivery outside the option-position persistence service so the canonical `trade_events -> projection -> position_lots` chain remains replayable.
+- Documented auto-close receipt side effects and troubleshooting surfaces in README, RUNBOOK, CONFIGS, and configuration guidance.
+
+### Tests
+- Added auto-close receipt decision, message, delivery, no-send, account-run state/audit, runtime status, and config validation coverage.
+- Re-ran focused auto-close, account-run, runtime-status, tick orchestration, option-position service, import ownership, compile, config dry-run, type, and release metadata checks.
+
 ## 1.2.45 - 2026-05-15
 
 ### Added

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, cast
 
 from src.application.config_loader import resolve_data_config_path
 from domain.domain.option_position_lots import (
@@ -19,6 +19,10 @@ from src.application.option_positions_service import (
 )
 from src.application.option_positions_facade import load_option_position_records
 from src.application.option_positions_sync_config import apply_option_positions_runtime_config
+from src.application.position_maintenance_receipt import (
+    resolve_auto_close_receipt_config,
+    safe_send_auto_close_receipt,
+)
 
 
 def _bool_config(data: dict[str, Any], key: str, default: bool) -> bool:
@@ -56,7 +60,13 @@ def _auto_close_config(cfg: dict[str, Any]) -> dict[str, Any]:
         "enabled": _bool_config(data, "enabled", True),
         "run_on_tick": _bool_config(data, "run_on_tick", True),
         "grace_days": _int_config(data, "grace_days", 1, min_value=0),
-        "max_close": _int_config(data, "max_close_per_run" if "max_close_per_run" in data else "max_close", 20, min_value=1),
+        "max_close": _int_config(
+            data,
+            "max_close_per_run" if "max_close_per_run" in data else "max_close",
+            20,
+            min_value=1,
+        ),
+        "receipt": resolve_auto_close_receipt_config(data.get("receipt")),
     }
 
 
@@ -144,7 +154,12 @@ def _refresh_position_projection_before_auto_close(repo: Any) -> dict[str, Any] 
     count_trade_events = getattr(candidate, "count_trade_events", None)
     if not callable(count_trade_events):
         return None
-    if int(count_trade_events() or 0) <= 0:
+    try:
+        count_trade_events_fn = cast(Callable[[], Any], count_trade_events)
+        trade_event_count = int(count_trade_events_fn())
+    except Exception:
+        return None
+    if trade_event_count <= 0:
         return None
     return rebuild_position_lots_from_trade_events(candidate)
 
@@ -167,6 +182,7 @@ def run_expired_position_maintenance_for_account(
     as_of_ms: int | None = None,
     broker: str | None = None,
     dry_run: bool = False,
+    send_receipt: bool = True,
 ) -> dict[str, Any]:
     auto_cfg = _auto_close_config(cfg)
     if not auto_cfg["enabled"] or not auto_cfg["run_on_tick"]:
@@ -220,7 +236,7 @@ def run_expired_position_maintenance_for_account(
         for item in decisions
         if isinstance(item, dict) and item.get("skip_reason") == "already_closed_or_zero_open"
     ]
-    result = {
+    result: dict[str, Any] = {
         "mode": "dry_run" if dry_run else "applied",
         "account": normalize_account(account) if account else None,
         "broker": normalize_broker(effective_broker) if effective_broker else None,
@@ -238,4 +254,19 @@ def run_expired_position_maintenance_for_account(
     if projection_refresh is not None:
         result["projection_refresh"] = projection_refresh
     result["summary_text"] = _write_auto_close_summary(report_dir, result)
+    if send_receipt:
+        result["receipt"] = safe_send_auto_close_receipt(
+            base=base,
+            config=cfg,
+            dry_run=dry_run,
+            result=result,
+        )
+    else:
+        result["receipt"] = {
+            "enabled": bool(auto_cfg["receipt"].get("enabled", True)),
+            "status": "skipped",
+            "reason": "skipped_no_send",
+            "delivery_confirmed": False,
+            "message_id": None,
+        }
     return result

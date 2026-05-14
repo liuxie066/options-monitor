@@ -121,6 +121,7 @@ class TickAccountExecutionRequest:
     prefetch_done: bool
     force_mode: bool
     smoke: bool
+    no_send: bool
     scan_decision_by_account: dict[str, dict[str, Any]]
     state_path: Path
     scheduler_schedule_key: str
@@ -168,6 +169,7 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                 prefetch_done=request.prefetch_done,
                 force_mode=request.force_mode,
                 allow_mutations=(not request.smoke),
+                allow_notifications=(not request.no_send),
                 update_legacy_output=request.update_legacy_output,
                 prefetch_lock=shared_prefetch_lock,
                 prefetch_state=shared_prefetch_state,

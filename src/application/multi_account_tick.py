@@ -359,6 +359,7 @@ def main(argv: list[str] | None = None) -> int:
             prefetch_done=prefetch_done,
             force_mode=force_mode,
             smoke=smoke,
+            no_send=no_send,
             scan_decision_by_account=scan_decision_by_account,
             state_path=state_path,
             scheduler_schedule_key=str(scheduler_schedule_key),

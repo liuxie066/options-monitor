@@ -338,6 +338,7 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 - 旧的全局 `portfolio.futu` 和 `symbols[].fetch.host/port` 仍可继续作为兼容默认来源。
 - 这次升级完成的是 **持仓/现金 context 的 per-account OpenD runtime 支持**，不是所有市场数据缓存都已经做成多 gateway 完全隔离。
 - `trade_intake.receipt.enabled` 默认 `true`。apply 模式下，成交写入/未解析/失败后会按 `notify_applied`、`notify_unresolved`、`notify_failed` 发送回执；重复 deal 默认不重复通知，但若上一次回执未确认，会按 `retry_unconfirmed_duplicate` 重试。
+- `option_positions.auto_close.receipt.enabled` 默认 `true`。tick 内的过期自动平仓实际写入或失败时，会按 `notify_applied` / `notify_failed` 发送回执；`notify_noop` 和 `notify_dry_run` 默认 `false`，避免无变更或 dry-run 产生噪音。
 
 #### 4.4.2 auto trade intake multiplier fallback
 
@@ -515,6 +516,7 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 ```
 
 - `option_positions.sync_to_feishu.enabled` 默认是 `false`。
+- `option_positions.auto_close.receipt.enabled` 默认是 `true`，只影响过期自动平仓写入后的本地通知回执，不改变本地 SQLite 主存储，也不写 Feishu 镜像。
 - 推荐在 `configs/user.common.json` 里把 runtime 开关覆盖成 `true`，再重新生成 `config.us.json` / `config.hk.json`。此时使用 `--config config.us.json` 的同步脚本，以及携带 runtime config 的本地持仓写入流程，才会真正写 Feishu `option_positions` 镜像表。
 - 直接只传 `--data-config` 的低层脚本仍读取 data config 里的同名开关，保持默认安全关闭。
 - 这个开关只影响“写远端镜像”；不改变本地 SQLite 主存储，也不关闭 Feishu bootstrap/read 侧行为。
