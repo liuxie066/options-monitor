@@ -1,47 +1,31 @@
-# Claude / OpenClaw Instructions
+# Claude / OpenClaw Supplement
 
-This repository is an operations-sensitive options monitoring tool. Treat it as a controlled operational system, not a generic Python sandbox.
+> This file contains Claude- and OpenClaw-specific instructions only.
+> All general agent rules (safety, entry points, module map) live in `AGENTS.md`.
 
-## Default Behavior
+## OpenClaw Readiness
 
-- For requests such as "explain", "look into", "check", "why", or "how does this work", start in read/analyze mode.
-- Inspect source files, config docs, and tests before running commands.
-- Do not run Python scripts just to see what happens.
-- Only execute commands when the user explicitly asks for execution, or when execution is required to verify a concrete change you made.
+In OpenClaw environments, use this as the first-pass readiness check:
 
-## Entry Point Priority
+```bash
+./om-agent run --tool openclaw_readiness --input-json '{"config_key":"us"}'
+```
 
-Use the highest-level safe entry point available:
+After that, follow the standard hierarchy in `AGENTS.md`:
+- Read-only diagnostics before mutating commands
+- `./om-agent` > `./om` > `python3 -m ...` > `python3 scripts/...`
 
-1. `./om-agent`
-2. `./om`
-3. `python3 -m ...`
-4. `python3 scripts/...` only as a compatibility fallback
+## Codex Co-authorship
 
-Do not default to `python3 scripts/...` for first-pass exploration.
+Commits made through OMX/Codex automation must include the trailer:
 
-## Safety Rules
+```
+Co-authored-by: OmX <omx@oh-my-codex.dev>
+```
 
-- Never send real notifications unless the user explicitly requests it.
-- Never modify production config files unless the user explicitly requests it.
-- Never delete runtime artifacts, state files, reports, or output directories unless the user explicitly asks for cleanup.
-- Prefer dry-run, validation, healthcheck, or test commands over live operational commands.
-- If a command can mutate runtime state, write data, or send notifications, confirm that the user explicitly wants that action.
+This is enforced by the local commit gate (`scripts/setup_git_hooks.sh`).
 
-## Where To Look First
+## Guardrails Reference
 
-- Business logic: `domain/`
-- Notification formatting: `src/application/notify_symbols.py`, `src/application/multi_tick/notify_format.py`
-- Operator CLI behavior: `src/interfaces/cli/`, `./om`
-- Agent entry points: `./om-agent`, `scripts/install_agent_plugin.sh`
-- Config contracts: `CONFIGS.md`, `CONFIGURATION_GUIDE.md`, `configs/examples/`, `src/application/config_validator.py`
-
-## Practical Defaults
-
-- For system status or troubleshooting, prefer read-only agent tools before runtime commands:
-  - `./om-agent run --tool runtime_status --input-json '{"config_key":"us"}'`
-  - `./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'`
-- In OpenClaw, prefer `./om-agent run --tool openclaw_readiness --input-json '{"config_key":"us"}'` for first-pass readiness.
-- Use direct `python3 scripts/...` commands only when the user explicitly asks for that script, or no higher-level entry point covers the task.
-- Keep account labels lowercase, such as `lx` and `sy`.
-- Keep user-facing notifications Markdown-friendly and preserve the existing Chinese tone.
+- Local commit gate, CI gate, and deploy gate details: `docs/GUARDRAILS.md`
+- Symbol canonicalization rules: `docs/GUARDRAILS.md` §D
