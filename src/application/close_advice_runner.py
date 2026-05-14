@@ -6,7 +6,7 @@ import json
 import math
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 from domain.domain.expiration_dates import expiration_business_today
 from domain.domain.fetch_source import is_futu_fetch_source
@@ -43,6 +43,12 @@ from src.application.expiration_normalization import find_unique_near_miss_expir
 from src.application.opend_fetch_config import opend_fetch_kwargs
 from src.application.symbol_aliases import load_runtime_symbol_aliases
 from src.infrastructure.opend_retcodes import classify_opend_error
+from src.application.candidate_filter_trace import (
+    append_candidate_filter_trace_rows,
+    build_candidate_filter_trace_row,
+    candidate_trace_path_for_output,
+    infer_trace_scope_from_path,
+)
 
 
 OUTPUT_COLUMNS = [
@@ -94,6 +100,26 @@ QUOTE_ISSUE_FLAGS = {
     "spread_too_wide",
     "invalid_spread",
 }
+
+
+class _PositionFetchSpec(TypedDict):
+    symbol: str
+    requested_keys: set[tuple[str, str, str, str]]
+    requested_expirations: set[str]
+    option_types: set[str]
+    strikes: list[float]
+
+
+class _OpenDFetchKwargs(TypedDict):
+    max_wait_sec: float
+    option_chain_window_sec: float
+    option_chain_max_calls: int
+    snapshot_max_wait_sec: float
+    snapshot_window_sec: float
+    snapshot_max_calls: int
+    expiration_max_wait_sec: float
+    expiration_window_sec: float
+    expiration_max_calls: int
 
 
 def _norm_symbol(value: Any, *, base_dir: Path | None = None) -> str:
@@ -291,8 +317,8 @@ def _build_position_fetch_specs(
     positions: list[dict[str, Any]],
     *,
     base_dir: Path,
-) -> dict[str, dict[str, Any]]:
-    specs: dict[str, dict[str, Any]] = {}
+) -> dict[str, _PositionFetchSpec]:
+    specs: dict[str, _PositionFetchSpec] = {}
     for pos in positions:
         if not isinstance(pos, dict):
             continue
@@ -302,14 +328,15 @@ def _build_position_fetch_specs(
         sym = key[0]
         item = specs.get(sym)
         if item is None:
-            item = {
+            new_item: _PositionFetchSpec = {
                 "symbol": sym,
-                "requested_keys": set(),
-                "requested_expirations": set(),
-                "option_types": set(),
-                "strikes": [],
+                "requested_keys": set[tuple[str, str, str, str]](),
+                "requested_expirations": set[str](),
+                "option_types": set[str](),
+                "strikes": list[float](),
             }
-            specs[sym] = item
+            specs[sym] = new_item
+            item = new_item
         item["requested_keys"].add(key)
         item["requested_expirations"].add(key[2])
         item["option_types"].add(key[1])
@@ -317,6 +344,21 @@ def _build_position_fetch_specs(
         if strike_num is not None:
             item["strikes"].append(strike_num)
     return specs
+
+
+def _typed_opend_fetch_kwargs(config: dict[str, Any]) -> _OpenDFetchKwargs:
+    raw = opend_fetch_kwargs(config)
+    return {
+        "max_wait_sec": float(raw["max_wait_sec"]),
+        "option_chain_window_sec": float(raw["option_chain_window_sec"]),
+        "option_chain_max_calls": int(raw["option_chain_max_calls"]),
+        "snapshot_max_wait_sec": float(raw["snapshot_max_wait_sec"]),
+        "snapshot_window_sec": float(raw["snapshot_window_sec"]),
+        "snapshot_max_calls": int(raw["snapshot_max_calls"]),
+        "expiration_max_wait_sec": float(raw["expiration_max_wait_sec"]),
+        "expiration_window_sec": float(raw["expiration_window_sec"]),
+        "expiration_max_calls": int(raw["expiration_max_calls"]),
+    }
 
 
 def _load_required_data_rows(required_data_root: Path, symbol: str) -> list[dict[str, Any]]:
@@ -374,8 +416,8 @@ def _ensure_required_data_coverage_for_positions(
 
     try:
         for symbol, spec in specs.items():
-            requested_keys = set(spec.get("requested_keys") or set())
-            requested_expirations = sorted(spec.get("requested_expirations") or set())
+            requested_keys = set(spec["requested_keys"])
+            requested_expirations = sorted(spec["requested_expirations"])
             missing_keys = [key for key in requested_keys if key not in current_covered]
             if not missing_keys:
                 continue
@@ -401,7 +443,7 @@ def _ensure_required_data_coverage_for_positions(
                             "matched_expiration": near_miss,
                         }
                 continue
-            strikes = [safe_float(v) for v in (spec.get("strikes") or [])]
+            strikes = [safe_float(v) for v in spec["strikes"]]
             strikes = [v for v in strikes if v is not None]
             host = str(fetch_cfg.get("host") or "127.0.0.1")
             port = safe_int(fetch_cfg.get("port")) or 11111
@@ -431,7 +473,7 @@ def _ensure_required_data_coverage_for_positions(
                     host=host,
                     port=port,
                     base_dir=base_dir,
-                    option_types=",".join(sorted(spec.get("option_types") or {"put", "call"})),
+                    option_types=",".join(sorted(spec["option_types"] or {"put", "call"})),
                     min_strike=min(strikes) if strikes else None,
                     max_strike=max(strikes) if strikes else None,
                     explicit_expirations=requested_expirations,
@@ -439,7 +481,7 @@ def _ensure_required_data_coverage_for_positions(
                     chain_cache_force_refresh=False,
                     freshness_policy="refresh_missing",
                     gateway=shared_gw,
-                    **opend_fetch_kwargs(config),
+                    **_typed_opend_fetch_kwargs(config),
                 )
             except Exception as exc:
                 summary["errors"] += 1
@@ -611,7 +653,7 @@ def _fetch_missing_quotes_via_opend(
                 explicit_expirations=expirations,
                 chain_cache=True,
                 freshness_policy="refresh_missing",
-                **opend_fetch_kwargs(config),
+                **_typed_opend_fetch_kwargs(config),
             )
         except Exception as exc:
             detail = "opend_fetch_error"
@@ -742,7 +784,8 @@ def _build_quote_issue_samples(
         resolved_underlier = str(detail.get("resolved_underlier") or "").strip()
         requested_symbol = str(detail.get("requested_symbol") or "").strip()
         available_expirations = [str(x).strip() for x in (detail.get("available_expirations") or []) if str(x).strip()]
-        near_miss = detail.get("expiration_near_miss") if isinstance(detail.get("expiration_near_miss"), dict) else {}
+        near_miss_raw = detail.get("expiration_near_miss")
+        near_miss: dict[str, Any] = near_miss_raw if isinstance(near_miss_raw, dict) else {}
         matched_expiration = str(near_miss.get("matched_expiration") or "").strip()
         requested_expiration = str(near_miss.get("requested_expiration") or "").strip()
         if "rate_limit" in reason and str(detail.get("message") or "").strip():
@@ -831,6 +874,7 @@ def _mid_from_quote(quote: dict[str, Any] | None) -> tuple[float | None, list[st
             return mid, ["mid_fallback_last_price"]
         return mid, []
     if has_usable_bid_ask:
+        assert bid is not None and ask is not None
         return round((bid + ask) / 2, 6), ["mid_from_bid_ask"]
     last_price = _quote_number(quote.get("last_price"))
     if last_price is not None:
@@ -1267,6 +1311,72 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     atomic_write_text(path, buf.getvalue(), encoding="utf-8")
 
 
+def _close_trace_key(row: dict[str, Any]) -> tuple[str, str, str, str, str]:
+    return (
+        str(row.get("account") or "").strip().lower(),
+        str(row.get("symbol") or "").strip().upper(),
+        str(row.get("option_type") or "").strip().lower(),
+        str(row.get("expiration") or "").strip(),
+        str(row.get("strike") or "").strip(),
+    )
+
+
+def _append_close_advice_filter_trace(
+    *,
+    csv_path: Path,
+    rows: list[dict[str, Any]],
+    selected_notify_rows: list[dict[str, Any]],
+    notify_levels: set[str],
+) -> None:
+    scope = infer_trace_scope_from_path(csv_path)
+    selected_keys = {_close_trace_key(row) for row in selected_notify_rows}
+    trace_rows: list[dict[str, Any]] = []
+    for row in rows:
+        symbol = str(row.get("symbol") or "").strip()
+        if not symbol:
+            continue
+        flags = [flag for flag in str(row.get("data_quality_flags") or "").split(";") if flag]
+        evaluation_status = str(row.get("evaluation_status") or "").strip().lower()
+        tier = str(row.get("tier") or "").strip().lower()
+        key = _close_trace_key(row)
+        if evaluation_status != "priced":
+            status = "rejected"
+            rule = flags[0] if flags else (evaluation_status or "close_advice_not_priced")
+            message = str(row.get("reason") or "close advice row could not be priced")
+        elif key in selected_keys:
+            status = "notified"
+            rule = "close_advice_notified"
+            message = str(row.get("reason") or "close advice selected for notification")
+        elif tier in notify_levels or tier in ("optimizer_switch", "optimizer_close"):
+            status = "ranked_below"
+            rule = "close_advice_over_max_items"
+            message = str(row.get("reason") or "close advice matched notify tier but was not selected")
+        else:
+            status = "accepted"
+            rule = f"close_advice_{tier or 'hold'}"
+            message = str(row.get("reason") or "close advice evaluated")
+        trace_rows.append(
+            build_candidate_filter_trace_row(
+                run_id=scope.get("run_id"),
+                account=scope.get("account") or row.get("account"),
+                symbol=symbol,
+                function="close_advice",
+                mode=str(row.get("option_type") or "close"),
+                status=status,
+                stage="close_advice",
+                rule=rule,
+                metric_value=row.get("effective_annualized_return") or row.get("capture_ratio"),
+                threshold=None,
+                expiration=row.get("expiration"),
+                strike=row.get("strike"),
+                message=message,
+                evidence_path=csv_path.name,
+                config_values={"notify_levels": sorted(notify_levels)},
+            )
+        )
+    append_candidate_filter_trace_rows(candidate_trace_path_for_output(csv_path), trace_rows)
+
+
 def _load_context(context_path: Path) -> dict[str, Any]:
     obj = read_json(context_path, default={})
     return obj if isinstance(obj, dict) else {}
@@ -1303,7 +1413,9 @@ def _load_alternative_annualized_from_scan(
             if col in df.columns:
                 vals = df[col].dropna()
                 if not vals.empty:
-                    return float(vals.max())
+                    parsed = safe_float(vals.max())
+                    if parsed is not None:
+                        return float(parsed)
                 break
         return None
     except Exception:
@@ -1480,6 +1592,15 @@ def run_close_advice(
             flag_counts[flag] = flag_counts.get(flag, 0) + 1
 
     _write_csv(csv_path, rows)
+    try:
+        _append_close_advice_filter_trace(
+            csv_path=csv_path,
+            rows=rows,
+            selected_notify_rows=selected_notify_rows,
+            notify_levels=notify_level_set,
+        )
+    except Exception:
+        pass
     atomic_write_text(text_path, text, encoding="utf-8")
     quote_issue_samples = _build_quote_issue_samples(
         positions,
