@@ -315,6 +315,14 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
     }
   },
   "trade_intake": {
+    "receipt": {
+      "enabled": true,
+      "notify_applied": true,
+      "notify_unresolved": true,
+      "notify_failed": true,
+      "notify_duplicate": false,
+      "retry_unconfirmed_duplicate": true
+    },
     "account_mapping": {
       "futu": {
         "12345678": "lx",
@@ -329,6 +337,7 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 - 不同账户现在可以实际走不同 OpenD holdings 端点。
 - 旧的全局 `portfolio.futu` 和 `symbols[].fetch.host/port` 仍可继续作为兼容默认来源。
 - 这次升级完成的是 **持仓/现金 context 的 per-account OpenD runtime 支持**，不是所有市场数据缓存都已经做成多 gateway 完全隔离。
+- `trade_intake.receipt.enabled` 默认 `true`。apply 模式下，成交写入/未解析/失败后会按 `notify_applied`、`notify_unresolved`、`notify_failed` 发送回执；重复 deal 默认不重复通知，但若上一次回执未确认，会按 `retry_unconfirmed_duplicate` 重试。
 
 #### 4.4.2 auto trade intake multiplier fallback
 

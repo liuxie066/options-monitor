@@ -46,7 +46,15 @@
     },
     "trade_intake": {
       "enabled": true,
-      "mode": "apply"
+      "mode": "apply",
+      "receipt": {
+        "enabled": true,
+        "notify_applied": true,
+        "notify_unresolved": true,
+        "notify_failed": true,
+        "notify_duplicate": false,
+        "retry_unconfirmed_duplicate": true
+      }
     },
     "option_positions": {
       "sync_to_feishu": {

@@ -402,3 +402,158 @@ def test_process_payload_records_failed_state_when_resolver_raises(tmp_path: Pat
     assert failed["status"] == "failed"
     assert failed["diagnostics"]["exception_type"] == "RuntimeError"
     assert any(event.get("phase") == "failed" and event.get("deal_id") == "deal-failed-1" for event in events)
+
+
+def test_process_payload_records_receipt_state_after_applied(tmp_path: Path) -> None:
+    deal = NormalizedTradeDeal(
+        broker="富途",
+        futu_account_id="REAL_1",
+        internal_account="lx",
+        deal_id="deal-receipt-1",
+        order_id="order-receipt-1",
+        symbol="NVDA",
+        option_type="put",
+        side="sell",
+        position_effect="open",
+        contracts=1,
+        price=1.23,
+        strike=120.0,
+        multiplier=100,
+        multiplier_source="payload",
+        expiration_ymd="2026-06-19",
+        currency="USD",
+        trade_time_ms=1000,
+        raw_payload={"deal_id": "deal-receipt-1"},
+    )
+
+    class _Result:
+        status = "applied"
+        action = "open"
+        reason = "applied_open"
+        deal_id = "deal-receipt-1"
+        account = "lx"
+        operations = [{"record_id": "lot_deal-receipt-1"}]
+
+        def to_dict(self) -> dict:
+            return {
+                "status": self.status,
+                "action": self.action,
+                "reason": self.reason,
+                "deal_id": self.deal_id,
+                "account": self.account,
+                "operations": self.operations,
+            }
+
+    writes: list[dict] = []
+    events: list[dict] = []
+
+    out = process_trade_payload(
+        {"deal_id": "deal-receipt-1"},
+        repo=object(),
+        state_path=tmp_path / "state.json",
+        audit_path=tmp_path / "audit.jsonl",
+        account_mapping={"REAL_1": "lx"},
+        apply_changes=True,
+        load_trade_intake_state_fn=lambda _path: {"processed_deal_ids": {}, "failed_deal_ids": {}, "unresolved_deal_ids": {}},
+        write_trade_intake_state_fn=lambda _path, state: writes.append(dict(state)),
+        upsert_deal_state_fn=upsert_deal_state,
+        append_trade_intake_audit_fn=lambda _path, event: events.append(dict(event)),
+        enrich_trade_payload_fn=None,
+        normalize_trade_deal_fn=lambda payload, futu_account_mapping=None: deal,
+        resolve_trade_deal_fn=lambda *_args, **_kwargs: _Result(),
+        on_result_fn=lambda _context: {"status": "sent", "delivery_confirmed": True, "message_id": "msg-1"},
+    )
+
+    assert out["receipt"]["status"] == "sent"
+    receipt = writes[-1]["processed_deal_ids"]["deal-receipt-1"]["receipt"]
+    assert receipt["delivery_confirmed"] is True
+    assert receipt["message_id"] == "msg-1"
+    assert receipt["attempt_count"] == 1
+    assert any(event.get("phase") == "receipt_sent" and event.get("deal_id") == "deal-receipt-1" for event in events)
+
+
+def test_process_payload_preserves_confirmed_receipt_on_duplicate_skip(tmp_path: Path) -> None:
+    deal = NormalizedTradeDeal(
+        broker="富途",
+        futu_account_id="REAL_1",
+        internal_account="lx",
+        deal_id="deal-duplicate-1",
+        order_id="order-duplicate-1",
+        symbol="NVDA",
+        option_type="put",
+        side="sell",
+        position_effect="open",
+        contracts=1,
+        price=1.23,
+        strike=120.0,
+        multiplier=100,
+        multiplier_source="payload",
+        expiration_ymd="2026-06-19",
+        currency="USD",
+        trade_time_ms=1000,
+        raw_payload={"deal_id": "deal-duplicate-1"},
+    )
+
+    class _Result:
+        status = "skipped"
+        action = None
+        reason = "duplicate_deal_id"
+        deal_id = "deal-duplicate-1"
+        account = "lx"
+        operations: list[dict] = []
+
+        def to_dict(self) -> dict:
+            return {
+                "status": self.status,
+                "action": self.action,
+                "reason": self.reason,
+                "deal_id": self.deal_id,
+                "account": self.account,
+                "operations": self.operations,
+            }
+
+    initial_state = {
+        "processed_deal_ids": {
+            "deal-duplicate-1": {
+                "status": "applied",
+                "action": "open",
+                "account": "lx",
+                "reason": "applied_open",
+                "receipt": {
+                    "status": "sent",
+                    "delivery_confirmed": True,
+                    "message_id": "msg-confirmed",
+                    "attempt_count": 1,
+                },
+            }
+        },
+        "failed_deal_ids": {},
+        "unresolved_deal_ids": {},
+    }
+    writes: list[dict] = []
+    events: list[dict] = []
+
+    out = process_trade_payload(
+        {"deal_id": "deal-duplicate-1"},
+        repo=object(),
+        state_path=tmp_path / "state.json",
+        audit_path=tmp_path / "audit.jsonl",
+        account_mapping={"REAL_1": "lx"},
+        apply_changes=True,
+        load_trade_intake_state_fn=lambda _path: initial_state,
+        write_trade_intake_state_fn=lambda _path, state: writes.append(dict(state)),
+        upsert_deal_state_fn=upsert_deal_state,
+        append_trade_intake_audit_fn=lambda _path, event: events.append(dict(event)),
+        enrich_trade_payload_fn=None,
+        normalize_trade_deal_fn=lambda payload, futu_account_mapping=None: deal,
+        resolve_trade_deal_fn=lambda *_args, **_kwargs: _Result(),
+        on_result_fn=lambda _context: {"status": "skipped", "reason": "skipped_duplicate", "delivery_confirmed": False},
+    )
+
+    assert out["receipt"]["reason"] == "skipped_duplicate"
+    receipt = writes[-1]["processed_deal_ids"]["deal-duplicate-1"]["receipt"]
+    assert receipt["status"] == "sent"
+    assert receipt["delivery_confirmed"] is True
+    assert receipt["message_id"] == "msg-confirmed"
+    assert receipt["attempt_count"] == 1
+    assert any(event.get("phase") == "receipt_skipped" and event.get("deal_id") == "deal-duplicate-1" for event in events)

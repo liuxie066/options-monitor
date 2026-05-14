@@ -14,6 +14,7 @@ from domain.domain.multi_tick import (
     resolve_notification_route_from_config,
     resolve_openclaw_transport_channel,
 )
+from src.application.trade_account_mapping import resolve_trade_intake_config
 
 
 PROFILE_PATH_KEYS = ("report_dir", "state_dir", "shared_state_dir", "accounts_root", "runs_root")
@@ -71,6 +72,41 @@ def _json_file_info(path: Path, *, base: Path, read_json_object_or_empty: Callab
     else:
         out["json"] = {}
     return out
+
+
+def _path_from_config(value: Any, *, base: Path) -> Path:
+    path = Path(str(value or ""))
+    if not path.is_absolute():
+        path = (base / path).resolve()
+    return path
+
+
+def _trade_intake_summary(state_json: dict[str, Any], status_json: dict[str, Any]) -> dict[str, Any]:
+    processed_raw = state_json.get("processed_deal_ids")
+    failed_raw = state_json.get("failed_deal_ids")
+    unresolved_raw = state_json.get("unresolved_deal_ids")
+    processed: dict[str, Any] = processed_raw if isinstance(processed_raw, dict) else {}
+    failed: dict[str, Any] = failed_raw if isinstance(failed_raw, dict) else {}
+    unresolved: dict[str, Any] = unresolved_raw if isinstance(unresolved_raw, dict) else {}
+    receipt_items: list[dict[str, Any]] = []
+    for bucket in (processed, failed, unresolved):
+        for item in bucket.values():
+            receipt = item.get("receipt") if isinstance(item, dict) else None
+            if isinstance(receipt, dict):
+                receipt_items.append(receipt)
+    return {
+        "listener_status": status_json.get("status"),
+        "listener_stage": status_json.get("stage"),
+        "last_heartbeat_utc": status_json.get("last_heartbeat_utc"),
+        "last_deal_result": status_json.get("last_deal_result"),
+        "last_receipt_result": status_json.get("last_receipt_result"),
+        "processed_count": len(processed),
+        "failed_count": len(failed),
+        "unresolved_count": len(unresolved),
+        "receipt_count": len(receipt_items),
+        "receipt_confirmed_count": sum(1 for item in receipt_items if bool(item.get("delivery_confirmed"))),
+        "receipt_failed_count": sum(1 for item in receipt_items if str(item.get("status") or "") in {"failed", "unconfirmed"}),
+    }
 
 
 def _text_file_info(path: Path, *, base: Path, max_chars: int) -> dict[str, Any]:
@@ -151,7 +187,8 @@ def _merge_openclaw_profile(payload: dict[str, Any], *, base: Path) -> tuple[dic
             hint="Remove profile_path/openclaw_profile_path or create the referenced JSON profile.",
         )
     profile = _read_json_object(profile_path)
-    paths = profile.get("paths") if isinstance(profile.get("paths"), dict) else {}
+    paths_raw = profile.get("paths")
+    paths: dict[str, Any] = paths_raw if isinstance(paths_raw, dict) else {}
     for key in ("config_key", "config_path", "accounts", "max_notification_chars", "max_run_age_minutes"):
         if key not in merged and key in profile:
             merged[key] = profile[key]
@@ -202,13 +239,17 @@ def _freshness_from_runtime_status(
             if parsed is not None:
                 candidates.append((label, parsed))
 
-    shared = data.get("shared") if isinstance(data.get("shared"), dict) else {}
+    shared_raw = data.get("shared")
+    shared: dict[str, Any] = shared_raw if isinstance(shared_raw, dict) else {}
     collect("shared.last_run", shared.get("last_run"))
     collect("shared.legacy_last_run", shared.get("legacy_last_run"))
-    latest_run = data.get("latest_run") if isinstance(data.get("latest_run"), dict) else {}
-    latest_state = latest_run.get("state") if isinstance(latest_run.get("state"), dict) else {}
+    latest_run_raw = data.get("latest_run")
+    latest_run: dict[str, Any] = latest_run_raw if isinstance(latest_run_raw, dict) else {}
+    latest_state_raw = latest_run.get("state")
+    latest_state: dict[str, Any] = latest_state_raw if isinstance(latest_state_raw, dict) else {}
     collect("latest_run.last_run", latest_state.get("last_run"))
-    accounts = data.get("accounts") if isinstance(data.get("accounts"), dict) else {}
+    accounts_raw = data.get("accounts")
+    accounts: dict[str, Any] = accounts_raw if isinstance(accounts_raw, dict) else {}
     for account, item in accounts.items():
         if isinstance(item, dict):
             collect(f"accounts.{account}.last_run", item.get("last_run"))
@@ -236,14 +277,18 @@ def _freshness_from_runtime_status(
 
 
 def _account_summary(data: dict[str, Any]) -> dict[str, Any]:
-    accounts = data.get("accounts") if isinstance(data.get("accounts"), dict) else {}
+    accounts_raw = data.get("accounts")
+    accounts: dict[str, Any] = accounts_raw if isinstance(accounts_raw, dict) else {}
     rows: dict[str, Any] = {}
     for account, item in accounts.items():
         if not isinstance(item, dict):
             continue
-        last_run = item.get("last_run") if isinstance(item.get("last_run"), dict) else {}
-        notification = item.get("notification") if isinstance(item.get("notification"), dict) else {}
-        last_run_json = last_run.get("json") if isinstance(last_run.get("json"), dict) else {}
+        last_run_raw = item.get("last_run")
+        notification_raw = item.get("notification")
+        last_run: dict[str, Any] = last_run_raw if isinstance(last_run_raw, dict) else {}
+        notification: dict[str, Any] = notification_raw if isinstance(notification_raw, dict) else {}
+        last_run_json_raw = last_run.get("json")
+        last_run_json: dict[str, Any] = last_run_json_raw if isinstance(last_run_json_raw, dict) else {}
         rows[str(account)] = {
             "last_run_exists": bool(last_run.get("exists")),
             "notification_exists": bool(notification.get("exists")),
@@ -297,8 +342,10 @@ def _prefetch_account_summary(info: dict[str, Any]) -> dict[str, Any]:
     if not info.get("exists"):
         return out
 
-    payload = info.get("json") if isinstance(info.get("json"), dict) else {}
-    run_summary = payload.get("run_fetch_summary") if isinstance(payload.get("run_fetch_summary"), dict) else {}
+    payload_raw = info.get("json")
+    payload: dict[str, Any] = payload_raw if isinstance(payload_raw, dict) else {}
+    run_summary_raw = payload.get("run_fetch_summary")
+    run_summary: dict[str, Any] = run_summary_raw if isinstance(run_summary_raw, dict) else {}
     out.update(
         {
             "bottleneck": run_summary.get("bottleneck"),
@@ -317,9 +364,8 @@ def _prefetch_account_summary(info: dict[str, Any]) -> dict[str, Any]:
 
 
 def _latest_run_prefetch_summary(latest_run_payload: dict[str, Any] | None) -> dict[str, Any]:
-    latest_accounts = latest_run_payload.get("accounts") if isinstance(latest_run_payload, dict) else {}
-    if not isinstance(latest_accounts, dict):
-        latest_accounts = {}
+    latest_accounts_raw = latest_run_payload.get("accounts") if isinstance(latest_run_payload, dict) else {}
+    latest_accounts: dict[str, Any] = latest_accounts_raw if isinstance(latest_accounts_raw, dict) else {}
 
     accounts: dict[str, Any] = {}
     bottlenecks: dict[str, int] = {}
@@ -331,7 +377,8 @@ def _latest_run_prefetch_summary(latest_run_payload: dict[str, Any] | None) -> d
     for account, item in latest_accounts.items():
         if not isinstance(item, dict):
             continue
-        info = item.get("required_data_prefetch") if isinstance(item.get("required_data_prefetch"), dict) else {}
+        info_raw = item.get("required_data_prefetch")
+        info: dict[str, Any] = info_raw if isinstance(info_raw, dict) else {}
         account_summary = _prefetch_account_summary(info)
         accounts[str(account)] = account_summary
         if not account_summary.get("exists"):
@@ -339,9 +386,11 @@ def _latest_run_prefetch_summary(latest_run_payload: dict[str, Any] | None) -> d
         available_account_count += 1
         bottleneck = str(account_summary.get("bottleneck") or "unknown")
         bottlenecks[bottleneck] = bottlenecks.get(bottleneck, 0) + 1
-        opend_calls = account_summary.get("opend_calls") if isinstance(account_summary.get("opend_calls"), dict) else {}
+        opend_calls_raw = account_summary.get("opend_calls")
+        opend_calls: dict[str, Any] = opend_calls_raw if isinstance(opend_calls_raw, dict) else {}
         total_opend_calls += int(opend_calls.get("total") or 0)
-        waits = account_summary.get("rate_gate_wait_sec") if isinstance(account_summary.get("rate_gate_wait_sec"), dict) else {}
+        waits_raw = account_summary.get("rate_gate_wait_sec")
+        waits: dict[str, Any] = waits_raw if isinstance(waits_raw, dict) else {}
         total_rate_gate_wait_sec += sum(float(value) for value in waits.values())
         total_errors += int(account_summary.get("errors") or 0)
 
@@ -455,6 +504,58 @@ def runtime_status_tool(
         base=base,
         max_chars=max_notification_chars,
     )
+    try:
+        intake_cfg = resolve_trade_intake_config(cfg)
+        intake_section_raw = cfg.get("trade_intake")
+        intake_section: dict[str, Any] = intake_section_raw if isinstance(intake_section_raw, dict) else {}
+        default_intake_status_path = (
+            _path_from_config(intake_cfg["status_path"], base=base)
+            if "status_path" in intake_section
+            else state_dir / "auto_trade_intake_status.json"
+        )
+        default_intake_state_path = (
+            _path_from_config(intake_cfg["state_path"], base=base)
+            if "state_path" in intake_section
+            else state_dir / "auto_trade_intake_state.json"
+        )
+        default_intake_audit_path = (
+            _path_from_config(intake_cfg["audit_path"], base=base)
+            if "audit_path" in intake_section
+            else state_dir / "auto_trade_intake_audit.jsonl"
+        )
+        trade_intake_status = _json_file_info(
+            _path_from_config(payload.get("trade_intake_status_path"), base=base) if payload.get("trade_intake_status_path") else default_intake_status_path,
+            base=base,
+            read_json_object_or_empty=read_json_object_or_empty,
+        )
+        trade_intake_state = _json_file_info(
+            _path_from_config(payload.get("trade_intake_state_path"), base=base) if payload.get("trade_intake_state_path") else default_intake_state_path,
+            base=base,
+            read_json_object_or_empty=read_json_object_or_empty,
+        )
+        trade_intake_audit = _file_info(
+            _path_from_config(payload.get("trade_intake_audit_path"), base=base) if payload.get("trade_intake_audit_path") else default_intake_audit_path,
+            base=base,
+        )
+        trade_intake_state_json = trade_intake_state.get("json")
+        trade_intake_status_json = trade_intake_status.get("json")
+        trade_intake_state_payload: dict[str, Any] = trade_intake_state_json if isinstance(trade_intake_state_json, dict) else {}
+        trade_intake_status_payload: dict[str, Any] = trade_intake_status_json if isinstance(trade_intake_status_json, dict) else {}
+        trade_intake = {
+            "enabled": bool(intake_cfg["enabled"]),
+            "mode": intake_cfg["mode"],
+            "receipt": dict(intake_cfg.get("receipt") or {}),
+            "status": trade_intake_status,
+            "state": trade_intake_state,
+            "audit": trade_intake_audit,
+            "summary": _trade_intake_summary(trade_intake_state_payload, trade_intake_status_payload),
+        }
+    except ValueError as exc:
+        trade_intake = {
+            "enabled": False,
+            "config_error": str(exc),
+            "summary": {"listener_status": None},
+        }
 
     account_status: dict[str, Any] = {}
     for account in accounts:
@@ -523,12 +624,13 @@ def runtime_status_tool(
 
     latest_status = None
     for candidate in (shared_last_run, legacy_last_run):
-        payload_json = candidate.get("json") if isinstance(candidate.get("json"), dict) else {}
+        payload_raw = candidate.get("json")
+        payload_json: dict[str, Any] = payload_raw if isinstance(payload_raw, dict) else {}
         latest_status = payload_json.get("status") or payload_json.get("last_status") or latest_status
         if latest_status:
             break
 
-    data = {
+    data: dict[str, Any] = {
         "config": {
             "config_path": mask_path(config_path),
             "accounts": accounts,
@@ -547,6 +649,7 @@ def runtime_status_tool(
             "last_run_dir": _path_pointer_file_info(pointer_path, base=base),
             "notification": notification,
         },
+        "trade_intake": trade_intake,
         "accounts": account_status,
         "latest_run": latest_run_payload,
         "required_data_prefetch": prefetch_summary,
@@ -570,7 +673,8 @@ def runtime_status_tool(
 
 def _check_from_tuple(name: str, result: tuple[dict[str, Any], list[str], dict[str, Any]]) -> dict[str, Any]:
     data, warnings, meta = result
-    summary = data.get("summary") if isinstance(data.get("summary"), dict) else {}
+    summary_raw = data.get("summary")
+    summary: dict[str, Any] = summary_raw if isinstance(summary_raw, dict) else {}
     return {
         "name": name,
         "status": "ok" if bool(summary.get("ok", True)) and not warnings else ("warn" if warnings else "ok"),
@@ -743,7 +847,8 @@ def _notification_route_check(cfg: dict[str, Any], *, openclaw_path: str | None)
 
 
 def _freshness_check(runtime_status_data: dict[str, Any]) -> dict[str, Any]:
-    freshness = runtime_status_data.get("freshness") if isinstance(runtime_status_data.get("freshness"), dict) else {}
+    freshness_raw = runtime_status_data.get("freshness")
+    freshness: dict[str, Any] = freshness_raw if isinstance(freshness_raw, dict) else {}
     status = str(freshness.get("status") or "unknown")
     if status == "fresh":
         check_status = "ok"
@@ -931,7 +1036,8 @@ def openclaw_readiness_tool(
     try:
         healthcheck_result = healthcheck_tool_fn(payload)
         healthcheck_check = _check_from_tuple("healthcheck", healthcheck_result)
-        healthcheck_summary = healthcheck_result[0].get("summary") if isinstance(healthcheck_result[0].get("summary"), dict) else {}
+        healthcheck_summary_raw = healthcheck_result[0].get("summary")
+        healthcheck_summary: dict[str, Any] = healthcheck_summary_raw if isinstance(healthcheck_summary_raw, dict) else {}
         if not bool(healthcheck_summary.get("ok", True)):
             healthcheck_check["status"] = "error"
             healthcheck_check["message"] = "healthcheck summary is not ok"

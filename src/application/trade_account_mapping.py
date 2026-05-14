@@ -18,6 +18,7 @@ def resolve_trade_intake_config(
     mode_override: str | None = None,
     state_path_override: str | Path | None = None,
     audit_path_override: str | Path | None = None,
+    status_path_override: str | Path | None = None,
 ) -> dict[str, Any]:
     src = cfg if isinstance(cfg, dict) else {}
     section = src.get("trade_intake")
@@ -34,6 +35,8 @@ def resolve_trade_intake_config(
 
     state_path = Path(state_path_override or ti.get("state_path") or "output/state/auto_trade_intake_state.json")
     audit_path = Path(audit_path_override or ti.get("audit_path") or "output/state/auto_trade_intake_audit.jsonl")
+    status_path = Path(status_path_override or ti.get("status_path") or "output/state/auto_trade_intake_status.json")
+    receipt_cfg = resolve_trade_intake_receipt_config(ti.get("receipt"))
     account_mapping = resolve_futu_account_mapping(src)
     futu_lookup_account_ids = resolve_futu_lookup_account_ids(src, account_mapping=account_mapping)
 
@@ -42,10 +45,36 @@ def resolve_trade_intake_config(
         "mode": mode,
         "state_path": state_path,
         "audit_path": audit_path,
+        "status_path": status_path,
         "reconnect_sec": reconnect_sec,
+        "receipt": receipt_cfg,
         "account_mapping": account_mapping,
         "futu_account_ids": futu_lookup_account_ids,
     }
+
+
+def resolve_trade_intake_receipt_config(value: Any) -> dict[str, bool]:
+    if value is None:
+        src: dict[str, Any] = {}
+    elif isinstance(value, dict):
+        src = value
+    else:
+        raise ValueError("trade_intake.receipt must be an object")
+    return {
+        "enabled": _bool_from_config(src, "enabled", default=True),
+        "notify_applied": _bool_from_config(src, "notify_applied", default=True),
+        "notify_unresolved": _bool_from_config(src, "notify_unresolved", default=True),
+        "notify_failed": _bool_from_config(src, "notify_failed", default=True),
+        "notify_duplicate": _bool_from_config(src, "notify_duplicate", default=False),
+        "retry_unconfirmed_duplicate": _bool_from_config(src, "retry_unconfirmed_duplicate", default=True),
+    }
+
+
+def _bool_from_config(src: dict[str, Any], key: str, *, default: bool) -> bool:
+    value = src.get(key, default)
+    if not isinstance(value, bool):
+        raise ValueError(f"trade_intake.receipt.{key} must be a boolean")
+    return bool(value)
 
 
 def resolve_futu_account_mapping(cfg: dict[str, Any] | None) -> dict[str, str]:

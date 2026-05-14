@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Callable, Protocol
 
+from src.infrastructure.io_utils import utc_now
+
 
 class TradePayloadEnrichmentResult(Protocol):
     payload: dict[str, Any]
@@ -77,6 +79,130 @@ def _record_failed_deal_state(
     return state
 
 
+def _attach_receipt_state(
+    state: dict[str, Any],
+    *,
+    deal_id: str,
+    result_dict: dict[str, Any],
+    receipt_result: dict[str, Any],
+) -> dict[str, Any]:
+    key = str(deal_id or "").strip()
+    if not key:
+        return state
+    out = {name: dict((state or {}).get(name) or {}) for name in ("processed_deal_ids", "failed_deal_ids", "unresolved_deal_ids")}
+    bucket_name = None
+    for candidate in ("processed_deal_ids", "failed_deal_ids", "unresolved_deal_ids"):
+        if key in out[candidate]:
+            bucket_name = candidate
+            break
+    if bucket_name is None:
+        status = str(result_dict.get("status") or "").strip().lower()
+        bucket_name = {
+            "applied": "processed_deal_ids",
+            "skipped": "processed_deal_ids",
+            "failed": "failed_deal_ids",
+            "unresolved": "unresolved_deal_ids",
+        }.get(status)
+    if bucket_name is None:
+        return state
+    item = dict(out[bucket_name].get(key) or {})
+    receipt = dict(receipt_result or {})
+    prior_receipt = item.get("receipt") if isinstance(item.get("receipt"), dict) else {}
+    if (
+        str(receipt.get("status") or "").strip().lower() == "skipped"
+        and str(receipt.get("reason") or "").strip().lower() == "skipped_duplicate"
+        and prior_receipt
+    ):
+        return state
+    if receipt.get("status") != "skipped":
+        receipt["attempt_count"] = int((prior_receipt or {}).get("attempt_count") or 0) + 1
+    receipt.setdefault("updated_at", utc_now())
+    item["receipt"] = receipt
+    out[bucket_name][key] = item
+    return out
+
+
+def _receipt_audit_phase(receipt_result: dict[str, Any]) -> str:
+    status = str(receipt_result.get("status") or "").strip().lower()
+    if status == "sent":
+        return "receipt_sent"
+    if status in {"failed", "unconfirmed"}:
+        return "receipt_failed"
+    return "receipt_skipped"
+
+
+def _finalize_trade_payload_result(
+    *,
+    result_dict: dict[str, Any],
+    state: dict[str, Any],
+    state_path: Any,
+    audit_path: Any,
+    payload: dict[str, Any],
+    effective_payload: dict[str, Any],
+    deal: object | None,
+    apply_changes: bool,
+    write_trade_intake_state_fn: Callable[[Any, dict[str, Any]], Any],
+    append_trade_intake_audit_fn: Callable[[Any, dict[str, Any]], Any],
+    on_result_fn: Callable[[dict[str, Any]], dict[str, Any] | None] | None,
+) -> dict[str, Any]:
+    if on_result_fn is None:
+        return result_dict
+    try:
+        receipt_result = on_result_fn(
+            {
+                "payload": payload,
+                "effective_payload": effective_payload,
+                "deal": deal,
+                "result": dict(result_dict),
+                "state": state,
+                "apply_changes": apply_changes,
+                "state_path": state_path,
+                "audit_path": audit_path,
+            }
+        )
+    except Exception as exc:
+        receipt_result = {
+            "enabled": True,
+            "status": "failed",
+            "reason": "receipt_callback_exception",
+            "delivery_confirmed": False,
+            "message_id": None,
+            "error_code": "RECEIPT_CALLBACK_EXCEPTION",
+            "send_message": f"{type(exc).__name__}: {exc}",
+        }
+    if not isinstance(receipt_result, dict):
+        return result_dict
+    result_with_receipt = dict(result_dict)
+    result_with_receipt["receipt"] = receipt_result
+    append_trade_intake_audit_fn(
+        audit_path,
+        build_trade_intake_audit_event(
+            _receipt_audit_phase(receipt_result),
+            payload=effective_payload if deal is None else None,
+            deal=deal,
+            result=result_with_receipt,
+            extra={"receipt": receipt_result},
+        ),
+    )
+    if apply_changes:
+        deal_id = (
+            str(result_dict.get("deal_id") or "").strip()
+            or str(getattr(deal, "deal_id", "") or "").strip()
+            or _payload_deal_id(effective_payload)
+            or _payload_deal_id(payload)
+            or ""
+        )
+        if deal_id:
+            state = _attach_receipt_state(
+                state,
+                deal_id=deal_id,
+                result_dict=result_dict,
+                receipt_result=receipt_result,
+            )
+            write_trade_intake_state_fn(state_path, state)
+    return result_with_receipt
+
+
 def build_trade_intake_audit_event(
     phase: str,
     *,
@@ -134,6 +260,7 @@ def process_trade_payload(
     enrich_trade_payload_fn: Callable[[dict[str, Any]], TradePayloadEnrichmentReturn] | None,
     normalize_trade_deal_fn: Callable[..., Any],
     resolve_trade_deal_fn: Callable[..., Any],
+    on_result_fn: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
 ) -> dict[str, Any]:
     state = load_trade_intake_state_fn(state_path) if apply_changes else {}
     append_trade_intake_audit_fn(audit_path, build_trade_intake_audit_event("received", payload=payload))
@@ -171,7 +298,19 @@ def process_trade_payload(
                 write_trade_intake_state_fn=write_trade_intake_state_fn,
                 upsert_deal_state_fn=upsert_deal_state_fn,
             )
-        return result_dict
+        return _finalize_trade_payload_result(
+            result_dict=result_dict,
+            state=state,
+            state_path=state_path,
+            audit_path=audit_path,
+            payload=payload,
+            effective_payload=effective_payload,
+            deal=None,
+            apply_changes=apply_changes,
+            write_trade_intake_state_fn=write_trade_intake_state_fn,
+            append_trade_intake_audit_fn=append_trade_intake_audit_fn,
+            on_result_fn=on_result_fn,
+        )
     append_trade_intake_audit_fn(audit_path, build_trade_intake_audit_event("normalized", deal=deal))
     try:
         result = resolve_trade_deal_fn(deal, repo=repo, state=state, apply_changes=apply_changes)
@@ -191,7 +330,19 @@ def process_trade_payload(
                 write_trade_intake_state_fn=write_trade_intake_state_fn,
                 upsert_deal_state_fn=upsert_deal_state_fn,
             )
-        return result_dict
+        return _finalize_trade_payload_result(
+            result_dict=result_dict,
+            state=state,
+            state_path=state_path,
+            audit_path=audit_path,
+            payload=payload,
+            effective_payload=effective_payload,
+            deal=deal,
+            apply_changes=apply_changes,
+            write_trade_intake_state_fn=write_trade_intake_state_fn,
+            append_trade_intake_audit_fn=append_trade_intake_audit_fn,
+            on_result_fn=on_result_fn,
+        )
 
     if apply_changes and deal.deal_id:
         if result.status == "applied":
@@ -255,4 +406,16 @@ def process_trade_payload(
                 },
             )
             write_trade_intake_state_fn(state_path, state)
-    return result_dict
+    return _finalize_trade_payload_result(
+        result_dict=result_dict,
+        state=state,
+        state_path=state_path,
+        audit_path=audit_path,
+        payload=payload,
+        effective_payload=effective_payload,
+        deal=deal,
+        apply_changes=apply_changes,
+        write_trade_intake_state_fn=write_trade_intake_state_fn,
+        append_trade_intake_audit_fn=append_trade_intake_audit_fn,
+        on_result_fn=on_result_fn,
+    )
