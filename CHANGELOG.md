@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.2.44 - 2026-05-14
+
+### Changed
+- Rewrote the README into a product/operator manual with a safer quick start, clearer entry-point guidance, and a workflow-first structure for WebUI, `./om`, and `./om-agent`.
+- Promoted candidate filter trace troubleshooting, side-effect boundaries, scheduled-task guidance, and agent safety rules so common online issues can be collected and analyzed locally with less guesswork.
+
+### Tests
+- Re-ran the agent plugin contract/smoke suite, `./om-agent spec` JSON validation, and `git diff --check` while verifying the README command surface against the current CLI.
+
 ## 1.2.43 - 2026-05-14
 
 ### Added
