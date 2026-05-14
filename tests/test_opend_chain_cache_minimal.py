@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Any, cast
 
 
 def test_chain_cache_helpers_roundtrip() -> None:
@@ -63,6 +64,182 @@ def test_chain_cache_fresh_check() -> None:
 
         assert load_option_chain_shard(path, asof_date="2026-03-29") is not None
         assert load_option_chain_shard(path, asof_date="2026-03-28") is None
+
+
+def test_chain_fetch_uses_stale_cache_on_rate_limit() -> None:
+    import sys
+    base = Path(__file__).resolve().parents[1]
+    if str(base) not in sys.path:
+        sys.path.insert(0, str(base))
+
+    from src.application.option_chain_fetching import (
+        OptionChainFetchRequest,
+        fetch_option_chains,
+        option_chain_shard_cache_path,
+        save_option_chain_shard,
+    )
+
+    class _Gateway:
+        def get_option_chain(self, **kwargs):  # noqa: ANN003, ANN201
+            raise RuntimeError("获取期权链频率太高，请求失败，每30秒最多10次。")
+
+    with TemporaryDirectory() as td:
+        root = Path(td)
+        cache_path = option_chain_shard_cache_path(root, "US.NVDA", "2026-09-18", option_type_scope="put")
+        save_option_chain_shard(
+            cache_path,
+            asof_date="2026-05-13",
+            underlier_code="US.NVDA",
+            expiration="2026-09-18",
+            rows=[
+                {
+                    "code": "US.NVDA.2026-09-18.P100",
+                    "strike_time": "2026-09-18",
+                    "strike_price": 100,
+                    "option_type": "PUT",
+                    "lot_size": 100,
+                }
+            ],
+        )
+
+        result = fetch_option_chains(
+            gateway=_Gateway(),
+            request=OptionChainFetchRequest(
+                symbol="NVDA",
+                underlier_code="US.NVDA",
+                expirations=["2026-09-18"],
+                option_types="put",
+                base_dir=root,
+                asof_date="2026-05-14",
+                chain_cache=True,
+                max_wait_sec=1,
+            ),
+            retry_call=lambda _name, fn, **kwargs: fn(),
+        )
+
+    assert result.status == "partial"
+    assert result.error_code == "RATE_LIMIT"
+    assert result.expiration_statuses["2026-09-18"] == "stale_cache"
+    assert result.stale_cache_expirations == ["2026-09-18"]
+    assert result.stale_cache_asof_dates == {"2026-09-18": "2026-05-13"}
+    assert result.rows[0]["code"] == "US.NVDA.2026-09-18.P100"
+
+
+def test_chain_fetch_force_refresh_does_not_use_stale_cache_on_rate_limit() -> None:
+    import sys
+    base = Path(__file__).resolve().parents[1]
+    if str(base) not in sys.path:
+        sys.path.insert(0, str(base))
+
+    from src.application.option_chain_fetching import (
+        OptionChainFetchRequest,
+        fetch_option_chains,
+        option_chain_shard_cache_path,
+        save_option_chain_shard,
+    )
+
+    class _Gateway:
+        def get_option_chain(self, **kwargs):  # noqa: ANN003, ANN201
+            raise RuntimeError("获取期权链频率太高，请求失败，每30秒最多10次。")
+
+    with TemporaryDirectory() as td:
+        root = Path(td)
+        cache_path = option_chain_shard_cache_path(root, "US.NVDA", "2026-09-18", option_type_scope="put")
+        save_option_chain_shard(
+            cache_path,
+            asof_date="2026-05-13",
+            underlier_code="US.NVDA",
+            expiration="2026-09-18",
+            rows=[
+                {
+                    "code": "US.NVDA.2026-09-18.P100",
+                    "strike_time": "2026-09-18",
+                    "strike_price": 100,
+                    "option_type": "PUT",
+                    "lot_size": 100,
+                }
+            ],
+        )
+
+        result = fetch_option_chains(
+            gateway=_Gateway(),
+            request=OptionChainFetchRequest(
+                symbol="NVDA",
+                underlier_code="US.NVDA",
+                expirations=["2026-09-18"],
+                option_types="put",
+                base_dir=root,
+                asof_date="2026-05-14",
+                chain_cache=True,
+                is_force_refresh=True,
+                max_wait_sec=1,
+            ),
+            retry_call=lambda _name, fn, **kwargs: fn(),
+        )
+
+    assert result.status == "error"
+    assert result.error_code == "RATE_LIMIT"
+    assert result.expiration_statuses["2026-09-18"] == "error"
+    assert result.stale_cache_expirations == []
+    assert result.rows == []
+
+
+def test_chain_fetch_ignores_stale_cache_older_than_cache_horizon_on_rate_limit() -> None:
+    import sys
+    base = Path(__file__).resolve().parents[1]
+    if str(base) not in sys.path:
+        sys.path.insert(0, str(base))
+
+    from src.application.option_chain_fetching import (
+        OptionChainFetchRequest,
+        fetch_option_chains,
+        option_chain_shard_cache_path,
+        save_option_chain_shard,
+    )
+
+    class _Gateway:
+        def get_option_chain(self, **kwargs):  # noqa: ANN003, ANN201
+            raise RuntimeError("获取期权链频率太高，请求失败，每30秒最多10次。")
+
+    with TemporaryDirectory() as td:
+        root = Path(td)
+        cache_path = option_chain_shard_cache_path(root, "US.NVDA", "2026-09-18", option_type_scope="put")
+        save_option_chain_shard(
+            cache_path,
+            asof_date="2026-05-06",
+            underlier_code="US.NVDA",
+            expiration="2026-09-18",
+            rows=[
+                {
+                    "code": "US.NVDA.2026-09-18.P100",
+                    "strike_time": "2026-09-18",
+                    "strike_price": 100,
+                    "option_type": "PUT",
+                    "lot_size": 100,
+                }
+            ],
+        )
+
+        result = fetch_option_chains(
+            gateway=_Gateway(),
+            request=OptionChainFetchRequest(
+                symbol="NVDA",
+                underlier_code="US.NVDA",
+                expirations=["2026-09-18"],
+                option_types="put",
+                base_dir=root,
+                asof_date="2026-05-14",
+                chain_cache=True,
+                max_wait_sec=1,
+            ),
+            retry_call=lambda _name, fn, **kwargs: fn(),
+        )
+
+    assert result.status == "error"
+    assert result.error_code == "RATE_LIMIT"
+    assert result.expiration_statuses["2026-09-18"] == "error"
+    assert result.stale_cache_expirations == []
+    assert result.rows == []
 
 
 def test_chain_cache_must_cover_explicit_expirations() -> None:
@@ -217,7 +394,7 @@ def test_option_chain_single_side_request_passes_option_type_to_opend() -> None:
 
     with TemporaryDirectory() as td:
         root = Path(td)
-        captured: list[dict] = []
+        captured: list[dict[str, Any]] = []
 
         class _Gateway:
             def get_option_chain(self, **kwargs):  # noqa: ANN001
@@ -272,7 +449,7 @@ def test_option_chain_legacy_option_type_fallback_records_rate_limit() -> None:
         _fetch_one_chain(
             _Gateway(),
             OptionChainFetchRequest(symbol="PDD", underlier_code="US.PDD", option_types="put"),
-            limiter,
+            cast(Any, limiter),
             "2026-05-15",
         )
     except RuntimeError as exc:

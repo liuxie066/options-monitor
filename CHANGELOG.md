@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## 1.2.40 - 2026-05-14
+
+### Added
+- Added required_data prefetch option-chain budget waves so OpenD `get_option_chain` calls stay under the configured shared window during global prefetch.
+- Added run summary fields for OpenD rate-limit classes, rate-limit items, prefetch budget plans, cooldowns, and stale option-chain cache hits.
+
+### Changed
+- Reduced effective prefetch option-chain budget below the raw OpenD limit to leave headroom for retries and concurrent callers.
+- Reused stale option-chain cache only as a bounded RATE_LIMIT fallback, with force-refresh runs and cache entries older than the retention horizon excluded.
+
+### Fixed
+- Recorded single-expiration OpenD option-chain RATE_LIMIT details in required_data prefetch summaries instead of leaving `opend_rate_limit_classes` empty.
+
+### Tests
+- Added focused US/HK required_data prefetch, OpenD coordinator, option-chain cache fallback, and budget planning regression coverage.
+- Re-ran focused OpenD limiter/config, required_data prefetch, explicit-expiration fetch, runtime status, compile, type, and diff validation.
+
 ## 1.2.39 - 2026-05-14
 
 ### Changed

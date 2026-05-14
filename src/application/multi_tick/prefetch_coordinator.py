@@ -36,7 +36,112 @@ def _is_prefetch_error(payload: dict[str, Any]) -> bool:
 
 
 def _is_opend_rate_limit_payload(payload: dict[str, Any]) -> bool:
-    return classify_opend_error(payload).is_rate_limit
+    return bool(_extract_opend_rate_limit_items(payload))
+
+
+def _iter_nested_opend_error_payloads(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+
+    candidates: list[dict[str, Any]] = []
+
+    def add_meta(raw: Any) -> None:
+        if not isinstance(raw, dict):
+            return
+        meta = raw.get("meta") if isinstance(raw.get("meta"), dict) else raw
+        if isinstance(meta, dict):
+            candidates.append(meta)
+            for key in ("errors", "snapshot_errors", "spot_errors"):
+                items = meta.get(key)
+                if not isinstance(items, list):
+                    continue
+                for item in items:
+                    if isinstance(item, dict):
+                        candidates.append(item)
+                    elif str(item or "").strip():
+                        candidates.append({"message": str(item)})
+
+    add_meta(payload)
+    nested_payload = payload.get("payload")
+    if isinstance(nested_payload, dict):
+        add_meta(nested_payload)
+    return candidates
+
+
+def _extract_opend_rate_limit_items(payload: dict[str, Any], *, symbol: str | None = None) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    payload_symbol = str(symbol or payload.get("symbol") or "").strip()
+    payload_market = _symbol_class(payload_symbol) if payload_symbol else ""
+    nested_candidates = _iter_nested_opend_error_payloads(payload)
+    has_nested_detail = any(_is_rate_limit_detail_candidate(candidate) for candidate in nested_candidates)
+    candidates = [payload, *nested_candidates]
+    out: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str, str]] = set()
+    for candidate in candidates:
+        if not isinstance(candidate, dict) or not classify_opend_error(candidate).is_rate_limit:
+            continue
+        if candidate is payload and has_nested_detail:
+            continue
+        if _has_nested_rate_limit_items(candidate):
+            continue
+        expiration = str(candidate.get("expiration") or "").strip()
+        endpoint = _rate_limit_endpoint(candidate)
+        message = str(candidate.get("message") or candidate.get("error") or payload.get("message") or "").strip()
+        key = (payload_symbol, payload_market, expiration, endpoint, message)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(
+            {
+                "symbol": payload_symbol,
+                "market": payload_market,
+                "expiration": expiration,
+                "endpoint": endpoint,
+                "error_code": str(candidate.get("error_code") or "RATE_LIMIT"),
+                "message": message,
+            }
+        )
+    return out
+
+
+def _is_rate_limit_detail_candidate(payload: dict[str, Any]) -> bool:
+    if not isinstance(payload, dict) or not classify_opend_error(payload).is_rate_limit:
+        return False
+    if str(payload.get("expiration") or "").strip():
+        return True
+    stage = str(payload.get("stage") or payload.get("endpoint") or "").strip()
+    return bool(stage)
+
+
+def _has_nested_rate_limit_items(payload: dict[str, Any]) -> bool:
+    for key in ("errors", "snapshot_errors", "spot_errors"):
+        items = payload.get(key)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if isinstance(item, dict) and classify_opend_error(item).is_rate_limit:
+                return True
+            if not isinstance(item, dict) and classify_opend_error({"message": str(item or "")}).is_rate_limit:
+                return True
+    return False
+
+
+def _rate_limit_endpoint(payload: dict[str, Any]) -> str:
+    raw_stage = str(payload.get("stage") or payload.get("endpoint") or "").strip().lower()
+    if raw_stage:
+        if raw_stage in {"market_snapshot", "snapshot"}:
+            return "market_snapshot"
+        if raw_stage in {"spot_snapshot", "spot"}:
+            return "spot_snapshot"
+        if raw_stage in {"option_expiration", "expiration"}:
+            return "option_expiration"
+        if raw_stage in {"option_chain", "chain"}:
+            return "option_chain"
+        return raw_stage
+    if str(payload.get("expiration") or "").strip():
+        return "option_chain"
+    return "opend"
 
 
 def _annotate_prefetch_payload(
@@ -71,6 +176,7 @@ class PrefetchCoordinatorResult:
     fail_budget_total: int = 0
     budget_triggered: bool = False
     opend_rate_limit_classes: set[str] = field(default_factory=set)
+    opend_rate_limit_items: list[dict[str, Any]] = field(default_factory=list)
     results: dict[str, str] = field(default_factory=dict)
     audit_items: list[dict[str, Any]] = field(default_factory=list)
 
@@ -236,6 +342,14 @@ class PrefetchCoordinator:
                 message = str(payload.get("message") or "")
                 if symbol:
                     result.results[symbol] = message
+                rate_limit_items = (
+                    _extract_opend_rate_limit_items(payload, symbol=symbol)
+                    if is_futu_fetch_source(payload.get("source"))
+                    else []
+                )
+                if rate_limit_items:
+                    result.opend_rate_limit_classes.add(_symbol_class(symbol))
+                    result.opend_rate_limit_items.extend(rate_limit_items)
 
                 status = str(payload.get("status") or "").strip().lower()
                 if status == "skipped":
@@ -244,8 +358,6 @@ class PrefetchCoordinator:
                     result.errors += 1
                     fail_consecutive += 1
                     fail_total += 1
-                    if is_futu_fetch_source(payload.get("source")) and _is_opend_rate_limit_payload(payload):
-                        result.opend_rate_limit_classes.add(_symbol_class(symbol))
                     if self._stop_on_failure_budget and (not result.budget_triggered) and budget_exceeded():
                         result.budget_triggered = True
                         if not budget_summary_emitted:
@@ -283,7 +395,8 @@ class PrefetchCoordinator:
                 while len(futures) < self._max_workers and submit_next():
                     pass
 
-            if self._cleanup_worker_fn is not None:
-                list(executor.map(lambda _idx: self._cleanup_worker_fn(), range(self._max_workers)))
+            cleanup_worker_fn = self._cleanup_worker_fn
+            if cleanup_worker_fn is not None:
+                list(executor.map(lambda _idx: cleanup_worker_fn(), range(self._max_workers)))
 
         return result

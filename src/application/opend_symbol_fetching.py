@@ -20,7 +20,7 @@ import math
 from dataclasses import dataclass, replace
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pandas as pd
 
@@ -301,14 +301,14 @@ def fetch_symbol_request(
         )
 
         # Reuse the fetched DataFrame when available to avoid records <-> DataFrame round trips.
-        chain = chain_bundle.frame
-        if not isinstance(chain, pd.DataFrame):
-            chain = pd.DataFrame(chain_bundle.rows or [])
-        if chain is None or chain.empty:
+        raw_chain = chain_bundle.frame
+        chain: pd.DataFrame = raw_chain if isinstance(raw_chain, pd.DataFrame) else pd.DataFrame(chain_bundle.rows or [])
+        if chain.empty:
             fetch_meta = dict(chain_bundle.fetch_meta or {})
             status = str(fetch_meta.get('status') or 'error')
             error_code = str(fetch_meta.get('error_code') or 'EMPTY_CHAIN')
-            fetch_errors = fetch_meta.get('errors') if isinstance(fetch_meta.get('errors'), list) else []
+            raw_fetch_errors = fetch_meta.get('errors')
+            fetch_errors = [item for item in raw_fetch_errors if isinstance(item, dict)] if isinstance(raw_fetch_errors, list) else []
             error_message = next(
                 (
                     str(item.get('message'))
@@ -336,6 +336,8 @@ def fetch_symbol_request(
                     'spot_errors': spot_errors,
                     'from_cache_expirations': fetch_meta.get('from_cache_expirations') or [],
                     'fetched_expirations': fetch_meta.get('fetched_expirations') or [],
+                    'stale_cache_expirations': fetch_meta.get('stale_cache_expirations') or [],
+                    'stale_cache_asof_dates': fetch_meta.get('stale_cache_asof_dates') or {},
                     'expiration_opend_calls': int(fetch_meta.get('expiration_opend_calls') or 0),
                     'expiration_cache_hits': int(fetch_meta.get('expiration_cache_hits') or 0),
                     'opend_call_count': int(fetch_meta.get('opend_call_count') or 0),
@@ -346,7 +348,7 @@ def fetch_symbol_request(
             }
 
         # Derive expirations (strike_time) and pick first N
-        chain = chain.copy()
+        chain = cast(pd.DataFrame, chain.copy())
         chain['expiration'] = chain['strike_time'].astype(str).str.slice(0, 10)
         expirations = sorted({x for x in chain['expiration'].tolist() if isinstance(x, str) and len(x) >= 10})
         if explicit_expirations_norm:
@@ -354,7 +356,7 @@ def fetch_symbol_request(
         elif request.limit_expirations:
             expirations = expirations[: int(request.limit_expirations)]
 
-        chain = chain[chain['expiration'].isin(expirations)].copy()
+        chain = cast(pd.DataFrame, chain[chain['expiration'].isin(expirations)].copy())
 
         # Early filters BEFORE snapshots (performance-critical):
         # - option type (put/call)
@@ -372,7 +374,7 @@ def fetch_symbol_request(
                         return 'put'
                     return s
                 chain['_ot'] = chain['option_type'].apply(_norm_ot)
-                chain = chain[chain['_ot'].isin(ot_set)].copy()
+                chain = cast(pd.DataFrame, chain[chain['_ot'].isin(list(ot_set))].copy())
         except Exception:
             pass
 
@@ -410,13 +412,13 @@ def fetch_symbol_request(
                             _row_keep(raw_option_type, raw_strike)
                             for raw_option_type, raw_strike in zip(option_type_values, chain['strike_price'].tolist())
                         ]
-                        chain = chain[mask].copy()
+                        chain = cast(pd.DataFrame, chain[mask].copy())
                     else:
                         if min_strike is not None:
-                            chain = chain[sp >= float(min_strike)].copy()
+                            chain = cast(pd.DataFrame, chain[cast(Any, sp) >= float(min_strike)].copy())
                             sp = pd.to_numeric(chain['strike_price'], errors='coerce')
                         if max_strike is not None:
-                            chain = chain[sp <= float(max_strike)].copy()
+                            chain = cast(pd.DataFrame, chain[cast(Any, sp) <= float(max_strike)].copy())
         except Exception:
             pass
 
@@ -531,7 +533,8 @@ def fetch_symbol_request(
             rows.append(row)
 
         fetch_result_meta = chain_bundle.fetch_meta or {}
-        fetch_errors = fetch_result_meta.get('errors') if isinstance(fetch_result_meta.get('errors'), list) else []
+        raw_fetch_errors = fetch_result_meta.get('errors')
+        fetch_errors = [item for item in raw_fetch_errors if isinstance(item, dict)] if isinstance(raw_fetch_errors, list) else []
         combined_errors = [*fetch_errors, *snapshot_errors]
         snapshot_error_code = next(
             (
@@ -572,6 +575,8 @@ def fetch_symbol_request(
                 'errors': combined_errors,
                 'from_cache_expirations': fetch_result_meta.get('from_cache_expirations') or [],
                 'fetched_expirations': fetch_result_meta.get('fetched_expirations') or [],
+                'stale_cache_expirations': fetch_result_meta.get('stale_cache_expirations') or [],
+                'stale_cache_asof_dates': fetch_result_meta.get('stale_cache_asof_dates') or {},
                 'expiration_opend_calls': int(fetch_result_meta.get('expiration_opend_calls') or 0),
                 'expiration_cache_hits': int(fetch_result_meta.get('expiration_cache_hits') or 0),
                 'opend_call_count': int(fetch_result_meta.get('opend_call_count') or 0),

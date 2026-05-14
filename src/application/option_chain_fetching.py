@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date
 import importlib
 from pathlib import Path
 from typing import Any, Callable, Literal
@@ -19,6 +20,7 @@ FreshnessPolicy = Literal["cache_first", "refresh_missing", "force_refresh"]
 DEFAULT_OPTION_CHAIN_WINDOW_SEC = 30.0
 DEFAULT_OPTION_CHAIN_MAX_CALLS = 10
 DEFAULT_OPTION_CHAIN_MAX_WAIT_SEC = 90.0
+DEFAULT_STALE_OPTION_CHAIN_CACHE_MAX_AGE_DAYS = 7
 
 _RATE_GATE_CACHE_LOCK = threading.Lock()
 _RATE_GATE_CACHE: dict[tuple[str, int, float, float], Any] = {}
@@ -63,6 +65,8 @@ class OptionChainFetchResult:
     error_code: str | None
     errors: list[dict[str, Any]]
     expiration_statuses: dict[str, str]
+    stale_cache_expirations: list[str] = field(default_factory=list)
+    stale_cache_asof_dates: dict[str, str] = field(default_factory=dict)
     frame: pd.DataFrame | None = None
 
     def to_meta(self) -> dict[str, Any]:
@@ -75,6 +79,8 @@ class OptionChainFetchResult:
             "rate_gate_wait_sec": float(self.rate_gate_wait_sec),
             "expiration_statuses": dict(self.expiration_statuses),
             "errors": list(self.errors),
+            "stale_cache_expirations": list(self.stale_cache_expirations),
+            "stale_cache_asof_dates": dict(self.stale_cache_asof_dates),
         }
 
 
@@ -206,6 +212,57 @@ def load_option_chain_shard(path: Path, *, asof_date: str) -> list[dict[str, Any
     return [dict(row) for row in rows if isinstance(row, dict)]
 
 
+def _parse_cache_asof_date(value: Any) -> date | None:
+    raw = str(value or "").strip()
+    if len(raw) >= 10:
+        raw = raw[:10]
+    try:
+        return date.fromisoformat(raw)
+    except Exception:
+        return None
+
+
+def _is_stale_cache_age_allowed(stale_asof: str, *, asof_date: str, max_age_days: int) -> bool:
+    stale_date = _parse_cache_asof_date(stale_asof)
+    current_date = _parse_cache_asof_date(asof_date)
+    if stale_date is None or current_date is None:
+        return False
+    age_days = (current_date - stale_date).days
+    return 0 < age_days <= max(0, int(max_age_days))
+
+
+def load_stale_option_chain_shard(
+    path: Path,
+    *,
+    asof_date: str,
+    max_age_days: int = DEFAULT_STALE_OPTION_CHAIN_CACHE_MAX_AGE_DAYS,
+) -> tuple[list[dict[str, Any]], str] | None:
+    if not str(asof_date or "").strip():
+        return None
+    try:
+        obj = json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(obj, dict):
+        return None
+    stale_asof = str(obj.get("asof_date") or "").strip()
+    if not stale_asof or not _is_stale_cache_age_allowed(
+        stale_asof,
+        asof_date=asof_date,
+        max_age_days=max_age_days,
+    ):
+        return None
+    if str(obj.get("status") or "").lower() != "ok":
+        return None
+    if obj.get("error") or obj.get("error_code"):
+        return None
+    rows = obj.get("rows")
+    if not isinstance(rows, list) or not rows:
+        return None
+    clean_rows = [dict(row) for row in rows if isinstance(row, dict)]
+    return (clean_rows, stale_asof) if clean_rows else None
+
+
 def save_option_chain_shard(
     path: Path,
     *,
@@ -293,6 +350,8 @@ def fetch_option_chains(
     fetched: list[str] = []
     errors: list[dict[str, Any]] = []
     statuses: dict[str, str] = {}
+    stale_cache: list[str] = []
+    stale_cache_asof_dates: dict[str, str] = {}
     opend_calls = 0
     rate_gate_wait_sec = 0.0
     option_type_scope = _single_option_type(request.option_types)
@@ -352,7 +411,6 @@ def fetch_option_chains(
         except Exception as exc:
             code = classify_option_chain_error(exc)
             msg = str(exc)
-            statuses[exp_key] = "error"
             errors.append({"expiration": exp_norm, "error_code": code, "message": msg})
             if request.chain_cache and asof_date:
                 save_option_chain_diagnostic(
@@ -369,6 +427,22 @@ def fetch_option_chains(
                     error_code=code,
                     message=msg,
                 )
+            stale_loaded: tuple[list[dict[str, Any]], str] | None = None
+            if code == "RATE_LIMIT" and request.chain_cache and asof_date and not force_refresh:
+                stale_loaded = load_stale_option_chain_shard(cache_path, asof_date=asof_date)
+                if stale_loaded is None and fallback_cache_path != cache_path:
+                    stale_loaded = load_stale_option_chain_shard(fallback_cache_path, asof_date=asof_date)
+            if stale_loaded is not None:
+                stale_rows, stale_asof = stale_loaded
+                rows.extend(stale_rows)
+                stale_frame = _records_to_frame(stale_rows)
+                if stale_frame is not None and not stale_frame.empty:
+                    frame_parts.append(stale_frame)
+                stale_cache.append(exp_key)
+                stale_cache_asof_dates[exp_key] = stale_asof
+                statuses[exp_key] = "stale_cache"
+                continue
+            statuses[exp_key] = "error"
             continue
 
         chain_frame = _chain_value_to_frame(chain)
@@ -418,6 +492,8 @@ def fetch_option_chains(
         error_code=_primary_error_code(errors),
         errors=errors,
         expiration_statuses=statuses,
+        stale_cache_expirations=stale_cache,
+        stale_cache_asof_dates=stale_cache_asof_dates,
         frame=_concat_frames(frame_parts),
     )
 
