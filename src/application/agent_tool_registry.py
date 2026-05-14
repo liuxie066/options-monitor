@@ -171,6 +171,29 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
         ),
     ),
     AgentToolDefinition(
+        name="candidate_filter_explain",
+        read_only=True,
+        description="Explain why a symbol was rejected, post-filtered, accepted, or not observed across candidate filter functions from existing trace rows.",
+        requires=("candidate_filter_trace",),
+        capabilities=("candidate_filter_trace", "filter_explain", "read_only"),
+        input_schema={
+            "symbol": "required canonical symbol, for example NVDA or 0700.HK",
+            "account": "optional account label",
+            "function": "optional sell_put|sell_call|close_advice|yield_enhancement|cash_reserve|share_coverage",
+            "run_id": "optional output_runs run id; use latest externally when desired",
+            "run_dir": "optional explicit output_runs/<run_id> directory",
+            "report_dir": "optional report dir containing candidate_filter_trace.jsonl",
+            "trace_path": "optional explicit candidate_filter_trace.jsonl path",
+            "trace_paths": "optional list of trace jsonl paths",
+        },
+        risk_level="read_only",
+        safe_default_input={"symbol": "NVDA"},
+        examples=(
+            {"input": {"run_id": "20260514T100000Z", "account": "lx", "symbol": "NVDA"}},
+            {"input": {"trace_path": "output/reports/candidate_filter_trace.jsonl", "symbol": "NVDA"}},
+        ),
+    ),
+    AgentToolDefinition(
         name="strategy_replay_analyze",
         read_only=True,
         description=(

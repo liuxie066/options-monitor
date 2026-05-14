@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 1.2.43 - 2026-05-14
+
+### Added
+- Added candidate filter trace rows for Sell Put, Sell Call, close advice, yield enhancement, cash reserve, and share coverage decisions.
+- Added the read-only `candidate_filter_explain` agent tool to explain why a symbol was rejected, post-filtered, accepted, notified, or not observed from existing trace files.
+
+### Changed
+- Tightened candidate scan typing and trace-path handling so changed-file `basedpyright` can validate the trace/explain implementation without being blocked by older weakly typed code.
+
+### Tests
+- Added regression coverage for candidate filter trace writing, missing required_data visibility, cash-reserve filtering traces, and the explain tool.
+- Re-ran focused candidate, close-advice, agent-plugin, compile, type, and release metadata validation.
+
 ## 1.2.42 - 2026-05-14
 
 ### Fixed

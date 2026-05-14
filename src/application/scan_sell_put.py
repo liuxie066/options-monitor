@@ -4,6 +4,8 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from typing import Any
+
 import pandas as pd
 
 repo_base = Path(__file__).resolve().parents[2]
@@ -67,14 +69,16 @@ def _normalize_contract_input(raw: CandidateContractInput | pd.Series) -> Candid
     return CandidateContractInput.from_row(raw, mode="put")
 
 
-def compute_metrics(contract: CandidateContractInput | pd.Series) -> dict | None:
+def compute_metrics(contract: CandidateContractInput | pd.Series) -> dict[str, float] | None:
     contract = _normalize_contract_input(contract)
     mid = contract.mid
     strike = contract.strike
     spot = contract.spot
     dte = contract.dte
 
-    if mid is None or strike is None or spot is None or dte <= 0:
+    if mid is None or strike is None or spot is None or dte is None:
+        return None
+    if dte <= 0:
         return None
     if mid <= 0 or strike <= 0 or spot <= 0:
         return None
@@ -119,7 +123,53 @@ def compute_metrics(contract: CandidateContractInput | pd.Series) -> dict | None
     }
 
 
-def _build_candidate_row(contract: CandidateContractInput, base_values: CandidateBaseValues, metrics: dict) -> dict | None:
+def explain_metrics_rejection(contract: CandidateContractInput | pd.Series) -> dict[str, Any] | None:
+    contract = _normalize_contract_input(contract)
+    mid = contract.mid
+    strike = contract.strike
+    spot = contract.spot
+    dte = contract.dte
+    if mid is None or strike is None or spot is None or dte is None:
+        return {"rule": "metrics_input_missing", "message": "mid, strike, spot, or dte missing"}
+    if dte <= 0:
+        return {"rule": "metrics_dte_non_positive", "metric_value": dte, "threshold": 0, "message": "dte must be positive"}
+    if mid <= 0:
+        return {"rule": "metrics_mid_non_positive", "metric_value": mid, "threshold": 0, "message": "mid must be positive"}
+    if strike <= 0:
+        return {"rule": "metrics_strike_non_positive", "metric_value": strike, "threshold": 0, "message": "strike must be positive"}
+    if spot <= 0:
+        return {"rule": "metrics_spot_non_positive", "metric_value": spot, "threshold": 0, "message": "spot must be positive"}
+    if strike >= spot:
+        return {"rule": "metrics_put_strike_not_below_spot", "metric_value": strike, "threshold": spot, "message": "put strike must be below spot"}
+
+    multiplier = contract.multiplier
+    m = int(multiplier) if multiplier and multiplier > 0 else None
+    if not m:
+        return {"rule": "metrics_multiplier_invalid", "metric_value": multiplier, "threshold": 0, "message": "multiplier must be positive"}
+
+    gross_income = mid * m
+    fee = calc_futu_option_fee(
+        contract.currency,
+        mid,
+        contracts=1,
+        multiplier=m,
+        is_sell=True,
+    )
+    net_income = gross_income - fee
+    if net_income <= 0:
+        return {"rule": "metrics_net_income_non_positive", "metric_value": net_income, "threshold": 0, "message": "net income must be positive"}
+
+    cash_basis = strike * m - net_income
+    if cash_basis <= 0:
+        return {"rule": "metrics_cash_basis_non_positive", "metric_value": cash_basis, "threshold": 0, "message": "cash basis must be positive"}
+    return {"rule": "candidate_metrics_unavailable", "message": "candidate metrics unavailable"}
+
+
+def _build_candidate_row(
+    contract: CandidateContractInput,
+    base_values: CandidateBaseValues,
+    metrics: dict[str, Any],
+) -> dict[str, Any] | None:
     return {
         "symbol": contract.symbol,
         "expiration": contract.expiration,
@@ -177,8 +227,8 @@ def run_sell_put_scan(
     min_open_interest: float = DEFAULT_CANDIDATE_LIQUIDITY.min_open_interest,
     min_volume: float = DEFAULT_CANDIDATE_LIQUIDITY.min_volume,
     max_spread_ratio: float | None = DEFAULT_CANDIDATE_LIQUIDITY.max_spread_ratio,
-    event_risk_cfg: dict | None = None,
-    score_weights: dict | None = None,
+    event_risk_cfg: dict[str, Any] | None = None,
+    score_weights: dict[str, Any] | None = None,
     reject_log_output: Path | None = None,
     quiet: bool = False,
 ) -> pd.DataFrame:
@@ -218,6 +268,7 @@ def run_sell_put_scan(
                 event_risk_cfg=cfg,
             ),
             print_summary_fn=_print_summary,
+            metric_reject_reason_fn=explain_metrics_rejection,
         ),
         event_risk_cfg=event_risk_cfg,
         base_dir=Path(__file__).resolve().parents[2],

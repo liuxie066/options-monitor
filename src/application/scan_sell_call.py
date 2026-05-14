@@ -4,7 +4,8 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
+
 import pandas as pd
 
 repo_base = Path(__file__).resolve().parents[2]
@@ -85,13 +86,15 @@ def _normalize_contract_input(raw: CandidateContractInput | pd.Series) -> Candid
     return CandidateContractInput.from_row(raw, mode="call")
 
 
-def compute_metrics(contract: CandidateContractInput | pd.Series, avg_cost: float):
+def compute_metrics(contract: CandidateContractInput | pd.Series, avg_cost: float) -> dict[str, Any] | None:
     contract = _normalize_contract_input(contract)
     mid = contract.mid
     strike = contract.strike
     spot = contract.spot
     dte = contract.dte
-    if None in (mid, strike, spot) or dte <= 0 or avg_cost <= 0:
+    if mid is None or strike is None or spot is None or dte is None:
+        return None
+    if dte <= 0 or avg_cost <= 0:
         return None
     if mid <= 0 or strike <= 0 or spot <= 0:
         return None
@@ -132,11 +135,56 @@ def compute_metrics(contract: CandidateContractInput | pd.Series, avg_cost: floa
     }
 
 
-def _make_compute_metrics(avg_cost: float) -> Callable[[CandidateContractInput], dict | None]:
-    def _compute(contract: CandidateContractInput) -> dict | None:
+def explain_metrics_rejection(contract: CandidateContractInput | pd.Series, avg_cost: float) -> dict[str, Any] | None:
+    contract = _normalize_contract_input(contract)
+    mid = contract.mid
+    strike = contract.strike
+    spot = contract.spot
+    dte = contract.dte
+    if mid is None or strike is None or spot is None or dte is None:
+        return {"rule": "metrics_input_missing", "message": "mid, strike, spot, or dte missing"}
+    if dte <= 0:
+        return {"rule": "metrics_dte_non_positive", "metric_value": dte, "threshold": 0, "message": "dte must be positive"}
+    if avg_cost <= 0:
+        return {"rule": "metrics_avg_cost_non_positive", "metric_value": avg_cost, "threshold": 0, "message": "avg_cost must be positive"}
+    if mid <= 0:
+        return {"rule": "metrics_mid_non_positive", "metric_value": mid, "threshold": 0, "message": "mid must be positive"}
+    if strike <= 0:
+        return {"rule": "metrics_strike_non_positive", "metric_value": strike, "threshold": 0, "message": "strike must be positive"}
+    if spot <= 0:
+        return {"rule": "metrics_spot_non_positive", "metric_value": spot, "threshold": 0, "message": "spot must be positive"}
+
+    multiplier = contract.multiplier
+    m = int(multiplier) if multiplier and multiplier > 0 else None
+    if not m:
+        return {"rule": "metrics_multiplier_invalid", "metric_value": multiplier, "threshold": 0, "message": "multiplier must be positive"}
+
+    gross_income = mid * m
+    fee = calc_futu_option_fee(
+        contract.currency,
+        mid,
+        contracts=1,
+        multiplier=m,
+        is_sell=True,
+    )
+    net_income = gross_income - fee
+    if net_income <= 0:
+        return {"rule": "metrics_net_income_non_positive", "metric_value": net_income, "threshold": 0, "message": "net income must be positive"}
+    return {"rule": "candidate_metrics_unavailable", "message": "candidate metrics unavailable"}
+
+
+def _make_compute_metrics(avg_cost: float) -> Callable[[CandidateContractInput], dict[str, Any] | None]:
+    def _compute(contract: CandidateContractInput) -> dict[str, Any] | None:
         return compute_metrics(contract, avg_cost)
 
     return _compute
+
+
+def _make_explain_metrics_rejection(avg_cost: float) -> Callable[[CandidateContractInput], dict[str, Any] | None]:
+    def _explain(contract: CandidateContractInput) -> dict[str, Any] | None:
+        return explain_metrics_rejection(contract, avg_cost)
+
+    return _explain
 
 
 def _resolve_covered_contracts(*, multiplier: float | None, shares: int, shares_locked: int, shares_available_for_cover: int | None) -> tuple[int, int, bool]:
@@ -153,8 +201,18 @@ def _resolve_covered_contracts(*, multiplier: float | None, shares: int, shares_
     )
 
 
-def _build_candidate_row_factory(*, avg_cost: float, shares: int, shares_locked: int, shares_available_for_cover: int | None) -> Callable[[CandidateContractInput, CandidateBaseValues, dict], dict | None]:
-    def _build(contract: CandidateContractInput, base_values: CandidateBaseValues, metrics: dict) -> dict | None:
+def _build_candidate_row_factory(
+    *,
+    avg_cost: float,
+    shares: int,
+    shares_locked: int,
+    shares_available_for_cover: int | None,
+) -> Callable[[CandidateContractInput, CandidateBaseValues, dict[str, Any]], dict[str, Any] | None]:
+    def _build(
+        contract: CandidateContractInput,
+        base_values: CandidateBaseValues,
+        metrics: dict[str, Any],
+    ) -> dict[str, Any] | None:
         available, covered_contracts_available, is_fully_covered_available = _resolve_covered_contracts(
             multiplier=contract.multiplier,
             shares=shares,
@@ -239,8 +297,8 @@ def run_sell_call_scan(
     min_open_interest: float = DEFAULT_CANDIDATE_LIQUIDITY.min_open_interest,
     min_volume: float = DEFAULT_CANDIDATE_LIQUIDITY.min_volume,
     max_spread_ratio: float | None = DEFAULT_CANDIDATE_LIQUIDITY.max_spread_ratio,
-    event_risk_cfg: dict | None = None,
-    score_weights: dict | None = None,
+    event_risk_cfg: dict[str, Any] | None = None,
+    score_weights: dict[str, Any] | None = None,
     reject_log_output: Path | None = None,
     quiet: bool = False,
 ) -> pd.DataFrame:
@@ -304,6 +362,7 @@ def run_sell_call_scan(
                 event_risk_cfg=cfg,
             ),
             print_summary_fn=_print_summary,
+            metric_reject_reason_fn=_make_explain_metrics_rejection(avg_cost),
         ),
         event_risk_cfg=event_risk_cfg,
         base_dir=Path(__file__).resolve().parents[2],

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable, cast
 
 import pandas as pd
 
@@ -18,6 +18,14 @@ from domain.domain.engine import (
     empty_reject_log_dataframe,
 )
 from src.application.candidate_models import CandidateBaseValues, CandidateContractInput
+from src.application.candidate_filter_trace import (
+    append_candidate_filter_trace_rows,
+    build_candidate_filter_trace_row,
+    build_candidate_filter_trace_rows_from_decision,
+    candidate_trace_path_for_output,
+    infer_trace_scope_from_path,
+    trace_function_for_mode,
+)
 
 
 @dataclass(frozen=True)
@@ -38,20 +46,22 @@ class CandidateScanConfig:
     min_net_income: float
     score_weights: CandidateScoreWeights | None = None
     reject_stage: str = "step3_risk_gate"
+    trace_output: Path | None = None
     quiet: bool = False
 
 
 @dataclass(frozen=True)
 class CandidateScanDependencies:
-    compute_metrics_fn: Callable[[CandidateContractInput], dict | None]
-    build_row_fn: Callable[[CandidateContractInput, CandidateBaseValues, dict], dict | None]
-    build_hard_constraint_kwargs_fn: Callable[[CandidateContractInput], dict]
-    annualized_return_value_fn: Callable[[dict], float | None]
-    annotate_event_risk_fn: Callable[[pd.DataFrame, Path, dict | None], pd.DataFrame]
+    compute_metrics_fn: Callable[[CandidateContractInput], dict[str, Any] | None]
+    build_row_fn: Callable[[CandidateContractInput, CandidateBaseValues, dict[str, Any]], dict[str, Any] | None]
+    build_hard_constraint_kwargs_fn: Callable[[CandidateContractInput], dict[str, Any]]
+    annualized_return_value_fn: Callable[[dict[str, Any]], float | None]
+    annotate_event_risk_fn: Callable[[pd.DataFrame, Path, dict[str, Any] | None], pd.DataFrame]
     print_summary_fn: Callable[[pd.DataFrame, Path, Path], None]
+    metric_reject_reason_fn: Callable[[CandidateContractInput], dict[str, Any] | None] | None = None
 
 
-def resolve_candidate_score_weights(raw: CandidateScoreWeights | dict | None) -> CandidateScoreWeights | None:
+def resolve_candidate_score_weights(raw: CandidateScoreWeights | dict[str, Any] | None) -> CandidateScoreWeights | None:
     if raw is None or raw == "":
         return None
     if isinstance(raw, CandidateScoreWeights):
@@ -87,11 +97,13 @@ def _load_required_data_rows(*, input_root: Path, symbol: str, mode: str) -> pd.
     path = Path(input_root) / "parsed" / f"{symbol}_required_data.csv"
     try:
         df = pd.read_csv(path)
+    except FileNotFoundError:
+        df = pd.DataFrame()
     except pd.errors.EmptyDataError:
         df = pd.DataFrame()
     if df.empty or ("option_type" not in df.columns):
         return pd.DataFrame()
-    return df[df["option_type"] == mode].copy()
+    return cast(pd.DataFrame, df.loc[df["option_type"] == mode].copy())
 
 
 def _spread_values(contract: CandidateContractInput) -> tuple[float | None, float | None]:
@@ -113,8 +125,8 @@ def _build_base_values(
     max_dte: int,
     min_strike: float | None,
     max_strike: float | None,
-    extra_hard_kwargs: dict,
-) -> tuple[dict[str, object], CandidateBaseValues | None]:
+    extra_hard_kwargs: dict[str, Any],
+) -> tuple[dict[str, Any], CandidateBaseValues | None]:
     gate = evaluate_candidate_hard_constraints(
         contract.to_gate_payload(),
         mode=contract.mode,
@@ -143,7 +155,7 @@ def run_candidate_scan(
     *,
     config: CandidateScanConfig,
     deps: CandidateScanDependencies,
-    event_risk_cfg: dict | None,
+    event_risk_cfg: dict[str, Any] | None,
     base_dir: Path,
     reject_log_output: Path | None = None,
 ) -> pd.DataFrame:
@@ -155,11 +167,33 @@ def run_candidate_scan(
         else out_path.with_name(f"{out_path.stem}_reject_log.csv")
     )
     reject_out_path.parent.mkdir(parents=True, exist_ok=True)
+    trace_out_path = Path(config.trace_output).resolve() if config.trace_output is not None else candidate_trace_path_for_output(out_path)
+    trace_rows: list[dict[str, Any]] = []
+    trace_function = trace_function_for_mode(config.mode)
+    trace_scope = infer_trace_scope_from_path(out_path)
+    config_values = _trace_config_values(config)
 
-    rows: list[dict] = []
-    reject_rows: list[dict] = []
+    rows: list[dict[str, Any]] = []
+    reject_rows: list[dict[str, Any]] = []
     for symbol in config.symbols:
         df = _load_required_data_rows(input_root=config.input_root, symbol=symbol, mode=config.mode)
+        if df.empty:
+            trace_rows.append(
+                build_candidate_filter_trace_row(
+                    run_id=trace_scope.get("run_id"),
+                    account=trace_scope.get("account"),
+                    symbol=symbol,
+                    function=trace_function,
+                    mode=config.mode,
+                    status="rejected",
+                    stage="fetch_visibility",
+                    rule=f"required_data_missing_{config.mode}_chain",
+                    message=f"required_data has no {config.mode} option rows for symbol",
+                    evidence_path=f"{symbol}_required_data.csv",
+                    config_values=config_values,
+                )
+            )
+            continue
         for _, row in df.iterrows():
             contract = CandidateContractInput.from_row(row, mode=config.mode)
             hard_kwargs = deps.build_hard_constraint_kwargs_fn(contract)
@@ -178,9 +212,46 @@ def run_candidate_scan(
                         reject_stage=config.reject_stage,
                     )
                 )
+                trace_rows.extend(
+                    build_candidate_filter_trace_rows_from_decision(
+                        decision=stage1,
+                        function=trace_function,
+                        status="rejected",
+                        reject_stage=config.reject_stage,
+                        evidence_path=reject_out_path.name,
+                        config_values=config_values,
+                        output_path=out_path,
+                    )
+                )
                 continue
             metrics = deps.compute_metrics_fn(contract)
             if not metrics:
+                reason: dict[str, Any] = {}
+                if deps.metric_reject_reason_fn is not None:
+                    try:
+                        reason = deps.metric_reject_reason_fn(contract) or {}
+                    except Exception:
+                        reason = {}
+                trace_rows.append(
+                    build_candidate_filter_trace_row(
+                        run_id=trace_scope.get("run_id"),
+                        account=trace_scope.get("account"),
+                        symbol=contract.symbol,
+                        function=trace_function,
+                        mode=config.mode,
+                        status="rejected",
+                        stage="metrics",
+                        rule=str(reason.get("rule") or "candidate_metrics_unavailable"),
+                        metric_value=reason.get("metric_value"),
+                        threshold=reason.get("threshold"),
+                        contract_symbol=contract.contract_symbol,
+                        expiration=contract.expiration,
+                        strike=contract.strike,
+                        message=str(reason.get("message") or "candidate metrics unavailable"),
+                        evidence_path=out_path.name,
+                        config_values=config_values,
+                    )
+                )
                 continue
             stage2 = evaluate_candidate_return_floor(
                 stage1,
@@ -204,11 +275,42 @@ def run_candidate_scan(
                     reject_stage=config.reject_stage,
                 )
             )
+            trace_rows.extend(
+                build_candidate_filter_trace_rows_from_decision(
+                    decision=stage3,
+                    function=trace_function,
+                    status="rejected",
+                    reject_stage=config.reject_stage,
+                    evidence_path=reject_out_path.name,
+                    config_values=config_values,
+                    output_path=out_path,
+                )
+            )
             if not bool(stage3.get("accepted")):
                 continue
             candidate = deps.build_row_fn(contract, base_values, metrics)
             if candidate:
                 rows.append(candidate)
+                trace_rows.append(
+                    build_candidate_filter_trace_row(
+                        run_id=trace_scope.get("run_id"),
+                        account=trace_scope.get("account"),
+                        symbol=candidate.get("symbol") or contract.symbol,
+                        function=trace_function,
+                        mode=config.mode,
+                        status="accepted",
+                        stage="stage4_ranking",
+                        rule="candidate_accepted",
+                        metric_value=deps.annualized_return_value_fn(metrics),
+                        threshold=config.min_annualized_net_return,
+                        contract_symbol=candidate.get("contract_symbol") or contract.contract_symbol,
+                        expiration=candidate.get("expiration") or contract.expiration,
+                        strike=candidate.get("strike") or contract.strike,
+                        message="candidate passed scan filters",
+                        evidence_path=out_path.name,
+                        config_values=config_values,
+                    )
+                )
 
     out = pd.DataFrame(rows)
     reject_log = pd.DataFrame(reject_rows)
@@ -233,14 +335,30 @@ def run_candidate_scan(
     else:
         reject_log.to_csv(reject_out_path, index=False)
 
+    append_candidate_filter_trace_rows(trace_out_path, trace_rows)
+
     if not config.quiet:
         deps.print_summary_fn(out, out_path, reject_out_path)
 
     return out
 
 
-def _decision_reject_log_rows(*, decision: dict, reject_stage: str) -> list[dict]:
-    rows: list[dict] = []
+def _trace_config_values(config: CandidateScanConfig) -> dict[str, object]:
+    return {
+        "min_dte": config.min_dte,
+        "max_dte": config.max_dte,
+        "min_strike": config.min_strike,
+        "max_strike": config.max_strike,
+        "min_open_interest": config.min_open_interest,
+        "min_volume": config.min_volume,
+        "max_spread_ratio": config.max_spread_ratio,
+        "min_annualized_net_return": config.min_annualized_net_return,
+        "min_net_income": config.min_net_income,
+    }
+
+
+def _decision_reject_log_rows(*, decision: dict[str, Any], reject_stage: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
     normalized = dict(decision.get("normalized_input") or {})
     for reject in list(decision.get("rejects") or []):
         reason = str(reject.get("reason") or "")
