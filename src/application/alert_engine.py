@@ -288,6 +288,12 @@ def _build_yield_enhancement_extra_parts(row: pd.Series) -> list[str]:
     parts: list[str] = []
     _append_option_quote_parts(parts, row)
     try:
+        value = row.get('put_bid')
+        if value is not None and not pd.isna(value):
+            parts.append(f"put_bid {float(value):.3f}")
+    except Exception:
+        pass
+    try:
         value = row.get('put_strike')
         if value is not None and not pd.isna(value):
             parts.append(f"put_strike {strike_text(value)}")

@@ -318,6 +318,8 @@ def test_notify_symbols_markdown_yield_enhancement_layout() -> None:
             "strike": 95.0,
             "risk_label": "中性",
             "option_ccy": "USD",
+            "mid": 1.453,
+            "put_bid": 3.0,
             "put_strike": 95.0,
             "call_strike": 110.0,
             "call_ask": 1.5,
@@ -339,6 +341,8 @@ def test_notify_symbols_markdown_yield_enhancement_layout() -> None:
     assert "Call=110" in out
     assert "备选Call=2个" in out
     assert "Call delta=0.32" in out
+    assert "建议挂单=卖3.000/买1.500" in out
+    assert "卖1.453/买1.500" not in out
     assert "目标价" not in out
 
 

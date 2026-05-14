@@ -103,6 +103,18 @@ def _present_compact(value: str | None) -> str:
     return v
 
 
+def _yield_enhancement_suggestion(put_bid: str | None, call_ask: str | None) -> str:
+    put_price = '' if _is_missing_value(put_bid) else _present_compact(put_bid)
+    call_price = '' if _is_missing_value(call_ask) else _present_compact(call_ask)
+    if put_price and call_price:
+        return f"卖{put_price}/买{call_price}"
+    if put_price:
+        return f"卖{put_price}"
+    if call_price:
+        return f"买{call_price}"
+    return ''
+
+
 def _value_after_prefix(token: str | None, prefix: str) -> str:
     if not token:
         return ''
@@ -614,6 +626,7 @@ def _format_alert_line(line: str, *, account_label: str = '当前账户') -> str
         )
 
     if parsed.strategy == 'yield_enhancement':
+        put_bid = parsed.extras.get('put_bid', '') or parsed.extras.get('bid', '')
         put_strike = parsed.extras.get('put_strike', '')
         call_strike = parsed.extras.get('call_strike', '')
         call_ask = parsed.extras.get('call_ask', '')
@@ -627,6 +640,7 @@ def _format_alert_line(line: str, *, account_label: str = '当前账户') -> str
         if not _is_missing_value(call_candidate_count):
             candidate_tail = f" | 备选Call={call_candidate_count}个"
         note = parsed.comment or '已按组合收益筛出推荐 Call，可作为该 Sell Put 的收益增强方案。'
+        enh_suggestion = _yield_enhancement_suggestion(put_bid, call_ask)
         return _build_notification_block(
             account_label=account_label,
             symbol_name=parsed.symbol_name,
@@ -653,6 +667,7 @@ def _format_alert_line(line: str, *, account_label: str = '当前账户') -> str
                 f"IV={_present_or_missing(expected_move_iv, reason='告警未提供expected_move_iv')}"
             ),
             note=note,
+            suggestion=enh_suggestion,
         )
 
     return parsed.raw
@@ -728,6 +743,7 @@ def _format_alert_line_compact(line: str, *, account_label: str = '当前账户'
         )
 
     if parsed.strategy == 'yield_enhancement':
+        put_bid = parsed.extras.get('put_bid', '') or parsed.extras.get('bid', '')
         put_strike = parsed.extras.get('put_strike', '')
         call_strike = parsed.extras.get('call_strike', '')
         call_ask = parsed.extras.get('call_ask', '')
@@ -741,10 +757,7 @@ def _format_alert_line_compact(line: str, *, account_label: str = '当前账户'
         if not _is_missing_value(call_candidate_count):
             candidate_tail = f" | 备选Call={call_candidate_count}个"
         note = parsed.comment or '已按组合收益筛出推荐 Call，可作为该 Sell Put 的收益增强方案。'
-        enh_suggestion = parsed.suggestion
-        if not _is_missing_value(call_ask):
-            ask_val = _present_compact(call_ask)
-            enh_suggestion = f"卖{enh_suggestion}/买{ask_val}" if enh_suggestion else f"买{ask_val}"
+        enh_suggestion = _yield_enhancement_suggestion(put_bid, call_ask)
         return _build_notification_block_compact(
             symbol_name=parsed.symbol_name,
             action_label='收益增强',

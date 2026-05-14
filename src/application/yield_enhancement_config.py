@@ -83,7 +83,13 @@ def resolve_yield_enhancement_cfg(symbol_cfg: dict[str, Any] | None) -> dict[str
     if not has_top_level:
         return {}
 
+    existing_explicit_fields = top_level.get("_explicit_fields")
+    if isinstance(existing_explicit_fields, (list, tuple, set)):
+        explicit_fields = tuple(str(key) for key in existing_explicit_fields)
+    else:
+        explicit_fields = tuple(str(key) for key in top_level.keys() if not str(key).startswith("_"))
     top_level = apply_yield_enhancement_defaults(top_level)
+    top_level["_explicit_fields"] = explicit_fields
     output_mode = str(top_level.get("output_mode") or "").strip().lower()
     if not output_mode:
         output_mode = "separate"

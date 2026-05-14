@@ -34,15 +34,19 @@ def test_sell_put_yield_enhancement_fetches_put_and_call_without_sell_call(monke
     )
 
     assert {side.option_type for side in plan.side_plans} == {"put", "call"}
-    assert len(plan.merged_specs) == 2
-    assert {tuple(spec.option_types) for spec in plan.merged_specs} == {("put",), ("call",)}
-    put_spec = next(spec for spec in plan.merged_specs if tuple(spec.option_types) == ("put",))
-    call_spec = next(spec for spec in plan.merged_specs if tuple(spec.option_types) == ("call",))
+    assert len(plan.merged_specs) == 1
+    merged_spec = plan.merged_specs[0]
+    assert tuple(merged_spec.option_types) == ("put", "call")
+    put_spec = merged_spec
+    call_spec = merged_spec
     assert put_spec.explicit_expirations == ["2026-06-19"]
-    assert call_spec.explicit_expirations == ["2026-06-19", "2026-07-17"]
+    assert call_spec.explicit_expirations == ["2026-06-19"]
 
     put_plan = next(side for side in plan.side_plans if side.option_type == "put")
     call_plan = next(side for side in plan.side_plans if side.option_type == "call")
+    assert call_plan.min_dte == 20
+    assert call_plan.max_dte == 60
+    assert "sell_put.max_dte" in call_plan.source_fields
     assert put_plan.strike_window.min_strike == 90.0
     assert put_plan.strike_window.max_strike == 96.0
     assert call_plan.strike_window.min_strike == 108.0

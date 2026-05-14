@@ -607,6 +607,8 @@ def test_sell_put_steps_yield_enhancement_put_universe_ignores_sell_put_return_f
     assert calls[0]['min_net_income'] == 70.0
     assert calls[1]['min_annualized_net_return'] == 0.0
     assert calls[1]['min_net_income'] == 0.0
+    assert calls[1]['min_dte'] == 7
+    assert calls[1]['max_dte'] == 45
 
 
 def test_sell_put_steps_yield_enhancement_put_universe_survives_sell_put_income_conversion_gap(tmp_path: Path) -> None:
@@ -662,6 +664,8 @@ def test_sell_put_steps_yield_enhancement_put_universe_survives_sell_put_income_
     assert "yield_enhancement_put_universe" in str(calls[0]["output"])
     assert calls[0]["min_annualized_net_return"] == 0.0
     assert calls[0]["min_net_income"] == 0.0
+    assert calls[0]["min_dte"] == 7
+    assert calls[0]["max_dte"] == 45
 
 
 def test_sell_put_steps_filter_uses_total_cny_when_base_cny_missing(tmp_path: Path) -> None:
