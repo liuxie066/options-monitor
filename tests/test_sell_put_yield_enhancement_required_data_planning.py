@@ -75,14 +75,14 @@ def test_sell_put_yield_enhancement_minimal_config_derives_call_fetch_window(mon
     assert tuple(plan.merged_specs[0].option_types) == ("put", "call")
     assert plan.merged_specs[0].side_strike_windows["call"] == {
         "min_strike": 103.0,
-        "max_strike": 127.5,
+        "max_strike": 142.8,
     }
 
     call_plan = next(side for side in plan.side_plans if side.option_type == "call")
     assert call_plan.strike_window.source == "yield_enhancement.call.spot_derived_bounds"
     assert call_plan.strike_window.base_min_strike == 103.0
-    assert call_plan.strike_window.base_max_strike == 125.0
-    assert call_plan.strike_window.max_strike == 127.5
+    assert call_plan.strike_window.base_max_strike == 140.0
+    assert call_plan.strike_window.max_strike == 142.8
 
 
 def test_sell_put_yield_enhancement_merges_with_existing_sell_call_bounds(monkeypatch, tmp_path: Path) -> None:

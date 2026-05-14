@@ -318,6 +318,30 @@ def _build_yield_enhancement_extra_parts(row: pd.Series) -> list[str]:
     except Exception:
         pass
     try:
+        value = row.get('call_cost_to_put_credit')
+        if value is not None and not pd.isna(value):
+            parts.append(f"call_cost_to_put_credit {pct(value)}")
+    except Exception:
+        pass
+    try:
+        value = row.get('upside_lift')
+        if value is not None and not pd.isna(value):
+            parts.append(f"upside_lift {num(value)}")
+    except Exception:
+        pass
+    try:
+        value = row.get('upside_lift_to_call_cost')
+        if value is not None and not pd.isna(value):
+            parts.append(f"upside_lift_to_call_cost {float(value):.2f}x")
+    except Exception:
+        pass
+    try:
+        value = row.get('upside_lift_to_put_credit')
+        if value is not None and not pd.isna(value):
+            parts.append(f"upside_lift_to_put_credit {float(value):.2f}x")
+    except Exception:
+        pass
+    try:
         value = row.get('expected_move')
         if value is not None and not pd.isna(value):
             parts.append(f"expected_move {num(value)}")

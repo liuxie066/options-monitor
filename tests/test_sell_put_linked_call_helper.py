@@ -1,8 +1,18 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pandas as pd
+
+
+def test_yield_enhancement_defaults_match_system_template() -> None:
+    from src.application.yield_enhancement_config import yield_enhancement_defaults_for_market
+
+    system_config = json.loads((Path(__file__).resolve().parents[1] / "configs" / "system.json").read_text())
+    for market in ("us", "hk"):
+        template = system_config["markets"][market]["symbol_defaults"]["yield_enhancement"]
+        assert template == yield_enhancement_defaults_for_market(market)
 
 
 def test_enrich_sell_put_candidates_with_linked_calls_selects_best_call(tmp_path: Path) -> None:
@@ -40,8 +50,8 @@ def test_enrich_sell_put_candidates_with_linked_calls_selects_best_call(tmp_path
                 "option_type": "call",
                 "expiration": "2026-06-19",
                 "dte": 44,
-                "contract_symbol": "NVDA_C115",
-                "strike": 115,
+                "contract_symbol": "NVDA_C112",
+                "strike": 112,
                 "spot": 100,
                 "bid": 0.95,
                 "ask": 1.0,
@@ -89,13 +99,16 @@ def test_enrich_sell_put_candidates_with_linked_calls_selects_best_call(tmp_path
             "max_dte": 90,
             "funding_mode": "credit_or_even",
             "min_put_otm_pct": 0.05,
-            "min_call_otm_pct": 0.03,
-            "max_call_otm_pct": 0.20,
+            "call": {
+                "min_otm_pct": 0.03,
+                "max_otm_pct": 0.20,
+                "min_delta": 0.10,
+                "max_delta": 0.45,
+            },
             "min_scenario_score": 0.02,
             "min_open_interest": 100,
             "min_volume": 5,
             "max_combo_spread_ratio": 0.50,
-            "optimizer_enabled": False,
         },
         output_path=tmp_path / "sell_put_linked_calls.csv",
     )
@@ -118,7 +131,7 @@ def test_enrich_sell_put_candidates_with_linked_calls_selects_best_call(tmp_path
     assert int(row["linked_call_count"]) == 2
 
     persisted_pairs = pd.read_csv(tmp_path / "sell_put_linked_calls.csv")
-    assert set(persisted_pairs["call_contract_symbol"]) == {"NVDA_C110", "NVDA_C115"}
+    assert set(persisted_pairs["call_contract_symbol"]) == {"NVDA_C110", "NVDA_C112"}
 
 
 def test_yield_enhancement_requires_iv_for_expected_move_scoring(tmp_path: Path) -> None:
@@ -179,7 +192,7 @@ def test_yield_enhancement_requires_iv_for_expected_move_scoring(tmp_path: Path)
     assert pairs.empty
 
 
-def test_yield_enhancement_optimizer_rejects_expensive_call_by_default(tmp_path: Path) -> None:
+def test_yield_enhancement_rejects_unfunded_call_by_default(tmp_path: Path) -> None:
     from src.application.sell_put_call_helper import find_sell_put_yield_enhancement_pairs
 
     parsed = tmp_path / "parsed"
@@ -194,9 +207,9 @@ def test_yield_enhancement_optimizer_rejects_expensive_call_by_default(tmp_path:
                 "contract_symbol": "NVDA_C110",
                 "strike": 110,
                 "spot": 100,
-                "bid": 1.4,
-                "ask": 1.5,
-                "mid": 1.45,
+                "bid": 3.9,
+                "ask": 4.0,
+                "mid": 3.95,
                 "volume": 65,
                 "open_interest": 980,
                 "implied_volatility": 0.40,
@@ -244,7 +257,7 @@ def test_yield_enhancement_optimizer_rejects_expensive_call_by_default(tmp_path:
     assert pairs.empty
 
 
-def test_yield_enhancement_optimizer_accepts_low_cost_call_with_clear_lift(tmp_path: Path) -> None:
+def test_yield_enhancement_accepts_premium_funded_call_with_clear_upside(tmp_path: Path) -> None:
     from src.application.sell_put_call_helper import find_sell_put_yield_enhancement_pairs
 
     parsed = tmp_path / "parsed"
@@ -308,8 +321,9 @@ def test_yield_enhancement_optimizer_accepts_low_cost_call_with_clear_lift(tmp_p
 
     assert len(pairs) == 1
     row = pairs.iloc[0]
-    assert bool(row["optimizer_accepted"]) is True
+    assert bool(row["funding_accepted"]) is True
     assert row["call_contract_symbol"] == "NVDA_C110_LOW"
-    assert float(row["scenario_score_lift"]) >= 0.01
-    assert float(row["downside_worsen_pct"]) <= 0.003
-    assert float(row["optimizer_score"]) > 0
+    assert float(row["call_cost_to_put_credit"]) <= 1.0
+    assert float(row["upside_lift_to_call_cost"]) >= 1.5
+    assert float(row["upside_lift_to_put_credit"]) >= 0.5
+    assert float(row["premium_funding_score"]) > 0

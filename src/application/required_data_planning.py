@@ -13,6 +13,7 @@ from domain.domain.candidate_defaults import (
 )
 from src.application.opend_market_snapshot_fetching import get_underlier_spot
 from src.application.opend_symbol_chain_fetching import list_option_expirations
+from src.application.yield_enhancement_config import YIELD_ENHANCEMENT_DEFAULTS
 
 
 OptionSide = Literal["put", "call"]
@@ -20,7 +21,7 @@ OptionSide = Literal["put", "call"]
 DEFAULT_SELL_CALL_SPOT_FALLBACK_MIN_PCT = 0.03
 DEFAULT_SELL_CALL_STRIKE_BUFFER_PCT = 0.02
 DEFAULT_FETCH_NEAR_BOUND_EXPAND_PCT = 0.20
-DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_MAX_CALL_OTM_PCT = 0.25
+DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_MAX_CALL_OTM_PCT = float(YIELD_ENHANCEMENT_DEFAULTS["call"]["max_otm_pct"])
 
 
 @dataclass(frozen=True)
@@ -365,8 +366,9 @@ def _resolve_sell_put_yield_enhancement_call_plan(
             call_cfg[key] = cfg.get(key)
         elif key in sell_put_cfg and key not in call_cfg:
             call_cfg[key] = sell_put_cfg.get(key)
-    fallback_min_pct = _safe_float(cfg.get("min_call_otm_pct"))
-    fallback_max_pct = _safe_float(cfg.get("max_call_otm_pct"))
+    default_call_cfg = dict(YIELD_ENHANCEMENT_DEFAULTS["call"])
+    fallback_min_pct = _safe_float(call_cfg.get("min_otm_pct", default_call_cfg.get("min_otm_pct")))
+    fallback_max_pct = _safe_float(call_cfg.get("max_otm_pct", default_call_cfg.get("max_otm_pct")))
     sell_put_window = resolve_candidate_window(
         sell_put_cfg,
         defaults=DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_WINDOW,

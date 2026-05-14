@@ -16,7 +16,13 @@ from src.application.account_config import ACCOUNT_TYPES, account_settings_from_
 from src.application.config_loader import resolve_templates_config, resolve_watchlist_config, set_watchlist_config
 from src.application.trade_account_mapping import resolve_trade_intake_config
 from src.application.opend_fetch_config import OPEND_RATE_LIMIT_ENDPOINT_KEYS
-from src.application.yield_enhancement_config import YIELD_ENHANCEMENT_OUTPUT_MODES
+from src.application.yield_enhancement_config import (
+    YIELD_ENHANCEMENT_FUNDING_MODES,
+    YIELD_ENHANCEMENT_LEGACY_CALL_BOUND_FIELDS,
+    YIELD_ENHANCEMENT_LEGACY_OPTIMIZER_FIELDS,
+    YIELD_ENHANCEMENT_OBJECTIVES,
+    YIELD_ENHANCEMENT_OUTPUT_MODES,
+)
 
 LIQUIDITY_ALLOWED_GLOBAL_FIELDS = (
     'min_open_interest',
@@ -43,7 +49,6 @@ REMOVED_STRATEGY_FILTER_FIELDS = (
 )
 SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS = LIQUIDITY_ALLOWED_GLOBAL_FIELDS + REMOVED_STRATEGY_FILTER_FIELDS + ('event_risk',)
 LEGACY_SELL_CALL_FETCH_FIELDS = ('target_otm_pct_min', 'target_otm_pct_max')
-YIELD_ENHANCEMENT_FUNDING_MODES = {'credit_or_even', 'max_debit'}
 YIELD_ENHANCEMENT_REMOVED_TARGET_FIELDS = (
     'target_price',
     'target_price_mode',
@@ -122,6 +127,17 @@ def _validate_optional_positive_number(cfg: dict, key: str, path: str):
         die(f'{path}.{key} must be a number')
 
 
+def _validate_optional_unit_interval_number(cfg: dict, key: str, path: str):
+    if key not in cfg or cfg.get(key) is None:
+        return
+    try:
+        value = float(cfg.get(key))
+        if value < 0 or value > 1:
+            die(f'{path}.{key} must be between 0 and 1')
+    except Exception:
+        die(f'{path}.{key} must be a number')
+
+
 def _validate_score_weights(cfg: dict, path: str) -> None:
     if 'score_weights' not in cfg or cfg.get('score_weights') is None:
         return
@@ -194,6 +210,22 @@ def _validate_yield_enhancement_cfg(cfg: dict, path: str):
             f"{path} has removed target-price fields: {', '.join(removed_target_keys)}; "
             "yield_enhancement now uses expected_move scenario scoring"
         )
+    legacy_optimizer_keys = [k for k in YIELD_ENHANCEMENT_LEGACY_OPTIMIZER_FIELDS if k in cfg]
+    if legacy_optimizer_keys:
+        die(
+            f"{path} has removed optimizer fields: {', '.join(legacy_optimizer_keys)}; "
+            "use premium_funded_long_call funding/upside fields instead"
+        )
+    legacy_call_bound_keys = [k for k in YIELD_ENHANCEMENT_LEGACY_CALL_BOUND_FIELDS if k in cfg]
+    if legacy_call_bound_keys:
+        die(
+            f"{path} has removed call OTM fields: {', '.join(legacy_call_bound_keys)}; "
+            "use yield_enhancement.call.min_otm_pct/max_otm_pct instead"
+        )
+    if 'objective' in cfg and cfg.get('objective') is not None:
+        objective = str(cfg.get('objective') or '').strip().lower()
+        if objective not in YIELD_ENHANCEMENT_OBJECTIVES:
+            die(f"{path}.objective must be one of: {', '.join(sorted(YIELD_ENHANCEMENT_OBJECTIVES))}")
     if 'output_mode' in cfg and cfg.get('output_mode') is not None:
         output_mode = str(cfg.get('output_mode') or '').strip().lower()
         if output_mode not in YIELD_ENHANCEMENT_OUTPUT_MODES:
@@ -204,24 +236,12 @@ def _validate_yield_enhancement_cfg(cfg: dict, path: str):
         'min_scenario_score',
         'min_annualized_scenario_score',
         'min_put_otm_pct',
-        'min_call_otm_pct',
-        'max_call_otm_pct',
         'min_combo_net_credit',
-        'max_downside_worsen_pct',
-        'min_scenario_score_lift',
-        'min_annualized_scenario_score_lift',
-        'min_lift_to_downside_ratio',
-        'max_combo_spread_worsen_ratio',
+        'max_call_cost_to_put_credit',
+        'min_upside_lift_to_call_cost',
+        'min_upside_lift_to_put_credit',
     ):
         _validate_optional_non_negative_number(cfg, key, path)
-    min_call_otm_pct = cfg.get('min_call_otm_pct')
-    max_call_otm_pct = cfg.get('max_call_otm_pct')
-    if (min_call_otm_pct is not None) and (max_call_otm_pct is not None):
-        try:
-            if float(min_call_otm_pct) > float(max_call_otm_pct):
-                die(f'{path}.min_call_otm_pct > {path}.max_call_otm_pct')
-        except Exception:
-            die(f'{path}.min_call_otm_pct/max_call_otm_pct must be numbers')
     _validate_optional_non_negative_number_list(cfg, 'scenario_move_factors', path)
     _validate_optional_non_negative_number_list(cfg, 'scenario_weights', path)
     if 'funding_mode' in cfg and cfg.get('funding_mode') is not None:
@@ -241,6 +261,26 @@ def _validate_yield_enhancement_cfg(cfg: dict, path: str):
     if isinstance(call_leg, dict):
         _validate_optional_dte_window(call_leg, f'{path}.call')
         _validate_optional_strike_bounds(call_leg, f'{path}.call')
+        for key in ('min_otm_pct', 'max_otm_pct'):
+            _validate_optional_non_negative_number(call_leg, key, f'{path}.call')
+        min_call_otm = call_leg.get('min_otm_pct')
+        max_call_otm = call_leg.get('max_otm_pct')
+        if (min_call_otm is not None) and (max_call_otm is not None):
+            try:
+                if float(min_call_otm) > float(max_call_otm):
+                    die(f'{path}.call.min_otm_pct > {path}.call.max_otm_pct')
+            except Exception:
+                die(f'{path}.call.min_otm_pct/max_otm_pct must be numbers')
+        for key in ('min_delta', 'max_delta'):
+            _validate_optional_unit_interval_number(call_leg, key, f'{path}.call')
+        min_delta = call_leg.get('min_delta')
+        max_delta = call_leg.get('max_delta')
+        if (min_delta is not None) and (max_delta is not None):
+            try:
+                if float(min_delta) > float(max_delta):
+                    die(f'{path}.call.min_delta > {path}.call.max_delta')
+            except Exception:
+                die(f'{path}.call.min_delta/max_delta must be numbers')
 
 
 def validate_config(cfg: dict):

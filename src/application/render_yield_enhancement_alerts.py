@@ -53,6 +53,10 @@ def render_one(row: pd.Series) -> str:
     expected_move_iv = _safe_float(row.get("expected_move_iv"))
     scenario_score = _safe_float(row.get("scenario_score"))
     annualized_scenario_score = _safe_float(row.get("annualized_scenario_score"))
+    call_cost_to_put_credit = _safe_float(row.get("call_cost_to_put_credit"))
+    upside_lift = _safe_float(row.get("upside_lift"))
+    upside_lift_to_call_cost = _safe_float(row.get("upside_lift_to_call_cost"))
+    upside_lift_to_put_credit = _safe_float(row.get("upside_lift_to_put_credit"))
     call_candidate_count = _safe_float(row.get("call_candidate_count"))
     candidate_line = None
     if call_candidate_count is not None and call_candidate_count > 1:
@@ -63,6 +67,8 @@ def render_one(row: pd.Series) -> str:
             "",
             f"DTE: {int(dte) if dte is not None else '-'}",
             f"净权利金({option_ccy}): {num(row.get('net_credit'))}",
+            f"资金覆盖: Call成本/Put权利金={('-' if call_cost_to_put_credit is None else pct(call_cost_to_put_credit))}",
+            f"上行弹性: 潜在收益={('-' if upside_lift is None else num(upside_lift))} | 成本倍数={('-' if upside_lift_to_call_cost is None else f'{upside_lift_to_call_cost:.2f}x')} | 权利金倍数={('-' if upside_lift_to_put_credit is None else f'{upside_lift_to_put_credit:.2f}x')}",
             f"场景评分: {('-' if scenario_score is None else pct(scenario_score))}",
             f"场景年化: {('-' if annualized_scenario_score is None else pct(annualized_scenario_score))}",
             f"Put: strike={put_strike} | delta={('-' if put_delta is None else f'{put_delta:.2f}')}",

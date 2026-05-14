@@ -48,29 +48,20 @@ class YieldEnhancementMetrics:
 
 
 @dataclass(frozen=True)
-class YieldEnhancementOptimizerScore:
+class YieldEnhancementFundingDecision:
     accepted: bool
-    optimizer_score: float
     reject_reasons: tuple[str, ...]
     put_net_credit: float
     call_total_cost: float
     combo_net_credit: float
-    base_cash_required: float | None
-    combo_cash_required: float | None
-    base_downside_breakeven: float | None
-    combo_downside_breakeven: float | None
-    downside_worsen: float | None
-    downside_worsen_pct: float | None
-    base_scenario_score: float | None
-    combo_scenario_score: float | None
-    scenario_score_lift: float | None
-    base_annualized_scenario_score: float | None
-    combo_annualized_scenario_score: float | None
-    annualized_scenario_score_lift: float | None
     call_cost_ratio: float | None
+    upside_scenario_price: float | None
+    upside_lift: float | None
+    upside_net_lift: float | None
+    upside_lift_to_call_cost: float | None
+    upside_lift_to_put_credit: float | None
+    premium_funding_score: float
     combo_spread_ratio: float | None
-    combo_spread_worsen_ratio: float | None
-    spread_penalty: float
     score_components: dict[str, float]
 
 
@@ -226,175 +217,122 @@ def _round_optional(value: float | None) -> float | None:
     return round(float(value), 6) if value is not None else None
 
 
-def compute_yield_enhancement_optimizer_score(
+def compute_yield_enhancement_funding_decision(
     *,
     put_leg: YieldEnhancementLeg,
     call_leg: YieldEnhancementLeg,
     put_sell_fee: float,
     call_buy_fee: float,
     combo_metrics: YieldEnhancementMetrics,
-    min_combo_net_credit: float | None = 0.0,
-    max_downside_worsen_pct: float | None = 0.003,
-    min_scenario_score_lift: float | None = 0.01,
-    min_annualized_scenario_score_lift: float | None = 0.08,
-    min_lift_to_downside_ratio: float | None = 2.0,
-    max_combo_spread_ratio: float | None = 0.35,
-    max_combo_spread_worsen_ratio: float | None = 0.15,
-) -> YieldEnhancementOptimizerScore:
-    """Score whether adding the long Call is worth its cost.
-
-    The base comparison is the already accepted Sell Put alone. Buying the Call
-    always reduces net credit, so the optimizer measures whether the upside
-    scenario lift is large enough to justify the breakeven deterioration.
-    """
+    min_combo_net_credit: float | None = None,
+    max_call_cost_to_put_credit: float | None = None,
+    min_upside_lift_to_call_cost: float | None = None,
+    min_upside_lift_to_put_credit: float | None = None,
+    max_combo_spread_ratio: float | None = None,
+) -> YieldEnhancementFundingDecision:
+    """Decide whether the put premium can sensibly fund a speculative long call."""
     rejects = validate_yield_enhancement_pair(put_leg, call_leg)
     reject_reasons: list[str] = list(rejects)
 
     multiplier = float(put_leg.multiplier)
     spot = float(put_leg.spot)
-    dte = int(min(put_leg.dte, call_leg.dte))
     put_net_credit = float(put_leg.bid) * multiplier - float(put_sell_fee)
     call_total_cost = float(call_leg.ask) * multiplier + float(call_buy_fee)
     combo_net_credit = float(combo_metrics.net_credit)
 
-    base_cash_required: float | None = None
-    base_downside_breakeven: float | None = None
-    base_scenario_score: float | None = None
-    base_annualized_scenario_score: float | None = None
-    if multiplier > 0 and put_leg.strike > 0:
-        base_cash_required = float(put_leg.strike) * multiplier - put_net_credit
-        if base_cash_required > 0:
-            base_downside_breakeven = float(put_leg.strike) - put_net_credit / multiplier
-            base_scenario_score = put_net_credit / base_cash_required
-            base_annualized_scenario_score = base_scenario_score * (365.0 / float(dte)) if dte > 0 else None
-        else:
-            reject_reasons.append("base_cash_required")
-    else:
-        reject_reasons.append("base_cash_required")
-
-    combo_cash_required = _safe_float(combo_metrics.cash_required)
-    combo_downside_breakeven = _safe_float(combo_metrics.downside_breakeven)
-    combo_scenario_score = _safe_float(combo_metrics.scenario_score)
-    combo_annualized_scenario_score = _safe_float(combo_metrics.annualized_scenario_score)
     combo_spread_ratio = _safe_float(combo_metrics.combo_spread_ratio)
 
-    downside_worsen: float | None = None
-    downside_worsen_pct: float | None = None
-    if base_downside_breakeven is not None and combo_downside_breakeven is not None and spot > 0:
-        downside_worsen = combo_downside_breakeven - base_downside_breakeven
-        downside_worsen_pct = downside_worsen / spot
-    else:
-        reject_reasons.append("downside_worsen_pct")
-
-    scenario_score_lift: float | None = None
-    if base_scenario_score is not None and combo_scenario_score is not None:
-        scenario_score_lift = combo_scenario_score - base_scenario_score
-    else:
-        reject_reasons.append("scenario_score_lift")
-
-    annualized_scenario_score_lift: float | None = None
-    if base_annualized_scenario_score is not None and combo_annualized_scenario_score is not None:
-        annualized_scenario_score_lift = combo_annualized_scenario_score - base_annualized_scenario_score
-
     call_cost_ratio = (call_total_cost / put_net_credit) if put_net_credit > 0 else None
-    put_spread_ratio = _safe_float(put_leg.spread_ratio)
-    combo_spread_worsen_ratio = None
-    if combo_spread_ratio is not None and put_spread_ratio is not None:
-        combo_spread_worsen_ratio = combo_spread_ratio - put_spread_ratio
+    if put_net_credit <= 0:
+        reject_reasons.append("put_net_credit")
+    if call_total_cost <= 0:
+        reject_reasons.append("call_total_cost")
+
+    expected_move = _safe_float(combo_metrics.expected_move)
+    upside_scenario_price = (spot + expected_move) if expected_move is not None else None
+    upside_lift = None
+    upside_net_lift = None
+    if upside_scenario_price is not None:
+        upside_lift = max(0.0, upside_scenario_price - float(call_leg.strike)) * multiplier
+        upside_net_lift = upside_lift - call_total_cost
+    else:
+        reject_reasons.append("expected_move")
+
+    upside_lift_to_call_cost = (upside_lift / call_total_cost) if upside_lift is not None and call_total_cost > 0 else None
+    upside_lift_to_put_credit = (upside_lift / put_net_credit) if upside_lift is not None and put_net_credit > 0 else None
 
     min_credit = _safe_float(min_combo_net_credit)
     if min_credit is not None and combo_net_credit < min_credit:
         reject_reasons.append("combo_net_credit")
 
-    max_downside = _safe_float(max_downside_worsen_pct)
-    if max_downside is not None:
-        if downside_worsen_pct is None or downside_worsen_pct > max_downside:
-            reject_reasons.append("downside_worsen_pct")
+    max_cost_ratio = _safe_float(max_call_cost_to_put_credit)
+    if max_cost_ratio is not None:
+        if call_cost_ratio is None or call_cost_ratio > max_cost_ratio:
+            reject_reasons.append("call_cost_to_put_credit")
 
-    min_lift = _safe_float(min_scenario_score_lift)
-    if min_lift is not None:
-        if scenario_score_lift is None or scenario_score_lift < min_lift:
-            reject_reasons.append("scenario_score_lift")
+    min_lift_to_cost = _safe_float(min_upside_lift_to_call_cost)
+    if min_lift_to_cost is not None:
+        if upside_lift_to_call_cost is None or upside_lift_to_call_cost < min_lift_to_cost:
+            reject_reasons.append("upside_lift_to_call_cost")
 
-    min_annualized_lift = _safe_float(min_annualized_scenario_score_lift)
-    if min_annualized_lift is not None:
-        if annualized_scenario_score_lift is None or annualized_scenario_score_lift < min_annualized_lift:
-            reject_reasons.append("annualized_scenario_score_lift")
-
-    lift_ratio = _safe_float(min_lift_to_downside_ratio)
-    if lift_ratio is not None and lift_ratio > 0:
-        if scenario_score_lift is None or downside_worsen_pct is None:
-            reject_reasons.append("lift_to_downside_ratio")
-        elif scenario_score_lift < max(downside_worsen_pct, 0.0) * lift_ratio:
-            reject_reasons.append("lift_to_downside_ratio")
+    min_lift_to_credit = _safe_float(min_upside_lift_to_put_credit)
+    if min_lift_to_credit is not None:
+        if upside_lift_to_put_credit is None or upside_lift_to_put_credit < min_lift_to_credit:
+            reject_reasons.append("upside_lift_to_put_credit")
 
     max_combo_spread = _safe_float(max_combo_spread_ratio)
     if max_combo_spread is not None:
         if combo_spread_ratio is None or combo_spread_ratio > max_combo_spread:
             reject_reasons.append("combo_spread_ratio")
 
-    max_spread_worsen = _safe_float(max_combo_spread_worsen_ratio)
-    if max_spread_worsen is not None and combo_spread_worsen_ratio is not None:
-        if combo_spread_worsen_ratio > max_spread_worsen:
-            reject_reasons.append("combo_spread_worsen_ratio")
-
-    downside_penalty = max(downside_worsen_pct or 0.0, 0.0) * max(lift_ratio or 0.0, 0.0)
-    spread_penalty = max(combo_spread_ratio or 0.0, 0.0) * 0.01
-    if combo_spread_worsen_ratio is not None:
-        spread_penalty += max(combo_spread_worsen_ratio, 0.0) * 0.01
+    spread_penalty = max(combo_spread_ratio or 0.0, 0.0) * 0.10
+    cost_penalty = max(call_cost_ratio or 0.0, 0.0)
     components = {
-        "scenario_score_lift": float(scenario_score_lift or 0.0),
-        "annualized_lift_tiebreaker": float(annualized_scenario_score_lift or 0.0) * 0.001,
-        "downside_penalty": -float(downside_penalty),
+        "upside_lift_to_call_cost": float(upside_lift_to_call_cost or 0.0),
+        "upside_lift_to_put_credit": float(upside_lift_to_put_credit or 0.0),
+        "call_cost_penalty": -float(cost_penalty),
         "spread_penalty": -float(spread_penalty),
     }
-    optimizer_score = sum(components.values())
+    premium_funding_score = sum(components.values())
     unique_rejects = tuple(dict.fromkeys(reject_reasons))
 
-    return YieldEnhancementOptimizerScore(
+    return YieldEnhancementFundingDecision(
         accepted=(len(unique_rejects) == 0),
-        optimizer_score=round(float(optimizer_score), 6),
         reject_reasons=unique_rejects,
         put_net_credit=round(put_net_credit, 6),
         call_total_cost=round(call_total_cost, 6),
         combo_net_credit=round(combo_net_credit, 6),
-        base_cash_required=_round_optional(base_cash_required),
-        combo_cash_required=_round_optional(combo_cash_required),
-        base_downside_breakeven=_round_optional(base_downside_breakeven),
-        combo_downside_breakeven=_round_optional(combo_downside_breakeven),
-        downside_worsen=_round_optional(downside_worsen),
-        downside_worsen_pct=_round_optional(downside_worsen_pct),
-        base_scenario_score=_round_optional(base_scenario_score),
-        combo_scenario_score=_round_optional(combo_scenario_score),
-        scenario_score_lift=_round_optional(scenario_score_lift),
-        base_annualized_scenario_score=_round_optional(base_annualized_scenario_score),
-        combo_annualized_scenario_score=_round_optional(combo_annualized_scenario_score),
-        annualized_scenario_score_lift=_round_optional(annualized_scenario_score_lift),
         call_cost_ratio=_round_optional(call_cost_ratio),
+        upside_scenario_price=_round_optional(upside_scenario_price),
+        upside_lift=_round_optional(upside_lift),
+        upside_net_lift=_round_optional(upside_net_lift),
+        upside_lift_to_call_cost=_round_optional(upside_lift_to_call_cost),
+        upside_lift_to_put_credit=_round_optional(upside_lift_to_put_credit),
+        premium_funding_score=round(float(premium_funding_score), 6),
         combo_spread_ratio=_round_optional(combo_spread_ratio),
-        combo_spread_worsen_ratio=_round_optional(combo_spread_worsen_ratio),
-        spread_penalty=round(float(spread_penalty), 6),
         score_components={name: round(float(value), 6) for name, value in components.items()},
     )
 
 
-def yield_enhancement_rank_key(row: dict[str, Any]) -> tuple:
+def yield_enhancement_rank_key(row: dict[str, Any]) -> tuple[float, ...]:
     def f(key: str, default: float = 0.0) -> float:
         value = _safe_float(row.get(key))
         return float(default if value is None else value)
 
-    optimizer_accepted = str(row.get("optimizer_accepted") or "").strip().lower() in {"1", "true", "yes"}
+    funding_accepted = str(row.get("funding_accepted") or "").strip().lower() in {"1", "true", "yes"}
     return (
-        -1.0 if optimizer_accepted else 0.0,
-        -f("optimizer_score"),
-        -f("scenario_score_lift"),
-        f("downside_worsen_pct", default=999.0),
+        -1.0 if funding_accepted else 0.0,
+        -f("premium_funding_score"),
+        -f("upside_lift_to_call_cost"),
+        -f("upside_lift_to_put_credit"),
+        f("call_cost_to_put_credit", default=999.0),
+        f("combo_spread_ratio", default=999.0),
+        -f("combo_net_credit"),
         -f("scenario_score"),
         -f("annualized_scenario_score"),
         f("upside_breakeven_pct_above_spot", default=999.0),
         -f("net_credit"),
         -f("put_otm_pct"),
-        f("combo_spread_ratio", default=999.0),
         -min(f("put_open_interest"), f("call_open_interest")),
         -f("call_delta"),
     )

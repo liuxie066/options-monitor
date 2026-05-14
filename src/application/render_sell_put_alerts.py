@@ -80,6 +80,9 @@ def _linked_call_lines(row) -> list[str]:
     ask = None
     delta = None
     net_credit = None
+    cost_to_credit = None
+    upside_lift = None
+    upside_lift_to_call_cost = None
     annualized_scenario_score = None
     scenario_score = None
     count = None
@@ -109,10 +112,37 @@ def _linked_call_lines(row) -> list[str]:
     except Exception:
         scenario_score = None
     try:
+        value = row.get("linked_call_cost_to_put_credit")
+        cost_to_credit = float(value) if value is not None and not pd.isna(value) else None
+    except Exception:
+        cost_to_credit = None
+    try:
+        value = row.get("linked_call_upside_lift")
+        upside_lift = float(value) if value is not None and not pd.isna(value) else None
+    except Exception:
+        upside_lift = None
+    try:
+        value = row.get("linked_call_upside_lift_to_call_cost")
+        upside_lift_to_call_cost = float(value) if value is not None and not pd.isna(value) else None
+    except Exception:
+        upside_lift_to_call_cost = None
+    try:
         value = row.get("linked_call_count")
         count = int(value) if value is not None and not pd.isna(value) else None
     except Exception:
         count = None
+
+    combo_parts = [
+        f"净权利金={('-' if net_credit is None else num(net_credit))}",
+    ]
+    if cost_to_credit is not None:
+        combo_parts.append(f"Call成本/Put权利金={pct(cost_to_credit)}")
+    combo_parts.extend(
+        [
+            f"场景评分={('-' if scenario_score is None else pct(scenario_score))}",
+            f"场景年化={('-' if annualized_scenario_score is None else pct(annualized_scenario_score))}",
+        ]
+    )
 
     lines = [
         "",
@@ -122,13 +152,14 @@ def _linked_call_lines(row) -> list[str]:
             f"ask={('-' if ask is None else num(ask))} | "
             f"delta={('-' if delta is None else f'{delta:.2f}')}"
         ),
-        (
-            "组合估算: "
-            f"净权利金={('-' if net_credit is None else num(net_credit))} | "
-            f"场景评分={('-' if scenario_score is None else pct(scenario_score))} | "
-            f"场景年化={('-' if annualized_scenario_score is None else pct(annualized_scenario_score))}"
-        ),
+        "组合估算: " + " | ".join(combo_parts),
     ]
+    if upside_lift is not None or upside_lift_to_call_cost is not None:
+        lines.append(
+            "上行弹性: "
+            f"潜在收益={('-' if upside_lift is None else num(upside_lift))} | "
+            f"成本倍数={('-' if upside_lift_to_call_cost is None else f'{upside_lift_to_call_cost:.2f}x')}"
+        )
     return lines
 
 
