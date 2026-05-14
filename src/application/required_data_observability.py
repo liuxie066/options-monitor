@@ -6,8 +6,10 @@ from typing import Any
 def extract_fetch_payload_metrics(payload: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return _empty_metrics()
-    meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
-    rows = payload.get("rows") if isinstance(payload.get("rows"), list) else []
+    raw_meta = payload.get("meta")
+    meta = raw_meta if isinstance(raw_meta, dict) else {}
+    raw_rows = payload.get("rows")
+    rows = raw_rows if isinstance(raw_rows, list) else []
     return {
         "rows": len(rows),
         "expiration_count": _int(payload.get("expiration_count")),
@@ -16,6 +18,7 @@ def extract_fetch_payload_metrics(payload: dict[str, Any] | None) -> dict[str, A
         "option_chain_opend_calls": _int(meta.get("opend_call_count")),
         "option_chain_rate_gate_wait_sec": round(_float(meta.get("rate_gate_wait_sec")), 6),
         "option_chain_cache_hits": len(meta.get("from_cache_expirations") or []),
+        "option_chain_stale_cache_hits": len(meta.get("stale_cache_expirations") or []),
         "option_chain_fetched_expirations": len(meta.get("fetched_expirations") or []),
         "snapshot_requested_codes": _int(
             meta.get("snapshot_requested_codes")
@@ -55,6 +58,7 @@ def summarize_prefetch_fetch_metrics(audit_items: list[dict[str, Any]]) -> dict[
         "expiration_cache_hits",
         "option_chain_opend_calls",
         "option_chain_cache_hits",
+        "option_chain_stale_cache_hits",
         "option_chain_fetched_expirations",
         "snapshot_requested_codes",
         "snapshot_opend_calls",
@@ -112,6 +116,7 @@ def summarize_required_data_prefetch_run(
         "cache": {
             "option_expiration_hits": _int(metrics.get("expiration_cache_hits")),
             "option_chain_hits": _int(metrics.get("option_chain_cache_hits")),
+            "option_chain_stale_hits": _int(metrics.get("option_chain_stale_cache_hits")),
             "option_chain_fetched_expirations": _int(metrics.get("option_chain_fetched_expirations")),
         },
         "rate_gate_wait_sec": {
@@ -145,6 +150,7 @@ def _empty_metrics() -> dict[str, Any]:
         "option_chain_opend_calls": 0,
         "option_chain_rate_gate_wait_sec": 0.0,
         "option_chain_cache_hits": 0,
+        "option_chain_stale_cache_hits": 0,
         "option_chain_fetched_expirations": 0,
         "snapshot_requested_codes": 0,
         "snapshot_opend_calls": 0,

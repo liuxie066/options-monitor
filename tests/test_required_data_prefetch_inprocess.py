@@ -21,9 +21,9 @@ class _Gateway:
 
 def test_prefetch_required_data_inprocess_reuses_gateways(tmp_path: Path, monkeypatch) -> None:
     watchlist = [
-        {"symbol": "AAPL", "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111, "limit_expirations": 8}},
-        {"symbol": "MSFT", "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111, "limit_expirations": 8}},
-        {"symbol": "NVDA", "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111, "limit_expirations": 8}},
+        {"symbol": "AAPL", "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111, "limit_expirations": 2}},
+        {"symbol": "MSFT", "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111, "limit_expirations": 2}},
+        {"symbol": "NVDA", "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111, "limit_expirations": 2}},
     ]
     built: list[_Gateway] = []
     saved: list[str] = []
@@ -84,13 +84,14 @@ def test_prefetch_required_data_inprocess_reuses_gateways(tmp_path: Path, monkey
     assert not execute_calls
     assert 1 <= len(built) <= 2
     assert all(gw.close_calls >= 1 for gw in built)
+    assert (tmp_path / "output_shared" / "state" / "required_data_prefetch.lock").exists()
 
 
 def test_prefetch_required_data_inprocess_reuses_gateways_per_endpoint(tmp_path: Path, monkeypatch) -> None:
     watchlist = [
-        {"symbol": "AAPL", "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111, "limit_expirations": 8}},
-        {"symbol": "MSFT", "fetch": {"source": "futu", "host": "127.0.0.1", "port": 22222, "limit_expirations": 8}},
-        {"symbol": "NVDA", "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111, "limit_expirations": 8}},
+        {"symbol": "AAPL", "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111, "limit_expirations": 2}},
+        {"symbol": "MSFT", "fetch": {"source": "futu", "host": "127.0.0.1", "port": 22222, "limit_expirations": 2}},
+        {"symbol": "NVDA", "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111, "limit_expirations": 2}},
     ]
     built: list[_Gateway] = []
     fetch_calls: list[dict[str, object]] = []
@@ -332,8 +333,10 @@ def test_prefetch_dedupes_same_run_symbol_and_merges_strategy_bounds(tmp_path: P
     assert captured["option_types"] == "put,call"
     assert captured["min_dte"] == 20
     assert captured["max_dte"] == 90
-    assert captured["side_strike_windows"]["put"] == {"min_strike": 360.0, "max_strike": 450.0}
-    assert captured["side_strike_windows"]["call"]["min_strike"] == 550
+    side_strike_windows = captured["side_strike_windows"]
+    assert isinstance(side_strike_windows, dict)
+    assert side_strike_windows["put"] == {"min_strike": 360.0, "max_strike": 450.0}
+    assert side_strike_windows["call"]["min_strike"] == 550
     assert result["symbols_total"] == 2
     assert result["unique_symbols_total"] == 1
     assert result["deduped_count"] == 1
@@ -342,6 +345,178 @@ def test_prefetch_dedupes_same_run_symbol_and_merges_strategy_bounds(tmp_path: P
     assert result["fetch_metrics"]["expiration_opend_calls"] == 1
     assert result["run_fetch_summary"]["opend_calls"]["total"] == 4
     assert result["run_fetch_summary"]["bottleneck"] == "option_chain_rate_gate"
+
+
+def test_inprocess_prefetch_executes_budgeted_waves_with_safe_option_chain_limit(tmp_path: Path, monkeypatch) -> None:
+    watchlist = [
+        {"symbol": "AAPL", "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111, "limit_expirations": 4}},
+        {"symbol": "MSFT", "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111, "limit_expirations": 4}},
+        {"symbol": "NVDA", "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111, "limit_expirations": 4}},
+    ]
+    captured_calls: list[dict[str, object]] = []
+
+    def fake_build_ready_futu_gateway(**kwargs):
+        return _Gateway()
+
+    def fake_fetch_symbol(symbol: str, **kwargs: object) -> dict[str, object]:
+        captured_calls.append({"symbol": symbol, **kwargs})
+        return {
+            "symbol": symbol,
+            "expiration_count": 1,
+            "rows": [{"symbol": symbol, "option_type": "put", "expiration": "2026-06-19", "strike": 100}],
+            "meta": {"status": "ok", "error": "", "source": "opend", "opend_call_count": 1},
+        }
+
+    monkeypatch.setattr("src.infrastructure.futu_gateway.build_ready_futu_gateway", fake_build_ready_futu_gateway)
+    monkeypatch.setattr(mod, "resolve_watchlist_config", lambda cfg: watchlist)
+    monkeypatch.setattr(mod, "has_shared_required_data", lambda symbol, root: False)
+    monkeypatch.setattr(mod, "fetch_symbol", fake_fetch_symbol)
+    monkeypatch.setattr(mod, "save_outputs", lambda *args, **kwargs: None)
+    monkeypatch.setattr(mod, "adapt_opend_tool_payload", lambda payload: {"source_name": "opend", "payload": payload})
+    monkeypatch.setattr(mod.state_repo, "append_source_snapshot_event", lambda *args, **kwargs: None)
+
+    result = mod.prefetch_required_data(
+        vpy=tmp_path / "python",
+        base=tmp_path,
+        cfg={
+            "runtime": {
+                "prefetch": {"execution_mode": "inprocess", "max_workers": 3},
+                "opend_rate_limits": {"option_chain": {"max_calls": 10, "window_sec": 30, "max_wait_sec": 90}},
+            }
+        },
+        shared_required=tmp_path / "shared_required",
+    )
+
+    assert len(captured_calls) == 3
+    assert {call["option_chain_max_calls"] for call in captured_calls} == {8}
+    assert result["effective_prefetch_workers"] == 2
+    assert result["prefetch_budget_plan"]["safe_option_chain_calls_per_window"] == 8
+    assert [wave["symbols"] for wave in result["prefetch_budget_plan"]["waves"]] == [["AAPL", "MSFT"], ["NVDA"]]
+
+
+def test_inprocess_prefetch_waits_after_rate_limited_wave_before_next_wave(tmp_path: Path, monkeypatch) -> None:
+    watchlist = [
+        {"symbol": "AAPL", "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111, "limit_expirations": 4}},
+        {"symbol": "MSFT", "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111, "limit_expirations": 4}},
+        {"symbol": "NVDA", "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111, "limit_expirations": 4}},
+    ]
+    sleeps: list[float] = []
+
+    def fake_build_ready_futu_gateway(**kwargs):
+        return _Gateway()
+
+    def fake_fetch_symbol(symbol: str, **kwargs: object) -> dict[str, object]:
+        meta: dict[str, object] = {"status": "ok", "error": "", "source": "opend", "opend_call_count": 1}
+        if symbol == "AAPL":
+            meta = {
+                "status": "partial",
+                "error_code": "RATE_LIMIT",
+                "errors": [
+                    {
+                        "expiration": "2026-09-18",
+                        "error_code": "RATE_LIMIT",
+                        "message": "too frequent",
+                    }
+                ],
+            }
+        return {
+            "symbol": symbol,
+            "expiration_count": 1,
+            "rows": [{"symbol": symbol, "option_type": "put", "expiration": "2026-06-19", "strike": 100}],
+            "meta": meta,
+        }
+
+    monkeypatch.setattr("src.infrastructure.futu_gateway.build_ready_futu_gateway", fake_build_ready_futu_gateway)
+    monkeypatch.setattr(mod, "resolve_watchlist_config", lambda cfg: watchlist)
+    monkeypatch.setattr(mod, "has_shared_required_data", lambda symbol, root: False)
+    monkeypatch.setattr(mod, "fetch_symbol", fake_fetch_symbol)
+    monkeypatch.setattr(mod, "save_outputs", lambda *args, **kwargs: None)
+    monkeypatch.setattr(mod, "adapt_opend_tool_payload", lambda payload: {"source_name": "opend", "payload": payload})
+    monkeypatch.setattr(mod.state_repo, "append_source_snapshot_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(mod, "_sleep_after_rate_limit_wave", lambda wait_sec: sleeps.append(float(wait_sec)))
+
+    result = mod.prefetch_required_data(
+        vpy=tmp_path / "python",
+        base=tmp_path,
+        cfg={
+            "runtime": {
+                "prefetch": {"execution_mode": "inprocess", "max_workers": 3},
+                "opend_rate_limits": {"option_chain": {"max_calls": 10, "window_sec": 30, "max_wait_sec": 90}},
+            }
+        },
+        shared_required=tmp_path / "shared_required",
+    )
+
+    assert sleeps == [30.0]
+    assert result["rate_limit_cooldowns"] == [
+        {"after_wave": 1, "reason": "opend_rate_limit", "wait_sec": 30.0}
+    ]
+    assert result["opend_rate_limit_classes"] == ["US"]
+
+
+def test_inprocess_prefetch_summary_records_partial_expiration_rate_limit_class(tmp_path: Path, monkeypatch) -> None:
+    watchlist = [
+        {
+            "symbol": "3690.HK",
+            "fetch": {"source": "futu", "host": "127.0.0.1", "port": 11111, "limit_expirations": 8},
+            "sell_call": {"enabled": True, "min_dte": 30, "max_dte": 180, "min_strike": 110},
+        }
+    ]
+
+    def fake_build_ready_futu_gateway(**kwargs):
+        return _Gateway()
+
+    def fake_fetch_symbol(symbol: str, **kwargs: object) -> dict[str, object]:
+        return {
+            "symbol": symbol,
+            "expiration_count": 2,
+            "rows": [{"symbol": symbol, "option_type": "call", "expiration": "2026-06-29", "strike": 110}],
+            "meta": {
+                "status": "partial",
+                "error_code": "RATE_LIMIT",
+                "error": (
+                    "get_option_chain(2026-09-29) failed: "
+                    "获取期权链频率太高，请求失败，每30秒最多10次。"
+                ),
+                "expiration_statuses": {"2026-06-29": "fetched", "2026-09-29": "error"},
+                "errors": [
+                    {
+                        "expiration": "2026-09-29",
+                        "error_code": "RATE_LIMIT",
+                        "message": "获取期权链频率太高，请求失败，每30秒最多10次。",
+                    }
+                ],
+            },
+        }
+
+    monkeypatch.setattr("src.infrastructure.futu_gateway.build_ready_futu_gateway", fake_build_ready_futu_gateway)
+    monkeypatch.setattr(mod, "resolve_watchlist_config", lambda cfg: watchlist)
+    monkeypatch.setattr(mod, "has_shared_required_data", lambda symbol, root: False)
+    monkeypatch.setattr(mod, "fetch_symbol", fake_fetch_symbol)
+    monkeypatch.setattr(mod, "save_outputs", lambda *args, **kwargs: None)
+    monkeypatch.setattr(mod, "adapt_opend_tool_payload", lambda payload: {"source_name": "opend", "payload": payload})
+    monkeypatch.setattr(mod.state_repo, "append_source_snapshot_event", lambda *args, **kwargs: None)
+
+    result = mod.prefetch_required_data(
+        vpy=tmp_path / "python",
+        base=tmp_path,
+        cfg={"runtime": {"prefetch": {"execution_mode": "inprocess", "max_workers": 1}}},
+        shared_required=tmp_path / "shared_required",
+    )
+
+    assert result["fetched_ok"] == 1
+    assert result["errors"] == 0
+    assert result["opend_rate_limit_classes"] == ["HK"]
+    assert result["opend_rate_limit_items"] == [
+        {
+            "symbol": "3690.HK",
+            "market": "HK",
+            "expiration": "2026-09-29",
+            "endpoint": "option_chain",
+            "error_code": "RATE_LIMIT",
+            "message": "获取期权链频率太高，请求失败，每30秒最多10次。",
+        }
+    ]
 
 
 def test_prefetch_skips_cached_required_data_when_strategy_bounds_are_covered(tmp_path: Path, monkeypatch) -> None:

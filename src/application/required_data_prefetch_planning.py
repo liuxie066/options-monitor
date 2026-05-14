@@ -10,7 +10,7 @@ from domain.domain.candidate_defaults import (
     DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_WINDOW,
     resolve_candidate_window,
 )
-from domain.domain.fetch_source import resolve_symbol_fetch_source
+from domain.domain.fetch_source import is_futu_fetch_source, resolve_symbol_fetch_source
 from src.application.yield_enhancement_config import resolve_yield_enhancement_cfg
 
 
@@ -42,6 +42,54 @@ class PrefetchSymbolPlan:
             "unique_count": self.unique_count,
             "deduped_count": self.deduped_count,
             "deduped_groups": [dict(group) for group in self.deduped_groups],
+        }
+
+
+@dataclass(frozen=True)
+class PrefetchBudgetWave:
+    index: int
+    symbol_cfgs: list[dict[str, Any]]
+    estimated_option_chain_calls: int
+
+    @property
+    def symbols(self) -> list[str]:
+        return [
+            str(item.get("symbol") or "").strip()
+            for item in self.symbol_cfgs
+            if isinstance(item, dict) and str(item.get("symbol") or "").strip()
+        ]
+
+    def summary(self) -> dict[str, Any]:
+        return {
+            "index": int(self.index),
+            "symbols": list(self.symbols),
+            "symbols_count": len(self.symbol_cfgs),
+            "estimated_option_chain_calls": int(self.estimated_option_chain_calls),
+        }
+
+
+@dataclass(frozen=True)
+class PrefetchBudgetPlan:
+    waves: list[PrefetchBudgetWave]
+    estimated_option_chain_calls: int
+    safe_option_chain_calls_per_window: int
+    configured_option_chain_max_calls: int
+    option_chain_window_sec: float
+    oversized_symbols: list[dict[str, Any]]
+
+    @property
+    def waves_count(self) -> int:
+        return len(self.waves)
+
+    def summary(self) -> dict[str, Any]:
+        return {
+            "estimated_option_chain_calls": int(self.estimated_option_chain_calls),
+            "safe_option_chain_calls_per_window": int(self.safe_option_chain_calls_per_window),
+            "configured_option_chain_max_calls": int(self.configured_option_chain_max_calls),
+            "option_chain_window_sec": float(self.option_chain_window_sec),
+            "waves_count": int(self.waves_count),
+            "waves": [wave.summary() for wave in self.waves],
+            "oversized_symbols": [dict(item) for item in self.oversized_symbols],
         }
 
 
@@ -79,6 +127,79 @@ def build_prefetch_symbol_plan(symbol_cfgs: list[dict[str, Any]]) -> PrefetchSym
         requested_symbols=requested_symbols,
         deduped_groups=deduped_groups,
     )
+
+
+def build_prefetch_budget_plan(
+    symbol_cfgs: list[dict[str, Any]],
+    *,
+    option_chain_cfg: dict[str, Any],
+) -> PrefetchBudgetPlan:
+    configured_max_calls = max(1, _to_int(option_chain_cfg.get("max_calls") or 10, 10))
+    window_sec = max(0.001, _to_float(option_chain_cfg.get("window_sec")) or 30.0)
+    safe_calls = _safe_option_chain_calls(configured_max_calls)
+    waves: list[PrefetchBudgetWave] = []
+    oversized_symbols: list[dict[str, Any]] = []
+    current: list[dict[str, Any]] = []
+    current_calls = 0
+    estimated_total = 0
+
+    def flush_current() -> None:
+        nonlocal current, current_calls
+        if not current:
+            return
+        waves.append(
+            PrefetchBudgetWave(
+                index=len(waves) + 1,
+                symbol_cfgs=list(current),
+                estimated_option_chain_calls=int(current_calls),
+            )
+        )
+        current = []
+        current_calls = 0
+
+    for cfg in symbol_cfgs:
+        est = estimate_prefetch_option_chain_calls(cfg)
+        estimated_total += est
+        symbol = str((cfg or {}).get("symbol") or "").strip()
+        if est > safe_calls:
+            flush_current()
+            waves.append(
+                PrefetchBudgetWave(
+                    index=len(waves) + 1,
+                    symbol_cfgs=[cfg],
+                    estimated_option_chain_calls=est,
+                )
+            )
+            oversized_symbols.append(
+                {
+                    "symbol": symbol,
+                    "estimated_option_chain_calls": est,
+                    "safe_option_chain_calls_per_window": safe_calls,
+                }
+            )
+            continue
+        if current and est > 0 and current_calls + est > safe_calls:
+            flush_current()
+        current.append(cfg)
+        current_calls += est
+
+    flush_current()
+    return PrefetchBudgetPlan(
+        waves=waves,
+        estimated_option_chain_calls=estimated_total,
+        safe_option_chain_calls_per_window=safe_calls,
+        configured_option_chain_max_calls=configured_max_calls,
+        option_chain_window_sec=window_sec,
+        oversized_symbols=oversized_symbols,
+    )
+
+
+def estimate_prefetch_option_chain_calls(symbol_cfg: dict[str, Any]) -> int:
+    fetch_cfg = _as_dict((symbol_cfg or {}).get("fetch"))
+    source, _decision = resolve_symbol_fetch_source(fetch_cfg)
+    if not is_futu_fetch_source(source):
+        return 0
+    return _limit_expirations(symbol_cfg)
 
 
 def merge_prefetch_symbol_configs(symbol_cfgs: list[dict[str, Any]]) -> dict[str, Any]:
@@ -207,14 +328,14 @@ def _strategy_payload(
     side_strike_windows: dict[str, dict[str, float | None]],
 ) -> dict[str, Any]:
     all_mins = [
-        float(window.get("min_strike"))
-        for window in side_strike_windows.values()
-        if window.get("min_strike") is not None
+        value
+        for value in (_to_float(window.get("min_strike")) for window in side_strike_windows.values())
+        if value is not None
     ]
     all_maxs = [
-        float(window.get("max_strike"))
-        for window in side_strike_windows.values()
-        if window.get("max_strike") is not None
+        value
+        for value in (_to_float(window.get("max_strike")) for window in side_strike_windows.values())
+        if value is not None
     ]
     return {
         "option_types": ",".join(dict.fromkeys(option_types)),
@@ -247,6 +368,13 @@ def _symbol_key(symbol: str) -> str:
 def _limit_expirations(symbol_cfg: dict[str, Any]) -> int:
     fetch_cfg = _as_dict((symbol_cfg or {}).get("fetch"))
     return max(1, _to_int(fetch_cfg.get("limit_expirations") or 8, 8))
+
+
+def _safe_option_chain_calls(configured_max_calls: int) -> int:
+    max_calls = max(1, int(configured_max_calls))
+    if max_calls <= 1:
+        return 1
+    return max(1, min(max_calls, int(max_calls * 0.8)))
 
 
 def _window_values(raw: dict[str, Any], *, defaults: Any) -> tuple[int, int]:

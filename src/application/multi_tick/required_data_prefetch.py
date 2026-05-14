@@ -1,7 +1,14 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+import time
+from typing import Any, Iterator
+
+try:
+    import fcntl
+except Exception:  # pragma: no cover - non-POSIX fallback
+    fcntl = None
 
 from domain.domain.tool_boundary import SCHEMA_VERSION_V1, normalize_tool_execution_payload
 from domain.services import (
@@ -14,6 +21,7 @@ from domain.storage.repositories import state_repo
 from src.application.config_loader import resolve_templates_config, resolve_watchlist_config
 from src.application.config_profiles import apply_profiles
 from src.application.multi_tick.prefetch_coordinator import PrefetchCoordinator
+from src.application.multi_tick.prefetch_coordinator import PrefetchCoordinatorResult
 from src.application.opend_fetch_config import resolve_opend_batch_config, resolve_opend_fetch_config
 from src.application.opend_symbol_fetching import fetch_symbol
 from src.application.opend_symbol_outputs import save_outputs
@@ -23,6 +31,7 @@ from src.application.required_data_observability import (
     summarize_required_data_prefetch_run,
 )
 from src.application.required_data_prefetch_planning import (
+    build_prefetch_budget_plan,
     build_prefetch_symbol_plan,
     strategy_prefetch_kwargs as _strategy_prefetch_kwargs,
 )
@@ -91,13 +100,13 @@ def _resolve_opend_fetch_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
 
 
 def _fetch_one_inprocess(
-    symbol_cfg: dict,
+    symbol_cfg: dict[str, Any],
     *,
     base: Path,
     shared_required: Path,
     opend_fetch_cfg: dict[str, Any],
     batch_cfg: Any,
-) -> dict:
+) -> dict[str, Any]:
     symbol = str(symbol_cfg.get('symbol')).strip()
     if not symbol:
         payload = normalize_tool_execution_payload(
@@ -157,7 +166,8 @@ def _fetch_one_inprocess(
         )
         _gateway_pool.mark_success()
         save_outputs(base, symbol, payload0, output_root=shared_required)
-        meta = payload0.get('meta') if isinstance(payload0.get('meta'), dict) else {}
+        raw_meta = payload0.get('meta')
+        meta = raw_meta if isinstance(raw_meta, dict) else {}
         ok = str(meta.get('status') or '').strip().lower() not in {'error', 'fail', 'failed'}
         message = str(meta.get('error') or meta.get('status') or 'fetched')
         payload = normalize_tool_execution_payload(
@@ -212,7 +222,82 @@ def _load_cached_required_data_frame(symbol: str, shared_required: Path) -> Any 
         return None
 
 
-def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required: Path, force_refresh: bool = False) -> dict:
+def _merge_coordinator_results(
+    results: list[PrefetchCoordinatorResult],
+    *,
+    fail_budget_consecutive: int,
+    fail_budget_total: int,
+) -> PrefetchCoordinatorResult:
+    merged = PrefetchCoordinatorResult(
+        fail_budget_consecutive=fail_budget_consecutive,
+        fail_budget_total=fail_budget_total,
+    )
+    for result in results:
+        merged.fetched_ok += int(result.fetched_ok)
+        merged.errors += int(result.errors)
+        merged.skipped += int(result.skipped)
+        merged.submitted_count += int(result.submitted_count)
+        merged.completed_count += int(result.completed_count)
+        merged.budget_triggered = bool(merged.budget_triggered or result.budget_triggered)
+        merged.opend_rate_limit_classes.update(result.opend_rate_limit_classes)
+        merged.opend_rate_limit_items.extend(result.opend_rate_limit_items)
+        merged.results.update(result.results)
+        merged.audit_items.extend(result.audit_items)
+    return merged
+
+
+def _sleep_after_rate_limit_wave(wait_sec: float) -> None:
+    time.sleep(max(0.0, float(wait_sec)))
+
+
+def _has_option_chain_rate_limit(items: list[dict[str, Any]]) -> bool:
+    for item in items:
+        endpoint = str(item.get("endpoint") or "").strip().lower()
+        if endpoint in {"option_chain", "opend", ""}:
+            return True
+    return False
+
+
+@contextmanager
+def _required_data_prefetch_file_lock(base: Path) -> Iterator[None]:
+    lock_path = Path(base) / "output_shared" / "state" / "required_data_prefetch.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as lock_fp:
+        if fcntl is not None:
+            fcntl.flock(lock_fp.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if fcntl is not None:
+                fcntl.flock(lock_fp.fileno(), fcntl.LOCK_UN)
+
+
+def prefetch_required_data(
+    *,
+    vpy: Path,
+    base: Path,
+    cfg: dict[str, Any],
+    shared_required: Path,
+    force_refresh: bool = False,
+) -> dict[str, Any]:
+    with _required_data_prefetch_file_lock(base):
+        return _prefetch_required_data_unlocked(
+            vpy=vpy,
+            base=base,
+            cfg=cfg,
+            shared_required=shared_required,
+            force_refresh=force_refresh,
+        )
+
+
+def _prefetch_required_data_unlocked(
+    *,
+    vpy: Path,
+    base: Path,
+    cfg: dict[str, Any],
+    shared_required: Path,
+    force_refresh: bool = False,
+) -> dict[str, Any]:
     profiles = resolve_templates_config(cfg)
     syms = [apply_profiles(it, profiles) for it in resolve_watchlist_config(cfg) if it.get('symbol')]
     symbols = [str(it.get('symbol')).strip() for it in syms if str(it.get('symbol')).strip()]
@@ -255,7 +340,7 @@ def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required:
     snapshot_fetch_cfg = opend_fetch_cfg["market_snapshot"]
     expiration_fetch_cfg = opend_fetch_cfg["option_expiration"]
 
-    def _fetch_one(symbol_cfg: dict) -> dict:
+    def _fetch_one(symbol_cfg: dict[str, Any]) -> dict[str, Any]:
         symbol = str(symbol_cfg.get('symbol')).strip()
         if not symbol:
             return normalize_tool_execution_payload(
@@ -343,6 +428,11 @@ def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required:
 
     todo_cfgs = [it for it in fetch_syms if _need_fetch(it)]
     unique_cached_count = max(0, len(fetch_syms) - len(todo_cfgs))
+    budget_plan = build_prefetch_budget_plan(todo_cfgs, option_chain_cfg=option_chain_fetch_cfg)
+    option_chain_fetch_cfg = dict(option_chain_fetch_cfg)
+    option_chain_fetch_cfg["max_calls"] = int(budget_plan.safe_option_chain_calls_per_window)
+    opend_fetch_cfg = dict(opend_fetch_cfg)
+    opend_fetch_cfg["option_chain"] = option_chain_fetch_cfg
 
     if not todo_cfgs:
         fetch_metrics = summarize_prefetch_fetch_metrics([])
@@ -381,12 +471,15 @@ def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required:
             'execution_mode': _resolve_execution_mode(cfg),
             'fetch_metrics': fetch_metrics,
             'run_fetch_summary': run_fetch_summary,
+            'prefetch_budget_plan': budget_plan.summary(),
+            'opend_rate_limit_classes': [],
+            'opend_rate_limit_items': [],
+            'rate_limit_cooldowns': [],
             'symbols': [],
             'audit': [],
         }
 
     configured_max_workers = _resolve_prefetch_max_workers(cfg)
-    max_workers = max(1, min(configured_max_workers, len(todo_cfgs)))
     fail_budget_consecutive, fail_budget_total = _resolve_failure_budget(cfg)
 
     def _dispatch(symbol_cfg: dict[str, Any]) -> dict[str, Any]:
@@ -400,18 +493,41 @@ def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required:
             batch_cfg=batch_cfg,
         )
 
-    coordinator = PrefetchCoordinator(
-        symbol_cfgs=todo_cfgs,
-        max_workers=max_workers,
-        execution_mode=execution_mode,
+    wave_results: list[PrefetchCoordinatorResult] = []
+    rate_limit_cooldowns: list[dict[str, Any]] = []
+    effective_max_workers = 0
+    for wave_idx, wave in enumerate(budget_plan.waves):
+        wave_workers = max(1, min(configured_max_workers, len(wave.symbol_cfgs)))
+        effective_max_workers = max(effective_max_workers, wave_workers)
+        coordinator = PrefetchCoordinator(
+            symbol_cfgs=wave.symbol_cfgs,
+            max_workers=wave_workers,
+            execution_mode=execution_mode,
+            fail_budget_consecutive=fail_budget_consecutive,
+            fail_budget_total=fail_budget_total,
+            dispatch_fn=_dispatch,
+            cleanup_worker_fn=(_gateway_pool.close_current_thread if execution_mode == 'inprocess' else None),
+            short_circuit_rate_limits=False,
+            stop_on_failure_budget=False,
+        )
+        wave_result = coordinator.run()
+        wave_results.append(wave_result)
+        if wave_idx < len(budget_plan.waves) - 1 and _has_option_chain_rate_limit(wave_result.opend_rate_limit_items):
+            wait_sec = float(option_chain_fetch_cfg.get("window_sec") or 30.0)
+            rate_limit_cooldowns.append(
+                {
+                    "after_wave": int(wave.index),
+                    "reason": "opend_rate_limit",
+                    "wait_sec": wait_sec,
+                }
+            )
+            _sleep_after_rate_limit_wave(wait_sec)
+    max_workers = effective_max_workers
+    coordinator_result = _merge_coordinator_results(
+        wave_results,
         fail_budget_consecutive=fail_budget_consecutive,
         fail_budget_total=fail_budget_total,
-        dispatch_fn=_dispatch,
-        cleanup_worker_fn=(_gateway_pool.close_current_thread if execution_mode == 'inprocess' else None),
-        short_circuit_rate_limits=False,
-        stop_on_failure_budget=False,
     )
-    coordinator_result = coordinator.run()
     fetch_metrics = summarize_prefetch_fetch_metrics(coordinator_result.audit_items)
     run_fetch_summary = summarize_required_data_prefetch_run(
         symbols_total=len(symbols),
@@ -452,6 +568,9 @@ def prefetch_required_data(*, vpy: Path, base: Path, cfg: dict, shared_required:
         'fail_budget_total': fail_budget_total,
         'budget_triggered': coordinator_result.budget_triggered,
         'opend_rate_limit_classes': sorted(coordinator_result.opend_rate_limit_classes),
+        'opend_rate_limit_items': list(coordinator_result.opend_rate_limit_items),
+        'prefetch_budget_plan': budget_plan.summary(),
+        'rate_limit_cooldowns': rate_limit_cooldowns,
         'fetch_metrics': fetch_metrics,
         'run_fetch_summary': run_fetch_summary,
         'force_refresh': bool(force_refresh),
