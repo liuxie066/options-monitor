@@ -156,9 +156,24 @@
         },
         "yield_enhancement": {
           "enabled": false,
-          "max_downside_worsen_pct": 0.02,
-          "min_annualized_scenario_score_lift": 0.03,
-          "min_lift_to_downside_ratio": 0.6
+          "objective": "premium_funded_long_call",
+          "output_mode": "separate",
+          "funding_mode": "credit_or_even",
+          "min_combo_net_credit": 0.0,
+          "max_call_cost_to_put_credit": 1.0,
+          "min_upside_lift_to_call_cost": 1.5,
+          "min_upside_lift_to_put_credit": 0.5,
+          "min_put_otm_pct": 0.05,
+          "min_open_interest": 100,
+          "min_volume": 5,
+          "max_spread_ratio": 0.35,
+          "max_combo_spread_ratio": 0.5,
+          "call": {
+            "min_otm_pct": 0.03,
+            "max_otm_pct": 0.4,
+            "min_delta": 0.1,
+            "max_delta": 0.45
+          }
         },
         "sell_call": {
           "enabled": false,
@@ -210,9 +225,24 @@
         },
         "yield_enhancement": {
           "enabled": false,
-          "max_downside_worsen_pct": 0.02,
-          "min_annualized_scenario_score_lift": 0.03,
-          "min_lift_to_downside_ratio": 0.6
+          "objective": "premium_funded_long_call",
+          "output_mode": "separate",
+          "funding_mode": "credit_or_even",
+          "min_combo_net_credit": 0.0,
+          "max_call_cost_to_put_credit": 1.0,
+          "min_upside_lift_to_call_cost": 1.5,
+          "min_upside_lift_to_put_credit": 0.5,
+          "min_put_otm_pct": 0.05,
+          "min_open_interest": 100,
+          "min_volume": 0,
+          "max_spread_ratio": 0.35,
+          "max_combo_spread_ratio": 0.5,
+          "call": {
+            "min_otm_pct": 0.03,
+            "max_otm_pct": 0.4,
+            "min_delta": 0.1,
+            "max_delta": 0.45
+          }
         },
         "sell_call": {
           "enabled": false,

@@ -8,10 +8,10 @@ from typing import Any
 import pandas as pd
 
 from domain.domain.engine import (
+    YieldEnhancementFundingDecision,
     YieldEnhancementLeg,
-    YieldEnhancementOptimizerScore,
+    compute_yield_enhancement_funding_decision,
     compute_yield_enhancement_metrics,
-    compute_yield_enhancement_optimizer_score,
     rank_yield_enhancement_rows,
     validate_yield_enhancement_pair,
 )
@@ -24,6 +24,7 @@ from domain.domain.candidate_defaults import (
 from domain.domain.fee_calc import calc_futu_option_fee
 from domain.domain.sell_put_risk_bands import classify_sell_put_risk
 from src.application.candidate_models import CandidateContractInput
+from src.application.yield_enhancement_config import apply_yield_enhancement_defaults
 
 
 def _safe_float(value: Any) -> float | None:
@@ -199,39 +200,25 @@ def _float_list(value: Any, *, default: tuple[float, ...]) -> tuple[float, ...]:
     return tuple(parsed) if parsed else default
 
 
-def _cfg_float(cfg: dict[str, Any], key: str, default: float) -> float:
-    value = _safe_float(cfg.get(key))
-    return float(default if value is None else value)
-
-
-def _optimizer_row_fields(score: YieldEnhancementOptimizerScore) -> dict[str, Any]:
+def _funding_decision_row_fields(decision: YieldEnhancementFundingDecision) -> dict[str, Any]:
     components = ";".join(
         f"{name}={value:.6f}"
-        for name, value in sorted(score.score_components.items())
+        for name, value in sorted(decision.score_components.items())
     )
     return {
-        "optimizer_accepted": bool(score.accepted),
-        "optimizer_score": score.optimizer_score,
-        "optimizer_reject_reasons": "|".join(score.reject_reasons),
-        "put_net_credit": score.put_net_credit,
-        "call_total_cost": score.call_total_cost,
-        "combo_net_credit": score.combo_net_credit,
-        "base_cash_required": score.base_cash_required,
-        "combo_cash_required": score.combo_cash_required,
-        "base_downside_breakeven": score.base_downside_breakeven,
-        "combo_downside_breakeven": score.combo_downside_breakeven,
-        "downside_worsen": score.downside_worsen,
-        "downside_worsen_pct": score.downside_worsen_pct,
-        "base_scenario_score": score.base_scenario_score,
-        "combo_scenario_score": score.combo_scenario_score,
-        "scenario_score_lift": score.scenario_score_lift,
-        "base_annualized_scenario_score": score.base_annualized_scenario_score,
-        "combo_annualized_scenario_score": score.combo_annualized_scenario_score,
-        "annualized_scenario_score_lift": score.annualized_scenario_score_lift,
-        "call_cost_ratio": score.call_cost_ratio,
-        "combo_spread_worsen_ratio": score.combo_spread_worsen_ratio,
-        "spread_penalty": score.spread_penalty,
-        "optimizer_score_components": components,
+        "funding_accepted": bool(decision.accepted),
+        "funding_reject_reasons": "|".join(decision.reject_reasons),
+        "put_net_credit": decision.put_net_credit,
+        "call_total_cost": decision.call_total_cost,
+        "combo_net_credit": decision.combo_net_credit,
+        "call_cost_to_put_credit": decision.call_cost_ratio,
+        "upside_scenario_price": decision.upside_scenario_price,
+        "upside_lift": decision.upside_lift,
+        "upside_net_lift": decision.upside_net_lift,
+        "upside_lift_to_call_cost": decision.upside_lift_to_call_cost,
+        "upside_lift_to_put_credit": decision.upside_lift_to_put_credit,
+        "premium_funding_score": decision.premium_funding_score,
+        "funding_score_components": components,
     }
 
 
@@ -243,7 +230,7 @@ def _build_pair_row(
     scenario_move_factors: tuple[float, ...],
     scenario_weights: tuple[float, ...],
     min_combo_notional_floor: float,
-    optimizer_cfg: dict[str, Any],
+    enhancement_cfg: dict[str, Any],
 ) -> dict[str, Any]:
     multiplier = int(put_leg.multiplier)
     put_sell_fee = calc_futu_option_fee(put_leg.currency, put_leg.bid, contracts=1, multiplier=multiplier, is_sell=True)
@@ -315,27 +302,23 @@ def _build_pair_row(
         "iv": put_leg.implied_volatility,
         "risk_label": risk.risk_label,
     }
-    optimizer_enabled = bool(optimizer_cfg.get("optimizer_enabled", True))
-    if optimizer_enabled:
-        optimizer = compute_yield_enhancement_optimizer_score(
-            put_leg=put_leg,
-            call_leg=call_leg,
-            put_sell_fee=put_sell_fee,
-            call_buy_fee=call_buy_fee,
-            combo_metrics=metrics,
-            min_combo_net_credit=_cfg_float(optimizer_cfg, "min_combo_net_credit", 0.0),
-            max_downside_worsen_pct=_cfg_float(optimizer_cfg, "max_downside_worsen_pct", 0.003),
-            min_scenario_score_lift=_cfg_float(optimizer_cfg, "min_scenario_score_lift", 0.01),
-            min_annualized_scenario_score_lift=_cfg_float(
-                optimizer_cfg,
-                "min_annualized_scenario_score_lift",
-                0.08,
-            ),
-            min_lift_to_downside_ratio=_cfg_float(optimizer_cfg, "min_lift_to_downside_ratio", 2.0),
-            max_combo_spread_ratio=_cfg_float(optimizer_cfg, "max_combo_spread_ratio", 0.35),
-            max_combo_spread_worsen_ratio=_cfg_float(optimizer_cfg, "max_combo_spread_worsen_ratio", 0.15),
-        )
-        row.update(_optimizer_row_fields(optimizer))
+    funding_mode = str(enhancement_cfg.get("funding_mode") or "credit_or_even").strip().lower()
+    min_combo_net_credit = _safe_float(enhancement_cfg.get("min_combo_net_credit"))
+    if funding_mode == "max_debit":
+        min_combo_net_credit = None
+    decision = compute_yield_enhancement_funding_decision(
+        put_leg=put_leg,
+        call_leg=call_leg,
+        put_sell_fee=put_sell_fee,
+        call_buy_fee=call_buy_fee,
+        combo_metrics=metrics,
+        min_combo_net_credit=min_combo_net_credit,
+        max_call_cost_to_put_credit=_safe_float(enhancement_cfg.get("max_call_cost_to_put_credit")),
+        min_upside_lift_to_call_cost=_safe_float(enhancement_cfg.get("min_upside_lift_to_call_cost")),
+        min_upside_lift_to_put_credit=_safe_float(enhancement_cfg.get("min_upside_lift_to_put_credit")),
+        max_combo_spread_ratio=_safe_float(enhancement_cfg.get("max_combo_spread_ratio")),
+    )
+    row.update(_funding_decision_row_fields(decision))
     return row
 
 
@@ -355,12 +338,19 @@ def _empty_pairs_df() -> pd.DataFrame:
             "scenario_score",
             "annualized_scenario_score",
             "call_candidate_count",
-            "optimizer_accepted",
-            "optimizer_score",
-            "optimizer_reject_reasons",
-            "scenario_score_lift",
-            "annualized_scenario_score_lift",
-            "downside_worsen_pct",
+            "funding_accepted",
+            "funding_reject_reasons",
+            "put_net_credit",
+            "call_total_cost",
+            "combo_net_credit",
+            "call_cost_to_put_credit",
+            "upside_scenario_price",
+            "upside_lift",
+            "upside_net_lift",
+            "upside_lift_to_call_cost",
+            "upside_lift_to_put_credit",
+            "premium_funding_score",
+            "funding_score_components",
         ]
     )
 
@@ -387,7 +377,7 @@ def find_sell_put_yield_enhancement_pairs(
     output_path: Path | None = None,
 ) -> pd.DataFrame:
     df = df_candidates.copy()
-    cfg = dict(yield_enhancement_cfg or {})
+    cfg = apply_yield_enhancement_defaults(yield_enhancement_cfg)
     if df.empty or not cfg.get("enabled"):
         pairs_df = _empty_pairs_df()
         if output_path is not None:
@@ -403,10 +393,10 @@ def find_sell_put_yield_enhancement_pairs(
     window = resolve_candidate_window(cfg, defaults=DEFAULT_SELL_PUT_YIELD_ENHANCEMENT_WINDOW)
 
     min_put_otm_pct = float(cfg.get("min_put_otm_pct", 0.05) or 0.0)
-    min_call_otm_pct = float(cfg.get("min_call_otm_pct", 0.03) or 0.0)
-    max_call_otm_pct = _safe_float(cfg.get("max_call_otm_pct"))
-    if max_call_otm_pct is None:
-        max_call_otm_pct = 0.25
+    min_call_otm = float(call_cfg.get("min_otm_pct", 0.03) or 0.0)
+    max_call_otm = _safe_float(call_cfg.get("max_otm_pct"))
+    min_call_delta = _safe_float(call_cfg.get("min_delta"))
+    max_call_delta = _safe_float(call_cfg.get("max_delta"))
     scenario_move_factors = _float_list(
         cfg.get("scenario_move_factors"),
         default=(0.0, 0.5, 1.0, 1.5),
@@ -423,7 +413,6 @@ def find_sell_put_yield_enhancement_pairs(
         max_debit_native = _safe_float(cfg.get("max_debit"))
     max_combo_spread_ratio = _safe_float(cfg.get("max_combo_spread_ratio", 0.50))
     min_combo_notional_floor = 1.0
-    optimizer_enabled = bool(cfg.get("optimizer_enabled", True))
 
     raw_calls = _load_required_data_calls(input_root=Path(input_root), symbol=symbol)
     call_legs_by_expiration: dict[str, list[YieldEnhancementLeg]] = {}
@@ -440,9 +429,14 @@ def find_sell_put_yield_enhancement_pairs(
                 _safe_float(call_cfg.get("max_strike")),
             ):
                 continue
-            if leg.strike < leg.spot * (1.0 + float(min_call_otm_pct)):
+            if leg.strike < leg.spot * (1.0 + float(min_call_otm)):
                 continue
-            if max_call_otm_pct is not None and leg.strike > leg.spot * (1.0 + float(max_call_otm_pct)):
+            if max_call_otm is not None and leg.strike > leg.spot * (1.0 + float(max_call_otm)):
+                continue
+            call_delta = _safe_float(leg.delta)
+            if min_call_delta is not None and (call_delta is None or call_delta < float(min_call_delta)):
+                continue
+            if max_call_delta is not None and (call_delta is None or call_delta > float(max_call_delta)):
                 continue
             if not _passes_liquidity(
                 leg,
@@ -478,11 +472,11 @@ def find_sell_put_yield_enhancement_pairs(
                     scenario_move_factors=scenario_move_factors,
                     scenario_weights=scenario_weights,
                     min_combo_notional_floor=min_combo_notional_floor,
-                    optimizer_cfg=cfg,
+                    enhancement_cfg=cfg,
                 )
             except Exception:
                 continue
-            if optimizer_enabled and not bool(candidate.get("optimizer_accepted")):
+            if not bool(candidate.get("funding_accepted")):
                 continue
             if funding_mode == "credit_or_even" and float(candidate["net_credit"]) < 0:
                 continue
@@ -577,9 +571,11 @@ def attach_best_linked_calls(
                 "linked_call_scenario_score": _safe_float(top.get("scenario_score")),
                 "linked_call_annualized_scenario_score": _safe_float(top.get("annualized_scenario_score")),
                 "linked_call_count": int(_safe_float(top.get("call_candidate_count")) or 1),
-                "linked_call_optimizer_score": _safe_float(top.get("optimizer_score")),
-                "linked_call_scenario_score_lift": _safe_float(top.get("scenario_score_lift")),
-                "linked_call_downside_worsen_pct": _safe_float(top.get("downside_worsen_pct")),
+                "linked_call_cost_to_put_credit": _safe_float(top.get("call_cost_to_put_credit")),
+                "linked_call_upside_lift": _safe_float(top.get("upside_lift")),
+                "linked_call_upside_lift_to_call_cost": _safe_float(top.get("upside_lift_to_call_cost")),
+                "linked_call_upside_lift_to_put_credit": _safe_float(top.get("upside_lift_to_put_credit")),
+                "linked_call_premium_funding_score": _safe_float(top.get("premium_funding_score")),
             }
         )
 

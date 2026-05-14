@@ -382,6 +382,8 @@ def test_run_symbol_monitoring_fetches_calls_for_sell_put_yield_enhancement(monk
 
     assert len(out) == 3
     assert [row["strategy"] for row in out] == ["sell_put", "yield_enhancement", "sell_call"]
-    assert captured_plan["yield_enhancement_cfg"] == {"enabled": True, "output_mode": "separate"}
+    assert captured_plan["yield_enhancement_cfg"]["enabled"] is True
+    assert captured_plan["yield_enhancement_cfg"]["objective"] == "premium_funded_long_call"
+    assert captured_plan["yield_enhancement_cfg"]["output_mode"] == "separate"
     assert captured_required_data["want_put"] is True
     assert captured_required_data["want_call"] is True

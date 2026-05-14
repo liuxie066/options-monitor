@@ -555,6 +555,115 @@ def test_sell_put_steps_use_global_liquidity_filters_only() -> None:
     assert 'require_bid_ask' not in kwargs
 
 
+def test_sell_put_steps_yield_enhancement_put_universe_ignores_sell_put_return_floor() -> None:
+    base = _add_repo_to_syspath()
+    import src.application.sell_put_steps as steps
+    import pandas as pd
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+
+    calls: list[dict] = []
+    orig_run_sell_put_scan = steps.run_sell_put_scan
+    orig_add_labels = steps.add_sell_put_labels
+
+    def _fake_run_sell_put_scan(**kwargs):
+        calls.append(kwargs)
+        Path(kwargs["output"]).parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame().to_csv(kwargs["output"], index=False)
+
+    steps.run_sell_put_scan = _fake_run_sell_put_scan
+    steps.add_sell_put_labels = lambda *args, **kwargs: None
+    try:
+        out = steps.run_sell_put_scan_and_summarize(
+            py='python',
+            base=base,
+            sym='AAPL',
+            symbol='AAPL',
+            symbol_lower='aapl',
+            symbol_cfg={'symbol': 'AAPL', 'yield_enhancement': {'enabled': True}},
+            sp={
+                'enabled': True,
+                'min_dte': 7,
+                'max_dte': 45,
+                'min_strike': 1,
+                'max_strike': 200,
+                'min_annualized_net_return': 0.25,
+                'min_net_income': 500,
+            },
+            top_n=3,
+            required_data_dir=base / 'output',
+            report_dir=base / 'output' / 'reports',
+            timeout_sec=10,
+            is_scheduled=True,
+            exchange_rate_converter=CurrencyConverter(ExchangeRates(usd_per_cny=0.14)),
+            portfolio_ctx=None,
+        )
+    finally:
+        steps.run_sell_put_scan = orig_run_sell_put_scan
+        steps.add_sell_put_labels = orig_add_labels
+
+    assert [row['strategy'] for row in out] == ['sell_put', 'yield_enhancement']
+    assert len(calls) == 2
+    assert calls[0]['min_annualized_net_return'] == 0.25
+    assert calls[0]['min_net_income'] == 70.0
+    assert calls[1]['min_annualized_net_return'] == 0.0
+    assert calls[1]['min_net_income'] == 0.0
+
+
+def test_sell_put_steps_yield_enhancement_put_universe_survives_sell_put_income_conversion_gap(tmp_path: Path) -> None:
+    base = _add_repo_to_syspath()
+    import src.application.sell_put_steps as steps
+    import pandas as pd
+    from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
+
+    report_dir = tmp_path / "reports"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    calls: list[dict] = []
+    orig_run_sell_put_scan = steps.run_sell_put_scan
+    orig_add_labels = steps.add_sell_put_labels
+
+    def _fake_run_sell_put_scan(**kwargs):
+        calls.append(kwargs)
+        Path(kwargs["output"]).parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame().to_csv(kwargs["output"], index=False)
+
+    steps.run_sell_put_scan = _fake_run_sell_put_scan
+    steps.add_sell_put_labels = lambda *args, **kwargs: None
+    try:
+        out = steps.run_sell_put_scan_and_summarize(
+            py="python",
+            base=base,
+            sym="AAPL",
+            symbol="AAPL",
+            symbol_lower="aapl",
+            symbol_cfg={"symbol": "AAPL", "yield_enhancement": {"enabled": True}},
+            sp={
+                "enabled": True,
+                "min_dte": 7,
+                "max_dte": 45,
+                "min_strike": 1,
+                "max_strike": 200,
+                "min_annualized_net_return": 0.25,
+                "min_net_income": 500,
+            },
+            top_n=3,
+            required_data_dir=tmp_path / "required_data",
+            report_dir=report_dir,
+            timeout_sec=10,
+            is_scheduled=True,
+            exchange_rate_converter=CurrencyConverter(ExchangeRates()),
+            portfolio_ctx=None,
+        )
+    finally:
+        steps.run_sell_put_scan = orig_run_sell_put_scan
+        steps.add_sell_put_labels = orig_add_labels
+
+    assert [row["strategy"] for row in out] == ["sell_put", "yield_enhancement"]
+    assert len(calls) == 1
+    assert "yield_enhancement_put_universe" in str(calls[0]["output"])
+    assert calls[0]["min_annualized_net_return"] == 0.0
+    assert calls[0]["min_net_income"] == 0.0
+
+
 def test_sell_put_steps_filter_uses_total_cny_when_base_cny_missing(tmp_path: Path) -> None:
     base = _add_repo_to_syspath()
     import src.application.sell_put_steps as steps

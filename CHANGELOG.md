@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 1.2.41 - 2026-05-14
+
+### Changed
+- Reworked Sell Put yield enhancement from a second-pass Sell Put optimizer into a premium-funded long-call combination strategy.
+- Moved yield-enhancement defaults into application configuration constants and locked `configs/system.json` against those defaults.
+- Broadened yield-enhancement Put universe generation so it inherits symbol, strike, DTE, cash, risk, and liquidity boundaries without inheriting Sell Put return thresholds.
+- Replaced old optimizer output fields with funding coverage and upside elasticity fields across candidates, summaries, canonical rows, alerts, and README guidance.
+
+### Fixed
+- Kept yield enhancement running when normal Sell Put minimum-income currency conversion is unavailable, while normal Sell Put output still fails closed.
+- Rejected removed yield-enhancement optimizer and legacy call OTM fields during config validation instead of allowing stale settings to apply silently.
+
+### Tests
+- Added regression coverage for system default consistency, premium-funded call acceptance/rejection, config tombstones, required-data call planning, and Sell Put return-floor isolation.
+- Re-ran the full pytest suite plus release metadata, config dry-run, compile, type, and diff validation.
+
 ## 1.2.40 - 2026-05-14
 
 ### Added

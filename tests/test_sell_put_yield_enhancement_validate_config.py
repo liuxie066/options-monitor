@@ -62,7 +62,7 @@ def test_validate_config_rejects_invalid_sell_put_yield_enhancement_funding_mode
         assert "NVDA.yield_enhancement.funding_mode" in str(exc)
 
 
-def test_validate_config_rejects_invalid_yield_enhancement_optimizer_threshold() -> None:
+def test_validate_config_rejects_removed_yield_enhancement_optimizer_field() -> None:
     from src.application.config_validator import validate_config
 
     cfg = {
@@ -88,7 +88,65 @@ def test_validate_config_rejects_invalid_yield_enhancement_optimizer_threshold()
         validate_config(cfg)
         raise AssertionError("expected config validation failure")
     except SystemExit as exc:
-        assert "NVDA.yield_enhancement.max_downside_worsen_pct" in str(exc)
+        assert "NVDA.yield_enhancement has removed optimizer fields" in str(exc)
+
+
+def test_validate_config_rejects_invalid_yield_enhancement_objective() -> None:
+    from src.application.config_validator import validate_config
+
+    cfg = {
+        "templates": {},
+        "symbols": [
+            {
+                "symbol": "NVDA",
+                "sell_put": {
+                    "enabled": True,
+                    "min_dte": 20,
+                    "max_dte": 60,
+                },
+                "yield_enhancement": {
+                    "enabled": True,
+                    "objective": "incremental_optimizer",
+                },
+                "sell_call": {"enabled": False},
+            }
+        ],
+    }
+
+    try:
+        validate_config(cfg)
+        raise AssertionError("expected config validation failure")
+    except SystemExit as exc:
+        assert "NVDA.yield_enhancement.objective" in str(exc)
+
+
+def test_validate_config_rejects_invalid_yield_enhancement_funding_ratio() -> None:
+    from src.application.config_validator import validate_config
+
+    cfg = {
+        "templates": {},
+        "symbols": [
+            {
+                "symbol": "NVDA",
+                "sell_put": {
+                    "enabled": True,
+                    "min_dte": 20,
+                    "max_dte": 60,
+                },
+                "yield_enhancement": {
+                    "enabled": True,
+                    "min_upside_lift_to_call_cost": -0.1,
+                },
+                "sell_call": {"enabled": False},
+            }
+        ],
+    }
+
+    try:
+        validate_config(cfg)
+        raise AssertionError("expected config validation failure")
+    except SystemExit as exc:
+        assert "NVDA.yield_enhancement.min_upside_lift_to_call_cost" in str(exc)
 
 
 def test_validate_config_rejects_invalid_template_yield_enhancement_call_bounds() -> None:
@@ -117,6 +175,34 @@ def test_validate_config_rejects_invalid_template_yield_enhancement_call_bounds(
         raise AssertionError("expected config validation failure")
     except SystemExit as exc:
         assert "templates.put_base.yield_enhancement.call.min_strike" in str(exc)
+
+
+def test_validate_config_rejects_invalid_template_yield_enhancement_call_otm_bounds() -> None:
+    from src.application.config_validator import validate_config
+
+    cfg = {
+        "templates": {
+            "put_base": {
+                "yield_enhancement": {
+                    "call": {"min_otm_pct": 0.5, "max_otm_pct": 0.2},
+                }
+            }
+        },
+        "symbols": [
+            {
+                "symbol": "NVDA",
+                "use": ["put_base"],
+                "sell_put": {"enabled": True, "min_dte": 20, "max_dte": 60},
+                "sell_call": {"enabled": False},
+            }
+        ],
+    }
+
+    try:
+        validate_config(cfg)
+        raise AssertionError("expected config validation failure")
+    except SystemExit as exc:
+        assert "templates.put_base.yield_enhancement.call.min_otm_pct" in str(exc)
 
 
 def test_validate_config_rejects_nested_sell_put_yield_enhancement_template_path() -> None:

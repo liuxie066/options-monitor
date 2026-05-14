@@ -71,6 +71,46 @@ def _sell_put_cash_block_mask(df: pd.DataFrame) -> pd.Series:
     return mask
 
 
+def _enrich_and_filter_sell_put_cash(
+    *,
+    df_labeled: pd.DataFrame,
+    symbol: str,
+    portfolio_ctx: dict | None,
+    exchange_rate_converter: CurrencyConverter,
+    out_path: Path,
+) -> pd.DataFrame:
+    if df_labeled.empty:
+        return df_labeled
+    df_out = enrich_sell_put_candidates_with_cash(
+        df_labeled=df_labeled,
+        symbol=symbol,
+        portfolio_ctx=portfolio_ctx,
+        exchange_rate_converter=exchange_rate_converter,
+        out_path=out_path,
+    )
+
+    # Enforce cash headroom as a hard filter at candidate-filter stage:
+    # - Prefer base(CNY) gating when both required/free are known.
+    # - Fallback to total(CNY) only when base(CNY) is unavailable.
+    # - Fallback to USD gating when CNY fields are unavailable.
+    try:
+        d = df_out.copy()
+        mask_drop = _sell_put_cash_block_mask(d)
+
+        if mask_drop.any():
+            d = d.loc[~mask_drop].copy()
+            d.to_csv(out_path, index=False)
+            df_out = d
+    except Exception as exc:
+        log.warning("sell_put_steps: cash hard filter failed for %s; fail closed: %s", symbol, exc)
+        df_out = df_out.iloc[0:0].copy()
+        try:
+            df_out.to_csv(out_path, index=False)
+        except Exception as write_exc:
+            log.warning("sell_put_steps: failed to write fail-closed CSV for %s: %s", symbol, write_exc)
+    return df_out
+
+
 def run_sell_put_scan_and_summarize(
     *,
     py: str,
@@ -92,6 +132,8 @@ def run_sell_put_scan_and_summarize(
 ) -> list[dict]:
     symbol_sp = (report_dir / f'{symbol_lower}_sell_put_candidates.csv').resolve()
     symbol_sp_labeled = (report_dir / f'{symbol_lower}_sell_put_candidates_labeled.csv').resolve()
+    symbol_yield_put_universe = (report_dir / f'{symbol_lower}_yield_enhancement_put_universe.csv').resolve()
+    symbol_yield_put_universe_labeled = (report_dir / f'{symbol_lower}_yield_enhancement_put_universe_labeled.csv').resolve()
     symbol_yield_enhancement = (report_dir / f'{symbol_lower}_yield_enhancement_candidates.csv').resolve()
     yield_enhancement_alerts = (report_dir / f'{symbol_lower}_yield_enhancement_alerts.txt').resolve()
     yield_enhancement_cfg = resolve_yield_enhancement_cfg(symbol_cfg)
@@ -110,72 +152,91 @@ def run_sell_put_scan_and_summarize(
     min_net_income_cny = float(sp.get('min_net_income', global_min_net_income) or 0.0)
 
     min_net_income_native = 0.0
+    sell_put_scan_allowed = True
     if min_net_income_cny > 0:
         native_ccy = symbol_currency(symbol)
         if not native_ccy:
             log.warning("sell_put_steps: currency unresolved for %s; fail closed", symbol)
-            return [summarize_sell_put(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg)]
-        converted_min_income = exchange_rate_converter.cny_to_native(
-            min_net_income_cny,
-            native_ccy=native_ccy,
+            sell_put_scan_allowed = False
+        else:
+            converted_min_income = exchange_rate_converter.cny_to_native(
+                min_net_income_cny,
+                native_ccy=native_ccy,
+            )
+            if converted_min_income is None:
+                log.warning("sell_put_steps: min_net_income conversion unavailable for %s/%s; fail closed", symbol, native_ccy)
+                sell_put_scan_allowed = False
+            else:
+                min_net_income_native = float(converted_min_income)
+
+    if sell_put_scan_allowed:
+        run_sell_put_scan(
+            symbols=[sym],
+            input_root=required_data_dir,
+            output=symbol_sp,
+            min_dte=window.min_dte,
+            max_dte=window.max_dte,
+            min_annualized_net_return=resolved_min_annualized_net_return,
+            min_net_income=float(min_net_income_native),
+            min_strike=(float(sp.get('min_strike')) if sp.get('min_strike') is not None else None),
+            max_strike=(float(sp.get('max_strike')) if sp.get('max_strike') is not None else None),
+            min_open_interest=liquidity.min_open_interest,
+            min_volume=liquidity.min_volume,
+            max_spread_ratio=liquidity.max_spread_ratio,
+            event_risk_cfg=event_risk,
+            score_weights=sp.get('score_weights'),
+            quiet=bool(is_scheduled),
         )
-        if converted_min_income is None:
-            log.warning("sell_put_steps: min_net_income conversion unavailable for %s/%s; fail closed", symbol, native_ccy)
-            return [summarize_sell_put(pd.DataFrame(), symbol, symbol_cfg=symbol_cfg)]
-        min_net_income_native = float(converted_min_income)
-
-    run_sell_put_scan(
-        symbols=[sym],
-        input_root=required_data_dir,
-        output=symbol_sp,
-        min_dte=window.min_dte,
-        max_dte=window.max_dte,
-        min_annualized_net_return=resolved_min_annualized_net_return,
-        min_net_income=float(min_net_income_native),
-        min_strike=(float(sp.get('min_strike')) if sp.get('min_strike') is not None else None),
-        max_strike=(float(sp.get('max_strike')) if sp.get('max_strike') is not None else None),
-        min_open_interest=liquidity.min_open_interest,
-        min_volume=liquidity.min_volume,
-        max_spread_ratio=liquidity.max_spread_ratio,
-        event_risk_cfg=event_risk,
-        score_weights=sp.get('score_weights'),
-        quiet=bool(is_scheduled),
-    )
-
-    add_sell_put_labels(base, symbol_sp, symbol_sp_labeled)
-
-    df_sp_lab = safe_read_csv(symbol_sp_labeled)
-    if not df_sp_lab.empty:
-        df_sp_lab = enrich_sell_put_candidates_with_cash(
-            df_labeled=df_sp_lab,
-            symbol=symbol,
-            portfolio_ctx=portfolio_ctx,
-            exchange_rate_converter=exchange_rate_converter,
-            out_path=symbol_sp_labeled,
-        )
-
-        # Enforce cash headroom as a hard filter at candidate-filter stage:
-        # - Prefer base(CNY) gating when both required/free are known.
-        # - Fallback to total(CNY) only when base(CNY) is unavailable.
-        # - Fallback to USD gating when CNY fields are unavailable.
+        add_sell_put_labels(base, symbol_sp, symbol_sp_labeled)
+        df_sp_lab = safe_read_csv(symbol_sp_labeled)
+        if not df_sp_lab.empty:
+            df_sp_lab = _enrich_and_filter_sell_put_cash(
+                df_labeled=df_sp_lab,
+                symbol=symbol,
+                portfolio_ctx=portfolio_ctx,
+                exchange_rate_converter=exchange_rate_converter,
+                out_path=symbol_sp_labeled,
+            )
+    else:
+        df_sp_lab = pd.DataFrame()
         try:
-            d = df_sp_lab.copy()
-            mask_drop = _sell_put_cash_block_mask(d)
-
-            if mask_drop.any():
-                d = d.loc[~mask_drop].copy()
-                d.to_csv(symbol_sp_labeled, index=False)
-                df_sp_lab = d
+            df_sp_lab.to_csv(symbol_sp, index=False)
+            df_sp_lab.to_csv(symbol_sp_labeled, index=False)
         except Exception as exc:
-            log.warning("sell_put_steps: cash hard filter failed for %s; fail closed: %s", symbol, exc)
-            df_sp_lab = df_sp_lab.iloc[0:0].copy()
-            try:
-                df_sp_lab.to_csv(symbol_sp_labeled, index=False)
-            except Exception as write_exc:
-                log.warning("sell_put_steps: failed to write fail-closed CSV for %s: %s", symbol, write_exc)
+            log.warning("sell_put_steps: failed to write fail-closed sell-put CSV for %s: %s", symbol, exc)
+
+    df_yield_put_universe = df_sp_lab
+    if bool(yield_enhancement_cfg.get("enabled", False)):
+        run_sell_put_scan(
+            symbols=[sym],
+            input_root=required_data_dir,
+            output=symbol_yield_put_universe,
+            min_dte=window.min_dte,
+            max_dte=window.max_dte,
+            min_annualized_net_return=0.0,
+            min_net_income=0.0,
+            min_strike=(float(sp.get('min_strike')) if sp.get('min_strike') is not None else None),
+            max_strike=(float(sp.get('max_strike')) if sp.get('max_strike') is not None else None),
+            min_open_interest=liquidity.min_open_interest,
+            min_volume=liquidity.min_volume,
+            max_spread_ratio=liquidity.max_spread_ratio,
+            event_risk_cfg=event_risk,
+            score_weights=sp.get('score_weights'),
+            quiet=True,
+        )
+        add_sell_put_labels(base, symbol_yield_put_universe, symbol_yield_put_universe_labeled)
+        df_yield_put_universe = safe_read_csv(symbol_yield_put_universe_labeled)
+        if not df_yield_put_universe.empty:
+            df_yield_put_universe = _enrich_and_filter_sell_put_cash(
+                df_labeled=df_yield_put_universe,
+                symbol=symbol,
+                portfolio_ctx=portfolio_ctx,
+                exchange_rate_converter=exchange_rate_converter,
+                out_path=symbol_yield_put_universe_labeled,
+            )
 
     raw_yield_pairs_df = find_sell_put_yield_enhancement_pairs(
-        df_candidates=df_sp_lab,
+        df_candidates=df_yield_put_universe,
         symbol=symbol,
         input_root=required_data_dir,
         yield_enhancement_cfg=yield_enhancement_cfg,
