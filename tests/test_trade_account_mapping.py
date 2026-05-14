@@ -65,6 +65,48 @@ def test_resolve_trade_intake_config_uses_defaults() -> None:
     assert out["enabled"] is True
     assert out["mode"] == "dry-run"
     assert str(out["state_path"]).endswith("output/state/auto_trade_intake_state.json")
+    assert str(out["status_path"]).endswith("output/state/auto_trade_intake_status.json")
+    assert out["receipt"] == {
+        "enabled": True,
+        "notify_applied": True,
+        "notify_unresolved": True,
+        "notify_failed": True,
+        "notify_duplicate": False,
+        "retry_unconfirmed_duplicate": True,
+    }
+
+
+def test_resolve_trade_intake_config_accepts_receipt_overrides() -> None:
+    cfg = {
+        "accounts": ["lx"],
+        "trade_intake": {
+            "status_path": "tmp/status.json",
+            "receipt": {
+                "enabled": False,
+                "notify_unresolved": False,
+                "notify_duplicate": True,
+            },
+        },
+    }
+
+    out = resolve_trade_intake_config(cfg)
+
+    assert str(out["status_path"]) == "tmp/status.json"
+    assert out["receipt"]["enabled"] is False
+    assert out["receipt"]["notify_unresolved"] is False
+    assert out["receipt"]["notify_duplicate"] is True
+    assert out["receipt"]["notify_applied"] is True
+
+
+def test_resolve_trade_intake_config_rejects_non_boolean_receipt_flag() -> None:
+    cfg = {"accounts": ["lx"], "trade_intake": {"receipt": {"enabled": "yes"}}}
+
+    try:
+        resolve_trade_intake_config(cfg)
+    except ValueError as exc:
+        assert "trade_intake.receipt.enabled must be a boolean" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
 
 
 def test_resolve_futu_lookup_account_ids_merges_account_settings_account_id() -> None:

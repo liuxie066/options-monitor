@@ -923,6 +923,34 @@ def test_runtime_status_summarizes_openclaw_runtime_files(tmp_path: Path) -> Non
 
     (shared_state_dir / "last_run.json").write_text(json.dumps({"status": "ok", "run_id": "run-1"}), encoding="utf-8")
     (state_dir / "last_run.json").write_text(json.dumps({"status": "legacy_ok"}), encoding="utf-8")
+    (state_dir / "auto_trade_intake_status.json").write_text(
+        json.dumps(
+            {
+                "status": "listening",
+                "stage": "deal_processed",
+                "last_heartbeat_utc": "2026-01-01T00:00:00+00:00",
+                "last_deal_result": {"status": "applied", "deal_id": "deal-1"},
+                "last_receipt_result": {"status": "sent", "delivery_confirmed": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (state_dir / "auto_trade_intake_state.json").write_text(
+        json.dumps(
+            {
+                "processed_deal_ids": {
+                    "deal-1": {
+                        "status": "applied",
+                        "receipt": {"status": "sent", "delivery_confirmed": True},
+                    }
+                },
+                "failed_deal_ids": {},
+                "unresolved_deal_ids": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (state_dir / "auto_trade_intake_audit.jsonl").write_text('{"phase":"receipt_sent"}\n', encoding="utf-8")
     (report_dir / "symbols_notification.txt").write_text("shared notification\n", encoding="utf-8")
     (accounts_root / "user1" / "state" / "last_run.json").write_text(json.dumps({"status": "account_ok"}), encoding="utf-8")
     (accounts_root / "user1" / "reports" / "symbols_notification.txt").write_text("account notification\n", encoding="utf-8")
@@ -991,6 +1019,10 @@ def test_runtime_status_summarizes_openclaw_runtime_files(tmp_path: Path) -> Non
     assert out["data"]["required_data_prefetch"]["total_rate_gate_wait_sec"] == 12.5
     assert out["data"]["required_data_prefetch"]["accounts"]["user1"]["deduped_count"] == 1
     assert out["data"]["required_data_prefetch"]["accounts"]["user1"]["cache"]["option_expiration_hits"] == 3
+    assert out["data"]["trade_intake"]["summary"]["listener_status"] == "listening"
+    assert out["data"]["trade_intake"]["summary"]["processed_count"] == 1
+    assert out["data"]["trade_intake"]["summary"]["receipt_confirmed_count"] == 1
+    assert out["data"]["trade_intake"]["audit"]["exists"] is True
 
 
 def test_runtime_status_loads_openclaw_profile_and_masks_external_paths(tmp_path: Path) -> None:

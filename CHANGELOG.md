@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 1.2.45 - 2026-05-15
+
+### Added
+- Added auto trade intake receipt delivery for applied, unresolved, and failed deals, using the configured notification route and default-on `trade_intake.receipt` settings.
+- Added listener status output with heartbeat, restart/error state, last deal result, and last receipt result so long-running intake jobs are observable from cron.
+- Added `runtime_status.trade_intake` summaries for intake state, listener status, audit file presence, and receipt confirmation counts.
+
+### Changed
+- Kept receipt delivery outside the option-position resolver path, sending only after intake resolution/persistence has produced a terminal result.
+- Documented auto trade intake receipt side effects and troubleshooting surfaces in README, RUNBOOK, and configuration guidance.
+
+### Tests
+- Added receipt decision, delivery normalization, state/audit persistence, duplicate-retry, runtime status, and receipt-config validation coverage.
+- Re-ran focused intake/runtime suites, changed-file type checking, compile checks, config dry-runs, and release metadata validation.
+
 ## 1.2.44 - 2026-05-14
 
 ### Changed
