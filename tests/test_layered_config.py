@@ -5,6 +5,7 @@ from pathlib import Path
 
 from src.application.config_validator import validate_config
 from src.application.layered_config import build_layered_runtime_config, explain_layered_runtime_config_key
+from src.application.runtime_config_freshness import GENERATED_KEY, check_runtime_config_freshness
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -69,6 +70,8 @@ def test_layered_config_builds_minimal_us_user_config(tmp_path: Path) -> None:
     assert cfg["symbols"][0]["yield_enhancement"]["enabled"] is True
     assert cfg.get("notifications", {}).get("channel") is None
     assert cfg["notifications"]["opend_alert_cooldown_sec"] == 600
+    assert cfg[GENERATED_KEY]["market"] == "us"
+    assert [item["role"] for item in cfg[GENERATED_KEY]["sources"]] == ["system", "common_user", "market_user"]
 
     validate_config(json.loads(json.dumps(cfg)))
 
@@ -369,6 +372,121 @@ def test_tracked_layered_examples_validate() -> None:
         validate_config(json.loads(json.dumps(cfg)))
 
 
+def test_runtime_config_freshness_detects_market_user_config_change(tmp_path: Path) -> None:
+    user_path = _write_json(
+        tmp_path / "user.us.json",
+        {
+            "account_settings": {
+                "lx": {
+                    "type": "futu",
+                    "futu": {"account_id": "REAL_12345678"},
+                }
+            },
+            "symbols": [{"symbol": "NVDA", "sell_put": {"max_strike": 160}}],
+        },
+    )
+    cfg, _meta = build_layered_runtime_config(repo_root=REPO_ROOT, market="us", user_config_path=user_path)
+
+    fresh = check_runtime_config_freshness(
+        cfg,
+        repo_root=REPO_ROOT,
+        market="us",
+        runtime_config_path=tmp_path / "config.us.json",
+    )
+    assert fresh["ok"] is True
+
+    _write_json(
+        user_path,
+        {
+            "account_settings": {
+                "lx": {
+                    "type": "futu",
+                    "futu": {"account_id": "REAL_12345678"},
+                }
+            },
+            "symbols": [{"symbol": "NVDA", "sell_put": {"max_strike": 170}}],
+        },
+    )
+
+    stale = check_runtime_config_freshness(
+        cfg,
+        repo_root=REPO_ROOT,
+        market="us",
+        runtime_config_path=tmp_path / "config.us.json",
+    )
+    assert stale["ok"] is False
+    assert stale["errors"][0]["code"] == "source_changed"
+    assert stale["errors"][0]["role"] == "market_user"
+    assert "--user-config" in stale["rebuild_command"]
+
+
+def test_runtime_config_freshness_detects_auto_common_user_config_appearing(tmp_path: Path) -> None:
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir()
+    _write_json(
+        config_dir / "user.us.json",
+        {
+            "account_settings": {
+                "lx": {
+                    "type": "futu",
+                    "futu": {"account_id": "REAL_12345678"},
+                }
+            },
+            "symbols": [{"symbol": "NVDA", "sell_put": {"max_strike": 160}}],
+        },
+    )
+    cfg, _meta = build_layered_runtime_config(
+        repo_root=tmp_path,
+        market="us",
+        system_config_path=REPO_ROOT / "configs" / "system.json",
+    )
+
+    _write_json(config_dir / "user.common.json", {"watchdog": {"retry_enabled": False}})
+
+    stale = check_runtime_config_freshness(
+        cfg,
+        repo_root=tmp_path,
+        market="us",
+        runtime_config_path=tmp_path / "config.us.json",
+    )
+    assert stale["ok"] is False
+    assert stale["errors"][0]["code"] == "optional_source_appeared"
+    assert stale["errors"][0]["role"] == "common_user"
+    assert "--common-user-config" in stale["rebuild_command"]
+    assert "configs/user.common.json" in stale["rebuild_command"]
+
+
+def test_init_runtime_config_includes_inline_generation_metadata(tmp_path: Path) -> None:
+    from src.application.agent_tool_init_local import init_local_config
+
+    config_path = tmp_path / "config.us.json"
+    data_config_path = tmp_path / "portfolio.sqlite.json"
+
+    init_local_config(
+        repo_root=REPO_ROOT,
+        market="us",
+        futu_acc_id="12345678",
+        account_label="lx",
+        config_path=config_path,
+        data_config_path=data_config_path,
+        symbols=["NVDA"],
+    )
+
+    cfg = json.loads(config_path.read_text(encoding="utf-8"))
+    generated = cfg[GENERATED_KEY]
+    market_user = next(item for item in generated["sources"] if item["role"] == "market_user")
+
+    assert market_user["inline"] is True
+    assert market_user["ref"] == "init_local_config"
+    assert generated["rebuild_command"].startswith("./om init runtime --market us")
+    assert check_runtime_config_freshness(
+        cfg,
+        repo_root=REPO_ROOT,
+        market="us",
+        runtime_config_path=config_path,
+    )["ok"] is True
+
+
 def test_config_build_cli_writes_output(tmp_path: Path, capsys) -> None:
     from src.interfaces.cli.main import main
 
@@ -403,6 +521,8 @@ def test_config_build_cli_writes_output(tmp_path: Path, capsys) -> None:
     assert payload["write_applied"] is True
     assert output_path.exists()
     validate_config(json.loads(output_path.read_text(encoding="utf-8")))
+    cfg = json.loads(output_path.read_text(encoding="utf-8"))
+    assert cfg[GENERATED_KEY]["market"] == "us"
 
 
 def test_config_build_cli_dry_run_does_not_write_output(tmp_path: Path, capsys) -> None:
@@ -486,6 +606,115 @@ def test_config_build_cli_accepts_explicit_common_user_config(tmp_path: Path, ca
     assert cfg["watchdog"]["retry_enabled"] is False
     assert cfg["accounts"] == ["lx"]
     validate_config(json.loads(json.dumps(cfg)))
+
+
+def test_config_validate_market_rejects_stale_runtime_config(tmp_path: Path, capsys) -> None:
+    from src.interfaces.cli.main import main
+
+    user_path = _write_json(
+        tmp_path / "user.us.json",
+        {
+            "account_settings": {
+                "lx": {
+                    "type": "futu",
+                    "futu": {"account_id": "REAL_12345678"},
+                }
+            },
+            "symbols": [{"symbol": "NVDA", "sell_put": {"max_strike": 160}}],
+        },
+    )
+    output_path = tmp_path / "config.us.json"
+    build_rc = main([
+        "config",
+        "build",
+        "--market",
+        "us",
+        "--user-config",
+        str(user_path),
+        "--output",
+        str(output_path),
+    ])
+    assert build_rc == 0
+    capsys.readouterr()
+
+    _write_json(
+        user_path,
+        {
+            "account_settings": {
+                "lx": {
+                    "type": "futu",
+                    "futu": {"account_id": "REAL_12345678"},
+                }
+            },
+            "symbols": [{"symbol": "NVDA", "sell_put": {"max_strike": 170}}],
+        },
+    )
+
+    validate_rc = main([
+        "config",
+        "validate",
+        "--config-path",
+        str(output_path),
+        "--market",
+        "us",
+    ])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert validate_rc == 2
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "CONFIG_ERROR"
+    assert "runtime config is stale" in payload["error"]["message"]
+    assert payload["error"]["details"]["errors"][0]["role"] == "market_user"
+
+
+def test_config_validate_market_wraps_schedule_contract_error_as_json(tmp_path: Path, capsys) -> None:
+    from src.interfaces.cli.main import main
+
+    user_path = _write_json(
+        tmp_path / "user.hk.json",
+        {
+            "account_settings": {
+                "lx": {
+                    "type": "futu",
+                    "futu": {"account_id": "REAL_87654321"},
+                }
+            },
+            "symbols": [{"symbol": "0700.HK", "sell_put": {"max_strike": 420}}],
+        },
+    )
+    output_path = tmp_path / "config.hk.json"
+    build_rc = main([
+        "config",
+        "build",
+        "--market",
+        "hk",
+        "--user-config",
+        str(user_path),
+        "--output",
+        str(output_path),
+    ])
+    assert build_rc == 0
+    capsys.readouterr()
+
+    cfg = json.loads(output_path.read_text(encoding="utf-8"))
+    cfg["schedule"]["timezone"] = "America/New_York"
+    output_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    validate_rc = main([
+        "config",
+        "validate",
+        "--config-path",
+        str(output_path),
+        "--market",
+        "hk",
+    ])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert validate_rc == 2
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "CONFIG_ERROR"
+    assert "runtime schedule timezone does not match market" in payload["error"]["message"]
+    assert payload["error"]["details"]["market"] == "hk"
 
 
 def test_config_explain_cli_outputs_source_trace(tmp_path: Path, capsys) -> None:

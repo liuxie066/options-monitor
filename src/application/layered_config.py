@@ -10,6 +10,7 @@ from src.application.config_loader import normalize_portfolio_broker_config, set
 from src.application.config_validator import validate_config
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.runtime_config_paths import write_json_atomic
+from src.application.runtime_config_freshness import GENERATED_KEY, build_generated_metadata
 
 
 MARKETS = ("us", "hk")
@@ -226,12 +227,14 @@ def _derive_portfolio(cfg: dict[str, Any], *, accounts: list[str]) -> None:
     portfolio.setdefault("base_currency", "CNY")
     portfolio["account"] = str(portfolio.get("account") or accounts[0]).strip().lower()
 
-    account_settings = cfg.get("account_settings") if isinstance(cfg.get("account_settings"), dict) else {}
+    raw_account_settings = cfg.get("account_settings")
+    account_settings = raw_account_settings if isinstance(raw_account_settings, dict) else {}
     source_by_account = portfolio.get("source_by_account")
     if not isinstance(source_by_account, dict):
         source_by_account = {}
     for account in accounts:
-        setting = account_settings.get(account) if isinstance(account_settings.get(account), dict) else {}
+        raw_setting = account_settings.get(account)
+        setting = raw_setting if isinstance(raw_setting, dict) else {}
         account_type = str(setting.get("type") or ACCOUNT_TYPE_FUTU).strip().lower()
         source_by_account.setdefault(account, "holdings" if account_type == ACCOUNT_TYPE_EXTERNAL_HOLDINGS else "futu")
     portfolio["source_by_account"] = source_by_account
@@ -262,12 +265,15 @@ def _derive_trade_intake(cfg: dict[str, Any], *, accounts: list[str]) -> None:
     else:
         futu_mapping = {str(k): str(v).strip().lower() for k, v in futu_mapping.items()}
 
-    account_settings = cfg.get("account_settings") if isinstance(cfg.get("account_settings"), dict) else {}
+    raw_account_settings = cfg.get("account_settings")
+    account_settings = raw_account_settings if isinstance(raw_account_settings, dict) else {}
     for account in accounts:
-        setting = account_settings.get(account) if isinstance(account_settings.get(account), dict) else {}
+        raw_setting = account_settings.get(account)
+        setting = raw_setting if isinstance(raw_setting, dict) else {}
         if str(setting.get("type") or ACCOUNT_TYPE_FUTU).strip().lower() != ACCOUNT_TYPE_FUTU:
             continue
-        futu_cfg = setting.get("futu") if isinstance(setting.get("futu"), dict) else {}
+        raw_futu_cfg = setting.get("futu")
+        futu_cfg = raw_futu_cfg if isinstance(raw_futu_cfg, dict) else {}
         account_id = str(futu_cfg.get("account_id") or "").strip()
         if account_id:
             futu_mapping.setdefault(account_id, account)
@@ -620,11 +626,16 @@ def build_layered_runtime_config(
 
     common_cfg = None
     common_path = None
+    common_enabled = False
+    common_auto_candidate = False
     if include_common_user_config:
         if common_user_config_path is not None and str(common_user_config_path).strip():
+            common_enabled = True
             common_path = _resolve_path(common_user_config_path, default=default_common_user_config_path(repo_root=repo_root))
             common_cfg = _read_json_object(common_path, label="common user config")
         elif not explicit_user_path:
+            common_enabled = True
+            common_auto_candidate = True
             common_path = default_common_user_config_path(repo_root=repo_root)
             if common_path.exists():
                 common_cfg = _read_json_object(common_path, label="common user config")
@@ -641,6 +652,18 @@ def build_layered_runtime_config(
     if common_path is not None:
         meta["common_user_config_path"] = str(common_path)
     meta["user_config_path"] = str(user_path)
+    meta["common_user_config_enabled"] = bool(common_enabled)
+    meta["common_user_config_auto_candidate"] = bool(common_auto_candidate)
+    cfg[GENERATED_KEY] = build_generated_metadata(
+        repo_root=repo_root,
+        market=normalized_market,
+        system_config_path=_resolve_path(system_config_path, default=default_system_config_path(repo_root=repo_root)),
+        user_config_path=user_path,
+        common_user_config_path=common_path,
+        common_user_config_loaded=common_cfg is not None,
+        common_user_config_enabled=common_enabled,
+        common_user_config_auto_candidate=common_auto_candidate,
+    )
     return cfg, meta
 
 

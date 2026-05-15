@@ -27,6 +27,12 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 ./om config build --market hk
 ```
 
+`config build` 会在生成的 `config.us.json` / `config.hk.json` 写入 `_generated`
+元信息，记录 system/common/user 三类源文件的路径和 SHA-256。之后只要
+`configs/system.json`、`configs/user.common.json`、`configs/user.us.json` 或
+`configs/user.hk.json` 有变化，就要重新 build 对应 market 的 runtime config。生产 tick
+入口会检查这个指纹，避免 cron 拿陈旧 runtime config 继续跑。
+
 不确定某个值来自哪里时，用 explain 查看覆盖链：
 
 ```bash
@@ -214,13 +220,15 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 
 | 工具 | 负责什么 | 不负责什么 |
 |---|---|---|
-| `config_validate` | 配置结构、字段语义、removed/legacy 字段、数值约束 | OpenD 是否在线、secrets 文件是否存在、runtime 输出是否健康 |
+| `./om config validate --market us|hk` | 配置结构、字段语义、removed/legacy 字段、数值约束、市场 schedule 时区契约、runtime config 生成指纹 | OpenD 是否在线、secrets 文件是否存在、runtime 输出是否健康 |
+| `config_validate` | 基础 runtime config 结构校验 | OpenD 是否在线、secrets 文件是否存在、生成指纹是否最新 |
 | `healthcheck` | runtime config 可读、data config/SQLite 存在性、OpenD readiness、option_positions bootstrap 状态 | 不负责替代主配置语义文档 |
 | `runtime_status` | 只读汇总现有 runtime / OpenClaw 输出文件 | 不校验配置语义，不检查 OpenD |
 | `openclaw_readiness` | 组合 `runtime_status` + `healthcheck` + 本地 openclaw 可用性 | 不替代 `config_validate` 的纯配置语义检查 |
 
 判断规则很简单：
 - 配置本身写得对不对，看 `config_validate`
+- runtime config 是否由最新 system/common/user 生成，看 `./om config validate --market us|hk`
 - 环境能不能跑起来，看 `healthcheck` / `openclaw_readiness`
 - 历史运行结果长什么样，看 `runtime_status`
 

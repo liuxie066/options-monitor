@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import fcntl
+import json
 import os
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
+
+from src.application.runtime_config_freshness import RuntimeConfigFreshnessError, ensure_runtime_config_freshness
 
 
 @dataclass(frozen=True)
@@ -75,6 +78,7 @@ def build_tick_cron_plan(
     no_send: bool = False,
     force: bool = False,
     debug: bool = False,
+    allow_stale_config: bool = False,
 ) -> TickCronPlan:
     market_key = _normalize_market(market)
     defaults = _MARKET_DEFAULTS[market_key]
@@ -100,6 +104,8 @@ def build_tick_cron_plan(
         tick_argv.append("--force")
     if debug:
         tick_argv.append("--debug")
+    if allow_stale_config:
+        tick_argv.append("--allow-stale-config")
 
     trigger_env = {
         "OM_TRIGGER_SOURCE": "cron",
@@ -131,6 +137,41 @@ def _write_line(stream: Any, text: str) -> None:
         pass
 
 
+def _resolve_config_for_preflight(plan: TickCronPlan, *, cwd: str | Path | None) -> Path:
+    config_path = Path(plan.config_path).expanduser()
+    if config_path.is_absolute():
+        return config_path.resolve()
+    base = Path(cwd).expanduser() if cwd is not None else Path.cwd()
+    return (base / config_path).resolve()
+
+
+def _preflight_runtime_config(
+    *,
+    plan: TickCronPlan,
+    cwd: str | Path | None,
+    allow_stale_config: bool,
+) -> dict[str, Any] | None:
+    if allow_stale_config:
+        return None
+    config_path = _resolve_config_for_preflight(plan, cwd=cwd)
+    try:
+        raw = json.loads(config_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise SystemExit(f"[CONFIG_ERROR] failed to read runtime config for preflight: {config_path}: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise SystemExit(f"[CONFIG_ERROR] runtime config must be a JSON object: {config_path}")
+    repo_root = Path(__file__).resolve().parents[2]
+    try:
+        return ensure_runtime_config_freshness(
+            raw,
+            repo_root=repo_root,
+            market=plan.market,
+            runtime_config_path=config_path,
+        )
+    except RuntimeConfigFreshnessError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
 def run_tick_cron(
     *,
     market: str,
@@ -144,9 +185,11 @@ def run_tick_cron(
     no_send: bool = False,
     force: bool = False,
     debug: bool = False,
+    allow_stale_config: bool = False,
     cwd: str | Path | None = None,
     dry_run_command: bool = False,
     run_cmd: Callable[..., subprocess.CompletedProcess[Any]] = subprocess.run,
+    preflight_config_fn: Callable[..., Any] | None = _preflight_runtime_config,
     stdout: Any = None,
     stderr: Any = None,
     environ: dict[str, str] | None = None,
@@ -163,6 +206,7 @@ def run_tick_cron(
         no_send=no_send,
         force=force,
         debug=debug,
+        allow_stale_config=allow_stale_config,
     )
     if dry_run_command:
         return {
@@ -187,6 +231,17 @@ def run_tick_cron(
         except BlockingIOError:
             _write_line(stdout, "SKIP_LOCKED")
             return 0
+
+        if preflight_config_fn is not None:
+            try:
+                preflight_config_fn(
+                    plan=plan,
+                    cwd=cwd,
+                    allow_stale_config=allow_stale_config,
+                )
+            except SystemExit as exc:
+                _write_line(stderr, str(exc))
+                return 1
 
         env = dict(environ if environ is not None else os.environ)
         env.update(plan.trigger_env)

@@ -65,6 +65,7 @@ from src.application.tick_run_context import (
 )
 from src.application.tick_run_workspace import prepare_tick_run_workspace
 from src.application.runtime_trigger_context import build_trigger_context
+from src.application.runtime_config_freshness import RuntimeConfigFreshnessError, ensure_runtime_config_freshness
 from src.application.tick_scheduler_context import (
     TickSchedulerRequest,
     build_tick_scheduler_context,
@@ -111,6 +112,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument('--force', action='store_true', help='Force running scan pipeline regardless of run window / run points (sending still respects --no-send and should_notify decisions).')
     ap.add_argument('--debug', action='store_true', help='Verbose logs to stdout (for manual debugging).')
     ap.add_argument('--opend-phone-verify-continue', action='store_true', help='Clear OpenD phone-verify pending pause and continue running.')
+    ap.add_argument('--allow-stale-config', action='store_true', help='Emergency override: skip generated runtime config freshness checks.')
     args = ap.parse_args(argv)
 
     set_debug(bool(getattr(args, 'debug', False)))
@@ -146,6 +148,19 @@ def main(argv: list[str] | None = None) -> int:
         config_path=cfg_path,
         market_config=str(getattr(args, 'market_config', 'auto') or 'auto'),
     )
+    allow_stale_config = bool(getattr(args, 'allow_stale_config', False))
+    freshness_info: dict[str, Any] | None = None
+    freshness_market = str(schedule_contract_info.get('market') or '').strip().lower()
+    if freshness_market and not allow_stale_config:
+        try:
+            freshness_info = ensure_runtime_config_freshness(
+                base_cfg,
+                repo_root=base,
+                market=freshness_market,
+                runtime_config_path=cfg_path,
+            )
+        except RuntimeConfigFreshnessError as exc:
+            raise SystemExit(str(exc)) from exc
     trigger_context = build_trigger_context()
     if args.accounts is None:
         args.accounts = accounts_from_config(base_cfg)
@@ -171,6 +186,8 @@ def main(argv: list[str] | None = None) -> int:
             'config_source_path': contract_info.get('resolved_path'),
             'config_canonical_path': contract_info.get('sibling_canonical_path'),
             'config_schedule_contract': schedule_contract_info,
+            'config_freshness': freshness_info,
+            'allow_stale_config': allow_stale_config,
             'trigger_source': trigger_context.get('source'),
             'trigger_job_id': trigger_context.get('job_id'),
             'outer_delivery_mode': trigger_context.get('delivery_mode'),
