@@ -770,7 +770,13 @@ def test_config_validate_runs_without_opend(monkeypatch, tmp_path: Path) -> None
     from src.application.tool_execution import execute_tool as run_tool
 
     cfg_path = tmp_path / "config.us.json"
-    cfg_path.write_text(json.dumps(_minimal_cfg(), ensure_ascii=False, indent=2), encoding="utf-8")
+    cfg = _minimal_cfg()
+    cfg["notifications"] = {
+        "provider": "openclaw",
+        "channel": "wechat_clawbot",
+        "target": "clawbot:test-room",
+    }
+    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
     out = run_tool("config_validate", {"config_path": str(cfg_path)})
 
@@ -909,7 +915,13 @@ def test_runtime_status_summarizes_openclaw_runtime_files(tmp_path: Path) -> Non
     from src.application.tool_execution import execute_tool as run_tool
 
     cfg_path = tmp_path / "config.us.json"
-    cfg_path.write_text(json.dumps(_minimal_cfg(), ensure_ascii=False, indent=2), encoding="utf-8")
+    cfg = _minimal_cfg()
+    cfg["notifications"] = {
+        "provider": "openclaw",
+        "channel": "wechat_clawbot",
+        "target": "clawbot:test-room",
+    }
+    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
     state_dir = tmp_path / "output" / "state"
     report_dir = tmp_path / "output" / "reports"
@@ -957,7 +969,27 @@ def test_runtime_status_summarizes_openclaw_runtime_files(tmp_path: Path) -> Non
     (run_dir / "state").mkdir(parents=True, exist_ok=True)
     (run_dir / "accounts" / "user1" / "state").mkdir(parents=True, exist_ok=True)
     (shared_state_dir / "last_run_dir.txt").write_text(str(run_dir), encoding="utf-8")
-    (run_dir / "state" / "tick_metrics.json").write_text(json.dumps({"notify_summary": {"sent": 1}}), encoding="utf-8")
+    (run_dir / "state" / "tick_metrics.json").write_text(
+        json.dumps(
+            {
+                "scheduler_decision": {
+                    "should_run_scan": True,
+                    "is_notify_window_open": True,
+                    "reason": "到达运行点 11:00：执行扫描并允许通知。",
+                },
+                "notify_summary": {
+                    "account_messages_count": 1,
+                    "send_attempted_count": 1,
+                    "send_confirmed_count": 1,
+                    "send_failed_count": 0,
+                },
+                "sent_accounts": ["user1"],
+                "reason": "sent",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
     (run_dir / "accounts" / "user1" / "symbols_notification.txt").write_text("run account notification\n", encoding="utf-8")
     (run_dir / "accounts" / "user1" / "state" / "required_data_prefetch_summary.json").write_text(
         json.dumps(
@@ -1018,7 +1050,10 @@ def test_runtime_status_summarizes_openclaw_runtime_files(tmp_path: Path) -> Non
     assert out["data"]["summary"]["latest_status"] == "ok"
     assert out["data"]["shared"]["notification"]["text"] == "shared notification\n"
     assert out["data"]["accounts"]["user1"]["notification"]["text"] == "account notification\n"
-    assert out["data"]["latest_run"]["state"]["tick_metrics"]["json"]["notify_summary"]["sent"] == 1
+    assert out["data"]["latest_run"]["state"]["tick_metrics"]["json"]["notify_summary"]["send_confirmed_count"] == 1
+    assert out["data"]["notification_diagnosis"]["status"] == "sent"
+    assert out["data"]["notification_diagnosis"]["scheduler_should_run_scan"] is True
+    assert out["data"]["notification_diagnosis"]["send_confirmed_count"] == 1
     assert out["data"]["latest_run"]["accounts"]["user1"]["notification"]["text"] == "run account notification\n"
     assert out["data"]["latest_run"]["accounts"]["user1"]["required_data_prefetch"]["exists"] is True
     assert out["data"]["latest_run"]["accounts"]["user1"]["expired_position_maintenance"]["json"]["receipt"]["status"] == "sent"
@@ -1061,6 +1096,10 @@ def test_runtime_status_loads_openclaw_profile_and_masks_external_paths(tmp_path
                     "accounts_root": str(accounts_root),
                     "runs_root": str(runs_root),
                 },
+                "trigger_source": "om_direct",
+                "trigger_job_id": "hk-direct-11",
+                "delivery": {"mode": "none"},
+                "timeoutSeconds": 700,
                 "max_run_age_minutes": 30,
             },
             ensure_ascii=False,
@@ -1071,7 +1110,13 @@ def test_runtime_status_loads_openclaw_profile_and_masks_external_paths(tmp_path
     out = run_tool("runtime_status", {"profile_path": str(profile_path)})
 
     assert out["ok"] is True
+    assert out["warnings"] == ["Outer delivery.mode is none; the task runner will not announce run output."]
     assert out["data"]["openclaw_profile"]["loaded"] is True
+    assert out["data"]["trigger_context"]["source"] == "om_direct"
+    assert out["data"]["trigger_context"]["job_id"] == "hk-direct-11"
+    assert out["data"]["trigger_context"]["delivery_mode"] == "none"
+    assert out["data"]["trigger_context"]["announce_expected"] is False
+    assert out["data"]["trigger_context"]["timeout_seconds"] == 700
     assert out["data"]["config"]["config_path"] == ".../config.us.json"
     assert out["data"]["paths"]["report_dir"] == ".../reports"
     assert out["data"]["account_summary"]["accounts"]["user1"]["last_status"] == "account_ok"

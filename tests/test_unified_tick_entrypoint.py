@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -52,6 +53,46 @@ def test_cli_run_tick_delegates_to_application_tick(
             "--force",
             "--debug",
         ]
+    ]
+
+
+def test_cli_run_tick_cron_dry_run_outputs_plan(capsys) -> None:
+    from src.interfaces.cli import main as cli_main
+
+    rc = cli_main.main(
+        [
+            "run",
+            "tick-cron",
+            "--market",
+            "hk",
+            "--accounts",
+            "lx",
+            "sy",
+            "--timeout",
+            "700",
+            "--dry-run-command",
+        ]
+    )
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    data = payload["data"]
+    assert data["market"] == "hk"
+    assert data["config_path"] == "config.hk.json"
+    assert data["lock_path"] == "/tmp/om-tick-hk.lock"
+    assert data["timeout_seconds"] == 700
+    assert data["trigger_env"]["OM_TRIGGER_JOB_ID"] == "om-tick-hk"
+    assert data["command"] == [
+        "./om",
+        "run",
+        "tick",
+        "--config",
+        "config.hk.json",
+        "--market-config",
+        "hk",
+        "--accounts",
+        "lx",
+        "sy",
     ]
 
 
@@ -243,6 +284,10 @@ def test_production_tick_entrypoints_enable_sibling_external_guard() -> None:
 
     assert "from src.application.multi_account_tick import run_tick" in cli_src
     assert "return int(run_tick(tick_argv))" in cli_src
+    assert 'run_sub.add_parser("tick-cron"' in cli_src
+    assert "run_tick_cron(" in cli_src
     assert "require_sibling_external=True" in multi_src
     assert "ensure_runtime_schedule_matches_market(" in multi_src
+    assert "build_trigger_context()" in multi_src
+    assert "'trigger_context': trigger_context" in multi_src
     assert "config_source_path" in multi_src

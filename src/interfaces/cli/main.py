@@ -20,6 +20,7 @@ from src.application.runtime_setup import init_runtime
 from src.application.scan_pipeline import run_scan
 from src.application.scan_scheduler import run_scheduler
 from src.application.strategy_replay import analyze_strategy_replay, read_strategy_replay_file
+from src.application.tick_cron import run_tick_cron
 from src.application.version_check import check_version_update
 from src.application.cash_headroom_query import query_sell_put_cash
 
@@ -164,6 +165,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     tick.add_argument("--force", action="store_true")
     tick.add_argument("--debug", action="store_true")
     tick.add_argument("--opend-phone-verify-continue", action="store_true")
+    tick_cron = run_sub.add_parser("tick-cron", help="cron-safe tick wrapper with lock, timeout, and trigger diagnostics")
+    tick_cron.add_argument("--market", required=True, choices=("us", "hk"))
+    tick_cron.add_argument("--accounts", nargs="+", default=None)
+    tick_cron.add_argument("--timeout", dest="timeout_seconds", type=int, default=600)
+    tick_cron.add_argument("--config", default=None)
+    tick_cron.add_argument("--lock-path", default=None)
+    tick_cron.add_argument("--trigger-job-id", default=None)
+    tick_cron.add_argument("--trigger-job-name", default=None)
+    tick_cron.add_argument("--trigger-schedule", default=None)
+    tick_cron.add_argument("--dry-run-command", action="store_true")
+    tick_cron.add_argument("--no-send", action="store_true")
+    tick_cron.add_argument("--force", action="store_true")
+    tick_cron.add_argument("--debug", action="store_true")
 
     return parser.parse_args(argv)
 
@@ -363,6 +377,25 @@ def main(argv: list[str] | None = None) -> int:
             if args.opend_phone_verify_continue:
                 tick_argv.append("--opend-phone-verify-continue")
             return int(run_tick(tick_argv))
+
+        if args.command == "run" and args.run_command == "tick-cron":
+            out = run_tick_cron(
+                market=args.market,
+                accounts=args.accounts,
+                timeout_seconds=args.timeout_seconds,
+                config_path=args.config,
+                lock_path=args.lock_path,
+                trigger_job_id=args.trigger_job_id,
+                trigger_job_name=args.trigger_job_name,
+                trigger_schedule=args.trigger_schedule,
+                dry_run_command=bool(args.dry_run_command),
+                no_send=bool(args.no_send),
+                force=bool(args.force),
+                debug=bool(args.debug),
+            )
+            if isinstance(out, dict):
+                return _print(build_response(tool_name="run.tick-cron", ok=True, data=out))
+            return int(out)
     except AgentToolError as err:
         return _print(build_response(tool_name="om", ok=False, error=build_error_payload(err)))
 

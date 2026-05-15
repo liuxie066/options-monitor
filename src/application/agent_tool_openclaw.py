@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from src.application.agent_tool_contracts import AgentToolError
+from src.application.runtime_trigger_context import build_trigger_context
 from domain.domain.multi_tick import (
     OPENCLAW_NOTIFICATION_PROVIDER,
     is_supported_notification_provider,
@@ -18,6 +19,18 @@ from src.application.trade_account_mapping import resolve_trade_intake_config
 
 
 PROFILE_PATH_KEYS = ("report_dir", "state_dir", "shared_state_dir", "accounts_root", "runs_root")
+PROFILE_TRIGGER_KEYS = (
+    "trigger_source",
+    "trigger_job_id",
+    "trigger_job_name",
+    "trigger_schedule",
+    "trigger_timezone",
+    "delivery",
+    "delivery_mode",
+    "deliveryMode",
+    "timeout_seconds",
+    "timeoutSeconds",
+)
 DEFAULT_PROFILE_NAMES = ("openclaw.profile.json", ".openclaw-profile.json")
 
 
@@ -190,6 +203,9 @@ def _merge_openclaw_profile(payload: dict[str, Any], *, base: Path) -> tuple[dic
     paths_raw = profile.get("paths")
     paths: dict[str, Any] = paths_raw if isinstance(paths_raw, dict) else {}
     for key in ("config_key", "config_path", "accounts", "max_notification_chars", "max_run_age_minutes"):
+        if key not in merged and key in profile:
+            merged[key] = profile[key]
+    for key in PROFILE_TRIGGER_KEYS:
         if key not in merged and key in profile:
             merged[key] = profile[key]
     for key in PROFILE_PATH_KEYS:
@@ -411,6 +427,116 @@ def _latest_run_prefetch_summary(latest_run_payload: dict[str, Any] | None) -> d
     }
 
 
+def _json_payload(file_info: Any) -> dict[str, Any]:
+    if not isinstance(file_info, dict):
+        return {}
+    payload = file_info.get("json")
+    return payload if isinstance(payload, dict) else {}
+
+
+def _resolve_notification_route_summary(cfg: dict[str, Any]) -> dict[str, Any]:
+    notifications = cfg.get("notifications") if isinstance(cfg.get("notifications"), dict) else {}
+    if not notifications:
+        return {"configured": False, "target_configured": False}
+    try:
+        route = resolve_notification_route_from_config(config=cfg)
+    except Exception as exc:
+        return {
+            "configured": False,
+            "target_configured": bool(str(notifications.get("target") or "").strip()),
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    provider = str(route.get("provider") or "")
+    channel = str(route.get("channel") or "")
+    target = str(notifications.get("target") or "").strip()
+    return {
+        "configured": bool(provider and channel and target),
+        "provider": provider or None,
+        "channel": channel or None,
+        "target_configured": bool(target),
+    }
+
+
+def _notification_diagnosis(
+    *,
+    cfg: dict[str, Any],
+    shared_last_run: dict[str, Any],
+    latest_run_payload: dict[str, Any] | None,
+    trigger_context: dict[str, Any],
+) -> dict[str, Any]:
+    latest_state = latest_run_payload.get("state") if isinstance(latest_run_payload, dict) else {}
+    state: dict[str, Any] = latest_state if isinstance(latest_state, dict) else {}
+    tick_metrics = _json_payload(state.get("tick_metrics"))
+    shared_payload = _json_payload(shared_last_run)
+    scheduler_raw = tick_metrics.get("scheduler_decision")
+    scheduler: dict[str, Any] = scheduler_raw if isinstance(scheduler_raw, dict) else {}
+    notify_summary_raw = tick_metrics.get("notify_summary")
+    notify_summary: dict[str, Any] = notify_summary_raw if isinstance(notify_summary_raw, dict) else {}
+    route_summary = _resolve_notification_route_summary(cfg)
+
+    no_send = bool(tick_metrics.get("no_send") or shared_payload.get("no_send"))
+    account_messages_count = int(notify_summary.get("account_messages_count") or tick_metrics.get("account_messages_count") or 0)
+    send_attempted_count = int(notify_summary.get("send_attempted_count") or tick_metrics.get("send_attempted_count") or 0)
+    send_confirmed_count = int(notify_summary.get("send_confirmed_count") or tick_metrics.get("send_confirmed_count") or 0)
+    send_failed_count = int(notify_summary.get("send_failed_count") or tick_metrics.get("send_failed_count") or 0)
+    scheduler_should_run = scheduler.get("should_run_scan")
+    scheduler_should_notify = scheduler.get("is_notify_window_open")
+    if scheduler_should_notify is None:
+        scheduler_should_notify = scheduler.get("should_notify")
+
+    status = "unknown"
+    reason = "insufficient runtime output"
+    if str(trigger_context.get("delivery_mode") or "").lower() == "none":
+        status = "outer_delivery_disabled"
+        reason = "outer delivery.mode is none; task output will not be announced by the runner"
+    elif scheduler_should_run is False:
+        status = "scheduler_skipped"
+        reason = str(scheduler.get("reason") or "scheduler decided not to run")
+    elif no_send:
+        status = "no_send"
+        reason = "--no-send suppressed repository notification delivery"
+    elif not bool(route_summary.get("configured")):
+        status = "notification_route_missing"
+        reason = "notifications route is missing or incomplete"
+    elif account_messages_count <= 0 and str(tick_metrics.get("reason") or "") == "no_account_notification":
+        status = "no_notification_content"
+        reason = "scan produced no account notification content"
+    elif send_confirmed_count > 0 and send_failed_count > 0:
+        status = "sent_partial"
+        reason = "some account notifications were confirmed and some failed"
+    elif send_confirmed_count > 0:
+        status = "sent"
+        reason = "repository notification delivery was confirmed for at least one account"
+    elif send_attempted_count > 0:
+        status = "send_failed_or_unconfirmed"
+        reason = "repository attempted notification delivery but no account send was confirmed"
+    elif tick_metrics:
+        status = str(tick_metrics.get("reason") or "not_sent")
+        reason = "latest tick metrics did not record a confirmed send"
+
+    return {
+        "status": status,
+        "reason": reason,
+        "trigger_observed": bool(trigger_context.get("observed")),
+        "trigger_source": trigger_context.get("source"),
+        "trigger_job_id": trigger_context.get("job_id"),
+        "timeout_seconds": trigger_context.get("timeout_seconds"),
+        "outer_delivery_mode": trigger_context.get("delivery_mode"),
+        "outer_announce_expected": trigger_context.get("announce_expected"),
+        "scheduler_should_run_scan": scheduler_should_run,
+        "scheduler_should_notify": scheduler_should_notify,
+        "scheduler_reason": scheduler.get("reason"),
+        "no_send": no_send,
+        "notification_route": route_summary,
+        "account_messages_count": account_messages_count,
+        "send_attempted_count": send_attempted_count,
+        "send_confirmed_count": send_confirmed_count,
+        "send_failed_count": send_failed_count,
+        "sent_accounts": tick_metrics.get("sent_accounts") or shared_payload.get("sent_accounts") or [],
+        "final_reason": tick_metrics.get("reason") or shared_payload.get("reason") or shared_payload.get("status"),
+    }
+
+
 def _latest_run_dir(base: Path, *, pointer_path: Path, runs_root: Path) -> Path | None:
     raw_pointer = _read_text(pointer_path)
     if raw_pointer:
@@ -488,6 +614,7 @@ def runtime_status_tool(
     )
     max_notification_chars = int(payload.get("max_notification_chars") or 4000)
     max_run_age_minutes = int(payload.get("max_run_age_minutes") or 60)
+    trigger_context = build_trigger_context(payload, environ={})
 
     shared_last_run = _json_file_info(
         shared_state_dir / "last_run.json",
@@ -626,6 +753,14 @@ def runtime_status_tool(
         warnings.append("No last_run.json found under output_shared/state or output/state.")
     if not notification.get("exists") and not any(item["notification"].get("exists") for item in account_status.values()):
         warnings.append("No symbols_notification.txt found under output/reports or output_accounts/<account>/reports.")
+    if str(trigger_context.get("delivery_mode") or "").lower() == "none":
+        warnings.append("Outer delivery.mode is none; the task runner will not announce run output.")
+    notification_diagnosis = _notification_diagnosis(
+        cfg=cfg,
+        shared_last_run=shared_last_run,
+        latest_run_payload=latest_run_payload,
+        trigger_context=trigger_context,
+    )
 
     latest_status = None
     for candidate in (shared_last_run, legacy_last_run):
@@ -658,6 +793,8 @@ def runtime_status_tool(
         "accounts": account_status,
         "latest_run": latest_run_payload,
         "required_data_prefetch": prefetch_summary,
+        "trigger_context": trigger_context,
+        "notification_diagnosis": notification_diagnosis,
         "account_summary": {},
         "freshness": {},
         "openclaw_profile": profile_meta or {"loaded": False},

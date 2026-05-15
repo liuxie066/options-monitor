@@ -97,8 +97,18 @@
 ```
 
 这是一条统一链路，单账户只是传一个账户的特例。旧脚本
-`scripts/send_if_needed.py` 和 `scripts/send_if_needed_multi.py` 已移除；升级后的定时任务应直接调用
-`./om run tick`。
+`scripts/send_if_needed.py` 和 `scripts/send_if_needed_multi.py` 已移除。人工执行可直接调用
+`./om run tick`；生产 cron 建议使用带锁和 timeout 诊断的包装入口：
+
+```bash
+./om run tick-cron --market hk --accounts lx sy --timeout 600
+./om run tick-cron --market us --accounts lx sy --timeout 600
+```
+
+`tick-cron` 会按 market 推导 canonical config、lock path 和 `OM_TRIGGER_*`
+诊断环境变量；`--dry-run-command` 可只查看将执行的 tick 命令。返回码语义：
+`SKIP_LOCKED` 返回 `0`，表示上一轮还在跑；真实执行失败返回原始非零码并输出
+`EXEC_FAILED_RC_<rc>`；超时返回 `124` 并输出 `EXEC_TIMEOUT_RC_124`。
 
 ---
 
@@ -401,6 +411,9 @@ OM_AGENT_ENABLE_WRITE_TOOLS=true ./om-agent run --tool version_update --input-js
 - 不发送通知
 - 可读取 `openclaw.profile.json` / `.openclaw-profile.json` 或 payload 里的
   `profile_path` 作为 OpenClaw 路径、账户和 freshness 阈值
+- 可读取可选的外层任务上下文，例如 `trigger_source`、`trigger_job_id`、
+  `delivery.mode` / `delivery_mode`、`timeoutSeconds`，用于区分“代码没有发送”
+  和“外层任务没有 announce”
 
 示例：
 
