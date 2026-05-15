@@ -358,6 +358,8 @@ def test_run_one_account_notifies_auto_close_even_when_scan_gate_blocks(monkeypa
     assert maintenance_states[-1]["receipt"]["reason"] == "skipped_no_route"
     maintenance_audits = [evt for evt in env["audit_events"] if evt["action"] == "expired_position_maintenance"]
     assert maintenance_audits[-1]["extra"]["receipt_status"] == "skipped"
+    receipt_audits = [evt for evt in env["audit_events"] if evt["action"] == "auto_close_receipt_skipped"]
+    assert receipt_audits[-1]["tool_name"] == "expired_position_maintenance_receipt"
 
 
 def test_run_one_account_notifies_auto_close_error_when_maintenance_raises(monkeypatch, tmp_path: Path) -> None:

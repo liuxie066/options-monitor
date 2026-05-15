@@ -122,6 +122,24 @@ def _trade_intake_summary(state_json: dict[str, Any], status_json: dict[str, Any
     }
 
 
+def _auto_close_receipt_summary(maintenance_json: dict[str, Any] | Any) -> dict[str, Any] | None:
+    if not isinstance(maintenance_json, dict):
+        return None
+    receipt = maintenance_json.get("receipt")
+    if not isinstance(receipt, dict):
+        return None
+    return {
+        "status": receipt.get("status"),
+        "reason": receipt.get("reason"),
+        "delivery_confirmed": bool(receipt.get("delivery_confirmed")),
+        "message_id": receipt.get("message_id"),
+        "error_code": receipt.get("error_code"),
+        "attempt_count": receipt.get("attempt_count"),
+        "receipt_key": receipt.get("receipt_key"),
+        "updated_at": receipt.get("updated_at"),
+    }
+
+
 def _text_file_info(path: Path, *, base: Path, max_chars: int) -> dict[str, Any]:
     out = _file_info(path, base=base)
     if not out.get("exists") or not out.get("is_file", False):
@@ -615,17 +633,19 @@ def _run_payload(
     run_accounts: dict[str, Any] = {}
     for account in accounts:
         run_account_root = run_dir / "accounts" / account
+        expired_position_maintenance = _json_file_info(
+            run_account_root / "state" / "expired_position_maintenance.json",
+            base=base,
+            read_json_object_or_empty=read_json_object_or_empty,
+        )
         run_accounts[account] = {
             "last_run": _json_file_info(
                 run_account_root / "state" / "last_run.json",
                 base=base,
                 read_json_object_or_empty=read_json_object_or_empty,
             ),
-            "expired_position_maintenance": _json_file_info(
-                run_account_root / "state" / "expired_position_maintenance.json",
-                base=base,
-                read_json_object_or_empty=read_json_object_or_empty,
-            ),
+            "expired_position_maintenance": expired_position_maintenance,
+            "auto_close_receipt": _auto_close_receipt_summary(expired_position_maintenance.get("json")),
             "notification": _text_file_info(
                 run_account_root / "symbols_notification.txt",
                 base=base,

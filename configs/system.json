@@ -67,7 +67,8 @@
           "notify_applied": true,
           "notify_failed": true,
           "notify_noop": false,
-          "notify_dry_run": false
+          "notify_dry_run": false,
+          "retry_unconfirmed": true
         }
       },
       "sync_to_feishu": {

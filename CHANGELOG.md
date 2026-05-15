@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 1.2.53 - 2026-05-15
+
+### Added
+- Added idempotent auto-close receipt state keyed by account, broker, business date, and closed position records so daily maintenance cron retries do not resend already confirmed receipts.
+- Added `retry_unconfirmed` receipt policy for retrying prior unconfirmed auto-close receipt deliveries.
+- Added `runtime_status.latest_run.accounts.<account>.auto_close_receipt` summary fields for receipt diagnosis.
+
+### Changed
+- Emitted explicit auto-close receipt audit events with status, attempt count, and receipt key metadata.
+- Documented daily maintenance cron handoff and auto-close receipt dedupe behavior.
+
+### Tests
+- Added regression coverage for confirmed duplicate skips, unconfirmed receipt retries, receipt state persistence, receipt audit events, and runtime-status receipt summaries.
+- Re-ran focused receipt/account-run/runtime-status tests, changed-file type checking, compile checks, config dry-runs, and release metadata validation.
+
 ## 1.2.52 - 2026-05-15
 
 ### Added

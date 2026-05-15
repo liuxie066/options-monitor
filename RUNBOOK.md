@@ -59,6 +59,8 @@ Cron Job:
 - id: `9cba60f7-407b-4427-9120-0a176b818de9`
 - schedule: `*/10 9-16 * * 1-5` @ `America/New_York`
 
+如果单独设置“过期自动平仓维护”cron，例如每天 `00:10` 唤醒一次，cron 仍只负责触发统一 tick 入口。过期自动平仓在代码内执行并写入 `expired_position_maintenance.json`；回执按账户、券商、业务日和平仓记录生成 `receipt_key`，同一天已确认发送的回执不会因为人工重跑或 cron 重试而重复发送，未确认回执会按 `option_positions.auto_close.receipt.retry_unconfirmed` 重试。
+
 常用命令：
 
 ```bash
