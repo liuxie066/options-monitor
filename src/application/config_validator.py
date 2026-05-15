@@ -17,6 +17,7 @@ from src.application.account_config import ACCOUNT_TYPES, account_settings_from_
 from src.application.config_loader import resolve_templates_config, resolve_watchlist_config, set_watchlist_config
 from src.application.trade_account_mapping import resolve_trade_intake_config
 from src.application.position_maintenance_receipt import resolve_auto_close_receipt_config
+from src.application.option_positions_feishu_sync_receipt import resolve_option_positions_feishu_sync_receipt_config
 from src.application.opend_fetch_config import OPEND_RATE_LIMIT_ENDPOINT_KEYS
 from src.application.yield_enhancement_config import (
     YIELD_ENHANCEMENT_FUNDING_MODES,
@@ -597,6 +598,11 @@ def validate_config(cfg: dict):
         if isinstance(sync_to_feishu, dict) and 'enabled' in sync_to_feishu and sync_to_feishu.get('enabled') is not None:
             if not isinstance(sync_to_feishu.get('enabled'), bool):
                 die('option_positions.sync_to_feishu.enabled must be a boolean')
+        if isinstance(sync_to_feishu, dict):
+            try:
+                resolve_option_positions_feishu_sync_receipt_config(sync_to_feishu.get('receipt'))
+            except ValueError as exc:
+                die(str(exc))
         auto_close = option_positions.get('auto_close') or {}
         if auto_close and not isinstance(auto_close, dict):
             die('option_positions.auto_close must be an object')

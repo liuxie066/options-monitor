@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 1.2.54 - 2026-05-15
+
+### Added
+- Added task-level receipt delivery for `option-positions sync-feishu` with confirmed duplicate suppression and unconfirmed receipt retry support.
+- Added persisted `option_positions_feishu_sync` last-run and receipt state for Feishu mirror synchronization diagnostics.
+- Added `runtime_status.option_positions_feishu_sync` so operators can inspect the latest sync result and receipt status without reading cron logs.
+- Added `--no-send` to `option-positions sync-feishu` for silent manual or scheduled runs.
+
+### Changed
+- Documented Feishu mirror sync receipt behavior, daily cron handoff, `receipt_key` dedupe, and troubleshooting surfaces.
+- Extended `option_positions.sync_to_feishu.receipt` defaults and config validation.
+
+### Tests
+- Added regression coverage for Feishu sync receipt decisions, message rendering, duplicate suppression, retry behavior, persisted receipt state, runtime-status summaries, and config validation.
+- Re-ran full pytest, focused type checking, compile checks, config dry-runs, diff checks, and release metadata validation.
+
 ## 1.2.53 - 2026-05-15
 
 ### Added

@@ -962,6 +962,28 @@ def test_runtime_status_summarizes_openclaw_runtime_files(tmp_path: Path) -> Non
         encoding="utf-8",
     )
     (state_dir / "auto_trade_intake_audit.jsonl").write_text('{"phase":"receipt_sent"}\n', encoding="utf-8")
+    (shared_state_dir / "option_positions_feishu_sync.json").write_text(
+        json.dumps(
+            {
+                "status": "applied",
+                "summary": {"scanned": 1, "create": 1, "update": 0, "delete": 0, "skip": 0, "conflict": 0, "failed": 0},
+                "receipt": {
+                    "status": "sent",
+                    "reason": "applied",
+                    "delivery_confirmed": True,
+                    "message_id": "msg-sync-1",
+                    "attempt_count": 1,
+                    "receipt_key": "sync-receipt-key-1",
+                    "updated_at": "2026-05-15T16:11:00+00:00",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (shared_state_dir / "option_positions_feishu_sync_receipts.json").write_text(
+        json.dumps({"receipts": {"sync-receipt-key-1": {"receipt": {"status": "sent"}}}}),
+        encoding="utf-8",
+    )
     (report_dir / "symbols_notification.txt").write_text("shared notification\n", encoding="utf-8")
     (accounts_root / "user1" / "state" / "last_run.json").write_text(json.dumps({"status": "account_ok"}), encoding="utf-8")
     (accounts_root / "user1" / "reports" / "symbols_notification.txt").write_text("account notification\n", encoding="utf-8")
@@ -1077,6 +1099,10 @@ def test_runtime_status_summarizes_openclaw_runtime_files(tmp_path: Path) -> Non
     assert out["data"]["trade_intake"]["summary"]["processed_count"] == 1
     assert out["data"]["trade_intake"]["summary"]["receipt_confirmed_count"] == 1
     assert out["data"]["trade_intake"]["audit"]["exists"] is True
+    assert out["data"]["option_positions_feishu_sync"]["last_run"]["json"]["status"] == "applied"
+    assert out["data"]["option_positions_feishu_sync"]["receipt"]["receipt_key"] == "sync-receipt-key-1"
+    assert out["data"]["summary"]["option_positions_feishu_sync_status"] == "applied"
+    assert out["data"]["summary"]["option_positions_feishu_sync_receipt_status"] == "sent"
 
 
 def test_runtime_status_can_inspect_scanned_run_after_skipped_latest(tmp_path: Path) -> None:

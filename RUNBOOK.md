@@ -46,7 +46,7 @@ cd /home/node/.openclaw/workspace/options-monitor-prod
 | `./om run tick --config ... --no-send` | 是 | 可能 | 否 | 会写本地运行产物，但禁发通知 |
 | `./om run tick --config ...` | 是 | 可能 | 是 | 正式运行入口；过期自动平仓写入后默认发送回执 |
 | `python3 -m src.application.auto_trade_intake --mode apply` | 是 | 否 | 是 | 会写本地 option_positions / intake state/status，并默认发送入账回执 |
-| `./om option-positions sync-feishu --apply` | 是 | 是 | 否 | 先跑 `--dry-run` |
+| `./om option-positions sync-feishu --apply` | 是 | 是 | 是 | 先跑 `--dry-run`；需要静默时加 `--no-send` |
 
 判断原则：
 - 只想确认配置或状态时，优先 `config_validate` / `healthcheck` / `runtime_status`
@@ -60,6 +60,8 @@ Cron Job:
 - schedule: `*/10 9-16 * * 1-5` @ `America/New_York`
 
 如果单独设置“过期自动平仓维护”cron，例如每天 `00:10` 唤醒一次，cron 仍只负责触发统一 tick 入口。过期自动平仓在代码内执行并写入 `expired_position_maintenance.json`；回执按账户、券商、业务日和平仓记录生成 `receipt_key`，同一天已确认发送的回执不会因为人工重跑或 cron 重试而重复发送，未确认回执会按 `option_positions.auto_close.receipt.retry_unconfirmed` 重试。
+
+如果单独设置“Option positions Feishu 镜像同步”cron，例如每天 `00:10` 运行 `./om option-positions sync-feishu --config config.us.json --apply`，cron 仍只负责触发。代码会写入 `option_positions_feishu_sync.json` 和回执状态；回执按业务日、同步范围、结果摘要和失败/冲突记录生成 `receipt_key`，已确认回执不重复发，未确认回执按 `option_positions.sync_to_feishu.receipt.retry_unconfirmed` 重试。
 
 常用命令：
 
