@@ -5,6 +5,7 @@ import hashlib
 import json
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -27,6 +28,11 @@ from src.application.option_positions_service import (
 from src.application.option_positions_sync_config import (
     apply_option_positions_runtime_config,
     effective_option_positions_sync_to_feishu_enabled,
+)
+from src.application.option_positions_feishu_sync_receipt import (
+    persist_option_positions_feishu_sync_last_run,
+    safe_send_option_positions_feishu_sync_receipt,
+    skipped_option_positions_feishu_sync_receipt,
 )
 from src.application.option_positions_facade import (
     canonicalize_option_position_fields,
@@ -357,6 +363,66 @@ def summarize_result(action_rows: list[dict[str, Any]]) -> dict[str, int]:
     return summary
 
 
+def build_sync_run_result(
+    *,
+    mode: str,
+    dry_run: bool,
+    data_config: Path,
+    runtime_config_path: Path | None,
+    filters: dict[str, Any],
+    action_rows: list[dict[str, Any]],
+    table_ref_hash: str | None,
+    started_at: str,
+    finished_at: str,
+    error: BaseException | None = None,
+) -> dict[str, Any]:
+    summary = summarize_result(action_rows)
+    if error is not None and summary.get("failed", 0) <= 0:
+        summary["failed"] = 1
+    status = _sync_status_from_summary(summary, error=error)
+    result: dict[str, Any] = {
+        "schema_kind": "option_positions_feishu_sync_run",
+        "schema_version": "1.0",
+        "mode": str(mode),
+        "status": status,
+        "dry_run": bool(dry_run),
+        "data_config_path": str(Path(data_config).resolve()),
+        "runtime_config_path": str(runtime_config_path.resolve()) if runtime_config_path is not None else None,
+        "table_ref_hash": table_ref_hash,
+        "filters": dict(filters),
+        "summary": summary,
+        "rows": [dict(row) for row in action_rows],
+        "started_at": started_at,
+        "finished_at": finished_at,
+    }
+    if error is not None:
+        result["error"] = {"type": type(error).__name__, "message": str(error)}
+    return result
+
+
+def finalize_sync_run_result(
+    *,
+    state_base: Path,
+    runtime_config: dict[str, Any] | None,
+    dry_run: bool,
+    no_send: bool,
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    if no_send:
+        receipt = skipped_option_positions_feishu_sync_receipt(result=result, reason="skipped_no_send")
+    else:
+        receipt = safe_send_option_positions_feishu_sync_receipt(
+            base=state_base,
+            config=runtime_config,
+            dry_run=dry_run,
+            result=result,
+        )
+    result_with_receipt = dict(result)
+    result_with_receipt["receipt"] = receipt
+    persist_option_positions_feishu_sync_last_run(base=state_base, result=result_with_receipt)
+    return result_with_receipt
+
+
 def _with_table_token(table_ref: Any, fn: Any) -> Any:
     app_id = str(table_ref.app_id)
     app_secret = str(table_ref.app_secret)
@@ -601,6 +667,67 @@ def sync_single_option_position_record(*, repo: Any, data_config: Path, record_i
     return rows[0]
 
 
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _sync_status_from_summary(summary: dict[str, Any], *, error: BaseException | None) -> str:
+    if error is not None:
+        return "failed"
+    failed = int(summary.get("failed") or 0)
+    conflict = int(summary.get("conflict") or 0)
+    changed = int(summary.get("create") or 0) + int(summary.get("update") or 0) + int(summary.get("delete") or 0)
+    skipped = int(summary.get("skip") or 0)
+    if failed > 0:
+        return "partial_failed" if changed > 0 or conflict > 0 or skipped > 0 else "failed"
+    if conflict > 0:
+        return "partial_conflict" if changed > 0 or skipped > 0 else "conflict"
+    if changed > 0:
+        return "applied"
+    return "noop"
+
+
+def _table_ref_hash(data_config: Path) -> str | None:
+    try:
+        table_ref = load_table_ref(data_config)
+    except Exception:
+        return None
+    raw = json.dumps(
+        {
+            "app_token": getattr(table_ref, "app_token", None),
+            "table_id": getattr(table_ref, "table_id", None),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _receipt_summary(receipt: Any) -> dict[str, Any] | None:
+    if not isinstance(receipt, dict):
+        return None
+    return {
+        "status": receipt.get("status"),
+        "reason": receipt.get("reason"),
+        "delivery_confirmed": bool(receipt.get("delivery_confirmed")),
+        "message_id": receipt.get("message_id"),
+        "error_code": receipt.get("error_code"),
+        "attempt_count": receipt.get("attempt_count"),
+        "receipt_key": receipt.get("receipt_key"),
+    }
+
+
+def _filters_from_args(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "only_record_id": args.only_record_id,
+        "only_open": bool(args.only_open),
+        "since_updated_ms": args.since_updated_ms,
+        "limit": args.limit,
+        "prune_remote_missing_local": bool(args.prune_remote_missing_local),
+    }
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Sync local option_positions SQLite lots to Feishu bitable")
     parser.add_argument("--config", default=None, help="runtime config path; when provided, portfolio.data_config and runtime sync switch are used")
@@ -616,6 +743,7 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="delete remote rows whose local_record_id no longer exists locally; disabled by default",
     )
+    parser.add_argument("--no-send", action="store_true", help="do not send sync receipt notifications")
     parser.add_argument("--verbose", action="store_true", help="print payload details")
     args = parser.parse_args(argv)
 
@@ -627,11 +755,13 @@ def main(argv: list[str] | None = None) -> None:
 
     base = Path(__file__).resolve().parents[2]
     runtime_config: dict[str, Any] | None = None
+    runtime_config_path: Path | None = None
     data_config_ref = args.data_config
     if args.config:
         cfg_path = Path(args.config)
         if not cfg_path.is_absolute():
             cfg_path = (base / cfg_path).resolve()
+        runtime_config_path = cfg_path
         runtime_config = load_config(base=base, config_path=cfg_path, is_scheduled=False, log=lambda msg: print(msg, file=sys.stderr))
         portfolio_cfg = runtime_config.get("portfolio") if isinstance(runtime_config.get("portfolio"), dict) else {}
         if data_config_ref is None or not str(data_config_ref).strip():
@@ -641,32 +771,67 @@ def main(argv: list[str] | None = None) -> None:
     if runtime_config is not None:
         apply_option_positions_runtime_config(repo, runtime_config)
     state_base = data_config.resolve().parent
-    action_rows = sync_option_positions(
-        repo=repo,
-        data_config=data_config,
-        base=state_base,
-        apply_mode=apply_mode,
-        only_record_id=args.only_record_id,
-        only_open=bool(args.only_open),
-        since_updated_ms=args.since_updated_ms,
-        limit=args.limit,
-        prune_remote_missing_local=bool(args.prune_remote_missing_local),
-        runtime_config=runtime_config,
-    )
+    sync_state_base = base if runtime_config is not None else state_base
+    filters = _filters_from_args(args)
+    table_hash = _table_ref_hash(data_config)
+    started_at = _utc_now()
+    action_rows: list[dict[str, Any]] = []
+    try:
+        action_rows = sync_option_positions(
+            repo=repo,
+            data_config=data_config,
+            base=state_base,
+            apply_mode=apply_mode,
+            only_record_id=args.only_record_id,
+            only_open=bool(args.only_open),
+            since_updated_ms=args.since_updated_ms,
+            limit=args.limit,
+            prune_remote_missing_local=bool(args.prune_remote_missing_local),
+            runtime_config=runtime_config,
+        )
+    except Exception as exc:
+        result = build_sync_run_result(
+            mode="apply" if apply_mode else "dry_run",
+            dry_run=dry_run,
+            data_config=data_config,
+            runtime_config_path=runtime_config_path,
+            filters=filters,
+            action_rows=action_rows,
+            table_ref_hash=table_hash,
+            started_at=started_at,
+            finished_at=_utc_now(),
+            error=exc,
+        )
+        result = finalize_sync_run_result(
+            state_base=sync_state_base,
+            runtime_config=runtime_config,
+            dry_run=dry_run,
+            no_send=bool(args.no_send),
+            result=result,
+        )
+        failed_summary = dict(result.get("summary") or {})
+        failed_summary["mode_apply"] = int(apply_mode)
+        failed_summary["mode_dry_run"] = int(dry_run)
+        summary_payload = {"summary": failed_summary, "receipt": _receipt_summary(result.get("receipt"))}
+        print(json.dumps(summary_payload, ensure_ascii=False, sort_keys=True))
+        raise
 
-    table_ref = load_table_ref(data_config)
-    schema_fields = _with_table_token(
-        table_ref,
-        lambda token: bitable_fields(token, table_ref.app_token, table_ref.table_id),
-    )
-    local_records = load_canonical_option_position_records(repo, base=state_base)
-    candidates = select_candidates(
-        local_records,
-        only_record_id=args.only_record_id,
-        only_open=bool(args.only_open),
-        since_updated_ms=args.since_updated_ms,
-        limit=args.limit,
-    )
+    schema_fields: list[dict[str, Any]] = []
+    candidates: list[SyncCandidate] = []
+    if args.verbose:
+        table_ref = load_table_ref(data_config)
+        schema_fields = _with_table_token(
+            table_ref,
+            lambda token: bitable_fields(token, table_ref.app_token, table_ref.table_id),
+        )
+        local_records = load_canonical_option_position_records(repo, base=state_base)
+        candidates = select_candidates(
+            local_records,
+            only_record_id=args.only_record_id,
+            only_open=bool(args.only_open),
+            since_updated_ms=args.since_updated_ms,
+            limit=args.limit,
+        )
     for row in action_rows:
         printable = dict(row)
         if args.verbose:
@@ -676,10 +841,28 @@ def main(argv: list[str] | None = None) -> None:
                 printable["payload"] = payload
         print(json.dumps(printable, ensure_ascii=False, sort_keys=True))
 
-    summary = summarize_result(action_rows)
+    result = build_sync_run_result(
+        mode="apply" if apply_mode else "dry_run",
+        dry_run=dry_run,
+        data_config=data_config,
+        runtime_config_path=runtime_config_path,
+        filters=filters,
+        action_rows=action_rows,
+        table_ref_hash=table_hash,
+        started_at=started_at,
+        finished_at=_utc_now(),
+    )
+    result = finalize_sync_run_result(
+        state_base=sync_state_base,
+        runtime_config=runtime_config,
+        dry_run=dry_run,
+        no_send=bool(args.no_send),
+        result=result,
+    )
+    summary = dict(result.get("summary") or {})
     summary["mode_apply"] = int(apply_mode)
     summary["mode_dry_run"] = int(dry_run)
-    print(json.dumps({"summary": summary}, ensure_ascii=False, sort_keys=True))
+    print(json.dumps({"summary": summary, "receipt": _receipt_summary(result.get("receipt"))}, ensure_ascii=False, sort_keys=True))
 
 
 if __name__ == "__main__":

@@ -179,6 +179,60 @@ def test_sync_script_apply_updates_existing_feishu_row_and_persists_metadata(mon
     assert sync_mod.summarize_result(rows)["update"] == 1
 
 
+def test_sync_script_apply_persists_last_run_and_receipt_state(monkeypatch, tmp_path: Path, capsys) -> None:
+    import src.application.option_positions_service as svc
+    import src.application.option_positions_feishu_sync as sync_mod
+    from domain.domain.option_position_lots import OpenPositionCommand
+
+    data_config = _write_data_config(
+        tmp_path / "data.json",
+        sqlite_path=tmp_path / "option_positions.sqlite3",
+        sync_to_feishu_enabled=True,
+    )
+    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    svc.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="TSLA",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="USD",
+            strike=100.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            premium_per_share=1.23,
+            opened_at_ms=1000,
+        ),
+    )
+
+    monkeypatch.setattr(sync_mod, "get_tenant_access_token", lambda *_args, **_kwargs: "token")
+    monkeypatch.setattr(sync_mod, "bitable_fields", lambda *_args, **_kwargs: [{"field_name": "broker"}, {"field_name": "local_record_id"}])
+    monkeypatch.setattr(sync_mod, "bitable_list_records", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(sync_mod, "bitable_create_record", lambda *_args, **_kwargs: {"record": {"record_id": "remote_rec_1"}})
+    monkeypatch.setattr(sync_mod, "bitable_update_record", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should not update")))
+    monkeypatch.setattr(sys, "argv", ["om option-positions sync-feishu", "--data-config", str(data_config), "--apply"])
+
+    sync_mod.main()
+
+    lines = [json.loads(line) for line in capsys.readouterr().out.strip().splitlines()]
+    assert lines[-1]["summary"]["create"] == 1
+    assert lines[-1]["receipt"]["status"] == "skipped"
+    assert lines[-1]["receipt"]["reason"] == "skipped_no_route"
+
+    state_path = tmp_path / "output_shared" / "state" / "option_positions_feishu_sync.json"
+    receipt_state_path = tmp_path / "output_shared" / "state" / "option_positions_feishu_sync_receipts.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    receipt_state = json.loads(receipt_state_path.read_text(encoding="utf-8"))
+
+    assert state["status"] == "applied"
+    assert state["summary"]["create"] == 1
+    assert state["receipt"]["reason"] == "skipped_no_route"
+    assert state["receipt"]["receipt_key"] in receipt_state["receipts"]
+
+
 def test_build_feishu_payload_coerces_numeric_fields_from_strings() -> None:
     import src.application.option_positions_feishu_sync as sync_mod
 

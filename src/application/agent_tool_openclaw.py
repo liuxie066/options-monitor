@@ -140,6 +140,24 @@ def _auto_close_receipt_summary(maintenance_json: dict[str, Any] | Any) -> dict[
     }
 
 
+def _option_positions_feishu_sync_receipt_summary(sync_json: dict[str, Any] | Any) -> dict[str, Any] | None:
+    if not isinstance(sync_json, dict):
+        return None
+    receipt = sync_json.get("receipt")
+    if not isinstance(receipt, dict):
+        return None
+    return {
+        "status": receipt.get("status"),
+        "reason": receipt.get("reason"),
+        "delivery_confirmed": bool(receipt.get("delivery_confirmed")),
+        "message_id": receipt.get("message_id"),
+        "error_code": receipt.get("error_code"),
+        "attempt_count": receipt.get("attempt_count"),
+        "receipt_key": receipt.get("receipt_key"),
+        "updated_at": receipt.get("updated_at"),
+    }
+
+
 def _text_file_info(path: Path, *, base: Path, max_chars: int) -> dict[str, Any]:
     out = _file_info(path, base=base)
     if not out.get("exists") or not out.get("is_file", False):
@@ -869,6 +887,16 @@ def runtime_status_tool(
         base=base,
         read_json_object_or_empty=read_json_object_or_empty,
     )
+    option_positions_feishu_sync_last_run = _json_file_info(
+        shared_state_dir / "option_positions_feishu_sync.json",
+        base=base,
+        read_json_object_or_empty=read_json_object_or_empty,
+    )
+    option_positions_feishu_sync_receipts = _json_file_info(
+        shared_state_dir / "option_positions_feishu_sync_receipts.json",
+        base=base,
+        read_json_object_or_empty=read_json_object_or_empty,
+    )
     notification = _text_file_info(
         report_dir / "symbols_notification.txt",
         base=base,
@@ -1016,6 +1044,11 @@ def runtime_status_tool(
             "notification": notification,
         },
         "trade_intake": trade_intake,
+        "option_positions_feishu_sync": {
+            "last_run": option_positions_feishu_sync_last_run,
+            "receipts": option_positions_feishu_sync_receipts,
+            "receipt": _option_positions_feishu_sync_receipt_summary(option_positions_feishu_sync_last_run.get("json")),
+        },
         "accounts": account_status,
         "latest_run_selection": latest_run_selection,
         "latest_run": latest_run_payload,
@@ -1043,6 +1076,14 @@ def runtime_status_tool(
     data["summary"]["prefetch_available"] = prefetch_summary.get("available")
     data["summary"]["prefetch_bottleneck"] = prefetch_summary.get("primary_bottleneck")
     data["summary"]["latest_scanned_run_prefetch_available"] = latest_scanned_prefetch_summary.get("available")
+    sync_last_run_json = option_positions_feishu_sync_last_run.get("json")
+    sync_last_run_payload: dict[str, Any] = sync_last_run_json if isinstance(sync_last_run_json, dict) else {}
+    data["summary"]["option_positions_feishu_sync_status"] = sync_last_run_payload.get("status")
+    data["summary"]["option_positions_feishu_sync_receipt_status"] = (
+        data["option_positions_feishu_sync"]["receipt"].get("status")
+        if isinstance(data["option_positions_feishu_sync"].get("receipt"), dict)
+        else None
+    )
     data["summary"]["latest_scanned_run_prefetch_bottleneck"] = latest_scanned_prefetch_summary.get("primary_bottleneck")
     return data, warnings, {"config_path": mask_path(config_path)}
 

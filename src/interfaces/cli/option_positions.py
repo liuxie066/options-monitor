@@ -155,6 +155,7 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="delete remote rows whose local_record_id no longer exists locally; disabled by default",
     )
+    p_sync_feishu.add_argument("--no-send", action="store_true", help="do not send sync receipt notifications")
     p_sync_feishu.add_argument("--verbose", action="store_true", help="print payload details")
 
     args = ap.parse_args(argv)
@@ -182,6 +183,8 @@ def main(argv: list[str] | None = None) -> int:
             sync_argv.extend(["--since-updated-ms", str(args.since_updated_ms)])
         if args.prune_remote_missing_local:
             sync_argv.append("--prune-remote-missing-local")
+        if args.no_send:
+            sync_argv.append("--no-send")
         if args.verbose:
             sync_argv.append("--verbose")
         run_option_positions_feishu_sync(sync_argv)

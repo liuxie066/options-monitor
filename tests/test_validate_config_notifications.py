@@ -107,7 +107,12 @@ def test_validate_config_accepts_option_positions_sync_to_feishu_enabled_boolean
     import src.application.config_validator as mod
 
     cfg = _base_cfg()
-    cfg["option_positions"] = {"sync_to_feishu": {"enabled": False}}
+    cfg["option_positions"] = {
+        "sync_to_feishu": {
+            "enabled": False,
+            "receipt": {"enabled": True, "notify_failed": True, "notify_noop": False},
+        }
+    }
 
     mod.validate_config(cfg)
 
@@ -123,3 +128,16 @@ def test_validate_config_rejects_non_boolean_option_positions_sync_to_feishu_ena
         raise AssertionError("expected SystemExit")
     except SystemExit as exc:
         assert "option_positions.sync_to_feishu.enabled must be a boolean" in str(exc)
+
+
+def test_validate_config_rejects_non_boolean_option_positions_sync_to_feishu_receipt() -> None:
+    import src.application.config_validator as mod
+
+    cfg = _base_cfg()
+    cfg["option_positions"] = {"sync_to_feishu": {"receipt": {"enabled": "yes"}}}
+
+    try:
+        mod.validate_config(cfg)
+        raise AssertionError("expected SystemExit")
+    except SystemExit as exc:
+        assert "option_positions.sync_to_feishu.receipt.enabled must be a boolean" in str(exc)

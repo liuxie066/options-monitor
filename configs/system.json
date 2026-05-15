@@ -72,7 +72,16 @@
         }
       },
       "sync_to_feishu": {
-        "enabled": false
+        "enabled": false,
+        "receipt": {
+          "enabled": true,
+          "notify_applied": true,
+          "notify_failed": true,
+          "notify_conflict": true,
+          "notify_noop": false,
+          "notify_dry_run": false,
+          "retry_unconfirmed": true
+        }
       }
     },
     "intake": {
