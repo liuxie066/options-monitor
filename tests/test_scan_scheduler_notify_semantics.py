@@ -116,6 +116,11 @@ def test_scan_scheduler_uses_simple_market_day_targets() -> None:
     )
     assert hourly.should_run_scan is True
     assert hourly.is_notify_window_open is True
+    assert hourly.now_beijing == '2026-04-01T11:00:00+08:00'
+    assert hourly.in_run_window is True
+    assert hourly.run_window_start_beijing == '2026-04-01T09:30:00+08:00'
+    assert hourly.run_window_end_beijing == '2026-04-01T16:00:00+08:00'
+    assert hourly.reason == '到达运行点 11:00：执行扫描并允许通知。'
 
     during_break = decide(
         schedule_cfg,

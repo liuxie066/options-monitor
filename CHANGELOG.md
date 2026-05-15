@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.2.48 - 2026-05-15
+
+### Fixed
+- Added a runtime schedule market guard so HK ticks fail fast when the loaded config carries a US-market schedule timezone instead of silently skipping during HK day-session cron runs.
+- Added HK 11:00 Beijing-time scheduler regression coverage to keep the HK run window on `09:30-16:00`.
+
+### Tests
+- Re-ran the full pytest suite, HK 11:00 scheduler verification, config dry-runs, and release metadata validation.
+
 ## 1.2.47 - 2026-05-15
 
 ### Changed

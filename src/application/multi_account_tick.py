@@ -36,6 +36,7 @@ from src.application.multi_tick.cash_footer import query_cash_footer
 from src.application.multi_tick.notify_format import build_account_message
 from domain.domain import (
     ensure_runtime_canonical_config,
+    ensure_runtime_schedule_matches_market,
     resolve_config_contract,
 )
 from domain.domain.engine import (
@@ -138,6 +139,11 @@ def main(argv: list[str] | None = None) -> int:
         require_sibling_external=True,
     )
     base_cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
+    schedule_contract_info = ensure_runtime_schedule_matches_market(
+        base_cfg,
+        config_path=cfg_path,
+        market_config=str(getattr(args, 'market_config', 'auto') or 'auto'),
+    )
     if args.accounts is None:
         args.accounts = accounts_from_config(base_cfg)
     else:
@@ -161,6 +167,7 @@ def main(argv: list[str] | None = None) -> int:
             'market_config': str(getattr(args, 'market_config', 'auto') or 'auto'),
             'config_source_path': contract_info.get('resolved_path'),
             'config_canonical_path': contract_info.get('sibling_canonical_path'),
+            'config_schedule_contract': schedule_contract_info,
             'no_send': no_send,
             'smoke': bool(smoke),
             'force': force_mode,
