@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from src.application.agent_tool_config import load_runtime_config
+from src.application.agent_tool_config import load_runtime_config, repo_base
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response
 from src.application.config_validator import validate_config
 from src.application.account_management import add_account, edit_account, remove_account
@@ -21,6 +21,8 @@ from src.application.scan_pipeline import run_scan
 from src.application.scan_scheduler import run_scheduler
 from src.application.strategy_replay import analyze_strategy_replay, read_strategy_replay_file
 from src.application.tick_cron import run_tick_cron
+from src.application.runtime_config_freshness import RuntimeConfigFreshnessError, ensure_runtime_config_freshness
+from domain.domain.config_contract import ensure_runtime_schedule_matches_market
 from src.application.version_check import check_version_update
 from src.application.cash_headroom_query import query_sell_put_cash
 
@@ -87,6 +89,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     validate = config_sub.add_parser("validate", help="validate runtime config")
     validate.add_argument("--config-key", default=None, choices=("us", "hk"))
     validate.add_argument("--config-path", default=None)
+    validate.add_argument("--market", default=None, choices=("us", "hk"))
     build = config_sub.add_parser("build", help="build canonical runtime config from system/user config")
     build.add_argument("--market", required=True, choices=("us", "hk"))
     build.add_argument("--system-config", default=None)
@@ -165,6 +168,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     tick.add_argument("--force", action="store_true")
     tick.add_argument("--debug", action="store_true")
     tick.add_argument("--opend-phone-verify-continue", action="store_true")
+    tick.add_argument("--allow-stale-config", action="store_true")
     tick_cron = run_sub.add_parser("tick-cron", help="cron-safe tick wrapper with lock, timeout, and trigger diagnostics")
     tick_cron.add_argument("--market", required=True, choices=("us", "hk"))
     tick_cron.add_argument("--accounts", nargs="+", default=None)
@@ -178,6 +182,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     tick_cron.add_argument("--no-send", action="store_true")
     tick_cron.add_argument("--force", action="store_true")
     tick_cron.add_argument("--debug", action="store_true")
+    tick_cron.add_argument("--allow-stale-config", action="store_true")
 
     return parser.parse_args(argv)
 
@@ -187,13 +192,49 @@ def _print(payload: dict[str, Any]) -> int:
     return 0 if payload.get("ok", True) else 2
 
 
-def _validate_runtime_config(*, config_key: str | None = None, config_path: str | None = None) -> dict[str, Any]:
+def _validate_runtime_config(
+    *,
+    config_key: str | None = None,
+    config_path: str | None = None,
+    market: str | None = None,
+) -> dict[str, Any]:
     path, cfg = load_runtime_config(config_key=config_key, config_path=config_path)
     validate_config(dict(cfg))
+    freshness = None
+    schedule_contract = None
+    if market:
+        try:
+            schedule_contract = ensure_runtime_schedule_matches_market(
+                cfg,
+                config_path=path,
+                market_config=market,
+            )
+        except SystemExit as exc:
+            raise AgentToolError(
+                code="CONFIG_ERROR",
+                message=str(exc),
+                details={"config_path": str(path), "market": str(market)},
+            ) from exc
+        try:
+            freshness = ensure_runtime_config_freshness(
+                cfg,
+                repo_root=repo_base(),
+                market=market,
+                runtime_config_path=path,
+            )
+        except RuntimeConfigFreshnessError as exc:
+            raise AgentToolError(
+                code="CONFIG_ERROR",
+                message=str(exc),
+                details=exc.result,
+            ) from exc
     return {
         "ok": True,
         "config_path": str(path),
         "config_key": str(config_key or "").strip().lower() or None,
+        "market": str(market or "").strip().lower() or None,
+        "schedule_contract": schedule_contract,
+        "freshness": freshness,
     }
 
 
@@ -264,7 +305,7 @@ def main(argv: list[str] | None = None) -> int:
             )))
 
         if args.command == "config" and args.config_command == "validate":
-            return _print(_validate_runtime_config(config_key=args.config_key, config_path=args.config_path))
+            return _print(_validate_runtime_config(config_key=args.config_key, config_path=args.config_path, market=args.market))
 
         if args.command == "config" and args.config_command == "build":
             from src.application.agent_tool_config import repo_base
@@ -376,6 +417,8 @@ def main(argv: list[str] | None = None) -> int:
                 tick_argv.append("--debug")
             if args.opend_phone_verify_continue:
                 tick_argv.append("--opend-phone-verify-continue")
+            if args.allow_stale_config:
+                tick_argv.append("--allow-stale-config")
             return int(run_tick(tick_argv))
 
         if args.command == "run" and args.run_command == "tick-cron":
@@ -392,6 +435,7 @@ def main(argv: list[str] | None = None) -> int:
                 no_send=bool(args.no_send),
                 force=bool(args.force),
                 debug=bool(args.debug),
+                allow_stale_config=bool(args.allow_stale_config),
             )
             if isinstance(out, dict):
                 return _print(build_response(tool_name="run.tick-cron", ok=True, data=out))

@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 1.2.50 - 2026-05-15
+
+### Added
+- Added generated runtime config freshness metadata for system, common user, and market user config sources.
+- Added stale runtime config checks to `config validate --market`, `run tick`, and `run tick-cron`, with clear rebuild commands.
+- Added an emergency `--allow-stale-config` override for tick entrypoints.
+
+### Fixed
+- Prevented cron/tick runs from silently using stale runtime configs after `configs/system.json`, `configs/user.common.json`, or market user configs change.
+- Preserved `init runtime` compatibility by recording inline generation metadata for starter runtime configs.
+- Returned schedule contract validation failures as structured JSON from `config validate --market`.
+
+### Tests
+- Added regression coverage for stale market-user config detection, newly appearing common-user config detection, tick-cron preflight failures, init-runtime metadata, and structured validation errors.
+- Re-ran focused pytest, smoke tests, changed-file type checking, compile checks, config dry-runs, and release metadata validation.
+
 ## 1.2.49 - 2026-05-15
 
 ### Added

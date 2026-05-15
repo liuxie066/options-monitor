@@ -110,6 +110,18 @@
 `SKIP_LOCKED` 返回 `0`，表示上一轮还在跑；真实执行失败返回原始非零码并输出
 `EXEC_FAILED_RC_<rc>`；超时返回 `124` 并输出 `EXEC_TIMEOUT_RC_124`。
 
+正式 cron 前建议先跑：
+
+```bash
+./om config validate --config-path config.hk.json --market hk
+./om config validate --config-path config.us.json --market us
+```
+
+`tick-cron` 也会在真实 tick 前检查 runtime config 的 `_generated` 指纹；当
+`configs/system.json`、`configs/user.common.json` 或市场 user config 更新后未重新
+`./om config build`，会以 `[CONFIG_ERROR]` 失败并打印重建命令。`--allow-stale-config`
+只用于临时应急。
+
 ---
 
 ## 5. 当前公开工具列表
