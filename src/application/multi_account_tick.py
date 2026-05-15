@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 from src.infrastructure.io_utils import (
     read_json,
@@ -34,7 +35,7 @@ from src.application.multi_tick.misc import (
 )
 from src.application.multi_tick.cash_footer import query_cash_footer
 from src.application.multi_tick.notify_format import build_account_message
-from domain.domain import (
+from domain.domain.config_contract import (
     ensure_runtime_canonical_config,
     ensure_runtime_schedule_matches_market,
     resolve_config_contract,
@@ -63,6 +64,7 @@ from src.application.tick_run_context import (
     complete_tick_idempotency as _complete_tick_idempotency,
 )
 from src.application.tick_run_workspace import prepare_tick_run_workspace
+from src.application.runtime_trigger_context import build_trigger_context
 from src.application.tick_scheduler_context import (
     TickSchedulerRequest,
     build_tick_scheduler_context,
@@ -90,7 +92,7 @@ def account_run_state_dir(run_dir: Path, account: str) -> Path:
     return (run_dir / 'accounts' / str(account).strip() / 'state').resolve()
 
 
-def _is_trading_day_guard_for_market(cfg: dict, market: str) -> tuple[bool | None, str]:
+def _is_trading_day_guard_for_market(cfg: dict[str, Any], market: str) -> tuple[bool | None, str]:
     """Return (is_trading_day, market_used) for one market.
 
     None means guard check failed and caller should continue without blocking.
@@ -121,7 +123,7 @@ def main(argv: list[str] | None = None) -> int:
     vpy = base / '.venv' / 'bin' / 'python'
     runlog = RunLogger(base)
     global _CURRENT_RUN_ID
-    _CURRENT_RUN_ID = runlog.run_id
+    _CURRENT_RUN_ID = runlog.run_id  # pyright: ignore[reportConstantRedefinition]
     run_id = runlog.run_id
 
     cfg_path = Path(args.config)
@@ -144,6 +146,7 @@ def main(argv: list[str] | None = None) -> int:
         config_path=cfg_path,
         market_config=str(getattr(args, 'market_config', 'auto') or 'auto'),
     )
+    trigger_context = build_trigger_context()
     if args.accounts is None:
         args.accounts = accounts_from_config(base_cfg)
     else:
@@ -168,6 +171,11 @@ def main(argv: list[str] | None = None) -> int:
             'config_source_path': contract_info.get('resolved_path'),
             'config_canonical_path': contract_info.get('sibling_canonical_path'),
             'config_schedule_contract': schedule_contract_info,
+            'trigger_source': trigger_context.get('source'),
+            'trigger_job_id': trigger_context.get('job_id'),
+            'outer_delivery_mode': trigger_context.get('delivery_mode'),
+            'outer_announce_expected': trigger_context.get('announce_expected'),
+            'outer_timeout_seconds': trigger_context.get('timeout_seconds'),
             'no_send': no_send,
             'smoke': bool(smoke),
             'force': force_mode,
@@ -327,13 +335,14 @@ def main(argv: list[str] | None = None) -> int:
     should_run_global = scheduler_context.should_run_global
     reason_global = scheduler_context.reason_global
 
-    tick_metrics = {
+    tick_metrics: dict[str, Any] = {
         'as_of_utc': utc_now(),
         'markets_to_run': markets_to_run,
         'scheduler_markets': scheduler_markets,
         'run_dir': str(run_dir),
         'scheduler_ms': scheduler_ms,
         'scheduler_decision': scheduler_decision,
+        'trigger_context': trigger_context,
         'accounts': [],
         'sent': False,
         'reason': '',

@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 1.2.49 - 2026-05-15
+
+### Added
+- Added `./om run tick-cron` as the cron-safe tick entrypoint with market-specific default config, lock file, timeout, dry-run command output, and trigger diagnostics.
+- Added runtime trigger context capture so tick runs and `runtime_status` can report outer runner source, job id, delivery mode, and timeout metadata.
+- Added `runtime_status.notification_diagnosis` to distinguish scheduler skips, `delivery.mode=none`, `--no-send`, missing notification routes, confirmed sends, partial sends, and unconfirmed delivery attempts.
+
+### Changed
+- Documented the recommended HK/US cron handoff through `tick-cron`, keeping cron as a 10-minute wakeup while code owns business-window and run-point decisions.
+- Clarified cron wrapper return semantics so lock skips, process failures, and timeouts are observable as distinct outcomes.
+
+### Tests
+- Added tick-cron, trigger-context, CLI, and runtime-status diagnosis coverage.
+- Re-ran full pytest, changed-file type checking, compile checks, config dry-runs, tick-cron dry-runs, and release metadata validation.
+
 ## 1.2.48 - 2026-05-15
 
 ### Fixed
