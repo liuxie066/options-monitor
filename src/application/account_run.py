@@ -7,18 +7,15 @@ from pathlib import Path
 from time import monotonic
 from typing import Any, Callable
 
-from domain.domain import (
-    Decision,
-    SchemaValidationError,
-    decide_should_notify,
-    normalize_pipeline_subprocess_output,
-)
 from domain.domain.engine import (
     AccountSchedulerDecisionView,
     build_failure_audit_fields,
     decide_account_scan_gate,
     decide_pipeline_execution_result,
 )
+from domain.domain.intermediate_objects import Decision, SchemaValidationError
+from domain.domain.multi_tick import decide_should_notify
+from domain.domain.tool_boundary import normalize_pipeline_subprocess_output
 from src.application.config_loader import resolve_watchlist_config, set_watchlist_config
 from src.application.close_advice_runner import run_close_advice
 from src.infrastructure.external_services import run_pipeline_script
@@ -159,7 +156,33 @@ def _position_maintenance_receipt_audit_fields(result: dict[str, Any]) -> dict[s
         "receipt_delivery_confirmed": bool(receipt.get("delivery_confirmed")),
         "receipt_message_id": receipt.get("message_id"),
         "receipt_error_code": receipt.get("error_code"),
+        "receipt_attempt_count": receipt.get("attempt_count"),
+        "receipt_key": receipt.get("receipt_key"),
     }
+
+
+def _position_maintenance_receipt_audit_action(result: dict[str, Any]) -> str:
+    receipt = result.get("receipt")
+    if not isinstance(receipt, dict):
+        return "auto_close_receipt_skipped"
+    status = str(receipt.get("status") or "").strip().lower()
+    if status == "sent":
+        return "auto_close_receipt_sent"
+    if status in {"failed", "unconfirmed"}:
+        return "auto_close_receipt_failed"
+    return "auto_close_receipt_skipped"
+
+
+def _position_maintenance_receipt_audit_status(result: dict[str, Any]) -> str:
+    receipt = result.get("receipt")
+    if not isinstance(receipt, dict):
+        return "skip"
+    status = str(receipt.get("status") or "").strip().lower()
+    if status in {"failed", "unconfirmed"}:
+        return "error"
+    if status == "sent":
+        return "ok"
+    return "skip"
 
 
 def _ensure_position_maintenance_receipt(
@@ -353,9 +376,13 @@ def run_one_account(
     notif_path = (acct_report_dir / "symbols_notification.txt").resolve()
     maintenance_notification = ""
 
+    notify_decisions: dict[str, bool | dict[str, Any] | AccountSchedulerDecisionView] = {}
+    for key, value in (request.notify_decision_by_account or {}).items():
+        if value is not None:
+            notify_decisions[key] = value
     should_notify_raw = decide_should_notify(
         account=acct,
-        notify_decision_by_account=request.notify_decision_by_account,
+        notify_decision_by_account=notify_decisions,
         scheduler_decision=request.scheduler_view,
     )
     scan_should_run, scan_reason = _resolve_account_scan_decision(
@@ -377,6 +404,7 @@ def run_one_account(
         )
     except SchemaValidationError as e:
         fail_schema_validation(stage="decision", exc=e, run_id=request.run_id)
+        raise
     should_run = bool(decision.should_run)
     should_notify = bool(decision.should_notify)
     reason = str(decision.reason)
@@ -430,6 +458,15 @@ def run_one_account(
                 **_position_maintenance_receipt_audit_fields(maintenance_result),
             },
         )
+        audit_fn(
+            "tool_call",
+            _position_maintenance_receipt_audit_action(maintenance_result),
+            run_id=request.run_id,
+            account=acct,
+            status=_position_maintenance_receipt_audit_status(maintenance_result),
+            tool_name="expired_position_maintenance_receipt",
+            extra=_position_maintenance_receipt_audit_fields(maintenance_result),
+        )
         _write_acct_run_state("expired_position_maintenance.json", maintenance_result)
         if maintenance_status == "error":
             runlog.safe_event(
@@ -470,6 +507,15 @@ def run_one_account(
             result=maintenance_result,
         )
         maintenance_notification = _maintenance_notification_text(maintenance_result)
+        audit_fn(
+            "tool_call",
+            _position_maintenance_receipt_audit_action(maintenance_result),
+            run_id=request.run_id,
+            account=acct,
+            status=_position_maintenance_receipt_audit_status(maintenance_result),
+            tool_name="expired_position_maintenance_receipt",
+            extra=_position_maintenance_receipt_audit_fields(maintenance_result),
+        )
         _write_acct_run_state("expired_position_maintenance.json", maintenance_result)
         runlog.safe_event(
             "expired_position_maintenance",
@@ -741,7 +787,7 @@ def run_one_account(
                 close_advice_cfg_copy.setdefault("render_style", "compact")
                 cfg_copy["close_advice"] = close_advice_cfg_copy
                 close_advice_run_cfg = cfg_copy
-            close_result = run_close_advice(
+            raw_close_result = run_close_advice(
                 config=close_advice_run_cfg,
                 context_path=(acct_state_dir / "option_positions_context.json").resolve(),
                 required_data_root=request.shared_required,
@@ -749,6 +795,7 @@ def run_one_account(
                 base_dir=request.base,
                 markets_to_run=request.markets_to_run,
             )
+            close_result: dict[str, Any] = raw_close_result if isinstance(raw_close_result, dict) else {}
             audit_fn(
                 "tool_call",
                 "close_advice",
@@ -769,7 +816,8 @@ def run_one_account(
             if close_text:
                 text = (text.strip() + "\n\n" + close_text.strip()).strip()
             elif int(close_result.get("quote_issue_rows") or 0) > 0:
-                flag_counts = close_result.get("flag_counts") if isinstance(close_result.get("flag_counts"), dict) else {}
+                flag_counts_raw = close_result.get("flag_counts")
+                flag_counts: dict[str, Any] = flag_counts_raw if isinstance(flag_counts_raw, dict) else {}
                 missing_quote = int(flag_counts.get("missing_quote") or 0)
                 missing_mid = int(flag_counts.get("missing_mid") or 0)
                 missing_expiration = int(flag_counts.get("required_data_missing_expiration") or 0)

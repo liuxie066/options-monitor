@@ -1027,7 +1027,14 @@ def test_runtime_status_summarizes_openclaw_runtime_files(tmp_path: Path) -> Non
             {
                 "mode": "applied",
                 "applied_closed": 1,
-                "receipt": {"status": "sent", "delivery_confirmed": True, "message_id": "msg-auto-1"},
+                "receipt": {
+                    "status": "sent",
+                    "delivery_confirmed": True,
+                    "message_id": "msg-auto-1",
+                    "attempt_count": 1,
+                    "receipt_key": "receipt-key-1",
+                    "updated_at": "2026-05-15T16:10:00+00:00",
+                },
             }
         ),
         encoding="utf-8",
@@ -1058,6 +1065,8 @@ def test_runtime_status_summarizes_openclaw_runtime_files(tmp_path: Path) -> Non
     assert out["data"]["latest_run"]["accounts"]["user1"]["notification"]["text"] == "run account notification\n"
     assert out["data"]["latest_run"]["accounts"]["user1"]["required_data_prefetch"]["exists"] is True
     assert out["data"]["latest_run"]["accounts"]["user1"]["expired_position_maintenance"]["json"]["receipt"]["status"] == "sent"
+    assert out["data"]["latest_run"]["accounts"]["user1"]["auto_close_receipt"]["receipt_key"] == "receipt-key-1"
+    assert out["data"]["latest_run"]["accounts"]["user1"]["auto_close_receipt"]["attempt_count"] == 1
     assert out["data"]["summary"]["prefetch_available"] is True
     assert out["data"]["summary"]["prefetch_bottleneck"] == "option_chain_rate_gate"
     assert out["data"]["required_data_prefetch"]["total_opend_calls"] == 6
