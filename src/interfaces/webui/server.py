@@ -102,15 +102,12 @@ SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS = VALIDATOR_SYMBOL_LEVEL_FORBIDDEN_STRATE
 
 SCHEDULE_SUMMARY_FIELDS = {
     "enabled",
-    "market_timezone",
+    "timezone",
     "beijing_timezone",
-    "market_open",
-    "market_close",
-    "market_break_start",
-    "market_break_end",
-    "first_notify_after_open_min",
-    "notify_interval_min",
-    "final_notify_before_close_min",
+    "cron_interval_min",
+    "run_window",
+    "run_points",
+    "gates",
 }
 
 

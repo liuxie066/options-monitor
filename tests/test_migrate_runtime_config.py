@@ -32,11 +32,20 @@ def test_migrate_config_updates_schedule_fields_without_touching_other_config() 
     migrated, changes = migrate_config(cfg)
 
     assert migrated["notifications"] == cfg["notifications"]
-    assert migrated["schedule"]["first_notify_after_open_min"] == 30
-    assert migrated["schedule"]["notify_interval_min"] == 45
-    assert migrated["schedule"]["final_notify_before_close_min"] == 10
-    assert migrated["schedule_hk"]["notify_interval_min"] == 30
-    assert migrated["schedule_hk"]["market_break_start"] == "12:00"
+    assert migrated["schedule"]["timezone"] == "America/New_York"
+    assert migrated["schedule"]["cron_interval_min"] == 10
+    assert migrated["schedule"]["run_window"] == {"start": "09:30", "end": "16:00", "breaks": []}
+    assert migrated["schedule"]["run_points"] == {"start_plus_min": 10, "hourly_minute": 0, "end_minus_min": 10}
+    assert migrated["schedule"]["gates"] == [
+        {
+            "type": "before",
+            "timezone": "Asia/Shanghai",
+            "time": "02:00",
+            "day_offset_from_window_start": 1,
+        }
+    ]
+    assert migrated["schedule_hk"]["timezone"] == "Asia/Hong_Kong"
+    assert migrated["schedule_hk"]["run_window"]["breaks"] == [{"start": "12:00", "end": "13:00"}]
     assert "market_dense_interval_min" not in migrated["schedule"]
     assert "market_sparse_interval_min" not in migrated["schedule"]
     assert "notify_cooldown_min" not in migrated["schedule_hk"]
@@ -125,8 +134,13 @@ def test_migrate_runtime_config_cli_apply_writes_backup(tmp_path: Path) -> None:
         mod.parse_args = old_parse_args  # type: ignore[assignment]
 
     migrated = json.loads(cfg_path.read_text(encoding="utf-8"))
-    assert migrated["schedule"]["first_notify_after_open_min"] == 30
-    assert migrated["schedule"]["notify_interval_min"] == 60
-    assert migrated["schedule"]["final_notify_before_close_min"] == 10
+    assert migrated["schedule"]["timezone"] == "Asia/Hong_Kong"
+    assert migrated["schedule"]["cron_interval_min"] == 10
+    assert migrated["schedule"]["run_window"] == {
+        "start": "09:30",
+        "end": "16:00",
+        "breaks": [{"start": "12:00", "end": "13:00"}],
+    }
+    assert migrated["schedule"]["run_points"] == {"start_plus_min": 10, "hourly_minute": 0, "end_minus_min": 10}
     assert "notify_cooldown_min" not in migrated["schedule"]
     assert len(list(tmp_path.glob("config.hk.json.bak.*"))) == 1

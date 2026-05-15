@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping
 from domain.domain.tool_boundary import (
     normalize_notify_window_aliases,
@@ -193,85 +192,6 @@ def decide_notification_meaningful(
 ) -> bool:
     text = str(notification_text or '').strip()
     return bool(text) and (text != empty_placeholder)
-
-
-def decide_scheduler_timing(
-    *,
-    now_utc: datetime,
-    last_scan_utc: datetime | None,
-    last_notify_utc: datetime | None,
-    in_window: bool,
-    monitor_off_hours: bool,
-    interval_min: int,
-    notify_cooldown_min: int,
-    schedule_v2_enabled: bool = False,
-    force_final_scan: bool = False,
-    off_window_notify: bool = False,
-    force: bool = False,
-) -> dict[str, Any]:
-    """Pure scheduler timing decision; callers keep state IO and config parsing."""
-    now = now_utc.astimezone(timezone.utc)
-    interval = int(interval_min)
-    cooldown = int(notify_cooldown_min)
-
-    if bool(force):
-        return {
-            'should_run_scan': True,
-            'is_notify_window_open': True,
-            'reason': 'force 模式：忽略频率控制直接执行。',
-            'next_run_utc': now,
-        }
-
-    if (not bool(in_window)) and (not bool(monitor_off_hours)):
-        should_run_scan = False
-        reason = '窗口外：不扫描。'
-    elif last_scan_utc is None:
-        should_run_scan = True
-        reason = '首次运行，无历史扫描记录。'
-    else:
-        elapsed = now - last_scan_utc.astimezone(timezone.utc)
-        if elapsed >= timedelta(minutes=interval):
-            should_run_scan = True
-            reason = f'距离上次扫描已超过 {interval} 分钟。'
-        elif bool(schedule_v2_enabled) and bool(force_final_scan):
-            should_run_scan = True
-            reason = '窗口收盘前最后一跳：强制扫描。'
-        else:
-            should_run_scan = False
-            reason = f'距离上次扫描不足 {interval} 分钟。'
-
-    if bool(schedule_v2_enabled):
-        if (not bool(in_window)) and (not bool(off_window_notify)):
-            is_notify_window_open = False
-        elif last_notify_utc is None:
-            is_notify_window_open = True
-        else:
-            is_notify_window_open = (
-                now - last_notify_utc.astimezone(timezone.utc)
-            ) >= timedelta(minutes=cooldown)
-    elif (not bool(in_window)) and (not bool(monitor_off_hours)):
-        is_notify_window_open = False
-    elif last_notify_utc is None:
-        is_notify_window_open = True
-    else:
-        is_notify_window_open = (
-            now - last_notify_utc.astimezone(timezone.utc)
-        ) >= timedelta(minutes=cooldown)
-
-    if not should_run_scan:
-        if last_scan_utc is None or interval >= 10**8:
-            next_run = now + timedelta(hours=24)
-        else:
-            next_run = last_scan_utc.astimezone(timezone.utc) + timedelta(minutes=interval)
-    else:
-        next_run = now
-
-    return {
-        'should_run_scan': bool(should_run_scan),
-        'is_notify_window_open': bool(is_notify_window_open),
-        'reason': str(reason),
-        'next_run_utc': next_run,
-    }
 
 
 def decide_notify_dispatch_gate(

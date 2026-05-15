@@ -158,5 +158,4 @@ def test_mark_scanned_accounts_updates_each_ran_account(tmp_path) -> None:
     )
 
     data = json.loads(state.read_text(encoding="utf-8"))
-    assert data["last_scan_utc"]
-    assert set(data["last_scan_utc_by_account"]) == {"lx", "sy"}
+    assert set(data["last_run_utc_by_account"]) == {"lx", "sy"}

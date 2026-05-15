@@ -7,24 +7,29 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-def test_scan_scheduler_emits_is_notify_window_open_and_backcompat_should_notify() -> None:
+def test_scan_scheduler_emits_notify_window_for_downstream_delivery() -> None:
     base = Path(__file__).resolve().parents[1]
 
     from src.application.scan_scheduler import decide
 
     schedule_cfg = {
         'enabled': True,
-        'market_timezone': 'Asia/Hong_Kong',
-        'market_open': '09:30',
-        'market_close': '16:00',
-        'monitor_off_hours': False,
-        'first_notify_after_open_min': 30,
-        'notify_interval_min': 60,
-        'final_notify_before_close_min': 10,
+        'timezone': 'Asia/Hong_Kong',
+        'cron_interval_min': 10,
+        'run_window': {
+            'start': '09:30',
+            'end': '16:00',
+            'breaks': [],
+        },
+        'run_points': {
+            'start_plus_min': 10,
+            'hourly_minute': 0,
+            'end_minus_min': 10,
+        },
         'beijing_timezone': 'Asia/Shanghai',
     }
     state = {
-        'last_scan_utc': None,
+        'last_run_utc_by_account': {},
         'last_notify_utc': None,
         'last_notify_utc_by_account': {},
     }
@@ -42,19 +47,24 @@ def test_scan_scheduler_uses_simple_market_day_targets() -> None:
 
     schedule_cfg = {
         'enabled': True,
-        'market_timezone': 'Asia/Hong_Kong',
-        'market_open': '09:30',
-        'market_close': '16:00',
-        'market_break_start': '12:00',
-        'market_break_end': '13:00',
-        'first_notify_after_open_min': 30,
-        'notify_interval_min': 60,
-        'final_notify_before_close_min': 10,
+        'timezone': 'Asia/Hong_Kong',
+        'cron_interval_min': 10,
+        'run_window': {
+            'start': '09:30',
+            'end': '16:00',
+            'breaks': [
+                {'start': '12:00', 'end': '13:00'},
+            ],
+        },
+        'run_points': {
+            'start_plus_min': 10,
+            'hourly_minute': 0,
+            'end_minus_min': 10,
+        },
         'beijing_timezone': 'Asia/Shanghai',
     }
     empty_state = {
-        'last_scan_utc': None,
-        'last_scan_utc_by_account': {},
+        'last_run_utc_by_account': {},
         'last_notify_utc': None,
         'last_notify_utc_by_account': {},
     }
@@ -62,18 +72,18 @@ def test_scan_scheduler_uses_simple_market_day_targets() -> None:
     before_first = decide(
         schedule_cfg,
         empty_state,
-        datetime(2026, 4, 1, 1, 50, 0, tzinfo=timezone.utc),  # 09:50 HKT
+        datetime(2026, 4, 1, 1, 35, 0, tzinfo=timezone.utc),  # 09:35 HKT
         account='lx',
         schedule_key='schedule_hk',
     )
     assert before_first.should_run_scan is False
     assert before_first.is_notify_window_open is False
-    assert before_first.next_run_market.endswith('10:00:00+08:00')
+    assert before_first.next_run_market.endswith('09:40:00+08:00')
 
     first = decide(
         schedule_cfg,
         empty_state,
-        datetime(2026, 4, 1, 2, 0, 0, tzinfo=timezone.utc),  # 10:00 HKT
+        datetime(2026, 4, 1, 1, 40, 0, tzinfo=timezone.utc),  # 09:40 HKT
         account='lx',
         schedule_key='schedule_hk',
     )
@@ -82,20 +92,20 @@ def test_scan_scheduler_uses_simple_market_day_targets() -> None:
 
     already_scanned = {
         **empty_state,
-        'last_scan_utc_by_account': {
-            'lx': datetime(2026, 4, 1, 2, 0, 1, tzinfo=timezone.utc).isoformat(),
+        'last_run_utc_by_account': {
+            'lx': datetime(2026, 4, 1, 1, 40, 1, tzinfo=timezone.utc).isoformat(),
         },
     }
     duplicate = decide(
         schedule_cfg,
         already_scanned,
-        datetime(2026, 4, 1, 2, 5, 0, tzinfo=timezone.utc),  # 10:05 HKT
+        datetime(2026, 4, 1, 1, 45, 0, tzinfo=timezone.utc),  # 09:45 HKT
         account='lx',
         schedule_key='schedule_hk',
     )
     assert duplicate.should_run_scan is False
     assert duplicate.is_notify_window_open is False
-    assert duplicate.next_run_market.endswith('11:00:00+08:00')
+    assert duplicate.next_run_market.endswith('10:00:00+08:00')
 
     hourly = decide(
         schedule_cfg,
@@ -127,3 +137,69 @@ def test_scan_scheduler_uses_simple_market_day_targets() -> None:
     )
     assert final.should_run_scan is True
     assert final.is_notify_window_open is True
+
+
+def test_scan_scheduler_us_beijing_before_2am_gate_handles_dst() -> None:
+    from src.application.scan_scheduler import decide
+
+    schedule_cfg = {
+        'enabled': True,
+        'timezone': 'America/New_York',
+        'cron_interval_min': 10,
+        'run_window': {
+            'start': '09:30',
+            'end': '16:00',
+            'breaks': [],
+        },
+        'run_points': {
+            'start_plus_min': 10,
+            'hourly_minute': 0,
+            'end_minus_min': 10,
+        },
+        'gates': [
+            {
+                'type': 'before',
+                'timezone': 'Asia/Shanghai',
+                'time': '02:00',
+                'day_offset_from_window_start': 1,
+            }
+        ],
+        'beijing_timezone': 'Asia/Shanghai',
+    }
+    empty_state = {
+        'last_run_utc_by_account': {},
+        'last_notify_utc': None,
+        'last_notify_utc_by_account': {},
+    }
+
+    summer_allowed = decide(
+        schedule_cfg,
+        empty_state,
+        datetime(2026, 7, 1, 17, 0, 0, tzinfo=timezone.utc),  # 13:00 EDT / 01:00 Beijing next day
+        account='lx',
+    )
+    assert summer_allowed.should_run_scan is True
+
+    summer_cutoff = decide(
+        schedule_cfg,
+        empty_state,
+        datetime(2026, 7, 1, 18, 0, 0, tzinfo=timezone.utc),  # 14:00 EDT / 02:00 Beijing next day
+        account='lx',
+    )
+    assert summer_cutoff.should_run_scan is False
+
+    winter_allowed = decide(
+        schedule_cfg,
+        empty_state,
+        datetime(2026, 1, 5, 17, 0, 0, tzinfo=timezone.utc),  # 12:00 EST / 01:00 Beijing next day
+        account='lx',
+    )
+    assert winter_allowed.should_run_scan is True
+
+    winter_cutoff = decide(
+        schedule_cfg,
+        empty_state,
+        datetime(2026, 1, 5, 18, 0, 0, tzinfo=timezone.utc),  # 13:00 EST / 02:00 Beijing next day
+        account='lx',
+    )
+    assert winter_cutoff.should_run_scan is False

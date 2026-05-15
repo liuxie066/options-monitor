@@ -173,17 +173,16 @@ def scheduler_status_tool(
     decision_payload["should_notify"] = bool(decision_payload.get("is_notify_window_open"))
     decision_payload["schedule_enabled"] = schedule_enabled
 
-    last_scan_by_account = state_data.get("last_scan_utc_by_account")
+    last_run_by_account = state_data.get("last_run_utc_by_account")
     last_notify_by_account = state_data.get("last_notify_utc_by_account")
     data = {
         "decision": decision_payload,
         "state": {
             "state_path": mask_path(state_path),
-            "last_scan_utc": state_data.get("last_scan_utc"),
-            "last_notify_utc": state_data.get("last_notify_utc"),
-            "last_scan_utc_for_account": (
-                last_scan_by_account.get(account) if account and isinstance(last_scan_by_account, dict) else None
+            "last_run_utc_for_account": (
+                last_run_by_account.get(account) if account and isinstance(last_run_by_account, dict) else None
             ),
+            "last_notify_utc": state_data.get("last_notify_utc"),
             "last_notify_utc_for_account": (
                 last_notify_by_account.get(account) if account and isinstance(last_notify_by_account, dict) else None
             ),

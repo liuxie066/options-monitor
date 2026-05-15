@@ -27,21 +27,37 @@ from src.application.config_validator import validate_config
 
 
 LEGACY_SCHEDULE_KEYS = (
+    "market_timezone",
+    "market_open",
+    "market_close",
+    "market_break_start",
+    "market_break_end",
     "market_dense_interval_min",
     "market_sparse_interval_min",
     "market_hours_interval_min",
+    "monitor_off_hours",
     "notify_cooldown_min",
     "notify_cooldown_dense_min",
     "notify_cooldown_sparse_min",
     "sparse_after_beijing",
     "interval_min",
+    "first_notify_after_open_min",
+    "notify_interval_min",
+    "final_notify_before_close_min",
     "schedule_v2",
 )
 
-DEFAULT_SCHEDULE_VALUES = {
-    "first_notify_after_open_min": 30,
-    "notify_interval_min": 60,
-    "final_notify_before_close_min": 10,
+DEFAULT_RUN_POINTS = {
+    "start_plus_min": 10,
+    "hourly_minute": 0,
+    "end_minus_min": 10,
+}
+
+US_BEIJING_BEFORE_2AM_GATE = {
+    "type": "before",
+    "timezone": "Asia/Shanghai",
+    "time": "02:00",
+    "day_offset_from_window_start": 1,
 }
 
 
@@ -68,25 +84,80 @@ def _backup(path: Path) -> Path:
     return backup
 
 
-def migrate_schedule(schedule: Any) -> tuple[bool, list[str]]:
+def _infer_market_from_path(path: Path) -> str | None:
+    name = path.name.lower()
+    if ".hk." in name or name.startswith("config.hk"):
+        return "hk"
+    if ".us." in name or name.startswith("config.us"):
+        return "us"
+    return None
+
+
+def _infer_market_for_schedule(schedule_key: str, schedule: dict[str, Any], market: str | None) -> str:
+    if schedule_key == "schedule_hk":
+        return "hk"
+    if market in {"us", "hk"}:
+        return market
+    tz = str(schedule.get("timezone") or schedule.get("market_timezone") or "").strip()
+    if tz == "Asia/Hong_Kong":
+        return "hk"
+    return "us"
+
+
+def _default_timezone(market: str) -> str:
+    return "Asia/Hong_Kong" if market == "hk" else "America/New_York"
+
+
+def _default_breaks(market: str) -> list[dict[str, str]]:
+    return [{"start": "12:00", "end": "13:00"}] if market == "hk" else []
+
+
+def _target_run_window(schedule: dict[str, Any], market: str) -> dict[str, Any]:
+    current = schedule.get("run_window") if isinstance(schedule.get("run_window"), dict) else {}
+    breaks = current.get("breaks") if isinstance(current.get("breaks"), list) else None
+    legacy_break_start = schedule.get("market_break_start")
+    legacy_break_end = schedule.get("market_break_end")
+    if legacy_break_start and legacy_break_end:
+        breaks = [{"start": str(legacy_break_start), "end": str(legacy_break_end)}]
+    if breaks is None:
+        breaks = _default_breaks(market)
+    return {
+        "start": str(schedule.get("market_open") or current.get("start") or "09:30"),
+        "end": str(schedule.get("market_close") or current.get("end") or "16:00"),
+        "breaks": breaks,
+    }
+
+
+def _positive_int(value: Any, default: int) -> int:
+    try:
+        parsed = int(value)
+    except Exception:
+        return int(default)
+    return parsed if parsed > 0 else int(default)
+
+
+def migrate_schedule(schedule: Any, *, schedule_key: str = "schedule", market: str | None = None) -> tuple[bool, list[str]]:
     if not isinstance(schedule, dict):
         return False, []
 
     changes: list[str] = []
     changed = False
+    schedule_market = _infer_market_for_schedule(schedule_key, schedule, market)
 
-    interval_value = schedule.get("notify_interval_min")
-    if interval_value is None:
-        interval_value = schedule.get("interval_min")
-    if interval_value is None:
-        interval_value = schedule.get("notify_cooldown_min")
-    if interval_value is None:
-        interval_value = DEFAULT_SCHEDULE_VALUES["notify_interval_min"]
-
-    desired_values = {
-        **DEFAULT_SCHEDULE_VALUES,
-        "notify_interval_min": interval_value,
+    desired_values: dict[str, Any] = {
+        "timezone": str(schedule.get("timezone") or schedule.get("market_timezone") or _default_timezone(schedule_market)),
+        "cron_interval_min": _positive_int(schedule.get("cron_interval_min"), 10),
+        "run_window": _target_run_window(schedule, schedule_market),
+        "run_points": (
+            schedule.get("run_points")
+            if isinstance(schedule.get("run_points"), dict)
+            else dict(DEFAULT_RUN_POINTS)
+        ),
     }
+    if schedule_market == "us":
+        gates = schedule.get("gates") if isinstance(schedule.get("gates"), list) else [dict(US_BEIJING_BEFORE_2AM_GATE)]
+        desired_values["gates"] = gates
+
     for key, value in desired_values.items():
         if schedule.get(key) != value:
             schedule[key] = value
@@ -105,11 +176,11 @@ def migrate_schedule(schedule: Any) -> tuple[bool, list[str]]:
     return changed, changes
 
 
-def migrate_config(data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+def migrate_config(data: dict[str, Any], *, market: str | None = None) -> tuple[dict[str, Any], list[str]]:
     migrated = json.loads(json.dumps(data, ensure_ascii=False))
     changes: list[str] = []
     for key in ("schedule", "schedule_hk"):
-        changed, schedule_changes = migrate_schedule(migrated.get(key))
+        changed, schedule_changes = migrate_schedule(migrated.get(key), schedule_key=key, market=market)
         if changed:
             changes.extend(f"{key}: {item}" for item in schedule_changes)
     return migrated, changes
@@ -154,7 +225,7 @@ def main() -> None:
     changed_paths: list[Path] = []
     for path in paths:
         data = _load_json(path)
-        migrated, changes = migrate_config(data)
+        migrated, changes = migrate_config(data, market=_infer_market_from_path(path))
         changed = _dump_json(data) != _dump_json(migrated)
         status = "CHANGED" if changed else "OK"
         rel = path.relative_to(base_dir) if path.is_relative_to(base_dir) else path

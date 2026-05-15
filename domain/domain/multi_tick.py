@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
@@ -57,6 +57,33 @@ def _time_in_range(value: time, start: time, end: time) -> bool:
     return value >= start or value <= end
 
 
+def _gate_cutoff_dt(*, gate: dict[str, Any], window_start_dt: datetime) -> datetime | None:
+    if str(gate.get('type') or '').strip().lower() != 'before':
+        return None
+    gate_tz = ZoneInfo(str(gate.get('timezone') or 'Asia/Shanghai'))
+    gate_time = _parse_hhmm(str(gate.get('time') or '02:00'))
+    try:
+        day_offset = int(gate.get('day_offset_from_window_start') or 0)
+    except Exception:
+        day_offset = 0
+    base_date = window_start_dt.astimezone(gate_tz).date() + timedelta(days=day_offset)
+    return datetime.combine(base_date, gate_time, tzinfo=gate_tz)
+
+
+def _allowed_by_gates(*, now_market: datetime, window_start_dt: datetime, gates: object) -> bool:
+    if not isinstance(gates, list):
+        return True
+    for gate in gates:
+        if not isinstance(gate, dict):
+            continue
+        if str(gate.get('type') or '').strip().lower() != 'before':
+            continue
+        cutoff = _gate_cutoff_dt(gate=gate, window_start_dt=window_start_dt)
+        if cutoff is not None and not (now_market.astimezone(cutoff.tzinfo) < cutoff):
+            return False
+    return True
+
+
 _SCHEDULE_TZ_HK: tuple[str, ...] = (
     'Asia/Hong_Kong',
 )
@@ -67,7 +94,7 @@ class AutoMarketRuleEvaluation:
     schedule_key: str
     default_market: str
     configured: bool
-    in_market_hours: bool
+    in_run_window: bool
     inferred_market_from_timezone: str | None
     resolved_market: str | None
 
@@ -84,10 +111,10 @@ def _collect_schedule_configs_for_auto_market(cfg: dict[str, Any]) -> tuple[tupl
 def _infer_timezone_market_override(schedule_cfg: dict[str, Any]) -> str | None:
     """Return a timezone-specific market override for auto selection.
 
-    This only handles the legacy case where `schedule` uses an HK timezone
-    instead of `schedule_hk`; US continues to use the default `schedule` label.
+    This handles the canonical single-`schedule` case where the configured
+    timezone identifies the market.
     """
-    tz = str(schedule_cfg.get('market_timezone', '')).strip()
+    tz = str(schedule_cfg.get('timezone', '')).strip()
     if tz in _SCHEDULE_TZ_HK:
         return 'HK'
     return None
@@ -110,7 +137,7 @@ def _evaluate_auto_market_rules(now_utc: datetime, cfg: dict[str, Any]) -> tuple
     out: list[AutoMarketRuleEvaluation] = []
     for schedule_key, schedule_cfg, default_market in _collect_schedule_configs_for_auto_market(cfg):
         configured = isinstance(schedule_cfg, dict)
-        in_market_hours = _is_market_hours_for_schedule(now_utc, schedule_cfg) if configured else False
+        in_run_window = _is_run_window_for_schedule(now_utc, schedule_cfg) if configured else False
         inferred_market_from_timezone = (
             _infer_timezone_market_override(schedule_cfg)
             if configured else None
@@ -121,14 +148,14 @@ def _evaluate_auto_market_rules(now_utc: datetime, cfg: dict[str, Any]) -> tuple
                 inferred_market_from_timezone=inferred_market_from_timezone,
                 default_market=default_market,
             )
-            if in_market_hours else None
+            if in_run_window else None
         )
         out.append(
             AutoMarketRuleEvaluation(
                 schedule_key=schedule_key,
                 default_market=default_market,
                 configured=configured,
-                in_market_hours=in_market_hours,
+                in_run_window=in_run_window,
                 inferred_market_from_timezone=inferred_market_from_timezone,
                 resolved_market=resolved_market,
             )
@@ -136,23 +163,37 @@ def _evaluate_auto_market_rules(now_utc: datetime, cfg: dict[str, Any]) -> tuple
     return tuple(out)
 
 
-def _is_market_hours_for_schedule(now_utc: datetime, schedule_cfg: dict[str, Any]) -> bool:
+def _is_run_window_for_schedule(now_utc: datetime, schedule_cfg: dict[str, Any]) -> bool:
     if not isinstance(schedule_cfg, dict) or not bool(schedule_cfg.get("enabled", True)):
         return False
-    market_tz = ZoneInfo(str(schedule_cfg.get("market_timezone") or "America/New_York"))
+    market_tz = ZoneInfo(str(schedule_cfg.get("timezone") or "America/New_York"))
     now_market = now_utc.astimezone(market_tz)
     if now_market.weekday() >= 5:
         return False
 
-    market_open = _parse_hhmm(str(schedule_cfg.get("market_open") or "09:30"))
-    market_close = _parse_hhmm(str(schedule_cfg.get("market_close") or "16:00"))
+    run_window = schedule_cfg.get("run_window") if isinstance(schedule_cfg.get("run_window"), dict) else {}
+    run_start = _parse_hhmm(str(run_window.get("start") or "09:30"))
+    run_end = _parse_hhmm(str(run_window.get("end") or "16:00"))
     current = now_market.time()
-    if not (market_open <= current <= market_close):
+    if not (run_start <= current <= run_end):
         return False
 
-    if schedule_cfg.get("market_break_start") and schedule_cfg.get("market_break_end"):
-        break_start = _parse_hhmm(str(schedule_cfg.get("market_break_start")))
-        break_end = _parse_hhmm(str(schedule_cfg.get("market_break_end")))
+    window_start_dt = datetime.combine(now_market.date(), run_start, tzinfo=market_tz)
+    if not _allowed_by_gates(
+        now_market=now_market,
+        window_start_dt=window_start_dt,
+        gates=schedule_cfg.get('gates'),
+    ):
+        return False
+
+    breaks = run_window.get("breaks")
+    if not isinstance(breaks, list):
+        breaks = []
+    for item in breaks:
+        if not isinstance(item, dict) or not item.get("start") or not item.get("end"):
+            continue
+        break_start = _parse_hhmm(str(item.get("start")))
+        break_end = _parse_hhmm(str(item.get("end")))
         if _time_in_range(current, break_start, break_end) and current != break_end:
             return False
     return True
@@ -281,7 +322,6 @@ def is_in_quiet_hours_window(*, start_t, end_t, now_bj_time) -> bool:
 
 def evaluate_dnd_quiet_hours(
     *,
-    schedule_v2_enabled: bool,
     quiet_hours: Any,
     no_send: bool,
     now_bj_time,
@@ -293,7 +333,7 @@ def evaluate_dnd_quiet_hours(
         'is_quiet': False,
         'parse_error': None,
     }
-    if schedule_v2_enabled or no_send:
+    if no_send:
         return out
     if (not quiet_hours) or (not isinstance(quiet_hours, dict)):
         return out

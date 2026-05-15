@@ -105,7 +105,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument('--market-config', default='auto', choices=['auto', 'hk', 'us', 'all'], help='Select symbols by market at config-load time (auto=by session).')
     ap.add_argument('--no-send', action='store_true', help='Do not send messages (for smoke tests / debugging).')
     ap.add_argument('--smoke', action='store_true', help='Smoke mode: run scheduler decisions but skip pipeline execution.')
-    ap.add_argument('--force', action='store_true', help='Force running scan pipeline regardless of market hours / scan interval (sending still respects --no-send and should_notify decisions).')
+    ap.add_argument('--force', action='store_true', help='Force running scan pipeline regardless of run window / run points (sending still respects --no-send and should_notify decisions).')
     ap.add_argument('--debug', action='store_true', help='Verbose logs to stdout (for manual debugging).')
     ap.add_argument('--opend-phone-verify-continue', action='store_true', help='Clear OpenD phone-verify pending pause and continue running.')
     args = ap.parse_args(argv)

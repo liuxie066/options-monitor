@@ -14,13 +14,19 @@ from typing import Optional, TypedDict, Literal
 
 class SchedulerDecision(TypedDict, total=False):
     now_utc: str
-    in_market_hours: bool
-    interval_min: int
-    notify_cooldown_min: int
+    now_market: str
+    now_beijing: str
+    in_run_window: bool
     should_run_scan: bool
+    is_notify_window_open: bool
     should_notify: bool
     reason: str
     next_run_utc: str
+    next_run_market: str
+    next_run_beijing: str
+    run_window_start_beijing: str
+    run_window_end_beijing: str
+    schedule_key: str
 
 
 @dataclass(frozen=True)

@@ -47,9 +47,18 @@ def test_layered_config_builds_minimal_us_user_config(tmp_path: Path) -> None:
     assert cfg["portfolio"]["source_by_account"] == {"lx": "futu"}
     assert cfg["trade_intake"]["mode"] == "apply"
     assert cfg["trade_intake"]["account_mapping"]["futu"] == {"REAL_12345678": "lx"}
-    assert cfg["schedule"]["market_timezone"] == "America/New_York"
-    assert cfg["schedule"]["market_close"] == "14:00"
-    assert cfg["schedule"]["final_notify_before_close_min"] == 0
+    assert cfg["schedule"]["timezone"] == "America/New_York"
+    assert cfg["schedule"]["cron_interval_min"] == 10
+    assert cfg["schedule"]["run_window"] == {"start": "09:30", "end": "16:00", "breaks": []}
+    assert cfg["schedule"]["run_points"] == {"start_plus_min": 10, "hourly_minute": 0, "end_minus_min": 10}
+    assert cfg["schedule"]["gates"] == [
+        {
+            "type": "before",
+            "timezone": "Asia/Shanghai",
+            "time": "02:00",
+            "day_offset_from_window_start": 1,
+        }
+    ]
     assert cfg["intake"]["symbol_aliases"]["英伟达"] == "NVDA"
     assert cfg["symbols"][0]["broker"] == "US"
     assert "market" not in cfg["symbols"][0]
@@ -94,8 +103,8 @@ def test_layered_config_derives_external_holdings_defaults(tmp_path: Path) -> No
     assert cfg["portfolio"]["source_by_account"] == {"lx": "futu", "sy": "holdings"}
     assert cfg["trade_intake"]["mode"] == "apply"
     assert cfg["trade_intake"]["account_mapping"]["futu"] == {"REAL_87654321": "lx"}
-    assert cfg["schedule"]["market_timezone"] == "Asia/Hong_Kong"
-    assert cfg["schedule"]["market_break_start"] == "12:00"
+    assert cfg["schedule"]["timezone"] == "Asia/Hong_Kong"
+    assert cfg["schedule"]["run_window"]["breaks"] == [{"start": "12:00", "end": "13:00"}]
     assert cfg["templates"]["put_base"]["sell_put"]["min_volume"] == 0
     assert cfg["symbols"][0]["broker"] == "HK"
     assert cfg["symbols"][0]["sell_put"]["max_dte"] == 90

@@ -67,23 +67,21 @@ def test_market_session_and_opend_alert_use_single_source_of_truth() -> None:
     cfg = {
         "schedule_hk": {
             "enabled": True,
-            "market_timezone": "Asia/Hong_Kong",
-            "market_open": "09:30",
-            "market_close": "16:00",
-            "monitor_off_hours": False,
-            "market_break_start": "12:00",
-            "market_break_end": "13:00",
+            "timezone": "Asia/Hong_Kong",
+            "run_window": {
+                "start": "09:30",
+                "end": "16:00",
+                "breaks": [
+                    {"start": "12:00", "end": "13:00"},
+                ],
+            },
             "beijing_timezone": "Asia/Shanghai",
-            "sparse_after_beijing": "02:00",
         },
         "schedule": {
             "enabled": False,
-            "market_timezone": "America/New_York",
-            "market_open": "09:30",
-            "market_close": "16:00",
-            "monitor_off_hours": False,
+            "timezone": "America/New_York",
+            "run_window": {"start": "09:30", "end": "16:00", "breaks": []},
             "beijing_timezone": "Asia/Shanghai",
-            "sparse_after_beijing": "02:00",
         },
     }
     now_utc = datetime(2026, 4, 1, 4, 30, 0, tzinfo=timezone.utc)

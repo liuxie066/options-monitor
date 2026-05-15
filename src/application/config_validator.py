@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from zoneinfo import ZoneInfo
 
 from domain.domain import (
     FEISHU_APP_NOTIFICATION_PROVIDER,
@@ -59,6 +60,26 @@ YIELD_ENHANCEMENT_REMOVED_TARGET_FIELDS = (
     'expected_move_factor',
     'min_target_return',
     'min_annualized_target_return',
+)
+REMOVED_SCHEDULE_FIELDS = (
+    'market_timezone',
+    'market_open',
+    'market_close',
+    'market_break_start',
+    'market_break_end',
+    'monitor_off_hours',
+    'market_dense_interval_min',
+    'market_sparse_interval_min',
+    'market_hours_interval_min',
+    'notify_cooldown_min',
+    'notify_cooldown_dense_min',
+    'notify_cooldown_sparse_min',
+    'sparse_after_beijing',
+    'interval_min',
+    'first_notify_after_open_min',
+    'notify_interval_min',
+    'final_notify_before_close_min',
+    'schedule_v2',
 )
 
 
@@ -284,6 +305,93 @@ def _validate_yield_enhancement_cfg(cfg: dict, path: str):
                 die(f'{path}.call.min_delta/max_delta must be numbers')
 
 
+def _validate_hhmm(value, path: str) -> None:
+    try:
+        text = str(value or '')
+        hour, minute = text.split(':', 1)
+        hour_i = int(hour)
+        minute_i = int(minute)
+        if hour_i < 0 or hour_i > 23 or minute_i < 0 or minute_i > 59:
+            raise ValueError(text)
+    except Exception:
+        die(f'{path} must be HH:MM')
+
+
+def _validate_timezone(value, path: str) -> None:
+    try:
+        ZoneInfo(str(value or ''))
+    except Exception:
+        die(f'{path} must be a valid IANA timezone')
+
+
+def _validate_schedule_cfg(raw, path: str) -> None:
+    if raw is None:
+        return
+    if not isinstance(raw, dict):
+        die(f'{path} must be an object')
+
+    removed = [key for key in REMOVED_SCHEDULE_FIELDS if key in raw]
+    if removed:
+        die(
+            f"{path} has removed schedule fields: {', '.join(removed)}; "
+            "use timezone, cron_interval_min, run_window, run_points, and gates"
+        )
+
+    if 'timezone' in raw:
+        _validate_timezone(raw.get('timezone'), f'{path}.timezone')
+    if 'beijing_timezone' in raw:
+        _validate_timezone(raw.get('beijing_timezone'), f'{path}.beijing_timezone')
+    if 'cron_interval_min' in raw and raw.get('cron_interval_min') is not None:
+        validate_positive_integer(raw.get('cron_interval_min'), f'{path}.cron_interval_min')
+
+    run_window = raw.get('run_window')
+    if run_window is not None:
+        if not isinstance(run_window, dict):
+            die(f'{path}.run_window must be an object')
+        _validate_hhmm(run_window.get('start'), f'{path}.run_window.start')
+        _validate_hhmm(run_window.get('end'), f'{path}.run_window.end')
+        breaks = run_window.get('breaks', [])
+        if breaks is None:
+            breaks = []
+        if not isinstance(breaks, list):
+            die(f'{path}.run_window.breaks must be an array')
+        for index, item in enumerate(breaks):
+            if not isinstance(item, dict):
+                die(f'{path}.run_window.breaks[{index}] must be an object')
+            _validate_hhmm(item.get('start'), f'{path}.run_window.breaks[{index}].start')
+            _validate_hhmm(item.get('end'), f'{path}.run_window.breaks[{index}].end')
+
+    run_points = raw.get('run_points')
+    if run_points is not None:
+        if not isinstance(run_points, dict):
+            die(f'{path}.run_points must be an object')
+        for key in ('start_plus_min', 'end_minus_min'):
+            if key in run_points and run_points.get(key) is not None:
+                validate_non_negative_integer(run_points.get(key), f'{path}.run_points.{key}')
+        if 'hourly_minute' in run_points and run_points.get('hourly_minute') is not None:
+            validate_non_negative_integer(run_points.get('hourly_minute'), f'{path}.run_points.hourly_minute')
+            if int(run_points.get('hourly_minute')) > 59:
+                die(f'{path}.run_points.hourly_minute must be <= 59')
+
+    gates = raw.get('gates')
+    if gates is not None:
+        if not isinstance(gates, list):
+            die(f'{path}.gates must be an array')
+        for index, gate in enumerate(gates):
+            if not isinstance(gate, dict):
+                die(f'{path}.gates[{index}] must be an object')
+            gate_type = str(gate.get('type') or '').strip().lower()
+            if gate_type != 'before':
+                die(f'{path}.gates[{index}].type must be before')
+            _validate_timezone(gate.get('timezone') or 'Asia/Shanghai', f'{path}.gates[{index}].timezone')
+            _validate_hhmm(gate.get('time'), f'{path}.gates[{index}].time')
+            if 'day_offset_from_window_start' in gate and gate.get('day_offset_from_window_start') is not None:
+                try:
+                    int(gate.get('day_offset_from_window_start'))
+                except Exception:
+                    die(f'{path}.gates[{index}].day_offset_from_window_start must be an integer')
+
+
 def validate_config(cfg: dict):
     if 'watchlist' in cfg:
         die('watchlist is no longer supported; use symbols')
@@ -291,6 +399,9 @@ def validate_config(cfg: dict):
         die('profiles is no longer supported; use templates')
     if 'fees' in cfg:
         die('fees is no longer supported; fee rules are built in')
+
+    _validate_schedule_cfg(cfg.get('schedule'), 'schedule')
+    _validate_schedule_cfg(cfg.get('schedule_hk'), 'schedule_hk')
 
     # intake config (optional)
     intake = cfg.get('intake') or {}
