@@ -387,3 +387,91 @@ def test_run_symbol_monitoring_fetches_calls_for_sell_put_yield_enhancement(monk
     assert captured_plan["yield_enhancement_cfg"]["output_mode"] == "separate"
     assert captured_required_data["want_put"] is True
     assert captured_required_data["want_call"] is True
+
+
+def test_run_symbol_monitoring_keeps_yield_enhancement_market_put_scope_after_account_prefilter(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import src.application.symbol_monitoring as mod
+
+    captured_plan: dict[str, object] = {}
+    captured_required_data: dict[str, object] = {}
+    captured_scan: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        mod,
+        "build_required_data_fetch_plan",
+        lambda **kwargs: captured_plan.update(kwargs) or {
+            "symbol": kwargs["symbol"],
+            "merged_specs": [],
+            "side_plans": [],
+            "to_debug_dict": lambda: {"ok": True},
+        },
+    )
+
+    def _apply_prefilters_fn(**kwargs):  # type: ignore[no-untyped-def]
+        capped_sp = dict(kwargs["sp"])
+        capped_sp["max_strike"] = 0
+        return type(
+            "Prefilters",
+            (),
+            {
+                "want_put": False,
+                "want_call": kwargs["want_call"],
+                "sp": capped_sp,
+                "cc": kwargs["cc"],
+                "stock": None,
+            },
+        )()
+
+    deps = mod.SymbolMonitoringDependencies(
+        build_converter_fn=lambda **kwargs: object(),
+        apply_prefilters_fn=_apply_prefilters_fn,
+        apply_multiplier_cache_fn=lambda **kwargs: None,
+        ensure_required_data_fn=lambda **kwargs: captured_required_data.update(kwargs),
+        run_sell_put_scan_fn=lambda **kwargs: captured_scan.update(kwargs) or {"strategy": "yield_enhancement"},
+        empty_sell_put_summary_fn=lambda symbol, symbol_cfg: (_ for _ in ()).throw(AssertionError("sell_put scan should still run for yield enhancement")),
+        run_sell_call_scan_fn=lambda **kwargs: {"strategy": "sell_call"},
+        empty_sell_call_summary_fn=lambda symbol, symbol_cfg: {"strategy": "sell_call"},
+    )
+
+    out = mod.run_symbol_monitoring(
+        inputs=mod.SymbolMonitoringInputs(
+            py="python3",
+            base=tmp_path,
+            symbol_cfg={
+                "symbol": "9992.HK",
+                "fetch": {"host": "127.0.0.1", "port": 11111, "limit_expirations": 8},
+                "sell_put": {
+                    "enabled": True,
+                    "min_dte": 20,
+                    "max_dte": 60,
+                    "min_strike": 10,
+                    "max_strike": 50,
+                },
+                "yield_enhancement": {"enabled": True},
+                "sell_call": {"enabled": False},
+            },
+            top_n=3,
+            portfolio_ctx={"cash_by_currency": {"HKD": 0}},
+            usd_per_cny_exchange_rate=None,
+            cny_per_hkd_exchange_rate=None,
+            timeout_sec=10,
+            required_data_dir=tmp_path / "required_data",
+            report_dir=tmp_path / "reports",
+            state_dir=tmp_path / "state",
+            is_scheduled=False,
+        ),
+        deps=deps,
+    )
+
+    assert [row["strategy"] for row in out] == ["yield_enhancement", "sell_call"]
+    assert captured_required_data["want_put"] is True
+    assert captured_required_data["want_call"] is True
+    assert captured_required_data["max_strike"] == 50.0
+    assert captured_plan["want_put"] is True
+    assert captured_plan["sell_put_cfg"]["max_strike"] == 50
+    assert captured_scan["run_sell_put"] is False
+    assert captured_scan["sp"]["max_strike"] == 0
+    assert captured_scan["yield_enhancement_sell_put_cfg"]["max_strike"] == 50

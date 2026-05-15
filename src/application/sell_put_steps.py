@@ -228,6 +228,8 @@ def run_sell_put_scan_and_summarize(
     portfolio_ctx: dict[str, Any] | None,
     global_sell_put_liquidity: dict[str, Any] | None = None,
     global_sell_put_event_risk: dict[str, Any] | None = None,
+    run_sell_put: bool = True,
+    yield_enhancement_sell_put_cfg: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     symbol_sp = (report_dir / f'{symbol_lower}_sell_put_candidates.csv').resolve()
     symbol_sp_labeled = (report_dir / f'{symbol_lower}_sell_put_candidates_labeled.csv').resolve()
@@ -238,6 +240,7 @@ def run_sell_put_scan_and_summarize(
     yield_enhancement_cfg = resolve_yield_enhancement_cfg(symbol_cfg)
     yield_enhancement_inline = wants_yield_enhancement_inline(yield_enhancement_cfg)
     yield_enhancement_separate = wants_yield_enhancement_separate(yield_enhancement_cfg)
+    yield_sp = dict(yield_enhancement_sell_put_cfg or sp)
 
     resolved_min_annualized_net_return = validate_min_annualized_net_return(
         sp.get('min_annualized_net_return'),
@@ -247,6 +250,7 @@ def run_sell_put_scan_and_summarize(
     liquidity = resolve_candidate_liquidity(global_sell_put_liquidity)
     event_risk = resolve_event_risk_config(global_sell_put_event_risk)
     window = resolve_candidate_window(sp, defaults=DEFAULT_SELL_PUT_WINDOW)
+    yield_window = resolve_candidate_window(yield_sp, defaults=DEFAULT_SELL_PUT_WINDOW)
     global_min_net_income = float((global_sell_put_liquidity or {}).get('min_net_income', 0.0) or 0.0)
     min_net_income_cny = float(sp.get('min_net_income', global_min_net_income) or 0.0)
 
@@ -268,7 +272,7 @@ def run_sell_put_scan_and_summarize(
             else:
                 min_net_income_native = float(converted_min_income)
 
-    if sell_put_scan_allowed:
+    if run_sell_put and sell_put_scan_allowed:
         run_sell_put_scan(
             symbols=[sym],
             input_root=required_data_dir,
@@ -310,36 +314,28 @@ def run_sell_put_scan_and_summarize(
             symbols=[sym],
             input_root=required_data_dir,
             output=symbol_yield_put_universe,
-            min_dte=window.min_dte,
-            max_dte=window.max_dte,
+            min_dte=yield_window.min_dte,
+            max_dte=yield_window.max_dte,
             min_annualized_net_return=0.0,
             min_net_income=0.0,
-            min_strike=_optional_float(sp, 'min_strike'),
-            max_strike=_optional_float(sp, 'max_strike'),
+            min_strike=_optional_float(yield_sp, 'min_strike'),
+            max_strike=_optional_float(yield_sp, 'max_strike'),
             min_open_interest=liquidity.min_open_interest,
             min_volume=liquidity.min_volume,
             max_spread_ratio=liquidity.max_spread_ratio,
             event_risk_cfg=event_risk,
-            score_weights=sp.get('score_weights'),
+            score_weights=yield_sp.get('score_weights'),
             quiet=True,
         )
         add_sell_put_labels(base, symbol_yield_put_universe, symbol_yield_put_universe_labeled)
         df_yield_put_universe = safe_read_csv(symbol_yield_put_universe_labeled)
-        if not df_yield_put_universe.empty:
-            df_yield_put_universe = _enrich_and_filter_sell_put_cash(
-                df_labeled=df_yield_put_universe,
-                symbol=symbol,
-                portfolio_ctx=portfolio_ctx,
-                exchange_rate_converter=exchange_rate_converter,
-                out_path=symbol_yield_put_universe_labeled,
-            )
 
     raw_yield_pairs_df = find_sell_put_yield_enhancement_pairs(
         df_candidates=df_yield_put_universe,
         symbol=symbol,
         input_root=required_data_dir,
         yield_enhancement_cfg=yield_enhancement_cfg,
-        sell_put_cfg=sp,
+        sell_put_cfg=yield_sp,
         global_yield_enhancement_liquidity=(symbol_cfg.get('_global_yield_enhancement_liquidity') or {}),
         output_path=None,
     )

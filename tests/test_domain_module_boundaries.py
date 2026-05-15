@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import importlib
 from pathlib import Path
 
 
@@ -40,6 +41,44 @@ def test_application_package_does_not_import_scripts_layer() -> None:
                 offenders.append(f"{path.relative_to(ROOT)}:{lineno}:{module}")
 
     assert offenders == []
+
+
+def test_agent_wiki_references_current_architecture_symbols() -> None:
+    text = (ROOT / "docs" / "AGENT_WIKI.md").read_text(encoding="utf-8")
+    symbols_by_module = {
+        "domain.domain.engine.candidate_engine": (
+            "evaluate_candidate_input",
+            "evaluate_candidate_hard_constraints",
+            "evaluate_candidate_return_floor",
+            "evaluate_candidate_risk_filter",
+            "rank_candidate_rows",
+        ),
+        "domain.domain.option_position_ledger": (
+            "project_position_lot_records",
+            "project_position_lot_records_with_diagnostics",
+        ),
+        "domain.domain.close_advice": (
+            "evaluate_close_advice",
+            "evaluate_close_optimizer",
+        ),
+        "src.application.multi_account_tick": ("run_tick",),
+    }
+
+    for module_name, current_names in symbols_by_module.items():
+        module = importlib.import_module(module_name)
+        for current_name in current_names:
+            assert hasattr(module, current_name)
+            assert current_name in text
+    assert "run_tick(argv: list[str] | None = None) -> int" in text
+
+    for stale_name in (
+        "evaluate_candidates(",
+        "project_position_lots(",
+        "generate_close_advice(",
+        "config_path: str",
+        "dry_run: bool",
+    ):
+        assert stale_name not in text
 
 
 def test_legacy_wrapper_modules_are_removed() -> None:
