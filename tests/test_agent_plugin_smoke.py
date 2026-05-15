@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
@@ -11,7 +12,7 @@ if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
 
-def _minimal_cfg() -> dict:
+def _minimal_cfg() -> dict[str, Any]:
     return {
         "accounts": ["user1"],
         "portfolio": {
@@ -48,7 +49,7 @@ def _minimal_cfg() -> dict:
     }
 
 
-def _public_cfg_with_futu(data_config_ref: str) -> dict:
+def _public_cfg_with_futu(data_config_ref: str) -> dict[str, Any]:
     cfg = _minimal_cfg()
     cfg["account_settings"] = {
         "user1": {
@@ -76,7 +77,7 @@ def _public_cfg_with_futu(data_config_ref: str) -> dict:
     return cfg
 
 
-def _public_cfg_with_futu_auto_source(data_config_ref: str) -> dict:
+def _public_cfg_with_futu_auto_source(data_config_ref: str) -> dict[str, Any]:
     cfg = _public_cfg_with_futu(data_config_ref)
     cfg["account_settings"]["user1"]["holdings_account"] = "lx"
     cfg["portfolio"]["source"] = "auto"
@@ -84,7 +85,7 @@ def _public_cfg_with_futu_auto_source(data_config_ref: str) -> dict:
     return cfg
 
 
-def _public_cfg_with_external_holdings(data_config_ref: str) -> dict:
+def _public_cfg_with_external_holdings(data_config_ref: str) -> dict[str, Any]:
     cfg = _public_cfg_with_futu(data_config_ref)
     cfg["accounts"] = ["user1", "ext1"]
     cfg["account_settings"]["ext1"] = {
@@ -1067,6 +1068,111 @@ def test_runtime_status_summarizes_openclaw_runtime_files(tmp_path: Path) -> Non
     assert out["data"]["trade_intake"]["summary"]["processed_count"] == 1
     assert out["data"]["trade_intake"]["summary"]["receipt_confirmed_count"] == 1
     assert out["data"]["trade_intake"]["audit"]["exists"] is True
+
+
+def test_runtime_status_can_inspect_scanned_run_after_skipped_latest(tmp_path: Path) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    def write_json(path: Path, payload: dict[str, object]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    cfg_path = tmp_path / "config.us.json"
+    cfg = _minimal_cfg()
+    cfg["accounts"] = ["user1", "user2"]
+    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    state_dir = tmp_path / "output" / "state"
+    report_dir = tmp_path / "output" / "reports"
+    shared_state_dir = tmp_path / "output_shared" / "state"
+    accounts_root = tmp_path / "output_accounts"
+    runs_root = tmp_path / "output_runs"
+    for path in (state_dir, report_dir, shared_state_dir, runs_root):
+        path.mkdir(parents=True, exist_ok=True)
+    (report_dir / "symbols_notification.txt").write_text("shared notification\n", encoding="utf-8")
+    write_json(shared_state_dir / "last_run.json", {"status": "ok", "run_id": "run-skip"})
+
+    run_scan = runs_root / "run-scan"
+    run_skip = runs_root / "run-skip"
+    write_json(
+        run_scan / "state" / "tick_metrics.json",
+        {
+            "accounts": {
+                "user1": {"ran_scan": True, "pipeline_ms": 1234, "reason": "force: bypass guard"},
+                "user2": {"ran_scan": True, "pipeline_ms": 987, "reason": "force: bypass guard"},
+            }
+        },
+    )
+    write_json(
+        run_skip / "state" / "tick_metrics.json",
+        {
+            "accounts": {
+                "user1": {"ran_scan": False, "pipeline_ms": None, "reason": "业务运行窗口外"},
+                "user2": {"ran_scan": False, "pipeline_ms": None, "reason": "业务运行窗口外"},
+            }
+        },
+    )
+    for account in ("user1", "user2"):
+        write_json(run_scan / "accounts" / account / "state" / "last_run.json", {"ran_scan": True, "status": "ok"})
+        write_json(run_skip / "accounts" / account / "state" / "last_run.json", {"ran_scan": False, "status": "skipped"})
+        (run_scan / "accounts" / account / "symbols_notification.txt").write_text("持仓扫描结果\n", encoding="utf-8")
+
+    write_json(
+        run_scan / "accounts" / "user1" / "state" / "required_data_prefetch_summary.json",
+        {
+            "errors": 0,
+            "cached_unique_symbols": 0,
+            "deduped_count": 0,
+            "skipped": 0,
+            "force_refresh": True,
+        },
+    )
+    (shared_state_dir / "last_run_dir.txt").write_text(str(run_skip), encoding="utf-8")
+
+    payload = {
+        "config_path": str(cfg_path),
+        "state_dir": str(state_dir),
+        "report_dir": str(report_dir),
+        "shared_state_dir": str(shared_state_dir),
+        "accounts_root": str(accounts_root),
+        "runs_root": str(runs_root),
+    }
+    out = run_tool("runtime_status", payload)
+
+    assert out["ok"] is True
+    assert out["warnings"] == []
+    data = out["data"]
+    assert data["latest_run"]["path"].endswith("run-skip")
+    assert data["latest_run_selection"]["source"] == "last_run_dir_or_mtime"
+    assert data["latest_scanned_run"]["path"].endswith("run-scan")
+    assert data["summary"]["latest_scanned_run_path"].endswith("run-scan")
+    assert data["required_data_prefetch"]["available"] is False
+
+    scanned_prefetch = data["latest_scanned_run_required_data_prefetch"]
+    assert scanned_prefetch["available"] is True
+    assert scanned_prefetch["available_account_count"] == 1
+    assert scanned_prefetch["missing_account_count"] == 1
+    assert scanned_prefetch["force_refresh_account_count"] == 1
+    assert scanned_prefetch["shared_run_summary"] is True
+    assert scanned_prefetch["shared_summary_account"] == "user1"
+    assert scanned_prefetch["opend_calls_reported_account_count"] == 0
+    assert scanned_prefetch["total_opend_calls"] == 0
+    assert scanned_prefetch["total_cached_unique_symbols"] == 0
+    assert scanned_prefetch["accounts"]["user1"]["force_refresh"] is True
+    assert scanned_prefetch["accounts"]["user1"]["opend_calls_reported"] is False
+
+    out_by_id = run_tool("runtime_status", {**payload, "run_id": "run-scan"})
+    assert out_by_id["ok"] is True
+    assert out_by_id["data"]["latest_run_selection"]["source"] == "run_id"
+    assert out_by_id["data"]["latest_run_selection"]["found"] is True
+    assert out_by_id["data"]["latest_run"]["path"].endswith("run-scan")
+    assert out_by_id["data"]["required_data_prefetch"]["available"] is True
+
+    out_by_dir = run_tool("runtime_status", {**payload, "run_dir": str(run_scan)})
+    assert out_by_dir["ok"] is True
+    assert out_by_dir["data"]["latest_run_selection"]["source"] == "run_dir"
+    assert out_by_dir["data"]["latest_run_selection"]["found"] is True
+    assert out_by_dir["data"]["latest_run"]["path"].endswith("run-scan")
 
 
 def test_runtime_status_loads_openclaw_profile_and_masks_external_paths(tmp_path: Path) -> None:

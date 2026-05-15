@@ -39,6 +39,8 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     runtime_status = next(item for item in spec["tools"] if item["name"] == "runtime_status")
     assert runtime_status["risk_level"] == "read_only"
     assert runtime_status["requires_confirm"] is False
+    assert "run_id" in runtime_status["input_schema"]
+    assert "run_dir" in runtime_status["input_schema"]
     income_report = next(item for item in spec["tools"] if item["name"] == "monthly_income_report")
     assert income_report["risk_level"] == "read_only"
     assert income_report["requires_confirm"] is False

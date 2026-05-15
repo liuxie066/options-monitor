@@ -264,6 +264,11 @@ def _freshness_from_runtime_status(
     latest_state_raw = latest_run.get("state")
     latest_state: dict[str, Any] = latest_state_raw if isinstance(latest_state_raw, dict) else {}
     collect("latest_run.last_run", latest_state.get("last_run"))
+    latest_scanned_raw = data.get("latest_scanned_run")
+    latest_scanned: dict[str, Any] = latest_scanned_raw if isinstance(latest_scanned_raw, dict) else {}
+    latest_scanned_state_raw = latest_scanned.get("state")
+    latest_scanned_state: dict[str, Any] = latest_scanned_state_raw if isinstance(latest_scanned_state_raw, dict) else {}
+    collect("latest_scanned_run.last_run", latest_scanned_state.get("last_run"))
     accounts_raw = data.get("accounts")
     accounts: dict[str, Any] = accounts_raw if isinstance(accounts_raw, dict) else {}
     for account, item in accounts.items():
@@ -362,15 +367,24 @@ def _prefetch_account_summary(info: dict[str, Any]) -> dict[str, Any]:
     payload: dict[str, Any] = payload_raw if isinstance(payload_raw, dict) else {}
     run_summary_raw = payload.get("run_fetch_summary")
     run_summary: dict[str, Any] = run_summary_raw if isinstance(run_summary_raw, dict) else {}
+    opend_calls = _numeric_dict(run_summary.get("opend_calls"))
+    cache = _numeric_dict(run_summary.get("cache"))
+    rate_gate_wait_sec = _numeric_dict(run_summary.get("rate_gate_wait_sec"))
+    force_refresh = payload.get("force_refresh")
     out.update(
         {
             "bottleneck": run_summary.get("bottleneck"),
             "to_fetch": _number_or_none(payload.get("to_fetch")),
             "deduped_count": _number_or_none(payload.get("deduped_count")),
+            "cached_unique_symbols": _number_or_none(payload.get("cached_unique_symbols")),
+            "skipped": _number_or_none(payload.get("skipped")),
+            "force_refresh": force_refresh if isinstance(force_refresh, bool) else None,
             "errors": _number_or_none(payload.get("errors")),
-            "opend_calls": _numeric_dict(run_summary.get("opend_calls")),
-            "cache": _numeric_dict(run_summary.get("cache")),
-            "rate_gate_wait_sec": _numeric_dict(run_summary.get("rate_gate_wait_sec")),
+            "opend_calls": opend_calls,
+            "opend_calls_reported": bool(opend_calls),
+            "cache": cache,
+            "rate_gate_wait_sec": rate_gate_wait_sec,
+            "rate_gate_wait_reported": bool(rate_gate_wait_sec),
         }
     )
     snapshot = run_summary.get("snapshot")
@@ -388,43 +402,79 @@ def _latest_run_prefetch_summary(latest_run_payload: dict[str, Any] | None) -> d
     total_opend_calls = 0
     total_rate_gate_wait_sec = 0.0
     total_errors = 0
+    total_to_fetch = 0
+    total_deduped_count = 0
+    total_cached_unique_symbols = 0
+    total_skipped = 0
     available_account_count = 0
+    opend_calls_reported_account_count = 0
+    rate_gate_wait_reported_account_count = 0
+    force_refresh_account_count = 0
+    first_available_account: str | None = None
 
     for account, item in latest_accounts.items():
         if not isinstance(item, dict):
             continue
+        account_name = str(account)
         info_raw = item.get("required_data_prefetch")
         info: dict[str, Any] = info_raw if isinstance(info_raw, dict) else {}
         account_summary = _prefetch_account_summary(info)
-        accounts[str(account)] = account_summary
+        accounts[account_name] = account_summary
         if not account_summary.get("exists"):
             continue
         available_account_count += 1
+        if first_available_account is None:
+            first_available_account = account_name
         bottleneck = str(account_summary.get("bottleneck") or "unknown")
         bottlenecks[bottleneck] = bottlenecks.get(bottleneck, 0) + 1
         opend_calls_raw = account_summary.get("opend_calls")
         opend_calls: dict[str, Any] = opend_calls_raw if isinstance(opend_calls_raw, dict) else {}
+        if account_summary.get("opend_calls_reported"):
+            opend_calls_reported_account_count += 1
         total_opend_calls += int(opend_calls.get("total") or 0)
         waits_raw = account_summary.get("rate_gate_wait_sec")
         waits: dict[str, Any] = waits_raw if isinstance(waits_raw, dict) else {}
+        if account_summary.get("rate_gate_wait_reported"):
+            rate_gate_wait_reported_account_count += 1
         total_rate_gate_wait_sec += sum(float(value) for value in waits.values())
         total_errors += int(account_summary.get("errors") or 0)
+        total_to_fetch += int(account_summary.get("to_fetch") or 0)
+        total_deduped_count += int(account_summary.get("deduped_count") or 0)
+        total_cached_unique_symbols += int(account_summary.get("cached_unique_symbols") or 0)
+        total_skipped += int(account_summary.get("skipped") or 0)
+        if account_summary.get("force_refresh") is True:
+            force_refresh_account_count += 1
 
     primary_bottleneck = None
     if bottlenecks:
         primary_bottleneck = max(bottlenecks.items(), key=lambda item: (item[1], item[0]))[0]
+    missing_account_count = len(accounts) - available_account_count
+    shared_run_summary = bool(available_account_count and missing_account_count and force_refresh_account_count)
 
-    return {
+    summary = {
         "available": available_account_count > 0,
         "account_count": len(accounts),
         "available_account_count": available_account_count,
+        "missing_account_count": missing_account_count,
         "primary_bottleneck": primary_bottleneck,
         "bottlenecks": bottlenecks,
         "total_opend_calls": total_opend_calls,
+        "opend_calls_reported_account_count": opend_calls_reported_account_count,
         "total_rate_gate_wait_sec": round(total_rate_gate_wait_sec, 3),
+        "rate_gate_wait_reported_account_count": rate_gate_wait_reported_account_count,
         "total_errors": total_errors,
+        "total_to_fetch": total_to_fetch,
+        "total_deduped_count": total_deduped_count,
+        "total_cached_unique_symbols": total_cached_unique_symbols,
+        "total_skipped": total_skipped,
+        "force_refresh_account_count": force_refresh_account_count,
+        "shared_run_summary": shared_run_summary,
+        "shared_summary_account": first_available_account if shared_run_summary else None,
         "accounts": accounts,
     }
+    if shared_run_summary:
+        summary["note"] = "Prefetch summary may be shared across accounts when force_refresh prefetch runs once."
+    return summary
 
 
 def _json_payload(file_info: Any) -> dict[str, Any]:
@@ -552,6 +602,179 @@ def _latest_run_dir(base: Path, *, pointer_path: Path, runs_root: Path) -> Path 
     if not dirs:
         return None
     return max(dirs, key=lambda item: item.stat().st_mtime)
+
+
+def _run_payload(
+    run_dir: Path,
+    *,
+    accounts: list[str],
+    base: Path,
+    read_json_object_or_empty: Callable[[Path], dict[str, Any]],
+    max_notification_chars: int,
+) -> dict[str, Any]:
+    run_accounts: dict[str, Any] = {}
+    for account in accounts:
+        run_account_root = run_dir / "accounts" / account
+        run_accounts[account] = {
+            "last_run": _json_file_info(
+                run_account_root / "state" / "last_run.json",
+                base=base,
+                read_json_object_or_empty=read_json_object_or_empty,
+            ),
+            "expired_position_maintenance": _json_file_info(
+                run_account_root / "state" / "expired_position_maintenance.json",
+                base=base,
+                read_json_object_or_empty=read_json_object_or_empty,
+            ),
+            "notification": _text_file_info(
+                run_account_root / "symbols_notification.txt",
+                base=base,
+                max_chars=max_notification_chars,
+            ),
+            "required_data_prefetch": _json_file_info(
+                run_account_root / "state" / "required_data_prefetch_summary.json",
+                base=base,
+                read_json_object_or_empty=read_json_object_or_empty,
+            ),
+        }
+    return {
+        "path": _relative_path(run_dir, base=base),
+        "state": {
+            "last_run": _json_file_info(
+                run_dir / "state" / "last_run.json",
+                base=base,
+                read_json_object_or_empty=read_json_object_or_empty,
+            ),
+            "tick_metrics": _json_file_info(
+                run_dir / "state" / "tick_metrics.json",
+                base=base,
+                read_json_object_or_empty=read_json_object_or_empty,
+            ),
+        },
+        "accounts": run_accounts,
+    }
+
+
+def _requested_run_dir_from_payload(
+    payload: dict[str, Any],
+    *,
+    base: Path,
+    runs_root: Path,
+) -> tuple[Path | None, dict[str, Any]]:
+    raw_run_dir = str(payload.get("run_dir") or "").strip()
+    if raw_run_dir:
+        run_dir = Path(raw_run_dir).expanduser()
+        if not run_dir.is_absolute():
+            run_dir = (base / run_dir).resolve()
+        found = run_dir.exists() and run_dir.is_dir()
+        return (
+            run_dir if found else None,
+            {
+                "requested": True,
+                "source": "run_dir",
+                "value": raw_run_dir,
+                "path": _relative_path(run_dir, base=base),
+                "found": found,
+            },
+        )
+
+    raw_run_id = str(payload.get("run_id") or "").strip()
+    if raw_run_id:
+        run_id = Path(raw_run_id)
+        direct_child = not run_id.is_absolute() and run_id.name == raw_run_id
+        run_dir = (runs_root / raw_run_id).resolve() if direct_child else (runs_root / run_id.name).resolve()
+        found = direct_child and run_dir.exists() and run_dir.is_dir()
+        selection: dict[str, Any] = {
+            "requested": True,
+            "source": "run_id",
+            "value": raw_run_id,
+            "path": _relative_path(run_dir, base=base),
+            "found": found,
+        }
+        if not direct_child:
+            selection["error"] = "run_id must be a direct child of runs_root"
+        return run_dir if found else None, selection
+
+    return None, {"requested": False, "source": "last_run_dir_or_mtime"}
+
+
+def _latest_run_selection(*, latest_run: Path | None, base: Path) -> dict[str, Any]:
+    return {
+        "requested": False,
+        "source": "last_run_dir_or_mtime",
+        "path": _relative_path(latest_run, base=base) if latest_run is not None else None,
+        "found": latest_run is not None,
+    }
+
+
+def _run_payload_has_scan(run_payload: dict[str, Any]) -> bool:
+    state_raw = run_payload.get("state")
+    state: dict[str, Any] = state_raw if isinstance(state_raw, dict) else {}
+    tick_metrics = _json_payload(state.get("tick_metrics"))
+    if tick_metrics.get("ran_scan") is True:
+        return True
+
+    tick_accounts_raw = tick_metrics.get("accounts")
+    tick_account_items: list[Any] = []
+    if isinstance(tick_accounts_raw, dict):
+        tick_account_items = list(tick_accounts_raw.values())
+    elif isinstance(tick_accounts_raw, list):
+        tick_account_items = tick_accounts_raw
+    if any(isinstance(item, dict) and item.get("ran_scan") is True for item in tick_account_items):
+        return True
+
+    if _json_payload(state.get("last_run")).get("ran_scan") is True:
+        return True
+
+    accounts_raw = run_payload.get("accounts")
+    accounts: dict[str, Any] = accounts_raw if isinstance(accounts_raw, dict) else {}
+    for item in accounts.values():
+        if isinstance(item, dict) and _json_payload(item.get("last_run")).get("ran_scan") is True:
+            return True
+    return False
+
+
+def _run_dirs_newest_first(runs_root: Path) -> list[Path]:
+    if not runs_root.exists() or not runs_root.is_dir():
+        return []
+    dirs: list[Path] = []
+    for item in runs_root.iterdir():
+        if item.is_dir():
+            dirs.append(item)
+    return sorted(dirs, key=lambda item: (item.stat().st_mtime, item.name), reverse=True)
+
+
+def _latest_scanned_run_payload(
+    *,
+    runs_root: Path,
+    accounts: list[str],
+    base: Path,
+    read_json_object_or_empty: Callable[[Path], dict[str, Any]],
+    max_notification_chars: int,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    searched_count = 0
+    for run_dir in _run_dirs_newest_first(runs_root):
+        searched_count += 1
+        candidate = _run_payload(
+            run_dir,
+            accounts=accounts,
+            base=base,
+            read_json_object_or_empty=read_json_object_or_empty,
+            max_notification_chars=max_notification_chars,
+        )
+        if _run_payload_has_scan(candidate):
+            return candidate, {
+                "source": "runs_root_mtime",
+                "searched_count": searched_count,
+                "found": True,
+                "path": candidate.get("path"),
+            }
+    return None, {
+        "source": "runs_root_mtime",
+        "searched_count": searched_count,
+        "found": False,
+        "path": None,
+    }
 
 
 def _accounts_from_runtime(
@@ -701,54 +924,37 @@ def runtime_status_tool(
         }
 
     pointer_path = shared_state_dir / "last_run_dir.txt"
-    latest_run = _latest_run_dir(base, pointer_path=pointer_path, runs_root=runs_root)
+    requested_run, latest_run_selection = _requested_run_dir_from_payload(payload, base=base, runs_root=runs_root)
+    if latest_run_selection.get("requested"):
+        latest_run = requested_run
+    else:
+        latest_run = _latest_run_dir(base, pointer_path=pointer_path, runs_root=runs_root)
+        latest_run_selection = _latest_run_selection(latest_run=latest_run, base=base)
     latest_run_payload: dict[str, Any] | None = None
     if latest_run is not None:
-        run_accounts: dict[str, Any] = {}
-        for account in accounts:
-            run_account_root = latest_run / "accounts" / account
-            run_accounts[account] = {
-                "last_run": _json_file_info(
-                    run_account_root / "state" / "last_run.json",
-                    base=base,
-                    read_json_object_or_empty=read_json_object_or_empty,
-                ),
-                "expired_position_maintenance": _json_file_info(
-                    run_account_root / "state" / "expired_position_maintenance.json",
-                    base=base,
-                    read_json_object_or_empty=read_json_object_or_empty,
-                ),
-                "notification": _text_file_info(
-                    run_account_root / "symbols_notification.txt",
-                    base=base,
-                    max_chars=max_notification_chars,
-                ),
-                "required_data_prefetch": _json_file_info(
-                    run_account_root / "state" / "required_data_prefetch_summary.json",
-                    base=base,
-                    read_json_object_or_empty=read_json_object_or_empty,
-                ),
-            }
-        latest_run_payload = {
-            "path": _relative_path(latest_run, base=base),
-            "state": {
-                "last_run": _json_file_info(
-                    latest_run / "state" / "last_run.json",
-                    base=base,
-                    read_json_object_or_empty=read_json_object_or_empty,
-                ),
-                "tick_metrics": _json_file_info(
-                    latest_run / "state" / "tick_metrics.json",
-                    base=base,
-                    read_json_object_or_empty=read_json_object_or_empty,
-                ),
-            },
-            "accounts": run_accounts,
-        }
+        latest_run_payload = _run_payload(
+            latest_run,
+            accounts=accounts,
+            base=base,
+            read_json_object_or_empty=read_json_object_or_empty,
+            max_notification_chars=max_notification_chars,
+        )
 
     prefetch_summary = _latest_run_prefetch_summary(latest_run_payload)
+    latest_scanned_run_payload, latest_scanned_run_selection = _latest_scanned_run_payload(
+        runs_root=runs_root,
+        accounts=accounts,
+        base=base,
+        read_json_object_or_empty=read_json_object_or_empty,
+        max_notification_chars=max_notification_chars,
+    )
+    latest_scanned_prefetch_summary = _latest_run_prefetch_summary(latest_scanned_run_payload)
 
     warnings: list[str] = []
+    if latest_run_selection.get("requested") and not latest_run_selection.get("found"):
+        source = latest_run_selection.get("source")
+        value = latest_run_selection.get("value")
+        warnings.append(f"Requested runtime run not found: {source}={value}.")
     if not shared_last_run.get("exists") and not legacy_last_run.get("exists"):
         warnings.append("No last_run.json found under output_shared/state or output/state.")
     if not notification.get("exists") and not any(item["notification"].get("exists") for item in account_status.values()):
@@ -791,8 +997,12 @@ def runtime_status_tool(
         },
         "trade_intake": trade_intake,
         "accounts": account_status,
+        "latest_run_selection": latest_run_selection,
         "latest_run": latest_run_payload,
+        "latest_scanned_run_selection": latest_scanned_run_selection,
+        "latest_scanned_run": latest_scanned_run_payload,
         "required_data_prefetch": prefetch_summary,
+        "latest_scanned_run_required_data_prefetch": latest_scanned_prefetch_summary,
         "trigger_context": trigger_context,
         "notification_diagnosis": notification_diagnosis,
         "account_summary": {},
@@ -808,8 +1018,12 @@ def runtime_status_tool(
     data["freshness"] = _freshness_from_runtime_status(data, max_age_minutes=max_run_age_minutes)
     data["summary"]["freshness_status"] = data["freshness"].get("status")
     data["summary"]["account_count"] = data["account_summary"].get("account_count")
+    data["summary"]["latest_run_path"] = latest_run_payload.get("path") if latest_run_payload else None
+    data["summary"]["latest_scanned_run_path"] = latest_scanned_run_payload.get("path") if latest_scanned_run_payload else None
     data["summary"]["prefetch_available"] = prefetch_summary.get("available")
     data["summary"]["prefetch_bottleneck"] = prefetch_summary.get("primary_bottleneck")
+    data["summary"]["latest_scanned_run_prefetch_available"] = latest_scanned_prefetch_summary.get("available")
+    data["summary"]["latest_scanned_run_prefetch_bottleneck"] = latest_scanned_prefetch_summary.get("primary_bottleneck")
     return data, warnings, {"config_path": mask_path(config_path)}
 
 
