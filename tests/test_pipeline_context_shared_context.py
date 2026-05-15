@@ -48,7 +48,6 @@ def test_build_pipeline_context_resolves_portfolio_source_by_account() -> None:
     captured: dict[str, object] = {}
     old_load_portfolio_context = pc.load_portfolio_context
     old_load_option_positions_context = pc.load_option_positions_context
-    old_auto_close = pc.maybe_auto_close_expired_positions
     old_load_exchange_rates = pc.load_exchange_rates
     try:
         def _fake_load_portfolio_context(**kwargs):  # type: ignore[no-untyped-def]
@@ -61,7 +60,6 @@ def test_build_pipeline_context_resolves_portfolio_source_by_account() -> None:
 
         pc.load_portfolio_context = _fake_load_portfolio_context  # type: ignore[assignment]
         pc.load_option_positions_context = _fake_load_option_positions_context  # type: ignore[assignment]
-        pc.maybe_auto_close_expired_positions = lambda **_kwargs: None  # type: ignore[assignment]
         pc.load_exchange_rates = lambda **_kwargs: (None, None)  # type: ignore[assignment]
 
         with TemporaryDirectory() as td:
@@ -96,7 +94,6 @@ def test_build_pipeline_context_resolves_portfolio_source_by_account() -> None:
     finally:
         pc.load_portfolio_context = old_load_portfolio_context  # type: ignore[assignment]
         pc.load_option_positions_context = old_load_option_positions_context  # type: ignore[assignment]
-        pc.maybe_auto_close_expired_positions = old_auto_close  # type: ignore[assignment]
         pc.load_exchange_rates = old_load_exchange_rates  # type: ignore[assignment]
 
 

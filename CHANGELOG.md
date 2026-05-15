@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 1.2.55 - 2026-05-16
+
+### Added
+- Added `./om option-positions auto-close-expired` as the dedicated expired-position auto-close entrypoint with runtime config, account, dry-run/apply, `--no-send`, and persisted run-state support.
+
+### Changed
+- Removed expired auto-close execution from option-monitor tick/account/pipeline orchestration so scans no longer perform maintenance writes as a side effect.
+- Removed the obsolete `option_positions.auto_close.run_on_tick` config knob and related validation surface.
+- Updated README, RUNBOOK, CONFIGS, and configuration guidance to document auto-close as an independent scheduled/manual workflow.
+
+### Tests
+- Added dedicated auto-close command coverage and removed tick notification/account-run tests that depended on auto-close side effects.
+- Re-ran focused tick, position-maintenance, auto-close, config dry-run, compile, diff, and targeted type checks.
+
 ## 1.2.54 - 2026-05-15
 
 ### Added

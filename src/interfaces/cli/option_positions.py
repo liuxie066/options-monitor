@@ -9,12 +9,14 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from typing import Any
 
 from domain.domain.option_position_lots import (
     normalize_account,
     normalize_broker,
 )
 from src.application.option_positions_service import persist_manual_void_event
+from src.application.option_positions_auto_close import main as run_option_positions_auto_close
 from src.application.option_positions_feishu_sync import main as run_option_positions_feishu_sync
 from src.application.position_workflows import (
     ManualCloseMatchError,
@@ -158,9 +160,48 @@ def main(argv: list[str] | None = None) -> int:
     p_sync_feishu.add_argument("--no-send", action="store_true", help="do not send sync receipt notifications")
     p_sync_feishu.add_argument("--verbose", action="store_true", help="print payload details")
 
+    p_auto_close = sub.add_parser('auto-close-expired', help='auto-close expired option position lots')
+    p_auto_close.add_argument("--config", dest="auto_close_config", default=None, help="runtime config path; provides accounts and portfolio.data_config")
+    p_auto_close.add_argument("--data-config", dest="auto_close_data_config", default=None, help="portfolio data config path; overrides runtime config when provided")
+    p_auto_close.add_argument("--accounts", nargs="+", default=None, help="accounts to process; defaults to runtime config accounts")
+    p_auto_close.add_argument("--broker", default=None, help="optional broker filter override")
+    p_auto_close.add_argument("--apply", action="store_true", help="append close events for expired lots")
+    p_auto_close.add_argument("--dry-run", action="store_true", help="preview without writing close events")
+    p_auto_close.add_argument("--as-of-utc", default=None, help="ISO datetime; default is current UTC")
+    p_auto_close.add_argument("--no-send", action="store_true", help="do not send auto-close receipt notifications")
+    p_auto_close.add_argument("--format", choices=["json", "text"], default="json")
+    p_auto_close.add_argument("--quiet", action="store_true", help="suppress stdout")
+
     args = ap.parse_args(argv)
 
     base = Path(__file__).resolve().parents[3]
+    if args.cmd == 'auto-close-expired':
+        auto_close_argv: list[str] = []
+        if args.auto_close_config:
+            auto_close_argv.extend(["--config", str(args.auto_close_config)])
+        if args.auto_close_data_config:
+            auto_close_argv.extend(["--data-config", str(args.auto_close_data_config)])
+        elif args.data_config:
+            auto_close_argv.extend(["--data-config", str(args.data_config)])
+        if args.accounts:
+            auto_close_argv.append("--accounts")
+            auto_close_argv.extend(str(item) for item in args.accounts)
+        if args.broker:
+            auto_close_argv.extend(["--broker", str(args.broker)])
+        if args.apply:
+            auto_close_argv.append("--apply")
+        if args.dry_run:
+            auto_close_argv.append("--dry-run")
+        if args.as_of_utc:
+            auto_close_argv.extend(["--as-of-utc", str(args.as_of_utc)])
+        if args.no_send:
+            auto_close_argv.append("--no-send")
+        if args.format:
+            auto_close_argv.extend(["--format", str(args.format)])
+        if args.quiet:
+            auto_close_argv.append("--quiet")
+        return int(run_option_positions_auto_close(auto_close_argv))
+
     if args.cmd == 'sync-feishu':
         sync_argv: list[str] = []
         if args.sync_config:
@@ -281,7 +322,8 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit(format_manual_close_match_error(e))
         except ValueError as e:
             raise SystemExit(str(e))
-        match = out.get("match") if isinstance(out.get("match"), dict) else {}
+        raw_match = out.get("match")
+        match: dict[str, Any] = raw_match if isinstance(raw_match, dict) else {}
         if match.get("rule") == "strict_contract_unique":
             print(f"[MATCH] rule={match.get('rule')} record_id={match.get('record_id')}")
         patch = out["patch"]

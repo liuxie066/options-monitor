@@ -59,7 +59,6 @@
     "option_positions": {
       "auto_close": {
         "enabled": true,
-        "run_on_tick": true,
         "grace_days": 1,
         "max_close_per_run": 20,
         "receipt": {
