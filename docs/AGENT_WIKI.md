@@ -1,12 +1,14 @@
 # Agent Wiki — options-monitor
 
-> Agent-oriented codebase reference. For human-readable architecture overview, see `ARCHITECTURE.md`.
+> Agent-oriented codebase reference. For human-readable architecture overview, see `docs/ARCHITECTURE.md`.
 
 ## 1. Module Map by Task
 
 ### Candidate Scanning
 - **Domain engine**: `domain/domain/engine/candidate_engine.py`
-  - Core function: `evaluate_candidates(candidates_df, constraints, context) → (passed_df, filtered_df)`
+  - Core functions: `evaluate_candidate_input`, `evaluate_candidate_hard_constraints`,
+    `evaluate_candidate_return_floor`, `evaluate_candidate_risk_filter`,
+    `rank_candidate_rows`
   - Steps: input normalization → hard constraints → return floor → risk filter → ranking
 - **Application adapters**: `src/application/candidate_scanning.py`, `src/application/scan_sell_put.py`, `src/application/scan_sell_call.py`
 - **Rule**: Do not add parallel ranking logic in application adapters.
@@ -87,7 +89,10 @@ src.application.pipeline_runtime
 → pipeline_symbol
 → scan_sell_put / scan_sell_call
 → candidate_scanning
-→ domain.domain.engine.candidate_engine.evaluate_candidates
+→ domain.domain.engine.candidate_engine
+  → evaluate_candidate_input / evaluate_candidate_hard_constraints
+  → evaluate_candidate_return_floor / evaluate_candidate_risk_filter
+  → rank_candidate_rows
 ```
 
 ### Option Position Flow
@@ -105,51 +110,33 @@ You do not need to read these files to understand what they do.
 
 ### `domain/domain/engine/candidate_engine.py`
 ```python
-def evaluate_candidates(
-    candidates_df: pd.DataFrame,
-    constraints: dict,
-    context: CandidateContext,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Returns: (passed_candidates, filtered_candidates).
-    Steps: normalization → hard constraints → return floor → risk filter → ranking.
-    """
+def evaluate_candidate_input(row: dict[str, Any]) -> dict[str, Any]: ...
+def evaluate_candidate_hard_constraints(payload: dict[str, Any], constraints: dict[str, Any]) -> dict[str, Any]: ...
+def evaluate_candidate_return_floor(payload: dict[str, Any], constraints: dict[str, Any]) -> dict[str, Any]: ...
+def evaluate_candidate_risk_filter(payload: dict[str, Any], constraints: dict[str, Any]) -> dict[str, Any]: ...
+def rank_candidate_rows(rows: list[dict[str, Any]], *, mode: StrategyMode | str) -> list[dict[str, Any]]: ...
 ```
 
 ### `domain/domain/option_position_ledger.py`
 ```python
-def project_position_lots(
-    trade_events: list[TradeEvent],
-    as_of_date: date | None = None,
-) -> list[PositionLot]:
-    """
-    Projects trade events into option position lots.
-    """
+def project_position_lot_records(events: list[dict[str, Any]] | list[TradeEvent]) -> list[dict[str, Any]]: ...
+def project_position_lot_records_with_diagnostics(events: list[dict[str, Any]] | list[TradeEvent]) -> ProjectionResult: ...
 ```
 
 ### `domain/domain/close_advice.py`
 ```python
-def generate_close_advice(
-    positions: list[PositionLot],
-    market_quotes: dict[str, Quote],
-    policy: ClosePolicy,
-) -> list[CloseAdvice]:
-    """
-    Deterministic close-advice decisions.
-    """
+def evaluate_close_advice(inp: CloseAdviceInput, config: CloseAdviceConfig | None = None) -> dict[str, Any]: ...
+def evaluate_close_optimizer(
+    inp: CloseAdviceInput,
+    optimizer_cfg: CloseOptimizerConfig,
+    *,
+    alternative_annualized_return: float | None = None,
+) -> dict[str, Any]: ...
 ```
 
 ### `src/application/multi_account_tick.py`
 ```python
-def run_tick(
-    config_path: str,
-    accounts: list[str],
-    run_id: str | None = None,
-    dry_run: bool = False,
-) -> TickResult:
-    """
-    Unified tick entry. Single account = ['lx']; multi = ['lx', 'sy'].
-    """
+def run_tick(argv: list[str] | None = None) -> int: ...
 ```
 
 ## 5. Runtime State Paths
