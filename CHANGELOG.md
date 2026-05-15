@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 1.2.51 - 2026-05-15
+
+### Fixed
+- Isolated yield enhancement from account cash prefilters so account-specific sell-put cash caps no longer shrink the market put universe used for YE pair selection.
+- Kept ordinary sell-put cash hard filtering on the account-scoped sell-put path while leaving the YE put universe market-scoped.
+
+### Changed
+- Updated Agent Wiki architecture references to current candidate engine, option-position ledger, close-advice, and tick entrypoint symbols.
+
+### Tests
+- Added regression coverage for account-prefiltered YE orchestration, YE put-universe cash-filter isolation, and current Agent Wiki symbol references.
+- Re-ran focused domain-boundary, sell-put liquidity, symbol-monitoring, YE helper/planning, pipeline wrapper, type, compile, and release metadata checks.
+
 ## 1.2.50 - 2026-05-15
 
 ### Added
