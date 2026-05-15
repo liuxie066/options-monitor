@@ -97,11 +97,11 @@ export function buildGlobalForm(summary, editor) {
     },
     schedule: {
       enabled: sections.schedule?.enabled !== false,
-      market_open: sections.schedule?.market_open == null ? '' : String(sections.schedule.market_open),
-      market_close: sections.schedule?.market_close == null ? '' : String(sections.schedule.market_close),
-      first_notify_after_open_min: sections.schedule?.first_notify_after_open_min == null ? '' : String(sections.schedule.first_notify_after_open_min),
-      notify_interval_min: sections.schedule?.notify_interval_min == null ? '' : String(sections.schedule.notify_interval_min),
-      final_notify_before_close_min: sections.schedule?.final_notify_before_close_min == null ? '' : String(sections.schedule.final_notify_before_close_min),
+      timezone: sections.schedule?.timezone == null ? '' : String(sections.schedule.timezone),
+      cron_interval_min: sections.schedule?.cron_interval_min == null ? '' : String(sections.schedule.cron_interval_min),
+      run_window: sections.schedule?.run_window || null,
+      run_points: sections.schedule?.run_points || null,
+      gates: Array.isArray(sections.schedule?.gates) ? sections.schedule.gates : [],
     },
   };
 }

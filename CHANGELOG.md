@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 1.2.47 - 2026-05-15
+
+### Changed
+- Reworked scan scheduling around explicit `timezone`, `run_window`, `run_points`, `gates`, and `cron_interval_min` settings.
+- Simplified scan/notification timing so scheduled points are open-plus-10 minutes, hourly, and close-minus-10 minutes instead of separate scan and notify intervals.
+- Applied the US Beijing-before-02:00 gate to auto market selection so US tick work is skipped after the cutoff across daylight saving and standard time.
+- Updated WebUI, generated static assets, config validation, migration helpers, and configuration guidance to use the new schedule fields.
+
+### Fixed
+- Preserved per-account scheduler behavior when reading upgraded state by falling back to legacy `last_scan_utc_by_account` only for the matching account.
+- Prevented stale WebUI bundles from shipping old schedule field names.
+
+### Tests
+- Added regression coverage for Beijing cutoff auto-market selection, legacy per-account scheduler state, and committed WebUI schedule bundle contents.
+- Re-ran the full pytest suite, config dry-runs, WebUI bundle checks, and release metadata validation.
+
 ## 1.2.46 - 2026-05-15
 
 ### Added

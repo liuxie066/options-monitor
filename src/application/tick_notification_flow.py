@@ -174,12 +174,8 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
     provider = notify_route.get("provider")
     channel = notify_route.get("channel")
     target = notify_route.get("target")
-    schedule_cfg = request.base_cfg.get("schedule") or {}
-    schedule_v2_cfg = schedule_cfg.get("schedule_v2") or {}
-    schedule_v2_enabled = bool(schedule_v2_cfg.get("enabled", False))
     quiet_hours = notif_cfg.get("quiet_hours_beijing")
     dnd_decision = evaluate_dnd_quiet_hours(
-        schedule_v2_enabled=schedule_v2_enabled,
         quiet_hours=quiet_hours,
         no_send=request.no_send,
         now_bj_time=datetime.now(timezone.utc).astimezone(request.bj_tz).time(),

@@ -11,21 +11,63 @@ def test_scan_scheduler_scan_is_per_account() -> None:
 
     schedule_cfg = {
         'enabled': True,
-        'market_timezone': 'Asia/Hong_Kong',
-        'market_open': '09:30',
-        'market_close': '16:00',
-        'monitor_off_hours': False,
-        'first_notify_after_open_min': 30,
-        'notify_interval_min': 60,
-        'final_notify_before_close_min': 10,
+        'timezone': 'Asia/Hong_Kong',
+        'cron_interval_min': 10,
+        'run_window': {
+            'start': '09:30',
+            'end': '16:00',
+            'breaks': [],
+        },
+        'run_points': {
+            'start_plus_min': 10,
+            'hourly_minute': 0,
+            'end_minus_min': 10,
+        },
         'beijing_timezone': 'Asia/Shanghai',
     }
 
-    t0 = datetime(2026, 4, 1, 2, 0, 0, tzinfo=timezone.utc)  # 10:00 HKT target
+    t0 = datetime(2026, 4, 1, 1, 40, 0, tzinfo=timezone.utc)  # 09:40 HKT target
     t1 = t0 + timedelta(minutes=10)
 
     state = {
-        'last_scan_utc': None,
+        'last_run_utc_by_account': {
+            'lx': t0.isoformat(),
+        },
+        'last_notify_utc': None,
+        'last_notify_utc_by_account': {},
+    }
+
+    d_lx = decide(schedule_cfg, state, t1, account='lx', schedule_key='schedule_hk')
+    d_sy = decide(schedule_cfg, state, t1, account='sy', schedule_key='schedule_hk')
+
+    assert d_lx.should_run_scan is False
+    assert d_sy.should_run_scan is True
+
+
+def test_scan_scheduler_reads_legacy_per_account_scan_state() -> None:
+    from src.application.scan_scheduler import decide
+
+    schedule_cfg = {
+        'enabled': True,
+        'timezone': 'Asia/Hong_Kong',
+        'cron_interval_min': 10,
+        'run_window': {
+            'start': '09:30',
+            'end': '16:00',
+            'breaks': [],
+        },
+        'run_points': {
+            'start_plus_min': 10,
+            'hourly_minute': 0,
+            'end_minus_min': 10,
+        },
+        'beijing_timezone': 'Asia/Shanghai',
+    }
+
+    t0 = datetime(2026, 4, 1, 1, 40, 0, tzinfo=timezone.utc)  # 09:40 HKT target
+    t1 = t0 + timedelta(minutes=10)
+    state = {
+        'last_scan_utc': t0.isoformat(),
         'last_scan_utc_by_account': {
             'lx': t0.isoformat(),
         },
@@ -45,15 +87,21 @@ def test_scheduler_decision_payload_uses_account_scan_clock(tmp_path) -> None:
 
     schedule_cfg = {
         'enabled': True,
-        'market_timezone': 'Asia/Hong_Kong',
-        'market_open': '09:30',
-        'market_close': '16:00',
-        'first_notify_after_open_min': 30,
-        'notify_interval_min': 60,
-        'final_notify_before_close_min': 10,
+        'timezone': 'Asia/Hong_Kong',
+        'cron_interval_min': 10,
+        'run_window': {
+            'start': '09:30',
+            'end': '16:00',
+            'breaks': [],
+        },
+        'run_points': {
+            'start_plus_min': 10,
+            'hourly_minute': 0,
+            'end_minus_min': 10,
+        },
         'beijing_timezone': 'Asia/Shanghai',
     }
-    t0 = datetime(2026, 4, 1, 2, 0, 0, tzinfo=timezone.utc)
+    t0 = datetime(2026, 4, 1, 1, 40, 0, tzinfo=timezone.utc)
     t1 = t0 + timedelta(minutes=10)
     config = tmp_path / 'config.us.json'
     state = tmp_path / 'scheduler_state.json'
@@ -61,8 +109,7 @@ def test_scheduler_decision_payload_uses_account_scan_clock(tmp_path) -> None:
     state.write_text(
         json.dumps(
             {
-                'last_scan_utc': None,
-                'last_scan_utc_by_account': {'lx': t0.isoformat()},
+                'last_run_utc_by_account': {'lx': t0.isoformat()},
                 'last_notify_utc': None,
                 'last_notify_utc_by_account': {},
             }
@@ -127,8 +174,7 @@ def test_mark_scheduler_accounts_batches_scan_state(tmp_path) -> None:
     data = json.loads(state.read_text(encoding='utf-8'))
     assert out['updated'] is True
     assert out['accounts'] == ['lx', 'sy']
-    assert data['last_scan_utc'] == t0.isoformat()
-    assert data['last_scan_utc_by_account'] == {
+    assert data['last_run_utc_by_account'] == {
         'lx': t0.isoformat(),
         'sy': t0.isoformat(),
     }

@@ -787,12 +787,10 @@ def test_scheduler_status_reads_decision_without_writing_state(tmp_path: Path) -
     cfg = _minimal_cfg()
     cfg["schedule"] = {
         "enabled": True,
-        "market_timezone": "America/New_York",
-        "market_open": "09:30",
-        "market_close": "16:00",
-        "first_notify_after_open_min": 30,
-        "notify_interval_min": 60,
-        "final_notify_before_close_min": 10,
+        "timezone": "America/New_York",
+        "cron_interval_min": 10,
+        "run_window": {"start": "09:30", "end": "16:00", "breaks": []},
+        "run_points": {"start_plus_min": 10, "hourly_minute": 0, "end_minus_min": 10},
     }
     cfg_path = tmp_path / "config.us.json"
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")

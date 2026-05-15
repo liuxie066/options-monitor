@@ -381,10 +381,65 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 说明：旧配置里的 `channel: "wechat_clawbot"` 会继续兼容并转换为 OpenClaw 实际通道名 `openclaw-weixin`。
 
 ### 4.6 schedule：监控时间窗口
-- 非交易日 / 非交易时段：不监控、不通知。
-- 交易时段：开盘后 30 分钟通知一次，之后每小时通知一次，收盘前 10 分钟通知一次。
-- 港股午休等中场休市可用 `market_break_start` / `market_break_end` 配置，休市窗口内会跳过。
-- 可调字段：`first_notify_after_open_min`、`notify_interval_min`、`final_notify_before_close_min`。
+- `timezone`: 业务运行窗口所在市场时区，例如美股 `America/New_York`、港股 `Asia/Hong_Kong`。不要用北京时间伪装市场时间；夏令时 / 冬令时由时区自动换算。
+- `cron_interval_min`: 外部 cron / tick 触发频率，线上当前按 10 分钟一轮配置；它只用于允许轻微延迟补跑，不代表通知频率。
+- `run_window`: 扫描和通知的业务运行窗口，字段为 `start`、`end`、`breaks`。港股午休等中场休市写在 `breaks`，休市窗口内会跳过。
+- `run_points`: 窗口内真正允许扫描并通知的目标点。当前默认语义是开盘后 10 分钟一次、之后整点一次、收盘前 10 分钟一次。
+- `gates`: 对运行目标点的额外约束。美股使用北京时间次日 02:00 前 gate，避免 02:00 以后继续扫描通知。
+
+美股示例：
+
+```json
+{
+  "schedule": {
+    "enabled": true,
+    "timezone": "America/New_York",
+    "cron_interval_min": 10,
+    "run_window": {
+      "start": "09:30",
+      "end": "16:00",
+      "breaks": []
+    },
+    "run_points": {
+      "start_plus_min": 10,
+      "hourly_minute": 0,
+      "end_minus_min": 10
+    },
+    "gates": [
+      {
+        "type": "before",
+        "timezone": "Asia/Shanghai",
+        "time": "02:00",
+        "day_offset_from_window_start": 1
+      }
+    ]
+  }
+}
+```
+
+港股示例：
+
+```json
+{
+  "schedule_hk": {
+    "enabled": true,
+    "timezone": "Asia/Hong_Kong",
+    "cron_interval_min": 10,
+    "run_window": {
+      "start": "09:30",
+      "end": "16:00",
+      "breaks": [
+        {"start": "12:00", "end": "13:00"}
+      ]
+    },
+    "run_points": {
+      "start_plus_min": 10,
+      "hourly_minute": 0,
+      "end_minus_min": 10
+    }
+  }
+}
+```
 
 ### 4.7 runtime：超时（线上稳定）
 - `symbol_timeout_sec`：单标的 fetch/scan 超时

@@ -127,12 +127,11 @@ def test_scan_scheduler_domain_and_cli() -> None:
                 {
                     'schedule': {
                         'enabled': True,
-                        'market_timezone': 'UTC',
+                        'timezone': 'UTC',
                         'beijing_timezone': 'UTC',
-                        'market_open': '00:00',
-                        'market_close': '23:59',
-                        'monitor_off_hours': True,
-                        'market_hours_interval_min': 10,
+                        'run_window': {'start': '00:00', 'end': '23:59', 'breaks': []},
+                        'run_points': {'start_plus_min': 0, 'hourly_minute': 0, 'end_minus_min': 0},
+                        'cron_interval_min': 10,
                     }
                 },
                 ensure_ascii=False,

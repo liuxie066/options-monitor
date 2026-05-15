@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -182,71 +181,3 @@ def test_decide_notification_delivery_centralizes_single_entry_policy() -> None:
         'config_error': None,
         'reason': 'send',
     }
-
-
-def test_decide_scheduler_timing_centralizes_scan_and_notify_cooldown() -> None:
-    from domain.domain.engine import decide_scheduler_timing
-
-    now = datetime(2026, 4, 1, 1, 0, tzinfo=timezone.utc)
-    assert decide_scheduler_timing(
-        now_utc=now,
-        last_scan_utc=None,
-        last_notify_utc=None,
-        in_window=True,
-        monitor_off_hours=False,
-        interval_min=30,
-        notify_cooldown_min=60,
-    ) == {
-        'should_run_scan': True,
-        'is_notify_window_open': True,
-        'reason': '首次运行，无历史扫描记录。',
-        'next_run_utc': now,
-    }
-    assert decide_scheduler_timing(
-        now_utc=now,
-        last_scan_utc=now - timedelta(minutes=10),
-        last_notify_utc=now - timedelta(minutes=10),
-        in_window=True,
-        monitor_off_hours=False,
-        interval_min=30,
-        notify_cooldown_min=60,
-    )['is_notify_window_open'] is False
-    assert decide_scheduler_timing(
-        now_utc=now,
-        last_scan_utc=now - timedelta(minutes=10),
-        last_notify_utc=now - timedelta(minutes=90),
-        in_window=True,
-        monitor_off_hours=False,
-        interval_min=30,
-        notify_cooldown_min=60,
-    )['is_notify_window_open'] is True
-    assert decide_scheduler_timing(
-        now_utc=now,
-        last_scan_utc=now - timedelta(minutes=10),
-        last_notify_utc=None,
-        in_window=False,
-        monitor_off_hours=False,
-        interval_min=30,
-        notify_cooldown_min=60,
-    )['reason'] == '窗口外：不扫描。'
-    assert decide_scheduler_timing(
-        now_utc=now,
-        last_scan_utc=now - timedelta(minutes=10),
-        last_notify_utc=now - timedelta(minutes=10),
-        in_window=False,
-        monitor_off_hours=False,
-        interval_min=30,
-        notify_cooldown_min=60,
-        schedule_v2_enabled=True,
-        off_window_notify=True,
-    )['is_notify_window_open'] is False
-    assert decide_scheduler_timing(
-        now_utc=now,
-        last_scan_utc=now,
-        last_notify_utc=now,
-        in_window=False,
-        monitor_off_hours=False,
-        interval_min=30,
-        notify_cooldown_min=60,
-        force=True,
-    )['reason'] == 'force 模式：忽略频率控制直接执行。'

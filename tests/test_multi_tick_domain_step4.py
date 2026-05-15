@@ -8,7 +8,6 @@ def test_evaluate_dnd_quiet_hours_cross_midnight_window() -> None:
     from domain.domain.multi_tick import evaluate_dnd_quiet_hours
 
     out = evaluate_dnd_quiet_hours(
-        schedule_v2_enabled=False,
         quiet_hours={'start': '23:00', 'end': '06:00'},
         no_send=False,
         now_bj_time=time(0, 30),
@@ -25,7 +24,6 @@ def test_evaluate_dnd_quiet_hours_parse_error_keeps_non_blocking_behavior() -> N
     from domain.domain.multi_tick import evaluate_dnd_quiet_hours
 
     out = evaluate_dnd_quiet_hours(
-        schedule_v2_enabled=False,
         quiet_hours={'start': 'BAD', 'end': '06:00'},
         no_send=False,
         now_bj_time=time(3, 0),

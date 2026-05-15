@@ -151,12 +151,26 @@
     "us": {
       "schedule": {
         "enabled": true,
-        "market_timezone": "America/New_York",
-        "market_open": "09:30",
-        "market_close": "14:00",
-        "first_notify_after_open_min": 30,
-        "notify_interval_min": 60,
-        "final_notify_before_close_min": 0
+        "timezone": "America/New_York",
+        "cron_interval_min": 10,
+        "run_window": {
+          "start": "09:30",
+          "end": "16:00",
+          "breaks": []
+        },
+        "run_points": {
+          "start_plus_min": 10,
+          "hourly_minute": 0,
+          "end_minus_min": 10
+        },
+        "gates": [
+          {
+            "type": "before",
+            "timezone": "Asia/Shanghai",
+            "time": "02:00",
+            "day_offset_from_window_start": 1
+          }
+        ]
       },
       "symbol_defaults": {
         "broker": "US",
@@ -206,14 +220,23 @@
     "hk": {
       "schedule": {
         "enabled": true,
-        "market_timezone": "Asia/Hong_Kong",
-        "market_open": "09:30",
-        "market_close": "16:00",
-        "market_break_start": "12:00",
-        "market_break_end": "13:00",
-        "first_notify_after_open_min": 30,
-        "notify_interval_min": 60,
-        "final_notify_before_close_min": 10
+        "timezone": "Asia/Hong_Kong",
+        "cron_interval_min": 10,
+        "run_window": {
+          "start": "09:30",
+          "end": "16:00",
+          "breaks": [
+            {
+              "start": "12:00",
+              "end": "13:00"
+            }
+          ]
+        },
+        "run_points": {
+          "start_plus_min": 10,
+          "hourly_minute": 0,
+          "end_minus_min": 10
+        }
       },
       "templates": {
         "put_base": {

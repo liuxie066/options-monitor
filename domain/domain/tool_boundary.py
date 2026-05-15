@@ -70,10 +70,15 @@ def normalize_scheduler_decision_payload(raw: dict[str, Any] | Any) -> dict[str,
     }
     for key in (
         "now_utc",
+        "now_market",
+        "now_beijing",
         "next_run_utc",
-        "in_market_hours",
-        "interval_min",
-        "notify_cooldown_min",
+        "next_run_market",
+        "next_run_beijing",
+        "in_run_window",
+        "run_window_start_beijing",
+        "run_window_end_beijing",
+        "schedule_key",
         "should_notify",
     ):
         if key in src:
