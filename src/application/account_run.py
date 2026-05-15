@@ -26,13 +26,7 @@ from src.application.multi_tick.misc import (
     ensure_account_output_dir,
     update_legacy_output_link,
 )
-from src.application.multi_tick.notify_format import flatten_auto_close_summary
 from src.application.multi_tick.required_data_prefetch import prefetch_required_data
-from src.application.position_maintenance import (
-    format_auto_close_summary,
-    run_expired_position_maintenance_for_account,
-)
-from src.application.position_maintenance_receipt import safe_send_auto_close_receipt
 
 from domain.storage.repositories import run_repo, state_repo
 
@@ -63,7 +57,6 @@ class AccountRunRequest:
     update_legacy_output: bool = True
     prefetch_lock: Any | None = None
     prefetch_state: dict[str, Any] | None = None
-    maintenance_lock: Any | None = None
     scan_decision_by_account: dict[str, dict[str, Any]] | None = None
 
 
@@ -131,131 +124,6 @@ def _record_account_run_degraded(
     )
 
 
-def _status_for_position_maintenance(result: dict[str, Any]) -> str:
-    if str(result.get("mode") or "") == "skipped":
-        return "skipped"
-    if result.get("errors"):
-        return "error"
-    return "ok"
-
-
-def _maintenance_notification_text(result: dict[str, Any]) -> str:
-    summary_text = str(result.get("summary_text") or "").strip()
-    if not summary_text:
-        return ""
-    return flatten_auto_close_summary(summary_text, always_show=False)
-
-
-def _position_maintenance_receipt_audit_fields(result: dict[str, Any]) -> dict[str, Any]:
-    receipt = result.get("receipt")
-    if not isinstance(receipt, dict):
-        return {}
-    return {
-        "receipt_status": receipt.get("status"),
-        "receipt_reason": receipt.get("reason"),
-        "receipt_delivery_confirmed": bool(receipt.get("delivery_confirmed")),
-        "receipt_message_id": receipt.get("message_id"),
-        "receipt_error_code": receipt.get("error_code"),
-        "receipt_attempt_count": receipt.get("attempt_count"),
-        "receipt_key": receipt.get("receipt_key"),
-    }
-
-
-def _position_maintenance_receipt_audit_action(result: dict[str, Any]) -> str:
-    receipt = result.get("receipt")
-    if not isinstance(receipt, dict):
-        return "auto_close_receipt_skipped"
-    status = str(receipt.get("status") or "").strip().lower()
-    if status == "sent":
-        return "auto_close_receipt_sent"
-    if status in {"failed", "unconfirmed"}:
-        return "auto_close_receipt_failed"
-    return "auto_close_receipt_skipped"
-
-
-def _position_maintenance_receipt_audit_status(result: dict[str, Any]) -> str:
-    receipt = result.get("receipt")
-    if not isinstance(receipt, dict):
-        return "skip"
-    status = str(receipt.get("status") or "").strip().lower()
-    if status in {"failed", "unconfirmed"}:
-        return "error"
-    if status == "sent":
-        return "ok"
-    return "skip"
-
-
-def _ensure_position_maintenance_receipt(
-    *,
-    base: Path,
-    cfg: dict[str, Any],
-    allow_mutations: bool,
-    allow_notifications: bool,
-    result: dict[str, Any],
-) -> dict[str, Any]:
-    if isinstance(result.get("receipt"), dict):
-        return result
-    out = dict(result)
-    if allow_notifications:
-        out["receipt"] = safe_send_auto_close_receipt(
-            base=base,
-            config=cfg,
-            dry_run=(not bool(allow_mutations)),
-            result=out,
-        )
-    else:
-        out["receipt"] = {
-            "enabled": True,
-            "status": "skipped",
-            "reason": "skipped_no_send",
-            "delivery_confirmed": False,
-            "message_id": None,
-        }
-    return out
-
-
-def _auto_close_grace_days_label(cfg: dict[str, Any]) -> str:
-    option_positions = cfg.get("option_positions") if isinstance(cfg, dict) else {}
-    auto_close = option_positions.get("auto_close") if isinstance(option_positions, dict) else {}
-    if not isinstance(auto_close, dict):
-        return "1"
-    raw = auto_close.get("grace_days", 1)
-    if isinstance(raw, bool):
-        return "invalid"
-    try:
-        value = int(raw)
-    except Exception:
-        return "invalid"
-    return str(value) if value >= 0 else "invalid"
-
-
-def _position_maintenance_error_result(
-    *,
-    cfg: dict[str, Any],
-    account: str,
-    broker: Any,
-    exc: Exception,
-) -> dict[str, Any]:
-    errors = [f"expired_position_maintenance failed for {account}: {type(exc).__name__}: {exc}"]
-    result: dict[str, Any] = {
-        "mode": "error",
-        "account": account,
-        "broker": str(broker or ""),
-        "as_of_utc": utc_now(),
-        "grace_days": _auto_close_grace_days_label(cfg),
-        "max_close": None,
-        "positions_checked": 0,
-        "decisions": 0,
-        "candidates_should_close": 0,
-        "applied_closed": 0,
-        "skipped_already_closed": 0,
-        "errors": errors,
-        "applied": [],
-    }
-    result["summary_text"] = format_auto_close_summary(result)
-    return result
-
-
 def _resolve_account_scan_decision(
     *,
     account: str,
@@ -317,11 +185,6 @@ def run_one_account(
 
     acct_report_dir = run_repo.get_run_account_dir(request.base, request.run_id, acct)
     acct_state_dir = run_repo.get_run_account_state_dir(request.base, request.run_id, acct)
-    runtime_meta = cfg.get("_runtime")
-    if not isinstance(runtime_meta, dict):
-        runtime_meta = {}
-        cfg["_runtime"] = runtime_meta
-    runtime_meta["expired_position_maintenance_owner"] = "account_run"
 
     cfg_override = state_repo.write_account_state_json_text(
         request.base,
@@ -374,7 +237,6 @@ def run_one_account(
         _write_acct_run_state("account_metrics.json", payload)
 
     notif_path = (acct_report_dir / "symbols_notification.txt").resolve()
-    maintenance_notification = ""
 
     notify_decisions: dict[str, bool | dict[str, Any] | AccountSchedulerDecisionView] = {}
     for key, value in (request.notify_decision_by_account or {}).items():
@@ -414,142 +276,17 @@ def run_one_account(
 
     _write_account_metrics_state()
 
-    def _run_position_maintenance() -> dict[str, Any]:
-        portfolio_cfg = cfg.get("portfolio") if isinstance(cfg, dict) else {}
-        return run_expired_position_maintenance_for_account(
-            base=request.base,
-            cfg=cfg,
-            account=acct,
-            report_dir=acct_report_dir,
-            broker=(portfolio_cfg.get("broker") if isinstance(portfolio_cfg, dict) else None),
-            dry_run=(not bool(request.allow_mutations)),
-            send_receipt=bool(request.allow_notifications),
-        )
-
-    try:
-        if request.maintenance_lock is None:
-            maintenance_result = _run_position_maintenance()
-        else:
-            with request.maintenance_lock:
-                maintenance_result = _run_position_maintenance()
-        maintenance_result = _ensure_position_maintenance_receipt(
-            base=request.base,
-            cfg=cfg,
-            allow_mutations=request.allow_mutations,
-            allow_notifications=request.allow_notifications,
-            result=maintenance_result,
-        )
-        maintenance_notification = _maintenance_notification_text(maintenance_result)
-        maintenance_status = _status_for_position_maintenance(maintenance_result)
-        audit_fn(
-            "tool_call",
-            "expired_position_maintenance",
-            run_id=request.run_id,
-            account=acct,
-            status=maintenance_status,
-            tool_name="expired_position_maintenance",
-            extra={
-                "mode": maintenance_result.get("mode"),
-                "positions_checked": maintenance_result.get("positions_checked"),
-                "candidates_should_close": maintenance_result.get("candidates_should_close"),
-                "applied_closed": maintenance_result.get("applied_closed"),
-                "skipped_already_closed": maintenance_result.get("skipped_already_closed"),
-                "errors": len(maintenance_result.get("errors") or []),
-                **_position_maintenance_receipt_audit_fields(maintenance_result),
-            },
-        )
-        audit_fn(
-            "tool_call",
-            _position_maintenance_receipt_audit_action(maintenance_result),
-            run_id=request.run_id,
-            account=acct,
-            status=_position_maintenance_receipt_audit_status(maintenance_result),
-            tool_name="expired_position_maintenance_receipt",
-            extra=_position_maintenance_receipt_audit_fields(maintenance_result),
-        )
-        _write_acct_run_state("expired_position_maintenance.json", maintenance_result)
-        if maintenance_status == "error":
-            runlog.safe_event(
-                "expired_position_maintenance",
-                "error",
-                message=f"expired position maintenance had errors for {acct}",
-                data=_safe_runlog_data(
-                    {
-                        "account": acct,
-                        "errors": len(maintenance_result.get("errors") or []),
-                    }
-                ),
-            )
-        elif int(maintenance_result.get("applied_closed") or 0) > 0:
-            runlog.safe_event(
-                "expired_position_maintenance",
-                "ok",
-                data=_safe_runlog_data(
-                    {
-                        "account": acct,
-                        "applied_closed": int(maintenance_result.get("applied_closed") or 0),
-                    }
-                ),
-            )
-    except Exception as exc:
-        portfolio_cfg = cfg.get("portfolio") if isinstance(cfg, dict) else {}
-        maintenance_result = _position_maintenance_error_result(
-            cfg=cfg,
-            account=acct,
-            broker=(portfolio_cfg.get("broker") if isinstance(portfolio_cfg, dict) else None),
-            exc=exc,
-        )
-        maintenance_result = _ensure_position_maintenance_receipt(
-            base=request.base,
-            cfg=cfg,
-            allow_mutations=request.allow_mutations,
-            allow_notifications=request.allow_notifications,
-            result=maintenance_result,
-        )
-        maintenance_notification = _maintenance_notification_text(maintenance_result)
-        audit_fn(
-            "tool_call",
-            _position_maintenance_receipt_audit_action(maintenance_result),
-            run_id=request.run_id,
-            account=acct,
-            status=_position_maintenance_receipt_audit_status(maintenance_result),
-            tool_name="expired_position_maintenance_receipt",
-            extra=_position_maintenance_receipt_audit_fields(maintenance_result),
-        )
-        _write_acct_run_state("expired_position_maintenance.json", maintenance_result)
-        runlog.safe_event(
-            "expired_position_maintenance",
-            "error",
-            message=f"expired position maintenance failed for {acct}",
-            data=_safe_runlog_data(
-                {
-                    "account": acct,
-                    "errors": len(maintenance_result.get("errors") or []),
-                }
-            ),
-        )
-        _record_account_run_degraded(
-            runlog=runlog,
-            audit_fn=audit_fn,
-            run_id=request.run_id,
-            account=acct,
-            action="expired_position_maintenance",
-            exc=exc,
-        )
-
     scan_gate = decide_account_scan_gate(
         should_run=should_run,
         has_symbols=((not request.markets_to_run) or bool(resolve_watchlist_config(cfg))),
         reason=reason,
     )
     if not bool(scan_gate.get("run_pipeline")):
-        result_should_notify = bool(should_notify or maintenance_notification)
+        result_should_notify = bool(should_notify)
         acct_metrics["ran_scan"] = bool(scan_gate.get("ran_scan"))
         acct_metrics["should_notify"] = result_should_notify
-        acct_metrics["meaningful"] = bool(scan_gate.get("meaningful") or maintenance_notification)
+        acct_metrics["meaningful"] = bool(scan_gate.get("meaningful"))
         acct_metrics["reason"] = str(scan_gate.get("result_reason") or reason)
-        if maintenance_notification:
-            acct_metrics["notification_type"] = "auto_close"
         _write_account_metrics_state()
         return AccountRunOutcome(
             result=AccountResult(
@@ -557,7 +294,7 @@ def run_one_account(
                 bool(scan_gate.get("ran_scan")),
                 result_should_notify,
                 str(scan_gate.get("result_reason") or reason),
-                maintenance_notification,
+                "",
             ),
             acct_metrics=acct_metrics,
             prefetch_done=request.prefetch_done,
@@ -716,13 +453,11 @@ def run_one_account(
         if out:
             tail = "\n".join(out.splitlines()[-60:])
             print(f"[ERR] pipeline failed ({acct})\n{tail}")
-        result_should_notify = bool(should_notify or maintenance_notification)
+        result_should_notify = bool(should_notify)
         acct_metrics["ran_scan"] = bool(pipeline_result.get("ran_scan"))
         acct_metrics["should_notify"] = result_should_notify
-        acct_metrics["meaningful"] = bool(pipeline_result.get("meaningful") or maintenance_notification)
+        acct_metrics["meaningful"] = bool(pipeline_result.get("meaningful"))
         acct_metrics["reason"] = str(pipeline_result.get("reason") or "pipeline failed")
-        if maintenance_notification:
-            acct_metrics["notification_type"] = "auto_close"
         _write_account_metrics_state()
         return AccountRunOutcome(
             result=AccountResult(
@@ -730,7 +465,7 @@ def run_one_account(
                 bool(pipeline_result.get("ran_scan")),
                 result_should_notify,
                 str(pipeline_result.get("reason") or "pipeline failed"),
-                maintenance_notification,
+                "",
             ),
             acct_metrics=acct_metrics,
             prefetch_done=prefetch_done,
@@ -773,9 +508,6 @@ def run_one_account(
             action="write_run_account_artifacts",
             exc=exc,
         )
-
-    if maintenance_notification:
-        text = (text.strip() + "\n\n" + maintenance_notification.strip()).strip()
 
     close_advice_cfg = (cfg.get("close_advice") or {}) if isinstance(cfg, dict) else {}
     if bool(close_advice_cfg.get("enabled", False)):
@@ -873,14 +605,11 @@ def run_one_account(
             runlog.safe_event("close_advice", "error", message=f"close advice failed for {acct}: {exc}")
 
     acct_metrics["ran_scan"] = True
-    acct_metrics["should_notify"] = bool(should_notify or maintenance_notification)
+    acct_metrics["should_notify"] = bool(should_notify)
     acct_metrics["reason"] = str(reason)
-    if maintenance_notification:
-        acct_metrics["meaningful"] = True
-        acct_metrics["notification_type"] = "auto_close"
     _write_account_metrics_state()
     return AccountRunOutcome(
-        result=AccountResult(acct, True, bool(should_notify or maintenance_notification), reason, text),
+        result=AccountResult(acct, True, bool(should_notify), reason, text),
         acct_metrics=acct_metrics,
         prefetch_done=prefetch_done,
         ran_pipeline=True,

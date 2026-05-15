@@ -58,7 +58,6 @@ def _auto_close_config(cfg: dict[str, Any]) -> dict[str, Any]:
     data = raw if isinstance(raw, dict) else {}
     return {
         "enabled": _bool_config(data, "enabled", True),
-        "run_on_tick": _bool_config(data, "run_on_tick", True),
         "grace_days": _int_config(data, "grace_days", 1, min_value=0),
         "max_close": _int_config(
             data,
@@ -185,7 +184,7 @@ def run_expired_position_maintenance_for_account(
     send_receipt: bool = True,
 ) -> dict[str, Any]:
     auto_cfg = _auto_close_config(cfg)
-    if not auto_cfg["enabled"] or not auto_cfg["run_on_tick"]:
+    if not auto_cfg["enabled"]:
         return {"mode": "skipped", "reason": "auto_close_disabled"}
 
     portfolio_cfg = cfg.get("portfolio") if isinstance(cfg, dict) else {}

@@ -143,7 +143,6 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
     account_count = len(request.account_ids)
     shared_prefetch_state: dict[str, object] = {"done": bool(request.prefetch_done)}
     shared_prefetch_lock = Lock() if account_count > 1 else None
-    shared_maintenance_lock = Lock() if account_count > 1 else None
 
     def _run_account(acct: str) -> AccountRunOutcome:
         acct = str(acct).strip()
@@ -173,7 +172,6 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
                 update_legacy_output=request.update_legacy_output,
                 prefetch_lock=shared_prefetch_lock,
                 prefetch_state=shared_prefetch_state,
-                maintenance_lock=shared_maintenance_lock,
                 scan_decision_by_account=request.scan_decision_by_account,
             ),
             runlog=request.runlog,

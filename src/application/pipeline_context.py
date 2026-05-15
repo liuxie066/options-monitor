@@ -163,21 +163,6 @@ def load_option_positions_context(
         return None, False
 
 
-def maybe_auto_close_expired_positions(
-    *,
-    base: Path,
-    data_config: str,
-    report_dir: Path,
-    state_dir: Path,
-    refreshed: bool,
-    log,
-    runtime_config: dict | None = None,
-) -> None:
-    # Deprecated compatibility hook. Auto-close writes are owned by account_run
-    # so context building remains read-only even when direct pipeline entrypoints run.
-    return
-
-
 def _load_option_position_exchange_rates(*, base: Path, state_dir: Path, log) -> dict | None:
     try:
         from src.infrastructure.exchange_rates import get_exchange_rates_or_fetch_latest
@@ -270,7 +255,7 @@ def build_pipeline_context(
         portfolio_source=str(portfolio_source),
     )
 
-    option_ctx, refreshed = load_option_positions_context(
+    option_ctx, _ = load_option_positions_context(
         base=base,
         data_config=str(data_config),
         market=str(broker),
@@ -278,16 +263,6 @@ def build_pipeline_context(
         ttl_sec=ttl_opt_ctx,
         state_dir=state_dir,
         shared_state_dir=shared_state_dir,
-        log=log,
-    )
-
-    maybe_auto_close_expired_positions(
-        base=base,
-        data_config=str(data_config),
-        report_dir=report_dir,
-        state_dir=state_dir,
-        refreshed=refreshed,
-        runtime_config=cfg,
         log=log,
     )
 

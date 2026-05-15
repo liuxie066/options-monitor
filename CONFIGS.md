@@ -20,8 +20,8 @@
 
 可选的轻量分层入口：
 
-- `configs/system.json`：系统默认值，随版本发布维护，包含 runtime、templates、schedule、trade_intake、option_positions auto-close receipt、intake aliases、symbol defaults 等通用默认。
-- `configs/user.common.json`：可选的本地全局用户覆盖文件，适合放两边市场都相同的 `watchdog`、`runtime`、`notifications`、`alert_policy`、`account_settings`、`portfolio.data_config`、`option_positions.sync_to_feishu.enabled`、`option_positions.auto_close.receipt.enabled`、`symbol_defaults` 等字段。该文件被 `.gitignore` 忽略，不随版本发布。
+- `configs/system.json`：系统默认值，随版本发布维护，包含 runtime、templates、schedule、trade_intake、专用 `option_positions.auto_close`、intake aliases、symbol defaults 等通用默认。
+- `configs/user.common.json`：可选的本地全局用户覆盖文件，适合放两边市场都相同的 `watchdog`、`runtime`、`notifications`、`alert_policy`、`account_settings`、`portfolio.data_config`、`option_positions.sync_to_feishu.enabled`、`option_positions.auto_close.enabled` / `option_positions.auto_close.receipt.enabled`、`symbol_defaults` 等字段。该文件被 `.gitignore` 忽略，不随版本发布。
 - `configs/user.us.json` / `configs/user.hk.json`：本地市场用户覆盖文件，默认只维护 market-specific 的账号和 symbols；同字段会覆盖 `configs/user.common.json`。这两类文件被 `.gitignore` 忽略，不随版本发布。
 - `configs/examples/user.example.us.json` / `configs/examples/user.example.hk.json`：可复制的用户配置模板。
 

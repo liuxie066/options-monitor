@@ -607,9 +607,8 @@ def validate_config(cfg: dict):
         if auto_close and not isinstance(auto_close, dict):
             die('option_positions.auto_close must be an object')
         if isinstance(auto_close, dict):
-            for key in ('enabled', 'run_on_tick'):
-                if key in auto_close and auto_close.get(key) is not None and not isinstance(auto_close.get(key), bool):
-                    die(f'option_positions.auto_close.{key} must be a boolean')
+            if 'enabled' in auto_close and auto_close.get('enabled') is not None and not isinstance(auto_close.get('enabled'), bool):
+                die('option_positions.auto_close.enabled must be a boolean')
             for key, min_value in (('grace_days', 0), ('max_close_per_run', 1), ('max_close', 1)):
                 if key not in auto_close or auto_close.get(key) in (None, ''):
                     continue

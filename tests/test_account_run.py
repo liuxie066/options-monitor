@@ -73,7 +73,6 @@ def _install_common_patches(monkeypatch, request: Any) -> dict[str, Any]:
 
     audit_events: list[dict[str, Any]] = []
     state_writes: list[tuple[str, dict[str, Any]]] = []
-    maintenance_calls: list[dict[str, Any]] = []
 
     acct_report_dir = request.accounts_root / request.acct / "reports"
     acct_state_dir = request.accounts_root / request.acct / "state"
@@ -109,25 +108,11 @@ def _install_common_patches(monkeypatch, request: Any) -> dict[str, Any]:
     monkeypatch.setattr(mod.state_repo, "write_account_run_state", lambda base, run_id, acct, name, payload: state_writes.append((name, dict(payload))))
     monkeypatch.setattr(mod.state_repo, "append_run_audit_jsonl", lambda *args, **kwargs: None)
 
-    def _run_expired_position_maintenance_for_account(**kwargs):
-        maintenance_calls.append(dict(kwargs))
-        return {
-            "mode": "skipped",
-            "reason": "test_noop",
-            "positions_checked": 0,
-            "candidates_should_close": 0,
-            "applied_closed": 0,
-            "errors": [],
-        }
-
-    monkeypatch.setattr(mod, "run_expired_position_maintenance_for_account", _run_expired_position_maintenance_for_account)
-
     return {
         "mod": mod,
         "audit_fn": _audit,
         "audit_events": audit_events,
         "state_writes": state_writes,
-        "maintenance_calls": maintenance_calls,
         "acct_report_dir": acct_report_dir,
         "acct_state_dir": acct_state_dir,
     }
@@ -166,8 +151,7 @@ def test_run_one_account_skips_pipeline_when_scan_gate_blocks(monkeypatch, tmp_p
     assert outcome.result.decision_reason == "scheduler_skip"
     assert outcome.result.notification_text == ""
     assert outcome.acct_metrics["reason"] == "scheduler_skip"
-    assert len(env["maintenance_calls"]) == 1
-    assert env["maintenance_calls"][0]["account"] == "lx"
+    assert not any(name == "expired_position_maintenance.json" for name, _ in env["state_writes"])
     assert any(name == "account_metrics.json" for name, _ in env["state_writes"])
 
 
@@ -200,276 +184,7 @@ def test_run_one_account_can_skip_legacy_output_link_update(monkeypatch, tmp_pat
 
     assert outcome.ran_pipeline is False
     assert legacy_calls == []
-    assert any(name == "expired_position_maintenance.json" for name, _ in env["state_writes"])
-
-
-def test_run_one_account_uses_dry_run_when_mutations_are_disabled(monkeypatch, tmp_path: Path) -> None:
-    from src.application.account_run import run_one_account
-
-    request = _make_request(tmp_path, allow_mutations=False)
-    env = _install_common_patches(monkeypatch, request)
-    runlog = _FakeRunlog()
-
-    monkeypatch.setattr(
-        env["mod"],
-        "decide_account_scan_gate",
-        lambda **kwargs: {
-            "run_pipeline": False,
-            "ran_scan": False,
-            "meaningful": False,
-            "result_reason": "scheduler_skip",
-        },
-    )
-    monkeypatch.setattr(env["mod"], "prefetch_required_data", lambda **kwargs: (_ for _ in ()).throw(AssertionError("prefetch should not run")))
-    monkeypatch.setattr(env["mod"], "run_pipeline_script", lambda **kwargs: (_ for _ in ()).throw(AssertionError("pipeline should not run")))
-
-    run_one_account(
-        request=request,
-        runlog=runlog,
-        audit_fn=env["audit_fn"],
-        fail_schema_validation=lambda **kwargs: (_ for _ in ()).throw(AssertionError("schema validation should not fail")),
-    )
-
-    assert env["maintenance_calls"][0]["dry_run"] is True
-
-
-def test_run_one_account_runs_position_maintenance_under_shared_lock(monkeypatch, tmp_path: Path) -> None:
-    from src.application.account_run import run_one_account
-
-    class _RecordingLock:
-        def __init__(self) -> None:
-            self.depth = 0
-            self.events: list[str] = []
-
-        def __enter__(self):
-            assert self.depth == 0
-            self.depth += 1
-            self.events.append("enter")
-            return self
-
-        def __exit__(self, exc_type, exc, tb) -> None:
-            self.events.append("exit")
-            self.depth -= 1
-
-    lock = _RecordingLock()
-    request = replace(_make_request(tmp_path), maintenance_lock=lock)
-    env = _install_common_patches(monkeypatch, request)
-    runlog = _FakeRunlog()
-
-    monkeypatch.setattr(
-        env["mod"],
-        "decide_account_scan_gate",
-        lambda **kwargs: {
-            "run_pipeline": False,
-            "ran_scan": False,
-            "meaningful": False,
-            "result_reason": "scheduler_skip",
-        },
-    )
-    monkeypatch.setattr(env["mod"], "prefetch_required_data", lambda **kwargs: (_ for _ in ()).throw(AssertionError("prefetch should not run")))
-    monkeypatch.setattr(env["mod"], "run_pipeline_script", lambda **kwargs: (_ for _ in ()).throw(AssertionError("pipeline should not run")))
-
-    def _maintenance(**kwargs):
-        assert lock.depth == 1
-        return {
-            "mode": "skipped",
-            "reason": "test_noop",
-            "positions_checked": 0,
-            "candidates_should_close": 0,
-            "applied_closed": 0,
-            "errors": [],
-        }
-
-    monkeypatch.setattr(env["mod"], "run_expired_position_maintenance_for_account", _maintenance)
-
-    outcome = run_one_account(
-        request=request,
-        runlog=runlog,
-        audit_fn=env["audit_fn"],
-        fail_schema_validation=lambda **kwargs: (_ for _ in ()).throw(AssertionError("schema validation should not fail")),
-    )
-
-    assert outcome.ran_pipeline is False
-    assert lock.events == ["enter", "exit"]
-
-
-def test_run_one_account_notifies_auto_close_even_when_scan_gate_blocks(monkeypatch, tmp_path: Path) -> None:
-    from src.application.account_run import run_one_account
-
-    request = _make_request(tmp_path)
-    env = _install_common_patches(monkeypatch, request)
-    runlog = _FakeRunlog()
-
-    monkeypatch.setattr(env["mod"], "decide_should_notify", lambda **kwargs: False)
-    monkeypatch.setattr(
-        env["mod"],
-        "decide_account_scan_gate",
-        lambda **kwargs: {
-            "run_pipeline": False,
-            "ran_scan": False,
-            "meaningful": False,
-            "result_reason": "scheduler_skip",
-        },
-    )
-    monkeypatch.setattr(env["mod"], "prefetch_required_data", lambda **kwargs: (_ for _ in ()).throw(AssertionError("prefetch should not run")))
-    monkeypatch.setattr(env["mod"], "run_pipeline_script", lambda **kwargs: (_ for _ in ()).throw(AssertionError("pipeline should not run")))
-    monkeypatch.setattr(
-        env["mod"],
-        "run_expired_position_maintenance_for_account",
-        lambda **kwargs: {
-            "mode": "applied",
-            "positions_checked": 1,
-            "candidates_should_close": 1,
-            "applied_closed": 1,
-            "errors": [],
-            "summary_text": "\n".join(
-                [
-                    "Auto-close expired positions (grace_days=2)",
-                    "as_of_utc: 2026-05-03T00:00:00+00:00",
-                    "mode: applied",
-                    "candidates_should_close: 1",
-                    "applied_closed: 1",
-                    "ERRORS: 0",
-                    "- rec_1 | pos_1 | exp=2026-05-01",
-                ]
-            ),
-        },
-    )
-
-    outcome = run_one_account(
-        request=request,
-        runlog=runlog,
-        audit_fn=env["audit_fn"],
-        fail_schema_validation=lambda **kwargs: (_ for _ in ()).throw(AssertionError("schema validation should not fail")),
-    )
-
-    assert outcome.ran_pipeline is False
-    assert outcome.result.should_notify is True
-    assert "Auto-close(exp+2d): closed 1/1, errors 0" in outcome.result.notification_text
-    assert "- rec_1 | pos_1 | exp=2026-05-01" in outcome.result.notification_text
-    assert outcome.acct_metrics["meaningful"] is True
-    assert outcome.acct_metrics["notification_type"] == "auto_close"
-    metrics_states = [payload for name, payload in env["state_writes"] if name == "account_metrics.json"]
-    assert metrics_states[-1]["should_notify"] is True
-    assert metrics_states[-1]["meaningful"] is True
-    assert metrics_states[-1]["notification_type"] == "auto_close"
-    maintenance_states = [payload for name, payload in env["state_writes"] if name == "expired_position_maintenance.json"]
-    assert maintenance_states[-1]["receipt"]["status"] == "skipped"
-    assert maintenance_states[-1]["receipt"]["reason"] == "skipped_no_route"
-    maintenance_audits = [evt for evt in env["audit_events"] if evt["action"] == "expired_position_maintenance"]
-    assert maintenance_audits[-1]["extra"]["receipt_status"] == "skipped"
-    receipt_audits = [evt for evt in env["audit_events"] if evt["action"] == "auto_close_receipt_skipped"]
-    assert receipt_audits[-1]["tool_name"] == "expired_position_maintenance_receipt"
-
-
-def test_run_one_account_notifies_auto_close_error_when_maintenance_raises(monkeypatch, tmp_path: Path) -> None:
-    from src.application.account_run import run_one_account
-
-    request = _make_request(tmp_path)
-    env = _install_common_patches(monkeypatch, request)
-    runlog = _FakeRunlog()
-
-    monkeypatch.setattr(env["mod"], "decide_should_notify", lambda **kwargs: False)
-    monkeypatch.setattr(
-        env["mod"],
-        "decide_account_scan_gate",
-        lambda **kwargs: {
-            "run_pipeline": False,
-            "ran_scan": False,
-            "meaningful": False,
-            "result_reason": "scheduler_skip",
-        },
-    )
-    monkeypatch.setattr(env["mod"], "prefetch_required_data", lambda **kwargs: (_ for _ in ()).throw(AssertionError("prefetch should not run")))
-    monkeypatch.setattr(env["mod"], "run_pipeline_script", lambda **kwargs: (_ for _ in ()).throw(AssertionError("pipeline should not run")))
-    monkeypatch.setattr(
-        env["mod"],
-        "run_expired_position_maintenance_for_account",
-        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("sqlite locked")),
-    )
-
-    outcome = run_one_account(
-        request=request,
-        runlog=runlog,
-        audit_fn=env["audit_fn"],
-        fail_schema_validation=lambda **kwargs: (_ for _ in ()).throw(AssertionError("schema validation should not fail")),
-    )
-
-    assert outcome.ran_pipeline is False
-    assert outcome.result.should_notify is True
-    assert "Auto-close(exp+1d): closed 0/0, errors 1" in outcome.result.notification_text
-    assert "sqlite locked" in outcome.result.notification_text
-    assert outcome.acct_metrics["meaningful"] is True
-    assert outcome.acct_metrics["notification_type"] == "auto_close"
-    metrics_states = [payload for name, payload in env["state_writes"] if name == "account_metrics.json"]
-    assert metrics_states[-1]["should_notify"] is True
-    assert metrics_states[-1]["meaningful"] is True
-    assert metrics_states[-1]["notification_type"] == "auto_close"
-    maintenance_states = [payload for name, payload in env["state_writes"] if name == "expired_position_maintenance.json"]
-    assert maintenance_states
-    assert maintenance_states[-1]["mode"] == "error"
-    assert maintenance_states[-1]["receipt"]["status"] == "skipped"
-    assert maintenance_states[-1]["receipt"]["reason"] == "skipped_no_route"
-    assert any(evt["step"] == "expired_position_maintenance" and evt["status"] == "error" for evt in runlog.events)
-
-
-def test_run_one_account_skips_auto_close_receipt_when_notifications_disabled(monkeypatch, tmp_path: Path) -> None:
-    from src.application.account_run import run_one_account
-
-    request = _make_request(tmp_path, allow_notifications=False)
-    env = _install_common_patches(monkeypatch, request)
-    runlog = _FakeRunlog()
-
-    monkeypatch.setattr(env["mod"], "decide_should_notify", lambda **kwargs: False)
-    monkeypatch.setattr(
-        env["mod"],
-        "decide_account_scan_gate",
-        lambda **kwargs: {
-            "run_pipeline": False,
-            "ran_scan": False,
-            "meaningful": False,
-            "result_reason": "scheduler_skip",
-        },
-    )
-    monkeypatch.setattr(env["mod"], "prefetch_required_data", lambda **kwargs: (_ for _ in ()).throw(AssertionError("prefetch should not run")))
-    monkeypatch.setattr(env["mod"], "run_pipeline_script", lambda **kwargs: (_ for _ in ()).throw(AssertionError("pipeline should not run")))
-    monkeypatch.setattr(
-        env["mod"],
-        "safe_send_auto_close_receipt",
-        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("no-send must not call receipt sender")),
-    )
-    monkeypatch.setattr(
-        env["mod"],
-        "run_expired_position_maintenance_for_account",
-        lambda **kwargs: {
-            "mode": "applied",
-            "positions_checked": 1,
-            "candidates_should_close": 1,
-            "applied_closed": 1,
-            "errors": [],
-            "summary_text": "\n".join(
-                [
-                    "Auto-close expired positions (grace_days=1)",
-                    "candidates_should_close: 1",
-                    "applied_closed: 1",
-                    "ERRORS: 0",
-                ]
-            ),
-            "send_receipt_arg": kwargs.get("send_receipt"),
-        },
-    )
-
-    run_one_account(
-        request=request,
-        runlog=runlog,
-        audit_fn=env["audit_fn"],
-        fail_schema_validation=lambda **kwargs: (_ for _ in ()).throw(AssertionError("schema validation should not fail")),
-    )
-
-    maintenance_states = [payload for name, payload in env["state_writes"] if name == "expired_position_maintenance.json"]
-    assert maintenance_states[-1]["send_receipt_arg"] is False
-    assert maintenance_states[-1]["receipt"]["status"] == "skipped"
-    assert maintenance_states[-1]["receipt"]["reason"] == "skipped_no_send"
+    assert not any(name == "expired_position_maintenance.json" for name, _ in env["state_writes"])
 
 
 def test_run_one_account_prefetches_and_runs_pipeline_successfully(monkeypatch, tmp_path: Path) -> None:

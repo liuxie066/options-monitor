@@ -4,10 +4,6 @@ import re
 
 from .misc import (
     AccountResult,
-    AUTO_CLOSE_APPLIED_RE,
-    AUTO_CLOSE_CAND_RE,
-    AUTO_CLOSE_ERR_RE,
-    AUTO_CLOSE_SKIPPED_ALREADY_CLOSED_RE,
     COVER_RE,
     CNY_RE,
 )
@@ -151,63 +147,6 @@ def annotate_notification(acct: str, text: str) -> str:
     return '\n'.join(out).strip() + '\n'
 
 
-def flatten_auto_close_summary(text: str, *, always_show: bool = False) -> str:
-    if not text:
-        return ''
-
-    m_grace = re.search(r"grace_days=(?P<n>[^)\s]+)", text)
-    m_applied = AUTO_CLOSE_APPLIED_RE.search(text)
-    m_cand = AUTO_CLOSE_CAND_RE.search(text)
-    m_err = AUTO_CLOSE_ERR_RE.search(text)
-    m_skipped = AUTO_CLOSE_SKIPPED_ALREADY_CLOSED_RE.search(text)
-
-    grace_label = m_grace.group('n') if m_grace else '1'
-    grace_part = f"exp+{grace_label}d" if str(grace_label).isdigit() else "exp+?d"
-    applied = int(m_applied.group('n')) if m_applied else 0
-    cand = int(m_cand.group('n')) if m_cand else applied
-    err = int(m_err.group('n')) if m_err else 0
-    skipped = int(m_skipped.group('n')) if m_skipped else 0
-
-    if applied == 0 and err == 0 and (not always_show):
-        return ''
-
-    header = f"Auto-close({grace_part}): closed {applied}/{cand}"
-    if skipped > 0:
-        header += f", skipped {skipped}"
-    header += f", errors {err}"
-    lines = [header]
-
-    if err > 0 or applied > 0:
-        for ln in text.splitlines():
-            if ln.startswith('- '):
-                lines.append(ln)
-            if len(lines) >= 1 + 6:
-                break
-
-    return ('\n'.join(lines).strip()).strip()
-
-
-def _is_auto_close_only_result(result: AccountResult) -> bool:
-    text = str(result.notification_text or '').strip()
-    return (not bool(result.ran_scan)) and text.startswith('Auto-close(')
-
-
-def _build_auto_close_message(result: AccountResult, *, now_bj: str) -> str:
-    acct = str(result.account).strip().lower()
-    text = str(result.notification_text or '').strip()
-    if not (result.should_notify and text):
-        return ''
-
-    lines: list[str] = []
-    lines.append("# Auto-close")
-    lines.append(f"## 账户提醒（{acct}）")
-    lines.append('')
-    lines.append(f"北京时间 {now_bj}")
-    lines.append('')
-    lines.append(text)
-    return '\n'.join(lines).strip() + '\n'
-
-
 def build_account_message(
     result: AccountResult,
     *,
@@ -216,8 +155,6 @@ def build_account_message(
 ) -> str:
     if not (result.should_notify and result.notification_text.strip()):
         return ''
-    if _is_auto_close_only_result(result):
-        return _build_auto_close_message(result, now_bj=now_bj)
 
     kept = result.notification_text.strip().splitlines()
     put_n = sum(1 for ln in kept if ' 卖Put ' in ln)
@@ -264,8 +201,6 @@ def build_account_message_compact(
 ) -> str:
     if not (result.should_notify and result.notification_text.strip()):
         return ''
-    if _is_auto_close_only_result(result):
-        return _build_auto_close_message(result, now_bj=now_bj)
 
     text = result.notification_text.strip()
     put_n = sum(1 for ln in text.splitlines() if ' 卖Put ' in ln)
