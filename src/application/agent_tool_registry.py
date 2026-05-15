@@ -436,6 +436,8 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
             "shared_state_dir": "optional shared state dir; defaults to output_shared/state",
             "accounts_root": "optional accounts output root; defaults to output_accounts",
             "runs_root": "optional run history root; defaults to output_runs",
+            "run_id": "optional output_runs run id to inspect instead of the last_run_dir pointer",
+            "run_dir": "optional explicit run directory to inspect instead of the last_run_dir pointer",
             "max_notification_chars": "optional int, capped at 20000",
             "max_run_age_minutes": "optional freshness threshold; defaults to 60",
             "profile_path": "optional OpenClaw profile JSON path; aliases openclaw_profile_path",

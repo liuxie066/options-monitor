@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 1.2.52 - 2026-05-15
+
+### Added
+- Added `runtime_status` support for inspecting a specific `output_runs` directory by `run_id` or `run_dir`.
+- Added `latest_scanned_run` and scanned-run prefetch summaries so a later skipped tick no longer hides the most recent real scan from runtime diagnostics.
+
+### Changed
+- Expanded required-data prefetch observability with sparse/shared summary fields such as `cached_unique_symbols`, `skipped`, `force_refresh`, reported OpenD call counts, and shared force-prefetch markers.
+
+### Tests
+- Added runtime-status regression coverage for skipped latest runs, explicit run selection, and shared force-prefetch summaries.
+- Re-ran focused agent plugin smoke/contract tests, changed-file type checking, compile checks, and release metadata validation.
+
 ## 1.2.51 - 2026-05-15
 
 ### Fixed
