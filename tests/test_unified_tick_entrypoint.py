@@ -186,6 +186,57 @@ def test_ensure_runtime_canonical_config_allows_repo_local_when_no_sibling_exter
         assert out["sibling_canonical_exists"] is False
 
 
+def test_ensure_runtime_schedule_matches_market_rejects_hk_config_with_us_schedule() -> None:
+    from domain.domain import ensure_runtime_schedule_matches_market
+
+    with TemporaryDirectory() as td:
+        cfg = Path(td) / "config.hk.json"
+        runtime_config = {
+            "schedule": {
+                "enabled": True,
+                "timezone": "America/New_York",
+                "run_window": {"start": "09:30", "end": "16:00", "breaks": []},
+            }
+        }
+
+        try:
+            ensure_runtime_schedule_matches_market(runtime_config, config_path=cfg, market_config="hk")
+            raise AssertionError("expected schedule market guard failure")
+        except SystemExit as e:
+            msg = str(e)
+            assert "runtime schedule timezone does not match market" in msg
+            assert "market: hk" in msg
+            assert "expected: Asia/Hong_Kong" in msg
+            assert "got: America/New_York" in msg
+
+
+def test_ensure_runtime_schedule_matches_market_accepts_hk_day_schedule() -> None:
+    from domain.domain import ensure_runtime_schedule_matches_market
+
+    with TemporaryDirectory() as td:
+        cfg = Path(td) / "config.hk.json"
+        runtime_config = {
+            "schedule": {
+                "enabled": True,
+                "timezone": "Asia/Hong_Kong",
+                "run_window": {
+                    "start": "09:30",
+                    "end": "16:00",
+                    "breaks": [{"start": "12:00", "end": "13:00"}],
+                },
+            }
+        }
+
+        out = ensure_runtime_schedule_matches_market(runtime_config, config_path=cfg, market_config="auto")
+
+    assert out == {
+        "market": "hk",
+        "schedule_key": "schedule",
+        "timezone": "Asia/Hong_Kong",
+        "validated": True,
+    }
+
+
 def test_production_tick_entrypoints_enable_sibling_external_guard() -> None:
     cli_src = Path("src/interfaces/cli/main.py").read_text(encoding="utf-8")
     multi_src = Path("src/application/multi_account_tick.py").read_text(encoding="utf-8")
@@ -193,4 +244,5 @@ def test_production_tick_entrypoints_enable_sibling_external_guard() -> None:
     assert "from src.application.multi_account_tick import run_tick" in cli_src
     assert "return int(run_tick(tick_argv))" in cli_src
     assert "require_sibling_external=True" in multi_src
+    assert "ensure_runtime_schedule_matches_market(" in multi_src
     assert "config_source_path" in multi_src

@@ -66,6 +66,7 @@ _EXPORTS: dict[str, str] = {
     'CANONICAL_CONFIGS': '.config_contract',
     'FORBIDDEN_RUNTIME_CONFIGS': '.config_contract',
     'ensure_runtime_canonical_config': '.config_contract',
+    'ensure_runtime_schedule_matches_market': '.config_contract',
     'resolve_config_contract': '.config_contract',
     'SCHEMA_KIND_DECISION': '.intermediate_objects',
     'SCHEMA_KIND_DELIVERY_PLAN': '.intermediate_objects',
