@@ -11,9 +11,11 @@ def build_tool_manifest() -> dict[str, Any]:
 
 
 def _tool_write_requested(definition: AgentToolDefinition, payload: dict[str, Any]) -> bool:
+    name = definition.name
+    if name == "doctor":
+        return _truthy(payload.get("write_outputs"))
     if definition.read_only:
         return False
-    name = definition.name
     if name == "version_update":
         return bool(payload.get("apply", False))
     if name == "manage_symbols":
@@ -22,6 +24,12 @@ def _tool_write_requested(definition: AgentToolDefinition, payload: dict[str, An
     if bool(payload.get("dry_run", False)):
         return False
     return bool(definition.side_effects or definition.requires_confirm or definition.risk_level != "read_only")
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 def _write_gate_error(definition: AgentToolDefinition, payload: dict[str, Any]) -> AgentToolError | None:

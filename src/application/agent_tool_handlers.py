@@ -29,6 +29,7 @@ from src.application.agent_tool_healthcheck import run_healthcheck_tool
 from src.application.agent_tool_candidate_rank import candidate_rank_explain_tool
 from src.application.agent_tool_candidate_filter import candidate_filter_explain_tool
 from src.application.agent_tool_strategy_replay import strategy_replay_analyze_tool
+from src.application.doctor import doctor_tool
 from src.application.agent_tool_notifications import preview_notification_tool
 from src.application.agent_tool_openclaw import (
     openclaw_readiness_tool,
@@ -114,6 +115,10 @@ def _mask_account_id(value: Any) -> str:
     return _mask_account_id_impl(value)
 
 
+def _mask_path_str(value: Any) -> str:
+    return mask_path(value) or "..."
+
+
 def _run_futu_doctor(*, host: str, port: int, symbols: list[str], timeout_sec: int) -> dict[str, Any]:
     return _run_futu_doctor_impl(host=host, port=port, symbols=symbols, timeout_sec=timeout_sec, repo_base=repo_base)
 
@@ -132,7 +137,7 @@ def _healthcheck_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str
         resolve_data_config_ref=_resolve_data_config_ref,
         resolve_public_data_config_path=_resolve_public_data_config_path,
         read_json_object_or_empty=_read_json_object_or_empty,
-        mask_path=mask_path,
+        mask_path=_mask_path_str,
         list_account_config_views=list_account_config_views,
         mask_account_id=_mask_account_id,
         infer_futu_portfolio_settings=infer_futu_portfolio_settings,
@@ -148,7 +153,7 @@ def _version_check_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[s
         payload,
         check_version_update=check_version_update,
         repo_base=repo_base,
-        mask_path=mask_path,
+        mask_path=_mask_path_str,
     )
 
 
@@ -157,7 +162,7 @@ def _version_update_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[
         payload,
         update_local_version=update_local_version,
         repo_base=repo_base,
-        mask_path=mask_path,
+        mask_path=_mask_path_str,
     )
 
 
@@ -168,7 +173,7 @@ def _config_validate_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list
         validate_runtime_config=_validate_runtime_config,
         accounts_from_config=accounts_from_config,
         resolve_watchlist_config=resolve_watchlist_config,
-        mask_path=mask_path,
+        mask_path=_mask_path_str,
     )
 
 
@@ -179,7 +184,7 @@ def _scheduler_status_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], lis
         read_state=read_scheduler_state,
         decide=scheduler_decide,
         repo_base=repo_base,
-        mask_path=mask_path,
+        mask_path=_mask_path_str,
     )
 
 
@@ -192,7 +197,7 @@ def _query_cash_headroom_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], 
         resolve_output_root=resolve_output_root,
         query_sell_put_cash=query_sell_put_cash,
         repo_base=repo_base,
-        mask_path=mask_path,
+        mask_path=_mask_path_str,
     )
 
 
@@ -226,7 +231,7 @@ def _option_positions_read_tool(payload: dict[str, Any]) -> tuple[dict[str, Any]
         build_lot_event_history=build_lot_event_history,
         inspect_projection_state=inspect_projection_state,
         repo_base=repo_base,
-        mask_path=mask_path,
+        mask_path=_mask_path_str,
     )
 
 
@@ -362,6 +367,16 @@ def _openclaw_readiness_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], l
     )
 
 
+def _doctor_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    return doctor_tool(
+        payload,
+        runtime_status_tool_fn=_runtime_status_tool,
+        load_runtime_config=load_runtime_config,
+        repo_base=repo_base,
+        mask_path=mask_path,
+    )
+
+
 TOOL_HANDLERS = {
     "healthcheck": _healthcheck_tool,
     "version_check": _version_check_tool,
@@ -383,4 +398,5 @@ TOOL_HANDLERS = {
     "preview_notification": _preview_notification_tool,
     "runtime_status": _runtime_status_tool,
     "openclaw_readiness": _openclaw_readiness_tool,
+    "doctor": _doctor_tool,
 }
