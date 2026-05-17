@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 1.2.56 - 2026-05-17
+
+### Added
+- Added the `doctor` agent tool and `./om doctor` CLI for production-quality triage from runtime status, scheduler evidence, audit tails, and deployment metadata.
+- Added optional OpenAI-compatible AI triage with custom `base_url`, `model`, `api_key_env`, strict JSON prompting, and redacted evidence handoff output.
+- Added strategy evidence collection from candidate CSVs, `candidate_filter_trace.jsonl`, and strategy replay artifacts so doctor can support evidence-backed optimization suggestions.
+
+### Changed
+- Made doctor report writes opt-in through `write_outputs=true`, write-tool permission, and `confirm=true`, while keeping the default path as no local writes.
+- Restricted doctor output directories to the repository tree and kept API keys, webhooks, bearer tokens, and long account identifiers out of handoff evidence.
+- Preserved deterministic runtime status in handoffs when AI triage is unavailable, and kept runtime summary warnings visible alongside scheduler findings.
+
+### Tests
+- Added doctor coverage for scheduler evidence boundaries, AI config/redaction, strategy evidence, output-write gating, path restrictions, and agent/CLI contracts.
+- Re-ran focused doctor, agent plugin contract/smoke, type checking, compile, config dry-runs, diff, and release metadata checks.
+
 ## 1.2.55 - 2026-05-16
 
 ### Added

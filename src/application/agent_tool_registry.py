@@ -479,6 +479,56 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
         safe_default_input={"config_key": "us"},
         examples=({"input": {"config_key": "us", "timeout_sec": 20}},),
     ),
+    AgentToolDefinition(
+        name="doctor",
+        read_only=False,
+        description=(
+            "Production quality doctor: collect runtime evidence, run deterministic checks, "
+            "optionally call a configured OpenAI-compatible AI endpoint, and render a local handoff."
+        ),
+        requires=("runtime_config", "runtime_artifacts"),
+        capabilities=("production_doctor", "runtime_triage", "ai_handoff", "local_report"),
+        side_effects=("writes_local_doctor_reports",),
+        input_schema={
+            "config_key": "us|hk",
+            "config_path": "optional explicit config path",
+            "accounts": "optional list[str]",
+            "profile_path": "optional OpenClaw profile JSON path; aliases openclaw_profile_path",
+            "openclaw_profile_path": "optional OpenClaw profile JSON path",
+            "scheduler_evidence": "optional online scheduler evidence object with provider/job/status/exit_code/stdout_tail/stderr_tail",
+            "ai": "optional bool; run AI triage when true and AI config is complete",
+            "ai_config": "optional object: provider, base_url, model, api_key_env, timeout_seconds, max_input_chars",
+            "output": "optional handoff|json|both; defaults to handoff",
+            "write_outputs": "optional bool; defaults false, true writes doctor files after write-tool confirmation",
+            "confirm": "required true when write_outputs=true",
+            "doctor_output_dir": "optional output directory; defaults to output_shared/doctor",
+            "doctor_current_dir": "optional current-state directory; defaults to output_shared/state/current",
+            "run_id": "optional output_runs run id forwarded to runtime_status",
+            "run_dir": "optional explicit run dir forwarded to runtime_status",
+            "candidate_paths": "optional candidate CSV path or list of paths for strategy evidence",
+            "trace_paths": "optional candidate_filter_trace.jsonl path or list of paths for strategy evidence",
+            "strategy_replay_paths": "optional strategy replay path or list of paths for strategy evidence",
+            "strategy_report_dir": "optional report dir containing candidate, trace, and replay artifacts",
+            "tail_limit": "optional JSONL tail row limit; default 20, max 200",
+        },
+        risk_level="local_write",
+        requires_confirm=True,
+        safe_default_input={"config_key": "us", "ai": False, "output": "handoff", "write_outputs": False},
+        examples=(
+            {"input": {"config_key": "us", "ai": False}},
+            {
+                "input": {
+                    "config_key": "us",
+                    "ai": True,
+                    "ai_config": {
+                        "base_url": "https://example.invalid/v1",
+                        "model": "doctor-model",
+                        "api_key_env": "OM_DOCTOR_AI_API_KEY",
+                    },
+                }
+            },
+        ),
+    ),
 )
 
 
