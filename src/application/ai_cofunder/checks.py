@@ -23,7 +23,7 @@ def run_deterministic_checks(evidence: dict[str, Any]) -> dict[str, Any]:
     category = _primary_category(findings, categories)
     status = _overall_status(findings)
     return {
-        "schema_version": "doctor_diagnosis.v1",
+        "schema_version": "ai_cofunder_diagnosis.v1",
         "status": status,
         "category": category,
         "findings": findings,
@@ -97,7 +97,7 @@ def _check_runtime(runtime: dict[str, Any], *, findings: list[dict[str, Any]], c
                 severity="fail",
                 category="runtime_failed",
                 code="RUNTIME_OUTPUT_STALE",
-                message="Runtime output is stale relative to the doctor freshness threshold.",
+                message="Runtime output is stale relative to the ai-cofunder freshness threshold.",
                 evidence=[
                     {"source": "runtime_status.freshness.status", "observed": freshness.get("status"), "expected": "fresh"},
                     {"source": "runtime_status.freshness.age_seconds", "observed": freshness.get("age_seconds"), "expected": f"<= {freshness.get('max_age_minutes')} minutes"},
@@ -112,7 +112,7 @@ def _check_runtime(runtime: dict[str, Any], *, findings: list[dict[str, Any]], c
                 severity="fail",
                 category="runtime_failed",
                 code="LATEST_RUN_MISSING",
-                message="Doctor could not find the latest runtime run directory.",
+                message="AI Cofunder could not find the latest runtime run directory.",
                 evidence=[{"source": "runtime_status.latest_run_selection", "observed": latest_run_selection, "expected": "found=true"}],
             )
         )

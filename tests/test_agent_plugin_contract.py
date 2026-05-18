@@ -31,7 +31,8 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert "candidate_rank_explain" in tool_names
     assert "candidate_filter_explain" in tool_names
     assert "strategy_replay_analyze" in tool_names
-    assert "doctor" in tool_names
+    assert "doctor" not in tool_names
+    assert "ai_cofunder" in tool_names
     assert spec["schema_version"] == "1.0"
     assert spec["recommended_flow"] == ["healthcheck", "scan_opportunities", "get_close_advice"]
     get_close_advice = next(item for item in spec["tools"] if item["name"] == "get_close_advice")
@@ -76,14 +77,22 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert strategy_replay["risk_level"] == "read_only"
     assert strategy_replay["requires_confirm"] is False
     assert strategy_replay["safe_default_input"]["min_sample"] == 5
-    doctor = next(item for item in spec["tools"] if item["name"] == "doctor")
-    assert doctor["read_only"] is False
-    assert doctor["risk_level"] == "local_write"
-    assert doctor["requires_confirm"] is True
-    assert doctor["safe_default_input"]["output"] == "handoff"
-    assert doctor["safe_default_input"]["write_outputs"] is False
-    assert "ai_config" in doctor["input_schema"]
-    assert "strategy_replay_paths" in doctor["input_schema"]
+    ai_cofunder = next(item for item in spec["tools"] if item["name"] == "ai_cofunder")
+    assert ai_cofunder["read_only"] is False
+    assert ai_cofunder["risk_level"] == "local_write"
+    assert ai_cofunder["requires_confirm"] is True
+    assert ai_cofunder["safe_default_input"] == {
+        "scope": "full",
+        "config_key": "us",
+        "output": "handoff",
+        "write_outputs": False,
+    }
+    assert "scope" in ai_cofunder["input_schema"]
+    assert "include_healthcheck" in ai_cofunder["input_schema"]
+    assert "data_config" in ai_cofunder["input_schema"]
+    assert "strategy_replay_paths" in ai_cofunder["input_schema"]
+    assert "ai_config" not in ai_cofunder["input_schema"]
+    assert "healthcheck_snapshot" in ai_cofunder["capabilities"]
 
 
 def test_agent_registry_manifest_and_handlers_stay_in_sync() -> None:
@@ -127,7 +136,8 @@ def test_agent_cli_spec_prints_json_manifest() -> None:
     assert any(str(x.get("name")) == "option_positions_read" for x in payload.get("tools", []))
     assert any(str(x.get("name")) == "config_validate" for x in payload.get("tools", []))
     assert any(str(x.get("name")) == "candidate_rank_explain" for x in payload.get("tools", []))
-    assert any(str(x.get("name")) == "doctor" for x in payload.get("tools", []))
+    assert not any(str(x.get("name")) == "doctor" for x in payload.get("tools", []))
+    assert any(str(x.get("name")) == "ai_cofunder" for x in payload.get("tools", []))
     assert any(str(x.get("name")) == "candidate_filter_explain" for x in payload.get("tools", []))
     assert any(str(x.get("name")) == "strategy_replay_analyze" for x in payload.get("tools", []))
     assert "init_command" not in payload["launcher"]

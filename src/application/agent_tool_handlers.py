@@ -31,7 +31,7 @@ from src.application.agent_tool_healthcheck import run_healthcheck_tool
 from src.application.agent_tool_candidate_rank import candidate_rank_explain_tool
 from src.application.agent_tool_candidate_filter import candidate_filter_explain_tool
 from src.application.agent_tool_strategy_replay import strategy_replay_analyze_tool
-from src.application.doctor import doctor_tool
+from src.application.ai_cofunder import ai_cofunder_tool
 from src.application.agent_tool_notifications import preview_notification_tool
 from src.application.agent_tool_openclaw import (
     openclaw_readiness_tool,
@@ -369,10 +369,11 @@ def _openclaw_readiness_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], l
     )
 
 
-def _doctor_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    return doctor_tool(
+def _ai_cofunder_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    return ai_cofunder_tool(
         payload,
         runtime_status_tool_fn=_runtime_status_tool,
+        healthcheck_tool_fn=_healthcheck_tool,
         load_runtime_config=load_runtime_config,
         repo_base=repo_base,
         mask_path=mask_path,
@@ -400,5 +401,5 @@ TOOL_HANDLERS = {
     "preview_notification": _preview_notification_tool,
     "runtime_status": _runtime_status_tool,
     "openclaw_readiness": _openclaw_readiness_tool,
-    "doctor": _doctor_tool,
+    "ai_cofunder": _ai_cofunder_tool,
 }

@@ -41,29 +41,31 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     health.add_argument("--config-path", default=None)
     health.add_argument("--accounts", nargs="*", default=None)
 
-    doctor = sub.add_parser("doctor", help="run production quality doctor")
-    doctor.add_argument("--config-key", default=None, choices=("us", "hk"))
-    doctor.add_argument("--config-path", default=None)
-    doctor.add_argument("--accounts", nargs="*", default=None)
-    doctor.add_argument("--profile-path", default=None)
-    doctor.add_argument("--ai", action="store_true")
-    doctor.add_argument("--ai-base-url", default=None)
-    doctor.add_argument("--ai-model", default=None)
-    doctor.add_argument("--ai-api-key-env", default=None)
-    doctor.add_argument("--ai-timeout-seconds", type=int, default=None)
-    doctor.add_argument("--ai-max-input-chars", type=int, default=None)
-    doctor.add_argument("--output", default="handoff", choices=("handoff", "json", "both", "markdown", "md"))
-    doctor.add_argument("--scheduler-evidence-json", default=None)
-    doctor.add_argument("--scheduler-evidence-file", default=None)
-    doctor.add_argument("--candidate-path", action="append", dest="candidate_paths", default=None)
-    doctor.add_argument("--trace-path", action="append", dest="trace_paths", default=None)
-    doctor.add_argument("--strategy-replay-path", action="append", dest="strategy_replay_paths", default=None)
-    doctor.add_argument("--strategy-report-dir", default=None)
-    doctor.add_argument("--doctor-output-dir", default=None)
-    doctor.add_argument("--doctor-current-dir", default=None)
-    doctor.add_argument("--write-outputs", action="store_true")
-    doctor.add_argument("--no-write-outputs", action="store_true")
-    doctor.add_argument("--confirm", action="store_true")
+    ai_cofunder = sub.add_parser("ai-cofunder", help="collect AI Cofunder evidence for MacBook Codex")
+    ai_cofunder_sub = ai_cofunder.add_subparsers(dest="ai_cofunder_command", required=True)
+    ai_collect = ai_cofunder_sub.add_parser("collect", help="collect redacted evidence bundle")
+    ai_collect.add_argument("--scope", default="full", choices=("ledger", "account-strategy", "quality", "strategy", "full"))
+    ai_collect.add_argument("--config-key", default=None, choices=("us", "hk"))
+    ai_collect.add_argument("--config-path", default=None)
+    ai_collect.add_argument("--accounts", nargs="*", default=None)
+    ai_collect.add_argument("--profile-path", default=None)
+    ai_collect.add_argument("--output", default="handoff", choices=("handoff", "json", "both", "markdown", "md"))
+    ai_collect.add_argument("--scheduler-evidence-json", default=None)
+    ai_collect.add_argument("--scheduler-evidence-file", default=None)
+    ai_collect.add_argument("--candidate-path", action="append", dest="candidate_paths", default=None)
+    ai_collect.add_argument("--trace-path", action="append", dest="trace_paths", default=None)
+    ai_collect.add_argument("--strategy-replay-path", action="append", dest="strategy_replay_paths", default=None)
+    ai_collect.add_argument("--strategy-report-dir", default=None)
+    ai_collect.add_argument("--include-healthcheck", action="store_true")
+    ai_collect.add_argument("--data-config", default=None)
+    ai_collect.add_argument("--timeout-sec", type=int, default=None)
+    ai_collect.add_argument("--output-dir", default=None)
+    ai_collect.add_argument("--current-dir", default=None)
+    ai_collect.add_argument("--write-outputs", action="store_true")
+    ai_collect.add_argument("--no-write-outputs", action="store_true")
+    ai_collect.add_argument("--confirm", action="store_true")
+    ai_handoff = ai_cofunder_sub.add_parser("handoff", help="render handoff from a collected bundle")
+    ai_handoff.add_argument("--bundle", required=True)
 
     scan = sub.add_parser("scan", help="run opportunity scan")
     scan.add_argument("--config-key", default=None, choices=("us", "hk"))
@@ -299,35 +301,28 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "healthcheck":
             return _print(run_healthcheck(config_key=args.config_key, config_path=args.config_path, accounts=args.accounts))
 
-        if args.command == "doctor":
-            payload: dict[str, Any] = {
+        if args.command == "ai-cofunder" and args.ai_cofunder_command == "collect":
+            payload = {
+                "scope": args.scope,
                 "config_key": args.config_key,
                 "config_path": args.config_path,
                 "accounts": args.accounts,
                 "profile_path": args.profile_path,
-                "ai": bool(args.ai),
                 "output": args.output,
                 "candidate_paths": args.candidate_paths,
                 "trace_paths": args.trace_paths,
                 "strategy_replay_paths": args.strategy_replay_paths,
                 "strategy_report_dir": args.strategy_report_dir,
-                "doctor_output_dir": args.doctor_output_dir,
-                "doctor_current_dir": args.doctor_current_dir,
+                "include_healthcheck": bool(args.include_healthcheck),
+                "data_config": args.data_config,
+                "timeout_sec": args.timeout_sec,
+                "ai_cofunder_output_dir": args.output_dir,
+                "ai_cofunder_current_dir": args.current_dir,
                 "write_outputs": bool(args.write_outputs),
                 "confirm": bool(args.confirm),
             }
             if args.no_write_outputs:
                 payload["write_outputs"] = False
-            ai_config = {
-                "base_url": args.ai_base_url,
-                "model": args.ai_model,
-                "api_key_env": args.ai_api_key_env,
-                "timeout_seconds": args.ai_timeout_seconds,
-                "max_input_chars": args.ai_max_input_chars,
-            }
-            ai_config = {key: value for key, value in ai_config.items() if value is not None}
-            if ai_config:
-                payload["ai_config"] = ai_config
             scheduler_evidence = _load_scheduler_evidence(
                 json_text=args.scheduler_evidence_json,
                 file_path=args.scheduler_evidence_file,
@@ -335,7 +330,19 @@ def main(argv: list[str] | None = None) -> int:
             if scheduler_evidence is not None:
                 payload["scheduler_evidence"] = scheduler_evidence
             payload = {key: value for key, value in payload.items() if value not in (None, [])}
-            return _print(execute_tool("doctor", payload))
+            return _print(execute_tool("ai_cofunder", payload))
+
+        if args.command == "ai-cofunder" and args.ai_cofunder_command == "handoff":
+            from src.application.ai_cofunder.service import render_ai_cofunder_handoff
+
+            bundle = json.loads(Path(args.bundle).read_text(encoding="utf-8"))
+            if not isinstance(bundle, dict):
+                raise AgentToolError(code="INPUT_ERROR", message="ai-cofunder bundle must be a JSON object")
+            return _print(build_response(
+                tool_name="ai-cofunder.handoff",
+                ok=True,
+                data={"handoff_markdown": render_ai_cofunder_handoff(bundle)},
+            ))
 
         if args.command == "scan":
             symbols = [s.strip().upper() for s in str(args.symbols or "").split(",") if s.strip()] or None

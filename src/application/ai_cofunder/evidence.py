@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from src.application.doctor.redaction import redact_value
+from src.application.ai_cofunder.redaction import redact_value
 
 
 def collect_evidence(
@@ -38,7 +38,7 @@ def collect_evidence(
 
     scheduler_evidence = _normalize_scheduler_evidence(payload.get("scheduler_evidence"))
     evidence = {
-        "schema_version": "doctor_evidence.v1",
+        "schema_version": "ai_cofunder_evidence.v1",
         "collected_at_utc": now.isoformat().replace("+00:00", "Z"),
         "input": _safe_input_summary(payload),
         "deployment": _deployment_snapshot(base=base, config_path=config_path, cfg=cfg, mask_path=mask_path),
@@ -108,7 +108,7 @@ def _safe_input_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "profile_path",
         "openclaw_profile_path",
         "output",
-        "ai",
+        "scope",
     ):
         if key in payload:
             out[key] = payload.get(key)
@@ -120,15 +120,6 @@ def _safe_input_summary(payload: dict[str, Any]) -> dict[str, Any]:
             "last_status": scheduler.get("last_status") or scheduler.get("status"),
             "last_exit_code": scheduler.get("last_exit_code") or scheduler.get("exit_code"),
             "last_triggered_at": scheduler.get("last_triggered_at"),
-        }
-    if isinstance(payload.get("ai_config"), dict):
-        ai_cfg = payload["ai_config"]
-        out["ai_config"] = {
-            "provider": ai_cfg.get("provider"),
-            "base_url": ai_cfg.get("base_url"),
-            "model": ai_cfg.get("model"),
-            "api_key_env": ai_cfg.get("api_key_env"),
-            "timeout_seconds": ai_cfg.get("timeout_seconds"),
         }
     return out
 
@@ -282,7 +273,7 @@ def _strategy_evidence(payload: dict[str, Any], *, source_paths: dict[str, Path 
     replay_reports = [_replay_summary(path, base=base, limit=tail_limit) for path in replay_paths]
     total_candidate_rows = sum(int(item.get("row_count") or 0) for item in candidate_reports if item.get("exists"))
     return {
-        "schema_version": "doctor_strategy_evidence.v1",
+        "schema_version": "ai_cofunder_strategy_evidence.v1",
         "candidate_reports": candidate_reports,
         "filter_traces": filter_traces,
         "strategy_replay": replay_reports,

@@ -3,8 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable
 
-from domain.domain import FEISHU_APP_NOTIFICATION_PROVIDER, normalize_notification_provider
+from domain.domain.multi_tick import FEISHU_APP_NOTIFICATION_PROVIDER, normalize_notification_provider
 from src.application.ledger.api import ledger_store_payload
+
+
+def _dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
 
 
 def run_healthcheck_tool(
@@ -20,7 +24,7 @@ def run_healthcheck_tool(
     mask_path: Callable[[Any], str],
     list_account_config_views: Callable[[dict[str, Any]], list[Any]],
     mask_account_id: Callable[[Any], str],
-    infer_futu_portfolio_settings: Callable[[dict[str, Any]], dict[str, Any]],
+    infer_futu_portfolio_settings: Callable[..., dict[str, Any]],
     load_option_positions_repo: Callable[[Any], Any],
     run_futu_doctor: Callable[..., dict[str, Any]],
     healthcheck_symbols_for_futu: Callable[[dict[str, Any]], list[str]],
@@ -45,7 +49,7 @@ def run_healthcheck_tool(
         }
     )
 
-    portfolio_cfg = cfg.get("portfolio") if isinstance(cfg.get("portfolio"), dict) else {}
+    portfolio_cfg = _dict(cfg.get("portfolio"))
     data_config_ref = resolve_data_config_ref(payload, portfolio_cfg)
     data_config_path = resolve_public_data_config_path(payload, portfolio_cfg)
     if data_config_path.exists():
@@ -70,8 +74,8 @@ def run_healthcheck_tool(
         )
 
     data_cfg = read_json_object_or_empty(data_config_path) if data_config_path.exists() else {}
-    feishu_cfg = data_cfg.get("feishu") if isinstance(data_cfg.get("feishu"), dict) else {}
-    feishu_tables = feishu_cfg.get("tables") if isinstance(feishu_cfg.get("tables"), dict) else {}
+    feishu_cfg = _dict(data_cfg.get("feishu"))
+    feishu_tables = _dict(feishu_cfg.get("tables"))
     feishu_ready = bool(str(feishu_cfg.get("app_id") or "").strip()) and bool(str(feishu_cfg.get("app_secret") or "").strip())
     holdings_ref = str(feishu_tables.get("holdings") or "").strip()
     holdings_ready = feishu_ready and ("/" in holdings_ref)
@@ -89,7 +93,7 @@ def run_healthcheck_tool(
             }
         )
         warnings.append("Replace example starter symbols before enabling long-term use or sends.")
-    if str((cfg.get("portfolio") or {}).get("data_config") or "").strip() == "secrets/portfolio.sqlite.json":
+    if str(portfolio_cfg.get("data_config") or "").strip() == "secrets/portfolio.sqlite.json":
         checks.append(
             {
                 "name": "starter_data_config",
@@ -99,7 +103,7 @@ def run_healthcheck_tool(
         )
         warnings.append("The repo-local starter SQLite data_config is fine for local testing, but review it before production use.")
 
-    notifications = cfg.get("notifications") if isinstance(cfg.get("notifications"), dict) else {}
+    notifications = _dict(cfg.get("notifications"))
     if (
         isinstance(notifications, dict)
         and normalize_notification_provider(notifications.get("provider") or notifications.get("channel"))
@@ -130,7 +134,7 @@ def run_healthcheck_tool(
             warnings.append("Notification credentials missing; notifications cannot be sent until the secrets file is restored.")
         else:
             secrets_payload = read_json_object_or_empty(secrets_path)
-            feishu_secret_cfg = secrets_payload.get("feishu") if isinstance(secrets_payload.get("feishu"), dict) else {}
+            feishu_secret_cfg = _dict(secrets_payload.get("feishu"))
             if not str(feishu_secret_cfg.get("app_id") or "").strip() or not str(feishu_secret_cfg.get("app_secret") or "").strip():
                 checks.append(
                     {
@@ -164,7 +168,7 @@ def run_healthcheck_tool(
     if data_config_path.exists():
         try:
             option_repo = load_option_positions_repo(data_config_path)
-            ledger_store = ledger_store_payload(data_config_path, option_repo)
+            ledger_store = _dict(ledger_store_payload(data_config_path, option_repo))
             checks.append(
                 {
                     "name": "ledger_store",
@@ -204,7 +208,7 @@ def run_healthcheck_tool(
     primary_errors: list[str] = []
     primary_preview: dict[str, dict[str, Any]] = {}
     account_views = {item.account: item for item in list_account_config_views(cfg)}
-    account_settings = cfg.get("account_settings") if isinstance(cfg.get("account_settings"), dict) else {}
+    account_settings = _dict(cfg.get("account_settings"))
     for account in accounts:
         account_view = account_views[account]
         source_plan = account_view.portfolio_source_plan
@@ -224,8 +228,8 @@ def run_healthcheck_tool(
                 mapping_errors.append(f"{account}: missing trade_intake.account_mapping.futu entry")
                 primary_errors.append(f"{account}: missing trade_intake.account_mapping.futu entry")
                 continue
-            account_setting = account_settings.get(account) if isinstance(account_settings.get(account), dict) else {}
-            futu_setting = account_setting.get("futu") if isinstance(account_setting.get("futu"), dict) else {}
+            account_setting = _dict(account_settings.get(account))
+            futu_setting = _dict(account_setting.get("futu"))
             configured_acc_id = str(futu_setting.get("account_id") or "").strip()
             if configured_acc_id and configured_acc_id not in {str(x).strip() for x in mapped_ids}:
                 mapping_errors.append(
@@ -292,19 +296,19 @@ def run_healthcheck_tool(
                     opend_endpoints[key] = {"host": host, "port": port, "accounts": []}
                 opend_endpoints[key]["accounts"].append(account)
 
-    doctor_results: dict[str, dict[str, Any]] = {}
+    readiness_results: dict[str, dict[str, Any]] = {}
     for key, ep in opend_endpoints.items():
         ep_host = ep["host"]
         ep_port = ep["port"]
-        doctor = run_futu_doctor(
+        readiness = run_futu_doctor(
             host=ep_host,
             port=ep_port,
             symbols=healthcheck_symbols_for_futu(cfg),
             timeout_sec=int(payload.get("timeout_sec") or 20),
         )
-        doctor_results[key] = doctor
+        readiness_results[key] = readiness
 
-    # Legacy global compatibility path for summary reporting
+    # Global path if no specific account needs Futu but global settings exist.
     futu_settings = infer_futu_portfolio_settings(cfg)
     futu_host = str(futu_settings.get("host") or "").strip()
     try:
@@ -313,60 +317,59 @@ def run_healthcheck_tool(
         futu_port = 0
 
     if opend_endpoints:
-        legacy_doctor_status = "ok"
-        legacy_doctor_message = "all OpenD checks passed"
+        aggregate_readiness_status = "ok"
+        aggregate_readiness_message = "all OpenD readiness checks passed"
         for key, ep in opend_endpoints.items():
             ep_host = ep["host"]
             ep_port = ep["port"]
-            doctor = doctor_results[key]
-            doctor_ok = bool(doctor.get("ok"))
+            readiness = readiness_results[key]
+            readiness_ok = bool(readiness.get("ok"))
             ep_accounts = ep["accounts"]
-            
-            if doctor_ok:
-                doctor_message = f"OpenD check passed for {', '.join(ep_accounts)}"
+
+            if readiness_ok:
+                readiness_message = f"OpenD readiness passed for {', '.join(ep_accounts)}"
             else:
-                watchdog = doctor.get("watchdog") if isinstance(doctor.get("watchdog"), dict) else {}
-                doctor_message = f"{', '.join(ep_accounts)}: " + str(
+                watchdog = _dict(readiness.get("watchdog"))
+                readiness_message = f"{', '.join(ep_accounts)}: " + str(
                     watchdog.get("message")
                     or watchdog.get("error")
-                    or doctor.get("message")
-                    or doctor.get("watchdog_raw")
-                    or "doctor_futu failed"
+                    or readiness.get("message")
+                    or readiness.get("watchdog_raw")
+                    or "OpenD readiness probe failed"
                 )
-            
+
             checks.append(
                 {
-                    "name": f"opend_doctor_{key.replace('.', '_').replace(':', '_')}",
-                    "status": ("ok" if doctor_ok else "error"),
-                    "message": doctor_message,
+                    "name": f"opend_readiness_{key.replace('.', '_').replace(':', '_')}",
+                    "status": ("ok" if readiness_ok else "error"),
+                    "message": readiness_message,
                     "value": {"host": ep_host, "port": ep_port, "accounts": ep_accounts},
                 }
             )
-            if not doctor_ok:
-                legacy_doctor_status = "error"
-                legacy_doctor_message = doctor_message
+            if not readiness_ok:
+                aggregate_readiness_status = "error"
+                aggregate_readiness_message = readiness_message
                 warnings.append(f"OpenD endpoint {key} for {', '.join(ep_accounts)} is not ready.")
         checks.append(
             {
-                "name": "opend_doctor",
-                "status": legacy_doctor_status,
-                "message": legacy_doctor_message,
+                "name": "opend_readiness",
+                "status": aggregate_readiness_status,
+                "message": aggregate_readiness_message,
             }
         )
     elif futu_host and futu_port > 0:
-        # Compatibility path if no specific account needs futu but global settings exist
-        doctor = run_futu_doctor(
+        readiness = run_futu_doctor(
             host=futu_host,
             port=futu_port,
             symbols=healthcheck_symbols_for_futu(cfg),
             timeout_sec=int(payload.get("timeout_sec") or 20),
         )
-        doctor_ok = bool(doctor.get("ok"))
+        readiness_ok = bool(readiness.get("ok"))
         checks.append(
             {
-                "name": "opend_doctor_global",
-                "status": ("ok" if doctor_ok else "error"),
-                "message": (doctor.get("message") or "Global OpenD check passed"),
+                "name": "opend_readiness_global",
+                "status": ("ok" if readiness_ok else "error"),
+                "message": (readiness.get("message") or "Global OpenD readiness passed"),
                 "value": {"host": futu_host, "port": futu_port},
             }
         )
@@ -381,7 +384,7 @@ def run_healthcheck_tool(
         warnings.append("Set account_settings.<account>.futu.host/port or symbols[].fetch.source=futu for the public install flow.")
 
     opend_ready = bool(
-        any(item.get("name").startswith("opend_doctor") and item.get("status") == "ok" for item in checks)
+        any(str(item.get("name") or "").startswith("opend_readiness") and item.get("status") == "ok" for item in checks)
     )
     account_paths: dict[str, dict[str, Any]] = {}
     for account in accounts:
@@ -417,6 +420,7 @@ def run_healthcheck_tool(
         "preview_notification": {"available": True, "mode": "read"},
         "runtime_status": {"available": True, "mode": "read"},
         "openclaw_readiness": {"available": True, "mode": "read"},
+        "ai_cofunder": {"available": True, "mode": "read_default_write_optional"},
     }
     critical = [item for item in checks if item["status"] == "error"]
     return (
