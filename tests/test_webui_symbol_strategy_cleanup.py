@@ -394,8 +394,8 @@ def test_global_summary_exposes_option_positions_bootstrap_status(monkeypatch) -
             )
 
             class _Repo:
-                bootstrap_status = "degraded_feishu_bootstrap_failed"
-                bootstrap_message = "feishu bootstrap failed: upstream unavailable"
+                bootstrap_status = "degraded_option_positions_repo_load_failed"
+                bootstrap_message = "option positions repo load failed: sqlite unavailable"
 
             monkeypatch.setattr(webui_server, "open_position_ledger", lambda _path: _Repo())
             webui_server.BASE_DIR = repo
@@ -403,9 +403,9 @@ def test_global_summary_exposes_option_positions_bootstrap_status(monkeypatch) -
 
             summary = _global_summary("us")
             bootstrap = summary["sections"]["portfolio"]["option_positions_bootstrap"]
-            assert bootstrap["status"] == "degraded_feishu_bootstrap_failed"
+            assert bootstrap["status"] == "degraded_option_positions_repo_load_failed"
             assert bootstrap["ok"] is False
-            assert "upstream unavailable" in bootstrap["message"]
+            assert "sqlite unavailable" in bootstrap["message"]
     finally:
         webui_server.open_position_ledger = old_open_position_ledger
         webui_server.BASE_DIR = old_base

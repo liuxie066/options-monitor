@@ -20,26 +20,17 @@ from domain.domain.ledger.position_fields import (
 from domain.domain.trade_contract_identity import canonical_contract_symbol
 from src.application.ledger.publisher import project_stored_trade_events_to_position_lots
 from src.application.ledger.repository import (
-    OptionPositionsTableRef,
     SQLiteOptionPositionsRepository,
-    _has_feishu_option_positions_table_cfg,
     _load_data_config,
-    _load_table_ref_from_cfg,
-    _option_positions_bootstrap_from_feishu_enabled_from_cfg,
     _option_positions_bootstrap_from_legacy_sqlite_enabled_from_cfg,
-    resolve_option_positions_sqlite_path,
     with_sqlite_repo_transaction,
 )
-from src.infrastructure.feishu_bitable import bitable_list_records, get_tenant_access_token, safe_float
+from src.application.ledger.store_resolution import resolve_ledger_store
+from src.infrastructure.feishu_bitable import safe_float
 
 
 def _canonical_trade_symbol(value: Any) -> str:
     return canonical_contract_symbol(value)
-
-
-def _list_feishu_option_position_records(table_ref: OptionPositionsTableRef) -> list[dict[str, Any]]:
-    token = get_tenant_access_token(table_ref.app_id, table_ref.app_secret)
-    return bitable_list_records(token, table_ref.app_token, table_ref.table_id, page_size=500)
 
 
 def _is_incomplete_option_bootstrap_fields(fields: dict[str, Any]) -> bool:
@@ -195,6 +186,16 @@ def _bootstrap_trade_events(records: list[dict[str, Any]], *, source_name: str) 
     return events
 
 
+def _has_retired_feishu_bootstrap_opt_in(cfg: dict[str, Any]) -> bool:
+    option_positions_cfg = cfg.get("option_positions")
+    if not isinstance(option_positions_cfg, dict):
+        return False
+    bootstrap_cfg = option_positions_cfg.get("bootstrap_from_feishu")
+    if not isinstance(bootstrap_cfg, dict):
+        return False
+    return bool(bootstrap_cfg.get("enabled") is True)
+
+
 def _raise_if_local_bootstrap_projection_failed(events: list[Any], projection: Any) -> None:
     if not any(_bootstrap_event_source(event) == "sqlite_position_lots" for event in events):
         return
@@ -278,8 +279,10 @@ def apply_bootstrap_snapshot(
 
 
 def load_option_positions_repo(data_config: Path) -> SQLiteOptionPositionsRepository:
-    repo = SQLiteOptionPositionsRepository(resolve_option_positions_sqlite_path(data_config))
-    repo.data_config_path = Path(data_config).resolve()
+    store = resolve_ledger_store(data_config)
+    repo = SQLiteOptionPositionsRepository(store.sqlite_path)
+    repo.data_config_path = store.data_config_path
+    setattr(repo, "ledger_store", store)
     data_cfg = _load_data_config(data_config)
     if repo.count_trade_events() > 0:
         repo.bootstrap_status = "skipped_existing_trade_events"
@@ -302,35 +305,12 @@ def load_option_positions_repo(data_config: Path) -> SQLiteOptionPositionsReposi
         )
         return repo
 
-    if _option_positions_bootstrap_from_feishu_enabled_from_cfg(data_cfg):
-        feishu_ref = _load_table_ref_from_cfg(data_cfg)
-        try:
-            bootstrap_records = _normalize_bootstrap_records(_list_feishu_option_position_records(feishu_ref))
-        except Exception as exc:
-            repo.bootstrap_status = "degraded_feishu_bootstrap_failed"
-            repo.bootstrap_message = f"feishu bootstrap failed: {exc}"
-            print(
-                f"[WARN] option_positions bootstrap skipped for {repo.db_path}: {exc}",
-                file=sys.stderr,
-            )
-        else:
-            apply_bootstrap_snapshot(
-                repo,
-                records=bootstrap_records,
-                source_name="feishu_bootstrap",
-                success_status="bootstrapped_from_feishu",
-                success_message="bootstrapped {count} trade events from feishu",
-                failure_status="degraded_feishu_bootstrap_failed",
-                failure_message="feishu bootstrap failed: {error}",
-                failure_log_prefix="option_positions bootstrap skipped",
-            )
+    if _has_retired_feishu_bootstrap_opt_in(data_cfg):
+        repo.bootstrap_status = "sqlite_only_feishu_bootstrap_retired"
+        repo.bootstrap_message = "feishu option_positions bootstrap is retired; local trade_events remain source of truth"
     else:
-        if _has_feishu_option_positions_table_cfg(data_cfg):
-            repo.bootstrap_status = "sqlite_only_feishu_bootstrap_disabled"
-            repo.bootstrap_message = "feishu option_positions bootstrap disabled; local trade_events remain source of truth"
-        else:
-            repo.bootstrap_status = "sqlite_only_no_feishu_bootstrap"
-            repo.bootstrap_message = "no feishu option_positions bootstrap configured"
+        repo.bootstrap_status = "sqlite_only_no_feishu_bootstrap"
+        repo.bootstrap_message = "feishu option_positions bootstrap is not used; local trade_events remain source of truth"
 
     if repo.count_trade_events() == 0 and repo.count_legacy_records() > 0:
         if _option_positions_bootstrap_from_legacy_sqlite_enabled_from_cfg(data_cfg):

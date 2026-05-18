@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 1.2.58 - 2026-05-18
+
+### Added
+- Added `./om option-positions store inspect` to diagnose active, legacy-configured, and repository-default SQLite stores, including `trade_events` / `position_lots` row counts and multi-store drift warnings.
+- Added ledger-store visibility to agent healthcheck, runtime status, option-position inspection/rebuild output, trade-event replay output, and expired-position maintenance results.
+
+### Changed
+- Fixed the option-position ledger store to `<runtime_root>/output_shared/state/option_positions.sqlite3`; deprecated `option_positions.sqlite_path` is ignored as an active path and retained only for diagnostics.
+- Retired Feishu `option_positions` bootstrap reads so option positions are sourced from local SQLite `trade_events -> projection -> position_lots`; Feishu `option_positions` remains mirror/sync-only.
+- Kept general Feishu holdings / `external_holdings` reads intact while limiting Feishu `option_positions` schema checks to explicitly enabled mirror sync.
+- Updated migration, architecture, getting-started, and ledger redesign docs to document the SQLite-only source of truth and Feishu mirror-only boundary.
+
+### Tests
+- Added regression coverage for ignored legacy SQLite paths, store inspection drift diagnostics, retired Feishu bootstrap config, healthcheck mirror-schema gating, and ledger-store payload exposure.
+- Re-ran full pytest, focused ledger/position/trade/healthcheck type checks, compile checks, `git diff --check`, release metadata validation, and store-inspect CLI verification.
+
 ## 1.2.57 - 2026-05-18
 
 ### Added

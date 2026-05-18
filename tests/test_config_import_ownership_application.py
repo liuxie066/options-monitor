@@ -244,13 +244,10 @@ def test_feishu_bitable_imports_infrastructure_owner_module() -> None:
     infra_mod = importlib.import_module("src.infrastructure.feishu_bitable")
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module("src.application.option_positions_reporting")
-    bootstrap_mod = importlib.import_module("src.application.ledger.bootstrap")
     reporting_mod = importlib.import_module("src.application.positions.reporting")
     read_model_mod = importlib.import_module("src.application.ledger.read_model")
     healthcheck_mod = importlib.import_module("src.application.healthcheck_runner")
 
-    assert bootstrap_mod.bitable_list_records is infra_mod.bitable_list_records
-    assert bootstrap_mod.get_tenant_access_token is infra_mod.get_tenant_access_token
     assert reporting_mod.safe_float is infra_mod.safe_float
     assert read_model_mod.parse_note_kv is infra_mod.parse_note_kv
     assert healthcheck_mod.get_tenant_access_token is infra_mod.get_tenant_access_token

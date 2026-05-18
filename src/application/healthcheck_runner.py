@@ -78,6 +78,16 @@ def _resolve_accounts(opt_cfg: dict[str, Any], requested: list[str] | None) -> l
     return accounts_from_config({"accounts": requested})
 
 
+def _option_positions_sync_to_feishu_enabled(data_cfg: dict[str, Any]) -> bool:
+    option_positions = data_cfg.get("option_positions")
+    if not isinstance(option_positions, dict):
+        return False
+    sync_to_feishu = option_positions.get("sync_to_feishu")
+    if not isinstance(sync_to_feishu, dict):
+        return False
+    return sync_to_feishu.get("enabled") is True
+
+
 def run_healthcheck_runner(
     *,
     config: str | Path = "config.us.json",
@@ -118,38 +128,55 @@ def run_healthcheck_runner(
         data_path = resolve_data_config_path(base=repo_base, data_config=data_ref)
         pm = _read_json(data_path)
 
-        fcfg = pm.get("feishu") if isinstance(pm.get("feishu"), dict) else {}
+        raw_feishu_cfg = pm.get("feishu")
+        fcfg: dict[str, Any] = raw_feishu_cfg if isinstance(raw_feishu_cfg, dict) else {}
         app_id = fcfg.get("app_id")
         app_secret = fcfg.get("app_secret")
-        tables = fcfg.get("tables") if isinstance(fcfg.get("tables"), dict) else {}
-        if not (app_id and app_secret and tables.get("holdings") and tables.get("option_positions")):
-            raise RuntimeError("portfolio secret config missing feishu app creds or tables")
+        raw_tables = fcfg.get("tables")
+        tables: dict[str, Any] = raw_tables if isinstance(raw_tables, dict) else {}
+        option_positions_sync_enabled = _option_positions_sync_to_feishu_enabled(pm)
+        if not (app_id and app_secret and tables.get("holdings")):
+            raise RuntimeError("portfolio secret config missing feishu app creds or holdings table")
+        if option_positions_sync_enabled and not tables.get("option_positions"):
+            raise RuntimeError("portfolio secret config missing option_positions table for enabled Feishu mirror sync")
 
         token = get_tenant_access_token(str(app_id), str(app_secret))
         hold_app, hold_tbl = _split_table_ref(str(tables["holdings"]))
-        opt_app, opt_tbl = _split_table_ref(str(tables["option_positions"]))
 
         hold_fields = {f.get("field_name") for f in bitable_fields(token, hold_app, hold_tbl)}
-        opt_fields = {f.get("field_name") for f in bitable_fields(token, opt_app, opt_tbl)}
 
         missing_hold = sorted(REQUIRED_HOLDINGS_FIELDS - hold_fields)
-        missing_opt = sorted(REQUIRED_OPTION_POSITION_FIELDS - opt_fields)
+        missing_opt: list[str] = []
+        if option_positions_sync_enabled:
+            opt_app, opt_tbl = _split_table_ref(str(tables["option_positions"]))
+            opt_fields = {f.get("field_name") for f in bitable_fields(token, opt_app, opt_tbl)}
+            missing_opt = sorted(REQUIRED_OPTION_POSITION_FIELDS - opt_fields)
         if not (hold_fields & {"broker", "market"}):
             missing_hold.append("broker|market")
         if missing_hold:
             errors.append("holdings table missing fields: " + ",".join(missing_hold))
         if missing_opt:
-            errors.append("legacy position bootstrap table missing fields: " + ",".join(missing_opt))
+            errors.append("option_positions mirror table missing fields: " + ",".join(missing_opt))
         if missing_hold or missing_opt:
             _add_check(
                 checks,
                 name="feishu_schema",
                 status="error",
                 message="required Feishu fields missing",
-                value={"holdings_missing": missing_hold, "option_positions_missing": missing_opt},
+                value={
+                    "holdings_missing": missing_hold,
+                    "option_positions_missing": missing_opt,
+                    "option_positions_checked": option_positions_sync_enabled,
+                },
             )
         else:
-            _add_check(checks, name="feishu_schema", status="ok", message="required Feishu fields found")
+            _add_check(
+                checks,
+                name="feishu_schema",
+                status="ok",
+                message="required Feishu fields found",
+                value={"option_positions_checked": option_positions_sync_enabled},
+            )
     except Exception as exc:
         msg = f"feishu schema check failed: {exc}"
         errors.append(msg)
@@ -159,20 +186,23 @@ def run_healthcheck_runner(
         scheduler_outputs: list[dict[str, str]] = []
         for acct in resolved_accounts:
             cfg = dict(raw_cfg)
-            portfolio_cfg = cfg.get("portfolio") if isinstance(cfg.get("portfolio"), dict) else {}
-            cfg["portfolio"] = dict(portfolio_cfg)
-            cfg["portfolio"]["account"] = acct
+            raw_scheduler_portfolio_cfg = cfg.get("portfolio")
+            scheduler_portfolio_cfg: dict[str, Any] = (
+                dict(raw_scheduler_portfolio_cfg) if isinstance(raw_scheduler_portfolio_cfg, dict) else {}
+            )
+            scheduler_portfolio_cfg["account"] = acct
+            cfg["portfolio"] = scheduler_portfolio_cfg
             tmp = repo_base / "output" / "state" / f"healthcheck_config.{acct}.json"
             tmp.parent.mkdir(parents=True, exist_ok=True)
             tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-            state = repo_base / "output" / "state" / f"healthcheck_scheduler_state.{acct}.json"
+            scheduler_state = repo_base / "output" / "state" / f"healthcheck_scheduler_state.{acct}.json"
             with redirect_stdout(io.StringIO()):
-                run_scheduler(config=tmp, state=state, jsonl=True, base_dir=repo_base)
+                run_scheduler(config=tmp, state=scheduler_state, jsonl=True, base_dir=repo_base)
             scheduler_outputs.append(
                 {
                     "account": acct,
                     "config_path": str(tmp),
-                    "state_path": str(state),
+                    "state_path": str(scheduler_state),
                 }
             )
         _add_check(
@@ -191,15 +221,16 @@ def run_healthcheck_runner(
         cron_state_path = Path(cron_path) if cron_path is not None else Path.home() / ".openclaw" / "cron" / "jobs.json"
         if cron_state_path.exists():
             data = _read_json(cron_state_path)
-            job = None
+            job: dict[str, Any] | None = None
             for item in data.get("jobs", []):
                 if isinstance(item, dict) and item.get("name") == "options-monitor auto tick":
                     job = item
                     break
             if job:
-                state = job.get("state") if isinstance(job.get("state"), dict) else {}
-                last = state.get("lastRunAtMs")
-                status = state.get("lastRunStatus") or state.get("lastStatus")
+                raw_state = job.get("state")
+                cron_job_state: dict[str, Any] = raw_state if isinstance(raw_state, dict) else {}
+                last = cron_job_state.get("lastRunAtMs")
+                status = cron_job_state.get("lastRunStatus") or cron_job_state.get("lastStatus")
                 if status != "ok":
                     warnings.append(f"cron last status: {status}")
                     _add_check(checks, name="cron_state", status="warn", message=f"cron last status: {status}")
@@ -271,4 +302,3 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print(format_healthcheck_report(result), end="")
     return 0 if result.get("ok") else 2
-

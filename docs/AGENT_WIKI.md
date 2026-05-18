@@ -56,7 +56,7 @@
 - **Trade intake entrypoints**: `src/application/trades/auto_intake.py`, `src/application/trades/resolver.py`, `src/application/trades/normalizer.py`
   - OpenD deal push intake, account mapping, normalization, idempotency state, receipts, and lot resolution.
 - **Application boundary**: `src/application/ledger/` owns storage/projection/preflight, `src/application/positions/` owns position-facing workflows, and `src/application/trades/` owns trade-facing workflows. `positions` and `trades` must enter ledger through `src/application/ledger/api.py`, not internal ledger modules.
-- **Rule**: Feishu `option_positions` is an explicit bootstrap input or mirror surface, not the steady-state source of truth. Local SQLite `trade_events` is the source of truth.
+- **Rule**: Feishu `option_positions` is a mirror/sync surface only, not a bootstrap input or steady-state source of truth. Local SQLite `trade_events` is the source of truth.
 
 ### Tick Runtime
 - **Orchestration spine**: `src/application/multi_account_tick.py`
@@ -130,7 +130,7 @@ trade_events
 → domain.domain.ledger.projection
 → position_lots
 → SQLite projection
-→ optional Feishu mirror / explicit bootstrap
+→ optional Feishu mirror
 ```
 
 Lot record field helpers live in `domain.domain.ledger.position_fields`.

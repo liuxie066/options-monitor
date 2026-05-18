@@ -5,7 +5,10 @@ import json
 from pathlib import Path
 from typing import Any
 
-from src.application.ledger.api import open_position_ledger_from_data_config as resolve_option_positions_repo
+from src.application.ledger.api import (
+    ledger_store_payload,
+    open_position_ledger_from_data_config as resolve_option_positions_repo,
+)
 from src.application.trades.review import (
     apply_repair_trade_event,
     apply_void_trade_event,
@@ -98,6 +101,7 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--apply and --dry-run are mutually exclusive")
     base = Path(__file__).resolve().parents[3]
     _data_config, repo = resolve_option_positions_repo(base=base, data_config=args.data_config)
+    ledger_store = ledger_store_payload(_data_config, repo)
 
     if args.cmd == "list":
         rows = list_trade_event_reviews(
@@ -142,6 +146,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "replay":
         payload = replay_trade_events(repo, apply=bool(args.apply))
+        payload["ledger_store"] = ledger_store
         if args.format == "json":
             _print_json(payload)
             return 0

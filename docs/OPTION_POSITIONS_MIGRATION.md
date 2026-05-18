@@ -7,7 +7,7 @@
 适用前提：
 - 旧线上环境已经有本地 `trade_events` / `position_lots`
 - 新版本采用 canonical `trade_events -> projection -> position_lots`
-- Feishu `option_positions` 只作为显式 bootstrap 输入 / 镜像，不再作为稳态主读源
+- Feishu `option_positions` 只作为显式镜像/同步目标，不再作为线上策略或持仓仓库 bootstrap 输入
 - legacy v2 代码已删除，不再参与默认读写路径
 
 ---
@@ -43,7 +43,7 @@
 - 新方案会先通过统一读路径接管旧数据
 - canonical truth 已经固定为 `trade_events`
 - `position_lots` 只是当前投影视图
-- Feishu 只是显式 bootstrap 输入 / 镜像，不再定义本地业务状态
+- Feishu 只是显式镜像/同步目标，不再定义本地业务状态
 
 ---
 
@@ -55,11 +55,24 @@
 
 - 如果历史里已有 `trade_events`，直接重放为当前 `position_lots`
 - 如果没有 `trade_events`，但已有旧 `position_lots`，系统会自动生成本地 bootstrap snapshot
-- 如果没有本地状态，只有在 data config 里显式设置 `option_positions.bootstrap_from_feishu.enabled=true` 时，才会从 Feishu `option_positions` 做一次 bootstrap
+- 如果没有本地状态，系统保持 SQLite 空状态；不会从 Feishu `option_positions` 做 bootstrap
 - 旧 SQLite `option_positions` 表不再默认迁移；只有显式设置 `option_positions.bootstrap_from_legacy_sqlite.enabled=true` 时，才会作为一次性迁移输入读取
 - 最后统一重放事件并投影出当前仓位
 
 默认不会因为配置了 Feishu table 或历史 SQLite `option_positions` 表，就自动把外部/旧状态变成本地事实。
+
+SQLite 存储路径固定为：
+
+```text
+<runtime_root>/output_shared/state/option_positions.sqlite3
+```
+
+如果线上怀疑存在多库并行，先跑只读诊断：
+
+```bash
+./om option-positions store inspect --config config.us.json
+./om option-positions store inspect --config config.us.json --format text
+```
 
 ---
 
@@ -190,11 +203,10 @@
 
 迁移完成后，Feishu 继续可以同步，但角色要收口：
 
-- 可以作为显式 bootstrap 来源
 - 可以作为远端镜像
 - 可以作为人工核对对象
 
-但不要再把 Feishu 当 steady-state 主读源。
+但不要再把 Feishu 当 bootstrap 输入或 steady-state 主读源。
 
 如果线上旧流程有“本地读不到就回退 Feishu”的思路，升级后应改成：
 

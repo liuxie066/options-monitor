@@ -12,6 +12,7 @@ from domain.domain.ledger.position_fields import (
     normalize_status,
 )
 from src.application.ledger.api import (
+    ledger_store_payload,
     list_expiry_close_position_lots,
     open_position_ledger,
     plan_expired_position_closes,
@@ -230,6 +231,7 @@ def run_expired_position_maintenance_for_account(
 
     repo = open_position_ledger(data_config)
     apply_option_positions_runtime_config(repo, cfg)
+    ledger_store = ledger_store_payload(data_config, repo)
     ts = int(as_of_ms if as_of_ms is not None else datetime.now(timezone.utc).timestamp() * 1000)
     projection_refresh = (
         None
@@ -286,6 +288,7 @@ def run_expired_position_maintenance_for_account(
         "skipped_already_closed": len(skipped_already_closed),
         "errors": errors,
         "applied": applied,
+        "ledger_store": ledger_store,
     }
     if projection_refresh is not None:
         result["projection_refresh"] = projection_refresh

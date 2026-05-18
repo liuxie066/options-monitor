@@ -44,7 +44,9 @@ def test_sync_script_dry_run_reports_create(monkeypatch, tmp_path: Path, capsys)
         sqlite_path=tmp_path / "option_positions.sqlite3",
         sync_to_feishu_enabled=True,
     )
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    repo = ledger_repository.SQLiteOptionPositionsRepository(
+        tmp_path / "output_shared" / "state" / "option_positions.sqlite3"
+    )
     ledger_manual_trades.persist_manual_open_event(
         repo,
         OpenPositionCommand(
@@ -113,7 +115,9 @@ def test_sync_script_apply_updates_existing_feishu_row_and_persists_metadata(mon
         sqlite_path=tmp_path / "option_positions.sqlite3",
         sync_to_feishu_enabled=True,
     )
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    repo = ledger_repository.SQLiteOptionPositionsRepository(
+        tmp_path / "output_shared" / "state" / "option_positions.sqlite3"
+    )
     ledger_manual_trades.persist_manual_open_event(
         repo,
         OpenPositionCommand(
@@ -196,7 +200,9 @@ def test_sync_script_apply_persists_last_run_and_receipt_state(monkeypatch, tmp_
         sqlite_path=tmp_path / "option_positions.sqlite3",
         sync_to_feishu_enabled=True,
     )
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    repo = ledger_repository.SQLiteOptionPositionsRepository(
+        tmp_path / "output_shared" / "state" / "option_positions.sqlite3"
+    )
     ledger_manual_trades.persist_manual_open_event(
         repo,
         OpenPositionCommand(

@@ -419,14 +419,14 @@ TradeEvent store
 - auto-close expired 已接入同一个 lot close preflight，写入前校验 `expire_close` 事件不会跨 lot / strike / expiry。
 - manual close、trade intake close、auto-close expired 已统一输出 `CloseTargetResolution`，并把同一解析 payload 贯穿 preview / diagnostics / write operation / stored raw_payload。
 - trade intake close 已优先从当前 writable `position_lots` 取候选，并在真实 repo 下按 strict exact FIFO match 拆成逐 lot target close events。
-- Feishu `option_positions` 已降级为显式 bootstrap 输入 / mirror，不再是默认事实源。
+- Feishu `option_positions` 已降级为 mirror/sync surface，不再是 bootstrap 输入或默认事实源。
 - 旧 SQLite `option_positions` 表已降级为显式 bootstrap 输入；默认运行路径不会在空投影时自动迁移旧表。
 - facade、manual close matcher、trade intake close matcher、agent monthly income report 已收敛到 canonical `position_lots` 读面，不再 fallback 到通用 `list_records`。
 - `domain.domain.option_position_lots` 已降级为兼容 re-export，核心 runtime 使用 `domain.domain.ledger.position_fields`。
 
 ### Phase 5: Legacy Retirement
 
-目标：删除旧 v1/v2 混合模型。v2 代码已完成物理删除，剩余 `option_positions_*` 名称只允许作为用户入口、历史配置键或 mirror/bootstrap 语义，不允许作为核心写模型 owner。
+目标：删除旧 v1/v2 混合模型。v2 代码已完成物理删除，剩余 `option_positions_*` 名称只允许作为用户入口、历史配置键、legacy local bootstrap 或 mirror 语义，不允许作为核心写模型 owner。
 
 任务：
 

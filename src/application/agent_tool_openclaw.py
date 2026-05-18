@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from src.application.agent_tool_contracts import AgentToolError
+from src.application.ledger.api import ledger_store_payload
+from src.application.runtime_config_paths import resolve_data_config_ref
 from src.application.runtime_trigger_context import build_trigger_context
 from domain.domain.multi_tick import (
     OPENCLAW_NOTIFICATION_PROVIDER,
@@ -868,6 +870,15 @@ def runtime_status_tool(
         config_key=payload.get("config_key"),
         config_path=payload.get("config_path"),
     )
+    portfolio_cfg = cfg.get("portfolio") if isinstance(cfg.get("portfolio"), dict) else {}
+    data_config_ref = resolve_data_config_ref(payload, portfolio_cfg)
+    if data_config_ref:
+        data_config_path = Path(data_config_ref).expanduser()
+        if not data_config_path.is_absolute():
+            data_config_path = (config_path.parent / data_config_path).resolve()
+    else:
+        data_config_path = (config_path.parent / "secrets" / "portfolio.sqlite.json").resolve()
+    ledger_store = ledger_store_payload(data_config_path)
     accounts = _accounts_from_runtime(
         payload,
         cfg,
@@ -1077,6 +1088,7 @@ def runtime_status_tool(
             "accounts_root": _relative_path(accounts_root, base=base),
             "runs_root": _relative_path(runs_root, base=base),
         },
+        "ledger_store": ledger_store,
         "shared": {
             "last_run": shared_last_run,
             "legacy_last_run": legacy_last_run,
@@ -1131,6 +1143,9 @@ def runtime_status_tool(
     data["summary"]["latest_scanned_run_prefetch_bottleneck"] = latest_scanned_prefetch_summary.get("primary_bottleneck")
     data["summary"]["ledger_status"] = ledger_context_summary.get("status")
     data["summary"]["ledger_fail_closed"] = bool(ledger_context_summary.get("fail_closed"))
+    data["summary"]["ledger_sqlite_path"] = ledger_store.get("sqlite_path")
+    data["summary"]["ledger_trade_event_count"] = ledger_store.get("trade_event_count")
+    data["summary"]["ledger_position_lot_count"] = ledger_store.get("position_lot_count")
     return data, warnings, {"config_path": mask_path(config_path)}
 
 

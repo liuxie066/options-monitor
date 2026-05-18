@@ -132,9 +132,9 @@ the storage/migration boundary.
 Lot record field construction and open/close patch helpers live under
 `domain.domain.ledger.position_fields`; the old
 `domain.domain.option_position_lots` module is only a compatibility re-export.
-Application services own SQLite loading, bootstrap, repair, Feishu sync, CLI
-facades, and reports. Feishu `option_positions` is an explicit bootstrap input
-or mirror surface, not the steady-state source of truth.
+Application services own SQLite loading, local bootstrap, repair, Feishu sync,
+CLI facades, and reports. Feishu `option_positions` is a mirror/sync surface
+only, not a bootstrap input or steady-state source of truth.
 `src.application.ledger.api` is the public application boundary for all
 non-ledger runtime code. `src.application.positions`, `src.application.trades`,
 agent tools, CLI modules, web UI modules, pipeline context, and cash-headroom
