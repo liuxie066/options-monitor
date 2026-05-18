@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 1.2.63 - 2026-05-18
+
+### Fixed
+- Preserved scheduler `last_run_id` / trigger timing in AI Cofunder evidence so stale runtime output can be judged against the actual online job run.
+- Downgraded stale runtime output from a hard failure to a warning when scheduler evidence confirms the latest runtime run completed successfully.
+- Split candidate CSVs from `*_reject_log.csv` files in AI Cofunder strategy evidence so rejected rows no longer inflate candidate counts or create bogus empty candidate samples.
+- Added Feishu option-position sync failure/conflict details to AI Cofunder ledger evidence and deterministic findings.
+- Added account-level candidate, reject-log, and filter-trace summaries to the AI Cofunder account-strategy matrix.
+
+### Tests
+- Added AI Cofunder regressions for scheduler run-id evidence, confirmed stale runtime handling, Feishu sync `partial_failed` details, reject-log separation, and account-level strategy evidence.
+- Re-ran focused AI Cofunder tests, agent plugin contract/smoke tests, changed-path type checking, compile checks, diff checks, and release metadata validation.
+
 ## 1.2.62 - 2026-05-18
 
 ### Changed

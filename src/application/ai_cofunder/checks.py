@@ -14,7 +14,7 @@ def run_deterministic_checks(evidence: dict[str, Any]) -> dict[str, Any]:
     _check_scheduler(scheduler, findings=findings, categories=categories)
 
     runtime = _dict(evidence.get("runtime_status"))
-    _check_runtime(runtime, findings=findings, categories=categories)
+    _check_runtime(runtime, scheduler=scheduler, findings=findings, categories=categories)
     _check_prefetch(runtime, findings=findings, categories=categories)
     _check_notification(runtime, findings=findings, categories=categories)
     _check_position_maintenance(runtime, findings=findings, categories=categories)
@@ -84,23 +84,32 @@ def _check_scheduler(scheduler: dict[str, Any], *, findings: list[dict[str, Any]
         )
 
 
-def _check_runtime(runtime: dict[str, Any], *, findings: list[dict[str, Any]], categories: list[str]) -> None:
+def _check_runtime(runtime: dict[str, Any], *, scheduler: dict[str, Any], findings: list[dict[str, Any]], categories: list[str]) -> None:
     summary = _dict(runtime.get("summary"))
     freshness = _dict(runtime.get("freshness"))
     latest_run_selection = _dict(runtime.get("latest_run_selection"))
     latest_scanned_selection = _dict(runtime.get("latest_scanned_run_selection"))
 
     if freshness.get("stale") is True:
-        categories.append("runtime_failed")
+        scheduler_confirms_latest_run = _scheduler_confirms_latest_runtime(scheduler, runtime)
+        severity = "warn" if scheduler_confirms_latest_run else "fail"
+        category = "runtime_stale" if scheduler_confirms_latest_run else "runtime_failed"
+        categories.append(category)
         findings.append(
             _finding(
-                severity="fail",
-                category="runtime_failed",
+                severity=severity,
+                category=category,
                 code="RUNTIME_OUTPUT_STALE",
-                message="Runtime output is stale relative to the ai-cofunder freshness threshold.",
+                message=(
+                    "Runtime output is stale relative to the ai-cofunder freshness threshold, "
+                    "but scheduler evidence points at the latest runtime run."
+                    if scheduler_confirms_latest_run
+                    else "Runtime output is stale relative to the ai-cofunder freshness threshold."
+                ),
                 evidence=[
                     {"source": "runtime_status.freshness.status", "observed": freshness.get("status"), "expected": "fresh"},
                     {"source": "runtime_status.freshness.age_seconds", "observed": freshness.get("age_seconds"), "expected": f"<= {freshness.get('max_age_minutes')} minutes"},
+                    {"source": "scheduler_evidence.last_run_id", "observed": scheduler.get("last_run_id"), "expected": _runtime_latest_run_id(runtime)},
                 ],
             )
         )
@@ -210,7 +219,7 @@ def _check_notification(runtime: dict[str, Any], *, findings: list[dict[str, Any
 def _check_position_maintenance(runtime: dict[str, Any], *, findings: list[dict[str, Any]], categories: list[str]) -> None:
     sync_status = _nested(runtime, "summary", "option_positions_feishu_sync_status")
     sync_receipt_status = _nested(runtime, "summary", "option_positions_feishu_sync_receipt_status")
-    bad_values = {"failed", "error", "unconfirmed"}
+    bad_values = {"failed", "partial_failed", "conflict", "partial_conflict", "error", "unconfirmed"}
     if str(sync_status or "").lower() in bad_values or str(sync_receipt_status or "").lower() in bad_values:
         categories.append("position_maintenance_issue")
         findings.append(
@@ -222,6 +231,7 @@ def _check_position_maintenance(runtime: dict[str, Any], *, findings: list[dict[
                 evidence=[
                     {"source": "runtime_status.summary.option_positions_feishu_sync_status", "observed": sync_status, "expected": "applied or skipped"},
                     {"source": "runtime_status.summary.option_positions_feishu_sync_receipt_status", "observed": sync_receipt_status, "expected": "sent or skipped"},
+                    {"source": "runtime_status.option_positions_feishu_sync", "observed": _sync_problem_summary(runtime), "expected": "no failed/conflict rows"},
                 ],
             )
         )
@@ -323,6 +333,85 @@ def _truthy(value: Any) -> bool:
     if isinstance(value, bool):
         return value
     return str(value or "").strip().lower() in {"1", "true", "yes", "y", "timeout", "timed_out"}
+
+
+def _scheduler_confirms_latest_runtime(scheduler: dict[str, Any], runtime: dict[str, Any]) -> bool:
+    if not scheduler.get("provided"):
+        return False
+    status = str(scheduler.get("last_status") or "").strip().lower()
+    exit_code = _as_int_or_none(scheduler.get("last_exit_code"))
+    if status not in {"success", "succeeded", "ok", "completed"}:
+        return False
+    if exit_code is not None and exit_code != 0:
+        return False
+    if _truthy(scheduler.get("timeout")):
+        return False
+    scheduler_ids = {
+        _basename(scheduler.get("last_run_id")),
+        _basename(scheduler.get("last_run_path")),
+    }
+    scheduler_ids.discard("")
+    if not scheduler_ids:
+        return False
+    runtime_ids = {_runtime_latest_run_id(runtime)}
+    runtime_ids.discard("")
+    return bool(scheduler_ids & runtime_ids)
+
+
+def _runtime_latest_run_id(runtime: dict[str, Any]) -> str:
+    candidates = (
+        _nested(runtime, "summary", "latest_run_path"),
+        _nested(runtime, "latest_run", "path"),
+        _nested(runtime, "latest_run", "state", "last_run", "json", "run_id"),
+    )
+    for value in candidates:
+        name = _basename(value)
+        if name:
+            return name
+    return ""
+
+
+def _basename(value: Any) -> str:
+    raw = str(value or "").strip().rstrip("/")
+    if not raw:
+        return ""
+    return raw.split("/")[-1]
+
+
+def _sync_problem_summary(runtime: dict[str, Any]) -> dict[str, Any]:
+    sync_run = _dict(_nested(runtime, "option_positions_feishu_sync", "last_run", "json"))
+    summary = _dict(sync_run.get("summary"))
+    rows_raw = sync_run.get("rows")
+    rows = rows_raw if isinstance(rows_raw, list) else []
+    problem_rows: list[dict[str, Any]] = []
+    for row in rows:
+        item = _dict(row)
+        action = str(item.get("action") or "").strip().lower()
+        if action not in {"failed", "conflict"}:
+            continue
+        problem_rows.append(
+            {
+                "record_id": item.get("record_id"),
+                "symbol": item.get("symbol"),
+                "action": item.get("action"),
+                "reason": item.get("reason") or item.get("error"),
+            }
+        )
+        if len(problem_rows) >= 10:
+            break
+    return {
+        "status": sync_run.get("status"),
+        "summary": {
+            "create": summary.get("create"),
+            "update": summary.get("update"),
+            "delete": summary.get("delete"),
+            "skip": summary.get("skip"),
+            "conflict": summary.get("conflict"),
+            "failed": summary.get("failed"),
+        },
+        "error": sync_run.get("error"),
+        "problem_rows": problem_rows,
+    }
 
 
 def _account_failures(tick_metrics: dict[str, Any]) -> list[dict[str, Any]]:

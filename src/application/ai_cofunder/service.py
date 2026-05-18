@@ -122,6 +122,7 @@ def _ledger_quality(runtime: dict[str, Any]) -> dict[str, Any]:
         "auto_close_status": _nested(runtime, "summary", "auto_close_expired_status"),
         "option_positions_feishu_sync_status": _nested(runtime, "summary", "option_positions_feishu_sync_status"),
         "option_positions_feishu_sync_receipt_status": _nested(runtime, "summary", "option_positions_feishu_sync_receipt_status"),
+        "option_positions_feishu_sync": _option_positions_feishu_sync_summary(runtime),
     }
     problem_count = failed + unresolved
     status = "ok" if problem_count == 0 else "warn"
@@ -158,12 +159,46 @@ def _account_strategy_matrix(evidence: dict[str, Any]) -> dict[str, Any]:
             "strategy_note": "Use candidate/filter trace evidence to distinguish market candidates from account-level filtering.",
         }
     strategy = _dict(evidence.get("strategy_evidence"))
+    strategy_accounts = _strategy_account_summaries(strategy)
+    for account, summary in strategy_accounts.items():
+        accounts.setdefault(account, {"strategy_note": "Inferred from strategy evidence paths or rows."})
+        accounts[account]["strategy_evidence"] = summary
     return {
         "status": "ok" if accounts else "warn",
         "accounts": accounts,
         "strategy_summary": strategy.get("summary") or {},
         "known_gap": "Per-account before/after strategy filter counts are not fully normalized yet.",
     }
+
+
+def _strategy_account_summaries(strategy: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, dict[str, Any]] = {}
+    for report in _list_of_dicts(strategy.get("candidate_reports")):
+        for account, count in _dict(report.get("account_counts")).items():
+            item = out.setdefault(str(account).lower(), {"candidate_rows": 0, "reject_log_rows": 0, "trace_rows": 0, "trace_status_counts": {}})
+            item["candidate_rows"] = _as_int(item.get("candidate_rows")) + _as_int(count)
+    for report in _list_of_dicts(strategy.get("reject_logs")):
+        for account, count in _dict(report.get("account_counts")).items():
+            item = out.setdefault(str(account).lower(), {"candidate_rows": 0, "reject_log_rows": 0, "trace_rows": 0, "trace_status_counts": {}})
+            item["reject_log_rows"] = _as_int(item.get("reject_log_rows")) + _as_int(count)
+    for trace in _list_of_dicts(strategy.get("filter_traces")):
+        for account, count in _dict(trace.get("account_counts")).items():
+            item = out.setdefault(str(account).lower(), {"candidate_rows": 0, "reject_log_rows": 0, "trace_rows": 0, "trace_status_counts": {}})
+            item["trace_rows"] = _as_int(item.get("trace_rows")) + _as_int(count)
+        status_by_account = _dict(trace.get("account_status_counts"))
+        for account, counts in status_by_account.items():
+            item = out.setdefault(str(account).lower(), {"candidate_rows": 0, "reject_log_rows": 0, "trace_rows": 0, "trace_status_counts": {}})
+            status_counts = _dict(item.get("trace_status_counts"))
+            for status, count in _dict(counts).items():
+                status_counts[str(status)] = _as_int(status_counts.get(str(status))) + _as_int(count)
+            item["trace_status_counts"] = status_counts
+    return out
+
+
+def _list_of_dicts(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
 
 
 def _runtime_quality(*, runtime: dict[str, Any], diagnosis: dict[str, Any]) -> dict[str, Any]:
@@ -250,12 +285,16 @@ def render_ai_cofunder_handoff(bundle: dict[str, Any]) -> str:
         f"- status: {ledger_quality.get('status')}",
         f"- failed_trades: {_nested(ledger_quality, 'trade_intake', 'failed_count')}",
         f"- unresolved_trades: {_nested(ledger_quality, 'trade_intake', 'unresolved_count')}",
+        f"- feishu_sync: {_nested(ledger_quality, 'position_summary', 'option_positions_feishu_sync_status')}",
+        f"- feishu_sync_failed: {_nested(ledger_quality, 'position_summary', 'option_positions_feishu_sync', 'summary', 'failed')}",
+        f"- feishu_sync_conflict: {_nested(ledger_quality, 'position_summary', 'option_positions_feishu_sync', 'summary', 'conflict')}",
         f"- gap: {ledger_quality.get('known_gap')}",
         "",
         "## Account Strategy Matrix",
         f"- status: {account_strategy.get('status')}",
         f"- accounts: {', '.join(sorted(_dict(account_strategy.get('accounts')).keys())) or '<none>'}",
         f"- candidate_rows: {strategy_summary.get('candidate_row_count')}",
+        f"- reject_log_rows: {strategy_summary.get('reject_log_row_count')}",
         f"- filter_trace_files: {strategy_summary.get('filter_trace_file_count')}",
         f"- gap: {account_strategy.get('known_gap')}",
         "",
@@ -321,6 +360,50 @@ def _write_outputs(
         "bundle_path": _relative(bundle_path, base=base),
         "handoff_path": _relative(handoff_path, base=base),
         "current_path": _relative(current_path, base=base),
+    }
+
+
+def _option_positions_feishu_sync_summary(runtime: dict[str, Any]) -> dict[str, Any]:
+    sync_run = _dict(_nested(runtime, "option_positions_feishu_sync", "last_run", "json"))
+    receipt = _dict(_nested(runtime, "option_positions_feishu_sync", "receipt"))
+    summary = _dict(sync_run.get("summary"))
+    rows_raw = sync_run.get("rows")
+    rows = rows_raw if isinstance(rows_raw, list) else []
+    problem_rows: list[dict[str, Any]] = []
+    for row in rows:
+        item = _dict(row)
+        action = str(item.get("action") or "").strip().lower()
+        if action not in {"failed", "conflict"}:
+            continue
+        problem_rows.append(
+            {
+                "record_id": item.get("record_id"),
+                "symbol": item.get("symbol"),
+                "option_type": item.get("option_type"),
+                "side": item.get("side"),
+                "action": item.get("action"),
+                "reason": item.get("reason") or item.get("error"),
+            }
+        )
+        if len(problem_rows) >= 10:
+            break
+    return {
+        "status": sync_run.get("status"),
+        "summary": {
+            "create": summary.get("create"),
+            "update": summary.get("update"),
+            "delete": summary.get("delete"),
+            "skip": summary.get("skip"),
+            "conflict": summary.get("conflict"),
+            "failed": summary.get("failed"),
+        },
+        "error": sync_run.get("error"),
+        "receipt": {
+            "status": receipt.get("status"),
+            "reason": receipt.get("reason"),
+            "delivery_confirmed": receipt.get("delivery_confirmed"),
+        },
+        "problem_rows": problem_rows,
     }
 
 
