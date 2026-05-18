@@ -300,7 +300,7 @@ def test_healthcheck_accepts_external_holdings_account_without_futu_mapping(monk
     assert all(item["name"] != "account_fallback_paths" for item in out["data"]["checks"])
 
 
-def test_healthcheck_reports_option_positions_bootstrap_degraded(monkeypatch, tmp_path: Path) -> None:
+def test_healthcheck_reports_option_positions_repo_load_degraded(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
     import src.application.agent_tool_handlers as tools
 
@@ -327,8 +327,8 @@ def test_healthcheck_reports_option_positions_bootstrap_degraded(monkeypatch, tm
     )
 
     class _Repo:
-        bootstrap_status = "degraded_feishu_bootstrap_failed"
-        bootstrap_message = "feishu bootstrap failed: upstream unavailable"
+        bootstrap_status = "degraded_option_positions_repo_load_failed"
+        bootstrap_message = "option positions repo load failed: sqlite unavailable"
 
     monkeypatch.setattr(tools, "open_position_ledger", lambda _path: _Repo())
 
@@ -336,8 +336,8 @@ def test_healthcheck_reports_option_positions_bootstrap_degraded(monkeypatch, tm
 
     bootstrap = next(item for item in out["data"]["checks"] if item["name"] == "option_positions_bootstrap")
     assert bootstrap["status"] == "warn"
-    assert bootstrap["value"]["status"] == "degraded_feishu_bootstrap_failed"
-    assert "upstream unavailable" in bootstrap["message"]
+    assert bootstrap["value"]["status"] == "degraded_option_positions_repo_load_failed"
+    assert "sqlite unavailable" in bootstrap["message"]
     assert out["data"]["summary"]["warning_count"] >= 1
 
 
@@ -369,7 +369,7 @@ def test_healthcheck_reports_option_positions_bootstrap_ok_for_sqlite_only(monke
 
     class _Repo:
         bootstrap_status = "sqlite_only_no_feishu_bootstrap"
-        bootstrap_message = "no feishu option_positions bootstrap configured"
+        bootstrap_message = "feishu option_positions bootstrap is not used; local trade_events remain source of truth"
 
     monkeypatch.setattr(tools, "open_position_ledger", lambda _path: _Repo())
 
@@ -1104,6 +1104,9 @@ def test_runtime_status_summarizes_openclaw_runtime_files(tmp_path: Path) -> Non
     assert out["data"]["option_positions_context"]["ledger"]["status"] == "ok"
     assert out["data"]["summary"]["ledger_status"] == "ok"
     assert out["data"]["summary"]["ledger_fail_closed"] is False
+    assert out["data"]["ledger_store"]["runtime_root"] == str(tmp_path.resolve())
+    assert out["data"]["ledger_store"]["sqlite_path"] == str((tmp_path / "output_shared" / "state" / "option_positions.sqlite3").resolve())
+    assert out["data"]["summary"]["ledger_sqlite_path"] == out["data"]["ledger_store"]["sqlite_path"]
     assert out["data"]["notification_diagnosis"]["status"] == "sent"
     assert out["data"]["notification_diagnosis"]["scheduler_should_run_scan"] is True
     assert out["data"]["notification_diagnosis"]["send_confirmed_count"] == 1

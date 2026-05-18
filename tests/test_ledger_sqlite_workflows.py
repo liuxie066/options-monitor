@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,7 @@ import src.application.ledger.interventions as ledger_interventions
 import src.application.ledger.manual_trades as ledger_manual_trades
 from src.application.ledger.position_records import PositionLotRecord
 import src.application.ledger.repository as ledger_repository
+from src.application.ledger.store_resolution import resolve_ledger_store
 from src.application.ledger.sync_metadata import (
     PositionLotSyncMetadataPatch,
     build_position_lot_sync_metadata_patch,
@@ -47,76 +49,86 @@ def _write_data_config(
             "tables": {"option_positions": "app_token/table_id"},
         }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    standard_db = path.parent / "output_shared" / "state" / "option_positions.sqlite3"
+    if sqlite_path.exists() and sqlite_path.resolve() != standard_db.resolve():
+        standard_db.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(sqlite_path, standard_db)
+        for suffix in ("-wal", "-shm"):
+            sidecar = sqlite_path.with_name(sqlite_path.name + suffix)
+            if sidecar.exists():
+                shutil.copy2(sidecar, standard_db.with_name(standard_db.name + suffix))
     return path
 
 
-def test_load_option_positions_repo_bootstraps_position_lots_from_feishu(tmp_path: Path) -> None:
+def test_resolve_ledger_store_ignores_sqlite_path_for_standard_runtime_config(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "options-monitor-prod-runtime"
+    data_config = runtime_root / "secrets" / "portfolio.sqlite.json"
+    data_config.parent.mkdir(parents=True)
+    legacy_db = tmp_path / "wrong" / "option_positions.sqlite3"
+    data_config.write_text(
+        json.dumps({"option_positions": {"sqlite_path": str(legacy_db)}}, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    resolution = resolve_ledger_store(data_config)
+
+    assert resolution.runtime_root == runtime_root.resolve()
+    assert resolution.runtime_root_source == "data_config_secrets_parent"
+    assert resolution.sqlite_path == (runtime_root / "output_shared" / "state" / "option_positions.sqlite3").resolve()
+    assert resolution.sqlite_path_source == "runtime_root"
+    assert resolution.legacy_sqlite_path == legacy_db.resolve()
+    assert any("ignored" in item for item in resolution.warnings)
+
+
+def test_resolve_ledger_store_ignores_legacy_sqlite_path_for_nonstandard_test_config(tmp_path: Path) -> None:
+    data_config = tmp_path / "data.json"
+    legacy_db = tmp_path / "option_positions.sqlite3"
+    data_config.write_text(
+        json.dumps({"option_positions": {"sqlite_path": str(legacy_db)}}, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    resolution = resolve_ledger_store(data_config)
+
+    assert resolution.runtime_root == tmp_path.resolve()
+    assert resolution.sqlite_path == (tmp_path / "output_shared" / "state" / "option_positions.sqlite3").resolve()
+    assert resolution.sqlite_path_source == "runtime_root"
+    assert resolution.legacy_sqlite_path == legacy_db.resolve()
+    assert any("ignored" in item for item in resolution.warnings)
+
+
+def test_load_option_positions_repo_ignores_retired_feishu_bootstrap_opt_in(tmp_path: Path) -> None:
 
     data_config = _write_data_config(
         tmp_path / "data.json",
         sqlite_path=tmp_path / "option_positions.sqlite3",
         bootstrap_from_feishu_enabled=True,
     )
-    old_list = bootstrap._list_feishu_option_position_records
-    try:
-        bootstrap._list_feishu_option_position_records = lambda _ref: [  # type: ignore[assignment]
-            {
-                "record_id": "rec_1",
-                "fields": {
-                    "account": " LX ",
-                    "broker": "富途",
-                    "symbol": "NVDA",
-                    "status": "open",
-                    "contracts": 1,
-                    "contracts_open": 1,
-                    "opened_at": 1000,
-                    "last_action_at": 1000,
-                    "currency": "港币",
-                },
-            }
-        ]
-        repo = ledger_bootstrap.load_option_positions_repo(data_config)
-    finally:
-        bootstrap._list_feishu_option_position_records = old_list  # type: ignore[assignment]
+    repo = ledger_bootstrap.load_option_positions_repo(data_config)
 
     records = repo.list_records(page_size=10)
-    assert len(records) == 1
-    assert records[0]["record_id"] == "rec_1"
-    assert repo.count_position_lots() == 1
-    assert repo.count_trade_events() == 1
-    events = repo.list_trade_events()
-    assert events[0]["source_type"] == "bootstrap_snapshot"
-    assert events[0]["account"] == "lx"
-    assert events[0]["currency"] == "HKD"
-    assert events[0]["raw_payload"]["lot_record_id"] == "rec_1"
+    assert records == []
+    assert repo.count_position_lots() == 0
+    assert repo.count_trade_events() == 0
+    assert repo.bootstrap_status == "sqlite_only_feishu_bootstrap_retired"
+    assert "retired" in str(repo.bootstrap_message)
 
 
 def test_load_option_positions_repo_does_not_bootstrap_from_feishu_by_default(tmp_path: Path) -> None:
 
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
-    old_list = bootstrap._list_feishu_option_position_records
-    try:
-        bootstrap._list_feishu_option_position_records = lambda _ref: (_ for _ in ()).throw(AssertionError("should not read Feishu"))  # type: ignore[assignment]
-        repo = ledger_bootstrap.load_option_positions_repo(data_config)
-    finally:
-        bootstrap._list_feishu_option_position_records = old_list  # type: ignore[assignment]
+    repo = ledger_bootstrap.load_option_positions_repo(data_config)
 
     assert repo.count_trade_events() == 0
     assert repo.count_position_lots() == 0
-    assert repo.bootstrap_status == "sqlite_only_feishu_bootstrap_disabled"
+    assert repo.bootstrap_status == "sqlite_only_no_feishu_bootstrap"
     assert "source of truth" in str(repo.bootstrap_message)
 
 
-def test_load_option_positions_repo_normalizes_market_only_feishu_bootstrap_rows(tmp_path: Path) -> None:
+def test_normalize_bootstrap_records_accepts_market_only_rows() -> None:
 
-    data_config = _write_data_config(
-        tmp_path / "data.json",
-        sqlite_path=tmp_path / "option_positions.sqlite3",
-        bootstrap_from_feishu_enabled=True,
-    )
-    old_list = bootstrap._list_feishu_option_position_records
-    try:
-        bootstrap._list_feishu_option_position_records = lambda _ref: [  # type: ignore[assignment]
+    records = bootstrap._normalize_bootstrap_records(  # type: ignore[attr-defined]
+        [
             {
                 "record_id": "rec_1",
                 "fields": {
@@ -129,25 +141,16 @@ def test_load_option_positions_repo_normalizes_market_only_feishu_bootstrap_rows
                 },
             }
         ]
-        repo = ledger_bootstrap.load_option_positions_repo(data_config)
-    finally:
-        bootstrap._list_feishu_option_position_records = old_list  # type: ignore[assignment]
+    )
 
-    records = repo.list_records(page_size=10)
     assert len(records) == 1
     assert records[0]["fields"]["broker"] == "富途"
 
 
-def test_load_option_positions_repo_skips_incomplete_feishu_option_bootstrap_rows(tmp_path: Path) -> None:
+def test_normalize_bootstrap_records_skips_incomplete_option_rows() -> None:
 
-    data_config = _write_data_config(
-        tmp_path / "data.json",
-        sqlite_path=tmp_path / "option_positions.sqlite3",
-        bootstrap_from_feishu_enabled=True,
-    )
-    old_list = bootstrap._list_feishu_option_position_records
-    try:
-        bootstrap._list_feishu_option_position_records = lambda _ref: [  # type: ignore[assignment]
+    records = bootstrap._normalize_bootstrap_records(  # type: ignore[attr-defined]
+        [
             {
                 "record_id": "rec_bad_option",
                 "fields": {
@@ -179,27 +182,16 @@ def test_load_option_positions_repo_skips_incomplete_feishu_option_bootstrap_row
                 },
             },
         ]
-        repo = ledger_bootstrap.load_option_positions_repo(data_config)
-    finally:
-        bootstrap._list_feishu_option_position_records = old_list  # type: ignore[assignment]
+    )
 
-    records = repo.list_records(page_size=10)
     assert len(records) == 1
     assert records[0]["record_id"] == "rec_good_option"
-    assert repo.count_position_lots() == 1
-    assert repo.count_trade_events() == 1
 
 
-def test_load_option_positions_repo_skips_invalid_timestamp_rows_without_degrading_bootstrap(tmp_path: Path) -> None:
+def test_bootstrap_trade_events_skips_invalid_timestamp_rows_without_degrading_bootstrap() -> None:
 
-    data_config = _write_data_config(
-        tmp_path / "data.json",
-        sqlite_path=tmp_path / "option_positions.sqlite3",
-        bootstrap_from_feishu_enabled=True,
-    )
-    old_list = bootstrap._list_feishu_option_position_records
-    try:
-        bootstrap._list_feishu_option_position_records = lambda _ref: [  # type: ignore[assignment]
+    events = bootstrap._bootstrap_trade_events(  # type: ignore[attr-defined]
+        [
             {
                 "record_id": "rec_bad_time",
                 "fields": {
@@ -226,16 +218,14 @@ def test_load_option_positions_repo_skips_invalid_timestamp_rows_without_degradi
                     "last_action_at": 1000,
                 },
             },
-        ]
-        repo = ledger_bootstrap.load_option_positions_repo(data_config)
-    finally:
-        bootstrap._list_feishu_option_position_records = old_list  # type: ignore[assignment]
+        ],
+        source_name="test_bootstrap",
+    )
 
-    records = repo.list_records(page_size=10)
-    assert len(records) == 1
-    assert records[0]["record_id"] == "rec_good_time"
-    assert repo.bootstrap_status == "bootstrapped_from_feishu"
-    assert repo.count_trade_events() == 1
+    assert len(events) == 1
+    event = events[0]
+    lot_id = event.get("raw_payload", {}).get("lot_record_id") if isinstance(event, dict) else getattr(event, "lot_id")
+    assert lot_id == "rec_good_time"
 
 
 def test_load_option_positions_repo_skips_legacy_rows_without_broker_or_market(tmp_path: Path) -> None:
@@ -404,17 +394,13 @@ def test_load_option_positions_repo_migrates_existing_position_lots_into_trade_e
 def test_bootstrap_seed_lot_survives_later_trade_event_projection(tmp_path: Path) -> None:
     from src.application.trades.normalizer import NormalizedTradeDeal
 
-    data_config = _write_data_config(
-        tmp_path / "data.json",
-        sqlite_path=tmp_path / "option_positions.sqlite3",
-        bootstrap_from_feishu_enabled=True,
-    )
-    old_list = bootstrap._list_feishu_option_position_records
-    try:
-        bootstrap._list_feishu_option_position_records = lambda _ref: [  # type: ignore[assignment]
-            {
-                "record_id": "rec_sy_seed",
-                "fields": {
+    db_path = tmp_path / "output_shared" / "state" / "option_positions.sqlite3"
+    repo_seed = ledger_repository.SQLiteOptionPositionsRepository(db_path)
+    repo_seed.replace_position_lots(
+        [
+            PositionLotRecord(
+                record_id="rec_sy_seed",
+                fields={
                     "account": "sy",
                     "broker": "富途",
                     "symbol": "AAPL",
@@ -433,11 +419,11 @@ def test_bootstrap_seed_lot_survives_later_trade_event_projection(tmp_path: Path
                     "note": "exp=2026-06-19;premium_per_share=1.0",
                     "premium": 1.0,
                 },
-            }
+            )
         ]
-        repo = ledger_bootstrap.load_option_positions_repo(data_config)
-    finally:
-        bootstrap._list_feishu_option_position_records = old_list  # type: ignore[assignment]
+    )
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=db_path, with_feishu=False)
+    repo = ledger_bootstrap.load_option_positions_repo(data_config)
 
     assert repo.count_trade_events() == 1
     open_deal = NormalizedTradeDeal(
@@ -527,26 +513,21 @@ def test_load_option_positions_repo_treats_holdings_only_feishu_as_sqlite_only(t
     repo = ledger_bootstrap.load_option_positions_repo(data_config)
 
     assert repo.bootstrap_status == "sqlite_only_no_feishu_bootstrap"
-    assert repo.bootstrap_message == "no feishu option_positions bootstrap configured"
+    assert repo.bootstrap_message == "feishu option_positions bootstrap is not used; local trade_events remain source of truth"
 
 
-def test_load_option_positions_repo_marks_degraded_when_feishu_bootstrap_fails(tmp_path: Path) -> None:
+def test_load_option_positions_repo_does_not_degrade_when_retired_feishu_bootstrap_config_exists(tmp_path: Path) -> None:
 
     data_config = _write_data_config(
         tmp_path / "data.json",
         sqlite_path=tmp_path / "option_positions.sqlite3",
         bootstrap_from_feishu_enabled=True,
     )
-    old_list = bootstrap._list_feishu_option_position_records
-    try:
-        bootstrap._list_feishu_option_position_records = lambda _ref: (_ for _ in ()).throw(RuntimeError("feishu unavailable"))  # type: ignore[assignment]
-        repo = ledger_bootstrap.load_option_positions_repo(data_config)
-    finally:
-        bootstrap._list_feishu_option_position_records = old_list  # type: ignore[assignment]
+    repo = ledger_bootstrap.load_option_positions_repo(data_config)
 
     assert repo.count_trade_events() == 0
-    assert repo.bootstrap_status == "degraded_feishu_bootstrap_failed"
-    assert "feishu unavailable" in str(repo.bootstrap_message)
+    assert repo.bootstrap_status == "sqlite_only_feishu_bootstrap_retired"
+    assert "source of truth" in str(repo.bootstrap_message)
 
 
 def test_load_option_positions_repo_rolls_back_failed_local_projection_migration(tmp_path: Path) -> None:
@@ -2226,7 +2207,7 @@ def test_load_option_positions_repo_ignores_incomplete_feishu_config_when_bootst
     assert repo.bootstrap_status == "sqlite_only_no_feishu_bootstrap"
 
 
-def test_load_option_positions_repo_raises_on_malformed_feishu_config_when_bootstrap_enabled(tmp_path: Path) -> None:
+def test_load_option_positions_repo_ignores_malformed_feishu_config_when_retired_bootstrap_enabled(tmp_path: Path) -> None:
 
     data_config = tmp_path / "data.json"
     data_config.write_text(
@@ -2245,8 +2226,9 @@ def test_load_option_positions_repo_raises_on_malformed_feishu_config_when_boots
         encoding="utf-8",
     )
 
-    with pytest.raises(SystemExit, match="data config missing feishu app_id/app_secret/option_positions"):
-        ledger_bootstrap.load_option_positions_repo(data_config)
+    repo = ledger_bootstrap.load_option_positions_repo(data_config)
+
+    assert repo.bootstrap_status == "sqlite_only_feishu_bootstrap_retired"
 
 
 def test_load_option_positions_repo_ignores_non_object_feishu_config_when_bootstrap_disabled(tmp_path: Path) -> None:
@@ -2270,7 +2252,7 @@ def test_load_option_positions_repo_ignores_non_object_feishu_config_when_bootst
     assert repo.bootstrap_status == "sqlite_only_no_feishu_bootstrap"
 
 
-def test_load_option_positions_repo_rejects_non_object_feishu_config_when_bootstrap_enabled(tmp_path: Path) -> None:
+def test_load_option_positions_repo_ignores_non_object_feishu_config_when_retired_bootstrap_enabled(tmp_path: Path) -> None:
 
     data_config = tmp_path / "data.json"
     data_config.write_text(
@@ -2289,8 +2271,9 @@ def test_load_option_positions_repo_rejects_non_object_feishu_config_when_bootst
         encoding="utf-8",
     )
 
-    with pytest.raises(SystemExit, match="data config feishu must be a JSON object"):
-        ledger_bootstrap.load_option_positions_repo(data_config)
+    repo = ledger_bootstrap.load_option_positions_repo(data_config)
+
+    assert repo.bootstrap_status == "sqlite_only_feishu_bootstrap_retired"
 
 
 def test_option_positions_sync_to_feishu_enabled_defaults_false(tmp_path: Path) -> None:
@@ -2315,7 +2298,7 @@ def test_option_positions_bootstrap_from_feishu_enabled_reads_boolean(tmp_path: 
         bootstrap_from_feishu_enabled=True,
     )
 
-    assert ledger_repository.option_positions_bootstrap_from_feishu_enabled(data_config) is True
+    assert ledger_repository.option_positions_bootstrap_from_feishu_enabled(data_config) is False
 
 
 def test_option_positions_bootstrap_from_legacy_sqlite_enabled_defaults_false(tmp_path: Path) -> None:
@@ -2336,7 +2319,7 @@ def test_option_positions_bootstrap_from_legacy_sqlite_enabled_reads_boolean(tmp
     assert ledger_repository.option_positions_bootstrap_from_legacy_sqlite_enabled(data_config) is True
 
 
-def test_option_positions_bootstrap_from_feishu_enabled_rejects_non_boolean(tmp_path: Path) -> None:
+def test_option_positions_bootstrap_from_feishu_enabled_ignores_retired_config_shape(tmp_path: Path) -> None:
 
     data_config = tmp_path / "data.json"
     data_config.write_text(
@@ -2354,8 +2337,7 @@ def test_option_positions_bootstrap_from_feishu_enabled_rejects_non_boolean(tmp_
         encoding="utf-8",
     )
 
-    with pytest.raises(SystemExit, match="data config option_positions.bootstrap_from_feishu.enabled must be a boolean"):
-        ledger_repository.option_positions_bootstrap_from_feishu_enabled(data_config)
+    assert ledger_repository.option_positions_bootstrap_from_feishu_enabled(data_config) is False
 
 
 def test_option_positions_bootstrap_from_legacy_sqlite_enabled_rejects_non_boolean(tmp_path: Path) -> None:

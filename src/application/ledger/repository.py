@@ -14,10 +14,8 @@ from src.application.ledger.sync_metadata import (
     PositionLotSyncMetadataPatch,
     apply_position_lot_sync_metadata_patch,
 )
+from src.application.ledger.store_resolution import resolve_ledger_store
 from src.infrastructure.feishu_bitable import parse_note_kv, safe_float
-
-
-REPO_BASE = Path(__file__).resolve().parents[3]
 
 
 @dataclass(frozen=True)
@@ -82,16 +80,6 @@ def _get_option_positions_sync_to_feishu_cfg(cfg: dict[str, Any]) -> dict[str, A
     return raw
 
 
-def _get_option_positions_bootstrap_from_feishu_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
-    option_positions_cfg = _get_option_positions_cfg(cfg)
-    raw = option_positions_cfg.get("bootstrap_from_feishu")
-    if raw is None:
-        return {}
-    if not isinstance(raw, dict):
-        raise SystemExit("data config option_positions.bootstrap_from_feishu must be a JSON object")
-    return raw
-
-
 def _get_option_positions_bootstrap_from_legacy_sqlite_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
     option_positions_cfg = _get_option_positions_cfg(cfg)
     raw = option_positions_cfg.get("bootstrap_from_legacy_sqlite")
@@ -138,23 +126,13 @@ def option_positions_sync_to_feishu_enabled(data_config: Path) -> bool:
 
 
 def option_positions_bootstrap_from_feishu_enabled(data_config: Path) -> bool:
-    cfg = _load_data_config(data_config)
-    return _option_positions_bootstrap_from_feishu_enabled_from_cfg(cfg)
+    _load_data_config(data_config)
+    return False
 
 
 def option_positions_bootstrap_from_legacy_sqlite_enabled(data_config: Path) -> bool:
     cfg = _load_data_config(data_config)
     return _option_positions_bootstrap_from_legacy_sqlite_enabled_from_cfg(cfg)
-
-
-def _option_positions_bootstrap_from_feishu_enabled_from_cfg(cfg: dict[str, Any]) -> bool:
-    bootstrap_cfg = _get_option_positions_bootstrap_from_feishu_cfg(cfg)
-    enabled = bootstrap_cfg.get("enabled")
-    if enabled is None:
-        return False
-    if not isinstance(enabled, bool):
-        raise SystemExit("data config option_positions.bootstrap_from_feishu.enabled must be a boolean")
-    return bool(enabled)
 
 
 def _option_positions_bootstrap_from_legacy_sqlite_enabled_from_cfg(cfg: dict[str, Any]) -> bool:
@@ -166,26 +144,8 @@ def _option_positions_bootstrap_from_legacy_sqlite_enabled_from_cfg(cfg: dict[st
         raise SystemExit("data config option_positions.bootstrap_from_legacy_sqlite.enabled must be a boolean")
     return bool(enabled)
 
-
-def _has_feishu_option_positions_table_cfg(cfg: dict[str, Any]) -> bool:
-    feishu_cfg = cfg.get("feishu")
-    if not isinstance(feishu_cfg, dict):
-        return False
-    tables = feishu_cfg.get("tables")
-    if not isinstance(tables, dict):
-        return False
-    return bool(str(tables.get("option_positions") or "").strip())
-
-
 def resolve_option_positions_sqlite_path(data_config: Path) -> Path:
-    cfg = _load_data_config(data_config)
-    raw = ((cfg.get("option_positions") or {}) if isinstance(cfg.get("option_positions"), dict) else {}).get("sqlite_path")
-    if raw is None or not str(raw).strip():
-        path = (REPO_BASE / "output_shared" / "state" / "option_positions.sqlite3").resolve()
-    else:
-        path = Path(str(raw))
-        if not path.is_absolute():
-            path = (REPO_BASE / path).resolve()
+    path = resolve_ledger_store(data_config).sqlite_path
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
 

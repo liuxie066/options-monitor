@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from domain.domain import FEISHU_APP_NOTIFICATION_PROVIDER, normalize_notification_provider
+from src.application.ledger.api import ledger_store_payload
 
 
 def run_healthcheck_tool(
@@ -163,6 +164,21 @@ def run_healthcheck_tool(
     if data_config_path.exists():
         try:
             option_repo = load_option_positions_repo(data_config_path)
+            ledger_store = ledger_store_payload(data_config_path, option_repo)
+            checks.append(
+                {
+                    "name": "ledger_store",
+                    "status": "ok",
+                    "message": (
+                        f"sqlite={ledger_store.get('sqlite_path')} "
+                        f"trade_events={ledger_store.get('trade_event_count')} "
+                        f"position_lots={ledger_store.get('position_lot_count')}"
+                    ),
+                    "value": ledger_store,
+                }
+            )
+            for warning in ledger_store.get("warnings") or []:
+                warnings.append(str(warning))
             option_positions_bootstrap_status = str(getattr(option_repo, "bootstrap_status", "") or "").strip() or None
             option_positions_bootstrap_message = str(getattr(option_repo, "bootstrap_message", "") or "").strip() or None
         except Exception as exc:

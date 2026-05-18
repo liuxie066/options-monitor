@@ -80,7 +80,7 @@ def build_context(
     account: str | None = None,
     rates: JsonDict | None = None,
 ) -> JsonDict:
-    """Build context from raw Bitable records.
+    """Build risk context from projected position-lot records.
 
     Important: keep record_id for downstream actions (auto-close expired positions)
     without adding extra list calls.

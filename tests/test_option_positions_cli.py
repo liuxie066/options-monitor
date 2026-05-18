@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest  # pyright: ignore[reportMissingImports]
 
+import src.application.ledger.bootstrap as ledger_bootstrap
 import src.application.ledger.interventions as ledger_interventions
 import src.application.ledger.manual_trades as ledger_manual_trades
 import src.application.ledger.repository as ledger_repository
@@ -105,6 +106,71 @@ def test_option_positions_cli_rebuild_reports_summary(monkeypatch, tmp_path: Pat
     assert "unmatched_explicit_close=0" in out
 
 
+def test_option_positions_cli_rebuild_ignores_deprecated_sqlite_path(monkeypatch, tmp_path: Path, capsys) -> None:
+    import src.interfaces.cli.option_positions as cli_mod
+
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
+    repo = ledger_bootstrap.load_option_positions_repo(data_config)
+    monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["om option-positions", "--data-config", str(data_config), "rebuild", "--format", "json"],
+    )
+
+    cli_mod.main()
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ledger_store"]["sqlite_path"] == str((tmp_path / "output_shared" / "state" / "option_positions.sqlite3").resolve())
+    assert payload["ledger_store"]["legacy_sqlite_path"] == str((tmp_path / "option_positions.sqlite3").resolve())
+    assert any("ignored" in item for item in payload["ledger_store"]["warnings"])
+
+
+def test_option_positions_cli_store_inspect_reports_parallel_sqlite_candidates(monkeypatch, tmp_path: Path, capsys) -> None:
+    import src.interfaces.cli.option_positions as cli_mod
+    from domain.domain.option_position_lots import OpenPositionCommand
+
+    legacy_db = tmp_path / "legacy" / "option_positions.sqlite3"
+    active_db = tmp_path / "output_shared" / "state" / "option_positions.sqlite3"
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=legacy_db)
+    for db_path, symbol in ((active_db, "TSLA"), (legacy_db, "NVDA")):
+        repo = ledger_repository.SQLiteOptionPositionsRepository(db_path)
+        ledger_manual_trades.persist_manual_open_event(
+            repo,
+            OpenPositionCommand(
+                broker="富途",
+                account="lx",
+                symbol=symbol,
+                option_type="put",
+                side="short",
+                contracts=1,
+                currency="USD",
+                strike=100.0,
+                multiplier=100,
+                expiration_ymd="2026-06-19",
+                premium_per_share=1.23,
+                opened_at_ms=1000,
+            ),
+        )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["om option-positions", "--data-config", str(data_config), "store", "inspect", "--format", "json"],
+    )
+
+    cli_mod.main()
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["active"]["sqlite_path"] == str(active_db.resolve())
+    assert payload["active"]["legacy_sqlite_path"] == str(legacy_db.resolve())
+    assert payload["summary"]["multiple_populated"] is True
+    assert any("multiple ledger sqlite candidates contain rows" in item for item in payload["warnings"])
+    by_path = {item["path"]: item for item in payload["candidates"]}
+    assert by_path[str(active_db.resolve())]["is_active"] is True
+    assert "legacy_configured_sqlite_path" in by_path[str(legacy_db.resolve())]["roles"]
+
+
 def test_option_positions_cli_inspect_reports_projection_state(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.option_positions as cli_mod
     from domain.domain.option_position_lots import OpenPositionCommand
@@ -153,6 +219,9 @@ def test_option_positions_cli_inspect_reports_projection_state(monkeypatch, tmp_
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["matched_record_ids"] == [lot["record_id"]]
+    assert payload["ledger_store"]["sqlite_path"] == str((tmp_path / "option_positions.sqlite3").resolve())
+    assert payload["ledger_store"]["trade_event_count"] == 1
+    assert payload["ledger_store"]["position_lot_count"] == 1
     assert payload["current_lots"][0]["fields"]["feishu_record_id"] == "rec_sync_1"
     assert payload["baseline_snapshot_id"] is None
     assert payload["projected_lots"][0]["current_contracts"] == 1

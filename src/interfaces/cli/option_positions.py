@@ -9,15 +9,18 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from domain.domain.ledger.position_fields import (
     normalize_account,
     normalize_broker,
 )
+from src.application.config_loader import resolve_data_config_path
 from src.application.ledger.api import (
     format_position_cash_secured,
     format_position_money,
+    inspect_ledger_stores,
+    ledger_store_payload,
     list_position_rows,
     open_position_ledger_from_data_config as resolve_option_positions_repo,
     reconcile_position_snapshot,
@@ -35,6 +38,82 @@ from src.application.positions.workflows import (
 )
 from src.application.positions.inspection import build_lot_event_history, inspect_projection_state
 from src.application.verification_snapshot_io import load_verification_snapshot_payload
+
+
+def _resolve_path_under(path: str | Path, *, base: Path) -> Path:
+    resolved = Path(path).expanduser()
+    if not resolved.is_absolute():
+        resolved = (base / resolved).resolve()
+    return resolved
+
+
+def _load_json_object(path: Path) -> dict[str, Any]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise SystemExit(f"expected JSON object: {path}")
+    return payload
+
+
+def _store_inspect_data_config(args: argparse.Namespace, *, base: Path) -> tuple[Path, Path | None]:
+    config_ref = str(getattr(args, "store_config", "") or "").strip()
+    explicit_data_config = str(getattr(args, "store_data_config", "") or getattr(args, "data_config", "") or "").strip()
+    if not config_ref:
+        return resolve_data_config_path(base=base, data_config=(explicit_data_config or None)), None
+
+    config_path = _resolve_path_under(config_ref, base=base)
+    if explicit_data_config:
+        return _resolve_path_under(explicit_data_config, base=base), config_path
+
+    cfg = _load_json_object(config_path)
+    portfolio_cfg = cfg.get("portfolio") if isinstance(cfg.get("portfolio"), dict) else {}
+    data_ref = str(portfolio_cfg.get("data_config") or "").strip() if isinstance(portfolio_cfg, dict) else ""
+    if data_ref:
+        data_path = Path(data_ref).expanduser()
+        if not data_path.is_absolute():
+            data_path = (config_path.parent / data_path).resolve()
+        return data_path, config_path
+    return (config_path.parent / "secrets" / "portfolio.sqlite.json").resolve(), config_path
+
+
+def _print_store_inspect_text(payload: dict[str, object]) -> None:
+    active_raw = payload.get("active")
+    summary_raw = payload.get("summary")
+    active = cast(dict[str, object], active_raw) if isinstance(active_raw, dict) else {}
+    summary = cast(dict[str, object], summary_raw) if isinstance(summary_raw, dict) else {}
+    print("# option_positions store")
+    print(f"active: {active.get('sqlite_path')}")
+    print(f"runtime_root: {active.get('runtime_root')} ({active.get('runtime_root_source')})")
+    print(
+        "active_counts: "
+        f"trade_events={active.get('trade_event_count')} "
+        f"position_lots={active.get('position_lot_count')} "
+        f"exists={active.get('db_exists')}"
+    )
+    print(
+        "summary: "
+        f"existing={summary.get('existing_candidate_count')} "
+        f"populated={summary.get('populated_candidate_count')} "
+        f"multiple_populated={summary.get('multiple_populated')}"
+    )
+    candidates = payload.get("candidates")
+    if isinstance(candidates, list):
+        print("# candidates")
+        for item in candidates:
+            if not isinstance(item, dict):
+                continue
+            item_map = cast(dict[str, object], item)
+            roles_raw = item_map.get("roles")
+            roles = ",".join(str(role) for role in roles_raw) if isinstance(roles_raw, list) else ""
+            print(
+                f"- {roles or '-'} | exists={item_map.get('exists')} "
+                f"trade_events={item_map.get('trade_event_count')} "
+                f"position_lots={item_map.get('position_lot_count')} | {item_map.get('path')}"
+            )
+    warnings = payload.get("warnings")
+    if isinstance(warnings, list) and warnings:
+        print("# warnings")
+        for warning in warnings:
+            print(f"- {warning}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -103,6 +182,14 @@ def main(argv: list[str] | None = None) -> int:
     p_inspect.add_argument('--strike', type=float, default=None)
     p_inspect.add_argument('--exp', default=None, help='YYYY-MM-DD')
     p_inspect.add_argument('--format', default='json', choices=['json'])
+
+    p_store = sub.add_parser('store', help='inspect option-position SQLite store resolution')
+    store_sub = p_store.add_subparsers(dest='store_cmd', required=True)
+    p_store_inspect = store_sub.add_parser('inspect', help='diagnose active and legacy SQLite store candidates')
+    p_store_inspect.add_argument("--config", dest="store_config", default=None, help="runtime config path; resolves portfolio.data_config relative to the config file")
+    p_store_inspect.add_argument("--data-config", dest="store_data_config", default=None, help="portfolio data config path override")
+    p_store_inspect.add_argument("--runtime-root", default=None, help="override runtime root for standard ledger path resolution")
+    p_store_inspect.add_argument("--format", default="json", choices=["json", "text"])
 
     p_reconcile = sub.add_parser('reconcile', help='store a verification snapshot and generate a reconciliation report')
     p_reconcile.add_argument('--snapshot-file', required=True, help='JSON file with a verification snapshot object or lots array')
@@ -175,6 +262,19 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     base = Path(__file__).resolve().parents[3]
+    if args.cmd == 'store':
+        data_config_path, config_path = _store_inspect_data_config(args, base=base)
+        payload = inspect_ledger_stores(
+            data_config_path,
+            runtime_root=getattr(args, "runtime_root", None),
+            config_path=config_path,
+        )
+        if args.format == "json":
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            _print_store_inspect_text(payload)
+        return 0
+
     if args.cmd == 'auto-close-expired':
         auto_close_argv: list[str] = []
         if args.auto_close_config:
@@ -233,6 +333,7 @@ def main(argv: list[str] | None = None) -> int:
 
     _data_config, repo = resolve_option_positions_repo(base=base, data_config=args.data_config)
     state_base = Path(str(_data_config)).resolve().parent
+    ledger_store = ledger_store_payload(_data_config, repo)
 
     if args.cmd == 'list':
         broker = normalize_broker(args.broker)
@@ -417,6 +518,7 @@ def main(argv: list[str] | None = None) -> int:
         result["mode"] = "canonical_position_lots_rebuild"
         result["source_of_truth"] = "trade_events"
         result["projection"] = "position_lots"
+        result["ledger_store"] = ledger_store
         if args.format == 'json':
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0
@@ -448,6 +550,7 @@ def main(argv: list[str] | None = None) -> int:
             strike=args.strike,
             expiration_ymd=((args.exp or '').strip() or None),
         )
+        payload["ledger_store"] = ledger_store
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
 

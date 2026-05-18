@@ -514,10 +514,12 @@ def test_auto_close_expired_positions_fail_closed_on_ledger_identity_mismatch(tm
 def test_position_maintenance_closes_legacy_sqlite_lot_after_load_repo_bootstrap(tmp_path: Path) -> None:
     from src.application.positions.maintenance import run_expired_position_maintenance_for_account
 
-    db_path = tmp_path / "option_positions.sqlite3"
-    data_config = tmp_path / "portfolio.sqlite.json"
+    runtime_root = tmp_path / "runtime"
+    db_path = runtime_root / "output_shared" / "state" / "option_positions.sqlite3"
+    data_config = runtime_root / "secrets" / "portfolio.sqlite.json"
+    data_config.parent.mkdir(parents=True)
     data_config.write_text(
-        json.dumps({"option_positions": {"sqlite_path": str(db_path)}}),
+        json.dumps({"option_positions": {}}),
         encoding="utf-8",
     )
     repo = ledger_repository.SQLiteOptionPositionsRepository(db_path)

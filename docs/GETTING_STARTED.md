@@ -59,7 +59,7 @@ http://127.0.0.1:8000
 
 默认最小配置下：
 - `option_positions` 只需要本地 SQLite
-- Feishu 只在你启用 holdings / external_holdings，或显式给 `option_positions` 启用 bootstrap / 镜像时才需要配置
+- Feishu 只在你启用 holdings / external_holdings，或显式启用 `option_positions` 镜像同步时才需要配置
 
 如果你不用 WebUI，也可以手工复制模板，详见根目录 [README.md](../README.md)。
 
@@ -79,10 +79,9 @@ http://127.0.0.1:8000
 
 配置优先级和工具边界的完整解释，以根目录 `CONFIGURATION_GUIDE.md` 为准。
 
-如果你显式启用了 Feishu `option_positions` bootstrap，这个 healthcheck 会额外给出 `option_positions_bootstrap` 状态，区分：
-- 未配置 bootstrap
-- 已配置且成功
-- 已配置但首次读取失败（warn / degraded）
+healthcheck 会额外给出本地 `ledger_store` 和 `option_positions_bootstrap` 状态：
+- `ledger_store` 用来确认当前读写的 SQLite 路径和 `trade_events` / `position_lots` 行数
+- `option_positions_bootstrap` 只反映本地接管/legacy 迁移状态；Feishu `option_positions` 不再作为 bootstrap 输入
 
 如果要显式指定配置路径：
 

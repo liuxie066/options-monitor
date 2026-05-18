@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest  # pyright: ignore[reportMissingImports]
 
+import src.application.ledger.bootstrap as ledger_bootstrap
 import src.application.ledger.manual_trades as ledger_manual_trades
 import src.application.ledger.repository as ledger_repository
 
@@ -160,3 +161,43 @@ def test_trade_events_replay_dry_run_reports_projection(monkeypatch, tmp_path: P
     assert out["mode"] == "dry_run"
     assert out["trade_event_count"] == 1
     assert out["position_lot_count"] == 1
+    assert out["ledger_store"]["sqlite_path"] == str((tmp_path / "option_positions.sqlite3").resolve())
+    assert out["ledger_store"]["trade_event_count"] == 1
+    assert out["ledger_store"]["position_lot_count"] == 1
+
+
+def test_trade_events_replay_apply_ignores_deprecated_sqlite_path(monkeypatch, tmp_path: Path, capsys) -> None:
+    import src.interfaces.cli.trade_events as cli
+    from domain.domain.option_position_lots import OpenPositionCommand
+
+    data_config = tmp_path / "data.json"
+    data_config.write_text(
+        json.dumps({"option_positions": {"sqlite_path": str(tmp_path / "option_positions.sqlite3")}}),
+        encoding="utf-8",
+    )
+    repo = ledger_bootstrap.load_option_positions_repo(data_config)
+    ledger_manual_trades.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="0700.HK",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="HKD",
+            strike=480.0,
+            multiplier=100,
+            expiration_ymd="2026-04-29",
+            premium_per_share=3.93,
+            opened_at_ms=1000,
+        ),
+    )
+    monkeypatch.setattr(cli, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
+
+    assert cli.main(["replay", "--apply", "--format", "json"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["mode"] == "applied"
+    assert out["ledger_store"]["sqlite_path"] == str((tmp_path / "output_shared" / "state" / "option_positions.sqlite3").resolve())
+    assert out["ledger_store"]["legacy_sqlite_path"] == str((tmp_path / "option_positions.sqlite3").resolve())
+    assert any("ignored" in item for item in out["ledger_store"]["warnings"])

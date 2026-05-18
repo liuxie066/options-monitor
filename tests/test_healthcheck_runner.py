@@ -73,8 +73,68 @@ def test_healthcheck_runner_returns_structured_result(monkeypatch, tmp_path: Pat
         "scheduler_decision",
         "cron_state",
     ]
+    feishu_schema = next(item for item in result["checks"] if item["name"] == "feishu_schema")
+    assert feishu_schema["value"]["option_positions_checked"] is False
     assert scheduler_calls
     assert scheduler_calls[0]["config"].name == "healthcheck_config.lx.json"
+
+
+def test_healthcheck_runner_checks_option_positions_schema_only_when_sync_enabled(
+    monkeypatch, tmp_path: Path
+) -> None:
+    from src.application import healthcheck_runner as runner
+
+    config_path = tmp_path / "config.us.json"
+    data_path = tmp_path / "portfolio.feishu.json"
+    cron_path = tmp_path / "jobs.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "accounts": ["lx"],
+                "portfolio": {"data_config": str(data_path)},
+            }
+        ),
+        encoding="utf-8",
+    )
+    data_path.write_text(
+        json.dumps(
+            {
+                "option_positions": {"sync_to_feishu": {"enabled": True}},
+                "feishu": {
+                    "app_id": "app",
+                    "app_secret": "secret",
+                    "tables": {
+                        "holdings": "hold_app/hold_tbl",
+                        "option_positions": "opt_app/opt_tbl",
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    cron_path.write_text(json.dumps({"jobs": []}), encoding="utf-8")
+
+    monkeypatch.setattr(runner, "validate_config", lambda _cfg: None)
+    monkeypatch.setattr(runner, "get_tenant_access_token", lambda _app_id, _app_secret: "token")
+
+    seen_tables: list[str] = []
+
+    def _fields(_token: str, _app: str, table: str) -> list[dict[str, str]]:
+        seen_tables.append(table)
+        names = runner.REQUIRED_HOLDINGS_FIELDS | {"broker"}
+        if table == "opt_tbl":
+            names = runner.REQUIRED_OPTION_POSITION_FIELDS
+        return [{"field_name": name} for name in sorted(names)]
+
+    monkeypatch.setattr(runner, "bitable_fields", _fields)
+    monkeypatch.setattr(runner, "run_scheduler", lambda **_kwargs: None)
+
+    result = runner.run_healthcheck_runner(config=config_path, base=tmp_path, cron_path=cron_path)
+
+    assert result["ok"] is True
+    assert seen_tables == ["hold_tbl", "opt_tbl"]
+    feishu_schema = next(item for item in result["checks"] if item["name"] == "feishu_schema")
+    assert feishu_schema["value"]["option_positions_checked"] is True
 
 
 def test_healthcheck_report_keeps_legacy_human_sections() -> None:

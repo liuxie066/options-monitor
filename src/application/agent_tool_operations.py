@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from src.application.agent_tool_contracts import AgentToolError
+from src.application.ledger.api import ledger_store_payload
 
 
 def _as_int(value: Any, *, default: int, minimum: int = 1, maximum: int = 500) -> int:
@@ -298,6 +299,7 @@ def option_positions_read_tool(
     portfolio_cfg = cfg.get("portfolio") if isinstance(cfg.get("portfolio"), dict) else {}
     data_config_path = resolve_public_data_config_path(payload, portfolio_cfg)
     _resolved_data_config, repo = resolve_option_positions_repo(base=repo_base(), data_config=data_config_path)
+    ledger_store = ledger_store_payload(data_config_path, repo)
 
     warnings: list[str] = []
     bootstrap_status = getattr(repo, "bootstrap_status", None)
@@ -370,4 +372,8 @@ def option_positions_read_tool(
         "status": bootstrap_status,
         "message": bootstrap_message,
     }
-    return data, warnings, {"config_path": mask_path(config_path), "data_config": mask_path(data_config_path)}
+    return data, warnings, {
+        "config_path": mask_path(config_path),
+        "data_config": mask_path(data_config_path),
+        "ledger_store": ledger_store,
+    }
