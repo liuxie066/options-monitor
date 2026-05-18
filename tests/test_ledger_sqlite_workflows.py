@@ -34,6 +34,7 @@ def _write_data_config(
     with_feishu: bool = True,
     bootstrap_from_feishu_enabled: bool = False,
     bootstrap_from_legacy_sqlite_enabled: bool = False,
+    copy_legacy_to_standard: bool = True,
 ) -> Path:
     payload: dict[str, object] = {
         "option_positions": {
@@ -50,7 +51,7 @@ def _write_data_config(
         }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     standard_db = path.parent / "output_shared" / "state" / "option_positions.sqlite3"
-    if sqlite_path.exists() and sqlite_path.resolve() != standard_db.resolve():
+    if copy_legacy_to_standard and sqlite_path.exists() and sqlite_path.resolve() != standard_db.resolve():
         standard_db.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(sqlite_path, standard_db)
         for suffix in ("-wal", "-shm"):
@@ -295,12 +296,18 @@ def test_load_option_positions_repo_does_not_migrate_legacy_rows_by_default(tmp_
         )
         conn.commit()
 
-    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=db_path, with_feishu=False)
+    data_config = _write_data_config(
+        tmp_path / "data.json",
+        sqlite_path=db_path,
+        with_feishu=False,
+        copy_legacy_to_standard=False,
+    )
     loaded = ledger_bootstrap.load_option_positions_repo(data_config)
 
     rows = loaded.list_records(page_size=10)
     assert rows == []
     assert loaded.count_trade_events() == 0
+    assert loaded.db_path != db_path.resolve()
     assert loaded.bootstrap_status == "sqlite_only_legacy_option_positions_bootstrap_disabled"
     assert "source of truth" in str(loaded.bootstrap_message)
 
@@ -339,6 +346,7 @@ def test_load_option_positions_repo_migrates_legacy_rows_with_explicit_opt_in(tm
         sqlite_path=db_path,
         with_feishu=False,
         bootstrap_from_legacy_sqlite_enabled=True,
+        copy_legacy_to_standard=False,
     )
     loaded = ledger_bootstrap.load_option_positions_repo(data_config)
 
@@ -346,8 +354,102 @@ def test_load_option_positions_repo_migrates_legacy_rows_with_explicit_opt_in(tm
     assert len(rows) == 1
     assert rows[0]["record_id"] == "legacy_1"
     assert rows[0]["fields"]["broker"] == "富途"
+    assert loaded.db_path != db_path.resolve()
     assert loaded.count_trade_events() == 1
     assert loaded.bootstrap_status == "migrated_legacy_option_positions"
+
+
+def test_load_option_positions_repo_prefers_legacy_trade_events_with_explicit_opt_in(tmp_path: Path) -> None:
+    from tests.ledger_legacy_helpers import LegacyTradeEvent as TradeEvent
+
+    legacy_db = tmp_path / "legacy" / "option_positions.sqlite3"
+    legacy_repo = ledger_repository.SQLiteOptionPositionsRepository(legacy_db)
+    legacy_repo.upsert_trade_event(
+        TradeEvent(
+            event_id="deal-open-legacy",
+            source_type="broker_trade_event",
+            source_name="legacy_sqlite",
+            broker="富途",
+            account="sy",
+            symbol="AAPL",
+            option_type="put",
+            side="sell",
+            position_effect="open",
+            contracts=2,
+            price=1.25,
+            strike=150.0,
+            multiplier=100,
+            expiration_ymd="2026-06-19",
+            currency="USD",
+            trade_time_ms=1000,
+            order_id="order-legacy",
+            multiplier_source="payload",
+            raw_payload={"deal_id": "deal-open-legacy"},
+        )
+    )
+    with legacy_repo._connect() as conn:  # type: ignore[attr-defined]
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS option_positions (
+              record_id TEXT PRIMARY KEY,
+              fields_json TEXT NOT NULL,
+              created_at_ms INTEGER NOT NULL,
+              updated_at_ms INTEGER NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO option_positions (record_id, fields_json, created_at_ms, updated_at_ms)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                "legacy_snapshot_should_not_win",
+                json.dumps(
+                    {"symbol": "MSFT", "market": "富途证券", "status": "open", "contracts_open": 1},
+                    ensure_ascii=False,
+                ),
+                1000,
+                1000,
+            ),
+        )
+        conn.commit()
+
+    data_config = _write_data_config(
+        tmp_path / "data.json",
+        sqlite_path=legacy_db,
+        with_feishu=False,
+        bootstrap_from_legacy_sqlite_enabled=True,
+        copy_legacy_to_standard=False,
+    )
+
+    loaded = ledger_bootstrap.load_option_positions_repo(data_config)
+
+    assert loaded.db_path != legacy_db.resolve()
+    assert loaded.count_trade_events() == 1
+    assert loaded.list_trade_events()[0]["event_id"] == "deal-open-legacy"
+    lots = loaded.list_position_lots()
+    assert len(lots) == 1
+    assert lots[0]["fields"]["symbol"] == "AAPL"
+    assert loaded.bootstrap_status == "migrated_legacy_trade_events"
+
+
+def test_load_option_positions_repo_reports_missing_legacy_sqlite_when_opted_in(tmp_path: Path) -> None:
+    legacy_db = tmp_path / "missing" / "option_positions.sqlite3"
+    data_config = _write_data_config(
+        tmp_path / "data.json",
+        sqlite_path=legacy_db,
+        with_feishu=False,
+        bootstrap_from_legacy_sqlite_enabled=True,
+        copy_legacy_to_standard=False,
+    )
+
+    loaded = ledger_bootstrap.load_option_positions_repo(data_config)
+
+    assert loaded.count_trade_events() == 0
+    assert loaded.count_position_lots() == 0
+    assert loaded.bootstrap_status == "sqlite_only_legacy_sqlite_not_found"
+    assert str(legacy_db) in str(loaded.bootstrap_message)
 
 
 def test_load_option_positions_repo_migrates_existing_position_lots_into_trade_events(tmp_path: Path) -> None:
