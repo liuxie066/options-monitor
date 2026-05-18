@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from domain.domain.option_position_lots import normalize_currency
+from domain.domain.ledger.position_fields import normalize_currency
 from domain.domain.symbol_identity import canonical_symbol
 
 

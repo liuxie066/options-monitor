@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 1.2.62 - 2026-05-18
+
+### Changed
+- Repointed runtime position/trade imports to the canonical `domain.domain.ledger.position_fields` owner instead of the legacy `domain.domain.option_position_lots` re-export.
+- Removed retired post-write v2 projection status payloads from option-position workflow and CLI outputs.
+- Retired the old local WebUI surface, including `src/interfaces/webui`, `src/application/webui_*`, `scripts/webui`, `run_webui.sh`, and WebUI-specific tests/static assets.
+- Updated onboarding docs and install guidance to use `./om init runtime` and CLI/agent entrypoints instead of the retired WebUI.
+- Updated project memory and architecture guidance so future work no longer treats WebUI as an active interface.
+
+### Tests
+- Added structural coverage to keep runtime code off the legacy `option_position_lots` re-export.
+- Added structural coverage to keep retired WebUI code and script entrypoints from returning.
+- Verified with focused ledger/WebUI-retirement tests, changed-file type checking, compile checks, full pytest, diff checks, and release metadata validation.
+
 ## 1.2.61 - 2026-05-18
 
 ### Changed

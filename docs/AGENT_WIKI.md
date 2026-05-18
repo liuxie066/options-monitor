@@ -209,6 +209,12 @@ Tick flow:
    -> run state and audit writes
 ```
 
+Entrypoint signature:
+
+```python
+def run_tick(argv: list[str] | None = None) -> int: ...
+```
+
 ### Ledger, Positions, And Trades
 
 Canonical chain:
@@ -237,6 +243,13 @@ Ownership:
 | Position-facing workflows | `src/application/positions/` |
 | Trade-facing workflows | `src/application/trades/` |
 
+Core projection functions:
+
+```python
+def project_trade_events(events: list[TradeEvent]) -> ProjectionResult: ...
+def build_risk_position_views(lots: list[PositionLot]) -> list[RiskPositionView]: ...
+```
+
 Rules:
 
 - Local SQLite `trade_events` is the source of truth.
@@ -249,6 +262,13 @@ Rules:
 - Domain policy: `domain/domain/close_advice.py`
 - Runner/I/O assembly: `src/application/close_advice_runner.py`
 - Recommended agent entry: `get_close_advice`
+
+Core domain functions:
+
+```python
+def evaluate_close_advice(inp: CloseAdviceInput, cfg: CloseAdviceConfig) -> dict[str, Any]: ...
+def evaluate_close_optimizer(inp: CloseAdviceInput, cfg: CloseAdviceConfig) -> dict[str, Any]: ...
+```
 
 Keep new scoring or optimizer policy in the domain layer. The runner should stay focused on inputs, local artifacts, and output formatting.
 
@@ -285,7 +305,7 @@ When adding or changing a tool, update manifest, handler, tests, and docs togeth
 domain/domain/        -> MUST NOT import src/ or scripts/
 src/application/      -> MUST NOT import scripts/
 src/infrastructure/   -> external adapters and persistence details
-src/interfaces/       -> CLI/WebUI/agent adaptation
+src/interfaces/       -> CLI/agent adaptation
 scripts/              -> operational wrappers only; delegate to src/ or domain/
 ```
 

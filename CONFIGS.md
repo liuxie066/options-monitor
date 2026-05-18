@@ -11,7 +11,7 @@
 - `config.us.json` / `config.hk.json` 是当前 runtime 的 canonical market configs。
 - 如果使用分层配置，`configs/system.json` + 可选 `configs/user.common.json` + `configs/user.<market>.json` 只是 authoring source；运行前用 `./om config build --market us|hk` 生成对应 canonical runtime config。
 - 线上可以把这两份 canonical config 放在仓库外管理，例如 `/opt/options-monitor/configs/config.us.json` / `/opt/options-monitor/configs/config.hk.json`，并在运行入口显式传入绝对路径。
-- 仓内同名文件仍是受支持的 repo-local runtime config 形态，适合本地开发、WebUI 初始化和默认本地运行。
+- 仓内同名文件仍是受支持的 repo-local runtime config 形态，适合本地开发和默认本地运行。
 - 仓库跟踪 `configs/system.json` 与 `configs/examples/*.json` 模板；用户实际 runtime config / user config / common user config 不随版本发布。
 - `.gitignore` 会忽略仓内 `config.us.json` / `config.hk.json`、`config.local*.json`、`config.market_*.json`、旧兼容文件名和 config 备份，避免代码更新覆盖用户本地配置。
 - runtime 入口始终以传入的 market-specific canonical config 为准；生产 cron 若使用仓外配置，应显式传入对应绝对路径。

@@ -113,7 +113,7 @@ Business rules live in `domain/domain/`. That layer must not import `src/` or `s
 domain/domain/        -> MUST NOT import src/ or scripts/
 src/application/      -> MUST NOT import scripts/
 src/infrastructure/   -> external adapters and persistence details
-src/interfaces/       -> CLI/WebUI/agent request and response adaptation
+src/interfaces/       -> CLI/agent request and response adaptation
 scripts/              -> thin operational wrappers only
 ```
 

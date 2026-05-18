@@ -23,6 +23,5 @@ mkdir -p secrets
 echo "[install-agent] OK"
 echo "[install-agent] next:"
 echo "  1) start OpenD and confirm it is logged in"
-echo "  2) run ./run_webui.sh"
-echo "  3) finish first-time initialization in the local WebUI"
-echo "  4) optional: copy configs/examples/openclaw.profile.example.json to openclaw.profile.json and fill cron/path values"
+echo "  2) initialize config with ./om init runtime --market us|hk --futu-acc-id <id>"
+echo "  3) optional: copy configs/examples/openclaw.profile.example.json to openclaw.profile.json and fill cron/path values"

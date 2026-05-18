@@ -40,16 +40,11 @@ python3 -m venv .venv
 
 ## 3. 初始化运行配置
 
-推荐先启动 WebUI：
+推荐用 CLI 初始化本地 runtime config：
 
 ```bash
-./run_webui.sh
-```
-
-默认地址：
-
-```text
-http://127.0.0.1:8000
+./om init runtime --market us --futu-acc-id <futu-account-id>
+./om init runtime --market hk --futu-acc-id <futu-account-id>
 ```
 
 首次初始化通常会生成：
@@ -61,7 +56,7 @@ http://127.0.0.1:8000
 - `option_positions` 只需要本地 SQLite
 - Feishu 只在你启用 holdings / external_holdings，或显式启用 `option_positions` 镜像同步时才需要配置
 
-如果你不用 WebUI，也可以手工复制模板，详见根目录 [README.md](../README.md)。
+也可以手工复制模板，详见根目录 [README.md](../README.md)。
 
 ---
 

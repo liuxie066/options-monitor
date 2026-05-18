@@ -59,15 +59,10 @@ def _apply_with_optional_sync(
 ) -> dict[str, Any]:
     del native_event, verification_snapshot_id, verification_note
     idempotent_duplicate = result.get("created") is False
-    v2_result = {
-        "mode": "retired",
-        "reason": "post_write_v2_projection_disabled",
-    }
     sync_result = _auto_sync_record_if_possible(repo, record_id=record_id) if record_id else None
     return payload | {
         "mode": "applied",
         "result": result,
-        "v2_result": v2_result,
         "sync_result": sync_result,
         "idempotent_duplicate": bool(idempotent_duplicate),
     }

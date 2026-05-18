@@ -366,11 +366,9 @@ def test_account_config_imports_owner_module() -> None:
     owner_mod = importlib.import_module("src.application.account_config")
     layered_mod = importlib.import_module("src.application.layered_config")
     multi_tick_mod = importlib.import_module("src.application.multi_account_tick")
-    webui_server_mod = importlib.import_module("src.interfaces.webui.server")
 
     assert layered_mod.normalize_accounts is owner_mod.normalize_accounts
     assert multi_tick_mod.accounts_from_config is owner_mod.accounts_from_config
-    assert webui_server_mod.list_account_config_views is owner_mod.list_account_config_views
 
 
 def test_shared_infrastructure_imports_owner_modules() -> None:
@@ -409,12 +407,10 @@ def test_external_services_imports_infrastructure_owner_module() -> None:
     owner_mod = importlib.import_module("src.infrastructure.external_services")
     multi_tick_mod = importlib.import_module("src.application.multi_account_tick")
     account_run_mod = importlib.import_module("src.application.account_run")
-    webui_server_mod = importlib.import_module("src.interfaces.webui.server")
 
     assert multi_tick_mod.run_scan_scheduler_cli is owner_mod.run_scan_scheduler_cli
     assert multi_tick_mod.select_notification_delivery_adapter is owner_mod.select_notification_delivery_adapter
     assert account_run_mod.run_pipeline_script is owner_mod.run_pipeline_script
-    assert webui_server_mod.send_openclaw_message is owner_mod.send_openclaw_message
 
 
 def test_multi_tick_helpers_import_application_owner_modules() -> None:

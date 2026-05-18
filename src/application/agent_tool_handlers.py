@@ -15,7 +15,7 @@ from domain.domain.fetch_source import resolve_symbol_fetch_source
 from src.application.futu_portfolio_context import infer_futu_portfolio_settings
 from src.application.notify_symbols import build_notification
 from src.application.positions.inspection import build_lot_event_history, inspect_projection_state
-from domain.domain.option_position_lots import normalize_account as _normalize_account
+from domain.domain.ledger.position_fields import normalize_account as _normalize_account
 from src.application.ledger.api import (
     list_position_rows as _list_position_rows,
     open_position_ledger,

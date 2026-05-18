@@ -8,7 +8,7 @@ domain rules, external adapters, and local state repositories.
 
 | Layer | Path | Owns |
 |---|---|---|
-| Interfaces | `src/interfaces/` | Human CLI, Agent CLI, WebUI request/response adaptation |
+| Interfaces | `src/interfaces/` | Human CLI and Agent CLI request/response adaptation |
 | Application | `src/application/` | Use-case orchestration, config assembly, pipeline execution, notification flow |
 | Domain | `domain/domain/` | Deterministic strategy, scheduler, notification, position, and schema decisions |
 | Infrastructure | `src/infrastructure/` | OpenD/Futu, Feishu, OpenClaw, exchange-rate and subprocess adapters |
@@ -20,7 +20,7 @@ Rules:
 - `src/application` must not import `scripts`.
 - `scripts/` is reserved for operational wrappers, release helpers, diagnostics,
   and one-off tools that delegate into `src` or `domain`.
-- Public behavior should enter through `./om`, `./om-agent`, WebUI, or
+- Public behavior should enter through `./om`, `./om-agent`, or
   documented `python -m src.application...` entry points.
 
 ## Main Entry Points
@@ -36,9 +36,6 @@ src.interfaces.agent.cli
 -> src.application.agent_tool_registry
 -> src.application.agent_tool_handlers
 ```
-
-WebUI is owned by `src.interfaces.webui.server` and delegates config editing,
-tool execution, and presenters into `src.application`.
 
 ## Runtime Tick Flow
 
@@ -196,6 +193,6 @@ When adding code:
 - Put pure business decisions in `domain/domain`.
 - Put use-case orchestration in `src/application`.
 - Put external system adapters in `src/infrastructure`.
-- Put CLI/WebUI argument and response adaptation in `src/interfaces`.
+- Put CLI and Agent CLI argument/response adaptation in `src/interfaces`.
 - Prefer a small facade-preserving move over changing public command behavior.
 - Add or update boundary tests when moving ownership between layers.
