@@ -17,6 +17,9 @@ import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
+from zoneinfo import ZoneInfo as _ZoneInfo
+from zoneinfo import ZoneInfoNotFoundError as _ZoneInfoNotFoundError
 
 repo_base = Path(__file__).resolve().parents[2]
 if str(repo_base) not in sys.path:
@@ -205,18 +208,6 @@ def parse_underlying_name(s: str) -> str | None:
     return None
 
 
-try:
-    from zoneinfo import ZoneInfo as _ZoneInfo, ZoneInfoNotFoundError as _ZoneInfoNotFoundError
-    _ZONEINFO_AVAILABLE = True
-except ImportError:
-    _ZoneInfo = None  # type: ignore[assignment]
-
-    class _ZoneInfoNotFoundError(Exception):  # type: ignore[no-redef]
-        pass
-
-    _ZONEINFO_AVAILABLE = False
-
-
 _TZ_HINTS: dict[str, str] = {
     '香港': 'Asia/Hong_Kong',
     '美国': 'America/New_York',
@@ -247,7 +238,7 @@ def parse_fill_timestamp(s: str) -> int | None:
     try:
         dt_naive = datetime.strptime(dt_str, '%Y/%m/%d %H:%M:%S')
         tz_name = _TZ_HINTS.get(tz_hint)
-        if tz_name and _ZONEINFO_AVAILABLE:
+        if tz_name:
             try:
                 tz = _ZoneInfo(tz_name)
                 dt = dt_naive.replace(tzinfo=tz)
@@ -265,7 +256,7 @@ def parse_option_message_text(
     *,
     accounts: list[str] | tuple[str, ...] | None = None,
     resolve_multiplier: bool = True,
-) -> dict:
+) -> dict[str, Any]:
     """解析单条期权消息，返回结构化字段。"""
     raw = (text or '').strip()
 
@@ -318,7 +309,7 @@ def parse_option_message_text(
             limit_expirations=1,
         )
 
-    ok = all([symbol, exp, opt_type, side, strike is not None, multiplier, contracts, account, currency])
+    ok = all([symbol, exp, opt_type, side, strike is not None, multiplier, premium is not None, contracts, account, currency])
 
     fill_time_ms = parse_fill_timestamp(raw2)
 
@@ -349,6 +340,7 @@ def parse_option_message_text(
                 'side': side,
                 'strike': strike,
                 'multiplier': multiplier,
+                'premium_per_share': premium,
                 'contracts': contracts,
                 'account': account,
                 'currency': currency,

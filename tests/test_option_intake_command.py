@@ -91,6 +91,19 @@ def test_parse_futu_premium_accepts_close_price_aliases() -> None:
     assert parse_futu_premium("【成交提醒】成功买入1张$腾讯 260429 480.00 沽$，成交价格：1.20") == 1.2
     assert parse_futu_premium("【成交提醒】成功买入1张$腾讯 260429 480.00 沽$，成交价：1.21") == 1.21
     assert parse_futu_premium("【成交提醒】成功买入1张$腾讯 260429 480.00 沽$，成交均价：1.22") == 1.22
+    assert parse_futu_premium("【成交提醒】成功买入1张$腾讯 260429 480.00 购$，成交价格：1.235") == 1.235
+
+
+def test_open_action_reports_missing_premium() -> None:
+    from src.application.parse_option_message import parse_option_message_text
+
+    parsed = parse_option_message_text(
+        "lx USD 【成交提醒】成功买入1张$NVDA 260619 120.00C$",
+        resolve_multiplier=False,
+    )
+
+    assert parsed["ok"] is False
+    assert "premium_per_share" in parsed["missing"]
 
 
 def test_parse_om_command_supports_generic_at_account() -> None:

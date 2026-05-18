@@ -510,6 +510,8 @@ def test_option_positions_cli_add_dry_run_infers_hkd_currency_from_hk_symbol(mon
             "100",
             "--exp",
             "2026-06-29",
+            "--premium-per-share",
+            "1.235",
             "--dry-run",
         ],
     )
@@ -519,6 +521,7 @@ def test_option_positions_cli_add_dry_run_infers_hkd_currency_from_hk_symbol(mon
     out = capsys.readouterr().out
     fields = json.loads(out[out.index("{"):])
     assert fields["currency"] == "HKD"
+    assert fields["premium"] == 1.235
 
 
 def test_option_positions_cli_add_dry_run_infers_usd_currency_from_us_symbol(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -552,6 +555,8 @@ def test_option_positions_cli_add_dry_run_infers_usd_currency_from_us_symbol(mon
             "100",
             "--exp",
             "2026-05-15",
+            "--premium-per-share",
+            "1.235",
             "--dry-run",
         ],
     )
@@ -561,6 +566,7 @@ def test_option_positions_cli_add_dry_run_infers_usd_currency_from_us_symbol(mon
     out = capsys.readouterr().out
     fields = json.loads(out[out.index("{"):])
     assert fields["currency"] == "USD"
+    assert fields["premium"] == 1.235
 
 
 def test_option_positions_cli_list_filters_by_local_expiration(monkeypatch, tmp_path: Path, capsys) -> None:

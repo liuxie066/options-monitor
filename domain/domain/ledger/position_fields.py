@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from domain.domain.option_position_identity import (
@@ -31,6 +32,7 @@ class _Unset:
 
 _UNSET = _Unset()
 _PatchValue = int | float | str | None | _Unset
+PRICE_DECIMAL_PLACES = 3
 
 POSITION_LOT_PATCH_FIELDS = (
     "contracts_open",
@@ -63,6 +65,67 @@ def safe_float(value: Any) -> float | None:
         return float(value)
     except Exception:
         return None
+
+
+def _required_text(value: Any, field_name: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError(f"{field_name} is required")
+    return text
+
+
+def normalize_trade_price(value: Any, field_name: str = "premium_per_share", *, allow_zero: bool = False) -> float:
+    if value in (None, ""):
+        raise ValueError(f"{field_name} is required")
+    try:
+        price = Decimal(str(value).strip())
+    except (InvalidOperation, ValueError):
+        raise ValueError(f"{field_name} must be numeric") from None
+    if not price.is_finite():
+        raise ValueError(f"{field_name} must be numeric")
+    if price < 0 or (price == 0 and not allow_zero):
+        comparator = ">= 0" if allow_zero else "> 0"
+        raise ValueError(f"{field_name} must be {comparator}")
+    exponent = price.normalize().as_tuple().exponent
+    decimal_places = max(0, -exponent) if isinstance(exponent, int) else 0
+    if decimal_places > PRICE_DECIMAL_PLACES:
+        raise ValueError(f"{field_name} supports at most {PRICE_DECIMAL_PLACES} decimal places")
+    return float(price)
+
+
+def _required_decimal(value: Any, field_name: str) -> Decimal:
+    if value in (None, ""):
+        raise ValueError(f"{field_name} is required")
+    try:
+        decimal_value = Decimal(str(value).strip())
+    except (InvalidOperation, ValueError):
+        raise ValueError(f"{field_name} must be numeric") from None
+    if not decimal_value.is_finite():
+        raise ValueError(f"{field_name} must be numeric")
+    return decimal_value
+
+
+def _required_positive_float(value: Any, field_name: str) -> float:
+    decimal_value = _required_decimal(value, field_name)
+    if decimal_value <= 0:
+        raise ValueError(f"{field_name} must be > 0")
+    return float(decimal_value)
+
+
+def _required_positive_int(value: Any, field_name: str) -> int:
+    decimal_value = _required_decimal(value, field_name)
+    if decimal_value != decimal_value.to_integral_value():
+        raise ValueError(f"{field_name} must be an integer")
+    if decimal_value <= 0:
+        raise ValueError(f"{field_name} must be > 0")
+    return int(decimal_value)
+
+
+def _short_call_locked_shares(multiplier: float, contracts: int) -> int:
+    raw_locked = Decimal(str(multiplier)) * Decimal(int(contracts))
+    if raw_locked != raw_locked.to_integral_value():
+        raise ValueError("underlying_share_locked requires integer contracts * multiplier")
+    return int(raw_locked)
 
 
 def parse_note_kv(note: str, key: str) -> str:
@@ -327,31 +390,40 @@ def build_position_lot_fields(cmd: OpenPositionCommand) -> PositionLotFields:
     sym = norm_symbol(cmd.symbol)
     broker = normalize_broker(cmd.broker)
     account = normalize_account(cmd.account)
+    _required_text(broker, "broker")
+    _required_text(account, "account")
+    _required_text(sym, "symbol")
     side = normalize_side(cmd.side, strict=True)
     option_type = normalize_option_type(cmd.option_type, strict=True)
     currency = resolve_open_currency(sym, cmd.currency)
-    contracts = int(cmd.contracts)
-    if contracts <= 0:
-        raise ValueError("contracts must be > 0")
+    contracts = _required_positive_int(cmd.contracts, "contracts")
 
     if cmd.strike is None:
         raise ValueError(f"{option_type} option requires strike")
+    strike = _required_positive_float(cmd.strike, "strike")
     exp_ms = parse_exp_to_ms(cmd.expiration_ymd)
     if exp_ms is None:
         raise ValueError(f"{option_type} option requires expiration_ymd")
+    premium = normalize_trade_price(cmd.premium_per_share, "premium_per_share")
 
-    multiplier = cmd.multiplier
+    if cmd.multiplier is None:
+        raise ValueError(f"{option_type} option requires multiplier")
+    multiplier = _required_positive_float(cmd.multiplier, "multiplier")
     cash_secured = None
     if side == "short" and option_type == "put":
-        if multiplier is None:
-            raise ValueError("short put requires multiplier")
-        cash_secured = calc_cash_secured(float(cmd.strike), float(multiplier), contracts)
+        cash_secured = calc_cash_secured(strike, multiplier, contracts)
 
-    underlying_locked = cmd.underlying_share_locked
-    if side == "short" and option_type == "call" and underlying_locked is None:
-        if multiplier is None:
-            raise ValueError("short call requires multiplier or underlying_share_locked")
-        underlying_locked = int(float(multiplier) * contracts)
+    underlying_locked = None
+    if cmd.underlying_share_locked not in (None, ""):
+        if side != "short" or option_type != "call":
+            raise ValueError("underlying_share_locked only applies to short call")
+        underlying_locked = _required_positive_int(cmd.underlying_share_locked, "underlying_share_locked")
+    if side == "short" and option_type == "call":
+        expected_locked = _short_call_locked_shares(multiplier, contracts)
+        if underlying_locked is None:
+            underlying_locked = expected_locked
+        elif underlying_locked != expected_locked:
+            raise ValueError("underlying_share_locked must equal contracts * multiplier for short call")
 
     note_kv: dict[str, str] = {}
 
@@ -363,7 +435,7 @@ def build_position_lot_fields(cmd: OpenPositionCommand) -> PositionLotFields:
         position_id=build_position_id(
             symbol=sym,
             expiration_ymd=cmd.expiration_ymd,
-            strike=cmd.strike,
+            strike=strike,
             option_type=option_type,
             side=side,
             contracts=contracts,
@@ -381,9 +453,9 @@ def build_position_lot_fields(cmd: OpenPositionCommand) -> PositionLotFields:
         note=merge_note(cmd.note, note_kv) or None,
         opened_at=opened_at,
         last_action_at=opened_at,
-        strike=float(cmd.strike),
+        strike=strike,
         expiration=int(exp_ms),
-        premium=(float(cmd.premium_per_share) if cmd.premium_per_share is not None else None),
+        premium=premium,
         multiplier=normalized_multiplier,
         underlying_share_locked=(int(underlying_locked) if underlying_locked is not None else None),
         cash_secured_amount=(float(cash_secured) if cash_secured is not None else None),
@@ -443,7 +515,7 @@ def build_open_adjustment_patch_contract(
     total_contracts = effective_contracts(fields)
     closed_contracts = effective_contracts_closed(fields)
 
-    next_contracts = int(contracts) if contracts is not None else total_contracts
+    next_contracts = _required_positive_int(contracts, "contracts") if contracts is not None else total_contracts
     if next_contracts <= 0:
         raise ValueError("contracts must be > 0")
     if closed_contracts > next_contracts:
@@ -451,10 +523,10 @@ def build_open_adjustment_patch_contract(
     if status == "close" and contracts is not None and next_contracts != closed_contracts:
         raise ValueError("cannot change contracts on a closed lot unless it equals contracts_closed")
 
-    next_strike = strike if strike is not None else effective_strike(fields)
-    next_multiplier = multiplier
-    if next_multiplier is None:
-        next_multiplier = effective_multiplier(fields)
+    next_strike = _required_positive_float(strike, "strike") if strike is not None else effective_strike(fields)
+    next_multiplier = (
+        _required_positive_float(multiplier, "multiplier") if multiplier is not None else effective_multiplier(fields)
+    )
 
     next_expiration_ymd = expiration_ymd or effective_expiration_ymd(fields) or None
     parsed_exp_ms: int | None = None
@@ -484,14 +556,13 @@ def build_open_adjustment_patch_contract(
     if strike is not None:
         if next_strike is None:
             raise ValueError("strike must be numeric")
-        patch_strike = float(next_strike)
+        patch_strike = next_strike
         note_updates["strike"] = None
     if premium_per_share is not None:
-        patch_premium = float(premium_per_share)
+        patch_premium = normalize_trade_price(premium_per_share, "premium_per_share")
         note_updates["premium_per_share"] = None
     if multiplier is not None:
-        if next_multiplier is None or float(next_multiplier) <= 0:
-            raise ValueError("multiplier must be > 0")
+        assert next_multiplier is not None
         if float(next_multiplier).is_integer():
             patch_multiplier = int(float(next_multiplier))
         else:
@@ -509,14 +580,14 @@ def build_open_adjustment_patch_contract(
     ):
         if next_strike is None:
             raise ValueError("short put adjustment requires strike")
-        if next_multiplier is None or float(next_multiplier) <= 0:
+        if next_multiplier is None:
             raise ValueError("short put adjustment requires multiplier")
         patch_cash_secured = float(calc_cash_secured(float(next_strike), float(next_multiplier), next_contracts))
 
     if side == "short" and option_type == "call" and (contracts is not None or multiplier is not None):
-        if next_multiplier is None or float(next_multiplier) <= 0:
+        if next_multiplier is None:
             raise ValueError("short call adjustment requires multiplier")
-        patch_underlying_locked = int(float(next_multiplier) * int(next_contracts))
+        patch_underlying_locked = _short_call_locked_shares(float(next_multiplier), next_contracts)
 
     if any(value is not None for value in (contracts, strike, expiration_ymd)):
         patch_position_id = build_position_id(
@@ -598,7 +669,7 @@ def build_close_patch_contract(
 
     close_price_value: _PatchValue = _UNSET
     if close_price is not None:
-        close_price_value = float(close_price)
+        close_price_value = normalize_trade_price(close_price, "close_price")
     if remaining == 0:
         status = "close"
         closed_at: _PatchValue = ts

@@ -88,6 +88,7 @@ def test_build_open_fields_for_short_put_sets_open_contracts_and_cash() -> None:
             strike=100,
             multiplier=100,
             expiration_ymd="2026-04-17",
+            premium_per_share=1.235,
             opened_at_ms=1000,
         )
     )
@@ -106,6 +107,7 @@ def test_build_open_fields_for_short_put_sets_open_contracts_and_cash() -> None:
     assert fields["strike"] == 100.0
     assert fields["expiration"] == 1776384000000
     assert fields["multiplier"] == 100
+    assert fields["premium"] == 1.235
     assert "exp=" not in str(fields.get("note") or "")
     assert "strike=" not in str(fields.get("note") or "")
     assert "multiplier=" not in str(fields.get("note") or "")
@@ -127,6 +129,7 @@ def test_build_position_lot_fields_returns_typed_open_contract() -> None:
         strike=100,
         multiplier=100,
         expiration_ymd="2026-04-17",
+        premium_per_share=1.235,
         opened_at_ms=1000,
     )
 
@@ -150,6 +153,7 @@ def test_build_open_fields_canonicalizes_alias_symbol() -> None:
             strike=135,
             multiplier=100,
             expiration_ymd="2026-04-29",
+            premium_per_share=1.23,
             opened_at_ms=1000,
         )
     )
@@ -171,6 +175,7 @@ def test_build_open_fields_infers_currency_from_symbol_when_missing() -> None:
             strike=510,
             multiplier=100,
             expiration_ymd="2026-06-29",
+            premium_per_share=1.23,
             opened_at_ms=1000,
         )
     )
@@ -186,6 +191,7 @@ def test_build_open_fields_infers_currency_from_symbol_when_missing() -> None:
             strike=30,
             multiplier=100,
             expiration_ymd="2026-05-15",
+            premium_per_share=1.23,
             opened_at_ms=1000,
         )
     )
@@ -207,6 +213,7 @@ def test_build_open_fields_explicit_currency_overrides_symbol_inference() -> Non
             strike=510,
             multiplier=100,
             expiration_ymd="2026-06-29",
+            premium_per_share=1.23,
             opened_at_ms=1000,
         )
     )
@@ -227,6 +234,7 @@ def test_build_open_fields_for_short_call_sets_locked_shares() -> None:
             strike=200,
             multiplier=100,
             expiration_ymd="2026-05-15",
+            premium_per_share=1.23,
             opened_at_ms=1000,
         )
     )
@@ -234,6 +242,91 @@ def test_build_open_fields_for_short_call_sets_locked_shares() -> None:
     assert fields["underlying_share_locked"] == 300
     assert fields["contracts_open"] == 3
     assert fields["expiration"] == 1778803200000
+
+
+def test_build_open_fields_enforces_core_write_rules() -> None:
+    command = OpenPositionCommand(
+        broker="富途",
+        account="sy",
+        symbol="aapl",
+        option_type="call",
+        side="long",
+        contracts=1,
+        currency="USD",
+        strike=200,
+        multiplier=100,
+        expiration_ymd="2026-05-15",
+        premium_per_share=1.235,
+        opened_at_ms=1000,
+    )
+
+    invalid_cases = (
+        (command.__class__(**{**command.__dict__, "broker": ""}), "broker is required"),
+        (command.__class__(**{**command.__dict__, "account": ""}), "account is required"),
+        (command.__class__(**{**command.__dict__, "symbol": ""}), "symbol is required"),
+        (command.__class__(**{**command.__dict__, "option_type": ""}), "option_type must be one of"),
+        (command.__class__(**{**command.__dict__, "side": ""}), "side must be one of"),
+        (command.__class__(**{**command.__dict__, "contracts": 0}), "contracts must be > 0"),
+        (command.__class__(**{**command.__dict__, "contracts": 1.5}), "contracts must be an integer"),
+        (command.__class__(**{**command.__dict__, "strike": 0}), "strike must be > 0"),
+        (command.__class__(**{**command.__dict__, "multiplier": 0}), "multiplier must be > 0"),
+    )
+    for bad_command, expected in invalid_cases:
+        try:
+            build_open_fields(bad_command)
+        except ValueError as exc:
+            assert expected in str(exc)
+        else:
+            raise AssertionError(f"expected ValueError: {expected}")
+
+
+def test_build_open_fields_enforces_risk_field_write_rules() -> None:
+    short_call = OpenPositionCommand(
+        broker="富途",
+        account="sy",
+        symbol="aapl",
+        option_type="call",
+        side="short",
+        contracts=3,
+        currency="USD",
+        strike=200,
+        multiplier=100,
+        expiration_ymd="2026-05-15",
+        premium_per_share=1.235,
+        opened_at_ms=1000,
+    )
+    long_call = short_call.__class__(**{**short_call.__dict__, "side": "long"})
+    short_put = short_call.__class__(**{**short_call.__dict__, "option_type": "put"})
+
+    explicit_locked = build_open_fields(
+        short_call.__class__(**{**short_call.__dict__, "underlying_share_locked": 300})
+    )
+    no_risk_lock = build_open_fields(long_call)
+    short_put_fields = build_open_fields(short_put)
+
+    assert explicit_locked["underlying_share_locked"] == 300
+    assert "underlying_share_locked" not in no_risk_lock
+    assert "cash_secured_amount" not in no_risk_lock
+    assert "underlying_share_locked" not in short_put_fields
+    assert short_put_fields["cash_secured_amount"] == 60000.0
+
+    invalid_cases = (
+        (
+            short_call.__class__(**{**short_call.__dict__, "underlying_share_locked": 299}),
+            "underlying_share_locked must equal contracts * multiplier for short call",
+        ),
+        (
+            short_put.__class__(**{**short_put.__dict__, "underlying_share_locked": 300}),
+            "underlying_share_locked only applies to short call",
+        ),
+    )
+    for bad_command, expected in invalid_cases:
+        try:
+            build_open_fields(bad_command)
+        except ValueError as exc:
+            assert expected in str(exc)
+        else:
+            raise AssertionError(f"expected ValueError: {expected}")
 
 
 def test_build_open_fields_requires_option_strike_and_expiration() -> None:
@@ -287,11 +380,50 @@ def test_build_open_fields_requires_option_strike_and_expiration() -> None:
             raise AssertionError(f"expected ValueError: {expected}")
 
 
+def test_build_open_fields_requires_premium_and_multiplier_and_preserves_three_decimal_premium() -> None:
+    command = OpenPositionCommand(
+        broker="富途",
+        account="sy",
+        symbol="aapl",
+        option_type="call",
+        side="long",
+        contracts=1,
+        currency="USD",
+        strike=200,
+        multiplier=100,
+        expiration_ymd="2026-05-15",
+        premium_per_share=1.235,
+        opened_at_ms=1000,
+    )
+
+    fields = build_open_fields(command)
+
+    assert fields["premium"] == 1.235
+
+    invalid_cases = (
+        (command.__class__(**{**command.__dict__, "premium_per_share": None}), "premium_per_share is required"),
+        (command.__class__(**{**command.__dict__, "premium_per_share": 0}), "premium_per_share must be > 0"),
+        (command.__class__(**{**command.__dict__, "premium_per_share": -1}), "premium_per_share must be > 0"),
+        (
+            command.__class__(**{**command.__dict__, "premium_per_share": 1.2345}),
+            "premium_per_share supports at most 3 decimal places",
+        ),
+        (command.__class__(**{**command.__dict__, "multiplier": None}), "call option requires multiplier"),
+    )
+    for bad_command, expected in invalid_cases:
+        try:
+            build_open_fields(bad_command)
+        except ValueError as exc:
+            assert expected in str(exc)
+        else:
+            raise AssertionError(f"expected ValueError: {expected}")
+
+
 def test_build_buy_to_close_patch_supports_partial_close() -> None:
     patch = build_buy_to_close_patch(
         {"contracts": 3, "contracts_open": 3, "contracts_closed": 0, "status": "open"},
         contracts_to_close=1,
-        close_price=1.23,
+        close_price=1.235,
         as_of_ms=2000,
     )
 
@@ -301,9 +433,27 @@ def test_build_buy_to_close_patch_supports_partial_close() -> None:
         "last_action_at": 2000,
         "close_type": BUY_TO_CLOSE,
         "close_reason": "manual_buy_to_close",
-        "close_price": 1.23,
+        "close_price": 1.235,
         "status": "open",
     }
+
+
+def test_build_buy_to_close_patch_rejects_invalid_close_price_precision_when_provided() -> None:
+    for close_price, expected in (
+        (0, "close_price must be > 0"),
+        (-1, "close_price must be > 0"),
+        (1.2345, "close_price supports at most 3 decimal places"),
+    ):
+        try:
+            build_buy_to_close_patch(
+                {"contracts": 3, "contracts_open": 3, "contracts_closed": 0, "status": "open"},
+                contracts_to_close=1,
+                close_price=close_price,
+            )
+        except ValueError as exc:
+            assert expected in str(exc)
+        else:
+            raise AssertionError(f"expected ValueError: {expected}")
 
 
 def test_build_close_patch_contract_matches_legacy_dict_api() -> None:
@@ -509,3 +659,77 @@ def test_build_open_adjustment_patch_rejects_contracts_below_closed() -> None:
         assert "contracts must be >= contracts_closed" in str(exc)
     else:
         raise AssertionError("expected ValueError")
+
+
+def test_build_open_adjustment_patch_enforces_core_write_rules() -> None:
+    fields = {
+        "symbol": "NVDA",
+        "option_type": "put",
+        "side": "short",
+        "status": "open",
+        "contracts": 2,
+        "contracts_open": 2,
+        "contracts_closed": 0,
+        "currency": "USD",
+        "strike": 100.0,
+        "multiplier": 100,
+        "expiration": 1781827200000,
+        "premium": 2.5,
+    }
+
+    invalid_cases = (
+        ({"contracts": 1.5}, "contracts must be an integer"),
+        ({"contracts": 0}, "contracts must be > 0"),
+        ({"strike": 0}, "strike must be > 0"),
+        ({"multiplier": 0}, "multiplier must be > 0"),
+        ({"premium_per_share": 1.2345}, "premium_per_share supports at most 3 decimal places"),
+    )
+    for kwargs, expected in invalid_cases:
+        try:
+            build_open_adjustment_patch(fields, **kwargs)
+        except ValueError as exc:
+            assert expected in str(exc)
+        else:
+            raise AssertionError(f"expected ValueError: {expected}")
+
+
+def test_build_open_adjustment_patch_recalculates_risk_fields() -> None:
+    short_call_patch = build_open_adjustment_patch(
+        {
+            "symbol": "AAPL",
+            "option_type": "call",
+            "side": "short",
+            "status": "open",
+            "contracts": 2,
+            "contracts_open": 2,
+            "contracts_closed": 0,
+            "currency": "USD",
+            "strike": 200.0,
+            "multiplier": 100,
+            "expiration": 1781827200000,
+            "premium": 2.5,
+        },
+        contracts=3,
+    )
+    short_put_patch = build_open_adjustment_patch(
+        {
+            "symbol": "NVDA",
+            "option_type": "put",
+            "side": "short",
+            "status": "open",
+            "contracts": 2,
+            "contracts_open": 2,
+            "contracts_closed": 0,
+            "currency": "USD",
+            "strike": 100.0,
+            "multiplier": 100,
+            "expiration": 1781827200000,
+            "premium": 2.5,
+        },
+        contracts=3,
+    )
+
+    assert short_call_patch["underlying_share_locked"] == 300
+    assert "cash_secured_amount" not in short_call_patch
+    assert short_put_patch["cash_secured_amount"] == 30000.0
+    assert "underlying_share_locked" not in short_put_patch

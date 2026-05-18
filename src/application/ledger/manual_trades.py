@@ -10,6 +10,7 @@ from domain.domain.ledger.position_fields import (
     PositionLotPatch,
     build_close_patch_contract,
     build_open_adjustment_patch_contract,
+    build_position_lot_fields,
     effective_expiration_ymd,
     effective_multiplier,
     effective_strike,
@@ -17,6 +18,7 @@ from domain.domain.ledger.position_fields import (
     normalize_account,
     normalize_broker,
     normalize_currency,
+    normalize_trade_price,
     now_ms,
     resolve_open_currency,
 )
@@ -145,6 +147,7 @@ def existing_manual_close_event_result(
     broker = normalize_broker(fields.get("broker"))
     if not broker:
         raise ValueError(f"position lot missing broker: {record_id}")
+    normalized_close_price = normalize_trade_price(close_price, "close_price")
     current_fields = assert_position_lot_target_matches_current_state(
         repo,
         record_id=record_id,
@@ -161,7 +164,7 @@ def existing_manual_close_event_result(
         option_type=str(current_fields.get("option_type") or ""),
         side="buy" if str(current_fields.get("side") or "").strip().lower() == "short" else "sell",
         contracts_to_close=int(contracts_to_close),
-        close_price=close_price,
+        close_price=normalized_close_price,
         strike=(float(strike) if strike is not None else None),
         multiplier=(int(float(multiplier)) if multiplier is not None else None),
         expiration_ymd=effective_expiration_ymd(current_fields),
@@ -210,6 +213,8 @@ def _manual_adjust_event_id(
 
 
 def persist_manual_open_event(repo: Any, command: OpenPositionCommand) -> LedgerWriteResult:
+    fields = build_position_lot_fields(command).to_dict()
+    premium_per_share = normalize_trade_price(fields.get("premium"), "premium_per_share")
     currency = resolve_open_currency(command.symbol, command.currency)
     normalized_side = "sell" if str(command.side).strip().lower() == "short" else "buy"
     canonical_symbol = _canonical_trade_symbol(command.symbol)
@@ -223,7 +228,7 @@ def persist_manual_open_event(repo: Any, command: OpenPositionCommand) -> Ledger
         option_type=str(command.option_type),
         side=normalized_side,
         contracts=int(command.contracts),
-        price=float(command.premium_per_share or 0.0),
+        price=float(premium_per_share),
         strike=strike,
         expiration_ymd=expiration_ymd,
         trade_time_ms=trade_time_ms,
@@ -242,7 +247,7 @@ def persist_manual_open_event(repo: Any, command: OpenPositionCommand) -> Ledger
             expiration_ymd=expiration_ymd,
         ),
         contracts=int(command.contracts),
-        price=float(command.premium_per_share or 0.0),
+        price=float(premium_per_share),
         currency=currency,
         source="cli_manual_open",
         multiplier=(float(command.multiplier) if command.multiplier is not None else 100.0),
@@ -271,6 +276,7 @@ def persist_manual_close_event(
     broker = normalize_broker(fields.get("broker"))
     if not broker:
         raise ValueError(f"position lot missing broker: {record_id}")
+    normalized_close_price = normalize_trade_price(close_price, "close_price")
     fields = assert_position_lot_target_matches_current_state(
         repo,
         record_id=record_id,
@@ -291,7 +297,7 @@ def persist_manual_close_event(
         option_type=str(fields.get("option_type") or ""),
         side="buy" if str(fields.get("side") or "").strip().lower() == "short" else "sell",
         contracts_to_close=int(contracts_to_close),
-        close_price=close_price,
+        close_price=normalized_close_price,
         strike=(float(strike) if strike is not None else None),
         multiplier=(int(float(multiplier)) if multiplier is not None else None),
         expiration_ymd=expiration_ymd,
@@ -306,7 +312,7 @@ def persist_manual_close_event(
     close_patch_contract = build_close_patch_contract(
         fields,
         contracts_to_close=int(contracts_to_close),
-        close_price=close_price,
+        close_price=normalized_close_price,
         close_reason=close_reason,
         as_of_ms=as_of_ms,
     )
@@ -325,7 +331,7 @@ def persist_manual_close_event(
             expiration_ymd=expiration_ymd,
         ),
         contracts=int(contracts_to_close),
-        price=float(close_price or 0.0),
+        price=float(normalized_close_price),
         currency=currency,
         source="cli_manual_close",
         multiplier=(float(multiplier) if multiplier is not None else 100.0),
