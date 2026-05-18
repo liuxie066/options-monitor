@@ -99,15 +99,34 @@ healthcheck 会额外给出本地 `ledger_store` 和 `option_positions_bootstrap
 
 ---
 
-## 6. 常见环境变量
+## 6. 收集 AI Cofunder 证据
+
+如果目标是让 MacBook 上的 Codex 分析线上版本质量、持仓/交易一致性，或多账户策略影响，使用 AI Cofunder 证据交接：
+
+```bash
+./om-agent run --tool ai_cofunder --input-json '{"config_key":"us","scope":"full","output":"both","write_outputs":false}'
+```
+
+同一个能力也有人工 CLI：
+
+```bash
+./om ai-cofunder collect --config-key us --scope full --output both --no-write-outputs
+```
+
+它默认不写文件、不发送通知、不调用在线 AI。线上调度系统的状态需要通过 `scheduler_evidence` 或 `--scheduler-evidence-json` 传入。
+
+---
+
+## 7. 常见环境变量
 
 - `OM_OUTPUT_DIR`：覆盖 agent 输出目录
 - `OM_AGENT_ENABLE_WRITE_TOOLS=true`：允许部分写操作工具
 
 ---
 
-## 7. 下一步看哪里
+## 8. 下一步看哪里
 
+- Agent 任务手册：[`AGENT_WIKI.md`](AGENT_WIKI.md)
 - Agent JSON 合同：[`AGENT_INTEGRATION.md`](AGENT_INTEGRATION.md)
 - 工具说明：[`TOOL_REFERENCE.md`](TOOL_REFERENCE.md)
 - 配置字段说明：[`../CONFIGURATION_GUIDE.md`](../CONFIGURATION_GUIDE.md)

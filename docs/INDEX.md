@@ -11,10 +11,10 @@
 - [../CONFIGURATION_GUIDE.md](../CONFIGURATION_GUIDE.md)：详细配置字段说明
 
 ## Agent / LLM Wiki
-- [../AGENTS.md](../AGENTS.md)：Agent 通用上下文、安全规则、入口层级、模块地图（静态前缀，Prompt Cache 友好）
+- [../AGENTS.md](../AGENTS.md)：Agent 首屏说明书、安全红线、入口层级、模块归属（静态前缀，Prompt Cache 友好）
 - [../CLAUDE.md](../CLAUDE.md)：Claude / OpenClaw 特有补充指令
 - [AGENT_INTEGRATION.md](AGENT_INTEGRATION.md)：Agent 集成合同
-- [AGENT_WIKI.md](AGENT_WIKI.md)：Agent 专用代码库速查（模块地图、关键接口、数据流）
+- [AGENT_WIKI.md](AGENT_WIKI.md)：Agent 任务手册（工具选择、AI Cofunder、排障 playbook、模块地图、验证矩阵）
 - [TOOL_REFERENCE.md](TOOL_REFERENCE.md)：工具参考
 - [SESSION_SUMMARY.md](SESSION_SUMMARY.md)：Session 间记忆摘要模板
 
