@@ -83,7 +83,7 @@ With scheduler evidence from the online job runner:
   --scope full \
   --output both \
   --no-write-outputs \
-  --scheduler-evidence-json '{"provider":"cron","job_name":"us-tick","last_status":"success","last_exit_code":0}'
+  --scheduler-evidence-json '{"provider":"cron","job_name":"us-tick","last_run_id":"20260518T095446Z-2e7d54","last_triggered_at":"2026-05-18T09:54:46Z","last_status":"success","last_exit_code":0}'
 ```
 
 With a readiness snapshot:
@@ -111,6 +111,8 @@ Equivalent agent tool:
 | `quality` | Runtime freshness, latest run status, scheduler evidence, optional healthcheck |
 | `strategy` | Candidate CSV, filter trace, and strategy replay evidence |
 | `full` | Combined default |
+
+AI Cofunder keeps candidate CSVs separate from `*_candidates_reject_log.csv` files. Reject logs remain available as rejection evidence, but they must not inflate candidate row counts.
 
 Default runs do not write files. Writing reports requires `write_outputs=true`, `confirm=true`, and `OM_AGENT_ENABLE_WRITE_TOOLS=true`. Default output locations are:
 

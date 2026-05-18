@@ -485,6 +485,8 @@ OM_AGENT_ENABLE_WRITE_TOOLS=true ./om-agent run --tool version_update --input-js
   "scheduler_evidence": {
     "provider": "cron",
     "job_name": "us-tick",
+    "last_run_id": "20260518T095446Z-2e7d54",
+    "last_triggered_at": "2026-05-18T09:54:46Z",
     "last_status": "success",
     "last_exit_code": 0
   }
@@ -512,7 +514,7 @@ output_shared/state/current/ai_cofunder.current.json
 
 注意：
 - 它是证据打包工具，不是线上 AI 推理功能。
-- `scheduler_evidence` 来自线上调度系统；本地 runtime 文件不能证明线上 cron 是否触发。
+- `scheduler_evidence` 来自线上调度系统；尽量提供 `last_run_id` 和 `last_triggered_at`，否则本地 runtime 文件不能完整证明线上 cron 是否按时触发。
 - `include_healthcheck=true` 只在 `quality` / `full` scope 下有意义。
 
 ---

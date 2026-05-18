@@ -499,7 +499,7 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
             "include_healthcheck": "optional bool; include healthcheck readiness snapshot in quality/full scopes; defaults false",
             "data_config": "optional explicit data config path forwarded to healthcheck when include_healthcheck=true",
             "timeout_sec": "optional int forwarded to healthcheck when include_healthcheck=true",
-            "scheduler_evidence": "optional online scheduler evidence object with provider/job/status/exit_code/stdout_tail/stderr_tail",
+            "scheduler_evidence": "optional online scheduler evidence object with provider/job/status/exit_code/last_run_id/last_triggered_at/stdout_tail/stderr_tail",
             "output": "optional handoff|json|both; defaults to handoff",
             "write_outputs": "optional bool; defaults false, true writes ai-cofunder files after write-tool confirmation",
             "confirm": "required true when write_outputs=true",

@@ -139,16 +139,129 @@ def test_ai_cofunder_does_not_guess_missing_scheduler_evidence(tmp_path: Path) -
     assert "RUNTIME_STATUS_WARNINGS" in codes
 
 
+def test_ai_cofunder_preserves_scheduler_run_id_and_downgrades_confirmed_stale_runtime(tmp_path: Path) -> None:
+    from src.application.ai_cofunder.service import ai_cofunder_tool
+
+    runtime_data = _runtime_status_data()
+    runtime_data["summary"]["ok"] = False
+    runtime_data["summary"]["warning_count"] = 1
+    runtime_data["freshness"] = {
+        "status": "stale",
+        "stale": True,
+        "age_seconds": 4500,
+        "max_age_minutes": 60,
+    }
+
+    def _runtime_status(_payload):
+        return runtime_data, ["runtime output is stale"], {}
+
+    data, _warnings, _meta = ai_cofunder_tool(
+        {
+            "config_path": str(tmp_path / "config.us.json"),
+            "write_outputs": False,
+            "scheduler_evidence": {
+                "provider": "cron",
+                "job_name": "hk-tick",
+                "last_run_id": "run-1",
+                "last_status": "success",
+                "last_exit_code": 0,
+            },
+        },
+        runtime_status_tool_fn=_runtime_status,
+        **_tool_kwargs(tmp_path),
+    )
+
+    findings = data["bundle"]["runtime_quality"]["findings"]
+    stale = next(item for item in findings if item["code"] == "RUNTIME_OUTPUT_STALE")
+    assert data["status"] == "warn"
+    assert data["bundle"]["scheduler_evidence"]["last_run_id"] == "run-1"
+    assert stale["severity"] == "warn"
+    assert stale["category"] == "runtime_stale"
+    assert "scheduler evidence points at the latest runtime run" in stale["message"]
+
+
+def test_ai_cofunder_includes_feishu_sync_problem_details(tmp_path: Path) -> None:
+    from src.application.ai_cofunder.service import ai_cofunder_tool
+
+    runtime_data = _runtime_status_data()
+    runtime_data["summary"]["option_positions_feishu_sync_status"] = "partial_failed"
+    runtime_data["summary"]["option_positions_feishu_sync_receipt_status"] = "sent"
+    runtime_data["option_positions_feishu_sync"] = {
+        "last_run": {
+            "json": {
+                "status": "partial_failed",
+                "summary": {"create": 0, "update": 2, "delete": 0, "skip": 1, "conflict": 0, "failed": 1},
+                "rows": [
+                    {"record_id": "lot_1", "symbol": "0700.HK", "option_type": "put", "side": "short", "action": "update"},
+                    {
+                        "record_id": "lot_2",
+                        "symbol": "9992.HK",
+                        "option_type": "put",
+                        "side": "short",
+                        "action": "failed",
+                        "reason": "bitable_update_failed: field mismatch",
+                    },
+                ],
+            }
+        },
+        "receipt": {"status": "sent", "reason": "partial_failed", "delivery_confirmed": True},
+    }
+
+    def _runtime_status(_payload):
+        return runtime_data, [], {}
+
+    data, _warnings, _meta = ai_cofunder_tool(
+        {
+            "config_path": str(tmp_path / "config.us.json"),
+            "write_outputs": False,
+            "scheduler_evidence": {
+                "provider": "cron",
+                "job_name": "hk-tick",
+                "last_triggered_at": "2026-05-16T01:00:00Z",
+                "last_status": "success",
+                "last_exit_code": 0,
+            },
+        },
+        runtime_status_tool_fn=_runtime_status,
+        **_tool_kwargs(tmp_path),
+    )
+
+    ledger_sync = data["bundle"]["ledger_quality"]["position_summary"]["option_positions_feishu_sync"]
+    findings = data["bundle"]["runtime_quality"]["findings"]
+    assert data["status"] == "warn"
+    assert data["category"] == "position_maintenance_issue"
+    assert ledger_sync["summary"]["failed"] == 1
+    assert ledger_sync["receipt"]["status"] == "sent"
+    assert ledger_sync["problem_rows"] == [
+        {
+            "record_id": "lot_2",
+            "symbol": "9992.HK",
+            "option_type": "put",
+            "side": "short",
+            "action": "failed",
+            "reason": "bitable_update_failed: field mismatch",
+        }
+    ]
+    assert any(item["code"] == "OPTION_POSITION_SYNC_ISSUE" for item in findings)
+    assert "- feishu_sync_failed: 1" in data["handoff_markdown"]
+
+
 def test_ai_cofunder_collects_strategy_evidence_for_handoff(tmp_path: Path) -> None:
     from src.application.ai_cofunder.service import ai_cofunder_tool
 
     report_dir = tmp_path / "reports"
     report_dir.mkdir()
-    (report_dir / "nvda_sell_put_candidates_labeled.csv").write_text(
+    account_report_dir = report_dir / "accounts" / "lx"
+    account_report_dir.mkdir(parents=True)
+    (account_report_dir / "nvda_sell_put_candidates_labeled.csv").write_text(
         "symbol,option_type,dte,delta,annualized_net_return,net_income\nNVDA,put,30,-0.2,0.12,120\n",
         encoding="utf-8",
     )
-    (report_dir / "candidate_filter_trace.jsonl").write_text(
+    (account_report_dir / "nvda_sell_put_candidates_reject_log.csv").write_text(
+        "symbol,reject_stage,engine_reject_stage,engine_reject_reason\nNVDA,step3_risk_gate,stage3_risk_filter,risk_spread\n",
+        encoding="utf-8",
+    )
+    (account_report_dir / "candidate_filter_trace.jsonl").write_text(
         json.dumps(
             {
                 "run_id": "run-1",
@@ -184,9 +297,19 @@ def test_ai_cofunder_collects_strategy_evidence_for_handoff(tmp_path: Path) -> N
     )
 
     summary = data["bundle"]["strategy_evidence"]["summary"]
+    reject_logs = data["bundle"]["strategy_evidence"]["reject_logs"]
+    account_strategy = data["bundle"]["account_strategy_matrix"]["accounts"]["lx"]["strategy_evidence"]
     assert data["status"] == "ok"
     assert summary["candidate_row_count"] == 1
+    assert summary["candidate_file_count"] == 1
+    assert summary["reject_log_row_count"] == 1
+    assert reject_logs[0]["reason_counts"] == {"risk_spread": 1}
+    assert account_strategy["candidate_rows"] == 1
+    assert account_strategy["reject_log_rows"] == 1
+    assert account_strategy["trace_rows"] == 1
+    assert account_strategy["trace_status_counts"] == {"rejected": 1}
     assert "candidate_rows: 1" in data["handoff_markdown"]
+    assert "reject_log_rows: 1" in data["handoff_markdown"]
 
 
 def test_ai_cofunder_builds_redacted_bundle_and_handoff(tmp_path: Path) -> None:

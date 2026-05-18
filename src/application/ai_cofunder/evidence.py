@@ -117,9 +117,11 @@ def _safe_input_summary(payload: dict[str, Any]) -> dict[str, Any]:
         out["scheduler_evidence"] = {
             "provider": scheduler.get("provider"),
             "job_name": scheduler.get("job_name"),
+            "last_run_id": scheduler.get("last_run_id") or scheduler.get("run_id"),
             "last_status": scheduler.get("last_status") or scheduler.get("status"),
             "last_exit_code": scheduler.get("last_exit_code") or scheduler.get("exit_code"),
             "last_triggered_at": scheduler.get("last_triggered_at"),
+            "last_finished_at": scheduler.get("last_finished_at") or scheduler.get("finished_at"),
         }
     return out
 
@@ -200,7 +202,10 @@ def _normalize_scheduler_evidence(value: Any) -> dict[str, Any]:
         "provided": True,
         "provider": value.get("provider"),
         "job_name": value.get("job_name") or value.get("name"),
+        "last_run_id": value.get("last_run_id") or value.get("run_id"),
+        "last_run_path": value.get("last_run_path") or value.get("run_path"),
         "last_triggered_at": value.get("last_triggered_at") or value.get("triggered_at"),
+        "last_finished_at": value.get("last_finished_at") or value.get("finished_at"),
         "last_status": value.get("last_status") or value.get("status"),
         "last_exit_code": value.get("last_exit_code") if "last_exit_code" in value else value.get("exit_code"),
         "timeout": value.get("timeout") or value.get("timed_out"),
@@ -260,26 +265,37 @@ def _strategy_evidence(payload: dict[str, Any], *, source_paths: dict[str, Path 
     candidate_paths = _explicit_paths(payload.get("candidate_paths") or payload.get("candidate_path"), base=base)
     trace_paths = _explicit_paths(payload.get("trace_paths") or payload.get("trace_path"), base=base)
     replay_paths = _explicit_paths(payload.get("strategy_replay_paths") or payload.get("strategy_replay_path") or payload.get("replay_path"), base=base)
+    reject_log_paths: list[Path] = []
     for directory in _strategy_dirs(source_paths, base=base):
-        candidate_paths.extend(_glob_many(directory, ("*sell_put_candidates*.csv", "*sell_call_candidates*.csv", "*yield_enhancement_candidates*.csv")))
+        found_candidates, found_reject_logs = _candidate_and_reject_log_paths(directory)
+        candidate_paths.extend(found_candidates)
+        reject_log_paths.extend(found_reject_logs)
         trace_paths.append(directory / "candidate_filter_trace.jsonl")
         replay_paths.extend(_glob_many(directory, ("strategy_replay.csv", "strategy_replay.json", "strategy_replay.jsonl")))
 
-    candidate_paths = _unique_paths(candidate_paths)[:30]
+    explicit_reject_logs = [path for path in candidate_paths if _is_reject_log_path(path)]
+    reject_log_paths.extend(explicit_reject_logs)
+    candidate_paths = _unique_paths([path for path in candidate_paths if _is_candidate_report_path(path)])[:30]
+    reject_log_paths = _unique_paths(reject_log_paths)[:30]
     trace_paths = _unique_paths(trace_paths)[:20]
     replay_paths = _unique_paths(replay_paths)[:20]
     candidate_reports = [_candidate_csv_summary(path, base=base) for path in candidate_paths]
+    reject_logs = [_reject_log_summary(path, base=base) for path in reject_log_paths]
     filter_traces = [_trace_summary(path, base=base, limit=tail_limit) for path in trace_paths]
     replay_reports = [_replay_summary(path, base=base, limit=tail_limit) for path in replay_paths]
     total_candidate_rows = sum(int(item.get("row_count") or 0) for item in candidate_reports if item.get("exists"))
+    total_reject_rows = sum(int(item.get("row_count") or 0) for item in reject_logs if item.get("exists"))
     return {
         "schema_version": "ai_cofunder_strategy_evidence.v1",
         "candidate_reports": candidate_reports,
+        "reject_logs": reject_logs,
         "filter_traces": filter_traces,
         "strategy_replay": replay_reports,
         "summary": {
             "candidate_file_count": sum(1 for item in candidate_reports if item.get("exists")),
             "candidate_row_count": total_candidate_rows,
+            "reject_log_file_count": sum(1 for item in reject_logs if item.get("exists")),
+            "reject_log_row_count": total_reject_rows,
             "filter_trace_file_count": sum(1 for item in filter_traces if item.get("exists")),
             "strategy_replay_file_count": sum(1 for item in replay_reports if item.get("exists")),
             "evidence_level": "candidate_and_trace" if total_candidate_rows and any(item.get("exists") for item in filter_traces) else ("candidate_only" if total_candidate_rows else "limited"),
@@ -325,11 +341,50 @@ def _glob_many(directory: Path, patterns: tuple[str, ...]) -> list[Path]:
     return out
 
 
+def _candidate_and_reject_log_paths(directory: Path) -> tuple[list[Path], list[Path]]:
+    candidate_like = _glob_many(directory, ("*sell_put_candidates*.csv", "*sell_call_candidates*.csv", "*yield_enhancement_candidates*.csv"))
+    reject_like = _glob_many(directory, ("*reject_log.csv",))
+    candidates = [path for path in candidate_like if _is_candidate_report_path(path)]
+    reject_logs = [path for path in [*candidate_like, *reject_like] if _is_reject_log_path(path)]
+    return candidates, reject_logs
+
+
+def _is_candidate_report_path(path: Path) -> bool:
+    name = path.name.lower()
+    if _is_reject_log_path(path):
+        return False
+    return (
+        "sell_put_candidates" in name
+        or "sell_call_candidates" in name
+        or "yield_enhancement_candidates" in name
+    ) and name.endswith(".csv")
+
+
+def _is_reject_log_path(path: Path) -> bool:
+    name = path.name.lower()
+    return "reject_log" in name and name.endswith(".csv")
+
+
 def _candidate_csv_summary(path: Path, *, base: Path) -> dict[str, Any]:
-    out: dict[str, Any] = {"path": _safe_rel(path, base=base), "exists": path.exists(), "row_count": 0, "columns": [], "sample_rows": [], "metric_ranges": {}}
+    account_hint = _account_hint(path)
+    out: dict[str, Any] = {
+        "path": _safe_rel(path, base=base),
+        "exists": path.exists(),
+        "account_hint": account_hint,
+        "row_count": 0,
+        "columns": [],
+        "sample_rows": [],
+        "metric_ranges": {},
+        "account_counts": {},
+        "strategy_counts": {},
+        "symbol_counts": {},
+    }
     if not path.exists() or not path.is_file():
         return out
     metric_values: dict[str, list[float]] = {}
+    account_counts: Counter[str] = Counter()
+    strategy_counts: Counter[str] = Counter()
+    symbol_counts: Counter[str] = Counter()
     try:
         with path.open("r", encoding="utf-8-sig", errors="replace", newline="") as fh:
             reader = csv.DictReader(fh)
@@ -339,19 +394,73 @@ def _candidate_csv_summary(path: Path, *, base: Path) -> dict[str, Any]:
                 out["row_count"] = int(out["row_count"]) + 1
                 if len(samples) < 5:
                     samples.append(_select_candidate_fields(row))
+                _count_text(account_counts, row.get("account") or account_hint)
+                _count_text(strategy_counts, row.get("strategy") or row.get("mode") or _strategy_hint(path))
+                _count_text(symbol_counts, row.get("symbol"))
                 _collect_metric_values(row, metric_values)
             out["sample_rows"] = samples
             out["metric_ranges"] = _metric_ranges(metric_values)
+            out["account_counts"] = dict(account_counts.most_common(20))
+            out["strategy_counts"] = dict(strategy_counts.most_common(20))
+            out["symbol_counts"] = dict(symbol_counts.most_common(30))
+    except Exception as exc:
+        out["read_error"] = f"{type(exc).__name__}: {exc}"
+    return out
+
+
+def _reject_log_summary(path: Path, *, base: Path) -> dict[str, Any]:
+    account_hint = _account_hint(path)
+    out: dict[str, Any] = {
+        "path": _safe_rel(path, base=base),
+        "exists": path.exists(),
+        "account_hint": account_hint,
+        "row_count": 0,
+        "columns": [],
+        "account_counts": {},
+        "stage_counts": {},
+        "reason_counts": {},
+        "symbol_counts": {},
+    }
+    if not path.exists() or not path.is_file():
+        return out
+    stage_counts: Counter[str] = Counter()
+    reason_counts: Counter[str] = Counter()
+    symbol_counts: Counter[str] = Counter()
+    account_counts: Counter[str] = Counter()
+    try:
+        with path.open("r", encoding="utf-8-sig", errors="replace", newline="") as fh:
+            reader = csv.DictReader(fh)
+            out["columns"] = list(reader.fieldnames or [])
+            for row in reader:
+                out["row_count"] = int(out["row_count"]) + 1
+                stage = str(row.get("engine_reject_stage") or row.get("reject_stage") or "").strip()
+                reason = str(row.get("engine_reject_reason") or row.get("reject_rule") or row.get("reject_reason") or "").strip()
+                symbol = str(row.get("symbol") or row.get("underlying_symbol") or "").strip().upper()
+                _count_text(account_counts, row.get("account") or account_hint)
+                if stage:
+                    stage_counts[stage] += 1
+                if reason:
+                    reason_counts[reason] += 1
+                if symbol:
+                    symbol_counts[symbol] += 1
+            out["account_counts"] = dict(account_counts.most_common(20))
+            out["stage_counts"] = dict(stage_counts.most_common(10))
+            out["reason_counts"] = dict(reason_counts.most_common(10))
+            out["symbol_counts"] = dict(symbol_counts.most_common(10))
     except Exception as exc:
         out["read_error"] = f"{type(exc).__name__}: {exc}"
     return out
 
 
 def _trace_summary(path: Path, *, base: Path, limit: int) -> dict[str, Any]:
+    account_hint = _account_hint(path)
     out: dict[str, Any] = {
         "path": _safe_rel(path, base=base),
         "exists": path.exists(),
+        "account_hint": account_hint,
         "line_count": 0,
+        "account_counts": {},
+        "account_status_counts": {},
         "function_counts": {},
         "status_counts": {},
         "rule_counts": {},
@@ -364,6 +473,8 @@ def _trace_summary(path: Path, *, base: Path, limit: int) -> dict[str, Any]:
     status_counts: Counter[str] = Counter()
     rule_counts: Counter[str] = Counter()
     symbol_counts: Counter[str] = Counter()
+    account_counts: Counter[str] = Counter()
+    account_status_counts: dict[str, Counter[str]] = {}
     rows: list[dict[str, Any]] = []
     try:
         with path.open("r", encoding="utf-8", errors="replace") as fh:
@@ -377,8 +488,13 @@ def _trace_summary(path: Path, *, base: Path, limit: int) -> dict[str, Any]:
                 except json.JSONDecodeError:
                     row_raw = {"raw": text[:1000]}
                 row: dict[str, Any] = row_raw if isinstance(row_raw, dict) else {"raw": row_raw}
+                account = str(row.get("account") or account_hint or "").strip().lower()
+                status = str(row.get("status") or "").strip()
+                _count_text(account_counts, account)
+                if account and status:
+                    account_status_counts.setdefault(account, Counter())[status] += 1
                 _count_text(function_counts, row.get("function"))
-                _count_text(status_counts, row.get("status"))
+                _count_text(status_counts, status)
                 _count_text(rule_counts, row.get("rule"))
                 _count_text(symbol_counts, row.get("symbol"))
                 rows.append(_select_trace_fields(row))
@@ -386,6 +502,11 @@ def _trace_summary(path: Path, *, base: Path, limit: int) -> dict[str, Any]:
         out["read_error"] = f"{type(exc).__name__}: {exc}"
         return out
     out["function_counts"] = dict(function_counts.most_common(20))
+    out["account_counts"] = dict(account_counts.most_common(20))
+    out["account_status_counts"] = {
+        account: dict(counter.most_common(20))
+        for account, counter in sorted(account_status_counts.items())
+    }
     out["status_counts"] = dict(status_counts.most_common(20))
     out["rule_counts"] = dict(rule_counts.most_common(30))
     out["symbol_counts"] = dict(symbol_counts.most_common(30))
@@ -461,6 +582,29 @@ def _count_text(counter: Counter[str], value: Any) -> None:
     text = str(value or "").strip()
     if text:
         counter[text] += 1
+
+
+def _account_hint(path: Path) -> str | None:
+    parts = list(path.parts)
+    for marker in ("accounts", "output_accounts"):
+        if marker not in parts:
+            continue
+        idx = parts.index(marker)
+        if idx + 1 < len(parts):
+            account = str(parts[idx + 1]).strip().lower()
+            return account or None
+    return None
+
+
+def _strategy_hint(path: Path) -> str | None:
+    name = path.name.lower()
+    if "yield_enhancement" in name:
+        return "yield_enhancement"
+    if "sell_call" in name:
+        return "sell_call"
+    if "sell_put" in name:
+        return "sell_put"
+    return None
 
 
 def _float_or_none(value: Any) -> float | None:
