@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, cast
 import json
 
 from src.application.agent_tool_contracts import AgentToolError
@@ -16,6 +16,7 @@ from domain.domain.trade_contract_identity import (
 )
 from src.application.expiration_normalization import find_unique_near_miss_expiration
 from src.application.opend_fetch_config import opend_fetch_kwargs
+from src.application.ledger.api import list_canonical_position_lot_snapshots, trade_event_log
 from src.application.watchlist_mutations import normalize_symbol_read
 
 
@@ -77,23 +78,24 @@ def _extract_position_fetch_requirements(ctx: dict[str, Any]) -> list[dict[str, 
             }
             grouped[symbol] = item
             order.append(symbol)
-        item["position_count"] += 1
+        position_count = item.get("position_count")
+        item["position_count"] = (position_count if isinstance(position_count, int) else 0) + 1
         option_type = _normalize_option_type(row.get("option_type"))
         expiration = _position_expiration_for_fetch(row)
         strike_num = _as_float_or_none(row.get("strike"))
         if option_type:
-            item["option_types"].add(option_type)
+            cast(set[str], item["option_types"]).add(option_type)
         if expiration:
-            item["requested_expirations"].add(expiration)
+            cast(set[str], item["requested_expirations"]).add(expiration)
         if strike_num is not None:
-            item["strikes"].append(strike_num)
+            cast(list[float], item["strikes"]).append(strike_num)
         key = _contract_key(symbol, option_type, expiration, strike_num)
         if all(key):
-            item["requested_contracts"].add(key)
+            cast(set[tuple[str, str, str, str]], item["requested_contracts"]).add(key)
     out: list[dict[str, Any]] = []
     for symbol in order:
         item = grouped[symbol]
-        strikes = [float(v) for v in item["strikes"]]
+        strikes = [float(v) for v in cast(list[float], item["strikes"])]
         out.append(
             {
                 "symbol": symbol,
@@ -342,11 +344,9 @@ def monthly_income_report_tool(
     if rates is None:
         warnings.append("exchange_rate cache unavailable; *_cny fields may be null")
 
-    primary_repo = getattr(repo, "primary_repo", repo)
-    list_trade_events = getattr(primary_repo, "list_trade_events", None)
-    trade_events = list_trade_events() if callable(list_trade_events) else None
+    trade_events = trade_event_log(repo)
     report = build_monthly_income_report(
-        repo.list_records(page_size=500),
+        list_canonical_position_lot_snapshots(repo, base=repo_base()),
         account=account,
         broker=broker,
         month=month,
@@ -452,6 +452,10 @@ def scan_opportunities_tool(
 
     top_n = int(payload.get("top_n") or (cfg_loaded.get("outputs", {}) or {}).get("top_n_alerts", 3) or 3)
     runtime = cfg_loaded.get("runtime", {}) or {}
+    raw_symbols = payload.get("symbols")
+    symbols_arg = ",".join(str(item) for item in raw_symbols) if isinstance(raw_symbols, list) else (
+        str(raw_symbols) if raw_symbols is not None else None
+    )
     summary_rows = run_watchlist_pipeline_default(
         py=str((repo_base() / ".venv" / "bin" / "python").resolve()),
         base=repo_base(),
@@ -466,7 +470,7 @@ def scan_opportunities_tool(
         portfolio_timeout_sec=int(payload.get("portfolio_timeout_sec") or runtime.get("portfolio_timeout_sec", 60) or 60),
         want_scan=True,
         no_context=bool(payload.get("no_context", False)),
-        symbols_arg=(",".join(payload.get("symbols")) if isinstance(payload.get("symbols"), list) else payload.get("symbols")),
+        symbols_arg=symbols_arg,
         log=_log,
         want_fn=lambda _step: True,
     )
@@ -566,8 +570,10 @@ def prepare_close_advice_inputs_tool(
     force_required_data_refresh = bool(payload.get("force_required_data_refresh", False))
     for spec in position_requirements:
         symbol = str(spec.get("symbol") or "").strip()
-        symbol_cfg = symbol_map.get(symbol) or {}
-        fetch_cfg = symbol_cfg.get("fetch") if isinstance(symbol_cfg.get("fetch"), dict) else {}
+        raw_symbol_cfg = symbol_map.get(symbol)
+        symbol_cfg = raw_symbol_cfg if isinstance(raw_symbol_cfg, dict) else {}
+        raw_fetch_cfg = symbol_cfg.get("fetch")
+        fetch_cfg = raw_fetch_cfg if isinstance(raw_fetch_cfg, dict) else {}
         src, _decision = resolve_symbol_fetch_source(fetch_cfg)
         limit_expirations = int(fetch_cfg.get("limit_expirations") or 8)
         csv_path = (required_data_root / "parsed" / f"{symbol}_required_data.csv").resolve()
@@ -591,7 +597,7 @@ def prepare_close_advice_inputs_tool(
                 host=str(fetch_cfg.get("host") or "127.0.0.1"),
                 port=int(fetch_cfg.get("port") or 11111),
                 base_dir=repo_base(),
-                option_types=",".join(spec.get("option_types") or ["put", "call"]),
+                option_types=",".join(str(item) for item in (spec.get("option_types") or ["put", "call"])),
                 min_strike=spec.get("min_strike"),
                 max_strike=spec.get("max_strike"),
                 explicit_expirations=requested_expirations,

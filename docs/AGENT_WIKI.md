@@ -24,10 +24,39 @@
 - **Rule**: Keep new scoring policy in domain; runner stays focused on input/output assembly.
 
 ### Option Positions
-- **Projection logic**: `domain/domain/option_position_ledger.py`
+- **Projection logic**: `domain/domain/ledger/projection.py`
   - Model: `trade_events → projection → position_lots`
-- **Application services**: `src/application/option_positions_facade.py`, `src/application/option_positions_inspection.py`, and related SQLite/CLI wrappers
-- **Rule**: Feishu `option_positions` is a bootstrap/mirror surface, not the steady-state source of truth. Local SQLite is the source of truth.
+- **Public application API**: `src/application/ledger/api.py`
+  - The only ledger import surface for `src/application/positions/` and `src/application/trades/`.
+  - Core workflows use semantic actions (`record_manual_position_*`, `record_broker_trade_*`,
+    `plan_expired_position_closes`, `record_expired_position_closes`) instead of composing
+    lower-level `persist_*` / `preflight_*` primitives directly.
+- **Canonical use-case service**: `src/application/ledger/service.py`
+- **Repository/config boundary**: `src/application/ledger/repository.py`
+- **Stored event codec**: `src/application/ledger/event_codec.py`
+- **Bootstrap/migration materialization**: `src/application/ledger/bootstrap.py`
+- **Event write + projection publish**: `src/application/ledger/writer.py`
+- **Manual open/close/adjust writes**: `src/application/ledger/manual_trades.py`
+- **Manual void/repair interventions**: `src/application/ledger/interventions.py`
+- **Auto-close maintenance**: `src/application/ledger/maintenance.py`
+- **Ledger preflight checks**: `src/application/ledger/preflight.py`
+- **Close lot resolver**: `src/application/ledger/lot_resolver.py`
+- **Lot target identity guard**: `src/application/ledger/targets.py`
+- **Canonical read model**: `src/application/ledger/read_model.py`
+- **Position-facing workflows**: `src/application/positions/workflows.py`
+  - Manual lot open/close/adjust, post-write Feishu mirror sync, and strict close-target resolution.
+- **Position maintenance entrypoints**: `src/application/positions/auto_close.py`, `src/application/positions/maintenance.py`, `src/application/positions/maintenance_receipt.py`
+  - CLI auto-close orchestration, per-account expiry maintenance, and maintenance receipts.
+- **Position mirror/sync entrypoints**: `src/application/positions/feishu_sync.py`, `src/application/positions/feishu_sync_receipt.py`, `src/application/positions/sync_config.py`
+  - Feishu mirror sync, sync receipt policy, and runtime sync enablement.
+- **Position read/report entrypoints**: `src/application/positions/context_builder.py`, `src/application/positions/inspection.py`, `src/application/positions/reporting.py`
+  - Risk context, projection inspection, lot event history, and income reporting.
+- **Trade-facing workflows**: `src/application/trades/workflows.py`, `src/application/trades/review.py`
+  - Normalized trade-deal open/close application, event review, replay, void, and repair.
+- **Trade intake entrypoints**: `src/application/trades/auto_intake.py`, `src/application/trades/resolver.py`, `src/application/trades/normalizer.py`
+  - OpenD deal push intake, account mapping, normalization, idempotency state, receipts, and lot resolution.
+- **Application boundary**: `src/application/ledger/` owns storage/projection/preflight, `src/application/positions/` owns position-facing workflows, and `src/application/trades/` owns trade-facing workflows. `positions` and `trades` must enter ledger through `src/application/ledger/api.py`, not internal ledger modules.
+- **Rule**: Feishu `option_positions` is an explicit bootstrap input or mirror surface, not the steady-state source of truth. Local SQLite `trade_events` is the source of truth.
 
 ### Tick Runtime
 - **Orchestration spine**: `src/application/multi_account_tick.py`
@@ -98,11 +127,21 @@ src.application.pipeline_runtime
 ### Option Position Flow
 ```text
 trade_events
-→ domain.domain.option_position_ledger.projection
+→ domain.domain.ledger.projection
 → position_lots
-→ SQLite (source of truth)
-→ optional Feishu mirror / bootstrap
+→ SQLite projection
+→ optional Feishu mirror / explicit bootstrap
 ```
+
+Lot record field helpers live in `domain.domain.ledger.position_fields`.
+`domain.domain.option_position_lots` is a compatibility re-export and should not
+be used by new ledger / positions / trades code.
+
+`src.application.ledger.api` is the only ledger boundary for non-ledger runtime
+code. Application workflows, agent tools, CLI modules, web UI code, scan
+context builders, and cash-headroom queries should import semantic actions from
+that module only. Do not import ledger service / preflight / repository /
+publisher / read-model modules outside `src.application.ledger`.
 
 ## 4. Key Function Signatures
 
@@ -117,10 +156,10 @@ def evaluate_candidate_risk_filter(payload: dict[str, Any], constraints: dict[st
 def rank_candidate_rows(rows: list[dict[str, Any]], *, mode: StrategyMode | str) -> list[dict[str, Any]]: ...
 ```
 
-### `domain/domain/option_position_ledger.py`
+### `domain/domain/ledger/projection.py`
 ```python
-def project_position_lot_records(events: list[dict[str, Any]] | list[TradeEvent]) -> list[dict[str, Any]]: ...
-def project_position_lot_records_with_diagnostics(events: list[dict[str, Any]] | list[TradeEvent]) -> ProjectionResult: ...
+def project_trade_events(events: list[TradeEvent]) -> ProjectionResult: ...
+def build_risk_position_views(lots: list[PositionLot]) -> list[RiskPositionView]: ...
 ```
 
 ### `domain/domain/close_advice.py`

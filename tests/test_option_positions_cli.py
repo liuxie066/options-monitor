@@ -5,7 +5,13 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
-import pytest
+import pytest  # pyright: ignore[reportMissingImports]
+
+import src.application.ledger.interventions as ledger_interventions
+import src.application.ledger.manual_trades as ledger_manual_trades
+import src.application.ledger.repository as ledger_repository
+from src.application.ledger.sync_metadata import PositionLotSyncMetadataPatch
+import src.application.ledger.writer as ledger_writer
 
 BASE = Path(__file__).resolve().parents[1]
 if str(BASE) not in sys.path:
@@ -22,13 +28,12 @@ def _write_data_config(path: Path, *, sqlite_path: Path) -> Path:
 
 def test_option_positions_cli_events_json(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.option_positions as cli_mod
-    import src.application.option_positions_service as svc
     from domain.domain.option_position_lots import OpenPositionCommand
 
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
-    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     repo.data_config_path = data_config  # type: ignore[attr-defined]
-    svc.persist_manual_open_event(
+    ledger_manual_trades.persist_manual_open_event(
         repo,
         OpenPositionCommand(
             broker="富途",
@@ -64,13 +69,12 @@ def test_option_positions_cli_events_json(monkeypatch, tmp_path: Path, capsys) -
 
 def test_option_positions_cli_rebuild_reports_summary(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.option_positions as cli_mod
-    import src.application.option_positions_service as svc
     from domain.domain.option_position_lots import OpenPositionCommand
 
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
-    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     repo.data_config_path = data_config  # type: ignore[attr-defined]
-    svc.persist_manual_open_event(
+    ledger_manual_trades.persist_manual_open_event(
         repo,
         OpenPositionCommand(
             broker="富途",
@@ -94,23 +98,21 @@ def test_option_positions_cli_rebuild_reports_summary(monkeypatch, tmp_path: Pat
     cli_mod.main()
 
     out = capsys.readouterr().out
-    assert "[DONE] rebuilt option_positions_v2 projection" in out
-    assert "baseline_snapshot=legacy_baseline" in out
-    assert "baseline_lots=0" in out
+    assert "[DONE] rebuilt canonical position_lots projection" in out
     assert "trade_events=1" in out
     assert "position_lots=1" in out
     assert "diagnostics=0" in out
+    assert "unmatched_explicit_close=0" in out
 
 
 def test_option_positions_cli_inspect_reports_projection_state(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.option_positions as cli_mod
-    import src.application.option_positions_service as svc
     from domain.domain.option_position_lots import OpenPositionCommand
 
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
-    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     repo.data_config_path = data_config  # type: ignore[attr-defined]
-    svc.persist_manual_open_event(
+    ledger_manual_trades.persist_manual_open_event(
         repo,
         OpenPositionCommand(
             broker="富途",
@@ -128,9 +130,10 @@ def test_option_positions_cli_inspect_reports_projection_state(monkeypatch, tmp_
         ),
     )
     lot = repo.list_position_lots()[0]
-    patched_fields = dict(lot["fields"])
-    patched_fields["feishu_record_id"] = "rec_sync_1"
-    repo.update_position_lot_fields(lot["record_id"], patched_fields)
+    repo.update_position_lot_sync_metadata(
+        lot["record_id"],
+        PositionLotSyncMetadataPatch(feishu_record_id="rec_sync_1"),
+    )
 
     monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
     monkeypatch.setattr(
@@ -151,7 +154,7 @@ def test_option_positions_cli_inspect_reports_projection_state(monkeypatch, tmp_
     payload = json.loads(capsys.readouterr().out)
     assert payload["matched_record_ids"] == [lot["record_id"]]
     assert payload["current_lots"][0]["fields"]["feishu_record_id"] == "rec_sync_1"
-    assert payload["baseline_snapshot_id"] == "legacy_baseline"
+    assert payload["baseline_snapshot_id"] is None
     assert payload["projected_lots"][0]["current_contracts"] == 1
     assert payload["baseline_lots"] == []
     assert payload["related_events"][0]["event_id"].startswith("manual-open-")
@@ -159,13 +162,12 @@ def test_option_positions_cli_inspect_reports_projection_state(monkeypatch, tmp_
 
 def test_option_positions_cli_inspect_reports_orphan_close_event_diagnostics(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.option_positions as cli_mod
-    import src.application.option_positions_service as svc
-    from domain.domain.option_position_ledger import TradeEvent
+    from tests.ledger_legacy_helpers import LegacyTradeEvent as TradeEvent
 
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
-    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     repo.data_config_path = data_config  # type: ignore[attr-defined]
-    svc._persist_trade_event_object(
+    ledger_writer.persist_trade_event_object(
         repo,
         TradeEvent(
             event_id="manual-close-missing-lot",
@@ -217,18 +219,17 @@ def test_option_positions_cli_inspect_reports_orphan_close_event_diagnostics(mon
     assert payload["current_lots"] == []
     assert payload["projected_lots"] == []
     assert payload["related_events"][0]["event_id"] == "manual-close-missing-lot"
-    assert payload["projection_diagnostics"][0]["code"] == "close_without_open_position"
+    assert payload["projection_diagnostics"][0]["code"] == "target_lot_not_found"
 
 
 def test_option_positions_cli_reconcile_writes_verification_snapshot_and_report(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.option_positions as cli_mod
-    import src.application.option_positions_service as svc
     from domain.domain.option_position_lots import OpenPositionCommand
 
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
-    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     repo.data_config_path = data_config  # type: ignore[attr-defined]
-    svc.persist_manual_open_event(
+    ledger_manual_trades.persist_manual_open_event(
         repo,
         OpenPositionCommand(
             broker="富途",
@@ -294,16 +295,17 @@ def test_option_positions_cli_reconcile_writes_verification_snapshot_and_report(
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["snapshot_id"] == "verify_cli_1"
+    assert payload["source_of_truth"] == "trade_events"
+    assert payload["projection"] == "position_lots"
     assert payload["summary"]["quantity_mismatch"] == 1
-    assert payload["baseline_snapshot_id"] == "legacy_baseline"
-    assert payload["projection_checkpoint_snapshot_id"] == "verify_cli_1"
     assert payload["latest_verification_snapshot_id"] == "verify_cli_1"
+    assert payload["verification_snapshot_count"] == 1
     assert payload["accepted_verification_snapshot_count"] == 1
     assert (
         tmp_path
         / "output_shared"
         / "state"
-        / "option_positions_v2"
+        / "option_positions"
         / "current"
         / "reconciliation.latest.json"
     ).exists()
@@ -311,13 +313,12 @@ def test_option_positions_cli_reconcile_writes_verification_snapshot_and_report(
 
 def test_option_positions_cli_inspect_surfaces_verification_and_reconciliation_state(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.option_positions as cli_mod
-    import src.application.option_positions_service as svc
     from domain.domain.option_position_lots import OpenPositionCommand
 
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
-    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     repo.data_config_path = data_config  # type: ignore[attr-defined]
-    svc.persist_manual_open_event(
+    ledger_manual_trades.persist_manual_open_event(
         repo,
         OpenPositionCommand(
             broker="富途",
@@ -397,23 +398,23 @@ def test_option_positions_cli_inspect_surfaces_verification_and_reconciliation_s
     cli_mod.main()
 
     payload = json.loads(capsys.readouterr().out)
-    assert payload["persisted_baseline_snapshot_id"] == "legacy_baseline"
+    assert payload["persisted_baseline_snapshot_id"] is None
     assert payload["projection_checkpoint_snapshot_id"] == "verify_cli_2"
-    assert payload["baseline_snapshot_id"] == "legacy_baseline"
+    assert payload["baseline_snapshot_id"] is None
     assert payload["latest_verification_snapshot_id"] == "verify_cli_2"
     assert payload["verification_snapshot_count"] == 1
     assert payload["accepted_verification_snapshot_count"] == 1
-    assert payload["projected_lots"][0]["current_contracts"] == 2
+    assert payload["projected_lots"][0]["current_contracts"] == 1
     assert payload["latest_reconciliation_summary"]["quantity_mismatch"] == 1
     assert payload["latest_reconciliation_report"]["snapshot_id"] == "verify_cli_2"
+    assert payload["latest_reconciliation_report"]["source_of_truth"] == "trade_events"
 
 
 def test_option_positions_cli_add_dry_run_infers_hkd_currency_from_hk_symbol(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.option_positions as cli_mod
-    import src.application.option_positions_service as svc
 
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
-    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
 
     monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
     monkeypatch.setattr(
@@ -453,10 +454,9 @@ def test_option_positions_cli_add_dry_run_infers_hkd_currency_from_hk_symbol(mon
 
 def test_option_positions_cli_add_dry_run_infers_usd_currency_from_us_symbol(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.option_positions as cli_mod
-    import src.application.option_positions_service as svc
 
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
-    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
 
     monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
     monkeypatch.setattr(
@@ -496,15 +496,14 @@ def test_option_positions_cli_add_dry_run_infers_usd_currency_from_us_symbol(mon
 
 def test_option_positions_cli_list_filters_by_local_expiration(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.option_positions as cli_mod
-    import src.application.option_positions_service as svc
     from domain.domain.option_position_lots import OpenPositionCommand
 
     near_exp = (datetime.now().date() + timedelta(days=1)).isoformat()
     far_exp = (datetime.now().date() + timedelta(days=21)).isoformat()
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
-    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     repo.data_config_path = data_config  # type: ignore[attr-defined]
-    svc.persist_manual_open_event(
+    ledger_manual_trades.persist_manual_open_event(
         repo,
         OpenPositionCommand(
             broker="富途",
@@ -521,7 +520,7 @@ def test_option_positions_cli_list_filters_by_local_expiration(monkeypatch, tmp_
             opened_at_ms=1000,
         ),
     )
-    svc.persist_manual_open_event(
+    ledger_manual_trades.persist_manual_open_event(
         repo,
         OpenPositionCommand(
             broker="富途",
@@ -568,13 +567,12 @@ def test_option_positions_cli_list_filters_by_local_expiration(monkeypatch, tmp_
 
 def test_option_positions_cli_buy_close_auto_matches_unique_selector(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.option_positions as cli_mod
-    import src.application.option_positions_service as svc
     from domain.domain.option_position_lots import OpenPositionCommand
 
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
-    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     repo.data_config_path = data_config  # type: ignore[attr-defined]
-    svc.persist_manual_open_event(
+    ledger_manual_trades.persist_manual_open_event(
         repo,
         OpenPositionCommand(
             broker="富途",
@@ -630,14 +628,13 @@ def test_option_positions_cli_buy_close_auto_matches_unique_selector(monkeypatch
 
 def test_option_positions_cli_buy_close_auto_match_lists_multiple_candidates(monkeypatch, tmp_path: Path) -> None:
     import src.interfaces.cli.option_positions as cli_mod
-    import src.application.option_positions_service as svc
     from domain.domain.option_position_lots import OpenPositionCommand
 
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
-    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     repo.data_config_path = data_config  # type: ignore[attr-defined]
     for opened_at in (1000, 2000):
-        svc.persist_manual_open_event(
+        ledger_manual_trades.persist_manual_open_event(
             repo,
             OpenPositionCommand(
                 broker="富途",
@@ -693,13 +690,12 @@ def test_option_positions_cli_buy_close_auto_match_lists_multiple_candidates(mon
 
 def test_option_positions_cli_void_event_reports_result(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.option_positions as cli_mod
-    import src.application.option_positions_service as svc
     from domain.domain.option_position_lots import OpenPositionCommand
 
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
-    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     repo.data_config_path = data_config  # type: ignore[attr-defined]
-    open_result = svc.persist_manual_open_event(
+    open_result = ledger_manual_trades.persist_manual_open_event(
         repo,
         OpenPositionCommand(
             broker="富途",
@@ -733,13 +729,12 @@ def test_option_positions_cli_void_event_reports_result(monkeypatch, tmp_path: P
 
 def test_option_positions_cli_adjust_lot_dry_run_outputs_patch(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.option_positions as cli_mod
-    import src.application.option_positions_service as svc
     from domain.domain.option_position_lots import OpenPositionCommand
 
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
-    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     repo.data_config_path = data_config  # type: ignore[attr-defined]
-    svc.persist_manual_open_event(
+    ledger_manual_trades.persist_manual_open_event(
         repo,
         OpenPositionCommand(
             broker="富途",
@@ -784,13 +779,12 @@ def test_option_positions_cli_adjust_lot_dry_run_outputs_patch(monkeypatch, tmp_
 
 def test_option_positions_cli_history_json_includes_related_events(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.option_positions as cli_mod
-    import src.application.option_positions_service as svc
     from domain.domain.option_position_lots import OpenPositionCommand
 
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
-    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     repo.data_config_path = data_config  # type: ignore[attr-defined]
-    svc.persist_manual_open_event(
+    ledger_manual_trades.persist_manual_open_event(
         repo,
         OpenPositionCommand(
             broker="富途",
@@ -808,7 +802,7 @@ def test_option_positions_cli_history_json_includes_related_events(monkeypatch, 
         ),
     )
     lot = repo.list_position_lots()[0]
-    close_result = svc.persist_manual_close_event(
+    close_result = ledger_manual_trades.persist_manual_close_event(
         repo,
         record_id=lot["record_id"],
         fields=lot["fields"],
@@ -817,20 +811,20 @@ def test_option_positions_cli_history_json_includes_related_events(monkeypatch, 
         close_reason="manual_buy_to_close",
         as_of_ms=1500,
     )
-    adjust_result = svc.persist_manual_adjust_event(
+    adjust_result = ledger_manual_trades.persist_manual_adjust_event(
         repo,
         record_id=lot["record_id"],
         fields=repo.get_position_lot_fields(lot["record_id"]),
         premium_per_share=3.1,
         as_of_ms=2000,
     )
-    svc.persist_manual_void_event(
+    ledger_interventions.persist_manual_void_event(
         repo,
         target_event_id=str(close_result["event_id"]),
         void_reason="close_was_wrong",
         as_of_ms=2500,
     )
-    svc.persist_manual_void_event(
+    ledger_interventions.persist_manual_void_event(
         repo,
         target_event_id=str(adjust_result["event_id"]),
         void_reason="adjust_was_wrong",
@@ -860,17 +854,16 @@ def test_option_positions_cli_history_json_includes_related_events(monkeypatch, 
 
 def test_option_positions_cli_report_monthly_income_json(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.option_positions as cli_mod
-    import src.application.option_positions_facade as facade
-    import src.application.option_positions_service as svc
+    import src.application.ledger.read_model as read_model
     from domain.domain.option_position_lots import OpenPositionCommand, parse_exp_to_ms
 
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
-    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     repo.data_config_path = data_config  # type: ignore[attr-defined]
 
     opened_at = parse_exp_to_ms("2026-04-03")
     assert opened_at is not None
-    svc.persist_manual_open_event(
+    ledger_manual_trades.persist_manual_open_event(
         repo,
         OpenPositionCommand(
             broker="富途",
@@ -889,7 +882,7 @@ def test_option_positions_cli_report_monthly_income_json(monkeypatch, tmp_path: 
     )
 
     monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
-    monkeypatch.setattr(facade, "get_exchange_rates_or_fetch_latest", lambda **_kwargs: {"rates": {"USDCNY": 7.2}})
+    monkeypatch.setattr(read_model, "get_exchange_rates_or_fetch_latest", lambda **_kwargs: {"rates": {"USDCNY": 7.2}})
     monkeypatch.setattr(
         sys,
         "argv",
@@ -951,7 +944,7 @@ def test_option_positions_cli_report_monthly_income_json(monkeypatch, tmp_path: 
 
 def test_option_positions_cli_report_monthly_income_text(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.option_positions as cli_mod
-    import src.application.option_positions_facade as facade
+    import src.application.ledger.read_model as read_model
 
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
 
@@ -963,7 +956,7 @@ def test_option_positions_cli_report_monthly_income_text(monkeypatch, tmp_path: 
             return []
 
     monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, _EmptyRepo()))
-    monkeypatch.setattr(facade, "get_exchange_rates_or_fetch_latest", lambda **_kwargs: {"rates": {}})
+    monkeypatch.setattr(read_model, "get_exchange_rates_or_fetch_latest", lambda **_kwargs: {"rates": {}})
     monkeypatch.setattr(
         sys,
         "argv",

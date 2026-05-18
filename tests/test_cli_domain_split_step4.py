@@ -185,11 +185,11 @@ def test_query_sell_put_cash_domain_minimal() -> None:
         return {'cash_by_currency': {'CNY': 100000.0, 'USD': 1000.0}, 'stocks_by_symbol': {}, 'portfolio_source_name': 'holdings'}
 
     old_load_portfolio = m.load_account_portfolio_context
-    old_load_option_position_records = m.load_option_position_records
+    old_load_option_position_records = m._load_option_position_records
     old_exchange_rates = m.get_exchange_rates_or_fetch_latest
     old_build_context = m.build_option_positions_context
     m.load_account_portfolio_context = fake_load_account_portfolio_context
-    m.load_option_position_records = lambda *_a, **_k: []
+    m._load_option_position_records = lambda *_a, **_k: []
     m.get_exchange_rates_or_fetch_latest = lambda **_kwargs: {'rates': {'USDCNY': 7.2, 'HKDCNY': 0.92}}
     m.build_option_positions_context = lambda *_a, **_k: {
         'cash_secured_by_symbol_by_ccy': {'AAPL': {'USD': 200.0}},
@@ -203,7 +203,7 @@ def test_query_sell_put_cash_domain_minimal() -> None:
         assert 'cash_free_cny' in result
     finally:
         m.load_account_portfolio_context = old_load_portfolio
-        m.load_option_position_records = old_load_option_position_records
+        m._load_option_position_records = old_load_option_position_records
         m.get_exchange_rates_or_fetch_latest = old_exchange_rates
         m.build_option_positions_context = old_build_context
 

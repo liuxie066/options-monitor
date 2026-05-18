@@ -14,17 +14,19 @@ from src.application.config_validator import validate_config
 from domain.domain.fetch_source import resolve_symbol_fetch_source
 from src.application.futu_portfolio_context import infer_futu_portfolio_settings
 from src.application.notify_symbols import build_notification
-from src.application.option_positions_inspection import build_lot_event_history, inspect_projection_state
+from src.application.positions.inspection import build_lot_event_history, inspect_projection_state
 from domain.domain.option_position_lots import normalize_account as _normalize_account
-from src.application.option_positions_service import load_option_positions_repo
-from src.application.option_positions_reporting import build_monthly_income_report
+from src.application.ledger.api import (
+    list_position_rows as _list_position_rows,
+    open_position_ledger,
+    open_position_ledger_from_data_config as resolve_option_positions_repo,
+)
+from src.application.positions.reporting import build_monthly_income_report
 from src.application.pipeline_context import load_option_positions_context, load_portfolio_context
 from src.application.cash_headroom_query import query_sell_put_cash
 from src.application.scan_scheduler import decide as scheduler_decide, read_state as read_scheduler_state
 from src.infrastructure.exchange_rates import get_cached_exchange_rates as _get_cached_exchange_rates_impl
 from src.infrastructure.io_utils import safe_read_csv
-from src.application.option_positions_facade import resolve_option_positions_repo
-from src.application.option_positions_facade import list_position_rows as _list_position_rows
 from src.application.agent_tool_healthcheck import run_healthcheck_tool
 from src.application.agent_tool_candidate_rank import candidate_rank_explain_tool
 from src.application.agent_tool_candidate_filter import candidate_filter_explain_tool
@@ -141,7 +143,7 @@ def _healthcheck_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str
         list_account_config_views=list_account_config_views,
         mask_account_id=_mask_account_id,
         infer_futu_portfolio_settings=infer_futu_portfolio_settings,
-        load_option_positions_repo=load_option_positions_repo,
+        load_option_positions_repo=open_position_ledger,
         run_futu_doctor=_run_futu_doctor,
         healthcheck_symbols_for_futu=_healthcheck_symbols_for_futu,
         write_tools_enabled=write_tools_enabled,

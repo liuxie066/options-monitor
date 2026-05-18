@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+## 1.2.57 - 2026-05-18
+
+### Added
+- Added a canonical trade/position ledger package around `trade_events -> projection -> position_lots`, with explicit lot identity, projection replay, read views, close-target resolution, preflight, writer, maintenance, intervention, reconciliation, and storage boundaries.
+- Added dedicated `positions` and `trades` application namespaces for position workflows, auto-close maintenance, Feishu mirror sync, trade intake, trade normalization, receipts, and trade-event review.
+- Added explicit result contracts for ledger preflight/write/projection refresh, manual open/close/adjust, broker trade operations, expired-close decisions, and manual void/repair interventions.
+
+### Changed
+- Retired the v2 snapshot/compatibility position model and removed legacy option-position facade/service modules from default runtime paths.
+- Unified manual close, broker close, and auto-close target resolution through a single `CloseTargetResolution` contract with fail-closed guards for same-expiry, same-strike, multi-lot, and cross-expiry cases.
+- Moved position lot fields, patch handling, sync metadata, projection writes, and close target validation behind explicit contracts instead of free-form core dictionaries.
+- Kept Feishu, reports, receipts, CLI JSON, SQLite codec, migration, and reconciliation as boundary adapters rather than canonical position sources.
+
+### Tests
+- Added structural regression guards preventing retired v2/facade imports, legacy fallback reads, non-public ledger imports, and free-form result contracts from returning to core position/trade paths.
+- Added ledger, position, trade, close-target, auto-close, migration, projection, publisher, reporting, Feishu sync, and trade-intake regression coverage for the rebuilt core model.
+- Re-ran full pytest, focused ledger/position/trade type checking, release metadata validation, diff checks, and a dry-run trade-event replay.
+
 ## 1.2.56 - 2026-05-17
 
 ### Added

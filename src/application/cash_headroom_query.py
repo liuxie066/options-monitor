@@ -15,11 +15,10 @@ from domain.domain.cash_secured_utils import (
 )
 from src.application.config_loader import normalize_portfolio_broker_config, resolve_data_config_path
 from src.infrastructure.exchange_rates import get_exchange_rates_or_fetch_latest
-from src.application.option_positions_context_builder import build_context as build_option_positions_context
+from src.application.positions.context_builder import build_context as build_option_positions_context
 from src.application.futu_portfolio_context import fetch_futu_portfolio_context
-from src.application.option_positions_service import load_option_positions_repo
+from src.application.ledger.api import list_position_lot_snapshots, open_position_ledger
 from src.application.portfolio_context_service import load_account_portfolio_context
-from src.application.option_positions_facade import load_option_position_records
 
 
 def load_json(path: Path) -> dict:
@@ -86,8 +85,8 @@ def _load_exchange_rate_payload(*, cache_path: Path, enabled: bool) -> dict:
 
 
 def _load_option_position_records(data_config_path: Path) -> list[dict]:
-    option_repo = load_option_positions_repo(data_config_path)
-    return list(load_option_position_records(option_repo))
+    option_repo = open_position_ledger(data_config_path)
+    return list(list_position_lot_snapshots(option_repo))
 
 
 def _cash_secured_unavailable_reason(option_ctx: dict | None) -> tuple[dict[str, str], str | None]:

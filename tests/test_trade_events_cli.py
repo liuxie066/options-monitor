@@ -3,15 +3,17 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
+import pytest  # pyright: ignore[reportMissingImports]
+
+import src.application.ledger.manual_trades as ledger_manual_trades
+import src.application.ledger.repository as ledger_repository
 
 
 def _repo_with_open_event(tmp_path: Path):
     from domain.domain.option_position_lots import OpenPositionCommand
-    from src.application import option_positions_service as svc
 
-    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    svc.persist_manual_open_event(
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    ledger_manual_trades.persist_manual_open_event(
         repo,
         OpenPositionCommand(
             broker="富途",
@@ -43,7 +45,10 @@ def test_trade_events_repair_dry_run_does_not_mutate(monkeypatch, tmp_path: Path
     out = json.loads(capsys.readouterr().out)
     assert out["mode"] == "dry_run"
     assert out["target_event"]["event_id"] == event_id
-    assert out["repair_event"]["strike"] == 500.0
+    assert out["repair_event"]["contract_key"]["strike"] == 500.0
+    assert out["ledger_preflight"]["status"] == "ok"
+    assert out["ledger_preflight"]["event_type"] == "repair"
+    assert out["ledger_preflight"]["target_event_id"] == event_id
     assert out["projection_preview"]["position_lot_count"] == 1
     assert out["projection_preview"]["projection_diagnostic_count"] == 0
     assert len(repo.list_trade_events()) == 1
@@ -61,6 +66,8 @@ def test_trade_events_repair_apply_voids_and_replaces_event(monkeypatch, tmp_pat
     out = json.loads(capsys.readouterr().out)
     assert out["mode"] == "applied"
     assert out["target_event_id"] == event_id
+    assert out["ledger_preflight"]["status"] == "ok"
+    assert out["ledger_preflight"]["event_type"] == "repair"
     assert out["void_event_id"].startswith("manual-repair-void-")
     assert out["repair_event_id"].startswith("manual-repair-")
     events = repo.list_trade_events()
@@ -91,11 +98,10 @@ def test_trade_events_repair_rejects_second_repair(monkeypatch, tmp_path: Path, 
 
 def test_trade_events_repair_rejects_open_event_with_downstream_close(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.trade_events as cli
-    from src.application import option_positions_service as svc
 
     repo, event_id = _repo_with_open_event(tmp_path)
     lot = repo.list_position_lots()[0]
-    svc.persist_manual_close_event(
+    ledger_manual_trades.persist_manual_close_event(
         repo,
         record_id=lot["record_id"],
         fields=lot["fields"],
@@ -124,6 +130,9 @@ def test_trade_events_void_dry_run_includes_projection_preview(monkeypatch, tmp_
 
     out = json.loads(capsys.readouterr().out)
     assert out["mode"] == "dry_run"
+    assert out["ledger_preflight"]["status"] == "ok"
+    assert out["ledger_preflight"]["event_type"] == "void"
+    assert out["ledger_preflight"]["target_event_id"] == event_id
     assert out["projection_preview"]["position_lot_count"] == 0
     assert len(repo.list_trade_events()) == 1
     assert len(repo.list_position_lots()) == 1

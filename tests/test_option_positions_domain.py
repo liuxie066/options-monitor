@@ -1,13 +1,19 @@
 from __future__ import annotations
 
-from domain.domain.option_position_lots import (
+from domain.domain.ledger.position_fields import (
     BUY_TO_CLOSE,
     EXPIRE_AUTO_CLOSE,
     OpenPositionCommand,
+    PositionLotFields,
+    PositionLotPatch,
     build_buy_to_close_patch,
+    build_close_patch_contract,
     build_open_adjustment_patch,
+    build_open_adjustment_patch_contract,
     build_expire_auto_close_patch,
+    build_expire_auto_close_patch_contract,
     build_open_fields,
+    build_position_lot_fields,
     effective_expiration_ymd,
     exp_ms_to_ymd,
     infer_currency_from_symbol,
@@ -107,6 +113,28 @@ def test_build_open_fields_for_short_put_sets_open_contracts_and_cash() -> None:
     assert fields["cash_secured_amount"] == 20000.0
     assert fields["opened_at"] == 1000
     assert fields["last_action_at"] == 1000
+
+
+def test_build_position_lot_fields_returns_typed_open_contract() -> None:
+    command = OpenPositionCommand(
+        broker="富途证券（香港）",
+        account="LX",
+        symbol="nvda",
+        option_type="认沽",
+        side="Sell To Open",
+        contracts=2,
+        currency="美元",
+        strike=100,
+        multiplier=100,
+        expiration_ymd="2026-04-17",
+        opened_at_ms=1000,
+    )
+
+    fields = build_position_lot_fields(command)
+
+    assert isinstance(fields, PositionLotFields)
+    assert fields.position_id == "NVDA_20260417_100P_short"
+    assert fields.to_dict() == build_open_fields(command)
 
 
 def test_build_open_fields_canonicalizes_alias_symbol() -> None:
@@ -278,6 +306,27 @@ def test_build_buy_to_close_patch_supports_partial_close() -> None:
     }
 
 
+def test_build_close_patch_contract_matches_legacy_dict_api() -> None:
+    fields = {"contracts": 3, "contracts_open": 3, "contracts_closed": 0, "status": "open", "side": "short"}
+
+    patch = build_close_patch_contract(
+        fields,
+        contracts_to_close=1,
+        close_price=1.23,
+        close_reason="manual_buy_to_close",
+        close_type=BUY_TO_CLOSE,
+        as_of_ms=2000,
+    )
+
+    assert isinstance(patch, PositionLotPatch)
+    assert patch.to_dict() == build_buy_to_close_patch(
+        fields,
+        contracts_to_close=1,
+        close_price=1.23,
+        as_of_ms=2000,
+    )
+
+
 def test_build_buy_to_close_patch_supports_full_close() -> None:
     patch = build_buy_to_close_patch(
         {"contracts": 3, "contracts_open": 1, "contracts_closed": 2, "status": "open"},
@@ -331,6 +380,31 @@ def test_build_expire_auto_close_patch_closes_open_contracts() -> None:
     assert "auto_close_reason=expired" in patch["note"]
 
 
+def test_build_expire_auto_close_patch_contract_matches_legacy_dict_api() -> None:
+    fields = {
+        "contracts": 2,
+        "contracts_open": 1,
+        "contracts_closed": 1,
+        "status": "open",
+        "note": "exp=2026-04-17",
+    }
+
+    patch = build_expire_auto_close_patch_contract(
+        fields,
+        as_of_ms=4000,
+        exp_source="expiration",
+        grace_days=1,
+    )
+
+    assert isinstance(patch, PositionLotPatch)
+    assert patch.to_dict() == build_expire_auto_close_patch(
+        fields,
+        as_of_ms=4000,
+        exp_source="expiration",
+        grace_days=1,
+    )
+
+
 def test_build_open_adjustment_patch_updates_key_open_fields() -> None:
     patch = build_open_adjustment_patch(
         {
@@ -371,6 +445,47 @@ def test_build_open_adjustment_patch_updates_key_open_fields() -> None:
     assert "strike=" not in patch["note"]
     assert "multiplier=" not in patch["note"]
     assert "premium_per_share=" not in patch["note"]
+
+
+def test_build_open_adjustment_patch_contract_matches_legacy_dict_api() -> None:
+    fields = {
+        "symbol": "NVDA",
+        "option_type": "put",
+        "side": "short",
+        "status": "open",
+        "contracts": 2,
+        "contracts_open": 2,
+        "contracts_closed": 0,
+        "currency": "USD",
+        "strike": 100.0,
+        "multiplier": 100,
+        "expiration": 1781827200000,
+        "premium": 2.5,
+        "note": "exp=2026-06-19;multiplier=100;premium_per_share=2.5;strike=100",
+    }
+
+    patch = build_open_adjustment_patch_contract(
+        fields,
+        contracts=3,
+        strike=105.0,
+        expiration_ymd="2026-07-17",
+        premium_per_share=3.1,
+        multiplier=100,
+        opened_at_ms=2000,
+        as_of_ms=3000,
+    )
+
+    assert isinstance(patch, PositionLotPatch)
+    assert patch.to_dict() == build_open_adjustment_patch(
+        fields,
+        contracts=3,
+        strike=105.0,
+        expiration_ymd="2026-07-17",
+        premium_per_share=3.1,
+        multiplier=100,
+        opened_at_ms=2000,
+        as_of_ms=3000,
+    )
 
 
 def test_build_open_adjustment_patch_rejects_contracts_below_closed() -> None:

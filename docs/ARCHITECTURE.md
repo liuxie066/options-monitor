@@ -124,10 +124,45 @@ The durable position model is:
 trade_events -> projection -> position_lots
 ```
 
-Domain projection logic lives in `domain.domain.option_position_ledger`.
+Domain projection logic lives in `domain.domain.ledger.projection`; the old
+`domain.domain.option_position_ledger` projection module is retired.
+Stored trade events are encoded at `src.application.ledger.event_codec`, so new
+writes use the canonical ledger event schema while old rows are decoded only at
+the storage/migration boundary.
+Lot record field construction and open/close patch helpers live under
+`domain.domain.ledger.position_fields`; the old
+`domain.domain.option_position_lots` module is only a compatibility re-export.
 Application services own SQLite loading, bootstrap, repair, Feishu sync, CLI
-facades, and reports. Feishu `option_positions` is a bootstrap/mirror surface,
-not the steady-state source of truth.
+facades, and reports. Feishu `option_positions` is an explicit bootstrap input
+or mirror surface, not the steady-state source of truth.
+`src.application.ledger.api` is the public application boundary for all
+non-ledger runtime code. `src.application.positions`, `src.application.trades`,
+agent tools, CLI modules, web UI modules, pipeline context, and cash-headroom
+queries must not import ledger internals such as service, preflight, resolver,
+writer, publisher, repository, reconciliation, or read-model modules directly.
+The API file is intentionally a thin facade: command/write operations live in
+`src.application.ledger.commands`, query/read operations live in
+`src.application.ledger.queries`, and typed read views such as
+`PositionLotSnapshot` and `RiskPositionView` live in
+`src.application.ledger.views`.
+Runtime callers should call semantic ledger actions such as manual position
+recording, broker trade recording, expired-close planning/recording, projection
+refresh, lot selection, position snapshot reads, mirror sync metadata writes,
+event review/repair, and reconciliation, rather than composing lower-level
+`persist_*`, `preflight_*`, `require_*`, or `load_*` functions themselves.
+Close writes share `CloseTargetResolution` as the ledger-owned target contract:
+manual close resolves a unique strict lot, broker close resolves a strict exact
+FIFO target set, and auto-close validates the explicit current lot before
+writing. Aggregated `position_key` values are read-only and must not become
+write targets.
+
+Position-facing workflows live under `src.application.positions`; they operate
+on projected lots and expose manual lot operations, expiry maintenance, and
+maintenance receipts, plus Feishu mirror sync, risk context, inspection, and
+reporting. Trade-facing workflows live under `src.application.trades`; they
+operate on normalized trade deals, OpenD deal intake, idempotency state,
+receipts, and event review/replay flows. Both route writes through
+`src.application.ledger` instead of owning projection or matching rules locally.
 
 ## Close Advice Flow
 

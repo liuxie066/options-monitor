@@ -7,7 +7,6 @@ _MODULE_EXPORTS = {
     "report_repo",
     "run_repo",
     "state_repo",
-    "option_positions_v2_repo",
 }
 
 __all__ = sorted(_MODULE_EXPORTS)

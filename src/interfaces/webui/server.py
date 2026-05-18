@@ -18,7 +18,7 @@ from src.application.account_config import (
     list_account_config_views,
 )
 from src.infrastructure.external_services import send_openclaw_message
-from src.application.option_positions_service import load_option_positions_repo
+from src.application.ledger.api import open_position_ledger
 from src.application.config_validator import SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS as VALIDATOR_SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS
 from src.application.account_management import add_account, edit_account, remove_account
 from src.application.tool_execution import build_tool_manifest, execute_tool
@@ -172,7 +172,7 @@ def _global_summary(config_key: str) -> dict[str, Any]:
         cfg = _load_config(config_key)
         config_path = _resolve_config_path(CONFIG_FILES[config_key])
         data_config_path = _load_data_config_for_runtime_impl(cfg, config_path=config_path)
-        repo = load_option_positions_repo(data_config_path)
+        repo = open_position_ledger(data_config_path)
         status = str(getattr(repo, "bootstrap_status", "") or "").strip()
         message = str(getattr(repo, "bootstrap_message", "") or "").strip()
         portfolio = summary.get("sections", {}).get("portfolio")

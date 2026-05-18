@@ -1,6 +1,12 @@
 {
   "option_positions": {
     "sqlite_path": "output_shared/state/option_positions.sqlite3",
+    "bootstrap_from_feishu": {
+      "enabled": false
+    },
+    "bootstrap_from_legacy_sqlite": {
+      "enabled": false
+    },
     "sync_to_feishu": {
       "enabled": false
     }

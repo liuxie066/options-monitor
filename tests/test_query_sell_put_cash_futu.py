@@ -21,14 +21,14 @@ def test_query_sell_put_cash_uses_futu_portfolio_context_when_runtime_config_all
         }
 
     old_fetch = m.fetch_futu_portfolio_context
-    old_load_repo = m.load_option_positions_repo
-    old_load_option_position_records = m.load_option_position_records
+    old_open_position_ledger = m.open_position_ledger
+    old_load_option_position_records = m._load_option_position_records
     old_build_context = m.build_option_positions_context
     old_exchange_rates = m.get_exchange_rates_or_fetch_latest
     try:
         m.fetch_futu_portfolio_context = fake_fetch_futu_portfolio_context
-        m.load_option_positions_repo = lambda *_a, **_k: object()  # type: ignore[assignment]
-        m.load_option_position_records = lambda *_a, **_k: []  # type: ignore[assignment]
+        m.open_position_ledger = lambda *_a, **_k: object()  # type: ignore[assignment]
+        m._load_option_position_records = lambda *_a, **_k: []  # type: ignore[assignment]
         m.build_option_positions_context = lambda *_a, **_k: {  # type: ignore[assignment]
             "cash_secured_by_symbol_by_ccy": {"NVDA": {"CNY": 72000.0}},
             "cash_secured_total_by_ccy": {"CNY": 72000.0},
@@ -52,8 +52,8 @@ def test_query_sell_put_cash_uses_futu_portfolio_context_when_runtime_config_all
         )
     finally:
         m.fetch_futu_portfolio_context = old_fetch
-        m.load_option_positions_repo = old_load_repo  # type: ignore[assignment]
-        m.load_option_position_records = old_load_option_position_records  # type: ignore[assignment]
+        m.open_position_ledger = old_open_position_ledger  # type: ignore[assignment]
+        m._load_option_position_records = old_load_option_position_records  # type: ignore[assignment]
         m.build_option_positions_context = old_build_context  # type: ignore[assignment]
         m.get_exchange_rates_or_fetch_latest = old_exchange_rates  # type: ignore[assignment]
 
@@ -74,15 +74,15 @@ def test_query_sell_put_cash_uses_account_scoped_portfolio_source_override() -> 
 
     old_fetch = m.fetch_futu_portfolio_context
     old_load_portfolio = m.load_account_portfolio_context
-    old_load_repo = m.load_option_positions_repo
-    old_load_option_position_records = m.load_option_position_records
+    old_open_position_ledger = m.open_position_ledger
+    old_load_option_position_records = m._load_option_position_records
     old_build_context = m.build_option_positions_context
     old_exchange_rates = m.get_exchange_rates_or_fetch_latest
     try:
         m.fetch_futu_portfolio_context = fake_fetch_futu_portfolio_context
         m.load_account_portfolio_context = fake_load_account_portfolio_context
-        m.load_option_positions_repo = lambda *_a, **_k: object()  # type: ignore[assignment]
-        m.load_option_position_records = lambda *_a, **_k: []  # type: ignore[assignment]
+        m.open_position_ledger = lambda *_a, **_k: object()  # type: ignore[assignment]
+        m._load_option_position_records = lambda *_a, **_k: []  # type: ignore[assignment]
         m.build_option_positions_context = lambda *_a, **_k: {  # type: ignore[assignment]
             "cash_secured_by_symbol_by_ccy": {"NVDA": {"CNY": 12000.0}},
             "cash_secured_total_by_ccy": {"CNY": 12000.0},
@@ -110,8 +110,8 @@ def test_query_sell_put_cash_uses_account_scoped_portfolio_source_override() -> 
     finally:
         m.fetch_futu_portfolio_context = old_fetch
         m.load_account_portfolio_context = old_load_portfolio
-        m.load_option_positions_repo = old_load_repo  # type: ignore[assignment]
-        m.load_option_position_records = old_load_option_position_records  # type: ignore[assignment]
+        m.open_position_ledger = old_open_position_ledger  # type: ignore[assignment]
+        m._load_option_position_records = old_load_option_position_records  # type: ignore[assignment]
         m.build_option_positions_context = old_build_context  # type: ignore[assignment]
         m.get_exchange_rates_or_fetch_latest = old_exchange_rates  # type: ignore[assignment]
 
@@ -128,14 +128,14 @@ def test_query_sell_put_cash_uses_holdings_account_mapping_for_external_account(
         return {"cash_by_currency": {"CNY": 50000.0}, "stocks_by_symbol": {}, "portfolio_source_name": "holdings"}
 
     old_load_portfolio = m.load_account_portfolio_context
-    old_load_repo = m.load_option_positions_repo
-    old_load_option_position_records = m.load_option_position_records
+    old_open_position_ledger = m.open_position_ledger
+    old_load_option_position_records = m._load_option_position_records
     old_build_context = m.build_option_positions_context
     old_exchange_rates = m.get_exchange_rates_or_fetch_latest
     try:
         m.load_account_portfolio_context = fake_load_account_portfolio_context
-        m.load_option_positions_repo = lambda *_a, **_k: object()  # type: ignore[assignment]
-        m.load_option_position_records = lambda *_a, **_k: []  # type: ignore[assignment]
+        m.open_position_ledger = lambda *_a, **_k: object()  # type: ignore[assignment]
+        m._load_option_position_records = lambda *_a, **_k: []  # type: ignore[assignment]
         m.build_option_positions_context = lambda *_a, **_k: {  # type: ignore[assignment]
             "cash_secured_by_symbol_by_ccy": {"NVDA": {"CNY": 8000.0}},
             "cash_secured_total_by_ccy": {"CNY": 8000.0},
@@ -166,8 +166,8 @@ def test_query_sell_put_cash_uses_holdings_account_mapping_for_external_account(
         )
     finally:
         m.load_account_portfolio_context = old_load_portfolio
-        m.load_option_positions_repo = old_load_repo  # type: ignore[assignment]
-        m.load_option_position_records = old_load_option_position_records  # type: ignore[assignment]
+        m.open_position_ledger = old_open_position_ledger  # type: ignore[assignment]
+        m._load_option_position_records = old_load_option_position_records  # type: ignore[assignment]
         m.build_option_positions_context = old_build_context  # type: ignore[assignment]
         m.get_exchange_rates_or_fetch_latest = old_exchange_rates  # type: ignore[assignment]
 
@@ -184,14 +184,14 @@ def test_query_sell_put_cash_marks_free_cash_unknown_when_cash_secured_unavailab
         return {"cash_by_currency": {"CNY": 130000.0}, "stocks_by_symbol": {}, "portfolio_source_name": "holdings"}
 
     old_load_portfolio = m.load_account_portfolio_context
-    old_load_repo = m.load_option_positions_repo
-    old_load_option_position_records = m.load_option_position_records
+    old_open_position_ledger = m.open_position_ledger
+    old_load_option_position_records = m._load_option_position_records
     old_build_context = m.build_option_positions_context
     old_exchange_rates = m.get_exchange_rates_or_fetch_latest
     try:
         m.load_account_portfolio_context = fake_load_account_portfolio_context
-        m.load_option_positions_repo = lambda *_a, **_k: object()  # type: ignore[assignment]
-        m.load_option_position_records = lambda *_a, **_k: []  # type: ignore[assignment]
+        m.open_position_ledger = lambda *_a, **_k: object()  # type: ignore[assignment]
+        m._load_option_position_records = lambda *_a, **_k: []  # type: ignore[assignment]
         m.build_option_positions_context = lambda *_a, **_k: {  # type: ignore[assignment]
             "cash_secured_by_symbol_by_ccy": {"NVDA": {"CNY": 12000.0}},
             "cash_secured_total_by_ccy": {"CNY": 12000.0},
@@ -217,8 +217,8 @@ def test_query_sell_put_cash_marks_free_cash_unknown_when_cash_secured_unavailab
         )
     finally:
         m.load_account_portfolio_context = old_load_portfolio
-        m.load_option_positions_repo = old_load_repo  # type: ignore[assignment]
-        m.load_option_position_records = old_load_option_position_records  # type: ignore[assignment]
+        m.open_position_ledger = old_open_position_ledger  # type: ignore[assignment]
+        m._load_option_position_records = old_load_option_position_records  # type: ignore[assignment]
         m.build_option_positions_context = old_build_context  # type: ignore[assignment]
         m.get_exchange_rates_or_fetch_latest = old_exchange_rates  # type: ignore[assignment]
 

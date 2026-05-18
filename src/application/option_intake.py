@@ -21,6 +21,7 @@ import shlex
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 repo_base = Path(__file__).resolve().parents[2]
 if str(repo_base) not in sys.path:
@@ -29,14 +30,17 @@ if str(repo_base) not in sys.path:
 from src.application.account_config import accounts_from_config_path
 from src.application.config_loader import load_config
 from src.application.parse_option_message import parse_option_message_text
-from src.application.option_positions_facade import resolve_option_positions_repo, resolve_option_positions_repo_from_config
-from src.application.position_workflows import (
+from src.application.ledger.api import (
+    open_position_ledger_from_data_config,
+    open_position_ledger_from_runtime_config,
+)
+from src.application.positions.workflows import (
     ManualCloseMatchError,
     execute_manual_close,
     execute_manual_open,
     format_manual_close_match_error,
 )
-from src.application.trade_intent import trade_intent_from_manual_parse
+from src.application.trades.intent import trade_intent_from_manual_parse
 
 
 @dataclass(frozen=True)
@@ -194,8 +198,9 @@ def parse_om_command(text: str) -> IntakeCommand:
     )
 
 
-def _missing_for_action(parsed: dict, action: str) -> list[str]:
-    p = parsed.get("parsed") or {}
+def _missing_for_action(parsed: dict[str, Any], action: str) -> list[str]:
+    raw_parsed = parsed.get("parsed")
+    p: dict[str, Any] = raw_parsed if isinstance(raw_parsed, dict) else {}
     if action == "close":
         return [
             k for k, v in {
@@ -207,7 +212,7 @@ def _missing_for_action(parsed: dict, action: str) -> list[str]:
     return list(parsed.get("missing") or [])
 
 
-def _target_position_side_for_close(parsed_fields: dict, raw_text: str) -> str | None:
+def _target_position_side_for_close(parsed_fields: dict[str, Any], raw_text: str) -> str | None:
     raw = str(raw_text or "").strip().lower()
     if "买" in raw or "買" in raw or "buy" in raw:
         return "short"
@@ -219,7 +224,7 @@ def _target_position_side_for_close(parsed_fields: dict, raw_text: str) -> str |
     return None
 
 
-def main():
+def main() -> int:
     ap = argparse.ArgumentParser(description='Option intake (parse + write)')
     ap.add_argument('--text', required=True)
     ap.add_argument('--config', default=None, help='optional options-monitor config used to resolve account labels')
@@ -251,8 +256,8 @@ def main():
         else:
             args.dry_run = True
 
-    runtime_config = None
-    cfg_path = None
+    runtime_config: dict[str, Any] | None = None
+    cfg_path: Path | None = None
     if args.config:
         cfg_path = Path(args.config)
         if not cfg_path.is_absolute():
@@ -260,11 +265,12 @@ def main():
         runtime_config = load_config(base=base, config_path=cfg_path, is_scheduled=False, log=lambda msg: print(msg, file=sys.stderr))
 
     accounts = args.accounts
-    if accounts is None and args.config:
+    if accounts is None and cfg_path is not None:
         accounts = accounts_from_config_path(cfg_path)
 
     parsed = parse_option_message_text(text, accounts=accounts, resolve_multiplier=(action == 'open'))
-    p = parsed['parsed']
+    raw_fields = parsed.get("parsed")
+    p: dict[str, Any] = raw_fields if isinstance(raw_fields, dict) else {}
     if account_override:
         p['account'] = str(account_override).strip().lower()
         parsed['missing'] = [x for x in (parsed.get('missing') or []) if x != 'account']
@@ -287,9 +293,9 @@ def main():
     repo = None
     if need_repo:
         if runtime_config is not None:
-            _data_config, repo = resolve_option_positions_repo_from_config(base=base, cfg=runtime_config, data_config=args.data_config)
+            _data_config, repo = open_position_ledger_from_runtime_config(base=base, cfg=runtime_config, data_config=args.data_config)
         else:
-            _data_config, repo = resolve_option_positions_repo(base=base, data_config=args.data_config)
+            _data_config, repo = open_position_ledger_from_data_config(base=base, data_config=args.data_config)
 
     if action == 'close':
         target_position_side = intent.target_position_side or _target_position_side_for_close(p, text)
@@ -315,7 +321,8 @@ def main():
         except ValueError as exc:
             print(str(exc))
             return 2
-        match = out.get("match") if isinstance(out.get("match"), dict) else {}
+        raw_match = out.get("match")
+        match: dict[str, Any] = raw_match if isinstance(raw_match, dict) else {}
         if match.get("rule") == "strict_contract_unique":
             print(f"[MATCH] rule={match.get('rule')} record_id={match.get('record_id')}")
         if args.dry_run and (not args.apply):
