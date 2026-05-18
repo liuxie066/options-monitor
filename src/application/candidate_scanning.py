@@ -44,6 +44,7 @@ class CandidateScanConfig:
     max_spread_ratio: float | None
     min_annualized_net_return: float | None
     min_net_income: float
+    min_otm_pct: float | None = None
     score_weights: CandidateScoreWeights | None = None
     reject_stage: str = "step3_risk_gate"
     trace_output: Path | None = None
@@ -125,6 +126,7 @@ def _build_base_values(
     max_dte: int,
     min_strike: float | None,
     max_strike: float | None,
+    min_otm_pct: float | None,
     extra_hard_kwargs: dict[str, Any],
 ) -> tuple[dict[str, Any], CandidateBaseValues | None]:
     gate = evaluate_candidate_hard_constraints(
@@ -134,6 +136,7 @@ def _build_base_values(
         max_dte=max_dte,
         min_strike=min_strike,
         max_strike=max_strike,
+        min_otm_pct=min_otm_pct,
         extra_required_fields=(),
         **(extra_hard_kwargs or {}),
     )
@@ -203,6 +206,7 @@ def run_candidate_scan(
                 max_dte=config.max_dte,
                 min_strike=config.min_strike,
                 max_strike=config.max_strike,
+                min_otm_pct=config.min_otm_pct,
                 extra_hard_kwargs=hard_kwargs,
             )
             if base_values is None:
@@ -349,6 +353,7 @@ def _trace_config_values(config: CandidateScanConfig) -> dict[str, object]:
         "max_dte": config.max_dte,
         "min_strike": config.min_strike,
         "max_strike": config.max_strike,
+        "min_otm_pct": config.min_otm_pct,
         "min_open_interest": config.min_open_interest,
         "min_volume": config.min_volume,
         "max_spread_ratio": config.max_spread_ratio,

@@ -18,6 +18,7 @@ from src.infrastructure.feishu_bitable import (
 )
 from domain.domain.symbol_identity import canonical_symbol
 from src.application.config_loader import resolve_data_config_path
+from src.application.secret_resolver import resolve_feishu_holdings_config
 from src.infrastructure.io_utils import atomic_write_json
 from domain.domain.ledger.position_fields import normalize_account, normalize_currency
 
@@ -226,15 +227,16 @@ def slice_shared_context_for_account(shared_ctx: dict, account: str | None) -> d
 
 
 def load_holdings_records(data_config_path: Path) -> list[dict]:
-    cfg = json.loads(data_config_path.read_text(encoding="utf-8"))
-    feishu_cfg = cfg.get("feishu", {}) or {}
-    app_id = feishu_cfg.get("app_id")
-    app_secret = feishu_cfg.get("app_secret")
-    holdings_ref = (feishu_cfg.get("tables", {}) or {}).get("holdings")
-    if not (app_id and app_secret and holdings_ref and "/" in holdings_ref):
-        raise ValueError("data config missing feishu app_id/app_secret/holdings")
+    cfg: dict = {}
+    if data_config_path.exists():
+        payload = json.loads(data_config_path.read_text(encoding="utf-8"))
+        cfg = payload if isinstance(payload, dict) else {}
+    feishu = resolve_feishu_holdings_config(cfg)
+    if not feishu.ready:
+        missing = ", ".join(feishu.missing_fields)
+        raise ValueError(f"environment missing Feishu holdings config: {missing}")
 
-    app_token, table_id = holdings_ref.split("/", 1)
+    app_token, table_id = feishu.holdings_ref.split("/", 1)
 
     def _list_records(token: str) -> list[dict]:
         try:
@@ -244,7 +246,7 @@ def load_holdings_records(data_config_path: Path) -> list[dict]:
         except FeishuPermanentError:
             return bitable_list_records(token, app_token, table_id)
 
-    return with_tenant_token_retry(str(app_id), str(app_secret), _list_records)
+    return with_tenant_token_retry(feishu.app_id, feishu.app_secret, _list_records)
 
 
 def load_holdings_portfolio_context(

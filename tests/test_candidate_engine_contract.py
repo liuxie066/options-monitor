@@ -165,6 +165,31 @@ def test_candidate_engine_stage1_rejects_put_hard_constraints() -> None:
     assert all(r["stage"] == STAGE_HARD_CONSTRAINTS for r in payload["rejects"])
 
 
+def test_candidate_engine_stage1_rejects_put_below_min_otm_pct() -> None:
+    from domain.domain.engine import evaluate_candidate_hard_constraints
+
+    payload = evaluate_candidate_hard_constraints(
+        {
+            "symbol": "NVDA",
+            "option_type": "put",
+            "expiration": "2026-06-18",
+            "dte": "30",
+            "spot": "100",
+            "strike": "98",
+            "mid": "1.2",
+            "multiplier": "100",
+        },
+        mode="put",
+        min_otm_pct=0.05,
+    )
+
+    assert payload["accepted"] is False
+    assert [r["reason"] for r in payload["rejects"]] == ["hard_strike"]
+    assert payload["rejects"][0]["message"] == "put otm_pct below minimum"
+    assert payload["rejects"][0]["metric_value"] == 0.02
+    assert payload["rejects"][0]["threshold"] == 0.05
+
+
 def test_candidate_engine_stage1_rejects_call_hard_constraints() -> None:
     from domain.domain.engine import evaluate_candidate_hard_constraints
 

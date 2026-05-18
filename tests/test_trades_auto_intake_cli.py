@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -76,6 +77,34 @@ def test_auto_trade_intake_open_example_dry_run_without_explicit_data_config(tmp
     payload = json.loads(result.stdout)
     assert payload["status"] == "dry_run"
     assert payload["action"] == "open"
+
+
+def test_auto_trade_intake_once_defaults_state_paths_to_runtime_root(tmp_path: Path) -> None:
+    config_path = _write_runtime_config(tmp_path)
+    runtime_root = tmp_path / "runtime"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "src.application.trades.auto_intake",
+            "--config",
+            str(config_path),
+            "--mode",
+            "dry-run",
+            "--once",
+        ],
+        cwd=str(BASE),
+        env={**dict(os.environ), "OM_RUNTIME_ROOT": str(runtime_root)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["state_path"] == str((runtime_root / "output" / "state" / "auto_trade_intake_state.json").resolve())
+    assert payload["audit_path"] == str((runtime_root / "output" / "state" / "auto_trade_intake_audit.jsonl").resolve())
+    assert payload["status_path"] == str((runtime_root / "output" / "state" / "auto_trade_intake_status.json").resolve())
 
 
 def test_auto_trade_intake_open_dry_run_accepts_futu_option_code_with_lookup_fields(tmp_path: Path) -> None:

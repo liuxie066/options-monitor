@@ -11,7 +11,6 @@ import src.application.ledger.bootstrap as ledger_bootstrap
 import src.application.ledger.interventions as ledger_interventions
 import src.application.ledger.manual_trades as ledger_manual_trades
 import src.application.ledger.repository as ledger_repository
-from src.application.ledger.sync_metadata import PositionLotSyncMetadataPatch
 import src.application.ledger.writer as ledger_writer
 
 BASE = Path(__file__).resolve().parents[1]
@@ -196,10 +195,6 @@ def test_option_positions_cli_inspect_reports_projection_state(monkeypatch, tmp_
         ),
     )
     lot = repo.list_position_lots()[0]
-    repo.update_position_lot_sync_metadata(
-        lot["record_id"],
-        PositionLotSyncMetadataPatch(feishu_record_id="rec_sync_1"),
-    )
 
     monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
     monkeypatch.setattr(
@@ -210,8 +205,8 @@ def test_option_positions_cli_inspect_reports_projection_state(monkeypatch, tmp_
             "--data-config",
             str(data_config),
             "inspect",
-            "--feishu-record-id",
-            "rec_sync_1",
+            "--record-id",
+            lot["record_id"],
         ],
     )
 
@@ -222,7 +217,6 @@ def test_option_positions_cli_inspect_reports_projection_state(monkeypatch, tmp_
     assert payload["ledger_store"]["sqlite_path"] == str((tmp_path / "option_positions.sqlite3").resolve())
     assert payload["ledger_store"]["trade_event_count"] == 1
     assert payload["ledger_store"]["position_lot_count"] == 1
-    assert payload["current_lots"][0]["fields"]["feishu_record_id"] == "rec_sync_1"
     assert payload["baseline_snapshot_id"] is None
     assert payload["projected_lots"][0]["current_contracts"] == 1
     assert payload["baseline_lots"] == []

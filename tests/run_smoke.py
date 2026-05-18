@@ -88,15 +88,15 @@ def test_agent_internal_init_minimal_config() -> None:
     _ensure_repo_on_path()
     with tempfile.TemporaryDirectory() as td:
         cfg_path = Path(td) / "config.us.json"
-        data_cfg_path = Path(td) / "portfolio.sqlite.json"
+        data_cfg_path = Path(td) / "portfolio.runtime.json"
         payload = _init_minimal_config(cfg_path=cfg_path, data_cfg_path=data_cfg_path)
         cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
         assert payload["account_label"] == "user1"
         assert cfg_path.exists()
         assert data_cfg_path.exists()
         assert Path(str(payload["config_path"])).name == "config.us.json"
-        assert Path(str(payload["data_config_path"])).name == "portfolio.sqlite.json"
-        assert cfg["portfolio"]["data_config"] == "portfolio.sqlite.json"
+        assert Path(str(payload["data_config_path"])).name == "portfolio.runtime.json"
+        assert cfg["portfolio"]["data_config"] == "portfolio.runtime.json"
         assert "pm_config" not in cfg["portfolio"]
         assert "market" not in cfg["portfolio"]
         assert cfg["symbols"][0]["broker"] == "US"
@@ -126,7 +126,7 @@ def test_agent_internal_init_reuses_existing_data_config_across_markets() -> Non
     with tempfile.TemporaryDirectory() as td:
         us_cfg_path = Path(td) / "config.us.json"
         hk_cfg_path = Path(td) / "config.hk.json"
-        data_cfg_path = Path(td) / "portfolio.sqlite.json"
+        data_cfg_path = Path(td) / "portfolio.runtime.json"
         first = _init_minimal_config(cfg_path=hk_cfg_path, data_cfg_path=data_cfg_path, market="hk")
         second = _init_minimal_config(cfg_path=us_cfg_path, data_cfg_path=data_cfg_path, market="us")
         assert first["data_config_reused"] is False
@@ -141,7 +141,7 @@ def test_agent_launcher_add_external_holdings_account() -> None:
     om_agent = (base / "om-agent").resolve()
     with tempfile.TemporaryDirectory() as td:
         cfg_path = Path(td) / "config.us.json"
-        data_cfg_path = Path(td) / "portfolio.sqlite.json"
+        data_cfg_path = Path(td) / "portfolio.runtime.json"
         _init_minimal_config(cfg_path=cfg_path, data_cfg_path=data_cfg_path)
         write_env = {**os.environ, "OM_AGENT_ENABLE_WRITE_TOOLS": "true"}
 
@@ -180,7 +180,7 @@ def test_agent_launcher_account_write_gate_and_dry_run() -> None:
     om_agent = (base / "om-agent").resolve()
     with tempfile.TemporaryDirectory() as td:
         cfg_path = Path(td) / "config.us.json"
-        data_cfg_path = Path(td) / "portfolio.sqlite.json"
+        data_cfg_path = Path(td) / "portfolio.runtime.json"
         _init_minimal_config(cfg_path=cfg_path, data_cfg_path=data_cfg_path)
 
         blocked = subprocess.run(
@@ -239,7 +239,7 @@ def test_agent_launcher_add_futu_account_with_holdings_fallback() -> None:
     om_agent = (base / "om-agent").resolve()
     with tempfile.TemporaryDirectory() as td:
         cfg_path = Path(td) / "config.us.json"
-        data_cfg_path = Path(td) / "portfolio.sqlite.json"
+        data_cfg_path = Path(td) / "portfolio.runtime.json"
         _init_minimal_config(cfg_path=cfg_path, data_cfg_path=data_cfg_path)
         write_env = {**os.environ, "OM_AGENT_ENABLE_WRITE_TOOLS": "true"}
 
@@ -281,7 +281,7 @@ def test_agent_launcher_edit_account_updates_type_and_mappings() -> None:
     om_agent = (base / "om-agent").resolve()
     with tempfile.TemporaryDirectory() as td:
         cfg_path = Path(td) / "config.us.json"
-        data_cfg_path = Path(td) / "portfolio.sqlite.json"
+        data_cfg_path = Path(td) / "portfolio.runtime.json"
         _init_minimal_config(cfg_path=cfg_path, data_cfg_path=data_cfg_path)
         write_env = {**os.environ, "OM_AGENT_ENABLE_WRITE_TOOLS": "true"}
         subprocess.run(
@@ -326,7 +326,7 @@ def test_agent_launcher_remove_account_updates_runtime_config() -> None:
     om_agent = (base / "om-agent").resolve()
     with tempfile.TemporaryDirectory() as td:
         cfg_path = Path(td) / "config.us.json"
-        data_cfg_path = Path(td) / "portfolio.sqlite.json"
+        data_cfg_path = Path(td) / "portfolio.runtime.json"
         _init_minimal_config(cfg_path=cfg_path, data_cfg_path=data_cfg_path)
         write_env = {**os.environ, "OM_AGENT_ENABLE_WRITE_TOOLS": "true"}
         subprocess.run(

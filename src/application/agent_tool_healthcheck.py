@@ -1,10 +1,13 @@
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any, Callable
 
 from domain.domain.multi_tick import FEISHU_APP_NOTIFICATION_PROVIDER, normalize_notification_provider
 from src.application.ledger.api import ledger_store_payload
+from src.application.secret_resolver import (
+    resolve_feishu_holdings_config,
+    resolve_feishu_notification_app_config,
+)
 
 
 def _dict(value: Any) -> dict[str, Any]:
@@ -57,28 +60,31 @@ def run_healthcheck_tool(
             {
                 "name": "data_config",
                 "status": "ok",
-                "message": ("portfolio.data_config found" if data_config_ref else "repo-local SQLite data config found"),
+                "message": ("portfolio.data_config found" if data_config_ref else "portfolio runtime data config found"),
                 "value": mask_path(data_config_path),
             }
         )
     else:
+        status = "error" if data_config_ref else "ok"
+        message = (
+            "portfolio.data_config missing"
+            if data_config_ref
+            else "portfolio.data_config not configured; using runtime-root ledger defaults"
+        )
         checks.append(
             {
                 "name": "data_config",
-                "status": "error",
-                "message": ("portfolio.data_config missing" if data_config_ref else "portfolio.data_config not configured"),
+                "status": status,
+                "message": message,
             }
         )
-        warnings.append(
-            "Minimal public setup requires a repo-local SQLite data config at secrets/portfolio.sqlite.json."
-        )
+        if data_config_ref:
+            warnings.append("Configured portfolio.data_config is missing.")
 
     data_cfg = read_json_object_or_empty(data_config_path) if data_config_path.exists() else {}
-    feishu_cfg = _dict(data_cfg.get("feishu"))
-    feishu_tables = _dict(feishu_cfg.get("tables"))
-    feishu_ready = bool(str(feishu_cfg.get("app_id") or "").strip()) and bool(str(feishu_cfg.get("app_secret") or "").strip())
-    holdings_ref = str(feishu_tables.get("holdings") or "").strip()
-    holdings_ready = feishu_ready and ("/" in holdings_ref)
+    feishu_holdings = resolve_feishu_holdings_config(data_cfg)
+    feishu_ready = bool(feishu_holdings.app_id and feishu_holdings.app_secret)
+    holdings_ready = feishu_holdings.ready
     symbol_names = {
         str(item.get("symbol") or "").strip().upper()
         for item in (cfg.get("symbols") or [])
@@ -93,15 +99,15 @@ def run_healthcheck_tool(
             }
         )
         warnings.append("Replace example starter symbols before enabling long-term use or sends.")
-    if str(portfolio_cfg.get("data_config") or "").strip() == "secrets/portfolio.sqlite.json":
+    if str(portfolio_cfg.get("data_config") or "").strip().startswith("secrets/"):
         checks.append(
             {
                 "name": "starter_data_config",
                 "status": "warn",
-                "message": "repo-local starter SQLite data_config is still in use",
+                "message": "repo-local secrets data_config is still in use",
             }
         )
-        warnings.append("The repo-local starter SQLite data_config is fine for local testing, but review it before production use.")
+        warnings.append("Move portfolio.data_config away from repo-local secrets or remove it and use runtime-root defaults.")
 
     notifications = _dict(cfg.get("notifications"))
     if (
@@ -110,10 +116,6 @@ def run_healthcheck_tool(
         == FEISHU_APP_NOTIFICATION_PROVIDER
     ):
         target = str(notifications.get("target") or "").strip()
-        secrets_file_value = str(notifications.get("secrets_file") or "secrets/notifications.feishu.app.json").strip()
-        secrets_path = Path(secrets_file_value)
-        if not secrets_path.is_absolute():
-            secrets_path = (config_path.parent / secrets_path).resolve()
         if target in {"ou_xxx", "user:ou_xxx", "chat:chat_xxx"}:
             checks.append(
                 {
@@ -123,49 +125,43 @@ def run_healthcheck_tool(
                 }
             )
             warnings.append("Replace the example notifications.target placeholder before enabling real sends.")
-        if not secrets_path.exists():
+        notification_app = resolve_feishu_notification_app_config(notifications)
+        if not notification_app.ready:
             checks.append(
                 {
-                    "name": "notification_secrets",
+                    "name": "notification_credentials",
                     "status": "error",
-                    "message": f"notification secrets file not found: {secrets_path}",
+                    "message": "notification Feishu app credentials missing from environment",
+                    "value": notification_app.redacted_status(),
                 }
             )
-            warnings.append("Notification credentials missing; notifications cannot be sent until the secrets file is restored.")
+            warnings.append(
+                "Notification credentials are incomplete; set "
+                + ", ".join(notification_app.missing_fields)
+                + " before enabling sends."
+            )
         else:
-            secrets_payload = read_json_object_or_empty(secrets_path)
-            feishu_secret_cfg = _dict(secrets_payload.get("feishu"))
-            if not str(feishu_secret_cfg.get("app_id") or "").strip() or not str(feishu_secret_cfg.get("app_secret") or "").strip():
+            if notification_app.app_id == "cli_xxx" or notification_app.app_secret == "xxx":
                 checks.append(
                     {
-                        "name": "notification_secrets",
-                        "status": "error",
-                        "message": f"notification secrets missing feishu.app_id/app_secret: {secrets_path}",
+                        "name": "notification_credentials_placeholder",
+                        "status": "warn",
+                        "message": "notification credentials are still using example placeholder values",
                     }
                 )
-                warnings.append("Notification credentials are incomplete; fix app_id/app_secret before enabling sends.")
-            else:
-                if str(feishu_secret_cfg.get("app_id") or "").strip() == "cli_xxx" or str(feishu_secret_cfg.get("app_secret") or "").strip() == "xxx":
-                    checks.append(
-                        {
-                            "name": "notification_secrets_placeholder",
-                            "status": "warn",
-                            "message": "notification secrets are still using example placeholder values",
-                        }
-                    )
-                    warnings.append("Replace example notification credentials before enabling real sends.")
-                checks.append(
-                    {
-                        "name": "notification_secrets",
-                        "status": "ok",
-                        "message": "notification secrets found",
-                        "value": mask_path(secrets_path),
-                    }
-                )
+                warnings.append("Replace example notification credentials before enabling real sends.")
+            checks.append(
+                {
+                    "name": "notification_credentials",
+                    "status": "ok",
+                    "message": "notification Feishu app credentials configured from environment",
+                    "value": notification_app.redacted_status(),
+                }
+            )
 
     option_positions_bootstrap_status = None
     option_positions_bootstrap_message = None
-    if data_config_path.exists():
+    if data_config_path.exists() or not data_config_ref:
         try:
             option_repo = load_option_positions_repo(data_config_path)
             ledger_store = _dict(ledger_store_payload(data_config_path, option_repo))
@@ -250,11 +246,15 @@ def run_healthcheck_tool(
             continue
 
         if not feishu_ready:
-            mapping_errors.append(f"{account}: external_holdings requires feishu.app_id/app_secret in portfolio.data_config")
-            primary_errors.append(f"{account}: external_holdings requires feishu.app_id/app_secret in portfolio.data_config")
-        if "/" not in holdings_ref:
-            mapping_errors.append(f"{account}: external_holdings requires feishu.tables.holdings in portfolio.data_config")
-            primary_errors.append(f"{account}: external_holdings requires feishu.tables.holdings in portfolio.data_config")
+            mapping_errors.append(
+                f"{account}: external_holdings requires {feishu_holdings.app_id_env}/{feishu_holdings.app_secret_env}"
+            )
+            primary_errors.append(
+                f"{account}: external_holdings requires {feishu_holdings.app_id_env}/{feishu_holdings.app_secret_env}"
+            )
+        if "/" not in feishu_holdings.holdings_ref:
+            mapping_errors.append(f"{account}: external_holdings requires {feishu_holdings.holdings_env}")
+            primary_errors.append(f"{account}: external_holdings requires {feishu_holdings.holdings_env}")
         primary_preview[account]["holdings_account"] = source_plan.holdings_account
         primary_preview[account]["ready"] = bool(holdings_ready)
 

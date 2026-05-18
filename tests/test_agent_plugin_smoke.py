@@ -106,13 +106,13 @@ def test_healthcheck_works_with_explicit_config_path(monkeypatch, tmp_path: Path
     cfg_path = tmp_path / "config.us.json"
     secrets_dir = tmp_path / "secrets"
     secrets_dir.mkdir()
-    data_cfg_path = secrets_dir / "portfolio.sqlite.json"
+    data_cfg_path = tmp_path / "portfolio.runtime.json"
     data_cfg_path.write_text(
         json.dumps({"option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"}}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     cfg_path.write_text(
-        json.dumps(_public_cfg_with_futu("secrets/portfolio.sqlite.json"), ensure_ascii=False, indent=2),
+        json.dumps(_public_cfg_with_futu("portfolio.runtime.json"), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 
@@ -149,11 +149,11 @@ def test_healthcheck_rejects_placeholder_futu_mapping(monkeypatch, tmp_path: Pat
     cfg_path = tmp_path / "config.us.json"
     secrets_dir = tmp_path / "secrets"
     secrets_dir.mkdir()
-    (secrets_dir / "portfolio.sqlite.json").write_text(
+    (tmp_path / "portfolio.runtime.json").write_text(
         json.dumps({"option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"}}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    cfg = _public_cfg_with_futu("secrets/portfolio.sqlite.json")
+    cfg = _public_cfg_with_futu("portfolio.runtime.json")
     cfg["trade_intake"]["account_mapping"]["futu"] = {"REAL_12345678": "user1"}
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -184,12 +184,12 @@ def test_healthcheck_accepts_futu_auto_source_without_fallback_checks(monkeypatc
     cfg_path = tmp_path / "config.us.json"
     secrets_dir = tmp_path / "secrets"
     secrets_dir.mkdir()
-    (secrets_dir / "portfolio.sqlite.json").write_text(
+    (tmp_path / "portfolio.runtime.json").write_text(
         json.dumps({"option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"}}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     cfg_path.write_text(
-        json.dumps(_public_cfg_with_futu_auto_source("secrets/portfolio.sqlite.json"), ensure_ascii=False, indent=2),
+        json.dumps(_public_cfg_with_futu_auto_source("portfolio.runtime.json"), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 
@@ -222,11 +222,11 @@ def test_healthcheck_rejects_account_settings_acc_id_missing_from_trade_intake_m
     cfg_path = tmp_path / "config.us.json"
     secrets_dir = tmp_path / "secrets"
     secrets_dir.mkdir()
-    (secrets_dir / "portfolio.sqlite.json").write_text(
+    (tmp_path / "portfolio.runtime.json").write_text(
         json.dumps({"option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"}}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    cfg = _public_cfg_with_futu("secrets/portfolio.sqlite.json")
+    cfg = _public_cfg_with_futu("portfolio.runtime.json")
     cfg["account_settings"]["user1"]["futu"] = {"account_id": "999999999999999999"}
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -256,14 +256,17 @@ def test_healthcheck_accepts_external_holdings_account_without_futu_mapping(monk
     cfg_path = tmp_path / "config.us.json"
     secrets_dir = tmp_path / "secrets"
     secrets_dir.mkdir()
-    (secrets_dir / "portfolio.sqlite.json").write_text(
+    monkeypatch.setenv("OM_FEISHU_APP_ID", "cli_xxx")
+    monkeypatch.setenv("OM_FEISHU_APP_SECRET", "secret_xxx")
+    monkeypatch.setenv("OM_FEISHU_HOLDINGS_TABLE", "app_token/table_id")
+    (tmp_path / "portfolio.runtime.json").write_text(
         json.dumps(
             {
                 "option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"},
                 "feishu": {
-                    "app_id": "cli_xxx",
-                    "app_secret": "secret_xxx",
-                    "tables": {"holdings": "app_token/table_id"},
+                    "app_id_env": "OM_FEISHU_APP_ID",
+                    "app_secret_env": "OM_FEISHU_APP_SECRET",
+                    "tables": {"holdings_env": "OM_FEISHU_HOLDINGS_TABLE"},
                 },
             },
             ensure_ascii=False,
@@ -272,7 +275,7 @@ def test_healthcheck_accepts_external_holdings_account_without_futu_mapping(monk
         encoding="utf-8",
     )
     cfg_path.write_text(
-        json.dumps(_public_cfg_with_external_holdings("secrets/portfolio.sqlite.json"), ensure_ascii=False, indent=2),
+        json.dumps(_public_cfg_with_external_holdings("portfolio.runtime.json"), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 
@@ -307,12 +310,12 @@ def test_healthcheck_reports_option_positions_repo_load_degraded(monkeypatch, tm
     cfg_path = tmp_path / "config.us.json"
     secrets_dir = tmp_path / "secrets"
     secrets_dir.mkdir()
-    (secrets_dir / "portfolio.sqlite.json").write_text(
+    (tmp_path / "portfolio.runtime.json").write_text(
         json.dumps({"option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"}}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     cfg_path.write_text(
-        json.dumps(_public_cfg_with_futu("secrets/portfolio.sqlite.json"), ensure_ascii=False, indent=2),
+        json.dumps(_public_cfg_with_futu("portfolio.runtime.json"), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 
@@ -348,12 +351,12 @@ def test_healthcheck_reports_option_positions_bootstrap_ok_for_sqlite_only(monke
     cfg_path = tmp_path / "config.us.json"
     secrets_dir = tmp_path / "secrets"
     secrets_dir.mkdir()
-    (secrets_dir / "portfolio.sqlite.json").write_text(
+    (tmp_path / "portfolio.runtime.json").write_text(
         json.dumps({"option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"}}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     cfg_path.write_text(
-        json.dumps(_public_cfg_with_futu("secrets/portfolio.sqlite.json"), ensure_ascii=False, indent=2),
+        json.dumps(_public_cfg_with_futu("portfolio.runtime.json"), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 
@@ -385,21 +388,17 @@ def test_healthcheck_warns_on_notification_placeholder_values(monkeypatch, tmp_p
     import src.application.agent_tool_handlers as tools
 
     cfg_path = tmp_path / "config.us.json"
-    secrets_dir = tmp_path / "secrets"
-    secrets_dir.mkdir()
-    (secrets_dir / "portfolio.sqlite.json").write_text(
+    data_cfg_path = tmp_path / "portfolio.runtime.json"
+    data_cfg_path.write_text(
         json.dumps({"option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"}}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    (secrets_dir / "notifications.feishu.app.json").write_text(
-        json.dumps({"feishu": {"app_id": "cli_xxx", "app_secret": "xxx"}}, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    cfg = _public_cfg_with_futu("secrets/portfolio.sqlite.json")
+    monkeypatch.setenv("OM_NOTIFY_FEISHU_APP_ID", "cli_xxx")
+    monkeypatch.setenv("OM_NOTIFY_FEISHU_APP_SECRET", "xxx")
+    cfg = _public_cfg_with_futu("portfolio.runtime.json")
     cfg["notifications"] = {
         "provider": "feishu_app",
         "target": "ou_xxx",
-        "secrets_file": "secrets/notifications.feishu.app.json",
     }
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -417,7 +416,7 @@ def test_healthcheck_warns_on_notification_placeholder_values(monkeypatch, tmp_p
 
     assert out["ok"] is True
     assert any(item["name"] == "notification_target_placeholder" and item["status"] == "warn" for item in out["data"]["checks"])
-    assert any(item["name"] == "notification_secrets_placeholder" and item["status"] == "warn" for item in out["data"]["checks"])
+    assert any(item["name"] == "notification_credentials_placeholder" and item["status"] == "warn" for item in out["data"]["checks"])
     assert any("example notifications.target placeholder" in item for item in out["warnings"])
     assert any("example notification credentials" in item for item in out["warnings"])
 
@@ -434,7 +433,7 @@ def test_get_portfolio_context_allows_futu_source_without_explicit_data_config(m
     old_load = tools.load_portfolio_context
     try:
         def _fake_load_portfolio_context(**kwargs):  # type: ignore[no-untyped-def]
-            assert str(kwargs["data_config"]).endswith("secrets/portfolio.sqlite.json")
+            assert str(kwargs["data_config"]).endswith("portfolio.runtime.json")
             return {
                 "portfolio_source_name": "futu",
                 "cash_by_currency": {"USD": 1000.0},
@@ -458,14 +457,17 @@ def test_get_portfolio_context_rejects_stale_external_holdings_cache_for_wrong_a
     cfg_path = tmp_path / "config.hk.json"
     secrets_dir = tmp_path / "secrets"
     secrets_dir.mkdir()
-    (secrets_dir / "portfolio.sqlite.json").write_text(
+    monkeypatch.setenv("OM_FEISHU_APP_ID", "cli_xxx")
+    monkeypatch.setenv("OM_FEISHU_APP_SECRET", "secret_xxx")
+    monkeypatch.setenv("OM_FEISHU_HOLDINGS_TABLE", "app_token/table_id")
+    (tmp_path / "portfolio.runtime.json").write_text(
         json.dumps(
             {
                 "option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"},
                 "feishu": {
-                    "app_id": "cli_xxx",
-                    "app_secret": "secret_xxx",
-                    "tables": {"holdings": "app_token/table_id"},
+                    "app_id_env": "OM_FEISHU_APP_ID",
+                    "app_secret_env": "OM_FEISHU_APP_SECRET",
+                    "tables": {"holdings_env": "OM_FEISHU_HOLDINGS_TABLE"},
                 },
             },
             ensure_ascii=False,
@@ -473,7 +475,7 @@ def test_get_portfolio_context_rejects_stale_external_holdings_cache_for_wrong_a
         ),
         encoding="utf-8",
     )
-    cfg = _public_cfg_with_futu("secrets/portfolio.sqlite.json")
+    cfg = _public_cfg_with_futu("portfolio.runtime.json")
     cfg["accounts"] = ["lx", "sy"]
     cfg["account_settings"]["lx"] = {"type": "futu"}
     cfg["account_settings"]["sy"] = {"type": "external_holdings", "holdings_account": "sy"}
@@ -582,8 +584,8 @@ def test_monthly_income_report_returns_agent_summary(monkeypatch, tmp_path: Path
         return out
 
     sqlite_path = tmp_path / "output_shared" / "state" / "option_positions.sqlite3"
-    data_cfg_path = tmp_path / "secrets" / "portfolio.sqlite.json"
-    data_cfg_path.parent.mkdir(parents=True)
+    data_cfg_path = tmp_path / "portfolio.runtime.json"
+    data_cfg_path.parent.mkdir(parents=True, exist_ok=True)
     data_cfg_path.write_text(
         json.dumps({"option_positions": {"sqlite_path": str(sqlite_path)}}, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -681,7 +683,7 @@ def test_monthly_income_report_returns_agent_summary(monkeypatch, tmp_path: Path
     assert out["data"]["premium_rows"][0]["premium_received_gross"] == 250.0
     assert out["data"]["cashflow_rows"][0]["net_cashflow_gross"] == 250.0
     assert out["data"]["cashflow_rows"][1]["net_cashflow_gross"] == -100.0
-    assert out["meta"]["data_config"] == ".../portfolio.sqlite.json"
+    assert out["meta"]["data_config"] == ".../portfolio.runtime.json"
 
 
 def test_version_check_returns_agent_diagnostic(monkeypatch) -> None:
@@ -832,8 +834,8 @@ def test_option_positions_read_lists_events_history_and_inspect(tmp_path: Path) 
         return out
 
     sqlite_path = tmp_path / "output_shared" / "state" / "option_positions.sqlite3"
-    data_cfg_path = tmp_path / "secrets" / "portfolio.sqlite.json"
-    data_cfg_path.parent.mkdir(parents=True)
+    data_cfg_path = tmp_path / "portfolio.runtime.json"
+    data_cfg_path.parent.mkdir(parents=True, exist_ok=True)
     data_cfg_path.write_text(
         json.dumps({"option_positions": {"sqlite_path": str(sqlite_path)}}, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -910,7 +912,7 @@ def test_option_positions_read_lists_events_history_and_inspect(tmp_path: Path) 
     assert history["data"]["event_count"] == 1
     assert inspected["ok"] is True
     assert inspected["data"]["matched_record_ids"] == [record_id]
-    assert inspected["meta"]["data_config"] == ".../portfolio.sqlite.json"
+    assert inspected["meta"]["data_config"] == ".../portfolio.runtime.json"
 
 
 def test_runtime_status_summarizes_openclaw_runtime_files(tmp_path: Path) -> None:
@@ -980,28 +982,6 @@ def test_runtime_status_summarizes_openclaw_runtime_files(tmp_path: Path) -> Non
                 "open_positions_min": [],
             }
         ),
-        encoding="utf-8",
-    )
-    (shared_state_dir / "option_positions_feishu_sync.json").write_text(
-        json.dumps(
-            {
-                "status": "applied",
-                "summary": {"scanned": 1, "create": 1, "update": 0, "delete": 0, "skip": 0, "conflict": 0, "failed": 0},
-                "receipt": {
-                    "status": "sent",
-                    "reason": "applied",
-                    "delivery_confirmed": True,
-                    "message_id": "msg-sync-1",
-                    "attempt_count": 1,
-                    "receipt_key": "sync-receipt-key-1",
-                    "updated_at": "2026-05-15T16:11:00+00:00",
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-    (shared_state_dir / "option_positions_feishu_sync_receipts.json").write_text(
-        json.dumps({"receipts": {"sync-receipt-key-1": {"receipt": {"status": "sent"}}}}),
         encoding="utf-8",
     )
     (report_dir / "symbols_notification.txt").write_text("shared notification\n", encoding="utf-8")
@@ -1125,10 +1105,9 @@ def test_runtime_status_summarizes_openclaw_runtime_files(tmp_path: Path) -> Non
     assert out["data"]["trade_intake"]["summary"]["processed_count"] == 1
     assert out["data"]["trade_intake"]["summary"]["receipt_confirmed_count"] == 1
     assert out["data"]["trade_intake"]["audit"]["exists"] is True
-    assert out["data"]["option_positions_feishu_sync"]["last_run"]["json"]["status"] == "applied"
-    assert out["data"]["option_positions_feishu_sync"]["receipt"]["receipt_key"] == "sync-receipt-key-1"
-    assert out["data"]["summary"]["option_positions_feishu_sync_status"] == "applied"
-    assert out["data"]["summary"]["option_positions_feishu_sync_receipt_status"] == "sent"
+    assert "option_positions_feishu_sync" not in out["data"]
+    assert "option_positions_feishu_sync_status" not in out["data"]["summary"]
+    assert "option_positions_feishu_sync_receipt_status" not in out["data"]["summary"]
 
 
 def test_runtime_status_can_inspect_scanned_run_after_skipped_latest(tmp_path: Path) -> None:
@@ -1297,12 +1276,12 @@ def test_openclaw_readiness_combines_status_and_healthcheck(monkeypatch, tmp_pat
     cfg_path = tmp_path / "config.us.json"
     secrets_dir = tmp_path / "secrets"
     secrets_dir.mkdir()
-    (secrets_dir / "portfolio.sqlite.json").write_text(
+    (tmp_path / "portfolio.runtime.json").write_text(
         json.dumps({"option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"}}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     cfg_path.write_text(
-        json.dumps(_public_cfg_with_futu("secrets/portfolio.sqlite.json"), ensure_ascii=False, indent=2),
+        json.dumps(_public_cfg_with_futu("portfolio.runtime.json"), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 
@@ -1552,11 +1531,11 @@ def test_prepare_close_advice_inputs_builds_context_and_required_data(monkeypatc
     cfg_path = tmp_path / "config.us.json"
     secrets_dir = tmp_path / "secrets"
     secrets_dir.mkdir()
-    (secrets_dir / "portfolio.sqlite.json").write_text(
+    (tmp_path / "portfolio.runtime.json").write_text(
         json.dumps({"option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"}}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    cfg = _public_cfg_with_futu("secrets/portfolio.sqlite.json")
+    cfg = _public_cfg_with_futu("portfolio.runtime.json")
     cfg["close_advice"] = {"enabled": True}
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -1618,11 +1597,11 @@ def test_prepare_close_advice_inputs_reuses_cached_required_data_when_coverage_i
     cfg_path = tmp_path / "config.us.json"
     secrets_dir = tmp_path / "secrets"
     secrets_dir.mkdir()
-    (secrets_dir / "portfolio.sqlite.json").write_text(
+    (tmp_path / "portfolio.runtime.json").write_text(
         json.dumps({"option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"}}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    cfg = _public_cfg_with_futu("secrets/portfolio.sqlite.json")
+    cfg = _public_cfg_with_futu("portfolio.runtime.json")
     cfg["close_advice"] = {"enabled": True}
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -1678,11 +1657,11 @@ def test_prepare_close_advice_inputs_reports_missing_required_expirations(monkey
     cfg_path = tmp_path / "config.us.json"
     secrets_dir = tmp_path / "secrets"
     secrets_dir.mkdir()
-    (secrets_dir / "portfolio.sqlite.json").write_text(
+    (tmp_path / "portfolio.runtime.json").write_text(
         json.dumps({"option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"}}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    cfg = _public_cfg_with_futu("secrets/portfolio.sqlite.json")
+    cfg = _public_cfg_with_futu("portfolio.runtime.json")
     cfg["symbols"][0]["symbol"] = "9992.HK"
     cfg["symbols"][0]["fetch"]["limit_expirations"] = 1
     cfg["close_advice"] = {"enabled": True}
@@ -1739,11 +1718,11 @@ def test_prepare_close_advice_inputs_reports_expiration_near_miss_without_silent
     cfg_path = tmp_path / "config.us.json"
     secrets_dir = tmp_path / "secrets"
     secrets_dir.mkdir()
-    (secrets_dir / "portfolio.sqlite.json").write_text(
+    (tmp_path / "portfolio.runtime.json").write_text(
         json.dumps({"option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"}}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    cfg = _public_cfg_with_futu("secrets/portfolio.sqlite.json")
+    cfg = _public_cfg_with_futu("portfolio.runtime.json")
     cfg["symbols"][0]["symbol"] = "0700.HK"
     cfg["close_advice"] = {"enabled": True}
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1814,11 +1793,11 @@ def test_prepare_close_advice_inputs_normalizes_timestamp_expirations(monkeypatc
     cfg_path = tmp_path / "config.us.json"
     secrets_dir = tmp_path / "secrets"
     secrets_dir.mkdir()
-    (secrets_dir / "portfolio.sqlite.json").write_text(
+    (tmp_path / "portfolio.runtime.json").write_text(
         json.dumps({"option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"}}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    cfg = _public_cfg_with_futu("secrets/portfolio.sqlite.json")
+    cfg = _public_cfg_with_futu("portfolio.runtime.json")
     cfg["symbols"][0]["symbol"] = "FUTU"
     cfg["close_advice"] = {"enabled": True}
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1872,11 +1851,11 @@ def test_prepare_close_advice_inputs_uses_expiration_ymd_for_position_requiremen
     cfg_path = tmp_path / "config.us.json"
     secrets_dir = tmp_path / "secrets"
     secrets_dir.mkdir()
-    (secrets_dir / "portfolio.sqlite.json").write_text(
+    (tmp_path / "portfolio.runtime.json").write_text(
         json.dumps({"option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"}}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    cfg = _public_cfg_with_futu("secrets/portfolio.sqlite.json")
+    cfg = _public_cfg_with_futu("portfolio.runtime.json")
     cfg["symbols"][0]["symbol"] = "FUTU"
     cfg["close_advice"] = {"enabled": True}
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")

@@ -276,6 +276,7 @@ def prefetch_required_data(
     *,
     vpy: Path,
     base: Path,
+    repo_root: Path | None = None,
     cfg: dict[str, Any],
     shared_required: Path,
     force_refresh: bool = False,
@@ -284,6 +285,7 @@ def prefetch_required_data(
         return _prefetch_required_data_unlocked(
             vpy=vpy,
             base=base,
+            repo_root=repo_root,
             cfg=cfg,
             shared_required=shared_required,
             force_refresh=force_refresh,
@@ -294,6 +296,7 @@ def _prefetch_required_data_unlocked(
     *,
     vpy: Path,
     base: Path,
+    repo_root: Path | None = None,
     cfg: dict[str, Any],
     shared_required: Path,
     force_refresh: bool = False,
@@ -332,6 +335,7 @@ def _prefetch_required_data_unlocked(
         except Exception:
             return True
 
+    process_root = (repo_root or base).resolve()
     exec_service = ToolExecutionService(base=base)
     opend_fetch_cfg = _resolve_opend_fetch_cfg(cfg)
     batch_cfg = resolve_opend_batch_config(cfg)
@@ -410,7 +414,7 @@ def _prefetch_required_data_unlocked(
                 source=src,
                 limit_exp=limit_exp,
                 cmd=cmd,
-                cwd=base,
+                cwd=process_root,
                 capture_output=True,
                 text=True,
                 idempotency_scope='required_data_prefetch',

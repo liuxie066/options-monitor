@@ -43,6 +43,7 @@ class TickSchedulerRequest:
     check_trading_day_for_market: Callable[[str], tuple[bool | None, str]]
     run_scan_scheduler_cli_fn: Callable[..., Any] = run_scan_scheduler_cli
     account_view_cls: type[AccountSchedulerDecisionView] = AccountSchedulerDecisionView
+    repo_root: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -123,7 +124,7 @@ def build_tick_scheduler_context(request: TickSchedulerRequest) -> TickScheduler
         try:
             scheduler_result = run_scheduler_flow(
                 vpy=request.vpy,
-                base=request.base,
+                base=(request.repo_root or request.base),
                 cfg_path=request.cfg_path,
                 base_cfg=request.base_cfg,
                 state_path=state_path,

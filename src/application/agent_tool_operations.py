@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.ledger.api import ledger_store_payload
@@ -239,8 +239,10 @@ def _events_action(
     expiration_ymd = _optional_text(payload.get("exp") or payload.get("expiration_ymd"))
     limit = _as_int(payload.get("limit"), default=50)
 
+    raw_events = list_trade_events()
+    trade_events = raw_events if isinstance(raw_events, list) else []
     rows: list[dict[str, Any]] = []
-    for event in reversed(list_trade_events()):
+    for event in reversed(trade_events):
         if not isinstance(event, dict):
             continue
         event_broker = normalize_broker(event.get("broker"))
@@ -296,7 +298,8 @@ def option_positions_read_tool(
         raise AgentToolError(code="INPUT_ERROR", message=f"unsupported option_positions_read action: {action}")
 
     config_path, cfg = load_runtime_config(config_key=payload.get("config_key"), config_path=payload.get("config_path"))
-    portfolio_cfg = cfg.get("portfolio") if isinstance(cfg.get("portfolio"), dict) else {}
+    portfolio_raw = cfg.get("portfolio")
+    portfolio_cfg = cast(dict[str, Any], portfolio_raw) if isinstance(portfolio_raw, dict) else {}
     data_config_path = resolve_public_data_config_path(payload, portfolio_cfg)
     _resolved_data_config, repo = resolve_option_positions_repo(base=repo_base(), data_config=data_config_path)
     ledger_store = ledger_store_payload(data_config_path, repo)
@@ -356,7 +359,6 @@ def option_positions_read_tool(
     else:
         selectors = {
             "record_id": _optional_text(payload.get("record_id")),
-            "feishu_record_id": _optional_text(payload.get("feishu_record_id")),
             "account": _optional_text(payload.get("account")),
             "symbol": _optional_text(payload.get("symbol")),
             "option_type": _optional_text(payload.get("option_type")),

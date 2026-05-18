@@ -12,11 +12,9 @@ from domain.domain.trade_contract_identity import (
     normalize_trade_side,
 )
 from src.application.ledger.lot_resolver import LotCloseResolutionError, LotCloseSelector, resolve_fifo_close_targets
-from src.application.ledger.position_records import PositionLotRecord
 from src.application.ledger.publisher import project_stored_trade_events_to_position_lots
 from src.application.ledger.repository import with_sqlite_repo_transaction
 from src.application.ledger.results import LedgerWriteResult, ProjectionRefreshResult
-from src.application.ledger.sync_metadata import POSITION_LOT_SYNC_METADATA_FIELDS
 
 
 def projection_diagnostics_summary(diagnostics: Sequence[Any]) -> dict[str, Any]:
@@ -51,55 +49,19 @@ def safe_int_count(value: Any) -> int:
         return 0
 
 
-def merge_preserved_position_lot_metadata(
-    records: list[PositionLotRecord],
-    existing_rows: list[dict[str, Any]],
-) -> list[PositionLotRecord]:
-    existing_by_record_id: dict[str, dict[str, Any]] = {}
-    for item in existing_rows:
-        record_id = str(item.get("record_id") or "").strip()
-        fields = item.get("fields") or {}
-        if record_id and isinstance(fields, dict):
-            existing_by_record_id[record_id] = fields
-
-    merged: list[PositionLotRecord] = []
-    for record in records:
-        record_id = record.record_id
-        fields = record.fields
-        existing_fields = existing_by_record_id.get(record_id) or {}
-        patched_fields = dict(fields)
-        for key in POSITION_LOT_SYNC_METADATA_FIELDS:
-            value = existing_fields.get(key)
-            if value not in (None, ""):
-                patched_fields[key] = value
-        merged.append(record.with_fields(patched_fields))
-    return merged
-
-
 def rebuild_position_lots_from_trade_events(repo: Any) -> ProjectionRefreshResult:
     def _run(sqlite_repo: Any, conn: Any | None) -> ProjectionRefreshResult:
         if conn is not None:
-            existing_rows = sqlite_repo.list_position_lots()
             events = sqlite_repo.list_trade_events(conn=conn)
             projection = project_stored_trade_events_to_position_lots(events)
-            merged = merge_preserved_position_lot_metadata(projection.lots, existing_rows)
-            inserted = sqlite_repo.replace_position_lots(merged, conn=conn)
+            inserted = sqlite_repo.replace_position_lots(projection.lots, conn=conn)
         else:
-            existing_rows = sqlite_repo.list_position_lots()
             events = sqlite_repo.list_trade_events()
             projection = project_stored_trade_events_to_position_lots(events)
-            merged = merge_preserved_position_lot_metadata(projection.lots, existing_rows)
-            inserted = sqlite_repo.replace_position_lots(merged)
+            inserted = sqlite_repo.replace_position_lots(projection.lots)
         result = {
             "trade_event_count": int(len(events)),
             "position_lot_count": int(inserted),
-            "preserved_sync_meta_record_count": int(
-                sum(
-                    1
-                    for item in merged
-                    if any(item.fields.get(key) not in (None, "") for key in POSITION_LOT_SYNC_METADATA_FIELDS)
-                )
-            ),
         }
         result.update(projection_diagnostics_summary(projection.diagnostics))
         return ProjectionRefreshResult.from_payload(result)
@@ -112,15 +74,13 @@ def persist_trade_event_object(repo: Any, event: Any) -> LedgerWriteResult:
         storage_events = _events_for_storage(sqlite_repo, event)
         if conn is not None:
             created_flags = [sqlite_repo.upsert_trade_event(item, conn=conn) for item in storage_events]
-            existing_rows = sqlite_repo.list_position_lots()
             projection = project_stored_trade_events_to_position_lots(sqlite_repo.list_trade_events(conn=conn))
-            records = merge_preserved_position_lot_metadata(projection.lots, existing_rows)
+            records = projection.lots
             lot_count = sqlite_repo.replace_position_lots(records, conn=conn)
         else:
             created_flags = [sqlite_repo.upsert_trade_event(item) for item in storage_events]
-            existing_rows = sqlite_repo.list_position_lots()
             projection = project_stored_trade_events_to_position_lots(sqlite_repo.list_trade_events())
-            records = merge_preserved_position_lot_metadata(projection.lots, existing_rows)
+            records = projection.lots
             lot_count = sqlite_repo.replace_position_lots(records)
         payload = storage_events[0].raw_payload or {}
         explicit_record_id = str(payload.get("record_id") or "").strip()

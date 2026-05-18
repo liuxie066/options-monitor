@@ -24,10 +24,8 @@ from src.application.runtime_config_paths import write_json_atomic
 def data_config_candidates(*, base: Path) -> list[Path]:
     base = Path(base).resolve()
     candidates = [
-        (base / "secrets" / "portfolio.sqlite.json").resolve(),
-        (base / "secrets" / "portfolio.feishu.json").resolve(),
-        Path("/opt/options-monitor/secrets/portfolio.sqlite.json").resolve(),
-        Path("/opt/options-monitor/secrets/portfolio.feishu.json").resolve(),
+        (base / "portfolio.runtime.json").resolve(),
+        Path("/etc/options-monitor/portfolio.runtime.json").resolve(),
     ]
     seen: set[str] = set()
     out: list[Path] = []

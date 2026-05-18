@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## 1.2.65 - 2026-05-19
+
+### Added
+- Added `./om service render` / `./om service status` support for Linux systemd and Mac launchd deployments, including runtime-root aware service profiles and split runtime/dev/server dependency files.
+- Added runtime path and secret resolution helpers so deployed services can read server-local environment variables without depending on repo-local secret JSON files.
+- Added AI Cofunder ranking evidence for strategy handoff bundles, including per-report top candidates, score inputs, configured score weights, cash headroom, reject samples, and handoff Markdown summaries.
+
+### Changed
+- Added `--env-file` to `./om service render` for systemd deployments so generated services reference the server-local environment file for Feishu credentials.
+- Routed scheduler, sell-put cash, pipeline runtime, multiplier cache, external service, and agent health/status paths through the configured runtime root.
+- Enforced sell-put `min_otm_pct` in the candidate engine and scan pipeline so configured OTM distance is part of the hard strategy gate.
+
+### Removed
+- Retired option-position Feishu Bitable mirror sync, including the `sync-feishu` CLI, sync metadata writes, sync receipts, runtime-status sync readouts, config defaults, docs, and sync-specific tests.
+- Removed repo-local `secrets/*.json` from the formal runtime path; Feishu holdings and Feishu app notifications now resolve credentials from environment variables, and option-position SQLite defaults to runtime-root storage without `portfolio.data_config`.
+- Removed retired one-off scripts and obsolete optimization notes that duplicated maintained CLI, runtime status, close-advice, notification, and deployment paths.
+
+### Tests
+- Re-ran full pytest, changed Python compile checks, focused AI Cofunder/plugin tests, config build dry-runs for US/HK, changed-path type checks, diff checks, and release metadata validation.
+
 ## 1.2.64 - 2026-05-18
 
 ### Fixed

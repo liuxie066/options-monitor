@@ -106,6 +106,34 @@ def test_cli_uses_defaults_when_args_absent(monkeypatch) -> None:
     assert request.snapshot_fallback_batch_size == 20
 
 
+def test_cli_uses_runtime_root_for_fetch_base_and_metrics(monkeypatch, tmp_path: Path) -> None:
+    mod = _mod()
+
+    runtime_root = tmp_path / "runtime"
+    captured: dict[str, object] = {}
+
+    def _fake_fetch_symbol_request(request):
+        captured["request"] = request
+        return {"symbol": request.symbol, "rows": [], "expiration_count": 0, "meta": {}}
+
+    def _fake_append_metrics_json(path, payload, *args, **kwargs):
+        captured["metrics_path"] = Path(path)
+        captured["metrics_payload"] = payload
+
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(runtime_root))
+    monkeypatch.setattr(mod, "fetch_symbol_request", _fake_fetch_symbol_request)
+    monkeypatch.setattr(mod, "save_outputs", lambda *args, **kwargs: (Path("raw"), Path("csv")))
+    monkeypatch.setattr(mod, "append_metrics_json", _fake_append_metrics_json)
+    monkeypatch.setattr(mod, "prune_chain_cache", lambda *args, **kwargs: None)
+    monkeypatch.setattr("sys.argv", ["prog", "--symbols", "MSFT", "--chain-cache", "--quiet"])
+
+    mod.main()
+
+    request = _request(captured["request"])
+    assert request.base_dir == runtime_root.resolve()
+    assert captured["metrics_path"] == (runtime_root / "output_shared" / "state" / "opend_metrics.json").resolve()
+
+
 def test_cli_normalizes_invalid_snapshot_batch_and_fallback_args(monkeypatch) -> None:
     mod = _mod()
 

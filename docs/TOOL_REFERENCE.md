@@ -125,6 +125,24 @@
 `./om config build`，会以 `[CONFIG_ERROR]` 失败并打印重建命令。`--allow-stale-config`
 只用于临时应急。
 
+### Service 入口关系
+
+Linux / Mac 长期运行建议先渲染服务文件，再由系统服务管理器安装：
+
+```bash
+./om service render --target systemd --runtime-root /var/lib/options-monitor --env-file /etc/options-monitor/options-monitor.env --markets us hk --accounts lx sy --output-dir /tmp/options-monitor-service
+./om service render --target launchd --runtime-root "$HOME/Library/Application Support/options-monitor" --markets us hk --accounts lx sy --output-dir /tmp/options-monitor-service
+```
+
+只读检查：
+
+```bash
+./om service status --profile-path /var/lib/options-monitor/service.profile.json --include-service-status
+./om-agent run --tool runtime_status --input-json '{"profile_path":"/var/lib/options-monitor/service.profile.json"}'
+```
+
+`service render` 只生成 service/timer/plist/profile 文件和安装命令，不会自动安装或启动。systemd 的 `--env-file` 会写入 `EnvironmentFile=...`，用于加载服务器本地的 Feishu 凭证环境变量。服务文件通过 `OM_RUNTIME_ROOT` 约束运行时目录，所有 `output_runs` / `output_shared` / `output_accounts` / SQLite 都应落到该目录。
+
 ---
 
 ## 5. 当前公开工具列表
@@ -425,7 +443,9 @@ OM_AGENT_ENABLE_WRITE_TOOLS=true ./om-agent run --tool version_update --input-js
 - 不运行 pipeline
 - 不发送通知
 - 可读取 `openclaw.profile.json` / `.openclaw-profile.json` 或 payload 里的
-  `profile_path` 作为 OpenClaw 路径、账户和 freshness 阈值
+  `profile_path` 作为 OpenClaw 或 service profile 路径、账户和 freshness 阈值
+- service profile 会提供 `service_provider`、`repo_root`、`runtime_root`、
+  `config_paths` 和 `services` 摘要
 - 可读取可选的外层任务上下文，例如 `trigger_source`、`trigger_job_id`、
   `delivery.mode` / `delivery_mode`、`timeoutSeconds`，用于区分“代码没有发送”
   和“外层任务没有 announce”

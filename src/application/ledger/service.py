@@ -56,28 +56,10 @@ def require_option_positions_read_repo(repo: Any) -> Any:
     return _impl(repo)
 
 
-def require_option_positions_sync_meta_repo(repo: Any) -> Any:
-    from src.application.ledger.repository import require_option_positions_sync_meta_repo as _impl
-
-    return _impl(repo)
-
-
 def require_option_positions_event_write_repo(repo: Any) -> Any:
     from src.application.ledger.repository import require_option_positions_event_write_repo as _impl
 
     return _impl(repo)
-
-
-def load_table_ref(data_config: Any) -> Any:
-    from src.application.ledger.repository import load_table_ref as _impl
-
-    return _impl(data_config)
-
-
-def option_positions_sync_to_feishu_enabled(data_config: Any) -> bool:
-    from src.application.ledger.repository import option_positions_sync_to_feishu_enabled as _impl
-
-    return bool(_impl(data_config))
 
 
 def rebuild_position_lots_from_trade_events(repo: Any) -> ProjectionRefreshResult:

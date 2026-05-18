@@ -7,7 +7,6 @@ def _base_cfg() -> dict:
         "accounts": ["user1"],
         "account_settings": {"user1": {"type": "futu"}},
         "portfolio": {
-            "data_config": "secrets/portfolio.sqlite.json",
             "broker": "富途",
             "account": "user1",
             "source": "futu",

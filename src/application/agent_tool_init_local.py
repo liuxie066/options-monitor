@@ -20,7 +20,7 @@ DEFAULT_SYMBOLS = {
 
 
 def _example_data_config_path(*, repo_root: Path) -> Path:
-    return (repo_root / "configs" / "examples" / "portfolio.sqlite.example.json").resolve()
+    return (repo_root / "configs" / "examples" / "portfolio.runtime.example.json").resolve()
 
 
 def default_runtime_config_path(*, repo_root: Path, market: str) -> Path:
@@ -28,7 +28,7 @@ def default_runtime_config_path(*, repo_root: Path, market: str) -> Path:
 
 
 def default_data_config_path(*, repo_root: Path) -> Path:
-    return (repo_root / "secrets" / "portfolio.sqlite.json").resolve()
+    return (repo_root / "portfolio.runtime.json").resolve()
 
 
 def _normalize_market(value: str) -> str:

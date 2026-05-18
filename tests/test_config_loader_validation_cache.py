@@ -74,28 +74,27 @@ def test_resolve_data_config_path_prefers_explicit_path() -> None:
     assert out == explicit.resolve()
 
 
-def test_default_data_config_path_prefers_new_secret_location_when_present() -> None:
+def test_default_data_config_path_prefers_runtime_config_location_when_present() -> None:
     from src.application.config_loader import default_data_config_path
 
     with TemporaryDirectory() as td:
         base = Path(td)
-        secret = base / "secrets" / "portfolio.sqlite.json"
-        secret.parent.mkdir(parents=True, exist_ok=True)
-        secret.write_text("{}", encoding="utf-8")
+        data_config = base / "portfolio.runtime.json"
+        data_config.write_text("{}", encoding="utf-8")
 
         out = default_data_config_path(base=base)
 
-    assert out == secret.resolve()
+    assert out == data_config.resolve()
 
 
-def test_default_data_config_path_falls_back_to_legacy_location_when_missing() -> None:
+def test_default_data_config_path_falls_back_to_runtime_config_location_when_missing() -> None:
     from src.application.config_loader import default_data_config_path
 
     with TemporaryDirectory() as td:
         base = Path(td)
         out = default_data_config_path(base=base)
 
-    assert out == (base / "secrets" / "portfolio.sqlite.json").resolve()
+    assert out == (base / "portfolio.runtime.json").resolve()
 
 
 def test_resolve_data_config_path_prefers_env_override(monkeypatch) -> None:
@@ -122,7 +121,7 @@ def test_resolve_data_config_path_ignores_legacy_om_pm_config(monkeypatch) -> No
 
         out = resolve_data_config_path(base=base, data_config=None)
 
-    assert out == (base / "secrets" / "portfolio.sqlite.json").resolve()
+    assert out == (base / "portfolio.runtime.json").resolve()
 
 
 def test_resolve_watchlist_and_templates_config_require_canonical_keys() -> None:

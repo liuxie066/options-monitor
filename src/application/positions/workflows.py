@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import sys
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 from domain.domain.ledger.position_fields import (
@@ -20,25 +18,6 @@ from src.application.ledger.api import (
     record_manual_position_open,
     resolve_manual_position_close_target,
 )
-from src.application.positions.feishu_sync import sync_single_option_position_record
-from src.application.positions.sync_config import effective_option_positions_sync_to_feishu_enabled
-
-
-def _auto_sync_record_if_possible(repo: Any, *, record_id: str) -> dict[str, Any] | None:
-    try:
-        data_config = getattr(repo, "data_config_path", None)
-        if data_config is None:
-            return None
-        resolved_data_config = Path(str(data_config))
-        if not effective_option_positions_sync_to_feishu_enabled(data_config=resolved_data_config, repo=repo):
-            return None
-        return sync_single_option_position_record(repo=repo, data_config=resolved_data_config, record_id=record_id, apply_mode=True)
-    except Exception as sync_error:
-        print(
-            f"[WARN] option_positions post-write Feishu sync skipped for {record_id} ({type(sync_error).__name__}): {sync_error}",
-            file=sys.stderr,
-        )
-        return None
 
 
 def _ms_to_iso(value: int | None) -> str:
@@ -47,7 +26,7 @@ def _ms_to_iso(value: int | None) -> str:
     return datetime.fromtimestamp(int(value) / 1000, tz=timezone.utc).isoformat()
 
 
-def _apply_with_optional_sync(
+def _apply_result_payload(
     repo: Any,
     *,
     record_id: str,
@@ -57,13 +36,11 @@ def _apply_with_optional_sync(
     verification_snapshot_id: str | None = None,
     verification_note: str | None = None,
 ) -> dict[str, Any]:
-    del native_event, verification_snapshot_id, verification_note
+    del repo, record_id, native_event, verification_snapshot_id, verification_note
     idempotent_duplicate = result.get("created") is False
-    sync_result = _auto_sync_record_if_possible(repo, record_id=record_id) if record_id else None
     return payload | {
         "mode": "applied",
         "result": result,
-        "sync_result": sync_result,
         "idempotent_duplicate": bool(idempotent_duplicate),
     }
 
@@ -251,10 +228,10 @@ def execute_manual_open(
     fields = payload["fields"]
     payload_command = payload.get("command")
     command = payload_command if isinstance(payload_command, OpenPositionCommand) else command
-    synced_record_id = _manual_open_record_id(result)
-    return _apply_with_optional_sync(
+    record_id = _manual_open_record_id(result)
+    return _apply_result_payload(
         repo,
-        record_id=synced_record_id,
+        record_id=record_id,
         result=result,
         payload=payload,
         native_event={
@@ -273,7 +250,7 @@ def execute_manual_open(
             "currency": fields.get("currency"),
             "multiplier": fields.get("multiplier"),
             "contracts": int(contracts),
-            "snapshot_lot_id": synced_record_id or None,
+            "snapshot_lot_id": record_id or None,
         },
     )
 
@@ -336,7 +313,7 @@ def execute_manual_close(
     payload = close_payload | {"match": match_info}
     ledger_preflight = close_payload["ledger_preflight"]
     is_duplicate = result.get("created") is False
-    return _apply_with_optional_sync(
+    return _apply_result_payload(
         repo,
         record_id=resolved_record_id,
         result=result,
@@ -404,7 +381,7 @@ def execute_manual_adjust(
     raw_target_contracts = patch.get("contracts_open")
     if raw_target_contracts is None:
         raw_target_contracts = fields.get("contracts_open") or fields.get("contracts") or 0
-    return _apply_with_optional_sync(
+    return _apply_result_payload(
         repo,
         record_id=record_id,
         result=result,

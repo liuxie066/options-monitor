@@ -65,6 +65,7 @@ from src.application.tick_run_context import (
 )
 from src.application.tick_run_workspace import prepare_tick_run_workspace
 from src.application.runtime_trigger_context import build_trigger_context
+from src.application.runtime_paths import resolve_runtime_root
 from src.application.runtime_config_freshness import RuntimeConfigFreshnessError, ensure_runtime_config_freshness
 from src.application.tick_scheduler_context import (
     TickSchedulerRequest,
@@ -121,8 +122,10 @@ def main(argv: list[str] | None = None) -> int:
     smoke = bool(getattr(args, 'smoke', False))
     force_mode = bool(getattr(args, 'force', False))
 
-    base = Path(__file__).resolve().parents[2]
-    vpy = base / '.venv' / 'bin' / 'python'
+    repo_root = Path(__file__).resolve().parents[2]
+    runtime_resolution = resolve_runtime_root(repo_root=repo_root)
+    base = runtime_resolution.runtime_root
+    vpy = repo_root / '.venv' / 'bin' / 'python'
     runlog = RunLogger(base)
     global _CURRENT_RUN_ID
     _CURRENT_RUN_ID = runlog.run_id  # pyright: ignore[reportConstantRedefinition]
@@ -130,16 +133,16 @@ def main(argv: list[str] | None = None) -> int:
 
     cfg_path = Path(args.config)
     if not cfg_path.is_absolute():
-        cfg_path = (base / cfg_path).resolve()
+        cfg_path = (repo_root / cfg_path).resolve()
     contract_info = resolve_config_contract(
         cfg_path,
         str(getattr(args, 'market_config', 'auto') or 'auto'),
-        repo_base=base,
+        repo_base=repo_root,
     )
     ensure_runtime_canonical_config(
         cfg_path,
         str(getattr(args, 'market_config', 'auto') or 'auto'),
-        repo_base=base,
+        repo_base=repo_root,
         require_sibling_external=True,
     )
     base_cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
@@ -155,7 +158,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             freshness_info = ensure_runtime_config_freshness(
                 base_cfg,
-                repo_root=base,
+                repo_root=repo_root,
                 market=freshness_market,
                 runtime_config_path=cfg_path,
             )
@@ -188,6 +191,9 @@ def main(argv: list[str] | None = None) -> int:
             'config_schedule_contract': schedule_contract_info,
             'config_freshness': freshness_info,
             'allow_stale_config': allow_stale_config,
+            'repo_root': str(repo_root),
+            'runtime_root': str(base),
+            'runtime_root_source': runtime_resolution.source,
             'trigger_source': trigger_context.get('source'),
             'trigger_job_id': trigger_context.get('job_id'),
             'outer_delivery_mode': trigger_context.get('delivery_mode'),
@@ -320,6 +326,7 @@ def main(argv: list[str] | None = None) -> int:
     scheduler_outcome = build_tick_scheduler_context(
         TickSchedulerRequest(
             vpy=vpy,
+            repo_root=repo_root,
             base=base,
             cfg_path=cfg_path,
             base_cfg=base_cfg,
@@ -374,6 +381,7 @@ def main(argv: list[str] | None = None) -> int:
             account_ids=account_ids,
             account_workers=account_workers,
             base=base,
+            repo_root=repo_root,
             base_cfg=base_cfg,
             cfg_path=cfg_path,
             vpy=vpy,
@@ -407,6 +415,7 @@ def main(argv: list[str] | None = None) -> int:
     return run_tick_notification_flow(
         TickNotificationRequest(
             base=base,
+            repo_root=repo_root,
             cfg_path=cfg_path,
             state_path=state_path,
             scheduler_schedule_key=str(scheduler_schedule_key),

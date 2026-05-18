@@ -283,6 +283,7 @@ def run_sell_put_scan_and_summarize(
             min_net_income=float(min_net_income_native),
             min_strike=_optional_float(sp, 'min_strike'),
             max_strike=_optional_float(sp, 'max_strike'),
+            min_otm_pct=_optional_float(sp, 'min_otm_pct'),
             min_open_interest=liquidity.min_open_interest,
             min_volume=liquidity.min_volume,
             max_spread_ratio=liquidity.max_spread_ratio,

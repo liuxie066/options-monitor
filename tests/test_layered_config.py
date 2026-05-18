@@ -43,7 +43,7 @@ def test_layered_config_builds_minimal_us_user_config(tmp_path: Path) -> None:
     assert cfg["accounts"] == ["lx"]
     assert cfg["account_settings"]["lx"]["type"] == "futu"
     assert cfg["portfolio"]["account"] == "lx"
-    assert cfg["portfolio"]["data_config"] == "secrets/portfolio.sqlite.json"
+    assert "data_config" not in cfg["portfolio"]
     assert cfg["portfolio"]["futu"] == {"host": "127.0.0.1", "port": 11111}
     assert cfg["portfolio"]["source_by_account"] == {"lx": "futu"}
     assert cfg["trade_intake"]["mode"] == "apply"
@@ -102,7 +102,7 @@ def test_layered_config_derives_external_holdings_defaults(tmp_path: Path) -> No
     cfg, _meta = build_layered_runtime_config(repo_root=REPO_ROOT, market="hk", user_config_path=user_path)
 
     assert cfg["accounts"] == ["lx", "sy"]
-    assert cfg["portfolio"]["data_config"] == "secrets/portfolio.sqlite.json"
+    assert "data_config" not in cfg["portfolio"]
     assert cfg["portfolio"]["source_by_account"] == {"lx": "futu", "sy": "holdings"}
     assert cfg["trade_intake"]["mode"] == "apply"
     assert cfg["trade_intake"]["account_mapping"]["futu"] == {"REAL_87654321": "lx"}
@@ -123,7 +123,7 @@ def test_layered_config_auto_loads_common_user_config_for_default_user_path(tmp_
         {
             "watchdog": {"retry_enabled": False},
             "runtime": {"portfolio_context_ttl_sec": 1200},
-            "option_positions": {"sync_to_feishu": {"enabled": True}},
+            "option_positions": {"auto_close": {"enabled": False}},
             "symbol_defaults": {
                 "fetch": {"limit_expirations": 7},
                 "sell_put": {"min_dte": 25},
@@ -151,7 +151,7 @@ def test_layered_config_auto_loads_common_user_config_for_default_user_path(tmp_
 
     assert cfg["watchdog"]["retry_enabled"] is False
     assert cfg["runtime"]["portfolio_context_ttl_sec"] == 1200
-    assert cfg["option_positions"]["sync_to_feishu"]["enabled"] is True
+    assert cfg["option_positions"]["auto_close"]["enabled"] is False
     assert cfg["symbols"][0]["fetch"]["limit_expirations"] == 7
     assert cfg["symbols"][0]["sell_put"]["min_dte"] == 25
     assert cfg["accounts"] == ["lx"]
@@ -460,7 +460,7 @@ def test_init_runtime_config_includes_inline_generation_metadata(tmp_path: Path)
     from src.application.agent_tool_init_local import init_local_config
 
     config_path = tmp_path / "config.us.json"
-    data_config_path = tmp_path / "portfolio.sqlite.json"
+    data_config_path = tmp_path / "portfolio.runtime.json"
 
     init_local_config(
         repo_root=REPO_ROOT,
@@ -723,7 +723,7 @@ def test_config_explain_cli_outputs_source_trace(tmp_path: Path, capsys) -> None
     common_path = _write_json(
         tmp_path / "user.common.json",
         {
-            "option_positions": {"sync_to_feishu": {"enabled": True}},
+            "option_positions": {"auto_close": {"enabled": False}},
             "account_settings": {
                 "lx": {
                     "type": "futu",
@@ -745,7 +745,7 @@ def test_config_explain_cli_outputs_source_trace(tmp_path: Path, capsys) -> None
         "--market",
         "us",
         "--key",
-        "option_positions.sync_to_feishu.enabled",
+        "option_positions.auto_close.enabled",
         "--common-user-config",
         str(common_path),
         "--user-config",
@@ -754,6 +754,6 @@ def test_config_explain_cli_outputs_source_trace(tmp_path: Path, capsys) -> None
 
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["value"] is True
+    assert payload["value"] is False
     assert payload["source"] == "common_user_config"
     assert [item["source"] for item in payload["trace"]] == ["system.defaults", "common_user_config"]

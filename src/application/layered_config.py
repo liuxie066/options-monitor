@@ -239,9 +239,6 @@ def _derive_portfolio(cfg: dict[str, Any], *, accounts: list[str]) -> None:
         source_by_account.setdefault(account, "holdings" if account_type == ACCOUNT_TYPE_EXTERNAL_HOLDINGS else "futu")
     portfolio["source_by_account"] = source_by_account
 
-    if not str(portfolio.get("data_config") or "").strip():
-        portfolio["data_config"] = "secrets/portfolio.sqlite.json"
-
     cfg["portfolio"] = portfolio
 
 

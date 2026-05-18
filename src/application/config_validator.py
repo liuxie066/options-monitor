@@ -17,7 +17,6 @@ from src.application.account_config import ACCOUNT_TYPES, account_settings_from_
 from src.application.config_loader import resolve_templates_config, resolve_watchlist_config, set_watchlist_config
 from src.application.trades.account_mapping import resolve_trade_intake_config
 from src.application.positions.maintenance_receipt import resolve_auto_close_receipt_config
-from src.application.positions.feishu_sync_receipt import resolve_option_positions_feishu_sync_receipt_config
 from src.application.opend_fetch_config import OPEND_RATE_LIMIT_ENDPOINT_KEYS
 from src.application.yield_enhancement_config import (
     YIELD_ENHANCEMENT_FUNDING_MODES,
@@ -472,7 +471,7 @@ def validate_config(cfg: dict):
     if notifications and not isinstance(notifications, dict):
         die('notifications must be an object')
     if isinstance(notifications, dict) and notifications:
-        has_routing = any(notifications.get(k) for k in ('provider', 'channel', 'target', 'secrets_file'))
+        has_routing = any(notifications.get(k) for k in ('provider', 'channel', 'target'))
         if has_routing:
             provider = normalize_notification_provider(notifications.get('provider') or notifications.get('channel'))
             if provider not in SUPPORTED_NOTIFICATION_PROVIDERS:
@@ -490,11 +489,6 @@ def validate_config(cfg: dict):
                 if resolve_openclaw_transport_channel(channel) not in SUPPORTED_NOTIFICATION_CHANNELS:
                     allowed = ', '.join(SUPPORTED_NOTIFICATION_CHANNELS)
                     die(f'notifications.channel must be one of: {allowed}')
-
-            if provider == FEISHU_APP_NOTIFICATION_PROVIDER:
-                secrets_file_value = str(notifications.get('secrets_file') or 'secrets/notifications.feishu.app.json').strip()
-                if not secrets_file_value:
-                    die('notifications.secrets_file must be a non-empty path for feishu_app notifications')
 
     close_advice = cfg.get('close_advice') or {}
     if close_advice and not isinstance(close_advice, dict):
@@ -592,17 +586,6 @@ def validate_config(cfg: dict):
     if option_positions and not isinstance(option_positions, dict):
         die('option_positions must be an object')
     if isinstance(option_positions, dict):
-        sync_to_feishu = option_positions.get('sync_to_feishu') or {}
-        if sync_to_feishu and not isinstance(sync_to_feishu, dict):
-            die('option_positions.sync_to_feishu must be an object')
-        if isinstance(sync_to_feishu, dict) and 'enabled' in sync_to_feishu and sync_to_feishu.get('enabled') is not None:
-            if not isinstance(sync_to_feishu.get('enabled'), bool):
-                die('option_positions.sync_to_feishu.enabled must be a boolean')
-        if isinstance(sync_to_feishu, dict):
-            try:
-                resolve_option_positions_feishu_sync_receipt_config(sync_to_feishu.get('receipt'))
-            except ValueError as exc:
-                die(str(exc))
         auto_close = option_positions.get('auto_close') or {}
         if auto_close and not isinstance(auto_close, dict):
             die('option_positions.auto_close must be an object')
@@ -664,6 +647,11 @@ def validate_config(cfg: dict):
                             f"{', '.join(unsupported_fetch_keys)}; use min_strike/max_strike only"
                         )
                 if side == 'sell_put':
+                    _validate_optional_unit_interval_number(
+                        side_cfg,
+                        'min_otm_pct',
+                        f'templates.{profile_name}.{side}',
+                    )
                     yield_enhancement_cfg = side_cfg.get('yield_enhancement')
                     if yield_enhancement_cfg is not None:
                         die(
@@ -709,6 +697,7 @@ def validate_config(cfg: dict):
         if sp and not isinstance(sp, dict):
             die(f"{sym}.sell_put must be an object")
         _validate_score_weights(sp, f'{sym}.sell_put')
+        _validate_optional_unit_interval_number(sp, 'min_otm_pct', f'{sym}.sell_put')
         bad_keys = [k for k in SYMBOL_LEVEL_FORBIDDEN_STRATEGY_FIELDS if k in sp]
         if bad_keys:
             die(f"{sym}.sell_put has forbidden symbol-level strategy filter keys: {', '.join(bad_keys)}")

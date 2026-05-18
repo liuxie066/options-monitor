@@ -159,3 +159,60 @@ def test_mark_scanned_accounts_updates_each_ran_account(tmp_path) -> None:
 
     data = json.loads(state.read_text(encoding="utf-8"))
     assert set(data["last_run_utc_by_account"]) == {"lx", "sy"}
+
+
+def test_main_uses_env_runtime_root_for_stateful_tick_flows(monkeypatch, tmp_path) -> None:
+    import json
+    from zoneinfo import ZoneInfo
+
+    from src.application import multi_account_tick as mod
+    from src.application.tick_guard_flow import TickGuardOutcome
+
+    cfg = tmp_path / "config.us.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "accounts": ["lx"],
+                "symbols": [],
+                "schedule": {"enabled": True},
+                "portfolio": {},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    runtime_root = tmp_path / "runtime"
+    captured: dict[str, Any] = {}
+
+    class _RunLogger:
+        def __init__(self, base):
+            captured["runlog_base"] = base
+            self.run_id = "run-1"
+
+        def safe_event(self, *args, **kwargs):
+            captured.setdefault("events", []).append((args, kwargs))
+
+    def _run_tick_guard_flow(request):
+        captured["guard_base"] = request.base
+        return TickGuardOutcome(
+            should_continue=False,
+            return_code=0,
+            base_cfg=request.base_cfg,
+            accounts=request.accounts,
+            default_account=request.default_account,
+            bj_tz=ZoneInfo("Asia/Shanghai"),
+        )
+
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(runtime_root))
+    monkeypatch.setattr(mod, "RunLogger", _RunLogger)
+    monkeypatch.setattr(mod, "resolve_config_contract", lambda *args, **kwargs: {})
+    monkeypatch.setattr(mod, "ensure_runtime_canonical_config", lambda *args, **kwargs: None)
+    monkeypatch.setattr(mod, "ensure_runtime_schedule_matches_market", lambda *args, **kwargs: {"market": ""})
+    monkeypatch.setattr(mod.state_repo, "claim_idempotency_record", lambda *args, **kwargs: {"claimed": True})
+    monkeypatch.setattr(mod, "run_tick_guard_flow", _run_tick_guard_flow)
+
+    rc = mod.main(["--config", str(cfg), "--accounts", "lx"])
+
+    assert rc == 0
+    assert captured["runlog_base"] == runtime_root.resolve()
+    assert captured["guard_base"] == runtime_root.resolve()

@@ -7,7 +7,7 @@
 适用前提：
 - 旧线上环境已经有本地 `trade_events` / `position_lots`
 - 新版本采用 canonical `trade_events -> projection -> position_lots`
-- Feishu `option_positions` 只作为显式镜像/同步目标，不再作为线上策略或持仓仓库 bootstrap 输入
+- Feishu `option_positions` 已退休，不再作为线上策略、持仓仓库 bootstrap 输入或镜像同步目标
 - legacy v2 代码已删除，不再参与默认读写路径
 
 ---
@@ -30,12 +30,10 @@
 
 - 保留 `trade_events`
 - 保留 `position_lots`
-- 保留 Feishu 映射 / sync metadata
 
 不要做这些事：
 
 - 不要先删 SQLite 旧表内容
-- 不要先清 Feishu 映射字段
 - 不要为了“切新方案”手工重写历史 lot
 
 原因：
@@ -43,7 +41,7 @@
 - 新方案会先通过统一读路径接管旧数据
 - canonical truth 已经固定为 `trade_events`
 - `position_lots` 只是当前投影视图
-- Feishu 只是显式镜像/同步目标，不再定义本地业务状态
+- Feishu 不再定义本地业务状态
 
 ---
 
@@ -90,7 +88,6 @@ SQLite 存储路径固定为：
 会生成 / 刷新的关键文件：
 
 - 本地 SQLite `position_lots`
-- 现有 Feishu sync metadata 会在重建时保留
 
 判断标准：
 
@@ -224,7 +221,7 @@ SQLite 存储路径固定为：
 - rebuild 稳定
 - inspect 抽查无异常
 - reconcile 已经能稳定输出对账报告
-- Feishu sync / context / report 都围绕统一输出稳定
+- risk context / report 都围绕统一输出稳定
 
 在这之前，不要急着清：
 

@@ -289,21 +289,20 @@ def test_multiplier_cache_imports_infrastructure_owner_module() -> None:
     assert parse_message_mod.resolve_multiplier_with_source is infra_mod.resolve_multiplier_with_source
 
 
-def test_option_positions_feishu_sync_imports_application_owner_module() -> None:
+def test_option_positions_feishu_sync_modules_are_removed() -> None:
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module("scripts.sync_option_positions_to_feishu")
     for old_module in (
         "src.application.option_positions_feishu_sync",
         "src.application.option_positions_feishu_sync_receipt",
         "src.application.option_positions_sync_config",
+        "src.application.positions.feishu_sync",
+        "src.application.positions.feishu_sync_receipt",
+        "src.application.positions.sync_config",
+        "src.application.ledger.sync_metadata",
     ):
         with pytest.raises(ModuleNotFoundError):
             importlib.import_module(old_module)
-
-    owner_mod = importlib.import_module("src.application.positions.feishu_sync")
-    workflows_mod = importlib.import_module("src.application.positions.workflows")
-
-    assert workflows_mod.sync_single_option_position_record is owner_mod.sync_single_option_position_record
 
 
 def test_trade_intake_imports_owner_modules() -> None:

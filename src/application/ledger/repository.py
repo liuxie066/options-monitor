@@ -3,47 +3,21 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, Sequence, cast
 
 from domain.domain.ledger.position_fields import effective_expiration, now_ms
 from src.application.ledger.event_codec import encode_trade_event_for_storage, trade_event_application_payload
 from src.application.ledger.position_records import PositionLotRecord
-from src.application.ledger.sync_metadata import (
-    PositionLotSyncMetadataPatch,
-    apply_position_lot_sync_metadata_patch,
-)
 from src.application.ledger.store_resolution import resolve_ledger_store
 from src.infrastructure.feishu_bitable import parse_note_kv, safe_float
-
-
-@dataclass(frozen=True)
-class OptionPositionsTableRef:
-    app_id: str
-    app_secret: str
-    app_token: str
-    table_id: str
-
-
-class OptionPositionsRepoLike(Protocol):
-    def list_records(self, *, page_size: int = 500) -> list[dict[str, Any]]: ...
-    def get_record_fields(self, record_id: str) -> dict[str, Any]: ...
 
 
 class OptionPositionsReadRepo(Protocol):
     def list_position_lots(self) -> list[dict[str, Any]]: ...
 
 
-class OptionPositionsSyncMetaRepo(OptionPositionsReadRepo, Protocol):
-    def update_position_lot_sync_metadata(
-        self,
-        record_id: str,
-        patch: PositionLotSyncMetadataPatch,
-    ) -> None: ...
-
-
-class OptionPositionsEventWriteRepo(OptionPositionsSyncMetaRepo, Protocol):
+class OptionPositionsEventWriteRepo(OptionPositionsReadRepo, Protocol):
     def list_trade_events(self, *, conn: sqlite3.Connection | None = None) -> list[dict[str, Any]]: ...
     def upsert_trade_event(self, event: Any, *, conn: sqlite3.Connection | None = None) -> bool: ...
     def replace_position_lots(
@@ -55,6 +29,8 @@ class OptionPositionsEventWriteRepo(OptionPositionsSyncMetaRepo, Protocol):
 
 
 def _load_data_config(data_config: Path) -> dict[str, Any]:
+    if not data_config.exists():
+        return {}
     cfg = json.loads(data_config.read_text(encoding="utf-8"))
     if not isinstance(cfg, dict):
         raise SystemExit("data config must be a JSON object")
@@ -70,16 +46,6 @@ def _get_option_positions_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
     return raw
 
 
-def _get_option_positions_sync_to_feishu_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
-    option_positions_cfg = _get_option_positions_cfg(cfg)
-    raw = option_positions_cfg.get("sync_to_feishu")
-    if raw is None:
-        return {}
-    if not isinstance(raw, dict):
-        raise SystemExit("data config option_positions.sync_to_feishu must be a JSON object")
-    return raw
-
-
 def _get_option_positions_bootstrap_from_legacy_sqlite_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
     option_positions_cfg = _get_option_positions_cfg(cfg)
     raw = option_positions_cfg.get("bootstrap_from_legacy_sqlite")
@@ -88,41 +54,6 @@ def _get_option_positions_bootstrap_from_legacy_sqlite_cfg(cfg: dict[str, Any]) 
     if not isinstance(raw, dict):
         raise SystemExit("data config option_positions.bootstrap_from_legacy_sqlite must be a JSON object")
     return raw
-
-
-def _get_feishu_cfg(cfg: dict[str, Any], *, allow_missing: bool) -> dict[str, Any] | None:
-    raw = cfg.get("feishu")
-    if raw is None:
-        return None if allow_missing else {}
-    if not isinstance(raw, dict):
-        raise SystemExit("data config feishu must be a JSON object")
-    return raw
-
-
-def _load_table_ref_from_cfg(cfg: dict[str, Any]) -> OptionPositionsTableRef:
-    feishu_cfg = _get_feishu_cfg(cfg, allow_missing=False) or {}
-    app_id = feishu_cfg.get("app_id")
-    app_secret = feishu_cfg.get("app_secret")
-    ref = (feishu_cfg.get("tables", {}) or {}).get("option_positions")
-    if not (app_id and app_secret and ref and "/" in ref):
-        raise SystemExit("data config missing feishu app_id/app_secret/option_positions")
-    app_token, table_id = ref.split("/", 1)
-    return OptionPositionsTableRef(str(app_id), str(app_secret), str(app_token), str(table_id))
-
-
-def load_table_ref(data_config: Path) -> OptionPositionsTableRef:
-    return _load_table_ref_from_cfg(_load_data_config(data_config))
-
-
-def option_positions_sync_to_feishu_enabled(data_config: Path) -> bool:
-    cfg = _load_data_config(data_config)
-    sync_cfg = _get_option_positions_sync_to_feishu_cfg(cfg)
-    enabled = sync_cfg.get("enabled")
-    if enabled is None:
-        return False
-    if not isinstance(enabled, bool):
-        raise SystemExit("data config option_positions.sync_to_feishu.enabled must be a boolean")
-    return bool(enabled)
 
 
 def option_positions_bootstrap_from_feishu_enabled(data_config: Path) -> bool:
@@ -467,39 +398,6 @@ class SQLiteOptionPositionsRepository:
             raise ValueError(f"position lot not found: {record_id}")
         return _row_to_position_lot(row)["fields"]
 
-    def update_position_lot_sync_metadata(
-        self,
-        record_id: str,
-        patch: PositionLotSyncMetadataPatch,
-    ) -> None:
-        normalized_record_id = str(record_id or "").strip()
-        if not normalized_record_id:
-            raise ValueError("record_id is required")
-        existing_fields = self.get_position_lot_fields(normalized_record_id)
-        patched_fields = apply_position_lot_sync_metadata_patch(existing_fields, patch)
-        ts = int(now_ms())
-        expiration_ms, strike, multiplier = _position_lot_contract_scalars(patched_fields)
-        with self._connect() as conn:
-            updated = conn.execute(
-                """
-                UPDATE position_lots
-                SET fields_json = ?, source_event_id = ?, expiration = ?, strike = ?, multiplier = ?, updated_at_ms = ?
-                WHERE record_id = ?
-                """,
-                (
-                    json.dumps(patched_fields, ensure_ascii=False, sort_keys=True),
-                    (str(patched_fields.get("source_event_id")) if patched_fields.get("source_event_id") else None),
-                    int(expiration_ms) if expiration_ms is not None else None,
-                    float(strike) if strike is not None else None,
-                    float(multiplier) if multiplier is not None else None,
-                    ts,
-                    normalized_record_id,
-                ),
-            )
-            conn.commit()
-        if int(updated.rowcount or 0) <= 0:
-            raise ValueError(f"position lot not found: {normalized_record_id}")
-
     def list_records(self, *, page_size: int = 500) -> list[dict[str, Any]]:
         return self.list_position_lots()
 
@@ -531,15 +429,8 @@ def require_option_positions_read_repo(repo: Any) -> OptionPositionsReadRepo:
     raise TypeError("option_positions repo does not satisfy read repository interface")
 
 
-def require_option_positions_sync_meta_repo(repo: Any) -> OptionPositionsSyncMetaRepo:
-    candidate = require_option_positions_read_repo(repo)
-    if callable(getattr(candidate, "update_position_lot_sync_metadata", None)):
-        return cast(OptionPositionsSyncMetaRepo, candidate)
-    raise TypeError("option_positions repo does not satisfy sync metadata repository interface")
-
-
 def require_option_positions_event_write_repo(repo: Any) -> OptionPositionsEventWriteRepo:
-    candidate = require_option_positions_sync_meta_repo(repo)
+    candidate = require_option_positions_read_repo(repo)
     required = (
         "list_trade_events",
         "upsert_trade_event",

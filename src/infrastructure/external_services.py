@@ -19,13 +19,13 @@ from domain.domain.multi_tick import (
 from domain.domain.fetch_source import is_futu_fetch_source
 from domain.domain.tool_boundary import normalize_notify_subprocess_output, normalize_subprocess_adapter_payload
 from src.application.config_loader import resolve_watchlist_config
+from src.application.secret_resolver import resolve_feishu_notification_app_config
 from src.infrastructure.feishu_bitable import FeishuError, get_tenant_access_token, http_json
 from src.infrastructure.opend_watchdog import run_watchdog_check
 
 
 DEFAULT_OPEND_HOST = '127.0.0.1'
 DEFAULT_OPEND_PORT = 11111
-DEFAULT_NOTIFICATION_FEISHU_APP_SECRETS = 'secrets/notifications.feishu.app.json'
 DEFAULT_NOTIFICATION_SEND_TIMEOUT_SEC = 60
 MAX_NOTIFICATION_SEND_TIMEOUT_SEC = 300
 
@@ -45,7 +45,7 @@ def run_command(
     text: bool = False,
     timeout_sec: int | None = None,
     env: dict[str, str] | None = None,
-) -> subprocess.CompletedProcess:
+) -> subprocess.CompletedProcess[Any]:
     return subprocess.run(
         cmd,
         cwd=str(cwd),
@@ -69,7 +69,7 @@ def run_scan_scheduler_cli(
     mark_scanned: bool = False,
     mark_notified: bool = False,
     capture_output: bool = True,
-) -> subprocess.CompletedProcess:
+) -> subprocess.CompletedProcess[Any]:
     cmd = [
         str(vpy),
         '-m',
@@ -108,7 +108,7 @@ def run_pipeline_script(
     capture_output: bool = False,
     text: bool = False,
     env: dict[str, str] | None = None,
-) -> subprocess.CompletedProcess:
+) -> subprocess.CompletedProcess[Any]:
     cmd = [
         str(vpy),
         '-m',
@@ -183,7 +183,7 @@ def send_openclaw_message(
     target: str,
     message: str,
     timeout_sec: int | None = None,
-) -> subprocess.CompletedProcess:
+) -> subprocess.CompletedProcess[Any]:
     transport_channel = resolve_openclaw_transport_channel(channel)
     cmd = [
         'openclaw',
@@ -207,7 +207,7 @@ def send_openclaw_message_process(
     target: str,
     message: str,
     notifications: dict[str, Any] | None = None,
-) -> subprocess.CompletedProcess:
+) -> subprocess.CompletedProcess[Any]:
     return send_openclaw_message(
         base=base,
         channel=channel,
@@ -217,50 +217,22 @@ def send_openclaw_message_process(
     )
 
 
-def _resolve_notification_secrets_file(
-    *,
-    base: Path,
-    notifications: dict[str, Any] | None = None,
-    secrets_file: str | Path | None = None,
-) -> Path:
-    raw_path = secrets_file
-    if raw_path is None and isinstance(notifications, dict):
-        raw_path = notifications.get('secrets_file')
-    path_value = str(raw_path or DEFAULT_NOTIFICATION_FEISHU_APP_SECRETS).strip()
-    path = Path(path_value)
-    if not path.is_absolute():
-        path = (base / path).resolve()
-    return path
-
-
 def load_feishu_notification_app_config(
     *,
-    base: Path,
+    base: Path | None = None,
     notifications: dict[str, Any] | None = None,
-    secrets_file: str | Path | None = None,
 ) -> dict[str, str]:
-    secrets_path = _resolve_notification_secrets_file(base=base, notifications=notifications, secrets_file=secrets_file)
-    if not secrets_path.exists():
-        raise ValueError(f'notification secrets file not found: {secrets_path}')
-
-    try:
-        payload = json.loads(secrets_path.read_text(encoding='utf-8'))
-    except json.JSONDecodeError as exc:
-        raise ValueError(f'notification secrets file is not valid json: {secrets_path}') from exc
-
-    feishu = payload.get('feishu') if isinstance(payload, dict) else None
-    if not isinstance(feishu, dict):
-        raise ValueError(f'notification secrets missing feishu object: {secrets_path}')
-
-    app_id = str(feishu.get('app_id') or '').strip()
-    app_secret = str(feishu.get('app_secret') or '').strip()
-    if not app_id or not app_secret:
-        raise ValueError(f'notification secrets missing feishu.app_id/app_secret: {secrets_path}')
+    del base
+    app_cfg = resolve_feishu_notification_app_config(notifications)
+    if not app_cfg.ready:
+        missing = ", ".join(app_cfg.missing_fields)
+        raise ValueError(f'notification env missing Feishu app credentials: {missing}')
 
     return {
-        'app_id': app_id,
-        'app_secret': app_secret,
-        'secrets_file': str(secrets_path),
+        'app_id': app_cfg.app_id,
+        'app_secret': app_cfg.app_secret,
+        'app_id_env': app_cfg.app_id_env,
+        'app_secret_env': app_cfg.app_secret_env,
     }
 
 
@@ -330,8 +302,10 @@ def send_feishu_app_message(
 
 def normalize_feishu_app_send_output(*, send_result: dict[str, Any]) -> dict[str, Any]:
     result = send_result if isinstance(send_result, dict) else {}
-    response_json = result.get('response_json') if isinstance(result.get('response_json'), dict) else {}
-    data = response_json.get('data') if isinstance(response_json.get('data'), dict) else {}
+    raw_response_json = result.get('response_json')
+    response_json: dict[str, Any] = raw_response_json if isinstance(raw_response_json, dict) else {}
+    raw_data = response_json.get('data')
+    data: dict[str, Any] = raw_data if isinstance(raw_data, dict) else {}
     message_id = data.get('message_id')
     http_status = result.get('http_status')
     feishu_code = response_json.get('code') if isinstance(response_json.get('code'), int) else None
@@ -418,7 +392,7 @@ def select_notification_delivery_adapter(provider: Any) -> NotificationDeliveryA
     raise ValueError(f'unsupported notification provider: {provider}; expected one of: {allowed}')
 
 
-def _resolve_opend_endpoint_for_market(cfg_obj: dict, market: str) -> tuple[str, int]:
+def _resolve_opend_endpoint_for_market(cfg_obj: dict[str, Any], market: str) -> tuple[str, int]:
     host = DEFAULT_OPEND_HOST
     port = DEFAULT_OPEND_PORT
     mkt = str(market or '').upper().strip()
@@ -441,7 +415,7 @@ def _resolve_opend_endpoint_for_market(cfg_obj: dict, market: str) -> tuple[str,
     return host, port
 
 
-def trading_day_via_futu(cfg_obj: dict, market: str) -> tuple[bool | None, str]:
+def trading_day_via_futu(cfg_obj: dict[str, Any], market: str) -> tuple[bool | None, str]:
     """读取交易日状态。
 
     返回值：

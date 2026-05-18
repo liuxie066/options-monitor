@@ -35,6 +35,8 @@ from domain.domain.symbol_identity import canonical_symbol_aliases, is_hk_symbol
 from src.application.opend_fetch_config import filter_opend_fetch_kwargs
 from src.application.symbol_aliases import symbol_aliases_from_config
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -44,7 +46,7 @@ def default_cache_path(repo_base: Path) -> Path:
     return (repo_base / "output_shared" / "state" / "multiplier_cache.json").resolve()
 
 
-def load_cache(path: Path) -> dict:
+def load_cache(path: Path) -> dict[str, Any]:
     try:
         if path.exists() and path.stat().st_size > 0:
             obj = json.loads(path.read_text(encoding="utf-8"))
@@ -58,14 +60,14 @@ def _cache_lock_path(path: Path) -> Path:
     return Path(path).with_suffix(Path(path).suffix + ".lock")
 
 
-def _write_cache_unlocked(path: Path, cache: dict) -> None:
+def _write_cache_unlocked(path: Path, cache: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     tmp.write_text(json.dumps(cache, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     os.replace(tmp, path)
 
 
-def save_cache(path: Path, cache: dict) -> None:
+def save_cache(path: Path, cache: dict[str, Any]) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = _cache_lock_path(path)
@@ -80,7 +82,7 @@ def save_cache(path: Path, cache: dict) -> None:
                 fcntl.flock(lock_fp.fileno(), fcntl.LOCK_UN)
 
 
-def merge_cache_updates(path: Path, updates: dict) -> dict:
+def merge_cache_updates(path: Path, updates: dict[str, Any]) -> dict[str, Any]:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = _cache_lock_path(path)
@@ -110,7 +112,7 @@ def _symbol_aliases(symbol: str, *, symbol_aliases: dict[str, str] | None = None
     return [sym] if sym else []
 
 
-def get_cached_multiplier(cache: dict, symbol: str) -> int | None:
+def get_cached_multiplier(cache: dict[str, Any], symbol: str) -> int | None:
     for sym in _symbol_aliases(symbol):
         try:
             v = cache.get(sym)
@@ -132,7 +134,7 @@ class RefreshResult:
     error: str | None = None
 
 
-def get_cached_multiplier_source(cache: dict, symbol: str) -> str | None:
+def get_cached_multiplier_source(cache: dict[str, Any], symbol: str) -> str | None:
     for sym in _symbol_aliases(symbol):
         item = cache.get(sym)
         if not isinstance(item, dict):
@@ -170,15 +172,23 @@ def _intake_config_candidates(
     else:
         candidates.append(("config", {}))
 
-    for filename in ("config.hk.json", "config.us.json"):
-        path = Path(repo_base) / filename
-        try:
-            obj = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        file_intake = obj.get("intake") if isinstance(obj, dict) else None
-        if isinstance(file_intake, dict):
-            candidates.append((f"config-file:{filename}", file_intake))
+    roots = [Path(repo_base).resolve()]
+    if roots[0] != REPO_ROOT:
+        roots.append(REPO_ROOT)
+    seen_paths: set[Path] = set()
+    for root in roots:
+        for filename in ("config.hk.json", "config.us.json"):
+            path = (root / filename).resolve()
+            if path in seen_paths:
+                continue
+            seen_paths.add(path)
+            try:
+                obj = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            file_intake = obj.get("intake") if isinstance(obj, dict) else None
+            if isinstance(file_intake, dict):
+                candidates.append((f"config-file:{filename}", file_intake))
     return candidates
 
 
@@ -357,7 +367,7 @@ def refresh_via_opend(
         return RefreshResult(symbol=sym, ok=False, multiplier=None, error=f"{type(e).__name__}: {e}")
 
 
-def store_multiplier(cache: dict, symbol: str, multiplier: int, *, source: str = "opend") -> dict:
+def store_multiplier(cache: dict[str, Any], symbol: str, multiplier: int, *, source: str = "opend") -> dict[str, Any]:
     cache[normalize_symbol(symbol)] = {
         "multiplier": int(multiplier),
         "as_of_utc": utc_now(),

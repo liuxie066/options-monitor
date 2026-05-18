@@ -28,6 +28,7 @@ from src.application.trades.push_listener import OpenDTradePushListener
 from src.application.trades.receipt import send_trade_intake_receipt
 from src.application.opend_fetch_config import opend_fetch_kwargs
 from src.application.ledger.api import open_position_ledger_from_runtime_config
+from src.application.runtime_paths import resolve_runtime_root
 from src.application.trades.intake import process_trade_payload
 from src.infrastructure.io_utils import atomic_write_json, utc_now
 
@@ -117,6 +118,7 @@ class _ReplayRepo:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     base = repo_base
+    runtime_root = resolve_runtime_root(repo_root=base).runtime_root
     cfg_path = Path(args.config)
     if not cfg_path.is_absolute():
         cfg_path = (base / cfg_path).resolve()
@@ -132,11 +134,11 @@ def main(argv: list[str] | None = None) -> int:
     audit_path = intake_cfg["audit_path"]
     status_path = intake_cfg["status_path"]
     if not state_path.is_absolute():
-        state_path = (base / state_path).resolve()
+        state_path = (runtime_root / state_path).resolve()
     if not audit_path.is_absolute():
-        audit_path = (base / audit_path).resolve()
+        audit_path = (runtime_root / audit_path).resolve()
     if not status_path.is_absolute():
-        status_path = (base / status_path).resolve()
+        status_path = (runtime_root / status_path).resolve()
     status_base = _status_base_payload(
         cfg_path=cfg_path,
         intake_cfg=intake_cfg,
@@ -175,7 +177,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.deal_json:
         payload = json.loads(Path(args.deal_json).read_text(encoding="utf-8"))
         if apply_changes:
-            _data_config, repo = open_position_ledger_from_runtime_config(base=base, cfg=cfg, data_config=args.data_config)
+            _data_config, repo = open_position_ledger_from_runtime_config(base=runtime_root, cfg=cfg, data_config=args.data_config)
         else:
             repo = _ReplayRepo()
         result = _process_payload(
@@ -203,7 +205,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
 
-    _data_config, repo = open_position_ledger_from_runtime_config(base=base, cfg=cfg, data_config=args.data_config)
+    _data_config, repo = open_position_ledger_from_runtime_config(base=runtime_root, cfg=cfg, data_config=args.data_config)
 
     if not bool(intake_cfg["enabled"]):
         _write_listener_status(status_path, status_base, status="error", stage="config", last_error="trade_intake.enabled=false")

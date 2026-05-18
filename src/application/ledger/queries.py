@@ -6,15 +6,11 @@ from typing import Any
 from src.application.ledger.publisher import project_stored_trade_events_to_position_lots
 from src.application.ledger.reconciliation import load_reconciliation_state
 from src.application.ledger.repository import (
-    load_table_ref,
-    option_positions_sync_to_feishu_enabled,
     require_option_positions_event_write_repo,
 )
 from src.application.ledger.risk_context import summarize_ledger_shadow_status
 from src.application.ledger.service import load_option_positions_repo
 from src.application.ledger.views import PositionLotSnapshot, RiskPositionView
-
-SYNC_TO_FEISHU_OVERRIDE_ATTR = "option_positions_sync_to_feishu_enabled_override"
 
 
 def open_position_ledger(data_config: Any) -> Any:
@@ -150,57 +146,9 @@ def summarize_position_lot_shadow_status(records: list[dict[str, Any]]) -> dict[
     return summarize_ledger_shadow_status(records)
 
 
-def position_lot_mirror_table_ref(data_config: Path) -> Any:
-    return load_table_ref(data_config)
-
-
-def position_lot_mirror_sync_enabled(data_config: Any) -> bool:
-    return option_positions_sync_to_feishu_enabled(data_config)
-
-
-def position_lot_mirror_sync_override_from_runtime_config(cfg: dict[str, Any] | None) -> bool | None:
-    data = cfg if isinstance(cfg, dict) else {}
-    option_positions = data.get("option_positions")
-    if option_positions is None:
-        return None
-    if not isinstance(option_positions, dict):
-        raise ValueError("option_positions must be an object")
-    sync_to_feishu = option_positions.get("sync_to_feishu")
-    if sync_to_feishu is None:
-        return None
-    if not isinstance(sync_to_feishu, dict):
-        raise ValueError("option_positions.sync_to_feishu must be an object")
-    if "enabled" not in sync_to_feishu or sync_to_feishu.get("enabled") is None:
-        return None
-    enabled = sync_to_feishu.get("enabled")
-    if not isinstance(enabled, bool):
-        raise ValueError("option_positions.sync_to_feishu.enabled must be a boolean")
-    return bool(enabled)
-
-
 def apply_position_ledger_runtime_config(repo: Any, cfg: dict[str, Any] | None) -> Any:
-    override = position_lot_mirror_sync_override_from_runtime_config(cfg)
-    if override is not None:
-        setattr(repo, SYNC_TO_FEISHU_OVERRIDE_ATTR, bool(override))
+    _ = cfg
     return repo
-
-
-def effective_position_lot_mirror_sync_enabled(
-    *,
-    data_config: Path,
-    runtime_config: dict[str, Any] | None = None,
-    repo: Any | None = None,
-) -> bool:
-    runtime_override = position_lot_mirror_sync_override_from_runtime_config(runtime_config)
-    if runtime_override is not None:
-        return bool(runtime_override)
-
-    if repo is not None:
-        repo_override = getattr(repo, SYNC_TO_FEISHU_OVERRIDE_ATTR, None)
-        if isinstance(repo_override, bool):
-            return bool(repo_override)
-
-    return position_lot_mirror_sync_enabled(Path(data_config))
 
 
 def trade_event_log(repo: Any) -> list[dict[str, Any]]:
@@ -230,9 +178,7 @@ def position_reconciliation_state(base: Path) -> dict[str, Any]:
 __all__ = [
     "PositionLotSnapshot",
     "RiskPositionView",
-    "SYNC_TO_FEISHU_OVERRIDE_ATTR",
     "apply_position_ledger_runtime_config",
-    "effective_position_lot_mirror_sync_enabled",
     "format_position_cash_secured",
     "format_position_money",
     "list_canonical_position_lot_snapshots",
@@ -245,9 +191,6 @@ __all__ = [
     "open_position_ledger_from_data_config",
     "open_position_ledger_from_runtime_config",
     "position_lot_context_view",
-    "position_lot_mirror_sync_enabled",
-    "position_lot_mirror_sync_override_from_runtime_config",
-    "position_lot_mirror_table_ref",
     "position_lot_risk_view",
     "position_lot_snapshot",
     "position_monthly_income_report",

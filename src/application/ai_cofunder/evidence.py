@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from domain.domain.engine import CandidateScoreWeights, explain_candidate_rank, yield_enhancement_rank_key
 from src.application.ai_cofunder.redaction import redact_value
 
 
@@ -34,7 +35,7 @@ def collect_evidence(
     source_refs = _source_refs(source_paths, base=base)
     tail_limit = _as_int(payload.get("tail_limit"), default=20, low=0, high=200)
     audit_tails = _audit_tails(source_paths, base=base, tail_limit=tail_limit)
-    strategy_evidence = _strategy_evidence(payload, source_paths=source_paths, base=base, tail_limit=tail_limit)
+    strategy_evidence = _strategy_evidence(payload, source_paths=source_paths, base=base, tail_limit=tail_limit, cfg=cfg)
 
     scheduler_evidence = _normalize_scheduler_evidence(payload.get("scheduler_evidence"))
     evidence = {
@@ -261,7 +262,7 @@ def _audit_tails(source_paths: dict[str, Path | None], *, base: Path, tail_limit
     return out
 
 
-def _strategy_evidence(payload: dict[str, Any], *, source_paths: dict[str, Path | None], base: Path, tail_limit: int) -> dict[str, Any]:
+def _strategy_evidence(payload: dict[str, Any], *, source_paths: dict[str, Path | None], base: Path, tail_limit: int, cfg: dict[str, Any]) -> dict[str, Any]:
     candidate_paths = _explicit_paths(payload.get("candidate_paths") or payload.get("candidate_path"), base=base)
     trace_paths = _explicit_paths(payload.get("trace_paths") or payload.get("trace_path"), base=base)
     replay_paths = _explicit_paths(payload.get("strategy_replay_paths") or payload.get("strategy_replay_path") or payload.get("replay_path"), base=base)
@@ -283,6 +284,8 @@ def _strategy_evidence(payload: dict[str, Any], *, source_paths: dict[str, Path 
     reject_logs = [_reject_log_summary(path, base=base) for path in reject_log_paths]
     filter_traces = [_trace_summary(path, base=base, limit=tail_limit) for path in trace_paths]
     replay_reports = [_replay_summary(path, base=base, limit=tail_limit) for path in replay_paths]
+    ranking_limit = _as_int(payload.get("ranking_limit") or payload.get("rank_sample_limit"), default=5, low=1, high=20)
+    ranking_evidence = _ranking_evidence(candidate_paths, base=base, cfg=cfg, limit=ranking_limit)
     total_candidate_rows = sum(int(item.get("row_count") or 0) for item in candidate_reports if item.get("exists"))
     total_reject_rows = sum(int(item.get("row_count") or 0) for item in reject_logs if item.get("exists"))
     return {
@@ -291,6 +294,7 @@ def _strategy_evidence(payload: dict[str, Any], *, source_paths: dict[str, Path 
         "reject_logs": reject_logs,
         "filter_traces": filter_traces,
         "strategy_replay": replay_reports,
+        "ranking_evidence": ranking_evidence,
         "summary": {
             "candidate_file_count": sum(1 for item in candidate_reports if item.get("exists")),
             "candidate_row_count": total_candidate_rows,
@@ -298,6 +302,8 @@ def _strategy_evidence(payload: dict[str, Any], *, source_paths: dict[str, Path 
             "reject_log_row_count": total_reject_rows,
             "filter_trace_file_count": sum(1 for item in filter_traces if item.get("exists")),
             "strategy_replay_file_count": sum(1 for item in replay_reports if item.get("exists")),
+            "ranking_report_count": _nested(_dict_or_empty(ranking_evidence), "summary", "report_count"),
+            "ranking_top_row_count": _nested(_dict_or_empty(ranking_evidence), "summary", "top_row_count"),
             "evidence_level": "candidate_and_trace" if total_candidate_rows and any(item.get("exists") for item in filter_traces) else ("candidate_only" if total_candidate_rows else "limited"),
         },
     }
@@ -420,6 +426,7 @@ def _reject_log_summary(path: Path, *, base: Path) -> dict[str, Any]:
         "stage_counts": {},
         "reason_counts": {},
         "symbol_counts": {},
+        "sample_rows": [],
     }
     if not path.exists() or not path.is_file():
         return out
@@ -427,6 +434,7 @@ def _reject_log_summary(path: Path, *, base: Path) -> dict[str, Any]:
     reason_counts: Counter[str] = Counter()
     symbol_counts: Counter[str] = Counter()
     account_counts: Counter[str] = Counter()
+    samples: list[dict[str, Any]] = []
     try:
         with path.open("r", encoding="utf-8-sig", errors="replace", newline="") as fh:
             reader = csv.DictReader(fh)
@@ -437,6 +445,8 @@ def _reject_log_summary(path: Path, *, base: Path) -> dict[str, Any]:
                 reason = str(row.get("engine_reject_reason") or row.get("reject_rule") or row.get("reject_reason") or "").strip()
                 symbol = str(row.get("symbol") or row.get("underlying_symbol") or "").strip().upper()
                 _count_text(account_counts, row.get("account") or account_hint)
+                if len(samples) < 5:
+                    samples.append(_select_reject_fields(row, account_hint=account_hint))
                 if stage:
                     stage_counts[stage] += 1
                 if reason:
@@ -447,6 +457,7 @@ def _reject_log_summary(path: Path, *, base: Path) -> dict[str, Any]:
             out["stage_counts"] = dict(stage_counts.most_common(10))
             out["reason_counts"] = dict(reason_counts.most_common(10))
             out["symbol_counts"] = dict(symbol_counts.most_common(10))
+            out["sample_rows"] = samples
     except Exception as exc:
         out["read_error"] = f"{type(exc).__name__}: {exc}"
     return out
@@ -534,6 +545,279 @@ def _replay_summary(path: Path, *, base: Path, limit: int) -> dict[str, Any]:
     return out
 
 
+def _ranking_evidence(candidate_paths: list[Path], *, base: Path, cfg: dict[str, Any], limit: int) -> dict[str, Any]:
+    reports: list[dict[str, Any]] = []
+    strategy_counts: Counter[str] = Counter()
+    cash_constraint_counts: Counter[str] = Counter()
+    top_row_count = 0
+
+    for path in candidate_paths:
+        report = _ranking_report(path, base=base, cfg=cfg, limit=limit)
+        reports.append(report)
+        if report.get("exists"):
+            _count_text(strategy_counts, report.get("strategy"))
+            raw_top_rows = report.get("top_rows")
+            top_rows = raw_top_rows if isinstance(raw_top_rows, list) else []
+            top_row_count += len(top_rows)
+            for row in top_rows:
+                cash = _dict_or_empty(row.get("cash_constraint")) if isinstance(row, dict) else {}
+                if cash.get("cash_headroom_ratio") is not None:
+                    cash_constraint_counts["cash_headroom_known"] += 1
+                elif cash:
+                    cash_constraint_counts["cash_fields_partial"] += 1
+                else:
+                    cash_constraint_counts["cash_fields_missing"] += 1
+
+    return {
+        "schema_version": "ai_cofunder_ranking_evidence.v1",
+        "top_rows_per_report": limit,
+        "reports": reports,
+        "summary": {
+            "report_count": sum(1 for item in reports if item.get("exists")),
+            "top_row_count": top_row_count,
+            "strategy_counts": dict(strategy_counts.most_common(20)),
+            "cash_constraint_counts": dict(cash_constraint_counts.most_common(10)),
+        },
+    }
+
+
+def _ranking_report(path: Path, *, base: Path, cfg: dict[str, Any], limit: int) -> dict[str, Any]:
+    strategy = _strategy_hint(path)
+    account_hint = _account_hint(path)
+    out: dict[str, Any] = {
+        "path": _safe_rel(path, base=base),
+        "exists": path.exists(),
+        "account_hint": account_hint,
+        "strategy": strategy,
+        "mode": _strategy_mode(strategy),
+        "row_count": 0,
+        "top_rows": [],
+    }
+    if not path.exists() or not path.is_file():
+        return out
+
+    rows: list[dict[str, Any]] = []
+    try:
+        with path.open("r", encoding="utf-8-sig", errors="replace", newline="") as fh:
+            reader = csv.DictReader(fh)
+            for idx, row in enumerate(reader, start=1):
+                out["row_count"] = int(out["row_count"]) + 1
+                if len(rows) < limit:
+                    rows.append(_ranking_row_evidence(row, rank=idx, strategy=strategy, account_hint=account_hint, cfg=cfg))
+    except Exception as exc:
+        out["read_error"] = f"{type(exc).__name__}: {exc}"
+        return out
+
+    out["top_rows"] = rows
+    return out
+
+
+def _ranking_row_evidence(
+    row: dict[str, Any],
+    *,
+    rank: int,
+    strategy: str | None,
+    account_hint: str | None,
+    cfg: dict[str, Any],
+) -> dict[str, Any]:
+    mode = _strategy_mode(strategy)
+    symbol = _text(row.get("symbol") or row.get("underlying_symbol")).upper() or None
+    strategy_cfg = _strategy_settings_for_symbol(cfg, symbol=symbol, strategy=strategy)
+    score_weights = _candidate_score_weights(_dict_or_empty(strategy_cfg.get("score_weights")))
+    rank_explanation: dict[str, Any] | None = None
+    rank_key: dict[str, Any] | None = None
+
+    if mode in {"put", "call"}:
+        try:
+            rank_explanation = explain_candidate_rank(row, mode=mode, score_weights=score_weights)
+        except Exception as exc:
+            rank_explanation = {"error": f"{type(exc).__name__}: {exc}"}
+    elif strategy == "yield_enhancement":
+        try:
+            rank_key = {
+                "sort_tuple": list(yield_enhancement_rank_key(row)),
+                "sort_order": [
+                    "funding_accepted",
+                    "premium_funding_score",
+                    "upside_lift_to_call_cost",
+                    "upside_lift_to_put_credit",
+                    "call_cost_to_put_credit",
+                    "combo_spread_ratio",
+                    "combo_net_credit",
+                    "scenario_score",
+                    "annualized_scenario_score",
+                    "upside_breakeven_pct_above_spot",
+                    "net_credit",
+                    "put_otm_pct",
+                    "min_leg_open_interest",
+                    "call_delta",
+                ],
+            }
+        except Exception as exc:
+            rank_key = {"error": f"{type(exc).__name__}: {exc}"}
+
+    return {
+        "rank": rank,
+        "account": _text(row.get("account") or account_hint).lower() or None,
+        "strategy": strategy,
+        "mode": mode,
+        "symbol": symbol,
+        "contract_symbol": _text(row.get("contract_symbol") or row.get("option_symbol")) or None,
+        "option_type": _text(row.get("option_type")).lower() or None,
+        "expiration": _text(row.get("expiration") or row.get("exp")) or None,
+        "strike": _first_float(row, "strike"),
+        "spot": _first_float(row, "spot"),
+        "metrics": _ranking_metrics(row),
+        "cash_constraint": _cash_constraint(row),
+        "configured_thresholds": _strategy_thresholds(strategy_cfg),
+        "configured_score_weights": _score_weights_payload(score_weights),
+        "rank_explanation": rank_explanation,
+        "yield_enhancement_rank": rank_key,
+    }
+
+
+def _ranking_metrics(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "dte": _first_float(row, "dte"),
+        "annualized_return": _first_float(
+            row,
+            "annualized_net_return_on_cash_basis",
+            "annualized_net_premium_return",
+            "annualized_net_return",
+            "annualized_return",
+            "annualized_scenario_score",
+        ),
+        "net_income": _first_float(row, "net_income", "net_credit", "combo_net_credit"),
+        "otm_pct": _first_float(row, "otm_pct", "put_otm_pct", "call_otm_pct", "strike_above_spot_pct"),
+        "delta": _first_float(row, "delta", "put_delta", "call_delta"),
+        "spread_ratio": _first_float(row, "spread_ratio", "combo_spread_ratio"),
+        "open_interest": _first_float(row, "open_interest", "put_open_interest", "call_open_interest"),
+        "volume": _first_float(row, "volume", "put_volume", "call_volume"),
+        "current_score": _first_float(row, "strategy_score", "_strategy_score", "score", "premium_funding_score", "scenario_score"),
+        "cash_required": _first_float(row, "cash_required", "cash_basis", "cash_required_cny", "cash_required_usd"),
+    }
+
+
+def _cash_constraint(row: dict[str, Any]) -> dict[str, Any]:
+    required = _first_float(row, "cash_required_cny", "cash_required_usd", "cash_required", "cash_basis")
+    free = _first_float(row, "cash_free_cny", "cash_free_total_cny", "cash_free_usd")
+    out: dict[str, Any] = {
+        key: _first_float(row, key)
+        for key in (
+            "cash_required_cny",
+            "cash_required_usd",
+            "cash_required",
+            "cash_basis",
+            "cash_free_cny",
+            "cash_free_total_cny",
+            "cash_free_usd",
+        )
+        if _first_float(row, key) is not None
+    }
+    reason = _text(row.get("cash_secured_unavailable_reason") or row.get("cash_requirement_unavailable_reason"))
+    if reason:
+        out["unavailable_reason"] = reason
+    if required is not None and required > 0 and free is not None:
+        out["cash_headroom_ratio"] = round(free / required, 6)
+    return out
+
+
+def _strategy_mode(strategy: str | None) -> str | None:
+    if strategy == "sell_put":
+        return "put"
+    if strategy == "sell_call":
+        return "call"
+    if strategy == "yield_enhancement":
+        return "enhancement"
+    return None
+
+
+def _strategy_settings_for_symbol(cfg: dict[str, Any], *, symbol: str | None, strategy: str | None) -> dict[str, Any]:
+    if not strategy:
+        return {}
+    symbol_cfg = _symbol_config(cfg, symbol)
+    merged: dict[str, Any] = {}
+    templates = _template_map(cfg)
+    for name in _template_names(symbol_cfg.get("use")):
+        template = _dict_or_empty(templates.get(name))
+        merged.update(_dict_or_empty(template.get(strategy)))
+    merged.update(_dict_or_empty(symbol_cfg.get(strategy)))
+    return merged
+
+
+def _symbol_config(cfg: dict[str, Any], symbol: str | None) -> dict[str, Any]:
+    if not symbol:
+        return {}
+    target = str(symbol).strip().upper()
+    symbols = cfg.get("symbols") if isinstance(cfg, dict) else None
+    if not isinstance(symbols, list):
+        return {}
+    for item in symbols:
+        symbol_cfg = _dict_or_empty(item)
+        if str(symbol_cfg.get("symbol") or "").strip().upper() == target:
+            return symbol_cfg
+    return {}
+
+
+def _template_map(cfg: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    out.update(_dict_or_empty(_nested(cfg, "defaults", "templates")))
+    out.update(_dict_or_empty(cfg.get("templates") if isinstance(cfg, dict) else None))
+    return out
+
+
+def _template_names(value: Any) -> list[str]:
+    raw_items = value if isinstance(value, list) else ([value] if value else [])
+    return [str(item).strip() for item in raw_items if str(item or "").strip()]
+
+
+def _candidate_score_weights(raw: dict[str, Any]) -> CandidateScoreWeights:
+    defaults = CandidateScoreWeights()
+    return CandidateScoreWeights(
+        annualized_return=_float_setting(raw, "annualized_return", defaults.annualized_return),
+        net_income=_float_setting(raw, "net_income", defaults.net_income),
+        liquidity=_float_setting(raw, "liquidity", defaults.liquidity),
+        risk_distance=_float_setting(raw, "risk_distance", defaults.risk_distance),
+    )
+
+
+def _float_setting(raw: dict[str, Any], key: str, default: float) -> float:
+    parsed = _float_or_none(raw.get(key))
+    return float(default if parsed is None or parsed < 0 else parsed)
+
+
+def _score_weights_payload(weights: CandidateScoreWeights) -> dict[str, float]:
+    return {
+        "annualized_return": float(weights.annualized_return),
+        "net_income": float(weights.net_income),
+        "liquidity": float(weights.liquidity),
+        "risk_distance": float(weights.risk_distance),
+    }
+
+
+def _strategy_thresholds(strategy_cfg: dict[str, Any]) -> dict[str, Any]:
+    keys = (
+        "enabled",
+        "min_dte",
+        "max_dte",
+        "min_strike",
+        "max_strike",
+        "min_otm_pct",
+        "min_annualized_net_return",
+        "min_net_income",
+        "min_open_interest",
+        "min_volume",
+        "max_spread_ratio",
+        "min_strike_cost_multiplier",
+        "min_combo_net_credit",
+        "max_call_cost_to_put_credit",
+        "min_upside_lift_to_call_cost",
+        "min_upside_lift_to_put_credit",
+        "max_combo_spread_ratio",
+    )
+    return {key: strategy_cfg.get(key) for key in keys if key in strategy_cfg}
+
+
 def _select_candidate_fields(row: dict[str, Any]) -> dict[str, Any]:
     keys = (
         "symbol",
@@ -548,13 +832,45 @@ def _select_candidate_fields(row: dict[str, Any]) -> dict[str, Any]:
         "spot",
         "annualized_return",
         "annualized_net_return",
+        "annualized_net_return_on_cash_basis",
+        "annualized_net_premium_return",
         "net_income",
+        "otm_pct",
+        "spread_ratio",
+        "open_interest",
+        "volume",
         "score",
         "strategy_score",
+        "cash_required_cny",
+        "cash_free_cny",
+        "cash_free_total_cny",
+        "cash_required_usd",
+        "cash_free_usd",
         "status",
         "filter_reason",
     )
     return {key: row.get(key) for key in keys if row.get(key) not in (None, "")}
+
+
+def _select_reject_fields(row: dict[str, Any], *, account_hint: str | None) -> dict[str, Any]:
+    keys = (
+        "account",
+        "symbol",
+        "contract_symbol",
+        "expiration",
+        "strike",
+        "mode",
+        "reject_stage",
+        "reject_rule",
+        "engine_reject_stage",
+        "engine_reject_reason",
+        "metric_value",
+        "threshold",
+    )
+    out = {key: row.get(key) for key in keys if row.get(key) not in (None, "")}
+    if "account" not in out and account_hint:
+        out["account"] = account_hint
+    return out
 
 
 def _select_trace_fields(row: dict[str, Any]) -> dict[str, Any]:
@@ -563,7 +879,34 @@ def _select_trace_fields(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _collect_metric_values(row: dict[str, Any], values: dict[str, list[float]]) -> None:
-    for key in ("dte", "delta", "annualized_return", "annualized_net_return", "net_income", "score", "strategy_score"):
+    for key in (
+        "dte",
+        "delta",
+        "annualized_return",
+        "annualized_net_return",
+        "annualized_net_return_on_cash_basis",
+        "annualized_net_premium_return",
+        "annualized_scenario_score",
+        "net_income",
+        "net_credit",
+        "combo_net_credit",
+        "otm_pct",
+        "put_otm_pct",
+        "call_otm_pct",
+        "spread_ratio",
+        "combo_spread_ratio",
+        "open_interest",
+        "volume",
+        "cash_required_cny",
+        "cash_free_cny",
+        "cash_free_total_cny",
+        "cash_required_usd",
+        "cash_free_usd",
+        "score",
+        "strategy_score",
+        "premium_funding_score",
+        "scenario_score",
+    ):
         parsed = _float_or_none(row.get(key))
         if parsed is not None:
             values.setdefault(key, []).append(parsed)
@@ -620,6 +963,22 @@ def _float_or_none(value: Any) -> float | None:
     if str(value).strip().endswith("%"):
         return parsed / 100.0
     return parsed
+
+
+def _first_float(row: dict[str, Any], *keys: str) -> float | None:
+    for key in keys:
+        parsed = _float_or_none(row.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _dict_or_empty(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
 
 
 def _unique_paths(paths: list[Path]) -> list[Path]:

@@ -1,15 +1,11 @@
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
 
 def _base_cfg() -> dict[str, object]:
     return {
         "accounts": ["user1"],
         "account_settings": {"user1": {"type": "futu"}},
         "portfolio": {
-            "data_config": "secrets/portfolio.sqlite.json",
             "broker": "富途",
             "account": "user1",
             "source": "futu",
@@ -27,11 +23,9 @@ def _base_cfg() -> dict[str, object]:
     }
 
 
-def test_validate_config_rejects_empty_notification_target(tmp_path: Path) -> None:
+def test_validate_config_rejects_empty_notification_target() -> None:
     import src.application.config_validator as mod
 
-    secrets = tmp_path / "notif.json"
-    secrets.write_text(json.dumps({"feishu": {"app_id": "cli", "app_secret": "sec"}}), encoding="utf-8")
     cfg = _base_cfg()
     cfg["notifications"] = {"provider": "openclaw", "channel": "openclaw-weixin", "target": ""}
 
@@ -42,11 +36,9 @@ def test_validate_config_rejects_empty_notification_target(tmp_path: Path) -> No
         assert "notifications.target must be a non-empty openclaw target string" in str(exc)
 
 
-def test_validate_config_rejects_non_string_notification_target(tmp_path: Path) -> None:
+def test_validate_config_rejects_non_string_notification_target() -> None:
     import src.application.config_validator as mod
 
-    secrets = tmp_path / "notif.json"
-    secrets.write_text(json.dumps({"feishu": {"app_id": "cli", "app_secret": "sec"}}), encoding="utf-8")
     cfg = _base_cfg()
     cfg["notifications"] = {"provider": "openclaw", "channel": "openclaw-weixin", "target": ["ou_x"]}
 
@@ -57,11 +49,9 @@ def test_validate_config_rejects_non_string_notification_target(tmp_path: Path) 
         assert "notifications.target must be a non-empty openclaw target string" in str(exc)
 
 
-def test_validate_config_accepts_valid_openclaw_notification_route(tmp_path: Path) -> None:
+def test_validate_config_accepts_valid_openclaw_notification_route() -> None:
     import src.application.config_validator as mod
 
-    secrets = tmp_path / "notif.json"
-    secrets.write_text(json.dumps({"feishu": {"app_id": "cli", "app_secret": "sec"}}), encoding="utf-8")
     cfg = _base_cfg()
     cfg["notifications"] = {"provider": "openclaw", "channel": "openclaw-weixin", "target": "clawbot:test-room"}
 
@@ -103,12 +93,12 @@ def test_validate_config_rejects_unsupported_notification_channel() -> None:
         assert "notifications.provider must be one of: openclaw, feishu_app" in str(exc)
 
 
-def test_validate_config_accepts_option_positions_sync_to_feishu_enabled_boolean() -> None:
+def test_validate_config_accepts_option_positions_auto_close_enabled_boolean() -> None:
     import src.application.config_validator as mod
 
     cfg = _base_cfg()
     cfg["option_positions"] = {
-        "sync_to_feishu": {
+        "auto_close": {
             "enabled": False,
             "receipt": {"enabled": True, "notify_failed": True, "notify_noop": False},
         }
@@ -117,27 +107,27 @@ def test_validate_config_accepts_option_positions_sync_to_feishu_enabled_boolean
     mod.validate_config(cfg)
 
 
-def test_validate_config_rejects_non_boolean_option_positions_sync_to_feishu_enabled() -> None:
+def test_validate_config_rejects_non_boolean_option_positions_auto_close_enabled() -> None:
     import src.application.config_validator as mod
 
     cfg = _base_cfg()
-    cfg["option_positions"] = {"sync_to_feishu": {"enabled": "no"}}
+    cfg["option_positions"] = {"auto_close": {"enabled": "no"}}
 
     try:
         mod.validate_config(cfg)
         raise AssertionError("expected SystemExit")
     except SystemExit as exc:
-        assert "option_positions.sync_to_feishu.enabled must be a boolean" in str(exc)
+        assert "option_positions.auto_close.enabled must be a boolean" in str(exc)
 
 
-def test_validate_config_rejects_non_boolean_option_positions_sync_to_feishu_receipt() -> None:
+def test_validate_config_rejects_non_boolean_option_positions_auto_close_receipt() -> None:
     import src.application.config_validator as mod
 
     cfg = _base_cfg()
-    cfg["option_positions"] = {"sync_to_feishu": {"receipt": {"enabled": "yes"}}}
+    cfg["option_positions"] = {"auto_close": {"receipt": {"enabled": "yes"}}}
 
     try:
         mod.validate_config(cfg)
         raise AssertionError("expected SystemExit")
     except SystemExit as exc:
-        assert "option_positions.sync_to_feishu.receipt.enabled must be a boolean" in str(exc)
+        assert "option_positions.auto_close.receipt.enabled must be a boolean" in str(exc)

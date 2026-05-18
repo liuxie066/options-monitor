@@ -21,7 +21,7 @@
 可选的轻量分层入口：
 
 - `configs/system.json`：系统默认值，随版本发布维护，包含 runtime、templates、schedule、trade_intake、专用 `option_positions.auto_close`、intake aliases、symbol defaults 等通用默认。
-- `configs/user.common.json`：可选的本地全局用户覆盖文件，适合放两边市场都相同的 `watchdog`、`runtime`、`notifications`、`alert_policy`、`account_settings`、`portfolio.data_config`、`option_positions.sync_to_feishu.enabled`、`option_positions.auto_close.enabled` / `option_positions.auto_close.receipt.enabled`、`symbol_defaults` 等字段。该文件被 `.gitignore` 忽略，不随版本发布。
+- `configs/user.common.json`：可选的本地全局用户覆盖文件，适合放两边市场都相同的 `watchdog`、`runtime`、`notifications`、`alert_policy`、`account_settings`、`portfolio.data_config`、`option_positions.auto_close.enabled` / `option_positions.auto_close.receipt.enabled`、`symbol_defaults` 等字段。该文件被 `.gitignore` 忽略，不随版本发布。
 - `configs/user.us.json` / `configs/user.hk.json`：本地市场用户覆盖文件，默认只维护 market-specific 的账号和 symbols；同字段会覆盖 `configs/user.common.json`。这两类文件被 `.gitignore` 忽略，不随版本发布。
 - `configs/examples/user.example.us.json` / `configs/examples/user.example.hk.json`：可复制的用户配置模板。
 
@@ -52,7 +52,7 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 解释某个字段的最终值和覆盖来源：
 
 ```bash
-./om config explain --market us --key option_positions.sync_to_feishu.enabled
+./om config explain --market us --key option_positions.auto_close.enabled
 ./om config explain --market us --key symbol_defaults.fetch.limit_expirations
 ./om config explain --market us --key symbols.0.fetch.limit_expirations
 ```
@@ -67,15 +67,16 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 ## 版本更新保护
 
 - 代码更新和发布同步只更新代码、文档与 `configs/examples/` 模板，不覆盖用户 runtime config。
-- `scripts/publish_to_prod.sh` 即使遇到被误跟踪的根目录 runtime config，也会显式跳过。
+- `scripts/deploy_to_prod.py` 默认跳过根目录 runtime config；只有显式 `--include-runtime-config --runtime-config-allowlist ...` 才允许受控更新。
 - CI guardrails 会拒绝提交根目录 `config.us.json` / `config.hk.json` / `config.json` / `config.market_*.json` 等 runtime config。
 - 需要适配新版配置字段时，使用 `scripts/migrate_runtime_config.py` 先 dry-run，再 `--apply` 写入；脚本会先创建 `*.bak.YYYYmmdd-HHMMSS` 备份。
 
-## Data Configs（独立数据配置）
+## Data Configs（可选迁移配置）
 
-- `secrets/portfolio.sqlite.json`
+- `portfolio.runtime.json`
 
-运行时配置里的 `portfolio.data_config` 指向这类数据配置文件。默认只需要一份 `secrets/portfolio.sqlite.json`；如果启用 Feishu holdings 或 Feishu `option_positions` 镜像，也在这同一份文件里补 `feishu` 配置。
+最小部署不需要配置 `portfolio.data_config`。期权持仓 SQLite 固定由 runtime root 派生到 `output_shared/state/option_positions.sqlite3`。
+只有 legacy SQLite bootstrap 或自定义 Feishu env key 名时，才使用 `portfolio.runtime.json` 或显式 `portfolio.data_config`。
 
 字段优先级、`config_path` / `config_key` / `portfolio.data_config` 的正式解释，请以 `CONFIGURATION_GUIDE.md` 为准；本文件只保留 canonical config 约定与迁移操作。
 

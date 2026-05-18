@@ -255,7 +255,7 @@ def build_risk_position_views(lots: list[PositionLot]) -> list[RiskPositionView]
 Rules:
 
 - Local SQLite `trade_events` is the source of truth.
-- Feishu `option_positions` is a mirror/sync surface only.
+- Feishu `option_positions` is retired and must not be used for bootstrap, sync, or strategy reads.
 - Non-ledger runtime code must enter through `src/application/ledger/api.py`.
 - Do not patch projected state directly when the canonical event chain is wrong.
 

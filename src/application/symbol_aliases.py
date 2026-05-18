@@ -42,4 +42,8 @@ def _load_runtime_symbol_aliases(root: str) -> dict[str, str]:
 
 def load_runtime_symbol_aliases(base_dir: Path | str | None = None) -> dict[str, str]:
     root = Path(base_dir).resolve() if base_dir is not None else REPO_ROOT
-    return dict(_load_runtime_symbol_aliases(str(root)))
+    if root == REPO_ROOT:
+        return dict(_load_runtime_symbol_aliases(str(root)))
+    aliases = dict(_load_runtime_symbol_aliases(str(REPO_ROOT)))
+    aliases.update(_load_runtime_symbol_aliases(str(root)))
+    return aliases

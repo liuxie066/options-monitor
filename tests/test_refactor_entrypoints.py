@@ -34,7 +34,6 @@ def test_runtime_entrypoints_use_application_facades() -> None:
     healthcheck_src = (ROOT / "src" / "application" / "healthcheck.py").read_text(encoding="utf-8")
     healthcheck_runner_src = (ROOT / "src" / "application" / "healthcheck_runner.py").read_text(encoding="utf-8")
     healthcheck_script_src = (ROOT / "scripts" / "healthcheck.py").read_text(encoding="utf-8")
-    healthcheck_notify_src = (ROOT / "scripts" / "healthcheck_and_notify.py").read_text(encoding="utf-8")
     required_data_prefetch_src = (ROOT / "src" / "application" / "multi_tick" / "required_data_prefetch.py").read_text(encoding="utf-8")
     prefetch_coordinator_src = (ROOT / "src" / "application" / "multi_tick" / "prefetch_coordinator.py").read_text(encoding="utf-8")
     scan_pipeline_src = (ROOT / "src" / "application" / "scan_pipeline.py").read_text(encoding="utf-8")
@@ -44,6 +43,18 @@ def test_runtime_entrypoints_use_application_facades() -> None:
     assert not (ROOT / "scripts" / "send_if_needed.py").exists()
     assert not (ROOT / "scripts" / "send_if_needed_multi.py").exists()
     assert not (ROOT / "scripts" / "option_positions.py").exists()
+    assert not (ROOT / "run_watchlist.sh").exists()
+    assert not (ROOT / "scripts" / "models.py").exists()
+    assert not (ROOT / "scripts" / "daily_health_summary.py").exists()
+    assert not (ROOT / "scripts" / "doctor_opend_required_fields.py").exists()
+    assert not (ROOT / "scripts" / "append_cash_summary.py").exists()
+    assert not (ROOT / "scripts" / "auto_close_expired_positions.py").exists()
+    assert not (ROOT / "scripts" / "auto_deploy_from_main.py").exists()
+    assert not (ROOT / "scripts" / "deploy_status.py").exists()
+    assert not (ROOT / "scripts" / "healthcheck_and_notify.py").exists()
+    assert not (ROOT / "scripts" / "publish_to_prod.sh").exists()
+    assert not (ROOT / "scripts" / "tools" / "sell_put_cash_and_notify.py").exists()
+    assert not (ROOT / "scripts" / "tools" / "snip_sell_put_headroom.py").exists()
     assert not (ROOT / "run_webui.sh").exists()
     assert not (ROOT / "scripts" / "webui").exists()
     assert not (ROOT / "src" / "interfaces" / "webui").exists()
@@ -79,8 +90,6 @@ def test_runtime_entrypoints_use_application_facades() -> None:
     assert "run_scheduler" not in healthcheck_script_src
     assert "get_tenant_access_token" in healthcheck_runner_src
     assert "run_scheduler" in healthcheck_runner_src
-    assert "scripts/healthcheck.py" not in healthcheck_notify_src
-    assert "run_healthcheck_runner" in healthcheck_notify_src
     assert "from src.application.multi_tick.prefetch_coordinator import PrefetchCoordinator" in required_data_prefetch_src
     assert "ThreadPoolExecutor" not in required_data_prefetch_src
     assert "ThreadPoolExecutor" in prefetch_coordinator_src
@@ -168,7 +177,7 @@ def test_unified_cli_scan_pipeline_command_exposes_canonical_flags() -> None:
     assert "--reuse-shared-scan" not in proc.stdout
 
 
-def test_unified_cli_option_positions_sync_feishu_command_exists() -> None:
+def test_unified_cli_option_positions_sync_feishu_command_is_removed() -> None:
     proc = subprocess.run(
         [
             str((ROOT / ".venv" / "bin" / "python").resolve()),
@@ -181,11 +190,10 @@ def test_unified_cli_option_positions_sync_feishu_command_exists() -> None:
         cwd=str(ROOT),
         capture_output=True,
         text=True,
-        check=True,
+        check=False,
     )
-    assert "--dry-run" in proc.stdout
-    assert "--prune-remote-missing-local" in proc.stdout
-    assert "scripts/sync_option_positions_to_feishu.py" not in proc.stdout
+    assert proc.returncode != 0
+    assert "invalid choice" in proc.stderr
 
 
 def test_unified_cli_option_positions_management_command_exists_without_legacy_market_alias() -> None:
