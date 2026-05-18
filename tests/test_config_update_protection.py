@@ -28,14 +28,3 @@ def test_guardrails_rejects_tracked_root_runtime_configs() -> None:
 
     assert [issue.path.as_posix() for issue in issues] == ["config.us.json", "config.hk.json"]
     assert all("root runtime config must stay untracked" in issue.reason for issue in issues)
-
-
-def test_deploy_to_prod_skips_runtime_configs_by_default() -> None:
-    from scripts import deploy_to_prod
-
-    assert deploy_to_prod.should_skip(Path("config.us.json")) is True
-    assert deploy_to_prod.should_skip(Path("config.hk.json")) is True
-    assert deploy_to_prod.should_skip(Path("config.local.prod.json")) is True
-    assert deploy_to_prod.should_skip(Path("config.us.json.bak.20260507-100000")) is True
-    assert deploy_to_prod.should_skip(Path("configs/examples/user.example.us.json")) is False
-    assert deploy_to_prod.should_skip(Path("src/application/config_loader.py")) is False

@@ -33,7 +33,6 @@ def test_runtime_entrypoints_use_application_facades() -> None:
     tool_execution_src = (ROOT / "src" / "application" / "tool_execution.py").read_text(encoding="utf-8")
     healthcheck_src = (ROOT / "src" / "application" / "healthcheck.py").read_text(encoding="utf-8")
     healthcheck_runner_src = (ROOT / "src" / "application" / "healthcheck_runner.py").read_text(encoding="utf-8")
-    healthcheck_script_src = (ROOT / "scripts" / "healthcheck.py").read_text(encoding="utf-8")
     required_data_prefetch_src = (ROOT / "src" / "application" / "multi_tick" / "required_data_prefetch.py").read_text(encoding="utf-8")
     prefetch_coordinator_src = (ROOT / "src" / "application" / "multi_tick" / "prefetch_coordinator.py").read_text(encoding="utf-8")
     scan_pipeline_src = (ROOT / "src" / "application" / "scan_pipeline.py").read_text(encoding="utf-8")
@@ -47,12 +46,25 @@ def test_runtime_entrypoints_use_application_facades() -> None:
     assert not (ROOT / "scripts" / "models.py").exists()
     assert not (ROOT / "scripts" / "daily_health_summary.py").exists()
     assert not (ROOT / "scripts" / "doctor_opend_required_fields.py").exists()
+    assert not (ROOT / "scripts" / "doctor_futu.py").exists()
     assert not (ROOT / "scripts" / "append_cash_summary.py").exists()
     assert not (ROOT / "scripts" / "auto_close_expired_positions.py").exists()
     assert not (ROOT / "scripts" / "auto_deploy_from_main.py").exists()
+    assert not (ROOT / "scripts" / "diagnose_opend_option_chain.py").exists()
+    assert not (ROOT / "scripts" / "deploy_safe.sh").exists()
+    assert not (ROOT / "scripts" / "deploy_to_prod.py").exists()
     assert not (ROOT / "scripts" / "deploy_status.py").exists()
+    assert not (ROOT / "scripts" / "healthcheck.py").exists()
     assert not (ROOT / "scripts" / "healthcheck_and_notify.py").exists()
+    assert not (ROOT / "scripts" / "opend_watchdog.py").exists()
+    assert not (ROOT / "scripts" / "opend_watchdog_loop.py").exists()
+    assert not (ROOT / "scripts" / "policy_check.py").exists()
     assert not (ROOT / "scripts" / "publish_to_prod.sh").exists()
+    assert not (ROOT / "scripts" / "retention_reports.py").exists()
+    assert not (ROOT / "src" / "application" / "deploy_observability.py").exists()
+    assert not (ROOT / "scripts" / "ssh_selfcheck.sh").exists()
+    assert not (ROOT / "scripts" / "tools" / "doctor_opend_telnet.py").exists()
+    assert not (ROOT / "scripts" / "tools" / "doctor_required_data_schema.py").exists()
     assert not (ROOT / "scripts" / "tools" / "sell_put_cash_and_notify.py").exists()
     assert not (ROOT / "scripts" / "tools" / "snip_sell_put_headroom.py").exists()
     assert not (ROOT / "run_webui.sh").exists()
@@ -83,11 +95,6 @@ def test_runtime_entrypoints_use_application_facades() -> None:
     assert not (ROOT / "src" / "application" / "agent_tools.py").exists()
     assert not (ROOT / "scripts" / "agent_plugin").exists()
     assert "from src.application.tool_execution import execute_tool" in healthcheck_src
-    assert "from src.application.healthcheck_runner import main" in healthcheck_script_src
-    assert "get_tenant_access_token" not in healthcheck_script_src
-    assert "bitable_fields" not in healthcheck_script_src
-    assert "validate_config" not in healthcheck_script_src
-    assert "run_scheduler" not in healthcheck_script_src
     assert "get_tenant_access_token" in healthcheck_runner_src
     assert "run_scheduler" in healthcheck_runner_src
     assert "from src.application.multi_tick.prefetch_coordinator import PrefetchCoordinator" in required_data_prefetch_src

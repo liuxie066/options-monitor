@@ -7,7 +7,7 @@
 - 纯函数 / Engine 契约测试：验证筛选、排序、调度、通知交付等确定性逻辑。
 - CLI / script 边界测试：验证命令参数、入口兼容和输出文件契约。
 - Pipeline / multi-account 测试：验证多账户状态隔离、共享 required data、共享 context 切片复用和 per-account notification batching。
-- Schema / guard 测试：验证 DTO、source snapshot、config gate、文档 wording 和部署参数约束。
+- Schema / guard 测试：验证 DTO、source snapshot、config gate、文档 wording 和 runtime config 跟踪约束。
 - 少量 subprocess 测试：依赖 `.venv/bin/python`，本地缺 venv 时会失败。
 
 ## 运行方式
@@ -36,7 +36,7 @@ python3 -m pytest tests/test_pipeline_context_shared_context.py -q
 
 ```bash
 PYTHONPYCACHEPREFIX=/tmp/om_pycache python3 -m py_compile <changed-files>
-python3 scripts/guardrails_check.py --check-doc-wording --check-deploy-args
+python3 scripts/guardrails_check.py --check-doc-wording --check-runtime-config-tracking
 git diff --check
 ```
 

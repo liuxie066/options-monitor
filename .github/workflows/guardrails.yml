@@ -26,7 +26,7 @@ jobs:
 
       - name: Guardrails checks
         run: |
-          ./.venv/bin/python scripts/guardrails_check.py --check-doc-wording --check-deploy-args --check-runtime-config-tracking
+          ./.venv/bin/python scripts/guardrails_check.py --check-doc-wording --check-runtime-config-tracking
 
       - name: Minimal regression
         run: |

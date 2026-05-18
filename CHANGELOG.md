@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 1.2.66 - 2026-05-19
+
+### Changed
+- Retired the repo-local dev-to-prod checkout deployment path from Makefile, guardrails, and operator docs; service deployment guidance now points to `./om service render` for Linux systemd and Mac launchd.
+- Narrowed guardrails checks to current documentation wording and runtime config tracking after removing the obsolete deploy argument policy.
+
+### Removed
+- Removed old deploy helper entrypoints and deploy observability remnants from the active architecture contract.
+- Removed obsolete OpenD, Futu, healthcheck, watchdog-loop, required-data schema, report-retention, and SSH deploy-key self-check scripts that duplicated maintained CLI/application paths.
+
+### Tests
+- Added structural regressions to keep retired deployment, WebUI, OpenD doctor, healthcheck wrapper, report-retention, and deploy-key helper scripts from returning.
+- Re-ran focused structure/runtime/service/OpenD CLI tests, guardrails, release metadata validation, and diff checks.
+
 ## 1.2.65 - 2026-05-19
 
 ### Added

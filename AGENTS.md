@@ -53,7 +53,7 @@ Legacy `scripts/send_if_needed*.py` is removed. Do not use it.
 Ask for explicit confirmation before any command that can:
 
 - Send real notifications through Feishu, webhook, email, or another channel.
-- Deploy to production, including `make deploy-safe` or similar.
+- Install, start, stop, or modify production services such as systemd / launchd units.
 - Modify `config.us.json`, `config.hk.json`, secrets, or production runtime config.
 - Delete `output/`, `output_runs/`, `output_shared/`, state files, caches, or runtime artifacts.
 - Write Feishu, option-position state, trade events, or broker-facing data.
