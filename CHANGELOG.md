@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 1.2.64 - 2026-05-18
+
+### Fixed
+- Enforced canonical option trade write rules for symbol, type, side, strike, expiration, contracts, multiplier, locked shares, premium, and cash-secured amount.
+- Required positive `premium_per_share` on manual and broker open writes, preserved up to three decimal places, and stopped defaulting missing open prices to `0.0`.
+- Required positive manual/broker close prices while keeping expire auto-close as the only zero-price close path.
+- Marked parsed trade messages without premium as not write-ready instead of only listing `premium_per_share` in missing fields.
+
+### Changed
+- Treat `underlying_share_locked` as a short-call-only derived risk field that must equal `contracts * multiplier` when explicitly supplied.
+- Treat `cash_secured_amount` as a short-put-only derived risk field from `strike * multiplier * contracts`.
+
+### Tests
+- Added domain regressions for required write fields, price precision, locked-share validation, and cash-secured derivation.
+- Re-ran changed-path type checking, compile checks, focused option-position/trade-intake tests, full pytest, diff checks, and release metadata validation.
+
 ## 1.2.63 - 2026-05-18
 
 ### Fixed

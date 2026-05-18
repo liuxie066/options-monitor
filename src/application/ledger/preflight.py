@@ -17,6 +17,7 @@ from domain.domain.ledger.position_fields import (
     normalize_broker,
     normalize_currency,
     normalize_status,
+    normalize_trade_price,
     now_ms,
     resolve_open_currency,
 )
@@ -425,6 +426,18 @@ def _preflight_lot_close(
             f"{operation_label} ledger preflight requires contracts_to_close > 0",
             details={"record_id": resolved_record_id, "contracts_to_close": int(contracts_to_close)},
         )
+    try:
+        normalized_close_price = normalize_trade_price(
+            close_price,
+            "close_price",
+            allow_zero=(event_type == "expire_close"),
+        )
+    except ValueError as exc:
+        raise LedgerPreflightError(
+            "invalid_close_price",
+            f"{operation_label} ledger preflight requires valid close_price",
+            details={"record_id": resolved_record_id, "close_price": close_price, "error": str(exc)},
+        ) from exc
 
     current_fields = _current_record_fields(repo, record_id=resolved_record_id)
     if fields is not None:
@@ -503,7 +516,7 @@ def _preflight_lot_close(
         event_time_ms=event_time_ms,
         contract_key=current_key,
         contracts=int(contracts_to_close),
-        price=float(close_price or 0.0),
+        price=float(normalized_close_price),
         currency=normalize_currency(current_fields.get("currency")),
         source=source,
         multiplier=float(effective_multiplier(current_fields) or 100),
@@ -724,7 +737,7 @@ def _manual_open_ledger_inputs(command: OpenPositionCommand) -> tuple[OpenPositi
         option_type=str(resolved_command.option_type),
         side=trade_side,
         contracts=int(resolved_command.contracts),
-        price=float(resolved_command.premium_per_share or 0.0),
+        price=float(fields["premium"]),
         strike=effective_strike(fields),
         expiration_ymd=str(resolved_command.expiration_ymd or "").strip() or None,
         trade_time_ms=event_time_ms,
@@ -735,7 +748,7 @@ def _manual_open_ledger_inputs(command: OpenPositionCommand) -> tuple[OpenPositi
         event_time_ms=event_time_ms,
         contract_key=contract_key,
         contracts=int(resolved_command.contracts),
-        price=float(resolved_command.premium_per_share or 0.0),
+        price=float(fields["premium"]),
         currency=resolve_open_currency(fields.get("symbol"), fields.get("currency")),
         source="cli_manual_open",
         multiplier=float(effective_multiplier(fields) or 100),
@@ -758,7 +771,7 @@ def _trade_open_ledger_inputs(deal: Any) -> tuple[Any, dict[str, Any], TradeEven
         event_time_ms=event_time_ms,
         contract_key=contract_key,
         contracts=int(getattr(resolved_deal, "contracts", 0) or 0),
-        price=float(getattr(resolved_deal, "price", 0.0) or 0.0),
+        price=float(fields["premium"]),
         currency=resolve_open_currency(fields.get("symbol"), fields.get("currency")),
         source="opend_push",
         multiplier=float(effective_multiplier(fields) or 100),
@@ -789,7 +802,11 @@ def _open_command_from_trade_deal(deal: Any) -> OpenPositionCommand:
             else None
         ),
         expiration_ymd=(str(getattr(deal, "expiration_ymd", "") or "").strip() or None),
-        premium_per_share=float(getattr(deal, "price", 0.0) or 0.0),
+        premium_per_share=(
+            float(getattr(deal, "price"))
+            if getattr(deal, "price", None) not in (None, "")
+            else None
+        ),
         note=(
             f"source=opend_push "
             f"deal_id={getattr(deal, 'deal_id', '') or ''} "

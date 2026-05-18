@@ -376,6 +376,7 @@ def record_broker_trade_open(repo: Any, deal: Any, *, persist_trade_event_fn: An
 
 def _broker_trade_open_command(deal: Any) -> OpenPositionCommand:
     side = str(getattr(deal, "side", "") or "").strip().lower()
+    raw_price = getattr(deal, "price", None)
     return OpenPositionCommand(
         broker="富途",
         account=str(getattr(deal, "internal_account", "") or ""),
@@ -387,7 +388,7 @@ def _broker_trade_open_command(deal: Any) -> OpenPositionCommand:
         strike=(float(getattr(deal, "strike")) if getattr(deal, "strike", None) is not None else None),
         multiplier=float(getattr(deal, "multiplier")) if getattr(deal, "multiplier", None) is not None else None,
         expiration_ymd=(str(getattr(deal, "expiration_ymd", "") or "").strip() or None),
-        premium_per_share=float(getattr(deal, "price", 0.0) or 0.0),
+        premium_per_share=float(raw_price) if raw_price not in (None, "") else None,
         note=(
             f"source=opend_push "
             f"deal_id={getattr(deal, 'deal_id', None)} "
