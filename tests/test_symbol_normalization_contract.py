@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from src.infrastructure.multiplier_cache import normalize_symbol as normalize_multiplier_symbol
 from src.application.opend_utils import resolve_underlier_alias
-from domain.domain.option_position_ledger import trade_event_from_normalized_deal
 from domain.domain.option_position_lots import norm_symbol as normalize_position_symbol
-from src.application.trade_event_normalizer import NormalizedTradeDeal
-from src.application.trade_event_normalizer import normalize_trade_deal
+import src.application.ledger.repository as ledger_repository
+import src.application.ledger.writer as ledger_writer
+from src.application.trades.normalizer import NormalizedTradeDeal
+from src.application.trades.normalizer import normalize_trade_deal
 from src.application.watchlist_mutations import normalize_symbol as normalize_watchlist_symbol
 
 
@@ -35,7 +38,7 @@ def test_trade_event_contract_canonicalizes_option_code_root_alias() -> None:
     assert deal.symbol == "9992.HK"
 
 
-def test_ledger_trade_event_canonicalizes_noncanonical_deal_symbol() -> None:
+def test_ledger_trade_event_canonicalizes_noncanonical_deal_symbol(tmp_path: Path) -> None:
     deal = NormalizedTradeDeal(
         broker="富途",
         futu_account_id="REAL_1",
@@ -57,6 +60,8 @@ def test_ledger_trade_event_canonicalizes_noncanonical_deal_symbol() -> None:
         raw_payload={"symbol": "POP"},
     )
 
-    event = trade_event_from_normalized_deal(deal)
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    ledger_writer.persist_trade_event(repo, deal)
+    event = repo.list_trade_events()[0]
 
-    assert event.symbol == "9992.HK"
+    assert event["symbol"] == "9992.HK"

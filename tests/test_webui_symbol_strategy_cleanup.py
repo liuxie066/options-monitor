@@ -377,7 +377,7 @@ def test_global_summary_exposes_notification_config_fields() -> None:
 def test_global_summary_exposes_option_positions_bootstrap_status(monkeypatch) -> None:
     old_base = webui_server.BASE_DIR
     old_config_files = dict(webui_server.CONFIG_FILES)
-    old_load_repo = webui_server.load_option_positions_repo
+    old_open_position_ledger = webui_server.open_position_ledger
     try:
         with TemporaryDirectory() as td:
             repo = Path(td)
@@ -397,7 +397,7 @@ def test_global_summary_exposes_option_positions_bootstrap_status(monkeypatch) -
                 bootstrap_status = "degraded_feishu_bootstrap_failed"
                 bootstrap_message = "feishu bootstrap failed: upstream unavailable"
 
-            monkeypatch.setattr(webui_server, "load_option_positions_repo", lambda _path: _Repo())
+            monkeypatch.setattr(webui_server, "open_position_ledger", lambda _path: _Repo())
             webui_server.BASE_DIR = repo
             webui_server.CONFIG_FILES = {"us": Path("config.us.json"), "hk": Path("config.hk.json")}
 
@@ -407,7 +407,7 @@ def test_global_summary_exposes_option_positions_bootstrap_status(monkeypatch) -
             assert bootstrap["ok"] is False
             assert "upstream unavailable" in bootstrap["message"]
     finally:
-        webui_server.load_option_positions_repo = old_load_repo
+        webui_server.open_position_ledger = old_open_position_ledger
         webui_server.BASE_DIR = old_base
         webui_server.CONFIG_FILES = old_config_files
 

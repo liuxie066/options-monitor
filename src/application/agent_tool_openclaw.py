@@ -15,7 +15,7 @@ from domain.domain.multi_tick import (
     resolve_notification_route_from_config,
     resolve_openclaw_transport_channel,
 )
-from src.application.trade_account_mapping import resolve_trade_intake_config
+from src.application.trades.account_mapping import resolve_trade_intake_config
 
 
 PROFILE_PATH_KEYS = ("report_dir", "state_dir", "shared_state_dir", "accounts_root", "runs_root")
@@ -155,6 +155,33 @@ def _option_positions_feishu_sync_receipt_summary(sync_json: dict[str, Any] | An
         "attempt_count": receipt.get("attempt_count"),
         "receipt_key": receipt.get("receipt_key"),
         "updated_at": receipt.get("updated_at"),
+    }
+
+
+def _ledger_context_summary(context_info: dict[str, Any] | Any) -> dict[str, Any]:
+    if not isinstance(context_info, dict):
+        return {"available": False, "status": "unknown", "fail_closed": False}
+    payload = context_info.get("json")
+    context: dict[str, Any] = payload if isinstance(payload, dict) else {}
+    ledger_raw = context.get("ledger")
+    ledger: dict[str, Any] = ledger_raw if isinstance(ledger_raw, dict) else {}
+    if not ledger:
+        return {
+            "available": bool(context_info.get("exists")),
+            "status": "unknown",
+            "fail_closed": False,
+        }
+    return {
+        "available": True,
+        "status": ledger.get("status") or "unknown",
+        "reason": ledger.get("reason"),
+        "read_model": ledger.get("read_model"),
+        "fail_closed": bool(ledger.get("fail_closed")),
+        "source_record_count": ledger.get("source_record_count"),
+        "imported_event_count": ledger.get("imported_event_count"),
+        "lot_count": ledger.get("lot_count"),
+        "open_lot_count": ledger.get("open_lot_count"),
+        "view_count": ledger.get("view_count"),
     }
 
 
@@ -897,6 +924,11 @@ def runtime_status_tool(
         base=base,
         read_json_object_or_empty=read_json_object_or_empty,
     )
+    option_positions_context = _json_file_info(
+        state_dir / "option_positions_context.json",
+        base=base,
+        read_json_object_or_empty=read_json_object_or_empty,
+    )
     notification = _text_file_info(
         report_dir / "symbols_notification.txt",
         base=base,
@@ -964,6 +996,11 @@ def runtime_status_tool(
                 base=base,
                 read_json_object_or_empty=read_json_object_or_empty,
             ),
+            "option_positions_context": _json_file_info(
+                account_root / "state" / "option_positions_context.json",
+                base=base,
+                read_json_object_or_empty=read_json_object_or_empty,
+            ),
             "notification": _text_file_info(
                 account_root / "reports" / "symbols_notification.txt",
                 base=base,
@@ -1009,6 +1046,9 @@ def runtime_status_tool(
         warnings.append("No symbols_notification.txt found under output/reports or output_accounts/<account>/reports.")
     if str(trigger_context.get("delivery_mode") or "").lower() == "none":
         warnings.append("Outer delivery.mode is none; the task runner will not announce run output.")
+    ledger_context_summary = _ledger_context_summary(option_positions_context)
+    if ledger_context_summary.get("fail_closed"):
+        warnings.append("Ledger shadow context is fail-closed; risk reads should be blocked until repaired.")
     notification_diagnosis = _notification_diagnosis(
         cfg=cfg,
         shared_last_run=shared_last_run,
@@ -1049,6 +1089,10 @@ def runtime_status_tool(
             "receipts": option_positions_feishu_sync_receipts,
             "receipt": _option_positions_feishu_sync_receipt_summary(option_positions_feishu_sync_last_run.get("json")),
         },
+        "option_positions_context": {
+            "last": option_positions_context,
+            "ledger": ledger_context_summary,
+        },
         "accounts": account_status,
         "latest_run_selection": latest_run_selection,
         "latest_run": latest_run_payload,
@@ -1085,6 +1129,8 @@ def runtime_status_tool(
         else None
     )
     data["summary"]["latest_scanned_run_prefetch_bottleneck"] = latest_scanned_prefetch_summary.get("primary_bottleneck")
+    data["summary"]["ledger_status"] = ledger_context_summary.get("status")
+    data["summary"]["ledger_fail_closed"] = bool(ledger_context_summary.get("fail_closed"))
     return data, warnings, {"config_path": mask_path(config_path)}
 
 

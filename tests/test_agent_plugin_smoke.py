@@ -7,6 +7,9 @@ from typing import Any
 
 import pandas as pd
 
+import src.application.ledger.manual_trades as ledger_manual_trades
+import src.application.ledger.repository as ledger_repository
+
 BASE = Path(__file__).resolve().parents[1]
 if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
@@ -327,7 +330,7 @@ def test_healthcheck_reports_option_positions_bootstrap_degraded(monkeypatch, tm
         bootstrap_status = "degraded_feishu_bootstrap_failed"
         bootstrap_message = "feishu bootstrap failed: upstream unavailable"
 
-    monkeypatch.setattr(tools, "load_option_positions_repo", lambda _path: _Repo())
+    monkeypatch.setattr(tools, "open_position_ledger", lambda _path: _Repo())
 
     out = run_tool("healthcheck", {"config_path": str(cfg_path)})
 
@@ -368,7 +371,7 @@ def test_healthcheck_reports_option_positions_bootstrap_ok_for_sqlite_only(monke
         bootstrap_status = "sqlite_only_no_feishu_bootstrap"
         bootstrap_message = "no feishu option_positions bootstrap configured"
 
-    monkeypatch.setattr(tools, "load_option_positions_repo", lambda _path: _Repo())
+    monkeypatch.setattr(tools, "open_position_ledger", lambda _path: _Repo())
 
     out = run_tool("healthcheck", {"config_path": str(cfg_path)})
 
@@ -571,7 +574,6 @@ def test_spec_exposes_broker_as_public_field() -> None:
 def test_monthly_income_report_returns_agent_summary(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
     import src.application.agent_tool_handlers as tools
-    import src.application.option_positions_service as svc
     from domain.domain.option_position_lots import OpenPositionCommand, parse_exp_to_ms
 
     def _ms(value: str) -> int:
@@ -592,8 +594,8 @@ def test_monthly_income_report_returns_agent_summary(monkeypatch, tmp_path: Path
         encoding="utf-8",
     )
 
-    repo = svc.SQLiteOptionPositionsRepository(sqlite_path)
-    svc.persist_manual_open_event(
+    repo = ledger_repository.SQLiteOptionPositionsRepository(sqlite_path)
+    ledger_manual_trades.persist_manual_open_event(
         repo,
         OpenPositionCommand(
             broker="富途",
@@ -611,7 +613,7 @@ def test_monthly_income_report_returns_agent_summary(monkeypatch, tmp_path: Path
         ),
     )
     lot = repo.list_position_lots()[0]
-    svc.persist_manual_close_event(
+    ledger_manual_trades.persist_manual_close_event(
         repo,
         record_id=lot["record_id"],
         fields=lot["fields"],
@@ -822,7 +824,6 @@ def test_scheduler_status_reads_decision_without_writing_state(tmp_path: Path) -
 
 def test_option_positions_read_lists_events_history_and_inspect(tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
-    import src.application.option_positions_service as svc
     from domain.domain.option_position_lots import OpenPositionCommand, parse_exp_to_ms
 
     def _ms(value: str) -> int:
@@ -843,8 +844,8 @@ def test_option_positions_read_lists_events_history_and_inspect(tmp_path: Path) 
         encoding="utf-8",
     )
 
-    repo = svc.SQLiteOptionPositionsRepository(sqlite_path)
-    svc.persist_manual_open_event(
+    repo = ledger_repository.SQLiteOptionPositionsRepository(sqlite_path)
+    ledger_manual_trades.persist_manual_open_event(
         repo,
         OpenPositionCommand(
             broker="富途",
@@ -962,6 +963,25 @@ def test_runtime_status_summarizes_openclaw_runtime_files(tmp_path: Path) -> Non
         encoding="utf-8",
     )
     (state_dir / "auto_trade_intake_audit.jsonl").write_text('{"phase":"receipt_sent"}\n', encoding="utf-8")
+    (state_dir / "option_positions_context.json").write_text(
+        json.dumps(
+            {
+                "ledger": {
+                    "status": "ok",
+                    "reason": "ledger_shadow_ok",
+                    "read_model": "ledger_shadow",
+                    "fail_closed": False,
+                    "source_record_count": 1,
+                    "imported_event_count": 1,
+                    "lot_count": 1,
+                    "open_lot_count": 1,
+                    "view_count": 1,
+                },
+                "open_positions_min": [],
+            }
+        ),
+        encoding="utf-8",
+    )
     (shared_state_dir / "option_positions_feishu_sync.json").write_text(
         json.dumps(
             {
@@ -1081,6 +1101,9 @@ def test_runtime_status_summarizes_openclaw_runtime_files(tmp_path: Path) -> Non
     assert out["data"]["shared"]["notification"]["text"] == "shared notification\n"
     assert out["data"]["accounts"]["user1"]["notification"]["text"] == "account notification\n"
     assert out["data"]["latest_run"]["state"]["tick_metrics"]["json"]["notify_summary"]["send_confirmed_count"] == 1
+    assert out["data"]["option_positions_context"]["ledger"]["status"] == "ok"
+    assert out["data"]["summary"]["ledger_status"] == "ok"
+    assert out["data"]["summary"]["ledger_fail_closed"] is False
     assert out["data"]["notification_diagnosis"]["status"] == "sent"
     assert out["data"]["notification_diagnosis"]["scheduler_should_run_scan"] is True
     assert out["data"]["notification_diagnosis"]["send_confirmed_count"] == 1

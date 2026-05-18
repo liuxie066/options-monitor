@@ -17,19 +17,19 @@ from pathlib import Path
 
 from src.application.account_config import build_account_portfolio_source_plan
 from src.application.config_loader import resolve_data_config_path
-from src.application.option_positions_context_builder import (
+from src.application.positions.context_builder import (
     build_context as build_option_positions_context,
     build_shared_context as build_shared_option_positions_context,
 )
 from src.application.futu_portfolio_context import fetch_futu_portfolio_context
 from src.infrastructure.io_utils import is_fresh, load_cached_json
-from src.application.option_positions_service import (
-    load_option_positions_repo,
+from src.application.ledger.api import (
+    list_position_lot_snapshots,
+    open_position_ledger,
 )
 from src.application.portfolio_context_service import load_account_portfolio_context, with_context_source
 from domain.services import adapt_holdings_context, adapt_option_positions_context
-from src.application.option_positions_context_builder import slice_shared_context_for_account as slice_shared_option_context_for_account
-from src.application.option_positions_facade import load_option_position_records
+from src.application.positions.context_builder import slice_shared_context_for_account as slice_shared_option_context_for_account
 from domain.storage.repositories import state_repo
 
 
@@ -41,8 +41,8 @@ def _persist_source_snapshot(base: Path, snapshot: dict) -> None:
 
 
 def _load_option_position_records(data_config: str) -> tuple[object, list[dict]]:
-    repo = load_option_positions_repo(Path(data_config))
-    return repo, list(load_option_position_records(repo))
+    repo = open_position_ledger(Path(data_config))
+    return repo, list(list_position_lot_snapshots(repo))
 
 
 def load_portfolio_context(

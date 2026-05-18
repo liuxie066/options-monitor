@@ -177,19 +177,21 @@ def test_required_data_uses_application_opend_symbol_fetching_owner() -> None:
 
 
 def test_option_positions_and_pipeline_context_import_data_config_owner_module() -> None:
-    option_positions_mod = importlib.import_module("src.application.option_positions_facade")
+    read_model_mod = importlib.import_module("src.application.ledger.read_model")
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module("scripts.pipeline_context")
 
     pipeline_context_mod = importlib.import_module("src.application.pipeline_context")
     owner_mod = importlib.import_module("src.application.config_loader")
 
-    assert option_positions_mod.resolve_data_config_path is owner_mod.resolve_data_config_path
+    assert read_model_mod.resolve_data_config_path is owner_mod.resolve_data_config_path
     assert pipeline_context_mod.resolve_data_config_path is owner_mod.resolve_data_config_path
 
 
 def test_option_positions_inspection_imports_application_owner_module() -> None:
-    owner_mod = importlib.import_module("src.application.option_positions_inspection")
+    owner_mod = importlib.import_module("src.application.positions.inspection")
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("src.application.option_positions_inspection")
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module("scripts.option_positions")
     with pytest.raises(ModuleNotFoundError):
@@ -205,6 +207,7 @@ def test_option_positions_inspection_imports_application_owner_module() -> None:
 
 def test_portfolio_context_and_cash_query_import_application_owner_modules() -> None:
     for old_module in (
+        "src.application.option_positions_context_builder",
         "scripts.query_sell_put_cash",
         "scripts.fetch_option_positions_context",
         "scripts.fetch_portfolio_context",
@@ -215,7 +218,7 @@ def test_portfolio_context_and_cash_query_import_application_owner_modules() -> 
             importlib.import_module(old_module)
 
     cash_mod = importlib.import_module("src.application.cash_headroom_query")
-    option_ctx_mod = importlib.import_module("src.application.option_positions_context_builder")
+    option_ctx_mod = importlib.import_module("src.application.positions.context_builder")
     portfolio_ctx_mod = importlib.import_module("src.application.portfolio_context_builder")
     portfolio_service_mod = importlib.import_module("src.application.portfolio_context_service")
     futu_portfolio_mod = importlib.import_module("src.application.futu_portfolio_context")
@@ -239,15 +242,17 @@ def test_feishu_bitable_imports_infrastructure_owner_module() -> None:
         importlib.import_module("scripts.feishu_bitable")
 
     infra_mod = importlib.import_module("src.infrastructure.feishu_bitable")
-    service_mod = importlib.import_module("src.application.option_positions_service")
-    reporting_mod = importlib.import_module("src.application.option_positions_reporting")
-    facade_mod = importlib.import_module("src.application.option_positions_facade")
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("src.application.option_positions_reporting")
+    bootstrap_mod = importlib.import_module("src.application.ledger.bootstrap")
+    reporting_mod = importlib.import_module("src.application.positions.reporting")
+    read_model_mod = importlib.import_module("src.application.ledger.read_model")
     healthcheck_mod = importlib.import_module("src.application.healthcheck_runner")
 
-    assert service_mod.bitable_list_records is infra_mod.bitable_list_records
-    assert service_mod.get_tenant_access_token is infra_mod.get_tenant_access_token
+    assert bootstrap_mod.bitable_list_records is infra_mod.bitable_list_records
+    assert bootstrap_mod.get_tenant_access_token is infra_mod.get_tenant_access_token
     assert reporting_mod.safe_float is infra_mod.safe_float
-    assert facade_mod.parse_note_kv is infra_mod.parse_note_kv
+    assert read_model_mod.parse_note_kv is infra_mod.parse_note_kv
     assert healthcheck_mod.get_tenant_access_token is infra_mod.get_tenant_access_token
 
 
@@ -256,13 +261,13 @@ def test_exchange_rates_imports_infrastructure_owner_module() -> None:
         importlib.import_module("scripts.exchange_rates")
 
     infra_mod = importlib.import_module("src.infrastructure.exchange_rates")
-    facade_mod = importlib.import_module("src.application.option_positions_facade")
-    reporting_mod = importlib.import_module("src.application.option_positions_reporting")
+    read_model_mod = importlib.import_module("src.application.ledger.read_model")
+    reporting_mod = importlib.import_module("src.application.positions.reporting")
     agent_tools_mod = importlib.import_module("src.application.agent_tool_handlers")
     cash_mod = importlib.import_module("src.application.sell_put_cash")
     notify_mod = importlib.import_module("src.application.notify_symbols")
 
-    assert facade_mod.get_exchange_rates_or_fetch_latest is infra_mod.get_exchange_rates_or_fetch_latest
+    assert read_model_mod.get_exchange_rates_or_fetch_latest is infra_mod.get_exchange_rates_or_fetch_latest
     assert reporting_mod.CurrencyConverter is infra_mod.CurrencyConverter
     assert agent_tools_mod._get_cached_exchange_rates_impl is infra_mod.get_cached_exchange_rates
     assert cash_mod.CurrencyConverter is infra_mod.CurrencyConverter
@@ -278,8 +283,8 @@ def test_multiplier_cache_imports_infrastructure_owner_module() -> None:
         importlib.import_module("scripts.option_intake")
 
     infra_mod = importlib.import_module("src.infrastructure.multiplier_cache")
-    reporting_mod = importlib.import_module("src.application.option_positions_reporting")
-    trade_normalizer_mod = importlib.import_module("src.application.trade_event_normalizer")
+    reporting_mod = importlib.import_module("src.application.positions.reporting")
+    trade_normalizer_mod = importlib.import_module("src.application.trades.normalizer")
     parse_message_mod = importlib.import_module("src.application.parse_option_message")
 
     assert reporting_mod.resolve_multiplier is infra_mod.resolve_multiplier
@@ -290,9 +295,16 @@ def test_multiplier_cache_imports_infrastructure_owner_module() -> None:
 def test_option_positions_feishu_sync_imports_application_owner_module() -> None:
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module("scripts.sync_option_positions_to_feishu")
+    for old_module in (
+        "src.application.option_positions_feishu_sync",
+        "src.application.option_positions_feishu_sync_receipt",
+        "src.application.option_positions_sync_config",
+    ):
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module(old_module)
 
-    owner_mod = importlib.import_module("src.application.option_positions_feishu_sync")
-    workflows_mod = importlib.import_module("src.application.position_workflows")
+    owner_mod = importlib.import_module("src.application.positions.feishu_sync")
+    workflows_mod = importlib.import_module("src.application.positions.workflows")
 
     assert workflows_mod.sync_single_option_position_record is owner_mod.sync_single_option_position_record
 
@@ -305,6 +317,16 @@ def test_trade_intake_imports_owner_modules() -> None:
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module("scripts.trade_event_normalizer")
     for old_module in (
+        "src.application.auto_trade_intake",
+        "src.application.futu_trade_detail_lookup",
+        "src.application.trade_account_mapping",
+        "src.application.trade_event_normalizer",
+        "src.application.trade_intake",
+        "src.application.trade_intake_receipt",
+        "src.application.trade_intake_resolver",
+        "src.application.trade_intake_state",
+        "src.application.trade_intent",
+        "src.application.trade_push_listener",
         "scripts.auto_trade_intake",
         "scripts.futu_trade_detail_lookup",
         "scripts.trade_intake_resolver",
@@ -315,13 +337,13 @@ def test_trade_intake_imports_owner_modules() -> None:
             importlib.import_module(old_module)
 
     identity_mod = importlib.import_module("domain.domain.trade_account_identity")
-    mapping_mod = importlib.import_module("src.application.trade_account_mapping")
-    normalizer_mod = importlib.import_module("src.application.trade_event_normalizer")
-    auto_trade_mod = importlib.import_module("src.application.auto_trade_intake")
-    lookup_mod = importlib.import_module("src.application.futu_trade_detail_lookup")
-    resolver_mod = importlib.import_module("src.application.trade_intake_resolver")
+    mapping_mod = importlib.import_module("src.application.trades.account_mapping")
+    normalizer_mod = importlib.import_module("src.application.trades.normalizer")
+    auto_trade_mod = importlib.import_module("src.application.trades.auto_intake")
+    lookup_mod = importlib.import_module("src.application.trades.futu_detail_lookup")
+    resolver_mod = importlib.import_module("src.application.trades.resolver")
+    workflows_mod = importlib.import_module("src.application.trades.workflows")
     validate_mod = importlib.import_module("src.application.config_validator")
-    workflows_mod = importlib.import_module("src.application.position_workflows")
 
     assert lookup_mod.extract_primary_account_id is identity_mod.extract_primary_account_id
     assert validate_mod.resolve_trade_intake_config is mapping_mod.resolve_trade_intake_config

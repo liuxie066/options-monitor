@@ -15,9 +15,9 @@ from domain.domain import (
 from domain.domain.fetch_source import normalize_fetch_source
 from src.application.account_config import ACCOUNT_TYPES, account_settings_from_config, accounts_from_config
 from src.application.config_loader import resolve_templates_config, resolve_watchlist_config, set_watchlist_config
-from src.application.trade_account_mapping import resolve_trade_intake_config
-from src.application.position_maintenance_receipt import resolve_auto_close_receipt_config
-from src.application.option_positions_feishu_sync_receipt import resolve_option_positions_feishu_sync_receipt_config
+from src.application.trades.account_mapping import resolve_trade_intake_config
+from src.application.positions.maintenance_receipt import resolve_auto_close_receipt_config
+from src.application.positions.feishu_sync_receipt import resolve_option_positions_feishu_sync_receipt_config
 from src.application.opend_fetch_config import OPEND_RATE_LIMIT_ENDPOINT_KEYS
 from src.application.yield_enhancement_config import (
     YIELD_ENHANCEMENT_FUNDING_MODES,

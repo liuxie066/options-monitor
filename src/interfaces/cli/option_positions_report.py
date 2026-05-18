@@ -1,19 +1,13 @@
-"""Read-only reports for position lots.
-
-Render and dispatch helpers for `./om option-positions report ...`.
-Business logic lives in `src.application.option_positions_facade` /
-`src.application.option_positions_reporting`; this module only wires the CLI
-subcommand to those services and renders Markdown output.
-"""
+"""Read-only reports for position lots."""
 
 from __future__ import annotations
 
 import json
 from typing import Any
 
-from src.application.option_positions_facade import (
-    build_option_positions_monthly_income_report,
+from src.application.ledger.api import (
     format_position_money,
+    position_monthly_income_report,
 )
 
 
@@ -151,7 +145,7 @@ def run_report(args, *, base, repo) -> int:
     """Dispatch `option-positions report <subcmd>` against an already-resolved repo."""
     sub = getattr(args, "report_cmd", None)
     if sub == "monthly-income":
-        report = build_option_positions_monthly_income_report(
+        report = position_monthly_income_report(
             repo,
             base=base,
             account=args.account,

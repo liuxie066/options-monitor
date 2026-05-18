@@ -3,6 +3,9 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import src.application.ledger.manual_trades as ledger_manual_trades
+import src.application.ledger.repository as ledger_repository
+
 from src.application.option_intake import _missing_for_action, parse_om_command
 from src.application.parse_option_message import parse_futu_premium
 
@@ -148,11 +151,10 @@ def test_option_intake_no_longer_shells_out_to_parser_or_option_positions() -> N
 
 def test_option_intake_close_auto_matches_unique_selector(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.application.option_intake as intake
-    import src.application.option_positions_service as svc
     from domain.domain.option_position_lots import OpenPositionCommand
 
-    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    svc.persist_manual_open_event(
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    ledger_manual_trades.persist_manual_open_event(
         repo,
         OpenPositionCommand(
             broker="富途",
@@ -171,7 +173,7 @@ def test_option_intake_close_auto_matches_unique_selector(monkeypatch, tmp_path:
     )
     lot = repo.list_position_lots()[0]
 
-    monkeypatch.setattr(intake, "resolve_option_positions_repo", lambda **_kwargs: (tmp_path / "data.json", repo))
+    monkeypatch.setattr(intake, "open_position_ledger_from_data_config", lambda **_kwargs: (tmp_path / "data.json", repo))
     monkeypatch.setattr(
         intake,
         "parse_option_message_text",
@@ -216,11 +218,10 @@ def test_option_intake_close_auto_matches_unique_selector(monkeypatch, tmp_path:
 
 def test_option_intake_close_parser_skips_multiplier_resolution(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.application.option_intake as intake
-    import src.application.option_positions_service as svc
     from domain.domain.option_position_lots import OpenPositionCommand
 
-    repo = svc.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    svc.persist_manual_open_event(
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    ledger_manual_trades.persist_manual_open_event(
         repo,
         OpenPositionCommand(
             broker="富途",
@@ -239,7 +240,7 @@ def test_option_intake_close_parser_skips_multiplier_resolution(monkeypatch, tmp
     )
     captured: dict[str, object] = {}
 
-    monkeypatch.setattr(intake, "resolve_option_positions_repo", lambda **_kwargs: (tmp_path / "data.json", repo))
+    monkeypatch.setattr(intake, "open_position_ledger_from_data_config", lambda **_kwargs: (tmp_path / "data.json", repo))
 
     def _fake_parse(*_args, **kwargs):
         captured.update(kwargs)

@@ -11,29 +11,29 @@ import json
 from pathlib import Path
 from typing import Any
 
-from domain.domain.option_position_lots import (
+from domain.domain.ledger.position_fields import (
     normalize_account,
     normalize_broker,
 )
-from src.application.option_positions_service import persist_manual_void_event
-from src.application.option_positions_auto_close import main as run_option_positions_auto_close
-from src.application.option_positions_feishu_sync import main as run_option_positions_feishu_sync
-from src.application.position_workflows import (
+from src.application.ledger.api import (
+    format_position_cash_secured,
+    format_position_money,
+    list_position_rows,
+    open_position_ledger_from_data_config as resolve_option_positions_repo,
+    reconcile_position_snapshot,
+    record_trade_event_void,
+    refresh_position_lot_projection,
+)
+from src.application.positions.auto_close import main as run_option_positions_auto_close
+from src.application.positions.feishu_sync import main as run_option_positions_feishu_sync
+from src.application.positions.workflows import (
     ManualCloseMatchError,
     execute_manual_adjust,
     execute_manual_close,
     execute_manual_open,
     format_manual_close_match_error,
 )
-from src.application.option_positions_facade import (
-    format_cash_secured_amount,
-    format_position_money,
-    list_position_rows,
-    resolve_option_positions_repo,
-)
-from src.application.option_positions_inspection import build_lot_event_history, inspect_projection_state
-from src.application.option_positions_v2_service import refresh_option_positions_v2_state
-from src.application.option_positions_v2_service import reconcile_option_positions_snapshot, snapshot_current_positions_as_verification
+from src.application.positions.inspection import build_lot_event_history, inspect_projection_state
 from src.application.verification_snapshot_io import load_verification_snapshot_payload
 
 
@@ -255,7 +255,7 @@ def main(argv: list[str] | None = None) -> int:
         print('# position_lots')
         for r in rows:
             ccy = str(r.get('currency') or 'USD').upper()
-            cash_txt = format_cash_secured_amount(r.get('cash_secured_amount'), ccy)
+            cash_txt = format_position_cash_secured(r.get('cash_secured_amount'), ccy)
             print(
                 f"- {r['record_id']} | {r.get('account')} | {r.get('symbol')} | {r.get('side')} {r.get('option_type')} | "
                 f"exp {r.get('expiration_ymd') or '-'} | strike {r.get('strike') if r.get('strike') is not None else '-'} | "
@@ -412,31 +412,22 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.cmd == 'rebuild':
-        state = refresh_option_positions_v2_state(base=state_base, repo=repo)
-        result = {
-            'persisted_baseline_snapshot_id': state.persisted_baseline_snapshot.get('snapshot_id'),
-            'baseline_snapshot_id': state.baseline_snapshot.get('snapshot_id'),
-            'latest_verification_snapshot_id': (state.latest_verification_snapshot or {}).get('snapshot_id'),
-            'verification_snapshot_count': int(len(state.verification_snapshots)),
-            'accepted_verification_snapshot_count': int(len(state.accepted_verification_snapshots)),
-            'baseline_lot_count': int(len(state.baseline_snapshot.get('lots') or [])),
-            'trade_event_count': int(len(state.events)),
-            'position_lot_count': int(len(state.projection.get('positions') or [])),
-            'diagnostic_count': int(len(state.projection.get('diagnostics') or [])),
-            'latest_reconciliation_report_id': (state.latest_reconciliation_report or {}).get('report_id'),
-            'skipped_legacy_event_count': int(len(state.skipped_legacy_events)),
-        }
+        raw_result = refresh_position_lot_projection(repo)
+        result = dict(raw_result) if isinstance(raw_result, dict) else raw_result.to_dict()
+        result["mode"] = "canonical_position_lots_rebuild"
+        result["source_of_truth"] = "trade_events"
+        result["projection"] = "position_lots"
         if args.format == 'json':
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0
         print(
-            "[DONE] rebuilt option_positions_v2 projection "
-            f"baseline_snapshot={result.get('baseline_snapshot_id')} "
-            f"baseline_lots={result.get('baseline_lot_count')} "
+            "[DONE] rebuilt canonical position_lots projection "
             f"trade_events={result.get('trade_event_count')} "
             f"position_lots={result.get('position_lot_count')} "
-            f"diagnostics={result.get('diagnostic_count')} "
-            f"skipped_legacy_events={result.get('skipped_legacy_event_count')}"
+            f"diagnostics={result.get('projection_diagnostic_count')} "
+            f"unmatched_explicit_close={result.get('unmatched_explicit_close_count')} "
+            f"unmatched_heuristic_close={result.get('unmatched_heuristic_close_count')} "
+            f"preserved_sync_meta={result.get('preserved_sync_meta_record_count')}"
         )
         return 0
 
@@ -468,7 +459,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == 'reconcile':
         try:
             snapshot = load_verification_snapshot_payload(args.snapshot_file)
-            report = reconcile_option_positions_snapshot(
+            report = reconcile_position_snapshot(
                 base=state_base,
                 repo=repo,
                 verification_snapshot=snapshot,
@@ -492,30 +483,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == 'void-event':
         try:
-            result = persist_manual_void_event(
-                repo,
-                target_event_id=args.event_id,
-                void_reason=args.void_reason,
-            )
+            result = record_trade_event_void(repo, event_id=args.event_id, reason=args.void_reason)
         except ValueError as e:
             raise SystemExit(str(e))
-        try:
-            snapshot_current_positions_as_verification(
-                base=state_base,
-                repo=repo,
-                snapshot_id=f"verify-{result.get('event_id')}",
-                source_name="cli_manual_void",
-                source_type="manual_verification",
-                note="manual_void checkpoint",
-            )
-            v2_state = refresh_option_positions_v2_state(base=state_base, repo=repo)
-            result["v2_result"] = {
-                'baseline_snapshot_id': v2_state.baseline_snapshot.get('snapshot_id'),
-                'processed_event_count': len(v2_state.events),
-                'diagnostic_count': len(v2_state.projection.get('diagnostics') or []),
-            }
-        except Exception:
-            result["v2_result"] = None
+        result["v2_result"] = {
+            "mode": "retired",
+            "reason": "post_write_v2_projection_disabled",
+        }
         print(
             f"[DONE] voided event_id={args.event_id} "
             f"via={result.get('event_id')} "

@@ -53,9 +53,9 @@ def test_agent_wiki_references_current_architecture_symbols() -> None:
             "evaluate_candidate_risk_filter",
             "rank_candidate_rows",
         ),
-        "domain.domain.option_position_ledger": (
-            "project_position_lot_records",
-            "project_position_lot_records_with_diagnostics",
+        "domain.domain.ledger.projection": (
+            "project_trade_events",
+            "build_risk_position_views",
         ),
         "domain.domain.close_advice": (
             "evaluate_close_advice",

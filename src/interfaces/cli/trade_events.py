@@ -5,8 +5,8 @@ import json
 from pathlib import Path
 from typing import Any
 
-from src.application.option_positions_facade import resolve_option_positions_repo
-from src.application.trade_event_review import (
+from src.application.ledger.api import open_position_ledger_from_data_config as resolve_option_positions_repo
+from src.application.trades.review import (
     apply_repair_trade_event,
     apply_void_trade_event,
     list_trade_event_reviews,

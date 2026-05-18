@@ -124,8 +124,8 @@ def test_shared_context_reuses_fetch_calls_across_accounts() -> None:
     old_is_fresh = pc.is_fresh
     old_load_holdings_portfolio_context = pcs.load_holdings_portfolio_context
     old_load_holdings_portfolio_shared_context = pcs.load_holdings_portfolio_shared_context
-    old_load_option_positions_repo = pc.load_option_positions_repo
-    old_load_option_position_records = pc.load_option_position_records
+    old_open_position_ledger = pc.open_position_ledger
+    old_load_option_position_records = pc._load_option_position_records
     old_build_option_positions_context = pc.build_option_positions_context
     old_build_shared_option_positions_context = pc.build_shared_option_positions_context
     old_load_option_position_exchange_rates = pc._load_option_position_exchange_rates
@@ -142,8 +142,8 @@ def test_shared_context_reuses_fetch_calls_across_accounts() -> None:
 
         pcs.load_holdings_portfolio_context = _fake_load_holdings_portfolio_context  # type: ignore[assignment]
         pcs.load_holdings_portfolio_shared_context = _fake_load_holdings_portfolio_shared_context  # type: ignore[assignment]
-        pc.load_option_positions_repo = lambda *_a, **_k: object()  # type: ignore[assignment]
-        pc.load_option_position_records = lambda *_a, **_k: []  # type: ignore[assignment]
+        pc.open_position_ledger = lambda *_a, **_k: object()  # type: ignore[assignment]
+        pc._load_option_position_records = lambda *_a, **_k: (object(), [])  # type: ignore[assignment]
         pc._load_option_position_exchange_rates = lambda **_kwargs: {"rates": {"USDCNY": 7.2}}  # type: ignore[assignment]
         pc.build_shared_option_positions_context = lambda *_a, **_k: (counts.__setitem__("option", counts["option"] + 1) or shared_option)  # type: ignore[assignment]
         pc.build_option_positions_context = lambda *_a, **_k: (counts.__setitem__("option", counts["option"] + 1) or shared_option["all_accounts"])  # type: ignore[assignment]
@@ -211,15 +211,15 @@ def test_shared_context_reuses_fetch_calls_across_accounts() -> None:
         pc.is_fresh = old_is_fresh  # type: ignore[assignment]
         pcs.load_holdings_portfolio_context = old_load_holdings_portfolio_context  # type: ignore[assignment]
         pcs.load_holdings_portfolio_shared_context = old_load_holdings_portfolio_shared_context  # type: ignore[assignment]
-        pc.load_option_positions_repo = old_load_option_positions_repo  # type: ignore[assignment]
-        pc.load_option_position_records = old_load_option_position_records  # type: ignore[assignment]
+        pc.open_position_ledger = old_open_position_ledger  # type: ignore[assignment]
+        pc._load_option_position_records = old_load_option_position_records  # type: ignore[assignment]
         pc.build_option_positions_context = old_build_option_positions_context  # type: ignore[assignment]
         pc.build_shared_option_positions_context = old_build_shared_option_positions_context  # type: ignore[assignment]
         pc._load_option_position_exchange_rates = old_load_option_position_exchange_rates  # type: ignore[assignment]
 
 
 def test_shared_slice_matches_legacy_key_fields() -> None:
-    from src.application.option_positions_context_builder import (
+    from src.application.positions.context_builder import (
         build_context as build_option_context,
         build_shared_context as build_option_shared_context,
         slice_shared_context_for_account as slice_option_shared_context,

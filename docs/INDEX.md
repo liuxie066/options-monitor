@@ -32,3 +32,4 @@
 
 ## 架构
 - [ARCHITECTURE.md](ARCHITECTURE.md)：系统分层、入口点、运行时流程（面向人类开发者）
+- [TRADE_POSITION_LEDGER_REDESIGN.md](TRADE_POSITION_LEDGER_REDESIGN.md)：交易与持仓账本重构设计、迁移阶段、风控验收标准
