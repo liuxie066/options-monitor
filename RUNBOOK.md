@@ -162,18 +162,6 @@ cat /home/node/.openclaw/workspace/options-monitor-prod/<report_dir>/symbols_not
 1. 确认运行命令的 `--market-config` 与配置文件市场一致。
 2. 检查是否误用 US/HK 配置。
 
-## SSH / Deploy Key 自检
-
-```bash
-cd /home/node/.openclaw/workspace/options-monitor-prod
-scripts/ssh_selfcheck.sh
-```
-
-脚本检查：
-- `/home/node/.openclaw/secrets/ssh/options-monitor/` 私钥/公钥是否存在
-- `ssh -T git@github.com` 认证
-- `git ls-remote` 远端访问
-
 ## 应急控制
 
 - 立即停定时监控：

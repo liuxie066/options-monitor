@@ -62,18 +62,6 @@ ROOT_RUNTIME_CONFIG_PATTERNS = (
     "config.*.bak.*",
 )
 
-EXPLICIT_TERMS = (
-    "显式",
-    "explicit",
-    "如需",
-    "allowlist",
-    "禁止",
-    "forbid",
-    "forbidden",
-    "不带",
-    "默认不会",
-)
-
 
 class Violation:
     def __init__(self, path: Path, line_no: int, reason: str, line: str) -> None:
@@ -153,34 +141,6 @@ def check_runtime_entry_wording(files: list[Path]) -> list[Violation]:
     return issues
 
 
-def check_deploy_include_runtime_default(files: list[Path]) -> list[Violation]:
-    issues: list[Violation] = []
-    for path in files:
-        if path.relative_to(ROOT).as_posix() == "scripts/guardrails_check.py":
-            continue
-        lines = read_lines(path)
-        for idx, line in enumerate(lines, start=1):
-            lowered = line.lower()
-            if "deploy_to_prod.py" not in lowered or "--include-runtime-config" not in lowered:
-                continue
-            if "--runtime-config-allowlist" in lowered:
-                continue
-
-            context = " ".join(lines[max(0, idx - 3) : min(len(lines), idx + 2)]).lower()
-            if any(term in context for term in EXPLICIT_TERMS):
-                continue
-
-            issues.append(
-                Violation(
-                    path.relative_to(ROOT),
-                    idx,
-                    "deploy_to_prod.py --include-runtime-config cannot be used as default path",
-                    line,
-                )
-            )
-    return issues
-
-
 def check_runtime_config_tracking(files: list[Path]) -> list[Violation]:
     issues: list[Violation] = []
     for path in files:
@@ -198,9 +158,8 @@ def check_runtime_config_tracking(files: list[Path]) -> list[Violation]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Guardrails checks for docs and deploy examples")
+    parser = argparse.ArgumentParser(description="Guardrails checks for docs and runtime config tracking")
     parser.add_argument("--check-doc-wording", action="store_true", help="check docs wording for runtime entry")
-    parser.add_argument("--check-deploy-args", action="store_true", help="check deploy examples/scripts")
     parser.add_argument(
         "--check-runtime-config-tracking",
         action="store_true",
@@ -209,11 +168,9 @@ def main() -> None:
     args = parser.parse_args()
 
     run_doc = args.check_doc_wording
-    run_deploy = args.check_deploy_args
     run_tracking = args.check_runtime_config_tracking
-    if not run_doc and not run_deploy and not run_tracking:
+    if not run_doc and not run_tracking:
         run_doc = True
-        run_deploy = True
         run_tracking = True
 
     tracked_paths = tracked_file_paths()
@@ -222,8 +179,6 @@ def main() -> None:
 
     if run_doc:
         issues.extend(check_runtime_entry_wording(files))
-    if run_deploy:
-        issues.extend(check_deploy_include_runtime_default(files))
     if run_tracking:
         issues.extend(check_runtime_config_tracking(tracked_paths))
 

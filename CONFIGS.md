@@ -66,8 +66,8 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 
 ## 版本更新保护
 
-- 代码更新和发布同步只更新代码、文档与 `configs/examples/` 模板，不覆盖用户 runtime config。
-- `scripts/deploy_to_prod.py` 默认跳过根目录 runtime config；只有显式 `--include-runtime-config --runtime-config-allowlist ...` 才允许受控更新。
+- 代码版本更新只跟踪代码、文档与 `configs/examples/` 模板，不覆盖用户 runtime config。
+- 仓库不再保留本地 dev -> prod checkout 同步脚本；Linux / Mac 服务部署使用 `./om service render` 生成服务文件。
 - CI guardrails 会拒绝提交根目录 `config.us.json` / `config.hk.json` / `config.json` / `config.market_*.json` 等 runtime config。
 - 需要适配新版配置字段时，使用 `scripts/migrate_runtime_config.py` 先 dry-run，再 `--apply` 写入；脚本会先创建 `*.bak.YYYYmmdd-HHMMSS` 备份。
 
