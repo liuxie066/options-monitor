@@ -104,6 +104,21 @@ def test_core_position_trade_runtime_imports_ledger_position_fields() -> None:
     assert offenders == []
 
 
+def test_runtime_code_does_not_import_legacy_position_lots_reexport() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    roots = [repo_root / "src", repo_root / "domain" / "domain"]
+    offenders: list[str] = []
+    for root in roots:
+        for path in root.rglob("*.py"):
+            if path == repo_root / "domain" / "domain" / "option_position_lots.py":
+                continue
+            text = path.read_text(encoding="utf-8")
+            if "from domain.domain.option_position_lots import" in text:
+                offenders.append(str(path.relative_to(repo_root)))
+
+    assert offenders == []
+
+
 def test_ledger_write_paths_use_position_field_contract_builders() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     checked = [

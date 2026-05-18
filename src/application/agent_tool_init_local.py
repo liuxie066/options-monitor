@@ -277,7 +277,6 @@ def init_local_config(
             f"./om-agent run --tool healthcheck --input-json '{{\"config_path\":\"{target_config_path}\"}}'",
             f"./om-agent run --tool scan_opportunities --input-json '{{\"config_path\":\"{target_config_path}\"}}'",
             f"./om-agent run --tool get_close_advice --input-json '{{\"config_path\":\"{target_config_path}\"}}'",
-            "./run_webui.sh",
         ],
         "recommended_flow": ["healthcheck", "scan_opportunities", "get_close_advice"],
     }

@@ -1,2 +1,0 @@
-"""WebUI interface layer."""
-

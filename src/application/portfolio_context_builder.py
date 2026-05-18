@@ -19,7 +19,7 @@ from src.infrastructure.feishu_bitable import (
 from domain.domain.symbol_identity import canonical_symbol
 from src.application.config_loader import resolve_data_config_path
 from src.infrastructure.io_utils import atomic_write_json
-from domain.domain.option_position_lots import normalize_account, normalize_currency
+from domain.domain.ledger.position_fields import normalize_account, normalize_currency
 
 from src.infrastructure.feishu_bitable import safe_float
 

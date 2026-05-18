@@ -670,10 +670,9 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 > 如果你要把本地 `option_positions` 同步回 Feishu 多维表，推荐在 `configs/user.common.json` 里显式打开
 > `option_positions.sync_to_feishu.enabled=true`，再重新 `./om config build --market us|hk`；默认关闭，避免误写远端。
 >
-> `option_positions` bootstrap 的当前状态会出现在两处：
-> - `./om-agent run --tool healthcheck ...` 的 `option_positions_bootstrap`
-> - WebUI 的 Market 面板摘要
-> 如果配置了 Feishu bootstrap，但首次读取失败，这两个地方都会显示 degraded/warn，而不是把它伪装成“天然空库”。
+> `option_positions` bootstrap 的当前状态会出现在
+> `./om-agent run --tool healthcheck ...` 的 `option_positions_bootstrap`。
+> 如果配置了 Feishu bootstrap，但首次读取失败，这里会显示 degraded/warn，而不是把它伪装成“天然空库”。
 
 ---
 

@@ -1,6 +1,6 @@
 ## Context
 
-US cron 的实际生效配置已经是 `config.us.json`，HK 对应 `config.hk.json`。仓库内的 CLI、agent、WebUI、healthcheck、watchlist、multi-account tick 等入口也已经默认指向这两份 market-specific runtime config。
+US cron 的实际生效配置已经是 `config.us.json`，HK 对应 `config.hk.json`。仓库内的 CLI、agent、healthcheck、watchlist、multi-account tick 等入口也已经默认指向这两份 market-specific runtime config。
 
 与此同时，`config.json` 仍可能作为本地历史文件存在。如果不明确其地位，就会留下“修改了 config.json 但 cron 没生效”的双真相源风险。
 

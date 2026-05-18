@@ -15,13 +15,12 @@
 
 | 入口 | 面向对象 | 适合做什么 |
 |---|---|---|
-| WebUI | 普通用户 | 初始化配置、查看概览、做轻量操作 |
 | `./om` | 人工 CLI | 配置构建、手动运行、持仓维护、只读查询 |
 | `./om-agent` | Agent / 程序 | JSON manifest、结构化工具调用、只读诊断 |
 
 推荐顺序：
 
-1. 首次启用先用 WebUI 或配置模板完成初始化。
+1. 首次启用先用 `./om init runtime` 或配置模板完成初始化。
 2. 日常人工操作优先 `./om`。
 3. Agent 接入、排障和结构化读取优先 `./om-agent`。
 
@@ -62,19 +61,7 @@ python3 -m venv .venv
 
 ### 2. 初始化配置
 
-推荐先启动 WebUI：
-
-```bash
-./run_webui.sh
-```
-
-默认地址：
-
-```text
-http://127.0.0.1:8000
-```
-
-如果你更偏向 CLI，也可以走初始化入口：
+推荐用 CLI 初始化入口：
 
 ```bash
 ./om init runtime --market us --futu-acc-id <futu-account-id>
@@ -469,7 +456,6 @@ OM_AGENT_ENABLE_WRITE_TOOLS=true ./om-agent run --tool manage_symbols --input-js
 补充说明：
 
 - `./om-agent spec` 才是当前公开工具清单的准确信源
-- WebUI 不是完整的 `om-agent` 镜像，当前只开放少数安全工具
 
 ## 定时与长驻任务
 

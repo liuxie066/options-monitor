@@ -24,7 +24,7 @@ from domain.domain.close_advice import (
 )
 from domain.domain.fee_calc import calc_futu_option_fee
 from src.infrastructure.io_utils import atomic_write_text, read_json, safe_read_csv
-from domain.domain.option_position_lots import (
+from domain.domain.ledger.position_fields import (
     effective_expiration_ymd,
     effective_multiplier,
     normalize_account,

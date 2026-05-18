@@ -6,7 +6,7 @@ from typing import Any, Mapping
 
 from domain.domain.fetch_source import is_futu_fetch_source, normalize_fetch_source
 from src.infrastructure.futu_gateway import build_ready_futu_gateway
-from domain.domain.option_position_lots import normalize_account, normalize_currency
+from domain.domain.ledger.position_fields import normalize_account, normalize_currency
 from domain.domain.symbol_identity import canonical_symbol, symbol_currency
 from src.application.account_config import resolve_trade_intake_futu_account_ids as _resolve_trade_intake_futu_account_ids
 

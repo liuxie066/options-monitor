@@ -17,8 +17,7 @@ def test_shell_entrypoints_target_src_interfaces() -> None:
     assert "src.interfaces.agent.cli" in agent_src
 
 
-def test_multi_tick_and_webui_use_application_facades() -> None:
-    run_webui_src = (ROOT / "run_webui.sh").read_text(encoding="utf-8")
+def test_runtime_entrypoints_use_application_facades() -> None:
     service_src = (ROOT / "src" / "infrastructure" / "external_services.py").read_text(encoding="utf-8")
     agent_runtime_src = (ROOT / "src" / "application" / "agent_tool_runtime.py").read_text(encoding="utf-8")
     pipeline_runtime_src = (ROOT / "src" / "application" / "pipeline_runtime.py").read_text(encoding="utf-8")
@@ -27,7 +26,6 @@ def test_multi_tick_and_webui_use_application_facades() -> None:
     agent_src = (ROOT / "om-agent").read_text(encoding="utf-8")
     multi_account_tick_src = (ROOT / "src" / "application" / "multi_account_tick.py").read_text(encoding="utf-8")
     tick_notification_flow_src = (ROOT / "src" / "application" / "tick_notification_flow.py").read_text(encoding="utf-8")
-    webui_interface_src = (ROOT / "src" / "interfaces" / "webui" / "server.py").read_text(encoding="utf-8")
     multi_tick_scheduler_src = (ROOT / "src" / "application" / "multi_tick_scheduler.py").read_text(encoding="utf-8")
     tick_scheduler_context_src = (ROOT / "src" / "application" / "tick_scheduler_context.py").read_text(encoding="utf-8")
     multi_tick_finalization_src = (ROOT / "src" / "application" / "multi_tick_finalization.py").read_text(encoding="utf-8")
@@ -46,11 +44,9 @@ def test_multi_tick_and_webui_use_application_facades() -> None:
     assert not (ROOT / "scripts" / "send_if_needed.py").exists()
     assert not (ROOT / "scripts" / "send_if_needed_multi.py").exists()
     assert not (ROOT / "scripts" / "option_positions.py").exists()
-    assert not (ROOT / "scripts" / "webui" / "server.py").exists()
-    assert not (ROOT / "scripts" / "webui" / "__init__.py").exists()
-    assert "src.interfaces.webui.server:app" in run_webui_src
-    assert "from src.application.account_management import add_account, edit_account, remove_account" in webui_interface_src
-    assert "from src.application.tool_execution import build_tool_manifest, execute_tool" in webui_interface_src
+    assert not (ROOT / "run_webui.sh").exists()
+    assert not (ROOT / "scripts" / "webui").exists()
+    assert not (ROOT / "src" / "interfaces" / "webui").exists()
     assert "src.interfaces.cli.main" in service_src
     assert "scripts/opend_watchdog.py" not in service_src
     assert "scripts/doctor_futu.py" not in agent_runtime_src

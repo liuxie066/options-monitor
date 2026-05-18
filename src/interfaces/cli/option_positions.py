@@ -589,10 +589,6 @@ def main(argv: list[str] | None = None) -> int:
             result = record_trade_event_void(repo, event_id=args.event_id, reason=args.void_reason)
         except ValueError as e:
             raise SystemExit(str(e))
-        result["v2_result"] = {
-            "mode": "retired",
-            "reason": "post_write_v2_projection_disabled",
-        }
         print(
             f"[DONE] voided event_id={args.event_id} "
             f"via={result.get('event_id')} "
