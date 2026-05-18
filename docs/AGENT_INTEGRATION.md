@@ -50,7 +50,7 @@ Errors are normalized to stable codes such as:
 
 说明：
 - 这些是顶层错误 envelope 的稳定代码。
-- 某些底层诊断项（例如 OpenD doctor 的细粒度失败原因）可能会体现在 `checks[]` 中，而不是顶层错误 code 枚举中。
+- 某些底层诊断项（例如 OpenD readiness probe 的细粒度失败原因）可能会体现在 `checks[]` 中，而不是顶层错误 code 枚举中。
 
 ## Claude Code
 

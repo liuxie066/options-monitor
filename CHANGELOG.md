@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 1.2.59 - 2026-05-18
+
+### Added
+- Added `./om ai-cofunder collect` and the `ai_cofunder` agent tool as the dedicated MacBook Codex handoff path for redacted runtime, scheduler, ledger, account-strategy, and strategy evidence.
+- Added optional `--include-healthcheck` / `include_healthcheck=true` support so AI Cofunder bundles can carry a redacted `healthcheck_snapshot` without duplicating healthcheck readiness logic.
+
+### Changed
+- Removed the old top-level `doctor` CLI/tool/module instead of keeping it as a compatibility alias for the AI partner workflow.
+- Moved AI Cofunder evidence collection, deterministic checks, and redaction into `src/application/ai_cofunder/`.
+- Renamed healthcheck OpenD output checks from `opend_doctor*` to `opend_readiness*` to keep readiness probes distinct from the removed doctor lane.
+
+### Tests
+- Replaced doctor contract/behavior coverage with AI Cofunder tests for scheduler evidence, strategy evidence, redaction, output-write gating, and local runtime artifacts.
+- Re-ran focused AI Cofunder/agent tests, changed-file type checking, compile checks, full pytest, CLI smoke checks, diff checks, and release metadata validation.
+
 ## 1.2.58 - 2026-05-18
 
 ### Added

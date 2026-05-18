@@ -134,7 +134,7 @@ def test_healthcheck_works_with_explicit_config_path(monkeypatch, tmp_path: Path
     assert out["data"]["account_paths"]["user1"]["primary"]["ok"] is True
     assert "fallback" not in out["data"]["account_paths"]["user1"]
     assert out["meta"]["config_path"] == ".../config.us.json"
-    assert any(item["name"] == "opend_doctor" and item["status"] == "ok" for item in out["data"]["checks"])
+    assert any(item["name"] == "opend_readiness" and item["status"] == "ok" for item in out["data"]["checks"])
     assert any(item["name"] == "account_mapping" and item["status"] == "ok" for item in out["data"]["checks"])
     primary = next(item for item in out["data"]["checks"] if item["name"] == "account_primary_paths")
     assert primary["status"] == "ok"

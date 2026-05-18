@@ -12,7 +12,7 @@ def build_tool_manifest() -> dict[str, Any]:
 
 def _tool_write_requested(definition: AgentToolDefinition, payload: dict[str, Any]) -> bool:
     name = definition.name
-    if name == "doctor":
+    if name == "ai_cofunder":
         return _truthy(payload.get("write_outputs"))
     if definition.read_only:
         return False

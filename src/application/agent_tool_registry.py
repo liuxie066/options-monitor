@@ -463,7 +463,7 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
             "config_path": "optional explicit config path",
             "accounts": "optional list[str]",
             "data_config": "optional explicit data config path for healthcheck",
-            "timeout_sec": "optional int for healthcheck OpenD doctor",
+            "timeout_sec": "optional int for healthcheck OpenD readiness probe",
             "max_notification_chars": "optional int, forwarded to runtime_status",
             "max_run_age_minutes": "optional freshness threshold for runtime_status",
             "profile_path": "optional OpenClaw profile JSON path; aliases openclaw_profile_path",
@@ -480,29 +480,31 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
         examples=({"input": {"config_key": "us", "timeout_sec": 20}},),
     ),
     AgentToolDefinition(
-        name="doctor",
+        name="ai_cofunder",
         read_only=False,
         description=(
-            "Production quality doctor: collect runtime evidence, run deterministic checks, "
-            "optionally call a configured OpenAI-compatible AI endpoint, and render a local handoff."
+            "AI Cofunder evidence collector: build a redacted bundle for MacBook Codex to diagnose "
+            "ledger quality, multi-account strategy effects, and runtime quality."
         ),
         requires=("runtime_config", "runtime_artifacts"),
-        capabilities=("production_doctor", "runtime_triage", "ai_handoff", "local_report"),
-        side_effects=("writes_local_doctor_reports",),
+        capabilities=("ai_cofunder_bundle", "ledger_quality", "account_strategy_matrix", "runtime_triage", "healthcheck_snapshot", "local_report"),
+        side_effects=("writes_local_ai_cofunder_reports",),
         input_schema={
+            "scope": "optional ledger|account-strategy|quality|strategy|full; defaults full",
             "config_key": "us|hk",
             "config_path": "optional explicit config path",
             "accounts": "optional list[str]",
             "profile_path": "optional OpenClaw profile JSON path; aliases openclaw_profile_path",
             "openclaw_profile_path": "optional OpenClaw profile JSON path",
+            "include_healthcheck": "optional bool; include healthcheck readiness snapshot in quality/full scopes; defaults false",
+            "data_config": "optional explicit data config path forwarded to healthcheck when include_healthcheck=true",
+            "timeout_sec": "optional int forwarded to healthcheck when include_healthcheck=true",
             "scheduler_evidence": "optional online scheduler evidence object with provider/job/status/exit_code/stdout_tail/stderr_tail",
-            "ai": "optional bool; run AI triage when true and AI config is complete",
-            "ai_config": "optional object: provider, base_url, model, api_key_env, timeout_seconds, max_input_chars",
             "output": "optional handoff|json|both; defaults to handoff",
-            "write_outputs": "optional bool; defaults false, true writes doctor files after write-tool confirmation",
+            "write_outputs": "optional bool; defaults false, true writes ai-cofunder files after write-tool confirmation",
             "confirm": "required true when write_outputs=true",
-            "doctor_output_dir": "optional output directory; defaults to output_shared/doctor",
-            "doctor_current_dir": "optional current-state directory; defaults to output_shared/state/current",
+            "ai_cofunder_output_dir": "optional output directory; defaults to output_shared/ai_cofunder",
+            "ai_cofunder_current_dir": "optional current-state directory; defaults to output_shared/state/current",
             "run_id": "optional output_runs run id forwarded to runtime_status",
             "run_dir": "optional explicit run dir forwarded to runtime_status",
             "candidate_paths": "optional candidate CSV path or list of paths for strategy evidence",
@@ -513,20 +515,11 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
         },
         risk_level="local_write",
         requires_confirm=True,
-        safe_default_input={"config_key": "us", "ai": False, "output": "handoff", "write_outputs": False},
+        safe_default_input={"scope": "full", "config_key": "us", "output": "handoff", "write_outputs": False},
         examples=(
-            {"input": {"config_key": "us", "ai": False}},
-            {
-                "input": {
-                    "config_key": "us",
-                    "ai": True,
-                    "ai_config": {
-                        "base_url": "https://example.invalid/v1",
-                        "model": "doctor-model",
-                        "api_key_env": "OM_DOCTOR_AI_API_KEY",
-                    },
-                }
-            },
+            {"input": {"scope": "full", "config_key": "us"}},
+            {"input": {"scope": "ledger", "config_key": "us"}},
+            {"input": {"scope": "account-strategy", "config_key": "us"}},
         ),
     ),
 )
