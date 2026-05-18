@@ -1,67 +1,62 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from types import SimpleNamespace
 
 
-def test_load_feishu_notification_app_config_uses_default_path(tmp_path: Path) -> None:
+def test_load_feishu_notification_app_config_uses_default_env(monkeypatch) -> None:
     from src.infrastructure.external_services import load_feishu_notification_app_config
 
-    secrets_dir = tmp_path / "secrets"
-    secrets_dir.mkdir()
-    secrets_path = secrets_dir / "notifications.feishu.app.json"
-    secrets_path.write_text(
-        json.dumps({"feishu": {"app_id": "cli_1", "app_secret": "sec_1"}}),
-        encoding="utf-8",
-    )
+    monkeypatch.setenv("OM_NOTIFY_FEISHU_APP_ID", "cli_1")
+    monkeypatch.setenv("OM_NOTIFY_FEISHU_APP_SECRET", "sec_1")
 
-    out = load_feishu_notification_app_config(base=tmp_path)
+    out = load_feishu_notification_app_config(base=None)
 
     assert out["app_id"] == "cli_1"
     assert out["app_secret"] == "sec_1"
-    assert out["secrets_file"] == str(secrets_path.resolve())
+    assert out["app_id_env"] == "OM_NOTIFY_FEISHU_APP_ID"
+    assert out["app_secret_env"] == "OM_NOTIFY_FEISHU_APP_SECRET"
 
 
-def test_load_feishu_notification_app_config_supports_explicit_path(tmp_path: Path) -> None:
+def test_load_feishu_notification_app_config_supports_custom_env_names(monkeypatch) -> None:
     from src.infrastructure.external_services import load_feishu_notification_app_config
 
-    secrets_path = tmp_path / "custom.json"
-    secrets_path.write_text(
-        json.dumps({"feishu": {"app_id": "cli_2", "app_secret": "sec_2"}}),
-        encoding="utf-8",
-    )
+    monkeypatch.setenv("CUSTOM_NOTIFY_APP_ID", "cli_2")
+    monkeypatch.setenv("CUSTOM_NOTIFY_APP_SECRET", "sec_2")
 
     out = load_feishu_notification_app_config(
-        base=tmp_path,
-        notifications={"secrets_file": "custom.json"},
+        base=None,
+        notifications={"app_id_env": "CUSTOM_NOTIFY_APP_ID", "app_secret_env": "CUSTOM_NOTIFY_APP_SECRET"},
     )
 
     assert out["app_id"] == "cli_2"
     assert out["app_secret"] == "sec_2"
 
 
-def test_load_feishu_notification_app_config_fails_when_file_missing(tmp_path: Path) -> None:
+def test_load_feishu_notification_app_config_fails_when_env_missing(monkeypatch) -> None:
     from src.infrastructure.external_services import load_feishu_notification_app_config
 
+    monkeypatch.delenv("OM_NOTIFY_FEISHU_APP_ID", raising=False)
+    monkeypatch.delenv("OM_NOTIFY_FEISHU_APP_SECRET", raising=False)
     try:
-        load_feishu_notification_app_config(base=tmp_path)
+        load_feishu_notification_app_config(base=None)
         raise AssertionError("expected ValueError")
     except ValueError as exc:
-        assert "notification secrets file not found" in str(exc)
+        assert "notification env missing Feishu app credentials" in str(exc)
+        assert "OM_NOTIFY_FEISHU_APP_ID" in str(exc)
+        assert "OM_NOTIFY_FEISHU_APP_SECRET" in str(exc)
 
 
-def test_load_feishu_notification_app_config_fails_when_credentials_missing(tmp_path: Path) -> None:
+def test_load_feishu_notification_app_config_fails_when_one_env_missing(monkeypatch) -> None:
     from src.infrastructure.external_services import load_feishu_notification_app_config
 
-    secrets_path = tmp_path / "custom.json"
-    secrets_path.write_text(json.dumps({"feishu": {"app_id": "cli_only"}}), encoding="utf-8")
-
+    monkeypatch.setenv("OM_NOTIFY_FEISHU_APP_ID", "cli_only")
+    monkeypatch.delenv("OM_NOTIFY_FEISHU_APP_SECRET", raising=False)
     try:
-        load_feishu_notification_app_config(base=tmp_path, secrets_file=secrets_path)
+        load_feishu_notification_app_config(base=None)
         raise AssertionError("expected ValueError")
     except ValueError as exc:
-        assert "notification secrets missing feishu.app_id/app_secret" in str(exc)
+        assert "OM_NOTIFY_FEISHU_APP_SECRET" in str(exc)
 
 
 def test_normalize_feishu_app_send_output_marks_success_with_message_id() -> None:

@@ -171,7 +171,6 @@ def _matches_lot_selector(
     row: dict[str, object],
     *,
     record_id: str | None,
-    feishu_record_id: str | None,
     account: str | None,
     symbol: str | None,
     option_type: str | None,
@@ -183,8 +182,6 @@ def _matches_lot_selector(
     if not isinstance(fields, dict):
         return False
     if record_id and row_record_id != str(record_id).strip():
-        return False
-    if feishu_record_id and str(fields.get("feishu_record_id") or "").strip() != str(feishu_record_id).strip():
         return False
     if account and normalize_account(fields.get("account")) != normalize_account(account):
         return False
@@ -318,7 +315,6 @@ def inspect_projection_state(
     *,
     base: Path,
     record_id: str | None = None,
-    feishu_record_id: str | None = None,
     account: str | None = None,
     symbol: str | None = None,
     option_type: str | None = None,
@@ -336,7 +332,6 @@ def inspect_projection_state(
         if _matches_lot_selector(
             row,
             record_id=record_id,
-            feishu_record_id=feishu_record_id,
             account=account,
             symbol=symbol,
             option_type=option_type,
@@ -420,7 +415,6 @@ def inspect_projection_state(
     return {
         "selectors": {
             "record_id": record_id,
-            "feishu_record_id": feishu_record_id,
             "account": account,
             "symbol": symbol,
             "option_type": option_type,

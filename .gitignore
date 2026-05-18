@@ -8,6 +8,9 @@
 .DS_Store
 .venv/
 __pycache__/
+.env/
+*.env.local
+options-monitor.env
 
 # extra local venvs / temp dirs
 .venv*/
@@ -35,6 +38,7 @@ htmlcov/
 .mypy_cache/
 .ruff_cache/
 .playwright-cli/
+.local/
 
 # Local runtime configs (do not commit)
 config.us.json

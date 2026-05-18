@@ -129,9 +129,9 @@ the storage/migration boundary.
 Lot record field construction and open/close patch helpers live under
 `domain.domain.ledger.position_fields`; the old
 `domain.domain.option_position_lots` module is only a compatibility re-export.
-Application services own SQLite loading, local bootstrap, repair, Feishu sync,
-CLI facades, and reports. Feishu `option_positions` is a mirror/sync surface
-only, not a bootstrap input or steady-state source of truth.
+Application services own SQLite loading, local bootstrap, repair, CLI facades,
+and reports. Feishu `option_positions` is retired: it is not a
+bootstrap input, sync target, strategy input, or steady-state source of truth.
 `src.application.ledger.api` is the public application boundary for all
 non-ledger runtime code. `src.application.positions`, `src.application.trades`,
 agent tools, CLI modules, web UI modules, pipeline context, and cash-headroom
@@ -144,8 +144,8 @@ The API file is intentionally a thin facade: command/write operations live in
 `src.application.ledger.views`.
 Runtime callers should call semantic ledger actions such as manual position
 recording, broker trade recording, expired-close planning/recording, projection
-refresh, lot selection, position snapshot reads, mirror sync metadata writes,
-event review/repair, and reconciliation, rather than composing lower-level
+refresh, lot selection, position snapshot reads, event review/repair, and
+reconciliation, rather than composing lower-level
 `persist_*`, `preflight_*`, `require_*`, or `load_*` functions themselves.
 Close writes share `CloseTargetResolution` as the ledger-owned target contract:
 manual close resolves a unique strict lot, broker close resolves a strict exact
@@ -155,8 +155,8 @@ write targets.
 
 Position-facing workflows live under `src.application.positions`; they operate
 on projected lots and expose manual lot operations, expiry maintenance, and
-maintenance receipts, plus Feishu mirror sync, risk context, inspection, and
-reporting. Trade-facing workflows live under `src.application.trades`; they
+maintenance receipts, plus risk context, inspection, and reporting.
+Trade-facing workflows live under `src.application.trades`; they
 operate on normalized trade deals, OpenD deal intake, idempotency state,
 receipts, and event review/replay flows. Both route writes through
 `src.application.ledger` instead of owning projection or matching rules locally.

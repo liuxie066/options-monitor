@@ -29,7 +29,6 @@ from src.application.ledger.repository import (
 )
 from src.application.ledger.results import LedgerWriteResult, TradeEventInterventionPreview
 from src.application.ledger.writer import (
-    merge_preserved_position_lot_metadata,
     persist_trade_event_object,
     projection_diagnostics_summary,
 )
@@ -503,16 +502,14 @@ def persist_manual_repair_event(
         if conn is not None:
             void_created = sqlite_repo.upsert_trade_event(void_event, conn=conn)
             repair_created = sqlite_repo.upsert_trade_event(repair_event, conn=conn)
-            existing_rows = sqlite_repo.list_position_lots()
             projection = project_stored_trade_events_to_position_lots(sqlite_repo.list_trade_events(conn=conn))
-            records = merge_preserved_position_lot_metadata(projection.lots, existing_rows)
+            records = projection.lots
             lot_count = sqlite_repo.replace_position_lots(records, conn=conn)
         else:
             void_created = sqlite_repo.upsert_trade_event(void_event)
             repair_created = sqlite_repo.upsert_trade_event(repair_event)
-            existing_rows = sqlite_repo.list_position_lots()
             projection = project_stored_trade_events_to_position_lots(sqlite_repo.list_trade_events())
-            records = merge_preserved_position_lot_metadata(projection.lots, existing_rows)
+            records = projection.lots
             lot_count = sqlite_repo.replace_position_lots(records)
         result = {
             "target_event_id": str(target_event_id),

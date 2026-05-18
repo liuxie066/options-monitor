@@ -20,6 +20,10 @@ def test_option_positions_v2_code_is_physically_retired() -> None:
         repo_root / "src" / "application" / "option_positions_inspection.py",
         repo_root / "src" / "application" / "option_positions_reporting.py",
         repo_root / "src" / "application" / "option_positions_sync_config.py",
+        repo_root / "src" / "application" / "positions" / "feishu_sync.py",
+        repo_root / "src" / "application" / "positions" / "feishu_sync_receipt.py",
+        repo_root / "src" / "application" / "positions" / "sync_config.py",
+        repo_root / "src" / "application" / "ledger" / "sync_metadata.py",
         repo_root / "src" / "application" / "position_maintenance.py",
         repo_root / "src" / "application" / "position_maintenance_receipt.py",
         repo_root / "tests" / "test_option_positions_legacy_v2.py",
@@ -36,9 +40,12 @@ def test_legacy_position_trade_test_filenames_are_retired() -> None:
         repo_root / "tests" / "test_option_positions_context_partial_close.py",
         repo_root / "tests" / "test_option_positions_feishu_sync_receipt.py",
         repo_root / "tests" / "test_option_positions_reporting.py",
+        repo_root / "tests" / "test_positions_feishu_sync.py",
+        repo_root / "tests" / "test_positions_feishu_sync_receipt.py",
         repo_root / "tests" / "test_position_maintenance.py",
         repo_root / "tests" / "test_position_maintenance_receipt.py",
         repo_root / "tests" / "test_position_workflows_auto_sync.py",
+        repo_root / "tests" / "test_positions_workflows_auto_sync.py",
         repo_root / "tests" / "test_sync_option_positions_to_feishu.py",
         repo_root / "tests" / "test_auto_trade_intake_audit.py",
         repo_root / "tests" / "test_auto_trade_intake_cli.py",
@@ -160,25 +167,17 @@ def test_position_lot_projection_uses_position_patch_decoder() -> None:
     assert "patch.get(" not in lots_text
 
 
-def test_position_lot_sync_metadata_uses_explicit_patch_contract() -> None:
+def test_position_lot_sync_metadata_is_retired() -> None:
     repo_root = Path(__file__).resolve().parents[1]
-    sync_metadata_text = (repo_root / "src" / "application" / "ledger" / "sync_metadata.py").read_text(
-        encoding="utf-8"
-    )
     repository_text = (repo_root / "src" / "application" / "ledger" / "repository.py").read_text(encoding="utf-8")
     commands_text = (repo_root / "src" / "application" / "ledger" / "commands.py").read_text(encoding="utf-8")
-    feishu_sync_text = (repo_root / "src" / "application" / "positions" / "feishu_sync.py").read_text(
-        encoding="utf-8"
-    )
 
-    assert "class PositionLotSyncMetadataPatch" in sync_metadata_text
-    assert "def update_position_lot_sync_metadata(" in repository_text
-    assert "patch: PositionLotSyncMetadataPatch | dict" not in repository_text
-    assert "patch: PositionLotSyncMetadataPatch | dict" not in commands_text
+    assert not (repo_root / "src" / "application" / "ledger" / "sync_metadata.py").exists()
+    assert "PositionLotSyncMetadataPatch" not in repository_text
+    assert "PositionLotSyncMetadataPatch" not in commands_text
+    assert "def update_position_lot_sync_metadata(" not in repository_text
     assert "def update_position_lot_fields(" not in repository_text
     assert "update_position_lot_fields" not in commands_text
-    assert "update_position_lot_fields" not in feishu_sync_text
-    assert "build_position_lot_sync_metadata_patch(" in feishu_sync_text
 
 
 def test_position_lot_projection_write_path_uses_explicit_record_contract() -> None:
@@ -192,7 +191,7 @@ def test_position_lot_projection_write_path_uses_explicit_record_contract() -> N
     assert "lots: list[PositionLotRecord]" in publisher_text
     assert "records: Sequence[PositionLotRecord]" in repository_text
     assert "replace_position_lots requires PositionLotRecord records" in repository_text
-    assert "def merge_preserved_position_lot_metadata(\n    records: list[PositionLotRecord]," in writer_text
+    assert "merge_preserved_position_lot_metadata" not in writer_text
     assert "replace_position_lots(self, records: list[dict[str, Any]]" not in repository_text
 
 
@@ -417,13 +416,17 @@ def test_position_maintenance_lives_under_positions_namespace() -> None:
     assert offenders == []
 
 
-def test_position_feishu_sync_lives_under_positions_namespace() -> None:
+def test_position_feishu_sync_is_fully_retired() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     roots = [repo_root / "src", repo_root / "scripts"]
     banned_imports = (
         "src.application.option_positions_feishu_sync",
         "src.application.option_positions_feishu_sync_receipt",
         "src.application.option_positions_sync_config",
+        "src.application.positions.feishu_sync",
+        "src.application.positions.feishu_sync_receipt",
+        "src.application.positions.sync_config",
+        "src.application.ledger.sync_metadata",
     )
     offenders: list[str] = []
     for root in roots:
@@ -432,9 +435,9 @@ def test_position_feishu_sync_lives_under_positions_namespace() -> None:
             if any(item in text for item in banned_imports):
                 offenders.append(str(path.relative_to(repo_root)))
 
-    assert (repo_root / "src" / "application" / "positions" / "feishu_sync.py").exists()
-    assert (repo_root / "src" / "application" / "positions" / "feishu_sync_receipt.py").exists()
-    assert (repo_root / "src" / "application" / "positions" / "sync_config.py").exists()
+    assert not (repo_root / "src" / "application" / "positions" / "feishu_sync.py").exists()
+    assert not (repo_root / "src" / "application" / "positions" / "feishu_sync_receipt.py").exists()
+    assert not (repo_root / "src" / "application" / "positions" / "sync_config.py").exists()
     assert offenders == []
 
 
@@ -506,13 +509,10 @@ def test_repository_config_and_guards_live_under_ledger_repository() -> None:
     repository_text = (repo_root / "src" / "application" / "ledger" / "repository.py").read_text(encoding="utf-8")
     moved_defs = (
         "class SQLiteOptionPositionsRepository",
-        "def load_table_ref(",
-        "def option_positions_sync_to_feishu_enabled(",
         "def option_positions_bootstrap_from_feishu_enabled(",
         "def option_positions_bootstrap_from_legacy_sqlite_enabled(",
         "def resolve_option_positions_sqlite_path(",
         "def require_option_positions_read_repo(",
-        "def require_option_positions_sync_meta_repo(",
         "def require_option_positions_event_write_repo(",
         "def with_sqlite_repo_transaction(",
     )
@@ -538,7 +538,6 @@ def test_event_write_projection_lives_under_ledger_writer() -> None:
     writer_text = (repo_root / "src" / "application" / "ledger" / "writer.py").read_text(encoding="utf-8")
     moved_defs = (
         "def projection_diagnostics_summary(",
-        "def merge_preserved_position_lot_metadata(",
         "def rebuild_position_lots_from_trade_events(",
         "def persist_trade_event_object(",
         "def persist_trade_event(",
@@ -722,13 +721,10 @@ def test_core_workflows_use_semantic_ledger_api_names() -> None:
         "load_option_positions_repo",
         "load_position_lot_records",
         "load_reconciliation_state",
-        "load_table_ref",
-        "option_positions_sync_to_feishu_enabled",
         "project_stored_trade_events_to_position_lots",
         "rebuild_position_lots_from_trade_events",
         "require_option_positions_event_write_repo",
         "require_option_positions_read_repo",
-        "require_option_positions_sync_meta_repo",
         "resolve_fifo_close_lots",
         "resolve_position_lot_records",
         "resolve_position_repo",
@@ -780,13 +776,10 @@ def test_ledger_public_api_exports_semantic_surface_only() -> None:
         "load_option_positions_repo",
         "load_position_lot_records",
         "load_reconciliation_state",
-        "load_table_ref",
-        "option_positions_sync_to_feishu_enabled",
         "project_stored_trade_events_to_position_lots",
         "rebuild_position_lots_from_trade_events",
         "require_option_positions_event_write_repo",
         "require_option_positions_read_repo",
-        "require_option_positions_sync_meta_repo",
         "resolve_fifo_close_lots",
         "resolve_position_lot_records",
         "resolve_position_repo",

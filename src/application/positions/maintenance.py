@@ -19,7 +19,6 @@ from src.application.ledger.api import (
     record_expired_position_closes,
     refresh_position_lot_projection,
 )
-from src.application.positions.sync_config import apply_option_positions_runtime_config
 from src.application.positions.maintenance_receipt import (
     resolve_auto_close_receipt_config,
     safe_send_auto_close_receipt,
@@ -230,7 +229,6 @@ def run_expired_position_maintenance_for_account(
         return {"mode": "skipped", "reason": "missing_data_config", "data_config": str(data_config)}
 
     repo = open_position_ledger(data_config)
-    apply_option_positions_runtime_config(repo, cfg)
     ledger_store = ledger_store_payload(data_config, repo)
     ts = int(as_of_ms if as_of_ms is not None else datetime.now(timezone.utc).timestamp() * 1000)
     projection_refresh = (

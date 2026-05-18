@@ -17,7 +17,6 @@ def run_deterministic_checks(evidence: dict[str, Any]) -> dict[str, Any]:
     _check_runtime(runtime, scheduler=scheduler, findings=findings, categories=categories)
     _check_prefetch(runtime, findings=findings, categories=categories)
     _check_notification(runtime, findings=findings, categories=categories)
-    _check_position_maintenance(runtime, findings=findings, categories=categories)
     _check_trade_intake(runtime, findings=findings, categories=categories)
 
     category = _primary_category(findings, categories)
@@ -216,27 +215,6 @@ def _check_notification(runtime: dict[str, Any], *, findings: list[dict[str, Any
         )
 
 
-def _check_position_maintenance(runtime: dict[str, Any], *, findings: list[dict[str, Any]], categories: list[str]) -> None:
-    sync_status = _nested(runtime, "summary", "option_positions_feishu_sync_status")
-    sync_receipt_status = _nested(runtime, "summary", "option_positions_feishu_sync_receipt_status")
-    bad_values = {"failed", "partial_failed", "conflict", "partial_conflict", "error", "unconfirmed"}
-    if str(sync_status or "").lower() in bad_values or str(sync_receipt_status or "").lower() in bad_values:
-        categories.append("position_maintenance_issue")
-        findings.append(
-            _finding(
-                severity="warn",
-                category="position_maintenance_issue",
-                code="OPTION_POSITION_SYNC_ISSUE",
-                message="Option-position Feishu sync or receipt reported a problem.",
-                evidence=[
-                    {"source": "runtime_status.summary.option_positions_feishu_sync_status", "observed": sync_status, "expected": "applied or skipped"},
-                    {"source": "runtime_status.summary.option_positions_feishu_sync_receipt_status", "observed": sync_receipt_status, "expected": "sent or skipped"},
-                    {"source": "runtime_status.option_positions_feishu_sync", "observed": _sync_problem_summary(runtime), "expected": "no failed/conflict rows"},
-                ],
-            )
-        )
-
-
 def _check_trade_intake(runtime: dict[str, Any], *, findings: list[dict[str, Any]], categories: list[str]) -> None:
     summary = _dict(_nested(runtime, "trade_intake", "summary"))
     failed_count = _as_int_or_none(summary.get("failed_count")) or 0
@@ -376,42 +354,6 @@ def _basename(value: Any) -> str:
     if not raw:
         return ""
     return raw.split("/")[-1]
-
-
-def _sync_problem_summary(runtime: dict[str, Any]) -> dict[str, Any]:
-    sync_run = _dict(_nested(runtime, "option_positions_feishu_sync", "last_run", "json"))
-    summary = _dict(sync_run.get("summary"))
-    rows_raw = sync_run.get("rows")
-    rows = rows_raw if isinstance(rows_raw, list) else []
-    problem_rows: list[dict[str, Any]] = []
-    for row in rows:
-        item = _dict(row)
-        action = str(item.get("action") or "").strip().lower()
-        if action not in {"failed", "conflict"}:
-            continue
-        problem_rows.append(
-            {
-                "record_id": item.get("record_id"),
-                "symbol": item.get("symbol"),
-                "action": item.get("action"),
-                "reason": item.get("reason") or item.get("error"),
-            }
-        )
-        if len(problem_rows) >= 10:
-            break
-    return {
-        "status": sync_run.get("status"),
-        "summary": {
-            "create": summary.get("create"),
-            "update": summary.get("update"),
-            "delete": summary.get("delete"),
-            "skip": summary.get("skip"),
-            "conflict": summary.get("conflict"),
-            "failed": summary.get("failed"),
-        },
-        "error": sync_run.get("error"),
-        "problem_rows": problem_rows,
-    }
 
 
 def _account_failures(tick_metrics: dict[str, Any]) -> list[dict[str, Any]]:

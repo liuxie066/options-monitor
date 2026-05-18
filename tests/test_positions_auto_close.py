@@ -31,7 +31,7 @@ def test_run_auto_close_expired_processes_config_accounts_and_writes_run_state(m
         "load_config",
         lambda **_kwargs: {
             "accounts": ["lx", "sy"],
-            "portfolio": {"data_config": "secrets/portfolio.sqlite.json", "broker": "富途"},
+            "portfolio": {"data_config": "portfolio.runtime.json", "broker": "富途"},
             "option_positions": {"auto_close": {"enabled": True}},
         },
     )
@@ -117,7 +117,7 @@ def test_run_auto_close_expired_no_send_dry_run_attaches_skipped_receipt(monkeyp
     result = mod.run_auto_close_expired(
         base=base,
         config_path=None,
-        data_config="secrets/portfolio.sqlite.json",
+        data_config="portfolio.runtime.json",
         accounts=["lx"],
         broker="富途",
         apply_mode=False,

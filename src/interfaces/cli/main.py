@@ -16,9 +16,16 @@ from src.application.layered_config import build_layered_runtime_config_file, ex
 from src.application.multi_account_tick import run_tick
 from src.application.notification_pipeline import preview_notification
 from src.application.pipeline_runtime import main as run_scan_pipeline
+from src.application.runtime_paths import resolve_runtime_root
 from src.application.runtime_setup import init_runtime
 from src.application.scan_pipeline import run_scan
 from src.application.scan_scheduler import run_scheduler
+from src.application.service_deploy import (
+    load_service_profile,
+    render_service_bundle,
+    service_status_from_profile,
+    write_service_bundle,
+)
 from src.application.strategy_replay import analyze_strategy_replay, read_strategy_replay_file
 from src.application.tick_cron import run_tick_cron
 from src.application.tool_execution import execute_tool
@@ -56,6 +63,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ai_collect.add_argument("--trace-path", action="append", dest="trace_paths", default=None)
     ai_collect.add_argument("--strategy-replay-path", action="append", dest="strategy_replay_paths", default=None)
     ai_collect.add_argument("--strategy-report-dir", default=None)
+    ai_collect.add_argument("--ranking-limit", type=int, default=None, help="top candidate rows per report included in ranking evidence")
     ai_collect.add_argument("--include-healthcheck", action="store_true")
     ai_collect.add_argument("--data-config", default=None)
     ai_collect.add_argument("--timeout-sec", type=int, default=None)
@@ -137,7 +145,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     scheduler = sub.add_parser("scheduler", help="scan scheduler / frequency controller")
     scheduler.add_argument("--config", required=True)
-    scheduler.add_argument("--state-dir", default="output/state")
+    scheduler.add_argument("--state-dir", default=None)
     scheduler.add_argument("--state", default=None)
     scheduler.add_argument("--schedule-key", default="schedule")
     scheduler.add_argument("--account", default=None)
@@ -155,7 +163,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     sell_put_cash.add_argument("--format", choices=("text", "json"), default="text")
     sell_put_cash.add_argument("--top", type=int, default=10)
     sell_put_cash.add_argument("--no-exchange-rates", action="store_true")
-    sell_put_cash.add_argument("--out-dir", default="output/state")
+    sell_put_cash.add_argument("--out-dir", default=None)
 
     strategy_replay = sub.add_parser("strategy-replay", help="offline strategy replay analysis")
     strategy_replay_sub = strategy_replay.add_subparsers(dest="strategy_replay_command", required=True)
@@ -164,6 +172,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     strategy_replay_analyze.add_argument("--min-sample", type=int, default=5)
     strategy_replay_analyze.add_argument("--win-return-threshold", type=float, default=0.0)
     strategy_replay_analyze.add_argument("--bad-drawdown-threshold", type=float, default=-0.15)
+
+    service = sub.add_parser("service", help="render and inspect platform service definitions")
+    service_sub = service.add_subparsers(dest="service_command", required=True)
+    service_render = service_sub.add_parser("render", help="render systemd or launchd service files")
+    service_render.add_argument("--target", required=True, choices=("systemd", "launchd"))
+    service_render.add_argument("--repo-root", default=None)
+    service_render.add_argument("--runtime-root", default=None)
+    service_render.add_argument("--accounts", nargs="+", default=None)
+    service_render.add_argument("--markets", nargs="+", choices=("us", "hk"), default=None)
+    service_render.add_argument("--config-us", default=None)
+    service_render.add_argument("--config-hk", default=None)
+    service_render.add_argument("--env-file", default=None, help="systemd EnvironmentFile path for local secrets/env values")
+    service_render.add_argument("--timeout", dest="timeout_seconds", type=int, default=600)
+    service_render.add_argument("--output-dir", default=None, help="write rendered files under this directory")
+    service_render.add_argument("--no-content", action="store_true", help="omit file contents from JSON output")
+    service_status = service_sub.add_parser("status", help="summarize a rendered service profile")
+    service_status.add_argument("--profile-path", required=True)
+    service_status.add_argument("--include-service-status", action="store_true")
 
     sub.add_parser("watchlist", help="manage monitored symbols")
     sub.add_parser("option-positions", help="option position operations")
@@ -210,6 +236,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     tick_cron.add_argument("--force", action="store_true")
     tick_cron.add_argument("--debug", action="store_true")
     tick_cron.add_argument("--allow-stale-config", action="store_true")
+    trade_intake = run_sub.add_parser("trade-intake", help="run OpenD trade intake listener")
+    trade_intake.add_argument("--config", default="config.us.json")
+    trade_intake.add_argument("--data-config", default=None)
+    trade_intake.add_argument("--mode", choices=["dry-run", "apply"], default=None)
+    trade_intake.add_argument("--state-path", default=None)
+    trade_intake.add_argument("--audit-path", default=None)
+    trade_intake.add_argument("--status-path", default=None)
+    trade_intake.add_argument("--host", default="127.0.0.1")
+    trade_intake.add_argument("--port", type=int, default=11111)
+    trade_intake.add_argument("--once", action="store_true")
+    trade_intake.add_argument("--deal-json", default=None)
 
     return parser.parse_args(argv)
 
@@ -313,6 +350,7 @@ def main(argv: list[str] | None = None) -> int:
                 "trace_paths": args.trace_paths,
                 "strategy_replay_paths": args.strategy_replay_paths,
                 "strategy_report_dir": args.strategy_report_dir,
+                "ranking_limit": args.ranking_limit,
                 "include_healthcheck": bool(args.include_healthcheck),
                 "data_config": args.data_config,
                 "timeout_sec": args.timeout_sec,
@@ -392,8 +430,6 @@ def main(argv: list[str] | None = None) -> int:
             return _print(_validate_runtime_config(config_key=args.config_key, config_path=args.config_path, market=args.market))
 
         if args.command == "config" and args.config_command == "build":
-            from src.application.agent_tool_config import repo_base
-
             return _print(build_layered_runtime_config_file(
                 repo_root=repo_base(),
                 market=args.market,
@@ -406,8 +442,6 @@ def main(argv: list[str] | None = None) -> int:
             ))
 
         if args.command == "config" and args.config_command == "explain":
-            from src.application.agent_tool_config import repo_base
-
             return _print(explain_layered_runtime_config_key(
                 repo_root=repo_base(),
                 market=args.market,
@@ -423,9 +457,10 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.command == "scheduler":
+            runtime_root = resolve_runtime_root(repo_root=repo_base()).runtime_root
             run_scheduler(
                 config=args.config,
-                state_dir=args.state_dir,
+                state_dir=args.state_dir or str((runtime_root / "output" / "state").resolve()),
                 state=args.state,
                 schedule_key=args.schedule_key,
                 account=args.account,
@@ -438,6 +473,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.command == "sell-put-cash":
+            runtime_root = resolve_runtime_root(repo_root=repo_base()).runtime_root
             query_sell_put_cash(
                 config=args.config,
                 data_config=args.data_config,
@@ -446,7 +482,7 @@ def main(argv: list[str] | None = None) -> int:
                 output_format=args.format,
                 top=args.top,
                 no_exchange_rates=bool(args.no_exchange_rates),
-                out_dir=args.out_dir,
+                out_dir=args.out_dir or str((runtime_root / "output" / "state").resolve()),
             )
             return 0
 
@@ -468,6 +504,39 @@ def main(argv: list[str] | None = None) -> int:
                 bad_drawdown_threshold=args.bad_drawdown_threshold,
             )
             return _print(build_response(tool_name="strategy-replay.analyze", ok=True, data=data))
+
+        if args.command == "service" and args.service_command == "render":
+            config_paths = {
+                key: value
+                for key, value in {
+                    "us": args.config_us,
+                    "hk": args.config_hk,
+                }.items()
+                if value
+            }
+            bundle = render_service_bundle(
+                target=args.target,
+                repo_root=args.repo_root,
+                runtime_root=args.runtime_root,
+                accounts=args.accounts,
+                markets=args.markets,
+                config_paths=config_paths,
+                env_file=args.env_file,
+                timeout_seconds=args.timeout_seconds,
+                include_content=(not bool(args.no_content)) or bool(args.output_dir),
+            )
+            if args.output_dir:
+                bundle["written_files"] = write_service_bundle(bundle, args.output_dir)
+                if bool(args.no_content):
+                    for item in bundle.get("files", []):
+                        if isinstance(item, dict):
+                            item.pop("content", None)
+            return _print(build_response(tool_name="service.render", ok=True, data=bundle))
+
+        if args.command == "service" and args.service_command == "status":
+            profile = load_service_profile(args.profile_path)
+            data = service_status_from_profile(profile, include_status=bool(args.include_service_status))
+            return _print(build_response(tool_name="service.status", ok=True, data=data))
 
         if args.command == "init" and args.init_command == "runtime":
             return _print(build_response(tool_name="init.runtime", ok=True, data=init_runtime(
@@ -524,6 +593,30 @@ def main(argv: list[str] | None = None) -> int:
             if isinstance(out, dict):
                 return _print(build_response(tool_name="run.tick-cron", ok=True, data=out))
             return int(out)
+
+        if args.command == "run" and args.run_command == "trade-intake":
+            from src.application.trades.auto_intake import main as run_trade_intake
+
+            intake_argv: list[str] = ["--config", str(args.config)]
+            if args.data_config:
+                intake_argv.extend(["--data-config", str(args.data_config)])
+            if args.mode:
+                intake_argv.extend(["--mode", str(args.mode)])
+            if args.state_path:
+                intake_argv.extend(["--state-path", str(args.state_path)])
+            if args.audit_path:
+                intake_argv.extend(["--audit-path", str(args.audit_path)])
+            if args.status_path:
+                intake_argv.extend(["--status-path", str(args.status_path)])
+            if args.host:
+                intake_argv.extend(["--host", str(args.host)])
+            if args.port:
+                intake_argv.extend(["--port", str(args.port)])
+            if args.once:
+                intake_argv.append("--once")
+            if args.deal_json:
+                intake_argv.extend(["--deal-json", str(args.deal_json)])
+            return int(run_trade_intake(intake_argv))
     except AgentToolError as err:
         return _print(build_response(tool_name="om", ok=False, error=build_error_payload(err)))
 

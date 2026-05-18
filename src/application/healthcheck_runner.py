@@ -11,22 +11,12 @@ from typing import Any
 from src.application.account_config import accounts_from_config
 from src.application.config_loader import normalize_portfolio_broker_config, resolve_data_config_path
 from src.application.config_validator import validate_config
+from src.application.secret_resolver import resolve_feishu_holdings_config
 from src.application.scan_scheduler import run_scheduler
 from src.infrastructure.feishu_bitable import bitable_fields, get_tenant_access_token
 
 
 REQUIRED_HOLDINGS_FIELDS = {"asset_id", "asset_name", "quantity", "account", "currency", "asset_type"}
-REQUIRED_OPTION_POSITION_FIELDS = {
-    "symbol",
-    "option_type",
-    "side",
-    "contracts",
-    "status",
-    "account",
-    "broker",
-    "currency",
-    "cash_secured_amount",
-}
 
 
 def now_utc() -> str:
@@ -78,16 +68,6 @@ def _resolve_accounts(opt_cfg: dict[str, Any], requested: list[str] | None) -> l
     return accounts_from_config({"accounts": requested})
 
 
-def _option_positions_sync_to_feishu_enabled(data_cfg: dict[str, Any]) -> bool:
-    option_positions = data_cfg.get("option_positions")
-    if not isinstance(option_positions, dict):
-        return False
-    sync_to_feishu = option_positions.get("sync_to_feishu")
-    if not isinstance(sync_to_feishu, dict):
-        return False
-    return sync_to_feishu.get("enabled") is True
-
-
 def run_healthcheck_runner(
     *,
     config: str | Path = "config.us.json",
@@ -126,48 +106,30 @@ def run_healthcheck_runner(
         portfolio_cfg = raw_portfolio_cfg if isinstance(raw_portfolio_cfg, dict) else {}
         data_ref = portfolio_cfg.get("data_config")
         data_path = resolve_data_config_path(base=repo_base, data_config=data_ref)
-        pm = _read_json(data_path)
+        pm = _read_json(data_path) if data_path.exists() else {}
 
-        raw_feishu_cfg = pm.get("feishu")
-        fcfg: dict[str, Any] = raw_feishu_cfg if isinstance(raw_feishu_cfg, dict) else {}
-        app_id = fcfg.get("app_id")
-        app_secret = fcfg.get("app_secret")
-        raw_tables = fcfg.get("tables")
-        tables: dict[str, Any] = raw_tables if isinstance(raw_tables, dict) else {}
-        option_positions_sync_enabled = _option_positions_sync_to_feishu_enabled(pm)
-        if not (app_id and app_secret and tables.get("holdings")):
-            raise RuntimeError("portfolio secret config missing feishu app creds or holdings table")
-        if option_positions_sync_enabled and not tables.get("option_positions"):
-            raise RuntimeError("portfolio secret config missing option_positions table for enabled Feishu mirror sync")
+        feishu = resolve_feishu_holdings_config(pm)
+        if not feishu.ready:
+            missing = ", ".join(feishu.missing_fields)
+            raise RuntimeError(f"environment missing Feishu holdings config: {missing}")
 
-        token = get_tenant_access_token(str(app_id), str(app_secret))
-        hold_app, hold_tbl = _split_table_ref(str(tables["holdings"]))
+        token = get_tenant_access_token(feishu.app_id, feishu.app_secret)
+        hold_app, hold_tbl = _split_table_ref(feishu.holdings_ref)
 
         hold_fields = {f.get("field_name") for f in bitable_fields(token, hold_app, hold_tbl)}
 
         missing_hold = sorted(REQUIRED_HOLDINGS_FIELDS - hold_fields)
-        missing_opt: list[str] = []
-        if option_positions_sync_enabled:
-            opt_app, opt_tbl = _split_table_ref(str(tables["option_positions"]))
-            opt_fields = {f.get("field_name") for f in bitable_fields(token, opt_app, opt_tbl)}
-            missing_opt = sorted(REQUIRED_OPTION_POSITION_FIELDS - opt_fields)
         if not (hold_fields & {"broker", "market"}):
             missing_hold.append("broker|market")
         if missing_hold:
             errors.append("holdings table missing fields: " + ",".join(missing_hold))
-        if missing_opt:
-            errors.append("option_positions mirror table missing fields: " + ",".join(missing_opt))
-        if missing_hold or missing_opt:
+        if missing_hold:
             _add_check(
                 checks,
                 name="feishu_schema",
                 status="error",
                 message="required Feishu fields missing",
-                value={
-                    "holdings_missing": missing_hold,
-                    "option_positions_missing": missing_opt,
-                    "option_positions_checked": option_positions_sync_enabled,
-                },
+                value={"holdings_missing": missing_hold},
             )
         else:
             _add_check(
@@ -175,7 +137,6 @@ def run_healthcheck_runner(
                 name="feishu_schema",
                 status="ok",
                 message="required Feishu fields found",
-                value={"option_positions_checked": option_positions_sync_enabled},
             )
     except Exception as exc:
         msg = f"feishu schema check failed: {exc}"

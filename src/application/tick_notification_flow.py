@@ -68,9 +68,12 @@ class TickNotificationRequest:
     audit_helper: Any
     vpy: Path
     complete_tick_idempotency_fn: Callable[..., None]
+    repo_root: Path | None = None
 
 
 def run_tick_notification_flow(request: TickNotificationRequest) -> int:
+    process_root = (request.repo_root or request.base).resolve()
+
     def finish_success(
         fn: Callable[[], int],
         *,
@@ -257,7 +260,7 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
                 error_code,
                 delivery_adapter.failure_stage,
             ),
-            base=request.base,
+            base=process_root,
             failure_stage=delivery_adapter.failure_stage,
         )
         sent_accounts = execution.sent_accounts
@@ -266,7 +269,7 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
         send_confirmed_count = execution.send_confirmed_count
         if notify_failures:
             failure_summary_result = send_account_message_with_retry(
-                base=request.base,
+                base=process_root,
                 channel=delivery_batch.channel,
                 target=delivery_batch.target,
                 account="notify_failure_summary",
@@ -302,7 +305,7 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
             mark_accounts_notified(
                 runner=run_scan_scheduler_cli,
                 vpy=request.vpy,
-                base=request.base,
+                base=process_root,
                 config=request.cfg_path,
                 state=request.state_path,
                 state_dir=run_repo.get_run_state_dir(request.base, request.run_id),

@@ -16,6 +16,7 @@ from src.application.opend_fetch_config import DEFAULT_OPEND_BATCH_MARKET_SNAPSH
 from src.application.opend_symbol_chain_fetching import prune_chain_cache
 from src.application.opend_symbol_outputs import append_metrics_json, save_outputs
 from src.application.required_data_observability import extract_fetch_payload_metrics
+from src.application.runtime_paths import resolve_runtime_root
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -61,7 +62,7 @@ def main() -> None:
     want_put = ("put" in opt_types) if opt_types else True
     want_call = ("call" in opt_types) if opt_types else True
 
-    base = REPO_ROOT
+    base = resolve_runtime_root(repo_root=REPO_ROOT).runtime_root
     output_root = Path(args.output_root).resolve() if args.output_root else None
 
     if args.chain_cache:

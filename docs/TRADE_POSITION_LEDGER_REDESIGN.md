@@ -55,14 +55,14 @@
 - canonical read model 已迁到 `src/application/ledger/read_model.py`；旧 `option_positions_facade` re-export 兼容层已删除。
 - `src/application/ledger/api.py` 是非 ledger runtime 进入账本核心的唯一公共应用边界；`positions` / `trades`、agent tools、CLI、web UI、pipeline context、cash headroom 都不再直接 import ledger 内部 service / preflight / resolver / publisher / repository / reconciliation / read-model 模块。
 - `ledger.api` 已收敛为薄公共 facade；命令写入/维护动作落在 `src/application/ledger/commands.py`，查询/读模型动作落在 `src/application/ledger/queries.py`，避免公共 API 自身演变成新的 god service。
-- runtime 调用方只使用语义账本动作（manual position record、broker trade record、expired-close plan/record、projection refresh、position snapshot read、mirror sync metadata、event review/repair、reconciliation），而不是自行组合 `persist_*` / `preflight_*` / `require_*` / `load_*` 内部原语。
+- runtime 调用方只使用语义账本动作（manual position record、broker trade record、expired-close plan/record、projection refresh、position snapshot read、event review/repair、reconciliation），而不是自行组合 `persist_*` / `preflight_*` / `require_*` / `load_*` 内部原语。
 - 风控读取路径开始使用显式 read DTO：`PositionLotSnapshot` / `RiskPositionView`。`src/application/positions/context_builder.py` 内部消费 `RiskPositionView`，CLI / JSON 输出边界再转换为 dict。
 - repository/config、stored event codec、bootstrap、event write/projection publish、manual open/close/adjust、manual void/repair、auto-close maintenance、ledger preflight、close lot resolver、target identity guard 已分别迁到 `src/application/ledger/repository.py`、`event_codec.py`、`bootstrap.py`、`writer.py`、`manual_trades.py`、`interventions.py`、`maintenance.py`、`preflight.py`、`lot_resolver.py`、`targets.py`。
 - close target 解析已统一为 `CloseTargetResolution` 读写契约：manual close 使用唯一 strict match，broker close 使用严格 exact FIFO target set，auto-close 使用显式 current `record_id` target；解析结果会写入 preview / diagnostics / operation / raw_payload。
 - lot record / field 语义已迁到 `domain/domain/ledger/position_fields.py`；旧 `domain/domain/option_position_lots.py` 仅作为兼容 re-export，ledger / positions / trades 核心路径不再从旧模块取写入字段模型。
 - open lot fields 与 open/close/adjust patch 已收敛到显式 `PositionLotFields` / `PositionLotPatch` contract；`src/application/ledger` 写路径内部使用 contract builder，旧 dict helper 只作为兼容输出边界保留。
 - projection 应用 adjust event 时会先用 `decode_position_lot_patch` 将 stored `raw_payload.patch` 解码成 `PositionLotPatch`；`PositionLot` 不再直接解释自由 patch dict。
-- Feishu mirror 回写已收敛为显式 `PositionLotSyncMetadataPatch`，仓储层只接受 typed patch 并只暴露 `update_position_lot_sync_metadata`，不再提供看起来能更新任意 lot fields 的通用接口。
+- 期权持仓 Feishu mirror 回写已退休；仓储层不再暴露 sync metadata 写接口，projection 只保留账本自身字段。
 - projection 发布到 `position_lots` 仓储替换时使用显式 `PositionLotRecord`；`repository.replace_position_lots` 不再接受自由 `list[dict]` 写入。
 - manual open/close/adjust 的中心结果边界已收敛到 `src/application/ledger/results.py`：preflight / write / preview 在应用内部使用 `LedgerPreflightResult`、`LedgerWriteResult` 和 manual preview/result contracts，只有 CLI / workflow 输出边界调用 `to_payload()` 转 dict。
 - event writer / projection refresh 的底层写入结果也已收敛到 `LedgerWriteResult` / `ProjectionRefreshResult`；`writer.py` 不再把 trade-event 写入和 rebuild 结果作为自由 dict 返回，调用方在 CLI / review / maintenance 输出边界转换。
@@ -246,7 +246,7 @@ CLI / agent / intake / auto-close
 -> replay projection
 -> run invariants
 -> publish read models
--> optional mirror sync / receipt
+-> local receipt
 ```
 
 Close target resolution：
@@ -402,7 +402,6 @@ TradeEvent store
 - auto-close expired
 - trade intake open / close
 - adjust / void / repair
-- Feishu sync mirror
 
 验收：
 
@@ -419,14 +418,14 @@ TradeEvent store
 - auto-close expired 已接入同一个 lot close preflight，写入前校验 `expire_close` 事件不会跨 lot / strike / expiry。
 - manual close、trade intake close、auto-close expired 已统一输出 `CloseTargetResolution`，并把同一解析 payload 贯穿 preview / diagnostics / write operation / stored raw_payload。
 - trade intake close 已优先从当前 writable `position_lots` 取候选，并在真实 repo 下按 strict exact FIFO match 拆成逐 lot target close events。
-- Feishu `option_positions` 已降级为 mirror/sync surface，不再是 bootstrap 输入或默认事实源。
+- Feishu `option_positions` 已退休，不再是 bootstrap 输入、镜像输出或默认事实源。
 - 旧 SQLite `option_positions` 表已降级为显式 bootstrap 输入；默认运行路径不会在空投影时自动迁移旧表。
 - facade、manual close matcher、trade intake close matcher、agent monthly income report 已收敛到 canonical `position_lots` 读面，不再 fallback 到通用 `list_records`。
 - `domain.domain.option_position_lots` 已降级为兼容 re-export，核心 runtime 使用 `domain.domain.ledger.position_fields`。
 
 ### Phase 5: Legacy Retirement
 
-目标：删除旧 v1/v2 混合模型。v2 代码已完成物理删除，剩余 `option_positions_*` 名称只允许作为用户入口、历史配置键、legacy local bootstrap 或 mirror 语义，不允许作为核心写模型 owner。
+目标：删除旧 v1/v2 混合模型。v2 代码已完成物理删除，剩余 `option_positions_*` 名称只允许作为用户入口、历史配置键或 legacy local bootstrap 语义，不允许作为核心写模型 owner。
 
 任务：
 
@@ -461,7 +460,6 @@ TradeEvent store
 - close target lot_id 与 payload contract_key 冲突时报错
 - broker close 成交无法唯一匹配时进入 unmatched
 - replay 后 lot_id 稳定
-- Feishu sync metadata 不影响 projection，且 metadata 回写不能携带业务 lot 字段
 - repair/void append-only，且有下游依赖时阻断
 
 ## Quality Gates

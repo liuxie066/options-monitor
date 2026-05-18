@@ -1,6 +1,3 @@
-pandas
-pyyaml
-tabulate
-fastapi
-uvicorn
-futu-api
+# Backward-compatible runtime install.
+# For optional service/API extras use requirements/server.txt.
+-r requirements/runtime.txt

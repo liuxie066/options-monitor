@@ -19,6 +19,8 @@
 - [SESSION_SUMMARY.md](SESSION_SUMMARY.md)：Session 间记忆摘要模板
 
 ## 运行与运维
+- [../DEPLOY.md](../DEPLOY.md)：Linux / Mac 服务化部署入口
+- [DEPLOY_LINUX_MAC.md](DEPLOY_LINUX_MAC.md)：systemd / launchd 部署、runtime_root 和 store 检查
 - [../RUNBOOK.md](../RUNBOOK.md)：运维巡检、cron、应急处理
 - [OPTION_POSITIONS_REPAIR.md](OPTION_POSITIONS_REPAIR.md)：`option_positions` / `position_lots` 错账修复手册
 - [RELEASE_PROCESS.md](RELEASE_PROCESS.md)：维护者发布清单

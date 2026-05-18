@@ -165,7 +165,6 @@ class LedgerWriteResult:
 class ProjectionRefreshResult:
     trade_event_count: int
     position_lot_count: int
-    preserved_sync_meta_record_count: int = 0
     projection_diagnostic_count: int = 0
     unmatched_explicit_close_count: int = 0
     unmatched_heuristic_close_count: int = 0
@@ -183,7 +182,6 @@ class ProjectionRefreshResult:
         known = {
             "trade_event_count",
             "position_lot_count",
-            "preserved_sync_meta_record_count",
             "projection_diagnostic_count",
             "unmatched_explicit_close_count",
             "unmatched_heuristic_close_count",
@@ -192,7 +190,6 @@ class ProjectionRefreshResult:
         return cls(
             trade_event_count=int(payload.get("trade_event_count") or 0),
             position_lot_count=int(payload.get("position_lot_count") or 0),
-            preserved_sync_meta_record_count=int(payload.get("preserved_sync_meta_record_count") or 0),
             projection_diagnostic_count=int(payload.get("projection_diagnostic_count") or 0),
             unmatched_explicit_close_count=int(payload.get("unmatched_explicit_close_count") or 0),
             unmatched_heuristic_close_count=int(payload.get("unmatched_heuristic_close_count") or 0),
@@ -211,7 +208,6 @@ class ProjectionRefreshResult:
             {
                 "trade_event_count": int(self.trade_event_count),
                 "position_lot_count": int(self.position_lot_count),
-                "preserved_sync_meta_record_count": int(self.preserved_sync_meta_record_count),
                 "projection_diagnostic_count": int(self.projection_diagnostic_count),
                 "unmatched_explicit_close_count": int(self.unmatched_explicit_close_count),
                 "unmatched_heuristic_close_count": int(self.unmatched_heuristic_close_count),

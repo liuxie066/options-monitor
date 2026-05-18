@@ -11,7 +11,7 @@
 适用前提：
 - canonical model 仍然是 `trade_events -> projection -> position_lots`
 - 不直接手改 SQLite 行
-- Feishu `option_positions` 只是镜像，不是主表
+- Feishu `option_positions` 已退休，不是修账入口
 
 ---
 
@@ -115,7 +115,6 @@
 
 效果：
 - 从 `trade_events` 全量重建 `position_lots`
-- 会保留本地 Feishu sync meta
 
 这个命令适合：
 - 手工修复后做一次确认
@@ -140,31 +139,15 @@
 
 ---
 
-## 4. 远端镜像怎么收口
+## 4. 远端镜像已退休
 
-如果你启用了 Feishu `option_positions` 镜像，修完本地后再决定是否同步。
+期权持仓不再同步到 Feishu 多维表。修复流程只收口本地 SQLite ledger：
 
-另外，远端写入默认关闭；推荐在 `configs/user.common.json` 里显式设置
-`option_positions.sync_to_feishu.enabled=true`，重新生成 runtime config 后，下面的 `--apply` 才会真正写 Feishu。
+- `trade_events` 是写入事实。
+- `position_lots` 是本地 projection。
+- `./om option-positions rebuild` 从 `trade_events` 重建 projection。
 
-普通同步：
-
-```bash
-./om option-positions sync-feishu --config config.us.json --dry-run
-./om option-positions sync-feishu --config config.us.json --apply
-```
-
-如果本地已经把某条 lot 作废掉，需要顺便删除远端孤儿镜像：
-
-```bash
-./om option-positions sync-feishu --config config.us.json --dry-run --prune-remote-missing-local
-./om option-positions sync-feishu --config config.us.json --apply --prune-remote-missing-local
-```
-
-注意：
-- `--prune-remote-missing-local` 默认关闭
-- 它只会删除“远端带 `local_record_id`，但本地已经不存在”的行
-- 不会按业务字段猜测删除
+普通 Feishu holdings 读取仍然保留，但它不参与期权持仓 ledger 修复。
 
 ---
 

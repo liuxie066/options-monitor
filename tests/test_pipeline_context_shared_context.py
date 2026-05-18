@@ -291,17 +291,20 @@ def test_shared_slice_matches_legacy_key_fields() -> None:
     assert sliced_option["open_positions_min"] == legacy_option["open_positions_min"]
 
 
-def test_load_holdings_records_falls_back_to_list_only_on_permanent_search_error(tmp_path: Path) -> None:
+def test_load_holdings_records_falls_back_to_list_only_on_permanent_search_error(monkeypatch, tmp_path: Path) -> None:
     import src.application.portfolio_context_builder as fpc
 
+    monkeypatch.setenv("OM_FEISHU_APP_ID", "app_id")
+    monkeypatch.setenv("OM_FEISHU_APP_SECRET", "app_secret")
+    monkeypatch.setenv("OM_FEISHU_HOLDINGS_TABLE", "app_token/table_id")
     cfg = tmp_path / "data.json"
     cfg.write_text(
         json.dumps(
             {
                 "feishu": {
-                    "app_id": "app_id",
-                    "app_secret": "app_secret",
-                    "tables": {"holdings": "app_token/table_id"},
+                    "app_id_env": "OM_FEISHU_APP_ID",
+                    "app_secret_env": "OM_FEISHU_APP_SECRET",
+                    "tables": {"holdings_env": "OM_FEISHU_HOLDINGS_TABLE"},
                 }
             },
             ensure_ascii=False,
@@ -326,17 +329,20 @@ def test_load_holdings_records_falls_back_to_list_only_on_permanent_search_error
     assert rows == [{"record_id": "rec_1", "fields": {}}]
 
 
-def test_load_holdings_records_does_not_fallback_on_permission_error(tmp_path: Path) -> None:
+def test_load_holdings_records_does_not_fallback_on_permission_error(monkeypatch, tmp_path: Path) -> None:
     import src.application.portfolio_context_builder as fpc
 
+    monkeypatch.setenv("OM_FEISHU_APP_ID", "app_id")
+    monkeypatch.setenv("OM_FEISHU_APP_SECRET", "app_secret")
+    monkeypatch.setenv("OM_FEISHU_HOLDINGS_TABLE", "app_token/table_id")
     cfg = tmp_path / "data.json"
     cfg.write_text(
         json.dumps(
             {
                 "feishu": {
-                    "app_id": "app_id",
-                    "app_secret": "app_secret",
-                    "tables": {"holdings": "app_token/table_id"},
+                    "app_id_env": "OM_FEISHU_APP_ID",
+                    "app_secret_env": "OM_FEISHU_APP_SECRET",
+                    "tables": {"holdings_env": "OM_FEISHU_HOLDINGS_TABLE"},
                 }
             },
             ensure_ascii=False,

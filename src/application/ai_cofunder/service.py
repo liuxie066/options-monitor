@@ -120,9 +120,6 @@ def _ledger_quality(runtime: dict[str, Any]) -> dict[str, Any]:
     unresolved = _as_int(trade_summary.get("unresolved_count"))
     position_summary = {
         "auto_close_status": _nested(runtime, "summary", "auto_close_expired_status"),
-        "option_positions_feishu_sync_status": _nested(runtime, "summary", "option_positions_feishu_sync_status"),
-        "option_positions_feishu_sync_receipt_status": _nested(runtime, "summary", "option_positions_feishu_sync_receipt_status"),
-        "option_positions_feishu_sync": _option_positions_feishu_sync_summary(runtime),
     }
     problem_count = failed + unresolved
     status = "ok" if problem_count == 0 else "warn"
@@ -273,6 +270,8 @@ def render_ai_cofunder_handoff(bundle: dict[str, Any]) -> str:
     healthcheck = _dict(bundle.get("healthcheck_snapshot"))
     strategy = _dict(bundle.get("strategy_evidence"))
     strategy_summary = _dict(strategy.get("summary"))
+    ranking = _dict(strategy.get("ranking_evidence"))
+    ranking_summary = _dict(ranking.get("summary"))
     lines = [
         "## AI Cofunder Handoff",
         f"Scope: {manifest.get('scope')}",
@@ -285,9 +284,7 @@ def render_ai_cofunder_handoff(bundle: dict[str, Any]) -> str:
         f"- status: {ledger_quality.get('status')}",
         f"- failed_trades: {_nested(ledger_quality, 'trade_intake', 'failed_count')}",
         f"- unresolved_trades: {_nested(ledger_quality, 'trade_intake', 'unresolved_count')}",
-        f"- feishu_sync: {_nested(ledger_quality, 'position_summary', 'option_positions_feishu_sync_status')}",
-        f"- feishu_sync_failed: {_nested(ledger_quality, 'position_summary', 'option_positions_feishu_sync', 'summary', 'failed')}",
-        f"- feishu_sync_conflict: {_nested(ledger_quality, 'position_summary', 'option_positions_feishu_sync', 'summary', 'conflict')}",
+        f"- auto_close: {_nested(ledger_quality, 'position_summary', 'auto_close_status')}",
         f"- gap: {ledger_quality.get('known_gap')}",
         "",
         "## Account Strategy Matrix",
@@ -296,8 +293,11 @@ def render_ai_cofunder_handoff(bundle: dict[str, Any]) -> str:
         f"- candidate_rows: {strategy_summary.get('candidate_row_count')}",
         f"- reject_log_rows: {strategy_summary.get('reject_log_row_count')}",
         f"- filter_trace_files: {strategy_summary.get('filter_trace_file_count')}",
+        f"- ranking_reports: {ranking_summary.get('report_count')}",
+        f"- ranking_top_rows: {ranking_summary.get('top_row_count')}",
         f"- gap: {account_strategy.get('known_gap')}",
         "",
+        *_render_ranking_evidence_lines(ranking),
         "## Runtime Quality",
         f"- status: {runtime_quality.get('status')}",
         f"- category: {runtime_quality.get('category')}",
@@ -320,6 +320,81 @@ def render_ai_cofunder_handoff(bundle: dict[str, Any]) -> str:
         "This bundle is redacted before handoff. Do not treat missing raw logs as proof that no online error occurred.",
     ]
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _render_ranking_evidence_lines(ranking: dict[str, Any]) -> list[str]:
+    summary = _dict(ranking.get("summary"))
+    lines = [
+        "## Ranking Evidence",
+        f"- reports: {summary.get('report_count')}",
+        f"- top_rows: {summary.get('top_row_count')}",
+        f"- strategies: {_format_counts(_dict(summary.get('strategy_counts')))}",
+        f"- cash_constraints: {_format_counts(_dict(summary.get('cash_constraint_counts')))}",
+    ]
+    rows = _ranking_handoff_rows(ranking, limit=8)
+    if not rows:
+        lines.extend(["", "Top rows: <none>", ""])
+        return lines
+    lines.extend(["", "Top current-order rows:"])
+    for row in rows:
+        metrics = _dict(row.get("metrics"))
+        cash = _dict(row.get("cash_constraint"))
+        explanation = _dict(row.get("rank_explanation"))
+        drivers = explanation.get("primary_drivers")
+        driver_text = ",".join(str(item) for item in drivers) if isinstance(drivers, list) and drivers else None
+        score = explanation.get("strategy_score")
+        if score is None:
+            score = metrics.get("current_score")
+        lines.append(
+            "- "
+            f"{row.get('account') or '-'} / {row.get('strategy') or '-'} / {row.get('symbol') or '-'} "
+            f"K={_fmt(row.get('strike'))} exp={row.get('expiration') or '-'} "
+            f"DTE={_fmt(metrics.get('dte'))} ann={_fmt(metrics.get('annualized_return'))} "
+            f"net={_fmt(metrics.get('net_income'))} otm={_fmt(metrics.get('otm_pct'))} "
+            f"delta={_fmt(metrics.get('delta'))} spread={_fmt(metrics.get('spread_ratio'))} "
+            f"oi={_fmt(metrics.get('open_interest'))} vol={_fmt(metrics.get('volume'))} "
+            f"cash_headroom={_fmt(cash.get('cash_headroom_ratio'))} score={_fmt(score)} "
+            f"drivers={driver_text or '-'}"
+        )
+    lines.append("")
+    return lines
+
+
+def _ranking_handoff_rows(ranking: dict[str, Any], *, limit: int) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    reports = ranking.get("reports")
+    if not isinstance(reports, list):
+        return out
+    for report in reports:
+        if not isinstance(report, dict):
+            continue
+        rows = report.get("top_rows")
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if isinstance(row, dict):
+                out.append(row)
+                if len(out) >= limit:
+                    return out
+    return out
+
+
+def _format_counts(counts: dict[str, Any]) -> str:
+    if not counts:
+        return "<none>"
+    return ", ".join(f"{key}={value}" for key, value in counts.items())
+
+
+def _fmt(value: Any) -> str:
+    if value is None:
+        return "-"
+    if isinstance(value, bool):
+        return str(value).lower()
+    try:
+        return f"{float(value):.6g}"
+    except Exception:
+        text = str(value).strip()
+        return text if text else "-"
 
 
 def _write_outputs(
@@ -360,50 +435,6 @@ def _write_outputs(
         "bundle_path": _relative(bundle_path, base=base),
         "handoff_path": _relative(handoff_path, base=base),
         "current_path": _relative(current_path, base=base),
-    }
-
-
-def _option_positions_feishu_sync_summary(runtime: dict[str, Any]) -> dict[str, Any]:
-    sync_run = _dict(_nested(runtime, "option_positions_feishu_sync", "last_run", "json"))
-    receipt = _dict(_nested(runtime, "option_positions_feishu_sync", "receipt"))
-    summary = _dict(sync_run.get("summary"))
-    rows_raw = sync_run.get("rows")
-    rows = rows_raw if isinstance(rows_raw, list) else []
-    problem_rows: list[dict[str, Any]] = []
-    for row in rows:
-        item = _dict(row)
-        action = str(item.get("action") or "").strip().lower()
-        if action not in {"failed", "conflict"}:
-            continue
-        problem_rows.append(
-            {
-                "record_id": item.get("record_id"),
-                "symbol": item.get("symbol"),
-                "option_type": item.get("option_type"),
-                "side": item.get("side"),
-                "action": item.get("action"),
-                "reason": item.get("reason") or item.get("error"),
-            }
-        )
-        if len(problem_rows) >= 10:
-            break
-    return {
-        "status": sync_run.get("status"),
-        "summary": {
-            "create": summary.get("create"),
-            "update": summary.get("update"),
-            "delete": summary.get("delete"),
-            "skip": summary.get("skip"),
-            "conflict": summary.get("conflict"),
-            "failed": summary.get("failed"),
-        },
-        "error": sync_run.get("error"),
-        "receipt": {
-            "status": receipt.get("status"),
-            "reason": receipt.get("reason"),
-            "delivery_confirmed": receipt.get("delivery_confirmed"),
-        },
-        "problem_rows": problem_rows,
     }
 
 

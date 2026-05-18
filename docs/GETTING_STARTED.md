@@ -21,7 +21,7 @@ bash scripts/install_agent_plugin.sh
 ```bash
 python3 -m venv .venv
 ./.venv/bin/pip install -U pip
-./.venv/bin/pip install -r requirements.txt
+./.venv/bin/pip install -r requirements.txt -c constraints.txt
 ```
 
 `requirements.txt` 已包含 `futu-api`，用于补齐本地 `futu` Python SDK。
@@ -50,11 +50,11 @@ python3 -m venv .venv
 首次初始化通常会生成：
 
 - `config.us.json` 或 `config.hk.json`
-- `secrets/portfolio.sqlite.json`
+- `portfolio.runtime.json`（可选；最小部署可不需要）
 
 默认最小配置下：
 - `option_positions` 只需要本地 SQLite
-- Feishu 只在你启用 holdings / external_holdings，或显式启用 `option_positions` 镜像同步时才需要配置
+- Feishu 只在你启用 holdings / external_holdings 时才需要通过环境变量配置
 
 也可以手工复制模板，详见根目录 [README.md](../README.md)。
 
@@ -115,6 +115,7 @@ healthcheck 会额外给出本地 `ledger_store` 和 `option_positions_bootstrap
 ## 7. 常见环境变量
 
 - `OM_OUTPUT_DIR`：覆盖 agent 输出目录
+- `OM_RUNTIME_ROOT`：覆盖运行时状态根目录；`option_positions` SQLite 位于 `<runtime_root>/output_shared/state/option_positions.sqlite3`
 - `OM_AGENT_ENABLE_WRITE_TOOLS=true`：允许部分写操作工具
 
 ---
@@ -124,4 +125,5 @@ healthcheck 会额外给出本地 `ledger_store` 和 `option_positions_bootstrap
 - Agent 任务手册：[`AGENT_WIKI.md`](AGENT_WIKI.md)
 - Agent JSON 合同：[`AGENT_INTEGRATION.md`](AGENT_INTEGRATION.md)
 - 工具说明：[`TOOL_REFERENCE.md`](TOOL_REFERENCE.md)
+- Linux / Mac 服务化部署：[`DEPLOY_LINUX_MAC.md`](DEPLOY_LINUX_MAC.md)
 - 配置字段说明：[`../CONFIGURATION_GUIDE.md`](../CONFIGURATION_GUIDE.md)

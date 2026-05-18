@@ -612,6 +612,7 @@ def evaluate_candidate_hard_constraints(
     max_dte: int | float | None = None,
     min_strike: int | float | None = None,
     max_strike: int | float | None = None,
+    min_otm_pct: int | float | None = None,
     put_cash_required: int | float | None = None,
     put_cash_free: int | float | None = None,
     call_covered_contracts_available: int | float | None = None,
@@ -698,6 +699,27 @@ def evaluate_candidate_hard_constraints(
             metric_value=strike,
             threshold={"spot": spot},
         )
+
+    min_otm_pct_v = _coerce_float(min_otm_pct)
+    if (
+        mode_norm == "put"
+        and min_otm_pct_v is not None
+        and min_otm_pct_v > 0
+        and strike is not None
+        and spot is not None
+        and spot > 0
+        and strike < spot
+    ):
+        otm_pct = (spot - strike) / spot
+        if otm_pct < min_otm_pct_v:
+            _reject(
+                rejects,
+                stage=STAGE_HARD_CONSTRAINTS,
+                reason=REJECT_HARD_STRIKE,
+                message="put otm_pct below minimum",
+                metric_value=round(otm_pct, 6),
+                threshold=min_otm_pct_v,
+            )
 
     put_required_v = _coerce_float(put_cash_required)
     put_free_v = _coerce_float(put_cash_free)

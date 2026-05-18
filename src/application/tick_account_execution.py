@@ -128,6 +128,7 @@ class TickAccountExecutionRequest:
     update_legacy_output: bool
     runlog: Any
     audit_helper: Any
+    repo_root: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -150,6 +151,7 @@ def run_tick_account_execution(request: TickAccountExecutionRequest) -> TickAcco
             request=AccountRunRequest(
                 acct=acct,
                 base=request.base,
+                repo_root=request.repo_root,
                 base_cfg=request.base_cfg,
                 cfg_path=request.cfg_path,
                 vpy=request.vpy,

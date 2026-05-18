@@ -39,7 +39,6 @@ from src.application.ledger.preflight import (
 )
 from src.application.ledger.repository import (
     require_option_positions_read_repo,
-    require_option_positions_sync_meta_repo,
 )
 from src.application.ledger.results import (
     BrokerTradeOpenPreviewResult,
@@ -56,7 +55,6 @@ from src.application.ledger.results import (
     OpenLedgerResult,
     ProjectionRefreshResult,
 )
-from src.application.ledger.sync_metadata import PositionLotSyncMetadataPatch
 from src.application.ledger.service import (
     persist_manual_adjust_event_with_ledger,
     persist_manual_close_event_with_ledger,
@@ -545,15 +543,6 @@ def refresh_position_lot_projection(repo: Any) -> ProjectionRefreshResult:
     return rebuild_position_lots_from_trade_events(getattr(repo, "primary_repo", repo))
 
 
-def record_position_lot_sync_metadata(
-    repo: Any,
-    record_id: str,
-    patch: PositionLotSyncMetadataPatch,
-) -> None:
-    primary_repo = require_option_positions_sync_meta_repo(repo)
-    primary_repo.update_position_lot_sync_metadata(record_id, patch)
-
-
 def preview_trade_event_void(repo: Any, *, event_id: str, reason: str) -> dict[str, Any]:
     from src.application.ledger.queries import trade_event_log, trade_event_projection_preview
 
@@ -665,7 +654,6 @@ __all__ = [
     "record_manual_position_close",
     "record_manual_position_open",
     "record_normalized_trade_event",
-    "record_position_lot_sync_metadata",
     "record_trade_event_repair",
     "record_trade_event_void",
     "reconcile_position_snapshot",

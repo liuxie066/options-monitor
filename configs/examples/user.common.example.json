@@ -18,11 +18,6 @@
       "medium_annual": 0.06
     }
   },
-  "option_positions": {
-    "sync_to_feishu": {
-      "enabled": false
-    }
-  },
   "notifications": {
     "provider": "openclaw",
     "channel": "openclaw-weixin",

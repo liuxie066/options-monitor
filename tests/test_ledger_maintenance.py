@@ -516,8 +516,8 @@ def test_position_maintenance_closes_legacy_sqlite_lot_after_load_repo_bootstrap
 
     runtime_root = tmp_path / "runtime"
     db_path = runtime_root / "output_shared" / "state" / "option_positions.sqlite3"
-    data_config = runtime_root / "secrets" / "portfolio.sqlite.json"
-    data_config.parent.mkdir(parents=True)
+    data_config = runtime_root / "portfolio.runtime.json"
+    data_config.parent.mkdir(parents=True, exist_ok=True)
     data_config.write_text(
         json.dumps({"option_positions": {}}),
         encoding="utf-8",

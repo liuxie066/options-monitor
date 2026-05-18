@@ -143,9 +143,6 @@ def _resolve_runtime_root(
             resolved_config = resolved_config.resolve()
         return resolved_config.parent.resolve(), "runtime_config_dir"
 
-    if data_config_path.parent.name == "secrets":
-        return data_config_path.parent.parent.resolve(), "data_config_secrets_parent"
-
     return data_config_path.parent.resolve(), "data_config_parent"
 
 

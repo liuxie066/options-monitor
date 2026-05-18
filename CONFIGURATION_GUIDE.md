@@ -3,8 +3,8 @@
 > 目标：你只要维护：
 > - 可选 `configs/user.common.json`（US/HK 共用的用户覆盖）
 > - `configs/user.us.json` / `configs/user.hk.json`（市场账号与 symbols；市场私有覆盖按需放这里）
-> - `portfolio.data_config`（最小配置下只需要 SQLite `option_positions` 路径）
-> - Feishu App 凭证和 Bitable 配置是可选项，只在 `holdings` / `external_holdings` 数据源，或 `option_positions` bootstrap / 镜像场景需要；`option_positions` 的稳态读写主存储仍是 SQLite
+> - 必要的环境变量（Feishu App 凭证与 Bitable 表引用）
+> - `portfolio.data_config` 只作为可选兼容/迁移文件；`option_positions` 的稳态读写主存储由 `runtime_root` 固定派生到 SQLite
 
 ---
 
@@ -15,7 +15,6 @@
 - `configs/user.common.json`（可选）：US/HK 共用用户覆盖，同字段会被 market user 覆盖
 - `configs/user.us.json`
 - `configs/user.hk.json`
-- `secrets/portfolio.sqlite.json`
 
 用户日常只维护 `configs/user.us.json` / `configs/user.hk.json` 里的 market-specific 账号和 symbols；如果某些覆盖 US/HK 都相同，放到可选的 `configs/user.common.json`。运行前生成 canonical runtime config：
 
@@ -36,7 +35,7 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 不确定某个值来自哪里时，用 explain 查看覆盖链：
 
 ```bash
-./om config explain --market us --key option_positions.sync_to_feishu.enabled
+./om config explain --market us --key option_positions.auto_close.enabled
 ./om config explain --market us --key symbol_defaults.fetch.limit_expirations
 ```
 
@@ -47,20 +46,19 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 ### 兼容的运行时文件
 - `config.us.json`
 - `config.hk.json`
-- `secrets/portfolio.sqlite.json`
+- `portfolio.runtime.json`（可选；只用于 legacy bootstrap 或自定义 env key 名）
 
 ### 仓库里保留的模板文件
 - `configs/system.json`
 - `configs/examples/user.common.example.json`
 - `configs/examples/user.example.us.json`
 - `configs/examples/user.example.hk.json`
-- `configs/examples/portfolio.sqlite.example.json`
-- `configs/examples/notifications.feishu.app.example.json`
+- `configs/examples/portfolio.runtime.example.json`
 - `configs/examples/openclaw.profile.example.json`
 
 ### 最小配置和补充配置怎么区分？
 - 最小编辑配置：`configs/user.us.json` / `configs/user.hk.json` 里的账号和 symbols；共用覆盖可放 `configs/user.common.json`
-- 最小运行配置：生成后的 `config.us.json` / `config.hk.json` + `secrets/portfolio.sqlite.json`
+- 最小运行配置：生成后的 `config.us.json` / `config.hk.json`；期权持仓 SQLite 固定在 `<runtime_root>/output_shared/state/option_positions.sqlite3`
 - 补充配置：在同一套结构上继续补 `watchdog.*`、`notifications.*`、`runtime.*`、`alert_policy.change_annual_threshold`、`intake.*`、`symbol_defaults.*`、`portfolio.source_by_account`、`feishu.*`
 - 不再维护“两套 schema”或“两份不同风格文档”；只有一套结构，只是填写程度不同。
 
@@ -68,21 +66,18 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 
 ## 1) 本项目需要哪些外部“表”（Bitable）？
 
-目前本项目通过 `portfolio.data_config` 指向本地 portfolio 配置文件。
-最小配置下它只需要提供 SQLite `option_positions` 路径；如果你要启用 Feishu holdings 数据源，或启用 Feishu `option_positions` bootstrap / 镜像，再在同一个文件里补 `feishu` 配置。
+期权持仓不再需要单独数据配置文件。SQLite 主库固定由 `runtime_root` 派生。
+如果启用 Feishu holdings 数据源，直接通过环境变量提供 Feishu App 凭证和 holdings 表引用。
 - `holdings`：可选主数据源，提供现金与股票持仓（用于 base 现金、shares、avg_cost）
 - `option_positions`：SQLite 主存储，提供已卖出期权占用（用于：
   - covered call 锁股数 `locked_shares_by_symbol`
   - cash-secured put 占用 `cash_secured_by_symbol`
 )
-- Feishu `tables.option_positions`：仅在两种场景使用
-  - SQLite 空库时作为一次性 bootstrap 输入
-  - 本地 SQLite 变更后作为远端镜像输出
-  - 不参与 steady-state 本地读模型
+- Feishu 不再承载 `option_positions`：不做 bootstrap，也不做镜像输出。
 
 **你需要给我的信息（不含密钥）**：
-- 两张表的 Bitable 链接（或 app_token/table_id）
-- 两张表里字段名是否与下文一致（截图/字段列表即可）
+- holdings 表的 Bitable 链接（或 app_token/table_id）
+- holdings 表里字段名是否与下文一致（截图/字段列表即可）
 
 ---
 
@@ -178,7 +173,7 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 
 1. payload/命令里显式传入的 `data_config`
 2. runtime config 里的 `portfolio.data_config`
-3. 若都未提供，则按当前 runtime config 所在目录推导 `secrets/portfolio.sqlite.json`
+3. 若都未提供，则按当前 runtime config 所在目录推导 `portfolio.runtime.json`
 4. `OM_DATA_CONFIG` 只作为显式 override 使用，不属于主配置心智
 
 不要把历史兼容文件名、旧 market-specific 变体、或额外 fallback 路径当作正式入口来理解。
@@ -189,7 +184,6 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 - `accounts`
 - `trade_intake.account_mapping.futu`
 - `templates`
-- `portfolio.data_config`
 - `portfolio.broker`
 - `portfolio.account`
 - `portfolio.source`
@@ -197,8 +191,9 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 - `schedule`
 - `symbols`
 
-#### data_config 最小必需
-- `option_positions.sqlite_path`
+#### data_config
+- 最小部署不需要 `portfolio.data_config`。
+- 只有 legacy SQLite bootstrap 或自定义 env key 名时，才使用 `portfolio.runtime.json`。
 
 #### 最小配置对应的数据来源
 - 行情与期权链：OpenD
@@ -220,9 +215,9 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 
 | 工具 | 负责什么 | 不负责什么 |
 |---|---|---|
-| `./om config validate --market us|hk` | 配置结构、字段语义、removed/legacy 字段、数值约束、市场 schedule 时区契约、runtime config 生成指纹 | OpenD 是否在线、secrets 文件是否存在、runtime 输出是否健康 |
-| `config_validate` | 基础 runtime config 结构校验 | OpenD 是否在线、secrets 文件是否存在、生成指纹是否最新 |
-| `healthcheck` | runtime config 可读、data config/SQLite 存在性、OpenD readiness、option_positions bootstrap 状态 | 不负责替代主配置语义文档 |
+| `./om config validate --market us|hk` | 配置结构、字段语义、removed/legacy 字段、数值约束、市场 schedule 时区契约、runtime config 生成指纹 | OpenD 是否在线、环境变量是否已注入、runtime 输出是否健康 |
+| `config_validate` | 基础 runtime config 结构校验 | OpenD 是否在线、环境变量是否已注入、生成指纹是否最新 |
+| `healthcheck` | runtime config 可读、SQLite store、Feishu env readiness、OpenD readiness、option_positions bootstrap 状态 | 不负责替代主配置语义文档 |
 | `runtime_status` | 只读汇总现有 runtime / OpenClaw 输出文件 | 不校验配置语义，不检查 OpenD |
 | `openclaw_readiness` | 组合 `runtime_status` + `healthcheck` + 本地 openclaw 可用性 | 不替代 `config_validate` 的纯配置语义检查 |
 
@@ -267,8 +262,7 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 - `yahoo` / `yfinance` 不作为 symbol required-data 的受支持运行时来源；它们只保留给独立的事件风险数据抓取等非 OpenD fallback 场景。
 
 ### 4.4 portfolio：账户约束来源
-- `data_config`: 最小配置建议指向 `secrets/portfolio.sqlite.json`，只负责 `option_positions.sqlite_path`
-- `data_config`: 持仓/SQLite/Feishu 数据配置路径
+- `data_config`: 可选迁移配置；最小部署不需要，正式路径由 runtime root 与环境变量决定
 - `broker`: 对外公开配置名，用来过滤 holdings / option_positions（例如 `富途`）
 - `market`: 兼容旧配置的别名；新配置不再推荐继续使用
 - `account`: 用来过滤两张表（例如 `lx`）
@@ -285,7 +279,7 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 - `account_settings.<account>.bitable.*`:
   - 当前只作为历史/预留展示字段保留
   - 不参与 runtime holdings 连接配置
-  - runtime 唯一生效的 Feishu holdings 来源是 `portfolio.data_config.feishu.tables.holdings`
+  - runtime 唯一生效的 Feishu holdings 来源是 `OM_FEISHU_HOLDINGS_TABLE`（或 `portfolio.runtime.json` 内声明的自定义 env key）
 - `account_settings.<account>.futu.host` / `account_settings.<account>.futu.port`:
   - 可选，账户级 OpenD 持仓连接参数。
   - 当前 runtime 已支持按账户读取不同的 OpenD holdings 端点。
@@ -554,46 +548,32 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 ## 5) `portfolio.data_config` / Feishu App 凭证到底放哪？
 
 ### 最小方式（新部署）
-- 从 `configs/examples/portfolio.sqlite.example.json` 复制到 `secrets/portfolio.sqlite.json`。
-- 在 `secrets/portfolio.sqlite.json` 内填写或保留 `option_positions.sqlite_path`。
-- 在 `config.us.json` / `config.hk.json` 内保持 `portfolio.data_config = "secrets/portfolio.sqlite.json"`。
+- 不需要创建 repo-local `secrets` JSON。
+- 不需要在 runtime config 里配置 `portfolio.data_config`。
+- 期权持仓 SQLite 固定写入 `<runtime_root>/output_shared/state/option_positions.sqlite3`。
 
-示例：
+如果需要 legacy SQLite bootstrap 或自定义 env key 名，才额外创建 `portfolio.runtime.json`。示例：
 
 ```json
 {
   "option_positions": {
-    "sqlite_path": "output_shared/state/option_positions.sqlite3",
-    "sync_to_feishu": {
-      "enabled": false,
-      "receipt": {
-        "enabled": true,
-        "notify_applied": true,
-        "notify_failed": true,
-        "notify_conflict": true,
-        "notify_noop": false,
-        "notify_dry_run": false,
-        "retry_unconfirmed": true
-      }
+    "bootstrap_from_legacy_sqlite": {
+      "enabled": false
     }
   },
   "feishu": {
-    "app_id": "",
-    "app_secret": "",
+    "app_id_env": "OM_FEISHU_APP_ID",
+    "app_secret_env": "OM_FEISHU_APP_SECRET",
     "tables": {
-      "holdings": "",
-      "option_positions": ""
+      "holdings_env": "OM_FEISHU_HOLDINGS_TABLE"
     }
   }
 }
 ```
 
-- `option_positions.sync_to_feishu.enabled` 默认是 `false`。
-- `option_positions.sync_to_feishu.receipt.enabled` 默认是 `true`。`sync-feishu --apply` 发生 create/update/delete、失败或冲突时会发送任务级回执；全量 skip/noop 和 dry-run 默认不发，避免每日 cron 噪音。回执按业务日、同步范围、结果摘要和失败/冲突记录生成 `receipt_key`；已确认回执不重复发，未确认回执可按 `retry_unconfirmed` 重试。
 - `option_positions.auto_close.receipt.enabled` 默认是 `true`，只影响专用过期自动平仓入口写入后的本地通知回执，不写 Feishu 镜像。每日维护 cron 或人工重跑触发同一批平仓时，代码会通过 `receipt_key` 做日级幂等；已确认回执不重复发，未确认回执可按 `retry_unconfirmed` 重试。
-- 推荐在 `configs/user.common.json` 里把 runtime 开关覆盖成 `true`，再重新生成 `config.us.json` / `config.hk.json`。此时使用 `--config config.us.json` 的同步脚本，以及携带 runtime config 的本地持仓写入流程，才会真正写 Feishu `option_positions` 镜像表。
-- 直接只传 `--data-config` 的低层脚本仍读取 data config 里的同名开关，保持默认安全关闭。
-- 这个开关只影响“写远端镜像”；不改变本地 SQLite 主存储，也不关闭 Feishu bootstrap/read 侧行为。
+- 期权持仓的唯一主存储是本地 SQLite：`trade_events -> position_lots`。系统不再把期权持仓同步到 Feishu 多维表，也不再需要 `feishu.tables.option_positions`。
+- Feishu 仍可用于 `external_holdings` 账号读取普通持仓；这是 holdings 数据源，不是期权持仓 ledger 镜像。
 
 ### 可选方式（增加 external_holdings 账号）
 - 先执行：
@@ -602,73 +582,49 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 ./om-agent add-account --market us --account-label ext1 --account-type external_holdings --holdings-account "Feishu EXT"
 ```
 
-- 继续使用同一份 `secrets/portfolio.sqlite.json`。
-- 在该文件内补充：
-  - `feishu.app_id`
-  - `feishu.app_secret`
-  - `feishu.tables.holdings`
-- `config.us.json` / `config.hk.json` 里的 `portfolio.data_config` 默认仍指向 `secrets/portfolio.sqlite.json`。
+- 设置环境变量：
+  - `OM_FEISHU_APP_ID`
+  - `OM_FEISHU_APP_SECRET`
+  - `OM_FEISHU_HOLDINGS_TABLE=app_token/table_id`
+- 如果需要自定义 env key 名，才在 `portfolio.runtime.json` 内配置 `feishu.app_id_env` / `feishu.app_secret_env` / `feishu.tables.holdings_env`。
 
 示例：
 
 ```json
 {
-  "option_positions": {
-    "sqlite_path": "output_shared/state/option_positions.sqlite3",
-    "sync_to_feishu": {
-      "enabled": false
-    }
-  },
+  "option_positions": {},
   "feishu": {
-    "app_id": "cli_YOUR_APP_ID",
-    "app_secret": "YOUR_APP_SECRET",
+    "app_id_env": "OM_FEISHU_APP_ID",
+    "app_secret_env": "OM_FEISHU_APP_SECRET",
     "tables": {
-      "holdings": "app_token/table_id",
-      "option_positions": ""
+      "holdings_env": "OM_FEISHU_HOLDINGS_TABLE"
     }
   }
 }
 ```
 
-### 外部数据配置（旧部署也适用）
-- 如果你已经在仓外维护数据配置 JSON，也可以直接把 `portfolio.data_config` 指向该文件。
-- 或设置环境变量 `OM_DATA_CONFIG=/absolute/path/to/portfolio.sqlite.json`。
+### 外部数据配置（旧部署迁移）
+- 如果你已经在仓外维护数据配置 JSON，可以短期继续把 `portfolio.data_config` 指向该文件。
+- 或设置环境变量 `OM_DATA_CONFIG=/absolute/path/to/portfolio.runtime.json`。
 
 示例：
 
 ```json
 {
-  "option_positions": {
-    "sync_to_feishu": {
-      "enabled": false,
-      "receipt": {
-        "enabled": true,
-        "notify_applied": true,
-        "notify_failed": true,
-        "notify_conflict": true,
-        "notify_noop": false,
-        "notify_dry_run": false,
-        "retry_unconfirmed": true
-      }
-    }
-  },
+  "option_positions": {},
   "feishu": {
-    "app_id": "cli_YOUR_APP_ID",
-    "app_secret": "YOUR_APP_SECRET",
+    "app_id_env": "OM_FEISHU_APP_ID",
+    "app_secret_env": "OM_FEISHU_APP_SECRET",
     "tables": {
-      "holdings": "app_token/table_id",
-      "option_positions": "app_token/table_id"
+      "holdings_env": "OM_FEISHU_HOLDINGS_TABLE"
     }
   }
 }
 ```
 
-当前仓库已加入 `.gitignore`（忽略 `secrets/` 与 `output/`）。
+当前仓库不再要求 repo-local `secrets/` 作为正式运行依赖；真实密钥通过环境变量注入。
 
 > 注意：不要在聊天里发送 app_secret。
->
-> 如果你要把本地 `option_positions` 同步回 Feishu 多维表，推荐在 `configs/user.common.json` 里显式打开
-> `option_positions.sync_to_feishu.enabled=true`，再重新 `./om config build --market us|hk`；默认关闭，避免误写远端。
 >
 > `option_positions` bootstrap 的当前状态会出现在
 > `./om-agent run --tool healthcheck ...` 的 `option_positions_bootstrap`。

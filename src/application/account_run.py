@@ -58,6 +58,7 @@ class AccountRunRequest:
     prefetch_lock: Any | None = None
     prefetch_state: dict[str, Any] | None = None
     scan_decision_by_account: dict[str, dict[str, Any]] | None = None
+    repo_root: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -152,6 +153,7 @@ def run_one_account(
     fail_schema_validation: Callable[..., Any],
 ) -> AccountRunOutcome:
     acct = str(request.acct).strip()
+    repo_root = (request.repo_root or request.base).resolve()
     acct_out = request.accounts_root / acct
     acct_metrics = {
         "account": acct,
@@ -325,6 +327,7 @@ def run_one_account(
         prefetch_stats = prefetch_required_data(
             vpy=request.vpy,
             base=request.base,
+            repo_root=repo_root,
             cfg=cfg,
             shared_required=request.shared_required,
             force_refresh=bool(request.force_mode),
@@ -399,7 +402,7 @@ def run_one_account(
     t_pipe0 = monotonic()
     pipe = run_pipeline_script(
         vpy=request.vpy,
-        base=request.base,
+        base=repo_root,
         config=cfg_override,
         report_dir=acct_report_dir,
         state_dir=acct_state_dir,
@@ -407,7 +410,7 @@ def run_one_account(
         shared_context_dir=run_repo.get_run_state_dir(request.base, request.run_id),
         capture_output=True,
         text=True,
-        env=dict(os.environ, PYTHONPATH=str(request.base)),
+        env=dict(os.environ, PYTHONPATH=str(repo_root)),
     )
     acct_metrics["pipeline_ms"] = int((monotonic() - t_pipe0) * 1000)
     audit_fn(

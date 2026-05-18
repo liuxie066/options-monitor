@@ -15,11 +15,6 @@ import src.application.ledger.manual_trades as ledger_manual_trades
 from src.application.ledger.position_records import PositionLotRecord
 import src.application.ledger.repository as ledger_repository
 from src.application.ledger.store_resolution import resolve_ledger_store
-from src.application.ledger.sync_metadata import (
-    PositionLotSyncMetadataPatch,
-    build_position_lot_sync_metadata_patch,
-    decode_position_lot_sync_metadata_patch,
-)
 import src.application.ledger.writer as ledger_writer
 
 BASE = Path(__file__).resolve().parents[1]
@@ -63,8 +58,8 @@ def _write_data_config(
 
 def test_resolve_ledger_store_ignores_sqlite_path_for_standard_runtime_config(tmp_path: Path) -> None:
     runtime_root = tmp_path / "options-monitor-prod-runtime"
-    data_config = runtime_root / "secrets" / "portfolio.sqlite.json"
-    data_config.parent.mkdir(parents=True)
+    data_config = runtime_root / "portfolio.runtime.json"
+    data_config.parent.mkdir(parents=True, exist_ok=True)
     legacy_db = tmp_path / "wrong" / "option_positions.sqlite3"
     data_config.write_text(
         json.dumps({"option_positions": {"sqlite_path": str(legacy_db)}}, ensure_ascii=False, indent=2) + "\n",
@@ -74,7 +69,7 @@ def test_resolve_ledger_store_ignores_sqlite_path_for_standard_runtime_config(tm
     resolution = resolve_ledger_store(data_config)
 
     assert resolution.runtime_root == runtime_root.resolve()
-    assert resolution.runtime_root_source == "data_config_secrets_parent"
+    assert resolution.runtime_root_source == "data_config_parent"
     assert resolution.sqlite_path == (runtime_root / "output_shared" / "state" / "option_positions.sqlite3").resolve()
     assert resolution.sqlite_path_source == "runtime_root"
     assert resolution.legacy_sqlite_path == legacy_db.resolve()
@@ -856,94 +851,6 @@ def test_sqlite_repo_migrates_and_backfills_position_lot_contract_columns(tmp_pa
     assert row["expiration"] == 1781827200000
     assert row["strike"] == 100.0
     assert row["multiplier"] == 100.0
-
-
-def test_projection_does_not_treat_sync_metadata_as_canonical_state(tmp_path: Path) -> None:
-    from domain.domain.option_position_lots import OpenPositionCommand
-    from tests.ledger_legacy_helpers import project_position_lot_records
-
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        OpenPositionCommand(
-            broker="富途",
-            account="lx",
-            symbol="TSLA",
-            option_type="put",
-            side="short",
-            contracts=1,
-            currency="USD",
-            strike=100.0,
-            multiplier=100,
-            expiration_ymd="2026-06-19",
-            premium_per_share=1.23,
-            opened_at_ms=1000,
-        ),
-    )
-
-    lot = repo.list_position_lots()[0]
-    repo.update_position_lot_sync_metadata(
-        lot["record_id"],
-        build_position_lot_sync_metadata_patch(
-            feishu_record_id="rec_sync_1",
-            sync_hash="hash_sync_1",
-            synced_at_ms=9999,
-        ),
-    )
-
-    repo.replace_position_lots(project_position_lot_records(repo.list_trade_events()))
-
-    reprojection_fields = repo.get_position_lot_fields(lot["record_id"])
-    assert "feishu_record_id" not in reprojection_fields
-    assert "feishu_sync_hash" not in reprojection_fields
-    assert "feishu_last_synced_at_ms" not in reprojection_fields
-    assert reprojection_fields["source_event_id"].startswith("manual-open-")
-    assert reprojection_fields["contracts_open"] == 1
-    assert reprojection_fields["status"] == "open"
-
-
-def test_rebuild_position_lots_from_trade_events_preserves_sync_metadata(tmp_path: Path) -> None:
-    from domain.domain.option_position_lots import OpenPositionCommand
-
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        OpenPositionCommand(
-            broker="富途",
-            account="lx",
-            symbol="TSLA",
-            option_type="put",
-            side="short",
-            contracts=1,
-            currency="USD",
-            strike=100.0,
-            multiplier=100,
-            expiration_ymd="2026-06-19",
-            premium_per_share=1.23,
-            opened_at_ms=1000,
-        ),
-    )
-
-    lot = repo.list_position_lots()[0]
-    repo.update_position_lot_sync_metadata(
-        lot["record_id"],
-        build_position_lot_sync_metadata_patch(
-            feishu_record_id="rec_sync_1",
-            sync_hash="hash_sync_1",
-            synced_at_ms=9999,
-        ),
-    )
-
-    result = ledger_writer.rebuild_position_lots_from_trade_events(repo)
-
-    rebuilt_fields = repo.get_position_lot_fields(lot["record_id"])
-    assert rebuilt_fields["feishu_record_id"] == "rec_sync_1"
-    assert rebuilt_fields["feishu_sync_hash"] == "hash_sync_1"
-    assert rebuilt_fields["feishu_last_synced_at_ms"] == 9999
-    assert rebuilt_fields["source_event_id"].startswith("manual-open-")
-    assert result["trade_event_count"] == 1
-    assert result["position_lot_count"] == 1
-    assert result["preserved_sync_meta_record_count"] == 1
 
 
 def test_rebuild_position_lots_applies_legacy_manual_close_to_bootstrap_seed(tmp_path: Path) -> None:
@@ -2378,13 +2285,6 @@ def test_load_option_positions_repo_ignores_non_object_feishu_config_when_retire
     assert repo.bootstrap_status == "sqlite_only_feishu_bootstrap_retired"
 
 
-def test_option_positions_sync_to_feishu_enabled_defaults_false(tmp_path: Path) -> None:
-
-    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
-
-    assert ledger_repository.option_positions_sync_to_feishu_enabled(data_config) is False
-
-
 def test_option_positions_bootstrap_from_feishu_enabled_defaults_false(tmp_path: Path) -> None:
 
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
@@ -2465,95 +2365,6 @@ def test_option_positions_bootstrap_from_legacy_sqlite_enabled_rejects_non_boole
         match="data config option_positions.bootstrap_from_legacy_sqlite.enabled must be a boolean",
     ):
         ledger_repository.option_positions_bootstrap_from_legacy_sqlite_enabled(data_config)
-
-
-def test_option_positions_sync_to_feishu_enabled_reads_boolean(tmp_path: Path) -> None:
-
-    data_config = tmp_path / "data.json"
-    data_config.write_text(
-        json.dumps(
-            {
-                "option_positions": {
-                    "sqlite_path": str(tmp_path / "option_positions.sqlite3"),
-                    "sync_to_feishu": {"enabled": True},
-                }
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-    assert ledger_repository.option_positions_sync_to_feishu_enabled(data_config) is True
-
-
-def test_option_positions_sync_to_feishu_enabled_rejects_non_boolean(tmp_path: Path) -> None:
-
-    data_config = tmp_path / "data.json"
-    data_config.write_text(
-        json.dumps(
-            {
-                "option_positions": {
-                    "sqlite_path": str(tmp_path / "option_positions.sqlite3"),
-                    "sync_to_feishu": {"enabled": "yes"},
-                }
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-    with pytest.raises(SystemExit, match="data config option_positions.sync_to_feishu.enabled must be a boolean"):
-        ledger_repository.option_positions_sync_to_feishu_enabled(data_config)
-
-
-def test_update_position_lot_sync_metadata_updates_single_row_and_sync_metadata(tmp_path: Path) -> None:
-    from domain.domain.option_position_lots import OpenPositionCommand
-
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        OpenPositionCommand(
-            broker="富途",
-            account="lx",
-            symbol="TSLA",
-            option_type="put",
-            side="short",
-            contracts=1,
-            currency="USD",
-            strike=100.0,
-            multiplier=100,
-            expiration_ymd="2026-06-19",
-            premium_per_share=1.23,
-            opened_at_ms=1000,
-        ),
-    )
-
-    lot = repo.list_position_lots()[0]
-    repo.update_position_lot_sync_metadata(
-        lot["record_id"],
-        build_position_lot_sync_metadata_patch(
-            feishu_record_id="rec_test_1",
-            sync_hash="hash_1",
-            synced_at_ms=2222,
-        ),
-    )
-
-    updated = repo.get_position_lot_fields(lot["record_id"])
-    assert updated["feishu_record_id"] == "rec_test_1"
-    assert updated["feishu_sync_hash"] == "hash_1"
-    assert updated["feishu_last_synced_at_ms"] == 2222
-    assert updated["source_event_id"] == lot["fields"]["source_event_id"]
-    with repo._connect() as conn:  # type: ignore[attr-defined]
-        row = conn.execute(
-            "SELECT source_event_id FROM position_lots WHERE record_id = ?",
-            (lot["record_id"],),
-        ).fetchone()
-    assert row is not None
-    assert row["source_event_id"] == lot["fields"]["source_event_id"]
 
 
 def test_replace_position_lots_rejects_incomplete_option_lots_atomically(tmp_path: Path) -> None:
@@ -2641,97 +2452,6 @@ def test_replace_position_lots_requires_typed_position_lot_records(tmp_path: Pat
         repo.replace_position_lots([raw_record])
 
     assert repo.list_position_lots() == []
-
-
-def test_update_position_lot_sync_metadata_requires_typed_patch(tmp_path: Path) -> None:
-    from domain.domain.option_position_lots import OpenPositionCommand
-
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        OpenPositionCommand(
-            broker="富途",
-            account="lx",
-            symbol="0700.HK",
-            option_type="put",
-            side="short",
-            contracts=1,
-            currency="HKD",
-            strike=480.0,
-            multiplier=100,
-            expiration_ymd="2026-04-29",
-            premium_per_share=3.93,
-            opened_at_ms=1000,
-        ),
-    )
-
-    lot = repo.list_position_lots()[0]
-    raw_business_patch: Any = {
-        "contracts_open": 0,
-        "status": "close",
-    }
-    with pytest.raises(TypeError, match="requires PositionLotSyncMetadataPatch"):
-        repo.update_position_lot_sync_metadata(lot["record_id"], raw_business_patch)
-
-    refreshed = repo.get_position_lot_fields(lot["record_id"])
-    assert refreshed["contracts_open"] == lot["fields"]["contracts_open"]
-    assert refreshed["status"] == lot["fields"]["status"]
-
-
-def test_decode_position_lot_sync_metadata_patch_rejects_business_fields() -> None:
-    with pytest.raises(ValueError, match="unsupported fields: contracts_open, status"):
-        decode_position_lot_sync_metadata_patch(
-            {
-                "contracts_open": 0,
-                "status": "close",
-            }
-        )
-
-
-def test_update_position_lot_sync_metadata_can_clear_metadata(tmp_path: Path) -> None:
-    from domain.domain.option_position_lots import OpenPositionCommand
-
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
-    ledger_manual_trades.persist_manual_open_event(
-        repo,
-        OpenPositionCommand(
-            broker="富途",
-            account="lx",
-            symbol="0700.HK",
-            option_type="put",
-            side="short",
-            contracts=1,
-            currency="HKD",
-            strike=480.0,
-            multiplier=100,
-            expiration_ymd="2026-04-29",
-            premium_per_share=3.93,
-            opened_at_ms=1000,
-        ),
-    )
-
-    lot = repo.list_position_lots()[0]
-    repo.update_position_lot_sync_metadata(
-        lot["record_id"],
-        build_position_lot_sync_metadata_patch(
-            feishu_record_id="rec_sync_1",
-            sync_hash="hash_sync_1",
-            synced_at_ms=9999,
-        ),
-    )
-    repo.update_position_lot_sync_metadata(
-        lot["record_id"],
-        PositionLotSyncMetadataPatch(
-            feishu_record_id=None,
-            feishu_sync_hash=None,
-            feishu_last_synced_at_ms=None,
-        ),
-    )
-
-    refreshed = repo.get_position_lot_fields(lot["record_id"])
-    assert "feishu_record_id" not in refreshed
-    assert "feishu_sync_hash" not in refreshed
-    assert "feishu_last_synced_at_ms" not in refreshed
 
 
 def test_projection_replay_fixture_closes_lot_and_excludes_it_from_open_context(tmp_path: Path) -> None:

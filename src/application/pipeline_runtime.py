@@ -16,16 +16,18 @@ from src.application.pipeline_reporting import (
 )
 from src.infrastructure.logging_config import get_logger
 from src.application.opend_fetch_config import opend_fetch_kwargs
+from src.application.pipeline_symbol import process_symbol
+from src.application.runtime_paths import resolve_runtime_root
 
 from domain.storage.repositories import report_repo
 
 
 LOG = get_logger("run_pipeline")
-RUNTIME_MODE = "dev"
-IS_SCHEDULED = False
-STAGE = "all"
-STAGE_ONLY: str | None = None
-SHARED_REQUIRED_DATA: str | None = None
+runtime_mode = "dev"
+is_scheduled = False
+stage = "all"
+stage_only: str | None = None
+shared_required_data: str | None = None
 
 
 def log(msg: str) -> None:
@@ -63,15 +65,15 @@ def _want(step: str) -> bool:
     if not s:
         return False
 
-    if STAGE_ONLY is not None:
+    if stage_only is not None:
         if s == "alert":
-            return STAGE_ONLY == "alert"
+            return stage_only == "alert"
         if s == "notify":
-            return STAGE_ONLY == "notify"
+            return stage_only == "notify"
         return False
 
     order = {"fetch": 0, "scan": 1, "alert": 2, "notify": 3, "all": 3}
-    cur = order.get(str(STAGE or "all"), 3)
+    cur = order.get(str(stage or "all"), 3)
     need = order.get(s)
     if need is None:
         return False
@@ -79,23 +81,24 @@ def _want(step: str) -> bool:
 
 
 def main(argv: list[str] | None = None) -> int:
-    global RUNTIME_MODE, IS_SCHEDULED, STAGE, STAGE_ONLY, SHARED_REQUIRED_DATA
+    global runtime_mode, is_scheduled, stage, stage_only, shared_required_data
 
     args = build_parser().parse_args(argv)
 
-    RUNTIME_MODE = str(args.mode)
-    IS_SCHEDULED = RUNTIME_MODE == "scheduled"
-    STAGE = str(args.stage)
-    STAGE_ONLY = str(args.stage_only) if args.stage_only else None
-    SHARED_REQUIRED_DATA = str(args.shared_required_data) if getattr(args, "shared_required_data", None) else None
+    runtime_mode = str(args.mode)
+    is_scheduled = runtime_mode == "scheduled"
+    stage = str(args.stage)
+    stage_only = str(args.stage_only) if args.stage_only else None
+    shared_required_data = str(args.shared_required_data) if getattr(args, "shared_required_data", None) else None
 
-    base = Path(__file__).resolve().parents[2]
+    repo_root = Path(__file__).resolve().parents[2]
+    runtime_root = resolve_runtime_root(repo_root=repo_root).runtime_root
     cfg_path = Path(args.config)
     if not cfg_path.is_absolute():
-        cfg_path = (base / cfg_path).resolve()
+        cfg_path = (repo_root / cfg_path).resolve()
 
     report_dir, state_dir = report_repo.prepare_dirs(
-        base=base,
+        base=runtime_root,
         report_dir=getattr(args, "report_dir", None),
         state_dir=getattr(args, "state_dir", None),
     )
@@ -106,7 +109,7 @@ def main(argv: list[str] | None = None) -> int:
             from domain.domain.fetch_source import is_futu_fetch_source
             from src.infrastructure import multiplier_cache
 
-            cache_path = multiplier_cache.default_cache_path(base)
+            cache_path = multiplier_cache.default_cache_path(runtime_root)
             cfg0 = json.loads(cfg_path.read_text(encoding="utf-8"))
             opend_kwargs = opend_fetch_kwargs(cfg0)
             syms = [
@@ -121,7 +124,7 @@ def main(argv: list[str] | None = None) -> int:
                 host = fetch.get("host") or "127.0.0.1"
                 port = int(fetch.get("port") or 11111)
                 refreshed = multiplier_cache.refresh_via_opend(
-                    repo_base=base,
+                    repo_base=runtime_root,
                     symbol=sym,
                     host=str(host),
                     port=int(port),
@@ -139,9 +142,9 @@ def main(argv: list[str] | None = None) -> int:
             pass
 
     cfg = load_runtime_pipeline_config(
-        base=base,
+        base=repo_root,
         config_path=cfg_path,
-        is_scheduled=IS_SCHEDULED,
+        is_scheduled=is_scheduled,
         log=log,
         state_dir=state_dir,
     )
@@ -156,12 +159,12 @@ def main(argv: list[str] | None = None) -> int:
         symbol_timeout_sec = int(runtime.get("symbol_timeout_sec", 120))
         portfolio_timeout_sec = int(runtime.get("portfolio_timeout_sec", 60))
 
-        if STAGE_ONLY is not None:
+        if stage_only is not None:
             from src.application.pipeline_alert_steps import run_stage_only_alert_notify
 
             run_stage_only_alert_notify(
                 report_dir=report_dir,
-                stage_only=STAGE_ONLY,
+                stage_only=stage_only,
                 want=_want,
                 log=log,
                 render_style=render_style,
@@ -172,17 +175,17 @@ def main(argv: list[str] | None = None) -> int:
 
         from src.application.pipeline_watchlist import run_watchlist_pipeline_default
 
-        required_data_dir = Path(SHARED_REQUIRED_DATA).resolve() if SHARED_REQUIRED_DATA else (base / "output").resolve()
+        required_data_dir = Path(shared_required_data).resolve() if shared_required_data else (runtime_root / "output").resolve()
 
         summary_rows = run_watchlist_pipeline_default(
             py=py,
-            base=base,
+            base=runtime_root,
             cfg=cfg,
             report_dir=report_dir,
             state_dir=state_dir,
             shared_state_dir=shared_context_dir,
             required_data_dir=required_data_dir,
-            is_scheduled=IS_SCHEDULED,
+            is_scheduled=is_scheduled,
             top_n=top_n,
             symbol_timeout_sec=symbol_timeout_sec,
             portfolio_timeout_sec=portfolio_timeout_sec,
@@ -193,18 +196,18 @@ def main(argv: list[str] | None = None) -> int:
             want_fn=_want,
         )
 
-        symbols = [r.get("symbol") for r in summary_rows if r.get("symbol")]
+        symbols = [str(r.get("symbol")) for r in summary_rows if r.get("symbol")]
 
-        if (STAGE_ONLY is None) and (not _want("scan")):
-            log(f"[INFO] stage={STAGE}: fetch done")
+        if (stage_only is None) and (not _want("scan")):
+            log(f"[INFO] stage={stage}: fetch done")
             return 0
 
-        build_symbols_summary(summary_rows, report_dir, is_scheduled=IS_SCHEDULED)
+        build_symbols_summary(summary_rows, report_dir, is_scheduled=is_scheduled)
 
-        if not IS_SCHEDULED:
+        if not is_scheduled:
             build_symbols_digest(symbols, report_dir)
 
-        changes_path = Path("/dev/null") if IS_SCHEDULED else (report_dir / "symbols_changes.txt").resolve()
+        changes_path = Path("/dev/null") if is_scheduled else (report_dir / "symbols_changes.txt").resolve()
         policy_json: str | None = None
         try:
             policy = cfg.get("alert_policy")
@@ -230,9 +233,9 @@ def main(argv: list[str] | None = None) -> int:
                 summary_input=(report_dir / "symbols_summary.csv").resolve(),
                 output=(report_dir / "symbols_alerts.txt").resolve(),
                 changes_output=changes_path,
-                previous_summary=((state_dir / "symbols_summary_prev.csv").resolve() if not IS_SCHEDULED else None),
+                previous_summary=((state_dir / "symbols_summary_prev.csv").resolve() if not is_scheduled else None),
                 state_dir=state_dir,
-                update_snapshot=(not IS_SCHEDULED),
+                update_snapshot=(not is_scheduled),
                 policy_json=policy_json,
             )
 
@@ -244,7 +247,7 @@ def main(argv: list[str] | None = None) -> int:
                 render_style=render_style,
             )
 
-            if IS_SCHEDULED and (report_dir == (base / "output" / "reports").resolve()):
+            if is_scheduled and (report_dir == (runtime_root / "output" / "reports").resolve()):
                 try:
                     import glob
 
@@ -278,7 +281,7 @@ def main(argv: list[str] | None = None) -> int:
                     pass
 
         portfolio_cfg = cfg.get("portfolio", {}) or {}
-        data_config = str(resolve_data_config_path(base=base, data_config=portfolio_cfg.get("data_config")))
+        data_config = str(resolve_data_config_path(base=runtime_root, data_config=portfolio_cfg.get("data_config")))
         broker = str(portfolio_cfg.get("broker") or "富途")
 
         try:
@@ -286,9 +289,9 @@ def main(argv: list[str] | None = None) -> int:
         except Exception:
             include_cash_footer = True
 
-        if include_cash_footer and (not IS_SCHEDULED):
+        if include_cash_footer and (not is_scheduled):
             append_cash_summary_footer(
-                base=base,
+                base=runtime_root,
                 notification=report_dir / "symbols_notification.txt",
                 config=cfg_path,
                 data_config=data_config,
@@ -300,7 +303,7 @@ def main(argv: list[str] | None = None) -> int:
             log("[INFO] notifications enabled in config; pipeline prepared notification text for sending.")
         else:
             log("[INFO] notifications disabled; generated notification text only.")
-        if not IS_SCHEDULED:
+        if not is_scheduled:
             print("\n[DONE] Symbols pipeline finished")
             print(f"- {report_dir}/symbols_summary.csv")
             print(f"- {report_dir}/symbols_alerts.txt")
@@ -310,7 +313,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     top_n = cfg.get("outputs", {}).get("top_n_alerts", 3)
-    process_symbol(py, base, cfg, top_n, report_dir=report_dir, state_dir=state_dir, is_scheduled=IS_SCHEDULED)
+    process_symbol(py, runtime_root, cfg, top_n, report_dir=report_dir, state_dir=state_dir, is_scheduled=is_scheduled)
     print("\n[DONE] Single-symbol pipeline finished")
     print(f"- {report_dir}/{{symbol}}_sell_put_candidates*.csv / alerts.txt")
     print(f"- {report_dir}/{{symbol}}_sell_call_candidates.csv / alerts.txt")

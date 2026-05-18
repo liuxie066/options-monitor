@@ -28,7 +28,6 @@ from src.application.ledger.api import (
     refresh_position_lot_projection,
 )
 from src.application.positions.auto_close import main as run_option_positions_auto_close
-from src.application.positions.feishu_sync import main as run_option_positions_feishu_sync
 from src.application.positions.workflows import (
     ManualCloseMatchError,
     execute_manual_adjust,
@@ -72,7 +71,7 @@ def _store_inspect_data_config(args: argparse.Namespace, *, base: Path) -> tuple
         if not data_path.is_absolute():
             data_path = (config_path.parent / data_path).resolve()
         return data_path, config_path
-    return (config_path.parent / "secrets" / "portfolio.sqlite.json").resolve(), config_path
+    return (config_path.parent / "portfolio.runtime.json").resolve(), config_path
 
 
 def _print_store_inspect_text(payload: dict[str, object]) -> None:
@@ -175,7 +174,6 @@ def main(argv: list[str] | None = None) -> int:
 
     p_inspect = sub.add_parser('inspect', help='inspect projected lot state and related trade events')
     p_inspect.add_argument('--record-id', default=None)
-    p_inspect.add_argument('--feishu-record-id', default=None)
     p_inspect.add_argument('--account', default=None)
     p_inspect.add_argument('--symbol', default=None)
     p_inspect.add_argument('--option-type', default=None, choices=['put', 'call'])
@@ -229,23 +227,6 @@ def main(argv: list[str] | None = None) -> int:
     p_monthly.add_argument('--month', default=None, help='YYYY-MM')
     p_monthly.add_argument('--format', choices=['text', 'json'], default='text')
     p_monthly.add_argument('--include-rows', action='store_true')
-
-    p_sync_feishu = sub.add_parser('sync-feishu', help='sync option positions to Feishu')
-    p_sync_feishu.add_argument("--config", dest="sync_config", default=None, help="runtime config path; when provided, portfolio.data_config and runtime sync switch are used")
-    p_sync_feishu.add_argument("--data-config", dest="sync_data_config", default=None, help="portfolio data config path; auto-resolves when omitted")
-    p_sync_feishu.add_argument("--apply", action="store_true", help="apply changes to Feishu and persist local sync metadata")
-    p_sync_feishu.add_argument("--dry-run", action="store_true", help="preview actions without writing to Feishu")
-    p_sync_feishu.add_argument("--limit", type=int, default=None, help="maximum number of local lots to inspect")
-    p_sync_feishu.add_argument("--only-record-id", default=None, help="sync a single local record_id")
-    p_sync_feishu.add_argument("--only-open", action="store_true", help="only sync open positions")
-    p_sync_feishu.add_argument("--since-updated-ms", type=int, default=None, help="only include rows last synced before this ms watermark")
-    p_sync_feishu.add_argument(
-        "--prune-remote-missing-local",
-        action="store_true",
-        help="delete remote rows whose local_record_id no longer exists locally; disabled by default",
-    )
-    p_sync_feishu.add_argument("--no-send", action="store_true", help="do not send sync receipt notifications")
-    p_sync_feishu.add_argument("--verbose", action="store_true", help="print payload details")
 
     p_auto_close = sub.add_parser('auto-close-expired', help='auto-close expired option position lots')
     p_auto_close.add_argument("--config", dest="auto_close_config", default=None, help="runtime config path; provides accounts and portfolio.data_config")
@@ -301,35 +282,6 @@ def main(argv: list[str] | None = None) -> int:
         if args.quiet:
             auto_close_argv.append("--quiet")
         return int(run_option_positions_auto_close(auto_close_argv))
-
-    if args.cmd == 'sync-feishu':
-        sync_argv: list[str] = []
-        if args.sync_config:
-            sync_argv.extend(["--config", str(args.sync_config)])
-        if args.sync_data_config:
-            sync_argv.extend(["--data-config", str(args.sync_data_config)])
-        elif args.data_config:
-            sync_argv.extend(["--data-config", str(args.data_config)])
-        if args.apply:
-            sync_argv.append("--apply")
-        if args.dry_run:
-            sync_argv.append("--dry-run")
-        if args.limit is not None:
-            sync_argv.extend(["--limit", str(args.limit)])
-        if args.only_record_id:
-            sync_argv.extend(["--only-record-id", str(args.only_record_id)])
-        if args.only_open:
-            sync_argv.append("--only-open")
-        if args.since_updated_ms is not None:
-            sync_argv.extend(["--since-updated-ms", str(args.since_updated_ms)])
-        if args.prune_remote_missing_local:
-            sync_argv.append("--prune-remote-missing-local")
-        if args.no_send:
-            sync_argv.append("--no-send")
-        if args.verbose:
-            sync_argv.append("--verbose")
-        run_option_positions_feishu_sync(sync_argv)
-        return 0
 
     _data_config, repo = resolve_option_positions_repo(base=base, data_config=args.data_config)
     state_base = Path(str(_data_config)).resolve().parent
@@ -528,22 +480,20 @@ def main(argv: list[str] | None = None) -> int:
             f"position_lots={result.get('position_lot_count')} "
             f"diagnostics={result.get('projection_diagnostic_count')} "
             f"unmatched_explicit_close={result.get('unmatched_explicit_close_count')} "
-            f"unmatched_heuristic_close={result.get('unmatched_heuristic_close_count')} "
-            f"preserved_sync_meta={result.get('preserved_sync_meta_record_count')}"
+            f"unmatched_heuristic_close={result.get('unmatched_heuristic_close_count')}"
         )
         return 0
 
     if args.cmd == 'inspect':
         if not any(
             value is not None and str(value).strip()
-            for value in (args.record_id, args.feishu_record_id, args.account, args.symbol, args.option_type, args.exp)
+            for value in (args.record_id, args.account, args.symbol, args.option_type, args.exp)
         ) and args.strike is None:
             raise SystemExit("inspect requires at least one selector")
         payload = inspect_projection_state(
             repo,
             base=state_base,
             record_id=args.record_id,
-            feishu_record_id=args.feishu_record_id,
             account=args.account,
             symbol=args.symbol,
             option_type=args.option_type,
@@ -594,7 +544,6 @@ def main(argv: list[str] | None = None) -> int:
             f"via={result.get('event_id')} "
             f"position_lots={result.get('position_lot_count')}"
         )
-        print("[WARN] Feishu mirror rows are not auto-deleted by void-event; rerun review/sync before trusting remote mirror.")
         return 0
 
     if args.cmd == 'adjust-lot':

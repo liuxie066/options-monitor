@@ -5,12 +5,13 @@ import shutil
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.ledger.api import ledger_store_payload
 from src.application.runtime_config_paths import resolve_data_config_ref
 from src.application.runtime_trigger_context import build_trigger_context
+from src.application.service_deploy import service_status_from_profile
 from domain.domain.multi_tick import (
     OPENCLAW_NOTIFICATION_PROVIDER,
     is_supported_notification_provider,
@@ -142,24 +143,6 @@ def _auto_close_receipt_summary(maintenance_json: dict[str, Any] | Any) -> dict[
     }
 
 
-def _option_positions_feishu_sync_receipt_summary(sync_json: dict[str, Any] | Any) -> dict[str, Any] | None:
-    if not isinstance(sync_json, dict):
-        return None
-    receipt = sync_json.get("receipt")
-    if not isinstance(receipt, dict):
-        return None
-    return {
-        "status": receipt.get("status"),
-        "reason": receipt.get("reason"),
-        "delivery_confirmed": bool(receipt.get("delivery_confirmed")),
-        "message_id": receipt.get("message_id"),
-        "error_code": receipt.get("error_code"),
-        "attempt_count": receipt.get("attempt_count"),
-        "receipt_key": receipt.get("receipt_key"),
-        "updated_at": receipt.get("updated_at"),
-    }
-
-
 def _ledger_context_summary(context_info: dict[str, Any] | Any) -> dict[str, Any]:
     if not isinstance(context_info, dict):
         return {"available": False, "status": "unknown", "fail_closed": False}
@@ -267,6 +250,15 @@ def _merge_openclaw_profile(payload: dict[str, Any], *, base: Path) -> tuple[dic
     profile = _read_json_object(profile_path)
     paths_raw = profile.get("paths")
     paths: dict[str, Any] = paths_raw if isinstance(paths_raw, dict) else {}
+    config_paths_raw = profile.get("config_paths")
+    config_paths: dict[str, Any] = config_paths_raw if isinstance(config_paths_raw, dict) else {}
+    if "config_path" not in merged and "config_key" not in merged and config_paths:
+        profile_markets = profile.get("markets")
+        market = "us"
+        if isinstance(profile_markets, list) and profile_markets:
+            market = str(profile_markets[0]).strip().lower() or "us"
+        if market in config_paths:
+            merged["config_path"] = config_paths[market]
     for key in ("config_key", "config_path", "accounts", "max_notification_chars", "max_run_age_minutes"):
         if key not in merged and key in profile:
             merged[key] = profile[key]
@@ -283,11 +275,34 @@ def _merge_openclaw_profile(payload: dict[str, Any], *, base: Path) -> tuple[dic
         merged["cron_jobs"] = profile["cron_jobs"]
     if "include_cron_status" not in merged and "include_cron_status" in profile:
         merged["include_cron_status"] = profile["include_cron_status"]
+    for key in ("service_provider", "repo_root", "runtime_root", "services", "include_service_status"):
+        if key not in merged and key in profile:
+            merged[key] = profile[key]
     return merged, {
         "path": _relative_path(profile_path, base=base),
         "loaded": True,
         "cron_job_count": len(profile.get("cron_jobs") or []) if isinstance(profile.get("cron_jobs"), list) else 0,
+        "service_provider": profile.get("service_provider"),
+        "service_count": len(profile.get("services") or []) if isinstance(profile.get("services"), list) else 0,
     }
+
+
+def _service_profile_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    services = payload.get("services")
+    profile = {
+        "service_provider": payload.get("service_provider") or payload.get("provider"),
+        "repo_root": payload.get("repo_root"),
+        "runtime_root": payload.get("runtime_root"),
+        "services": services if isinstance(services, list) else [],
+    }
+    if not profile.get("service_provider") and not profile.get("services"):
+        return {"loaded": False}
+    summary = service_status_from_profile(
+        profile,
+        include_status=bool(payload.get("include_service_status", False)),
+    )
+    summary["loaded"] = True
+    return summary
 
 
 def _parse_utc(value: Any) -> datetime | None:
@@ -870,14 +885,15 @@ def runtime_status_tool(
         config_key=payload.get("config_key"),
         config_path=payload.get("config_path"),
     )
-    portfolio_cfg = cfg.get("portfolio") if isinstance(cfg.get("portfolio"), dict) else {}
+    portfolio_raw = cfg.get("portfolio")
+    portfolio_cfg = cast(dict[str, Any], portfolio_raw) if isinstance(portfolio_raw, dict) else {}
     data_config_ref = resolve_data_config_ref(payload, portfolio_cfg)
     if data_config_ref:
         data_config_path = Path(data_config_ref).expanduser()
         if not data_config_path.is_absolute():
             data_config_path = (config_path.parent / data_config_path).resolve()
     else:
-        data_config_path = (config_path.parent / "secrets" / "portfolio.sqlite.json").resolve()
+        data_config_path = (config_path.parent / "portfolio.runtime.json").resolve()
     ledger_store = ledger_store_payload(data_config_path)
     accounts = _accounts_from_runtime(
         payload,
@@ -922,16 +938,6 @@ def runtime_status_tool(
     )
     legacy_last_run = _json_file_info(
         state_dir / "last_run.json",
-        base=base,
-        read_json_object_or_empty=read_json_object_or_empty,
-    )
-    option_positions_feishu_sync_last_run = _json_file_info(
-        shared_state_dir / "option_positions_feishu_sync.json",
-        base=base,
-        read_json_object_or_empty=read_json_object_or_empty,
-    )
-    option_positions_feishu_sync_receipts = _json_file_info(
-        shared_state_dir / "option_positions_feishu_sync_receipts.json",
         base=base,
         read_json_object_or_empty=read_json_object_or_empty,
     )
@@ -1096,11 +1102,6 @@ def runtime_status_tool(
             "notification": notification,
         },
         "trade_intake": trade_intake,
-        "option_positions_feishu_sync": {
-            "last_run": option_positions_feishu_sync_last_run,
-            "receipts": option_positions_feishu_sync_receipts,
-            "receipt": _option_positions_feishu_sync_receipt_summary(option_positions_feishu_sync_last_run.get("json")),
-        },
         "option_positions_context": {
             "last": option_positions_context,
             "ledger": ledger_context_summary,
@@ -1117,6 +1118,7 @@ def runtime_status_tool(
         "account_summary": {},
         "freshness": {},
         "openclaw_profile": profile_meta or {"loaded": False},
+        "service_profile": _service_profile_summary(payload),
         "summary": {
             "ok": not warnings,
             "warning_count": len(warnings),
@@ -1132,14 +1134,6 @@ def runtime_status_tool(
     data["summary"]["prefetch_available"] = prefetch_summary.get("available")
     data["summary"]["prefetch_bottleneck"] = prefetch_summary.get("primary_bottleneck")
     data["summary"]["latest_scanned_run_prefetch_available"] = latest_scanned_prefetch_summary.get("available")
-    sync_last_run_json = option_positions_feishu_sync_last_run.get("json")
-    sync_last_run_payload: dict[str, Any] = sync_last_run_json if isinstance(sync_last_run_json, dict) else {}
-    data["summary"]["option_positions_feishu_sync_status"] = sync_last_run_payload.get("status")
-    data["summary"]["option_positions_feishu_sync_receipt_status"] = (
-        data["option_positions_feishu_sync"]["receipt"].get("status")
-        if isinstance(data["option_positions_feishu_sync"].get("receipt"), dict)
-        else None
-    )
     data["summary"]["latest_scanned_run_prefetch_bottleneck"] = latest_scanned_prefetch_summary.get("primary_bottleneck")
     data["summary"]["ledger_status"] = ledger_context_summary.get("status")
     data["summary"]["ledger_fail_closed"] = bool(ledger_context_summary.get("fail_closed"))

@@ -180,72 +180,6 @@ def test_ai_cofunder_preserves_scheduler_run_id_and_downgrades_confirmed_stale_r
     assert "scheduler evidence points at the latest runtime run" in stale["message"]
 
 
-def test_ai_cofunder_includes_feishu_sync_problem_details(tmp_path: Path) -> None:
-    from src.application.ai_cofunder.service import ai_cofunder_tool
-
-    runtime_data = _runtime_status_data()
-    runtime_data["summary"]["option_positions_feishu_sync_status"] = "partial_failed"
-    runtime_data["summary"]["option_positions_feishu_sync_receipt_status"] = "sent"
-    runtime_data["option_positions_feishu_sync"] = {
-        "last_run": {
-            "json": {
-                "status": "partial_failed",
-                "summary": {"create": 0, "update": 2, "delete": 0, "skip": 1, "conflict": 0, "failed": 1},
-                "rows": [
-                    {"record_id": "lot_1", "symbol": "0700.HK", "option_type": "put", "side": "short", "action": "update"},
-                    {
-                        "record_id": "lot_2",
-                        "symbol": "9992.HK",
-                        "option_type": "put",
-                        "side": "short",
-                        "action": "failed",
-                        "reason": "bitable_update_failed: field mismatch",
-                    },
-                ],
-            }
-        },
-        "receipt": {"status": "sent", "reason": "partial_failed", "delivery_confirmed": True},
-    }
-
-    def _runtime_status(_payload):
-        return runtime_data, [], {}
-
-    data, _warnings, _meta = ai_cofunder_tool(
-        {
-            "config_path": str(tmp_path / "config.us.json"),
-            "write_outputs": False,
-            "scheduler_evidence": {
-                "provider": "cron",
-                "job_name": "hk-tick",
-                "last_triggered_at": "2026-05-16T01:00:00Z",
-                "last_status": "success",
-                "last_exit_code": 0,
-            },
-        },
-        runtime_status_tool_fn=_runtime_status,
-        **_tool_kwargs(tmp_path),
-    )
-
-    ledger_sync = data["bundle"]["ledger_quality"]["position_summary"]["option_positions_feishu_sync"]
-    findings = data["bundle"]["runtime_quality"]["findings"]
-    assert data["status"] == "warn"
-    assert data["category"] == "position_maintenance_issue"
-    assert ledger_sync["summary"]["failed"] == 1
-    assert ledger_sync["receipt"]["status"] == "sent"
-    assert ledger_sync["problem_rows"] == [
-        {
-            "record_id": "lot_2",
-            "symbol": "9992.HK",
-            "option_type": "put",
-            "side": "short",
-            "action": "failed",
-            "reason": "bitable_update_failed: field mismatch",
-        }
-    ]
-    assert any(item["code"] == "OPTION_POSITION_SYNC_ISSUE" for item in findings)
-    assert "- feishu_sync_failed: 1" in data["handoff_markdown"]
-
-
 def test_ai_cofunder_collects_strategy_evidence_for_handoff(tmp_path: Path) -> None:
     from src.application.ai_cofunder.service import ai_cofunder_tool
 
@@ -254,7 +188,11 @@ def test_ai_cofunder_collects_strategy_evidence_for_handoff(tmp_path: Path) -> N
     account_report_dir = report_dir / "accounts" / "lx"
     account_report_dir.mkdir(parents=True)
     (account_report_dir / "nvda_sell_put_candidates_labeled.csv").write_text(
-        "symbol,option_type,dte,delta,annualized_net_return,net_income\nNVDA,put,30,-0.2,0.12,120\n",
+        (
+            "symbol,account,option_type,dte,delta,strike,spot,annualized_net_return_on_cash_basis,"
+            "net_income,otm_pct,spread_ratio,open_interest,volume,cash_required_usd,cash_free_usd\n"
+            "NVDA,lx,put,30,-0.2,140,150,0.12,120,0.066667,0.12,500,20,14000,28000\n"
+        ),
         encoding="utf-8",
     )
     (account_report_dir / "nvda_sell_put_candidates_reject_log.csv").write_text(
@@ -298,18 +236,30 @@ def test_ai_cofunder_collects_strategy_evidence_for_handoff(tmp_path: Path) -> N
 
     summary = data["bundle"]["strategy_evidence"]["summary"]
     reject_logs = data["bundle"]["strategy_evidence"]["reject_logs"]
+    ranking = data["bundle"]["strategy_evidence"]["ranking_evidence"]
+    ranking_row = ranking["reports"][0]["top_rows"][0]
     account_strategy = data["bundle"]["account_strategy_matrix"]["accounts"]["lx"]["strategy_evidence"]
     assert data["status"] == "ok"
     assert summary["candidate_row_count"] == 1
     assert summary["candidate_file_count"] == 1
     assert summary["reject_log_row_count"] == 1
+    assert summary["ranking_report_count"] == 1
+    assert summary["ranking_top_row_count"] == 1
     assert reject_logs[0]["reason_counts"] == {"risk_spread": 1}
+    assert reject_logs[0]["sample_rows"][0]["engine_reject_reason"] == "risk_spread"
+    assert ranking["summary"]["strategy_counts"] == {"sell_put": 1}
+    assert ranking_row["metrics"]["annualized_return"] == 0.12
+    assert ranking_row["metrics"]["otm_pct"] == 0.066667
+    assert ranking_row["cash_constraint"]["cash_headroom_ratio"] == 2.0
+    assert ranking_row["rank_explanation"]["score_inputs"]["spread_ratio"] == 0.12
     assert account_strategy["candidate_rows"] == 1
     assert account_strategy["reject_log_rows"] == 1
     assert account_strategy["trace_rows"] == 1
     assert account_strategy["trace_status_counts"] == {"rejected": 1}
     assert "candidate_rows: 1" in data["handoff_markdown"]
     assert "reject_log_rows: 1" in data["handoff_markdown"]
+    assert "## Ranking Evidence" in data["handoff_markdown"]
+    assert "cash_headroom=2" in data["handoff_markdown"]
 
 
 def test_ai_cofunder_builds_redacted_bundle_and_handoff(tmp_path: Path) -> None:
@@ -375,7 +325,7 @@ def test_ai_cofunder_can_include_redacted_healthcheck_snapshot(tmp_path: Path) -
                 "account_paths": {"lx": {"primary": {"source": "futu", "ok": False}}},
                 "checks": [
                     {
-                        "name": "notification_secrets",
+                        "name": "notification_credentials",
                         "status": "error",
                         "message": "missing https://example.com/webhook/token for 281756479859383816",
                     }

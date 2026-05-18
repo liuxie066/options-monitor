@@ -195,6 +195,51 @@ def test_validate_config_rejects_invalid_candidate_score_weights() -> None:
         assert 'templates.put_base.sell_put.score_weights.liquidity must be >= 0' in msg
 
 
+def test_validate_config_rejects_invalid_sell_put_min_otm_pct() -> None:
+    _add_repo_to_syspath()
+    from src.application.config_validator import validate_config
+
+    cfg = {
+        'templates': {
+            'put_base': {
+                'sell_put': {
+                    'min_otm_pct': 1.5,
+                }
+            },
+        },
+        'symbols': [
+            {
+                'symbol': 'AAPL',
+                'use': ['put_base'],
+                'sell_put': {
+                    'enabled': True,
+                    'min_dte': 7,
+                    'max_dte': 45,
+                    'min_strike': 10,
+                    'max_strike': 200,
+                },
+                'sell_call': {'enabled': False},
+            }
+        ],
+    }
+
+    try:
+        validate_config(cfg)
+        raise AssertionError('expected config validation failure')
+    except SystemExit as e:
+        msg = str(e)
+        assert 'templates.put_base.sell_put.min_otm_pct must be between 0 and 1' in msg
+
+    cfg['templates']['put_base']['sell_put']['min_otm_pct'] = 0.05
+    cfg['symbols'][0]['sell_put']['min_otm_pct'] = -0.01
+    try:
+        validate_config(cfg)
+        raise AssertionError('expected config validation failure')
+    except SystemExit as e:
+        msg = str(e)
+        assert 'AAPL.sell_put.min_otm_pct must be between 0 and 1' in msg
+
+
 def test_validate_config_rejects_removed_legacy_sell_call_fetch_fields_in_templates() -> None:
     _add_repo_to_syspath()
     from src.application.config_validator import validate_config
@@ -520,6 +565,7 @@ def test_sell_put_steps_use_global_liquidity_filters_only() -> None:
                 'max_dte': 45,
                 'min_strike': 1,
                 'max_strike': 200,
+                'min_otm_pct': 0.05,
                 'min_annualized_net_return': 0.1,
                 'min_open_interest': 999,
                 'score_weights': {'liquidity': 0.02, 'risk_distance': 0.03},
@@ -550,6 +596,7 @@ def test_sell_put_steps_use_global_liquidity_filters_only() -> None:
     assert kwargs['min_open_interest'] == 50.0
     assert kwargs['min_volume'] == 12.0
     assert kwargs['max_spread_ratio'] == 0.31
+    assert kwargs['min_otm_pct'] == 0.05
     assert kwargs['score_weights'] == {'liquidity': 0.02, 'risk_distance': 0.03}
     assert 'min_iv' not in kwargs
     assert 'require_bid_ask' not in kwargs

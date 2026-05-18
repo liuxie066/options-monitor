@@ -467,6 +467,109 @@ def test_run_candidate_scan_uses_configured_score_weights(tmp_path: Path) -> Non
     assert list(out["contract_symbol"]) == ["LOWER_RETURN_LIQUID", "HIGH_RETURN_WIDE"]
 
 
+def test_run_candidate_scan_applies_sell_put_min_otm_pct(tmp_path: Path) -> None:
+    _add_repo_to_syspath()
+    import src.application.candidate_scanning as scan
+
+    parsed = tmp_path / "input" / "parsed"
+    parsed.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "symbol": "NVDA",
+                "option_type": "put",
+                "expiration": "2026-06-18",
+                "dte": 30,
+                "contract_symbol": "NEAR_SPOT",
+                "multiplier": 100,
+                "currency": "USD",
+                "strike": 98,
+                "spot": 100,
+                "bid": 1.0,
+                "ask": 1.2,
+                "last_price": 1.1,
+                "mid": 1.1,
+                "open_interest": 100,
+                "volume": 20,
+                "implied_volatility": 0.3,
+                "delta": -0.35,
+            },
+            {
+                "symbol": "NVDA",
+                "option_type": "put",
+                "expiration": "2026-06-18",
+                "dte": 30,
+                "contract_symbol": "FIVE_PCT_OTM",
+                "multiplier": 100,
+                "currency": "USD",
+                "strike": 95,
+                "spot": 100,
+                "bid": 0.8,
+                "ask": 1.0,
+                "last_price": 0.9,
+                "mid": 0.9,
+                "open_interest": 100,
+                "volume": 20,
+                "implied_volatility": 0.3,
+                "delta": -0.2,
+            },
+        ]
+    ).to_csv(parsed / "NVDA_required_data.csv", index=False)
+
+    out_path = tmp_path / "output.csv"
+    out = scan.run_candidate_scan(
+        config=scan.CandidateScanConfig(
+            mode="put",
+            symbols=["NVDA"],
+            input_root=tmp_path / "input",
+            output=out_path,
+            empty_output_columns=["symbol"],
+            min_dte=7,
+            max_dte=60,
+            min_strike=None,
+            max_strike=None,
+            min_open_interest=0,
+            min_volume=0,
+            max_spread_ratio=1.0,
+            min_annualized_net_return=0.01,
+            min_net_income=1,
+            min_otm_pct=0.05,
+            quiet=True,
+        ),
+        deps=scan.CandidateScanDependencies(
+            compute_metrics_fn=lambda contract: {
+                "net_income": 100.0,
+                "annualized_net_return_on_cash_basis": 0.12,
+            },
+            build_row_fn=lambda contract, base_values, metrics: {
+                "symbol": contract.symbol,
+                "contract_symbol": contract.contract_symbol,
+                "expiration": contract.expiration,
+                "dte": contract.dte,
+                "strike": contract.strike,
+                "open_interest": base_values.open_interest,
+                "volume": base_values.volume,
+                "spread_ratio": base_values.spread_ratio,
+                "annualized_net_return_on_cash_basis": metrics["annualized_net_return_on_cash_basis"],
+                "net_income": metrics["net_income"],
+            },
+            build_hard_constraint_kwargs_fn=lambda contract: {},
+            annualized_return_value_fn=lambda metrics: float(metrics["annualized_net_return_on_cash_basis"]),
+            annotate_event_risk_fn=lambda df, base_dir, cfg: df,
+            print_summary_fn=lambda df, out_path, reject_path: None,
+        ),
+        event_risk_cfg=None,
+        base_dir=tmp_path,
+    )
+
+    assert list(out["contract_symbol"]) == ["FIVE_PCT_OTM"]
+    reject_log = pd.read_csv(out_path.with_name("output_reject_log.csv"))
+    assert list(reject_log["contract_symbol"]) == ["NEAR_SPOT"]
+    assert list(reject_log["reject_rule"]) == ["strike"]
+    assert list(reject_log["metric_value"]) == [0.02]
+    assert list(reject_log["threshold"]) == [0.05]
+
+
 def test_run_candidate_scan_logs_hard_liquidity_and_missing_spread_rejects(tmp_path: Path) -> None:
     _add_repo_to_syspath()
     import src.application.candidate_scanning as scan

@@ -5,6 +5,7 @@
 ## 文档边界
 
 - 快速上手与常用命令：`README.md`
+- Linux / Mac 服务化部署：`DEPLOY.md` / `docs/DEPLOY_LINUX_MAC.md`
 - 配置来源与同步：`CONFIGS.md`
 - option positions 升级迁移：`docs/OPTION_POSITIONS_MIGRATION.md`
 - option positions 错账修复：`docs/OPTION_POSITIONS_REPAIR.md`
@@ -29,11 +30,19 @@
 
 ```bash
 cd /home/node/.openclaw/workspace/options-monitor-prod
-./run_watchlist.sh
+./om run tick --config config.us.json --accounts lx sy
 ```
 
 - 运行入口配置：`config.us.json`（US）/ `config.hk.json`（HK）
 - 产出：`<report_dir>/symbols_*` 与每标的 `*_sell_put_* / *_sell_call_*`（默认 `report_dir=output/reports`）
+- 服务化部署时，所有运行产物应位于 `runtime_root`，而不是 repo 根目录；详见 `DEPLOY.md`
+
+服务化环境的只读巡检：
+
+```bash
+./om service status --profile-path /var/lib/options-monitor/service.profile.json --include-service-status
+./om-agent run --tool runtime_status --input-json '{"profile_path":"/var/lib/options-monitor/service.profile.json"}'
+```
 
 ## 命令副作用总表（先看这个）
 
@@ -47,13 +56,14 @@ cd /home/node/.openclaw/workspace/options-monitor-prod
 | `./om run tick --config ...` | 是 | 可能 | 是 | 正式扫描/通知入口 |
 | `python3 -m src.application.auto_trade_intake --mode apply` | 是 | 否 | 是 | 会写本地 option_positions / intake state/status，并默认发送入账回执 |
 | `./om option-positions auto-close-expired --config ... --apply` | 是 | 否 | 是 | 专用过期自动平仓入口；先跑 `--dry-run`；需要静默时加 `--no-send` |
-| `./om option-positions sync-feishu --apply` | 是 | 是 | 是 | 先跑 `--dry-run`；需要静默时加 `--no-send` |
 
 判断原则：
 - 只想确认配置或状态时，优先 `config_validate` / `healthcheck` / `runtime_status`
 - 只要命令会写本地、写远端或发通知，就不要把它当成“只读检查”来使用
 
 ## 定时任务（OpenClaw cron）
+
+新 Linux / Mac 部署优先使用 `./om service render` 生成 systemd / launchd 服务。OpenClaw cron 仍可作为已有环境的调度器，但不要再把 runtime 路径隐含在仓库目录。
 
 Cron Job:
 - name: `options-monitor auto tick`
@@ -67,8 +77,6 @@ flock -n /tmp/om-auto-close-expired.lock bash -lc 'set -euo pipefail; cd /home/n
 ```
 
 专用入口会写入 `output_runs/<run_id>/accounts/<account>/state/expired_position_maintenance.json` 和 `output_shared/state/auto_close_expired.json`；回执按账户、券商、业务日和平仓记录生成 `receipt_key`，同一天已确认发送的回执不会因为人工重跑或 cron 重试而重复发送，未确认回执会按 `option_positions.auto_close.receipt.retry_unconfirmed` 重试。
-
-如果单独设置“Option positions Feishu 镜像同步”cron，例如每天 `00:10` 运行 `./om option-positions sync-feishu --config config.us.json --apply`，cron 仍只负责触发。代码会写入 `option_positions_feishu_sync.json` 和回执状态；回执按业务日、同步范围、结果摘要和失败/冲突记录生成 `receipt_key`，已确认回执不重复发，未确认回执按 `option_positions.sync_to_feishu.receipt.retry_unconfirmed` 重试。
 
 常用命令：
 
@@ -168,8 +176,6 @@ scripts/ssh_selfcheck.sh
 
 ## 应急控制
 
-- 立即停自动发布：
-  - 创建 `options-monitor-prod/disable_autodeploy.flag`
 - 立即停定时监控：
   - `openclaw cron disable 9cba60f7-407b-4427-9120-0a176b818de9`
 

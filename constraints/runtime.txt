@@ -1,0 +1,6 @@
+# Reproducible install constraints for requirements/runtime.txt.
+# Refresh intentionally during release prep after validating the dependency set.
+pandas==3.0.2
+pyyaml==6.0.3
+tabulate==0.10.0
+futu-api==10.4.6408

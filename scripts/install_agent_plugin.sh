@@ -11,7 +11,7 @@ echo "[install-agent] step: create venv"
 
 echo "[install-agent] step: install python deps"
 ./.venv/bin/pip install --upgrade pip
-./.venv/bin/pip install -r requirements.txt
+./.venv/bin/pip install -r requirements.txt -c constraints.txt
 
 echo "[install-agent] step: verify public launcher"
 ./om-agent spec >/dev/null

@@ -52,8 +52,8 @@ def resolve_public_data_config_path(
         runtime_path = Path(config_path).expanduser()
         if not runtime_path.is_absolute():
             runtime_path = runtime_path.resolve()
-        return (runtime_path.parent / "secrets" / "portfolio.sqlite.json").resolve()
-    return (repo_base() / "secrets" / "portfolio.sqlite.json").resolve()
+        return (runtime_path.parent / "portfolio.runtime.json").resolve()
+    return (repo_base() / "portfolio.runtime.json").resolve()
 
 
 def resolve_local_path(value: Any, *, default: Path, repo_base: Callable[[], Path]) -> Path:
