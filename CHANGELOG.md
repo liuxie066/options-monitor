@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.2.61 - 2026-05-18
+
+### Changed
+- Rewrote `AGENTS.md` as the short agent-facing operating manual for safety boundaries, entrypoint selection, module ownership, and focused quality gates.
+- Rebuilt `docs/AGENT_WIKI.md` into a task-driven agent handbook covering tool selection, AI Cofunder handoff, runtime evidence paths, investigation playbooks, module boundaries, and verification guidance.
+- Updated README, Getting Started, Agent Integration, Docs Index, and Tool Reference navigation so agents can find the handbook and the `ai_cofunder` workflow from the public docs.
+
+### Tests
+- Verified doc whitespace with `git diff --check`, confirmed the `ai_cofunder` manifest through `./om-agent spec`, and checked `./om ai-cofunder collect --help`.
+
 ## 1.2.60 - 2026-05-18
 
 ### Fixed

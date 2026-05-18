@@ -75,6 +75,9 @@
 | `candidate_rank_explain` | Agent-only read existing candidate CSV ranking explanations |
 | `strategy_replay_analyze` | `./om strategy-replay analyze` |
 | `preview_notification` | `./om notify preview` |
+| `runtime_status` | Agent-only runtime artifact summary |
+| `openclaw_readiness` | Agent-only OpenClaw readiness summary |
+| `ai_cofunder` | `./om ai-cofunder collect` |
 | `get_close_advice` | `./om close-advice` |
 | `query_cash_headroom` | `./om sell-put-cash` / `src.application.cash_headroom_query::query_sell_put_cash(...)` |
 | `monthly_income_report` | `./om option-positions report monthly-income` |
@@ -453,6 +456,64 @@ OM_AGENT_ENABLE_WRITE_TOOLS=true ./om-agent run --tool version_update --input-js
 ./om-agent run --tool openclaw_readiness --input-json '{"config_key":"us"}'
 ./om-agent run --tool openclaw_readiness --input-json '{"profile_path":"openclaw.profile.json"}'
 ```
+
+---
+
+## 5.17 `ai_cofunder`
+
+用途：
+- 收集线上运行证据，生成给 MacBook Codex 阅读的 redacted bundle / handoff
+- 诊断 runtime 质量、账本质量、多账户策略影响和策略证据完整性
+- 可选嵌入 `healthcheck` snapshot，但不取代 `healthcheck` 的 readiness 职责
+- 默认不写文件、不调用在线 AI、不发送通知
+
+示例：
+
+```bash
+./om-agent run --tool ai_cofunder --input-json '{"config_key":"us","scope":"full","output":"both","write_outputs":false}'
+./om ai-cofunder collect --config-key us --scope full --output both --no-write-outputs
+```
+
+带线上调度证据：
+
+```bash
+./om-agent run --tool ai_cofunder --input-json '{
+  "config_key": "us",
+  "scope": "full",
+  "output": "both",
+  "write_outputs": false,
+  "scheduler_evidence": {
+    "provider": "cron",
+    "job_name": "us-tick",
+    "last_status": "success",
+    "last_exit_code": 0
+  }
+}'
+```
+
+Scope：
+- `ledger`：交易入账、持仓维护和账本质量
+- `account-strategy`：多账户策略影响、候选和 filter trace
+- `quality`：runtime freshness、最新 run、调度证据和可选 healthcheck
+- `strategy`：候选 CSV、filter trace、strategy replay
+- `full`：默认全量证据
+
+写报告需要三层条件：
+- `write_outputs=true`
+- `confirm=true`
+- `OM_AGENT_ENABLE_WRITE_TOOLS=true`
+
+默认写入位置：
+
+```text
+output_shared/ai_cofunder/
+output_shared/state/current/ai_cofunder.current.json
+```
+
+注意：
+- 它是证据打包工具，不是线上 AI 推理功能。
+- `scheduler_evidence` 来自线上调度系统；本地 runtime 文件不能证明线上 cron 是否触发。
+- `include_healthcheck=true` 只在 `quality` / `full` scope 下有意义。
 
 ---
 
