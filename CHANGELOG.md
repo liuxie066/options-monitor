@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 1.2.60 - 2026-05-18
+
+### Fixed
+- Fixed legacy SQLite bootstrap so `option_positions.bootstrap_from_legacy_sqlite.enabled=true` reads the deprecated `option_positions.sqlite_path` database instead of the active runtime database.
+- Prefer migrating legacy `trade_events` as the source of truth, with explicit fallbacks for legacy `position_lots` and old `option_positions` snapshots.
+- Added explicit bootstrap statuses for missing, empty, disabled, and unreadable legacy SQLite stores instead of silently skipping migration.
+
+### Tests
+- Added regression coverage for active-empty / legacy-populated dual-store bootstrap, legacy `trade_events` precedence, disabled legacy migration, and missing legacy database diagnostics.
+- Re-ran focused ledger/option-position/trade CLI tests, changed-file type checking, compile checks, full pytest, diff checks, and release metadata validation.
+
 ## 1.2.59 - 2026-05-18
 
 ### Added
