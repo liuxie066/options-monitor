@@ -454,8 +454,13 @@ bash scripts/install_agent_plugin.sh
 常用只读工具：
 
 ```bash
+./om status --config-key us
+./om runs --limit 10
+./om logs --run-id <run-id> --lines 50
 ./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'
 ./om-agent run --tool runtime_status --input-json '{"config_key":"us"}'
+./om-agent run --tool runtime_runs --input-json '{"limit":10}'
+./om-agent run --tool runtime_logs --input-json '{"run_id":"<run-id>","kind":"tool","lines":50}'
 ./om-agent run --tool config_validate --input-json '{"config_key":"us"}'
 ./om-agent run --tool scheduler_status --input-json '{"config_key":"us","account":"lx"}'
 ```
@@ -467,7 +472,7 @@ AI Cofunder 证据交接：
 ./om-agent run --tool ai_cofunder --input-json '{"config_key":"us","scope":"full","output":"both","write_outputs":false}'
 ```
 
-`ai-cofunder` 是给 MacBook 上的 Codex 分析线上质量和策略问题的证据打包入口。线上侧只收集 redacted bundle / handoff，不调用在线 AI；调度系统状态需要通过 `scheduler_evidence` 或 CLI 的 `--scheduler-evidence-json` 显式传入。
+`ai-cofunder` 是给 MacBook 上的 Codex 分析线上质量和策略问题的证据打包入口。线上侧只收集 redacted bundle / handoff，不调用在线 AI；run 列表和日志摘要与 `./om runs` / `./om logs` 同源，调度系统状态需要通过 `scheduler_evidence` 或 CLI 的 `--scheduler-evidence-json` 显式传入。
 
 写工具门禁：
 

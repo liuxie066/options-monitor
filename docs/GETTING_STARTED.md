@@ -90,6 +90,11 @@ healthcheck 会额外给出本地 `ledger_store` 和 `option_positions_bootstrap
 ## 5. 跑一个只读工具
 
 ```bash
+./om status --config-key us
+./om runs --limit 10
+./om logs --run-id <run-id> --lines 50
+./om-agent run --tool runtime_runs --input-json '{"limit":10}'
+./om-agent run --tool runtime_logs --input-json '{"run_id":"<run-id>","kind":"tool","lines":50}'
 ./om-agent run --tool manage_symbols --input-json '{"config_key":"us","action":"list"}'
 ```
 

@@ -1285,6 +1285,65 @@ def test_runtime_status_loads_openclaw_profile_and_masks_external_paths(tmp_path
     assert out["data"]["freshness"]["status"] == "fresh"
 
 
+def test_runtime_runs_agent_tool_lists_and_selects_runs(tmp_path: Path) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    runs_root = tmp_path / "output_runs"
+    run_dir = runs_root / "run-1"
+    (run_dir / "state").mkdir(parents=True, exist_ok=True)
+    (run_dir / "state" / "tick_metrics.json").write_text(
+        json.dumps(
+            {
+                "ran_scan": True,
+                "sent": True,
+                "accounts": [{"account": "lx", "ran_scan": True}],
+                "reason": "sent",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    listed = run_tool("runtime_runs", {"runs_root": str(runs_root), "limit": 5})
+    selected = run_tool("runtime_runs", {"runs_root": str(runs_root), "run_id": "run-1"})
+
+    assert listed["ok"] is True
+    assert listed["data"]["schema_version"] == "runtime_runs.v1"
+    assert listed["data"]["summary"]["total_count"] == 1
+    assert listed["data"]["runs"][0]["run_id"] == "run-1"
+    assert listed["data"]["runs"][0]["ran_scan"] is True
+    assert listed["meta"]["runs_root"] == ".../output_runs"
+    assert selected["ok"] is True
+    assert selected["data"]["summary"]["requested_found"] is True
+    assert selected["data"]["selected_run"]["run_id"] == "run-1"
+
+
+def test_runtime_logs_agent_tool_tails_run_audit_and_file(tmp_path: Path) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    runs_root = tmp_path / "output_runs"
+    audit = runs_root / "run-1" / "state" / "audit_events.jsonl"
+    audit.parent.mkdir(parents=True, exist_ok=True)
+    audit.write_text('{"message":"first"}\n{"message":"second"}\n', encoding="utf-8")
+    service_log = tmp_path / "service.log"
+    service_log.write_text("one\ntwo\nthree\n", encoding="utf-8")
+
+    audit_out = run_tool(
+        "runtime_logs",
+        {"runs_root": str(runs_root), "run_id": "run-1", "kind": "audit", "lines": 1},
+    )
+    file_out = run_tool("runtime_logs", {"file": str(service_log), "lines": 2})
+
+    assert audit_out["ok"] is True
+    assert audit_out["data"]["schema_version"] == "runtime_logs.v1"
+    assert audit_out["data"]["summary"]["requested_run_found"] is True
+    assert audit_out["data"]["files"][0]["path"].endswith("audit_events.jsonl")
+    assert audit_out["data"]["files"][0]["tail"] == ['{"message":"second"}']
+    assert audit_out["meta"]["runs_root"] == ".../output_runs"
+    assert file_out["ok"] is True
+    assert file_out["data"]["files"][0]["tail"] == ["two", "three"]
+
+
 def test_openclaw_readiness_combines_status_and_healthcheck(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
     import src.application.agent_tool_handlers as tools

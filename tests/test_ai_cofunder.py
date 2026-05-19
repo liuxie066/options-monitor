@@ -304,7 +304,10 @@ def test_ai_cofunder_builds_redacted_bundle_and_handoff(tmp_path: Path) -> None:
         "included": False,
         "reason": "include_healthcheck=false",
     }
+    assert bundle["runtime_runs"]["schema_version"] == "runtime_runs.v1"
+    assert bundle["runtime_logs"]["schema_version"] == "runtime_logs.v1"
     assert "AI Cofunder Handoff" in data["handoff_markdown"]
+    assert "Runtime Evidence" in data["handoff_markdown"]
     assert "webhook/token" not in bundle_json
     assert "281756479859383816" not in bundle_json
     assert meta["outputs"]["written"] is False
@@ -535,6 +538,10 @@ def test_ai_cofunder_agent_tool_runs_with_local_runtime_artifacts(tmp_path: Path
         json.dumps({"status": "ok", "run_id": "run-1", "ran_scan": True}),
         encoding="utf-8",
     )
+    (run_dir / "state" / "tool_execution_audit.jsonl").write_text(
+        '{"tool_name":"tick","status":"ok"}\n',
+        encoding="utf-8",
+    )
 
     out = run_tool(
         "ai_cofunder",
@@ -560,3 +567,7 @@ def test_ai_cofunder_agent_tool_runs_with_local_runtime_artifacts(tmp_path: Path
     assert out["data"]["status"] in {"ok", "warn"}
     assert out["data"]["outputs"]["written"] is False
     assert "AI Cofunder Handoff" in out["data"]["handoff_markdown"]
+    bundle = out["data"]["bundle"]
+    assert bundle["runtime_runs"]["summary"]["total_count"] == 1
+    assert bundle["runtime_runs"]["runs"][0]["run_id"] == "run-1"
+    assert bundle["runtime_logs"]["summary"]["existing_file_count"] == 1

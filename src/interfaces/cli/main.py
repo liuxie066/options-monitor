@@ -34,6 +34,9 @@ from src.application.strategy_replay import analyze_strategy_replay, read_strate
 from src.application.tick_cron import run_tick_cron
 from src.application.tool_execution import execute_tool
 from src.application.runtime_config_freshness import RuntimeConfigFreshnessError, ensure_runtime_config_freshness
+from src.application.runtime_logs_cli import collect_runtime_logs, format_runtime_logs
+from src.application.runtime_runs_cli import collect_runtime_runs, format_runtime_runs
+from src.application.runtime_status_cli import format_runtime_status_summary, runtime_status_payload_from_args
 from domain.domain.config_contract import ensure_runtime_schedule_matches_market
 from src.application.version_check import check_version_update
 from src.application.cash_headroom_query import query_sell_put_cash
@@ -60,6 +63,42 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     doctor.add_argument("--accounts", nargs="*", default=None)
     doctor.add_argument("--opend-telnet-host", default=None)
     doctor.add_argument("--opend-telnet-port", type=int, default=None)
+
+    status = sub.add_parser("status", help="summarize runtime status")
+    status.add_argument("--config-key", default=None, choices=("us", "hk"))
+    status.add_argument("--config-path", default=None)
+    status.add_argument("--accounts", nargs="*", default=None)
+    status.add_argument("--profile-path", default=None)
+    status.add_argument("--run-id", default=None)
+    status.add_argument("--run-dir", default=None)
+    status.add_argument("--report-dir", default=None)
+    status.add_argument("--state-dir", default=None)
+    status.add_argument("--shared-state-dir", default=None)
+    status.add_argument("--accounts-root", default=None)
+    status.add_argument("--runs-root", default=None)
+    status.add_argument("--max-run-age-minutes", type=int, default=None)
+    status.add_argument("--max-notification-chars", type=int, default=None)
+    status.add_argument("--json", action="store_true", help="print raw runtime_status JSON envelope")
+
+    runs = sub.add_parser("runs", help="list runtime run snapshots")
+    runs.add_argument("--runs-root", default=None)
+    runs.add_argument("--profile-path", default=None)
+    runs.add_argument("--limit", type=int, default=10)
+    runs.add_argument("--run-id", default=None)
+    runs.add_argument("--run-dir", default=None)
+    runs.add_argument("--scanned-only", action="store_true")
+    runs.add_argument("--json", action="store_true", help="print JSON envelope")
+
+    logs = sub.add_parser("logs", help="tail runtime logs and run audit files")
+    logs.add_argument("--runs-root", default=None)
+    logs.add_argument("--logs-root", default=None)
+    logs.add_argument("--profile-path", default=None)
+    logs.add_argument("--run-id", default=None)
+    logs.add_argument("--run-dir", default=None)
+    logs.add_argument("--kind", default="all", choices=("all", "audit", "tool", "tick", "service"))
+    logs.add_argument("--lines", type=int, default=50)
+    logs.add_argument("--file", dest="log_file", default=None)
+    logs.add_argument("--json", action="store_true", help="print JSON envelope")
 
     ai_cofunder = sub.add_parser("ai-cofunder", help="collect AI Cofunder evidence for MacBook Codex")
     ai_cofunder_sub = ai_cofunder.add_subparsers(dest="ai_cofunder_command", required=True)
@@ -457,6 +496,55 @@ def main(argv: list[str] | None = None) -> int:
                 ok=bool(healthcheck.get("ok", True)),
                 data={"healthcheck": healthcheck},
             ))
+
+        if args.command == "status":
+            out = execute_tool("runtime_status", runtime_status_payload_from_args(args))
+            if args.json:
+                return _print(out)
+            sys.stdout.write(format_runtime_status_summary(out))
+            return 0 if out.get("ok", True) else 2
+
+        if args.command == "runs":
+            data = collect_runtime_runs(
+                repo_root=repo_base(),
+                runs_root=args.runs_root,
+                profile_path=args.profile_path,
+                limit=int(args.limit),
+                run_id=args.run_id,
+                run_dir=args.run_dir,
+                scanned_only=bool(args.scanned_only),
+            )
+            envelope = build_response(
+                tool_name="runs",
+                ok=bool(data.get("summary", {}).get("ok", True)),
+                data=data,
+            )
+            if args.json:
+                return _print(envelope)
+            sys.stdout.write(format_runtime_runs(data))
+            return 0 if envelope.get("ok", True) else 2
+
+        if args.command == "logs":
+            data = collect_runtime_logs(
+                repo_root=repo_base(),
+                runs_root=args.runs_root,
+                logs_root=args.logs_root,
+                profile_path=args.profile_path,
+                run_id=args.run_id,
+                run_dir=args.run_dir,
+                kind=args.kind,
+                lines=int(args.lines),
+                log_file=args.log_file,
+            )
+            envelope = build_response(
+                tool_name="logs",
+                ok=bool(data.get("summary", {}).get("ok", True)),
+                data=data,
+            )
+            if args.json:
+                return _print(envelope)
+            sys.stdout.write(format_runtime_logs(data))
+            return 0 if envelope.get("ok", True) else 2
 
         if args.command == "ai-cofunder" and args.ai_cofunder_command == "collect":
             payload = {

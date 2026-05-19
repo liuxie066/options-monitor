@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.2.74 - 2026-05-19
+
+### Added
+- Added top-level `./om status` as a terminal-friendly, read-only wrapper over `runtime_status`, with `--json` for the raw agent-tool envelope.
+- Added top-level `./om runs` to list and inspect local runtime run snapshots from `output_runs`.
+- Added top-level `./om logs` to tail run audit files and service logs from the terminal.
+- Added read-only `runtime_runs` and `runtime_logs` agent tools for Clawbot/agent access to the same runtime evidence as `./om runs` and `./om logs`.
+- Added `runtime_runs` and `runtime_logs` snapshots to AI Cofunder bundles so handoffs use the same terminal evidence surfaces.
+
 ## 1.2.73 - 2026-05-19
 
 ### Changed

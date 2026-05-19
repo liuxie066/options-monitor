@@ -26,6 +26,8 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert "monthly_income_report" in tool_names
     assert "option_positions_read" in tool_names
     assert "runtime_status" in tool_names
+    assert "runtime_runs" in tool_names
+    assert "runtime_logs" in tool_names
     assert "openclaw_readiness" in tool_names
     assert "version_update" in tool_names
     assert "candidate_rank_explain" in tool_names
@@ -43,6 +45,20 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert runtime_status["requires_confirm"] is False
     assert "run_id" in runtime_status["input_schema"]
     assert "run_dir" in runtime_status["input_schema"]
+    runtime_runs = next(item for item in spec["tools"] if item["name"] == "runtime_runs")
+    assert runtime_runs["risk_level"] == "read_only"
+    assert runtime_runs["requires_confirm"] is False
+    assert runtime_runs["safe_default_input"] == {"limit": 10}
+    assert "run_id" in runtime_runs["input_schema"]
+    assert "run_dir" in runtime_runs["input_schema"]
+    assert "limit" in runtime_runs["input_schema"]
+    runtime_logs = next(item for item in spec["tools"] if item["name"] == "runtime_logs")
+    assert runtime_logs["risk_level"] == "read_only"
+    assert runtime_logs["requires_confirm"] is False
+    assert runtime_logs["safe_default_input"] == {"kind": "all", "lines": 50}
+    assert "kind" in runtime_logs["input_schema"]
+    assert "lines" in runtime_logs["input_schema"]
+    assert "file" in runtime_logs["input_schema"]
     income_report = next(item for item in spec["tools"] if item["name"] == "monthly_income_report")
     assert income_report["risk_level"] == "read_only"
     assert income_report["requires_confirm"] is False
@@ -135,6 +151,8 @@ def test_agent_cli_spec_prints_json_manifest() -> None:
     assert any(str(x.get("name")) == "monthly_income_report" for x in payload.get("tools", []))
     assert any(str(x.get("name")) == "option_positions_read" for x in payload.get("tools", []))
     assert any(str(x.get("name")) == "config_validate" for x in payload.get("tools", []))
+    assert any(str(x.get("name")) == "runtime_runs" for x in payload.get("tools", []))
+    assert any(str(x.get("name")) == "runtime_logs" for x in payload.get("tools", []))
     assert any(str(x.get("name")) == "candidate_rank_explain" for x in payload.get("tools", []))
     assert not any(str(x.get("name")) == "doctor" for x in payload.get("tools", []))
     assert any(str(x.get("name")) == "ai_cofunder" for x in payload.get("tools", []))
