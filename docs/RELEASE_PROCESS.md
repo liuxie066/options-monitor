@@ -82,7 +82,7 @@ python3 -m pytest tests/test_layered_config.py
   --runtime-root /var/lib/options-monitor
 ```
 
-确认升级时才会下载 tag、在新 release 内准备 `.venv`、安装 runtime/server 依赖、校验新目录、切换 `current` symlink，并重启长期运行的 trade-intake service：
+确认升级时才会下载 tag、在新 release 内准备 `.venv`、安装 runtime/server 依赖、校验新目录、切换 `current` symlink，并按 `service.profile.json` 重启长期运行的 trade-intake service：
 
 ```bash
 ./om update apply \
@@ -92,6 +92,15 @@ python3 -m pytest tests/test_layered_config.py
 ```
 
 默认不自动跨 major；需要跨 major 时显式传 `--allow-major`。
+
+如果 systemd unit 使用 `User=<deploy_user>` 运行自动升级，`service render` 会在 profile 中标记 trade-intake 重启使用 `sudo -n systemctl restart ...`。服务器需要给运行用户配置最小 sudoers 授权，例如：
+
+```sudoers
+liuxie ALL=(root) NOPASSWD: /bin/systemctl restart options-monitor-trade-intake.service
+liuxie ALL=(root) NOPASSWD: /usr/bin/systemctl restart options-monitor-trade-intake.service
+```
+
+如果授权缺失，升级状态会记录 `remediation`，提示手工执行 `sudo systemctl restart options-monitor-trade-intake.service` 并补齐 sudoers。
 
 回滚同样默认 dry-run：
 

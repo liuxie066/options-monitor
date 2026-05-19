@@ -123,6 +123,48 @@ def _run_required(
     return result
 
 
+class ServiceRestartError(RuntimeError):
+    def __init__(self, message: str, *, remediation: list[str]) -> None:
+        super().__init__(message)
+        self.remediation = remediation
+
+
+def _restart_profile(profile: dict[str, Any]) -> dict[str, Any]:
+    raw = profile.get("restart")
+    return raw if isinstance(raw, dict) else {}
+
+
+def _restart_command_prefix(profile: dict[str, Any]) -> list[str]:
+    restart = _restart_profile(profile)
+    raw_prefix = restart.get("command_prefix")
+    if isinstance(raw_prefix, list) and raw_prefix:
+        prefix = [str(item).strip() for item in raw_prefix if str(item).strip()]
+        if prefix:
+            return prefix
+    if bool(restart.get("requires_sudo") or profile.get("restart_requires_sudo")):
+        return ["sudo", "-n", "systemctl"]
+    return ["systemctl"]
+
+
+def _restart_remediation(*, profile: dict[str, Any], service_name: str, command: list[str]) -> list[str]:
+    deploy_user = str(profile.get("deploy_user") or "").strip()
+    sudoers = _restart_profile(profile).get("sudoers")
+    suggestions = [str(item) for item in sudoers] if isinstance(sudoers, list) else []
+    if not suggestions and deploy_user:
+        suggestions = [
+            f"{deploy_user} ALL=(root) NOPASSWD: /bin/systemctl restart {service_name}",
+            f"{deploy_user} ALL=(root) NOPASSWD: /usr/bin/systemctl restart {service_name}",
+        ]
+    remediation = [
+        f"manual_restart: sudo systemctl restart {service_name}",
+        f"failed_command: {' '.join(shlex.quote(part) for part in command)}",
+    ]
+    if suggestions:
+        remediation.append("sudoers_minimal:")
+        remediation.extend(suggestions)
+    return remediation
+
+
 def _remote_url(*, repo_root: Path, remote_name: str, run_cmd: Callable[..., Any]) -> str:
     result = _run_command(
         ["git", "config", "--get", f"remote.{remote_name}.url"],
@@ -164,11 +206,19 @@ def _restart_services_from_profile(
     restarted: list[str] = []
     if provider != "systemd":
         return restarted
+    command_prefix = _restart_command_prefix(profile)
     for item in services:
         name = str(item.get("name") if isinstance(item, dict) else item or "").strip()
         if not name.endswith(".service") or "trade-intake" not in name:
             continue
-        _run_required(["systemctl", "restart", name], cwd=None, run_cmd=run_cmd, operations=operations, timeout=60)
+        command = [*command_prefix, "restart", name]
+        result = _run_command(command, cwd=None, run_cmd=run_cmd, timeout=60)
+        operations.append(result)
+        if not result["ok"]:
+            raise ServiceRestartError(
+                f"failed to restart {name}: {' '.join(shlex.quote(part) for part in command)}",
+                remediation=_restart_remediation(profile=profile, service_name=name, command=command),
+            )
         restarted.append(name)
     return restarted
 
@@ -367,6 +417,7 @@ def service_upgrade(
         }
 
     lock_path = runtime / "locks" / "upgrade.lock"
+    symlink_switched = False
     try:
         with _UpgradeLock(lock_path):
             releases.mkdir(parents=True, exist_ok=True)
@@ -395,6 +446,7 @@ def service_upgrade(
                 timeout=120,
             )
             _switch_current_symlink(current_link=repo_link, target_dir=target_dir)
+            symlink_switched = True
             restarted = (
                 _restart_services_from_profile(runtime_root=runtime, run_cmd=run_cmd, operations=operations)
                 if restart_services
@@ -405,10 +457,12 @@ def service_upgrade(
             **status_base,
             "ok": False,
             "status": "failed",
-            "changed": False,
+            "changed": bool(symlink_switched),
+            "symlink_switched": bool(symlink_switched),
             "target_dir": str(target_dir),
             "previous_dir": str(previous_dir),
             "error": f"{type(exc).__name__}: {exc}",
+            **({"remediation": exc.remediation} if isinstance(exc, ServiceRestartError) else {}),
             "operations": operations,
         }
         write_upgrade_status(runtime_root=runtime, payload=out)
@@ -488,9 +542,11 @@ def service_rollback(
             "operations": operations,
         }
 
+    symlink_switched = False
     try:
         with _UpgradeLock(runtime / "locks" / "upgrade.lock"):
             _switch_current_symlink(current_link=repo_link, target_dir=target_dir)
+            symlink_switched = True
             restarted = (
                 _restart_services_from_profile(runtime_root=runtime, run_cmd=run_cmd, operations=operations)
                 if restart_services
@@ -501,9 +557,11 @@ def service_rollback(
             **status_base,
             "ok": False,
             "status": "failed",
-            "changed": False,
+            "changed": bool(symlink_switched),
+            "symlink_switched": bool(symlink_switched),
             "target_dir": str(target_dir),
             "error": f"{type(exc).__name__}: {exc}",
+            **({"remediation": exc.remediation} if isinstance(exc, ServiceRestartError) else {}),
             "operations": operations,
         }
         write_upgrade_status(runtime_root=runtime, payload=out)

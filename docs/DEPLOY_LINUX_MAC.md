@@ -119,6 +119,15 @@ Environment="OM_RUNTIME_ROOT=/var/lib/options-monitor"
 
 `liuxie` 只是上面示例里的服务器运行用户，不是代码默认值。如果 HOME 不在 `/home/<user>`，再传 `--deploy-home <path>`。如果不传 `--deploy-user` 且未设置 `OM_DEPLOY_USER` / `DEPLOY_USER`，systemd unit 不会写 `User=` / `HOME=`。
 
+自动升级 timer 也会以该用户运行。systemd 系统级 service 的重启需要 root 权限，因此渲染出的 `service.profile.json` 会把长期 trade-intake 重启策略标记为 `sudo -n systemctl restart ...`。请给部署用户配置最小 sudoers 授权：
+
+```sudoers
+liuxie ALL=(root) NOPASSWD: /bin/systemctl restart options-monitor-trade-intake.service
+liuxie ALL=(root) NOPASSWD: /usr/bin/systemctl restart options-monitor-trade-intake.service
+```
+
+如果服务器上的 `systemctl` 只有其中一个路径，只保留对应那一行即可。
+
 安装前先跑只读 preflight：
 
 ```bash
