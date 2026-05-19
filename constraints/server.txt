@@ -1,4 +1,2 @@
 -c runtime.txt
-fastapi==0.136.0
-uvicorn==0.44.0
-cryptography==46.0.7
+lark-oapi==1.6.5

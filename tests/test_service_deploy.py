@@ -121,7 +121,7 @@ def test_render_systemd_bundle_can_include_auto_upgrade_timer(tmp_path: Path) ->
     assert profile["config_paths"]["us"] == str(runtime / "config.us.json")
 
 
-def test_render_systemd_bundle_can_include_feishu_gateway_service(tmp_path: Path) -> None:
+def test_render_systemd_bundle_can_include_feishu_ws_service(tmp_path: Path) -> None:
     from src.application.service_deploy import render_service_bundle
 
     repo = tmp_path / "repo"
@@ -133,24 +133,21 @@ def test_render_systemd_bundle_can_include_feishu_gateway_service(tmp_path: Path
         repo_root=repo,
         runtime_root=runtime,
         markets=["us"],
-        include_feishu_gateway=True,
-        feishu_gateway_host="127.0.0.1",
-        feishu_gateway_port=8765,
-        feishu_gateway_path="/feishu/events",
+        include_feishu_ws=True,
     )
 
     files = {item["relative_path"]: item for item in bundle["files"]}
-    service = files["systemd/options-monitor-feishu-gateway.service"]["content"]
+    service = files["systemd/options-monitor-feishu-ws.service"]["content"]
     profile = json.loads(files["service.profile.json"]["content"])
 
-    assert str(repo / "om") + " inbound feishu-gateway" in service
-    assert "--host 127.0.0.1 --port 8765 --path /feishu/events" in service
+    assert str(repo / "om") + " inbound feishu-ws" in service
     assert "--audit-db " + str(runtime / "output_shared" / "state" / "inbound_control.sqlite3") in service
+    assert "--lock-path " + str(runtime / "locks" / "feishu-ws.lock") in service
     assert "Restart=always" in service
-    assert {"name": "options-monitor-feishu-gateway.service"} in profile["services"]
-    assert profile["feishu_gateway"]["enabled"] is True
-    assert profile["feishu_gateway"]["path"] == "/feishu/events"
-    assert "systemctl enable --now options-monitor-feishu-gateway.service" in bundle["commands"]["enable"]
+    assert {"name": "options-monitor-feishu-ws.service"} in profile["services"]
+    assert profile["feishu_ws"]["enabled"] is True
+    assert profile["feishu_ws"]["lock_path"] == str(runtime / "locks" / "feishu-ws.lock")
+    assert "systemctl enable --now options-monitor-feishu-ws.service" in bundle["commands"]["enable"]
 
 
 def test_render_systemd_auto_upgrade_preserves_symlink_repo_root(tmp_path: Path) -> None:

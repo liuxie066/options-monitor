@@ -51,8 +51,6 @@ def test_feishu_bot_resolver_defaults_allowed_open_ids_to_user_open_id() -> None
             "OM_FEISHU_BOT_APP_ID": "cli_1",
             "OM_FEISHU_BOT_APP_SECRET": "secret_1",
             "OM_FEISHU_BOT_USER_OPEN_ID": "ou_1",
-            "OM_FEISHU_BOT_ENCRYPT_KEY": "encrypt_1",
-            "OM_FEISHU_BOT_VERIFICATION_TOKEN": "token_1",
         }
     )
 
@@ -62,18 +60,16 @@ def test_feishu_bot_resolver_defaults_allowed_open_ids_to_user_open_id() -> None
     assert resolved.default_allowed_senders() == "feishu:ou_1"
 
 
-def test_feishu_bot_inbound_requires_verification_token() -> None:
+def test_feishu_bot_inbound_requires_allowed_sender() -> None:
     resolved = resolve_feishu_bot_config(
         environ={
             "OM_FEISHU_BOT_APP_ID": "cli_1",
             "OM_FEISHU_BOT_APP_SECRET": "secret_1",
-            "OM_FEISHU_BOT_USER_OPEN_ID": "ou_1",
-            "OM_FEISHU_BOT_ENCRYPT_KEY": "encrypt_1",
         }
     )
 
     assert resolved.inbound_ready is False
-    assert resolved.inbound_missing_fields == ("OM_FEISHU_BOT_VERIFICATION_TOKEN",)
+    assert resolved.inbound_missing_fields == ("OM_FEISHU_BOT_ALLOWED_OPEN_IDS",)
 
 
 def test_feishu_bot_resolver_ignores_custom_env_name_config() -> None:
@@ -95,8 +91,6 @@ def test_feishu_bot_resolver_ignores_custom_env_name_config() -> None:
             "CUSTOM_APP_SECRET": "secret_custom",
             "CUSTOM_OPEN_ID": "ou_custom",
             "CUSTOM_ALLOWED": "ou_custom",
-            "CUSTOM_ENCRYPT": "encrypt_custom",
-            "CUSTOM_TOKEN": "token_custom",
         },
     )
 
@@ -107,7 +101,5 @@ def test_feishu_bot_resolver_ignores_custom_env_name_config() -> None:
     assert resolved.inbound_missing_fields == (
         "OM_FEISHU_BOT_APP_ID",
         "OM_FEISHU_BOT_APP_SECRET",
-        "OM_FEISHU_BOT_ENCRYPT_KEY",
-        "OM_FEISHU_BOT_VERIFICATION_TOKEN",
         "OM_FEISHU_BOT_ALLOWED_OPEN_IDS",
     )

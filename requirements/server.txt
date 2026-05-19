@@ -1,4 +1,2 @@
 -r runtime.txt
-fastapi
-uvicorn
-cryptography
+lark-oapi

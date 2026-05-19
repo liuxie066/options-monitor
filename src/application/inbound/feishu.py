@@ -18,18 +18,6 @@ def handle_feishu_payload(
     execute_tool_fn: ExecuteToolFn | None = None,
     allowed_senders: str | None = None,
 ) -> dict[str, Any]:
-    challenge = _extract_challenge(payload)
-    if challenge:
-        return build_response(
-            tool_name="inbound.feishu",
-            ok=True,
-            data={
-                "kind": "url_verification",
-                "challenge": challenge,
-                "response": {"challenge": challenge},
-            },
-        )
-
     event_type = _extract_event_type(payload)
     if event_type and event_type != "im.message.receive_v1":
         return build_response(
@@ -117,14 +105,6 @@ def feishu_payload_to_inbound_request(
         config_path=config_path,
         audit_db=audit_db,
     )
-
-
-def _extract_challenge(payload: dict[str, Any]) -> str | None:
-    if str(payload.get("type") or "").strip() == "url_verification":
-        return _first_text(payload.get("challenge"))
-    if str(payload.get("schema") or "").strip() == "2.0" and payload.get("challenge"):
-        return _first_text(payload.get("challenge"))
-    return None
 
 
 def _extract_event_type(payload: dict[str, Any]) -> str | None:

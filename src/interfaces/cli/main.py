@@ -15,10 +15,11 @@ from src.application.config_edit import get_runtime_config_value, set_runtime_co
 from src.application.healthcheck import run_healthcheck
 from src.application.inbound import (
     InboundRequest,
-    build_feishu_gateway_settings,
+    build_feishu_ws_settings,
+    check_feishu_ws_settings,
     handle_feishu_payload,
     handle_inbound_request,
-    serve_feishu_gateway,
+    serve_feishu_ws,
 )
 from src.application.layered_config import build_layered_runtime_config_file, explain_layered_runtime_config_key
 from src.application.multi_account_tick import run_tick
@@ -91,21 +92,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     inbound_feishu.add_argument("--config-path", default=None)
     inbound_feishu.add_argument("--audit-db", default=None)
     inbound_feishu.add_argument("--format", choices=("json", "text"), default="json")
-    inbound_gateway = inbound_sub.add_parser("feishu-gateway", help="serve the Feishu App event callback gateway")
-    inbound_gateway.add_argument("--host", default=None)
-    inbound_gateway.add_argument("--port", type=int, default=None)
-    inbound_gateway.add_argument("--path", default=None)
-    inbound_gateway.add_argument("--config-key", default="us", choices=("us", "hk"))
-    inbound_gateway.add_argument("--config-path", default=None)
-    inbound_gateway.add_argument("--audit-db", default=None)
-    inbound_gateway.add_argument("--allow-unsigned", action="store_true")
-    inbound_gateway.add_argument("--no-reply", action="store_true")
-    inbound_gateway.add_argument("--reply-in-thread", action="store_true")
-    inbound_gateway.add_argument("--max-reply-chars", type=int, default=None)
-    inbound_gateway.add_argument("--signature-max-age-seconds", type=int, default=None)
-    inbound_gateway.add_argument("--tls-certfile", default=None)
-    inbound_gateway.add_argument("--tls-keyfile", default=None)
-    inbound_gateway.add_argument("--check", action="store_true", help="validate and print redacted gateway configuration without starting the server")
+    inbound_ws = inbound_sub.add_parser("feishu-ws", help="serve the Feishu App long-connection inbound client")
+    inbound_ws.add_argument("--config-key", default="us", choices=("us", "hk"))
+    inbound_ws.add_argument("--config-path", default=None)
+    inbound_ws.add_argument("--audit-db", default=None)
+    inbound_ws.add_argument("--no-reply", action="store_true")
+    inbound_ws.add_argument("--reply-in-thread", action="store_true", default=None)
+    inbound_ws.add_argument("--max-reply-chars", type=int, default=None)
+    inbound_ws.add_argument("--queue-size", type=int, default=None)
+    inbound_ws.add_argument("--lock-path", default=None)
+    inbound_ws.add_argument("--check", action="store_true", help="validate and print redacted long-connection configuration without starting the client")
 
     status = sub.add_parser("status", help="summarize runtime status")
     status.add_argument("--config-key", default=None, choices=("us", "hk"))
@@ -297,11 +293,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     service_render.add_argument("--deploy-home", default=None, help="systemd HOME environment; defaults to /home/<deploy-user>")
     service_render.add_argument("--timeout", dest="timeout_seconds", type=int, default=600)
     service_render.add_argument("--include-auto-upgrade", action="store_true", help="render an opt-in daily auto-upgrade service/timer")
-    service_render.add_argument("--include-feishu-gateway", action="store_true", help="render the long-running Feishu inbound gateway service")
-    service_render.add_argument("--feishu-gateway-host", default="127.0.0.1")
-    service_render.add_argument("--feishu-gateway-port", type=int, default=8765)
-    service_render.add_argument("--feishu-gateway-path", default="/feishu/events")
-    service_render.add_argument("--feishu-gateway-config-key", default="us", choices=("us", "hk"))
+    service_render.add_argument("--include-feishu-ws", action="store_true", help="render the long-running Feishu long-connection inbound service")
+    service_render.add_argument("--feishu-ws-config-key", default="us", choices=("us", "hk"))
     service_render.add_argument("--output-dir", default=None, help="write rendered files under this directory")
     service_render.add_argument("--no-content", action="store_true", help="omit file contents from JSON output")
     service_preflight_cmd = service_sub.add_parser("preflight", help="check Linux runtime root before installing/running services")
@@ -607,37 +600,19 @@ def main(argv: list[str] | None = None) -> int:
                 return 0 if out.get("ok", True) else 2
             return _print(out)
 
-        if args.command == "inbound" and args.inbound_command == "feishu-gateway":
-            settings = build_feishu_gateway_settings(
-                host=args.host,
-                port=args.port,
-                path=args.path,
+        if args.command == "inbound" and args.inbound_command == "feishu-ws":
+            settings = build_feishu_ws_settings(
                 config_key=args.config_key,
                 config_path=args.config_path,
                 audit_db=args.audit_db,
-                require_signature=not bool(args.allow_unsigned),
                 reply_enabled=not bool(args.no_reply),
-                reply_in_thread=bool(args.reply_in_thread),
+                reply_in_thread=args.reply_in_thread,
                 max_reply_chars=args.max_reply_chars,
-                signature_max_age_seconds=args.signature_max_age_seconds,
-                tls_certfile=args.tls_certfile,
-                tls_keyfile=args.tls_keyfile,
+                queue_size=args.queue_size,
             )
             if args.check:
-                try:
-                    settings.validate_for_serve()
-                    ok = True
-                    error = None
-                except AgentToolError as err:
-                    ok = False
-                    error = build_error_payload(err)
-                return _print(build_response(
-                    tool_name="inbound.feishu_gateway.check",
-                    ok=ok,
-                    data={"settings": settings.redacted_status()},
-                    error=error,
-                ))
-            serve_feishu_gateway(settings)
+                return _print(check_feishu_ws_settings(settings))
+            serve_feishu_ws(settings, lock_path=args.lock_path)
             return 0
 
         if args.command == "status":
@@ -904,11 +879,8 @@ def main(argv: list[str] | None = None) -> int:
                 deploy_home=args.deploy_home,
                 timeout_seconds=args.timeout_seconds,
                 include_auto_upgrade=bool(args.include_auto_upgrade),
-                include_feishu_gateway=bool(args.include_feishu_gateway),
-                feishu_gateway_host=args.feishu_gateway_host,
-                feishu_gateway_port=int(args.feishu_gateway_port),
-                feishu_gateway_path=args.feishu_gateway_path,
-                feishu_gateway_config_key=args.feishu_gateway_config_key,
+                include_feishu_ws=bool(args.include_feishu_ws),
+                feishu_ws_config_key=args.feishu_ws_config_key,
                 include_content=(not bool(args.no_content)) or bool(args.output_dir),
             )
             if args.output_dir:

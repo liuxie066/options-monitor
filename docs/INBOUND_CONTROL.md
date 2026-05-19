@@ -112,7 +112,7 @@ Local test:
 ./om inbound handle --text '持仓 sy' --sender local --channel local --message-id local-1
 ```
 
-Feishu gateway call:
+Feishu message call:
 
 ```bash
 OM_FEISHU_BOT_ALLOWED_OPEN_IDS='ou_xxx' \
@@ -132,72 +132,53 @@ OM_FEISHU_BOT_ALLOWED_OPEN_IDS='ou_xxx' \
 
 This adapter only extracts Feishu `im.message.receive_v1` text-message fields and delegates to `./om inbound handle`.
 
-The adapter also handles Feishu URL verification payloads by returning the challenge:
-
-```bash
-./om inbound feishu --input-json '{"type":"url_verification","challenge":"xxx"}'
-```
-
 Text output for chat replies:
 
 ```bash
 ./om inbound handle --text '状态' --format text
 ```
 
-## Feishu Gateway
+## Feishu Long Connection
 
-`./om inbound feishu-gateway` is the long-running Feishu App event callback receiver for the full Feishu loop:
+`./om inbound feishu-ws` is the long-running Feishu App long-connection client for the full Feishu loop:
 
 ```text
-Feishu Event Subscription HTTPS callback
-  -> ./om inbound feishu-gateway
-  -> signature/token checks
+Feishu Event Subscription long connection
+  -> ./om inbound feishu-ws
   -> ./om inbound feishu
   -> OM inbound allowlist/audit/pure-read tools
   -> Feishu message reply API
 ```
 
-It still does not expose arbitrary shell execution. It only forwards verified Feishu text messages into the same inbound control path.
+It still does not expose arbitrary shell execution. It only forwards Feishu text messages received through the authenticated SDK connection into the same inbound control path. OM no longer supports the HTTPS callback receiver as the production Feishu inbound path.
 
 Required environment values:
 
 ```bash
 export OM_FEISHU_BOT_APP_ID='<Feishu app_id>'
 export OM_FEISHU_BOT_APP_SECRET='<Feishu app_secret>'
-export OM_FEISHU_BOT_ENCRYPT_KEY='<Feishu event Encrypt Key>'
-export OM_FEISHU_BOT_VERIFICATION_TOKEN='<Feishu event Verification Token>'
 export OM_FEISHU_BOT_USER_OPEN_ID='***REMOVED-OPEN-ID***'
 export OM_FEISHU_BOT_ALLOWED_OPEN_IDS='***REMOVED-OPEN-ID***'
+export OM_FEISHU_ACK_REACTION='SMILE'
 ```
 
-The same Feishu Bot credentials are used for inbound event verification, same-message replies, and proactive OM notifications. There is no fallback to a separate notification app.
+The same Feishu Bot credentials are used for long-connection event receiving, same-message replies, and proactive OM notifications. There is no fallback to a separate notification app.
+
+`OM_FEISHU_ACK_REACTION` is optional. When set, `feishu-ws` calls Feishu's message reaction API after an allowed text message is accepted by inbound control and before sending the text reply. The value must be a Feishu `emoji_type` such as `SMILE`; leave it empty to disable reaction acknowledgements. Reaction failures are reported in the JSON status for that event but do not fail the inbound command or block the text reply.
 
 Local config check:
 
 ```bash
-./om inbound feishu-gateway --check
+./om inbound feishu-ws --check
 ```
 
-Run behind an HTTPS reverse proxy:
+Run the long-connection client directly on the server:
 
 ```bash
-./om inbound feishu-gateway --host 127.0.0.1 --port 8765 --path /feishu/events
-```
-
-The external Feishu callback URL should then point at your reverse proxy, for example:
-
-```text
-https://your-domain.example/feishu/events
-```
-
-Direct TLS is also supported when you really want Python to terminate HTTPS:
-
-```bash
-./om inbound feishu-gateway \
-  --host 0.0.0.0 \
-  --port 8765 \
-  --tls-certfile /etc/letsencrypt/live/your-domain/fullchain.pem \
-  --tls-keyfile /etc/letsencrypt/live/your-domain/privkey.pem
+./om inbound feishu-ws \
+  --config-key us \
+  --audit-db /var/lib/options-monitor/output_shared/state/inbound_control.sqlite3 \
+  --lock-path /var/lib/options-monitor/locks/feishu-ws.lock
 ```
 
 For Linux systemd rendering:
@@ -209,18 +190,17 @@ For Linux systemd rendering:
   --env-file /etc/options-monitor/options-monitor.env \
   --markets us hk \
   --accounts lx sy \
-  --include-feishu-gateway \
+  --include-feishu-ws \
   --output-dir /tmp/options-monitor-service
 ```
 
-Install the rendered `options-monitor-feishu-gateway.service`, reload systemd, and enable it. The service binds to `127.0.0.1:8765` by default, which is intended for Nginx/Caddy/Cloudflare Tunnel TLS termination.
+Install the rendered `options-monitor-feishu-ws.service`, reload systemd, and enable it. It does not bind a local HTTP port and does not require a public callback URL, reverse proxy, TLS certificate, or tunnel. The rendered service passes `--lock-path` so only one long-connection client should run per Feishu App.
 
 Supported Feishu events:
 
-- `url_verification`
 - `im.message.receive_v1` with text content
 
-Unsupported events are acknowledged and ignored. Encrypted event payloads are supported when `requirements/server.txt` is installed, because decryption uses the server dependency set.
+Only subscribe this event for the OM Bot in Feishu Open Platform. Install `requirements/server.txt` on hosts that run `feishu-ws`, because long connection uses the `lark-oapi` server dependency set.
 
 ## LLM Translator
 

@@ -10,8 +10,6 @@ DEFAULT_FEISHU_APP_SECRET_ENV = "OM_FEISHU_APP_SECRET"
 DEFAULT_FEISHU_HOLDINGS_TABLE_ENV = "OM_FEISHU_HOLDINGS_TABLE"
 DEFAULT_FEISHU_BOT_APP_ID_ENV = "OM_FEISHU_BOT_APP_ID"
 DEFAULT_FEISHU_BOT_APP_SECRET_ENV = "OM_FEISHU_BOT_APP_SECRET"
-DEFAULT_FEISHU_BOT_ENCRYPT_KEY_ENV = "OM_FEISHU_BOT_ENCRYPT_KEY"
-DEFAULT_FEISHU_BOT_VERIFICATION_TOKEN_ENV = "OM_FEISHU_BOT_VERIFICATION_TOKEN"
 DEFAULT_FEISHU_BOT_USER_OPEN_ID_ENV = "OM_FEISHU_BOT_USER_OPEN_ID"
 DEFAULT_FEISHU_BOT_ALLOWED_OPEN_IDS_ENV = "OM_FEISHU_BOT_ALLOWED_OPEN_IDS"
 
@@ -70,14 +68,10 @@ class FeishuBotConfig:
     app_secret: str
     user_open_id: str
     allowed_open_ids: tuple[str, ...]
-    encrypt_key: str
-    verification_token: str
     app_id_env: str
     app_secret_env: str
     user_open_id_env: str
     allowed_open_ids_env: str
-    encrypt_key_env: str
-    verification_token_env: str
 
     @property
     def credentials_ready(self) -> bool:
@@ -89,7 +83,7 @@ class FeishuBotConfig:
 
     @property
     def inbound_ready(self) -> bool:
-        return bool(self.credentials_ready and self.encrypt_key and self.verification_token and self.allowed_open_ids)
+        return bool(self.credentials_ready and self.allowed_open_ids)
 
     @property
     def credential_missing_fields(self) -> tuple[str, ...]:
@@ -110,10 +104,6 @@ class FeishuBotConfig:
     @property
     def inbound_missing_fields(self) -> tuple[str, ...]:
         missing = list(self.credential_missing_fields)
-        if not self.encrypt_key:
-            missing.append(self.encrypt_key_env)
-        if not self.verification_token:
-            missing.append(self.verification_token_env)
         if not self.allowed_open_ids:
             missing.append(self.allowed_open_ids_env)
         return tuple(missing)
@@ -131,10 +121,6 @@ class FeishuBotConfig:
             "user_open_id_configured": bool(self.user_open_id),
             "allowed_open_ids_env": self.allowed_open_ids_env,
             "allowed_open_ids_count": len(self.allowed_open_ids),
-            "encrypt_key_env": self.encrypt_key_env,
-            "encrypt_key_configured": bool(self.encrypt_key),
-            "verification_token_env": self.verification_token_env,
-            "verification_token_configured": bool(self.verification_token),
         }
 
 
@@ -168,8 +154,6 @@ def resolve_feishu_bot_config(
     app_secret_env = DEFAULT_FEISHU_BOT_APP_SECRET_ENV
     user_open_id_env = DEFAULT_FEISHU_BOT_USER_OPEN_ID_ENV
     allowed_open_ids_env = DEFAULT_FEISHU_BOT_ALLOWED_OPEN_IDS_ENV
-    encrypt_key_env = DEFAULT_FEISHU_BOT_ENCRYPT_KEY_ENV
-    verification_token_env = DEFAULT_FEISHU_BOT_VERIFICATION_TOKEN_ENV
     user_open_id = _env(environ, user_open_id_env)
     allowed_open_ids = _split_csv(_env(environ, allowed_open_ids_env)) or ((user_open_id,) if user_open_id else ())
     return FeishuBotConfig(
@@ -177,14 +161,10 @@ def resolve_feishu_bot_config(
         app_secret=_env(environ, app_secret_env),
         user_open_id=user_open_id,
         allowed_open_ids=allowed_open_ids,
-        encrypt_key=_env(environ, encrypt_key_env),
-        verification_token=_env(environ, verification_token_env),
         app_id_env=app_id_env,
         app_secret_env=app_secret_env,
         user_open_id_env=user_open_id_env,
         allowed_open_ids_env=allowed_open_ids_env,
-        encrypt_key_env=encrypt_key_env,
-        verification_token_env=verification_token_env,
     )
 
 
@@ -204,9 +184,7 @@ __all__ = [
     "DEFAULT_FEISHU_BOT_ALLOWED_OPEN_IDS_ENV",
     "DEFAULT_FEISHU_BOT_APP_ID_ENV",
     "DEFAULT_FEISHU_BOT_APP_SECRET_ENV",
-    "DEFAULT_FEISHU_BOT_ENCRYPT_KEY_ENV",
     "DEFAULT_FEISHU_BOT_USER_OPEN_ID_ENV",
-    "DEFAULT_FEISHU_BOT_VERIFICATION_TOKEN_ENV",
     "FeishuBotConfig",
     "FeishuHoldingsConfig",
     "resolve_feishu_holdings_config",

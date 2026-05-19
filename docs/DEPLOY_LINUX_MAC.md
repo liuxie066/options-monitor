@@ -82,10 +82,9 @@ sudoedit "$ENV_FILE"
 ```bash
 OM_FEISHU_BOT_APP_ID=cli_xxx
 OM_FEISHU_BOT_APP_SECRET=xxx
-OM_FEISHU_BOT_ENCRYPT_KEY=xxx
-OM_FEISHU_BOT_VERIFICATION_TOKEN=xxx
 OM_FEISHU_BOT_USER_OPEN_ID=ou_xxx
 OM_FEISHU_BOT_ALLOWED_OPEN_IDS=ou_xxx
+OM_FEISHU_ACK_REACTION=SMILE
 ```
 
 渲染服务文件：
@@ -100,11 +99,11 @@ cd "$REPO"
   --deploy-user "$DEPLOY_USER" \
   --markets us hk \
   --accounts lx sy \
-  --include-feishu-gateway \
+  --include-feishu-ws \
   --output-dir /tmp/options-monitor-service
 ```
 
-`--include-feishu-gateway` 会生成 `options-monitor-feishu-gateway.service`，默认监听 `127.0.0.1:8765/feishu/events`。建议用 Nginx/Caddy/Cloudflare Tunnel 对外提供 HTTPS，再反代到本地 gateway。
+`--include-feishu-ws` 会生成 `options-monitor-feishu-ws.service`。它通过飞书长连接接收事件，不监听本地 HTTP 端口，也不需要公网回调 URL、Nginx/Caddy 或 Cloudflare Tunnel。服务会使用 `/var/lib/options-monitor/locks/feishu-ws.lock` 防止同一个 Feishu App 启动多个长连接客户端。
 
 如果要启用远端自动升级，建议 `$REPO` 使用 `/opt/options-monitor/current` 这样的 symlink 布局，并额外传：
 
@@ -181,7 +180,7 @@ sudo systemctl enable --now options-monitor-auto-close-hk.timer
 sudo systemctl enable --now options-monitor-projection-verify.timer
 sudo systemctl enable --now options-monitor-runtime-status.timer
 sudo systemctl enable --now options-monitor-trade-intake.service
-sudo systemctl enable --now options-monitor-feishu-gateway.service
+sudo systemctl enable --now options-monitor-feishu-ws.service
 ```
 
 如果 render 时传了 `--include-auto-upgrade`，再启用升级 timer：

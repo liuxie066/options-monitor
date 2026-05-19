@@ -477,10 +477,10 @@ bash scripts/install_agent_plugin.sh
 ```bash
 ./om inbound handle --text '持仓 sy' --sender local --channel local --message-id local-1
 ./om inbound feishu --input-file feishu_event.json --format text
-./om inbound feishu-gateway --check
+./om inbound feishu-ws --check
 ```
 
-它只接受确定性只读命令，并带 sender allowlist、message_id 幂等和 SQLite audit。`feishu-gateway` 可作为长驻 Feishu App event callback receiver，负责飞书签名/verification token 校验和自动回复，但仍然只能进入只读 inbound 控制链。接飞书、微信或 Hermes 前先看
+它只接受确定性只读命令，并带 sender allowlist、message_id 幂等和 SQLite audit。`feishu-ws` 可作为长驻 Feishu App long-connection client，通过飞书 SDK 长连接接收消息，可按 `OM_FEISHU_ACK_REACTION` 增加消息 reaction，并自动回复，不需要公网 HTTPS callback。接飞书、微信或 Hermes 前先看
 [docs/INBOUND_CONTROL.md](docs/INBOUND_CONTROL.md)。
 
 AI Cofunder 证据交接：
