@@ -28,6 +28,7 @@ from src.application.service_deploy import (
     service_status_from_profile,
     write_service_bundle,
 )
+from src.application.service_upgrade import service_rollback, service_upgrade, service_upgrade_check
 from src.application.strategy_replay import analyze_strategy_replay, read_strategy_replay_file
 from src.application.tick_cron import run_tick_cron
 from src.application.tool_execution import execute_tool
@@ -191,6 +192,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     service_render.add_argument("--deploy-user", default=None, help="systemd User= identity; also accepted from OM_DEPLOY_USER/DEPLOY_USER")
     service_render.add_argument("--deploy-home", default=None, help="systemd HOME environment; defaults to /home/<deploy-user>")
     service_render.add_argument("--timeout", dest="timeout_seconds", type=int, default=600)
+    service_render.add_argument("--include-auto-upgrade", action="store_true", help="render an opt-in daily auto-upgrade service/timer")
     service_render.add_argument("--output-dir", default=None, help="write rendered files under this directory")
     service_render.add_argument("--no-content", action="store_true", help="omit file contents from JSON output")
     service_preflight_cmd = service_sub.add_parser("preflight", help="check Linux runtime root before installing/running services")
@@ -207,6 +209,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     service_status = service_sub.add_parser("status", help="summarize a rendered service profile")
     service_status.add_argument("--profile-path", required=True)
     service_status.add_argument("--include-service-status", action="store_true")
+    service_upgrade_check_cmd = service_sub.add_parser("upgrade-check", help="check whether a newer released version is available")
+    service_upgrade_check_cmd.add_argument("--repo-root", default=None)
+    service_upgrade_check_cmd.add_argument("--runtime-root", default="/var/lib/options-monitor")
+    service_upgrade_check_cmd.add_argument("--remote-name", default="origin")
+    service_upgrade_cmd = service_sub.add_parser("upgrade", help="upgrade a current symlink to a released version")
+    service_upgrade_cmd.add_argument("--repo-root", default=None)
+    service_upgrade_cmd.add_argument("--runtime-root", default="/var/lib/options-monitor")
+    service_upgrade_cmd.add_argument("--releases-root", default=None)
+    service_upgrade_cmd.add_argument("--target-version", default=None)
+    service_upgrade_cmd.add_argument("--remote-name", default="origin")
+    service_upgrade_cmd.add_argument("--auto", action="store_true")
+    service_upgrade_cmd.add_argument("--allow-major", action="store_true")
+    service_upgrade_cmd.add_argument("--confirm", action="store_true", help="apply upgrade; without this the command is a dry run")
+    service_upgrade_cmd.add_argument("--no-restart-services", action="store_true")
+    service_rollback_cmd = service_sub.add_parser("rollback", help="switch current symlink back to a prior released version")
+    service_rollback_cmd.add_argument("--repo-root", default=None)
+    service_rollback_cmd.add_argument("--runtime-root", default="/var/lib/options-monitor")
+    service_rollback_cmd.add_argument("--releases-root", default=None)
+    service_rollback_cmd.add_argument("--to-version", default=None)
+    service_rollback_cmd.add_argument("--confirm", action="store_true", help="apply rollback; without this the command is a dry run")
+    service_rollback_cmd.add_argument("--no-restart-services", action="store_true")
 
     sub.add_parser("watchlist", help="manage monitored symbols")
     sub.add_parser("option-positions", help="option position operations")
@@ -550,6 +573,7 @@ def main(argv: list[str] | None = None) -> int:
                 deploy_user=args.deploy_user,
                 deploy_home=args.deploy_home,
                 timeout_seconds=args.timeout_seconds,
+                include_auto_upgrade=bool(args.include_auto_upgrade),
                 include_content=(not bool(args.no_content)) or bool(args.output_dir),
             )
             if args.output_dir:
@@ -590,6 +614,39 @@ def main(argv: list[str] | None = None) -> int:
             profile = load_service_profile(args.profile_path)
             data = service_status_from_profile(profile, include_status=bool(args.include_service_status))
             return _print(build_response(tool_name="service.status", ok=True, data=data))
+
+        if args.command == "service" and args.service_command == "upgrade-check":
+            data = service_upgrade_check(
+                repo_root=args.repo_root or repo_base(),
+                runtime_root=args.runtime_root,
+                remote_name=args.remote_name,
+            )
+            return _print(build_response(tool_name="service.upgrade_check", ok=bool(data.get("ok")), data=data))
+
+        if args.command == "service" and args.service_command == "upgrade":
+            data = service_upgrade(
+                repo_root=args.repo_root or repo_base(),
+                runtime_root=args.runtime_root,
+                releases_root=args.releases_root,
+                target_version=args.target_version,
+                remote_name=args.remote_name,
+                confirm=bool(args.confirm),
+                auto=bool(args.auto),
+                allow_major=bool(args.allow_major),
+                restart_services=not bool(args.no_restart_services),
+            )
+            return _print(build_response(tool_name="service.upgrade", ok=bool(data.get("ok")), data=data))
+
+        if args.command == "service" and args.service_command == "rollback":
+            data = service_rollback(
+                repo_root=args.repo_root or repo_base(),
+                runtime_root=args.runtime_root,
+                releases_root=args.releases_root,
+                to_version=args.to_version,
+                confirm=bool(args.confirm),
+                restart_services=not bool(args.no_restart_services),
+            )
+            return _print(build_response(tool_name="service.rollback", ok=bool(data.get("ok")), data=data))
 
         if args.command == "init" and args.init_command == "runtime":
             return _print(build_response(tool_name="init.runtime", ok=True, data=init_runtime(

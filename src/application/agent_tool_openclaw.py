@@ -952,6 +952,11 @@ def runtime_status_tool(
         base=base,
         read_json_object_or_empty=read_json_object_or_empty,
     )
+    upgrade_status = _json_file_info(
+        ledger_runtime_root / "upgrade_status.json",
+        base=base,
+        read_json_object_or_empty=read_json_object_or_empty,
+    )
     notification = _text_file_info(
         report_dir / "symbols_notification.txt",
         base=base,
@@ -1113,6 +1118,7 @@ def runtime_status_tool(
             "ledger": ledger_context_summary,
         },
         "projection_verify": projection_verify,
+        "service_upgrade": upgrade_status,
         "accounts": account_status,
         "latest_run_selection": latest_run_selection,
         "latest_run": latest_run_payload,
@@ -1150,6 +1156,9 @@ def runtime_status_tool(
     projection_verify_json = projection_verify.get("json") if isinstance(projection_verify.get("json"), dict) else {}
     data["summary"]["projection_verify_ok"] = projection_verify_json.get("ok") if projection_verify_json else None
     data["summary"]["projection_verify_mode"] = projection_verify_json.get("mode_used") if projection_verify_json else None
+    upgrade_json = upgrade_status.get("json") if isinstance(upgrade_status.get("json"), dict) else {}
+    data["summary"]["service_upgrade_status"] = upgrade_json.get("status") if upgrade_json else None
+    data["summary"]["service_upgrade_target_version"] = upgrade_json.get("target_version") if upgrade_json else None
     return data, warnings, {"config_path": mask_path(config_path)}
 
 

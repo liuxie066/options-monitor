@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.69 - 2026-05-19
+
+### Added
+- Added opt-in service release upgrade commands and timers: `service upgrade-check`, dry-run/confirmed `service upgrade`, and dry-run/confirmed `service rollback`.
+- Surfaced the latest service upgrade status in runtime status.
+
 ## 1.2.68 - 2026-05-19
 
 ### Added

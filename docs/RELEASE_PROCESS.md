@@ -47,6 +47,70 @@ python3 -m pytest tests/test_layered_config.py
 
 ---
 
+## 远端自动升级
+
+远端升级只消费已经发布成功的 GitHub release tag，不追 `main`。
+
+推荐部署布局：
+
+```text
+/opt/options-monitor/
+  releases/
+    1.2.68/
+    1.2.69/
+  current -> releases/1.2.69
+
+/var/lib/options-monitor/
+  service.profile.json
+  upgrade_status.json
+  locks/upgrade.lock
+```
+
+升级检查只读：
+
+```bash
+./om service upgrade-check \
+  --repo-root /opt/options-monitor/current \
+  --runtime-root /var/lib/options-monitor
+```
+
+升级默认 dry-run：
+
+```bash
+./om service upgrade \
+  --repo-root /opt/options-monitor/current \
+  --runtime-root /var/lib/options-monitor
+```
+
+确认升级时才会下载 tag、校验新目录、切换 `current` symlink，并重启长期运行的 trade-intake service：
+
+```bash
+./om service upgrade \
+  --repo-root /opt/options-monitor/current \
+  --runtime-root /var/lib/options-monitor \
+  --confirm
+```
+
+默认不自动跨 major；需要跨 major 时显式传 `--allow-major`。
+
+回滚同样默认 dry-run：
+
+```bash
+./om service rollback \
+  --repo-root /opt/options-monitor/current \
+  --runtime-root /var/lib/options-monitor
+
+./om service rollback \
+  --repo-root /opt/options-monitor/current \
+  --runtime-root /var/lib/options-monitor \
+  --to-version 1.2.68 \
+  --confirm
+```
+
+`./om service render --include-auto-upgrade` 会额外渲染每天北京时间 06:10 的升级 timer。这个开关是显式 opt-in；普通 `service render` 不会默认启用自动升级。
+
+---
+
 ## 手动打 tag（补发 / 重跑）
 
 ```bash
