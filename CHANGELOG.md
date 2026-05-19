@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.70 - 2026-05-19
+
+### Changed
+- Render US and HK systemd tick timers with market-timezone calendar-aligned 10-minute boundaries while leaving scheduler run-point decisions unchanged.
+
 ## 1.2.69 - 2026-05-19
 
 ### Added

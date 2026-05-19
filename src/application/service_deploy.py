@@ -19,6 +19,8 @@ ServiceProvider = Literal["systemd", "launchd", "manual", "openclaw"]
 DEFAULT_MARKETS: tuple[str, ...] = ("us", "hk")
 DEFAULT_ACCOUNTS: tuple[str, ...] = ("lx", "sy")
 DEFAULT_TIMEOUT_SECONDS = 600
+US_TICK_SYSTEMD_CALENDAR = "Mon..Fri *-*-* 09..16:00/10:00 America/New_York"
+HK_TICK_SYSTEMD_CALENDAR = "Mon..Fri *-*-* 09..16:00/10:00 Asia/Hong_Kong"
 AUTO_CLOSE_SYSTEMD_CALENDAR = "*-*-* 05:30:00 Asia/Shanghai"
 AUTO_CLOSE_LAUNCHD_CALENDAR = {"Hour": 5, "Minute": 30}
 PROJECTION_VERIFY_SYSTEMD_CALENDAR = "*-*-* 06:00:00 Asia/Shanghai"
@@ -200,6 +202,14 @@ def _systemd_timer(*, description: str, unit_name: str, interval: str | None = N
     return "\n".join(timer_lines)
 
 
+def _systemd_tick_calendar(market: str) -> str | None:
+    if market == "us":
+        return US_TICK_SYSTEMD_CALENDAR
+    if market == "hk":
+        return HK_TICK_SYSTEMD_CALENDAR
+    return None
+
+
 def _launchd_plist(
     *,
     label: str,
@@ -366,7 +376,11 @@ def render_service_bundle(
             )
             add(
                 f"systemd/{timer_name}",
-                _systemd_timer(description=f"Options Monitor {market.upper()} tick timer", unit_name=service_name),
+                _systemd_timer(
+                    description=f"Options Monitor {market.upper()} tick timer",
+                    unit_name=service_name,
+                    calendar=_systemd_tick_calendar(market),
+                ),
                 install_path=f"/etc/systemd/system/{timer_name}",
                 kind="systemd_timer",
                 service_name=timer_name,
