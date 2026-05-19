@@ -480,8 +480,13 @@ def apply_bootstrap_snapshot(
         return False
 
 
-def load_option_positions_repo(data_config: Path) -> SQLiteOptionPositionsRepository:
-    store = resolve_ledger_store(data_config)
+def load_option_positions_repo(
+    data_config: Path,
+    *,
+    config_path: str | Path | None = None,
+    runtime_root: str | Path | None = None,
+) -> SQLiteOptionPositionsRepository:
+    store = resolve_ledger_store(data_config, config_path=config_path, runtime_root=runtime_root)
     repo = SQLiteOptionPositionsRepository(store.sqlite_path)
     repo.data_config_path = store.data_config_path
     setattr(repo, "ledger_store", store)

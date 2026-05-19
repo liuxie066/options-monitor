@@ -35,6 +35,31 @@ def _repo_with_open_event(tmp_path: Path):
     return repo, event_id
 
 
+def test_trade_events_list_text_shows_trade_time_beijing(monkeypatch, tmp_path: Path, capsys) -> None:
+    import src.interfaces.cli.trade_events as cli
+
+    repo, _event_id = _repo_with_open_event(tmp_path)
+    monkeypatch.setattr(cli, "resolve_option_positions_repo", lambda **_kwargs: (tmp_path / "data.json", repo))
+
+    assert cli.main(["list", "--format", "text"]) == 0
+
+    out = capsys.readouterr().out
+    assert "time 1970-01-01 08:00:01 北京时间" in out
+
+
+def test_trade_events_show_json_includes_trade_time_beijing(monkeypatch, tmp_path: Path, capsys) -> None:
+    import src.interfaces.cli.trade_events as cli
+
+    repo, event_id = _repo_with_open_event(tmp_path)
+    monkeypatch.setattr(cli, "resolve_option_positions_repo", lambda **_kwargs: (tmp_path / "data.json", repo))
+
+    assert cli.main(["show", event_id, "--format", "json"]) == 0
+
+    out = json.loads(capsys.readouterr().out)
+    assert out["event"]["trade_time_ms"] == 1000
+    assert out["event"]["trade_time_beijing"] == "1970-01-01 08:00:01 北京时间"
+
+
 def test_trade_events_repair_dry_run_does_not_mutate(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.trade_events as cli
 

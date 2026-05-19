@@ -36,6 +36,7 @@ from src.application.positions.workflows import (
     format_manual_close_match_error,
 )
 from src.application.positions.inspection import build_lot_event_history, inspect_projection_state
+from src.application.trade_time_format import add_trade_time_beijing
 
 
 def _resolve_path_under(path: str | Path, *, base: Path) -> Path:
@@ -401,7 +402,7 @@ def main(argv: list[str] | None = None) -> int:
             if account and event_account != account:
                 continue
             rows.append(
-                {
+                add_trade_time_beijing({
                     'event_id': event.get('event_id'),
                     'trade_time_ms': event.get('trade_time_ms'),
                     'source_type': event.get('source_type'),
@@ -417,7 +418,7 @@ def main(argv: list[str] | None = None) -> int:
                     'strike': event.get('strike'),
                     'expiration_ymd': event.get('expiration_ymd'),
                     'currency': event.get('currency'),
-                }
+                })
             )
             if len(rows) >= max(args.limit, 1):
                 break
@@ -432,7 +433,8 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 f"- {row.get('event_id')} | {row.get('account')} | {row.get('symbol')} | "
                 f"{row.get('side')} {row.get('option_type')} {row.get('position_effect')} | "
-                f"contracts {row.get('contracts')} | source {row.get('source_type')}:{row.get('source_name')}"
+                f"contracts {row.get('contracts')} | time {row.get('trade_time_beijing') or '-'} | "
+                f"source {row.get('source_type')}:{row.get('source_name')}"
             )
         return 0
 
@@ -458,7 +460,8 @@ def main(argv: list[str] | None = None) -> int:
                 extra.append(f"close_target_src={row.get('close_target_source_event_id')}")
             print(
                 f"- {row.get('event_id')} | {row.get('side')} {row.get('option_type')} {row.get('position_effect')} | "
-                f"contracts {row.get('contracts')} | source {row.get('source_type')}:{row.get('source_name')}"
+                f"contracts {row.get('contracts')} | time {row.get('trade_time_beijing') or '-'} | "
+                f"source {row.get('source_type')}:{row.get('source_name')}"
                 + (f" | {' '.join(extra)}" if extra else "")
             )
         return 0

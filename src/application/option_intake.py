@@ -31,8 +31,12 @@ from src.application.account_config import accounts_from_config_path
 from src.application.config_loader import load_config
 from src.application.parse_option_message import parse_option_message_text
 from src.application.ledger.api import (
+    inspect_ledger_stores,
+    ledger_store_payload,
     open_position_ledger_from_data_config,
     open_position_ledger_from_runtime_config,
+    resolve_ledger_store,
+    resolve_position_data_config_path,
 )
 from src.application.positions.workflows import (
     ManualCloseMatchError,
@@ -40,6 +44,7 @@ from src.application.positions.workflows import (
     execute_manual_open,
     format_manual_close_match_error,
 )
+from src.application.trade_time_format import format_trade_time_beijing
 from src.application.trades.intent import trade_intent_from_manual_parse
 
 
@@ -224,6 +229,45 @@ def _target_position_side_for_close(parsed_fields: dict[str, Any], raw_text: str
     return None
 
 
+def _print_ledger_target(*, data_config: Path, repo: Any | None, config_path: Path | None) -> bool:
+    store = (
+        ledger_store_payload(data_config, repo)
+        if repo is not None
+        else resolve_ledger_store(data_config, config_path=config_path).to_dict()
+    )
+    sqlite_path = str(store.get("sqlite_path") or "")
+    runtime_root = str(store.get("runtime_root") or "")
+    runtime_root_source = str(store.get("runtime_root_source") or "")
+    print(f"[LEDGER] sqlite={sqlite_path} runtime_root={runtime_root} source={runtime_root_source}")
+    inspection = inspect_ledger_stores(data_config, config_path=config_path)
+    warnings = [str(item) for item in (inspection.get("warnings") or []) if str(item)]
+    for warning in warnings:
+        print(f"[LEDGER_WARN] {warning}")
+    summary = inspection.get("summary") if isinstance(inspection.get("summary"), dict) else {}
+    return bool(summary.get("multiple_populated") or summary.get("active_empty_but_other_populated"))
+
+
+def _copy_with_beijing_time_fields(fields: dict[str, Any], *, keys: tuple[str, ...]) -> dict[str, Any]:
+    out = dict(fields)
+    for key in keys:
+        formatted = format_trade_time_beijing(out.get(key))
+        if formatted is not None:
+            out[f"{key}_beijing"] = formatted
+    return out
+
+
+def _first_time_ms(*values: Any) -> Any:
+    for value in values:
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _format_done_trade_time(ms: Any) -> str:
+    formatted = format_trade_time_beijing(ms)
+    return f" 成交时间={formatted}" if formatted else ""
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description='Option intake (parse + write)')
     ap.add_argument('--text', required=True)
@@ -289,13 +333,30 @@ def main() -> int:
         broker=market,
         record_id=record_id,
     )
+    data_config_path = resolve_position_data_config_path(
+        base=base,
+        cfg=runtime_config,
+        data_config=args.data_config,
+        config_path=cfg_path,
+    )
+    if args.dry_run or args.apply or action == "close":
+        diverged_store = _print_ledger_target(data_config=data_config_path, repo=None, config_path=cfg_path)
+        if args.apply and diverged_store:
+            print("[LEDGER_FAIL] divergent populated ledger stores detected; aborting apply")
+            return 2
+
     need_repo = action == 'close' or bool(args.apply)
     repo = None
     if need_repo:
         if runtime_config is not None:
-            _data_config, repo = open_position_ledger_from_runtime_config(base=base, cfg=runtime_config, data_config=args.data_config)
+            _resolved_data_config, repo = open_position_ledger_from_runtime_config(
+                base=base,
+                cfg=runtime_config,
+                data_config=args.data_config,
+                config_path=cfg_path,
+            )
         else:
-            _data_config, repo = open_position_ledger_from_data_config(base=base, data_config=args.data_config)
+            _resolved_data_config, repo = open_position_ledger_from_data_config(base=base, data_config=args.data_config)
 
     if action == 'close':
         target_position_side = intent.target_position_side or _target_position_side_for_close(p, text)
@@ -328,10 +389,18 @@ def main() -> int:
             print(f"[MATCH] rule={match.get('rule')} record_id={match.get('record_id')}")
         if args.dry_run and (not args.apply):
             print('[DRY_RUN] update fields:')
-            print(json.dumps(out['patch'], ensure_ascii=False, indent=2))
+            print(json.dumps(_copy_with_beijing_time_fields(out['patch'], keys=("closed_at", "last_action_at")), ensure_ascii=False, indent=2))
             return 0
         closed_record_id = (match.get("record_id") if match else None) or intent.record_id
-        print(f"[DONE] buy-closed {closed_record_id} contracts={int(intent.contracts or 0)} event_id={out['result'].get('event_id')}")
+        trade_time_ms = _first_time_ms(
+            intent.trade_time_ms,
+            (out.get("ledger_preflight") or {}).get("event_time_ms") if isinstance(out.get("ledger_preflight"), dict) else None,
+            (out.get("patch") or {}).get("closed_at") if isinstance(out.get("patch"), dict) else None,
+        )
+        print(
+            f"[DONE] buy-closed {closed_record_id} contracts={int(intent.contracts or 0)} "
+            f"event_id={out['result'].get('event_id')}{_format_done_trade_time(trade_time_ms)}"
+        )
         return 0
     else:
         try:
@@ -358,9 +427,11 @@ def main() -> int:
             return 2
         if args.dry_run and (not args.apply):
             print('[DRY_RUN] create fields:')
-            print(json.dumps(out['fields'], ensure_ascii=False, indent=2))
+            print(json.dumps(_copy_with_beijing_time_fields(out['fields'], keys=("opened_at", "last_action_at")), ensure_ascii=False, indent=2))
             return 0
-        print(f"[DONE] created event_id={out['result'].get('event_id')}")
+        fields = out.get("fields") if isinstance(out.get("fields"), dict) else {}
+        trade_time_ms = _first_time_ms(intent.trade_time_ms, fields.get("opened_at"), fields.get("last_action_at"))
+        print(f"[DONE] created event_id={out['result'].get('event_id')}{_format_done_trade_time(trade_time_ms)}")
         return 0
 
 

@@ -863,6 +863,8 @@ def test_option_positions_cli_history_json_includes_related_events(monkeypatch, 
     assert event_ids[0].startswith("manual-open-")
     assert event_ids[1].startswith("manual-close-")
     assert event_ids[2].startswith("manual-adjust-")
+    assert rows[0]["trade_time_beijing"] == "1970-01-01 08:00:01 北京时间"
+    assert rows[1]["trade_time_beijing"] == "1970-01-01 08:00:01 北京时间"
     assert rows[3]["void_target_event_id"] == close_result["event_id"]
     assert rows[4]["void_target_event_id"] == adjust_result["event_id"]
 

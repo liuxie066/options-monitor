@@ -12,6 +12,7 @@ from src.application.ledger.api import (
     refresh_position_lot_projection,
     trade_event_log,
 )
+from src.application.trade_time_format import add_trade_time_beijing
 
 
 def _event_status(event: dict[str, Any], *, voided_event_ids: set[str], diagnostic_event_ids: set[str]) -> str:
@@ -74,7 +75,7 @@ def list_trade_event_reviews(
         if normalized_status != "all" and row_status != normalized_status:
             continue
         rows.append(
-            {
+            add_trade_time_beijing({
                 "event_id": event.get("event_id"),
                 "status": row_status,
                 "trade_time_ms": event.get("trade_time_ms"),
@@ -92,7 +93,7 @@ def list_trade_event_reviews(
                 "expiration_ymd": event.get("expiration_ymd"),
                 "currency": event.get("currency"),
                 "diagnostics": diagnostics_by_event.get(str(event.get("event_id") or "").strip(), []),
-            }
+            })
         )
         if len(rows) >= max(int(limit), 1):
             break
@@ -112,7 +113,7 @@ def show_trade_event_review(repo: Any, *, event_id: str) -> dict[str, Any]:
         diagnostic_event_ids=set(diagnostics_by_event),
     )
     return {
-        "event": event,
+        "event": add_trade_time_beijing(event),
         "status": status,
         "diagnostics": diagnostics_by_event.get(target_id, []),
     }

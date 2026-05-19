@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 1.2.75 - 2026-05-19
+
+### Fixed
+- Resolved manual option intake ledger stores from the runtime config path so `/var/lib/options-monitor/config.*.json` writes to the runtime active SQLite store without requiring `OM_RUNTIME_ROOT`.
+- Added manual intake ledger target output and fail-closed protection when populated active/default stores indicate possible ledger drift.
+- Standardized human-readable trade time output on Beijing time across manual intake summaries, trade intake receipts, trade-event review output, and option-position history/inspection payloads.
+
 ## 1.2.74 - 2026-05-19
 
 ### Added

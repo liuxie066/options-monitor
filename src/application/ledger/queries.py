@@ -23,15 +23,35 @@ def open_position_ledger_from_data_config(*, base: Path, data_config: str | Path
     return _impl(base=base, data_config=data_config)
 
 
+def resolve_position_data_config_path(
+    *,
+    base: Path,
+    cfg: dict[str, Any] | None = None,
+    data_config: str | Path | None = None,
+    config_path: str | Path | None = None,
+) -> Path:
+    from src.application.ledger.read_model import resolve_position_data_config_path as _impl
+
+    return _impl(base=base, cfg=cfg, data_config=data_config, config_path=config_path)
+
+
 def open_position_ledger_from_runtime_config(
     *,
     base: Path,
     cfg: dict[str, Any] | None,
     data_config: str | Path | None = None,
+    config_path: str | Path | None = None,
+    runtime_root: str | Path | None = None,
 ) -> tuple[Path, Any]:
     from src.application.ledger.read_model import resolve_position_repo_from_config as _impl
 
-    resolved_data_config, repo = _impl(base=base, cfg=cfg, data_config=data_config)
+    resolved_data_config, repo = _impl(
+        base=base,
+        cfg=cfg,
+        data_config=data_config,
+        config_path=config_path,
+        runtime_root=runtime_root,
+    )
     apply_position_ledger_runtime_config(repo, cfg)
     return resolved_data_config, repo
 
@@ -196,6 +216,7 @@ __all__ = [
     "position_monthly_income_report",
     "position_projection_verify_state",
     "project_trade_event_log",
+    "resolve_position_data_config_path",
     "resolve_position_lot_snapshots",
     "summarize_position_lot_shadow_status",
     "trade_event_log",
