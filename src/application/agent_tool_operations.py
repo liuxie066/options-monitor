@@ -7,6 +7,7 @@ from typing import Any, Callable, cast
 
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.ledger.api import ledger_store_payload
+from src.application.trade_time_format import add_trade_time_beijing
 
 
 def _as_int(value: Any, *, default: int, minimum: int = 1, maximum: int = 500) -> int:
@@ -198,7 +199,7 @@ def scheduler_status_tool(
 
 
 def _event_row(event: dict[str, Any], *, normalize_broker: Callable[[Any], str], normalize_account: Callable[[Any], str]) -> dict[str, Any]:
-    return {
+    return add_trade_time_beijing({
         "event_id": event.get("event_id"),
         "trade_time_ms": event.get("trade_time_ms"),
         "source_type": event.get("source_type"),
@@ -214,7 +215,7 @@ def _event_row(event: dict[str, Any], *, normalize_broker: Callable[[Any], str],
         "strike": event.get("strike"),
         "expiration_ymd": event.get("expiration_ymd"),
         "currency": event.get("currency"),
-    }
+    })
 
 
 def _events_action(

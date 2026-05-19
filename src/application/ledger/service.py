@@ -44,10 +44,15 @@ from src.application.ledger.results import (
 )
 
 
-def load_option_positions_repo(data_config: Any) -> Any:
+def load_option_positions_repo(
+    data_config: Any,
+    *,
+    config_path: Any = None,
+    runtime_root: Any = None,
+) -> Any:
     from src.application.ledger.bootstrap import load_option_positions_repo as _impl
 
-    return _impl(data_config)
+    return _impl(data_config, config_path=config_path, runtime_root=runtime_root)
 
 
 def require_option_positions_read_repo(repo: Any) -> Any:

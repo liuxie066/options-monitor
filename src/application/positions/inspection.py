@@ -20,6 +20,7 @@ from src.application.ledger.api import (
     project_trade_event_log,
     trade_event_log,
 )
+from src.application.trade_time_format import format_trade_time_beijing
 
 
 __all__ = ["build_lot_event_history", "inspect_projection_state"]
@@ -99,9 +100,10 @@ def _event_record_refs(event: dict[str, object]) -> set[str]:
 
 def _event_to_history_row(event: dict[str, object], *, fallback_record_id: str | None = None) -> dict[str, object]:
     payload = _event_payload(event)
-    return {
+    trade_time_ms = event.get("trade_time_ms")
+    row = {
         "event_id": str(event.get("event_id") or "").strip(),
-        "trade_time_ms": event.get("trade_time_ms"),
+        "trade_time_ms": trade_time_ms,
         "source_type": event.get("source_type"),
         "source_name": event.get("source_name"),
         "broker": normalize_broker(_optional_text(event.get("broker"))),
@@ -126,6 +128,24 @@ def _event_to_history_row(event: dict[str, object], *, fallback_record_id: str |
         ),
         "patch": payload.get("patch") if isinstance(payload.get("patch"), dict) else None,
     }
+    trade_time_beijing = format_trade_time_beijing(trade_time_ms)
+    if trade_time_beijing is not None:
+        row["trade_time_beijing"] = trade_time_beijing
+    return row
+
+
+def _lot_with_beijing_time_fields(row: dict[str, object]) -> dict[str, object]:
+    out = dict(row)
+    fields = row.get("fields")
+    if not isinstance(fields, dict):
+        return out
+    copied_fields = dict(fields)
+    for key in ("opened_at", "closed_at", "last_action_at"):
+        formatted = format_trade_time_beijing(copied_fields.get(key))
+        if formatted is not None:
+            copied_fields[f"{key}_beijing"] = formatted
+    out["fields"] = copied_fields
+    return out
 
 
 def _event_matches_lot(event: dict[str, object], *, record_id: str, fields: dict[str, object]) -> bool:
@@ -427,7 +447,7 @@ def inspect_projection_state(
             "expiration_ymd": expiration_ymd,
         },
         "matched_record_ids": sorted(matched_record_ids),
-        "current_lots": matched_current,
+        "current_lots": [_lot_with_beijing_time_fields(row) for row in matched_current],
         "projected_lots": matched_projected,
         "projection_verify_checkpoint_id": projection_verify_checkpoint_id,
         "baseline_lots": baseline_lots,

@@ -18,6 +18,7 @@ from src.application.trades.review import (
     replay_trade_events,
     show_trade_event_review,
 )
+from src.application.trade_time_format import format_trade_time_beijing
 
 
 def _print_json(payload: Any) -> None:
@@ -124,7 +125,8 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 f"- {row.get('event_id')} | {row.get('status')} | {row.get('account')} | {row.get('symbol')} | "
                 f"{row.get('side')} {row.get('option_type')} {row.get('position_effect')} | "
-                f"contracts {row.get('contracts')} | source {row.get('source_type')}:{row.get('source_name')}{diag_text}"
+                f"contracts {row.get('contracts')} | time {row.get('trade_time_beijing') or '-'} | "
+                f"source {row.get('source_type')}:{row.get('source_name')}{diag_text}"
             )
         return 0
 
@@ -138,9 +140,10 @@ def main(argv: list[str] | None = None) -> int:
             _print_json(payload)
             return 0
         event = payload["event"]
+        trade_time = format_trade_time_beijing(event.get("trade_time_ms")) or "-"
         print(
             f"{event.get('event_id')} | {payload.get('status')} | {event.get('account')} | {event.get('symbol')} | "
-            f"{event.get('side')} {event.get('option_type')} {event.get('position_effect')}"
+            f"{event.get('side')} {event.get('option_type')} {event.get('position_effect')} | time {trade_time}"
         )
         return 0
 

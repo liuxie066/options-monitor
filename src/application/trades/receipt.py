@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from domain.domain.multi_tick import resolve_notification_route_from_config
+from src.application.trade_time_format import format_trade_time_beijing
 from src.infrastructure.external_services import select_notification_delivery_adapter
 
 
@@ -161,6 +162,7 @@ def build_trade_intake_receipt_message(
     strike = _value("strike", deal, result, payload)
     contracts = _value("contracts", deal, result, payload) or _value("qty", deal, result, payload)
     price = _value("price", deal, result, payload)
+    trade_time = format_trade_time_beijing(_trade_time_ms(deal, result, payload))
     deal_id = _deal_id(deal, result, payload) or "-"
     reason = str(result.get("reason") or "").strip() or "-"
 
@@ -178,6 +180,8 @@ def build_trade_intake_receipt_message(
         lines.append(f"数量：{contracts} 张")
     if price not in (None, ""):
         lines.append(f"成交价：{price}")
+    if trade_time:
+        lines.append(f"成交时间：{trade_time}")
     lines.append(f"状态：{'已记录' if applied else '未记录'}")
     lines.append(f"原因：{reason}")
     lines.append(f"deal_id：{deal_id}")
@@ -223,6 +227,18 @@ def _deal_id(deal: Any, result: dict[str, Any], payload: dict[str, Any] | None) 
         or _optional_str((payload or {}).get("dealID"))
         or _optional_str((payload or {}).get("id"))
     )
+
+
+def _trade_time_ms(deal: Any, result: dict[str, Any], payload: dict[str, Any] | None) -> Any:
+    for value in (
+        result.get("trade_time_ms"),
+        getattr(deal, "trade_time_ms", None),
+        (payload or {}).get("trade_time_ms"),
+        (payload or {}).get("fill_time_ms"),
+    ):
+        if value not in (None, ""):
+            return value
+    return None
 
 
 def _value(name: str, deal: Any, result: dict[str, Any], payload: dict[str, Any] | None) -> str | None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -328,6 +329,122 @@ def _btc_popmart_message() -> str:
     )
 
 
+def _fake_open_parse() -> dict[str, object]:
+    return {
+        "ok": True,
+        "raw": "open",
+        "missing": [],
+        "parsed": {
+            "account": "sy",
+            "symbol": "9992.HK",
+            "option_type": "call",
+            "side": "short",
+            "strike": 200.0,
+            "exp": "2026-06-29",
+            "premium_per_share": 1.5,
+            "contracts": 3,
+            "currency": "HKD",
+            "market": "富途",
+            "multiplier": 100,
+        },
+    }
+
+
+def test_option_intake_runtime_config_path_resolves_runtime_ledger_without_env(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    import src.application.option_intake as intake
+    import src.application.ledger.store_resolution as store_resolution
+
+    release_root = tmp_path / "apps" / "releases" / "1.2.74"
+    runtime_root = tmp_path / "var" / "lib" / "options-monitor"
+    release_root.mkdir(parents=True)
+    runtime_root.mkdir(parents=True)
+    config_path = runtime_root / "config.hk.json"
+    config_path.write_text(json.dumps({"accounts": ["sy"], "portfolio": {}}, ensure_ascii=False), encoding="utf-8")
+
+    monkeypatch.delenv("OM_RUNTIME_ROOT", raising=False)
+    monkeypatch.setattr(intake, "repo_base", release_root)
+    monkeypatch.setattr(store_resolution, "REPO_BASE", release_root)
+    monkeypatch.setattr(intake, "load_config", lambda **_kwargs: {"accounts": ["sy"], "portfolio": {}})
+    monkeypatch.setattr(intake, "parse_option_message_text", lambda *_args, **_kwargs: _fake_open_parse())
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "option_intake",
+            "--config",
+            str(config_path),
+            "--text",
+            "/om -sy open 成交提醒",
+            "--apply",
+        ],
+    )
+
+    assert intake.main() == 0
+
+    active_db = runtime_root / "output_shared" / "state" / "option_positions.sqlite3"
+    release_local_db = release_root / "output_shared" / "state" / "option_positions.sqlite3"
+    assert active_db.exists()
+    assert not release_local_db.exists()
+    repo = ledger_repository.SQLiteOptionPositionsRepository(active_db)
+    assert repo.count_trade_events() == 1
+    store_inspect = store_resolution.inspect_ledger_stores(runtime_root / "portfolio.runtime.json", config_path=config_path)
+    assert store_inspect["summary"]["multiple_populated"] is False
+    assert not any("multiple ledger sqlite candidates" in item for item in store_inspect["warnings"])
+    out = capsys.readouterr().out
+    assert f"[LEDGER] sqlite={active_db.resolve()}" in out
+    assert "[DONE] created event_id=" in out
+
+
+def test_option_intake_apply_fails_closed_when_release_local_store_has_rows(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    import src.application.option_intake as intake
+    import src.application.ledger.store_resolution as store_resolution
+
+    release_root = tmp_path / "apps" / "releases" / "1.2.74"
+    runtime_root = tmp_path / "var" / "lib" / "options-monitor"
+    release_root.mkdir(parents=True)
+    runtime_root.mkdir(parents=True)
+    config_path = runtime_root / "config.hk.json"
+    config_path.write_text(json.dumps({"accounts": ["sy"], "portfolio": {}}, ensure_ascii=False), encoding="utf-8")
+
+    release_local_db = release_root / "output_shared" / "state" / "option_positions.sqlite3"
+    release_repo = ledger_repository.SQLiteOptionPositionsRepository(release_local_db)
+    _seed_popmart_short_call(release_repo)
+
+    monkeypatch.delenv("OM_RUNTIME_ROOT", raising=False)
+    monkeypatch.setattr(intake, "repo_base", release_root)
+    monkeypatch.setattr(store_resolution, "REPO_BASE", release_root)
+    monkeypatch.setattr(intake, "load_config", lambda **_kwargs: {"accounts": ["sy"], "portfolio": {}})
+    monkeypatch.setattr(intake, "parse_option_message_text", lambda *_args, **_kwargs: _fake_open_parse())
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "option_intake",
+            "--config",
+            str(config_path),
+            "--text",
+            "/om -sy open 成交提醒",
+            "--apply",
+        ],
+    )
+
+    assert intake.main() == 2
+
+    active_db = runtime_root / "output_shared" / "state" / "option_positions.sqlite3"
+    assert not active_db.exists()
+    out = capsys.readouterr().out
+    assert "[LEDGER_WARN] active ledger sqlite has no rows while another candidate is populated" in out
+    assert "[LEDGER_FAIL] divergent populated ledger stores detected; aborting apply" in out
+
+
 def test_option_intake_btc_dry_run_uses_parsed_fill_timestamp(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.application.option_intake as intake
 
@@ -346,11 +463,13 @@ def test_option_intake_btc_dry_run_uses_parsed_fill_timestamp(monkeypatch, tmp_p
     assert f"[MATCH] rule=strict_contract_unique record_id={lot_id}" in out
     assert f'"closed_at": {expected_ms}' in out
     assert f'"last_action_at": {expected_ms}' in out
+    assert '"closed_at_beijing": "2026-05-19 10:42:31 北京时间"' in out
+    assert '"last_action_at_beijing": "2026-05-19 10:42:31 北京时间"' in out
     assert repo.get_record_fields(lot_id)["status"] == "open"
     assert len(repo.list_trade_events()) == 1
 
 
-def test_option_intake_btc_apply_uses_parsed_fill_timestamp(monkeypatch, tmp_path: Path) -> None:
+def test_option_intake_btc_apply_uses_parsed_fill_timestamp(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.application.option_intake as intake
 
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
@@ -366,6 +485,8 @@ def test_option_intake_btc_apply_uses_parsed_fill_timestamp(monkeypatch, tmp_pat
 
     assert intake.main() == 0
 
+    out = capsys.readouterr().out
+    assert "成交时间=2026-05-19 10:42:31 北京时间" in out
     fields = repo.get_record_fields(lot_id)
     assert fields["status"] == "close"
     assert fields["closed_at"] == expected_ms

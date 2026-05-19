@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -30,9 +31,45 @@ from src.infrastructure.exchange_rates import get_exchange_rates_or_fetch_latest
 from src.infrastructure.feishu_bitable import parse_note_kv, safe_float
 
 
-def resolve_position_repo(*, base: Path, data_config: str | Path | None) -> tuple[Path, Any]:
-    resolved_data_config = resolve_data_config_path(base=base, data_config=data_config)
-    return resolved_data_config, load_option_positions_repo(resolved_data_config)
+def _resolve_data_config_for_config_path(
+    *,
+    base: Path,
+    data_config: str | Path | None,
+    config_path: str | Path | None = None,
+) -> Path:
+    if config_path is None or not str(config_path).strip():
+        return resolve_data_config_path(base=base, data_config=data_config)
+    resolved_config = Path(config_path).expanduser()
+    if not resolved_config.is_absolute():
+        resolved_config = resolved_config.resolve()
+    if data_config is not None and str(data_config).strip():
+        path = Path(data_config).expanduser()
+        if not path.is_absolute():
+            path = (resolved_config.parent / path).resolve()
+        return path
+    env_ref = str(os.environ.get("OM_DATA_CONFIG") or "").strip()
+    if env_ref:
+        return Path(env_ref).expanduser().resolve()
+    return (resolved_config.parent / "portfolio.runtime.json").resolve()
+
+
+def resolve_position_repo(
+    *,
+    base: Path,
+    data_config: str | Path | None,
+    config_path: str | Path | None = None,
+    runtime_root: str | Path | None = None,
+) -> tuple[Path, Any]:
+    resolved_data_config = _resolve_data_config_for_config_path(
+        base=base,
+        data_config=data_config,
+        config_path=config_path,
+    )
+    return resolved_data_config, load_option_positions_repo(
+        resolved_data_config,
+        config_path=config_path,
+        runtime_root=runtime_root,
+    )
 
 
 def resolve_position_repo_from_config(
@@ -40,12 +77,37 @@ def resolve_position_repo_from_config(
     base: Path,
     cfg: dict[str, Any] | None,
     data_config: str | Path | None = None,
+    config_path: str | Path | None = None,
+    runtime_root: str | Path | None = None,
 ) -> tuple[Path, Any]:
     portfolio_cfg = cfg.get("portfolio") if isinstance(cfg, dict) and isinstance(cfg.get("portfolio"), dict) else {}
     data_config_ref = data_config
     if data_config_ref is None or not str(data_config_ref).strip():
         data_config_ref = portfolio_cfg.get("data_config") if isinstance(portfolio_cfg, dict) else None
-    return resolve_position_repo(base=base, data_config=data_config_ref)
+    return resolve_position_repo(
+        base=base,
+        data_config=data_config_ref,
+        config_path=config_path,
+        runtime_root=runtime_root,
+    )
+
+
+def resolve_position_data_config_path(
+    *,
+    base: Path,
+    cfg: dict[str, Any] | None = None,
+    data_config: str | Path | None = None,
+    config_path: str | Path | None = None,
+) -> Path:
+    portfolio_cfg = cfg.get("portfolio") if isinstance(cfg, dict) and isinstance(cfg.get("portfolio"), dict) else {}
+    data_config_ref = data_config
+    if data_config_ref is None or not str(data_config_ref).strip():
+        data_config_ref = portfolio_cfg.get("data_config") if isinstance(portfolio_cfg, dict) else None
+    return _resolve_data_config_for_config_path(
+        base=base,
+        data_config=data_config_ref,
+        config_path=config_path,
+    )
 
 
 def canonicalize_position_lot_fields(fields: dict[str, Any]) -> dict[str, Any]:

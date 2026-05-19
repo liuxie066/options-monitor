@@ -114,6 +114,7 @@ def test_send_trade_intake_receipt_uses_existing_route_and_sender(tmp_path: Path
         strike=120,
         contracts=1,
         price=1.23,
+        trade_time_ms=1779167311000,
     )
 
     def _send(**kwargs):
@@ -138,6 +139,7 @@ def test_send_trade_intake_receipt_uses_existing_route_and_sender(tmp_path: Path
     assert out["message_id"] == "msg-1"
     assert calls[0]["target"] == "user:test"
     assert "成交已写入 option_positions" in calls[0]["message"]
+    assert "成交时间：2026-05-19 13:08:31 北京时间" in calls[0]["message"]
     assert "deal_id：deal-1" in calls[0]["message"]
 
 
