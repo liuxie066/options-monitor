@@ -11,6 +11,8 @@ from typing import Any, Callable
 
 from domain.domain.engine import CandidateScoreWeights, explain_candidate_rank, yield_enhancement_rank_key
 from src.application.ai_cofunder.redaction import redact_value
+from src.application.runtime_logs_cli import collect_runtime_logs
+from src.application.runtime_runs_cli import collect_runtime_runs
 
 
 def collect_evidence(
@@ -35,6 +37,23 @@ def collect_evidence(
     source_refs = _source_refs(source_paths, base=base)
     tail_limit = _as_int(payload.get("tail_limit"), default=20, low=0, high=200)
     audit_tails = _audit_tails(source_paths, base=base, tail_limit=tail_limit)
+    runtime_runs = collect_runtime_runs(
+        repo_root=base,
+        runs_root=payload.get("runs_root"),
+        profile_path=_profile_path(payload),
+        limit=_as_int(payload.get("runs_limit"), default=10, low=1, high=50),
+        run_id=payload.get("run_id"),
+        run_dir=payload.get("run_dir"),
+    )
+    runtime_logs = collect_runtime_logs(
+        repo_root=base,
+        runs_root=payload.get("runs_root"),
+        profile_path=_profile_path(payload),
+        run_id=payload.get("run_id"),
+        run_dir=payload.get("run_dir"),
+        kind="all",
+        lines=tail_limit,
+    )
     strategy_evidence = _strategy_evidence(payload, source_paths=source_paths, base=base, tail_limit=tail_limit, cfg=cfg)
 
     scheduler_evidence = _normalize_scheduler_evidence(payload.get("scheduler_evidence"))
@@ -46,6 +65,8 @@ def collect_evidence(
         "scheduler_evidence": scheduler_evidence,
         "runtime_status": runtime_data,
         "runtime_status_warnings": list(runtime_warnings),
+        "runtime_runs": runtime_runs,
+        "runtime_logs": runtime_logs,
         "audit_tails": audit_tails,
         "strategy_evidence": strategy_evidence,
         "source_refs": source_refs,
@@ -58,6 +79,10 @@ def collect_evidence(
         "runtime_status_meta": runtime_meta,
     }
     return evidence, warnings, meta
+
+
+def _profile_path(payload: dict[str, Any]) -> Any:
+    return payload.get("profile_path") or payload.get("openclaw_profile_path")
 
 
 def redacted_evidence(evidence: dict[str, Any]) -> dict[str, Any]:

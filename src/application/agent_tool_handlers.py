@@ -37,6 +37,8 @@ from src.application.agent_tool_openclaw import (
     openclaw_readiness_tool,
     runtime_status_tool,
 )
+from src.application.runtime_logs_cli import collect_runtime_logs
+from src.application.runtime_runs_cli import collect_runtime_runs
 from src.application.agent_tool_operations import (
     config_validate_tool,
     option_positions_read_tool,
@@ -374,6 +376,34 @@ def _runtime_status_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[
     )
 
 
+def _runtime_runs_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    data = collect_runtime_runs(
+        repo_root=repo_base(),
+        runs_root=payload.get("runs_root"),
+        profile_path=payload.get("profile_path") or payload.get("openclaw_profile_path"),
+        limit=int(payload.get("limit") or 10),
+        run_id=payload.get("run_id"),
+        run_dir=payload.get("run_dir"),
+        scanned_only=bool(payload.get("scanned_only")),
+    )
+    return data, [], {"runs_root": mask_path(data.get("runs_root"))}
+
+
+def _runtime_logs_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    data = collect_runtime_logs(
+        repo_root=repo_base(),
+        runs_root=payload.get("runs_root"),
+        logs_root=payload.get("logs_root"),
+        profile_path=payload.get("profile_path") or payload.get("openclaw_profile_path"),
+        run_id=payload.get("run_id"),
+        run_dir=payload.get("run_dir"),
+        kind=str(payload.get("kind") or "all"),
+        lines=int(payload.get("lines") or 50),
+        log_file=payload.get("file") or payload.get("log_file"),
+    )
+    return data, [], {"runs_root": mask_path(data.get("runs_root")), "logs_root": mask_path(data.get("logs_root"))}
+
+
 def _openclaw_readiness_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     return openclaw_readiness_tool(
         payload,
@@ -416,6 +446,8 @@ TOOL_HANDLERS = {
     "manage_symbols": _manage_symbols_tool,
     "preview_notification": _preview_notification_tool,
     "runtime_status": _runtime_status_tool,
+    "runtime_runs": _runtime_runs_tool,
+    "runtime_logs": _runtime_logs_tool,
     "openclaw_readiness": _openclaw_readiness_tool,
     "ai_cofunder": _ai_cofunder_tool,
 }

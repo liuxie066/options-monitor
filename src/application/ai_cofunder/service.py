@@ -108,6 +108,8 @@ def _build_bundle(
         "runtime_quality": _runtime_quality(runtime=runtime, diagnosis=diagnosis) if scope in {"quality", "full"} else {"status": "skipped", "reason": f"scope={scope}"},
         "healthcheck_snapshot": healthcheck_snapshot,
         "strategy_evidence": evidence.get("strategy_evidence") if scope in {"account-strategy", "strategy", "full"} else {"status": "skipped", "reason": f"scope={scope}"},
+        "runtime_runs": evidence.get("runtime_runs") if scope in {"quality", "full"} else {"status": "skipped", "reason": f"scope={scope}"},
+        "runtime_logs": evidence.get("runtime_logs") if scope in {"quality", "full"} else {"status": "skipped", "reason": f"scope={scope}"},
         "scheduler_evidence": evidence.get("scheduler_evidence"),
         "source_refs": evidence.get("source_refs") or {},
         "audit_tails": evidence.get("audit_tails") or {},
@@ -268,6 +270,11 @@ def render_ai_cofunder_handoff(bundle: dict[str, Any]) -> str:
     ledger_quality = _dict(bundle.get("ledger_quality"))
     account_strategy = _dict(bundle.get("account_strategy_matrix"))
     healthcheck = _dict(bundle.get("healthcheck_snapshot"))
+    runtime_runs = _dict(bundle.get("runtime_runs"))
+    runtime_logs = _dict(bundle.get("runtime_logs"))
+    runtime_runs_summary = _dict(runtime_runs.get("summary"))
+    runtime_logs_summary = _dict(runtime_logs.get("summary"))
+    selected_run = _dict(runtime_runs.get("selected_run"))
     strategy = _dict(bundle.get("strategy_evidence"))
     strategy_summary = _dict(strategy.get("summary"))
     ranking = _dict(strategy.get("ranking_evidence"))
@@ -303,6 +310,13 @@ def render_ai_cofunder_handoff(bundle: dict[str, Any]) -> str:
         f"- category: {runtime_quality.get('category')}",
         f"- latest_status: {_nested(runtime_quality, 'summary', 'latest_status')}",
         f"- freshness: {_nested(runtime_quality, 'freshness', 'status')}",
+        "",
+        "## Runtime Evidence",
+        f"- runs_returned: {runtime_runs_summary.get('returned_count')}",
+        f"- runs_total: {runtime_runs_summary.get('total_count')}",
+        f"- selected_run: {selected_run.get('run_id')}",
+        f"- log_files: {runtime_logs_summary.get('existing_file_count')}/{runtime_logs_summary.get('file_count')}",
+        f"- log_lines: {runtime_logs_summary.get('lines')}",
         "",
         "## Healthcheck Snapshot",
         f"- status: {healthcheck.get('status')}",

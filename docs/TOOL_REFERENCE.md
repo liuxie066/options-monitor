@@ -76,7 +76,9 @@
 | `candidate_rank_explain` | Agent-only read existing candidate CSV ranking explanations |
 | `strategy_replay_analyze` | `./om strategy-replay analyze` |
 | `preview_notification` | `./om notify preview` |
-| `runtime_status` | Agent-only runtime artifact summary |
+| `runtime_status` | `./om status` or raw agent runtime artifact summary |
+| `runtime_runs` | `./om runs` |
+| `runtime_logs` | `./om logs` |
 | `openclaw_readiness` | Agent-only OpenClaw readiness summary |
 | `ai_cofunder` | `./om ai-cofunder collect` |
 | `get_close_advice` | `./om close-advice` |
@@ -463,8 +465,15 @@ OM_AGENT_ENABLE_WRITE_TOOLS=true ./om-agent run --tool version_update --input-js
 示例：
 
 ```bash
+./om status --config-key us
+./om status --config-key us --json
+./om runs --limit 10
+./om runs --run-id 20260515T182459Z-474761
+./om logs --run-id 20260515T182459Z-474761 --kind tool --lines 20
 ./om-agent run --tool runtime_status --input-json '{"config_key":"us"}'
 ./om-agent run --tool runtime_status --input-json '{"profile_path":"openclaw.profile.json"}'
+./om-agent run --tool runtime_runs --input-json '{"limit":10}'
+./om-agent run --tool runtime_logs --input-json '{"run_id":"20260515T182459Z-474761","kind":"tool","lines":20}'
 ```
 
 ---
@@ -494,6 +503,7 @@ OM_AGENT_ENABLE_WRITE_TOOLS=true ./om-agent run --tool version_update --input-js
 用途：
 - 收集线上运行证据，生成给 MacBook Codex 阅读的 redacted bundle / handoff
 - 诊断 runtime 质量、账本质量、多账户策略影响和策略证据完整性
+- 内嵌与 `./om runs` / `./om logs` 同源的 run 列表和 audit tail 摘要
 - 可选嵌入 `healthcheck` snapshot，但不取代 `healthcheck` 的 readiness 职责
 - 默认不写文件、不调用在线 AI、不发送通知
 
