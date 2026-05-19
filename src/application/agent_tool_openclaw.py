@@ -895,6 +895,7 @@ def runtime_status_tool(
     else:
         data_config_path = (config_path.parent / "portfolio.runtime.json").resolve()
     ledger_store = ledger_store_payload(data_config_path)
+    ledger_runtime_root = Path(str(ledger_store.get("runtime_root") or base)).expanduser()
     accounts = _accounts_from_runtime(
         payload,
         cfg,
@@ -943,6 +944,11 @@ def runtime_status_tool(
     )
     option_positions_context = _json_file_info(
         state_dir / "option_positions_context.json",
+        base=base,
+        read_json_object_or_empty=read_json_object_or_empty,
+    )
+    projection_verify = _json_file_info(
+        ledger_runtime_root / "output_shared" / "state" / "option_positions" / "current" / "projection_verify.latest.json",
         base=base,
         read_json_object_or_empty=read_json_object_or_empty,
     )
@@ -1106,6 +1112,7 @@ def runtime_status_tool(
             "last": option_positions_context,
             "ledger": ledger_context_summary,
         },
+        "projection_verify": projection_verify,
         "accounts": account_status,
         "latest_run_selection": latest_run_selection,
         "latest_run": latest_run_payload,
@@ -1140,6 +1147,9 @@ def runtime_status_tool(
     data["summary"]["ledger_sqlite_path"] = ledger_store.get("sqlite_path")
     data["summary"]["ledger_trade_event_count"] = ledger_store.get("trade_event_count")
     data["summary"]["ledger_position_lot_count"] = ledger_store.get("position_lot_count")
+    projection_verify_json = projection_verify.get("json") if isinstance(projection_verify.get("json"), dict) else {}
+    data["summary"]["projection_verify_ok"] = projection_verify_json.get("ok") if projection_verify_json else None
+    data["summary"]["projection_verify_mode"] = projection_verify_json.get("mode_used") if projection_verify_json else None
     return data, warnings, {"config_path": mask_path(config_path)}
 
 

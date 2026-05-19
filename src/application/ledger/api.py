@@ -28,12 +28,12 @@ from src.application.ledger.commands import (
     record_normalized_trade_event,
     record_trade_event_repair,
     record_trade_event_void,
-    reconcile_position_snapshot,
     refresh_position_lot_projection,
     resolve_broker_trade_close_lots,
     resolve_broker_trade_close_targets,
     resolve_manual_position_close_lot,
     resolve_manual_position_close_target,
+    verify_position_lot_projection,
 )
 from src.application.ledger.errors import LedgerPreflightError
 from src.application.ledger.queries import (
@@ -55,7 +55,7 @@ from src.application.ledger.queries import (
     position_lot_risk_view,
     position_lot_snapshot,
     position_monthly_income_report,
-    position_reconciliation_state,
+    position_projection_verify_state,
     project_trade_event_log,
     resolve_position_lot_snapshots,
     summarize_position_lot_shadow_status,
@@ -103,7 +103,7 @@ __all__ = [
     "position_lot_risk_view",
     "position_lot_snapshot",
     "position_monthly_income_report",
-    "position_reconciliation_state",
+    "position_projection_verify_state",
     "preview_broker_trade_close",
     "preview_broker_trade_open",
     "preview_manual_position_adjust",
@@ -122,7 +122,6 @@ __all__ = [
     "record_trade_event_repair",
     "record_trade_event_void",
     "resolve_ledger_store",
-    "reconcile_position_snapshot",
     "refresh_position_lot_projection",
     "resolve_broker_trade_close_lots",
     "resolve_broker_trade_close_targets",
@@ -132,4 +131,5 @@ __all__ = [
     "summarize_position_lot_shadow_status",
     "trade_event_log",
     "trade_event_projection_preview",
+    "verify_position_lot_projection",
 ]

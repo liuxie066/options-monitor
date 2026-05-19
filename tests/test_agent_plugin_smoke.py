@@ -984,6 +984,12 @@ def test_runtime_status_summarizes_openclaw_runtime_files(tmp_path: Path) -> Non
         ),
         encoding="utf-8",
     )
+    projection_verify_dir = shared_state_dir / "option_positions" / "current"
+    projection_verify_dir.mkdir(parents=True, exist_ok=True)
+    (projection_verify_dir / "projection_verify.latest.json").write_text(
+        json.dumps({"ok": True, "mode_used": "checkpoint_reuse", "summary": {"matched": 1}}),
+        encoding="utf-8",
+    )
     (report_dir / "symbols_notification.txt").write_text("shared notification\n", encoding="utf-8")
     (accounts_root / "user1" / "state" / "last_run.json").write_text(json.dumps({"status": "account_ok"}), encoding="utf-8")
     (accounts_root / "user1" / "reports" / "symbols_notification.txt").write_text("account notification\n", encoding="utf-8")
@@ -1087,6 +1093,9 @@ def test_runtime_status_summarizes_openclaw_runtime_files(tmp_path: Path) -> Non
     assert out["data"]["ledger_store"]["runtime_root"] == str(tmp_path.resolve())
     assert out["data"]["ledger_store"]["sqlite_path"] == str((tmp_path / "output_shared" / "state" / "option_positions.sqlite3").resolve())
     assert out["data"]["summary"]["ledger_sqlite_path"] == out["data"]["ledger_store"]["sqlite_path"]
+    assert out["data"]["projection_verify"]["json"]["ok"] is True
+    assert out["data"]["summary"]["projection_verify_ok"] is True
+    assert out["data"]["summary"]["projection_verify_mode"] == "checkpoint_reuse"
     assert out["data"]["notification_diagnosis"]["status"] == "sent"
     assert out["data"]["notification_diagnosis"]["scheduler_should_run_scan"] is True
     assert out["data"]["notification_diagnosis"]["send_confirmed_count"] == 1

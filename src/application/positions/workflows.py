@@ -33,10 +33,8 @@ def _apply_result_payload(
     result: dict[str, Any],
     payload: dict[str, Any],
     native_event: dict[str, Any] | None = None,
-    verification_snapshot_id: str | None = None,
-    verification_note: str | None = None,
 ) -> dict[str, Any]:
-    del repo, record_id, native_event, verification_snapshot_id, verification_note
+    del repo, record_id, native_event
     idempotent_duplicate = result.get("created") is False
     return payload | {
         "mode": "applied",
@@ -404,6 +402,4 @@ def execute_manual_adjust(
             "target_contracts": int(raw_target_contracts or 0),
             "snapshot_lot_id": record_id,
         },
-        verification_snapshot_id=f"verify-{result.get('event_id')}",
-        verification_note="manual_adjust checkpoint",
     )

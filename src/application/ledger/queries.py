@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from src.application.ledger.publisher import project_stored_trade_events_to_position_lots
-from src.application.ledger.reconciliation import load_reconciliation_state
+from src.application.ledger.projection_verify import load_projection_verify_state
 from src.application.ledger.repository import (
     require_option_positions_event_write_repo,
 )
@@ -171,8 +171,8 @@ def trade_event_projection_preview(events: list[dict[str, Any]]) -> dict[str, An
     }
 
 
-def position_reconciliation_state(base: Path) -> dict[str, Any]:
-    return load_reconciliation_state(base=base)
+def position_projection_verify_state(base: Path) -> dict[str, Any]:
+    return load_projection_verify_state(base=base)
 
 
 __all__ = [
@@ -194,7 +194,7 @@ __all__ = [
     "position_lot_risk_view",
     "position_lot_snapshot",
     "position_monthly_income_report",
-    "position_reconciliation_state",
+    "position_projection_verify_state",
     "project_trade_event_log",
     "resolve_position_lot_snapshots",
     "summarize_position_lot_shadow_status",

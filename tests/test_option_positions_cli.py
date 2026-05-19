@@ -217,9 +217,11 @@ def test_option_positions_cli_inspect_reports_projection_state(monkeypatch, tmp_
     assert payload["ledger_store"]["sqlite_path"] == str((tmp_path / "option_positions.sqlite3").resolve())
     assert payload["ledger_store"]["trade_event_count"] == 1
     assert payload["ledger_store"]["position_lot_count"] == 1
-    assert payload["baseline_snapshot_id"] is None
+    assert payload["projection_verify_checkpoint_id"] is None
     assert payload["projected_lots"][0]["current_contracts"] == 1
     assert payload["baseline_lots"] == []
+    assert payload["latest_projection_verify_report"] is None
+    assert payload["latest_projection_verify_summary"] == {}
     assert payload["related_events"][0]["event_id"].startswith("manual-open-")
 
 
@@ -285,7 +287,7 @@ def test_option_positions_cli_inspect_reports_orphan_close_event_diagnostics(mon
     assert payload["projection_diagnostics"][0]["code"] == "target_lot_not_found"
 
 
-def test_option_positions_cli_reconcile_writes_verification_snapshot_and_report(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_option_positions_cli_verify_projection_writes_report_and_checkpoint(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.option_positions as cli_mod
     from domain.domain.option_position_lots import OpenPositionCommand
 
@@ -309,35 +311,6 @@ def test_option_positions_cli_reconcile_writes_verification_snapshot_and_report(
             opened_at_ms=1000,
         ),
     )
-    snapshot_path = tmp_path / "verify.json"
-    snapshot_path.write_text(
-        json.dumps(
-            {
-                "snapshot_id": "verify_cli_1",
-                "snapshot_type": "verification",
-                "snapshot_at_utc": "2026-05-09T00:00:00+00:00",
-                "source_name": "test_cli",
-                "lots": [
-                    {
-                        "account": "lx",
-                        "broker": "富途",
-                        "symbol": "TSLA",
-                        "option_type": "put",
-                        "side": "short",
-                        "strike": 100,
-                        "expiration_ymd": "2026-06-19",
-                        "currency": "USD",
-                        "multiplier": 100,
-                        "contracts": 2,
-                    }
-                ],
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-
     monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
     monkeypatch.setattr(
         sys,
@@ -346,9 +319,7 @@ def test_option_positions_cli_reconcile_writes_verification_snapshot_and_report(
             "om option-positions",
             "--data-config",
             str(data_config),
-            "reconcile",
-            "--snapshot-file",
-            str(snapshot_path),
+            "verify-projection",
             "--format",
             "json",
         ],
@@ -357,24 +328,36 @@ def test_option_positions_cli_reconcile_writes_verification_snapshot_and_report(
     cli_mod.main()
 
     payload = json.loads(capsys.readouterr().out)
-    assert payload["snapshot_id"] == "verify_cli_1"
+    assert payload["ok"] is True
     assert payload["source_of_truth"] == "trade_events"
     assert payload["projection"] == "position_lots"
-    assert payload["summary"]["quantity_mismatch"] == 1
-    assert payload["latest_verification_snapshot_id"] == "verify_cli_1"
-    assert payload["verification_snapshot_count"] == 1
-    assert payload["accepted_verification_snapshot_count"] == 1
+    assert payload["mode_used"] == "full_replay"
+    assert payload["summary"]["matched"] == 1
     assert (
         tmp_path
         / "output_shared"
         / "state"
         / "option_positions"
         / "current"
-        / "reconciliation.latest.json"
+        / "projection_verify.latest.json"
+    ).exists()
+    assert (
+        tmp_path
+        / "output_shared"
+        / "state"
+        / "option_positions"
+        / "current"
+        / "projection_verify.checkpoint.json"
     ).exists()
 
+    cli_mod.main()
+    reused = json.loads(capsys.readouterr().out)
+    assert reused["ok"] is True
+    assert reused["mode_used"] == "checkpoint_reuse"
+    assert reused["checkpoint_reused"] is True
 
-def test_option_positions_cli_inspect_surfaces_verification_and_reconciliation_state(monkeypatch, tmp_path: Path, capsys) -> None:
+
+def test_option_positions_cli_inspect_surfaces_projection_verify_state(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.option_positions as cli_mod
     from domain.domain.option_position_lots import OpenPositionCommand
 
@@ -399,35 +382,6 @@ def test_option_positions_cli_inspect_surfaces_verification_and_reconciliation_s
         ),
     )
     lot = repo.list_position_lots()[0]
-    snapshot_path = tmp_path / "verify.json"
-    snapshot_path.write_text(
-        json.dumps(
-            {
-                "snapshot_id": "verify_cli_2",
-                "snapshot_type": "verification",
-                "snapshot_at_utc": "2026-05-09T00:00:00+00:00",
-                "source_name": "test_cli",
-                "lots": [
-                    {
-                        "account": "lx",
-                        "broker": "富途",
-                        "symbol": "TSLA",
-                        "option_type": "put",
-                        "side": "short",
-                        "strike": 100,
-                        "expiration_ymd": "2026-06-19",
-                        "currency": "USD",
-                        "multiplier": 100,
-                        "contracts": 2,
-                    }
-                ],
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-
     monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
     monkeypatch.setattr(
         sys,
@@ -436,9 +390,7 @@ def test_option_positions_cli_inspect_surfaces_verification_and_reconciliation_s
             "om option-positions",
             "--data-config",
             str(data_config),
-            "reconcile",
-            "--snapshot-file",
-            str(snapshot_path),
+            "verify-projection",
             "--format",
             "json",
         ],
@@ -461,16 +413,10 @@ def test_option_positions_cli_inspect_surfaces_verification_and_reconciliation_s
     cli_mod.main()
 
     payload = json.loads(capsys.readouterr().out)
-    assert payload["persisted_baseline_snapshot_id"] is None
-    assert payload["projection_checkpoint_snapshot_id"] == "verify_cli_2"
-    assert payload["baseline_snapshot_id"] is None
-    assert payload["latest_verification_snapshot_id"] == "verify_cli_2"
-    assert payload["verification_snapshot_count"] == 1
-    assert payload["accepted_verification_snapshot_count"] == 1
     assert payload["projected_lots"][0]["current_contracts"] == 1
-    assert payload["latest_reconciliation_summary"]["quantity_mismatch"] == 1
-    assert payload["latest_reconciliation_report"]["snapshot_id"] == "verify_cli_2"
-    assert payload["latest_reconciliation_report"]["source_of_truth"] == "trade_events"
+    assert payload["projection_verify_checkpoint_id"]
+    assert payload["latest_projection_verify_summary"]["matched"] == 1
+    assert payload["latest_projection_verify_report"]["source_of_truth"] == "trade_events"
 
 
 def test_option_positions_cli_add_dry_run_infers_hkd_currency_from_hk_symbol(monkeypatch, tmp_path: Path, capsys) -> None:

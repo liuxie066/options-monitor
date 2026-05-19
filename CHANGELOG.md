@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 1.2.68 - 2026-05-19
+
+### Added
+- Added checkpointed `./om option-positions verify-projection` to validate `position_lots` by replaying canonical `trade_events`, with latest report and checkpoint artifacts under option-position state.
+- Surfaced the latest projection verification status in option-position inspection and runtime status.
+- Added a rendered daily projection verification service/timer that runs at 06:00 Beijing time.
+- Moved rendered expired auto-close service/timer execution to 05:30 Beijing time.
+
+### Removed
+- Removed the external option-position snapshot reconciliation command and loader so reconciliation is internal event-vs-position projection verification only.
+
 ## 1.2.67 - 2026-05-19
 
 ### Added

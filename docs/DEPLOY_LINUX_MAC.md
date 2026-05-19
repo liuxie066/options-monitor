@@ -136,9 +136,13 @@ sudo systemctl enable --now options-monitor-tick-us.timer
 sudo systemctl enable --now options-monitor-tick-hk.timer
 sudo systemctl enable --now options-monitor-auto-close-us.timer
 sudo systemctl enable --now options-monitor-auto-close-hk.timer
+sudo systemctl enable --now options-monitor-projection-verify.timer
 sudo systemctl enable --now options-monitor-runtime-status.timer
 sudo systemctl enable --now options-monitor-trade-intake.service
 ```
+
+`options-monitor-projection-verify.timer` 每天北京时间 06:00 运行一次 `./om option-positions verify-projection --mode auto`，用于校验 `trade_events -> position_lots` 并复用 checkpoint。
+`options-monitor-auto-close-*.timer` 每天北京时间 05:30 运行一次 `./om option-positions auto-close-expired --apply --quiet`，先处理过期自动平仓，再由 06:00 的 projection verify 做内部对账。
 
 检查：
 
@@ -146,6 +150,7 @@ sudo systemctl enable --now options-monitor-trade-intake.service
 ./om service status --profile-path "$RUNTIME/service.profile.json" --include-service-status
 ./om-agent run --tool runtime_status --input-json "{\"profile_path\":\"$RUNTIME/service.profile.json\"}"
 ./om option-positions store inspect --config config.us.json
+./om option-positions --data-config "$RUNTIME/portfolio.runtime.json" verify-projection --mode full
 ```
 
 线上查 runtime 时优先带 profile path；如果直接用 `config_key`，确保当前 shell 带上 `OM_RUNTIME_ROOT=$RUNTIME`，否则会读 repo 下默认 runtime。
@@ -183,9 +188,12 @@ launchctl bootstrap "gui/$UID" "$HOME/Library/LaunchAgents/com.options-monitor.t
 launchctl bootstrap "gui/$UID" "$HOME/Library/LaunchAgents/com.options-monitor.tick-hk.plist"
 launchctl bootstrap "gui/$UID" "$HOME/Library/LaunchAgents/com.options-monitor.auto-close-us.plist"
 launchctl bootstrap "gui/$UID" "$HOME/Library/LaunchAgents/com.options-monitor.auto-close-hk.plist"
+launchctl bootstrap "gui/$UID" "$HOME/Library/LaunchAgents/com.options-monitor.projection-verify.plist"
 launchctl bootstrap "gui/$UID" "$HOME/Library/LaunchAgents/com.options-monitor.runtime-status.plist"
 launchctl bootstrap "gui/$UID" "$HOME/Library/LaunchAgents/com.options-monitor.trade-intake.plist"
 ```
+
+launchd 的日历时间按 Mac 本机时区执行；要等价于北京时间 05:30 / 06:00，Mac 的系统时区需要设为中国标准时间或等价时区。
 
 检查：
 

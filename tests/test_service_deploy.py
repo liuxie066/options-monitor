@@ -23,6 +23,9 @@ def test_render_systemd_bundle_uses_runtime_root_and_canonical_entrypoints(tmp_p
     files = {item["relative_path"]: item for item in bundle["files"]}
     tick = files["systemd/options-monitor-tick-us.service"]["content"]
     intake = files["systemd/options-monitor-trade-intake.service"]["content"]
+    auto_close_timer = files["systemd/options-monitor-auto-close-us.timer"]["content"]
+    verify = files["systemd/options-monitor-projection-verify.service"]["content"]
+    verify_timer = files["systemd/options-monitor-projection-verify.timer"]["content"]
     profile = json.loads(files["service.profile.json"]["content"])
 
     assert 'Environment="OM_RUNTIME_ROOT=' + str(runtime) + '"' in tick
@@ -32,10 +35,15 @@ def test_render_systemd_bundle_uses_runtime_root_and_canonical_entrypoints(tmp_p
     assert "--lock-path " + str(runtime / "locks" / "tick-us.lock") in tick
     assert str(repo / "om") + " run trade-intake" in intake
     assert "Restart=always" in intake
+    assert "OnCalendar=*-*-* 05:30:00 Asia/Shanghai" in auto_close_timer
+    assert str(repo / "om") + " option-positions --data-config " + str(runtime / "portfolio.runtime.json") in verify
+    assert "verify-projection --mode auto" in verify
+    assert "OnCalendar=*-*-* 06:00:00 Asia/Shanghai" in verify_timer
     assert profile["service_provider"] == "systemd"
     assert profile["runtime_root"] == str(runtime)
     assert {"name": "options-monitor-tick-us.service"} in profile["services"]
     assert {"name": "options-monitor-tick-us.timer"} in profile["services"]
+    assert {"name": "options-monitor-projection-verify.timer"} in profile["services"]
     assert "deploy_user" not in profile
     assert "deploy_home" not in profile
 
@@ -152,6 +160,8 @@ def test_render_launchd_bundle_uses_launch_agents_and_logs(tmp_path: Path) -> No
 
     files = {item["relative_path"]: item for item in bundle["files"]}
     tick = files["launchd/com.options-monitor.tick-hk.plist"]["content"]
+    auto_close = files["launchd/com.options-monitor.auto-close-hk.plist"]["content"]
+    verify = files["launchd/com.options-monitor.projection-verify.plist"]["content"]
     profile = json.loads(files["service.profile.json"]["content"])
 
     assert "<key>Label</key>" in tick
@@ -159,8 +169,20 @@ def test_render_launchd_bundle_uses_launch_agents_and_logs(tmp_path: Path) -> No
     assert str(runtime / "logs" / "com.options-monitor.tick-hk.out.log") in tick
     assert "--market" in tick
     assert "hk" in tick
+    assert "<string>com.options-monitor.auto-close-hk</string>" in auto_close
+    assert "<key>Hour</key>" in auto_close
+    assert "<integer>5</integer>" in auto_close
+    assert "<key>Minute</key>" in auto_close
+    assert "<integer>30</integer>" in auto_close
+    assert "<string>com.options-monitor.projection-verify</string>" in verify
+    assert "<key>Hour</key>" in verify
+    assert "<integer>6</integer>" in verify
+    assert "<key>Minute</key>" in verify
+    assert "<integer>0</integer>" in verify
+    assert "verify-projection" in verify
     assert profile["service_provider"] == "launchd"
     assert {"name": "com.options-monitor.tick-hk"} in profile["services"]
+    assert {"name": "com.options-monitor.projection-verify"} in profile["services"]
 
 
 def test_write_service_bundle_writes_relative_files(tmp_path: Path) -> None:

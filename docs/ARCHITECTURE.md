@@ -136,7 +136,7 @@ bootstrap input, sync target, strategy input, or steady-state source of truth.
 non-ledger runtime code. `src.application.positions`, `src.application.trades`,
 agent tools, CLI modules, web UI modules, pipeline context, and cash-headroom
 queries must not import ledger internals such as service, preflight, resolver,
-writer, publisher, repository, reconciliation, or read-model modules directly.
+writer, publisher, repository, projection-verify, or read-model modules directly.
 The API file is intentionally a thin facade: command/write operations live in
 `src.application.ledger.commands`, query/read operations live in
 `src.application.ledger.queries`, and typed read views such as
@@ -145,7 +145,7 @@ The API file is intentionally a thin facade: command/write operations live in
 Runtime callers should call semantic ledger actions such as manual position
 recording, broker trade recording, expired-close planning/recording, projection
 refresh, lot selection, position snapshot reads, event review/repair, and
-reconciliation, rather than composing lower-level
+projection verification, rather than composing lower-level
 `persist_*`, `preflight_*`, `require_*`, or `load_*` functions themselves.
 Close writes share `CloseTargetResolution` as the ledger-owned target contract:
 manual close resolves a unique strict lot, broker close resolves a strict exact

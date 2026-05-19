@@ -50,12 +50,12 @@
 
 - canonical state 固定为 `trade_events -> position_lots`。
 - manual open / close / adjust、trade intake、auto-close、void / repair 的默认写后状态都从 canonical projection 发布。
-- `rebuild` / `reconcile` / `inspect` / `history` 默认读写面不再调用 v2 service。
+- `rebuild` / `verify-projection` / `inspect` / `history` 默认读写面不再调用 v2 service。
 - 旧 `option_positions_facade` 已删除；canonical `position_lots` 为空时不会用 v2 compat records 补数据。
 - canonical read model 已迁到 `src/application/ledger/read_model.py`；旧 `option_positions_facade` re-export 兼容层已删除。
-- `src/application/ledger/api.py` 是非 ledger runtime 进入账本核心的唯一公共应用边界；`positions` / `trades`、agent tools、CLI、web UI、pipeline context、cash headroom 都不再直接 import ledger 内部 service / preflight / resolver / publisher / repository / reconciliation / read-model 模块。
+- `src/application/ledger/api.py` 是非 ledger runtime 进入账本核心的唯一公共应用边界；`positions` / `trades`、agent tools、CLI、web UI、pipeline context、cash headroom 都不再直接 import ledger 内部 service / preflight / resolver / publisher / repository / projection-verify / read-model 模块。
 - `ledger.api` 已收敛为薄公共 facade；命令写入/维护动作落在 `src/application/ledger/commands.py`，查询/读模型动作落在 `src/application/ledger/queries.py`，避免公共 API 自身演变成新的 god service。
-- runtime 调用方只使用语义账本动作（manual position record、broker trade record、expired-close plan/record、projection refresh、position snapshot read、event review/repair、reconciliation），而不是自行组合 `persist_*` / `preflight_*` / `require_*` / `load_*` 内部原语。
+- runtime 调用方只使用语义账本动作（manual position record、broker trade record、expired-close plan/record、projection refresh、position snapshot read、event review/repair、projection verify），而不是自行组合 `persist_*` / `preflight_*` / `require_*` / `load_*` 内部原语。
 - 风控读取路径开始使用显式 read DTO：`PositionLotSnapshot` / `RiskPositionView`。`src/application/positions/context_builder.py` 内部消费 `RiskPositionView`，CLI / JSON 输出边界再转换为 dict。
 - repository/config、stored event codec、bootstrap、event write/projection publish、manual open/close/adjust、manual void/repair、auto-close maintenance、ledger preflight、close lot resolver、target identity guard 已分别迁到 `src/application/ledger/repository.py`、`event_codec.py`、`bootstrap.py`、`writer.py`、`manual_trades.py`、`interventions.py`、`maintenance.py`、`preflight.py`、`lot_resolver.py`、`targets.py`。
 - close target 解析已统一为 `CloseTargetResolution` 读写契约：manual close 使用唯一 strict match，broker close 使用严格 exact FIFO target set，auto-close 使用显式 current `record_id` target；解析结果会写入 preview / diagnostics / operation / raw_payload。
@@ -204,7 +204,7 @@ domain/domain/ledger/
   position_fields.py   # canonical lot record fields and open/close patch helpers
   projection.py        # event replay -> lots + views
   invariants.py        # fail-closed checks
-  reconciliation.py    # broker/Feishu/manual snapshot comparison
+  projection_verify.py # checkpointed trade_events -> position_lots verification
 
 domain/storage/repositories/
   ledger_repo.py       # append-only event store + projection snapshot repository
@@ -297,25 +297,25 @@ TradeEvent store
 - 不生成新的交易建议。
 - 不执行 auto-close。
 - runtime_status 暴露失败原因和阻断状态。
-- operator 需要先 reconcile 或 repair。
+- operator 需要先 verify-projection 或 repair。
 
-## Reconciliation Rules
+## Projection Verify Rules
 
-外部数据只做对账，不直接改 canonical state：
+默认对账只验证本地事件流和持仓投影：
 
-- broker current positions
-- Feishu mirror
-- manual verification snapshot
+```text
+trade_events -> shadow position_lots
+vs
+persisted position_lots
+```
 
 对账结果分类：
 
 - `matched`
-- `missing_in_ledger`
-- `missing_in_broker`
-- `quantity_mismatch`
-- `identity_mismatch`
-- `duplicate_lot_identity`
-- `unmatched_close_event`
+- `missing_in_position_lots`
+- `extra_in_position_lots`
+- `field_mismatch`
+- `projection_error`
 
 修正方式：
 
@@ -368,7 +368,7 @@ TradeEvent store
 - 从旧 `trade_events` 导入新 `TradeEvent`。
 - 从旧 `position_lots` / v2 snapshots 只读构建 baseline import events。
 - 生成 shadow `PositionLot` 和 `RiskPositionView`。
-- 输出 reconciliation report。
+- 输出 projection verify report。
 
 验收：
 
@@ -412,7 +412,7 @@ TradeEvent store
 当前进展：
 
 - manual open / close / adjust、auto-close expired、trade intake open / close、void / repair 已切到 ledger preflight / service 语义。
-- service 会在非重复写入前运行 `position_lots` replay、reconciliation、target lot identity 校验和 projected close 校验。
+- service 会在非重复写入前运行 `position_lots` replay、target lot identity 校验和 projected close 校验；日常状态核验使用 checkpointed `verify-projection`。
 - idempotent retry 先按旧 event_id 识别为 duplicate，不要求已关闭 lot 仍出现在 open projection。
 - 写后 `position_lots` 发布从 canonical ledger replay 生成；v2 append / refresh 已从默认写后链路退休。
 - auto-close expired 已接入同一个 lot close preflight，写入前校验 `expire_close` 事件不会跨 lot / strike / expiry。
@@ -486,16 +486,16 @@ python3 -m pytest tests/test_ledger_*.py
 - open lot count
 - invariant diagnostics
 - old/new risk context diff
-- reconciliation summary
+- projection verify summary
 
 ## Operator Safety
 
 以下动作必须先 dry-run：
 
 - migration import
-- reconciliation apply
-- broker snapshot repair
-- Feishu prune
+- verify-projection full replay
+- event repair / void
+- projection rebuild
 - legacy retirement cleanup
 
 任何删除旧数据的动作都不属于前四个阶段。
