@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.82 - 2026-05-20
+
+### Changed
+- Added structured monthly-income diagnostics for inbound `收益` queries so empty or incomplete return summaries explain matched events, lots, closed lots, premium rows, cash-secured availability, and missing fields.
+- Changed inbound monthly-income rendering to show an explicit "暂无可计算收益" explanation instead of successful-looking rows with all return fields as `-`.
+
 ## 1.2.81 - 2026-05-19
 
 ### Changed

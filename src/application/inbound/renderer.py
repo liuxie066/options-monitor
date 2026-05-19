@@ -50,8 +50,11 @@ def render_inbound_text(*, intent: InboundIntent | None, tool_result: dict[str, 
 def _render_monthly_income(data: dict[str, Any]) -> str:
     return_summary = data.get("return_summary")
     if isinstance(return_summary, list) and return_summary:
+        calculable_rows = [row for row in return_summary if isinstance(row, dict) and _return_row_is_calculable(row)]
+        if not calculable_rows:
+            return _render_monthly_income_diagnostics(data)
         lines = ["收益统计完成（基于 OM 本地账本）："]
-        for row in return_summary[:4]:
+        for row in calculable_rows[:4]:
             if not isinstance(row, dict):
                 continue
             lines.extend(
@@ -68,7 +71,7 @@ def _render_monthly_income(data: dict[str, Any]) -> str:
 
     rows = data.get("summary")
     if not isinstance(rows, list) or not rows:
-        return "收益统计完成：没有匹配的月度收益记录。"
+        return _render_monthly_income_diagnostics(data)
     lines = ["收益统计完成（基于 OM 本地账本）："]
     for row in rows[:6]:
         if not isinstance(row, dict):
@@ -83,6 +86,74 @@ def _render_monthly_income(data: dict[str, Any]) -> str:
             f"open_basis={row.get('open_basis_lifecycle_pnl_gross', 0)}"
         )
     return "\n".join(lines)
+
+
+def _return_row_is_calculable(row: dict[str, Any]) -> bool:
+    try:
+        cash = row.get("cash_secured_cny")
+        if cash is None or float(cash) <= 0:
+            return False
+    except Exception:
+        return False
+    for key in (
+        "net_return_rate",
+        "premium_return_rate",
+        "realized_return_rate",
+        "net_income_cny",
+        "premium_income_cny",
+        "realized_pnl_cny",
+    ):
+        if row.get(key) is not None:
+            return True
+    return False
+
+
+def _render_monthly_income_diagnostics(data: dict[str, Any]) -> str:
+    diagnostics = data.get("diagnostics")
+    diag = diagnostics[0] if isinstance(diagnostics, list) and diagnostics and isinstance(diagnostics[0], dict) else {}
+    filters = data.get("filters") if isinstance(data.get("filters"), dict) else {}
+    account = diag.get("account") or filters.get("account") or "-"
+    month = diag.get("month") or filters.get("month") or "-"
+    missing = diag.get("missing_fields") if isinstance(diag.get("missing_fields"), list) else []
+    reasons = _income_missing_reasons(missing)
+    if not reasons:
+        reasons = ["没有可计算收益数据。"]
+    lines = [
+        f"{account} {month} 暂无可计算收益。",
+        "原因：" + "；".join(reasons),
+    ]
+    if diag:
+        lines.append(
+            "匹配事件："
+            f"{int(diag.get('matched_trade_events_count') or 0)}，"
+            f"持仓 lot：{int(diag.get('matched_lots_count') or 0)}，"
+            f"已平仓 lot：{int(diag.get('closed_lots_count') or 0)}，"
+            f"权利金行：{int(diag.get('premium_rows_count') or 0)}。"
+        )
+        if missing:
+            lines.append("缺失项：" + "、".join(str(item) for item in missing[:8]))
+    warnings = data.get("report_warnings")
+    if isinstance(warnings, list) and warnings:
+        lines.append("诊断：" + "；".join(str(item) for item in warnings[:3]))
+    return "\n".join(lines)
+
+
+def _income_missing_reasons(missing_fields: list[Any]) -> list[str]:
+    missing = {str(item) for item in missing_fields}
+    reasons: list[str] = []
+    if "income_rows" in missing or "trade_events" in missing:
+        reasons.append("本月没有匹配到已完成收益事件")
+    if "closed_lots" in missing:
+        reasons.append("账本缺少已平仓/close 数据")
+    if "premium" in missing:
+        reasons.append("账本缺少开仓权利金数据")
+    if "cash_secured" in missing:
+        reasons.append("当前持仓缺少现金担保金额")
+    if "currency_conversion" in missing:
+        reasons.append("缺少币种换算汇率，无法折算 CNY")
+    if "month_range" in missing:
+        reasons.append("部分事件缺少成交时间，无法归入查询月份")
+    return reasons
 
 
 def _pct(value: Any) -> str:

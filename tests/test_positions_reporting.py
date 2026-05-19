@@ -461,6 +461,116 @@ def test_monthly_income_return_summary_warns_when_exchange_rate_missing() -> Non
     assert any("missing CNY exchange rate" in item for item in report["warnings"])
 
 
+def test_monthly_income_diagnostics_marks_calculable_summary_ok() -> None:
+    records = [
+        {
+            "record_id": "lx_put",
+            "fields": {
+                "broker": "富途",
+                "account": "lx",
+                "symbol": "NVDA",
+                "option_type": "put",
+                "side": "short",
+                "status": "open",
+                "contracts": 1,
+                "currency": "USD",
+                "premium": 2.0,
+                "multiplier": 100,
+                "cash_secured_amount": 10000,
+                "opened_at": _ms("2026-05-03"),
+            },
+        },
+    ]
+
+    report = build_monthly_income_report(
+        records,
+        account="lx",
+        broker="富途",
+        month="2026-05",
+        rates={"rates": {"USDCNY": 7.2}},
+    )
+
+    diag = report["diagnostics"][0]
+    assert diag["status"] == "ok"
+    assert diag["account"] == "lx"
+    assert diag["month_range"] == {"month": "2026-05", "start": "2026-05-01", "end": "2026-05-31"}
+    assert diag["matched_lots_count"] == 1
+    assert diag["premium_rows_count"] == 1
+    assert diag["cash_secured_available"] is True
+    assert "income_rows" not in diag["missing_fields"]
+    assert "cash_secured" not in diag["missing_fields"]
+
+
+def test_monthly_income_diagnostics_explains_open_positions_without_month_income() -> None:
+    records = [
+        {
+            "record_id": "sy_put",
+            "fields": {
+                "broker": "富途",
+                "account": "sy",
+                "symbol": "0700.HK",
+                "option_type": "put",
+                "side": "short",
+                "status": "open",
+                "contracts": 1,
+                "currency": "HKD",
+                "premium": 3.0,
+                "multiplier": 100,
+                "cash_secured_amount": 20000,
+                "opened_at": _ms("2026-04-03"),
+            },
+        }
+    ]
+
+    report = build_monthly_income_report(
+        records,
+        account="sy",
+        broker="富途",
+        month="2026-05",
+        rates={"rates": {"HKDCNY": 0.92}},
+    )
+
+    assert report["summary"] == []
+    assert report["return_summary"] == []
+    diag = report["diagnostics"][0]
+    assert diag["status"] == "empty"
+    assert diag["matched_lots_count"] == 1
+    assert diag["closed_lots_count"] == 0
+    assert diag["premium_rows_count"] == 0
+    assert diag["cash_secured_available"] is True
+    assert {"income_rows", "closed_lots", "premium"}.issubset(set(diag["missing_fields"]))
+
+
+def test_monthly_income_diagnostics_exposes_missing_cash_secured_and_conversion() -> None:
+    records = [
+        {
+            "record_id": "sy_put",
+            "fields": {
+                "broker": "富途",
+                "account": "sy",
+                "symbol": "NVDA",
+                "option_type": "put",
+                "side": "short",
+                "status": "open",
+                "contracts": 1,
+                "currency": "USD",
+                "premium": 2.0,
+                "multiplier": 100,
+                "opened_at": _ms("2026-05-03"),
+            },
+        }
+    ]
+
+    report = build_monthly_income_report(records, account="sy", broker="富途", month="2026-05")
+
+    diag = report["diagnostics"][0]
+    assert diag["status"] == "incomplete"
+    assert diag["matched_lots_count"] == 1
+    assert diag["premium_rows_count"] == 1
+    assert "cash_secured" in diag["missing_fields"]
+    assert "currency_conversion" in diag["missing_fields"]
+
+
 def test_read_model_monthly_income_report_uses_canonical_lot_records() -> None:
     import src.application.ledger.read_model as read_model
 

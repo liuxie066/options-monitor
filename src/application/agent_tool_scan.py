@@ -361,6 +361,7 @@ def monthly_income_report_tool(
     data: dict[str, Any] = {
         "summary": report.get("summary") if isinstance(report.get("summary"), list) else [],
         "return_summary": report.get("return_summary") if isinstance(report.get("return_summary"), list) else [],
+        "diagnostics": report.get("diagnostics") if isinstance(report.get("diagnostics"), list) else [],
         "filters": dict(report.get("filters") or {}),
         "calculation_method": str(report.get("calculation_method") or ""),
         "row_count": len(rows),
