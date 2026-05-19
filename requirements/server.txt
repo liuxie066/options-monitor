@@ -1,3 +1,4 @@
 -r runtime.txt
 fastapi
 uvicorn
+cryptography

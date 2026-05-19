@@ -13,6 +13,13 @@ from src.application.account_management import add_account, edit_account, remove
 from src.application.close_advice_pipeline import run_close_advice
 from src.application.config_edit import get_runtime_config_value, set_runtime_config_value
 from src.application.healthcheck import run_healthcheck
+from src.application.inbound import (
+    InboundRequest,
+    build_feishu_gateway_settings,
+    handle_feishu_payload,
+    handle_inbound_request,
+    serve_feishu_gateway,
+)
 from src.application.layered_config import build_layered_runtime_config_file, explain_layered_runtime_config_key
 from src.application.multi_account_tick import run_tick
 from src.application.notification_pipeline import preview_notification
@@ -63,6 +70,47 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     doctor.add_argument("--accounts", nargs="*", default=None)
     doctor.add_argument("--opend-telnet-host", default=None)
     doctor.add_argument("--opend-telnet-port", type=int, default=None)
+
+    inbound = sub.add_parser("inbound", help="handle controlled inbound remote commands")
+    inbound_sub = inbound.add_subparsers(dest="inbound_command", required=True)
+    inbound_handle = inbound_sub.add_parser("handle", help="parse, authorize, audit, and execute one inbound command")
+    inbound_handle.add_argument("--text", required=True)
+    inbound_handle.add_argument("--sender", dest="sender_id", default="local")
+    inbound_handle.add_argument("--channel", default="local")
+    inbound_handle.add_argument("--message-id", default=None)
+    inbound_handle.add_argument("--config-key", default="us", choices=("us", "hk"))
+    inbound_handle.add_argument("--config-path", default=None)
+    inbound_handle.add_argument("--audit-db", default=None)
+    inbound_handle.add_argument("--format", choices=("json", "text"), default="json")
+    inbound_feishu = inbound_sub.add_parser("feishu", help="handle one Feishu event payload through inbound control")
+    feishu_input = inbound_feishu.add_mutually_exclusive_group(required=True)
+    feishu_input.add_argument("--input-json", default=None)
+    feishu_input.add_argument("--input-file", default=None)
+    feishu_input.add_argument("--stdin", action="store_true")
+    inbound_feishu.add_argument("--config-key", default="us", choices=("us", "hk"))
+    inbound_feishu.add_argument("--config-path", default=None)
+    inbound_feishu.add_argument("--audit-db", default=None)
+    inbound_feishu.add_argument("--format", choices=("json", "text"), default="json")
+    inbound_gateway = inbound_sub.add_parser("feishu-gateway", help="serve the Feishu App event callback gateway")
+    inbound_gateway.add_argument("--host", default=None)
+    inbound_gateway.add_argument("--port", type=int, default=None)
+    inbound_gateway.add_argument("--path", default=None)
+    inbound_gateway.add_argument("--config-key", default="us", choices=("us", "hk"))
+    inbound_gateway.add_argument("--config-path", default=None)
+    inbound_gateway.add_argument("--audit-db", default=None)
+    inbound_gateway.add_argument("--allowed-senders", default=None)
+    inbound_gateway.add_argument("--app-id", default=None)
+    inbound_gateway.add_argument("--app-secret", default=None)
+    inbound_gateway.add_argument("--encrypt-key", default=None)
+    inbound_gateway.add_argument("--verification-token", default=None)
+    inbound_gateway.add_argument("--allow-unsigned", action="store_true")
+    inbound_gateway.add_argument("--no-reply", action="store_true")
+    inbound_gateway.add_argument("--reply-in-thread", action="store_true")
+    inbound_gateway.add_argument("--max-reply-chars", type=int, default=None)
+    inbound_gateway.add_argument("--signature-max-age-seconds", type=int, default=None)
+    inbound_gateway.add_argument("--tls-certfile", default=None)
+    inbound_gateway.add_argument("--tls-keyfile", default=None)
+    inbound_gateway.add_argument("--check", action="store_true", help="validate and print redacted gateway configuration without starting the server")
 
     status = sub.add_parser("status", help="summarize runtime status")
     status.add_argument("--config-key", default=None, choices=("us", "hk"))
@@ -254,6 +302,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     service_render.add_argument("--deploy-home", default=None, help="systemd HOME environment; defaults to /home/<deploy-user>")
     service_render.add_argument("--timeout", dest="timeout_seconds", type=int, default=600)
     service_render.add_argument("--include-auto-upgrade", action="store_true", help="render an opt-in daily auto-upgrade service/timer")
+    service_render.add_argument("--include-feishu-gateway", action="store_true", help="render the long-running Feishu inbound gateway service")
+    service_render.add_argument("--feishu-gateway-host", default="127.0.0.1")
+    service_render.add_argument("--feishu-gateway-port", type=int, default=8765)
+    service_render.add_argument("--feishu-gateway-path", default="/feishu/events")
+    service_render.add_argument("--feishu-gateway-config-key", default="us", choices=("us", "hk"))
     service_render.add_argument("--output-dir", default=None, help="write rendered files under this directory")
     service_render.add_argument("--no-content", action="store_true", help="omit file contents from JSON output")
     service_preflight_cmd = service_sub.add_parser("preflight", help="check Linux runtime root before installing/running services")
@@ -407,6 +460,29 @@ def _load_scheduler_evidence(*, json_text: str | None, file_path: str | None) ->
     return None
 
 
+def _load_json_payload(*, json_text: str | None, file_path: str | None, stdin_enabled: bool = False) -> dict[str, Any]:
+    try:
+        if file_path:
+            payload = json.loads(Path(file_path).read_text(encoding="utf-8"))
+        elif stdin_enabled:
+            payload = json.loads(sys.stdin.read())
+        elif json_text:
+            payload = json.loads(json_text)
+        else:
+            raise AgentToolError(code="INPUT_ERROR", message="missing JSON payload")
+    except AgentToolError:
+        raise
+    except Exception as exc:
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message="failed to parse JSON payload",
+            details={"error": f"{type(exc).__name__}: {exc}"},
+        ) from exc
+    if not isinstance(payload, dict):
+        raise AgentToolError(code="INPUT_ERROR", message="JSON payload must be an object")
+    return payload
+
+
 def _validate_runtime_config(
     *,
     config_key: str | None = None,
@@ -496,6 +572,83 @@ def main(argv: list[str] | None = None) -> int:
                 ok=bool(healthcheck.get("ok", True)),
                 data={"healthcheck": healthcheck},
             ))
+
+        if args.command == "inbound" and args.inbound_command == "handle":
+            out = handle_inbound_request(
+                InboundRequest(
+                    text=args.text,
+                    sender_id=args.sender_id,
+                    channel=args.channel,
+                    message_id=args.message_id,
+                    config_key=args.config_key,
+                    config_path=args.config_path,
+                    audit_db=args.audit_db,
+                )
+            )
+            if args.format == "text":
+                data_raw = out.get("data")
+                data: dict[str, Any] = data_raw if isinstance(data_raw, dict) else {}
+                text = str(data.get("response_text") or "").strip() or _dumps(out)
+                sys.stdout.write(text + "\n")
+                return 0 if out.get("ok", True) else 2
+            return _print(out)
+
+        if args.command == "inbound" and args.inbound_command == "feishu":
+            out = handle_feishu_payload(
+                _load_json_payload(
+                    json_text=args.input_json,
+                    file_path=args.input_file,
+                    stdin_enabled=bool(args.stdin),
+                ),
+                config_key=args.config_key,
+                config_path=args.config_path,
+                audit_db=args.audit_db,
+            )
+            if args.format == "text":
+                data_raw = out.get("data")
+                data = data_raw if isinstance(data_raw, dict) else {}
+                text = str(data.get("response_text") or data.get("challenge") or "").strip() or _dumps(out)
+                sys.stdout.write(text + "\n")
+                return 0 if out.get("ok", True) else 2
+            return _print(out)
+
+        if args.command == "inbound" and args.inbound_command == "feishu-gateway":
+            settings = build_feishu_gateway_settings(
+                host=args.host,
+                port=args.port,
+                path=args.path,
+                config_key=args.config_key,
+                config_path=args.config_path,
+                audit_db=args.audit_db,
+                allowed_senders=args.allowed_senders,
+                app_id=args.app_id,
+                app_secret=args.app_secret,
+                encrypt_key=args.encrypt_key,
+                verification_token=args.verification_token,
+                require_signature=not bool(args.allow_unsigned),
+                reply_enabled=not bool(args.no_reply),
+                reply_in_thread=bool(args.reply_in_thread),
+                max_reply_chars=args.max_reply_chars,
+                signature_max_age_seconds=args.signature_max_age_seconds,
+                tls_certfile=args.tls_certfile,
+                tls_keyfile=args.tls_keyfile,
+            )
+            if args.check:
+                try:
+                    settings.validate_for_serve()
+                    ok = True
+                    error = None
+                except AgentToolError as err:
+                    ok = False
+                    error = build_error_payload(err)
+                return _print(build_response(
+                    tool_name="inbound.feishu_gateway.check",
+                    ok=ok,
+                    data={"settings": settings.redacted_status()},
+                    error=error,
+                ))
+            serve_feishu_gateway(settings)
+            return 0
 
         if args.command == "status":
             out = execute_tool("runtime_status", runtime_status_payload_from_args(args))
@@ -761,6 +914,11 @@ def main(argv: list[str] | None = None) -> int:
                 deploy_home=args.deploy_home,
                 timeout_seconds=args.timeout_seconds,
                 include_auto_upgrade=bool(args.include_auto_upgrade),
+                include_feishu_gateway=bool(args.include_feishu_gateway),
+                feishu_gateway_host=args.feishu_gateway_host,
+                feishu_gateway_port=int(args.feishu_gateway_port),
+                feishu_gateway_path=args.feishu_gateway_path,
+                feishu_gateway_config_key=args.feishu_gateway_config_key,
                 include_content=(not bool(args.no_content)) or bool(args.output_dir),
             )
             if args.output_dir:

@@ -82,7 +82,7 @@ python3 -m pytest tests/test_layered_config.py
   --runtime-root /var/lib/options-monitor
 ```
 
-确认升级时才会下载 tag、在新 release 内准备 `.venv`、安装 runtime/server 依赖、校验新目录、切换 `current` symlink，并按 `service.profile.json` 重启长期运行的 trade-intake service：
+确认升级时才会下载 tag、在新 release 内准备 `.venv`、安装 runtime/server 依赖、校验新目录、迁移上一 release 的 `configs/user*.json`、重建并校验 runtime config、切换 `current` symlink，并按 `service.profile.json` 重启长期运行的 trade-intake service：
 
 ```bash
 ./om update apply \
@@ -92,6 +92,8 @@ python3 -m pytest tests/test_layered_config.py
 ```
 
 默认不自动跨 major；需要跨 major 时显式传 `--allow-major`。
+
+升级会根据 `/var/lib/options-monitor/service.profile.json` 里的 `markets` / `config_paths` 逐个执行新 release 的 `./om config build` 和 `./om config validate`。如果缺少 `configs/user.hk.json` / `configs/user.us.json` 等必要 market user overlay，升级会在切换 symlink 前失败，并在 `upgrade_status.json` 写入复制配置或迁移到 runtime config 目录的 remediation。
 
 如果 systemd unit 使用 `User=<deploy_user>` 运行自动升级，`service render` 会在 profile 中标记 trade-intake 重启使用 `sudo -n systemctl restart ...`。服务器需要给运行用户配置最小 sudoers 授权，例如：
 

@@ -77,6 +77,16 @@ sudoedit "$ENV_FILE"
 
 `$ENV_FILE` 必须保留在服务器本地，填入真实 Feishu 凭证和表引用，不通过 git 发布。
 
+如果要从飞书发消息控制 OM，还需要填入 inbound gateway 相关值：
+
+```bash
+OM_INBOUND_FEISHU_APP_ID=cli_xxx
+OM_INBOUND_FEISHU_APP_SECRET=xxx
+OM_INBOUND_FEISHU_ENCRYPT_KEY=xxx
+OM_INBOUND_FEISHU_VERIFICATION_TOKEN=xxx
+OM_INBOUND_ALLOWED_SENDERS=feishu:ou_xxx
+```
+
 渲染服务文件：
 
 ```bash
@@ -89,8 +99,11 @@ cd "$REPO"
   --deploy-user "$DEPLOY_USER" \
   --markets us hk \
   --accounts lx sy \
+  --include-feishu-gateway \
   --output-dir /tmp/options-monitor-service
 ```
+
+`--include-feishu-gateway` 会生成 `options-monitor-feishu-gateway.service`，默认监听 `127.0.0.1:8765/feishu/events`。建议用 Nginx/Caddy/Cloudflare Tunnel 对外提供 HTTPS，再反代到本地 gateway。
 
 如果要启用远端自动升级，建议 `$REPO` 使用 `/opt/options-monitor/current` 这样的 symlink 布局，并额外传：
 
@@ -108,6 +121,8 @@ cd "$REPO"
 ```
 
 启用 `--include-auto-upgrade` 时，渲染器会保留 `--repo-root` 传入的 symlink 字面路径，并默认把 tick / trade-intake / maintenance config 指到 runtime root 下的 `config.us.json` / `config.hk.json`。这样 release 切换只移动代码，不绑定 release 目录内的生产配置。需要用非默认路径时，显式传 `--config-us` / `--config-hk`。
+
+自动升级切换 release 前，会把上一 release 的 `configs/user.common.json`、`configs/user.hk.json`、`configs/user.us.json` 复制到新 release 中缺失的位置，并根据 profile 里的 config path 重新执行 `./om config build` / `./om config validate`。如果缺少 market user config，升级会在 symlink 切换前失败，避免 tick 进入 runtime config stale 状态。
 
 传入 `--deploy-user "$DEPLOY_USER"` 后，渲染出的 systemd unit 会包含：
 
@@ -165,6 +180,7 @@ sudo systemctl enable --now options-monitor-auto-close-hk.timer
 sudo systemctl enable --now options-monitor-projection-verify.timer
 sudo systemctl enable --now options-monitor-runtime-status.timer
 sudo systemctl enable --now options-monitor-trade-intake.service
+sudo systemctl enable --now options-monitor-feishu-gateway.service
 ```
 
 如果 render 时传了 `--include-auto-upgrade`，再启用升级 timer：

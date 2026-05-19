@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import shlex
 import subprocess
 from datetime import datetime, timezone
@@ -129,6 +130,21 @@ class ServiceRestartError(RuntimeError):
         self.remediation = remediation
 
 
+class RuntimeConfigPrepareError(RuntimeError):
+    def __init__(self, message: str, *, remediation: list[str]) -> None:
+        super().__init__(message)
+        self.remediation = remediation
+
+
+def _load_service_profile(runtime_root: Path) -> dict[str, Any]:
+    profile_path = runtime_root / "service.profile.json"
+    try:
+        profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return profile if isinstance(profile, dict) else {}
+
+
 def _restart_profile(profile: dict[str, Any]) -> dict[str, Any]:
     raw = profile.get("restart")
     return raw if isinstance(raw, dict) else {}
@@ -194,15 +210,12 @@ def _restart_services_from_profile(
     run_cmd: Callable[..., Any],
     operations: list[dict[str, Any]],
 ) -> list[str]:
-    profile_path = runtime_root / "service.profile.json"
-    try:
-        profile = json.loads(profile_path.read_text(encoding="utf-8"))
-    except Exception:
-        return []
-    if not isinstance(profile, dict):
+    profile = _load_service_profile(runtime_root)
+    if not profile:
         return []
     provider = str(profile.get("service_provider") or "").strip().lower()
-    services = profile.get("services") if isinstance(profile.get("services"), list) else []
+    raw_services = profile.get("services")
+    services: list[Any] = raw_services if isinstance(raw_services, list) else []
     restarted: list[str] = []
     if provider != "systemd":
         return restarted
@@ -221,6 +234,101 @@ def _restart_services_from_profile(
             )
         restarted.append(name)
     return restarted
+
+
+def _profile_runtime_config_targets(profile: dict[str, Any]) -> list[dict[str, str]]:
+    raw_markets = profile.get("markets")
+    markets = [str(item).strip().lower() for item in raw_markets] if isinstance(raw_markets, list) else []
+    raw_config_paths = profile.get("config_paths")
+    config_paths: dict[Any, Any] = raw_config_paths if isinstance(raw_config_paths, dict) else {}
+    targets: list[dict[str, str]] = []
+    for market in markets:
+        if market not in {"us", "hk"}:
+            continue
+        path = str(config_paths.get(market) or "").strip()
+        if path:
+            targets.append({"market": market, "config_path": path})
+    return targets
+
+
+def _migrate_user_overlay_configs(*, previous_dir: Path, target_dir: Path, markets: list[str]) -> list[dict[str, str]]:
+    previous_configs = previous_dir / "configs"
+    target_configs = target_dir / "configs"
+    target_configs.mkdir(parents=True, exist_ok=True)
+    names = ["user.common.json", *(f"user.{market}.json" for market in markets if market in {"us", "hk"})]
+    out: list[dict[str, str]] = []
+    for name in names:
+        source = previous_configs / name
+        target = target_configs / name
+        if target.exists():
+            out.append({"name": name, "status": "exists", "source": str(source), "target": str(target)})
+            continue
+        if source.exists():
+            shutil.copy2(source, target)
+            out.append({"name": name, "status": "copied", "source": str(source), "target": str(target)})
+            continue
+        out.append({"name": name, "status": "missing_source", "source": str(source), "target": str(target)})
+    return out
+
+
+def _missing_market_user_configs(*, target_dir: Path, markets: list[str]) -> list[Path]:
+    return [
+        target_dir / "configs" / f"user.{market}.json"
+        for market in markets
+        if market in {"us", "hk"} and not (target_dir / "configs" / f"user.{market}.json").exists()
+    ]
+
+
+def _prepare_runtime_configs_for_release(
+    *,
+    previous_dir: Path,
+    target_dir: Path,
+    runtime_root: Path,
+    run_cmd: Callable[..., Any],
+    operations: list[dict[str, Any]],
+) -> dict[str, Any]:
+    profile = _load_service_profile(runtime_root)
+    targets = _profile_runtime_config_targets(profile)
+    if not targets:
+        return {"status": "skipped", "reason": "service profile has no runtime config targets"}
+
+    markets = [item["market"] for item in targets]
+    overlays = _migrate_user_overlay_configs(previous_dir=previous_dir, target_dir=target_dir, markets=markets)
+    missing = _missing_market_user_configs(target_dir=target_dir, markets=markets)
+    if missing:
+        remediation = [
+            f"copy_user_config: cp {previous_dir / 'configs' / path.name} {target_dir / 'configs'}/"
+            for path in missing
+        ]
+        remediation.append(
+            f"or move user overlays to {runtime_root / 'configs'} and build runtime configs with explicit --user-config paths"
+        )
+        raise RuntimeConfigPrepareError(
+            "release is missing required market user config overlays",
+            remediation=remediation,
+        )
+
+    rebuilt: list[dict[str, str]] = []
+    for item in targets:
+        market = item["market"]
+        config_path = item["config_path"]
+        _run_required(
+            ["./om", "config", "build", "--market", market, "--output", config_path],
+            cwd=target_dir,
+            run_cmd=run_cmd,
+            operations=operations,
+            timeout=120,
+        )
+        _run_required(
+            ["./om", "config", "validate", "--config-path", config_path, "--market", market],
+            cwd=target_dir,
+            run_cmd=run_cmd,
+            operations=operations,
+            timeout=120,
+        )
+        rebuilt.append({"market": market, "config_path": config_path})
+
+    return {"status": "prepared", "overlays": overlays, "rebuilt": rebuilt}
 
 
 def _release_python(target_dir: Path) -> Path:
@@ -445,6 +553,13 @@ def service_upgrade(
                 operations=operations,
                 timeout=120,
             )
+            runtime_config_prepare = _prepare_runtime_configs_for_release(
+                previous_dir=previous_dir,
+                target_dir=target_dir,
+                runtime_root=runtime,
+                run_cmd=run_cmd,
+                operations=operations,
+            )
             _switch_current_symlink(current_link=repo_link, target_dir=target_dir)
             symlink_switched = True
             restarted = (
@@ -462,7 +577,7 @@ def service_upgrade(
             "target_dir": str(target_dir),
             "previous_dir": str(previous_dir),
             "error": f"{type(exc).__name__}: {exc}",
-            **({"remediation": exc.remediation} if isinstance(exc, ServiceRestartError) else {}),
+            **({"remediation": exc.remediation} if isinstance(exc, (RuntimeConfigPrepareError, ServiceRestartError)) else {}),
             "operations": operations,
         }
         write_upgrade_status(runtime_root=runtime, payload=out)
@@ -475,6 +590,7 @@ def service_upgrade(
         "changed": True,
         "target_dir": str(target_dir),
         "previous_dir": str(previous_dir),
+        "runtime_config_prepare": runtime_config_prepare,
         "restarted_services": restarted,
         "operations": operations,
     }
