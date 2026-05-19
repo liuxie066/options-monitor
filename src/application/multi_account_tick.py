@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -125,7 +126,7 @@ def main(argv: list[str] | None = None) -> int:
     repo_root = Path(__file__).resolve().parents[2]
     runtime_resolution = resolve_runtime_root(repo_root=repo_root)
     base = runtime_resolution.runtime_root
-    vpy = repo_root / '.venv' / 'bin' / 'python'
+    vpy = Path(sys.executable)
     runlog = RunLogger(base)
     global _CURRENT_RUN_ID
     _CURRENT_RUN_ID = runlog.run_id  # pyright: ignore[reportConstantRedefinition]

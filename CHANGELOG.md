@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 1.2.73 - 2026-05-19
+
+### Changed
+- Preserved symlink repo roots in service rendering and defaulted auto-upgrade config paths to runtime-root configs.
+- Prepared release `.venv` runtime dependencies during confirmed service upgrades before switching the `current` symlink.
+- Reused the current Python executable for tick child processes instead of assuming every release directory already has `.venv/bin/python`.
+
 ## 1.2.72 - 2026-05-19
 
 ### Added

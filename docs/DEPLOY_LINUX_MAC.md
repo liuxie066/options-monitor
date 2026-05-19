@@ -107,6 +107,8 @@ cd "$REPO"
   --output-dir /tmp/options-monitor-service
 ```
 
+启用 `--include-auto-upgrade` 时，渲染器会保留 `--repo-root` 传入的 symlink 字面路径，并默认把 tick / trade-intake / maintenance config 指到 runtime root 下的 `config.us.json` / `config.hk.json`。这样 release 切换只移动代码，不绑定 release 目录内的生产配置。需要用非默认路径时，显式传 `--config-us` / `--config-hk`。
+
 传入 `--deploy-user "$DEPLOY_USER"` 后，渲染出的 systemd unit 会包含：
 
 ```ini
@@ -123,8 +125,8 @@ Environment="OM_RUNTIME_ROOT=/var/lib/options-monitor"
 ./om service preflight \
   --runtime-root "$RUNTIME" \
   --env-file "$ENV_FILE" \
-  --config-us config.us.json \
-  --config-hk config.hk.json \
+  --config-us "$RUNTIME/config.us.json" \
+  --config-hk "$RUNTIME/config.hk.json" \
   --accounts lx sy
 ```
 
@@ -166,7 +168,7 @@ sudo systemctl enable --now options-monitor-upgrade.timer
 `options-monitor-auto-close-*.timer` 每天北京时间 05:30 运行一次 `./om option-positions auto-close-expired --apply --quiet`，先处理过期自动平仓，再由 06:00 的 projection verify 做内部对账。
 `options-monitor-tick-us.timer` 使用 `OnCalendar=Mon..Fri *-*-* 09..16:00/10:00 America/New_York`，按美东时间 10 分钟整数边界唤醒。
 `options-monitor-tick-hk.timer` 使用 `OnCalendar=Mon..Fri *-*-* 09..16:00/10:00 Asia/Hong_Kong`，按香港时间 10 分钟整数边界唤醒；是否真正扫描/通知仍由 `tick-cron` scheduler 的 run points 决定。
-`options-monitor-upgrade.timer` 只有在 render 时传了 `--include-auto-upgrade` 才会生成；它每天北京时间 06:10 检查最新 release tag，发现可升级版本后切换 `/opt/options-monitor/current` 并写入 `upgrade_status.json`。
+`options-monitor-upgrade.timer` 只有在 render 时传了 `--include-auto-upgrade` 才会生成；它每天北京时间 06:10 检查最新 release tag，发现可升级版本后会在目标 release 内创建 `.venv`、安装 runtime/server 依赖、校验 `om-agent spec` 和 tick 运行解释器，再切换 `/opt/options-monitor/current` 并写入 `upgrade_status.json`。
 
 检查：
 

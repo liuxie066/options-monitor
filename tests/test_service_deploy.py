@@ -102,9 +102,43 @@ def test_render_systemd_bundle_can_include_auto_upgrade_timer(tmp_path: Path) ->
     profile = json.loads(files["service.profile.json"]["content"])
 
     assert str(repo / "om") + " update apply" in service
+    assert "--repo-root " + str(repo) in service
     assert "--auto --confirm" in service
     assert "OnCalendar=*-*-* 06:10:00 Asia/Shanghai" in timer
     assert profile["auto_upgrade"]["enabled"] is True
+    assert profile["config_paths"]["us"] == str(runtime / "config.us.json")
+
+
+def test_render_systemd_auto_upgrade_preserves_symlink_repo_root(tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+
+    releases = tmp_path / "releases"
+    release_dir = releases / "1.2.71"
+    release_dir.mkdir(parents=True)
+    current = tmp_path / "options-monitor"
+    current.symlink_to(release_dir, target_is_directory=True)
+    runtime = tmp_path / "runtime"
+
+    bundle = render_service_bundle(
+        target="systemd",
+        repo_root=current,
+        runtime_root=runtime,
+        markets=["hk"],
+        include_auto_upgrade=True,
+    )
+
+    files = {item["relative_path"]: item for item in bundle["files"]}
+    upgrade = files["systemd/options-monitor-upgrade.service"]["content"]
+    tick = files["systemd/options-monitor-tick-hk.service"]["content"]
+    profile = json.loads(files["service.profile.json"]["content"])
+
+    assert "WorkingDirectory=" + str(current) in upgrade
+    assert str(current / "om") + " update apply" in upgrade
+    assert "--repo-root " + str(current) in upgrade
+    assert str(release_dir) not in upgrade
+    assert "--config " + str(runtime / "config.hk.json") in tick
+    assert profile["repo_root"] == str(current)
+    assert profile["config_paths"]["hk"] == str(runtime / "config.hk.json")
 
 
 def test_render_systemd_bundle_allows_deploy_identity_override(tmp_path: Path) -> None:
@@ -429,7 +463,22 @@ def test_service_upgrade_dry_run_and_confirm_switches_current_symlink(tmp_path: 
             target = Path(command[-1])
             target.mkdir(parents=True)
             (target / "VERSION").write_text("1.0.1\n", encoding="utf-8")
+            (target / "requirements").mkdir()
+            (target / "constraints").mkdir()
+            (target / "requirements.txt").write_text("-r requirements/runtime.txt\n", encoding="utf-8")
+            (target / "constraints.txt").write_text("-c constraints/runtime.txt\n", encoding="utf-8")
+            (target / "requirements" / "runtime.txt").write_text("", encoding="utf-8")
+            (target / "constraints" / "runtime.txt").write_text("", encoding="utf-8")
+            (target / "requirements" / "server.txt").write_text("", encoding="utf-8")
+            (target / "constraints" / "server.txt").write_text("", encoding="utf-8")
             return subprocess.CompletedProcess(command, 0, stdout="cloned\n", stderr="")
+        if command == ["python3", "-m", "venv", ".venv"]:
+            cwd = Path(_kwargs["cwd"])
+            venv_python = cwd / ".venv" / "bin" / "python"
+            venv_python.parent.mkdir(parents=True)
+            venv_python.write_text("#!/bin/sh\n", encoding="utf-8")
+            venv_python.chmod(0o755)
+            return subprocess.CompletedProcess(command, 0, stdout="venv\n", stderr="")
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
     dry = service_upgrade(
@@ -455,6 +504,20 @@ def test_service_upgrade_dry_run_and_confirm_switches_current_symlink(tmp_path: 
     assert out["status"] == "upgraded"
     assert out["changed"] is True
     assert current.resolve() == (releases / "1.0.1").resolve()
+    assert ["python3", "-m", "venv", ".venv"] in calls
+    venv_python = str(releases / "1.0.1" / ".venv" / "bin" / "python")
+    assert [venv_python, "-m", "pip", "install", "-r", "requirements.txt", "-c", "constraints.txt"] in calls
+    assert [
+        venv_python,
+        "-m",
+        "pip",
+        "install",
+        "-r",
+        "requirements/server.txt",
+        "-c",
+        "constraints/server.txt",
+    ] in calls
+    assert any(command[:2] == [venv_python, "-c"] for command in calls)
     assert ["systemctl", "restart", "options-monitor-trade-intake.service"] in calls
     status = json.loads((runtime / "upgrade_status.json").read_text(encoding="utf-8"))
     assert status["target_version"] == "1.0.1"

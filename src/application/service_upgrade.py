@@ -173,6 +173,75 @@ def _restart_services_from_profile(
     return restarted
 
 
+def _release_python(target_dir: Path) -> Path:
+    return target_dir / ".venv" / "bin" / "python"
+
+
+def _ensure_release_runtime(
+    *,
+    target_dir: Path,
+    run_cmd: Callable[..., Any],
+    operations: list[dict[str, Any]],
+) -> Path:
+    venv_python = _release_python(target_dir)
+    if not venv_python.exists():
+        _run_required(
+            ["python3", "-m", "venv", ".venv"],
+            cwd=target_dir,
+            run_cmd=run_cmd,
+            operations=operations,
+            timeout=300,
+        )
+    if not venv_python.exists() or not os.access(venv_python, os.X_OK):
+        raise RuntimeError(f"release virtualenv python is missing after setup: {venv_python}")
+
+    _run_required(
+        [str(venv_python), "-m", "pip", "install", "-U", "pip"],
+        cwd=target_dir,
+        run_cmd=run_cmd,
+        operations=operations,
+        timeout=600,
+    )
+    _run_required(
+        [str(venv_python), "-m", "pip", "install", "-r", "requirements.txt", "-c", "constraints.txt"],
+        cwd=target_dir,
+        run_cmd=run_cmd,
+        operations=operations,
+        timeout=1200,
+    )
+    server_requirements = target_dir / "requirements" / "server.txt"
+    server_constraints = target_dir / "constraints" / "server.txt"
+    if server_requirements.exists() and server_constraints.exists():
+        _run_required(
+            [
+                str(venv_python),
+                "-m",
+                "pip",
+                "install",
+                "-r",
+                "requirements/server.txt",
+                "-c",
+                "constraints/server.txt",
+            ],
+            cwd=target_dir,
+            run_cmd=run_cmd,
+            operations=operations,
+            timeout=1200,
+        )
+    _run_required(
+        [
+            str(venv_python),
+            "-c",
+            "from pathlib import Path; import sys; assert Path(sys.executable).exists(); import src.application.multi_account_tick",
+        ],
+        cwd=target_dir,
+        run_cmd=run_cmd,
+        operations=operations,
+        timeout=120,
+    )
+    return venv_python
+
+
 def service_upgrade_check(
     *,
     repo_root: str | Path,
@@ -278,6 +347,7 @@ def service_upgrade(
     warnings = [] if repo_root_is_symlink else ["confirmed upgrade requires repo_root to be a current symlink"]
     planned = [
         f"clone {tag} into {target_dir}" if not target_dir.exists() else f"reuse existing release dir {target_dir}",
+        f"prepare release runtime at {target_dir / '.venv'}",
         f"validate {target_dir}",
         f"switch {repo_link} -> {target_dir}",
         "restart long-running services" if restart_services else "skip service restart",
@@ -309,6 +379,7 @@ def service_upgrade(
                     operations=operations,
                     timeout=600,
                 )
+            _ensure_release_runtime(target_dir=target_dir, run_cmd=run_cmd, operations=operations)
             _run_required(
                 ["python3", "scripts/release_check.py", "--tag", str(tag)],
                 cwd=target_dir,

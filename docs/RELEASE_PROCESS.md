@@ -82,7 +82,7 @@ python3 -m pytest tests/test_layered_config.py
   --runtime-root /var/lib/options-monitor
 ```
 
-确认升级时才会下载 tag、校验新目录、切换 `current` symlink，并重启长期运行的 trade-intake service：
+确认升级时才会下载 tag、在新 release 内准备 `.venv`、安装 runtime/server 依赖、校验新目录、切换 `current` symlink，并重启长期运行的 trade-intake service：
 
 ```bash
 ./om update apply \
@@ -107,7 +107,7 @@ python3 -m pytest tests/test_layered_config.py
   --confirm
 ```
 
-`./om service render --include-auto-upgrade` 会额外渲染每天北京时间 06:10 的升级 timer。这个开关是显式 opt-in；普通 `service render` 不会默认启用自动升级。
+`./om service render --include-auto-upgrade` 会额外渲染每天北京时间 06:10 的升级 timer。这个开关是显式 opt-in；普通 `service render` 不会默认启用自动升级。自动升级部署应让 `--repo-root` 指向 `current` symlink，并让生产 config 位于 runtime root，例如 `/var/lib/options-monitor/config.us.json` 和 `/var/lib/options-monitor/config.hk.json`。
 
 ---
 
