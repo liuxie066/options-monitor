@@ -5,10 +5,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from domain.domain.option_position_lots import EXPIRE_AUTO_CLOSE, parse_exp_to_ms
+import src.application.ledger.bootstrap as ledger_bootstrap
 import src.application.ledger.manual_trades as ledger_manual_trades
 from src.application.ledger.maintenance import auto_close_expired_positions, build_expired_close_decisions
 from src.application.ledger.position_records import PositionLotRecord
 import src.application.ledger.repository as ledger_repository
+
+
+def _migrate_seed_position_lots_explicitly(repo: ledger_repository.SQLiteOptionPositionsRepository) -> None:
+    result = ledger_bootstrap.migrate_legacy_sqlite_to_repo(repo, legacy_path=repo.db_path, apply=True)
+    assert result["ok"] is True
+    assert result["applied"] is True
+    assert result["source_table"] == "position_lots"
 
 
 def test_build_expired_close_decisions_marks_expired_position() -> None:
@@ -168,6 +176,7 @@ def test_auto_close_expired_positions_uses_effective_contracts_open_fallback(tmp
         ]
     )
     assert inserted == 1
+    _migrate_seed_position_lots_explicitly(repo)
 
     as_of_ms = parse_exp_to_ms("2026-04-20")
     assert as_of_ms is not None
@@ -414,6 +423,7 @@ def test_auto_close_expired_positions_closes_same_expiry_without_crossing_later_
             ),
         ]
     )
+    _migrate_seed_position_lots_explicitly(repo)
     as_of_ms = parse_exp_to_ms("2026-05-31")
     assert as_of_ms is not None
     positions = [dict(item["fields"], record_id=item["record_id"]) for item in repo.list_position_lots()]
@@ -511,7 +521,7 @@ def test_auto_close_expired_positions_fail_closed_on_ledger_identity_mismatch(tm
     assert fields["contracts_open"] == 6
 
 
-def test_position_maintenance_closes_legacy_sqlite_lot_after_load_repo_bootstrap(tmp_path: Path) -> None:
+def test_position_maintenance_requires_explicit_legacy_migration_before_closing_legacy_lot(tmp_path: Path) -> None:
     from src.application.positions.maintenance import run_expired_position_maintenance_for_account
 
     runtime_root = tmp_path / "runtime"
@@ -559,9 +569,11 @@ def test_position_maintenance_closes_legacy_sqlite_lot_after_load_repo_bootstrap
         as_of_ms=as_of_ms,
     )
 
-    assert result["applied_closed"] == 1
-    assert result["errors"] == []
+    assert result["applied_closed"] == 0
+    assert len(result["errors"]) == 1
+    assert "explicit legacy migration required before auto-close" in result["errors"][0]
+    assert "migrate-legacy --apply" in result["errors"][0]
     lots = ledger_repository.SQLiteOptionPositionsRepository(db_path).list_position_lots()
     assert len(lots) == 1
-    assert lots[0]["fields"]["status"] == "close"
-    assert lots[0]["fields"]["close_type"] == EXPIRE_AUTO_CLOSE
+    assert lots[0]["fields"]["status"] == "open"
+    assert "close_type" not in lots[0]["fields"]

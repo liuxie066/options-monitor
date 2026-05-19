@@ -2,25 +2,14 @@ from __future__ import annotations
 
 """基础设施 service 层：统一承接外部进程与第三方 API 调用。"""
 
-import json
 import subprocess
-from dataclasses import dataclass
+from datetime import date, datetime
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Any, Callable
+from typing import Any
+from zoneinfo import ZoneInfo
 
-from domain.domain.multi_tick import (
-    FEISHU_APP_NOTIFICATION_PROVIDER,
-    OPENCLAW_NOTIFICATION_PROVIDER,
-    SUPPORTED_NOTIFICATION_PROVIDERS,
-    normalize_notification_provider,
-    resolve_openclaw_transport_channel,
-)
 from domain.domain.fetch_source import is_futu_fetch_source
-from domain.domain.tool_boundary import normalize_notify_subprocess_output, normalize_subprocess_adapter_payload
-from src.application.config_loader import resolve_watchlist_config
-from src.application.secret_resolver import resolve_feishu_notification_app_config
-from src.infrastructure.feishu_bitable import FeishuError, get_tenant_access_token, http_json
+from domain.domain.multi_tick import resolve_openclaw_transport_channel
 from src.infrastructure.opend_watchdog import run_watchdog_check
 
 
@@ -28,13 +17,6 @@ DEFAULT_OPEND_HOST = '127.0.0.1'
 DEFAULT_OPEND_PORT = 11111
 DEFAULT_NOTIFICATION_SEND_TIMEOUT_SEC = 60
 MAX_NOTIFICATION_SEND_TIMEOUT_SEC = 300
-
-
-@dataclass(frozen=True)
-class NotificationDeliveryAdapter:
-    send_fn: Callable[..., Any]
-    normalize_fn: Callable[..., dict[str, Any]]
-    failure_stage: str
 
 
 def run_command(
@@ -217,179 +199,22 @@ def send_openclaw_message_process(
     )
 
 
-def load_feishu_notification_app_config(
-    *,
-    base: Path | None = None,
-    notifications: dict[str, Any] | None = None,
-) -> dict[str, str]:
-    del base
-    app_cfg = resolve_feishu_notification_app_config(notifications)
-    if not app_cfg.ready:
-        missing = ", ".join(app_cfg.missing_fields)
-        raise ValueError(f'notification env missing Feishu app credentials: {missing}')
-
-    return {
-        'app_id': app_cfg.app_id,
-        'app_secret': app_cfg.app_secret,
-        'app_id_env': app_cfg.app_id_env,
-        'app_secret_env': app_cfg.app_secret_env,
-    }
-
-
-def send_feishu_app_message(
-    *,
-    base: Path,
-    channel: str,
-    target: str,
-    message: str,
-    notifications: dict[str, Any] | None = None,
-    receive_id_type: str = 'open_id',
-) -> dict[str, Any]:
-    resolved_channel = str(channel or '').strip().lower()
-    if resolved_channel != FEISHU_APP_NOTIFICATION_PROVIDER:
-        raise ValueError(f'unsupported notification provider for feishu app sender: {channel}')
-
-    receive_id = str(target or '').strip()
-    if not receive_id:
-        raise ValueError('notifications.target is required')
-    if receive_id_type != 'open_id':
-        raise ValueError(f'unsupported receive_id_type for phase1: {receive_id_type}')
-
-    app_cfg = load_feishu_notification_app_config(base=base, notifications=notifications)
-    tenant_access_token = get_tenant_access_token(app_cfg['app_id'], app_cfg['app_secret'])
-    request_path = f'/open-apis/im/v1/messages?receive_id_type={receive_id_type}'
-    url = f'https://open.feishu.cn{request_path}'
-    headers = {
-        'Authorization': f'Bearer {tenant_access_token}',
-        'Content-Type': 'application/json; charset=utf-8',
-    }
-    payload = {
-        'receive_id': receive_id,
-        'msg_type': 'text',
-        'content': json.dumps({'text': str(message or '')}, ensure_ascii=False),
-    }
-
-    try:
-        response_json = http_json('POST', url, payload=payload, headers=headers)
-        return {
-            'ok': True,
-            'http_status': 200,
-            'request_path': request_path,
-            'response_json': response_json,
-            'response_tail': json.dumps(response_json, ensure_ascii=False)[-500:],
-        }
-    except FeishuError as exc:
-        response = exc.response if isinstance(exc.response, dict) else {}
-        body_text = str(response.get('body') or '')
-        response_json = response if isinstance(response.get('code'), int) else None
-        if body_text:
-            try:
-                parsed = json.loads(body_text)
-                if isinstance(parsed, dict):
-                    response_json = parsed
-            except Exception:
-                pass
-        return {
-            'ok': False,
-            'http_status': response.get('http_status'),
-            'request_path': request_path,
-            'response_json': response_json,
-            'response_tail': body_text[-500:],
-            'error_type': type(exc).__name__,
-            'error_message': str(exc),
-        }
-
-
-def normalize_feishu_app_send_output(*, send_result: dict[str, Any]) -> dict[str, Any]:
-    result = send_result if isinstance(send_result, dict) else {}
-    raw_response_json = result.get('response_json')
-    response_json: dict[str, Any] = raw_response_json if isinstance(raw_response_json, dict) else {}
-    raw_data = response_json.get('data')
-    data: dict[str, Any] = raw_data if isinstance(raw_data, dict) else {}
-    message_id = data.get('message_id')
-    http_status = result.get('http_status')
-    feishu_code = response_json.get('code') if isinstance(response_json.get('code'), int) else None
-    feishu_msg = str(response_json.get('msg') or result.get('error_message') or '').strip()
-    request_path = str(result.get('request_path') or '/open-apis/im/v1/messages?receive_id_type=open_id')
-    response_tail = str(result.get('response_tail') or '')
-
-    command_ok = (http_status == 200)
-    delivery_confirmed = bool(command_ok and feishu_code == 0 and message_id)
-    ok = delivery_confirmed
-
-    if ok:
-        message = f'message_id={message_id}'
-    elif command_ok and feishu_code == 0 and not message_id:
-        message = 'feishu send returned success but data.message_id is missing'
-    else:
-        parts = [
-            f'http_status={http_status}',
-            f'feishu_code={feishu_code}',
-            f'feishu_msg={feishu_msg or ""}',
-            f'message_id={message_id}',
-            f'request_path={request_path}',
-        ]
-        if response_tail:
-            parts.append(f'response_tail={response_tail}')
-        message = ' '.join(parts)
-
-    return normalize_subprocess_adapter_payload(
-        adapter='notify',
-        tool_name='feishu_app_message_send',
-        returncode=(0 if command_ok else 1),
-        stdout=response_tail,
-        stderr='',
-        ok=ok,
-        message=message,
-        extra={
-            'command_ok': command_ok,
-            'delivery_confirmed': delivery_confirmed,
-            'message_id': (None if message_id is None else str(message_id)),
-            'http_status': http_status,
-            'feishu_code': feishu_code,
-            'feishu_msg': feishu_msg,
-            'request_path': request_path,
-            'response_tail': response_tail,
-        },
-    )
-
-
-def send_feishu_app_message_process(*, base: Path, channel: str, target: str, message: str, notifications: dict[str, Any] | None = None):
-    send_result = send_feishu_app_message(
-        base=base,
-        channel=channel,
-        target=target,
-        message=message,
-        notifications=notifications,
-    )
-    normalized = normalize_feishu_app_send_output(send_result=send_result)
-    stdout = ''
-    if isinstance(send_result, dict):
-        response_json = send_result.get('response_json')
-        if isinstance(response_json, dict) and response_json:
-            stdout = json.dumps(response_json, ensure_ascii=False)
-        elif send_result.get('response_tail'):
-            stdout = str(send_result.get('response_tail') or '')
-    stderr = '' if bool(normalized.get('command_ok')) else str(normalized.get('message') or '')
-    return SimpleNamespace(returncode=int(normalized.get('returncode') or 0), stdout=stdout, stderr=stderr, raw=send_result)
-
-
-def select_notification_delivery_adapter(provider: Any) -> NotificationDeliveryAdapter:
-    resolved_provider = normalize_notification_provider(provider)
-    if resolved_provider == FEISHU_APP_NOTIFICATION_PROVIDER:
-        return NotificationDeliveryAdapter(
-            send_fn=send_feishu_app_message_process,
-            normalize_fn=normalize_feishu_app_send_output,
-            failure_stage='send_feishu_app_message',
-        )
-    if resolved_provider == OPENCLAW_NOTIFICATION_PROVIDER:
-        return NotificationDeliveryAdapter(
-            send_fn=send_openclaw_message_process,
-            normalize_fn=normalize_notify_subprocess_output,
-            failure_stage='send_openclaw_message',
-        )
-    allowed = ', '.join(SUPPORTED_NOTIFICATION_PROVIDERS)
-    raise ValueError(f'unsupported notification provider: {provider}; expected one of: {allowed}')
+def _resolve_watchlist_config(cfg: dict[str, Any] | None) -> list[dict[str, Any]]:
+    data = cfg if isinstance(cfg, dict) else {}
+    symbols = data.get("symbols")
+    if not isinstance(symbols, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in symbols:
+        if not isinstance(item, dict):
+            continue
+        normalized = dict(item)
+        broker = str(item.get("broker") or "").strip() or str(item.get("market") or "").strip()
+        if broker:
+            normalized["broker"] = broker
+        normalized.pop("market", None)
+        out.append(normalized)
+    return out
 
 
 def _resolve_opend_endpoint_for_market(cfg_obj: dict[str, Any], market: str) -> tuple[str, int]:
@@ -398,7 +223,7 @@ def _resolve_opend_endpoint_for_market(cfg_obj: dict[str, Any], market: str) -> 
     mkt = str(market or '').upper().strip()
 
     try:
-        for sym in resolve_watchlist_config(cfg_obj):
+        for sym in _resolve_watchlist_config(cfg_obj):
             if not isinstance(sym, dict):
                 continue
             if str(sym.get('broker') or '').upper() != mkt:
@@ -429,11 +254,6 @@ def trading_day_via_futu(cfg_obj: dict[str, Any], market: str) -> tuple[bool | N
     except Exception:
         return (None, market_used)
 
-    try:
-        from src.application.opend_utils import is_trading_day_via_futu
-    except Exception:
-        return (None, market_used)
-
     host, port = _resolve_opend_endpoint_for_market(cfg_obj, market_used)
 
     try:
@@ -442,9 +262,70 @@ def trading_day_via_futu(cfg_obj: dict[str, Any], market: str) -> tuple[bool | N
         return (None, market_used)
 
     try:
-        return is_trading_day_via_futu(ctx, market_used)
+        return _is_trading_day_via_futu(ctx, market_used)
     finally:
         try:
             ctx.close()
         except Exception:
             pass
+
+
+def _market_to_futu_trade_date_market(market: str) -> Any:
+    try:
+        from futu import TradeDateMarket
+    except Exception:
+        return None
+
+    mapping = {
+        "HK": "HK",
+        "US": "US",
+        "CN": "CN",
+    }
+    key = mapping.get(str(market or "").upper().strip())
+    return getattr(TradeDateMarket, key, None) if key else None
+
+
+def _trading_date(market: str) -> date:
+    mkt = str(market or "").upper().strip()
+    if mkt == "US":
+        return datetime.now(ZoneInfo("America/New_York")).date()
+    if mkt == "HK":
+        return datetime.now(ZoneInfo("Asia/Hong_Kong")).date()
+    if mkt == "CN":
+        return datetime.now(ZoneInfo("Asia/Shanghai")).date()
+    return datetime.now(ZoneInfo("UTC")).date()
+
+
+def _is_trading_day_via_futu(ctx: Any, market: str) -> tuple[bool | None, str]:
+    market_used = str(market or "").upper().strip()
+    futu_market = _market_to_futu_trade_date_market(market_used)
+    if futu_market is None:
+        return (None, market_used)
+
+    trading_date = _trading_date(market_used)
+    trading_date_text = trading_date.strftime("%Y-%m-%d")
+    try:
+        ret, data = ctx.request_trading_days(market=futu_market, start=trading_date_text, end=trading_date_text)
+    except Exception:
+        return (None, market_used)
+
+    if ret != 0:
+        return (None, market_used)
+
+    rows = []
+    if isinstance(data, list):
+        rows = data
+    elif hasattr(data, "to_dict"):
+        try:
+            rows = data.to_dict("records")  # type: ignore[attr-defined]
+        except Exception:
+            rows = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("time") or "") != trading_date_text:
+            continue
+        trade_date_type = str(row.get("trade_date_type") or "").upper()
+        if trade_date_type in ("WHOLE", "MORNING", "AFTERNOON", "TRADING"):
+            return (True, market_used)
+    return (False, market_used)

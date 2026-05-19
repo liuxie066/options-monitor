@@ -13,11 +13,12 @@ from src.application.runtime_config_paths import resolve_data_config_ref
 from src.application.runtime_trigger_context import build_trigger_context
 from src.application.service_deploy import service_status_from_profile
 from domain.domain.multi_tick import (
+    FEISHU_APP_NOTIFICATION_PROVIDER,
     OPENCLAW_NOTIFICATION_PROVIDER,
     is_supported_notification_provider,
-    resolve_notification_route_from_config,
     resolve_openclaw_transport_channel,
 )
+from src.application.notification_delivery_route import resolve_notification_delivery_route
 from src.application.trades.account_mapping import resolve_trade_intake_config
 
 
@@ -569,7 +570,7 @@ def _resolve_notification_route_summary(cfg: dict[str, Any]) -> dict[str, Any]:
     if not notifications:
         return {"configured": False, "target_configured": False}
     try:
-        route = resolve_notification_route_from_config(config=cfg)
+        route = resolve_notification_delivery_route(config=cfg)
     except Exception as exc:
         return {
             "configured": False,
@@ -578,7 +579,7 @@ def _resolve_notification_route_summary(cfg: dict[str, Any]) -> dict[str, Any]:
         }
     provider = str(route.get("provider") or "")
     channel = str(route.get("channel") or "")
-    target = str(notifications.get("target") or "").strip()
+    target = str(route.get("target") or "").strip()
     return {
         "configured": bool(provider and channel and target),
         "provider": provider or None,
@@ -1299,10 +1300,10 @@ def _notification_route_check(cfg: dict[str, Any], *, openclaw_path: str | None)
             "message": "notifications config is absent; live tick can generate reports but cannot send notifications",
             "value": {"configured": False},
         }
-    route = resolve_notification_route_from_config(config=cfg)
+    route = resolve_notification_delivery_route(config=cfg)
     provider = str(route.get("provider") or "")
     channel = str(route.get("channel") or "")
-    target = str(notifications.get("target") or "").strip()
+    target = str(route.get("target") or "").strip()
     if not is_supported_notification_provider(provider):
         return {
             "name": "notification_route",
@@ -1311,10 +1312,11 @@ def _notification_route_check(cfg: dict[str, Any], *, openclaw_path: str | None)
             "value": {"configured": True, "provider": provider, "channel": channel, "target_configured": bool(target)},
         }
     if not target:
+        message = "Feishu bot user open_id is missing" if provider == FEISHU_APP_NOTIFICATION_PROVIDER else "notifications.target is missing"
         return {
             "name": "notification_route",
             "status": "error",
-            "message": "notifications.target is missing",
+            "message": message,
             "value": {"configured": True, "provider": provider, "channel": channel, "target_configured": False},
         }
     transport_channel = resolve_openclaw_transport_channel(channel) if provider == OPENCLAW_NOTIFICATION_PROVIDER else channel

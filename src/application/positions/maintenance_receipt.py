@@ -11,7 +11,8 @@ from zoneinfo import ZoneInfo
 from domain.domain.multi_tick import resolve_notification_route_from_config
 from domain.storage.json_io import atomic_write_json, read_json
 from domain.storage.repositories import state_repo
-from src.infrastructure.external_services import select_notification_delivery_adapter
+from src.application.notification_delivery_adapter import select_notification_delivery_adapter
+from src.application.notification_delivery_route import resolve_notification_delivery_route
 
 _AUTO_CLOSE_RECEIPT_STATE_NAME = "auto_close_receipts.json"
 _AUTO_CLOSE_RECEIPT_STATE_MAX_ITEMS = 200
@@ -77,7 +78,7 @@ def send_auto_close_receipt(
         _attach_receipt_identity(out, receipt_key=receipt_key, receipt_key_fields=receipt_key_fields)
         return out
 
-    route = route_resolver(config=config or {})
+    route = resolve_notification_delivery_route(config=config or {}, route_resolver=route_resolver)
     provider = route.get("provider")
     channel = route.get("channel")
     target = route.get("target")

@@ -45,7 +45,7 @@ def check_sender_allowed(
 ) -> SenderDecision:
     normalized_channel = str(channel or "").strip().lower() or "local"
     normalized_sender = str(sender_id or "").strip()
-    raw = allowed_senders if allowed_senders is not None else os.environ.get("OM_INBOUND_ALLOWED_SENDERS")
+    raw = allowed_senders if allowed_senders is not None else _default_allowed_senders(normalized_channel)
     entries = _parse_allowed_entries(raw)
 
     if normalized_channel == "local" and not _truthy_env("OM_INBOUND_REQUIRE_ALLOWLIST", require_local_allowlist):
@@ -69,7 +69,7 @@ def enforce_sender_allowed(*, channel: str, sender_id: str, allowed_senders: str
         raise AgentToolError(
             code="PERMISSION_DENIED",
             message="sender is not allowed to use inbound control",
-            hint="Set OM_INBOUND_ALLOWED_SENDERS with entries like feishu:ou_xxx.",
+            hint="Set OM_FEISHU_BOT_USER_OPEN_ID or OM_FEISHU_BOT_ALLOWED_OPEN_IDS.",
             details=decision.public_payload(),
         )
     return decision
@@ -107,6 +107,24 @@ def enforce_tool_allowed(call: InboundToolCall) -> dict[str, Any]:
         "risk_level": risk_level,
         "reason": "pure_read_whitelist",
     }
+
+
+def _default_allowed_senders(channel: str) -> str:
+    if channel == "feishu":
+        allowed = _parse_open_ids(os.environ.get("OM_FEISHU_BOT_ALLOWED_OPEN_IDS"))
+        if not allowed:
+            allowed = _parse_open_ids(os.environ.get("OM_FEISHU_BOT_USER_OPEN_ID"))
+        return ",".join(f"feishu:{item}" for item in allowed)
+    return ""
+
+
+def _parse_open_ids(value: str | None) -> list[str]:
+    out: list[str] = []
+    for raw in str(value or "").split(","):
+        item = raw.strip()
+        if item and item not in out:
+            out.append(item)
+    return out
 
 
 def _parse_allowed_entries(raw: str | None) -> list[tuple[str, str, str]]:

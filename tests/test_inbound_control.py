@@ -324,8 +324,14 @@ def test_inbound_cli_feishu_reports_invalid_json(capsys) -> None:
     assert payload["error"]["code"] == "INPUT_ERROR"
 
 
-def test_inbound_cli_feishu_gateway_check_reports_redacted_config(capsys) -> None:
+def test_inbound_cli_feishu_gateway_check_reports_redacted_config(capsys, monkeypatch) -> None:
     import src.interfaces.cli.main as cli
+
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "app_1")
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_SECRET", "secret_1")
+    monkeypatch.setenv("OM_FEISHU_BOT_ENCRYPT_KEY", "encrypt_1")
+    monkeypatch.setenv("OM_FEISHU_BOT_VERIFICATION_TOKEN", "token_1")
+    monkeypatch.setenv("OM_FEISHU_BOT_ALLOWED_OPEN_IDS", "ou_1")
 
     rc = cli.main(
         [
@@ -337,14 +343,6 @@ def test_inbound_cli_feishu_gateway_check_reports_redacted_config(capsys) -> Non
             "8765",
             "--path",
             "/feishu/events",
-            "--app-id",
-            "app_1",
-            "--app-secret",
-            "secret_1",
-            "--encrypt-key",
-            "encrypt_1",
-            "--allowed-senders",
-            "feishu:ou_1",
             "--check",
         ]
     )
@@ -354,3 +352,15 @@ def test_inbound_cli_feishu_gateway_check_reports_redacted_config(capsys) -> Non
     assert payload["ok"] is True
     assert payload["data"]["settings"]["app_id_configured"] is True
     assert "secret_1" not in json.dumps(payload, ensure_ascii=False)
+
+
+def test_inbound_cli_feishu_gateway_rejects_secret_override_flags(capsys) -> None:
+    import src.interfaces.cli.main as cli
+
+    try:
+        cli.main(["inbound", "feishu-gateway", "--app-id", "app_1", "--check"])
+    except SystemExit as exc:
+        assert int(exc.code or 0) == 2
+    else:
+        raise AssertionError("expected argparse to reject --app-id")
+    _ = capsys.readouterr()

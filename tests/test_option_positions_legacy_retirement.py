@@ -134,7 +134,6 @@ def test_ledger_write_paths_use_position_field_contract_builders() -> None:
         repo_root / "src" / "application" / "ledger" / "maintenance.py",
         repo_root / "src" / "application" / "ledger" / "preflight.py",
         repo_root / "src" / "application" / "ledger" / "publisher.py",
-        repo_root / "src" / "application" / "ledger" / "service.py",
     ]
     banned_imports = {
         "build_open_fields",
@@ -264,11 +263,11 @@ def test_ledger_preflight_has_dedicated_owner() -> None:
     service_path = repo_root / "src" / "application" / "ledger" / "service.py"
 
     assert preflight_path.exists()
-    service_text = service_path.read_text(encoding="utf-8")
-    assert "src.application.ledger.preflight" in service_text
-    assert "def _preflight_open_event(" not in service_text
-    assert "def _preflight_lot_close(" not in service_text
-    assert "def _preflight_lot_adjust(" not in service_text
+    assert not service_path.exists()
+    preflight_text = preflight_path.read_text(encoding="utf-8")
+    assert "def _preflight_open_event(" in preflight_text
+    assert "def _preflight_lot_close(" in preflight_text
+    assert "def _preflight_lot_adjust(" in preflight_text
 
 
 def test_manual_ledger_command_results_use_explicit_contracts() -> None:
@@ -276,16 +275,14 @@ def test_manual_ledger_command_results_use_explicit_contracts() -> None:
     results_text = (repo_root / "src" / "application" / "ledger" / "results.py").read_text(encoding="utf-8")
     preflight_text = (repo_root / "src" / "application" / "ledger" / "preflight.py").read_text(encoding="utf-8")
     commands_text = (repo_root / "src" / "application" / "ledger" / "commands.py").read_text(encoding="utf-8")
-    service_text = (repo_root / "src" / "application" / "ledger" / "service.py").read_text(encoding="utf-8")
+    service_path = repo_root / "src" / "application" / "ledger" / "service.py"
 
     assert "class LedgerPreflightResult" in results_text
     assert "class LedgerWriteResult" in results_text
     assert "class ManualOpenPreviewResult" in results_text
     assert "class ManualClosePreviewResult" in results_text
     assert "class ManualAdjustPreviewResult" in results_text
-    assert "class OpenLedgerResult" not in service_text
-    assert "class ManualCloseLedgerResult" not in service_text
-    assert "class ManualAdjustLedgerResult" not in service_text
+    assert not service_path.exists()
     assert "def preflight_manual_open(\n" in preflight_text
     assert ") -> LedgerPreflightResult:" in preflight_text
     assert ") -> ManualOpenPreviewResult:" in commands_text
@@ -323,7 +320,6 @@ def test_broker_trade_operations_use_explicit_contracts() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     results_text = (repo_root / "src" / "application" / "ledger" / "results.py").read_text(encoding="utf-8")
     commands_text = (repo_root / "src" / "application" / "ledger" / "commands.py").read_text(encoding="utf-8")
-    service_text = (repo_root / "src" / "application" / "ledger" / "service.py").read_text(encoding="utf-8")
     workflows_text = (repo_root / "src" / "application" / "trades" / "workflows.py").read_text(encoding="utf-8")
     resolver_text = (repo_root / "src" / "application" / "trades" / "resolver.py").read_text(encoding="utf-8")
 
@@ -332,7 +328,6 @@ def test_broker_trade_operations_use_explicit_contracts() -> None:
     assert ") -> BrokerTradeOpenPreviewResult:" in commands_text
     assert ") -> BrokerTradeOperation:" in commands_text
     assert ") -> list[BrokerTradeOperation]:" in commands_text
-    assert ") -> list[BrokerTradeOperation]:" in service_text
     assert ") -> BrokerTradeOpenPreviewResult:" in workflows_text
     assert ") -> BrokerTradeOperation:" in workflows_text
     assert "operations: list[BrokerTradeOperation]" in resolver_text
@@ -345,14 +340,14 @@ def test_trade_event_interventions_use_explicit_preview_contracts() -> None:
     interventions_text = (repo_root / "src" / "application" / "ledger" / "interventions.py").read_text(
         encoding="utf-8"
     )
-    service_text = (repo_root / "src" / "application" / "ledger" / "service.py").read_text(encoding="utf-8")
+    commands_text = (repo_root / "src" / "application" / "ledger" / "commands.py").read_text(encoding="utf-8")
 
     assert "class TradeEventInterventionPreview" in results_text
     assert "preview: TradeEventInterventionPreview | dict[str, Any]" in results_text
     assert ") -> TradeEventInterventionPreview:" in interventions_text
     assert ") -> LedgerWriteResult:" in interventions_text
-    assert ") -> TradeEventInterventionPreview:" in service_text
-    assert "TradeEventInterventionLedgerResult(" in service_text
+    assert ") -> TradeEventInterventionLedgerResult:" in commands_text
+    assert "TradeEventInterventionLedgerResult(" in commands_text
 
 
 def test_close_lot_resolver_has_single_application_owner() -> None:
@@ -510,7 +505,6 @@ def test_repository_config_and_guards_live_under_ledger_repository() -> None:
     moved_defs = (
         "class SQLiteOptionPositionsRepository",
         "def option_positions_bootstrap_from_feishu_enabled(",
-        "def option_positions_bootstrap_from_legacy_sqlite_enabled(",
         "def resolve_option_positions_sqlite_path(",
         "def require_option_positions_read_repo(",
         "def require_option_positions_event_write_repo(",

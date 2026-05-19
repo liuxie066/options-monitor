@@ -107,7 +107,7 @@ def main(argv: list[str] | None = None) -> int:
     if bool(getattr(args, "refresh_multiplier_cache", False)):
         try:
             from domain.domain.fetch_source import is_futu_fetch_source
-            from src.infrastructure import multiplier_cache
+            from src.application import multiplier_cache
 
             cache_path = multiplier_cache.default_cache_path(runtime_root)
             cfg0 = json.loads(cfg_path.read_text(encoding="utf-8"))

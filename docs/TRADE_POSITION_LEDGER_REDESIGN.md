@@ -235,11 +235,11 @@ src/interfaces/cli/
 
 ## Write Path Rules
 
-所有写路径统一进入 `src.application.ledger.service`：
+所有写路径统一进入 `src.application.ledger.commands`：
 
 ```text
 CLI / agent / intake / auto-close
--> ledger service
+-> ledger commands
 -> validate selector
 -> resolve exact lot_id
 -> append TradeEvent
@@ -425,14 +425,14 @@ persisted position_lots
 
 ### Phase 5: Legacy Retirement
 
-目标：删除旧 v1/v2 混合模型。v2 代码已完成物理删除，剩余 `option_positions_*` 名称只允许作为用户入口、历史配置键或 legacy local bootstrap 语义，不允许作为核心写模型 owner。
+目标：删除旧 v1/v2 混合模型。v2 代码已完成物理删除，剩余 `option_positions_*` 名称只允许作为用户入口、历史配置键或显式 legacy migration 语义，不允许作为核心写模型 owner。
 
 任务：
 
 - 保持 v2 文件、导出和 runtime import 不回归的结构性测试。
 - 保持 facade、close target resolver、agent report 不 fallback 到 legacy compat records。
 - 默认 runtime code 直接依赖 `src.application.ledger.read_model`；旧 `option_positions_facade` 已删除并由结构性测试防回归。
-- legacy SQLite `option_positions` table 只能通过显式 `bootstrap_from_legacy_sqlite` 迁移入口读取。
+- legacy SQLite `trade_events` / `position_lots` / `option_positions` table 只能通过显式 `om option-positions store migrate-legacy` 迁移入口读取，默认 repo load 不做 bootstrap。
 - 文档更新：`OPTION_POSITIONS_MIGRATION.md` 和 `OPTION_POSITIONS_REPAIR.md` 改为 legacy-only。
 - CLI 命令给出迁移后的新入口。
 

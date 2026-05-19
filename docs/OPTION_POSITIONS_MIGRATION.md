@@ -52,9 +52,9 @@
 接管逻辑：
 
 - 如果历史里已有 `trade_events`，直接重放为当前 `position_lots`
-- 如果没有 `trade_events`，但已有旧 `position_lots`，系统会自动生成本地 bootstrap snapshot
+- 如果没有 `trade_events`，但已有旧 `position_lots`，系统只报告 legacy state；不会在默认打开 repo 时自动生成 bootstrap snapshot
 - 如果没有本地状态，系统保持 SQLite 空状态；不会从 Feishu `option_positions` 做 bootstrap
-- 旧 SQLite `option_positions` 表不再默认迁移；只有显式设置 `option_positions.bootstrap_from_legacy_sqlite.enabled=true` 时，才会作为一次性迁移输入读取
+- 旧 SQLite `trade_events` / `position_lots` / `option_positions` 表不再默认迁移；只有显式执行 `./om option-positions store migrate-legacy --apply` 时，才会作为一次性迁移输入读取
 - 最后统一重放事件并投影出当前仓位
 
 默认不会因为配置了 Feishu table 或历史 SQLite `option_positions` 表，就自动把外部/旧状态变成本地事实。

@@ -75,9 +75,9 @@ from src.application.tick_scheduler_context import (
 from src.infrastructure.external_services import (
     run_opend_watchdog,
     run_scan_scheduler_cli,
-    select_notification_delivery_adapter,
     trading_day_via_futu,
 )
+from src.application.notification_delivery_adapter import select_notification_delivery_adapter
 
 from domain.storage.repositories import state_repo
 

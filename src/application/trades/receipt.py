@@ -5,8 +5,9 @@ from pathlib import Path
 from typing import Any, Callable
 
 from domain.domain.multi_tick import resolve_notification_route_from_config
+from src.application.notification_delivery_route import resolve_notification_delivery_route
 from src.application.trade_time_format import format_trade_time_beijing
-from src.infrastructure.external_services import select_notification_delivery_adapter
+from src.application.notification_delivery_adapter import select_notification_delivery_adapter
 
 
 def send_trade_intake_receipt(
@@ -41,7 +42,7 @@ def send_trade_intake_receipt(
             "message_id": None,
         }
 
-    route = route_resolver(config=config or {})
+    route = resolve_notification_delivery_route(config=config or {}, route_resolver=route_resolver)
     provider = route.get("provider")
     channel = route.get("channel")
     target = route.get("target")

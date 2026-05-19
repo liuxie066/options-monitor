@@ -8,8 +8,12 @@ from typing import Any, Mapping
 DEFAULT_FEISHU_APP_ID_ENV = "OM_FEISHU_APP_ID"
 DEFAULT_FEISHU_APP_SECRET_ENV = "OM_FEISHU_APP_SECRET"
 DEFAULT_FEISHU_HOLDINGS_TABLE_ENV = "OM_FEISHU_HOLDINGS_TABLE"
-DEFAULT_NOTIFY_FEISHU_APP_ID_ENV = "OM_NOTIFY_FEISHU_APP_ID"
-DEFAULT_NOTIFY_FEISHU_APP_SECRET_ENV = "OM_NOTIFY_FEISHU_APP_SECRET"
+DEFAULT_FEISHU_BOT_APP_ID_ENV = "OM_FEISHU_BOT_APP_ID"
+DEFAULT_FEISHU_BOT_APP_SECRET_ENV = "OM_FEISHU_BOT_APP_SECRET"
+DEFAULT_FEISHU_BOT_ENCRYPT_KEY_ENV = "OM_FEISHU_BOT_ENCRYPT_KEY"
+DEFAULT_FEISHU_BOT_VERIFICATION_TOKEN_ENV = "OM_FEISHU_BOT_VERIFICATION_TOKEN"
+DEFAULT_FEISHU_BOT_USER_OPEN_ID_ENV = "OM_FEISHU_BOT_USER_OPEN_ID"
+DEFAULT_FEISHU_BOT_ALLOWED_OPEN_IDS_ENV = "OM_FEISHU_BOT_ALLOWED_OPEN_IDS"
 
 
 def _dict(value: Any) -> dict[str, Any]:
@@ -61,18 +65,34 @@ class FeishuHoldingsConfig:
 
 
 @dataclass(frozen=True)
-class FeishuNotificationAppConfig:
+class FeishuBotConfig:
     app_id: str
     app_secret: str
+    user_open_id: str
+    allowed_open_ids: tuple[str, ...]
+    encrypt_key: str
+    verification_token: str
     app_id_env: str
     app_secret_env: str
+    user_open_id_env: str
+    allowed_open_ids_env: str
+    encrypt_key_env: str
+    verification_token_env: str
 
     @property
-    def ready(self) -> bool:
+    def credentials_ready(self) -> bool:
         return bool(self.app_id and self.app_secret)
 
     @property
-    def missing_fields(self) -> tuple[str, ...]:
+    def send_ready(self) -> bool:
+        return bool(self.credentials_ready and self.user_open_id)
+
+    @property
+    def inbound_ready(self) -> bool:
+        return bool(self.credentials_ready and self.encrypt_key and self.verification_token and self.allowed_open_ids)
+
+    @property
+    def credential_missing_fields(self) -> tuple[str, ...]:
         missing: list[str] = []
         if not self.app_id:
             missing.append(self.app_id_env)
@@ -80,12 +100,41 @@ class FeishuNotificationAppConfig:
             missing.append(self.app_secret_env)
         return tuple(missing)
 
+    @property
+    def send_missing_fields(self) -> tuple[str, ...]:
+        missing = list(self.credential_missing_fields)
+        if not self.user_open_id:
+            missing.append(self.user_open_id_env)
+        return tuple(missing)
+
+    @property
+    def inbound_missing_fields(self) -> tuple[str, ...]:
+        missing = list(self.credential_missing_fields)
+        if not self.encrypt_key:
+            missing.append(self.encrypt_key_env)
+        if not self.verification_token:
+            missing.append(self.verification_token_env)
+        if not self.allowed_open_ids:
+            missing.append(self.allowed_open_ids_env)
+        return tuple(missing)
+
+    def default_allowed_senders(self) -> str:
+        return ",".join(f"feishu:{item}" for item in self.allowed_open_ids if item)
+
     def redacted_status(self) -> dict[str, Any]:
         return {
             "app_id_env": self.app_id_env,
             "app_id_configured": bool(self.app_id),
             "app_secret_env": self.app_secret_env,
             "app_secret_configured": bool(self.app_secret),
+            "user_open_id_env": self.user_open_id_env,
+            "user_open_id_configured": bool(self.user_open_id),
+            "allowed_open_ids_env": self.allowed_open_ids_env,
+            "allowed_open_ids_count": len(self.allowed_open_ids),
+            "encrypt_key_env": self.encrypt_key_env,
+            "encrypt_key_configured": bool(self.encrypt_key),
+            "verification_token_env": self.verification_token_env,
+            "verification_token_configured": bool(self.verification_token),
         }
 
 
@@ -109,39 +158,57 @@ def resolve_feishu_holdings_config(
     )
 
 
-def resolve_feishu_notification_app_config(
+def resolve_feishu_bot_config(
     notifications: dict[str, Any] | None = None,
     *,
     environ: Mapping[str, str] | None = None,
-) -> FeishuNotificationAppConfig:
-    notifications_cfg = _dict(notifications)
-    feishu_cfg = _dict(notifications_cfg.get("feishu"))
-    app_id_env = (
-        _text(feishu_cfg.get("app_id_env"))
-        or _text(notifications_cfg.get("app_id_env"))
-        or DEFAULT_NOTIFY_FEISHU_APP_ID_ENV
-    )
-    app_secret_env = (
-        _text(feishu_cfg.get("app_secret_env"))
-        or _text(notifications_cfg.get("app_secret_env"))
-        or DEFAULT_NOTIFY_FEISHU_APP_SECRET_ENV
-    )
-    return FeishuNotificationAppConfig(
+) -> FeishuBotConfig:
+    del notifications
+    app_id_env = DEFAULT_FEISHU_BOT_APP_ID_ENV
+    app_secret_env = DEFAULT_FEISHU_BOT_APP_SECRET_ENV
+    user_open_id_env = DEFAULT_FEISHU_BOT_USER_OPEN_ID_ENV
+    allowed_open_ids_env = DEFAULT_FEISHU_BOT_ALLOWED_OPEN_IDS_ENV
+    encrypt_key_env = DEFAULT_FEISHU_BOT_ENCRYPT_KEY_ENV
+    verification_token_env = DEFAULT_FEISHU_BOT_VERIFICATION_TOKEN_ENV
+    user_open_id = _env(environ, user_open_id_env)
+    allowed_open_ids = _split_csv(_env(environ, allowed_open_ids_env)) or ((user_open_id,) if user_open_id else ())
+    return FeishuBotConfig(
         app_id=_env(environ, app_id_env),
         app_secret=_env(environ, app_secret_env),
+        user_open_id=user_open_id,
+        allowed_open_ids=allowed_open_ids,
+        encrypt_key=_env(environ, encrypt_key_env),
+        verification_token=_env(environ, verification_token_env),
         app_id_env=app_id_env,
         app_secret_env=app_secret_env,
+        user_open_id_env=user_open_id_env,
+        allowed_open_ids_env=allowed_open_ids_env,
+        encrypt_key_env=encrypt_key_env,
+        verification_token_env=verification_token_env,
     )
+
+
+def _split_csv(value: str) -> tuple[str, ...]:
+    out: list[str] = []
+    for raw in str(value or "").split(","):
+        item = raw.strip()
+        if item and item not in out:
+            out.append(item)
+    return tuple(out)
 
 
 __all__ = [
     "DEFAULT_FEISHU_APP_ID_ENV",
     "DEFAULT_FEISHU_APP_SECRET_ENV",
     "DEFAULT_FEISHU_HOLDINGS_TABLE_ENV",
-    "DEFAULT_NOTIFY_FEISHU_APP_ID_ENV",
-    "DEFAULT_NOTIFY_FEISHU_APP_SECRET_ENV",
+    "DEFAULT_FEISHU_BOT_ALLOWED_OPEN_IDS_ENV",
+    "DEFAULT_FEISHU_BOT_APP_ID_ENV",
+    "DEFAULT_FEISHU_BOT_APP_SECRET_ENV",
+    "DEFAULT_FEISHU_BOT_ENCRYPT_KEY_ENV",
+    "DEFAULT_FEISHU_BOT_USER_OPEN_ID_ENV",
+    "DEFAULT_FEISHU_BOT_VERIFICATION_TOKEN_ENV",
+    "FeishuBotConfig",
     "FeishuHoldingsConfig",
-    "FeishuNotificationAppConfig",
     "resolve_feishu_holdings_config",
-    "resolve_feishu_notification_app_config",
+    "resolve_feishu_bot_config",
 ]

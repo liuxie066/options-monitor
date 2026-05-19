@@ -24,7 +24,6 @@ from domain.domain.ledger.position_fields import (
     parse_exp_to_ms,
 )
 from domain.domain.trade_contract_identity import canonical_contract_symbol
-from src.application.ledger.bootstrap import apply_bootstrap_snapshot
 from src.application.ledger.errors import LedgerPreflightError
 from src.application.ledger.lot_resolver import LotCloseResolutionError, resolve_explicit_close_target
 from src.application.ledger.repository import (
@@ -152,32 +151,7 @@ def _auto_close_expiration_anchor(fields: dict[str, Any]) -> tuple[int | None, s
     return int(normalized_ms), exp_source, exp_ymd, int(exp_ms)
 
 
-def _bootstrap_records_before(records: list[dict[str, Any]], *, before_ms: int | None) -> list[dict[str, Any]]:
-    if before_ms is None:
-        return records
-    fallback_ms = max(0, int(before_ms) - 1)
-    out: list[dict[str, Any]] = []
-    for item in records:
-        if not isinstance(item, dict):
-            continue
-        fields = item.get("fields")
-        if not isinstance(fields, dict):
-            out.append(item)
-            continue
-        patched_fields = dict(fields)
-        if patched_fields.get("opened_at") in (None, "") and patched_fields.get("last_action_at") in (None, ""):
-            exp_ms, _exp_source = effective_expiration(patched_fields)
-            if exp_ms is not None and int(exp_ms) < fallback_ms:
-                patched_fields["opened_at"] = max(0, int(exp_ms) - 1)
-            else:
-                patched_fields["opened_at"] = fallback_ms
-        patched = dict(item)
-        patched["fields"] = patched_fields
-        out.append(patched)
-    return out
-
-
-def _ensure_existing_position_lots_have_bootstrap_events(repo: Any, *, before_ms: int | None = None) -> None:
+def _raise_if_legacy_position_lots_without_trade_events(repo: Any) -> None:
     candidate = require_option_positions_event_write_repo(repo)
     count_trade_events = getattr(candidate, "count_trade_events", None)
     count_position_lots = getattr(candidate, "count_position_lots", None)
@@ -185,18 +159,10 @@ def _ensure_existing_position_lots_have_bootstrap_events(repo: Any, *, before_ms
         return
     if safe_int_count(count_trade_events()) > 0 or safe_int_count(count_position_lots()) <= 0:
         return
-    ok = apply_bootstrap_snapshot(
-        candidate,
-        records=_bootstrap_records_before(candidate.list_position_lots(), before_ms=before_ms),
-        source_name="sqlite_position_lots",
-        success_status="migrated_local_position_lots",
-        success_message="migrated {count} bootstrap events from local position_lots",
-        failure_status="degraded_local_position_lots_migration_failed",
-        failure_message="local position_lots migration failed: {error}",
-        failure_log_prefix="option_positions local snapshot migration skipped",
+    raise ValueError(
+        "position_lots exist without trade_events; run explicit "
+        "option-positions store migrate-legacy --apply before auto-close"
     )
-    if not ok:
-        raise ValueError(getattr(candidate, "bootstrap_message", None) or "local position_lots migration failed")
 
 
 def build_expired_close_decisions(
@@ -459,12 +425,12 @@ def auto_close_expired_positions(
         )
     if to_close_indexes:
         try:
-            _ensure_existing_position_lots_have_bootstrap_events(repo, before_ms=as_of_ms)
+            _raise_if_legacy_position_lots_without_trade_events(repo)
         except Exception as exc:
             return ExpiredCloseRunResult(
                 decisions=decisions,
                 applied=applied,
-                errors=[f"bootstrap migration failed before auto-close: {exc}"],
+                errors=[f"explicit legacy migration required before auto-close: {exc}"],
             )
     for index in to_close_indexes:
         decision = decisions[index]

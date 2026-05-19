@@ -67,6 +67,28 @@ def test_validate_config_accepts_wechat_clawbot_without_feishu_secrets() -> None
     mod.validate_config(cfg)
 
 
+def test_validate_config_accepts_feishu_app_without_config_target() -> None:
+    import src.application.config_validator as mod
+
+    cfg = _base_cfg()
+    cfg["notifications"] = {"provider": "feishu_app"}
+
+    mod.validate_config(cfg)
+
+
+def test_validate_config_rejects_feishu_app_config_target() -> None:
+    import src.application.config_validator as mod
+
+    cfg = _base_cfg()
+    cfg["notifications"] = {"provider": "feishu_app", "target": "ou_xxx"}
+
+    try:
+        mod.validate_config(cfg)
+        raise AssertionError("expected SystemExit")
+    except SystemExit as exc:
+        assert "OM_FEISHU_BOT_USER_OPEN_ID" in str(exc)
+
+
 def test_validate_config_rejects_empty_wechat_clawbot_target() -> None:
     import src.application.config_validator as mod
 

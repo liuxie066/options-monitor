@@ -49,8 +49,8 @@ def test_derive_put_cash_cap_uses_cny_fallback_for_us_symbols() -> None:
         'cash_by_currency': {'CNY': 70000.0},
         'option_ctx': {'cash_secured_total_by_ccy': {'USD': 2000.0}},
     }
-    with patch('src.infrastructure.multiplier_cache.load_cache', return_value={}):
-        with patch('src.infrastructure.multiplier_cache.get_cached_multiplier', return_value=100):
+    with patch('src.application.multiplier_cache.load_cache', return_value={}):
+        with patch('src.application.multiplier_cache.get_cached_multiplier', return_value=100):
             out = derive_put_max_strike_from_cash('NVDA', ctx, usd_per_cny_exchange_rate=0.14, cny_per_hkd_exchange_rate=None)
     assert out is not None
     assert abs(float(out) - 78.0) < 1e-9

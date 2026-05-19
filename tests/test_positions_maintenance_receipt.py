@@ -150,6 +150,35 @@ def test_send_auto_close_receipt_uses_existing_route_and_sender(tmp_path: Path) 
     assert out["attempt_count"] == 1
 
 
+def test_send_auto_close_receipt_uses_feishu_bot_target(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "ou_bot")
+    calls: list[dict] = []
+
+    def _send(**kwargs):
+        calls.append(dict(kwargs))
+        return {"command_ok": True, "delivery_confirmed": True, "message_id": "msg-auto-1", "returncode": 0}
+
+    out = send_auto_close_receipt(
+        base=tmp_path,
+        config={"notifications": {"provider": "feishu_app"}},
+        receipt_config={},
+        dry_run=False,
+        result={
+            "mode": "applied",
+            "account": "lx",
+            "applied_closed": 1,
+            "candidates_should_close": 1,
+            "errors": [],
+        },
+        send_fn=_send,
+        normalize_fn=lambda send_result: send_result,
+    )
+
+    assert out["status"] == "sent"
+    assert calls[0]["target"] == "ou_bot"
+    assert calls[0]["notifications"] == {"provider": "feishu_app"}
+
+
 def test_send_auto_close_receipt_increments_retry_attempt_count(tmp_path: Path) -> None:
     calls: list[dict] = []
 

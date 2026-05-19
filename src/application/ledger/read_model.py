@@ -26,7 +26,8 @@ from domain.domain.ledger.position_fields import (
 )
 from src.application.config_loader import resolve_data_config_path
 from src.application.positions.reporting import build_monthly_income_report
-from src.application.ledger.service import load_option_positions_repo, require_option_positions_read_repo
+from src.application.ledger.bootstrap import load_option_positions_repo
+from src.application.ledger.repository import require_option_positions_read_repo
 from src.infrastructure.exchange_rates import get_exchange_rates_or_fetch_latest
 from src.infrastructure.feishu_bitable import parse_note_kv, safe_float
 

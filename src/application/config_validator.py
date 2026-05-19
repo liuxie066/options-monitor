@@ -479,10 +479,17 @@ def validate_config(cfg: dict):
                 die(f'notifications.provider must be one of: {allowed}')
 
             target = notifications.get('target')
+            if provider == FEISHU_APP_NOTIFICATION_PROVIDER and isinstance(target, str) and str(target).strip():
+                die('notifications.target is not used for feishu_app; set OM_FEISHU_BOT_USER_OPEN_ID')
+            if target is not None and not isinstance(target, str):
+                if provider == OPENCLAW_NOTIFICATION_PROVIDER:
+                    die('notifications.target must be a non-empty openclaw target string')
+                die('notifications.target must be a string when configured')
             if not isinstance(target, str) or not str(target).strip():
                 if provider == OPENCLAW_NOTIFICATION_PROVIDER:
                     die('notifications.target must be a non-empty openclaw target string')
-                die('notifications.target must be a non-empty open_id string')
+                if provider != FEISHU_APP_NOTIFICATION_PROVIDER:
+                    die('notifications.target must be a non-empty open_id string')
 
             if provider == OPENCLAW_NOTIFICATION_PROVIDER:
                 channel = normalize_notification_channel(notifications.get('channel') or 'openclaw-weixin')

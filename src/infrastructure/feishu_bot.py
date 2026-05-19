@@ -49,3 +49,40 @@ def reply_text_message(
         )
 
     return with_tenant_token_retry(app_id, app_secret, _send)
+
+
+def send_text_message(
+    *,
+    app_id: str,
+    app_secret: str,
+    open_id: str,
+    text: str,
+    http_json_fn: HttpJsonFn = http_json,
+) -> dict[str, Any]:
+    open_id_value = str(open_id or "").strip()
+    text_value = str(text or "").strip()
+    if not open_id_value:
+        raise ValueError("open_id is required")
+    if not text_value:
+        raise ValueError("text is required")
+
+    request_path = "/open-apis/im/v1/messages?receive_id_type=open_id"
+    url = f"https://open.feishu.cn{request_path}"
+    payload = {
+        "receive_id": open_id_value,
+        "msg_type": "text",
+        "content": json.dumps({"text": text_value}, ensure_ascii=False),
+    }
+
+    def _send(tenant_token: str) -> dict[str, Any]:
+        return http_json_fn(
+            "POST",
+            url,
+            payload,
+            headers={
+                "Authorization": f"Bearer {tenant_token}",
+                "Content-Type": "application/json; charset=utf-8",
+            },
+        )
+
+    return with_tenant_token_retry(app_id, app_secret, _send)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from src.infrastructure.multiplier_cache import normalize_symbol as normalize_multiplier_symbol
+from src.application.multiplier_cache import normalize_symbol as normalize_multiplier_symbol
 from src.application.opend_utils import resolve_underlier_alias
 from domain.domain.option_position_lots import norm_symbol as normalize_position_symbol
 import src.application.ledger.repository as ledger_repository

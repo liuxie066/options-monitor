@@ -143,6 +143,32 @@ def test_send_trade_intake_receipt_uses_existing_route_and_sender(tmp_path: Path
     assert "deal_id：deal-1" in calls[0]["message"]
 
 
+def test_send_trade_intake_receipt_uses_feishu_bot_target(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "ou_bot")
+    calls: list[dict] = []
+
+    def _send(**kwargs):
+        calls.append(dict(kwargs))
+        return {"command_ok": True, "delivery_confirmed": True, "message_id": "msg-1", "returncode": 0}
+
+    out = send_trade_intake_receipt(
+        base=tmp_path,
+        config={"notifications": {"provider": "feishu_app"}},
+        receipt_config={},
+        apply_changes=True,
+        state={},
+        deal=None,
+        result={"status": "applied", "reason": "applied_open", "deal_id": "deal-1", "account": "lx", "action": "open"},
+        payload={"deal_id": "deal-1"},
+        send_fn=_send,
+        normalize_fn=lambda send_result: send_result,
+    )
+
+    assert out["status"] == "sent"
+    assert calls[0]["target"] == "ou_bot"
+    assert calls[0]["notifications"] == {"provider": "feishu_app"}
+
+
 def test_build_trade_intake_receipt_message_marks_unresolved() -> None:
     msg = build_trade_intake_receipt_message(
         deal=None,

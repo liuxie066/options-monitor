@@ -118,7 +118,8 @@ This is a controlled message entrypoint, not an `om-agent` tool and not a shell 
 Remote channels require:
 
 ```bash
-OM_INBOUND_ALLOWED_SENDERS='feishu:ou_xxx'
+OM_FEISHU_BOT_USER_OPEN_ID='ou_xxx'
+OM_FEISHU_BOT_ALLOWED_OPEN_IDS='ou_xxx'
 ```
 
 The first whitelist is intentionally small:
@@ -136,7 +137,7 @@ Do not connect Feishu, WeChat, or Hermes to arbitrary shell execution. Gateways 
 For Feishu event JSON specifically, use the thin adapter:
 
 ```bash
-OM_INBOUND_ALLOWED_SENDERS='feishu:ou_xxx' \
+OM_FEISHU_BOT_ALLOWED_OPEN_IDS='ou_xxx' \
 ./om inbound feishu --input-file feishu_event.json --format text
 ```
 
