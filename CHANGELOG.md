@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.80 - 2026-05-19
+
+### Added
+- Added account-level `return_summary` to monthly income reports, including current cash-secured basis, CNY income totals, monthly and annualized return rates, and CLI/inbound summary rendering.
+
 ## 1.2.79 - 2026-05-19
 
 ### Changed

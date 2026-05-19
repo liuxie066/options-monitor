@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -299,6 +300,167 @@ def test_build_monthly_income_report_leaves_cny_fields_empty_without_rates() -> 
     )
 
 
+def test_monthly_income_return_summary_uses_account_cash_secured_and_long_call_cost() -> None:
+    records = [
+        {
+            "record_id": "hk_put",
+            "fields": {
+                "broker": "富途",
+                "account": "lx",
+                "symbol": "0700.HK",
+                "option_type": "put",
+                "side": "short",
+                "status": "open",
+                "contracts": 1,
+                "currency": "HKD",
+                "premium": 2.0,
+                "multiplier": 100,
+                "cash_secured_amount": 20000,
+                "opened_at": _ms("2026-05-02"),
+            },
+        },
+        {
+            "record_id": "us_put",
+            "fields": {
+                "broker": "富途",
+                "account": "lx",
+                "symbol": "NVDA",
+                "option_type": "put",
+                "side": "short",
+                "status": "open",
+                "contracts": 1,
+                "currency": "USD",
+                "premium": 3.0,
+                "multiplier": 100,
+                "cash_secured_amount": 10000,
+                "opened_at": _ms("2026-05-03"),
+            },
+        },
+        {
+            "record_id": "long_call",
+            "fields": {
+                "broker": "富途",
+                "account": "lx",
+                "symbol": "NVDA",
+                "option_type": "call",
+                "side": "long",
+                "status": "open",
+                "contracts": 1,
+                "currency": "USD",
+                "premium": 1.0,
+                "multiplier": 100,
+                "opened_at": _ms("2026-05-03"),
+            },
+        },
+    ]
+
+    report = build_monthly_income_report(
+        records,
+        account="lx",
+        broker="富途",
+        month="2026-05",
+        rates={"rates": {"USDCNY": 7.2, "HKDCNY": 0.92}},
+        now_fn=lambda: date(2026, 5, 19),
+    )
+
+    assert report["warnings"] == []
+    assert len(report["return_summary"]) == 1
+    row = report["return_summary"][0]
+    assert row["cash_secured_by_ccy"] == {"HKD": 20000.0, "USD": 10000.0}
+    assert row["cash_secured_cny"] == 90400.0
+    assert row["net_income_by_ccy"] == {"HKD": 200.0, "USD": 200.0}
+    assert row["net_income_cny"] == 1624.0
+    assert row["premium_income_by_ccy"] == {"HKD": 200.0, "USD": 300.0}
+    assert row["premium_income_cny"] == 2344.0
+    assert row["net_return_rate"] == round(1624.0 / 90400.0, 6)
+    assert row["premium_return_rate"] == round(2344.0 / 90400.0, 6)
+    assert row["annualized_basis_days"] == 19
+    assert row["annualized_net_return_rate"] == round(row["net_return_rate"] * 365 / 19, 6)
+    assert row["return_basis"] == "current_cash_secured"
+
+
+def test_monthly_income_return_summary_outputs_each_account_when_account_filter_omitted() -> None:
+    records = [
+        {
+            "record_id": "lx_put",
+            "fields": {
+                "broker": "富途",
+                "account": "lx",
+                "symbol": "NVDA",
+                "option_type": "put",
+                "side": "short",
+                "status": "open",
+                "contracts": 1,
+                "currency": "USD",
+                "premium": 2.0,
+                "multiplier": 100,
+                "cash_secured_amount": 10000,
+                "opened_at": _ms("2026-05-03"),
+            },
+        },
+        {
+            "record_id": "sy_put",
+            "fields": {
+                "broker": "富途",
+                "account": "sy",
+                "symbol": "0700.HK",
+                "option_type": "put",
+                "side": "short",
+                "status": "open",
+                "contracts": 1,
+                "currency": "HKD",
+                "premium": 3.0,
+                "multiplier": 100,
+                "cash_secured_amount": 20000,
+                "opened_at": _ms("2026-05-04"),
+            },
+        },
+    ]
+
+    report = build_monthly_income_report(
+        records,
+        broker="富途",
+        month="2026-05",
+        rates={"rates": {"USDCNY": 7.2, "HKDCNY": 0.92}},
+        now_fn=lambda: date(2026, 5, 19),
+    )
+
+    assert [(row["account"], row["cash_secured_cny"]) for row in report["return_summary"]] == [
+        ("lx", 72000.0),
+        ("sy", 18400.0),
+    ]
+
+
+def test_monthly_income_return_summary_warns_when_exchange_rate_missing() -> None:
+    records = [
+        {
+            "record_id": "lx_put",
+            "fields": {
+                "broker": "富途",
+                "account": "lx",
+                "symbol": "NVDA",
+                "option_type": "put",
+                "side": "short",
+                "status": "open",
+                "contracts": 1,
+                "currency": "USD",
+                "premium": 2.0,
+                "multiplier": 100,
+                "cash_secured_amount": 10000,
+                "opened_at": _ms("2026-05-03"),
+            },
+        },
+    ]
+
+    report = build_monthly_income_report(records, account="lx", broker="富途", month="2026-05")
+
+    row = report["return_summary"][0]
+    assert row["cash_secured_cny"] is None
+    assert row["net_income_cny"] is None
+    assert row["net_return_rate"] is None
+    assert any("missing CNY exchange rate" in item for item in report["warnings"])
+
+
 def test_read_model_monthly_income_report_uses_canonical_lot_records() -> None:
     import src.application.ledger.read_model as read_model
 
@@ -488,7 +650,7 @@ def test_monthly_income_report_excludes_voided_close_event_but_keeps_open_premiu
             "premium_positions": 1,
         },
     )
-    assert report["warnings"] == []
+    assert any("missing CNY exchange rate" in item for item in report["warnings"])
 
 
 def test_monthly_income_report_uses_adjusted_premium_and_opened_at(tmp_path) -> None:
@@ -673,6 +835,49 @@ def test_monthly_income_report_event_cashflow_and_realized_are_separate_across_m
             "realized_gross": 150.0,
         },
     )
+
+
+def test_monthly_income_return_summary_handles_realized_month_without_new_open() -> None:
+    records = [
+        {
+            "record_id": "current-open",
+            "fields": {
+                "broker": "富途",
+                "account": "lx",
+                "symbol": "MSFT",
+                "option_type": "put",
+                "side": "short",
+                "status": "open",
+                "contracts": 1,
+                "currency": "USD",
+                "premium": 1.0,
+                "multiplier": 100,
+                "cash_secured_amount": 20000,
+                "opened_at": _ms("2026-05-02"),
+            },
+        }
+    ]
+    events = [
+        _trade_event("open-short", side="sell", position_effect="open", price=2.5, trade_date="2026-04-03"),
+        _trade_event("close-short", side="buy", position_effect="close", price=1.0, trade_date="2026-05-01"),
+    ]
+
+    may = build_monthly_income_report(
+        records,
+        account="lx",
+        broker="富途",
+        month="2026-05",
+        rates={"rates": {"USDCNY": 7.2}},
+        trade_events=events,
+        now_fn=lambda: date(2026, 5, 19),
+    )
+
+    row = may["return_summary"][0]
+    assert row["premium_income_cny"] == 0.0
+    assert row["realized_pnl_cny"] == 1080.0
+    assert row["net_income_cny"] == -720.0
+    assert row["cash_secured_cny"] == 144000.0
+    assert row["realized_return_rate"] == round(1080.0 / 144000.0, 6)
 
 
 def test_monthly_income_report_event_long_call_realized_uses_close_minus_open() -> None:

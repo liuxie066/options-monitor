@@ -348,6 +348,13 @@ OM_AGENT_ENABLE_WRITE_TOOLS=true ./om-agent run --tool version_update --input-js
   只有带 `yield_enhancement` / `enhancement_call` 标记的 long call 平仓收益进入该字段。
 - `premium_received_gross` / `realized_gross`：兼容字段，分别对应 short 开仓权利金和已实现收益；
   新消费方优先使用上面的明确口径字段。
+- `return_summary`：按 `month + account` 输出账户级收益率摘要，不按币种拆行。
+  分母为当前 open position lots 的 `cash_secured_amount` 折 CNY 后合计，
+  字段包括 `cash_secured_by_ccy`、`cash_secured_cny`、`net_income_cny`、
+  `premium_income_cny`、`net_return_rate`、`premium_return_rate`、
+  `annualized_*_return_rate` 和 `annualized_basis_days`。
+  `return_basis=current_cash_secured` 表示这不是账户总资产收益率。
+  如果缺少汇率，相关 CNY 和收益率字段为 `null`，并在 `warnings` 中说明。
 
 示例：
 

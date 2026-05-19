@@ -13,6 +13,7 @@ from src.application.inbound.contracts import InboundToolCall
 from src.application.inbound.feishu import feishu_payload_to_inbound_request, handle_feishu_payload
 from src.application.inbound.parser import parse_inbound_text
 from src.application.inbound.policy import check_sender_allowed, enforce_tool_allowed
+from src.application.inbound.renderer import render_inbound_text
 
 
 def test_inbound_parser_maps_core_read_only_commands() -> None:
@@ -98,6 +99,37 @@ def test_inbound_handle_executes_read_only_tool_and_replays_duplicate_message(tm
         ).fetchone()
 
     assert row == ("monthly_income_report", "monthly_income_report", "allowed", 1, 1, "ou_1")
+
+
+def test_inbound_monthly_income_renderer_prefers_return_summary() -> None:
+    intent = parse_inbound_text("收益 lx 2026-05")
+    text = render_inbound_text(
+        intent=intent,
+        tool_result=build_response(
+            tool_name="monthly_income_report",
+            ok=True,
+            data={
+                "summary": [{"month": "2026-05", "account": "lx", "currency": "USD"}],
+                "return_summary": [
+                    {
+                        "month": "2026-05",
+                        "account": "lx",
+                        "net_return_rate": 0.0681,
+                        "net_income_cny": 36097.23,
+                        "cash_secured_cny": 530385.93,
+                        "annualized_basis_days": 19,
+                        "annualized_net_return_rate": 1.3074,
+                        "premium_return_rate": 0.0697,
+                    }
+                ],
+            },
+        ),
+    )
+
+    assert "lx 2026-05 收益摘要" in text
+    assert "净收益率：6.81%" in text
+    assert "净收入：CNY 36,097" in text
+    assert "按 19 天折年化：130.74%" in text
 
 
 def test_inbound_duplicate_message_from_other_sender_is_denied_and_marked(tmp_path: Path) -> None:

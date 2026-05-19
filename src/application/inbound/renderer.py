@@ -48,6 +48,24 @@ def render_inbound_text(*, intent: InboundIntent | None, tool_result: dict[str, 
 
 
 def _render_monthly_income(data: dict[str, Any]) -> str:
+    return_summary = data.get("return_summary")
+    if isinstance(return_summary, list) and return_summary:
+        lines = ["收益统计完成（基于 OM 本地账本）："]
+        for row in return_summary[:4]:
+            if not isinstance(row, dict):
+                continue
+            lines.extend(
+                [
+                    f"{row.get('account') or '-'} {row.get('month') or '-'} 收益摘要",
+                    f"净收益率：{_pct(row.get('net_return_rate'))}",
+                    f"净收入：{_cny(row.get('net_income_cny'))}",
+                    f"现金担保：{_cny(row.get('cash_secured_cny'))}",
+                    f"按 {row.get('annualized_basis_days') or 0} 天折年化：{_pct(row.get('annualized_net_return_rate'))}",
+                    f"权利金毛收益率：{_pct(row.get('premium_return_rate'))}",
+                ]
+            )
+        return "\n".join(lines)
+
     rows = data.get("summary")
     if not isinstance(rows, list) or not rows:
         return "收益统计完成：没有匹配的月度收益记录。"
@@ -65,6 +83,24 @@ def _render_monthly_income(data: dict[str, Any]) -> str:
             f"open_basis={row.get('open_basis_lifecycle_pnl_gross', 0)}"
         )
     return "\n".join(lines)
+
+
+def _pct(value: Any) -> str:
+    if value is None:
+        return "-"
+    try:
+        return f"{float(value) * 100:.2f}%"
+    except Exception:
+        return "-"
+
+
+def _cny(value: Any) -> str:
+    if value is None:
+        return "CNY -"
+    try:
+        return f"CNY {float(value):,.0f}"
+    except Exception:
+        return "CNY -"
 
 
 def _render_positions(data: dict[str, Any]) -> str:

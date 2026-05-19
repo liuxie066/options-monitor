@@ -957,6 +957,9 @@ def test_option_positions_cli_report_monthly_income_json(monkeypatch, tmp_path: 
         "premium_contracts": 1,
         "premium_positions": 1,
     }
+    assert payload["return_summary"][0]["account"] == "lx"
+    assert payload["return_summary"][0]["cash_secured_by_ccy"] == {"USD": 10000.0}
+    assert payload["return_summary"][0]["premium_return_rate"] == round(1800.0 / 72000.0, 6)
 
 
 def test_option_positions_cli_report_monthly_income_text(monkeypatch, tmp_path: Path, capsys) -> None:

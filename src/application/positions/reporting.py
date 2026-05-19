@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import calendar
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from src.infrastructure.feishu_bitable import parse_note_kv, safe_float
 from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
@@ -390,6 +392,226 @@ def _finalize_summary_rows(summary: dict[str, dict[str, Any]]) -> list[dict[str,
             value_key = key.removesuffix("_missing")
             row[value_key] = None if row.pop(key) else _round_money(row.get(value_key, 0.0))
     return rows
+
+
+def _month_elapsed_days(month: str, *, now_fn: Any = None) -> int:
+    try:
+        year_s, month_s = str(month).split("-", 1)
+        year = int(year_s)
+        month_num = int(month_s)
+        _, days_in_month = calendar.monthrange(year, month_num)
+    except Exception:
+        return 0
+    now = (now_fn or (lambda: datetime.now(ZoneInfo("Asia/Shanghai"))))()
+    if isinstance(now, datetime):
+        now_bj = now.astimezone(ZoneInfo("Asia/Shanghai")) if now.tzinfo else now.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+        current_year = now_bj.year
+        current_month = now_bj.month
+        current_day = now_bj.day
+    else:
+        current_year = int(getattr(now, "year", 0) or 0)
+        current_month = int(getattr(now, "month", 0) or 0)
+        current_day = int(getattr(now, "day", 0) or 0)
+    if (year, month_num) < (current_year, current_month):
+        return int(days_in_month)
+    if (year, month_num) == (current_year, current_month):
+        return max(1, min(int(current_day), int(days_in_month)))
+    return 0
+
+
+def _add_ccy_amount(bucket: dict[str, float], currency: str, amount: Any) -> None:
+    value = safe_float(amount)
+    if value is None:
+        return
+    ccy = normalize_currency(currency) or str(currency or "").upper()
+    if not ccy:
+        return
+    bucket[ccy] = _round_money(float(bucket.get(ccy, 0.0) or 0.0) + float(value))
+
+
+def _current_cash_secured_by_account_from_records(
+    records: list[dict[str, Any]],
+    *,
+    account_norm: str | None,
+    broker_norm: str | None,
+) -> dict[str, dict[str, float]]:
+    out: dict[str, dict[str, float]] = {}
+    for rec in records:
+        fields = rec.get("fields") or rec
+        if not isinstance(fields, dict):
+            continue
+        if account_norm and normalize_account(fields.get("account")) != account_norm:
+            continue
+        if broker_norm and normalize_broker(fields.get("broker")) != broker_norm:
+            continue
+        if normalize_status(fields.get("status")) != "open":
+            continue
+        amount = safe_float(fields.get("cash_secured_amount"))
+        if amount is None or amount <= 0:
+            continue
+        account = normalize_account(fields.get("account")) or "-"
+        currency = normalize_currency(fields.get("currency")) or "USD"
+        _add_ccy_amount(out.setdefault(account, {}), currency, amount)
+    return out
+
+
+def _current_cash_secured_by_account_from_event_lots(
+    open_lots: list[dict[str, Any]],
+    *,
+    account_norm: str | None,
+    broker_norm: str | None,
+) -> dict[str, dict[str, float]]:
+    out: dict[str, dict[str, float]] = {}
+    for lot in open_lots:
+        if account_norm and normalize_account(lot.get("account")) != account_norm:
+            continue
+        if broker_norm and normalize_broker(lot.get("broker")) != broker_norm:
+            continue
+        if str(lot.get("position_side") or "").strip().lower() != "short":
+            continue
+        if normalize_option_type(lot.get("option_type")) != "put":
+            continue
+        remaining = int(float(lot.get("remaining") or 0))
+        if remaining <= 0:
+            continue
+        strike = safe_float(lot.get("strike"))
+        multiplier = safe_float(lot.get("multiplier"))
+        if strike is None or multiplier is None or strike <= 0 or multiplier <= 0:
+            continue
+        account = normalize_account(lot.get("account")) or "-"
+        currency = normalize_currency(lot.get("currency")) or "USD"
+        _add_ccy_amount(out.setdefault(account, {}), currency, float(strike) * float(multiplier) * remaining)
+    return out
+
+
+def _cny_total_or_none(
+    by_ccy: dict[str, float],
+    *,
+    converter: CurrencyConverter,
+    warnings: list[str],
+    warning_prefix: str,
+) -> float | None:
+    total = 0.0
+    missing: list[str] = []
+    for currency, amount in sorted(by_ccy.items()):
+        converted = _maybe_to_cny(converter, amount, currency)
+        if converted is None:
+            missing.append(currency)
+            continue
+        total += float(converted)
+    if missing:
+        warnings.append(f"{warning_prefix}: missing CNY exchange rate for {', '.join(missing)}")
+        return None
+    return _round_money(total)
+
+
+def _rate(numerator: float | None, denominator: float | None) -> float | None:
+    if numerator is None or denominator is None or float(denominator) <= 0:
+        return None
+    return round(float(numerator) / float(denominator), 6)
+
+
+def _annualized(rate: float | None, days: int) -> float | None:
+    if rate is None or days <= 0:
+        return None
+    return round(float(rate) * 365.0 / float(days), 6)
+
+
+def _build_return_summary(
+    summary_rows: list[dict[str, Any]],
+    *,
+    cash_secured_by_account: dict[str, dict[str, float]],
+    converter: CurrencyConverter,
+    warnings: list[str],
+    now_fn: Any = None,
+) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in summary_rows:
+        month = str(row.get("month") or "").strip()
+        account = normalize_account(row.get("account")) or "-"
+        currency = normalize_currency(row.get("currency")) or str(row.get("currency") or "").upper()
+        if not month or not currency:
+            continue
+        bucket = grouped.setdefault(
+            (month, account),
+            {
+                "month": month,
+                "account": account,
+                "net_income_by_ccy": {},
+                "premium_income_by_ccy": {},
+                "realized_pnl_by_ccy": {},
+                "net_income_cny": 0.0,
+                "premium_income_cny": 0.0,
+                "realized_pnl_cny": 0.0,
+                "_net_income_cny_missing": False,
+                "_premium_income_cny_missing": False,
+                "_realized_pnl_cny_missing": False,
+            },
+        )
+        _add_ccy_amount(bucket["net_income_by_ccy"], currency, row.get("net_cashflow_gross"))
+        _add_ccy_amount(bucket["premium_income_by_ccy"], currency, row.get("premium_received_gross"))
+        _add_ccy_amount(bucket["realized_pnl_by_ccy"], currency, row.get("realized_pnl_gross"))
+        for source_key, target_key, missing_key in (
+            ("net_cashflow_gross_cny", "net_income_cny", "_net_income_cny_missing"),
+            ("premium_received_gross_cny", "premium_income_cny", "_premium_income_cny_missing"),
+            ("realized_pnl_gross_cny", "realized_pnl_cny", "_realized_pnl_cny_missing"),
+        ):
+            cny = safe_float(row.get(source_key))
+            if cny is None:
+                bucket[missing_key] = True
+            elif not bucket.get(missing_key):
+                bucket[target_key] = _round_money(float(bucket.get(target_key) or 0.0) + float(cny))
+
+    out: list[dict[str, Any]] = []
+    for (month, account), bucket in sorted(grouped.items(), key=lambda item: item[0]):
+        cash_by_ccy = dict(sorted((cash_secured_by_account.get(account) or {}).items()))
+        cash_secured_cny = _cny_total_or_none(
+            cash_by_ccy,
+            converter=converter,
+            warnings=warnings,
+            warning_prefix=f"return_summary {month} {account} cash_secured_cny",
+        )
+        net_income_cny = None if bucket.pop("_net_income_cny_missing") else _round_money(bucket["net_income_cny"])
+        premium_income_cny = (
+            None if bucket.pop("_premium_income_cny_missing") else _round_money(bucket["premium_income_cny"])
+        )
+        realized_pnl_cny = (
+            None if bucket.pop("_realized_pnl_cny_missing") else _round_money(bucket["realized_pnl_cny"])
+        )
+        if net_income_cny is None:
+            warnings.append(f"return_summary {month} {account} net_income_cny: missing CNY exchange rate")
+        if premium_income_cny is None:
+            warnings.append(f"return_summary {month} {account} premium_income_cny: missing CNY exchange rate")
+        if realized_pnl_cny is None:
+            warnings.append(f"return_summary {month} {account} realized_pnl_cny: missing CNY exchange rate")
+        net_return_rate = _rate(net_income_cny, cash_secured_cny)
+        premium_return_rate = _rate(premium_income_cny, cash_secured_cny)
+        realized_return_rate = _rate(realized_pnl_cny, cash_secured_cny)
+        annualized_basis_days = _month_elapsed_days(month, now_fn=now_fn)
+        out.append(
+            {
+                "month": month,
+                "account": account,
+                "cash_secured_by_ccy": cash_by_ccy,
+                "cash_secured_cny": cash_secured_cny,
+                "net_income_by_ccy": dict(sorted(bucket["net_income_by_ccy"].items())),
+                "net_income_cny": net_income_cny,
+                "premium_income_by_ccy": dict(sorted(bucket["premium_income_by_ccy"].items())),
+                "premium_income_cny": premium_income_cny,
+                "realized_pnl_by_ccy": dict(sorted(bucket["realized_pnl_by_ccy"].items())),
+                "realized_pnl_cny": realized_pnl_cny,
+                "net_return_rate": net_return_rate,
+                "premium_return_rate": premium_return_rate,
+                "realized_return_rate": realized_return_rate,
+                "annualized_net_return_rate": _annualized(net_return_rate, annualized_basis_days),
+                "annualized_premium_return_rate": _annualized(premium_return_rate, annualized_basis_days),
+                "annualized_realized_return_rate": _annualized(realized_return_rate, annualized_basis_days),
+                "annualized_basis_days": annualized_basis_days,
+                "return_basis": "current_cash_secured",
+                "calculation_method": "net_cashflow_cny / current_open_cash_secured_cny",
+            }
+        )
+    return out
 
 
 def _event_detail_sort_key(row: dict[str, Any]) -> tuple[Any, ...]:
@@ -810,10 +1032,12 @@ def _build_legacy_open_basis_rows(
 def _build_monthly_income_report_from_events(
     trade_events: list[dict[str, Any]],
     *,
+    records: list[dict[str, Any]],
     account_norm: str | None,
     broker_norm: str | None,
     month: str | None,
     converter: CurrencyConverter,
+    now_fn: Any = None,
 ) -> dict[str, Any]:
     events = _active_trade_events(trade_events)
     open_lots: list[dict[str, Any]] = []
@@ -1116,8 +1340,27 @@ def _build_monthly_income_report_from_events(
         if row.get("leg_role") == "enhancement_call"
         or (row.get("strategy") == "yield_enhancement" and row.get("position_side") == "long")
     ]
+    summary_rows = _finalize_summary_rows(summary)
+    cash_secured_by_account = _current_cash_secured_by_account_from_records(
+        records,
+        account_norm=account_norm,
+        broker_norm=broker_norm,
+    )
+    if not cash_secured_by_account:
+        cash_secured_by_account = _current_cash_secured_by_account_from_event_lots(
+            open_lots,
+            account_norm=account_norm,
+            broker_norm=broker_norm,
+        )
     return {
-        "summary": _finalize_summary_rows(summary),
+        "summary": summary_rows,
+        "return_summary": _build_return_summary(
+            summary_rows,
+            cash_secured_by_account=cash_secured_by_account,
+            converter=converter,
+            warnings=warnings,
+            now_fn=now_fn,
+        ),
         "rows": sorted(filtered_realized_rows, key=_event_detail_sort_key),
         "premium_rows": sorted(filtered_premium_rows, key=_event_detail_sort_key),
         "cashflow_rows": sorted(filtered_cashflow_rows, key=_event_detail_sort_key),
@@ -1137,6 +1380,7 @@ def build_monthly_income_report(
     month: str | None = None,
     rates: dict[str, Any] | None = None,
     trade_events: list[dict[str, Any]] | None = None,
+    now_fn: Any = None,
 ) -> dict[str, Any]:
     account_norm = normalize_account(account) if account else None
     broker_norm = normalize_broker(broker) if broker else None
@@ -1144,10 +1388,12 @@ def build_monthly_income_report(
     if trade_events:
         report = _build_monthly_income_report_from_events(
             trade_events,
+            records=records,
             account_norm=account_norm,
             broker_norm=broker_norm,
             month=month,
             converter=converter,
+            now_fn=now_fn,
         )
         report["filters"] = {
             "account": account_norm,
@@ -1287,8 +1533,22 @@ def build_monthly_income_report(
             currency=row["currency"],
         )
 
+    summary_rows = _finalize_summary_rows(summary)
+    cash_secured_by_account = _current_cash_secured_by_account_from_records(
+        records,
+        account_norm=account_norm,
+        broker_norm=broker_norm,
+    )
+
     return {
-        "summary": _finalize_summary_rows(summary),
+        "summary": summary_rows,
+        "return_summary": _build_return_summary(
+            summary_rows,
+            cash_secured_by_account=cash_secured_by_account,
+            converter=converter,
+            warnings=warnings,
+            now_fn=now_fn,
+        ),
         "rows": [
             r.as_dict()
             for r in sorted(rows, key=lambda x: (x.month, x.account, x.currency, x.symbol, x.record_id))
