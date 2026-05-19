@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.2.72 - 2026-05-19
+
+### Added
+- Added top-level `./om doctor`, `./om setup`, `./om update check/apply/rollback`, and safe `./om config get/set` operator entrypoints.
+
+### Changed
+- Render opt-in auto-upgrade services through `./om update apply` while keeping legacy `./om service upgrade*` commands compatible.
+
 ## 1.2.71 - 2026-05-19
 
 ### Fixed

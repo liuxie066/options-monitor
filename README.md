@@ -20,7 +20,7 @@
 
 推荐顺序：
 
-1. 首次启用先用 `./om init runtime` 或配置模板完成初始化。
+1. 首次启用先用 `./om setup` 或配置模板完成初始化。
 2. 日常人工操作优先 `./om`。
 3. Agent 接入、排障和结构化读取优先 `./om-agent`。
 
@@ -65,9 +65,11 @@ python3 -m venv .venv
 推荐用 CLI 初始化入口：
 
 ```bash
-./om init runtime --market us --futu-acc-id <futu-account-id>
-./om init runtime --market hk --futu-acc-id <futu-account-id>
+./om setup --market us --futu-acc-id <futu-account-id>
+./om setup --market hk --futu-acc-id <futu-account-id>
 ```
+
+旧的 `./om init runtime ...` 入口仍保留兼容。
 
 如果你已经有自己的分层配置，运行时最终只认这两个 canonical config：
 
@@ -107,6 +109,7 @@ python3 -m venv .venv
 
 ```bash
 ./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'
+./om doctor --config-key us
 ./om-agent run --tool runtime_status --input-json '{"config_key":"us"}'
 ./om-agent run --tool openclaw_readiness --input-json '{"config_key":"us"}'
 ```
@@ -116,6 +119,15 @@ python3 -m venv .venv
 ```bash
 ./om config explain --market us --key option_positions.auto_close.enabled
 ./om config explain --market us --key symbol_defaults.fetch.limit_expirations
+```
+
+直接查看或修改 runtime config 时，使用 `config get/set`。`set` 默认只预览，只有同时传
+`--apply --confirm` 才会写入，并会先校验修改后的配置：
+
+```bash
+./om config get --config-key us --key runtime.prefetch.max_workers
+./om config set --config-key us --key runtime.prefetch.max_workers --json-value 4
+./om config set --config-key us --key runtime.prefetch.max_workers --json-value 4 --apply --confirm
 ```
 
 ### 4. 第一轮真实运行

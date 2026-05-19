@@ -101,7 +101,7 @@ def test_render_systemd_bundle_can_include_auto_upgrade_timer(tmp_path: Path) ->
     timer = files["systemd/options-monitor-upgrade.timer"]["content"]
     profile = json.loads(files["service.profile.json"]["content"])
 
-    assert str(repo / "om") + " service upgrade" in service
+    assert str(repo / "om") + " update apply" in service
     assert "--auto --confirm" in service
     assert "OnCalendar=*-*-* 06:10:00 Asia/Shanghai" in timer
     assert profile["auto_upgrade"]["enabled"] is True
@@ -264,8 +264,8 @@ def test_render_launchd_bundle_can_include_auto_upgrade_timer(tmp_path: Path) ->
     profile = json.loads(files["service.profile.json"]["content"])
 
     assert "<string>com.options-monitor.upgrade</string>" in upgrade
-    assert "service" in upgrade
-    assert "upgrade" in upgrade
+    assert "update" in upgrade
+    assert "apply" in upgrade
     assert "<key>Hour</key>" in upgrade
     assert "<integer>6</integer>" in upgrade
     assert "<key>Minute</key>" in upgrade
