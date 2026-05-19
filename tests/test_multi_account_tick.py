@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import threading
+from pathlib import Path
 from typing import Any
 
 
@@ -194,6 +195,7 @@ def test_main_uses_env_runtime_root_for_stateful_tick_flows(monkeypatch, tmp_pat
 
     def _run_tick_guard_flow(request):
         captured["guard_base"] = request.base
+        captured["guard_vpy"] = request.vpy
         return TickGuardOutcome(
             should_continue=False,
             return_code=0,
@@ -216,3 +218,4 @@ def test_main_uses_env_runtime_root_for_stateful_tick_flows(monkeypatch, tmp_pat
     assert rc == 0
     assert captured["runlog_base"] == runtime_root.resolve()
     assert captured["guard_base"] == runtime_root.resolve()
+    assert captured["guard_vpy"] == Path(sys.executable)

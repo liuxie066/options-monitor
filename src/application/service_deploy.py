@@ -106,10 +106,26 @@ def _resolve_path(value: str | Path | None, *, base: Path, default: Path) -> Pat
     return path
 
 
-def _config_path_for_market(market: str, *, repo_root: Path, config_paths: dict[str, str | Path] | None) -> Path:
+def _absolute_path_preserve_symlink(value: str | Path, *, base: Path | None = None) -> Path:
+    path = Path(value).expanduser()
+    if path.is_absolute():
+        return path
+    return (base or Path.cwd()) / path
+
+
+def _config_path_for_market(
+    market: str,
+    *,
+    repo_root: Path,
+    runtime_root: Path | None = None,
+    config_paths: dict[str, str | Path] | None,
+) -> Path:
     configured = (config_paths or {}).get(market)
-    default = repo_root / f"config.{market}.json"
-    return _resolve_path(configured, base=repo_root, default=default)
+    default_root = runtime_root or repo_root
+    default = default_root / f"config.{market}.json"
+    if configured is None or str(configured).strip() == "":
+        return default
+    return _absolute_path_preserve_symlink(configured, base=repo_root)
 
 
 def _json_arg(payload: dict[str, Any]) -> str:
@@ -303,7 +319,7 @@ def render_service_bundle(
     include_content: bool = True,
 ) -> dict[str, Any]:
     target_key = normalize_target(target)
-    repo = Path(repo_root or Path.cwd()).expanduser().resolve()
+    repo = _absolute_path_preserve_symlink(repo_root or Path.cwd())
     runtime = _resolve_path(runtime_root, base=repo, default=default_runtime_root(target_key))
     env_file_path = _resolve_path(env_file, base=repo, default=Path()) if env_file else None
     if env_file_path is not None and target_key != "systemd":
@@ -316,8 +332,14 @@ def render_service_bundle(
         systemd_home = Path(deploy_home).expanduser()
     account_values = normalize_accounts(accounts)
     market_values = normalize_markets(markets)
+    config_default_root = runtime if include_auto_upgrade else None
     config_by_market = {
-        market: _config_path_for_market(market, repo_root=repo, config_paths=config_paths)
+        market: _config_path_for_market(
+            market,
+            repo_root=repo,
+            runtime_root=config_default_root,
+            config_paths=config_paths,
+        )
         for market in market_values
     }
     om = str(repo / "om")
