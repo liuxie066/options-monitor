@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.2.77 - 2026-05-19
+
+### Added
+- Added controlled inbound remote command handling with deterministic read-only routing, sender allowlist enforcement, message-id idempotency, and SQLite audit records.
+- Added Feishu App event callback support through `./om inbound feishu-gateway`, including signature/token checks, encrypted payload handling, and Feishu App reply API responses.
+- Added `./om service render --include-feishu-gateway` to generate a long-running Feishu gateway service and documented the Linux deployment/env configuration.
+
+### Fixed
+- Rebuild runtime configs during service upgrades after migrating `configs/user*.json` from the previous release, failing before symlink switch when required market user overlays are missing.
+
 ## 1.2.76 - 2026-05-19
 
 ### Fixed

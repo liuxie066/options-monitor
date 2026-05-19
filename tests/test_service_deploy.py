@@ -109,6 +109,38 @@ def test_render_systemd_bundle_can_include_auto_upgrade_timer(tmp_path: Path) ->
     assert profile["config_paths"]["us"] == str(runtime / "config.us.json")
 
 
+def test_render_systemd_bundle_can_include_feishu_gateway_service(tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    repo.mkdir()
+
+    bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        runtime_root=runtime,
+        markets=["us"],
+        include_feishu_gateway=True,
+        feishu_gateway_host="127.0.0.1",
+        feishu_gateway_port=8765,
+        feishu_gateway_path="/feishu/events",
+    )
+
+    files = {item["relative_path"]: item for item in bundle["files"]}
+    service = files["systemd/options-monitor-feishu-gateway.service"]["content"]
+    profile = json.loads(files["service.profile.json"]["content"])
+
+    assert str(repo / "om") + " inbound feishu-gateway" in service
+    assert "--host 127.0.0.1 --port 8765 --path /feishu/events" in service
+    assert "--audit-db " + str(runtime / "output_shared" / "state" / "inbound_control.sqlite3") in service
+    assert "Restart=always" in service
+    assert {"name": "options-monitor-feishu-gateway.service"} in profile["services"]
+    assert profile["feishu_gateway"]["enabled"] is True
+    assert profile["feishu_gateway"]["path"] == "/feishu/events"
+    assert "systemctl enable --now options-monitor-feishu-gateway.service" in bundle["commands"]["enable"]
+
+
 def test_render_systemd_auto_upgrade_preserves_symlink_repo_root(tmp_path: Path) -> None:
     from src.application.service_deploy import render_service_bundle
 
@@ -592,6 +624,161 @@ def test_service_upgrade_restart_denied_includes_remediation(tmp_path: Path) -> 
     assert operations[-1]["returncode"] == 1
     assert "manual_restart: sudo systemctl restart options-monitor-trade-intake.service" in remediation
     assert "liuxie ALL=(root) NOPASSWD: /bin/systemctl restart options-monitor-trade-intake.service" in remediation
+
+
+def test_service_upgrade_migrates_user_configs_and_rebuilds_runtime_configs_before_switch(tmp_path: Path) -> None:
+    from src.application.service_upgrade import service_upgrade
+
+    install = tmp_path / "opt" / "options-monitor"
+    releases = install / "releases"
+    v100 = releases / "1.0.0"
+    v100.mkdir(parents=True)
+    (v100 / "VERSION").write_text("1.0.0\n", encoding="utf-8")
+    (v100 / "configs").mkdir()
+    for name in ("user.common.json", "user.hk.json", "user.us.json"):
+        (v100 / "configs" / name).write_text(json.dumps({"name": name}), encoding="utf-8")
+    current = install / "current"
+    current.symlink_to(v100, target_is_directory=True)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    hk_runtime = runtime / "config.hk.json"
+    us_runtime = runtime / "config.us.json"
+    (runtime / "service.profile.json").write_text(
+        json.dumps(
+            {
+                "service_provider": "systemd",
+                "markets": ["hk", "us"],
+                "config_paths": {"hk": str(hk_runtime), "us": str(us_runtime)},
+                "services": [{"name": "options-monitor-trade-intake.service"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    calls: list[list[str]] = []
+
+    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        calls.append(list(command))
+        if command[:3] == ["git", "ls-remote", "--tags"]:
+            return subprocess.CompletedProcess(command, 0, stdout="b refs/tags/v1.0.1\n", stderr="")
+        if command[:3] == ["git", "config", "--get"]:
+            return subprocess.CompletedProcess(command, 0, stdout="https://example.invalid/repo.git\n", stderr="")
+        if command[:2] == ["git", "clone"]:
+            target = Path(command[-1])
+            target.mkdir(parents=True)
+            (target / "VERSION").write_text("1.0.1\n", encoding="utf-8")
+            (target / "configs").mkdir()
+            (target / "configs" / "system.json").write_text("{}", encoding="utf-8")
+            (target / "requirements").mkdir()
+            (target / "constraints").mkdir()
+            (target / "requirements.txt").write_text("-r requirements/runtime.txt\n", encoding="utf-8")
+            (target / "constraints.txt").write_text("-c constraints/runtime.txt\n", encoding="utf-8")
+            (target / "requirements" / "runtime.txt").write_text("", encoding="utf-8")
+            (target / "constraints" / "runtime.txt").write_text("", encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0, stdout="cloned\n", stderr="")
+        if command == ["python3", "-m", "venv", ".venv"]:
+            cwd = Path(_kwargs["cwd"])
+            venv_python = cwd / ".venv" / "bin" / "python"
+            venv_python.parent.mkdir(parents=True)
+            venv_python.write_text("#!/bin/sh\n", encoding="utf-8")
+            venv_python.chmod(0o755)
+            return subprocess.CompletedProcess(command, 0, stdout="venv\n", stderr="")
+        if command[:4] == ["./om", "config", "build", "--market"]:
+            Path(command[-1]).write_text('{"ok": true}\n', encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0, stdout="built\n", stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    out = service_upgrade(
+        repo_root=current,
+        runtime_root=runtime,
+        releases_root=releases,
+        confirm=True,
+        run_cmd=_run_cmd,
+    )
+
+    target = releases / "1.0.1"
+    assert out["status"] == "upgraded"
+    assert current.resolve() == target.resolve()
+    assert (target / "configs" / "user.common.json").exists()
+    assert (target / "configs" / "user.hk.json").exists()
+    assert (target / "configs" / "user.us.json").exists()
+    assert ["./om", "config", "build", "--market", "hk", "--output", str(hk_runtime)] in calls
+    assert ["./om", "config", "validate", "--config-path", str(hk_runtime), "--market", "hk"] in calls
+    assert ["./om", "config", "build", "--market", "us", "--output", str(us_runtime)] in calls
+    restart_index = calls.index(["systemctl", "restart", "options-monitor-trade-intake.service"])
+    validate_index = calls.index(["./om", "config", "validate", "--config-path", str(us_runtime), "--market", "us"])
+    assert validate_index < restart_index
+    assert out["runtime_config_prepare"]["status"] == "prepared"
+
+
+def test_service_upgrade_missing_user_config_fails_before_switch_with_remediation(tmp_path: Path) -> None:
+    from src.application.service_upgrade import service_upgrade
+
+    install = tmp_path / "opt" / "options-monitor"
+    releases = install / "releases"
+    v100 = releases / "1.0.0"
+    v100.mkdir(parents=True)
+    (v100 / "VERSION").write_text("1.0.0\n", encoding="utf-8")
+    (v100 / "configs").mkdir()
+    (v100 / "configs" / "user.common.json").write_text("{}", encoding="utf-8")
+    current = install / "current"
+    current.symlink_to(v100, target_is_directory=True)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    (runtime / "service.profile.json").write_text(
+        json.dumps(
+            {
+                "service_provider": "systemd",
+                "markets": ["hk"],
+                "config_paths": {"hk": str(runtime / "config.hk.json")},
+                "services": [{"name": "options-monitor-trade-intake.service"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    calls: list[list[str]] = []
+
+    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        calls.append(list(command))
+        if command[:3] == ["git", "ls-remote", "--tags"]:
+            return subprocess.CompletedProcess(command, 0, stdout="b refs/tags/v1.0.1\n", stderr="")
+        if command[:3] == ["git", "config", "--get"]:
+            return subprocess.CompletedProcess(command, 0, stdout="https://example.invalid/repo.git\n", stderr="")
+        if command[:2] == ["git", "clone"]:
+            target = Path(command[-1])
+            target.mkdir(parents=True)
+            (target / "VERSION").write_text("1.0.1\n", encoding="utf-8")
+            (target / "configs").mkdir()
+            (target / "requirements").mkdir()
+            (target / "constraints").mkdir()
+            (target / "requirements.txt").write_text("-r requirements/runtime.txt\n", encoding="utf-8")
+            (target / "constraints.txt").write_text("-c constraints/runtime.txt\n", encoding="utf-8")
+            (target / "requirements" / "runtime.txt").write_text("", encoding="utf-8")
+            (target / "constraints" / "runtime.txt").write_text("", encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0, stdout="cloned\n", stderr="")
+        if command == ["python3", "-m", "venv", ".venv"]:
+            cwd = Path(_kwargs["cwd"])
+            venv_python = cwd / ".venv" / "bin" / "python"
+            venv_python.parent.mkdir(parents=True)
+            venv_python.write_text("#!/bin/sh\n", encoding="utf-8")
+            venv_python.chmod(0o755)
+            return subprocess.CompletedProcess(command, 0, stdout="venv\n", stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    out = service_upgrade(
+        repo_root=current,
+        runtime_root=runtime,
+        releases_root=releases,
+        confirm=True,
+        run_cmd=_run_cmd,
+    )
+
+    assert out["status"] == "failed"
+    assert out["changed"] is False
+    assert out["symlink_switched"] is False
+    assert current.resolve() == v100.resolve()
+    assert out["remediation"][0].startswith("copy_user_config: cp ")
+    assert not any(command[:4] == ["./om", "config", "build", "--market"] for command in calls)
+    assert ["systemctl", "restart", "options-monitor-trade-intake.service"] not in calls
 
 
 def test_service_upgrade_blocks_major_by_default(tmp_path: Path) -> None:

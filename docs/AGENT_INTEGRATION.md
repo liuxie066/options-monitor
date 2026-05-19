@@ -105,6 +105,52 @@ For MacBook-side Codex diagnosis of online quality or strategy direction, collec
 ./om-agent run --tool ai_cofunder --input-json '{"config_key":"us","scope":"full","output":"both","write_outputs":false}'
 ```
 
+## Inbound Remote Messages
+
+Use `./om inbound handle` when a remote messaging gateway needs to send user text into OM:
+
+```bash
+./om inbound handle --text '持仓 sy' --sender ou_xxx --channel feishu --message-id msg_xxx
+```
+
+This is a controlled message entrypoint, not an `om-agent` tool and not a shell bridge. It performs deterministic parsing, sender allowlist checks, message idempotency, SQLite audit, and then calls a pure-read tool through the same `execute_tool(...)` path used by `om-agent`.
+
+Remote channels require:
+
+```bash
+OM_INBOUND_ALLOWED_SENDERS='feishu:ou_xxx'
+```
+
+The first whitelist is intentionally small:
+
+- `runtime_status`
+- `healthcheck`
+- `config_validate`
+- `option_positions_read`
+- `monthly_income_report`
+- `runtime_runs`
+- `runtime_logs`
+
+Do not connect Feishu, WeChat, or Hermes to arbitrary shell execution. Gateways should call only `./om inbound handle`. See [INBOUND_CONTROL.md](INBOUND_CONTROL.md).
+
+For Feishu event JSON specifically, use the thin adapter:
+
+```bash
+OM_INBOUND_ALLOWED_SENDERS='feishu:ou_xxx' \
+./om inbound feishu --input-file feishu_event.json --format text
+```
+
+It extracts `im.message.receive_v1` text fields and then delegates to the same inbound control path.
+
+For the full Feishu loop, run the gateway service:
+
+```bash
+./om inbound feishu-gateway --check
+./om inbound feishu-gateway --host 127.0.0.1 --port 8765 --path /feishu/events
+```
+
+The gateway verifies Feishu event signatures/tokens, delegates text messages to inbound control, and replies through the Feishu message reply API. Deploy it behind HTTPS reverse proxy or render it as a long-running service with `./om service render --include-feishu-gateway ...`.
+
 Treat `openclaw_readiness` as OpenClaw-specific. It is safe to call outside OpenClaw, but the
 `openclaw_binary` check may return `warn` when the `openclaw` command is not installed.
 
