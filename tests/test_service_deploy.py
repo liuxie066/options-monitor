@@ -5,6 +5,18 @@ import subprocess
 from pathlib import Path
 
 
+def _write_upgrade_release_skeleton(path: Path, version: str) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "VERSION").write_text(f"{version}\n", encoding="utf-8")
+    (path / "configs").mkdir(exist_ok=True)
+    (path / "requirements").mkdir(exist_ok=True)
+    (path / "constraints").mkdir(exist_ok=True)
+    (path / "requirements.txt").write_text("-r requirements/runtime.txt\n", encoding="utf-8")
+    (path / "constraints.txt").write_text("-c constraints/runtime.txt\n", encoding="utf-8")
+    (path / "requirements" / "runtime.txt").write_text("", encoding="utf-8")
+    (path / "constraints" / "runtime.txt").write_text("", encoding="utf-8")
+
+
 def test_render_systemd_bundle_uses_runtime_root_and_canonical_entrypoints(tmp_path: Path) -> None:
     from src.application.service_deploy import render_service_bundle
 
@@ -643,6 +655,32 @@ def test_service_upgrade_migrates_user_configs_and_rebuilds_runtime_configs_befo
     runtime.mkdir()
     hk_runtime = runtime / "config.hk.json"
     us_runtime = runtime / "config.us.json"
+    hk_runtime.write_text(
+        json.dumps(
+            {
+                "_generated": {
+                    "sources": [
+                        {"role": "common_user", "loaded": True, "path": "configs/user.common.json"},
+                        {"role": "market_user", "loaded": True, "path": "configs/user.hk.json"},
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    us_runtime.write_text(
+        json.dumps(
+            {
+                "_generated": {
+                    "sources": [
+                        {"role": "common_user", "loaded": True, "path": "configs/user.common.json"},
+                        {"role": "market_user", "loaded": True, "path": "configs/user.us.json"},
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
     (runtime / "service.profile.json").write_text(
         json.dumps(
             {
@@ -776,8 +814,288 @@ def test_service_upgrade_missing_user_config_fails_before_switch_with_remediatio
     assert out["changed"] is False
     assert out["symlink_switched"] is False
     assert current.resolve() == v100.resolve()
-    assert out["remediation"][0].startswith("copy_user_config: cp ")
+    assert out["remediation"][0].startswith("restore_user_overlays: copy ")
     assert not any(command[:4] == ["./om", "config", "build", "--market"] for command in calls)
+    assert ["systemctl", "restart", "options-monitor-trade-intake.service"] not in calls
+
+
+def test_service_upgrade_recovers_user_configs_from_older_complete_release(tmp_path: Path) -> None:
+    from src.application.service_upgrade import service_upgrade
+
+    install = tmp_path / "opt" / "options-monitor"
+    releases = install / "releases"
+    v090 = releases / "0.9.0"
+    _write_upgrade_release_skeleton(v090, "0.9.0")
+    for name in ("user.common.json", "user.hk.json", "user.us.json"):
+        (v090 / "configs" / name).write_text(json.dumps({"source": "0.9.0", "name": name}), encoding="utf-8")
+    v100 = releases / "1.0.0"
+    _write_upgrade_release_skeleton(v100, "1.0.0")
+    current = install / "current"
+    current.symlink_to(v100, target_is_directory=True)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    hk_runtime = runtime / "config.hk.json"
+    us_runtime = runtime / "config.us.json"
+    (runtime / "service.profile.json").write_text(
+        json.dumps(
+            {
+                "service_provider": "systemd",
+                "markets": ["hk", "us"],
+                "config_paths": {"hk": str(hk_runtime), "us": str(us_runtime)},
+                "services": [{"name": "options-monitor-trade-intake.service"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    calls: list[dict[str, object]] = []
+
+    def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append({"command": list(command), "cwd": kwargs.get("cwd")})
+        if command[:3] == ["git", "ls-remote", "--tags"]:
+            return subprocess.CompletedProcess(command, 0, stdout="b refs/tags/v1.0.1\n", stderr="")
+        if command[:3] == ["git", "config", "--get"]:
+            return subprocess.CompletedProcess(command, 0, stdout="https://example.invalid/repo.git\n", stderr="")
+        if command[:2] == ["git", "clone"]:
+            _write_upgrade_release_skeleton(Path(command[-1]), "1.0.1")
+            return subprocess.CompletedProcess(command, 0, stdout="cloned\n", stderr="")
+        if command == ["python3", "-m", "venv", ".venv"]:
+            cwd = Path(kwargs["cwd"])
+            venv_python = cwd / ".venv" / "bin" / "python"
+            venv_python.parent.mkdir(parents=True)
+            venv_python.write_text("#!/bin/sh\n", encoding="utf-8")
+            venv_python.chmod(0o755)
+            return subprocess.CompletedProcess(command, 0, stdout="venv\n", stderr="")
+        if command[:4] == ["./om", "config", "build", "--market"]:
+            Path(command[-1]).write_text('{"ok": true}\n', encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0, stdout="built\n", stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    out = service_upgrade(
+        repo_root=current,
+        runtime_root=runtime,
+        releases_root=releases,
+        confirm=True,
+        run_cmd=_run_cmd,
+    )
+
+    target = releases / "1.0.1"
+    assert out["status"] == "upgraded"
+    assert current.resolve() == target.resolve()
+    for name in ("user.common.json", "user.hk.json", "user.us.json"):
+        assert json.loads((target / "configs" / name).read_text(encoding="utf-8"))["source"] == "0.9.0"
+    assert any(
+        call["command"] == ["./om", "config", "validate", "--config-path", str(hk_runtime), "--market", "hk"]
+        and call["cwd"] == str(current)
+        for call in calls
+    )
+    assert out["post_switch_runtime_config_validate"][0]["phase"] == "post_switch"
+
+
+def test_service_upgrade_uses_runtime_overlay_dir_before_older_release(tmp_path: Path) -> None:
+    from src.application.service_upgrade import service_upgrade
+
+    install = tmp_path / "opt" / "options-monitor"
+    releases = install / "releases"
+    v090 = releases / "0.9.0"
+    _write_upgrade_release_skeleton(v090, "0.9.0")
+    for name in ("user.common.json", "user.hk.json"):
+        (v090 / "configs" / name).write_text(json.dumps({"source": "older", "name": name}), encoding="utf-8")
+    v100 = releases / "1.0.0"
+    _write_upgrade_release_skeleton(v100, "1.0.0")
+    current = install / "current"
+    current.symlink_to(v100, target_is_directory=True)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    runtime_configs = runtime / "configs"
+    runtime_configs.mkdir()
+    for name in ("user.common.json", "user.hk.json"):
+        (runtime_configs / name).write_text(json.dumps({"source": "runtime", "name": name}), encoding="utf-8")
+    hk_runtime = runtime / "config.hk.json"
+    (runtime / "service.profile.json").write_text(
+        json.dumps(
+            {
+                "service_provider": "systemd",
+                "markets": ["hk"],
+                "config_paths": {"hk": str(hk_runtime)},
+                "services": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
+        if command[:3] == ["git", "ls-remote", "--tags"]:
+            return subprocess.CompletedProcess(command, 0, stdout="b refs/tags/v1.0.1\n", stderr="")
+        if command[:3] == ["git", "config", "--get"]:
+            return subprocess.CompletedProcess(command, 0, stdout="https://example.invalid/repo.git\n", stderr="")
+        if command[:2] == ["git", "clone"]:
+            _write_upgrade_release_skeleton(Path(command[-1]), "1.0.1")
+            return subprocess.CompletedProcess(command, 0, stdout="cloned\n", stderr="")
+        if command == ["python3", "-m", "venv", ".venv"]:
+            cwd = Path(kwargs["cwd"])
+            venv_python = cwd / ".venv" / "bin" / "python"
+            venv_python.parent.mkdir(parents=True)
+            venv_python.write_text("#!/bin/sh\n", encoding="utf-8")
+            venv_python.chmod(0o755)
+            return subprocess.CompletedProcess(command, 0, stdout="venv\n", stderr="")
+        if command[:4] == ["./om", "config", "build", "--market"]:
+            Path(command[-1]).write_text('{"ok": true}\n', encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0, stdout="built\n", stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    out = service_upgrade(
+        repo_root=current,
+        runtime_root=runtime,
+        releases_root=releases,
+        confirm=True,
+        restart_services=False,
+        run_cmd=_run_cmd,
+    )
+
+    target = releases / "1.0.1"
+    assert out["status"] == "upgraded"
+    for name in ("user.common.json", "user.hk.json"):
+        assert json.loads((target / "configs" / name).read_text(encoding="utf-8"))["source"] == "runtime"
+
+
+def test_service_upgrade_uses_runtime_config_metadata_overlay_source(tmp_path: Path) -> None:
+    from src.application.service_upgrade import service_upgrade
+
+    install = tmp_path / "opt" / "options-monitor"
+    releases = install / "releases"
+    v100 = releases / "1.0.0"
+    _write_upgrade_release_skeleton(v100, "1.0.0")
+    current = install / "current"
+    current.symlink_to(v100, target_is_directory=True)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    authoring = tmp_path / "authoring"
+    authoring.mkdir()
+    common_source = authoring / "user.common.json"
+    market_source = authoring / "user.hk.json"
+    common_source.write_text(json.dumps({"source": "metadata", "name": "user.common.json"}), encoding="utf-8")
+    market_source.write_text(json.dumps({"source": "metadata", "name": "user.hk.json"}), encoding="utf-8")
+    hk_runtime = runtime / "config.hk.json"
+    hk_runtime.write_text(
+        json.dumps(
+            {
+                "_generated": {
+                    "sources": [
+                        {"role": "common_user", "loaded": True, "path": str(common_source)},
+                        {"role": "market_user", "loaded": True, "path": str(market_source)},
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (runtime / "service.profile.json").write_text(
+        json.dumps(
+            {
+                "service_provider": "systemd",
+                "markets": ["hk"],
+                "config_paths": {"hk": str(hk_runtime)},
+                "services": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
+        if command[:3] == ["git", "ls-remote", "--tags"]:
+            return subprocess.CompletedProcess(command, 0, stdout="b refs/tags/v1.0.1\n", stderr="")
+        if command[:3] == ["git", "config", "--get"]:
+            return subprocess.CompletedProcess(command, 0, stdout="https://example.invalid/repo.git\n", stderr="")
+        if command[:2] == ["git", "clone"]:
+            _write_upgrade_release_skeleton(Path(command[-1]), "1.0.1")
+            return subprocess.CompletedProcess(command, 0, stdout="cloned\n", stderr="")
+        if command == ["python3", "-m", "venv", ".venv"]:
+            cwd = Path(kwargs["cwd"])
+            venv_python = cwd / ".venv" / "bin" / "python"
+            venv_python.parent.mkdir(parents=True)
+            venv_python.write_text("#!/bin/sh\n", encoding="utf-8")
+            venv_python.chmod(0o755)
+            return subprocess.CompletedProcess(command, 0, stdout="venv\n", stderr="")
+        if command[:4] == ["./om", "config", "build", "--market"]:
+            Path(command[-1]).write_text('{"ok": true}\n', encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0, stdout="built\n", stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    out = service_upgrade(
+        repo_root=current,
+        runtime_root=runtime,
+        releases_root=releases,
+        confirm=True,
+        restart_services=False,
+        run_cmd=_run_cmd,
+    )
+
+    target = releases / "1.0.1"
+    assert out["status"] == "upgraded"
+    for name in ("user.common.json", "user.hk.json"):
+        assert json.loads((target / "configs" / name).read_text(encoding="utf-8"))["source"] == "metadata"
+
+
+def test_service_upgrade_rebuild_failure_fails_before_switch_with_remediation(tmp_path: Path) -> None:
+    from src.application.service_upgrade import service_upgrade
+
+    install = tmp_path / "opt" / "options-monitor"
+    releases = install / "releases"
+    v100 = releases / "1.0.0"
+    _write_upgrade_release_skeleton(v100, "1.0.0")
+    for name in ("user.common.json", "user.hk.json"):
+        (v100 / "configs" / name).write_text(json.dumps({"name": name}), encoding="utf-8")
+    current = install / "current"
+    current.symlink_to(v100, target_is_directory=True)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    hk_runtime = runtime / "config.hk.json"
+    (runtime / "service.profile.json").write_text(
+        json.dumps(
+            {
+                "service_provider": "systemd",
+                "markets": ["hk"],
+                "config_paths": {"hk": str(hk_runtime)},
+                "services": [{"name": "options-monitor-trade-intake.service"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    calls: list[list[str]] = []
+
+    def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append(list(command))
+        if command[:3] == ["git", "ls-remote", "--tags"]:
+            return subprocess.CompletedProcess(command, 0, stdout="b refs/tags/v1.0.1\n", stderr="")
+        if command[:3] == ["git", "config", "--get"]:
+            return subprocess.CompletedProcess(command, 0, stdout="https://example.invalid/repo.git\n", stderr="")
+        if command[:2] == ["git", "clone"]:
+            _write_upgrade_release_skeleton(Path(command[-1]), "1.0.1")
+            return subprocess.CompletedProcess(command, 0, stdout="cloned\n", stderr="")
+        if command == ["python3", "-m", "venv", ".venv"]:
+            cwd = Path(kwargs["cwd"])
+            venv_python = cwd / ".venv" / "bin" / "python"
+            venv_python.parent.mkdir(parents=True)
+            venv_python.write_text("#!/bin/sh\n", encoding="utf-8")
+            venv_python.chmod(0o755)
+            return subprocess.CompletedProcess(command, 0, stdout="venv\n", stderr="")
+        if command[:4] == ["./om", "config", "build", "--market"]:
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="build failed")
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    out = service_upgrade(
+        repo_root=current,
+        runtime_root=runtime,
+        releases_root=releases,
+        confirm=True,
+        run_cmd=_run_cmd,
+    )
+
+    assert out["status"] == "failed"
+    assert out["changed"] is False
+    assert out["symlink_switched"] is False
+    assert current.resolve() == v100.resolve()
+    assert any(item.startswith("manual_rebuild: ") for item in out["remediation"])
     assert ["systemctl", "restart", "options-monitor-trade-intake.service"] not in calls
 
 

@@ -5,6 +5,7 @@ import os
 import shutil
 import shlex
 import subprocess
+from functools import cmp_to_key
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -251,32 +252,225 @@ def _profile_runtime_config_targets(profile: dict[str, Any]) -> list[dict[str, s
     return targets
 
 
-def _migrate_user_overlay_configs(*, previous_dir: Path, target_dir: Path, markets: list[str]) -> list[dict[str, str]]:
-    previous_configs = previous_dir / "configs"
-    target_configs = target_dir / "configs"
-    target_configs.mkdir(parents=True, exist_ok=True)
-    names = ["user.common.json", *(f"user.{market}.json" for market in markets if market in {"us", "hk"})]
-    out: list[dict[str, str]] = []
-    for name in names:
-        source = previous_configs / name
-        target = target_configs / name
-        if target.exists():
-            out.append({"name": name, "status": "exists", "source": str(source), "target": str(target)})
+def _user_overlay_names(markets: list[str]) -> list[str]:
+    return ["user.common.json", *(f"user.{market}.json" for market in markets if market in {"us", "hk"})]
+
+
+def _safe_read_json_object(path: Path) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _resolve_runtime_metadata_path(raw: Any, *, repo_root: Path) -> Path | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    path = Path(text).expanduser()
+    if not path.is_absolute():
+        path = repo_root / path
+    return path.resolve()
+
+
+def _metadata_overlay_paths(*, runtime_config_path: Path, repo_root: Path, market: str) -> dict[str, Path]:
+    cfg = _safe_read_json_object(runtime_config_path)
+    generated = cfg.get("_generated") if isinstance(cfg, dict) else None
+    if not isinstance(generated, dict):
+        return {}
+    sources = generated.get("sources")
+    if not isinstance(sources, list):
+        return {}
+    out: dict[str, Path] = {}
+    for item in sources:
+        if not isinstance(item, dict) or not bool(item.get("loaded")):
             continue
-        if source.exists():
-            shutil.copy2(source, target)
-            out.append({"name": name, "status": "copied", "source": str(source), "target": str(target)})
+        role = str(item.get("role") or "").strip()
+        if role == "common_user":
+            name = "user.common.json"
+        elif role == "market_user":
+            name = f"user.{market}.json"
+        else:
             continue
-        out.append({"name": name, "status": "missing_source", "source": str(source), "target": str(target)})
+        path = _resolve_runtime_metadata_path(item.get("path"), repo_root=repo_root)
+        if path is not None and path.exists():
+            out[name] = path
     return out
 
 
-def _missing_market_user_configs(*, target_dir: Path, markets: list[str]) -> list[Path]:
-    return [
-        target_dir / "configs" / f"user.{market}.json"
-        for market in markets
-        if market in {"us", "hk"} and not (target_dir / "configs" / f"user.{market}.json").exists()
+def _release_version_for_sort(path: Path) -> str:
+    version_path = path / "VERSION"
+    if version_path.exists():
+        try:
+            return version_path.read_text(encoding="utf-8").strip()
+        except Exception:
+            pass
+    return path.name
+
+
+def _compare_release_dirs_desc(left: Path, right: Path) -> int:
+    left_version = _release_version_for_sort(left)
+    right_version = _release_version_for_sort(right)
+    try:
+        return -compare_versions(left_version, right_version)
+    except Exception:
+        if left.name == right.name:
+            return 0
+        return -1 if left.name > right.name else 1
+
+
+def _complete_release_overlay_dirs(*, releases_root: Path, names: list[str], exclude_dirs: set[Path]) -> list[Path]:
+    if not releases_root.exists():
+        return []
+    candidates = [
+        path
+        for path in releases_root.iterdir()
+        if path.is_dir() and path.resolve() not in exclude_dirs
     ]
+    out: list[Path] = []
+    for release_dir in sorted(candidates, key=cmp_to_key(_compare_release_dirs_desc)):
+        configs = release_dir / "configs"
+        if all((configs / name).exists() for name in names):
+            out.append(configs)
+    return out
+
+
+def _overlay_source_candidates(
+    *,
+    previous_dir: Path,
+    target_dir: Path,
+    runtime_root: Path,
+    releases_root: Path,
+    targets: list[dict[str, str]],
+    markets: list[str],
+    names: list[str],
+) -> dict[str, list[Path]]:
+    candidates: dict[str, list[Path]] = {name: [] for name in names}
+
+    def add(name: str, path: Path) -> None:
+        if name not in candidates or not path.exists() or path.resolve() == (target_dir / "configs" / name).resolve():
+            return
+        resolved = path.resolve()
+        if resolved not in {item.resolve() for item in candidates[name]}:
+            candidates[name].append(path)
+
+    runtime_configs_by_market = {item["market"]: Path(item["config_path"]).expanduser() for item in targets}
+    for market in markets:
+        config_path = runtime_configs_by_market.get(market)
+        if config_path is None:
+            continue
+        for name, source in _metadata_overlay_paths(
+            runtime_config_path=config_path,
+            repo_root=previous_dir,
+            market=market,
+        ).items():
+            add(name, source)
+
+    runtime_configs = runtime_root / "configs"
+    for name in names:
+        add(name, runtime_configs / name)
+        add(name, previous_dir / "configs" / name)
+
+    exclude_dirs = {target_dir.resolve()}
+    for configs in _complete_release_overlay_dirs(releases_root=releases_root, names=names, exclude_dirs=exclude_dirs):
+        for name in names:
+            add(name, configs / name)
+
+    return candidates
+
+
+def _migrate_user_overlay_configs(
+    *,
+    previous_dir: Path,
+    target_dir: Path,
+    runtime_root: Path,
+    releases_root: Path,
+    targets: list[dict[str, str]],
+    markets: list[str],
+) -> list[dict[str, str]]:
+    target_configs = target_dir / "configs"
+    target_configs.mkdir(parents=True, exist_ok=True)
+    names = _user_overlay_names(markets)
+    candidates = _overlay_source_candidates(
+        previous_dir=previous_dir,
+        target_dir=target_dir,
+        runtime_root=runtime_root,
+        releases_root=releases_root,
+        targets=targets,
+        markets=markets,
+        names=names,
+    )
+    out: list[dict[str, str]] = []
+    for name in names:
+        target = target_configs / name
+        if target.exists():
+            out.append({"name": name, "status": "exists", "source": str(target), "target": str(target)})
+            continue
+        source = candidates[name][0] if candidates[name] else None
+        if source is not None:
+            shutil.copy2(source, target)
+            out.append({"name": name, "status": "copied", "source": str(source), "target": str(target)})
+            continue
+        out.append({"name": name, "status": "missing_source", "source": "", "target": str(target)})
+    return out
+
+
+def _missing_user_overlay_configs(*, target_dir: Path, markets: list[str]) -> list[Path]:
+    return [
+        target_dir / "configs" / name
+        for name in _user_overlay_names(markets)
+        if not (target_dir / "configs" / name).exists()
+    ]
+
+
+def _runtime_config_remediation(*, runtime_root: Path, target_dir: Path, missing: list[Path]) -> list[str]:
+    names = " ".join(path.name for path in missing)
+    return [
+        f"restore_user_overlays: copy {names} into {target_dir / 'configs'}",
+        f"preferred_runtime_overlays: mkdir -p {runtime_root / 'configs'} && copy user.common.json/user.hk.json/user.us.json there before upgrade",
+        "fallback_release_search: restore the missing files from the newest known-good release under the releases directory",
+    ]
+
+
+def _rebuild_and_validate_runtime_configs(
+    *,
+    targets: list[dict[str, str]],
+    cwd: Path,
+    run_cmd: Callable[..., Any],
+    operations: list[dict[str, Any]],
+    phase: str,
+) -> list[dict[str, str]]:
+    rebuilt: list[dict[str, str]] = []
+    for item in targets:
+        market = item["market"]
+        config_path = item["config_path"]
+        try:
+            _run_required(
+                ["./om", "config", "build", "--market", market, "--output", config_path],
+                cwd=cwd,
+                run_cmd=run_cmd,
+                operations=operations,
+                timeout=120,
+            )
+            _run_required(
+                ["./om", "config", "validate", "--config-path", config_path, "--market", market],
+                cwd=cwd,
+                run_cmd=run_cmd,
+                operations=operations,
+                timeout=120,
+            )
+        except RuntimeError as exc:
+            raise RuntimeConfigPrepareError(
+                f"failed to {phase} rebuild/validate runtime config for {market}: {config_path}",
+                remediation=[
+                    f"manual_rebuild: cd {cwd} && ./om config build --market {market} --output {config_path}",
+                    f"manual_validate: cd {cwd} && ./om config validate --config-path {config_path} --market {market}",
+                    f"inspect_last_operation: {exc}",
+                ],
+            ) from exc
+        rebuilt.append({"market": market, "config_path": config_path, "phase": phase})
+    return rebuilt
 
 
 def _prepare_runtime_configs_for_release(
@@ -284,6 +478,7 @@ def _prepare_runtime_configs_for_release(
     previous_dir: Path,
     target_dir: Path,
     runtime_root: Path,
+    releases_root: Path,
     run_cmd: Callable[..., Any],
     operations: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -293,42 +488,30 @@ def _prepare_runtime_configs_for_release(
         return {"status": "skipped", "reason": "service profile has no runtime config targets"}
 
     markets = [item["market"] for item in targets]
-    overlays = _migrate_user_overlay_configs(previous_dir=previous_dir, target_dir=target_dir, markets=markets)
-    missing = _missing_market_user_configs(target_dir=target_dir, markets=markets)
+    overlays = _migrate_user_overlay_configs(
+        previous_dir=previous_dir,
+        target_dir=target_dir,
+        runtime_root=runtime_root,
+        releases_root=releases_root,
+        targets=targets,
+        markets=markets,
+    )
+    missing = _missing_user_overlay_configs(target_dir=target_dir, markets=markets)
     if missing:
-        remediation = [
-            f"copy_user_config: cp {previous_dir / 'configs' / path.name} {target_dir / 'configs'}/"
-            for path in missing
-        ]
-        remediation.append(
-            f"or move user overlays to {runtime_root / 'configs'} and build runtime configs with explicit --user-config paths"
-        )
         raise RuntimeConfigPrepareError(
             "release is missing required market user config overlays",
-            remediation=remediation,
+            remediation=_runtime_config_remediation(runtime_root=runtime_root, target_dir=target_dir, missing=missing),
         )
 
-    rebuilt: list[dict[str, str]] = []
-    for item in targets:
-        market = item["market"]
-        config_path = item["config_path"]
-        _run_required(
-            ["./om", "config", "build", "--market", market, "--output", config_path],
-            cwd=target_dir,
-            run_cmd=run_cmd,
-            operations=operations,
-            timeout=120,
-        )
-        _run_required(
-            ["./om", "config", "validate", "--config-path", config_path, "--market", market],
-            cwd=target_dir,
-            run_cmd=run_cmd,
-            operations=operations,
-            timeout=120,
-        )
-        rebuilt.append({"market": market, "config_path": config_path})
+    rebuilt = _rebuild_and_validate_runtime_configs(
+        targets=targets,
+        cwd=target_dir,
+        run_cmd=run_cmd,
+        operations=operations,
+        phase="pre_switch",
+    )
 
-    return {"status": "prepared", "overlays": overlays, "rebuilt": rebuilt}
+    return {"status": "prepared", "targets": targets, "overlays": overlays, "rebuilt": rebuilt}
 
 
 def _release_python(target_dir: Path) -> Path:
@@ -557,11 +740,23 @@ def service_upgrade(
                 previous_dir=previous_dir,
                 target_dir=target_dir,
                 runtime_root=runtime,
+                releases_root=releases,
                 run_cmd=run_cmd,
                 operations=operations,
             )
             _switch_current_symlink(current_link=repo_link, target_dir=target_dir)
             symlink_switched = True
+            post_switch_runtime_config_validate = (
+                _rebuild_and_validate_runtime_configs(
+                    targets=runtime_config_prepare.get("targets", []),
+                    cwd=repo_link,
+                    run_cmd=run_cmd,
+                    operations=operations,
+                    phase="post_switch",
+                )
+                if runtime_config_prepare.get("status") == "prepared"
+                else []
+            )
             restarted = (
                 _restart_services_from_profile(runtime_root=runtime, run_cmd=run_cmd, operations=operations)
                 if restart_services
@@ -591,6 +786,7 @@ def service_upgrade(
         "target_dir": str(target_dir),
         "previous_dir": str(previous_dir),
         "runtime_config_prepare": runtime_config_prepare,
+        "post_switch_runtime_config_validate": post_switch_runtime_config_validate,
         "restarted_services": restarted,
         "operations": operations,
     }

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.78 - 2026-05-19
+
+### Fixed
+- Hardened service upgrade user overlay recovery by falling back from runtime config metadata to runtime overlays and older complete releases before rebuilding and validating runtime configs.
+- Added post-switch runtime config rebuild/validation so upgrade success is tied to the current symlink freshness path used by tick services.
+
 ## 1.2.77 - 2026-05-19
 
 ### Added
