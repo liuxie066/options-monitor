@@ -268,6 +268,7 @@ def execute_manual_close(
     position_side: str | None = None,
     strike: float | None = None,
     expiration_ymd: str | None = None,
+    as_of_ms: int | None = None,
 ) -> dict[str, Any]:
     resolved_record_id = str(record_id or "").strip()
     match_info: dict[str, Any] = {"rule": "explicit_record_id", "record_id": resolved_record_id}
@@ -296,6 +297,7 @@ def execute_manual_close(
                 contracts_to_close=int(contracts_to_close),
                 close_price=close_price,
                 close_reason=close_reason,
+                as_of_ms=as_of_ms,
             ).to_payload(),
         }
     close_payload = record_manual_position_close(
@@ -304,6 +306,7 @@ def execute_manual_close(
         contracts_to_close=int(contracts_to_close),
         close_price=close_price,
         close_reason=close_reason,
+        as_of_ms=as_of_ms,
     ).to_payload()
     result = close_payload["result"]
     if "close_target_resolution" in close_payload and "close_target_resolution" not in match_info:

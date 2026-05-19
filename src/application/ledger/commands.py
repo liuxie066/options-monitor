@@ -169,6 +169,7 @@ def preview_manual_position_close(
     contracts_to_close: int,
     close_price: float | None,
     close_reason: str,
+    as_of_ms: int | None = None,
 ) -> ManualClosePreviewResult:
     close_target_resolution = resolve_explicit_close_target(
         repo,
@@ -184,6 +185,7 @@ def preview_manual_position_close(
         contracts_to_close=int(contracts_to_close),
         close_price=close_price,
         close_reason=close_reason,
+        as_of_ms=as_of_ms,
     )
     patch_contract = build_close_patch_contract(
         fields,
@@ -208,6 +210,7 @@ def record_manual_position_close(
     close_price: float | None,
     close_reason: str,
     fields: dict[str, Any] | None = None,
+    as_of_ms: int | None = None,
 ) -> ManualCloseLedgerResult:
     current_fields = repo.get_record_fields(record_id)
     from src.application.ledger.manual_trades import existing_manual_close_event_result
@@ -228,6 +231,7 @@ def record_manual_position_close(
             contracts_to_close=int(contracts_to_close),
             close_price=close_price,
             close_reason=close_reason,
+            as_of_ms=as_of_ms,
         )
         return ledger_result.with_close_target_resolution(
             _duplicate_close_target_resolution_payload(
@@ -251,6 +255,7 @@ def record_manual_position_close(
         contracts_to_close=int(contracts_to_close),
         close_price=close_price,
         close_reason=close_reason,
+        as_of_ms=as_of_ms,
     ).with_close_target_resolution(close_target_resolution.to_dict())
 
 

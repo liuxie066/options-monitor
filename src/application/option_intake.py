@@ -314,6 +314,7 @@ def main() -> int:
                 position_side=target_position_side,
                 strike=intent.strike,
                 expiration_ymd=intent.expiration_ymd,
+                as_of_ms=intent.trade_time_ms,
             )
         except ManualCloseMatchError as exc:
             print(format_manual_close_match_error(exc))
