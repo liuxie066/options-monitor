@@ -22,6 +22,7 @@ def test_render_systemd_bundle_uses_runtime_root_and_canonical_entrypoints(tmp_p
 
     files = {item["relative_path"]: item for item in bundle["files"]}
     tick = files["systemd/options-monitor-tick-us.service"]["content"]
+    tick_timer = files["systemd/options-monitor-tick-us.timer"]["content"]
     intake = files["systemd/options-monitor-trade-intake.service"]["content"]
     auto_close_timer = files["systemd/options-monitor-auto-close-us.timer"]["content"]
     verify = files["systemd/options-monitor-projection-verify.service"]["content"]
@@ -33,6 +34,9 @@ def test_render_systemd_bundle_uses_runtime_root_and_canonical_entrypoints(tmp_p
     assert 'Environment="HOME=' not in tick
     assert str(repo / "om") + " run tick-cron --market us" in tick
     assert "--lock-path " + str(runtime / "locks" / "tick-us.lock") in tick
+    assert "OnCalendar=Mon..Fri *-*-* 09..16:00/10:00 America/New_York" in tick_timer
+    assert "OnUnitActiveSec=10min" not in tick_timer
+    assert "OnBootSec=2min" not in tick_timer
     assert str(repo / "om") + " run trade-intake" in intake
     assert "Restart=always" in intake
     assert "OnCalendar=*-*-* 05:30:00 Asia/Shanghai" in auto_close_timer
@@ -46,6 +50,31 @@ def test_render_systemd_bundle_uses_runtime_root_and_canonical_entrypoints(tmp_p
     assert {"name": "options-monitor-projection-verify.timer"} in profile["services"]
     assert "deploy_user" not in profile
     assert "deploy_home" not in profile
+
+
+def test_render_systemd_bundle_aligns_hk_tick_timer_to_calendar_boundaries(tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    repo.mkdir()
+
+    bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        runtime_root=runtime,
+        accounts=["lx"],
+        markets=["hk"],
+    )
+
+    files = {item["relative_path"]: item for item in bundle["files"]}
+    tick = files["systemd/options-monitor-tick-hk.service"]["content"]
+    tick_timer = files["systemd/options-monitor-tick-hk.timer"]["content"]
+
+    assert str(repo / "om") + " run tick-cron --market hk" in tick
+    assert "OnCalendar=Mon..Fri *-*-* 09..16:00/10:00 Asia/Hong_Kong" in tick_timer
+    assert "OnUnitActiveSec=10min" not in tick_timer
+    assert "OnBootSec=2min" not in tick_timer
 
 
 def test_render_systemd_bundle_can_include_auto_upgrade_timer(tmp_path: Path) -> None:
