@@ -23,9 +23,9 @@ from src.application.ledger.api import (
     ledger_store_payload,
     list_position_rows,
     open_position_ledger_from_data_config as resolve_option_positions_repo,
-    reconcile_position_snapshot,
     record_trade_event_void,
     refresh_position_lot_projection,
+    verify_position_lot_projection,
 )
 from src.application.positions.auto_close import main as run_option_positions_auto_close
 from src.application.positions.workflows import (
@@ -36,7 +36,6 @@ from src.application.positions.workflows import (
     format_manual_close_match_error,
 )
 from src.application.positions.inspection import build_lot_event_history, inspect_projection_state
-from src.application.verification_snapshot_io import load_verification_snapshot_payload
 
 
 def _resolve_path_under(path: str | Path, *, base: Path) -> Path:
@@ -189,9 +188,9 @@ def main(argv: list[str] | None = None) -> int:
     p_store_inspect.add_argument("--runtime-root", default=None, help="override runtime root for standard ledger path resolution")
     p_store_inspect.add_argument("--format", default="json", choices=["json", "text"])
 
-    p_reconcile = sub.add_parser('reconcile', help='store a verification snapshot and generate a reconciliation report')
-    p_reconcile.add_argument('--snapshot-file', required=True, help='JSON file with a verification snapshot object or lots array')
-    p_reconcile.add_argument('--format', default='text', choices=['text', 'json'])
+    p_verify = sub.add_parser('verify-projection', help='verify position_lots by replaying trade_events')
+    p_verify.add_argument('--mode', default='auto', choices=['auto', 'full'], help='auto may reuse a trusted checkpoint when events and lots are unchanged')
+    p_verify.add_argument('--format', default='text', choices=['text', 'json'])
 
     p_void_event = sub.add_parser('void-event', help='append a void event for a canonical trade event')
     p_void_event.add_argument('--event-id', required=True)
@@ -509,13 +508,12 @@ def main(argv: list[str] | None = None) -> int:
 
         return run_report(args, base=base, repo=repo)
 
-    if args.cmd == 'reconcile':
+    if args.cmd == 'verify-projection':
         try:
-            snapshot = load_verification_snapshot_payload(args.snapshot_file)
-            report = reconcile_position_snapshot(
+            report = verify_position_lot_projection(
                 base=state_base,
                 repo=repo,
-                verification_snapshot=snapshot,
+                mode=args.mode,
             )
         except ValueError as e:
             raise SystemExit(str(e))
@@ -524,12 +522,13 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         summary = report.get('summary') or {}
         print(
-            "[DONE] wrote verification snapshot and reconciliation report "
-            f"snapshot_id={report.get('snapshot_id')} "
+            "[DONE] verified trade_events projection against position_lots "
+            f"report_id={report.get('report_id')} "
+            f"ok={bool(report.get('ok'))} "
+            f"mode={report.get('mode_used')} "
             f"matched={int(summary.get('matched', 0))} "
-            f"quantity_mismatch={int(summary.get('quantity_mismatch', 0))} "
-            f"missing_in_projection={int(summary.get('missing_in_projection', 0))} "
-            f"missing_in_snapshot={int(summary.get('missing_in_snapshot', 0))} "
+            f"missing_in_position_lots={int(summary.get('missing_in_position_lots', 0))} "
+            f"extra_in_position_lots={int(summary.get('extra_in_position_lots', 0))} "
             f"field_mismatch={int(summary.get('field_mismatch', 0))}"
         )
         return 0

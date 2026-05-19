@@ -16,7 +16,7 @@ from domain.domain.ledger.identity import ContractKey
 from domain.domain.trade_contract_identity import canonical_contract_symbol
 from src.application.ledger.api import (
     list_position_lot_snapshots,
-    position_reconciliation_state,
+    position_projection_verify_state,
     project_trade_event_log,
     trade_event_log,
 )
@@ -305,7 +305,11 @@ def _report_matches_position_keys(report: dict[str, object] | None, keys: set[st
     if not isinstance(items, list):
         return False
     return any(
-        isinstance(item, dict) and str(item.get("position_key") or "").strip() in keys
+        isinstance(item, dict)
+        and (
+            str(item.get("position_key") or "").strip() in keys
+            or str(item.get("record_id") or "").strip() in keys
+        )
         for item in items
     )
 
@@ -403,15 +407,16 @@ def inspect_projection_state(
         or str((item.details or {}).get("target_lot_id") or "").strip() in set(matched_record_ids)
         or str((item.details or {}).get("lot_id") or "").strip() in set(matched_record_ids)
     ]
-    canonical_reconciliation = position_reconciliation_state(base)
-    canonical_report = canonical_reconciliation.get("latest_reconciliation_report")
-    latest_reconciliation_report = None
-    if isinstance(canonical_report, dict) and _report_matches_position_keys(canonical_report, matched_position_keys):
-        latest_reconciliation_report = canonical_report
-    latest_canonical_snapshot = canonical_reconciliation.get("latest_verification_snapshot")
-    latest_verification_snapshot_id = latest_canonical_snapshot.get("snapshot_id") if isinstance(latest_canonical_snapshot, dict) else None
-    verification_snapshot_count = int(canonical_reconciliation.get("verification_snapshot_count") or 0)
-    accepted_verification_snapshot_count = int(canonical_reconciliation.get("accepted_verification_snapshot_count") or 0)
+    matched_report_keys = set(matched_position_keys) | set(matched_record_ids)
+    projection_verify_state = position_projection_verify_state(base)
+    projection_verify_report = projection_verify_state.get("latest_projection_verify_report")
+    latest_projection_verify_report = None
+    if isinstance(projection_verify_report, dict) and _report_matches_position_keys(projection_verify_report, matched_report_keys):
+        latest_projection_verify_report = projection_verify_report
+    projection_verify_checkpoint = projection_verify_state.get("latest_projection_verify_checkpoint")
+    projection_verify_checkpoint_id = (
+        projection_verify_checkpoint.get("checkpoint_id") if isinstance(projection_verify_checkpoint, dict) else None
+    )
     return {
         "selectors": {
             "record_id": record_id,
@@ -424,16 +429,11 @@ def inspect_projection_state(
         "matched_record_ids": sorted(matched_record_ids),
         "current_lots": matched_current,
         "projected_lots": matched_projected,
-        "persisted_baseline_snapshot_id": None,
-        "projection_checkpoint_snapshot_id": latest_verification_snapshot_id,
-        "baseline_snapshot_id": None,
-        "verification_snapshot_count": verification_snapshot_count,
-        "accepted_verification_snapshot_count": accepted_verification_snapshot_count,
-        "latest_verification_snapshot_id": latest_verification_snapshot_id,
+        "projection_verify_checkpoint_id": projection_verify_checkpoint_id,
         "baseline_lots": baseline_lots,
         "related_events": related_events,
         "projection_diagnostics": filtered_diagnostics,
         "all_projection_diagnostic_count": len(projection.diagnostics),
-        "latest_reconciliation_report": latest_reconciliation_report,
-        "latest_reconciliation_summary": (latest_reconciliation_report or {}).get("summary") or {},
+        "latest_projection_verify_report": latest_projection_verify_report,
+        "latest_projection_verify_summary": (latest_projection_verify_report or {}).get("summary") or {},
     }

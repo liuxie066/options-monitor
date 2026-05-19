@@ -18,7 +18,7 @@
 
 - 位置：`output_shared/state/option_positions_v2/`
 - 允许用途：人工历史备查。
-- 禁止用途：作为风控输入、close target resolver、facade fallback、默认 rebuild / reconcile / inspect 依据。
+- 禁止用途：作为风控输入、close target resolver、facade fallback、默认 rebuild / verify-projection / inspect 依据。
 
 默认系统现在只从 canonical `trade_events -> position_lots` 推导仓位；代码库已经没有 v2 domain / repo / service 读取入口。不要把旧 v2 输出再写回 canonical 状态。
 
@@ -119,57 +119,58 @@ SQLite 存储路径固定为：
 - 当前 lot 是否正确
 - projection 结果是否正确
 - `diagnostics` 是否有异常
-- latest verification / reconciliation 状态是否合理
+- latest projection verify 状态是否合理
 
 迁移后的 `inspect` 不只是看当前 lot / events / projection，也会显示：
 
-- latest verification
-- latest reconciliation report
+- latest projection verify report
+- latest projection verify checkpoint
 
 ---
 
-## 5. 确认真实仓位后，再做正式 reconcile
+## 5. 验证事件表与持仓投影
 
-当你已经确认券商真实仓位后，再准备一份 verification snapshot 做正式对账。
+外部 verification snapshot 对账已退休。当前默认只验证本地 canonical 链路：
+
+```text
+trade_events -> shadow position_lots
+vs
+persisted position_lots
+```
 
 示例：
 
 ```bash
-./om option-positions reconcile --snapshot-file /path/to/verification.json
-./om option-positions reconcile --snapshot-file /path/to/verification.json --format json
+./om option-positions verify-projection
+./om option-positions verify-projection --format json
+./om option-positions verify-projection --mode full
 ```
-
-`verification.json` 可以是：
-
-- 一个完整 verification snapshot 对象
-- 或一个 `lots` 数组
 
 这一步会：
 
-- 持久化 verification snapshot
-- 输出 reconciliation report
-- 不直接覆盖 canonical `position_lots`
-- 不把 verification 当作新的事实源
+- 从 `trade_events` 重放出 shadow projection
+- 与当前持久化 `position_lots` 比较
+- 输出 projection verify report
+- 成功时写入 checkpoint；下一次 `--mode auto` 可在事件和持仓 fingerprint 不变时复用 checkpoint
 
-如果出现 mismatch，下一步应该是 repair / adjust / void 明确修账，而不是让 verification 覆盖投影。
+如果出现 mismatch，下一步应该是 rebuild / repair / adjust / void 明确修账，而不是直接手改 `position_lots`。
 
 ---
 
-## 6. reconcile 之后，按差异决定 repair
+## 6. verify 之后，按差异决定 repair
 
-一旦正式 reconcile 完成，后续运维主要看两层：
+一旦正式 verify 完成，后续运维主要看两层：
 
-- canonical `position_lots` 当前投影
-- verification / reconciliation report 的差异
+- canonical `trade_events` 事件流
+- projection verify report 的差异
 
 也就是说：
 
 - `trade_events` 仍是事实源
 - `position_lots` 仍是当前状态投影
-- verification 只是人工/券商证据
 - mismatch 必须通过 explicit repair / adjust / void 进入账本
 
-后续再跑 `inspect` 时，重点就是看当前 lot、相关 events、latest reconciliation 是否一致。
+后续再跑 `inspect` 时，重点就是看当前 lot、相关 events、latest projection verify 是否一致。
 
 ---
 
@@ -220,7 +221,7 @@ SQLite 存储路径固定为：
 
 - rebuild 稳定
 - inspect 抽查无异常
-- reconcile 已经能稳定输出对账报告
+- verify-projection 已经能稳定输出 projection verify 报告
 - risk context / report 都围绕统一输出稳定
 
 在这之前，不要急着清：
@@ -238,11 +239,10 @@ SQLite 存储路径固定为：
 1. 升级版本，但不清旧数据
 2. 跑一次 `./om option-positions rebuild`
 3. 用 `inspect` 抽查关键仓位
-4. 准备真实仓位 verification snapshot
-5. 跑一次正式 `reconcile`
-6. 对 mismatch 执行 explicit repair / adjust / void
-7. 之后按 `trade_events -> position_lots` 进入新运维流程
+4. 跑一次 `./om option-positions verify-projection`
+5. 对 mismatch 执行 explicit repair / adjust / void
+6. 之后按 `trade_events -> position_lots` 进入新运维流程
 
 一句话：
 
-> 正确迁移方式不是先做大规模数据改写，而是“保留旧数据 -> canonical rebuild -> inspect -> reconcile -> repair 差异 -> 再进入新运维流程”。
+> 正确迁移方式不是先做大规模数据改写，而是“保留旧数据 -> canonical rebuild -> inspect -> verify-projection -> repair 差异 -> 再进入新运维流程”。

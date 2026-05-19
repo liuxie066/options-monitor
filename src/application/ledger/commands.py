@@ -618,14 +618,10 @@ def record_trade_event_repair(
     }
 
 
-def reconcile_position_snapshot(*, base: Any, repo: Any, verification_snapshot: dict[str, Any]) -> dict[str, Any]:
-    from src.application.ledger.reconciliation import reconcile_option_positions_snapshot
+def verify_position_lot_projection(*, base: Any, repo: Any, mode: str = "auto") -> dict[str, Any]:
+    from src.application.ledger.projection_verify import verify_position_projection
 
-    return reconcile_option_positions_snapshot(
-        base=base,
-        repo=repo,
-        verification_snapshot=verification_snapshot,
-    )
+    return verify_position_projection(base=base, repo=repo, mode=mode)
 
 
 __all__ = [
@@ -656,10 +652,10 @@ __all__ = [
     "record_normalized_trade_event",
     "record_trade_event_repair",
     "record_trade_event_void",
-    "reconcile_position_snapshot",
     "refresh_position_lot_projection",
     "resolve_broker_trade_close_lots",
     "resolve_broker_trade_close_targets",
     "resolve_manual_position_close_lot",
     "resolve_manual_position_close_target",
+    "verify_position_lot_projection",
 ]

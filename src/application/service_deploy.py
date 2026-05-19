@@ -19,6 +19,10 @@ ServiceProvider = Literal["systemd", "launchd", "manual", "openclaw"]
 DEFAULT_MARKETS: tuple[str, ...] = ("us", "hk")
 DEFAULT_ACCOUNTS: tuple[str, ...] = ("lx", "sy")
 DEFAULT_TIMEOUT_SECONDS = 600
+AUTO_CLOSE_SYSTEMD_CALENDAR = "*-*-* 05:30:00 Asia/Shanghai"
+AUTO_CLOSE_LAUNCHD_CALENDAR = {"Hour": 5, "Minute": 30}
+PROJECTION_VERIFY_SYSTEMD_CALENDAR = "*-*-* 06:00:00 Asia/Shanghai"
+PROJECTION_VERIFY_LAUNCHD_CALENDAR = {"Hour": 6, "Minute": 0}
 
 
 @dataclass(frozen=True)
@@ -301,6 +305,7 @@ def render_service_bundle(
     om_agent = str(repo / "om-agent")
     lock_root = runtime / "locks"
     log_root = runtime / "logs"
+    runtime_data_config = runtime / "portfolio.runtime.json"
 
     files: list[RenderedServiceFile] = []
     service_names: list[str] = []
@@ -391,12 +396,50 @@ def render_service_bundle(
                 _systemd_timer(
                     description=f"Options Monitor {market.upper()} expired option maintenance timer",
                     unit_name=auto_close_service,
-                    calendar="*-*-* 00:10:00",
+                    calendar=AUTO_CLOSE_SYSTEMD_CALENDAR,
                 ),
                 install_path=f"/etc/systemd/system/{auto_close_timer}",
                 kind="systemd_timer",
                 service_name=auto_close_timer,
             )
+
+        verify_service = "options-monitor-projection-verify.service"
+        verify_timer = "options-monitor-projection-verify.timer"
+        verify_args = [
+            om,
+            "option-positions",
+            "--data-config",
+            str(runtime_data_config),
+            "verify-projection",
+            "--mode",
+            "auto",
+        ]
+        add(
+            f"systemd/{verify_service}",
+            _systemd_unit(
+                description="Options Monitor option-position projection verification",
+                repo_root=repo,
+                runtime_root=runtime,
+                env_file=env_file_path,
+                deploy_user=systemd_user,
+                deploy_home=systemd_home,
+                exec_args=verify_args,
+            ),
+            install_path=f"/etc/systemd/system/{verify_service}",
+            kind="systemd_service",
+            service_name=verify_service,
+        )
+        add(
+            f"systemd/{verify_timer}",
+            _systemd_timer(
+                description="Options Monitor option-position projection verification timer",
+                unit_name=verify_service,
+                calendar=PROJECTION_VERIFY_SYSTEMD_CALENDAR,
+            ),
+            install_path=f"/etc/systemd/system/{verify_timer}",
+            kind="systemd_timer",
+            service_name=verify_timer,
+        )
 
         trade_market = "us" if "us" in config_by_market else market_values[0]
         trade_service = "options-monitor-trade-intake.service"
@@ -518,12 +561,37 @@ def render_service_bundle(
                     runtime_root=runtime,
                     program_args=auto_close_args,
                     log_root=log_root,
-                    start_calendar_interval={"Hour": 0, "Minute": 10},
+                    start_calendar_interval=AUTO_CLOSE_LAUNCHD_CALENDAR,
                 ),
                 install_path=f"~/Library/LaunchAgents/{auto_label}.plist",
                 kind="launchd_plist",
                 service_name=auto_label,
             )
+
+        verify_label = "com.options-monitor.projection-verify"
+        verify_args = [
+            om,
+            "option-positions",
+            "--data-config",
+            str(runtime_data_config),
+            "verify-projection",
+            "--mode",
+            "auto",
+        ]
+        add(
+            f"launchd/{verify_label}.plist",
+            _launchd_plist(
+                label=verify_label,
+                repo_root=repo,
+                runtime_root=runtime,
+                program_args=verify_args,
+                log_root=log_root,
+                start_calendar_interval=PROJECTION_VERIFY_LAUNCHD_CALENDAR,
+            ),
+            install_path=f"~/Library/LaunchAgents/{verify_label}.plist",
+            kind="launchd_plist",
+            service_name=verify_label,
+        )
 
         trade_market = "us" if "us" in config_by_market else market_values[0]
         trade_label = "com.options-monitor.trade-intake"
