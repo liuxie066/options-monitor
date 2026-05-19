@@ -26,7 +26,7 @@ if str(repo_base) not in sys.path:
     sys.path.insert(0, str(repo_base))
 
 from src.application.account_config import DEFAULT_ACCOUNTS, accounts_from_config_path, normalize_accounts
-from src.infrastructure.multiplier_cache import resolve_multiplier_with_source
+from src.application.multiplier_cache import resolve_multiplier_with_source
 from domain.domain.ledger.position_fields import infer_currency_from_symbol as infer_position_currency_from_symbol
 from domain.domain.symbol_identity import canonical_symbol
 

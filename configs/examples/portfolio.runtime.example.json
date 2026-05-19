@@ -1,9 +1,4 @@
 {
-  "option_positions": {
-    "bootstrap_from_legacy_sqlite": {
-      "enabled": false
-    }
-  },
   "feishu": {
     "app_id_env": "OM_FEISHU_APP_ID",
     "app_secret_env": "OM_FEISHU_APP_SECRET",

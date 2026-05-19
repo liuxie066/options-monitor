@@ -4,63 +4,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 
-def test_load_feishu_notification_app_config_uses_default_env(monkeypatch) -> None:
-    from src.infrastructure.external_services import load_feishu_notification_app_config
-
-    monkeypatch.setenv("OM_NOTIFY_FEISHU_APP_ID", "cli_1")
-    monkeypatch.setenv("OM_NOTIFY_FEISHU_APP_SECRET", "sec_1")
-
-    out = load_feishu_notification_app_config(base=None)
-
-    assert out["app_id"] == "cli_1"
-    assert out["app_secret"] == "sec_1"
-    assert out["app_id_env"] == "OM_NOTIFY_FEISHU_APP_ID"
-    assert out["app_secret_env"] == "OM_NOTIFY_FEISHU_APP_SECRET"
-
-
-def test_load_feishu_notification_app_config_supports_custom_env_names(monkeypatch) -> None:
-    from src.infrastructure.external_services import load_feishu_notification_app_config
-
-    monkeypatch.setenv("CUSTOM_NOTIFY_APP_ID", "cli_2")
-    monkeypatch.setenv("CUSTOM_NOTIFY_APP_SECRET", "sec_2")
-
-    out = load_feishu_notification_app_config(
-        base=None,
-        notifications={"app_id_env": "CUSTOM_NOTIFY_APP_ID", "app_secret_env": "CUSTOM_NOTIFY_APP_SECRET"},
-    )
-
-    assert out["app_id"] == "cli_2"
-    assert out["app_secret"] == "sec_2"
-
-
-def test_load_feishu_notification_app_config_fails_when_env_missing(monkeypatch) -> None:
-    from src.infrastructure.external_services import load_feishu_notification_app_config
-
-    monkeypatch.delenv("OM_NOTIFY_FEISHU_APP_ID", raising=False)
-    monkeypatch.delenv("OM_NOTIFY_FEISHU_APP_SECRET", raising=False)
-    try:
-        load_feishu_notification_app_config(base=None)
-        raise AssertionError("expected ValueError")
-    except ValueError as exc:
-        assert "notification env missing Feishu app credentials" in str(exc)
-        assert "OM_NOTIFY_FEISHU_APP_ID" in str(exc)
-        assert "OM_NOTIFY_FEISHU_APP_SECRET" in str(exc)
-
-
-def test_load_feishu_notification_app_config_fails_when_one_env_missing(monkeypatch) -> None:
-    from src.infrastructure.external_services import load_feishu_notification_app_config
-
-    monkeypatch.setenv("OM_NOTIFY_FEISHU_APP_ID", "cli_only")
-    monkeypatch.delenv("OM_NOTIFY_FEISHU_APP_SECRET", raising=False)
-    try:
-        load_feishu_notification_app_config(base=None)
-        raise AssertionError("expected ValueError")
-    except ValueError as exc:
-        assert "OM_NOTIFY_FEISHU_APP_SECRET" in str(exc)
-
-
 def test_normalize_feishu_app_send_output_marks_success_with_message_id() -> None:
-    from src.infrastructure.external_services import normalize_feishu_app_send_output
+    from src.application.notification_delivery_adapter import normalize_feishu_app_send_output
 
     out = normalize_feishu_app_send_output(
         send_result={
@@ -79,7 +24,7 @@ def test_normalize_feishu_app_send_output_marks_success_with_message_id() -> Non
 
 
 def test_normalize_feishu_app_send_output_marks_unconfirmed_when_message_id_missing() -> None:
-    from src.infrastructure.external_services import normalize_feishu_app_send_output
+    from src.application.notification_delivery_adapter import normalize_feishu_app_send_output
 
     out = normalize_feishu_app_send_output(
         send_result={
@@ -99,7 +44,7 @@ def test_normalize_feishu_app_send_output_marks_unconfirmed_when_message_id_miss
 
 
 def test_normalize_feishu_app_send_output_marks_failed_on_non_200() -> None:
-    from src.infrastructure.external_services import normalize_feishu_app_send_output
+    from src.application.notification_delivery_adapter import normalize_feishu_app_send_output
 
     out = normalize_feishu_app_send_output(
         send_result={
@@ -121,7 +66,7 @@ def test_normalize_feishu_app_send_output_marks_failed_on_non_200() -> None:
 
 
 def test_normalize_feishu_app_send_output_marks_failed_on_feishu_code() -> None:
-    from src.infrastructure.external_services import normalize_feishu_app_send_output
+    from src.application.notification_delivery_adapter import normalize_feishu_app_send_output
 
     out = normalize_feishu_app_send_output(
         send_result={
@@ -140,8 +85,63 @@ def test_normalize_feishu_app_send_output_marks_failed_on_feishu_code() -> None:
     assert out["feishu_msg"] == "denied"
 
 
+def test_send_feishu_app_message_uses_bot_user_open_id_when_target_empty(monkeypatch, tmp_path: Path) -> None:
+    from src.application import notification_delivery_adapter as service
+
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "cli_1")
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_SECRET", "sec_1")
+    monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "ou_1")
+    captured: dict[str, str] = {}
+
+    def _send_text_message(**kwargs):  # type: ignore[no-untyped-def]
+        captured.update({key: str(value) for key, value in kwargs.items() if key in {"app_id", "app_secret", "open_id", "text"}})
+        return {"code": 0, "msg": "success", "data": {"message_id": "om_1"}}
+
+    monkeypatch.setattr(service, "send_text_message", _send_text_message)
+
+    out = service.send_feishu_app_message(
+        base=tmp_path,
+        channel="feishu_app",
+        target="",
+        message="hello",
+        notifications={},
+    )
+
+    assert out["ok"] is True
+    assert captured["app_id"] == "cli_1"
+    assert captured["app_secret"] == "sec_1"
+    assert captured["open_id"] == "ou_1"
+    assert captured["text"] == "hello"
+
+
+def test_send_feishu_app_message_ignores_config_target_for_bot_channel(monkeypatch, tmp_path: Path) -> None:
+    from src.application import notification_delivery_adapter as service
+
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "cli_1")
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_SECRET", "sec_1")
+    monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "ou_bot")
+    captured: dict[str, str] = {}
+
+    def _send_text_message(**kwargs):  # type: ignore[no-untyped-def]
+        captured.update({key: str(value) for key, value in kwargs.items() if key in {"open_id"}})
+        return {"code": 0, "msg": "success", "data": {"message_id": "om_1"}}
+
+    monkeypatch.setattr(service, "send_text_message", _send_text_message)
+
+    out = service.send_feishu_app_message(
+        base=tmp_path,
+        channel="feishu_app",
+        target="ou_other",
+        message="hello",
+        notifications={},
+    )
+
+    assert out["ok"] is True
+    assert captured["open_id"] == "ou_bot"
+
+
 def test_select_notification_delivery_adapter_keeps_feishu_app_provider_on_app_sender() -> None:
-    from src.infrastructure.external_services import (
+    from src.application.notification_delivery_adapter import (
         normalize_feishu_app_send_output,
         select_notification_delivery_adapter,
         send_feishu_app_message_process,
@@ -156,8 +156,10 @@ def test_select_notification_delivery_adapter_keeps_feishu_app_provider_on_app_s
 
 def test_select_notification_delivery_adapter_routes_wechat_clawbot_to_openclaw() -> None:
     from domain.domain import normalize_notify_subprocess_output
-    from src.infrastructure.external_services import (
+    from src.application.notification_delivery_adapter import (
         select_notification_delivery_adapter,
+    )
+    from src.infrastructure.external_services import (
         send_openclaw_message_process,
     )
 
@@ -222,7 +224,7 @@ def test_send_openclaw_message_process_uses_configured_timeout(monkeypatch, tmp_
 
 
 def test_select_notification_delivery_adapter_rejects_unknown_provider() -> None:
-    from src.infrastructure.external_services import select_notification_delivery_adapter
+    from src.application.notification_delivery_adapter import select_notification_delivery_adapter
 
     try:
         select_notification_delivery_adapter("sms")

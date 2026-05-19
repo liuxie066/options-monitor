@@ -77,14 +77,15 @@ sudoedit "$ENV_FILE"
 
 `$ENV_FILE` 必须保留在服务器本地，填入真实 Feishu 凭证和表引用，不通过 git 发布。
 
-如果要从飞书发消息控制 OM，还需要填入 inbound gateway 相关值：
+如果要通过同一个飞书 Bot 接收命令、自动回复和发送主动通知，还需要填入 Bot channel 相关值：
 
 ```bash
-OM_INBOUND_FEISHU_APP_ID=cli_xxx
-OM_INBOUND_FEISHU_APP_SECRET=xxx
-OM_INBOUND_FEISHU_ENCRYPT_KEY=xxx
-OM_INBOUND_FEISHU_VERIFICATION_TOKEN=xxx
-OM_INBOUND_ALLOWED_SENDERS=feishu:ou_xxx
+OM_FEISHU_BOT_APP_ID=cli_xxx
+OM_FEISHU_BOT_APP_SECRET=xxx
+OM_FEISHU_BOT_ENCRYPT_KEY=xxx
+OM_FEISHU_BOT_VERIFICATION_TOKEN=xxx
+OM_FEISHU_BOT_USER_OPEN_ID=ou_xxx
+OM_FEISHU_BOT_ALLOWED_OPEN_IDS=ou_xxx
 ```
 
 渲染服务文件：

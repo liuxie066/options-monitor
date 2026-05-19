@@ -37,43 +37,10 @@ def _load_data_config(data_config: Path) -> dict[str, Any]:
     return cfg
 
 
-def _get_option_positions_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
-    raw = cfg.get("option_positions")
-    if raw is None:
-        return {}
-    if not isinstance(raw, dict):
-        raise SystemExit("data config option_positions must be a JSON object")
-    return raw
-
-
-def _get_option_positions_bootstrap_from_legacy_sqlite_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
-    option_positions_cfg = _get_option_positions_cfg(cfg)
-    raw = option_positions_cfg.get("bootstrap_from_legacy_sqlite")
-    if raw is None:
-        return {}
-    if not isinstance(raw, dict):
-        raise SystemExit("data config option_positions.bootstrap_from_legacy_sqlite must be a JSON object")
-    return raw
-
-
 def option_positions_bootstrap_from_feishu_enabled(data_config: Path) -> bool:
     _load_data_config(data_config)
     return False
 
-
-def option_positions_bootstrap_from_legacy_sqlite_enabled(data_config: Path) -> bool:
-    cfg = _load_data_config(data_config)
-    return _option_positions_bootstrap_from_legacy_sqlite_enabled_from_cfg(cfg)
-
-
-def _option_positions_bootstrap_from_legacy_sqlite_enabled_from_cfg(cfg: dict[str, Any]) -> bool:
-    bootstrap_cfg = _get_option_positions_bootstrap_from_legacy_sqlite_cfg(cfg)
-    enabled = bootstrap_cfg.get("enabled")
-    if enabled is None:
-        return False
-    if not isinstance(enabled, bool):
-        raise SystemExit("data config option_positions.bootstrap_from_legacy_sqlite.enabled must be a boolean")
-    return bool(enabled)
 
 def resolve_option_positions_sqlite_path(data_config: Path) -> Path:
     path = resolve_ledger_store(data_config).sqlite_path
@@ -256,35 +223,6 @@ class SQLiteOptionPositionsRepository:
         with self._connect() as conn:
             row = conn.execute("SELECT COUNT(*) AS cnt FROM trade_events").fetchone()
         return int((row["cnt"] if row is not None else 0) or 0)
-
-    def count_legacy_records(self) -> int:
-        if not self._table_exists("option_positions"):
-            return 0
-        with self._connect() as conn:
-            row = conn.execute("SELECT COUNT(*) AS cnt FROM option_positions").fetchone()
-        return int((row["cnt"] if row is not None else 0) or 0)
-
-    def list_legacy_records(self) -> list[dict[str, Any]]:
-        if not self._table_exists("option_positions"):
-            return []
-        with self._connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT record_id, fields_json
-                FROM option_positions
-                ORDER BY updated_at_ms DESC, record_id DESC
-                """
-            ).fetchall()
-        out: list[dict[str, Any]] = []
-        for row in rows:
-            fields = json.loads(str(row["fields_json"]) or "{}")
-            out.append(
-                {
-                    "record_id": str(row["record_id"]),
-                    "fields": fields if isinstance(fields, dict) else {},
-                }
-            )
-        return out
 
     def upsert_trade_event(self, event: Any, *, conn: sqlite3.Connection | None = None) -> bool:
         encoded = encode_trade_event_for_storage(event)

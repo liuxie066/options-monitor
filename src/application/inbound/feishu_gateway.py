@@ -12,7 +12,14 @@ from typing import Any, Callable, Mapping, cast
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response, mask_path
 from src.application.inbound.feishu import handle_feishu_payload
 from src.application.inbound.router import ExecuteToolFn
-from src.infrastructure.feishu_im import reply_text_message
+from src.application.secret_resolver import (
+    DEFAULT_FEISHU_BOT_APP_ID_ENV,
+    DEFAULT_FEISHU_BOT_APP_SECRET_ENV,
+    DEFAULT_FEISHU_BOT_ENCRYPT_KEY_ENV,
+    DEFAULT_FEISHU_BOT_VERIFICATION_TOKEN_ENV,
+    resolve_feishu_bot_config,
+)
+from src.infrastructure.feishu_bot import reply_text_message
 
 
 DEFAULT_FEISHU_GATEWAY_HOST = "127.0.0.1"
@@ -20,12 +27,6 @@ DEFAULT_FEISHU_GATEWAY_PORT = 8765
 DEFAULT_FEISHU_GATEWAY_PATH = "/feishu/events"
 DEFAULT_FEISHU_SIGNATURE_MAX_AGE_SECONDS = 600
 DEFAULT_FEISHU_REPLY_MAX_CHARS = 3500
-DEFAULT_INBOUND_FEISHU_APP_ID_ENV = "OM_INBOUND_FEISHU_APP_ID"
-DEFAULT_INBOUND_FEISHU_APP_SECRET_ENV = "OM_INBOUND_FEISHU_APP_SECRET"
-DEFAULT_NOTIFY_FEISHU_APP_ID_ENV = "OM_NOTIFY_FEISHU_APP_ID"
-DEFAULT_NOTIFY_FEISHU_APP_SECRET_ENV = "OM_NOTIFY_FEISHU_APP_SECRET"
-DEFAULT_INBOUND_FEISHU_ENCRYPT_KEY_ENV = "OM_INBOUND_FEISHU_ENCRYPT_KEY"
-DEFAULT_INBOUND_FEISHU_VERIFICATION_TOKEN_ENV = "OM_INBOUND_FEISHU_VERIFICATION_TOKEN"
 
 ReplyFn = Callable[..., dict[str, Any]]
 
@@ -61,21 +62,26 @@ class FeishuGatewaySettings:
             raise AgentToolError(
                 code="CONFIG_ERROR",
                 message="missing inbound sender allowlist for Feishu gateway",
-                hint="Set OM_INBOUND_ALLOWED_SENDERS with entries like feishu:ou_xxx.",
+                hint="Set OM_FEISHU_BOT_USER_OPEN_ID or OM_FEISHU_BOT_ALLOWED_OPEN_IDS.",
             )
         if self.require_signature and not self.encrypt_key:
             raise AgentToolError(
                 code="CONFIG_ERROR",
                 message="missing Feishu inbound encrypt key for signature verification",
-                hint=f"Set {DEFAULT_INBOUND_FEISHU_ENCRYPT_KEY_ENV}, or pass --allow-unsigned only for local tests.",
+                hint=f"Set {DEFAULT_FEISHU_BOT_ENCRYPT_KEY_ENV}, or pass --allow-unsigned only for local tests.",
+            )
+        if not self.verification_token:
+            raise AgentToolError(
+                code="CONFIG_ERROR",
+                message="missing Feishu verification token for event callbacks",
+                hint=f"Set {DEFAULT_FEISHU_BOT_VERIFICATION_TOKEN_ENV}.",
             )
         if self.reply_enabled and not (self.app_id and self.app_secret):
             raise AgentToolError(
                 code="CONFIG_ERROR",
                 message="missing Feishu app credentials for automatic replies",
                 hint=(
-                    f"Set {DEFAULT_INBOUND_FEISHU_APP_ID_ENV}/{DEFAULT_INBOUND_FEISHU_APP_SECRET_ENV} "
-                    f"or {DEFAULT_NOTIFY_FEISHU_APP_ID_ENV}/{DEFAULT_NOTIFY_FEISHU_APP_SECRET_ENV}."
+                    f"Set {DEFAULT_FEISHU_BOT_APP_ID_ENV}/{DEFAULT_FEISHU_BOT_APP_SECRET_ENV}."
                 ),
             )
         if bool(self.tls_certfile) != bool(self.tls_keyfile):
@@ -92,7 +98,7 @@ class FeishuGatewaySettings:
             "config_key": self.config_key,
             "config_path": self.config_path,
             "audit_db": mask_path(self.audit_db),
-            "allowed_senders_configured": bool(self.allowed_senders or os.environ.get("OM_INBOUND_ALLOWED_SENDERS")),
+            "allowed_senders_configured": bool(self.allowed_senders),
             "app_id_configured": bool(self.app_id),
             "app_secret_configured": bool(self.app_secret),
             "encrypt_key_configured": bool(self.encrypt_key),
@@ -114,11 +120,6 @@ def build_feishu_gateway_settings(
     config_key: str | None = "us",
     config_path: str | None = None,
     audit_db: str | None = None,
-    allowed_senders: str | None = None,
-    app_id: str | None = None,
-    app_secret: str | None = None,
-    encrypt_key: str | None = None,
-    verification_token: str | None = None,
     require_signature: bool | None = None,
     reply_enabled: bool = True,
     reply_in_thread: bool | None = None,
@@ -129,16 +130,7 @@ def build_feishu_gateway_settings(
     environ: Mapping[str, str] | None = None,
 ) -> FeishuGatewaySettings:
     env = environ if environ is not None else os.environ
-    resolved_app_id = _first_text(
-        app_id,
-        env.get(DEFAULT_INBOUND_FEISHU_APP_ID_ENV),
-        env.get(DEFAULT_NOTIFY_FEISHU_APP_ID_ENV),
-    )
-    resolved_app_secret = _first_text(
-        app_secret,
-        env.get(DEFAULT_INBOUND_FEISHU_APP_SECRET_ENV),
-        env.get(DEFAULT_NOTIFY_FEISHU_APP_SECRET_ENV),
-    )
+    bot_cfg = resolve_feishu_bot_config(environ=env)
     resolved_require_signature = True if require_signature is None else bool(require_signature)
     return FeishuGatewaySettings(
         host=_first_text(host, env.get("OM_FEISHU_GATEWAY_HOST")) or DEFAULT_FEISHU_GATEWAY_HOST,
@@ -147,11 +139,11 @@ def build_feishu_gateway_settings(
         config_key=str(config_key or "").strip().lower() or None,
         config_path=_first_text(config_path),
         audit_db=_first_text(audit_db, env.get("OM_INBOUND_AUDIT_DB")),
-        allowed_senders=_first_text(allowed_senders, env.get("OM_INBOUND_ALLOWED_SENDERS")),
-        app_id=resolved_app_id or "",
-        app_secret=resolved_app_secret or "",
-        encrypt_key=_first_text(encrypt_key, env.get(DEFAULT_INBOUND_FEISHU_ENCRYPT_KEY_ENV)) or "",
-        verification_token=_first_text(verification_token, env.get(DEFAULT_INBOUND_FEISHU_VERIFICATION_TOKEN_ENV)) or "",
+        allowed_senders=bot_cfg.default_allowed_senders(),
+        app_id=bot_cfg.app_id,
+        app_secret=bot_cfg.app_secret,
+        encrypt_key=bot_cfg.encrypt_key,
+        verification_token=bot_cfg.verification_token,
         require_signature=resolved_require_signature,
         reply_enabled=bool(reply_enabled),
         reply_in_thread=bool(reply_in_thread) if reply_in_thread is not None else _truthy(env.get("OM_FEISHU_REPLY_IN_THREAD")),
@@ -226,8 +218,7 @@ def handle_feishu_gateway_http(
 ) -> tuple[int, dict[str, Any]]:
     try:
         payload = _load_payload(raw_body)
-        if not _is_url_verification(payload):
-            _verify_request(raw_body=raw_body, headers=headers, settings=settings, now_fn=now_fn)
+        _verify_request(raw_body=raw_body, headers=headers, settings=settings, now_fn=now_fn)
         if _is_encrypted_payload(payload):
             payload = decrypt_feishu_event_payload(payload, settings.encrypt_key)
         _verify_token(payload, settings.verification_token)

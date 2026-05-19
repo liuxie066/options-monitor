@@ -17,7 +17,7 @@ from src.infrastructure.io_utils import safe_read_csv
 def apply_multiplier_cache_to_required_data_csv(*, base: Path, required_data_dir: Path, symbol: str) -> None:
     """Best-effort: fill missing/invalid multiplier in required_data.csv based on local cache."""
     try:
-        from src.infrastructure import multiplier_cache
+        from src.application import multiplier_cache
 
         m = multiplier_cache.resolve_multiplier(
             repo_base=base,

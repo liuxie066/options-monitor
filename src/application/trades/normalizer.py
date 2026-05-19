@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from domain.domain.ledger.position_fields import normalize_currency, normalize_option_type
-from src.infrastructure.multiplier_cache import resolve_multiplier_with_source_and_diagnostics
+from src.application.multiplier_cache import resolve_multiplier_with_source_and_diagnostics
 from domain.domain.trade_contract_identity import (
     normalize_contract_expiration,
     normalize_position_effect,

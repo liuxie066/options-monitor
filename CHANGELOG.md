@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 1.2.79 - 2026-05-19
+
+### Changed
+- Consolidated Feishu bot inbound/reply/send configuration on fixed `OM_FEISHU_BOT_*` environment variables and removed gateway CLI secret override flags.
+- Moved Feishu notification route resolution into the application layer while keeping infrastructure Feishu bot code as an HTTP client only.
+- Retired default ledger legacy bootstrap paths; legacy SQLite `trade_events`, `position_lots`, and `option_positions` migration now requires the explicit `option-positions store migrate-legacy` command.
+
+### Fixed
+- Applied Feishu event signature verification consistently to URL verification callbacks when signature checks are enabled.
+- Added architecture guard tests for infrastructure layering, Feishu gateway secret flags, and Feishu bot custom env-name compatibility regressions.
+
 ## 1.2.78 - 2026-05-19
 
 ### Fixed

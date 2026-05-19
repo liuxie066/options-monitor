@@ -28,14 +28,12 @@ def _write_data_config(
     sqlite_path: Path,
     with_feishu: bool = True,
     bootstrap_from_feishu_enabled: bool = False,
-    bootstrap_from_legacy_sqlite_enabled: bool = False,
     copy_legacy_to_standard: bool = True,
 ) -> Path:
     payload: dict[str, object] = {
         "option_positions": {
             "sqlite_path": str(sqlite_path),
             "bootstrap_from_feishu": {"enabled": bool(bootstrap_from_feishu_enabled)},
-            "bootstrap_from_legacy_sqlite": {"enabled": bool(bootstrap_from_legacy_sqlite_enabled)},
         },
     }
     if with_feishu:
@@ -259,7 +257,7 @@ def test_load_option_positions_repo_skips_legacy_rows_without_broker_or_market(t
     rows = loaded.list_records(page_size=10)
     assert rows == []
     assert loaded.count_trade_events() == 0
-    assert loaded.bootstrap_status == "sqlite_only_legacy_option_positions_bootstrap_disabled"
+    assert loaded.bootstrap_status == "sqlite_only_no_feishu_bootstrap"
 
 
 def test_load_option_positions_repo_does_not_migrate_legacy_rows_by_default(tmp_path: Path) -> None:
@@ -303,11 +301,11 @@ def test_load_option_positions_repo_does_not_migrate_legacy_rows_by_default(tmp_
     assert rows == []
     assert loaded.count_trade_events() == 0
     assert loaded.db_path != db_path.resolve()
-    assert loaded.bootstrap_status == "sqlite_only_legacy_option_positions_bootstrap_disabled"
+    assert loaded.bootstrap_status == "sqlite_only_no_feishu_bootstrap"
     assert "source of truth" in str(loaded.bootstrap_message)
 
 
-def test_load_option_positions_repo_migrates_legacy_rows_with_explicit_opt_in(tmp_path: Path) -> None:
+def test_migrate_legacy_sqlite_imports_legacy_option_positions_explicitly(tmp_path: Path) -> None:
 
     db_path = tmp_path / "option_positions.sqlite3"
     repo = ledger_repository.SQLiteOptionPositionsRepository(db_path)
@@ -340,10 +338,16 @@ def test_load_option_positions_repo_migrates_legacy_rows_with_explicit_opt_in(tm
         tmp_path / "data.json",
         sqlite_path=db_path,
         with_feishu=False,
-        bootstrap_from_legacy_sqlite_enabled=True,
         copy_legacy_to_standard=False,
     )
     loaded = ledger_bootstrap.load_option_positions_repo(data_config)
+    dry_run = ledger_bootstrap.migrate_legacy_sqlite_to_repo(loaded, legacy_path=db_path, apply=False)
+
+    assert dry_run["applied"] is False
+    assert dry_run["source_table"] == "option_positions"
+    assert loaded.count_trade_events() == 0
+
+    result = ledger_bootstrap.migrate_legacy_sqlite_to_repo(loaded, legacy_path=db_path, apply=True)
 
     rows = loaded.list_records(page_size=10)
     assert len(rows) == 1
@@ -352,9 +356,11 @@ def test_load_option_positions_repo_migrates_legacy_rows_with_explicit_opt_in(tm
     assert loaded.db_path != db_path.resolve()
     assert loaded.count_trade_events() == 1
     assert loaded.bootstrap_status == "migrated_legacy_option_positions"
+    assert result["applied"] is True
+    assert result["migrated_count"] == 1
 
 
-def test_load_option_positions_repo_prefers_legacy_trade_events_with_explicit_opt_in(tmp_path: Path) -> None:
+def test_migrate_legacy_sqlite_prefers_legacy_trade_events_explicitly(tmp_path: Path) -> None:
     from tests.ledger_legacy_helpers import LegacyTradeEvent as TradeEvent
 
     legacy_db = tmp_path / "legacy" / "option_positions.sqlite3"
@@ -414,40 +420,45 @@ def test_load_option_positions_repo_prefers_legacy_trade_events_with_explicit_op
         tmp_path / "data.json",
         sqlite_path=legacy_db,
         with_feishu=False,
-        bootstrap_from_legacy_sqlite_enabled=True,
         copy_legacy_to_standard=False,
     )
 
     loaded = ledger_bootstrap.load_option_positions_repo(data_config)
 
     assert loaded.db_path != legacy_db.resolve()
+    assert loaded.count_trade_events() == 0
+
+    result = ledger_bootstrap.migrate_legacy_sqlite_to_repo(loaded, legacy_path=legacy_db, apply=True)
+
     assert loaded.count_trade_events() == 1
     assert loaded.list_trade_events()[0]["event_id"] == "deal-open-legacy"
     lots = loaded.list_position_lots()
     assert len(lots) == 1
     assert lots[0]["fields"]["symbol"] == "AAPL"
     assert loaded.bootstrap_status == "migrated_legacy_trade_events"
+    assert result["source_table"] == "trade_events"
 
 
-def test_load_option_positions_repo_reports_missing_legacy_sqlite_when_opted_in(tmp_path: Path) -> None:
+def test_migrate_legacy_sqlite_reports_missing_legacy_sqlite_explicitly(tmp_path: Path) -> None:
     legacy_db = tmp_path / "missing" / "option_positions.sqlite3"
     data_config = _write_data_config(
         tmp_path / "data.json",
         sqlite_path=legacy_db,
         with_feishu=False,
-        bootstrap_from_legacy_sqlite_enabled=True,
         copy_legacy_to_standard=False,
     )
 
     loaded = ledger_bootstrap.load_option_positions_repo(data_config)
+    result = ledger_bootstrap.migrate_legacy_sqlite_to_repo(loaded, legacy_path=legacy_db, apply=True)
 
     assert loaded.count_trade_events() == 0
     assert loaded.count_position_lots() == 0
-    assert loaded.bootstrap_status == "sqlite_only_legacy_sqlite_not_found"
-    assert str(legacy_db) in str(loaded.bootstrap_message)
+    assert result["ok"] is False
+    assert result["message"] == "legacy SQLite database not found"
+    assert result["legacy_sqlite_path"] == str(legacy_db.resolve())
 
 
-def test_load_option_positions_repo_migrates_existing_position_lots_into_trade_events(tmp_path: Path) -> None:
+def test_load_option_positions_repo_does_not_migrate_existing_position_lots_by_default(tmp_path: Path) -> None:
 
     db_path = tmp_path / "option_positions.sqlite3"
     repo = ledger_repository.SQLiteOptionPositionsRepository(db_path)
@@ -481,7 +492,9 @@ def test_load_option_positions_repo_migrates_existing_position_lots_into_trade_e
 
     loaded = ledger_bootstrap.load_option_positions_repo(data_config)
 
-    assert loaded.count_trade_events() == 1
+    assert loaded.count_trade_events() == 0
+    assert loaded.bootstrap_status == "sqlite_only_legacy_position_lots_present"
+    assert "migrate-legacy" in str(loaded.bootstrap_message)
     rows = loaded.list_position_lots()
     assert len(rows) == 1
     assert rows[0]["record_id"] == "rec_bootstrap_1"
@@ -521,7 +534,11 @@ def test_bootstrap_seed_lot_survives_later_trade_event_projection(tmp_path: Path
     )
     data_config = _write_data_config(tmp_path / "data.json", sqlite_path=db_path, with_feishu=False)
     repo = ledger_bootstrap.load_option_positions_repo(data_config)
+    migrate_result = ledger_bootstrap.migrate_legacy_sqlite_to_repo(repo, legacy_path=db_path, apply=True)
 
+    assert migrate_result["ok"] is True
+    assert migrate_result["applied"] is True
+    assert migrate_result["source_table"] == "position_lots"
     assert repo.count_trade_events() == 1
     open_deal = NormalizedTradeDeal(
         broker="富途",
@@ -627,7 +644,7 @@ def test_load_option_positions_repo_does_not_degrade_when_retired_feishu_bootstr
     assert "source of truth" in str(repo.bootstrap_message)
 
 
-def test_load_option_positions_repo_rolls_back_failed_local_projection_migration(tmp_path: Path) -> None:
+def test_load_option_positions_repo_does_not_validate_legacy_position_lots_until_explicit_migration(tmp_path: Path) -> None:
     import json
 
     db_path = tmp_path / "option_positions.sqlite3"
@@ -659,8 +676,8 @@ def test_load_option_positions_repo_rolls_back_failed_local_projection_migration
     )
     loaded = ledger_bootstrap.load_option_positions_repo(data_config)
 
-    assert loaded.bootstrap_status == "degraded_local_position_lots_migration_failed"
-    assert "missing expiration, strike" in str(loaded.bootstrap_message)
+    assert loaded.bootstrap_status == "sqlite_only_legacy_position_lots_present"
+    assert "migrate-legacy" in str(loaded.bootstrap_message)
     assert loaded.count_trade_events() == 0
     lots = loaded.list_position_lots()
     assert [row["record_id"] for row in lots] == ["lot_bad_option"]
@@ -2303,24 +2320,6 @@ def test_option_positions_bootstrap_from_feishu_enabled_reads_boolean(tmp_path: 
     assert ledger_repository.option_positions_bootstrap_from_feishu_enabled(data_config) is False
 
 
-def test_option_positions_bootstrap_from_legacy_sqlite_enabled_defaults_false(tmp_path: Path) -> None:
-
-    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
-
-    assert ledger_repository.option_positions_bootstrap_from_legacy_sqlite_enabled(data_config) is False
-
-
-def test_option_positions_bootstrap_from_legacy_sqlite_enabled_reads_boolean(tmp_path: Path) -> None:
-
-    data_config = _write_data_config(
-        tmp_path / "data.json",
-        sqlite_path=tmp_path / "option_positions.sqlite3",
-        bootstrap_from_legacy_sqlite_enabled=True,
-    )
-
-    assert ledger_repository.option_positions_bootstrap_from_legacy_sqlite_enabled(data_config) is True
-
-
 def test_option_positions_bootstrap_from_feishu_enabled_ignores_retired_config_shape(tmp_path: Path) -> None:
 
     data_config = tmp_path / "data.json"
@@ -2340,31 +2339,6 @@ def test_option_positions_bootstrap_from_feishu_enabled_ignores_retired_config_s
     )
 
     assert ledger_repository.option_positions_bootstrap_from_feishu_enabled(data_config) is False
-
-
-def test_option_positions_bootstrap_from_legacy_sqlite_enabled_rejects_non_boolean(tmp_path: Path) -> None:
-
-    data_config = tmp_path / "data.json"
-    data_config.write_text(
-        json.dumps(
-            {
-                "option_positions": {
-                    "sqlite_path": str(tmp_path / "option_positions.sqlite3"),
-                    "bootstrap_from_legacy_sqlite": {"enabled": "yes"},
-                }
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-    with pytest.raises(
-        SystemExit,
-        match="data config option_positions.bootstrap_from_legacy_sqlite.enabled must be a boolean",
-    ):
-        ledger_repository.option_positions_bootstrap_from_legacy_sqlite_enabled(data_config)
 
 
 def test_replace_position_lots_rejects_incomplete_option_lots_atomically(tmp_path: Path) -> None:

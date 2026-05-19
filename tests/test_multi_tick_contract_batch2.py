@@ -58,12 +58,12 @@ def test_multi_tick_io_and_decision_failure_audit_fields_are_distinguishable() -
     scheduler_src = (base / "src" / "application" / "multi_tick_scheduler.py").read_text(encoding="utf-8")
     audit_src = (base / "src" / "application" / "multi_tick_audit.py").read_text(encoding="utf-8")
     notification_flow_src = (base / "src" / "application" / "tick_notification_flow.py").read_text(encoding="utf-8")
-    external_services_src = (base / "src" / "infrastructure" / "external_services.py").read_text(encoding="utf-8")
+    delivery_adapter_src = (base / "src" / "application" / "notification_delivery_adapter.py").read_text(encoding="utf-8")
     helper_src = (base / "src" / "application" / "scheduled_notification.py").read_text(encoding="utf-8")
     account_run_src = (base / "src" / "application" / "account_run.py").read_text(encoding="utf-8")
     assert "normalize_subprocess_adapter_payload(" in scheduler_src
     assert "normalize_pipeline_subprocess_output(" in account_run_src
-    assert "normalize_notify_subprocess_output" in external_services_src
+    assert "normalize_notify_subprocess_output" in delivery_adapter_src
     assert "select_notification_delivery_adapter" in notification_flow_src
     assert 'failure_kind="io_error"' in helper_src
     assert 'failure_kind="decision_error"' in audit_src

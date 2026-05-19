@@ -47,7 +47,7 @@ def _position_fields(
 
 def test_manual_open_ledger_service_projects_new_lot(tmp_path: Path) -> None:
     from domain.domain.option_position_lots import OpenPositionCommand
-    from src.application.ledger.service import persist_manual_open_event_with_ledger
+    from src.application.ledger.commands import persist_manual_open_event_with_ledger
 
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
 
@@ -84,7 +84,7 @@ def test_manual_open_ledger_service_projects_new_lot(tmp_path: Path) -> None:
 
 def test_manual_close_ledger_service_closes_exact_lot(tmp_path: Path) -> None:
     from domain.domain.option_position_lots import OpenPositionCommand
-    from src.application.ledger.service import persist_manual_close_event_with_ledger
+    from src.application.ledger.commands import persist_manual_close_event_with_ledger
 
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     ledger_manual_trades.persist_manual_open_event(
@@ -129,7 +129,7 @@ def test_manual_close_ledger_service_closes_exact_lot(tmp_path: Path) -> None:
 
 def test_manual_adjust_ledger_service_targets_exact_lot(tmp_path: Path) -> None:
     from domain.domain.option_position_lots import OpenPositionCommand
-    from src.application.ledger.service import persist_manual_adjust_event_with_ledger
+    from src.application.ledger.commands import persist_manual_adjust_event_with_ledger
 
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
     ledger_manual_trades.persist_manual_open_event(
@@ -174,7 +174,8 @@ def test_manual_adjust_ledger_service_targets_exact_lot(tmp_path: Path) -> None:
 
 
 def test_manual_close_ledger_preflight_rejects_target_identity_mismatch() -> None:
-    from src.application.ledger.service import LedgerPreflightError, preflight_manual_close
+    from src.application.ledger.errors import LedgerPreflightError
+    from src.application.ledger.preflight import preflight_manual_close
 
     current_fields = _position_fields(strike=450.0)
     projected_fields = _position_fields(strike=451.0)
@@ -202,7 +203,8 @@ def test_manual_close_ledger_preflight_rejects_target_identity_mismatch() -> Non
 
 
 def test_manual_close_ledger_preflight_rejects_duplicate_lot_snapshot() -> None:
-    from src.application.ledger.service import LedgerPreflightError, preflight_manual_close
+    from src.application.ledger.errors import LedgerPreflightError
+    from src.application.ledger.preflight import preflight_manual_close
 
     fields = _position_fields()
 

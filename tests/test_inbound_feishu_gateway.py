@@ -76,14 +76,45 @@ def test_feishu_signature_verification_rejects_bad_signature() -> None:
 
 
 def test_feishu_gateway_returns_url_verification_challenge() -> None:
+    raw_body = _body({"type": "url_verification", "token": "verify-token", "challenge": "challenge-token"})
+    signature = build_feishu_signature(
+        timestamp="1000",
+        nonce="nonce-1",
+        encrypt_key="secret-key",
+        raw_body=raw_body,
+    )
     status, payload = handle_feishu_gateway_http(
-        raw_body=_body({"type": "url_verification", "token": "verify-token", "challenge": "challenge-token"}),
-        headers={},
-        settings=FeishuGatewaySettings(verification_token="verify-token", require_signature=True),
+        raw_body=raw_body,
+        headers={
+            "X-Lark-Request-Timestamp": "1000",
+            "X-Lark-Request-Nonce": "nonce-1",
+            "X-Lark-Signature": signature,
+        },
+        settings=FeishuGatewaySettings(
+            verification_token="verify-token",
+            encrypt_key="secret-key",
+            require_signature=True,
+        ),
+        now_fn=lambda: 1000.0,
     )
 
     assert status == 200
     assert payload == {"challenge": "challenge-token"}
+
+
+def test_feishu_gateway_url_verification_requires_signature_when_enabled() -> None:
+    status, payload = handle_feishu_gateway_http(
+        raw_body=_body({"type": "url_verification", "token": "verify-token", "challenge": "challenge-token"}),
+        headers={},
+        settings=FeishuGatewaySettings(
+            verification_token="verify-token",
+            encrypt_key="secret-key",
+            require_signature=True,
+        ),
+    )
+
+    assert status == 401
+    assert payload["error"]["code"] == "PERMISSION_DENIED"
 
 
 def test_feishu_gateway_decrypts_encrypted_payload() -> None:
@@ -183,17 +214,20 @@ def test_feishu_gateway_does_not_reply_to_denied_sender(tmp_path: Path) -> None:
     assert replies == []
 
 
-def test_feishu_gateway_settings_prefers_inbound_app_credentials() -> None:
+def test_feishu_gateway_settings_uses_unified_feishu_bot_config() -> None:
     settings = build_feishu_gateway_settings(
         environ={
-            "OM_INBOUND_FEISHU_APP_ID": "in_app",
-            "OM_INBOUND_FEISHU_APP_SECRET": "in_secret",
-            "OM_NOTIFY_FEISHU_APP_ID": "notify_app",
-            "OM_NOTIFY_FEISHU_APP_SECRET": "notify_secret",
-            "OM_INBOUND_FEISHU_ENCRYPT_KEY": "encrypt",
+            "OM_FEISHU_BOT_APP_ID": "bot_app",
+            "OM_FEISHU_BOT_APP_SECRET": "bot_secret",
+            "OM_FEISHU_BOT_USER_OPEN_ID": "ou_1",
+            "OM_FEISHU_BOT_ALLOWED_OPEN_IDS": "ou_1,ou_2",
+            "OM_FEISHU_BOT_ENCRYPT_KEY": "encrypt",
+            "OM_FEISHU_BOT_VERIFICATION_TOKEN": "verify",
         }
     )
 
-    assert settings.app_id == "in_app"
-    assert settings.app_secret == "in_secret"
+    assert settings.app_id == "bot_app"
+    assert settings.app_secret == "bot_secret"
     assert settings.encrypt_key == "encrypt"
+    assert settings.verification_token == "verify"
+    assert settings.allowed_senders == "feishu:ou_1,feishu:ou_2"

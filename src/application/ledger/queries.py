@@ -5,11 +5,11 @@ from typing import Any
 
 from src.application.ledger.publisher import project_stored_trade_events_to_position_lots
 from src.application.ledger.projection_verify import load_projection_verify_state
+from src.application.ledger.bootstrap import load_option_positions_repo
 from src.application.ledger.repository import (
     require_option_positions_event_write_repo,
 )
 from src.application.ledger.risk_context import summarize_ledger_shadow_status
-from src.application.ledger.service import load_option_positions_repo
 from src.application.ledger.views import PositionLotSnapshot, RiskPositionView
 
 

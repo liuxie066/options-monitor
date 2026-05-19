@@ -4,6 +4,16 @@
 
 It is not a shell bridge. Gateways should pass one message into OM and let OM parse, authorize, audit, and execute the request through the existing agent-tool contract.
 
+## Bot Channel Model
+
+OM treats a messaging integration as one bot channel with three operations:
+
+- `receive`: user sends a message into OM.
+- `reply`: OM responds to the original inbound message.
+- `send`: OM proactively sends notifications, receipts, and alerts.
+
+Feishu is the first concrete bot channel. Its receive/reply/send paths use the same `OM_FEISHU_BOT_*` configuration, so user messages, automatic replies, and proactive notifications stay in the same Feishu Bot identity. Future WeChat support should add a separate adapter with the same channel semantics instead of adding another notification-only path.
+
 ## Boundary
 
 Allowed architecture:
@@ -45,14 +55,16 @@ Only this pure-read whitelist is enabled. Tools that write local reports or cach
 Remote channels require an explicit sender allowlist:
 
 ```bash
-export OM_INBOUND_ALLOWED_SENDERS='feishu:***REMOVED-OPEN-ID***'
+export OM_FEISHU_BOT_USER_OPEN_ID='***REMOVED-OPEN-ID***'
 ```
 
-Multiple entries can be comma-separated:
+Multiple Feishu users can be comma-separated. If this is empty, OM defaults the allowlist to `OM_FEISHU_BOT_USER_OPEN_ID`:
 
 ```bash
-export OM_INBOUND_ALLOWED_SENDERS='feishu:ou_xxx,wechat:user_xxx,hermes:*'
+export OM_FEISHU_BOT_ALLOWED_OPEN_IDS='ou_xxx,ou_yyy'
 ```
+
+Future non-Feishu channels should expose the same `(channel, user_id)` allowlist semantics instead of bypassing this policy.
 
 `local` channel is allowed by default for local CLI testing. Set this to force allowlist checks for local invocations too:
 
@@ -103,7 +115,7 @@ Local test:
 Feishu gateway call:
 
 ```bash
-OM_INBOUND_ALLOWED_SENDERS='feishu:ou_xxx' \
+OM_FEISHU_BOT_ALLOWED_OPEN_IDS='ou_xxx' \
 ./om inbound handle \
   --text '收益 sy 2026-05' \
   --sender ou_xxx \
@@ -114,7 +126,7 @@ OM_INBOUND_ALLOWED_SENDERS='feishu:ou_xxx' \
 Thin Feishu event-payload adapter:
 
 ```bash
-OM_INBOUND_ALLOWED_SENDERS='feishu:ou_xxx' \
+OM_FEISHU_BOT_ALLOWED_OPEN_IDS='ou_xxx' \
 ./om inbound feishu --input-file feishu_event.json --format text
 ```
 
@@ -150,14 +162,15 @@ It still does not expose arbitrary shell execution. It only forwards verified Fe
 Required environment values:
 
 ```bash
-export OM_INBOUND_ALLOWED_SENDERS='feishu:***REMOVED-OPEN-ID***'
-export OM_INBOUND_FEISHU_ENCRYPT_KEY='<Feishu event Encrypt Key>'
-export OM_INBOUND_FEISHU_VERIFICATION_TOKEN='<Feishu event Verification Token>'
-export OM_INBOUND_FEISHU_APP_ID='<Feishu app_id>'
-export OM_INBOUND_FEISHU_APP_SECRET='<Feishu app_secret>'
+export OM_FEISHU_BOT_APP_ID='<Feishu app_id>'
+export OM_FEISHU_BOT_APP_SECRET='<Feishu app_secret>'
+export OM_FEISHU_BOT_ENCRYPT_KEY='<Feishu event Encrypt Key>'
+export OM_FEISHU_BOT_VERIFICATION_TOKEN='<Feishu event Verification Token>'
+export OM_FEISHU_BOT_USER_OPEN_ID='***REMOVED-OPEN-ID***'
+export OM_FEISHU_BOT_ALLOWED_OPEN_IDS='***REMOVED-OPEN-ID***'
 ```
 
-If `OM_INBOUND_FEISHU_APP_ID` / `OM_INBOUND_FEISHU_APP_SECRET` are empty, the gateway falls back to `OM_NOTIFY_FEISHU_APP_ID` / `OM_NOTIFY_FEISHU_APP_SECRET`.
+The same Feishu Bot credentials are used for inbound event verification, same-message replies, and proactive OM notifications. There is no fallback to a separate notification app.
 
 Local config check:
 

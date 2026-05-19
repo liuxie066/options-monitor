@@ -7,7 +7,7 @@ from typing import Any
 
 from src.infrastructure.feishu_bitable import parse_note_kv, safe_float
 from src.infrastructure.exchange_rates import CurrencyConverter, ExchangeRates
-from src.infrastructure.multiplier_cache import resolve_multiplier
+from src.application.multiplier_cache import resolve_multiplier
 from domain.domain.ledger.position_fields import (
     BUY_TO_CLOSE,
     EXPIRE_AUTO_CLOSE,

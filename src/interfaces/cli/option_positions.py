@@ -22,7 +22,9 @@ from src.application.ledger.api import (
     inspect_ledger_stores,
     ledger_store_payload,
     list_position_rows,
+    migrate_legacy_sqlite_to_repo,
     open_position_ledger_from_data_config as resolve_option_positions_repo,
+    open_position_ledger_from_runtime_config,
     record_trade_event_void,
     refresh_position_lot_projection,
     verify_position_lot_projection,
@@ -188,6 +190,13 @@ def main(argv: list[str] | None = None) -> int:
     p_store_inspect.add_argument("--data-config", dest="store_data_config", default=None, help="portfolio data config path override")
     p_store_inspect.add_argument("--runtime-root", default=None, help="override runtime root for standard ledger path resolution")
     p_store_inspect.add_argument("--format", default="json", choices=["json", "text"])
+    p_store_migrate = store_sub.add_parser('migrate-legacy', help='explicitly migrate a legacy SQLite store into active trade_events')
+    p_store_migrate.add_argument("--config", dest="store_config", default=None, help="runtime config path; resolves portfolio.data_config relative to the config file")
+    p_store_migrate.add_argument("--data-config", dest="store_data_config", default=None, help="portfolio data config path override")
+    p_store_migrate.add_argument("--runtime-root", default=None, help="override runtime root for standard ledger path resolution")
+    p_store_migrate.add_argument("--legacy-sqlite-path", default=None, help="legacy SQLite path override; defaults to deprecated option_positions.sqlite_path when present")
+    p_store_migrate.add_argument("--apply", action="store_true", help="apply migration; omitted means dry-run inspect")
+    p_store_migrate.add_argument("--format", default="json", choices=["json", "text"])
 
     p_verify = sub.add_parser('verify-projection', help='verify position_lots by replaying trade_events')
     p_verify.add_argument('--mode', default='auto', choices=['auto', 'full'], help='auto may reuse a trusted checkpoint when events and lots are unchanged')
@@ -245,15 +254,41 @@ def main(argv: list[str] | None = None) -> int:
     base = Path(__file__).resolve().parents[3]
     if args.cmd == 'store':
         data_config_path, config_path = _store_inspect_data_config(args, base=base)
-        payload = inspect_ledger_stores(
-            data_config_path,
-            runtime_root=getattr(args, "runtime_root", None),
-            config_path=config_path,
-        )
+        if args.store_cmd == "inspect":
+            payload = inspect_ledger_stores(
+                data_config_path,
+                runtime_root=getattr(args, "runtime_root", None),
+                config_path=config_path,
+            )
+        else:
+            _resolved_data_config, repo = open_position_ledger_from_runtime_config(
+                base=base,
+                cfg=None,
+                data_config=data_config_path,
+                config_path=config_path,
+                runtime_root=getattr(args, "runtime_root", None),
+            )
+            store = getattr(repo, "ledger_store", None)
+            legacy_path = getattr(args, "legacy_sqlite_path", None) or getattr(store, "legacy_sqlite_path", None)
+            payload = migrate_legacy_sqlite_to_repo(
+                repo,
+                legacy_path=legacy_path,
+                apply=bool(getattr(args, "apply", False)),
+            )
+            payload["ledger_store"] = ledger_store_payload(data_config_path, repo)
         if args.format == "json":
             print(json.dumps(payload, ensure_ascii=False, indent=2))
         else:
-            _print_store_inspect_text(payload)
+            if args.store_cmd == "inspect":
+                _print_store_inspect_text(payload)
+            else:
+                status = "APPLIED" if payload.get("applied") else "DRY_RUN"
+                print(
+                    f"[{status}] legacy={payload.get('legacy_sqlite_path')} "
+                    f"source={payload.get('source_table') or '-'} "
+                    f"migrated={payload.get('migrated_count') or 0} "
+                    f"message={payload.get('message') or '-'}"
+                )
         return 0
 
     if args.cmd == 'auto-close-expired':

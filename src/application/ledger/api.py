@@ -36,6 +36,10 @@ from src.application.ledger.commands import (
     verify_position_lot_projection,
 )
 from src.application.ledger.errors import LedgerPreflightError
+from src.application.ledger.bootstrap import (
+    inspect_legacy_sqlite_migration,
+    migrate_legacy_sqlite_to_repo,
+)
 from src.application.ledger.queries import (
     PositionLotSnapshot,
     RiskPositionView,
@@ -87,6 +91,7 @@ __all__ = [
     "format_position_cash_secured",
     "format_position_money",
     "inspect_ledger_stores",
+    "inspect_legacy_sqlite_migration",
     "list_close_lot_candidates",
     "list_canonical_position_lot_snapshots",
     "list_expiry_close_position_lots",
@@ -123,6 +128,7 @@ __all__ = [
     "record_normalized_trade_event",
     "record_trade_event_repair",
     "record_trade_event_void",
+    "migrate_legacy_sqlite_to_repo",
     "resolve_ledger_store",
     "refresh_position_lot_projection",
     "resolve_broker_trade_close_lots",

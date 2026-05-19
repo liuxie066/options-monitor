@@ -7,11 +7,7 @@ from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from domain.domain.intermediate_objects import SchemaValidationError, SnapshotDTO
-from domain.domain.multi_tick import (
-    cash_footer_for_account,
-    evaluate_dnd_quiet_hours,
-    resolve_notification_route_from_config,
-)
+from domain.domain.multi_tick import cash_footer_for_account, evaluate_dnd_quiet_hours
 from domain.domain.multi_tick_result import (
     build_account_messages,
     build_no_candidate_account_messages,
@@ -37,6 +33,8 @@ from src.application.multi_tick_finalization import (
     finalize_multi_tick_run,
     finalize_no_account_notification,
 )
+from src.application.notification_delivery_route import resolve_notification_delivery_route
+from src.application.notification_delivery_adapter import select_notification_delivery_adapter
 from src.application.scheduled_notification import (
     build_notify_failure_summary_message,
     build_per_account_delivery_batch,
@@ -47,7 +45,6 @@ from src.application.scheduled_notification import (
 )
 from src.infrastructure.external_services import (
     run_scan_scheduler_cli,
-    select_notification_delivery_adapter,
 )
 from src.infrastructure.io_utils import bj_now, read_json, utc_now
 
@@ -172,7 +169,7 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
             account_messages=heartbeat_account_messages,
         )
 
-    notify_route = resolve_notification_route_from_config(config=request.base_cfg)
+    notify_route = resolve_notification_delivery_route(config=request.base_cfg)
     notif_cfg = notify_route.get("notifications") or {}
     provider = notify_route.get("provider")
     channel = notify_route.get("channel")

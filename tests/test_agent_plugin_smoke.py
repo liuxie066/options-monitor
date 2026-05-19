@@ -393,12 +393,12 @@ def test_healthcheck_warns_on_notification_placeholder_values(monkeypatch, tmp_p
         json.dumps({"option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"}}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    monkeypatch.setenv("OM_NOTIFY_FEISHU_APP_ID", "cli_xxx")
-    monkeypatch.setenv("OM_NOTIFY_FEISHU_APP_SECRET", "xxx")
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "cli_xxx")
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_SECRET", "xxx")
+    monkeypatch.setenv("OM_FEISHU_BOT_USER_OPEN_ID", "ou_xxx")
     cfg = _public_cfg_with_futu("portfolio.runtime.json")
     cfg["notifications"] = {
         "provider": "feishu_app",
-        "target": "ou_xxx",
     }
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -417,8 +417,8 @@ def test_healthcheck_warns_on_notification_placeholder_values(monkeypatch, tmp_p
     assert out["ok"] is True
     assert any(item["name"] == "notification_target_placeholder" and item["status"] == "warn" for item in out["data"]["checks"])
     assert any(item["name"] == "notification_credentials_placeholder" and item["status"] == "warn" for item in out["data"]["checks"])
-    assert any("example notifications.target placeholder" in item for item in out["warnings"])
-    assert any("example notification credentials" in item for item in out["warnings"])
+    assert any("example Feishu bot user open_id" in item for item in out["warnings"])
+    assert any("example Feishu bot credentials" in item for item in out["warnings"])
 
 
 def test_get_portfolio_context_allows_futu_source_without_explicit_data_config(monkeypatch, tmp_path: Path) -> None:

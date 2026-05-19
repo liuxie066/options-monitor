@@ -26,7 +26,7 @@ def derive_put_max_strike_from_cash(
 
     strike_cap ~= free_cash_native / multiplier
 
-    Multiplier source: src.infrastructure.multiplier_cache (best-effort). Missing => return None.
+    Multiplier source: src.application.multiplier_cache (best-effort). Missing => return None.
 
     Note:
     - usd_per_cny_exchange_rate means USD per 1 CNY
@@ -83,7 +83,7 @@ def derive_put_max_strike_from_cash(
     # 3) multiplier from cache
     mult = None
     try:
-        from src.infrastructure import multiplier_cache
+        from src.application import multiplier_cache
         repo_base = Path(__file__).resolve().parents[2]
         mult = multiplier_cache.resolve_multiplier(
             repo_base=repo_base,

@@ -5,8 +5,8 @@ from typing import Any, Callable
 from domain.domain.multi_tick import FEISHU_APP_NOTIFICATION_PROVIDER, normalize_notification_provider
 from src.application.ledger.api import ledger_store_payload
 from src.application.secret_resolver import (
+    resolve_feishu_bot_config,
     resolve_feishu_holdings_config,
-    resolve_feishu_notification_app_config,
 )
 
 
@@ -115,47 +115,50 @@ def run_healthcheck_tool(
         and normalize_notification_provider(notifications.get("provider") or notifications.get("channel"))
         == FEISHU_APP_NOTIFICATION_PROVIDER
     ):
-        target = str(notifications.get("target") or "").strip()
+        bot_cfg = resolve_feishu_bot_config(notifications)
+        target = str(bot_cfg.user_open_id or "").strip()
         if target in {"ou_xxx", "user:ou_xxx", "chat:chat_xxx"}:
             checks.append(
                 {
                     "name": "notification_target_placeholder",
                     "status": "warn",
-                    "message": "notifications.target is still using the example placeholder value",
+                    "message": "Feishu bot notification target is still using the example placeholder value",
                 }
             )
-            warnings.append("Replace the example notifications.target placeholder before enabling real sends.")
-        notification_app = resolve_feishu_notification_app_config(notifications)
-        if not notification_app.ready:
+            warnings.append("Replace the example Feishu bot user open_id before enabling real sends.")
+        send_missing = list(bot_cfg.credential_missing_fields)
+        if not target:
+            send_missing.append(bot_cfg.user_open_id_env)
+        if send_missing:
             checks.append(
                 {
                     "name": "notification_credentials",
                     "status": "error",
-                    "message": "notification Feishu app credentials missing from environment",
-                    "value": notification_app.redacted_status(),
+                    "message": "Feishu bot send configuration missing from environment",
+                    "value": bot_cfg.redacted_status(),
                 }
             )
             warnings.append(
-                "Notification credentials are incomplete; set "
-                + ", ".join(notification_app.missing_fields)
+                "Feishu bot send configuration is incomplete; set "
+                + ", ".join(send_missing)
                 + " before enabling sends."
             )
         else:
-            if notification_app.app_id == "cli_xxx" or notification_app.app_secret == "xxx":
+            if bot_cfg.app_id == "cli_xxx" or bot_cfg.app_secret == "xxx":
                 checks.append(
                     {
                         "name": "notification_credentials_placeholder",
                         "status": "warn",
-                        "message": "notification credentials are still using example placeholder values",
+                        "message": "Feishu bot credentials are still using example placeholder values",
                     }
                 )
-                warnings.append("Replace example notification credentials before enabling real sends.")
+                warnings.append("Replace example Feishu bot credentials before enabling real sends.")
             checks.append(
                 {
                     "name": "notification_credentials",
                     "status": "ok",
-                    "message": "notification Feishu app credentials configured from environment",
-                    "value": notification_app.redacted_status(),
+                    "message": "Feishu bot send configuration is configured from environment",
+                    "value": bot_cfg.redacted_status(),
                 }
             )
 

@@ -23,10 +23,9 @@ from src.application.ledger.publisher import project_stored_trade_events_to_posi
 from src.application.ledger.repository import (
     SQLiteOptionPositionsRepository,
     _load_data_config,
-    _option_positions_bootstrap_from_legacy_sqlite_enabled_from_cfg,
     with_sqlite_repo_transaction,
 )
-from src.application.ledger.store_resolution import LedgerStoreResolution, resolve_ledger_store
+from src.application.ledger.store_resolution import resolve_ledger_store
 from src.infrastructure.feishu_bitable import safe_float
 
 
@@ -288,29 +287,6 @@ def _legacy_sqlite_counts(path: Path) -> dict[str, int] | None:
         }
 
 
-def _legacy_sqlite_has_rows(counts: dict[str, int] | None) -> bool:
-    if counts is None:
-        return False
-    return any(int(value or 0) > 0 for value in counts.values())
-
-
-def _disabled_legacy_sqlite_status(counts: dict[str, int]) -> tuple[str, str]:
-    if int(counts.get("trade_events") or 0) > 0:
-        return (
-            "sqlite_only_legacy_trade_events_bootstrap_disabled",
-            "legacy trade_events bootstrap disabled; local trade_events remain source of truth",
-        )
-    if int(counts.get("position_lots") or 0) > 0:
-        return (
-            "sqlite_only_legacy_position_lots_bootstrap_disabled",
-            "legacy position_lots bootstrap disabled; local trade_events remain source of truth",
-        )
-    return (
-        "sqlite_only_legacy_option_positions_bootstrap_disabled",
-        "legacy option_positions bootstrap disabled; local trade_events remain source of truth",
-    )
-
-
 def _legacy_position_lot_row(row: sqlite3.Row) -> dict[str, Any]:
     fields = json.loads(str(row["fields_json"]) or "{}")
     if not isinstance(fields, dict):
@@ -381,77 +357,139 @@ def _list_legacy_option_positions(conn: sqlite3.Connection) -> list[dict[str, An
     return records
 
 
-def _migrate_legacy_sqlite_if_configured(
+def _legacy_source_table(counts: dict[str, int] | None) -> str | None:
+    if not counts:
+        return None
+    if int(counts.get("trade_events") or 0) > 0:
+        return "trade_events"
+    if int(counts.get("position_lots") or 0) > 0:
+        return "position_lots"
+    if int(counts.get("option_positions") or 0) > 0:
+        return "option_positions"
+    return None
+
+
+def inspect_legacy_sqlite_migration(legacy_path: str | Path | None) -> dict[str, Any]:
+    path_text = str(legacy_path or "").strip()
+    if not path_text:
+        return {
+            "ok": False,
+            "legacy_sqlite_path": None,
+            "exists": False,
+            "counts": None,
+            "source_table": None,
+            "message": "legacy SQLite path is required",
+        }
+    path = Path(path_text).expanduser().resolve()
+    try:
+        counts = _legacy_sqlite_counts(path)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "legacy_sqlite_path": str(path),
+            "exists": path.exists(),
+            "counts": None,
+            "source_table": None,
+            "message": f"failed to inspect legacy SQLite: {exc}",
+        }
+    if counts is None:
+        return {
+            "ok": False,
+            "legacy_sqlite_path": str(path),
+            "exists": False,
+            "counts": None,
+            "source_table": None,
+            "message": "legacy SQLite database not found",
+        }
+    source_table = _legacy_source_table(counts)
+    return {
+        "ok": source_table is not None,
+        "legacy_sqlite_path": str(path),
+        "exists": True,
+        "counts": counts,
+        "source_table": source_table,
+        "message": "legacy SQLite has migratable rows" if source_table else "legacy SQLite database has no bootstrap rows",
+    }
+
+
+def migrate_legacy_sqlite_to_repo(
     repo: SQLiteOptionPositionsRepository,
     *,
-    store: LedgerStoreResolution,
-    data_cfg: dict[str, Any],
-) -> bool:
-    legacy_path = store.legacy_sqlite_path
-    if legacy_path is None:
-        return False
+    legacy_path: str | Path | None,
+    apply: bool = False,
+) -> dict[str, Any]:
+    inspection = inspect_legacy_sqlite_migration(legacy_path)
+    payload: dict[str, Any] = {
+        **inspection,
+        "active_sqlite_path": str(repo.db_path),
+        "applied": False,
+        "migrated_count": 0,
+        "bootstrap_status": getattr(repo, "bootstrap_status", None),
+        "bootstrap_message": getattr(repo, "bootstrap_message", None),
+    }
+    if not bool(inspection.get("ok")):
+        return payload
+    if not apply:
+        payload["message"] = "dry run; pass --apply to migrate legacy SQLite into active trade_events"
+        return payload
 
-    enabled = _option_positions_bootstrap_from_legacy_sqlite_enabled_from_cfg(data_cfg)
-    try:
-        counts = _legacy_sqlite_counts(legacy_path)
-    except Exception as exc:
-        if enabled:
-            repo.bootstrap_status = "degraded_legacy_sqlite_migration_failed"
-            repo.bootstrap_message = f"legacy SQLite migration failed: {exc}"
-            print(
-                f"[WARN] option_positions legacy SQLite migration skipped for {repo.db_path}: {exc}",
-                file=sys.stderr,
-            )
-        return False
-    if not enabled:
-        if _legacy_sqlite_has_rows(counts):
-            repo.bootstrap_status, repo.bootstrap_message = _disabled_legacy_sqlite_status(counts or {})
-        return False
-    if counts is None:
-        repo.bootstrap_status = "sqlite_only_legacy_sqlite_not_found"
-        repo.bootstrap_message = f"legacy SQLite database not found: {legacy_path}"
-        return False
-    if not _legacy_sqlite_has_rows(counts):
-        repo.bootstrap_status = "sqlite_only_legacy_sqlite_empty"
-        repo.bootstrap_message = f"legacy SQLite database has no bootstrap rows: {legacy_path}"
-        return False
+    path = Path(str(inspection["legacy_sqlite_path"])).expanduser().resolve()
+    counts = inspection.get("counts") if isinstance(inspection.get("counts"), dict) else {}
+    source_table = str(inspection.get("source_table") or "")
 
     try:
-        with closing(_legacy_sqlite_connect(legacy_path)) as conn:
-            if int(counts.get("trade_events") or 0) > 0:
+        with closing(_legacy_sqlite_connect(path)) as conn:
+            if source_table == "trade_events":
                 count = materialize_bootstrap_events(repo, _list_legacy_trade_events(conn))
                 repo.bootstrap_status = "migrated_legacy_trade_events"
                 repo.bootstrap_message = f"migrated {count} trade events from legacy SQLite trade_events"
-                return True
-            if int(counts.get("position_lots") or 0) > 0:
-                return apply_bootstrap_snapshot(
-                    repo,
-                    records=_list_legacy_position_lots(conn),
+            elif source_table == "position_lots":
+                events = _bootstrap_trade_events(
+                    _list_legacy_position_lots(conn),
                     source_name="legacy_position_lots",
-                    success_status="migrated_legacy_position_lots",
-                    success_message="migrated {count} bootstrap events from legacy SQLite position_lots",
-                    failure_status="degraded_legacy_position_lots_migration_failed",
-                    failure_message="legacy SQLite position_lots migration failed: {error}",
-                    failure_log_prefix="option_positions legacy position_lots migration skipped",
                 )
-            return apply_bootstrap_snapshot(
-                repo,
-                records=_normalize_bootstrap_records(_list_legacy_option_positions(conn)),
-                source_name="legacy_option_positions",
-                success_status="migrated_legacy_option_positions",
-                success_message="migrated {count} trade events from legacy SQLite option_positions",
-                failure_status="degraded_legacy_option_positions_migration_failed",
-                failure_message="legacy SQLite option_positions migration failed: {error}",
-                failure_log_prefix="option_positions legacy option_positions migration skipped",
-            )
+                count = materialize_bootstrap_events(repo, events)
+                repo.bootstrap_status = "migrated_legacy_position_lots"
+                repo.bootstrap_message = f"migrated {count} bootstrap events from legacy SQLite position_lots"
+            else:
+                events = _bootstrap_trade_events(
+                    _normalize_bootstrap_records(_list_legacy_option_positions(conn)),
+                    source_name="legacy_option_positions",
+                )
+                count = materialize_bootstrap_events(repo, events)
+                repo.bootstrap_status = "migrated_legacy_option_positions"
+                repo.bootstrap_message = f"migrated {count} trade events from legacy SQLite option_positions"
     except Exception as exc:
         repo.bootstrap_status = "degraded_legacy_sqlite_migration_failed"
         repo.bootstrap_message = f"legacy SQLite migration failed: {exc}"
+        payload.update(
+            {
+                "ok": False,
+                "applied": False,
+                "migrated_count": 0,
+                "bootstrap_status": repo.bootstrap_status,
+                "bootstrap_message": repo.bootstrap_message,
+                "message": f"legacy SQLite migration failed: {exc}",
+            }
+        )
         print(
             f"[WARN] option_positions legacy SQLite migration skipped for {repo.db_path}: {exc}",
             file=sys.stderr,
         )
-        return False
+        return payload
+
+    payload.update(
+        {
+            "ok": True,
+            "applied": True,
+            "migrated_count": count,
+            "counts": counts,
+            "bootstrap_status": repo.bootstrap_status,
+            "bootstrap_message": repo.bootstrap_message,
+            "message": repo.bootstrap_message,
+        }
+    )
+    return payload
 
 
 def apply_bootstrap_snapshot(
@@ -500,15 +538,10 @@ def load_option_positions_repo(
         return repo
 
     if repo.count_position_lots() > 0:
-        apply_bootstrap_snapshot(
-            repo,
-            records=repo.list_position_lots(),
-            source_name="sqlite_position_lots",
-            success_status="migrated_local_position_lots",
-            success_message="migrated {count} bootstrap events from local position_lots",
-            failure_status="degraded_local_position_lots_migration_failed",
-            failure_message="local position_lots migration failed: {error}",
-            failure_log_prefix="option_positions local snapshot migration skipped",
+        repo.bootstrap_status = "sqlite_only_legacy_position_lots_present"
+        repo.bootstrap_message = (
+            "position_lots exist without trade_events; run explicit "
+            "option-positions store migrate-legacy before ledger writes"
         )
         return repo
 
@@ -519,5 +552,4 @@ def load_option_positions_repo(
         repo.bootstrap_status = "sqlite_only_no_feishu_bootstrap"
         repo.bootstrap_message = "feishu option_positions bootstrap is not used; local trade_events remain source of truth"
 
-    _migrate_legacy_sqlite_if_configured(repo, store=store, data_cfg=data_cfg)
     return repo

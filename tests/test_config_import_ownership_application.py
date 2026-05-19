@@ -271,7 +271,7 @@ def test_exchange_rates_imports_infrastructure_owner_module() -> None:
     assert notify_mod.load_exchange_rate_info is infra_mod.load_exchange_rate_info
 
 
-def test_multiplier_cache_imports_infrastructure_owner_module() -> None:
+def test_multiplier_cache_imports_application_owner_module() -> None:
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module("scripts.multiplier_cache")
     with pytest.raises(ModuleNotFoundError):
@@ -279,14 +279,14 @@ def test_multiplier_cache_imports_infrastructure_owner_module() -> None:
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module("scripts.option_intake")
 
-    infra_mod = importlib.import_module("src.infrastructure.multiplier_cache")
+    owner_mod = importlib.import_module("src.application.multiplier_cache")
     reporting_mod = importlib.import_module("src.application.positions.reporting")
     trade_normalizer_mod = importlib.import_module("src.application.trades.normalizer")
     parse_message_mod = importlib.import_module("src.application.parse_option_message")
 
-    assert reporting_mod.resolve_multiplier is infra_mod.resolve_multiplier
-    assert trade_normalizer_mod.resolve_multiplier_with_source_and_diagnostics is infra_mod.resolve_multiplier_with_source_and_diagnostics
-    assert parse_message_mod.resolve_multiplier_with_source is infra_mod.resolve_multiplier_with_source
+    assert reporting_mod.resolve_multiplier is owner_mod.resolve_multiplier
+    assert trade_normalizer_mod.resolve_multiplier_with_source_and_diagnostics is owner_mod.resolve_multiplier_with_source_and_diagnostics
+    assert parse_message_mod.resolve_multiplier_with_source is owner_mod.resolve_multiplier_with_source
 
 
 def test_option_positions_feishu_sync_modules_are_removed() -> None:
@@ -404,11 +404,12 @@ def test_external_services_imports_infrastructure_owner_module() -> None:
             importlib.import_module(old_module)
 
     owner_mod = importlib.import_module("src.infrastructure.external_services")
+    delivery_mod = importlib.import_module("src.application.notification_delivery_adapter")
     multi_tick_mod = importlib.import_module("src.application.multi_account_tick")
     account_run_mod = importlib.import_module("src.application.account_run")
 
     assert multi_tick_mod.run_scan_scheduler_cli is owner_mod.run_scan_scheduler_cli
-    assert multi_tick_mod.select_notification_delivery_adapter is owner_mod.select_notification_delivery_adapter
+    assert multi_tick_mod.select_notification_delivery_adapter is delivery_mod.select_notification_delivery_adapter
     assert account_run_mod.run_pipeline_script is owner_mod.run_pipeline_script
 
 
