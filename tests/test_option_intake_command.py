@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import src.application.ledger.manual_trades as ledger_manual_trades
 import src.application.ledger.repository as ledger_repository
 
 from src.application.option_intake import _missing_for_action, parse_om_command
-from src.application.parse_option_message import parse_futu_premium
+from src.application.parse_option_message import parse_fill_timestamp, parse_futu_premium
 
 
 def test_parse_om_open_command_with_review_and_account() -> None:
@@ -294,3 +295,81 @@ def test_option_intake_close_parser_skips_multiplier_resolution(monkeypatch, tmp
 
     assert captured["resolve_multiplier"] is False
     assert "[DRY_RUN] update fields:" in capsys.readouterr().out
+
+
+def _seed_popmart_short_call(repo: ledger_repository.SQLiteOptionPositionsRepository) -> str:
+    from domain.domain.option_position_lots import OpenPositionCommand
+
+    ledger_manual_trades.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="sy",
+            symbol="9992.HK",
+            option_type="call",
+            side="short",
+            contracts=3,
+            currency="HKD",
+            strike=200.0,
+            multiplier=100,
+            expiration_ymd="2026-06-29",
+            premium_per_share=1.5,
+            opened_at_ms=1000,
+        ),
+    )
+    return str(repo.list_position_lots()[0]["record_id"])
+
+
+def _btc_popmart_message() -> str:
+    return (
+        "/om btc sy -- 【成交提醒】成功买入3张$泡泡玛特 260629 200.00 购$，"
+        "成交价格：0.72，此笔订单委托已全部成交，2026/05/19 10:42:31 (香港)。"
+        "【富途证券(香港)】"
+    )
+
+
+def test_option_intake_btc_dry_run_uses_parsed_fill_timestamp(monkeypatch, tmp_path: Path, capsys) -> None:
+    import src.application.option_intake as intake
+
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    lot_id = _seed_popmart_short_call(repo)
+    monkeypatch.setattr(intake, "open_position_ledger_from_data_config", lambda **_kwargs: (tmp_path / "data.json", repo))
+    message = _btc_popmart_message()
+    expected_ms = parse_fill_timestamp(message)
+    assert expected_ms is not None
+
+    monkeypatch.setattr(sys, "argv", ["option_intake", "--text", message, "--dry-run"])
+
+    assert intake.main() == 0
+
+    out = capsys.readouterr().out
+    assert f"[MATCH] rule=strict_contract_unique record_id={lot_id}" in out
+    assert f'"closed_at": {expected_ms}' in out
+    assert f'"last_action_at": {expected_ms}' in out
+    assert repo.get_record_fields(lot_id)["status"] == "open"
+    assert len(repo.list_trade_events()) == 1
+
+
+def test_option_intake_btc_apply_uses_parsed_fill_timestamp(monkeypatch, tmp_path: Path) -> None:
+    import src.application.option_intake as intake
+
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    lot_id = _seed_popmart_short_call(repo)
+    monkeypatch.setattr(intake, "open_position_ledger_from_data_config", lambda **_kwargs: (tmp_path / "data.json", repo))
+    message = _btc_popmart_message()
+    expected_ms = parse_fill_timestamp(message)
+    assert expected_ms is not None
+    expected_dt = datetime.fromtimestamp(expected_ms / 1000, tz=timezone.utc)
+    assert (expected_dt.hour, expected_dt.minute, expected_dt.second) == (2, 42, 31)
+
+    monkeypatch.setattr(sys, "argv", ["option_intake", "--text", message, "--apply"])
+
+    assert intake.main() == 0
+
+    fields = repo.get_record_fields(lot_id)
+    assert fields["status"] == "close"
+    assert fields["closed_at"] == expected_ms
+    assert fields["last_action_at"] == expected_ms
+    close_event = repo.list_trade_events()[-1]
+    assert close_event["event_type"] == "close"
+    assert close_event["trade_time_ms"] == expected_ms

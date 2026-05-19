@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.71 - 2026-05-19
+
+### Fixed
+- Use parsed Futu fill timestamps for manual BTC close preview and write paths when available, while preserving execution-time fallback.
+
 ## 1.2.70 - 2026-05-19
 
 ### Changed
