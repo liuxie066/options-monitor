@@ -305,6 +305,8 @@ def run_healthcheck_tool(
             port=ep_port,
             symbols=healthcheck_symbols_for_futu(cfg),
             timeout_sec=int(payload.get("timeout_sec") or 20),
+            telnet_host=str(payload.get("opend_telnet_host") or "127.0.0.1"),
+            telnet_port=int(payload.get("opend_telnet_port") or 22222),
         )
         readiness_results[key] = readiness
 
@@ -343,13 +345,22 @@ def run_healthcheck_tool(
                     "name": f"opend_readiness_{key.replace('.', '_').replace(':', '_')}",
                     "status": ("ok" if readiness_ok else "error"),
                     "message": readiness_message,
-                    "value": {"host": ep_host, "port": ep_port, "accounts": ep_accounts},
+                    "value": {
+                        "host": ep_host,
+                        "port": ep_port,
+                        "accounts": ep_accounts,
+                        "global_state": _dict(readiness.get("watchdog")).get("state"),
+                        "telnet": _dict(readiness.get("telnet")),
+                    },
                 }
             )
             if not readiness_ok:
                 aggregate_readiness_status = "error"
                 aggregate_readiness_message = readiness_message
                 warnings.append(f"OpenD endpoint {key} for {', '.join(ep_accounts)} is not ready.")
+            telnet = _dict(readiness.get("telnet"))
+            if telnet and not bool(telnet.get("ok")):
+                warnings.append("OpenD Telnet is not listening; phone verification cannot be submitted through telnet.")
         checks.append(
             {
                 "name": "opend_readiness",
@@ -363,6 +374,8 @@ def run_healthcheck_tool(
             port=futu_port,
             symbols=healthcheck_symbols_for_futu(cfg),
             timeout_sec=int(payload.get("timeout_sec") or 20),
+            telnet_host=str(payload.get("opend_telnet_host") or "127.0.0.1"),
+            telnet_port=int(payload.get("opend_telnet_port") or 22222),
         )
         readiness_ok = bool(readiness.get("ok"))
         checks.append(
@@ -370,9 +383,17 @@ def run_healthcheck_tool(
                 "name": "opend_readiness_global",
                 "status": ("ok" if readiness_ok else "error"),
                 "message": (readiness.get("message") or "Global OpenD readiness passed"),
-                "value": {"host": futu_host, "port": futu_port},
+                "value": {
+                    "host": futu_host,
+                    "port": futu_port,
+                    "global_state": _dict(readiness.get("watchdog")).get("state"),
+                    "telnet": _dict(readiness.get("telnet")),
+                },
             }
         )
+        telnet = _dict(readiness.get("telnet"))
+        if telnet and not bool(telnet.get("ok")):
+            warnings.append("OpenD Telnet is not listening; phone verification cannot be submitted through telnet.")
     else:
         checks.append(
             {

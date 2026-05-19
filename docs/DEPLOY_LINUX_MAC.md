@@ -62,8 +62,9 @@ python3 -m venv .venv
 REPO=/opt/options-monitor
 RUNTIME=/var/lib/options-monitor
 ENV_FILE=/etc/options-monitor/options-monitor.env
-sudo mkdir -p "$RUNTIME" "$RUNTIME/logs" "$RUNTIME/locks"
-sudo chown -R "$USER":"$USER" "$RUNTIME"
+DEPLOY_USER=liuxie
+sudo mkdir -p "$RUNTIME" "$RUNTIME/logs" "$RUNTIME/locks" "$RUNTIME/output_accounts" "$RUNTIME/output_shared"
+sudo chown -R "$DEPLOY_USER":"$DEPLOY_USER" "$RUNTIME"
 ```
 
 发布环境变量文件：
@@ -85,10 +86,42 @@ cd "$REPO"
   --repo-root "$REPO" \
   --runtime-root "$RUNTIME" \
   --env-file "$ENV_FILE" \
+  --deploy-user "$DEPLOY_USER" \
   --markets us hk \
   --accounts lx sy \
   --output-dir /tmp/options-monitor-service
 ```
+
+传入 `--deploy-user "$DEPLOY_USER"` 后，渲染出的 systemd unit 会包含：
+
+```ini
+User=liuxie
+Environment="HOME=/home/liuxie"
+Environment="OM_RUNTIME_ROOT=/var/lib/options-monitor"
+```
+
+`liuxie` 只是上面示例里的服务器运行用户，不是代码默认值。如果 HOME 不在 `/home/<user>`，再传 `--deploy-home <path>`。如果不传 `--deploy-user` 且未设置 `OM_DEPLOY_USER` / `DEPLOY_USER`，systemd unit 不会写 `User=` / `HOME=`。
+
+安装前先跑只读 preflight：
+
+```bash
+./om service preflight \
+  --runtime-root "$RUNTIME" \
+  --env-file "$ENV_FILE" \
+  --config-us config.us.json \
+  --config-hk config.hk.json \
+  --accounts lx sy
+```
+
+preflight 会检查 env path 是文件还是目录、runtime root / locks / output_accounts / output_shared 权限、`output` 是否为 symlink，以及 runtime config 是否带 `_generated` 元数据。
+如果 `output` 已经是普通目录，先 dry-run，再确认迁移：
+
+```bash
+./om service repair-output --runtime-root "$RUNTIME" --default-account lx
+./om service repair-output --runtime-root "$RUNTIME" --default-account lx --confirm
+```
+
+修复会先备份真实目录，再把内容迁移到 `output_accounts/<default-account>`，最后创建 `output -> output_accounts/<default-account>` symlink。
 
 安装：
 
@@ -114,6 +147,8 @@ sudo systemctl enable --now options-monitor-trade-intake.service
 ./om-agent run --tool runtime_status --input-json "{\"profile_path\":\"$RUNTIME/service.profile.json\"}"
 ./om option-positions store inspect --config config.us.json
 ```
+
+线上查 runtime 时优先带 profile path；如果直接用 `config_key`，确保当前 shell 带上 `OM_RUNTIME_ROOT=$RUNTIME`，否则会读 repo 下默认 runtime。
 
 ## 4. Mac: launchd
 
@@ -166,6 +201,16 @@ launchctl bootstrap "gui/$UID" "$HOME/Library/LaunchAgents/com.options-monitor.t
 - Linux 机器能连接可用 OpenD host/port，或本机已运行 OpenD。
 - Mac 机器的 OpenD 登录状态稳定，launchd 服务能访问同一端口。
 - runtime config 中的 `fetch.host` / `fetch.port` 指向正确地址。
+- OpenD Telnet 已启用，`FutuOpenD.xml` 中应包含 `telnet_ip=127.0.0.1`、`telnet_port=22222`。
+- 手机验证码需要通过 Telnet 提交；提交后 `program_status_type=READY`，且 `qot_logined=true`、`trd_logined=true`。
+
+检查 OpenD readiness：
+
+```bash
+./om healthcheck --config-key us --accounts lx sy --opend-telnet-host 127.0.0.1 --opend-telnet-port 22222
+```
+
+`healthcheck` 的 `opend_readiness*` 检查会展示 OpenD global state 和 Telnet 是否监听。Telnet 未监听不会替代 OpenD API readiness，但会明确提示手机验证码无法通过 Telnet 提交。
 
 ## 6. 切换旧数据
 

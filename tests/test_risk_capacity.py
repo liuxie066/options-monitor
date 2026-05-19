@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from domain.domain.risk_capacity import (
-    compute_covered_call_share_capacity,
+    compute_sell_call_share_capacity,
     compute_sell_put_cash_capacity,
     compute_short_call_locked_shares,
     compute_short_put_cash_secured,
@@ -40,8 +40,8 @@ def test_sell_put_cash_capacity_fails_closed_when_basis_missing() -> None:
     assert capacity.reason == "cash_basis_missing"
 
 
-def test_covered_call_share_capacity_uses_actual_multiplier() -> None:
-    capacity = compute_covered_call_share_capacity(
+def test_sell_call_share_capacity_uses_actual_multiplier() -> None:
+    capacity = compute_sell_call_share_capacity(
         shares_total=600,
         shares_locked=100,
         multiplier=500,

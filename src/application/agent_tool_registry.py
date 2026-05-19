@@ -53,6 +53,8 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
             "accounts": "optional list[str]",
             "data_config": "optional explicit data config path",
             "timeout_sec": "optional int",
+            "opend_telnet_host": "optional OpenD telnet host; defaults to 127.0.0.1",
+            "opend_telnet_port": "optional OpenD telnet port; defaults to 22222",
         },
         risk_level="read_only",
         safe_default_input={"config_key": "us"},

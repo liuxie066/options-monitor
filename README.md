@@ -3,7 +3,7 @@
 `options-monitor` 是一个本地运行的期权监控、筛选、报告和通知工具，主要服务这几类工作流：
 
 - `Sell Put`
-- `Covered Call`
+- `Sell Call`
 - `Sell Put` 收益增强 `yield_enhancement`
 - `close_advice`
 - `option_positions`
@@ -340,9 +340,9 @@ Agent 只读列出：
 
 除了链上候选过滤，最终还会叠加账户现金维度的 `cash_reserve` 后过滤。
 
-### Covered Call
+### Sell Call
 
-Covered Call 的关键区别是它依赖真实持仓上下文：
+Sell Call 的关键区别是它依赖真实持仓上下文：
 
 - `shares` / `avg_cost` 来自 holdings，不再建议手写在 symbol 配置里
 - 已被 short call 锁定的股票会从可卖数量里扣掉

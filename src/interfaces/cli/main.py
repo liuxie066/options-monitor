@@ -22,7 +22,9 @@ from src.application.scan_pipeline import run_scan
 from src.application.scan_scheduler import run_scheduler
 from src.application.service_deploy import (
     load_service_profile,
+    repair_output_symlink,
     render_service_bundle,
+    service_preflight,
     service_status_from_profile,
     write_service_bundle,
 )
@@ -47,6 +49,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     health.add_argument("--config-key", default=None, choices=("us", "hk"))
     health.add_argument("--config-path", default=None)
     health.add_argument("--accounts", nargs="*", default=None)
+    health.add_argument("--opend-telnet-host", default=None)
+    health.add_argument("--opend-telnet-port", type=int, default=None)
 
     ai_cofunder = sub.add_parser("ai-cofunder", help="collect AI Cofunder evidence for MacBook Codex")
     ai_cofunder_sub = ai_cofunder.add_subparsers(dest="ai_cofunder_command", required=True)
@@ -184,9 +188,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     service_render.add_argument("--config-us", default=None)
     service_render.add_argument("--config-hk", default=None)
     service_render.add_argument("--env-file", default=None, help="systemd EnvironmentFile path for local secrets/env values")
+    service_render.add_argument("--deploy-user", default=None, help="systemd User= identity; also accepted from OM_DEPLOY_USER/DEPLOY_USER")
+    service_render.add_argument("--deploy-home", default=None, help="systemd HOME environment; defaults to /home/<deploy-user>")
     service_render.add_argument("--timeout", dest="timeout_seconds", type=int, default=600)
     service_render.add_argument("--output-dir", default=None, help="write rendered files under this directory")
     service_render.add_argument("--no-content", action="store_true", help="omit file contents from JSON output")
+    service_preflight_cmd = service_sub.add_parser("preflight", help="check Linux runtime root before installing/running services")
+    service_preflight_cmd.add_argument("--runtime-root", default="/var/lib/options-monitor")
+    service_preflight_cmd.add_argument("--accounts", nargs="+", default=None)
+    service_preflight_cmd.add_argument("--default-account", default=None)
+    service_preflight_cmd.add_argument("--config-us", default=None)
+    service_preflight_cmd.add_argument("--config-hk", default=None)
+    service_preflight_cmd.add_argument("--env-file", default=None)
+    service_repair_output = service_sub.add_parser("repair-output", help="migrate a real runtime output directory to output_accounts and create the output symlink")
+    service_repair_output.add_argument("--runtime-root", default="/var/lib/options-monitor")
+    service_repair_output.add_argument("--default-account", required=True)
+    service_repair_output.add_argument("--confirm", action="store_true", help="apply the migration; without this the command is a dry run")
     service_status = service_sub.add_parser("status", help="summarize a rendered service profile")
     service_status.add_argument("--profile-path", required=True)
     service_status.add_argument("--include-service-status", action="store_true")
@@ -336,7 +353,15 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(actual_argv)
     try:
         if args.command == "healthcheck":
-            return _print(run_healthcheck(config_key=args.config_key, config_path=args.config_path, accounts=args.accounts))
+            return _print(
+                run_healthcheck(
+                    config_key=args.config_key,
+                    config_path=args.config_path,
+                    accounts=args.accounts,
+                    opend_telnet_host=args.opend_telnet_host,
+                    opend_telnet_port=args.opend_telnet_port,
+                )
+            )
 
         if args.command == "ai-cofunder" and args.ai_cofunder_command == "collect":
             payload = {
@@ -522,6 +547,8 @@ def main(argv: list[str] | None = None) -> int:
                 markets=args.markets,
                 config_paths=config_paths,
                 env_file=args.env_file,
+                deploy_user=args.deploy_user,
+                deploy_home=args.deploy_home,
                 timeout_seconds=args.timeout_seconds,
                 include_content=(not bool(args.no_content)) or bool(args.output_dir),
             )
@@ -532,6 +559,32 @@ def main(argv: list[str] | None = None) -> int:
                         if isinstance(item, dict):
                             item.pop("content", None)
             return _print(build_response(tool_name="service.render", ok=True, data=bundle))
+
+        if args.command == "service" and args.service_command == "preflight":
+            config_paths = {
+                key: value
+                for key, value in {
+                    "us": args.config_us,
+                    "hk": args.config_hk,
+                }.items()
+                if value
+            }
+            data = service_preflight(
+                runtime_root=args.runtime_root,
+                env_file=args.env_file,
+                accounts=args.accounts,
+                default_account=args.default_account,
+                config_paths=config_paths,
+            )
+            return _print(build_response(tool_name="service.preflight", ok=bool(data["summary"]["ok"]), data=data))
+
+        if args.command == "service" and args.service_command == "repair-output":
+            data = repair_output_symlink(
+                runtime_root=args.runtime_root,
+                default_account=args.default_account,
+                confirm=bool(args.confirm),
+            )
+            return _print(build_response(tool_name="service.repair_output", ok=True, data=data))
 
         if args.command == "service" and args.service_command == "status":
             profile = load_service_profile(args.profile_path)

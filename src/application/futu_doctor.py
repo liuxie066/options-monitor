@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from src.application.opend_utils import normalize_underlier
-from src.infrastructure.opend_watchdog import run_watchdog_check
+from src.infrastructure.opend_watchdog import port_open, run_watchdog_check
 
 
 REQUIRED_SNAPSHOT_COLS = [
@@ -42,6 +42,21 @@ def sdk_status() -> dict[str, Any]:
     return {
         "futu_sdk_importable": futu_found,
         "ok": bool(futu_found),
+    }
+
+
+def telnet_status(*, host: str = "127.0.0.1", port: int = 22222) -> dict[str, Any]:
+    open_ok = port_open(str(host), int(port), timeout=0.8)
+    return {
+        "host": str(host),
+        "port": int(port),
+        "listening": bool(open_ok),
+        "ok": bool(open_ok),
+        "message": (
+            "OpenD Telnet is listening"
+            if open_ok
+            else "OpenD Telnet is not listening; set telnet_ip=127.0.0.1 and telnet_port=22222 in FutuOpenD.xml"
+        ),
     }
 
 
@@ -155,6 +170,8 @@ def run_futu_doctor_checks(
     *,
     host: str,
     port: int,
+    telnet_host: str = "127.0.0.1",
+    telnet_port: int = 22222,
     symbols: list[str] | None = None,
     ensure: bool = False,
     timeout_sec: int | None = None,
@@ -165,6 +182,7 @@ def run_futu_doctor_checks(
 
     watchdog = run_watchdog_check(host=str(host), port=int(port), ensure=bool(ensure)).to_payload()
     watchdog_ok = bool(watchdog.get("ok"))
+    telnet = telnet_status(host=str(telnet_host), port=int(telnet_port))
 
     required_fields = None
     required_fields_raw = ""
@@ -197,8 +215,11 @@ def run_futu_doctor_checks(
         "ok": ok,
         "host": str(host),
         "port": int(port),
+        "telnet_host": str(telnet_host),
+        "telnet_port": int(telnet_port),
         "source": "futu",
         "sdk": sdk,
+        "telnet": telnet,
         "watchdog_ok": watchdog_ok,
         "watchdog_returncode": (0 if watchdog_ok else 2),
         "watchdog": watchdog,
@@ -231,6 +252,15 @@ def build_human_text(result: dict[str, Any]) -> str:
         action = wd.get("action_taken")
         if action:
             lines.append(f"  action: {action}")
+
+    telnet = result.get("telnet") if isinstance(result.get("telnet"), dict) else {}
+    if telnet:
+        endpoint = f"{telnet.get('host')}:{telnet.get('port')}"
+        if telnet.get("ok"):
+            lines.append(f"[OK] OpenD Telnet listening: {endpoint}")
+        else:
+            lines.append(f"[WARN] OpenD Telnet unavailable: {endpoint}")
+            lines.append("  enable telnet_ip=127.0.0.1 and telnet_port=22222 in FutuOpenD.xml, then use Telnet to submit phone verification codes.")
 
     fields = result.get("required_fields") if isinstance(result.get("required_fields"), dict) else None
     if fields is not None:
@@ -269,4 +299,5 @@ __all__ = [
     "required_fields_ok",
     "run_futu_doctor_checks",
     "sdk_status",
+    "telnet_status",
 ]

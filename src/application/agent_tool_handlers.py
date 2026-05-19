@@ -121,8 +121,24 @@ def _mask_path_str(value: Any) -> str:
     return mask_path(value) or "..."
 
 
-def _run_futu_doctor(*, host: str, port: int, symbols: list[str], timeout_sec: int) -> dict[str, Any]:
-    return _run_futu_doctor_impl(host=host, port=port, symbols=symbols, timeout_sec=timeout_sec, repo_base=repo_base)
+def _run_futu_doctor(
+    *,
+    host: str,
+    port: int,
+    symbols: list[str],
+    timeout_sec: int,
+    telnet_host: str = "127.0.0.1",
+    telnet_port: int = 22222,
+) -> dict[str, Any]:
+    return _run_futu_doctor_impl(
+        host=host,
+        port=port,
+        symbols=symbols,
+        timeout_sec=timeout_sec,
+        repo_base=repo_base,
+        telnet_host=telnet_host,
+        telnet_port=telnet_port,
+    )
 
 
 def _healthcheck_symbols_for_futu(cfg: dict[str, Any]) -> list[str]:

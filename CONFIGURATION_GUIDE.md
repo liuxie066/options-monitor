@@ -70,7 +70,7 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 如果启用 Feishu holdings 数据源，直接通过环境变量提供 Feishu App 凭证和 holdings 表引用。
 - `holdings`：可选主数据源，提供现金与股票持仓（用于 base 现金、shares、avg_cost）
 - `option_positions`：SQLite 主存储，提供已卖出期权占用（用于：
-  - covered call 锁股数 `locked_shares_by_symbol`
+  - sell call 锁股数 `locked_shares_by_symbol`
   - cash-secured put 占用 `cash_secured_by_symbol`
 )
 - Feishu 不再承载 `option_positions`：不做 bootstrap，也不做镜像输出。
@@ -143,7 +143,7 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 
 数量与占用：
 - `contracts`：合约张数（float→int）
-- `underlying_share_locked`（推荐字段名）：covered call 锁定股数
+- `underlying_share_locked`（推荐字段名）：sell call 锁定股数
   - 兼容字段：`underlying_shares_locked`
   - 如果为空且是 short call，会按 `contracts * 100` 推算
 - `cash_secured_amount`：short put 的现金担保占用（美元数值）
@@ -152,7 +152,7 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 - `note`：可写 `key=value`；脚本支持 `status/option_type/side` 从 note 里解析
 
 ### 3.3 输出给监控系统的关键字段
-- `locked_shares_by_symbol`：用于 covered call 可卖张数 = (shares - locked)/100
+- `locked_shares_by_symbol`：用于 sell call 可卖张数 = (shares - locked)/100
 - `cash_secured_by_symbol`：用于卖 put 的“已占用担保现金”
 
 ---
@@ -240,7 +240,7 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 - `sell_put.min_annualized_net_return` 统一解析优先级：
   `symbol.sell_put.min_annualized_net_return` > `templates.<name>.sell_put.min_annualized_net_return` > 代码默认 `DEFAULT_MIN_ANNUALIZED_NET_RETURN(0.07)`。
 - 全局流动性/价差硬过滤仅允许 3 个键：`min_open_interest`、`min_volume`、`max_spread_ratio`
-- `templates.call_base.sell_call.*`：call 的通用底线
+- `templates.call_base.sell_call.*`：sell_call 的通用底线
 
 ### 4.3 symbols[]：每个标的的个性化区间
 你通常只需要改：
@@ -253,10 +253,10 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
   - `min_strike_cost_multiplier` 会用自动读取的 `avg_cost` 做硬过滤；例如 `1.02` 表示有效 `min_strike` 不低于 `avg_cost * 1.02`。
   - 若 holdings 取不到（该账户缺 holdings / 读取失败），则该账户的 sell_call 会被跳过。
   - 抓取层现在会先为 sell_put / sell_call 分别规划 required_data 窗口，再按相同 expiration 尽量合并到底层 OpenD 请求。
-  - call 的近端边界是 `min_strike`；若只配置了 `min_strike`，抓取层会自动向上扩 `20%` 作为抓取上界。
-  - 若 call 未配置任何 strike 边界，抓取层会退回到基于 `spot` 的默认窗口 `[spot*1.03, spot*1.20]`。
+  - sell_call 的近端边界是 `min_strike`；若只配置了 `min_strike`，抓取层会自动向上扩 `20%` 作为抓取上界。
+  - 若 sell_call 未配置任何 strike 边界，抓取层会退回到基于 `spot` 的默认窗口 `[spot*1.03, spot*1.20]`。
   - 旧的按 OTM% 定义 call 抓取窗口的配置已移除，避免与绝对价边界模式重复定义同一抓取窗口。
-  - call 抓取窗口允许小幅 buffer，仅用于避免边界漏抓；扫描阶段仍严格使用原始 `min_strike/max_strike`。
+  - sell_call 抓取窗口允许小幅 buffer，仅用于避免边界漏抓；扫描阶段仍严格使用原始 `min_strike/max_strike`。
 - `use`: 选择使用哪些模板（例如 `["put_base","call_base"]`）
 - `fetch.source`: 行情源，当前 symbol required-data 运行时仅支持 `futu`（富途数据源，经本机 OpenD 网关 + Futu API）；旧值 `opend` 仍兼容。
 - `yahoo` / `yfinance` 不作为 symbol required-data 的受支持运行时来源；它们只保留给独立的事件风险数据抓取等非 OpenD fallback 场景。

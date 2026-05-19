@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
+from json import JSONDecodeError
 from pathlib import Path
 from typing import Any
 
@@ -57,6 +58,18 @@ def _read_json_object(path: Path, *, label: str, hint: str | None = None) -> dic
         )
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
+    except JSONDecodeError as exc:
+        raise AgentToolError(
+            code="CONFIG_ERROR",
+            message=f"failed to parse {label}: {path}:{exc.lineno}:{exc.colno}",
+            details={
+                "error": str(exc),
+                "line": int(exc.lineno),
+                "column": int(exc.colno),
+                "position": int(exc.pos),
+            },
+            hint="Fix the JSON syntax first. A common cause is a trailing comma in ignored or local runtime config.",
+        ) from exc
     except Exception as exc:
         raise AgentToolError(
             code="CONFIG_ERROR",

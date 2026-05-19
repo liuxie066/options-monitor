@@ -85,6 +85,8 @@ def classify_watchdog_result(state: dict | None, error_text: str | None) -> tupl
             return ("OPEND_NEEDS_PHONE_VERIFY", "OpenD 需要手机验证码登录")
         if "not ready" in low:
             return ("OPEND_NOT_READY", "OpenD 未就绪")
+        if "trade not logged in" in low or "trd" in low:
+            return ("OPEND_TRD_NOT_LOGINED", "OpenD 交易未登录")
         if "quote not logged in" in low or "qot" in low:
             return ("OPEND_QOT_NOT_LOGINED", "OpenD 行情未登录")
 
@@ -96,6 +98,8 @@ def classify_watchdog_result(state: dict | None, error_text: str | None) -> tupl
 
     if not bool(st.get("qot_logined", True)):
         return ("OPEND_QOT_NOT_LOGINED", "OpenD 行情未登录")
+    if not bool(st.get("trd_logined", True)):
+        return ("OPEND_TRD_NOT_LOGINED", "OpenD 交易未登录")
 
     return ("OPEND_API_ERROR", "OpenD 接口异常")
 
@@ -270,7 +274,8 @@ def run_watchdog_check(
             h.state = st
             ready = st.get("program_status_type") in (None, "", "READY")
             qot = bool(st.get("qot_logined", True))
-            if ready and qot:
+            trd = bool(st.get("trd_logined", True))
+            if ready and qot and trd:
                 h.ok = True
                 h.error_code = None
                 h.message = "OpenD 健康"
@@ -279,6 +284,8 @@ def run_watchdog_check(
                     h.error = f"OpenD not READY: {st}"
                 elif not qot:
                     h.error = f"OpenD quote not logged in: {st}"
+                elif not trd:
+                    h.error = f"OpenD trade not logged in: {st}"
                 h.error_code, h.message = classify_watchdog_result(st, h.error)
         else:
             h.error_code, h.message = classify_watchdog_result(h.state, h.error)

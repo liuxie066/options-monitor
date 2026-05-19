@@ -14,7 +14,7 @@ class SellPutCashCapacity:
 
 
 @dataclass(frozen=True)
-class CoveredCallShareCapacity:
+class SellCallShareCapacity:
     accepted: bool
     reason: str
     shares_total: int
@@ -101,14 +101,14 @@ def compute_sell_put_cash_capacity(
     )
 
 
-def compute_covered_call_share_capacity(
+def compute_sell_call_share_capacity(
     *,
     shares_total: Any,
     shares_locked: Any = 0,
     multiplier: Any,
     shares_available_for_cover: Any = None,
-) -> CoveredCallShareCapacity:
-    """Compute account share capacity for covered-call candidates."""
+) -> SellCallShareCapacity:
+    """Compute account share capacity for sell-call candidates."""
 
     total = _to_nonnegative_int(shares_total)
     locked = _to_nonnegative_int(shares_locked)
@@ -121,7 +121,7 @@ def compute_covered_call_share_capacity(
     multiplier_v = _to_float(multiplier)
     multiplier_int = int(multiplier_v) if multiplier_v is not None else 0
     if multiplier_v is None or multiplier_int <= 0:
-        return CoveredCallShareCapacity(
+        return SellCallShareCapacity(
             accepted=False,
             reason="invalid_multiplier",
             shares_total=total,
@@ -133,7 +133,7 @@ def compute_covered_call_share_capacity(
 
     covered_contracts = max(0, available) // multiplier_int
     accepted = covered_contracts >= 1
-    return CoveredCallShareCapacity(
+    return SellCallShareCapacity(
         accepted=accepted,
         reason=("share_capacity_supported" if accepted else "share_capacity_insufficient"),
         shares_total=total,
