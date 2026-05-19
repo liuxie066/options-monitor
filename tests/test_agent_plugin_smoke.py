@@ -990,6 +990,10 @@ def test_runtime_status_summarizes_openclaw_runtime_files(tmp_path: Path) -> Non
         json.dumps({"ok": True, "mode_used": "checkpoint_reuse", "summary": {"matched": 1}}),
         encoding="utf-8",
     )
+    (tmp_path / "upgrade_status.json").write_text(
+        json.dumps({"status": "upgraded", "target_version": "1.2.99"}),
+        encoding="utf-8",
+    )
     (report_dir / "symbols_notification.txt").write_text("shared notification\n", encoding="utf-8")
     (accounts_root / "user1" / "state" / "last_run.json").write_text(json.dumps({"status": "account_ok"}), encoding="utf-8")
     (accounts_root / "user1" / "reports" / "symbols_notification.txt").write_text("account notification\n", encoding="utf-8")
@@ -1096,6 +1100,9 @@ def test_runtime_status_summarizes_openclaw_runtime_files(tmp_path: Path) -> Non
     assert out["data"]["projection_verify"]["json"]["ok"] is True
     assert out["data"]["summary"]["projection_verify_ok"] is True
     assert out["data"]["summary"]["projection_verify_mode"] == "checkpoint_reuse"
+    assert out["data"]["service_upgrade"]["json"]["status"] == "upgraded"
+    assert out["data"]["summary"]["service_upgrade_status"] == "upgraded"
+    assert out["data"]["summary"]["service_upgrade_target_version"] == "1.2.99"
     assert out["data"]["notification_diagnosis"]["status"] == "sent"
     assert out["data"]["notification_diagnosis"]["scheduler_should_run_scan"] is True
     assert out["data"]["notification_diagnosis"]["send_confirmed_count"] == 1

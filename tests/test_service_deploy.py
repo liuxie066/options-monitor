@@ -48,6 +48,36 @@ def test_render_systemd_bundle_uses_runtime_root_and_canonical_entrypoints(tmp_p
     assert "deploy_home" not in profile
 
 
+def test_render_systemd_bundle_can_include_auto_upgrade_timer(tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+
+    repo = tmp_path / "current"
+    runtime = tmp_path / "runtime"
+    repo.mkdir()
+
+    default_bundle = render_service_bundle(target="systemd", repo_root=repo, runtime_root=runtime, markets=["us"])
+    default_files = {item["relative_path"]: item for item in default_bundle["files"]}
+    assert "systemd/options-monitor-upgrade.service" not in default_files
+
+    bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        runtime_root=runtime,
+        markets=["us"],
+        include_auto_upgrade=True,
+    )
+
+    files = {item["relative_path"]: item for item in bundle["files"]}
+    service = files["systemd/options-monitor-upgrade.service"]["content"]
+    timer = files["systemd/options-monitor-upgrade.timer"]["content"]
+    profile = json.loads(files["service.profile.json"]["content"])
+
+    assert str(repo / "om") + " service upgrade" in service
+    assert "--auto --confirm" in service
+    assert "OnCalendar=*-*-* 06:10:00 Asia/Shanghai" in timer
+    assert profile["auto_upgrade"]["enabled"] is True
+
+
 def test_render_systemd_bundle_allows_deploy_identity_override(tmp_path: Path) -> None:
     from src.application.service_deploy import render_service_bundle
 
@@ -185,6 +215,35 @@ def test_render_launchd_bundle_uses_launch_agents_and_logs(tmp_path: Path) -> No
     assert {"name": "com.options-monitor.projection-verify"} in profile["services"]
 
 
+def test_render_launchd_bundle_can_include_auto_upgrade_timer(tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+
+    repo = tmp_path / "current"
+    runtime = tmp_path / "runtime"
+    repo.mkdir()
+
+    bundle = render_service_bundle(
+        target="launchd",
+        repo_root=repo,
+        runtime_root=runtime,
+        markets=["us"],
+        include_auto_upgrade=True,
+    )
+
+    files = {item["relative_path"]: item for item in bundle["files"]}
+    upgrade = files["launchd/com.options-monitor.upgrade.plist"]["content"]
+    profile = json.loads(files["service.profile.json"]["content"])
+
+    assert "<string>com.options-monitor.upgrade</string>" in upgrade
+    assert "service" in upgrade
+    assert "upgrade" in upgrade
+    assert "<key>Hour</key>" in upgrade
+    assert "<integer>6</integer>" in upgrade
+    assert "<key>Minute</key>" in upgrade
+    assert "<integer>10</integer>" in upgrade
+    assert profile["auto_upgrade"]["schedule_beijing"] == "06:10"
+
+
 def test_write_service_bundle_writes_relative_files(tmp_path: Path) -> None:
     from src.application.service_deploy import render_service_bundle, write_service_bundle
 
@@ -297,6 +356,163 @@ def test_service_status_from_profile_checks_provider_with_injected_runner() -> N
     assert calls == [["systemctl", "is-active", "options-monitor-trade-intake.service"]]
 
 
+def test_service_upgrade_dry_run_and_confirm_switches_current_symlink(tmp_path: Path) -> None:
+    from src.application.service_upgrade import service_upgrade
+
+    install = tmp_path / "opt" / "options-monitor"
+    releases = install / "releases"
+    v100 = releases / "1.0.0"
+    v100.mkdir(parents=True)
+    (v100 / "VERSION").write_text("1.0.0\n", encoding="utf-8")
+    current = install / "current"
+    current.symlink_to(v100, target_is_directory=True)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    (runtime / "service.profile.json").write_text(
+        json.dumps(
+            {
+                "service_provider": "systemd",
+                "services": [
+                    {"name": "options-monitor-tick-us.timer"},
+                    {"name": "options-monitor-trade-intake.service"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    calls: list[list[str]] = []
+
+    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        calls.append(list(command))
+        if command[:3] == ["git", "ls-remote", "--tags"]:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=(
+                    "a refs/tags/v1.0.0\n"
+                    "b refs/tags/v1.0.1\n"
+                ),
+                stderr="",
+            )
+        if command[:3] == ["git", "config", "--get"]:
+            return subprocess.CompletedProcess(command, 0, stdout="https://example.invalid/repo.git\n", stderr="")
+        if command[:2] == ["git", "clone"]:
+            target = Path(command[-1])
+            target.mkdir(parents=True)
+            (target / "VERSION").write_text("1.0.1\n", encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0, stdout="cloned\n", stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    dry = service_upgrade(
+        repo_root=current,
+        runtime_root=runtime,
+        releases_root=releases,
+        run_cmd=_run_cmd,
+    )
+    assert dry["status"] == "dry_run"
+    assert dry["changed"] is False
+    assert dry["repo_root_is_symlink"] is True
+    assert dry["warnings"] == []
+    assert current.resolve() == v100.resolve()
+
+    out = service_upgrade(
+        repo_root=current,
+        runtime_root=runtime,
+        releases_root=releases,
+        confirm=True,
+        run_cmd=_run_cmd,
+    )
+
+    assert out["status"] == "upgraded"
+    assert out["changed"] is True
+    assert current.resolve() == (releases / "1.0.1").resolve()
+    assert ["systemctl", "restart", "options-monitor-trade-intake.service"] in calls
+    status = json.loads((runtime / "upgrade_status.json").read_text(encoding="utf-8"))
+    assert status["target_version"] == "1.0.1"
+    assert status["status"] == "upgraded"
+
+
+def test_service_upgrade_blocks_major_by_default(tmp_path: Path) -> None:
+    from src.application.service_upgrade import service_upgrade
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    repo.mkdir()
+    runtime.mkdir()
+    (repo / "VERSION").write_text("1.0.0\n", encoding="utf-8")
+
+    out = service_upgrade(
+        repo_root=repo,
+        runtime_root=runtime,
+        target_version="2.0.0",
+        run_cmd=lambda command, **_kwargs: subprocess.CompletedProcess(command, 0, stdout="", stderr=""),
+    )
+
+    assert out["status"] == "blocked_major_upgrade"
+    assert out["changed"] is False
+
+
+def test_service_upgrade_dry_run_warns_when_repo_root_is_not_symlink(tmp_path: Path) -> None:
+    from src.application.service_upgrade import service_upgrade
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    repo.mkdir()
+    runtime.mkdir()
+    (repo / "VERSION").write_text("1.0.0\n", encoding="utf-8")
+
+    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        if command[:3] == ["git", "ls-remote", "--tags"]:
+            return subprocess.CompletedProcess(command, 0, stdout="b refs/tags/v1.0.1\n", stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    out = service_upgrade(
+        repo_root=repo,
+        runtime_root=runtime,
+        target_version="1.0.1",
+        run_cmd=_run_cmd,
+    )
+
+    assert out["status"] == "dry_run"
+    assert out["repo_root_is_symlink"] is False
+    assert out["warnings"] == ["confirmed upgrade requires repo_root to be a current symlink"]
+
+
+def test_service_rollback_switches_current_symlink(tmp_path: Path) -> None:
+    from src.application.service_upgrade import service_rollback, write_upgrade_status
+
+    install = tmp_path / "opt" / "options-monitor"
+    releases = install / "releases"
+    v100 = releases / "1.0.0"
+    v101 = releases / "1.0.1"
+    v100.mkdir(parents=True)
+    v101.mkdir()
+    (v100 / "VERSION").write_text("1.0.0\n", encoding="utf-8")
+    (v101 / "VERSION").write_text("1.0.1\n", encoding="utf-8")
+    current = install / "current"
+    current.symlink_to(v101, target_is_directory=True)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    write_upgrade_status(
+        runtime_root=runtime,
+        payload={"status": "upgraded", "current_version": "1.0.0", "target_version": "1.0.1"},
+    )
+
+    dry = service_rollback(repo_root=current, runtime_root=runtime, releases_root=releases)
+    assert dry["status"] == "dry_run"
+    assert current.resolve() == v101.resolve()
+
+    out = service_rollback(
+        repo_root=current,
+        runtime_root=runtime,
+        releases_root=releases,
+        confirm=True,
+        restart_services=False,
+    )
+    assert out["status"] == "rolled_back"
+    assert current.resolve() == v100.resolve()
+
+
 def test_runtime_status_loads_service_profile_paths(tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool
 
@@ -398,6 +614,39 @@ def test_cli_service_render_no_content_still_writes_files(capsys, tmp_path: Path
     payload = json.loads(capsys.readouterr().out)
     assert payload["data"]["files"][0].get("content") is None
     assert "ExecStart=" in (output_dir / "systemd" / "options-monitor-tick-us.service").read_text(encoding="utf-8")
+
+
+def test_cli_service_upgrade_delegates_to_application(monkeypatch, capsys, tmp_path: Path) -> None:
+    import src.interfaces.cli.main as cli_main
+
+    calls: list[dict[str, object]] = []
+
+    def _fake_upgrade(**kwargs):  # type: ignore[no-untyped-def]
+        calls.append(dict(kwargs))
+        return {"ok": True, "status": "dry_run", "changed": False}
+
+    monkeypatch.setattr(cli_main, "service_upgrade", _fake_upgrade)
+
+    rc = cli_main.main(
+        [
+            "service",
+            "upgrade",
+            "--repo-root",
+            str(tmp_path / "current"),
+            "--runtime-root",
+            str(tmp_path / "runtime"),
+            "--target-version",
+            "1.2.99",
+            "--auto",
+        ]
+    )
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert calls[0]["target_version"] == "1.2.99"
+    assert calls[0]["auto"] is True
+    assert calls[0]["confirm"] is False
 
 
 def test_cli_run_trade_intake_delegates_to_application(monkeypatch) -> None:

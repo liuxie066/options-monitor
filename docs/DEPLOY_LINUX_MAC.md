@@ -92,6 +92,21 @@ cd "$REPO"
   --output-dir /tmp/options-monitor-service
 ```
 
+如果要启用远端自动升级，建议 `$REPO` 使用 `/opt/options-monitor/current` 这样的 symlink 布局，并额外传：
+
+```bash
+./om service render \
+  --target systemd \
+  --repo-root /opt/options-monitor/current \
+  --runtime-root "$RUNTIME" \
+  --env-file "$ENV_FILE" \
+  --deploy-user "$DEPLOY_USER" \
+  --markets us hk \
+  --accounts lx sy \
+  --include-auto-upgrade \
+  --output-dir /tmp/options-monitor-service
+```
+
 传入 `--deploy-user "$DEPLOY_USER"` 后，渲染出的 systemd unit 会包含：
 
 ```ini
@@ -141,8 +156,15 @@ sudo systemctl enable --now options-monitor-runtime-status.timer
 sudo systemctl enable --now options-monitor-trade-intake.service
 ```
 
+如果 render 时传了 `--include-auto-upgrade`，再启用升级 timer：
+
+```bash
+sudo systemctl enable --now options-monitor-upgrade.timer
+```
+
 `options-monitor-projection-verify.timer` 每天北京时间 06:00 运行一次 `./om option-positions verify-projection --mode auto`，用于校验 `trade_events -> position_lots` 并复用 checkpoint。
 `options-monitor-auto-close-*.timer` 每天北京时间 05:30 运行一次 `./om option-positions auto-close-expired --apply --quiet`，先处理过期自动平仓，再由 06:00 的 projection verify 做内部对账。
+`options-monitor-upgrade.timer` 只有在 render 时传了 `--include-auto-upgrade` 才会生成；它每天北京时间 06:10 检查最新 release tag，发现可升级版本后切换 `/opt/options-monitor/current` 并写入 `upgrade_status.json`。
 
 检查：
 

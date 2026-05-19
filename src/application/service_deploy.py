@@ -23,6 +23,8 @@ AUTO_CLOSE_SYSTEMD_CALENDAR = "*-*-* 05:30:00 Asia/Shanghai"
 AUTO_CLOSE_LAUNCHD_CALENDAR = {"Hour": 5, "Minute": 30}
 PROJECTION_VERIFY_SYSTEMD_CALENDAR = "*-*-* 06:00:00 Asia/Shanghai"
 PROJECTION_VERIFY_LAUNCHD_CALENDAR = {"Hour": 6, "Minute": 0}
+AUTO_UPGRADE_SYSTEMD_CALENDAR = "*-*-* 06:10:00 Asia/Shanghai"
+AUTO_UPGRADE_LAUNCHD_CALENDAR = {"Hour": 6, "Minute": 10}
 
 
 @dataclass(frozen=True)
@@ -242,6 +244,7 @@ def build_service_profile(
     env_file: Path | None = None,
     deploy_user: str | None = None,
     deploy_home: Path | None = None,
+    auto_upgrade_enabled: bool = False,
 ) -> dict[str, Any]:
     profile: dict[str, Any] = {
         "schema_version": 1,
@@ -266,6 +269,11 @@ def build_service_profile(
         profile["deploy_user"] = str(deploy_user)
     if deploy_home is not None:
         profile["deploy_home"] = str(deploy_home)
+    if auto_upgrade_enabled:
+        profile["auto_upgrade"] = {
+            "enabled": True,
+            "schedule_beijing": "06:10",
+        }
     return profile
 
 
@@ -281,6 +289,7 @@ def render_service_bundle(
     deploy_user: str | None = None,
     deploy_home: str | Path | None = None,
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
+    include_auto_upgrade: bool = False,
     include_content: bool = True,
 ) -> dict[str, Any]:
     target_key = normalize_target(target)
@@ -502,6 +511,46 @@ def render_service_bundle(
             kind="systemd_timer",
             service_name=status_timer,
         )
+        if include_auto_upgrade:
+            upgrade_service = "options-monitor-upgrade.service"
+            upgrade_timer = "options-monitor-upgrade.timer"
+            upgrade_args = [
+                om,
+                "service",
+                "upgrade",
+                "--repo-root",
+                str(repo),
+                "--runtime-root",
+                str(runtime),
+                "--auto",
+                "--confirm",
+            ]
+            add(
+                f"systemd/{upgrade_service}",
+                _systemd_unit(
+                    description="Options Monitor release upgrade",
+                    repo_root=repo,
+                    runtime_root=runtime,
+                    env_file=env_file_path,
+                    deploy_user=systemd_user,
+                    deploy_home=systemd_home,
+                    exec_args=upgrade_args,
+                ),
+                install_path=f"/etc/systemd/system/{upgrade_service}",
+                kind="systemd_service",
+                service_name=upgrade_service,
+            )
+            add(
+                f"systemd/{upgrade_timer}",
+                _systemd_timer(
+                    description="Options Monitor release upgrade timer",
+                    unit_name=upgrade_service,
+                    calendar=AUTO_UPGRADE_SYSTEMD_CALENDAR,
+                ),
+                install_path=f"/etc/systemd/system/{upgrade_timer}",
+                kind="systemd_timer",
+                service_name=upgrade_timer,
+            )
     else:
         for market in market_values:
             label = f"com.options-monitor.tick-{market}"
@@ -642,6 +691,33 @@ def render_service_bundle(
             kind="launchd_plist",
             service_name=status_label,
         )
+        if include_auto_upgrade:
+            upgrade_label = "com.options-monitor.upgrade"
+            upgrade_args = [
+                om,
+                "service",
+                "upgrade",
+                "--repo-root",
+                str(repo),
+                "--runtime-root",
+                str(runtime),
+                "--auto",
+                "--confirm",
+            ]
+            add(
+                f"launchd/{upgrade_label}.plist",
+                _launchd_plist(
+                    label=upgrade_label,
+                    repo_root=repo,
+                    runtime_root=runtime,
+                    program_args=upgrade_args,
+                    log_root=log_root,
+                    start_calendar_interval=AUTO_UPGRADE_LAUNCHD_CALENDAR,
+                ),
+                install_path=f"~/Library/LaunchAgents/{upgrade_label}.plist",
+                kind="launchd_plist",
+                service_name=upgrade_label,
+            )
 
     profile = build_service_profile(
         target=target_key,
@@ -654,6 +730,7 @@ def render_service_bundle(
         env_file=env_file_path,
         deploy_user=systemd_user,
         deploy_home=systemd_home,
+        auto_upgrade_enabled=bool(include_auto_upgrade),
     )
     profile_content = json.dumps(profile, ensure_ascii=False, indent=2) + "\n"
     add(
