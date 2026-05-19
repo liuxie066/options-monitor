@@ -62,6 +62,26 @@ def print_monthly_income(report: dict[str, Any], *, include_rows: bool = False) 
             print(f"- 权利金毛收益率：{_format_rate(row.get('premium_return_rate'))}")
             print(f"- 口径：{row.get('return_basis') or 'current_cash_secured'}")
 
+    diagnostics = report.get("diagnostics") or []
+    if diagnostics:
+        print("")
+        print("## Diagnostics")
+        for row in diagnostics[:6]:
+            if not isinstance(row, dict):
+                continue
+            missing = row.get("missing_fields") if isinstance(row.get("missing_fields"), list) else []
+            print(
+                "- "
+                f"{row.get('account') or '-'} {row.get('month') or '-'} "
+                f"status={row.get('status') or '-'} "
+                f"events={row.get('matched_trade_events_count') or 0} "
+                f"lots={row.get('matched_lots_count') or 0} "
+                f"closed={row.get('closed_lots_count') or 0} "
+                f"premium={row.get('premium_rows_count') or 0} "
+                f"cash_secured={'yes' if row.get('cash_secured_available') else 'no'} "
+                f"missing={','.join(str(item) for item in missing) if missing else '-'}"
+            )
+
     print("")
     print(
         "| month | account | currency | net_cashflow_gross | realized_pnl_gross | "

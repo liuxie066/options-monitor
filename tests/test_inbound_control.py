@@ -132,6 +132,97 @@ def test_inbound_monthly_income_renderer_prefers_return_summary() -> None:
     assert "按 19 天折年化：130.74%" in text
 
 
+def test_inbound_monthly_income_renderer_explains_incomplete_summary() -> None:
+    intent = parse_inbound_text("收益 sy 2026-05")
+    text = render_inbound_text(
+        intent=intent,
+        tool_result=build_response(
+            tool_name="monthly_income_report",
+            ok=True,
+            data={
+                "summary": [{"month": "2026-05", "account": "sy", "currency": "HKD"}],
+                "return_summary": [
+                    {
+                        "month": "2026-05",
+                        "account": "sy",
+                        "net_return_rate": None,
+                        "net_income_cny": None,
+                        "cash_secured_cny": None,
+                        "annualized_basis_days": 20,
+                        "annualized_net_return_rate": None,
+                        "premium_return_rate": None,
+                    }
+                ],
+                "diagnostics": [
+                    {
+                        "account": "sy",
+                        "month": "2026-05",
+                        "status": "incomplete",
+                        "matched_trade_events_count": 0,
+                        "matched_lots_count": 13,
+                        "closed_lots_count": 0,
+                        "premium_rows_count": 0,
+                        "cash_secured_available": False,
+                        "missing_fields": ["cash_secured", "closed_lots", "currency_conversion", "premium"],
+                    }
+                ],
+            },
+        ),
+    )
+
+    assert "sy 2026-05 暂无可计算收益。" in text
+    assert "账本缺少已平仓/close 数据" in text
+    assert "匹配事件：0，持仓 lot：13，已平仓 lot：0，权利金行：0。" in text
+    assert "缺失项：cash_secured、closed_lots、currency_conversion、premium" in text
+
+
+def test_inbound_audit_keeps_monthly_income_diagnostics(tmp_path: Path) -> None:
+    audit_db = tmp_path / "inbound.sqlite3"
+
+    def _execute_tool(tool_name: str, payload: dict) -> dict:
+        return build_response(
+            tool_name=tool_name,
+            ok=True,
+            data={
+                "summary": [],
+                "return_summary": [],
+                "diagnostics": [
+                    {
+                        "account": "sy",
+                        "month": "2026-05",
+                        "status": "empty",
+                        "matched_trade_events_count": 0,
+                        "matched_lots_count": 13,
+                        "closed_lots_count": 0,
+                        "premium_rows_count": 0,
+                        "missing_fields": ["income_rows", "closed_lots", "premium"],
+                    }
+                ],
+            },
+        )
+
+    out = handle_inbound_request(
+        InboundRequest(
+            text="收益 sy 2026-05",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_diag",
+            audit_db=str(audit_db),
+        ),
+        execute_tool_fn=_execute_tool,
+        allowed_senders="feishu:ou_1",
+    )
+
+    assert out["data"]["response_text"].startswith("sy 2026-05 暂无可计算收益")
+    with sqlite3.connect(audit_db) as conn:
+        response_json = conn.execute("SELECT response_json FROM inbound_command_audit").fetchone()[0]
+
+    stored = json.loads(response_json)
+    diagnostics = stored["data"]["tool_result"]["data"]["diagnostics"]
+    assert diagnostics[0]["status"] == "empty"
+    assert diagnostics[0]["matched_lots_count"] == 13
+
+
 def test_inbound_duplicate_message_from_other_sender_is_denied_and_marked(tmp_path: Path) -> None:
     audit_db = tmp_path / "inbound.sqlite3"
 

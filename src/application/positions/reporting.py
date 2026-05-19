@@ -484,6 +484,198 @@ def _current_cash_secured_by_account_from_event_lots(
     return out
 
 
+def _matching_record_fields(
+    records: list[dict[str, Any]],
+    *,
+    account_norm: str | None,
+    broker_norm: str | None,
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for rec in records:
+        fields = rec.get("fields") or rec
+        if not isinstance(fields, dict):
+            continue
+        if account_norm and normalize_account(fields.get("account")) != account_norm:
+            continue
+        if broker_norm and normalize_broker(fields.get("broker")) != broker_norm:
+            continue
+        out.append(fields)
+    return out
+
+
+def _month_range_payload(month: str | None) -> dict[str, Any]:
+    if not month:
+        return {"month": None, "start": None, "end": None}
+    try:
+        year_s, month_s = str(month).split("-", 1)
+        year = int(year_s)
+        month_num = int(month_s)
+        _, days = calendar.monthrange(year, month_num)
+    except Exception:
+        return {"month": month, "start": None, "end": None}
+    return {"month": month, "start": f"{year:04d}-{month_num:02d}-01", "end": f"{year:04d}-{month_num:02d}-{days:02d}"}
+
+
+def _return_row_is_calculable(row: dict[str, Any] | None) -> bool:
+    if not isinstance(row, dict):
+        return False
+    if safe_float(row.get("cash_secured_cny")) is None or float(row.get("cash_secured_cny") or 0.0) <= 0:
+        return False
+    return any(
+        safe_float(row.get(key)) is not None
+        for key in (
+            "net_return_rate",
+            "premium_return_rate",
+            "realized_return_rate",
+            "net_income_cny",
+            "premium_income_cny",
+            "realized_pnl_cny",
+        )
+    )
+
+
+def _missing_fields_from_warnings(warnings: list[str]) -> set[str]:
+    missing: set[str] = set()
+    for warning in warnings:
+        text = str(warning or "").lower()
+        if "missing premium" in text:
+            missing.add("premium")
+        if "missing closed_at" in text or "missing trade_time_ms" in text:
+            missing.add("month_range")
+        if "missing close_price" in text:
+            missing.add("close_price")
+        if "missing contracts" in text or "contracts_closed <= 0" in text or "contracts <= 0" in text:
+            missing.add("contracts")
+        if "missing multiplier" in text:
+            missing.add("multiplier")
+        if "missing cny exchange rate" in text or "exchange rate" in text:
+            missing.add("currency_conversion")
+        if "no matching open lot" in text or "close contracts exceed" in text:
+            missing.add("closed_lots")
+    return missing
+
+
+def _build_monthly_income_diagnostics(
+    *,
+    account_norm: str | None,
+    broker_norm: str | None,
+    month: str | None,
+    records: list[dict[str, Any]],
+    trade_events: list[dict[str, Any]] | None,
+    summary_rows: list[dict[str, Any]],
+    return_summary: list[dict[str, Any]],
+    realized_rows: list[dict[str, Any]],
+    premium_rows: list[dict[str, Any]],
+    cash_secured_by_account: dict[str, dict[str, float]],
+    warnings: list[str],
+    calculation_method: str,
+) -> list[dict[str, Any]]:
+    matching_fields = _matching_record_fields(records, account_norm=account_norm, broker_norm=broker_norm)
+    accounts: set[str] = {
+        str(row.get("account") or "-")
+        for row in [*summary_rows, *return_summary]
+        if isinstance(row, dict) and str(row.get("account") or "").strip()
+    }
+    if account_norm:
+        accounts.add(account_norm)
+    if not accounts:
+        accounts.update(
+            normalize_account(fields.get("account")) or "-"
+            for fields in matching_fields
+            if normalize_account(fields.get("account"))
+        )
+    if not accounts:
+        accounts.add("-")
+
+    months: set[str | None] = {
+        str(row.get("month") or "")
+        for row in [*summary_rows, *return_summary]
+        if isinstance(row, dict) and str(row.get("month") or "").strip()
+    }
+    if month:
+        months.add(month)
+    if not months:
+        months.add(None)
+
+    return_by_key = {
+        (str(row.get("month") or ""), str(row.get("account") or "-")): row
+        for row in return_summary
+        if isinstance(row, dict)
+    }
+    summary_keys = {
+        (str(row.get("month") or ""), str(row.get("account") or "-"))
+        for row in summary_rows
+        if isinstance(row, dict)
+    }
+    active_events = _active_trade_events(trade_events or []) if trade_events is not None else []
+
+    diagnostics: list[dict[str, Any]] = []
+    for account in sorted(accounts):
+        cash_by_ccy = dict(sorted((cash_secured_by_account.get(account) or {}).items()))
+        cash_secured_available = any(float(value or 0.0) > 0 for value in cash_by_ccy.values())
+        matched_lots_count = sum(1 for fields in matching_fields if (normalize_account(fields.get("account")) or "-") == account)
+        for diag_month in sorted(months, key=lambda value: str(value or "")):
+            month_key = str(diag_month or "")
+            return_row = return_by_key.get((month_key, account))
+            matched_events_count = 0
+            if trade_events is not None:
+                for event in active_events:
+                    if not _passes_report_filter(event, account, broker_norm):
+                        continue
+                    if str(event.get("position_effect") or "").strip().lower() not in {"open", "close"}:
+                        continue
+                    event_month = _event_month(event)
+                    if diag_month and event_month != diag_month:
+                        continue
+                    matched_events_count += 1
+            closed_lots_count = sum(
+                1
+                for row in realized_rows
+                if str(row.get("account") or "-") == account and (not diag_month or row.get("month") == diag_month)
+            )
+            premium_rows_count = sum(
+                1
+                for row in premium_rows
+                if str(row.get("account") or "-") == account and (not diag_month or row.get("month") == diag_month)
+            )
+            missing_fields = _missing_fields_from_warnings(warnings)
+            if (month_key, account) not in summary_keys:
+                missing_fields.add("income_rows")
+            if trade_events is not None and matched_events_count == 0:
+                missing_fields.add("trade_events")
+            if closed_lots_count == 0:
+                missing_fields.add("closed_lots")
+            if premium_rows_count == 0:
+                missing_fields.add("premium")
+            if not cash_secured_available:
+                missing_fields.add("cash_secured")
+            if isinstance(return_row, dict):
+                if return_row.get("cash_secured_cny") is None:
+                    missing_fields.add("cash_secured")
+                if any(return_row.get(key) is None for key in ("net_income_cny", "premium_income_cny", "realized_pnl_cny")):
+                    missing_fields.add("currency_conversion")
+
+            status = "ok" if _return_row_is_calculable(return_row) else ("empty" if (month_key, account) not in summary_keys else "incomplete")
+            diagnostics.append(
+                {
+                    "account": account,
+                    "month": diag_month,
+                    "month_range": _month_range_payload(diag_month),
+                    "status": status,
+                    "calculation_method": calculation_method,
+                    "matched_trade_events_count": matched_events_count,
+                    "matched_lots_count": matched_lots_count,
+                    "closed_lots_count": closed_lots_count,
+                    "premium_rows_count": premium_rows_count,
+                    "cash_secured_available": cash_secured_available,
+                    "cash_secured_by_ccy": cash_by_ccy,
+                    "missing_fields": sorted(missing_fields),
+                    "warnings": [str(item) for item in warnings if str(item).strip()],
+                }
+            )
+    return diagnostics
+
+
 def _cny_total_or_none(
     by_ccy: dict[str, float],
     *,
@@ -1352,14 +1544,29 @@ def _build_monthly_income_report_from_events(
             account_norm=account_norm,
             broker_norm=broker_norm,
         )
+    return_summary = _build_return_summary(
+        summary_rows,
+        cash_secured_by_account=cash_secured_by_account,
+        converter=converter,
+        warnings=warnings,
+        now_fn=now_fn,
+    )
     return {
         "summary": summary_rows,
-        "return_summary": _build_return_summary(
-            summary_rows,
+        "return_summary": return_summary,
+        "diagnostics": _build_monthly_income_diagnostics(
+            account_norm=account_norm,
+            broker_norm=broker_norm,
+            month=month,
+            records=records,
+            trade_events=trade_events,
+            summary_rows=summary_rows,
+            return_summary=return_summary,
+            realized_rows=filtered_realized_rows,
+            premium_rows=filtered_premium_rows,
             cash_secured_by_account=cash_secured_by_account,
-            converter=converter,
             warnings=warnings,
-            now_fn=now_fn,
+            calculation_method="trade_events",
         ),
         "rows": sorted(filtered_realized_rows, key=_event_detail_sort_key),
         "premium_rows": sorted(filtered_premium_rows, key=_event_detail_sort_key),
@@ -1539,15 +1746,30 @@ def build_monthly_income_report(
         account_norm=account_norm,
         broker_norm=broker_norm,
     )
+    return_summary = _build_return_summary(
+        summary_rows,
+        cash_secured_by_account=cash_secured_by_account,
+        converter=converter,
+        warnings=warnings,
+        now_fn=now_fn,
+    )
 
     return {
         "summary": summary_rows,
-        "return_summary": _build_return_summary(
-            summary_rows,
+        "return_summary": return_summary,
+        "diagnostics": _build_monthly_income_diagnostics(
+            account_norm=account_norm,
+            broker_norm=broker_norm,
+            month=month,
+            records=records,
+            trade_events=None,
+            summary_rows=summary_rows,
+            return_summary=return_summary,
+            realized_rows=[row.as_dict() for row in rows],
+            premium_rows=[row.as_dict() for row in premium_rows],
             cash_secured_by_account=cash_secured_by_account,
-            converter=converter,
             warnings=warnings,
-            now_fn=now_fn,
+            calculation_method="position_lots_legacy",
         ),
         "rows": [
             r.as_dict()

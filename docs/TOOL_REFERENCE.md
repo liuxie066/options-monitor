@@ -355,6 +355,9 @@ OM_AGENT_ENABLE_WRITE_TOOLS=true ./om-agent run --tool version_update --input-js
   `annualized_*_return_rate` 和 `annualized_basis_days`。
   `return_basis=current_cash_secured` 表示这不是账户总资产收益率。
   如果缺少汇率，相关 CNY 和收益率字段为 `null`，并在 `warnings` 中说明。
+- `diagnostics`：按 `month + account` 输出收益统计诊断，包括匹配到的
+  `trade_events`、position lots、已平仓行、premium 行、现金担保可用性和
+  `missing_fields`。入站 `收益` 命令会用它解释“暂无可计算收益”或数据不完整的原因。
 
 示例：
 
