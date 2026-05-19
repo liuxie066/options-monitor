@@ -295,6 +295,15 @@ def build_service_profile(
         profile["deploy_user"] = str(deploy_user)
     if deploy_home is not None:
         profile["deploy_home"] = str(deploy_home)
+    if target == "systemd" and deploy_user and str(deploy_user).strip() != "root":
+        profile["restart"] = {
+            "requires_sudo": True,
+            "command_prefix": ["sudo", "-n", "systemctl"],
+            "sudoers": [
+                f"{deploy_user} ALL=(root) NOPASSWD: /bin/systemctl restart options-monitor-trade-intake.service",
+                f"{deploy_user} ALL=(root) NOPASSWD: /usr/bin/systemctl restart options-monitor-trade-intake.service",
+            ],
+        }
     if auto_upgrade_enabled:
         profile["auto_upgrade"] = {
             "enabled": True,

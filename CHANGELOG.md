@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.76 - 2026-05-19
+
+### Fixed
+- Restart trade-intake during systemd service upgrades through profile-driven `sudo -n systemctl` when the upgrade unit runs as a non-root deploy user, and record restart remediation on permission failures.
+
 ## 1.2.75 - 2026-05-19
 
 ### Fixed

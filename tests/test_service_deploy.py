@@ -165,6 +165,9 @@ def test_render_systemd_bundle_allows_deploy_identity_override(tmp_path: Path) -
     assert 'Environment="HOME=/srv/options-home"' in tick
     assert profile["deploy_user"] == "ops"
     assert profile["deploy_home"] == "/srv/options-home"
+    assert profile["restart"]["requires_sudo"] is True
+    assert profile["restart"]["command_prefix"] == ["sudo", "-n", "systemctl"]
+    assert "ops ALL=(root) NOPASSWD: /bin/systemctl restart options-monitor-trade-intake.service" in profile["restart"]["sudoers"]
 
 
 def test_render_systemd_bundle_quotes_paths_with_spaces(tmp_path: Path) -> None:
@@ -522,6 +525,73 @@ def test_service_upgrade_dry_run_and_confirm_switches_current_symlink(tmp_path: 
     status = json.loads((runtime / "upgrade_status.json").read_text(encoding="utf-8"))
     assert status["target_version"] == "1.0.1"
     assert status["status"] == "upgraded"
+
+
+def test_service_upgrade_restart_uses_sudo_prefix_from_deploy_profile(tmp_path: Path) -> None:
+    from src.application.service_upgrade import _restart_services_from_profile
+
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    (runtime / "service.profile.json").write_text(
+        json.dumps(
+            {
+                "service_provider": "systemd",
+                "deploy_user": "liuxie",
+                "restart": {
+                    "requires_sudo": True,
+                    "command_prefix": ["sudo", "-n", "systemctl"],
+                },
+                "services": [{"name": "options-monitor-trade-intake.service"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    calls: list[list[str]] = []
+
+    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        calls.append(list(command))
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    restarted = _restart_services_from_profile(runtime_root=runtime, run_cmd=_run_cmd, operations=[])
+
+    assert restarted == ["options-monitor-trade-intake.service"]
+    assert calls == [["sudo", "-n", "systemctl", "restart", "options-monitor-trade-intake.service"]]
+
+
+def test_service_upgrade_restart_denied_includes_remediation(tmp_path: Path) -> None:
+    from src.application.service_upgrade import ServiceRestartError, _restart_services_from_profile
+
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    (runtime / "service.profile.json").write_text(
+        json.dumps(
+            {
+                "service_provider": "systemd",
+                "deploy_user": "liuxie",
+                "restart": {
+                    "requires_sudo": True,
+                    "command_prefix": ["sudo", "-n", "systemctl"],
+                },
+                "services": [{"name": "options-monitor-trade-intake.service"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    operations: list[dict] = []
+
+    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr="Failed to restart: Access denied\n")
+
+    try:
+        _restart_services_from_profile(runtime_root=runtime, run_cmd=_run_cmd, operations=operations)
+    except ServiceRestartError as exc:
+        remediation = exc.remediation
+    else:  # pragma: no cover - defensive assertion branch
+        raise AssertionError("expected ServiceRestartError")
+
+    assert operations[-1]["returncode"] == 1
+    assert "manual_restart: sudo systemctl restart options-monitor-trade-intake.service" in remediation
+    assert "liuxie ALL=(root) NOPASSWD: /bin/systemctl restart options-monitor-trade-intake.service" in remediation
 
 
 def test_service_upgrade_blocks_major_by_default(tmp_path: Path) -> None:
