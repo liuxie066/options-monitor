@@ -11,6 +11,19 @@ from src.application.ledger.api import (
 )
 
 
+def _format_rate(value: Any) -> str:
+    if value is None:
+        return "-"
+    try:
+        return f"{float(value) * 100:.2f}%"
+    except Exception:
+        return "-"
+
+
+def _format_cny(value: Any) -> str:
+    return format_position_money(value, "CNY")
+
+
 def print_monthly_income(report: dict[str, Any], *, include_rows: bool = False) -> None:
     print("# Position Lots Monthly Income")
     print("")
@@ -29,6 +42,25 @@ def print_monthly_income(report: dict[str, Any], *, include_rows: bool = False) 
     if parts:
         print("")
         print("filters: " + " | ".join(parts))
+
+    return_summary = report.get("return_summary") or []
+    if return_summary:
+        print("")
+        print("## Return Summary")
+        for row in return_summary:
+            if not isinstance(row, dict):
+                continue
+            print("")
+            print(f"### {row.get('account') or '-'} {row.get('month') or '-'} 收益摘要")
+            print(f"- 净收益率：{_format_rate(row.get('net_return_rate'))}")
+            print(f"- 净收入：{_format_cny(row.get('net_income_cny'))}")
+            print(f"- 现金担保：{_format_cny(row.get('cash_secured_cny'))}")
+            print(
+                f"- 按 {row.get('annualized_basis_days') or 0} 天折年化："
+                f"{_format_rate(row.get('annualized_net_return_rate'))}"
+            )
+            print(f"- 权利金毛收益率：{_format_rate(row.get('premium_return_rate'))}")
+            print(f"- 口径：{row.get('return_basis') or 'current_cash_secured'}")
 
     print("")
     print(

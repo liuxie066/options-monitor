@@ -360,6 +360,7 @@ def monthly_income_report_tool(
     premium_rows = report.get("premium_rows") if isinstance(report.get("premium_rows"), list) else []
     data: dict[str, Any] = {
         "summary": report.get("summary") if isinstance(report.get("summary"), list) else [],
+        "return_summary": report.get("return_summary") if isinstance(report.get("return_summary"), list) else [],
         "filters": dict(report.get("filters") or {}),
         "calculation_method": str(report.get("calculation_method") or ""),
         "row_count": len(rows),
