@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 1.2.67 - 2026-05-19
+
+### Added
+- Added Linux service preflight checks for env-file shape, runtime directory permissions, output symlink state, and generated runtime config metadata.
+- Added `./om service repair-output` to migrate a real runtime `output` directory into `output_accounts/<default-account>` and replace it with the required symlink.
+- Added OpenD Telnet readiness reporting to healthcheck and Futu doctor outputs.
+
+### Changed
+- `./om service render` now always writes `OM_RUNTIME_ROOT` into systemd units and supports optional deploy identity via `--deploy-user` / `--deploy-home` or `OM_DEPLOY_USER` / `DEPLOY_USER`.
+- Runtime config JSON parse errors now include precise file, line, and column diagnostics.
+- Standardized user-facing call-side strategy naming on Sell Call to match Sell Put terminology.
+
 ## 1.2.66 - 2026-05-19
 
 ### Changed
@@ -612,7 +624,7 @@
 ## 1.2.11 - 2026-05-11
 
 ### Changed
-- Restored Covered Call/Sell Call assigned-return hard filtering with `min_if_exercised_total_return`, using account `avg_cost` as the cost basis.
+- Restored Sell Call assigned-return hard filtering with `min_if_exercised_total_return`, using account `avg_cost` as the cost basis.
 - Documented the default `0.0` assigned-return floor in system config and strategy docs.
 
 ## 1.2.10 - 2026-05-11
@@ -634,10 +646,10 @@
 ## 1.2.7 - 2026-05-11
 
 ### Added
-- Added shared risk-capacity helpers for Sell Put cash headroom and Covered Call share coverage decisions.
+- Added shared risk-capacity helpers for Sell Put cash headroom and Sell Call share coverage decisions.
 
 ### Changed
-- Hardened Sell Put and Covered Call gating so missing multiplier, currency, cash-secured basis, or cash requirement data fails closed instead of using guessed defaults.
+- Hardened Sell Put and Sell Call gating so missing multiplier, currency, cash-secured basis, or cash requirement data fails closed instead of using guessed defaults.
 - Propagated cash-secured unavailable diagnostics through candidate filtering, cash-headroom queries, and cash footers so unknown cash usage is visible instead of silently reported as available.
 
 ### Fixed
@@ -778,7 +790,7 @@
 ## 1.0.10 - 2026-05-05
 
 ### Changed
-- Calculated covered-call net premium annualized return against current spot opportunity cost while keeping exercised total return on the holding cost basis.
+- Calculated sell-call net premium annualized return against current spot opportunity cost while keeping exercised total return on the holding cost basis.
 - Promoted monthly option income statistics to the agent-facing `monthly_income_report` tool.
 - Added agent-facing read tools for version checks, config validation, scheduler decisions, and option-position ledger diagnostics.
 
@@ -906,7 +918,7 @@
 ## 0.3.7 - 2026-04-30
 
 ### Changed
-- Redesigned required-data fetch planning so `sell_put` and `sell_call` derive independent near/far strike bounds before merging compatible OpenD requests, ensuring covered-call target strikes are fetched instead of being filtered only at scan time
+- Redesigned required-data fetch planning so `sell_put` and `sell_call` derive independent near/far strike bounds before merging compatible OpenD requests, ensuring sell-call target strikes are fetched instead of being filtered only at scan time
 - Removed legacy `target_otm_pct_*` planning semantics, standardized fetch/debug terminology on side-specific near/far bounds, and kept fetch-plan diagnostics backward compatible by emitting both `coverage` and `bounds_coverage`
 
 ## 0.3.6 - 2026-04-29

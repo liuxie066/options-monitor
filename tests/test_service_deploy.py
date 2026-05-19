@@ -26,6 +26,8 @@ def test_render_systemd_bundle_uses_runtime_root_and_canonical_entrypoints(tmp_p
     profile = json.loads(files["service.profile.json"]["content"])
 
     assert 'Environment="OM_RUNTIME_ROOT=' + str(runtime) + '"' in tick
+    assert "User=" not in tick
+    assert 'Environment="HOME=' not in tick
     assert str(repo / "om") + " run tick-cron --market us" in tick
     assert "--lock-path " + str(runtime / "locks" / "tick-us.lock") in tick
     assert str(repo / "om") + " run trade-intake" in intake
@@ -34,6 +36,34 @@ def test_render_systemd_bundle_uses_runtime_root_and_canonical_entrypoints(tmp_p
     assert profile["runtime_root"] == str(runtime)
     assert {"name": "options-monitor-tick-us.service"} in profile["services"]
     assert {"name": "options-monitor-tick-us.timer"} in profile["services"]
+    assert "deploy_user" not in profile
+    assert "deploy_home" not in profile
+
+
+def test_render_systemd_bundle_allows_deploy_identity_override(tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        runtime_root=tmp_path / "runtime",
+        accounts=["lx"],
+        markets=["us"],
+        deploy_user="ops",
+        deploy_home="/srv/options-home",
+    )
+
+    files = {item["relative_path"]: item for item in bundle["files"]}
+    tick = files["systemd/options-monitor-tick-us.service"]["content"]
+    profile = json.loads(files["service.profile.json"]["content"])
+
+    assert "User=ops" in tick
+    assert 'Environment="HOME=/srv/options-home"' in tick
+    assert profile["deploy_user"] == "ops"
+    assert profile["deploy_home"] == "/srv/options-home"
 
 
 def test_render_systemd_bundle_quotes_paths_with_spaces(tmp_path: Path) -> None:
@@ -147,6 +177,78 @@ def test_write_service_bundle_writes_relative_files(tmp_path: Path) -> None:
 
     assert str(tmp_path / "rendered" / "service.profile.json") in written
     assert (tmp_path / "rendered" / "systemd" / "options-monitor-tick-us.service").exists()
+
+
+def test_service_preflight_reports_runtime_output_dir_and_config_metadata(tmp_path: Path) -> None:
+    from src.application.service_deploy import service_preflight
+
+    runtime = tmp_path / "runtime"
+    (runtime / "locks").mkdir(parents=True)
+    (runtime / "output_accounts").mkdir()
+    (runtime / "output_shared").mkdir()
+    (runtime / "output").mkdir()
+    cfg = tmp_path / "config.us.json"
+    cfg.write_text('{"accounts":["lx"]}', encoding="utf-8")
+
+    out = service_preflight(
+        runtime_root=runtime,
+        accounts=["lx"],
+        config_paths={"us": cfg},
+    )
+    checks = {item["name"]: item for item in out["checks"]}
+
+    assert out["summary"]["ok"] is False
+    assert checks["output_symlink"]["status"] == "error"
+    assert "repair-output" in checks["output_symlink"]["value"]["repair"]
+    assert checks["runtime_config_us"]["status"] == "error"
+    assert "generation metadata" in checks["runtime_config_us"]["message"]
+
+
+def test_service_preflight_reports_json_line_and_column(tmp_path: Path) -> None:
+    from src.application.service_deploy import service_preflight
+
+    runtime = tmp_path / "runtime"
+    (runtime / "locks").mkdir(parents=True)
+    (runtime / "output_accounts").mkdir()
+    (runtime / "output_shared").mkdir()
+    (runtime / "output").symlink_to(runtime / "output_accounts" / "lx", target_is_directory=True)
+    cfg = tmp_path / "config.us.json"
+    cfg.write_text('{"accounts":["lx",],\n}', encoding="utf-8")
+
+    out = service_preflight(runtime_root=runtime, accounts=["lx"], config_paths={"us": cfg})
+    check = next(item for item in out["checks"] if item["name"] == "runtime_config_us")
+
+    assert check["status"] == "error"
+    assert check["value"]["line"] == 1
+    assert check["value"]["column"] > 0
+
+
+def test_repair_output_symlink_backs_up_and_migrates_real_output(tmp_path: Path) -> None:
+    from datetime import datetime, timezone
+
+    from src.application.service_deploy import repair_output_symlink
+
+    runtime = tmp_path / "runtime"
+    output = runtime / "output"
+    (output / "reports").mkdir(parents=True)
+    (output / "reports" / "symbols_notification.txt").write_text("hello", encoding="utf-8")
+
+    dry = repair_output_symlink(runtime_root=runtime, default_account="lx")
+    assert dry["changed"] is False
+    assert output.is_dir()
+
+    out = repair_output_symlink(
+        runtime_root=runtime,
+        default_account="lx",
+        confirm=True,
+        now_fn=lambda: datetime(2026, 5, 19, tzinfo=timezone.utc),
+    )
+
+    assert out["changed"] is True
+    assert output.is_symlink()
+    assert output.resolve() == (runtime / "output_accounts" / "lx").resolve()
+    assert (runtime / "output_accounts" / "lx" / "reports" / "symbols_notification.txt").read_text(encoding="utf-8") == "hello"
+    assert (runtime / "output.backup.20260519000000" / "reports" / "symbols_notification.txt").exists()
 
 
 def test_service_status_from_profile_checks_provider_with_injected_runner() -> None:

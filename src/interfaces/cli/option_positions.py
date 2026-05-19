@@ -141,7 +141,7 @@ def main(argv: list[str] | None = None) -> int:
     p_add.add_argument('--multiplier', type=float, required=True, help='contract multiplier')
     p_add.add_argument('--exp', required=True, help='YYYY-MM-DD')
     p_add.add_argument('--premium-per-share', type=float, required=True, help='premium per share; positive, up to 3 decimals')
-    p_add.add_argument('--underlying-share-locked', type=int, default=None, help='for covered call locking shares')
+    p_add.add_argument('--underlying-share-locked', type=int, default=None, help='for sell call locking shares')
     p_add.add_argument('--note', default=None)
     p_add.add_argument('--dry-run', action='store_true')
 

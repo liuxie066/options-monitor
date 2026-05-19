@@ -24,7 +24,7 @@ from domain.domain.sell_call_config import (
     validate_min_annualized_net_premium_return,
     validate_min_strike_cost_multiplier,
 )
-from domain.domain.risk_capacity import compute_covered_call_share_capacity
+from domain.domain.risk_capacity import compute_sell_call_share_capacity
 from src.application.candidate_scanning import (
     CandidateScanConfig,
     CandidateScanDependencies,
@@ -187,8 +187,14 @@ def _make_explain_metrics_rejection(avg_cost: float) -> Callable[[CandidateContr
     return _explain
 
 
-def _resolve_covered_contracts(*, multiplier: float | None, shares: int, shares_locked: int, shares_available_for_cover: int | None) -> tuple[int, int, bool]:
-    capacity = compute_covered_call_share_capacity(
+def _resolve_sell_call_contract_capacity(
+    *,
+    multiplier: float | None,
+    shares: int,
+    shares_locked: int,
+    shares_available_for_cover: int | None,
+) -> tuple[int, int, bool]:
+    capacity = compute_sell_call_share_capacity(
         shares_total=shares,
         shares_locked=shares_locked,
         shares_available_for_cover=shares_available_for_cover,
@@ -213,7 +219,7 @@ def _build_candidate_row_factory(
         base_values: CandidateBaseValues,
         metrics: dict[str, Any],
     ) -> dict[str, Any] | None:
-        available, covered_contracts_available, is_fully_covered_available = _resolve_covered_contracts(
+        available, covered_contracts_available, is_fully_covered_available = _resolve_sell_call_contract_capacity(
             multiplier=contract.multiplier,
             shares=shares,
             shares_locked=shares_locked,
@@ -348,7 +354,7 @@ def run_sell_call_scan(
                 shares_available_for_cover=shares_available_for_cover,
             ),
             build_hard_constraint_kwargs_fn=lambda contract: {
-                "call_covered_contracts_available": _resolve_covered_contracts(
+                "call_covered_contracts_available": _resolve_sell_call_contract_capacity(
                     multiplier=contract.multiplier,
                     shares=shares,
                     shares_locked=shares_locked,

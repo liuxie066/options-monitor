@@ -152,7 +152,7 @@ def build_context(
             continue
 
         # Keep only what downstream needs. Multiple holdings rows for the same
-        # account/symbol must aggregate; otherwise covered-call capacity can be
+        # account/symbol must aggregate; otherwise sell-call capacity can be
         # undercounted or overwritten by the last row.
         shares = int(qty)
         existing = stocks_by_symbol.get(sym)

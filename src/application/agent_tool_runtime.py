@@ -77,12 +77,23 @@ def mask_account_id(value: Any) -> str:
     return raw
 
 
-def run_futu_doctor(*, host: str, port: int, symbols: list[str], timeout_sec: int, repo_base: Callable[[], Path]) -> dict[str, Any]:
+def run_futu_doctor(
+    *,
+    host: str,
+    port: int,
+    symbols: list[str],
+    timeout_sec: int,
+    repo_base: Callable[[], Path],
+    telnet_host: str = "127.0.0.1",
+    telnet_port: int = 22222,
+) -> dict[str, Any]:
     try:
         del repo_base
         return run_futu_doctor_checks(
             host=str(host),
             port=int(port),
+            telnet_host=str(telnet_host),
+            telnet_port=int(telnet_port),
             symbols=[str(s) for s in symbols],
             timeout_sec=int(timeout_sec),
         )

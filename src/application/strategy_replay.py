@@ -102,7 +102,7 @@ def _normalize_mode(value: Any) -> str | None:
     raw = str(value or "").strip().lower()
     if raw in {"put", "sell_put", "short_put", "cash_secured_put"}:
         return "put"
-    if raw in {"call", "sell_call", "covered_call", "short_call"}:
+    if raw in {"call", "sell_call", "short_call"}:
         return "call"
     return None
 

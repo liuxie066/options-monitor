@@ -46,6 +46,7 @@ def test_futu_doctor_runtime_returns_structured_payload(monkeypatch) -> None:
 
     monkeypatch.setattr(doctor, "sdk_status", lambda: {"ok": True, "futu_sdk_importable": True})
     monkeypatch.setattr(doctor, "run_watchdog_check", lambda **_kwargs: _Health())
+    monkeypatch.setattr(doctor, "port_open", lambda host, port, timeout=0.8: host == "127.0.0.1" and port == 22222)
     monkeypatch.setattr(
         doctor,
         "check_required_option_fields",
@@ -58,6 +59,7 @@ def test_futu_doctor_runtime_returns_structured_payload(monkeypatch) -> None:
     assert payload["watchdog_ok"] is True
     assert payload["required_fields_ok"] is True
     assert payload["required_fields"]["results"][0]["symbol"] == "NVDA"
+    assert payload["telnet"]["ok"] is True
 
 
 def test_futu_doctor_skips_field_probe_when_sdk_missing(monkeypatch) -> None:
@@ -69,6 +71,7 @@ def test_futu_doctor_skips_field_probe_when_sdk_missing(monkeypatch) -> None:
 
     monkeypatch.setattr(doctor, "sdk_status", lambda: {"ok": False, "futu_sdk_importable": False})
     monkeypatch.setattr(doctor, "run_watchdog_check", lambda **_kwargs: _Health())
+    monkeypatch.setattr(doctor, "port_open", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(
         doctor,
         "check_required_option_fields",
@@ -81,6 +84,19 @@ def test_futu_doctor_skips_field_probe_when_sdk_missing(monkeypatch) -> None:
     assert payload["watchdog_ok"] is True
     assert payload["required_fields_ok"] is False
     assert payload["required_fields"] is None
+    assert payload["telnet"]["ok"] is False
+
+
+def test_opend_watchdog_requires_trade_login() -> None:
+    from src.infrastructure.opend_watchdog import classify_watchdog_result
+
+    code, message = classify_watchdog_result(
+        {"program_status_type": "READY", "qot_logined": True, "trd_logined": False},
+        None,
+    )
+
+    assert code == "OPEND_TRD_NOT_LOGINED"
+    assert "交易未登录" in message
 
 
 def test_multi_tick_watchdog_accepts_structured_watchdog_payload(fake_runlog_factory, tmp_path: Path) -> None:

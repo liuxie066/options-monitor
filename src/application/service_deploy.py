@@ -4,8 +4,11 @@ import json
 import os
 import plistlib
 import shlex
+import shutil
 import subprocess
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from json import JSONDecodeError
 from pathlib import Path
 from typing import Any, Callable, Literal, cast
 
@@ -74,6 +77,17 @@ def default_runtime_root(target: ServiceTarget, *, home: Path | None = None) -> 
     return home_dir / "Library" / "Application Support" / "options-monitor"
 
 
+def default_systemd_deploy_user() -> str:
+    return str(os.environ.get("OM_DEPLOY_USER") or os.environ.get("DEPLOY_USER") or "").strip()
+
+
+def default_systemd_deploy_home(deploy_user: str) -> Path:
+    user = str(deploy_user or "").strip()
+    if user == "root":
+        return Path("/root")
+    return Path("/home") / user
+
+
 def _resolve_path(value: str | Path | None, *, base: Path, default: Path) -> Path:
     raw = str(value or "").strip()
     if not raw:
@@ -123,6 +137,8 @@ def _systemd_unit(
     runtime_root: Path,
     exec_args: list[str],
     env_file: Path | None = None,
+    deploy_user: str | None = None,
+    deploy_home: Path | None = None,
     service_type: str = "oneshot",
     restart: str | None = None,
 ) -> str:
@@ -135,9 +151,17 @@ def _systemd_unit(
         "[Service]",
         f"Type={service_type}",
         f"WorkingDirectory={_systemd_quote_arg(repo_root)}",
-        _systemd_environment_assignment("PYTHONUNBUFFERED", "1"),
-        _systemd_environment_assignment("OM_RUNTIME_ROOT", runtime_root),
     ]
+    if deploy_user:
+        lines.append(f"User={deploy_user}")
+    if deploy_home is not None:
+        lines.append(_systemd_environment_assignment("HOME", deploy_home))
+    lines.extend(
+        [
+            _systemd_environment_assignment("PYTHONUNBUFFERED", "1"),
+            _systemd_environment_assignment("OM_RUNTIME_ROOT", runtime_root),
+        ]
+    )
     if env_file is not None:
         lines.append(_systemd_environment_file(env_file))
     lines.append("ExecStart=" + _systemd_join_args(exec_args))
@@ -212,6 +236,8 @@ def build_service_profile(
     service_names: list[str],
     config_paths: dict[str, Path],
     env_file: Path | None = None,
+    deploy_user: str | None = None,
+    deploy_home: Path | None = None,
 ) -> dict[str, Any]:
     profile: dict[str, Any] = {
         "schema_version": 1,
@@ -232,6 +258,10 @@ def build_service_profile(
     }
     if env_file is not None:
         profile["env_file"] = str(env_file)
+    if deploy_user:
+        profile["deploy_user"] = str(deploy_user)
+    if deploy_home is not None:
+        profile["deploy_home"] = str(deploy_home)
     return profile
 
 
@@ -244,6 +274,8 @@ def render_service_bundle(
     markets: list[str] | tuple[str, ...] | None = None,
     config_paths: dict[str, str | Path] | None = None,
     env_file: str | Path | None = None,
+    deploy_user: str | None = None,
+    deploy_home: str | Path | None = None,
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
     include_content: bool = True,
 ) -> dict[str, Any]:
@@ -253,6 +285,12 @@ def render_service_bundle(
     env_file_path = _resolve_path(env_file, base=repo, default=Path()) if env_file else None
     if env_file_path is not None and target_key != "systemd":
         raise ValueError("--env-file is only supported for systemd service rendering")
+    systemd_user = default_systemd_deploy_user() if target_key == "systemd" else None
+    if deploy_user is not None and str(deploy_user).strip():
+        systemd_user = str(deploy_user).strip()
+    systemd_home = default_systemd_deploy_home(systemd_user) if target_key == "systemd" and systemd_user else None
+    if deploy_home is not None and str(deploy_home).strip():
+        systemd_home = Path(deploy_home).expanduser()
     account_values = normalize_accounts(accounts)
     market_values = normalize_markets(markets)
     config_by_market = {
@@ -304,6 +342,8 @@ def render_service_bundle(
                     repo_root=repo,
                     runtime_root=runtime,
                     env_file=env_file_path,
+                    deploy_user=systemd_user,
+                    deploy_home=systemd_home,
                     exec_args=tick_args,
                 ),
                 install_path=f"/etc/systemd/system/{service_name}",
@@ -338,6 +378,8 @@ def render_service_bundle(
                     repo_root=repo,
                     runtime_root=runtime,
                     env_file=env_file_path,
+                    deploy_user=systemd_user,
+                    deploy_home=systemd_home,
                     exec_args=auto_close_args,
                 ),
                 install_path=f"/etc/systemd/system/{auto_close_service}",
@@ -374,6 +416,8 @@ def render_service_bundle(
                 repo_root=repo,
                 runtime_root=runtime,
                 env_file=env_file_path,
+                deploy_user=systemd_user,
+                deploy_home=systemd_home,
                 exec_args=trade_args,
                 service_type="simple",
                 restart="always",
@@ -400,6 +444,8 @@ def render_service_bundle(
                 repo_root=repo,
                 runtime_root=runtime,
                 env_file=env_file_path,
+                deploy_user=systemd_user,
+                deploy_home=systemd_home,
                 exec_args=status_args,
             ),
             install_path=f"/etc/systemd/system/{status_service}",
@@ -538,6 +584,8 @@ def render_service_bundle(
         service_names=service_names,
         config_paths=config_by_market,
         env_file=env_file_path,
+        deploy_user=systemd_user,
+        deploy_home=systemd_home,
     )
     profile_content = json.dumps(profile, ensure_ascii=False, indent=2) + "\n"
     add(
@@ -553,6 +601,8 @@ def render_service_bundle(
         "repo_root": str(repo),
         "runtime_root": str(runtime),
         **({"env_file": str(env_file_path)} if env_file_path is not None else {}),
+        **({"deploy_user": str(systemd_user)} if systemd_user else {}),
+        **({"deploy_home": str(systemd_home)} if systemd_home is not None else {}),
         "accounts": account_values,
         "markets": market_values,
         "files": [item.to_dict(include_content=include_content) for item in files],
@@ -614,6 +664,249 @@ def write_service_bundle(bundle: dict[str, Any], output_dir: str | Path) -> list
         path.write_text(content, encoding="utf-8")
         written.append(str(path))
     return written
+
+
+def _status_from_checks(checks: list[dict[str, Any]]) -> dict[str, Any]:
+    error_count = sum(1 for item in checks if item.get("status") == "error")
+    warn_count = sum(1 for item in checks if item.get("status") == "warn")
+    return {"ok": error_count == 0, "error_count": error_count, "warning_count": warn_count}
+
+
+def _check_env_file(path: Path) -> dict[str, Any]:
+    if path.exists() and path.is_file():
+        return {"name": "env_file", "status": "ok", "message": "environment file exists", "value": str(path)}
+    if path.exists() and path.is_dir():
+        return {
+            "name": "env_file",
+            "status": "error",
+            "message": "environment path is a directory; expected a file",
+            "value": str(path),
+        }
+    return {"name": "env_file", "status": "error", "message": "environment file is missing", "value": str(path)}
+
+
+def _check_writable_dir(path: Path, *, name: str) -> dict[str, Any]:
+    if not path.exists():
+        return {
+            "name": name,
+            "status": "error",
+            "message": "directory is missing",
+            "value": {"path": str(path), "repair": f"mkdir -p {shlex.quote(str(path))}"},
+        }
+    if not path.is_dir():
+        return {"name": name, "status": "error", "message": "path exists but is not a directory", "value": str(path)}
+    perms = {
+        "readable": os.access(path, os.R_OK),
+        "writable": os.access(path, os.W_OK),
+        "executable": os.access(path, os.X_OK),
+    }
+    ok = all(perms.values())
+    return {
+        "name": name,
+        "status": "ok" if ok else "error",
+        "message": "directory permissions ok" if ok else "directory is not readable/writable/executable by current user",
+        "value": {"path": str(path), **perms},
+    }
+
+
+def _json_parse_error_details(exc: JSONDecodeError) -> dict[str, Any]:
+    return {
+        "error": str(exc),
+        "line": int(exc.lineno),
+        "column": int(exc.colno),
+        "position": int(exc.pos),
+    }
+
+
+def _check_runtime_config(path: Path, *, market: str) -> dict[str, Any]:
+    if not path.exists():
+        return {"name": f"runtime_config_{market}", "status": "error", "message": "runtime config is missing", "value": str(path)}
+    if not path.is_file():
+        return {"name": f"runtime_config_{market}", "status": "error", "message": "runtime config path is not a file", "value": str(path)}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except JSONDecodeError as exc:
+        return {
+            "name": f"runtime_config_{market}",
+            "status": "error",
+            "message": "runtime config JSON parse failed",
+            "value": {"path": str(path), **_json_parse_error_details(exc)},
+        }
+    except Exception as exc:
+        return {
+            "name": f"runtime_config_{market}",
+            "status": "error",
+            "message": "runtime config read failed",
+            "value": {"path": str(path), "error": f"{type(exc).__name__}: {exc}"},
+        }
+    if not isinstance(payload, dict):
+        return {"name": f"runtime_config_{market}", "status": "error", "message": "runtime config must be a JSON object", "value": str(path)}
+    if not isinstance(payload.get("_generated"), dict):
+        return {
+            "name": f"runtime_config_{market}",
+            "status": "error",
+            "message": "runtime config is missing generation metadata",
+            "value": {"path": str(path), "repair": f"./om config build --market {market} --output {shlex.quote(str(path))}"},
+        }
+    return {"name": f"runtime_config_{market}", "status": "ok", "message": "runtime config metadata exists", "value": str(path)}
+
+
+def service_preflight(
+    *,
+    runtime_root: str | Path,
+    env_file: str | Path | None = None,
+    accounts: list[str] | tuple[str, ...] | None = None,
+    config_paths: dict[str, str | Path] | None = None,
+    default_account: str | None = None,
+) -> dict[str, Any]:
+    runtime = Path(runtime_root).expanduser().resolve()
+    account_values = normalize_accounts(accounts)
+    default_account_value = str(default_account or (account_values[0] if account_values else DEFAULT_ACCOUNTS[0])).strip()
+    checks: list[dict[str, Any]] = []
+    commands: list[str] = []
+
+    if env_file is not None and str(env_file).strip():
+        checks.append(_check_env_file(Path(env_file).expanduser()))
+
+    for name, path in (
+        ("runtime_root", runtime),
+        ("locks", runtime / "locks"),
+        ("output_accounts", runtime / "output_accounts"),
+        ("output_shared", runtime / "output_shared"),
+    ):
+        checks.append(_check_writable_dir(path, name=name))
+
+    output = runtime / "output"
+    repair_cmd = (
+        "./om service repair-output "
+        f"--runtime-root {shlex.quote(str(runtime))} "
+        f"--default-account {shlex.quote(default_account_value)} --confirm"
+    )
+    if output.is_symlink():
+        target = output.resolve()
+        status = "ok" if target.exists() else "warn"
+        checks.append(
+            {
+                "name": "output_symlink",
+                "status": status,
+                "message": "output is a symlink" if status == "ok" else "output symlink target is missing",
+                "value": {"path": str(output), "target": str(target)},
+            }
+        )
+    elif output.exists():
+        checks.append(
+            {
+                "name": "output_symlink",
+                "status": "error",
+                "message": "multi-account runtime requires output to be a symlink, but it is a real path",
+                "value": {"path": str(output), "repair": repair_cmd},
+            }
+        )
+        commands.append(repair_cmd)
+    else:
+        checks.append(
+            {
+                "name": "output_symlink",
+                "status": "warn",
+                "message": "output symlink is missing",
+                "value": {"path": str(output), "repair": repair_cmd},
+            }
+        )
+        commands.append(repair_cmd)
+
+    for market, raw_path in sorted((config_paths or {}).items()):
+        if raw_path is not None and str(raw_path).strip():
+            checks.append(_check_runtime_config(Path(raw_path).expanduser(), market=str(market)))
+
+    summary = _status_from_checks(checks)
+    return {
+        "runtime_root": str(runtime),
+        "accounts": account_values,
+        "checks": checks,
+        "repair_commands": commands,
+        "summary": summary,
+    }
+
+
+def _copy_tree_contents(src: Path, dst: Path) -> None:
+    dst.mkdir(parents=True, exist_ok=True)
+    for item in src.iterdir():
+        target = dst / item.name
+        if item.is_dir() and not item.is_symlink():
+            shutil.copytree(item, target, symlinks=True)
+        else:
+            shutil.copy2(item, target, follow_symlinks=False)
+
+
+def repair_output_symlink(
+    *,
+    runtime_root: str | Path,
+    default_account: str,
+    confirm: bool = False,
+    now_fn: Callable[[], datetime] | None = None,
+) -> dict[str, Any]:
+    runtime = Path(runtime_root).expanduser().resolve()
+    account = str(default_account or "").strip()
+    if not account:
+        raise ValueError("default_account is required")
+    output = runtime / "output"
+    account_root = runtime / "output_accounts" / account
+    timestamp = (now_fn or (lambda: datetime.now(timezone.utc)))().strftime("%Y%m%d%H%M%S")
+    backup = runtime / f"output.backup.{timestamp}"
+    operations: list[str] = []
+
+    if output.is_symlink():
+        return {
+            "changed": False,
+            "confirmed": bool(confirm),
+            "runtime_root": str(runtime),
+            "output": str(output),
+            "target": str(output.resolve()),
+            "operations": ["output already symlink"],
+        }
+    if output.exists() and not output.is_dir():
+        raise ValueError(f"runtime output exists but is not a directory or symlink: {output}")
+
+    operations.extend(
+        [
+            f"mkdir -p {account_root}",
+            f"backup {output} -> {backup}" if output.exists() else "no existing output directory to back up",
+            f"link {output} -> {account_root}",
+        ]
+    )
+    if not confirm:
+        return {
+            "changed": False,
+            "confirmed": False,
+            "runtime_root": str(runtime),
+            "output": str(output),
+            "target": str(account_root),
+            "backup": str(backup) if output.exists() else None,
+            "operations": operations,
+        }
+
+    account_root.mkdir(parents=True, exist_ok=True)
+    if output.exists():
+        conflicts = [item.name for item in output.iterdir() if (account_root / item.name).exists()]
+        if conflicts:
+            raise ValueError(
+                "cannot migrate output because output_accounts/"
+                f"{account} already has conflicting entries: {', '.join(conflicts)}"
+            )
+        _copy_tree_contents(output, backup)
+        for item in output.iterdir():
+            shutil.move(str(item), str(account_root / item.name))
+        output.rmdir()
+    output.symlink_to(account_root, target_is_directory=True)
+    return {
+        "changed": True,
+        "confirmed": True,
+        "runtime_root": str(runtime),
+        "output": str(output),
+        "target": str(account_root),
+        "backup": str(backup) if backup.exists() else None,
+        "operations": operations,
+    }
 
 
 def load_service_profile(path: str | Path) -> dict[str, Any]:
@@ -695,7 +988,9 @@ __all__ = [
     "normalize_accounts",
     "normalize_markets",
     "normalize_target",
+    "repair_output_symlink",
     "render_service_bundle",
+    "service_preflight",
     "service_status_from_profile",
     "write_service_bundle",
 ]
