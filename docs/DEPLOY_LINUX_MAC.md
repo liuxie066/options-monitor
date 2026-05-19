@@ -122,7 +122,7 @@ cd "$REPO"
 
 启用 `--include-auto-upgrade` 时，渲染器会保留 `--repo-root` 传入的 symlink 字面路径，并默认把 tick / trade-intake / maintenance config 指到 runtime root 下的 `config.us.json` / `config.hk.json`。这样 release 切换只移动代码，不绑定 release 目录内的生产配置。需要用非默认路径时，显式传 `--config-us` / `--config-hk`。
 
-自动升级切换 release 前，会把上一 release 的 `configs/user.common.json`、`configs/user.hk.json`、`configs/user.us.json` 复制到新 release 中缺失的位置，并根据 profile 里的 config path 重新执行 `./om config build` / `./om config validate`。如果缺少 market user config，升级会在 symlink 切换前失败，避免 tick 进入 runtime config stale 状态。
+自动升级切换 release 前，会恢复新 release 缺失的 `configs/user.common.json`、`configs/user.hk.json`、`configs/user.us.json`。来源包括 runtime config metadata 里的 source path、`<runtime_root>/configs/`、当前 release，以及 `releases/` 下最近一个包含完整 overlay 的旧 release。随后会根据 profile 里的 config path 执行 `./om config build` / `./om config validate`；切换 symlink 后还会再用 current symlink 重建/校验一次。如果仍缺少必要 overlay 或 rebuild/validate 失败，升级会记录 remediation 并阻止未切换场景继续切换，避免 tick 进入 runtime config stale 状态。
 
 传入 `--deploy-user "$DEPLOY_USER"` 后，渲染出的 systemd unit 会包含：
 
