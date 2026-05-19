@@ -51,6 +51,38 @@ def reply_text_message(
     return with_tenant_token_retry(app_id, app_secret, _send)
 
 
+def add_message_reaction(
+    *,
+    app_id: str,
+    app_secret: str,
+    message_id: str,
+    emoji_type: str,
+    http_json_fn: HttpJsonFn = http_json,
+) -> dict[str, Any]:
+    message_id_value = str(message_id or "").strip()
+    emoji_type_value = str(emoji_type or "").strip().upper()
+    if not message_id_value:
+        raise ValueError("message_id is required")
+    if not emoji_type_value:
+        raise ValueError("emoji_type is required")
+
+    url = f"https://open.feishu.cn/open-apis/im/v1/messages/{quote(message_id_value, safe='')}/reactions"
+    payload = {"reaction_type": {"emoji_type": emoji_type_value}}
+
+    def _send(tenant_token: str) -> dict[str, Any]:
+        return http_json_fn(
+            "POST",
+            url,
+            payload,
+            headers={
+                "Authorization": f"Bearer {tenant_token}",
+                "Content-Type": "application/json; charset=utf-8",
+            },
+        )
+
+    return with_tenant_token_retry(app_id, app_secret, _send)
+
+
 def send_text_message(
     *,
     app_id: str,

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 1.2.81 - 2026-05-19
+
+### Changed
+- Replaced the Feishu HTTPS callback inbound gateway with `./om inbound feishu-ws`, a Feishu long-connection client that reuses the existing allowlist, audit, idempotency, and read-only tool routing.
+- Added optional Feishu message reaction acknowledgements for `feishu-ws` through `OM_FEISHU_ACK_REACTION`.
+- Switched rendered services from `--include-feishu-gateway` to `--include-feishu-ws` and removed callback-only Feishu encrypt/token/host/port/path environment settings.
+
 ## 1.2.80 - 2026-05-19
 
 ### Added

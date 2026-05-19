@@ -237,14 +237,6 @@ def test_feishu_payload_adapter_extracts_text_message_and_calls_inbound(tmp_path
     assert calls == [("monthly_income_report", {"config_key": "us", "account": "sy", "month": "2026-05"})]
 
 
-def test_feishu_payload_adapter_returns_url_verification_challenge() -> None:
-    out = handle_feishu_payload({"type": "url_verification", "challenge": "challenge-token"})
-
-    assert out["ok"] is True
-    assert out["data"]["kind"] == "url_verification"
-    assert out["data"]["response"] == {"challenge": "challenge-token"}
-
-
 def test_feishu_payload_adapter_ignores_non_message_events() -> None:
     out = handle_feishu_payload(
         {
@@ -356,25 +348,18 @@ def test_inbound_cli_feishu_reports_invalid_json(capsys) -> None:
     assert payload["error"]["code"] == "INPUT_ERROR"
 
 
-def test_inbound_cli_feishu_gateway_check_reports_redacted_config(capsys, monkeypatch) -> None:
+def test_inbound_cli_feishu_ws_check_reports_redacted_config(capsys, monkeypatch) -> None:
     import src.interfaces.cli.main as cli
 
     monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "app_1")
     monkeypatch.setenv("OM_FEISHU_BOT_APP_SECRET", "secret_1")
-    monkeypatch.setenv("OM_FEISHU_BOT_ENCRYPT_KEY", "encrypt_1")
-    monkeypatch.setenv("OM_FEISHU_BOT_VERIFICATION_TOKEN", "token_1")
     monkeypatch.setenv("OM_FEISHU_BOT_ALLOWED_OPEN_IDS", "ou_1")
+    monkeypatch.setattr("src.application.inbound.feishu_ws.is_feishu_ws_sdk_available", lambda: True)
 
     rc = cli.main(
         [
             "inbound",
-            "feishu-gateway",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            "8765",
-            "--path",
-            "/feishu/events",
+            "feishu-ws",
             "--check",
         ]
     )
@@ -386,11 +371,11 @@ def test_inbound_cli_feishu_gateway_check_reports_redacted_config(capsys, monkey
     assert "secret_1" not in json.dumps(payload, ensure_ascii=False)
 
 
-def test_inbound_cli_feishu_gateway_rejects_secret_override_flags(capsys) -> None:
+def test_inbound_cli_feishu_ws_rejects_secret_override_flags(capsys) -> None:
     import src.interfaces.cli.main as cli
 
     try:
-        cli.main(["inbound", "feishu-gateway", "--app-id", "app_1", "--check"])
+        cli.main(["inbound", "feishu-ws", "--app-id", "app_1", "--check"])
     except SystemExit as exc:
         assert int(exc.code or 0) == 2
     else:

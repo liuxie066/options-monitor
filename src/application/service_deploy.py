@@ -27,9 +27,6 @@ PROJECTION_VERIFY_SYSTEMD_CALENDAR = "*-*-* 06:00:00 Asia/Shanghai"
 PROJECTION_VERIFY_LAUNCHD_CALENDAR = {"Hour": 6, "Minute": 0}
 AUTO_UPGRADE_SYSTEMD_CALENDAR = "*-*-* 06:10:00 Asia/Shanghai"
 AUTO_UPGRADE_LAUNCHD_CALENDAR = {"Hour": 6, "Minute": 10}
-FEISHU_GATEWAY_HOST = "127.0.0.1"
-FEISHU_GATEWAY_PORT = 8765
-FEISHU_GATEWAY_PATH = "/feishu/events"
 
 
 @dataclass(frozen=True)
@@ -274,7 +271,7 @@ def build_service_profile(
     deploy_user: str | None = None,
     deploy_home: Path | None = None,
     auto_upgrade_enabled: bool = False,
-    feishu_gateway: dict[str, Any] | None = None,
+    feishu_ws: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     profile: dict[str, Any] = {
         "schema_version": 1,
@@ -313,8 +310,8 @@ def build_service_profile(
             "enabled": True,
             "schedule_beijing": "06:10",
         }
-    if feishu_gateway is not None:
-        profile["feishu_gateway"] = dict(feishu_gateway)
+    if feishu_ws is not None:
+        profile["feishu_ws"] = dict(feishu_ws)
     return profile
 
 
@@ -331,11 +328,8 @@ def render_service_bundle(
     deploy_home: str | Path | None = None,
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
     include_auto_upgrade: bool = False,
-    include_feishu_gateway: bool = False,
-    feishu_gateway_host: str = FEISHU_GATEWAY_HOST,
-    feishu_gateway_port: int = FEISHU_GATEWAY_PORT,
-    feishu_gateway_path: str = FEISHU_GATEWAY_PATH,
-    feishu_gateway_config_key: str = "us",
+    include_feishu_ws: bool = False,
+    feishu_ws_config_key: str = "us",
     include_content: bool = True,
 ) -> dict[str, Any]:
     target_key = normalize_target(target)
@@ -368,12 +362,9 @@ def render_service_bundle(
     log_root = runtime / "logs"
     runtime_data_config = runtime / "portfolio.runtime.json"
     inbound_audit_db = runtime / "output_shared" / "state" / "inbound_control.sqlite3"
-    feishu_gateway_path_value = str(feishu_gateway_path or FEISHU_GATEWAY_PATH).strip() or FEISHU_GATEWAY_PATH
-    if not feishu_gateway_path_value.startswith("/"):
-        feishu_gateway_path_value = "/" + feishu_gateway_path_value
-    feishu_gateway_config_key_value = str(feishu_gateway_config_key or "us").strip().lower() or "us"
-    if feishu_gateway_config_key_value not in {"us", "hk"}:
-        raise ValueError("feishu_gateway_config_key must be us or hk")
+    feishu_ws_config_key_value = str(feishu_ws_config_key or "us").strip().lower() or "us"
+    if feishu_ws_config_key_value not in {"us", "hk"}:
+        raise ValueError("feishu_ws_config_key must be us or hk")
 
     files: list[RenderedServiceFile] = []
     service_names: list[str] = []
@@ -615,39 +606,35 @@ def render_service_bundle(
                 service_name=upgrade_timer,
             )
 
-        if include_feishu_gateway:
-            gateway_service = "options-monitor-feishu-gateway.service"
-            gateway_args = [
+        if include_feishu_ws:
+            ws_service = "options-monitor-feishu-ws.service"
+            ws_args = [
                 om,
                 "inbound",
-                "feishu-gateway",
-                "--host",
-                str(feishu_gateway_host or FEISHU_GATEWAY_HOST),
-                "--port",
-                str(int(feishu_gateway_port)),
-                "--path",
-                feishu_gateway_path_value,
+                "feishu-ws",
                 "--config-key",
-                feishu_gateway_config_key_value,
+                feishu_ws_config_key_value,
                 "--audit-db",
                 str(inbound_audit_db),
+                "--lock-path",
+                str(lock_root / "feishu-ws.lock"),
             ]
             add(
-                f"systemd/{gateway_service}",
+                f"systemd/{ws_service}",
                 _systemd_unit(
-                    description="Options Monitor Feishu inbound gateway",
+                    description="Options Monitor Feishu long-connection inbound",
                     repo_root=repo,
                     runtime_root=runtime,
                     env_file=env_file_path,
                     deploy_user=systemd_user,
                     deploy_home=systemd_home,
-                    exec_args=gateway_args,
+                    exec_args=ws_args,
                     service_type="simple",
                     restart="always",
                 ),
-                install_path=f"/etc/systemd/system/{gateway_service}",
+                install_path=f"/etc/systemd/system/{ws_service}",
                 kind="systemd_service",
-                service_name=gateway_service,
+                service_name=ws_service,
             )
     else:
         for market in market_values:
@@ -817,36 +804,32 @@ def render_service_bundle(
                 service_name=upgrade_label,
             )
 
-        if include_feishu_gateway:
-            gateway_label = "com.options-monitor.feishu-gateway"
-            gateway_args = [
+        if include_feishu_ws:
+            ws_label = "com.options-monitor.feishu-ws"
+            ws_args = [
                 om,
                 "inbound",
-                "feishu-gateway",
-                "--host",
-                str(feishu_gateway_host or FEISHU_GATEWAY_HOST),
-                "--port",
-                str(int(feishu_gateway_port)),
-                "--path",
-                feishu_gateway_path_value,
+                "feishu-ws",
                 "--config-key",
-                feishu_gateway_config_key_value,
+                feishu_ws_config_key_value,
                 "--audit-db",
                 str(inbound_audit_db),
+                "--lock-path",
+                str(lock_root / "feishu-ws.lock"),
             ]
             add(
-                f"launchd/{gateway_label}.plist",
+                f"launchd/{ws_label}.plist",
                 _launchd_plist(
-                    label=gateway_label,
+                    label=ws_label,
                     repo_root=repo,
                     runtime_root=runtime,
-                    program_args=gateway_args,
+                    program_args=ws_args,
                     log_root=log_root,
                     keep_alive=True,
                 ),
-                install_path=f"~/Library/LaunchAgents/{gateway_label}.plist",
+                install_path=f"~/Library/LaunchAgents/{ws_label}.plist",
                 kind="launchd_plist",
-                service_name=gateway_label,
+                service_name=ws_label,
             )
 
     profile = build_service_profile(
@@ -861,14 +844,12 @@ def render_service_bundle(
         deploy_user=systemd_user,
         deploy_home=systemd_home,
         auto_upgrade_enabled=bool(include_auto_upgrade),
-        feishu_gateway={
+        feishu_ws={
             "enabled": True,
-            "host": str(feishu_gateway_host or FEISHU_GATEWAY_HOST),
-            "port": int(feishu_gateway_port),
-            "path": feishu_gateway_path_value,
-            "config_key": feishu_gateway_config_key_value,
+            "config_key": feishu_ws_config_key_value,
             "audit_db": str(inbound_audit_db),
-        } if include_feishu_gateway else None,
+            "lock_path": str(lock_root / "feishu-ws.lock"),
+        } if include_feishu_ws else None,
     )
     profile_content = json.dumps(profile, ensure_ascii=False, indent=2) + "\n"
     add(
@@ -913,7 +894,7 @@ def _install_commands(target: ServiceTarget, *, files: list[RenderedServiceFile]
             Path(item.install_path).name
             for item in files
             if item.kind == "systemd_service"
-            and ("trade-intake" in item.install_path or "feishu-gateway" in item.install_path)
+            and ("trade-intake" in item.install_path or "feishu-ws" in item.install_path)
         ]
         return {
             "prepare": mkdirs,
