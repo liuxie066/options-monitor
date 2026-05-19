@@ -43,8 +43,8 @@ python3 -m venv .venv
 推荐用 CLI 初始化本地 runtime config：
 
 ```bash
-./om init runtime --market us --futu-acc-id <futu-account-id>
-./om init runtime --market hk --futu-acc-id <futu-account-id>
+./om setup --market us --futu-acc-id <futu-account-id>
+./om setup --market hk --futu-acc-id <futu-account-id>
 ```
 
 首次初始化通常会生成：
@@ -63,6 +63,7 @@ python3 -m venv .venv
 ## 4. 跑一个最基本的检查
 
 ```bash
+./om doctor --config-key us
 ./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'
 ```
 

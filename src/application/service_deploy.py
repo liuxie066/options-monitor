@@ -530,8 +530,8 @@ def render_service_bundle(
             upgrade_timer = "options-monitor-upgrade.timer"
             upgrade_args = [
                 om,
-                "service",
-                "upgrade",
+                "update",
+                "apply",
                 "--repo-root",
                 str(repo),
                 "--runtime-root",
@@ -709,8 +709,8 @@ def render_service_bundle(
             upgrade_label = "com.options-monitor.upgrade"
             upgrade_args = [
                 om,
-                "service",
-                "upgrade",
+                "update",
+                "apply",
                 "--repo-root",
                 str(repo),
                 "--runtime-root",

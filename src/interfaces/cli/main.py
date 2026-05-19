@@ -11,6 +11,7 @@ from src.application.agent_tool_contracts import AgentToolError, build_error_pay
 from src.application.config_validator import validate_config
 from src.application.account_management import add_account, edit_account, remove_account
 from src.application.close_advice_pipeline import run_close_advice
+from src.application.config_edit import get_runtime_config_value, set_runtime_config_value
 from src.application.healthcheck import run_healthcheck
 from src.application.layered_config import build_layered_runtime_config_file, explain_layered_runtime_config_key
 from src.application.multi_account_tick import run_tick
@@ -52,6 +53,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     health.add_argument("--accounts", nargs="*", default=None)
     health.add_argument("--opend-telnet-host", default=None)
     health.add_argument("--opend-telnet-port", type=int, default=None)
+
+    doctor = sub.add_parser("doctor", help="diagnose runtime readiness and common operator issues")
+    doctor.add_argument("--config-key", default=None, choices=("us", "hk"))
+    doctor.add_argument("--config-path", default=None)
+    doctor.add_argument("--accounts", nargs="*", default=None)
+    doctor.add_argument("--opend-telnet-host", default=None)
+    doctor.add_argument("--opend-telnet-port", type=int, default=None)
 
     ai_cofunder = sub.add_parser("ai-cofunder", help="collect AI Cofunder evidence for MacBook Codex")
     ai_cofunder_sub = ai_cofunder.add_subparsers(dest="ai_cofunder_command", required=True)
@@ -145,6 +153,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     explain.add_argument("--common-user-config", default=None)
     explain.add_argument("--no-common-user-config", action="store_true")
     explain.add_argument("--user-config", default=None)
+    get_config = config_sub.add_parser("get", help="read a runtime config value by dot path")
+    get_config.add_argument("--config-key", default=None, choices=("us", "hk"))
+    get_config.add_argument("--config-path", default=None)
+    get_config.add_argument("--key", required=True)
+    set_config = config_sub.add_parser("set", help="preview or write a runtime config value by dot path")
+    set_config.add_argument("--config-key", default=None, choices=("us", "hk"))
+    set_config.add_argument("--config-path", default=None)
+    set_config.add_argument("--key", required=True)
+    set_value = set_config.add_mutually_exclusive_group(required=True)
+    set_value.add_argument("--value", default=None, help="string value to write")
+    set_value.add_argument("--json-value", default=None, help="JSON value to write, for numbers, booleans, arrays, or objects")
+    set_config.add_argument("--apply", action="store_true", help="write the change; omitted means dry-run preview")
+    set_config.add_argument("--confirm", action="store_true", help="required together with --apply")
+    set_config.add_argument("--no-backup", action="store_true", help="do not write a .bak timestamp copy before applying")
 
     sub.add_parser("version", help="check latest released version from git tags")
 
@@ -231,6 +253,30 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     service_rollback_cmd.add_argument("--confirm", action="store_true", help="apply rollback; without this the command is a dry run")
     service_rollback_cmd.add_argument("--no-restart-services", action="store_true")
 
+    update = sub.add_parser("update", help="check, apply, or roll back released versions")
+    update_sub = update.add_subparsers(dest="update_command", required=True)
+    update_check = update_sub.add_parser("check", help="check whether a newer released version is available")
+    update_check.add_argument("--repo-root", default=None)
+    update_check.add_argument("--runtime-root", default="/var/lib/options-monitor")
+    update_check.add_argument("--remote-name", default="origin")
+    update_apply = update_sub.add_parser("apply", help="upgrade a current symlink to a released version")
+    update_apply.add_argument("--repo-root", default=None)
+    update_apply.add_argument("--runtime-root", default="/var/lib/options-monitor")
+    update_apply.add_argument("--releases-root", default=None)
+    update_apply.add_argument("--target-version", default=None)
+    update_apply.add_argument("--remote-name", default="origin")
+    update_apply.add_argument("--auto", action="store_true")
+    update_apply.add_argument("--allow-major", action="store_true")
+    update_apply.add_argument("--confirm", action="store_true", help="apply upgrade; without this the command is a dry run")
+    update_apply.add_argument("--no-restart-services", action="store_true")
+    update_rollback = update_sub.add_parser("rollback", help="switch current symlink back to a prior released version")
+    update_rollback.add_argument("--repo-root", default=None)
+    update_rollback.add_argument("--runtime-root", default="/var/lib/options-monitor")
+    update_rollback.add_argument("--releases-root", default=None)
+    update_rollback.add_argument("--to-version", default=None)
+    update_rollback.add_argument("--confirm", action="store_true", help="apply rollback; without this the command is a dry run")
+    update_rollback.add_argument("--no-restart-services", action="store_true")
+
     sub.add_parser("watchlist", help="manage monitored symbols")
     sub.add_parser("option-positions", help="option position operations")
     sub.add_parser("trade-events", help="review, repair, replay, and void trade events")
@@ -248,6 +294,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     runtime.add_argument("--opend-host", default="127.0.0.1")
     runtime.add_argument("--opend-port", type=int, default=11111)
     runtime.add_argument("--force", action="store_true")
+
+    setup = sub.add_parser("setup", help="set up a starter runtime config")
+    setup.add_argument("--market", required=True, choices=("us", "hk"))
+    setup.add_argument("--futu-acc-id", required=True)
+    setup.add_argument("--account-label", default="user1")
+    setup.add_argument("--config-path", default=None)
+    setup.add_argument("--data-config-path", default=None)
+    setup.add_argument("--symbol", action="append", dest="symbols", default=None)
+    setup.add_argument("--holdings-account", default=None)
+    setup.add_argument("--opend-host", default="127.0.0.1")
+    setup.add_argument("--opend-port", type=int, default=11111)
+    setup.add_argument("--force", action="store_true")
 
     run = sub.add_parser("run", help="run long-lived workflows")
     run_sub = run.add_subparsers(dest="run_command", required=True)
@@ -386,6 +444,20 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
 
+        if args.command == "doctor":
+            healthcheck = run_healthcheck(
+                config_key=args.config_key,
+                config_path=args.config_path,
+                accounts=args.accounts,
+                opend_telnet_host=args.opend_telnet_host,
+                opend_telnet_port=args.opend_telnet_port,
+            )
+            return _print(build_response(
+                tool_name="doctor",
+                ok=bool(healthcheck.get("ok", True)),
+                data={"healthcheck": healthcheck},
+            ))
+
         if args.command == "ai-cofunder" and args.ai_cofunder_command == "collect":
             payload = {
                 "scope": args.scope,
@@ -498,6 +570,33 @@ def main(argv: list[str] | None = None) -> int:
                 common_user_config_path=args.common_user_config,
                 include_common_user_config=not bool(args.no_common_user_config),
                 user_config_path=args.user_config,
+            ))
+
+        if args.command == "config" and args.config_command == "get":
+            return _print(build_response(
+                tool_name="config.get",
+                ok=True,
+                data=get_runtime_config_value(
+                    config_key=args.config_key,
+                    config_path=args.config_path,
+                    key=args.key,
+                ),
+            ))
+
+        if args.command == "config" and args.config_command == "set":
+            return _print(build_response(
+                tool_name="config.set",
+                ok=True,
+                data=set_runtime_config_value(
+                    config_key=args.config_key,
+                    config_path=args.config_path,
+                    key=args.key,
+                    value=args.value,
+                    json_value=args.json_value,
+                    apply=bool(args.apply),
+                    confirm=bool(args.confirm),
+                    backup=not bool(args.no_backup),
+                ),
             ))
 
         if args.command == "version":
@@ -648,8 +747,55 @@ def main(argv: list[str] | None = None) -> int:
             )
             return _print(build_response(tool_name="service.rollback", ok=bool(data.get("ok")), data=data))
 
+        if args.command == "update" and args.update_command == "check":
+            data = service_upgrade_check(
+                repo_root=args.repo_root or repo_base(),
+                runtime_root=args.runtime_root,
+                remote_name=args.remote_name,
+            )
+            return _print(build_response(tool_name="update.check", ok=bool(data.get("ok")), data=data))
+
+        if args.command == "update" and args.update_command == "apply":
+            data = service_upgrade(
+                repo_root=args.repo_root or repo_base(),
+                runtime_root=args.runtime_root,
+                releases_root=args.releases_root,
+                target_version=args.target_version,
+                remote_name=args.remote_name,
+                confirm=bool(args.confirm),
+                auto=bool(args.auto),
+                allow_major=bool(args.allow_major),
+                restart_services=not bool(args.no_restart_services),
+            )
+            return _print(build_response(tool_name="update.apply", ok=bool(data.get("ok")), data=data))
+
+        if args.command == "update" and args.update_command == "rollback":
+            data = service_rollback(
+                repo_root=args.repo_root or repo_base(),
+                runtime_root=args.runtime_root,
+                releases_root=args.releases_root,
+                to_version=args.to_version,
+                confirm=bool(args.confirm),
+                restart_services=not bool(args.no_restart_services),
+            )
+            return _print(build_response(tool_name="update.rollback", ok=bool(data.get("ok")), data=data))
+
         if args.command == "init" and args.init_command == "runtime":
             return _print(build_response(tool_name="init.runtime", ok=True, data=init_runtime(
+                market=args.market,
+                futu_acc_id=args.futu_acc_id,
+                account_label=args.account_label,
+                config_path=args.config_path,
+                data_config_path=args.data_config_path,
+                symbols=args.symbols,
+                holdings_account=args.holdings_account,
+                opend_host=args.opend_host,
+                opend_port=args.opend_port,
+                force=bool(args.force),
+            )))
+
+        if args.command == "setup":
+            return _print(build_response(tool_name="setup", ok=True, data=init_runtime(
                 market=args.market,
                 futu_acc_id=args.futu_acc_id,
                 account_label=args.account_label,
