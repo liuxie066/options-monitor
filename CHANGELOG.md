@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.2.86 - 2026-05-20
+
+### Added
+- Added project-level memory governance docs that define `memory/` as the LLM wiki, including authority order, ingest triggers, lint expectations, and audit logging.
+- Added `memory/index.md` to organize existing decisions, patterns, and failures by module for future agent work.
+- Added templates for durable memory decisions, patterns, and failures.
+
+### Changed
+- Documented the Memory / LLM Wiki workflow in `docs/AGENT_WIKI.md`, including manual ingest prompts and the rule that ordinary debug/session summaries must not be promoted automatically.
+
 ## 1.2.85 - 2026-05-20
 
 ### Added
