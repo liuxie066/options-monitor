@@ -14,6 +14,45 @@ _INT_RE = re.compile(r"(?<!\d)(\d{1,3})(?!\d)")
 _DATE_RE = re.compile(r"(?<!\d)(20\d{2})[-/.](0[1-9]|1[0-2])[-/.](0[1-9]|[12]\d|3[01])(?!\d)")
 _OPERATION_ID_RE = re.compile(r"\bin_[A-Za-z0-9_.:-]+\b")
 _SYMBOL_RE = re.compile(r"(?<![A-Za-z0-9_.])([A-Za-z]{1,8}(?:\.[A-Za-z]{1,4})?|[A-Za-z]{2}\.\d{4,5}|\d{3,5}(?:\.HK)?|[\u4e00-\u9fff]{2,8})(?![A-Za-z0-9_.])")
+_MANUAL_UPDATE_SET_RE = r"(?:改成|改为|变成|设为|设置为|调整为|调整成|to|=|:|：)"
+_MANUAL_UPDATE_ALIASES: tuple[tuple[str, str], ...] = (
+    ("premium_per_share", "premium_per_share"),
+    ("premium", "premium_per_share"),
+    ("权利金", "premium_per_share"),
+    ("close_price", "close_price"),
+    ("close", "close_price"),
+    ("平仓价", "close_price"),
+    ("平仓价格", "close_price"),
+    ("contracts_to_close", "contracts_to_close"),
+    ("平仓数量", "contracts_to_close"),
+    ("合约数", "contracts"),
+    ("数量", "contracts"),
+    ("张数", "contracts"),
+    ("contracts", "contracts"),
+    ("qty", "contracts"),
+    ("strike", "strike"),
+    ("行权价", "strike"),
+    ("multiplier", "multiplier"),
+    ("乘数", "multiplier"),
+    ("underlying_share_locked", "underlying_share_locked"),
+    ("locked_shares", "underlying_share_locked"),
+    ("locked", "underlying_share_locked"),
+    ("锁定股数", "underlying_share_locked"),
+    ("expiration_ymd", "expiration_ymd"),
+    ("expiration", "expiration_ymd"),
+    ("到期日", "expiration_ymd"),
+    ("exp", "expiration_ymd"),
+    ("option_type", "option_type"),
+    ("type", "option_type"),
+    ("side", "side"),
+    ("方向", "side"),
+    ("currency", "currency"),
+    ("币种", "currency"),
+    ("record_id", "record_id"),
+    ("close_reason", "close_reason"),
+    ("note", "note"),
+    ("备注", "note"),
+)
 
 
 def parse_inbound_text(text: str, *, now_fn: Callable[[], date] | None = None) -> InboundIntent:
@@ -31,6 +70,13 @@ def parse_inbound_text(text: str, *, now_fn: Callable[[], date] | None = None) -
 
     if compact in {"帮助", "help", "/help"}:
         return InboundIntent(name="help", arguments={})
+
+    if compact in {"待确认", "当前预览", "待确认记录", "pending", "pendingoperations"} or lower in {
+        "pending",
+        "pending operations",
+        "current preview",
+    }:
+        return InboundIntent(name="pending_operations", arguments={})
 
     operation_intent = _parse_operation_intent(raw, compact=compact, lower=lower)
     if operation_intent is not None:
@@ -137,13 +183,13 @@ def _extract_run_id_for_logs(text: str) -> str | None:
 
 def _parse_operation_intent(text: str, *, compact: str, lower: str) -> InboundIntent | None:
     if compact.startswith("确认记录") or lower.startswith("confirm trade"):
-        return InboundIntent(name="manual_trade_confirm", arguments={"operation_id": _extract_operation_id(text)})
+        return InboundIntent(name="manual_trade_confirm", arguments=_operation_reference_args(text))
     if compact.startswith("取消记录") or lower.startswith("cancel trade"):
-        return InboundIntent(name="manual_trade_cancel", arguments={"operation_id": _extract_operation_id(text)})
+        return InboundIntent(name="manual_trade_cancel", arguments=_operation_reference_args(text))
     if compact.startswith("确认监控") or lower.startswith("confirm symbol"):
-        return InboundIntent(name="symbol_confirm", arguments={"operation_id": _extract_operation_id(text)})
+        return InboundIntent(name="symbol_confirm", arguments=_operation_reference_args(text))
     if compact.startswith("取消监控") or lower.startswith("cancel symbol"):
-        return InboundIntent(name="symbol_cancel", arguments={"operation_id": _extract_operation_id(text)})
+        return InboundIntent(name="symbol_cancel", arguments=_operation_reference_args(text))
 
     if _looks_like_symbol_list(compact, lower):
         return InboundIntent(name="symbol_list", arguments={})
@@ -158,15 +204,25 @@ def _parse_operation_intent(text: str, *, compact: str, lower: str) -> InboundIn
         return InboundIntent(name="manual_trade_open", arguments=_parse_manual_trade_request(text))
     if _looks_like_manual_close(compact, lower):
         return InboundIntent(name="manual_trade_close", arguments=_parse_manual_trade_request(text))
+    manual_update = _parse_manual_trade_update(text)
+    if manual_update:
+        return InboundIntent(name="manual_trade_update", arguments=manual_update)
     return None
 
 
-def _extract_operation_id(text: str) -> str:
+def _operation_reference_args(text: str) -> dict[str, object]:
+    operation_id = _extract_operation_id(text)
+    return {
+        "operation_id": operation_id,
+        "operation_resolution": "explicit" if operation_id else "latest_pending",
+    }
+
+
+def _extract_operation_id(text: str) -> str | None:
     match = _OPERATION_ID_RE.search(text)
     if match:
         return match.group(0)
-    parts = [part.strip() for part in re.split(r"\s+", text.strip()) if part.strip()]
-    return parts[-1] if parts else ""
+    return None
 
 
 def _parse_manual_trade_request(text: str) -> dict[str, object]:
@@ -175,6 +231,70 @@ def _parse_manual_trade_request(text: str) -> dict[str, object]:
     if account:
         args["account"] = account
     return args
+
+
+def _parse_manual_trade_update(text: str) -> dict[str, object]:
+    updates: dict[str, object] = {}
+    labeled = _extract_labeled_values(text)
+    for raw_key, raw_value in labeled.items():
+        field = _manual_update_field(raw_key)
+        if field:
+            updates[field] = _manual_update_value(field, raw_value)
+    for alias, field in sorted(_MANUAL_UPDATE_ALIASES, key=lambda item: len(item[0]), reverse=True):
+        pattern = rf"{re.escape(alias)}\s*{_MANUAL_UPDATE_SET_RE}\s*([^\s,，。]+)"
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            updates[field] = _manual_update_value(field, match.group(1))
+    if not updates:
+        return {}
+    operation_id = _extract_operation_id(text)
+    return {
+        "operation_id": operation_id,
+        "operation_resolution": "explicit" if operation_id else "latest_pending",
+        "updates": updates,
+    }
+
+
+def _manual_update_field(raw_key: str) -> str | None:
+    lowered = str(raw_key or "").strip().lower()
+    for alias, field in _MANUAL_UPDATE_ALIASES:
+        if lowered == alias.lower():
+            return field
+    return None
+
+
+def _manual_update_value(field: str, raw_value: object) -> object:
+    text = str(raw_value or "").strip()
+    if field in {"contracts", "contracts_to_close", "underlying_share_locked"}:
+        return _parse_int_token(text)
+    if field in {"premium_per_share", "close_price", "strike", "multiplier"}:
+        return _parse_float_token(text)
+    if field == "expiration_ymd":
+        return _parse_date(text) or text
+    if field == "option_type":
+        return _parse_option_type(text) or text.lower()
+    if field == "side":
+        return _parse_position_side(text) or text.lower()
+    if field == "currency":
+        return text.upper()
+    return text
+
+
+def _parse_int_token(text: str) -> int:
+    match = re.search(r"-?\d+(?:\.\d+)?", text)
+    if not match:
+        raise AgentToolError(code="INPUT_ERROR", message=f"无法解析整数：{text}")
+    token = match.group(0)
+    if "." in token:
+        raise AgentToolError(code="INPUT_ERROR", message=f"整数参数不能写小数：{token}")
+    return int(token)
+
+
+def _parse_float_token(text: str) -> float:
+    match = re.search(r"-?\d+(?:\.\d+)?", text)
+    if not match:
+        raise AgentToolError(code="INPUT_ERROR", message=f"无法解析数字：{text}")
+    return float(match.group(0))
 
 
 def _parse_symbol_add(text: str) -> dict[str, object]:

@@ -35,6 +35,48 @@ def test_top_level_doctor_wraps_healthcheck(monkeypatch, capsys) -> None:
         "accounts": ["lx", "sy"],
         "opend_telnet_host": None,
         "opend_telnet_port": None,
+        "audit_db": None,
+        "profile_path": None,
+        "include_service_status": False,
+    }]
+
+
+def test_top_level_healthcheck_passes_inbound_diagnostics_args(monkeypatch, capsys) -> None:
+    import src.interfaces.cli.main as cli
+
+    calls: list[dict] = []
+
+    def _healthcheck(**kwargs):
+        calls.append(kwargs)
+        return {"tool_name": "healthcheck", "ok": True, "data": {"status": "pass"}}
+
+    monkeypatch.setattr(cli, "run_healthcheck", _healthcheck)
+
+    rc = cli.main(
+        [
+            "healthcheck",
+            "--config-path",
+            "config.us.json",
+            "--audit-db",
+            "inbound.sqlite3",
+            "--profile-path",
+            "service.profile.json",
+            "--include-service-status",
+        ]
+    )
+    payload = _read_json_output(capsys)
+
+    assert rc == 0
+    assert payload["tool_name"] == "healthcheck"
+    assert calls == [{
+        "config_key": None,
+        "config_path": "config.us.json",
+        "accounts": None,
+        "opend_telnet_host": None,
+        "opend_telnet_port": None,
+        "audit_db": "inbound.sqlite3",
+        "profile_path": "service.profile.json",
+        "include_service_status": True,
     }]
 
 

@@ -27,6 +27,7 @@ from src.application.inbound import (
     handle_inbound_request,
     serve_feishu_ws,
 )
+from src.application.inbound.diagnostics import collect_pending_operations, collect_recent_audit
 from src.application.layered_config import build_layered_runtime_config_file, explain_layered_runtime_config_key
 from src.application.multi_account_tick import run_tick
 from src.application.notification_pipeline import preview_notification
@@ -79,6 +80,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     health.add_argument("--accounts", nargs="*", default=None)
     health.add_argument("--opend-telnet-host", default=None)
     health.add_argument("--opend-telnet-port", type=int, default=None)
+    health.add_argument("--audit-db", default=None)
+    health.add_argument("--profile-path", default=None)
+    health.add_argument("--include-service-status", action="store_true")
 
     doctor = sub.add_parser("doctor", help="diagnose runtime readiness and common operator issues")
     doctor.add_argument("--config-key", default=None, choices=("us", "hk"))
@@ -86,6 +90,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     doctor.add_argument("--accounts", nargs="*", default=None)
     doctor.add_argument("--opend-telnet-host", default=None)
     doctor.add_argument("--opend-telnet-port", type=int, default=None)
+    doctor.add_argument("--audit-db", default=None)
+    doctor.add_argument("--profile-path", default=None)
+    doctor.add_argument("--include-service-status", action="store_true")
 
     inbound = sub.add_parser("inbound", help="handle controlled inbound remote commands")
     inbound_sub = inbound.add_subparsers(dest="inbound_command", required=True)
@@ -94,10 +101,31 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     inbound_handle.add_argument("--sender", dest="sender_id", default="local")
     inbound_handle.add_argument("--channel", default="local")
     inbound_handle.add_argument("--message-id", default=None)
+    inbound_handle.add_argument("--conversation-id", default=None)
     inbound_handle.add_argument("--config-key", default="us", choices=("us", "hk"))
     inbound_handle.add_argument("--config-path", default=None)
     inbound_handle.add_argument("--audit-db", default=None)
     inbound_handle.add_argument("--format", choices=("json", "text"), default="json")
+    inbound_pending = inbound_sub.add_parser("pending", help="inspect pending inbound operations")
+    inbound_pending_sub = inbound_pending.add_subparsers(dest="inbound_pending_command", required=True)
+    inbound_pending_list = inbound_pending_sub.add_parser("list", help="list previewed operations awaiting confirmation")
+    inbound_pending_list.add_argument("--sender", dest="sender_id", default=None)
+    inbound_pending_list.add_argument("--channel", default=None)
+    inbound_pending_list.add_argument("--conversation-id", default=None)
+    inbound_pending_list.add_argument("--operation-type", action="append", dest="operation_types", default=None)
+    inbound_pending_list.add_argument("--include-expired", action="store_true")
+    inbound_pending_list.add_argument("--limit", type=int, default=20)
+    inbound_pending_list.add_argument("--audit-db", default=None)
+    inbound_pending_list.add_argument("--format", choices=("json", "text"), default="json")
+    inbound_audit = inbound_sub.add_parser("audit", help="inspect inbound audit records")
+    inbound_audit_sub = inbound_audit.add_subparsers(dest="inbound_audit_command", required=True)
+    inbound_audit_recent = inbound_audit_sub.add_parser("recent", help="show recent inbound audit records")
+    inbound_audit_recent.add_argument("--sender", dest="sender_id", default=None)
+    inbound_audit_recent.add_argument("--channel", default=None)
+    inbound_audit_recent.add_argument("--conversation-id", default=None)
+    inbound_audit_recent.add_argument("--limit", type=int, default=20)
+    inbound_audit_recent.add_argument("--audit-db", default=None)
+    inbound_audit_recent.add_argument("--format", choices=("json", "text"), default="json")
     inbound_feishu = inbound_sub.add_parser("feishu", help="handle one Feishu event payload through inbound control")
     feishu_input = inbound_feishu.add_mutually_exclusive_group(required=True)
     feishu_input.add_argument("--input-json", default=None)
@@ -636,6 +664,9 @@ def main(argv: list[str] | None = None) -> int:
                     accounts=args.accounts,
                     opend_telnet_host=args.opend_telnet_host,
                     opend_telnet_port=args.opend_telnet_port,
+                    audit_db=args.audit_db,
+                    profile_path=args.profile_path,
+                    include_service_status=bool(args.include_service_status),
                 )
             )
 
@@ -646,6 +677,9 @@ def main(argv: list[str] | None = None) -> int:
                 accounts=args.accounts,
                 opend_telnet_host=args.opend_telnet_host,
                 opend_telnet_port=args.opend_telnet_port,
+                audit_db=args.audit_db,
+                profile_path=args.profile_path,
+                include_service_status=bool(args.include_service_status),
             )
             return _print(build_response(
                 tool_name="doctor",
@@ -660,6 +694,7 @@ def main(argv: list[str] | None = None) -> int:
                     sender_id=args.sender_id,
                     channel=args.channel,
                     message_id=args.message_id,
+                    conversation_id=args.conversation_id,
                     config_key=args.config_key,
                     config_path=args.config_path,
                     audit_db=args.audit_db,
@@ -671,6 +706,36 @@ def main(argv: list[str] | None = None) -> int:
                 text = str(data.get("response_text") or "").strip() or _dumps(out)
                 sys.stdout.write(text + "\n")
                 return 0 if out.get("ok", True) else 2
+            return _print(out)
+
+        if args.command == "inbound" and args.inbound_command == "pending" and args.inbound_pending_command == "list":
+            data = collect_pending_operations(
+                audit_db=args.audit_db,
+                channel=args.channel,
+                sender_id=args.sender_id,
+                conversation_id=args.conversation_id,
+                operation_types=args.operation_types,
+                include_expired=bool(args.include_expired),
+                limit=int(args.limit),
+            )
+            out = build_response(tool_name="inbound.pending.list", ok=True, data=data)
+            if args.format == "text":
+                sys.stdout.write(str(data.get("response_text") or "").strip() + "\n")
+                return 0
+            return _print(out)
+
+        if args.command == "inbound" and args.inbound_command == "audit" and args.inbound_audit_command == "recent":
+            data = collect_recent_audit(
+                audit_db=args.audit_db,
+                channel=args.channel,
+                sender_id=args.sender_id,
+                conversation_id=args.conversation_id,
+                limit=int(args.limit),
+            )
+            out = build_response(tool_name="inbound.audit.recent", ok=True, data=data)
+            if args.format == "text":
+                sys.stdout.write(str(data.get("response_text") or "").strip() + "\n")
+                return 0
             return _print(out)
 
         if args.command == "inbound" and args.inbound_command == "feishu":

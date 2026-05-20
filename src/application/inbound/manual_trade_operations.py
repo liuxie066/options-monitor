@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import asdict, is_dataclass
 from typing import Any, cast
 
@@ -21,10 +22,49 @@ from src.application.positions.workflows import (
 
 PREVIEW_INTENTS = frozenset({"manual_trade_open", "manual_trade_close"})
 CONFIRM_INTENTS = frozenset({"manual_trade_confirm", "manual_trade_cancel"})
+UPDATE_INTENTS = frozenset({"manual_trade_update"})
+MANUAL_TRADE_OPERATION_TYPES = frozenset({"manual_open", "manual_close"})
+MANUAL_OPEN_UPDATE_FIELDS = frozenset(
+    {
+        "contracts",
+        "strike",
+        "multiplier",
+        "expiration_ymd",
+        "premium_per_share",
+        "underlying_share_locked",
+        "currency",
+        "note",
+    }
+)
+MANUAL_CLOSE_UPDATE_FIELDS = frozenset(
+    {
+        "record_id",
+        "contracts",
+        "contracts_to_close",
+        "strike",
+        "expiration_ymd",
+        "close_price",
+        "close_reason",
+    }
+)
+FIELD_LABELS = {
+    "contracts": "合约数",
+    "contracts_to_close": "平仓数量",
+    "strike": "Strike",
+    "multiplier": "Multiplier",
+    "expiration_ymd": "到期日",
+    "premium_per_share": "Premium",
+    "underlying_share_locked": "Locked",
+    "currency": "币种",
+    "note": "备注",
+    "record_id": "record_id",
+    "close_price": "平仓价",
+    "close_reason": "平仓原因",
+}
 
 
 def is_manual_trade_operation_intent(intent: InboundIntent) -> bool:
-    return intent.name in PREVIEW_INTENTS or intent.name in CONFIRM_INTENTS
+    return intent.name in PREVIEW_INTENTS or intent.name in CONFIRM_INTENTS or intent.name in UPDATE_INTENTS
 
 
 def handle_manual_trade_operation(
@@ -76,9 +116,16 @@ def handle_manual_trade_operation(
         )
         return _preview_and_save(payload, request=request, command_id=command_id, store=store, ttl_seconds=policy.confirm_ttl_seconds)
     if intent.name == "manual_trade_confirm":
-        return _confirm_operation(operation_id=_required_text(intent.arguments.get("operation_id"), "operation_id"), request=request, store=store)
+        return _confirm_operation(operation_id=_optional_text(intent.arguments.get("operation_id")), request=request, store=store)
     if intent.name == "manual_trade_cancel":
-        return _cancel_operation(operation_id=_required_text(intent.arguments.get("operation_id"), "operation_id"), request=request, store=store)
+        return _cancel_operation(operation_id=_optional_text(intent.arguments.get("operation_id")), request=request, store=store)
+    if intent.name == "manual_trade_update":
+        return _update_operation(
+            operation_id=_optional_text(intent.arguments.get("operation_id")),
+            updates=dict(intent.arguments.get("updates") or {}),
+            request=request,
+            store=store,
+        )
     raise AgentToolError(code="INPUT_ERROR", message=f"unsupported manual trade operation intent: {intent.name}")
 
 
@@ -99,6 +146,7 @@ def _preview_and_save(
         command_id=command_id,
         channel=request.channel,
         sender_id=request.sender_id,
+        conversation_id=request.conversation_id,
         operation_type=str(payload["operation_type"]),
         payload_hash=payload_hash,
         payload=payload,
@@ -123,12 +171,18 @@ def _preview_and_save(
     )
 
 
-def _confirm_operation(*, operation_id: str, request: InboundRequest, store: InboundOperationStore) -> dict[str, Any]:
-    operation = _load_pending_operation(operation_id, request=request, store=store)
+def _confirm_operation(*, operation_id: str | None, request: InboundRequest, store: InboundOperationStore) -> dict[str, Any]:
+    operation_id, operation, operation_resolution = _resolve_manual_trade_operation(
+        operation_id=operation_id,
+        request=request,
+        store=store,
+        allow_expired=False,
+        action="确认",
+    )
     if operation_is_expired(operation):
         result = {"operation_id": operation_id, "status": "expired"}
         store.mark_expired(operation_id, result=result)
-        raise AgentToolError(code="NEEDS_CLARIFICATION", message="这条交易记录确认已过期，未写入账本。", hint="请重新发送记录交易命令生成新的预览。", details=result)
+        raise AgentToolError(code="NEEDS_CLARIFICATION", message="这条交易记录确认已过期，未写入账本。", hint="请重新发送记录交易命令生成新的预览。", details={**result, **operation_resolution})
     payload = dict(operation["payload"])
     stored_hash = str(operation.get("payload_hash") or "")
     current_hash = hash_operation_payload(payload)
@@ -136,7 +190,19 @@ def _confirm_operation(*, operation_id: str, request: InboundRequest, store: Inb
         result = {"operation_id": operation_id, "status": "failed", "reason": "payload_hash_mismatch"}
         store.mark_failed(operation_id, result=result)
         raise AgentToolError(code="INTERNAL_ERROR", message="pending operation payload hash mismatch; refusing to write ledger", details=result)
-    store.mark_confirmed(operation_id)
+    if not store.mark_confirmed(operation_id):
+        current = store.get(operation_id) or {}
+        current_status = str(current.get("status") or "-")
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message=f"这条交易记录不能再次确认，当前状态：{current_status}。",
+            details={
+                "operation_id": operation_id,
+                "status": current_status,
+                "reason": "operation_not_previewed",
+                **operation_resolution,
+            },
+        )
     try:
         preview = _preview_operation(payload)
         result = _apply_operation(payload)
@@ -154,6 +220,7 @@ def _confirm_operation(*, operation_id: str, request: InboundRequest, store: Inb
         ok=True,
         data={
             "operation_id": operation_id,
+            **operation_resolution,
             "operation_type": payload["operation_type"],
             "status": "applied",
             "payload_hash": current_hash,
@@ -166,39 +233,222 @@ def _confirm_operation(*, operation_id: str, request: InboundRequest, store: Inb
     )
 
 
-def _cancel_operation(*, operation_id: str, request: InboundRequest, store: InboundOperationStore) -> dict[str, Any]:
-    operation = _load_pending_operation(operation_id, request=request, store=store, allow_expired=True)
+def _cancel_operation(*, operation_id: str | None, request: InboundRequest, store: InboundOperationStore) -> dict[str, Any]:
+    operation_id, operation, operation_resolution = _resolve_manual_trade_operation(
+        operation_id=operation_id,
+        request=request,
+        store=store,
+        allow_expired=True,
+        action="取消",
+    )
     result = {"operation_id": operation_id, "status": "cancelled"}
     store.mark_cancelled(operation_id, result=result)
     text = f"交易记录已取消，未写入账本。\ncommand_id: {operation_id}"
     return build_response(
         tool_name="inbound.manual_trade",
         ok=True,
-        data={"operation_id": operation_id, "operation_type": operation.get("operation_type"), "status": "cancelled", "result": result, "response_text": text},
+        data={"operation_id": operation_id, **operation_resolution, "operation_type": operation.get("operation_type"), "status": "cancelled", "result": result, "response_text": text},
         meta={"audit_db": mask_path(store.path)},
     )
 
 
-def _load_pending_operation(
-    operation_id: str,
+def _update_operation(*, operation_id: str | None, updates: dict[str, Any], request: InboundRequest, store: InboundOperationStore) -> dict[str, Any]:
+    operation_id, operation, operation_resolution = _resolve_manual_trade_operation(
+        operation_id=operation_id,
+        request=request,
+        store=store,
+        allow_expired=False,
+        action="修改",
+    )
+    patch = _normalize_manual_trade_patch(str(operation.get("operation_type") or ""), updates)
+    payload = _apply_manual_trade_patch(dict(operation["payload"]), patch)
+    preview = _preview_operation(payload)
+    payload = _payload_with_preview_locked_values(payload, preview)
+    preview = _preview_operation(payload)
+    payload_hash = hash_operation_payload(payload)
+    updated = store.update_preview(operation_id, payload_hash=payload_hash, payload=payload, preview=preview)
+    text = render_manual_trade_response("updated", operation_id, payload, preview=preview, expires_at=str(updated.get("expires_at") or ""))
+    if patch:
+        text += "\n" + _format_patch_summary(patch)
+    return build_response(
+        tool_name="inbound.manual_trade",
+        ok=True,
+        data={
+            "operation_id": operation_id,
+            **operation_resolution,
+            "operation_type": payload["operation_type"],
+            "status": "previewed",
+            "updated_fields": sorted(patch.keys()),
+            "patch": patch,
+            "payload_hash": payload_hash,
+            "payload": payload,
+            "preview": preview,
+            "expires_at": updated.get("expires_at"),
+            "response_text": text,
+        },
+        meta={"audit_db": mask_path(store.path)},
+    )
+
+
+def _resolve_manual_trade_operation(
     *,
+    operation_id: str | None,
     request: InboundRequest,
     store: InboundOperationStore,
-    allow_expired: bool = False,
-) -> dict[str, Any]:
-    operation = store.get(operation_id)
-    if operation is None:
-        raise AgentToolError(code="INPUT_ERROR", message="找不到待确认的交易记录。", hint="请检查 operation_id，或重新发送记录交易命令。")
-    if str(operation.get("channel") or "") != request.channel or str(operation.get("sender_id") or "") != request.sender_id:
-        raise AgentToolError(code="PERMISSION_DENIED", message="只能由创建该预览的同一 sender 确认或取消。", details={"operation_id": operation_id})
-    status = str(operation.get("status") or "").strip()
-    if status != "previewed":
-        raise AgentToolError(code="INPUT_ERROR", message=f"这条交易记录不能再次确认，当前状态：{status or '-'}。", details={"operation_id": operation_id, "status": status})
-    if not allow_expired and operation_is_expired(operation):
-        result = {"operation_id": operation_id, "status": "expired"}
-        store.mark_expired(operation_id, result=result)
-        raise AgentToolError(code="NEEDS_CLARIFICATION", message="这条交易记录确认已过期，未写入账本。", hint="请重新发送记录交易命令生成新的预览。", details=result)
-    return operation
+    allow_expired: bool,
+    action: str,
+) -> tuple[str, dict[str, Any], dict[str, Any]]:
+    resolution = store.resolve_pending_operation(
+        channel=request.channel,
+        sender_id=request.sender_id,
+        operation_types=MANUAL_TRADE_OPERATION_TYPES,
+        conversation_id=request.conversation_id,
+        explicit_operation_id=operation_id,
+        allow_expired=allow_expired,
+    )
+    details = _operation_resolution_details(resolution)
+    status = str(resolution.get("status") or "")
+    resolved_operation_id = str(resolution.get("operation_id") or operation_id or "").strip()
+    operation_raw = resolution.get("operation")
+    operation = cast(dict[str, Any], operation_raw) if isinstance(operation_raw, dict) else {}
+    if status == "resolved" and resolved_operation_id and operation:
+        return resolved_operation_id, operation, details
+    if status == "expired":
+        result = {"operation_id": resolved_operation_id, "status": "expired"}
+        if resolved_operation_id:
+            store.mark_expired(resolved_operation_id, result=result)
+        raise AgentToolError(code="NEEDS_CLARIFICATION", message="这条交易记录确认已过期，未写入账本。", hint="请重新发送记录交易命令生成新的预览。", details={**result, **details})
+    if status == "ambiguous":
+        hint = (
+            _candidate_hint("确认记录" if action == "确认" else "取消记录", details.get("candidate_operations"))
+            if action in {"确认", "取消"}
+            else _update_candidate_hint(details.get("candidate_operations"))
+        )
+        raise AgentToolError(
+            code="NEEDS_CLARIFICATION",
+            message=f"有多条待{action}的交易记录，请带 operation_id。",
+            hint=hint,
+            details=details,
+        )
+    if status == "none":
+        raise AgentToolError(code="NEEDS_CLARIFICATION", message=f"没有可{action}的交易记录。", hint="请先发送记录交易命令生成预览。", details=details)
+    if status == "forbidden":
+        raise AgentToolError(code="PERMISSION_DENIED", message=f"只能由创建该预览的同一 sender/对话 {action}。", details=details)
+    if status == "wrong_family":
+        raise AgentToolError(code="INPUT_ERROR", message="这不是交易记录操作，不能用确认记录/取消记录处理。", details=details)
+    if status == "invalid_status":
+        current_status = str(operation.get("status") or "-")
+        raise AgentToolError(code="INPUT_ERROR", message=f"这条交易记录不能再次{action}，当前状态：{current_status}。", details=details)
+    raise AgentToolError(code="INPUT_ERROR", message="找不到待确认的交易记录。", hint="请检查 operation_id，或重新发送记录交易命令。", details=details)
+
+
+def _normalize_manual_trade_patch(operation_type: str, updates: dict[str, Any]) -> dict[str, Any]:
+    raw_patch = {
+        _manual_trade_patch_target_key(operation_type, str(key).strip()): value
+        for key, value in updates.items()
+        if str(key).strip()
+    }
+    if operation_type == "manual_open":
+        allowed = MANUAL_OPEN_UPDATE_FIELDS
+    elif operation_type == "manual_close":
+        allowed = MANUAL_CLOSE_UPDATE_FIELDS
+    else:
+        raise AgentToolError(code="INPUT_ERROR", message=f"unsupported operation_type for update: {operation_type}")
+    disallowed = sorted(key for key in raw_patch if key not in allowed)
+    if disallowed:
+        labels = "、".join(disallowed)
+        raise AgentToolError(code="NEEDS_CLARIFICATION", message=f"这条交易记录不能修改字段：{labels}。", hint="请取消后重新记录，或只修改当前预览支持的字段。")
+    patch: dict[str, Any] = {}
+    for key, value in raw_patch.items():
+        patch[key] = _normalize_patch_value(key, value)
+    if not patch:
+        raise AgentToolError(code="NEEDS_CLARIFICATION", message="没有识别出要修改的交易字段。", hint="例如：premium 改成 2.35，或 合约数改成 2。")
+    return patch
+
+
+def _manual_trade_patch_target_key(operation_type: str, key: str) -> str:
+    if operation_type == "manual_close" and key == "contracts":
+        return "contracts_to_close"
+    if operation_type == "manual_close" and key == "premium_per_share":
+        return "close_price"
+    return key
+
+
+def _normalize_patch_value(field_name: str, value: Any) -> Any:
+    if field_name in {"contracts", "contracts_to_close", "underlying_share_locked"}:
+        return _positive_int(value, field_name)
+    if field_name in {"strike", "multiplier", "premium_per_share", "close_price"}:
+        return _positive_float(value, field_name)
+    if field_name == "expiration_ymd":
+        text = _required_text(value, field_name)
+        if not re_match_date(text):
+            raise AgentToolError(code="INPUT_ERROR", message="expiration_ymd must be YYYY-MM-DD")
+        return text
+    if field_name == "currency":
+        return _required_text(value, field_name).upper()
+    return _required_text(value, field_name)
+
+
+def _apply_manual_trade_patch(payload: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+    out = dict(payload)
+    args = dict(out.get("arguments") or {})
+    args.update(patch)
+    out["arguments"] = args
+    diagnostics = out.get("diagnostics")
+    if isinstance(diagnostics, dict):
+        out["diagnostics"] = {**diagnostics, "updated_fields": sorted(patch.keys())}
+    else:
+        out["diagnostics"] = {"updated_fields": sorted(patch.keys())}
+    return out
+
+
+def _operation_resolution_details(resolution: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "operation_resolution": resolution.get("operation_resolution"),
+        "resolved_operation_id": resolution.get("operation_id"),
+        "candidate_operations": resolution.get("candidate_operations") or [],
+    }
+
+
+def _candidate_hint(prefix: str, candidates: Any) -> str:
+    rows = candidates if isinstance(candidates, list) else []
+    candidate_lines = _candidate_summary_lines(rows, prefix=prefix)
+    if not candidate_lines:
+        return f"请回复：{prefix} <operation_id>"
+    return "\n候选交易：\n" + "\n".join(candidate_lines)
+
+
+def _update_candidate_hint(candidates: Any) -> str:
+    rows = candidates if isinstance(candidates, list) else []
+    candidate_lines = _candidate_summary_lines(rows, prefix="")
+    if not candidate_lines:
+        return "请在修改内容后带 operation_id，例如：premium 改成 2.35 <operation_id>"
+    return "请在修改内容后带 operation_id，例如：premium 改成 2.35 <operation_id>\n候选交易：\n" + "\n".join(candidate_lines)
+
+
+def _candidate_summary_lines(rows: list[Any], *, prefix: str) -> list[str]:
+    lines: list[str] = []
+    for idx, item_raw in enumerate(rows[:5], start=1):
+        if not isinstance(item_raw, dict):
+            continue
+        operation_id = str(item_raw.get("operation_id") or "").strip()
+        if not operation_id:
+            continue
+        summary = str(item_raw.get("summary") or item_raw.get("operation_type") or "-").strip()
+        command = f"{prefix} {operation_id}".strip()
+        if command:
+            lines.append(f"{idx}. {operation_id} | {summary} | 回复：{command}")
+        else:
+            lines.append(f"{idx}. {operation_id} | {summary}")
+    return lines
+
+
+def _format_patch_summary(patch: dict[str, Any]) -> str:
+    parts = []
+    for key in sorted(patch):
+        label = FIELD_LABELS.get(key, key)
+        parts.append(f"{label}={patch[key]}")
+    return "已修改：" + "，".join(parts)
 
 
 def _manual_trade_raw_text(intent: InboundIntent, request: InboundRequest) -> str:
@@ -360,7 +610,7 @@ def render_manual_trade_response(
     raw_fields = preview_map.get("fields")
     fields = cast(dict[str, Any], raw_fields) if isinstance(raw_fields, dict) else {}
     if operation_type == "manual_open":
-        title = "交易记录预览：开仓" if status == "previewed" else "交易已写入 OM 本地账本：开仓"
+        title = "交易记录预览已更新：开仓" if status == "updated" else ("交易记录预览：开仓" if status == "previewed" else "交易已写入 OM 本地账本：开仓")
         lines = [
             title,
             f"账户：{fields.get('account') or args.get('account') or '-'}",
@@ -369,7 +619,7 @@ def render_manual_trade_response(
             f"数量：{args.get('contracts') or '-'} 张",
         ]
     else:
-        title = "交易记录预览：平仓" if status == "previewed" else "交易已写入 OM 本地账本：平仓"
+        title = "交易记录预览已更新：平仓" if status == "updated" else ("交易记录预览：平仓" if status == "previewed" else "交易已写入 OM 本地账本：平仓")
         raw_match = preview_map.get("match")
         match = cast(dict[str, Any], raw_match) if isinstance(raw_match, dict) else {}
         preview_record_id = preview_map.get("record_id")
@@ -381,8 +631,17 @@ def render_manual_trade_response(
             f"合约：{fields.get('symbol') or args.get('symbol') or '-'} {fields.get('expiration_ymd') or args.get('expiration_ymd') or '-'} {fields.get('strike') or args.get('strike') or '-'}",
             f"平仓数量：{args.get('contracts_to_close') or '-'} 张",
         ]
-    if status == "previewed":
-        lines.extend(["", "未写入账本。", f"确认写入请回复：确认记录 {operation_id}", f"取消请回复：取消记录 {operation_id}"])
+    if status in {"previewed", "updated"}:
+        lines.extend(
+            [
+                "",
+                "未写入账本。",
+                "确认写入请回复：确认记录",
+                "取消请回复：取消记录",
+                f"operation_id：{operation_id}",
+                f"如同时有多条待确认，请回复：确认记录 {operation_id}",
+            ]
+        )
         if expires_at:
             lines.append("有效期：10 分钟。")
     else:
@@ -450,6 +709,10 @@ def _optional_positive_float(value: Any, field_name: str) -> float | None:
     if value in (None, ""):
         return None
     return _positive_float(value, field_name)
+
+
+def re_match_date(text: str) -> bool:
+    return re.fullmatch(r"20\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])", str(text or "").strip()) is not None
 
 
 def _json_safe(value: Any) -> Any:

@@ -283,6 +283,8 @@ def inspect_ledger_stores(
     )
     if repo_related:
         add_candidate("repository_default_runtime_root", repo_default)
+    elif "releases" in {part.lower() for part in REPO_BASE.parts}:
+        add_candidate("repository_default_runtime_root", repo_default)
     if repo_related or systemd_related:
         add_candidate("systemd_default_runtime_root", systemd_default)
 

@@ -20,6 +20,7 @@ from src.application.symbol_mutations import add_symbol_entry, edit_symbol_entry
 LIST_INTENTS = frozenset({"symbol_list"})
 PREVIEW_INTENTS = frozenset({"symbol_add", "symbol_edit", "symbol_remove"})
 CONFIRM_INTENTS = frozenset({"symbol_confirm", "symbol_cancel"})
+SYMBOL_OPERATION_TYPES = PREVIEW_INTENTS
 
 
 def is_symbol_operation_intent(intent: InboundIntent) -> bool:
@@ -40,9 +41,9 @@ def handle_symbol_operation(
         payload = _build_operation_payload(intent.name, dict(intent.arguments), request=request)
         return _preview_and_save(payload, request=request, command_id=command_id, store=store, ttl_seconds=policy.confirm_ttl_seconds)
     if intent.name == "symbol_confirm":
-        return _confirm_operation(operation_id=_required_text(intent.arguments.get("operation_id"), "operation_id"), request=request, store=store)
+        return _confirm_operation(operation_id=_optional_text(intent.arguments.get("operation_id")), request=request, store=store)
     if intent.name == "symbol_cancel":
-        return _cancel_operation(operation_id=_required_text(intent.arguments.get("operation_id"), "operation_id"), request=request, store=store)
+        return _cancel_operation(operation_id=_optional_text(intent.arguments.get("operation_id")), request=request, store=store)
     raise AgentToolError(code="INPUT_ERROR", message=f"unsupported symbol operation intent: {intent.name}")
 
 
@@ -68,6 +69,7 @@ def _preview_and_save(
         command_id=command_id,
         channel=request.channel,
         sender_id=request.sender_id,
+        conversation_id=request.conversation_id,
         operation_type=str(payload["operation_type"]),
         payload_hash=payload_hash,
         payload=payload,
@@ -92,12 +94,18 @@ def _preview_and_save(
     )
 
 
-def _confirm_operation(*, operation_id: str, request: InboundRequest, store: InboundOperationStore) -> dict[str, Any]:
-    operation = _load_pending_operation(operation_id, request=request, store=store)
+def _confirm_operation(*, operation_id: str | None, request: InboundRequest, store: InboundOperationStore) -> dict[str, Any]:
+    operation_id, operation, operation_resolution = _resolve_symbol_operation(
+        operation_id=operation_id,
+        request=request,
+        store=store,
+        allow_expired=False,
+        action="确认",
+    )
     if operation_is_expired(operation):
         result = {"operation_id": operation_id, "status": "expired"}
         store.mark_expired(operation_id, result=result)
-        raise AgentToolError(code="NEEDS_CLARIFICATION", message="这条监控标的变更确认已过期，未写入配置。", hint="请重新发送监控标的命令生成新的预览。", details=result)
+        raise AgentToolError(code="NEEDS_CLARIFICATION", message="这条监控标的变更确认已过期，未写入配置。", hint="请重新发送监控标的命令生成新的预览。", details={**result, **operation_resolution})
     payload = dict(operation["payload"])
     stored_hash = str(operation.get("payload_hash") or "")
     current_hash = hash_operation_payload(payload)
@@ -105,7 +113,19 @@ def _confirm_operation(*, operation_id: str, request: InboundRequest, store: Inb
         result = {"operation_id": operation_id, "status": "failed", "reason": "payload_hash_mismatch"}
         store.mark_failed(operation_id, result=result)
         raise AgentToolError(code="INTERNAL_ERROR", message="pending symbol operation payload hash mismatch; refusing to write config", details=result)
-    store.mark_confirmed(operation_id)
+    if not store.mark_confirmed(operation_id):
+        current = store.get(operation_id) or {}
+        current_status = str(current.get("status") or "-")
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message=f"这条监控标的变更不能再次确认，当前状态：{current_status}。",
+            details={
+                "operation_id": operation_id,
+                "status": current_status,
+                "reason": "operation_not_previewed",
+                **operation_resolution,
+            },
+        )
     try:
         preview = _preview_operation(payload)
         result = _apply_operation(payload)
@@ -121,42 +141,94 @@ def _confirm_operation(*, operation_id: str, request: InboundRequest, store: Inb
     return build_response(
         tool_name="inbound.symbols",
         ok=True,
-        data={"operation_id": operation_id, "operation_type": payload["operation_type"], "status": "applied", "payload_hash": current_hash, "payload": payload, "preview": preview, "result": result, "response_text": text},
+        data={"operation_id": operation_id, **operation_resolution, "operation_type": payload["operation_type"], "status": "applied", "payload_hash": current_hash, "payload": payload, "preview": preview, "result": result, "response_text": text},
         meta={"audit_db": mask_path(store.path)},
     )
 
 
-def _cancel_operation(*, operation_id: str, request: InboundRequest, store: InboundOperationStore) -> dict[str, Any]:
-    operation = _load_pending_operation(operation_id, request=request, store=store, allow_expired=True)
+def _cancel_operation(*, operation_id: str | None, request: InboundRequest, store: InboundOperationStore) -> dict[str, Any]:
+    operation_id, operation, operation_resolution = _resolve_symbol_operation(
+        operation_id=operation_id,
+        request=request,
+        store=store,
+        allow_expired=True,
+        action="取消",
+    )
     result = {"operation_id": operation_id, "status": "cancelled"}
     store.mark_cancelled(operation_id, result=result)
     text = f"监控标的变更已取消，未写入配置。\ncommand_id: {operation_id}"
-    return build_response(tool_name="inbound.symbols", ok=True, data={"operation_id": operation_id, "operation_type": operation.get("operation_type"), "status": "cancelled", "result": result, "response_text": text}, meta={"audit_db": mask_path(store.path)})
+    return build_response(tool_name="inbound.symbols", ok=True, data={"operation_id": operation_id, **operation_resolution, "operation_type": operation.get("operation_type"), "status": "cancelled", "result": result, "response_text": text}, meta={"audit_db": mask_path(store.path)})
 
 
-def _load_pending_operation(
-    operation_id: str,
+def _resolve_symbol_operation(
     *,
+    operation_id: str | None,
     request: InboundRequest,
     store: InboundOperationStore,
-    allow_expired: bool = False,
-) -> dict[str, Any]:
-    operation = store.get(operation_id)
-    if operation is None:
-        raise AgentToolError(code="INPUT_ERROR", message="找不到待确认的监控标的变更。", hint="请检查 operation_id，或重新发送监控标的命令。")
-    if str(operation.get("channel") or "") != request.channel or str(operation.get("sender_id") or "") != request.sender_id:
-        raise AgentToolError(code="PERMISSION_DENIED", message="只能由创建该预览的同一 sender 确认或取消。", details={"operation_id": operation_id})
-    operation_type = str(operation.get("operation_type") or "")
-    if not operation_type.startswith("symbol_"):
-        raise AgentToolError(code="INPUT_ERROR", message="这不是监控标的变更操作，不能用监控标的确认命令处理。", details={"operation_id": operation_id, "operation_type": operation_type})
-    status = str(operation.get("status") or "").strip()
-    if status != "previewed":
-        raise AgentToolError(code="INPUT_ERROR", message=f"这条监控标的变更不能再次确认，当前状态：{status or '-'}。", details={"operation_id": operation_id, "status": status})
-    if not allow_expired and operation_is_expired(operation):
-        result = {"operation_id": operation_id, "status": "expired"}
-        store.mark_expired(operation_id, result=result)
-        raise AgentToolError(code="NEEDS_CLARIFICATION", message="这条监控标的变更确认已过期，未写入配置。", hint="请重新发送监控标的命令生成新的预览。", details=result)
-    return operation
+    allow_expired: bool,
+    action: str,
+) -> tuple[str, dict[str, Any], dict[str, Any]]:
+    resolution = store.resolve_pending_operation(
+        channel=request.channel,
+        sender_id=request.sender_id,
+        operation_types=SYMBOL_OPERATION_TYPES,
+        conversation_id=request.conversation_id,
+        explicit_operation_id=operation_id,
+        allow_expired=allow_expired,
+    )
+    details = _operation_resolution_details(resolution)
+    status = str(resolution.get("status") or "")
+    resolved_operation_id = str(resolution.get("operation_id") or operation_id or "").strip()
+    operation_raw = resolution.get("operation")
+    operation = operation_raw if isinstance(operation_raw, dict) else {}
+    if status == "resolved" and resolved_operation_id and operation:
+        return resolved_operation_id, operation, details
+    if status == "expired":
+        result = {"operation_id": resolved_operation_id, "status": "expired"}
+        if resolved_operation_id:
+            store.mark_expired(resolved_operation_id, result=result)
+        raise AgentToolError(code="NEEDS_CLARIFICATION", message="这条监控标的变更确认已过期，未写入配置。", hint="请重新发送监控标的命令生成新的预览。", details={**result, **details})
+    if status == "ambiguous":
+        raise AgentToolError(
+            code="NEEDS_CLARIFICATION",
+            message=f"有多条待{action}的监控标的变更，请带 operation_id。",
+            hint=_candidate_hint("确认监控" if action == "确认" else "取消监控", details.get("candidate_operations")),
+            details=details,
+        )
+    if status == "none":
+        raise AgentToolError(code="NEEDS_CLARIFICATION", message=f"没有可{action}的监控标的变更。", hint="请先发送监控标的变更命令生成预览。", details=details)
+    if status == "forbidden":
+        raise AgentToolError(code="PERMISSION_DENIED", message=f"只能由创建该预览的同一 sender/对话 {action}。", details=details)
+    if status == "wrong_family":
+        raise AgentToolError(code="INPUT_ERROR", message="这不是监控标的变更，不能用确认监控/取消监控处理。", details=details)
+    if status == "invalid_status":
+        current_status = str(operation.get("status") or "-")
+        raise AgentToolError(code="INPUT_ERROR", message=f"这条监控标的变更不能再次{action}，当前状态：{current_status}。", details=details)
+    raise AgentToolError(code="INPUT_ERROR", message="找不到待确认的监控标的变更。", hint="请检查 operation_id，或重新发送监控标的命令。", details=details)
+
+
+def _operation_resolution_details(resolution: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "operation_resolution": resolution.get("operation_resolution"),
+        "resolved_operation_id": resolution.get("operation_id"),
+        "candidate_operations": resolution.get("candidate_operations") or [],
+    }
+
+
+def _candidate_hint(prefix: str, candidates: Any) -> str:
+    rows = candidates if isinstance(candidates, list) else []
+    lines: list[str] = []
+    for idx, item_raw in enumerate(rows[:5], start=1):
+        if not isinstance(item_raw, dict):
+            continue
+        operation_id = str(item_raw.get("operation_id") or "").strip()
+        if not operation_id:
+            continue
+        summary = str(item_raw.get("summary") or item_raw.get("operation_type") or "-").strip()
+        lines.append(f"{idx}. {operation_id} | {summary} | 回复：{prefix} {operation_id}")
+    if not lines:
+        return f"请回复：{prefix} <operation_id>"
+    return "\n候选变更：\n" + "\n".join(lines)
 
 
 def _build_operation_payload(operation_type: str, arguments: dict[str, Any], *, request: InboundRequest) -> dict[str, Any]:
@@ -294,7 +366,16 @@ def render_symbol_response(
     if isinstance(preview, dict) and preview.get("config_path"):
         lines.append(f"配置：{preview.get('config_path')}")
     if status == "previewed":
-        lines.extend(["", "未写入配置。", f"确认写入请回复：确认监控 {operation_id}", f"取消请回复：取消监控 {operation_id}"])
+        lines.extend(
+            [
+                "",
+                "未写入配置。",
+                "确认写入请回复：确认监控",
+                "取消请回复：取消监控",
+                f"operation_id：{operation_id}",
+                f"如同时有多条待确认，请回复：确认监控 {operation_id}",
+            ]
+        )
         if expires_at:
             lines.append("有效期：10 分钟。")
     else:
@@ -311,3 +392,8 @@ def _required_text(value: Any, field_name: str) -> str:
     if not text:
         raise AgentToolError(code="NEEDS_CLARIFICATION", message=f"{field_name} is required")
     return text
+
+
+def _optional_text(value: Any) -> str | None:
+    text = str(value or "").strip()
+    return text or None

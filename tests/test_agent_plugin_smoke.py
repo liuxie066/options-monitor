@@ -100,6 +100,20 @@ def _public_cfg_with_external_holdings(data_config_ref: str) -> dict[str, Any]:
     return cfg
 
 
+def _write_healthcheck_config(tmp_path: Path) -> Path:
+    cfg_path = tmp_path / "config.us.json"
+    data_cfg_path = tmp_path / "portfolio.runtime.json"
+    data_cfg_path.write_text(
+        json.dumps({"option_positions": {"sqlite_path": "output_shared/state/option_positions.sqlite3"}}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    cfg_path.write_text(
+        json.dumps(_public_cfg_with_futu("portfolio.runtime.json"), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return cfg_path
+
+
 def test_healthcheck_works_with_explicit_config_path(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
     import src.application.agent_tool_handlers as tools
@@ -141,6 +155,96 @@ def test_healthcheck_works_with_explicit_config_path(monkeypatch, tmp_path: Path
     assert primary["status"] == "ok"
     assert primary["value"]["user1"]["source"] == "futu"
     assert any("starter account label 'user1'" in item for item in out["warnings"])
+
+
+def test_healthcheck_reports_feishu_inbound_audit_ready(monkeypatch, tmp_path: Path) -> None:
+    from src.application.inbound.audit import InboundAuditStore
+    from src.application.tool_execution import execute_tool as run_tool
+    import src.application.agent_tool_handlers as tools
+
+    cfg_path = _write_healthcheck_config(tmp_path)
+    audit_db = tmp_path / "inbound.sqlite3"
+    InboundAuditStore(audit_db).record_result(
+        {
+            "command_id": "in_healthcheck_ready",
+            "channel": "feishu",
+            "sender_id": "ou_1",
+            "conversation_id": "feishu:chat_1:ou_1",
+            "message_id": "omsg_1",
+            "raw_text": "状态",
+            "parser": "deterministic",
+            "intent_name": "runtime_status",
+            "tool_name": "runtime_status",
+            "decision": "allowed",
+            "result_ok": True,
+            "response": {"data": {"response_text": "ok"}},
+        }
+    )
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "cli_1")
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_SECRET", "secret_1")
+    monkeypatch.setenv("OM_FEISHU_BOT_ALLOWED_OPEN_IDS", "ou_1")
+    monkeypatch.setattr(
+        tools,
+        "_run_futu_doctor",
+        lambda **kwargs: {
+            "ok": True,
+            "sdk": {"ok": True},
+            "watchdog": {"ok": True},
+        },
+    )
+
+    out = run_tool("healthcheck", {"config_path": str(cfg_path), "audit_db": str(audit_db)})
+    checks = {item["name"]: item for item in out["data"]["checks"]}
+
+    assert out["ok"] is True
+    assert checks["feishu_inbound"]["status"] == "ok"
+    assert checks["feishu_inbound"]["value"]["latest_event"]["sender_id"] == "ou_1"
+    assert checks["feishu_inbound"]["value"]["latest_event"]["conversation_id"] == "feishu:chat_1:ou_1"
+    assert checks["feishu_inbound"]["value"]["pending_store"]["readable"] is True
+
+
+def test_healthcheck_warns_when_feishu_latest_sender_not_allowed(monkeypatch, tmp_path: Path) -> None:
+    from src.application.inbound.audit import InboundAuditStore
+    from src.application.tool_execution import execute_tool as run_tool
+    import src.application.agent_tool_handlers as tools
+
+    cfg_path = _write_healthcheck_config(tmp_path)
+    audit_db = tmp_path / "inbound.sqlite3"
+    InboundAuditStore(audit_db).record_result(
+        {
+            "command_id": "in_healthcheck_denied_sender",
+            "channel": "feishu",
+            "sender_id": "ou_1",
+            "conversation_id": "feishu:chat_1:ou_1",
+            "message_id": "omsg_1",
+            "raw_text": "状态",
+            "parser": "deterministic",
+            "intent_name": "runtime_status",
+            "tool_name": "runtime_status",
+            "decision": "allowed",
+            "result_ok": True,
+            "response": {"data": {"response_text": "ok"}},
+        }
+    )
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "cli_1")
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_SECRET", "secret_1")
+    monkeypatch.setenv("OM_FEISHU_BOT_ALLOWED_OPEN_IDS", "ou_2")
+    monkeypatch.setattr(
+        tools,
+        "_run_futu_doctor",
+        lambda **kwargs: {
+            "ok": True,
+            "sdk": {"ok": True},
+            "watchdog": {"ok": True},
+        },
+    )
+
+    out = run_tool("healthcheck", {"config_path": str(cfg_path), "audit_db": str(audit_db)})
+    check = next(item for item in out["data"]["checks"] if item["name"] == "feishu_inbound")
+
+    assert out["ok"] is True
+    assert check["status"] == "warn"
+    assert "OM_FEISHU_BOT_ALLOWED_OPEN_IDS" in check["message"]
 
 
 def test_healthcheck_rejects_placeholder_futu_mapping(monkeypatch, tmp_path: Path) -> None:

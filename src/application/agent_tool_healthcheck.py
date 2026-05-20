@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import sqlite3
+from pathlib import Path
 from typing import Any, Callable
 
 from domain.domain.multi_tick import FEISHU_APP_NOTIFICATION_PROVIDER, normalize_notification_provider
+from src.application.inbound.audit import default_audit_db_path
 from src.application.ledger.api import ledger_store_payload
 from src.application.secret_resolver import (
     resolve_feishu_bot_config,
     resolve_feishu_holdings_config,
 )
+from src.application.service_deploy import load_service_profile, service_status_from_profile
 
 
 def _dict(value: Any) -> dict[str, Any]:
@@ -161,6 +165,13 @@ def run_healthcheck_tool(
                     "value": bot_cfg.redacted_status(),
                 }
             )
+
+    feishu_inbound_check, feishu_inbound_warnings = _feishu_inbound_check(payload, mask_path=mask_path)
+    checks.append(feishu_inbound_check)
+    warnings.extend(feishu_inbound_warnings)
+    feishu_service_check, feishu_service_warnings = _feishu_ws_service_check(payload, mask_path=mask_path)
+    checks.append(feishu_service_check)
+    warnings.extend(feishu_service_warnings)
 
     option_positions_bootstrap_status = None
     option_positions_bootstrap_message = None
@@ -465,3 +476,243 @@ def run_healthcheck_tool(
         warnings,
         {"config_path": mask_path(config_path)},
     )
+
+
+def _feishu_inbound_check(payload: dict[str, Any], *, mask_path: Callable[[Any], str]) -> tuple[dict[str, Any], list[str]]:
+    bot_cfg = resolve_feishu_bot_config()
+    audit_path = _audit_db_path(payload)
+    value: dict[str, Any] = {
+        "audit_db": mask_path(audit_path),
+        "audit_db_exists": audit_path.exists(),
+        "credentials_configured": bot_cfg.credentials_ready,
+        "allowed_open_ids_count": len(bot_cfg.allowed_open_ids),
+        "pending_store": {},
+    }
+    configured = bool(bot_cfg.credentials_ready or bot_cfg.allowed_open_ids or payload.get("inbound_audit_db") or payload.get("audit_db"))
+    if not configured and not audit_path.exists():
+        return (
+            {
+                "name": "feishu_inbound",
+                "status": "info",
+                "message": "Feishu inbound is not configured and no audit DB exists",
+                "value": value,
+            },
+            [],
+        )
+
+    problems: list[str] = []
+    if not bot_cfg.credentials_ready:
+        problems.append("Feishu Bot app credentials are incomplete")
+    if not bot_cfg.allowed_open_ids:
+        problems.append("Feishu inbound sender allowlist is empty")
+    if not audit_path.exists():
+        problems.append("inbound audit DB does not exist")
+        return (
+            {
+                "name": "feishu_inbound",
+                "status": "warn",
+                "message": "; ".join(problems),
+                "value": value,
+            },
+            [f"Feishu inbound audit DB missing: {mask_path(audit_path)}"],
+        )
+
+    audit_status = _read_recent_feishu_audit(audit_path, limit=5)
+    value.update(audit_status)
+    value["pending_store"] = _read_pending_store_status(audit_path)
+    if audit_status.get("error"):
+        problems.append(str(audit_status["error"]))
+    if value["pending_store"].get("error"):
+        problems.append(str(value["pending_store"]["error"]))
+
+    recent_rows = audit_status.get("recent_rows") if isinstance(audit_status.get("recent_rows"), list) else []
+    if not recent_rows:
+        problems.append("no recent Feishu inbound audit events found")
+    else:
+        latest = _dict(recent_rows[0])
+        missing_latest_fields = [
+            key
+            for key in ("sender_id", "conversation_id", "message_id")
+            if not str(latest.get(key) or "").strip()
+        ]
+        value["latest_event"] = {
+            "created_at": latest.get("created_at"),
+            "sender_id": latest.get("sender_id"),
+            "conversation_id": latest.get("conversation_id"),
+            "message_id": latest.get("message_id"),
+            "intent_name": latest.get("intent_name"),
+            "decision": latest.get("decision"),
+            "result_ok": bool(latest.get("result_ok")),
+            "missing_fields": missing_latest_fields,
+        }
+        if missing_latest_fields:
+            problems.append("latest Feishu inbound event is missing " + ", ".join(missing_latest_fields))
+        sender = str(latest.get("sender_id") or "").strip()
+        if bot_cfg.allowed_open_ids and sender and sender not in set(bot_cfg.allowed_open_ids):
+            problems.append("latest Feishu sender is not in OM_FEISHU_BOT_ALLOWED_OPEN_IDS")
+
+    if not problems:
+        return (
+            {
+                "name": "feishu_inbound",
+                "status": "ok",
+                "message": "Feishu inbound audit and pending store are readable",
+                "value": value,
+            },
+            [],
+        )
+    return (
+        {
+            "name": "feishu_inbound",
+            "status": "warn",
+            "message": "; ".join(problems),
+            "value": value,
+        },
+        ["Feishu inbound check warning: " + "; ".join(problems)],
+    )
+
+
+def _feishu_ws_service_check(payload: dict[str, Any], *, mask_path: Callable[[Any], str]) -> tuple[dict[str, Any], list[str]]:
+    profile_raw = str(payload.get("profile_path") or "").strip()
+    include_status = bool(payload.get("include_service_status"))
+    if not profile_raw:
+        return (
+            {
+                "name": "feishu_ws_service",
+                "status": "info",
+                "message": "service profile not provided; skip Feishu WS service status",
+                "value": {"status_checked": False},
+            },
+            [],
+        )
+    profile_path = Path(profile_raw).expanduser()
+    value: dict[str, Any] = {
+        "profile_path": mask_path(profile_path),
+        "status_checked": include_status,
+    }
+    if not profile_path.exists():
+        return (
+            {
+                "name": "feishu_ws_service",
+                "status": "warn",
+                "message": "service profile does not exist",
+                "value": value,
+            },
+            [f"Feishu WS service profile missing: {mask_path(profile_path)}"],
+        )
+    try:
+        profile = load_service_profile(profile_path)
+        service_status = service_status_from_profile(profile, include_status=include_status)
+    except Exception as exc:
+        return (
+            {
+                "name": "feishu_ws_service",
+                "status": "warn",
+                "message": f"failed to inspect service profile: {type(exc).__name__}: {exc}",
+                "value": value,
+            },
+            [f"Feishu WS service profile inspect failed: {type(exc).__name__}: {exc}"],
+        )
+    services = [_dict(item) for item in service_status.get("services") or []]
+    feishu_service = next((item for item in services if str(item.get("name") or "") == "options-monitor-feishu-ws.service"), None)
+    value.update(
+        {
+            "provider": service_status.get("provider"),
+            "service_present": feishu_service is not None,
+            "service": feishu_service,
+        }
+    )
+    if feishu_service is None:
+        return (
+            {
+                "name": "feishu_ws_service",
+                "status": "warn",
+                "message": "options-monitor-feishu-ws.service is not present in service profile",
+                "value": value,
+            },
+            ["Feishu WS service is missing from service profile."],
+        )
+    if include_status and str(feishu_service.get("status") or "") != "ok":
+        return (
+            {
+                "name": "feishu_ws_service",
+                "status": "warn",
+                "message": "options-monitor-feishu-ws.service is not active",
+                "value": value,
+            },
+            ["Feishu WS service is not active."],
+        )
+    message = "options-monitor-feishu-ws.service is present"
+    if include_status:
+        message = "options-monitor-feishu-ws.service is active"
+    return (
+        {
+            "name": "feishu_ws_service",
+            "status": "ok",
+            "message": message,
+            "value": value,
+        },
+        [],
+    )
+
+
+def _audit_db_path(payload: dict[str, Any]) -> Path:
+    raw = str(payload.get("inbound_audit_db") or payload.get("audit_db") or "").strip()
+    if raw:
+        return Path(raw).expanduser().resolve()
+    return default_audit_db_path()
+
+
+def _read_recent_feishu_audit(path: Path, *, limit: int) -> dict[str, Any]:
+    try:
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
+            conn.row_factory = sqlite3.Row
+            table = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='inbound_command_audit'"
+            ).fetchone()
+            if table is None:
+                return {"audit_table_present": False, "recent_count": 0, "recent_rows": []}
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM inbound_command_audit
+                WHERE channel = 'feishu'
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                (max(1, min(int(limit), 20)),),
+            ).fetchall()
+        out = [_row_to_public_dict(row) for row in rows]
+        return {"audit_table_present": True, "recent_count": len(out), "recent_rows": out}
+    except Exception as exc:
+        return {
+            "audit_table_present": None,
+            "recent_count": 0,
+            "recent_rows": [],
+            "error": f"failed to read inbound audit DB: {type(exc).__name__}: {exc}",
+        }
+
+
+def _read_pending_store_status(path: Path) -> dict[str, Any]:
+    try:
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
+            table = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='inbound_pending_operations'"
+            ).fetchone()
+            if table is None:
+                return {"readable": True, "table_present": False, "previewed_count": 0}
+            previewed_count = conn.execute(
+                "SELECT COUNT(*) FROM inbound_pending_operations WHERE status = 'previewed'"
+            ).fetchone()[0]
+        return {"readable": True, "table_present": True, "previewed_count": int(previewed_count or 0)}
+    except Exception as exc:
+        return {
+            "readable": False,
+            "table_present": None,
+            "previewed_count": 0,
+            "error": f"failed to read inbound pending store: {type(exc).__name__}: {exc}",
+        }
+
+
+def _row_to_public_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {key: row[key] for key in row.keys()}
