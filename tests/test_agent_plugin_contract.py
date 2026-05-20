@@ -59,6 +59,10 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert "kind" in runtime_logs["input_schema"]
     assert "lines" in runtime_logs["input_schema"]
     assert "file" in runtime_logs["input_schema"]
+    ai_cofunder = next(item for item in spec["tools"] if item["name"] == "ai_cofunder")
+    assert "runs_root" in ai_cofunder["input_schema"]
+    assert "run_id" in ai_cofunder["input_schema"]
+    assert "report_dir" in ai_cofunder["input_schema"]
     income_report = next(item for item in spec["tools"] if item["name"] == "monthly_income_report")
     assert income_report["risk_level"] == "read_only"
     assert income_report["requires_confirm"] is False

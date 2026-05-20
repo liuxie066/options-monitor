@@ -127,6 +127,15 @@ def _safe_input_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "accounts",
         "run_id",
         "run_dir",
+        "report_dir",
+        "state_dir",
+        "shared_state_dir",
+        "accounts_root",
+        "runs_root",
+        "runs_limit",
+        "tail_limit",
+        "max_run_age_minutes",
+        "max_notification_chars",
         "candidate_paths",
         "trace_paths",
         "strategy_replay_paths",
@@ -244,9 +253,23 @@ def _normalize_scheduler_evidence(value: Any) -> dict[str, Any]:
 def _actual_source_paths(payload: dict[str, Any], *, runtime_data: dict[str, Any], base: Path) -> dict[str, Path | None]:
     paths_raw = runtime_data.get("paths")
     paths: dict[str, Any] = paths_raw if isinstance(paths_raw, dict) else {}
-    report_dir = _resolve_under_base(payload.get("strategy_report_dir") or payload.get("report_dir") or paths.get("report_dir"), base=base, default=base / "output" / "reports")
-    shared_state_dir = _resolve_under_base(payload.get("shared_state_dir") or paths.get("shared_state_dir"), base=base, default=base / "output_shared" / "state")
-    runs_root = _resolve_under_base(payload.get("runs_root") or paths.get("runs_root"), base=base, default=base / "output_runs")
+    profile_paths = _profile_source_paths(payload, base=base)
+    runtime_root = _resolve_under_base(profile_paths.get("runtime_root"), base=base, default=base)
+    report_dir = _resolve_under_base(
+        payload.get("strategy_report_dir") or payload.get("report_dir") or profile_paths.get("report_dir") or paths.get("report_dir"),
+        base=base,
+        default=runtime_root / "output" / "reports",
+    )
+    shared_state_dir = _resolve_under_base(
+        payload.get("shared_state_dir") or profile_paths.get("shared_state_dir") or paths.get("shared_state_dir"),
+        base=base,
+        default=runtime_root / "output_shared" / "state",
+    )
+    runs_root = _resolve_under_base(
+        payload.get("runs_root") or profile_paths.get("runs_root") or paths.get("runs_root"),
+        base=base,
+        default=runtime_root / "output_runs",
+    )
     latest_run_path = _resolve_runtime_path(_nested(runtime_data, "latest_run", "path"), base=base, fallback_root=runs_root)
     latest_scanned_run_path = _resolve_runtime_path(_nested(runtime_data, "latest_scanned_run", "path"), base=base, fallback_root=runs_root)
     return {
@@ -256,6 +279,33 @@ def _actual_source_paths(payload: dict[str, Any], *, runtime_data: dict[str, Any
         "latest_run_dir": latest_run_path,
         "latest_scanned_run_dir": latest_scanned_run_path,
     }
+
+
+def _profile_source_paths(payload: dict[str, Any], *, base: Path) -> dict[str, Any]:
+    raw_profile = _profile_path(payload)
+    if not raw_profile:
+        return {}
+    profile_path = Path(str(raw_profile)).expanduser()
+    if not profile_path.is_absolute():
+        profile_path = (base / profile_path).resolve()
+    if not profile_path.exists() or not profile_path.is_file():
+        return {}
+    try:
+        profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(profile, dict):
+        return {}
+    paths_raw = profile.get("paths")
+    paths: dict[str, Any] = paths_raw if isinstance(paths_raw, dict) else {}
+    out: dict[str, Any] = {}
+    for key in ("report_dir", "shared_state_dir", "runs_root", "runtime_root"):
+        value = paths.get(key)
+        if value is None:
+            value = profile.get(key)
+        if value is not None:
+            out[key] = value
+    return out
 
 
 def _source_refs(source_paths: dict[str, Path | None], *, base: Path) -> dict[str, Any]:
@@ -343,7 +393,7 @@ def _strategy_dirs(source_paths: dict[str, Path | None], *, base: Path) -> list[
             accounts_dir = path / "accounts"
             if accounts_dir.exists() and accounts_dir.is_dir():
                 dirs.extend(item for item in accounts_dir.iterdir() if item.is_dir())
-    return _unique_paths([path for path in dirs if _is_under_base(path, base=base)])
+    return _unique_paths(dirs)
 
 
 def _explicit_paths(value: Any, *, base: Path) -> list[Path]:
@@ -358,8 +408,7 @@ def _explicit_paths(value: Any, *, base: Path) -> list[Path]:
             path = (base / path).resolve()
         else:
             path = path.resolve()
-        if _is_under_base(path, base=base):
-            out.append(path)
+        out.append(path)
     return out
 
 
@@ -1016,14 +1065,6 @@ def _unique_paths(paths: list[Path]) -> list[Path]:
         seen.add(key)
         out.append(path.resolve())
     return out
-
-
-def _is_under_base(path: Path, *, base: Path) -> bool:
-    try:
-        path.resolve().relative_to(base.resolve())
-        return True
-    except ValueError:
-        return False
 
 
 def _jsonl_tail(path: Path, *, base: Path, limit: int) -> dict[str, Any]:

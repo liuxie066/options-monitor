@@ -156,6 +156,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ai_collect.add_argument("--config-path", default=None)
     ai_collect.add_argument("--accounts", nargs="*", default=None)
     ai_collect.add_argument("--profile-path", default=None)
+    ai_collect.add_argument("--report-dir", default=None)
+    ai_collect.add_argument("--state-dir", default=None)
+    ai_collect.add_argument("--shared-state-dir", default=None)
+    ai_collect.add_argument("--accounts-root", default=None)
+    ai_collect.add_argument("--runs-root", default=None)
+    ai_collect.add_argument("--run-id", default=None)
+    ai_collect.add_argument("--run-dir", default=None)
+    ai_collect.add_argument("--runs-limit", type=int, default=None)
+    ai_collect.add_argument("--tail-limit", type=int, default=None)
+    ai_collect.add_argument("--max-run-age-minutes", type=int, default=None)
+    ai_collect.add_argument("--max-notification-chars", type=int, default=None)
     ai_collect.add_argument("--output", default="handoff", choices=("handoff", "json", "both", "markdown", "md"))
     ai_collect.add_argument("--scheduler-evidence-json", default=None)
     ai_collect.add_argument("--scheduler-evidence-file", default=None)
@@ -719,6 +730,17 @@ def main(argv: list[str] | None = None) -> int:
                 "config_path": args.config_path,
                 "accounts": args.accounts,
                 "profile_path": args.profile_path,
+                "report_dir": args.report_dir,
+                "state_dir": args.state_dir,
+                "shared_state_dir": args.shared_state_dir,
+                "accounts_root": args.accounts_root,
+                "runs_root": args.runs_root,
+                "run_id": args.run_id,
+                "run_dir": args.run_dir,
+                "runs_limit": args.runs_limit,
+                "tail_limit": args.tail_limit,
+                "max_run_age_minutes": args.max_run_age_minutes,
+                "max_notification_chars": args.max_notification_chars,
                 "output": args.output,
                 "candidate_paths": args.candidate_paths,
                 "trace_paths": args.trace_paths,

@@ -979,6 +979,107 @@ def _run_payload_has_scan(run_payload: dict[str, Any]) -> bool:
     return False
 
 
+def _normalize_market(value: Any) -> str | None:
+    text = str(value or "").strip().upper()
+    if not text:
+        return None
+    if text in {"US", "USA"}:
+        return "US"
+    if text in {"HK", "HKG", "HKEX"}:
+        return "HK"
+    return None
+
+
+def _collect_market_values(value: Any) -> set[str]:
+    out: set[str] = set()
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if isinstance(item, bool):
+                if item:
+                    market = _normalize_market(key)
+                    if market:
+                        out.add(market)
+                continue
+            out.update(_collect_market_values(item))
+        return out
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            out.update(_collect_market_values(item))
+        return out
+    market = _normalize_market(value)
+    if market:
+        out.add(market)
+    return out
+
+
+def _desired_runtime_market(payload: dict[str, Any], cfg: dict[str, Any], *, config_path: Path) -> str | None:
+    for value in (payload.get("config_key"),):
+        market = _normalize_market(value)
+        if market:
+            return market
+
+    payload_markets = _collect_market_values(payload.get("markets"))
+    if len(payload_markets) == 1:
+        return next(iter(payload_markets))
+
+    symbol_markets: set[str] = set()
+    symbols_raw = cfg.get("symbols")
+    if isinstance(symbols_raw, list):
+        for item in symbols_raw:
+            if isinstance(item, dict):
+                symbol_markets.update(_collect_market_values(item.get("market")))
+    if len(symbol_markets) == 1:
+        return next(iter(symbol_markets))
+
+    name = config_path.name.lower()
+    if "config.us" in name or name.startswith("us."):
+        return "US"
+    if "config.hk" in name or name.startswith("hk."):
+        return "HK"
+    return None
+
+
+def _run_payload_markets(run_payload: dict[str, Any]) -> set[str]:
+    state_raw = run_payload.get("state")
+    state: dict[str, Any] = state_raw if isinstance(state_raw, dict) else {}
+    payloads: list[dict[str, Any]] = [
+        _json_payload(state.get("tick_metrics")),
+        _json_payload(state.get("last_run")),
+    ]
+    tick_metrics = payloads[0]
+    scheduler_decision = tick_metrics.get("scheduler_decision")
+    if isinstance(scheduler_decision, dict):
+        payloads.append(scheduler_decision)
+
+    accounts_raw = run_payload.get("accounts")
+    accounts: dict[str, Any] = accounts_raw if isinstance(accounts_raw, dict) else {}
+    for item in accounts.values():
+        if isinstance(item, dict):
+            payloads.append(_json_payload(item.get("last_run")))
+
+    markets: set[str] = set()
+    for item in payloads:
+        for key in (
+            "market",
+            "markets",
+            "market_key",
+            "config_key",
+            "markets_to_run",
+            "scheduler_markets",
+            "scheduler_market",
+        ):
+            if key in item:
+                markets.update(_collect_market_values(item.get(key)))
+    return markets
+
+
+def _run_payload_matches_market(run_payload: dict[str, Any], desired_market: str | None) -> bool:
+    if desired_market is None:
+        return True
+    observed_markets = _run_payload_markets(run_payload)
+    return not observed_markets or desired_market in observed_markets
+
+
 def _run_dirs_newest_first(runs_root: Path) -> list[Path]:
     if not runs_root.exists() or not runs_root.is_dir():
         return []
@@ -996,8 +1097,10 @@ def _latest_scanned_run_payload(
     base: Path,
     read_json_object_or_empty: Callable[[Path], dict[str, Any]],
     max_notification_chars: int,
+    desired_market: str | None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     searched_count = 0
+    skipped_market_mismatch_count = 0
     for run_dir in _run_dirs_newest_first(runs_root):
         searched_count += 1
         candidate = _run_payload(
@@ -1007,16 +1110,23 @@ def _latest_scanned_run_payload(
             read_json_object_or_empty=read_json_object_or_empty,
             max_notification_chars=max_notification_chars,
         )
+        if not _run_payload_matches_market(candidate, desired_market):
+            skipped_market_mismatch_count += 1
+            continue
         if _run_payload_has_scan(candidate):
             return candidate, {
                 "source": "runs_root_mtime",
                 "searched_count": searched_count,
+                "market_filter": desired_market,
+                "skipped_market_mismatch_count": skipped_market_mismatch_count,
                 "found": True,
                 "path": candidate.get("path"),
             }
     return None, {
         "source": "runs_root_mtime",
         "searched_count": searched_count,
+        "market_filter": desired_market,
+        "skipped_market_mismatch_count": skipped_market_mismatch_count,
         "found": False,
         "path": None,
     }
@@ -1217,12 +1327,14 @@ def runtime_status_tool(
         )
 
     prefetch_summary = _latest_run_prefetch_summary(latest_run_payload)
+    desired_market = _desired_runtime_market(payload, cfg, config_path=config_path)
     latest_scanned_run_payload, latest_scanned_run_selection = _latest_scanned_run_payload(
         runs_root=runs_root,
         accounts=accounts,
         base=base,
         read_json_object_or_empty=read_json_object_or_empty,
         max_notification_chars=max_notification_chars,
+        desired_market=desired_market,
     )
     latest_scanned_prefetch_summary = _latest_run_prefetch_summary(latest_scanned_run_payload)
 
