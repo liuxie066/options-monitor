@@ -106,6 +106,43 @@ liuxie ALL=(root) NOPASSWD: /usr/bin/systemctl restart options-monitor-feishu-ws
 
 如果 release/config 已切换成功但服务重启失败，升级状态会写成 `upgraded_restart_failed`，并记录 `symlink_switched=true`、`config_rebuilt`、`restart_failed_services` 和 `manual_remediation`。这种部分成功状态不会让自动升级 unit 因已知的服务重启权限问题反复 failed；按 remediation 手工重启服务并补齐 sudoers 即可。
 
+Release runtime 依赖安装默认使用 `OM_UPGRADE_INSTALLER=auto`：先检测 `uv`，可用时执行 `uv venv .venv` 和 `uv pip install -p .venv/bin/python ...`，不可用或 auto 模式下 uv 安装失败时回退到原 pip 流程。可用 `OM_UPGRADE_INSTALLER=pip` 强制旧流程，或 `OM_UPGRADE_INSTALLER=uv` 强制 uv 且失败即中止升级。若只配置了 `PIP_INDEX_URL`，升级会把它映射为 uv 命令的 `UV_INDEX_URL`。
+
+release 清理默认 dry-run，不删除文件：
+
+```bash
+./om service cleanup \
+  --repo-root /opt/options-monitor/current \
+  --releases-root /opt/options-monitor/releases \
+  --cleanup-downloads \
+  --cleanup-pip-cache
+```
+
+输出会列出当前 active release、将保留的 release、将删除的旧 release、将清理的缓存目录以及预计释放空间。默认 `--keep-releases 2`，即保留当前版本和最近一个回滚版本；小于 2 的值会被提升为 2。真正删除必须显式确认：
+
+```bash
+./om service cleanup \
+  --repo-root /opt/options-monitor/current \
+  --releases-root /opt/options-monitor/releases \
+  --cleanup-downloads \
+  --cleanup-pip-cache \
+  --confirm
+```
+
+清理只处理旧 release 和显式允许的缓存，不会触碰 `/var/lib/options-monitor`、SQLite、`output*`、locks、runtime config、用户 overlay config、当前 active release 或最近一个 rollback release。需要额外清理系统缓存时可加 `--include-apt-cache` 或 `--journal-vacuum-size 64M`。
+
+确认升级成功后也可以追加后置清理：
+
+```bash
+./om update apply \
+  --repo-root /opt/options-monitor/current \
+  --runtime-root /var/lib/options-monitor \
+  --confirm \
+  --cleanup-after-upgrade
+```
+
+后置清理只在升级成功、symlink 已切到目标 release、runtime config rebuild/validate 成功、active release 可确认且至少保留 2 个 release 时执行。`--repo-root` 不是 symlink 字面路径时，确认升级会 fail fast，不会提前 clone 到错误的 release 布局。
+
 回滚同样默认 dry-run：
 
 ```bash

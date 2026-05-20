@@ -45,6 +45,13 @@ from src.application.runtime_config_freshness import RuntimeConfigFreshnessError
 from src.application.runtime_logs_cli import collect_runtime_logs, format_runtime_logs
 from src.application.runtime_runs_cli import collect_runtime_runs, format_runtime_runs
 from src.application.runtime_status_cli import format_runtime_status_summary, runtime_status_payload_from_args
+from src.application.service_cleanup import service_cleanup
+from src.application.settings import (
+    bootstrap_process_env,
+    diagnose_effective_settings,
+    explain_effective_setting,
+    inspect_effective_settings,
+)
 from domain.domain.config_contract import ensure_runtime_schedule_matches_market
 from src.application.version_check import check_version_update
 from src.application.cash_headroom_query import query_sell_put_cash
@@ -246,6 +253,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     set_config.add_argument("--confirm", action="store_true", help="required together with --apply")
     set_config.add_argument("--no-backup", action="store_true", help="do not write a .bak timestamp copy before applying")
 
+    settings = sub.add_parser("settings", help="inspect effective environment-backed settings")
+    settings_sub = settings.add_subparsers(dest="settings_command", required=True)
+    settings_inspect = settings_sub.add_parser("inspect", help="show redacted effective settings and sources")
+    settings_inspect.add_argument("--env-file", default=None)
+    settings_inspect.add_argument("--no-local-env-file", action="store_true")
+    settings_doctor = settings_sub.add_parser("doctor", help="diagnose env-file, Feishu Bot, and write-gate settings")
+    settings_doctor.add_argument("--env-file", default=None)
+    settings_doctor.add_argument("--no-local-env-file", action="store_true")
+    settings_explain = settings_sub.add_parser("explain", help="explain one effective setting source")
+    settings_explain.add_argument("--key", required=True)
+    settings_explain.add_argument("--env-file", default=None)
+    settings_explain.add_argument("--no-local-env-file", action="store_true")
+
     sub.add_parser("version", help="check latest released version from git tags")
 
     scheduler = sub.add_parser("scheduler", help="scan scheduler / frequency controller")
@@ -288,7 +308,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     service_render.add_argument("--markets", nargs="+", choices=("us", "hk"), default=None)
     service_render.add_argument("--config-us", default=None)
     service_render.add_argument("--config-hk", default=None)
-    service_render.add_argument("--env-file", default=None, help="systemd EnvironmentFile path for local secrets/env values")
+    service_render.add_argument("--env-file", default=None, help="service env-file path for local secrets/env values")
     service_render.add_argument("--deploy-user", default=None, help="systemd User= identity; also accepted from OM_DEPLOY_USER/DEPLOY_USER")
     service_render.add_argument("--deploy-home", default=None, help="systemd HOME environment; defaults to /home/<deploy-user>")
     service_render.add_argument("--timeout", dest="timeout_seconds", type=int, default=600)
@@ -311,6 +331,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     service_status = service_sub.add_parser("status", help="summarize a rendered service profile")
     service_status.add_argument("--profile-path", required=True)
     service_status.add_argument("--include-service-status", action="store_true")
+    service_cleanup_cmd = service_sub.add_parser("cleanup", help="dry-run or clean old releases and selected caches")
+    service_cleanup_cmd.add_argument("--repo-root", default=None)
+    service_cleanup_cmd.add_argument("--releases-root", default=None)
+    service_cleanup_cmd.add_argument("--keep-releases", type=int, default=2)
+    service_cleanup_cmd.add_argument("--include-apt-cache", action="store_true")
+    service_cleanup_cmd.add_argument("--journal-vacuum-size", default=None)
+    service_cleanup_cmd.add_argument("--cleanup-downloads", action="store_true")
+    service_cleanup_cmd.add_argument("--cleanup-pip-cache", action="store_true")
+    service_cleanup_cmd.add_argument("--confirm", action="store_true", help="delete planned paths; without this the command is a dry run")
     service_upgrade_check_cmd = service_sub.add_parser("upgrade-check", help="check whether a newer released version is available")
     service_upgrade_check_cmd.add_argument("--repo-root", default=None)
     service_upgrade_check_cmd.add_argument("--runtime-root", default="/var/lib/options-monitor")
@@ -325,6 +354,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     service_upgrade_cmd.add_argument("--allow-major", action="store_true")
     service_upgrade_cmd.add_argument("--confirm", action="store_true", help="apply upgrade; without this the command is a dry run")
     service_upgrade_cmd.add_argument("--no-restart-services", action="store_true")
+    service_upgrade_cmd.add_argument("--cleanup-after-upgrade", action="store_true", help="clean old releases after a fully successful confirmed upgrade")
+    service_upgrade_cmd.add_argument("--cleanup-keep-releases", type=int, default=2)
     service_rollback_cmd = service_sub.add_parser("rollback", help="switch current symlink back to a prior released version")
     service_rollback_cmd.add_argument("--repo-root", default=None)
     service_rollback_cmd.add_argument("--runtime-root", default="/var/lib/options-monitor")
@@ -349,6 +380,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     update_apply.add_argument("--allow-major", action="store_true")
     update_apply.add_argument("--confirm", action="store_true", help="apply upgrade; without this the command is a dry run")
     update_apply.add_argument("--no-restart-services", action="store_true")
+    update_apply.add_argument("--cleanup-after-upgrade", action="store_true", help="clean old releases after a fully successful confirmed upgrade")
+    update_apply.add_argument("--cleanup-keep-releases", type=int, default=2)
     update_rollback = update_sub.add_parser("rollback", help="switch current symlink back to a prior released version")
     update_rollback.add_argument("--repo-root", default=None)
     update_rollback.add_argument("--runtime-root", default="/var/lib/options-monitor")
@@ -517,8 +550,16 @@ def _validate_runtime_config(
     }
 
 
+def _should_bootstrap_process_env(actual_argv: list[str]) -> bool:
+    if actual_argv and actual_argv[0] == "settings":
+        return False
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     actual_argv = list(sys.argv[1:] if argv is None else argv)
+    if argv is None and _should_bootstrap_process_env(actual_argv):
+        bootstrap_process_env(repo_root=repo_base(), include_local_env_file=True)
     if actual_argv and actual_argv[0] == "scan-pipeline":
         return int(run_scan_pipeline(actual_argv[1:]))
     if actual_argv and actual_argv[0] == "option-positions":
@@ -605,7 +646,7 @@ def main(argv: list[str] | None = None) -> int:
                 config_key=args.config_key,
                 config_path=args.config_path,
                 audit_db=args.audit_db,
-                reply_enabled=not bool(args.no_reply),
+                reply_enabled=False if bool(args.no_reply) else None,
                 reply_in_thread=args.reply_in_thread,
                 max_reply_chars=args.max_reply_chars,
                 queue_size=args.queue_size,
@@ -805,6 +846,45 @@ def main(argv: list[str] | None = None) -> int:
                 ),
             ))
 
+        if args.command == "settings" and args.settings_command == "inspect":
+            return _print(build_response(
+                tool_name="settings.inspect",
+                ok=True,
+                data=inspect_effective_settings(
+                    repo_root=repo_base(),
+                    env_file=args.env_file,
+                    include_local_env_file=not bool(args.no_local_env_file),
+                ),
+            ))
+
+        if args.command == "settings" and args.settings_command == "doctor":
+            data = diagnose_effective_settings(
+                repo_root=repo_base(),
+                env_file=args.env_file,
+                include_local_env_file=not bool(args.no_local_env_file),
+            )
+            return _print(build_response(
+                tool_name="settings.doctor",
+                ok=bool(data.get("summary", {}).get("ok", True)),
+                data=data,
+            ))
+
+        if args.command == "settings" and args.settings_command == "explain":
+            try:
+                data = explain_effective_setting(
+                    args.key,
+                    repo_root=repo_base(),
+                    env_file=args.env_file,
+                    include_local_env_file=not bool(args.no_local_env_file),
+                )
+            except ValueError as exc:
+                raise AgentToolError(code="INPUT_ERROR", message=str(exc)) from exc
+            return _print(build_response(
+                tool_name="settings.explain",
+                ok=True,
+                data=data,
+            ))
+
         if args.command == "version":
             sys.stdout.write(_dumps(check_version_update()))
             return 0
@@ -922,6 +1002,19 @@ def main(argv: list[str] | None = None) -> int:
             data = service_status_from_profile(profile, include_status=bool(args.include_service_status))
             return _print(build_response(tool_name="service.status", ok=True, data=data))
 
+        if args.command == "service" and args.service_command == "cleanup":
+            data = service_cleanup(
+                repo_root=args.repo_root or repo_base(),
+                releases_root=args.releases_root,
+                keep_releases=args.keep_releases,
+                include_apt_cache=bool(args.include_apt_cache),
+                journal_vacuum_size=args.journal_vacuum_size,
+                cleanup_downloads=bool(args.cleanup_downloads),
+                cleanup_pip_cache=bool(args.cleanup_pip_cache),
+                confirm=bool(args.confirm),
+            )
+            return _print(build_response(tool_name="service.cleanup", ok=bool(data.get("ok")), data=data))
+
         if args.command == "service" and args.service_command == "upgrade-check":
             data = service_upgrade_check(
                 repo_root=args.repo_root or repo_base(),
@@ -941,6 +1034,8 @@ def main(argv: list[str] | None = None) -> int:
                 auto=bool(args.auto),
                 allow_major=bool(args.allow_major),
                 restart_services=not bool(args.no_restart_services),
+                cleanup_after_upgrade=bool(args.cleanup_after_upgrade),
+                cleanup_keep_releases=args.cleanup_keep_releases,
             )
             return _print(build_response(tool_name="service.upgrade", ok=bool(data.get("ok")), data=data))
 
@@ -974,6 +1069,8 @@ def main(argv: list[str] | None = None) -> int:
                 auto=bool(args.auto),
                 allow_major=bool(args.allow_major),
                 restart_services=not bool(args.no_restart_services),
+                cleanup_after_upgrade=bool(args.cleanup_after_upgrade),
+                cleanup_keep_releases=args.cleanup_keep_releases,
             )
             return _print(build_response(tool_name="update.apply", ok=bool(data.get("ok")), data=data))
 
@@ -1088,4 +1185,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv[1:]))
+    raise SystemExit(main())

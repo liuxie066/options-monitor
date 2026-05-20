@@ -108,12 +108,19 @@ def _return_row_is_calculable(row: dict[str, Any]) -> bool:
 
 def _render_monthly_income_diagnostics(data: dict[str, Any]) -> str:
     diagnostics = data.get("diagnostics")
-    diag = diagnostics[0] if isinstance(diagnostics, list) and diagnostics and isinstance(diagnostics[0], dict) else {}
-    filters = data.get("filters") if isinstance(data.get("filters"), dict) else {}
+    diag: dict[str, Any] = (
+        cast(dict[str, Any], diagnostics[0])
+        if isinstance(diagnostics, list) and diagnostics and isinstance(diagnostics[0], dict)
+        else {}
+    )
+    filters_raw = data.get("filters")
+    filters: dict[str, Any] = cast(dict[str, Any], filters_raw) if isinstance(filters_raw, dict) else {}
     account = diag.get("account") or filters.get("account") or "-"
     month = diag.get("month") or filters.get("month") or "-"
-    missing = diag.get("missing_fields") if isinstance(diag.get("missing_fields"), list) else []
-    reasons = _income_missing_reasons(missing)
+    return_row = _find_return_summary_row(data, account=str(account), month=str(month))
+    raw_missing = diag.get("missing_fields")
+    missing: list[Any] = raw_missing if isinstance(raw_missing, list) else []
+    reasons = _income_missing_reasons(missing, diag=diag, return_row=return_row)
     if not reasons:
         reasons = ["没有可计算收益数据。"]
     lines = [
@@ -127,31 +134,120 @@ def _render_monthly_income_diagnostics(data: dict[str, Any]) -> str:
             f"持仓 lot：{int(diag.get('matched_lots_count') or 0)}，"
             f"已平仓 lot：{int(diag.get('closed_lots_count') or 0)}，"
             f"权利金行：{int(diag.get('premium_rows_count') or 0)}。"
-        )
+            )
         if missing:
             lines.append("缺失项：" + "、".join(str(item) for item in missing[:8]))
+    if return_row:
+        original_currency_lines = _original_currency_summary_lines(return_row)
+        if original_currency_lines:
+            lines.extend(original_currency_lines)
     warnings = data.get("report_warnings")
     if isinstance(warnings, list) and warnings:
         lines.append("诊断：" + "；".join(str(item) for item in warnings[:3]))
     return "\n".join(lines)
 
 
-def _income_missing_reasons(missing_fields: list[Any]) -> list[str]:
+def _income_missing_reasons(missing_fields: list[Any], *, diag: dict[str, Any], return_row: dict[str, Any]) -> list[str]:
     missing = {str(item) for item in missing_fields}
     reasons: list[str] = []
     if "income_rows" in missing or "trade_events" in missing:
         reasons.append("本月没有匹配到已完成收益事件")
-    if "closed_lots" in missing:
+    premium_rows_count = int(diag.get("premium_rows_count") or 0) if isinstance(diag, dict) else 0
+    closed_lots_count = int(diag.get("closed_lots_count") or 0) if isinstance(diag, dict) else 0
+    if closed_lots_count == 0 and premium_rows_count > 0:
+        reasons.append("本月暂无平仓收益")
+    elif "closed_lots" in missing:
         reasons.append("账本缺少已平仓/close 数据")
     if "premium" in missing:
         reasons.append("账本缺少开仓权利金数据")
     if "cash_secured" in missing:
         reasons.append("当前持仓缺少现金担保金额")
     if "currency_conversion" in missing:
-        reasons.append("缺少币种换算汇率，无法折算 CNY")
+        currencies = _missing_cny_currencies(diag, return_row)
+        if _dict(return_row.get("cash_secured_by_ccy")):
+            reasons.append(f"现金担保原币存在，但缺少 {_ccy_pair_text(currencies)} 汇率，无法折算 CNY")
+        else:
+            reasons.append(f"缺少 {_ccy_pair_text(currencies)} 汇率，无法折算 CNY")
+        if premium_rows_count > 0 and _dict(return_row.get("premium_income_by_ccy")):
+            reasons.append("本月有开仓权利金收入，但缺汇率导致无法计算 CNY 收益率")
     if "month_range" in missing:
         reasons.append("部分事件缺少成交时间，无法归入查询月份")
     return reasons
+
+
+def _find_return_summary_row(data: dict[str, Any], *, account: str, month: str) -> dict[str, Any]:
+    rows = data.get("return_summary")
+    if not isinstance(rows, list):
+        return {}
+    for row_raw in rows:
+        row = _dict(row_raw)
+        if str(row.get("account") or "-") == account and str(row.get("month") or "-") == month:
+            return row
+    return _dict(rows[0]) if rows else {}
+
+
+def _missing_cny_currencies(diag: dict[str, Any], return_row: dict[str, Any]) -> list[str]:
+    raw = diag.get("missing_cny_currencies") if isinstance(diag, dict) else None
+    if isinstance(raw, list) and raw:
+        return sorted({str(item).upper() for item in raw if str(item).strip()})
+    currencies: set[str] = set()
+    for key in ("cash_secured_by_ccy", "net_income_by_ccy", "premium_income_by_ccy", "realized_pnl_by_ccy"):
+        values = _dict(return_row.get(key))
+        currencies.update(str(currency).upper() for currency in values if str(currency).strip())
+    return sorted(currencies)
+
+
+def _ccy_pair_text(currencies: list[str]) -> str:
+    if not currencies:
+        return "币种到 CNY"
+    return "/".join(currencies) + " 到 CNY"
+
+
+def _original_currency_summary_lines(return_row: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+    premium = _dict(return_row.get("premium_income_by_ccy"))
+    cash = _dict(return_row.get("cash_secured_by_ccy"))
+    if premium:
+        lines.append("权利金收入：" + _format_ccy_amounts(premium))
+    if cash:
+        lines.append("现金担保：" + _format_ccy_amounts(cash))
+    premium_rates = _dict(return_row.get("premium_return_rate_by_ccy"))
+    if not premium_rates and premium and cash:
+        premium_rates = _rate_by_ccy_for_render(premium, cash)
+    if premium_rates:
+        lines.append("原币权利金收益率：" + _format_ccy_rates(premium_rates))
+    return lines
+
+
+def _rate_by_ccy_for_render(numerator_by_ccy: dict[str, Any], denominator_by_ccy: dict[str, Any]) -> dict[str, float]:
+    out: dict[str, float] = {}
+    for currency, numerator in numerator_by_ccy.items():
+        try:
+            denominator = float(denominator_by_ccy.get(currency) or 0.0)
+            if denominator > 0:
+                out[str(currency).upper()] = float(numerator or 0.0) / denominator
+        except Exception:
+            continue
+    return out
+
+
+def _format_ccy_amounts(values: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for currency, amount in sorted(values.items()):
+        try:
+            parts.append(f"{str(currency).upper()} {float(amount):,.0f}")
+        except Exception:
+            continue
+    return " + ".join(parts) if parts else "-"
+
+
+def _format_ccy_rates(values: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for currency, value in sorted(values.items()):
+        pct = _pct(value)
+        if pct != "-":
+            parts.append(f"{str(currency).upper()} {pct}")
+    return "，".join(parts) if parts else "-"
 
 
 def _pct(value: Any) -> str:

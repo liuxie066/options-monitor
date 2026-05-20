@@ -87,15 +87,21 @@ def _run_command(
     *,
     cwd: Path | None,
     run_cmd: Callable[..., Any],
+    env: dict[str, str] | None = None,
     timeout: int = 300,
 ) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "cwd": (str(cwd) if cwd is not None else None),
+        "capture_output": True,
+        "text": True,
+        "timeout": timeout,
+        "check": False,
+    }
+    if env is not None:
+        kwargs["env"] = env
     proc = run_cmd(
         command,
-        cwd=(str(cwd) if cwd is not None else None),
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=False,
+        **kwargs,
     )
     rc = int(getattr(proc, "returncode", 1))
     stdout = str(getattr(proc, "stdout", "") or "")
@@ -107,6 +113,7 @@ def _run_command(
         "stdout": stdout[-4000:],
         "stderr": stderr[-4000:],
         "ok": rc == 0,
+        **({"env_overrides": sorted(set(env) - set(os.environ))} if env is not None else {}),
     }
 
 
@@ -116,9 +123,10 @@ def _run_required(
     cwd: Path | None,
     run_cmd: Callable[..., Any],
     operations: list[dict[str, Any]],
+    env: dict[str, str] | None = None,
     timeout: int = 300,
 ) -> dict[str, Any]:
-    result = _run_command(command, cwd=cwd, run_cmd=run_cmd, timeout=timeout)
+    result = _run_command(command, cwd=cwd, run_cmd=run_cmd, env=env, timeout=timeout)
     operations.append(result)
     if not result["ok"]:
         raise RuntimeError(f"command failed: {' '.join(shlex.quote(part) for part in command)}")
@@ -146,6 +154,12 @@ class RuntimeConfigPrepareError(RuntimeError):
         self.remediation = remediation
 
 
+class RuntimePrepareError(RuntimeError):
+    def __init__(self, message: str, *, runtime_prepare: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.runtime_prepare = runtime_prepare
+
+
 def _load_service_profile(runtime_root: Path) -> dict[str, Any]:
     profile_path = runtime_root / "service.profile.json"
     try:
@@ -160,29 +174,49 @@ def _restart_profile(profile: dict[str, Any]) -> dict[str, Any]:
     return raw if isinstance(raw, dict) else {}
 
 
-def _restart_command_prefix(profile: dict[str, Any]) -> list[str]:
+def _is_root_process() -> bool:
+    try:
+        return os.geteuid() == 0
+    except (AttributeError, OSError):
+        return False
+
+
+def _restart_command_policy(profile: dict[str, Any]) -> tuple[list[str], str]:
     restart = _restart_profile(profile)
     raw_prefix = restart.get("command_prefix")
     if isinstance(raw_prefix, list) and raw_prefix:
         prefix = [str(item).strip() for item in raw_prefix if str(item).strip()]
         if prefix:
-            return prefix
+            return prefix, "profile.command_prefix"
     raw_command = restart.get("restart_command") or profile.get("restart_command")
     if isinstance(raw_command, str) and raw_command.strip():
         parts = shlex.split(raw_command)
         if parts[-1:] == ["restart"]:
             parts = parts[:-1]
         if parts:
-            return parts
+            return parts, "profile.restart_command"
     if isinstance(raw_command, list) and raw_command:
         parts = [str(item).strip() for item in raw_command if str(item).strip()]
         if parts[-1:] == ["restart"]:
             parts = parts[:-1]
         if parts:
-            return parts
-    if bool(restart.get("requires_sudo") or profile.get("restart_requires_sudo")):
-        return ["sudo", "-n", "systemctl"]
-    return ["systemctl"]
+            return parts, "profile.restart_command"
+    requires_sudo = restart.get("requires_sudo")
+    if bool(requires_sudo or profile.get("restart_requires_sudo")):
+        return ["sudo", "-n", "systemctl"], "profile.requires_sudo"
+    if requires_sudo is False:
+        return ["systemctl"], "profile.requires_sudo_false"
+    provider = str(profile.get("service_provider") or "").strip().lower()
+    deploy_user = str(profile.get("deploy_user") or "").strip()
+    if provider == "systemd" and (deploy_user and deploy_user != "root"):
+        return ["sudo", "-n", "systemctl"], "deploy_user_sudo_fallback"
+    if provider == "systemd" and not _is_root_process():
+        return ["sudo", "-n", "systemctl"], "non_root_sudo_fallback"
+    return ["systemctl"], "root_systemctl_default"
+
+
+def _restart_command_prefix(profile: dict[str, Any]) -> list[str]:
+    return _restart_command_policy(profile)[0]
 
 
 def _restart_remediation(*, profile: dict[str, Any], service_names: list[str], command_by_service: dict[str, list[str]]) -> list[str]:
@@ -269,13 +303,14 @@ def _restart_services_from_profile(
     restarted: list[str] = []
     if provider != "systemd":
         return restarted
-    command_prefix = _restart_command_prefix(profile)
+    command_prefix, command_source = _restart_command_policy(profile)
     failed: list[str] = []
     command_by_service: dict[str, list[str]] = {}
     for name in _restart_service_names(profile):
         command = [*command_prefix, "restart", name]
         command_by_service[name] = command
         result = _run_command(command, cwd=None, run_cmd=run_cmd, timeout=60)
+        result["command_source"] = command_source
         operations.append(result)
         if not result["ok"]:
             failed.append(name)
@@ -568,6 +603,124 @@ def _prepare_runtime_configs_for_release(
     return {"status": "prepared", "targets": targets, "overlays": overlays, "rebuilt": rebuilt}
 
 
+def _upgrade_installer_mode() -> str:
+    mode = str(os.environ.get("OM_UPGRADE_INSTALLER") or "auto").strip().lower()
+    return mode if mode in {"auto", "uv", "pip"} else "auto"
+
+
+def _uv_install_env() -> dict[str, str]:
+    env = dict(os.environ)
+    pip_index = str(env.get("PIP_INDEX_URL") or "").strip()
+    if pip_index and not str(env.get("UV_INDEX_URL") or "").strip():
+        env["UV_INDEX_URL"] = pip_index
+    return env
+
+
+def _command_error(result: dict[str, Any]) -> str:
+    stderr = str(result.get("stderr") or "").strip()
+    stdout = str(result.get("stdout") or "").strip()
+    command = " ".join(str(part) for part in result.get("command") or [])
+    detail = stderr or stdout or f"returncode={result.get('returncode')}"
+    return f"{command}: {detail}" if command else detail
+
+
+def _pip_install_commands(venv_python: Path) -> list[tuple[list[str], int]]:
+    return [
+        ([str(venv_python), "-m", "pip", "install", "-U", "pip"], 600),
+        ([str(venv_python), "-m", "pip", "install", "-r", "requirements.txt", "-c", "constraints.txt"], 1200),
+    ]
+
+
+def _uv_install_commands(venv_python: Path, *, include_server: bool) -> list[tuple[list[str], int]]:
+    commands: list[tuple[list[str], int]] = [
+        (["uv", "venv", ".venv"], 300),
+        (["uv", "pip", "install", "-p", str(venv_python), "-r", "requirements.txt", "-c", "constraints.txt"], 1200),
+    ]
+    if include_server:
+        commands.append(
+            (
+                [
+                    "uv",
+                    "pip",
+                    "install",
+                    "-p",
+                    str(venv_python),
+                    "-r",
+                    "requirements/server.txt",
+                    "-c",
+                    "constraints/server.txt",
+                ],
+                1200,
+            )
+        )
+    return commands
+
+
+def _run_runtime_install_commands(
+    *,
+    commands: list[tuple[list[str], int]],
+    cwd: Path,
+    run_cmd: Callable[..., Any],
+    operations: list[dict[str, Any]],
+    installer: str,
+    env: dict[str, str] | None = None,
+) -> None:
+    for command, timeout in commands:
+        result = _run_command(command, cwd=cwd, run_cmd=run_cmd, env=env, timeout=timeout)
+        result["runtime_prepare_installer"] = installer
+        operations.append(result)
+        if not result["ok"]:
+            raise RuntimeError(_command_error(result))
+
+
+def _run_pip_runtime_prepare(
+    *,
+    target_dir: Path,
+    venv_python: Path,
+    include_server: bool,
+    run_cmd: Callable[..., Any],
+    operations: list[dict[str, Any]],
+    commands: list[list[str]],
+) -> None:
+    if not venv_python.exists():
+        command = ["python3", "-m", "venv", ".venv"]
+        _run_required(command, cwd=target_dir, run_cmd=run_cmd, operations=operations, timeout=300)
+        operations[-1]["runtime_prepare_installer"] = "pip"
+        commands.append(command)
+    pip_commands = _pip_install_commands(venv_python)
+    if include_server:
+        pip_commands.append(
+            (
+                [
+                    str(venv_python),
+                    "-m",
+                    "pip",
+                    "install",
+                    "-r",
+                    "requirements/server.txt",
+                    "-c",
+                    "constraints/server.txt",
+                ],
+                1200,
+            )
+        )
+    _run_runtime_install_commands(
+        commands=pip_commands,
+        cwd=target_dir,
+        run_cmd=run_cmd,
+        operations=operations,
+        installer="pip",
+    )
+    commands.extend(command for command, _timeout in pip_commands)
+
+
+def _check_uv_available(*, target_dir: Path, run_cmd: Callable[..., Any], operations: list[dict[str, Any]]) -> bool:
+    result = _run_command(["sh", "-lc", "command -v uv"], cwd=target_dir, run_cmd=run_cmd, timeout=30)
+    result["runtime_prepare_installer_check"] = "uv"
+    operations.append(result)
+    return bool(result.get("ok"))
+
+
 def _release_python(target_dir: Path) -> Path:
     return target_dir / ".venv" / "bin" / "python"
 
@@ -577,51 +730,74 @@ def _ensure_release_runtime(
     target_dir: Path,
     run_cmd: Callable[..., Any],
     operations: list[dict[str, Any]],
-) -> Path:
+) -> dict[str, Any]:
     venv_python = _release_python(target_dir)
-    if not venv_python.exists():
-        _run_required(
-            ["python3", "-m", "venv", ".venv"],
-            cwd=target_dir,
-            run_cmd=run_cmd,
-            operations=operations,
-            timeout=300,
-        )
-    if not venv_python.exists() or not os.access(venv_python, os.X_OK):
-        raise RuntimeError(f"release virtualenv python is missing after setup: {venv_python}")
-
-    _run_required(
-        [str(venv_python), "-m", "pip", "install", "-U", "pip"],
-        cwd=target_dir,
-        run_cmd=run_cmd,
-        operations=operations,
-        timeout=600,
-    )
-    _run_required(
-        [str(venv_python), "-m", "pip", "install", "-r", "requirements.txt", "-c", "constraints.txt"],
-        cwd=target_dir,
-        run_cmd=run_cmd,
-        operations=operations,
-        timeout=1200,
-    )
     server_requirements = target_dir / "requirements" / "server.txt"
     server_constraints = target_dir / "constraints" / "server.txt"
-    if server_requirements.exists() and server_constraints.exists():
-        _run_required(
-            [
-                str(venv_python),
-                "-m",
-                "pip",
-                "install",
-                "-r",
-                "requirements/server.txt",
-                "-c",
-                "constraints/server.txt",
-            ],
-            cwd=target_dir,
+    include_server = server_requirements.exists() and server_constraints.exists()
+    mode = _upgrade_installer_mode()
+    commands: list[list[str]] = []
+    runtime_prepare: dict[str, Any] = {
+        "installer": "pip",
+        "mode": mode,
+        "fallback": False,
+        "venv_path": str(target_dir / ".venv"),
+        "python": str(venv_python),
+        "commands": commands,
+    }
+
+    uv_available = _check_uv_available(target_dir=target_dir, run_cmd=run_cmd, operations=operations) if mode in {"auto", "uv"} else False
+    use_uv = mode == "uv" and uv_available or mode == "auto" and uv_available
+    if use_uv:
+        runtime_prepare["installer"] = "uv"
+        uv_commands = _uv_install_commands(venv_python, include_server=include_server)
+        commands.extend(command for command, _timeout in uv_commands)
+        try:
+            uv_env = _uv_install_env()
+            _run_runtime_install_commands(
+                commands=uv_commands,
+                cwd=target_dir,
+                run_cmd=run_cmd,
+                operations=operations,
+                installer="uv",
+                env=uv_env,
+            )
+            if not venv_python.exists():
+                raise RuntimeError(f"uv did not create release virtualenv python: {venv_python}")
+        except RuntimeError as exc:
+            runtime_prepare["uv_error"] = str(exc)
+            if mode == "uv":
+                raise RuntimePrepareError(str(exc), runtime_prepare=runtime_prepare) from exc
+            shutil.rmtree(target_dir / ".venv", ignore_errors=True)
+            runtime_prepare["installer"] = "pip"
+            runtime_prepare["fallback"] = True
+            runtime_prepare["fallback_from"] = "uv"
+            _run_pip_runtime_prepare(
+                target_dir=target_dir,
+                venv_python=venv_python,
+                include_server=include_server,
+                run_cmd=run_cmd,
+                operations=operations,
+                commands=commands,
+            )
+    else:
+        if mode == "uv":
+            runtime_prepare["installer"] = "uv"
+            runtime_prepare["uv_error"] = "uv is not available on PATH"
+            raise RuntimePrepareError("uv is not available on PATH", runtime_prepare=runtime_prepare)
+        _run_pip_runtime_prepare(
+            target_dir=target_dir,
+            venv_python=venv_python,
+            include_server=include_server,
             run_cmd=run_cmd,
             operations=operations,
-            timeout=1200,
+            commands=commands,
+        )
+
+    if not venv_python.exists() or not os.access(venv_python, os.X_OK):
+        raise RuntimePrepareError(
+            f"release virtualenv python is missing after setup: {venv_python}",
+            runtime_prepare=runtime_prepare,
         )
     _run_required(
         [
@@ -634,7 +810,8 @@ def _ensure_release_runtime(
         operations=operations,
         timeout=120,
     )
-    return venv_python
+    commands.append([str(venv_python), "-c", "from pathlib import Path; import sys; assert Path(sys.executable).exists(); import src.application.multi_account_tick"])
+    return runtime_prepare
 
 
 def service_upgrade_check(
@@ -685,6 +862,8 @@ def service_upgrade(
     auto: bool = False,
     allow_major: bool = False,
     restart_services: bool = True,
+    cleanup_after_upgrade: bool = False,
+    cleanup_keep_releases: int = 2,
     run_cmd: Callable[..., Any] = subprocess.run,
     now_fn: Callable[[], datetime] | None = None,
 ) -> dict[str, Any]:
@@ -717,6 +896,8 @@ def service_upgrade(
         "auto": bool(auto),
         "confirmed": bool(confirm),
         "allow_major": bool(allow_major),
+        "cleanup_after_upgrade": bool(cleanup_after_upgrade),
+        "cleanup_keep_releases": max(2, int(cleanup_keep_releases or 2)),
         "updated_at": utc_now_iso(now_fn),
     }
     if not target:
@@ -747,6 +928,8 @@ def service_upgrade(
         f"switch {repo_link} -> {target_dir}",
         "restart long-running services" if restart_services else "skip service restart",
     ]
+    if cleanup_after_upgrade:
+        planned.append(f"cleanup old releases after successful upgrade, keep {status_base['cleanup_keep_releases']} releases")
     if not confirm:
         return {
             **status_base,
@@ -760,9 +943,24 @@ def service_upgrade(
             "version_check": check,
             "operations": operations,
         }
+    if not repo_root_is_symlink:
+        out = {
+            **status_base,
+            "ok": False,
+            "status": "repo_root_not_symlink",
+            "changed": False,
+            "target_dir": str(target_dir),
+            "previous_dir": str(previous_dir),
+            "warnings": warnings,
+            "reason": "repo_root must be the current symlink path for confirmed upgrade",
+            "operations": operations,
+        }
+        write_upgrade_status(runtime_root=runtime, payload=out)
+        return out
 
     lock_path = runtime / "locks" / "upgrade.lock"
     symlink_switched = False
+    runtime_prepare: dict[str, Any] = {}
     runtime_config_prepare: dict[str, Any] = {}
     post_switch_runtime_config_validate: list[dict[str, Any]] = []
     try:
@@ -777,7 +975,7 @@ def service_upgrade(
                     operations=operations,
                     timeout=600,
                 )
-            _ensure_release_runtime(target_dir=target_dir, run_cmd=run_cmd, operations=operations)
+            runtime_prepare = _ensure_release_runtime(target_dir=target_dir, run_cmd=run_cmd, operations=operations)
             _run_required(
                 ["python3", "scripts/release_check.py", "--tag", str(tag)],
                 cwd=target_dir,
@@ -828,6 +1026,7 @@ def service_upgrade(
             "config_rebuilt": bool(runtime_config_prepare.get("status") == "prepared"),
             "target_dir": str(target_dir),
             "previous_dir": str(previous_dir),
+            "runtime_prepare": runtime_prepare,
             "runtime_config_prepare": runtime_config_prepare,
             "post_switch_runtime_config_validate": post_switch_runtime_config_validate,
             "restarted_services": exc.restarted_services,
@@ -849,12 +1048,65 @@ def service_upgrade(
             "config_rebuilt": bool(runtime_config_prepare.get("status") == "prepared"),
             "target_dir": str(target_dir),
             "previous_dir": str(previous_dir),
+            "runtime_prepare": exc.runtime_prepare if isinstance(exc, RuntimePrepareError) else runtime_prepare,
             "error": f"{type(exc).__name__}: {exc}",
             **({"remediation": exc.remediation} if isinstance(exc, RuntimeConfigPrepareError) else {}),
             "operations": operations,
         }
         write_upgrade_status(runtime_root=runtime, payload=out)
         return out
+
+    cleanup_result: dict[str, Any] | None = None
+    if cleanup_after_upgrade:
+        if not symlink_switched or runtime_config_prepare.get("status") != "prepared":
+            cleanup_result = {
+                "ok": True,
+                "status": "skipped",
+                "changed": False,
+                "reason": "cleanup-after-upgrade requires symlink switch and prepared runtime configs",
+                "symlink_switched": bool(symlink_switched),
+                "runtime_config_status": runtime_config_prepare.get("status"),
+            }
+        else:
+            from src.application.service_cleanup import service_cleanup
+
+            cleanup_plan = service_cleanup(
+                repo_root=repo_link,
+                releases_root=releases,
+                keep_releases=max(2, int(cleanup_keep_releases or 2)),
+                cleanup_downloads=True,
+                cleanup_pip_cache=False,
+                include_apt_cache=False,
+                journal_vacuum_size=None,
+                confirm=False,
+                run_cmd=run_cmd,
+            )
+            if not cleanup_plan.get("ok"):
+                cleanup_result = {
+                    **cleanup_plan,
+                    "status": "skipped",
+                    "changed": False,
+                    "reason": "cleanup-after-upgrade could not confirm active release",
+                }
+            elif len(cleanup_plan.get("kept_releases", [])) < max(2, int(cleanup_keep_releases or 2)):
+                cleanup_result = {
+                    **cleanup_plan,
+                    "status": "skipped",
+                    "changed": False,
+                    "reason": "cleanup-after-upgrade requires at least keep_releases retained releases",
+                }
+            else:
+                cleanup_result = service_cleanup(
+                    repo_root=repo_link,
+                    releases_root=releases,
+                    keep_releases=max(2, int(cleanup_keep_releases or 2)),
+                    cleanup_downloads=True,
+                    cleanup_pip_cache=False,
+                    include_apt_cache=False,
+                    journal_vacuum_size=None,
+                    confirm=True,
+                    run_cmd=run_cmd,
+                )
 
     out = {
         **status_base,
@@ -865,9 +1117,11 @@ def service_upgrade(
         "previous_dir": str(previous_dir),
         "symlink_switched": True,
         "config_rebuilt": bool(runtime_config_prepare.get("status") == "prepared"),
+        "runtime_prepare": runtime_prepare,
         "runtime_config_prepare": runtime_config_prepare,
         "post_switch_runtime_config_validate": post_switch_runtime_config_validate,
         "restarted_services": restarted,
+        **({"post_upgrade_cleanup": cleanup_result} if cleanup_result is not None else {}),
         "operations": operations,
     }
     write_upgrade_status(runtime_root=runtime, payload=out)

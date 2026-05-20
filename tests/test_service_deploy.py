@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -295,21 +296,33 @@ def test_render_systemd_bundle_can_reference_environment_file(tmp_path: Path) ->
     assert profile["env_file"] == str(env_file)
 
 
-def test_render_service_bundle_rejects_env_file_for_launchd(tmp_path: Path) -> None:
+def test_render_launchd_bundle_can_reference_environment_file(tmp_path: Path) -> None:
     from src.application.service_deploy import render_service_bundle
 
     repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    env_file = tmp_path / "Library" / "Application Support" / "options-monitor" / "options-monitor.env"
     repo.mkdir()
 
-    try:
-        render_service_bundle(
-            target="launchd",
-            repo_root=repo,
-            env_file="/etc/options-monitor/options-monitor.env",
-        )
-        raise AssertionError("expected ValueError")
-    except ValueError as exc:
-        assert "--env-file is only supported for systemd" in str(exc)
+    bundle = render_service_bundle(
+        target="launchd",
+        repo_root=repo,
+        runtime_root=runtime,
+        accounts=["lx"],
+        markets=["us"],
+        env_file=env_file,
+    )
+
+    files = {item["relative_path"]: item for item in bundle["files"]}
+    tick = files["launchd/com.options-monitor.tick-us.plist"]["content"]
+    intake = files["launchd/com.options-monitor.trade-intake.plist"]["content"]
+    profile = json.loads(files["service.profile.json"]["content"])
+
+    assert "<key>OM_ENV_FILE</key>" in tick
+    assert f"<string>{env_file}</string>" in tick
+    assert "<key>OM_ENV_FILE</key>" in intake
+    assert bundle["env_file"] == str(env_file)
+    assert profile["env_file"] == str(env_file)
 
 
 def test_render_launchd_bundle_uses_launch_agents_and_logs(tmp_path: Path) -> None:
@@ -495,9 +508,10 @@ def test_service_status_from_profile_checks_provider_with_injected_runner() -> N
     assert calls == [["systemctl", "is-active", "options-monitor-trade-intake.service"]]
 
 
-def test_service_upgrade_dry_run_and_confirm_switches_current_symlink(tmp_path: Path) -> None:
+def test_service_upgrade_dry_run_and_confirm_switches_current_symlink(monkeypatch, tmp_path: Path) -> None:
     from src.application.service_upgrade import service_upgrade
 
+    monkeypatch.setenv("OM_UPGRADE_INSTALLER", "pip")
     install = tmp_path / "opt" / "options-monitor"
     releases = install / "releases"
     v100 = releases / "1.0.0"
@@ -511,6 +525,7 @@ def test_service_upgrade_dry_run_and_confirm_switches_current_symlink(tmp_path: 
         json.dumps(
             {
                 "service_provider": "systemd",
+                "restart": {"requires_sudo": False},
                 "services": [
                     {"name": "options-monitor-tick-us.timer"},
                     {"name": "options-monitor-trade-intake.service"},
@@ -595,7 +610,10 @@ def test_service_upgrade_dry_run_and_confirm_switches_current_symlink(tmp_path: 
     ] in calls
     assert any(command[:2] == [venv_python, "-c"] for command in calls)
     assert ["systemctl", "restart", "options-monitor-trade-intake.service"] in calls
+    assert out["runtime_prepare"]["installer"] == "pip"
+    assert out["runtime_prepare"]["fallback"] is False
     status = json.loads((runtime / "upgrade_status.json").read_text(encoding="utf-8"))
+    assert status["runtime_prepare"]["installer"] == "pip"
     assert status["target_version"] == "1.0.1"
     assert status["status"] == "upgraded"
 
@@ -635,6 +653,212 @@ def test_service_upgrade_restart_uses_sudo_prefix_from_deploy_profile(tmp_path: 
         ["sudo", "-n", "systemctl", "restart", "options-monitor-trade-intake.service"],
         ["sudo", "-n", "systemctl", "restart", "options-monitor-feishu-ws.service"],
     ]
+
+
+def test_service_upgrade_restart_uses_sudo_fallback_for_legacy_non_root_systemd_profile(monkeypatch, tmp_path: Path) -> None:
+    from src.application.service_upgrade import _restart_services_from_profile
+
+    monkeypatch.setattr(os, "geteuid", lambda: 501, raising=False)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    (runtime / "service.profile.json").write_text(
+        json.dumps(
+            {
+                "service_provider": "systemd",
+                "services": [{"name": "options-monitor-trade-intake.service"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    calls: list[list[str]] = []
+    operations: list[dict] = []
+
+    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        calls.append(list(command))
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    restarted = _restart_services_from_profile(runtime_root=runtime, run_cmd=_run_cmd, operations=operations)
+
+    assert restarted == ["options-monitor-trade-intake.service"]
+    assert calls == [["sudo", "-n", "systemctl", "restart", "options-monitor-trade-intake.service"]]
+    assert operations[0]["command_source"] == "non_root_sudo_fallback"
+
+
+def test_service_upgrade_restart_honors_explicit_non_sudo_profile(monkeypatch, tmp_path: Path) -> None:
+    from src.application.service_upgrade import _restart_services_from_profile
+
+    monkeypatch.setattr(os, "geteuid", lambda: 501, raising=False)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    (runtime / "service.profile.json").write_text(
+        json.dumps(
+            {
+                "service_provider": "systemd",
+                "restart": {"requires_sudo": False},
+                "services": [{"name": "options-monitor-trade-intake.service"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    calls: list[list[str]] = []
+    operations: list[dict] = []
+
+    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        calls.append(list(command))
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    restarted = _restart_services_from_profile(runtime_root=runtime, run_cmd=_run_cmd, operations=operations)
+
+    assert restarted == ["options-monitor-trade-intake.service"]
+    assert calls == [["systemctl", "restart", "options-monitor-trade-intake.service"]]
+    assert operations[0]["command_source"] == "profile.requires_sudo_false"
+
+
+def _write_runtime_target_with_server_deps(path: Path) -> None:
+    _write_upgrade_release_skeleton(path, "1.0.1")
+    (path / "requirements" / "server.txt").write_text("", encoding="utf-8")
+    (path / "constraints" / "server.txt").write_text("", encoding="utf-8")
+
+
+def _create_fake_venv_python(target: Path) -> None:
+    venv_python = target / ".venv" / "bin" / "python"
+    venv_python.parent.mkdir(parents=True, exist_ok=True)
+    venv_python.write_text("#!/bin/sh\n", encoding="utf-8")
+    venv_python.chmod(0o755)
+
+
+def test_service_upgrade_runtime_prepare_auto_uses_pip_when_uv_missing(monkeypatch, tmp_path: Path) -> None:
+    from src.application.service_upgrade import _ensure_release_runtime
+
+    monkeypatch.delenv("OM_UPGRADE_INSTALLER", raising=False)
+    target = tmp_path / "release"
+    _write_runtime_target_with_server_deps(target)
+    calls: list[list[str]] = []
+
+    def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append(list(command))
+        if command == ["sh", "-lc", "command -v uv"]:
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
+        if command == ["python3", "-m", "venv", ".venv"]:
+            _create_fake_venv_python(Path(kwargs["cwd"]))
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    out = _ensure_release_runtime(target_dir=target, run_cmd=_run_cmd, operations=[])
+
+    venv_python = str(target / ".venv" / "bin" / "python")
+    assert out["installer"] == "pip"
+    assert out["fallback"] is False
+    assert ["uv", "pip", "install", "-p", venv_python, "-r", "requirements.txt", "-c", "constraints.txt"] not in calls
+    assert [venv_python, "-m", "pip", "install", "-r", "requirements.txt", "-c", "constraints.txt"] in calls
+    assert [venv_python, "-m", "pip", "install", "-r", "requirements/server.txt", "-c", "constraints/server.txt"] in calls
+
+
+def test_service_upgrade_runtime_prepare_auto_uses_uv_and_maps_pip_index(monkeypatch, tmp_path: Path) -> None:
+    from src.application.service_upgrade import _ensure_release_runtime
+
+    monkeypatch.delenv("OM_UPGRADE_INSTALLER", raising=False)
+    monkeypatch.setenv("PIP_INDEX_URL", "https://mirrors.aliyun.com/pypi/simple/")
+    monkeypatch.delenv("UV_INDEX_URL", raising=False)
+    target = tmp_path / "release"
+    _write_runtime_target_with_server_deps(target)
+    calls: list[list[str]] = []
+    uv_envs: list[dict[str, str]] = []
+
+    def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append(list(command))
+        if command == ["sh", "-lc", "command -v uv"]:
+            return subprocess.CompletedProcess(command, 0, stdout="/usr/bin/uv\n", stderr="")
+        if command == ["uv", "venv", ".venv"]:
+            _create_fake_venv_python(Path(kwargs["cwd"]))
+        if command[:3] == ["uv", "pip", "install"]:
+            uv_envs.append(dict(kwargs["env"]))
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    out = _ensure_release_runtime(target_dir=target, run_cmd=_run_cmd, operations=[])
+
+    venv_python = str(target / ".venv" / "bin" / "python")
+    assert out["installer"] == "uv"
+    assert out["fallback"] is False
+    assert ["uv", "venv", ".venv"] in calls
+    assert ["uv", "pip", "install", "-p", venv_python, "-r", "requirements.txt", "-c", "constraints.txt"] in calls
+    assert ["uv", "pip", "install", "-p", venv_python, "-r", "requirements/server.txt", "-c", "constraints/server.txt"] in calls
+    assert uv_envs and uv_envs[0]["UV_INDEX_URL"] == "https://mirrors.aliyun.com/pypi/simple/"
+
+
+def test_service_upgrade_runtime_prepare_pip_mode_skips_uv(monkeypatch, tmp_path: Path) -> None:
+    from src.application.service_upgrade import _ensure_release_runtime
+
+    monkeypatch.setenv("OM_UPGRADE_INSTALLER", "pip")
+    target = tmp_path / "release"
+    _write_runtime_target_with_server_deps(target)
+    calls: list[list[str]] = []
+
+    def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append(list(command))
+        if command == ["python3", "-m", "venv", ".venv"]:
+            _create_fake_venv_python(Path(kwargs["cwd"]))
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    out = _ensure_release_runtime(target_dir=target, run_cmd=_run_cmd, operations=[])
+
+    assert out["installer"] == "pip"
+    assert ["sh", "-lc", "command -v uv"] not in calls
+
+
+def test_service_upgrade_runtime_prepare_uv_mode_failure_does_not_fallback(monkeypatch, tmp_path: Path) -> None:
+    from src.application.service_upgrade import RuntimePrepareError, _ensure_release_runtime
+
+    monkeypatch.setenv("OM_UPGRADE_INSTALLER", "uv")
+    target = tmp_path / "release"
+    _write_runtime_target_with_server_deps(target)
+    calls: list[list[str]] = []
+
+    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        calls.append(list(command))
+        if command == ["uv", "venv", ".venv"]:
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="uv failed\n")
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    try:
+        _ensure_release_runtime(target_dir=target, run_cmd=_run_cmd, operations=[])
+    except RuntimePrepareError as exc:
+        assert exc.runtime_prepare["installer"] == "uv"
+        assert exc.runtime_prepare["fallback"] is False
+        assert "uv failed" in str(exc.runtime_prepare["uv_error"])
+    else:  # pragma: no cover - defensive assertion branch
+        raise AssertionError("expected RuntimePrepareError")
+
+    assert ["python3", "-m", "venv", ".venv"] not in calls
+
+
+def test_service_upgrade_runtime_prepare_auto_falls_back_to_pip_after_uv_failure(monkeypatch, tmp_path: Path) -> None:
+    from src.application.service_upgrade import _ensure_release_runtime
+
+    monkeypatch.delenv("OM_UPGRADE_INSTALLER", raising=False)
+    target = tmp_path / "release"
+    _write_runtime_target_with_server_deps(target)
+    calls: list[list[str]] = []
+
+    def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append(list(command))
+        if command == ["sh", "-lc", "command -v uv"]:
+            return subprocess.CompletedProcess(command, 0, stdout="/usr/bin/uv\n", stderr="")
+        if command == ["uv", "venv", ".venv"]:
+            _create_fake_venv_python(Path(kwargs["cwd"]))
+            return subprocess.CompletedProcess(command, 0, stdout="uv venv\n", stderr="")
+        if command[:3] == ["uv", "pip", "install"]:
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="uv install failed\n")
+        if command == ["python3", "-m", "venv", ".venv"]:
+            _create_fake_venv_python(Path(kwargs["cwd"]))
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    out = _ensure_release_runtime(target_dir=target, run_cmd=_run_cmd, operations=[])
+
+    assert out["installer"] == "pip"
+    assert out["fallback"] is True
+    assert out["fallback_from"] == "uv"
+    assert "uv install failed" in str(out["uv_error"])
+    assert ["python3", "-m", "venv", ".venv"] in calls
 
 
 def test_service_upgrade_restart_denied_includes_remediation(tmp_path: Path) -> None:
@@ -897,6 +1121,7 @@ def test_service_upgrade_migrates_user_configs_and_rebuilds_runtime_configs_befo
                 "service_provider": "systemd",
                 "markets": ["hk", "us"],
                 "config_paths": {"hk": str(hk_runtime), "us": str(us_runtime)},
+                "restart": {"requires_sudo": False},
                 "services": [{"name": "options-monitor-trade-intake.service"}],
             }
         ),
@@ -1355,6 +1580,119 @@ def test_service_upgrade_dry_run_warns_when_repo_root_is_not_symlink(tmp_path: P
     assert out["warnings"] == ["confirmed upgrade requires repo_root to be a current symlink"]
 
 
+def test_service_upgrade_confirm_fails_fast_when_repo_root_is_not_symlink(tmp_path: Path) -> None:
+    from src.application.service_upgrade import service_upgrade
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    releases = tmp_path / "releases"
+    repo.mkdir()
+    runtime.mkdir()
+    (repo / "VERSION").write_text("1.0.0\n", encoding="utf-8")
+    calls: list[list[str]] = []
+
+    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        calls.append(list(command))
+        if command[:3] == ["git", "ls-remote", "--tags"]:
+            return subprocess.CompletedProcess(command, 0, stdout="b refs/tags/v1.0.1\n", stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    out = service_upgrade(
+        repo_root=repo,
+        runtime_root=runtime,
+        releases_root=releases,
+        target_version="1.0.1",
+        confirm=True,
+        run_cmd=_run_cmd,
+    )
+
+    assert out["status"] == "repo_root_not_symlink"
+    assert out["changed"] is False
+    assert not releases.exists()
+    assert not any(command[:2] == ["git", "clone"] for command in calls)
+    status = json.loads((runtime / "upgrade_status.json").read_text(encoding="utf-8"))
+    assert status["status"] == "repo_root_not_symlink"
+
+
+def test_service_upgrade_cleanup_after_success_deletes_older_releases(tmp_path: Path) -> None:
+    from src.application.service_upgrade import service_upgrade
+
+    install = tmp_path / "opt" / "options-monitor"
+    releases = install / "releases"
+    v080 = releases / "0.8.0"
+    v090 = releases / "0.9.0"
+    v100 = releases / "1.0.0"
+    for release in (v080, v090, v100):
+        _write_upgrade_release_skeleton(release, release.name)
+    for name in ("user.common.json", "user.hk.json"):
+        (v100 / "configs" / name).write_text(json.dumps({"name": name}), encoding="utf-8")
+    current = install / "current"
+    current.symlink_to(v100, target_is_directory=True)
+    downloads = install / "_downloads"
+    downloads.mkdir()
+    (downloads / "old.tar.gz").write_text("cache", encoding="utf-8")
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    hk_runtime = runtime / "config.hk.json"
+    (runtime / "service.profile.json").write_text(
+        json.dumps(
+            {
+                "service_provider": "systemd",
+                "markets": ["hk"],
+                "config_paths": {"hk": str(hk_runtime)},
+                "services": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
+        if command[:3] == ["git", "ls-remote", "--tags"]:
+            return subprocess.CompletedProcess(command, 0, stdout="b refs/tags/v1.0.1\n", stderr="")
+        if command[:3] == ["git", "config", "--get"]:
+            return subprocess.CompletedProcess(command, 0, stdout="https://example.invalid/repo.git\n", stderr="")
+        if command[:2] == ["git", "clone"]:
+            _write_upgrade_release_skeleton(Path(command[-1]), "1.0.1")
+            return subprocess.CompletedProcess(command, 0, stdout="cloned\n", stderr="")
+        if command == ["python3", "-m", "venv", ".venv"]:
+            cwd = Path(kwargs["cwd"])
+            venv_python = cwd / ".venv" / "bin" / "python"
+            venv_python.parent.mkdir(parents=True)
+            venv_python.write_text("#!/bin/sh\n", encoding="utf-8")
+            venv_python.chmod(0o755)
+            return subprocess.CompletedProcess(command, 0, stdout="venv\n", stderr="")
+        if command[:4] == ["./om", "config", "build", "--market"]:
+            Path(command[-1]).write_text('{"ok": true}\n', encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0, stdout="built\n", stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    out = service_upgrade(
+        repo_root=current,
+        runtime_root=runtime,
+        releases_root=releases,
+        target_version="1.0.1",
+        confirm=True,
+        restart_services=False,
+        cleanup_after_upgrade=True,
+        cleanup_keep_releases=2,
+        run_cmd=_run_cmd,
+    )
+
+    assert out["status"] == "upgraded"
+    assert out["symlink_switched"] is True
+    assert current.resolve() == (releases / "1.0.1").resolve()
+    cleanup = out["post_upgrade_cleanup"]
+    assert cleanup["status"] == "cleaned"
+    assert {Path(item["path"]).name for item in cleanup["kept_releases"]} == {"1.0.1", "1.0.0"}
+    assert (releases / "1.0.1").exists()
+    assert v100.exists()
+    assert not v090.exists()
+    assert not v080.exists()
+    assert not downloads.exists()
+    status = json.loads((runtime / "upgrade_status.json").read_text(encoding="utf-8"))
+    assert status["post_upgrade_cleanup"]["status"] == "cleaned"
+
+
 def test_service_rollback_switches_current_symlink(tmp_path: Path) -> None:
     from src.application.service_upgrade import service_rollback, write_upgrade_status
 
@@ -1515,6 +1853,7 @@ def test_cli_service_upgrade_delegates_to_application(monkeypatch, capsys, tmp_p
             "--target-version",
             "1.2.99",
             "--auto",
+            "--cleanup-after-upgrade",
         ]
     )
 
@@ -1524,6 +1863,159 @@ def test_cli_service_upgrade_delegates_to_application(monkeypatch, capsys, tmp_p
     assert calls[0]["target_version"] == "1.2.99"
     assert calls[0]["auto"] is True
     assert calls[0]["confirm"] is False
+    assert calls[0]["cleanup_after_upgrade"] is True
+    assert calls[0]["cleanup_keep_releases"] == 2
+
+
+def test_cli_service_cleanup_delegates_to_application(monkeypatch, capsys, tmp_path: Path) -> None:
+    import src.interfaces.cli.main as cli_main
+
+    calls: list[dict[str, object]] = []
+
+    def _fake_cleanup(**kwargs):  # type: ignore[no-untyped-def]
+        calls.append(dict(kwargs))
+        return {"ok": True, "status": "dry_run", "changed": False}
+
+    monkeypatch.setattr(cli_main, "service_cleanup", _fake_cleanup)
+
+    rc = cli_main.main(
+        [
+            "service",
+            "cleanup",
+            "--repo-root",
+            str(tmp_path / "current"),
+            "--releases-root",
+            str(tmp_path / "releases"),
+            "--keep-releases",
+            "3",
+            "--cleanup-downloads",
+            "--cleanup-pip-cache",
+        ]
+    )
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["tool_name"] == "service.cleanup"
+    assert payload["ok"] is True
+    assert calls[0]["repo_root"] == str(tmp_path / "current")
+    assert calls[0]["releases_root"] == str(tmp_path / "releases")
+    assert calls[0]["keep_releases"] == 3
+    assert calls[0]["cleanup_downloads"] is True
+    assert calls[0]["cleanup_pip_cache"] is True
+    assert calls[0]["confirm"] is False
+
+
+def test_service_cleanup_dry_run_reports_releases_and_caches(tmp_path: Path) -> None:
+    from src.application.service_cleanup import service_cleanup
+
+    apps = tmp_path / "apps"
+    releases = apps / "releases"
+    v100 = releases / "1.0.0"
+    v101 = releases / "1.0.1"
+    v102 = releases / "1.0.2"
+    for release in (v100, v101, v102):
+        _write_upgrade_release_skeleton(release, release.name)
+        (release / "payload.txt").write_text(release.name, encoding="utf-8")
+    current = apps / "current"
+    current.symlink_to(v102, target_is_directory=True)
+    downloads = apps / "_downloads"
+    downloads.mkdir()
+    (downloads / "release.tar.gz").write_text("download-cache", encoding="utf-8")
+
+    out = service_cleanup(
+        repo_root=current,
+        releases_root=releases,
+        cleanup_downloads=True,
+    )
+
+    assert out["ok"] is True
+    assert out["status"] == "dry_run"
+    assert out["changed"] is False
+    assert out["active_release"] == str(v102.resolve())
+    assert [item["version"] for item in out["kept_releases"]] == ["1.0.2", "1.0.1"]
+    assert [Path(item["path"]).name for item in out["delete_releases"]] == ["1.0.0"]
+    assert out["cache_dirs"][0]["path"] == str(downloads)
+    assert out["estimated_freed_bytes"] > 0
+    assert out["freed_bytes"] == 0
+    assert out["deleted_paths"] == []
+    assert v100.exists()
+    assert downloads.exists()
+
+
+def test_service_cleanup_confirm_deletes_only_old_releases_and_selected_caches(tmp_path: Path) -> None:
+    from src.application.service_cleanup import service_cleanup
+
+    apps = tmp_path / "apps"
+    releases = apps / "releases"
+    v100 = releases / "1.0.0"
+    v101 = releases / "1.0.1"
+    v102 = releases / "1.0.2"
+    for release in (v100, v101, v102):
+        _write_upgrade_release_skeleton(release, release.name)
+    current = apps / "current"
+    current.symlink_to(v102, target_is_directory=True)
+    downloads = apps / "_downloads"
+    downloads.mkdir()
+    (downloads / "release.tar.gz").write_text("download-cache", encoding="utf-8")
+
+    out = service_cleanup(
+        repo_root=current,
+        releases_root=releases,
+        cleanup_downloads=True,
+        confirm=True,
+    )
+
+    assert out["ok"] is True
+    assert out["status"] == "cleaned"
+    assert out["changed"] is True
+    assert v102.exists()
+    assert v101.exists()
+    assert not v100.exists()
+    assert not downloads.exists()
+    assert str(v100) in out["deleted_paths"]
+    assert str(downloads) in out["deleted_paths"]
+    assert out["freed_bytes"] == out["estimated_freed_bytes"]
+
+
+def test_service_cleanup_keeps_active_release_even_when_it_is_not_newest(tmp_path: Path) -> None:
+    from src.application.service_cleanup import service_cleanup
+
+    apps = tmp_path / "apps"
+    releases = apps / "releases"
+    v100 = releases / "1.0.0"
+    v101 = releases / "1.0.1"
+    v102 = releases / "1.0.2"
+    for release in (v100, v101, v102):
+        _write_upgrade_release_skeleton(release, release.name)
+    current = apps / "current"
+    current.symlink_to(v100, target_is_directory=True)
+
+    out = service_cleanup(
+        repo_root=current,
+        releases_root=releases,
+        keep_releases=2,
+        confirm=True,
+    )
+
+    kept = {Path(item["path"]).name for item in out["kept_releases"]}
+    assert kept == {"1.0.0", "1.0.2"}
+    assert v100.exists()
+    assert v102.exists()
+    assert not v101.exists()
+
+
+def test_service_cleanup_requires_repo_root_symlink(tmp_path: Path) -> None:
+    from src.application.service_cleanup import service_cleanup
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "VERSION").write_text("1.0.0\n", encoding="utf-8")
+
+    out = service_cleanup(repo_root=repo, releases_root=tmp_path / "releases", confirm=True)
+
+    assert out["ok"] is False
+    assert out["status"] == "repo_root_not_symlink"
+    assert out["changed"] is False
 
 
 def test_cli_run_trade_intake_delegates_to_application(monkeypatch) -> None:

@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 1.2.88 - 2026-05-20
+
+### Added
+- Added `./om service cleanup`, a dry-run-by-default release cleanup command that reports active, kept, and deletable releases, optional cache cleanup, and estimated freed space.
+- Added `--cleanup-after-upgrade` for service upgrades so old releases can be cleaned only after a successful symlink switch and runtime config rebuild/validation.
+
+### Changed
+- Made confirmed service upgrades fail fast when `--repo-root` is not the current symlink path, preventing clones into the wrong release layout.
+- Improved monthly income diagnostics so existing original-currency cash-secured values are not reported as missing when only CNY conversion rates are absent.
+- Changed inbound income replies to show original-currency premium, cash-secured, and return-rate summaries when CNY conversion is unavailable.
+
 ## 1.2.87 - 2026-05-20
 
 ### Changed
