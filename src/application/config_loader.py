@@ -13,12 +13,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
 from src.application.runtime_config_paths import write_json_atomic
+from src.application.settings import build_effective_env
 
 
 def data_config_candidates(*, base: Path) -> list[Path]:
@@ -52,7 +52,7 @@ def resolve_data_config_path(*, base: Path, data_config: str | Path | None) -> P
         if not path.is_absolute():
             path = (Path(base).resolve() / path).resolve()
         return path
-    env_ref = str(os.environ.get("OM_DATA_CONFIG") or "").strip()
+    env_ref = str(build_effective_env().get("OM_DATA_CONFIG") or "").strip()
     if env_ref:
         return Path(env_ref).expanduser().resolve()
     return default_data_config_path(base=base)

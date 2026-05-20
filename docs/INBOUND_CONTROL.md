@@ -55,7 +55,7 @@ Only this pure-read whitelist is enabled. Tools that write local reports or cach
 Remote channels require an explicit sender allowlist:
 
 ```bash
-export OM_FEISHU_BOT_USER_OPEN_ID='***REMOVED-OPEN-ID***'
+export OM_FEISHU_BOT_USER_OPEN_ID='ou_xxx'
 ```
 
 Multiple Feishu users can be comma-separated. If this is empty, OM defaults the allowlist to `OM_FEISHU_BOT_USER_OPEN_ID`:
@@ -157,14 +157,13 @@ Required environment values:
 ```bash
 export OM_FEISHU_BOT_APP_ID='<Feishu app_id>'
 export OM_FEISHU_BOT_APP_SECRET='<Feishu app_secret>'
-export OM_FEISHU_BOT_USER_OPEN_ID='***REMOVED-OPEN-ID***'
-export OM_FEISHU_BOT_ALLOWED_OPEN_IDS='***REMOVED-OPEN-ID***'
-export OM_FEISHU_ACK_REACTION='SMILE'
+export OM_FEISHU_BOT_USER_OPEN_ID='ou_xxx'
+export OM_FEISHU_BOT_ALLOWED_OPEN_IDS='ou_xxx'
 ```
 
 The same Feishu Bot credentials are used for long-connection event receiving, same-message replies, and proactive OM notifications. There is no fallback to a separate notification app.
 
-`OM_FEISHU_ACK_REACTION` is optional. When set, `feishu-ws` calls Feishu's message reaction API after an allowed text message is accepted by inbound control and before sending the text reply. The value must be a Feishu `emoji_type` such as `SMILE`; leave it empty to disable reaction acknowledgements. Reaction failures are reported in the JSON status for that event but do not fail the inbound command or block the text reply.
+Reaction and reply behavior is configured in runtime config under `inbound.feishu_ws`, not in the secret env file. Set `inbound.feishu_ws.ack_reaction` to a Feishu `emoji_type` such as `SMILE` to enable message reactions; leave it empty to disable reaction acknowledgements. Reaction failures are reported in the JSON status for that event but do not fail the inbound command or block the text reply.
 
 Local config check:
 
@@ -195,6 +194,8 @@ For Linux systemd rendering:
 ```
 
 Install the rendered `options-monitor-feishu-ws.service`, reload systemd, and enable it. It does not bind a local HTTP port and does not require a public callback URL, reverse proxy, TLS certificate, or tunnel. The rendered service passes `--lock-path` so only one long-connection client should run per Feishu App.
+
+For Mac launchd, pass the same local env file through `--env-file`; the rendered plist stores it as `OM_ENV_FILE` because launchd does not inherit your interactive shell environment.
 
 Supported Feishu events:
 

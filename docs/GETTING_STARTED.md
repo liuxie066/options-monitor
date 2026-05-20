@@ -73,6 +73,12 @@ python3 -m venv .venv
 ./om-agent run --tool config_validate --input-json '{"config_key":"us"}'
 ```
 
+如果你配置了本地 env file，先跑 settings 诊断确认密钥来源和写入开关：
+
+```bash
+./om settings doctor
+```
+
 配置优先级和工具边界的完整解释，以根目录 `CONFIGURATION_GUIDE.md` 为准。
 
 healthcheck 会额外给出本地 `ledger_store` 和 `option_positions_bootstrap` 状态：

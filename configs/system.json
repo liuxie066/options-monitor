@@ -111,6 +111,15 @@
       "opend_alert_after_consecutive_failures": 3,
       "opend_alert_send_recovery_notice": true
     },
+    "inbound": {
+      "feishu_ws": {
+        "reply_enabled": true,
+        "reply_in_thread": false,
+        "max_reply_chars": 3500,
+        "ack_reaction": "",
+        "queue_size": 100
+      }
+    },
     "watchdog": {
       "retry_enabled": true,
       "retry_interval_sec": 3,

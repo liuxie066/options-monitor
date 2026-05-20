@@ -2,17 +2,17 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from src.application.agent_tool_config import repo_base
+from src.application.settings import build_effective_env
 
 
 def default_audit_db_path() -> Path:
-    raw = str(os.environ.get("OM_INBOUND_AUDIT_DB") or "").strip()
+    raw = str(build_effective_env().get("OM_INBOUND_AUDIT_DB") or "").strip()
     if raw:
         path = Path(raw).expanduser()
         return path if path.is_absolute() else (repo_base() / path).resolve()

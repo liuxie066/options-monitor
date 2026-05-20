@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Any, Callable
+
+from src.application.settings import build_effective_env
 
 
 def resolve_data_config_ref(payload: dict[str, Any], portfolio_cfg: dict[str, Any]) -> str | None:
@@ -11,7 +12,7 @@ def resolve_data_config_ref(payload: dict[str, Any], portfolio_cfg: dict[str, An
     raw = str(value or "").strip()
     if raw:
         return raw
-    env_ref = str(os.environ.get("OM_DATA_CONFIG") or "").strip()
+    env_ref = str(build_effective_env().get("OM_DATA_CONFIG") or "").strip()
     return env_ref or None
 
 

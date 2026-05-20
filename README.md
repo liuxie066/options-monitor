@@ -166,7 +166,7 @@ python3 -m venv .venv
 
 ```bash
 ./om service render --target systemd --runtime-root /var/lib/options-monitor --env-file /etc/options-monitor/options-monitor.env --markets us hk --accounts lx sy --output-dir /tmp/options-monitor-service
-./om service render --target launchd --runtime-root "$HOME/Library/Application Support/options-monitor" --markets us hk --accounts lx sy --output-dir /tmp/options-monitor-service
+./om service render --target launchd --runtime-root "$HOME/Library/Application Support/options-monitor" --env-file "$HOME/Library/Application Support/options-monitor/options-monitor.env" --markets us hk --accounts lx sy --output-dir /tmp/options-monitor-service
 ```
 
 完整步骤见 [`DEPLOY.md`](DEPLOY.md)。
@@ -412,7 +412,7 @@ Sell Call 的关键区别是它依赖真实持仓上下文：
 持仓和本地仓位相关数据配置：
 
 - 默认不需要单独配置文件；SQLite 固定在 `<runtime_root>/output_shared/state/option_positions.sqlite3`
-- `portfolio.runtime.json` 只用于 legacy bootstrap 或自定义 env key 名
+- `portfolio.runtime.json` 默认不需要；只在 external_holdings 需要声明 Feishu 表引用 env 名或执行 legacy 迁移时使用
 
 原则上：
 
@@ -420,6 +420,7 @@ Sell Call 的关键区别是它依赖真实持仓上下文：
 - 用 `./om config build` 生成 runtime config
 - 用 `./om config validate --market us|hk` 检查合法性、市场时区契约和生成指纹
 - 用 `config_validate` 做不含生成指纹检查的基础只读配置校验
+- 用 `./om settings doctor` 检查 env-file、Feishu Bot 和写入开关
 
 ### 数据来源
 
@@ -480,7 +481,7 @@ bash scripts/install_agent_plugin.sh
 ./om inbound feishu-ws --check
 ```
 
-它只接受确定性只读命令，并带 sender allowlist、message_id 幂等和 SQLite audit。`feishu-ws` 可作为长驻 Feishu App long-connection client，通过飞书 SDK 长连接接收消息，可按 `OM_FEISHU_ACK_REACTION` 增加消息 reaction，并自动回复，不需要公网 HTTPS callback。接飞书、微信或 Hermes 前先看
+它只接受确定性只读命令，并带 sender allowlist、message_id 幂等和 SQLite audit。`feishu-ws` 可作为长驻 Feishu App long-connection client，通过飞书 SDK 长连接接收消息，并自动回复，不需要公网 HTTPS callback；reaction、reply、queue 行为配置在 runtime config 的 `inbound.feishu_ws` 下。接飞书、微信或 Hermes 前先看
 [docs/INBOUND_CONTROL.md](docs/INBOUND_CONTROL.md)。
 
 AI Cofunder 证据交接：
