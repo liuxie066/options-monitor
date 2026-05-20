@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import platform
 import shutil
 import shlex
 import subprocess
+import sys
+import sysconfig
+import time
 from functools import cmp_to_key
 from datetime import datetime, timezone
 from pathlib import Path
@@ -99,6 +104,8 @@ def _run_command(
     env: dict[str, str] | None = None,
     timeout: int = 300,
 ) -> dict[str, Any]:
+    started_at = utc_now_iso()
+    started = time.monotonic()
     kwargs: dict[str, Any] = {
         "cwd": (str(cwd) if cwd is not None else None),
         "capture_output": True,
@@ -118,6 +125,9 @@ def _run_command(
     return {
         "command": command,
         "cwd": str(cwd) if cwd is not None else None,
+        "started_at": started_at,
+        "ended_at": utc_now_iso(),
+        "duration_seconds": round(time.monotonic() - started, 3),
         "returncode": rc,
         "stdout": stdout[-4000:],
         "stderr": stderr[-4000:],
@@ -1177,9 +1187,9 @@ def _pip_install_commands(venv_python: Path) -> list[tuple[list[str], int]]:
     ]
 
 
-def _uv_install_commands(venv_python: Path, *, include_server: bool) -> list[tuple[list[str], int]]:
+def _uv_install_commands(venv_python: Path, *, venv_dir: Path, include_server: bool) -> list[tuple[list[str], int]]:
     commands: list[tuple[list[str], int]] = [
-        (["uv", "venv", "--python", "python3", ".venv"], 300),
+        (["uv", "venv", "--python", "python3", str(venv_dir)], 300),
         (["uv", "pip", "install", "-p", str(venv_python), "-r", "requirements.txt", "-c", "constraints.txt"], 1200),
     ]
     if include_server:
@@ -1222,6 +1232,7 @@ def _run_runtime_install_commands(
 def _run_pip_runtime_prepare(
     *,
     target_dir: Path,
+    venv_dir: Path,
     venv_python: Path,
     include_server: bool,
     run_cmd: Callable[..., Any],
@@ -1230,7 +1241,7 @@ def _run_pip_runtime_prepare(
     env: dict[str, str],
 ) -> None:
     if not venv_python.exists():
-        command = ["python3", "-m", "venv", ".venv"]
+        command = ["python3", "-m", "venv", str(venv_dir)]
         _run_required(command, cwd=target_dir, run_cmd=run_cmd, operations=operations, env=env, timeout=300)
         operations[-1]["runtime_prepare_installer"] = "pip"
         commands.append(command)
@@ -1273,6 +1284,141 @@ def _release_python(target_dir: Path) -> Path:
     return target_dir / ".venv" / "bin" / "python"
 
 
+def _venv_python(venv_dir: Path) -> Path:
+    return venv_dir / "bin" / "python"
+
+
+def _dependency_context(*, include_server: bool, python_spec: str, installer_mode: str) -> dict[str, Any]:
+    return {
+        "include_server": bool(include_server),
+        "installer_mode": installer_mode,
+        "python_implementation": sys.implementation.name,
+        "python_spec": python_spec,
+        "python_version": f"{sys.version_info.major}.{sys.version_info.minor}",
+        "platform": sysconfig.get_platform(),
+        "platform_machine": platform.machine(),
+        "platform_system": platform.system(),
+    }
+
+
+def _dependency_hash(
+    target_dir: Path,
+    *,
+    include_server: bool,
+    python_spec: str = "python3",
+    installer_mode: str = "auto",
+) -> str:
+    digest = hashlib.sha256()
+    context = _dependency_context(
+        include_server=include_server,
+        python_spec=python_spec,
+        installer_mode=installer_mode,
+    )
+    digest.update(json.dumps(context, sort_keys=True).encode("utf-8"))
+    digest.update(b"\n")
+    for path in _dependency_files(target_dir, include_server=include_server):
+        try:
+            rel = path.relative_to(target_dir)
+            label = rel.as_posix()
+        except ValueError:
+            label = str(path)
+        digest.update(f"path:{label}\n".encode("utf-8"))
+        try:
+            digest.update(path.read_bytes())
+        except FileNotFoundError:
+            digest.update(b"__missing__")
+        digest.update(b"\n")
+    return digest.hexdigest()[:16]
+
+
+def _dependency_files(target_dir: Path, *, include_server: bool) -> list[Path]:
+    roots = [target_dir / "requirements.txt", target_dir / "constraints.txt"]
+    if include_server:
+        roots.extend(
+            [
+                target_dir / "requirements" / "server.txt",
+                target_dir / "constraints" / "server.txt",
+            ]
+        )
+    seen: set[Path] = set()
+    ordered: list[Path] = []
+
+    def visit(path: Path) -> None:
+        resolved = path.resolve()
+        if resolved in seen:
+            return
+        seen.add(resolved)
+        ordered.append(path)
+        try:
+            text = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return
+        for ref in _requirement_refs(path, text):
+            visit(ref)
+
+    for root in roots:
+        visit(root)
+    return ordered
+
+
+def _requirement_refs(path: Path, text: str) -> list[Path]:
+    refs: list[Path] = []
+    for raw_line in text.splitlines():
+        line = raw_line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        try:
+            tokens = shlex.split(line)
+        except ValueError:
+            continue
+        i = 0
+        while i < len(tokens):
+            token = tokens[i]
+            if token in {"-r", "--requirement", "-c", "--constraint"} and i + 1 < len(tokens):
+                refs.append((path.parent / tokens[i + 1]).resolve())
+                i += 2
+                continue
+            if token.startswith("-r") and len(token) > 2:
+                refs.append((path.parent / token[2:]).resolve())
+            elif token.startswith("-c") and len(token) > 2:
+                refs.append((path.parent / token[2:]).resolve())
+            elif token.startswith("--requirement="):
+                refs.append((path.parent / token.split("=", 1)[1]).resolve())
+            elif token.startswith("--constraint="):
+                refs.append((path.parent / token.split("=", 1)[1]).resolve())
+            i += 1
+    return refs
+
+
+def _shared_venv_path(cache_root: Path, dependency_hash: str) -> Path:
+    return cache_root / "venvs" / dependency_hash
+
+
+def _shared_venv_build_path(shared_venv: Path) -> Path:
+    return shared_venv.with_name(f".{shared_venv.name}.tmp.{os.getpid()}")
+
+
+def _shared_venv_marker(venv_dir: Path) -> Path:
+    return venv_dir / ".options-monitor-deps-complete"
+
+
+def _shared_venv_valid(venv_dir: Path) -> bool:
+    python = _venv_python(venv_dir)
+    return _shared_venv_marker(venv_dir).exists() and python.exists() and os.access(python, os.X_OK)
+
+
+def _link_release_venv(*, target_dir: Path, shared_venv: Path) -> None:
+    release_venv = target_dir / ".venv"
+    if release_venv.is_symlink() and release_venv.resolve() == shared_venv.resolve():
+        return
+    if release_venv.is_symlink() or release_venv.exists():
+        if release_venv.is_dir() and not release_venv.is_symlink():
+            shutil.rmtree(release_venv)
+        else:
+            release_venv.unlink()
+    release_venv.symlink_to(shared_venv, target_is_directory=True)
+
+
 def _ensure_release_runtime(
     *,
     target_dir: Path,
@@ -1281,93 +1427,154 @@ def _ensure_release_runtime(
     operations: list[dict[str, Any]],
 ) -> dict[str, Any]:
     cache = cache_root or default_upgrade_cache_root(target_dir)
-    venv_python = _release_python(target_dir)
+    release_venv = target_dir / ".venv"
+    release_python = _release_python(target_dir)
     server_requirements = target_dir / "requirements" / "server.txt"
     server_constraints = target_dir / "constraints" / "server.txt"
     include_server = server_requirements.exists() and server_constraints.exists()
     mode = _upgrade_installer_mode()
+    python_spec = "python3"
+    dependency_hash = _dependency_hash(
+        target_dir,
+        include_server=include_server,
+        python_spec=python_spec,
+        installer_mode=mode,
+    )
+    dependency_context = _dependency_context(include_server=include_server, python_spec=python_spec, installer_mode=mode)
+    shared_venv = _shared_venv_path(cache, dependency_hash)
+    build_venv = _shared_venv_build_path(shared_venv)
+    build_python = _venv_python(build_venv)
     install_env = _runtime_install_env(cache_root=cache)
     commands: list[list[str]] = []
+    started_at = utc_now_iso()
+    started = time.monotonic()
     runtime_prepare: dict[str, Any] = {
         "installer": "pip",
         "mode": mode,
         "fallback": False,
-        "venv_path": str(target_dir / ".venv"),
-        "python": str(venv_python),
-        "python_spec": "python3",
+        "venv_strategy": "dependency_hash_cache",
+        "venv_reused": False,
+        "venv_path": str(release_venv),
+        "python": str(release_python),
+        "dependency_hash": dependency_hash,
+        "dependency_context": dependency_context,
+        "shared_venv_path": str(shared_venv),
+        "shared_venv_build_path": str(build_venv),
+        "python_spec": python_spec,
         "cache_root": str(cache),
         "uv_cache_dir": install_env.get("UV_CACHE_DIR"),
         "pip_cache_dir": install_env.get("PIP_CACHE_DIR"),
         "commands": commands,
+        "started_at": started_at,
     }
 
-    uv_available = _check_uv_available(target_dir=target_dir, run_cmd=run_cmd, operations=operations) if mode in {"auto", "uv"} else False
-    use_uv = mode == "uv" and uv_available or mode == "auto" and uv_available
-    if use_uv:
-        runtime_prepare["installer"] = "uv"
-        uv_commands = _uv_install_commands(venv_python, include_server=include_server)
-        commands.extend(command for command, _timeout in uv_commands)
-        try:
-            _run_runtime_install_commands(
-                commands=uv_commands,
-                cwd=target_dir,
-                run_cmd=run_cmd,
-                operations=operations,
-                installer="uv",
-                env=install_env,
+    if _shared_venv_valid(shared_venv):
+        _link_release_venv(target_dir=target_dir, shared_venv=shared_venv)
+        runtime_prepare["installer"] = "cache"
+        runtime_prepare["venv_reused"] = True
+    else:
+        if shared_venv.exists():
+            shutil.rmtree(shared_venv)
+        if build_venv.exists():
+            shutil.rmtree(build_venv)
+        shared_venv.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        uv_available = (
+            _check_uv_available(target_dir=target_dir, run_cmd=run_cmd, operations=operations)
+            if not runtime_prepare["venv_reused"] and mode in {"auto", "uv"}
+            else False
+        )
+        use_uv = mode == "uv" and uv_available or mode == "auto" and uv_available
+        if runtime_prepare["venv_reused"]:
+            pass
+        elif use_uv:
+            runtime_prepare["installer"] = "uv"
+            uv_commands = _uv_install_commands(
+                build_python,
+                venv_dir=build_venv,
+                include_server=include_server,
             )
-            if not venv_python.exists():
-                raise RuntimeError(f"uv did not create release virtualenv python: {venv_python}")
-        except RuntimeError as exc:
-            runtime_prepare["uv_error"] = str(exc)
+            commands.extend(command for command, _timeout in uv_commands)
+            try:
+                _run_runtime_install_commands(
+                    commands=uv_commands,
+                    cwd=target_dir,
+                    run_cmd=run_cmd,
+                    operations=operations,
+                    installer="uv",
+                    env=install_env,
+                )
+                if not build_python.exists():
+                    raise RuntimeError(f"uv did not create shared virtualenv python: {build_python}")
+            except RuntimeError as exc:
+                runtime_prepare["uv_error"] = str(exc)
+                if mode == "uv":
+                    raise
+                shutil.rmtree(build_venv, ignore_errors=True)
+                runtime_prepare["installer"] = "pip"
+                runtime_prepare["fallback"] = True
+                runtime_prepare["fallback_from"] = "uv"
+                _run_pip_runtime_prepare(
+                    target_dir=target_dir,
+                    venv_dir=build_venv,
+                    venv_python=build_python,
+                    include_server=include_server,
+                    run_cmd=run_cmd,
+                    operations=operations,
+                    commands=commands,
+                    env=install_env,
+                )
+        else:
             if mode == "uv":
-                raise RuntimePrepareError(str(exc), runtime_prepare=runtime_prepare) from exc
-            shutil.rmtree(target_dir / ".venv", ignore_errors=True)
-            runtime_prepare["installer"] = "pip"
-            runtime_prepare["fallback"] = True
-            runtime_prepare["fallback_from"] = "uv"
+                runtime_prepare["installer"] = "uv"
+                runtime_prepare["uv_error"] = "uv is not available on PATH"
+                raise RuntimeError("uv is not available on PATH")
             _run_pip_runtime_prepare(
                 target_dir=target_dir,
-                venv_python=venv_python,
+                venv_dir=build_venv,
+                venv_python=build_python,
                 include_server=include_server,
                 run_cmd=run_cmd,
                 operations=operations,
                 commands=commands,
                 env=install_env,
             )
-    else:
-        if mode == "uv":
-            runtime_prepare["installer"] = "uv"
-            runtime_prepare["uv_error"] = "uv is not available on PATH"
-            raise RuntimePrepareError("uv is not available on PATH", runtime_prepare=runtime_prepare)
-        _run_pip_runtime_prepare(
-            target_dir=target_dir,
-            venv_python=venv_python,
-            include_server=include_server,
+
+        if not runtime_prepare["venv_reused"]:
+            _shared_venv_marker(build_venv).write_text(utc_now_iso() + "\n", encoding="utf-8")
+            build_venv.rename(shared_venv)
+            _link_release_venv(target_dir=target_dir, shared_venv=shared_venv)
+
+        if not release_python.exists() or not os.access(release_python, os.X_OK):
+            raise RuntimeError(f"release virtualenv python is missing after setup: {release_python}")
+        _run_required(
+            [
+                str(release_python),
+                "-c",
+                "from pathlib import Path; import sys; assert Path(sys.executable).exists(); import src.application.multi_account_tick",
+            ],
+            cwd=target_dir,
             run_cmd=run_cmd,
             operations=operations,
-            commands=commands,
-            env=install_env,
+            timeout=120,
         )
-
-    if not venv_python.exists() or not os.access(venv_python, os.X_OK):
-        raise RuntimePrepareError(
-            f"release virtualenv python is missing after setup: {venv_python}",
-            runtime_prepare=runtime_prepare,
+        commands.append(
+            [
+                str(release_python),
+                "-c",
+                "from pathlib import Path; import sys; assert Path(sys.executable).exists(); import src.application.multi_account_tick",
+            ]
         )
-    _run_required(
-        [
-            str(venv_python),
-            "-c",
-            "from pathlib import Path; import sys; assert Path(sys.executable).exists(); import src.application.multi_account_tick",
-        ],
-        cwd=target_dir,
-        run_cmd=run_cmd,
-        operations=operations,
-        timeout=120,
-    )
-    commands.append([str(venv_python), "-c", "from pathlib import Path; import sys; assert Path(sys.executable).exists(); import src.application.multi_account_tick"])
-    return runtime_prepare
+        runtime_prepare["ended_at"] = utc_now_iso()
+        runtime_prepare["duration_seconds"] = round(time.monotonic() - started, 3)
+        return runtime_prepare
+    except RuntimeError as exc:
+        if not runtime_prepare["venv_reused"]:
+            shutil.rmtree(build_venv, ignore_errors=True)
+        runtime_prepare["ended_at"] = utc_now_iso()
+        runtime_prepare["duration_seconds"] = round(time.monotonic() - started, 3)
+        raise RuntimePrepareError(str(exc), runtime_prepare=runtime_prepare) from exc
 
 
 def service_upgrade_check(
@@ -1562,7 +1769,36 @@ def service_upgrade(
                 run_cmd=run_cmd,
                 operations=operations,
             )
+            write_upgrade_status(
+                runtime_root=runtime,
+                payload={
+                    **status_base,
+                    "ok": True,
+                    "status": "runtime_preparing",
+                    "changed": False,
+                    "symlink_switched": False,
+                    "target_dir": str(target_dir),
+                    "previous_dir": str(previous_dir),
+                    "release_materialize": release_materialize,
+                    "operations": operations,
+                },
+            )
             runtime_prepare = _ensure_release_runtime(target_dir=target_dir, cache_root=cache, run_cmd=run_cmd, operations=operations)
+            write_upgrade_status(
+                runtime_root=runtime,
+                payload={
+                    **status_base,
+                    "ok": True,
+                    "status": "runtime_prepared",
+                    "changed": False,
+                    "symlink_switched": False,
+                    "target_dir": str(target_dir),
+                    "previous_dir": str(previous_dir),
+                    "release_materialize": release_materialize,
+                    "runtime_prepare": runtime_prepare,
+                    "operations": operations,
+                },
+            )
             _run_required(
                 ["python3", "scripts/release_check.py", "--tag", str(tag)],
                 cwd=target_dir,
