@@ -7,7 +7,6 @@
 - `Sell Put` 收益增强 `yield_enhancement`
 - `close_advice`
 - `option_positions`
-- 离线复盘、候选解释和线上问题排查
 
 它不是自动交易系统，也不会替你下单。它的职责是把行情、持仓、现金、期权仓位、策略阈值和通知串起来，给出便于人工复核的结果。
 
@@ -32,7 +31,6 @@
 - 按 `sell_put` / `sell_call` 规则筛选候选
 - 结合账户现金、股票持仓、已开仓位做二次过滤
 - 生成收益增强候选、平仓建议、通知文本和运行状态
-- 提供 `candidate_rank_explain` / `candidate_filter_explain` / `strategy_replay_analyze` 这类离线解释工具
 
 不做什么：
 
