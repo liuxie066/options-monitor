@@ -3,11 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import asdict, is_dataclass
-from typing import Any
+from typing import Any, cast
 
 from src.application.agent_tool_config import load_runtime_config, repo_base
 from src.application.agent_tool_contracts import AgentToolError, build_response, mask_path
 from src.application.inbound.contracts import InboundIntent, InboundRequest
+from src.application.inbound.manual_trade_parser import build_manual_trade_draft
 from src.application.inbound.operation_policy import enforce_trade_write_allowed
 from src.application.inbound.operation_store import InboundOperationStore, operation_is_expired
 from src.application.ledger.api import open_position_ledger_from_runtime_config
@@ -35,10 +36,44 @@ def handle_manual_trade_operation(
 ) -> dict[str, Any]:
     policy = enforce_trade_write_allowed(channel=request.channel, sender_id=request.sender_id)
     if intent.name == "manual_trade_open":
-        payload = _build_operation_payload("manual_open", _manual_open_args(intent.arguments), request=request)
+        config_path, cfg = _load_runtime_config_for_request(request)
+        draft = build_manual_trade_draft(
+            "manual_open",
+            raw_text=_manual_trade_raw_text(intent, request),
+            accounts=_accounts_from_runtime_config(cfg),
+            config_key=request.config_key,
+            config_path=config_path,
+            runtime_config=cfg,
+            repo_base=repo_base(),
+            allow_opend_refresh=False,
+        )
+        payload = _build_operation_payload(
+            "manual_open",
+            _manual_open_args(draft["arguments"]),
+            request=request,
+            config_path=config_path,
+            diagnostics=draft["diagnostics"],
+        )
         return _preview_and_save(payload, request=request, command_id=command_id, store=store, ttl_seconds=policy.confirm_ttl_seconds)
     if intent.name == "manual_trade_close":
-        payload = _build_operation_payload("manual_close", _manual_close_args(intent.arguments), request=request)
+        config_path, cfg = _load_runtime_config_for_request(request)
+        draft = build_manual_trade_draft(
+            "manual_close",
+            raw_text=_manual_trade_raw_text(intent, request),
+            accounts=_accounts_from_runtime_config(cfg),
+            config_key=request.config_key,
+            config_path=config_path,
+            runtime_config=cfg,
+            repo_base=repo_base(),
+            allow_opend_refresh=False,
+        )
+        payload = _build_operation_payload(
+            "manual_close",
+            _manual_close_args(draft["arguments"]),
+            request=request,
+            config_path=config_path,
+            diagnostics=draft["diagnostics"],
+        )
         return _preview_and_save(payload, request=request, command_id=command_id, store=store, ttl_seconds=policy.confirm_ttl_seconds)
     if intent.name == "manual_trade_confirm":
         return _confirm_operation(operation_id=_required_text(intent.arguments.get("operation_id"), "operation_id"), request=request, store=store)
@@ -166,8 +201,40 @@ def _load_pending_operation(
     return operation
 
 
-def _build_operation_payload(operation_type: str, arguments: dict[str, Any], *, request: InboundRequest) -> dict[str, Any]:
-    return {"schema_version": "1.0", "operation_type": operation_type, "arguments": dict(arguments), "config": {"config_key": request.config_key, "config_path": request.config_path}}
+def _manual_trade_raw_text(intent: InboundIntent, request: InboundRequest) -> str:
+    return str(intent.arguments.get("raw_text") or request.text or "").strip()
+
+
+def _load_runtime_config_for_request(request: InboundRequest) -> tuple[Any, dict[str, Any]]:
+    return load_runtime_config(config_key=request.config_key or "us", config_path=request.config_path)
+
+
+def _accounts_from_runtime_config(cfg: dict[str, Any]) -> list[str]:
+    raw = cfg.get("accounts")
+    if isinstance(raw, list):
+        return [str(item).strip().lower() for item in raw if str(item).strip()]
+    if isinstance(raw, tuple):
+        return [str(item).strip().lower() for item in raw if str(item).strip()]
+    return []
+
+
+def _build_operation_payload(
+    operation_type: str,
+    arguments: dict[str, Any],
+    *,
+    request: InboundRequest,
+    config_path: Any | None = None,
+    diagnostics: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload = {
+        "schema_version": "1.0",
+        "operation_type": operation_type,
+        "arguments": dict(arguments),
+        "config": {"config_key": request.config_key, "config_path": str(config_path) if config_path else request.config_path},
+    }
+    if diagnostics:
+        payload["diagnostics"] = dict(diagnostics)
+    return payload
 
 
 def _payload_with_preview_locked_values(payload: dict[str, Any], preview: dict[str, Any]) -> dict[str, Any]:
@@ -222,7 +289,8 @@ def _apply_operation(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _open_repo_for_payload(payload: dict[str, Any]) -> tuple[Any, Any]:
-    config = payload.get("config") if isinstance(payload.get("config"), dict) else {}
+    raw_config = payload.get("config")
+    config = cast(dict[str, Any], raw_config) if isinstance(raw_config, dict) else {}
     config_path, cfg = load_runtime_config(config_key=str(config.get("config_key") or "us"), config_path=config.get("config_path"))
     return open_position_ledger_from_runtime_config(base=repo_base(), cfg=cfg, config_path=config_path)
 
@@ -286,8 +354,11 @@ def render_manual_trade_response(
     operation_type = str(payload.get("operation_type") or "")
     if status == "cancelled":
         return f"交易记录已取消，未写入账本。\ncommand_id: {operation_id}"
-    args = payload.get("arguments") if isinstance(payload.get("arguments"), dict) else {}
-    fields = preview.get("fields") if isinstance(preview, dict) and isinstance(preview.get("fields"), dict) else {}
+    raw_args = payload.get("arguments")
+    args = cast(dict[str, Any], raw_args) if isinstance(raw_args, dict) else {}
+    preview_map = preview if isinstance(preview, dict) else {}
+    raw_fields = preview_map.get("fields")
+    fields = cast(dict[str, Any], raw_fields) if isinstance(raw_fields, dict) else {}
     if operation_type == "manual_open":
         title = "交易记录预览：开仓" if status == "previewed" else "交易已写入 OM 本地账本：开仓"
         lines = [
@@ -299,8 +370,9 @@ def render_manual_trade_response(
         ]
     else:
         title = "交易记录预览：平仓" if status == "previewed" else "交易已写入 OM 本地账本：平仓"
-        match = preview.get("match") if isinstance(preview, dict) and isinstance(preview.get("match"), dict) else {}
-        preview_record_id = preview.get("record_id") if isinstance(preview, dict) else None
+        raw_match = preview_map.get("match")
+        match = cast(dict[str, Any], raw_match) if isinstance(raw_match, dict) else {}
+        preview_record_id = preview_map.get("record_id")
         record_id = str(match.get("record_id") or args.get("record_id") or preview_record_id or "")
         lines = [
             title,

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.91 - 2026-05-20
+
+### Changed
+- Split Feishu inbound manual-trade recognition from trade draft normalization so the parser only identifies manual open/close commands while a dedicated draft builder handles Futu fill parsing, symbol canonicalization, multiplier resolution, and close-side conversion.
+- Added auditable manual-trade draft diagnostics to inbound preview payloads, including raw/canonical symbol, multiplier source and attempts, fill parser source, fill time, side conversion, and missing fields.
+
 ## 1.2.90 - 2026-05-20
 
 ### Added
