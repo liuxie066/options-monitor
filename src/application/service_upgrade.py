@@ -627,6 +627,137 @@ def _restart_services_from_loaded_profile(
     return restarted
 
 
+def _post_upgrade_service_health(
+    *,
+    profile: dict[str, Any],
+    repo_root: Path,
+    run_cmd: Callable[..., Any],
+    operations: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if not profile:
+        return {"ok": True, "status": "skipped", "reason": "service_profile_missing", "checks": [], "failed_checks": []}
+    provider = str(profile.get("service_provider") or "").strip().lower()
+    if provider != "systemd":
+        return {"ok": True, "status": "skipped", "reason": f"unsupported_provider:{provider or 'missing'}", "checks": [], "failed_checks": []}
+
+    services = _restart_service_names(profile)
+    checks: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+
+    for service_name in services:
+        for action in ("is-active", "is-enabled"):
+            command = ["systemctl", action, service_name]
+            result = _run_command(command, cwd=None, run_cmd=run_cmd, timeout=30)
+            result["operation"] = "post_upgrade_service_health"
+            result["check"] = action
+            result["service"] = service_name
+            operations.append(result)
+            public = {
+                "service": service_name,
+                "check": action,
+                "ok": bool(result.get("ok")),
+                "stdout": str(result.get("stdout") or "").strip(),
+                "stderr": str(result.get("stderr") or "").strip(),
+            }
+            checks.append(public)
+            if not result.get("ok"):
+                failed.append(public)
+
+    if "options-monitor-feishu-ws.service" in services:
+        command = _feishu_ws_check_command(profile=profile, repo_root=repo_root)
+        env = _child_env_from_profile(profile)
+        result = _run_command(command, cwd=repo_root, run_cmd=run_cmd, env=env, timeout=60)
+        result["operation"] = "post_upgrade_service_health"
+        result["check"] = "feishu-ws-check"
+        result["service"] = "options-monitor-feishu-ws.service"
+        operations.append(result)
+        public = {
+            "service": "options-monitor-feishu-ws.service",
+            "check": "feishu-ws-check",
+            "ok": bool(result.get("ok")),
+            "stdout": str(result.get("stdout") or "").strip(),
+            "stderr": str(result.get("stderr") or "").strip(),
+        }
+        checks.append(public)
+        if not result.get("ok"):
+            failed.append(public)
+
+    return {
+        "ok": not failed,
+        "status": "ok" if not failed else "error",
+        "provider": provider,
+        "services": services,
+        "checks": checks,
+        "failed_checks": failed,
+        "remediation": _service_health_remediation(failed),
+    }
+
+
+def _feishu_ws_config_key(profile: dict[str, Any]) -> str:
+    feishu_ws = profile.get("feishu_ws")
+    raw = feishu_ws.get("config_key") if isinstance(feishu_ws, dict) else None
+    key = str(raw or "us").strip().lower()
+    return key if key in {"us", "hk"} else "us"
+
+
+def _feishu_ws_check_command(*, profile: dict[str, Any], repo_root: Path) -> list[str]:
+    key = _feishu_ws_config_key(profile)
+    command = [str(repo_root / "om"), "inbound", "feishu-ws", "--check", "--config-key", key]
+    config_paths = profile.get("config_paths")
+    if isinstance(config_paths, dict):
+        config_path = str(config_paths.get(key) or "").strip()
+        if config_path:
+            command.extend(["--config-path", config_path])
+    return command
+
+
+def _child_env_from_profile(profile: dict[str, Any]) -> dict[str, str] | None:
+    env: dict[str, str] = {}
+    for key in ("PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TERM"):
+        value = str(os.environ.get(key) or "").strip()
+        if value:
+            env[key] = value
+    runtime_root = str(profile.get("runtime_root") or "").strip()
+    if runtime_root:
+        env["OM_RUNTIME_ROOT"] = runtime_root
+    env["PYTHONUNBUFFERED"] = "1"
+    env_file = str(profile.get("env_file") or "").strip()
+    if env_file:
+        env["OM_ENV_FILE"] = str(Path(env_file).expanduser())
+    return env
+
+
+def _service_health_remediation(failed_checks: list[dict[str, Any]]) -> list[str]:
+    services = sorted({str(item.get("service") or "") for item in failed_checks if str(item.get("service") or "").strip()})
+    remediation: list[str] = []
+    for service_name in services:
+        if service_name.endswith(".service"):
+            remediation.append(f"manual_enable: sudo systemctl enable --now {service_name}")
+            remediation.append(f"manual_restart: sudo systemctl restart {service_name}")
+    if any(item.get("check") == "feishu-ws-check" for item in failed_checks):
+        remediation.append("manual_check: source the env file, then run ./om inbound feishu-ws --check")
+    return remediation
+
+
+def _service_reconcile_failed(service_reconcile: dict[str, Any]) -> bool:
+    if not service_reconcile:
+        return False
+    if service_reconcile.get("apply_errors"):
+        return True
+    summary_raw = service_reconcile.get("summary")
+    summary = summary_raw if isinstance(summary_raw, dict) else {}
+    return str(summary.get("status") or "").strip().lower() == "error"
+
+
+def _service_reconcile_remediation(service_reconcile: dict[str, Any]) -> list[str]:
+    out: list[str] = []
+    for item in service_reconcile.get("apply_errors") or []:
+        out.append(f"service_reconcile_error: {item}")
+    for item in service_reconcile.get("manual_actions") or []:
+        out.append(str(item))
+    return out
+
+
 def _profile_runtime_config_targets(profile: dict[str, Any]) -> list[dict[str, str]]:
     raw_markets = profile.get("markets")
     markets = [str(item).strip().lower() for item in raw_markets] if isinstance(raw_markets, list) else []
@@ -1296,6 +1427,7 @@ def service_upgrade(
     runtime_config_prepare: dict[str, Any] = {}
     post_switch_runtime_config_validate: list[dict[str, Any]] = []
     service_reconcile: dict[str, Any] = {}
+    service_health: dict[str, Any] = {}
     pre_upgrade_profile = _load_service_profile(runtime)
     try:
         with _UpgradeLock(lock_path):
@@ -1363,10 +1495,21 @@ def service_upgrade(
                     confirm=True,
                     run_cmd=run_cmd,
                 )
+            restart_profile = _load_service_profile(runtime) or pre_upgrade_profile
             restarted = (
-                _restart_services_from_loaded_profile(profile=pre_upgrade_profile, run_cmd=run_cmd, operations=operations)
+                _restart_services_from_loaded_profile(profile=restart_profile, run_cmd=run_cmd, operations=operations)
                 if restart_services
                 else []
+            )
+            service_health = (
+                _post_upgrade_service_health(
+                    profile=restart_profile,
+                    repo_root=repo_link,
+                    run_cmd=run_cmd,
+                    operations=operations,
+                )
+                if restart_services
+                else {"ok": True, "status": "skipped", "reason": "service_restart_disabled", "checks": [], "failed_checks": []}
             )
     except ServiceRestartError as exc:
         out = {
@@ -1383,6 +1526,7 @@ def service_upgrade(
             "runtime_config_prepare": runtime_config_prepare,
             "post_switch_runtime_config_validate": post_switch_runtime_config_validate,
             "service_reconcile": service_reconcile,
+            "service_health": service_health,
             "restarted_services": exc.restarted_services,
             "restart_failed_services": exc.failed_services,
             "manual_remediation": exc.remediation,
@@ -1406,6 +1550,54 @@ def service_upgrade(
             "runtime_prepare": exc.runtime_prepare if isinstance(exc, RuntimePrepareError) else runtime_prepare,
             "error": f"{type(exc).__name__}: {exc}",
             **({"remediation": exc.remediation} if isinstance(exc, RuntimeConfigPrepareError) else {}),
+            "operations": operations,
+        }
+        write_upgrade_status(runtime_root=runtime, payload=out)
+        return out
+
+    if _service_reconcile_failed(service_reconcile):
+        out = {
+            **status_base,
+            "ok": True,
+            "status": "upgraded_service_reconcile_failed",
+            "changed": bool(symlink_switched),
+            "symlink_switched": bool(symlink_switched),
+            "config_rebuilt": bool(runtime_config_prepare.get("status") == "prepared"),
+            "target_dir": str(target_dir),
+            "previous_dir": str(previous_dir),
+            "release_materialize": release_materialize,
+            "runtime_prepare": runtime_prepare,
+            "runtime_config_prepare": runtime_config_prepare,
+            "post_switch_runtime_config_validate": post_switch_runtime_config_validate,
+            "service_reconcile": service_reconcile,
+            "service_health": service_health,
+            "restarted_services": restarted,
+            "manual_remediation": _service_reconcile_remediation(service_reconcile),
+            "remediation": _service_reconcile_remediation(service_reconcile),
+            "operations": operations,
+        }
+        write_upgrade_status(runtime_root=runtime, payload=out)
+        return out
+
+    if service_health and not bool(service_health.get("ok", True)):
+        out = {
+            **status_base,
+            "ok": True,
+            "status": "upgraded_service_health_failed",
+            "changed": bool(symlink_switched),
+            "symlink_switched": bool(symlink_switched),
+            "config_rebuilt": bool(runtime_config_prepare.get("status") == "prepared"),
+            "target_dir": str(target_dir),
+            "previous_dir": str(previous_dir),
+            "release_materialize": release_materialize,
+            "runtime_prepare": runtime_prepare,
+            "runtime_config_prepare": runtime_config_prepare,
+            "post_switch_runtime_config_validate": post_switch_runtime_config_validate,
+            "service_reconcile": service_reconcile,
+            "service_health": service_health,
+            "restarted_services": restarted,
+            "manual_remediation": service_health.get("remediation") or [],
+            "remediation": service_health.get("remediation") or [],
             "operations": operations,
         }
         write_upgrade_status(runtime_root=runtime, payload=out)
@@ -1477,6 +1669,7 @@ def service_upgrade(
         "runtime_config_prepare": runtime_config_prepare,
         "post_switch_runtime_config_validate": post_switch_runtime_config_validate,
         "service_reconcile": service_reconcile,
+        "service_health": service_health,
         "restarted_services": restarted,
         **({"post_upgrade_cleanup": cleanup_result} if cleanup_result is not None else {}),
         "operations": operations,
