@@ -111,8 +111,8 @@ def _init_runtime_rebuild_command(
 ) -> str:
     command = [
         "./om",
+        "setup",
         "init",
-        "runtime",
         "--market",
         market,
         "--futu-acc-id",

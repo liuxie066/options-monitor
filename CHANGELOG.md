@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.95 - 2026-05-20
+
+### Changed
+- Removed legacy `./om init runtime ...` and top-level `./om setup --market ...` compatibility entrypoints in favor of the current `./om setup init ...` command.
+- Updated generated runtime config rebuild commands and onboarding docs to reference only the current setup/init flow.
+
 ## 1.2.94 - 2026-05-20
 
 ### Fixed

@@ -4,6 +4,8 @@ import os
 import json
 from pathlib import Path
 
+import pytest
+
 
 def _read_json_output(capsys) -> dict:
     return json.loads(capsys.readouterr().out)
@@ -325,41 +327,24 @@ def test_top_level_logs_missing_selected_run_returns_error(capsys, tmp_path: Pat
     assert "requested run: not found" in out
 
 
-def test_top_level_setup_delegates_to_runtime_init(monkeypatch, capsys, tmp_path: Path) -> None:
+def test_top_level_setup_requires_current_subcommand(capsys) -> None:
     import src.interfaces.cli.main as cli
 
-    config_path = tmp_path / "config.us.json"
-    data_config_path = tmp_path / "portfolio.runtime.json"
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["setup", "--market", "us", "--futu-acc-id", "123456"])
 
-    def _init_runtime(**kwargs):
-        return kwargs
+    assert exc.value.code == 2
+    assert "setup" in capsys.readouterr().err
 
-    monkeypatch.setattr(cli, "init_runtime", _init_runtime)
 
-    rc = cli.main([
-        "setup",
-        "--market",
-        "us",
-        "--futu-acc-id",
-        "123456",
-        "--account-label",
-        "lx",
-        "--config-path",
-        str(config_path),
-        "--data-config-path",
-        str(data_config_path),
-        "--symbol",
-        "NVDA",
-    ])
-    payload = _read_json_output(capsys)
+def test_init_runtime_command_is_removed(capsys) -> None:
+    import src.interfaces.cli.main as cli
 
-    assert rc == 0
-    assert payload["tool_name"] == "setup"
-    assert payload["data"]["market"] == "us"
-    assert payload["data"]["futu_acc_id"] == "123456"
-    assert payload["data"]["account_label"] == "lx"
-    assert payload["data"]["config_path"] == str(config_path)
-    assert payload["data"]["symbols"] == ["NVDA"]
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["init", "runtime", "--market", "us", "--futu-acc-id", "123456"])
+
+    assert exc.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err
 
 
 def test_top_level_update_commands_delegate_to_service_upgrade(monkeypatch, capsys, tmp_path: Path) -> None:
