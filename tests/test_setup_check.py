@@ -15,6 +15,8 @@ def test_setup_check_is_read_only_and_reports_missing_config(tmp_path: Path) -> 
     checks = {item["name"]: item for item in out["checks"]}
 
     assert isinstance(out["summary"]["ok"], bool)
+    assert checks["platform"]["value"]["service_target"] in {"systemd", "launchd", "manual"}
+    assert out["platform_profile"]["default_env_file"]
     assert checks["install.repo"]["status"] == "ok"
     assert checks["config.us"]["status"] == "warn"
     assert "setup init --market us" in checks["config.us"]["hint"]

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import platform
+import shlex
 import sys
 from pathlib import Path
 from typing import Any, Iterable
@@ -9,6 +10,7 @@ from typing import Any, Iterable
 from src.application.agent_tool_config import load_runtime_config
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.config_validator import validate_config
+from src.application.platform_profile import PlatformProfile, current_platform_profile
 from src.application.runtime_paths import resolve_runtime_root
 from src.application.settings import diagnose_effective_settings
 
@@ -33,6 +35,15 @@ def run_setup_check(
         checks.append(item)
 
     version = _read_text(root / "VERSION")
+    profile = current_platform_profile()
+    add(
+        "platform",
+        "ok" if profile.platform in {"linux", "macos"} else "warn",
+        f"{profile.platform} platform profile selected" if profile.platform in {"linux", "macos"} else "unsupported platform; service setup is manual",
+        profile.to_dict(),
+        hint="Use Linux or macOS for managed service deployment." if profile.platform == "other" else None,
+    )
+
     add(
         "install.repo",
         "ok" if (root / "om").exists() and (root / "src").is_dir() else "error",
@@ -56,6 +67,18 @@ def run_setup_check(
         "required Python imports are available" if not missing_deps else "required Python imports are missing",
         {"missing": missing_deps} if missing_deps else {"checked": ["pandas", "futu"]},
         hint="./.venv/bin/pip install -r requirements.txt -c constraints.txt" if missing_deps else None,
+    )
+
+    server_deps_available = importlib.util.find_spec("lark_oapi") is not None
+    add(
+        "install.server_dependencies",
+        "ok" if server_deps_available else "info",
+        "server dependency set is installed" if server_deps_available else "server dependency set is optional; install it before running Feishu long-connection inbound",
+        {
+            "lark_oapi": server_deps_available,
+            "needed_for": ["inbound.feishu_ws", "service render --include-feishu-ws"],
+        },
+        hint="./.venv/bin/pip install -r requirements/server.txt -c constraints/server.txt" if not server_deps_available else None,
     )
 
     settings = diagnose_effective_settings(
@@ -115,6 +138,8 @@ def run_setup_check(
         {
             "runtime_root": str(runtime.runtime_root),
             "source": runtime.source,
+            "recommended_runtime_root": str(profile.default_runtime_root),
+            "recommended_env_file": str(profile.default_env_file),
             "option_positions_sqlite": str(sqlite_path),
             "option_positions_sqlite_exists": sqlite_path.exists(),
         },
@@ -127,7 +152,12 @@ def run_setup_check(
         _service_probe(selected_markets),
     )
 
-    next_steps = _next_steps(config_ok_markets=config_ok_markets, selected_markets=selected_markets, settings=settings)
+    next_steps = _next_steps(
+        config_ok_markets=config_ok_markets,
+        selected_markets=selected_markets,
+        settings=settings,
+        profile=profile,
+    )
     error_count = sum(1 for item in checks if item.get("status") == "error")
     warning_count = sum(1 for item in checks if item.get("status") == "warn")
     return {
@@ -138,6 +168,7 @@ def run_setup_check(
         },
         "repo_root": str(root),
         "markets": selected_markets,
+        "platform_profile": profile.to_dict(),
         "checks": checks,
         "next_steps": next_steps,
     }
@@ -196,7 +227,13 @@ def _service_probe(markets: list[str]) -> dict[str, Any]:
     }
 
 
-def _next_steps(*, config_ok_markets: list[str], selected_markets: list[str], settings: dict[str, Any]) -> list[str]:
+def _next_steps(
+    *,
+    config_ok_markets: list[str],
+    selected_markets: list[str],
+    settings: dict[str, Any],
+    profile: PlatformProfile,
+) -> list[str]:
     steps: list[str] = []
     missing_markets = [market for market in selected_markets if market not in config_ok_markets]
     if missing_markets:
@@ -207,6 +244,18 @@ def _next_steps(*, config_ok_markets: list[str], selected_markets: list[str], se
         steps.append("./om settings doctor")
     for market in config_ok_markets:
         steps.append(f"./om doctor --config-key {market}")
+    if config_ok_markets and profile.service_target != "manual":
+        steps.append(
+            "./om service render "
+            f"--target {profile.service_target} "
+            f"--runtime-root {_quote(profile.default_runtime_root)} "
+            f"--env-file {_quote(profile.default_env_file)} "
+            "--markets us hk --accounts lx sy --output-dir /tmp/options-monitor-service"
+        )
     if not steps:
         steps.append("./om doctor --config-key us")
     return steps
+
+
+def _quote(value: str | Path) -> str:
+    return shlex.quote(str(value))

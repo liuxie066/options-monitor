@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.2.92 - 2026-05-20
+
+### Added
+- Added a shared Linux/macOS platform profile for install/setup defaults, including service target, recommended runtime root, env-file path, prerequisite hints, and service notes.
+
+### Changed
+- Improved `./om setup check` onboarding output with platform profile diagnostics, optional Feishu long-connection server dependency visibility, recommended runtime/env paths, and platform-specific service render next steps.
+- Improved `scripts/install.sh` with Linux/macOS prerequisite hints, Python/venv preflight checks, and platform-specific env-file guidance without writing secrets or enabling services.
+- Expanded install/getting-started/deployment docs with separate Linux and macOS paths, Feishu `--with-server` guidance, and safer env-file initialization examples.
+
 ## 1.2.91 - 2026-05-20
 
 ### Changed

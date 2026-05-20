@@ -12,6 +12,7 @@ from json import JSONDecodeError
 from pathlib import Path
 from typing import Any, Callable, Literal, cast
 
+from src.application.platform_profile import default_runtime_root_for_service_target
 from src.application.settings import build_effective_env
 
 
@@ -81,10 +82,7 @@ def normalize_accounts(values: list[str] | tuple[str, ...] | None) -> list[str]:
 
 
 def default_runtime_root(target: ServiceTarget, *, home: Path | None = None) -> Path:
-    if target == "systemd":
-        return Path("/var/lib/options-monitor")
-    home_dir = home or Path.home()
-    return home_dir / "Library" / "Application Support" / "options-monitor"
+    return default_runtime_root_for_service_target(target, home=home)
 
 
 def default_systemd_deploy_user() -> str:

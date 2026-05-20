@@ -70,8 +70,8 @@ sudo chown -R "$DEPLOY_USER":"$DEPLOY_USER" "$RUNTIME"
 发布环境变量文件：
 
 ```bash
-sudo mkdir -p /etc/options-monitor
-sudo install -m 600 -o root -g root configs/examples/options-monitor.env.example "$ENV_FILE"
+sudo install -d -m 700 /etc/options-monitor
+sudo test -f "$ENV_FILE" || sudo install -m 600 -o root -g root configs/examples/options-monitor.env.example "$ENV_FILE"
 sudoedit "$ENV_FILE"
 ```
 
@@ -242,7 +242,7 @@ REPO="$HOME/workspace/options-monitor"
 RUNTIME="$HOME/Library/Application Support/options-monitor"
 ENV_FILE="$RUNTIME/options-monitor.env"
 mkdir -p "$RUNTIME" "$RUNTIME/logs" "$RUNTIME/locks"
-install -m 600 configs/examples/options-monitor.env.example "$ENV_FILE"
+test -f "$ENV_FILE" || install -m 600 configs/examples/options-monitor.env.example "$ENV_FILE"
 $EDITOR "$ENV_FILE"
 ```
 
