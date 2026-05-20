@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.2.101 - 2026-05-21
+
+### Added
+- Added dependency-hash based shared virtualenv reuse for service upgrades, so unchanged release dependencies can skip repeated pip/uv installation.
+- Added runtime prepare timing and intermediate `runtime_preparing` / `runtime_prepared` upgrade status writes for clearer upgrade progress diagnosis.
+
+### Changed
+- Build service upgrade virtualenvs in temporary cache paths and publish them atomically after successful dependency installation.
+- Include Python, platform, installer mode, requirements, constraints, and server dependency inputs in the virtualenv cache fingerprint.
+
 ## 1.2.100 - 2026-05-20
 
 ### Added
