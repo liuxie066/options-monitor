@@ -47,7 +47,7 @@
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh -o /tmp/options-monitor-install.sh
-bash /tmp/options-monitor-install.sh --version v1.2.90 --prefix "$HOME/apps/options-monitor"
+bash /tmp/options-monitor-install.sh --version v1.2.92 --prefix "$HOME/apps/options-monitor"
 
 cd "$HOME/apps/options-monitor/current"
 ./om setup check
@@ -56,6 +56,15 @@ cd "$HOME/apps/options-monitor/current"
 安装脚本只下载代码、checkout 指定 release、创建 `.venv`、安装依赖并更新 `current` symlink。它不会写配置、不会写 secrets、不会启动服务、不会创建定时任务。
 
 手动安装、server/dev 依赖和目录布局见 [docs/INSTALL.md](docs/INSTALL.md)。
+
+平台默认值：
+
+| 平台 | 推荐 runtime root | 推荐 env-file | 服务管理器 |
+|---|---|---|---|
+| Linux | `/var/lib/options-monitor` | `/etc/options-monitor/options-monitor.env` | `systemd` |
+| macOS | `$HOME/Library/Application Support/options-monitor` | `$HOME/Library/Application Support/options-monitor/options-monitor.env` | `launchd` |
+
+如果要从飞书 long-connection 接收远端命令，安装时加 `--with-server`。
 
 ### 2. 初始化配置
 
