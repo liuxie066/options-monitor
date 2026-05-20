@@ -38,6 +38,14 @@ def default_releases_root(repo_root: Path) -> Path:
     return (repo.parent / "releases").resolve()
 
 
+def default_upgrade_cache_root(repo_root: Path) -> Path:
+    configured = str(os.environ.get("OM_UPGRADE_CACHE_ROOT") or "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    repo = Path(repo_root).expanduser()
+    return (repo.parent / "_cache").resolve()
+
+
 def upgrade_status_path(runtime_root: str | Path) -> Path:
     return Path(runtime_root).expanduser().resolve() / "upgrade_status.json"
 
@@ -281,6 +289,289 @@ def _remote_url(*, repo_root: Path, remote_name: str, run_cmd: Callable[..., Any
     if not url:
         raise RuntimeError(f"remote URL is empty for {remote_name}")
     return url
+
+
+def _cache_repo_path(cache_root: Path) -> Path:
+    return cache_root / "git" / "options-monitor.git"
+
+
+def _cache_remote_url(*, cache_root: Path, remote_name: str, run_cmd: Callable[..., Any]) -> str:
+    cache_repo = _cache_repo_path(cache_root)
+    if not cache_repo.exists():
+        raise RuntimeError(f"upgrade git cache is missing: {cache_repo}")
+    result = _run_command(
+        ["git", f"--git-dir={cache_repo}", "config", "--get", f"remote.{remote_name}.url"],
+        cwd=None,
+        run_cmd=run_cmd,
+        timeout=30,
+    )
+    if not result["ok"]:
+        raise RuntimeError(f"failed to resolve cached remote URL for {remote_name}")
+    url = str(result.get("stdout") or "").strip()
+    if not url:
+        raise RuntimeError(f"cached remote URL is empty for {remote_name}")
+    return url
+
+
+def _resolve_upgrade_remote_url(
+    *,
+    repo_root: Path,
+    cache_root: Path,
+    remote_name: str,
+    run_cmd: Callable[..., Any],
+) -> str:
+    errors: list[str] = []
+    try:
+        return _remote_url(repo_root=repo_root, remote_name=remote_name, run_cmd=run_cmd)
+    except Exception as exc:
+        errors.append(f"current_release: {exc}")
+    try:
+        return _cache_remote_url(cache_root=cache_root, remote_name=remote_name, run_cmd=run_cmd)
+    except Exception as exc:
+        errors.append(f"upgrade_cache: {exc}")
+    raise RuntimeError(
+        "failed to resolve upgrade remote URL from current release or upgrade cache; "
+        + "; ".join(errors)
+    )
+
+
+def _release_tags_from_ls_remote(stdout: str) -> list[tuple[str, str]]:
+    found: dict[str, str] = {}
+    for line in stdout.splitlines():
+        parts = line.strip().split()
+        if len(parts) != 2:
+            continue
+        ref = parts[1].strip()
+        prefix = "refs/tags/"
+        if not ref.startswith(prefix):
+            continue
+        tag = ref[len(prefix) :]
+        if not tag.startswith("v"):
+            continue
+        version = tag[1:]
+        try:
+            parse_version(version)
+        except ValueError:
+            continue
+        found[version] = tag
+    return sorted(found.items(), key=cmp_to_key(lambda left, right: compare_versions(left[0], right[0])))
+
+
+def _version_check_from_cache(
+    *,
+    repo_root: Path,
+    cache_root: Path,
+    remote_name: str,
+    run_cmd: Callable[..., Any],
+    now_fn: Callable[[], datetime] | None,
+) -> dict[str, Any]:
+    checked_at = utc_now_iso(now_fn)
+    try:
+        current_version = _read_version(repo_root)
+        parse_version(current_version)
+    except Exception as exc:
+        return {
+            "current_version": None,
+            "latest_version": None,
+            "update_available": False,
+            "remote_name": remote_name,
+            "checked_at": checked_at,
+            "release_tag": None,
+            "message": "版本检查失败：本地版本无效",
+            "ok": False,
+            "error": str(exc),
+            "source": "upgrade_cache",
+            "cache_repo": str(_cache_repo_path(cache_root)),
+        }
+
+    cache_repo = _cache_repo_path(cache_root)
+    if not cache_repo.exists():
+        return {
+            "current_version": current_version,
+            "latest_version": None,
+            "update_available": False,
+            "remote_name": remote_name,
+            "checked_at": checked_at,
+            "release_tag": None,
+            "message": "版本检查失败",
+            "ok": False,
+            "error": f"upgrade git cache is missing: {cache_repo}",
+            "source": "upgrade_cache",
+            "cache_repo": str(cache_repo),
+        }
+
+    result = _run_command(
+        ["git", f"--git-dir={cache_repo}", "ls-remote", "--tags", "--refs", remote_name],
+        cwd=None,
+        run_cmd=run_cmd,
+        timeout=120,
+    )
+    if not result["ok"]:
+        error = str(
+            result.get("stderr")
+            or result.get("stdout")
+            or f"git ls-remote failed for remote {remote_name}"
+        ).strip()
+        return {
+            "current_version": current_version,
+            "latest_version": None,
+            "update_available": False,
+            "remote_name": remote_name,
+            "checked_at": checked_at,
+            "release_tag": None,
+            "message": "版本检查失败",
+            "ok": False,
+            "error": error,
+            "source": "upgrade_cache",
+            "cache_repo": str(cache_repo),
+        }
+
+    tags = _release_tags_from_ls_remote(str(result.get("stdout") or ""))
+    if not tags:
+        return {
+            "current_version": current_version,
+            "latest_version": None,
+            "update_available": False,
+            "remote_name": remote_name,
+            "checked_at": checked_at,
+            "release_tag": None,
+            "message": "未找到可用发布版本",
+            "ok": False,
+            "error": "no valid release tags found on remote",
+            "source": "upgrade_cache",
+            "cache_repo": str(cache_repo),
+        }
+
+    latest_version, release_tag = tags[-1]
+    cmp = compare_versions(current_version, latest_version)
+    if cmp < 0:
+        message = f"发现新版本 {latest_version}，当前 {current_version}"
+        update_available = True
+    elif cmp == 0:
+        message = f"当前已是最新版本 {current_version}"
+        update_available = False
+    else:
+        message = f"当前版本 {current_version} 高于远端最新版本 {latest_version}"
+        update_available = False
+    return {
+        "current_version": current_version,
+        "latest_version": latest_version,
+        "update_available": update_available,
+        "remote_name": remote_name,
+        "checked_at": checked_at,
+        "release_tag": release_tag,
+        "message": message,
+        "ok": True,
+        "error": None,
+        "source": "upgrade_cache",
+        "cache_repo": str(cache_repo),
+    }
+
+
+def _version_check_for_upgrade(
+    *,
+    repo_root: Path,
+    cache_root: Path,
+    remote_name: str,
+    run_cmd: Callable[..., Any],
+    now_fn: Callable[[], datetime] | None,
+) -> dict[str, Any]:
+    repo_check = check_version_update(base_dir=repo_root, remote_name=remote_name, run_cmd=run_cmd, now_fn=now_fn)
+    if repo_check.get("ok"):
+        return {**repo_check, "source": "current_release"}
+    cache_check = _version_check_from_cache(
+        repo_root=repo_root,
+        cache_root=cache_root,
+        remote_name=remote_name,
+        run_cmd=run_cmd,
+        now_fn=now_fn,
+    )
+    if cache_check.get("ok"):
+        return {**cache_check, "fallback_from": "current_release", "current_release_error": repo_check.get("error")}
+    return {**repo_check, "source": "current_release", "cache_version_check": cache_check}
+
+
+def _release_materialize_summary(*, tag: str, target_dir: Path, cache_root: Path) -> dict[str, Any]:
+    cache_repo = _cache_repo_path(cache_root)
+    return {
+        "method": "reuse_existing_release" if target_dir.exists() else "git_cache_archive",
+        "cache_root": str(cache_root),
+        "cache_repo": str(cache_repo),
+        "target_dir": str(target_dir),
+        "tag": tag,
+        "cache_initialized": False,
+        "fetched": False,
+    }
+
+
+def _materialize_release_from_git_cache(
+    *,
+    remote_url: str,
+    tag: str,
+    target_dir: Path,
+    cache_root: Path,
+    run_cmd: Callable[..., Any],
+    operations: list[dict[str, Any]],
+) -> dict[str, Any]:
+    cache_repo = _cache_repo_path(cache_root)
+    out = _release_materialize_summary(tag=tag, target_dir=target_dir, cache_root=cache_root)
+    if target_dir.exists():
+        return out
+
+    cache_repo.parent.mkdir(parents=True, exist_ok=True)
+    if cache_repo.exists():
+        _run_required(
+            ["git", f"--git-dir={cache_repo}", "fetch", "--tags", "--prune", "origin"],
+            cwd=None,
+            run_cmd=run_cmd,
+            operations=operations,
+            timeout=600,
+        )
+        out["fetched"] = True
+    else:
+        _run_required(
+            ["git", "clone", "--mirror", remote_url, str(cache_repo)],
+            cwd=None,
+            run_cmd=run_cmd,
+            operations=operations,
+            timeout=600,
+        )
+        out["cache_initialized"] = True
+
+    target_dir.parent.mkdir(parents=True, exist_ok=True)
+    tmp_dir = target_dir.with_name(f".{target_dir.name}.archive-tmp")
+    tar_path = target_dir.with_name(f".{target_dir.name}.tar")
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+    try:
+        if tar_path.exists():
+            tar_path.unlink()
+        tmp_dir.mkdir(parents=True, exist_ok=False)
+        _run_required(
+            ["git", f"--git-dir={cache_repo}", "archive", "--format=tar", "-o", str(tar_path), tag],
+            cwd=None,
+            run_cmd=run_cmd,
+            operations=operations,
+            timeout=300,
+        )
+        _run_required(
+            ["tar", "-xf", str(tar_path), "-C", str(tmp_dir)],
+            cwd=None,
+            run_cmd=run_cmd,
+            operations=operations,
+            timeout=300,
+        )
+        if not (tmp_dir / "VERSION").exists():
+            raise RuntimeError(f"archived release is missing VERSION: {tag}")
+        os.replace(tmp_dir, target_dir)
+    except Exception:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
+    finally:
+        try:
+            tar_path.unlink()
+        except FileNotFoundError:
+            pass
+    return out
 
 
 def _major_upgrade_blocked(*, current_version: str, target_version: str, allow_major: bool) -> bool:
@@ -618,8 +909,12 @@ def _upgrade_installer_mode() -> str:
     return mode if mode in {"auto", "uv", "pip"} else "auto"
 
 
-def _uv_install_env() -> dict[str, str]:
+def _runtime_install_env(*, cache_root: Path) -> dict[str, str]:
     env = dict(os.environ)
+    uv_cache = cache_root / "uv"
+    pip_cache = cache_root / "pip"
+    env.setdefault("UV_CACHE_DIR", str(uv_cache))
+    env.setdefault("PIP_CACHE_DIR", str(pip_cache))
     pip_index = str(env.get("PIP_INDEX_URL") or "").strip()
     if pip_index and not str(env.get("UV_INDEX_URL") or "").strip():
         env["UV_INDEX_URL"] = pip_index
@@ -643,7 +938,7 @@ def _pip_install_commands(venv_python: Path) -> list[tuple[list[str], int]]:
 
 def _uv_install_commands(venv_python: Path, *, include_server: bool) -> list[tuple[list[str], int]]:
     commands: list[tuple[list[str], int]] = [
-        (["uv", "venv", ".venv"], 300),
+        (["uv", "venv", "--python", "python3", ".venv"], 300),
         (["uv", "pip", "install", "-p", str(venv_python), "-r", "requirements.txt", "-c", "constraints.txt"], 1200),
     ]
     if include_server:
@@ -691,10 +986,11 @@ def _run_pip_runtime_prepare(
     run_cmd: Callable[..., Any],
     operations: list[dict[str, Any]],
     commands: list[list[str]],
+    env: dict[str, str],
 ) -> None:
     if not venv_python.exists():
         command = ["python3", "-m", "venv", ".venv"]
-        _run_required(command, cwd=target_dir, run_cmd=run_cmd, operations=operations, timeout=300)
+        _run_required(command, cwd=target_dir, run_cmd=run_cmd, operations=operations, env=env, timeout=300)
         operations[-1]["runtime_prepare_installer"] = "pip"
         commands.append(command)
     pip_commands = _pip_install_commands(venv_python)
@@ -720,6 +1016,7 @@ def _run_pip_runtime_prepare(
         run_cmd=run_cmd,
         operations=operations,
         installer="pip",
+        env=env,
     )
     commands.extend(command for command, _timeout in pip_commands)
 
@@ -738,14 +1035,17 @@ def _release_python(target_dir: Path) -> Path:
 def _ensure_release_runtime(
     *,
     target_dir: Path,
+    cache_root: Path | None = None,
     run_cmd: Callable[..., Any],
     operations: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    cache = cache_root or default_upgrade_cache_root(target_dir)
     venv_python = _release_python(target_dir)
     server_requirements = target_dir / "requirements" / "server.txt"
     server_constraints = target_dir / "constraints" / "server.txt"
     include_server = server_requirements.exists() and server_constraints.exists()
     mode = _upgrade_installer_mode()
+    install_env = _runtime_install_env(cache_root=cache)
     commands: list[list[str]] = []
     runtime_prepare: dict[str, Any] = {
         "installer": "pip",
@@ -753,6 +1053,10 @@ def _ensure_release_runtime(
         "fallback": False,
         "venv_path": str(target_dir / ".venv"),
         "python": str(venv_python),
+        "python_spec": "python3",
+        "cache_root": str(cache),
+        "uv_cache_dir": install_env.get("UV_CACHE_DIR"),
+        "pip_cache_dir": install_env.get("PIP_CACHE_DIR"),
         "commands": commands,
     }
 
@@ -763,14 +1067,13 @@ def _ensure_release_runtime(
         uv_commands = _uv_install_commands(venv_python, include_server=include_server)
         commands.extend(command for command, _timeout in uv_commands)
         try:
-            uv_env = _uv_install_env()
             _run_runtime_install_commands(
                 commands=uv_commands,
                 cwd=target_dir,
                 run_cmd=run_cmd,
                 operations=operations,
                 installer="uv",
-                env=uv_env,
+                env=install_env,
             )
             if not venv_python.exists():
                 raise RuntimeError(f"uv did not create release virtualenv python: {venv_python}")
@@ -789,6 +1092,7 @@ def _ensure_release_runtime(
                 run_cmd=run_cmd,
                 operations=operations,
                 commands=commands,
+                env=install_env,
             )
     else:
         if mode == "uv":
@@ -802,6 +1106,7 @@ def _ensure_release_runtime(
             run_cmd=run_cmd,
             operations=operations,
             commands=commands,
+            env=install_env,
         )
 
     if not venv_python.exists() or not os.access(venv_python, os.X_OK):
@@ -828,18 +1133,27 @@ def service_upgrade_check(
     *,
     repo_root: str | Path,
     runtime_root: str | Path,
+    cache_root: str | Path | None = None,
     remote_name: str = "origin",
     run_cmd: Callable[..., Any] = subprocess.run,
     now_fn: Callable[[], datetime] | None = None,
 ) -> dict[str, Any]:
     repo = Path(repo_root).expanduser().resolve()
     runtime = Path(runtime_root).expanduser().resolve()
-    version = check_version_update(base_dir=repo, remote_name=remote_name, run_cmd=run_cmd, now_fn=now_fn)
+    cache = Path(cache_root).expanduser().resolve() if cache_root else default_upgrade_cache_root(Path(repo_root).expanduser())
+    version = _version_check_for_upgrade(
+        repo_root=repo,
+        cache_root=cache,
+        remote_name=remote_name,
+        run_cmd=run_cmd,
+        now_fn=now_fn,
+    )
     status = load_upgrade_status(runtime_root=runtime)
     return {
         "ok": bool(version.get("ok")),
         "repo_root": str(repo),
         "runtime_root": str(runtime),
+        "upgrade_cache_root": str(cache),
         "remote_name": remote_name,
         "checked_at": utc_now_iso(now_fn),
         "current_version": version.get("current_version"),
@@ -866,6 +1180,7 @@ def service_upgrade(
     repo_root: str | Path,
     runtime_root: str | Path,
     releases_root: str | Path | None = None,
+    cache_root: str | Path | None = None,
     target_version: str | None = None,
     remote_name: str = "origin",
     confirm: bool = False,
@@ -881,11 +1196,13 @@ def service_upgrade(
     repo = repo_link.resolve()
     runtime = Path(runtime_root).expanduser().resolve()
     releases = Path(releases_root).expanduser().resolve() if releases_root else default_releases_root(repo_link)
+    cache = Path(cache_root).expanduser().resolve() if cache_root else default_upgrade_cache_root(repo_link)
     current_version = _read_version(repo)
     repo_root_is_symlink = repo_link.is_symlink()
     check = service_upgrade_check(
         repo_root=repo,
         runtime_root=runtime,
+        cache_root=cache,
         remote_name=remote_name,
         run_cmd=run_cmd,
         now_fn=now_fn,
@@ -899,6 +1216,7 @@ def service_upgrade(
         "repo_root": str(repo_link),
         "runtime_root": str(runtime),
         "releases_root": str(releases),
+        "upgrade_cache_root": str(cache),
         "current_version": current_version,
         "target_version": target or None,
         "release_tag": tag,
@@ -932,7 +1250,9 @@ def service_upgrade(
     previous_dir = repo
     warnings = [] if repo_root_is_symlink else ["confirmed upgrade requires repo_root to be a current symlink"]
     planned = [
-        f"clone {tag} into {target_dir}" if not target_dir.exists() else f"reuse existing release dir {target_dir}",
+        f"materialize {tag} into {target_dir} from git cache {cache / 'git' / 'options-monitor.git'}"
+        if not target_dir.exists()
+        else f"reuse existing release dir {target_dir}",
         f"prepare release runtime at {target_dir / '.venv'}",
         f"validate {target_dir}",
         f"switch {repo_link} -> {target_dir}",
@@ -971,6 +1291,7 @@ def service_upgrade(
 
     lock_path = runtime / "locks" / "upgrade.lock"
     symlink_switched = False
+    release_materialize = _release_materialize_summary(tag=str(tag), target_dir=target_dir, cache_root=cache)
     runtime_prepare: dict[str, Any] = {}
     runtime_config_prepare: dict[str, Any] = {}
     post_switch_runtime_config_validate: list[dict[str, Any]] = []
@@ -979,16 +1300,25 @@ def service_upgrade(
     try:
         with _UpgradeLock(lock_path):
             releases.mkdir(parents=True, exist_ok=True)
-            remote_url = _remote_url(repo_root=repo, remote_name=remote_name, run_cmd=run_cmd)
-            if not target_dir.exists():
-                _run_required(
-                    ["git", "clone", "--depth", "1", "--branch", str(tag), remote_url, str(target_dir)],
-                    cwd=None,
+            remote_url = (
+                ""
+                if target_dir.exists()
+                else _resolve_upgrade_remote_url(
+                    repo_root=repo,
+                    cache_root=cache,
+                    remote_name=remote_name,
                     run_cmd=run_cmd,
-                    operations=operations,
-                    timeout=600,
                 )
-            runtime_prepare = _ensure_release_runtime(target_dir=target_dir, run_cmd=run_cmd, operations=operations)
+            )
+            release_materialize = _materialize_release_from_git_cache(
+                remote_url=remote_url,
+                tag=str(tag),
+                target_dir=target_dir,
+                cache_root=cache,
+                run_cmd=run_cmd,
+                operations=operations,
+            )
+            runtime_prepare = _ensure_release_runtime(target_dir=target_dir, cache_root=cache, run_cmd=run_cmd, operations=operations)
             _run_required(
                 ["python3", "scripts/release_check.py", "--tag", str(tag)],
                 cwd=target_dir,
@@ -1048,6 +1378,7 @@ def service_upgrade(
             "config_rebuilt": bool(runtime_config_prepare.get("status") == "prepared"),
             "target_dir": str(target_dir),
             "previous_dir": str(previous_dir),
+            "release_materialize": release_materialize,
             "runtime_prepare": runtime_prepare,
             "runtime_config_prepare": runtime_config_prepare,
             "post_switch_runtime_config_validate": post_switch_runtime_config_validate,
@@ -1071,6 +1402,7 @@ def service_upgrade(
             "config_rebuilt": bool(runtime_config_prepare.get("status") == "prepared"),
             "target_dir": str(target_dir),
             "previous_dir": str(previous_dir),
+            "release_materialize": release_materialize,
             "runtime_prepare": exc.runtime_prepare if isinstance(exc, RuntimePrepareError) else runtime_prepare,
             "error": f"{type(exc).__name__}: {exc}",
             **({"remediation": exc.remediation} if isinstance(exc, RuntimeConfigPrepareError) else {}),
@@ -1140,6 +1472,7 @@ def service_upgrade(
         "previous_dir": str(previous_dir),
         "symlink_switched": True,
         "config_rebuilt": bool(runtime_config_prepare.get("status") == "prepared"),
+        "release_materialize": release_materialize,
         "runtime_prepare": runtime_prepare,
         "runtime_config_prepare": runtime_config_prepare,
         "post_switch_runtime_config_validate": post_switch_runtime_config_validate,
@@ -1251,6 +1584,7 @@ def service_rollback(
 
 __all__ = [
     "default_releases_root",
+    "default_upgrade_cache_root",
     "load_upgrade_status",
     "service_rollback",
     "service_upgrade",

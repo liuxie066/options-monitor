@@ -649,6 +649,9 @@ def test_service_upgrade_dry_run_and_confirm_switches_current_symlink(monkeypatc
             )
         if command[:3] == ["git", "config", "--get"]:
             return subprocess.CompletedProcess(command, 0, stdout="https://example.invalid/repo.git\n", stderr="")
+        materialized = _fake_git_cache_materialize(list(command), version="1.0.1")
+        if materialized is not None:
+            return materialized
         if command[:2] == ["git", "clone"]:
             target = Path(command[-1])
             target.mkdir(parents=True)
@@ -694,6 +697,11 @@ def test_service_upgrade_dry_run_and_confirm_switches_current_symlink(monkeypatc
     assert out["status"] == "upgraded"
     assert out["changed"] is True
     assert current.resolve() == (releases / "1.0.1").resolve()
+    cache_repo = install / "_cache" / "git" / "options-monitor.git"
+    assert ["git", "clone", "--mirror", "https://example.invalid/repo.git", str(cache_repo)] in calls
+    assert any(command[:3] == ["git", f"--git-dir={cache_repo}", "archive"] for command in calls)
+    assert any(command[:2] == ["tar", "-xf"] for command in calls)
+    assert not any(command[:4] == ["git", "clone", "--depth", "1"] for command in calls)
     assert ["python3", "-m", "venv", ".venv"] in calls
     venv_python = str(releases / "1.0.1" / ".venv" / "bin" / "python")
     assert [venv_python, "-m", "pip", "install", "-r", "requirements.txt", "-c", "constraints.txt"] in calls
@@ -714,9 +722,15 @@ def test_service_upgrade_dry_run_and_confirm_switches_current_symlink(monkeypatc
     assert {"name": "options-monitor-projection-verify.timer"} in refreshed_profile["services"]
     assert (systemd_root / "options-monitor-projection-verify.timer").exists()
     assert out["service_reconcile"]["summary"]["status"] == "ok"
+    assert out["release_materialize"]["method"] == "git_cache_archive"
+    assert out["release_materialize"]["cache_repo"] == str(cache_repo)
+    assert out["release_materialize"]["cache_initialized"] is True
     assert out["runtime_prepare"]["installer"] == "pip"
     assert out["runtime_prepare"]["fallback"] is False
+    assert out["runtime_prepare"]["uv_cache_dir"] == str(install / "_cache" / "uv")
+    assert out["runtime_prepare"]["pip_cache_dir"] == str(install / "_cache" / "pip")
     status = json.loads((runtime / "upgrade_status.json").read_text(encoding="utf-8"))
+    assert status["release_materialize"]["method"] == "git_cache_archive"
     assert status["runtime_prepare"]["installer"] == "pip"
     assert status["target_version"] == "1.0.1"
     assert status["status"] == "upgraded"
@@ -831,6 +845,177 @@ def _create_fake_venv_python(target: Path) -> None:
     venv_python.chmod(0o755)
 
 
+def _fake_git_cache_materialize(command: list[str], *, version: str = "1.0.1") -> subprocess.CompletedProcess | None:
+    if command[:3] == ["git", "clone", "--mirror"]:
+        Path(command[-1]).mkdir(parents=True, exist_ok=True)
+        return subprocess.CompletedProcess(command, 0, stdout="mirrored\n", stderr="")
+    if len(command) >= 3 and command[0] == "git" and str(command[1]).startswith("--git-dir=") and command[2] == "fetch":
+        return subprocess.CompletedProcess(command, 0, stdout="fetched\n", stderr="")
+    if len(command) >= 4 and command[0] == "git" and str(command[1]).startswith("--git-dir=") and command[2] == "archive":
+        tar_path = Path(command[command.index("-o") + 1])
+        tar_path.parent.mkdir(parents=True, exist_ok=True)
+        tar_path.write_text("fake tar\n", encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, stdout="archived\n", stderr="")
+    if command[:2] == ["tar", "-xf"]:
+        target = Path(command[command.index("-C") + 1])
+        _write_upgrade_release_skeleton(target, version)
+        (target / "requirements" / "server.txt").write_text("", encoding="utf-8")
+        (target / "constraints" / "server.txt").write_text("", encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, stdout="extracted\n", stderr="")
+    return None
+
+
+def test_service_upgrade_materialize_uses_existing_git_cache_fetch(tmp_path: Path) -> None:
+    from src.application.service_upgrade import _materialize_release_from_git_cache
+
+    cache_root = tmp_path / "_cache"
+    cache_repo = cache_root / "git" / "options-monitor.git"
+    cache_repo.mkdir(parents=True)
+    target = tmp_path / "releases" / "1.0.1"
+    calls: list[list[str]] = []
+
+    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        calls.append(list(command))
+        materialized = _fake_git_cache_materialize(list(command), version="1.0.1")
+        if materialized is not None:
+            return materialized
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    out = _materialize_release_from_git_cache(
+        remote_url="https://example.invalid/repo.git",
+        tag="v1.0.1",
+        target_dir=target,
+        cache_root=cache_root,
+        run_cmd=_run_cmd,
+        operations=[],
+    )
+
+    assert out["method"] == "git_cache_archive"
+    assert out["cache_initialized"] is False
+    assert out["fetched"] is True
+    assert target.exists()
+    assert ["git", f"--git-dir={cache_repo}", "fetch", "--tags", "--prune", "origin"] in calls
+    assert ["git", "clone", "--mirror", "https://example.invalid/repo.git", str(cache_repo)] not in calls
+
+
+def test_service_upgrade_materialize_reuses_existing_target_without_git(tmp_path: Path) -> None:
+    from src.application.service_upgrade import _materialize_release_from_git_cache
+
+    target = tmp_path / "releases" / "1.0.1"
+    _write_upgrade_release_skeleton(target, "1.0.1")
+    calls: list[list[str]] = []
+
+    out = _materialize_release_from_git_cache(
+        remote_url="https://example.invalid/repo.git",
+        tag="v1.0.1",
+        target_dir=target,
+        cache_root=tmp_path / "_cache",
+        run_cmd=lambda command, **_kwargs: calls.append(list(command))
+        or subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr=""),
+        operations=[],
+    )
+
+    assert out["method"] == "reuse_existing_release"
+    assert calls == []
+
+
+def test_service_upgrade_check_falls_back_to_git_cache_when_current_release_has_no_git(tmp_path: Path) -> None:
+    from src.application.service_upgrade import service_upgrade_check
+
+    repo = tmp_path / "releases" / "1.0.0"
+    _write_upgrade_release_skeleton(repo, "1.0.0")
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    cache_root = tmp_path / "_cache"
+    cache_repo = cache_root / "git" / "options-monitor.git"
+    cache_repo.mkdir(parents=True)
+    calls: list[tuple[list[str], str | None]] = []
+
+    def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append((list(command), kwargs.get("cwd")))
+        if command[:3] == ["git", "ls-remote", "--tags"]:
+            raise subprocess.CalledProcessError(128, command, stderr="fatal: not a git repository")
+        if command[:3] == ["git", f"--git-dir={cache_repo}", "ls-remote"]:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=(
+                    "a refs/tags/v1.0.0\n"
+                    "b refs/tags/v1.0.1\n"
+                ),
+                stderr="",
+            )
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    out = service_upgrade_check(repo_root=repo, runtime_root=runtime, cache_root=cache_root, run_cmd=_run_cmd)
+
+    assert out["ok"] is True
+    assert out["latest_version"] == "1.0.1"
+    assert out["version_check"]["source"] == "upgrade_cache"
+    assert out["version_check"]["fallback_from"] == "current_release"
+    assert any(command[:3] == ["git", f"--git-dir={cache_repo}", "ls-remote"] for command, _cwd in calls)
+
+
+def test_service_upgrade_confirm_uses_cached_remote_when_current_release_has_no_git(tmp_path: Path) -> None:
+    from src.application.service_upgrade import service_upgrade
+
+    install = tmp_path / "opt" / "options-monitor"
+    releases = install / "releases"
+    v100 = releases / "1.0.0"
+    _write_upgrade_release_skeleton(v100, "1.0.0")
+    current = install / "current"
+    current.parent.mkdir(parents=True, exist_ok=True)
+    current.symlink_to(v100, target_is_directory=True)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    cache_root = install / "_cache"
+    cache_repo = cache_root / "git" / "options-monitor.git"
+    cache_repo.mkdir(parents=True)
+    calls: list[list[str]] = []
+
+    def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append(list(command))
+        if command[:3] == ["git", "ls-remote", "--tags"]:
+            raise subprocess.CalledProcessError(128, command, stderr="fatal: not a git repository")
+        if command[:3] == ["git", f"--git-dir={cache_repo}", "ls-remote"]:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=(
+                    "a refs/tags/v1.0.0\n"
+                    "b refs/tags/v1.0.1\n"
+                ),
+                stderr="",
+            )
+        if command[:3] == ["git", "config", "--get"]:
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="fatal: not a git repository")
+        if command[:3] == ["git", f"--git-dir={cache_repo}", "config"]:
+            return subprocess.CompletedProcess(command, 0, stdout="https://example.invalid/repo.git\n", stderr="")
+        materialized = _fake_git_cache_materialize(list(command), version="1.0.1")
+        if materialized is not None:
+            return materialized
+        if command == ["python3", "-m", "venv", ".venv"]:
+            _create_fake_venv_python(Path(kwargs["cwd"]))
+            return subprocess.CompletedProcess(command, 0, stdout="venv\n", stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    out = service_upgrade(
+        repo_root=current,
+        runtime_root=runtime,
+        releases_root=releases,
+        cache_root=cache_root,
+        confirm=True,
+        restart_services=False,
+        run_cmd=_run_cmd,
+    )
+
+    assert out["status"] == "upgraded"
+    assert current.resolve() == (releases / "1.0.1").resolve()
+    assert ["git", f"--git-dir={cache_repo}", "config", "--get", "remote.origin.url"] in calls
+    assert ["git", f"--git-dir={cache_repo}", "fetch", "--tags", "--prune", "origin"] in calls
+    assert not (releases / "1.0.1" / ".git").exists()
+
+
 def test_service_upgrade_runtime_prepare_auto_uses_pip_when_uv_missing(monkeypatch, tmp_path: Path) -> None:
     from src.application.service_upgrade import _ensure_release_runtime
 
@@ -872,7 +1057,7 @@ def test_service_upgrade_runtime_prepare_auto_uses_uv_and_maps_pip_index(monkeyp
         calls.append(list(command))
         if command == ["sh", "-lc", "command -v uv"]:
             return subprocess.CompletedProcess(command, 0, stdout="/usr/bin/uv\n", stderr="")
-        if command == ["uv", "venv", ".venv"]:
+        if command == ["uv", "venv", "--python", "python3", ".venv"]:
             _create_fake_venv_python(Path(kwargs["cwd"]))
         if command[:3] == ["uv", "pip", "install"]:
             uv_envs.append(dict(kwargs["env"]))
@@ -883,10 +1068,14 @@ def test_service_upgrade_runtime_prepare_auto_uses_uv_and_maps_pip_index(monkeyp
     venv_python = str(target / ".venv" / "bin" / "python")
     assert out["installer"] == "uv"
     assert out["fallback"] is False
-    assert ["uv", "venv", ".venv"] in calls
+    assert ["uv", "venv", "--python", "python3", ".venv"] in calls
     assert ["uv", "pip", "install", "-p", venv_python, "-r", "requirements.txt", "-c", "constraints.txt"] in calls
     assert ["uv", "pip", "install", "-p", venv_python, "-r", "requirements/server.txt", "-c", "constraints/server.txt"] in calls
     assert uv_envs and uv_envs[0]["UV_INDEX_URL"] == "https://mirrors.aliyun.com/pypi/simple/"
+    assert uv_envs[0]["UV_CACHE_DIR"] == str(tmp_path / "_cache" / "uv")
+    assert uv_envs[0]["PIP_CACHE_DIR"] == str(tmp_path / "_cache" / "pip")
+    assert out["python_spec"] == "python3"
+    assert out["uv_cache_dir"] == str(tmp_path / "_cache" / "uv")
 
 
 def test_service_upgrade_runtime_prepare_pip_mode_skips_uv(monkeypatch, tmp_path: Path) -> None:
@@ -919,7 +1108,7 @@ def test_service_upgrade_runtime_prepare_uv_mode_failure_does_not_fallback(monke
 
     def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
         calls.append(list(command))
-        if command == ["uv", "venv", ".venv"]:
+        if command == ["uv", "venv", "--python", "python3", ".venv"]:
             return subprocess.CompletedProcess(command, 1, stdout="", stderr="uv failed\n")
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
@@ -947,7 +1136,7 @@ def test_service_upgrade_runtime_prepare_auto_falls_back_to_pip_after_uv_failure
         calls.append(list(command))
         if command == ["sh", "-lc", "command -v uv"]:
             return subprocess.CompletedProcess(command, 0, stdout="/usr/bin/uv\n", stderr="")
-        if command == ["uv", "venv", ".venv"]:
+        if command == ["uv", "venv", "--python", "python3", ".venv"]:
             _create_fake_venv_python(Path(kwargs["cwd"]))
             return subprocess.CompletedProcess(command, 0, stdout="uv venv\n", stderr="")
         if command[:3] == ["uv", "pip", "install"]:
@@ -1036,6 +1225,9 @@ def test_service_upgrade_partial_success_when_restart_denied_after_switch(tmp_pa
             return subprocess.CompletedProcess(command, 0, stdout="a refs/tags/v1.0.1\n", stderr="")
         if command[:3] == ["git", "config", "--get"]:
             return subprocess.CompletedProcess(command, 0, stdout="https://example.invalid/repo.git\n", stderr="")
+        materialized = _fake_git_cache_materialize(list(command), version="1.0.1")
+        if materialized is not None:
+            return materialized
         if command[:2] == ["git", "clone"]:
             target = Path(command[-1])
             target.mkdir(parents=True)
@@ -1239,6 +1431,9 @@ def test_service_upgrade_migrates_user_configs_and_rebuilds_runtime_configs_befo
             return subprocess.CompletedProcess(command, 0, stdout="b refs/tags/v1.0.1\n", stderr="")
         if command[:3] == ["git", "config", "--get"]:
             return subprocess.CompletedProcess(command, 0, stdout="https://example.invalid/repo.git\n", stderr="")
+        materialized = _fake_git_cache_materialize(list(command), version="1.0.1")
+        if materialized is not None:
+            return materialized
         if command[:2] == ["git", "clone"]:
             target = Path(command[-1])
             target.mkdir(parents=True)
@@ -1320,6 +1515,9 @@ def test_service_upgrade_missing_user_config_fails_before_switch_with_remediatio
             return subprocess.CompletedProcess(command, 0, stdout="b refs/tags/v1.0.1\n", stderr="")
         if command[:3] == ["git", "config", "--get"]:
             return subprocess.CompletedProcess(command, 0, stdout="https://example.invalid/repo.git\n", stderr="")
+        materialized = _fake_git_cache_materialize(list(command), version="1.0.1")
+        if materialized is not None:
+            return materialized
         if command[:2] == ["git", "clone"]:
             target = Path(command[-1])
             target.mkdir(parents=True)
@@ -1394,6 +1592,9 @@ def test_service_upgrade_recovers_user_configs_from_older_complete_release(tmp_p
             return subprocess.CompletedProcess(command, 0, stdout="b refs/tags/v1.0.1\n", stderr="")
         if command[:3] == ["git", "config", "--get"]:
             return subprocess.CompletedProcess(command, 0, stdout="https://example.invalid/repo.git\n", stderr="")
+        materialized = _fake_git_cache_materialize(list(command), version="1.0.1")
+        if materialized is not None:
+            return materialized
         if command[:2] == ["git", "clone"]:
             _write_upgrade_release_skeleton(Path(command[-1]), "1.0.1")
             return subprocess.CompletedProcess(command, 0, stdout="cloned\n", stderr="")
@@ -1467,6 +1668,9 @@ def test_service_upgrade_uses_runtime_overlay_dir_before_older_release(tmp_path:
             return subprocess.CompletedProcess(command, 0, stdout="b refs/tags/v1.0.1\n", stderr="")
         if command[:3] == ["git", "config", "--get"]:
             return subprocess.CompletedProcess(command, 0, stdout="https://example.invalid/repo.git\n", stderr="")
+        materialized = _fake_git_cache_materialize(list(command), version="1.0.1")
+        if materialized is not None:
+            return materialized
         if command[:2] == ["git", "clone"]:
             _write_upgrade_release_skeleton(Path(command[-1]), "1.0.1")
             return subprocess.CompletedProcess(command, 0, stdout="cloned\n", stderr="")
@@ -1545,6 +1749,9 @@ def test_service_upgrade_uses_runtime_config_metadata_overlay_source(tmp_path: P
             return subprocess.CompletedProcess(command, 0, stdout="b refs/tags/v1.0.1\n", stderr="")
         if command[:3] == ["git", "config", "--get"]:
             return subprocess.CompletedProcess(command, 0, stdout="https://example.invalid/repo.git\n", stderr="")
+        materialized = _fake_git_cache_materialize(list(command), version="1.0.1")
+        if materialized is not None:
+            return materialized
         if command[:2] == ["git", "clone"]:
             _write_upgrade_release_skeleton(Path(command[-1]), "1.0.1")
             return subprocess.CompletedProcess(command, 0, stdout="cloned\n", stderr="")
@@ -1608,6 +1815,9 @@ def test_service_upgrade_rebuild_failure_fails_before_switch_with_remediation(tm
             return subprocess.CompletedProcess(command, 0, stdout="b refs/tags/v1.0.1\n", stderr="")
         if command[:3] == ["git", "config", "--get"]:
             return subprocess.CompletedProcess(command, 0, stdout="https://example.invalid/repo.git\n", stderr="")
+        materialized = _fake_git_cache_materialize(list(command), version="1.0.1")
+        if materialized is not None:
+            return materialized
         if command[:2] == ["git", "clone"]:
             _write_upgrade_release_skeleton(Path(command[-1]), "1.0.1")
             return subprocess.CompletedProcess(command, 0, stdout="cloned\n", stderr="")
@@ -1755,6 +1965,9 @@ def test_service_upgrade_cleanup_after_success_deletes_older_releases(tmp_path: 
             return subprocess.CompletedProcess(command, 0, stdout="b refs/tags/v1.0.1\n", stderr="")
         if command[:3] == ["git", "config", "--get"]:
             return subprocess.CompletedProcess(command, 0, stdout="https://example.invalid/repo.git\n", stderr="")
+        materialized = _fake_git_cache_materialize(list(command), version="1.0.1")
+        if materialized is not None:
+            return materialized
         if command[:2] == ["git", "clone"]:
             _write_upgrade_release_skeleton(Path(command[-1]), "1.0.1")
             return subprocess.CompletedProcess(command, 0, stdout="cloned\n", stderr="")
@@ -2036,6 +2249,8 @@ def test_cli_service_upgrade_delegates_to_application(monkeypatch, capsys, tmp_p
             str(tmp_path / "current"),
             "--runtime-root",
             str(tmp_path / "runtime"),
+            "--cache-root",
+            str(tmp_path / "_cache"),
             "--target-version",
             "1.2.99",
             "--auto",
@@ -2046,11 +2261,42 @@ def test_cli_service_upgrade_delegates_to_application(monkeypatch, capsys, tmp_p
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
+    assert calls[0]["cache_root"] == str(tmp_path / "_cache")
     assert calls[0]["target_version"] == "1.2.99"
     assert calls[0]["auto"] is True
     assert calls[0]["confirm"] is False
     assert calls[0]["cleanup_after_upgrade"] is True
     assert calls[0]["cleanup_keep_releases"] == 2
+
+
+def test_cli_update_check_delegates_cache_root_to_application(monkeypatch, capsys, tmp_path: Path) -> None:
+    import src.interfaces.cli.main as cli_main
+
+    calls: list[dict[str, object]] = []
+
+    def _fake_check(**kwargs):  # type: ignore[no-untyped-def]
+        calls.append(dict(kwargs))
+        return {"ok": True, "status": "checked"}
+
+    monkeypatch.setattr(cli_main, "service_upgrade_check", _fake_check)
+
+    rc = cli_main.main(
+        [
+            "update",
+            "check",
+            "--repo-root",
+            str(tmp_path / "current"),
+            "--runtime-root",
+            str(tmp_path / "runtime"),
+            "--cache-root",
+            str(tmp_path / "_cache"),
+        ]
+    )
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert calls[0]["cache_root"] == str(tmp_path / "_cache")
 
 
 def test_cli_service_cleanup_delegates_to_application(monkeypatch, capsys, tmp_path: Path) -> None:

@@ -82,7 +82,7 @@ python3 -m pytest tests/test_layered_config.py
   --runtime-root /var/lib/options-monitor
 ```
 
-确认升级时才会下载 tag、在新 release 内准备 `.venv`、安装 runtime/server 依赖、校验新目录、迁移上一 release 的 `configs/user*.json`、重建并校验 runtime config、切换 `current` symlink，补齐当前 release 新增的缺失 service/timer，并按升级前 `service.profile.json` 重启长期运行的 trade-intake service：
+确认升级时才会从本机 git cache materialize release、在新 release 内准备 `.venv`、安装 runtime/server 依赖、校验新目录、迁移上一 release 的 `configs/user*.json`、重建并校验 runtime config、切换 `current` symlink，补齐当前 release 新增的缺失 service/timer，并按升级前 `service.profile.json` 重启长期运行的 trade-intake service：
 
 ```bash
 ./om update apply \
@@ -108,7 +108,9 @@ liuxie ALL=(root) NOPASSWD: /usr/bin/systemctl restart options-monitor-feishu-ws
 
 如果 release/config 已切换成功但服务重启失败，升级状态会写成 `upgraded_restart_failed`，并记录 `symlink_switched=true`、`config_rebuilt`、`restart_failed_services` 和 `manual_remediation`。这种部分成功状态不会让自动升级 unit 因已知的服务重启权限问题反复 failed；按 remediation 手工重启服务并补齐 sudoers 即可。
 
-Release runtime 依赖安装默认使用 `OM_UPGRADE_INSTALLER=auto`：先检测 `uv`，可用时执行 `uv venv .venv` 和 `uv pip install -p .venv/bin/python ...`，不可用或 auto 模式下 uv 安装失败时回退到原 pip 流程。可用 `OM_UPGRADE_INSTALLER=pip` 强制旧流程，或 `OM_UPGRADE_INSTALLER=uv` 强制 uv 且失败即中止升级。若只配置了 `PIP_INDEX_URL`，升级会把它映射为 uv 命令的 `UV_INDEX_URL`。
+升级默认把下载缓存放在 `repo_root` 同级的 `_cache/`，也可用 `OM_UPGRADE_CACHE_ROOT` 或 `--cache-root` 覆盖。代码物料使用 `_cache/git/options-monitor.git`：首次 `git clone --mirror`，后续 `git fetch --tags --prune`，再用 `git archive` 解包到目标 release，因此不会每次重新 clone 完整 tag 工作树。release 目录不保留 `.git`；后续 `update check` 和确认升级会在当前 release 不是 git checkout 时从 `_cache/git/options-monitor.git` 读取 remote 与 release tags。
+
+Release runtime 依赖安装默认使用 `OM_UPGRADE_INSTALLER=auto`：先检测宿主机 PATH 上的 `uv`，可用时执行 `uv venv --python python3 .venv` 和 `uv pip install -p .venv/bin/python ...`，不可用或 auto 模式下 uv 安装失败时回退到原 pip 流程。升级流程不会自动安装 uv；需要加速时应在宿主机安装一次。可用 `OM_UPGRADE_INSTALLER=pip` 强制旧流程，或 `OM_UPGRADE_INSTALLER=uv` 强制 uv 且失败即中止升级。依赖下载缓存默认复用 `_cache/uv` 和 `_cache/pip`；只配置了 `PIP_INDEX_URL` 时，升级会把它映射为 uv 命令的 `UV_INDEX_URL`。
 
 release 清理默认 dry-run，不删除文件：
 
