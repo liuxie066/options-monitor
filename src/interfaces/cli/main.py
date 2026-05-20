@@ -46,6 +46,7 @@ from src.application.runtime_logs_cli import collect_runtime_logs, format_runtim
 from src.application.runtime_runs_cli import collect_runtime_runs, format_runtime_runs
 from src.application.runtime_status_cli import format_runtime_status_summary, runtime_status_payload_from_args
 from src.application.service_cleanup import service_cleanup
+from src.application.setup import run_setup_check
 from src.application.settings import (
     bootstrap_process_env,
     diagnose_effective_settings,
@@ -408,17 +409,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     runtime.add_argument("--opend-port", type=int, default=11111)
     runtime.add_argument("--force", action="store_true")
 
-    setup = sub.add_parser("setup", help="set up a starter runtime config")
-    setup.add_argument("--market", required=True, choices=("us", "hk"))
-    setup.add_argument("--futu-acc-id", required=True)
-    setup.add_argument("--account-label", default="user1")
-    setup.add_argument("--config-path", default=None)
-    setup.add_argument("--data-config-path", default=None)
-    setup.add_argument("--symbol", action="append", dest="symbols", default=None)
-    setup.add_argument("--holdings-account", default=None)
-    setup.add_argument("--opend-host", default="127.0.0.1")
-    setup.add_argument("--opend-port", type=int, default=11111)
-    setup.add_argument("--force", action="store_true")
+    setup = sub.add_parser("setup", help="install-time checks and first-run setup helpers")
+    setup_sub = setup.add_subparsers(dest="setup_command")
+    _add_setup_init_args(setup, required=False)
+    setup_check = setup_sub.add_parser("check", help="run read-only first-run setup diagnostics")
+    setup_check.add_argument("--market", action="append", choices=("us", "hk", "all"), default=None)
+    setup_check.add_argument("--env-file", default=None)
+    setup_check.add_argument("--no-local-env-file", action="store_true")
+    setup_init = setup_sub.add_parser("init", help="generate starter runtime config")
+    _add_setup_init_args(setup_init, required=True)
 
     run = sub.add_parser("run", help="run long-lived workflows")
     run_sub = run.add_subparsers(dest="run_command", required=True)
@@ -460,6 +459,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     trade_intake.add_argument("--deal-json", default=None)
 
     return parser.parse_args(argv)
+
+
+def _add_setup_init_args(parser: argparse.ArgumentParser, *, required: bool) -> None:
+    parser.add_argument("--market", required=required, choices=("us", "hk"))
+    parser.add_argument("--futu-acc-id", required=required)
+    parser.add_argument("--account-label", "--account", dest="account_label", default="user1")
+    parser.add_argument("--config-path", default=None)
+    parser.add_argument("--data-config-path", default=None)
+    parser.add_argument("--symbol", action="append", dest="symbols", default=None)
+    parser.add_argument("--holdings-account", default=None)
+    parser.add_argument("--opend-host", default="127.0.0.1")
+    parser.add_argument("--opend-port", type=int, default=11111)
+    parser.add_argument("--force", action="store_true")
 
 
 def _print(payload: dict[str, Any]) -> int:
@@ -551,7 +563,7 @@ def _validate_runtime_config(
 
 
 def _should_bootstrap_process_env(actual_argv: list[str]) -> bool:
-    if actual_argv and actual_argv[0] == "settings":
+    if actual_argv and actual_argv[0] in {"settings", "setup"}:
         return False
     return True
 
@@ -1099,8 +1111,27 @@ def main(argv: list[str] | None = None) -> int:
                 force=bool(args.force),
             )))
 
+        if args.command == "setup" and args.setup_command == "check":
+            data = run_setup_check(
+                repo_root=repo_base(),
+                markets=args.market,
+                env_file=args.env_file,
+                include_local_env_file=not bool(args.no_local_env_file),
+            )
+            return _print(build_response(
+                tool_name="setup.check",
+                ok=bool(data.get("summary", {}).get("ok", True)),
+                data=data,
+            ))
+
         if args.command == "setup":
-            return _print(build_response(tool_name="setup", ok=True, data=init_runtime(
+            if not args.market or not args.futu_acc_id:
+                raise AgentToolError(
+                    code="INPUT_ERROR",
+                    message="setup init requires --market and --futu-acc-id",
+                    hint="Run ./om setup check for read-only diagnostics, or ./om setup init --market us --account lx --futu-acc-id <id>.",
+                )
+            return _print(build_response(tool_name="setup.init" if args.setup_command == "init" else "setup", ok=True, data=init_runtime(
                 market=args.market,
                 futu_acc_id=args.futu_acc_id,
                 account_label=args.account_label,

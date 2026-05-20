@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.2.90 - 2026-05-20
+
+### Added
+- Added `scripts/install.sh`, a pinned-release installer that creates a release directory, prepares `.venv`, installs dependencies, and updates the `current` symlink without writing config, secrets, services, timers, or runtime state.
+- Added `./om setup check`, a read-only first-run diagnostic for install layout, dependencies, settings, runtime config, runtime root, option-position SQLite path, and service/timer presence.
+
+### Changed
+- Split installation, ordinary getting started, and Agent getting started docs into separate `docs/INSTALL.md`, `docs/GETTING_STARTED.md`, and `docs/AGENT_GETTING_STARTED.md` paths.
+
 ## 1.2.89 - 2026-05-20
 
 ### Added
