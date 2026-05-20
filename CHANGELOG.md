@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.94 - 2026-05-20
+
+### Fixed
+- Fixed service drift reconciliation to preserve profile-provided runtime roots and to skip empty service profiles instead of forcing default maintenance units into intentionally empty profiles.
+
 ## 1.2.93 - 2026-05-20
 
 ### Added

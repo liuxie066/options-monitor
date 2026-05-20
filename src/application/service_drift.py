@@ -122,6 +122,8 @@ def _load_profile_and_paths(
     profile_file = Path(profile_path).expanduser() if profile_path else runtime / "service.profile.json"
     if not loaded_profile and profile_file.exists():
         loaded_profile = load_service_profile(profile_file)
+        if runtime_root is None and loaded_profile.get("runtime_root"):
+            runtime = Path(str(loaded_profile["runtime_root"])).expanduser()
     repo = Path(repo_root or loaded_profile.get("repo_root") or Path.cwd()).expanduser()
     provider = str(loaded_profile.get("service_provider") or loaded_profile.get("provider") or "").strip().lower()
     unit_root_raw = (
@@ -156,18 +158,37 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
         }
 
     if isinstance(profile.get("services"), list) and not profile.get("services"):
-        bundle: dict[str, Any] = {}
-        expected_files: dict[str, dict[str, Any]] = {}
-        expected_services: list[str] = []
-    else:
-        bundle = _expected_bundle_from_profile(
-            profile,
-            provider=provider,
-            repo_root=ctx["repo_root"],
-            runtime_root=ctx["runtime_root"],
-        )
-        expected_files = _expected_install_files(bundle, provider=provider)
-        expected_services = _service_names_from_profile(_bundle_profile(bundle))
+        return {
+            "checked": True,
+            "supported": True,
+            "reason": "service_profile_has_no_services",
+            "provider": provider,
+            "profile_path": str(ctx["profile_path"]),
+            "repo_root": str(ctx["repo_root"]),
+            "runtime_root": str(ctx["runtime_root"]),
+            "systemd_unit_root": str(ctx["systemd_unit_root"]) if provider == "systemd" else None,
+            "expected_services": [],
+            "profile_services": [],
+            "installed_units": [],
+            "missing_profile_units": [],
+            "missing_installed_units": [],
+            "extra_profile_units": [],
+            "extra_installed_units": [],
+            "mismatched_units": [],
+            "required_units": [],
+            "missing_required_units": [],
+            "profile_content_changed": False,
+            "manual_actions": [],
+            "summary": {"ok": True, "status": "skipped", "error_count": 0, "warning_count": 0},
+        }
+    bundle = _expected_bundle_from_profile(
+        profile,
+        provider=provider,
+        repo_root=ctx["repo_root"],
+        runtime_root=ctx["runtime_root"],
+    )
+    expected_files = _expected_install_files(bundle, provider=provider)
+    expected_services = _service_names_from_profile(_bundle_profile(bundle))
     profile_services = _service_names_from_profile(profile)
     installed_units = _installed_units(provider=provider, expected_files=expected_files, ctx=ctx)
     missing_profile_units = sorted(set(expected_services) - set(profile_services))
@@ -181,7 +202,7 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
         for unit in required_units
         if unit in set(missing_profile_units) or unit in set(missing_installed_units)
     )
-    profile_content_changed = bool(bundle) and _profile_content_changed(profile, bundle)
+    profile_content_changed = _profile_content_changed(profile, bundle)
     manual_actions = _manual_actions(
         provider=provider,
         missing_installed_units=missing_installed_units,
