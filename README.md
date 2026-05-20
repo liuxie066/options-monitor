@@ -1,12 +1,11 @@
 # options-monitor
 
-`options-monitor` 是一个本地运行的期权监控、筛选、报告和通知工具，主要服务这几类工作流：
+`options-monitor` 是一个本地运行的期权监控、筛选、报告和通知工具，主要服务四个用户功能：
 
-- `Sell Put`
-- `Sell Call`
-- `Sell Put` 收益增强 `yield_enhancement`
-- `close_advice`
-- `option_positions`
+- `Sell Put`：扫描 Put 期权候选，结合现金、策略阈值和已有风险暴露，筛出适合人工复核的卖 Put 机会。
+- `Sell Call`：基于已有正股持仓扫描 Call 期权候选，辅助 covered call 收益管理。
+- `Sell Put` 收益增强 `yield_enhancement`：在 Sell Put 候选基础上评估收益增强组合，寻找权利金、现金占用和 long call 成本之间更合适的组合。
+- `close_advice`：检查已有期权仓位，给出止盈、继续持有或需要关注的平仓参考。
 
 它不是自动交易系统，也不会替你下单。它的职责是把行情、持仓、现金、期权仓位、策略阈值和通知串起来，给出便于人工复核的结果。
 
@@ -27,10 +26,10 @@
 
 做什么：
 
-- 扫描关注标的期权链
-- 按 `sell_put` / `sell_call` 规则筛选候选
-- 结合账户现金、股票持仓、已开仓位做二次过滤
-- 生成收益增强候选、平仓建议、通知文本和运行状态
+- 为 `Sell Put` 扫描和筛选候选。
+- 为 `Sell Call` 生成 covered call 候选。
+- 为 `yield_enhancement` 评估 Sell Put 收益增强组合。
+- 为 `close_advice` 生成已有仓位的平仓参考。
 
 不做什么：
 
