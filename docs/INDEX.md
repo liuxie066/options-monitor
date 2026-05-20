@@ -4,7 +4,8 @@
 
 ## 产品使用
 - [../README.md](../README.md)：产品介绍、安装、初始化、常用命令
-- [GETTING_STARTED.md](GETTING_STARTED.md)：本地 Agent 工具快速开始
+- [INSTALL.md](INSTALL.md)：安装方式、release 目录布局和 installer 安全契约
+- [GETTING_STARTED.md](GETTING_STARTED.md)：普通用户首次运行路径
 
 ## 配置
 - [../CONFIGS.md](../CONFIGS.md)：配置来源与 canonical config 约定
@@ -14,6 +15,7 @@
 - [../AGENTS.md](../AGENTS.md)：Agent 首屏说明书、安全红线、入口层级、模块归属（静态前缀，Prompt Cache 友好）
 - [../CLAUDE.md](../CLAUDE.md)：Claude / OpenClaw 特有补充指令
 - [AGENT_INTEGRATION.md](AGENT_INTEGRATION.md)：Agent 集成合同
+- [AGENT_GETTING_STARTED.md](AGENT_GETTING_STARTED.md)：本地 Agent 工具快速开始
 - [AGENT_WIKI.md](AGENT_WIKI.md)：Agent 任务手册（工具选择、AI Cofunder、排障 playbook、模块地图、验证矩阵）
 - [TOOL_REFERENCE.md](TOOL_REFERENCE.md)：工具参考
 - [SESSION_SUMMARY.md](SESSION_SUMMARY.md)：Session 间记忆摘要模板

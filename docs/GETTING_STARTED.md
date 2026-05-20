@@ -1,141 +1,136 @@
 # Getting Started
 
-这份文档只服务一种场景：
+这份文档从“已经安装好代码”开始，目标是让普通用户把 OM 第一次安全跑起来。
 
-> 你要把 `options-monitor` 当作本地 Agent 工具来接入和调用。
-
-如果你只是普通使用者，请先看根目录 [README.md](../README.md)。
+还没安装时先看 [INSTALL.md](INSTALL.md)。
 
 ---
 
-## 1. 安装
+## 1. 先做只读检查
 
 ```bash
-git clone <repo-url> options-monitor
-cd options-monitor
-bash scripts/install_agent_plugin.sh
+./om setup check
 ```
 
-如果本地还没有 Python 环境：
+`setup check` 只读。它不会写配置、不会写 env-file、不会启动服务、不会创建定时任务、不会连接 OpenD 或 Feishu。
+
+它会检查：
+
+- repo / venv / Python 依赖是否完整
+- `config.us.json` / `config.hk.json` 是否存在且可校验
+- env-file 是否可解析，Feishu Bot 和写入开关是否配置
+- runtime root 和期权持仓 SQLite 路径
+- 本机是否已有 systemd/launchd service 或 timer
+- 下一步应该运行什么命令
+
+如果要忽略本地 `.env/options-monitor.env`，做一次隔离检查：
 
 ```bash
-python3 -m venv .venv
-./.venv/bin/pip install -U pip
-./.venv/bin/pip install -r requirements.txt -c constraints.txt
+./om setup check --no-local-env-file
 ```
-
-`requirements.txt` 已包含 `futu-api`，用于补齐本地 `futu` Python SDK。
 
 ---
 
-## 2. 查看 Agent 工具清单
+## 2. 初始化 runtime config
+
+推荐入口：
 
 ```bash
-./om-agent spec
+./om setup init --market us --account lx --futu-acc-id <futu-account-id>
+./om setup init --market hk --account lx --futu-acc-id <futu-account-id>
 ```
 
-这会输出工具 manifest（JSON）。
-
----
-
-## 3. 初始化运行配置
-
-推荐用 CLI 初始化本地 runtime config：
+旧入口仍保留兼容：
 
 ```bash
 ./om setup --market us --futu-acc-id <futu-account-id>
-./om setup --market hk --futu-acc-id <futu-account-id>
+./om init runtime --market us --futu-acc-id <futu-account-id>
 ```
 
-首次初始化通常会生成：
+初始化后先校验配置：
 
-- `config.us.json` 或 `config.hk.json`
-- `portfolio.runtime.json`（可选；最小部署可不需要）
-
-默认最小配置下：
-- `option_positions` 只需要本地 SQLite
-- Feishu 只在你启用 holdings / external_holdings 时才需要通过环境变量配置
-
-也可以手工复制模板，详见根目录 [README.md](../README.md)。
+```bash
+./om config validate --config-path config.us.json --market us
+./om config validate --config-path config.hk.json --market hk
+```
 
 ---
 
-## 4. 跑一个最基本的检查
+## 3. 配置 env-file
+
+真实凭证放 env-file，不放 runtime config。
+
+本地默认路径：
 
 ```bash
-./om doctor --config-key us
-./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'
+.env/options-monitor.env
 ```
 
-如果你想先确认“配置本身是否合法”，优先跑：
+Linux 推荐路径：
 
 ```bash
-./om-agent run --tool config_validate --input-json '{"config_key":"us"}'
+/etc/options-monitor/options-monitor.env
 ```
 
-如果你配置了本地 env file，先跑 settings 诊断确认密钥来源和写入开关：
+先复制示例，再按需填写：
 
 ```bash
+mkdir -p .env
+cp -n configs/examples/options-monitor.env.example .env/options-monitor.env
 ./om settings doctor
 ```
 
-配置优先级和工具边界的完整解释，以根目录 `CONFIGURATION_GUIDE.md` 为准。
-
-healthcheck 会额外给出本地 `ledger_store` 和 `option_positions_bootstrap` 状态：
-- `ledger_store` 用来确认当前读写的 SQLite 路径和 `trade_events` / `position_lots` 行数
-- `option_positions_bootstrap` 只反映本地接管/legacy 迁移状态；Feishu `option_positions` 不再作为 bootstrap 输入
-
-如果要显式指定配置路径：
-
-```bash
-./om-agent run --tool healthcheck --input-json '{"config_path":"config.us.json"}'
-```
+`settings doctor` 会脱敏显示来源和缺失项。
 
 ---
 
-## 5. 跑一个只读工具
+## 4. 跑系统诊断
+
+```bash
+./om doctor --config-key us
+./om doctor --config-key hk
+```
+
+也可以直接看运行状态：
 
 ```bash
 ./om status --config-key us
 ./om runs --limit 10
-./om logs --run-id <run-id> --lines 50
-./om-agent run --tool runtime_runs --input-json '{"limit":10}'
-./om-agent run --tool runtime_logs --input-json '{"run_id":"<run-id>","kind":"tool","lines":50}'
-./om-agent run --tool manage_symbols --input-json '{"config_key":"us","action":"list"}'
 ```
 
 ---
 
-## 6. 收集 AI Cofunder 证据
+## 5. 可选：Feishu long-connection
 
-如果目标是让 MacBook 上的 Codex 分析线上版本质量、持仓/交易一致性，或多账户策略影响，使用 AI Cofunder 证据交接：
+Feishu Bot 走同一组 `OM_FEISHU_BOT_*` env 设置。配置后先做只读检查：
 
 ```bash
-./om-agent run --tool ai_cofunder --input-json '{"config_key":"us","scope":"full","output":"both","write_outputs":false}'
+./om inbound feishu-ws --check
 ```
 
-同一个能力也有人工 CLI：
+长期运行时才需要 service 化；不要在安装或初始化阶段自动启动。
+
+---
+
+## 6. 可选：长期运行服务
+
+本地临时使用可以手动跑：
 
 ```bash
-./om ai-cofunder collect --config-key us --scope full --output both --no-write-outputs
+./om run tick --config config.us.json --accounts lx
 ```
 
-它默认不写文件、不发送通知、不调用在线 AI。线上调度系统的状态需要通过 `scheduler_evidence` 或 `--scheduler-evidence-json` 传入。
+服务器长期运行先 render 服务文件：
 
----
+```bash
+./om service render \
+  --target systemd \
+  --runtime-root /var/lib/options-monitor \
+  --env-file /etc/options-monitor/options-monitor.env \
+  --markets us hk \
+  --accounts lx sy \
+  --include-feishu-ws \
+  --output-dir /tmp/options-monitor-service
+```
 
-## 7. 常见环境变量
-
-- `OM_OUTPUT_DIR`：覆盖 agent 输出目录
-- `OM_RUNTIME_ROOT`：覆盖运行时状态根目录；`option_positions` SQLite 位于 `<runtime_root>/output_shared/state/option_positions.sqlite3`
-- `OM_AGENT_ENABLE_WRITE_TOOLS=true`：允许部分写操作工具
-
----
-
-## 8. 下一步看哪里
-
-- Agent 任务手册：[`AGENT_WIKI.md`](AGENT_WIKI.md)
-- Agent JSON 合同：[`AGENT_INTEGRATION.md`](AGENT_INTEGRATION.md)
-- 工具说明：[`TOOL_REFERENCE.md`](TOOL_REFERENCE.md)
-- Linux / Mac 服务化部署：[`DEPLOY_LINUX_MAC.md`](DEPLOY_LINUX_MAC.md)
-- 配置字段说明：[`../CONFIGURATION_GUIDE.md`](../CONFIGURATION_GUIDE.md)
+`service render` 只生成文件和安装命令，不会自动 install、enable 或 start。确认后再按输出的命令安装和启用。
