@@ -145,6 +145,10 @@ def test_render_systemd_bundle_can_include_feishu_ws_service(tmp_path: Path) -> 
     assert "--lock-path " + str(runtime / "locks" / "feishu-ws.lock") in service
     assert "Restart=always" in service
     assert {"name": "options-monitor-feishu-ws.service"} in profile["services"]
+    assert profile["restart"]["services"] == [
+        "options-monitor-trade-intake.service",
+        "options-monitor-feishu-ws.service",
+    ]
     assert profile["feishu_ws"]["enabled"] is True
     assert profile["feishu_ws"]["lock_path"] == str(runtime / "locks" / "feishu-ws.lock")
     assert "systemctl enable --now options-monitor-feishu-ws.service" in bundle["commands"]["enable"]
@@ -208,7 +212,35 @@ def test_render_systemd_bundle_allows_deploy_identity_override(tmp_path: Path) -
     assert profile["deploy_home"] == "/srv/options-home"
     assert profile["restart"]["requires_sudo"] is True
     assert profile["restart"]["command_prefix"] == ["sudo", "-n", "systemctl"]
+    assert profile["restart"]["services"] == ["options-monitor-trade-intake.service"]
     assert "ops ALL=(root) NOPASSWD: /bin/systemctl restart options-monitor-trade-intake.service" in profile["restart"]["sudoers"]
+
+
+def test_render_systemd_feishu_ws_sudoers_cover_all_long_running_services(tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    bundle = render_service_bundle(
+        target="systemd",
+        repo_root=repo,
+        runtime_root=tmp_path / "runtime",
+        accounts=["lx"],
+        markets=["us"],
+        deploy_user="ops",
+        include_feishu_ws=True,
+    )
+
+    profile = json.loads({item["relative_path"]: item for item in bundle["files"]}["service.profile.json"]["content"])
+
+    assert profile["restart"]["command_prefix"] == ["sudo", "-n", "systemctl"]
+    assert profile["restart"]["services"] == [
+        "options-monitor-trade-intake.service",
+        "options-monitor-feishu-ws.service",
+    ]
+    assert "ops ALL=(root) NOPASSWD: /bin/systemctl restart options-monitor-trade-intake.service" in profile["restart"]["sudoers"]
+    assert "ops ALL=(root) NOPASSWD: /bin/systemctl restart options-monitor-feishu-ws.service" in profile["restart"]["sudoers"]
 
 
 def test_render_systemd_bundle_quotes_paths_with_spaces(tmp_path: Path) -> None:
@@ -582,7 +614,10 @@ def test_service_upgrade_restart_uses_sudo_prefix_from_deploy_profile(tmp_path: 
                     "requires_sudo": True,
                     "command_prefix": ["sudo", "-n", "systemctl"],
                 },
-                "services": [{"name": "options-monitor-trade-intake.service"}],
+                "services": [
+                    {"name": "options-monitor-trade-intake.service"},
+                    {"name": "options-monitor-feishu-ws.service"},
+                ],
             }
         ),
         encoding="utf-8",
@@ -595,8 +630,11 @@ def test_service_upgrade_restart_uses_sudo_prefix_from_deploy_profile(tmp_path: 
 
     restarted = _restart_services_from_profile(runtime_root=runtime, run_cmd=_run_cmd, operations=[])
 
-    assert restarted == ["options-monitor-trade-intake.service"]
-    assert calls == [["sudo", "-n", "systemctl", "restart", "options-monitor-trade-intake.service"]]
+    assert restarted == ["options-monitor-trade-intake.service", "options-monitor-feishu-ws.service"]
+    assert calls == [
+        ["sudo", "-n", "systemctl", "restart", "options-monitor-trade-intake.service"],
+        ["sudo", "-n", "systemctl", "restart", "options-monitor-feishu-ws.service"],
+    ]
 
 
 def test_service_upgrade_restart_denied_includes_remediation(tmp_path: Path) -> None:
@@ -633,6 +671,181 @@ def test_service_upgrade_restart_denied_includes_remediation(tmp_path: Path) -> 
     assert operations[-1]["returncode"] == 1
     assert "manual_restart: sudo systemctl restart options-monitor-trade-intake.service" in remediation
     assert "liuxie ALL=(root) NOPASSWD: /bin/systemctl restart options-monitor-trade-intake.service" in remediation
+
+
+def test_service_upgrade_partial_success_when_restart_denied_after_switch(tmp_path: Path) -> None:
+    from src.application.service_upgrade import service_upgrade
+
+    install = tmp_path / "opt" / "options-monitor"
+    releases = install / "releases"
+    v100 = releases / "1.0.0"
+    v100.mkdir(parents=True)
+    (v100 / "VERSION").write_text("1.0.0\n", encoding="utf-8")
+    current = install / "current"
+    current.symlink_to(v100, target_is_directory=True)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    (runtime / "service.profile.json").write_text(
+        json.dumps(
+            {
+                "service_provider": "systemd",
+                "deploy_user": "liuxie",
+                "restart": {
+                    "requires_sudo": True,
+                    "command_prefix": ["sudo", "-n", "systemctl"],
+                    "services": [
+                        "options-monitor-trade-intake.service",
+                        "options-monitor-feishu-ws.service",
+                    ],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        if command[:3] == ["git", "ls-remote", "--tags"]:
+            return subprocess.CompletedProcess(command, 0, stdout="a refs/tags/v1.0.1\n", stderr="")
+        if command[:3] == ["git", "config", "--get"]:
+            return subprocess.CompletedProcess(command, 0, stdout="https://example.invalid/repo.git\n", stderr="")
+        if command[:2] == ["git", "clone"]:
+            target = Path(command[-1])
+            target.mkdir(parents=True)
+            (target / "VERSION").write_text("1.0.1\n", encoding="utf-8")
+            (target / "requirements").mkdir()
+            (target / "constraints").mkdir()
+            (target / "requirements.txt").write_text("-r requirements/runtime.txt\n", encoding="utf-8")
+            (target / "constraints.txt").write_text("-c constraints/runtime.txt\n", encoding="utf-8")
+            (target / "requirements" / "runtime.txt").write_text("", encoding="utf-8")
+            (target / "constraints" / "runtime.txt").write_text("", encoding="utf-8")
+            (target / "requirements" / "server.txt").write_text("", encoding="utf-8")
+            (target / "constraints" / "server.txt").write_text("", encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0, stdout="cloned\n", stderr="")
+        if command == ["python3", "-m", "venv", ".venv"]:
+            cwd = Path(_kwargs["cwd"])
+            venv_python = cwd / ".venv" / "bin" / "python"
+            venv_python.parent.mkdir(parents=True)
+            venv_python.write_text("#!/bin/sh\n", encoding="utf-8")
+            venv_python.chmod(0o755)
+            return subprocess.CompletedProcess(command, 0, stdout="venv\n", stderr="")
+        if command[:4] == ["sudo", "-n", "systemctl", "restart"]:
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="Access denied\n")
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    out = service_upgrade(
+        repo_root=current,
+        runtime_root=runtime,
+        releases_root=releases,
+        confirm=True,
+        auto=True,
+        run_cmd=_run_cmd,
+    )
+
+    assert out["ok"] is True
+    assert out["status"] == "upgraded_restart_failed"
+    assert out["changed"] is True
+    assert out["symlink_switched"] is True
+    assert current.resolve() == (releases / "1.0.1").resolve()
+    assert out["restart_failed_services"] == [
+        "options-monitor-trade-intake.service",
+        "options-monitor-feishu-ws.service",
+    ]
+    assert "manual_restart: sudo systemctl restart options-monitor-feishu-ws.service" in out["manual_remediation"]
+    status = json.loads((runtime / "upgrade_status.json").read_text(encoding="utf-8"))
+    assert status["status"] == "upgraded_restart_failed"
+    assert status["restart_failed_services"] == out["restart_failed_services"]
+
+
+def test_service_upgrade_restart_uses_explicit_restart_services_from_profile(tmp_path: Path) -> None:
+    from src.application.service_upgrade import _restart_services_from_profile
+
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    (runtime / "service.profile.json").write_text(
+        json.dumps(
+            {
+                "service_provider": "systemd",
+                "restart": {
+                    "command_prefix": ["sudo", "-n", "systemctl"],
+                    "services": [
+                        "options-monitor-trade-intake.service",
+                        "options-monitor-feishu-ws.service",
+                        "options-monitor-custom-worker.service",
+                    ],
+                },
+                "services": [
+                    {"name": "options-monitor-tick-us.service"},
+                    {"name": "options-monitor-trade-intake.service"},
+                    {"name": "options-monitor-feishu-ws.service"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    calls: list[list[str]] = []
+
+    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        calls.append(list(command))
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    restarted = _restart_services_from_profile(runtime_root=runtime, run_cmd=_run_cmd, operations=[])
+
+    assert restarted == [
+        "options-monitor-trade-intake.service",
+        "options-monitor-feishu-ws.service",
+        "options-monitor-custom-worker.service",
+    ]
+    assert calls == [
+        ["sudo", "-n", "systemctl", "restart", "options-monitor-trade-intake.service"],
+        ["sudo", "-n", "systemctl", "restart", "options-monitor-feishu-ws.service"],
+        ["sudo", "-n", "systemctl", "restart", "options-monitor-custom-worker.service"],
+    ]
+
+
+def test_service_upgrade_restart_supports_restart_command_string(tmp_path: Path) -> None:
+    from src.application.service_upgrade import _restart_services_from_profile
+
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    (runtime / "service.profile.json").write_text(
+        json.dumps(
+            {
+                "service_provider": "systemd",
+                "restart": {
+                    "restart_command": "sudo -n systemctl restart",
+                    "services": ["options-monitor-trade-intake.service"],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    calls: list[list[str]] = []
+
+    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        calls.append(list(command))
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    restarted = _restart_services_from_profile(runtime_root=runtime, run_cmd=_run_cmd, operations=[])
+
+    assert restarted == ["options-monitor-trade-intake.service"]
+    assert calls == [["sudo", "-n", "systemctl", "restart", "options-monitor-trade-intake.service"]]
+
+
+def test_service_upgrade_restart_no_profile_is_noop(tmp_path: Path) -> None:
+    from src.application.service_upgrade import _restart_services_from_profile
+
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    calls: list[list[str]] = []
+
+    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        calls.append(list(command))
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    restarted = _restart_services_from_profile(runtime_root=runtime, run_cmd=_run_cmd, operations=[])
+
+    assert restarted == []
+    assert calls == []
 
 
 def test_service_upgrade_migrates_user_configs_and_rebuilds_runtime_configs_before_switch(tmp_path: Path) -> None:

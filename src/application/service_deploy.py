@@ -273,6 +273,11 @@ def build_service_profile(
     auto_upgrade_enabled: bool = False,
     feishu_ws: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    restartable_services = [
+        name
+        for name in service_names
+        if (str(name).endswith(".service") and ("trade-intake" in str(name) or "feishu-ws" in str(name)))
+    ]
     profile: dict[str, Any] = {
         "schema_version": 1,
         "service_provider": target,
@@ -300,10 +305,21 @@ def build_service_profile(
         profile["restart"] = {
             "requires_sudo": True,
             "command_prefix": ["sudo", "-n", "systemctl"],
+            "services": restartable_services,
             "sudoers": [
-                f"{deploy_user} ALL=(root) NOPASSWD: /bin/systemctl restart options-monitor-trade-intake.service",
-                f"{deploy_user} ALL=(root) NOPASSWD: /usr/bin/systemctl restart options-monitor-trade-intake.service",
+                item
+                for service_name in restartable_services
+                for item in (
+                    f"{deploy_user} ALL=(root) NOPASSWD: /bin/systemctl restart {service_name}",
+                    f"{deploy_user} ALL=(root) NOPASSWD: /usr/bin/systemctl restart {service_name}",
+                )
             ],
+        }
+    elif target == "systemd" and restartable_services:
+        profile["restart"] = {
+            "requires_sudo": False,
+            "command_prefix": ["systemctl"],
+            "services": restartable_services,
         }
     if auto_upgrade_enabled:
         profile["auto_upgrade"] = {

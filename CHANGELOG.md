@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.83 - 2026-05-20
+
+### Fixed
+- Restart all profile-managed long-running systemd services after service upgrades, including `options-monitor-trade-intake.service` and `options-monitor-feishu-ws.service`, using the configured restart command strategy.
+- Record service-restart failures after a successful symlink/config switch as `upgraded_restart_failed` with `restart_failed_services` and manual remediation instead of failing the upgrade unit outright.
+
 ## 1.2.82 - 2026-05-20
 
 ### Changed
