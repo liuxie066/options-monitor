@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 1.2.85 - 2026-05-20
+
+### Added
+- Added inbound manual trade recording with preview, sender-gated confirmation, pending-operation audit records, and readable Feishu responses for manual open/close ledger writes.
+- Added canonical monitored-symbol calibration for config writes so inputs such as `700`, `HK.00700`, `腾讯`, `POP`, and lowercase US symbols resolve to stable `symbols[]` entries.
+- Added the `./om symbols` CLI for monitored-symbol list/add/edit/remove operations with preview-by-default writes.
+- Added inbound monitored-symbol operations with preview/confirm/cancel flow and the dedicated `OM_INBOUND_SYMBOL_WRITE_ENABLED` safety gate.
+
+### Changed
+- Routed `manage_symbols` writes through the same canonical symbol calibration contract.
+
+### Removed
+- Removed the old `./om watchlist` user entrypoint and watchlist mutation compatibility module; user-facing monitored-symbol operations now use `symbols`.
+
 ## 1.2.84 - 2026-05-20
 
 ### Fixed

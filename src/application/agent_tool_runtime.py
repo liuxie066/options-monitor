@@ -13,7 +13,7 @@ from src.application.runtime_config_paths import (
     resolve_public_data_config_path,
     write_json_atomic,
 )
-from src.application.watchlist_mutations import normalize_symbol_read
+from src.application.symbol_mutations import normalize_symbol_read
 
 
 def normalize_broker(value: Any) -> str:

@@ -17,7 +17,7 @@ from domain.domain.trade_contract_identity import (
 from src.application.expiration_normalization import find_unique_near_miss_expiration
 from src.application.opend_fetch_config import opend_fetch_kwargs
 from src.application.ledger.api import list_canonical_position_lot_snapshots, trade_event_log
-from src.application.watchlist_mutations import normalize_symbol_read
+from src.application.symbol_mutations import normalize_symbol_read
 
 
 def _normalize_expiration(value: Any) -> str:

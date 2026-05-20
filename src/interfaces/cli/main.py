@@ -357,7 +357,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     update_rollback.add_argument("--confirm", action="store_true", help="apply rollback; without this the command is a dry run")
     update_rollback.add_argument("--no-restart-services", action="store_true")
 
-    sub.add_parser("watchlist", help="manage monitored symbols")
+    sub.add_parser("symbols", help="manage monitored symbols")
     sub.add_parser("option-positions", help="option position operations")
     sub.add_parser("trade-events", help="review, repair, replay, and void trade events")
 
@@ -529,10 +529,10 @@ def main(argv: list[str] | None = None) -> int:
         from src.interfaces.cli.trade_events import main as run_trade_events_cli
 
         return int(run_trade_events_cli(actual_argv[1:]))
-    if actual_argv and actual_argv[0] == "watchlist":
-        from src.interfaces.cli.watchlist import main as run_watchlist_cli
+    if actual_argv and actual_argv[0] == "symbols":
+        from src.interfaces.cli.symbols import main as run_symbols_cli
 
-        return int(run_watchlist_cli(actual_argv[1:]))
+        return int(run_symbols_cli(actual_argv[1:]))
 
     args = parse_args(actual_argv)
     try:

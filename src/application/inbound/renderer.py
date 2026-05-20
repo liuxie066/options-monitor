@@ -6,7 +6,8 @@ from src.application.inbound.contracts import InboundIntent
 
 
 HELP_TEXT = (
-    "可用只读命令：状态、健康检查、持仓 sy、收益 sy、收益 sy 2026-05、最近运行、日志 <run_id>。"
+    "可用只读命令：状态、健康检查、持仓 sy、收益 sy、收益 sy 2026-05、最近运行、日志 <run_id>、查看监控标的。\n"
+    "管理员写操作：记录开仓/记录平仓、增加/修改/删除监控标的。写操作会先返回预览，确认请回复：确认记录 <operation_id> 或 确认监控 <operation_id>。"
 )
 
 

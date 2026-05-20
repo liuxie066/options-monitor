@@ -7,9 +7,15 @@ from typing import Any, Callable
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response, mask_path
 from src.application.inbound.audit import InboundAuditStore, build_command_id, utc_now_iso
 from src.application.inbound.contracts import InboundIntent, InboundRequest, InboundToolCall
+from src.application.inbound.manual_trade_operations import (
+    handle_manual_trade_operation,
+    is_manual_trade_operation_intent,
+)
+from src.application.inbound.operation_store import InboundOperationStore
 from src.application.inbound.parser import parse_inbound_text
 from src.application.inbound.policy import enforce_sender_allowed, enforce_tool_allowed
 from src.application.inbound.renderer import HELP_TEXT, render_inbound_text
+from src.application.inbound.symbol_operations import handle_symbol_operation, is_symbol_operation_intent
 from src.application.tool_execution import execute_tool
 
 
@@ -94,6 +100,64 @@ def handle_inbound_request(
                 created_at=created_at,
                 intent=intent,
                 call=None,
+                decision=decision,
+                response=response,
+            )
+
+        if is_manual_trade_operation_intent(intent):
+            call = InboundToolCall(tool_name="inbound.manual_trade", payload=dict(intent.arguments))
+            operation_result = handle_manual_trade_operation(
+                intent,
+                normalized_request,
+                command_id=command_id,
+                store=InboundOperationStore(store.path),
+            )
+            response = _operation_response(
+                operation_result,
+                command_id=command_id,
+                request=normalized_request,
+                intent=intent,
+                sender_decision=sender_decision.public_payload(),
+                reason="manual_trade_operation",
+                audit_db=store.path,
+            )
+            decision = "allowed"
+            return _record_and_return(
+                store=store,
+                request=normalized_request,
+                command_id=command_id,
+                created_at=created_at,
+                intent=intent,
+                call=call,
+                decision=decision,
+                response=response,
+            )
+
+        if is_symbol_operation_intent(intent):
+            call = InboundToolCall(tool_name="inbound.symbols", payload=dict(intent.arguments))
+            operation_result = handle_symbol_operation(
+                intent,
+                normalized_request,
+                command_id=command_id,
+                store=InboundOperationStore(store.path),
+            )
+            response = _operation_response(
+                operation_result,
+                command_id=command_id,
+                request=normalized_request,
+                intent=intent,
+                sender_decision=sender_decision.public_payload(),
+                reason="symbol_operation",
+                audit_db=store.path,
+            )
+            decision = "allowed"
+            return _record_and_return(
+                store=store,
+                request=normalized_request,
+                command_id=command_id,
+                created_at=created_at,
+                intent=intent,
+                call=call,
                 decision=decision,
                 response=response,
             )
@@ -186,6 +250,42 @@ def _base_payload(request: InboundRequest) -> dict[str, Any]:
     elif request.config_key:
         payload["config_key"] = request.config_key
     return payload
+
+
+def _operation_response(
+    operation_result: dict[str, Any],
+    *,
+    command_id: str,
+    request: InboundRequest,
+    intent: InboundIntent,
+    sender_decision: dict[str, Any],
+    reason: str,
+    audit_db: Any,
+) -> dict[str, Any]:
+    data = dict(operation_result.get("data") or {})
+    data.update(
+        {
+            "command_id": command_id,
+            "request": request.public_payload(),
+            "intent": intent.public_payload(),
+            "decision": {
+                "allowed": True,
+                "reason": reason,
+                "sender": sender_decision,
+            },
+            "response_text": str(data.get("response_text") or ""),
+        }
+    )
+    meta = dict(operation_result.get("meta") or {})
+    meta["audit_db"] = mask_path(audit_db)
+    return build_response(
+        tool_name=str(operation_result.get("tool_name") or "inbound.handle"),
+        ok=bool(operation_result.get("ok", False)),
+        data=data,
+        error=operation_result.get("error") if not bool(operation_result.get("ok", False)) else None,
+        warnings=operation_result.get("warnings"),
+        meta=meta,
+    )
 
 
 def _record_and_return(

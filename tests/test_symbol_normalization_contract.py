@@ -9,14 +9,14 @@ import src.application.ledger.repository as ledger_repository
 import src.application.ledger.writer as ledger_writer
 from src.application.trades.normalizer import NormalizedTradeDeal
 from src.application.trades.normalizer import normalize_trade_deal
-from src.application.watchlist_mutations import normalize_symbol as normalize_watchlist_symbol
+from src.application.symbol_mutations import normalize_symbol as normalize_config_symbol
 
 
 def test_symbol_alias_contract_canonicalizes_pop_consistently() -> None:
     expected = "9992.HK"
 
     assert resolve_underlier_alias("POP") == expected
-    assert normalize_watchlist_symbol("POP") == expected
+    assert normalize_config_symbol("POP") == expected
     assert normalize_multiplier_symbol("POP") == expected
     assert normalize_position_symbol("POP") == expected
 
