@@ -126,9 +126,18 @@ def _run_required(
 
 
 class ServiceRestartError(RuntimeError):
-    def __init__(self, message: str, *, remediation: list[str]) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        remediation: list[str],
+        failed_services: list[str] | None = None,
+        restarted_services: list[str] | None = None,
+    ) -> None:
         super().__init__(message)
         self.remediation = remediation
+        self.failed_services = failed_services or []
+        self.restarted_services = restarted_services or []
 
 
 class RuntimeConfigPrepareError(RuntimeError):
@@ -158,28 +167,70 @@ def _restart_command_prefix(profile: dict[str, Any]) -> list[str]:
         prefix = [str(item).strip() for item in raw_prefix if str(item).strip()]
         if prefix:
             return prefix
+    raw_command = restart.get("restart_command") or profile.get("restart_command")
+    if isinstance(raw_command, str) and raw_command.strip():
+        parts = shlex.split(raw_command)
+        if parts[-1:] == ["restart"]:
+            parts = parts[:-1]
+        if parts:
+            return parts
+    if isinstance(raw_command, list) and raw_command:
+        parts = [str(item).strip() for item in raw_command if str(item).strip()]
+        if parts[-1:] == ["restart"]:
+            parts = parts[:-1]
+        if parts:
+            return parts
     if bool(restart.get("requires_sudo") or profile.get("restart_requires_sudo")):
         return ["sudo", "-n", "systemctl"]
     return ["systemctl"]
 
 
-def _restart_remediation(*, profile: dict[str, Any], service_name: str, command: list[str]) -> list[str]:
+def _restart_remediation(*, profile: dict[str, Any], service_names: list[str], command_by_service: dict[str, list[str]]) -> list[str]:
     deploy_user = str(profile.get("deploy_user") or "").strip()
     sudoers = _restart_profile(profile).get("sudoers")
     suggestions = [str(item) for item in sudoers] if isinstance(sudoers, list) else []
     if not suggestions and deploy_user:
         suggestions = [
-            f"{deploy_user} ALL=(root) NOPASSWD: /bin/systemctl restart {service_name}",
-            f"{deploy_user} ALL=(root) NOPASSWD: /usr/bin/systemctl restart {service_name}",
+            item
+            for service_name in service_names
+            for item in (
+                f"{deploy_user} ALL=(root) NOPASSWD: /bin/systemctl restart {service_name}",
+                f"{deploy_user} ALL=(root) NOPASSWD: /usr/bin/systemctl restart {service_name}",
+            )
         ]
     remediation = [
-        f"manual_restart: sudo systemctl restart {service_name}",
-        f"failed_command: {' '.join(shlex.quote(part) for part in command)}",
+        *(f"manual_restart: sudo systemctl restart {service_name}" for service_name in service_names),
+        *(
+            f"failed_command: {' '.join(shlex.quote(part) for part in command_by_service.get(service_name, []))}"
+            for service_name in service_names
+            if command_by_service.get(service_name)
+        ),
     ]
     if suggestions:
         remediation.append("sudoers_minimal:")
         remediation.extend(suggestions)
     return remediation
+
+
+def _restart_service_names(profile: dict[str, Any]) -> list[str]:
+    restart = _restart_profile(profile)
+    raw_restart_services = restart.get("services") or restart.get("restart_services") or profile.get("restart_services")
+    explicit = isinstance(raw_restart_services, list) and bool(raw_restart_services)
+    if isinstance(raw_restart_services, list) and raw_restart_services:
+        names = [str(item.get("name") if isinstance(item, dict) else item or "").strip() for item in raw_restart_services]
+    else:
+        raw_services = profile.get("services")
+        services: list[Any] = raw_services if isinstance(raw_services, list) else []
+        names = [str(item.get("name") if isinstance(item, dict) else item or "").strip() for item in services]
+    out: list[str] = []
+    for name in names:
+        if not name.endswith(".service"):
+            continue
+        if not explicit and "trade-intake" not in name and "feishu-ws" not in name:
+            continue
+        if name not in out:
+            out.append(name)
+    return out
 
 
 def _remote_url(*, repo_root: Path, remote_name: str, run_cmd: Callable[..., Any]) -> str:
@@ -215,25 +266,28 @@ def _restart_services_from_profile(
     if not profile:
         return []
     provider = str(profile.get("service_provider") or "").strip().lower()
-    raw_services = profile.get("services")
-    services: list[Any] = raw_services if isinstance(raw_services, list) else []
     restarted: list[str] = []
     if provider != "systemd":
         return restarted
     command_prefix = _restart_command_prefix(profile)
-    for item in services:
-        name = str(item.get("name") if isinstance(item, dict) else item or "").strip()
-        if not name.endswith(".service") or "trade-intake" not in name:
-            continue
+    failed: list[str] = []
+    command_by_service: dict[str, list[str]] = {}
+    for name in _restart_service_names(profile):
         command = [*command_prefix, "restart", name]
+        command_by_service[name] = command
         result = _run_command(command, cwd=None, run_cmd=run_cmd, timeout=60)
         operations.append(result)
         if not result["ok"]:
-            raise ServiceRestartError(
-                f"failed to restart {name}: {' '.join(shlex.quote(part) for part in command)}",
-                remediation=_restart_remediation(profile=profile, service_name=name, command=command),
-            )
+            failed.append(name)
+            continue
         restarted.append(name)
+    if failed:
+        raise ServiceRestartError(
+            f"failed to restart services: {', '.join(failed)}",
+            failed_services=failed,
+            restarted_services=restarted,
+            remediation=_restart_remediation(profile=profile, service_names=failed, command_by_service=command_by_service),
+        )
     return restarted
 
 
@@ -709,6 +763,8 @@ def service_upgrade(
 
     lock_path = runtime / "locks" / "upgrade.lock"
     symlink_switched = False
+    runtime_config_prepare: dict[str, Any] = {}
+    post_switch_runtime_config_validate: list[dict[str, Any]] = []
     try:
         with _UpgradeLock(lock_path):
             releases.mkdir(parents=True, exist_ok=True)
@@ -762,6 +818,27 @@ def service_upgrade(
                 if restart_services
                 else []
             )
+    except ServiceRestartError as exc:
+        out = {
+            **status_base,
+            "ok": True,
+            "status": "upgraded_restart_failed",
+            "changed": bool(symlink_switched),
+            "symlink_switched": bool(symlink_switched),
+            "config_rebuilt": bool(runtime_config_prepare.get("status") == "prepared"),
+            "target_dir": str(target_dir),
+            "previous_dir": str(previous_dir),
+            "runtime_config_prepare": runtime_config_prepare,
+            "post_switch_runtime_config_validate": post_switch_runtime_config_validate,
+            "restarted_services": exc.restarted_services,
+            "restart_failed_services": exc.failed_services,
+            "manual_remediation": exc.remediation,
+            "remediation": exc.remediation,
+            "error": f"{type(exc).__name__}: {exc}",
+            "operations": operations,
+        }
+        write_upgrade_status(runtime_root=runtime, payload=out)
+        return out
     except Exception as exc:
         out = {
             **status_base,
@@ -769,10 +846,11 @@ def service_upgrade(
             "status": "failed",
             "changed": bool(symlink_switched),
             "symlink_switched": bool(symlink_switched),
+            "config_rebuilt": bool(runtime_config_prepare.get("status") == "prepared"),
             "target_dir": str(target_dir),
             "previous_dir": str(previous_dir),
             "error": f"{type(exc).__name__}: {exc}",
-            **({"remediation": exc.remediation} if isinstance(exc, (RuntimeConfigPrepareError, ServiceRestartError)) else {}),
+            **({"remediation": exc.remediation} if isinstance(exc, RuntimeConfigPrepareError) else {}),
             "operations": operations,
         }
         write_upgrade_status(runtime_root=runtime, payload=out)
@@ -785,6 +863,8 @@ def service_upgrade(
         "changed": True,
         "target_dir": str(target_dir),
         "previous_dir": str(previous_dir),
+        "symlink_switched": True,
+        "config_rebuilt": bool(runtime_config_prepare.get("status") == "prepared"),
         "runtime_config_prepare": runtime_config_prepare,
         "post_switch_runtime_config_validate": post_switch_runtime_config_validate,
         "restarted_services": restarted,
