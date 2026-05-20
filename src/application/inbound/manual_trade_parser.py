@@ -80,6 +80,7 @@ def _build_open_draft(
             or _extract_after_label(text, ("multiplier", "乘数"))
         ),
         runtime_config=runtime_config,
+        config_path=config_path,
         repo_base=repo_base,
         allow_opend_refresh=allow_opend_refresh,
     )
@@ -288,6 +289,7 @@ def _resolve_multiplier(
     symbol: Any,
     explicit_multiplier: Any,
     runtime_config: dict[str, Any] | None,
+    config_path: str | Path | None,
     repo_base: Path,
     allow_opend_refresh: bool,
 ) -> tuple[float | None, str | None, dict[str, Any]]:
@@ -295,6 +297,7 @@ def _resolve_multiplier(
         repo_base=repo_base,
         symbol=str(symbol or "").strip() or None,
         multiplier=explicit_multiplier,
+        config_path=config_path,
         allow_opend_refresh=allow_opend_refresh,
         config=runtime_config,
     )

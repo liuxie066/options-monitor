@@ -412,6 +412,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     update_rollback.add_argument("--confirm", action="store_true", help="apply rollback; without this the command is a dry run")
     update_rollback.add_argument("--no-restart-services", action="store_true")
 
+    multiplier_cache = sub.add_parser("multiplier-cache", help="inspect or seed the shared multiplier cache")
+    multiplier_cache_sub = multiplier_cache.add_subparsers(dest="multiplier_cache_command", required=True)
+    multiplier_seed = multiplier_cache_sub.add_parser("seed", help="seed a symbol multiplier into runtime cache; dry-run by default")
+    multiplier_seed.add_argument("--symbol", required=True)
+    multiplier_seed.add_argument("--multiplier", type=int, required=True)
+    multiplier_seed.add_argument("--source", default="manual_seed")
+    multiplier_seed.add_argument("--runtime-root", default=None)
+    multiplier_seed.add_argument("--config-path", default=None)
+    multiplier_seed.add_argument("--cache", default=None)
+    multiplier_seed.add_argument("--confirm", action="store_true")
+
     sub.add_parser("symbols", help="manage monitored symbols")
     sub.add_parser("option-positions", help="option position operations")
     sub.add_parser("trade-events", help="review, repair, replay, and void trade events")
@@ -1154,6 +1165,21 @@ def main(argv: list[str] | None = None) -> int:
                 opend_port=args.opend_port,
                 force=bool(args.force),
             )))
+
+        if args.command == "multiplier-cache" and args.multiplier_cache_command == "seed":
+            from src.application.multiplier_cache import seed_multiplier_cache
+
+            data = seed_multiplier_cache(
+                repo_base=repo_base(),
+                symbol=args.symbol,
+                multiplier=args.multiplier,
+                source=args.source,
+                runtime_root=args.runtime_root,
+                config_path=args.config_path,
+                cache_path=args.cache,
+                confirm=bool(args.confirm),
+            )
+            return _print(build_response(tool_name="multiplier_cache.seed", ok=bool(data.get("ok")), data=data))
 
         if args.command == "run" and args.run_command == "tick":
             tick_argv: list[str] = ["--config", str(args.config)]

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import platform
+import shutil
 import shlex
 import sys
 from pathlib import Path
@@ -12,7 +13,7 @@ from src.application.agent_tool_contracts import AgentToolError
 from src.application.config_validator import validate_config
 from src.application.platform_profile import PlatformProfile, current_platform_profile
 from src.application.runtime_paths import resolve_runtime_root
-from src.application.settings import diagnose_effective_settings
+from src.application.settings import build_effective_env, diagnose_effective_settings
 
 
 def run_setup_check(
@@ -81,12 +82,36 @@ def run_setup_check(
         hint="./.venv/bin/pip install -r requirements/server.txt -c constraints/server.txt" if not server_deps_available else None,
     )
 
+    effective_env = build_effective_env(
+        repo_root=root,
+        env_file=env_file,
+        include_local_env_file=include_local_env_file,
+    )
+    installer_mode = str(effective_env.values.get("OM_UPGRADE_INSTALLER") or "auto").strip().lower()
+    if installer_mode not in {"auto", "uv", "pip"}:
+        installer_mode = "auto"
+    uv_path = shutil.which("uv")
+    add(
+        "upgrade.uv",
+        "ok" if uv_path else ("warn" if installer_mode == "uv" else "info"),
+        "uv is available for service upgrade dependency installation" if uv_path else "uv is not available; service upgrade will use pip fallback",
+        {"installer_mode": installer_mode, "uv_path": uv_path, "cache_env": {"UV_CACHE_DIR": effective_env.values.get("UV_CACHE_DIR")}},
+        hint=(
+            "Install uv on the remote host or set OM_UPGRADE_INSTALLER=pip before running service upgrade."
+            if not uv_path and installer_mode == "uv"
+            else "Install uv on the remote host to speed up service upgrade dependency installation."
+            if not uv_path
+            else None
+        ),
+    )
+
     settings = diagnose_effective_settings(
         repo_root=root,
         env_file=env_file,
         include_local_env_file=include_local_env_file,
     )
-    settings_summary = settings.get("summary") if isinstance(settings.get("summary"), dict) else {}
+    settings_summary_raw = settings.get("summary")
+    settings_summary: dict[str, Any] = settings_summary_raw if isinstance(settings_summary_raw, dict) else {}
     add(
         "settings",
         "error" if int(settings_summary.get("error_count") or 0) > 0 else ("warn" if int(settings_summary.get("warning_count") or 0) > 0 else "ok"),
@@ -239,7 +264,8 @@ def _next_steps(
     if missing_markets:
         market = missing_markets[0]
         steps.append(f"./om setup init --market {market} --account lx --futu-acc-id <futu-account-id>")
-    settings_summary = settings.get("summary") if isinstance(settings.get("summary"), dict) else {}
+    settings_summary_raw = settings.get("summary")
+    settings_summary: dict[str, Any] = settings_summary_raw if isinstance(settings_summary_raw, dict) else {}
     if int(settings_summary.get("warning_count") or 0) or int(settings_summary.get("error_count") or 0):
         steps.append("./om settings doctor")
     for market in config_ok_markets:

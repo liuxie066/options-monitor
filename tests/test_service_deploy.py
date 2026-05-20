@@ -162,6 +162,89 @@ def test_service_drift_confirm_writes_missing_timer_and_profile(tmp_path: Path) 
     assert ["systemctl", "enable", "--now", "options-monitor-projection-verify.service"] not in calls
 
 
+def test_service_drift_confirm_uses_sudo_fallback_for_systemd_permission_errors(monkeypatch, tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+    from src.application.service_drift import service_drift
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    systemd_root = tmp_path / "systemd"
+    repo.mkdir()
+    runtime.mkdir()
+    bundle = render_service_bundle(target="systemd", repo_root=repo, runtime_root=runtime, accounts=["lx"], markets=["us"])
+    profile = json.loads({item["relative_path"]: item for item in bundle["files"]}["service.profile.json"]["content"])
+    profile["services"] = [
+        item
+        for item in profile["services"]
+        if item["name"] not in {"options-monitor-projection-verify.service", "options-monitor-projection-verify.timer"}
+    ]
+    (runtime / "service.profile.json").write_text(json.dumps(profile, ensure_ascii=False), encoding="utf-8")
+    _write_systemd_units_from_bundle(
+        bundle,
+        systemd_root,
+        skip={"options-monitor-projection-verify.service", "options-monitor-projection-verify.timer"},
+    )
+    original_write_text = Path.write_text
+
+    def _write_text(path: Path, content: str, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if systemd_root in path.parents:
+            raise PermissionError("permission denied")
+        return original_write_text(path, content, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", _write_text)
+    calls: list[list[str]] = []
+
+    def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append(list(command))
+        if command[:4] == ["sudo", "-n", "sh", "-c"]:
+            original_write_text(Path(command[-1]), str(kwargs.get("input") or ""), encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0, stdout="written\n", stderr="")
+        if command[0:1] == ["systemctl"]:
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="Access denied\n")
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    out = service_drift(
+        repo_root=repo,
+        runtime_root=runtime,
+        systemd_unit_root=systemd_root,
+        confirm=True,
+        run_cmd=_run_cmd,
+    )
+
+    assert out["summary"]["status"] == "ok"
+    assert any(item.get("sudo_fallback") for item in out["operations"] if item.get("operation") == "write_unit")
+    assert ["sudo", "-n", "systemctl", "daemon-reload"] in calls
+    assert ["sudo", "-n", "systemctl", "enable", "--now", "options-monitor-projection-verify.timer"] in calls
+
+
+def test_service_drift_discovers_installed_feishu_ws_as_managed_service(tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+    from src.application.service_drift import service_drift
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    systemd_root = tmp_path / "systemd"
+    repo.mkdir()
+    runtime.mkdir()
+    bundle = render_service_bundle(target="systemd", repo_root=repo, runtime_root=runtime, accounts=["lx"], markets=["us"], include_feishu_ws=True)
+    profile = json.loads({item["relative_path"]: item for item in bundle["files"]}["service.profile.json"]["content"])
+    profile.pop("feishu_ws", None)
+    profile["services"] = [item for item in profile["services"] if item["name"] != "options-monitor-feishu-ws.service"]
+    (runtime / "service.profile.json").write_text(json.dumps(profile, ensure_ascii=False), encoding="utf-8")
+    _write_systemd_units_from_bundle(bundle, systemd_root)
+
+    out = service_drift(repo_root=repo, runtime_root=runtime, systemd_unit_root=systemd_root, confirm=True)
+    refreshed = json.loads((runtime / "service.profile.json").read_text(encoding="utf-8"))
+
+    assert "options-monitor-feishu-ws.service" in out["expected_services"]
+    assert {"name": "options-monitor-feishu-ws.service"} in refreshed["services"]
+    assert refreshed["feishu_ws"]["enabled"] is True
+    assert refreshed["restart"]["services"] == [
+        "options-monitor-trade-intake.service",
+        "options-monitor-feishu-ws.service",
+    ]
+
+
 def test_render_systemd_bundle_aligns_hk_tick_timer_to_calendar_boundaries(tmp_path: Path) -> None:
     from src.application.service_deploy import render_service_bundle
 
@@ -1550,7 +1633,8 @@ def test_service_upgrade_migrates_user_configs_and_rebuilds_runtime_configs_befo
                         {"role": "common_user", "loaded": True, "path": "configs/user.common.json"},
                         {"role": "market_user", "loaded": True, "path": "configs/user.hk.json"},
                     ]
-                }
+                },
+                "inbound": {"feishu_ws": {"ack_reaction": "SMILE"}},
             }
         ),
         encoding="utf-8",
@@ -1630,6 +1714,9 @@ def test_service_upgrade_migrates_user_configs_and_rebuilds_runtime_configs_befo
     assert (target / "configs" / "user.common.json").exists()
     assert (target / "configs" / "user.hk.json").exists()
     assert (target / "configs" / "user.us.json").exists()
+    common_overlay = json.loads((target / "configs" / "user.common.json").read_text(encoding="utf-8"))
+    assert common_overlay["inbound"]["feishu_ws"]["ack_reaction"] == "SMILE"
+    assert out["runtime_config_prepare"]["preserved_hotfixes"][0]["path"] == "inbound.feishu_ws.ack_reaction"
     assert ["./om", "config", "build", "--market", "hk", "--output", str(hk_runtime)] in calls
     assert ["./om", "config", "validate", "--config-path", str(hk_runtime), "--market", "hk"] in calls
     assert ["./om", "config", "build", "--market", "us", "--output", str(us_runtime)] in calls
@@ -2084,6 +2171,60 @@ def test_service_upgrade_confirm_fails_fast_when_repo_root_is_not_symlink(tmp_pa
     assert not any(command[:2] == ["git", "clone"] for command in calls)
     status = json.loads((runtime / "upgrade_status.json").read_text(encoding="utf-8"))
     assert status["status"] == "repo_root_not_symlink"
+
+
+def test_service_upgrade_coerces_release_entity_repo_root_to_current_symlink(monkeypatch, tmp_path: Path) -> None:
+    from src.application.service_upgrade import service_upgrade
+
+    monkeypatch.setenv("OM_UPGRADE_INSTALLER", "pip")
+    monkeypatch.setenv("OM_SYSTEMD_UNIT_ROOT", str(tmp_path / "systemd"))
+    install = tmp_path / "opt" / "options-monitor"
+    releases = install / "releases"
+    v100 = releases / "1.0.0"
+    _write_upgrade_release_skeleton(v100, "1.0.0")
+    current = install / "current"
+    current.symlink_to(v100, target_is_directory=True)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    (runtime / "service.profile.json").write_text(
+        json.dumps(
+            {
+                "service_provider": "systemd",
+                "repo_root": str(current),
+                "runtime_root": str(runtime),
+                "restart": {"requires_sudo": False},
+                "services": [{"name": "options-monitor-trade-intake.service"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
+        if command[:3] == ["git", "ls-remote", "--tags"]:
+            return subprocess.CompletedProcess(command, 0, stdout="b refs/tags/v1.0.1\n", stderr="")
+        if command[:3] == ["git", "config", "--get"]:
+            return subprocess.CompletedProcess(command, 0, stdout="https://example.invalid/repo.git\n", stderr="")
+        materialized = _fake_git_cache_materialize(list(command), version="1.0.1")
+        if materialized is not None:
+            return materialized
+        if command == ["python3", "-m", "venv", ".venv"]:
+            _create_fake_venv_python(Path(kwargs["cwd"]))
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    out = service_upgrade(
+        repo_root=v100,
+        runtime_root=runtime,
+        releases_root=releases,
+        target_version="1.0.1",
+        confirm=True,
+        run_cmd=_run_cmd,
+    )
+
+    assert out["status"] == "upgraded"
+    assert out["repo_root"] == str(current)
+    assert out["repo_root_is_symlink"] is True
+    assert out["repo_root_resolution"]["coerced"] is True
+    assert current.resolve() == (releases / "1.0.1").resolve()
 
 
 def test_service_upgrade_cleanup_after_success_deletes_older_releases(tmp_path: Path) -> None:

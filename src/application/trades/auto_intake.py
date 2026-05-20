@@ -64,6 +64,8 @@ def _process_payload(
     host: str,
     port: int,
     config: dict[str, Any] | None = None,
+    config_path: Path | None = None,
+    runtime_root: Path | None = None,
     on_result_fn: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
 ) -> dict[str, Any]:
     opend_config = opend_fetch_kwargs(config) if isinstance(config, dict) else None
@@ -73,6 +75,8 @@ def _process_payload(
             raw,
             futu_account_mapping=futu_account_mapping,
             repo_base=repo_base,
+            runtime_root=runtime_root,
+            config_path=config_path,
             config=config,
             host=host,
             port=port,
@@ -191,6 +195,8 @@ def main(argv: list[str] | None = None) -> int:
             host=args.host,
             port=args.port,
             config=cfg,
+            config_path=cfg_path,
+            runtime_root=runtime_root,
             on_result_fn=receipt_callback,
         )
         if apply_changes:
@@ -223,6 +229,8 @@ def main(argv: list[str] | None = None) -> int:
             host=args.host,
             port=args.port,
             config=cfg,
+            config_path=cfg_path,
+            runtime_root=runtime_root,
             on_result_fn=receipt_callback,
         )
         _write_listener_status(

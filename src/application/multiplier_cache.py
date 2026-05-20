@@ -33,6 +33,7 @@ except Exception:  # pragma: no cover - non-Unix fallback
 
 from domain.domain.symbol_identity import canonical_symbol_aliases, resolve_underlier_alias
 from src.application.opend_fetch_config import filter_opend_fetch_kwargs
+from src.application.runtime_paths import resolve_runtime_root
 from src.application.symbol_aliases import symbol_aliases_from_config
 
 def utc_now() -> str:
@@ -41,6 +42,26 @@ def utc_now() -> str:
 
 def default_cache_path(repo_base: Path) -> Path:
     return (repo_base / "output_shared" / "state" / "multiplier_cache.json").resolve()
+
+
+def resolve_cache_path(
+    *,
+    repo_base: Path,
+    runtime_root: str | Path | None = None,
+    config_path: str | Path | None = None,
+) -> Path:
+    if runtime_root is not None and str(runtime_root).strip():
+        return default_cache_path(Path(runtime_root).expanduser())
+
+    if config_path is not None and str(config_path).strip():
+        path = Path(config_path).expanduser()
+        if path.is_absolute():
+            return default_cache_path(path.parent)
+
+    runtime = resolve_runtime_root(repo_root=repo_base)
+    if runtime.source != "repo_default":
+        return default_cache_path(runtime.runtime_root)
+    return default_cache_path(repo_base)
 
 
 def load_cache(path: Path) -> dict[str, Any]:
@@ -161,6 +182,8 @@ def resolve_multiplier_with_source_and_diagnostics(
     repo_base: Path,
     symbol: str | None,
     multiplier: int | float | None = None,
+    runtime_root: str | Path | None = None,
+    config_path: str | Path | None = None,
     allow_opend_refresh: bool = False,
     host: str = "127.0.0.1",
     port: int = 11111,
@@ -193,7 +216,7 @@ def resolve_multiplier_with_source_and_diagnostics(
         diagnostics["message"] = "missing symbol; multiplier could not be resolved"
         return None, None, diagnostics
 
-    cache_path = default_cache_path(repo_base)
+    cache_path = resolve_cache_path(repo_base=repo_base, runtime_root=runtime_root, config_path=config_path)
     diagnostics["cache_path"] = str(cache_path)
     cache = load_cache(cache_path)
     cached = get_cached_multiplier(cache, sym)
@@ -296,11 +319,65 @@ def store_multiplier(cache: dict[str, Any], symbol: str, multiplier: int, *, sou
     return cache
 
 
+def seed_multiplier_cache(
+    *,
+    repo_base: Path,
+    symbol: str,
+    multiplier: int,
+    source: str = "manual_seed",
+    runtime_root: str | Path | None = None,
+    config_path: str | Path | None = None,
+    cache_path: str | Path | None = None,
+    confirm: bool = False,
+) -> dict[str, Any]:
+    path = Path(cache_path).expanduser().resolve() if cache_path else resolve_cache_path(
+        repo_base=repo_base,
+        runtime_root=runtime_root,
+        config_path=config_path,
+    )
+    sym = normalize_symbol(symbol)
+    value = _positive_int(multiplier)
+    if not sym or value is None:
+        return {
+            "ok": False,
+            "status": "invalid_input",
+            "changed": False,
+            "symbol": sym or symbol,
+            "multiplier": multiplier,
+            "cache_path": str(path),
+        }
+    update = store_multiplier({}, sym, value, source=source)
+    if not confirm:
+        return {
+            "ok": True,
+            "status": "dry_run",
+            "changed": False,
+            "symbol": sym,
+            "multiplier": value,
+            "source": source,
+            "cache_path": str(path),
+            "planned_update": update[sym],
+        }
+    cache = merge_cache_updates(path, update)
+    return {
+        "ok": True,
+        "status": "seeded",
+        "changed": True,
+        "symbol": sym,
+        "multiplier": value,
+        "source": source,
+        "cache_path": str(path),
+        "entry": cache.get(sym),
+    }
+
+
 def resolve_multiplier_with_source(
     *,
     repo_base: Path,
     symbol: str | None,
     multiplier: int | float | None = None,
+    runtime_root: str | Path | None = None,
+    config_path: str | Path | None = None,
     allow_opend_refresh: bool = False,
     host: str = "127.0.0.1",
     port: int = 11111,
@@ -311,6 +388,8 @@ def resolve_multiplier_with_source(
         repo_base=repo_base,
         symbol=symbol,
         multiplier=multiplier,
+        runtime_root=runtime_root,
+        config_path=config_path,
         allow_opend_refresh=allow_opend_refresh,
         host=host,
         port=port,
@@ -325,6 +404,8 @@ def resolve_multiplier(
     repo_base: Path,
     symbol: str | None,
     multiplier: int | float | None = None,
+    runtime_root: str | Path | None = None,
+    config_path: str | Path | None = None,
     allow_opend_refresh: bool = False,
     host: str = "127.0.0.1",
     port: int = 11111,
@@ -335,6 +416,8 @@ def resolve_multiplier(
         repo_base=repo_base,
         symbol=symbol,
         multiplier=multiplier,
+        runtime_root=runtime_root,
+        config_path=config_path,
         allow_opend_refresh=allow_opend_refresh,
         host=host,
         port=port,
