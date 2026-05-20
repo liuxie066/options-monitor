@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import Any, Mapping
+
+from src.application.settings import build_effective_env
 
 
 DEFAULT_FEISHU_APP_ID_ENV = "OM_FEISHU_APP_ID"
@@ -23,7 +24,7 @@ def _text(value: Any) -> str:
 
 
 def _env(environ: Mapping[str, str] | None, name: str) -> str:
-    env = environ if environ is not None else os.environ
+    env = build_effective_env(environ=environ).values
     return _text(env.get(name))
 
 

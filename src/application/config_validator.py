@@ -81,6 +81,21 @@ REMOVED_SCHEDULE_FIELDS = (
     'final_notify_before_close_min',
     'schedule_v2',
 )
+INLINE_SECRET_CONFIG_KEYS = {
+    'access_token',
+    'app_secret',
+    'client_secret',
+    'password',
+    'private_key',
+    'refresh_token',
+    'tenant_access_token',
+}
+RETIRED_FEISHU_CALLBACK_KEYS = {
+    'encrypt_key',
+    'encrypt_key_env',
+    'verification_token',
+    'verification_token_env',
+}
 
 
 def die(msg: str):
@@ -392,6 +407,22 @@ def _validate_schedule_cfg(raw, path: str) -> None:
                     die(f'{path}.gates[{index}].day_offset_from_window_start must be an integer')
 
 
+def _validate_no_inline_secrets_or_retired_callback_cfg(value, path: str = '') -> None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key_text = str(key or '').strip()
+            child_path = f'{path}.{key_text}' if path else key_text
+            key_lower = key_text.lower()
+            if key_lower in RETIRED_FEISHU_CALLBACK_KEYS and item not in (None, '', {}, []):
+                die(f'{child_path} is no longer supported; Feishu inbound uses long-connection Bot env settings')
+            if key_lower in INLINE_SECRET_CONFIG_KEYS and isinstance(item, str) and item.strip():
+                die(f'{child_path} must not contain inline secret material; store it in the env file instead')
+            _validate_no_inline_secrets_or_retired_callback_cfg(item, child_path)
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            _validate_no_inline_secrets_or_retired_callback_cfg(item, f'{path}[{index}]')
+
+
 def validate_config(cfg: dict):
     if 'watchlist' in cfg:
         die('watchlist is no longer supported; use symbols')
@@ -399,6 +430,8 @@ def validate_config(cfg: dict):
         die('profiles is no longer supported; use templates')
     if 'fees' in cfg:
         die('fees is no longer supported; fee rules are built in')
+
+    _validate_no_inline_secrets_or_retired_callback_cfg(cfg)
 
     _validate_schedule_cfg(cfg.get('schedule'), 'schedule')
     _validate_schedule_cfg(cfg.get('schedule_hk'), 'schedule_hk')
@@ -466,6 +499,23 @@ def validate_config(cfg: dict):
                 if not isinstance(raw, dict):
                     die(f'runtime.opend_rate_limits.{endpoint} must be an object')
                 validate_rate_limit_object(raw, f'runtime.opend_rate_limits.{endpoint}')
+
+    inbound = cfg.get('inbound') or {}
+    if inbound and not isinstance(inbound, dict):
+        die('inbound must be an object')
+    if isinstance(inbound, dict):
+        feishu_ws = inbound.get('feishu_ws') or {}
+        if feishu_ws and not isinstance(feishu_ws, dict):
+            die('inbound.feishu_ws must be an object')
+        if isinstance(feishu_ws, dict):
+            for key in ('reply_enabled', 'reply_in_thread'):
+                if key in feishu_ws and feishu_ws.get(key) is not None and not isinstance(feishu_ws.get(key), bool):
+                    die(f'inbound.feishu_ws.{key} must be a boolean')
+            for key in ('max_reply_chars', 'queue_size'):
+                if key in feishu_ws and feishu_ws.get(key) is not None:
+                    validate_positive_integer(feishu_ws.get(key), f'inbound.feishu_ws.{key}')
+            if 'ack_reaction' in feishu_ws and feishu_ws.get('ack_reaction') is not None and not isinstance(feishu_ws.get('ack_reaction'), str):
+                die('inbound.feishu_ws.ack_reaction must be a string')
 
     notifications = cfg.get('notifications') or {}
     if notifications and not isinstance(notifications, dict):
@@ -593,6 +643,10 @@ def validate_config(cfg: dict):
     if option_positions and not isinstance(option_positions, dict):
         die('option_positions must be an object')
     if isinstance(option_positions, dict):
+        if 'sync_to_feishu' in option_positions:
+            die('option_positions.sync_to_feishu has been removed; local SQLite trade_events are the source of truth')
+        if 'bootstrap_from_feishu' in option_positions:
+            die('option_positions.bootstrap_from_feishu has been removed; use explicit legacy inspect/migrate commands')
         auto_close = option_positions.get('auto_close') or {}
         if auto_close and not isinstance(auto_close, dict):
             die('option_positions.auto_close must be an object')

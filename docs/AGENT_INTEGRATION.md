@@ -150,7 +150,7 @@ For the full Feishu loop, run the long-connection service:
 ./om inbound feishu-ws --config-key us --lock-path /var/lib/options-monitor/locks/feishu-ws.lock
 ```
 
-The long-connection client receives Feishu events through the authenticated SDK connection, delegates text messages to inbound control, optionally adds the configured `OM_FEISHU_ACK_REACTION`, and replies through the Feishu message reply API. Render it as a long-running service with `./om service render --include-feishu-ws ...`; no public callback URL or reverse proxy is required.
+The long-connection client receives Feishu events through the authenticated SDK connection, delegates text messages to inbound control, optionally adds the configured runtime `inbound.feishu_ws.ack_reaction`, and replies through the Feishu message reply API. Render it as a long-running service with `./om service render --include-feishu-ws ...`; no public callback URL or reverse proxy is required.
 
 Treat `openclaw_readiness` as OpenClaw-specific. It is safe to call outside OpenClaw, but the
 `openclaw_binary` check may return `warn` when the `openclaw` command is not installed.

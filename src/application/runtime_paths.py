@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from pathlib import Path
+
+from src.application.settings import build_effective_env
 
 
 @dataclass(frozen=True)
@@ -26,7 +27,7 @@ def resolve_runtime_root(
     if runtime_root is not None and str(runtime_root).strip():
         return RuntimeRootResolution(Path(runtime_root).expanduser().resolve(), "argument")
 
-    env = environ if environ is not None else os.environ
+    env = build_effective_env(environ=environ).values
     env_root = str(env.get("OM_RUNTIME_ROOT") or "").strip()
     if env_root:
         return RuntimeRootResolution(Path(env_root).expanduser().resolve(), "env:OM_RUNTIME_ROOT")

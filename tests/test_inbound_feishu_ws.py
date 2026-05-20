@@ -140,8 +140,12 @@ def test_feishu_ws_does_not_reply_to_denied_sender(tmp_path: Path) -> None:
     assert replies == []
 
 
-def test_feishu_ws_settings_uses_unified_bot_config_without_callback_secrets() -> None:
+def test_feishu_ws_settings_uses_unified_bot_config_without_callback_secrets(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.us.json"
+    config_path.write_text("{}", encoding="utf-8")
+
     settings = build_feishu_ws_settings(
+        config_path=str(config_path),
         environ={
             "OM_FEISHU_BOT_APP_ID": "bot_app",
             "OM_FEISHU_BOT_APP_SECRET": "bot_secret",
@@ -154,7 +158,44 @@ def test_feishu_ws_settings_uses_unified_bot_config_without_callback_secrets() -
     assert settings.app_id == "bot_app"
     assert settings.app_secret == "bot_secret"
     assert settings.allowed_senders == "feishu:ou_1,feishu:ou_2"
+    assert settings.ack_reaction == ""
+
+
+def test_feishu_ws_settings_reads_behavior_from_runtime_config(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.us.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "inbound": {
+                    "feishu_ws": {
+                        "reply_enabled": False,
+                        "reply_in_thread": True,
+                        "max_reply_chars": 1200,
+                        "ack_reaction": "smile",
+                        "queue_size": 25,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    settings = build_feishu_ws_settings(
+        config_path=str(config_path),
+        queue_size=5,
+        environ={
+            "OM_FEISHU_BOT_APP_ID": "bot_app",
+            "OM_FEISHU_BOT_APP_SECRET": "bot_secret",
+            "OM_FEISHU_BOT_ALLOWED_OPEN_IDS": "ou_1",
+            "OM_FEISHU_WS_QUEUE_SIZE": "99",
+        },
+    )
+
+    assert settings.reply_enabled is False
+    assert settings.reply_in_thread is True
+    assert settings.max_reply_chars == 1200
     assert settings.ack_reaction == "SMILE"
+    assert settings.queue_size == 5
 
 
 def test_feishu_ws_check_reports_missing_sdk() -> None:

@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 1.2.89 - 2026-05-20
+
+### Added
+- Added `./om settings inspect`, `./om settings explain`, and `./om settings doctor` to show redacted effective env-file settings, sources, deprecated env usage, Feishu Bot readiness, and write-gate state.
+- Added automatic local env-file bootstrap for `./om` and `./om-agent`, with service rendering support for systemd `EnvironmentFile` and launchd `OM_ENV_FILE`.
+
+### Changed
+- Moved Feishu long-connection reaction, reply, and queue behavior into runtime config under `inbound.feishu_ws` instead of secret env vars.
+- Hardened config validation against inline secret material, retired Feishu callback settings, and retired option-position Feishu sync/bootstrap settings.
+- Clarified setup, deployment, inbound, and agent docs around env-file secrets, fixed option-position store paths, and Feishu long-connection configuration.
+
 ## 1.2.88 - 2026-05-20
 
 ### Added

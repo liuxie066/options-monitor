@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Any
 
 from src.application.config_loader import normalize_portfolio_broker_config
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.runtime_config_paths import absolutize_portfolio_data_config
+from src.application.settings import build_effective_env
 
 
 DEFAULT_CONFIGS = {
@@ -78,14 +78,14 @@ def resolve_output_root(output_dir: str | Path | None = None) -> Path:
         if not path.is_absolute():
             path = (repo_base() / path).resolve()
         return path
-    env_dir = str(os.environ.get("OM_OUTPUT_DIR") or "").strip()
+    env_dir = str(build_effective_env().get("OM_OUTPUT_DIR") or "").strip()
     if env_dir:
         return Path(env_dir).expanduser().resolve()
     return (repo_base() / "output" / "agent_plugin").resolve()
 
 
 def write_tools_enabled() -> bool:
-    raw = str(os.environ.get("OM_AGENT_ENABLE_WRITE_TOOLS") or "").strip().lower()
+    raw = str(build_effective_env().get("OM_AGENT_ENABLE_WRITE_TOOLS") or "").strip().lower()
     return raw in {"1", "true", "yes", "on"}
 
 

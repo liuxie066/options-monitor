@@ -46,7 +46,7 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 ### 兼容的运行时文件
 - `config.us.json`
 - `config.hk.json`
-- `portfolio.runtime.json`（可选；只用于 legacy bootstrap 或自定义 env key 名）
+- `portfolio.runtime.json`（可选；只用于 external_holdings 的 Feishu 表 env 名声明或 legacy 迁移）
 
 ### 仓库里保留的模板文件
 - `configs/system.json`
@@ -193,7 +193,7 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 
 #### data_config
 - 最小部署不需要 `portfolio.data_config`。
-- 只有 legacy SQLite bootstrap 或自定义 env key 名时，才使用 `portfolio.runtime.json`。
+- 只有 external_holdings 需要声明 Feishu 表 env 名，或执行 legacy SQLite 迁移时，才使用 `portfolio.runtime.json`。
 
 #### 最小配置对应的数据来源
 - 行情与期权链：OpenD
@@ -279,7 +279,7 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 - `account_settings.<account>.bitable.*`:
   - 当前只作为历史/预留展示字段保留
   - 不参与 runtime holdings 连接配置
-  - runtime 唯一生效的 Feishu holdings 来源是 `OM_FEISHU_HOLDINGS_TABLE`（或 `portfolio.runtime.json` 内声明的自定义 env key）
+  - runtime 唯一生效的 Feishu holdings 来源是 env file 里的 `OM_FEISHU_HOLDINGS_TABLE`（或 `portfolio.runtime.json` 内声明的替代 env 名）
 - `account_settings.<account>.futu.host` / `account_settings.<account>.futu.port`:
   - 可选，账户级 OpenD 持仓连接参数。
   - 当前 runtime 已支持按账户读取不同的 OpenD holdings 端点。
@@ -545,14 +545,22 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 
 ---
 
-## 5) `portfolio.data_config` / Feishu App 凭证到底放哪？
+## 5) env file / Feishu App 凭证到底放哪？
 
 ### 最小方式（新部署）
 - 不需要创建 repo-local `secrets` JSON。
 - 不需要在 runtime config 里配置 `portfolio.data_config`。
 - 期权持仓 SQLite 固定写入 `<runtime_root>/output_shared/state/option_positions.sqlite3`。
+- 真实凭证放本机 env file：本地默认 `.env/options-monitor.env`，Linux 推荐 `/etc/options-monitor/options-monitor.env`。
 
-如果需要 legacy SQLite bootstrap 或自定义 env key 名，才额外创建 `portfolio.runtime.json`。示例：
+配置后用只读命令确认来源和值已脱敏：
+
+```bash
+./om settings doctor
+./om settings inspect
+```
+
+如果需要 legacy SQLite 迁移或 external_holdings 替代 env 名，才额外创建 `portfolio.runtime.json`。示例：
 
 ```json
 {
@@ -586,7 +594,7 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
   - `OM_FEISHU_APP_ID`
   - `OM_FEISHU_APP_SECRET`
   - `OM_FEISHU_HOLDINGS_TABLE=app_token/table_id`
-- 如果需要自定义 env key 名，才在 `portfolio.runtime.json` 内配置 `feishu.app_id_env` / `feishu.app_secret_env` / `feishu.tables.holdings_env`。
+- 如果需要替代 env 名，才在 `portfolio.runtime.json` 内配置 `feishu.app_id_env` / `feishu.app_secret_env` / `feishu.tables.holdings_env`。
 
 示例：
 

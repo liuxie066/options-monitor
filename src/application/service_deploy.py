@@ -12,6 +12,8 @@ from json import JSONDecodeError
 from pathlib import Path
 from typing import Any, Callable, Literal, cast
 
+from src.application.settings import build_effective_env
+
 
 ServiceTarget = Literal["systemd", "launchd"]
 ServiceProvider = Literal["systemd", "launchd", "manual", "openclaw"]
@@ -86,7 +88,8 @@ def default_runtime_root(target: ServiceTarget, *, home: Path | None = None) -> 
 
 
 def default_systemd_deploy_user() -> str:
-    return str(os.environ.get("OM_DEPLOY_USER") or os.environ.get("DEPLOY_USER") or "").strip()
+    env = build_effective_env().values
+    return str(env.get("OM_DEPLOY_USER") or env.get("DEPLOY_USER") or "").strip()
 
 
 def default_systemd_deploy_home(deploy_user: str) -> Path:
@@ -233,18 +236,22 @@ def _launchd_plist(
     runtime_root: Path,
     program_args: list[str],
     log_root: Path,
+    env_file: Path | None = None,
     start_interval: int | None = None,
     start_calendar_interval: dict[str, int] | None = None,
     keep_alive: bool = False,
 ) -> str:
+    environment = {
+        "OM_RUNTIME_ROOT": str(runtime_root),
+        "PYTHONUNBUFFERED": "1",
+    }
+    if env_file is not None:
+        environment["OM_ENV_FILE"] = str(env_file)
     payload: dict[str, Any] = {
         "Label": label,
         "ProgramArguments": program_args,
         "WorkingDirectory": str(repo_root),
-        "EnvironmentVariables": {
-            "OM_RUNTIME_ROOT": str(runtime_root),
-            "PYTHONUNBUFFERED": "1",
-        },
+        "EnvironmentVariables": environment,
         "StandardOutPath": str(log_root / f"{label}.out.log"),
         "StandardErrorPath": str(log_root / f"{label}.err.log"),
         "RunAtLoad": bool(keep_alive),
@@ -352,8 +359,6 @@ def render_service_bundle(
     repo = _absolute_path_preserve_symlink(repo_root or Path.cwd())
     runtime = _resolve_path(runtime_root, base=repo, default=default_runtime_root(target_key))
     env_file_path = _resolve_path(env_file, base=repo, default=Path()) if env_file else None
-    if env_file_path is not None and target_key != "systemd":
-        raise ValueError("--env-file is only supported for systemd service rendering")
     systemd_user = default_systemd_deploy_user() if target_key == "systemd" else None
     if deploy_user is not None and str(deploy_user).strip():
         systemd_user = str(deploy_user).strip()
@@ -684,6 +689,7 @@ def render_service_bundle(
                     runtime_root=runtime,
                     program_args=tick_args,
                     log_root=log_root,
+                    env_file=env_file_path,
                     start_interval=600,
                 ),
                 install_path=f"~/Library/LaunchAgents/{label}.plist",
@@ -711,6 +717,7 @@ def render_service_bundle(
                     runtime_root=runtime,
                     program_args=auto_close_args,
                     log_root=log_root,
+                    env_file=env_file_path,
                     start_calendar_interval=AUTO_CLOSE_LAUNCHD_CALENDAR,
                 ),
                 install_path=f"~/Library/LaunchAgents/{auto_label}.plist",
@@ -736,6 +743,7 @@ def render_service_bundle(
                 runtime_root=runtime,
                 program_args=verify_args,
                 log_root=log_root,
+                env_file=env_file_path,
                 start_calendar_interval=PROJECTION_VERIFY_LAUNCHD_CALENDAR,
             ),
             install_path=f"~/Library/LaunchAgents/{verify_label}.plist",
@@ -762,6 +770,7 @@ def render_service_bundle(
                 runtime_root=runtime,
                 program_args=trade_args,
                 log_root=log_root,
+                env_file=env_file_path,
                 keep_alive=True,
             ),
             install_path=f"~/Library/LaunchAgents/{trade_label}.plist",
@@ -786,6 +795,7 @@ def render_service_bundle(
                 runtime_root=runtime,
                 program_args=status_args,
                 log_root=log_root,
+                env_file=env_file_path,
                 start_interval=900,
             ),
             install_path=f"~/Library/LaunchAgents/{status_label}.plist",
@@ -813,6 +823,7 @@ def render_service_bundle(
                     runtime_root=runtime,
                     program_args=upgrade_args,
                     log_root=log_root,
+                    env_file=env_file_path,
                     start_calendar_interval=AUTO_UPGRADE_LAUNCHD_CALENDAR,
                 ),
                 install_path=f"~/Library/LaunchAgents/{upgrade_label}.plist",
@@ -841,6 +852,7 @@ def render_service_bundle(
                     runtime_root=runtime,
                     program_args=ws_args,
                     log_root=log_root,
+                    env_file=env_file_path,
                     keep_alive=True,
                 ),
                 install_path=f"~/Library/LaunchAgents/{ws_label}.plist",

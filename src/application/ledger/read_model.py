@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -25,6 +24,7 @@ from domain.domain.ledger.position_fields import (
     parse_exp_to_ms,
 )
 from src.application.config_loader import resolve_data_config_path
+from src.application.settings import build_effective_env
 from src.application.positions.reporting import build_monthly_income_report
 from src.application.ledger.bootstrap import load_option_positions_repo
 from src.application.ledger.repository import require_option_positions_read_repo
@@ -48,7 +48,7 @@ def _resolve_data_config_for_config_path(
         if not path.is_absolute():
             path = (resolved_config.parent / path).resolve()
         return path
-    env_ref = str(os.environ.get("OM_DATA_CONFIG") or "").strip()
+    env_ref = str(build_effective_env().get("OM_DATA_CONFIG") or "").strip()
     if env_ref:
         return Path(env_ref).expanduser().resolve()
     return (resolved_config.parent / "portfolio.runtime.json").resolve()

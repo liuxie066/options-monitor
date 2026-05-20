@@ -153,3 +153,42 @@ def test_validate_config_rejects_non_boolean_option_positions_auto_close_receipt
         raise AssertionError("expected SystemExit")
     except SystemExit as exc:
         assert "option_positions.auto_close.receipt.enabled must be a boolean" in str(exc)
+
+
+def test_validate_config_rejects_option_positions_feishu_sync_config() -> None:
+    import src.application.config_validator as mod
+
+    cfg = _base_cfg()
+    cfg["option_positions"] = {"sync_to_feishu": {"enabled": True}}
+
+    try:
+        mod.validate_config(cfg)
+        raise AssertionError("expected SystemExit")
+    except SystemExit as exc:
+        assert "option_positions.sync_to_feishu has been removed" in str(exc)
+
+
+def test_validate_config_rejects_inline_secret_material() -> None:
+    import src.application.config_validator as mod
+
+    cfg = _base_cfg()
+    cfg["feishu"] = {"app_secret": "secret_in_json"}
+
+    try:
+        mod.validate_config(cfg)
+        raise AssertionError("expected SystemExit")
+    except SystemExit as exc:
+        assert "must not contain inline secret material" in str(exc)
+
+
+def test_validate_config_rejects_retired_feishu_callback_keys() -> None:
+    import src.application.config_validator as mod
+
+    cfg = _base_cfg()
+    cfg["inbound"] = {"feishu": {"verification_token_env": "OM_OLD_TOKEN"}}
+
+    try:
+        mod.validate_config(cfg)
+        raise AssertionError("expected SystemExit")
+    except SystemExit as exc:
+        assert "Feishu inbound uses long-connection Bot env settings" in str(exc)

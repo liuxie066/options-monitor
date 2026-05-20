@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, cast
 
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response, mask_path
+from src.application.agent_tool_config import load_runtime_config, resolve_runtime_config_path
 from src.application.inbound.feishu import handle_feishu_payload
 from src.application.inbound.router import ExecuteToolFn
 from src.application.secret_resolver import (
@@ -17,6 +18,7 @@ from src.application.secret_resolver import (
     DEFAULT_FEISHU_BOT_APP_SECRET_ENV,
     resolve_feishu_bot_config,
 )
+from src.application.settings import build_effective_env
 from src.infrastructure.feishu_bot import add_message_reaction, reply_text_message
 from src.infrastructure.feishu_ws_client import is_feishu_ws_sdk_available, start_feishu_ws_client
 
@@ -84,14 +86,15 @@ def build_feishu_ws_settings(
     config_key: str | None = "us",
     config_path: str | None = None,
     audit_db: str | None = None,
-    reply_enabled: bool = True,
+    reply_enabled: bool | None = None,
     reply_in_thread: bool | None = None,
     max_reply_chars: int | None = None,
     queue_size: int | None = None,
     environ: Mapping[str, str] | None = None,
 ) -> FeishuWsSettings:
-    env = environ if environ is not None else os.environ
+    env = build_effective_env(environ=environ).values
     bot_cfg = resolve_feishu_bot_config(environ=env)
+    behavior_cfg = _load_feishu_ws_behavior_config(config_key=config_key, config_path=config_path)
     return FeishuWsSettings(
         config_key=str(config_key or "").strip().lower() or None,
         config_path=_first_text(config_path),
@@ -99,11 +102,19 @@ def build_feishu_ws_settings(
         allowed_senders=bot_cfg.default_allowed_senders(),
         app_id=bot_cfg.app_id,
         app_secret=bot_cfg.app_secret,
-        reply_enabled=bool(reply_enabled),
-        reply_in_thread=bool(reply_in_thread) if reply_in_thread is not None else _truthy(env.get("OM_FEISHU_REPLY_IN_THREAD")),
-        max_reply_chars=int(max_reply_chars or _int_env(env, "OM_FEISHU_REPLY_MAX_CHARS", DEFAULT_FEISHU_REPLY_MAX_CHARS)),
-        ack_reaction=str(env.get("OM_FEISHU_ACK_REACTION") or "").strip().upper(),
-        queue_size=max(1, int(queue_size or _int_env(env, "OM_FEISHU_WS_QUEUE_SIZE", DEFAULT_FEISHU_WS_QUEUE_SIZE))),
+        reply_enabled=_config_bool(reply_enabled, behavior_cfg.get("reply_enabled"), default=True),
+        reply_in_thread=_config_bool(reply_in_thread, behavior_cfg.get("reply_in_thread"), default=False),
+        max_reply_chars=_config_positive_int(
+            max_reply_chars,
+            behavior_cfg.get("max_reply_chars"),
+            default=DEFAULT_FEISHU_REPLY_MAX_CHARS,
+        ),
+        ack_reaction=str(behavior_cfg.get("ack_reaction") or "").strip().upper(),
+        queue_size=_config_positive_int(
+            queue_size,
+            behavior_cfg.get("queue_size"),
+            default=DEFAULT_FEISHU_WS_QUEUE_SIZE,
+        ),
     )
 
 
@@ -395,23 +406,59 @@ def _dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _load_feishu_ws_behavior_config(*, config_key: str | None, config_path: str | None) -> dict[str, Any]:
+    explicit_config_path = bool(config_path is not None and str(config_path).strip())
+    if not explicit_config_path:
+        try:
+            resolved_path = resolve_runtime_config_path(config_key=config_key, config_path=None)
+        except AgentToolError:
+            return {}
+        if not resolved_path.exists():
+            return {}
+
+    try:
+        _path, cfg = load_runtime_config(config_key=config_key, config_path=config_path)
+    except AgentToolError:
+        if explicit_config_path:
+            raise
+        return {}
+
+    inbound = _dict(cfg.get("inbound"))
+    return _dict(inbound.get("feishu_ws"))
+
+
+def _config_bool(explicit: bool | None, configured: Any, *, default: bool) -> bool:
+    if explicit is not None:
+        return bool(explicit)
+    if isinstance(configured, bool):
+        return configured
+    if configured is None:
+        return bool(default)
+    value = str(configured or "").strip().lower()
+    if value in {"1", "true", "yes", "y", "on"}:
+        return True
+    if value in {"0", "false", "no", "n", "off"}:
+        return False
+    return bool(default)
+
+
+def _config_positive_int(explicit: int | None, configured: Any, *, default: int) -> int:
+    raw = explicit if explicit is not None else configured
+    if raw is None or str(raw).strip() == "":
+        raw = default
+    try:
+        value = int(raw)
+    except Exception:
+        value = default
+    return max(1, value)
+
+
 def _first_text(*values: Any) -> str | None:
     for value in values:
         text = str(value or "").strip()
         if text:
             return text
     return None
-
-
-def _int_env(env: Mapping[str, str], name: str, default: int) -> int:
-    try:
-        return int(str(env.get(name) or "").strip() or default)
-    except Exception:
-        return default
-
-
-def _truthy(value: Any) -> bool:
-    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 @contextmanager

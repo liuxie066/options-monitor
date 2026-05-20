@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol, cast, runtime_checkable
+
+from src.application.settings import build_effective_env
 
 
 REPO_BASE = Path(__file__).resolve().parents[3]
@@ -133,7 +134,7 @@ def _resolve_runtime_root(
     if runtime_root is not None and str(runtime_root).strip():
         return Path(runtime_root).expanduser().resolve(), "argument"
 
-    env_root = str(os.environ.get("OM_RUNTIME_ROOT") or "").strip()
+    env_root = str(build_effective_env().get("OM_RUNTIME_ROOT") or "").strip()
     if env_root:
         return Path(env_root).expanduser().resolve(), "env:OM_RUNTIME_ROOT"
 

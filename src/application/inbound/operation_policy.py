@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 
 from src.application.agent_tool_contracts import AgentToolError
+from src.application.settings import build_effective_env
 
 
 DEFAULT_CONFIRM_TTL_SECONDS = 600
@@ -19,13 +19,14 @@ class InboundOperationPolicy:
 
 
 def load_operation_policy_from_env() -> InboundOperationPolicy:
+    env = build_effective_env().values
     return InboundOperationPolicy(
-        operations_enabled=_truthy(os.environ.get("OM_INBOUND_OPERATIONS_ENABLED")),
-        trade_write_enabled=_truthy(os.environ.get("OM_INBOUND_TRADE_WRITE_ENABLED")),
-        symbol_write_enabled=_truthy(os.environ.get("OM_INBOUND_SYMBOL_WRITE_ENABLED")),
-        admin_senders=_parse_sender_entries(os.environ.get("OM_INBOUND_ADMIN_OPEN_IDS")),
+        operations_enabled=_truthy(env.get("OM_INBOUND_OPERATIONS_ENABLED")),
+        trade_write_enabled=_truthy(env.get("OM_INBOUND_TRADE_WRITE_ENABLED")),
+        symbol_write_enabled=_truthy(env.get("OM_INBOUND_SYMBOL_WRITE_ENABLED")),
+        admin_senders=_parse_sender_entries(env.get("OM_INBOUND_ADMIN_OPEN_IDS")),
         confirm_ttl_seconds=_positive_int(
-            os.environ.get("OM_INBOUND_CONFIRM_TTL_SECONDS"),
+            env.get("OM_INBOUND_CONFIRM_TTL_SECONDS"),
             default=DEFAULT_CONFIRM_TTL_SECONDS,
         ),
     )

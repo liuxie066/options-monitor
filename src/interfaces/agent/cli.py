@@ -6,9 +6,10 @@ import sys
 from pathlib import Path
 
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response
-from src.application.agent_tool_config import write_tools_enabled
+from src.application.agent_tool_config import repo_base, write_tools_enabled
 from src.application.account_management import add_account, edit_account, remove_account
 from src.application.tool_execution import build_tool_manifest, execute_tool
+from src.application.settings import bootstrap_process_env
 
 
 def dumps_json(payload: dict) -> str:
@@ -80,6 +81,8 @@ def _enforce_account_write_gate(args: argparse.Namespace) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    if argv is None:
+        bootstrap_process_env(repo_root=repo_base(), include_local_env_file=True)
     args = parse_args(argv)
     if args.command == "spec":
         sys.stdout.write(dumps_json(build_tool_manifest()))

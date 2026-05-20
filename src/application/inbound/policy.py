@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import Any
 
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.agent_tool_registry import get_tool_definition
 from src.application.inbound.contracts import InboundToolCall
+from src.application.settings import build_effective_env
 
 
 PURE_READ_TOOLS = frozenset(
@@ -110,10 +110,11 @@ def enforce_tool_allowed(call: InboundToolCall) -> dict[str, Any]:
 
 
 def _default_allowed_senders(channel: str) -> str:
+    env = build_effective_env().values
     if channel == "feishu":
-        allowed = _parse_open_ids(os.environ.get("OM_FEISHU_BOT_ALLOWED_OPEN_IDS"))
+        allowed = _parse_open_ids(env.get("OM_FEISHU_BOT_ALLOWED_OPEN_IDS"))
         if not allowed:
-            allowed = _parse_open_ids(os.environ.get("OM_FEISHU_BOT_USER_OPEN_ID"))
+            allowed = _parse_open_ids(env.get("OM_FEISHU_BOT_USER_OPEN_ID"))
         return ",".join(f"feishu:{item}" for item in allowed)
     return ""
 
@@ -147,5 +148,5 @@ def _parse_allowed_entries(raw: str | None) -> list[tuple[str, str, str]]:
 def _truthy_env(name: str, explicit: bool | None) -> bool:
     if explicit is not None:
         return bool(explicit)
-    value = str(os.environ.get(name) or "").strip().lower()
+    value = str(build_effective_env().get(name) or "").strip().lower()
     return value in {"1", "true", "yes", "y", "on"}
