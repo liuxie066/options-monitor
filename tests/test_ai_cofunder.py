@@ -356,6 +356,88 @@ def test_ai_cofunder_collects_strategy_evidence_for_handoff(tmp_path: Path) -> N
     assert "cash_headroom=2" in data["handoff_markdown"]
 
 
+def test_ai_cofunder_collects_strategy_evidence_from_profile_runtime_root(tmp_path: Path) -> None:
+    from src.application.ai_cofunder.service import ai_cofunder_tool
+
+    runtime_root = tmp_path.parent / f"{tmp_path.name}-runtime"
+    runs_root = runtime_root / "output_runs"
+    run_dir = runs_root / "run-1"
+    account_run_dir = run_dir / "accounts" / "lx"
+    account_run_dir.mkdir(parents=True)
+    (account_run_dir / "nvda_sell_put_candidates_labeled.csv").write_text(
+        (
+            "symbol,account,option_type,dte,delta,strike,spot,annualized_net_return_on_cash_basis,"
+            "net_income,otm_pct,spread_ratio,open_interest,volume,cash_required_usd,cash_free_usd\n"
+            "NVDA,lx,put,30,-0.2,140,150,0.12,120,0.066667,0.12,500,20,14000,28000\n"
+        ),
+        encoding="utf-8",
+    )
+    (account_run_dir / "nvda_sell_put_candidates_reject_log.csv").write_text(
+        "symbol,reject_stage,engine_reject_stage,engine_reject_reason\nNVDA,step3_risk_gate,stage3_risk_filter,risk_spread\n",
+        encoding="utf-8",
+    )
+    (account_run_dir / "candidate_filter_trace.jsonl").write_text(
+        json.dumps({"run_id": "run-1", "account": "lx", "status": "rejected", "rule": "risk_volume"}) + "\n",
+        encoding="utf-8",
+    )
+    profile_path = tmp_path / "service.profile.json"
+    profile_path.write_text(
+        json.dumps(
+            {
+                "runtime_root": str(runtime_root),
+                "paths": {
+                    "runs_root": str(runs_root),
+                    "report_dir": str(runtime_root / "output" / "reports"),
+                    "shared_state_dir": str(runtime_root / "output_shared" / "state"),
+                },
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    runtime_data = _runtime_status_data()
+    runtime_data["summary"]["latest_run_path"] = ".../run-1"
+    runtime_data["summary"]["latest_scanned_run_path"] = ".../run-1"
+    runtime_data["latest_run"]["path"] = ".../run-1"
+    runtime_data["latest_scanned_run"]["path"] = ".../run-1"
+    runtime_data["paths"] = {
+        "runs_root": ".../output_runs",
+        "shared_state_dir": ".../state",
+    }
+
+    def _runtime_status(_payload):
+        return runtime_data, [], {}
+
+    data, _warnings, _meta = ai_cofunder_tool(
+        {
+            "config_path": str(tmp_path / "config.us.json"),
+            "profile_path": str(profile_path),
+            "write_outputs": False,
+            "scheduler_evidence": {
+                "provider": "openclaw",
+                "job_name": "us-tick",
+                "last_triggered_at": "2026-05-16T01:00:00Z",
+                "last_status": "success",
+                "last_exit_code": 0,
+            },
+        },
+        runtime_status_tool_fn=_runtime_status,
+        **_tool_kwargs(tmp_path),
+    )
+
+    summary = data["bundle"]["strategy_evidence"]["summary"]
+    account_strategy = data["bundle"]["account_strategy_matrix"]["accounts"]["lx"]["strategy_evidence"]
+    assert summary["candidate_row_count"] == 1
+    assert summary["reject_log_row_count"] == 1
+    assert summary["filter_trace_file_count"] == 1
+    assert summary["ranking_report_count"] == 1
+    assert account_strategy["candidate_rows"] == 1
+    assert account_strategy["reject_log_rows"] == 1
+    assert account_strategy["trace_rows"] == 1
+
+
 def test_ai_cofunder_builds_redacted_bundle_and_handoff(tmp_path: Path) -> None:
     from src.application.ai_cofunder.service import ai_cofunder_tool
 

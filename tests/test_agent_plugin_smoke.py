@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -1365,6 +1366,66 @@ def test_runtime_status_can_inspect_scanned_run_after_skipped_latest(tmp_path: P
     assert out_by_dir["data"]["latest_run_selection"]["source"] == "run_dir"
     assert out_by_dir["data"]["latest_run_selection"]["found"] is True
     assert out_by_dir["data"]["latest_run"]["path"].endswith("run-scan")
+
+
+def test_runtime_status_latest_scanned_run_respects_config_market(tmp_path: Path) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    def write_json(path: Path, payload: dict[str, object]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    cfg_path = tmp_path / "config.us.json"
+    cfg = _minimal_cfg()
+    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    report_dir = tmp_path / "output" / "reports"
+    shared_state_dir = tmp_path / "output_shared" / "state"
+    runs_root = tmp_path / "output_runs"
+    for path in (report_dir, shared_state_dir, runs_root):
+        path.mkdir(parents=True, exist_ok=True)
+    (report_dir / "symbols_notification.txt").write_text("shared notification\n", encoding="utf-8")
+    write_json(shared_state_dir / "last_run.json", {"status": "ok", "run_id": "run-hk"})
+
+    run_us = runs_root / "run-us"
+    run_hk = runs_root / "run-hk"
+    write_json(
+        run_us / "state" / "tick_metrics.json",
+        {
+            "ran_scan": True,
+            "markets_to_run": ["US"],
+            "scheduler_markets": ["US"],
+            "accounts": {"user1": {"ran_scan": True}},
+        },
+    )
+    write_json(
+        run_hk / "state" / "tick_metrics.json",
+        {
+            "ran_scan": True,
+            "markets_to_run": ["HK"],
+            "scheduler_markets": ["HK"],
+            "accounts": {"user1": {"ran_scan": True}},
+        },
+    )
+    os.utime(run_us, (1_000_000, 1_000_000))
+    os.utime(run_hk, (2_000_000, 2_000_000))
+
+    out = run_tool(
+        "runtime_status",
+        {
+            "config_key": "us",
+            "config_path": str(cfg_path),
+            "report_dir": str(report_dir),
+            "shared_state_dir": str(shared_state_dir),
+            "runs_root": str(runs_root),
+        },
+    )
+
+    assert out["ok"] is True
+    selection = out["data"]["latest_scanned_run_selection"]
+    assert out["data"]["latest_scanned_run"]["path"].endswith("run-us")
+    assert selection["market_filter"] == "US"
+    assert selection["skipped_market_mismatch_count"] == 1
 
 
 def test_runtime_status_loads_openclaw_profile_and_masks_external_paths(tmp_path: Path) -> None:

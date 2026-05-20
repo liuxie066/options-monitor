@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.2.98 - 2026-05-20
+
+### Added
+- Added remote runtime selection flags to `om ai-cofunder collect`, including run roots, explicit run ids, report/state roots, tail limits, and notification/freshness limits.
+
+### Fixed
+- Fixed AI Cofunder strategy evidence collection for service-profile runtime roots outside the repo checkout, so remote run candidate, reject-log, trace, and ranking evidence can be included in handoff bundles.
+- Made runtime status select the latest scanned run for the requested US/HK market instead of crossing shared `output_runs` markets.
+
 ## 1.2.97 - 2026-05-20
 
 ### Changed

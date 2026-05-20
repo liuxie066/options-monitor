@@ -158,6 +158,78 @@ def test_top_level_status_prints_human_summary(monkeypatch, capsys) -> None:
     assert "ledger: status=ok fail_closed=no events=3 lots=2 sqlite=output_shared/state/option_positions.sqlite3" in out
 
 
+def test_ai_cofunder_collect_forwards_remote_runtime_selection(monkeypatch, capsys) -> None:
+    import src.interfaces.cli.main as cli
+
+    calls: list[tuple[str, dict]] = []
+
+    def _execute_tool(name: str, payload: dict) -> dict:
+        calls.append((name, payload))
+        return {"tool_name": "ai_cofunder", "ok": True, "data": {"status": "ok"}}
+
+    monkeypatch.setattr(cli, "execute_tool", _execute_tool)
+
+    rc = cli.main([
+        "ai-cofunder",
+        "collect",
+        "--config-key",
+        "us",
+        "--config-path",
+        "/var/lib/options-monitor/config.us.json",
+        "--profile-path",
+        "/var/lib/options-monitor/service.profile.json",
+        "--runs-root",
+        "/var/lib/options-monitor/output_runs",
+        "--report-dir",
+        "/var/lib/options-monitor/output/reports",
+        "--shared-state-dir",
+        "/var/lib/options-monitor/output_shared/state",
+        "--accounts-root",
+        "/var/lib/options-monitor/output_accounts",
+        "--run-id",
+        "run-1",
+        "--runs-limit",
+        "3",
+        "--tail-limit",
+        "50",
+        "--max-run-age-minutes",
+        "90",
+        "--max-notification-chars",
+        "2000",
+        "--output",
+        "json",
+        "--no-write-outputs",
+    ])
+    payload = _read_json_output(capsys)
+
+    assert rc == 0
+    assert payload["tool_name"] == "ai_cofunder"
+    assert calls == [
+        (
+            "ai_cofunder",
+            {
+                "scope": "full",
+                "config_key": "us",
+                "config_path": "/var/lib/options-monitor/config.us.json",
+                "profile_path": "/var/lib/options-monitor/service.profile.json",
+                "report_dir": "/var/lib/options-monitor/output/reports",
+                "shared_state_dir": "/var/lib/options-monitor/output_shared/state",
+                "accounts_root": "/var/lib/options-monitor/output_accounts",
+                "runs_root": "/var/lib/options-monitor/output_runs",
+                "run_id": "run-1",
+                "runs_limit": 3,
+                "tail_limit": 50,
+                "max_run_age_minutes": 90,
+                "max_notification_chars": 2000,
+                "output": "json",
+                "include_healthcheck": False,
+                "write_outputs": False,
+                "confirm": False,
+            },
+        )
+    ]
+
+
 def test_top_level_status_json_prints_raw_runtime_status(monkeypatch, capsys) -> None:
     import src.interfaces.cli.main as cli
 
