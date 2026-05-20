@@ -72,13 +72,6 @@ cd "$HOME/apps/options-monitor/current"
 ./om setup init --market hk --account lx --futu-acc-id <futu-account-id>
 ```
 
-旧的 `./om setup --market ...` 和 `./om init runtime ...` 入口仍保留兼容。
-
-如果你已经有自己的分层配置，运行时最终只认这两个 canonical config：
-
-- `config.us.json`
-- `config.hk.json`
-
 常见编辑源：
 
 - `configs/system.json`

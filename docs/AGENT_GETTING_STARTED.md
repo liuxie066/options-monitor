@@ -45,13 +45,6 @@ python3 -m venv .venv
 ./om setup init --market us --account lx --futu-acc-id <futu-account-id>
 ```
 
-旧的兼容入口仍可用：
-
-```bash
-./om setup --market us --futu-acc-id <futu-account-id>
-./om init runtime --market us --futu-acc-id <futu-account-id>
-```
-
 首次初始化通常会生成：
 
 - `config.us.json` 或 `config.hk.json`

@@ -40,13 +40,6 @@
 ./om setup init --market hk --account lx --futu-acc-id <futu-account-id>
 ```
 
-旧入口仍保留兼容：
-
-```bash
-./om setup --market us --futu-acc-id <futu-account-id>
-./om init runtime --market us --futu-acc-id <futu-account-id>
-```
-
 初始化后先校验配置：
 
 ```bash

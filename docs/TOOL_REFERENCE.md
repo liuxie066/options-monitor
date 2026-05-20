@@ -157,8 +157,6 @@
 ./om setup init --market us --account lx --futu-acc-id <futu-account-id>
 ```
 
-旧的 `./om setup --market ...` 和 `./om init runtime ...` 入口仍保留兼容。
-
 ### Service 入口关系
 
 Linux / Mac 长期运行建议先渲染服务文件，再由系统服务管理器安装：

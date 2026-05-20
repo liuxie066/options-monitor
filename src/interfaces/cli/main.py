@@ -401,23 +401,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     sub.add_parser("option-positions", help="option position operations")
     sub.add_parser("trade-events", help="review, repair, replay, and void trade events")
 
-    init_cmd = sub.add_parser("init", help="initialize runtime config")
-    init_sub = init_cmd.add_subparsers(dest="init_command", required=True)
-    runtime = init_sub.add_parser("runtime", help="generate runtime config")
-    runtime.add_argument("--market", required=True, choices=("us", "hk"))
-    runtime.add_argument("--futu-acc-id", required=True)
-    runtime.add_argument("--account-label", default="user1")
-    runtime.add_argument("--config-path", default=None)
-    runtime.add_argument("--data-config-path", default=None)
-    runtime.add_argument("--symbol", action="append", dest="symbols", default=None)
-    runtime.add_argument("--holdings-account", default=None)
-    runtime.add_argument("--opend-host", default="127.0.0.1")
-    runtime.add_argument("--opend-port", type=int, default=11111)
-    runtime.add_argument("--force", action="store_true")
-
     setup = sub.add_parser("setup", help="install-time checks and first-run setup helpers")
-    setup_sub = setup.add_subparsers(dest="setup_command")
-    _add_setup_init_args(setup, required=False)
+    setup_sub = setup.add_subparsers(dest="setup_command", required=True)
     setup_check = setup_sub.add_parser("check", help="run read-only first-run setup diagnostics")
     setup_check.add_argument("--market", action="append", choices=("us", "hk", "all"), default=None)
     setup_check.add_argument("--env-file", default=None)
@@ -1113,20 +1098,6 @@ def main(argv: list[str] | None = None) -> int:
             )
             return _print(build_response(tool_name="update.rollback", ok=bool(data.get("ok")), data=data))
 
-        if args.command == "init" and args.init_command == "runtime":
-            return _print(build_response(tool_name="init.runtime", ok=True, data=init_runtime(
-                market=args.market,
-                futu_acc_id=args.futu_acc_id,
-                account_label=args.account_label,
-                config_path=args.config_path,
-                data_config_path=args.data_config_path,
-                symbols=args.symbols,
-                holdings_account=args.holdings_account,
-                opend_host=args.opend_host,
-                opend_port=args.opend_port,
-                force=bool(args.force),
-            )))
-
         if args.command == "setup" and args.setup_command == "check":
             data = run_setup_check(
                 repo_root=repo_base(),
@@ -1140,14 +1111,8 @@ def main(argv: list[str] | None = None) -> int:
                 data=data,
             ))
 
-        if args.command == "setup":
-            if not args.market or not args.futu_acc_id:
-                raise AgentToolError(
-                    code="INPUT_ERROR",
-                    message="setup init requires --market and --futu-acc-id",
-                    hint="Run ./om setup check for read-only diagnostics, or ./om setup init --market us --account lx --futu-acc-id <id>.",
-                )
-            return _print(build_response(tool_name="setup.init" if args.setup_command == "init" else "setup", ok=True, data=init_runtime(
+        if args.command == "setup" and args.setup_command == "init":
+            return _print(build_response(tool_name="setup.init", ok=True, data=init_runtime(
                 market=args.market,
                 futu_acc_id=args.futu_acc_id,
                 account_label=args.account_label,

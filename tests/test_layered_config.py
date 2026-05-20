@@ -478,7 +478,7 @@ def test_init_runtime_config_includes_inline_generation_metadata(tmp_path: Path)
 
     assert market_user["inline"] is True
     assert market_user["ref"] == "init_local_config"
-    assert generated["rebuild_command"].startswith("./om init runtime --market us")
+    assert generated["rebuild_command"].startswith("./om setup init --market us")
     assert check_runtime_config_freshness(
         cfg,
         repo_root=REPO_ROOT,
