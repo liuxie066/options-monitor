@@ -35,6 +35,7 @@ class EffectiveEnv:
     env_file: Path | None = None
     env_file_loaded: bool = False
     warnings: tuple[str, ...] = ()
+    env_file_duplicate_keys: tuple[dict[str, Any], ...] = ()
 
     def get(self, name: str, default: str = "") -> str:
         return str(self.values.get(name, default) or "")
@@ -99,9 +100,12 @@ def build_effective_env(
         include_local_env_file=include_local_env_file,
     )
     loaded = False
+    duplicate_keys: tuple[dict[str, Any], ...] = ()
     if resolved_env_file is not None:
         try:
-            file_values = parse_env_file(resolved_env_file.read_text(encoding="utf-8"))
+            parsed_file = _parse_env_file_with_metadata(resolved_env_file.read_text(encoding="utf-8"))
+            file_values = parsed_file.values
+            duplicate_keys = parsed_file.duplicate_keys
         except FileNotFoundError:
             warnings.append(f"env file not found: {resolved_env_file}")
             file_values = {}
@@ -123,11 +127,23 @@ def build_effective_env(
         env_file=resolved_env_file,
         env_file_loaded=loaded,
         warnings=tuple(warnings),
+        env_file_duplicate_keys=duplicate_keys,
     )
 
 
+@dataclass(frozen=True)
+class _ParsedEnvFile:
+    values: dict[str, str]
+    duplicate_keys: tuple[dict[str, Any], ...] = ()
+
+
 def parse_env_file(text: str) -> dict[str, str]:
+    return _parse_env_file_with_metadata(text).values
+
+
+def _parse_env_file_with_metadata(text: str) -> _ParsedEnvFile:
     out: dict[str, str] = {}
+    seen: dict[str, list[tuple[int, str]]] = {}
     for lineno, raw_line in enumerate(str(text or "").splitlines(), start=1):
         line = raw_line.strip()
         if not line or line.startswith("#"):
@@ -140,8 +156,41 @@ def parse_env_file(text: str) -> dict[str, str]:
         key = raw_key.strip()
         if not _KEY_RE.match(key):
             raise ValueError(f"invalid env line {lineno}: invalid key {key!r}")
-        out[key] = _parse_env_value(raw_value.strip())
-    return out
+        value = _parse_env_value(raw_value.strip())
+        out[key] = value
+        seen.setdefault(key, []).append((lineno, value))
+
+    duplicates: list[dict[str, Any]] = []
+    for key, entries in seen.items():
+        if len(entries) <= 1:
+            continue
+        raw_values = [value for _lineno, value in entries]
+        public_values: list[str] = []
+        for value in raw_values:
+            redacted = _redacted_value(key, value) or ""
+            if redacted not in public_values:
+                public_values.append(redacted)
+        item: dict[str, Any] = {
+            "name": key,
+            "count": len(entries),
+            "lines": [lineno for lineno, _value in entries],
+            "conflict": len(set(raw_values)) > 1,
+            "values": public_values,
+        }
+        if key in DEPRECATED_ENV_SETTINGS:
+            item["migration_target"] = _deprecated_env_migration_target(key)
+            item["hint"] = DEPRECATED_ENV_SETTINGS[key]
+        duplicates.append(item)
+    return _ParsedEnvFile(values=out, duplicate_keys=tuple(duplicates))
+
+
+def _deprecated_env_migration_target(name: str) -> str | None:
+    targets = {
+        "OM_FEISHU_ACK_REACTION": "inbound.feishu_ws.ack_reaction",
+        "OM_FEISHU_REPLY_MAX_CHARS": "inbound.feishu_ws.max_reply_chars",
+        "OM_FEISHU_WS_QUEUE_SIZE": "inbound.feishu_ws.queue_size",
+    }
+    return targets.get(name)
 
 
 def inspect_effective_settings(
@@ -233,7 +282,7 @@ def diagnose_effective_settings(
         add("env_file_warning", status, warning)
 
     deprecated = [
-        {"name": name, "hint": hint}
+        {"name": name, "hint": hint, "migration_target": _deprecated_env_migration_target(name)}
         for name, hint in DEPRECATED_ENV_SETTINGS.items()
         if effective.get(name)
     ]
@@ -241,6 +290,34 @@ def diagnose_effective_settings(
         add("deprecated_env", "warn", "deprecated env settings are configured but ignored by runtime code", deprecated)
     else:
         add("deprecated_env", "ok", "no deprecated Feishu behavior env settings configured")
+
+    duplicate_deprecated = [
+        item
+        for item in effective.env_file_duplicate_keys
+        if str(item.get("name") or "") in DEPRECATED_ENV_SETTINGS
+    ]
+    if duplicate_deprecated:
+        add(
+            "deprecated_env_duplicates",
+            "warn",
+            "deprecated env settings are defined multiple times; migrate once to runtime config and remove env duplicates",
+            {
+                "duplicates": duplicate_deprecated,
+                "action": "set the runtime config key shown in migration_target and delete the deprecated env key; this tool does not overwrite runtime config",
+            },
+        )
+    else:
+        add("deprecated_env_duplicates", "ok", "no duplicate deprecated env settings found")
+
+    if effective.env_file_duplicate_keys:
+        add(
+            "duplicate_env_keys",
+            "warn",
+            "env file defines one or more keys multiple times; the last value wins",
+            {"duplicates": list(effective.env_file_duplicate_keys)},
+        )
+    else:
+        add("duplicate_env_keys", "ok", "no duplicate env keys found")
 
     bot_app_id = effective.get("OM_FEISHU_BOT_APP_ID")
     bot_app_secret = effective.get("OM_FEISHU_BOT_APP_SECRET")
@@ -285,6 +362,26 @@ def diagnose_effective_settings(
         "agent_write_tools_enabled": _truthy(effective.get("OM_AGENT_ENABLE_WRITE_TOOLS")),
     }
     add("write_gates", "info", "write gates are explicit settings and default to disabled", write_gates)
+    missing_trade_write = [
+        name
+        for name, enabled in (
+            ("OM_INBOUND_OPERATIONS_ENABLED", write_gates["operations_enabled"]),
+            ("OM_INBOUND_TRADE_WRITE_ENABLED", write_gates["trade_write_enabled"]),
+        )
+        if not enabled
+    ]
+    if missing_trade_write:
+        add(
+            "inbound_trade_write_readiness",
+            "warn",
+            "manual trade inbound is readable but trade writes are not enabled",
+            {
+                "missing_enabled_env": missing_trade_write,
+                "action": "set OM_INBOUND_OPERATIONS_ENABLED=1 and OM_INBOUND_TRADE_WRITE_ENABLED=1 only after confirming the Feishu sender allowlist/admin sender",
+            },
+        )
+    else:
+        add("inbound_trade_write_readiness", "ok", "manual trade inbound write gates are enabled")
 
     error_count = sum(1 for item in checks if item.get("status") == "error")
     warning_count = sum(1 for item in checks if item.get("status") == "warn")

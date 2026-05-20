@@ -155,8 +155,9 @@ def test_resolve_trade_open_missing_multiplier_is_retryable_with_diagnostics() -
                     "attempted_sources": [
                         {"source": "payload", "status": "missing"},
                         {"source": "cache", "status": "miss"},
-                        {"source": "config:intake.multiplier_by_symbol", "status": "miss"},
+                        {"source": "opend", "status": "error", "error": "multiplier_not_found"},
                     ],
+                    "message": "recognized 9992.HK but multiplier could not be resolved",
                 },
             },
         ),

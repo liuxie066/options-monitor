@@ -140,6 +140,41 @@ def test_feishu_ws_does_not_reply_to_denied_sender(tmp_path: Path) -> None:
     assert replies == []
 
 
+def test_feishu_ws_replies_when_allowed_sender_hits_write_gate(monkeypatch, tmp_path: Path) -> None:
+    for name in (
+        "OM_ENV_FILE",
+        "OM_INBOUND_OPERATIONS_ENABLED",
+        "OM_INBOUND_TRADE_WRITE_ENABLED",
+        "OM_INBOUND_ADMIN_OPEN_IDS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    replies: list[dict] = []
+
+    def _reply(**kwargs) -> dict:  # type: ignore[no-untyped-def]
+        replies.append(dict(kwargs))
+        return {"code": 0}
+
+    out = handle_feishu_ws_event(
+        _message_payload(
+            sender="ou_1",
+            text="记录开仓 sy NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
+        ),
+        settings=FeishuWsSettings(
+            allowed_senders="feishu:ou_1",
+            app_id="app_1",
+            app_secret="secret_1",
+            audit_db=str(tmp_path / "audit.sqlite3"),
+        ),
+        reply_fn=_reply,
+    )
+
+    assert out["ok"] is False
+    assert out["data"]["reply"]["reason"] == "permission_denied_sent"
+    assert replies
+    assert "inbound write operations are disabled" in replies[0]["text"]
+    assert "OM_INBOUND_OPERATIONS_ENABLED=1" in replies[0]["text"]
+
+
 def test_feishu_ws_settings_uses_unified_bot_config_without_callback_secrets(tmp_path: Path) -> None:
     config_path = tmp_path / "config.us.json"
     config_path.write_text("{}", encoding="utf-8")

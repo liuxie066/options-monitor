@@ -444,22 +444,13 @@ def validate_config(cfg: dict):
         sa = intake.get('symbol_aliases') or {}
         if sa and not isinstance(sa, dict):
             die('intake.symbol_aliases must be an object')
-        mb = intake.get('multiplier_by_symbol') or {}
-        if mb and not isinstance(mb, dict):
-            die('intake.multiplier_by_symbol must be an object')
-        for k, v in mb.items():
-            try:
-                if float(v) <= 0:
-                    die(f'intake.multiplier_by_symbol[{k}] must be > 0')
-            except Exception:
-                die(f'intake.multiplier_by_symbol[{k}] must be a number')
-        for key in ('default_multiplier_us', 'default_multiplier_hk'):
+        retired_multiplier_keys = ('multiplier_by_symbol', 'default_multiplier_us', 'default_multiplier_hk')
+        for key in retired_multiplier_keys:
             if key in intake and intake[key] is not None:
-                try:
-                    if float(intake[key]) <= 0:
-                        die(f'intake.{key} must be > 0')
-                except Exception:
-                    die(f'intake.{key} must be a number')
+                die(
+                    f'intake.{key} is retired; multiplier metadata must come from '
+                    'payload, output_shared/state/multiplier_cache.json, or OpenD refresh'
+                )
 
     syms = resolve_watchlist_config(cfg)
     if not syms:

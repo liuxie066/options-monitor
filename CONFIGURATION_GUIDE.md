@@ -343,21 +343,17 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 - `option_positions.auto_close.enabled` 控制专用过期自动平仓入口是否工作。
 - `option_positions.auto_close.receipt.enabled` 默认 `true`。`./om option-positions auto-close-expired --apply` 实际写入或失败时，会按 `notify_applied` / `notify_failed` 发送回执；`notify_noop` 和 `notify_dry_run` 默认 `false`，避免无变更或 dry-run 产生噪音。回执会按账户、券商、业务日和平仓记录生成 `receipt_key`，同一业务日已确认发送的结果不会重复通知；`retry_unconfirmed` 默认 `true`，上一条回执未确认时允许后续定时/人工重跑重试。
 
-#### 4.4.2 auto trade intake multiplier fallback
+#### 4.4.2 auto trade intake multiplier resolution
 
 自动成交 intake 写入 open 事件前会先把 broker raw payload 里的 symbol canonicalize 到共享格式（例如 `POP` / `HK.09992` / `HK.POP260528P150000` -> `9992.HK`），再解析 multiplier。fallback 顺序固定为：
 
 1. payload / lookup row 显式字段：`multiplier`、`contract_multiplier`、`lot_size`
-2. contract metadata：本地 `output_shared/state/multiplier_cache.json`，缺失时可按 listener 的 OpenD `host/port` 和 `runtime.opend_rate_limits.option_chain` 限频刷新；旧字段 `runtime.option_chain_fetch` 仍兼容
-3. `intake.multiplier_by_symbol[canonical_symbol]`
-4. 显式配置的 market default：`intake.default_multiplier_hk` / `intake.default_multiplier_us`
+2. contract metadata：本地 `output_shared/state/multiplier_cache.json`
+3. cache miss 时按 listener 的 OpenD `host/port` 和 `runtime.opend_rate_limits.option_chain` 限频实时刷新并写回 cache；旧字段 `runtime.option_chain_fetch` 仍兼容
 
-当所有来源都失败时，open deal 会进入 `unresolved_deal_ids`，并带 `retryable=true`、`missing_fields`、`multiplier_resolution.attempted_sources` 等诊断，方便补 cache/config 后重试。market default 只在配置中存在时使用，不作为代码里的隐式假设。
+当所有来源都失败时，open deal 会进入 `unresolved_deal_ids`，并带 `retryable=true`、`missing_fields`、`multiplier_resolution.attempted_sources`、`multiplier_resolution.message` 等诊断，方便修复 OpenD 连接或补齐共享 cache 后重试。
 
-对 onboarding / starter config，不建议预置 `default_multiplier_hk` / `default_multiplier_us`。更安全的顺序是：
-- 先依赖 payload / lookup row 的显式 multiplier
-- 再依赖本地 `multiplier_cache.json` 或 OpenD 刷新
-- 若仍不够，再按具体标的显式配置 `intake.multiplier_by_symbol`
+`intake.multiplier_by_symbol`、`intake.default_multiplier_hk`、`intake.default_multiplier_us` 已退休。multiplier 是标的元数据，不属于 US/HK 策略配置；runtime config 只保留 `intake.symbol_aliases` 这类解析辅助字段。
 
 ### 4.5 notifications：推送目标
 - `provider`: 通用投递器，当前主流程使用 `openclaw`

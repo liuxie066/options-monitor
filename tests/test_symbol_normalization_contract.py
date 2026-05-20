@@ -55,7 +55,7 @@ def test_ledger_trade_event_canonicalizes_noncanonical_deal_symbol(tmp_path: Pat
         price=6.3,
         strike=150.0,
         multiplier=1000,
-        multiplier_source="config:intake.multiplier_by_symbol",
+        multiplier_source="cache",
         expiration_ymd="2026-05-28",
         currency="HKD",
         trade_time_ms=1000,

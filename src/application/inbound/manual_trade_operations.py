@@ -45,7 +45,7 @@ def handle_manual_trade_operation(
             config_path=config_path,
             runtime_config=cfg,
             repo_base=repo_base(),
-            allow_opend_refresh=False,
+            allow_opend_refresh=True,
         )
         payload = _build_operation_payload(
             "manual_open",
@@ -65,7 +65,7 @@ def handle_manual_trade_operation(
             config_path=config_path,
             runtime_config=cfg,
             repo_base=repo_base(),
-            allow_opend_refresh=False,
+            allow_opend_refresh=True,
         )
         payload = _build_operation_payload(
             "manual_close",
