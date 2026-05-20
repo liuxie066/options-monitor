@@ -473,6 +473,61 @@ def test_inbound_monthly_income_renderer_explains_incomplete_summary() -> None:
     assert "缺失项：cash_secured、closed_lots、currency_conversion、premium" in text
 
 
+def test_inbound_monthly_income_renderer_shows_original_currency_when_rates_missing() -> None:
+    intent = parse_inbound_text("收益 lx 2026-05")
+    text = render_inbound_text(
+        intent=intent,
+        tool_result=build_response(
+            tool_name="monthly_income_report",
+            ok=True,
+            data={
+                "summary": [{"month": "2026-05", "account": "lx", "currency": "HKD"}],
+                "return_summary": [
+                    {
+                        "month": "2026-05",
+                        "account": "lx",
+                        "cash_secured_by_ccy": {"HKD": 377500.0, "USD": 29745.0},
+                        "cash_secured_cny": None,
+                        "net_income_by_ccy": {"HKD": 22751.0, "USD": 2400.0},
+                        "net_income_cny": None,
+                        "premium_income_by_ccy": {"HKD": 23735.0, "USD": 2400.0},
+                        "premium_income_cny": None,
+                        "premium_return_rate_by_ccy": {"HKD": 0.062874, "USD": 0.080686},
+                        "net_return_rate": None,
+                        "premium_return_rate": None,
+                    }
+                ],
+                "diagnostics": [
+                    {
+                        "account": "lx",
+                        "month": "2026-05",
+                        "status": "incomplete",
+                        "matched_trade_events_count": 17,
+                        "matched_lots_count": 17,
+                        "closed_lots_count": 0,
+                        "premium_rows_count": 16,
+                        "cash_secured_available": True,
+                        "cash_secured_conversion_missing": True,
+                        "currency_conversion_missing": True,
+                        "missing_cny_currencies": ["HKD", "USD"],
+                        "missing_fields": ["currency_conversion"],
+                    }
+                ],
+            },
+        ),
+    )
+
+    assert "lx 2026-05 暂无可计算收益。" in text
+    assert "本月暂无平仓收益" in text
+    assert "现金担保原币存在，但缺少 HKD/USD 到 CNY 汇率，无法折算 CNY" in text
+    assert "本月有开仓权利金收入，但缺汇率导致无法计算 CNY 收益率" in text
+    assert "当前持仓缺少现金担保金额" not in text
+    assert "账本缺少已平仓/close 数据" not in text
+    assert "权利金收入：HKD 23,735 + USD 2,400" in text
+    assert "现金担保：HKD 377,500 + USD 29,745" in text
+    assert "原币权利金收益率：HKD 6.29%，USD 8.07%" in text
+
+
 def test_inbound_renderer_summarizes_position_rows() -> None:
     intent = parse_inbound_text("持仓 sy")
     text = render_inbound_text(

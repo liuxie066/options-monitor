@@ -84,8 +84,9 @@ OM_FEISHU_BOT_APP_ID=cli_xxx
 OM_FEISHU_BOT_APP_SECRET=xxx
 OM_FEISHU_BOT_USER_OPEN_ID=ou_xxx
 OM_FEISHU_BOT_ALLOWED_OPEN_IDS=ou_xxx
-OM_FEISHU_ACK_REACTION=SMILE
 ```
+
+Feishu long-connection 的 reaction、reply、queue 行为配置在 runtime config 的 `inbound.feishu_ws` 下，不写入服务器 secret env file。
 
 渲染服务文件：
 
@@ -195,7 +196,31 @@ sudo systemctl enable --now options-monitor-upgrade.timer
 `options-monitor-auto-close-*.timer` 每天北京时间 05:30 运行一次 `./om option-positions auto-close-expired --apply --quiet`，先处理过期自动平仓，再由 06:00 的 projection verify 做内部对账。
 `options-monitor-tick-us.timer` 使用 `OnCalendar=Mon..Fri *-*-* 09..16:00/10:00 America/New_York`，按美东时间 10 分钟整数边界唤醒。
 `options-monitor-tick-hk.timer` 使用 `OnCalendar=Mon..Fri *-*-* 09..16:00/10:00 Asia/Hong_Kong`，按香港时间 10 分钟整数边界唤醒；是否真正扫描/通知仍由 `tick-cron` scheduler 的 run points 决定。
-`options-monitor-upgrade.timer` 只有在 render 时传了 `--include-auto-upgrade` 才会生成；它每天北京时间 06:10 检查最新 release tag，发现可升级版本后会在目标 release 内创建 `.venv`、安装 runtime/server 依赖、校验 `om-agent spec` 和 tick 运行解释器，再切换 `/opt/options-monitor/current` 并写入 `upgrade_status.json`。
+`options-monitor-upgrade.timer` 只有在 render 时传了 `--include-auto-upgrade` 才会生成；它每天北京时间 06:10 检查最新 release tag，发现可升级版本后会在目标 release 内创建 `.venv`、安装 runtime/server 依赖、校验 `om-agent spec` 和 tick 运行解释器，再切换 `/opt/options-monitor/current` 并写入 `upgrade_status.json`。依赖安装默认 `OM_UPGRADE_INSTALLER=auto`，会优先使用 `uv`，uv 不可用或 auto 模式失败时回退 pip；可用 `OM_UPGRADE_INSTALLER=pip|uv` 强制选择。只配置 `PIP_INDEX_URL` 时会自动映射给 uv 的 `UV_INDEX_URL`。
+
+升级后的 release 清理默认 dry-run：
+
+```bash
+./om service cleanup \
+  --repo-root /opt/options-monitor/current \
+  --releases-root /opt/options-monitor/releases \
+  --cleanup-downloads \
+  --cleanup-pip-cache
+```
+
+输出会列出当前 active release、保留 release、待删除旧 release、缓存目录和预计释放空间。默认至少保留 2 个 release（当前版本 + 最近一个回滚版本）；真正删除必须加 `--confirm`。清理边界固定为旧 release 和显式允许的缓存，不会删除 `$RUNTIME`、SQLite、`output` / `output_shared` / `output_runs`、locks、runtime config、用户 overlay config、当前 active release 或回滚 release。可选项包括 `--include-apt-cache`、`--journal-vacuum-size 64M`、`--cleanup-downloads`、`--cleanup-pip-cache`。
+
+如果希望升级成功后自动清理旧 release：
+
+```bash
+./om service upgrade \
+  --repo-root /opt/options-monitor/current \
+  --runtime-root "$RUNTIME" \
+  --confirm \
+  --cleanup-after-upgrade
+```
+
+后置清理只在升级成功、symlink 已切到目标 release、runtime config rebuild/validate 成功、active release 可确认且至少保留 2 个 release 时执行。确认升级时 `--repo-root` 必须是 current symlink 字面路径；如果传成真实 release 目录，会 fail fast，不会先 clone 到错误的 `releases/releases` 结构。
 
 检查：
 
@@ -215,7 +240,10 @@ sudo systemctl enable --now options-monitor-upgrade.timer
 ```bash
 REPO="$HOME/workspace/options-monitor"
 RUNTIME="$HOME/Library/Application Support/options-monitor"
+ENV_FILE="$RUNTIME/options-monitor.env"
 mkdir -p "$RUNTIME" "$RUNTIME/logs" "$RUNTIME/locks"
+install -m 600 configs/examples/options-monitor.env.example "$ENV_FILE"
+$EDITOR "$ENV_FILE"
 ```
 
 渲染：
@@ -226,10 +254,14 @@ cd "$REPO"
   --target launchd \
   --repo-root "$REPO" \
   --runtime-root "$RUNTIME" \
+  --env-file "$ENV_FILE" \
   --markets us hk \
   --accounts lx sy \
+  --include-feishu-ws \
   --output-dir /tmp/options-monitor-service
 ```
+
+launchd 不读取 shell profile。渲染器会把 `OM_ENV_FILE=$ENV_FILE` 写入 plist，CLI 启动后再从该 env file 读取 Feishu Bot、holdings 和 inbound audit 配置。
 
 安装：
 
@@ -244,6 +276,7 @@ launchctl bootstrap "gui/$UID" "$HOME/Library/LaunchAgents/com.options-monitor.a
 launchctl bootstrap "gui/$UID" "$HOME/Library/LaunchAgents/com.options-monitor.projection-verify.plist"
 launchctl bootstrap "gui/$UID" "$HOME/Library/LaunchAgents/com.options-monitor.runtime-status.plist"
 launchctl bootstrap "gui/$UID" "$HOME/Library/LaunchAgents/com.options-monitor.trade-intake.plist"
+launchctl bootstrap "gui/$UID" "$HOME/Library/LaunchAgents/com.options-monitor.feishu-ws.plist"
 ```
 
 launchd 的日历时间按 Mac 本机时区执行；要等价于北京时间 05:30 / 06:00，Mac 的系统时区需要设为中国标准时间或等价时区。

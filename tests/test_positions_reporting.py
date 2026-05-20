@@ -571,6 +571,66 @@ def test_monthly_income_diagnostics_exposes_missing_cash_secured_and_conversion(
     assert "currency_conversion" in diag["missing_fields"]
 
 
+def test_monthly_income_diagnostics_distinguishes_cash_secured_conversion_missing() -> None:
+    records = [
+        {
+            "record_id": "lx_hk_put",
+            "fields": {
+                "broker": "富途",
+                "account": "lx",
+                "symbol": "9992.HK",
+                "option_type": "put",
+                "side": "short",
+                "status": "open",
+                "contracts": 1,
+                "currency": "HKD",
+                "premium": 237.35,
+                "multiplier": 100,
+                "cash_secured_amount": 377500,
+                "opened_at": _ms("2026-05-03"),
+            },
+        },
+        {
+            "record_id": "lx_us_put",
+            "fields": {
+                "broker": "富途",
+                "account": "lx",
+                "symbol": "NVDA",
+                "option_type": "put",
+                "side": "short",
+                "status": "open",
+                "contracts": 1,
+                "currency": "USD",
+                "premium": 24.0,
+                "multiplier": 100,
+                "cash_secured_amount": 29745,
+                "opened_at": _ms("2026-05-03"),
+            },
+        },
+    ]
+
+    report = build_monthly_income_report(records, account="lx", broker="富途", month="2026-05")
+
+    row = report["return_summary"][0]
+    assert row["cash_secured_by_ccy"] == {"HKD": 377500.0, "USD": 29745.0}
+    assert row["premium_income_by_ccy"] == {"HKD": 23735.0, "USD": 2400.0}
+    assert row["cash_secured_cny"] is None
+    assert row["premium_income_cny"] is None
+    assert row["premium_return_rate_by_ccy"] == {"HKD": 0.062874, "USD": 0.080686}
+
+    diag = report["diagnostics"][0]
+    assert diag["status"] == "incomplete"
+    assert diag["closed_lots_count"] == 0
+    assert diag["premium_rows_count"] == 2
+    assert diag["cash_secured_available"] is True
+    assert diag["cash_secured_conversion_missing"] is True
+    assert diag["currency_conversion_missing"] is True
+    assert diag["missing_cny_currencies"] == ["HKD", "USD"]
+    assert "cash_secured" not in diag["missing_fields"]
+    assert "closed_lots" not in diag["missing_fields"]
+    assert "currency_conversion" in diag["missing_fields"]
+
+
 def test_read_model_monthly_income_report_uses_canonical_lot_records() -> None:
     import src.application.ledger.read_model as read_model
 

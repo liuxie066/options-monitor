@@ -649,11 +649,39 @@ def _build_monthly_income_diagnostics(
                 missing_fields.add("premium")
             if not cash_secured_available:
                 missing_fields.add("cash_secured")
+            cash_secured_conversion_missing = False
+            currency_conversion_missing = "currency_conversion" in missing_fields
+            missing_cny_currencies: set[str] = set()
             if isinstance(return_row, dict):
-                if return_row.get("cash_secured_cny") is None:
+                row_cash_by_ccy = return_row.get("cash_secured_by_ccy")
+                if isinstance(row_cash_by_ccy, dict) and row_cash_by_ccy:
+                    next_cash_by_ccy: dict[str, float] = {}
+                    for key, value in row_cash_by_ccy.items():
+                        amount = safe_float(value)
+                        if amount is not None:
+                            next_cash_by_ccy[str(key)] = float(amount)
+                    cash_by_ccy = dict(sorted(next_cash_by_ccy.items()))
+                    cash_secured_available = any(float(value or 0.0) > 0 for value in cash_by_ccy.values())
+                if return_row.get("cash_secured_cny") is None and cash_secured_available:
+                    cash_secured_conversion_missing = True
+                    currency_conversion_missing = True
+                    missing_cny_currencies.update(str(currency) for currency in cash_by_ccy)
+                    missing_fields.discard("cash_secured")
+                elif return_row.get("cash_secured_cny") is None:
                     missing_fields.add("cash_secured")
-                if any(return_row.get(key) is None for key in ("net_income_cny", "premium_income_cny", "realized_pnl_cny")):
-                    missing_fields.add("currency_conversion")
+                for cny_key, by_ccy_key in (
+                    ("net_income_cny", "net_income_by_ccy"),
+                    ("premium_income_cny", "premium_income_by_ccy"),
+                    ("realized_pnl_cny", "realized_pnl_by_ccy"),
+                ):
+                    values = return_row.get(by_ccy_key)
+                    if return_row.get(cny_key) is None and isinstance(values, dict) and values:
+                        currency_conversion_missing = True
+                        missing_cny_currencies.update(str(currency) for currency in values)
+            if closed_lots_count == 0 and premium_rows_count > 0 and "closed_lots" in missing_fields:
+                missing_fields.discard("closed_lots")
+            if currency_conversion_missing:
+                missing_fields.add("currency_conversion")
 
             status = "ok" if _return_row_is_calculable(return_row) else ("empty" if (month_key, account) not in summary_keys else "incomplete")
             diagnostics.append(
@@ -668,6 +696,9 @@ def _build_monthly_income_diagnostics(
                     "closed_lots_count": closed_lots_count,
                     "premium_rows_count": premium_rows_count,
                     "cash_secured_available": cash_secured_available,
+                    "cash_secured_conversion_missing": cash_secured_conversion_missing,
+                    "currency_conversion_missing": currency_conversion_missing,
+                    "missing_cny_currencies": sorted(currency for currency in missing_cny_currencies if currency),
                     "cash_secured_by_ccy": cash_by_ccy,
                     "missing_fields": sorted(missing_fields),
                     "warnings": [str(item) for item in warnings if str(item).strip()],
@@ -701,6 +732,16 @@ def _rate(numerator: float | None, denominator: float | None) -> float | None:
     if numerator is None or denominator is None or float(denominator) <= 0:
         return None
     return round(float(numerator) / float(denominator), 6)
+
+
+def _rate_by_ccy(numerator_by_ccy: dict[str, float], denominator_by_ccy: dict[str, float]) -> dict[str, float]:
+    out: dict[str, float] = {}
+    for currency, numerator in sorted(numerator_by_ccy.items()):
+        denominator = safe_float(denominator_by_ccy.get(currency))
+        rate = _rate(safe_float(numerator), denominator)
+        if rate is not None:
+            out[currency] = rate
+    return out
 
 
 def _annualized(rate: float | None, days: int) -> float | None:
@@ -780,21 +821,28 @@ def _build_return_summary(
         premium_return_rate = _rate(premium_income_cny, cash_secured_cny)
         realized_return_rate = _rate(realized_pnl_cny, cash_secured_cny)
         annualized_basis_days = _month_elapsed_days(month, now_fn=now_fn)
+        cash_by_ccy_sorted = dict(sorted(cash_by_ccy.items()))
+        net_by_ccy = dict(sorted(bucket["net_income_by_ccy"].items()))
+        premium_by_ccy = dict(sorted(bucket["premium_income_by_ccy"].items()))
+        realized_by_ccy = dict(sorted(bucket["realized_pnl_by_ccy"].items()))
         out.append(
             {
                 "month": month,
                 "account": account,
-                "cash_secured_by_ccy": cash_by_ccy,
+                "cash_secured_by_ccy": cash_by_ccy_sorted,
                 "cash_secured_cny": cash_secured_cny,
-                "net_income_by_ccy": dict(sorted(bucket["net_income_by_ccy"].items())),
+                "net_income_by_ccy": net_by_ccy,
                 "net_income_cny": net_income_cny,
-                "premium_income_by_ccy": dict(sorted(bucket["premium_income_by_ccy"].items())),
+                "premium_income_by_ccy": premium_by_ccy,
                 "premium_income_cny": premium_income_cny,
-                "realized_pnl_by_ccy": dict(sorted(bucket["realized_pnl_by_ccy"].items())),
+                "realized_pnl_by_ccy": realized_by_ccy,
                 "realized_pnl_cny": realized_pnl_cny,
                 "net_return_rate": net_return_rate,
                 "premium_return_rate": premium_return_rate,
                 "realized_return_rate": realized_return_rate,
+                "net_return_rate_by_ccy": _rate_by_ccy(net_by_ccy, cash_by_ccy_sorted),
+                "premium_return_rate_by_ccy": _rate_by_ccy(premium_by_ccy, cash_by_ccy_sorted),
+                "realized_return_rate_by_ccy": _rate_by_ccy(realized_by_ccy, cash_by_ccy_sorted),
                 "annualized_net_return_rate": _annualized(net_return_rate, annualized_basis_days),
                 "annualized_premium_return_rate": _annualized(premium_return_rate, annualized_basis_days),
                 "annualized_realized_return_rate": _annualized(realized_return_rate, annualized_basis_days),
