@@ -88,6 +88,37 @@ def _check_runtime(runtime: dict[str, Any], *, scheduler: dict[str, Any], findin
     freshness = _dict(runtime.get("freshness"))
     latest_run_selection = _dict(runtime.get("latest_run_selection"))
     latest_scanned_selection = _dict(runtime.get("latest_scanned_run_selection"))
+    service_upgrade = _dict(runtime.get("service_upgrade"))
+    service_upgrade_eval = _dict(service_upgrade.get("evaluation"))
+    service_upgrade_status = str(service_upgrade_eval.get("status") or summary.get("service_upgrade_status") or "").strip()
+    service_upgrade_runtime_failed = service_upgrade_eval.get("runtime_failed")
+
+    if service_upgrade_runtime_failed is True:
+        categories.append("runtime_failed")
+        findings.append(
+            _finding(
+                severity="fail",
+                category="runtime_failed",
+                code="SERVICE_UPGRADE_FAILED",
+                message="Service upgrade status still indicates an unrecovered runtime failure.",
+                evidence=[{"source": "runtime_status.service_upgrade.evaluation", "observed": service_upgrade_eval or summary, "expected": "runtime_failed=false"}],
+            )
+        )
+    elif service_upgrade_status in {"remediated", "historical_failed"}:
+        categories.append("service_upgrade_historical")
+        findings.append(
+            _finding(
+                severity="warn",
+                category="service_upgrade_historical",
+                code="SERVICE_UPGRADE_REMEDIATED" if service_upgrade_status == "remediated" else "SERVICE_UPGRADE_HISTORICAL_FAILED",
+                message=(
+                    "Service upgrade previously failed, but current runtime evidence indicates it has been remediated."
+                    if service_upgrade_status == "remediated"
+                    else "Service upgrade status contains a historical failure that does not match the current version."
+                ),
+                evidence=[{"source": "runtime_status.service_upgrade.evaluation", "observed": service_upgrade_eval or summary, "expected": "current runtime not failed"}],
+            )
+        )
 
     if freshness.get("stale") is True:
         scheduler_confirms_latest_run = _scheduler_confirms_latest_runtime(scheduler, runtime)
@@ -168,7 +199,7 @@ def _check_runtime(runtime: dict[str, Any], *, scheduler: dict[str, Any], findin
             )
         )
 
-    if summary.get("ok") is False:
+    if summary.get("ok") is False and not _summary_only_service_upgrade_warning(summary):
         categories.append("runtime_failed")
         findings.append(
             _finding(
@@ -179,6 +210,15 @@ def _check_runtime(runtime: dict[str, Any], *, scheduler: dict[str, Any], findin
                 evidence=[{"source": "runtime_status.summary", "observed": summary, "expected": "ok=true"}],
             )
         )
+
+
+def _summary_only_service_upgrade_warning(summary: dict[str, Any]) -> bool:
+    codes_raw = summary.get("warning_codes")
+    codes = {str(item) for item in codes_raw} if isinstance(codes_raw, list) else set()
+    if not codes:
+        return False
+    allowed = {"SERVICE_UPGRADE_REMEDIATED", "SERVICE_UPGRADE_HISTORICAL_FAILED"}
+    return bool(codes) and codes.issubset(allowed)
 
 
 def _check_prefetch(runtime: dict[str, Any], *, findings: list[dict[str, Any]], categories: list[str]) -> None:

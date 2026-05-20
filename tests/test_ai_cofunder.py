@@ -180,6 +180,100 @@ def test_ai_cofunder_preserves_scheduler_run_id_and_downgrades_confirmed_stale_r
     assert "scheduler evidence points at the latest runtime run" in stale["message"]
 
 
+def test_ai_cofunder_downgrades_remediated_upgrade_failure_to_warning(tmp_path: Path) -> None:
+    from src.application.ai_cofunder.service import ai_cofunder_tool
+
+    runtime_data = _runtime_status_data()
+    runtime_data["summary"]["ok"] = False
+    runtime_data["summary"]["warning_count"] = 1
+    runtime_data["summary"]["warning_codes"] = ["SERVICE_UPGRADE_REMEDIATED"]
+    runtime_data["summary"]["service_upgrade_status"] = "remediated"
+    runtime_data["summary"]["service_upgrade_historical_status"] = "failed"
+    runtime_data["service_upgrade"] = {
+        "json": {"status": "failed", "target_version": "1.2.82"},
+        "evaluation": {
+            "status": "remediated",
+            "historical_status": "failed",
+            "target_version": "1.2.82",
+            "current_version": "1.2.82",
+            "runtime_failed": False,
+            "warning": True,
+        },
+    }
+
+    def _runtime_status(_payload):
+        return runtime_data, ["service upgrade remediated"], {}
+
+    data, _warnings, _meta = ai_cofunder_tool(
+        {
+            "config_path": str(tmp_path / "config.us.json"),
+            "write_outputs": False,
+            "scheduler_evidence": {
+                "provider": "cron",
+                "job_name": "us-tick",
+                "last_triggered_at": "2026-05-16T01:55:00Z",
+                "last_run_id": "run-1",
+                "last_status": "success",
+                "last_exit_code": 0,
+            },
+        },
+        runtime_status_tool_fn=_runtime_status,
+        **_tool_kwargs(tmp_path),
+    )
+
+    findings = data["bundle"]["runtime_quality"]["findings"]
+    assert data["status"] == "warn"
+    assert data["category"] == "service_upgrade_historical"
+    assert any(item["code"] == "SERVICE_UPGRADE_REMEDIATED" for item in findings)
+    assert not any(item["code"] == "RUNTIME_STATUS_WARNINGS" for item in findings)
+
+
+def test_ai_cofunder_keeps_unrecovered_upgrade_failure_as_runtime_failed(tmp_path: Path) -> None:
+    from src.application.ai_cofunder.service import ai_cofunder_tool
+
+    runtime_data = _runtime_status_data()
+    runtime_data["summary"]["ok"] = False
+    runtime_data["summary"]["warning_count"] = 1
+    runtime_data["summary"]["warning_codes"] = ["SERVICE_UPGRADE_FAILED"]
+    runtime_data["summary"]["service_upgrade_status"] = "failed"
+    runtime_data["summary"]["service_upgrade_runtime_failed"] = True
+    runtime_data["service_upgrade"] = {
+        "json": {"status": "failed", "target_version": "1.2.82"},
+        "evaluation": {
+            "status": "failed",
+            "historical_status": "failed",
+            "target_version": "1.2.82",
+            "current_version": "1.2.82",
+            "runtime_failed": True,
+            "warning": False,
+        },
+    }
+
+    def _runtime_status(_payload):
+        return runtime_data, ["service upgrade failed"], {}
+
+    data, _warnings, _meta = ai_cofunder_tool(
+        {
+            "config_path": str(tmp_path / "config.us.json"),
+            "write_outputs": False,
+            "scheduler_evidence": {
+                "provider": "cron",
+                "job_name": "us-tick",
+                "last_triggered_at": "2026-05-16T01:55:00Z",
+                "last_run_id": "run-1",
+                "last_status": "success",
+                "last_exit_code": 0,
+            },
+        },
+        runtime_status_tool_fn=_runtime_status,
+        **_tool_kwargs(tmp_path),
+    )
+
+    assert data["status"] == "fail"
+    assert data["category"] == "runtime_failed"
+    assert data["bundle"]["runtime_quality"]["findings"][0]["code"] == "SERVICE_UPGRADE_FAILED"
+
+
 def test_ai_cofunder_collects_strategy_evidence_for_handoff(tmp_path: Path) -> None:
     from src.application.ai_cofunder.service import ai_cofunder_tool
 

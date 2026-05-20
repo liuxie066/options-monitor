@@ -288,7 +288,7 @@ def _merge_openclaw_profile(payload: dict[str, Any], *, base: Path) -> tuple[dic
     }
 
 
-def _service_profile_summary(payload: dict[str, Any]) -> dict[str, Any]:
+def _service_profile_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
     services = payload.get("services")
     profile = {
         "service_provider": payload.get("service_provider") or payload.get("provider"),
@@ -296,6 +296,20 @@ def _service_profile_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "runtime_root": payload.get("runtime_root"),
         "services": services if isinstance(services, list) else [],
     }
+    return profile
+
+
+def _load_runtime_service_profile(runtime_root: Path) -> dict[str, Any]:
+    profile_path = runtime_root / "service.profile.json"
+    try:
+        payload = json.loads(profile_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _service_profile_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    profile = _service_profile_from_payload(payload)
     if not profile.get("service_provider") and not profile.get("services"):
         return {"loaded": False}
     summary = service_status_from_profile(
@@ -304,6 +318,128 @@ def _service_profile_summary(payload: dict[str, Any]) -> dict[str, Any]:
     )
     summary["loaded"] = True
     return summary
+
+
+def _repo_version(base: Path) -> str | None:
+    try:
+        text = (base / "VERSION").read_text(encoding="utf-8").strip()
+    except Exception:
+        return None
+    return text or None
+
+
+def _upgrade_service_profile(payload: dict[str, Any], *, runtime_root: Path) -> dict[str, Any]:
+    profile = _load_runtime_service_profile(runtime_root)
+    if profile:
+        return profile
+    payload_profile = _service_profile_from_payload(payload)
+    if payload_profile.get("service_provider") or payload_profile.get("services"):
+        return payload_profile
+    return {}
+
+
+def _check_upgrade_services(profile: dict[str, Any], *, failed_services: list[str]) -> dict[str, Any]:
+    if not profile:
+        return {"checked": False, "reason": "service_profile_missing", "all_active": False, "services": []}
+    status = service_status_from_profile(profile, include_status=True)
+    services_raw = status.get("services")
+    services = services_raw if isinstance(services_raw, list) else []
+    wanted = {name for name in failed_services if name}
+    checked_services: list[dict[str, Any]] = []
+    for item in services:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if wanted and name not in wanted:
+            continue
+        checked_services.append(item)
+    if not checked_services and not wanted:
+        checked_services = [item for item in services if isinstance(item, dict)]
+    if not checked_services:
+        return {**status, "checked": False, "reason": "restart_services_missing", "all_active": False}
+    all_active = all(str(item.get("status") or "").strip().lower() == "ok" for item in checked_services)
+    return {**status, "checked": True, "services": checked_services, "all_active": all_active}
+
+
+def _upgrade_status_evaluation(
+    upgrade_info: dict[str, Any],
+    *,
+    base: Path,
+    runtime_root: Path,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    upgrade_json = upgrade_info.get("json") if isinstance(upgrade_info.get("json"), dict) else {}
+    if not upgrade_json:
+        return {"status": None, "runtime_failed": False, "warning": False, "checked": False}
+
+    historical_status = str(upgrade_json.get("status") or "").strip()
+    target_version = str(upgrade_json.get("target_version") or "").strip() or None
+    current_version = _repo_version(base)
+    lock_path = runtime_root / "locks" / "upgrade.lock"
+    lock_exists = lock_path.exists()
+    error = upgrade_json.get("error")
+    failed_statuses = {"failed", "upgraded_restart_failed"}
+    failed_services_raw = upgrade_json.get("restart_failed_services")
+    failed_services = [str(item).strip() for item in failed_services_raw] if isinstance(failed_services_raw, list) else []
+    failed_services = [item for item in failed_services if item]
+    service_check: dict[str, Any] = {"checked": False, "services": []}
+
+    out: dict[str, Any] = {
+        "status": historical_status or None,
+        "historical_status": historical_status or None,
+        "target_version": target_version,
+        "current_version": current_version,
+        "error": error,
+        "lock_exists": lock_exists,
+        "runtime_failed": False,
+        "warning": False,
+        "checked": True,
+    }
+
+    if lock_exists:
+        return {
+            **out,
+            "status": "in_progress",
+            "runtime_failed": True,
+            "reason": "upgrade_lock_exists",
+            "lock_path": _relative_path(lock_path, base=base),
+        }
+
+    if historical_status not in failed_statuses:
+        return out
+
+    target_is_current = bool(target_version and current_version and target_version == current_version)
+    symlink_switched = bool(upgrade_json.get("symlink_switched") or upgrade_json.get("changed"))
+    if not target_is_current:
+        return {
+            **out,
+            "status": "historical_failed",
+            "runtime_failed": False,
+            "warning": True,
+            "reason": "upgrade_failure_target_is_not_current_version",
+        }
+
+    profile = _upgrade_service_profile(payload, runtime_root=runtime_root)
+    service_check = _check_upgrade_services(profile, failed_services=failed_services)
+    services_active = bool(service_check.get("checked")) and bool(service_check.get("all_active"))
+    if symlink_switched and services_active:
+        return {
+            **out,
+            "status": "remediated",
+            "runtime_failed": False,
+            "warning": True,
+            "reason": "target_version_active_and_restart_services_active",
+            "service_check": service_check,
+        }
+
+    return {
+        **out,
+        "status": "failed",
+        "runtime_failed": True,
+        "warning": False,
+        "reason": "upgrade_failure_still_requires_remediation",
+        "service_check": service_check,
+    }
 
 
 def _parse_utc(value: Any) -> datetime | None:
@@ -1084,6 +1220,22 @@ def runtime_status_tool(
         latest_run_payload=latest_run_payload,
         trigger_context=trigger_context,
     )
+    upgrade_evaluation = _upgrade_status_evaluation(
+        upgrade_status,
+        base=base,
+        runtime_root=ledger_runtime_root,
+        payload=payload,
+    )
+    warning_codes: list[str] = []
+    if upgrade_evaluation.get("status") == "remediated":
+        warnings.append("Service upgrade previously failed but current release and restart services look remediated.")
+        warning_codes.append("SERVICE_UPGRADE_REMEDIATED")
+    elif upgrade_evaluation.get("status") == "historical_failed":
+        warnings.append("Service upgrade status file contains a historical failure for a non-current target version.")
+        warning_codes.append("SERVICE_UPGRADE_HISTORICAL_FAILED")
+    elif upgrade_evaluation.get("runtime_failed"):
+        warnings.append("Service upgrade status still indicates an unrecovered runtime failure.")
+        warning_codes.append("SERVICE_UPGRADE_FAILED")
 
     latest_status = None
     for candidate in (shared_last_run, legacy_last_run):
@@ -1119,7 +1271,7 @@ def runtime_status_tool(
             "ledger": ledger_context_summary,
         },
         "projection_verify": projection_verify,
-        "service_upgrade": upgrade_status,
+        "service_upgrade": {**upgrade_status, "evaluation": upgrade_evaluation},
         "accounts": account_status,
         "latest_run_selection": latest_run_selection,
         "latest_run": latest_run_payload,
@@ -1136,6 +1288,7 @@ def runtime_status_tool(
         "summary": {
             "ok": not warnings,
             "warning_count": len(warnings),
+            "warning_codes": warning_codes,
             "latest_status": latest_status,
         },
     }
@@ -1158,8 +1311,12 @@ def runtime_status_tool(
     data["summary"]["projection_verify_ok"] = projection_verify_json.get("ok") if projection_verify_json else None
     data["summary"]["projection_verify_mode"] = projection_verify_json.get("mode_used") if projection_verify_json else None
     upgrade_json = upgrade_status.get("json") if isinstance(upgrade_status.get("json"), dict) else {}
-    data["summary"]["service_upgrade_status"] = upgrade_json.get("status") if upgrade_json else None
+    data["summary"]["service_upgrade_status"] = upgrade_evaluation.get("status") or (upgrade_json.get("status") if upgrade_json else None)
+    data["summary"]["service_upgrade_historical_status"] = upgrade_evaluation.get("historical_status")
     data["summary"]["service_upgrade_target_version"] = upgrade_json.get("target_version") if upgrade_json else None
+    data["summary"]["service_upgrade_current_version"] = upgrade_evaluation.get("current_version")
+    data["summary"]["service_upgrade_error"] = upgrade_evaluation.get("error")
+    data["summary"]["service_upgrade_runtime_failed"] = bool(upgrade_evaluation.get("runtime_failed"))
     return data, warnings, {"config_path": mask_path(config_path)}
 
 
