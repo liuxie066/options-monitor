@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
+from src.application.multiplier_cache import save_cache
 from src.application.trades.normalizer import normalize_trade_deal
 
 
@@ -66,6 +67,39 @@ def test_normalize_trade_deal_parses_futu_millisecond_trade_time_as_beijing() ->
 
     expected = int(datetime(2026, 5, 20, 15, 5, 47, 577000, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp() * 1000)
     assert deal.trade_time_ms == expected
+
+
+def test_normalize_trade_deal_uses_runtime_multiplier_cache_from_config_path(tmp_path: Path) -> None:
+    runtime = tmp_path / "runtime"
+    repo = tmp_path / "repo"
+    runtime.mkdir()
+    repo.mkdir()
+    cache_path = runtime / "output_shared" / "state" / "multiplier_cache.json"
+    save_cache(cache_path, {"0883.HK": {"multiplier": 1000, "source": "runtime_seed"}})
+
+    deal = normalize_trade_deal(
+        {
+            "deal_id": "deal-runtime-cache",
+            "trd_acc_id": "REAL_1",
+            "code": "0883.HK",
+            "option_type": "CALL",
+            "side": "SELL",
+            "position_effect": "OPEN",
+            "qty": 1,
+            "price": "0.41",
+            "strike": "30",
+            "expiration": "20260629",
+            "currency": "HKD",
+        },
+        futu_account_mapping={"REAL_1": "sy"},
+        repo_base=repo,
+        config_path=runtime / "config.hk.json",
+    )
+
+    assert deal.symbol == "0883.HK"
+    assert deal.multiplier == 1000
+    assert deal.multiplier_source == "runtime_seed"
+    assert deal.normalization_diagnostics["multiplier_resolution"]["cache_path"] == str(cache_path.resolve())
 
 
 def test_normalize_trade_deal_keeps_unknown_position_effect_when_missing() -> None:

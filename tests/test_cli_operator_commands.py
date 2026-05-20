@@ -470,7 +470,7 @@ def test_top_level_update_commands_delegate_to_service_upgrade(monkeypatch, caps
     ]) == 0
     assert _read_json_output(capsys)["tool_name"] == "update.rollback"
 
-    assert calls[0] == ("check", {"repo_root": str(repo), "runtime_root": str(runtime), "remote_name": "origin"})
+    assert calls[0] == ("check", {"repo_root": str(repo), "runtime_root": str(runtime), "cache_root": None, "remote_name": "origin"})
     assert calls[1][0] == "apply"
     assert calls[1][1]["repo_root"] == str(repo)
     assert calls[1][1]["runtime_root"] == str(runtime)

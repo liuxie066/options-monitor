@@ -178,6 +178,57 @@ def _load_service_profile(runtime_root: Path) -> dict[str, Any]:
     return profile if isinstance(profile, dict) else {}
 
 
+def _repo_root_symlink_candidates(*, repo_root: Path, runtime_root: Path) -> list[Path]:
+    candidates: list[Path] = []
+    profile = _load_service_profile(runtime_root)
+    raw_profile_repo = str(profile.get("repo_root") or "").strip()
+    if raw_profile_repo:
+        candidates.append(Path(raw_profile_repo).expanduser())
+
+    resolved = repo_root.resolve()
+    search_roots = [resolved.parent]
+    if resolved.parent.name == "releases":
+        search_roots.append(resolved.parent.parent)
+    for root in search_roots:
+        try:
+            children = list(root.iterdir())
+        except OSError:
+            continue
+        for child in children:
+            if child.is_symlink():
+                candidates.append(child)
+
+    out: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            if candidate.is_symlink() and candidate.resolve() == resolved:
+                out.append(candidate)
+        except OSError:
+            continue
+    return out
+
+
+def _coerce_repo_root_to_current_symlink(*, repo_root: str | Path, runtime_root: Path) -> tuple[Path, Path, dict[str, Any]]:
+    requested = Path(repo_root).expanduser()
+    if requested.is_symlink():
+        return requested, requested.resolve(), {"source": "argument", "requested_repo_root": str(requested), "coerced": False}
+
+    candidates = _repo_root_symlink_candidates(repo_root=requested, runtime_root=runtime_root)
+    if candidates:
+        selected = candidates[0]
+        return selected, selected.resolve(), {
+            "source": "runtime_profile_or_sibling_symlink",
+            "requested_repo_root": str(requested),
+            "selected_repo_root": str(selected),
+            "coerced": True,
+        }
+    return requested, requested.resolve(), {"source": "argument", "requested_repo_root": str(requested), "coerced": False}
+
+
 def _restart_profile(profile: dict[str, Any]) -> dict[str, Any]:
     raw = profile.get("restart")
     return raw if isinstance(raw, dict) else {}
@@ -945,6 +996,64 @@ def _missing_user_overlay_configs(*, target_dir: Path, markets: list[str]) -> li
     ]
 
 
+PRESERVED_RUNTIME_CONFIG_PATHS = (
+    ("inbound", "feishu_ws", "ack_reaction"),
+)
+
+
+def _nested_get(payload: dict[str, Any], path: tuple[str, ...]) -> Any:
+    node: Any = payload
+    for key in path:
+        if not isinstance(node, dict) or key not in node:
+            return None
+        node = node[key]
+    return node
+
+
+def _nested_set(payload: dict[str, Any], path: tuple[str, ...], value: Any) -> None:
+    node = payload
+    for key in path[:-1]:
+        child = node.get(key)
+        if not isinstance(child, dict):
+            child = {}
+            node[key] = child
+        node = child
+    node[path[-1]] = value
+
+
+def _preserve_runtime_config_hotfixes(*, target_dir: Path, targets: list[dict[str, str]]) -> list[dict[str, str]]:
+    overlay_path = target_dir / "configs" / "user.common.json"
+    overlay = _safe_read_json_object(overlay_path) or {}
+    preserved: list[dict[str, str]] = []
+    changed = False
+
+    for target in targets:
+        config_path = Path(target["config_path"]).expanduser()
+        runtime_cfg = _safe_read_json_object(config_path)
+        if not runtime_cfg:
+            continue
+        for path in PRESERVED_RUNTIME_CONFIG_PATHS:
+            current_value = _nested_get(runtime_cfg, path)
+            overlay_value = _nested_get(overlay, path)
+            if current_value in (None, "") or overlay_value not in (None, ""):
+                continue
+            _nested_set(overlay, path, current_value)
+            changed = True
+            preserved.append(
+                {
+                    "path": ".".join(path),
+                    "value": str(current_value),
+                    "source": str(config_path),
+                    "target": str(overlay_path),
+                    "reason": "runtime_config_hotfix_preserved",
+                }
+            )
+
+    if changed:
+        overlay_path.write_text(json.dumps(overlay, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return preserved
+
+
 def _runtime_config_remediation(*, runtime_root: Path, target_dir: Path, missing: list[Path]) -> list[str]:
     names = " ".join(path.name for path in missing)
     return [
@@ -1023,6 +1132,7 @@ def _prepare_runtime_configs_for_release(
             "release is missing required market user config overlays",
             remediation=_runtime_config_remediation(runtime_root=runtime_root, target_dir=target_dir, missing=missing),
         )
+    preserved_hotfixes = _preserve_runtime_config_hotfixes(target_dir=target_dir, targets=targets)
 
     rebuilt = _rebuild_and_validate_runtime_configs(
         targets=targets,
@@ -1032,7 +1142,7 @@ def _prepare_runtime_configs_for_release(
         phase="pre_switch",
     )
 
-    return {"status": "prepared", "targets": targets, "overlays": overlays, "rebuilt": rebuilt}
+    return {"status": "prepared", "targets": targets, "overlays": overlays, "preserved_hotfixes": preserved_hotfixes, "rebuilt": rebuilt}
 
 
 def _upgrade_installer_mode() -> str:
@@ -1269,9 +1379,9 @@ def service_upgrade_check(
     run_cmd: Callable[..., Any] = subprocess.run,
     now_fn: Callable[[], datetime] | None = None,
 ) -> dict[str, Any]:
-    repo = Path(repo_root).expanduser().resolve()
     runtime = Path(runtime_root).expanduser().resolve()
-    cache = Path(cache_root).expanduser().resolve() if cache_root else default_upgrade_cache_root(Path(repo_root).expanduser())
+    repo_link, repo, repo_root_resolution = _coerce_repo_root_to_current_symlink(repo_root=repo_root, runtime_root=runtime)
+    cache = Path(cache_root).expanduser().resolve() if cache_root else default_upgrade_cache_root(repo_link)
     version = _version_check_for_upgrade(
         repo_root=repo,
         cache_root=cache,
@@ -1282,7 +1392,9 @@ def service_upgrade_check(
     status = load_upgrade_status(runtime_root=runtime)
     return {
         "ok": bool(version.get("ok")),
-        "repo_root": str(repo),
+        "repo_root": str(repo_link),
+        "repo_root_resolved": str(repo),
+        "repo_root_resolution": repo_root_resolution,
         "runtime_root": str(runtime),
         "upgrade_cache_root": str(cache),
         "remote_name": remote_name,
@@ -1323,9 +1435,8 @@ def service_upgrade(
     run_cmd: Callable[..., Any] = subprocess.run,
     now_fn: Callable[[], datetime] | None = None,
 ) -> dict[str, Any]:
-    repo_link = Path(repo_root).expanduser()
-    repo = repo_link.resolve()
     runtime = Path(runtime_root).expanduser().resolve()
+    repo_link, repo, repo_root_resolution = _coerce_repo_root_to_current_symlink(repo_root=repo_root, runtime_root=runtime)
     releases = Path(releases_root).expanduser().resolve() if releases_root else default_releases_root(repo_link)
     cache = Path(cache_root).expanduser().resolve() if cache_root else default_upgrade_cache_root(repo_link)
     current_version = _read_version(repo)
@@ -1352,6 +1463,7 @@ def service_upgrade(
         "target_version": target or None,
         "release_tag": tag,
         "repo_root_is_symlink": repo_root_is_symlink,
+        "repo_root_resolution": repo_root_resolution,
         "auto": bool(auto),
         "confirmed": bool(confirm),
         "allow_major": bool(allow_major),
@@ -1689,9 +1801,8 @@ def service_rollback(
     run_cmd: Callable[..., Any] = subprocess.run,
     now_fn: Callable[[], datetime] | None = None,
 ) -> dict[str, Any]:
-    repo_link = Path(repo_root).expanduser()
-    repo = repo_link.resolve()
     runtime = Path(runtime_root).expanduser().resolve()
+    repo_link, repo, repo_root_resolution = _coerce_repo_root_to_current_symlink(repo_root=repo_root, runtime_root=runtime)
     releases = Path(releases_root).expanduser().resolve() if releases_root else default_releases_root(repo_link)
     status = load_upgrade_status(runtime_root=runtime) or {}
     current_version = _read_version(repo)
@@ -1707,6 +1818,7 @@ def service_rollback(
         "current_version": current_version,
         "target_version": target or None,
         "repo_root_is_symlink": repo_root_is_symlink,
+        "repo_root_resolution": repo_root_resolution,
         "confirmed": bool(confirm),
         "updated_at": utc_now_iso(now_fn),
     }

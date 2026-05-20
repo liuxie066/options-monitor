@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 1.2.99 - 2026-05-20
+
+### Added
+- Added `./om multiplier-cache seed` to dry-run or confirm runtime multiplier cache repairs without editing market config.
+- Added setup diagnostics for uv availability and forced `OM_UPGRADE_INSTALLER=uv` readiness.
+
+### Changed
+- Made manual trade and broker trade multiplier resolution prefer the shared runtime cache inferred from runtime root or runtime config path before OpenD refresh.
+- Made service upgrade coerce a release-entity repo root back to the active current symlink when the runtime service profile identifies it.
+
+### Fixed
+- Reconciled legacy service profiles that had an installed Feishu WS service outside the managed service list, so upgrades restart and check Feishu WS with trade-intake.
+- Added sudo fallback for service drift systemd unit writes and permission-denied `systemctl` operations.
+- Preserved selected runtime config hotfixes such as `inbound.feishu_ws.ack_reaction` before upgrade rebuilds overwrite generated configs.
+
 ## 1.2.98 - 2026-05-20
 
 ### Added

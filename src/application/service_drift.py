@@ -143,7 +143,8 @@ def _load_profile_and_paths(
 
 
 def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
-    profile = ctx["profile"]
+    profile = _profile_with_discovered_managed_services(ctx["profile"], ctx=ctx)
+    ctx["profile"] = profile
     provider = str(ctx["provider"] or "").strip().lower()
     if provider not in {"systemd", "launchd"}:
         return {
@@ -241,6 +242,31 @@ def _build_drift(ctx: dict[str, Any]) -> dict[str, Any]:
         "manual_actions": manual_actions,
         "summary": summary,
     }
+
+
+def _profile_with_discovered_managed_services(profile: dict[str, Any], *, ctx: dict[str, Any]) -> dict[str, Any]:
+    provider = str(ctx.get("provider") or "").strip().lower()
+    if provider != "systemd":
+        return profile
+    services = _service_names_from_profile(profile)
+    discovered = []
+    feishu_unit = Path(ctx["systemd_unit_root"]) / "options-monitor-feishu-ws.service"
+    if "options-monitor-feishu-ws.service" not in services and feishu_unit.exists():
+        discovered.append("options-monitor-feishu-ws.service")
+    if not discovered:
+        return profile
+    out = dict(profile)
+    raw_services = out.get("services")
+    service_items = list(raw_services) if isinstance(raw_services, list) else []
+    service_items.extend({"name": name} for name in discovered)
+    out["services"] = service_items
+    if "options-monitor-feishu-ws.service" in discovered:
+        feishu_ws = out.get("feishu_ws")
+        next_feishu_ws = dict(feishu_ws) if isinstance(feishu_ws, dict) else {}
+        next_feishu_ws.setdefault("enabled", True)
+        next_feishu_ws.setdefault("config_key", "us")
+        out["feishu_ws"] = next_feishu_ws
+    return out
 
 
 def _expected_bundle_from_profile(
@@ -524,14 +550,17 @@ def _apply_missing_service_drift(
         if not item:
             continue
         path = _install_path(item, provider=provider, ctx=ctx)
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(str(item.get("content") or ""), encoding="utf-8")
-        except Exception as exc:
-            errors.append(f"write {path}: {type(exc).__name__}: {exc}")
+        write_result = _write_text_with_sudo_fallback(
+            path,
+            str(item.get("content") or ""),
+            ctx=ctx,
+            run_cmd=run_cmd,
+        )
+        operations.append({**write_result, "unit": name})
+        if not write_result.get("ok"):
+            errors.append(f"write {path}: {write_result.get('error') or write_result.get('stderr') or write_result.get('returncode')}")
             continue
         written_units.append(name)
-        operations.append({"operation": "write_unit", "path": str(path), "unit": name, "ok": True})
 
     profile_written = False
     if before.get("profile_content_changed"):
@@ -582,7 +611,7 @@ def _run_systemctl(ctx: dict[str, Any], args: list[str], *, run_cmd: Callable[..
     stdout = str(getattr(proc, "stdout", "") or "")
     stderr = str(getattr(proc, "stderr", "") or "")
     rc = int(getattr(proc, "returncode", 1))
-    return {
+    result = {
         "operation": "systemctl",
         "command": command,
         "ok": rc == 0,
@@ -590,6 +619,97 @@ def _run_systemctl(ctx: dict[str, Any], args: list[str], *, run_cmd: Callable[..
         "stdout": stdout[-2000:],
         "stderr": stderr[-2000:],
     }
+    if result["ok"] or not command or command[0] == "sudo":
+        return result
+    if not _looks_like_systemctl_permission_error(stdout=stdout, stderr=stderr):
+        return result
+    retry_command = ["sudo", "-n", *command]
+    try:
+        proc = run_cmd(retry_command, capture_output=True, text=True, timeout=60, check=False)
+    except Exception as exc:
+        return {
+            **result,
+            "ok": False,
+            "sudo_fallback": True,
+            "sudo_command": retry_command,
+            "sudo_error": f"{type(exc).__name__}: {exc}",
+        }
+    retry_stdout = str(getattr(proc, "stdout", "") or "")
+    retry_stderr = str(getattr(proc, "stderr", "") or "")
+    retry_rc = int(getattr(proc, "returncode", 1))
+    return {
+        "operation": "systemctl",
+        "command": retry_command,
+        "initial_command": command,
+        "sudo_fallback": True,
+        "ok": retry_rc == 0,
+        "returncode": retry_rc,
+        "stdout": retry_stdout[-2000:],
+        "stderr": retry_stderr[-2000:],
+    }
+
+
+def _write_text_with_sudo_fallback(
+    path: Path,
+    content: str,
+    *,
+    ctx: dict[str, Any],
+    run_cmd: Callable[..., Any],
+) -> dict[str, Any]:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        return {"operation": "write_unit", "path": str(path), "ok": True, "sudo_fallback": False}
+    except Exception as exc:
+        first_error = f"{type(exc).__name__}: {exc}"
+
+    if str(ctx.get("provider") or "") != "systemd":
+        return {"operation": "write_unit", "path": str(path), "ok": False, "error": first_error, "sudo_fallback": False}
+
+    mkdir_command = ["sudo", "-n", "install", "-d", str(path.parent)]
+    write_command = ["sudo", "-n", "sh", "-c", 'cat > "$1"', "sh", str(path)]
+    try:
+        mkdir_proc = run_cmd(mkdir_command, capture_output=True, text=True, timeout=60, check=False)
+        mkdir_rc = int(getattr(mkdir_proc, "returncode", 1))
+        if mkdir_rc != 0:
+            return {
+                "operation": "write_unit",
+                "path": str(path),
+                "ok": False,
+                "error": first_error,
+                "sudo_fallback": True,
+                "sudo_command": mkdir_command,
+                "returncode": mkdir_rc,
+                "stdout": str(getattr(mkdir_proc, "stdout", "") or "")[-2000:],
+                "stderr": str(getattr(mkdir_proc, "stderr", "") or "")[-2000:],
+            }
+        write_proc = run_cmd(write_command, input=content, capture_output=True, text=True, timeout=60, check=False)
+    except Exception as exc:
+        return {
+            "operation": "write_unit",
+            "path": str(path),
+            "ok": False,
+            "error": f"{first_error}; sudo fallback failed: {type(exc).__name__}: {exc}",
+            "sudo_fallback": True,
+            "sudo_command": write_command,
+        }
+    write_rc = int(getattr(write_proc, "returncode", 1))
+    return {
+        "operation": "write_unit",
+        "path": str(path),
+        "ok": write_rc == 0,
+        "error": None if write_rc == 0 else first_error,
+        "sudo_fallback": True,
+        "sudo_command": write_command,
+        "returncode": write_rc,
+        "stdout": str(getattr(write_proc, "stdout", "") or "")[-2000:],
+        "stderr": str(getattr(write_proc, "stderr", "") or "")[-2000:],
+    }
+
+
+def _looks_like_systemctl_permission_error(*, stdout: str, stderr: str) -> bool:
+    text = f"{stdout}\n{stderr}".lower()
+    return any(marker in text for marker in ("access denied", "permission denied", "interactive authentication required"))
 
 
 def _systemctl_prefix(profile: dict[str, Any]) -> list[str]:

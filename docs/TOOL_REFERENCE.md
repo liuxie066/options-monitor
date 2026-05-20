@@ -157,6 +157,17 @@
 ./om setup init --market us --account lx --futu-acc-id <futu-account-id>
 ```
 
+共享 multiplier cache 可以显式 seed，默认 dry-run，写入必须带 `--confirm`：
+
+```bash
+./om multiplier-cache seed --runtime-root /var/lib/options-monitor --symbol 0883.HK --multiplier 1000
+./om multiplier-cache seed --runtime-root /var/lib/options-monitor --symbol 0883.HK --multiplier 1000 --confirm
+```
+
+manual trade / trade-intake 会优先使用 runtime root 或 runtime config 路径推导出的
+`output_shared/state/multiplier_cache.json`，cache miss 时再按场景实时向 OpenD 刷新；
+不再依赖 `config.us.json` / `config.hk.json` 里的 market config 兜底。
+
 ### Service 入口关系
 
 Linux / Mac 长期运行建议先渲染服务文件，再由系统服务管理器安装：

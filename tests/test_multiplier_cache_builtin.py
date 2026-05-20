@@ -11,10 +11,12 @@ from src.application.multiplier_cache import (
     merge_cache_updates,
     normalize_symbol,
     refresh_via_opend,
+    resolve_cache_path,
     resolve_multiplier,
     resolve_multiplier_with_source_and_diagnostics,
     resolve_multiplier_with_source,
     save_cache,
+    seed_multiplier_cache,
 )
 
 
@@ -54,6 +56,27 @@ def test_resolve_multiplier_uses_cached_value(tmp_path: Path) -> None:
         symbol="00700.HK",
         allow_opend_refresh=False,
     ) == (500, "test")
+
+
+def test_resolve_multiplier_uses_runtime_cache_from_config_path(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    repo.mkdir()
+    runtime.mkdir()
+    cache_path = runtime / "output_shared" / "state" / "multiplier_cache.json"
+    save_cache(cache_path, {"0883.HK": {"multiplier": 1000, "source": "runtime_seed"}})
+
+    value, source, diagnostics = resolve_multiplier_with_source_and_diagnostics(
+        repo_base=repo,
+        config_path=runtime / "config.hk.json",
+        symbol="中海油",
+        allow_opend_refresh=False,
+    )
+
+    assert value == 1000
+    assert source == "runtime_seed"
+    assert diagnostics["cache_path"] == str(cache_path.resolve())
+    assert resolve_cache_path(repo_base=repo, config_path=runtime / "config.hk.json") == cache_path.resolve()
 
 
 def test_resolve_multiplier_ignores_retired_config_fallback(tmp_path: Path) -> None:
@@ -130,6 +153,23 @@ def test_merge_cache_updates_preserves_existing_entries(tmp_path: Path) -> None:
     assert cache["0700.HK"]["source"] == "existing"
     assert cache["3690.HK"]["source"] == "opend"
     assert cache_path.with_suffix(".json.lock").exists()
+
+
+def test_seed_multiplier_cache_is_dry_run_until_confirmed(tmp_path: Path) -> None:
+    runtime = tmp_path / "runtime"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    dry = seed_multiplier_cache(repo_base=repo, runtime_root=runtime, symbol="0883.HK", multiplier=1000)
+    cache_path = runtime / "output_shared" / "state" / "multiplier_cache.json"
+    assert dry["status"] == "dry_run"
+    assert dry["cache_path"] == str(cache_path.resolve())
+    assert not cache_path.exists()
+
+    out = seed_multiplier_cache(repo_base=repo, runtime_root=runtime, symbol="0883.HK", multiplier=1000, confirm=True)
+
+    assert out["status"] == "seeded"
+    assert load_cache(cache_path)["0883.HK"]["multiplier"] == 1000
 
 
 def test_refresh_via_opend_forwards_opend_fetch_config(monkeypatch, tmp_path: Path) -> None:

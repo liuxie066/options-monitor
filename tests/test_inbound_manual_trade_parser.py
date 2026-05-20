@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from src.application.inbound.manual_trade_parser import build_manual_trade_draft
+from src.application.multiplier_cache import save_cache
 
 
 def _runtime_config() -> dict[str, Any]:
@@ -79,6 +80,38 @@ def test_manual_trade_draft_parses_futu_open_without_manual_multiplier(monkeypat
     assert diagnostics["multiplier_source_policy"]["allow_opend_refresh"] is True
     assert diagnostics["fill_time_ms"] == expected_ms
     assert diagnostics["missing_fields"] == []
+
+
+def test_manual_trade_draft_reads_runtime_multiplier_cache_from_config_path(tmp_path: Path) -> None:
+    runtime = tmp_path / "runtime"
+    repo = tmp_path / "repo"
+    runtime.mkdir()
+    repo.mkdir()
+    cache_path = runtime / "output_shared" / "state" / "multiplier_cache.json"
+    save_cache(cache_path, {"0883.HK": {"multiplier": 1000, "source": "runtime_seed"}})
+
+    message = (
+        "记录开仓 sy 成交提醒: 【成交提醒】成功卖出1张$中海油 260629 30.00 购$，"
+        "成交价格：0.41，此笔订单委托已全部成交，2026/05/20 11:50:42 (香港)。"
+    )
+
+    draft = build_manual_trade_draft(
+        "manual_open",
+        raw_text=message,
+        accounts=("lx", "sy"),
+        config_key="hk",
+        config_path=runtime / "config.hk.json",
+        runtime_config=_runtime_config(),
+        repo_base=repo,
+        allow_opend_refresh=False,
+    )
+
+    assert draft["arguments"]["symbol"] == "0883.HK"
+    assert draft["arguments"]["multiplier"] == 1000.0
+    assert draft["arguments"]["currency"] == "HKD"
+    assert draft["diagnostics"]["multiplier_source"] == "runtime_seed"
+    assert draft["diagnostics"]["multiplier_cache_path"] == str(cache_path.resolve())
+    assert draft["diagnostics"]["missing_fields"] == []
 
 
 def test_manual_trade_draft_canonicalizes_handwritten_open_and_resolves_multiplier(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
