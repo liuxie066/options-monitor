@@ -473,6 +473,191 @@ def test_inbound_monthly_income_renderer_explains_incomplete_summary() -> None:
     assert "缺失项：cash_secured、closed_lots、currency_conversion、premium" in text
 
 
+def test_inbound_renderer_summarizes_position_rows() -> None:
+    intent = parse_inbound_text("持仓 sy")
+    text = render_inbound_text(
+        intent=intent,
+        tool_result=build_response(
+            tool_name="option_positions_read",
+            ok=True,
+            data={
+                "rows": [
+                    {
+                        "account": "sy",
+                        "symbol": "0700.HK",
+                        "option_type": "call",
+                        "side": "short",
+                        "strike": 510.0,
+                        "expiration_ymd": "2026-05-28",
+                        "contracts_open": 2,
+                    },
+                    {
+                        "account": "sy",
+                        "symbol": "0700.HK",
+                        "option_type": "put",
+                        "side": "short",
+                        "strike": 450.0,
+                        "expiration_ymd": "2026-06-29",
+                        "contracts_open": 3,
+                    },
+                ],
+                "filters": {"account": "sy", "status": "open"},
+            },
+        ),
+    )
+
+    assert "sy 当前 open 期权持仓：2 条" in text
+    assert "0700.HK short call 510 exp 2026-05-28 open 2" in text
+    assert "数据源：OM 本地 SQLite position_lots" in text
+
+
+def test_inbound_renderer_explains_empty_positions() -> None:
+    intent = parse_inbound_text("持仓 lx")
+    text = render_inbound_text(
+        intent=intent,
+        tool_result=build_response(
+            tool_name="option_positions_read",
+            ok=True,
+            data={"rows": [], "filters": {"account": "lx", "status": "open"}},
+        ),
+    )
+
+    assert text.startswith("lx 当前没有 open 期权持仓。")
+
+
+def test_inbound_renderer_summarizes_runtime_status() -> None:
+    intent = parse_inbound_text("状态")
+    text = render_inbound_text(
+        intent=intent,
+        tool_result=build_response(
+            tool_name="runtime_status",
+            ok=True,
+            data={
+                "summary": {
+                    "ok": False,
+                    "latest_status": "ok",
+                    "warning_count": 1,
+                    "ledger_status": "ok",
+                    "ledger_position_lot_count": 3,
+                    "ledger_trade_event_count": 12,
+                    "projection_verify_ok": True,
+                    "projection_verify_mode": "checkpoint_reuse",
+                },
+                "latest_run": {
+                    "path": "output_runs/run-1",
+                    "state": {
+                        "tick_metrics": {
+                            "json": {
+                                "ran_scan": True,
+                                "notify_summary": {"send_confirmed_count": 1, "send_attempted_count": 1},
+                            }
+                        }
+                    },
+                    "accounts": {
+                        "sy": {
+                            "auto_close_receipt": {"status": "sent"},
+                            "expired_position_maintenance": {"json": {"mode": "applied", "applied_closed": 1}},
+                        }
+                    },
+                },
+            },
+            warnings=["No symbols_notification.txt found."],
+        ),
+    )
+
+    assert "OM 状态：degraded" in text
+    assert "最新运行：run-1 scan=yes notify=1/1" in text
+    assert "账本：ok lots=3 events=12" in text
+    assert "auto-close sy：sent，closed=1" in text
+    assert "异常：No symbols_notification.txt found." in text
+
+
+def test_inbound_renderer_summarizes_healthcheck_and_config() -> None:
+    health_text = render_inbound_text(
+        intent=parse_inbound_text("健康检查"),
+        tool_result=build_response(
+            tool_name="healthcheck",
+            ok=True,
+            data={
+                "summary": {"ok": False, "critical_count": 1, "warning_count": 2},
+                "checks": [
+                    {"name": "opend_readiness", "status": "error", "message": "OpenD unreachable"},
+                    {"name": "feishu_bot", "status": "warn", "message": "missing default recipient"},
+                ],
+            },
+        ),
+    )
+    config_text = render_inbound_text(
+        intent=parse_inbound_text("配置检查"),
+        tool_result=build_response(
+            tool_name="config_validate",
+            ok=True,
+            data={
+                "config_path": ".../config.us.json",
+                "account_count": 2,
+                "accounts": ["lx", "sy"],
+                "symbol_count": 12,
+                "warnings": ["schedule disabled"],
+            },
+        ),
+    )
+
+    assert "健康检查：degraded" in health_text
+    assert "- error opend_readiness: OpenD unreachable" in health_text
+    assert "配置检查：有警告" in config_text
+    assert "账户：lx, sy（2 个）" in config_text
+    assert "警告：schedule disabled" in config_text
+
+
+def test_inbound_renderer_summarizes_runs_and_logs() -> None:
+    runs_text = render_inbound_text(
+        intent=parse_inbound_text("最近运行"),
+        tool_result=build_response(
+            tool_name="runtime_runs",
+            ok=True,
+            data={
+                "summary": {"returned_count": 1, "total_count": 1},
+                "runs": [
+                    {
+                        "run_id": "run-1",
+                        "status": "success",
+                        "mtime_utc": "2026-05-20T01:00:00+00:00",
+                        "ran_scan": True,
+                        "sent": False,
+                        "accounts": ["sy"],
+                        "reason": "market_closed",
+                    }
+                ],
+            },
+        ),
+    )
+    logs_text = render_inbound_text(
+        intent=parse_inbound_text("日志 run-1"),
+        tool_result=build_response(
+            tool_name="runtime_logs",
+            ok=True,
+            data={
+                "summary": {"existing_file_count": 1, "kind": "audit", "lines": 50},
+                "selected_run": {"run_id": "run-1"},
+                "files": [
+                    {
+                        "path_display": "output_runs/run-1/state/audit_events.jsonl",
+                        "exists": True,
+                        "tail_line_count": 2,
+                        "tail": ['{"phase":"start"}', '{"phase":"done"}'],
+                    }
+                ],
+            },
+        ),
+    )
+
+    assert "最近运行：1/1 条" in runs_text
+    assert "run-1 success 2026-05-20T01:00:00+00:00 scan=yes sent=no accounts=sy reason=market_closed" in runs_text
+    assert "日志查询：1/1 个文件，kind=audit，lines=50" in logs_text
+    assert "run：run-1" in logs_text
+    assert '{"phase":"done"}' in logs_text
+
+
 def test_inbound_audit_keeps_monthly_income_diagnostics(tmp_path: Path) -> None:
     audit_db = tmp_path / "inbound.sqlite3"
 

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.87 - 2026-05-20
+
+### Changed
+- Expanded Feishu inbound read-only replies for status, healthcheck, config validation, position, recent-run, and log queries so bot responses show actionable summaries instead of generic completion messages.
+
 ## 1.2.86 - 2026-05-20
 
 ### Added
