@@ -269,13 +269,13 @@ Agent：
 ./om-agent run --tool close_advice --input-json '{"config_key":"us"}'
 ```
 
-### Watchlist
+### Symbols
 
 ```bash
-./om watchlist list
-./om watchlist add TCOM --put
-./om watchlist edit TCOM --set sell_put.max_strike=45
-./om watchlist rm TCOM
+./om symbols list
+./om symbols add TCOM --put
+./om symbols edit TCOM --set sell_put.max_strike=45
+./om symbols rm TCOM
 ```
 
 Agent 只读列出：

@@ -12,8 +12,78 @@ from src.application.inbound import InboundRequest, handle_inbound_request
 from src.application.inbound.contracts import InboundToolCall
 from src.application.inbound.feishu import feishu_payload_to_inbound_request, handle_feishu_payload
 from src.application.inbound.parser import parse_inbound_text
-from src.application.inbound.policy import check_sender_allowed, enforce_tool_allowed
+from src.application.inbound.policy import PURE_READ_TOOLS, check_sender_allowed, enforce_tool_allowed
 from src.application.inbound.renderer import render_inbound_text
+
+
+def _write_inbound_runtime_config(tmp_path: Path) -> tuple[Path, Path]:
+    sqlite_path = tmp_path / "output_shared" / "state" / "option_positions.sqlite3"
+    data_cfg_path = tmp_path / "portfolio.runtime.json"
+    data_cfg_path.write_text(
+        json.dumps({"option_positions": {"sqlite_path": str(sqlite_path)}}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    cfg_path = tmp_path / "config.us.json"
+    cfg_path.write_text(json.dumps(_runtime_cfg(str(data_cfg_path)), ensure_ascii=False, indent=2), encoding="utf-8")
+    return cfg_path, sqlite_path
+
+
+def _write_symbols_runtime_config(tmp_path: Path) -> Path:
+    data_cfg_path = tmp_path / "portfolio.runtime.json"
+    data_cfg_path.write_text(json.dumps({"option_positions": {}}, ensure_ascii=False, indent=2), encoding="utf-8")
+    cfg_path = tmp_path / "config.us.json"
+    cfg_path.write_text(json.dumps(_runtime_cfg(str(data_cfg_path)), ensure_ascii=False, indent=2), encoding="utf-8")
+    return cfg_path
+
+
+def _runtime_cfg(data_config_ref: str) -> dict:
+    return {
+        "accounts": ["sy"],
+        "portfolio": {
+            "broker": "富途",
+            "source": "futu",
+            "account": "sy",
+            "data_config": data_config_ref,
+        },
+        "templates": {
+            "put_base": {
+                "sell_put": {
+                    "min_annualized_net_return": 0.1,
+                    "min_net_income": 50,
+                    "min_open_interest": 10,
+                    "min_volume": 1,
+                    "max_spread_ratio": 0.3,
+                }
+            }
+        },
+        "symbols": [
+            {
+                "symbol": "NVDA",
+                "fetch": {"source": "futu", "limit_expirations": 8},
+                "use": ["put_base"],
+                "sell_put": {
+                    "enabled": True,
+                    "min_dte": 20,
+                    "max_dte": 45,
+                    "min_strike": 100,
+                    "max_strike": 120,
+                },
+                "sell_call": {"enabled": False},
+            }
+        ],
+    }
+
+
+def _enable_inbound_trade_write(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OM_INBOUND_OPERATIONS_ENABLED", "1")
+    monkeypatch.setenv("OM_INBOUND_TRADE_WRITE_ENABLED", "1")
+    monkeypatch.setenv("OM_INBOUND_ADMIN_OPEN_IDS", "feishu:ou_1")
+
+
+def _enable_inbound_symbol_write(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OM_INBOUND_OPERATIONS_ENABLED", "1")
+    monkeypatch.setenv("OM_INBOUND_SYMBOL_WRITE_ENABLED", "1")
+    monkeypatch.setenv("OM_INBOUND_ADMIN_OPEN_IDS", "feishu:ou_1")
 
 
 def test_inbound_parser_maps_core_read_only_commands() -> None:
@@ -56,6 +126,233 @@ def test_inbound_policy_allows_sender_and_rejects_non_pure_read_tool() -> None:
         enforce_tool_allowed(InboundToolCall(tool_name="scan_opportunities", payload={"config_key": "us"}))
 
     assert exc.value.code == "PERMISSION_DENIED"
+    assert "inbound.manual_trade" not in PURE_READ_TOOLS
+
+
+def test_inbound_parser_maps_manual_trade_and_symbol_operations() -> None:
+    open_intent = parse_inbound_text("记录开仓 sy 0700.HK short put strike 450 exp 2026-05-28 6张 premium 2.35 multiplier 100")
+    assert open_intent.name == "manual_trade_open"
+    assert open_intent.arguments == {
+        "account": "sy",
+        "symbol": "0700.HK",
+        "option_type": "put",
+        "side": "short",
+        "contracts": 6,
+        "strike": 450.0,
+        "expiration_ymd": "2026-05-28",
+        "multiplier": 100.0,
+        "premium_per_share": 2.35,
+    }
+
+    close_intent = parse_inbound_text("记录平仓 sy 0700.HK short put strike 450 exp 2026-05-28 2张 close 1.2")
+    assert close_intent.name == "manual_trade_close"
+    assert close_intent.arguments["contracts_to_close"] == 2
+    assert close_intent.arguments["close_price"] == 1.2
+
+    assert parse_inbound_text("确认记录 in_abc123").arguments == {"operation_id": "in_abc123"}
+    assert parse_inbound_text("取消记录 in_abc123").name == "manual_trade_cancel"
+
+    assert parse_inbound_text("查看监控标的").name == "symbol_list"
+    symbol_add = parse_inbound_text("增加监控标的 700 put")
+    assert symbol_add.name == "symbol_add"
+    assert symbol_add.arguments == {"symbol": "700", "sell_put_enabled": True, "sell_call_enabled": False}
+    symbol_edit = parse_inbound_text("修改监控标的 HK.00700 sell_put.max_strike=480")
+    assert symbol_edit.name == "symbol_edit"
+    assert symbol_edit.arguments == {"symbol": "HK.00700", "set": {"sell_put.max_strike": 480}}
+    assert parse_inbound_text("删除监控标的 腾讯").arguments == {"symbol": "腾讯"}
+    assert parse_inbound_text("确认监控 in_abc123").name == "symbol_confirm"
+
+
+def test_inbound_manual_trade_preview_and_confirm_open(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import src.application.ledger.repository as ledger_repository
+
+    _enable_inbound_trade_write(monkeypatch)
+    cfg_path, sqlite_path = _write_inbound_runtime_config(tmp_path)
+    audit_db = tmp_path / "inbound.sqlite3"
+
+    preview = handle_inbound_request(
+        InboundRequest(
+            text="记录开仓 sy NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_open_preview",
+            config_path=str(cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+
+    assert preview["ok"] is True
+    assert preview["tool_name"] == "inbound.manual_trade"
+    assert preview["data"]["response_text"].startswith("交易记录预览：开仓")
+    assert "未写入账本" in preview["data"]["response_text"]
+
+    operation_id = preview["data"]["operation_id"]
+    confirmed = handle_inbound_request(
+        InboundRequest(
+            text=f"确认记录 {operation_id}",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_open_confirm",
+            config_path=str(cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+
+    assert confirmed["ok"] is True
+    assert "交易已写入 OM 本地账本：开仓" in confirmed["data"]["response_text"]
+    repo = ledger_repository.SQLiteOptionPositionsRepository(sqlite_path)
+    assert len(repo.list_trade_events()) == 1
+
+
+def test_inbound_manual_trade_preview_and_confirm_close(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import src.application.ledger.repository as ledger_repository
+
+    _enable_inbound_trade_write(monkeypatch)
+    cfg_path, sqlite_path = _write_inbound_runtime_config(tmp_path)
+    audit_db = tmp_path / "inbound.sqlite3"
+
+    open_preview = handle_inbound_request(
+        InboundRequest(
+            text="记录开仓 sy NVDA short put strike 100 exp 2026-06-19 2张 premium 2.5 multiplier 100",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_close_open_preview",
+            config_path=str(cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+    open_id = open_preview["data"]["operation_id"]
+    handle_inbound_request(
+        InboundRequest(
+            text=f"确认记录 {open_id}",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_close_open_confirm",
+            config_path=str(cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+
+    close_preview = handle_inbound_request(
+        InboundRequest(
+            text="记录平仓 sy NVDA short put strike 100 exp 2026-06-19 1张 close 1.0",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_close_preview",
+            config_path=str(cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+    assert close_preview["ok"] is True
+    assert close_preview["data"]["response_text"].startswith("交易记录预览：平仓")
+
+    close_id = close_preview["data"]["operation_id"]
+    confirmed = handle_inbound_request(
+        InboundRequest(
+            text=f"确认记录 {close_id}",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_close_confirm",
+            config_path=str(cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+
+    assert confirmed["ok"] is True
+    assert "交易已写入 OM 本地账本：平仓" in confirmed["data"]["response_text"]
+    repo = ledger_repository.SQLiteOptionPositionsRepository(sqlite_path)
+    assert len(repo.list_trade_events()) == 2
+
+
+def test_inbound_symbol_add_edit_remove_preview_and_confirm(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _enable_inbound_symbol_write(monkeypatch)
+    cfg_path = _write_symbols_runtime_config(tmp_path)
+    audit_db = tmp_path / "inbound.sqlite3"
+
+    listed = handle_inbound_request(
+        InboundRequest(text="查看监控标的", sender_id="ou_1", channel="feishu", message_id="msg_symbol_list", config_path=str(cfg_path), audit_db=str(audit_db)),
+        allowed_senders="feishu:ou_1",
+    )
+    assert listed["ok"] is True
+    assert listed["tool_name"] == "inbound.symbols"
+    assert "当前监控标的" in listed["data"]["response_text"]
+
+    add_preview = handle_inbound_request(
+        InboundRequest(text="增加监控标的 700 put", sender_id="ou_1", channel="feishu", message_id="msg_symbol_add", config_path=str(cfg_path), audit_db=str(audit_db)),
+        allowed_senders="feishu:ou_1",
+    )
+    assert add_preview["ok"] is True
+    assert "校准为：0700.HK" in add_preview["data"]["response_text"]
+    add_id = add_preview["data"]["operation_id"]
+    add_confirm = handle_inbound_request(
+        InboundRequest(text=f"确认监控 {add_id}", sender_id="ou_1", channel="feishu", message_id="msg_symbol_add_confirm", config_path=str(cfg_path), audit_db=str(audit_db)),
+        allowed_senders="feishu:ou_1",
+    )
+    assert add_confirm["ok"] is True
+
+    edit_preview = handle_inbound_request(
+        InboundRequest(text="修改监控标的 HK.00700 sell_put.max_strike=480", sender_id="ou_1", channel="feishu", message_id="msg_symbol_edit", config_path=str(cfg_path), audit_db=str(audit_db)),
+        allowed_senders="feishu:ou_1",
+    )
+    edit_id = edit_preview["data"]["operation_id"]
+    edit_confirm = handle_inbound_request(
+        InboundRequest(text=f"确认监控 {edit_id}", sender_id="ou_1", channel="feishu", message_id="msg_symbol_edit_confirm", config_path=str(cfg_path), audit_db=str(audit_db)),
+        allowed_senders="feishu:ou_1",
+    )
+    assert edit_confirm["ok"] is True
+
+    remove_preview = handle_inbound_request(
+        InboundRequest(text="删除监控标的 腾讯", sender_id="ou_1", channel="feishu", message_id="msg_symbol_remove", config_path=str(cfg_path), audit_db=str(audit_db)),
+        allowed_senders="feishu:ou_1",
+    )
+    remove_id = remove_preview["data"]["operation_id"]
+    remove_confirm = handle_inbound_request(
+        InboundRequest(text=f"确认监控 {remove_id}", sender_id="ou_1", channel="feishu", message_id="msg_symbol_remove_confirm", config_path=str(cfg_path), audit_db=str(audit_db)),
+        allowed_senders="feishu:ou_1",
+    )
+    assert remove_confirm["ok"] is True
+
+    current = json.loads(cfg_path.read_text(encoding="utf-8"))
+    assert [item["symbol"] for item in current["symbols"]] == ["NVDA"]
+
+
+def test_inbound_write_operations_are_disabled_by_default(tmp_path: Path) -> None:
+    cfg_path = _write_symbols_runtime_config(tmp_path)
+    audit_db = tmp_path / "inbound.sqlite3"
+
+    trade_out = handle_inbound_request(
+        InboundRequest(
+            text="记录开仓 sy NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_disabled_trade",
+            config_path=str(cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+    symbol_out = handle_inbound_request(
+        InboundRequest(
+            text="增加监控标的 700 put",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_disabled_symbol",
+            config_path=str(cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+
+    assert trade_out["ok"] is False
+    assert trade_out["error"]["code"] == "PERMISSION_DENIED"
+    assert symbol_out["ok"] is False
+    assert symbol_out["error"]["code"] == "PERMISSION_DENIED"
 
 
 def test_inbound_handle_executes_read_only_tool_and_replays_duplicate_message(tmp_path: Path) -> None:

@@ -2396,6 +2396,33 @@ def test_manage_symbols_write_applies_when_enabled(monkeypatch, tmp_path: Path) 
     assert "market" not in added
 
 
+def test_manage_symbols_add_calibrates_symbol_before_write(monkeypatch, tmp_path: Path) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    cfg_path = tmp_path / "config.hk.json"
+    cfg = _minimal_cfg()
+    cfg["symbols"] = [{"symbol": "NVDA"}]
+    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    monkeypatch.setenv("OM_AGENT_ENABLE_WRITE_TOOLS", "true")
+
+    out = run_tool(
+        "manage_symbols",
+        {
+            "config_path": str(cfg_path),
+            "action": "add",
+            "symbol": "HK.00700",
+            "sell_put_enabled": True,
+            "sell_put_min_dte": 20,
+            "sell_put_max_dte": 45,
+            "confirm": True,
+        },
+    )
+
+    assert out["ok"] is True
+    current = json.loads(cfg_path.read_text(encoding="utf-8"))
+    assert [item["symbol"] for item in current["symbols"]] == ["NVDA", "0700.HK"]
+
+
 def test_manage_symbols_add_allows_single_near_bound_modes(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 

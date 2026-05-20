@@ -4,10 +4,10 @@ from copy import deepcopy
 from typing import Any, Callable, cast
 
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.watchlist_mutations import (
+from src.application.symbol_mutations import (
     ensure_symbols_list as _ensure_symbols_list,
     find_symbol_entry as _find_symbol_entry,
-    normalize_symbol as _normalize_symbol,
+    require_calibrated_symbol,
     set_path as _shared_set_path,
 )
 
@@ -73,7 +73,14 @@ def optional_float(payload: dict[str, Any], key: str) -> float | None:
 
 def apply_symbol_mutation(cfg: dict[str, Any], payload: dict[str, Any], *, normalize_accounts, resolve_watchlist_config) -> dict[str, Any]:
     action = str(payload.get("action") or "list").strip().lower()
-    symbol = _normalize_symbol(str(payload.get("symbol") or ""))
+    symbol = ""
+    if action != "list":
+        calibrated = require_calibrated_symbol(
+            str(payload.get("symbol") or ""),
+            config=cfg,
+            error_factory=lambda message: AgentToolError(code="INPUT_ERROR", message=message),
+        )
+        symbol = str(calibrated.canonical_symbol or "")
     symbols = _ensure_symbols_list(cfg, error_factory=lambda message: AgentToolError(code="CONFIG_ERROR", message=message))
     if action == "list":
         return cfg

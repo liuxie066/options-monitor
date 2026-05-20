@@ -24,7 +24,7 @@ from src.application.yield_enhancement_config import (
     resolve_yield_enhancement_cfg,
     wants_yield_enhancement_separate,
 )
-from src.application.watchlist_mutations import normalize_symbol_read
+from src.application.symbol_mutations import normalize_symbol_read
 
 LIQUIDITY_COMMON_FIELDS = (
     'min_net_income',
