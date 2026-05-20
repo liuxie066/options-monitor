@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.2.97 - 2026-05-20
+
+### Changed
+- Reworked multiplier resolution to use only payload fields, the shared `output_shared/state/multiplier_cache.json`, and OpenD refresh, retiring `intake.multiplier_by_symbol` and market default multiplier config fields.
+- Enabled manual trade inbound drafts to refresh missing multipliers from OpenD and include clearer multiplier cache/failure diagnostics.
+
+### Fixed
+- Made Feishu WS send a visible reply when an allowlisted sender hits the inbound write-gate, while keeping unauthorized senders silent.
+- Added settings doctor diagnostics for duplicate deprecated Feishu ACK env keys and manual trade write-gate readiness.
+
 ## 1.2.96 - 2026-05-20
 
 ### Added

@@ -58,6 +58,19 @@ def test_validate_config_accepts_valid_openclaw_notification_route() -> None:
     mod.validate_config(cfg)
 
 
+def test_validate_config_rejects_retired_intake_multiplier_metadata() -> None:
+    import src.application.config_validator as mod
+
+    cfg = _base_cfg()
+    cfg["intake"] = {"symbol_aliases": {"中海油": "0883.HK"}, "multiplier_by_symbol": {"0883.HK": 1000}}
+
+    try:
+        mod.validate_config(cfg)
+        raise AssertionError("expected SystemExit")
+    except SystemExit as exc:
+        assert "intake.multiplier_by_symbol is retired" in str(exc)
+
+
 def test_validate_config_accepts_wechat_clawbot_without_feishu_secrets() -> None:
     import src.application.config_validator as mod
 

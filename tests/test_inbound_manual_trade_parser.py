@@ -13,20 +13,32 @@ def _runtime_config() -> dict[str, Any]:
     return {"accounts": ["lx", "sy"]}
 
 
-def _patch_multiplier(monkeypatch: pytest.MonkeyPatch, value: int | None, source: str | None = "cache") -> None:
+def _patch_multiplier(
+    monkeypatch: pytest.MonkeyPatch,
+    value: int | None,
+    source: str | None = "cache",
+    *,
+    expected_allow_opend_refresh: bool = False,
+) -> None:
     def _fake_resolve(**kwargs: Any) -> tuple[int | None, str | None, dict[str, Any]]:
-        assert kwargs["allow_opend_refresh"] is False
+        assert kwargs["allow_opend_refresh"] is expected_allow_opend_refresh
         attempted = [
             {"source": "payload", "status": "missing" if kwargs.get("multiplier") in (None, "") else "resolved", "value": kwargs.get("multiplier")},
             {"source": source or "cache", "status": "resolved" if value else "miss", "value": value},
         ]
-        return value, source if value else None, {"attempted_sources": attempted}
+        diagnostics = {
+            "attempted_sources": attempted,
+            "cache_path": str(Path(kwargs["repo_base"]) / "output_shared" / "state" / "multiplier_cache.json"),
+        }
+        if not value:
+            diagnostics["message"] = f"recognized {kwargs.get('symbol')} but multiplier could not be resolved"
+        return value, source if value else None, diagnostics
 
     monkeypatch.setattr("src.application.inbound.manual_trade_parser.resolve_multiplier_with_source_and_diagnostics", _fake_resolve)
 
 
 def test_manual_trade_draft_parses_futu_open_without_manual_multiplier(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    _patch_multiplier(monkeypatch, 1000)
+    _patch_multiplier(monkeypatch, 1000, expected_allow_opend_refresh=True)
     message = (
         "成交提醒: 【成交提醒】成功卖出1张$中海油 260629 30.00 购$，成交价格：0.41，"
         "此笔订单委托已全部成交，2026/05/20 11:50:42 (香港)。【富途证券(香港)】"
@@ -35,17 +47,17 @@ def test_manual_trade_draft_parses_futu_open_without_manual_multiplier(monkeypat
 
     draft = build_manual_trade_draft(
         "manual_open",
-        raw_text=f"记录开仓 lx {message}",
+        raw_text=f"记录开仓 sy {message}",
         accounts=("lx", "sy"),
         config_key="hk",
         config_path="/var/lib/options-monitor/config.hk.json",
         runtime_config=_runtime_config(),
         repo_base=tmp_path,
-        allow_opend_refresh=False,
+        allow_opend_refresh=True,
     )
 
     assert draft["arguments"] == {
-        "account": "lx",
+        "account": "sy",
         "symbol": "0883.HK",
         "option_type": "call",
         "side": "short",
@@ -63,6 +75,8 @@ def test_manual_trade_draft_parses_futu_open_without_manual_multiplier(monkeypat
     assert diagnostics["raw_symbol"] == "中海油"
     assert diagnostics["canonical_symbol"] == "0883.HK"
     assert diagnostics["multiplier_source"] == "cache"
+    assert diagnostics["multiplier_source_policy"]["mode"] == "cache_opend"
+    assert diagnostics["multiplier_source_policy"]["allow_opend_refresh"] is True
     assert diagnostics["fill_time_ms"] == expected_ms
     assert diagnostics["missing_fields"] == []
 
@@ -145,3 +159,4 @@ def test_manual_trade_draft_reports_missing_multiplier(monkeypatch: pytest.Monke
 
     assert "multiplier" in draft["diagnostics"]["missing_fields"]
     assert draft["diagnostics"]["multiplier_resolution_attempts"]
+    assert draft["diagnostics"]["multiplier_resolution_message"] == "recognized 0700.HK but multiplier could not be resolved"

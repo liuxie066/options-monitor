@@ -56,7 +56,7 @@ def test_resolve_multiplier_uses_cached_value(tmp_path: Path) -> None:
     ) == (500, "test")
 
 
-def test_resolve_multiplier_uses_repo_market_config_when_active_config_lacks_intake(tmp_path: Path) -> None:
+def test_resolve_multiplier_ignores_retired_config_fallback(tmp_path: Path) -> None:
     (tmp_path / "config.hk.json").write_text(
         json.dumps(
             {
@@ -71,17 +71,37 @@ def test_resolve_multiplier_uses_repo_market_config_when_active_config_lacks_int
     value, source, diagnostics = resolve_multiplier_with_source_and_diagnostics(
         repo_base=tmp_path,
         symbol="9992.HK",
-        config={"trade_intake": {"mode": "dry-run"}},
+        config={"intake": {"multiplier_by_symbol": {"9992.HK": 1000}}},
         allow_opend_refresh=False,
     )
 
-    assert value == 1000
-    assert source == "config-file:config.hk.json:intake.default_multiplier_hk"
-    assert diagnostics["selected_source"] == source
-    assert any(
-        item["source"] == "config:intake.default_multiplier_hk" and item["status"] == "missing_or_invalid"
-        for item in diagnostics["attempted_sources"]
+    assert value is None
+    assert source is None
+    assert diagnostics["selected_source"] is None
+    assert diagnostics["cache_path"] == str(tmp_path / "output_shared" / "state" / "multiplier_cache.json")
+    assert diagnostics["message"] == "recognized 9992.HK but multiplier could not be resolved"
+    assert [item["source"] for item in diagnostics["attempted_sources"]] == ["payload", "cache", "opend"]
+    assert not any(str(item["source"]).startswith("config") for item in diagnostics["attempted_sources"])
+
+
+def test_resolve_multiplier_refreshes_opend_and_writes_cache(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        "src.application.multiplier_cache.refresh_via_opend",
+        lambda **_kwargs: type("Result", (), {"ok": True, "multiplier": 1000, "error": None})(),
     )
+
+    value, source, diagnostics = resolve_multiplier_with_source_and_diagnostics(
+        repo_base=tmp_path,
+        symbol="9992.HK",
+        allow_opend_refresh=True,
+    )
+
+    assert value == 1000
+    assert source == "opend"
+    assert diagnostics["selected_source"] == "opend"
+    cache = load_cache(tmp_path / "output_shared" / "state" / "multiplier_cache.json")
+    assert cache["9992.HK"]["multiplier"] == 1000
+    assert cache["9992.HK"]["source"] == "opend"
 
 
 def test_merge_cache_updates_preserves_existing_entries(tmp_path: Path) -> None:

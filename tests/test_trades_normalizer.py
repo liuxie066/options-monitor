@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -246,7 +245,7 @@ def test_normalize_trade_deal_uses_contract_metadata_multiplier_with_runtime_con
     assert deal.normalization_diagnostics["multiplier_resolution"]["selected_source"] == "cache"
 
 
-def test_normalize_trade_deal_uses_static_symbol_multiplier_after_metadata_miss(monkeypatch, tmp_path: Path) -> None:
+def test_normalize_trade_deal_ignores_retired_static_symbol_multiplier(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         "src.application.multiplier_cache.refresh_via_opend",
         lambda **_kwargs: SimpleNamespace(ok=False, multiplier=None, error="not available in test"),
@@ -267,13 +266,14 @@ def test_normalize_trade_deal_uses_static_symbol_multiplier_after_metadata_miss(
     )
 
     assert deal.symbol == "9992.HK"
-    assert deal.multiplier == 1000
-    assert deal.multiplier_source == "config:intake.multiplier_by_symbol"
+    assert deal.multiplier is None
+    assert deal.multiplier_source is None
     attempts = deal.normalization_diagnostics["multiplier_resolution"]["attempted_sources"]
-    assert any(item["source"] == "config:intake.multiplier_by_symbol" and item["status"] == "resolved" for item in attempts)
+    assert [item["source"] for item in attempts] == ["payload", "cache", "opend"]
+    assert deal.normalization_diagnostics["multiplier_resolution"]["message"] == "recognized 9992.HK but multiplier could not be resolved"
 
 
-def test_normalize_trade_deal_uses_configured_market_default_multiplier(monkeypatch, tmp_path: Path) -> None:
+def test_normalize_trade_deal_ignores_retired_market_default_multiplier(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         "src.application.multiplier_cache.refresh_via_opend",
         lambda **_kwargs: SimpleNamespace(ok=False, multiplier=None, error="not available in test"),
@@ -316,13 +316,17 @@ def test_normalize_trade_deal_uses_configured_market_default_multiplier(monkeypa
         config={"intake": {"default_multiplier_us": 100}},
     )
 
-    assert hk_deal.multiplier == 1000
-    assert hk_deal.multiplier_source == "config:intake.default_multiplier_hk"
-    assert us_deal.multiplier == 100
-    assert us_deal.multiplier_source == "config:intake.default_multiplier_us"
+    assert hk_deal.multiplier is None
+    assert hk_deal.multiplier_source is None
+    assert us_deal.multiplier is None
+    assert us_deal.multiplier_source is None
+    assert not any(
+        str(item["source"]).startswith("config")
+        for item in hk_deal.normalization_diagnostics["multiplier_resolution"]["attempted_sources"]
+    )
 
 
-def test_normalize_trade_deal_uses_repo_hk_intake_config_when_active_config_has_no_intake(
+def test_normalize_trade_deal_ignores_repo_hk_intake_config_when_active_config_has_no_intake(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -330,16 +334,7 @@ def test_normalize_trade_deal_uses_repo_hk_intake_config_when_active_config_has_
         "src.application.multiplier_cache.refresh_via_opend",
         lambda **_kwargs: SimpleNamespace(ok=False, multiplier=None, error="not available in test"),
     )
-    (tmp_path / "config.hk.json").write_text(
-        json.dumps(
-            {
-                "intake": {
-                    "default_multiplier_hk": 1000,
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
+    (tmp_path / "config.hk.json").write_text('{"intake":{"default_multiplier_hk":1000}}', encoding="utf-8")
 
     deal = normalize_trade_deal(
         {
@@ -361,8 +356,9 @@ def test_normalize_trade_deal_uses_repo_hk_intake_config_when_active_config_has_
     )
 
     assert deal.symbol == "9992.HK"
-    assert deal.multiplier == 1000
-    assert deal.multiplier_source == "config-file:config.hk.json:intake.default_multiplier_hk"
+    assert deal.multiplier is None
+    assert deal.multiplier_source is None
+    assert deal.normalization_diagnostics["multiplier_resolution"]["message"] == "recognized 9992.HK but multiplier could not be resolved"
 
 
 def test_normalize_trade_deal_does_not_let_hk_option_display_name_block_code_fallback(
@@ -371,17 +367,7 @@ def test_normalize_trade_deal_does_not_let_hk_option_display_name_block_code_fal
 ) -> None:
     monkeypatch.setattr(
         "src.application.multiplier_cache.refresh_via_opend",
-        lambda **_kwargs: SimpleNamespace(ok=False, multiplier=None, error="not available in test"),
-    )
-    (tmp_path / "config.hk.json").write_text(
-        json.dumps(
-            {
-                "intake": {
-                    "default_multiplier_hk": 1000,
-                }
-            }
-        ),
-        encoding="utf-8",
+        lambda **_kwargs: SimpleNamespace(ok=True, multiplier=1000, error=None),
     )
 
     deal = normalize_trade_deal(
@@ -404,4 +390,4 @@ def test_normalize_trade_deal_does_not_let_hk_option_display_name_block_code_fal
     assert deal.strike == 135.0
     assert deal.expiration_ymd == "2026-05-28"
     assert deal.multiplier == 1000
-    assert deal.multiplier_source == "config-file:config.hk.json:intake.default_multiplier_hk"
+    assert deal.multiplier_source == "opend"

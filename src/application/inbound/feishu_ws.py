@@ -266,7 +266,8 @@ def _maybe_react(
 
     inbound_result = _inbound_result(data)
     if _inbound_error_code(inbound_result) == "PERMISSION_DENIED":
-        return {"attempted": False, "ok": True, "reason": "permission_denied"}
+        if _permission_denied_should_stay_silent(inbound_result):
+            return {"attempted": False, "ok": True, "reason": "permission_denied"}
 
     emoji_type = str(settings.ack_reaction or "").strip().upper()
     if not emoji_type:
@@ -316,11 +317,14 @@ def _maybe_reply(
 
     inbound_result = _inbound_result(data)
     if _inbound_error_code(inbound_result) == "PERMISSION_DENIED":
-        return {"attempted": False, "ok": True, "reason": "permission_denied"}
+        if _permission_denied_should_stay_silent(inbound_result):
+            return {"attempted": False, "ok": True, "reason": "permission_denied"}
     if not settings.reply_enabled:
         return {"attempted": False, "ok": True, "reason": "reply_disabled"}
 
     response_text = _trim_reply(str(data.get("response_text") or ""), max_chars=settings.max_reply_chars)
+    if not response_text and _inbound_error_code(inbound_result) == "PERMISSION_DENIED":
+        response_text = _trim_reply(_permission_denied_message(inbound_result), max_chars=settings.max_reply_chars)
     if not response_text:
         return {"attempted": False, "ok": True, "reason": "empty_response"}
     if not (settings.app_id and settings.app_secret):
@@ -349,7 +353,7 @@ def _maybe_reply(
     return {
         "attempted": True,
         "ok": True,
-        "reason": "sent",
+        "reason": "permission_denied_sent" if _inbound_error_code(inbound_result) == "PERMISSION_DENIED" else "sent",
         "message_id": message_id,
         "api_response": api_response,
     }
@@ -393,6 +397,24 @@ def _inbound_command_id(inbound_result: dict[str, Any]) -> str | None:
     data_raw = inbound_result.get("data")
     data = cast(dict[str, Any], data_raw) if isinstance(data_raw, dict) else {}
     return _first_text(data.get("command_id"))
+
+
+def _permission_denied_should_stay_silent(inbound_result: dict[str, Any]) -> bool:
+    error_raw = inbound_result.get("error")
+    error = cast(dict[str, Any], error_raw) if isinstance(error_raw, dict) else {}
+    details_raw = error.get("details")
+    details = cast(dict[str, Any], details_raw) if isinstance(details_raw, dict) else {}
+    reason = str(details.get("reason") or "").strip()
+    message = str(error.get("message") or "").strip()
+    return reason in {"sender_not_allowed", "missing_sender"} or message == "sender is not allowed to use inbound control"
+
+
+def _permission_denied_message(inbound_result: dict[str, Any]) -> str:
+    error_raw = inbound_result.get("error")
+    error = cast(dict[str, Any], error_raw) if isinstance(error_raw, dict) else {}
+    message = str(error.get("message") or "写入权限未开启").strip()
+    hint = str(error.get("hint") or "").strip()
+    return f"{message}{(' ' + hint) if hint else ''}".strip()
 
 
 def _trim_reply(value: str, *, max_chars: int) -> str:

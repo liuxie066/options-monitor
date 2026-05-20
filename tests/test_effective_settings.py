@@ -128,6 +128,59 @@ def test_settings_doctor_reports_deprecated_env_without_secret_values(tmp_path) 
     assert checks["feishu_bot_recipients"]["value"]["allowed_open_ids_count"] == 2
 
 
+def test_settings_doctor_reports_deprecated_ack_duplicate_conflict(tmp_path) -> None:
+    env_file = tmp_path / "options-monitor.env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "OM_FEISHU_BOT_APP_ID=cli_1",
+                "OM_FEISHU_BOT_APP_SECRET=secret_1",
+                "OM_FEISHU_BOT_ALLOWED_OPEN_IDS=ou_1",
+                "OM_FEISHU_ACK_REACTION=SMILE",
+                'OM_FEISHU_ACK_REACTION="thumbsup"',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    out = diagnose_effective_settings(environ={}, env_file=env_file)
+    checks = {item["name"]: item for item in out["checks"]}
+
+    assert checks["deprecated_env"]["status"] == "warn"
+    assert checks["deprecated_env_duplicates"]["status"] == "warn"
+    duplicate = checks["deprecated_env_duplicates"]["value"]["duplicates"][0]
+    assert duplicate["name"] == "OM_FEISHU_ACK_REACTION"
+    assert duplicate["conflict"] is True
+    assert duplicate["migration_target"] == "inbound.feishu_ws.ack_reaction"
+    assert "overwrite runtime config" in checks["deprecated_env_duplicates"]["value"]["action"]
+    assert checks["duplicate_env_keys"]["status"] == "warn"
+
+
+def test_settings_doctor_reports_inbound_trade_write_gate_readiness(tmp_path) -> None:
+    env_file = tmp_path / "options-monitor.env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "OM_FEISHU_BOT_APP_ID=cli_1",
+                "OM_FEISHU_BOT_APP_SECRET=secret_1",
+                "OM_FEISHU_BOT_ALLOWED_OPEN_IDS=ou_1",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    out = diagnose_effective_settings(environ={}, env_file=env_file)
+    checks = {item["name"]: item for item in out["checks"]}
+
+    assert checks["inbound_trade_write_readiness"]["status"] == "warn"
+    assert checks["inbound_trade_write_readiness"]["value"]["missing_enabled_env"] == [
+        "OM_INBOUND_OPERATIONS_ENABLED",
+        "OM_INBOUND_TRADE_WRITE_ENABLED",
+    ]
+
+
 def test_cli_settings_explain_outputs_redacted_json(tmp_path, capsys) -> None:
     from src.interfaces.cli.main import main
 

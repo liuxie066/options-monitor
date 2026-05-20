@@ -31,12 +31,9 @@ try:
 except Exception:  # pragma: no cover - non-Unix fallback
     fcntl = None  # type: ignore[assignment]
 
-from domain.domain.symbol_identity import canonical_symbol_aliases, is_hk_symbol, resolve_underlier_alias
+from domain.domain.symbol_identity import canonical_symbol_aliases, resolve_underlier_alias
 from src.application.opend_fetch_config import filter_opend_fetch_kwargs
 from src.application.symbol_aliases import symbol_aliases_from_config
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
-
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -159,76 +156,6 @@ def _positive_int(value: Any) -> int | None:
     return None
 
 
-def _intake_config_candidates(
-    *,
-    repo_base: Path,
-    config: dict[str, Any] | None,
-) -> list[tuple[str, dict[str, Any]]]:
-    candidates: list[tuple[str, dict[str, Any]]] = []
-    cfg = config if isinstance(config, dict) else {}
-    intake = cfg.get("intake") if isinstance(cfg.get("intake"), dict) else None
-    if isinstance(intake, dict):
-        candidates.append(("config", intake))
-    else:
-        candidates.append(("config", {}))
-
-    roots = [Path(repo_base).resolve()]
-    if roots[0] != REPO_ROOT:
-        roots.append(REPO_ROOT)
-    seen_paths: set[Path] = set()
-    for root in roots:
-        for filename in ("config.hk.json", "config.us.json"):
-            path = (root / filename).resolve()
-            if path in seen_paths:
-                continue
-            seen_paths.add(path)
-            try:
-                obj = json.loads(path.read_text(encoding="utf-8"))
-            except Exception:
-                continue
-            file_intake = obj.get("intake") if isinstance(obj, dict) else None
-            if isinstance(file_intake, dict):
-                candidates.append((f"config-file:{filename}", file_intake))
-    return candidates
-
-
-def _static_config_multiplier(
-    *,
-    repo_base: Path,
-    config: dict[str, Any] | None,
-    symbol: str,
-) -> tuple[int | None, str | None, dict[str, Any]]:
-    diagnostics: dict[str, Any] = {"attempted_sources": []}
-    symbol_aliases = symbol_aliases_from_config(config)
-    sym = normalize_symbol(symbol, symbol_aliases=symbol_aliases)
-
-    for prefix, intake in _intake_config_candidates(repo_base=repo_base, config=config):
-        by_symbol = intake.get("multiplier_by_symbol")
-        source = f"{prefix}:intake.multiplier_by_symbol"
-        if isinstance(by_symbol, dict):
-            normalized_map = {
-                normalize_symbol(str(key or ""), symbol_aliases=symbol_aliases): value
-                for key, value in by_symbol.items()
-                if str(key or "").strip()
-            }
-            value = _positive_int(normalized_map.get(sym))
-            if value is not None:
-                diagnostics["attempted_sources"].append({"source": source, "status": "resolved", "value": value})
-                return value, source, diagnostics
-            diagnostics["attempted_sources"].append({"source": source, "status": "miss", "symbol": sym})
-        else:
-            diagnostics["attempted_sources"].append({"source": source, "status": "missing_config"})
-
-        default_key = "default_multiplier_hk" if is_hk_symbol(sym, symbol_aliases=symbol_aliases) else "default_multiplier_us"
-        source = f"{prefix}:intake.{default_key}"
-        value = _positive_int(intake.get(default_key))
-        if value is not None:
-            diagnostics["attempted_sources"].append({"source": source, "status": "resolved", "value": value})
-            return value, source, diagnostics
-        diagnostics["attempted_sources"].append({"source": source, "status": "missing_or_invalid"})
-    return None, None, diagnostics
-
-
 def resolve_multiplier_with_source_and_diagnostics(
     *,
     repo_base: Path,
@@ -263,9 +190,11 @@ def resolve_multiplier_with_source_and_diagnostics(
 
     if not sym:
         diagnostics["attempted_sources"].append({"source": "contract_metadata", "status": "skipped_no_symbol"})
+        diagnostics["message"] = "missing symbol; multiplier could not be resolved"
         return None, None, diagnostics
 
     cache_path = default_cache_path(repo_base)
+    diagnostics["cache_path"] = str(cache_path)
     cache = load_cache(cache_path)
     cached = get_cached_multiplier(cache, sym)
     if cached:
@@ -300,16 +229,7 @@ def resolve_multiplier_with_source_and_diagnostics(
     else:
         diagnostics["attempted_sources"].append({"source": "opend", "status": "skipped"})
 
-    static_value, static_source, static_diagnostics = _static_config_multiplier(
-        repo_base=repo_base,
-        config=config,
-        symbol=sym,
-    )
-    diagnostics["attempted_sources"].extend(static_diagnostics.get("attempted_sources") or [])
-    if static_value is not None and static_source:
-        diagnostics["selected_source"] = static_source
-        return int(static_value), static_source, diagnostics
-
+    diagnostics["message"] = f"recognized {sym} but multiplier could not be resolved"
     return None, None, diagnostics
 
 

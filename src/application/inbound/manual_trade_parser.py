@@ -239,6 +239,8 @@ def _base_diagnostics(
         "multiplier": multiplier,
         "multiplier_source": multiplier_source,
         "multiplier_resolution_attempts": multiplier_diagnostics.get("attempted_sources") or [],
+        "multiplier_resolution_message": multiplier_diagnostics.get("message"),
+        "multiplier_cache_path": multiplier_diagnostics.get("cache_path"),
         "fill_parser_source": "futu_fill_alert" if fill else "manual_fields",
         "fill_time_ms": fill.get("fill_time_ms"),
         "trade_side_raw": trade_side_raw,
@@ -247,7 +249,7 @@ def _base_diagnostics(
         "config_path": str(config_path) if config_path else None,
         "accounts": list(normalize_accounts(accounts, fallback=DEFAULT_ACCOUNTS)),
         "multiplier_source_policy": {
-            "mode": "cache_config_only" if not allow_opend_refresh else "cache_config_opend",
+            "mode": "cache_only" if not allow_opend_refresh else "cache_opend",
             "allow_opend_refresh": bool(allow_opend_refresh),
         },
         "raw_text": text,
