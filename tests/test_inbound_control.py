@@ -133,21 +133,16 @@ def test_inbound_parser_maps_manual_trade_and_symbol_operations() -> None:
     open_intent = parse_inbound_text("记录开仓 sy 0700.HK short put strike 450 exp 2026-05-28 6张 premium 2.35 multiplier 100")
     assert open_intent.name == "manual_trade_open"
     assert open_intent.arguments == {
+        "raw_text": "记录开仓 sy 0700.HK short put strike 450 exp 2026-05-28 6张 premium 2.35 multiplier 100",
         "account": "sy",
-        "symbol": "0700.HK",
-        "option_type": "put",
-        "side": "short",
-        "contracts": 6,
-        "strike": 450.0,
-        "expiration_ymd": "2026-05-28",
-        "multiplier": 100.0,
-        "premium_per_share": 2.35,
     }
 
     close_intent = parse_inbound_text("记录平仓 sy 0700.HK short put strike 450 exp 2026-05-28 2张 close 1.2")
     assert close_intent.name == "manual_trade_close"
-    assert close_intent.arguments["contracts_to_close"] == 2
-    assert close_intent.arguments["close_price"] == 1.2
+    assert close_intent.arguments == {
+        "raw_text": "记录平仓 sy 0700.HK short put strike 450 exp 2026-05-28 2张 close 1.2",
+        "account": "sy",
+    }
 
     assert parse_inbound_text("确认记录 in_abc123").arguments == {"operation_id": "in_abc123"}
     assert parse_inbound_text("取消记录 in_abc123").name == "manual_trade_cancel"
@@ -186,6 +181,8 @@ def test_inbound_manual_trade_preview_and_confirm_open(monkeypatch: pytest.Monke
     assert preview["tool_name"] == "inbound.manual_trade"
     assert preview["data"]["response_text"].startswith("交易记录预览：开仓")
     assert "未写入账本" in preview["data"]["response_text"]
+    assert preview["data"]["payload"]["diagnostics"]["raw_symbol"] == "NVDA"
+    assert preview["data"]["payload"]["diagnostics"]["multiplier_source"] == "payload"
 
     operation_id = preview["data"]["operation_id"]
     confirmed = handle_inbound_request(
@@ -206,6 +203,41 @@ def test_inbound_manual_trade_preview_and_confirm_open(monkeypatch: pytest.Monke
     assert len(repo.list_trade_events()) == 1
 
 
+def test_inbound_manual_trade_preview_canonicalizes_symbol_and_keeps_diagnostics(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _enable_inbound_trade_write(monkeypatch)
+    cfg_path, _sqlite_path = _write_inbound_runtime_config(tmp_path)
+    audit_db = tmp_path / "inbound.sqlite3"
+
+    def _fake_resolve(**_kwargs: object) -> tuple[int, str, dict]:
+        return 500, "cache", {"attempted_sources": [{"source": "cache", "status": "resolved", "value": 500}]}
+
+    monkeypatch.setattr("src.application.inbound.manual_trade_parser.resolve_multiplier_with_source_and_diagnostics", _fake_resolve)
+
+    preview = handle_inbound_request(
+        InboundRequest(
+            text="记录开仓 sy 腾讯 short put strike 450 exp 2026-05-28 6张 premium 2.35",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_open_tencent_preview",
+            config_path=str(cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+
+    payload = preview["data"]["payload"]
+    assert payload["arguments"]["symbol"] == "0700.HK"
+    assert payload["arguments"]["multiplier"] == 500.0
+    assert payload["diagnostics"]["raw_symbol"] == "腾讯"
+    assert payload["diagnostics"]["canonical_symbol"] == "0700.HK"
+    assert payload["diagnostics"]["multiplier_resolution_attempts"][0]["source"] == "cache"
+
+    with sqlite3.connect(audit_db) as conn:
+        response_json = conn.execute("SELECT response_json FROM inbound_command_audit").fetchone()[0]
+    stored = json.loads(response_json)
+    assert stored["data"]["payload"]["diagnostics"]["canonical_symbol"] == "0700.HK"
+
+
 def test_inbound_manual_trade_preview_and_confirm_close(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import src.application.ledger.repository as ledger_repository
 
@@ -215,7 +247,7 @@ def test_inbound_manual_trade_preview_and_confirm_close(monkeypatch: pytest.Monk
 
     open_preview = handle_inbound_request(
         InboundRequest(
-            text="记录开仓 sy NVDA short put strike 100 exp 2026-06-19 2张 premium 2.5 multiplier 100",
+            text="记录开仓 sy 0700.HK short put strike 450 exp 2026-06-19 2张 premium 2.5 multiplier 500",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_close_open_preview",
@@ -239,7 +271,7 @@ def test_inbound_manual_trade_preview_and_confirm_close(monkeypatch: pytest.Monk
 
     close_preview = handle_inbound_request(
         InboundRequest(
-            text="记录平仓 sy NVDA short put strike 100 exp 2026-06-19 1张 close 1.0",
+            text="记录平仓 sy HK.00700 short put strike 450 exp 2026-06-19 1张 close 1.0",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_close_preview",
@@ -250,6 +282,9 @@ def test_inbound_manual_trade_preview_and_confirm_close(monkeypatch: pytest.Monk
     )
     assert close_preview["ok"] is True
     assert close_preview["data"]["response_text"].startswith("交易记录预览：平仓")
+    assert close_preview["data"]["payload"]["arguments"]["symbol"] == "0700.HK"
+    assert close_preview["data"]["payload"]["diagnostics"]["raw_symbol"] == "HK.00700"
+    assert close_preview["data"]["payload"]["diagnostics"]["canonical_symbol"] == "0700.HK"
 
     close_id = close_preview["data"]["operation_id"]
     confirmed = handle_inbound_request(

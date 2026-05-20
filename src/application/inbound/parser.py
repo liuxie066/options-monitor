@@ -13,7 +13,6 @@ _MONTH_RE = re.compile(r"(?<!\d)(20\d{2})[-/.](0[1-9]|1[0-2])(?!\d)")
 _INT_RE = re.compile(r"(?<!\d)(\d{1,3})(?!\d)")
 _DATE_RE = re.compile(r"(?<!\d)(20\d{2})[-/.](0[1-9]|1[0-2])[-/.](0[1-9]|[12]\d|3[01])(?!\d)")
 _OPERATION_ID_RE = re.compile(r"\bin_[A-Za-z0-9_.:-]+\b")
-_NUMBER_RE = re.compile(r"(?<![A-Za-z0-9.])(\d+(?:\.\d+)?)(?![A-Za-z0-9.])")
 _SYMBOL_RE = re.compile(r"(?<![A-Za-z0-9_.])([A-Za-z]{1,8}(?:\.[A-Za-z]{1,4})?|[A-Za-z]{2}\.\d{4,5}|\d{3,5}(?:\.HK)?|[\u4e00-\u9fff]{2,8})(?![A-Za-z0-9_.])")
 
 
@@ -156,9 +155,9 @@ def _parse_operation_intent(text: str, *, compact: str, lower: str) -> InboundIn
         return InboundIntent(name="symbol_remove", arguments=_parse_symbol_remove(text))
 
     if _looks_like_manual_open(compact, lower):
-        return InboundIntent(name="manual_trade_open", arguments=_parse_manual_open(text))
+        return InboundIntent(name="manual_trade_open", arguments=_parse_manual_trade_request(text))
     if _looks_like_manual_close(compact, lower):
-        return InboundIntent(name="manual_trade_close", arguments=_parse_manual_close(text))
+        return InboundIntent(name="manual_trade_close", arguments=_parse_manual_trade_request(text))
     return None
 
 
@@ -170,54 +169,12 @@ def _extract_operation_id(text: str) -> str:
     return parts[-1] if parts else ""
 
 
-def _parse_manual_open(text: str) -> dict[str, object]:
-    labeled = _extract_labeled_values(text)
-    args: dict[str, object] = {
-        "account": labeled.get("account") or _extract_account(text),
-        "symbol": labeled.get("symbol") or _extract_symbol(text),
-        "option_type": _parse_option_type(str(labeled.get("option_type") or text)),
-        "side": _parse_position_side(str(labeled.get("side") or text)),
-        "contracts": _parse_int_value(labeled, ("contracts", "qty")) or _extract_contracts(text),
-        "strike": _parse_float_value(labeled, ("strike",)) or _extract_after_label(text, ("strike", "行权价")),
-        "expiration_ymd": _parse_date(str(labeled.get("expiration_ymd") or labeled.get("exp") or text)),
-        "multiplier": _parse_float_value(labeled, ("multiplier",)),
-        "premium_per_share": _parse_float_value(labeled, ("premium_per_share", "premium")),
-    }
-    locked = _parse_int_value(labeled, ("underlying_share_locked", "locked"))
-    if locked is not None:
-        args["underlying_share_locked"] = locked
-    currency = labeled.get("currency")
-    if currency:
-        args["currency"] = str(currency).upper()
-    note = labeled.get("note")
-    if note:
-        args["note"] = str(note)
-    if args["premium_per_share"] is None:
-        args["premium_per_share"] = _extract_after_label(text, ("premium", "权利金"))
-    if args["multiplier"] is None:
-        args["multiplier"] = _extract_after_label(text, ("multiplier", "乘数"))
-    return {key: value for key, value in args.items() if value not in (None, "")}
-
-
-def _parse_manual_close(text: str) -> dict[str, object]:
-    labeled = _extract_labeled_values(text)
-    args: dict[str, object] = {
-        "record_id": labeled.get("record_id") or _extract_record_id(text),
-        "account": labeled.get("account") or _extract_account(text),
-        "symbol": labeled.get("symbol") or _extract_symbol(text),
-        "option_type": _parse_option_type(str(labeled.get("option_type") or text)),
-        "side": _parse_position_side(str(labeled.get("side") or text)),
-        "contracts_to_close": _parse_int_value(labeled, ("contracts_to_close", "contracts", "qty")) or _extract_contracts(text),
-        "strike": _parse_float_value(labeled, ("strike",)) or _extract_after_label(text, ("strike", "行权价")),
-        "expiration_ymd": _parse_date(str(labeled.get("expiration_ymd") or labeled.get("exp") or text)),
-        "close_price": _parse_float_value(labeled, ("close_price", "close")),
-    }
-    if args["close_price"] is None:
-        args["close_price"] = _extract_after_label(text, ("close", "平仓价", "价格"))
-    close_reason = labeled.get("close_reason")
-    if close_reason:
-        args["close_reason"] = str(close_reason)
-    return {key: value for key, value in args.items() if value not in (None, "")}
+def _parse_manual_trade_request(text: str) -> dict[str, object]:
+    args: dict[str, object] = {"raw_text": text}
+    account = _extract_account(text)
+    if account:
+        args["account"] = account
+    return args
 
 
 def _parse_symbol_add(text: str) -> dict[str, object]:
@@ -352,63 +309,11 @@ def _extract_symbol_set_values(text: str) -> dict[str, object]:
     return out
 
 
-def _extract_record_id(text: str) -> str | None:
-    match = re.search(r"\b(lot|evt|rec|record)[A-Za-z0-9_.:-]*\b", text, flags=re.IGNORECASE)
-    return match.group(0) if match else None
-
-
-def _parse_date(text: str) -> str | None:
-    match = _DATE_RE.search(text)
-    return f"{match.group(1)}-{match.group(2)}-{match.group(3)}" if match else None
-
-
-def _parse_option_type(text: str) -> str | None:
-    lower = text.lower()
-    if "put" in lower or "看跌" in text:
-        return "put"
-    if "call" in lower or "看涨" in text:
-        return "call"
-    return None
-
-
-def _parse_position_side(text: str) -> str | None:
-    lower = text.lower()
-    if "short" in lower or "sell" in lower or "卖出" in text:
-        return "short"
-    if "long" in lower or "buy" in lower or "买入" in text:
-        return "long"
-    return None
-
-
 def _parse_int_value(values: dict[str, str], keys: tuple[str, ...]) -> int | None:
     for key in keys:
         raw = values.get(key)
         if raw not in (None, ""):
             return int(float(str(raw)))
-    return None
-
-
-def _parse_float_value(values: dict[str, str], keys: tuple[str, ...]) -> float | None:
-    for key in keys:
-        raw = values.get(key)
-        if raw not in (None, ""):
-            return float(str(raw))
-    return None
-
-
-def _extract_contracts(text: str) -> int | None:
-    match = re.search(r"(?<!\d)(\d+)\s*(?:张|手|份|contracts?|合约)(?![A-Za-z])", text, flags=re.IGNORECASE)
-    if match:
-        return int(match.group(1))
-    return None
-
-
-def _extract_after_label(text: str, labels: tuple[str, ...]) -> float | None:
-    for label in labels:
-        pattern = rf"{re.escape(label)}\s*[:=：]?\s*{_NUMBER_RE.pattern}"
-        match = re.search(pattern, text, flags=re.IGNORECASE)
-        if match:
-            return float(match.group(1))
     return None
 
 
