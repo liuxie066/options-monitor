@@ -385,7 +385,68 @@ For type checking, prefer the narrow touched path first. Use broad checks when t
 
 When a public command, payload field, output path, or safety boundary changes, update the docs in the same change.
 
-## 11. Handoff Template
+## 11. Memory / LLM Wiki Workflow
+
+The project-level LLM wiki lives under `memory/`.
+
+Use it as durable engineering context, not as a replacement for source code, tests, runtime evidence, or current architecture docs.
+
+Authority order:
+
+```text
+Source code / tests / runtime evidence
+> AGENTS.md / docs/ARCHITECTURE.md
+> memory/decisions
+> memory/patterns / memory/failures
+> memory/sessions
+```
+
+At the start of architecture, reliability, release, or module-boundary work:
+
+1. Read `memory/index.md`.
+2. Open only the relevant memory entries.
+3. Verify any drift-prone fact against current code, tests, config, or runtime artifacts.
+
+Default behavior: do not automatically write memory during normal edits, normal debugging, or ordinary session summaries. Ingest only when the result creates durable knowledge:
+
+- A new architecture decision or module ownership boundary.
+- A public CLI, tool payload, output path, safety boundary, or runtime behavior change.
+- A repeated or likely-to-repeat failure mode.
+- A reusable implementation pattern proven by code and tests.
+- A release or verification cycle with a stable operational lesson.
+
+Before ingesting, decide whether the lesson is worth long-term promotion:
+
+1. Will it change how a future agent designs, debugs, verifies, or releases work?
+2. Is it backed by code, tests, config, runtime evidence, or a completed release?
+3. Does it belong in durable memory instead of only `memory/sessions`?
+4. Does it reduce future confusion more than it adds maintenance cost?
+
+If the answer is unclear, keep it in the session handoff and do not promote it yet.
+
+Manual prompts that may trigger ingest:
+
+```text
+ingest 这次改动
+更新本次 session memory
+请根据本次 session 更新 memory
+memory lint
+ingest this change into memory
+update this session memory
+please update memory from this session
+```
+
+When ingesting:
+
+1. Read the relevant diff, tests, runtime evidence, and session summary.
+2. Write the smallest useful entry in `memory/decisions`, `memory/patterns`, or `memory/failures`.
+3. Use the templates in `memory/templates/`.
+4. Update `memory/index.md` if future agents should discover the entry by module.
+5. Append an audit note to `memory/log.md`.
+
+Keep `memory/sessions` as short-term handoff material. Promote durable lessons out of session summaries before relying on them for future architecture decisions.
+
+## 12. Handoff Template
 
 Use this shape when handing work to another agent or future session:
 
