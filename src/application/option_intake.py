@@ -34,6 +34,7 @@ from src.application.ledger.api import (
     inspect_ledger_stores,
     ledger_store_write_guard,
     ledger_store_payload,
+    open_position_ledger_from_data_config,
     open_position_ledger_from_runtime_config,
     resolve_ledger_store,
     resolve_position_data_config_path,
@@ -252,6 +253,8 @@ def _print_ledger_target(*, data_config: Path, repo: Any | None, config_path: Pa
 def _print_ledger_guard_failure(guard: dict[str, Any]) -> None:
     raw_errors = guard.get("errors")
     errors = raw_errors if isinstance(raw_errors, list) else []
+    if errors:
+        print("[LEDGER_FAIL] divergent populated ledger stores detected; aborting apply")
     for error in errors:
         print(f"[LEDGER_FAIL] {error}")
     raw_active = guard.get("active")
@@ -384,12 +387,18 @@ def main() -> int:
                 config_path=cfg_path,
                 runtime_root=args.runtime_root,
             )
-        else:
+        elif cfg_path is not None or args.runtime_root:
             _resolved_data_config, repo = open_position_ledger_from_runtime_config(
                 base=base,
                 cfg=None,
                 data_config=args.data_config,
+                config_path=cfg_path,
                 runtime_root=args.runtime_root,
+            )
+        else:
+            _resolved_data_config, repo = open_position_ledger_from_data_config(
+                base=base,
+                data_config=args.data_config,
             )
 
     if action == 'close':

@@ -89,6 +89,8 @@ def _enable_inbound_symbol_write(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_inbound_parser_maps_core_read_only_commands() -> None:
     assert parse_inbound_text("状态").name == "runtime_status"
     assert parse_inbound_text("健康检查").name == "healthcheck"
+    assert parse_inbound_text("待确认").name == "pending_operations"
+    assert parse_inbound_text("pending").name == "pending_operations"
 
     positions = parse_inbound_text("持仓 sy")
     assert positions.name == "option_positions_open"
@@ -144,8 +146,32 @@ def test_inbound_parser_maps_manual_trade_and_symbol_operations() -> None:
         "account": "sy",
     }
 
-    assert parse_inbound_text("确认记录 in_abc123").arguments == {"operation_id": "in_abc123"}
+    assert parse_inbound_text("确认记录 in_abc123").arguments == {
+        "operation_id": "in_abc123",
+        "operation_resolution": "explicit",
+    }
+    assert parse_inbound_text("确认记录").arguments == {
+        "operation_id": None,
+        "operation_resolution": "latest_pending",
+    }
     assert parse_inbound_text("取消记录 in_abc123").name == "manual_trade_cancel"
+    trade_update = parse_inbound_text("premium 改成 2.75")
+    assert trade_update.name == "manual_trade_update"
+    assert trade_update.arguments == {
+        "operation_id": None,
+        "operation_resolution": "latest_pending",
+        "updates": {"premium_per_share": 2.75},
+    }
+    trade_update_with_id = parse_inbound_text("合约数改成2 in_abc123")
+    assert trade_update_with_id.arguments == {
+        "operation_id": "in_abc123",
+        "operation_resolution": "explicit",
+        "updates": {"contracts": 2},
+    }
+    with pytest.raises(AgentToolError) as decimal_contracts:
+        parse_inbound_text("合约数改成1.9")
+    assert decimal_contracts.value.code == "INPUT_ERROR"
+    assert "整数参数不能写小数" in decimal_contracts.value.message
 
     assert parse_inbound_text("查看监控标的").name == "symbol_list"
     symbol_add = parse_inbound_text("增加监控标的 700 put")
@@ -187,7 +213,7 @@ def test_inbound_manual_trade_preview_and_confirm_open(monkeypatch: pytest.Monke
     operation_id = preview["data"]["operation_id"]
     confirmed = handle_inbound_request(
         InboundRequest(
-            text=f"确认记录 {operation_id}",
+            text="确认记录",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_open_confirm",
@@ -198,7 +224,411 @@ def test_inbound_manual_trade_preview_and_confirm_open(monkeypatch: pytest.Monke
     )
 
     assert confirmed["ok"] is True
+    assert confirmed["data"]["operation_id"] == operation_id
+    assert confirmed["data"]["operation_resolution"] == "latest_pending"
+    assert confirmed["data"]["resolved_operation_id"] == operation_id
     assert "交易已写入 OM 本地账本：开仓" in confirmed["data"]["response_text"]
+    repo = ledger_repository.SQLiteOptionPositionsRepository(sqlite_path)
+    assert len(repo.list_trade_events()) == 1
+
+
+def test_inbound_operation_confirm_claim_is_atomic(tmp_path: Path) -> None:
+    from src.application.inbound.operation_store import InboundOperationStore
+
+    store = InboundOperationStore(tmp_path / "inbound.sqlite3")
+    store.save_preview(
+        operation_id="in_atomic_claim",
+        command_id="in_atomic_claim",
+        channel="feishu",
+        sender_id="ou_1",
+        conversation_id="feishu:chat_a:ou_1",
+        operation_type="manual_open",
+        payload_hash="hash_1",
+        payload={"operation_type": "manual_open", "arguments": {"account": "sy", "symbol": "NVDA"}},
+        preview={"fields": {"account": "sy", "symbol": "NVDA"}},
+        ttl_seconds=600,
+    )
+
+    assert store.mark_confirmed("in_atomic_claim") is True
+    assert store.mark_confirmed("in_atomic_claim") is False
+    operation = store.get("in_atomic_claim")
+    assert operation is not None
+    assert operation["status"] == "confirmed"
+
+
+def test_inbound_manual_trade_update_pending_preview_then_confirm(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import src.application.ledger.repository as ledger_repository
+
+    _enable_inbound_trade_write(monkeypatch)
+    cfg_path, sqlite_path = _write_inbound_runtime_config(tmp_path)
+    audit_db = tmp_path / "inbound.sqlite3"
+
+    preview = handle_inbound_request(
+        InboundRequest(
+            text="记录开仓 sy NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_update_open_preview",
+            config_path=str(cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+    operation_id = preview["data"]["operation_id"]
+
+    updated = handle_inbound_request(
+        InboundRequest(
+            text="premium 改成 2.75",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_update_open_premium",
+            config_path=str(cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+
+    assert updated["ok"] is True
+    assert updated["data"]["operation_id"] == operation_id
+    assert updated["data"]["resolved_operation_id"] == operation_id
+    assert updated["data"]["updated_fields"] == ["premium_per_share"]
+    assert updated["data"]["payload"]["arguments"]["premium_per_share"] == 2.75
+    assert updated["data"]["response_text"].startswith("交易记录预览已更新：开仓")
+    assert "已修改：Premium=2.75" in updated["data"]["response_text"]
+    repo = ledger_repository.SQLiteOptionPositionsRepository(sqlite_path)
+    assert repo.list_trade_events() == []
+
+    confirmed = handle_inbound_request(
+        InboundRequest(
+            text="确认记录",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_update_open_confirm",
+            config_path=str(cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+
+    assert confirmed["ok"] is True
+    events = repo.list_trade_events()
+    assert len(events) == 1
+    assert events[0]["price"] == 2.75
+
+
+def test_inbound_pending_operations_lists_current_conversation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _enable_inbound_trade_write(monkeypatch)
+    monkeypatch.setenv("OM_INBOUND_SYMBOL_WRITE_ENABLED", "1")
+    cfg_path, _sqlite_path = _write_inbound_runtime_config(tmp_path)
+    audit_db = tmp_path / "inbound.sqlite3"
+
+    trade_preview = handle_inbound_request(
+        InboundRequest(
+            text="记录开仓 sy NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_pending_trade_preview",
+            conversation_id="feishu:chat_a:ou_1",
+            config_path=str(cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+
+    pending = handle_inbound_request(
+        InboundRequest(
+            text="待确认",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_pending_list_one",
+            conversation_id="feishu:chat_a:ou_1",
+            config_path=str(cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+
+    trade_id = trade_preview["data"]["operation_id"]
+    assert pending["ok"] is True
+    assert pending["data"]["tool_call"]["tool_name"] == "inbound.pending"
+    assert pending["data"]["pending_count"] == 1
+    assert pending["data"]["pending_operations"][0]["operation_id"] == trade_id
+    assert "当前待确认：1 条" in pending["data"]["response_text"]
+    assert "交易开仓" in pending["data"]["response_text"]
+    assert "NVDA 2026-06-19 100.0P short put 1张 premium 2.5" in pending["data"]["response_text"]
+    assert f"确认：确认记录 {trade_id}" in pending["data"]["response_text"]
+    assert f"取消：取消记录 {trade_id}" in pending["data"]["response_text"]
+
+    symbol_preview = handle_inbound_request(
+        InboundRequest(
+            text="增加监控标的 700 put",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_pending_symbol_preview",
+            conversation_id="feishu:chat_a:ou_1",
+            config_path=str(cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+    pending_two = handle_inbound_request(
+        InboundRequest(
+            text="pending operations",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_pending_list_two",
+            conversation_id="feishu:chat_a:ou_1",
+            config_path=str(cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+
+    symbol_id = symbol_preview["data"]["operation_id"]
+    assert pending_two["ok"] is True
+    assert pending_two["data"]["pending_count"] == 2
+    assert "当前待确认：2 条" in pending_two["data"]["response_text"]
+    assert "监控新增" in pending_two["data"]["response_text"]
+    assert "add 0700.HK put" in pending_two["data"]["response_text"]
+    assert f"确认：确认监控 {symbol_id}" in pending_two["data"]["response_text"]
+    assert f"确认：确认记录 {trade_id}" in pending_two["data"]["response_text"]
+
+
+def test_inbound_manual_trade_bare_confirm_requires_unique_pending(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import src.application.ledger.repository as ledger_repository
+
+    _enable_inbound_trade_write(monkeypatch)
+    cfg_path, sqlite_path = _write_inbound_runtime_config(tmp_path)
+    audit_db = tmp_path / "inbound.sqlite3"
+
+    first = handle_inbound_request(
+        InboundRequest(
+            text="记录开仓 sy NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_ambiguous_open_1",
+            config_path=str(cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+    second = handle_inbound_request(
+        InboundRequest(
+            text="记录开仓 sy NVDA short put strike 101 exp 2026-06-19 1张 premium 2.4 multiplier 100",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_ambiguous_open_2",
+            config_path=str(cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+
+    out = handle_inbound_request(
+        InboundRequest(
+            text="确认记录",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_ambiguous_confirm",
+            config_path=str(cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+
+    assert out["ok"] is False
+    assert out["error"]["code"] == "NEEDS_CLARIFICATION"
+    assert "有多条待确认的交易记录" in out["data"]["response_text"]
+    assert "请带 operation_id。\n候选交易：" in out["data"]["response_text"]
+    assert first["data"]["operation_id"] in out["data"]["response_text"]
+    assert second["data"]["operation_id"] in out["data"]["response_text"]
+    assert "候选交易" in out["data"]["response_text"]
+    assert "NVDA 2026-06-19 100.0P short put 1张 premium 2.5" in out["data"]["response_text"]
+    assert "NVDA 2026-06-19 101.0P short put 1张 premium 2.4" in out["data"]["response_text"]
+    assert f"回复：确认记录 {first['data']['operation_id']}" in out["data"]["response_text"]
+    repo = ledger_repository.SQLiteOptionPositionsRepository(sqlite_path)
+    assert repo.list_trade_events() == []
+
+
+def test_inbound_manual_trade_update_requires_unique_pending(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import src.application.ledger.repository as ledger_repository
+
+    _enable_inbound_trade_write(monkeypatch)
+    cfg_path, sqlite_path = _write_inbound_runtime_config(tmp_path)
+    audit_db = tmp_path / "inbound.sqlite3"
+
+    first = handle_inbound_request(
+        InboundRequest(
+            text="记录开仓 sy NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_ambiguous_update_open_1",
+            config_path=str(cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+    second = handle_inbound_request(
+        InboundRequest(
+            text="记录开仓 sy NVDA short put strike 101 exp 2026-06-19 1张 premium 2.4 multiplier 100",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_ambiguous_update_open_2",
+            config_path=str(cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+
+    out = handle_inbound_request(
+        InboundRequest(
+            text="premium 改成 2.75",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_ambiguous_update",
+            config_path=str(cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+
+    assert out["ok"] is False
+    assert out["error"]["code"] == "NEEDS_CLARIFICATION"
+    assert "有多条待修改的交易记录" in out["data"]["response_text"]
+    assert "请在修改内容后带 operation_id" in out["data"]["response_text"]
+    assert "\n候选交易：" in out["data"]["response_text"]
+    assert first["data"]["operation_id"] in out["data"]["response_text"]
+    assert second["data"]["operation_id"] in out["data"]["response_text"]
+    assert "候选交易" in out["data"]["response_text"]
+    assert "premium 2.5" in out["data"]["response_text"]
+    assert "premium 2.4" in out["data"]["response_text"]
+    assert "premium 改成 2.35 <operation_id>" in out["data"]["response_text"]
+    repo = ledger_repository.SQLiteOptionPositionsRepository(sqlite_path)
+    assert repo.list_trade_events() == []
+
+
+def test_inbound_bare_symbol_confirm_does_not_confirm_manual_trade(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import src.application.ledger.repository as ledger_repository
+
+    _enable_inbound_trade_write(monkeypatch)
+    monkeypatch.setenv("OM_INBOUND_SYMBOL_WRITE_ENABLED", "1")
+    cfg_path, sqlite_path = _write_inbound_runtime_config(tmp_path)
+    audit_db = tmp_path / "inbound.sqlite3"
+
+    preview = handle_inbound_request(
+        InboundRequest(
+            text="记录开仓 sy NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_cross_family_trade_preview",
+            config_path=str(cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+    assert preview["ok"] is True
+
+    out = handle_inbound_request(
+        InboundRequest(
+            text="确认监控",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_cross_family_symbol_confirm",
+            config_path=str(cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+
+    assert out["ok"] is False
+    assert out["error"]["code"] == "NEEDS_CLARIFICATION"
+    assert "没有可确认的监控标的变更" in out["data"]["response_text"]
+    repo = ledger_repository.SQLiteOptionPositionsRepository(sqlite_path)
+    assert repo.list_trade_events() == []
+
+
+def test_inbound_bare_confirm_is_scoped_to_conversation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import src.application.ledger.repository as ledger_repository
+
+    _enable_inbound_trade_write(monkeypatch)
+    cfg_path, sqlite_path = _write_inbound_runtime_config(tmp_path)
+    audit_db = tmp_path / "inbound.sqlite3"
+
+    preview = handle_inbound_request(
+        InboundRequest(
+            text="记录开仓 sy NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_conversation_preview",
+            conversation_id="feishu:chat_a:ou_1",
+            config_path=str(cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+    assert preview["ok"] is True
+
+    wrong_chat_pending = handle_inbound_request(
+        InboundRequest(
+            text="待确认",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_conversation_wrong_chat_pending",
+            conversation_id="feishu:chat_b:ou_1",
+            config_path=str(cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+    assert wrong_chat_pending["ok"] is True
+    assert wrong_chat_pending["data"]["pending_count"] == 0
+    assert wrong_chat_pending["data"]["response_text"] == "当前对话没有待确认操作。"
+
+    right_chat_pending = handle_inbound_request(
+        InboundRequest(
+            text="当前预览",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_conversation_right_chat_pending",
+            conversation_id="feishu:chat_a:ou_1",
+            config_path=str(cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+    assert right_chat_pending["ok"] is True
+    assert right_chat_pending["data"]["pending_count"] == 1
+    assert right_chat_pending["data"]["pending_operations"][0]["operation_id"] == preview["data"]["operation_id"]
+
+    wrong_chat = handle_inbound_request(
+        InboundRequest(
+            text="确认记录",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_conversation_wrong_chat",
+            conversation_id="feishu:chat_b:ou_1",
+            config_path=str(cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+    assert wrong_chat["ok"] is False
+    assert "没有可确认的交易记录" in wrong_chat["data"]["response_text"]
+
+    confirmed = handle_inbound_request(
+        InboundRequest(
+            text="确认记录",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_conversation_right_chat",
+            conversation_id="feishu:chat_a:ou_1",
+            config_path=str(cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+    assert confirmed["ok"] is True
+    assert confirmed["data"]["operation_id"] == preview["data"]["operation_id"]
     repo = ledger_repository.SQLiteOptionPositionsRepository(sqlite_path)
     assert len(repo.list_trade_events()) == 1
 
@@ -326,10 +756,13 @@ def test_inbound_symbol_add_edit_remove_preview_and_confirm(monkeypatch: pytest.
     assert "校准为：0700.HK" in add_preview["data"]["response_text"]
     add_id = add_preview["data"]["operation_id"]
     add_confirm = handle_inbound_request(
-        InboundRequest(text=f"确认监控 {add_id}", sender_id="ou_1", channel="feishu", message_id="msg_symbol_add_confirm", config_path=str(cfg_path), audit_db=str(audit_db)),
+        InboundRequest(text="确认监控", sender_id="ou_1", channel="feishu", message_id="msg_symbol_add_confirm", config_path=str(cfg_path), audit_db=str(audit_db)),
         allowed_senders="feishu:ou_1",
     )
     assert add_confirm["ok"] is True
+    assert add_confirm["data"]["operation_id"] == add_id
+    assert add_confirm["data"]["operation_resolution"] == "latest_pending"
+    assert add_confirm["data"]["resolved_operation_id"] == add_id
 
     edit_preview = handle_inbound_request(
         InboundRequest(text="修改监控标的 HK.00700 sell_put.max_strike=480", sender_id="ou_1", channel="feishu", message_id="msg_symbol_edit", config_path=str(cfg_path), audit_db=str(audit_db)),
@@ -425,12 +858,51 @@ def test_inbound_handle_executes_read_only_tool_and_replays_duplicate_message(tm
     with sqlite3.connect(audit_db) as conn:
         row = conn.execute(
             """
-            SELECT intent_name, tool_name, decision, result_ok, duplicate_count, last_duplicate_sender_id
+            SELECT intent_name, tool_name, decision, result_ok, duplicate_count, last_duplicate_sender_id, conversation_id
             FROM inbound_command_audit
             """
         ).fetchone()
 
-    assert row == ("monthly_income_report", "monthly_income_report", "allowed", 1, 1, "ou_1")
+    assert row == ("monthly_income_report", "monthly_income_report", "allowed", 1, 1, "ou_1", "feishu:ou_1")
+
+
+def test_inbound_handle_without_message_id_generates_fresh_command_id(tmp_path: Path) -> None:
+    audit_db = tmp_path / "inbound.sqlite3"
+    calls: list[tuple[str, dict]] = []
+
+    def _execute_tool(tool_name: str, payload: dict) -> dict:
+        calls.append((tool_name, payload))
+        return build_response(tool_name=tool_name, ok=True, data={"status": "ok"})
+
+    request = InboundRequest(
+        text="状态",
+        sender_id="local",
+        channel="local",
+        audit_db=str(audit_db),
+    )
+
+    first = handle_inbound_request(request, execute_tool_fn=_execute_tool, allowed_senders="local:local")
+    second = handle_inbound_request(request, execute_tool_fn=_execute_tool, allowed_senders="local:local")
+
+    assert first["ok"] is True
+    assert second["ok"] is True
+    assert "idempotent_replay" not in second.get("meta", {})
+    assert calls == [
+        ("runtime_status", {"config_key": "us"}),
+        ("runtime_status", {"config_key": "us"}),
+    ]
+    with sqlite3.connect(audit_db) as conn:
+        rows = conn.execute(
+            "SELECT command_id, message_id, duplicate_count FROM inbound_command_audit ORDER BY id"
+        ).fetchall()
+    assert len(rows) == 2
+    assert rows[0][0].startswith("in_")
+    assert rows[1][0].startswith("in_")
+    assert rows[0][0] != rows[1][0]
+    assert rows[0][1] is None
+    assert rows[1][1] is None
+    assert rows[0][2] == 0
+    assert rows[1][2] == 0
 
 
 def test_inbound_monthly_income_renderer_prefers_return_summary() -> None:
@@ -862,6 +1334,7 @@ def test_feishu_payload_adapter_extracts_text_message_and_calls_inbound(tmp_path
             "sender": {"sender_id": {"open_id": "ou_1", "user_id": "user_1"}},
             "message": {
                 "message_id": "om_1",
+                "chat_id": "oc_1",
                 "message_type": "text",
                 "content": json.dumps({"text": '<at user_id="bot">Bot</at> 收益 sy 2026-05'}, ensure_ascii=False),
             },
@@ -883,6 +1356,7 @@ def test_feishu_payload_adapter_extracts_text_message_and_calls_inbound(tmp_path
         sender_id="ou_1",
         channel="feishu",
         message_id="om_1",
+        conversation_id="feishu:oc_1:ou_1",
         config_key="us",
         audit_db=str(tmp_path / "audit.sqlite3"),
     )
@@ -941,6 +1415,8 @@ def test_inbound_cli_wires_request(monkeypatch, capsys, tmp_path: Path) -> None:
             "feishu",
             "--message-id",
             "msg_1",
+            "--conversation-id",
+            "feishu:oc_1:ou_1",
             "--audit-db",
             str(tmp_path / "audit.sqlite3"),
         ]
@@ -955,10 +1431,120 @@ def test_inbound_cli_wires_request(monkeypatch, capsys, tmp_path: Path) -> None:
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_1",
+            conversation_id="feishu:oc_1:ou_1",
             config_key="us",
             audit_db=str(tmp_path / "audit.sqlite3"),
         )
     ]
+
+
+def test_inbound_cli_pending_and_audit_diagnostics(monkeypatch: pytest.MonkeyPatch, capsys, tmp_path: Path) -> None:
+    import src.interfaces.cli.main as cli
+
+    _enable_inbound_trade_write(monkeypatch)
+    cfg_path, _sqlite_path = _write_inbound_runtime_config(tmp_path)
+    audit_db = tmp_path / "inbound.sqlite3"
+    preview = handle_inbound_request(
+        InboundRequest(
+            text="记录开仓 sy NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_cli_pending_preview",
+            conversation_id="feishu:oc_1:ou_1",
+            config_path=str(cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+    capsys.readouterr()
+
+    pending_rc = cli.main(
+        [
+            "inbound",
+            "pending",
+            "list",
+            "--channel",
+            "feishu",
+            "--sender",
+            "ou_1",
+            "--conversation-id",
+            "feishu:oc_1:ou_1",
+            "--audit-db",
+            str(audit_db),
+        ]
+    )
+    pending_payload = json.loads(capsys.readouterr().out)
+
+    assert pending_rc == 0
+    assert pending_payload["tool_name"] == "inbound.pending.list"
+    assert pending_payload["data"]["pending_count"] == 1
+    assert pending_payload["data"]["pending_operations"][0]["operation_id"] == preview["data"]["operation_id"]
+    assert "NVDA 2026-06-19 100.0P short put 1张 premium 2.5" in pending_payload["data"]["response_text"]
+
+    text_rc = cli.main(
+        [
+            "inbound",
+            "pending",
+            "list",
+            "--channel",
+            "feishu",
+            "--sender",
+            "ou_1",
+            "--conversation-id",
+            "feishu:oc_1:ou_1",
+            "--audit-db",
+            str(audit_db),
+            "--format",
+            "text",
+        ]
+    )
+    pending_text = capsys.readouterr().out
+    assert text_rc == 0
+    assert "Inbound pending：1 条" in pending_text
+    assert f"确认：确认记录 {preview['data']['operation_id']}" in pending_text
+
+    audit_rc = cli.main(
+        [
+            "inbound",
+            "audit",
+            "recent",
+            "--channel",
+            "feishu",
+            "--sender",
+            "ou_1",
+            "--audit-db",
+            str(audit_db),
+        ]
+    )
+    audit_payload = json.loads(capsys.readouterr().out)
+
+    assert audit_rc == 0
+    assert audit_payload["tool_name"] == "inbound.audit.recent"
+    assert audit_payload["data"]["audit_count"] == 1
+    assert audit_payload["data"]["audit_rows"][0]["intent_name"] == "manual_trade_open"
+    assert audit_payload["data"]["audit_rows"][0]["message_id"] == "msg_cli_pending_preview"
+    assert "交易记录预览：开仓" in audit_payload["data"]["audit_rows"][0]["response_text"]
+
+    audit_text_rc = cli.main(
+        [
+            "inbound",
+            "audit",
+            "recent",
+            "--channel",
+            "feishu",
+            "--sender",
+            "ou_1",
+            "--audit-db",
+            str(audit_db),
+            "--format",
+            "text",
+        ]
+    )
+    audit_text = capsys.readouterr().out
+    assert audit_text_rc == 0
+    assert "Inbound audit recent：1 条" in audit_text
+    assert "manual_trade_open" in audit_text
+    assert "msg_cli_pending_preview" in audit_text
 
 
 def test_inbound_cli_feishu_wires_payload(monkeypatch, capsys, tmp_path: Path) -> None:

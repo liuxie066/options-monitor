@@ -10,6 +10,7 @@ class InboundRequest:
     sender_id: str
     channel: str = "local"
     message_id: str | None = None
+    conversation_id: str | None = None
     config_key: str | None = "us"
     config_path: str | None = None
     audit_db: str | None = None
@@ -19,6 +20,7 @@ class InboundRequest:
             "channel": self.channel,
             "sender_id": self.sender_id,
             "message_id": self.message_id,
+            "conversation_id": self.conversation_id,
             "config_key": self.config_key,
             "config_path": self.config_path,
         }

@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## 1.2.102 - 2026-05-21
+
+### Added
+- Added conversation-scoped inbound pending operation resolution, so bare replies such as `确认记录` / `取消记录` can safely resolve the current Feishu conversation when there is exactly one pending operation.
+- Added inbound pending and audit diagnostics commands for inspecting pending previews and recent command audit rows.
+- Added Feishu inbound audit and Feishu WS service profile diagnostics to `healthcheck` / `doctor`.
+
+### Changed
+- Made manual trade preview replies more readable and support in-conversation edits such as premium, contract count, expiry, strike, and close-price updates before confirmation.
+- Made symbol operation confirmation follow the same conversation-scoped confirmation flow as manual trade records.
+
+### Fixed
+- Made pending operation confirmation an atomic claim before ledger/config writes, preventing duplicate confirmations from applying the same preview twice.
+- Rejected decimal input for integer manual trade fields instead of silently truncating values such as contract counts.
+- Avoided command-id collisions for local inbound requests without a remote message id.
+- Restored option intake ledger opener compatibility and release-local ledger drift detection used by the write guard.
+
 ## 1.2.101 - 2026-05-21
 
 ### Added

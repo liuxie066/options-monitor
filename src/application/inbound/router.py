@@ -14,7 +14,7 @@ from src.application.inbound.manual_trade_operations import (
 from src.application.inbound.operation_store import InboundOperationStore
 from src.application.inbound.parser import parse_inbound_text
 from src.application.inbound.policy import enforce_sender_allowed, enforce_tool_allowed
-from src.application.inbound.renderer import HELP_TEXT, render_inbound_text
+from src.application.inbound.renderer import HELP_TEXT, render_inbound_text, render_pending_operations
 from src.application.inbound.symbol_operations import handle_symbol_operation, is_symbol_operation_intent
 from src.application.tool_execution import execute_tool
 
@@ -39,7 +39,11 @@ def handle_inbound_request(
         text=normalized_request.text,
     )
 
-    existing = store.find_by_message(channel=normalized_request.channel, message_id=normalized_request.message_id)
+    existing = store.find_by_message(
+        channel=normalized_request.channel,
+        message_id=normalized_request.message_id,
+        command_id=command_id,
+    )
     if existing is not None:
         if str(existing.get("sender_id") or "") != normalized_request.sender_id:
             store.mark_duplicate(
@@ -100,6 +104,53 @@ def handle_inbound_request(
                 created_at=created_at,
                 intent=intent,
                 call=None,
+                decision=decision,
+                response=response,
+            )
+
+        if intent.name == "pending_operations":
+            call = InboundToolCall(
+                tool_name="inbound.pending",
+                payload={
+                    "scope": "current_conversation",
+                    "channel": normalized_request.channel,
+                    "sender_id": normalized_request.sender_id,
+                    "conversation_id": normalized_request.conversation_id,
+                },
+            )
+            pending_operations = InboundOperationStore(store.path).list_pending_operations(
+                channel=normalized_request.channel,
+                sender_id=normalized_request.sender_id,
+                conversation_id=normalized_request.conversation_id,
+            )
+            response_text = render_pending_operations(pending_operations)
+            response = build_response(
+                tool_name="inbound.handle",
+                ok=True,
+                data={
+                    "command_id": command_id,
+                    "request": normalized_request.public_payload(),
+                    "intent": intent.public_payload(),
+                    "tool_call": call.public_payload(),
+                    "decision": {
+                        "allowed": True,
+                        "reason": "pending_operations",
+                        "sender": sender_decision.public_payload(),
+                    },
+                    "pending_count": len(pending_operations),
+                    "pending_operations": pending_operations,
+                    "response_text": response_text,
+                },
+                meta={"audit_db": mask_path(store.path)},
+            )
+            decision = "allowed"
+            return _record_and_return(
+                store=store,
+                request=normalized_request,
+                command_id=command_id,
+                created_at=created_at,
+                intent=intent,
+                call=call,
                 decision=decision,
                 response=response,
             )
@@ -305,6 +356,7 @@ def _record_and_return(
             "command_id": command_id,
             "channel": request.channel,
             "sender_id": request.sender_id,
+            "conversation_id": request.conversation_id,
             "message_id": request.message_id,
             "raw_text": request.text,
             "parser": intent.parser if intent else None,
@@ -382,11 +434,15 @@ def _decision_for_error(err: AgentToolError) -> str:
 
 
 def _normalize_request(request: InboundRequest) -> InboundRequest:
+    channel = str(request.channel or "local").strip().lower() or "local"
+    sender_id = str(request.sender_id or "").strip()
+    conversation_id = str(request.conversation_id or "").strip() or f"{channel}:{sender_id}"
     return InboundRequest(
         text=str(request.text or "").strip(),
-        sender_id=str(request.sender_id or "").strip(),
-        channel=str(request.channel or "local").strip().lower() or "local",
+        sender_id=sender_id,
+        channel=channel,
         message_id=str(request.message_id).strip() if request.message_id is not None and str(request.message_id).strip() else None,
+        conversation_id=conversation_id,
         config_key=str(request.config_key or "").strip().lower() or None,
         config_path=str(request.config_path).strip() if request.config_path is not None and str(request.config_path).strip() else None,
         audit_db=str(request.audit_db).strip() if request.audit_db is not None and str(request.audit_db).strip() else None,

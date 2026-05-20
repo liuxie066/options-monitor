@@ -88,6 +88,7 @@ def feishu_payload_to_inbound_request(
         _dict(payload.get("header")).get("event_id"),
         payload.get("uuid"),
     )
+    chat_id = _first_text(message.get("chat_id"), _dict(message.get("chat")).get("chat_id"))
     text = _extract_message_text(message)
     if not text:
         raise AgentToolError(
@@ -101,6 +102,7 @@ def feishu_payload_to_inbound_request(
         sender_id=sender_id,
         channel="feishu",
         message_id=message_id,
+        conversation_id=f"feishu:{chat_id}:{sender_id}" if chat_id else None,
         config_key=config_key,
         config_path=config_path,
         audit_db=audit_db,

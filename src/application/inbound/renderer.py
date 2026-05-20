@@ -6,15 +6,20 @@ from src.application.inbound.contracts import InboundIntent
 
 
 HELP_TEXT = (
-    "可用只读命令：状态、健康检查、持仓 sy、收益 sy、收益 sy 2026-05、最近运行、日志 <run_id>、查看监控标的。\n"
-    "管理员写操作：记录开仓/记录平仓、增加/修改/删除监控标的。写操作会先返回预览，确认请回复：确认记录 <operation_id> 或 确认监控 <operation_id>。"
+    "可用只读命令：状态、健康检查、持仓 sy、收益 sy、收益 sy 2026-05、最近运行、日志 <run_id>、查看监控标的、待确认。\n"
+    "管理员写操作：记录开仓/记录平仓、增加/修改/删除监控标的。写操作会先返回预览；同一对话只有一条待确认时，可回复：确认记录 或 确认监控。"
 )
 
 
 def render_inbound_text(*, intent: InboundIntent | None, tool_result: dict[str, Any] | None, error: dict[str, Any] | None = None) -> str:
     if error:
+        message = str(error.get("message") or "").strip()
         hint = str(error.get("hint") or "").strip()
-        return f"{error.get('message')}{(' ' + hint) if hint else ''}".strip()
+        if not hint:
+            return message
+        if "\n" in hint:
+            return f"{message}\n{hint}".strip()
+        return f"{message} {hint}".strip()
     if intent and intent.name == "help":
         return HELP_TEXT
     if not tool_result:
@@ -24,6 +29,8 @@ def render_inbound_text(*, intent: InboundIntent | None, tool_result: dict[str, 
         err = cast(dict[str, Any], err_raw) if isinstance(err_raw, dict) else {}
         message = str(err.get("message") or "查询失败")
         hint = str(err.get("hint") or "").strip()
+        if "\n" in hint:
+            return f"{message}\n{hint}".strip()
         return f"{message}{(' ' + hint) if hint else ''}".strip()
     name = intent.name if intent else str(tool_result.get("tool_name") or "")
     data_raw = tool_result.get("data")
@@ -43,6 +50,44 @@ def render_inbound_text(*, intent: InboundIntent | None, tool_result: dict[str, 
     if name == "config_validate":
         return _render_config_validate(data, tool_result)
     return "查询完成。"
+
+
+def render_pending_operations(operations: list[dict[str, Any]]) -> str:
+    if not operations:
+        return "当前对话没有待确认操作。"
+    lines = [f"当前待确认：{len(operations)} 条"]
+    for idx, operation in enumerate(operations[:10], start=1):
+        operation_id = str(operation.get("operation_id") or "").strip()
+        operation_type = str(operation.get("operation_type") or "").strip()
+        summary = str(operation.get("summary") or operation_type or "-").strip()
+        confirm, cancel = _pending_operation_commands(operation_type)
+        label = _pending_operation_label(operation_type)
+        lines.append(f"{idx}. {operation_id} | {label} | {summary}")
+        if operation_id:
+            lines.append(f"   确认：{confirm} {operation_id}")
+            lines.append(f"   取消：{cancel} {operation_id}")
+        expires_at = str(operation.get("expires_at") or "").strip()
+        if expires_at:
+            lines.append(f"   过期：{expires_at}")
+    if len(operations) > 10:
+        lines.append(f"... 还有 {len(operations) - 10} 条未展示。")
+    return "\n".join(lines)
+
+
+def _pending_operation_commands(operation_type: str) -> tuple[str, str]:
+    if operation_type.startswith("symbol_"):
+        return "确认监控", "取消监控"
+    return "确认记录", "取消记录"
+
+
+def _pending_operation_label(operation_type: str) -> str:
+    return {
+        "manual_open": "交易开仓",
+        "manual_close": "交易平仓",
+        "symbol_add": "监控新增",
+        "symbol_edit": "监控修改",
+        "symbol_remove": "监控删除",
+    }.get(operation_type, operation_type or "待确认操作")
 
 
 def _render_monthly_income(data: dict[str, Any]) -> str:
