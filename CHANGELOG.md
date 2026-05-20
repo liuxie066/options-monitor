@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 1.2.96 - 2026-05-20
+
+### Added
+- Added an upgrade cache boundary for service upgrades: release code is materialized from `_cache/git/options-monitor.git`, with `--cache-root` and `OM_UPGRADE_CACHE_ROOT` overrides.
+- Added stable uv and pip download cache directories for release runtime preparation.
+
+### Changed
+- Changed confirmed upgrades to mirror/fetch once and archive target release tags instead of cloning a fresh working tree for every release.
+- Kept release directories free of `.git` while allowing later upgrade checks and upgrades to resolve release tags and remote URLs from the upgrade git cache.
+- Updated uv runtime preparation to use the host `python3` interpreter and to avoid installing uv during upgrades.
+
 ## 1.2.95 - 2026-05-20
 
 ### Changed

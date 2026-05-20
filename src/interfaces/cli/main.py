@@ -350,11 +350,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     service_upgrade_check_cmd = service_sub.add_parser("upgrade-check", help="check whether a newer released version is available")
     service_upgrade_check_cmd.add_argument("--repo-root", default=None)
     service_upgrade_check_cmd.add_argument("--runtime-root", default="/var/lib/options-monitor")
+    service_upgrade_check_cmd.add_argument("--cache-root", default=None)
     service_upgrade_check_cmd.add_argument("--remote-name", default="origin")
     service_upgrade_cmd = service_sub.add_parser("upgrade", help="upgrade a current symlink to a released version")
     service_upgrade_cmd.add_argument("--repo-root", default=None)
     service_upgrade_cmd.add_argument("--runtime-root", default="/var/lib/options-monitor")
     service_upgrade_cmd.add_argument("--releases-root", default=None)
+    service_upgrade_cmd.add_argument("--cache-root", default=None)
     service_upgrade_cmd.add_argument("--target-version", default=None)
     service_upgrade_cmd.add_argument("--remote-name", default="origin")
     service_upgrade_cmd.add_argument("--auto", action="store_true")
@@ -376,11 +378,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     update_check = update_sub.add_parser("check", help="check whether a newer released version is available")
     update_check.add_argument("--repo-root", default=None)
     update_check.add_argument("--runtime-root", default="/var/lib/options-monitor")
+    update_check.add_argument("--cache-root", default=None)
     update_check.add_argument("--remote-name", default="origin")
     update_apply = update_sub.add_parser("apply", help="upgrade a current symlink to a released version")
     update_apply.add_argument("--repo-root", default=None)
     update_apply.add_argument("--runtime-root", default="/var/lib/options-monitor")
     update_apply.add_argument("--releases-root", default=None)
+    update_apply.add_argument("--cache-root", default=None)
     update_apply.add_argument("--target-version", default=None)
     update_apply.add_argument("--remote-name", default="origin")
     update_apply.add_argument("--auto", action="store_true")
@@ -1032,6 +1036,7 @@ def main(argv: list[str] | None = None) -> int:
             data = service_upgrade_check(
                 repo_root=args.repo_root or repo_base(),
                 runtime_root=args.runtime_root,
+                cache_root=args.cache_root,
                 remote_name=args.remote_name,
             )
             return _print(build_response(tool_name="service.upgrade_check", ok=bool(data.get("ok")), data=data))
@@ -1041,6 +1046,7 @@ def main(argv: list[str] | None = None) -> int:
                 repo_root=args.repo_root or repo_base(),
                 runtime_root=args.runtime_root,
                 releases_root=args.releases_root,
+                cache_root=args.cache_root,
                 target_version=args.target_version,
                 remote_name=args.remote_name,
                 confirm=bool(args.confirm),
@@ -1067,6 +1073,7 @@ def main(argv: list[str] | None = None) -> int:
             data = service_upgrade_check(
                 repo_root=args.repo_root or repo_base(),
                 runtime_root=args.runtime_root,
+                cache_root=args.cache_root,
                 remote_name=args.remote_name,
             )
             return _print(build_response(tool_name="update.check", ok=bool(data.get("ok")), data=data))
@@ -1076,6 +1083,7 @@ def main(argv: list[str] | None = None) -> int:
                 repo_root=args.repo_root or repo_base(),
                 runtime_root=args.runtime_root,
                 releases_root=args.releases_root,
+                cache_root=args.cache_root,
                 target_version=args.target_version,
                 remote_name=args.remote_name,
                 confirm=bool(args.confirm),

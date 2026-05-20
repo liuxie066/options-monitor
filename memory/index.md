@@ -115,6 +115,7 @@ Decisions:
 
 - [Install Futu SDK with bootstrap](decisions/2026-04-27-install-futu-sdk-with-bootstrap.md)
 - [Version check via origin tags](decisions/2026-04-27-version-check-via-origin-tags.md)
+- [Service upgrade cache boundary](decisions/2026-05-20-upgrade-cache-boundary.md)
 
 Failures:
 
