@@ -239,6 +239,7 @@ def test_render_systemd_bundle_can_include_feishu_ws_service(tmp_path: Path) -> 
     profile = json.loads(files["service.profile.json"]["content"])
 
     assert str(repo / "om") + " inbound feishu-ws" in service
+    assert "--config-path " + str(repo / "config.us.json") in service
     assert "--audit-db " + str(runtime / "output_shared" / "state" / "inbound_control.sqlite3") in service
     assert "--lock-path " + str(runtime / "locks" / "feishu-ws.lock") in service
     assert "Restart=always" in service
@@ -717,11 +718,14 @@ def test_service_upgrade_dry_run_and_confirm_switches_current_symlink(monkeypatc
     ] in calls
     assert any(command[:2] == [venv_python, "-c"] for command in calls)
     assert ["systemctl", "restart", "options-monitor-trade-intake.service"] in calls
+    assert ["systemctl", "is-active", "options-monitor-trade-intake.service"] in calls
+    assert ["systemctl", "is-enabled", "options-monitor-trade-intake.service"] in calls
     assert ["systemctl", "enable", "--now", "options-monitor-projection-verify.timer"] in calls
     refreshed_profile = json.loads((runtime / "service.profile.json").read_text(encoding="utf-8"))
     assert {"name": "options-monitor-projection-verify.timer"} in refreshed_profile["services"]
     assert (systemd_root / "options-monitor-projection-verify.timer").exists()
     assert out["service_reconcile"]["summary"]["status"] == "ok"
+    assert out["service_health"]["status"] == "ok"
     assert out["release_materialize"]["method"] == "git_cache_archive"
     assert out["release_materialize"]["cache_repo"] == str(cache_repo)
     assert out["release_materialize"]["cache_initialized"] is True
@@ -734,6 +738,152 @@ def test_service_upgrade_dry_run_and_confirm_switches_current_symlink(monkeypatc
     assert status["runtime_prepare"]["installer"] == "pip"
     assert status["target_version"] == "1.0.1"
     assert status["status"] == "upgraded"
+
+
+def test_service_upgrade_restarts_feishu_ws_from_refreshed_profile_after_reconcile(monkeypatch, tmp_path: Path) -> None:
+    from src.application.service_upgrade import service_upgrade
+
+    monkeypatch.setenv("OM_UPGRADE_INSTALLER", "pip")
+    systemd_root = tmp_path / "systemd"
+    monkeypatch.setenv("OM_SYSTEMD_UNIT_ROOT", str(systemd_root))
+    install = tmp_path / "opt" / "options-monitor"
+    releases = install / "releases"
+    v100 = releases / "1.0.0"
+    _write_upgrade_release_skeleton(v100, "1.0.0")
+    current = install / "current"
+    current.symlink_to(v100, target_is_directory=True)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    env_file = runtime / "options-monitor.env"
+    env_file.write_text(
+        "OM_FEISHU_BOT_APP_ID=cli_1\n"
+        "OM_FEISHU_BOT_APP_SECRET=secret_1\n"
+        "OM_FEISHU_BOT_USER_OPEN_ID=ou_1\n",
+        encoding="utf-8",
+    )
+    (runtime / "service.profile.json").write_text(
+        json.dumps(
+            {
+                "service_provider": "systemd",
+                "repo_root": str(current),
+                "runtime_root": str(runtime),
+                "env_file": str(env_file),
+                "config_paths": {"us": str(runtime / "config.us.json")},
+                "feishu_ws": {"enabled": True, "config_key": "us"},
+                "restart": {
+                    "requires_sudo": False,
+                    "services": ["options-monitor-trade-intake.service"],
+                },
+                "services": [
+                    {"name": "options-monitor-tick-us.timer"},
+                    {"name": "options-monitor-trade-intake.service"},
+                    {"name": "options-monitor-feishu-ws.service"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    calls: list[list[str]] = []
+
+    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        calls.append(list(command))
+        if command[:3] == ["git", "ls-remote", "--tags"]:
+            return subprocess.CompletedProcess(command, 0, stdout="a refs/tags/v1.0.1\n", stderr="")
+        if command[:3] == ["git", "config", "--get"]:
+            return subprocess.CompletedProcess(command, 0, stdout="https://example.invalid/repo.git\n", stderr="")
+        materialized = _fake_git_cache_materialize(list(command), version="1.0.1")
+        if materialized is not None:
+            return materialized
+        if command == ["python3", "-m", "venv", ".venv"]:
+            _create_fake_venv_python(Path(_kwargs["cwd"]))
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    out = service_upgrade(
+        repo_root=current,
+        runtime_root=runtime,
+        releases_root=releases,
+        confirm=True,
+        run_cmd=_run_cmd,
+    )
+
+    assert out["status"] == "upgraded"
+    assert ["systemctl", "restart", "options-monitor-trade-intake.service"] in calls
+    assert ["systemctl", "restart", "options-monitor-feishu-ws.service"] in calls
+    assert ["systemctl", "is-active", "options-monitor-feishu-ws.service"] in calls
+    assert ["systemctl", "is-enabled", "options-monitor-feishu-ws.service"] in calls
+    assert [
+        str(current / "om"),
+        "inbound",
+        "feishu-ws",
+        "--check",
+        "--config-key",
+        "us",
+        "--config-path",
+        str(runtime / "config.us.json"),
+    ] in calls
+    refreshed_profile = json.loads((runtime / "service.profile.json").read_text(encoding="utf-8"))
+    assert refreshed_profile["restart"]["services"] == [
+        "options-monitor-trade-intake.service",
+        "options-monitor-feishu-ws.service",
+    ]
+
+
+def test_post_upgrade_service_health_reports_feishu_ws_check_failure(tmp_path: Path) -> None:
+    from src.application.service_upgrade import _post_upgrade_service_health
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    profile = {
+        "service_provider": "systemd",
+        "config_paths": {"us": str(tmp_path / "config.us.json")},
+        "feishu_ws": {"enabled": True, "config_key": "us"},
+        "services": [{"name": "options-monitor-feishu-ws.service"}],
+    }
+    operations: list[dict] = []
+
+    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        if list(command)[:3] == [str(repo / "om"), "inbound", "feishu-ws"]:
+            return subprocess.CompletedProcess(command, 2, stdout="", stderr="missing Feishu app credentials\n")
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    out = _post_upgrade_service_health(profile=profile, repo_root=repo, run_cmd=_run_cmd, operations=operations)
+
+    assert out["ok"] is False
+    assert out["status"] == "error"
+    assert out["failed_checks"][0]["check"] == "feishu-ws-check"
+    assert "manual_check: source the env file, then run ./om inbound feishu-ws --check" in out["remediation"]
+
+
+def test_post_upgrade_feishu_ws_check_uses_profile_env_file_not_process_secret(monkeypatch, tmp_path: Path) -> None:
+    from src.application.service_upgrade import _post_upgrade_service_health
+
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "stale-process-app")
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    env_file = tmp_path / "options-monitor.env"
+    repo.mkdir()
+    runtime.mkdir()
+    env_file.write_text("OM_FEISHU_BOT_APP_ID=cli_1\n", encoding="utf-8")
+    profile = {
+        "service_provider": "systemd",
+        "runtime_root": str(runtime),
+        "env_file": str(env_file),
+        "config_paths": {"us": str(tmp_path / "config.us.json")},
+        "feishu_ws": {"enabled": True, "config_key": "us"},
+        "services": [{"name": "options-monitor-feishu-ws.service"}],
+    }
+
+    def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
+        if list(command)[:3] == [str(repo / "om"), "inbound", "feishu-ws"]:
+            env = kwargs.get("env") or {}
+            assert env["OM_ENV_FILE"] == str(env_file)
+            assert env["OM_RUNTIME_ROOT"] == str(runtime)
+            assert "OM_FEISHU_BOT_APP_ID" not in env
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    out = _post_upgrade_service_health(profile=profile, repo_root=repo, run_cmd=_run_cmd, operations=[])
+
+    assert out["ok"] is True
 
 
 def test_service_upgrade_restart_uses_sudo_prefix_from_deploy_profile(tmp_path: Path) -> None:
@@ -1190,9 +1340,10 @@ def test_service_upgrade_restart_denied_includes_remediation(tmp_path: Path) -> 
     assert "liuxie ALL=(root) NOPASSWD: /bin/systemctl restart options-monitor-trade-intake.service" in remediation
 
 
-def test_service_upgrade_partial_success_when_restart_denied_after_switch(tmp_path: Path) -> None:
+def test_service_upgrade_partial_success_when_restart_denied_after_switch(monkeypatch, tmp_path: Path) -> None:
     from src.application.service_upgrade import service_upgrade
 
+    monkeypatch.setenv("OM_SYSTEMD_UNIT_ROOT", str(tmp_path / "systemd"))
     install = tmp_path / "opt" / "options-monitor"
     releases = install / "releases"
     v100 = releases / "1.0.0"
@@ -1215,6 +1366,11 @@ def test_service_upgrade_partial_success_when_restart_denied_after_switch(tmp_pa
                         "options-monitor-feishu-ws.service",
                     ],
                 },
+                "services": [
+                    {"name": "options-monitor-trade-intake.service"},
+                    {"name": "options-monitor-feishu-ws.service"},
+                ],
+                "feishu_ws": {"enabled": True, "config_key": "us"},
             }
         ),
         encoding="utf-8",
@@ -1368,9 +1524,10 @@ def test_service_upgrade_restart_no_profile_is_noop(tmp_path: Path) -> None:
     assert calls == []
 
 
-def test_service_upgrade_migrates_user_configs_and_rebuilds_runtime_configs_before_switch(tmp_path: Path) -> None:
+def test_service_upgrade_migrates_user_configs_and_rebuilds_runtime_configs_before_switch(monkeypatch, tmp_path: Path) -> None:
     from src.application.service_upgrade import service_upgrade
 
+    monkeypatch.setenv("OM_SYSTEMD_UNIT_ROOT", str(tmp_path / "systemd"))
     install = tmp_path / "opt" / "options-monitor"
     releases = install / "releases"
     v100 = releases / "1.0.0"
@@ -1556,9 +1713,10 @@ def test_service_upgrade_missing_user_config_fails_before_switch_with_remediatio
     assert ["systemctl", "restart", "options-monitor-trade-intake.service"] not in calls
 
 
-def test_service_upgrade_recovers_user_configs_from_older_complete_release(tmp_path: Path) -> None:
+def test_service_upgrade_recovers_user_configs_from_older_complete_release(monkeypatch, tmp_path: Path) -> None:
     from src.application.service_upgrade import service_upgrade
 
+    monkeypatch.setenv("OM_SYSTEMD_UNIT_ROOT", str(tmp_path / "systemd"))
     install = tmp_path / "opt" / "options-monitor"
     releases = install / "releases"
     v090 = releases / "0.9.0"
