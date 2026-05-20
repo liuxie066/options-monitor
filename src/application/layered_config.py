@@ -315,19 +315,31 @@ def build_layered_runtime_config_from_user_config(
     market: str,
     user_config: dict[str, Any],
     common_user_config: dict[str, Any] | None = None,
+    system_config: dict[str, Any] | None = None,
+    system_config_ref: str | None = None,
     system_config_path: str | Path | None = None,
     common_user_config_ref: str | None = None,
     user_config_ref: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     normalized_market = _normalize_market(market)
-    system_path = _resolve_path(system_config_path, default=default_system_config_path(repo_root=repo_root))
 
     if not isinstance(user_config, dict):
         raise AgentToolError(code="CONFIG_ERROR", message="user config must be a JSON object")
     if common_user_config is not None and not isinstance(common_user_config, dict):
         raise AgentToolError(code="CONFIG_ERROR", message="common user config must be a JSON object")
+    if system_config is not None and system_config_path is not None:
+        raise AgentToolError(code="CONFIG_ERROR", message="system_config and system_config_path cannot both be set")
+    if system_config is not None and not isinstance(system_config, dict):
+        raise AgentToolError(code="CONFIG_ERROR", message="system config must be a JSON object")
 
-    system_cfg = _read_json_object(system_path, label="system config")
+    system_path: Path | None = None
+    if system_config is None:
+        system_path = _resolve_path(system_config_path, default=default_system_config_path(repo_root=repo_root))
+        system_cfg = _read_json_object(system_path, label="system config")
+        system_ref = str(system_path)
+    else:
+        system_cfg = deepcopy(system_config)
+        system_ref = str(system_config_ref or "<memory>")
     system_market = _system_market_payload(system_cfg, market=normalized_market)
 
     symbol_defaults = system_market.pop("symbol_defaults", {})
@@ -361,7 +373,8 @@ def build_layered_runtime_config_from_user_config(
 
     meta = {
         "market": normalized_market,
-        "system_config_path": str(system_path),
+        "system_config_path": str(system_path) if system_path is not None else system_ref,
+        "system_config_ref": system_ref,
         "common_user_config_ref": str(common_user_config_ref or "<none>"),
         "common_user_config_loaded": common_user_config is not None,
         "user_config_ref": str(user_config_ref or "<memory>"),
