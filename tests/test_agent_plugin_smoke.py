@@ -1126,6 +1126,136 @@ def test_runtime_status_summarizes_openclaw_runtime_files(tmp_path: Path) -> Non
     assert "option_positions_feishu_sync_receipt_status" not in out["data"]["summary"]
 
 
+def _runtime_status_upgrade_fixture(tmp_path: Path, *, target_version: str = "1.2.82") -> dict[str, Any]:
+    (tmp_path / "VERSION").write_text("1.2.82\n", encoding="utf-8")
+    data_config = tmp_path / "portfolio.runtime.json"
+    data_config.write_text("{}", encoding="utf-8")
+    cfg_path = tmp_path / "config.us.json"
+    cfg = {
+        "accounts": ["user1"],
+        "portfolio": {"data_config": str(data_config)},
+        "notifications": {"provider": "openclaw", "target": "route"},
+    }
+    cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
+    (tmp_path / "output_shared" / "state").mkdir(parents=True)
+    (tmp_path / "output_shared" / "state" / "last_run.json").write_text(json.dumps({"status": "ok"}), encoding="utf-8")
+    (tmp_path / "output" / "reports").mkdir(parents=True)
+    (tmp_path / "output" / "reports" / "symbols_notification.txt").write_text("ok\n", encoding="utf-8")
+    (tmp_path / "service.profile.json").write_text(
+        json.dumps(
+            {
+                "service_provider": "systemd",
+                "runtime_root": str(tmp_path),
+                "services": [
+                    {"name": "options-monitor-trade-intake.service"},
+                    {"name": "options-monitor-feishu-ws.service"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "upgrade_status.json").write_text(
+        json.dumps(
+            {
+                "ok": False,
+                "status": "failed",
+                "current_version": "1.2.81",
+                "target_version": target_version,
+                "changed": True,
+                "symlink_switched": True,
+                "error": "ServiceRestartError: failed to restart options-monitor-trade-intake.service",
+                "restart_failed_services": ["options-monitor-trade-intake.service"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return {"cfg_path": cfg_path, "cfg": cfg}
+
+
+def _call_runtime_status_for_upgrade(tmp_path: Path, cfg_path: Path, cfg: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    from src.application.agent_tool_openclaw import runtime_status_tool
+
+    def _read_json(path: Path) -> dict[str, Any]:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    return runtime_status_tool(
+        {"config_path": str(cfg_path)},
+        load_runtime_config=lambda **_kwargs: (cfg_path, cfg),
+        normalize_accounts=lambda value, fallback=(): list(value or fallback),
+        accounts_from_config=lambda loaded: list(loaded.get("accounts") or []),
+        read_json_object_or_empty=_read_json,
+        repo_base=lambda: tmp_path,
+        mask_path=lambda path: str(path),
+    )
+
+
+def test_runtime_status_marks_remediated_upgrade_failure(monkeypatch, tmp_path: Path) -> None:
+    import src.application.agent_tool_openclaw as openclaw
+
+    fixture = _runtime_status_upgrade_fixture(tmp_path)
+
+    def _service_status(profile: dict[str, Any], *, include_status: bool = False) -> dict[str, Any]:
+        services = profile.get("services") if isinstance(profile.get("services"), list) else []
+        return {
+            "provider": profile.get("service_provider"),
+            "services": [{**item, "status": "ok", "returncode": 0} for item in services if isinstance(item, dict)],
+            "status_checked": include_status,
+        }
+
+    monkeypatch.setattr(openclaw, "service_status_from_profile", _service_status)
+
+    data, warnings, _meta = _call_runtime_status_for_upgrade(tmp_path, fixture["cfg_path"], fixture["cfg"])
+
+    assert data["service_upgrade"]["evaluation"]["status"] == "remediated"
+    assert data["service_upgrade"]["evaluation"]["runtime_failed"] is False
+    assert data["summary"]["service_upgrade_status"] == "remediated"
+    assert data["summary"]["service_upgrade_historical_status"] == "failed"
+    assert data["summary"]["service_upgrade_runtime_failed"] is False
+    assert data["summary"]["warning_codes"] == ["SERVICE_UPGRADE_REMEDIATED"]
+    assert warnings == ["Service upgrade previously failed but current release and restart services look remediated."]
+
+
+def test_runtime_status_keeps_upgrade_failed_when_service_still_failed(monkeypatch, tmp_path: Path) -> None:
+    import src.application.agent_tool_openclaw as openclaw
+
+    fixture = _runtime_status_upgrade_fixture(tmp_path)
+
+    def _service_status(profile: dict[str, Any], *, include_status: bool = False) -> dict[str, Any]:
+        services = profile.get("services") if isinstance(profile.get("services"), list) else []
+        out = []
+        for item in services:
+            if not isinstance(item, dict):
+                continue
+            status = "warn" if item.get("name") == "options-monitor-trade-intake.service" else "ok"
+            out.append({**item, "status": status, "returncode": 3 if status == "warn" else 0})
+        return {"provider": profile.get("service_provider"), "services": out, "status_checked": include_status}
+
+    monkeypatch.setattr(openclaw, "service_status_from_profile", _service_status)
+
+    data, warnings, _meta = _call_runtime_status_for_upgrade(tmp_path, fixture["cfg_path"], fixture["cfg"])
+
+    assert data["service_upgrade"]["evaluation"]["status"] == "failed"
+    assert data["summary"]["service_upgrade_runtime_failed"] is True
+    assert data["summary"]["warning_codes"] == ["SERVICE_UPGRADE_FAILED"]
+    assert warnings == ["Service upgrade status still indicates an unrecovered runtime failure."]
+
+
+def test_runtime_status_treats_older_failed_upgrade_as_historical(tmp_path: Path) -> None:
+    fixture = _runtime_status_upgrade_fixture(tmp_path, target_version="1.2.81")
+
+    data, warnings, _meta = _call_runtime_status_for_upgrade(tmp_path, fixture["cfg_path"], fixture["cfg"])
+
+    assert data["service_upgrade"]["evaluation"]["status"] == "historical_failed"
+    assert data["summary"]["service_upgrade_status"] == "historical_failed"
+    assert data["summary"]["service_upgrade_runtime_failed"] is False
+    assert data["summary"]["warning_codes"] == ["SERVICE_UPGRADE_HISTORICAL_FAILED"]
+    assert warnings == ["Service upgrade status file contains a historical failure for a non-current target version."]
+
+
 def test_runtime_status_can_inspect_scanned_run_after_skipped_latest(tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool as run_tool
 

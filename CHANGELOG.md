@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.84 - 2026-05-20
+
+### Fixed
+- Distinguish remediated or historical service-upgrade failures in `runtime_status` so stale `upgrade_status.json` failures no longer force a current `runtime_failed` result.
+- Downgrade remediated service-upgrade failures to AI Cofunder warnings while preserving unrecovered upgrade failures as runtime failures.
+
 ## 1.2.83 - 2026-05-20
 
 ### Fixed
