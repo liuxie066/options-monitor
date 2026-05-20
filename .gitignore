@@ -49,6 +49,8 @@ config.market_us.json
 config.market_hk.json
 config.scheduled.json
 config.local*.json
+config.yaml
+resolved/
 
 # Local caches
 cache/

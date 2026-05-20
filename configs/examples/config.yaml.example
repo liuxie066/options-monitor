@@ -1,0 +1,31 @@
+accounts:
+  lx:
+    type: futu
+    futu_account_id: "REPLACE_WITH_FUTU_ACCOUNT_ID"
+  sy:
+    type: external_holdings
+    holdings_account: sy
+
+markets:
+  us:
+    accounts: [lx, sy]
+    symbols:
+      - NVDA
+      - FUTU
+      - GOOGL
+    overrides:
+      FUTU:
+        sell_put:
+          dte: [20, 45]
+          strike: [55, 85]
+        yield_enhancement: true
+
+  hk:
+    accounts: [lx]
+    symbols:
+      - "0700.HK"
+      - "9992.HK"
+
+inbound:
+  feishu_ws:
+    ack_reaction: THUMBSUP

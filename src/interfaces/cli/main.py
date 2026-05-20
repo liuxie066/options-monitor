@@ -12,6 +12,12 @@ from src.application.config_validator import validate_config
 from src.application.account_management import add_account, edit_account, remove_account
 from src.application.close_advice_pipeline import run_close_advice
 from src.application.config_edit import get_runtime_config_value, set_runtime_config_value
+from src.application.config_yaml import (
+    build_yaml_runtime_config_file,
+    explain_yaml_config_key,
+    validate_yaml_runtime_config,
+)
+from src.application.config_yaml_migration import preview_config_yaml_migration
 from src.application.healthcheck import run_healthcheck
 from src.application.inbound import (
     InboundRequest,
@@ -233,10 +239,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     config = sub.add_parser("config", help="config operations")
     config_sub = config.add_subparsers(dest="config_command", required=True)
     validate = config_sub.add_parser("validate", help="validate runtime config")
+    validate.add_argument("--source", default="runtime", choices=("runtime", "yaml"))
+    validate.add_argument("--config-yaml", default=None)
     validate.add_argument("--config-key", default=None, choices=("us", "hk"))
     validate.add_argument("--config-path", default=None)
     validate.add_argument("--market", default=None, choices=("us", "hk"))
     build = config_sub.add_parser("build", help="build canonical runtime config from system/user config")
+    build.add_argument("--source", default="legacy", choices=("legacy", "yaml"))
+    build.add_argument("--config-yaml", default=None)
     build.add_argument("--market", required=True, choices=("us", "hk"))
     build.add_argument("--system-config", default=None)
     build.add_argument("--common-user-config", default=None)
@@ -245,12 +255,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     build.add_argument("--output", default=None)
     build.add_argument("--dry-run", action="store_true")
     explain = config_sub.add_parser("explain", help="explain a layered config key")
+    explain.add_argument("--source", default="legacy", choices=("legacy", "yaml"))
+    explain.add_argument("--config-yaml", default=None)
     explain.add_argument("--market", required=True, choices=("us", "hk"))
     explain.add_argument("--key", required=True)
     explain.add_argument("--system-config", default=None)
     explain.add_argument("--common-user-config", default=None)
     explain.add_argument("--no-common-user-config", action="store_true")
     explain.add_argument("--user-config", default=None)
+    migrate_yaml = config_sub.add_parser("migrate-yaml", help="preview migration from layered JSON user config to config.yaml")
+    migrate_yaml.add_argument("--common-user-config", default=None)
+    migrate_yaml.add_argument("--no-common-user-config", action="store_true")
+    migrate_yaml.add_argument("--us-user-config", default=None)
+    migrate_yaml.add_argument("--hk-user-config", default=None)
+    migrate_yaml.add_argument("--us-accounts", nargs="+", default=None)
+    migrate_yaml.add_argument("--hk-accounts", nargs="+", default=None)
+    migrate_yaml.add_argument("--output", default=None)
+    migrate_yaml.add_argument("--apply", action="store_true", help="write config.yaml; omitted means dry-run preview")
+    migrate_yaml.add_argument("--no-backup", action="store_true", help="do not write a .bak timestamp copy before applying")
     get_config = config_sub.add_parser("get", help="read a runtime config value by dot path")
     get_config.add_argument("--config-key", default=None, choices=("us", "hk"))
     get_config.add_argument("--config-path", default=None)
@@ -834,9 +856,26 @@ def main(argv: list[str] | None = None) -> int:
             )))
 
         if args.command == "config" and args.config_command == "validate":
+            if args.source == "yaml":
+                if not args.market:
+                    raise AgentToolError(code="INPUT_ERROR", message="--market is required when --source yaml")
+                return _print(validate_yaml_runtime_config(
+                    repo_root=repo_base(),
+                    market=args.market,
+                    config_path=args.config_yaml,
+                ))
             return _print(_validate_runtime_config(config_key=args.config_key, config_path=args.config_path, market=args.market))
 
         if args.command == "config" and args.config_command == "build":
+            if args.source == "yaml":
+                return _print(build_yaml_runtime_config_file(
+                    repo_root=repo_base(),
+                    market=args.market,
+                    config_path=args.config_yaml,
+                    system_config_path=args.system_config,
+                    output_config_path=args.output,
+                    dry_run=bool(args.dry_run),
+                ))
             return _print(build_layered_runtime_config_file(
                 repo_root=repo_base(),
                 market=args.market,
@@ -849,6 +888,14 @@ def main(argv: list[str] | None = None) -> int:
             ))
 
         if args.command == "config" and args.config_command == "explain":
+            if args.source == "yaml":
+                return _print(explain_yaml_config_key(
+                    repo_root=repo_base(),
+                    market=args.market,
+                    key=args.key,
+                    config_path=args.config_yaml,
+                    system_config_path=args.system_config,
+                ))
             return _print(explain_layered_runtime_config_key(
                 repo_root=repo_base(),
                 market=args.market,
@@ -857,6 +904,20 @@ def main(argv: list[str] | None = None) -> int:
                 common_user_config_path=args.common_user_config,
                 include_common_user_config=not bool(args.no_common_user_config),
                 user_config_path=args.user_config,
+            ))
+
+        if args.command == "config" and args.config_command == "migrate-yaml":
+            return _print(preview_config_yaml_migration(
+                repo_root=repo_base(),
+                common_user_config_path=args.common_user_config,
+                include_common_user_config=not bool(args.no_common_user_config),
+                us_user_config_path=args.us_user_config,
+                hk_user_config_path=args.hk_user_config,
+                us_accounts=args.us_accounts,
+                hk_accounts=args.hk_accounts,
+                output_config_yaml_path=args.output,
+                apply=bool(args.apply),
+                backup=not bool(args.no_backup),
             ))
 
         if args.command == "config" and args.config_command == "get":

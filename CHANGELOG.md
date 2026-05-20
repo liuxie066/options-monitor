@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.2.100 - 2026-05-20
+
+### Added
+- Added a YAML authoring surface for runtime config, backed by code-owned `DEFAULT_CONFIG` defaults and explicit US/HK market resolution.
+- Added `./om config migrate-yaml` to preview or apply migration from layered JSON user config into ignored local `config.yaml`, with backup and post-write validation.
+
+### Changed
+- Documented the split between human-edited `config.yaml`, generated market runtime snapshots, env-backed write gates/secrets, and per-symbol strategy overrides.
+
 ## 1.2.99 - 2026-05-20
 
 ### Added

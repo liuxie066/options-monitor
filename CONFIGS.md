@@ -2,13 +2,14 @@
 
 仅定义配置契约与门禁，不重复 README/RUNBOOK 的操作细节。
 
-## Canonical Configs（唯一真源）
+## Canonical Configs（运行真源）
 
 - `config.us.json`
 - `config.hk.json`
 
 规则：
 - `config.us.json` / `config.hk.json` 是当前 runtime 的 canonical market configs。
+- `config.yaml` 是新的人工编辑入口；运行前用 `./om config build --source yaml --market us|hk` 生成 market-specific runtime snapshot。
 - 如果使用分层配置，`configs/system.json` + 可选 `configs/user.common.json` + `configs/user.<market>.json` 只是 authoring source；运行前用 `./om config build --market us|hk` 生成对应 canonical runtime config。
 - 线上可以把这两份 canonical config 放在仓库外管理，例如 `/opt/options-monitor/configs/config.us.json` / `/opt/options-monitor/configs/config.hk.json`，并在运行入口显式传入绝对路径。
 - 仓内同名文件仍是受支持的 repo-local runtime config 形态，适合本地开发和默认本地运行。
@@ -16,7 +17,58 @@
 - `.gitignore` 会忽略仓内 `config.us.json` / `config.hk.json`、`config.local*.json`、`config.market_*.json`、旧兼容文件名和 config 备份，避免代码更新覆盖用户本地配置。
 - runtime 入口始终以传入的 market-specific canonical config 为准；生产 cron 若使用仓外配置，应显式传入对应绝对路径。
 
-## Layered Configs（推荐编辑入口）
+## YAML Config（推荐编辑入口）
+
+`config.yaml` 只保存用户 override：账号、每个 market 的账户集合、symbols、少量 per-symbol override，以及少数运行行为配置。系统默认值由 `src/application/config_defaults.py` 的 `DEFAULT_CONFIG` 提供，构建时深合并。
+
+规则：
+- 缩进使用 2 个空格；tab 会被拒绝。
+- `market` 必须显式传入 `us` 或 `hk`；不会隐式 fallback 到 `us`。
+- `symbols` 保持字符串列表；每个 symbol 的 `dte`、`strike`、`yield_enhancement` 等配置放在 `markets.<market>.overrides.<symbol>`。
+- `yield_enhancement` 是 symbol 策略意图，不是全局 feature 开关。
+- `close_advice` 是建议功能，可用 `features.close_advice: false` 关闭。
+- Feishu / 交易 / 配置写入权限不放在 `config.yaml`，写入闸门属于 `options-monitor.env`，执行时仍需要命令级 `--apply` / `confirm`。
+
+示例：
+
+```bash
+cp configs/examples/config.yaml.example config.yaml
+./om config build --source yaml --market us --dry-run
+./om config build --source yaml --market hk --dry-run
+```
+
+默认输出到 runtime root 下的 resolved snapshot：
+
+```text
+<runtime_root>/resolved/config.us.json
+<runtime_root>/resolved/config.hk.json
+```
+
+也可以显式指定输出，继续兼容现有运行入口：
+
+```bash
+./om config build --source yaml --market us --output config.us.json
+./om config validate --source yaml --market us --config-yaml config.yaml
+./om config explain --source yaml --market us --key symbols.1.sell_put.min_dte
+```
+
+从旧 layered JSON 用户配置预览迁移，默认只 dry-run，不写文件：
+
+```bash
+./om config migrate-yaml --output config.yaml
+./om config migrate-yaml --output config.yaml --hk-accounts lx
+```
+
+该命令会读取 `configs/user.common.json`、`configs/user.us.json`、`configs/user.hk.json`，输出拟议 YAML、来源、每个 market 的 accounts / symbols，并校验新 YAML 解析后的 runtime config 是否等价于旧 layered runtime config。
+如果旧配置没有显式 market accounts，迁移工具会先按旧有效配置推导；需要收窄目标账户时，用 `--us-accounts` / `--hk-accounts` 只做 dry-run 预览。
+
+确认预览后，显式加 `--apply` 才会写入 `config.yaml`。如果目标文件已存在，默认先写 `config.yaml.bak.<timestamp>` 备份；确认不需要备份时可加 `--no-backup`。写入后工具会从磁盘上的 `config.yaml` 重新执行 US/HK 两个市场的 YAML validate + build dry-run，不会顺手生成 `config.us.json` / `config.hk.json`。
+
+```bash
+./om config migrate-yaml --output config.yaml --hk-accounts lx --apply
+```
+
+## Layered JSON Configs（兼容编辑入口）
 
 可选的轻量分层入口：
 
