@@ -22,6 +22,7 @@ output/
 output_accounts/
 output_shared/
 output_runs/
+handoffs/
 secrets/
 
 # Build / packaging

@@ -65,6 +65,103 @@ def test_render_systemd_bundle_uses_runtime_root_and_canonical_entrypoints(tmp_p
     assert "deploy_home" not in profile
 
 
+def _write_systemd_units_from_bundle(bundle: dict, systemd_root: Path, *, skip: set[str] | None = None) -> None:
+    skip = skip or set()
+    systemd_root.mkdir(parents=True, exist_ok=True)
+    for item in bundle["files"]:
+        if item.get("kind") not in {"systemd_service", "systemd_timer"}:
+            continue
+        name = Path(item["install_path"]).name
+        if name in skip:
+            continue
+        (systemd_root / name).write_text(item["content"], encoding="utf-8")
+
+
+def test_service_drift_detects_missing_projection_verify_timer(tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+    from src.application.service_drift import service_drift
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    systemd_root = tmp_path / "systemd"
+    repo.mkdir()
+    runtime.mkdir()
+    bundle = render_service_bundle(target="systemd", repo_root=repo, runtime_root=runtime, accounts=["lx"], markets=["us"])
+    profile = json.loads({item["relative_path"]: item for item in bundle["files"]}["service.profile.json"]["content"])
+    profile["services"] = [
+        item
+        for item in profile["services"]
+        if item["name"] not in {"options-monitor-projection-verify.service", "options-monitor-projection-verify.timer"}
+    ]
+    (runtime / "service.profile.json").write_text(json.dumps(profile, ensure_ascii=False), encoding="utf-8")
+    _write_systemd_units_from_bundle(
+        bundle,
+        systemd_root,
+        skip={"options-monitor-projection-verify.service", "options-monitor-projection-verify.timer"},
+    )
+
+    out = service_drift(repo_root=repo, runtime_root=runtime, systemd_unit_root=systemd_root)
+
+    assert out["summary"]["status"] == "error"
+    assert out["summary"]["ok"] is False
+    assert out["missing_profile_units"] == [
+        "options-monitor-projection-verify.service",
+        "options-monitor-projection-verify.timer",
+    ]
+    assert out["missing_installed_units"] == [
+        "options-monitor-projection-verify.service",
+        "options-monitor-projection-verify.timer",
+    ]
+    assert out["missing_required_units"] == ["options-monitor-projection-verify.timer"]
+
+
+def test_service_drift_confirm_writes_missing_timer_and_profile(tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+    from src.application.service_drift import service_drift
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    systemd_root = tmp_path / "systemd"
+    repo.mkdir()
+    runtime.mkdir()
+    bundle = render_service_bundle(target="systemd", repo_root=repo, runtime_root=runtime, accounts=["lx"], markets=["us"])
+    profile = json.loads({item["relative_path"]: item for item in bundle["files"]}["service.profile.json"]["content"])
+    profile["services"] = [
+        item
+        for item in profile["services"]
+        if item["name"] not in {"options-monitor-projection-verify.service", "options-monitor-projection-verify.timer"}
+    ]
+    (runtime / "service.profile.json").write_text(json.dumps(profile, ensure_ascii=False), encoding="utf-8")
+    _write_systemd_units_from_bundle(
+        bundle,
+        systemd_root,
+        skip={"options-monitor-projection-verify.service", "options-monitor-projection-verify.timer"},
+    )
+    calls: list[list[str]] = []
+
+    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        calls.append(list(command))
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    out = service_drift(
+        repo_root=repo,
+        runtime_root=runtime,
+        systemd_unit_root=systemd_root,
+        confirm=True,
+        run_cmd=_run_cmd,
+    )
+
+    assert out["summary"]["status"] == "ok"
+    assert out["changed"] is True
+    assert (systemd_root / "options-monitor-projection-verify.service").exists()
+    assert (systemd_root / "options-monitor-projection-verify.timer").exists()
+    refreshed = json.loads((runtime / "service.profile.json").read_text(encoding="utf-8"))
+    assert {"name": "options-monitor-projection-verify.timer"} in refreshed["services"]
+    assert ["systemctl", "daemon-reload"] in calls
+    assert ["systemctl", "enable", "--now", "options-monitor-projection-verify.timer"] in calls
+    assert ["systemctl", "enable", "--now", "options-monitor-projection-verify.service"] not in calls
+
+
 def test_render_systemd_bundle_aligns_hk_tick_timer_to_calendar_boundaries(tmp_path: Path) -> None:
     from src.application.service_deploy import render_service_bundle
 
@@ -512,6 +609,8 @@ def test_service_upgrade_dry_run_and_confirm_switches_current_symlink(monkeypatc
     from src.application.service_upgrade import service_upgrade
 
     monkeypatch.setenv("OM_UPGRADE_INSTALLER", "pip")
+    systemd_root = tmp_path / "systemd"
+    monkeypatch.setenv("OM_SYSTEMD_UNIT_ROOT", str(systemd_root))
     install = tmp_path / "opt" / "options-monitor"
     releases = install / "releases"
     v100 = releases / "1.0.0"
@@ -610,6 +709,11 @@ def test_service_upgrade_dry_run_and_confirm_switches_current_symlink(monkeypatc
     ] in calls
     assert any(command[:2] == [venv_python, "-c"] for command in calls)
     assert ["systemctl", "restart", "options-monitor-trade-intake.service"] in calls
+    assert ["systemctl", "enable", "--now", "options-monitor-projection-verify.timer"] in calls
+    refreshed_profile = json.loads((runtime / "service.profile.json").read_text(encoding="utf-8"))
+    assert {"name": "options-monitor-projection-verify.timer"} in refreshed_profile["services"]
+    assert (systemd_root / "options-monitor-projection-verify.timer").exists()
+    assert out["service_reconcile"]["summary"]["status"] == "ok"
     assert out["runtime_prepare"]["installer"] == "pip"
     assert out["runtime_prepare"]["fallback"] is False
     status = json.loads((runtime / "upgrade_status.json").read_text(encoding="utf-8"))
@@ -1728,8 +1832,9 @@ def test_service_rollback_switches_current_symlink(tmp_path: Path) -> None:
     assert current.resolve() == v100.resolve()
 
 
-def test_runtime_status_loads_service_profile_paths(tmp_path: Path) -> None:
+def test_runtime_status_loads_service_profile_paths(monkeypatch, tmp_path: Path) -> None:
     from src.application.tool_execution import execute_tool
+    from src.application.service_deploy import render_service_bundle
 
     cfg_path = tmp_path / "config.us.json"
     data_config = tmp_path / "portfolio.runtime.json"
@@ -1746,28 +1851,27 @@ def test_runtime_status_loads_service_profile_paths(tmp_path: Path) -> None:
         ),
         encoding="utf-8",
     )
-    profile_path = tmp_path / "service.profile.json"
-    profile_path.write_text(
-        json.dumps(
-            {
-                "service_provider": "systemd",
-                "runtime_root": str(tmp_path),
-                "accounts": ["lx"],
-                "markets": ["us"],
-                "config_paths": {"us": str(cfg_path)},
-                "paths": {
-                    "report_dir": str(tmp_path / "output" / "reports"),
-                    "state_dir": str(tmp_path / "output" / "state"),
-                    "shared_state_dir": str(tmp_path / "output_shared" / "state"),
-                    "accounts_root": str(tmp_path / "output_accounts"),
-                    "runs_root": str(tmp_path / "output_runs"),
-                },
-                "services": [{"name": "options-monitor-trade-intake.service"}],
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
+    systemd_root = tmp_path / "systemd"
+    monkeypatch.setenv("OM_SYSTEMD_UNIT_ROOT", str(systemd_root))
+    bundle = render_service_bundle(
+        target="systemd",
+        repo_root=tmp_path,
+        runtime_root=tmp_path,
+        accounts=["lx"],
+        markets=["us"],
+        config_paths={"us": cfg_path},
     )
+    _write_systemd_units_from_bundle(bundle, systemd_root)
+    profile_path = tmp_path / "service.profile.json"
+    profile = json.loads({item["relative_path"]: item for item in bundle["files"]}["service.profile.json"]["content"])
+    profile["paths"] = {
+        "report_dir": str(tmp_path / "output" / "reports"),
+        "state_dir": str(tmp_path / "output" / "state"),
+        "shared_state_dir": str(tmp_path / "output_shared" / "state"),
+        "accounts_root": str(tmp_path / "output_accounts"),
+        "runs_root": str(tmp_path / "output_runs"),
+    }
+    profile_path.write_text(json.dumps(profile, ensure_ascii=False), encoding="utf-8")
 
     out = execute_tool("runtime_status", {"profile_path": str(profile_path)})
 
@@ -1775,7 +1879,57 @@ def test_runtime_status_loads_service_profile_paths(tmp_path: Path) -> None:
     assert out["data"]["config"]["accounts"] == ["lx"]
     assert out["data"]["service_profile"]["loaded"] is True
     assert out["data"]["service_profile"]["provider"] == "systemd"
-    assert out["data"]["service_profile"]["service_count"] == 1
+    assert out["data"]["service_drift"]["summary"]["status"] == "ok"
+
+
+def test_runtime_status_warns_when_required_service_timer_is_missing(monkeypatch, tmp_path: Path) -> None:
+    from src.application.tool_execution import execute_tool
+    from src.application.service_deploy import render_service_bundle
+
+    cfg_path = tmp_path / "config.us.json"
+    data_config = tmp_path / "portfolio.runtime.json"
+    data_config.write_text("{}", encoding="utf-8")
+    cfg_path.write_text(
+        json.dumps(
+            {
+                "accounts": ["lx"],
+                "portfolio": {"data_config": str(data_config)},
+                "notifications": {"provider": "openclaw", "target": "route"},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    systemd_root = tmp_path / "systemd"
+    monkeypatch.setenv("OM_SYSTEMD_UNIT_ROOT", str(systemd_root))
+    bundle = render_service_bundle(
+        target="systemd",
+        repo_root=tmp_path,
+        runtime_root=tmp_path,
+        accounts=["lx"],
+        markets=["us"],
+        config_paths={"us": cfg_path},
+    )
+    _write_systemd_units_from_bundle(
+        bundle,
+        systemd_root,
+        skip={"options-monitor-projection-verify.service", "options-monitor-projection-verify.timer"},
+    )
+    profile = json.loads({item["relative_path"]: item for item in bundle["files"]}["service.profile.json"]["content"])
+    profile["services"] = [
+        item
+        for item in profile["services"]
+        if item["name"] not in {"options-monitor-projection-verify.service", "options-monitor-projection-verify.timer"}
+    ]
+    profile_path = tmp_path / "service.profile.json"
+    profile_path.write_text(json.dumps(profile, ensure_ascii=False), encoding="utf-8")
+
+    out = execute_tool("runtime_status", {"profile_path": str(profile_path)})
+
+    assert out["ok"] is True
+    assert out["data"]["summary"]["ok"] is False
+    assert "SERVICE_DRIFT_REQUIRED_UNIT_MISSING" in out["data"]["summary"]["warning_codes"]
+    assert out["data"]["service_drift"]["missing_required_units"] == ["options-monitor-projection-verify.timer"]
 
 
 def test_cli_service_render_returns_json(capsys, tmp_path: Path) -> None:
@@ -1829,6 +1983,38 @@ def test_cli_service_render_no_content_still_writes_files(capsys, tmp_path: Path
     payload = json.loads(capsys.readouterr().out)
     assert payload["data"]["files"][0].get("content") is None
     assert "ExecStart=" in (output_dir / "systemd" / "options-monitor-tick-us.service").read_text(encoding="utf-8")
+
+
+def test_cli_service_drift_reports_missing_units(monkeypatch, capsys, tmp_path: Path) -> None:
+    from src.application.service_deploy import render_service_bundle
+    from src.interfaces.cli.main import main
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    systemd_root = tmp_path / "systemd"
+    repo.mkdir()
+    runtime.mkdir()
+    monkeypatch.setenv("OM_SYSTEMD_UNIT_ROOT", str(systemd_root))
+    bundle = render_service_bundle(target="systemd", repo_root=repo, runtime_root=runtime, accounts=["lx"], markets=["us"])
+    profile = json.loads({item["relative_path"]: item for item in bundle["files"]}["service.profile.json"]["content"])
+    profile["services"] = [
+        item
+        for item in profile["services"]
+        if item["name"] not in {"options-monitor-projection-verify.service", "options-monitor-projection-verify.timer"}
+    ]
+    (runtime / "service.profile.json").write_text(json.dumps(profile, ensure_ascii=False), encoding="utf-8")
+    _write_systemd_units_from_bundle(
+        bundle,
+        systemd_root,
+        skip={"options-monitor-projection-verify.service", "options-monitor-projection-verify.timer"},
+    )
+
+    rc = main(["service", "drift", "--repo-root", str(repo), "--runtime-root", str(runtime)])
+
+    assert rc == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["data"]["missing_required_units"] == ["options-monitor-projection-verify.timer"]
 
 
 def test_cli_service_upgrade_delegates_to_application(monkeypatch, capsys, tmp_path: Path) -> None:

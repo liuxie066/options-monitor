@@ -12,6 +12,7 @@ from src.application.settings import build_effective_env
 
 REPO_BASE = Path(__file__).resolve().parents[3]
 LEDGER_DB_RELATIVE_PATH = Path("output_shared") / "state" / "option_positions.sqlite3"
+SYSTEMD_DEFAULT_RUNTIME_ROOT = Path("/var/lib/options-monitor")
 
 
 @dataclass(frozen=True)
@@ -227,6 +228,14 @@ def _candidate_has_rows(candidate: dict[str, object]) -> bool:
     return False
 
 
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.resolve().relative_to(parent.resolve())
+        return True
+    except ValueError:
+        return False
+
+
 def inspect_ledger_stores(
     data_config: str | Path,
     *,
@@ -257,7 +266,25 @@ def inspect_ledger_stores(
     add_candidate("active", resolution.sqlite_path)
     if resolution.legacy_sqlite_path is not None:
         add_candidate("legacy_configured_sqlite_path", resolution.legacy_sqlite_path)
-    add_candidate("repository_default_runtime_root", REPO_BASE / LEDGER_DB_RELATIVE_PATH)
+    repo_default = REPO_BASE / LEDGER_DB_RELATIVE_PATH
+    systemd_default = SYSTEMD_DEFAULT_RUNTIME_ROOT / LEDGER_DB_RELATIVE_PATH
+    active_resolved = resolution.sqlite_path.resolve()
+    data_config_resolved = resolution.data_config_path.resolve()
+    config_resolved = Path(config_path).expanduser().resolve() if config_path is not None else None
+    repo_related = (
+        active_resolved == repo_default.resolve()
+        or _is_relative_to(data_config_resolved, REPO_BASE)
+        or (config_resolved is not None and _is_relative_to(config_resolved, REPO_BASE))
+    )
+    systemd_related = (
+        active_resolved == systemd_default.resolve()
+        or _is_relative_to(data_config_resolved, SYSTEMD_DEFAULT_RUNTIME_ROOT)
+        or (config_resolved is not None and _is_relative_to(config_resolved, SYSTEMD_DEFAULT_RUNTIME_ROOT))
+    )
+    if repo_related:
+        add_candidate("repository_default_runtime_root", repo_default)
+    if repo_related or systemd_related:
+        add_candidate("systemd_default_runtime_root", systemd_default)
 
     candidates = [candidate_map[key] for key in ordered_paths]
     existing_candidates = [item for item in candidates if bool(item.get("exists"))]
@@ -296,6 +323,55 @@ def inspect_ledger_stores(
             "active_empty_but_other_populated": (not active_has_rows and bool(other_populated)),
         },
         "warnings": warnings,
+    }
+
+
+def ledger_store_write_guard(
+    data_config: str | Path,
+    *,
+    runtime_root: str | Path | None = None,
+    config_path: str | Path | None = None,
+) -> dict[str, object]:
+    inspection = inspect_ledger_stores(
+        data_config,
+        runtime_root=runtime_root,
+        config_path=config_path,
+    )
+    active_raw = inspection.get("active")
+    summary_raw = inspection.get("summary")
+    warnings_raw = inspection.get("warnings")
+    active = cast(dict[str, object], active_raw) if isinstance(active_raw, dict) else {}
+    summary = cast(dict[str, object], summary_raw) if isinstance(summary_raw, dict) else {}
+    warnings = [str(item) for item in warnings_raw if str(item)] if isinstance(warnings_raw, list) else []
+    errors: list[str] = []
+
+    if bool(summary.get("multiple_populated")):
+        errors.append("multiple populated ledger SQLite candidates detected; pass --runtime-root for the intended active store")
+    if bool(summary.get("active_empty_but_other_populated")):
+        errors.append("active ledger SQLite is empty while another candidate is populated; refusing write")
+
+    runtime_root_source = str(active.get("runtime_root_source") or "")
+    active_sqlite = str(active.get("sqlite_path") or "")
+    repo_default_sqlite = str((REPO_BASE / LEDGER_DB_RELATIVE_PATH).resolve())
+    if (
+        runtime_root_source == "data_config_parent"
+        and active_sqlite == repo_default_sqlite
+        and "releases" in {part.lower() for part in REPO_BASE.parts}
+    ):
+        errors.append(
+            "write would target a release-local ledger store; pass --runtime-root or set OM_RUNTIME_ROOT for production"
+        )
+
+    return {
+        "ok": not errors,
+        "active": active,
+        "summary": summary,
+        "warnings": warnings,
+        "errors": errors,
+        "remediation": [
+            "re-run with --runtime-root /var/lib/options-monitor",
+            "or set OM_RUNTIME_ROOT=/var/lib/options-monitor before running the write command",
+        ] if errors else [],
     }
 
 

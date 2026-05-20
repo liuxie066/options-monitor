@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from src.application.ledger.store_resolution import LedgerStoreResolution
 from src.application.trades.normalizer import NormalizedTradeDeal
 from src.application.trades.state import upsert_deal_state
 from src.application.trades.intake import build_trade_intake_audit_event, process_trade_payload
@@ -115,6 +116,110 @@ def test_process_payload_appends_ledger_persist_audit_on_applied(monkeypatch, tm
 
     assert out["status"] == "applied"
     assert any(event.get("phase") == "ledger_persisted" for event in events)
+
+
+def test_process_payload_close_invalidates_context_and_attaches_projection_diagnostics(tmp_path: Path) -> None:
+    runtime_root = tmp_path / "runtime"
+    account_ctx = runtime_root / "output_accounts" / "lx" / "state" / "option_positions_context.json"
+    shared_ctx = runtime_root / "output_shared" / "state" / "option_positions_context.shared.json"
+    account_ctx.parent.mkdir(parents=True, exist_ok=True)
+    shared_ctx.parent.mkdir(parents=True, exist_ok=True)
+    account_ctx.write_text("{}", encoding="utf-8")
+    shared_ctx.write_text("{}", encoding="utf-8")
+
+    deal = NormalizedTradeDeal(
+        broker="富途",
+        futu_account_id="REAL_1",
+        internal_account="lx",
+        deal_id="deal-close-1",
+        order_id="order-1",
+        symbol="0700.HK",
+        option_type="call",
+        side="buy",
+        position_effect="close",
+        contracts=2,
+        price=1.2,
+        strike=510.0,
+        multiplier=100,
+        multiplier_source="cache",
+        expiration_ymd="2026-05-28",
+        currency="HKD",
+        trade_time_ms=1779260747577,
+        raw_payload={"deal_id": "deal-close-1"},
+    )
+
+    class _Repo:
+        ledger_store = LedgerStoreResolution(
+            runtime_root=runtime_root,
+            data_config_path=runtime_root / "portfolio.runtime.json",
+            sqlite_path=runtime_root / "output_shared" / "state" / "option_positions.sqlite3",
+            runtime_root_source="argument",
+            sqlite_path_source="runtime_root",
+            db_exists=True,
+            db_size_bytes=1,
+            trade_event_count=2,
+            position_lot_count=1,
+        )
+
+    class _Result:
+        status = "applied"
+        action = "close"
+        reason = "applied_close"
+        deal_id = "deal-close-1"
+        account = "lx"
+        operations = []
+
+        def to_dict(self) -> dict:
+            return {
+                "status": self.status,
+                "action": self.action,
+                "reason": self.reason,
+                "deal_id": self.deal_id,
+                "account": self.account,
+                "operations": self.operations,
+                "diagnostics": {
+                    "post_write_projection_verification": {
+                        "ok": True,
+                        "checks": [
+                            {
+                                "record_id": "lot_1",
+                                "contracts_open_before": 2,
+                                "contracts_to_close": 2,
+                                "expected_contracts_open_after": 0,
+                                "actual_contracts_open_after": 0,
+                            }
+                        ],
+                        "errors": [],
+                    }
+                },
+            }
+
+    events: list[dict] = []
+    out = process_trade_payload(
+        {"deal_id": "deal-close-1"},
+        repo=_Repo(),
+        state_path=tmp_path / "state.json",
+        audit_path=tmp_path / "audit.jsonl",
+        account_mapping={"REAL_1": "lx"},
+        apply_changes=True,
+        load_trade_intake_state_fn=lambda _path: {},
+        write_trade_intake_state_fn=lambda *_args, **_kwargs: None,
+        upsert_deal_state_fn=lambda state, **_kwargs: state,
+        append_trade_intake_audit_fn=lambda _path, event: events.append(dict(event)),
+        enrich_trade_payload_fn=None,
+        normalize_trade_deal_fn=lambda _payload, futu_account_mapping=None: deal,
+        resolve_trade_deal_fn=lambda *_args, **_kwargs: _Result(),
+    )
+
+    assert out["projection_status"] == "recorded_and_projected"
+    assert out["ledger_store"]["sqlite_path"].endswith("option_positions.sqlite3")
+    assert out["contracts_open_before"] == 2
+    assert out["contracts_open_after"] == 0
+    assert out["context_invalidation"]["ok"] is True
+    assert not account_ctx.exists()
+    assert not shared_ctx.exists()
+    resolved = [event for event in events if event.get("phase") == "resolved"][-1]
+    assert resolved["result"]["projection_status"] == "recorded_and_projected"
 
 
 def test_process_payload_appends_enriched_audit_when_lookup_adds_account(monkeypatch, tmp_path: Path) -> None:

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from src.application.multiplier_cache import normalize_symbol as normalize_multiplier_symbol
 from src.application.opend_utils import resolve_underlier_alias
 from domain.domain.option_position_lots import norm_symbol as normalize_position_symbol
@@ -65,3 +67,32 @@ def test_ledger_trade_event_canonicalizes_noncanonical_deal_symbol(tmp_path: Pat
     event = repo.list_trade_events()[0]
 
     assert event["symbol"] == "9992.HK"
+
+
+def test_ledger_trade_event_rejects_missing_broker_trade_time(tmp_path: Path) -> None:
+    deal = NormalizedTradeDeal(
+        broker="富途",
+        futu_account_id="REAL_1",
+        internal_account="lx",
+        deal_id="deal-missing-time",
+        order_id="order-missing-time",
+        symbol="0700.HK",
+        option_type="call",
+        side="sell",
+        position_effect="open",
+        contracts=1,
+        price=6.3,
+        strike=510.0,
+        multiplier=100,
+        multiplier_source="cache",
+        expiration_ymd="2026-05-28",
+        currency="HKD",
+        trade_time_ms=None,
+        raw_payload={"symbol": "0700.HK"},
+    )
+
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    with pytest.raises(ValueError, match="requires positive trade_time_ms"):
+        ledger_writer.persist_trade_event(repo, deal)
+
+    assert repo.list_trade_events() == []

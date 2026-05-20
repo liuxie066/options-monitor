@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from src.application.service_drift import service_drift
 from src.application.version_check import check_version_update, compare_versions, parse_version
 
 
@@ -297,6 +298,15 @@ def _restart_services_from_profile(
     operations: list[dict[str, Any]],
 ) -> list[str]:
     profile = _load_service_profile(runtime_root)
+    return _restart_services_from_loaded_profile(profile=profile, run_cmd=run_cmd, operations=operations)
+
+
+def _restart_services_from_loaded_profile(
+    *,
+    profile: dict[str, Any],
+    run_cmd: Callable[..., Any],
+    operations: list[dict[str, Any]],
+) -> list[str]:
     if not profile:
         return []
     provider = str(profile.get("service_provider") or "").strip().lower()
@@ -926,6 +936,7 @@ def service_upgrade(
         f"prepare release runtime at {target_dir / '.venv'}",
         f"validate {target_dir}",
         f"switch {repo_link} -> {target_dir}",
+        "reconcile service drift from current release",
         "restart long-running services" if restart_services else "skip service restart",
     ]
     if cleanup_after_upgrade:
@@ -963,6 +974,8 @@ def service_upgrade(
     runtime_prepare: dict[str, Any] = {}
     runtime_config_prepare: dict[str, Any] = {}
     post_switch_runtime_config_validate: list[dict[str, Any]] = []
+    service_reconcile: dict[str, Any] = {}
+    pre_upgrade_profile = _load_service_profile(runtime)
     try:
         with _UpgradeLock(lock_path):
             releases.mkdir(parents=True, exist_ok=True)
@@ -1011,8 +1024,17 @@ def service_upgrade(
                 if runtime_config_prepare.get("status") == "prepared"
                 else []
             )
+            if pre_upgrade_profile:
+                service_reconcile = service_drift(
+                    repo_root=repo_link,
+                    runtime_root=runtime,
+                    profile_path=runtime / "service.profile.json",
+                    profile=pre_upgrade_profile,
+                    confirm=True,
+                    run_cmd=run_cmd,
+                )
             restarted = (
-                _restart_services_from_profile(runtime_root=runtime, run_cmd=run_cmd, operations=operations)
+                _restart_services_from_loaded_profile(profile=pre_upgrade_profile, run_cmd=run_cmd, operations=operations)
                 if restart_services
                 else []
             )
@@ -1029,6 +1051,7 @@ def service_upgrade(
             "runtime_prepare": runtime_prepare,
             "runtime_config_prepare": runtime_config_prepare,
             "post_switch_runtime_config_validate": post_switch_runtime_config_validate,
+            "service_reconcile": service_reconcile,
             "restarted_services": exc.restarted_services,
             "restart_failed_services": exc.failed_services,
             "manual_remediation": exc.remediation,
@@ -1120,6 +1143,7 @@ def service_upgrade(
         "runtime_prepare": runtime_prepare,
         "runtime_config_prepare": runtime_config_prepare,
         "post_switch_runtime_config_validate": post_switch_runtime_config_validate,
+        "service_reconcile": service_reconcile,
         "restarted_services": restarted,
         **({"post_upgrade_cleanup": cleanup_result} if cleanup_result is not None else {}),
         "operations": operations,

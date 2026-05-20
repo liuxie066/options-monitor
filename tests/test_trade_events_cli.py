@@ -226,3 +226,102 @@ def test_trade_events_replay_apply_ignores_deprecated_sqlite_path(monkeypatch, t
     assert out["ledger_store"]["sqlite_path"] == str((tmp_path / "output_shared" / "state" / "option_positions.sqlite3").resolve())
     assert out["ledger_store"]["legacy_sqlite_path"] == str((tmp_path / "option_positions.sqlite3").resolve())
     assert any("ignored" in item for item in out["ledger_store"]["warnings"])
+
+
+def test_trade_events_replay_accepts_explicit_runtime_root(tmp_path: Path, capsys) -> None:
+    import src.interfaces.cli.trade_events as cli
+    from domain.domain.option_position_lots import OpenPositionCommand
+
+    data_config = tmp_path / "release" / "portfolio.runtime.json"
+    data_config.parent.mkdir(parents=True, exist_ok=True)
+    data_config.write_text("{}", encoding="utf-8")
+    runtime_root = tmp_path / "runtime"
+    repo = ledger_repository.SQLiteOptionPositionsRepository(
+        runtime_root / "output_shared" / "state" / "option_positions.sqlite3"
+    )
+    ledger_manual_trades.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="0700.HK",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="HKD",
+            strike=480.0,
+            multiplier=100,
+            expiration_ymd="2026-04-29",
+            premium_per_share=3.93,
+            opened_at_ms=1000,
+        ),
+    )
+
+    assert cli.main([
+        "--data-config",
+        str(data_config),
+        "replay",
+        "--runtime-root",
+        str(runtime_root),
+        "--dry-run",
+        "--format",
+        "json",
+    ]) == 0
+
+    out = json.loads(capsys.readouterr().out)
+    assert out["trade_event_count"] == 1
+    assert out["ledger_store"]["runtime_root"] == str(runtime_root.resolve())
+    assert out["ledger_store"]["runtime_root_source"] == "argument"
+
+
+def test_trade_events_repair_apply_outputs_explicit_runtime_root_store(tmp_path: Path, capsys) -> None:
+    import src.interfaces.cli.trade_events as cli
+    from domain.domain.option_position_lots import OpenPositionCommand
+
+    data_config = tmp_path / "release" / "portfolio.runtime.json"
+    data_config.parent.mkdir(parents=True, exist_ok=True)
+    data_config.write_text("{}", encoding="utf-8")
+    runtime_root = tmp_path / "runtime"
+    repo = ledger_repository.SQLiteOptionPositionsRepository(
+        runtime_root / "output_shared" / "state" / "option_positions.sqlite3"
+    )
+    ledger_manual_trades.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="0700.HK",
+            option_type="put",
+            side="short",
+            contracts=1,
+            currency="HKD",
+            strike=480.0,
+            multiplier=100,
+            expiration_ymd="2026-04-29",
+            premium_per_share=3.93,
+            opened_at_ms=1000,
+        ),
+    )
+    event_id = str(repo.list_trade_events()[0]["event_id"])
+
+    assert cli.main([
+        "--data-config",
+        str(data_config),
+        "repair",
+        "--runtime-root",
+        str(runtime_root),
+        event_id,
+        "--strike",
+        "500",
+        "--apply",
+        "--format",
+        "json",
+    ]) == 0
+
+    out = json.loads(capsys.readouterr().out)
+    assert out["mode"] == "applied"
+    assert out["ledger_store"]["sqlite_path"] == str(
+        (runtime_root / "output_shared" / "state" / "option_positions.sqlite3").resolve()
+    )
+    assert out["ledger_store"]["runtime_root"] == str(runtime_root.resolve())
+    assert out["ledger_store"]["runtime_root_source"] == "argument"

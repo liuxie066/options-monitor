@@ -347,6 +347,7 @@ def render_service_bundle(
     env_file: str | Path | None = None,
     deploy_user: str | None = None,
     deploy_home: str | Path | None = None,
+    use_default_deploy_user: bool = True,
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
     include_auto_upgrade: bool = False,
     include_feishu_ws: bool = False,
@@ -357,7 +358,7 @@ def render_service_bundle(
     repo = _absolute_path_preserve_symlink(repo_root or Path.cwd())
     runtime = _resolve_path(runtime_root, base=repo, default=default_runtime_root(target_key))
     env_file_path = _resolve_path(env_file, base=repo, default=Path()) if env_file else None
-    systemd_user = default_systemd_deploy_user() if target_key == "systemd" else None
+    systemd_user = default_systemd_deploy_user() if target_key == "systemd" and use_default_deploy_user else None
     if deploy_user is not None and str(deploy_user).strip():
         systemd_user = str(deploy_user).strip()
     systemd_home = default_systemd_deploy_home(systemd_user) if target_key == "systemd" and systemd_user else None

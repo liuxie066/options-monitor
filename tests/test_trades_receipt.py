@@ -185,3 +185,22 @@ def test_build_trade_intake_receipt_message_marks_unresolved() -> None:
     assert "[未记录]" in msg
     assert "missing_required_fields:multiplier" in msg
     assert "9992.HK" in msg
+
+
+def test_build_trade_intake_receipt_message_marks_projection_verification_failure() -> None:
+    msg = build_trade_intake_receipt_message(
+        deal=None,
+        result={
+            "status": "failed",
+            "reason": "projection_verification_failed",
+            "deal_id": "deal-1",
+            "account": "lx",
+            "action": "close",
+        },
+        payload={"symbol": "0700.HK", "qty": 2, "price": 1.2},
+    )
+
+    assert "[写入异常]" in msg
+    assert "[已记录]" not in msg
+    assert "状态：写入异常" in msg
+    assert "projection_verification_failed" in msg

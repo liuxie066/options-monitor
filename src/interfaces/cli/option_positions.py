@@ -20,13 +20,14 @@ from src.application.ledger.api import (
     format_position_cash_secured,
     format_position_money,
     inspect_ledger_stores,
+    ledger_store_write_guard,
     ledger_store_payload,
     list_position_rows,
     migrate_legacy_sqlite_to_repo,
-    open_position_ledger_from_data_config as resolve_option_positions_repo,
     open_position_ledger_from_runtime_config,
     record_trade_event_void,
     refresh_position_lot_projection,
+    resolve_position_data_config_path,
     verify_position_lot_projection,
 )
 from src.application.positions.auto_close import main as run_option_positions_auto_close
@@ -117,9 +118,50 @@ def _print_store_inspect_text(payload: dict[str, object]) -> None:
             print(f"- {warning}")
 
 
+def _runtime_root_arg(args: argparse.Namespace) -> str | None:
+    return str(getattr(args, "runtime_root", "") or "").strip() or None
+
+
+def resolve_option_positions_repo(**kwargs: Any) -> tuple[Path, Any]:
+    """Compatibility wrapper kept for tests and older call sites."""
+
+    return open_position_ledger_from_runtime_config(**kwargs)
+
+
+def _print_guard_failure(guard: dict[str, object], *, as_json: bool) -> None:
+    payload = {"ok": False, "error": "ledger_store_guard_failed", "ledger_store_guard": guard}
+    if as_json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return
+    raw_errors = guard.get("errors")
+    errors = raw_errors if isinstance(raw_errors, list) else []
+    for error in errors:
+        print(f"[LEDGER_FAIL] {error}")
+    raw_active = guard.get("active")
+    active = cast(dict[str, object], raw_active) if isinstance(raw_active, dict) else {}
+    print(
+        f"[LEDGER] sqlite={active.get('sqlite_path') or '-'} "
+        f"runtime_root={active.get('runtime_root') or '-'} "
+        f"source={active.get('runtime_root_source') or '-'}"
+    )
+    raw_remediation = guard.get("remediation")
+    remediation = raw_remediation if isinstance(raw_remediation, list) else []
+    for item in remediation:
+        print(f"[REMEDIATION] {item}")
+
+
+def _guard_write(*, data_config: Path, args: argparse.Namespace, as_json: bool) -> dict[str, object] | None:
+    guard = ledger_store_write_guard(data_config, runtime_root=_runtime_root_arg(args))
+    if bool(guard.get("ok")):
+        return guard
+    _print_guard_failure(guard, as_json=as_json)
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description='Manage position lots via trade events')
     ap.add_argument('--data-config', default=None, help='portfolio data config path; auto-resolves when omitted')
+    ap.add_argument('--runtime-root', default=None, help='runtime root for active ledger store, e.g. /var/lib/options-monitor')
 
     sub = ap.add_subparsers(dest='cmd', required=True)
 
@@ -132,6 +174,7 @@ def main(argv: list[str] | None = None) -> int:
     p_list.add_argument('--exp-within-days', type=int, default=None, help='only include rows expiring within N days from today')
 
     p_add = sub.add_parser('add', help='add a record')
+    p_add.add_argument('--runtime-root', default=None, help='runtime root for active ledger store')
     p_add.add_argument('--broker', default='富途')
     p_add.add_argument('--account', required=True)
     p_add.add_argument('--symbol', required=True)
@@ -148,6 +191,7 @@ def main(argv: list[str] | None = None) -> int:
     p_add.add_argument('--dry-run', action='store_true')
 
     p_buy_close = sub.add_parser('buy-close', help='buy to close a position by record_id or strict unique selector')
+    p_buy_close.add_argument('--runtime-root', default=None, help='runtime root for active ledger store')
     p_buy_close.add_argument('--record-id', default=None)
     p_buy_close.add_argument('--broker', default='富途')
     p_buy_close.add_argument('--account', default=None, help='required when --record-id is omitted')
@@ -172,9 +216,11 @@ def main(argv: list[str] | None = None) -> int:
     p_history.add_argument('--format', default='text', choices=['text', 'json'])
 
     p_rebuild = sub.add_parser('rebuild', help='rebuild position_lots projection from trade_events')
+    p_rebuild.add_argument('--runtime-root', default=None, help='runtime root for active ledger store')
     p_rebuild.add_argument('--format', default='text', choices=['text', 'json'])
 
     p_inspect = sub.add_parser('inspect', help='inspect projected lot state and related trade events')
+    p_inspect.add_argument('--runtime-root', default=None, help='runtime root for active ledger store')
     p_inspect.add_argument('--record-id', default=None)
     p_inspect.add_argument('--account', default=None)
     p_inspect.add_argument('--symbol', default=None)
@@ -199,14 +245,17 @@ def main(argv: list[str] | None = None) -> int:
     p_store_migrate.add_argument("--format", default="json", choices=["json", "text"])
 
     p_verify = sub.add_parser('verify-projection', help='verify position_lots by replaying trade_events')
+    p_verify.add_argument('--runtime-root', default=None, help='runtime root for active ledger store')
     p_verify.add_argument('--mode', default='auto', choices=['auto', 'full'], help='auto may reuse a trusted checkpoint when events and lots are unchanged')
     p_verify.add_argument('--format', default='text', choices=['text', 'json'])
 
     p_void_event = sub.add_parser('void-event', help='append a void event for a canonical trade event')
+    p_void_event.add_argument('--runtime-root', default=None, help='runtime root for active ledger store')
     p_void_event.add_argument('--event-id', required=True)
     p_void_event.add_argument('--void-reason', default='manual_void')
 
     p_adjust = sub.add_parser('adjust-lot', help='append an adjustment event for an existing position lot')
+    p_adjust.add_argument('--runtime-root', default=None, help='runtime root for active ledger store')
     p_adjust.add_argument('--record-id', required=True)
     p_adjust.add_argument('--contracts', type=int, default=None)
     p_adjust.add_argument('--strike', type=float, default=None)
@@ -261,6 +310,14 @@ def main(argv: list[str] | None = None) -> int:
                 config_path=config_path,
             )
         else:
+            if bool(getattr(args, "apply", False)):
+                guard = _guard_write(
+                    data_config=data_config_path,
+                    args=args,
+                    as_json=(str(getattr(args, "format", "") or "") == "json"),
+                )
+                if guard is None:
+                    return 2
             _resolved_data_config, repo = open_position_ledger_from_runtime_config(
                 base=base,
                 cfg=None,
@@ -318,7 +375,28 @@ def main(argv: list[str] | None = None) -> int:
             auto_close_argv.append("--quiet")
         return int(run_option_positions_auto_close(auto_close_argv))
 
-    _data_config, repo = resolve_option_positions_repo(base=base, data_config=args.data_config)
+    write_cmd = (
+        (args.cmd == "add" and not bool(args.dry_run))
+        or (args.cmd == "buy-close" and not bool(args.dry_run))
+        or args.cmd in {"rebuild", "void-event"}
+        or (args.cmd == "adjust-lot" and not bool(args.dry_run))
+    )
+    data_config_path = resolve_position_data_config_path(base=base, data_config=args.data_config)
+    if write_cmd:
+        guard = _guard_write(
+            data_config=data_config_path,
+            args=args,
+            as_json=(str(getattr(args, "format", "") or "") == "json"),
+        )
+        if guard is None:
+            return 2
+
+    _data_config, repo = resolve_option_positions_repo(
+        base=base,
+        cfg=None,
+        data_config=args.data_config,
+        runtime_root=_runtime_root_arg(args),
+    )
     state_base = Path(str(_data_config)).resolve().parent
     ledger_store = ledger_store_payload(_data_config, repo)
 
@@ -555,6 +633,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         except ValueError as e:
             raise SystemExit(str(e))
+        report["ledger_store"] = ledger_store
         if args.format == 'json':
             print(json.dumps(report, ensure_ascii=False, indent=2))
             return 0

@@ -37,6 +37,7 @@ from src.application.service_deploy import (
     service_status_from_profile,
     write_service_bundle,
 )
+from src.application.service_drift import service_drift
 from src.application.service_upgrade import service_rollback, service_upgrade, service_upgrade_check
 from src.application.strategy_replay import analyze_strategy_replay, read_strategy_replay_file
 from src.application.tick_cron import run_tick_cron
@@ -332,6 +333,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     service_status = service_sub.add_parser("status", help="summarize a rendered service profile")
     service_status.add_argument("--profile-path", required=True)
     service_status.add_argument("--include-service-status", action="store_true")
+    service_drift_cmd = service_sub.add_parser("drift", help="compare expected service units with profile and installed units")
+    service_drift_cmd.add_argument("--repo-root", default=None)
+    service_drift_cmd.add_argument("--runtime-root", default="/var/lib/options-monitor")
+    service_drift_cmd.add_argument("--profile-path", default=None)
+    service_drift_cmd.add_argument("--confirm", action="store_true", help="write missing units/profile and enable missing timers")
     service_cleanup_cmd = service_sub.add_parser("cleanup", help="dry-run or clean old releases and selected caches")
     service_cleanup_cmd.add_argument("--repo-root", default=None)
     service_cleanup_cmd.add_argument("--releases-root", default=None)
@@ -1013,6 +1019,16 @@ def main(argv: list[str] | None = None) -> int:
             profile = load_service_profile(args.profile_path)
             data = service_status_from_profile(profile, include_status=bool(args.include_service_status))
             return _print(build_response(tool_name="service.status", ok=True, data=data))
+
+        if args.command == "service" and args.service_command == "drift":
+            data = service_drift(
+                repo_root=args.repo_root or repo_base(),
+                runtime_root=args.runtime_root,
+                profile_path=args.profile_path,
+                confirm=bool(args.confirm),
+            )
+            ok = bool(data.get("summary", {}).get("ok", True))
+            return _print(build_response(tool_name="service.drift", ok=ok, data=data))
 
         if args.command == "service" and args.service_command == "cleanup":
             data = service_cleanup(

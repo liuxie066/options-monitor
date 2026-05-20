@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 from domain.domain.multi_tick import resolve_notification_route_from_config
 from src.application.notification_delivery_route import resolve_notification_delivery_route
@@ -153,8 +153,12 @@ def build_trade_intake_receipt_message(
     payload: dict[str, Any] | None = None,
 ) -> str:
     status = str(result.get("status") or "").strip().lower()
+    reason = str(result.get("reason") or "").strip() or "-"
     applied = status == "applied"
-    title = "[已记录] 成交已写入 option_positions" if applied else "[未记录] 成交未写入 option_positions"
+    if status == "failed" and reason == "projection_verification_failed":
+        title = "[写入异常] 成交事件已写入但持仓投影未确认"
+    else:
+        title = "[已记录] 成交已写入 option_positions" if applied else "[未记录] 成交未写入 option_positions"
     account = _value("account", deal, result, payload) or "-"
     symbol = _value("symbol", deal, result, payload) or "-"
     action = _action_text(deal, result, payload)
@@ -165,7 +169,16 @@ def build_trade_intake_receipt_message(
     price = _value("price", deal, result, payload)
     trade_time = format_trade_time_beijing(_trade_time_ms(deal, result, payload))
     deal_id = _deal_id(deal, result, payload) or "-"
-    reason = str(result.get("reason") or "").strip() or "-"
+    ledger_store_raw = result.get("ledger_store")
+    ledger_store = cast(dict[str, Any], ledger_store_raw) if isinstance(ledger_store_raw, dict) else {}
+    projection_status = str(result.get("projection_status") or "").strip()
+    diagnostics_raw = result.get("diagnostics")
+    diagnostics = cast(dict[str, Any], diagnostics_raw) if isinstance(diagnostics_raw, dict) else {}
+    verification_raw = diagnostics.get("post_write_projection_verification")
+    verification = cast(dict[str, Any], verification_raw) if isinstance(verification_raw, dict) else {}
+    checks_raw = verification.get("checks")
+    checks = checks_raw if isinstance(checks_raw, list) else []
+    first_check = cast(dict[str, Any], checks[0]) if checks and isinstance(checks[0], dict) else {}
 
     lines = [
         title,
@@ -183,7 +196,18 @@ def build_trade_intake_receipt_message(
         lines.append(f"成交价：{price}")
     if trade_time:
         lines.append(f"成交时间：{trade_time}")
-    lines.append(f"状态：{'已记录' if applied else '未记录'}")
+    status_text = "已记录" if applied else "写入异常" if status == "failed" and reason == "projection_verification_failed" else "未记录"
+    lines.append(f"状态：{status_text}")
+    if projection_status:
+        lines.append(f"投影状态：{projection_status}")
+    if first_check:
+        lines.append(
+            "目标持仓："
+            f"{first_check.get('contracts_open_before')} -> {first_check.get('actual_contracts_open_after')}"
+            f" / expected {first_check.get('expected_contracts_open_after')}"
+        )
+    if ledger_store:
+        lines.append(f"账本：{ledger_store.get('sqlite_path') or '-'}")
     lines.append(f"原因：{reason}")
     lines.append(f"deal_id：{deal_id}")
     return "\n".join(lines)

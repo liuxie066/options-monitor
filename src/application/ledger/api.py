@@ -70,6 +70,7 @@ from src.application.ledger.queries import (
 from src.application.ledger.store_resolution import (
     LedgerStoreResolution,
     inspect_ledger_stores,
+    ledger_store_write_guard,
     ledger_store_payload,
     resolve_ledger_store,
 )
@@ -99,6 +100,7 @@ __all__ = [
     "list_position_lot_sync_snapshots",
     "list_position_rows",
     "ledger_store_payload",
+    "ledger_store_write_guard",
     "normalize_position_lot_fields",
     "normalize_position_lot_snapshot",
     "open_position_ledger",

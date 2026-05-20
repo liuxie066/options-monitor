@@ -85,6 +85,13 @@ def test_resolve_trade_open_apply_creates_record() -> None:
     assert repo.created == []
 
 
+def test_resolve_trade_open_rejects_missing_trade_time_before_write() -> None:
+    result = resolve_trade_deal(_deal(trade_time_ms=None), repo=FakeRepo(), state={}, apply_changes=True)
+
+    assert result.status == "unresolved"
+    assert result.reason == "missing_required_fields:trade_time_ms"
+
+
 def test_resolve_trade_open_apply_uses_ledger_preflight_with_sqlite(tmp_path: Path) -> None:
 
     repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
