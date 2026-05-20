@@ -3,6 +3,8 @@ from __future__ import annotations
 import src.application.ledger.manual_trades as ledger_manual_trades
 import src.application.ledger.repository as ledger_repository
 
+from domain.domain.ledger import ContractKey, TradeEvent
+from src.application.ledger.writer import persist_trade_event_object
 from src.application.trades.normalizer import NormalizedTradeDeal
 from src.application.trades.resolver import (
     load_close_candidate_records,
@@ -254,6 +256,78 @@ def test_resolve_trade_close_apply_persists_per_lot_target_events(tmp_path) -> N
     lots = repo.list_position_lots()
     assert all(item["fields"]["status"] == "close" for item in lots)
     assert all(item["fields"]["contracts_open"] == 0 for item in lots)
+
+
+def test_resolve_trade_close_rejects_missing_trade_time_before_write() -> None:
+    repo = FakeRepo([_record("rec1", 100, 1)])
+
+    result = resolve_trade_deal(_deal(contracts=1, trade_time_ms=None), repo=repo, state={}, apply_changes=True)
+
+    assert result.status == "unresolved"
+    assert result.reason == "missing_required_fields:trade_time_ms"
+
+
+def test_resolve_trade_close_reports_failed_when_post_write_projection_does_not_close_lot(tmp_path) -> None:
+    from domain.domain.option_position_lots import OpenPositionCommand
+
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    ledger_manual_trades.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="0700.HK",
+            option_type="put",
+            side="short",
+            contracts=2,
+            currency="HKD",
+            strike=480.0,
+            multiplier=100,
+            expiration_ymd="2026-04-29",
+            premium_per_share=3.93,
+            opened_at_ms=1000,
+        ),
+    )
+    lot_id = repo.list_position_lots()[0]["record_id"]
+
+    def _persist_bad_zero_time_close(repo, deal):  # type: ignore[no-untyped-def]
+        record_id = str((deal.raw_payload or {}).get("record_id") or "")
+        event = TradeEvent(
+            event_id=f"{deal.deal_id}:close:{record_id}",
+            event_type="close",
+            event_time_ms=0,
+            contract_key=ContractKey.from_values(
+                broker="富途",
+                account=deal.internal_account,
+                underlying_symbol=deal.symbol,
+                option_type=deal.option_type,
+                position_side="short",
+                strike=deal.strike,
+                expiration_ymd=deal.expiration_ymd,
+            ),
+            contracts=int(deal.contracts or 0),
+            price=float(deal.price or 0),
+            currency=deal.currency,
+            source="opend_push",
+            multiplier=float(deal.multiplier or 100),
+            target_lot_id=record_id,
+            raw_payload={"record_id": record_id, "target_lot_id": record_id},
+        )
+        return persist_trade_event_object(repo, event)
+
+    result = resolve_trade_deal(
+        _deal(contracts=2, trade_time_ms=5000),
+        repo=repo,
+        state={},
+        apply_changes=True,
+        persist_trade_event_fn=_persist_bad_zero_time_close,
+    )
+
+    assert result.status == "failed"
+    assert result.reason == "projection_verification_failed"
+    verification = result.diagnostics["post_write_projection_verification"]
+    assert verification["errors"][0]["code"] == "projection_unmatched_close"
+    assert repo.get_record_fields(lot_id)["contracts_open"] == 2
 
 
 def test_resolve_trade_close_rejects_insufficient_contracts() -> None:

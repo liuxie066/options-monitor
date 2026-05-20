@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 1.2.93 - 2026-05-20
+
+### Added
+- Added active ledger store write guards for `trade-events`, `option-positions`, and manual option intake write paths, including `--runtime-root` support and structured ledger-store diagnostics.
+- Added service drift diagnostics and reconciliation for rendered systemd/launchd profiles, with runtime status visibility for missing required maintenance units.
+
+### Changed
+- Hardened broker trade intake so Futu millisecond timestamps parse as Beijing time and broker trade events no longer write `trade_time_ms=0`.
+- Verified post-write close projections before reporting intake success, added ledger/projection details to trade-intake receipts, and invalidated stale option-position context caches after applied closes.
+- Included ledger store details in repair/replay/inspect/verify outputs so production operators can see which SQLite store a command actually used.
+- Reconciled missing service units during confirmed upgrades before restarting long-running services.
+
 ## 1.2.92 - 2026-05-20
 
 ### Added

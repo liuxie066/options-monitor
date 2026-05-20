@@ -12,6 +12,7 @@ from src.application.ledger.api import ledger_store_payload
 from src.application.runtime_config_paths import resolve_data_config_ref
 from src.application.runtime_trigger_context import build_trigger_context
 from src.application.service_deploy import service_status_from_profile
+from src.application.service_drift import service_drift_status
 from domain.domain.multi_tick import (
     FEISHU_APP_NOTIFICATION_PROVIDER,
     OPENCLAW_NOTIFICATION_PROVIDER,
@@ -276,7 +277,20 @@ def _merge_openclaw_profile(payload: dict[str, Any], *, base: Path) -> tuple[dic
         merged["cron_jobs"] = profile["cron_jobs"]
     if "include_cron_status" not in merged and "include_cron_status" in profile:
         merged["include_cron_status"] = profile["include_cron_status"]
-    for key in ("service_provider", "repo_root", "runtime_root", "services", "include_service_status"):
+    for key in (
+        "service_provider",
+        "repo_root",
+        "runtime_root",
+        "services",
+        "include_service_status",
+        "markets",
+        "config_paths",
+        "env_file",
+        "deploy_user",
+        "deploy_home",
+        "auto_upgrade",
+        "feishu_ws",
+    ):
         if key not in merged and key in profile:
             merged[key] = profile[key]
     return merged, {
@@ -296,6 +310,18 @@ def _service_profile_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "runtime_root": payload.get("runtime_root"),
         "services": services if isinstance(services, list) else [],
     }
+    for key in (
+        "accounts",
+        "markets",
+        "config_paths",
+        "env_file",
+        "deploy_user",
+        "deploy_home",
+        "auto_upgrade",
+        "feishu_ws",
+    ):
+        if key in payload:
+            profile[key] = payload[key]
     return profile
 
 
@@ -1237,6 +1263,33 @@ def runtime_status_tool(
         warnings.append("Service upgrade status still indicates an unrecovered runtime failure.")
         warning_codes.append("SERVICE_UPGRADE_FAILED")
 
+    service_profile_for_drift = _upgrade_service_profile(payload, runtime_root=ledger_runtime_root)
+    service_profile_for_drift_map = service_profile_for_drift if isinstance(service_profile_for_drift, dict) else {}
+    drift_profile_path = None
+    if payload.get("profile_path"):
+        drift_profile_path = Path(str(payload["profile_path"])).expanduser()
+        if not drift_profile_path.is_absolute():
+            drift_profile_path = (base / drift_profile_path).resolve()
+    service_drift = service_drift_status(
+        repo_root=service_profile_for_drift_map.get("repo_root") if service_profile_for_drift_map else None,
+        runtime_root=service_profile_for_drift_map.get("runtime_root") or ledger_runtime_root,
+        profile_path=drift_profile_path,
+        profile=service_profile_for_drift_map if service_profile_for_drift_map else None,
+    )
+    service_drift_summary_raw = service_drift.get("summary")
+    service_drift_summary: dict[str, Any] = service_drift_summary_raw if isinstance(service_drift_summary_raw, dict) else {}
+    missing_required_units = [
+        str(item)
+        for item in service_drift_summary.get("missing_required_units") or service_drift.get("missing_required_units") or []
+        if str(item).strip()
+    ]
+    if missing_required_units:
+        warnings.append("Service drift detected: required maintenance units are missing: " + ", ".join(missing_required_units) + ".")
+        warning_codes.append("SERVICE_DRIFT_REQUIRED_UNIT_MISSING")
+    elif service_drift_summary.get("status") == "warn":
+        warnings.append("Service drift detected between current release, service profile, and installed units.")
+        warning_codes.append("SERVICE_DRIFT")
+
     latest_status = None
     for candidate in (shared_last_run, legacy_last_run):
         payload_raw = candidate.get("json")
@@ -1272,6 +1325,7 @@ def runtime_status_tool(
         },
         "projection_verify": projection_verify,
         "service_upgrade": {**upgrade_status, "evaluation": upgrade_evaluation},
+        "service_drift": service_drift,
         "accounts": account_status,
         "latest_run_selection": latest_run_selection,
         "latest_run": latest_run_payload,
@@ -1317,6 +1371,9 @@ def runtime_status_tool(
     data["summary"]["service_upgrade_current_version"] = upgrade_evaluation.get("current_version")
     data["summary"]["service_upgrade_error"] = upgrade_evaluation.get("error")
     data["summary"]["service_upgrade_runtime_failed"] = bool(upgrade_evaluation.get("runtime_failed"))
+    data["summary"]["service_drift_status"] = service_drift_summary.get("status")
+    data["summary"]["service_drift_missing_units"] = service_drift.get("missing_installed_units")
+    data["summary"]["service_drift_missing_required_units"] = missing_required_units
     return data, warnings, {"config_path": mask_path(config_path)}
 
 

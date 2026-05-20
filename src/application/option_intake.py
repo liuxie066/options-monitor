@@ -32,8 +32,8 @@ from src.application.config_loader import load_config
 from src.application.parse_option_message import parse_option_message_text
 from src.application.ledger.api import (
     inspect_ledger_stores,
+    ledger_store_write_guard,
     ledger_store_payload,
-    open_position_ledger_from_data_config,
     open_position_ledger_from_runtime_config,
     resolve_ledger_store,
     resolve_position_data_config_path,
@@ -229,22 +229,42 @@ def _target_position_side_for_close(parsed_fields: dict[str, Any], raw_text: str
     return None
 
 
-def _print_ledger_target(*, data_config: Path, repo: Any | None, config_path: Path | None) -> bool:
+def _print_ledger_target(*, data_config: Path, repo: Any | None, config_path: Path | None, runtime_root: str | None = None) -> bool:
     store = (
         ledger_store_payload(data_config, repo)
         if repo is not None
-        else resolve_ledger_store(data_config, config_path=config_path).to_dict()
+        else resolve_ledger_store(data_config, config_path=config_path, runtime_root=runtime_root).to_dict()
     )
     sqlite_path = str(store.get("sqlite_path") or "")
     runtime_root = str(store.get("runtime_root") or "")
     runtime_root_source = str(store.get("runtime_root_source") or "")
     print(f"[LEDGER] sqlite={sqlite_path} runtime_root={runtime_root} source={runtime_root_source}")
-    inspection = inspect_ledger_stores(data_config, config_path=config_path)
-    warnings = [str(item) for item in (inspection.get("warnings") or []) if str(item)]
+    inspection = inspect_ledger_stores(data_config, config_path=config_path, runtime_root=runtime_root)
+    raw_warnings = inspection.get("warnings")
+    warnings = [str(item) for item in raw_warnings if str(item)] if isinstance(raw_warnings, list) else []
     for warning in warnings:
         print(f"[LEDGER_WARN] {warning}")
-    summary = inspection.get("summary") if isinstance(inspection.get("summary"), dict) else {}
+    raw_summary = inspection.get("summary")
+    summary: dict[str, Any] = raw_summary if isinstance(raw_summary, dict) else {}
     return bool(summary.get("multiple_populated") or summary.get("active_empty_but_other_populated"))
+
+
+def _print_ledger_guard_failure(guard: dict[str, Any]) -> None:
+    raw_errors = guard.get("errors")
+    errors = raw_errors if isinstance(raw_errors, list) else []
+    for error in errors:
+        print(f"[LEDGER_FAIL] {error}")
+    raw_active = guard.get("active")
+    active: dict[str, Any] = raw_active if isinstance(raw_active, dict) else {}
+    print(
+        f"[LEDGER] sqlite={active.get('sqlite_path') or '-'} "
+        f"runtime_root={active.get('runtime_root') or '-'} "
+        f"source={active.get('runtime_root_source') or '-'}"
+    )
+    raw_remediation = guard.get("remediation")
+    remediation = raw_remediation if isinstance(raw_remediation, list) else []
+    for item in remediation:
+        print(f"[REMEDIATION] {item}")
 
 
 def _copy_with_beijing_time_fields(fields: dict[str, Any], *, keys: tuple[str, ...]) -> dict[str, Any]:
@@ -275,6 +295,7 @@ def main() -> int:
     ap.add_argument('--accounts', nargs='*', default=None, help='optional account labels to recognize')
     ap.add_argument('--market', default='富途')
     ap.add_argument('--data-config', default=None, help='portfolio data config path; auto-resolves when omitted')
+    ap.add_argument('--runtime-root', default=None, help='runtime root for active ledger store, e.g. /var/lib/options-monitor')
     ap.add_argument('--action', choices=['open', 'close'], default=None, help='explicit action; /om command can also provide open/close')
     ap.add_argument('--account', default=None, help='override parsed account, e.g. lx/sy')
     ap.add_argument('--record-id', default=None, help='optional for close/buy-close; omitted close uses strict unique auto matching')
@@ -340,10 +361,17 @@ def main() -> int:
         config_path=cfg_path,
     )
     if args.dry_run or args.apply or action == "close":
-        diverged_store = _print_ledger_target(data_config=data_config_path, repo=None, config_path=cfg_path)
-        if args.apply and diverged_store:
-            print("[LEDGER_FAIL] divergent populated ledger stores detected; aborting apply")
-            return 2
+        _print_ledger_target(
+            data_config=data_config_path,
+            repo=None,
+            config_path=cfg_path,
+            runtime_root=args.runtime_root,
+        )
+        if args.apply:
+            guard = ledger_store_write_guard(data_config_path, config_path=cfg_path, runtime_root=args.runtime_root)
+            if not bool(guard.get("ok")):
+                _print_ledger_guard_failure(guard)
+                return 2
 
     need_repo = action == 'close' or bool(args.apply)
     repo = None
@@ -354,9 +382,15 @@ def main() -> int:
                 cfg=runtime_config,
                 data_config=args.data_config,
                 config_path=cfg_path,
+                runtime_root=args.runtime_root,
             )
         else:
-            _resolved_data_config, repo = open_position_ledger_from_data_config(base=base, data_config=args.data_config)
+            _resolved_data_config, repo = open_position_ledger_from_runtime_config(
+                base=base,
+                cfg=None,
+                data_config=args.data_config,
+                runtime_root=args.runtime_root,
+            )
 
     if action == 'close':
         target_position_side = intent.target_position_side or _target_position_side_for_close(p, text)
@@ -429,9 +463,12 @@ def main() -> int:
             print('[DRY_RUN] create fields:')
             print(json.dumps(_copy_with_beijing_time_fields(out['fields'], keys=("opened_at", "last_action_at")), ensure_ascii=False, indent=2))
             return 0
-        fields = out.get("fields") if isinstance(out.get("fields"), dict) else {}
+        raw_fields_out = out.get("fields")
+        fields: dict[str, Any] = raw_fields_out if isinstance(raw_fields_out, dict) else {}
         trade_time_ms = _first_time_ms(intent.trade_time_ms, fields.get("opened_at"), fields.get("last_action_at"))
-        print(f"[DONE] created event_id={out['result'].get('event_id')}{_format_done_trade_time(trade_time_ms)}")
+        raw_result = out.get("result")
+        result: dict[str, Any] = raw_result if isinstance(raw_result, dict) else {}
+        print(f"[DONE] created event_id={result.get('event_id')}{_format_done_trade_time(trade_time_ms)}")
         return 0
 
 

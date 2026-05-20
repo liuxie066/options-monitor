@@ -39,6 +39,7 @@ def format_runtime_status_summary(envelope: dict[str, Any]) -> str:
     prefetch = _dict(data.get("required_data_prefetch"))
     scanned_prefetch = _dict(data.get("latest_scanned_run_required_data_prefetch"))
     service = _dict(data.get("service_upgrade"))
+    service_drift = _dict(data.get("service_drift"))
     warnings = _list(envelope.get("warnings"))
     ledger_warnings = _list(ledger.get("warnings"))
 
@@ -59,6 +60,7 @@ def format_runtime_status_summary(envelope: dict[str, Any]) -> str:
         _prefetch_line("prefetch", prefetch),
         _prefetch_line("prefetch scanned", scanned_prefetch),
         _service_line(service),
+        _service_drift_line(service_drift),
     ]
 
     error = _dict(envelope.get("error"))
@@ -237,6 +239,16 @@ def _service_line(service: dict[str, Any]) -> str:
     status = latest.get("status") if latest else service.get("status")
     target = latest.get("target_version") if latest else service.get("target_version")
     return f"service: upgrade={_value(status)} target={_value(target)}"
+
+
+def _service_drift_line(drift: dict[str, Any]) -> str:
+    summary = _dict(drift.get("summary"))
+    return (
+        "service drift: "
+        f"status={_value(summary.get('status'))} "
+        f"missing={_int_value(summary.get('missing_installed_count'))} "
+        f"required_missing={_csv(summary.get('missing_required_units'))}"
+    )
 
 
 def _error_line(error: dict[str, Any]) -> str:

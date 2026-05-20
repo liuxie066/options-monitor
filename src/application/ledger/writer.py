@@ -219,7 +219,7 @@ def _trade_event_from_normalized_deal(deal: Any) -> TradeEvent:
     multiplier_source = str(getattr(deal, "multiplier_source", "") or "").strip()
     if multiplier_source:
         raw_payload.setdefault("multiplier_source", multiplier_source)
-    event_time_ms = int(getattr(deal, "trade_time_ms", None) or 0)
+    event_time_ms = _required_broker_trade_time_ms(deal)
     contract_key = ContractKey.from_values(
         broker=getattr(deal, "broker", None) or "富途",
         account=getattr(deal, "internal_account", None) or "",
@@ -252,6 +252,22 @@ def _event_type_from_position_effect(position_effect: str) -> str:
     if position_effect in {"adjust", "void"}:
         return position_effect
     return position_effect
+
+
+def _required_broker_trade_time_ms(deal: Any) -> int:
+    raw = getattr(deal, "trade_time_ms", None)
+    if raw in (None, ""):
+        value = 0
+    else:
+        try:
+            value = int(raw)
+        except Exception:
+            value = 0
+    if value <= 0:
+        deal_id = str(getattr(deal, "deal_id", "") or "").strip()
+        suffix = f" deal_id={deal_id}" if deal_id else ""
+        raise ValueError(f"broker trade event requires positive trade_time_ms; refusing event_time_ms=0{suffix}")
+    return value
 
 
 def _position_side_from_trade(*, effect: str, trade_side: str) -> str:

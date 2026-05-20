@@ -113,6 +113,7 @@ def _required_open_missing(deal: NormalizedTradeDeal) -> list[str]:
         "multiplier": deal.multiplier,
         "expiration_ymd": deal.expiration_ymd,
         "currency": deal.currency,
+        "trade_time_ms": deal.trade_time_ms,
     }
     return [k for k, v in src.items() if v in (None, "")]
 
@@ -147,6 +148,7 @@ def _required_close_missing(deal: NormalizedTradeDeal) -> list[str]:
         "price": deal.price,
         "strike": deal.strike,
         "expiration_ymd": deal.expiration_ymd,
+        "trade_time_ms": deal.trade_time_ms,
     }
     return [k for k, v in src.items() if v in (None, "")]
 
@@ -275,6 +277,16 @@ def resolve_trade_deal(
             persist_trade_event_fn=persist_fn,
             close_target_resolution=close_target_resolution,
         )
+        verification = _verify_applied_close_projection(repo=repo, operations=operations)
+        if not verification["ok"]:
+            return _failure(
+                status="failed",
+                action="close",
+                reason="projection_verification_failed",
+                deal=deal,
+                operations=operations,
+                diagnostics={**close_target_diagnostics, "post_write_projection_verification": verification},
+            )
         return IntakeResolution(
             status="applied",
             action="close",
@@ -282,7 +294,7 @@ def resolve_trade_deal(
             deal_id=deal.deal_id,
             account=deal.internal_account,
             operations=operations,
-            diagnostics=close_target_diagnostics,
+            diagnostics={**close_target_diagnostics, "post_write_projection_verification": verification},
         )
 
     operations = preview_trade_close(
@@ -300,3 +312,82 @@ def resolve_trade_deal(
         operations=operations,
         diagnostics=close_target_diagnostics,
     )
+
+
+def _verify_applied_close_projection(*, repo: OptionPositionsRepoLike, operations: list[BrokerTradeOperation]) -> dict[str, Any]:
+    errors: list[dict[str, Any]] = []
+    checks: list[dict[str, Any]] = []
+    for operation in operations:
+        payload = operation.to_payload()
+        record_id = str(payload.get("record_id") or "").strip()
+        raw_result = payload.get("result")
+        result: dict[str, Any] = raw_result if isinstance(raw_result, dict) else {}
+        raw_ledger_preflight = payload.get("ledger_preflight")
+        ledger_preflight: dict[str, Any] = raw_ledger_preflight if isinstance(raw_ledger_preflight, dict) else {}
+
+        explicit_unmatched = _safe_int(result.get("unmatched_explicit_close_count"))
+        heuristic_unmatched = _safe_int(result.get("unmatched_heuristic_close_count"))
+        if explicit_unmatched or heuristic_unmatched:
+            errors.append(
+                {
+                    "record_id": record_id or None,
+                    "code": "projection_unmatched_close",
+                    "unmatched_explicit_close_count": explicit_unmatched,
+                    "unmatched_heuristic_close_count": heuristic_unmatched,
+                    "projection_diagnostics": result.get("projection_diagnostics") or [],
+                }
+            )
+        projection_errors = [
+            dict(item)
+            for item in list(result.get("projection_diagnostics") or [])
+            if isinstance(item, dict) and str(item.get("severity") or "").strip().lower() == "error"
+        ]
+        if projection_errors:
+            errors.append(
+                {
+                    "record_id": record_id or None,
+                    "code": "projection_error",
+                    "projection_diagnostics": projection_errors,
+                }
+            )
+
+        expected_after = ledger_preflight.get("contracts_open_after")
+        has_projection_result = result.get("position_lot_count") is not None or "projection_diagnostic_count" in result
+        if record_id and expected_after is not None and has_projection_result:
+            try:
+                fields = repo.get_record_fields(record_id)
+                actual_after = _contracts_open(fields)
+            except Exception as exc:
+                errors.append(
+                    {
+                        "record_id": record_id,
+                        "code": "target_lot_read_failed",
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+                continue
+            check = {
+                "record_id": record_id,
+                "contracts_open_before": ledger_preflight.get("contracts_open_before"),
+                "contracts_to_close": ledger_preflight.get("contracts_to_close"),
+                "expected_contracts_open_after": _safe_int(expected_after),
+                "actual_contracts_open_after": actual_after,
+            }
+            checks.append(check)
+            if actual_after != _safe_int(expected_after):
+                errors.append({"record_id": record_id, "code": "target_lot_contracts_open_mismatch", **check})
+
+    return {"ok": not errors, "checks": checks, "errors": errors}
+
+
+def _safe_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except Exception:
+        return 0
+
+
+def _contracts_open(fields: dict[str, Any]) -> int:
+    if fields.get("contracts_open") not in (None, ""):
+        return _safe_int(fields.get("contracts_open"))
+    return _safe_int(fields.get("contracts"))

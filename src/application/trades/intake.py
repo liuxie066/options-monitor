@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Protocol, cast
 
+from src.application.positions.context_cache import invalidate_option_positions_context_cache
 from src.infrastructure.io_utils import utc_now
 
 
@@ -77,6 +78,91 @@ def _record_failed_deal_state(
     )
     write_trade_intake_state_fn(state_path, state)
     return state
+
+
+def _ledger_store_from_repo(repo: Any) -> dict[str, Any] | None:
+    store = getattr(repo, "ledger_store", None)
+    to_dict = getattr(store, "to_dict", None)
+    if callable(to_dict):
+        payload = to_dict()
+        return dict(payload) if isinstance(payload, dict) else None
+    return None
+
+
+def _projection_status(result_dict: dict[str, Any]) -> str:
+    status = str(result_dict.get("status") or "").strip().lower()
+    reason = str(result_dict.get("reason") or "").strip().lower()
+    if status == "applied":
+        return "recorded_and_projected"
+    if status == "failed" and reason == "projection_verification_failed":
+        return "recorded_needs_review"
+    return "not_recorded"
+
+
+def _attach_projection_check_fields(out: dict[str, Any]) -> None:
+    diagnostics_raw = out.get("diagnostics")
+    diagnostics = cast(dict[str, Any], diagnostics_raw) if isinstance(diagnostics_raw, dict) else {}
+    verification_raw = diagnostics.get("post_write_projection_verification")
+    verification = cast(dict[str, Any], verification_raw) if isinstance(verification_raw, dict) else {}
+    checks_raw = verification.get("checks")
+    checks = checks_raw if isinstance(checks_raw, list) else []
+    first_check = cast(dict[str, Any], checks[0]) if checks and isinstance(checks[0], dict) else {}
+    if "projection_diagnostic_count" in verification:
+        out["projection_diagnostic_count"] = verification.get("projection_diagnostic_count")
+    else:
+        operations_raw = out.get("operations")
+        operations = operations_raw if isinstance(operations_raw, list) else []
+        first_operation = cast(dict[str, Any], operations[0]) if operations and isinstance(operations[0], dict) else {}
+        result_raw = first_operation.get("result")
+        result = cast(dict[str, Any], result_raw) if isinstance(result_raw, dict) else {}
+        if "projection_diagnostic_count" in result:
+            out["projection_diagnostic_count"] = result.get("projection_diagnostic_count")
+    if not first_check:
+        return
+    out["target_lot_before"] = {
+        "record_id": first_check.get("record_id"),
+        "contracts_open": first_check.get("contracts_open_before"),
+    }
+    out["target_lot_after"] = {
+        "record_id": first_check.get("record_id"),
+        "contracts_open": first_check.get("actual_contracts_open_after"),
+    }
+    out["contracts_open_before"] = first_check.get("contracts_open_before")
+    out["contracts_open_after"] = first_check.get("actual_contracts_open_after")
+
+
+def _attach_runtime_write_diagnostics(
+    *,
+    result_dict: dict[str, Any],
+    repo: Any,
+    apply_changes: bool,
+) -> dict[str, Any]:
+    out = dict(result_dict)
+    store = _ledger_store_from_repo(repo)
+    if store is not None:
+        out["ledger_store"] = store
+    out["projection_status"] = _projection_status(out)
+    _attach_projection_check_fields(out)
+    if not apply_changes:
+        return out
+    if str(out.get("status") or "").strip().lower() != "applied":
+        return out
+    if str(out.get("action") or "").strip().lower() != "close":
+        return out
+    runtime_root = str((store or {}).get("runtime_root") or "").strip()
+    if not runtime_root:
+        return out
+    try:
+        out["context_invalidation"] = invalidate_option_positions_context_cache(
+            runtime_root=runtime_root,
+            account=str(out.get("account") or "").strip().lower() or None,
+        )
+    except Exception as exc:
+        out["context_invalidation"] = {
+            "ok": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    return out
 
 
 def _attach_receipt_state(
@@ -315,6 +401,11 @@ def process_trade_payload(
     try:
         result = resolve_trade_deal_fn(deal, repo=repo, state=state, apply_changes=apply_changes)
         result_dict = result.to_dict()
+        result_dict = _attach_runtime_write_diagnostics(
+            result_dict=result_dict,
+            repo=repo,
+            apply_changes=apply_changes,
+        )
         append_trade_intake_audit_fn(audit_path, build_trade_intake_audit_event("resolved", deal=deal, result=result_dict))
     except Exception as exc:
         result_dict = _exception_result_dict(exc, payload=effective_payload, deal=deal, stage="resolve")

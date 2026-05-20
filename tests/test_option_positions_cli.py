@@ -30,8 +30,8 @@ def test_option_positions_cli_events_json(monkeypatch, tmp_path: Path, capsys) -
     import src.interfaces.cli.option_positions as cli_mod
     from domain.domain.option_position_lots import OpenPositionCommand
 
-    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "legacy" / "option_positions.sqlite3")
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "output_shared" / "state" / "option_positions.sqlite3")
     repo.data_config_path = data_config  # type: ignore[attr-defined]
     ledger_manual_trades.persist_manual_open_event(
         repo,
@@ -71,8 +71,8 @@ def test_option_positions_cli_rebuild_reports_summary(monkeypatch, tmp_path: Pat
     import src.interfaces.cli.option_positions as cli_mod
     from domain.domain.option_position_lots import OpenPositionCommand
 
-    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "legacy" / "option_positions.sqlite3")
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "output_shared" / "state" / "option_positions.sqlite3")
     repo.data_config_path = data_config  # type: ignore[attr-defined]
     ledger_manual_trades.persist_manual_open_event(
         repo,
@@ -174,8 +174,8 @@ def test_option_positions_cli_inspect_reports_projection_state(monkeypatch, tmp_
     import src.interfaces.cli.option_positions as cli_mod
     from domain.domain.option_position_lots import OpenPositionCommand
 
-    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "legacy" / "option_positions.sqlite3")
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "output_shared" / "state" / "option_positions.sqlite3")
     repo.data_config_path = data_config  # type: ignore[attr-defined]
     ledger_manual_trades.persist_manual_open_event(
         repo,
@@ -214,7 +214,7 @@ def test_option_positions_cli_inspect_reports_projection_state(monkeypatch, tmp_
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["matched_record_ids"] == [lot["record_id"]]
-    assert payload["ledger_store"]["sqlite_path"] == str((tmp_path / "option_positions.sqlite3").resolve())
+    assert payload["ledger_store"]["sqlite_path"] == str((tmp_path / "output_shared" / "state" / "option_positions.sqlite3").resolve())
     assert payload["ledger_store"]["trade_event_count"] == 1
     assert payload["ledger_store"]["position_lot_count"] == 1
     assert payload["projection_verify_checkpoint_id"] is None
@@ -229,8 +229,8 @@ def test_option_positions_cli_inspect_reports_orphan_close_event_diagnostics(mon
     import src.interfaces.cli.option_positions as cli_mod
     from tests.ledger_legacy_helpers import LegacyTradeEvent as TradeEvent
 
-    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "legacy" / "option_positions.sqlite3")
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "output_shared" / "state" / "option_positions.sqlite3")
     repo.data_config_path = data_config  # type: ignore[attr-defined]
     ledger_writer.persist_trade_event_object(
         repo,
@@ -707,8 +707,8 @@ def test_option_positions_cli_void_event_reports_result(monkeypatch, tmp_path: P
     import src.interfaces.cli.option_positions as cli_mod
     from domain.domain.option_position_lots import OpenPositionCommand
 
-    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "option_positions.sqlite3")
-    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "option_positions.sqlite3")
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "legacy" / "option_positions.sqlite3")
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "output_shared" / "state" / "option_positions.sqlite3")
     repo.data_config_path = data_config  # type: ignore[attr-defined]
     open_result = ledger_manual_trades.persist_manual_open_event(
         repo,

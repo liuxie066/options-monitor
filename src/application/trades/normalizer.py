@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from domain.domain.ledger.position_fields import normalize_currency, normalize_option_type
 from src.application.multiplier_cache import resolve_multiplier_with_source_and_diagnostics
@@ -88,6 +89,9 @@ def _normalize_expiration(value: Any) -> str | None:
     return normalize_contract_expiration(value)
 
 
+_FUTU_TRADE_TIME_ZONE = ZoneInfo("Asia/Shanghai")
+
+
 def _normalize_trade_time_ms(value: Any) -> int | None:
     if value in (None, ""):
         return None
@@ -99,9 +103,22 @@ def _normalize_trade_time_ms(value: Any) -> int | None:
     raw = str(value).strip()
     if raw.isdigit():
         return _normalize_trade_time_ms(int(raw))
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S"):
+    iso_raw = raw.replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(iso_raw)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=_FUTU_TRADE_TIME_ZONE)
+        return int(dt.timestamp() * 1000)
+    except ValueError:
+        pass
+    for fmt in (
+        "%Y-%m-%d %H:%M:%S.%f",
+        "%Y/%m/%d %H:%M:%S.%f",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y/%m/%d %H:%M:%S",
+    ):
         try:
-            dt = datetime.strptime(raw, fmt).replace(tzinfo=timezone.utc)
+            dt = datetime.strptime(raw, fmt).replace(tzinfo=_FUTU_TRADE_TIME_ZONE)
             return int(dt.timestamp() * 1000)
         except ValueError:
             continue

@@ -3,11 +3,13 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from src.application.ledger.api import (
+    ledger_store_write_guard,
     ledger_store_payload,
-    open_position_ledger_from_data_config as resolve_option_positions_repo,
+    open_position_ledger_from_runtime_config as resolve_option_positions_repo,
+    resolve_position_data_config_path,
 )
 from src.application.trades.review import (
     apply_repair_trade_event,
@@ -46,9 +48,49 @@ def _repair_overrides(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def _runtime_root_arg(args: argparse.Namespace) -> str | None:
+    return str(getattr(args, "runtime_root", "") or "").strip() or None
+
+
+def _print_guard_failure(guard: dict[str, object], *, as_json: bool) -> None:
+    payload = {"ok": False, "error": "ledger_store_guard_failed", "ledger_store_guard": guard}
+    if as_json:
+        _print_json(payload)
+        return
+    raw_errors = guard.get("errors")
+    errors = raw_errors if isinstance(raw_errors, list) else []
+    for error in errors:
+        print(f"[LEDGER_FAIL] {error}")
+    raw_active = guard.get("active")
+    active = cast(dict[str, object], raw_active) if isinstance(raw_active, dict) else {}
+    print(
+        f"[LEDGER] sqlite={active.get('sqlite_path') or '-'} "
+        f"runtime_root={active.get('runtime_root') or '-'} "
+        f"source={active.get('runtime_root_source') or '-'}"
+    )
+    raw_remediation = guard.get("remediation")
+    remediation = raw_remediation if isinstance(raw_remediation, list) else []
+    for item in remediation:
+        print(f"[REMEDIATION] {item}")
+
+
+def _guard_write(
+    *,
+    data_config: Path,
+    args: argparse.Namespace,
+    as_json: bool,
+) -> dict[str, object] | None:
+    guard = ledger_store_write_guard(data_config, runtime_root=_runtime_root_arg(args))
+    if bool(guard.get("ok")):
+        return guard
+    _print_guard_failure(guard, as_json=as_json)
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Review, repair, replay, and void trade events")
     parser.add_argument("--data-config", default=None, help="portfolio data config path; auto-resolves when omitted")
+    parser.add_argument("--runtime-root", default=None, help="runtime root for active ledger store, e.g. /var/lib/options-monitor")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p_list = sub.add_parser("list", help="list trade events with review status")
@@ -63,11 +105,13 @@ def main(argv: list[str] | None = None) -> int:
     p_show.add_argument("--format", choices=["text", "json"], default="json")
 
     p_replay = sub.add_parser("replay", help="replay trade_events into position_lots projection")
+    p_replay.add_argument("--runtime-root", default=None, help="runtime root for active ledger store")
     p_replay.add_argument("--apply", action="store_true", help="persist the replayed position_lots projection")
     p_replay.add_argument("--dry-run", action="store_true", help="preview replay result without writing")
     p_replay.add_argument("--format", choices=["text", "json"], default="text")
 
     p_void = sub.add_parser("void", help="append a void event for an existing trade event")
+    p_void.add_argument("--runtime-root", default=None, help="runtime root for active ledger store")
     p_void.add_argument("event_id")
     p_void.add_argument("--reason", default="manual_void")
     p_void.add_argument("--apply", action="store_true")
@@ -75,6 +119,7 @@ def main(argv: list[str] | None = None) -> int:
     p_void.add_argument("--format", choices=["text", "json"], default="text")
 
     p_repair = sub.add_parser("repair", help="void an event and append a corrected replacement event")
+    p_repair.add_argument("--runtime-root", default=None, help="runtime root for active ledger store")
     p_repair.add_argument("event_id")
     p_repair.add_argument("--reason", default="manual_repair")
     p_repair.add_argument("--broker", default=None)
@@ -101,7 +146,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd in {"replay", "void", "repair"} and bool(getattr(args, "apply", False)) and bool(getattr(args, "dry_run", False)):
         raise SystemExit("--apply and --dry-run are mutually exclusive")
     base = Path(__file__).resolve().parents[3]
-    _data_config, repo = resolve_option_positions_repo(base=base, data_config=args.data_config)
+    data_config_path = resolve_position_data_config_path(base=base, data_config=args.data_config)
+    if args.cmd in {"replay", "void", "repair"} and bool(getattr(args, "apply", False)):
+        guard = _guard_write(
+            data_config=data_config_path,
+            args=args,
+            as_json=(str(getattr(args, "format", "") or "") == "json"),
+        )
+        if guard is None:
+            return 2
+    _data_config, repo = resolve_option_positions_repo(base=base, cfg=None, data_config=args.data_config, runtime_root=_runtime_root_arg(args))
     ledger_store = ledger_store_payload(_data_config, repo)
 
     if args.cmd == "list":
@@ -136,6 +190,7 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as exc:
             print(str(exc))
             return 2
+        payload["ledger_store"] = ledger_store
         if args.format == "json":
             _print_json(payload)
             return 0
@@ -169,6 +224,7 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as exc:
             print(str(exc))
             return 2
+        payload["ledger_store"] = ledger_store
         if args.format == "json":
             _print_json(payload)
             return 0
@@ -189,6 +245,7 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as exc:
             print(str(exc))
             return 2
+        payload["ledger_store"] = ledger_store
         if args.format == "json":
             _print_json(payload)
             return 0

@@ -14,7 +14,7 @@ import src.application.ledger.interventions as ledger_interventions
 import src.application.ledger.manual_trades as ledger_manual_trades
 from src.application.ledger.position_records import PositionLotRecord
 import src.application.ledger.repository as ledger_repository
-from src.application.ledger.store_resolution import resolve_ledger_store
+from src.application.ledger.store_resolution import ledger_store_write_guard, resolve_ledger_store
 import src.application.ledger.writer as ledger_writer
 
 BASE = Path(__file__).resolve().parents[1]
@@ -89,6 +89,47 @@ def test_resolve_ledger_store_ignores_legacy_sqlite_path_for_nonstandard_test_co
     assert resolution.sqlite_path_source == "runtime_root"
     assert resolution.legacy_sqlite_path == legacy_db.resolve()
     assert any("ignored" in item for item in resolution.warnings)
+
+
+def test_ledger_store_write_guard_fails_when_active_empty_but_systemd_default_populated(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from domain.domain.option_position_lots import OpenPositionCommand
+    import src.application.ledger.store_resolution as store_resolution
+
+    data_config = tmp_path / "release" / "portfolio.runtime.json"
+    data_config.parent.mkdir(parents=True, exist_ok=True)
+    data_config.write_text("{}", encoding="utf-8")
+    systemd_root = tmp_path / "var-lib-options-monitor"
+    monkeypatch.setattr(store_resolution, "REPO_BASE", data_config.parent)
+    monkeypatch.setattr(store_resolution, "SYSTEMD_DEFAULT_RUNTIME_ROOT", systemd_root)
+    repo = ledger_repository.SQLiteOptionPositionsRepository(
+        systemd_root / "output_shared" / "state" / "option_positions.sqlite3"
+    )
+    ledger_manual_trades.persist_manual_open_event(
+        repo,
+        OpenPositionCommand(
+            broker="富途",
+            account="lx",
+            symbol="0700.HK",
+            option_type="call",
+            side="short",
+            contracts=2,
+            currency="HKD",
+            strike=510.0,
+            multiplier=100,
+            expiration_ymd="2026-05-28",
+            premium_per_share=1.2,
+            opened_at_ms=1000,
+        ),
+    )
+
+    guard = ledger_store_write_guard(data_config)
+
+    assert guard["ok"] is False
+    assert any("active ledger SQLite is empty" in item for item in guard["errors"])
+    assert guard["summary"]["active_empty_but_other_populated"] is True
 
 
 def test_load_option_positions_repo_ignores_retired_feishu_bootstrap_opt_in(tmp_path: Path) -> None:

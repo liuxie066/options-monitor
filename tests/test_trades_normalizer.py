@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 from src.application.trades.normalizer import normalize_trade_deal
 
@@ -41,6 +43,30 @@ def test_normalize_trade_deal_maps_core_fields() -> None:
     assert deal.expiration_ymd == "2026-04-29"
     assert deal.currency == "HKD"
     assert isinstance(deal.trade_time_ms, int)
+
+
+def test_normalize_trade_deal_parses_futu_millisecond_trade_time_as_beijing() -> None:
+    deal = normalize_trade_deal(
+        {
+            "deal_id": "deal-ms-time",
+            "trd_acc_id": "REAL_1",
+            "code": "0700.HK",
+            "option_type": "CALL",
+            "side": "BUY",
+            "position_effect": "CLOSE",
+            "qty": 2,
+            "price": "1.2",
+            "strike": "510",
+            "multiplier": 100,
+            "expiration": "20260528",
+            "currency": "HKD",
+            "create_time": "2026-05-20 15:05:47.577",
+        },
+        futu_account_mapping={"REAL_1": "lx"},
+    )
+
+    expected = int(datetime(2026, 5, 20, 15, 5, 47, 577000, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp() * 1000)
+    assert deal.trade_time_ms == expected
 
 
 def test_normalize_trade_deal_keeps_unknown_position_effect_when_missing() -> None:

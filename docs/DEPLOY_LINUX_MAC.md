@@ -125,6 +125,8 @@ cd "$REPO"
 
 自动升级切换 release 前，会恢复新 release 缺失的 `configs/user.common.json`、`configs/user.hk.json`、`configs/user.us.json`。来源包括 runtime config metadata 里的 source path、`<runtime_root>/configs/`、当前 release，以及 `releases/` 下最近一个包含完整 overlay 的旧 release。随后会根据 profile 里的 config path 执行 `./om config build` / `./om config validate`；切换 symlink 后还会再用 current symlink 重建/校验一次。如果仍缺少必要 overlay 或 rebuild/validate 失败，升级会记录 remediation 并阻止未切换场景继续切换，避免 tick 进入 runtime config stale 状态。
 
+升级切换 release 后还会做一次 service drift reconcile：以当前 release 的 `service render` 结果为期望状态，对比 `$RUNTIME/service.profile.json` 和 systemd unit 文件。缺失 unit 会被写入 `/etc/systemd/system/`，缺失 timer 会执行 `systemctl enable --now`；长期运行的新增 service 不会被自动启用或重启。这样新版本增加 `options-monitor-projection-verify.timer` 这类维护任务时，旧服务器不会因为旧 profile 而漏装。
+
 传入 `--deploy-user "$DEPLOY_USER"` 后，渲染出的 systemd unit 会包含：
 
 ```ini
@@ -226,6 +228,7 @@ sudo systemctl enable --now options-monitor-upgrade.timer
 
 ```bash
 ./om service status --profile-path "$RUNTIME/service.profile.json" --include-service-status
+./om service drift --runtime-root "$RUNTIME"
 ./om-agent run --tool runtime_status --input-json "{\"profile_path\":\"$RUNTIME/service.profile.json\"}"
 ./om option-positions store inspect --config config.us.json
 ./om option-positions --data-config "$RUNTIME/portfolio.runtime.json" verify-projection --mode full
