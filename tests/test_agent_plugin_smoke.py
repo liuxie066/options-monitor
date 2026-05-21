@@ -1315,6 +1315,71 @@ def _call_runtime_status_for_upgrade(tmp_path: Path, cfg_path: Path, cfg: dict[s
     )
 
 
+def test_runtime_status_auto_loads_runtime_service_profile_paths(tmp_path: Path) -> None:
+    from src.application.agent_tool_openclaw import runtime_status_tool
+
+    release_root = tmp_path / "release"
+    runtime_root = tmp_path / "runtime"
+    release_root.mkdir()
+    runtime_root.mkdir()
+    (release_root / "VERSION").write_text("1.2.82\n", encoding="utf-8")
+
+    cfg_path = runtime_root / "config.us.json"
+    data_config = runtime_root / "portfolio.runtime.json"
+    data_config.write_text("{}", encoding="utf-8")
+    cfg = {
+        "accounts": ["user1"],
+        "portfolio": {"data_config": str(data_config)},
+        "notifications": {"provider": "openclaw", "target": "route"},
+    }
+    cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
+
+    shared_state_dir = runtime_root / "output_shared" / "state"
+    report_dir = runtime_root / "output" / "reports"
+    shared_state_dir.mkdir(parents=True)
+    report_dir.mkdir(parents=True)
+    (shared_state_dir / "last_run.json").write_text(json.dumps({"status": "ok"}), encoding="utf-8")
+    (report_dir / "symbols_notification.txt").write_text("ready\n", encoding="utf-8")
+    (runtime_root / "service.profile.json").write_text(
+        json.dumps(
+            {
+                "service_provider": "systemd",
+                "runtime_root": str(runtime_root),
+                "accounts": ["user1"],
+                "paths": {
+                    "report_dir": str(report_dir),
+                    "state_dir": str(runtime_root / "output" / "state"),
+                    "shared_state_dir": str(shared_state_dir),
+                    "accounts_root": str(runtime_root / "output_accounts"),
+                    "runs_root": str(runtime_root / "output_runs"),
+                },
+                "config_paths": {"us": str(cfg_path)},
+                "services": [{"name": "options-monitor-feishu-ws.service"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    data, warnings, _meta = runtime_status_tool(
+        {"config_path": str(cfg_path)},
+        load_runtime_config=lambda **_kwargs: (cfg_path, cfg),
+        normalize_accounts=lambda value, fallback=(): list(value or fallback),
+        accounts_from_config=lambda loaded: list(loaded.get("accounts") or []),
+        read_json_object_or_empty=lambda path: json.loads(path.read_text(encoding="utf-8")) if path.exists() else {},
+        repo_base=lambda: release_root,
+        mask_path=lambda path: str(path),
+    )
+
+    assert data["shared"]["last_run"]["exists"] is True
+    assert data["shared"]["notification"]["exists"] is True
+    assert str(data["shared"]["last_run"]["path"]).endswith("last_run.json")
+    assert str(data["shared"]["notification"]["path"]).endswith("symbols_notification.txt")
+    assert data["openclaw_profile"]["loaded"] is True
+    assert data["service_profile"]["loaded"] is True
+    assert "No last_run.json found under output_shared/state or output/state." not in warnings
+    assert "No symbols_notification.txt found under output/reports or output_accounts/<account>/reports." not in warnings
+
+
 def test_runtime_status_marks_remediated_upgrade_failure(monkeypatch, tmp_path: Path) -> None:
     import src.application.agent_tool_openclaw as openclaw
 
@@ -1384,6 +1449,20 @@ def test_runtime_status_treats_older_failed_upgrade_as_historical(tmp_path: Path
     assert "SERVICE_DRIFT_REQUIRED_UNIT_MISSING" in data["summary"]["warning_codes"]
     assert "Service upgrade status file contains a historical failure for a non-current target version." in warnings
     assert "Service drift detected: required maintenance units are missing: options-monitor-projection-verify.timer." in warnings
+
+
+def test_runtime_status_keeps_newer_failed_upgrade_as_runtime_failure(tmp_path: Path) -> None:
+    fixture = _runtime_status_upgrade_fixture(tmp_path, target_version="1.2.83")
+
+    data, warnings, _meta = _call_runtime_status_for_upgrade(tmp_path, fixture["cfg_path"], fixture["cfg"])
+
+    assert data["service_upgrade"]["evaluation"]["status"] == "failed"
+    assert data["service_upgrade"]["evaluation"]["runtime_failed"] is True
+    assert data["service_upgrade"]["evaluation"]["reason"] == "upgrade_target_version_not_active"
+    assert data["summary"]["service_upgrade_status"] == "failed"
+    assert data["summary"]["service_upgrade_runtime_failed"] is True
+    assert "SERVICE_UPGRADE_FAILED" in data["summary"]["warning_codes"]
+    assert "Service upgrade status still indicates an unrecovered runtime failure." in warnings
 
 
 def test_runtime_status_can_inspect_scanned_run_after_skipped_latest(tmp_path: Path) -> None:

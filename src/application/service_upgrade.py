@@ -79,12 +79,26 @@ class _UpgradeLock:
 
     def __enter__(self) -> "_UpgradeLock":
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            self.fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError as exc:
-            raise RuntimeError(f"upgrade lock already exists: {self.path}") from exc
+        self.fd = self._open_lock()
         os.write(self.fd, str(os.getpid()).encode("utf-8"))
         return self
+
+    def _open_lock(self) -> int:
+        try:
+            return os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError as exc:
+            if not _upgrade_lock_is_stale(self.path):
+                raise RuntimeError(f"upgrade lock already exists: {self.path}") from exc
+            try:
+                self.path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as unlink_exc:
+                raise RuntimeError(f"failed to remove stale upgrade lock: {self.path}") from unlink_exc
+            try:
+                return os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError as retry_exc:
+                raise RuntimeError(f"upgrade lock already exists: {self.path}") from retry_exc
 
     def __exit__(self, *_exc: object) -> None:
         if self.fd is not None:
@@ -94,6 +108,35 @@ class _UpgradeLock:
             self.path.unlink()
         except FileNotFoundError:
             pass
+
+
+def _upgrade_lock_pid(path: Path) -> int | None:
+    try:
+        raw = path.read_text(encoding="utf-8").strip()
+    except Exception:
+        return None
+    try:
+        pid = int(raw)
+    except ValueError:
+        return None
+    return pid if pid > 0 else None
+
+
+def _pid_is_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def _upgrade_lock_is_stale(path: Path) -> bool:
+    pid = _upgrade_lock_pid(path)
+    return pid is None or not _pid_is_running(pid)
 
 
 def _run_command(

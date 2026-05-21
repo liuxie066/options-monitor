@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from datetime import datetime, timezone
@@ -9,6 +10,7 @@ from typing import Any, Callable, cast
 
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.ledger.api import ledger_store_payload
+from src.application.release_target import compare_versions
 from src.application.runtime_config_paths import resolve_data_config_ref
 from src.application.runtime_trigger_context import build_trigger_context
 from src.application.service_deploy import service_status_from_profile
@@ -243,18 +245,18 @@ def _profile_path_from_payload(payload: dict[str, Any], *, base: Path) -> Path |
     return None
 
 
-def _merge_openclaw_profile(payload: dict[str, Any], *, base: Path) -> tuple[dict[str, Any], dict[str, Any] | None]:
+def _profile_meta(profile: dict[str, Any], *, profile_path: Path, base: Path) -> dict[str, Any]:
+    return {
+        "path": _relative_path(profile_path, base=base),
+        "loaded": True,
+        "cron_job_count": len(profile.get("cron_jobs") or []) if isinstance(profile.get("cron_jobs"), list) else 0,
+        "service_provider": profile.get("service_provider"),
+        "service_count": len(profile.get("services") or []) if isinstance(profile.get("services"), list) else 0,
+    }
+
+
+def _merge_service_profile_payload(payload: dict[str, Any], *, profile: dict[str, Any]) -> dict[str, Any]:
     merged = dict(payload)
-    profile_path = _profile_path_from_payload(merged, base=base)
-    if profile_path is None:
-        return merged, None
-    if not profile_path.exists():
-        raise AgentToolError(
-            code="CONFIG_ERROR",
-            message=f"OpenClaw profile not found: {profile_path.name}",
-            hint="Remove profile_path or create the referenced JSON profile.",
-        )
-    profile = _read_json_object(profile_path)
     paths_raw = profile.get("paths")
     paths: dict[str, Any] = paths_raw if isinstance(paths_raw, dict) else {}
     config_paths_raw = profile.get("config_paths")
@@ -298,13 +300,39 @@ def _merge_openclaw_profile(payload: dict[str, Any], *, base: Path) -> tuple[dic
     ):
         if key not in merged and key in profile:
             merged[key] = profile[key]
-    return merged, {
-        "path": _relative_path(profile_path, base=base),
-        "loaded": True,
-        "cron_job_count": len(profile.get("cron_jobs") or []) if isinstance(profile.get("cron_jobs"), list) else 0,
-        "service_provider": profile.get("service_provider"),
-        "service_count": len(profile.get("services") or []) if isinstance(profile.get("services"), list) else 0,
-    }
+    return merged
+
+
+def _merge_openclaw_profile(payload: dict[str, Any], *, base: Path) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    profile_path = _profile_path_from_payload(payload, base=base)
+    if profile_path is None:
+        return dict(payload), None
+    if not profile_path.exists():
+        raise AgentToolError(
+            code="CONFIG_ERROR",
+            message=f"OpenClaw profile not found: {profile_path.name}",
+            hint="Remove profile_path or create the referenced JSON profile.",
+        )
+    profile = _read_json_object(profile_path)
+    return _merge_service_profile_payload(payload, profile=profile), _profile_meta(profile, profile_path=profile_path, base=base)
+
+
+def _merge_runtime_service_profile(
+    payload: dict[str, Any],
+    *,
+    base: Path,
+    runtime_root: Path,
+    existing_profile_meta: dict[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    if existing_profile_meta is not None:
+        return payload, existing_profile_meta
+    if str(payload.get("profile_path") or "").strip():
+        return payload, existing_profile_meta
+    profile_path = (runtime_root / "service.profile.json").resolve()
+    if not profile_path.exists():
+        return payload, existing_profile_meta
+    profile = _read_json_object(profile_path)
+    return _merge_service_profile_payload(payload, profile=profile), _profile_meta(profile, profile_path=profile_path, base=base)
 
 
 def _service_profile_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -392,6 +420,34 @@ def _check_upgrade_services(profile: dict[str, Any], *, failed_services: list[st
     return {**status, "checked": True, "services": checked_services, "all_active": all_active}
 
 
+def _upgrade_lock_info(lock_path: Path) -> dict[str, Any]:
+    if not lock_path.exists():
+        return {"exists": False, "pid": None, "active": False, "stale": False}
+    pid: int | None = None
+    try:
+        raw = lock_path.read_text(encoding="utf-8").strip()
+        pid = int(raw) if raw else None
+    except Exception:
+        pid = None
+    active = False
+    if pid and pid > 0:
+        try:
+            os.kill(pid, 0)
+            active = True
+        except ProcessLookupError:
+            active = False
+        except PermissionError:
+            active = True
+        except OSError:
+            active = False
+    return {
+        "exists": True,
+        "pid": pid,
+        "active": active,
+        "stale": not active,
+    }
+
+
 def _upgrade_status_evaluation(
     upgrade_info: dict[str, Any],
     *,
@@ -407,7 +463,8 @@ def _upgrade_status_evaluation(
     target_version = str(upgrade_json.get("target_version") or "").strip() or None
     current_version = _repo_version(base)
     lock_path = runtime_root / "locks" / "upgrade.lock"
-    lock_exists = lock_path.exists()
+    lock_info = _upgrade_lock_info(lock_path)
+    lock_exists = bool(lock_info.get("exists"))
     error = upgrade_json.get("error")
     failed_statuses = {"failed", "upgraded_restart_failed"}
     failed_services_raw = upgrade_json.get("restart_failed_services")
@@ -422,12 +479,15 @@ def _upgrade_status_evaluation(
         "current_version": current_version,
         "error": error,
         "lock_exists": lock_exists,
+        "lock_pid": lock_info.get("pid"),
+        "lock_active": bool(lock_info.get("active")),
+        "lock_stale": bool(lock_info.get("stale")),
         "runtime_failed": False,
         "warning": False,
         "checked": True,
     }
 
-    if lock_exists:
+    if lock_exists and lock_info.get("active"):
         return {
             **out,
             "status": "in_progress",
@@ -442,6 +502,20 @@ def _upgrade_status_evaluation(
     target_is_current = bool(target_version and current_version and target_version == current_version)
     symlink_switched = bool(upgrade_json.get("symlink_switched") or upgrade_json.get("changed"))
     if not target_is_current:
+        target_is_older = False
+        if target_version and current_version:
+            try:
+                target_is_older = compare_versions(target_version, current_version) < 0
+            except ValueError:
+                target_is_older = False
+        if not target_is_older:
+            return {
+                **out,
+                "status": "failed",
+                "runtime_failed": True,
+                "warning": False,
+                "reason": "upgrade_target_version_not_active",
+            }
         return {
             **out,
             "status": "historical_failed",
@@ -1252,6 +1326,12 @@ def runtime_status_tool(
         data_config_path = (config_path.parent / "portfolio.runtime.json").resolve()
     ledger_store = ledger_store_payload(data_config_path)
     ledger_runtime_root = Path(str(ledger_store.get("runtime_root") or base)).expanduser()
+    payload, profile_meta = _merge_runtime_service_profile(
+        payload,
+        base=base,
+        runtime_root=ledger_runtime_root,
+        existing_profile_meta=profile_meta,
+    )
     accounts = _accounts_from_runtime(
         payload,
         cfg,
