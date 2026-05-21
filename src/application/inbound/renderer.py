@@ -7,7 +7,7 @@ from src.application.inbound.contracts import InboundIntent
 
 HELP_TEXT = (
     "可用只读命令：状态、健康检查、持仓、持仓 sy、收益、收益 sy、收益 sy 2026-05、最近运行、日志 <run_id>、查看监控标的、待确认。\n"
-    "管理员写操作：记录开仓/记录平仓、增加/修改/删除监控标的。写操作会先返回预览；同一对话只有一条待确认时，可回复：确认记录 或 确认监控。"
+    "管理员写操作：记录开仓/记录平仓、增加/修改/删除监控标的、立即升级。写操作会先返回预览；同一对话只有一条待确认时，可回复：确认记录、确认监控 或 确认升级。"
 )
 
 
@@ -77,6 +77,8 @@ def render_pending_operations(operations: list[dict[str, Any]]) -> str:
 def _pending_operation_commands(operation_type: str) -> tuple[str, str]:
     if operation_type.startswith("symbol_"):
         return "确认监控", "取消监控"
+    if operation_type.startswith("upgrade_"):
+        return "确认升级", "取消升级"
     return "确认记录", "取消记录"
 
 
@@ -87,6 +89,7 @@ def _pending_operation_label(operation_type: str) -> str:
         "symbol_add": "监控新增",
         "symbol_edit": "监控修改",
         "symbol_remove": "监控删除",
+        "upgrade_now": "立即升级",
     }.get(operation_type, operation_type or "待确认操作")
 
 
