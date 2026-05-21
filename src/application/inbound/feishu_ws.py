@@ -48,7 +48,7 @@ class FeishuWsSettings:
     max_reply_chars: int = DEFAULT_FEISHU_REPLY_MAX_CHARS
     ack_reaction: str = ""
     queue_size: int = DEFAULT_FEISHU_WS_QUEUE_SIZE
-    agent_runtime_enabled: bool = False
+    agent_runtime_enabled: bool = True
     agent_context_window_messages: int = DEFAULT_CONTEXT_WINDOW_MESSAGES
     agent_llm: LlmTranslatorSettings = field(default_factory=LlmTranslatorSettings)
 

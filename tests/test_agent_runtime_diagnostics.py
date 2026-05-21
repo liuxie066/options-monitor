@@ -1,0 +1,145 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+from src.application.agent_runtime.diagnostics import check_llm_translator
+from src.application.agent_runtime.llm_intent_schema import llm_intent_json_schema
+
+
+def _runtime_config(*, llm: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {
+        "accounts": ["sy"],
+        "account_settings": {"sy": {"type": "futu"}},
+        "portfolio": {
+            "broker": "富途",
+            "account": "sy",
+            "source": "futu",
+            "base_currency": "CNY",
+        },
+        "symbols": [
+            {
+                "symbol": "NVDA",
+                "market": "US",
+                "fetch": {"source": "futu"},
+                "sell_put": {"enabled": False},
+                "sell_call": {"enabled": False},
+            }
+        ],
+        "agent": {
+            "runtime": {"enabled": True, "context_window_messages": 8},
+            "llm": llm or {"enabled": False},
+        },
+    }
+
+
+def _write_config(tmp_path: Path, cfg: dict[str, Any]) -> Path:
+    path = tmp_path / "config.us.json"
+    path.write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+def test_llm_check_allows_disabled_translator_without_api_key(tmp_path: Path) -> None:
+    cfg_path = _write_config(tmp_path, _runtime_config())
+
+    out = check_llm_translator(
+        repo_root=tmp_path,
+        config_path=cfg_path,
+        include_local_env_file=False,
+    )
+
+    assert out["summary"]["ok"] is True
+    assert out["summary"]["status"] == "disabled"
+    assert out["llm"]["enabled"] is False
+    assert out["llm"]["api_key_configured"] is False
+    checks = {item["name"]: item for item in out["checks"]}
+    assert checks["enabled"]["status"] == "warn"
+    assert checks["provider"]["status"] == "skipped"
+    assert checks["live_probe"]["status"] == "skipped"
+
+
+def test_llm_check_reports_ready_custom_openai_compatible_endpoint(tmp_path: Path) -> None:
+    cfg_path = _write_config(
+        tmp_path,
+        _runtime_config(
+            llm={
+                "enabled": True,
+                "provider": "openai",
+                "base_url": "https://llm.example/v1",
+                "model": "gpt-5.2",
+                "api_key_env": "OM_LLM_API_KEY",
+                "confidence_min": 0.75,
+                "timeout_seconds": 9,
+                "max_output_tokens": 777,
+            }
+        ),
+    )
+    env_file = tmp_path / "options-monitor.env"
+    env_file.write_text("OM_LLM_API_KEY=sk-test\n", encoding="utf-8")
+
+    out = check_llm_translator(
+        repo_root=tmp_path,
+        config_path=cfg_path,
+        env_file=env_file,
+        include_local_env_file=False,
+    )
+
+    assert out["summary"]["ok"] is True
+    assert out["summary"]["status"] == "ready"
+    assert out["env"]["env_file_loaded"] is True
+    assert out["llm"]["responses_url"] == "https://llm.example/v1/responses"
+    assert out["llm"]["api_key_configured"] is True
+    assert out["llm"]["api_key_source"] == f"env_file:{env_file.resolve()}"
+    checks = {item["name"]: item for item in out["checks"]}
+    assert checks["api_key"]["value"]["configured"] is True
+    assert checks["live_probe"]["status"] == "skipped"
+
+
+def test_llm_check_live_probe_uses_read_only_structured_translation(tmp_path: Path) -> None:
+    calls: list[dict[str, Any]] = []
+    cfg_path = _write_config(
+        tmp_path,
+        _runtime_config(
+            llm={
+                "enabled": True,
+                "provider": "openai",
+                "model": "gpt-5.2",
+                "api_key_env": "OM_LLM_API_KEY",
+                "confidence_min": 0.75,
+            }
+        ),
+    )
+    env_file = tmp_path / "options-monitor.env"
+    env_file.write_text("OM_LLM_API_KEY=sk-test\n", encoding="utf-8")
+
+    def _create_response(**kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs)
+        assert kwargs["json_schema"] == llm_intent_json_schema()
+        return {
+            "output_text": json.dumps(
+                    {
+                        "schema_version": "om-llm-intent-v1",
+                        "intent": "runtime_status",
+                        "arguments": {},
+                        "confidence": 0.91,
+                    }
+                )
+            }
+
+    out = check_llm_translator(
+        repo_root=tmp_path,
+        config_path=cfg_path,
+        env_file=env_file,
+        include_local_env_file=False,
+        live=True,
+        live_text="状态",
+        create_response_fn=_create_response,
+    )
+
+    assert out["summary"]["ok"] is True
+    assert out["summary"]["live_checked"] is True
+    assert calls[0]["api_key"] == "sk-test"
+    checks = {item["name"]: item for item in out["checks"]}
+    assert checks["live_probe"]["status"] == "ok"
+    assert checks["live_probe"]["value"]["intent"]["name"] == "runtime_status"

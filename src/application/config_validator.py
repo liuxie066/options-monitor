@@ -531,10 +531,24 @@ def validate_config(cfg: dict):
         die('agent.llm must be an object')
     if 'enabled' in llm_agent and llm_agent.get('enabled') is not None and not isinstance(llm_agent.get('enabled'), bool):
         die('agent.llm.enabled must be a boolean')
-    for key in ('provider', 'model', 'api_key_env'):
+    for key in ('provider', 'base_url', 'model', 'api_key_env'):
         if key in llm_agent and llm_agent.get(key) is not None and not isinstance(llm_agent.get(key), str):
             die(f'agent.llm.{key} must be a string')
     _validate_optional_unit_interval_number(llm_agent, 'confidence_min', 'agent.llm')
+    if str(llm_agent.get('base_url') or '').strip():
+        llm_base_url = str(llm_agent.get('base_url') or '').strip()
+        if not (llm_base_url.startswith('https://') or llm_base_url.startswith('http://')):
+            die('agent.llm.base_url must start with http:// or https:// when set')
+    if 'timeout_seconds' in llm_agent and llm_agent.get('timeout_seconds') is not None:
+        validate_positive_integer(llm_agent.get('timeout_seconds'), 'agent.llm.timeout_seconds')
+        if int(llm_agent.get('timeout_seconds')) > 120:
+            die('agent.llm.timeout_seconds must be <= 120')
+    if 'max_output_tokens' in llm_agent and llm_agent.get('max_output_tokens') is not None:
+        validate_positive_integer(llm_agent.get('max_output_tokens'), 'agent.llm.max_output_tokens')
+        if int(llm_agent.get('max_output_tokens')) < 64:
+            die('agent.llm.max_output_tokens must be >= 64')
+        if int(llm_agent.get('max_output_tokens')) > 4096:
+            die('agent.llm.max_output_tokens must be <= 4096')
     llm_enabled = bool(llm_agent.get('enabled')) if isinstance(llm_agent.get('enabled'), bool) else False
     llm_provider = str(llm_agent.get('provider') or '').strip()
     if llm_provider and llm_provider != 'openai':

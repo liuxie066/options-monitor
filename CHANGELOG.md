@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 1.2.114 - 2026-05-21
+
+### Added
+- Added a shared command catalog for inbound slash commands, operator help, and the optional LLM intent surface.
+- Added `om agent commands` and `om agent llm-check` diagnostics for inspecting command routing and optional LLM readiness.
+
+### Changed
+- Enabled the one-shot AgentRuntime command facade by default for inbound handling, with `--no-agent-runtime` available for explicit fallback to the legacy parser path.
+- Clarified that LangGraph remains deferred; the production path is the deterministic command facade plus an optional one-shot LLM translator.
+- Removed legacy `om service upgrade-check`, `om service upgrade`, and `om service rollback` CLI aliases; use `om update check/apply/rollback` for release updates.
+- Unified release tag parsing and upgrade target resolution behind a shared release target resolver with fetch-before-select diagnostics.
+
+### Fixed
+- Returned structured inbound configuration errors when the audit SQLite database is unwritable instead of surfacing a Python traceback.
+- Kept inbound confirmation, income, and position receipts aligned with the canonical renderer behavior, including untruncated open-position output.
+
 ## 1.2.113 - 2026-05-21
 
 ### Added

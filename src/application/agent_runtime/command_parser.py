@@ -5,6 +5,7 @@ import shlex
 from datetime import date
 from typing import Callable
 
+from src.application.agent_runtime.command_catalog import commands_by_intent
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.inbound.contracts import InboundIntent
 
@@ -12,6 +13,7 @@ from src.application.inbound.contracts import InboundIntent
 _MONTH_RE = re.compile(r"^(20\d{2})[-/.](0[1-9]|1[0-2])$")
 _OPERATION_ID_RE = re.compile(r"^in_[A-Za-z0-9_.:-]+$")
 _ACCOUNTS = frozenset({"lx", "sy"})
+_COMMANDS = commands_by_intent()
 
 _CONFIRM_TARGETS = {
     "trade": "manual_trade_confirm",
@@ -52,34 +54,34 @@ def parse_agent_command(text: str, *, now_fn: Callable[[], date] | None = None) 
     args = parts[1:]
     today = now_fn() if now_fn is not None else date.today()
 
-    if command in {"/help", "/?"}:
+    if command in _COMMANDS["help"]:
         return _intent("help")
-    if command == "/status":
+    if command in _COMMANDS["runtime_status"]:
         _reject_extra(command, args)
         return _intent("runtime_status")
-    if command in {"/health", "/doctor"}:
+    if command in _COMMANDS["healthcheck"]:
         _reject_extra(command, args)
         return _intent("healthcheck")
-    if command in {"/config-check", "/config"}:
+    if command in _COMMANDS["config_validate"]:
         _reject_extra(command, args)
         return _intent("config_validate")
-    if command == "/positions":
+    if command in _COMMANDS["option_positions_open"]:
         return _parse_positions(command, args)
-    if command == "/income":
+    if command in _COMMANDS["monthly_income_report"]:
         return _parse_income(command, args, today=today)
-    if command == "/runs":
+    if command in _COMMANDS["runtime_runs"]:
         return _parse_runs(command, args)
-    if command == "/logs":
+    if command in _COMMANDS["runtime_logs"]:
         return _parse_logs(command, args)
-    if command == "/symbols":
+    if command in _COMMANDS["symbol_list"]:
         _reject_extra(command, args)
         return _intent("symbol_list")
-    if command == "/pending":
+    if command in _COMMANDS["pending_operations"]:
         _reject_extra(command, args)
         return _intent("pending_operations")
-    if command == "/confirm":
+    if command in _COMMANDS["manual_trade_confirm"]:
         return _parse_operation_command(command, args, target_map=_CONFIRM_TARGETS, action_label="确认")
-    if command == "/cancel":
+    if command in _COMMANDS["manual_trade_cancel"]:
         return _parse_operation_command(command, args, target_map=_CANCEL_TARGETS, action_label="取消")
 
     raise AgentToolError(
