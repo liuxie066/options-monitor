@@ -62,7 +62,7 @@ def build_rebuild_command(
     if isinstance(custom_command, str) and custom_command.strip():
         return custom_command.strip()
 
-    command = ["./om", "config", "build", "--market", str(market)]
+    command = ["./om", "config", "build", "--source", "legacy", "--market", str(market)]
     sources = generated.get("sources") if isinstance(generated, dict) else []
     if isinstance(sources, list):
         source_by_role = {

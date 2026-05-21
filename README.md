@@ -75,11 +75,12 @@ om setup check
 - `config.yaml` 只保存用户 override，包括 accounts、markets、symbols 和非 secret 行为配置。
 - env-file 只保存 secrets、Feishu 凭证和写入开关。
 - `config build` 生成 market-specific runtime config，实际运行仍读取 JSON 快照。
+- `config build` / `config explain` 默认读取 YAML；legacy JSON 必须显式传 `--source legacy`。
 
 源码 checkout 或本地手动运行可以直接在 repo root 维护忽略文件 `config.yaml`：
 
 ```bash
-cp configs/examples/config.yaml.example config.yaml
+om config init --output config.yaml --runtime-output-dir .
 $EDITOR config.yaml
 
 om config validate --source yaml --market us
@@ -98,8 +99,15 @@ om config validate --config-path config.hk.json --market hk
 生产服务建议把 `config.yaml` 和生成后的 runtime config 放在 `runtime_root` 或其他 release 外的持久路径，再显式传路径：
 
 ```bash
+om config init --output /var/lib/options-monitor/config.yaml --runtime-output-dir /var/lib/options-monitor
 om config build --source yaml --market us --config-yaml /var/lib/options-monitor/config.yaml --output /var/lib/options-monitor/config.us.json
 om config build --source yaml --market hk --config-yaml /var/lib/options-monitor/config.yaml --output /var/lib/options-monitor/config.hk.json
+om service render \
+  --target systemd \
+  --runtime-root /var/lib/options-monitor \
+  --config-yaml /var/lib/options-monitor/config.yaml \
+  --config-us /var/lib/options-monitor/config.us.json \
+  --config-hk /var/lib/options-monitor/config.hk.json
 ```
 
 已有 `configs/user.*.json` 的旧安装可以先 dry-run 迁移：
@@ -109,16 +117,19 @@ om config migrate-yaml --output config.yaml
 om config migrate-yaml --output config.yaml --apply
 ```
 
-如果只是想快速生成 starter runtime config，也可以使用兼容入口：
+历史兼容入口 `om setup init` 仍保留，但已 deprecated。新安装不要再用它生成人工维护的
+runtime JSON；需要从旧 `configs/user.*.json` 迁移时使用 `om config migrate-yaml`。
 
 ```bash
 om setup init --market us --account lx --futu-acc-id <futu-account-id>
 om setup init --market hk --account lx --futu-acc-id <futu-account-id>
 ```
 
-这条路径直接生成 `config.us.json` / `config.hk.json`，适合作为一次性 bootstrap；长期维护仍建议收敛到 `config.yaml`。
+这条路径只作为旧脚本兼容面存在，输出会带 deprecation warning。
 
-生成的 runtime config 会记录 `_generated` 指纹。`config.yaml` 或 legacy 分层配置更新后，都需要重新 `config build`；`run tick` / `run tick-cron` 会在陈旧 runtime config 上提前失败并给出重建命令。
+生成的 runtime config 会记录 `_generated` 指纹。`config.yaml` 更新后需要重新
+`config build --source yaml`；旧安装的 legacy 分层配置仍可兼容 rebuild，但该 authoring
+路径已 deprecated。`run tick` / `run tick-cron` 会在陈旧 runtime config 上提前失败并给出重建命令。
 
 完整首次运行流程见 [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md)。
 
@@ -148,10 +159,10 @@ om config explain --source yaml --market us --key option_positions.auto_close.en
 om config explain --source yaml --market us --key symbol_defaults.fetch.limit_expirations
 ```
 
-直接查看或修改 runtime config 时，使用 `config get/set`。写入语义统一为：
+直接查看 runtime config 时，使用 `config get`。`config set` 仍保留为兼容/应急入口，但它修改的是生成后的 runtime JSON，不是 durable authoring source；持久配置变更应改 `config.yaml` 后重新 `config build --source yaml`。写入语义统一为：
 默认只读或 dry-run；`--apply` 允许本地文件/状态写入；`--confirm` 允许交易事件、Feishu、服务变更这类高风险写入；`--yes` 用于非交互脚本，等价显式确认并在输出里带 `audit_id`。写命令的 JSON 输出都会带 `dry_run`、`write_applied`、`backup_path`、`audit_id`、`rollback_hint`。
 
-`config set` 属于本地配置写入，默认只预览，`--apply` 后会先校验修改后的配置再写入：
+`config set` 属于本地 runtime snapshot 写入，默认只预览，`--apply` 后会先校验修改后的配置再写入：
 
 ```bash
 om config get --config-key us --key runtime.prefetch.max_workers
@@ -194,8 +205,27 @@ om run tick --config config.us.json --accounts lx sy
 渲染服务文件：
 
 ```bash
-./om service render --target systemd --runtime-root /var/lib/options-monitor --env-file /etc/options-monitor/options-monitor.env --markets us hk --accounts lx sy --output-dir /tmp/options-monitor-service
-./om service render --target launchd --runtime-root "$HOME/Library/Application Support/options-monitor" --env-file "$HOME/Library/Application Support/options-monitor/options-monitor.env" --markets us hk --accounts lx sy --output-dir /tmp/options-monitor-service
+./om service render \
+  --target systemd \
+  --runtime-root /var/lib/options-monitor \
+  --env-file /etc/options-monitor/options-monitor.env \
+  --markets us hk \
+  --accounts lx sy \
+  --config-yaml /var/lib/options-monitor/config.yaml \
+  --config-us /var/lib/options-monitor/config.us.json \
+  --config-hk /var/lib/options-monitor/config.hk.json \
+  --output-dir /tmp/options-monitor-service
+
+./om service render \
+  --target launchd \
+  --runtime-root "$HOME/Library/Application Support/options-monitor" \
+  --env-file "$HOME/Library/Application Support/options-monitor/options-monitor.env" \
+  --markets us hk \
+  --accounts lx sy \
+  --config-yaml "$HOME/Library/Application Support/options-monitor/config.yaml" \
+  --config-us "$HOME/Library/Application Support/options-monitor/config.us.json" \
+  --config-hk "$HOME/Library/Application Support/options-monitor/config.hk.json" \
+  --output-dir /tmp/options-monitor-service
 ```
 
 完整步骤见 [`DEPLOY.md`](DEPLOY.md)。
@@ -565,9 +595,10 @@ README 只记录公开入口和边界。生产 cron id、长驻服务启停和�
 不要把 `version_update apply=true` 放进固定频率任务。它会递增本地 `VERSION`，不等于发布流程。
 
 `tick-cron` 在拿到锁后会先校验 runtime config 的生成指纹；如果
-`config.yaml` 或 legacy 分层 user config 更新后没有重新 build，
+`config.yaml` 更新后没有重新 build，
 任务会以 `[CONFIG_ERROR]` 失败并打印 `./om config build ... --output ...`。`--allow-stale-config`
-只作为临时应急绕过使用。
+只作为临时应急绕过使用。旧安装的 legacy 分层 user config 仍可兼容检查，但该 authoring
+路径已 deprecated。
 
 ## 副作用边界
 

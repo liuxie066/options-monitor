@@ -24,11 +24,12 @@ src/application/config_defaults.py DEFAULT_CONFIG
 - `config.yaml` 是推荐的人类编辑入口，只保存 override。
 - `config.us.json` / `config.hk.json` 是生成后的 runtime config，不是首选手工编辑入口。
 - env-file 保存 secrets、Feishu Bot 凭证和写入开关；`config.yaml` 会拒绝 write gate 字段。
+- `config build` / `config explain` 默认读取 YAML；legacy JSON 只在显式 `--source legacy` 时使用。
 
 本地/source checkout 可以直接在 repo root 维护 `config.yaml`：
 
 ```bash
-cp configs/examples/config.yaml.example config.yaml
+./om config init --output config.yaml --runtime-output-dir .
 $EDITOR config.yaml
 
 ./om config validate --source yaml --market us
@@ -39,11 +40,18 @@ $EDITOR config.yaml
 生产服务建议把 `config.yaml` 和生成后的 runtime config 放在 release 目录外，例如 `/var/lib/options-monitor`：
 
 ```bash
+./om config init --output /var/lib/options-monitor/config.yaml --runtime-output-dir /var/lib/options-monitor
 ./om config build --source yaml --market us --config-yaml /var/lib/options-monitor/config.yaml --output /var/lib/options-monitor/config.us.json
 ./om config build --source yaml --market hk --config-yaml /var/lib/options-monitor/config.yaml --output /var/lib/options-monitor/config.hk.json
+./om service render \
+  --target systemd \
+  --runtime-root /var/lib/options-monitor \
+  --config-yaml /var/lib/options-monitor/config.yaml \
+  --config-us /var/lib/options-monitor/config.us.json \
+  --config-hk /var/lib/options-monitor/config.hk.json
 ```
 
-`config build` 会在生成的 runtime config 写入 `_generated` 元信息，记录来源路径、SHA-256 和 rebuild command。之后只要 `config.yaml` 或 legacy 分层源文件变化，就要重新 build 对应 market 的 runtime config。生产 tick 入口会检查这个指纹，避免 cron 拿陈旧 runtime config 继续跑。
+`config build` 会在生成的 runtime config 写入 `_generated` 元信息，记录来源路径、SHA-256 和 rebuild command。之后只要 `config.yaml` 变化，就要重新 build 对应 market 的 runtime config。旧安装的 legacy 分层源文件仍可兼容 rebuild，但该 authoring 路径已 deprecated。生产 tick 入口会检查这个指纹，避免 cron 拿陈旧 runtime config 继续跑。
 
 不确定某个值来自哪里时，用 explain 查看覆盖链：
 
@@ -94,6 +102,12 @@ markets:
 - `configs/user.us.json`
 - `configs/user.hk.json`
 
+新安装 starter：
+
+```bash
+./om config init --output config.yaml --runtime-output-dir .
+```
+
 从旧配置迁移到 `config.yaml`：
 
 ```bash
@@ -101,7 +115,7 @@ markets:
 ./om config migrate-yaml --output config.yaml --apply
 ```
 
-`migrate-yaml` 默认 dry-run；只有带 `--apply` 才会写文件，默认会先备份已有 `config.yaml`。
+`config init` 会同时生成 US/HK runtime JSON；已有文件时需要 `--force` 才覆盖。`migrate-yaml` 用于已有 legacy `configs/user.*.json`，默认 dry-run；只有带 `--apply` 才会写文件，默认会先备份已有 `config.yaml`。
 
 兼容的运行时文件：
 
@@ -221,7 +235,7 @@ markets:
 
 ## 4) runtime config：生成后的 JSON 里需要有什么？
 
-运行时文件通常是 `config.us.json` / `config.hk.json`，或生产 runtime root 下的同名 JSON。它们由 `config.yaml` 或 legacy 分层 JSON 生成。
+运行时文件通常是 `config.us.json` / `config.hk.json`，或生产 runtime root 下的同名 JSON。主路径由 `config.yaml` 生成；legacy 分层 JSON 只作为旧安装兼容和迁移入口。
 
 ### 4.0A 配置优先级（只认这一套主路径）
 

@@ -38,16 +38,17 @@ python3 -m venv .venv
 
 ## 3. 初始化运行配置
 
-普通本地初始化走 `./om setup check` 和 `./om setup init`：
+普通本地初始化走 `./om setup check` 和 YAML starter：
 
 ```bash
 ./om setup check
-./om setup init --market us --account lx --futu-acc-id <futu-account-id>
+./om config init --output config.yaml --runtime-output-dir . --futu-acc-id <futu-account-id>
 ```
 
 首次初始化通常会生成：
 
-- `config.us.json` 或 `config.hk.json`
+- `config.yaml`
+- `config.us.json` 和 `config.hk.json`
 - `portfolio.runtime.json`（可选；最小部署可不需要）
 
 默认最小配置下：

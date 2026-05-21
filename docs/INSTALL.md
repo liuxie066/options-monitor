@@ -93,6 +93,9 @@ om service render \
   --env-file "$HOME/Library/Application Support/options-monitor/options-monitor.env" \
   --markets us hk \
   --accounts lx sy \
+  --config-yaml "$HOME/Library/Application Support/options-monitor/config.yaml" \
+  --config-us "$HOME/Library/Application Support/options-monitor/config.us.json" \
+  --config-hk "$HOME/Library/Application Support/options-monitor/config.hk.json" \
   --output-dir /tmp/options-monitor-service
 ```
 
@@ -155,6 +158,9 @@ om service render \
   --env-file /etc/options-monitor/options-monitor.env \
   --markets us hk \
   --accounts lx sy \
+  --config-yaml /var/lib/options-monitor/config.yaml \
+  --config-us /var/lib/options-monitor/config.us.json \
+  --config-hk /var/lib/options-monitor/config.hk.json \
   --output-dir /tmp/options-monitor-service
 ```
 

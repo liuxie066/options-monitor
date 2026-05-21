@@ -507,6 +507,219 @@ def test_top_level_setup_requires_current_subcommand(capsys) -> None:
     assert "setup" in capsys.readouterr().err
 
 
+def test_legacy_config_build_emits_deprecation_warning(capsys, tmp_path: Path) -> None:
+    import src.interfaces.cli.main as cli
+
+    rc = cli.main([
+        "config",
+        "build",
+        "--source",
+        "legacy",
+        "--market",
+        "us",
+        "--common-user-config",
+        "configs/examples/user.common.example.json",
+        "--user-config",
+        "configs/examples/user.example.us.json",
+        "--output",
+        str(tmp_path / "config.us.json"),
+        "--dry-run",
+    ])
+    payload = _read_json_output(capsys)
+
+    assert rc == 0
+    assert payload["ok"] is True
+    assert cli.LEGACY_CONFIG_AUTHORING_DEPRECATION_WARNING in payload["warnings"]
+
+
+def test_config_build_defaults_to_yaml_source(capsys, tmp_path: Path) -> None:
+    import src.interfaces.cli.main as cli
+
+    config_yaml = tmp_path / "config.yaml"
+    config_yaml.write_text(
+        """\
+accounts:
+  lx:
+    type: futu
+markets:
+  us:
+    accounts: [lx]
+    symbols: [NVDA]
+  hk:
+    accounts: [lx]
+    symbols: ["0700.HK"]
+""",
+        encoding="utf-8",
+    )
+
+    rc = cli.main([
+        "config",
+        "build",
+        "--market",
+        "us",
+        "--config-yaml",
+        str(config_yaml),
+        "--output",
+        str(tmp_path / "config.us.json"),
+        "--dry-run",
+    ])
+    payload = _read_json_output(capsys)
+
+    assert rc == 0
+    assert payload["ok"] is True
+    assert payload["source_format"] == "yaml"
+    assert payload["dry_run"] is True
+    assert "warnings" not in payload
+
+
+def test_config_build_rejects_legacy_flags_without_legacy_source(capsys) -> None:
+    import src.interfaces.cli.main as cli
+
+    rc = cli.main([
+        "config",
+        "build",
+        "--market",
+        "us",
+        "--user-config",
+        "configs/examples/user.example.us.json",
+        "--dry-run",
+    ])
+    payload = _read_json_output(capsys)
+
+    assert rc == 2
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "INPUT_ERROR"
+    assert payload["error"]["details"]["flags"] == ["--user-config"]
+
+
+def test_config_validate_rejects_runtime_flags_with_yaml_source(capsys, tmp_path: Path) -> None:
+    import src.interfaces.cli.main as cli
+
+    config_yaml = tmp_path / "config.yaml"
+    config_yaml.write_text(
+        """\
+accounts:
+  lx:
+    type: futu
+markets:
+  us:
+    accounts: [lx]
+    symbols: [NVDA]
+""",
+        encoding="utf-8",
+    )
+
+    rc = cli.main([
+        "config",
+        "validate",
+        "--source",
+        "yaml",
+        "--market",
+        "us",
+        "--config-yaml",
+        str(config_yaml),
+        "--config-path",
+        "config.us.json",
+    ])
+    payload = _read_json_output(capsys)
+
+    assert rc == 2
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "INPUT_ERROR"
+    assert payload["error"]["details"]["flags"] == ["--config-path"]
+
+
+def test_config_validate_rejects_yaml_flag_with_runtime_source(capsys) -> None:
+    import src.interfaces.cli.main as cli
+
+    rc = cli.main([
+        "config",
+        "validate",
+        "--source",
+        "runtime",
+        "--config-yaml",
+        "config.yaml",
+    ])
+    payload = _read_json_output(capsys)
+
+    assert rc == 2
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "INPUT_ERROR"
+    assert payload["error"]["details"]["flags"] == ["--config-yaml"]
+
+
+def test_config_validate_defaults_to_runtime_source(monkeypatch, capsys) -> None:
+    import src.interfaces.cli.main as cli
+
+    calls: list[dict] = []
+
+    def _validate_runtime_config(**kwargs):
+        calls.append(kwargs)
+        return {"tool_name": "config.validate", "ok": True, "data": {"status": "pass"}}
+
+    monkeypatch.setattr(cli, "_validate_runtime_config", _validate_runtime_config)
+
+    rc = cli.main([
+        "config",
+        "validate",
+        "--config-path",
+        "config.us.json",
+        "--market",
+        "us",
+    ])
+    payload = _read_json_output(capsys)
+
+    assert rc == 0
+    assert payload["ok"] is True
+    assert calls == [{"config_key": None, "config_path": "config.us.json", "market": "us"}]
+
+
+def test_setup_init_emits_deprecation_warning(monkeypatch, capsys) -> None:
+    import src.interfaces.cli.main as cli
+
+    calls: list[dict] = []
+
+    def _init_runtime(**kwargs):
+        calls.append(kwargs)
+        return {"ok": True, "config_path": "config.us.json"}
+
+    monkeypatch.setattr(cli, "init_runtime", _init_runtime)
+
+    rc = cli.main(["setup", "init", "--market", "us", "--futu-acc-id", "12345678"])
+    payload = _read_json_output(capsys)
+
+    assert rc == 0
+    assert payload["tool_name"] == "setup.init"
+    assert payload["warnings"] == [cli.SETUP_INIT_DEPRECATION_WARNING]
+    assert calls[0]["market"] == "us"
+
+
+def test_service_render_warns_without_yaml_authoring_source(capsys, tmp_path: Path) -> None:
+    import src.interfaces.cli.main as cli
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    runtime = tmp_path / "runtime"
+
+    rc = cli.main([
+        "service",
+        "render",
+        "--target",
+        "systemd",
+        "--repo-root",
+        str(repo),
+        "--runtime-root",
+        str(runtime),
+        "--markets",
+        "us",
+    ])
+    payload = _read_json_output(capsys)
+
+    assert rc == 0
+    assert payload["tool_name"] == "service.render"
+    assert payload["warnings"] == [cli.SERVICE_RENDER_LEGACY_AUTHORING_WARNING]
+
+
 def test_init_runtime_command_is_removed(capsys) -> None:
     import src.interfaces.cli.main as cli
 
@@ -623,6 +836,7 @@ def test_config_get_and_set_preview_then_apply(capsys, tmp_path: Path) -> None:
     ]) == 0
     payload = _read_json_output(capsys)
     assert payload["tool_name"] == "config.set"
+    assert payload["warnings"] == [cli.RUNTIME_CONFIG_SET_DEPRECATION_WARNING]
     assert payload["data"]["dry_run"] is True
     assert payload["data"]["applied"] is False
     assert json.loads(path.read_text(encoding="utf-8"))["runtime"]["prefetch"]["max_workers"] == 2
@@ -641,6 +855,7 @@ def test_config_get_and_set_preview_then_apply(capsys, tmp_path: Path) -> None:
         "--no-backup",
     ]) == 0
     payload = _read_json_output(capsys)
+    assert payload["warnings"] == [cli.RUNTIME_CONFIG_SET_DEPRECATION_WARNING]
     assert payload["data"]["applied"] is True
     assert payload["data"]["dry_run"] is False
     assert json.loads(path.read_text(encoding="utf-8"))["runtime"]["prefetch"]["max_workers"] == 4

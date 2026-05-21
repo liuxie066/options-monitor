@@ -284,10 +284,13 @@ Notification text should remain Markdown-friendly and operationally direct. Do n
 
 ### Configuration
 
-- Layered config build: `src/application/layered_config.py`
-- Runtime validation: `src/application/config_validator.py`
-- Examples: `configs/examples/user.example.us.json`, `configs/examples/user.example.hk.json`
+- YAML authoring: `src/application/config_yaml.py`, `src/application/config_yaml_init.py`
+- Runtime snapshot validation: `src/application/config_validator.py`
+- Legacy JSON compatibility: `src/application/layered_config.py`
+- Examples: `configs/examples/config.yaml.example`, `configs/examples/user.example.us.json`, `configs/examples/user.example.hk.json`
 - Full config docs: `CONFIGS.md`, `CONFIGURATION_GUIDE.md`
+
+`config.yaml` is the preferred human authoring surface. `config.us.json` and `config.hk.json` are generated runtime snapshots consumed by tick/agent tools. Legacy JSON user overlays are compatibility inputs only; use them explicitly with `--source legacy`.
 
 Do not weaken production config validation to make local tests pass. Fix the config path, test fixture, or validation contract instead.
 
@@ -368,7 +371,7 @@ Use supported `gh release view --json` fields such as `tagName`, `name`, `url`, 
 | Candidate filter/rank | Candidate engine tests, candidate tool tests, focused trace/replay tests |
 | Tick orchestration | `python3 -m pytest tests/test_multi_tick_*.py tests/test_unified_tick_entrypoint.py` |
 | Notifications | `python3 -m pytest tests/test_notify_symbols_markdown.py tests/test_multi_tick_notify_format.py` |
-| Config | `python3 -m pytest tests/test_layered_config.py`; config build dry-runs |
+| Config | `python3 -m pytest tests/test_config_yaml.py tests/test_layered_config.py`; YAML validate/build dry-runs; runtime validate for generated snapshots |
 | Ledger/positions/trades | Focused ledger, positions, and trade workflow tests |
 | Docs only | `git diff --check`; verify referenced commands/tools exist when possible |
 

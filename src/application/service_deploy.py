@@ -272,6 +272,7 @@ def build_service_profile(
     markets: list[str],
     service_names: list[str],
     config_paths: dict[str, Path],
+    config_authoring: dict[str, Any] | None = None,
     env_file: Path | None = None,
     deploy_user: str | None = None,
     deploy_home: Path | None = None,
@@ -300,6 +301,8 @@ def build_service_profile(
         "config_paths": {key: str(value) for key, value in config_paths.items()},
         "services": [{"name": name} for name in service_names],
     }
+    if config_authoring is not None:
+        profile["config_authoring"] = dict(config_authoring)
     if env_file is not None:
         profile["env_file"] = str(env_file)
     if deploy_user:
@@ -344,6 +347,7 @@ def render_service_bundle(
     accounts: list[str] | tuple[str, ...] | None = None,
     markets: list[str] | tuple[str, ...] | None = None,
     config_paths: dict[str, str | Path] | None = None,
+    config_yaml: str | Path | None = None,
     env_file: str | Path | None = None,
     deploy_user: str | None = None,
     deploy_home: str | Path | None = None,
@@ -376,6 +380,20 @@ def render_service_bundle(
         )
         for market in market_values
     }
+    config_yaml_path = (
+        _absolute_path_preserve_symlink(config_yaml, base=repo)
+        if config_yaml is not None and str(config_yaml).strip()
+        else None
+    )
+    config_authoring = (
+        {
+            "source": "yaml",
+            "config_yaml": str(config_yaml_path),
+            "markets": market_values,
+        }
+        if config_yaml_path is not None
+        else None
+    )
     om = str(repo / "om")
     om_agent = str(repo / "om-agent")
     lock_root = runtime / "locks"
@@ -875,6 +893,7 @@ def render_service_bundle(
         markets=market_values,
         service_names=service_names,
         config_paths=config_by_market,
+        config_authoring=config_authoring,
         env_file=env_file_path,
         deploy_user=systemd_user,
         deploy_home=systemd_home,
@@ -1046,7 +1065,7 @@ def _check_runtime_config(path: Path, *, market: str) -> dict[str, Any]:
             "name": f"runtime_config_{market}",
             "status": "error",
             "message": "runtime config is missing generation metadata",
-            "value": {"path": str(path), "repair": f"./om config build --market {market} --output {shlex.quote(str(path))}"},
+            "value": {"path": str(path), "repair": f"./om config build --source legacy --market {market} --output {shlex.quote(str(path))}"},
         }
     return {"name": f"runtime_config_{market}", "status": "ok", "message": "runtime config metadata exists", "value": str(path)}
 

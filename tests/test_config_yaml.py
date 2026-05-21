@@ -10,6 +10,7 @@ from src.application.agent_tool_contracts import AgentToolError
 from src.application.config_defaults import DEFAULT_CONFIG, DEFAULT_CONFIG_REF
 from src.application.config_validator import validate_config
 from src.application.config_yaml import RESOLVED_KEY, resolve_yaml_runtime_config
+from src.application.config_yaml_init import init_yaml_config
 from src.application.runtime_config_freshness import GENERATED_KEY
 
 
@@ -108,6 +109,59 @@ def test_default_config_matches_legacy_system_json() -> None:
     system_json = json.loads((REPO_ROOT / "configs" / "system.json").read_text(encoding="utf-8"))
 
     assert DEFAULT_CONFIG == system_json
+
+
+def test_config_init_writes_starter_yaml_and_runtime_configs(tmp_path: Path) -> None:
+    output_path = tmp_path / "config.yaml"
+    runtime_dir = tmp_path / "runtime"
+
+    out = init_yaml_config(
+        repo_root=REPO_ROOT,
+        output_config_yaml_path=output_path,
+        runtime_output_dir=runtime_dir,
+        futu_acc_id="12345678",
+        account_label="lx",
+    )
+
+    assert out["ok"] is True
+    assert out["write_applied"] is True
+    assert output_path.exists()
+    assert (runtime_dir / "config.us.json").exists()
+    assert (runtime_dir / "config.hk.json").exists()
+    payload = yaml.safe_load(output_path.read_text(encoding="utf-8"))
+    assert payload["accounts"]["lx"]["futu_account_id"] == "12345678"
+    assert payload["markets"]["us"]["accounts"] == ["lx", "sy"]
+    assert payload["markets"]["hk"]["symbols"] == ["0700.HK", "9992.HK"]
+    us_cfg = json.loads((runtime_dir / "config.us.json").read_text(encoding="utf-8"))
+    hk_cfg = json.loads((runtime_dir / "config.hk.json").read_text(encoding="utf-8"))
+    assert us_cfg[GENERATED_KEY]["source_format"] == "yaml"
+    assert hk_cfg[GENERATED_KEY]["market"] == "hk"
+
+
+def test_config_init_cli_supports_dry_run(tmp_path: Path, capsys) -> None:
+    from src.interfaces.cli.main import main
+
+    output_path = tmp_path / "config.yaml"
+    runtime_dir = tmp_path / "runtime"
+
+    rc = main([
+        "config",
+        "init",
+        "--output",
+        str(output_path),
+        "--runtime-output-dir",
+        str(runtime_dir),
+        "--dry-run",
+    ])
+
+    assert rc == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["ok"] is True
+    assert out["dry_run"] is True
+    assert out["write_applied"] is False
+    assert "markets:" in out["yaml"]
+    assert not output_path.exists()
+    assert not runtime_dir.exists()
 
 
 def test_yaml_config_requires_explicit_market(tmp_path: Path) -> None:

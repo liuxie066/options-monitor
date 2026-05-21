@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 1.2.111 - 2026-05-21
+
+### Added
+- Added `om config init` to generate a starter `config.yaml` and build US/HK runtime config snapshots for first-run setup.
+- Added YAML authoring metadata to rendered service profiles so `update apply` can rebuild runtime configs from `config.yaml`.
+
+### Changed
+- Made `om config build` and `om config explain` default to YAML authoring, with explicit `--source legacy` required for deprecated JSON overlay inputs.
+- Marked `om setup init`, legacy JSON authoring, service rendering without `--config-yaml`, and runtime JSON `config set` writes with deprecation or boundary warnings.
+- Updated operator and agent docs around `config.yaml` authoring, generated runtime snapshots, YAML-aware service updates, and first-run smoke checks.
+
+### Fixed
+- Rejected mixed YAML/runtime flags in `om config validate`, keeping authoring validation and generated runtime snapshot validation separate.
+
 ## 1.2.110 - 2026-05-21
 
 ### Fixed

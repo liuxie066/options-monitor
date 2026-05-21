@@ -72,7 +72,7 @@ om-agent run --tool <tool-name> --input-file payload.json
 | `version_check` | `om version` |
 | `version_update` | Agent-only local `VERSION` update helper |
 | `config_validate` | `om config validate` |
-| runtime config read/write | `om config get` / `om config set` |
+| runtime config read / emergency write | `om config get` / `om config set` |
 | `scheduler_status` | `om scheduler` 的只读判定部分 |
 | `scan_opportunities` | `om scan` / `om scan-pipeline` |
 | `candidate_rank_explain` | Agent-only read existing candidate CSV ranking explanations |
@@ -139,8 +139,7 @@ om config validate --config-path config.hk.json --market hk
 om config validate --config-path config.us.json --market us
 ```
 
-`tick-cron` 也会在真实 tick 前检查 runtime config 的 `_generated` 指纹；当 `config.yaml` 或 legacy 分层 user config 更新后未重新 `config build`，会以 `[CONFIG_ERROR]` 失败并打印重建命令。`--allow-stale-config`
-只用于临时应急。
+`tick-cron` 也会在真实 tick 前检查 runtime config 的 `_generated` 指纹；当 `config.yaml` 更新后未重新 `config build --source yaml`，会以 `[CONFIG_ERROR]` 失败并打印重建命令。旧安装的 legacy 分层 user config 仍可兼容检查，但该 authoring 路径已 deprecated。`--allow-stale-config` 只用于临时应急。
 
 ### Setup 入口关系
 
@@ -156,10 +155,13 @@ om setup check --no-local-env-file
 推荐 authoring 入口是 `config.yaml`：
 
 ```bash
-cp configs/examples/config.yaml.example config.yaml
+om config init --output config.yaml --runtime-output-dir .
 om config validate --source yaml --market us
 om config build --source yaml --market us --output config.us.json
 ```
+
+`config init` 默认写 `config.yaml` 并生成 `config.us.json` / `config.hk.json`；`--dry-run` 只预览 YAML，`--force` 才覆盖已有 starter/runtime 文件。
+`config build` / `config explain` 默认读取 YAML；legacy JSON 只在显式 `--source legacy` 时使用。
 
 已有 legacy `configs/user.*.json` 时先迁移：
 
@@ -168,11 +170,14 @@ om config migrate-yaml --output config.yaml
 om config migrate-yaml --output config.yaml --apply
 ```
 
-生成 starter runtime config 的兼容入口：
+历史兼容入口 `om setup init` 仍保留，但已 deprecated。新安装不要再用它生成人工维护的
+runtime JSON；需要从旧 `configs/user.*.json` 迁移时使用 `om config migrate-yaml`。
 
 ```bash
 om setup init --market us --account lx --futu-acc-id <futu-account-id>
 ```
+
+这条路径只作为旧脚本兼容面存在，输出会带 deprecation warning。
 
 写入命令的语义统一为：默认只读或 dry-run；`--apply` 允许本地文件/状态写入；`--confirm` 允许交易事件、Feishu、服务变更这类高风险写入；`--yes` 用于非交互脚本，等价显式确认并在输出里带 `audit_id`。结构化输出统一包含 `dry_run`、`write_applied`、`backup_path`、`audit_id`、`rollback_hint`。
 
@@ -193,8 +198,29 @@ manual trade / trade-intake 会优先使用 runtime root 或 runtime config 路�
 Linux / Mac 长期运行建议先渲染服务文件，再由系统服务管理器安装：
 
 ```bash
-om service render --target systemd --runtime-root /var/lib/options-monitor --env-file /etc/options-monitor/options-monitor.env --markets us hk --accounts lx sy --include-feishu-ws --output-dir /tmp/options-monitor-service
-om service render --target launchd --runtime-root "$HOME/Library/Application Support/options-monitor" --env-file "$HOME/Library/Application Support/options-monitor/options-monitor.env" --markets us hk --accounts lx sy --output-dir /tmp/options-monitor-service
+om service render \
+  --target systemd \
+  --runtime-root /var/lib/options-monitor \
+  --env-file /etc/options-monitor/options-monitor.env \
+  --markets us hk \
+  --accounts lx sy \
+  --config-yaml /var/lib/options-monitor/config.yaml \
+  --config-us /var/lib/options-monitor/config.us.json \
+  --config-hk /var/lib/options-monitor/config.hk.json \
+  --include-feishu-ws \
+  --output-dir /tmp/options-monitor-service
+
+om service render \
+  --target launchd \
+  --runtime-root "$HOME/Library/Application Support/options-monitor" \
+  --env-file "$HOME/Library/Application Support/options-monitor/options-monitor.env" \
+  --markets us hk \
+  --accounts lx sy \
+  --config-yaml "$HOME/Library/Application Support/options-monitor/config.yaml" \
+  --config-us "$HOME/Library/Application Support/options-monitor/config.us.json" \
+  --config-hk "$HOME/Library/Application Support/options-monitor/config.hk.json" \
+  --output-dir /tmp/options-monitor-service
+
 om service preflight --runtime-root /var/lib/options-monitor --env-file /etc/options-monitor/options-monitor.env --config-us config.us.json --config-hk config.hk.json --accounts lx sy
 om service repair-output --runtime-root /var/lib/options-monitor --default-account lx --confirm
 om settings doctor
@@ -208,7 +234,7 @@ om service drift --runtime-root /var/lib/options-monitor
 om-agent run --tool runtime_status --input-json '{"profile_path":"/var/lib/options-monitor/service.profile.json"}'
 ```
 
-`service render` 只生成 service/timer/plist/profile 文件和安装命令，不会自动安装或启动。systemd 的 `--env-file` 会写入 `EnvironmentFile=...`；launchd 的 `--env-file` 会写入 `EnvironmentVariables.OM_ENV_FILE=...`，两者都用于加载本机 Feishu 凭证环境变量。systemd unit 始终写入 `OM_RUNTIME_ROOT`；只有显式传 `--deploy-user` 或设置 `OM_DEPLOY_USER` / `DEPLOY_USER` 时，才会写入 `User=<deploy_user>` 和默认 `HOME=/home/<deploy_user>`。HOME 不在默认位置时用 `--deploy-home` 覆盖。启用 `--include-feishu-ws` 时会额外生成 `options-monitor-feishu-ws.service` / `com.options-monitor.feishu-ws.plist`，通过飞书长连接接收消息，不需要公网 HTTPS callback、反向代理或 tunnel，并会使用 runtime locks 目录下的 `feishu-ws.lock` 防止多实例抢同一个 App。启用 `--include-auto-upgrade` 时，`--repo-root` 会保留传入的 symlink 路径，默认 config path 会使用 runtime root 下的 `config.us.json` / `config.hk.json`，避免生产配置随 release 目录漂移。当前自动升级的 rebuild/recover 路径仍基于 legacy `configs/user*.json` overlay；使用 `config.yaml` authoring 的部署，要把 YAML 和生成后的 runtime config 放在 release 目录外，并在启用自动升级前确认 YAML rebuild 方案。`service preflight` 是只读部署前检查；`service repair-output` 默认 dry-run，只有带 `--confirm` 或 `--yes` 才会迁移真实目录并创建 `output` symlink。
+`service render` 只生成 service/timer/plist/profile 文件和安装命令，不会自动安装或启动。systemd 的 `--env-file` 会写入 `EnvironmentFile=...`；launchd 的 `--env-file` 会写入 `EnvironmentVariables.OM_ENV_FILE=...`，两者都用于加载本机 Feishu 凭证环境变量。systemd unit 始终写入 `OM_RUNTIME_ROOT`；只有显式传 `--deploy-user` 或设置 `OM_DEPLOY_USER` / `DEPLOY_USER` 时，才会写入 `User=<deploy_user>` 和默认 `HOME=/home/<deploy_user>`。HOME 不在默认位置时用 `--deploy-home` 覆盖。启用 `--include-feishu-ws` 时会额外生成 `options-monitor-feishu-ws.service` / `com.options-monitor.feishu-ws.plist`，通过飞书长连接接收消息，不需要公网 HTTPS callback、反向代理或 tunnel，并会使用 runtime locks 目录下的 `feishu-ws.lock` 防止多实例抢同一个 App。启用 `--include-auto-upgrade` 时，`--repo-root` 会保留传入的 symlink 路径，默认 config path 会使用 runtime root 下的 `config.us.json` / `config.hk.json`，避免生产配置随 release 目录漂移。传入 `--config-yaml` 后，profile 会记录 YAML authoring source；后续 `update apply` 会用 `config build --source yaml --config-yaml <path>` 重建 runtime config，不再要求 legacy overlay。`service preflight` 是只读部署前检查；`service repair-output` 默认 dry-run，只有带 `--confirm` 或 `--yes` 才会迁移真实目录并创建 `output` symlink。
 
 `service drift` 会用当前 release 的 `render_service_bundle()` 重新生成期望 service/timer，再和 `$RUNTIME/service.profile.json` 以及 systemd unit 文件对比。默认只读；带 `--confirm` 或 `--yes` 时只写入缺失 unit/profile、执行 `systemctl daemon-reload`，并 `enable --now` 缺失 timer，不会自动启用或重启新增长期 service。`runtime_status` 同样会暴露 service drift 摘要；缺失 `options-monitor-projection-verify.timer` 这类维护 timer 会作为 warning/error 返回。
 

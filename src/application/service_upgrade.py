@@ -824,13 +824,35 @@ def _profile_runtime_config_targets(profile: dict[str, Any]) -> list[dict[str, s
     markets = [str(item).strip().lower() for item in raw_markets] if isinstance(raw_markets, list) else []
     raw_config_paths = profile.get("config_paths")
     config_paths: dict[Any, Any] = raw_config_paths if isinstance(raw_config_paths, dict) else {}
+    raw_authoring = profile.get("config_authoring")
+    authoring = raw_authoring if isinstance(raw_authoring, dict) else {}
+    authoring_source = str(authoring.get("source") or "legacy").strip().lower()
+    authoring_yaml = str(authoring.get("config_yaml") or "").strip()
+    raw_authoring_markets = authoring.get("markets")
+    authoring_markets = {
+        str(item).strip().lower()
+        for item in raw_authoring_markets
+    } if isinstance(raw_authoring_markets, list) else set(markets)
+    raw_config_sources = profile.get("config_sources")
+    config_sources: dict[Any, Any] = raw_config_sources if isinstance(raw_config_sources, dict) else {}
     targets: list[dict[str, str]] = []
     for market in markets:
         if market not in {"us", "hk"}:
             continue
         path = str(config_paths.get(market) or "").strip()
         if path:
-            targets.append({"market": market, "config_path": path})
+            target = {"market": market, "config_path": path, "source": "legacy"}
+            raw_market_source = config_sources.get(market)
+            market_source = raw_market_source if isinstance(raw_market_source, dict) else {}
+            source = str(market_source.get("source") or "").strip().lower()
+            config_yaml = str(market_source.get("config_yaml") or "").strip()
+            if source == "yaml" and config_yaml:
+                target["source"] = "yaml"
+                target["config_yaml"] = config_yaml
+            elif authoring_source == "yaml" and authoring_yaml and market in authoring_markets:
+                target["source"] = "yaml"
+                target["config_yaml"] = authoring_yaml
+            targets.append(target)
     return targets
 
 
@@ -1085,9 +1107,36 @@ def _rebuild_and_validate_runtime_configs(
     for item in targets:
         market = item["market"]
         config_path = item["config_path"]
+        source = str(item.get("source") or "legacy").strip().lower()
+        config_yaml = str(item.get("config_yaml") or "").strip()
+        build_command = ["./om", "config", "build", "--source", "legacy", "--market", market, "--output", config_path]
+        manual_rebuild = f"manual_rebuild: cd {cwd} && ./om config build --source legacy --market {market} --output {config_path}"
+        if source == "yaml":
+            if not config_yaml:
+                raise RuntimeConfigPrepareError(
+                    f"missing YAML authoring source for runtime config target {market}: {config_path}",
+                    remediation=["rerender_service_profile: ./om service render ... --config-yaml <path>"],
+                )
+            build_command = [
+                "./om",
+                "config",
+                "build",
+                "--source",
+                "yaml",
+                "--market",
+                market,
+                "--config-yaml",
+                config_yaml,
+                "--output",
+                config_path,
+            ]
+            manual_rebuild = (
+                f"manual_rebuild: cd {cwd} && ./om config build --source yaml "
+                f"--market {market} --config-yaml {config_yaml} --output {config_path}"
+            )
         try:
             _run_required(
-                ["./om", "config", "build", "--market", market, "--output", config_path],
+                build_command,
                 cwd=cwd,
                 run_cmd=run_cmd,
                 operations=operations,
@@ -1104,12 +1153,12 @@ def _rebuild_and_validate_runtime_configs(
             raise RuntimeConfigPrepareError(
                 f"failed to {phase} rebuild/validate runtime config for {market}: {config_path}",
                 remediation=[
-                    f"manual_rebuild: cd {cwd} && ./om config build --market {market} --output {config_path}",
+                    manual_rebuild,
                     f"manual_validate: cd {cwd} && ./om config validate --config-path {config_path} --market {market}",
                     f"inspect_last_operation: {exc}",
                 ],
             ) from exc
-        rebuilt.append({"market": market, "config_path": config_path, "phase": phase})
+        rebuilt.append({"market": market, "config_path": config_path, "source": source, "phase": phase})
     return rebuilt
 
 
@@ -1127,22 +1176,27 @@ def _prepare_runtime_configs_for_release(
     if not targets:
         return {"status": "skipped", "reason": "service profile has no runtime config targets"}
 
-    markets = [item["market"] for item in targets]
-    overlays = _migrate_user_overlay_configs(
-        previous_dir=previous_dir,
-        target_dir=target_dir,
-        runtime_root=runtime_root,
-        releases_root=releases_root,
-        targets=targets,
-        markets=markets,
-    )
-    missing = _missing_user_overlay_configs(target_dir=target_dir, markets=markets)
-    if missing:
-        raise RuntimeConfigPrepareError(
-            "release is missing required market user config overlays",
-            remediation=_runtime_config_remediation(runtime_root=runtime_root, target_dir=target_dir, missing=missing),
+    legacy_targets = [item for item in targets if str(item.get("source") or "legacy").strip().lower() != "yaml"]
+    legacy_markets = [item["market"] for item in legacy_targets]
+    overlays: list[dict[str, str]] = []
+    missing: list[Path] = []
+    preserved_hotfixes: list[dict[str, str]] = []
+    if legacy_targets:
+        overlays = _migrate_user_overlay_configs(
+            previous_dir=previous_dir,
+            target_dir=target_dir,
+            runtime_root=runtime_root,
+            releases_root=releases_root,
+            targets=legacy_targets,
+            markets=legacy_markets,
         )
-    preserved_hotfixes = _preserve_runtime_config_hotfixes(target_dir=target_dir, targets=targets)
+        missing = _missing_user_overlay_configs(target_dir=target_dir, markets=legacy_markets)
+        if missing:
+            raise RuntimeConfigPrepareError(
+                "release is missing required market user config overlays",
+                remediation=_runtime_config_remediation(runtime_root=runtime_root, target_dir=target_dir, missing=missing),
+            )
+        preserved_hotfixes = _preserve_runtime_config_hotfixes(target_dir=target_dir, targets=legacy_targets)
 
     rebuilt = _rebuild_and_validate_runtime_configs(
         targets=targets,
@@ -1152,7 +1206,13 @@ def _prepare_runtime_configs_for_release(
         phase="pre_switch",
     )
 
-    return {"status": "prepared", "targets": targets, "overlays": overlays, "preserved_hotfixes": preserved_hotfixes, "rebuilt": rebuilt}
+    return {
+        "status": "prepared",
+        "targets": targets,
+        "overlays": overlays,
+        "preserved_hotfixes": preserved_hotfixes,
+        "rebuilt": rebuilt,
+    }
 
 
 def _upgrade_installer_mode() -> str:

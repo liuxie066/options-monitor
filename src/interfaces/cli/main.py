@@ -17,6 +17,7 @@ from src.application.config_yaml import (
     explain_yaml_config_key,
     validate_yaml_runtime_config,
 )
+from src.application.config_yaml_init import init_yaml_config
 from src.application.config_yaml_migration import preview_config_yaml_migration
 from src.application.healthcheck import run_healthcheck
 from src.application.inbound import (
@@ -68,8 +69,79 @@ from src.application.cash_headroom_query import query_sell_put_cash
 from src.application.write_contract import attach_write_contract
 
 
+LEGACY_CONFIG_AUTHORING_DEPRECATION_WARNING = (
+    "legacy JSON config authoring is deprecated; use `om config init` for new installs "
+    "or `om config migrate-yaml` for existing configs, then build runtime snapshots with "
+    "`om config build --source yaml`."
+)
+SETUP_INIT_DEPRECATION_WARNING = (
+    "`om setup init` is deprecated for config authoring; use "
+    "`om config init --output config.yaml --runtime-output-dir .`."
+)
+SERVICE_RENDER_LEGACY_AUTHORING_WARNING = (
+    "`om service render` without `--config-yaml` creates a legacy config profile; pass "
+    "`--config-yaml <path>` so `om update apply` can rebuild runtime config from YAML."
+)
+RUNTIME_CONFIG_SET_DEPRECATION_WARNING = (
+    "`om config set` edits generated runtime JSON; for durable config changes edit "
+    "`config.yaml` and rebuild with `om config build --source yaml`."
+)
+
+
 def _dumps(payload: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+
+
+def _with_warning(payload: dict[str, Any], warning: str) -> dict[str, Any]:
+    out = dict(payload)
+    raw_warnings = out.get("warnings")
+    warnings = [str(item) for item in raw_warnings if str(item).strip()] if isinstance(raw_warnings, list) else []
+    if warning not in warnings:
+        warnings.append(warning)
+    out["warnings"] = warnings
+    return out
+
+
+def _reject_legacy_config_flags_without_legacy_source(args: argparse.Namespace) -> None:
+    legacy_flags = []
+    if str(getattr(args, "common_user_config", "") or "").strip():
+        legacy_flags.append("--common-user-config")
+    if bool(getattr(args, "no_common_user_config", False)):
+        legacy_flags.append("--no-common-user-config")
+    if str(getattr(args, "user_config", "") or "").strip():
+        legacy_flags.append("--user-config")
+    if legacy_flags:
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message="legacy JSON config flags require --source legacy",
+            details={"flags": legacy_flags},
+            hint="Use --source legacy for old configs, or migrate with `om config migrate-yaml` and use config.yaml.",
+        )
+
+
+def _reject_runtime_validate_flags_for_yaml_source(args: argparse.Namespace) -> None:
+    runtime_flags = []
+    if str(getattr(args, "config_key", "") or "").strip():
+        runtime_flags.append("--config-key")
+    if str(getattr(args, "config_path", "") or "").strip():
+        runtime_flags.append("--config-path")
+    if runtime_flags:
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message="runtime config flags cannot be used with --source yaml",
+            details={"flags": runtime_flags},
+            hint="Use `om config validate --source yaml --market <market> --config-yaml <path>` for authoring, or `om config validate --config-path <runtime-json> --market <market>` for generated runtime config.",
+        )
+
+
+def _reject_yaml_validate_flags_for_runtime_source(args: argparse.Namespace) -> None:
+    if str(getattr(args, "config_yaml", "") or "").strip():
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message="--config-yaml requires --source yaml",
+            details={"flags": ["--config-yaml"]},
+            hint="Use `om config validate --source yaml --market <market> --config-yaml <path>` for authoring, or pass generated JSON via --config-path.",
+        )
 
 
 def _confirmed(args: argparse.Namespace) -> bool:
@@ -294,14 +366,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     config = sub.add_parser("config", help="config operations")
     config_sub = config.add_subparsers(dest="config_command", required=True)
+    init_config = config_sub.add_parser("init", help="generate starter config.yaml and runtime configs")
+    init_config.add_argument("--output", default=None, help="config.yaml path; defaults to repo-local config.yaml")
+    init_config.add_argument("--runtime-output-dir", default=None, help="directory for generated config.us.json/config.hk.json")
+    init_config.add_argument("--market", action="append", choices=("us", "hk", "all"), default=None)
+    init_config.add_argument("--futu-acc-id", default=None, help="Futu account id; omitted keeps a placeholder in config.yaml")
+    init_config.add_argument("--account-label", "--account", dest="account_label", default="lx")
+    init_config.add_argument("--external-holdings-account", default="sy")
+    init_config.add_argument("--no-external-holdings", action="store_true")
+    init_config.add_argument("--us-symbol", action="append", dest="us_symbols", default=None)
+    init_config.add_argument("--hk-symbol", action="append", dest="hk_symbols", default=None)
+    init_config.add_argument("--no-build", action="store_true", help="only write config.yaml; do not build runtime JSON")
+    init_config.add_argument("--dry-run", action="store_true", help="preview starter YAML without writing files")
+    init_config.add_argument("--force", action="store_true")
     validate = config_sub.add_parser("validate", help="validate runtime config")
     validate.add_argument("--source", default="runtime", choices=("runtime", "yaml"))
     validate.add_argument("--config-yaml", default=None)
     validate.add_argument("--config-key", default=None, choices=("us", "hk"))
     validate.add_argument("--config-path", default=None)
     validate.add_argument("--market", default=None, choices=("us", "hk"))
-    build = config_sub.add_parser("build", help="build canonical runtime config from system/user config")
-    build.add_argument("--source", default="legacy", choices=("legacy", "yaml"))
+    build = config_sub.add_parser("build", help="build canonical runtime config from config.yaml or legacy JSON")
+    build.add_argument("--source", default="yaml", choices=("yaml", "legacy"), help="authoring source; defaults to yaml, legacy JSON is deprecated")
     build.add_argument("--config-yaml", default=None)
     build.add_argument("--market", required=True, choices=("us", "hk"))
     build.add_argument("--system-config", default=None)
@@ -311,7 +396,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     build.add_argument("--output", default=None)
     build.add_argument("--dry-run", action="store_true")
     explain = config_sub.add_parser("explain", help="explain a layered config key")
-    explain.add_argument("--source", default="legacy", choices=("legacy", "yaml"))
+    explain.add_argument("--source", default="yaml", choices=("yaml", "legacy"), help="authoring source; defaults to yaml, legacy JSON is deprecated")
     explain.add_argument("--config-yaml", default=None)
     explain.add_argument("--market", required=True, choices=("us", "hk"))
     explain.add_argument("--key", required=True)
@@ -401,6 +486,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     service_render.add_argument("--markets", nargs="+", choices=("us", "hk"), default=None)
     service_render.add_argument("--config-us", default=None)
     service_render.add_argument("--config-hk", default=None)
+    service_render.add_argument("--config-yaml", default=None, help="YAML authoring source recorded in service.profile.json for update rebuilds")
     service_render.add_argument("--env-file", default=None, help="service env-file path for local secrets/env values")
     service_render.add_argument("--deploy-user", default=None, help="systemd User= identity; also accepted from OM_DEPLOY_USER/DEPLOY_USER")
     service_render.add_argument("--deploy-home", default=None, help="systemd HOME environment; defaults to /home/<deploy-user>")
@@ -522,7 +608,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     setup_check.add_argument("--market", action="append", choices=("us", "hk", "all"), default=None)
     setup_check.add_argument("--env-file", default=None)
     setup_check.add_argument("--no-local-env-file", action="store_true")
-    setup_init = setup_sub.add_parser("init", help="generate starter runtime config")
+    setup_init = setup_sub.add_parser("init", help="deprecated: generate starter runtime config")
     _add_setup_init_args(setup_init, required=True)
 
     run = sub.add_parser("run", help="run long-lived workflows")
@@ -977,6 +1063,7 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "config" and args.config_command == "validate":
             if args.source == "yaml":
+                _reject_runtime_validate_flags_for_yaml_source(args)
                 if not args.market:
                     raise AgentToolError(code="INPUT_ERROR", message="--market is required when --source yaml")
                 return _print(validate_yaml_runtime_config(
@@ -984,10 +1071,12 @@ def main(argv: list[str] | None = None) -> int:
                     market=args.market,
                     config_path=args.config_yaml,
                 ))
+            _reject_yaml_validate_flags_for_runtime_source(args)
             return _print(_validate_runtime_config(config_key=args.config_key, config_path=args.config_path, market=args.market))
 
         if args.command == "config" and args.config_command == "build":
             if args.source == "yaml":
+                _reject_legacy_config_flags_without_legacy_source(args)
                 return _print(build_yaml_runtime_config_file(
                     repo_root=repo_base(),
                     market=args.market,
@@ -996,7 +1085,7 @@ def main(argv: list[str] | None = None) -> int:
                     output_config_path=args.output,
                     dry_run=bool(args.dry_run),
                 ))
-            return _print(build_layered_runtime_config_file(
+            return _print(_with_warning(build_layered_runtime_config_file(
                 repo_root=repo_base(),
                 market=args.market,
                 system_config_path=args.system_config,
@@ -1005,10 +1094,11 @@ def main(argv: list[str] | None = None) -> int:
                 user_config_path=args.user_config,
                 output_config_path=args.output,
                 dry_run=bool(args.dry_run),
-            ))
+            ), LEGACY_CONFIG_AUTHORING_DEPRECATION_WARNING))
 
         if args.command == "config" and args.config_command == "explain":
             if args.source == "yaml":
+                _reject_legacy_config_flags_without_legacy_source(args)
                 return _print(explain_yaml_config_key(
                     repo_root=repo_base(),
                     market=args.market,
@@ -1016,7 +1106,7 @@ def main(argv: list[str] | None = None) -> int:
                     config_path=args.config_yaml,
                     system_config_path=args.system_config,
                 ))
-            return _print(explain_layered_runtime_config_key(
+            return _print(_with_warning(explain_layered_runtime_config_key(
                 repo_root=repo_base(),
                 market=args.market,
                 key=args.key,
@@ -1024,7 +1114,7 @@ def main(argv: list[str] | None = None) -> int:
                 common_user_config_path=args.common_user_config,
                 include_common_user_config=not bool(args.no_common_user_config),
                 user_config_path=args.user_config,
-            ))
+            ), LEGACY_CONFIG_AUTHORING_DEPRECATION_WARNING))
 
         if args.command == "config" and args.config_command == "migrate-yaml":
             return _print(preview_config_yaml_migration(
@@ -1038,6 +1128,22 @@ def main(argv: list[str] | None = None) -> int:
                 output_config_yaml_path=args.output,
                 apply=bool(args.apply or args.yes),
                 backup=not bool(args.no_backup),
+            ))
+
+        if args.command == "config" and args.config_command == "init":
+            return _print(init_yaml_config(
+                repo_root=repo_base(),
+                output_config_yaml_path=args.output,
+                runtime_output_dir=args.runtime_output_dir,
+                markets=args.market,
+                futu_acc_id=args.futu_acc_id,
+                account_label=args.account_label,
+                external_holdings_account=None if bool(args.no_external_holdings) else args.external_holdings_account,
+                us_symbols=args.us_symbols,
+                hk_symbols=args.hk_symbols,
+                build=not bool(args.no_build),
+                dry_run=bool(args.dry_run),
+                force=bool(args.force),
             ))
 
         if args.command == "config" and args.config_command == "get":
@@ -1065,6 +1171,7 @@ def main(argv: list[str] | None = None) -> int:
                     confirm=bool(args.confirm or args.yes),
                     backup=not bool(args.no_backup),
                 ),
+                warnings=[RUNTIME_CONFIG_SET_DEPRECATION_WARNING],
             ))
 
         if args.command == "settings" and args.settings_command == "inspect":
@@ -1175,6 +1282,7 @@ def main(argv: list[str] | None = None) -> int:
                 accounts=args.accounts,
                 markets=args.markets,
                 config_paths=config_paths,
+                config_yaml=args.config_yaml,
                 env_file=args.env_file,
                 deploy_user=args.deploy_user,
                 deploy_home=args.deploy_home,
@@ -1190,7 +1298,8 @@ def main(argv: list[str] | None = None) -> int:
                     for item in bundle.get("files", []):
                         if isinstance(item, dict):
                             item.pop("content", None)
-            return _print(build_response(tool_name="service.render", ok=True, data=bundle))
+            warnings = [] if args.config_yaml else [SERVICE_RENDER_LEGACY_AUTHORING_WARNING]
+            return _print(build_response(tool_name="service.render", ok=True, data=bundle, warnings=warnings))
 
         if args.command == "service" and args.service_command == "preflight":
             config_paths = {
@@ -1352,7 +1461,7 @@ def main(argv: list[str] | None = None) -> int:
                 opend_host=args.opend_host,
                 opend_port=args.opend_port,
                 force=bool(args.force),
-            )))
+            ), warnings=[SETUP_INIT_DEPRECATION_WARNING]))
 
         if args.command == "multiplier-cache" and args.multiplier_cache_command == "seed":
             from src.application.multiplier_cache import seed_multiplier_cache

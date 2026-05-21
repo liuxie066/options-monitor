@@ -134,7 +134,7 @@ def run_setup_check(
                 "warn",
                 f"{market.upper()} runtime config is missing",
                 {"config_path": str(config_path)},
-                hint=f"./om setup init --market {market} --account lx --futu-acc-id <futu-account-id>",
+                hint="./om config init --output config.yaml --runtime-output-dir .",
             )
             continue
         try:
@@ -262,8 +262,7 @@ def _next_steps(
     steps: list[str] = []
     missing_markets = [market for market in selected_markets if market not in config_ok_markets]
     if missing_markets:
-        market = missing_markets[0]
-        steps.append(f"./om setup init --market {market} --account lx --futu-acc-id <futu-account-id>")
+        steps.append("./om config init --output config.yaml --runtime-output-dir .")
     settings_summary_raw = settings.get("summary")
     settings_summary: dict[str, Any] = settings_summary_raw if isinstance(settings_summary_raw, dict) else {}
     if int(settings_summary.get("warning_count") or 0) or int(settings_summary.get("error_count") or 0):
