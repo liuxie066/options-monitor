@@ -179,6 +179,10 @@ def test_settings_doctor_reports_inbound_trade_write_gate_readiness(tmp_path) ->
         "OM_INBOUND_OPERATIONS_ENABLED",
         "OM_INBOUND_TRADE_WRITE_ENABLED",
     ]
+    assert checks["inbound_upgrade_write_readiness"]["value"]["missing_enabled_env"] == [
+        "OM_INBOUND_OPERATIONS_ENABLED",
+        "OM_INBOUND_UPGRADE_WRITE_ENABLED",
+    ]
 
 
 def test_cli_settings_explain_outputs_redacted_json(tmp_path, capsys) -> None:

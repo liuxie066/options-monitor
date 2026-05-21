@@ -50,7 +50,7 @@ The first implementation is read-only and deterministic. It supports:
 | `最近运行` | `runtime_runs` |
 | `日志 <run_id>` | `runtime_logs` |
 
-Only this pure-read whitelist is enabled. Tools that write local reports or cache files, send notifications, mutate config, or touch broker state are not available through inbound control.
+Read commands use the pure-read whitelist. Admin write operations are separate and must pass sender allowlist, operation gates, preview storage, and explicit confirmation before applying.
 
 ## Sender Allowlist
 
@@ -213,12 +213,26 @@ If it is added later, it must only translate natural language into a structured 
 
 ## Write Actions
 
-Write actions are out of scope for the first inbound version.
+Inbound write actions are opt-in. Set `OM_INBOUND_OPERATIONS_ENABLED=1`, configure `OM_INBOUND_ADMIN_OPEN_IDS`, then enable only the required operation family:
 
-Future write actions must use:
+```bash
+export OM_INBOUND_TRADE_WRITE_ENABLED=1
+export OM_INBOUND_SYMBOL_WRITE_ENABLED=1
+export OM_INBOUND_UPGRADE_WRITE_ENABLED=1
+```
+
+Write actions use:
 
 ```text
 request -> preview -> command_id -> explicit confirmation -> re-validate -> execute -> receipt
 ```
 
-Broker writes and real trade actions should be the last capability enabled, after preview and confirmation flows are proven.
+Supported write commands:
+
+| Text | Preview intent | Confirm | Cancel |
+| --- | --- | --- | --- |
+| `记录开仓 ...` / `记录平仓 ...` | `manual_trade_*` | `确认记录 [operation_id]` | `取消记录 [operation_id]` |
+| `增加/修改/删除监控标的 ...` | `symbol_*` | `确认监控 [operation_id]` | `取消监控 [operation_id]` |
+| `立即升级` / `立即升级到 v1.2.111` | `upgrade_now` | `确认升级 [operation_id]` | `取消升级 [operation_id]` |
+
+`立即升级` delegates to the same service upgrade path as `./om update apply --auto --confirm`. The preview does not switch releases; confirmation runs the upgrade and restarts services according to the deployment profile.

@@ -16,6 +16,7 @@ from src.application.inbound.parser import parse_inbound_text
 from src.application.inbound.policy import enforce_sender_allowed, enforce_tool_allowed
 from src.application.inbound.renderer import HELP_TEXT, render_inbound_text, render_pending_operations
 from src.application.inbound.symbol_operations import handle_symbol_operation, is_symbol_operation_intent
+from src.application.inbound.upgrade_operations import handle_upgrade_operation, is_upgrade_operation_intent
 from src.application.tool_execution import execute_tool
 
 
@@ -199,6 +200,35 @@ def handle_inbound_request(
                 intent=intent,
                 sender_decision=sender_decision.public_payload(),
                 reason="symbol_operation",
+                audit_db=store.path,
+            )
+            decision = "allowed"
+            return _record_and_return(
+                store=store,
+                request=normalized_request,
+                command_id=command_id,
+                created_at=created_at,
+                intent=intent,
+                call=call,
+                decision=decision,
+                response=response,
+            )
+
+        if is_upgrade_operation_intent(intent):
+            call = InboundToolCall(tool_name="inbound.upgrade", payload=dict(intent.arguments))
+            operation_result = handle_upgrade_operation(
+                intent,
+                normalized_request,
+                command_id=command_id,
+                store=InboundOperationStore(store.path),
+            )
+            response = _operation_response(
+                operation_result,
+                command_id=command_id,
+                request=normalized_request,
+                intent=intent,
+                sender_decision=sender_decision.public_payload(),
+                reason="upgrade_operation",
                 audit_db=store.path,
             )
             decision = "allowed"
