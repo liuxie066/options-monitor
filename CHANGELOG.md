@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 1.2.117 - 2026-05-22
+
+### Fixed
+- Made `runtime_status` auto-load the runtime `service.profile.json` after resolving the ledger runtime root, so Feishu status replies inspect production runtime paths instead of release-local fallback paths.
+- Made service upgrade locks recover from stale PID files while preserving active upgrade locks.
+- Kept failed upgrades for newer target versions classified as unrecovered runtime failures instead of historical failures.
+
 ## 1.2.116 - 2026-05-22
 
 ### Added

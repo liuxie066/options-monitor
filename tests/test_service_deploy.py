@@ -5,6 +5,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 
 def _write_upgrade_release_skeleton(path: Path, version: str) -> None:
     path.mkdir(parents=True, exist_ok=True)
@@ -16,6 +18,33 @@ def _write_upgrade_release_skeleton(path: Path, version: str) -> None:
     (path / "constraints.txt").write_text("-c constraints/runtime.txt\n", encoding="utf-8")
     (path / "requirements" / "runtime.txt").write_text("", encoding="utf-8")
     (path / "constraints" / "runtime.txt").write_text("", encoding="utf-8")
+
+
+def test_upgrade_lock_removes_stale_pid_file(tmp_path: Path) -> None:
+    from src.application.service_upgrade import _UpgradeLock
+
+    lock_path = tmp_path / "runtime" / "locks" / "upgrade.lock"
+    lock_path.parent.mkdir(parents=True)
+    lock_path.write_text("999999999\n", encoding="utf-8")
+
+    with _UpgradeLock(lock_path):
+        assert lock_path.read_text(encoding="utf-8") == str(os.getpid())
+
+    assert not lock_path.exists()
+
+
+def test_upgrade_lock_keeps_active_pid_file(tmp_path: Path) -> None:
+    from src.application.service_upgrade import _UpgradeLock
+
+    lock_path = tmp_path / "runtime" / "locks" / "upgrade.lock"
+    lock_path.parent.mkdir(parents=True)
+    lock_path.write_text(str(os.getpid()), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="upgrade lock already exists"):
+        with _UpgradeLock(lock_path):
+            pass
+
+    assert lock_path.exists()
 
 
 def test_render_systemd_bundle_uses_runtime_root_and_canonical_entrypoints(tmp_path: Path) -> None:
