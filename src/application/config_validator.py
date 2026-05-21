@@ -551,8 +551,8 @@ def validate_config(cfg: dict):
             die('agent.llm.max_output_tokens must be <= 4096')
     llm_enabled = bool(llm_agent.get('enabled')) if isinstance(llm_agent.get('enabled'), bool) else False
     llm_provider = str(llm_agent.get('provider') or '').strip()
-    if llm_provider and llm_provider != 'openai':
-        die('agent.llm.provider must be openai when set')
+    if llm_provider and llm_provider not in {'openai', 'deepseek'}:
+        die('agent.llm.provider must be one of: openai, deepseek')
     if llm_enabled:
         if not llm_provider:
             die('agent.llm.provider is required when agent.llm.enabled is true')
