@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.108 - 2026-05-21
+
+### Changed
+- Added installed global `om` / `om-agent` wrapper startup coverage to the release smoke gate, including repo-outside startup checks for `om --help`, `om setup check`, `om settings doctor`, and `om-agent spec`.
+
 ## 1.2.107 - 2026-05-21
 
 ### Changed

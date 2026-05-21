@@ -22,6 +22,21 @@ def _ensure_repo_on_path() -> Path:
     return base
 
 
+def _write_managed_wrapper(path: Path, target: Path) -> None:
+    path.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "# options-monitor managed wrapper",
+                f'exec "{target}" "$@"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+
+
 def _init_minimal_config(*, cfg_path: Path, data_cfg_path: Path, market: str = "us", symbols: list[str] | None = None) -> dict[str, object]:
     _ensure_repo_on_path()
 
@@ -82,6 +97,82 @@ def test_agent_launcher_spec_contract() -> None:
     assert any(str(x.get("name")) == "prepare_close_advice_inputs" for x in payload.get("tools", []))
     assert any(str(x.get("name")) == "close_advice" for x in payload.get("tools", []))
     assert any(str(x.get("name")) == "get_close_advice" for x in payload.get("tools", []))
+
+
+def test_installed_global_wrappers_work_outside_release_cwd() -> None:
+    base = _ensure_repo_on_path()
+    with tempfile.TemporaryDirectory() as td:
+        temp_root = Path(td)
+        prefix = temp_root / "prefix"
+        releases_dir = prefix / "releases"
+        release_root = releases_dir / "vtest"
+        current = prefix / "current"
+        bin_dir = temp_root / "bin"
+        outside = temp_root / "outside"
+
+        releases_dir.mkdir(parents=True)
+        bin_dir.mkdir()
+        outside.mkdir()
+        release_root.symlink_to(base, target_is_directory=True)
+        current.symlink_to(release_root, target_is_directory=True)
+        _write_managed_wrapper(bin_dir / "om", current / "om")
+        _write_managed_wrapper(bin_dir / "om-agent", current / "om-agent")
+        env_file = outside / "settings.env"
+        env_file.write_text("", encoding="utf-8")
+
+        env = os.environ.copy()
+        env["PATH"] = os.pathsep.join([str(bin_dir), env.get("PATH", "")])
+
+        om_wrapper = (bin_dir / "om").read_text(encoding="utf-8")
+        om_agent_wrapper = (bin_dir / "om-agent").read_text(encoding="utf-8")
+        assert f'exec "{current / "om"}" "$@"' in om_wrapper
+        assert f'exec "{current / "om-agent"}" "$@"' in om_agent_wrapper
+
+        help_proc = subprocess.run(
+            ["om", "--help"],
+            cwd=str(outside),
+            capture_output=True,
+            text=True,
+            check=True,
+            env=env,
+        )
+        assert "usage:" in help_proc.stdout
+
+        setup_proc = subprocess.run(
+            ["om", "setup", "check"],
+            cwd=str(outside),
+            capture_output=True,
+            text=True,
+            check=True,
+            env=env,
+        )
+        setup_payload = json.loads(setup_proc.stdout)
+        assert setup_payload["tool_name"] == "setup.check"
+        assert setup_payload["ok"] is True
+
+        settings_proc = subprocess.run(
+            ["om", "settings", "doctor", "--env-file", str(env_file)],
+            cwd=str(outside),
+            capture_output=True,
+            text=True,
+            check=True,
+            env=env,
+        )
+        settings_payload = json.loads(settings_proc.stdout)
+        assert settings_payload["tool_name"] == "settings.doctor"
+        assert settings_payload["ok"] is True
+        assert Path(settings_payload["data"]["env_file"]).resolve() == env_file.resolve()
+
+        spec_proc = subprocess.run(
+            ["om-agent", "spec"],
+            cwd=str(outside),
+            capture_output=True,
+            text=True,
+            check=True,
+            env=env,
+        )
+        spec_payload = json.loads(spec_proc.stdout)
+        assert spec_payload["name"] == "options-monitor-local-tools"
 
 
 def test_agent_internal_init_minimal_config() -> None:
@@ -382,6 +473,7 @@ def main() -> None:
     test_scanners_require_multiplier()
     test_cash_cap_is_best_effort()
     test_agent_launcher_spec_contract()
+    test_installed_global_wrappers_work_outside_release_cwd()
     test_agent_launcher_spec_prefers_broker_field()
     test_agent_internal_init_minimal_config()
     test_agent_internal_init_reuses_existing_data_config_across_markets()
