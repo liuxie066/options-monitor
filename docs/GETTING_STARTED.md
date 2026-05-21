@@ -4,12 +4,14 @@
 
 还没安装时先看 [INSTALL.md](INSTALL.md)。
 
+下文使用安装后的全局命令 `om`。如果你在源码 checkout 里工作，`./om` 也可以作为 fallback。
+
 ---
 
 ## 1. 先做只读检查
 
 ```bash
-./om setup check
+om setup check
 ```
 
 `setup check` 只读。它不会写配置、不会写 env-file、不会启动服务、不会创建定时任务、不会连接 OpenD 或 Feishu。
@@ -26,25 +28,51 @@
 如果要忽略本地 `.env/options-monitor.env`，做一次隔离检查：
 
 ```bash
-./om setup check --no-local-env-file
+om setup check --no-local-env-file
 ```
 
 ---
 
-## 2. 初始化 runtime config
+## 2. 初始化配置
 
-推荐入口：
+推荐先维护 `config.yaml`。它只保存用户 override；系统默认来自代码里的 `DEFAULT_CONFIG`，secrets 和写入开关放 env-file。
+下面的本地示例以 repo root 为工作目录；installer 安装后可以先 `cd "$HOME/apps/options-monitor/current"`。生产服务建议把 `config.yaml` 和生成后的 runtime config 放在 release 目录外，再显式传 `--config-yaml` / `--output`。
 
 ```bash
-./om setup init --market us --account lx --futu-acc-id <futu-account-id>
-./om setup init --market hk --account lx --futu-acc-id <futu-account-id>
+cp configs/examples/config.yaml.example config.yaml
+$EDITOR config.yaml
 ```
 
-初始化后先校验配置：
+YAML 使用空格缩进，不要用 tab；示例采用 2 个空格。港股代码这类可能被 YAML 误判的值建议加引号，例如 `"0700.HK"`。
+
+先校验 YAML 合并代码默认值后的结果：
 
 ```bash
-./om config validate --config-path config.us.json --market us
-./om config validate --config-path config.hk.json --market hk
+om config validate --source yaml --market us
+om config validate --source yaml --market hk
+```
+
+再生成运行时 JSON 快照并校验：
+
+```bash
+om config build --source yaml --market us --output config.us.json
+om config build --source yaml --market hk --output config.hk.json
+om config validate --config-path config.us.json --market us
+om config validate --config-path config.hk.json --market hk
+```
+
+已有 legacy `configs/user.*.json` 时，先预览迁移，确认后再写入 `config.yaml`：
+
+```bash
+om config migrate-yaml --output config.yaml
+om config migrate-yaml --output config.yaml --apply
+```
+
+只想快速生成 starter runtime config 时，可以用兼容入口：
+
+```bash
+om setup init --market us --account lx --futu-acc-id <futu-account-id>
+om setup init --market hk --account lx --futu-acc-id <futu-account-id>
 ```
 
 ---
@@ -76,10 +104,10 @@ $HOME/Library/Application Support/options-monitor/options-monitor.env
 ```bash
 mkdir -p .env
 cp -n configs/examples/options-monitor.env.example .env/options-monitor.env
-./om settings doctor
+om settings doctor
 ```
 
-长期服务使用的 env-file 应通过 `./om settings doctor --env-file <path>` 单独检查。
+长期服务使用的 env-file 应通过 `om settings doctor --env-file <path>` 单独检查。
 
 `settings doctor` 会脱敏显示来源和缺失项。
 
@@ -88,16 +116,25 @@ cp -n configs/examples/options-monitor.env.example .env/options-monitor.env
 ## 4. 跑系统诊断
 
 ```bash
-./om doctor --config-key us
-./om doctor --config-key hk
+om doctor --config-key us
+om doctor --config-key hk
 ```
 
 也可以直接看运行状态：
 
 ```bash
-./om status --config-key us
-./om runs --limit 10
+om status --config-key us
+om runs --limit 10
 ```
+
+如果需要把问题交给维护者排查，生成一份脱敏 support bundle：
+
+```bash
+om support bundle --config-key us
+om support bundle --config-key us --include-healthcheck
+```
+
+`support bundle` 会写出一个 JSON 诊断包，默认包含 setup/settings/config/runtime status 快照，并脱敏 secret、token、webhook URL 和长数字账号。默认不跑 healthcheck；需要连同 OpenD readiness 一起收集时再加 `--include-healthcheck`。
 
 ---
 
@@ -106,7 +143,7 @@ cp -n configs/examples/options-monitor.env.example .env/options-monitor.env
 Feishu Bot 走同一组 `OM_FEISHU_BOT_*` env 设置。配置后先做只读检查：
 
 ```bash
-./om inbound feishu-ws --check
+om inbound feishu-ws --check
 ```
 
 长期运行时才需要 service 化；不要在安装或初始化阶段自动启动。
@@ -118,13 +155,13 @@ Feishu Bot 走同一组 `OM_FEISHU_BOT_*` env 设置。配置后先做只读检�
 本地临时使用可以手动跑：
 
 ```bash
-./om run tick --config config.us.json --accounts lx
+om run tick --config config.us.json --accounts lx
 ```
 
 服务器长期运行先 render 服务文件。Linux 生产推荐：
 
 ```bash
-./om service render \
+om service render \
   --target systemd \
   --runtime-root /var/lib/options-monitor \
   --env-file /etc/options-monitor/options-monitor.env \
@@ -137,7 +174,7 @@ Feishu Bot 走同一组 `OM_FEISHU_BOT_*` env 设置。配置后先做只读检�
 Mac launchd 推荐：
 
 ```bash
-./om service render \
+om service render \
   --target launchd \
   --runtime-root "$HOME/Library/Application Support/options-monitor" \
   --env-file "$HOME/Library/Application Support/options-monitor/options-monitor.env" \

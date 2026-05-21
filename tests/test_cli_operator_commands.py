@@ -80,6 +80,62 @@ def test_top_level_healthcheck_passes_inbound_diagnostics_args(monkeypatch, caps
     }]
 
 
+def test_support_bundle_command_forwards_diagnostic_args(monkeypatch, capsys) -> None:
+    import src.interfaces.cli.main as cli
+
+    calls: list[dict] = []
+
+    def _support_bundle_response(**kwargs):
+        calls.append(kwargs)
+        return {
+            "schema_version": "1.0",
+            "tool_name": "support.bundle",
+            "ok": True,
+            "data": {"bundle_path": "/tmp/options-monitor-support.json"},
+            "warnings": [],
+            "error": None,
+            "meta": {},
+        }
+
+    monkeypatch.setattr(cli, "support_bundle_response", _support_bundle_response)
+
+    rc = cli.main([
+        "support",
+        "bundle",
+        "--config-key",
+        "us",
+        "--accounts",
+        "lx",
+        "sy",
+        "--profile-path",
+        "service.profile.json",
+        "--env-file",
+        "options-monitor.env",
+        "--no-local-env-file",
+        "--include-healthcheck",
+        "--runtime-root",
+        "/var/lib/options-monitor",
+        "--output-dir",
+        "/tmp/support",
+    ])
+    payload = _read_json_output(capsys)
+
+    assert rc == 0
+    assert payload["tool_name"] == "support.bundle"
+    assert calls == [{
+        "repo_root": cli.repo_base(),
+        "config_key": "us",
+        "config_path": None,
+        "accounts": ["lx", "sy"],
+        "profile_path": "service.profile.json",
+        "env_file": "options-monitor.env",
+        "include_local_env_file": False,
+        "include_healthcheck": True,
+        "output_dir": "/tmp/support",
+        "runtime_root": "/var/lib/options-monitor",
+    }]
+
+
 def _runtime_status_envelope(*, ok: bool = True) -> dict:
     return {
         "tool_name": "runtime_status",
