@@ -3,38 +3,34 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from src.application.agent_runtime.command_catalog import (
+    ACCOUNT_VALUES,
+    LLM_INTENT_SCHEMA_VERSION,
+    LOG_KIND_VALUES,
+    POSITION_STATUS_VALUES,
+    llm_allowed_arguments,
+    llm_argument_schema_properties,
+    llm_argument_schema_required_keys,
+    llm_intent_names,
+)
 from src.application.agent_runtime.settings import LlmTranslatorSettings
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.inbound.contracts import InboundIntent
 
 
-LLM_INTENT_SCHEMA_VERSION = "om-llm-intent-v1"
-
-_ACCOUNT_VALUES = frozenset({"lx", "sy"})
-_POSITION_STATUS_VALUES = frozenset({"open", "all"})
-_LOG_KIND_VALUES = frozenset({"all", "tool", "state"})
+_ACCOUNT_VALUES = frozenset(ACCOUNT_VALUES)
+_POSITION_STATUS_VALUES = frozenset(POSITION_STATUS_VALUES)
+_LOG_KIND_VALUES = frozenset(LOG_KIND_VALUES)
 _MONTH_RE = re.compile(r"^20\d{2}-(0[1-9]|1[0-2])$")
 
-_ALLOWED_ARGUMENTS: dict[str, frozenset[str]] = {
-    "help": frozenset(),
-    "runtime_status": frozenset(),
-    "healthcheck": frozenset(),
-    "config_validate": frozenset(),
-    "option_positions_open": frozenset({"account", "status"}),
-    "monthly_income_report": frozenset({"account", "month"}),
-    "runtime_runs": frozenset({"limit"}),
-    "runtime_logs": frozenset({"run_id", "kind", "lines"}),
-    "symbol_list": frozenset(),
-    "pending_operations": frozenset(),
-}
-_ARGUMENT_SCHEMA_KEYS = ("account", "status", "month", "run_id", "kind", "limit", "lines")
+_ALLOWED_ARGUMENTS = llm_allowed_arguments()
 
 
 def llm_intent_schema() -> dict[str, Any]:
     return {
         "schema_version": LLM_INTENT_SCHEMA_VERSION,
         "shape": {
-            "intent": sorted(_ALLOWED_ARGUMENTS),
+            "intent": llm_intent_names(),
             "arguments": "object",
             "confidence": "number 0..1",
         },
@@ -56,20 +52,12 @@ def llm_intent_json_schema() -> dict[str, Any]:
         "additionalProperties": False,
         "properties": {
             "schema_version": {"type": "string", "enum": [LLM_INTENT_SCHEMA_VERSION]},
-            "intent": {"type": "string", "enum": sorted(_ALLOWED_ARGUMENTS)},
+            "intent": {"type": "string", "enum": llm_intent_names()},
             "arguments": {
                 "type": "object",
                 "additionalProperties": False,
-                "properties": {
-                    "account": {"type": ["string", "null"], "enum": ["lx", "sy", None]},
-                    "status": {"type": ["string", "null"], "enum": ["open", "all", None]},
-                    "month": {"type": ["string", "null"]},
-                    "run_id": {"type": ["string", "null"]},
-                    "kind": {"type": ["string", "null"], "enum": ["all", "tool", "state", None]},
-                    "limit": {"type": ["integer", "null"]},
-                    "lines": {"type": ["integer", "null"]},
-                },
-                "required": list(_ARGUMENT_SCHEMA_KEYS),
+                "properties": llm_argument_schema_properties(),
+                "required": llm_argument_schema_required_keys(),
             },
             "confidence": {"type": "number"},
         },
@@ -101,7 +89,7 @@ def inbound_intent_from_llm_payload(
             code="PERMISSION_DENIED",
             message=f"LLM intent is not allowed: {intent_name}",
             hint="LLM translator is currently restricted to read-only intents.",
-            details={"allowed_intents": sorted(_ALLOWED_ARGUMENTS)},
+            details={"allowed_intents": llm_intent_names()},
         )
 
     confidence = _parse_confidence(payload.get("confidence"))

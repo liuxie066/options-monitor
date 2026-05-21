@@ -27,6 +27,8 @@ def ai_cofunder_tool(
     healthcheck_tool_fn: Callable[[dict[str, Any]], tuple[dict[str, Any], list[str], dict[str, Any]]] | None = None,
     now_fn: Callable[[], datetime] | None = None,
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    _reject_removed_payload_alias(payload, alias="openclaw_profile_path", replacement="profile_path")
+    _reject_removed_payload_alias(payload, alias="rank_sample_limit", replacement="ranking_limit")
     base = repo_base().resolve()
     scope = _scope(payload.get("scope"))
     evidence, warnings, meta = collect_evidence(
@@ -82,6 +84,14 @@ def ai_cofunder_tool(
     }
     meta.update({"outputs": outputs, "scope": scope, "healthcheck": healthcheck_meta})
     return data, warnings, meta
+
+
+def _reject_removed_payload_alias(payload: dict[str, Any], *, alias: str, replacement: str) -> None:
+    if alias in payload and str(payload.get(alias) or "").strip():
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message=f"{alias} has been removed; use {replacement}",
+        )
 
 
 def _build_bundle(
@@ -295,7 +305,6 @@ def _healthcheck_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "data_config",
         "timeout_sec",
         "profile_path",
-        "openclaw_profile_path",
         "include_service_status",
     )
     return {key: payload[key] for key in keys if key in payload}
@@ -356,7 +365,7 @@ def _healthcheck_env_file(payload: dict[str, Any], *, base: Path) -> tuple[Path 
 
 
 def _healthcheck_profile_path(payload: dict[str, Any], *, base: Path) -> Path | None:
-    raw = str(payload.get("profile_path") or payload.get("openclaw_profile_path") or "").strip()
+    raw = str(payload.get("profile_path") or "").strip()
     if not raw:
         return None
     return _resolve_healthcheck_path(raw, base=base)

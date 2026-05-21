@@ -50,6 +50,7 @@ def _preview_and_save(
     ttl_seconds: int,
 ) -> dict[str, Any]:
     preview = _preview_operation(payload)
+    _freeze_preview_target(payload, preview)
     payload_hash = hash_operation_payload(payload)
     operation = store.save_preview(
         operation_id=command_id,
@@ -273,6 +274,24 @@ def _candidate_hint(prefix: str, candidates: Any) -> str:
 
 def _build_operation_payload(operation_type: str, arguments: dict[str, Any]) -> dict[str, Any]:
     return {"schema_version": "1.0", "operation_type": operation_type, "arguments": arguments}
+
+
+def _freeze_preview_target(payload: dict[str, Any], preview: dict[str, Any]) -> None:
+    args = payload.setdefault("arguments", {})
+    if not isinstance(args, dict) or str(args.get("target_version") or "").strip():
+        return
+    upgrade = preview.get("upgrade") if isinstance(preview, dict) else {}
+    if not isinstance(upgrade, dict):
+        return
+    target = str(upgrade.get("target_version") or "").strip()
+    if target:
+        args["target_version"] = target
+    release_tag = str(upgrade.get("release_tag") or "").strip()
+    if release_tag:
+        args["release_tag"] = release_tag
+    target_source = str(upgrade.get("target_source") or "").strip()
+    if target_source:
+        args["target_source"] = target_source
 
 
 def _preview_operation(payload: dict[str, Any]) -> dict[str, Any]:

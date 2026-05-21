@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 from src.application.agent_tool_contracts import build_response
 from src.application.inbound.feishu_ws import (
@@ -15,7 +16,7 @@ from src.application.inbound.feishu_ws import (
 from src.infrastructure.feishu_ws_client import feishu_event_model_to_payload
 
 
-def _message_payload(*, sender: str = "ou_1", text: str = "收益 sy 2026-05") -> dict:
+def _message_payload(*, sender: str = "ou_1", text: str = "收益 sy 2026-05") -> dict[str, Any]:
     return {
         "schema": "2.0",
         "header": {"event_id": "evt_1", "event_type": "im.message.receive_v1"},
@@ -31,11 +32,11 @@ def _message_payload(*, sender: str = "ou_1", text: str = "收益 sy 2026-05") -
 
 
 def test_feishu_ws_delegates_to_inbound_and_replies(tmp_path: Path) -> None:
-    replies: list[dict] = []
-    reactions: list[dict] = []
-    calls: list[tuple[str, dict]] = []
+    replies: list[dict[str, Any]] = []
+    reactions: list[dict[str, Any]] = []
+    calls: list[tuple[str, dict[str, Any]]] = []
 
-    def _execute(tool_name: str, payload: dict) -> dict:
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
         calls.append((tool_name, payload))
         return build_response(
             tool_name=tool_name,
@@ -43,11 +44,11 @@ def test_feishu_ws_delegates_to_inbound_and_replies(tmp_path: Path) -> None:
             data={"summary": [{"month": "2026-05", "account": "sy", "currency": "HKD"}]},
         )
 
-    def _reply(**kwargs) -> dict:  # type: ignore[no-untyped-def]
+    def _reply(**kwargs: Any) -> dict[str, Any]:
         replies.append(dict(kwargs))
         return {"code": 0, "data": {"message_id": "reply_1"}}
 
-    def _reaction(**kwargs) -> dict:  # type: ignore[no-untyped-def]
+    def _reaction(**kwargs: Any) -> dict[str, Any]:
         reactions.append(dict(kwargs))
         return {"code": 0, "data": {"reaction_id": "reaction_1"}}
 
@@ -76,9 +77,9 @@ def test_feishu_ws_delegates_to_inbound_and_replies(tmp_path: Path) -> None:
 
 
 def test_feishu_ws_can_route_through_agent_runtime(tmp_path: Path) -> None:
-    calls: list[tuple[str, dict]] = []
+    calls: list[tuple[str, dict[str, Any]]] = []
 
-    def _execute(tool_name: str, payload: dict) -> dict:
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
         calls.append((tool_name, payload))
         return build_response(tool_name=tool_name, ok=True, data={"summary": {"ok": True}})
 
@@ -104,16 +105,16 @@ def test_feishu_ws_can_route_through_agent_runtime(tmp_path: Path) -> None:
 
 
 def test_feishu_ws_reaction_failure_does_not_fail_inbound_or_reply(tmp_path: Path) -> None:
-    replies: list[dict] = []
+    replies: list[dict[str, Any]] = []
 
-    def _execute(tool_name: str, payload: dict) -> dict:
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
         return build_response(tool_name=tool_name, ok=True, data={"status": "ok"})
 
-    def _reply(**kwargs) -> dict:  # type: ignore[no-untyped-def]
+    def _reply(**kwargs: Any) -> dict[str, Any]:
         replies.append(dict(kwargs))
         return {"code": 0, "data": {"message_id": "reply_1"}}
 
-    def _reaction(**_kwargs) -> dict:  # type: ignore[no-untyped-def]
+    def _reaction(**_kwargs: Any) -> dict[str, Any]:
         raise RuntimeError("no permission")
 
     out = handle_feishu_ws_event(
@@ -138,14 +139,14 @@ def test_feishu_ws_reaction_failure_does_not_fail_inbound_or_reply(tmp_path: Pat
 
 
 def test_feishu_ws_does_not_reply_to_denied_sender(tmp_path: Path) -> None:
-    replies: list[dict] = []
-    reactions: list[dict] = []
+    replies: list[dict[str, Any]] = []
+    reactions: list[dict[str, Any]] = []
 
-    def _reply(**kwargs) -> dict:  # type: ignore[no-untyped-def]
+    def _reply(**kwargs: Any) -> dict[str, Any]:
         replies.append(dict(kwargs))
         return {"code": 0}
 
-    def _reaction(**kwargs) -> dict:  # type: ignore[no-untyped-def]
+    def _reaction(**kwargs: Any) -> dict[str, Any]:
         reactions.append(dict(kwargs))
         return {"code": 0}
 
@@ -176,9 +177,9 @@ def test_feishu_ws_replies_when_allowed_sender_hits_write_gate(monkeypatch, tmp_
         "OM_INBOUND_ADMIN_OPEN_IDS",
     ):
         monkeypatch.delenv(name, raising=False)
-    replies: list[dict] = []
+    replies: list[dict[str, Any]] = []
 
-    def _reply(**kwargs) -> dict:  # type: ignore[no-untyped-def]
+    def _reply(**kwargs: Any) -> dict[str, Any]:
         replies.append(dict(kwargs))
         return {"code": 0}
 
@@ -246,9 +247,12 @@ def test_feishu_ws_settings_reads_behavior_from_runtime_config(tmp_path: Path) -
                     "llm": {
                         "enabled": True,
                         "provider": "openai",
+                        "base_url": "https://llm.example/v1",
                         "model": "gpt-5.2",
                         "api_key_env": "OM_LLM_API_KEY",
                         "confidence_min": 0.8,
+                        "timeout_seconds": 31,
+                        "max_output_tokens": 769,
                     }
                 }
             }
@@ -276,8 +280,28 @@ def test_feishu_ws_settings_reads_behavior_from_runtime_config(tmp_path: Path) -
     assert settings.agent_context_window_messages == 9
     assert settings.agent_llm.enabled is True
     assert settings.agent_llm.provider == "openai"
+    assert settings.agent_llm.base_url == "https://llm.example/v1"
     assert settings.agent_llm.model == "gpt-5.2"
     assert settings.agent_llm.confidence_min == 0.8
+    assert settings.agent_llm.timeout_seconds == 31
+    assert settings.agent_llm.max_output_tokens == 769
+
+
+def test_feishu_ws_settings_enables_command_runtime_by_default(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.us.json"
+    config_path.write_text(json.dumps({"inbound": {"feishu_ws": {}}}), encoding="utf-8")
+
+    settings = build_feishu_ws_settings(
+        config_path=str(config_path),
+        environ={
+            "OM_FEISHU_BOT_APP_ID": "bot_app",
+            "OM_FEISHU_BOT_APP_SECRET": "bot_secret",
+            "OM_FEISHU_BOT_ALLOWED_OPEN_IDS": "ou_1",
+        },
+    )
+
+    assert settings.agent_runtime_enabled is True
+    assert settings.agent_llm.enabled is False
 
 
 def test_feishu_ws_check_reports_missing_sdk() -> None:
@@ -291,19 +315,19 @@ def test_feishu_ws_check_reports_missing_sdk() -> None:
 
 
 def test_feishu_ws_serve_uses_background_worker(tmp_path: Path) -> None:
-    calls: list[tuple[str, dict]] = []
+    calls: list[tuple[str, dict[str, Any]]] = []
 
-    def _execute(tool_name: str, payload: dict) -> dict:
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
         calls.append((tool_name, payload))
         return build_response(tool_name=tool_name, ok=True, data={"status": "ok"})
 
-    def _reply(**_kwargs) -> dict:  # type: ignore[no-untyped-def]
+    def _reply(**_kwargs: Any) -> dict[str, Any]:
         return {"code": 0}
 
-    def _reaction(**_kwargs) -> dict:  # type: ignore[no-untyped-def]
+    def _reaction(**_kwargs: Any) -> dict[str, Any]:
         return {"code": 0}
 
-    def _start_client(**kwargs) -> None:  # type: ignore[no-untyped-def]
+    def _start_client(**kwargs: Any) -> None:
         kwargs["on_event"](_message_payload(text="状态"))
 
     serve_feishu_ws(

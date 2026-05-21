@@ -4,6 +4,7 @@ import json
 from datetime import date
 from typing import Any, Callable
 
+from src.application.agent_runtime.command_catalog import spec_by_intent
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response, mask_path
 from src.application.inbound.audit import InboundAuditStore, build_command_id, utc_now_iso
 from src.application.inbound.contracts import InboundIntent, InboundRequest, InboundToolCall
@@ -22,6 +23,7 @@ from src.application.tool_execution import execute_tool
 
 ExecuteToolFn = Callable[[str, dict[str, Any]], dict[str, Any]]
 ParseIntentFn = Callable[[str, Callable[[], date] | None], InboundIntent]
+_COMMAND_SPECS_BY_INTENT = spec_by_intent()
 
 
 def handle_inbound_request(
@@ -42,11 +44,14 @@ def handle_inbound_request(
         text=normalized_request.text,
     )
 
-    existing = store.find_by_message(
-        channel=normalized_request.channel,
-        message_id=normalized_request.message_id,
-        command_id=command_id,
-    )
+    try:
+        existing = store.find_by_message(
+            channel=normalized_request.channel,
+            message_id=normalized_request.message_id,
+            command_id=command_id,
+        )
+    except AgentToolError as err:
+        return _error_response(command_id=command_id, request=normalized_request, err=err, audit_db=store.path)
     if existing is not None:
         if str(existing.get("sender_id") or "") != normalized_request.sender_id:
             store.mark_duplicate(
@@ -300,11 +305,11 @@ def _parse_intent(
 def _tool_call_from_intent(intent: InboundIntent, *, request: InboundRequest) -> InboundToolCall:
     base = _base_payload(request)
     if intent.name == "runtime_status":
-        return InboundToolCall(tool_name="runtime_status", payload=base)
+        return InboundToolCall(tool_name=_catalog_tool_name(intent.name), payload=base)
     if intent.name == "healthcheck":
-        return InboundToolCall(tool_name="healthcheck", payload=base)
+        return InboundToolCall(tool_name=_catalog_tool_name(intent.name), payload=base)
     if intent.name == "config_validate":
-        return InboundToolCall(tool_name="config_validate", payload=base)
+        return InboundToolCall(tool_name=_catalog_tool_name(intent.name), payload=base)
     if intent.name == "option_positions_open":
         payload = {
             **base,
@@ -314,7 +319,7 @@ def _tool_call_from_intent(intent: InboundIntent, *, request: InboundRequest) ->
         if intent.arguments.get("account"):
             payload["account"] = intent.arguments["account"]
         return InboundToolCall(
-            tool_name="option_positions_read",
+            tool_name=_catalog_tool_name(intent.name),
             payload=payload,
         )
     if intent.name == "monthly_income_report":
@@ -323,12 +328,12 @@ def _tool_call_from_intent(intent: InboundIntent, *, request: InboundRequest) ->
             payload["account"] = intent.arguments["account"]
         if intent.arguments.get("month"):
             payload["month"] = intent.arguments["month"]
-        return InboundToolCall(tool_name="monthly_income_report", payload=payload)
+        return InboundToolCall(tool_name=_catalog_tool_name(intent.name), payload=payload)
     if intent.name == "runtime_runs":
-        return InboundToolCall(tool_name="runtime_runs", payload={"limit": int(intent.arguments.get("limit") or 10)})
+        return InboundToolCall(tool_name=_catalog_tool_name(intent.name), payload={"limit": int(intent.arguments.get("limit") or 10)})
     if intent.name == "runtime_logs":
         return InboundToolCall(
-            tool_name="runtime_logs",
+            tool_name=_catalog_tool_name(intent.name),
             payload={
                 "run_id": intent.arguments["run_id"],
                 "kind": intent.arguments.get("kind") or "all",
@@ -339,6 +344,13 @@ def _tool_call_from_intent(intent: InboundIntent, *, request: InboundRequest) ->
         code="INPUT_ERROR",
         message=f"unsupported inbound intent: {intent.name}",
     )
+
+
+def _catalog_tool_name(intent_name: str) -> str:
+    spec = _COMMAND_SPECS_BY_INTENT.get(intent_name)
+    if spec is None or not spec.tool_name:
+        raise AgentToolError(code="INPUT_ERROR", message=f"unsupported inbound intent: {intent_name}")
+    return spec.tool_name
 
 
 def _base_payload(request: InboundRequest) -> dict[str, Any]:

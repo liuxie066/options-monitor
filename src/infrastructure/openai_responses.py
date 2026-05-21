@@ -26,6 +26,7 @@ class OpenAIResponsesError(Exception):
 def create_structured_response(
     *,
     api_key: str,
+    base_url: str | None = None,
     model: str,
     input_text: str,
     instructions: str,
@@ -60,7 +61,7 @@ def create_structured_response(
     if temperature is not None:
         payload["temperature"] = float(temperature)
     return (http_post_json_fn or _post_json)(
-        DEFAULT_OPENAI_RESPONSES_URL,
+        resolve_responses_url(base_url),
         payload,
         headers={
             "Authorization": f"Bearer {api_key_value}",
@@ -68,6 +69,16 @@ def create_structured_response(
         },
         timeout=int(timeout),
     )
+
+
+def resolve_responses_url(base_url: str | None) -> str:
+    value = str(base_url or "").strip()
+    if not value:
+        return DEFAULT_OPENAI_RESPONSES_URL
+    normalized = value.rstrip("/")
+    if normalized.endswith("/responses"):
+        return normalized
+    return f"{normalized}/responses"
 
 
 def extract_response_text(response: dict[str, Any]) -> str:

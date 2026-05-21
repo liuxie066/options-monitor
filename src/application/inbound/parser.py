@@ -501,4 +501,4 @@ def _looks_like_symbol_edit(compact: str, lower: str) -> bool:
 
 
 def _looks_like_symbol_remove(compact: str, lower: str) -> bool:
-    return compact.startswith("删除监控标的") or compact.startswith("移除监控标的") or lower.startswith("symbol remove ") or lower.startswith("symbols remove ") or lower.startswith("symbols rm ")
+    return compact.startswith("删除监控标的") or compact.startswith("移除监控标的") or lower.startswith("symbols rm ")

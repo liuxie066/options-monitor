@@ -1,25 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import datetime, timezone
-from functools import cmp_to_key
 from pathlib import Path
-import re
 import subprocess
 from typing import Any
 
+from src.application.release_target import VERSION_RE, compare_versions, parse_release_tags, parse_version
 
-VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$")
-TAG_RE = re.compile(r"^v(?P<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$")
 BUMP_KINDS = {"major", "minor", "patch"}
-
-
-@dataclass(frozen=True)
-class _SemVer:
-    major: int
-    minor: int
-    patch: int
-    prerelease: tuple[tuple[int, Any], ...]
 
 
 def repo_base() -> Path:
@@ -36,53 +24,6 @@ def _read_current_version(base_dir: Path) -> str:
     if not VERSION_RE.match(value):
         raise ValueError(f"invalid VERSION format: {value}")
     return value
-
-
-def _parse_prerelease(value: str) -> tuple[tuple[int, Any], ...]:
-    if not value:
-        return ()
-    parts: list[tuple[int, Any]] = []
-    for token in value.split("."):
-        if token.isdigit():
-            parts.append((0, int(token)))
-        else:
-            parts.append((1, token))
-    return tuple(parts)
-
-
-def parse_version(value: str) -> _SemVer:
-    if not VERSION_RE.match(value):
-        raise ValueError(f"invalid version: {value}")
-    core, sep, prerelease = value.partition("-")
-    major_s, minor_s, patch_s = core.split(".")
-    return _SemVer(
-        major=int(major_s),
-        minor=int(minor_s),
-        patch=int(patch_s),
-        prerelease=_parse_prerelease(prerelease if sep else ""),
-    )
-
-
-def compare_versions(left: str, right: str) -> int:
-    a = parse_version(left)
-    b = parse_version(right)
-    if (a.major, a.minor, a.patch) != (b.major, b.minor, b.patch):
-        return -1 if (a.major, a.minor, a.patch) < (b.major, b.minor, b.patch) else 1
-    if not a.prerelease and not b.prerelease:
-        return 0
-    if not a.prerelease:
-        return 1
-    if not b.prerelease:
-        return -1
-    for ai, bi in zip(a.prerelease, b.prerelease):
-        if ai == bi:
-            continue
-        if ai[0] != bi[0]:
-            return -1 if ai[0] < bi[0] else 1
-        return -1 if ai[1] < bi[1] else 1
-    if len(a.prerelease) == len(b.prerelease):
-        return 0
-    return -1 if len(a.prerelease) < len(b.prerelease) else 1
 
 
 def bump_version(current_version: str, bump: str = "patch") -> str:
@@ -112,7 +53,7 @@ def update_local_version(
     explicit_target = str(target_version or "").strip()
     explicit_bump = str(bump or "").strip().lower()
     if explicit_target and explicit_bump:
-        raise ValueError("provide either target_version/version or bump, not both")
+        raise ValueError("provide either target_version or bump, not both")
     if explicit_target:
         if not VERSION_RE.match(explicit_target):
             raise ValueError(f"invalid target version: {explicit_target}")
@@ -150,25 +91,6 @@ def update_local_version(
         "updated_at": _checked_at(now_fn),
         "message": message,
     }
-
-
-def _extract_release_tags(stdout: str) -> list[tuple[str, str]]:
-    found: dict[str, str] = {}
-    for line in stdout.splitlines():
-        parts = line.strip().split()
-        if len(parts) != 2:
-            continue
-        ref = parts[1].strip()
-        prefix = "refs/tags/"
-        if not ref.startswith(prefix):
-            continue
-        tag = ref[len(prefix):]
-        match = TAG_RE.match(tag)
-        if not match:
-            continue
-        version = match.group("version")
-        found[version] = tag
-    return sorted(found.items(), key=cmp_to_key(lambda left, right: compare_versions(left[0], right[0])))
 
 
 def check_version_update(
@@ -231,7 +153,7 @@ def check_version_update(
             "error": str(exc),
         }
 
-    tags = _extract_release_tags(str(proc.stdout or ""))
+    tags = parse_release_tags(str(proc.stdout or ""))
     if not tags:
         return {
             "current_version": current_version,

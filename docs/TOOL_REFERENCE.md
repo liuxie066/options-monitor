@@ -103,9 +103,10 @@ om-agent run --tool <tool-name> --input-file payload.json
 om inbound handle --text '收益 sy 2026-05' --sender ou_xxx --channel feishu --message-id msg_xxx
 om inbound feishu --input-file feishu_event.json --format text
 om inbound feishu-ws --check
+om agent llm-check --config-key us
 ```
 
-它不是 `om-agent` manifest 里的工具，也不是 shell bridge。`inbound feishu` 只解析 Feishu 事件 payload，然后进入同一条 sender allowlist、message_id 幂等、SQLite audit 和工具白名单路径。`--agent-runtime` 可增加 slash command facade；runtime config 也可选择启用 LLM intent translation，但 LLM 只能产出结构化 intent，不能执行工具或改写事实输出。`inbound feishu-ws` 是长驻 Feishu App long-connection client：通过飞书 SDK 长连接接收消息、进入 inbound control，并使用同一个 Bot 自动回复；AgentRuntime 是否启用由 `agent.runtime.enabled` 控制，reaction、reply、queue 行为配置在 runtime config 的 `inbound.feishu_ws` 下。完整边界见 [INBOUND_CONTROL.md](INBOUND_CONTROL.md)。
+它不是 `om-agent` manifest 里的工具，也不是 shell bridge。`inbound feishu` 只解析 Feishu 事件 payload，然后进入同一条 sender allowlist、message_id 幂等、SQLite audit 和工具白名单路径。AgentRuntime command facade 默认开启；runtime config 也可选择启用 LLM intent translation，但 LLM 只能产出结构化 intent，不能执行工具或改写事实输出。`inbound feishu-ws` 是长驻 Feishu App long-connection client：通过飞书 SDK 长连接接收消息、进入 inbound control，并使用同一个 Bot 自动回复；AgentRuntime 可通过 `agent.runtime.enabled` 显式关闭，reaction、reply、queue 行为配置在 runtime config 的 `inbound.feishu_ws` 下。完整边界见 [INBOUND_CONTROL.md](INBOUND_CONTROL.md)。
 
 ### Tick 入口关系
 
@@ -242,7 +243,7 @@ systemd 的 US/HK tick timer 使用 market timezone 的 `OnCalendar` 在 10 分�
 
 渲染出的长期服务包含每天北京时间 05:30 执行的 expired auto-close，以及每天北京时间 06:00 执行的 option-position projection verify。auto-close 会以非交互方式运行 `auto-close-expired --apply --yes --quiet`；projection verify 使用 `om option-positions --data-config <runtime_root>/portfolio.runtime.json verify-projection --mode auto`。systemd 分别使用 `OnCalendar=*-*-* 05:30:00 Asia/Shanghai` 和 `OnCalendar=*-*-* 06:00:00 Asia/Shanghai`；launchd 使用本机时区的 `Hour=5, Minute=30` 和 `Hour=6, Minute=0`。
 
-自动升级是显式 opt-in：`om service render --include-auto-upgrade ...` 会额外生成每天北京时间 06:10 的 upgrade timer。升级命令默认 dry-run；只有 `om update apply --confirm` 才会用本机 `_cache/git/options-monitor.git` 增量 fetch 并 archive 出 release、准备新 release `.venv`、安装 runtime/server 依赖、校验新 release、切换 `current` symlink、补齐当前 release 新增的缺失 timer/unit，并按 reconcile 后的 profile 重启长期服务。`OM_UPGRADE_CACHE_ROOT` / `--cache-root` 可覆盖默认 `_cache/`；依赖下载缓存复用 `_cache/uv` 和 `_cache/pip`。release 目录不保留 `.git`，升级检查和下一次升级会在当前 release 没有 git remote 时从 git cache 读取 remote 与 release tags。uv 只作为宿主机工具检测和使用，升级不会自动安装 uv，uv 模式使用 `uv venv --python python3 .venv`。systemd 使用非 root `User=` 运行时，profile 会使用 `sudo -n systemctl restart ...` 重启 `options-monitor-trade-intake.service` 和已渲染的 `options-monitor-feishu-ws.service`，需要部署用户具备对应 NOPASSWD sudoers；重启后会检查长期服务 `is-active` / `is-enabled`，并对 Feishu WS 执行 `om inbound feishu-ws --check`。release/config 已切换但服务重启、reconcile 或 health check 失败时，upgrade status 会记录 `upgraded_restart_failed`、`upgraded_service_reconcile_failed` 或 `upgraded_service_health_failed` 以及 remediation。`om update rollback` 同样默认 dry-run。旧的 `om service upgrade*` / `om service rollback` 入口仍保留兼容。
+自动升级是显式 opt-in：`om service render --include-auto-upgrade ...` 会额外生成每天北京时间 06:10 的 upgrade timer。升级命令默认 dry-run；只有 `om update apply --confirm` 才会用本机 `_cache/git/options-monitor.git` 增量 fetch 并 archive 出 release、准备新 release `.venv`、安装 runtime/server 依赖、校验新 release、切换 `current` symlink、补齐当前 release 新增的缺失 timer/unit，并按 reconcile 后的 profile 重启长期服务。`OM_UPGRADE_CACHE_ROOT` / `--cache-root` 可覆盖默认 `_cache/`；依赖下载缓存复用 `_cache/uv` 和 `_cache/pip`。release 目录不保留 `.git`，升级检查和下一次升级会在当前 release 没有 git remote 时从 git cache 读取 remote 与 release tags。uv 只作为宿主机工具检测和使用，升级不会自动安装 uv，uv 模式使用 `uv venv --python python3 .venv`。systemd 使用非 root `User=` 运行时，profile 会使用 `sudo -n systemctl restart ...` 重启 `options-monitor-trade-intake.service` 和已渲染的 `options-monitor-feishu-ws.service`，需要部署用户具备对应 NOPASSWD sudoers；重启后会检查长期服务 `is-active` / `is-enabled`，并对 Feishu WS 执行 `om inbound feishu-ws --check`。release/config 已切换但服务重启、reconcile 或 health check 失败时，upgrade status 会记录 `upgraded_restart_failed`、`upgraded_service_reconcile_failed` 或 `upgraded_service_health_failed` 以及 remediation。`om update rollback` 同样默认 dry-run。升级公开入口统一为 `om update check/apply/rollback`。
 
 ---
 
@@ -306,7 +307,7 @@ om-agent run --tool version_check --input-json '{"remote_name":"origin"}'
 
 ```bash
 om-agent run --tool version_update --input-json '{"bump":"patch"}'
-OM_AGENT_ENABLE_WRITE_TOOLS=true om-agent run --tool version_update --input-json '{"version":"1.2.3","apply":true,"confirm":true}'
+OM_AGENT_ENABLE_WRITE_TOOLS=true om-agent run --tool version_update --input-json '{"target_version":"1.2.3","apply":true,"confirm":true}'
 ```
 
 `apply=true` 是本地写入动作，还需要 `confirm=true` 和

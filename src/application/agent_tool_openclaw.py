@@ -225,7 +225,12 @@ def _read_json_object(path: Path) -> dict[str, Any]:
 
 
 def _profile_path_from_payload(payload: dict[str, Any], *, base: Path) -> Path | None:
-    raw = str(payload.get("openclaw_profile_path") or payload.get("profile_path") or "").strip()
+    if "openclaw_profile_path" in payload and str(payload.get("openclaw_profile_path") or "").strip():
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message="openclaw_profile_path has been removed; use profile_path",
+        )
+    raw = str(payload.get("profile_path") or "").strip()
     if raw:
         path = Path(raw).expanduser()
         if not path.is_absolute():
@@ -247,7 +252,7 @@ def _merge_openclaw_profile(payload: dict[str, Any], *, base: Path) -> tuple[dic
         raise AgentToolError(
             code="CONFIG_ERROR",
             message=f"OpenClaw profile not found: {profile_path.name}",
-            hint="Remove profile_path/openclaw_profile_path or create the referenced JSON profile.",
+            hint="Remove profile_path or create the referenced JSON profile.",
         )
     profile = _read_json_object(profile_path)
     paths_raw = profile.get("paths")
@@ -1778,11 +1783,8 @@ def _freshness_check(runtime_status_data: dict[str, Any]) -> dict[str, Any]:
 def _command_input(payload: dict[str, Any]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     profile_path = str(payload.get("profile_path") or "").strip()
-    openclaw_profile_path = str(payload.get("openclaw_profile_path") or "").strip()
     if profile_path:
         out["profile_path"] = profile_path
-    elif openclaw_profile_path:
-        out["openclaw_profile_path"] = openclaw_profile_path
     if str(payload.get("config_key") or "").strip():
         out["config_key"] = str(payload.get("config_key")).strip()
     elif payload.get("config_path"):
