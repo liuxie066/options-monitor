@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.2.116 - 2026-05-22
+
+### Added
+- Added an independent inbound upgrade worker so Feishu upgrade confirmations can survive `feishu-ws` service restarts and write final applied/failed results.
+- Added final Feishu upgrade receipts from the worker after the upgrade completes.
+
+### Changed
+- Changed Feishu `确认升级` to acknowledge immediately and queue the upgrade instead of running it synchronously inside the WebSocket handler.
+- Replaced raw pending-operation statuses in user-facing duplicate confirmation messages with readable progress text.
+
 ## 1.2.115 - 2026-05-22
 
 ### Added

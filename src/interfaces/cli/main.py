@@ -31,6 +31,7 @@ from src.application.inbound import (
     serve_feishu_ws,
 )
 from src.application.inbound.diagnostics import collect_pending_operations, collect_recent_audit
+from src.application.inbound.upgrade_operations import run_confirmed_upgrade_operation
 from src.application.layered_config import build_layered_runtime_config_file, explain_layered_runtime_config_key
 from src.application.multi_account_tick import run_tick
 from src.application.notification_pipeline import preview_notification
@@ -287,6 +288,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     inbound_ws.add_argument("--queue-size", type=int, default=None)
     inbound_ws.add_argument("--lock-path", default=None)
     inbound_ws.add_argument("--check", action="store_true", help="validate and print redacted long-connection configuration without starting the client")
+    inbound_upgrade_worker = inbound_sub.add_parser("upgrade-worker", help="run one confirmed inbound upgrade operation")
+    inbound_upgrade_worker.add_argument("--operation-id", required=True)
+    inbound_upgrade_worker.add_argument("--audit-db", default=None)
+    inbound_upgrade_worker.add_argument("--no-final-receipt", action="store_true")
+    inbound_upgrade_worker.add_argument("--format", choices=("json", "text"), default="json")
 
     status = sub.add_parser("status", help="summarize runtime status")
     status.add_argument("--config-key", default=None, choices=("us", "hk"))
@@ -962,6 +968,20 @@ def main(argv: list[str] | None = None) -> int:
                 return _print(check_feishu_ws_settings(settings))
             serve_feishu_ws(settings, lock_path=args.lock_path)
             return 0
+
+        if args.command == "inbound" and args.inbound_command == "upgrade-worker":
+            out = run_confirmed_upgrade_operation(
+                operation_id=args.operation_id,
+                audit_db=args.audit_db,
+                send_receipt=not bool(args.no_final_receipt),
+            )
+            if args.format == "text":
+                data_raw = out.get("data")
+                data = data_raw if isinstance(data_raw, dict) else {}
+                text = str(data.get("response_text") or "").strip() or _dumps(out)
+                sys.stdout.write(text + "\n")
+                return 0 if out.get("ok", True) else 2
+            return _print(out)
 
         if args.command == "status":
             out = execute_tool("runtime_status", runtime_status_payload_from_args(args))

@@ -352,4 +352,4 @@ Supported write commands:
 | `增加/修改/删除监控标的 ...` | `symbol_*` | `确认监控 [operation_id]` | `取消监控 [operation_id]` |
 | `立即升级` / `立即升级到 v1.2.111` | `upgrade_now` | `确认升级 [operation_id]` | `取消升级 [operation_id]` |
 
-`立即升级` delegates to the same service upgrade path as `./om update apply --auto --confirm`. The preview does not switch releases; confirmation runs the upgrade and restarts services according to the deployment profile.
+`立即升级` delegates to the same service upgrade path as `./om update apply --auto --confirm`. The preview does not switch releases. Confirmation only records the confirmation and starts an independent `inbound upgrade-worker`; the worker runs the upgrade, writes the final applied/failed result, and sends the final Feishu receipt after service restarts.
