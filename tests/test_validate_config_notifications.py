@@ -58,6 +58,129 @@ def test_validate_config_accepts_valid_openclaw_notification_route() -> None:
     mod.validate_config(cfg)
 
 
+def test_validate_config_rejects_non_bool_agent_runtime_enabled() -> None:
+    import src.application.config_validator as mod
+
+    cfg = _base_cfg()
+    cfg["agent"] = {"runtime": {"enabled": "yes"}}
+
+    try:
+        mod.validate_config(cfg)
+        raise AssertionError("expected SystemExit")
+    except SystemExit as exc:
+        assert "agent.runtime.enabled must be a boolean" in str(exc)
+
+
+def test_validate_config_rejects_invalid_agent_context_window() -> None:
+    import src.application.config_validator as mod
+
+    cfg = _base_cfg()
+    cfg["agent"] = {"runtime": {"context_window_messages": "many"}}
+
+    try:
+        mod.validate_config(cfg)
+        raise AssertionError("expected SystemExit")
+    except SystemExit as exc:
+        assert "agent.runtime.context_window_messages must be an integer" in str(exc)
+
+    cfg = _base_cfg()
+    cfg["agent"] = {"runtime": {"context_window_messages": 21}}
+
+    try:
+        mod.validate_config(cfg)
+        raise AssertionError("expected SystemExit")
+    except SystemExit as exc:
+        assert "agent.runtime.context_window_messages must be <= 20" in str(exc)
+
+
+def test_validate_config_rejects_non_object_agent() -> None:
+    import src.application.config_validator as mod
+
+    cfg = _base_cfg()
+    cfg["agent"] = False
+
+    try:
+        mod.validate_config(cfg)
+        raise AssertionError("expected SystemExit")
+    except SystemExit as exc:
+        assert "agent must be an object" in str(exc)
+
+
+def test_validate_config_rejects_invalid_agent_llm_config() -> None:
+    import src.application.config_validator as mod
+
+    cfg = _base_cfg()
+    cfg["agent"] = {"llm": {"enabled": "yes"}}
+
+    try:
+        mod.validate_config(cfg)
+        raise AssertionError("expected SystemExit")
+    except SystemExit as exc:
+        assert "agent.llm.enabled must be a boolean" in str(exc)
+
+    cfg = _base_cfg()
+    cfg["agent"] = {"llm": {"provider": ["openai"]}}
+
+    try:
+        mod.validate_config(cfg)
+        raise AssertionError("expected SystemExit")
+    except SystemExit as exc:
+        assert "agent.llm.provider must be a string" in str(exc)
+
+    cfg = _base_cfg()
+    cfg["agent"] = {"llm": {"confidence_min": 1.5}}
+
+    try:
+        mod.validate_config(cfg)
+        raise AssertionError("expected SystemExit")
+    except SystemExit as exc:
+        assert "agent.llm.confidence_min must be between 0 and 1" in str(exc)
+
+    cfg = _base_cfg()
+    cfg["agent"] = {"llm": {"provider": "anthropic"}}
+
+    try:
+        mod.validate_config(cfg)
+        raise AssertionError("expected SystemExit")
+    except SystemExit as exc:
+        assert "agent.llm.provider must be openai when set" in str(exc)
+
+
+def test_validate_config_requires_complete_agent_llm_when_enabled() -> None:
+    import src.application.config_validator as mod
+
+    cfg = _base_cfg()
+    cfg["agent"] = {"llm": {"enabled": True, "provider": "", "model": "gpt-5.2", "api_key_env": "OM_LLM_API_KEY"}}
+
+    try:
+        mod.validate_config(cfg)
+        raise AssertionError("expected SystemExit")
+    except SystemExit as exc:
+        assert "agent.llm.provider is required when agent.llm.enabled is true" in str(exc)
+
+    cfg = _base_cfg()
+    cfg["agent"] = {"llm": {"enabled": True, "provider": "openai", "model": "", "api_key_env": "OM_LLM_API_KEY"}}
+
+    try:
+        mod.validate_config(cfg)
+        raise AssertionError("expected SystemExit")
+    except SystemExit as exc:
+        assert "agent.llm.model is required when agent.llm.enabled is true" in str(exc)
+
+    cfg = _base_cfg()
+    cfg["agent"] = {"llm": {"enabled": True, "provider": "openai", "model": "gpt-5.2", "api_key_env": ""}}
+
+    try:
+        mod.validate_config(cfg)
+        raise AssertionError("expected SystemExit")
+    except SystemExit as exc:
+        assert "agent.llm.api_key_env is required when agent.llm.enabled is true" in str(exc)
+
+    cfg = _base_cfg()
+    cfg["agent"] = {"llm": {"enabled": True, "provider": "openai", "model": "gpt-5.2", "api_key_env": "OM_LLM_API_KEY"}}
+    mod.validate_config(cfg)
+
+
 def test_validate_config_rejects_retired_intake_multiplier_metadata() -> None:
     import src.application.config_validator as mod
 

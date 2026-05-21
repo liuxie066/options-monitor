@@ -508,6 +508,45 @@ def validate_config(cfg: dict):
             if 'ack_reaction' in feishu_ws and feishu_ws.get('ack_reaction') is not None and not isinstance(feishu_ws.get('ack_reaction'), str):
                 die('inbound.feishu_ws.ack_reaction must be a string')
 
+    agent = cfg.get('agent')
+    if agent is None:
+        agent = {}
+    if not isinstance(agent, dict):
+        die('agent must be an object')
+    runtime_agent = agent.get('runtime')
+    if runtime_agent is None:
+        runtime_agent = {}
+    if not isinstance(runtime_agent, dict):
+        die('agent.runtime must be an object')
+    if 'enabled' in runtime_agent and runtime_agent.get('enabled') is not None and not isinstance(runtime_agent.get('enabled'), bool):
+        die('agent.runtime.enabled must be a boolean')
+    if 'context_window_messages' in runtime_agent and runtime_agent.get('context_window_messages') is not None:
+        validate_non_negative_integer(runtime_agent.get('context_window_messages'), 'agent.runtime.context_window_messages')
+        if int(runtime_agent.get('context_window_messages')) > 20:
+            die('agent.runtime.context_window_messages must be <= 20')
+    llm_agent = agent.get('llm')
+    if llm_agent is None:
+        llm_agent = {}
+    if not isinstance(llm_agent, dict):
+        die('agent.llm must be an object')
+    if 'enabled' in llm_agent and llm_agent.get('enabled') is not None and not isinstance(llm_agent.get('enabled'), bool):
+        die('agent.llm.enabled must be a boolean')
+    for key in ('provider', 'model', 'api_key_env'):
+        if key in llm_agent and llm_agent.get(key) is not None and not isinstance(llm_agent.get(key), str):
+            die(f'agent.llm.{key} must be a string')
+    _validate_optional_unit_interval_number(llm_agent, 'confidence_min', 'agent.llm')
+    llm_enabled = bool(llm_agent.get('enabled')) if isinstance(llm_agent.get('enabled'), bool) else False
+    llm_provider = str(llm_agent.get('provider') or '').strip()
+    if llm_provider and llm_provider != 'openai':
+        die('agent.llm.provider must be openai when set')
+    if llm_enabled:
+        if not llm_provider:
+            die('agent.llm.provider is required when agent.llm.enabled is true')
+        if not str(llm_agent.get('model') or '').strip():
+            die('agent.llm.model is required when agent.llm.enabled is true')
+        if not str(llm_agent.get('api_key_env') or '').strip():
+            die('agent.llm.api_key_env is required when agent.llm.enabled is true')
+
     notifications = cfg.get('notifications') or {}
     if notifications and not isinstance(notifications, dict):
         die('notifications must be an object')
