@@ -15,6 +15,29 @@ def test_shell_entrypoints_target_src_interfaces() -> None:
 
     assert "src.interfaces.cli.main" in om_src
     assert "src.interfaces.agent.cli" in agent_src
+    assert 'export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"' in om_src
+    assert 'export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"' in agent_src
+
+
+def test_shell_entrypoints_work_outside_repo_cwd(tmp_path: Path) -> None:
+    proc = subprocess.run(
+        [str((ROOT / "om").resolve()), "--help"],
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "usage:" in proc.stdout
+
+    agent_proc = subprocess.run(
+        [str((ROOT / "om-agent").resolve()), "spec"],
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    payload = json.loads(agent_proc.stdout)
+    assert payload["name"] == "options-monitor-local-tools"
 
 
 def test_runtime_entrypoints_use_application_facades() -> None:

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.106 - 2026-05-21
+
+### Fixed
+- Fixed installed `om` and `om-agent` entrypoints so global wrappers work from directories outside the release checkout by adding the release root to `PYTHONPATH` without changing the caller's current working directory.
+
 ## 1.2.105 - 2026-05-21
 
 ### Added
