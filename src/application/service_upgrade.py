@@ -10,13 +10,13 @@ import subprocess
 import sys
 import sysconfig
 import time
-from functools import cmp_to_key
 from datetime import datetime, timezone
+from functools import cmp_to_key
 from pathlib import Path
 from typing import Any, Callable
 
+from src.application.release_target import compare_versions, parse_version, resolve_upgrade_target
 from src.application.service_drift import service_drift
-from src.application.version_check import check_version_update, compare_versions, parse_version
 
 
 def utc_now_iso(now_fn: Callable[[], datetime] | None = None) -> str:
@@ -396,160 +396,40 @@ def _resolve_upgrade_remote_url(
     )
 
 
-def _release_tags_from_ls_remote(stdout: str) -> list[tuple[str, str]]:
-    found: dict[str, str] = {}
-    for line in stdout.splitlines():
-        parts = line.strip().split()
-        if len(parts) != 2:
-            continue
-        ref = parts[1].strip()
-        prefix = "refs/tags/"
-        if not ref.startswith(prefix):
-            continue
-        tag = ref[len(prefix) :]
-        if not tag.startswith("v"):
-            continue
-        version = tag[1:]
-        try:
-            parse_version(version)
-        except ValueError:
-            continue
-        found[version] = tag
-    return sorted(found.items(), key=cmp_to_key(lambda left, right: compare_versions(left[0], right[0])))
-
-
-def _version_check_from_cache(
+def _version_check_for_upgrade(
     *,
     repo_root: Path,
     cache_root: Path,
+    target_version: str | None = None,
     remote_name: str,
     run_cmd: Callable[..., Any],
     now_fn: Callable[[], datetime] | None,
 ) -> dict[str, Any]:
-    checked_at = utc_now_iso(now_fn)
     try:
         current_version = _read_version(repo_root)
-        parse_version(current_version)
     except Exception as exc:
         return {
             "current_version": None,
             "latest_version": None,
             "update_available": False,
             "remote_name": remote_name,
-            "checked_at": checked_at,
+            "checked_at": utc_now_iso(now_fn),
             "release_tag": None,
             "message": "版本检查失败：本地版本无效",
             "ok": False,
             "error": str(exc),
-            "source": "upgrade_cache",
-            "cache_repo": str(_cache_repo_path(cache_root)),
+            "source": "release_target",
         }
-
-    cache_repo = _cache_repo_path(cache_root)
-    if not cache_repo.exists():
-        return {
-            "current_version": current_version,
-            "latest_version": None,
-            "update_available": False,
-            "remote_name": remote_name,
-            "checked_at": checked_at,
-            "release_tag": None,
-            "message": "版本检查失败",
-            "ok": False,
-            "error": f"upgrade git cache is missing: {cache_repo}",
-            "source": "upgrade_cache",
-            "cache_repo": str(cache_repo),
-        }
-
-    result = _run_command(
-        ["git", f"--git-dir={cache_repo}", "ls-remote", "--tags", "--refs", remote_name],
-        cwd=None,
-        run_cmd=run_cmd,
-        timeout=120,
-    )
-    if not result["ok"]:
-        error = str(
-            result.get("stderr")
-            or result.get("stdout")
-            or f"git ls-remote failed for remote {remote_name}"
-        ).strip()
-        return {
-            "current_version": current_version,
-            "latest_version": None,
-            "update_available": False,
-            "remote_name": remote_name,
-            "checked_at": checked_at,
-            "release_tag": None,
-            "message": "版本检查失败",
-            "ok": False,
-            "error": error,
-            "source": "upgrade_cache",
-            "cache_repo": str(cache_repo),
-        }
-
-    tags = _release_tags_from_ls_remote(str(result.get("stdout") or ""))
-    if not tags:
-        return {
-            "current_version": current_version,
-            "latest_version": None,
-            "update_available": False,
-            "remote_name": remote_name,
-            "checked_at": checked_at,
-            "release_tag": None,
-            "message": "未找到可用发布版本",
-            "ok": False,
-            "error": "no valid release tags found on remote",
-            "source": "upgrade_cache",
-            "cache_repo": str(cache_repo),
-        }
-
-    latest_version, release_tag = tags[-1]
-    cmp = compare_versions(current_version, latest_version)
-    if cmp < 0:
-        message = f"发现新版本 {latest_version}，当前 {current_version}"
-        update_available = True
-    elif cmp == 0:
-        message = f"当前已是最新版本 {current_version}"
-        update_available = False
-    else:
-        message = f"当前版本 {current_version} 高于远端最新版本 {latest_version}"
-        update_available = False
-    return {
-        "current_version": current_version,
-        "latest_version": latest_version,
-        "update_available": update_available,
-        "remote_name": remote_name,
-        "checked_at": checked_at,
-        "release_tag": release_tag,
-        "message": message,
-        "ok": True,
-        "error": None,
-        "source": "upgrade_cache",
-        "cache_repo": str(cache_repo),
-    }
-
-
-def _version_check_for_upgrade(
-    *,
-    repo_root: Path,
-    cache_root: Path,
-    remote_name: str,
-    run_cmd: Callable[..., Any],
-    now_fn: Callable[[], datetime] | None,
-) -> dict[str, Any]:
-    repo_check = check_version_update(base_dir=repo_root, remote_name=remote_name, run_cmd=run_cmd, now_fn=now_fn)
-    if repo_check.get("ok"):
-        return {**repo_check, "source": "current_release"}
-    cache_check = _version_check_from_cache(
+    resolved = resolve_upgrade_target(
+        current_version=current_version,
         repo_root=repo_root,
         cache_root=cache_root,
+        explicit_target=target_version,
         remote_name=remote_name,
         run_cmd=run_cmd,
         now_fn=now_fn,
     )
-    if cache_check.get("ok"):
-        return {**cache_check, "fallback_from": "current_release", "current_release_error": repo_check.get("error")}
-    return {**repo_check, "source": "current_release", "cache_version_check": cache_check}
+    return {**resolved, "source": resolved.get("target_source") or "release_target"}
 
 
 def _release_materialize_summary(*, tag: str, target_dir: Path, cache_root: Path) -> dict[str, Any]:
@@ -1642,6 +1522,7 @@ def service_upgrade_check(
     repo_root: str | Path,
     runtime_root: str | Path,
     cache_root: str | Path | None = None,
+    target_version: str | None = None,
     remote_name: str = "origin",
     run_cmd: Callable[..., Any] = subprocess.run,
     now_fn: Callable[[], datetime] | None = None,
@@ -1652,6 +1533,7 @@ def service_upgrade_check(
     version = _version_check_for_upgrade(
         repo_root=repo,
         cache_root=cache,
+        target_version=target_version,
         remote_name=remote_name,
         run_cmd=run_cmd,
         now_fn=now_fn,
@@ -1670,6 +1552,12 @@ def service_upgrade_check(
         "latest_version": version.get("latest_version"),
         "release_tag": version.get("release_tag"),
         "upgrade_available": bool(version.get("update_available")),
+        "target_source": version.get("target_source"),
+        "cache_repo": version.get("cache_repo"),
+        "cache_fetched": bool(version.get("cache_fetched")),
+        "tag_count": version.get("tag_count"),
+        "highest_tag_seen": version.get("highest_tag_seen"),
+        "selected_tag": version.get("selected_tag"),
         "version_check": version,
         "last_upgrade": status,
     }
@@ -1712,11 +1600,12 @@ def service_upgrade(
         repo_root=repo,
         runtime_root=runtime,
         cache_root=cache,
+        target_version=target_version,
         remote_name=remote_name,
         run_cmd=run_cmd,
         now_fn=now_fn,
     )
-    target = _version_text(target_version or str(check.get("latest_version") or ""))
+    target = _version_text(str(check.get("latest_version") or ""))
     tag = _tag_text(target) if target else None
     operations: list[dict[str, Any]] = []
     status_base = {

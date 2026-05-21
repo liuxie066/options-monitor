@@ -74,14 +74,12 @@ def version_update_tool(
     repo_base: Callable[[], Path],
     mask_path: Callable[[Any], str],
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    target_version = _optional_text(payload.get("target_version"))
-    version_alias = _optional_text(payload.get("version"))
-    if target_version and version_alias and target_version != version_alias:
+    if _optional_text(payload.get("version")):
         raise AgentToolError(
             code="INPUT_ERROR",
-            message="version and target_version must match when both are provided",
+            message="version_update.version has been removed; use target_version",
         )
-    target_version = target_version or version_alias
+    target_version = _optional_text(payload.get("target_version"))
     bump = _optional_text(payload.get("bump"))
     apply_mode = bool(payload.get("apply", False))
     allow_downgrade = bool(payload.get("allow_downgrade", False))

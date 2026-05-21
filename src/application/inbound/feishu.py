@@ -17,7 +17,7 @@ def handle_feishu_payload(
     audit_db: str | None = None,
     execute_tool_fn: ExecuteToolFn | None = None,
     allowed_senders: str | None = None,
-    use_agent_runtime: bool = False,
+    use_agent_runtime: bool | None = None,
     agent_runtime_settings: Any | None = None,
 ) -> dict[str, Any]:
     event_type = _extract_event_type(payload)
@@ -41,13 +41,22 @@ def handle_feishu_payload(
     kwargs: dict[str, Any] = {"allowed_senders": allowed_senders}
     if execute_tool_fn is not None:
         kwargs["execute_tool_fn"] = execute_tool_fn
-    if use_agent_runtime:
-        from src.application.agent_runtime import handle_agent_message
-
-        kwargs["settings"] = agent_runtime_settings or _explicit_agent_runtime_settings(
+    settings: Any | None = None
+    if use_agent_runtime is False:
+        use_runtime = False
+    else:
+        settings = agent_runtime_settings or _agent_runtime_settings(
             config_key=config_key,
             config_path=config_path,
+            force_enabled=True if use_agent_runtime is True else None,
         )
+        assert settings is not None
+        use_runtime = bool(settings.enabled)
+    if use_runtime:
+        from src.application.agent_runtime import handle_agent_message
+
+        assert settings is not None
+        kwargs["settings"] = settings
         inbound_result = handle_agent_message(request, **kwargs)
     else:
         inbound_result = handle_inbound_request(request, **kwargs)
@@ -68,7 +77,12 @@ def handle_feishu_payload(
     )
 
 
-def _explicit_agent_runtime_settings(*, config_key: str | None, config_path: str | None) -> Any:
+def _agent_runtime_settings(
+    *,
+    config_key: str | None,
+    config_path: str | None,
+    force_enabled: bool | None = None,
+) -> Any:
     from src.application.agent_runtime import AgentRuntimeSettings
     from src.application.agent_tool_config import load_runtime_config
 
@@ -77,11 +91,11 @@ def _explicit_agent_runtime_settings(*, config_key: str | None, config_path: str
     except AgentToolError:
         if config_path is not None and str(config_path).strip():
             raise
-        return AgentRuntimeSettings(enabled=True)
+        return AgentRuntimeSettings(enabled=True if force_enabled is None else bool(force_enabled))
 
     configured = AgentRuntimeSettings.from_runtime_config(cfg)
     return AgentRuntimeSettings(
-        enabled=True,
+        enabled=configured.enabled if force_enabled is None else bool(force_enabled),
         context_window_messages=configured.context_window_messages,
         llm=configured.llm,
     )
