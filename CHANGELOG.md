@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.103 - 2026-05-21
+
+### Fixed
+- Made agent and inbound monthly income reports use the shared exchange-rate loader and the runtime config's rate cache path, so CNY return summaries can be calculated when runtime rates are available or fetchable.
+
 ## 1.2.102 - 2026-05-21
 
 ### Added

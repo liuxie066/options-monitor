@@ -324,7 +324,7 @@ def monthly_income_report_tool(
     normalize_broker,
     resolve_option_positions_repo,
     build_monthly_income_report,
-    get_cached_exchange_rates,
+    get_exchange_rates,
     repo_base,
     mask_path,
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
@@ -338,9 +338,9 @@ def monthly_income_report_tool(
     month = str(payload.get("month") or "").strip() or None
     include_rows = bool(payload.get("include_rows", False))
 
-    rate_cache_path = (repo_base() / "output" / "state" / "rate_cache.json").resolve()
-    rates = get_cached_exchange_rates(cache_path=rate_cache_path)
     warnings: list[str] = []
+    rate_cache_path = (config_path.parent / "output" / "state" / "rate_cache.json").resolve()
+    rates = get_exchange_rates(cache_path=rate_cache_path, log=warnings.append)
     if rates is None:
         warnings.append("exchange_rate cache unavailable; *_cny fields may be null")
 

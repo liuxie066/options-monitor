@@ -268,7 +268,7 @@ def test_exchange_rates_imports_infrastructure_owner_module() -> None:
 
     assert read_model_mod.get_exchange_rates_or_fetch_latest is infra_mod.get_exchange_rates_or_fetch_latest
     assert reporting_mod.CurrencyConverter is infra_mod.CurrencyConverter
-    assert agent_tools_mod._get_cached_exchange_rates_impl is infra_mod.get_cached_exchange_rates
+    assert agent_tools_mod._get_exchange_rates_or_fetch_latest_impl is infra_mod.get_exchange_rates_or_fetch_latest
     assert cash_mod.CurrencyConverter is infra_mod.CurrencyConverter
     assert notify_mod.load_exchange_rate_info is infra_mod.load_exchange_rate_info
 
