@@ -86,6 +86,12 @@ def _enable_inbound_symbol_write(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OM_INBOUND_ADMIN_OPEN_IDS", "feishu:ou_1")
 
 
+def _enable_inbound_upgrade_write(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OM_INBOUND_OPERATIONS_ENABLED", "1")
+    monkeypatch.setenv("OM_INBOUND_UPGRADE_WRITE_ENABLED", "1")
+    monkeypatch.setenv("OM_INBOUND_ADMIN_OPEN_IDS", "feishu:ou_1")
+
+
 def test_inbound_parser_maps_core_read_only_commands() -> None:
     assert parse_inbound_text("状态").name == "runtime_status"
     assert parse_inbound_text("健康检查").name == "healthcheck"
@@ -190,6 +196,11 @@ def test_inbound_parser_maps_manual_trade_and_symbol_operations() -> None:
     assert symbol_edit.arguments == {"symbol": "HK.00700", "set": {"sell_put.max_strike": 480}}
     assert parse_inbound_text("删除监控标的 腾讯").arguments == {"symbol": "腾讯"}
     assert parse_inbound_text("确认监控 in_abc123").name == "symbol_confirm"
+    upgrade = parse_inbound_text("立即升级到 v1.2.111")
+    assert upgrade.name == "upgrade_now"
+    assert upgrade.arguments == {"target_version": "1.2.111"}
+    assert parse_inbound_text("确认升级 in_abc123").name == "upgrade_confirm"
+    assert parse_inbound_text("取消升级").name == "upgrade_cancel"
 
 
 def test_inbound_manual_trade_preview_and_confirm_open(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -400,6 +411,87 @@ def test_inbound_pending_operations_lists_current_conversation(monkeypatch: pyte
     assert "add 0700.HK put" in pending_two["data"]["response_text"]
     assert f"确认：确认监控 {symbol_id}" in pending_two["data"]["response_text"]
     assert f"确认：确认记录 {trade_id}" in pending_two["data"]["response_text"]
+
+
+def test_inbound_upgrade_preview_and_confirm(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from src.application.inbound import upgrade_operations
+
+    _enable_inbound_upgrade_write(monkeypatch)
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    audit_db = tmp_path / "inbound.sqlite3"
+    calls: list[dict[str, object]] = []
+
+    def _fake_service_upgrade(**kwargs):  # type: ignore[no-untyped-def]
+        calls.append(dict(kwargs))
+        return {
+            "ok": True,
+            "status": "upgraded" if kwargs.get("confirm") else "dry_run",
+            "changed": bool(kwargs.get("confirm")),
+            "current_version": "1.2.110",
+            "target_version": kwargs.get("target_version") or "1.2.111",
+            "release_tag": "v1.2.111",
+            "repo_root": str(kwargs["repo_root"]),
+            "runtime_root": str(kwargs["runtime_root"]),
+            "planned_operations": ["materialize v1.2.111", "switch current symlink"],
+        }
+
+    def _fake_service_upgrade_check(**kwargs):  # type: ignore[no-untyped-def]
+        calls.append({"check": True, **dict(kwargs)})
+        return {
+            "ok": True,
+            "repo_root": str(kwargs["repo_root"]),
+            "repo_root_resolved": str(kwargs["repo_root"]),
+            "repo_root_resolution": {"status": "input"},
+            "runtime_root": str(kwargs["runtime_root"]),
+            "current_version": "1.2.110",
+            "latest_version": "1.2.111",
+            "release_tag": "v1.2.111",
+            "upgrade_available": True,
+            "version_check": {"ok": True},
+        }
+
+    monkeypatch.setattr(upgrade_operations, "service_upgrade_check", _fake_service_upgrade_check)
+    monkeypatch.setattr(upgrade_operations, "service_upgrade", _fake_service_upgrade)
+
+    preview = handle_inbound_request(
+        InboundRequest(
+            text="立即升级到 v1.2.111",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_upgrade_preview",
+            conversation_id="feishu:chat_a:ou_1",
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+
+    assert preview["ok"] is True
+    assert preview["tool_name"] == "inbound.upgrade"
+    assert preview["data"]["response_text"].startswith("升级预览：立即升级")
+    assert "未执行升级" in preview["data"]["response_text"]
+    assert preview["data"]["payload"]["arguments"] == {"target_version": "1.2.111"}
+    assert calls[-1]["check"] is True
+
+    operation_id = preview["data"]["operation_id"]
+    confirmed = handle_inbound_request(
+        InboundRequest(
+            text="确认升级",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_upgrade_confirm",
+            conversation_id="feishu:chat_a:ou_1",
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+
+    assert confirmed["ok"] is True
+    assert confirmed["data"]["operation_id"] == operation_id
+    assert confirmed["data"]["operation_resolution"] == "latest_pending"
+    assert "升级执行完成" in confirmed["data"]["response_text"]
+    assert calls[-1]["confirm"] is True
+    assert calls[-1]["auto"] is True
+    assert str(calls[-1]["runtime_root"]) == str(tmp_path / "runtime")
 
 
 def test_inbound_manual_trade_bare_confirm_requires_unique_pending(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

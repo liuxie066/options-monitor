@@ -438,6 +438,8 @@ def _operation_summary_text(operation_type: str, operation: dict[str, Any]) -> s
         return _manual_close_summary(args)
     if operation_type.startswith("symbol_"):
         return _symbol_operation_summary(operation_type, args, operation)
+    if operation_type == "upgrade_now":
+        return _upgrade_operation_summary(operation)
     return operation_type or "-"
 
 
@@ -500,6 +502,17 @@ def _symbol_operation_summary(operation_type: str, args: dict[str, Any], operati
     if operation_type == "symbol_remove":
         return f"remove {symbol}"
     return f"{operation_type} {symbol}"
+
+
+def _upgrade_operation_summary(operation: dict[str, Any]) -> str:
+    preview = operation.get("preview")
+    preview_map = preview if isinstance(preview, dict) else {}
+    summary = preview_map.get("summary")
+    summary_map = summary if isinstance(summary, dict) else {}
+    current = str(summary_map.get("current_version") or "-")
+    target = str(summary_map.get("target_version") or "-")
+    status = str(summary_map.get("status") or "-")
+    return f"{current} -> {target} status {status}"
 
 
 def _json(value: Any) -> str:

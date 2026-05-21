@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.2.112 - 2026-05-21
+
+### Added
+- Added an inbound `立即升级` operation with preview, pending confirmation, cancellation, admin write gates, and service-upgrade execution through the existing release upgrade path.
+- Added `OM_INBOUND_UPGRADE_WRITE_ENABLED` to settings inspection and doctor readiness checks for explicitly enabling inbound upgrade writes.
+
+### Changed
+- Updated inbound help, pending-operation summaries, and inbound control docs to include the `确认升级` / `取消升级` flow.
+
 ## 1.2.111 - 2026-05-21
 
 ### Added

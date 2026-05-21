@@ -13,6 +13,7 @@ _MONTH_RE = re.compile(r"(?<!\d)(20\d{2})[-/.](0[1-9]|1[0-2])(?!\d)")
 _INT_RE = re.compile(r"(?<!\d)(\d{1,3})(?!\d)")
 _DATE_RE = re.compile(r"(?<!\d)(20\d{2})[-/.](0[1-9]|1[0-2])[-/.](0[1-9]|[12]\d|3[01])(?!\d)")
 _OPERATION_ID_RE = re.compile(r"\bin_[A-Za-z0-9_.:-]+\b")
+_VERSION_RE = re.compile(r"\bv?(\d+\.\d+\.\d+(?:[-+][A-Za-z0-9_.-]+)?)\b")
 _SYMBOL_RE = re.compile(r"(?<![A-Za-z0-9_.])([A-Za-z]{1,8}(?:\.[A-Za-z]{1,4})?|[A-Za-z]{2}\.\d{4,5}|\d{3,5}(?:\.HK)?|[\u4e00-\u9fff]{2,8})(?![A-Za-z0-9_.])")
 _MANUAL_UPDATE_SET_RE = r"(?:改成|改为|变成|设为|设置为|调整为|调整成|to|=|:|：)"
 _MANUAL_UPDATE_ALIASES: tuple[tuple[str, str], ...] = (
@@ -175,6 +176,10 @@ def _extract_run_id_for_logs(text: str) -> str | None:
 
 
 def _parse_operation_intent(text: str, *, compact: str, lower: str) -> InboundIntent | None:
+    if compact.startswith("确认升级") or lower.startswith("confirm upgrade"):
+        return InboundIntent(name="upgrade_confirm", arguments=_operation_reference_args(text))
+    if compact.startswith("取消升级") or lower.startswith("cancel upgrade"):
+        return InboundIntent(name="upgrade_cancel", arguments=_operation_reference_args(text))
     if compact.startswith("确认记录") or lower.startswith("confirm trade"):
         return InboundIntent(name="manual_trade_confirm", arguments=_operation_reference_args(text))
     if compact.startswith("取消记录") or lower.startswith("cancel trade"):
@@ -193,6 +198,8 @@ def _parse_operation_intent(text: str, *, compact: str, lower: str) -> InboundIn
     if _looks_like_symbol_remove(compact, lower):
         return InboundIntent(name="symbol_remove", arguments=_parse_symbol_remove(text))
 
+    if _looks_like_upgrade_now(compact, lower):
+        return InboundIntent(name="upgrade_now", arguments=_parse_upgrade_request(text))
     if _looks_like_manual_open(compact, lower):
         return InboundIntent(name="manual_trade_open", arguments=_parse_manual_trade_request(text))
     if _looks_like_manual_close(compact, lower):
@@ -223,6 +230,14 @@ def _parse_manual_trade_request(text: str) -> dict[str, object]:
     account = _extract_account(text)
     if account:
         args["account"] = account
+    return args
+
+
+def _parse_upgrade_request(text: str) -> dict[str, object]:
+    args: dict[str, object] = {}
+    match = _VERSION_RE.search(text)
+    if match:
+        args["target_version"] = match.group(1)
     return args
 
 
@@ -459,6 +474,10 @@ def _looks_like_runs(compact: str, lower: str) -> bool:
 
 def _looks_like_logs(compact: str, lower: str) -> bool:
     return compact.startswith("日志") or lower.startswith("log ") or lower.startswith("logs ")
+
+
+def _looks_like_upgrade_now(compact: str, lower: str) -> bool:
+    return compact.startswith("立即升级") or compact in {"升级", "马上升级"} or lower in {"upgrade now", "update now"} or lower.startswith("upgrade now ")
 
 
 def _looks_like_manual_open(compact: str, lower: str) -> bool:

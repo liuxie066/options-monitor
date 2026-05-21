@@ -14,6 +14,7 @@ class InboundOperationPolicy:
     operations_enabled: bool
     trade_write_enabled: bool
     symbol_write_enabled: bool
+    upgrade_write_enabled: bool
     admin_senders: tuple[str, ...]
     confirm_ttl_seconds: int = DEFAULT_CONFIRM_TTL_SECONDS
 
@@ -24,6 +25,7 @@ def load_operation_policy_from_env() -> InboundOperationPolicy:
         operations_enabled=_truthy(env.get("OM_INBOUND_OPERATIONS_ENABLED")),
         trade_write_enabled=_truthy(env.get("OM_INBOUND_TRADE_WRITE_ENABLED")),
         symbol_write_enabled=_truthy(env.get("OM_INBOUND_SYMBOL_WRITE_ENABLED")),
+        upgrade_write_enabled=_truthy(env.get("OM_INBOUND_UPGRADE_WRITE_ENABLED")),
         admin_senders=_parse_sender_entries(env.get("OM_INBOUND_ADMIN_OPEN_IDS")),
         confirm_ttl_seconds=_positive_int(
             env.get("OM_INBOUND_CONFIRM_TTL_SECONDS"),
@@ -60,6 +62,22 @@ def enforce_symbol_write_allowed(
             code="PERMISSION_DENIED",
             message="inbound monitored symbol writes are disabled",
             hint="Set OM_INBOUND_SYMBOL_WRITE_ENABLED=1 for monitored symbol config writes.",
+        )
+    return effective
+
+
+def enforce_upgrade_write_allowed(
+    *,
+    channel: str,
+    sender_id: str,
+    policy: InboundOperationPolicy | None = None,
+) -> InboundOperationPolicy:
+    effective = _enforce_base_write_allowed(channel=channel, sender_id=sender_id, policy=policy)
+    if not effective.upgrade_write_enabled:
+        raise AgentToolError(
+            code="PERMISSION_DENIED",
+            message="inbound immediate upgrade is disabled",
+            hint="Set OM_INBOUND_UPGRADE_WRITE_ENABLED=1 for inbound upgrade operations.",
         )
     return effective
 
