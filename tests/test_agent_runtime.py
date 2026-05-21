@@ -12,6 +12,7 @@ from src.application.agent_runtime.llm_intent_schema import LLM_INTENT_SCHEMA_VE
 from src.application.agent_runtime.llm_translator import LlmTranslationResult, parse_llm_translation_payload, translate_inbound_intent
 from src.application.agent_tool_contracts import build_response
 from src.application.inbound.contracts import InboundIntent, InboundRequest
+from src.infrastructure.openai_chat_completions import create_json_chat_completion, extract_chat_completion_text
 from src.infrastructure.openai_responses import OpenAIResponsesError, create_structured_response, extract_response_text
 
 
@@ -565,6 +566,69 @@ def test_llm_translator_calls_openai_provider_and_parses_structured_response() -
     assert calls[0]["json_schema"]["properties"]["intent"]["enum"]
 
 
+def test_llm_translator_calls_deepseek_provider_and_parses_chat_response() -> None:
+    calls: list[dict[str, Any]] = []
+
+    def _create_response(**kwargs: object) -> dict[str, Any]:
+        calls.append(dict(kwargs))
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "schema_version": LLM_INTENT_SCHEMA_VERSION,
+                                "intent": "option_positions_open",
+                                "arguments": {
+                                    "account": "sy",
+                                    "status": "open",
+                                    "month": None,
+                                    "run_id": None,
+                                    "kind": None,
+                                    "limit": None,
+                                    "lines": None,
+                                },
+                                "confidence": 0.93,
+                            }
+                        )
+                    }
+                }
+            ]
+        }
+
+    result = translate_inbound_intent(
+        "帮我看 sy 的持仓",
+        settings=LlmTranslatorSettings(
+            enabled=True,
+            provider="deepseek",
+            base_url="https://api.deepseek.com",
+            model="deepseek-v4-flash",
+            api_key_env="DEEPSEEK_API_KEY",
+            timeout_seconds=9,
+            max_output_tokens=777,
+        ),
+        environ={"DEEPSEEK_API_KEY": "sk-test"},
+        create_response_fn=_create_response,
+    )
+
+    assert result.error is None
+    assert result.intent is not None
+    assert result.intent.name == "option_positions_open"
+    assert result.intent.arguments == {"account": "sy", "status": "open"}
+    assert result.trace["reason"] == "accepted"
+    assert result.trace["provider"] == "deepseek"
+    assert result.trace["base_url"] == "https://api.deepseek.com"
+    assert result.trace["model"] == "deepseek-v4-flash"
+    assert result.trace["api_key_env"] == "DEEPSEEK_API_KEY"
+    assert calls[0]["api_key"] == "sk-test"
+    assert calls[0]["base_url"] == "https://api.deepseek.com"
+    assert calls[0]["model"] == "deepseek-v4-flash"
+    assert calls[0]["timeout"] == 9
+    assert calls[0]["max_output_tokens"] == 777
+    assert calls[0]["input_text"] == "帮我看 sy 的持仓"
+    assert "Example JSON output" in str(calls[0]["instructions"])
+
+
 def test_llm_translator_sends_structured_conversation_context() -> None:
     calls: list[dict[str, Any]] = []
 
@@ -753,3 +817,56 @@ def test_openai_responses_client_accepts_full_responses_url() -> None:
     )
 
     assert calls[0]["url"] == "https://llm.example/v1/responses"
+
+
+def test_openai_chat_completions_client_builds_deepseek_json_request() -> None:
+    calls: list[dict[str, Any]] = []
+
+    def _post(
+        url: str,
+        payload: dict[str, Any],
+        *,
+        headers: dict[str, str],
+        timeout: int,
+    ) -> dict[str, Any]:
+        calls.append({"url": url, "payload": payload, "headers": headers, "timeout": timeout})
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "schema_version": LLM_INTENT_SCHEMA_VERSION,
+                                "intent": "runtime_status",
+                                "arguments": {},
+                                "confidence": 0.9,
+                            }
+                        )
+                    }
+                }
+            ]
+        }
+
+    response = create_json_chat_completion(
+        api_key="sk-test",
+        base_url="https://api.deepseek.com",
+        model="deepseek-v4-flash",
+        input_text="状态",
+        instructions="translate only as json",
+        json_schema=llm_intent_json_schema(),
+        timeout=7,
+        http_post_json_fn=_post,
+    )
+
+    assert calls[0]["url"] == "https://api.deepseek.com/chat/completions"
+    assert calls[0]["headers"]["Authorization"] == "Bearer sk-test"
+    assert calls[0]["payload"]["model"] == "deepseek-v4-flash"
+    assert calls[0]["payload"]["messages"][0]["role"] == "system"
+    assert calls[0]["payload"]["messages"][1] == {"role": "user", "content": "状态"}
+    assert calls[0]["payload"]["max_tokens"] == 512
+    assert calls[0]["payload"]["response_format"] == {"type": "json_object"}
+    assert calls[0]["payload"]["thinking"] == {"type": "disabled"}
+    assert calls[0]["payload"]["stream"] is False
+    assert calls[0]["payload"]["temperature"] == 0.0
+    assert calls[0]["timeout"] == 7
+    assert "runtime_status" in extract_chat_completion_text(response)
