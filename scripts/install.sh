@@ -16,7 +16,7 @@ OS_NAME="$(uname -s 2>/dev/null || printf 'unknown')"
 usage() {
   cat <<'EOF'
 Usage:
-  install.sh --version v1.2.105 [--prefix "$HOME/apps/options-monitor"]
+  install.sh --version v1.2.107 [--prefix "$HOME/apps/options-monitor"]
 
 Installs one pinned options-monitor release into:
   <prefix>/releases/<version>
@@ -28,7 +28,7 @@ write env secrets, start services, create timers, connect to OpenD, send Feishu
 messages, or touch SQLite state.
 
 Options:
-  --version VERSION     Required. Release tag to install, for example v1.2.105.
+  --version VERSION     Required. Release tag to install, for example v1.2.107.
   --prefix PATH        Install root. Default: $HOME/apps/options-monitor.
   --repo-url URL       Git repository URL.
   --python PATH        Python executable for venv creation. Default: python3.
@@ -210,7 +210,7 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-[ -n "$VERSION" ] || die "--version is required; install a pinned release tag, for example --version v1.2.105"
+[ -n "$VERSION" ] || die "--version is required; install a pinned release tag, for example --version v1.2.107"
 case "$VERSION" in
   v*) TAG="$VERSION" ;;
   *) TAG="v${VERSION}" ;;

@@ -46,7 +46,7 @@
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh -o /tmp/options-monitor-install.sh
-bash /tmp/options-monitor-install.sh --version v1.2.105 --prefix "$HOME/apps/options-monitor"
+bash /tmp/options-monitor-install.sh --version v1.2.107 --prefix "$HOME/apps/options-monitor"
 
 om setup check
 ```

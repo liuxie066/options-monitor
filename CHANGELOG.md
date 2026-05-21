@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.107 - 2026-05-21
+
+### Changed
+- Updated quick-start, install guide, and installer help examples to point at the fixed `v1.2.107` release instead of the broken `v1.2.105` global wrapper release.
+
 ## 1.2.106 - 2026-05-21
 
 ### Fixed
