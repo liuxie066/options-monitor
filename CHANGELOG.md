@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.2.105 - 2026-05-21
+
+### Added
+- Added installer-managed user-level `om` and `om-agent` wrappers, created in `$HOME/.local/bin` by default and pointed at the active `current` release.
+- Added installer flags to skip CLI wrapper creation, choose a custom wrapper directory, or explicitly take over existing non-managed wrapper paths.
+
+### Changed
+- Updated install docs and quick-start commands to present `om` / `om-agent` as the normal installed entrypoints, while keeping `./om` / `./om-agent` as repo-local fallbacks.
+
 ## 1.2.104 - 2026-05-21
 
 ### Added

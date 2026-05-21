@@ -13,14 +13,16 @@
 
 | 入口 | 面向对象 | 适合做什么 |
 |---|---|---|
-| `./om` | 人工 CLI | 配置构建、手动运行、持仓维护、只读查询 |
-| `./om-agent` | Agent / 程序 | JSON manifest、结构化工具调用、只读诊断 |
+| `om` | 人工 CLI | 配置构建、手动运行、持仓维护、只读查询 |
+| `om-agent` | Agent / 程序 | JSON manifest、结构化工具调用、只读诊断 |
+
+源码目录内也可以直接使用 fallback：`./om` / `./om-agent`。
 
 推荐顺序：
 
-1. 首次启用先完成安装，然后运行 `./om setup check`。
-2. 日常人工操作优先 `./om`。
-3. Agent 接入、排障和结构化读取优先 `./om-agent`。
+1. 首次启用先完成安装，然后运行 `om setup check`。
+2. 日常人工操作优先 `om`。
+3. Agent 接入、排障和结构化读取优先 `om-agent`。
 
 ## 它做什么，不做什么
 
@@ -44,13 +46,13 @@
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh -o /tmp/options-monitor-install.sh
-bash /tmp/options-monitor-install.sh --version v1.2.92 --prefix "$HOME/apps/options-monitor"
+bash /tmp/options-monitor-install.sh --version v1.2.105 --prefix "$HOME/apps/options-monitor"
 
-cd "$HOME/apps/options-monitor/current"
-./om setup check
+om setup check
 ```
 
-安装脚本只下载代码、checkout 指定 release、创建 `.venv`、安装依赖并更新 `current` symlink。它不会写配置、不会写 secrets、不会启动服务、不会创建定时任务。
+安装脚本会下载代码、checkout 指定 release、创建 `.venv`、安装依赖、更新 `current` symlink，并默认在 `$HOME/.local/bin` 创建 `om` / `om-agent` 用户级 wrapper。它不会写配置、不会写 secrets、不会启动服务、不会创建定时任务。
+如果 `$HOME/.local/bin` 尚未加入 `PATH`，按安装输出提示先加入 PATH，或使用 fallback：`$HOME/apps/options-monitor/current/om setup check`。
 
 手动安装、server/dev 依赖和目录布局见 [docs/INSTALL.md](docs/INSTALL.md)。
 
@@ -68,8 +70,8 @@ cd "$HOME/apps/options-monitor/current"
 推荐用 CLI 初始化入口：
 
 ```bash
-./om setup init --market us --account lx --futu-acc-id <futu-account-id>
-./om setup init --market hk --account lx --futu-acc-id <futu-account-id>
+om setup init --market us --account lx --futu-acc-id <futu-account-id>
+om setup init --market hk --account lx --futu-acc-id <futu-account-id>
 ```
 
 常见编辑源：
@@ -83,8 +85,8 @@ cd "$HOME/apps/options-monitor/current"
 从分层配置生成 runtime config：
 
 ```bash
-./om config build --market us
-./om config build --market hk
+om config build --market us
+om config build --market hk
 ```
 
 生成的 runtime config 会记录 `_generated` 指纹，覆盖
