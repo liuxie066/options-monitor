@@ -9,6 +9,11 @@ from src.application.agent_runtime.settings import LlmTranslatorSettings
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.inbound.contracts import InboundIntent
 from src.application.settings import build_effective_env
+from src.infrastructure.openai_chat_completions import (
+    OpenAIChatCompletionsError,
+    create_json_chat_completion,
+    extract_chat_completion_text,
+)
 from src.infrastructure.openai_responses import OpenAIResponsesError, create_structured_response, extract_response_text
 
 
@@ -34,6 +39,22 @@ Rules:
 - For unclear or unsupported messages, return a low confidence value below 0.5.
 - Use account only when the user explicitly mentions lx or sy.
 - Use month only when the user explicitly mentions a YYYY-MM month.
+
+Example JSON output:
+{
+  "schema_version": "om-llm-intent-v1",
+  "intent": "runtime_status",
+  "arguments": {
+    "account": null,
+    "status": null,
+    "month": null,
+    "run_id": null,
+    "kind": null,
+    "limit": null,
+    "lines": null
+  },
+  "confidence": 0.91
+}
 """
 
 
@@ -84,14 +105,14 @@ def translate_inbound_intent(
         )
 
     provider = str(settings.provider or "").strip().lower()
-    if provider != "openai":
+    if provider not in {"openai", "deepseek"}:
         return LlmTranslationResult(
             intent=None,
             trace=_trace(settings, attempted=False, reason="unsupported_provider"),
             error=AgentToolError(
                 code="LLM_UNAVAILABLE",
                 message=f"unsupported LLM translator provider: {settings.provider}",
-                hint="Set agent.llm.provider to openai, or disable agent.llm.enabled.",
+                hint="Set agent.llm.provider to openai or deepseek, or disable agent.llm.enabled.",
                 details={"provider": settings.provider},
             ),
         )
@@ -110,7 +131,7 @@ def translate_inbound_intent(
         )
 
     try:
-        response = (create_response_fn or create_structured_response)(
+        response = (create_response_fn or _provider_create_response_fn(provider))(
             api_key=api_key,
             base_url=settings.base_url,
             model=settings.model,
@@ -120,7 +141,7 @@ def translate_inbound_intent(
             timeout=int(settings.timeout_seconds),
             max_output_tokens=int(settings.max_output_tokens),
         )
-    except OpenAIResponsesError as err:
+    except (OpenAIResponsesError, OpenAIChatCompletionsError) as err:
         return LlmTranslationResult(
             intent=None,
             trace=_trace(
@@ -195,6 +216,12 @@ def _api_key_value(settings: LlmTranslatorSettings, *, environ: dict[str, str] |
     return str(env.get(settings.api_key_env) or "").strip()
 
 
+def _provider_create_response_fn(provider: str) -> CreateStructuredResponseFn:
+    if str(provider or "").strip().lower() == "deepseek":
+        return create_json_chat_completion
+    return create_structured_response
+
+
 def _provider_input_text(text: str, *, conversation_context: dict[str, Any] | None) -> str:
     if not isinstance(conversation_context, dict):
         return str(text or "")
@@ -247,7 +274,7 @@ def _context_trace(conversation_context: dict[str, Any] | None) -> dict[str, Any
 def _parse_provider_payload(response: dict[str, Any]) -> dict[str, Any] | None:
     if not isinstance(response, dict):
         return None
-    text = extract_response_text(response)
+    text = extract_response_text(response) or extract_chat_completion_text(response)
     if not text:
         return None
     try:

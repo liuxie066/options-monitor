@@ -197,7 +197,7 @@ def test_validate_config_rejects_invalid_agent_llm_config() -> None:
         mod.validate_config(cfg)
         raise AssertionError("expected SystemExit")
     except SystemExit as exc:
-        assert "agent.llm.provider must be openai when set" in str(exc)
+        assert "agent.llm.provider must be one of: openai, deepseek" in str(exc)
 
 
 def test_validate_config_requires_complete_agent_llm_when_enabled() -> None:
@@ -238,6 +238,20 @@ def test_validate_config_requires_complete_agent_llm_when_enabled() -> None:
             "base_url": "https://llm.example/v1",
             "model": "gpt-5.2",
             "api_key_env": "OM_LLM_API_KEY",
+            "timeout_seconds": 20,
+            "max_output_tokens": 512,
+        }
+    }
+    mod.validate_config(cfg)
+
+    cfg = _base_cfg()
+    cfg["agent"] = {
+        "llm": {
+            "enabled": True,
+            "provider": "deepseek",
+            "base_url": "https://api.deepseek.com",
+            "model": "deepseek-v4-flash",
+            "api_key_env": "DEEPSEEK_API_KEY",
             "timeout_seconds": 20,
             "max_output_tokens": 512,
         }

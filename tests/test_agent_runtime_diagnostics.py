@@ -88,11 +88,52 @@ def test_llm_check_reports_ready_custom_openai_compatible_endpoint(tmp_path: Pat
     assert out["summary"]["ok"] is True
     assert out["summary"]["status"] == "ready"
     assert out["env"]["env_file_loaded"] is True
+    assert out["llm"]["endpoint_url"] == "https://llm.example/v1/responses"
     assert out["llm"]["responses_url"] == "https://llm.example/v1/responses"
+    assert out["llm"]["chat_completions_url"] is None
     assert out["llm"]["api_key_configured"] is True
     assert out["llm"]["api_key_source"] == f"env_file:{env_file.resolve()}"
     checks = {item["name"]: item for item in out["checks"]}
     assert checks["api_key"]["value"]["configured"] is True
+    assert checks["live_probe"]["status"] == "skipped"
+
+
+def test_llm_check_reports_ready_deepseek_endpoint(tmp_path: Path) -> None:
+    cfg_path = _write_config(
+        tmp_path,
+        _runtime_config(
+            llm={
+                "enabled": True,
+                "provider": "deepseek",
+                "base_url": "https://api.deepseek.com",
+                "model": "deepseek-v4-flash",
+                "api_key_env": "DEEPSEEK_API_KEY",
+                "confidence_min": 0.75,
+                "timeout_seconds": 9,
+                "max_output_tokens": 777,
+            }
+        ),
+    )
+    env_file = tmp_path / "options-monitor.env"
+    env_file.write_text("DEEPSEEK_API_KEY=sk-test\n", encoding="utf-8")
+
+    out = check_llm_translator(
+        repo_root=tmp_path,
+        config_path=cfg_path,
+        env_file=env_file,
+        include_local_env_file=False,
+    )
+
+    assert out["summary"]["ok"] is True
+    assert out["summary"]["status"] == "ready"
+    assert out["llm"]["endpoint_url"] == "https://api.deepseek.com/chat/completions"
+    assert out["llm"]["responses_url"] is None
+    assert out["llm"]["chat_completions_url"] == "https://api.deepseek.com/chat/completions"
+    assert out["llm"]["api_key_configured"] is True
+    assert out["llm"]["api_key_source"] == f"env_file:{env_file.resolve()}"
+    checks = {item["name"]: item for item in out["checks"]}
+    assert checks["provider"]["value"] == "deepseek"
+    assert checks["base_url"]["value"]["endpoint_url"] == "https://api.deepseek.com/chat/completions"
     assert checks["live_probe"]["status"] == "skipped"
 
 

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.2.115 - 2026-05-22
+
+### Added
+- Added `agent.llm.provider: deepseek` support through DeepSeek's OpenAI-compatible Chat Completions API.
+- Added a Chat Completions JSON-mode client for LLM intent translation, including DeepSeek endpoint diagnostics in `om agent llm-check`.
+
+### Changed
+- Documented DeepSeek LLM configuration with `DEEPSEEK_API_KEY`, `https://api.deepseek.com`, and `deepseek-v4-flash`.
+- Kept OpenAI on the existing Responses API path while routing DeepSeek through `/chat/completions`.
+
 ## 1.2.114 - 2026-05-21
 
 ### Added

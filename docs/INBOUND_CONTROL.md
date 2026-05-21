@@ -111,7 +111,12 @@ When enabled, LLM translation only runs after command and deterministic parsing 
 
 The command surface authority is `src/application/agent_runtime/command_catalog.py`. Slash command metadata, the read-only LLM intent surface, and inbound help text should use that catalog instead of maintaining separate command lists.
 
-The first provider adapter is OpenAI Responses API. The request is structured-output only, uses deterministic sampling, and sets provider-side storage off for translated messages. `agent.llm.base_url` is optional; leave it empty for `https://api.openai.com/v1/responses`, or set an OpenAI-compatible base URL such as `https://example.com/v1`. To enable it, set the API key in the local env file or deployment env file, then set `agent.llm` in runtime config:
+Supported providers:
+
+- `openai`: uses OpenAI Responses API. Leave `base_url` empty for `https://api.openai.com/v1/responses`, or set a full Responses-compatible base URL.
+- `deepseek`: uses DeepSeek's OpenAI-compatible Chat Completions API. Leave `base_url` empty or set `https://api.deepseek.com`; OM calls `/chat/completions` and requests `response_format: {"type":"json_object"}`.
+
+To enable it, set the API key in the local env file or deployment env file, then set `agent.llm` in runtime config:
 
 ```bash
 OM_LLM_API_KEY='sk-...'
@@ -130,6 +135,25 @@ agent:
     max_output_tokens: 512
 ```
 
+DeepSeek example:
+
+```bash
+DEEPSEEK_API_KEY='sk-...'
+```
+
+```yaml
+agent:
+  llm:
+    enabled: true
+    provider: deepseek
+    base_url: "https://api.deepseek.com"
+    model: deepseek-v4-flash
+    api_key_env: DEEPSEEK_API_KEY
+    confidence_min: 0.75
+    timeout_seconds: 20
+    max_output_tokens: 512
+```
+
 The API key stays in environment settings; runtime config only names which env var to read. When LLM translation runs, OM sends a bounded same-conversation context window to the translator: recent inbound audit rows plus current pending operation summaries. Sender and conversation identifiers are used locally to select the window, but are not sent to the provider. `agent.runtime.context_window_messages` controls the recent-message window and is capped at 20; this context is only used for intent translation, not execution.
 
 Check the translator control plane before enabling it in Feishu:
@@ -140,7 +164,7 @@ Check the translator control plane before enabling it in Feishu:
 ./om agent llm-check --config-key us --live
 ```
 
-`agent commands` renders the same command catalog used by slash commands, inbound help, and the LLM intent schema. The default LLM check only validates runtime config, the effective env file, redacted API-key presence, and the resolved Responses API URL. `--live` sends one read-only structured translation probe to the configured provider.
+`agent commands` renders the same command catalog used by slash commands, inbound help, and the LLM intent schema. The default LLM check only validates runtime config, the effective env file, redacted API-key presence, and the resolved provider endpoint URL. `--live` sends one read-only structured translation probe to the configured provider.
 
 ## Sender Allowlist
 
@@ -300,7 +324,7 @@ Only subscribe this event for the OM Bot in Feishu Open Platform. Install `requi
 
 LLM translation is opt-in and inactive unless `agent.llm.enabled` is true.
 
-The current provider adapter uses OpenAI Responses API for structured output. It must only translate natural language into an `om-llm-intent-v1` structured intent. The translated intent must still go through the same sender allowlist, pure-read whitelist, audit, and idempotency checks. Low-confidence, incomplete, or write-like intents must return clarification or preview only.
+The current provider adapters use OpenAI Responses API for `openai` and Chat Completions JSON output for `deepseek`. They must only translate natural language into an `om-llm-intent-v1` structured intent. The translated intent must still go through the same sender allowlist, pure-read whitelist, audit, and idempotency checks. Low-confidence, incomplete, or write-like intents must return clarification or preview only.
 
 LangGraph is intentionally not part of the production runtime yet. The current workflow is a one-shot command facade plus an optional LLM translator; OM keeps deterministic execution, factual rendering, preview/confirm/apply, and audit ownership. Add LangGraph only when there is a real stateful workflow that cannot stay clear in this simpler runtime.
 
