@@ -192,18 +192,19 @@ class InboundOperationStore:
             }
         return {**resolution, "status": "none", "operation": None}
 
-    def mark_confirmed(self, operation_id: str) -> bool:
+    def mark_confirmed(self, operation_id: str, *, result: dict[str, Any] | None = None) -> bool:
         self._ensure_schema()
         with self._connect() as conn:
             cursor = conn.execute(
                 """
                 UPDATE inbound_pending_operations
                 SET status = 'confirmed',
-                    confirmed_at = COALESCE(confirmed_at, ?)
+                    confirmed_at = COALESCE(confirmed_at, ?),
+                    result_json = COALESCE(?, result_json)
                 WHERE operation_id = ?
                   AND status = 'previewed'
                 """,
-                (utc_now_iso(), str(operation_id)),
+                (utc_now_iso(), _json(result) if result is not None else None, str(operation_id)),
             )
             return cursor.rowcount == 1
 
@@ -241,6 +242,21 @@ class InboundOperationStore:
 
     def mark_applied(self, operation_id: str, *, result: dict[str, Any]) -> None:
         self._set_status(operation_id, "applied", applied_at=utc_now_iso(), result_json=_json(result))
+
+    def mark_running(self, operation_id: str, *, result: dict[str, Any]) -> bool:
+        self._ensure_schema()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE inbound_pending_operations
+                SET status = 'running',
+                    result_json = ?
+                WHERE operation_id = ?
+                  AND status = 'confirmed'
+                """,
+                (_json(result), str(operation_id)),
+            )
+            return cursor.rowcount == 1
 
     def mark_cancelled(self, operation_id: str, *, result: dict[str, Any]) -> None:
         self._set_status(operation_id, "cancelled", cancelled_at=utc_now_iso(), result_json=_json(result))

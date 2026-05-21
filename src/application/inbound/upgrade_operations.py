@@ -2,21 +2,31 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import shutil
+import subprocess
+import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from src.application.agent_tool_config import repo_base
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response, mask_path
 from src.application.inbound.contracts import InboundIntent, InboundRequest
 from src.application.inbound.operation_policy import enforce_upgrade_write_allowed
 from src.application.inbound.operation_store import InboundOperationStore, operation_is_expired
+from src.application.inbound.operation_status_text import cannot_repeat_message, user_facing_operation_status
 from src.application.service_upgrade import compare_versions, default_releases_root, default_upgrade_cache_root, service_upgrade, service_upgrade_check
 from src.application.settings import build_effective_env
+from src.application.secret_resolver import resolve_feishu_bot_config
+from src.infrastructure.feishu_bot import reply_text_message
 
 
 PREVIEW_INTENTS = frozenset({"upgrade_now"})
 CONFIRM_INTENTS = frozenset({"upgrade_confirm", "upgrade_cancel"})
 UPGRADE_OPERATION_TYPES = PREVIEW_INTENTS
+UpgradeWorkerLauncher = Callable[[str, Path], dict[str, Any]]
+ReplyFn = Callable[..., dict[str, Any]]
+UPGRADE_WORKER_LAUNCHER: UpgradeWorkerLauncher | None = None
 
 
 def is_upgrade_operation_intent(intent: InboundIntent) -> bool:
@@ -49,6 +59,7 @@ def _preview_and_save(
     store: InboundOperationStore,
     ttl_seconds: int,
 ) -> dict[str, Any]:
+    _attach_receipt_target(payload, request)
     preview = _preview_operation(payload)
     _freeze_preview_target(payload, preview)
     payload_hash = hash_operation_payload(payload)
@@ -107,12 +118,18 @@ def _confirm_operation(*, operation_id: str | None, request: InboundRequest, sto
         result = {"operation_id": operation_id, "status": "failed", "reason": "payload_hash_mismatch"}
         store.mark_failed(operation_id, result=result)
         raise AgentToolError(code="INTERNAL_ERROR", message="pending upgrade operation payload hash mismatch; refusing to upgrade", details=result)
-    if not store.mark_confirmed(operation_id):
+    queued = {
+        "operation_id": operation_id,
+        "status": "confirmed",
+        "task_status": "queued",
+        "receipt_target": _receipt_target_from_request(request),
+    }
+    if not store.mark_confirmed(operation_id, result=queued):
         current = store.get(operation_id) or {}
         current_status = str(current.get("status") or "-")
         raise AgentToolError(
             code="INPUT_ERROR",
-            message=f"这条升级操作不能再次确认，当前状态：{current_status}。",
+            message=cannot_repeat_message("升级操作", "确认", current_status),
             details={
                 "operation_id": operation_id,
                 "status": current_status,
@@ -121,42 +138,15 @@ def _confirm_operation(*, operation_id: str | None, request: InboundRequest, sto
             },
         )
     try:
-        preview = _preview_operation(payload)
-        result = _apply_operation(payload)
+        launch = _launch_upgrade_worker(operation_id=operation_id, audit_db=store.path)
     except AgentToolError as exc:
         store.mark_failed(operation_id, result={"operation_id": operation_id, "status": "failed", "error": exc.code, "message": exc.message})
         raise
     except Exception as exc:
         failed = {"operation_id": operation_id, "status": "failed", "error": type(exc).__name__, "message": str(exc)}
         store.mark_failed(operation_id, result=failed)
-        raise AgentToolError(code="INTERNAL_ERROR", message="upgrade operation failed after confirmation", details=failed) from exc
-    if not bool(result.get("ok", False)):
-        failed = {"operation_id": operation_id, "status": "failed", "result": result}
-        store.mark_failed(operation_id, result=failed)
-        error = AgentToolError(
-            code="UPGRADE_FAILED",
-            message=f"立即升级未成功：{result.get('status') or 'unknown'}",
-            details=result,
-        )
-        return build_response(
-            tool_name="inbound.upgrade",
-            ok=False,
-            data={
-                "operation_id": operation_id,
-                **operation_resolution,
-                "operation_type": payload["operation_type"],
-                "status": "failed",
-                "payload_hash": current_hash,
-                "payload": payload,
-                "preview": preview,
-                "result": result,
-                "response_text": render_upgrade_response(status="failed", operation_id=operation_id, payload=payload, preview=preview, result=result),
-            },
-            error=build_error_payload(error),
-            meta={"audit_db": mask_path(store.path)},
-        )
-    store.mark_applied(operation_id, result=result)
-    text = render_upgrade_response(status="applied", operation_id=operation_id, payload=payload, preview=preview, result=result)
+        raise AgentToolError(code="INTERNAL_ERROR", message="升级确认已收到，但后台升级任务启动失败。", details=failed) from exc
+    text = render_upgrade_response(status="confirmed", operation_id=operation_id, payload=payload, preview=operation.get("preview"), result=launch)
     return build_response(
         tool_name="inbound.upgrade",
         ok=True,
@@ -164,11 +154,11 @@ def _confirm_operation(*, operation_id: str | None, request: InboundRequest, sto
             "operation_id": operation_id,
             **operation_resolution,
             "operation_type": payload["operation_type"],
-            "status": "applied",
+            "status": "confirmed",
             "payload_hash": current_hash,
             "payload": payload,
-            "preview": preview,
-            "result": result,
+            "preview": operation.get("preview"),
+            "result": launch,
             "response_text": text,
         },
         meta={"audit_db": mask_path(store.path)},
@@ -244,7 +234,7 @@ def _resolve_upgrade_operation(
         raise AgentToolError(code="INPUT_ERROR", message="这不是升级操作，不能用确认升级/取消升级处理。", details=details)
     if status == "invalid_status":
         current_status = str(operation.get("status") or "-")
-        raise AgentToolError(code="INPUT_ERROR", message=f"这条升级操作不能再次{action}，当前状态：{current_status}。", details=details)
+        raise AgentToolError(code="INPUT_ERROR", message=cannot_repeat_message("升级操作", action, current_status), details=details)
     raise AgentToolError(code="INPUT_ERROR", message="找不到待确认的升级操作。", hint="请检查 operation_id，或重新发送：立即升级", details=details)
 
 
@@ -276,6 +266,32 @@ def _build_operation_payload(operation_type: str, arguments: dict[str, Any]) -> 
     return {"schema_version": "1.0", "operation_type": operation_type, "arguments": arguments}
 
 
+def _attach_receipt_target(payload: dict[str, Any], request: InboundRequest) -> None:
+    payload["receipt_target"] = _receipt_target_from_request(request)
+
+
+def _receipt_target_from_request(request: InboundRequest) -> dict[str, Any]:
+    receipt = {
+        "channel": request.channel,
+        "sender_id": request.sender_id,
+        "message_id": request.message_id,
+        "conversation_id": request.conversation_id,
+        "config_key": request.config_key,
+        "config_path": request.config_path,
+    }
+    return {key: value for key, value in receipt.items() if value}
+
+
+def _receipt_target_from_operation(operation: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    result = operation.get("result")
+    result_map = result if isinstance(result, dict) else {}
+    target = result_map.get("receipt_target")
+    if isinstance(target, dict) and target:
+        return target
+    payload_target = payload.get("receipt_target")
+    return payload_target if isinstance(payload_target, dict) else {}
+
+
 def _freeze_preview_target(payload: dict[str, Any], preview: dict[str, Any]) -> None:
     args = payload.setdefault("arguments", {})
     if not isinstance(args, dict) or str(args.get("target_version") or "").strip():
@@ -303,6 +319,202 @@ def _preview_operation(payload: dict[str, Any]) -> dict[str, Any]:
 def _apply_operation(payload: dict[str, Any]) -> dict[str, Any]:
     args = _upgrade_defaults(dict(payload.get("arguments") or {}))
     return service_upgrade(confirm=True, **args)
+
+
+def run_confirmed_upgrade_operation(
+    *,
+    operation_id: str,
+    audit_db: str | Path | None = None,
+    send_receipt: bool = True,
+    reply_fn: ReplyFn = reply_text_message,
+) -> dict[str, Any]:
+    store = InboundOperationStore(audit_db)
+    operation = store.get(operation_id)
+    if operation is None:
+        raise AgentToolError(code="INPUT_ERROR", message="找不到待执行的升级操作。", details={"operation_id": operation_id})
+    status = str(operation.get("status") or "").strip()
+    if status in {"applied", "failed", "cancelled", "expired"}:
+        existing = operation.get("result")
+        result = existing if isinstance(existing, dict) else {}
+        return build_response(
+            tool_name="inbound.upgrade.worker",
+            ok=status == "applied",
+            data={
+                "operation_id": operation_id,
+                "status": status,
+                "status_text": user_facing_operation_status(status),
+                "result": result,
+                "response_text": render_upgrade_response(
+                    status=status,
+                    operation_id=operation_id,
+                    payload=dict(operation.get("payload") or {}),
+                    preview=operation.get("preview") if isinstance(operation.get("preview"), dict) else None,
+                    result=result,
+                ),
+            },
+            meta={"audit_db": mask_path(store.path)},
+        )
+    if status != "confirmed":
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message=cannot_repeat_message("升级操作", "执行", status),
+            details={"operation_id": operation_id, "status": status},
+        )
+
+    payload = dict(operation.get("payload") or {})
+    stored_hash = str(operation.get("payload_hash") or "")
+    current_hash = hash_operation_payload(payload)
+    if stored_hash != current_hash:
+        failed = {"operation_id": operation_id, "status": "failed", "reason": "payload_hash_mismatch"}
+        store.mark_failed(operation_id, result=failed)
+        raise AgentToolError(code="INTERNAL_ERROR", message="pending upgrade operation payload hash mismatch; refusing to upgrade", details=failed)
+
+    running = {
+        "operation_id": operation_id,
+        "status": "running",
+        "task_status": "running",
+        "worker_pid": os.getpid(),
+    }
+    if not store.mark_running(operation_id, result=running):
+        current = store.get(operation_id) or {}
+        current_status = str(current.get("status") or "-")
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message=cannot_repeat_message("升级操作", "执行", current_status),
+            details={"operation_id": operation_id, "status": current_status},
+        )
+
+    preview = operation.get("preview") if isinstance(operation.get("preview"), dict) else _preview_operation(payload)
+    receipt_target = _receipt_target_from_operation(operation, payload)
+    try:
+        result = _apply_operation(payload)
+    except AgentToolError as exc:
+        failed = {"operation_id": operation_id, "status": "failed", "error": exc.code, "message": exc.message}
+        failed["final_receipt"] = _send_final_receipt(operation_id=operation_id, receipt_target=receipt_target, payload=payload, preview=preview, result=failed, status="failed", enabled=send_receipt, reply_fn=reply_fn)
+        store.mark_failed(operation_id, result=failed)
+        raise
+    except Exception as exc:
+        failed = {"operation_id": operation_id, "status": "failed", "error": type(exc).__name__, "message": str(exc)}
+        failed["final_receipt"] = _send_final_receipt(operation_id=operation_id, receipt_target=receipt_target, payload=payload, preview=preview, result=failed, status="failed", enabled=send_receipt, reply_fn=reply_fn)
+        store.mark_failed(operation_id, result=failed)
+        raise AgentToolError(code="INTERNAL_ERROR", message="upgrade operation failed in background worker", details=failed) from exc
+
+    if not bool(result.get("ok", False)):
+        failed = {"operation_id": operation_id, "status": "failed", "result": result}
+        failed["final_receipt"] = _send_final_receipt(operation_id=operation_id, receipt_target=receipt_target, payload=payload, preview=preview, result=result, status="failed", enabled=send_receipt, reply_fn=reply_fn)
+        store.mark_failed(operation_id, result=failed)
+        return build_response(
+            tool_name="inbound.upgrade.worker",
+            ok=False,
+            data={
+                "operation_id": operation_id,
+                "status": "failed",
+                "result": result,
+                "response_text": render_upgrade_response(status="failed", operation_id=operation_id, payload=payload, preview=preview, result=result),
+            },
+            error=build_error_payload(AgentToolError(code="UPGRADE_FAILED", message=f"立即升级未成功：{result.get('status') or 'unknown'}", details=result)),
+            meta={"audit_db": mask_path(store.path)},
+        )
+
+    applied = dict(result)
+    applied["operation_id"] = operation_id
+    applied["status"] = "applied"
+    applied["final_receipt"] = _send_final_receipt(operation_id=operation_id, receipt_target=receipt_target, payload=payload, preview=preview, result=applied, status="applied", enabled=send_receipt, reply_fn=reply_fn)
+    store.mark_applied(operation_id, result=applied)
+    return build_response(
+        tool_name="inbound.upgrade.worker",
+        ok=True,
+        data={
+            "operation_id": operation_id,
+            "status": "applied",
+            "result": applied,
+            "response_text": render_upgrade_response(status="applied", operation_id=operation_id, payload=payload, preview=preview, result=applied),
+        },
+        meta={"audit_db": mask_path(store.path)},
+    )
+
+
+def _launch_upgrade_worker(*, operation_id: str, audit_db: Path) -> dict[str, Any]:
+    launcher = UPGRADE_WORKER_LAUNCHER or _default_upgrade_worker_launcher
+    result = launcher(operation_id, audit_db)
+    return {
+        "operation_id": operation_id,
+        "status": "confirmed",
+        "task_status": "queued",
+        "worker": result,
+    }
+
+
+def _default_upgrade_worker_launcher(operation_id: str, audit_db: Path) -> dict[str, Any]:
+    root = repo_base()
+    om_path = root / "om"
+    command = [str(om_path if om_path.exists() else sys.executable), "inbound", "upgrade-worker", "--operation-id", operation_id, "--audit-db", str(audit_db)]
+    if not om_path.exists():
+        command = [sys.executable, "-m", "src.interfaces.cli.main", "inbound", "upgrade-worker", "--operation-id", operation_id, "--audit-db", str(audit_db)]
+
+    systemd_run = shutil.which("systemd-run")
+    if systemd_run and sys.platform.startswith("linux"):
+        unit = "options-monitor-inbound-upgrade-" + "".join(ch if ch.isalnum() else "-" for ch in operation_id.lower())[:48]
+        env = build_effective_env().values
+        current_pythonpath = str(env.get("PYTHONPATH") or "").strip()
+        env_py = f"PYTHONPATH={root}{os.pathsep}{current_pythonpath}" if current_pythonpath else f"PYTHONPATH={root}"
+        attempts = [
+            [systemd_run, "--user", "--unit", unit, "--collect", "--working-directory", str(root), "--setenv", env_py, *command],
+            ["sudo", "-n", systemd_run, "--unit", unit, "--collect", "--working-directory", str(root), "--setenv", env_py, *command],
+        ]
+        errors: list[str] = []
+        for attempt in attempts:
+            if attempt[0] == "sudo" and shutil.which("sudo") is None:
+                continue
+            proc = subprocess.run(attempt, cwd=str(root), text=True, capture_output=True, timeout=20, check=False)
+            if proc.returncode == 0:
+                return {"launcher": "systemd-run", "unit": unit, "command": command}
+            errors.append((proc.stderr or proc.stdout or f"exit {proc.returncode}").strip())
+        raise AgentToolError(
+            code="UPGRADE_WORKER_LAUNCH_FAILED",
+            message="升级确认已收到，但无法启动独立升级任务。",
+            hint="请检查 systemd-run 或 sudo -n systemd-run 权限。",
+            details={"operation_id": operation_id, "launcher_errors": errors},
+        )
+
+    proc = subprocess.Popen(command, cwd=str(root), start_new_session=True)
+    return {"launcher": "popen", "pid": proc.pid, "command": command}
+
+
+def _send_final_receipt(
+    *,
+    operation_id: str,
+    receipt_target: dict[str, Any],
+    payload: dict[str, Any],
+    preview: dict[str, Any],
+    result: dict[str, Any],
+    status: str,
+    enabled: bool,
+    reply_fn: ReplyFn,
+) -> dict[str, Any]:
+    message_id = str(receipt_target.get("message_id") or "").strip()
+    if not enabled:
+        return {"attempted": False, "ok": True, "reason": "disabled"}
+    if not message_id:
+        return {"attempted": False, "ok": True, "reason": "missing_message_id"}
+    if str(receipt_target.get("channel") or "").strip().lower() != "feishu":
+        return {"attempted": False, "ok": True, "reason": "not_feishu"}
+    env = build_effective_env().values
+    bot = resolve_feishu_bot_config(environ=env)
+    if not (bot.app_id and bot.app_secret):
+        return {"attempted": True, "ok": False, "reason": "missing_app_credentials"}
+    text = render_upgrade_response(status=status, operation_id=operation_id, payload=payload, preview=preview, result=result)
+    try:
+        api_response = reply_fn(
+            app_id=bot.app_id,
+            app_secret=bot.app_secret,
+            message_id=message_id,
+            text=text,
+            uuid=f"{operation_id}:upgrade-final",
+        )
+    except Exception as exc:
+        return {"attempted": True, "ok": False, "reason": "reply_failed", "message_id": message_id, "error": f"{type(exc).__name__}: {exc}"}
+    return {"attempted": True, "ok": True, "reason": "sent", "message_id": message_id, "api_response": api_response}
 
 
 def _upgrade_defaults(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -463,6 +675,16 @@ def render_upgrade_response(
                 f"command_id: {operation_id}",
             ]
         )
+    if status in {"confirmed", "running"}:
+        return "\n".join(
+            [
+                "已收到升级确认，开始执行升级。",
+                f"当前版本：{current}",
+                f"目标版本：{target}",
+                "升级期间飞书服务可能短暂重启，完成后会发送最终结果。",
+                f"command_id: {operation_id}",
+            ]
+        )
     if status == "failed":
         return "\n".join(
             [
@@ -473,7 +695,7 @@ def render_upgrade_response(
                 f"command_id: {operation_id}",
             ]
         )
-    return f"升级操作状态：{status}\ncommand_id: {operation_id}"
+    return f"升级操作进度：{user_facing_operation_status(status)}\ncommand_id: {operation_id}"
 
 
 def hash_operation_payload(payload: dict[str, Any]) -> str:
