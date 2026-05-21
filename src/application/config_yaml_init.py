@@ -138,15 +138,18 @@ def _starter_yaml_payload(
         },
         "agent": {
             "runtime": {
-                "enabled": False,
+                "enabled": True,
                 "context_window_messages": 8,
             },
             "llm": {
                 "enabled": False,
                 "provider": "",
+                "base_url": "",
                 "model": "",
                 "api_key_env": "OM_LLM_API_KEY",
                 "confidence_min": 0.75,
+                "timeout_seconds": 20,
+                "max_output_tokens": 512,
             }
         },
         "inbound": {

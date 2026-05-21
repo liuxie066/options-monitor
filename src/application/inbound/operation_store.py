@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from src.application.inbound.audit import default_audit_db_path, utc_now_iso
+from src.application.inbound.audit import connect_inbound_sqlite, default_audit_db_path, inbound_sqlite_error, utc_now_iso
 
 
 class InboundOperationStore:
@@ -284,8 +284,7 @@ class InboundOperationStore:
             )
 
     def _connect(self) -> sqlite3.Connection:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(self.path))
+        conn = connect_inbound_sqlite(self.path)
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -340,38 +339,40 @@ class InboundOperationStore:
         return out
 
     def _ensure_schema(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS inbound_pending_operations (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    operation_id TEXT NOT NULL UNIQUE,
-                    command_id TEXT NOT NULL,
-                    channel TEXT NOT NULL,
-                    sender_id TEXT NOT NULL,
-                    conversation_id TEXT,
-                    operation_type TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    payload_hash TEXT NOT NULL,
-                    payload_json TEXT NOT NULL,
-                    preview_json TEXT NOT NULL,
-                    result_json TEXT,
-                    created_at TEXT NOT NULL,
-                    expires_at TEXT NOT NULL,
-                    confirmed_at TEXT,
-                    applied_at TEXT,
-                    cancelled_at TEXT
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS inbound_pending_operations (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        operation_id TEXT NOT NULL UNIQUE,
+                        command_id TEXT NOT NULL,
+                        channel TEXT NOT NULL,
+                        sender_id TEXT NOT NULL,
+                        conversation_id TEXT,
+                        operation_type TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        payload_hash TEXT NOT NULL,
+                        payload_json TEXT NOT NULL,
+                        preview_json TEXT NOT NULL,
+                        result_json TEXT,
+                        created_at TEXT NOT NULL,
+                        expires_at TEXT NOT NULL,
+                        confirmed_at TEXT,
+                        applied_at TEXT,
+                        cancelled_at TEXT
+                    )
+                    """
                 )
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_inbound_operations_status
-                ON inbound_pending_operations(status, expires_at)
-                """
-            )
-            _ensure_column(conn, "conversation_id", "TEXT")
+                conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_inbound_operations_status
+                    ON inbound_pending_operations(status, expires_at)
+                    """
+                )
+                _ensure_column(conn, "conversation_id", "TEXT")
+        except sqlite3.Error as exc:
+            raise inbound_sqlite_error(self.path, exc) from exc
 
 
 def operation_is_expired(operation: dict[str, Any], *, now: datetime | None = None) -> bool:

@@ -58,7 +58,8 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert runtime_logs["safe_default_input"] == {"kind": "all", "lines": 50}
     assert "kind" in runtime_logs["input_schema"]
     assert "lines" in runtime_logs["input_schema"]
-    assert "file" in runtime_logs["input_schema"]
+    assert "log_file" in runtime_logs["input_schema"]
+    assert "file" not in runtime_logs["input_schema"]
     ai_cofunder = next(item for item in spec["tools"] if item["name"] == "ai_cofunder")
     assert "runs_root" in ai_cofunder["input_schema"]
     assert "run_id" in ai_cofunder["input_schema"]
@@ -81,6 +82,8 @@ def test_agent_spec_uses_symbols_public_name() -> None:
     assert version_update["risk_level"] == "local_write"
     assert version_update["requires_confirm"] is True
     assert version_update["safe_default_input"] == {"bump": "patch", "apply": False}
+    assert "target_version" in version_update["input_schema"]
+    assert "version" not in version_update["input_schema"]
     manage_symbols = next(item for item in spec["tools"] if item["name"] == "manage_symbols")
     assert manage_symbols["risk_level"] == "local_write"
     assert manage_symbols["requires_confirm"] is True
