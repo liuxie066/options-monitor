@@ -18,7 +18,7 @@
 | Purpose | Sell Put / Sell Call / Yield Enhancement scanning, filtering, reporting, and notification |
 | Stack | Python 3, pandas, SQLite, OpenD/Futu API, Feishu webhooks |
 | Accounts | Lowercase labels such as `lx`, `sy`; read from top-level `accounts` in runtime config |
-| Canonical Configs | `config.us.json`, `config.hk.json`; built from `configs/system.json` plus user overlays |
+| Canonical Configs | `config.yaml` is the human authoring source; `config.us.json` / `config.hk.json` are generated runtime snapshots |
 | Reports | `output/`, `output_accounts/<account>/`, `output_shared/`, `output_runs/<run_id>/` |
 | Local Agent Entry | `./om-agent` |
 | Human CLI Entry | `./om` |
@@ -54,7 +54,7 @@ Ask for explicit confirmation before any command that can:
 
 - Send real notifications through Feishu, webhook, email, or another channel.
 - Install, start, stop, or modify production services such as systemd / launchd units.
-- Modify `config.us.json`, `config.hk.json`, secrets, or production runtime config.
+- Modify `config.yaml`, `config.us.json`, `config.hk.json`, secrets, or production runtime config.
 - Delete `output/`, `output_runs/`, `output_shared/`, state files, caches, or runtime artifacts.
 - Write Feishu, option-position state, trade events, or broker-facing data.
 
@@ -156,8 +156,10 @@ python3 -m pytest tests/test_multi_tick_*.py tests/test_unified_tick_entrypoint.
 
 # Config validation
 python3 -m pytest tests/test_layered_config.py
-./om config build --market us --user-config configs/examples/user.example.us.json --dry-run
-./om config build --market hk --user-config configs/examples/user.example.hk.json --dry-run
+./om config validate --source yaml --market us --config-yaml configs/examples/config.yaml.example
+./om config validate --source yaml --market hk --config-yaml configs/examples/config.yaml.example
+./om config build --source yaml --market us --config-yaml configs/examples/config.yaml.example --dry-run
+./om config build --source yaml --market hk --config-yaml configs/examples/config.yaml.example --dry-run
 ```
 
 For release work, also check `VERSION`, `CHANGELOG.md`, `scripts/release_check.py`, and `.github/workflows/release-from-version.yml`.

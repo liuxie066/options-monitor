@@ -39,11 +39,13 @@ om setup check --no-local-env-file
 下面的本地示例以 repo root 为工作目录；installer 安装后可以先 `cd "$HOME/apps/options-monitor/current"`。生产服务建议把 `config.yaml` 和生成后的 runtime config 放在 release 目录外，再显式传 `--config-yaml` / `--output`。
 
 ```bash
-cp configs/examples/config.yaml.example config.yaml
+om config init --output config.yaml --runtime-output-dir .
 $EDITOR config.yaml
 ```
 
 YAML 使用空格缩进，不要用 tab；示例采用 2 个空格。港股代码这类可能被 YAML 误判的值建议加引号，例如 `"0700.HK"`。
+`config init` 默认生成 `config.yaml`，并构建 `config.us.json` / `config.hk.json`。已有文件时会拒绝覆盖；确认要重建 starter 时再加 `--force`。
+`config build` / `config explain` 默认读取 YAML；旧 JSON authoring 需要显式 `--source legacy`。
 
 先校验 YAML 合并代码默认值后的结果：
 
@@ -68,11 +70,25 @@ om config migrate-yaml --output config.yaml
 om config migrate-yaml --output config.yaml --apply
 ```
 
-只想快速生成 starter runtime config 时，可以用兼容入口：
+历史兼容入口 `om setup init` 仍保留，但已 deprecated。新安装不要再用它生成人工维护的
+runtime JSON；需要从旧 `configs/user.*.json` 迁移时使用 `om config migrate-yaml`。
 
 ```bash
 om setup init --market us --account lx --futu-acc-id <futu-account-id>
 om setup init --market hk --account lx --futu-acc-id <futu-account-id>
+```
+
+这条路径只作为旧脚本兼容面存在，输出会带 deprecation warning。
+
+如果是 installer 安装后的空目录首跑，也可以不进入 release 目录：
+
+```bash
+mkdir -p ~/options-monitor-first-run
+cd ~/options-monitor-first-run
+om config init --output config.yaml --runtime-output-dir runtime-config --futu-acc-id <futu-account-id>
+om config validate --source yaml --market us --config-yaml config.yaml
+om config build --source yaml --market hk --config-yaml config.yaml --output runtime-config/config.hk.json --dry-run
+om support bundle --config-path runtime-config/config.us.json --output-dir support --no-local-env-file
 ```
 
 ---
@@ -167,6 +183,9 @@ om service render \
   --env-file /etc/options-monitor/options-monitor.env \
   --markets us hk \
   --accounts lx sy \
+  --config-yaml /var/lib/options-monitor/config.yaml \
+  --config-us /var/lib/options-monitor/config.us.json \
+  --config-hk /var/lib/options-monitor/config.hk.json \
   --include-feishu-ws \
   --output-dir /tmp/options-monitor-service
 ```
@@ -180,6 +199,9 @@ om service render \
   --env-file "$HOME/Library/Application Support/options-monitor/options-monitor.env" \
   --markets us hk \
   --accounts lx sy \
+  --config-yaml "$HOME/Library/Application Support/options-monitor/config.yaml" \
+  --config-us "$HOME/Library/Application Support/options-monitor/config.us.json" \
+  --config-hk "$HOME/Library/Application Support/options-monitor/config.hk.json" \
   --include-feishu-ws \
   --output-dir /tmp/options-monitor-service
 ```

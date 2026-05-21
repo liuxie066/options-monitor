@@ -507,6 +507,8 @@ def test_config_build_cli_writes_output(tmp_path: Path, capsys) -> None:
     rc = main([
         "config",
         "build",
+        "--source",
+        "legacy",
         "--market",
         "us",
         "--user-config",
@@ -545,6 +547,8 @@ def test_config_build_cli_dry_run_does_not_write_output(tmp_path: Path, capsys) 
     rc = main([
         "config",
         "build",
+        "--source",
+        "legacy",
         "--market",
         "us",
         "--user-config",
@@ -588,6 +592,8 @@ def test_config_build_cli_accepts_explicit_common_user_config(tmp_path: Path, ca
     rc = main([
         "config",
         "build",
+        "--source",
+        "legacy",
         "--market",
         "us",
         "--common-user-config",
@@ -627,6 +633,8 @@ def test_config_validate_market_rejects_stale_runtime_config(tmp_path: Path, cap
     build_rc = main([
         "config",
         "build",
+        "--source",
+        "legacy",
         "--market",
         "us",
         "--user-config",
@@ -686,6 +694,8 @@ def test_config_validate_market_wraps_schedule_contract_error_as_json(tmp_path: 
     build_rc = main([
         "config",
         "build",
+        "--source",
+        "legacy",
         "--market",
         "hk",
         "--user-config",
@@ -742,6 +752,8 @@ def test_config_explain_cli_outputs_source_trace(tmp_path: Path, capsys) -> None
     rc = main([
         "config",
         "explain",
+        "--source",
+        "legacy",
         "--market",
         "us",
         "--key",

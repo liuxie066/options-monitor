@@ -161,8 +161,8 @@ Treat `./om-agent` as a local tool host command.
 
 Recommended environment:
 
-- keep repo-local `config.us.json` / `config.hk.json` as the default runtime configs
-- complete first-time initialization with `./om setup init` after OpenD is ready
+- keep repo-local `config.us.json` / `config.hk.json` as generated runtime snapshots
+- complete first-time initialization with `./om config init --output config.yaml --runtime-output-dir .`
 - use explicit `config_path` input only when you intentionally want to override the default repo-local config
 - keep `OM_AGENT_ENABLE_WRITE_TOOLS` unset unless you explicitly want config writes
 - optionally copy `configs/examples/openclaw.profile.example.json` to `openclaw.profile.json`
