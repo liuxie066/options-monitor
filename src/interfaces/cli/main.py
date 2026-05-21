@@ -8,6 +8,7 @@ from typing import Any
 
 from src.application.agent_tool_config import load_runtime_config, repo_base
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response
+from src.application.agent_runtime import AgentRuntimeSettings, handle_agent_message
 from src.application.config_validator import validate_config
 from src.application.account_management import add_account, edit_account, remove_account
 from src.application.close_advice_pipeline import run_close_advice
@@ -100,6 +101,23 @@ def _with_warning(payload: dict[str, Any], warning: str) -> dict[str, Any]:
         warnings.append(warning)
     out["warnings"] = warnings
     return out
+
+
+def _agent_runtime_settings_for_cli(*, config_key: str | None, config_path: str | None) -> AgentRuntimeSettings:
+    explicit_config_path = bool(config_path is not None and str(config_path).strip())
+    try:
+        _path, cfg = load_runtime_config(config_key=config_key, config_path=config_path)
+    except AgentToolError:
+        if explicit_config_path:
+            raise
+        return AgentRuntimeSettings(enabled=True)
+
+    configured = AgentRuntimeSettings.from_runtime_config(cfg)
+    return AgentRuntimeSettings(
+        enabled=True,
+        context_window_messages=configured.context_window_messages,
+        llm=configured.llm,
+    )
 
 
 def _reject_legacy_config_flags_without_legacy_source(args: argparse.Namespace) -> None:
@@ -205,6 +223,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     inbound_handle.add_argument("--config-key", default="us", choices=("us", "hk"))
     inbound_handle.add_argument("--config-path", default=None)
     inbound_handle.add_argument("--audit-db", default=None)
+    inbound_handle.add_argument("--agent-runtime", action="store_true", help="route through the optional AgentRuntime command facade")
     inbound_handle.add_argument("--format", choices=("json", "text"), default="json")
     inbound_pending = inbound_sub.add_parser("pending", help="inspect pending inbound operations")
     inbound_pending_sub = inbound_pending.add_subparsers(dest="inbound_pending_command", required=True)
@@ -234,6 +253,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     inbound_feishu.add_argument("--config-key", default="us", choices=("us", "hk"))
     inbound_feishu.add_argument("--config-path", default=None)
     inbound_feishu.add_argument("--audit-db", default=None)
+    inbound_feishu.add_argument("--agent-runtime", action="store_true", help="route message text through the optional AgentRuntime command facade")
     inbound_feishu.add_argument("--format", choices=("json", "text"), default="json")
     inbound_ws = inbound_sub.add_parser("feishu-ws", help="serve the Feishu App long-connection inbound client")
     inbound_ws.add_argument("--config-key", default="us", choices=("us", "hk"))
@@ -829,17 +849,23 @@ def main(argv: list[str] | None = None) -> int:
             ))
 
         if args.command == "inbound" and args.inbound_command == "handle":
-            out = handle_inbound_request(
-                InboundRequest(
-                    text=args.text,
-                    sender_id=args.sender_id,
-                    channel=args.channel,
-                    message_id=args.message_id,
-                    conversation_id=args.conversation_id,
-                    config_key=args.config_key,
-                    config_path=args.config_path,
-                    audit_db=args.audit_db,
+            request = InboundRequest(
+                text=args.text,
+                sender_id=args.sender_id,
+                channel=args.channel,
+                message_id=args.message_id,
+                conversation_id=args.conversation_id,
+                config_key=args.config_key,
+                config_path=args.config_path,
+                audit_db=args.audit_db,
+            )
+            out = (
+                handle_agent_message(
+                    request,
+                    settings=_agent_runtime_settings_for_cli(config_key=args.config_key, config_path=args.config_path),
                 )
+                if bool(args.agent_runtime)
+                else handle_inbound_request(request)
             )
             if args.format == "text":
                 data_raw = out.get("data")
@@ -889,6 +915,7 @@ def main(argv: list[str] | None = None) -> int:
                 config_key=args.config_key,
                 config_path=args.config_path,
                 audit_db=args.audit_db,
+                use_agent_runtime=bool(args.agent_runtime),
             )
             if args.format == "text":
                 data_raw = out.get("data")

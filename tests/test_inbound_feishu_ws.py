@@ -75,6 +75,34 @@ def test_feishu_ws_delegates_to_inbound_and_replies(tmp_path: Path) -> None:
     assert replies[0]["text"].startswith("收益统计完成")
 
 
+def test_feishu_ws_can_route_through_agent_runtime(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict]] = []
+
+    def _execute(tool_name: str, payload: dict) -> dict:
+        calls.append((tool_name, payload))
+        return build_response(tool_name=tool_name, ok=True, data={"summary": {"ok": True}})
+
+    out = handle_feishu_ws_event(
+        _message_payload(text="/status"),
+        settings=FeishuWsSettings(
+            allowed_senders="feishu:ou_1",
+            app_id="app_1",
+            app_secret="secret_1",
+            audit_db=str(tmp_path / "audit.sqlite3"),
+            agent_runtime_enabled=True,
+        ),
+        reply_fn=lambda **_kwargs: {"code": 0},
+        execute_tool_fn=_execute,
+    )
+
+    inbound_result = out["data"]["inbound"]["data"]["inbound_result"]
+    assert out["ok"] is True
+    assert calls == [("runtime_status", {"config_key": "us"})]
+    assert inbound_result["data"]["intent"]["parser"] == "command"
+    assert inbound_result["meta"]["agent_runtime"]["route"] == "command"
+    assert inbound_result["meta"]["agent_runtime"]["llm"]["enabled"] is False
+
+
 def test_feishu_ws_reaction_failure_does_not_fail_inbound_or_reply(tmp_path: Path) -> None:
     replies: list[dict] = []
 
@@ -209,6 +237,19 @@ def test_feishu_ws_settings_reads_behavior_from_runtime_config(tmp_path: Path) -
                         "ack_reaction": "smile",
                         "queue_size": 25,
                     }
+                },
+                "agent": {
+                    "runtime": {
+                        "enabled": True,
+                        "context_window_messages": 9,
+                    },
+                    "llm": {
+                        "enabled": True,
+                        "provider": "openai",
+                        "model": "gpt-5.2",
+                        "api_key_env": "OM_LLM_API_KEY",
+                        "confidence_min": 0.8,
+                    }
                 }
             }
         ),
@@ -231,6 +272,12 @@ def test_feishu_ws_settings_reads_behavior_from_runtime_config(tmp_path: Path) -
     assert settings.max_reply_chars == 1200
     assert settings.ack_reaction == "SMILE"
     assert settings.queue_size == 5
+    assert settings.agent_runtime_enabled is True
+    assert settings.agent_context_window_messages == 9
+    assert settings.agent_llm.enabled is True
+    assert settings.agent_llm.provider == "openai"
+    assert settings.agent_llm.model == "gpt-5.2"
+    assert settings.agent_llm.confidence_min == 0.8
 
 
 def test_feishu_ws_check_reports_missing_sdk() -> None:

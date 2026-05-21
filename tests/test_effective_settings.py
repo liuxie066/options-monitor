@@ -64,6 +64,21 @@ def test_settings_explain_accepts_public_alias(tmp_path) -> None:
     assert out["source"] == f"env_file:{env_file}"
 
 
+def test_settings_inspect_and_explain_cover_llm_api_key(tmp_path) -> None:
+    env_file = tmp_path / "options-monitor.env"
+    env_file.write_text('OM_LLM_API_KEY="sk-secret"\n', encoding="utf-8")
+
+    inspected = inspect_effective_settings(environ={}, env_file=env_file)
+    assert inspected["entries"]["OM_LLM_API_KEY"]["configured"] is True
+    assert inspected["entries"]["OM_LLM_API_KEY"]["value"] == "<redacted>"
+    assert inspected["entries"]["OM_LLM_API_KEY"]["secret"] is True
+
+    explained = explain_effective_setting("agent.llm.api_key", environ={}, env_file=env_file)
+    assert explained["env_name"] == "OM_LLM_API_KEY"
+    assert explained["configured"] is True
+    assert explained["value"] == "<redacted>"
+
+
 def test_effective_env_loads_repo_local_env_file_when_enabled(tmp_path) -> None:
     repo = tmp_path / "repo"
     env_dir = repo / ".env"

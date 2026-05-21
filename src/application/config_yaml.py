@@ -29,6 +29,7 @@ from src.application.runtime_paths import resolve_runtime_root
 RESOLVED_KEY = "_resolved"
 
 PASSTHROUGH_KEYS = {
+    "agent",
     "alert_policy",
     "close_advice",
     "inbound",

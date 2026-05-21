@@ -52,6 +52,72 @@ The first implementation is read-only and deterministic. It supports:
 
 Read commands use the pure-read whitelist. Admin write operations are separate and must pass sender allowlist, operation gates, preview storage, and explicit confirmation before applying.
 
+## AgentRuntime Command Facade
+
+`AgentRuntime` is an optional facade above the same inbound parser, policy, audit, and tool execution path. It adds slash commands for users who do not want to remember natural-language phrases:
+
+| Command | Intent |
+|---|---|
+| `/status` | `runtime_status` |
+| `/health` | `healthcheck` |
+| `/positions [lx|sy|all]` | open/all option positions |
+| `/income [lx|sy] [YYYY-MM|本月|上月]` | income report |
+| `/runs [limit]` | recent runs |
+| `/logs <run_id>` | runtime logs |
+| `/symbols` | monitored symbols |
+| `/pending` | pending preview operations |
+| `/confirm trade|symbol|upgrade [operation_id]` | confirm a pending write preview |
+| `/cancel trade|symbol|upgrade [operation_id]` | cancel a pending write preview |
+
+Local one-shot testing can opt in explicitly:
+
+```bash
+./om inbound handle --agent-runtime --text '/positions sy' --format text
+```
+
+For long-running Feishu WS, enable it in runtime config:
+
+```yaml
+agent:
+  runtime:
+    enabled: true
+    context_window_messages: 8
+```
+
+This still does not enable LLM. Unknown slash commands return clarification; non-slash messages continue through the deterministic inbound parser.
+
+LLM translation is disabled by default:
+
+```yaml
+agent:
+  llm:
+    enabled: false
+    provider: ""
+    model: ""
+    api_key_env: OM_LLM_API_KEY
+    confidence_min: 0.75
+```
+
+When enabled, LLM translation only runs after command and deterministic parsing fail. It must return an `om-llm-intent-v1` JSON intent into the same inbound router; it must not execute tools or rewrite canonical OM responses. The current intent schema is read-only and only allows help/status/health/config/positions/income/runs/logs/symbols/pending operations.
+
+The first provider adapter is OpenAI Responses API. The request is structured-output only, uses deterministic sampling, and sets provider-side storage off for translated messages. To enable it, set the API key in the local env file or deployment env file, then set `agent.llm` in runtime config:
+
+```bash
+OM_LLM_API_KEY='sk-...'
+```
+
+```yaml
+agent:
+  llm:
+    enabled: true
+    provider: openai
+    model: gpt-5.2
+    api_key_env: OM_LLM_API_KEY
+    confidence_min: 0.75
+```
+
+The API key stays in environment settings; runtime config only names which env var to read. When LLM translation runs, OM sends a bounded same-conversation context window to the translator: recent inbound audit rows plus current pending operation summaries. Sender and conversation identifiers are used locally to select the window, but are not sent to the provider. `agent.runtime.context_window_messages` controls the recent-message window and is capped at 20; this context is only used for intent translation, not execution.
+
 ## Sender Allowlist
 
 Remote channels require an explicit sender allowlist:
@@ -148,6 +214,7 @@ Text output for chat replies:
 Feishu Event Subscription long connection
   -> ./om inbound feishu-ws
   -> ./om inbound feishu
+  -> optional AgentRuntime command facade
   -> OM inbound allowlist/audit/pure-read tools
   -> Feishu message reply API
 ```
@@ -207,9 +274,9 @@ Only subscribe this event for the OM Bot in Feishu Open Platform. Install `requi
 
 ## LLM Translator
 
-LLM translation is intentionally not part of the first implementation.
+LLM translation is opt-in and inactive unless `agent.llm.enabled` is true.
 
-If it is added later, it must only translate natural language into a structured intent. The translated intent must still go through the same sender allowlist, pure-read whitelist, audit, and idempotency checks. Low-confidence, incomplete, or write-like intents must return clarification or preview only.
+The current provider adapter uses OpenAI Responses API for structured output. It must only translate natural language into an `om-llm-intent-v1` structured intent. The translated intent must still go through the same sender allowlist, pure-read whitelist, audit, and idempotency checks. Low-confidence, incomplete, or write-like intents must return clarification or preview only.
 
 ## Write Actions
 
