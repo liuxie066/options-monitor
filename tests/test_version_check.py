@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import subprocess
 
+from src.application.release_target import parse_release_tags
 from src.application.version_check import bump_version, check_version_update, compare_versions, update_local_version
 
 
@@ -91,6 +92,20 @@ def test_check_version_update_reports_newer_release(tmp_path: Path) -> None:
     assert out["update_available"] is True
     assert out["release_tag"] == "v0.1.0-beta.10"
     assert out["checked_at"] == "2026-04-27T12:00:00Z"
+
+
+def test_release_tag_parser_orders_multi_digit_patch_versions() -> None:
+    tags = parse_release_tags(
+        "\n".join(
+            [
+                "a refs/tags/v1.2.99",
+                "b refs/tags/v1.2.100",
+                "c refs/tags/v1.2.113",
+            ]
+        )
+    )
+
+    assert tags[-1] == ("1.2.113", "v1.2.113")
 
 
 def test_check_version_update_reports_latest(tmp_path: Path) -> None:

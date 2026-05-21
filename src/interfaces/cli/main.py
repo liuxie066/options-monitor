@@ -8,7 +8,8 @@ from typing import Any
 
 from src.application.agent_tool_config import load_runtime_config, repo_base
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response
-from src.application.agent_runtime import AgentRuntimeSettings, handle_agent_message
+from src.application.agent_runtime import AgentRuntimeSettings, command_catalog_payload, handle_agent_message
+from src.application.agent_runtime.diagnostics import check_llm_translator
 from src.application.config_validator import validate_config
 from src.application.account_management import add_account, edit_account, remove_account
 from src.application.close_advice_pipeline import run_close_advice
@@ -103,18 +104,23 @@ def _with_warning(payload: dict[str, Any], warning: str) -> dict[str, Any]:
     return out
 
 
-def _agent_runtime_settings_for_cli(*, config_key: str | None, config_path: str | None) -> AgentRuntimeSettings:
+def _agent_runtime_settings_for_cli(
+    *,
+    config_key: str | None,
+    config_path: str | None,
+    force_enabled: bool | None = None,
+) -> AgentRuntimeSettings:
     explicit_config_path = bool(config_path is not None and str(config_path).strip())
     try:
         _path, cfg = load_runtime_config(config_key=config_key, config_path=config_path)
     except AgentToolError:
         if explicit_config_path:
             raise
-        return AgentRuntimeSettings(enabled=True)
+        return AgentRuntimeSettings(enabled=True if force_enabled is None else bool(force_enabled))
 
     configured = AgentRuntimeSettings.from_runtime_config(cfg)
     return AgentRuntimeSettings(
-        enabled=True,
+        enabled=configured.enabled if force_enabled is None else bool(force_enabled),
         context_window_messages=configured.context_window_messages,
         llm=configured.llm,
     )
@@ -212,6 +218,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     support_bundle.add_argument("--runtime-root", default=None)
     support_bundle.add_argument("--output-dir", default=None)
 
+    agent = sub.add_parser("agent", help="inspect optional conversational agent runtime")
+    agent_sub = agent.add_subparsers(dest="agent_command", required=True)
+    agent_commands = agent_sub.add_parser("commands", help="list supported agent commands and intents")
+    agent_commands.add_argument("--format", choices=("json", "text"), default="json")
+    agent_llm_check = agent_sub.add_parser("llm-check", help="check optional LLM intent translator configuration")
+    agent_llm_check.add_argument("--config-key", default="us", choices=("us", "hk"))
+    agent_llm_check.add_argument("--config-path", default=None)
+    agent_llm_check.add_argument("--env-file", default=None)
+    agent_llm_check.add_argument("--no-local-env-file", action="store_true")
+    agent_llm_check.add_argument("--live", action="store_true", help="run one read-only provider translation probe")
+    agent_llm_check.add_argument("--text", default=None, help="probe text used with --live")
+
     inbound = sub.add_parser("inbound", help="handle controlled inbound remote commands")
     inbound_sub = inbound.add_subparsers(dest="inbound_command", required=True)
     inbound_handle = inbound_sub.add_parser("handle", help="parse, authorize, audit, and execute one inbound command")
@@ -223,7 +241,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     inbound_handle.add_argument("--config-key", default="us", choices=("us", "hk"))
     inbound_handle.add_argument("--config-path", default=None)
     inbound_handle.add_argument("--audit-db", default=None)
-    inbound_handle.add_argument("--agent-runtime", action="store_true", help="route through the optional AgentRuntime command facade")
+    inbound_handle_agent = inbound_handle.add_mutually_exclusive_group()
+    inbound_handle_agent.add_argument("--agent-runtime", dest="agent_runtime", action="store_true", default=None, help="force routing through the AgentRuntime command facade")
+    inbound_handle_agent.add_argument("--no-agent-runtime", dest="agent_runtime", action="store_false", help="bypass AgentRuntime and use the legacy deterministic inbound parser directly")
     inbound_handle.add_argument("--format", choices=("json", "text"), default="json")
     inbound_pending = inbound_sub.add_parser("pending", help="inspect pending inbound operations")
     inbound_pending_sub = inbound_pending.add_subparsers(dest="inbound_pending_command", required=True)
@@ -253,7 +273,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     inbound_feishu.add_argument("--config-key", default="us", choices=("us", "hk"))
     inbound_feishu.add_argument("--config-path", default=None)
     inbound_feishu.add_argument("--audit-db", default=None)
-    inbound_feishu.add_argument("--agent-runtime", action="store_true", help="route message text through the optional AgentRuntime command facade")
+    inbound_feishu_agent = inbound_feishu.add_mutually_exclusive_group()
+    inbound_feishu_agent.add_argument("--agent-runtime", dest="agent_runtime", action="store_true", default=None, help="force routing through the AgentRuntime command facade")
+    inbound_feishu_agent.add_argument("--no-agent-runtime", dest="agent_runtime", action="store_false", help="bypass AgentRuntime and use the legacy deterministic inbound parser directly")
     inbound_feishu.add_argument("--format", choices=("json", "text"), default="json")
     inbound_ws = inbound_sub.add_parser("feishu-ws", help="serve the Feishu App long-connection inbound client")
     inbound_ws.add_argument("--config-key", default="us", choices=("us", "hk"))
@@ -433,7 +455,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     migrate_yaml.add_argument("--hk-accounts", nargs="+", default=None)
     migrate_yaml.add_argument("--output", default=None)
     migrate_yaml.add_argument("--apply", action="store_true", help="write config.yaml; omitted means dry-run preview")
-    migrate_yaml.add_argument("--yes", action="store_true", help="non-interactive alias for --apply; emits an audit_id")
     migrate_yaml.add_argument("--no-backup", action="store_true", help="do not write a .bak timestamp copy before applying")
     get_config = config_sub.add_parser("get", help="read a runtime config value by dot path")
     get_config.add_argument("--config-key", default=None, choices=("us", "hk"))
@@ -547,34 +568,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     service_cleanup_cmd.add_argument("--cleanup-pip-cache", action="store_true")
     service_cleanup_cmd.add_argument("--confirm", action="store_true", help="delete planned paths; without this the command is a dry run")
     service_cleanup_cmd.add_argument("--yes", action="store_true", help="non-interactive confirmation; emits an audit_id")
-    service_upgrade_check_cmd = service_sub.add_parser("upgrade-check", help="check whether a newer released version is available")
-    service_upgrade_check_cmd.add_argument("--repo-root", default=None)
-    service_upgrade_check_cmd.add_argument("--runtime-root", default="/var/lib/options-monitor")
-    service_upgrade_check_cmd.add_argument("--cache-root", default=None)
-    service_upgrade_check_cmd.add_argument("--remote-name", default="origin")
-    service_upgrade_cmd = service_sub.add_parser("upgrade", help="upgrade a current symlink to a released version")
-    service_upgrade_cmd.add_argument("--repo-root", default=None)
-    service_upgrade_cmd.add_argument("--runtime-root", default="/var/lib/options-monitor")
-    service_upgrade_cmd.add_argument("--releases-root", default=None)
-    service_upgrade_cmd.add_argument("--cache-root", default=None)
-    service_upgrade_cmd.add_argument("--target-version", default=None)
-    service_upgrade_cmd.add_argument("--remote-name", default="origin")
-    service_upgrade_cmd.add_argument("--auto", action="store_true")
-    service_upgrade_cmd.add_argument("--allow-major", action="store_true")
-    service_upgrade_cmd.add_argument("--confirm", action="store_true", help="apply upgrade; without this the command is a dry run")
-    service_upgrade_cmd.add_argument("--yes", action="store_true", help="non-interactive confirmation; emits an audit_id")
-    service_upgrade_cmd.add_argument("--no-restart-services", action="store_true")
-    service_upgrade_cmd.add_argument("--cleanup-after-upgrade", action="store_true", help="clean old releases after a fully successful confirmed upgrade")
-    service_upgrade_cmd.add_argument("--cleanup-keep-releases", type=int, default=2)
-    service_rollback_cmd = service_sub.add_parser("rollback", help="switch current symlink back to a prior released version")
-    service_rollback_cmd.add_argument("--repo-root", default=None)
-    service_rollback_cmd.add_argument("--runtime-root", default="/var/lib/options-monitor")
-    service_rollback_cmd.add_argument("--releases-root", default=None)
-    service_rollback_cmd.add_argument("--to-version", default=None)
-    service_rollback_cmd.add_argument("--confirm", action="store_true", help="apply rollback; without this the command is a dry run")
-    service_rollback_cmd.add_argument("--yes", action="store_true", help="non-interactive confirmation; emits an audit_id")
-    service_rollback_cmd.add_argument("--no-restart-services", action="store_true")
-
     update = sub.add_parser("update", help="check, apply, or roll back released versions")
     update_sub = update.add_subparsers(dest="update_command", required=True)
     update_check = update_sub.add_parser("check", help="check whether a newer released version is available")
@@ -615,8 +608,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     multiplier_seed.add_argument("--config-path", default=None)
     multiplier_seed.add_argument("--cache", default=None)
     multiplier_seed.add_argument("--apply", action="store_true")
-    multiplier_seed.add_argument("--confirm", action="store_true", help="legacy alias for --apply")
-    multiplier_seed.add_argument("--yes", action="store_true", help="non-interactive alias for --apply; emits an audit_id")
 
     sub.add_parser("symbols", help="manage monitored symbols")
     sub.add_parser("option-positions", help="option position operations")
@@ -848,7 +839,41 @@ def main(argv: list[str] | None = None) -> int:
                 runtime_root=args.runtime_root,
             ))
 
+        if args.command == "agent" and args.agent_command == "llm-check":
+            data = check_llm_translator(
+                repo_root=repo_base(),
+                config_key=args.config_key,
+                config_path=args.config_path,
+                env_file=args.env_file,
+                include_local_env_file=not bool(args.no_local_env_file),
+                live=bool(args.live),
+                live_text=args.text or "状态",
+            )
+            return _print(build_response(
+                tool_name="agent.llm_check",
+                ok=bool(data.get("summary", {}).get("ok", True)),
+                data=data,
+            ))
+
+        if args.command == "agent" and args.agent_command == "commands":
+            data = command_catalog_payload()
+            if args.format == "text":
+                sys.stdout.write(str(data.get("help_text") or "").strip() + "\n")
+                return 0
+            return _print(build_response(tool_name="agent.commands", ok=True, data=data))
+
         if args.command == "inbound" and args.inbound_command == "handle":
+            force_agent_runtime = getattr(args, "agent_runtime", None)
+            agent_settings: AgentRuntimeSettings | None = None
+            if force_agent_runtime is False:
+                use_agent_runtime = False
+            else:
+                agent_settings = _agent_runtime_settings_for_cli(
+                    config_key=args.config_key,
+                    config_path=args.config_path,
+                    force_enabled=True if force_agent_runtime is True else None,
+                )
+                use_agent_runtime = bool(agent_settings.enabled)
             request = InboundRequest(
                 text=args.text,
                 sender_id=args.sender_id,
@@ -859,14 +884,11 @@ def main(argv: list[str] | None = None) -> int:
                 config_path=args.config_path,
                 audit_db=args.audit_db,
             )
-            out = (
-                handle_agent_message(
-                    request,
-                    settings=_agent_runtime_settings_for_cli(config_key=args.config_key, config_path=args.config_path),
-                )
-                if bool(args.agent_runtime)
-                else handle_inbound_request(request)
-            )
+            if use_agent_runtime:
+                assert agent_settings is not None
+                out = handle_agent_message(request, settings=agent_settings)
+            else:
+                out = handle_inbound_request(request)
             if args.format == "text":
                 data_raw = out.get("data")
                 data: dict[str, Any] = data_raw if isinstance(data_raw, dict) else {}
@@ -906,6 +928,7 @@ def main(argv: list[str] | None = None) -> int:
             return _print(out)
 
         if args.command == "inbound" and args.inbound_command == "feishu":
+            force_agent_runtime = getattr(args, "agent_runtime", None)
             out = handle_feishu_payload(
                 _load_json_payload(
                     json_text=args.input_json,
@@ -915,7 +938,7 @@ def main(argv: list[str] | None = None) -> int:
                 config_key=args.config_key,
                 config_path=args.config_path,
                 audit_db=args.audit_db,
-                use_agent_runtime=bool(args.agent_runtime),
+                use_agent_runtime=None if force_agent_runtime is None else bool(force_agent_runtime),
             )
             if args.format == "text":
                 data_raw = out.get("data")
@@ -1153,7 +1176,7 @@ def main(argv: list[str] | None = None) -> int:
                 us_accounts=args.us_accounts,
                 hk_accounts=args.hk_accounts,
                 output_config_yaml_path=args.output,
-                apply=bool(args.apply or args.yes),
+                apply=bool(args.apply),
                 backup=not bool(args.no_backup),
             ))
 
@@ -1195,7 +1218,7 @@ def main(argv: list[str] | None = None) -> int:
                     value=args.value,
                     json_value=args.json_value,
                     apply=bool(args.apply),
-                    confirm=bool(args.confirm or args.yes),
+                    confirm=_confirmed(args),
                     backup=not bool(args.no_backup),
                 ),
                 warnings=[RUNTIME_CONFIG_SET_DEPRECATION_WARNING],
@@ -1385,45 +1408,6 @@ def main(argv: list[str] | None = None) -> int:
             data = _service_write_contract(data, confirmed=_confirmed(args), rollback_hint="restore deleted release/cache paths from external backup")
             return _print(build_response(tool_name="service.cleanup", ok=bool(data.get("ok")), data=data))
 
-        if args.command == "service" and args.service_command == "upgrade-check":
-            data = service_upgrade_check(
-                repo_root=args.repo_root or repo_base(),
-                runtime_root=args.runtime_root,
-                cache_root=args.cache_root,
-                remote_name=args.remote_name,
-            )
-            return _print(build_response(tool_name="service.upgrade_check", ok=bool(data.get("ok")), data=data))
-
-        if args.command == "service" and args.service_command == "upgrade":
-            data = service_upgrade(
-                repo_root=args.repo_root or repo_base(),
-                runtime_root=args.runtime_root,
-                releases_root=args.releases_root,
-                cache_root=args.cache_root,
-                target_version=args.target_version,
-                remote_name=args.remote_name,
-                confirm=_confirmed(args),
-                auto=bool(args.auto),
-                allow_major=bool(args.allow_major),
-                restart_services=not bool(args.no_restart_services),
-                cleanup_after_upgrade=bool(args.cleanup_after_upgrade),
-                cleanup_keep_releases=args.cleanup_keep_releases,
-            )
-            data = _service_write_contract(data, confirmed=_confirmed(args), rollback_hint="./om update rollback --confirm")
-            return _print(build_response(tool_name="service.upgrade", ok=bool(data.get("ok")), data=data))
-
-        if args.command == "service" and args.service_command == "rollback":
-            data = service_rollback(
-                repo_root=args.repo_root or repo_base(),
-                runtime_root=args.runtime_root,
-                releases_root=args.releases_root,
-                to_version=args.to_version,
-                confirm=_confirmed(args),
-                restart_services=not bool(args.no_restart_services),
-            )
-            data = _service_write_contract(data, confirmed=_confirmed(args), rollback_hint="./om update apply --confirm")
-            return _print(build_response(tool_name="service.rollback", ok=bool(data.get("ok")), data=data))
-
         if args.command == "update" and args.update_command == "check":
             data = service_upgrade_check(
                 repo_root=args.repo_root or repo_base(),
@@ -1501,7 +1485,7 @@ def main(argv: list[str] | None = None) -> int:
                 runtime_root=args.runtime_root,
                 config_path=args.config_path,
                 cache_path=args.cache,
-                confirm=bool(args.apply or args.confirm or args.yes),
+                confirm=bool(args.apply),
             )
             return _print(build_response(tool_name="multiplier_cache.seed", ok=bool(data.get("ok")), data=data))
 

@@ -769,18 +769,9 @@ def test_service_upgrade_dry_run_and_confirm_switches_current_symlink(monkeypatc
 
     def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
         calls.append(list(command))
-        if command[:3] == ["git", "ls-remote", "--tags"]:
-            return subprocess.CompletedProcess(
-                command,
-                0,
-                stdout=(
-                    "a refs/tags/v1.0.0\n"
-                    "b refs/tags/v1.0.1\n"
-                ),
-                stderr="",
-            )
-        if command[:3] == ["git", "config", "--get"]:
-            return subprocess.CompletedProcess(command, 0, stdout="https://example.invalid/repo.git\n", stderr="")
+        target_query = _fake_release_target_query(list(command))
+        if target_query is not None:
+            return target_query
         materialized = _fake_git_cache_materialize(list(command), version="1.0.1")
         if materialized is not None:
             return materialized
@@ -857,7 +848,8 @@ def test_service_upgrade_dry_run_and_confirm_switches_current_symlink(monkeypatc
     assert out["service_health"]["status"] == "ok"
     assert out["release_materialize"]["method"] == "git_cache_archive"
     assert out["release_materialize"]["cache_repo"] == str(cache_repo)
-    assert out["release_materialize"]["cache_initialized"] is True
+    assert out["release_materialize"]["cache_initialized"] is False
+    assert out["release_materialize"]["fetched"] is True
     assert out["runtime_prepare"]["installer"] == "pip"
     assert out["runtime_prepare"]["fallback"] is False
     assert out["runtime_prepare"]["venv_reused"] is False
@@ -918,10 +910,9 @@ def test_service_upgrade_restarts_feishu_ws_from_refreshed_profile_after_reconci
 
     def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
         calls.append(list(command))
-        if command[:3] == ["git", "ls-remote", "--tags"]:
-            return subprocess.CompletedProcess(command, 0, stdout="a refs/tags/v1.0.1\n", stderr="")
-        if command[:3] == ["git", "config", "--get"]:
-            return subprocess.CompletedProcess(command, 0, stdout="https://example.invalid/repo.git\n", stderr="")
+        target_query = _fake_release_target_query(list(command), tags=("1.0.1",))
+        if target_query is not None:
+            return target_query
         materialized = _fake_git_cache_materialize(list(command), version="1.0.1")
         if materialized is not None:
             return materialized
@@ -1150,6 +1141,22 @@ def _fake_git_cache_materialize(command: list[str], *, version: str = "1.0.1") -
     return None
 
 
+def _fake_release_target_query(
+    command: list[str],
+    *,
+    tags: tuple[str, ...] = ("1.0.0", "1.0.1"),
+    remote_url: str = "https://example.invalid/repo.git",
+) -> subprocess.CompletedProcess | None:
+    if command[:3] == ["git", "config", "--get"]:
+        return subprocess.CompletedProcess(command, 0, stdout=f"{remote_url}\n", stderr="")
+    if len(command) >= 4 and command[0] == "git" and str(command[1]).startswith("--git-dir=") and command[2:4] == ["config", "--get"]:
+        return subprocess.CompletedProcess(command, 0, stdout=f"{remote_url}\n", stderr="")
+    if len(command) >= 3 and command[0] == "git" and str(command[1]).startswith("--git-dir=") and command[2] == "for-each-ref":
+        stdout = "".join(f"{index:x} refs/tags/v{version}\n" for index, version in enumerate(tags, start=1))
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+    return None
+
+
 def test_service_upgrade_materialize_uses_existing_git_cache_fetch(tmp_path: Path) -> None:
     from src.application.service_upgrade import _materialize_release_from_git_cache
 
@@ -1218,9 +1225,9 @@ def test_service_upgrade_check_falls_back_to_git_cache_when_current_release_has_
 
     def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
         calls.append((list(command), kwargs.get("cwd")))
-        if command[:3] == ["git", "ls-remote", "--tags"]:
-            raise subprocess.CalledProcessError(128, command, stderr="fatal: not a git repository")
-        if command[:3] == ["git", f"--git-dir={cache_repo}", "ls-remote"]:
+        if command[:3] == ["git", f"--git-dir={cache_repo}", "fetch"]:
+            return subprocess.CompletedProcess(command, 0, stdout="fetched\n", stderr="")
+        if command[:3] == ["git", f"--git-dir={cache_repo}", "for-each-ref"]:
             return subprocess.CompletedProcess(
                 command,
                 0,
@@ -1236,9 +1243,9 @@ def test_service_upgrade_check_falls_back_to_git_cache_when_current_release_has_
 
     assert out["ok"] is True
     assert out["latest_version"] == "1.0.1"
-    assert out["version_check"]["source"] == "upgrade_cache"
-    assert out["version_check"]["fallback_from"] == "current_release"
-    assert any(command[:3] == ["git", f"--git-dir={cache_repo}", "ls-remote"] for command, _cwd in calls)
+    assert out["version_check"]["source"] == "latest_from_cache"
+    assert out["version_check"]["cache_fetched"] is True
+    assert any(command[:3] == ["git", f"--git-dir={cache_repo}", "for-each-ref"] for command, _cwd in calls)
 
 
 def test_service_upgrade_confirm_uses_cached_remote_when_current_release_has_no_git(tmp_path: Path) -> None:
@@ -1260,9 +1267,7 @@ def test_service_upgrade_confirm_uses_cached_remote_when_current_release_has_no_
 
     def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
         calls.append(list(command))
-        if command[:3] == ["git", "ls-remote", "--tags"]:
-            raise subprocess.CalledProcessError(128, command, stderr="fatal: not a git repository")
-        if command[:3] == ["git", f"--git-dir={cache_repo}", "ls-remote"]:
+        if command[:3] == ["git", f"--git-dir={cache_repo}", "for-each-ref"]:
             return subprocess.CompletedProcess(
                 command,
                 0,
@@ -1592,10 +1597,9 @@ def test_service_upgrade_partial_success_when_restart_denied_after_switch(monkey
     )
 
     def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
-        if command[:3] == ["git", "ls-remote", "--tags"]:
-            return subprocess.CompletedProcess(command, 0, stdout="a refs/tags/v1.0.1\n", stderr="")
-        if command[:3] == ["git", "config", "--get"]:
-            return subprocess.CompletedProcess(command, 0, stdout="https://example.invalid/repo.git\n", stderr="")
+        target_query = _fake_release_target_query(list(command), tags=("1.0.1",))
+        if target_query is not None:
+            return target_query
         materialized = _fake_git_cache_materialize(list(command), version="1.0.1")
         if materialized is not None:
             return materialized
@@ -1796,10 +1800,9 @@ def test_service_upgrade_migrates_user_configs_and_rebuilds_runtime_configs_befo
 
     def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
         calls.append(list(command))
-        if command[:3] == ["git", "ls-remote", "--tags"]:
-            return subprocess.CompletedProcess(command, 0, stdout="b refs/tags/v1.0.1\n", stderr="")
-        if command[:3] == ["git", "config", "--get"]:
-            return subprocess.CompletedProcess(command, 0, stdout="https://example.invalid/repo.git\n", stderr="")
+        target_query = _fake_release_target_query(list(command), tags=("1.0.1",))
+        if target_query is not None:
+            return target_query
         materialized = _fake_git_cache_materialize(list(command), version="1.0.1")
         if materialized is not None:
             return materialized
@@ -1879,10 +1882,9 @@ def test_service_upgrade_missing_user_config_fails_before_switch_with_remediatio
 
     def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
         calls.append(list(command))
-        if command[:3] == ["git", "ls-remote", "--tags"]:
-            return subprocess.CompletedProcess(command, 0, stdout="b refs/tags/v1.0.1\n", stderr="")
-        if command[:3] == ["git", "config", "--get"]:
-            return subprocess.CompletedProcess(command, 0, stdout="https://example.invalid/repo.git\n", stderr="")
+        target_query = _fake_release_target_query(list(command), tags=("1.0.1",))
+        if target_query is not None:
+            return target_query
         materialized = _fake_git_cache_materialize(list(command), version="1.0.1")
         if materialized is not None:
             return materialized
@@ -1953,10 +1955,9 @@ def test_service_upgrade_recovers_user_configs_from_older_complete_release(monke
 
     def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
         calls.append({"command": list(command), "cwd": kwargs.get("cwd")})
-        if command[:3] == ["git", "ls-remote", "--tags"]:
-            return subprocess.CompletedProcess(command, 0, stdout="b refs/tags/v1.0.1\n", stderr="")
-        if command[:3] == ["git", "config", "--get"]:
-            return subprocess.CompletedProcess(command, 0, stdout="https://example.invalid/repo.git\n", stderr="")
+        target_query = _fake_release_target_query(list(command), tags=("1.0.1",))
+        if target_query is not None:
+            return target_query
         materialized = _fake_git_cache_materialize(list(command), version="1.0.1")
         if materialized is not None:
             return materialized
@@ -2025,10 +2026,9 @@ def test_service_upgrade_uses_runtime_overlay_dir_before_older_release(tmp_path:
     )
 
     def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
-        if command[:3] == ["git", "ls-remote", "--tags"]:
-            return subprocess.CompletedProcess(command, 0, stdout="b refs/tags/v1.0.1\n", stderr="")
-        if command[:3] == ["git", "config", "--get"]:
-            return subprocess.CompletedProcess(command, 0, stdout="https://example.invalid/repo.git\n", stderr="")
+        target_query = _fake_release_target_query(list(command), tags=("1.0.1",))
+        if target_query is not None:
+            return target_query
         materialized = _fake_git_cache_materialize(list(command), version="1.0.1")
         if materialized is not None:
             return materialized
@@ -2102,10 +2102,9 @@ def test_service_upgrade_uses_runtime_config_metadata_overlay_source(tmp_path: P
     )
 
     def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
-        if command[:3] == ["git", "ls-remote", "--tags"]:
-            return subprocess.CompletedProcess(command, 0, stdout="b refs/tags/v1.0.1\n", stderr="")
-        if command[:3] == ["git", "config", "--get"]:
-            return subprocess.CompletedProcess(command, 0, stdout="https://example.invalid/repo.git\n", stderr="")
+        target_query = _fake_release_target_query(list(command), tags=("1.0.1",))
+        if target_query is not None:
+            return target_query
         materialized = _fake_git_cache_materialize(list(command), version="1.0.1")
         if materialized is not None:
             return materialized
@@ -2164,10 +2163,9 @@ def test_service_upgrade_rebuild_failure_fails_before_switch_with_remediation(tm
 
     def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
         calls.append(list(command))
-        if command[:3] == ["git", "ls-remote", "--tags"]:
-            return subprocess.CompletedProcess(command, 0, stdout="b refs/tags/v1.0.1\n", stderr="")
-        if command[:3] == ["git", "config", "--get"]:
-            return subprocess.CompletedProcess(command, 0, stdout="https://example.invalid/repo.git\n", stderr="")
+        target_query = _fake_release_target_query(list(command), tags=("1.0.1",))
+        if target_query is not None:
+            return target_query
         materialized = _fake_git_cache_materialize(list(command), version="1.0.1")
         if materialized is not None:
             return materialized
@@ -2232,10 +2230,9 @@ def test_service_upgrade_uses_yaml_authoring_source_for_runtime_rebuild(tmp_path
 
     def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
         calls.append(list(command))
-        if command[:3] == ["git", "ls-remote", "--tags"]:
-            return subprocess.CompletedProcess(command, 0, stdout="b refs/tags/v1.0.1\n", stderr="")
-        if command[:3] == ["git", "config", "--get"]:
-            return subprocess.CompletedProcess(command, 0, stdout="https://example.invalid/repo.git\n", stderr="")
+        target_query = _fake_release_target_query(list(command), tags=("1.0.1",))
+        if target_query is not None:
+            return target_query
         materialized = _fake_git_cache_materialize(list(command), version="1.0.1")
         if materialized is not None:
             return materialized
@@ -2301,8 +2298,6 @@ def test_service_upgrade_dry_run_warns_when_repo_root_is_not_symlink(tmp_path: P
     (repo / "VERSION").write_text("1.0.0\n", encoding="utf-8")
 
     def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
-        if command[:3] == ["git", "ls-remote", "--tags"]:
-            return subprocess.CompletedProcess(command, 0, stdout="b refs/tags/v1.0.1\n", stderr="")
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
     out = service_upgrade(
@@ -2330,8 +2325,6 @@ def test_service_upgrade_confirm_fails_fast_when_repo_root_is_not_symlink(tmp_pa
 
     def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
         calls.append(list(command))
-        if command[:3] == ["git", "ls-remote", "--tags"]:
-            return subprocess.CompletedProcess(command, 0, stdout="b refs/tags/v1.0.1\n", stderr="")
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
     out = service_upgrade(
@@ -2378,10 +2371,9 @@ def test_service_upgrade_coerces_release_entity_repo_root_to_current_symlink(mon
     )
 
     def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
-        if command[:3] == ["git", "ls-remote", "--tags"]:
-            return subprocess.CompletedProcess(command, 0, stdout="b refs/tags/v1.0.1\n", stderr="")
-        if command[:3] == ["git", "config", "--get"]:
-            return subprocess.CompletedProcess(command, 0, stdout="https://example.invalid/repo.git\n", stderr="")
+        target_query = _fake_release_target_query(list(command), tags=("1.0.1",))
+        if target_query is not None:
+            return target_query
         materialized = _fake_git_cache_materialize(list(command), version="1.0.1")
         if materialized is not None:
             return materialized
@@ -2438,10 +2430,9 @@ def test_service_upgrade_cleanup_after_success_deletes_older_releases(tmp_path: 
     )
 
     def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
-        if command[:3] == ["git", "ls-remote", "--tags"]:
-            return subprocess.CompletedProcess(command, 0, stdout="b refs/tags/v1.0.1\n", stderr="")
-        if command[:3] == ["git", "config", "--get"]:
-            return subprocess.CompletedProcess(command, 0, stdout="https://example.invalid/repo.git\n", stderr="")
+        target_query = _fake_release_target_query(list(command), tags=("1.0.1",))
+        if target_query is not None:
+            return target_query
         materialized = _fake_git_cache_materialize(list(command), version="1.0.1")
         if materialized is not None:
             return materialized
@@ -2705,45 +2696,6 @@ def test_cli_service_drift_reports_missing_units(monkeypatch, capsys, tmp_path: 
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is False
     assert payload["data"]["missing_required_units"] == ["options-monitor-projection-verify.timer"]
-
-
-def test_cli_service_upgrade_delegates_to_application(monkeypatch, capsys, tmp_path: Path) -> None:
-    import src.interfaces.cli.main as cli_main
-
-    calls: list[dict[str, object]] = []
-
-    def _fake_upgrade(**kwargs):  # type: ignore[no-untyped-def]
-        calls.append(dict(kwargs))
-        return {"ok": True, "status": "dry_run", "changed": False}
-
-    monkeypatch.setattr(cli_main, "service_upgrade", _fake_upgrade)
-
-    rc = cli_main.main(
-        [
-            "service",
-            "upgrade",
-            "--repo-root",
-            str(tmp_path / "current"),
-            "--runtime-root",
-            str(tmp_path / "runtime"),
-            "--cache-root",
-            str(tmp_path / "_cache"),
-            "--target-version",
-            "1.2.99",
-            "--auto",
-            "--cleanup-after-upgrade",
-        ]
-    )
-
-    assert rc == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["ok"] is True
-    assert calls[0]["cache_root"] == str(tmp_path / "_cache")
-    assert calls[0]["target_version"] == "1.2.99"
-    assert calls[0]["auto"] is True
-    assert calls[0]["confirm"] is False
-    assert calls[0]["cleanup_after_upgrade"] is True
-    assert calls[0]["cleanup_keep_releases"] == 2
 
 
 def test_cli_update_check_delegates_cache_root_to_application(monkeypatch, capsys, tmp_path: Path) -> None:

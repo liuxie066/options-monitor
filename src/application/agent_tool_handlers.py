@@ -377,10 +377,11 @@ def _runtime_status_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[
 
 
 def _runtime_runs_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    _reject_removed_payload_alias(payload, alias="openclaw_profile_path", replacement="profile_path")
     data = collect_runtime_runs(
         repo_root=repo_base(),
         runs_root=payload.get("runs_root"),
-        profile_path=payload.get("profile_path") or payload.get("openclaw_profile_path"),
+        profile_path=payload.get("profile_path"),
         limit=int(payload.get("limit") or 10),
         run_id=payload.get("run_id"),
         run_dir=payload.get("run_dir"),
@@ -390,18 +391,28 @@ def _runtime_runs_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[st
 
 
 def _runtime_logs_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    _reject_removed_payload_alias(payload, alias="openclaw_profile_path", replacement="profile_path")
+    _reject_removed_payload_alias(payload, alias="file", replacement="log_file")
     data = collect_runtime_logs(
         repo_root=repo_base(),
         runs_root=payload.get("runs_root"),
         logs_root=payload.get("logs_root"),
-        profile_path=payload.get("profile_path") or payload.get("openclaw_profile_path"),
+        profile_path=payload.get("profile_path"),
         run_id=payload.get("run_id"),
         run_dir=payload.get("run_dir"),
         kind=str(payload.get("kind") or "all"),
         lines=int(payload.get("lines") or 50),
-        log_file=payload.get("file") or payload.get("log_file"),
+        log_file=payload.get("log_file"),
     )
     return data, [], {"runs_root": mask_path(data.get("runs_root")), "logs_root": mask_path(data.get("logs_root"))}
+
+
+def _reject_removed_payload_alias(payload: dict[str, Any], *, alias: str, replacement: str) -> None:
+    if alias in payload and str(payload.get(alias) or "").strip():
+        raise AgentToolError(
+            code="INPUT_ERROR",
+            message=f"{alias} has been removed; use {replacement}",
+        )
 
 
 def _openclaw_readiness_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:

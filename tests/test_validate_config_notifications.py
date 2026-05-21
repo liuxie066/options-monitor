@@ -128,6 +128,24 @@ def test_validate_config_rejects_invalid_agent_llm_config() -> None:
         assert "agent.llm.provider must be a string" in str(exc)
 
     cfg = _base_cfg()
+    cfg["agent"] = {"llm": {"base_url": ["https://llm.example/v1"]}}
+
+    try:
+        mod.validate_config(cfg)
+        raise AssertionError("expected SystemExit")
+    except SystemExit as exc:
+        assert "agent.llm.base_url must be a string" in str(exc)
+
+    cfg = _base_cfg()
+    cfg["agent"] = {"llm": {"base_url": "llm.example/v1"}}
+
+    try:
+        mod.validate_config(cfg)
+        raise AssertionError("expected SystemExit")
+    except SystemExit as exc:
+        assert "agent.llm.base_url must start with http:// or https:// when set" in str(exc)
+
+    cfg = _base_cfg()
     cfg["agent"] = {"llm": {"confidence_min": 1.5}}
 
     try:
@@ -135,6 +153,42 @@ def test_validate_config_rejects_invalid_agent_llm_config() -> None:
         raise AssertionError("expected SystemExit")
     except SystemExit as exc:
         assert "agent.llm.confidence_min must be between 0 and 1" in str(exc)
+
+    cfg = _base_cfg()
+    cfg["agent"] = {"llm": {"timeout_seconds": "slow"}}
+
+    try:
+        mod.validate_config(cfg)
+        raise AssertionError("expected SystemExit")
+    except SystemExit as exc:
+        assert "agent.llm.timeout_seconds must be an integer" in str(exc)
+
+    cfg = _base_cfg()
+    cfg["agent"] = {"llm": {"timeout_seconds": 121}}
+
+    try:
+        mod.validate_config(cfg)
+        raise AssertionError("expected SystemExit")
+    except SystemExit as exc:
+        assert "agent.llm.timeout_seconds must be <= 120" in str(exc)
+
+    cfg = _base_cfg()
+    cfg["agent"] = {"llm": {"max_output_tokens": 63}}
+
+    try:
+        mod.validate_config(cfg)
+        raise AssertionError("expected SystemExit")
+    except SystemExit as exc:
+        assert "agent.llm.max_output_tokens must be >= 64" in str(exc)
+
+    cfg = _base_cfg()
+    cfg["agent"] = {"llm": {"max_output_tokens": 4097}}
+
+    try:
+        mod.validate_config(cfg)
+        raise AssertionError("expected SystemExit")
+    except SystemExit as exc:
+        assert "agent.llm.max_output_tokens must be <= 4096" in str(exc)
 
     cfg = _base_cfg()
     cfg["agent"] = {"llm": {"provider": "anthropic"}}
@@ -177,7 +231,17 @@ def test_validate_config_requires_complete_agent_llm_when_enabled() -> None:
         assert "agent.llm.api_key_env is required when agent.llm.enabled is true" in str(exc)
 
     cfg = _base_cfg()
-    cfg["agent"] = {"llm": {"enabled": True, "provider": "openai", "model": "gpt-5.2", "api_key_env": "OM_LLM_API_KEY"}}
+    cfg["agent"] = {
+        "llm": {
+            "enabled": True,
+            "provider": "openai",
+            "base_url": "https://llm.example/v1",
+            "model": "gpt-5.2",
+            "api_key_env": "OM_LLM_API_KEY",
+            "timeout_seconds": 20,
+            "max_output_tokens": 512,
+        }
+    }
     mod.validate_config(cfg)
 
 

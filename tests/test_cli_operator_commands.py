@@ -136,6 +136,67 @@ def test_support_bundle_command_forwards_diagnostic_args(monkeypatch, capsys) ->
     }]
 
 
+def test_agent_llm_check_command_forwards_diagnostic_args(monkeypatch, capsys) -> None:
+    import src.interfaces.cli.main as cli
+
+    calls: list[dict] = []
+
+    def _check_llm_translator(**kwargs):
+        calls.append(kwargs)
+        return {"summary": {"ok": True, "status": "ready"}, "checks": []}
+
+    monkeypatch.setattr(cli, "check_llm_translator", _check_llm_translator)
+
+    rc = cli.main([
+        "agent",
+        "llm-check",
+        "--config-key",
+        "hk",
+        "--env-file",
+        "options-monitor.env",
+        "--no-local-env-file",
+        "--live",
+        "--text",
+        "状态",
+    ])
+    payload = _read_json_output(capsys)
+
+    assert rc == 0
+    assert payload["tool_name"] == "agent.llm_check"
+    assert payload["ok"] is True
+    assert calls == [{
+        "repo_root": cli.repo_base(),
+        "config_key": "hk",
+        "config_path": None,
+        "env_file": "options-monitor.env",
+        "include_local_env_file": False,
+        "live": True,
+        "live_text": "状态",
+    }]
+
+
+def test_agent_commands_command_renders_catalog(capsys) -> None:
+    import src.interfaces.cli.main as cli
+
+    rc = cli.main(["agent", "commands"])
+    payload = _read_json_output(capsys)
+
+    assert rc == 0
+    assert payload["tool_name"] == "agent.commands"
+    assert payload["ok"] is True
+    assert payload["data"]["summary"]["llm_allowed_count"] >= 1
+    intents = {item["intent_name"] for item in payload["data"]["commands"]}
+    assert "runtime_status" in intents
+    assert "manual_trade_confirm" in intents
+
+    rc = cli.main(["agent", "commands", "--format", "text"])
+    text = capsys.readouterr().out
+
+    assert rc == 0
+    assert "/status" in text
+    assert "/confirm trade|symbol|upgrade" in text
+
+
 def _runtime_status_envelope(*, ok: bool = True) -> dict:
     return {
         "tool_name": "runtime_status",
@@ -792,6 +853,16 @@ def test_top_level_update_commands_delegate_to_service_upgrade(monkeypatch, caps
     assert calls[2][1]["confirm"] is False
 
 
+def test_service_upgrade_compat_commands_are_removed(capsys) -> None:
+    import src.interfaces.cli.main as cli
+
+    for command in ("upgrade-check", "upgrade", "rollback"):
+        with pytest.raises(SystemExit) as exc:
+            cli.main(["service", command])
+        assert exc.value.code == 2
+        assert "invalid choice" in capsys.readouterr().err
+
+
 def test_config_get_and_set_preview_then_apply(capsys, tmp_path: Path) -> None:
     import src.interfaces.cli.main as cli
 
@@ -851,7 +922,6 @@ def test_config_get_and_set_preview_then_apply(capsys, tmp_path: Path) -> None:
         "--json-value",
         "4",
         "--apply",
-        "--confirm",
         "--no-backup",
     ]) == 0
     payload = _read_json_output(capsys)

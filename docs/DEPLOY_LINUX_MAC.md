@@ -219,7 +219,7 @@ sudo systemctl enable --now options-monitor-upgrade.timer
 如果希望升级成功后自动清理旧 release：
 
 ```bash
-./om service upgrade \
+./om update apply \
   --repo-root /opt/options-monitor/current \
   --runtime-root "$RUNTIME" \
   --confirm \

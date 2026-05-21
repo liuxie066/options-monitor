@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from src.application.agent_tool_contracts import AgentToolError, build_response
+from src.application.agent_runtime.command_catalog import command_specs
 from src.application.inbound import InboundRequest, handle_inbound_request
 from src.application.inbound.contracts import InboundToolCall
 from src.application.inbound.feishu import feishu_payload_to_inbound_request, handle_feishu_payload
@@ -145,6 +146,14 @@ def test_inbound_policy_allows_sender_and_rejects_non_pure_read_tool() -> None:
     assert "inbound.manual_trade" not in PURE_READ_TOOLS
 
 
+def test_command_catalog_read_tool_names_match_inbound_policy() -> None:
+    special_inbound_tools = {"inbound.pending", "inbound.symbols"}
+    for spec in command_specs():
+        if not spec.read_only or not spec.tool_name:
+            continue
+        assert spec.tool_name in PURE_READ_TOOLS or spec.tool_name in special_inbound_tools
+
+
 def test_inbound_parser_maps_manual_trade_and_symbol_operations() -> None:
     open_intent = parse_inbound_text("记录开仓 sy 0700.HK short put strike 450 exp 2026-05-28 6张 premium 2.35 multiplier 100")
     assert open_intent.name == "manual_trade_open"
@@ -201,6 +210,26 @@ def test_inbound_parser_maps_manual_trade_and_symbol_operations() -> None:
     assert upgrade.arguments == {"target_version": "1.2.111"}
     assert parse_inbound_text("确认升级 in_abc123").name == "upgrade_confirm"
     assert parse_inbound_text("取消升级").name == "upgrade_cancel"
+
+
+def test_inbound_request_reports_unwritable_audit_db(tmp_path: Path) -> None:
+    blocked_parent = tmp_path / "audit-parent-is-file"
+    blocked_parent.write_text("not a directory", encoding="utf-8")
+
+    out = handle_inbound_request(
+        InboundRequest(
+            text="状态",
+            sender_id="local",
+            message_id="msg_unwritable_audit",
+            audit_db=str(blocked_parent / "inbound.sqlite3"),
+        )
+    )
+
+    assert out["ok"] is False
+    assert out["error"]["code"] == "CONFIG_ERROR"
+    assert out["error"]["message"] == "failed to open inbound audit SQLite database"
+    assert "Set OM_INBOUND_AUDIT_DB" in out["error"]["hint"]
+    assert out["meta"]["audit_db"] == ".../inbound.sqlite3"
 
 
 def test_inbound_manual_trade_preview_and_confirm_open(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -455,7 +484,7 @@ def test_inbound_upgrade_preview_and_confirm(monkeypatch: pytest.MonkeyPatch, tm
 
     preview = handle_inbound_request(
         InboundRequest(
-            text="立即升级到 v1.2.111",
+            text="立即升级",
             sender_id="ou_1",
             channel="feishu",
             message_id="msg_upgrade_preview",
@@ -469,7 +498,7 @@ def test_inbound_upgrade_preview_and_confirm(monkeypatch: pytest.MonkeyPatch, tm
     assert preview["tool_name"] == "inbound.upgrade"
     assert preview["data"]["response_text"].startswith("升级预览：立即升级")
     assert "未执行升级" in preview["data"]["response_text"]
-    assert preview["data"]["payload"]["arguments"] == {"target_version": "1.2.111"}
+    assert preview["data"]["payload"]["arguments"] == {"target_version": "1.2.111", "release_tag": "v1.2.111"}
     assert calls[-1]["check"] is True
 
     operation_id = preview["data"]["operation_id"]
@@ -491,6 +520,7 @@ def test_inbound_upgrade_preview_and_confirm(monkeypatch: pytest.MonkeyPatch, tm
     assert "升级执行完成" in confirmed["data"]["response_text"]
     assert calls[-1]["confirm"] is True
     assert calls[-1]["auto"] is True
+    assert calls[-1]["target_version"] == "1.2.111"
     assert str(calls[-1]["runtime_root"]) == str(tmp_path / "runtime")
 
 
@@ -1604,9 +1634,12 @@ def test_feishu_payload_adapter_agent_runtime_reads_runtime_config(monkeypatch: 
         "llm": {
             "enabled": True,
             "provider": "openai",
+            "base_url": "https://llm.example/v1",
             "model": "gpt-5.2",
             "api_key_env": "OM_LLM_API_KEY",
             "confidence_min": 0.82,
+            "timeout_seconds": 32,
+            "max_output_tokens": 770,
         },
     }
     cfg_path = tmp_path / "config.us.json"
@@ -1653,8 +1686,58 @@ def test_feishu_payload_adapter_agent_runtime_reads_runtime_config(monkeypatch: 
     assert settings.context_window_messages == 7
     assert settings.llm.enabled is True
     assert settings.llm.provider == "openai"
+    assert settings.llm.base_url == "https://llm.example/v1"
     assert settings.llm.model == "gpt-5.2"
     assert settings.llm.confidence_min == 0.82
+    assert settings.llm.timeout_seconds == 32
+    assert settings.llm.max_output_tokens == 770
+
+
+def test_feishu_payload_adapter_defaults_to_agent_runtime_from_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    data_cfg_path = tmp_path / "portfolio.runtime.json"
+    data_cfg_path.write_text(json.dumps({"option_positions": {}}, ensure_ascii=False), encoding="utf-8")
+    cfg = _runtime_cfg(str(data_cfg_path))
+    cfg["agent"] = {"runtime": {"enabled": True, "context_window_messages": 5}, "llm": {"enabled": False}}
+    cfg_path = tmp_path / "config.us.json"
+    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    payload = {
+        "schema": "2.0",
+        "header": {"event_id": "evt_agent_default", "event_type": "im.message.receive_v1"},
+        "event": {
+            "sender": {"sender_id": {"open_id": "ou_1"}},
+            "message": {
+                "message_id": "om_agent_default",
+                "chat_id": "oc_1",
+                "message_type": "text",
+                "content": json.dumps({"text": "/status"}, ensure_ascii=False),
+            },
+        },
+    }
+    seen: list[dict] = []
+
+    def _handle_agent_message(request: InboundRequest, **kwargs) -> dict:
+        seen.append({"request": request, "kwargs": kwargs})
+        return build_response(
+            tool_name="inbound.handle",
+            ok=True,
+            data={"response_text": "状态查询完成。"},
+            meta={"agent_runtime": {"route": "command"}},
+        )
+
+    monkeypatch.setattr("src.application.agent_runtime.handle_agent_message", _handle_agent_message)
+
+    out = handle_feishu_payload(
+        payload,
+        config_path=str(cfg_path),
+        audit_db=str(tmp_path / "audit.sqlite3"),
+        allowed_senders="feishu:ou_1",
+    )
+
+    assert out["ok"] is True
+    assert len(seen) == 1
+    settings = seen[0]["kwargs"]["settings"]
+    assert settings.enabled is True
+    assert settings.context_window_messages == 5
 
 
 def test_feishu_payload_adapter_ignores_non_message_events() -> None:
@@ -1702,6 +1785,7 @@ def test_inbound_cli_wires_request(monkeypatch, capsys, tmp_path: Path) -> None:
             "feishu:oc_1:ou_1",
             "--audit-db",
             str(tmp_path / "audit.sqlite3"),
+            "--no-agent-runtime",
         ]
     )
     payload = json.loads(capsys.readouterr().out)
@@ -1726,15 +1810,66 @@ def test_inbound_cli_agent_runtime_loads_settings_from_config(monkeypatch, capsy
 
     cfg = _runtime_cfg(str(tmp_path / "portfolio.runtime.json"))
     cfg["agent"] = {
-        "runtime": {"enabled": False, "context_window_messages": 6},
+        "runtime": {"enabled": True, "context_window_messages": 6},
         "llm": {
             "enabled": True,
             "provider": "openai",
+            "base_url": "https://llm.example/v1",
             "model": "gpt-5.2",
             "api_key_env": "OM_LLM_API_KEY",
             "confidence_min": 0.81,
+            "timeout_seconds": 33,
+            "max_output_tokens": 771,
         },
     }
+    cfg_path = tmp_path / "config.us.json"
+    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    seen = []
+
+    def _handle_agent(request: InboundRequest, **kwargs) -> dict:
+        seen.append({"request": request, "settings": kwargs.get("settings")})
+        return build_response(
+            tool_name="inbound.handle",
+            ok=True,
+            data={"response_text": "状态查询完成。"},
+        )
+
+    monkeypatch.setattr(cli, "handle_agent_message", _handle_agent)
+
+    rc = cli.main(
+        [
+            "inbound",
+            "handle",
+            "--config-path",
+            str(cfg_path),
+            "--text",
+            "/status",
+            "--sender",
+            "local",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert payload["tool_name"] == "inbound.handle"
+    assert len(seen) == 1
+    settings = seen[0]["settings"]
+    assert settings.enabled is True
+    assert settings.context_window_messages == 6
+    assert settings.llm.enabled is True
+    assert settings.llm.provider == "openai"
+    assert settings.llm.base_url == "https://llm.example/v1"
+    assert settings.llm.model == "gpt-5.2"
+    assert settings.llm.confidence_min == 0.81
+    assert settings.llm.timeout_seconds == 33
+    assert settings.llm.max_output_tokens == 771
+
+
+def test_inbound_cli_agent_runtime_flag_forces_disabled_config(monkeypatch, capsys, tmp_path: Path) -> None:
+    import src.interfaces.cli.main as cli
+
+    cfg = _runtime_cfg(str(tmp_path / "portfolio.runtime.json"))
+    cfg["agent"] = {"runtime": {"enabled": False, "context_window_messages": 4}, "llm": {"enabled": False}}
     cfg_path = tmp_path / "config.us.json"
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
     seen = []
@@ -1769,11 +1904,7 @@ def test_inbound_cli_agent_runtime_loads_settings_from_config(monkeypatch, capsy
     assert len(seen) == 1
     settings = seen[0]["settings"]
     assert settings.enabled is True
-    assert settings.context_window_messages == 6
-    assert settings.llm.enabled is True
-    assert settings.llm.provider == "openai"
-    assert settings.llm.model == "gpt-5.2"
-    assert settings.llm.confidence_min == 0.81
+    assert settings.context_window_messages == 4
 
 
 def test_inbound_cli_pending_and_audit_diagnostics(monkeypatch: pytest.MonkeyPatch, capsys, tmp_path: Path) -> None:
@@ -1923,7 +2054,7 @@ def test_inbound_cli_feishu_wires_payload(monkeypatch, capsys, tmp_path: Path) -
                 "config_key": "us",
                 "config_path": None,
                 "audit_db": str(tmp_path / "audit.sqlite3"),
-                "use_agent_runtime": False,
+                "use_agent_runtime": None,
             },
         }
     ]
