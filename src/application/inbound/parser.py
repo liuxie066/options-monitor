@@ -61,7 +61,7 @@ def parse_inbound_text(text: str, *, now_fn: Callable[[], date] | None = None) -
         raise AgentToolError(
             code="NEEDS_CLARIFICATION",
             message="请输入要查询的内容。",
-            hint="可用：状态、健康检查、持仓 sy、收益 sy 2026-05、最近运行、日志 <run_id>。",
+            hint="可用：状态、健康检查、持仓、持仓 sy、收益、收益 sy 2026-05、最近运行、日志 <run_id>。",
         )
 
     compact = _compact(raw)
@@ -93,25 +93,18 @@ def parse_inbound_text(text: str, *, now_fn: Callable[[], date] | None = None) -
 
     if _looks_like_positions(compact, lower):
         account = _extract_account(raw)
-        if not account:
-            raise AgentToolError(
-                code="NEEDS_CLARIFICATION",
-                message="请指定账户，例如：持仓 sy。",
-                hint="当前支持账户标签 lx 或 sy。",
-            )
         status = "all" if ("全部" in compact or "all" in lower) else "open"
-        return InboundIntent(name="option_positions_open", arguments={"account": account, "status": status})
+        args = {"status": status}
+        if account:
+            args["account"] = account
+        return InboundIntent(name="option_positions_open", arguments=args)
 
     if _looks_like_income(compact, lower):
         account = _extract_account(raw)
-        if not account:
-            raise AgentToolError(
-                code="NEEDS_CLARIFICATION",
-                message="请指定账户，例如：收益 sy 或 收益 sy 2026-05。",
-                hint="当前支持账户标签 lx 或 sy。",
-            )
         month = _extract_month(raw, compact=compact, today=today)
-        args = {"account": account}
+        args = {}
+        if account:
+            args["account"] = account
         if month:
             args["month"] = month
         return InboundIntent(name="monthly_income_report", arguments=args)
@@ -132,7 +125,7 @@ def parse_inbound_text(text: str, *, now_fn: Callable[[], date] | None = None) -
     raise AgentToolError(
         code="NEEDS_CLARIFICATION",
         message="没有识别出可执行的只读命令。",
-        hint="可用：状态、健康检查、持仓 sy、收益 sy 2026-05、最近运行、日志 <run_id>。",
+        hint="可用：状态、健康检查、持仓、持仓 sy、收益、收益 sy 2026-05、最近运行、日志 <run_id>。",
     )
 
 

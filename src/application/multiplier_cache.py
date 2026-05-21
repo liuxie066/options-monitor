@@ -33,6 +33,7 @@ except Exception:  # pragma: no cover - non-Unix fallback
 
 from domain.domain.symbol_identity import canonical_symbol_aliases, resolve_underlier_alias
 from src.application.opend_fetch_config import filter_opend_fetch_kwargs
+from src.application.write_contract import attach_write_contract
 from src.application.runtime_paths import resolve_runtime_root
 from src.application.symbol_aliases import symbol_aliases_from_config
 
@@ -348,27 +349,37 @@ def seed_multiplier_cache(
         }
     update = store_multiplier({}, sym, value, source=source)
     if not confirm:
-        return {
+        return attach_write_contract(
+            {
+                "ok": True,
+                "status": "dry_run",
+                "changed": False,
+                "symbol": sym,
+                "multiplier": value,
+                "source": source,
+                "cache_path": str(path),
+                "planned_update": update[sym],
+            },
+            dry_run=True,
+            write_applied=False,
+            rollback_hint=None,
+        )
+    cache = merge_cache_updates(path, update)
+    return attach_write_contract(
+        {
             "ok": True,
-            "status": "dry_run",
-            "changed": False,
+            "status": "seeded",
+            "changed": True,
             "symbol": sym,
             "multiplier": value,
             "source": source,
             "cache_path": str(path),
-            "planned_update": update[sym],
-        }
-    cache = merge_cache_updates(path, update)
-    return {
-        "ok": True,
-        "status": "seeded",
-        "changed": True,
-        "symbol": sym,
-        "multiplier": value,
-        "source": source,
-        "cache_path": str(path),
-        "entry": cache.get(sym),
-    }
+            "entry": cache.get(sym),
+        },
+        dry_run=False,
+        write_applied=True,
+        rollback_hint=f"remove or edit {sym} in {path}",
+    )
 
 
 def resolve_multiplier_with_source(

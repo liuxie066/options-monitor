@@ -263,17 +263,21 @@ def _tool_call_from_intent(intent: InboundIntent, *, request: InboundRequest) ->
     if intent.name == "config_validate":
         return InboundToolCall(tool_name="config_validate", payload=base)
     if intent.name == "option_positions_open":
+        payload = {
+            **base,
+            "action": "list",
+            "status": intent.arguments.get("status") or "open",
+        }
+        if intent.arguments.get("account"):
+            payload["account"] = intent.arguments["account"]
         return InboundToolCall(
             tool_name="option_positions_read",
-            payload={
-                **base,
-                "action": "list",
-                "account": intent.arguments["account"],
-                "status": intent.arguments.get("status") or "open",
-            },
+            payload=payload,
         )
     if intent.name == "monthly_income_report":
-        payload = {**base, "account": intent.arguments["account"]}
+        payload = {**base}
+        if intent.arguments.get("account"):
+            payload["account"] = intent.arguments["account"]
         if intent.arguments.get("month"):
             payload["month"] = intent.arguments["month"]
         return InboundToolCall(tool_name="monthly_income_report", payload=payload)

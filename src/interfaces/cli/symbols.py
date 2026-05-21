@@ -13,6 +13,7 @@ from src.application.config_loader import resolve_watchlist_config, set_watchlis
 from src.application.config_validator import validate_config
 from src.application.runtime_config_paths import write_json_atomic
 from src.application.symbol_mutations import add_symbol_entry, edit_symbol_entry, remove_symbol_entry
+from src.application.write_contract import attach_write_contract
 
 
 def load_json(path: Path) -> dict:
@@ -113,17 +114,26 @@ def main(argv: list[str] | None = None) -> int:
     p_add.add_argument("--put", action="store_true")
     p_add.add_argument("--call", action="store_true")
     p_add.add_argument("--accounts", nargs="*", default=None)
-    p_add.add_argument("--confirm", action="store_true")
     p_add.add_argument("--dry-run", action="store_true")
+    p_add.add_argument("--apply", action="store_true")
+    p_add.add_argument("--confirm", action="store_true", help="alias for --apply on local config writes")
+    p_add.add_argument("--yes", action="store_true", help="non-interactive alias for --apply; emits an audit_id")
+    p_add.add_argument("--format", choices=["text", "json"], default="text")
     p_rm = sub.add_parser("rm", aliases=["remove"])
     p_rm.add_argument("symbol")
-    p_rm.add_argument("--confirm", action="store_true")
     p_rm.add_argument("--dry-run", action="store_true")
+    p_rm.add_argument("--apply", action="store_true")
+    p_rm.add_argument("--confirm", action="store_true", help="alias for --apply on local config writes")
+    p_rm.add_argument("--yes", action="store_true", help="non-interactive alias for --apply; emits an audit_id")
+    p_rm.add_argument("--format", choices=["text", "json"], default="text")
     p_edit = sub.add_parser("edit")
     p_edit.add_argument("symbol")
     p_edit.add_argument("--set", action="append", default=[])
-    p_edit.add_argument("--confirm", action="store_true")
     p_edit.add_argument("--dry-run", action="store_true")
+    p_edit.add_argument("--apply", action="store_true")
+    p_edit.add_argument("--confirm", action="store_true", help="alias for --apply on local config writes")
+    p_edit.add_argument("--yes", action="store_true", help="non-interactive alias for --apply; emits an audit_id")
+    p_edit.add_argument("--format", choices=["text", "json"], default="text")
     args = ap.parse_args(argv)
 
     base = Path(__file__).resolve().parents[3]
@@ -140,11 +150,26 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("edit requires at least one --set path=value")
     preview_cfg = deepcopy(cfg)
     summary = _apply_command(preview_cfg, args)
-    if args.dry_run or not args.confirm:
-        _print_preview(summary.public_payload(), cfg_path=cfg_path)
+    write_requested = bool(args.apply or args.confirm or args.yes)
+    if args.dry_run and write_requested:
+        raise SystemExit("--dry-run cannot be combined with --apply, --confirm, or --yes")
+    payload = attach_write_contract(
+        summary.public_payload(),
+        dry_run=not write_requested,
+        write_applied=write_requested,
+        rollback_hint=f"restore {cfg_path} from version control or revert this symbol mutation",
+    )
+    if not write_requested:
+        if args.format == "json":
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            _print_preview(summary.public_payload(), cfg_path=cfg_path)
         return 0
     _save_validated_json(cfg_path, preview_cfg)
-    print(f"[DONE] {summary.action} {summary.canonical_symbol} -> {cfg_path}")
+    if args.format == "json":
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(f"[DONE] {summary.action} {summary.canonical_symbol} -> {cfg_path}")
     return 0
 
 
@@ -177,7 +202,7 @@ def _print_preview(summary: dict[str, Any], *, cfg_path: Path) -> None:
     existing = str(summary.get("existing_symbol") or "").strip()
     if existing:
         lines.append(f"匹配现有记录：{existing}")
-    lines.extend(["", "未写入配置。确认写入请追加 --confirm。"])
+    lines.extend(["", "未写入配置。确认写入请追加 --apply。"])
     print("\n".join(lines))
 
 

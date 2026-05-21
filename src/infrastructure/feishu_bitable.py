@@ -144,7 +144,18 @@ def _classify_error(*, http_status: int | None, body_text: str, parsed: Any, url
     )
 
 
-def _log_record(level: str, *, category: str, http_status: int | None, feishu_code: int | None, attempt: int, max_attempts: int, url_path: str, sleep_s: float | None = None) -> dict:
+def _log_record(
+    level: str,
+    *,
+    category: str,
+    http_status: int | None,
+    feishu_code: int | None,
+    attempt: int,
+    max_attempts: int,
+    url_path: str,
+    sleep_s: float | None = None,
+    message_id: str | None = None,
+) -> dict:
     rec = {
         "level": level,
         "category": category,
@@ -156,6 +167,8 @@ def _log_record(level: str, *, category: str, http_status: int | None, feishu_co
     }
     if sleep_s is not None:
         rec["sleep_s"] = sleep_s
+    if message_id:
+        rec["message_id"] = message_id
     return rec
 
 
@@ -209,6 +222,7 @@ def http_json(
     timeout: int = 20,
     retry_max_attempts: int = 3,
     log_fn: Callable[[dict], Any] | None = None,
+    log_success_attempts: bool = False,
 ) -> dict:
     """Unified HTTP JSON helper.
 
@@ -247,6 +261,21 @@ def http_json(
                 if isinstance(code, int) and code != 0:
                     raise _classify_error(http_status=getattr(resp, "status", None), body_text=body_text, parsed=parsed, url=url)
 
+                if log_success_attempts and log_fn is not None:
+                    data_obj = parsed.get("data") if isinstance(parsed.get("data"), dict) else {}
+                    message_id = data_obj.get("message_id") if isinstance(data_obj, dict) else None
+                    log_fn(
+                        _log_record(
+                            "info",
+                            category="success",
+                            http_status=getattr(resp, "status", None),
+                            feishu_code=(code if isinstance(code, int) else None),
+                            attempt=attempt,
+                            max_attempts=retry_max_attempts,
+                            url_path=url_path,
+                            message_id=(str(message_id) if message_id else None),
+                        )
+                    )
                 return parsed
 
         except urllib.error.HTTPError as e:

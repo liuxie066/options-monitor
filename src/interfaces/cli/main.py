@@ -64,10 +64,24 @@ from src.application.settings import (
 from domain.domain.config_contract import ensure_runtime_schedule_matches_market
 from src.application.version_check import check_version_update
 from src.application.cash_headroom_query import query_sell_put_cash
+from src.application.write_contract import attach_write_contract
 
 
 def _dumps(payload: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+
+
+def _confirmed(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "confirm", False) or getattr(args, "yes", False))
+
+
+def _service_write_contract(data: dict[str, Any], *, confirmed: bool, rollback_hint: str | None = None) -> dict[str, Any]:
+    return attach_write_contract(
+        data,
+        dry_run=not bool(confirmed),
+        write_applied=bool(confirmed and data.get("changed", False)),
+        rollback_hint=rollback_hint,
+    )
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -300,6 +314,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     migrate_yaml.add_argument("--hk-accounts", nargs="+", default=None)
     migrate_yaml.add_argument("--output", default=None)
     migrate_yaml.add_argument("--apply", action="store_true", help="write config.yaml; omitted means dry-run preview")
+    migrate_yaml.add_argument("--yes", action="store_true", help="non-interactive alias for --apply; emits an audit_id")
     migrate_yaml.add_argument("--no-backup", action="store_true", help="do not write a .bak timestamp copy before applying")
     get_config = config_sub.add_parser("get", help="read a runtime config value by dot path")
     get_config.add_argument("--config-key", default=None, choices=("us", "hk"))
@@ -313,7 +328,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     set_value.add_argument("--value", default=None, help="string value to write")
     set_value.add_argument("--json-value", default=None, help="JSON value to write, for numbers, booleans, arrays, or objects")
     set_config.add_argument("--apply", action="store_true", help="write the change; omitted means dry-run preview")
-    set_config.add_argument("--confirm", action="store_true", help="required together with --apply")
+    set_config.add_argument("--confirm", action="store_true", help="alias for --apply on local config writes")
+    set_config.add_argument("--yes", action="store_true", help="non-interactive alias for --apply; emits an audit_id")
     set_config.add_argument("--no-backup", action="store_true", help="do not write a .bak timestamp copy before applying")
 
     settings = sub.add_parser("settings", help="inspect effective environment-backed settings")
@@ -391,6 +407,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     service_repair_output.add_argument("--runtime-root", default="/var/lib/options-monitor")
     service_repair_output.add_argument("--default-account", required=True)
     service_repair_output.add_argument("--confirm", action="store_true", help="apply the migration; without this the command is a dry run")
+    service_repair_output.add_argument("--yes", action="store_true", help="non-interactive confirmation; emits an audit_id")
     service_status = service_sub.add_parser("status", help="summarize a rendered service profile")
     service_status.add_argument("--profile-path", required=True)
     service_status.add_argument("--include-service-status", action="store_true")
@@ -399,6 +416,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     service_drift_cmd.add_argument("--runtime-root", default="/var/lib/options-monitor")
     service_drift_cmd.add_argument("--profile-path", default=None)
     service_drift_cmd.add_argument("--confirm", action="store_true", help="write missing units/profile and enable missing timers")
+    service_drift_cmd.add_argument("--yes", action="store_true", help="non-interactive confirmation; emits an audit_id")
     service_cleanup_cmd = service_sub.add_parser("cleanup", help="dry-run or clean old releases and selected caches")
     service_cleanup_cmd.add_argument("--repo-root", default=None)
     service_cleanup_cmd.add_argument("--releases-root", default=None)
@@ -408,6 +426,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     service_cleanup_cmd.add_argument("--cleanup-downloads", action="store_true")
     service_cleanup_cmd.add_argument("--cleanup-pip-cache", action="store_true")
     service_cleanup_cmd.add_argument("--confirm", action="store_true", help="delete planned paths; without this the command is a dry run")
+    service_cleanup_cmd.add_argument("--yes", action="store_true", help="non-interactive confirmation; emits an audit_id")
     service_upgrade_check_cmd = service_sub.add_parser("upgrade-check", help="check whether a newer released version is available")
     service_upgrade_check_cmd.add_argument("--repo-root", default=None)
     service_upgrade_check_cmd.add_argument("--runtime-root", default="/var/lib/options-monitor")
@@ -423,6 +442,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     service_upgrade_cmd.add_argument("--auto", action="store_true")
     service_upgrade_cmd.add_argument("--allow-major", action="store_true")
     service_upgrade_cmd.add_argument("--confirm", action="store_true", help="apply upgrade; without this the command is a dry run")
+    service_upgrade_cmd.add_argument("--yes", action="store_true", help="non-interactive confirmation; emits an audit_id")
     service_upgrade_cmd.add_argument("--no-restart-services", action="store_true")
     service_upgrade_cmd.add_argument("--cleanup-after-upgrade", action="store_true", help="clean old releases after a fully successful confirmed upgrade")
     service_upgrade_cmd.add_argument("--cleanup-keep-releases", type=int, default=2)
@@ -432,6 +452,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     service_rollback_cmd.add_argument("--releases-root", default=None)
     service_rollback_cmd.add_argument("--to-version", default=None)
     service_rollback_cmd.add_argument("--confirm", action="store_true", help="apply rollback; without this the command is a dry run")
+    service_rollback_cmd.add_argument("--yes", action="store_true", help="non-interactive confirmation; emits an audit_id")
     service_rollback_cmd.add_argument("--no-restart-services", action="store_true")
 
     update = sub.add_parser("update", help="check, apply, or roll back released versions")
@@ -451,6 +472,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     update_apply.add_argument("--auto", action="store_true")
     update_apply.add_argument("--allow-major", action="store_true")
     update_apply.add_argument("--confirm", action="store_true", help="apply upgrade; without this the command is a dry run")
+    update_apply.add_argument("--yes", action="store_true", help="non-interactive confirmation; emits an audit_id")
     update_apply.add_argument("--no-restart-services", action="store_true")
     update_apply.add_argument("--cleanup-after-upgrade", action="store_true", help="clean old releases after a fully successful confirmed upgrade")
     update_apply.add_argument("--cleanup-keep-releases", type=int, default=2)
@@ -460,6 +482,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     update_rollback.add_argument("--releases-root", default=None)
     update_rollback.add_argument("--to-version", default=None)
     update_rollback.add_argument("--confirm", action="store_true", help="apply rollback; without this the command is a dry run")
+    update_rollback.add_argument("--yes", action="store_true", help="non-interactive confirmation; emits an audit_id")
     update_rollback.add_argument("--no-restart-services", action="store_true")
 
     multiplier_cache = sub.add_parser("multiplier-cache", help="inspect or seed the shared multiplier cache")
@@ -471,7 +494,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     multiplier_seed.add_argument("--runtime-root", default=None)
     multiplier_seed.add_argument("--config-path", default=None)
     multiplier_seed.add_argument("--cache", default=None)
-    multiplier_seed.add_argument("--confirm", action="store_true")
+    multiplier_seed.add_argument("--apply", action="store_true")
+    multiplier_seed.add_argument("--confirm", action="store_true", help="legacy alias for --apply")
+    multiplier_seed.add_argument("--yes", action="store_true", help="non-interactive alias for --apply; emits an audit_id")
 
     sub.add_parser("symbols", help="manage monitored symbols")
     sub.add_parser("option-positions", help="option position operations")
@@ -517,6 +542,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     trade_intake.add_argument("--config", default="config.us.json")
     trade_intake.add_argument("--data-config", default=None)
     trade_intake.add_argument("--mode", choices=["dry-run", "apply"], default=None)
+    trade_intake.add_argument("--confirm", action="store_true")
+    trade_intake.add_argument("--yes", action="store_true", help="non-interactive confirmation; emits an audit_id")
     trade_intake.add_argument("--state-path", default=None)
     trade_intake.add_argument("--audit-path", default=None)
     trade_intake.add_argument("--status-path", default=None)
@@ -981,7 +1008,7 @@ def main(argv: list[str] | None = None) -> int:
                 us_accounts=args.us_accounts,
                 hk_accounts=args.hk_accounts,
                 output_config_yaml_path=args.output,
-                apply=bool(args.apply),
+                apply=bool(args.apply or args.yes),
                 backup=not bool(args.no_backup),
             ))
 
@@ -1007,7 +1034,7 @@ def main(argv: list[str] | None = None) -> int:
                     value=args.value,
                     json_value=args.json_value,
                     apply=bool(args.apply),
-                    confirm=bool(args.confirm),
+                    confirm=bool(args.confirm or args.yes),
                     backup=not bool(args.no_backup),
                 ),
             ))
@@ -1159,8 +1186,9 @@ def main(argv: list[str] | None = None) -> int:
             data = repair_output_symlink(
                 runtime_root=args.runtime_root,
                 default_account=args.default_account,
-                confirm=bool(args.confirm),
+                confirm=_confirmed(args),
             )
+            data = _service_write_contract(data, confirmed=_confirmed(args), rollback_hint="restore the previous output directory/symlink layout from filesystem backup")
             return _print(build_response(tool_name="service.repair_output", ok=True, data=data))
 
         if args.command == "service" and args.service_command == "status":
@@ -1173,8 +1201,9 @@ def main(argv: list[str] | None = None) -> int:
                 repo_root=args.repo_root or repo_base(),
                 runtime_root=args.runtime_root,
                 profile_path=args.profile_path,
-                confirm=bool(args.confirm),
+                confirm=_confirmed(args),
             )
+            data = _service_write_contract(data, confirmed=_confirmed(args), rollback_hint="remove written units or restore the previous service.profile.json")
             ok = bool(data.get("summary", {}).get("ok", True))
             return _print(build_response(tool_name="service.drift", ok=ok, data=data))
 
@@ -1187,8 +1216,9 @@ def main(argv: list[str] | None = None) -> int:
                 journal_vacuum_size=args.journal_vacuum_size,
                 cleanup_downloads=bool(args.cleanup_downloads),
                 cleanup_pip_cache=bool(args.cleanup_pip_cache),
-                confirm=bool(args.confirm),
+                confirm=_confirmed(args),
             )
+            data = _service_write_contract(data, confirmed=_confirmed(args), rollback_hint="restore deleted release/cache paths from external backup")
             return _print(build_response(tool_name="service.cleanup", ok=bool(data.get("ok")), data=data))
 
         if args.command == "service" and args.service_command == "upgrade-check":
@@ -1208,13 +1238,14 @@ def main(argv: list[str] | None = None) -> int:
                 cache_root=args.cache_root,
                 target_version=args.target_version,
                 remote_name=args.remote_name,
-                confirm=bool(args.confirm),
+                confirm=_confirmed(args),
                 auto=bool(args.auto),
                 allow_major=bool(args.allow_major),
                 restart_services=not bool(args.no_restart_services),
                 cleanup_after_upgrade=bool(args.cleanup_after_upgrade),
                 cleanup_keep_releases=args.cleanup_keep_releases,
             )
+            data = _service_write_contract(data, confirmed=_confirmed(args), rollback_hint="./om update rollback --confirm")
             return _print(build_response(tool_name="service.upgrade", ok=bool(data.get("ok")), data=data))
 
         if args.command == "service" and args.service_command == "rollback":
@@ -1223,9 +1254,10 @@ def main(argv: list[str] | None = None) -> int:
                 runtime_root=args.runtime_root,
                 releases_root=args.releases_root,
                 to_version=args.to_version,
-                confirm=bool(args.confirm),
+                confirm=_confirmed(args),
                 restart_services=not bool(args.no_restart_services),
             )
+            data = _service_write_contract(data, confirmed=_confirmed(args), rollback_hint="./om update apply --confirm")
             return _print(build_response(tool_name="service.rollback", ok=bool(data.get("ok")), data=data))
 
         if args.command == "update" and args.update_command == "check":
@@ -1245,13 +1277,14 @@ def main(argv: list[str] | None = None) -> int:
                 cache_root=args.cache_root,
                 target_version=args.target_version,
                 remote_name=args.remote_name,
-                confirm=bool(args.confirm),
+                confirm=_confirmed(args),
                 auto=bool(args.auto),
                 allow_major=bool(args.allow_major),
                 restart_services=not bool(args.no_restart_services),
                 cleanup_after_upgrade=bool(args.cleanup_after_upgrade),
                 cleanup_keep_releases=args.cleanup_keep_releases,
             )
+            data = _service_write_contract(data, confirmed=_confirmed(args), rollback_hint="./om update rollback --confirm")
             return _print(build_response(tool_name="update.apply", ok=bool(data.get("ok")), data=data))
 
         if args.command == "update" and args.update_command == "rollback":
@@ -1260,9 +1293,10 @@ def main(argv: list[str] | None = None) -> int:
                 runtime_root=args.runtime_root,
                 releases_root=args.releases_root,
                 to_version=args.to_version,
-                confirm=bool(args.confirm),
+                confirm=_confirmed(args),
                 restart_services=not bool(args.no_restart_services),
             )
+            data = _service_write_contract(data, confirmed=_confirmed(args), rollback_hint="./om update apply --confirm")
             return _print(build_response(tool_name="update.rollback", ok=bool(data.get("ok")), data=data))
 
         if args.command == "setup" and args.setup_command == "check":
@@ -1303,7 +1337,7 @@ def main(argv: list[str] | None = None) -> int:
                 runtime_root=args.runtime_root,
                 config_path=args.config_path,
                 cache_path=args.cache,
-                confirm=bool(args.confirm),
+                confirm=bool(args.apply or args.confirm or args.yes),
             )
             return _print(build_response(tool_name="multiplier_cache.seed", ok=bool(data.get("ok")), data=data))
 
@@ -1357,6 +1391,10 @@ def main(argv: list[str] | None = None) -> int:
                 intake_argv.extend(["--data-config", str(args.data_config)])
             if args.mode:
                 intake_argv.extend(["--mode", str(args.mode)])
+            if args.confirm:
+                intake_argv.append("--confirm")
+            if args.yes:
+                intake_argv.append("--yes")
             if args.state_path:
                 intake_argv.extend(["--state-path", str(args.state_path)])
             if args.audit_path:

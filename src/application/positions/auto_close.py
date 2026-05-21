@@ -17,6 +17,7 @@ from src.application.positions.maintenance import (
     run_expired_position_maintenance_for_account,
 )
 from src.application.positions.maintenance_receipt import safe_send_auto_close_receipt
+from src.application.write_contract import attach_write_contract, write_control
 from src.infrastructure.io_utils import utc_now
 from src.infrastructure.run_log import RunLogger
 
@@ -369,6 +370,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--accounts", nargs="+", default=None, help="accounts to process; defaults to runtime config accounts")
     parser.add_argument("--broker", default=None, help="optional broker filter override")
     parser.add_argument("--apply", action="store_true", help="append close events for expired lots")
+    parser.add_argument("--confirm", action="store_true", help="confirm high-risk close-event writes and receipts")
+    parser.add_argument("--yes", action="store_true", help="non-interactive confirmation; emits an audit_id")
     parser.add_argument("--dry-run", action="store_true", help="preview without writing close events")
     parser.add_argument("--as-of-utc", default=None, help="ISO datetime; default is current UTC")
     parser.add_argument("--no-send", action="store_true", help="do not send auto-close receipt notifications")
@@ -376,8 +379,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--quiet", action="store_true", help="suppress stdout")
     args = parser.parse_args(argv)
 
-    if args.apply and args.dry_run:
-        raise SystemExit("--apply and --dry-run cannot be used together")
+    if args.dry_run and any(bool(getattr(args, name, False)) for name in ("apply", "confirm", "yes")):
+        raise SystemExit("--dry-run cannot be combined with --apply, --confirm, or --yes")
+    control = write_control(
+        apply=bool(args.apply),
+        confirm=bool(args.confirm),
+        yes=bool(args.yes),
+        high_risk=True,
+    )
+    if control["confirmation_required"]:
+        raise SystemExit("auto-close-expired writes trade_events and may send receipts; use --confirm or --yes to apply")
 
     base = Path(__file__).resolve().parents[3]
     config_path = Path(args.config) if args.config else None
@@ -387,9 +398,16 @@ def main(argv: list[str] | None = None) -> int:
         data_config=args.data_config,
         accounts=list(args.accounts or []),
         broker=args.broker,
-        apply_mode=bool(args.apply),
+        apply_mode=bool(control["write_requested"]),
         no_send=bool(args.no_send),
         as_of_ms=_parse_as_of_ms(args.as_of_utc),
+    )
+    summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
+    result = attach_write_contract(
+        result,
+        dry_run=not bool(control["write_requested"]),
+        write_applied=bool(control["write_requested"] and int(summary.get("applied_closed") or 0) > 0),
+        rollback_hint="void auto-close close events or restore option_positions SQLite from backup",
     )
     if not args.quiet:
         if args.format == "json":

@@ -30,6 +30,7 @@ from src.application.opend_fetch_config import opend_fetch_kwargs
 from src.application.ledger.api import open_position_ledger_from_runtime_config
 from src.application.runtime_paths import resolve_runtime_root
 from src.application.trades.intake import process_trade_payload
+from src.application.write_contract import attach_write_contract, write_control
 from src.infrastructure.io_utils import atomic_write_json, utc_now
 
 
@@ -38,6 +39,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--config", default="config.us.json")
     ap.add_argument("--data-config", default=None)
     ap.add_argument("--mode", choices=["dry-run", "apply"], default=None)
+    ap.add_argument("--confirm", action="store_true", help="confirm high-risk trade-event writes and receipts")
+    ap.add_argument("--yes", action="store_true", help="non-interactive confirmation; emits an audit_id")
     ap.add_argument("--state-path", default=None)
     ap.add_argument("--audit-path", default=None)
     ap.add_argument("--status-path", default=None)
@@ -172,6 +175,15 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     apply_changes = intake_cfg["mode"] == "apply"
+    control = write_control(
+        apply=apply_changes,
+        confirm=bool(args.confirm),
+        yes=bool(args.yes),
+        high_risk=True,
+    )
+    if apply_changes and control["confirmation_required"]:
+        print("trade-intake apply mode writes trade_events and may send receipts; use --confirm or --yes")
+        return 2
     receipt_callback = _build_receipt_callback(
         base=base,
         cfg=cfg,
@@ -208,6 +220,12 @@ def main(argv: list[str] | None = None) -> int:
                 last_deal_result=_result_summary(result),
                 last_receipt_result=_receipt_summary(result.get("receipt")),
             )
+        result = attach_write_contract(
+            result,
+            dry_run=not apply_changes,
+            write_applied=apply_changes and str(result.get("status") or "") not in {"dry_run", "skipped"},
+            rollback_hint="void created trade events or restore option_positions SQLite from backup",
+        )
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
 

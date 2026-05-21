@@ -188,6 +188,7 @@ def test_multi_tick_notify_does_not_retry_when_message_id_exists() -> None:
     assert audit_events[-1]["status"] == "ok"
     assert audit_events[-1]["extra"]["delivery_confirmed"] is True
     assert audit_events[-1]["extra"]["message_id"] == "lx-1"
+    assert send_calls[0]["idempotency_key"].startswith("om-")
 
 
 def test_multi_tick_notify_unconfirmed_is_not_retried_even_when_explicitly_requested() -> None:
@@ -274,3 +275,64 @@ def test_multi_tick_notify_failed_send_retries_once_by_default() -> None:
     assert sleeps == [1.0]
     assert [e["action"] for e in audit_events] == ["send_start", "send_fail", "send_start", "send_fail"]
     assert [e["status"] for e in audit_events] == ["start", "error", "start", "error"]
+
+
+def test_multi_tick_notify_records_feishu_inner_retry_without_outer_retry() -> None:
+    helper = importlib.import_module("src.application.scheduled_notification")
+
+    audit_events: list[dict] = []
+    send_calls: list[dict] = []
+    runlog = _FakeRunLogger()
+
+    def _send(**kwargs):
+        send_calls.append(dict(kwargs))
+        return SimpleNamespace(returncode=0, stdout='{"message_id":"lx-1"}', stderr="")
+
+    def _normalize(**_kwargs):
+        return {
+            "ok": True,
+            "command_ok": True,
+            "delivery_confirmed": True,
+            "message_id": "lx-1",
+            "idempotency_key": send_calls[-1]["idempotency_key"],
+            "http_attempts": [
+                {"level": "warn", "category": "transient", "http_status": 500, "feishu_code": 2200, "attempt": 1},
+                {"level": "info", "category": "success", "http_status": 200, "feishu_code": 0, "attempt": 2, "message_id": "lx-1"},
+            ],
+            "retry_attempt_count": 1,
+            "ambiguous_send": True,
+            "duplicate_risk": False,
+            "stdout_tail": '{"message_id":"lx-1"}',
+            "stderr_tail": "",
+            "adapter": "notify",
+        }
+
+    def _audit(event_type, action, **kwargs):
+        audit_events.append({"event_type": event_type, "action": action, **kwargs})
+
+    result = helper.send_account_message_with_retry(
+        base=Path("/tmp/options-monitor-test"),
+        channel="feishu_app",
+        target="ou_1",
+        account="lx",
+        message="hello",
+        run_id="run-1",
+        runlog=runlog,
+        audit_fn=_audit,
+        send_fn=_send,
+        normalize_fn=_normalize,
+        safe_data_fn=lambda payload: payload,
+        failure_fields_builder=lambda **kwargs: kwargs,
+        sleep_fn=lambda seconds: None,
+    )
+
+    assert result["ok"] is True
+    assert result["attempts"] == 1
+    assert result["retry_attempt_count"] == 1
+    assert result["ambiguous_send"] is True
+    assert result["duplicate_risk"] is False
+    assert len(send_calls) == 1
+    assert send_calls[0]["idempotency_key"].startswith("om-")
+    assert audit_events[0]["extra"]["idempotency_key"] == send_calls[0]["idempotency_key"]
+    assert audit_events[-1]["extra"]["retry_attempt_count"] == 1
+    assert audit_events[-1]["extra"]["ambiguous_send"] is True

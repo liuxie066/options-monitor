@@ -93,7 +93,7 @@ def test_option_positions_cli_rebuild_reports_summary(monkeypatch, tmp_path: Pat
     )
 
     monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
-    monkeypatch.setattr(sys, "argv", ["om option-positions", "--data-config", str(data_config), "rebuild"])
+    monkeypatch.setattr(sys, "argv", ["om option-positions", "--data-config", str(data_config), "rebuild", "--apply"])
 
     cli_mod.main()
 
@@ -509,6 +509,79 @@ def test_option_positions_cli_add_dry_run_infers_usd_currency_from_us_symbol(mon
     assert fields["premium"] == 1.235
 
 
+def test_option_positions_cli_add_apply_alone_requires_confirm() -> None:
+    import src.interfaces.cli.option_positions as cli_mod
+
+    with pytest.raises(SystemExit, match="use --confirm or --yes"):
+        cli_mod.main([
+            "add",
+            "--account",
+            "lx",
+            "--symbol",
+            "0700.HK",
+            "--option-type",
+            "put",
+            "--side",
+            "short",
+            "--contracts",
+            "1",
+            "--strike",
+            "510",
+            "--multiplier",
+            "100",
+            "--exp",
+            "2026-06-29",
+            "--premium-per-share",
+            "1.235",
+            "--apply",
+        ])
+
+
+def test_option_positions_cli_add_confirm_json_outputs_write_contract(monkeypatch, tmp_path: Path, capsys) -> None:
+    import src.interfaces.cli.option_positions as cli_mod
+
+    data_config = _write_data_config(tmp_path / "data.json", sqlite_path=tmp_path / "legacy" / "option_positions.sqlite3")
+    repo = ledger_repository.SQLiteOptionPositionsRepository(tmp_path / "output_shared" / "state" / "option_positions.sqlite3")
+    repo.data_config_path = data_config  # type: ignore[attr-defined]
+    monkeypatch.setattr(cli_mod, "resolve_option_positions_repo", lambda **_kwargs: (data_config, repo))
+
+    cli_mod.main([
+        "--data-config",
+        str(data_config),
+        "add",
+        "--account",
+        "lx",
+        "--symbol",
+        "0700.HK",
+        "--option-type",
+        "put",
+        "--side",
+        "short",
+        "--contracts",
+        "1",
+        "--strike",
+        "510",
+        "--multiplier",
+        "100",
+        "--exp",
+        "2026-06-29",
+        "--premium-per-share",
+        "1.235",
+        "--confirm",
+        "--format",
+        "json",
+    ])
+
+    out = json.loads(capsys.readouterr().out)
+    assert out["dry_run"] is False
+    assert out["write_applied"] is True
+    assert out["backup_path"] is None
+    assert out["audit_id"].startswith("audit_")
+    assert out["rollback_hint"]
+    assert out["result"]["event_id"]
+    assert repo.count_trade_events() == 1
+
+
 def test_option_positions_cli_list_filters_by_local_expiration(monkeypatch, tmp_path: Path, capsys) -> None:
     import src.interfaces.cli.option_positions as cli_mod
     from domain.domain.option_position_lots import OpenPositionCommand
@@ -732,8 +805,16 @@ def test_option_positions_cli_void_event_reports_result(monkeypatch, tmp_path: P
     monkeypatch.setattr(
         sys,
         "argv",
-        ["om option-positions", "--data-config", str(data_config), "void-event", "--event-id", str(open_result["event_id"])],
-    )
+            [
+                "om option-positions",
+                "--data-config",
+                str(data_config),
+                "void-event",
+                "--event-id",
+                str(open_result["event_id"]),
+                "--confirm",
+            ],
+        )
 
     cli_mod.main()
 

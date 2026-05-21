@@ -457,6 +457,7 @@ def render_service_bundle(
                 "--accounts",
                 *account_values,
                 "--apply",
+                "--yes",
                 "--quiet",
             ]
             add(
@@ -534,6 +535,7 @@ def render_service_bundle(
             str(config_by_market[trade_market]),
             "--mode",
             "apply",
+            "--yes",
         ]
         add(
             f"systemd/{trade_service}",
@@ -708,6 +710,7 @@ def render_service_bundle(
                 "--accounts",
                 *account_values,
                 "--apply",
+                "--yes",
                 "--quiet",
             ]
             add(
@@ -762,6 +765,7 @@ def render_service_bundle(
             str(config_by_market[trade_market]),
             "--mode",
             "apply",
+            "--yes",
         ]
         add(
             f"launchd/{trade_label}.plist",

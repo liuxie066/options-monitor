@@ -3,14 +3,14 @@
 
 Usage examples:
   python3 -m src.application.option_intake --text "期权：腾讯20260330 put，strike500，成本5.425每股，乘数100，short 10张，sy，HKD" --dry-run
-  python3 -m src.application.option_intake --text "期权：腾讯20260330 put，strike500，成本5.425每股，乘数100，short 10张，sy，HKD" --apply
+  python3 -m src.application.option_intake --text "期权：腾讯20260330 put，strike500，成本5.425每股，乘数100，short 10张，sy，HKD" --confirm
   python3 -m src.application.option_intake --text "/om open lx -r -- 【成交提醒】成功卖出2张$腾讯 260429 480.00 沽$，成交价格：3.93..."
   python3 -m src.application.option_intake --text "/om close sy -id recxxx -a -- 【成交提醒】成功买入1张$腾讯 260429 480.00 沽$，成交价格：1.20..."
 
 Design:
 - Parses message with src.application.parse_option_message.parse_option_message_text
 - Writes through shared position workflow application helpers
-- Default dry-run (safe). Use --apply to persist.
+- Default dry-run (safe). Use --confirm or --yes to persist trade events.
 """
 
 from __future__ import annotations
@@ -47,6 +47,7 @@ from src.application.positions.workflows import (
 )
 from src.application.trade_time_format import format_trade_time_beijing
 from src.application.trades.intent import trade_intent_from_manual_parse
+from src.application.write_contract import write_control
 
 
 @dataclass(frozen=True)
@@ -57,6 +58,7 @@ class IntakeCommand:
     record_id: str | None = None
     dry_run: bool | None = None
     apply: bool | None = None
+    confirm: bool | None = None
 
 
 def _account_from_token(token: str) -> str | None:
@@ -110,9 +112,9 @@ def parse_om_command(text: str) -> IntakeCommand:
     - /om open lx -r -- <message>
     - /om close sy -id recxxx -a -- <message>
     - /om btc sy recxxx -r -- <message>
-    - /om open @account --apply -- <message>
+    - /om open @account --confirm -- <message>
     - /om -r -lx open <message>
-    - /om --apply --account lx close --record-id recxxx <message>
+    - /om --confirm --account lx close --record-id recxxx <message>
     - /om -r -sy c -id recxxx <message>
 
     Use "--" before the broker message when possible. Without it, the first
@@ -134,6 +136,7 @@ def parse_om_command(text: str) -> IntakeCommand:
     record_id: str | None = None
     dry_run: bool | None = None
     apply_flag: bool | None = None
+    confirm_flag: bool | None = None
     body_start = len(tokens)
     i = 1
     while i < len(tokens):
@@ -151,8 +154,13 @@ def parse_om_command(text: str) -> IntakeCommand:
             apply_flag = False
             i += 1
             continue
-        if low in ("--apply", "-a", "apply", "确认", "写入"):
+        if low in ("--apply", "-a", "apply", "写入"):
             apply_flag = True
+            dry_run = False
+            i += 1
+            continue
+        if low in ("--confirm", "--yes", "confirm", "yes", "确认"):
+            confirm_flag = True
             dry_run = False
             i += 1
             continue
@@ -201,6 +209,7 @@ def parse_om_command(text: str) -> IntakeCommand:
         record_id=record_id,
         dry_run=dry_run,
         apply=apply_flag,
+        confirm=confirm_flag,
     )
 
 
@@ -303,8 +312,10 @@ def main() -> int:
     ap.add_argument('--account', default=None, help='override parsed account, e.g. lx/sy')
     ap.add_argument('--record-id', default=None, help='optional for close/buy-close; omitted close uses strict unique auto matching')
     ap.add_argument('--close-reason', default='manual_buy_to_close')
-    ap.add_argument('--dry-run', action='store_true', help='default behavior if neither --dry-run nor --apply specified')
-    ap.add_argument('--apply', action='store_true')
+    ap.add_argument('--dry-run', action='store_true', help='default behavior if no write flag is specified')
+    ap.add_argument('--apply', action='store_true', help='request a write; trade-event writes also require --confirm or --yes')
+    ap.add_argument('--confirm', action='store_true', help='confirm high-risk trade-event writes')
+    ap.add_argument('--yes', action='store_true', help='non-interactive confirmation; emits an audit_id')
     args = ap.parse_args()
 
     base = repo_base
@@ -315,14 +326,30 @@ def main() -> int:
     record_id = args.record_id or command.record_id
     text = command.text or args.text
 
-    # default safe mode; command flags can set dry-run/apply when CLI flags are absent.
-    if not args.dry_run and not args.apply:
-        if command.apply is True:
+    # default safe mode; command flags can set dry-run/write intent when CLI flags are absent.
+    if not any((args.dry_run, args.apply, args.confirm, args.yes)):
+        if command.confirm is True:
+            args.confirm = True
+        elif command.apply is True:
             args.apply = True
         elif command.dry_run is True:
             args.dry_run = True
         else:
             args.dry_run = True
+
+    if args.dry_run and any((args.apply, args.confirm, args.yes)):
+        print("--dry-run cannot be combined with --apply, --confirm, or --yes")
+        return 2
+    control = write_control(
+        apply=bool(args.apply),
+        confirm=bool(args.confirm),
+        yes=bool(args.yes),
+        high_risk=True,
+    )
+    if control["confirmation_required"]:
+        print("option_intake writes trade_events; use --confirm or --yes to apply")
+        return 2
+    write_requested = bool(control["write_requested"])
 
     runtime_config: dict[str, Any] | None = None
     cfg_path: Path | None = None
@@ -363,20 +390,20 @@ def main() -> int:
         data_config=args.data_config,
         config_path=cfg_path,
     )
-    if args.dry_run or args.apply or action == "close":
+    if args.dry_run or write_requested or action == "close":
         _print_ledger_target(
             data_config=data_config_path,
             repo=None,
             config_path=cfg_path,
             runtime_root=args.runtime_root,
         )
-        if args.apply:
+        if write_requested:
             guard = ledger_store_write_guard(data_config_path, config_path=cfg_path, runtime_root=args.runtime_root)
             if not bool(guard.get("ok")):
                 _print_ledger_guard_failure(guard)
                 return 2
 
-    need_repo = action == 'close' or bool(args.apply)
+    need_repo = action == 'close' or write_requested
     repo = None
     if need_repo:
         if runtime_config is not None:
@@ -410,7 +437,7 @@ def main() -> int:
                 contracts_to_close=int(intent.contracts or 0),
                 close_price=intent.price,
                 close_reason=args.close_reason,
-                dry_run=bool(args.dry_run and not args.apply),
+                dry_run=not write_requested,
                 broker=intent.broker,
                 account=intent.account,
                 symbol=intent.symbol,
@@ -430,7 +457,7 @@ def main() -> int:
         match: dict[str, Any] = raw_match if isinstance(raw_match, dict) else {}
         if match.get("rule") == "strict_contract_unique":
             print(f"[MATCH] rule={match.get('rule')} record_id={match.get('record_id')}")
-        if args.dry_run and (not args.apply):
+        if not write_requested:
             print('[DRY_RUN] update fields:')
             print(json.dumps(_copy_with_beijing_time_fields(out['patch'], keys=("closed_at", "last_action_at")), ensure_ascii=False, indent=2))
             return 0
@@ -463,12 +490,12 @@ def main() -> int:
                 underlying_share_locked=None,
                 note=f"user_input: {parsed.get('raw')}",
                 opened_at_ms=intent.trade_time_ms,
-                dry_run=bool(args.dry_run and not args.apply),
+                dry_run=not write_requested,
             )
         except ValueError as exc:
             print(str(exc))
             return 2
-        if args.dry_run and (not args.apply):
+        if not write_requested:
             print('[DRY_RUN] create fields:')
             print(json.dumps(_copy_with_beijing_time_fields(out['fields'], keys=("opened_at", "last_action_at")), ensure_ascii=False, indent=2))
             return 0

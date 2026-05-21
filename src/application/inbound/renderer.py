@@ -6,7 +6,7 @@ from src.application.inbound.contracts import InboundIntent
 
 
 HELP_TEXT = (
-    "可用只读命令：状态、健康检查、持仓 sy、收益 sy、收益 sy 2026-05、最近运行、日志 <run_id>、查看监控标的、待确认。\n"
+    "可用只读命令：状态、健康检查、持仓、持仓 sy、收益、收益 sy、收益 sy 2026-05、最近运行、日志 <run_id>、查看监控标的、待确认。\n"
     "管理员写操作：记录开仓/记录平仓、增加/修改/删除监控标的。写操作会先返回预览；同一对话只有一条待确认时，可回复：确认记录 或 确认监控。"
 )
 
@@ -97,17 +97,18 @@ def _render_monthly_income(data: dict[str, Any]) -> str:
         if not calculable_rows:
             return _render_monthly_income_diagnostics(data)
         lines = ["收益统计完成（基于 OM 本地账本）："]
-        for row in calculable_rows[:4]:
+        for row in calculable_rows:
             if not isinstance(row, dict):
                 continue
             lines.extend(
                 [
                     f"{row.get('account') or '-'} {row.get('month') or '-'} 收益摘要",
                     f"净收益率：{_pct(row.get('net_return_rate'))}",
-                    f"净收入：{_cny(row.get('net_income_cny'))}",
-                    f"现金担保：{_cny(row.get('cash_secured_cny'))}",
+                    f"净流入：{_cny_with_original(row.get('net_income_cny'), _dict(row.get('net_income_by_ccy')))}",
                     f"按 {row.get('annualized_basis_days') or 0} 天折年化：{_pct(row.get('annualized_net_return_rate'))}",
                     f"权利金毛收益率：{_pct(row.get('premium_return_rate'))}",
+                    f"权利金收入：{_cny_with_original(row.get('premium_income_cny'), _dict(row.get('premium_income_by_ccy')))}",
+                    f"已实现平仓PnL：{_cny_with_original(row.get('realized_pnl_cny'), _dict(row.get('realized_pnl_by_ccy')))}",
                 ]
             )
         return "\n".join(lines)
@@ -116,7 +117,7 @@ def _render_monthly_income(data: dict[str, Any]) -> str:
     if not isinstance(rows, list) or not rows:
         return _render_monthly_income_diagnostics(data)
     lines = ["收益统计完成（基于 OM 本地账本）："]
-    for row in rows[:6]:
+    for row in rows:
         if not isinstance(row, dict):
             continue
         lines.append(
@@ -250,12 +251,13 @@ def _ccy_pair_text(currencies: list[str]) -> str:
 
 def _original_currency_summary_lines(return_row: dict[str, Any]) -> list[str]:
     lines: list[str] = []
+    net = _dict(return_row.get("net_income_by_ccy"))
     premium = _dict(return_row.get("premium_income_by_ccy"))
-    cash = _dict(return_row.get("cash_secured_by_ccy"))
+    if net:
+        lines.append("净流入：" + _format_ccy_amounts(net))
     if premium:
         lines.append("权利金收入：" + _format_ccy_amounts(premium))
-    if cash:
-        lines.append("现金担保：" + _format_ccy_amounts(cash))
+    cash = _dict(return_row.get("cash_secured_by_ccy"))
     premium_rates = _dict(return_row.get("premium_return_rate_by_ccy"))
     if not premium_rates and premium and cash:
         premium_rates = _rate_by_ccy_for_render(premium, cash)
@@ -295,6 +297,14 @@ def _format_ccy_rates(values: dict[str, Any]) -> str:
     return "，".join(parts) if parts else "-"
 
 
+def _cny_with_original(cny_value: Any, by_ccy: dict[str, Any]) -> str:
+    cny_text = _cny(cny_value)
+    original = _format_ccy_amounts(by_ccy)
+    if original == "-":
+        return cny_text
+    return f"{cny_text}（{original}）"
+
+
 def _pct(value: Any) -> str:
     if value is None:
         return "-"
@@ -321,12 +331,13 @@ def _render_positions(data: dict[str, Any]) -> str:
         return "持仓查询完成。"
     filters = _dict(data.get("filters"))
     account = _value(filters.get("account"))
+    account_label = "全部账户" if account == "-" else account
     status = _value(filters.get("status") or "open")
     if not rows:
-        return f"{account} 当前没有 {status} 期权持仓。\n数据源：OM 本地 SQLite position_lots"
+        return f"{account_label} 当前没有 {status} 期权持仓。\n数据源：OM 本地 SQLite position_lots"
 
-    lines = [f"{account} 当前 {status} 期权持仓：{len(rows)} 条"]
-    for row_raw in rows[:10]:
+    lines = [f"{account_label} 当前 {status} 期权持仓：{len(rows)} 条"]
+    for row_raw in rows:
         row = _dict(row_raw)
         lines.append(
             "- "
@@ -336,8 +347,6 @@ def _render_positions(data: dict[str, Any]) -> str:
             f"exp {(_value(row.get('expiration_ymd') or row.get('expiration')))} "
             f"open {_num(row.get('contracts_open') if row.get('contracts_open') is not None else row.get('contracts'))}"
         )
-    if len(rows) > 10:
-        lines.append(f"... 还有 {len(rows) - 10} 条未展示。")
     bootstrap = _dict(data.get("bootstrap"))
     bootstrap_status = str(bootstrap.get("status") or "").strip()
     if bootstrap_status.startswith("degraded"):

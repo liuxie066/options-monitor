@@ -430,7 +430,7 @@ def migrate_legacy_sqlite_to_repo(
     if not bool(inspection.get("ok")):
         return payload
     if not apply:
-        payload["message"] = "dry run; pass --apply to migrate legacy SQLite into active trade_events"
+        payload["message"] = "dry run; pass --confirm or --yes to migrate legacy SQLite into active trade_events"
         return payload
 
     path = Path(str(inspection["legacy_sqlite_path"])).expanduser().resolve()

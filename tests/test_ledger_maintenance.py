@@ -572,7 +572,7 @@ def test_position_maintenance_requires_explicit_legacy_migration_before_closing_
     assert result["applied_closed"] == 0
     assert len(result["errors"]) == 1
     assert "explicit legacy migration required before auto-close" in result["errors"][0]
-    assert "migrate-legacy --apply" in result["errors"][0]
+    assert "migrate-legacy --confirm" in result["errors"][0]
     lots = ledger_repository.SQLiteOptionPositionsRepository(db_path).list_position_lots()
     assert len(lots) == 1
     assert lots[0]["fields"]["status"] == "open"

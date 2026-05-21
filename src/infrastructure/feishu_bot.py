@@ -89,6 +89,8 @@ def send_text_message(
     app_secret: str,
     open_id: str,
     text: str,
+    uuid: str | None = None,
+    log_fn: Callable[[dict[str, Any]], Any] | None = None,
     http_json_fn: HttpJsonFn = http_json,
 ) -> dict[str, Any]:
     open_id_value = str(open_id or "").strip()
@@ -105,6 +107,8 @@ def send_text_message(
         "msg_type": "text",
         "content": json.dumps({"text": text_value}, ensure_ascii=False),
     }
+    if uuid:
+        payload["uuid"] = str(uuid)
 
     def _send(tenant_token: str) -> dict[str, Any]:
         return http_json_fn(
@@ -115,6 +119,9 @@ def send_text_message(
                 "Authorization": f"Bearer {tenant_token}",
                 "Content-Type": "application/json; charset=utf-8",
             },
+            retry_max_attempts=(3 if uuid else 1),
+            log_fn=log_fn,
+            log_success_attempts=bool(log_fn),
         )
 
     return with_tenant_token_retry(app_id, app_secret, _send)

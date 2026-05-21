@@ -10,6 +10,7 @@ from src.application.symbol_mutations import (
     require_calibrated_symbol,
     set_path as _shared_set_path,
 )
+from src.application.write_contract import attach_write_contract
 
 
 def list_symbol_rows(cfg: dict[str, Any], *, resolve_watchlist_config, normalize_accounts) -> list[dict[str, Any]]:
@@ -166,7 +167,7 @@ def manage_symbols_tool(
     config_path, cfg = load_runtime_config(config_key=payload.get("config_key"), config_path=payload.get("config_path"))
     action = str(payload.get("action") or "list").strip().lower()
     dry_run = bool(payload.get("dry_run", False))
-    confirm = bool(payload.get("confirm", False))
+    confirm = bool(payload.get("confirm", False) or payload.get("yes", False))
     if action != "list" and not dry_run:
         if not write_tools_enabled():
             raise AgentToolError(code="PERMISSION_DENIED", message="write tools are disabled", hint="Set OM_AGENT_ENABLE_WRITE_TOOLS=true to enable config writes.")
@@ -175,7 +176,14 @@ def manage_symbols_tool(
     mutated = apply_symbol_mutation_fn(deepcopy_fn(cfg), payload)
     validate_runtime_config(mutated)
     rows = list_symbol_rows_fn(mutated)
-    result = {"action": action, "dry_run": dry_run, "symbols": rows, "symbol_count": len(rows)}
-    if action != "list" and not dry_run:
+    write_applied = action != "list" and not dry_run
+    result = {"action": action, "symbols": rows, "symbol_count": len(rows)}
+    if write_applied:
         write_json_atomic(config_path, mutated)
-    return result, [], {"config_path": mask_path(config_path), "write_applied": (action != "list" and not dry_run)}
+    result = attach_write_contract(
+        result,
+        dry_run=(action != "list" and not write_applied),
+        write_applied=write_applied,
+        rollback_hint=f"restore config from backup or revert symbol mutation in {config_path}" if write_applied else None,
+    )
+    return result, [], {"config_path": mask_path(config_path), "write_applied": write_applied}

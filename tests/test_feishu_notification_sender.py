@@ -23,6 +23,31 @@ def test_normalize_feishu_app_send_output_marks_success_with_message_id() -> Non
     assert out["returncode"] == 0
 
 
+def test_normalize_feishu_app_send_output_exposes_idempotency_and_retry_diagnostics() -> None:
+    from src.application.notification_delivery_adapter import normalize_feishu_app_send_output
+
+    out = normalize_feishu_app_send_output(
+        send_result={
+            "http_status": 200,
+            "request_path": "/open-apis/im/v1/messages?receive_id_type=open_id",
+            "response_json": {"code": 0, "msg": "success", "data": {"message_id": "om_123"}},
+            "response_tail": '{"code":0}',
+            "idempotency_key": "idem-1",
+            "http_attempts": [
+                {"level": "warn", "category": "transient", "http_status": 500, "feishu_code": 2200, "attempt": 1},
+                {"level": "info", "category": "success", "http_status": 200, "feishu_code": 0, "attempt": 2, "message_id": "om_123"},
+            ],
+        }
+    )
+
+    assert out["ok"] is True
+    assert out["idempotency_key"] == "idem-1"
+    assert out["retry_attempt_count"] == 1
+    assert out["ambiguous_send"] is True
+    assert out["duplicate_risk"] is False
+    assert len(out["http_attempts"]) == 2
+
+
 def test_normalize_feishu_app_send_output_marks_unconfirmed_when_message_id_missing() -> None:
     from src.application.notification_delivery_adapter import normalize_feishu_app_send_output
 
@@ -94,7 +119,7 @@ def test_send_feishu_app_message_uses_bot_user_open_id_when_target_empty(monkeyp
     captured: dict[str, str] = {}
 
     def _send_text_message(**kwargs):  # type: ignore[no-untyped-def]
-        captured.update({key: str(value) for key, value in kwargs.items() if key in {"app_id", "app_secret", "open_id", "text"}})
+        captured.update({key: str(value) for key, value in kwargs.items() if key in {"app_id", "app_secret", "open_id", "text", "uuid"}})
         return {"code": 0, "msg": "success", "data": {"message_id": "om_1"}}
 
     monkeypatch.setattr(service, "send_text_message", _send_text_message)
@@ -105,6 +130,7 @@ def test_send_feishu_app_message_uses_bot_user_open_id_when_target_empty(monkeyp
         target="",
         message="hello",
         notifications={},
+        idempotency_key="idem-1",
     )
 
     assert out["ok"] is True
@@ -112,6 +138,7 @@ def test_send_feishu_app_message_uses_bot_user_open_id_when_target_empty(monkeyp
     assert captured["app_secret"] == "sec_1"
     assert captured["open_id"] == "ou_1"
     assert captured["text"] == "hello"
+    assert captured["uuid"] == "idem-1"
 
 
 def test_send_feishu_app_message_ignores_config_target_for_bot_channel(monkeypatch, tmp_path: Path) -> None:

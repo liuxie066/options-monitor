@@ -329,10 +329,13 @@ def test_build_notify_summary_records_run_level_delivery_counts() -> None:
 
     summary = build_notify_summary(
         sent_accounts=["lx"],
-        notify_failures=[{"account": "sy", "error_code": "SEND_TIMEOUT"}],
+        notify_failures=[{"account": "sy", "error_code": "SEND_TIMEOUT", "ambiguous_send": True, "duplicate_risk": True}],
         total_accounts=2,
         send_attempted_count=2,
         send_confirmed_count=1,
+        retry_attempt_count=1,
+        ambiguous_send_count=1,
+        duplicate_risk_count=1,
     )
     tick_metrics: dict[str, object] = {}
 
@@ -340,16 +343,22 @@ def test_build_notify_summary_records_run_level_delivery_counts() -> None:
         tick_metrics=tick_metrics,
         no_send=False,
         sent_accounts=["lx"],
-        notify_failures=[{"account": "sy", "error_code": "SEND_TIMEOUT"}],
+        notify_failures=[{"account": "sy", "error_code": "SEND_TIMEOUT", "ambiguous_send": True, "duplicate_risk": True}],
         notify_summary=summary,
     )
 
     assert summary["account_messages_count"] == 2
     assert summary["send_attempted_count"] == 2
     assert summary["send_confirmed_count"] == 1
+    assert summary["retry_attempt_count"] == 1
+    assert summary["ambiguous_send_count"] == 1
+    assert summary["duplicate_risk_count"] == 1
     assert tick_metrics["account_messages_count"] == 2
     assert tick_metrics["send_attempted_count"] == 2
     assert tick_metrics["send_confirmed_count"] == 1
+    assert tick_metrics["retry_attempt_count"] == 1
+    assert tick_metrics["ambiguous_send_count"] == 1
+    assert tick_metrics["duplicate_risk_count"] == 1
     assert tick_metrics["reason"] == "sent_partial_notify_failure"
 
 

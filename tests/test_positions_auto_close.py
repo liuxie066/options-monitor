@@ -147,6 +147,7 @@ def test_option_positions_cli_dispatches_auto_close_expired(monkeypatch) -> None
         "lx",
         "sy",
         "--apply",
+        "--yes",
         "--no-send",
         "--quiet",
     ])
@@ -159,6 +160,7 @@ def test_option_positions_cli_dispatches_auto_close_expired(monkeypatch) -> None
         "lx",
         "sy",
         "--apply",
+        "--yes",
         "--no-send",
         "--format",
         "json",

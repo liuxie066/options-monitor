@@ -189,7 +189,9 @@ def send_openclaw_message_process(
     target: str,
     message: str,
     notifications: dict[str, Any] | None = None,
+    idempotency_key: str | None = None,
 ) -> subprocess.CompletedProcess[Any]:
+    del idempotency_key
     return send_openclaw_message(
         base=base,
         channel=channel,

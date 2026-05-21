@@ -21,6 +21,7 @@ from src.application.trades.review import (
     show_trade_event_review,
 )
 from src.application.trade_time_format import format_trade_time_beijing
+from src.application.write_contract import attach_write_contract, write_control
 
 
 def _print_json(payload: Any) -> None:
@@ -87,6 +88,33 @@ def _guard_write(
     return None
 
 
+def _add_write_flags(parser: argparse.ArgumentParser, *, high_risk: bool) -> None:
+    parser.add_argument("--apply", action="store_true", help="allow local state writes")
+    if high_risk:
+        parser.add_argument("--confirm", action="store_true", help="confirm high-risk trade-event writes")
+        parser.add_argument("--yes", action="store_true", help="non-interactive confirmation; emits an audit_id")
+    else:
+        parser.add_argument("--confirm", action="store_true", help="alias for --apply on local state writes")
+        parser.add_argument("--yes", action="store_true", help="non-interactive alias for --apply; emits an audit_id")
+    parser.add_argument("--dry-run", action="store_true", help="preview without writing; this is the default")
+
+
+def _resolve_write_control(args: argparse.Namespace, *, command_name: str, high_risk: bool) -> dict[str, bool]:
+    has_dry_run = bool(getattr(args, "dry_run", False))
+    has_write_flag = any(bool(getattr(args, name, False)) for name in ("apply", "confirm", "yes"))
+    if has_dry_run and has_write_flag:
+        raise SystemExit("--dry-run cannot be combined with --apply, --confirm, or --yes")
+    control = write_control(
+        apply=bool(getattr(args, "apply", False)),
+        confirm=bool(getattr(args, "confirm", False)),
+        yes=bool(getattr(args, "yes", False)),
+        high_risk=high_risk,
+    )
+    if control["confirmation_required"]:
+        raise SystemExit(f"{command_name} writes trade_events; use --confirm or --yes to apply")
+    return control
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Review, repair, replay, and void trade events")
     parser.add_argument("--data-config", default=None, help="portfolio data config path; auto-resolves when omitted")
@@ -106,17 +134,15 @@ def main(argv: list[str] | None = None) -> int:
 
     p_replay = sub.add_parser("replay", help="replay trade_events into position_lots projection")
     p_replay.add_argument("--runtime-root", default=None, help="runtime root for active ledger store")
-    p_replay.add_argument("--apply", action="store_true", help="persist the replayed position_lots projection")
-    p_replay.add_argument("--dry-run", action="store_true", help="preview replay result without writing")
     p_replay.add_argument("--format", choices=["text", "json"], default="text")
+    _add_write_flags(p_replay, high_risk=False)
 
     p_void = sub.add_parser("void", help="append a void event for an existing trade event")
     p_void.add_argument("--runtime-root", default=None, help="runtime root for active ledger store")
     p_void.add_argument("event_id")
     p_void.add_argument("--reason", default="manual_void")
-    p_void.add_argument("--apply", action="store_true")
-    p_void.add_argument("--dry-run", action="store_true")
     p_void.add_argument("--format", choices=["text", "json"], default="text")
+    _add_write_flags(p_void, high_risk=True)
 
     p_repair = sub.add_parser("repair", help="void an event and append a corrected replacement event")
     p_repair.add_argument("--runtime-root", default=None, help="runtime root for active ledger store")
@@ -138,16 +164,18 @@ def main(argv: list[str] | None = None) -> int:
     p_repair.add_argument("--order-id", default=None)
     p_repair.add_argument("--record-id", default=None, help="explicit close target record_id for repaired close events")
     p_repair.add_argument("--close-target-source-event-id", default=None)
-    p_repair.add_argument("--apply", action="store_true")
-    p_repair.add_argument("--dry-run", action="store_true")
     p_repair.add_argument("--format", choices=["text", "json"], default="text")
+    _add_write_flags(p_repair, high_risk=True)
 
     args = parser.parse_args(argv)
-    if args.cmd in {"replay", "void", "repair"} and bool(getattr(args, "apply", False)) and bool(getattr(args, "dry_run", False)):
-        raise SystemExit("--apply and --dry-run are mutually exclusive")
+    write_controls: dict[str, dict[str, bool]] = {}
+    if args.cmd == "replay":
+        write_controls[args.cmd] = _resolve_write_control(args, command_name="trade-events replay", high_risk=False)
+    elif args.cmd in {"void", "repair"}:
+        write_controls[args.cmd] = _resolve_write_control(args, command_name=f"trade-events {args.cmd}", high_risk=True)
     base = Path(__file__).resolve().parents[3]
     data_config_path = resolve_position_data_config_path(base=base, data_config=args.data_config)
-    if args.cmd in {"replay", "void", "repair"} and bool(getattr(args, "apply", False)):
+    if bool(write_controls.get(args.cmd, {}).get("write_requested", False)):
         guard = _guard_write(
             data_config=data_config_path,
             args=args,
@@ -203,53 +231,74 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.cmd == "replay":
-        payload = replay_trade_events(repo, apply=bool(args.apply))
+        should_apply = bool(write_controls["replay"]["write_requested"])
+        payload = replay_trade_events(repo, apply=should_apply)
         payload["ledger_store"] = ledger_store
+        payload = attach_write_contract(
+            payload,
+            dry_run=not should_apply,
+            write_applied=should_apply,
+            rollback_hint="rerun trade-events replay from canonical trade_events",
+        )
         if args.format == "json":
             _print_json(payload)
             return 0
         print(
-            f"[{'DONE' if args.apply else 'DRY_RUN'}] replay trade_events={payload.get('trade_event_count')} "
+            f"[{'DONE' if should_apply else 'DRY_RUN'}] replay trade_events={payload.get('trade_event_count')} "
             f"position_lots={payload.get('position_lot_count')} diagnostics={payload.get('projection_diagnostic_count')}"
         )
         return 0
 
     if args.cmd == "void":
+        should_apply = bool(write_controls["void"]["write_requested"])
         try:
             payload = (
                 apply_void_trade_event(repo, event_id=args.event_id, reason=args.reason)
-                if args.apply
+                if should_apply
                 else preview_void_trade_event(repo, event_id=args.event_id, reason=args.reason)
             )
         except ValueError as exc:
             print(str(exc))
             return 2
         payload["ledger_store"] = ledger_store
+        payload = attach_write_contract(
+            payload,
+            dry_run=not should_apply,
+            write_applied=should_apply,
+            rollback_hint="void appends an immutable correction; restore from backup if this was accidental",
+        )
         if args.format == "json":
             _print_json(payload)
             return 0
-        if args.apply:
+        if should_apply:
             print(f"[DONE] voided event_id={args.event_id} via={payload.get('event_id')}")
         else:
             print(f"[DRY_RUN] would void event_id={args.event_id} reason={args.reason}")
         return 0
 
     if args.cmd == "repair":
+        should_apply = bool(write_controls["repair"]["write_requested"])
         overrides = _repair_overrides(args)
         try:
             payload = (
                 apply_repair_trade_event(repo, event_id=args.event_id, overrides=overrides, reason=args.reason)
-                if args.apply
+                if should_apply
                 else preview_repair_trade_event(repo, event_id=args.event_id, overrides=overrides, reason=args.reason)
             )
         except ValueError as exc:
             print(str(exc))
             return 2
         payload["ledger_store"] = ledger_store
+        payload = attach_write_contract(
+            payload,
+            dry_run=not should_apply,
+            write_applied=should_apply,
+            rollback_hint="void repair events or restore option_positions SQLite from backup",
+        )
         if args.format == "json":
             _print_json(payload)
             return 0
-        if args.apply:
+        if should_apply:
             print(
                 f"[DONE] repaired event_id={args.event_id} "
                 f"void={payload.get('void_event_id')} repair={payload.get('repair_event_id')} "

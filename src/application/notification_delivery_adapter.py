@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -26,6 +27,24 @@ class NotificationDeliveryAdapter:
     failure_stage: str
 
 
+def build_notification_idempotency_key(
+    *,
+    run_id: str,
+    account: str,
+    target: str,
+    message: str,
+) -> str:
+    raw = "\n".join(
+        [
+            str(run_id or "").strip(),
+            str(account or "").strip().lower(),
+            str(target or "").strip(),
+            hashlib.sha256(str(message or "").encode("utf-8")).hexdigest(),
+        ]
+    )
+    return "om-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+
+
 def resolve_feishu_bot_send_target(
     *,
     notifications: dict[str, Any] | None = None,
@@ -41,6 +60,7 @@ def send_feishu_app_message(
     message: str,
     notifications: dict[str, Any] | None = None,
     receive_id_type: str = "open_id",
+    idempotency_key: str | None = None,
 ) -> dict[str, Any]:
     del base, target
     resolved_channel = str(channel or "").strip().lower()
@@ -59,12 +79,15 @@ def send_feishu_app_message(
         raise ValueError(f"unsupported receive_id_type for phase1: {receive_id_type}")
 
     request_path = f"/open-apis/im/v1/messages?receive_id_type={receive_id_type}"
+    http_attempts: list[dict[str, Any]] = []
     try:
         response_json = send_text_message(
             app_id=bot_cfg.app_id,
             app_secret=bot_cfg.app_secret,
             open_id=receive_id,
             text=str(message or ""),
+            uuid=idempotency_key,
+            log_fn=http_attempts.append,
         )
         return {
             "ok": True,
@@ -72,6 +95,8 @@ def send_feishu_app_message(
             "request_path": request_path,
             "response_json": response_json,
             "response_tail": json.dumps(response_json, ensure_ascii=False)[-500:],
+            "idempotency_key": idempotency_key,
+            "http_attempts": http_attempts,
         }
     except FeishuError as exc:
         response = exc.response if isinstance(exc.response, dict) else {}
@@ -92,6 +117,8 @@ def send_feishu_app_message(
             "response_tail": body_text[-500:],
             "error_type": type(exc).__name__,
             "error_message": str(exc),
+            "idempotency_key": idempotency_key,
+            "http_attempts": http_attempts,
         }
 
 
@@ -107,6 +134,11 @@ def normalize_feishu_app_send_output(*, send_result: dict[str, Any]) -> dict[str
     feishu_msg = str(response_json.get("msg") or result.get("error_message") or "").strip()
     request_path = str(result.get("request_path") or "/open-apis/im/v1/messages?receive_id_type=open_id")
     response_tail = str(result.get("response_tail") or "")
+    idempotency_key = str(result.get("idempotency_key") or "").strip() or None
+    http_attempts = result.get("http_attempts") if isinstance(result.get("http_attempts"), list) else []
+    retry_attempt_count = max(0, len(http_attempts) - 1)
+    ambiguous_send = any(str(item.get("category") or "") == "transient" for item in http_attempts if isinstance(item, dict))
+    duplicate_risk = bool(ambiguous_send and not idempotency_key)
 
     command_ok = http_status == 200
     delivery_confirmed = bool(command_ok and feishu_code == 0 and message_id)
@@ -145,6 +177,11 @@ def normalize_feishu_app_send_output(*, send_result: dict[str, Any]) -> dict[str
             "feishu_msg": feishu_msg,
             "request_path": request_path,
             "response_tail": response_tail,
+            "idempotency_key": idempotency_key,
+            "http_attempts": http_attempts,
+            "retry_attempt_count": retry_attempt_count,
+            "ambiguous_send": ambiguous_send,
+            "duplicate_risk": duplicate_risk,
         },
     )
 
@@ -156,6 +193,7 @@ def send_feishu_app_message_process(
     target: str,
     message: str,
     notifications: dict[str, Any] | None = None,
+    idempotency_key: str | None = None,
 ) -> Any:
     send_result = send_feishu_app_message(
         base=base,
@@ -163,6 +201,7 @@ def send_feishu_app_message_process(
         target=target,
         message=message,
         notifications=notifications,
+        idempotency_key=idempotency_key,
     )
     normalized = normalize_feishu_app_send_output(send_result=send_result)
     stdout = ""
@@ -192,4 +231,3 @@ def select_notification_delivery_adapter(provider: Any) -> NotificationDeliveryA
         )
     allowed = ", ".join(SUPPORTED_NOTIFICATION_PROVIDERS)
     raise ValueError(f"unsupported notification provider: {provider}; expected one of: {allowed}")
-

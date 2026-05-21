@@ -104,6 +104,9 @@ def build_notify_summary(
     total_accounts: int,
     send_attempted_count: int | None = None,
     send_confirmed_count: int | None = None,
+    retry_attempt_count: int | None = None,
+    ambiguous_send_count: int | None = None,
+    duplicate_risk_count: int | None = None,
 ) -> dict[str, int]:
     attempted_count = (
         int(send_attempted_count)
@@ -119,6 +122,9 @@ def build_notify_summary(
         "send_attempted_count": attempted_count,
         "send_confirmed_count": confirmed_count,
         "send_failed_count": len(notify_failures),
+        "retry_attempt_count": int(retry_attempt_count or 0),
+        "ambiguous_send_count": int(ambiguous_send_count or 0),
+        "duplicate_risk_count": int(duplicate_risk_count or 0),
     }
 
 
@@ -138,6 +144,9 @@ def apply_notify_results_to_tick_metrics(
         "send_attempted_count",
         "send_confirmed_count",
         "send_failed_count",
+        "retry_attempt_count",
+        "ambiguous_send_count",
+        "duplicate_risk_count",
     ):
         tick_metrics[key] = int(notify_summary.get(key, 0))
     if notify_failures:
