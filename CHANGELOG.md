@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.2.110 - 2026-05-21
+
+### Fixed
+- Made `runtime_status.latest_run` respect the requested US/HK market, preventing newer cross-market skipped runs from masking the current market runtime state.
+- Stopped treating expected scheduler skips as missing-notification runtime warnings, so skip-only runs no longer produce false quality failures.
+- Made AI Cofunder healthcheck snapshots load the service profile env file temporarily before checking online runtime settings.
+- Included projection replay verification in AI Cofunder ledger quality, clearing the `trade_events` to `position_lots` evidence gap when replay passes.
+
 ## 1.2.109 - 2026-05-21
 
 ### Added

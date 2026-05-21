@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, TypedDict
@@ -489,6 +490,54 @@ def test_ai_cofunder_builds_redacted_bundle_and_handoff(tmp_path: Path) -> None:
     assert meta["outputs"]["written"] is False
 
 
+def test_ai_cofunder_ledger_quality_uses_projection_verify_evidence(tmp_path: Path) -> None:
+    from src.application.ai_cofunder.service import ai_cofunder_tool
+
+    runtime_data = _runtime_status_data()
+    runtime_data["projection_verify"] = {
+        "exists": True,
+        "path": "output_shared/state/option_positions/current/projection_verify.latest.json",
+        "json": {
+            "ok": True,
+            "mode_used": "full_replay",
+            "event_count": 37,
+            "position_lot_count": 33,
+            "projected_lot_count": 33,
+            "projection_error_count": 0,
+            "summary": {"matched": 33},
+        },
+    }
+
+    def _runtime_status(_payload):
+        return runtime_data, [], {}
+
+    data, warnings, _meta = ai_cofunder_tool(
+        {
+            "scope": "full",
+            "config_path": str(tmp_path / "config.us.json"),
+            "write_outputs": False,
+            "scheduler_evidence": {
+                "provider": "openclaw",
+                "job_name": "us-tick",
+                "last_triggered_at": "2026-05-16T01:00:00Z",
+                "last_status": "success",
+                "last_exit_code": 0,
+            },
+        },
+        runtime_status_tool_fn=_runtime_status,
+        **_tool_kwargs(tmp_path),
+    )
+
+    ledger = data["bundle"]["ledger_quality"]
+    assert warnings == []
+    assert ledger["status"] == "ok"
+    assert ledger["known_gap"] is None
+    assert ledger["projection_verify"]["status"] == "ok"
+    assert ledger["projection_verify"]["event_count"] == 37
+    assert ledger["projection_verify"]["position_lot_count"] == 33
+    assert "projection_verify: status=ok" in data["handoff_markdown"]
+
+
 def test_ai_cofunder_can_include_redacted_healthcheck_snapshot(tmp_path: Path) -> None:
     from src.application.ai_cofunder.service import ai_cofunder_tool
 
@@ -544,6 +593,59 @@ def test_ai_cofunder_can_include_redacted_healthcheck_snapshot(tmp_path: Path) -
     assert "webhook/token" not in snapshot_json
     assert "281756479859383816" not in snapshot_json
     assert "***REDACTED_URL***" in snapshot_json
+
+
+def test_ai_cofunder_healthcheck_loads_env_file_from_service_profile(monkeypatch, tmp_path: Path) -> None:
+    from src.application.ai_cofunder.service import ai_cofunder_tool
+
+    profile_path = tmp_path / "service.profile.json"
+    env_path = tmp_path / "options-monitor.env"
+    env_path.write_text("OM_TEST_PROFILE_ENV=loaded\n", encoding="utf-8")
+    profile_path.write_text(json.dumps({"env_file": str(env_path)}, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.delenv("OM_TEST_PROFILE_ENV", raising=False)
+
+    def _runtime_status(_payload):
+        return _runtime_status_data(), [], {}
+
+    def _healthcheck(payload):
+        assert payload["profile_path"] == str(profile_path)
+        assert os.environ.get("OM_TEST_PROFILE_ENV") == "loaded"
+        return (
+            {
+                "summary": {"ok": True, "critical_count": 0, "warning_count": 0},
+                "config": {"config_path": str(tmp_path / "config.us.json"), "accounts": ["lx"]},
+                "account_paths": {},
+                "checks": [],
+            },
+            [],
+            {"config_path": str(tmp_path / "config.us.json")},
+        )
+
+    data, warnings, meta = ai_cofunder_tool(
+        {
+            "scope": "full",
+            "config_path": str(tmp_path / "config.us.json"),
+            "profile_path": str(profile_path),
+            "include_healthcheck": True,
+            "write_outputs": False,
+            "scheduler_evidence": {
+                "provider": "openclaw",
+                "job_name": "us-tick",
+                "last_triggered_at": "2026-05-16T01:00:00Z",
+                "last_status": "success",
+                "last_exit_code": 0,
+            },
+        },
+        runtime_status_tool_fn=_runtime_status,
+        healthcheck_tool_fn=_healthcheck,
+        **_tool_kwargs(tmp_path),
+    )
+
+    assert warnings == []
+    assert data["bundle"]["healthcheck_snapshot"]["status"] == "ok"
+    assert meta["healthcheck"]["env_file_loaded"] is True
+    assert meta["healthcheck"]["env_file_key_count"] == 1
+    assert os.environ.get("OM_TEST_PROFILE_ENV") is None
 
 
 def test_ai_cofunder_writes_bundle_and_handoff(tmp_path: Path) -> None:

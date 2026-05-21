@@ -1307,7 +1307,8 @@ def test_runtime_status_marks_remediated_upgrade_failure(monkeypatch, tmp_path: 
     fixture = _runtime_status_upgrade_fixture(tmp_path)
 
     def _service_status(profile: dict[str, Any], *, include_status: bool = False) -> dict[str, Any]:
-        services = profile.get("services") if isinstance(profile.get("services"), list) else []
+        services_raw = profile.get("services")
+        services = services_raw if isinstance(services_raw, list) else []
         return {
             "provider": profile.get("service_provider"),
             "services": [{**item, "status": "ok", "returncode": 0} for item in services if isinstance(item, dict)],
@@ -1335,7 +1336,8 @@ def test_runtime_status_keeps_upgrade_failed_when_service_still_failed(monkeypat
     fixture = _runtime_status_upgrade_fixture(tmp_path)
 
     def _service_status(profile: dict[str, Any], *, include_status: bool = False) -> dict[str, Any]:
-        services = profile.get("services") if isinstance(profile.get("services"), list) else []
+        services_raw = profile.get("services")
+        services = services_raw if isinstance(services_raw, list) else []
         out = []
         for item in services:
             if not isinstance(item, dict):
@@ -1529,10 +1531,61 @@ def test_runtime_status_latest_scanned_run_respects_config_market(tmp_path: Path
     )
 
     assert out["ok"] is True
+    assert out["data"]["latest_run"]["path"].endswith("run-us")
+    assert out["data"]["latest_run_selection"]["market_filter"] == "US"
+    assert out["data"]["latest_run_selection"]["skipped_market_mismatch_count"] == 1
     selection = out["data"]["latest_scanned_run_selection"]
     assert out["data"]["latest_scanned_run"]["path"].endswith("run-us")
     assert selection["market_filter"] == "US"
     assert selection["skipped_market_mismatch_count"] == 1
+
+
+def test_runtime_status_does_not_warn_missing_notification_for_expected_skip(tmp_path: Path) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    def write_json(path: Path, payload: dict[str, object]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    cfg_path = tmp_path / "config.us.json"
+    cfg_path.write_text(json.dumps(_minimal_cfg(), ensure_ascii=False, indent=2), encoding="utf-8")
+    shared_state_dir = tmp_path / "output_shared" / "state"
+    runs_root = tmp_path / "output_runs"
+    run_skip = runs_root / "run-skip"
+    shared_state_dir.mkdir(parents=True)
+    write_json(shared_state_dir / "last_run.json", {"status": "skipped", "run_id": "run-skip"})
+    write_json(
+        run_skip / "state" / "tick_metrics.json",
+        {
+            "ran_scan": False,
+            "scheduler_decision": {
+                "should_run_scan": False,
+                "should_notify": False,
+                "is_notify_window_open": False,
+                "reason": "业务运行窗口内，当前没有待执行运行点。",
+            },
+            "accounts": [{"account": "user1", "status": "skipped", "ran_scan": False}],
+        },
+    )
+    write_json(run_skip / "accounts" / "user1" / "state" / "last_run.json", {"status": "skipped", "ran_scan": False})
+    (shared_state_dir / "last_run_dir.txt").write_text(str(run_skip), encoding="utf-8")
+
+    out = run_tool(
+        "runtime_status",
+        {
+            "config_key": "us",
+            "config_path": str(cfg_path),
+            "shared_state_dir": str(shared_state_dir),
+            "runs_root": str(runs_root),
+            "report_dir": str(tmp_path / "output" / "reports"),
+            "accounts_root": str(tmp_path / "output_accounts"),
+        },
+    )
+
+    assert out["ok"] is True
+    assert out["warnings"] == []
+    assert out["data"]["summary"]["ok"] is True
+    assert out["data"]["latest_run"]["path"].endswith("run-skip")
 
 
 def test_runtime_status_loads_openclaw_profile_and_masks_external_paths(tmp_path: Path) -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -8,6 +9,7 @@ from typing import Any, Callable
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.ai_cofunder.checks import run_deterministic_checks
 from src.application.ai_cofunder.evidence import collect_evidence, redacted_evidence
+from src.application.settings.effective import parse_env_file
 
 
 SCHEMA_VERSION = "ai_cofunder.v1"
@@ -40,6 +42,7 @@ def ai_cofunder_tool(
     healthcheck_snapshot, healthcheck_warnings, healthcheck_meta = _healthcheck_snapshot(
         payload,
         scope=scope,
+        base=base,
         healthcheck_tool_fn=healthcheck_tool_fn,
     )
     warnings.extend(healthcheck_warnings)
@@ -123,7 +126,9 @@ def _ledger_quality(runtime: dict[str, Any]) -> dict[str, Any]:
     position_summary = {
         "auto_close_status": _nested(runtime, "summary", "auto_close_expired_status"),
     }
-    problem_count = failed + unresolved
+    projection_verify = _projection_verify_quality(runtime)
+    projection_problem = projection_verify.get("status") not in {"ok", "missing"}
+    problem_count = failed + unresolved + (1 if projection_problem else 0)
     status = "ok" if problem_count == 0 else "warn"
     return {
         "status": status,
@@ -134,7 +139,34 @@ def _ledger_quality(runtime: dict[str, Any]) -> dict[str, Any]:
             "raw_summary": trade_summary,
         },
         "position_summary": position_summary,
-        "known_gap": "Detailed trade_events -> position_lots invariant evidence is not collected yet.",
+        "projection_verify": projection_verify,
+        "known_gap": None if projection_verify.get("status") == "ok" else "Detailed trade_events -> position_lots invariant evidence is missing or did not pass.",
+    }
+
+
+def _projection_verify_quality(runtime: dict[str, Any]) -> dict[str, Any]:
+    info = _dict(runtime.get("projection_verify"))
+    payload = _dict(info.get("json"))
+    if not payload:
+        return {
+            "status": "missing",
+            "available": False,
+            "path": info.get("path"),
+        }
+    projection_errors = _as_int(payload.get("projection_error_count"))
+    ok = payload.get("ok")
+    status = "ok" if ok is True and projection_errors == 0 else "warn"
+    return {
+        "status": status,
+        "available": True,
+        "path": info.get("path"),
+        "ok": ok,
+        "mode": payload.get("mode_used"),
+        "event_count": _as_int(payload.get("event_count")),
+        "position_lot_count": _as_int(payload.get("position_lot_count")),
+        "projected_lot_count": _as_int(payload.get("projected_lot_count")),
+        "projection_error_count": projection_errors,
+        "matched_count": _as_int(_nested(payload, "summary", "matched")),
     }
 
 
@@ -214,6 +246,7 @@ def _healthcheck_snapshot(
     payload: dict[str, Any],
     *,
     scope: str,
+    base: Path,
     healthcheck_tool_fn: Callable[[dict[str, Any]], tuple[dict[str, Any], list[str], dict[str, Any]]] | None,
 ) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
     if scope not in {"quality", "full"}:
@@ -225,8 +258,13 @@ def _healthcheck_snapshot(
         return {"status": "warn", "included": False, "reason": warning}, [warning], {"included": False}
 
     healthcheck_payload = _healthcheck_payload(payload)
-    data, warnings, meta = healthcheck_tool_fn(healthcheck_payload)
-    safe_warnings = [_redacted_text_warning(item) for item in warnings]
+    env_values, env_meta, env_warnings = _healthcheck_env_values(payload, base=base)
+    data, warnings, meta = _call_healthcheck_with_env(
+        healthcheck_tool_fn,
+        healthcheck_payload,
+        env_values=env_values,
+    )
+    safe_warnings = [_redacted_text_warning(item) for item in [*env_warnings, *warnings]]
     summary = _dict(data.get("summary"))
     status = _healthcheck_status(summary=summary, warnings=safe_warnings)
     return (
@@ -240,7 +278,7 @@ def _healthcheck_snapshot(
             "warnings": safe_warnings,
         },
         [f"healthcheck_snapshot: {item}" for item in safe_warnings],
-        {"included": True, **_dict(meta)},
+        {"included": True, **_dict(meta), **env_meta},
     )
 
 
@@ -250,8 +288,85 @@ def _redacted_text_warning(value: Any) -> str:
 
 
 def _healthcheck_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    keys = ("config_key", "config_path", "accounts", "data_config", "timeout_sec")
+    keys = (
+        "config_key",
+        "config_path",
+        "accounts",
+        "data_config",
+        "timeout_sec",
+        "profile_path",
+        "openclaw_profile_path",
+        "include_service_status",
+    )
     return {key: payload[key] for key in keys if key in payload}
+
+
+def _call_healthcheck_with_env(
+    healthcheck_tool_fn: Callable[[dict[str, Any]], tuple[dict[str, Any], list[str], dict[str, Any]]],
+    payload: dict[str, Any],
+    *,
+    env_values: dict[str, str],
+) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+    previous = {key: os.environ.get(key) for key in env_values}
+    try:
+        for key, value in env_values.items():
+            os.environ[key] = value
+        return healthcheck_tool_fn(payload)
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def _healthcheck_env_values(payload: dict[str, Any], *, base: Path) -> tuple[dict[str, str], dict[str, Any], list[str]]:
+    env_file, warnings = _healthcheck_env_file(payload, base=base)
+    if env_file is None:
+        return {}, {"env_file_loaded": False, "env_file_key_count": 0}, warnings
+    if not env_file.exists():
+        return {}, {"env_file_loaded": False, "env_file_key_count": 0}, [*warnings, f"env file not found: {env_file}"]
+    try:
+        values = parse_env_file(env_file.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {}, {"env_file_loaded": False, "env_file_key_count": 0}, [*warnings, f"failed to load env file: {type(exc).__name__}: {exc}"]
+    return values, {"env_file_loaded": True, "env_file_key_count": len(values)}, warnings
+
+
+def _healthcheck_env_file(payload: dict[str, Any], *, base: Path) -> tuple[Path | None, list[str]]:
+    raw_env_file = str(payload.get("env_file") or "").strip()
+    if raw_env_file:
+        return _resolve_healthcheck_path(raw_env_file, base=base), []
+
+    profile_path = _healthcheck_profile_path(payload, base=base)
+    if profile_path is None:
+        return None, []
+    if not profile_path.exists():
+        return None, [f"service profile not found: {profile_path}"]
+    try:
+        profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return None, [f"failed to read service profile for env file: {type(exc).__name__}: {exc}"]
+    if not isinstance(profile, dict):
+        return None, ["service profile is not a JSON object"]
+    raw_profile_env = str(profile.get("env_file") or "").strip()
+    if not raw_profile_env:
+        return None, []
+    return _resolve_healthcheck_path(raw_profile_env, base=profile_path.parent), []
+
+
+def _healthcheck_profile_path(payload: dict[str, Any], *, base: Path) -> Path | None:
+    raw = str(payload.get("profile_path") or payload.get("openclaw_profile_path") or "").strip()
+    if not raw:
+        return None
+    return _resolve_healthcheck_path(raw, base=base)
+
+
+def _resolve_healthcheck_path(value: str, *, base: Path) -> Path:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = (base / path).resolve()
+    return path
 
 
 def _healthcheck_status(*, summary: dict[str, Any], warnings: list[str]) -> str:
@@ -292,6 +407,12 @@ def render_ai_cofunder_handoff(bundle: dict[str, Any]) -> str:
         f"- failed_trades: {_nested(ledger_quality, 'trade_intake', 'failed_count')}",
         f"- unresolved_trades: {_nested(ledger_quality, 'trade_intake', 'unresolved_count')}",
         f"- auto_close: {_nested(ledger_quality, 'position_summary', 'auto_close_status')}",
+        "- projection_verify: "
+        f"status={_nested(ledger_quality, 'projection_verify', 'status')}, "
+        f"mode={_nested(ledger_quality, 'projection_verify', 'mode')}, "
+        f"events={_nested(ledger_quality, 'projection_verify', 'event_count')}, "
+        f"lots={_nested(ledger_quality, 'projection_verify', 'position_lot_count')}, "
+        f"errors={_nested(ledger_quality, 'projection_verify', 'projection_error_count')}",
         f"- gap: {ledger_quality.get('known_gap')}",
         "",
         "## Account Strategy Matrix",
