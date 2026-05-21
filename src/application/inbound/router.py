@@ -21,6 +21,7 @@ from src.application.tool_execution import execute_tool
 
 
 ExecuteToolFn = Callable[[str, dict[str, Any]], dict[str, Any]]
+ParseIntentFn = Callable[[str, Callable[[], date] | None], InboundIntent]
 
 
 def handle_inbound_request(
@@ -30,6 +31,7 @@ def handle_inbound_request(
     execute_tool_fn: ExecuteToolFn = execute_tool,
     allowed_senders: str | None = None,
     now_fn: Callable[[], date] | None = None,
+    parse_intent_fn: ParseIntentFn | None = None,
 ) -> dict[str, Any]:
     normalized_request = _normalize_request(request)
     store = audit_store or InboundAuditStore(normalized_request.audit_db)
@@ -79,7 +81,7 @@ def handle_inbound_request(
             sender_id=normalized_request.sender_id,
             allowed_senders=allowed_senders,
         )
-        intent = parse_inbound_text(normalized_request.text, now_fn=now_fn)
+        intent = _parse_intent(normalized_request.text, now_fn=now_fn, parse_intent_fn=parse_intent_fn)
         if intent.name == "help":
             response = build_response(
                 tool_name="inbound.handle",
@@ -282,6 +284,17 @@ def handle_inbound_request(
         response=response,
         error_code=error_code,
     )
+
+
+def _parse_intent(
+    text: str,
+    *,
+    now_fn: Callable[[], date] | None,
+    parse_intent_fn: ParseIntentFn | None,
+) -> InboundIntent:
+    if parse_intent_fn is not None:
+        return parse_intent_fn(text, now_fn)
+    return parse_inbound_text(text, now_fn=now_fn)
 
 
 def _tool_call_from_intent(intent: InboundIntent, *, request: InboundRequest) -> InboundToolCall:

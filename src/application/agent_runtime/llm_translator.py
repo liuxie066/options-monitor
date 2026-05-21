@@ -1,0 +1,296 @@
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from typing import Any, Callable
+
+from src.application.agent_runtime.llm_intent_schema import inbound_intent_from_llm_payload, llm_intent_json_schema, llm_intent_schema
+from src.application.agent_runtime.settings import LlmTranslatorSettings
+from src.application.agent_tool_contracts import AgentToolError
+from src.application.inbound.contracts import InboundIntent
+from src.application.settings import build_effective_env
+from src.infrastructure.openai_responses import OpenAIResponsesError, create_structured_response, extract_response_text
+
+
+@dataclass(frozen=True)
+class LlmTranslationResult:
+    intent: InboundIntent | None
+    trace: dict[str, Any]
+    error: AgentToolError | None = None
+
+
+CreateStructuredResponseFn = Callable[..., dict[str, Any]]
+
+_TRANSLATOR_INSTRUCTIONS = """\
+You translate one user message for options-monitor into one read-only intent.
+Return only the requested JSON schema.
+
+Rules:
+- Never execute tools or claim an action was done.
+- Only choose the read-only intents present in the schema.
+- The input may be plain text or a JSON object with `message` and bounded, redacted `context`; translate the current `message`.
+- Do not translate write/admin actions such as recording trades, changing monitored symbols, upgrades, or confirmations.
+- Use null for unknown optional arguments.
+- For unclear or unsupported messages, return a low confidence value below 0.5.
+- Use account only when the user explicitly mentions lx or sy.
+- Use month only when the user explicitly mentions a YYYY-MM month.
+"""
+
+
+def parse_llm_translation_payload(
+    payload: dict[str, Any],
+    *,
+    settings: LlmTranslatorSettings,
+) -> LlmTranslationResult:
+    try:
+        intent = inbound_intent_from_llm_payload(payload, settings=settings)
+    except AgentToolError as err:
+        return LlmTranslationResult(
+            intent=None,
+            trace=_trace(settings, attempted=True, reason="invalid_payload", error_code=err.code),
+            error=err,
+        )
+    return LlmTranslationResult(
+        intent=intent,
+        trace=_trace(settings, attempted=True, reason="accepted", schema_version=llm_intent_schema()["schema_version"]),
+    )
+
+
+def translate_inbound_intent(
+    text: str,
+    *,
+    settings: LlmTranslatorSettings,
+    environ: dict[str, str] | None = None,
+    create_response_fn: CreateStructuredResponseFn | None = None,
+    conversation_context: dict[str, Any] | None = None,
+) -> LlmTranslationResult:
+    if not settings.enabled:
+        return LlmTranslationResult(
+            intent=None,
+            trace=_trace(settings, attempted=False, reason="disabled"),
+        )
+
+    missing = _missing_config(settings)
+    if missing:
+        return LlmTranslationResult(
+            intent=None,
+            trace=_trace(settings, attempted=False, reason="missing_config", missing=missing),
+            error=AgentToolError(
+                code="LLM_UNAVAILABLE",
+                message="LLM translator is enabled but not fully configured.",
+                hint="Set agent.llm.provider, agent.llm.model, and agent.llm.api_key_env, or disable agent.llm.enabled.",
+                details={"missing": missing},
+            ),
+        )
+
+    provider = str(settings.provider or "").strip().lower()
+    if provider != "openai":
+        return LlmTranslationResult(
+            intent=None,
+            trace=_trace(settings, attempted=False, reason="unsupported_provider"),
+            error=AgentToolError(
+                code="LLM_UNAVAILABLE",
+                message=f"unsupported LLM translator provider: {settings.provider}",
+                hint="Set agent.llm.provider to openai, or disable agent.llm.enabled.",
+                details={"provider": settings.provider},
+            ),
+        )
+
+    api_key = _api_key_value(settings, environ=environ)
+    if not api_key:
+        return LlmTranslationResult(
+            intent=None,
+            trace=_trace(settings, attempted=False, reason="missing_api_key", missing=["api_key"]),
+            error=AgentToolError(
+                code="LLM_UNAVAILABLE",
+                message="LLM translator API key is not configured.",
+                hint=f"Set {settings.api_key_env} in the local env file or process environment.",
+                details={"api_key_env": settings.api_key_env},
+            ),
+        )
+
+    try:
+        response = (create_response_fn or create_structured_response)(
+            api_key=api_key,
+            model=settings.model,
+            input_text=_provider_input_text(text, conversation_context=conversation_context),
+            instructions=_TRANSLATOR_INSTRUCTIONS,
+            json_schema=llm_intent_json_schema(),
+        )
+    except OpenAIResponsesError as err:
+        return LlmTranslationResult(
+            intent=None,
+            trace=_trace(
+                settings,
+                attempted=True,
+                reason="provider_error",
+                error_code="LLM_PROVIDER_ERROR",
+                conversation_context=conversation_context,
+            ),
+            error=AgentToolError(
+                code="LLM_PROVIDER_ERROR",
+                message=str(err),
+                details={"provider": provider, "http_status": err.http_status},
+            ),
+        )
+    except Exception as err:
+        return LlmTranslationResult(
+            intent=None,
+            trace=_trace(
+                settings,
+                attempted=True,
+                reason="provider_error",
+                error_code="LLM_PROVIDER_ERROR",
+                conversation_context=conversation_context,
+            ),
+            error=AgentToolError(
+                code="LLM_PROVIDER_ERROR",
+                message=f"LLM translator provider failed: {type(err).__name__}: {err}",
+                details={"provider": provider},
+            ),
+        )
+
+    payload = _parse_provider_payload(response)
+    if payload is None:
+        return LlmTranslationResult(
+            intent=None,
+            trace=_trace(
+                settings,
+                attempted=True,
+                reason="invalid_provider_output",
+                error_code="LLM_PROVIDER_ERROR",
+                conversation_context=conversation_context,
+            ),
+            error=AgentToolError(
+                code="LLM_PROVIDER_ERROR",
+                message="LLM translator returned invalid JSON.",
+                details={"provider": provider},
+            ),
+        )
+    parsed = parse_llm_translation_payload(payload, settings=settings)
+    parsed.trace["context"] = _context_trace(conversation_context)
+    return parsed
+
+
+def skipped_llm_trace(settings: LlmTranslatorSettings, *, reason: str) -> dict[str, Any]:
+    return _trace(settings, attempted=False, reason=reason)
+
+
+def _missing_config(settings: LlmTranslatorSettings) -> list[str]:
+    missing: list[str] = []
+    if not str(settings.provider or "").strip():
+        missing.append("provider")
+    if not str(settings.model or "").strip():
+        missing.append("model")
+    if not str(settings.api_key_env or "").strip():
+        missing.append("api_key_env")
+    return missing
+
+
+def _api_key_value(settings: LlmTranslatorSettings, *, environ: dict[str, str] | None) -> str:
+    env = build_effective_env(environ=environ).values
+    return str(env.get(settings.api_key_env) or "").strip()
+
+
+def _provider_input_text(text: str, *, conversation_context: dict[str, Any] | None) -> str:
+    if not isinstance(conversation_context, dict):
+        return str(text or "")
+    return json.dumps(
+        {
+            "message": str(text or ""),
+            "context": _provider_context(conversation_context),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+def _provider_context(conversation_context: dict[str, Any]) -> dict[str, Any]:
+    recent = conversation_context.get("recent_messages")
+    pending = conversation_context.get("pending_operations")
+    return {
+        "window_messages": int(conversation_context.get("window_messages") or 0),
+        "recent_messages": list(recent) if isinstance(recent, list) else [],
+        "pending_operations": [_pending_operation_provider_item(item) for item in pending if isinstance(item, dict)]
+        if isinstance(pending, list)
+        else [],
+    }
+
+
+def _pending_operation_provider_item(operation: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "operation_id": operation.get("operation_id"),
+        "operation_type": operation.get("operation_type"),
+        "summary": operation.get("summary"),
+        "status": operation.get("status"),
+        "created_at": operation.get("created_at"),
+        "expires_at": operation.get("expires_at"),
+    }
+
+
+def _context_trace(conversation_context: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(conversation_context, dict):
+        return {"provided": False}
+    recent = conversation_context.get("recent_messages")
+    pending = conversation_context.get("pending_operations")
+    return {
+        "provided": True,
+        "window_messages": int(conversation_context.get("window_messages") or 0),
+        "recent_count": len(recent) if isinstance(recent, list) else 0,
+        "pending_count": len(pending) if isinstance(pending, list) else 0,
+    }
+
+
+def _parse_provider_payload(response: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(response, dict):
+        return None
+    text = extract_response_text(response)
+    if not text:
+        return None
+    try:
+        parsed = json.loads(_strip_json_code_fence(text))
+    except Exception:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _strip_json_code_fence(text: str) -> str:
+    value = str(text or "").strip()
+    if value.startswith("```"):
+        lines = value.splitlines()
+        if lines and lines[0].strip().startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        value = "\n".join(lines).strip()
+    return value
+
+
+def _trace(
+    settings: LlmTranslatorSettings,
+    *,
+    attempted: bool,
+    reason: str,
+    missing: list[str] | None = None,
+    error_code: str | None = None,
+    schema_version: str | None = None,
+    conversation_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "enabled": bool(settings.enabled),
+        "attempted": bool(attempted),
+        "reason": str(reason),
+        "provider": settings.provider,
+        "model": settings.model,
+        "api_key_env": settings.api_key_env,
+        "confidence_min": float(settings.confidence_min),
+    }
+    if missing:
+        payload["missing"] = list(missing)
+    if error_code:
+        payload["error_code"] = str(error_code)
+    if schema_version:
+        payload["schema_version"] = str(schema_version)
+    if conversation_context is not None:
+        payload["context"] = _context_trace(conversation_context)
+    return payload

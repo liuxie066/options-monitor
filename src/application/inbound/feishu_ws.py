@@ -5,10 +5,11 @@ import os
 import queue
 import threading
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, cast
 
+from src.application.agent_runtime.settings import DEFAULT_CONTEXT_WINDOW_MESSAGES, AgentRuntimeSettings, LlmTranslatorSettings
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response, mask_path
 from src.application.agent_tool_config import load_runtime_config, resolve_runtime_config_path
 from src.application.inbound.feishu import handle_feishu_payload
@@ -47,6 +48,9 @@ class FeishuWsSettings:
     max_reply_chars: int = DEFAULT_FEISHU_REPLY_MAX_CHARS
     ack_reaction: str = ""
     queue_size: int = DEFAULT_FEISHU_WS_QUEUE_SIZE
+    agent_runtime_enabled: bool = False
+    agent_context_window_messages: int = DEFAULT_CONTEXT_WINDOW_MESSAGES
+    agent_llm: LlmTranslatorSettings = field(default_factory=LlmTranslatorSettings)
 
     def validate_for_serve(self) -> None:
         if not self.allowed_senders:
@@ -75,6 +79,9 @@ class FeishuWsSettings:
             "max_reply_chars": int(self.max_reply_chars),
             "ack_reaction": self.ack_reaction,
             "queue_size": int(self.queue_size),
+            "agent_runtime_enabled": bool(self.agent_runtime_enabled),
+            "agent_context_window_messages": int(self.agent_context_window_messages),
+            "agent_llm": self.agent_llm.public_payload(),
         }
         if sdk_available is not None:
             out["sdk_available"] = bool(sdk_available)
@@ -94,7 +101,9 @@ def build_feishu_ws_settings(
 ) -> FeishuWsSettings:
     env = build_effective_env(environ=environ).values
     bot_cfg = resolve_feishu_bot_config(environ=env)
-    behavior_cfg = _load_feishu_ws_behavior_config(config_key=config_key, config_path=config_path)
+    runtime_cfg = _load_runtime_behavior_config(config_key=config_key, config_path=config_path)
+    behavior_cfg = _dict(_dict(runtime_cfg.get("inbound")).get("feishu_ws"))
+    agent_runtime_settings = AgentRuntimeSettings.from_runtime_config(runtime_cfg)
     return FeishuWsSettings(
         config_key=str(config_key or "").strip().lower() or None,
         config_path=_first_text(config_path),
@@ -115,6 +124,9 @@ def build_feishu_ws_settings(
             behavior_cfg.get("queue_size"),
             default=DEFAULT_FEISHU_WS_QUEUE_SIZE,
         ),
+        agent_runtime_enabled=agent_runtime_settings.enabled,
+        agent_context_window_messages=agent_runtime_settings.context_window_messages,
+        agent_llm=agent_runtime_settings.llm,
     )
 
 
@@ -163,6 +175,12 @@ def handle_feishu_ws_event(
         config_key=settings.config_key,
         config_path=settings.config_path,
         audit_db=settings.audit_db,
+        use_agent_runtime=settings.agent_runtime_enabled,
+        agent_runtime_settings=AgentRuntimeSettings(
+            enabled=settings.agent_runtime_enabled,
+            context_window_messages=settings.agent_context_window_messages,
+            llm=settings.agent_llm,
+        ),
         **inbound_kwargs,
     )
     reaction_status = _maybe_react(inbound=inbound, settings=settings, reaction_fn=reaction_fn)
@@ -428,7 +446,7 @@ def _dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _load_feishu_ws_behavior_config(*, config_key: str | None, config_path: str | None) -> dict[str, Any]:
+def _load_runtime_behavior_config(*, config_key: str | None, config_path: str | None) -> dict[str, Any]:
     explicit_config_path = bool(config_path is not None and str(config_path).strip())
     if not explicit_config_path:
         try:
@@ -444,9 +462,7 @@ def _load_feishu_ws_behavior_config(*, config_key: str | None, config_path: str 
         if explicit_config_path:
             raise
         return {}
-
-    inbound = _dict(cfg.get("inbound"))
-    return _dict(inbound.get("feishu_ws"))
+    return cfg
 
 
 def _config_bool(explicit: bool | None, configured: Any, *, default: bool) -> bool:

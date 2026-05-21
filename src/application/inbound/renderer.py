@@ -7,7 +7,8 @@ from src.application.inbound.contracts import InboundIntent
 
 HELP_TEXT = (
     "可用只读命令：状态、健康检查、持仓、持仓 sy、收益、收益 sy、收益 sy 2026-05、最近运行、日志 <run_id>、查看监控标的、待确认。\n"
-    "管理员写操作：记录开仓/记录平仓、增加/修改/删除监控标的、立即升级。写操作会先返回预览；同一对话只有一条待确认时，可回复：确认记录、确认监控 或 确认升级。"
+    "Command：/status、/health、/positions [lx|sy|all]、/income [lx|sy] [YYYY-MM|本月|上月]、/runs [limit]、/logs <run_id>、/symbols、/pending。\n"
+    "管理员写操作：记录开仓/记录平仓、增加/修改/删除监控标的、立即升级。写操作会先返回预览；同一对话只有一条待确认时，可回复：确认记录、确认监控 或 确认升级。Command 确认格式：/confirm trade|symbol|upgrade [operation_id]。"
 )
 
 

@@ -1595,6 +1595,68 @@ def test_feishu_payload_adapter_extracts_text_message_and_calls_inbound(tmp_path
     assert calls == [("monthly_income_report", {"config_key": "us", "account": "sy", "month": "2026-05"})]
 
 
+def test_feishu_payload_adapter_agent_runtime_reads_runtime_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    data_cfg_path = tmp_path / "portfolio.runtime.json"
+    data_cfg_path.write_text(json.dumps({"option_positions": {}}, ensure_ascii=False), encoding="utf-8")
+    cfg = _runtime_cfg(str(data_cfg_path))
+    cfg["agent"] = {
+        "runtime": {"enabled": False, "context_window_messages": 7},
+        "llm": {
+            "enabled": True,
+            "provider": "openai",
+            "model": "gpt-5.2",
+            "api_key_env": "OM_LLM_API_KEY",
+            "confidence_min": 0.82,
+        },
+    }
+    cfg_path = tmp_path / "config.us.json"
+    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    payload = {
+        "schema": "2.0",
+        "header": {"event_id": "evt_agent", "event_type": "im.message.receive_v1"},
+        "event": {
+            "sender": {"sender_id": {"open_id": "ou_1"}},
+            "message": {
+                "message_id": "om_agent",
+                "chat_id": "oc_1",
+                "message_type": "text",
+                "content": json.dumps({"text": "/status"}, ensure_ascii=False),
+            },
+        },
+    }
+    seen: list[dict] = []
+
+    def _handle_agent_message(request: InboundRequest, **kwargs) -> dict:
+        seen.append({"request": request, "kwargs": kwargs})
+        return build_response(
+            tool_name="inbound.handle",
+            ok=True,
+            data={"response_text": "状态查询完成。"},
+            meta={"agent_runtime": {"route": "command"}},
+        )
+
+    monkeypatch.setattr("src.application.agent_runtime.handle_agent_message", _handle_agent_message)
+
+    out = handle_feishu_payload(
+        payload,
+        config_path=str(cfg_path),
+        audit_db=str(tmp_path / "audit.sqlite3"),
+        allowed_senders="feishu:ou_1",
+        use_agent_runtime=True,
+    )
+
+    assert out["ok"] is True
+    assert out["data"]["response_text"] == "状态查询完成。"
+    assert len(seen) == 1
+    settings = seen[0]["kwargs"]["settings"]
+    assert settings.enabled is True
+    assert settings.context_window_messages == 7
+    assert settings.llm.enabled is True
+    assert settings.llm.provider == "openai"
+    assert settings.llm.model == "gpt-5.2"
+    assert settings.llm.confidence_min == 0.82
+
+
 def test_feishu_payload_adapter_ignores_non_message_events() -> None:
     out = handle_feishu_payload(
         {
@@ -1657,6 +1719,61 @@ def test_inbound_cli_wires_request(monkeypatch, capsys, tmp_path: Path) -> None:
             audit_db=str(tmp_path / "audit.sqlite3"),
         )
     ]
+
+
+def test_inbound_cli_agent_runtime_loads_settings_from_config(monkeypatch, capsys, tmp_path: Path) -> None:
+    import src.interfaces.cli.main as cli
+
+    cfg = _runtime_cfg(str(tmp_path / "portfolio.runtime.json"))
+    cfg["agent"] = {
+        "runtime": {"enabled": False, "context_window_messages": 6},
+        "llm": {
+            "enabled": True,
+            "provider": "openai",
+            "model": "gpt-5.2",
+            "api_key_env": "OM_LLM_API_KEY",
+            "confidence_min": 0.81,
+        },
+    }
+    cfg_path = tmp_path / "config.us.json"
+    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    seen = []
+
+    def _handle_agent(request: InboundRequest, **kwargs) -> dict:
+        seen.append({"request": request, "settings": kwargs.get("settings")})
+        return build_response(
+            tool_name="inbound.handle",
+            ok=True,
+            data={"response_text": "状态查询完成。"},
+        )
+
+    monkeypatch.setattr(cli, "handle_agent_message", _handle_agent)
+
+    rc = cli.main(
+        [
+            "inbound",
+            "handle",
+            "--agent-runtime",
+            "--config-path",
+            str(cfg_path),
+            "--text",
+            "/status",
+            "--sender",
+            "local",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert payload["tool_name"] == "inbound.handle"
+    assert len(seen) == 1
+    settings = seen[0]["settings"]
+    assert settings.enabled is True
+    assert settings.context_window_messages == 6
+    assert settings.llm.enabled is True
+    assert settings.llm.provider == "openai"
+    assert settings.llm.model == "gpt-5.2"
+    assert settings.llm.confidence_min == 0.81
 
 
 def test_inbound_cli_pending_and_audit_diagnostics(monkeypatch: pytest.MonkeyPatch, capsys, tmp_path: Path) -> None:
@@ -1802,7 +1919,12 @@ def test_inbound_cli_feishu_wires_payload(monkeypatch, capsys, tmp_path: Path) -
     assert seen == [
         {
             "payload": {"event": {"message": {"content": "{}"}}},
-            "kwargs": {"config_key": "us", "config_path": None, "audit_db": str(tmp_path / "audit.sqlite3")},
+            "kwargs": {
+                "config_key": "us",
+                "config_path": None,
+                "audit_db": str(tmp_path / "audit.sqlite3"),
+                "use_agent_runtime": False,
+            },
         }
     ]
 

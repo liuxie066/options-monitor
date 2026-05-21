@@ -549,7 +549,7 @@ bash scripts/install_agent_plugin.sh
 ./om inbound feishu-ws --check
 ```
 
-它只接受确定性只读命令，并带 sender allowlist、message_id 幂等和 SQLite audit。`feishu-ws` 可作为长驻 Feishu App long-connection client，通过飞书 SDK 长连接接收消息，并自动回复，不需要公网 HTTPS callback；reaction、reply、queue 行为配置在 runtime config 的 `inbound.feishu_ws` 下。接飞书、微信或 Hermes 前先看
+它只接受确定性只读命令，并带 sender allowlist、message_id 幂等和 SQLite audit。`--agent-runtime` 可启用 slash command facade，例如 `/status`、`/positions sy`、`/income 2026-05`；Feishu WS 是否启用同一层由 runtime config 的 `agent.runtime.enabled` 控制，默认关闭。`agent.llm` 默认关闭；显式配置 `provider: openai`、`model` 和本机 `OM_LLM_API_KEY` 后，只会把自然语言和同一对话的有限上下文翻译成 `om-llm-intent-v1` 只读 intent，再走同一条 router。`feishu-ws` 可作为长驻 Feishu App long-connection client，通过飞书 SDK 长连接接收消息，并自动回复，不需要公网 HTTPS callback；reaction、reply、queue 行为配置在 runtime config 的 `inbound.feishu_ws` 下。接飞书、微信或 Hermes 前先看
 [docs/INBOUND_CONTROL.md](docs/INBOUND_CONTROL.md)。
 
 AI Cofunder 证据交接：

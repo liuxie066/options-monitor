@@ -116,6 +116,19 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "opend_alert_after_consecutive_failures": 3,
             "opend_alert_send_recovery_notice": True,
         },
+        "agent": {
+            "runtime": {
+                "enabled": False,
+                "context_window_messages": 8,
+            },
+            "llm": {
+                "enabled": False,
+                "provider": "",
+                "model": "",
+                "api_key_env": "OM_LLM_API_KEY",
+                "confidence_min": 0.75,
+            },
+        },
         "inbound": {
             "feishu_ws": {
                 "reply_enabled": True,

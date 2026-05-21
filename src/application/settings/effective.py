@@ -16,7 +16,7 @@ DEPRECATED_ENV_SETTINGS: dict[str, str] = {
 }
 
 _KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_SECRET_NAME_PARTS = ("SECRET", "TOKEN", "PASSWORD", "PRIVATE_KEY")
+_SECRET_NAME_PARTS = ("SECRET", "TOKEN", "PASSWORD", "PRIVATE_KEY", "API_KEY")
 
 
 @dataclass(frozen=True)
@@ -226,6 +226,7 @@ def inspect_effective_settings(
         "OM_INBOUND_ADMIN_OPEN_IDS",
         "OM_INBOUND_CONFIRM_TTL_SECONDS",
         "OM_AGENT_ENABLE_WRITE_TOOLS",
+        "OM_LLM_API_KEY",
     ]
     entries: dict[str, dict[str, Any]] = {}
     for key in keys:
@@ -512,6 +513,7 @@ def _setting_key_to_env_name(key: str) -> str:
         "inbound.admin_open_ids": "OM_INBOUND_ADMIN_OPEN_IDS",
         "inbound.confirm_ttl_seconds": "OM_INBOUND_CONFIRM_TTL_SECONDS",
         "agent.write_tools_enabled": "OM_AGENT_ENABLE_WRITE_TOOLS",
+        "agent.llm.api_key": "OM_LLM_API_KEY",
     }
     if normalized in aliases:
         return aliases[normalized]

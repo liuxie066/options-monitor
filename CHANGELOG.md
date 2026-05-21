@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 1.2.113 - 2026-05-21
+
+### Added
+- Added the optional `AgentRuntime` inbound facade with slash commands for status, health, positions, income, runs, logs, monitored symbols, pending previews, and typed confirm/cancel flows.
+- Added an opt-in OpenAI Responses intent translator that can only produce bounded read-only `om-llm-intent-v1` intents before re-entering the existing inbound router, allowlist, audit, and renderer path.
+- Added agent runtime config defaults, YAML passthrough, config validation, settings inspection support for `OM_LLM_API_KEY`, and coverage for Feishu WS agent runtime settings.
+
+### Changed
+- Updated inbound help and operator docs to describe the command facade, optional LLM translation, same-conversation context window, and Feishu WS runtime gating.
+
+### Fixed
+- Made one-shot `om inbound handle --agent-runtime` load the same runtime config settings as Feishu WS, keeping context-window and LLM settings consistent across local and remote inbound paths.
+
 ## 1.2.112 - 2026-05-21
 
 ### Added

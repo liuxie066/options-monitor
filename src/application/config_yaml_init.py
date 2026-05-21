@@ -136,6 +136,19 @@ def _starter_yaml_payload(
                 "symbols": hk_symbols,
             },
         },
+        "agent": {
+            "runtime": {
+                "enabled": False,
+                "context_window_messages": 8,
+            },
+            "llm": {
+                "enabled": False,
+                "provider": "",
+                "model": "",
+                "api_key_env": "OM_LLM_API_KEY",
+                "confidence_min": 0.75,
+            }
+        },
         "inbound": {
             "feishu_ws": {
                 "ack_reaction": "THUMBSUP",

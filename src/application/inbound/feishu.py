@@ -17,6 +17,8 @@ def handle_feishu_payload(
     audit_db: str | None = None,
     execute_tool_fn: ExecuteToolFn | None = None,
     allowed_senders: str | None = None,
+    use_agent_runtime: bool = False,
+    agent_runtime_settings: Any | None = None,
 ) -> dict[str, Any]:
     event_type = _extract_event_type(payload)
     if event_type and event_type != "im.message.receive_v1":
@@ -39,7 +41,16 @@ def handle_feishu_payload(
     kwargs: dict[str, Any] = {"allowed_senders": allowed_senders}
     if execute_tool_fn is not None:
         kwargs["execute_tool_fn"] = execute_tool_fn
-    inbound_result = handle_inbound_request(request, **kwargs)
+    if use_agent_runtime:
+        from src.application.agent_runtime import handle_agent_message
+
+        kwargs["settings"] = agent_runtime_settings or _explicit_agent_runtime_settings(
+            config_key=config_key,
+            config_path=config_path,
+        )
+        inbound_result = handle_agent_message(request, **kwargs)
+    else:
+        inbound_result = handle_inbound_request(request, **kwargs)
     data_raw = inbound_result.get("data")
     data = cast(dict[str, Any], data_raw) if isinstance(data_raw, dict) else {}
     return build_response(
@@ -54,6 +65,25 @@ def handle_feishu_payload(
         },
         error=inbound_result.get("error") if not bool(inbound_result.get("ok", False)) else None,
         meta=dict(inbound_result.get("meta") or {}),
+    )
+
+
+def _explicit_agent_runtime_settings(*, config_key: str | None, config_path: str | None) -> Any:
+    from src.application.agent_runtime import AgentRuntimeSettings
+    from src.application.agent_tool_config import load_runtime_config
+
+    try:
+        _path, cfg = load_runtime_config(config_key=config_key, config_path=config_path)
+    except AgentToolError:
+        if config_path is not None and str(config_path).strip():
+            raise
+        return AgentRuntimeSettings(enabled=True)
+
+    configured = AgentRuntimeSettings.from_runtime_config(cfg)
+    return AgentRuntimeSettings(
+        enabled=True,
+        context_window_messages=configured.context_window_messages,
+        llm=configured.llm,
     )
 
 
