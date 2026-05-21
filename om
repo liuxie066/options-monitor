@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VPY="$ROOT/.venv/bin/python"
+export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
 if [[ -x "$VPY" ]]; then
   exec "$VPY" -m src.interfaces.cli.main "$@"
