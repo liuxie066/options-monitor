@@ -20,7 +20,7 @@ def _read_json_object(path: Path) -> dict[str, Any]:
         raise AgentToolError(
             code="CONFIG_ERROR",
             message=f"runtime config not found: {path}",
-            hint="Pass --config-path explicitly, or create the canonical config with om setup / om config build.",
+            hint="Pass --config-path explicitly, or create config.yaml with `om config init` and build runtime snapshots with `om config build --source yaml`.",
         )
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))

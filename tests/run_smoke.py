@@ -163,6 +163,86 @@ def test_installed_global_wrappers_work_outside_release_cwd() -> None:
         assert settings_payload["ok"] is True
         assert Path(settings_payload["data"]["env_file"]).resolve() == env_file.resolve()
 
+        config_yaml = outside / "config.yaml"
+        runtime_configs = outside / "runtime-config"
+        init_proc = subprocess.run(
+            [
+                "om",
+                "config",
+                "init",
+                "--output",
+                str(config_yaml),
+                "--runtime-output-dir",
+                str(runtime_configs),
+                "--futu-acc-id",
+                "12345678",
+            ],
+            cwd=str(outside),
+            capture_output=True,
+            text=True,
+            check=True,
+            env=env,
+        )
+        init_payload = json.loads(init_proc.stdout)
+        assert init_payload["ok"] is True
+        assert config_yaml.exists()
+        assert (runtime_configs / "config.us.json").exists()
+        assert (runtime_configs / "config.hk.json").exists()
+
+        validate_proc = subprocess.run(
+            ["om", "config", "validate", "--source", "yaml", "--market", "us", "--config-yaml", str(config_yaml)],
+            cwd=str(outside),
+            capture_output=True,
+            text=True,
+            check=True,
+            env=env,
+        )
+        assert json.loads(validate_proc.stdout)["ok"] is True
+
+        build_proc = subprocess.run(
+            [
+                "om",
+                "config",
+                "build",
+                "--source",
+                "yaml",
+                "--market",
+                "hk",
+                "--config-yaml",
+                str(config_yaml),
+                "--output",
+                str(runtime_configs / "config.hk.json"),
+                "--dry-run",
+            ],
+            cwd=str(outside),
+            capture_output=True,
+            text=True,
+            check=True,
+            env=env,
+        )
+        assert json.loads(build_proc.stdout)["dry_run"] is True
+
+        support_proc = subprocess.run(
+            [
+                "om",
+                "support",
+                "bundle",
+                "--config-path",
+                str(runtime_configs / "config.us.json"),
+                "--output-dir",
+                str(outside / "support"),
+                "--no-local-env-file",
+            ],
+            cwd=str(outside),
+            capture_output=True,
+            text=True,
+            check=True,
+            env=env,
+        )
+        support_payload = json.loads(support_proc.stdout)
+        assert support_payload["tool_name"] == "support.bundle"
+        assert Path(support_payload["data"]["bundle_path"]).exists()
+
         spec_proc = subprocess.run(
             ["om-agent", "spec"],
             cwd=str(outside),

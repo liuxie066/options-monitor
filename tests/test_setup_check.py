@@ -20,8 +20,8 @@ def test_setup_check_is_read_only_and_reports_missing_config(tmp_path: Path) -> 
     assert checks["install.repo"]["status"] == "ok"
     assert checks["upgrade.uv"]["status"] in {"ok", "info", "warn"}
     assert checks["config.us"]["status"] == "warn"
-    assert "setup init --market us" in checks["config.us"]["hint"]
-    assert any(step.startswith("./om setup init --market us") for step in out["next_steps"])
+    assert "config init" in checks["config.us"]["hint"]
+    assert any(step.startswith("./om config init") for step in out["next_steps"])
     assert not (tmp_path / "config.us.json").exists()
 
 

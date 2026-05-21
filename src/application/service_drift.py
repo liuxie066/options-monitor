@@ -299,6 +299,7 @@ def _expected_bundle_from_profile(
         accounts=_profile_accounts(profile),
         markets=_profile_markets(profile),
         config_paths={str(key): str(value) for key, value in config_paths.items() if str(value or "").strip()},
+        config_yaml=_profile_config_yaml(profile),
         env_file=profile.get("env_file"),
         deploy_user=profile.get("deploy_user"),
         deploy_home=profile.get("deploy_home"),
@@ -384,6 +385,16 @@ def _profile_markets(profile: dict[str, Any]) -> list[str]:
     services = " ".join(_service_names_from_profile(profile))
     inferred = [market for market in DEFAULT_MARKETS if f"-{market}" in services or f".{market}" in services]
     return inferred or list(DEFAULT_MARKETS)
+
+
+def _profile_config_yaml(profile: dict[str, Any]) -> str | None:
+    raw_authoring = profile.get("config_authoring")
+    authoring = raw_authoring if isinstance(raw_authoring, dict) else {}
+    if str(authoring.get("source") or "").strip().lower() == "yaml":
+        config_yaml = str(authoring.get("config_yaml") or "").strip()
+        if config_yaml:
+            return config_yaml
+    return None
 
 
 def _installed_units(*, provider: str, expected_files: dict[str, dict[str, Any]], ctx: dict[str, Any]) -> list[str]:
