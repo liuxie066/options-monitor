@@ -28,6 +28,7 @@ from src.application.ledger.api import (
     record_trade_event_void,
     refresh_position_lot_projection,
     resolve_position_data_config_path,
+    preview_trade_event_void,
     verify_position_lot_projection,
 )
 from src.application.positions.auto_close import main as run_option_positions_auto_close
@@ -40,6 +41,8 @@ from src.application.positions.workflows import (
 )
 from src.application.positions.inspection import build_lot_event_history, inspect_projection_state
 from src.application.trade_time_format import add_trade_time_beijing
+from src.application.trades.review import replay_trade_events
+from src.application.write_contract import attach_write_contract, write_control
 
 
 def _resolve_path_under(path: str | Path, *, base: Path) -> Path:
@@ -122,6 +125,40 @@ def _runtime_root_arg(args: argparse.Namespace) -> str | None:
     return str(getattr(args, "runtime_root", "") or "").strip() or None
 
 
+def _add_local_write_flags(parser: argparse.ArgumentParser, *, high_risk: bool) -> None:
+    parser.add_argument("--dry-run", action="store_true", help="preview only; this is the default")
+    parser.add_argument("--apply", action="store_true", help="allow local state writes")
+    if high_risk:
+        parser.add_argument("--confirm", action="store_true", help="confirm high-risk trade-event writes")
+        parser.add_argument("--yes", action="store_true", help="non-interactive confirmation; emits an audit_id")
+    else:
+        parser.add_argument("--confirm", action="store_true", help="alias for --apply on local state writes")
+        parser.add_argument("--yes", action="store_true", help="non-interactive alias for --apply; emits an audit_id")
+
+
+def _resolve_write_control(args: argparse.Namespace, *, command_name: str, high_risk: bool) -> dict[str, bool]:
+    has_dry_run = bool(getattr(args, "dry_run", False))
+    has_write_flag = any(
+        bool(getattr(args, name, False))
+        for name in ("apply", "confirm", "yes")
+    )
+    if has_dry_run and has_write_flag:
+        raise SystemExit("--dry-run cannot be combined with --apply, --confirm, or --yes")
+    control = write_control(
+        apply=bool(getattr(args, "apply", False)),
+        confirm=bool(getattr(args, "confirm", False)),
+        yes=bool(getattr(args, "yes", False)),
+        high_risk=high_risk,
+    )
+    if control["confirmation_required"]:
+        raise SystemExit(f"{command_name} writes trade_events; use --confirm or --yes to apply")
+    return control
+
+
+def _json_or_text_format(args: argparse.Namespace) -> str:
+    return str(getattr(args, "format", "") or "text")
+
+
 def resolve_option_positions_repo(**kwargs: Any) -> tuple[Path, Any]:
     """Compatibility wrapper kept for tests and older call sites."""
 
@@ -188,7 +225,8 @@ def main(argv: list[str] | None = None) -> int:
     p_add.add_argument('--premium-per-share', type=float, required=True, help='premium per share; positive, up to 3 decimals')
     p_add.add_argument('--underlying-share-locked', type=int, default=None, help='for sell call locking shares')
     p_add.add_argument('--note', default=None)
-    p_add.add_argument('--dry-run', action='store_true')
+    p_add.add_argument('--format', default='text', choices=['text', 'json'])
+    _add_local_write_flags(p_add, high_risk=True)
 
     p_buy_close = sub.add_parser('buy-close', help='buy to close a position by record_id or strict unique selector')
     p_buy_close.add_argument('--runtime-root', default=None, help='runtime root for active ledger store')
@@ -203,7 +241,8 @@ def main(argv: list[str] | None = None) -> int:
     p_buy_close.add_argument('--contracts', type=int, required=True, help='contracts to close; supports partial close')
     p_buy_close.add_argument('--close-price', type=float, required=True, help='close price per share/contract unit; positive, up to 3 decimals')
     p_buy_close.add_argument('--close-reason', default='manual_buy_to_close')
-    p_buy_close.add_argument('--dry-run', action='store_true')
+    p_buy_close.add_argument('--format', default='text', choices=['text', 'json'])
+    _add_local_write_flags(p_buy_close, high_risk=True)
 
     p_events = sub.add_parser('events', help='list canonical trade events')
     p_events.add_argument('--broker', default=None)
@@ -218,6 +257,7 @@ def main(argv: list[str] | None = None) -> int:
     p_rebuild = sub.add_parser('rebuild', help='rebuild position_lots projection from trade_events')
     p_rebuild.add_argument('--runtime-root', default=None, help='runtime root for active ledger store')
     p_rebuild.add_argument('--format', default='text', choices=['text', 'json'])
+    _add_local_write_flags(p_rebuild, high_risk=False)
 
     p_inspect = sub.add_parser('inspect', help='inspect projected lot state and related trade events')
     p_inspect.add_argument('--runtime-root', default=None, help='runtime root for active ledger store')
@@ -242,6 +282,8 @@ def main(argv: list[str] | None = None) -> int:
     p_store_migrate.add_argument("--runtime-root", default=None, help="override runtime root for standard ledger path resolution")
     p_store_migrate.add_argument("--legacy-sqlite-path", default=None, help="legacy SQLite path override; defaults to deprecated option_positions.sqlite_path when present")
     p_store_migrate.add_argument("--apply", action="store_true", help="apply migration; omitted means dry-run inspect")
+    p_store_migrate.add_argument("--confirm", action="store_true", help="confirm high-risk trade-event migration")
+    p_store_migrate.add_argument("--yes", action="store_true", help="non-interactive confirmation; emits an audit_id")
     p_store_migrate.add_argument("--format", default="json", choices=["json", "text"])
 
     p_verify = sub.add_parser('verify-projection', help='verify position_lots by replaying trade_events')
@@ -253,6 +295,8 @@ def main(argv: list[str] | None = None) -> int:
     p_void_event.add_argument('--runtime-root', default=None, help='runtime root for active ledger store')
     p_void_event.add_argument('--event-id', required=True)
     p_void_event.add_argument('--void-reason', default='manual_void')
+    p_void_event.add_argument('--format', default='text', choices=['text', 'json'])
+    _add_local_write_flags(p_void_event, high_risk=True)
 
     p_adjust = sub.add_parser('adjust-lot', help='append an adjustment event for an existing position lot')
     p_adjust.add_argument('--runtime-root', default=None, help='runtime root for active ledger store')
@@ -263,7 +307,8 @@ def main(argv: list[str] | None = None) -> int:
     p_adjust.add_argument('--premium-per-share', type=float, default=None)
     p_adjust.add_argument('--multiplier', type=float, default=None)
     p_adjust.add_argument('--opened-at-ms', type=int, default=None)
-    p_adjust.add_argument('--dry-run', action='store_true')
+    p_adjust.add_argument('--format', default='text', choices=['text', 'json'])
+    _add_local_write_flags(p_adjust, high_risk=True)
 
     p_report = sub.add_parser('report', help='read-only reports for position lots')
     report_sub = p_report.add_subparsers(dest='report_cmd', required=True)
@@ -292,6 +337,8 @@ def main(argv: list[str] | None = None) -> int:
     p_auto_close.add_argument("--accounts", nargs="+", default=None, help="accounts to process; defaults to runtime config accounts")
     p_auto_close.add_argument("--broker", default=None, help="optional broker filter override")
     p_auto_close.add_argument("--apply", action="store_true", help="append close events for expired lots")
+    p_auto_close.add_argument("--confirm", action="store_true", help="confirm high-risk close-event writes and receipts")
+    p_auto_close.add_argument("--yes", action="store_true", help="non-interactive confirmation; emits an audit_id")
     p_auto_close.add_argument("--dry-run", action="store_true", help="preview without writing close events")
     p_auto_close.add_argument("--as-of-utc", default=None, help="ISO datetime; default is current UTC")
     p_auto_close.add_argument("--no-send", action="store_true", help="do not send auto-close receipt notifications")
@@ -310,7 +357,13 @@ def main(argv: list[str] | None = None) -> int:
                 config_path=config_path,
             )
         else:
-            if bool(getattr(args, "apply", False)):
+            control = _resolve_write_control(
+                args,
+                command_name="option-positions store migrate-legacy",
+                high_risk=True,
+            )
+            should_apply = bool(control["write_requested"])
+            if should_apply:
                 guard = _guard_write(
                     data_config=data_config_path,
                     args=args,
@@ -330,7 +383,13 @@ def main(argv: list[str] | None = None) -> int:
             payload = migrate_legacy_sqlite_to_repo(
                 repo,
                 legacy_path=legacy_path,
-                apply=bool(getattr(args, "apply", False)),
+                apply=should_apply,
+            )
+            payload = attach_write_contract(
+                payload,
+                dry_run=not should_apply,
+                write_applied=bool(should_apply and payload.get("applied")),
+                rollback_hint="void migrated bootstrap events or restore the active option_positions SQLite backup",
             )
             payload["ledger_store"] = ledger_store_payload(data_config_path, repo)
         if args.format == "json":
@@ -363,6 +422,10 @@ def main(argv: list[str] | None = None) -> int:
             auto_close_argv.extend(["--broker", str(args.broker)])
         if args.apply:
             auto_close_argv.append("--apply")
+        if args.confirm:
+            auto_close_argv.append("--confirm")
+        if args.yes:
+            auto_close_argv.append("--yes")
         if args.dry_run:
             auto_close_argv.append("--dry-run")
         if args.as_of_utc:
@@ -375,12 +438,12 @@ def main(argv: list[str] | None = None) -> int:
             auto_close_argv.append("--quiet")
         return int(run_option_positions_auto_close(auto_close_argv))
 
-    write_cmd = (
-        (args.cmd == "add" and not bool(args.dry_run))
-        or (args.cmd == "buy-close" and not bool(args.dry_run))
-        or args.cmd in {"rebuild", "void-event"}
-        or (args.cmd == "adjust-lot" and not bool(args.dry_run))
-    )
+    write_controls: dict[str, dict[str, bool]] = {}
+    if args.cmd in {"add", "buy-close", "void-event", "adjust-lot"}:
+        write_controls[args.cmd] = _resolve_write_control(args, command_name=f"option-positions {args.cmd}", high_risk=True)
+    elif args.cmd == "rebuild":
+        write_controls[args.cmd] = _resolve_write_control(args, command_name="option-positions rebuild", high_risk=False)
+    write_cmd = bool(write_controls.get(args.cmd, {}).get("write_requested", False))
     data_config_path = resolve_position_data_config_path(base=base, data_config=args.data_config)
     if write_cmd:
         guard = _guard_write(
@@ -432,6 +495,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == 'add':
         broker = normalize_broker(args.broker)
+        control = write_controls["add"]
+        dry_run = not bool(control["write_requested"])
         try:
             out = execute_manual_open(
                 repo,
@@ -448,13 +513,23 @@ def main(argv: list[str] | None = None) -> int:
                 premium_per_share=args.premium_per_share,
                 underlying_share_locked=args.underlying_share_locked,
                 note=args.note,
-                dry_run=bool(args.dry_run),
+                dry_run=dry_run,
             )
         except ValueError as e:
             raise SystemExit(str(e))
 
+        payload = attach_write_contract(
+            {"operation": "manual_open", **out, "ledger_store": ledger_store},
+            dry_run=dry_run,
+            write_applied=not dry_run,
+            rollback_hint="void the created open trade event with option-positions void-event --confirm",
+        )
+        if _json_or_text_format(args) == "json":
+            print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+            return 0
+
         fields = out["fields"]
-        if args.dry_run:
+        if dry_run:
             print('[DRY_RUN] create fields:')
             print(json.dumps(fields, ensure_ascii=False, indent=2))
             return 0
@@ -468,6 +543,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.cmd == 'buy-close':
+        control = write_controls["buy-close"]
+        dry_run = not bool(control["write_requested"])
         try:
             out = execute_manual_close(
                 repo,
@@ -475,7 +552,7 @@ def main(argv: list[str] | None = None) -> int:
                 contracts_to_close=int(args.contracts),
                 close_price=args.close_price,
                 close_reason=args.close_reason,
-                dry_run=bool(args.dry_run),
+                dry_run=dry_run,
                 broker=args.broker,
                 account=args.account,
                 symbol=args.symbol,
@@ -492,8 +569,17 @@ def main(argv: list[str] | None = None) -> int:
         match: dict[str, Any] = raw_match if isinstance(raw_match, dict) else {}
         if match.get("rule") == "strict_contract_unique":
             print(f"[MATCH] rule={match.get('rule')} record_id={match.get('record_id')}")
+        payload = attach_write_contract(
+            {"operation": "manual_close", **out, "ledger_store": ledger_store},
+            dry_run=dry_run,
+            write_applied=not dry_run,
+            rollback_hint="void the created close trade event with option-positions void-event --confirm",
+        )
+        if _json_or_text_format(args) == "json":
+            print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+            return 0
         patch = out["patch"]
-        if args.dry_run:
+        if dry_run:
             print('[DRY_RUN] update fields:')
             print(json.dumps(patch, ensure_ascii=False, indent=2))
             return 0
@@ -580,17 +666,31 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.cmd == 'rebuild':
-        raw_result = refresh_position_lot_projection(repo)
-        result = dict(raw_result) if isinstance(raw_result, dict) else raw_result.to_dict()
-        result["mode"] = "canonical_position_lots_rebuild"
+        control = write_controls["rebuild"]
+        should_apply = bool(control["write_requested"])
+        if should_apply:
+            raw_result = refresh_position_lot_projection(repo)
+            result = dict(raw_result) if isinstance(raw_result, dict) else raw_result.to_dict()
+            result["mode"] = "canonical_position_lots_rebuild"
+        else:
+            result = replay_trade_events(repo, apply=False)
+            result["mode"] = "canonical_position_lots_rebuild_dry_run"
         result["source_of_truth"] = "trade_events"
         result["projection"] = "position_lots"
         result["ledger_store"] = ledger_store
+        result = attach_write_contract(
+            result,
+            dry_run=not should_apply,
+            write_applied=should_apply,
+            rollback_hint="rerun option-positions rebuild from canonical trade_events",
+        )
         if args.format == 'json':
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0
+        prefix = "[DONE]" if should_apply else "[DRY_RUN]"
+        verb = "rebuilt" if should_apply else "would rebuild"
         print(
-            "[DONE] rebuilt canonical position_lots projection "
+            f"{prefix} {verb} canonical position_lots projection "
             f"trade_events={result.get('trade_event_count')} "
             f"position_lots={result.get('position_lot_count')} "
             f"diagnostics={result.get('projection_diagnostic_count')} "
@@ -651,10 +751,29 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.cmd == 'void-event':
+        control = write_controls["void-event"]
+        should_apply = bool(control["write_requested"])
         try:
-            result = record_trade_event_void(repo, event_id=args.event_id, reason=args.void_reason)
+            result = (
+                record_trade_event_void(repo, event_id=args.event_id, reason=args.void_reason)
+                if should_apply
+                else preview_trade_event_void(repo, event_id=args.event_id, reason=args.void_reason)
+            )
         except ValueError as e:
             raise SystemExit(str(e))
+        result["ledger_store"] = ledger_store
+        result = attach_write_contract(
+            result,
+            dry_run=not should_apply,
+            write_applied=should_apply,
+            rollback_hint="void-event appends an immutable correction; restore from backup if this was accidental",
+        )
+        if _json_or_text_format(args) == "json":
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
+        if not should_apply:
+            print(f"[DRY_RUN] would void event_id={args.event_id} reason={args.void_reason}")
+            return 0
         print(
             f"[DONE] voided event_id={args.event_id} "
             f"via={result.get('event_id')} "
@@ -663,6 +782,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.cmd == 'adjust-lot':
+        control = write_controls["adjust-lot"]
+        dry_run = not bool(control["write_requested"])
         try:
             out = execute_manual_adjust(
                 repo,
@@ -673,12 +794,21 @@ def main(argv: list[str] | None = None) -> int:
                 premium_per_share=args.premium_per_share,
                 multiplier=args.multiplier,
                 opened_at_ms=args.opened_at_ms,
-                dry_run=bool(args.dry_run),
+                dry_run=dry_run,
             )
         except ValueError as e:
             raise SystemExit(str(e))
+        payload = attach_write_contract(
+            {"operation": "manual_adjust", **out, "ledger_store": ledger_store},
+            dry_run=dry_run,
+            write_applied=not dry_run,
+            rollback_hint="void the created adjust trade event with option-positions void-event --confirm",
+        )
+        if _json_or_text_format(args) == "json":
+            print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+            return 0
         patch = out["patch"]
-        if args.dry_run:
+        if dry_run:
             print('[DRY_RUN] adjust fields:')
             print(json.dumps(patch, ensure_ascii=False, indent=2))
             return 0

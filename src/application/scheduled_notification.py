@@ -16,6 +16,7 @@ from domain.domain.engine import (
     decide_notification_delivery,
     resolve_multi_tick_engine_entrypoint,
 )
+from src.application.notification_delivery_adapter import build_notification_idempotency_key
 
 
 @dataclass(frozen=True)
@@ -99,6 +100,7 @@ class PerAccountSendExecution:
     sent_accounts: list[str]
     notify_failures: list[dict[str, object]]
     attempted_accounts: list[str]
+    send_results: list[dict[str, object]]
 
     @property
     def send_attempted_count(self) -> int:
@@ -111,6 +113,18 @@ class PerAccountSendExecution:
     @property
     def send_failed_count(self) -> int:
         return len(self.notify_failures)
+
+    @property
+    def retry_attempt_count(self) -> int:
+        return sum(int(item.get("retry_attempt_count") or 0) for item in self.send_results)
+
+    @property
+    def ambiguous_send_count(self) -> int:
+        return sum(1 for item in self.send_results if bool(item.get("ambiguous_send")))
+
+    @property
+    def duplicate_risk_count(self) -> int:
+        return sum(1 for item in self.send_results if bool(item.get("duplicate_risk")))
 
 NOTIFY_SEND_MAX_ATTEMPTS = 2
 NOTIFY_SEND_RETRY_DELAYS_SEC: tuple[float, ...] = (1.0,)
@@ -511,6 +525,12 @@ def send_account_message_with_retry(
     attempts = max(1, int(max_attempts or 1))
     final_record: dict[str, object] | None = None
     attempt_records: list[dict[str, object]] = []
+    idempotency_key = build_notification_idempotency_key(
+        run_id=run_id,
+        account=account,
+        target=target,
+        message=message,
+    )
 
     for attempt in range(1, attempts + 1):
         t_notify0 = monotonic()
@@ -521,6 +541,7 @@ def send_account_message_with_retry(
             "channel": str(channel),
             "target_set": bool(str(target or "")),
             "message_len": len(str(message or "")),
+            "idempotency_key": idempotency_key,
         }
         audit_fn(
             "notify",
@@ -539,6 +560,7 @@ def send_account_message_with_retry(
                 channel=str(channel),
                 target=str(target),
                 message=message,
+                idempotency_key=idempotency_key,
             )
             send_tool_dto = _normalize_delivery_output(normalize_notify_output=normalize_fn, send=send)
             raw_message_id = send_tool_dto.get("message_id")
@@ -558,6 +580,11 @@ def send_account_message_with_retry(
                 "stdout_tail": send_tool_dto.get("stdout_tail"),
                 "stderr_tail": send_tool_dto.get("stderr_tail"),
                 "error_code": error_code,
+                "idempotency_key": send_tool_dto.get("idempotency_key") or idempotency_key,
+                "http_attempts": send_tool_dto.get("http_attempts") if isinstance(send_tool_dto.get("http_attempts"), list) else [],
+                "retry_attempt_count": int(send_tool_dto.get("retry_attempt_count") or 0),
+                "ambiguous_send": bool(send_tool_dto.get("ambiguous_send")),
+                "duplicate_risk": bool(send_tool_dto.get("duplicate_risk")),
             }
         except subprocess.TimeoutExpired as exc:
             message_id = None
@@ -574,6 +601,7 @@ def send_account_message_with_retry(
                 "error_code": error_code,
                 "timeout_sec": getattr(exc, "timeout", None),
                 "exception_type": type(exc).__name__,
+                "idempotency_key": idempotency_key,
             }
         except Exception as exc:
             message_id = None
@@ -589,6 +617,7 @@ def send_account_message_with_retry(
                 "stderr_tail": _tail_text(f"{type(exc).__name__}: {exc}"),
                 "error_code": error_code,
                 "exception_type": type(exc).__name__,
+                "idempotency_key": idempotency_key,
             }
 
         will_retry = _should_retry_send(
@@ -641,6 +670,10 @@ def send_account_message_with_retry(
                 "message_id": record.get("message_id"),
                 "command_ok": bool(record.get("command_ok")),
                 "delivery_confirmed": bool(record.get("delivery_confirmed")),
+                "idempotency_key": record.get("idempotency_key") or idempotency_key,
+                "retry_attempt_count": int(record.get("retry_attempt_count") or 0),
+                "ambiguous_send": bool(record.get("ambiguous_send")),
+                "duplicate_risk": bool(record.get("duplicate_risk")),
             }
 
         runlog.safe_event(
@@ -670,6 +703,7 @@ def send_account_message_with_retry(
         "stdout_tail": "",
         "stderr_tail": "",
         "error_code": "SEND_FAILED",
+        "idempotency_key": idempotency_key,
     }
     command_ok = bool(final.get("command_ok"))
     return {
@@ -684,6 +718,10 @@ def send_account_message_with_retry(
         "message_id": final.get("message_id"),
         "command_ok": command_ok,
         "delivery_confirmed": bool(final.get("delivery_confirmed")),
+        "idempotency_key": final.get("idempotency_key") or idempotency_key,
+        "retry_attempt_count": int(final.get("retry_attempt_count") or 0),
+        "ambiguous_send": bool(final.get("ambiguous_send")),
+        "duplicate_risk": bool(final.get("duplicate_risk")),
     }
 
 
@@ -716,6 +754,7 @@ def execute_per_account_delivery(
     sent_accounts: list[str] = []
     notify_failures: list[dict[str, object]] = []
     attempted_accounts: list[str] = []
+    send_results: list[dict[str, object]] = []
     target = str(delivery_batch.target)
     channel = str(delivery_batch.channel)
 
@@ -750,6 +789,7 @@ def execute_per_account_delivery(
             sleep_fn=sleep_fn,
         )
         if not bool(send_result.get("ok")):
+            send_results.append(dict(send_result))
             error_code = str(send_result.get("error_code") or "SEND_FAILED")
             final_record = send_result.get("final") if isinstance(send_result.get("final"), dict) else {}
             if on_failure is not None:
@@ -767,15 +807,21 @@ def execute_per_account_delivery(
                     "stderr_tail": final_record.get("stderr_tail"),
                     "timeout_sec": final_record.get("timeout_sec"),
                     "exception_type": final_record.get("exception_type"),
+                    "idempotency_key": send_result.get("idempotency_key"),
+                    "retry_attempt_count": int(send_result.get("retry_attempt_count") or 0),
+                    "ambiguous_send": bool(send_result.get("ambiguous_send")),
+                    "duplicate_risk": bool(send_result.get("duplicate_risk")),
                 }
             )
             continue
+        send_results.append(dict(send_result))
         sent_accounts.append(acct)
 
     return PerAccountSendExecution(
         sent_accounts=sent_accounts,
         notify_failures=notify_failures,
         attempted_accounts=attempted_accounts,
+        send_results=send_results,
     )
 
 def build_multi_tick_scheduler_decision(

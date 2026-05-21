@@ -229,6 +229,9 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
     notify_failures: list[dict[str, object]] = []
     send_attempted_count = 0
     send_confirmed_count = 0
+    retry_attempt_count = 0
+    ambiguous_send_count = 0
+    duplicate_risk_count = 0
     failure_summary_delivery: dict[str, object] | None = None
     if bool(notify_delivery.get("should_send")):
         assert delivery_batch is not None
@@ -264,6 +267,9 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
         notify_failures = execution.notify_failures
         send_attempted_count = execution.send_attempted_count
         send_confirmed_count = execution.send_confirmed_count
+        retry_attempt_count = execution.retry_attempt_count
+        ambiguous_send_count = execution.ambiguous_send_count
+        duplicate_risk_count = execution.duplicate_risk_count
         if notify_failures:
             failure_summary_result = send_account_message_with_retry(
                 base=process_root,
@@ -318,6 +324,9 @@ def run_tick_notification_flow(request: TickNotificationRequest) -> int:
         total_accounts=len(account_messages),
         send_attempted_count=send_attempted_count,
         send_confirmed_count=send_confirmed_count,
+        retry_attempt_count=retry_attempt_count,
+        ambiguous_send_count=ambiguous_send_count,
+        duplicate_risk_count=duplicate_risk_count,
     )
     try:
         apply_notify_results_to_tick_metrics(

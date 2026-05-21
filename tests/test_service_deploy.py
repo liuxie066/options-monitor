@@ -47,6 +47,8 @@ def test_render_systemd_bundle_uses_runtime_root_and_canonical_entrypoints(tmp_p
     assert 'Environment="HOME=' not in tick
     assert str(repo / "om") + " run tick-cron --market us" in tick
     assert "--lock-path " + str(runtime / "locks" / "tick-us.lock") in tick
+    assert str(repo / "om") + " option-positions auto-close-expired" in files["systemd/options-monitor-auto-close-us.service"]["content"]
+    assert "--apply --yes --quiet" in files["systemd/options-monitor-auto-close-us.service"]["content"]
     assert "OnCalendar=Mon..Fri *-*-* 09..16:00/10:00 America/New_York" in tick_timer
     assert "OnUnitActiveSec=10min" not in tick_timer
     assert "OnBootSec=2min" not in tick_timer

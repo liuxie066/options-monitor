@@ -96,9 +96,17 @@ def test_inbound_parser_maps_core_read_only_commands() -> None:
     assert positions.name == "option_positions_open"
     assert positions.arguments == {"account": "sy", "status": "open"}
 
+    all_positions = parse_inbound_text("持仓")
+    assert all_positions.name == "option_positions_open"
+    assert all_positions.arguments == {"status": "open"}
+
     income = parse_inbound_text("收益 sy 本月", now_fn=lambda: date(2026, 5, 19))
     assert income.name == "monthly_income_report"
     assert income.arguments == {"account": "sy", "month": "2026-05"}
+
+    all_income = parse_inbound_text("收益 本月", now_fn=lambda: date(2026, 5, 19))
+    assert all_income.name == "monthly_income_report"
+    assert all_income.arguments == {"month": "2026-05"}
 
     last_month = parse_inbound_text("收益 lx 上月", now_fn=lambda: date(2026, 1, 3))
     assert last_month.arguments == {"account": "lx", "month": "2025-12"}
@@ -108,12 +116,12 @@ def test_inbound_parser_maps_core_read_only_commands() -> None:
     assert logs.arguments["run_id"] == "20260515T182459Z-474761"
 
 
-def test_inbound_parser_requires_clarification_for_missing_account() -> None:
+def test_inbound_parser_requires_clarification_for_unknown_command() -> None:
     with pytest.raises(AgentToolError) as exc:
-        parse_inbound_text("持仓")
+        parse_inbound_text("查一下")
 
     assert exc.value.code == "NEEDS_CLARIFICATION"
-    assert "账户" in exc.value.message
+    assert "没有识别" in exc.value.message
 
 
 def test_inbound_policy_allows_sender_and_rejects_non_pure_read_tool() -> None:
@@ -866,6 +874,45 @@ def test_inbound_handle_executes_read_only_tool_and_replays_duplicate_message(tm
     assert row == ("monthly_income_report", "monthly_income_report", "allowed", 1, 1, "ou_1", "feishu:ou_1")
 
 
+def test_inbound_handle_omits_account_filter_when_account_not_provided(tmp_path: Path) -> None:
+    audit_db = tmp_path / "inbound.sqlite3"
+    calls: list[tuple[str, dict]] = []
+
+    def _execute_tool(tool_name: str, payload: dict) -> dict:
+        calls.append((tool_name, payload))
+        return build_response(tool_name=tool_name, ok=True, data={"summary": []})
+
+    income = handle_inbound_request(
+        InboundRequest(
+            text="收益 2026-05",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_income",
+            audit_db=str(audit_db),
+        ),
+        execute_tool_fn=_execute_tool,
+        allowed_senders="feishu:ou_1",
+    )
+    positions = handle_inbound_request(
+        InboundRequest(
+            text="持仓",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_positions",
+            audit_db=str(audit_db),
+        ),
+        execute_tool_fn=_execute_tool,
+        allowed_senders="feishu:ou_1",
+    )
+
+    assert income["ok"] is True
+    assert positions["ok"] is True
+    assert calls == [
+        ("monthly_income_report", {"config_key": "us", "month": "2026-05"}),
+        ("option_positions_read", {"config_key": "us", "action": "list", "status": "open"}),
+    ]
+
+
 def test_inbound_handle_without_message_id_generates_fresh_command_id(tmp_path: Path) -> None:
     audit_db = tmp_path / "inbound.sqlite3"
     calls: list[tuple[str, dict]] = []
@@ -919,11 +966,16 @@ def test_inbound_monthly_income_renderer_prefers_return_summary() -> None:
                         "month": "2026-05",
                         "account": "lx",
                         "net_return_rate": 0.0681,
+                        "net_income_by_ccy": {"USD": 5000.0},
                         "net_income_cny": 36097.23,
                         "cash_secured_cny": 530385.93,
                         "annualized_basis_days": 19,
                         "annualized_net_return_rate": 1.3074,
+                        "premium_income_by_ccy": {"USD": 5100.0},
+                        "premium_income_cny": 36800.0,
                         "premium_return_rate": 0.0697,
+                        "realized_pnl_by_ccy": {"USD": -100.0},
+                        "realized_pnl_cny": -702.77,
                     }
                 ],
             },
@@ -932,8 +984,45 @@ def test_inbound_monthly_income_renderer_prefers_return_summary() -> None:
 
     assert "lx 2026-05 收益摘要" in text
     assert "净收益率：6.81%" in text
-    assert "净收入：CNY 36,097" in text
+    assert "净流入：CNY 36,097（USD 5,000）" in text
+    assert "现金担保" not in text
     assert "按 19 天折年化：130.74%" in text
+    assert "权利金收入：CNY 36,800（USD 5,100）" in text
+    assert "已实现平仓PnL：CNY -703（USD -100）" in text
+
+
+def test_inbound_monthly_income_renderer_does_not_cap_return_summary_rows() -> None:
+    intent = parse_inbound_text("收益")
+    rows = []
+    for idx in range(5):
+        month = f"2026-0{idx + 1}"
+        rows.append(
+            {
+                "month": month,
+                "account": "lx",
+                "net_return_rate": 0.01,
+                "net_income_by_ccy": {"USD": 100.0 + idx},
+                "net_income_cny": 700.0 + idx,
+                "cash_secured_cny": 10000.0,
+                "annualized_basis_days": 30,
+                "annualized_net_return_rate": 0.121667,
+                "premium_return_rate": 0.01,
+                "premium_income_cny": 700.0 + idx,
+                "realized_pnl_cny": 0.0,
+            }
+        )
+    text = render_inbound_text(
+        intent=intent,
+        tool_result=build_response(
+            tool_name="monthly_income_report",
+            ok=True,
+            data={"return_summary": rows},
+        ),
+    )
+
+    assert "lx 2026-01 收益摘要" in text
+    assert "lx 2026-05 收益摘要" in text
+    assert text.count("收益摘要") == 5
 
 
 def test_inbound_monthly_income_renderer_explains_incomplete_summary() -> None:
@@ -1030,8 +1119,9 @@ def test_inbound_monthly_income_renderer_shows_original_currency_when_rates_miss
     assert "本月有开仓权利金收入，但缺汇率导致无法计算 CNY 收益率" in text
     assert "当前持仓缺少现金担保金额" not in text
     assert "账本缺少已平仓/close 数据" not in text
+    assert "净流入：HKD 22,751 + USD 2,400" in text
     assert "权利金收入：HKD 23,735 + USD 2,400" in text
-    assert "现金担保：HKD 377,500 + USD 29,745" in text
+    assert "现金担保：HKD 377,500 + USD 29,745" not in text
     assert "原币权利金收益率：HKD 6.29%，USD 8.07%" in text
 
 
@@ -1071,6 +1161,45 @@ def test_inbound_renderer_summarizes_position_rows() -> None:
     assert "sy 当前 open 期权持仓：2 条" in text
     assert "0700.HK short call 510 exp 2026-05-28 open 2" in text
     assert "数据源：OM 本地 SQLite position_lots" in text
+
+    all_accounts = render_inbound_text(
+        intent=parse_inbound_text("持仓"),
+        tool_result=build_response(
+            tool_name="option_positions_read",
+            ok=True,
+            data={"rows": [], "filters": {"account": None, "status": "open"}},
+        ),
+    )
+    assert all_accounts.startswith("全部账户 当前没有 open 期权持仓。")
+
+
+def test_inbound_renderer_does_not_cap_position_rows() -> None:
+    rows = [
+        {
+            "account": "sy",
+            "symbol": f"SYM{idx}",
+            "option_type": "put",
+            "side": "short",
+            "strike": 400 + idx,
+            "expiration_ymd": "2026-06-29",
+            "contracts_open": idx,
+        }
+        for idx in range(1, 13)
+    ]
+
+    text = render_inbound_text(
+        intent=parse_inbound_text("持仓 sy"),
+        tool_result=build_response(
+            tool_name="option_positions_read",
+            ok=True,
+            data={"rows": rows, "filters": {"account": "sy", "status": "open"}},
+        ),
+    )
+
+    assert "sy 当前 open 期权持仓：12 条" in text
+    assert "SYM1 short put 401 exp 2026-06-29 open 1" in text
+    assert "SYM12 short put 412 exp 2026-06-29 open 12" in text
+    assert "未展示" not in text
 
 
 def test_inbound_renderer_explains_empty_positions() -> None:

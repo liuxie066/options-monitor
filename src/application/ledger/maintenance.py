@@ -161,7 +161,7 @@ def _raise_if_legacy_position_lots_without_trade_events(repo: Any) -> None:
         return
     raise ValueError(
         "position_lots exist without trade_events; run explicit "
-        "option-positions store migrate-legacy --apply before auto-close"
+            "option-positions store migrate-legacy --confirm before auto-close"
     )
 
 

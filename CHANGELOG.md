@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 1.2.104 - 2026-05-21
+
+### Added
+- Added a shared write contract for CLI and agent write paths, including standard `dry_run`, `write_applied`, `backup_path`, `audit_id`, and `rollback_hint` fields.
+- Added Feishu app notification idempotency keys and send-attempt diagnostics for retries, ambiguous sends, and duplicate-risk reporting.
+
+### Changed
+- Unified write flag semantics: local writes use `--apply`, while high-risk trade, Feishu, and service writes require `--confirm` or non-interactive `--yes`.
+- Made inbound `收益` and `持仓` default to all accounts when no account is provided, expanded income receipt details, and removed fixed truncation from income and position renderers.
+- Updated rendered service commands to pass `--yes` for non-interactive trade intake and expired-position auto-close jobs.
+
 ## 1.2.103 - 2026-05-21
 
 ### Fixed

@@ -31,6 +31,7 @@ from src.application.layered_config import (
     default_user_config_path,
 )
 from src.application.runtime_config_freshness import GENERATED_KEY
+from src.application.write_contract import attach_write_contract
 
 
 SKIP_ROOT_KEYS = {"account_settings", "accounts", "defaults", "markets", "symbols"}
@@ -451,23 +452,26 @@ def preview_config_yaml_migration(
         atomic_write_text(output_path, yaml_text, encoding="utf-8")
         post_write_validation = _post_write_validation(repo_root=repo_root, config_path=output_path)
 
-    return {
-        "ok": all(bool(item.get("ok")) for item in validation.values()),
-        "dry_run": not should_apply,
-        "write_applied": should_apply,
-        "output_config_yaml_path": str(output_path),
-        "backup_path": str(backup_path) if backup_path else None,
-        "post_write_validation": post_write_validation,
-        "sources": {
-            "common_user_config_path": str(common_path) if common_loaded else None,
-            "common_user_config_loaded": bool(common_loaded),
-            "us_user_config_path": str(user_paths["us"]),
-            "hk_user_config_path": str(user_paths["hk"]),
+    return attach_write_contract(
+        {
+            "ok": all(bool(item.get("ok")) for item in validation.values()),
+            "output_config_yaml_path": str(output_path),
+            "post_write_validation": post_write_validation,
+            "sources": {
+                "common_user_config_path": str(common_path) if common_loaded else None,
+                "common_user_config_loaded": bool(common_loaded),
+                "us_user_config_path": str(user_paths["us"]),
+                "hk_user_config_path": str(user_paths["hk"]),
+            },
+            "validation": validation,
+            "warnings": warnings,
+            "yaml": yaml_text,
         },
-        "validation": validation,
-        "warnings": warnings,
-        "yaml": yaml_text,
-    }
+        dry_run=not should_apply,
+        write_applied=should_apply,
+        backup_path=backup_path,
+        rollback_hint=f"restore {backup_path} to {output_path}" if backup_path else f"delete {output_path} or rerun migration",
+    )
 
 
 __all__ = ["preview_config_yaml_migration"]

@@ -42,8 +42,10 @@ The first implementation is read-only and deterministic. It supports:
 | `状态` | `runtime_status` |
 | `健康检查` | `healthcheck` |
 | `配置检查` | `config_validate` |
-| `持仓 sy` | `option_positions_read` |
-| `收益 sy` | `monthly_income_report` |
+| `持仓` | `option_positions_read` for all accounts, open positions |
+| `持仓 sy` | `option_positions_read` for one account |
+| `收益` | `monthly_income_report` for all accounts/months |
+| `收益 sy` | `monthly_income_report` for one account |
 | `收益 sy 2026-05` | `monthly_income_report` with month filter |
 | `最近运行` | `runtime_runs` |
 | `日志 <run_id>` | `runtime_logs` |

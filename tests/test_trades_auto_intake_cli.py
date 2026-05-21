@@ -79,6 +79,31 @@ def test_auto_trade_intake_open_example_dry_run_without_explicit_data_config(tmp
     assert payload["action"] == "open"
 
 
+def test_auto_trade_intake_apply_mode_requires_confirm(tmp_path: Path) -> None:
+    config_path = _write_runtime_config(tmp_path)
+    deal_path = _write_open_deal_payload(tmp_path / "auto_trade_intake.open.json")
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "src.application.trades.auto_intake",
+            "--config",
+            str(config_path),
+            "--mode",
+            "apply",
+            "--deal-json",
+            str(deal_path),
+        ],
+        cwd=str(BASE),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert "use --confirm or --yes" in result.stdout
+
+
 def test_auto_trade_intake_once_defaults_state_paths_to_runtime_root(tmp_path: Path) -> None:
     config_path = _write_runtime_config(tmp_path)
     runtime_root = tmp_path / "runtime"

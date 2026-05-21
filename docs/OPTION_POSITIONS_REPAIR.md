@@ -51,7 +51,7 @@
 动作：
 
 ```bash
-./om option-positions void-event --event-id <open_event_id>
+./om option-positions void-event --event-id <open_event_id> --confirm
 ```
 
 效果：
@@ -65,7 +65,7 @@
 动作：
 
 ```bash
-./om option-positions void-event --event-id <close_event_id>
+./om option-positions void-event --event-id <close_event_id> --confirm
 ```
 
 效果：
@@ -94,8 +94,8 @@
 确认后再 apply：
 
 ```bash
-./om option-positions adjust-lot --record-id <record_id> --premium-per-share 3.1
-./om option-positions adjust-lot --record-id <record_id> --exp 2026-07-17 --strike 105
+./om option-positions adjust-lot --record-id <record_id> --premium-per-share 3.1 --confirm
+./om option-positions adjust-lot --record-id <record_id> --exp 2026-07-17 --strike 105 --confirm
 ```
 
 效果：

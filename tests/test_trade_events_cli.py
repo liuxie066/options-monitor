@@ -70,6 +70,10 @@ def test_trade_events_repair_dry_run_does_not_mutate(monkeypatch, tmp_path: Path
 
     out = json.loads(capsys.readouterr().out)
     assert out["mode"] == "dry_run"
+    assert out["dry_run"] is True
+    assert out["write_applied"] is False
+    assert out["backup_path"] is None
+    assert out["audit_id"].startswith("audit_")
     assert out["target_event"]["event_id"] == event_id
     assert out["repair_event"]["contract_key"]["strike"] == 500.0
     assert out["ledger_preflight"]["status"] == "ok"
@@ -87,10 +91,15 @@ def test_trade_events_repair_apply_voids_and_replaces_event(monkeypatch, tmp_pat
     repo, event_id = _repo_with_open_event(tmp_path)
     monkeypatch.setattr(cli, "resolve_option_positions_repo", lambda **_kwargs: (tmp_path / "data.json", repo))
 
-    assert cli.main(["repair", event_id, "--strike", "500", "--apply", "--format", "json"]) == 0
+    assert cli.main(["repair", event_id, "--strike", "500", "--confirm", "--format", "json"]) == 0
 
     out = json.loads(capsys.readouterr().out)
     assert out["mode"] == "applied"
+    assert out["dry_run"] is False
+    assert out["write_applied"] is True
+    assert out["backup_path"] is None
+    assert out["audit_id"].startswith("audit_")
+    assert out["rollback_hint"]
     assert out["target_event_id"] == event_id
     assert out["ledger_preflight"]["status"] == "ok"
     assert out["ledger_preflight"]["event_type"] == "repair"
@@ -109,10 +118,10 @@ def test_trade_events_repair_rejects_second_repair(monkeypatch, tmp_path: Path, 
     repo, event_id = _repo_with_open_event(tmp_path)
     monkeypatch.setattr(cli, "resolve_option_positions_repo", lambda **_kwargs: (tmp_path / "data.json", repo))
 
-    assert cli.main(["repair", event_id, "--strike", "500", "--apply", "--format", "json"]) == 0
+    assert cli.main(["repair", event_id, "--strike", "500", "--confirm", "--format", "json"]) == 0
     capsys.readouterr()
 
-    assert cli.main(["repair", event_id, "--strike", "510", "--apply"]) == 2
+    assert cli.main(["repair", event_id, "--strike", "510", "--confirm"]) == 2
 
     out = capsys.readouterr().out
     assert "trade event already voided" in out
@@ -138,7 +147,7 @@ def test_trade_events_repair_rejects_open_event_with_downstream_close(monkeypatc
     )
     monkeypatch.setattr(cli, "resolve_option_positions_repo", lambda **_kwargs: (tmp_path / "data.json", repo))
 
-    assert cli.main(["repair", event_id, "--strike", "500", "--apply"]) == 2
+    assert cli.main(["repair", event_id, "--strike", "500", "--confirm"]) == 2
 
     out = capsys.readouterr().out
     assert "cannot repair an open event with downstream close/adjust dependencies" in out
@@ -170,8 +179,20 @@ def test_trade_events_rejects_apply_and_dry_run_together(monkeypatch, tmp_path: 
     repo, event_id = _repo_with_open_event(tmp_path)
     monkeypatch.setattr(cli, "resolve_option_positions_repo", lambda **_kwargs: (tmp_path / "data.json", repo))
 
-    with pytest.raises(SystemExit, match="--apply and --dry-run are mutually exclusive"):
+    with pytest.raises(SystemExit, match="--dry-run cannot be combined"):
         cli.main(["repair", event_id, "--strike", "500", "--apply", "--dry-run"])
+
+
+def test_trade_events_repair_apply_alone_requires_confirm(monkeypatch, tmp_path: Path) -> None:
+    import src.interfaces.cli.trade_events as cli
+
+    repo, event_id = _repo_with_open_event(tmp_path)
+    monkeypatch.setattr(cli, "resolve_option_positions_repo", lambda **_kwargs: (tmp_path / "data.json", repo))
+
+    with pytest.raises(SystemExit, match="use --confirm or --yes"):
+        cli.main(["repair", event_id, "--strike", "500", "--apply"])
+
+    assert len(repo.list_trade_events()) == 1
 
 
 def test_trade_events_replay_dry_run_reports_projection(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -313,7 +334,7 @@ def test_trade_events_repair_apply_outputs_explicit_runtime_root_store(tmp_path:
         event_id,
         "--strike",
         "500",
-        "--apply",
+        "--confirm",
         "--format",
         "json",
     ]) == 0

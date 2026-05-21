@@ -219,7 +219,7 @@ def test_option_intake_close_auto_matches_unique_selector(monkeypatch, tmp_path:
             "【成交提醒】成功买入1张$腾讯 260429 480.00 沽$，成交价格：1.20",
             "--action",
             "close",
-            "--apply",
+            "--confirm",
         ],
     )
 
@@ -296,6 +296,16 @@ def test_option_intake_close_parser_skips_multiplier_resolution(monkeypatch, tmp
 
     assert captured["resolve_multiplier"] is False
     assert "[DRY_RUN] update fields:" in capsys.readouterr().out
+
+
+def test_option_intake_apply_alone_requires_confirm(monkeypatch, tmp_path: Path, capsys) -> None:
+    import src.application.option_intake as intake
+
+    monkeypatch.setattr(intake, "parse_option_message_text", lambda *_args, **_kwargs: _fake_open_parse())
+    monkeypatch.setattr(sys, "argv", ["option_intake", "--text", "成交提醒", "--apply"])
+
+    assert intake.main() == 2
+    assert "use --confirm or --yes" in capsys.readouterr().out
 
 
 def _seed_popmart_short_call(repo: ledger_repository.SQLiteOptionPositionsRepository) -> str:
@@ -379,7 +389,7 @@ def test_option_intake_runtime_config_path_resolves_runtime_ledger_without_env(
             str(config_path),
             "--text",
             "/om -sy open 成交提醒",
-            "--apply",
+            "--confirm",
         ],
     )
 
@@ -432,7 +442,7 @@ def test_option_intake_apply_fails_closed_when_release_local_store_has_rows(
             str(config_path),
             "--text",
             "/om -sy open 成交提醒",
-            "--apply",
+            "--confirm",
         ],
     )
 
@@ -481,7 +491,7 @@ def test_option_intake_btc_apply_uses_parsed_fill_timestamp(monkeypatch, tmp_pat
     expected_dt = datetime.fromtimestamp(expected_ms / 1000, tz=timezone.utc)
     assert (expected_dt.hour, expected_dt.minute, expected_dt.second) == (2, 42, 31)
 
-    monkeypatch.setattr(sys, "argv", ["option_intake", "--text", message, "--apply"])
+    monkeypatch.setattr(sys, "argv", ["option_intake", "--text", message, "--confirm"])
 
     assert intake.main() == 0
 

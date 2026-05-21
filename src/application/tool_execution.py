@@ -41,11 +41,11 @@ def _write_gate_error(definition: AgentToolDefinition, payload: dict[str, Any]) 
             message=f"{definition.name} write mode is disabled",
             hint="Set OM_AGENT_ENABLE_WRITE_TOOLS=true and pass confirm=true for non-dry-run writes.",
         )
-    if definition.requires_confirm and not bool(payload.get("confirm", False)):
+    if definition.requires_confirm and not bool(payload.get("confirm", False) or payload.get("yes", False)):
         return AgentToolError(
             code="CONFIRMATION_REQUIRED",
             message=f"confirm=true is required for {definition.name} non-dry-run writes",
-            hint="Run the tool in dry-run/preview mode first, then retry with confirm=true only when the write is intended.",
+            hint="Run the tool in dry-run/preview mode first, then retry with confirm=true or yes=true only when the write is intended.",
         )
     return None
 

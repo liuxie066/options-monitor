@@ -12,6 +12,7 @@ from src.application.agent_tool_config import resolve_runtime_config_path
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.config_validator import validate_config
 from src.application.runtime_config_paths import write_json_atomic
+from src.application.write_contract import attach_write_contract
 
 
 def _read_json_object(path: Path) -> dict[str, Any]:
@@ -172,13 +173,7 @@ def set_runtime_config_value(
     _path_set(mutated, parts, new_value)
     _validate_runtime_config_payload(deepcopy(mutated))
 
-    should_apply = bool(apply)
-    if should_apply and not bool(confirm):
-        raise AgentToolError(
-            code="CONFIRMATION_REQUIRED",
-            message="config set writes require --confirm together with --apply",
-            hint="Omit --apply to preview the change without writing.",
-        )
+    should_apply = bool(apply or confirm)
 
     backup_path: Path | None = None
     if should_apply:
@@ -188,18 +183,22 @@ def set_runtime_config_value(
             shutil.copy2(path, backup_path)
         write_json_atomic(path, mutated)
 
-    return {
-        "config_path": str(path),
-        "key": key,
-        "existed": bool(existed),
-        "old_value": deepcopy(old_value) if existed else None,
-        "new_value": deepcopy(new_value),
-        "changed": (not existed) or old_value != new_value,
-        "validated": True,
-        "applied": should_apply,
-        "dry_run": not should_apply,
-        "backup_path": str(backup_path) if backup_path else None,
-    }
+    return attach_write_contract(
+        {
+            "config_path": str(path),
+            "key": key,
+            "existed": bool(existed),
+            "old_value": deepcopy(old_value) if existed else None,
+            "new_value": deepcopy(new_value),
+            "changed": (not existed) or old_value != new_value,
+            "validated": True,
+            "applied": should_apply,
+        },
+        dry_run=not should_apply,
+        write_applied=should_apply,
+        backup_path=backup_path,
+        rollback_hint=f"restore {backup_path} to {path}" if backup_path else "rerun config set with the previous value",
+    )
 
 
 __all__ = [
