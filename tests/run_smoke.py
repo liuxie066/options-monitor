@@ -175,6 +175,36 @@ def test_installed_global_wrappers_work_outside_release_cwd() -> None:
         assert spec_payload["name"] == "options-monitor-local-tools"
 
 
+def test_support_bundle_cli_writes_redacted_bundle() -> None:
+    base = _ensure_repo_on_path()
+    om = (base / "om").resolve()
+    with tempfile.TemporaryDirectory() as td:
+        out_dir = Path(td) / "support"
+        p = subprocess.run(
+            [
+                str(om),
+                "support",
+                "bundle",
+                "--config-key",
+                "us",
+                "--output-dir",
+                str(out_dir),
+                "--no-local-env-file",
+            ],
+            cwd=str(base),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        payload = json.loads(p.stdout)
+        assert payload["tool_name"] == "support.bundle"
+        bundle_path = Path(payload["data"]["bundle_path"])
+        assert bundle_path.exists()
+        bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+        assert bundle["schema_version"] == "support_bundle.v1"
+        assert bundle["redaction"]["enabled"] is True
+
+
 def test_agent_internal_init_minimal_config() -> None:
     _ensure_repo_on_path()
     with tempfile.TemporaryDirectory() as td:
@@ -474,6 +504,7 @@ def main() -> None:
     test_cash_cap_is_best_effort()
     test_agent_launcher_spec_contract()
     test_installed_global_wrappers_work_outside_release_cwd()
+    test_support_bundle_cli_writes_redacted_bundle()
     test_agent_launcher_spec_prefers_broker_field()
     test_agent_internal_init_minimal_config()
     test_agent_internal_init_reuses_existing_data_config_across_markets()

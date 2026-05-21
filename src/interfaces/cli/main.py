@@ -61,6 +61,7 @@ from src.application.settings import (
     explain_effective_setting,
     inspect_effective_settings,
 )
+from src.application.support_bundle import support_bundle_response
 from domain.domain.config_contract import ensure_runtime_schedule_matches_market
 from src.application.version_check import check_version_update
 from src.application.cash_headroom_query import query_sell_put_cash
@@ -107,6 +108,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     doctor.add_argument("--audit-db", default=None)
     doctor.add_argument("--profile-path", default=None)
     doctor.add_argument("--include-service-status", action="store_true")
+
+    support = sub.add_parser("support", help="collect redacted support diagnostics")
+    support_sub = support.add_subparsers(dest="support_command", required=True)
+    support_bundle = support_sub.add_parser("bundle", help="write a redacted support bundle JSON")
+    support_bundle.add_argument("--config-key", default=None, choices=("us", "hk"))
+    support_bundle.add_argument("--config-path", default=None)
+    support_bundle.add_argument("--accounts", nargs="*", default=None)
+    support_bundle.add_argument("--profile-path", default=None)
+    support_bundle.add_argument("--env-file", default=None)
+    support_bundle.add_argument("--no-local-env-file", action="store_true")
+    support_bundle.add_argument("--include-healthcheck", action="store_true")
+    support_bundle.add_argument("--runtime-root", default=None)
+    support_bundle.add_argument("--output-dir", default=None)
 
     inbound = sub.add_parser("inbound", help="handle controlled inbound remote commands")
     inbound_sub = inbound.add_subparsers(dest="inbound_command", required=True)
@@ -712,6 +726,20 @@ def main(argv: list[str] | None = None) -> int:
                 tool_name="doctor",
                 ok=bool(healthcheck.get("ok", True)),
                 data={"healthcheck": healthcheck},
+            ))
+
+        if args.command == "support" and args.support_command == "bundle":
+            return _print(support_bundle_response(
+                repo_root=repo_base(),
+                config_key=args.config_key,
+                config_path=args.config_path,
+                accounts=args.accounts,
+                profile_path=args.profile_path,
+                env_file=args.env_file,
+                include_local_env_file=not bool(args.no_local_env_file),
+                include_healthcheck=bool(args.include_healthcheck),
+                output_dir=args.output_dir,
+                runtime_root=args.runtime_root,
             ))
 
         if args.command == "inbound" and args.inbound_command == "handle":

@@ -10,12 +10,12 @@
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh -o /tmp/options-monitor-install.sh
-bash /tmp/options-monitor-install.sh --version v1.2.107 --prefix "$HOME/apps/options-monitor"
+bash /tmp/options-monitor-install.sh --version <release-tag> --prefix "$HOME/apps/options-monitor"
 
 om setup check
 ```
 
-`--version` 必须是明确 release tag。不要在生产机器上安装浮动分支。
+`--version` 必须是明确 release tag，例如 `v1.2.109`。不要在生产机器上安装浮动分支。
 安装脚本默认把 wrapper 写到 `$HOME/.local/bin`。如果该目录不在 `PATH`，安装输出会提示：
 
 ```bash
@@ -33,7 +33,7 @@ export PATH="$HOME/.local/bin:$PATH"
 如果需要 Feishu long-connection、远端 inbound 或服务端依赖，安装时加 `--with-server`：
 
 ```bash
-bash /tmp/options-monitor-install.sh --version v1.2.107 --prefix "$HOME/apps/options-monitor" --with-server
+bash /tmp/options-monitor-install.sh --version <release-tag> --prefix "$HOME/apps/options-monitor" --with-server
 ```
 
 ## macOS
@@ -59,7 +59,7 @@ brew install python git
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh -o /tmp/options-monitor-install.sh
-bash /tmp/options-monitor-install.sh --version v1.2.107 --prefix "$HOME/apps/options-monitor"
+bash /tmp/options-monitor-install.sh --version <release-tag> --prefix "$HOME/apps/options-monitor"
 
 om setup check
 ```
@@ -67,7 +67,7 @@ om setup check
 如果这台 Mac 要跑 Feishu long-connection inbound：
 
 ```bash
-bash /tmp/options-monitor-install.sh --version v1.2.107 --prefix "$HOME/apps/options-monitor" --with-server
+bash /tmp/options-monitor-install.sh --version <release-tag> --prefix "$HOME/apps/options-monitor" --with-server
 ```
 
 本地手动运行可以继续使用 repo 内忽略文件：
@@ -115,7 +115,7 @@ Python 需要 3.10 或更高版本；较旧发行版请安装更新的 Python �
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh -o /tmp/options-monitor-install.sh
-bash /tmp/options-monitor-install.sh --version v1.2.107 --prefix "$HOME/apps/options-monitor"
+bash /tmp/options-monitor-install.sh --version <release-tag> --prefix "$HOME/apps/options-monitor"
 
 om setup check
 ```
@@ -123,7 +123,7 @@ om setup check
 如果这台服务器要跑 Feishu long-connection inbound：
 
 ```bash
-bash /tmp/options-monitor-install.sh --version v1.2.107 --prefix "$HOME/apps/options-monitor" --with-server
+bash /tmp/options-monitor-install.sh --version <release-tag> --prefix "$HOME/apps/options-monitor" --with-server
 ```
 
 生产服务 env-file 推荐放在：
@@ -165,7 +165,7 @@ om service render \
 ```bash
 git clone https://github.com/liuxie066/options-monitor.git options-monitor
 cd options-monitor
-git checkout v1.2.107
+git checkout <release-tag>
 python3 -m venv .venv
 ./.venv/bin/pip install -U pip
 ./.venv/bin/pip install -r requirements.txt -c constraints.txt
@@ -184,9 +184,9 @@ python3 -m venv .venv
 
 ```text
 $HOME/apps/options-monitor/
-  current -> releases/v1.2.107
+  current -> releases/<release-tag>
   releases/
-    v1.2.107/
+    <release-tag>/
       .venv/
       om
       om-agent
@@ -214,7 +214,7 @@ installer 允许做：
 installer 禁止做：
 
 - 覆盖未知来源的同名 `om` / `om-agent` 命令（除非显式传 `--force-cli-wrapper`）
-- 写 `config.us.json` / `config.hk.json`
+- 写 `config.yaml`、`config.us.json` 或 `config.hk.json`
 - 写真实 env-file 或 secrets
 - 创建或启用 systemd/launchd timer
 - 启动长期服务

@@ -123,7 +123,7 @@ cd "$REPO"
 
 启用 `--include-auto-upgrade` 时，渲染器会保留 `--repo-root` 传入的 symlink 字面路径，并默认把 tick / trade-intake / Feishu WS / maintenance config 指到 runtime root 下的 `config.us.json` / `config.hk.json`。这样 release 切换只移动代码，不绑定 release 目录内的生产配置。需要用非默认路径时，显式传 `--config-us` / `--config-hk`。
 
-自动升级切换 release 前，会恢复新 release 缺失的 `configs/user.common.json`、`configs/user.hk.json`、`configs/user.us.json`。来源包括 runtime config metadata 里的 source path、`<runtime_root>/configs/`、当前 release，以及 `releases/` 下最近一个包含完整 overlay 的旧 release。随后会根据 profile 里的 config path 执行 `./om config build` / `./om config validate`；切换 symlink 后还会再用 current symlink 重建/校验一次。如果仍缺少必要 overlay 或 rebuild/validate 失败，升级会记录 remediation 并阻止未切换场景继续切换，避免 tick 进入 runtime config stale 状态。
+自动升级切换 release 前，会恢复新 release 缺失的 `configs/user.common.json`、`configs/user.hk.json`、`configs/user.us.json`。来源包括 runtime config metadata 里的 source path、`<runtime_root>/configs/`、当前 release，以及 `releases/` 下最近一个包含完整 overlay 的旧 release。随后会根据 profile 里的 config path 执行 legacy `./om config build` / `./om config validate`；切换 symlink 后还会再用 current symlink 重建/校验一次。如果仍缺少必要 overlay 或 rebuild/validate 失败，升级会记录 remediation 并阻止未切换场景继续切换，避免 tick 进入 runtime config stale 状态。使用 `config.yaml` authoring 的部署，应把 `config.yaml` 和生成后的 `config.us.json` / `config.hk.json` 放在 release 目录外，并在启用自动升级前确认升级链路已能按你的 YAML 路径重建；否则先保持手动升级。
 
 升级切换 release 后还会做一次 service drift reconcile：以当前 release 的 `service render` 结果为期望状态，对比 `$RUNTIME/service.profile.json` 和 systemd unit 文件。缺失 unit 会被写入 `/etc/systemd/system/`，缺失 timer 会执行 `systemctl enable --now`。随后升级流程会用 reconcile 后的 profile 重启长期运行的 trade-intake / Feishu WS，并执行服务 active/enabled 检查；Feishu WS 还会运行 `./om inbound feishu-ws --check`，避免长驻进程继续使用旧 release、旧 config 或不可用 env。
 
