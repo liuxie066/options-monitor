@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from src.application.agent_runtime import AgentRuntimeSettings, LlmTranslatorSettings, handle_agent_message
+from src.application.agent_runtime.command_catalog import command_catalog_payload, command_specs
 from src.application.agent_runtime.command_parser import parse_agent_command
 from src.application.agent_runtime.llm_intent_schema import LLM_INTENT_SCHEMA_VERSION, llm_intent_json_schema, llm_intent_schema
 from src.application.agent_runtime.llm_translator import LlmTranslationResult, parse_llm_translation_payload, translate_inbound_intent
@@ -37,6 +38,20 @@ def test_agent_command_parser_maps_read_commands() -> None:
     logs = parse_agent_command("/logs 20260515T182459Z-474761")
     assert logs is not None
     assert logs.arguments == {"run_id": "20260515T182459Z-474761", "kind": "all", "lines": 50}
+
+
+def test_agent_command_catalog_drives_llm_allowed_surface() -> None:
+    llm_allowed = {spec.intent_name for spec in command_specs() if spec.llm_allowed}
+    llm_denied = {spec.intent_name for spec in command_specs() if not spec.llm_allowed}
+    schema = llm_intent_schema()
+    payload = command_catalog_payload()
+
+    assert set(schema["shape"]["intent"]) == llm_allowed
+    assert "runtime_status" in llm_allowed
+    assert "manual_trade_confirm" in llm_denied
+    assert not (llm_allowed & llm_denied)
+    assert payload["summary"]["command_count"] == len(command_specs())
+    assert "Command：" in payload["help_text"]
 
 
 def test_agent_command_parser_maps_typed_confirm_commands() -> None:
@@ -83,9 +98,12 @@ def test_agent_runtime_executes_slash_command_through_inbound_router(tmp_path: P
             "attempted": False,
             "reason": "command",
             "provider": "",
+            "base_url": "",
             "model": "",
             "api_key_env": "OM_LLM_API_KEY",
             "confidence_min": 0.75,
+            "timeout_seconds": 20,
+            "max_output_tokens": 512,
         },
         "context": {"provided": False},
         "langgraph": "disabled",
@@ -219,9 +237,12 @@ def test_agent_runtime_routes_valid_llm_translation_through_inbound_router(tmp_p
                 "attempted": True,
                 "reason": "accepted",
                 "provider": "openai",
+                "base_url": "",
                 "model": "gpt-5.2",
                 "api_key_env": "OM_LLM_API_KEY",
                 "confidence_min": 0.75,
+                "timeout_seconds": 20,
+                "max_output_tokens": 512,
                 "schema_version": LLM_INTENT_SCHEMA_VERSION,
             },
         )
@@ -294,9 +315,12 @@ def test_agent_runtime_builds_context_from_same_conversation(tmp_path: Path) -> 
                 "attempted": True,
                 "reason": "accepted",
                 "provider": "openai",
+                "base_url": "",
                 "model": "gpt-5.2",
                 "api_key_env": "OM_LLM_API_KEY",
                 "confidence_min": 0.75,
+                "timeout_seconds": 20,
+                "max_output_tokens": 512,
             },
         )
 
@@ -326,7 +350,7 @@ def test_agent_runtime_builds_context_from_same_conversation(tmp_path: Path) -> 
 
 
 def test_agent_runtime_settings_from_runtime_config() -> None:
-    assert AgentRuntimeSettings.from_runtime_config({}).enabled is False
+    assert AgentRuntimeSettings.from_runtime_config({}).enabled is True
 
     settings = AgentRuntimeSettings.from_runtime_config(
         {
@@ -335,9 +359,12 @@ def test_agent_runtime_settings_from_runtime_config() -> None:
                 "llm": {
                     "enabled": True,
                     "provider": "openai",
+                    "base_url": "https://llm.example/v1",
                     "model": "gpt-5.2",
                     "api_key_env": "OM_LLM_API_KEY",
                     "confidence_min": 0.8,
+                    "timeout_seconds": 30,
+                    "max_output_tokens": 768,
                 },
             }
         }
@@ -348,9 +375,12 @@ def test_agent_runtime_settings_from_runtime_config() -> None:
     assert settings.llm.public_payload() == {
         "enabled": True,
         "provider": "openai",
+        "base_url": "https://llm.example/v1",
         "model": "gpt-5.2",
         "api_key_env": "OM_LLM_API_KEY",
         "confidence_min": 0.8,
+        "timeout_seconds": 30,
+        "max_output_tokens": 768,
     }
 
 
@@ -507,7 +537,10 @@ def test_llm_translator_calls_openai_provider_and_parses_structured_response() -
         settings=LlmTranslatorSettings(
             enabled=True,
             provider="openai",
+            base_url="https://llm.example/v1",
             model="gpt-5.2",
+            timeout_seconds=9,
+            max_output_tokens=777,
         ),
         environ={"OM_LLM_API_KEY": "sk-test"},
         create_response_fn=_create_response,
@@ -519,8 +552,14 @@ def test_llm_translator_calls_openai_provider_and_parses_structured_response() -
     assert result.intent.arguments == {"account": "sy", "status": "open"}
     assert result.trace["reason"] == "accepted"
     assert result.trace["provider"] == "openai"
+    assert result.trace["base_url"] == "https://llm.example/v1"
+    assert result.trace["timeout_seconds"] == 9
+    assert result.trace["max_output_tokens"] == 777
     assert calls[0]["api_key"] == "sk-test"
+    assert calls[0]["base_url"] == "https://llm.example/v1"
     assert calls[0]["model"] == "gpt-5.2"
+    assert calls[0]["timeout"] == 9
+    assert calls[0]["max_output_tokens"] == 777
     assert calls[0]["input_text"] == "帮我看 sy 的持仓"
     assert "Never execute tools" in str(calls[0]["instructions"])
     assert calls[0]["json_schema"]["properties"]["intent"]["enum"]
@@ -668,6 +707,7 @@ def test_openai_responses_client_builds_structured_output_request() -> None:
 
     response = create_structured_response(
         api_key="sk-test",
+        base_url="https://llm.example/v1",
         model="gpt-5.2",
         input_text="状态",
         instructions="translate only",
@@ -676,7 +716,7 @@ def test_openai_responses_client_builds_structured_output_request() -> None:
         http_post_json_fn=_post,
     )
 
-    assert calls[0]["url"] == "https://api.openai.com/v1/responses"
+    assert calls[0]["url"] == "https://llm.example/v1/responses"
     assert calls[0]["headers"]["Authorization"] == "Bearer sk-test"
     assert calls[0]["payload"]["model"] == "gpt-5.2"
     assert calls[0]["payload"]["input"] == "状态"
@@ -687,3 +727,29 @@ def test_openai_responses_client_builds_structured_output_request() -> None:
     assert calls[0]["payload"]["text"]["format"]["schema"]["properties"]["intent"]["enum"]
     assert calls[0]["timeout"] == 7
     assert "runtime_status" in extract_response_text(response)
+
+
+def test_openai_responses_client_accepts_full_responses_url() -> None:
+    calls: list[dict[str, Any]] = []
+
+    def _post(
+        url: str,
+        payload: dict[str, Any],
+        *,
+        headers: dict[str, str],
+        timeout: int,
+    ) -> dict[str, Any]:
+        calls.append({"url": url, "payload": payload, "headers": headers, "timeout": timeout})
+        return {"output_text": "{}"}
+
+    create_structured_response(
+        api_key="sk-test",
+        base_url="https://llm.example/v1/responses",
+        model="gpt-5.2",
+        input_text="状态",
+        instructions="translate only",
+        json_schema=llm_intent_json_schema(),
+        http_post_json_fn=_post,
+    )
+
+    assert calls[0]["url"] == "https://llm.example/v1/responses"

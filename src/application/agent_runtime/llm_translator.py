@@ -112,10 +112,13 @@ def translate_inbound_intent(
     try:
         response = (create_response_fn or create_structured_response)(
             api_key=api_key,
+            base_url=settings.base_url,
             model=settings.model,
             input_text=_provider_input_text(text, conversation_context=conversation_context),
             instructions=_TRANSLATOR_INSTRUCTIONS,
             json_schema=llm_intent_json_schema(),
+            timeout=int(settings.timeout_seconds),
+            max_output_tokens=int(settings.max_output_tokens),
         )
     except OpenAIResponsesError as err:
         return LlmTranslationResult(
@@ -281,9 +284,12 @@ def _trace(
         "attempted": bool(attempted),
         "reason": str(reason),
         "provider": settings.provider,
+        "base_url": settings.base_url,
         "model": settings.model,
         "api_key_env": settings.api_key_env,
         "confidence_min": float(settings.confidence_min),
+        "timeout_seconds": int(settings.timeout_seconds),
+        "max_output_tokens": int(settings.max_output_tokens),
     }
     if missing:
         payload["missing"] = list(missing)

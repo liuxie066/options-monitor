@@ -82,7 +82,7 @@ def collect_evidence(
 
 
 def _profile_path(payload: dict[str, Any]) -> Any:
-    return payload.get("profile_path") or payload.get("openclaw_profile_path")
+    return payload.get("profile_path")
 
 
 def redacted_evidence(evidence: dict[str, Any]) -> dict[str, Any]:
@@ -104,7 +104,6 @@ def _runtime_status_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "max_notification_chars",
         "max_run_age_minutes",
         "profile_path",
-        "openclaw_profile_path",
         "trigger_source",
         "trigger_job_id",
         "trigger_job_name",
@@ -141,7 +140,6 @@ def _safe_input_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "strategy_replay_paths",
         "strategy_report_dir",
         "profile_path",
-        "openclaw_profile_path",
         "output",
         "scope",
     ):
@@ -359,7 +357,7 @@ def _strategy_evidence(payload: dict[str, Any], *, source_paths: dict[str, Path 
     reject_logs = [_reject_log_summary(path, base=base) for path in reject_log_paths]
     filter_traces = [_trace_summary(path, base=base, limit=tail_limit) for path in trace_paths]
     replay_reports = [_replay_summary(path, base=base, limit=tail_limit) for path in replay_paths]
-    ranking_limit = _as_int(payload.get("ranking_limit") or payload.get("rank_sample_limit"), default=5, low=1, high=20)
+    ranking_limit = _as_int(payload.get("ranking_limit"), default=5, low=1, high=20)
     ranking_evidence = _ranking_evidence(candidate_paths, base=base, cfg=cfg, limit=ranking_limit)
     total_candidate_rows = sum(int(item.get("row_count") or 0) for item in candidate_reports if item.get("exists"))
     total_reject_rows = sum(int(item.get("row_count") or 0) for item in reject_logs if item.get("exists"))

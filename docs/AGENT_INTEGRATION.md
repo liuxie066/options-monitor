@@ -113,7 +113,7 @@ Use `./om inbound handle` when a remote messaging gateway needs to send user tex
 ./om inbound handle --text '持仓 sy' --sender ou_xxx --channel feishu --message-id msg_xxx
 ```
 
-This is a controlled message entrypoint, not an `om-agent` tool and not a shell bridge. By default it performs deterministic parsing, sender allowlist checks, message idempotency, SQLite audit, and then calls an allowlisted tool through the same `execute_tool(...)` path used by `om-agent`. `--agent-runtime` may add slash commands, and runtime config may opt into LLM intent translation; both still return structured intents into the same allowlist, audit, and renderer path.
+This is a controlled message entrypoint, not an `om-agent` tool and not a shell bridge. By default it performs AgentRuntime command parsing, deterministic parsing, sender allowlist checks, message idempotency, SQLite audit, and then calls an allowlisted tool through the same `execute_tool(...)` path used by `om-agent`. `--no-agent-runtime` bypasses the command facade for parser diagnostics, and runtime config may opt into LLM intent translation; both still return structured intents into the same allowlist, audit, and renderer path.
 
 Remote channels require:
 

@@ -93,9 +93,6 @@ def _add_write_flags(parser: argparse.ArgumentParser, *, high_risk: bool) -> Non
     if high_risk:
         parser.add_argument("--confirm", action="store_true", help="confirm high-risk trade-event writes")
         parser.add_argument("--yes", action="store_true", help="non-interactive confirmation; emits an audit_id")
-    else:
-        parser.add_argument("--confirm", action="store_true", help="alias for --apply on local state writes")
-        parser.add_argument("--yes", action="store_true", help="non-interactive alias for --apply; emits an audit_id")
     parser.add_argument("--dry-run", action="store_true", help="preview without writing; this is the default")
 
 
@@ -103,7 +100,10 @@ def _resolve_write_control(args: argparse.Namespace, *, command_name: str, high_
     has_dry_run = bool(getattr(args, "dry_run", False))
     has_write_flag = any(bool(getattr(args, name, False)) for name in ("apply", "confirm", "yes"))
     if has_dry_run and has_write_flag:
-        raise SystemExit("--dry-run cannot be combined with --apply, --confirm, or --yes")
+        message = "--dry-run cannot be combined with --apply"
+        if high_risk:
+            message += ", --confirm, or --yes"
+        raise SystemExit(message)
     control = write_control(
         apply=bool(getattr(args, "apply", False)),
         confirm=bool(getattr(args, "confirm", False)),

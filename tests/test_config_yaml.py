@@ -42,9 +42,12 @@ agent:
   llm:
     enabled: false
     provider: ""
+    base_url: ""
     model: ""
     api_key_env: OM_LLM_API_KEY
     confidence_min: 0.75
+    timeout_seconds: 20
+    max_output_tokens: 512
 
 markets:
   us:
@@ -99,7 +102,10 @@ def test_yaml_config_resolves_user_overrides_and_defaults(tmp_path: Path) -> Non
     assert cfg["close_advice"]["enabled"] is False
     assert cfg["agent"]["runtime"]["enabled"] is True
     assert cfg["agent"]["runtime"]["context_window_messages"] == 6
+    assert cfg["agent"]["llm"]["base_url"] == ""
     assert cfg["agent"]["llm"]["api_key_env"] == "OM_LLM_API_KEY"
+    assert cfg["agent"]["llm"]["timeout_seconds"] == 20
+    assert cfg["agent"]["llm"]["max_output_tokens"] == 512
     assert cfg["inbound"]["feishu_ws"]["ack_reaction"] == "THUMBSUP"
     assert cfg["symbols"][0]["symbol"] == "NVDA"
     assert cfg["symbols"][0]["sell_put"]["min_dte"] == 20
@@ -144,10 +150,13 @@ def test_config_init_writes_starter_yaml_and_runtime_configs(tmp_path: Path) -> 
     assert (runtime_dir / "config.hk.json").exists()
     payload = yaml.safe_load(output_path.read_text(encoding="utf-8"))
     assert payload["accounts"]["lx"]["futu_account_id"] == "12345678"
-    assert payload["agent"]["runtime"]["enabled"] is False
+    assert payload["agent"]["runtime"]["enabled"] is True
     assert payload["agent"]["runtime"]["context_window_messages"] == 8
     assert payload["agent"]["llm"]["enabled"] is False
+    assert payload["agent"]["llm"]["base_url"] == ""
     assert payload["agent"]["llm"]["api_key_env"] == "OM_LLM_API_KEY"
+    assert payload["agent"]["llm"]["timeout_seconds"] == 20
+    assert payload["agent"]["llm"]["max_output_tokens"] == 512
     assert payload["markets"]["us"]["accounts"] == ["lx", "sy"]
     assert payload["markets"]["hk"]["symbols"] == ["0700.HK", "9992.HK"]
     us_cfg = json.loads((runtime_dir / "config.us.json").read_text(encoding="utf-8"))

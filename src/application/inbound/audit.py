@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from src.application.agent_tool_contracts import AgentToolError, mask_path
 from src.application.agent_tool_config import repo_base
 from src.application.settings import build_effective_env
 
@@ -108,7 +109,12 @@ class InboundAuditStore:
                 """,
                 tuple(params),
             ).fetchall()
-        return [_row_to_dict(row) for row in rows if row is not None]
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            item = _row_to_dict(row)
+            if item is not None:
+                out.append(item)
+        return out
 
     def record_result(self, record: dict[str, Any]) -> None:
         self._ensure_schema()
@@ -171,51 +177,73 @@ class InboundAuditStore:
             )
 
     def _connect(self) -> sqlite3.Connection:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(self.path))
+        conn = connect_inbound_sqlite(self.path)
         conn.row_factory = sqlite3.Row
         return conn
 
     def _ensure_schema(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS inbound_command_audit (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    command_id TEXT NOT NULL UNIQUE,
-                    channel TEXT NOT NULL,
-                    sender_id TEXT NOT NULL,
-                    conversation_id TEXT,
-                    message_id TEXT,
-                    raw_text TEXT NOT NULL,
-                    parser TEXT,
-                    intent_name TEXT,
-                    tool_name TEXT,
-                    tool_payload_json TEXT,
-                    decision TEXT NOT NULL,
-                    result_ok INTEGER NOT NULL DEFAULT 0,
-                    error_code TEXT,
-                    response_json TEXT,
-                    duplicate_count INTEGER NOT NULL DEFAULT 0,
-                    created_at TEXT NOT NULL,
-                    finished_at TEXT NOT NULL,
-                    last_duplicate_at TEXT,
-                    last_duplicate_sender_id TEXT,
-                    last_duplicate_decision TEXT
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS inbound_command_audit (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        command_id TEXT NOT NULL UNIQUE,
+                        channel TEXT NOT NULL,
+                        sender_id TEXT NOT NULL,
+                        conversation_id TEXT,
+                        message_id TEXT,
+                        raw_text TEXT NOT NULL,
+                        parser TEXT,
+                        intent_name TEXT,
+                        tool_name TEXT,
+                        tool_payload_json TEXT,
+                        decision TEXT NOT NULL,
+                        result_ok INTEGER NOT NULL DEFAULT 0,
+                        error_code TEXT,
+                        response_json TEXT,
+                        duplicate_count INTEGER NOT NULL DEFAULT 0,
+                        created_at TEXT NOT NULL,
+                        finished_at TEXT NOT NULL,
+                        last_duplicate_at TEXT,
+                        last_duplicate_sender_id TEXT,
+                        last_duplicate_decision TEXT
+                    )
+                    """
                 )
-                """
-            )
-            conn.execute(
-                """
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_inbound_audit_message
-                ON inbound_command_audit(channel, message_id)
-                WHERE message_id IS NOT NULL AND message_id != ''
-                """
-            )
-            _ensure_column(conn, "last_duplicate_sender_id", "TEXT")
-            _ensure_column(conn, "last_duplicate_decision", "TEXT")
-            _ensure_column(conn, "conversation_id", "TEXT")
+                conn.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_inbound_audit_message
+                    ON inbound_command_audit(channel, message_id)
+                    WHERE message_id IS NOT NULL AND message_id != ''
+                    """
+                )
+                _ensure_column(conn, "last_duplicate_sender_id", "TEXT")
+                _ensure_column(conn, "last_duplicate_decision", "TEXT")
+                _ensure_column(conn, "conversation_id", "TEXT")
+        except sqlite3.Error as exc:
+            raise inbound_sqlite_error(self.path, exc) from exc
+
+
+def connect_inbound_sqlite(path: Path) -> sqlite3.Connection:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return sqlite3.connect(str(path))
+    except (OSError, sqlite3.Error) as exc:
+        raise inbound_sqlite_error(path, exc) from exc
+
+
+def inbound_sqlite_error(path: Path, exc: BaseException) -> AgentToolError:
+    return AgentToolError(
+        code="CONFIG_ERROR",
+        message="failed to open inbound audit SQLite database",
+        hint="Set OM_INBOUND_AUDIT_DB to a writable SQLite path, or pass --audit-db for local one-shot testing.",
+        details={
+            "audit_db": mask_path(path),
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+        },
+    )
 
 
 def utc_now_iso() -> str:

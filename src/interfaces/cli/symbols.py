@@ -116,23 +116,17 @@ def main(argv: list[str] | None = None) -> int:
     p_add.add_argument("--accounts", nargs="*", default=None)
     p_add.add_argument("--dry-run", action="store_true")
     p_add.add_argument("--apply", action="store_true")
-    p_add.add_argument("--confirm", action="store_true", help="alias for --apply on local config writes")
-    p_add.add_argument("--yes", action="store_true", help="non-interactive alias for --apply; emits an audit_id")
     p_add.add_argument("--format", choices=["text", "json"], default="text")
-    p_rm = sub.add_parser("rm", aliases=["remove"])
+    p_rm = sub.add_parser("rm")
     p_rm.add_argument("symbol")
     p_rm.add_argument("--dry-run", action="store_true")
     p_rm.add_argument("--apply", action="store_true")
-    p_rm.add_argument("--confirm", action="store_true", help="alias for --apply on local config writes")
-    p_rm.add_argument("--yes", action="store_true", help="non-interactive alias for --apply; emits an audit_id")
     p_rm.add_argument("--format", choices=["text", "json"], default="text")
     p_edit = sub.add_parser("edit")
     p_edit.add_argument("symbol")
     p_edit.add_argument("--set", action="append", default=[])
     p_edit.add_argument("--dry-run", action="store_true")
     p_edit.add_argument("--apply", action="store_true")
-    p_edit.add_argument("--confirm", action="store_true", help="alias for --apply on local config writes")
-    p_edit.add_argument("--yes", action="store_true", help="non-interactive alias for --apply; emits an audit_id")
     p_edit.add_argument("--format", choices=["text", "json"], default="text")
     args = ap.parse_args(argv)
 
@@ -150,9 +144,9 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("edit requires at least one --set path=value")
     preview_cfg = deepcopy(cfg)
     summary = _apply_command(preview_cfg, args)
-    write_requested = bool(args.apply or args.confirm or args.yes)
+    write_requested = bool(args.apply)
     if args.dry_run and write_requested:
-        raise SystemExit("--dry-run cannot be combined with --apply, --confirm, or --yes")
+        raise SystemExit("--dry-run cannot be combined with --apply")
     payload = attach_write_contract(
         summary.public_payload(),
         dry_run=not write_requested,
@@ -176,7 +170,7 @@ def main(argv: list[str] | None = None) -> int:
 def _apply_command(cfg: dict, args: argparse.Namespace):
     if args.cmd == "add":
         return cmd_add(cfg, args.symbol, args.use, args.limit_exp, args.put, args.call, accounts=args.accounts)
-    if args.cmd in {"rm", "remove"}:
+    if args.cmd == "rm":
         return cmd_rm(cfg, args.symbol)
     if args.cmd == "edit":
         return cmd_edit(cfg, args.symbol, args.set)

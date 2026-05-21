@@ -113,15 +113,18 @@
     },
     "agent": {
       "runtime": {
-        "enabled": false,
+        "enabled": true,
         "context_window_messages": 8
       },
       "llm": {
         "enabled": false,
         "provider": "",
+        "base_url": "",
         "model": "",
         "api_key_env": "OM_LLM_API_KEY",
-        "confidence_min": 0.75
+        "confidence_min": 0.75,
+        "timeout_seconds": 20,
+        "max_output_tokens": 512
       }
     },
     "inbound": {

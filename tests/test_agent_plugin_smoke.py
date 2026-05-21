@@ -850,7 +850,7 @@ def test_version_update_apply_writes_version(monkeypatch, tmp_path: Path) -> Non
     monkeypatch.setattr(handlers, "repo_base", lambda: tmp_path)
     monkeypatch.setenv("OM_AGENT_ENABLE_WRITE_TOOLS", "true")
 
-    out = run_tool("version_update", {"version": "1.1.0", "apply": True, "confirm": True})
+    out = run_tool("version_update", {"target_version": "1.1.0", "apply": True, "confirm": True})
 
     assert out["ok"] is True
     assert out["warnings"] == []
@@ -867,16 +867,30 @@ def test_version_update_apply_requires_write_gate(monkeypatch, tmp_path: Path) -
     (tmp_path / "VERSION").write_text("1.0.0\n", encoding="utf-8")
     monkeypatch.setattr(handlers, "repo_base", lambda: tmp_path)
 
-    blocked = run_tool("version_update", {"version": "1.1.0", "apply": True})
+    blocked = run_tool("version_update", {"target_version": "1.1.0", "apply": True})
     assert blocked["ok"] is False
     assert blocked["error"]["code"] == "PERMISSION_DENIED"
     assert (tmp_path / "VERSION").read_text(encoding="utf-8").strip() == "1.0.0"
 
     monkeypatch.setenv("OM_AGENT_ENABLE_WRITE_TOOLS", "true")
-    needs_confirm = run_tool("version_update", {"version": "1.1.0", "apply": True})
+    needs_confirm = run_tool("version_update", {"target_version": "1.1.0", "apply": True})
     assert needs_confirm["ok"] is False
     assert needs_confirm["error"]["code"] == "CONFIRMATION_REQUIRED"
     assert (tmp_path / "VERSION").read_text(encoding="utf-8").strip() == "1.0.0"
+
+
+def test_version_update_rejects_removed_version_alias(monkeypatch, tmp_path: Path) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+    import src.application.agent_tool_handlers as handlers
+
+    (tmp_path / "VERSION").write_text("1.0.0\n", encoding="utf-8")
+    monkeypatch.setattr(handlers, "repo_base", lambda: tmp_path)
+
+    out = run_tool("version_update", {"version": "1.1.0"})
+
+    assert out["ok"] is False
+    assert out["error"]["code"] == "INPUT_ERROR"
+    assert "target_version" in out["error"]["message"]
 
 
 def test_config_validate_runs_without_opend(monkeypatch, tmp_path: Path) -> None:
@@ -1689,7 +1703,7 @@ def test_runtime_logs_agent_tool_tails_run_audit_and_file(tmp_path: Path) -> Non
         "runtime_logs",
         {"runs_root": str(runs_root), "run_id": "run-1", "kind": "audit", "lines": 1},
     )
-    file_out = run_tool("runtime_logs", {"file": str(service_log), "lines": 2})
+    file_out = run_tool("runtime_logs", {"log_file": str(service_log), "lines": 2})
 
     assert audit_out["ok"] is True
     assert audit_out["data"]["schema_version"] == "runtime_logs.v1"
@@ -1699,6 +1713,19 @@ def test_runtime_logs_agent_tool_tails_run_audit_and_file(tmp_path: Path) -> Non
     assert audit_out["meta"]["runs_root"] == ".../output_runs"
     assert file_out["ok"] is True
     assert file_out["data"]["files"][0]["tail"] == ["two", "three"]
+
+
+def test_runtime_logs_rejects_removed_file_alias(tmp_path: Path) -> None:
+    from src.application.tool_execution import execute_tool as run_tool
+
+    service_log = tmp_path / "service.log"
+    service_log.write_text("one\n", encoding="utf-8")
+
+    out = run_tool("runtime_logs", {"file": str(service_log), "lines": 1})
+
+    assert out["ok"] is False
+    assert out["error"]["code"] == "INPUT_ERROR"
+    assert "log_file" in out["error"]["message"]
 
 
 def test_openclaw_readiness_combines_status_and_healthcheck(monkeypatch, tmp_path: Path) -> None:
