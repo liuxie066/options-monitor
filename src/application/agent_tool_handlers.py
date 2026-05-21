@@ -25,7 +25,7 @@ from src.application.positions.reporting import build_monthly_income_report
 from src.application.pipeline_context import load_option_positions_context, load_portfolio_context
 from src.application.cash_headroom_query import query_sell_put_cash
 from src.application.scan_scheduler import decide as scheduler_decide, read_state as read_scheduler_state
-from src.infrastructure.exchange_rates import get_cached_exchange_rates as _get_cached_exchange_rates_impl
+from src.infrastructure.exchange_rates import get_exchange_rates_or_fetch_latest as _get_exchange_rates_or_fetch_latest_impl
 from src.infrastructure.io_utils import safe_read_csv
 from src.application.agent_tool_healthcheck import run_healthcheck_tool
 from src.application.agent_tool_candidate_rank import candidate_rank_explain_tool
@@ -221,8 +221,8 @@ def _query_cash_headroom_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], 
     )
 
 
-def _get_cached_exchange_rates(*, cache_path):
-    return _get_cached_exchange_rates_impl(cache_path=cache_path)
+def _get_exchange_rates(*, cache_path, log=None):
+    return _get_exchange_rates_or_fetch_latest_impl(cache_path=cache_path, log=log)
 
 
 def _monthly_income_report_tool(payload: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
@@ -233,7 +233,7 @@ def _monthly_income_report_tool(payload: dict[str, Any]) -> tuple[dict[str, Any]
         normalize_broker=_normalize_broker,
         resolve_option_positions_repo=resolve_option_positions_repo,
         build_monthly_income_report=build_monthly_income_report,
-        get_cached_exchange_rates=_get_cached_exchange_rates,
+        get_exchange_rates=_get_exchange_rates,
         repo_base=repo_base,
         mask_path=mask_path,
     )

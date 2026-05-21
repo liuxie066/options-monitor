@@ -730,11 +730,13 @@ def test_monthly_income_report_returns_agent_summary(monkeypatch, tmp_path: Path
         as_of_ms=_ms("2026-04-20"),
     )
 
-    monkeypatch.setattr(
-        tools,
-        "_get_cached_exchange_rates",
-        lambda **_kwargs: {"rates": {"USDCNY": 7.2, "HKDCNY": 0.92}},
-    )
+    rate_calls: list[dict[str, Any]] = []
+
+    def _fake_get_exchange_rates(**kwargs):
+        rate_calls.append(kwargs)
+        return {"rates": {"USDCNY": 7.2, "HKDCNY": 0.92}}
+
+    monkeypatch.setattr(tools, "_get_exchange_rates", _fake_get_exchange_rates)
 
     out = run_tool(
         "monthly_income_report",
@@ -747,6 +749,7 @@ def test_monthly_income_report_returns_agent_summary(monkeypatch, tmp_path: Path
     )
 
     assert out["ok"] is True
+    assert Path(rate_calls[0]["cache_path"]) == tmp_path / "output" / "state" / "rate_cache.json"
     assert out["warnings"] == []
     assert out["data"]["row_count"] == 1
     assert out["data"]["premium_row_count"] == 1
