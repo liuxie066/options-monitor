@@ -46,10 +46,12 @@
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh -o /tmp/options-monitor-install.sh
-bash /tmp/options-monitor-install.sh --version v1.2.107 --prefix "$HOME/apps/options-monitor"
+bash /tmp/options-monitor-install.sh --version <release-tag> --prefix "$HOME/apps/options-monitor"
 
 om setup check
 ```
+
+`<release-tag>` 必须换成明确的 GitHub release tag，例如 `v1.2.109`。不要在生产机器上安装浮动分支。
 
 安装脚本会下载代码、checkout 指定 release、创建 `.venv`、安装依赖、更新 `current` symlink，并默认在 `$HOME/.local/bin` 创建 `om` / `om-agent` 用户级 wrapper。它不会写配置、不会写 secrets、不会启动服务、不会创建定时任务。
 如果 `$HOME/.local/bin` 尚未加入 `PATH`，按安装输出提示先加入 PATH，或使用 fallback：`$HOME/apps/options-monitor/current/om setup check`。
@@ -67,32 +69,56 @@ om setup check
 
 ### 2. 初始化配置
 
-推荐用 CLI 初始化入口：
+当前推荐配置模型：
+
+- 代码内 `DEFAULT_CONFIG` 提供系统默认值，用户不用维护系统默认文件。
+- `config.yaml` 只保存用户 override，包括 accounts、markets、symbols 和非 secret 行为配置。
+- env-file 只保存 secrets、Feishu 凭证和写入开关。
+- `config build` 生成 market-specific runtime config，实际运行仍读取 JSON 快照。
+
+源码 checkout 或本地手动运行可以直接在 repo root 维护忽略文件 `config.yaml`：
+
+```bash
+cp configs/examples/config.yaml.example config.yaml
+$EDITOR config.yaml
+
+om config validate --source yaml --market us
+om config build --source yaml --market us --output config.us.json
+om config validate --config-path config.us.json --market us
+```
+
+HK 同理：
+
+```bash
+om config validate --source yaml --market hk
+om config build --source yaml --market hk --output config.hk.json
+om config validate --config-path config.hk.json --market hk
+```
+
+生产服务建议把 `config.yaml` 和生成后的 runtime config 放在 `runtime_root` 或其他 release 外的持久路径，再显式传路径：
+
+```bash
+om config build --source yaml --market us --config-yaml /var/lib/options-monitor/config.yaml --output /var/lib/options-monitor/config.us.json
+om config build --source yaml --market hk --config-yaml /var/lib/options-monitor/config.yaml --output /var/lib/options-monitor/config.hk.json
+```
+
+已有 `configs/user.*.json` 的旧安装可以先 dry-run 迁移：
+
+```bash
+om config migrate-yaml --output config.yaml
+om config migrate-yaml --output config.yaml --apply
+```
+
+如果只是想快速生成 starter runtime config，也可以使用兼容入口：
 
 ```bash
 om setup init --market us --account lx --futu-acc-id <futu-account-id>
 om setup init --market hk --account lx --futu-acc-id <futu-account-id>
 ```
 
-常见编辑源：
+这条路径直接生成 `config.us.json` / `config.hk.json`，适合作为一次性 bootstrap；长期维护仍建议收敛到 `config.yaml`。
 
-- `configs/system.json`
-- `configs/user.common.json`
-- `configs/user.us.json`
-- `configs/user.hk.json`
-- `portfolio.runtime.json`（可选迁移配置；默认不需要）
-
-从分层配置生成 runtime config：
-
-```bash
-om config build --market us
-om config build --market hk
-```
-
-生成的 runtime config 会记录 `_generated` 指纹，覆盖
-`configs/system.json`、可选 `configs/user.common.json`、以及对应市场的
-`configs/user.us.json` / `configs/user.hk.json`。这些源文件任意一个更新后，都需要重新
-`config build`；`run tick` / `run tick-cron` 会在陈旧 runtime config 上提前失败并给出重建命令。
+生成的 runtime config 会记录 `_generated` 指纹。`config.yaml` 或 legacy 分层配置更新后，都需要重新 `config build`；`run tick` / `run tick-cron` 会在陈旧 runtime config 上提前失败并给出重建命令。
 
 完整首次运行流程见 [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md)。
 
@@ -101,24 +127,25 @@ om config build --market hk
 先检查配置本身是否合法：
 
 ```bash
-./om config validate --config-path config.us.json --market us
-./om-agent run --tool config_validate --input-json '{"config_key":"us"}'
+om config validate --source yaml --market us
+om config validate --config-path config.us.json --market us
+om-agent run --tool config_validate --input-json '{"config_key":"us"}'
 ```
 
 再检查本机前置条件、OpenD、SQLite 和通知配置：
 
 ```bash
-./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'
-./om doctor --config-key us
-./om-agent run --tool runtime_status --input-json '{"config_key":"us"}'
-./om-agent run --tool openclaw_readiness --input-json '{"config_key":"us"}'
+om-agent run --tool healthcheck --input-json '{"config_key":"us"}'
+om doctor --config-key us
+om-agent run --tool runtime_status --input-json '{"config_key":"us"}'
+om-agent run --tool openclaw_readiness --input-json '{"config_key":"us"}'
 ```
 
 解释某个配置值来自哪里：
 
 ```bash
-./om config explain --market us --key option_positions.auto_close.enabled
-./om config explain --market us --key symbol_defaults.fetch.limit_expirations
+om config explain --source yaml --market us --key option_positions.auto_close.enabled
+om config explain --source yaml --market us --key symbol_defaults.fetch.limit_expirations
 ```
 
 直接查看或修改 runtime config 时，使用 `config get/set`。写入语义统一为：
@@ -127,9 +154,9 @@ om config build --market hk
 `config set` 属于本地配置写入，默认只预览，`--apply` 后会先校验修改后的配置再写入：
 
 ```bash
-./om config get --config-key us --key runtime.prefetch.max_workers
-./om config set --config-key us --key runtime.prefetch.max_workers --json-value 4
-./om config set --config-key us --key runtime.prefetch.max_workers --json-value 4 --apply
+om config get --config-key us --key runtime.prefetch.max_workers
+om config set --config-key us --key runtime.prefetch.max_workers --json-value 4
+om config set --config-key us --key runtime.prefetch.max_workers --json-value 4 --apply
 ```
 
 ### 4. 第一轮真实运行
@@ -137,14 +164,14 @@ om config build --market hk
 先禁发通知：
 
 ```bash
-./om run tick --config config.us.json --accounts lx sy --no-send
+om run tick --config config.us.json --accounts lx sy --no-send
 ```
 
 确认输出、候选和通知预览都合理，再进行正式运行：
 
 ```bash
-./om run tick --config config.us.json --accounts lx
-./om run tick --config config.us.json --accounts lx sy
+om run tick --config config.us.json --accounts lx
+om run tick --config config.us.json --accounts lx sy
 ```
 
 ### 5. Linux / Mac 服务化部署
@@ -406,7 +433,11 @@ Sell Call 的关键区别是它依赖真实持仓上下文：
 - `config.us.json`
 - `config.hk.json`
 
-分层编辑源：
+推荐编辑源：
+
+- `config.yaml`
+
+兼容编辑源：
 
 - `configs/system.json`
 - `configs/user.common.json`
@@ -420,11 +451,13 @@ Sell Call 的关键区别是它依赖真实持仓上下文：
 
 原则上：
 
-- 编辑分层配置
-- 用 `./om config build` 生成 runtime config
-- 用 `./om config validate --market us|hk` 检查合法性、市场时区契约和生成指纹
+- 编辑 `config.yaml`
+- 用 `om config build --source yaml --market us|hk` 生成 runtime config
+- 用 `om config validate --source yaml --market us|hk` 检查 YAML override 与代码默认值合并后的配置
+- 用 `om config validate --config-path ... --market us|hk` 检查 runtime config、市场时区契约和生成指纹
 - 用 `config_validate` 做不含生成指纹检查的基础只读配置校验
-- 用 `./om settings doctor` 检查 env-file、Feishu Bot 和写入开关
+- 用 `om settings doctor` 检查 env-file、Feishu Bot 和写入开关
+- 遇到安装或运行问题时，用 `om support bundle --config-key us` 生成脱敏诊断包
 
 ### 数据来源
 
@@ -532,7 +565,7 @@ README 只记录公开入口和边界。生产 cron id、长驻服务启停和�
 不要把 `version_update apply=true` 放进固定频率任务。它会递增本地 `VERSION`，不等于发布流程。
 
 `tick-cron` 在拿到锁后会先校验 runtime config 的生成指纹；如果
-`configs/system.json`、`configs/user.common.json` 或市场 user config 更新后没有重新 build，
+`config.yaml` 或 legacy 分层 user config 更新后没有重新 build，
 任务会以 `[CONFIG_ERROR]` 失败并打印 `./om config build ... --output ...`。`--allow-stale-config`
 只作为临时应急绕过使用。
 

@@ -13,8 +13,10 @@
 
 | 入口 | 面向对象 | 典型用途 |
 |---|---|---|
-| `./om` | 人工操作 | 手动跑 pipeline、分阶段运行、命令行查询 |
-| `./om-agent` | 程序 / Agent | JSON manifest、结构化 tool 调用 |
+| `om` | 人工操作 | 手动跑 pipeline、分阶段运行、命令行查询 |
+| `om-agent` | 程序 / Agent | JSON manifest、结构化 tool 调用 |
+
+安装版默认提供全局 `om` / `om-agent` wrapper。源码目录内的 `./om` / `./om-agent` 是 fallback。
 
 一句话：
 
@@ -26,7 +28,7 @@
 ## 2. 如何查看工具清单
 
 ```bash
-./om-agent spec
+om-agent spec
 ```
 
 它会输出当前环境下可用的工具 manifest。
@@ -40,13 +42,13 @@
 ## 3. 常见调用方式
 
 ```bash
-./om-agent run --tool <tool-name> --input-json '<json>'
+om-agent run --tool <tool-name> --input-json '<json>'
 ```
 
 也支持：
 
 ```bash
-./om-agent run --tool <tool-name> --input-file payload.json
+om-agent run --tool <tool-name> --input-file payload.json
 ```
 
 `--input-file` 会覆盖 `--input-json`。
@@ -66,24 +68,24 @@
 
 | `om-agent` tool | `om` / CLI 对应能力 |
 |---|---|
-| `healthcheck` | `./om doctor` / `./om healthcheck` |
-| `version_check` | `./om version` |
+| `healthcheck` | `om doctor` / `om healthcheck` |
+| `version_check` | `om version` |
 | `version_update` | Agent-only local `VERSION` update helper |
-| `config_validate` | `./om config validate` |
-| runtime config read/write | `./om config get` / `./om config set` |
-| `scheduler_status` | `./om scheduler` 的只读判定部分 |
-| `scan_opportunities` | `./om scan` / `./om scan-pipeline` |
+| `config_validate` | `om config validate` |
+| runtime config read/write | `om config get` / `om config set` |
+| `scheduler_status` | `om scheduler` 的只读判定部分 |
+| `scan_opportunities` | `om scan` / `om scan-pipeline` |
 | `candidate_rank_explain` | Agent-only read existing candidate CSV ranking explanations |
-| `strategy_replay_analyze` | `./om strategy-replay analyze` |
-| `preview_notification` | `./om notify preview` |
-| `runtime_status` | `./om status` or raw agent runtime artifact summary |
-| `runtime_runs` | `./om runs` |
-| `runtime_logs` | `./om logs` |
+| `strategy_replay_analyze` | `om strategy-replay analyze` |
+| `preview_notification` | `om notify preview` |
+| `runtime_status` | `om status` or raw agent runtime artifact summary |
+| `runtime_runs` | `om runs` |
+| `runtime_logs` | `om logs` |
 | `openclaw_readiness` | Agent-only OpenClaw readiness summary |
-| `ai_cofunder` | `./om ai-cofunder collect` |
-| `get_close_advice` | `./om close-advice` |
-| `query_cash_headroom` | `./om sell-put-cash` / `src.application.cash_headroom_query::query_sell_put_cash(...)` |
-| `monthly_income_report` | `./om option-positions report monthly-income` |
+| `ai_cofunder` | `om ai-cofunder collect` |
+| `get_close_advice` | `om close-advice` |
+| `query_cash_headroom` | `om sell-put-cash` / `src.application.cash_headroom_query::query_sell_put_cash(...)` |
+| `monthly_income_report` | `om option-positions report monthly-income` |
 | `option_positions_read` | `src.application.ledger.read_model` / `src.application.positions.inspection` 的只读部分 |
 
 说明：
@@ -95,12 +97,12 @@
 
 ### 远程消息入口
 
-`./om inbound handle` 是飞书、微信、Hermes 等消息入口调用 OM 的受控入口：
+`om inbound handle` 是飞书、微信、Hermes 等消息入口调用 OM 的受控入口：
 
 ```bash
-./om inbound handle --text '收益 sy 2026-05' --sender ou_xxx --channel feishu --message-id msg_xxx
-./om inbound feishu --input-file feishu_event.json --format text
-./om inbound feishu-ws --check
+om inbound handle --text '收益 sy 2026-05' --sender ou_xxx --channel feishu --message-id msg_xxx
+om inbound feishu --input-file feishu_event.json --format text
+om inbound feishu-ws --check
 ```
 
 它不是 `om-agent` manifest 里的工具，也不是 shell bridge。`inbound feishu` 只解析 Feishu 事件 payload，然后进入同一条 sender allowlist、message_id 幂等、SQLite audit 和 pure-read 白名单路径。`inbound feishu-ws` 是长驻 Feishu App long-connection client：通过飞书 SDK 长连接接收消息、进入只读 inbound 调用，并使用同一个 Bot 自动回复；reaction、reply、queue 行为配置在 runtime config 的 `inbound.feishu_ws` 下。完整边界见 [INBOUND_CONTROL.md](INBOUND_CONTROL.md)。
@@ -110,17 +112,17 @@
 `om-agent` 当前不提供“直接发送通知”的 tool。实时 tick / 扫描 / 通知运行使用人工 CLI：
 
 ```bash
-./om run tick --config config.us.json --accounts lx
-./om run tick --config config.us.json --accounts lx sy
+om run tick --config config.us.json --accounts lx
+om run tick --config config.us.json --accounts lx sy
 ```
 
 这是一条统一链路，单账户只是传一个账户的特例。旧脚本
 `scripts/send_if_needed.py` 和 `scripts/send_if_needed_multi.py` 已移除。人工执行可直接调用
-`./om run tick`；生产 cron 建议使用带锁和 timeout 诊断的包装入口：
+`om run tick`；生产 cron 建议使用带锁和 timeout 诊断的包装入口：
 
 ```bash
-./om run tick-cron --market hk --accounts lx sy --timeout 600
-./om run tick-cron --market us --accounts lx sy --timeout 600
+om run tick-cron --market hk --accounts lx sy --timeout 600
+om run tick-cron --market us --accounts lx sy --timeout 600
 ```
 
 `tick-cron` 会按 market 推导 canonical config、lock path 和 `OM_TRIGGER_*`
@@ -131,13 +133,13 @@
 正式 cron 前建议先跑：
 
 ```bash
-./om config validate --config-path config.hk.json --market hk
-./om config validate --config-path config.us.json --market us
+om config validate --source yaml --market hk
+om config validate --source yaml --market us
+om config validate --config-path config.hk.json --market hk
+om config validate --config-path config.us.json --market us
 ```
 
-`tick-cron` 也会在真实 tick 前检查 runtime config 的 `_generated` 指纹；当
-`configs/system.json`、`configs/user.common.json` 或市场 user config 更新后未重新
-`./om config build`，会以 `[CONFIG_ERROR]` 失败并打印重建命令。`--allow-stale-config`
+`tick-cron` 也会在真实 tick 前检查 runtime config 的 `_generated` 指纹；当 `config.yaml` 或 legacy 分层 user config 更新后未重新 `config build`，会以 `[CONFIG_ERROR]` 失败并打印重建命令。`--allow-stale-config`
 只用于临时应急。
 
 ### Setup 入口关系
@@ -145,16 +147,31 @@
 首次安装后先跑只读 setup 诊断：
 
 ```bash
-./om setup check
-./om setup check --no-local-env-file
+om setup check
+om setup check --no-local-env-file
 ```
 
 `setup check` 只读，不写配置、不写 env-file、不启动服务、不创建 timer、不连接 OpenD/Feishu。它汇总安装、settings、runtime config、runtime root 和 service/timer 观察结果，并给出下一步命令。
 
-生成 starter runtime config 使用：
+推荐 authoring 入口是 `config.yaml`：
 
 ```bash
-./om setup init --market us --account lx --futu-acc-id <futu-account-id>
+cp configs/examples/config.yaml.example config.yaml
+om config validate --source yaml --market us
+om config build --source yaml --market us --output config.us.json
+```
+
+已有 legacy `configs/user.*.json` 时先迁移：
+
+```bash
+om config migrate-yaml --output config.yaml
+om config migrate-yaml --output config.yaml --apply
+```
+
+生成 starter runtime config 的兼容入口：
+
+```bash
+om setup init --market us --account lx --futu-acc-id <futu-account-id>
 ```
 
 写入命令的语义统一为：默认只读或 dry-run；`--apply` 允许本地文件/状态写入；`--confirm` 允许交易事件、Feishu、服务变更这类高风险写入；`--yes` 用于非交互脚本，等价显式确认并在输出里带 `audit_id`。结构化输出统一包含 `dry_run`、`write_applied`、`backup_path`、`audit_id`、`rollback_hint`。
@@ -162,8 +179,8 @@
 共享 multiplier cache 可以显式 seed，默认 dry-run，属于本地状态写入，写入使用 `--apply`：
 
 ```bash
-./om multiplier-cache seed --runtime-root /var/lib/options-monitor --symbol 0883.HK --multiplier 1000
-./om multiplier-cache seed --runtime-root /var/lib/options-monitor --symbol 0883.HK --multiplier 1000 --apply
+om multiplier-cache seed --runtime-root /var/lib/options-monitor --symbol 0883.HK --multiplier 1000
+om multiplier-cache seed --runtime-root /var/lib/options-monitor --symbol 0883.HK --multiplier 1000 --apply
 ```
 
 manual trade / trade-intake 会优先使用 runtime root 或 runtime config 路径推导出的
@@ -176,30 +193,30 @@ manual trade / trade-intake 会优先使用 runtime root 或 runtime config 路�
 Linux / Mac 长期运行建议先渲染服务文件，再由系统服务管理器安装：
 
 ```bash
-./om service render --target systemd --runtime-root /var/lib/options-monitor --env-file /etc/options-monitor/options-monitor.env --markets us hk --accounts lx sy --include-feishu-ws --output-dir /tmp/options-monitor-service
-./om service render --target launchd --runtime-root "$HOME/Library/Application Support/options-monitor" --env-file "$HOME/Library/Application Support/options-monitor/options-monitor.env" --markets us hk --accounts lx sy --output-dir /tmp/options-monitor-service
-./om service preflight --runtime-root /var/lib/options-monitor --env-file /etc/options-monitor/options-monitor.env --config-us config.us.json --config-hk config.hk.json --accounts lx sy
-./om service repair-output --runtime-root /var/lib/options-monitor --default-account lx --confirm
-./om settings doctor
+om service render --target systemd --runtime-root /var/lib/options-monitor --env-file /etc/options-monitor/options-monitor.env --markets us hk --accounts lx sy --include-feishu-ws --output-dir /tmp/options-monitor-service
+om service render --target launchd --runtime-root "$HOME/Library/Application Support/options-monitor" --env-file "$HOME/Library/Application Support/options-monitor/options-monitor.env" --markets us hk --accounts lx sy --output-dir /tmp/options-monitor-service
+om service preflight --runtime-root /var/lib/options-monitor --env-file /etc/options-monitor/options-monitor.env --config-us config.us.json --config-hk config.hk.json --accounts lx sy
+om service repair-output --runtime-root /var/lib/options-monitor --default-account lx --confirm
+om settings doctor
 ```
 
 只读检查：
 
 ```bash
-./om service status --profile-path /var/lib/options-monitor/service.profile.json --include-service-status
-./om service drift --runtime-root /var/lib/options-monitor
-./om-agent run --tool runtime_status --input-json '{"profile_path":"/var/lib/options-monitor/service.profile.json"}'
+om service status --profile-path /var/lib/options-monitor/service.profile.json --include-service-status
+om service drift --runtime-root /var/lib/options-monitor
+om-agent run --tool runtime_status --input-json '{"profile_path":"/var/lib/options-monitor/service.profile.json"}'
 ```
 
-`service render` 只生成 service/timer/plist/profile 文件和安装命令，不会自动安装或启动。systemd 的 `--env-file` 会写入 `EnvironmentFile=...`；launchd 的 `--env-file` 会写入 `EnvironmentVariables.OM_ENV_FILE=...`，两者都用于加载本机 Feishu 凭证环境变量。systemd unit 始终写入 `OM_RUNTIME_ROOT`；只有显式传 `--deploy-user` 或设置 `OM_DEPLOY_USER` / `DEPLOY_USER` 时，才会写入 `User=<deploy_user>` 和默认 `HOME=/home/<deploy_user>`。HOME 不在默认位置时用 `--deploy-home` 覆盖。启用 `--include-feishu-ws` 时会额外生成 `options-monitor-feishu-ws.service` / `com.options-monitor.feishu-ws.plist`，通过飞书长连接接收消息，不需要公网 HTTPS callback、反向代理或 tunnel，并会使用 runtime locks 目录下的 `feishu-ws.lock` 防止多实例抢同一个 App。启用 `--include-auto-upgrade` 时，`--repo-root` 会保留传入的 symlink 路径，默认 config path 会使用 runtime root 下的 `config.us.json` / `config.hk.json`，避免生产配置随 release 目录漂移。升级切换 symlink 前会从 runtime config metadata、`<runtime_root>/configs/`、当前 release、旧完整 release 恢复 `configs/user*.json`，并用新 release 重建/校验 runtime config；切换后会再用 current symlink 重建/校验一次。缺少必要 overlay 或 rebuild/validate 失败时会写 remediation。`service preflight` 是只读部署前检查；`service repair-output` 默认 dry-run，只有带 `--confirm` 或 `--yes` 才会迁移真实目录并创建 `output` symlink。
+`service render` 只生成 service/timer/plist/profile 文件和安装命令，不会自动安装或启动。systemd 的 `--env-file` 会写入 `EnvironmentFile=...`；launchd 的 `--env-file` 会写入 `EnvironmentVariables.OM_ENV_FILE=...`，两者都用于加载本机 Feishu 凭证环境变量。systemd unit 始终写入 `OM_RUNTIME_ROOT`；只有显式传 `--deploy-user` 或设置 `OM_DEPLOY_USER` / `DEPLOY_USER` 时，才会写入 `User=<deploy_user>` 和默认 `HOME=/home/<deploy_user>`。HOME 不在默认位置时用 `--deploy-home` 覆盖。启用 `--include-feishu-ws` 时会额外生成 `options-monitor-feishu-ws.service` / `com.options-monitor.feishu-ws.plist`，通过飞书长连接接收消息，不需要公网 HTTPS callback、反向代理或 tunnel，并会使用 runtime locks 目录下的 `feishu-ws.lock` 防止多实例抢同一个 App。启用 `--include-auto-upgrade` 时，`--repo-root` 会保留传入的 symlink 路径，默认 config path 会使用 runtime root 下的 `config.us.json` / `config.hk.json`，避免生产配置随 release 目录漂移。当前自动升级的 rebuild/recover 路径仍基于 legacy `configs/user*.json` overlay；使用 `config.yaml` authoring 的部署，要把 YAML 和生成后的 runtime config 放在 release 目录外，并在启用自动升级前确认 YAML rebuild 方案。`service preflight` 是只读部署前检查；`service repair-output` 默认 dry-run，只有带 `--confirm` 或 `--yes` 才会迁移真实目录并创建 `output` symlink。
 
 `service drift` 会用当前 release 的 `render_service_bundle()` 重新生成期望 service/timer，再和 `$RUNTIME/service.profile.json` 以及 systemd unit 文件对比。默认只读；带 `--confirm` 或 `--yes` 时只写入缺失 unit/profile、执行 `systemctl daemon-reload`，并 `enable --now` 缺失 timer，不会自动启用或重启新增长期 service。`runtime_status` 同样会暴露 service drift 摘要；缺失 `options-monitor-projection-verify.timer` 这类维护 timer 会作为 warning/error 返回。
 
 systemd 的 US/HK tick timer 使用 market timezone 的 `OnCalendar` 在 10 分钟整数边界唤醒：US 为 `Mon..Fri *-*-* 09..16:00/10:00 America/New_York`，HK 为 `Mon..Fri *-*-* 09..16:00/10:00 Asia/Hong_Kong`。业务 run point 是否执行仍由 `tick-cron` scheduler 决定。
 
-渲染出的长期服务包含每天北京时间 05:30 执行的 expired auto-close，以及每天北京时间 06:00 执行的 option-position projection verify。auto-close 会以非交互方式运行 `auto-close-expired --apply --yes --quiet`；projection verify 使用 `./om option-positions --data-config <runtime_root>/portfolio.runtime.json verify-projection --mode auto`。systemd 分别使用 `OnCalendar=*-*-* 05:30:00 Asia/Shanghai` 和 `OnCalendar=*-*-* 06:00:00 Asia/Shanghai`；launchd 使用本机时区的 `Hour=5, Minute=30` 和 `Hour=6, Minute=0`。
+渲染出的长期服务包含每天北京时间 05:30 执行的 expired auto-close，以及每天北京时间 06:00 执行的 option-position projection verify。auto-close 会以非交互方式运行 `auto-close-expired --apply --yes --quiet`；projection verify 使用 `om option-positions --data-config <runtime_root>/portfolio.runtime.json verify-projection --mode auto`。systemd 分别使用 `OnCalendar=*-*-* 05:30:00 Asia/Shanghai` 和 `OnCalendar=*-*-* 06:00:00 Asia/Shanghai`；launchd 使用本机时区的 `Hour=5, Minute=30` 和 `Hour=6, Minute=0`。
 
-自动升级是显式 opt-in：`./om service render --include-auto-upgrade ...` 会额外生成每天北京时间 06:10 的 upgrade timer。升级命令默认 dry-run；只有 `./om update apply --confirm` 才会用本机 `_cache/git/options-monitor.git` 增量 fetch 并 archive 出 release、准备新 release `.venv`、安装 runtime/server 依赖、校验新 release、切换 `current` symlink、补齐当前 release 新增的缺失 timer/unit，并按 reconcile 后的 profile 重启长期服务。`OM_UPGRADE_CACHE_ROOT` / `--cache-root` 可覆盖默认 `_cache/`；依赖下载缓存复用 `_cache/uv` 和 `_cache/pip`。release 目录不保留 `.git`，升级检查和下一次升级会在当前 release 没有 git remote 时从 git cache 读取 remote 与 release tags。uv 只作为宿主机工具检测和使用，升级不会自动安装 uv，uv 模式使用 `uv venv --python python3 .venv`。systemd 使用非 root `User=` 运行时，profile 会使用 `sudo -n systemctl restart ...` 重启 `options-monitor-trade-intake.service` 和已渲染的 `options-monitor-feishu-ws.service`，需要部署用户具备对应 NOPASSWD sudoers；重启后会检查长期服务 `is-active` / `is-enabled`，并对 Feishu WS 执行 `./om inbound feishu-ws --check`。release/config 已切换但服务重启、reconcile 或 health check 失败时，upgrade status 会记录 `upgraded_restart_failed`、`upgraded_service_reconcile_failed` 或 `upgraded_service_health_failed` 以及 remediation。`./om update rollback` 同样默认 dry-run。旧的 `./om service upgrade*` / `./om service rollback` 入口仍保留兼容。
+自动升级是显式 opt-in：`om service render --include-auto-upgrade ...` 会额外生成每天北京时间 06:10 的 upgrade timer。升级命令默认 dry-run；只有 `om update apply --confirm` 才会用本机 `_cache/git/options-monitor.git` 增量 fetch 并 archive 出 release、准备新 release `.venv`、安装 runtime/server 依赖、校验新 release、切换 `current` symlink、补齐当前 release 新增的缺失 timer/unit，并按 reconcile 后的 profile 重启长期服务。`OM_UPGRADE_CACHE_ROOT` / `--cache-root` 可覆盖默认 `_cache/`；依赖下载缓存复用 `_cache/uv` 和 `_cache/pip`。release 目录不保留 `.git`，升级检查和下一次升级会在当前 release 没有 git remote 时从 git cache 读取 remote 与 release tags。uv 只作为宿主机工具检测和使用，升级不会自动安装 uv，uv 模式使用 `uv venv --python python3 .venv`。systemd 使用非 root `User=` 运行时，profile 会使用 `sudo -n systemctl restart ...` 重启 `options-monitor-trade-intake.service` 和已渲染的 `options-monitor-feishu-ws.service`，需要部署用户具备对应 NOPASSWD sudoers；重启后会检查长期服务 `is-active` / `is-enabled`，并对 Feishu WS 执行 `om inbound feishu-ws --check`。release/config 已切换但服务重启、reconcile 或 health check 失败时，upgrade status 会记录 `upgraded_restart_failed`、`upgraded_service_reconcile_failed` 或 `upgraded_service_health_failed` 以及 remediation。`om update rollback` 同样默认 dry-run。旧的 `om service upgrade*` / `om service rollback` 入口仍保留兼容。
 
 ---
 
@@ -215,9 +232,26 @@ systemd 的 US/HK tick timer 使用 market timezone 的 `OnCalendar` 在 10 分�
 示例：
 
 ```bash
-./om doctor --config-key us
-./om-agent run --tool healthcheck --input-json '{"config_key":"us"}'
+om doctor --config-key us
+om-agent run --tool healthcheck --input-json '{"config_key":"us"}'
 ```
+
+### Support Bundle
+
+用途：
+- 生成给维护者排查问题的脱敏 JSON 诊断包
+- 汇总 setup/settings/config/runtime status 快照
+- 默认不连接 OpenD；需要 OpenD readiness 时显式加 `--include-healthcheck`
+
+示例：
+
+```bash
+om support bundle --config-key us
+om support bundle --config-key us --include-healthcheck
+om support bundle --config-key us --env-file /etc/options-monitor/options-monitor.env --output-dir /tmp/options-monitor-support
+```
+
+输出文件会脱敏 secret、token、webhook URL 和长数字账号。该命令只写 support bundle 文件，不修改配置、env-file、服务或业务状态。
 
 ---
 
@@ -230,7 +264,7 @@ systemd 的 US/HK tick timer 使用 market timezone 的 `OnCalendar` 在 10 分�
 示例：
 
 ```bash
-./om-agent run --tool version_check --input-json '{"remote_name":"origin"}'
+om-agent run --tool version_check --input-json '{"remote_name":"origin"}'
 ```
 
 ---
@@ -245,8 +279,8 @@ systemd 的 US/HK tick timer 使用 market timezone 的 `OnCalendar` 在 10 分�
 示例：
 
 ```bash
-./om-agent run --tool version_update --input-json '{"bump":"patch"}'
-OM_AGENT_ENABLE_WRITE_TOOLS=true ./om-agent run --tool version_update --input-json '{"version":"1.2.3","apply":true,"confirm":true}'
+om-agent run --tool version_update --input-json '{"bump":"patch"}'
+OM_AGENT_ENABLE_WRITE_TOOLS=true om-agent run --tool version_update --input-json '{"version":"1.2.3","apply":true,"confirm":true}'
 ```
 
 `apply=true` 是本地写入动作，还需要 `confirm=true` 和
@@ -264,7 +298,7 @@ OM_AGENT_ENABLE_WRITE_TOOLS=true ./om-agent run --tool version_update --input-js
 示例：
 
 ```bash
-./om-agent run --tool config_validate --input-json '{"config_key":"us"}'
+om-agent run --tool config_validate --input-json '{"config_key":"us"}'
 ```
 
 ---
@@ -280,7 +314,7 @@ OM_AGENT_ENABLE_WRITE_TOOLS=true ./om-agent run --tool version_update --input-js
 示例：
 
 ```bash
-./om-agent run --tool scheduler_status --input-json '{"config_key":"us","account":"lx"}'
+om-agent run --tool scheduler_status --input-json '{"config_key":"us","account":"lx"}'
 ```
 
 ---
@@ -294,7 +328,7 @@ OM_AGENT_ENABLE_WRITE_TOOLS=true ./om-agent run --tool version_update --input-js
 示例：
 
 ```bash
-./om-agent run --tool scan_opportunities --input-json '{"config_key":"us","symbols":["NVDA"],"top_n":3}'
+om-agent run --tool scan_opportunities --input-json '{"config_key":"us","symbols":["NVDA"],"top_n":3}'
 ```
 
 ---
@@ -309,9 +343,9 @@ OM_AGENT_ENABLE_WRITE_TOOLS=true ./om-agent run --tool version_update --input-js
 示例：
 
 ```bash
-./om-agent run --tool candidate_rank_explain --input-json '{"mode":"put","top_n":5}'
-./om-agent run --tool candidate_rank_explain --input-json '{"candidate_path":"output/reports/sell_call_candidates.csv","mode":"call","top_n":5}'
-./om-agent run --tool candidate_rank_explain --input-json '{"mode":"put","score_weights":{"liquidity":0.02},"compare_baseline":true}'
+om-agent run --tool candidate_rank_explain --input-json '{"mode":"put","top_n":5}'
+om-agent run --tool candidate_rank_explain --input-json '{"candidate_path":"output/reports/sell_call_candidates.csv","mode":"call","top_n":5}'
+om-agent run --tool candidate_rank_explain --input-json '{"mode":"put","score_weights":{"liquidity":0.02},"compare_baseline":true}'
 ```
 
 注意：
@@ -331,8 +365,8 @@ OM_AGENT_ENABLE_WRITE_TOOLS=true ./om-agent run --tool version_update --input-js
 示例：
 
 ```bash
-./om-agent run --tool strategy_replay_analyze --input-json '{"replay_path":"output/reports/strategy_replay.csv","min_sample":5}'
-./om strategy-replay analyze --replay-path output/reports/strategy_replay.csv --min-sample 5
+om-agent run --tool strategy_replay_analyze --input-json '{"replay_path":"output/reports/strategy_replay.csv","min_sample":5}'
+om strategy-replay analyze --replay-path output/reports/strategy_replay.csv --min-sample 5
 ```
 
 注意：
@@ -353,8 +387,8 @@ OM_AGENT_ENABLE_WRITE_TOOLS=true ./om-agent run --tool version_update --input-js
 示例：
 
 ```bash
-./om-agent run --tool query_cash_headroom --input-json '{"config_key":"us","account":"lx"}'
-./om-agent run --tool query_cash_headroom --input-json '{"config_key":"us","account":"sy"}'
+om-agent run --tool query_cash_headroom --input-json '{"config_key":"us","account":"lx"}'
+om-agent run --tool query_cash_headroom --input-json '{"config_key":"us","account":"sy"}'
 ```
 
 注意：
@@ -397,7 +431,7 @@ OM_AGENT_ENABLE_WRITE_TOOLS=true ./om-agent run --tool version_update --input-js
 示例：
 
 ```bash
-./om-agent run --tool monthly_income_report --input-json '{"config_key":"us","account":"lx","month":"2026-04"}'
+om-agent run --tool monthly_income_report --input-json '{"config_key":"us","account":"lx","month":"2026-04"}'
 ```
 
 ---
@@ -413,8 +447,8 @@ OM_AGENT_ENABLE_WRITE_TOOLS=true ./om-agent run --tool version_update --input-js
 示例：
 
 ```bash
-./om-agent run --tool option_positions_read --input-json '{"config_key":"us","action":"list","account":"lx","status":"open"}'
-./om-agent run --tool option_positions_read --input-json '{"config_key":"us","action":"history","record_id":"rec_xxx"}'
+om-agent run --tool option_positions_read --input-json '{"config_key":"us","action":"list","account":"lx","status":"open"}'
+om-agent run --tool option_positions_read --input-json '{"config_key":"us","action":"history","record_id":"rec_xxx"}'
 ```
 
 注意：
@@ -431,7 +465,7 @@ OM_AGENT_ENABLE_WRITE_TOOLS=true ./om-agent run --tool version_update --input-js
 示例：
 
 ```bash
-./om-agent run --tool get_portfolio_context --input-json '{"config_key":"us","account":"lx"}'
+om-agent run --tool get_portfolio_context --input-json '{"config_key":"us","account":"lx"}'
 ```
 
 ---
@@ -453,7 +487,7 @@ OM_AGENT_ENABLE_WRITE_TOOLS=true ./om-agent run --tool version_update --input-js
 示例：
 
 ```bash
-./om-agent run --tool close_advice --input-json '{"config_key":"us"}'
+om-agent run --tool close_advice --input-json '{"config_key":"us"}'
 ```
 
 ---
@@ -466,7 +500,7 @@ OM_AGENT_ENABLE_WRITE_TOOLS=true ./om-agent run --tool version_update --input-js
 示例：
 
 ```bash
-./om-agent run --tool get_close_advice --input-json '{"config_key":"us"}'
+om-agent run --tool get_close_advice --input-json '{"config_key":"us"}'
 ```
 
 这是更推荐的 Agent 入口。
@@ -481,7 +515,7 @@ OM_AGENT_ENABLE_WRITE_TOOLS=true ./om-agent run --tool version_update --input-js
 示例：
 
 ```bash
-./om-agent run --tool manage_symbols --input-json '{"config_key":"us","action":"list"}'
+om-agent run --tool manage_symbols --input-json '{"config_key":"us","action":"list"}'
 ```
 
 注意：
@@ -500,7 +534,7 @@ OM_AGENT_ENABLE_WRITE_TOOLS=true ./om-agent run --tool version_update --input-js
 示例：
 
 ```bash
-./om-agent run --tool preview_notification --input-json '{"alerts_path":"output/reports/symbols_alerts.txt","changes_path":"output/reports/symbols_changes.txt","account_label":"lx"}'
+om-agent run --tool preview_notification --input-json '{"alerts_path":"output/reports/symbols_alerts.txt","changes_path":"output/reports/symbols_changes.txt","account_label":"lx"}'
 ```
 
 ---
@@ -522,15 +556,15 @@ OM_AGENT_ENABLE_WRITE_TOOLS=true ./om-agent run --tool version_update --input-js
 示例：
 
 ```bash
-./om status --config-key us
-./om status --config-key us --json
-./om runs --limit 10
-./om runs --run-id 20260515T182459Z-474761
-./om logs --run-id 20260515T182459Z-474761 --kind tool --lines 20
-./om-agent run --tool runtime_status --input-json '{"config_key":"us"}'
-./om-agent run --tool runtime_status --input-json '{"profile_path":"openclaw.profile.json"}'
-./om-agent run --tool runtime_runs --input-json '{"limit":10}'
-./om-agent run --tool runtime_logs --input-json '{"run_id":"20260515T182459Z-474761","kind":"tool","lines":20}'
+om status --config-key us
+om status --config-key us --json
+om runs --limit 10
+om runs --run-id 20260515T182459Z-474761
+om logs --run-id 20260515T182459Z-474761 --kind tool --lines 20
+om-agent run --tool runtime_status --input-json '{"config_key":"us"}'
+om-agent run --tool runtime_status --input-json '{"profile_path":"openclaw.profile.json"}'
+om-agent run --tool runtime_runs --input-json '{"limit":10}'
+om-agent run --tool runtime_logs --input-json '{"run_id":"20260515T182459Z-474761","kind":"tool","lines":20}'
 ```
 
 ---
@@ -549,8 +583,8 @@ OM_AGENT_ENABLE_WRITE_TOOLS=true ./om-agent run --tool version_update --input-js
 示例：
 
 ```bash
-./om-agent run --tool openclaw_readiness --input-json '{"config_key":"us"}'
-./om-agent run --tool openclaw_readiness --input-json '{"profile_path":"openclaw.profile.json"}'
+om-agent run --tool openclaw_readiness --input-json '{"config_key":"us"}'
+om-agent run --tool openclaw_readiness --input-json '{"profile_path":"openclaw.profile.json"}'
 ```
 
 ---
@@ -560,21 +594,21 @@ OM_AGENT_ENABLE_WRITE_TOOLS=true ./om-agent run --tool version_update --input-js
 用途：
 - 收集线上运行证据，生成给 MacBook Codex 阅读的 redacted bundle / handoff
 - 诊断 runtime 质量、账本质量、多账户策略影响和策略证据完整性
-- 内嵌与 `./om runs` / `./om logs` 同源的 run 列表和 audit tail 摘要
+- 内嵌与 `om runs` / `om logs` 同源的 run 列表和 audit tail 摘要
 - 可选嵌入 `healthcheck` snapshot，但不取代 `healthcheck` 的 readiness 职责
 - 默认不写文件、不调用在线 AI、不发送通知
 
 示例：
 
 ```bash
-./om-agent run --tool ai_cofunder --input-json '{"config_key":"us","scope":"full","output":"both","write_outputs":false}'
-./om ai-cofunder collect --config-key us --scope full --output both --no-write-outputs
+om-agent run --tool ai_cofunder --input-json '{"config_key":"us","scope":"full","output":"both","write_outputs":false}'
+om ai-cofunder collect --config-key us --scope full --output both --no-write-outputs
 ```
 
 带线上调度证据：
 
 ```bash
-./om-agent run --tool ai_cofunder --input-json '{
+om-agent run --tool ai_cofunder --input-json '{
   "config_key": "us",
   "scope": "full",
   "output": "both",
@@ -618,12 +652,12 @@ output_shared/state/current/ai_cofunder.current.json
 
 ## 6. 人工 CLI：版本检查
 
-`./om version` 仍然保留为人工 CLI 能力。Agent 使用 `version_check`，二者读取同一个本地 `VERSION` 和远端 `v*` tags。
+`om version` 仍然保留为人工 CLI 能力。Agent 使用 `version_check`，二者读取同一个本地 `VERSION` 和远端 `v*` tags。
 
 示例：
 
 ```bash
-./om version
+om version
 ```
 
 ---

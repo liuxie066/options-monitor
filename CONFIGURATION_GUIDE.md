@@ -1,49 +1,110 @@
 # options-monitor 配置与表结构说明（实战版）
 
 > 目标：你只要维护：
-> - 可选 `configs/user.common.json`（US/HK 共用的用户覆盖）
-> - `configs/user.us.json` / `configs/user.hk.json`（市场账号与 symbols；市场私有覆盖按需放这里）
-> - 必要的环境变量（Feishu App 凭证与 Bitable 表引用）
+> - `config.yaml`：用户 override，放 accounts、markets、symbols 和非 secret 行为配置
+> - env-file：Feishu App 凭证、Bitable 表引用、写入开关
+> - 生成后的 runtime config：`config.us.json` / `config.hk.json`，供实际运行读取
 > - `portfolio.data_config` 只作为可选兼容/迁移文件；`option_positions` 的稳态读写主存储由 `runtime_root` 固定派生到 SQLite
 
 ---
 
 ## 0) 最终保留哪几个配置文件？
 
-### 推荐编辑入口（分层配置）
-- `configs/system.json`：系统默认值，通常不需要用户改
-- `configs/user.common.json`（可选）：US/HK 共用用户覆盖，同字段会被 market user 覆盖
-- `configs/user.us.json`
-- `configs/user.hk.json`
+### 推荐编辑入口
 
-用户日常只维护 `configs/user.us.json` / `configs/user.hk.json` 里的 market-specific 账号和 symbols；如果某些覆盖 US/HK 都相同，放到可选的 `configs/user.common.json`。运行前生成 canonical runtime config：
-
-```bash
-cp configs/examples/user.common.example.json configs/user.common.json  # 可选
-cp configs/examples/user.example.us.json configs/user.us.json
-cp configs/examples/user.example.hk.json configs/user.hk.json
-./om config build --market us
-./om config build --market hk
+```text
+src/application/config_defaults.py DEFAULT_CONFIG
+  + config.yaml user overrides
+  + env-file secrets/write gates
+  -> config build
+  -> runtime config JSON
 ```
 
-`config build` 会在生成的 `config.us.json` / `config.hk.json` 写入 `_generated`
-元信息，记录 system/common/user 三类源文件的路径和 SHA-256。之后只要
-`configs/system.json`、`configs/user.common.json`、`configs/user.us.json` 或
-`configs/user.hk.json` 有变化，就要重新 build 对应 market 的 runtime config。生产 tick
-入口会检查这个指纹，避免 cron 拿陈旧 runtime config 继续跑。
+- 系统默认值在代码里的 `DEFAULT_CONFIG`，用户不编辑默认配置文件。
+- `config.yaml` 是推荐的人类编辑入口，只保存 override。
+- `config.us.json` / `config.hk.json` 是生成后的 runtime config，不是首选手工编辑入口。
+- env-file 保存 secrets、Feishu Bot 凭证和写入开关；`config.yaml` 会拒绝 write gate 字段。
+
+本地/source checkout 可以直接在 repo root 维护 `config.yaml`：
+
+```bash
+cp configs/examples/config.yaml.example config.yaml
+$EDITOR config.yaml
+
+./om config validate --source yaml --market us
+./om config build --source yaml --market us --output config.us.json
+./om config validate --config-path config.us.json --market us
+```
+
+生产服务建议把 `config.yaml` 和生成后的 runtime config 放在 release 目录外，例如 `/var/lib/options-monitor`：
+
+```bash
+./om config build --source yaml --market us --config-yaml /var/lib/options-monitor/config.yaml --output /var/lib/options-monitor/config.us.json
+./om config build --source yaml --market hk --config-yaml /var/lib/options-monitor/config.yaml --output /var/lib/options-monitor/config.hk.json
+```
+
+`config build` 会在生成的 runtime config 写入 `_generated` 元信息，记录来源路径、SHA-256 和 rebuild command。之后只要 `config.yaml` 或 legacy 分层源文件变化，就要重新 build 对应 market 的 runtime config。生产 tick 入口会检查这个指纹，避免 cron 拿陈旧 runtime config 继续跑。
 
 不确定某个值来自哪里时，用 explain 查看覆盖链：
 
 ```bash
-./om config explain --market us --key option_positions.auto_close.enabled
-./om config explain --market us --key symbol_defaults.fetch.limit_expirations
+./om config explain --source yaml --market us --key option_positions.auto_close.enabled
+./om config explain --source yaml --market us --key symbol_defaults.fetch.limit_expirations
 ```
 
-生成产物仍是 runtime 唯一入口：
+### YAML 结构约定
+
+- `accounts` 是顶层账户定义。
+- `markets.us` / `markets.hk` 显式声明该市场使用哪些账户和 symbols。
+- `symbols` 保持字符串列表；每个 symbol 的 DTE、strike、收益增强等个性化设置放在 `markets.<market>.overrides.<symbol>`。
+- YAML 必须使用空格缩进，tab 会被拒绝；示例采用 2 个空格。
+- 港股代码建议加引号，例如 `"0700.HK"`。
+
+最小结构：
+
+```yaml
+accounts:
+  lx:
+    type: futu
+    futu_account_id: "REPLACE_WITH_FUTU_ACCOUNT_ID"
+
+markets:
+  us:
+    accounts: [lx]
+    symbols:
+      - NVDA
+    overrides:
+      NVDA:
+        sell_put:
+          dte: [20, 45]
+          strike: [80, 120]
+```
+
+### 生成产物仍是 runtime 入口
+
 - `config.us.json`
 - `config.hk.json`
 
-### 兼容的运行时文件
+### 兼容路径
+
+旧的分层 JSON 仍可用，主要用于已有安装、迁移和部分服务升级路径：
+
+- `configs/system.json`
+- `configs/user.common.json`（可选）
+- `configs/user.us.json`
+- `configs/user.hk.json`
+
+从旧配置迁移到 `config.yaml`：
+
+```bash
+./om config migrate-yaml --output config.yaml
+./om config migrate-yaml --output config.yaml --apply
+```
+
+`migrate-yaml` 默认 dry-run；只有带 `--apply` 才会写文件，默认会先备份已有 `config.yaml`。
+
+兼容的运行时文件：
+
 - `config.us.json`
 - `config.hk.json`
 - `portfolio.runtime.json`（可选；只用于 external_holdings 的 Feishu 表 env 名声明或 legacy 迁移）
@@ -55,12 +116,13 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 - `configs/examples/user.example.hk.json`
 - `configs/examples/portfolio.runtime.example.json`
 - `configs/examples/openclaw.profile.example.json`
+- `configs/examples/config.yaml.example`
 
 ### 最小配置和补充配置怎么区分？
-- 最小编辑配置：`configs/user.us.json` / `configs/user.hk.json` 里的账号和 symbols；共用覆盖可放 `configs/user.common.json`
+- 最小编辑配置：`config.yaml` 里的 `accounts`、`markets.<market>.accounts` 和 `markets.<market>.symbols`
 - 最小运行配置：生成后的 `config.us.json` / `config.hk.json`；期权持仓 SQLite 固定在 `<runtime_root>/output_shared/state/option_positions.sqlite3`
 - 补充配置：在同一套结构上继续补 `watchdog.*`、`notifications.*`、`runtime.*`、`alert_policy.change_annual_threshold`、`intake.*`、`symbol_defaults.*`、`portfolio.source_by_account`、`feishu.*`
-- 不再维护“两套 schema”或“两份不同风格文档”；只有一套结构，只是填写程度不同。
+- 不再维护“两套心智模型”；YAML 是推荐 authoring，runtime JSON 是生成产物，legacy JSON 是兼容/迁移入口。
 
 ---
 
@@ -157,9 +219,9 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 
 ---
 
-## 4) config.us.json 或 config.hk.json：你需要配置什么？
+## 4) runtime config：生成后的 JSON 里需要有什么？
 
-安装版默认文件：`config.us.json` 或 `config.hk.json`
+运行时文件通常是 `config.us.json` / `config.hk.json`，或生产 runtime root 下的同名 JSON。它们由 `config.yaml` 或 legacy 分层 JSON 生成。
 
 ### 4.0A 配置优先级（只认这一套主路径）
 
@@ -215,15 +277,17 @@ cp configs/examples/user.example.hk.json configs/user.hk.json
 
 | 工具 | 负责什么 | 不负责什么 |
 |---|---|---|
-| `./om config validate --market us|hk` | 配置结构、字段语义、removed/legacy 字段、数值约束、市场 schedule 时区契约、runtime config 生成指纹 | OpenD 是否在线、环境变量是否已注入、runtime 输出是否健康 |
+| `./om config validate --source yaml --market us|hk` | 校验 `config.yaml` 与代码默认值合并后的配置结构、字段语义、removed/legacy 字段和数值约束 | OpenD 是否在线、环境变量是否已注入、runtime 输出是否健康 |
+| `./om config validate --config-path ... --market us|hk` | 校验生成后的 runtime config、市场 schedule 时区契约和生成指纹 | OpenD 是否在线、环境变量是否已注入、runtime 输出是否健康 |
 | `config_validate` | 基础 runtime config 结构校验 | OpenD 是否在线、环境变量是否已注入、生成指纹是否最新 |
 | `healthcheck` | runtime config 可读、SQLite store、Feishu env readiness、OpenD readiness、option_positions bootstrap 状态 | 不负责替代主配置语义文档 |
 | `runtime_status` | 只读汇总现有 runtime / OpenClaw 输出文件 | 不校验配置语义，不检查 OpenD |
 | `openclaw_readiness` | 组合 `runtime_status` + `healthcheck` + 本地 openclaw 可用性 | 不替代 `config_validate` 的纯配置语义检查 |
 
 判断规则很简单：
-- 配置本身写得对不对，看 `config_validate`
-- runtime config 是否由最新 system/common/user 生成，看 `./om config validate --market us|hk`
+- YAML authoring 写得对不对，看 `./om config validate --source yaml --market us|hk`
+- runtime config 是否由最新 `config.yaml` 或 legacy user config 生成，看 `./om config validate --config-path ... --market us|hk`
+- 基础 runtime JSON 结构是否可读，看 `config_validate`
 - 环境能不能跑起来，看 `healthcheck` / `openclaw_readiness`
 - 历史运行结果长什么样，看 `runtime_status`
 

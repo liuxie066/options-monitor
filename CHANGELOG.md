@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.2.109 - 2026-05-21
+
+### Added
+- Added `om support bundle` for generating a redacted JSON diagnostic bundle with setup, settings, config validation, runtime status, and optional healthcheck snapshots.
+
+### Changed
+- Refreshed quick-start, install, configuration, tool, deployment, and release docs around the current `config.yaml` authoring model, generated runtime config snapshots, global `om` / `om-agent` wrappers, and the remaining legacy auto-upgrade config rebuild boundary.
+
 ## 1.2.108 - 2026-05-21
 
 ### Changed
