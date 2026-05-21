@@ -830,23 +830,6 @@ def _notification_diagnosis(
     }
 
 
-def _latest_run_dir(base: Path, *, pointer_path: Path, runs_root: Path) -> Path | None:
-    raw_pointer = _read_text(pointer_path)
-    if raw_pointer:
-        pointed = Path(raw_pointer).expanduser()
-        if not pointed.is_absolute():
-            pointed = (base / pointed).resolve()
-        if pointed.exists() and pointed.is_dir():
-            return pointed
-
-    if not runs_root.exists() or not runs_root.is_dir():
-        return None
-    dirs = [item for item in runs_root.iterdir() if item.is_dir()]
-    if not dirs:
-        return None
-    return max(dirs, key=lambda item: item.stat().st_mtime)
-
-
 def _run_payload(
     run_dir: Path,
     *,
@@ -943,12 +926,78 @@ def _requested_run_dir_from_payload(
     return None, {"requested": False, "source": "last_run_dir_or_mtime"}
 
 
-def _latest_run_selection(*, latest_run: Path | None, base: Path) -> dict[str, Any]:
-    return {
+def _latest_run_payload_for_market(
+    *,
+    base: Path,
+    pointer_path: Path,
+    runs_root: Path,
+    accounts: list[str],
+    read_json_object_or_empty: Callable[[Path], dict[str, Any]],
+    max_notification_chars: int,
+    desired_market: str | None,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    skipped_market_mismatch_count = 0
+    searched_count = 0
+    seen_dirs: set[Path] = set()
+
+    raw_pointer = _read_text(pointer_path)
+    if raw_pointer:
+        pointed = Path(raw_pointer).expanduser()
+        if not pointed.is_absolute():
+            pointed = (base / pointed).resolve()
+        if pointed.exists() and pointed.is_dir():
+            seen_dirs.add(pointed.resolve())
+            candidate = _run_payload(
+                pointed,
+                accounts=accounts,
+                base=base,
+                read_json_object_or_empty=read_json_object_or_empty,
+                max_notification_chars=max_notification_chars,
+            )
+            if _run_payload_matches_market(candidate, desired_market):
+                return candidate, {
+                    "requested": False,
+                    "source": "last_run_dir_or_mtime",
+                    "path": candidate.get("path"),
+                    "found": True,
+                    "market_filter": desired_market,
+                    "searched_count": searched_count,
+                    "skipped_market_mismatch_count": skipped_market_mismatch_count,
+                }
+            skipped_market_mismatch_count += 1
+
+    for run_dir in _run_dirs_newest_first(runs_root):
+        if run_dir.resolve() in seen_dirs:
+            continue
+        searched_count += 1
+        candidate = _run_payload(
+            run_dir,
+            accounts=accounts,
+            base=base,
+            read_json_object_or_empty=read_json_object_or_empty,
+            max_notification_chars=max_notification_chars,
+        )
+        if not _run_payload_matches_market(candidate, desired_market):
+            skipped_market_mismatch_count += 1
+            continue
+        return candidate, {
+            "requested": False,
+            "source": "last_run_dir_or_mtime",
+            "path": candidate.get("path"),
+            "found": True,
+            "market_filter": desired_market,
+            "searched_count": searched_count,
+            "skipped_market_mismatch_count": skipped_market_mismatch_count,
+        }
+
+    return None, {
         "requested": False,
         "source": "last_run_dir_or_mtime",
-        "path": _relative_path(latest_run, base=base) if latest_run is not None else None,
-        "found": latest_run is not None,
+        "path": None,
+        "found": False,
+        "market_filter": desired_market,
+        "searched_count": searched_count,
+        "skipped_market_mismatch_count": skipped_market_mismatch_count,
     }
 
 
@@ -1078,6 +1127,35 @@ def _run_payload_matches_market(run_payload: dict[str, Any], desired_market: str
         return True
     observed_markets = _run_payload_markets(run_payload)
     return not observed_markets or desired_market in observed_markets
+
+
+def _nested(payload: Any, *keys: str) -> Any:
+    cur = payload
+    for key in keys:
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(key)
+    return cur
+
+
+def _dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _latest_run_expects_static_notification(latest_run_payload: dict[str, Any] | None) -> bool:
+    if latest_run_payload is None:
+        return True
+    tick_metrics = _json_payload(_nested(latest_run_payload, "state", "tick_metrics"))
+    scheduler = _dict(tick_metrics.get("scheduler_decision"))
+    if scheduler.get("should_run_scan") is False:
+        return False
+    if scheduler.get("should_notify") is False:
+        return False
+    if scheduler.get("is_notify_window_open") is False:
+        return False
+    if tick_metrics.get("no_send") is True:
+        return False
+    return True
 
 
 def _run_dirs_newest_first(runs_root: Path) -> list[Path]:
@@ -1310,24 +1388,31 @@ def runtime_status_tool(
         }
 
     pointer_path = shared_state_dir / "last_run_dir.txt"
+    desired_market = _desired_runtime_market(payload, cfg, config_path=config_path)
     requested_run, latest_run_selection = _requested_run_dir_from_payload(payload, base=base, runs_root=runs_root)
+    latest_run_payload: dict[str, Any] | None = None
     if latest_run_selection.get("requested"):
         latest_run = requested_run
+        if latest_run is not None:
+            latest_run_payload = _run_payload(
+                latest_run,
+                accounts=accounts,
+                base=base,
+                read_json_object_or_empty=read_json_object_or_empty,
+                max_notification_chars=max_notification_chars,
+            )
     else:
-        latest_run = _latest_run_dir(base, pointer_path=pointer_path, runs_root=runs_root)
-        latest_run_selection = _latest_run_selection(latest_run=latest_run, base=base)
-    latest_run_payload: dict[str, Any] | None = None
-    if latest_run is not None:
-        latest_run_payload = _run_payload(
-            latest_run,
-            accounts=accounts,
+        latest_run_payload, latest_run_selection = _latest_run_payload_for_market(
             base=base,
+            pointer_path=pointer_path,
+            runs_root=runs_root,
+            accounts=accounts,
             read_json_object_or_empty=read_json_object_or_empty,
             max_notification_chars=max_notification_chars,
+            desired_market=desired_market,
         )
 
     prefetch_summary = _latest_run_prefetch_summary(latest_run_payload)
-    desired_market = _desired_runtime_market(payload, cfg, config_path=config_path)
     latest_scanned_run_payload, latest_scanned_run_selection = _latest_scanned_run_payload(
         runs_root=runs_root,
         accounts=accounts,
@@ -1345,7 +1430,11 @@ def runtime_status_tool(
         warnings.append(f"Requested runtime run not found: {source}={value}.")
     if not shared_last_run.get("exists") and not legacy_last_run.get("exists"):
         warnings.append("No last_run.json found under output_shared/state or output/state.")
-    if not notification.get("exists") and not any(item["notification"].get("exists") for item in account_status.values()):
+    if (
+        _latest_run_expects_static_notification(latest_run_payload)
+        and not notification.get("exists")
+        and not any(item["notification"].get("exists") for item in account_status.values())
+    ):
         warnings.append("No symbols_notification.txt found under output/reports or output_accounts/<account>/reports.")
     if str(trigger_context.get("delivery_mode") or "").lower() == "none":
         warnings.append("Outer delivery.mode is none; the task runner will not announce run output.")
