@@ -447,8 +447,11 @@ def test_inbound_upgrade_preview_and_confirm(monkeypatch: pytest.MonkeyPatch, tm
 
     _enable_inbound_upgrade_write(monkeypatch)
     monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "cli_test_app")
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_SECRET", "cli_test_secret")
     audit_db = tmp_path / "inbound.sqlite3"
     calls: list[dict[str, object]] = []
+    replies: list[dict[str, object]] = []
 
     def _fake_service_upgrade(**kwargs):  # type: ignore[no-untyped-def]
         calls.append(dict(kwargs))
@@ -481,6 +484,11 @@ def test_inbound_upgrade_preview_and_confirm(monkeypatch: pytest.MonkeyPatch, tm
 
     monkeypatch.setattr(upgrade_operations, "service_upgrade_check", _fake_service_upgrade_check)
     monkeypatch.setattr(upgrade_operations, "service_upgrade", _fake_service_upgrade)
+    monkeypatch.setattr(
+        upgrade_operations,
+        "UPGRADE_WORKER_LAUNCHER",
+        lambda operation_id, audit_db: {"launcher": "test", "operation_id": operation_id, "audit_db": str(audit_db)},
+    )
 
     preview = handle_inbound_request(
         InboundRequest(
@@ -517,11 +525,97 @@ def test_inbound_upgrade_preview_and_confirm(monkeypatch: pytest.MonkeyPatch, tm
     assert confirmed["ok"] is True
     assert confirmed["data"]["operation_id"] == operation_id
     assert confirmed["data"]["operation_resolution"] == "latest_pending"
-    assert "升级执行完成" in confirmed["data"]["response_text"]
+    assert "已收到升级确认" in confirmed["data"]["response_text"]
+    assert all("confirm" not in call for call in calls if "check" not in call)
+
+    worker = upgrade_operations.run_confirmed_upgrade_operation(
+        operation_id=operation_id,
+        audit_db=audit_db,
+        reply_fn=lambda **kwargs: replies.append(dict(kwargs)) or {"ok": True, "message_id": "reply_1"},
+    )
+
+    assert worker["ok"] is True
+    assert worker["data"]["status"] == "applied"
+    assert "升级执行完成" in worker["data"]["response_text"]
+    assert replies[-1]["message_id"] == "msg_upgrade_confirm"
+    assert "升级执行完成" in str(replies[-1]["text"])
+    assert replies[-1]["uuid"] == f"{operation_id}:upgrade-final"
     assert calls[-1]["confirm"] is True
     assert calls[-1]["auto"] is True
     assert calls[-1]["target_version"] == "1.2.111"
     assert str(calls[-1]["runtime_root"]) == str(tmp_path / "runtime")
+
+
+def test_inbound_upgrade_reconfirm_hides_internal_status(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from src.application.inbound import upgrade_operations
+
+    _enable_inbound_upgrade_write(monkeypatch)
+    audit_db = tmp_path / "inbound.sqlite3"
+
+    monkeypatch.setattr(
+        upgrade_operations,
+        "service_upgrade_check",
+        lambda **kwargs: {
+            "ok": True,
+            "repo_root": str(kwargs["repo_root"]),
+            "repo_root_resolved": str(kwargs["repo_root"]),
+            "repo_root_resolution": {"status": "input"},
+            "runtime_root": str(kwargs["runtime_root"]),
+            "current_version": "1.2.110",
+            "latest_version": "1.2.111",
+            "release_tag": "v1.2.111",
+            "upgrade_available": True,
+            "version_check": {"ok": True},
+        },
+    )
+    monkeypatch.setattr(
+        upgrade_operations,
+        "UPGRADE_WORKER_LAUNCHER",
+        lambda operation_id, audit_db: {"launcher": "test", "operation_id": operation_id},
+    )
+
+    preview = handle_inbound_request(
+        InboundRequest(
+            text="立即升级",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_upgrade_preview",
+            conversation_id="feishu:chat_a:ou_1",
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+    operation_id = preview["data"]["operation_id"]
+
+    first = handle_inbound_request(
+        InboundRequest(
+            text=f"确认升级 {operation_id}",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_upgrade_confirm_1",
+            conversation_id="feishu:chat_a:ou_1",
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+    assert first["ok"] is True
+
+    second = handle_inbound_request(
+        InboundRequest(
+            text=f"确认升级 {operation_id}",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_upgrade_confirm_2",
+            conversation_id="feishu:chat_a:ou_1",
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+
+    assert second["ok"] is False
+    response_text = str(second["data"]["response_text"])
+    assert "当前进度：确认已收到，正在执行或等待结果" in response_text
+    assert "confirmed" not in response_text
 
 
 def test_inbound_manual_trade_bare_confirm_requires_unique_pending(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

@@ -13,6 +13,7 @@ from src.application.config_validator import validate_config
 from src.application.inbound.contracts import InboundIntent, InboundRequest
 from src.application.inbound.operation_policy import enforce_symbol_write_allowed
 from src.application.inbound.operation_store import InboundOperationStore, operation_is_expired
+from src.application.inbound.operation_status_text import cannot_repeat_message
 from src.application.runtime_config_paths import write_json_atomic
 from src.application.symbol_mutations import add_symbol_entry, edit_symbol_entry, remove_symbol_entry
 
@@ -118,7 +119,7 @@ def _confirm_operation(*, operation_id: str | None, request: InboundRequest, sto
         current_status = str(current.get("status") or "-")
         raise AgentToolError(
             code="INPUT_ERROR",
-            message=f"这条监控标的变更不能再次确认，当前状态：{current_status}。",
+            message=cannot_repeat_message("监控标的变更", "确认", current_status),
             details={
                 "operation_id": operation_id,
                 "status": current_status,
@@ -203,7 +204,7 @@ def _resolve_symbol_operation(
         raise AgentToolError(code="INPUT_ERROR", message="这不是监控标的变更，不能用确认监控/取消监控处理。", details=details)
     if status == "invalid_status":
         current_status = str(operation.get("status") or "-")
-        raise AgentToolError(code="INPUT_ERROR", message=f"这条监控标的变更不能再次{action}，当前状态：{current_status}。", details=details)
+        raise AgentToolError(code="INPUT_ERROR", message=cannot_repeat_message("监控标的变更", action, current_status), details=details)
     raise AgentToolError(code="INPUT_ERROR", message="找不到待确认的监控标的变更。", hint="请检查 operation_id，或重新发送监控标的命令。", details=details)
 
 

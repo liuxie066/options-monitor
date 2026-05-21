@@ -12,6 +12,7 @@ from src.application.inbound.contracts import InboundIntent, InboundRequest
 from src.application.inbound.manual_trade_parser import build_manual_trade_draft
 from src.application.inbound.operation_policy import enforce_trade_write_allowed
 from src.application.inbound.operation_store import InboundOperationStore, operation_is_expired
+from src.application.inbound.operation_status_text import cannot_repeat_message
 from src.application.ledger.api import open_position_ledger_from_runtime_config
 from src.application.positions.workflows import (
     ManualCloseMatchError,
@@ -195,7 +196,7 @@ def _confirm_operation(*, operation_id: str | None, request: InboundRequest, sto
         current_status = str(current.get("status") or "-")
         raise AgentToolError(
             code="INPUT_ERROR",
-            message=f"这条交易记录不能再次确认，当前状态：{current_status}。",
+            message=cannot_repeat_message("交易记录", "确认", current_status),
             details={
                 "operation_id": operation_id,
                 "status": current_status,
@@ -338,7 +339,7 @@ def _resolve_manual_trade_operation(
         raise AgentToolError(code="INPUT_ERROR", message="这不是交易记录操作，不能用确认记录/取消记录处理。", details=details)
     if status == "invalid_status":
         current_status = str(operation.get("status") or "-")
-        raise AgentToolError(code="INPUT_ERROR", message=f"这条交易记录不能再次{action}，当前状态：{current_status}。", details=details)
+        raise AgentToolError(code="INPUT_ERROR", message=cannot_repeat_message("交易记录", action, current_status), details=details)
     raise AgentToolError(code="INPUT_ERROR", message="找不到待确认的交易记录。", hint="请检查 operation_id，或重新发送记录交易命令。", details=details)
 
 
