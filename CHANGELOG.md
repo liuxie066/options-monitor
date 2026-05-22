@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.2.126 - 2026-05-22
+
+### Added
+- Added a constrained LLM general-reply fallback for harmless non-business chat, such as assistant identity questions, after deterministic and read-only intent routing cannot produce an action.
+
+### Fixed
+- Kept the general LLM reply path blocked for trade, position, income, config, upgrade, symbol, confirmation, and other write-like or business requests so it cannot bypass deterministic tools or preview/confirm flows.
+
 ## 1.2.125 - 2026-05-22
 
 ### Fixed
