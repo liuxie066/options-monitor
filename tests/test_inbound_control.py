@@ -1547,6 +1547,47 @@ def test_inbound_renderer_summarizes_runtime_status() -> None:
     assert "异常：No symbols_notification.txt found." in text
 
 
+def test_inbound_renderer_shows_service_upgrade_failure_details() -> None:
+    intent = parse_inbound_text("状态")
+    text = render_inbound_text(
+        intent=intent,
+        tool_result=build_response(
+            tool_name="runtime_status",
+            ok=True,
+            data={
+                "summary": {
+                    "ok": False,
+                    "latest_status": "ok",
+                    "warning_count": 1,
+                    "service_upgrade_status": "upgraded_restart_failed",
+                    "service_upgrade_target_version": "1.2.118",
+                    "service_upgrade_current_version": "1.2.118",
+                    "service_upgrade_reason": "upgrade_failure_still_requires_remediation",
+                    "service_upgrade_runtime_failed": True,
+                    "service_upgrade_failed_services": ["options-monitor-feishu-ws.service"],
+                    "service_upgrade_remediation": [
+                        "manual_restart: sudo systemctl restart options-monitor-feishu-ws.service",
+                        "sudoers_minimal:",
+                    ],
+                },
+                "service_upgrade": {
+                    "evaluation": {
+                        "status": "upgraded_restart_failed",
+                        "target_version": "1.2.118",
+                        "current_version": "1.2.118",
+                        "reason": "upgrade_failure_still_requires_remediation",
+                    }
+                },
+            },
+            warnings=["Service upgrade status still indicates an unrecovered runtime failure."],
+        ),
+    )
+
+    assert "升级状态：upgraded_restart_failed target=1.2.118 current=1.2.118 reason=upgrade_failure_still_requires_remediation" in text
+    assert "失败服务：options-monitor-feishu-ws.service" in text
+    assert "修复提示：manual_restart: sudo systemctl restart options-monitor-feishu-ws.service；sudoers_minimal:" in text
+
+
 def test_inbound_renderer_summarizes_healthcheck_and_config() -> None:
     health_text = render_inbound_text(
         intent=parse_inbound_text("健康检查"),
