@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.125 - 2026-05-22
+
+### Fixed
+- Made automatic trade intake silently ignore non-option stock deals, preventing stock buys/sells from entering option-position state or sending "not recorded" receipts.
+
 ## 1.2.124 - 2026-05-22
 
 ### Fixed

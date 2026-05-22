@@ -191,6 +191,8 @@ def resolve_trade_deal(
 
     if not deal.deal_id:
         return _failure(status="unresolved", action=None, reason="missing_required_fields:deal_id", deal=deal)
+    if deal.symbol and not deal.option_type:
+        return _failure(status="skipped", action=None, reason="not_option_deal", deal=deal)
     if not deal.internal_account:
         diagnostics = _missing_account_mapping_diagnostics(deal)
         futu_account_id = str(diagnostics.get("futu_account_id") or "").strip()
@@ -205,7 +207,7 @@ def resolve_trade_deal(
             diagnostics=diagnostics,
         )
     if not deal.symbol or not deal.option_type:
-        return _failure(status="unresolved", action=None, reason="not_option_deal", deal=deal)
+        return _failure(status="skipped", action=None, reason="not_option_deal", deal=deal)
     if deal.position_effect not in ("open", "close"):
         return _failure(status="unresolved", action=None, reason="unknown_position_effect", deal=deal)
 

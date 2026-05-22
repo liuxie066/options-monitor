@@ -85,6 +85,18 @@ def test_receipt_decision_retries_unconfirmed_duplicate() -> None:
     assert out == {"should_send": True, "reason": "duplicate_retry_unconfirmed_receipt"}
 
 
+def test_receipt_decision_skips_non_option_deal() -> None:
+    out = decide_trade_intake_receipt(
+        receipt_config={},
+        apply_changes=True,
+        state={},
+        deal_id="deal-stock-1",
+        result={"status": "skipped", "reason": "not_option_deal"},
+    )
+
+    assert out == {"should_send": False, "reason": "skipped_not_option_deal"}
+
+
 def test_send_trade_intake_receipt_skips_without_route(tmp_path: Path) -> None:
     out = send_trade_intake_receipt(
         base=tmp_path,
