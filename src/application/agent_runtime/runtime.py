@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from datetime import date
+import re
 from typing import Any, Callable
 
 from src.application.agent_runtime.agent_loop import build_tool_observation, run_read_only_agent_loop
 from src.application.agent_runtime.command_catalog import spec_by_intent
 from src.application.agent_runtime.command_parser import parse_agent_command
 from src.application.agent_runtime.conversation_context import build_conversation_context, context_trace
+from src.application.agent_runtime.llm_reply import LlmReplyResult, generate_general_reply
 from src.application.agent_runtime.llm_translator import LlmTranslationResult, skipped_llm_trace, translate_inbound_intent
 from src.application.agent_runtime.settings import AgentRuntimeSettings
 from src.application.agent_runtime.tool_policy import DEFAULT_TOOL_POLICY
@@ -18,7 +20,60 @@ from src.application.inbound.router import ExecuteToolFn, handle_inbound_request
 from src.application.tool_execution import execute_tool
 
 TranslateIntentFn = Callable[[str, AgentRuntimeSettings, dict[str, Any] | None], LlmTranslationResult]
+GenerateReplyFn = Callable[[str, AgentRuntimeSettings, dict[str, Any] | None], LlmReplyResult]
 _COMMAND_SPECS_BY_INTENT = spec_by_intent()
+_OPERATION_ID_RE = re.compile(r"\bin_[A-Za-z0-9_.:-]+\b")
+_BUSINESS_OR_WRITE_TOKENS = (
+    "确认",
+    "取消",
+    "记录",
+    "开仓",
+    "平仓",
+    "交易",
+    "买入",
+    "卖出",
+    "下单",
+    "成交",
+    "权利金",
+    "行权价",
+    "持仓",
+    "收益",
+    "状态",
+    "健康",
+    "配置",
+    "日志",
+    "账本",
+    "监控",
+    "标的",
+    "升级",
+    "重启",
+    "启动",
+    "停止",
+    "写入",
+    "删除",
+    "修改",
+    "增加",
+    "confirm",
+    "cancel",
+    "trade",
+    "position",
+    "income",
+    "status",
+    "health",
+    "config",
+    "logs",
+    "symbol",
+    "upgrade",
+    "restart",
+    "start",
+    "stop",
+    "apply",
+    "delete",
+    "edit",
+    "add",
+    "premium",
+    "strike",
+)
 
 
 def handle_agent_message(
@@ -30,6 +85,7 @@ def handle_agent_message(
     now_fn: Callable[[], date] | None = None,
     settings: AgentRuntimeSettings | None = None,
     translate_intent_fn: TranslateIntentFn | None = None,
+    generate_reply_fn: GenerateReplyFn | None = None,
 ) -> dict[str, Any]:
     runtime_settings = settings or AgentRuntimeSettings()
     store = audit_store or InboundAuditStore(request.audit_db)
@@ -99,6 +155,26 @@ def handle_agent_message(
                 _ensure_llm_intent_allowed(llm_result.intent)
                 return llm_result.intent
             if llm_result.error is not None:
+                reply_result = _maybe_generate_general_reply(
+                    text,
+                    settings=runtime_settings,
+                    translate_trace=llm_trace,
+                    translate_error=llm_result.error,
+                    generate_reply_fn=generate_reply_fn,
+                    conversation_context=conversation_context,
+                )
+                if reply_result.response_text:
+                    route = "llm_reply"
+                    llm_trace = dict(reply_result.trace)
+                    return InboundIntent(
+                        name="small_talk",
+                        arguments={
+                            "kind": "llm_reply",
+                            "response_text": reply_result.response_text,
+                        },
+                        parser="llm_reply",
+                        confidence=1.0,
+                    )
                 raise llm_result.error
             raise
 
@@ -140,6 +216,54 @@ def _translate_intent(
     if translate_intent_fn is not None:
         return translate_intent_fn(text, settings, conversation_context)
     return translate_inbound_intent(text, settings=settings.llm, conversation_context=conversation_context)
+
+
+def _maybe_generate_general_reply(
+    text: str,
+    *,
+    settings: AgentRuntimeSettings,
+    translate_trace: dict[str, Any],
+    translate_error: AgentToolError,
+    generate_reply_fn: GenerateReplyFn | None,
+    conversation_context: dict[str, Any] | None,
+) -> LlmReplyResult:
+    if not _general_reply_allowed(text, translate_error=translate_error):
+        return LlmReplyResult(
+            response_text=None,
+            trace={
+                **dict(translate_trace),
+                "reply": {
+                    "attempted": False,
+                    "reason": "blocked_by_safety_filter",
+                },
+            },
+            error=translate_error,
+        )
+    if generate_reply_fn is not None:
+        reply_result = generate_reply_fn(text, settings, conversation_context)
+    else:
+        reply_result = generate_general_reply(
+            text,
+            settings=settings.llm,
+            conversation_context=conversation_context,
+        )
+    trace = dict(reply_result.trace)
+    trace["intent_router"] = dict(translate_trace)
+    if "context" not in trace:
+        trace["context"] = context_trace(conversation_context)
+    return LlmReplyResult(response_text=reply_result.response_text, trace=trace, error=reply_result.error)
+
+
+def _general_reply_allowed(text: str, *, translate_error: AgentToolError) -> bool:
+    if translate_error.code != "NEEDS_CLARIFICATION":
+        return False
+    raw = str(text or "").strip()
+    if not raw or _looks_like_command(raw) or _OPERATION_ID_RE.search(raw):
+        return False
+    compact = re.sub(r"\s+", "", raw).lower()
+    if any(token in compact for token in _BUSINESS_OR_WRITE_TOKENS):
+        return False
+    return True
 
 
 def _agent_loop_execute_tool_fn(

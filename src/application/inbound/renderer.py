@@ -22,7 +22,7 @@ def render_inbound_text(*, intent: InboundIntent | None, tool_result: dict[str, 
     if intent and intent.name == "help":
         return HELP_TEXT
     if intent and intent.name == "small_talk":
-        return SMALL_TALK_TEXT
+        return str(intent.arguments.get("response_text") or SMALL_TALK_TEXT).strip() or SMALL_TALK_TEXT
     if not tool_result:
         return "没有执行结果。"
     if not bool(tool_result.get("ok", False)):

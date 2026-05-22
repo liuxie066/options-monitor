@@ -15,8 +15,9 @@ from src.application.agent_runtime.command_catalog import command_catalog_payloa
 from src.application.agent_runtime.command_parser import parse_agent_command
 from src.application.agent_runtime.conversation_context import build_conversation_context
 from src.application.agent_runtime.llm_intent_schema import LLM_INTENT_SCHEMA_VERSION, llm_intent_json_schema, llm_intent_schema
+from src.application.agent_runtime.llm_reply import LlmReplyResult, generate_general_reply
 from src.application.agent_runtime.llm_translator import LlmTranslationResult, parse_llm_translation_payload, translate_inbound_intent
-from src.application.agent_tool_contracts import build_response
+from src.application.agent_tool_contracts import AgentToolError, build_response
 from src.application.inbound.audit import InboundAuditStore
 from src.application.inbound.contracts import InboundIntent, InboundRequest
 from src.infrastructure.openai_chat_completions import create_json_chat_completion, extract_chat_completion_text
@@ -258,6 +259,156 @@ def test_agent_runtime_keeps_llm_disabled_for_unrecognized_text(tmp_path: Path) 
     assert out["meta"]["agent_runtime"]["llm"]["enabled"] is False
     assert out["meta"]["agent_runtime"]["llm"]["attempted"] is False
     assert out["meta"]["agent_runtime"]["llm"]["reason"] == "disabled"
+
+
+def test_agent_runtime_uses_llm_reply_for_non_business_text_after_low_confidence(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(tool_name=tool_name, ok=True, data={})
+
+    def _translate(
+        text: str,
+        _settings: AgentRuntimeSettings,
+        conversation_context: dict[str, Any] | None,
+    ) -> LlmTranslationResult:
+        assert text == "你是什么模型"
+        assert conversation_context is not None
+        return LlmTranslationResult(
+            intent=None,
+            trace={
+                "enabled": True,
+                "attempted": True,
+                "reason": "invalid_payload",
+                "provider": "deepseek",
+                "base_url": "https://api.deepseek.com",
+                "model": "deepseek-v4-flash",
+                "api_key_env": "DEEPSEEK_API_KEY",
+                "confidence_min": 0.75,
+                "timeout_seconds": 20,
+                "max_output_tokens": 512,
+                "error_code": "NEEDS_CLARIFICATION",
+            },
+            error=AgentToolError(
+                code="NEEDS_CLARIFICATION",
+                message="LLM intent confidence is too low.",
+                hint="Please use a supported command or provide a clearer request.",
+            ),
+        )
+
+    def _reply(
+        text: str,
+        settings: AgentRuntimeSettings,
+        conversation_context: dict[str, Any] | None,
+    ) -> LlmReplyResult:
+        assert text == "你是什么模型"
+        assert settings.llm.provider == "deepseek"
+        assert conversation_context is not None
+        return LlmReplyResult(
+            response_text="我是 OM 的交易系统助手，当前启用了 DeepSeek 作为自然语言路由和普通回复能力。",
+            trace={
+                "enabled": True,
+                "attempted": True,
+                "reason": "general_reply",
+                "provider": "deepseek",
+                "base_url": "https://api.deepseek.com",
+                "model": "deepseek-v4-flash",
+                "api_key_env": "DEEPSEEK_API_KEY",
+                "confidence_min": 0.75,
+                "timeout_seconds": 20,
+                "max_output_tokens": 512,
+                "facts_source": "none",
+                "tools_allowed": False,
+                "writes_allowed": False,
+                "schema_version": "om-llm-reply-v1",
+            },
+        )
+
+    out = handle_agent_message(
+        InboundRequest(
+            text="你是什么模型",
+            sender_id="local",
+            message_id="msg_llm_reply",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AgentRuntimeSettings(
+            mode="llm_router",
+            llm=LlmTranslatorSettings(
+                enabled=True,
+                provider="deepseek",
+                base_url="https://api.deepseek.com",
+                model="deepseek-v4-flash",
+                api_key_env="DEEPSEEK_API_KEY",
+            ),
+        ),
+        translate_intent_fn=_translate,
+        generate_reply_fn=_reply,
+    )
+
+    assert out["ok"] is True
+    assert calls == []
+    assert out["data"]["intent"]["name"] == "small_talk"
+    assert out["data"]["intent"]["parser"] == "llm_reply"
+    assert out["data"]["response_text"] == "我是 OM 的交易系统助手，当前启用了 DeepSeek 作为自然语言路由和普通回复能力。"
+    assert out["meta"]["agent_runtime"]["route"] == "llm_reply"
+    assert out["meta"]["agent_runtime"]["llm"]["reason"] == "general_reply"
+    assert out["meta"]["agent_runtime"]["llm"]["intent_router"]["reason"] == "invalid_payload"
+    assert out["meta"]["agent_runtime"]["llm"]["tools_allowed"] is False
+    assert out["meta"]["agent_runtime"]["llm"]["writes_allowed"] is False
+
+
+def test_agent_runtime_does_not_use_llm_reply_for_write_like_text(tmp_path: Path) -> None:
+    def _translate(
+        _text: str,
+        _settings: AgentRuntimeSettings,
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmTranslationResult:
+        return LlmTranslationResult(
+            intent=None,
+            trace={
+                "enabled": True,
+                "attempted": True,
+                "reason": "invalid_payload",
+                "provider": "openai",
+                "base_url": "",
+                "model": "gpt-5.2",
+                "api_key_env": "OM_LLM_API_KEY",
+                "confidence_min": 0.75,
+                "timeout_seconds": 20,
+                "max_output_tokens": 512,
+                "error_code": "NEEDS_CLARIFICATION",
+            },
+            error=AgentToolError(code="NEEDS_CLARIFICATION", message="LLM intent confidence is too low."),
+        )
+
+    def _reply(
+        _text: str,
+        _settings: AgentRuntimeSettings,
+        _conversation_context: dict[str, Any] | None,
+    ) -> LlmReplyResult:
+        raise AssertionError("write-like input must not use general LLM reply")
+
+    out = handle_agent_message(
+        InboundRequest(
+            text="记录一笔开仓",
+            sender_id="local",
+            message_id="msg_no_llm_reply_for_write",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        settings=AgentRuntimeSettings(
+            mode="llm_router",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        translate_intent_fn=_translate,
+        generate_reply_fn=_reply,
+    )
+
+    assert out["ok"] is False
+    assert out["error"]["code"] == "NEEDS_CLARIFICATION"
+    assert out["meta"]["agent_runtime"]["route"] == "deterministic"
+    assert out["meta"]["agent_runtime"]["llm"]["reason"] == "invalid_payload"
 
 
 def test_agent_runtime_disabled_setting_skips_command_facade(tmp_path: Path) -> None:
@@ -1090,6 +1241,52 @@ def test_llm_translator_calls_deepseek_provider_and_parses_chat_response() -> No
     assert calls[0]["max_output_tokens"] == 777
     assert calls[0]["input_text"] == "帮我看 sy 的持仓"
     assert "Example JSON output" in str(calls[0]["instructions"])
+
+
+def test_llm_reply_calls_provider_with_constrained_general_reply_prompt() -> None:
+    calls: list[dict[str, Any]] = []
+
+    def _create_response(**kwargs: object) -> dict[str, Any]:
+        calls.append(dict(kwargs))
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "reply": "我是 OM 的交易系统助手，可以帮你把自然语言路由到只读命令。"
+                            }
+                        )
+                    }
+                }
+            ]
+        }
+
+    result = generate_general_reply(
+        "你是什么模型",
+        settings=LlmTranslatorSettings(
+            enabled=True,
+            provider="deepseek",
+            base_url="https://api.deepseek.com",
+            model="deepseek-v4-flash",
+            api_key_env="DEEPSEEK_API_KEY",
+        ),
+        environ={"DEEPSEEK_API_KEY": "sk-test"},
+        create_response_fn=_create_response,
+    )
+
+    assert result.error is None
+    assert result.response_text == "我是 OM 的交易系统助手，可以帮你把自然语言路由到只读命令。"
+    assert result.trace["reason"] == "general_reply"
+    assert result.trace["facts_source"] == "none"
+    assert result.trace["tools_allowed"] is False
+    assert result.trace["writes_allowed"] is False
+    assert calls[0]["api_key"] == "sk-test"
+    input_payload = json.loads(str(calls[0]["input_text"]))
+    assert input_payload["message"] == "你是什么模型"
+    assert input_payload["assistant"] == {"provider": "deepseek", "model": "deepseek-v4-flash"}
+    assert "Do not execute tools" in str(calls[0]["instructions"])
+    assert calls[0]["json_schema"]["required"] == ["reply"]
 
 
 def test_llm_translator_sends_structured_conversation_context() -> None:
