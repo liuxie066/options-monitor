@@ -117,6 +117,7 @@ def handle_inbound_request(
             )
 
         if intent.name == "small_talk":
+            response_text = str(intent.arguments.get("response_text") or SMALL_TALK_TEXT).strip() or SMALL_TALK_TEXT
             response = build_response(
                 tool_name="inbound.handle",
                 ok=True,
@@ -129,7 +130,7 @@ def handle_inbound_request(
                         "reason": "small_talk",
                         "sender": sender_decision.public_payload(),
                     },
-                    "response_text": SMALL_TALK_TEXT,
+                    "response_text": response_text,
                 },
                 meta={"audit_db": mask_path(store.path)},
             )
