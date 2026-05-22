@@ -99,6 +99,12 @@ def _projection_status(result_dict: dict[str, Any]) -> str:
     return "not_recorded"
 
 
+def _is_ignored_non_option_result(result_dict: dict[str, Any]) -> bool:
+    status = str(result_dict.get("status") or "").strip().lower()
+    reason = str(result_dict.get("reason") or "").strip().lower()
+    return status == "skipped" and reason == "not_option_deal"
+
+
 def _attach_projection_check_fields(out: dict[str, Any]) -> None:
     diagnostics_raw = out.get("diagnostics")
     diagnostics = cast(dict[str, Any], diagnostics_raw) if isinstance(diagnostics_raw, dict) else {}
@@ -172,6 +178,8 @@ def _attach_receipt_state(
     result_dict: dict[str, Any],
     receipt_result: dict[str, Any],
 ) -> dict[str, Any]:
+    if _is_ignored_non_option_result(result_dict):
+        return state
     key = str(deal_id or "").strip()
     if not key:
         return state
@@ -231,6 +239,8 @@ def _finalize_trade_payload_result(
     append_trade_intake_audit_fn: Callable[[Any, dict[str, Any]], Any],
     on_result_fn: Callable[[dict[str, Any]], dict[str, Any] | None] | None,
 ) -> dict[str, Any]:
+    if _is_ignored_non_option_result(result_dict):
+        return result_dict
     if on_result_fn is None:
         return result_dict
     try:
