@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 1.2.118 - 2026-05-22
+
+### Added
+- Added a bounded assistant agent loop and read-only tool policy layer for optional LLM and future LangGraph routing.
+- Added assistant config diagnostics and architecture guard tests for the assistant/runtime split, read-only LLM intent surface, and Feishu WS config boundaries.
+
+### Changed
+- Split assistant control-plane settings into `config.assistant.json`, keeping `config.us.json` and `config.hk.json` focused on business runtime settings.
+- Made Feishu inbound and Feishu WS load assistant behavior from `--assistant-config` while keeping business tools on `--config-path`.
+- Retired live `agent.*` config in favor of `assistant.*`, with `assistant.mode` controlling deterministic, LLM router, and agent loop behavior.
+
+### Fixed
+- Rejected business runtime config files when passed as assistant config, preventing `accounts` / `symbols` / `portfolio` from entering the assistant control plane.
+- Kept LLM translation restricted to read-only intents that re-enter the deterministic inbound router and renderer.
+- Added signed pending-operation confirmation checks so write previews cannot be confirmed after payload or signing-key drift.
+
 ## 1.2.117 - 2026-05-22
 
 ### Fixed
