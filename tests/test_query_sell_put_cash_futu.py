@@ -36,7 +36,7 @@ def test_query_sell_put_cash_uses_futu_portfolio_context_when_runtime_config_all
         }
         m.get_exchange_rates_or_fetch_latest = lambda **_kwargs: {}  # type: ignore[assignment]
 
-        out_dir = BASE / "output" / "state" / "test_query_sell_put_cash_futu"
+        out_dir = BASE / "output_shared" / "state" / "test_query_sell_put_cash_futu"
         out_dir.mkdir(parents=True, exist_ok=True)
         result = m.query_sell_put_cash(
             config="config.us.json",
@@ -90,7 +90,7 @@ def test_query_sell_put_cash_uses_account_scoped_portfolio_source_override() -> 
         }
         m.get_exchange_rates_or_fetch_latest = lambda **_kwargs: {}  # type: ignore[assignment]
 
-        out_dir = BASE / "output" / "state" / "test_query_sell_put_cash_holdings_override"
+        out_dir = BASE / "output_shared" / "state" / "test_query_sell_put_cash_holdings_override"
         out_dir.mkdir(parents=True, exist_ok=True)
         result = m.query_sell_put_cash(
             config="config.us.json",
@@ -143,7 +143,7 @@ def test_query_sell_put_cash_uses_holdings_account_mapping_for_external_account(
         }
         m.get_exchange_rates_or_fetch_latest = lambda **_kwargs: {}  # type: ignore[assignment]
 
-        out_dir = BASE / "output" / "state" / "test_query_sell_put_cash_external_holdings"
+        out_dir = BASE / "output_shared" / "state" / "test_query_sell_put_cash_external_holdings"
         out_dir.mkdir(parents=True, exist_ok=True)
         result = m.query_sell_put_cash(
             config="config.us.json",
@@ -202,7 +202,7 @@ def test_query_sell_put_cash_marks_free_cash_unknown_when_cash_secured_unavailab
         }
         m.get_exchange_rates_or_fetch_latest = lambda **_kwargs: {}  # type: ignore[assignment]
 
-        out_dir = BASE / "output" / "state" / "test_query_sell_put_cash_unavailable"
+        out_dir = BASE / "output_shared" / "state" / "test_query_sell_put_cash_unavailable"
         out_dir.mkdir(parents=True, exist_ok=True)
         result = m.query_sell_put_cash(
             config="config.us.json",

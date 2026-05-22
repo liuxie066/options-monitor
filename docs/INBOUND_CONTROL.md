@@ -69,7 +69,7 @@ Read commands use the pure-read whitelist. Admin write operations are separate a
 | `/confirm trade|symbol|upgrade [operation_id]` | confirm a pending write preview |
 | `/cancel trade|symbol|upgrade [operation_id]` | cancel a pending write preview |
 
-Local one-shot testing uses the same command facade by default when `agent.runtime.enabled` is true:
+Local one-shot testing uses the same command facade by default when `assistant.mode` is not disabled:
 
 ```bash
 ./om inbound handle --text '/positions sy' --format text
@@ -81,23 +81,25 @@ For parser diagnostics, bypass the facade explicitly:
 ./om inbound handle --no-agent-runtime --text '持仓 sy' --format text
 ```
 
-For long-running Feishu WS, the same config controls the facade:
+For long-running Feishu WS, `config.assistant.json` controls the facade:
 
 ```yaml
-agent:
-  runtime:
-    enabled: true
-    context_window_messages: 8
+assistant:
+  mode: deterministic
+  context_window_messages: 8
+  default_market_scope: us
 ```
 
-This still does not enable LLM. Unknown slash commands return clarification; non-slash messages continue through the deterministic inbound parser.
+This still does not enable LLM. Unknown slash commands return clarification; non-slash messages continue through the deterministic inbound parser. Supported modes are `disabled`, `deterministic`, `llm_router`, and `agent_loop`.
 
 LLM translation is disabled by default:
 
 ```yaml
-agent:
+assistant:
+  mode: deterministic
+  context_window_messages: 8
+  default_market_scope: us
   llm:
-    enabled: false
     provider: ""
     base_url: ""
     model: ""
@@ -116,16 +118,18 @@ Supported providers:
 - `openai`: uses OpenAI Responses API. Leave `base_url` empty for `https://api.openai.com/v1/responses`, or set a full Responses-compatible base URL.
 - `deepseek`: uses DeepSeek's OpenAI-compatible Chat Completions API. Leave `base_url` empty or set `https://api.deepseek.com`; OM calls `/chat/completions` and requests `response_format: {"type":"json_object"}`.
 
-To enable it, set the API key in the local env file or deployment env file, then set `agent.llm` in runtime config:
+To enable it, set the API key in the local env file or deployment env file, then set `assistant.mode` and `assistant.llm` in `config.assistant.json`:
 
 ```bash
 OM_LLM_API_KEY='sk-...'
 ```
 
 ```yaml
-agent:
+assistant:
+  mode: llm_router
+  context_window_messages: 8
+  default_market_scope: us
   llm:
-    enabled: true
     provider: openai
     base_url: ""
     model: gpt-5.2
@@ -142,9 +146,11 @@ DEEPSEEK_API_KEY='sk-...'
 ```
 
 ```yaml
-agent:
+assistant:
+  mode: llm_router
+  context_window_messages: 8
+  default_market_scope: us
   llm:
-    enabled: true
     provider: deepseek
     base_url: "https://api.deepseek.com"
     model: deepseek-v4-flash
@@ -154,17 +160,17 @@ agent:
     max_output_tokens: 512
 ```
 
-The API key stays in environment settings; runtime config only names which env var to read. When LLM translation runs, OM sends a bounded same-conversation context window to the translator: recent inbound audit rows plus current pending operation summaries. Sender and conversation identifiers are used locally to select the window, but are not sent to the provider. `agent.runtime.context_window_messages` controls the recent-message window and is capped at 20; this context is only used for intent translation, not execution.
+The API key stays in environment settings; assistant config only names which env var to read. When LLM translation runs, OM sends a bounded same-conversation context window to the translator: recent inbound audit rows plus current pending operation summaries. Sender and conversation identifiers are used locally to select the window, but are not sent to the provider. `assistant.context_window_messages` controls the recent-message window and is capped at 20; this context is only used for intent translation, not execution.
 
 Check the translator control plane before enabling it in Feishu:
 
 ```bash
 ./om agent commands --format text
-./om agent llm-check --config-key us
-./om agent llm-check --config-key us --live
+./om agent llm-check
+./om agent llm-check --live
 ```
 
-`agent commands` renders the same command catalog used by slash commands, inbound help, and the LLM intent schema. The default LLM check only validates runtime config, the effective env file, redacted API-key presence, and the resolved provider endpoint URL. `--live` sends one read-only structured translation probe to the configured provider.
+`agent commands` renders the same command catalog used by slash commands, inbound help, and the LLM intent schema. The default LLM check validates `config.assistant.json`, the effective env file, redacted API-key presence, and the resolved provider endpoint URL. `--live` sends one read-only structured translation probe to the configured provider.
 
 ## Sender Allowlist
 
@@ -280,7 +286,7 @@ export OM_FEISHU_BOT_ALLOWED_OPEN_IDS='ou_xxx'
 
 The same Feishu Bot credentials are used for long-connection event receiving, same-message replies, and proactive OM notifications. There is no fallback to a separate notification app.
 
-Reaction and reply behavior is configured in runtime config under `inbound.feishu_ws`, not in the secret env file. Set `inbound.feishu_ws.ack_reaction` to a Feishu `emoji_type` such as `SMILE` to enable message reactions; leave it empty to disable reaction acknowledgements. Reaction failures are reported in the JSON status for that event but do not fail the inbound command or block the text reply.
+Reaction and reply behavior is configured in assistant config under `inbound.feishu_ws`, not in the secret env file. Set `inbound.feishu_ws.ack_reaction` to a Feishu `emoji_type` such as `SMILE` to enable message reactions; leave it empty to disable reaction acknowledgements. Reaction failures are reported in the JSON status for that event but do not fail the inbound command or block the text reply.
 
 Local config check:
 
@@ -293,6 +299,7 @@ Run the long-connection client directly on the server:
 ```bash
 ./om inbound feishu-ws \
   --config-key us \
+  --config-path /var/lib/options-monitor/config.us.json \
   --audit-db /var/lib/options-monitor/output_shared/state/inbound_control.sqlite3 \
   --lock-path /var/lib/options-monitor/locks/feishu-ws.lock
 ```
@@ -322,11 +329,11 @@ Only subscribe this event for the OM Bot in Feishu Open Platform. Install `requi
 
 ## LLM Translator
 
-LLM translation is opt-in and inactive unless `agent.llm.enabled` is true.
+LLM translation is opt-in and inactive unless `assistant.mode` is `llm_router` or `agent_loop`.
 
 The current provider adapters use OpenAI Responses API for `openai` and Chat Completions JSON output for `deepseek`. They must only translate natural language into an `om-llm-intent-v1` structured intent. The translated intent must still go through the same sender allowlist, pure-read whitelist, audit, and idempotency checks. Low-confidence, incomplete, or write-like intents must return clarification or preview only.
 
-LangGraph is intentionally not part of the production runtime yet. The current workflow is a one-shot command facade plus an optional LLM translator; OM keeps deterministic execution, factual rendering, preview/confirm/apply, and audit ownership. Add LangGraph only when there is a real stateful workflow that cannot stay clear in this simpler runtime.
+`agent_loop` is the bounded stateful lane for future LangGraph-backed workflows. The current implementation still keeps deterministic execution, factual rendering, preview/confirm/apply, and audit ownership outside the loop.
 
 ## Write Actions
 

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from src.application.inbound.audit import connect_inbound_sqlite, default_audit_db_path, inbound_sqlite_error, utc_now_iso
+from src.application.inbound.operation_signature import sign_operation_fields
 
 
 class InboundOperationStore:
@@ -31,6 +32,18 @@ class InboundOperationStore:
         self._ensure_schema()
         now = created_at or utc_now_iso()
         expires_at = (datetime.fromisoformat(now) + timedelta(seconds=max(1, int(ttl_seconds)))).isoformat()
+        operation_for_signature = {
+            "operation_id": str(operation_id),
+            "command_id": str(command_id),
+            "channel": str(channel),
+            "sender_id": str(sender_id),
+            "conversation_id": _optional_str(conversation_id),
+            "operation_type": str(operation_type),
+            "payload_hash": str(payload_hash),
+            "created_at": str(now),
+            "expires_at": str(expires_at),
+        }
+        signature = sign_operation_fields(operation=operation_for_signature)
         with self._connect() as conn:
             conn.execute(
                 """
@@ -45,10 +58,12 @@ class InboundOperationStore:
                     payload_hash,
                     payload_json,
                     preview_json,
+                    signature_version,
+                    signature,
                     created_at,
                     expires_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, 'previewed', ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, 'previewed', ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(operation_id) DO NOTHING
                 """,
                 (
@@ -61,6 +76,8 @@ class InboundOperationStore:
                     str(payload_hash),
                     _json(payload),
                     _json(preview),
+                    signature["signature_version"],
+                    signature["signature"],
                     str(now),
                     str(expires_at),
                 ),
@@ -221,17 +238,45 @@ class InboundOperationStore:
             raise ValueError("operation_id is required")
         self._ensure_schema()
         with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM inbound_pending_operations
+                WHERE operation_id = ?
+                  AND status = 'previewed'
+                LIMIT 1
+                """,
+                (normalized,),
+            ).fetchone()
+            operation = _row_to_operation(row)
+            if operation is None:
+                raise ValueError(f"pending operation is not previewed: {normalized}")
+            operation.update({
+                "payload_hash": str(payload_hash),
+                "payload": payload,
+                "preview": preview,
+            })
+            signature = sign_operation_fields(operation=operation)
             cursor = conn.execute(
                 """
                 UPDATE inbound_pending_operations
                 SET payload_hash = ?,
                     payload_json = ?,
                     preview_json = ?,
+                    signature_version = ?,
+                    signature = ?,
                     result_json = NULL
                 WHERE operation_id = ?
                   AND status = 'previewed'
                 """,
-                (str(payload_hash), _json(payload), _json(preview), normalized),
+                (
+                    str(payload_hash),
+                    _json(payload),
+                    _json(preview),
+                    signature["signature_version"],
+                    signature["signature"],
+                    normalized,
+                ),
             )
             if cursor.rowcount == 0:
                 raise ValueError(f"pending operation is not previewed: {normalized}")
@@ -371,6 +416,8 @@ class InboundOperationStore:
                         payload_hash TEXT NOT NULL,
                         payload_json TEXT NOT NULL,
                         preview_json TEXT NOT NULL,
+                        signature_version TEXT,
+                        signature TEXT,
                         result_json TEXT,
                         created_at TEXT NOT NULL,
                         expires_at TEXT NOT NULL,
@@ -387,6 +434,8 @@ class InboundOperationStore:
                     """
                 )
                 _ensure_column(conn, "conversation_id", "TEXT")
+                _ensure_column(conn, "signature_version", "TEXT")
+                _ensure_column(conn, "signature", "TEXT")
         except sqlite3.Error as exc:
             raise inbound_sqlite_error(self.path, exc) from exc
 

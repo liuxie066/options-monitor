@@ -19,6 +19,7 @@ def handle_feishu_payload(
     allowed_senders: str | None = None,
     use_agent_runtime: bool | None = None,
     agent_runtime_settings: Any | None = None,
+    assistant_config_path: str | None = None,
 ) -> dict[str, Any]:
     event_type = _extract_event_type(payload)
     if event_type and event_type != "im.message.receive_v1":
@@ -48,6 +49,7 @@ def handle_feishu_payload(
         settings = agent_runtime_settings or _agent_runtime_settings(
             config_key=config_key,
             config_path=config_path,
+            assistant_config_path=assistant_config_path,
             force_enabled=True if use_agent_runtime is True else None,
         )
         assert settings is not None
@@ -81,24 +83,27 @@ def _agent_runtime_settings(
     *,
     config_key: str | None,
     config_path: str | None,
+    assistant_config_path: str | None = None,
     force_enabled: bool | None = None,
 ) -> Any:
     from src.application.agent_runtime import AgentRuntimeSettings
-    from src.application.agent_tool_config import load_runtime_config
+    from src.application.agent_runtime.config_loader import load_assistant_config
 
-    try:
-        _path, cfg = load_runtime_config(config_key=config_key, config_path=config_path)
-    except AgentToolError:
-        if config_path is not None and str(config_path).strip():
-            raise
-        return AgentRuntimeSettings(enabled=True if force_enabled is None else bool(force_enabled))
+    del config_key, config_path
+    assistant_explicit = bool(assistant_config_path is not None and str(assistant_config_path).strip())
+    assistant_path, assistant_cfg = load_assistant_config(config_path=assistant_config_path, missing_ok=not assistant_explicit)
+    del assistant_path
+    if assistant_cfg:
+        configured = AgentRuntimeSettings.from_runtime_config(assistant_cfg)
+        return AgentRuntimeSettings(
+            mode=configured.mode,
+            enabled=configured.enabled if force_enabled is None else bool(force_enabled),
+            context_window_messages=configured.context_window_messages,
+            default_market_scope=configured.default_market_scope,
+            llm=configured.llm,
+        )
 
-    configured = AgentRuntimeSettings.from_runtime_config(cfg)
-    return AgentRuntimeSettings(
-        enabled=configured.enabled if force_enabled is None else bool(force_enabled),
-        context_window_messages=configured.context_window_messages,
-        llm=configured.llm,
-    )
+    return AgentRuntimeSettings(enabled=True if force_enabled is None else bool(force_enabled))
 
 
 def feishu_payload_to_inbound_request(

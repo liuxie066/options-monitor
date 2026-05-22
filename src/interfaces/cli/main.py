@@ -9,12 +9,14 @@ from typing import Any
 from src.application.agent_tool_config import load_runtime_config, repo_base
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response
 from src.application.agent_runtime import AgentRuntimeSettings, command_catalog_payload, handle_agent_message
+from src.application.agent_runtime.config_loader import load_assistant_config
 from src.application.agent_runtime.diagnostics import check_llm_translator
 from src.application.config_validator import validate_config
 from src.application.account_management import add_account, edit_account, remove_account
 from src.application.close_advice_pipeline import run_close_advice
 from src.application.config_edit import get_runtime_config_value, set_runtime_config_value
 from src.application.config_yaml import (
+    build_yaml_assistant_config_file,
     build_yaml_runtime_config_file,
     explain_yaml_config_key,
     validate_yaml_runtime_config,
@@ -109,22 +111,22 @@ def _agent_runtime_settings_for_cli(
     *,
     config_key: str | None,
     config_path: str | None,
+    assistant_config_path: str | None = None,
     force_enabled: bool | None = None,
 ) -> AgentRuntimeSettings:
-    explicit_config_path = bool(config_path is not None and str(config_path).strip())
-    try:
-        _path, cfg = load_runtime_config(config_key=config_key, config_path=config_path)
-    except AgentToolError:
-        if explicit_config_path:
-            raise
-        return AgentRuntimeSettings(enabled=True if force_enabled is None else bool(force_enabled))
-
-    configured = AgentRuntimeSettings.from_runtime_config(cfg)
-    return AgentRuntimeSettings(
-        enabled=configured.enabled if force_enabled is None else bool(force_enabled),
-        context_window_messages=configured.context_window_messages,
-        llm=configured.llm,
-    )
+    del config_key, config_path
+    assistant_explicit = bool(assistant_config_path is not None and str(assistant_config_path).strip())
+    _assistant_path, assistant_cfg = load_assistant_config(config_path=assistant_config_path, missing_ok=not assistant_explicit)
+    if assistant_cfg:
+        configured = AgentRuntimeSettings.from_runtime_config(assistant_cfg)
+        return AgentRuntimeSettings(
+            mode=configured.mode,
+            enabled=configured.enabled if force_enabled is None else bool(force_enabled),
+            context_window_messages=configured.context_window_messages,
+            default_market_scope=configured.default_market_scope,
+            llm=configured.llm,
+        )
+    return AgentRuntimeSettings(enabled=True if force_enabled is None else bool(force_enabled))
 
 
 def _reject_legacy_config_flags_without_legacy_source(args: argparse.Namespace) -> None:
@@ -224,8 +226,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     agent_commands = agent_sub.add_parser("commands", help="list supported agent commands and intents")
     agent_commands.add_argument("--format", choices=("json", "text"), default="json")
     agent_llm_check = agent_sub.add_parser("llm-check", help="check optional LLM intent translator configuration")
-    agent_llm_check.add_argument("--config-key", default="us", choices=("us", "hk"))
-    agent_llm_check.add_argument("--config-path", default=None)
+    agent_llm_check.add_argument("--assistant-config", default=None)
     agent_llm_check.add_argument("--env-file", default=None)
     agent_llm_check.add_argument("--no-local-env-file", action="store_true")
     agent_llm_check.add_argument("--live", action="store_true", help="run one read-only provider translation probe")
@@ -241,10 +242,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     inbound_handle.add_argument("--conversation-id", default=None)
     inbound_handle.add_argument("--config-key", default="us", choices=("us", "hk"))
     inbound_handle.add_argument("--config-path", default=None)
+    inbound_handle.add_argument("--assistant-config", default=None)
     inbound_handle.add_argument("--audit-db", default=None)
     inbound_handle_agent = inbound_handle.add_mutually_exclusive_group()
     inbound_handle_agent.add_argument("--agent-runtime", dest="agent_runtime", action="store_true", default=None, help="force routing through the AgentRuntime command facade")
-    inbound_handle_agent.add_argument("--no-agent-runtime", dest="agent_runtime", action="store_false", help="bypass AgentRuntime and use the legacy deterministic inbound parser directly")
+    inbound_handle_agent.add_argument("--no-agent-runtime", dest="agent_runtime", action="store_false", help="bypass AgentRuntime and use the deterministic inbound parser directly")
     inbound_handle.add_argument("--format", choices=("json", "text"), default="json")
     inbound_pending = inbound_sub.add_parser("pending", help="inspect pending inbound operations")
     inbound_pending_sub = inbound_pending.add_subparsers(dest="inbound_pending_command", required=True)
@@ -273,14 +275,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     feishu_input.add_argument("--stdin", action="store_true")
     inbound_feishu.add_argument("--config-key", default="us", choices=("us", "hk"))
     inbound_feishu.add_argument("--config-path", default=None)
+    inbound_feishu.add_argument("--assistant-config", default=None)
     inbound_feishu.add_argument("--audit-db", default=None)
     inbound_feishu_agent = inbound_feishu.add_mutually_exclusive_group()
     inbound_feishu_agent.add_argument("--agent-runtime", dest="agent_runtime", action="store_true", default=None, help="force routing through the AgentRuntime command facade")
-    inbound_feishu_agent.add_argument("--no-agent-runtime", dest="agent_runtime", action="store_false", help="bypass AgentRuntime and use the legacy deterministic inbound parser directly")
+    inbound_feishu_agent.add_argument("--no-agent-runtime", dest="agent_runtime", action="store_false", help="bypass AgentRuntime and use the deterministic inbound parser directly")
     inbound_feishu.add_argument("--format", choices=("json", "text"), default="json")
     inbound_ws = inbound_sub.add_parser("feishu-ws", help="serve the Feishu App long-connection inbound client")
     inbound_ws.add_argument("--config-key", default="us", choices=("us", "hk"))
     inbound_ws.add_argument("--config-path", default=None)
+    inbound_ws.add_argument("--assistant-config", default=None)
     inbound_ws.add_argument("--audit-db", default=None)
     inbound_ws.add_argument("--no-reply", action="store_true")
     inbound_ws.add_argument("--reply-in-thread", action="store_true", default=None)
@@ -443,6 +447,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     build.add_argument("--user-config", default=None)
     build.add_argument("--output", default=None)
     build.add_argument("--dry-run", action="store_true")
+    build_assistant = config_sub.add_parser("build-assistant", help="build assistant config from config.yaml")
+    build_assistant.add_argument("--source", default="yaml", choices=("yaml",))
+    build_assistant.add_argument("--config-yaml", default=None)
+    build_assistant.add_argument("--system-config", default=None)
+    build_assistant.add_argument("--output", default=None)
+    build_assistant.add_argument("--dry-run", action="store_true")
     explain = config_sub.add_parser("explain", help="explain a layered config key")
     explain.add_argument("--source", default="yaml", choices=("yaml", "legacy"), help="authoring source; defaults to yaml, legacy JSON is deprecated")
     explain.add_argument("--config-yaml", default=None)
@@ -774,6 +784,8 @@ def _validate_runtime_config(
 
 
 def _should_bootstrap_process_env(actual_argv: list[str]) -> bool:
+    if "--no-local-env-file" in actual_argv:
+        return False
     if actual_argv and actual_argv[0] in {"settings", "setup"}:
         return False
     return True
@@ -848,8 +860,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "agent" and args.agent_command == "llm-check":
             data = check_llm_translator(
                 repo_root=repo_base(),
-                config_key=args.config_key,
-                config_path=args.config_path,
+                config_path=args.assistant_config,
                 env_file=args.env_file,
                 include_local_env_file=not bool(args.no_local_env_file),
                 live=bool(args.live),
@@ -877,6 +888,7 @@ def main(argv: list[str] | None = None) -> int:
                 agent_settings = _agent_runtime_settings_for_cli(
                     config_key=args.config_key,
                     config_path=args.config_path,
+                    assistant_config_path=args.assistant_config,
                     force_enabled=True if force_agent_runtime is True else None,
                 )
                 use_agent_runtime = bool(agent_settings.enabled)
@@ -945,6 +957,7 @@ def main(argv: list[str] | None = None) -> int:
                 config_path=args.config_path,
                 audit_db=args.audit_db,
                 use_agent_runtime=None if force_agent_runtime is None else bool(force_agent_runtime),
+                assistant_config_path=args.assistant_config,
             )
             if args.format == "text":
                 data_raw = out.get("data")
@@ -958,6 +971,7 @@ def main(argv: list[str] | None = None) -> int:
             settings = build_feishu_ws_settings(
                 config_key=args.config_key,
                 config_path=args.config_path,
+                assistant_config_path=args.assistant_config,
                 audit_db=args.audit_db,
                 reply_enabled=False if bool(args.no_reply) else None,
                 reply_in_thread=args.reply_in_thread,
@@ -1166,6 +1180,15 @@ def main(argv: list[str] | None = None) -> int:
                 dry_run=bool(args.dry_run),
             ), LEGACY_CONFIG_AUTHORING_DEPRECATION_WARNING))
 
+        if args.command == "config" and args.config_command == "build-assistant":
+            return _print(build_yaml_assistant_config_file(
+                repo_root=repo_base(),
+                config_path=args.config_yaml,
+                system_config_path=args.system_config,
+                output_config_path=args.output,
+                dry_run=bool(args.dry_run),
+            ))
+
         if args.command == "config" and args.config_command == "explain":
             if args.source == "yaml":
                 _reject_legacy_config_flags_without_legacy_source(args)
@@ -1291,7 +1314,7 @@ def main(argv: list[str] | None = None) -> int:
             runtime_root = resolve_runtime_root(repo_root=repo_base()).runtime_root
             run_scheduler(
                 config=args.config,
-                state_dir=args.state_dir or str((runtime_root / "output" / "state").resolve()),
+                state_dir=args.state_dir or str((runtime_root / "output_shared" / "state").resolve()),
                 state=args.state,
                 schedule_key=args.schedule_key,
                 account=args.account,
@@ -1313,7 +1336,7 @@ def main(argv: list[str] | None = None) -> int:
                 output_format=args.format,
                 top=args.top,
                 no_exchange_rates=bool(args.no_exchange_rates),
-                out_dir=args.out_dir or str((runtime_root / "output" / "state").resolve()),
+                out_dir=args.out_dir or str((runtime_root / "output_shared" / "state").resolve()),
             )
             return 0
 

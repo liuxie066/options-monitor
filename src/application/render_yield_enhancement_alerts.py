@@ -88,7 +88,7 @@ def render_one(row: pd.Series) -> str:
 def render_yield_enhancement_alerts(
     *,
     input_path: str | Path | None = None,
-    report_dir: str | Path = 'output/reports',
+    report_dir: str | Path = 'output_shared/reports',
     top: int = 5,
     symbol: str | None = None,
     output_path: str | Path | None = None,
@@ -159,7 +159,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help='Input CSV path (default: <report-dir>/<symbol>_yield_enhancement_candidates.csv when --symbol is set; otherwise <report-dir>/yield_enhancement_candidates.csv)',
     )
-    parser.add_argument('--report-dir', default='output/reports', help='Report dir for default input/output (default: output/reports)')
+    parser.add_argument('--report-dir', default='output_shared/reports', help='Report dir for default input/output (default: output_shared/reports)')
     parser.add_argument('--top', type=int, default=5)
     parser.add_argument('--symbol', default=None)
     parser.add_argument(

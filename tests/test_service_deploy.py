@@ -385,12 +385,16 @@ def test_render_systemd_bundle_can_include_feishu_ws_service(tmp_path: Path) -> 
     repo = tmp_path / "repo"
     runtime = tmp_path / "runtime"
     repo.mkdir()
+    runtime.mkdir()
+    config_yaml = runtime / "config.yaml"
+    config_yaml.write_text("accounts: {}\nmarkets: {}\n", encoding="utf-8")
 
     bundle = render_service_bundle(
         target="systemd",
         repo_root=repo,
         runtime_root=runtime,
         markets=["us"],
+        config_yaml=config_yaml,
         include_feishu_ws=True,
     )
 
@@ -400,6 +404,7 @@ def test_render_systemd_bundle_can_include_feishu_ws_service(tmp_path: Path) -> 
 
     assert str(repo / "om") + " inbound feishu-ws" in service
     assert "--config-path " + str(repo / "config.us.json") in service
+    assert "--assistant-config " + str(runtime / "resolved" / "config.assistant.json") in service
     assert "--audit-db " + str(runtime / "output_shared" / "state" / "inbound_control.sqlite3") in service
     assert "--lock-path " + str(runtime / "locks" / "feishu-ws.lock") in service
     assert "Restart=always" in service
@@ -409,6 +414,8 @@ def test_render_systemd_bundle_can_include_feishu_ws_service(tmp_path: Path) -> 
         "options-monitor-feishu-ws.service",
     ]
     assert profile["feishu_ws"]["enabled"] is True
+    assert profile["assistant_config_path"] == str(runtime / "resolved" / "config.assistant.json")
+    assert profile["feishu_ws"]["assistant_config_path"] == str(runtime / "resolved" / "config.assistant.json")
     assert profile["feishu_ws"]["lock_path"] == str(runtime / "locks" / "feishu-ws.lock")
     assert "systemctl enable --now options-monitor-feishu-ws.service" in bundle["commands"]["enable"]
 
@@ -2292,6 +2299,22 @@ def test_service_upgrade_uses_yaml_authoring_source_for_runtime_rebuild(tmp_path
     assert out["runtime_config_prepare"]["preserved_hotfixes"] == []
     assert ["./om", "config", "build", "--source", "yaml", "--market", "hk", "--config-yaml", str(config_yaml), "--output", str(hk_runtime)] in calls
     assert ["./om", "config", "build", "--source", "yaml", "--market", "us", "--config-yaml", str(config_yaml), "--output", str(us_runtime)] in calls
+    assert [
+        "./om",
+        "config",
+        "build-assistant",
+        "--source",
+        "yaml",
+        "--config-yaml",
+        str(config_yaml),
+        "--output",
+        str(runtime / "resolved" / "config.assistant.json"),
+    ] in calls
+    assert out["runtime_config_prepare"]["assistant_rebuilt"] == {
+        "config_path": str(runtime / "resolved" / "config.assistant.json"),
+        "source": "yaml",
+        "phase": "pre_switch",
+    }
     assert not (releases / "1.0.1" / "configs" / "user.hk.json").exists()
     refreshed_profile = json.loads((runtime / "service.profile.json").read_text(encoding="utf-8"))
     assert refreshed_profile["config_authoring"]["config_yaml"] == str(config_yaml)
@@ -2571,8 +2594,8 @@ def test_runtime_status_loads_service_profile_paths(monkeypatch, tmp_path: Path)
     profile_path = tmp_path / "service.profile.json"
     profile = json.loads({item["relative_path"]: item for item in bundle["files"]}["service.profile.json"]["content"])
     profile["paths"] = {
-        "report_dir": str(tmp_path / "output" / "reports"),
-        "state_dir": str(tmp_path / "output" / "state"),
+        "report_dir": str(tmp_path / "output_shared" / "reports"),
+        "state_dir": str(tmp_path / "output_shared" / "state"),
         "shared_state_dir": str(tmp_path / "output_shared" / "state"),
         "accounts_root": str(tmp_path / "output_accounts"),
         "runs_root": str(tmp_path / "output_runs"),

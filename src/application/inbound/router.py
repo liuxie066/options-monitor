@@ -15,7 +15,7 @@ from src.application.inbound.manual_trade_operations import (
 from src.application.inbound.operation_store import InboundOperationStore
 from src.application.inbound.parser import parse_inbound_text
 from src.application.inbound.policy import enforce_sender_allowed, enforce_tool_allowed
-from src.application.inbound.renderer import HELP_TEXT, render_inbound_text, render_pending_operations
+from src.application.inbound.renderer import HELP_TEXT, SMALL_TALK_TEXT, render_inbound_text, render_pending_operations
 from src.application.inbound.symbol_operations import handle_symbol_operation, is_symbol_operation_intent
 from src.application.inbound.upgrade_operations import handle_upgrade_operation, is_upgrade_operation_intent
 from src.application.tool_execution import execute_tool
@@ -101,6 +101,35 @@ def handle_inbound_request(
                         "sender": sender_decision.public_payload(),
                     },
                     "response_text": HELP_TEXT,
+                },
+                meta={"audit_db": mask_path(store.path)},
+            )
+            decision = "allowed"
+            return _record_and_return(
+                store=store,
+                request=normalized_request,
+                command_id=command_id,
+                created_at=created_at,
+                intent=intent,
+                call=None,
+                decision=decision,
+                response=response,
+            )
+
+        if intent.name == "small_talk":
+            response = build_response(
+                tool_name="inbound.handle",
+                ok=True,
+                data={
+                    "command_id": command_id,
+                    "request": normalized_request.public_payload(),
+                    "intent": intent.public_payload(),
+                    "decision": {
+                        "allowed": True,
+                        "reason": "small_talk",
+                        "sender": sender_decision.public_payload(),
+                    },
+                    "response_text": SMALL_TALK_TEXT,
                 },
                 meta={"audit_db": mask_path(store.path)},
             )

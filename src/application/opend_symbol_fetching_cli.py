@@ -55,7 +55,7 @@ def main() -> None:
     ap.add_argument("--expiration-max-wait-sec", type=float, default=30.0, help="Max seconds to wait for shared option-expiration rate-limit budget")
     ap.add_argument("--expiration-window-sec", type=float, default=30.0, help="Shared option-expiration rate-limit window seconds")
     ap.add_argument("--expiration-max-calls", type=int, default=60, help="Shared option-expiration max calls per window")
-    ap.add_argument("--output-root", default=None, help="Output root containing raw/ and parsed/ (default: ./output)")
+    ap.add_argument("--output-root", default=None, help="Output root containing raw/ and parsed/ (default: output_shared/required_data)")
     args = ap.parse_args()
 
     opt_types = {s.strip().lower() for s in str(args.option_types or "").split(",") if s.strip()}

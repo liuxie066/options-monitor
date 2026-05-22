@@ -19,6 +19,8 @@ from domain.domain.ledger.position_fields import (
     now_ms,
 )
 from domain.domain.trade_contract_identity import canonical_contract_symbol
+from src.application.ledger.event_codec import stored_trade_event_to_ledger_event
+from src.application.ledger.migration import legacy_trade_event_to_ledger_event
 from src.application.ledger.publisher import project_stored_trade_events_to_position_lots
 from src.application.ledger.repository import (
     SQLiteOptionPositionsRepository,
@@ -37,7 +39,7 @@ def _is_incomplete_option_bootstrap_fields(fields: dict[str, Any]) -> bool:
     option_type = str(fields.get("option_type") or "").strip().lower()
     if option_type not in {"put", "call"}:
         return False
-    expiration = fields.get("expiration")
+    expiration = fields.get("expiration_ymd") or fields.get("expiration")
     strike = safe_float(fields.get("strike"))
     return expiration in (None, "") or strike is None
 
@@ -63,7 +65,7 @@ def _normalize_bootstrap_records(records: list[dict[str, Any]]) -> list[dict[str
                 (
                     f"[WARN] option_positions bootstrap skipped incomplete option row "
                     f"record_id={record_id or '(missing)'} symbol={fields.get('symbol') or ''} "
-                    f"option_type={fields.get('option_type') or ''} expiration={fields.get('expiration') or ''} "
+                    f"option_type={fields.get('option_type') or ''} expiration={fields.get('expiration_ymd') or fields.get('expiration') or ''} "
                     f"strike={fields.get('strike') or ''}"
                 ),
                 file=sys.stderr,
@@ -140,28 +142,15 @@ def _bootstrap_trade_event(item: dict[str, Any], *, source_name: str) -> Any | N
             strike=safe_float(fields.get("strike")),
             expiration_ymd=expiration_ymd,
         )
-    except Exception:
-        return {
-            "event_id": event_id,
-            "source_type": "bootstrap_snapshot",
-            "source_name": source_name,
-            "broker": broker,
-            "account": normalize_account(fields.get("account")),
-            "symbol": _canonical_trade_symbol(fields.get("symbol")),
-            "option_type": str(fields.get("option_type") or ""),
-            "side": "sell" if str(fields.get("side") or "").strip().lower() == "short" else str(fields.get("side") or "").strip().lower(),
-            "position_effect": "open",
-            "contracts": max(0, int(safe_float(fields.get("contracts")) or safe_float(fields.get("contracts_open")) or 0)),
-            "price": float(safe_float(fields.get("premium")) or 0.0),
-            "strike": safe_float(fields.get("strike")),
-            "multiplier": (int(float(raw_multiplier)) if raw_multiplier is not None else None),
-            "expiration_ymd": expiration_ymd,
-            "currency": normalize_currency(fields.get("currency")),
-            "trade_time_ms": trade_time_ms,
-            "order_id": None,
-            "multiplier_source": "bootstrap_snapshot" if raw_multiplier is not None else None,
-            "raw_payload": raw_payload,
-        }
+    except Exception as exc:
+        print(
+            (
+                f"[WARN] option_positions bootstrap skipped row that cannot be converted "
+                f"record_id={record_id or '(missing)'} source={source_name} error={exc}"
+            ),
+            file=sys.stderr,
+        )
+        return None
     return TradeEvent(
         event_id=event_id,
         event_type="open",
@@ -322,6 +311,29 @@ def _list_legacy_trade_events(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     return events
 
 
+def _canonicalize_migrated_trade_events(events: list[dict[str, Any]]) -> list[TradeEvent]:
+    canonical: list[TradeEvent] = []
+    error_codes: list[str] = []
+    for item in events:
+        event, diagnostics = stored_trade_event_to_ledger_event(item)
+        errors = [diag for diag in diagnostics if getattr(diag, "severity", "") == "error"]
+        if event is not None and not errors:
+            canonical.append(event)
+            continue
+
+        legacy_event, legacy_diagnostics = legacy_trade_event_to_ledger_event(item)
+        legacy_errors = [diag for diag in legacy_diagnostics if getattr(diag, "severity", "") == "error"]
+        if legacy_event is not None and not legacy_errors:
+            canonical.append(legacy_event)
+            continue
+
+        error_codes.extend(str(getattr(diag, "code", "") or "unknown") for diag in [*errors, *legacy_errors])
+    if error_codes:
+        joined = ", ".join(error_codes[:8])
+        raise ValueError(f"legacy trade_events migration failed canonicalization: {joined}")
+    return canonical
+
+
 def _list_legacy_position_lots(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     if not _legacy_table_exists(conn, "position_lots"):
         return []
@@ -440,7 +452,7 @@ def migrate_legacy_sqlite_to_repo(
     try:
         with closing(_legacy_sqlite_connect(path)) as conn:
             if source_table == "trade_events":
-                count = materialize_bootstrap_events(repo, _list_legacy_trade_events(conn))
+                count = materialize_bootstrap_events(repo, _canonicalize_migrated_trade_events(_list_legacy_trade_events(conn)))
                 repo.bootstrap_status = "migrated_legacy_trade_events"
                 repo.bootstrap_message = f"migrated {count} trade events from legacy SQLite trade_events"
             elif source_table == "position_lots":

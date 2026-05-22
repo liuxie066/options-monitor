@@ -127,7 +127,7 @@ scripts/              -> thin operational wrappers only
 # Candidate explanations
 ./om-agent run --tool candidate_filter_explain --input-json '{"run_id":"<run-id>","account":"lx","symbol":"NVDA"}'
 ./om-agent run --tool candidate_rank_explain --input-json '{"mode":"put","top_n":5}'
-./om-agent run --tool strategy_replay_analyze --input-json '{"replay_path":"output/reports/strategy_replay.csv","min_sample":5}'
+./om-agent run --tool strategy_replay_analyze --input-json '{"replay_path":"output_shared/reports/strategy_replay.csv","min_sample":5}'
 
 # Cash and positions
 ./om-agent run --tool query_cash_headroom --input-json '{"config_key":"us","account":"lx"}'

@@ -20,7 +20,7 @@ def test_scheduler_cli_defaults_state_dir_to_runtime_root(monkeypatch, tmp_path:
     rc = cli.main(["scheduler", "--config", str(config_path)])
 
     assert rc == 0
-    assert captured["state_dir"] == str((runtime_root / "output" / "state").resolve())
+    assert captured["state_dir"] == str((runtime_root / "output_shared" / "state").resolve())
 
 
 def test_sell_put_cash_cli_defaults_out_dir_to_runtime_root(monkeypatch, tmp_path: Path) -> None:
@@ -39,4 +39,4 @@ def test_sell_put_cash_cli_defaults_out_dir_to_runtime_root(monkeypatch, tmp_pat
     rc = cli.main(["sell-put-cash", "--format", "json"])
 
     assert rc == 0
-    assert captured["out_dir"] == str((runtime_root / "output" / "state").resolve())
+    assert captured["out_dir"] == str((runtime_root / "output_shared" / "state").resolve())

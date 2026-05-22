@@ -64,8 +64,8 @@ def test_resolve_trade_intake_config_uses_defaults() -> None:
 
     assert out["enabled"] is True
     assert out["mode"] == "dry-run"
-    assert str(out["state_path"]).endswith("output/state/auto_trade_intake_state.json")
-    assert str(out["status_path"]).endswith("output/state/auto_trade_intake_status.json")
+    assert str(out["state_path"]).endswith("output_shared/state/auto_trade_intake_state.json")
+    assert str(out["status_path"]).endswith("output_shared/state/auto_trade_intake_status.json")
     assert out["receipt"] == {
         "enabled": True,
         "notify_applied": True,

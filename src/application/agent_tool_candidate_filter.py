@@ -105,8 +105,8 @@ def _trace_paths(payload: dict[str, Any], *, repo_base: Callable[[], Path]) -> l
     if payload.get("report_dir"):
         candidates.append(_resolve_path(payload.get("report_dir"), base=base) / "candidate_filter_trace.jsonl")
 
-    candidates.append(base / "output" / "reports" / "candidate_filter_trace.jsonl")
-    candidates.append(base / "output" / "agent_plugin" / "reports" / "candidate_filter_trace.jsonl")
+    candidates.append(base / "output_shared" / "reports" / "candidate_filter_trace.jsonl")
+    candidates.append(base / "output_shared" / "agent_tools" / "reports" / "candidate_filter_trace.jsonl")
 
     out: list[Path] = []
     seen: set[Path] = set()

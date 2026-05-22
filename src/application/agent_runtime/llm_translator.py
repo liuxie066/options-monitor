@@ -99,7 +99,7 @@ def translate_inbound_intent(
             error=AgentToolError(
                 code="LLM_UNAVAILABLE",
                 message="LLM translator is enabled but not fully configured.",
-                hint="Set agent.llm.provider, agent.llm.model, and agent.llm.api_key_env, or disable agent.llm.enabled.",
+                hint="Set assistant.llm.provider, assistant.llm.model, and assistant.llm.api_key_env, or use assistant.mode=deterministic.",
                 details={"missing": missing},
             ),
         )
@@ -112,7 +112,7 @@ def translate_inbound_intent(
             error=AgentToolError(
                 code="LLM_UNAVAILABLE",
                 message=f"unsupported LLM translator provider: {settings.provider}",
-                hint="Set agent.llm.provider to openai or deepseek, or disable agent.llm.enabled.",
+                hint="Set assistant.llm.provider to openai or deepseek, or use assistant.mode=deterministic.",
                 details={"provider": settings.provider},
             ),
         )

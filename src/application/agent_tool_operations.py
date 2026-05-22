@@ -146,7 +146,7 @@ def scheduler_status_tool(
     schedule_cfg = cfg.get(schedule_key) if isinstance(cfg.get(schedule_key), dict) else {}
     schedule_enabled = bool((schedule_cfg or {}).get("enabled", True))
 
-    default_state_dir = (base / "output" / "state").resolve()
+    default_state_dir = (base / "output_shared" / "state").resolve()
     state_dir = _resolve_local_path(payload.get("state_dir"), base=base, default=default_state_dir)
     default_state = (state_dir / "scheduler_state.json").resolve()
     state_path = _resolve_local_path(payload.get("state"), base=base, default=default_state)
