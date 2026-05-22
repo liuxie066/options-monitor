@@ -6,16 +6,27 @@
 
 ## Quick Install
 
-默认使用可审计的两步安装，不用 `curl | bash`：
+普通安装默认解析并安装最新 GitHub release，不安装浮动 `main` 分支：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh -o /tmp/options-monitor-install.sh
-bash /tmp/options-monitor-install.sh --version <release-tag> --prefix "$HOME/apps/options-monitor"
+curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh | bash
 
 om setup check
 ```
 
-`--version` 必须是明确 release tag，例如 `v1.2.109`。不要在生产机器上安装浮动分支。
+安装输出会明确打印解析到的 release tag，例如：
+
+```text
+[install] resolved latest release: v1.2.118
+```
+
+需要复现、回滚或固定生产版本时，使用可审计的两步安装并显式指定 release tag：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh -o /tmp/options-monitor-install.sh
+bash /tmp/options-monitor-install.sh --version v1.2.118 --prefix "$HOME/apps/options-monitor"
+```
+
 安装脚本默认把 wrapper 写到 `$HOME/.local/bin`。如果该目录不在 `PATH`，安装输出会提示：
 
 ```bash
@@ -33,7 +44,7 @@ export PATH="$HOME/.local/bin:$PATH"
 如果需要 Feishu long-connection、远端 inbound 或服务端依赖，安装时加 `--with-server`：
 
 ```bash
-bash /tmp/options-monitor-install.sh --version <release-tag> --prefix "$HOME/apps/options-monitor" --with-server
+curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh | bash -s -- --with-server
 ```
 
 ## macOS
@@ -58,8 +69,7 @@ brew install python git
 安装代码：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh -o /tmp/options-monitor-install.sh
-bash /tmp/options-monitor-install.sh --version <release-tag> --prefix "$HOME/apps/options-monitor"
+curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh | bash
 
 om setup check
 ```
@@ -67,7 +77,7 @@ om setup check
 如果这台 Mac 要跑 Feishu long-connection inbound：
 
 ```bash
-bash /tmp/options-monitor-install.sh --version <release-tag> --prefix "$HOME/apps/options-monitor" --with-server
+curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh | bash -s -- --with-server
 ```
 
 本地手动运行可以继续使用 repo 内忽略文件：
@@ -117,8 +127,7 @@ Python 需要 3.10 或更高版本；较旧发行版请安装更新的 Python �
 安装代码：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh -o /tmp/options-monitor-install.sh
-bash /tmp/options-monitor-install.sh --version <release-tag> --prefix "$HOME/apps/options-monitor"
+curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh | bash
 
 om setup check
 ```
@@ -126,7 +135,7 @@ om setup check
 如果这台服务器要跑 Feishu long-connection inbound：
 
 ```bash
-bash /tmp/options-monitor-install.sh --version <release-tag> --prefix "$HOME/apps/options-monitor" --with-server
+curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh | bash -s -- --with-server
 ```
 
 生产服务 env-file 推荐放在：
@@ -190,9 +199,9 @@ python3 -m venv .venv
 
 ```text
 $HOME/apps/options-monitor/
-  current -> releases/<release-tag>
+  current -> releases/<resolved-release-tag>
   releases/
-    <release-tag>/
+    <resolved-release-tag>/
       .venv/
       om
       om-agent
@@ -210,7 +219,7 @@ $HOME/.local/bin/
 installer 允许做：
 
 - clone repo
-- checkout 指定 tag
+- checkout 最新或指定的 GitHub release tag
 - 创建 `.venv`
 - 安装 Python requirements
 - 更新 `current` symlink

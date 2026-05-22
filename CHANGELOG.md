@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.2.120 - 2026-05-22
+
+### Changed
+- Made `scripts/install.sh` resolve the latest published GitHub release by default while preserving explicit release-tag installs and avoiding floating `main`.
+- Updated the quick-install documentation to use the one-line installer path, with fixed-version installs kept for production replay and rollback.
+
+### Fixed
+- Made re-running the installer for the already active release idempotent while still allowing optional server/dev dependencies to be added.
+
 ## 1.2.119 - 2026-05-22
 
 ### Fixed
