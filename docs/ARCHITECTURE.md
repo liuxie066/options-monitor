@@ -171,13 +171,24 @@ runner modules focused on input/output orchestration.
 
 ## Config And Runtime State
 
-Canonical runtime configs are:
+The canonical human authoring source is `config.yaml`. Code-owned defaults live
+in `src.application.config_defaults.DEFAULT_CONFIG`, and YAML overrides are
+resolved by `src.application.config_yaml`.
+
+Market runtime configs are generated snapshots:
 
 - `config.us.json`
 - `config.hk.json`
 
-Layered config source files live under `configs/` and are built by
-`src.application.layered_config`.
+Runtime execution consumes those JSON snapshots rather than editing
+`config.yaml` directly. First-run setup uses `src.application.config_yaml_init`
+to create a starter YAML file and build market snapshots. Legacy JSON overlays
+under `configs/` are compatibility inputs for explicit `--source legacy` flows,
+not the preferred authoring path.
+
+Shared config section helpers such as symbol/watchlist and templates live in
+`src.application.config_sections`; both loading and validation depend on that
+neutral module to avoid loader/validator cycles.
 
 Runtime state is local and intentionally explicit:
 

@@ -480,7 +480,7 @@ def _default_upgrade_worker_launcher(operation_id: str, audit_db: Path) -> dict[
             details={"operation_id": operation_id, "launcher_errors": errors},
         )
 
-    proc = subprocess.Popen(command, cwd=str(root), env={**os.environ, **worker_env}, start_new_session=True)
+    proc = subprocess.Popen(command, cwd=str(root), env={**build_effective_env(repo_root=root).values, **worker_env}, start_new_session=True)
     return {"launcher": "popen", "pid": proc.pid, "command": command, "env_keys": sorted(worker_env)}
 
 

@@ -6,7 +6,7 @@ from typing import Any
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.agent_tool_registry import get_tool_definition
 from src.application.inbound.contracts import InboundToolCall
-from src.application.inbound.policy import PURE_READ_TOOLS
+from src.application.tool_allowlist import PURE_READ_TOOLS
 
 
 @dataclass(frozen=True)

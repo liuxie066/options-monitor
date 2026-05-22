@@ -1314,6 +1314,166 @@ def _call_runtime_status_for_upgrade(tmp_path: Path, cfg_path: Path, cfg: dict[s
     )
 
 
+def test_runtime_status_reports_assistant_llm_and_latest_agent_route(monkeypatch, tmp_path: Path) -> None:
+    from src.application.inbound.audit import InboundAuditStore
+
+    fixture = _runtime_status_upgrade_fixture(tmp_path)
+    assistant_dir = tmp_path / "resolved"
+    assistant_dir.mkdir()
+    (assistant_dir / "config.assistant.json").write_text(
+        json.dumps(
+            {
+                "assistant": {
+                    "mode": "agent_loop",
+                    "context_window_messages": 6,
+                    "default_market_scope": "us",
+                    "llm": {
+                        "provider": "deepseek",
+                        "base_url": "https://api.deepseek.com",
+                        "model": "deepseek-v4-flash",
+                        "api_key_env": "DEEPSEEK_API_KEY",
+                    },
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    audit_db = tmp_path / "inbound.sqlite3"
+    monkeypatch.setenv("OM_INBOUND_AUDIT_DB", str(audit_db))
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    InboundAuditStore(audit_db).record_result(
+        {
+            "command_id": "in_runtime_status_agent_route",
+            "channel": "feishu",
+            "sender_id": "ou_1",
+            "conversation_id": "feishu:chat_1:ou_1",
+            "message_id": "omsg_1",
+            "raw_text": "系统怎么样",
+            "parser": "llm",
+            "intent_name": "runtime_status",
+            "tool_name": "runtime_status",
+            "decision": "allowed",
+            "result_ok": True,
+            "response": {
+                "meta": {
+                    "agent_runtime": {
+                        "mode": "agent_loop",
+                        "route": "agent_loop",
+                        "llm": {"attempted": True, "reason": "accepted"},
+                        "context": {"provided": True, "recent_count": 1, "pending_count": 0},
+                    }
+                }
+            },
+        }
+    )
+
+    data, _warnings, _meta = _call_runtime_status_for_upgrade(tmp_path, fixture["cfg_path"], fixture["cfg"])
+
+    assert data["assistant_runtime"]["config"]["mode"] == "agent_loop"
+    assert data["assistant_runtime"]["llm"]["enabled"] is True
+    assert data["assistant_runtime"]["llm"]["provider"] == "deepseek"
+    assert data["assistant_runtime"]["llm"]["endpoint_url"] == "https://api.deepseek.com/chat/completions"
+    assert data["assistant_runtime"]["llm"]["api_key_configured"] is True
+    assert data["assistant_runtime"]["audit"]["latest"]["route"] == "agent_loop"
+    assert data["assistant_runtime"]["audit"]["latest"]["llm_reason"] == "accepted"
+    assert data["summary"]["assistant_mode"] == "agent_loop"
+    assert data["summary"]["assistant_latest_route"] == "agent_loop"
+
+
+def test_runtime_status_does_not_report_llm_endpoint_when_llm_disabled(tmp_path: Path) -> None:
+    fixture = _runtime_status_upgrade_fixture(tmp_path)
+
+    data, _warnings, _meta = _call_runtime_status_for_upgrade(tmp_path, fixture["cfg_path"], fixture["cfg"])
+
+    assert data["assistant_runtime"]["config"]["mode"] == "deterministic"
+    assert data["assistant_runtime"]["llm"]["enabled"] is False
+    assert data["assistant_runtime"]["llm"]["provider"] == ""
+    assert data["assistant_runtime"]["llm"]["endpoint_url"] is None
+
+
+def test_runtime_status_uses_service_profile_assistant_config_and_env_file(tmp_path: Path) -> None:
+    from src.application.inbound.audit import InboundAuditStore
+
+    fixture = _runtime_status_upgrade_fixture(tmp_path)
+    assistant_path = tmp_path / "assistant" / "config.assistant.json"
+    assistant_path.parent.mkdir()
+    assistant_path.write_text(
+        json.dumps(
+            {
+                "assistant": {
+                    "mode": "agent_loop",
+                    "llm": {
+                        "provider": "deepseek",
+                        "base_url": "https://api.deepseek.com",
+                        "model": "deepseek-v4-flash",
+                        "api_key_env": "DEEPSEEK_API_KEY",
+                    },
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    audit_db = tmp_path / "profile-audit.sqlite3"
+    env_file = tmp_path / "options-monitor.env"
+    env_file.write_text(
+        f"DEEPSEEK_API_KEY=sk-profile\nOM_INBOUND_AUDIT_DB={audit_db}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "service.profile.json").write_text(
+        json.dumps(
+            {
+                "service_provider": "systemd",
+                "runtime_root": str(tmp_path),
+                "env_file": str(env_file),
+                "assistant_config_path": str(assistant_path),
+                "feishu_ws": {
+                    "assistant_config_path": str(assistant_path),
+                    "audit_db": str(audit_db),
+                },
+                "services": [{"name": "options-monitor-feishu-ws.service"}],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    InboundAuditStore(audit_db).record_result(
+        {
+            "command_id": "in_profile_runtime_status_agent_route",
+            "channel": "feishu",
+            "sender_id": "ou_1",
+            "conversation_id": "feishu:chat_1:ou_1",
+            "message_id": "omsg_profile",
+            "raw_text": "系统怎么样",
+            "parser": "llm",
+            "intent_name": "runtime_status",
+            "tool_name": "runtime_status",
+            "decision": "allowed",
+            "result_ok": True,
+            "response": {
+                "meta": {
+                    "agent_runtime": {
+                        "mode": "agent_loop",
+                        "route": "agent_loop",
+                        "llm": {"attempted": True, "reason": "accepted"},
+                    }
+                }
+            },
+        }
+    )
+
+    data, _warnings, _meta = _call_runtime_status_for_upgrade(tmp_path, fixture["cfg_path"], fixture["cfg"])
+
+    assert data["assistant_runtime"]["config"]["path"] == str(assistant_path)
+    assert data["assistant_runtime"]["config"]["mode"] == "agent_loop"
+    assert data["assistant_runtime"]["llm"]["api_key_configured"] is True
+    assert data["assistant_runtime"]["llm"]["env_file"] == str(env_file)
+    assert data["assistant_runtime"]["llm"]["env_file_loaded"] is True
+    assert data["assistant_runtime"]["audit"]["path"] == str(audit_db)
+    assert data["assistant_runtime"]["audit"]["latest"]["route"] == "agent_loop"
+
+
 def test_runtime_status_auto_loads_runtime_service_profile_paths(tmp_path: Path) -> None:
     from src.application.agent_tool_runtime_status import runtime_status_tool
 
