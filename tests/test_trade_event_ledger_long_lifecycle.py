@@ -81,6 +81,7 @@ def test_projection_sell_close_closes_long_lot() -> None:
                 contracts=2,
                 price=4.2,
                 trade_time_ms=2000,
+                raw_payload={"record_id": "lot_evt-open-long-1"},
             ),
         ]
     )
@@ -114,6 +115,7 @@ def test_projection_buy_close_still_closes_short_lot() -> None:
                 contracts=1,
                 price=2.2,
                 trade_time_ms=2000,
+                raw_payload={"record_id": "lot_evt-open-short-1"},
             ),
         ]
     )
@@ -127,7 +129,7 @@ def test_projection_buy_close_still_closes_short_lot() -> None:
     assert fields["close_reason"] == "broker_trade_buy_to_close"
 
 
-def test_projection_heuristic_close_does_not_cross_same_strike_different_expiry() -> None:
+def test_projection_explicit_close_does_not_cross_same_strike_different_expiry() -> None:
     result = project_position_lot_records_with_diagnostics(
         [
             _event(
@@ -162,6 +164,7 @@ def test_projection_heuristic_close_does_not_cross_same_strike_different_expiry(
                 contracts=3,
                 price=1.0,
                 trade_time_ms=3000,
+                raw_payload={"record_id": "lot_evt-open-jun"},
             ),
         ]
     )

@@ -935,9 +935,9 @@ def build_notification(
 
 def main():
     parser = argparse.ArgumentParser(description='Build symbols notification text from alerts')
-    parser.add_argument('--alerts-input', default='output/reports/symbols_alerts.txt')
-    parser.add_argument('--changes-input', default='output/reports/symbols_changes.txt')
-    parser.add_argument('--output', default='output/reports/symbols_notification.txt')
+    parser.add_argument('--alerts-input', default='output_shared/reports/symbols_alerts.txt')
+    parser.add_argument('--changes-input', default='output_shared/reports/symbols_changes.txt')
+    parser.add_argument('--output', default='output_shared/reports/symbols_notification.txt')
     parser.add_argument('--state-dir', default=None, help='[optional] state dir for rate_cache.json')
     args = parser.parse_args()
 
@@ -958,7 +958,7 @@ def main():
                 sd = (base / sd).resolve()
             rate_path = (sd / 'rate_cache.json').resolve()
         else:
-            rate_path = (base / 'output' / 'state' / 'rate_cache.json').resolve()
+            rate_path = (base / 'output_shared' / 'state' / 'rate_cache.json').resolve()
         data = load_exchange_rate_info(
             cache_path=rate_path,
             max_age_hours=24,

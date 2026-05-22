@@ -86,6 +86,8 @@ def test_feishu_ws_can_route_through_agent_runtime(tmp_path: Path) -> None:
     out = handle_feishu_ws_event(
         _message_payload(text="/status"),
         settings=FeishuWsSettings(
+            config_path=str(tmp_path / "config.us.json"),
+            assistant_config_path=str(tmp_path / "config.assistant.json"),
             allowed_senders="feishu:ou_1",
             app_id="app_1",
             app_secret="secret_1",
@@ -98,7 +100,7 @@ def test_feishu_ws_can_route_through_agent_runtime(tmp_path: Path) -> None:
 
     inbound_result = out["data"]["inbound"]["data"]["inbound_result"]
     assert out["ok"] is True
-    assert calls == [("runtime_status", {"config_key": "us"})]
+    assert calls == [("runtime_status", {"config_path": str(tmp_path / "config.us.json")})]
     assert inbound_result["data"]["intent"]["parser"] == "command"
     assert inbound_result["meta"]["agent_runtime"]["route"] == "command"
     assert inbound_result["meta"]["agent_runtime"]["llm"]["enabled"] is False
@@ -225,9 +227,9 @@ def test_feishu_ws_settings_uses_unified_bot_config_without_callback_secrets(tmp
     assert settings.ack_reaction == ""
 
 
-def test_feishu_ws_settings_reads_behavior_from_runtime_config(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.us.json"
-    config_path.write_text(
+def test_feishu_ws_settings_reads_behavior_from_assistant_config(tmp_path: Path) -> None:
+    assistant_config_path = tmp_path / "config.assistant.json"
+    assistant_config_path.write_text(
         json.dumps(
             {
                 "inbound": {
@@ -239,13 +241,11 @@ def test_feishu_ws_settings_reads_behavior_from_runtime_config(tmp_path: Path) -
                         "queue_size": 25,
                     }
                 },
-                "agent": {
-                    "runtime": {
-                        "enabled": True,
-                        "context_window_messages": 9,
-                    },
+                "assistant": {
+                    "mode": "agent_loop",
+                    "context_window_messages": 9,
+                    "default_market_scope": "us",
                     "llm": {
-                        "enabled": True,
                         "provider": "openai",
                         "base_url": "https://llm.example/v1",
                         "model": "gpt-5.2",
@@ -261,7 +261,8 @@ def test_feishu_ws_settings_reads_behavior_from_runtime_config(tmp_path: Path) -
     )
 
     settings = build_feishu_ws_settings(
-        config_path=str(config_path),
+        config_path=str(tmp_path / "config.us.json"),
+        assistant_config_path=str(assistant_config_path),
         queue_size=5,
         environ={
             "OM_FEISHU_BOT_APP_ID": "bot_app",
@@ -272,10 +273,13 @@ def test_feishu_ws_settings_reads_behavior_from_runtime_config(tmp_path: Path) -
     )
 
     assert settings.reply_enabled is False
+    assert settings.config_path == str(tmp_path / "config.us.json")
+    assert settings.assistant_config_path == str(assistant_config_path)
     assert settings.reply_in_thread is True
     assert settings.max_reply_chars == 1200
     assert settings.ack_reaction == "SMILE"
     assert settings.queue_size == 5
+    assert settings.agent_runtime_mode == "agent_loop"
     assert settings.agent_runtime_enabled is True
     assert settings.agent_context_window_messages == 9
     assert settings.agent_llm.enabled is True
@@ -288,11 +292,11 @@ def test_feishu_ws_settings_reads_behavior_from_runtime_config(tmp_path: Path) -
 
 
 def test_feishu_ws_settings_enables_command_runtime_by_default(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.us.json"
-    config_path.write_text(json.dumps({"inbound": {"feishu_ws": {}}}), encoding="utf-8")
+    assistant_config_path = tmp_path / "config.assistant.json"
+    assistant_config_path.write_text(json.dumps({"inbound": {"feishu_ws": {}}}), encoding="utf-8")
 
     settings = build_feishu_ws_settings(
-        config_path=str(config_path),
+        assistant_config_path=str(assistant_config_path),
         environ={
             "OM_FEISHU_BOT_APP_ID": "bot_app",
             "OM_FEISHU_BOT_APP_SECRET": "bot_secret",
@@ -300,6 +304,7 @@ def test_feishu_ws_settings_enables_command_runtime_by_default(tmp_path: Path) -
         },
     )
 
+    assert settings.agent_runtime_mode == "deterministic"
     assert settings.agent_runtime_enabled is True
     assert settings.agent_llm.enabled is False
 

@@ -665,7 +665,7 @@ def _resolve_previous_summary_path(*, repo_base: Path, previous_summary: str | N
         return (sd / 'symbols_summary_prev.csv').resolve()
     if previous_summary:
         return _resolve_repo_path(repo_base=repo_base, value=previous_summary)
-    return (repo_base / 'output' / 'state' / 'symbols_summary_prev.csv').resolve()
+    return (repo_base / 'output_shared' / 'state' / 'symbols_summary_prev.csv').resolve()
 
 
 def _load_policy(policy_json: str | None, *, repo_base: Path) -> dict:
@@ -716,9 +716,9 @@ def _fill_capacity_fields_from_note(current: pd.DataFrame) -> pd.DataFrame:
 
 def run_alert_engine(
     *,
-    summary_input: str = 'output/reports/symbols_summary.csv',
-    output: str = 'output/reports/symbols_alerts.txt',
-    changes_output: str = 'output/reports/symbols_changes.txt',
+    summary_input: str = 'output_shared/reports/symbols_summary.csv',
+    output: str = 'output_shared/reports/symbols_alerts.txt',
+    changes_output: str = 'output_shared/reports/symbols_changes.txt',
     previous_summary: str | None = None,
     state_dir: str | None = None,
     update_snapshot: bool = False,
@@ -780,9 +780,9 @@ def run_alert_engine(
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='Build alert and change text from symbols summary')
-    parser.add_argument('--summary-input', default='output/reports/symbols_summary.csv')
-    parser.add_argument('--output', default='output/reports/symbols_alerts.txt')
-    parser.add_argument('--changes-output', default='output/reports/symbols_changes.txt')
+    parser.add_argument('--summary-input', default='output_shared/reports/symbols_summary.csv')
+    parser.add_argument('--output', default='output_shared/reports/symbols_alerts.txt')
+    parser.add_argument('--changes-output', default='output_shared/reports/symbols_changes.txt')
     parser.add_argument('--previous-summary', default=None, help='Previous summary snapshot CSV (default: <state-dir>/symbols_summary_prev.csv)')
     parser.add_argument('--state-dir', default=None, help='[optional] state dir for symbols_summary_prev.csv (overrides --previous-summary when set)')
     parser.add_argument('--update-snapshot', action='store_true')

@@ -785,3 +785,14 @@ def test_ledger_public_api_exports_semantic_surface_only() -> None:
     banned_prefixes = ("persist_", "preflight_")
     offenders = sorted(name for name in exported if name in banned_exact or name.startswith(banned_prefixes))
     assert offenders == []
+
+
+def test_trade_event_projection_mainline_has_no_legacy_passthrough() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    codec_text = (repo_root / "src" / "application" / "ledger" / "event_codec.py").read_text(encoding="utf-8")
+    publisher_text = (repo_root / "src" / "application" / "ledger" / "publisher.py").read_text(encoding="utf-8")
+
+    assert "legacy_trade_event_to_ledger_event" not in codec_text
+    assert "_encode_legacy_bootstrap_passthrough" not in codec_text
+    assert "_bootstrap_passthrough_records" not in publisher_text
+    assert "_resolve_legacy_close_targets" not in publisher_text

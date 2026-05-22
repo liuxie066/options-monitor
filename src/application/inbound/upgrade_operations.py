@@ -13,6 +13,7 @@ from src.application.agent_tool_config import repo_base
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response, mask_path
 from src.application.inbound.contracts import InboundIntent, InboundRequest
 from src.application.inbound.operation_policy import enforce_upgrade_write_allowed
+from src.application.inbound.operation_signature import verify_operation_signature
 from src.application.inbound.operation_store import InboundOperationStore, operation_is_expired
 from src.application.inbound.operation_status_text import cannot_repeat_message, user_facing_operation_status
 from src.application.service_upgrade import compare_versions, default_releases_root, default_upgrade_cache_root, service_upgrade, service_upgrade_check
@@ -118,6 +119,7 @@ def _confirm_operation(*, operation_id: str | None, request: InboundRequest, sto
         result = {"operation_id": operation_id, "status": "failed", "reason": "payload_hash_mismatch"}
         store.mark_failed(operation_id, result=result)
         raise AgentToolError(code="INTERNAL_ERROR", message="pending upgrade operation payload hash mismatch; refusing to upgrade", details=result)
+    verify_operation_signature(operation)
     queued = {
         "operation_id": operation_id,
         "status": "confirmed",
@@ -368,6 +370,7 @@ def run_confirmed_upgrade_operation(
         failed = {"operation_id": operation_id, "status": "failed", "reason": "payload_hash_mismatch"}
         store.mark_failed(operation_id, result=failed)
         raise AgentToolError(code="INTERNAL_ERROR", message="pending upgrade operation payload hash mismatch; refusing to upgrade", details=failed)
+    verify_operation_signature(operation)
 
     running = {
         "operation_id": operation_id,

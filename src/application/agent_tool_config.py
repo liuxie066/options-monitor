@@ -81,7 +81,7 @@ def resolve_output_root(output_dir: str | Path | None = None) -> Path:
     env_dir = str(build_effective_env().get("OM_OUTPUT_DIR") or "").strip()
     if env_dir:
         return Path(env_dir).expanduser().resolve()
-    return (repo_base() / "output" / "agent_plugin").resolve()
+    return (repo_base() / "output_shared" / "agent_tools").resolve()
 
 
 def write_tools_enabled() -> bool:

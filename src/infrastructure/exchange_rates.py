@@ -305,13 +305,13 @@ def get_usd_per_cny_exchange_rate(base_dir: Path) -> float | None:
 
     NOTE: This function keeps the existing call signature.
     It reads and refreshes the repo-local cache:
-      1) <base_dir>/output/state/rate_cache.json
+      1) <base_dir>/output_shared/state/rate_cache.json
       2) on miss/stale, fetch latest online and write back to the same file
     """
     try:
         base_dir = Path(base_dir).resolve()
         obj = get_exchange_rates_or_fetch_latest(
-            cache_path=(base_dir / 'output' / 'state' / 'rate_cache.json').resolve(),
+            cache_path=(base_dir / 'output_shared' / 'state' / 'rate_cache.json').resolve(),
             max_age_hours=24,
         )
         usdcny = _extract_usdcny_from_rates(obj)

@@ -11,7 +11,7 @@ from domain.storage.repositories import state_repo
 
 def main():
     ap = argparse.ArgumentParser(description='Write last_run.json')
-    ap.add_argument('--state-dir', default='output/state', help='Directory for last_run.json (default: output/state)')
+    ap.add_argument('--state-dir', default='output_shared/state', help='Directory for last_run.json (default: output_shared/state)')
     ap.add_argument('--path', default=None, help='[deprecated] explicit last_run.json path. Prefer --state-dir.' )
     ap.add_argument('--status', required=True, choices=['ok','error','skip'])
     ap.add_argument('--stage', default='')

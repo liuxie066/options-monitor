@@ -5,6 +5,7 @@ from typing import Any
 
 from src.application.ledger.position_records import PositionLotRecord
 from src.application.ledger.publisher import PublishedPositionLotProjection, project_stored_trade_events_to_position_lots
+from src.application.ledger.migration import legacy_trade_event_to_ledger_event
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,13 @@ class LegacyTradeEvent:
     raw_payload: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        event, diagnostics = legacy_trade_event_to_ledger_event(self)
+        errors = [item.code for item in diagnostics if item.severity == "error"]
+        if event is None or errors:
+            raise AssertionError(f"legacy test event could not be converted: {', '.join(errors) or 'unknown'}")
+        return event.to_dict()
+
+    def to_legacy_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 

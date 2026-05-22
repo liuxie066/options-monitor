@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 
 from domain.domain.ledger import ProjectionResult, TradeEvent, project_trade_events
@@ -48,7 +48,6 @@ def project_stored_trade_events_to_position_lots(events: list[Any]) -> Published
         if str(item.get("event_id") or "").strip()
     }
     ledger_events, import_diagnostics = import_stored_trade_events(stored_events)
-    ledger_events, target_diagnostics = _resolve_legacy_close_targets(ledger_events)
     ledger_projection = project_trade_events(ledger_events)
     lots = [
         _position_lot_to_legacy_record(
@@ -58,66 +57,11 @@ def project_stored_trade_events_to_position_lots(events: list[Any]) -> Published
         )
         for lot in ledger_projection.lots
     ]
-    lots.extend(_bootstrap_passthrough_records(stored_events, imported_event_ids={event.event_id for event in ledger_events}))
     return PublishedPositionLotProjection(
         lots=lots,
-        diagnostics=[*import_diagnostics, *target_diagnostics, *ledger_projection.diagnostics],
+        diagnostics=[*import_diagnostics, *ledger_projection.diagnostics],
         ledger_projection=ledger_projection,
     )
-
-
-def _resolve_legacy_close_targets(events: list[TradeEvent]) -> tuple[list[TradeEvent], list[LedgerDiagnostic]]:
-    resolved: list[TradeEvent] = []
-    diagnostics: list[LedgerDiagnostic] = []
-    for event in sorted(events, key=lambda item: (int(item.event_time_ms or 0), item.event_id)):
-        if not event.is_close or event.target_lot_id:
-            resolved.append(event)
-            continue
-        current = project_trade_events(resolved)
-        candidates = [
-            lot
-            for lot in sorted(current.lots, key=lambda item: (item.opened_at_ms, item.lot_id))
-            if lot.contract_key == event.contract_key and int(lot.contracts_open) > 0
-        ]
-        remaining = int(event.contracts)
-        matched = 0
-        for lot in candidates:
-            if remaining <= 0:
-                break
-            take = min(int(lot.contracts_open), remaining)
-            if take <= 0:
-                continue
-            close_event_id = event.event_id if matched == 0 else f"{event.event_id}:target:{lot.lot_id}"
-            resolved.append(
-                replace(
-                    event,
-                    event_id=close_event_id,
-                    contracts=take,
-                    target_lot_id=lot.lot_id,
-                    raw_payload={
-                        **event.raw_payload,
-                        "legacy_heuristic_target": True,
-                        "legacy_source_event_id": event.event_id,
-                    },
-                )
-            )
-            remaining -= take
-            matched += take
-        if remaining > 0:
-            diagnostics.append(
-                LedgerDiagnostic(
-                    event_id=event.event_id,
-                    severity="warn",
-                    code="close_unmatched_contracts",
-                    message="legacy close event contracts could not be fully matched to open lots",
-                    details={
-                        "contracts_requested": int(event.contracts),
-                        "contracts_matched": int(matched),
-                        "contracts_unmatched": int(remaining),
-                    },
-                )
-            )
-    return resolved, diagnostics
 
 
 def _position_lot_to_legacy_record(
@@ -135,34 +79,6 @@ def _position_lot_to_legacy_record(
     if close_event is not None:
         fields.update(_close_fields(close_event, legacy_by_event_id=legacy_by_event_id, lot=lot))
     return PositionLotRecord(record_id=lot.lot_id, fields=fields)
-
-
-def _bootstrap_passthrough_records(
-    legacy_events: list[dict[str, Any]],
-    *,
-    imported_event_ids: set[str],
-) -> list[PositionLotRecord]:
-    records: list[PositionLotRecord] = []
-    passthrough_sources = {"feishu_bootstrap", "legacy_option_positions"}
-    for event in legacy_events:
-        event_id = str(event.get("event_id") or "").strip()
-        if not event_id or event_id in imported_event_ids:
-            continue
-        if str(event.get("source_type") or "").strip().lower() != "bootstrap_snapshot":
-            continue
-        if str(event.get("source_name") or "").strip() not in passthrough_sources:
-            continue
-        payload = _event_payload(event)
-        record_id = str(payload.get("lot_record_id") or "").strip()
-        fields = payload.get("fields")
-        if not record_id or not isinstance(fields, dict):
-            continue
-        patched_fields = dict(fields)
-        patched_fields["source_event_id"] = event_id
-        patched_fields["event_source_type"] = str(event.get("source_type") or "").strip()
-        patched_fields["event_source_name"] = str(event.get("source_name") or "").strip()
-        records.append(PositionLotRecord(record_id=record_id, fields=patched_fields))
-    return records
 
 
 def _base_fields_for_lot(

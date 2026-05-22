@@ -580,7 +580,6 @@ def _freshness_from_runtime_status(
     shared_raw = data.get("shared")
     shared: dict[str, Any] = shared_raw if isinstance(shared_raw, dict) else {}
     collect("shared.last_run", shared.get("last_run"))
-    collect("shared.legacy_last_run", shared.get("legacy_last_run"))
     latest_run_raw = data.get("latest_run")
     latest_run: dict[str, Any] = latest_run_raw if isinstance(latest_run_raw, dict) else {}
     latest_state_raw = latest_run.get("state")
@@ -1342,12 +1341,12 @@ def runtime_status_tool(
     report_dir = _resolve_under_base(
         payload.get("report_dir"),
         base=base,
-        default=base / "output" / "reports",
+        default=base / "output_shared" / "reports",
     )
     state_dir = _resolve_under_base(
         payload.get("state_dir"),
         base=base,
-        default=base / "output" / "state",
+        default=base / "output_shared" / "state",
     )
     shared_state_dir = _resolve_under_base(
         payload.get("shared_state_dir"),
@@ -1370,11 +1369,6 @@ def runtime_status_tool(
 
     shared_last_run = _json_file_info(
         shared_state_dir / "last_run.json",
-        base=base,
-        read_json_object_or_empty=read_json_object_or_empty,
-    )
-    legacy_last_run = _json_file_info(
-        state_dir / "last_run.json",
         base=base,
         read_json_object_or_empty=read_json_object_or_empty,
     )
@@ -1513,14 +1507,14 @@ def runtime_status_tool(
         source = latest_run_selection.get("source")
         value = latest_run_selection.get("value")
         warnings.append(f"Requested runtime run not found: {source}={value}.")
-    if not shared_last_run.get("exists") and not legacy_last_run.get("exists"):
-        warnings.append("No last_run.json found under output_shared/state or output/state.")
+    if not shared_last_run.get("exists"):
+        warnings.append("No last_run.json found under output_shared/state.")
     if (
         _latest_run_expects_static_notification(latest_run_payload)
         and not notification.get("exists")
         and not any(item["notification"].get("exists") for item in account_status.values())
     ):
-        warnings.append("No symbols_notification.txt found under output/reports or output_accounts/<account>/reports.")
+        warnings.append("No symbols_notification.txt found under output_shared/reports or output_accounts/<account>/reports.")
     if str(trigger_context.get("delivery_mode") or "").lower() == "none":
         warnings.append("Outer delivery.mode is none; the task runner will not announce run output.")
     ledger_context_summary = _ledger_context_summary(option_positions_context)
@@ -1576,13 +1570,9 @@ def runtime_status_tool(
         warnings.append("Service drift detected between current release, service profile, and installed units.")
         warning_codes.append("SERVICE_DRIFT")
 
-    latest_status = None
-    for candidate in (shared_last_run, legacy_last_run):
-        payload_raw = candidate.get("json")
-        payload_json: dict[str, Any] = payload_raw if isinstance(payload_raw, dict) else {}
-        latest_status = payload_json.get("status") or payload_json.get("last_status") or latest_status
-        if latest_status:
-            break
+    shared_last_run_json_raw = shared_last_run.get("json")
+    shared_last_run_json: dict[str, Any] = shared_last_run_json_raw if isinstance(shared_last_run_json_raw, dict) else {}
+    latest_status = shared_last_run_json.get("status") or shared_last_run_json.get("last_status")
 
     data: dict[str, Any] = {
         "config": {
@@ -1600,7 +1590,6 @@ def runtime_status_tool(
         "ledger_store": ledger_store,
         "shared": {
             "last_run": shared_last_run,
-            "legacy_last_run": legacy_last_run,
             "last_run_dir": _path_pointer_file_info(pointer_path, base=base),
             "notification": notification,
         },

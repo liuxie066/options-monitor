@@ -9,9 +9,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, cast
 
+from src.application.agent_runtime.config_loader import load_assistant_config
 from src.application.agent_runtime.settings import DEFAULT_CONTEXT_WINDOW_MESSAGES, AgentRuntimeSettings, LlmTranslatorSettings
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response, mask_path
-from src.application.agent_tool_config import load_runtime_config, resolve_runtime_config_path
 from src.application.inbound.feishu import handle_feishu_payload
 from src.application.inbound.router import ExecuteToolFn
 from src.application.secret_resolver import (
@@ -39,6 +39,7 @@ LOG = logging.getLogger(__name__)
 class FeishuWsSettings:
     config_key: str | None = "us"
     config_path: str | None = None
+    assistant_config_path: str | None = None
     audit_db: str | None = None
     allowed_senders: str | None = None
     app_id: str = ""
@@ -48,6 +49,7 @@ class FeishuWsSettings:
     max_reply_chars: int = DEFAULT_FEISHU_REPLY_MAX_CHARS
     ack_reaction: str = ""
     queue_size: int = DEFAULT_FEISHU_WS_QUEUE_SIZE
+    agent_runtime_mode: str = "deterministic"
     agent_runtime_enabled: bool = True
     agent_context_window_messages: int = DEFAULT_CONTEXT_WINDOW_MESSAGES
     agent_llm: LlmTranslatorSettings = field(default_factory=LlmTranslatorSettings)
@@ -70,6 +72,7 @@ class FeishuWsSettings:
         out: dict[str, Any] = {
             "config_key": self.config_key,
             "config_path": self.config_path,
+            "assistant_config_path": self.assistant_config_path,
             "audit_db": mask_path(self.audit_db),
             "allowed_senders_configured": bool(self.allowed_senders),
             "app_id_configured": bool(self.app_id),
@@ -79,6 +82,7 @@ class FeishuWsSettings:
             "max_reply_chars": int(self.max_reply_chars),
             "ack_reaction": self.ack_reaction,
             "queue_size": int(self.queue_size),
+            "agent_runtime_mode": self.agent_runtime_mode,
             "agent_runtime_enabled": bool(self.agent_runtime_enabled),
             "agent_context_window_messages": int(self.agent_context_window_messages),
             "agent_llm": self.agent_llm.public_payload(),
@@ -92,6 +96,7 @@ def build_feishu_ws_settings(
     *,
     config_key: str | None = "us",
     config_path: str | None = None,
+    assistant_config_path: str | None = None,
     audit_db: str | None = None,
     reply_enabled: bool | None = None,
     reply_in_thread: bool | None = None,
@@ -101,12 +106,13 @@ def build_feishu_ws_settings(
 ) -> FeishuWsSettings:
     env = build_effective_env(environ=environ).values
     bot_cfg = resolve_feishu_bot_config(environ=env)
-    runtime_cfg = _load_runtime_behavior_config(config_key=config_key, config_path=config_path)
-    behavior_cfg = _dict(_dict(runtime_cfg.get("inbound")).get("feishu_ws"))
-    agent_runtime_settings = AgentRuntimeSettings.from_runtime_config(runtime_cfg)
+    assistant_cfg = _load_assistant_behavior_config(config_path=assistant_config_path)
+    behavior_cfg = _dict(_dict(assistant_cfg.get("inbound")).get("feishu_ws"))
+    agent_runtime_settings = AgentRuntimeSettings.from_runtime_config(assistant_cfg)
     return FeishuWsSettings(
         config_key=str(config_key or "").strip().lower() or None,
         config_path=_first_text(config_path),
+        assistant_config_path=_first_text(assistant_config_path),
         audit_db=_first_text(audit_db, env.get("OM_INBOUND_AUDIT_DB")),
         allowed_senders=bot_cfg.default_allowed_senders(),
         app_id=bot_cfg.app_id,
@@ -124,6 +130,7 @@ def build_feishu_ws_settings(
             behavior_cfg.get("queue_size"),
             default=DEFAULT_FEISHU_WS_QUEUE_SIZE,
         ),
+        agent_runtime_mode=agent_runtime_settings.mode,
         agent_runtime_enabled=agent_runtime_settings.enabled,
         agent_context_window_messages=agent_runtime_settings.context_window_messages,
         agent_llm=agent_runtime_settings.llm,
@@ -177,10 +184,12 @@ def handle_feishu_ws_event(
         audit_db=settings.audit_db,
         use_agent_runtime=settings.agent_runtime_enabled,
         agent_runtime_settings=AgentRuntimeSettings(
+            mode=settings.agent_runtime_mode,
             enabled=settings.agent_runtime_enabled,
             context_window_messages=settings.agent_context_window_messages,
             llm=settings.agent_llm,
         ),
+        assistant_config_path=settings.assistant_config_path,
         **inbound_kwargs,
     )
     reaction_status = _maybe_react(inbound=inbound, settings=settings, reaction_fn=reaction_fn)
@@ -446,22 +455,16 @@ def _dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _load_runtime_behavior_config(*, config_key: str | None, config_path: str | None) -> dict[str, Any]:
+def _load_assistant_behavior_config(*, config_path: str | None) -> dict[str, Any]:
     explicit_config_path = bool(config_path is not None and str(config_path).strip())
-    if not explicit_config_path:
-        try:
-            resolved_path = resolve_runtime_config_path(config_key=config_key, config_path=None)
-        except AgentToolError:
-            return {}
-        if not resolved_path.exists():
-            return {}
-
     try:
-        _path, cfg = load_runtime_config(config_key=config_key, config_path=config_path)
+        _path, cfg = load_assistant_config(config_path=config_path, missing_ok=not explicit_config_path)
     except AgentToolError:
         if explicit_config_path:
             raise
         return {}
+    if cfg:
+        return cfg
     return cfg
 
 

@@ -3,10 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable
 
+from src.application.agent_runtime.config_loader import load_assistant_config
 from src.application.agent_runtime.llm_translator import CreateStructuredResponseFn, translate_inbound_intent
 from src.application.agent_runtime.settings import AgentRuntimeSettings, LlmTranslatorSettings
-from src.application.agent_tool_config import load_runtime_config
-from src.application.config_validator import validate_config
 from src.application.settings import build_effective_env
 from src.infrastructure.openai_chat_completions import resolve_chat_completions_url
 from src.infrastructure.openai_responses import resolve_responses_url
@@ -18,7 +17,6 @@ DEFAULT_LIVE_PROBE_TEXT = "状态"
 def check_llm_translator(
     *,
     repo_root: str | Path,
-    config_key: str | None = None,
     config_path: str | Path | None = None,
     env_file: str | Path | None = None,
     include_local_env_file: bool = True,
@@ -26,8 +24,14 @@ def check_llm_translator(
     live_text: str = DEFAULT_LIVE_PROBE_TEXT,
     create_response_fn: CreateStructuredResponseFn | None = None,
 ) -> dict[str, Any]:
-    path, cfg = load_runtime_config(config_key=config_key, config_path=config_path)
-    settings = AgentRuntimeSettings.from_runtime_config(cfg).llm
+    explicit_config_path = bool(config_path is not None and str(config_path).strip())
+    path, cfg = load_assistant_config(
+        config_path=config_path,
+        repo_root=repo_root,
+        missing_ok=not explicit_config_path,
+    )
+    runtime_settings = AgentRuntimeSettings.from_runtime_config(cfg)
+    settings = runtime_settings.llm
     effective_env = build_effective_env(
         repo_root=repo_root,
         env_file=env_file,
@@ -35,7 +39,7 @@ def check_llm_translator(
     )
 
     checks: list[dict[str, Any]] = []
-    validation_ok = _append_runtime_config_check(checks, cfg=cfg)
+    validation_ok = _append_assistant_config_check(checks, cfg=cfg, settings=runtime_settings)
     checks.extend(_config_checks(settings, effective_env=effective_env))
 
     live_probe = _live_probe_check(
@@ -66,8 +70,10 @@ def check_llm_translator(
             "warning_count": sum(1 for item in checks if item.get("status") == "warn"),
         },
         "config": {
-            "config_key": str(config_key or "").strip().lower() or None,
+            "config_kind": "assistant",
             "config_path": str(path),
+            "loaded": bool(cfg),
+            "mode": runtime_settings.mode,
         },
         "env": {
             "env_file": str(effective_env.env_file) if effective_env.env_file is not None else None,
@@ -88,20 +94,25 @@ def check_llm_translator(
     }
 
 
-def _append_runtime_config_check(checks: list[dict[str, Any]], *, cfg: dict[str, Any]) -> bool:
-    try:
-        validate_config(dict(cfg))
-    except SystemExit as exc:
+def _append_assistant_config_check(checks: list[dict[str, Any]], *, cfg: dict[str, Any], settings: AgentRuntimeSettings) -> bool:
+    if not cfg:
         checks.append({
-            "name": "runtime_config",
+            "name": "assistant_config",
+            "status": "warn",
+            "message": "config.assistant.json not found; using deterministic assistant defaults",
+        })
+        return True
+    if settings.mode not in {"deterministic", "llm_router", "agent_loop", "disabled"}:
+        checks.append({
+            "name": "assistant_config",
             "status": "error",
-            "message": str(exc),
+            "message": "assistant.mode is invalid",
         })
         return False
     checks.append({
-        "name": "runtime_config",
+        "name": "assistant_config",
         "status": "ok",
-        "message": "runtime config validates",
+        "message": "assistant config validates",
     })
     return True
 
@@ -111,7 +122,7 @@ def _config_checks(settings: LlmTranslatorSettings, *, effective_env: Any) -> li
     checks.append({
         "name": "enabled",
         "status": "ok" if settings.enabled else "warn",
-        "message": "agent.llm.enabled is true" if settings.enabled else "agent.llm.enabled is false; translator is inactive",
+        "message": "assistant mode uses LLM" if settings.enabled else "assistant mode is deterministic; LLM is inactive",
     })
     checks.append(_provider_check(settings.provider, required=settings.enabled))
     checks.append(_required_text_check("model", settings.model, required=settings.enabled))
@@ -163,24 +174,24 @@ def _provider_check(value: str, *, required: bool) -> dict[str, Any]:
             return {
                 "name": "provider",
                 "status": "skipped",
-                "message": "agent.llm.provider is not set because LLM is disabled",
+                "message": "assistant.llm.provider is not set because LLM is disabled",
             }
         return {
             "name": "provider",
             "status": "error",
-            "message": "agent.llm.provider is required when LLM is enabled",
+            "message": "assistant.llm.provider is required when LLM is enabled",
         }
     if text not in {"openai", "deepseek"}:
         return {
             "name": "provider",
             "status": "error",
-            "message": "agent.llm.provider must be one of: openai, deepseek",
+            "message": "assistant.llm.provider must be one of: openai, deepseek",
             "value": text,
         }
     return {
         "name": "provider",
         "status": "ok",
-        "message": "agent.llm.provider is configured",
+        "message": "assistant.llm.provider is configured",
         "value": text,
     }
 
@@ -192,24 +203,24 @@ def _required_text_check(name: str, value: str, *, expected: str | None = None, 
             return {
                 "name": name,
                 "status": "skipped",
-                "message": f"agent.llm.{name} is not set because LLM is disabled",
+                "message": f"assistant.llm.{name} is not set because LLM is disabled",
             }
         return {
             "name": name,
             "status": "error",
-            "message": f"agent.llm.{name} is required when LLM is enabled",
+            "message": f"assistant.llm.{name} is required when LLM is enabled",
         }
     if expected is not None and text != expected:
         return {
             "name": name,
             "status": "error",
-            "message": f"agent.llm.{name} must be {expected}",
+            "message": f"assistant.llm.{name} must be {expected}",
             "value": text,
         }
     return {
         "name": name,
         "status": "ok",
-        "message": f"agent.llm.{name} is configured",
+        "message": f"assistant.llm.{name} is configured",
         "value": text,
     }
 

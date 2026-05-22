@@ -8,8 +8,8 @@ from domain.storage.json_io import atomic_write_json as write_json
 
 
 def prepare_dirs(base: Path, report_dir: str | None, state_dir: str | None) -> tuple[Path, Path]:
-    rd = (Path(report_dir).resolve() if report_dir else (base / "output" / "reports").resolve())
-    sd = (Path(state_dir).resolve() if state_dir else (base / "output" / "state").resolve())
+    rd = (Path(report_dir).resolve() if report_dir else (base / "output_shared" / "reports").resolve())
+    sd = (Path(state_dir).resolve() if state_dir else (base / "output_shared" / "state").resolve())
     rd.mkdir(parents=True, exist_ok=True)
     sd.mkdir(parents=True, exist_ok=True)
     return rd, sd

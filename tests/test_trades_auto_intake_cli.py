@@ -127,9 +127,9 @@ def test_auto_trade_intake_once_defaults_state_paths_to_runtime_root(tmp_path: P
 
     assert result.returncode == 0, result.stderr or result.stdout
     payload = json.loads(result.stdout)
-    assert payload["state_path"] == str((runtime_root / "output" / "state" / "auto_trade_intake_state.json").resolve())
-    assert payload["audit_path"] == str((runtime_root / "output" / "state" / "auto_trade_intake_audit.jsonl").resolve())
-    assert payload["status_path"] == str((runtime_root / "output" / "state" / "auto_trade_intake_status.json").resolve())
+    assert payload["state_path"] == str((runtime_root / "output_shared" / "state" / "auto_trade_intake_state.json").resolve())
+    assert payload["audit_path"] == str((runtime_root / "output_shared" / "state" / "auto_trade_intake_audit.jsonl").resolve())
+    assert payload["status_path"] == str((runtime_root / "output_shared" / "state" / "auto_trade_intake_status.json").resolve())
 
 
 def test_auto_trade_intake_open_dry_run_accepts_futu_option_code_with_lookup_fields(tmp_path: Path) -> None:

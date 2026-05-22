@@ -54,7 +54,7 @@ def append_metrics_json(metrics_path: Path, payload: dict[str, Any], max_entries
 
 
 def save_outputs(base: Path, symbol: str, payload: dict[str, Any], *, output_root: Path | None = None) -> tuple[Path, Path]:
-    root = output_root.resolve() if output_root is not None else (base / "output").resolve()
+    root = output_root.resolve() if output_root is not None else (base / "output_shared" / "required_data").resolve()
     raw_dir = root / "raw"
     parsed_dir = root / "parsed"
     raw_dir.mkdir(parents=True, exist_ok=True)

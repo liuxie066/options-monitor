@@ -73,7 +73,7 @@ def test_settings_inspect_and_explain_cover_llm_api_key(tmp_path) -> None:
     assert inspected["entries"]["OM_LLM_API_KEY"]["value"] == "<redacted>"
     assert inspected["entries"]["OM_LLM_API_KEY"]["secret"] is True
 
-    explained = explain_effective_setting("agent.llm.api_key", environ={}, env_file=env_file)
+    explained = explain_effective_setting("assistant.llm.api_key", environ={}, env_file=env_file)
     assert explained["env_name"] == "OM_LLM_API_KEY"
     assert explained["configured"] is True
     assert explained["value"] == "<redacted>"

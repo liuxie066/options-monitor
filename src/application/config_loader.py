@@ -189,7 +189,7 @@ def load_config(
         should_validate = True
         validation_cache: tuple[Path, str] | None = None
         if is_scheduled:
-            sd = state_dir if state_dir is not None else (base / 'output' / 'state').resolve()
+            sd = state_dir if state_dir is not None else (base / 'output_shared' / 'state').resolve()
             should_validate, cache_path, cfg_hash = _scheduled_validation_cache_state(cfg=cfg, state_dir=sd)
             if should_validate:
                 validation_cache = (cache_path, cfg_hash)

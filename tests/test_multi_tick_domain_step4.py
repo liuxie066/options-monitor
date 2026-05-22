@@ -131,14 +131,14 @@ def test_resolve_scheduler_state_path_supports_legacy_state_override() -> None:
     base = Path('/tmp/base-test')
     state = resolve_scheduler_state_path(
         base_dir=base,
-        state_dir='output/state',
+        state_dir='output_shared/state',
         state_override='custom/state.json',
     )
     assert str(state) == '/tmp/base-test/custom/state.json'
 
     state_default = resolve_scheduler_state_path(
         base_dir=base,
-        state_dir='output/state',
+        state_dir='output_shared/state',
         state_override=None,
     )
-    assert str(state_default) == '/tmp/base-test/output/state/scheduler_state.json'
+    assert str(state_default) == '/tmp/base-test/output_shared/state/scheduler_state.json'

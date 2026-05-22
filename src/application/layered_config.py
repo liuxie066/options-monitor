@@ -356,7 +356,7 @@ def build_layered_runtime_config_from_user_config(
 
     cfg = _deep_merge(system_market, common_user_config or {})
     cfg = _deep_merge(cfg, user_config)
-    for internal_key in ("defaults", "markets", "symbol_defaults"):
+    for internal_key in ("defaults", "markets", "symbol_defaults", "assistant", "inbound"):
         cfg.pop(internal_key, None)
 
     _apply_symbol_defaults(cfg, symbol_defaults=symbol_defaults)

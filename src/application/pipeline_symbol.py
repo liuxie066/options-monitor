@@ -41,9 +41,9 @@ def process_symbol(
 ) -> list[dict]:
     """Thin wrapper around the canonical symbol monitoring use case."""
     if report_dir is None:
-        report_dir = base / 'output' / 'reports'
+        report_dir = base / 'output_shared' / 'reports'
     if required_data_dir is None:
-        required_data_dir = base / 'output'
+        required_data_dir = base / 'output_shared' / 'required_data'
     return run_symbol_monitoring(
         inputs=SymbolMonitoringInputs(
             py=py,

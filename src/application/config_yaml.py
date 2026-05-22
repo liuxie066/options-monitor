@@ -10,7 +10,7 @@ from typing import Any
 import yaml
 
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.config_validator import validate_config
+from src.application.config_validator import validate_assistant_config, validate_config
 from src.application.config_defaults import (
     DEFAULT_CONFIG_REF,
     default_config,
@@ -29,10 +29,8 @@ from src.application.runtime_paths import resolve_runtime_root
 RESOLVED_KEY = "_resolved"
 
 PASSTHROUGH_KEYS = {
-    "agent",
     "alert_policy",
     "close_advice",
-    "inbound",
     "notifications",
     "option_positions",
     "outputs",
@@ -42,7 +40,8 @@ PASSTHROUGH_KEYS = {
     "templates",
     "watchdog",
 }
-ROOT_KEYS = {"accounts", "features", "markets", *PASSTHROUGH_KEYS}
+ASSISTANT_AUTHORING_KEYS = {"assistant", "inbound"}
+ROOT_KEYS = {"accounts", "features", "markets", *PASSTHROUGH_KEYS, *ASSISTANT_AUTHORING_KEYS}
 MARKET_KEYS = {"accounts", "features", "overrides", "symbols", *PASSTHROUGH_KEYS}
 WRITE_GATE_KEYS = {"write_gates", "write_permissions", "writes", "feishu_write", "feishu_writes"}
 
@@ -54,6 +53,11 @@ def default_yaml_config_path(*, repo_root: Path) -> Path:
 def default_yaml_output_config_path(*, repo_root: Path, market: str, runtime_root: str | Path | None = None) -> Path:
     runtime = resolve_runtime_root(repo_root=repo_root, runtime_root=runtime_root)
     return (runtime.runtime_root / "resolved" / f"config.{market}.json").resolve()
+
+
+def default_yaml_assistant_config_path(*, repo_root: Path, runtime_root: str | Path | None = None) -> Path:
+    runtime = resolve_runtime_root(repo_root=repo_root, runtime_root=runtime_root)
+    return (runtime.runtime_root / "resolved" / "config.assistant.json").resolve()
 
 
 def _normalize_market(value: str) -> str:
@@ -79,6 +83,11 @@ def _deep_merge(base: Any, override: Any) -> Any:
             out[key] = _deep_merge(out[key], value) if key in out else deepcopy(value)
         return out
     return deepcopy(override)
+
+
+def _system_defaults(system_cfg: dict[str, Any]) -> dict[str, Any]:
+    defaults = system_cfg.get("defaults")
+    return deepcopy(defaults) if isinstance(defaults, dict) else deepcopy(system_cfg)
 
 
 def _file_sha256(path: Path) -> str:
@@ -598,6 +607,149 @@ def build_yaml_runtime_config_file(
     }
 
 
+def _assistant_config_from_runtime_defaults(cfg: dict[str, Any]) -> dict[str, Any]:
+    assistant = cfg.get("assistant")
+    if isinstance(assistant, dict):
+        return deepcopy(assistant)
+    return {
+        "mode": "deterministic",
+        "context_window_messages": 8,
+        "default_market_scope": "us",
+        "llm": {
+            "provider": "",
+            "base_url": "",
+            "model": "",
+            "api_key_env": "OM_LLM_API_KEY",
+            "confidence_min": 0.75,
+            "timeout_seconds": 20,
+            "max_output_tokens": 512,
+        },
+    }
+
+
+def resolve_yaml_assistant_config(
+    *,
+    repo_root: Path,
+    config_path: str | Path | None = None,
+    system_config_path: str | Path | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    yaml_path = _resolve_path(config_path, default=default_yaml_config_path(repo_root=repo_root))
+    explicit_system_path = bool(system_config_path is not None and str(system_config_path).strip())
+    system_path = _resolve_path(system_config_path, default=default_system_config_path(repo_root=repo_root)) if explicit_system_path else None
+    system_doc = load_yaml_config_file(system_path) if system_path is not None else default_config()
+    system_cfg = _system_defaults(system_doc)
+    system_ref = str(system_path) if system_path is not None else DEFAULT_CONFIG_REF
+    system_sha256 = _file_sha256(system_path) if system_path is not None else default_config_sha256()
+    raw_cfg = load_yaml_config_file(yaml_path)
+
+    assistant_cfg = _assistant_config_from_runtime_defaults(system_cfg)
+    raw_assistant = raw_cfg.get("assistant")
+    if raw_assistant is not None:
+        if not isinstance(raw_assistant, dict):
+            raise AgentToolError(code="CONFIG_ERROR", message="assistant must be an object")
+        assistant_cfg = _deep_merge(assistant_cfg, raw_assistant)
+
+    inbound_cfg = deepcopy(system_cfg.get("inbound") if isinstance(system_cfg.get("inbound"), dict) else {})
+    raw_inbound = raw_cfg.get("inbound")
+    if raw_inbound is not None:
+        if not isinstance(raw_inbound, dict):
+            raise AgentToolError(code="CONFIG_ERROR", message="inbound must be an object")
+        inbound_cfg = _deep_merge(inbound_cfg, raw_inbound)
+
+    generated = {
+        "schema_version": GENERATED_SCHEMA_VERSION,
+        "generator": "options-monitor",
+        "source_format": "yaml",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "sources": [
+            {
+                "role": "system",
+                "loaded": system_path is not None,
+                "optional": False,
+                "enabled": True,
+                "path": _path_for_metadata(system_path, repo_root=repo_root) if system_path is not None else system_ref,
+                "sha256": system_sha256,
+            },
+            {
+                "role": "config_yaml",
+                "loaded": True,
+                "optional": False,
+                "enabled": True,
+                "path": _path_for_metadata(yaml_path, repo_root=repo_root),
+                "sha256": _file_sha256(yaml_path),
+            },
+        ],
+    }
+    cfg = {
+        "assistant": assistant_cfg,
+        "inbound": inbound_cfg,
+        GENERATED_KEY: generated,
+        RESOLVED_KEY: {
+            "source_format": "yaml",
+            "config_yaml_path": _path_for_metadata(yaml_path, repo_root=repo_root),
+            "config_yaml_sha256": _file_sha256(yaml_path),
+            "default_source": _path_for_metadata(system_path, repo_root=repo_root) if system_path is not None else system_ref,
+            "default_sha256": system_sha256,
+            "runtime_schema": "assistant-config-json-v1",
+        },
+    }
+    meta = {
+        "source_format": "yaml",
+        "config_yaml_path": str(yaml_path),
+        "config_yaml_sha256": _file_sha256(yaml_path),
+        "system_config_path": str(system_path) if system_path is not None else system_ref,
+        "system_config_ref": system_ref,
+        "system_config_sha256": system_sha256,
+    }
+    validate_assistant_config(deepcopy(cfg))
+    return cfg, meta
+
+
+def build_yaml_assistant_config_file(
+    *,
+    repo_root: Path,
+    config_path: str | Path | None = None,
+    system_config_path: str | Path | None = None,
+    output_config_path: str | Path | None = None,
+    runtime_root: str | Path | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    cfg, meta = resolve_yaml_assistant_config(
+        repo_root=repo_root,
+        config_path=config_path,
+        system_config_path=system_config_path,
+    )
+    output_path = _resolve_path(
+        output_config_path,
+        default=default_yaml_assistant_config_path(repo_root=repo_root, runtime_root=runtime_root),
+    )
+    rebuild_parts = [
+        "./om",
+        "config",
+        "build-assistant",
+        "--source",
+        "yaml",
+        "--config-yaml",
+        str(Path(meta["config_yaml_path"])),
+    ]
+    if str(meta.get("system_config_ref") or "") != DEFAULT_CONFIG_REF:
+        rebuild_parts.extend(["--system-config", str(Path(meta["system_config_path"]))])
+    rebuild_parts.extend(["--output", str(output_path)])
+    cfg[GENERATED_KEY]["rebuild_command"] = " ".join(shlex.quote(part) for part in rebuild_parts)
+
+    if not dry_run:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        write_json_atomic(output_path, cfg)
+
+    return {
+        "ok": True,
+        **meta,
+        "output_config_path": str(output_path),
+        "dry_run": bool(dry_run),
+        "write_applied": not bool(dry_run),
+    }
+
+
 def validate_yaml_runtime_config(
     *,
     repo_root: Path,
@@ -663,11 +815,14 @@ def explain_yaml_config_key(
 
 __all__ = [
     "RESOLVED_KEY",
+    "build_yaml_assistant_config_file",
     "build_yaml_runtime_config_file",
+    "default_yaml_assistant_config_path",
     "default_yaml_config_path",
     "default_yaml_output_config_path",
     "explain_yaml_config_key",
     "load_yaml_config_file",
+    "resolve_yaml_assistant_config",
     "resolve_yaml_runtime_config",
     "validate_yaml_runtime_config",
     "yaml_to_market_user_config",

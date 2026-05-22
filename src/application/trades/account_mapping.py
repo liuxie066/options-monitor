@@ -33,9 +33,9 @@ def resolve_trade_intake_config(
     if reconnect_sec <= 0:
         raise ValueError("trade_intake.reconnect_sec must be > 0")
 
-    state_path = Path(state_path_override or ti.get("state_path") or "output/state/auto_trade_intake_state.json")
-    audit_path = Path(audit_path_override or ti.get("audit_path") or "output/state/auto_trade_intake_audit.jsonl")
-    status_path = Path(status_path_override or ti.get("status_path") or "output/state/auto_trade_intake_status.json")
+    state_path = Path(state_path_override or ti.get("state_path") or "output_shared/state/auto_trade_intake_state.json")
+    audit_path = Path(audit_path_override or ti.get("audit_path") or "output_shared/state/auto_trade_intake_audit.jsonl")
+    status_path = Path(status_path_override or ti.get("status_path") or "output_shared/state/auto_trade_intake_status.json")
     receipt_cfg = resolve_trade_intake_receipt_config(ti.get("receipt"))
     account_mapping = resolve_futu_account_mapping(src)
     futu_lookup_account_ids = resolve_futu_lookup_account_ids(src, account_mapping=account_mapping)

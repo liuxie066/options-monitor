@@ -10,9 +10,9 @@ from typing import Any, Mapping
 DEFAULT_LOCAL_ENV_FILE = Path(".env/options-monitor.env")
 ENV_FILE_POINTER = "OM_ENV_FILE"
 DEPRECATED_ENV_SETTINGS: dict[str, str] = {
-    "OM_FEISHU_ACK_REACTION": "Use runtime config inbound.feishu_ws.ack_reaction.",
-    "OM_FEISHU_REPLY_MAX_CHARS": "Use runtime config inbound.feishu_ws.max_reply_chars.",
-    "OM_FEISHU_WS_QUEUE_SIZE": "Use runtime config inbound.feishu_ws.queue_size.",
+    "OM_FEISHU_ACK_REACTION": "Use assistant config inbound.feishu_ws.ack_reaction.",
+    "OM_FEISHU_REPLY_MAX_CHARS": "Use assistant config inbound.feishu_ws.max_reply_chars.",
+    "OM_FEISHU_WS_QUEUE_SIZE": "Use assistant config inbound.feishu_ws.queue_size.",
 }
 
 _KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -513,7 +513,7 @@ def _setting_key_to_env_name(key: str) -> str:
         "inbound.admin_open_ids": "OM_INBOUND_ADMIN_OPEN_IDS",
         "inbound.confirm_ttl_seconds": "OM_INBOUND_CONFIRM_TTL_SECONDS",
         "agent.write_tools_enabled": "OM_AGENT_ENABLE_WRITE_TOOLS",
-        "agent.llm.api_key": "OM_LLM_API_KEY",
+        "assistant.llm.api_key": "OM_LLM_API_KEY",
     }
     if normalized in aliases:
         return aliases[normalized]

@@ -67,7 +67,7 @@ Use the launcher as a local command tool. Typical pattern:
 ./om-agent run --tool query_cash_headroom --input-json '{"config_key":"us","account":"lx"}'
 ./om-agent run --tool query_cash_headroom --input-json '{"config_key":"us","account":"sy"}'
 ./om-agent run --tool candidate_rank_explain --input-json '{"mode":"put","top_n":5}'
-./om-agent run --tool strategy_replay_analyze --input-json '{"replay_path":"output/reports/strategy_replay.csv","min_sample":5}'
+./om-agent run --tool strategy_replay_analyze --input-json '{"replay_path":"output_shared/reports/strategy_replay.csv","min_sample":5}'
 ./om-agent run --tool monthly_income_report --input-json '{"config_key":"us","account":"lx","month":"2026-04"}'
 ./om-agent run --tool option_positions_read --input-json '{"config_key":"us","action":"list","account":"lx","status":"open"}'
 ./om-agent run --tool get_close_advice --input-json '{"config_key":"us"}'
@@ -113,7 +113,7 @@ Use `./om inbound handle` when a remote messaging gateway needs to send user tex
 ./om inbound handle --text '持仓 sy' --sender ou_xxx --channel feishu --message-id msg_xxx
 ```
 
-This is a controlled message entrypoint, not an `om-agent` tool and not a shell bridge. By default it performs AgentRuntime command parsing, deterministic parsing, sender allowlist checks, message idempotency, SQLite audit, and then calls an allowlisted tool through the same `execute_tool(...)` path used by `om-agent`. `--no-agent-runtime` bypasses the command facade for parser diagnostics, and runtime config may opt into LLM intent translation; both still return structured intents into the same allowlist, audit, and renderer path.
+This is a controlled message entrypoint, not an `om-agent` tool and not a shell bridge. By default it performs AgentRuntime command parsing, deterministic parsing, sender allowlist checks, message idempotency, SQLite audit, and then calls an allowlisted tool through the same `execute_tool(...)` path used by `om-agent`. `--no-agent-runtime` bypasses the command facade for parser diagnostics, and assistant config may opt into LLM intent translation; both still return structured intents into the same allowlist, audit, and renderer path.
 
 Remote channels require:
 
@@ -149,10 +149,10 @@ For the full Feishu loop, run the long-connection service:
 
 ```bash
 ./om inbound feishu-ws --check
-./om inbound feishu-ws --config-key us --lock-path /var/lib/options-monitor/locks/feishu-ws.lock
+./om inbound feishu-ws --config-key us --config-path /var/lib/options-monitor/config.us.json --lock-path /var/lib/options-monitor/locks/feishu-ws.lock
 ```
 
-The long-connection client receives Feishu events through the authenticated SDK connection, delegates text messages to inbound control, optionally adds the configured runtime `inbound.feishu_ws.ack_reaction`, and replies through the Feishu message reply API. Render it as a long-running service with `./om service render --include-feishu-ws ...`; no public callback URL or reverse proxy is required.
+The long-connection client receives Feishu events through the authenticated SDK connection, delegates text messages to inbound control, optionally adds the configured assistant `inbound.feishu_ws.ack_reaction`, and replies through the Feishu message reply API. Render it as a long-running service with `./om service render --include-feishu-ws ...`; no public callback URL or reverse proxy is required.
 
 Treat `openclaw_readiness` as OpenClaw-specific. It is safe to call outside OpenClaw, but the
 `openclaw_binary` check may return `warn` when the `openclaw` command is not installed.
@@ -190,8 +190,8 @@ Use `runtime_status` when you only want to inspect existing runtime files. It do
 notifications, or write state. It summarizes:
 
 - `output_shared/state/last_run.json`
-- `output/state/last_run.json`
-- `output/reports/symbols_notification.txt`
+- `output_shared/state/last_run.json`
+- `output_shared/reports/symbols_notification.txt`
 - `output_accounts/<account>/state/last_run.json`
 - `output_accounts/<account>/reports/symbols_notification.txt`
 - the latest `output_runs/<run_id>` pointer when available
@@ -202,8 +202,8 @@ If the production layout uses non-default paths, pass them explicitly:
 ```bash
 ./om-agent run --tool runtime_status --input-json '{
   "config_path": "/home/node/.openclaw/workspace/options-monitor-prod/config.us.json",
-  "report_dir": "/home/node/.openclaw/workspace/options-monitor-prod/output/reports",
-  "state_dir": "/home/node/.openclaw/workspace/options-monitor-prod/output/state",
+  "report_dir": "/home/node/.openclaw/workspace/options-monitor-prod/output_shared/reports",
+  "state_dir": "/home/node/.openclaw/workspace/options-monitor-prod/output_shared/state",
   "shared_state_dir": "/home/node/.openclaw/workspace/options-monitor-prod/output_shared/state",
   "accounts_root": "/home/node/.openclaw/workspace/options-monitor-prod/output_accounts",
   "runs_root": "/home/node/.openclaw/workspace/options-monitor-prod/output_runs"

@@ -103,10 +103,10 @@ om-agent run --tool <tool-name> --input-file payload.json
 om inbound handle --text '收益 sy 2026-05' --sender ou_xxx --channel feishu --message-id msg_xxx
 om inbound feishu --input-file feishu_event.json --format text
 om inbound feishu-ws --check
-om agent llm-check --config-key us
+om agent llm-check
 ```
 
-它不是 `om-agent` manifest 里的工具，也不是 shell bridge。`inbound feishu` 只解析 Feishu 事件 payload，然后进入同一条 sender allowlist、message_id 幂等、SQLite audit 和工具白名单路径。AgentRuntime command facade 默认开启；runtime config 也可选择启用 LLM intent translation，但 LLM 只能产出结构化 intent，不能执行工具或改写事实输出。`inbound feishu-ws` 是长驻 Feishu App long-connection client：通过飞书 SDK 长连接接收消息、进入 inbound control，并使用同一个 Bot 自动回复；AgentRuntime 可通过 `agent.runtime.enabled` 显式关闭，reaction、reply、queue 行为配置在 runtime config 的 `inbound.feishu_ws` 下。完整边界见 [INBOUND_CONTROL.md](INBOUND_CONTROL.md)。
+它不是 `om-agent` manifest 里的工具，也不是 shell bridge。`inbound feishu` 只解析 Feishu 事件 payload，然后进入同一条 sender allowlist、message_id 幂等、SQLite audit 和工具白名单路径。AgentRuntime command facade 默认开启；assistant config 可选择启用 LLM intent translation，但 LLM 只能产出结构化 intent，不能执行工具或改写事实输出。`inbound feishu-ws` 是长驻 Feishu App long-connection client：通过飞书 SDK 长连接接收消息、进入 inbound control，并使用同一个 Bot 自动回复；AgentRuntime 由 `assistant.mode` 控制，reaction、reply、queue 行为配置在 assistant config 的 `inbound.feishu_ws` 下。完整边界见 [INBOUND_CONTROL.md](INBOUND_CONTROL.md)。
 
 ### Tick 入口关系
 
@@ -235,7 +235,7 @@ om service drift --runtime-root /var/lib/options-monitor
 om-agent run --tool runtime_status --input-json '{"profile_path":"/var/lib/options-monitor/service.profile.json"}'
 ```
 
-`service render` 只生成 service/timer/plist/profile 文件和安装命令，不会自动安装或启动。systemd 的 `--env-file` 会写入 `EnvironmentFile=...`；launchd 的 `--env-file` 会写入 `EnvironmentVariables.OM_ENV_FILE=...`，两者都用于加载本机 Feishu 凭证环境变量。systemd unit 始终写入 `OM_RUNTIME_ROOT`；只有显式传 `--deploy-user` 或设置 `OM_DEPLOY_USER` / `DEPLOY_USER` 时，才会写入 `User=<deploy_user>` 和默认 `HOME=/home/<deploy_user>`。HOME 不在默认位置时用 `--deploy-home` 覆盖。启用 `--include-feishu-ws` 时会额外生成 `options-monitor-feishu-ws.service` / `com.options-monitor.feishu-ws.plist`，通过飞书长连接接收消息，不需要公网 HTTPS callback、反向代理或 tunnel，并会使用 runtime locks 目录下的 `feishu-ws.lock` 防止多实例抢同一个 App。启用 `--include-auto-upgrade` 时，`--repo-root` 会保留传入的 symlink 路径，默认 config path 会使用 runtime root 下的 `config.us.json` / `config.hk.json`，避免生产配置随 release 目录漂移。传入 `--config-yaml` 后，profile 会记录 YAML authoring source；后续 `update apply` 会用 `config build --source yaml --config-yaml <path>` 重建 runtime config，不再要求 legacy overlay。`service preflight` 是只读部署前检查；`service repair-output` 默认 dry-run，只有带 `--confirm` 或 `--yes` 才会迁移真实目录并创建 `output` symlink。
+`service render` 只生成 service/timer/plist/profile 文件和安装命令，不会自动安装或启动。systemd 的 `--env-file` 会写入 `EnvironmentFile=...`；launchd 的 `--env-file` 会写入 `EnvironmentVariables.OM_ENV_FILE=...`，两者都用于加载本机 Feishu 凭证环境变量。systemd unit 始终写入 `OM_RUNTIME_ROOT`；只有显式传 `--deploy-user` 或设置 `OM_DEPLOY_USER` / `DEPLOY_USER` 时，才会写入 `User=<deploy_user>` 和默认 `HOME=/home/<deploy_user>`。HOME 不在默认位置时用 `--deploy-home` 覆盖。启用 `--include-feishu-ws` 时会额外生成 `options-monitor-feishu-ws.service` / `com.options-monitor.feishu-ws.plist`，通过飞书长连接接收消息，不需要公网 HTTPS callback、反向代理或 tunnel，并会使用 runtime locks 目录下的 `feishu-ws.lock` 防止多实例抢同一个 App。传入 `--config-yaml` 后，Feishu WS service 会同时拿到 runtime config 的 `--config-path` 和 `$RUNTIME/resolved/config.assistant.json` 的 `--assistant-config`。启用 `--include-auto-upgrade` 时，`--repo-root` 会保留传入的 symlink 路径，默认 config path 会使用 runtime root 下的 `config.us.json` / `config.hk.json`，避免生产配置随 release 目录漂移。传入 `--config-yaml` 后，profile 会记录 YAML authoring source；后续 `update apply` 会用 `config build --source yaml --config-yaml <path>` 重建 runtime config，并用 `config build-assistant --source yaml --config-yaml <path>` 重建 assistant config，不再要求 legacy overlay。`service preflight` 是只读部署前检查；`service repair-output` 默认 dry-run，只有带 `--confirm` 或 `--yes` 才会迁移真实目录并创建 `output` symlink。
 
 `service drift` 会用当前 release 的 `render_service_bundle()` 重新生成期望 service/timer，再和 `$RUNTIME/service.profile.json` 以及 systemd unit 文件对比。默认只读；带 `--confirm` 或 `--yes` 时只写入缺失 unit/profile、执行 `systemctl daemon-reload`，并 `enable --now` 缺失 timer，不会自动启用或重启新增长期 service。`runtime_status` 同样会暴露 service drift 摘要；缺失 `options-monitor-projection-verify.timer` 这类维护 timer 会作为 warning/error 返回。
 
@@ -371,13 +371,13 @@ om-agent run --tool scan_opportunities --input-json '{"config_key":"us","symbols
 
 ```bash
 om-agent run --tool candidate_rank_explain --input-json '{"mode":"put","top_n":5}'
-om-agent run --tool candidate_rank_explain --input-json '{"candidate_path":"output/reports/sell_call_candidates.csv","mode":"call","top_n":5}'
+om-agent run --tool candidate_rank_explain --input-json '{"candidate_path":"output_shared/reports/sell_call_candidates.csv","mode":"call","top_n":5}'
 om-agent run --tool candidate_rank_explain --input-json '{"mode":"put","score_weights":{"liquidity":0.02},"compare_baseline":true}'
 ```
 
 注意：
 - 该工具只读本地 CSV，不重新扫描、不发通知、不写 Feishu、不写报告。
-- 默认先找 `output/reports`，再找 `output/agent_plugin/reports`；也可传 `report_dir`、`output_dir` 或 `candidate_path`。
+- 默认先找 `output_shared/reports`，再找 `output_shared/agent_tools/reports`；也可传 `report_dir`、`output_dir` 或 `candidate_path`。
 - `score_weights` 只影响本次解释输出，不修改配置，也不改变生产排序默认值。
 
 ---
@@ -392,8 +392,8 @@ om-agent run --tool candidate_rank_explain --input-json '{"mode":"put","score_we
 示例：
 
 ```bash
-om-agent run --tool strategy_replay_analyze --input-json '{"replay_path":"output/reports/strategy_replay.csv","min_sample":5}'
-om strategy-replay analyze --replay-path output/reports/strategy_replay.csv --min-sample 5
+om-agent run --tool strategy_replay_analyze --input-json '{"replay_path":"output_shared/reports/strategy_replay.csv","min_sample":5}'
+om strategy-replay analyze --replay-path output_shared/reports/strategy_replay.csv --min-sample 5
 ```
 
 注意：
@@ -561,7 +561,7 @@ om-agent run --tool manage_symbols --input-json '{"config_key":"us","action":"li
 示例：
 
 ```bash
-om-agent run --tool preview_notification --input-json '{"alerts_path":"output/reports/symbols_alerts.txt","changes_path":"output/reports/symbols_changes.txt","account_label":"lx"}'
+om-agent run --tool preview_notification --input-json '{"alerts_path":"output_shared/reports/symbols_alerts.txt","changes_path":"output_shared/reports/symbols_changes.txt","account_label":"lx"}'
 ```
 
 ---

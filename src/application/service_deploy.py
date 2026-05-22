@@ -272,6 +272,7 @@ def build_service_profile(
     markets: list[str],
     service_names: list[str],
     config_paths: dict[str, Path],
+    assistant_config_path: Path | None = None,
     config_authoring: dict[str, Any] | None = None,
     env_file: Path | None = None,
     deploy_user: str | None = None,
@@ -292,8 +293,8 @@ def build_service_profile(
         "accounts": accounts,
         "markets": markets,
         "paths": {
-            "report_dir": str(runtime_root / "output" / "reports"),
-            "state_dir": str(runtime_root / "output" / "state"),
+            "report_dir": str(runtime_root / "output_shared" / "reports"),
+            "state_dir": str(runtime_root / "output_shared" / "state"),
             "shared_state_dir": str(runtime_root / "output_shared" / "state"),
             "accounts_root": str(runtime_root / "output_accounts"),
             "runs_root": str(runtime_root / "output_runs"),
@@ -301,6 +302,8 @@ def build_service_profile(
         "config_paths": {key: str(value) for key, value in config_paths.items()},
         "services": [{"name": name} for name in service_names],
     }
+    if assistant_config_path is not None:
+        profile["assistant_config_path"] = str(assistant_config_path)
     if config_authoring is not None:
         profile["config_authoring"] = dict(config_authoring)
     if env_file is not None:
@@ -400,6 +403,7 @@ def render_service_bundle(
     log_root = runtime / "logs"
     runtime_data_config = runtime / "portfolio.runtime.json"
     inbound_audit_db = runtime / "output_shared" / "state" / "inbound_control.sqlite3"
+    assistant_config_path = runtime / "resolved" / "config.assistant.json" if config_yaml_path is not None else None
     feishu_ws_config_key_value = str(feishu_ws_config_key or "us").strip().lower() or "us"
     if feishu_ws_config_key_value not in {"us", "hk"}:
         raise ValueError("feishu_ws_config_key must be us or hk")
@@ -656,11 +660,15 @@ def render_service_bundle(
                 feishu_ws_config_key_value,
                 "--config-path",
                 str(config_by_market.get(feishu_ws_config_key_value) or config_by_market[market_values[0]]),
+            ]
+            if assistant_config_path is not None:
+                ws_args.extend(["--assistant-config", str(assistant_config_path)])
+            ws_args.extend([
                 "--audit-db",
                 str(inbound_audit_db),
                 "--lock-path",
                 str(lock_root / "feishu-ws.lock"),
-            ]
+            ])
             add(
                 f"systemd/{ws_service}",
                 _systemd_unit(
@@ -864,11 +872,15 @@ def render_service_bundle(
                 feishu_ws_config_key_value,
                 "--config-path",
                 str(config_by_market.get(feishu_ws_config_key_value) or config_by_market[market_values[0]]),
+            ]
+            if assistant_config_path is not None:
+                ws_args.extend(["--assistant-config", str(assistant_config_path)])
+            ws_args.extend([
                 "--audit-db",
                 str(inbound_audit_db),
                 "--lock-path",
                 str(lock_root / "feishu-ws.lock"),
-            ]
+            ])
             add(
                 f"launchd/{ws_label}.plist",
                 _launchd_plist(
@@ -893,6 +905,7 @@ def render_service_bundle(
         markets=market_values,
         service_names=service_names,
         config_paths=config_by_market,
+        assistant_config_path=assistant_config_path,
         config_authoring=config_authoring,
         env_file=env_file_path,
         deploy_user=systemd_user,
@@ -901,6 +914,7 @@ def render_service_bundle(
         feishu_ws={
             "enabled": True,
             "config_key": feishu_ws_config_key_value,
+            **({"assistant_config_path": str(assistant_config_path)} if assistant_config_path is not None else {}),
             "audit_db": str(inbound_audit_db),
             "lock_path": str(lock_root / "feishu-ws.lock"),
         } if include_feishu_ws else None,

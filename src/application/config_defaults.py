@@ -116,13 +116,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "opend_alert_after_consecutive_failures": 3,
             "opend_alert_send_recovery_notice": True,
         },
-        "agent": {
-            "runtime": {
-                "enabled": True,
-                "context_window_messages": 8,
-            },
+        "assistant": {
+            "mode": "deterministic",
+            "context_window_messages": 8,
+            "default_market_scope": "us",
             "llm": {
-                "enabled": False,
                 "provider": "",
                 "base_url": "",
                 "model": "",

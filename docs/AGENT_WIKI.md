@@ -150,7 +150,7 @@ Important runtime paths:
 | Current pointers | `output_shared/state/current/` |
 | Per-account output | `output_accounts/<account>/` |
 | Run snapshots | `output_runs/<run_id>/` |
-| Default reports | `output/reports/` |
+| Default reports | `output_shared/reports/` |
 | OpenD cache | `cache/opend_option_chain/`, `cache/opend_option_expirations/` |
 | Audit logs | `audit/run_logs/` |
 

@@ -692,7 +692,29 @@ def _feishu_ws_check_command(*, profile: dict[str, Any], repo_root: Path) -> lis
         config_path = str(config_paths.get(key) or "").strip()
         if config_path:
             command.extend(["--config-path", config_path])
+    assistant_config_path = _assistant_config_path_from_profile(profile=profile)
+    if assistant_config_path:
+        command.extend(["--assistant-config", assistant_config_path])
     return command
+
+
+def _assistant_config_path_from_profile(*, profile: dict[str, Any], runtime_root: Path | None = None) -> str:
+    raw = str(profile.get("assistant_config_path") or "").strip()
+    if raw:
+        return raw
+    feishu_ws = profile.get("feishu_ws")
+    if isinstance(feishu_ws, dict):
+        raw = str(feishu_ws.get("assistant_config_path") or "").strip()
+        if raw:
+            return raw
+    authoring = profile.get("config_authoring")
+    if isinstance(authoring, dict) and str(authoring.get("source") or "").strip().lower() == "yaml":
+        root = runtime_root
+        if root is None and str(profile.get("runtime_root") or "").strip():
+            root = Path(str(profile["runtime_root"])).expanduser()
+        if root is not None:
+            return str(root / "resolved" / "config.assistant.json")
+    return ""
 
 
 def _child_env_from_profile(profile: dict[str, Any]) -> dict[str, str] | None:
@@ -777,6 +799,24 @@ def _profile_runtime_config_targets(profile: dict[str, Any]) -> list[dict[str, s
                 target["config_yaml"] = authoring_yaml
             targets.append(target)
     return targets
+
+
+def _profile_assistant_config_target(profile: dict[str, Any], *, runtime_root: Path) -> dict[str, str] | None:
+    raw_authoring = profile.get("config_authoring")
+    authoring = raw_authoring if isinstance(raw_authoring, dict) else {}
+    if str(authoring.get("source") or "").strip().lower() != "yaml":
+        return None
+    config_yaml = str(authoring.get("config_yaml") or "").strip()
+    if not config_yaml:
+        return None
+    assistant_config_path = _assistant_config_path_from_profile(profile=profile, runtime_root=runtime_root)
+    if not assistant_config_path:
+        assistant_config_path = str(runtime_root / "resolved" / "config.assistant.json")
+    return {
+        "source": "yaml",
+        "config_yaml": config_yaml,
+        "config_path": assistant_config_path,
+    }
 
 
 def _user_overlay_names(markets: list[str]) -> list[str]:
@@ -1085,6 +1125,52 @@ def _rebuild_and_validate_runtime_configs(
     return rebuilt
 
 
+def _rebuild_assistant_config(
+    *,
+    target: dict[str, str] | None,
+    cwd: Path,
+    run_cmd: Callable[..., Any],
+    operations: list[dict[str, Any]],
+    phase: str,
+) -> dict[str, str] | None:
+    if target is None:
+        return None
+    config_yaml = str(target.get("config_yaml") or "").strip()
+    config_path = str(target.get("config_path") or "").strip()
+    if not config_yaml or not config_path:
+        raise RuntimeConfigPrepareError(
+            "missing YAML authoring source for assistant config target",
+            remediation=["rerender_service_profile: ./om service render ... --config-yaml <path>"],
+        )
+    try:
+        _run_required(
+            [
+                "./om",
+                "config",
+                "build-assistant",
+                "--source",
+                "yaml",
+                "--config-yaml",
+                config_yaml,
+                "--output",
+                config_path,
+            ],
+            cwd=cwd,
+            run_cmd=run_cmd,
+            operations=operations,
+            timeout=120,
+        )
+    except RuntimeError as exc:
+        raise RuntimeConfigPrepareError(
+            f"failed to {phase} rebuild assistant config: {config_path}",
+            remediation=[
+                f"manual_rebuild: cd {cwd} && ./om config build-assistant --source yaml --config-yaml {config_yaml} --output {config_path}",
+                f"inspect_last_operation: {exc}",
+            ],
+        ) from exc
+    return {"config_path": config_path, "source": "yaml", "phase": phase}
+
+
 def _prepare_runtime_configs_for_release(
     *,
     previous_dir: Path,
@@ -1096,7 +1182,8 @@ def _prepare_runtime_configs_for_release(
 ) -> dict[str, Any]:
     profile = _load_service_profile(runtime_root)
     targets = _profile_runtime_config_targets(profile)
-    if not targets:
+    assistant_target = _profile_assistant_config_target(profile, runtime_root=runtime_root)
+    if not targets and assistant_target is None:
         return {"status": "skipped", "reason": "service profile has no runtime config targets"}
 
     legacy_targets = [item for item in targets if str(item.get("source") or "legacy").strip().lower() != "yaml"]
@@ -1128,13 +1215,22 @@ def _prepare_runtime_configs_for_release(
         operations=operations,
         phase="pre_switch",
     )
+    assistant_rebuilt = _rebuild_assistant_config(
+        target=assistant_target,
+        cwd=target_dir,
+        run_cmd=run_cmd,
+        operations=operations,
+        phase="pre_switch",
+    )
 
     return {
         "status": "prepared",
         "targets": targets,
+        "assistant_target": assistant_target,
         "overlays": overlays,
         "preserved_hotfixes": preserved_hotfixes,
         "rebuilt": rebuilt,
+        "assistant_rebuilt": assistant_rebuilt,
     }
 
 

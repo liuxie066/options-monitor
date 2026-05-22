@@ -89,7 +89,7 @@ def mark_accounts_notified(
     mark_scheduler_accounts(
         config=config,
         state=state,
-        state_dir=state_dir or "output/state",
+        state_dir=state_dir or "output_shared/state",
         schedule_key=str(schedule_key or "schedule"),
         accounts=[str(a).strip() for a in accounts if str(a).strip()],
         mark_notified=True,

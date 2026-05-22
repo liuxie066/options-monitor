@@ -92,7 +92,7 @@ def _default_report_dirs(
     if payload.get("output_dir"):
         return [(resolve_output_root(payload.get("output_dir")) / "reports").resolve()]
     candidates = [
-        (base / "output" / "reports").resolve(),
+        (base / "output_shared" / "reports").resolve(),
         (resolve_output_root(None) / "reports").resolve(),
     ]
     out: list[Path] = []

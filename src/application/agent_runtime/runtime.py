@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Any, Callable
 
+from src.application.agent_runtime.agent_loop import run_read_only_agent_loop
 from src.application.agent_runtime.command_parser import parse_agent_command
 from src.application.agent_runtime.conversation_context import build_conversation_context, context_trace
 from src.application.agent_runtime.llm_translator import LlmTranslationResult, skipped_llm_trace, translate_inbound_intent
@@ -57,26 +58,37 @@ def handle_agent_message(
         except AgentToolError as err:
             if err.code != "NEEDS_CLARIFICATION":
                 raise
+            llm_mode = runtime_settings.mode in {"llm_router", "agent_loop"}
             conversation_context = (
                 build_conversation_context(
                     request,
                     audit_store=store,
                     max_messages=runtime_settings.context_window_messages,
                 )
-                if runtime_settings.llm.enabled or translate_intent_fn is not None
+                if llm_mode or translate_intent_fn is not None
                 else None
             )
-            llm_result = _translate_intent(
-                text,
-                settings=runtime_settings,
-                translate_intent_fn=translate_intent_fn,
-                conversation_context=conversation_context,
-            )
-            llm_trace = dict(llm_result.trace)
+            if runtime_settings.mode == "agent_loop":
+                loop_result = run_read_only_agent_loop(
+                    text,
+                    settings=runtime_settings,
+                    conversation_context=conversation_context,
+                    translate_intent_fn=translate_intent_fn,
+                )
+                llm_result = loop_result.translation
+                llm_trace = dict(loop_result.trace)
+            else:
+                llm_result = _translate_intent(
+                    text,
+                    settings=runtime_settings,
+                    translate_intent_fn=translate_intent_fn,
+                    conversation_context=conversation_context,
+                )
+                llm_trace = dict(llm_result.trace)
             if "context" not in llm_trace:
                 llm_trace["context"] = context_trace(conversation_context)
             if llm_result.intent is not None:
-                route = "llm"
+                route = "agent_loop" if runtime_settings.mode == "agent_loop" else "llm"
                 return llm_result.intent
             if llm_result.error is not None:
                 raise llm_result.error
@@ -122,9 +134,10 @@ def _with_agent_runtime_meta(
     context_meta = llm_meta.pop("context", {"provided": False})
     meta["agent_runtime"] = {
         "enabled": bool(settings.enabled),
+        "mode": settings.mode,
         "route": route,
         "llm": llm_meta,
         "context": dict(context_meta) if isinstance(context_meta, dict) else {"provided": False},
-        "langgraph": "disabled",
+        "langgraph": "optional" if settings.mode == "agent_loop" else "disabled",
     }
     return {**response, "meta": meta}

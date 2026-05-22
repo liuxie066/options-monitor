@@ -34,7 +34,7 @@ cd /home/node/.openclaw/workspace/options-monitor-prod
 ```
 
 - 运行入口配置：`config.us.json`（US）/ `config.hk.json`（HK）
-- 产出：`<report_dir>/symbols_*` 与每标的 `*_sell_put_* / *_sell_call_*`（默认 `report_dir=output/reports`）
+- 产出：`<report_dir>/symbols_*` 与每标的 `*_sell_put_* / *_sell_call_*`（默认 `report_dir=output_shared/reports`）
 - 服务化部署时，所有运行产物应位于 `runtime_root`，而不是 repo 根目录；详见 `DEPLOY.md`
 
 服务化环境的只读巡检：
@@ -132,7 +132,7 @@ openclaw cron runs
 2. 查看上次运行结果（最重要）：
 
 ```bash
-cat /home/node/.openclaw/workspace/options-monitor-prod/output/state/last_run.json
+cat /home/node/.openclaw/workspace/options-monitor-prod/output_shared/state/last_run.json
 ```
 
 3. 查看最新通知内容：

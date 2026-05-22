@@ -256,7 +256,7 @@ def _actual_source_paths(payload: dict[str, Any], *, runtime_data: dict[str, Any
     report_dir = _resolve_under_base(
         payload.get("strategy_report_dir") or payload.get("report_dir") or profile_paths.get("report_dir") or paths.get("report_dir"),
         base=base,
-        default=runtime_root / "output" / "reports",
+        default=runtime_root / "output_shared" / "reports",
     )
     shared_state_dir = _resolve_under_base(
         payload.get("shared_state_dir") or profile_paths.get("shared_state_dir") or paths.get("shared_state_dir"),

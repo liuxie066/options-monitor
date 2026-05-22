@@ -646,7 +646,7 @@ def test_get_portfolio_context_rejects_stale_external_holdings_cache_for_wrong_a
     monkeypatch.setattr(pipeline_context, "load_cached_json", _load_cached)
     monkeypatch.setattr(pcs, "load_holdings_portfolio_shared_context", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("should reuse shared cache")))  # type: ignore[assignment]
 
-    out_root = tmp_path / "output" / "agent_plugin"
+    out_root = tmp_path / "output_shared" / "agent_tools"
     out = run_tool(
         "get_portfolio_context",
         {
@@ -749,7 +749,7 @@ def test_monthly_income_report_returns_agent_summary(monkeypatch, tmp_path: Path
     )
 
     assert out["ok"] is True
-    assert Path(rate_calls[0]["cache_path"]) == tmp_path / "output" / "state" / "rate_cache.json"
+    assert Path(rate_calls[0]["cache_path"]) == tmp_path / "output_shared" / "state" / "rate_cache.json"
     assert out["warnings"] == []
     assert out["data"]["row_count"] == 1
     assert out["data"]["premium_row_count"] == 1
@@ -1049,8 +1049,8 @@ def test_runtime_status_summarizes_openclaw_runtime_files(tmp_path: Path) -> Non
     }
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    state_dir = tmp_path / "output" / "state"
-    report_dir = tmp_path / "output" / "reports"
+    state_dir = tmp_path / "output_shared" / "state"
+    report_dir = tmp_path / "output_shared" / "reports"
     shared_state_dir = tmp_path / "output_shared" / "state"
     accounts_root = tmp_path / "output_accounts"
     runs_root = tmp_path / "output_runs"
@@ -1058,7 +1058,6 @@ def test_runtime_status_summarizes_openclaw_runtime_files(tmp_path: Path) -> Non
         path.mkdir(parents=True, exist_ok=True)
 
     (shared_state_dir / "last_run.json").write_text(json.dumps({"status": "ok", "run_id": "run-1"}), encoding="utf-8")
-    (state_dir / "last_run.json").write_text(json.dumps({"status": "legacy_ok"}), encoding="utf-8")
     (state_dir / "auto_trade_intake_status.json").write_text(
         json.dumps(
             {
@@ -1261,8 +1260,8 @@ def _runtime_status_upgrade_fixture(tmp_path: Path, *, target_version: str = "1.
     cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
     (tmp_path / "output_shared" / "state").mkdir(parents=True)
     (tmp_path / "output_shared" / "state" / "last_run.json").write_text(json.dumps({"status": "ok"}), encoding="utf-8")
-    (tmp_path / "output" / "reports").mkdir(parents=True)
-    (tmp_path / "output" / "reports" / "symbols_notification.txt").write_text("ok\n", encoding="utf-8")
+    (tmp_path / "output_shared" / "reports").mkdir(parents=True)
+    (tmp_path / "output_shared" / "reports" / "symbols_notification.txt").write_text("ok\n", encoding="utf-8")
     (tmp_path / "service.profile.json").write_text(
         json.dumps(
             {
@@ -1335,7 +1334,7 @@ def test_runtime_status_auto_loads_runtime_service_profile_paths(tmp_path: Path)
     cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
 
     shared_state_dir = runtime_root / "output_shared" / "state"
-    report_dir = runtime_root / "output" / "reports"
+    report_dir = runtime_root / "output_shared" / "reports"
     shared_state_dir.mkdir(parents=True)
     report_dir.mkdir(parents=True)
     (shared_state_dir / "last_run.json").write_text(json.dumps({"status": "ok"}), encoding="utf-8")
@@ -1348,7 +1347,7 @@ def test_runtime_status_auto_loads_runtime_service_profile_paths(tmp_path: Path)
                 "accounts": ["user1"],
                 "paths": {
                     "report_dir": str(report_dir),
-                    "state_dir": str(runtime_root / "output" / "state"),
+                    "state_dir": str(runtime_root / "output_shared" / "state"),
                     "shared_state_dir": str(shared_state_dir),
                     "accounts_root": str(runtime_root / "output_accounts"),
                     "runs_root": str(runtime_root / "output_runs"),
@@ -1376,8 +1375,8 @@ def test_runtime_status_auto_loads_runtime_service_profile_paths(tmp_path: Path)
     assert str(data["shared"]["notification"]["path"]).endswith("symbols_notification.txt")
     assert data["openclaw_profile"]["loaded"] is True
     assert data["service_profile"]["loaded"] is True
-    assert "No last_run.json found under output_shared/state or output/state." not in warnings
-    assert "No symbols_notification.txt found under output/reports or output_accounts/<account>/reports." not in warnings
+    assert "No last_run.json found under output_shared/state or output_shared/state." not in warnings
+    assert "No symbols_notification.txt found under output_shared/reports or output_accounts/<account>/reports." not in warnings
 
 
 def test_runtime_status_marks_remediated_upgrade_failure(monkeypatch, tmp_path: Path) -> None:
@@ -1477,8 +1476,8 @@ def test_runtime_status_can_inspect_scanned_run_after_skipped_latest(tmp_path: P
     cfg["accounts"] = ["user1", "user2"]
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    state_dir = tmp_path / "output" / "state"
-    report_dir = tmp_path / "output" / "reports"
+    state_dir = tmp_path / "output_shared" / "state"
+    report_dir = tmp_path / "output_shared" / "reports"
     shared_state_dir = tmp_path / "output_shared" / "state"
     accounts_root = tmp_path / "output_accounts"
     runs_root = tmp_path / "output_runs"
@@ -1581,7 +1580,7 @@ def test_runtime_status_latest_scanned_run_respects_config_market(tmp_path: Path
     cfg = _minimal_cfg()
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    report_dir = tmp_path / "output" / "reports"
+    report_dir = tmp_path / "output_shared" / "reports"
     shared_state_dir = tmp_path / "output_shared" / "state"
     runs_root = tmp_path / "output_runs"
     for path in (report_dir, shared_state_dir, runs_root):
@@ -1670,7 +1669,7 @@ def test_runtime_status_does_not_warn_missing_notification_for_expected_skip(tmp
             "config_path": str(cfg_path),
             "shared_state_dir": str(shared_state_dir),
             "runs_root": str(runs_root),
-            "report_dir": str(tmp_path / "output" / "reports"),
+            "report_dir": str(tmp_path / "output_shared" / "reports"),
             "accounts_root": str(tmp_path / "output_accounts"),
         },
     )
@@ -1824,7 +1823,7 @@ def test_openclaw_readiness_combines_status_and_healthcheck(monkeypatch, tmp_pat
     )
 
     shared_state_dir = tmp_path / "output_shared" / "state"
-    report_dir = tmp_path / "output" / "reports"
+    report_dir = tmp_path / "output_shared" / "reports"
     accounts_root = tmp_path / "output_accounts"
     for path in (shared_state_dir, report_dir, accounts_root / "user1" / "reports"):
         path.mkdir(parents=True, exist_ok=True)
@@ -1971,7 +1970,7 @@ def test_close_advice_reads_cached_context_and_required_data(monkeypatch, tmp_pa
     cfg["close_advice"] = {"enabled": True}
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    out_root = tmp_path / "output" / "agent_plugin"
+    out_root = tmp_path / "output_shared" / "agent_tools"
     state_dir = out_root / "state"
     required_dir = out_root / "required_data"
     state_dir.mkdir(parents=True)
@@ -2056,7 +2055,7 @@ def test_close_advice_requires_cached_inputs(tmp_path: Path) -> None:
     cfg["close_advice"] = {"enabled": True}
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    out = run_tool("close_advice", {"config_path": str(cfg_path), "output_dir": str(tmp_path / "output" / "agent_plugin")})
+    out = run_tool("close_advice", {"config_path": str(cfg_path), "output_dir": str(tmp_path / "output_shared" / "agent_tools")})
 
     assert out["ok"] is False
     assert out["error"]["code"] == "DEPENDENCY_MISSING"
@@ -2113,7 +2112,7 @@ def test_prepare_close_advice_inputs_builds_context_and_required_data(monkeypatc
         tools.load_option_positions_context = _fake_load_option_positions_context  # type: ignore[assignment]
         tools.fetch_symbol_opend = _fake_fetch_symbol_opend  # type: ignore[assignment]
         tools.save_required_data_opend = _fake_save_required_data_opend  # type: ignore[assignment]
-        out = run_tool("prepare_close_advice_inputs", {"config_path": str(cfg_path), "output_dir": str(tmp_path / "output" / "agent_plugin")})
+        out = run_tool("prepare_close_advice_inputs", {"config_path": str(cfg_path), "output_dir": str(tmp_path / "output_shared" / "agent_tools")})
     finally:
         tools.load_option_positions_context = old_load  # type: ignore[assignment]
         tools.fetch_symbol_opend = old_opend  # type: ignore[assignment]
@@ -2143,7 +2142,7 @@ def test_prepare_close_advice_inputs_reuses_cached_required_data_when_coverage_i
     cfg["close_advice"] = {"enabled": True}
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    required_root = (tmp_path / "output" / "agent_plugin" / "required_data" / "parsed")
+    required_root = (tmp_path / "output_shared" / "agent_tools" / "required_data" / "parsed")
     required_root.mkdir(parents=True, exist_ok=True)
     (required_root / "NVDA_required_data.csv").write_text(
         "symbol,option_type,expiration,strike\n"
@@ -2175,7 +2174,7 @@ def test_prepare_close_advice_inputs_reuses_cached_required_data_when_coverage_i
         tools.save_required_data_opend = _fail_save_required_data_opend  # type: ignore[assignment]
         out = run_tool(
             "prepare_close_advice_inputs",
-            {"config_path": str(cfg_path), "output_dir": str(tmp_path / "output" / "agent_plugin")},
+            {"config_path": str(cfg_path), "output_dir": str(tmp_path / "output_shared" / "agent_tools")},
         )
     finally:
         tools.load_option_positions_context = old_load  # type: ignore[assignment]
@@ -2236,7 +2235,7 @@ def test_prepare_close_advice_inputs_reports_missing_required_expirations(monkey
         tools.load_option_positions_context = _fake_load_option_positions_context  # type: ignore[assignment]
         tools.fetch_symbol_opend = _fake_fetch_symbol_opend  # type: ignore[assignment]
         tools.save_required_data_opend = _fake_save_required_data_opend  # type: ignore[assignment]
-        out = run_tool("prepare_close_advice_inputs", {"config_path": str(cfg_path), "output_dir": str(tmp_path / "output" / "agent_plugin")})
+        out = run_tool("prepare_close_advice_inputs", {"config_path": str(cfg_path), "output_dir": str(tmp_path / "output_shared" / "agent_tools")})
     finally:
         tools.load_option_positions_context = old_load  # type: ignore[assignment]
         tools.fetch_symbol_opend = old_opend  # type: ignore[assignment]
@@ -2298,7 +2297,7 @@ def test_prepare_close_advice_inputs_reports_expiration_near_miss_without_silent
             "prepare_close_advice_inputs",
             {
                 "config_path": str(cfg_path),
-                "output_dir": str(tmp_path / "output" / "agent_plugin"),
+                "output_dir": str(tmp_path / "output_shared" / "agent_tools"),
                 "force_required_data_refresh": True,
             },
         )
@@ -2372,7 +2371,7 @@ def test_prepare_close_advice_inputs_normalizes_timestamp_expirations(monkeypatc
         tools.load_option_positions_context = _fake_load_option_positions_context  # type: ignore[assignment]
         tools.fetch_symbol_opend = _fake_fetch_symbol_opend  # type: ignore[assignment]
         tools.save_required_data_opend = _fake_save_required_data_opend  # type: ignore[assignment]
-        out = run_tool("prepare_close_advice_inputs", {"config_path": str(cfg_path), "output_dir": str(tmp_path / "output" / "agent_plugin")})
+        out = run_tool("prepare_close_advice_inputs", {"config_path": str(cfg_path), "output_dir": str(tmp_path / "output_shared" / "agent_tools")})
     finally:
         tools.load_option_positions_context = old_load  # type: ignore[assignment]
         tools.fetch_symbol_opend = old_opend  # type: ignore[assignment]
@@ -2431,7 +2430,7 @@ def test_prepare_close_advice_inputs_uses_expiration_ymd_for_position_requiremen
         tools.load_option_positions_context = _fake_load_option_positions_context  # type: ignore[assignment]
         tools.fetch_symbol_opend = _fake_fetch_symbol_opend  # type: ignore[assignment]
         tools.save_required_data_opend = _fake_save_required_data_opend  # type: ignore[assignment]
-        out = run_tool("prepare_close_advice_inputs", {"config_path": str(cfg_path), "output_dir": str(tmp_path / "output" / "agent_plugin")})
+        out = run_tool("prepare_close_advice_inputs", {"config_path": str(cfg_path), "output_dir": str(tmp_path / "output_shared" / "agent_tools")})
     finally:
         tools.load_option_positions_context = old_load  # type: ignore[assignment]
         tools.fetch_symbol_opend = old_opend  # type: ignore[assignment]
@@ -2545,7 +2544,7 @@ def test_scan_opportunities_returns_summary_fields(monkeypatch, tmp_path: Path) 
         monkeypatch.setattr(report_builders, "build_symbols_summary", lambda *args, **kwargs: None)
         monkeypatch.setattr(report_builders, "build_symbols_digest", lambda *args, **kwargs: None)
 
-        out = run_tool("scan_opportunities", {"config_path": str(cfg_path), "output_dir": str(tmp_path / "output" / "agent_plugin")})
+        out = run_tool("scan_opportunities", {"config_path": str(cfg_path), "output_dir": str(tmp_path / "output_shared" / "agent_tools")})
     finally:
         if old_load_config is not None:
             tools.__dict__["load_config"] = old_load_config

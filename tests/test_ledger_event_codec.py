@@ -22,7 +22,7 @@ def _contract_key() -> ContractKey:
     )
 
 
-def test_event_codec_encodes_legacy_trade_event_as_canonical_payload() -> None:
+def test_event_codec_rejects_legacy_trade_event_payloads() -> None:
     legacy = LegacyTradeEvent(
         event_id="deal-open-1",
         source_type="broker_trade_event",
@@ -45,15 +45,12 @@ def test_event_codec_encodes_legacy_trade_event_as_canonical_payload() -> None:
         raw_payload={"deal_id": "deal-open-1"},
     )
 
-    encoded = encode_trade_event_for_storage(legacy)
-
-    assert encoded.event_id == "deal-open-1"
-    assert encoded.event_time_ms == 1000
-    assert encoded.payload["event_type"] == "open"
-    assert encoded.payload["event_time_ms"] == 1000
-    assert encoded.payload["contract_key"]["underlying_symbol"] == "AAPL"
-    assert "position_effect" not in encoded.payload
-    assert "trade_time_ms" not in encoded.payload
+    try:
+        encode_trade_event_for_storage(legacy.to_legacy_dict())
+    except ValueError as exc:
+        assert "non_canonical_trade_event_schema" in str(exc)
+    else:
+        raise AssertionError("expected legacy payload rejection")
 
 
 def test_sqlite_repo_stores_canonical_event_json_and_returns_compat_payload(tmp_path: Path) -> None:
@@ -89,7 +86,7 @@ def test_sqlite_repo_stores_canonical_event_json_and_returns_compat_payload(tmp_
     assert listed[0]["side"] == "sell"
 
 
-def test_publisher_projects_mixed_canonical_and_legacy_stored_events() -> None:
+def test_publisher_rejects_mixed_canonical_and_legacy_stored_events() -> None:
     canonical_open = TradeEvent(
         event_id="open-aapl",
         event_type="open",
@@ -124,11 +121,12 @@ def test_publisher_projects_mixed_canonical_and_legacy_stored_events() -> None:
         raw_payload={"record_id": "lot_open-aapl"},
     )
 
-    imported, diagnostics = import_stored_trade_events([canonical_open, legacy_close])
-    assert diagnostics == []
-    assert [event.event_id for event in imported] == ["open-aapl", "close-aapl"]
-    projection = project_stored_trade_events_to_position_lots([canonical_open, legacy_close])
+    legacy_payload = legacy_close.to_legacy_dict()
+    imported, diagnostics = import_stored_trade_events([canonical_open, legacy_payload])
+    assert [item.code for item in diagnostics] == ["non_canonical_trade_event_schema"]
+    assert [event.event_id for event in imported] == ["open-aapl"]
+    projection = project_stored_trade_events_to_position_lots([canonical_open, legacy_payload])
 
-    assert projection.diagnostics == []
+    assert [item.code for item in projection.diagnostics] == ["non_canonical_trade_event_schema"]
     assert projection.lots[0].record_id == "lot_open-aapl"
-    assert projection.lots[0].fields["contracts_open"] == 1
+    assert projection.lots[0].fields["contracts_open"] == 2

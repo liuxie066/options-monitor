@@ -54,8 +54,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--refresh-multiplier-cache", action="store_true", help="Refresh output_shared/state/multiplier_cache.json via OpenD before running (best-effort).")
     parser.add_argument("--no-context", action="store_true", help="Skip portfolio/option_positions context fetch (dev speed). Useful when tuning filters only.")
     parser.add_argument("--shared-required-data", default=None, help="Path to shared required_data directory (contains raw/ and parsed/). If set, it is authoritative and fetch is skipped when artifacts exist.")
-    parser.add_argument("--report-dir", default=None, help="Directory to write reports (symbols_summary/alerts/notification). Default: output/reports")
-    parser.add_argument("--state-dir", default=None, help="Directory to read/write state cache (portfolio_context/option_positions_context/rate_cache/etc). Default: output/state")
+    parser.add_argument("--report-dir", default=None, help="Directory to write reports (symbols_summary/alerts/notification). Default: output_shared/reports")
+    parser.add_argument("--state-dir", default=None, help="Directory to read/write state cache (portfolio_context/option_positions_context/rate_cache/etc). Default: output_shared/state")
     parser.add_argument("--shared-context-dir", default=None, help="Optional shared context cache directory for cross-account reuse within one tick")
     return parser
 
@@ -175,7 +175,7 @@ def main(argv: list[str] | None = None) -> int:
 
         from src.application.pipeline_watchlist import run_watchlist_pipeline_default
 
-        required_data_dir = Path(shared_required_data).resolve() if shared_required_data else (runtime_root / "output").resolve()
+        required_data_dir = Path(shared_required_data).resolve() if shared_required_data else (runtime_root / "output_shared" / "required_data").resolve()
 
         summary_rows = run_watchlist_pipeline_default(
             py=py,
@@ -246,39 +246,6 @@ def main(argv: list[str] | None = None) -> int:
                 output=(report_dir / "symbols_notification.txt").resolve(),
                 render_style=render_style,
             )
-
-            if is_scheduled and (report_dir == (runtime_root / "output" / "reports").resolve()):
-                try:
-                    import glob
-
-                    keep = {
-                        (report_dir / "symbols_summary.csv").resolve(),
-                        (report_dir / "symbols_notification.txt").resolve(),
-                    }
-                    patterns = [
-                        str((report_dir / "*sell_put_candidates*.csv").resolve()),
-                        str((report_dir / "*sell_call_candidates*.csv").resolve()),
-                        str((report_dir / "*yield_enhancement_candidates*.csv").resolve()),
-                        str((report_dir / "*sell_put_alerts*.txt").resolve()),
-                        str((report_dir / "*sell_call_alerts*.txt").resolve()),
-                        str((report_dir / "*yield_enhancement_alerts*.txt").resolve()),
-                        str((report_dir / "symbols_summary.txt").resolve()),
-                        str((report_dir / "symbols_digest.txt").resolve()),
-                        str((report_dir / "symbols_alerts.txt").resolve()),
-                        str((report_dir / "symbols_changes.txt").resolve()),
-                    ]
-                    for pattern in patterns:
-                        for fp in glob.glob(pattern):
-                            candidate = Path(fp).resolve()
-                            if candidate in keep:
-                                continue
-                            try:
-                                if candidate.exists():
-                                    candidate.unlink()
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
 
         portfolio_cfg = cfg.get("portfolio", {}) or {}
         data_config = str(resolve_data_config_path(base=runtime_root, data_config=portfolio_cfg.get("data_config")))

@@ -93,6 +93,7 @@ def test_agent_runtime_executes_slash_command_through_inbound_router(tmp_path: P
     assert out["data"]["intent"]["parser"] == "command"
     assert out["meta"]["agent_runtime"] == {
         "enabled": True,
+        "mode": "deterministic",
         "route": "command",
         "llm": {
             "enabled": False,
@@ -131,6 +132,34 @@ def test_agent_runtime_keeps_deterministic_fallback(tmp_path: Path) -> None:
     assert out["ok"] is True
     assert calls == [("runtime_status", {"config_key": "us"})]
     assert out["data"]["intent"]["parser"] == "deterministic"
+    assert out["meta"]["agent_runtime"]["route"] == "deterministic"
+    assert out["meta"]["agent_runtime"]["llm"]["reason"] == "not_needed"
+
+
+def test_agent_runtime_answers_small_talk_without_tool_or_llm(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(tool_name=tool_name, ok=True, data={"summary": {"ok": True}})
+
+    out = handle_agent_message(
+        InboundRequest(
+            text="你好",
+            sender_id="local",
+            message_id="msg_small_talk",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AgentRuntimeSettings(
+            mode="llm_router",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+    )
+
+    assert out["ok"] is True
+    assert calls == []
+    assert out["data"]["intent"]["name"] == "small_talk"
     assert out["meta"]["agent_runtime"]["route"] == "deterministic"
     assert out["meta"]["agent_runtime"]["llm"]["reason"] == "not_needed"
 
@@ -355,10 +384,11 @@ def test_agent_runtime_settings_from_runtime_config() -> None:
 
     settings = AgentRuntimeSettings.from_runtime_config(
         {
-            "agent": {
-                "runtime": {"enabled": True, "context_window_messages": 12},
+            "assistant": {
+                "mode": "llm_router",
+                "context_window_messages": 12,
+                "default_market_scope": "all",
                 "llm": {
-                    "enabled": True,
                     "provider": "openai",
                     "base_url": "https://llm.example/v1",
                     "model": "gpt-5.2",
@@ -372,7 +402,9 @@ def test_agent_runtime_settings_from_runtime_config() -> None:
     )
 
     assert settings.enabled is True
+    assert settings.mode == "llm_router"
     assert settings.context_window_messages == 12
+    assert settings.default_market_scope == "all"
     assert settings.llm.public_payload() == {
         "enabled": True,
         "provider": "openai",
@@ -382,6 +414,65 @@ def test_agent_runtime_settings_from_runtime_config() -> None:
         "confidence_min": 0.8,
         "timeout_seconds": 30,
         "max_output_tokens": 768,
+    }
+
+
+def test_agent_runtime_agent_loop_is_bounded_read_only_router(tmp_path: Path) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool_name, payload))
+        return build_response(tool_name=tool_name, ok=True, data={"summary": {"ok": True}})
+
+    def _translate(
+        text: str,
+        settings: AgentRuntimeSettings,
+        conversation_context: dict[str, Any] | None,
+    ) -> LlmTranslationResult:
+        assert text == "帮我看一下状态"
+        assert settings.mode == "agent_loop"
+        assert conversation_context is not None
+        return LlmTranslationResult(
+            intent=InboundIntent(name="runtime_status", arguments={}, parser="llm", confidence=0.92),
+            trace={
+                "enabled": True,
+                "attempted": True,
+                "reason": "accepted",
+                "provider": "openai",
+                "base_url": "",
+                "model": "gpt-5.2",
+                "api_key_env": "OM_LLM_API_KEY",
+                "confidence_min": 0.75,
+                "timeout_seconds": 20,
+                "max_output_tokens": 512,
+            },
+        )
+
+    out = handle_agent_message(
+        InboundRequest(
+            text="帮我看一下状态",
+            sender_id="local",
+            message_id="msg_agent_loop",
+            audit_db=str(tmp_path / "inbound.sqlite3"),
+        ),
+        execute_tool_fn=_execute,
+        settings=AgentRuntimeSettings(
+            mode="agent_loop",
+            llm=LlmTranslatorSettings(enabled=True, provider="openai", model="gpt-5.2"),
+        ),
+        translate_intent_fn=_translate,
+    )
+
+    assert out["ok"] is True
+    assert calls == [("runtime_status", {"config_key": "us"})]
+    assert out["meta"]["agent_runtime"]["route"] == "agent_loop"
+    assert out["meta"]["agent_runtime"]["langgraph"] == "optional"
+    assert out["meta"]["agent_runtime"]["llm"]["agent_loop"] == {
+        "enabled": True,
+        "planner": "llm_read_only_intent",
+        "max_steps": 2,
+        "steps_used": 1,
+        "writes_allowed": False,
     }
 
 

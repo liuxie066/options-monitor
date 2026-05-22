@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from src.application.agent_tool_contracts import AgentToolError
+from src.application.inbound.operation_signature import require_operation_hmac_key
 from src.application.settings import build_effective_env
 
 
@@ -101,6 +102,13 @@ def _enforce_base_write_allowed(
             message="no inbound operation admin sender is configured",
             hint="Set OM_INBOUND_ADMIN_OPEN_IDS to the current bot app open_id.",
         )
+    if any(_sender_entry_has_wildcard(entry) for entry in effective.admin_senders):
+        raise AgentToolError(
+            code="CONFIG_ERROR",
+            message="wildcard inbound operation admins are not allowed",
+            hint="Set OM_INBOUND_ADMIN_OPEN_IDS to explicit sender IDs such as feishu:ou_xxx.",
+        )
+    require_operation_hmac_key()
     if not _sender_matches(channel=channel, sender_id=sender_id, entries=effective.admin_senders):
         raise AgentToolError(
             code="PERMISSION_DENIED",
@@ -144,3 +152,11 @@ def _sender_matches(*, channel: str, sender_id: str, entries: tuple[str, ...]) -
         if channel_ok and sender_ok:
             return True
     return False
+
+
+def _sender_entry_has_wildcard(entry: str) -> bool:
+    if ":" in entry:
+        entry_channel, entry_sender = entry.split(":", 1)
+    else:
+        entry_channel, entry_sender = "*", entry
+    return entry_channel.strip() == "*" or entry_sender.strip() == "*"
