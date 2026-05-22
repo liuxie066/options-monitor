@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.122 - 2026-05-22
+
+### Fixed
+- Made Feishu chat upgrade workers inherit `OM_ENV_FILE` and `OM_RUNTIME_ROOT` through systemd-run without exposing secret values, so final upgrade receipts can use the deployed bot credentials.
+- Made `config migrate-yaml` convert legacy `agent.*` settings into the canonical `assistant.*` config shape.
+
 ## 1.2.121 - 2026-05-22
 
 ### Changed

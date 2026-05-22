@@ -686,6 +686,82 @@ def test_inbound_upgrade_reconfirm_hides_internal_status(monkeypatch: pytest.Mon
     assert "confirmed" not in response_text
 
 
+def test_upgrade_worker_launcher_passes_env_file_pointer_to_systemd(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import subprocess
+
+    from src.application.inbound import upgrade_operations
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "om").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    env_file = tmp_path / "options-monitor.env"
+    env_file.write_text("OM_FEISHU_BOT_APP_SECRET=secret-from-file\n", encoding="utf-8")
+    captured: list[list[str]] = []
+
+    monkeypatch.setattr(upgrade_operations, "repo_base", lambda: root)
+    monkeypatch.setattr(upgrade_operations.sys, "platform", "linux")
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(runtime))
+    monkeypatch.setenv("OM_ENV_FILE", str(env_file))
+    monkeypatch.setattr(upgrade_operations.shutil, "which", lambda name: "/bin/systemd-run" if name == "systemd-run" else "/usr/bin/sudo" if name == "sudo" else None)
+
+    def _fake_run(cmd: list[str], **kwargs):  # type: ignore[no-untyped-def]
+        captured.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(upgrade_operations.subprocess, "run", _fake_run)
+
+    out = upgrade_operations._default_upgrade_worker_launcher("in_abc", tmp_path / "audit.sqlite3")
+
+    assert out["launcher"] == "systemd-run"
+    assert out["env_keys"] == ["OM_ENV_FILE", "OM_RUNTIME_ROOT", "PYTHONPATH", "PYTHONUNBUFFERED"]
+    first = captured[0]
+    assert "--setenv" in first
+    assert f"OM_ENV_FILE={env_file}" in first
+    assert f"OM_RUNTIME_ROOT={runtime}" in first
+    assert f"PYTHONPATH={root}" in first
+    assert "secret-from-file" not in " ".join(first)
+
+
+def test_upgrade_worker_launcher_falls_back_to_service_profile_env_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import subprocess
+
+    from src.application.inbound import upgrade_operations
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "om").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    env_file = tmp_path / "service.env"
+    env_file.write_text("OM_FEISHU_BOT_APP_ID=cli_test\nOM_FEISHU_BOT_APP_SECRET=secret\n", encoding="utf-8")
+    (runtime / "service.profile.json").write_text(
+        json.dumps({"runtime_root": str(runtime), "env_file": str(env_file)}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    captured: list[list[str]] = []
+
+    monkeypatch.setattr(upgrade_operations, "repo_base", lambda: root)
+    monkeypatch.setattr(upgrade_operations.sys, "platform", "linux")
+    monkeypatch.setenv("OM_RUNTIME_ROOT", str(runtime))
+    monkeypatch.delenv("OM_ENV_FILE", raising=False)
+    monkeypatch.setattr(upgrade_operations.shutil, "which", lambda name: "/bin/systemd-run" if name == "systemd-run" else None)
+
+    def _fake_run(cmd: list[str], **kwargs):  # type: ignore[no-untyped-def]
+        captured.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(upgrade_operations.subprocess, "run", _fake_run)
+
+    out = upgrade_operations._default_upgrade_worker_launcher("in_def", tmp_path / "audit.sqlite3")
+
+    assert out["launcher"] == "systemd-run"
+    first = captured[0]
+    assert f"OM_ENV_FILE={env_file}" in first
+    assert "OM_FEISHU_BOT_APP_SECRET=secret" not in " ".join(first)
+
+
 def test_inbound_manual_trade_bare_confirm_requires_unique_pending(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import src.application.ledger.repository as ledger_repository
 

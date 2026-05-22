@@ -28,6 +28,7 @@ UPGRADE_OPERATION_TYPES = PREVIEW_INTENTS
 UpgradeWorkerLauncher = Callable[[str, Path], dict[str, Any]]
 ReplyFn = Callable[..., dict[str, Any]]
 UPGRADE_WORKER_LAUNCHER: UpgradeWorkerLauncher | None = None
+_DEFAULT_RUNTIME_ROOT = Path("/var/lib/options-monitor")
 
 
 def is_upgrade_operation_intent(intent: InboundIntent) -> bool:
@@ -456,14 +457,13 @@ def _default_upgrade_worker_launcher(operation_id: str, audit_db: Path) -> dict[
         command = [sys.executable, "-m", "src.interfaces.cli.main", "inbound", "upgrade-worker", "--operation-id", operation_id, "--audit-db", str(audit_db)]
 
     systemd_run = shutil.which("systemd-run")
+    worker_env = _upgrade_worker_child_env(root=root)
+    systemd_env_args = _systemd_setenv_args(worker_env)
     if systemd_run and sys.platform.startswith("linux"):
         unit = "options-monitor-inbound-upgrade-" + "".join(ch if ch.isalnum() else "-" for ch in operation_id.lower())[:48]
-        env = build_effective_env().values
-        current_pythonpath = str(env.get("PYTHONPATH") or "").strip()
-        env_py = f"PYTHONPATH={root}{os.pathsep}{current_pythonpath}" if current_pythonpath else f"PYTHONPATH={root}"
         attempts = [
-            [systemd_run, "--user", "--unit", unit, "--collect", "--working-directory", str(root), "--setenv", env_py, *command],
-            ["sudo", "-n", systemd_run, "--unit", unit, "--collect", "--working-directory", str(root), "--setenv", env_py, *command],
+            [systemd_run, "--user", "--unit", unit, "--collect", "--working-directory", str(root), *systemd_env_args, *command],
+            ["sudo", "-n", systemd_run, "--unit", unit, "--collect", "--working-directory", str(root), *systemd_env_args, *command],
         ]
         errors: list[str] = []
         for attempt in attempts:
@@ -471,7 +471,7 @@ def _default_upgrade_worker_launcher(operation_id: str, audit_db: Path) -> dict[
                 continue
             proc = subprocess.run(attempt, cwd=str(root), text=True, capture_output=True, timeout=20, check=False)
             if proc.returncode == 0:
-                return {"launcher": "systemd-run", "unit": unit, "command": command}
+                return {"launcher": "systemd-run", "unit": unit, "command": command, "env_keys": sorted(worker_env)}
             errors.append((proc.stderr or proc.stdout or f"exit {proc.returncode}").strip())
         raise AgentToolError(
             code="UPGRADE_WORKER_LAUNCH_FAILED",
@@ -480,8 +480,54 @@ def _default_upgrade_worker_launcher(operation_id: str, audit_db: Path) -> dict[
             details={"operation_id": operation_id, "launcher_errors": errors},
         )
 
-    proc = subprocess.Popen(command, cwd=str(root), start_new_session=True)
-    return {"launcher": "popen", "pid": proc.pid, "command": command}
+    proc = subprocess.Popen(command, cwd=str(root), env={**os.environ, **worker_env}, start_new_session=True)
+    return {"launcher": "popen", "pid": proc.pid, "command": command, "env_keys": sorted(worker_env)}
+
+
+def _upgrade_worker_child_env(*, root: Path) -> dict[str, str]:
+    effective = build_effective_env(repo_root=root)
+    values = effective.values
+    profile: dict[str, Any] = {}
+    runtime_root = str(values.get("OM_RUNTIME_ROOT") or "").strip()
+    if runtime_root:
+        profile = _read_upgrade_worker_service_profile(Path(runtime_root).expanduser())
+    else:
+        profile = _read_upgrade_worker_service_profile(_DEFAULT_RUNTIME_ROOT)
+        runtime_root = str(profile.get("runtime_root") or "").strip() if profile else ""
+
+    out: dict[str, str] = {"PYTHONUNBUFFERED": "1"}
+    if runtime_root:
+        out["OM_RUNTIME_ROOT"] = str(Path(runtime_root).expanduser())
+
+    env_file = str(values.get("OM_ENV_FILE") or "").strip()
+    if not env_file and effective.env_file is not None:
+        env_file = str(effective.env_file)
+    if not env_file and profile:
+        env_file = str(profile.get("env_file") or "").strip()
+    if env_file:
+        out["OM_ENV_FILE"] = str(Path(env_file).expanduser())
+
+    current_pythonpath = str(values.get("PYTHONPATH") or "").strip()
+    out["PYTHONPATH"] = f"{root}{os.pathsep}{current_pythonpath}" if current_pythonpath else str(root)
+    return out
+
+
+def _read_upgrade_worker_service_profile(runtime_root: Path) -> dict[str, Any]:
+    profile_path = runtime_root / "service.profile.json"
+    try:
+        profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return profile if isinstance(profile, dict) else {}
+
+
+def _systemd_setenv_args(env: dict[str, str]) -> list[str]:
+    args: list[str] = []
+    for key in sorted(env):
+        value = str(env.get(key) or "")
+        if value:
+            args.extend(["--setenv", f"{key}={value}"])
+    return args
 
 
 def _send_final_receipt(
