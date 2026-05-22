@@ -5,6 +5,7 @@ from typing import Any
 from src.application.inbound.audit import InboundAuditStore
 from src.application.inbound.contracts import InboundRequest
 from src.application.inbound.operation_store import InboundOperationStore
+from src.application.inbound.policy import PURE_READ_TOOLS
 
 
 def build_conversation_context(
@@ -45,7 +46,17 @@ def build_conversation_context(
     return {
         "scope": normalized,
         "window_messages": window,
+        "limits": {
+            "max_recent_messages": window,
+            "max_pending_operations": pending_limit,
+        },
+        "semantics": {
+            "explicit_message_wins": True,
+            "context_is_hint_only": True,
+            "confirmation_must_be_deterministic": True,
+        },
         "recent_messages": recent_messages,
+        "last_successful_read": _last_successful_read(recent_messages),
         "pending_operations": pending_operations,
     }
 
@@ -77,10 +88,40 @@ def _audit_context_item(row: dict[str, Any]) -> dict[str, Any]:
         "parser": row.get("parser"),
         "intent_name": row.get("intent_name"),
         "tool_name": row.get("tool_name"),
+        "tool_payload": _safe_tool_payload(row.get("tool_payload_json")),
         "decision": row.get("decision"),
         "result_ok": bool(row.get("result_ok")),
         "error_code": row.get("error_code"),
     }
+
+
+def _last_successful_read(messages: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for item in reversed(messages):
+        if item.get("result_ok") is not True:
+            continue
+        tool_name = str(item.get("tool_name") or "").strip()
+        if not tool_name or tool_name not in PURE_READ_TOOLS:
+            continue
+        return {
+            "created_at": item.get("created_at"),
+            "intent_name": item.get("intent_name"),
+            "tool_name": tool_name,
+            "tool_payload": item.get("tool_payload") if isinstance(item.get("tool_payload"), dict) else {},
+        }
+    return None
+
+
+def _safe_tool_payload(value: Any) -> dict[str, Any]:
+    import json
+
+    try:
+        parsed = json.loads(str(value or "{}"))
+    except Exception:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    allowed = {"config_key", "account", "status", "month", "run_id", "kind", "limit", "lines", "action"}
+    return {key: parsed[key] for key in sorted(allowed) if key in parsed}
 
 
 def _clip(value: Any, limit: int) -> str:

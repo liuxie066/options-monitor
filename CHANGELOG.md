@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 1.2.123 - 2026-05-22
+
+### Added
+- Added a structured `om-agent-loop-v1` trace contract for the optional assistant agent loop, including planned read-only steps, sanitized tool observations, and final response ownership.
+- Added runtime status diagnostics for assistant config, LLM provider readiness, inbound audit state, and latest agent route.
+- Added shared helpers for assistant read-only tool allowlists and config section resolution.
+
+### Fixed
+- Kept the assistant agent loop restricted to read-only intents that re-enter the deterministic inbound router and tool policy.
+- Prevented LLM-routed write or confirmation intents from bypassing deterministic preview/confirm flows.
+- Avoided reporting an LLM endpoint in `runtime_status` when LLM routing is disabled or no supported provider is configured.
+- Made Feishu chat upgrade workers inherit the effective environment when launched without systemd-run, preserving deployed env-file settings.
+
 ## 1.2.122 - 2026-05-22
 
 ### Fixed

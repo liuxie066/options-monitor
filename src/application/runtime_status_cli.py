@@ -40,6 +40,7 @@ def format_runtime_status_summary(envelope: dict[str, Any]) -> str:
     scanned_prefetch = _dict(data.get("latest_scanned_run_required_data_prefetch"))
     service = _dict(data.get("service_upgrade"))
     service_drift = _dict(data.get("service_drift"))
+    assistant = _dict(data.get("assistant_runtime"))
     warnings = _list(envelope.get("warnings"))
     ledger_warnings = _list(ledger.get("warnings"))
 
@@ -61,6 +62,7 @@ def format_runtime_status_summary(envelope: dict[str, Any]) -> str:
         _prefetch_line("prefetch scanned", scanned_prefetch),
         _service_line(service),
         _service_drift_line(service_drift),
+        _assistant_line(assistant),
     ]
 
     error = _dict(envelope.get("error"))
@@ -248,6 +250,21 @@ def _service_drift_line(drift: dict[str, Any]) -> str:
         f"status={_value(summary.get('status'))} "
         f"missing={_int_value(summary.get('missing_installed_count'))} "
         f"required_missing={_csv(summary.get('missing_required_units'))}"
+    )
+
+
+def _assistant_line(assistant: dict[str, Any]) -> str:
+    config = _dict(assistant.get("config"))
+    llm = _dict(assistant.get("llm"))
+    audit = _dict(assistant.get("audit"))
+    latest = _dict(audit.get("latest"))
+    return (
+        "assistant: "
+        f"mode={_value(config.get('mode'))} "
+        f"llm={_yes_no(llm.get('enabled'))} "
+        f"provider={_value(llm.get('provider'))} "
+        f"latest_route={_value(latest.get('route'))} "
+        f"latest_intent={_value(latest.get('intent_name'))}"
     )
 
 
