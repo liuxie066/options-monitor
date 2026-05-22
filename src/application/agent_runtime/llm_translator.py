@@ -34,6 +34,7 @@ Rules:
 - Never execute tools or claim an action was done.
 - Only choose the read-only intents present in the schema.
 - The input may be plain text or a JSON object with `message` and bounded, redacted `context`; translate the current `message`.
+- Context is a hint only. The current message wins whenever it explicitly names an account, month, run id, or status.
 - Do not translate write/admin actions such as recording trades, changing monitored symbols, upgrades, or confirmations.
 - Use null for unknown optional arguments.
 - For unclear or unsupported messages, return a low confidence value below 0.5.
@@ -240,6 +241,10 @@ def _provider_context(conversation_context: dict[str, Any]) -> dict[str, Any]:
     pending = conversation_context.get("pending_operations")
     return {
         "window_messages": int(conversation_context.get("window_messages") or 0),
+        "semantics": conversation_context.get("semantics") if isinstance(conversation_context.get("semantics"), dict) else {},
+        "last_successful_read": conversation_context.get("last_successful_read")
+        if isinstance(conversation_context.get("last_successful_read"), dict)
+        else None,
         "recent_messages": list(recent) if isinstance(recent, list) else [],
         "pending_operations": [_pending_operation_provider_item(item) for item in pending if isinstance(item, dict)]
         if isinstance(pending, list)

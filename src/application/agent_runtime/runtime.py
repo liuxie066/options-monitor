@@ -3,19 +3,22 @@ from __future__ import annotations
 from datetime import date
 from typing import Any, Callable
 
-from src.application.agent_runtime.agent_loop import run_read_only_agent_loop
+from src.application.agent_runtime.agent_loop import build_tool_observation, run_read_only_agent_loop
+from src.application.agent_runtime.command_catalog import spec_by_intent
 from src.application.agent_runtime.command_parser import parse_agent_command
 from src.application.agent_runtime.conversation_context import build_conversation_context, context_trace
 from src.application.agent_runtime.llm_translator import LlmTranslationResult, skipped_llm_trace, translate_inbound_intent
 from src.application.agent_runtime.settings import AgentRuntimeSettings
+from src.application.agent_runtime.tool_policy import DEFAULT_TOOL_POLICY
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.inbound.audit import InboundAuditStore
-from src.application.inbound.contracts import InboundIntent, InboundRequest
+from src.application.inbound.contracts import InboundIntent, InboundRequest, InboundToolCall
 from src.application.inbound.parser import parse_inbound_text
 from src.application.inbound.router import ExecuteToolFn, handle_inbound_request
 from src.application.tool_execution import execute_tool
 
 TranslateIntentFn = Callable[[str, AgentRuntimeSettings, dict[str, Any] | None], LlmTranslationResult]
+_COMMAND_SPECS_BY_INTENT = spec_by_intent()
 
 
 def handle_agent_message(
@@ -38,15 +41,19 @@ def handle_agent_message(
             allowed_senders=allowed_senders,
             now_fn=now_fn,
         )
-        return _with_agent_runtime_meta(
+        response = _with_agent_runtime_meta(
             response,
             route="disabled",
             settings=runtime_settings,
             llm_trace=skipped_llm_trace(runtime_settings.llm, reason="runtime_disabled"),
         )
+        _update_audit_response(store=store, response=response)
+        return response
 
     route = "command" if _looks_like_command(request.text) else "deterministic"
     llm_trace = skipped_llm_trace(runtime_settings.llm, reason="command" if route == "command" else "not_needed")
+    agent_loop_tool_events: list[dict[str, Any]] = []
+    agent_loop_observations: list[dict[str, Any]] = []
 
     def _parse(text: str, parser_now_fn: Callable[[], date] | None) -> InboundIntent:
         nonlocal route, llm_trace
@@ -89,20 +96,34 @@ def handle_agent_message(
                 llm_trace["context"] = context_trace(conversation_context)
             if llm_result.intent is not None:
                 route = "agent_loop" if runtime_settings.mode == "agent_loop" else "llm"
+                _ensure_llm_intent_allowed(llm_result.intent)
                 return llm_result.intent
             if llm_result.error is not None:
                 raise llm_result.error
             raise
 
+    router_execute_tool_fn = execute_tool_fn
+    if runtime_settings.mode == "agent_loop":
+        router_execute_tool_fn = _agent_loop_execute_tool_fn(
+            execute_tool_fn=execute_tool_fn,
+            tool_events=agent_loop_tool_events,
+            observations=agent_loop_observations,
+            should_trace=lambda: route == "agent_loop",
+        )
+
     response = handle_inbound_request(
         request,
         audit_store=store,
-        execute_tool_fn=execute_tool_fn,
+        execute_tool_fn=router_execute_tool_fn,
         allowed_senders=allowed_senders,
         now_fn=now_fn,
         parse_intent_fn=_parse,
     )
-    return _with_agent_runtime_meta(response, route=route, settings=runtime_settings, llm_trace=llm_trace)
+    if agent_loop_tool_events:
+        llm_trace = _merge_agent_loop_tool_events(llm_trace, agent_loop_tool_events, agent_loop_observations)
+    response = _with_agent_runtime_meta(response, route=route, settings=runtime_settings, llm_trace=llm_trace)
+    _update_audit_response(store=store, response=response)
+    return response
 
 
 def _looks_like_command(text: str) -> bool:
@@ -119,6 +140,110 @@ def _translate_intent(
     if translate_intent_fn is not None:
         return translate_intent_fn(text, settings, conversation_context)
     return translate_inbound_intent(text, settings=settings.llm, conversation_context=conversation_context)
+
+
+def _agent_loop_execute_tool_fn(
+    *,
+    execute_tool_fn: ExecuteToolFn,
+    tool_events: list[dict[str, Any]],
+    observations: list[dict[str, Any]],
+    should_trace: Callable[[], bool],
+) -> ExecuteToolFn:
+    def _execute(tool_name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if not should_trace():
+            return execute_tool_fn(tool_name, dict(payload or {}))
+        call = InboundToolCall(tool_name=tool_name, payload=dict(payload or {}))
+        try:
+            decision = DEFAULT_TOOL_POLICY.authorize_read_tool(call, source="agent_loop")
+        except AgentToolError as err:
+            tool_events.append(
+                {
+                    "phase": "authorize_tool",
+                    "tool_name": tool_name,
+                    "allowed": False,
+                    "error_code": err.code,
+                }
+            )
+            raise
+        tool_events.append(
+            {
+                "phase": "authorize_tool",
+                "tool_name": tool_name,
+                "allowed": True,
+                "decision": decision.public_payload(),
+            }
+        )
+        result = execute_tool_fn(tool_name, dict(payload or {}))
+        observations.append(
+            build_tool_observation(
+                index=len(observations) + 1,
+                tool_name=tool_name,
+                payload=dict(payload or {}),
+                result=result,
+            ).public_payload()
+        )
+        error = result.get("error") if isinstance(result, dict) else None
+        error_code = error.get("code") if isinstance(error, dict) else None
+        tool_events.append(
+            {
+                "phase": "observe_tool_result",
+                "tool_name": tool_name,
+                "ok": bool(result.get("ok", False)) if isinstance(result, dict) else False,
+                "error_code": str(error_code) if error_code else None,
+            }
+        )
+        return result
+
+    return _execute
+
+
+def _merge_agent_loop_tool_events(
+    llm_trace: dict[str, Any],
+    tool_events: list[dict[str, Any]],
+    observations: list[dict[str, Any]],
+) -> dict[str, Any]:
+    merged = dict(llm_trace)
+    loop = dict(merged.get("agent_loop") if isinstance(merged.get("agent_loop"), dict) else {})
+    loop.setdefault("enabled", True)
+    loop.setdefault("planner", "llm_read_only_intent")
+    loop["tool_events"] = [dict(item) for item in tool_events]
+    loop["observations"] = [dict(item) for item in observations]
+    loop["tool_calls_used"] = sum(1 for item in tool_events if item.get("phase") == "observe_tool_result")
+    loop["writes_allowed"] = False
+    final_response = dict(loop.get("final_response") if isinstance(loop.get("final_response"), dict) else {})
+    final_response.update(
+        {
+            "status": "rendered",
+            "reason": "canonical renderer produced the factual response",
+            "canonical_renderer_required": True,
+            "llm_may_summarize": False,
+        }
+    )
+    loop["final_response"] = final_response
+    merged["agent_loop"] = loop
+    return merged
+
+
+def _ensure_llm_intent_allowed(intent: InboundIntent) -> None:
+    spec = _COMMAND_SPECS_BY_INTENT.get(intent.name)
+    if spec is None or not spec.read_only or not spec.llm_allowed:
+        raise AgentToolError(
+            code="PERMISSION_DENIED",
+            message=f"LLM is not allowed to route intent: {intent.name}",
+            hint="LLM routing is restricted to read-only command intents; write actions must use deterministic preview and confirm flows.",
+            details={"intent_name": intent.name},
+        )
+
+
+def _update_audit_response(*, store: InboundAuditStore, response: dict[str, Any]) -> None:
+    meta = response.get("meta")
+    if isinstance(meta, dict) and bool(meta.get("idempotent_replay")):
+        return
+    data = response.get("data")
+    command_id = data.get("command_id") if isinstance(data, dict) else None
+    if not command_id:
+        return
+    store.update_response(command_id=str(command_id), response=response)
 
 
 def _with_agent_runtime_meta(

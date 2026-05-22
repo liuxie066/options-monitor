@@ -6,19 +6,7 @@ from typing import Any
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.inbound.contracts import InboundToolCall
 from src.application.settings import build_effective_env
-
-
-PURE_READ_TOOLS = frozenset(
-    {
-        "runtime_status",
-        "healthcheck",
-        "option_positions_read",
-        "monthly_income_report",
-        "runtime_runs",
-        "runtime_logs",
-        "config_validate",
-    }
-)
+from src.application.tool_allowlist import PURE_READ_TOOLS
 
 
 @dataclass(frozen=True)

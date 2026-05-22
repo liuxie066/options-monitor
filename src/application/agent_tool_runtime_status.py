@@ -285,6 +285,7 @@ def _merge_service_profile_payload(payload: dict[str, Any], *, profile: dict[str
         "markets",
         "config_paths",
         "env_file",
+        "assistant_config_path",
         "deploy_user",
         "deploy_home",
         "auto_upgrade",
@@ -369,6 +370,180 @@ def _service_profile_summary(payload: dict[str, Any]) -> dict[str, Any]:
     )
     summary["loaded"] = True
     return summary
+
+
+def _assistant_runtime_summary(
+    *,
+    base: Path,
+    runtime_root: Path,
+    payload: dict[str, Any],
+    mask_path: Callable[[Any], str | None],
+) -> dict[str, Any]:
+    try:
+        from src.application.agent_runtime.config_loader import load_assistant_config
+        from src.application.agent_runtime.settings import AgentRuntimeSettings
+        from src.application.inbound.audit import InboundAuditStore
+        from src.application.settings import build_effective_env
+        from src.infrastructure.openai_chat_completions import resolve_chat_completions_url
+        from src.infrastructure.openai_responses import resolve_responses_url
+    except Exception as exc:
+        return {"available": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    assistant_config_path, assistant_config_explicit = _assistant_config_path_from_runtime_status_payload(
+        payload,
+        base=base,
+        runtime_root=runtime_root,
+    )
+    runtime_candidate = runtime_root / "resolved" / "config.assistant.json"
+    repo_candidate = base / "config.assistant.json"
+    if assistant_config_path is None and runtime_candidate.exists():
+        assistant_config_path = runtime_candidate
+    elif assistant_config_path is None and repo_candidate.exists():
+        assistant_config_path = repo_candidate
+    missing_ok = assistant_config_path is None
+    if assistant_config_path is None:
+        assistant_config_path = runtime_candidate
+    elif assistant_config_explicit:
+        missing_ok = False
+
+    try:
+        path, cfg = load_assistant_config(
+            config_path=assistant_config_path,
+            repo_root=base,
+            missing_ok=missing_ok,
+        )
+        settings = AgentRuntimeSettings.from_runtime_config(cfg)
+    except Exception as exc:
+        return {
+            "available": False,
+            "config": {
+                "path": mask_path(assistant_config_path) if assistant_config_path is not None else None,
+                "loaded": False,
+            },
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+    provider = str(settings.llm.provider or "").strip().lower()
+    endpoint_url = None
+    if settings.llm.enabled and provider == "deepseek":
+        endpoint_url = resolve_chat_completions_url(settings.llm.base_url)
+    elif settings.llm.enabled and provider == "openai":
+        endpoint_url = resolve_responses_url(settings.llm.base_url)
+    env_file_path = _assistant_env_file_path_from_payload(payload, base=base)
+    env = build_effective_env(repo_root=base, env_file=env_file_path)
+    audit_db_path = _assistant_audit_db_path_from_payload(payload, base=base, env=env.values)
+    audit_summary: dict[str, Any] = {
+        "path": mask_path(audit_db_path),
+        "exists": audit_db_path.exists(),
+        "latest": None,
+    }
+    if audit_db_path.exists():
+        try:
+            rows = InboundAuditStore(audit_db_path).list_recent(limit=1)
+            if rows:
+                audit_summary["latest"] = _assistant_audit_latest(rows[0])
+        except Exception as exc:
+            audit_summary["error"] = f"{type(exc).__name__}: {exc}"
+
+    return {
+        "available": True,
+        "config": {
+            "path": mask_path(path),
+            "loaded": bool(cfg),
+            "mode": settings.mode,
+            "enabled": bool(settings.enabled),
+            "context_window_messages": int(settings.context_window_messages),
+            "default_market_scope": settings.default_market_scope,
+        },
+        "llm": {
+            **settings.llm.public_payload(),
+            "endpoint_url": endpoint_url,
+            "api_key_configured": bool(env.get(settings.llm.api_key_env)),
+            "env_file": mask_path(env.env_file) if env.env_file is not None else None,
+            "env_file_loaded": bool(env.env_file_loaded),
+        },
+        "audit": audit_summary,
+    }
+
+
+def _assistant_config_path_from_runtime_status_payload(
+    payload: dict[str, Any],
+    *,
+    base: Path,
+    runtime_root: Path,
+) -> tuple[Path | None, bool]:
+    raw = str(payload.get("assistant_config_path") or "").strip()
+    if not raw:
+        feishu_ws = payload.get("feishu_ws")
+        if isinstance(feishu_ws, dict):
+            raw = str(feishu_ws.get("assistant_config_path") or "").strip()
+    if raw:
+        return _resolve_assistant_runtime_path(raw, base=base), True
+    default_path = runtime_root / "resolved" / "config.assistant.json"
+    return (default_path if default_path.exists() else None), False
+
+
+def _assistant_env_file_path_from_payload(payload: dict[str, Any], *, base: Path) -> Path | None:
+    raw = str(payload.get("env_file") or "").strip()
+    if not raw:
+        return None
+    return _resolve_assistant_runtime_path(raw, base=base)
+
+
+def _assistant_audit_db_path_from_payload(payload: dict[str, Any], *, base: Path, env: dict[str, str]) -> Path:
+    raw = ""
+    feishu_ws = payload.get("feishu_ws")
+    if isinstance(feishu_ws, dict):
+        raw = str(feishu_ws.get("audit_db") or "").strip()
+    if not raw:
+        raw = str(env.get("OM_INBOUND_AUDIT_DB") or "").strip()
+    if raw:
+        return _resolve_assistant_runtime_path(raw, base=base)
+    return (base / "output_shared" / "state" / "inbound_control.sqlite3").resolve()
+
+
+def _resolve_assistant_runtime_path(raw: str, *, base: Path) -> Path:
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = (base / path).resolve()
+    return path
+
+
+def _assistant_audit_latest(row: dict[str, Any]) -> dict[str, Any]:
+    response: dict[str, Any] = {}
+    try:
+        parsed = json.loads(str(row.get("response_json") or "{}"))
+        response = parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        response = {}
+    meta = response.get("meta")
+    runtime = meta.get("agent_runtime") if isinstance(meta, dict) else None
+    runtime_payload = runtime if isinstance(runtime, dict) else {}
+    llm = runtime_payload.get("llm")
+    llm_payload = llm if isinstance(llm, dict) else {}
+    context = runtime_payload.get("context")
+    context_payload = context if isinstance(context, dict) else {}
+    return {
+        "created_at": row.get("created_at"),
+        "channel": row.get("channel"),
+        "sender_id": row.get("sender_id"),
+        "conversation_id": row.get("conversation_id"),
+        "parser": row.get("parser"),
+        "intent_name": row.get("intent_name"),
+        "tool_name": row.get("tool_name"),
+        "decision": row.get("decision"),
+        "result_ok": bool(row.get("result_ok")),
+        "error_code": row.get("error_code"),
+        "route": runtime_payload.get("route"),
+        "mode": runtime_payload.get("mode"),
+        "llm_reason": llm_payload.get("reason"),
+        "llm_attempted": llm_payload.get("attempted"),
+        "context": {
+            "provided": bool(context_payload.get("provided")),
+            "recent_count": context_payload.get("recent_count"),
+            "pending_count": context_payload.get("pending_count"),
+        },
+    }
 
 
 def _repo_version(base: Path) -> str | None:
@@ -1622,6 +1797,12 @@ def runtime_status_tool(
     shared_last_run_json_raw = shared_last_run.get("json")
     shared_last_run_json: dict[str, Any] = shared_last_run_json_raw if isinstance(shared_last_run_json_raw, dict) else {}
     latest_status = shared_last_run_json.get("status") or shared_last_run_json.get("last_status")
+    assistant_runtime = _assistant_runtime_summary(
+        base=base,
+        runtime_root=ledger_runtime_root,
+        payload=payload,
+        mask_path=mask_path,
+    )
 
     data: dict[str, Any] = {
         "config": {
@@ -1663,6 +1844,7 @@ def runtime_status_tool(
         "freshness": {},
         "openclaw_profile": profile_meta or {"loaded": False},
         "service_profile": _service_profile_summary(payload),
+        "assistant_runtime": assistant_runtime,
         "summary": {
             "ok": not warnings,
             "warning_count": len(warnings),
@@ -1701,6 +1883,16 @@ def runtime_status_tool(
     data["summary"]["service_drift_status"] = service_drift_summary.get("status")
     data["summary"]["service_drift_missing_units"] = service_drift.get("missing_installed_units")
     data["summary"]["service_drift_missing_required_units"] = missing_required_units
+    assistant_config_summary = assistant_runtime.get("config") if isinstance(assistant_runtime.get("config"), dict) else {}
+    assistant_llm_summary = assistant_runtime.get("llm") if isinstance(assistant_runtime.get("llm"), dict) else {}
+    assistant_audit_summary = assistant_runtime.get("audit") if isinstance(assistant_runtime.get("audit"), dict) else {}
+    assistant_latest = assistant_audit_summary.get("latest") if isinstance(assistant_audit_summary.get("latest"), dict) else {}
+    data["summary"]["assistant_mode"] = assistant_config_summary.get("mode")
+    data["summary"]["assistant_llm_enabled"] = bool(assistant_llm_summary.get("enabled"))
+    data["summary"]["assistant_llm_provider"] = assistant_llm_summary.get("provider")
+    data["summary"]["assistant_latest_route"] = assistant_latest.get("route")
+    data["summary"]["assistant_latest_intent"] = assistant_latest.get("intent_name")
+    data["summary"]["assistant_latest_llm_reason"] = assistant_latest.get("llm_reason")
     return data, warnings, {"config_path": mask_path(config_path)}
 
 

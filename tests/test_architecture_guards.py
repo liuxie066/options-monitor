@@ -159,6 +159,29 @@ def test_llm_intent_surface_is_read_only_only() -> None:
         assert definition.requires_confirm is False
 
 
+def test_read_tool_allowlist_has_neutral_owner() -> None:
+    from src.application import tool_allowlist
+    from src.application.agent_runtime import tool_policy
+    from src.application.inbound import policy as inbound_policy
+
+    assert inbound_policy.PURE_READ_TOOLS is tool_allowlist.PURE_READ_TOOLS
+    assert tool_policy.PURE_READ_TOOLS is tool_allowlist.PURE_READ_TOOLS
+
+    tool_policy_text = (ROOT / "src" / "application" / "agent_runtime" / "tool_policy.py").read_text(encoding="utf-8")
+    assert "from src.application.inbound.policy import PURE_READ_TOOLS" not in tool_policy_text
+
+
+def test_config_section_helpers_have_neutral_owner() -> None:
+    from src.application import config_loader, config_sections
+
+    assert config_loader.resolve_templates_config is config_sections.resolve_templates_config
+    assert config_loader.resolve_watchlist_config is config_sections.resolve_watchlist_config
+    assert config_loader.set_watchlist_config is config_sections.set_watchlist_config
+
+    validator_text = (ROOT / "src" / "application" / "config_validator.py").read_text(encoding="utf-8")
+    assert "from src.application.config_loader import" not in validator_text
+
+
 def test_feishu_ws_cli_keeps_runtime_and_assistant_config_flags_separate() -> None:
     text = (ROOT / "src" / "interfaces" / "cli" / "main.py").read_text(encoding="utf-8")
 

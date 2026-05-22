@@ -161,6 +161,22 @@ class InboundAuditStore:
                 ),
             )
 
+    def update_response(self, *, command_id: str, response: dict[str, Any]) -> None:
+        normalized_command_id = str(command_id or "").strip()
+        if not normalized_command_id:
+            return
+        self._ensure_schema()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE inbound_command_audit
+                SET response_json = ?,
+                    finished_at = ?
+                WHERE command_id = ?
+                """,
+                (_json(response), utc_now_iso(), normalized_command_id),
+            )
+
     def mark_duplicate(self, *, command_id: str, sender_id: str | None = None, decision: str = "idempotent_replay") -> None:
         self._ensure_schema()
         with self._connect() as conn:
