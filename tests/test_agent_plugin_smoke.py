@@ -1294,7 +1294,7 @@ def _runtime_status_upgrade_fixture(tmp_path: Path, *, target_version: str = "1.
 
 
 def _call_runtime_status_for_upgrade(tmp_path: Path, cfg_path: Path, cfg: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
-    from src.application.agent_tool_openclaw import runtime_status_tool
+    from src.application.agent_tool_runtime_status import runtime_status_tool
 
     def _read_json(path: Path) -> dict[str, Any]:
         try:
@@ -1315,7 +1315,7 @@ def _call_runtime_status_for_upgrade(tmp_path: Path, cfg_path: Path, cfg: dict[s
 
 
 def test_runtime_status_auto_loads_runtime_service_profile_paths(tmp_path: Path) -> None:
-    from src.application.agent_tool_openclaw import runtime_status_tool
+    from src.application.agent_tool_runtime_status import runtime_status_tool
 
     release_root = tmp_path / "release"
     runtime_root = tmp_path / "runtime"
@@ -1380,7 +1380,7 @@ def test_runtime_status_auto_loads_runtime_service_profile_paths(tmp_path: Path)
 
 
 def test_runtime_status_marks_remediated_upgrade_failure(monkeypatch, tmp_path: Path) -> None:
-    import src.application.agent_tool_openclaw as openclaw
+    import src.application.agent_tool_runtime_status as runtime_status
 
     fixture = _runtime_status_upgrade_fixture(tmp_path)
 
@@ -1393,7 +1393,7 @@ def test_runtime_status_marks_remediated_upgrade_failure(monkeypatch, tmp_path: 
             "status_checked": include_status,
         }
 
-    monkeypatch.setattr(openclaw, "service_status_from_profile", _service_status)
+    monkeypatch.setattr(runtime_status, "service_status_from_profile", _service_status)
 
     data, warnings, _meta = _call_runtime_status_for_upgrade(tmp_path, fixture["cfg_path"], fixture["cfg"])
 
@@ -1409,7 +1409,7 @@ def test_runtime_status_marks_remediated_upgrade_failure(monkeypatch, tmp_path: 
 
 
 def test_runtime_status_normalizes_v_prefixed_upgrade_target(monkeypatch, tmp_path: Path) -> None:
-    import src.application.agent_tool_openclaw as openclaw
+    import src.application.agent_tool_runtime_status as runtime_status
 
     fixture = _runtime_status_upgrade_fixture(tmp_path, target_version="v1.2.82")
 
@@ -1422,7 +1422,7 @@ def test_runtime_status_normalizes_v_prefixed_upgrade_target(monkeypatch, tmp_pa
             "status_checked": include_status,
         }
 
-    monkeypatch.setattr(openclaw, "service_status_from_profile", _service_status)
+    monkeypatch.setattr(runtime_status, "service_status_from_profile", _service_status)
 
     data, warnings, _meta = _call_runtime_status_for_upgrade(tmp_path, fixture["cfg_path"], fixture["cfg"])
 
@@ -1433,7 +1433,7 @@ def test_runtime_status_normalizes_v_prefixed_upgrade_target(monkeypatch, tmp_pa
 
 
 def test_runtime_status_keeps_upgrade_failed_when_service_still_failed(monkeypatch, tmp_path: Path) -> None:
-    import src.application.agent_tool_openclaw as openclaw
+    import src.application.agent_tool_runtime_status as runtime_status
 
     fixture = _runtime_status_upgrade_fixture(tmp_path)
 
@@ -1448,7 +1448,7 @@ def test_runtime_status_keeps_upgrade_failed_when_service_still_failed(monkeypat
             out.append({**item, "status": status, "returncode": 3 if status == "warn" else 0})
         return {"provider": profile.get("service_provider"), "services": out, "status_checked": include_status}
 
-    monkeypatch.setattr(openclaw, "service_status_from_profile", _service_status)
+    monkeypatch.setattr(runtime_status, "service_status_from_profile", _service_status)
 
     data, warnings, _meta = _call_runtime_status_for_upgrade(tmp_path, fixture["cfg_path"], fixture["cfg"])
 
