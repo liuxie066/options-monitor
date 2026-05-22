@@ -7,7 +7,7 @@ from typing import Any
 import yaml
 
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.config_yaml import build_yaml_runtime_config_file, validate_yaml_runtime_config
+from src.application.config_yaml import build_yaml_assistant_config_file, build_yaml_runtime_config_file, validate_yaml_runtime_config
 from src.application.layered_config import MARKETS
 from src.application.write_contract import attach_write_contract
 from src.infrastructure.io_utils import atomic_write_text
@@ -136,13 +136,11 @@ def _starter_yaml_payload(
                 "symbols": hk_symbols,
             },
         },
-        "agent": {
-            "runtime": {
-                "enabled": True,
-                "context_window_messages": 8,
-            },
+        "assistant": {
+            "mode": "deterministic",
+            "context_window_messages": 8,
+            "default_market_scope": "us",
             "llm": {
-                "enabled": False,
                 "provider": "",
                 "base_url": "",
                 "model": "",
@@ -162,6 +160,20 @@ def _starter_yaml_payload(
 
 def _build_commands(*, config_path: Path, outputs: dict[str, Path], markets: list[str]) -> list[str]:
     commands: list[str] = []
+    assistant_output = outputs.get("assistant")
+    if assistant_output is not None:
+        command = [
+            "./om",
+            "config",
+            "build-assistant",
+            "--source",
+            "yaml",
+            "--config-yaml",
+            str(config_path),
+            "--output",
+            str(assistant_output),
+        ]
+        commands.append(" ".join(shlex.quote(part) for part in command))
     for market in markets:
         command = [
             "./om",
@@ -206,9 +218,11 @@ def init_yaml_config(
         market: (output_dir / f"config.{market}.json").resolve()
         for market in selected_markets
     }
+    assistant_output = (output_dir / "config.assistant.json").resolve()
+    all_outputs = {"assistant": assistant_output, **runtime_outputs}
 
     if not force:
-        existing = [output_path, *(runtime_outputs.values() if build else [])]
+        existing = [output_path, *(all_outputs.values() if build else [])]
         conflicts = [str(path) for path in existing if path.exists()]
         if conflicts:
             raise AgentToolError(
@@ -248,6 +262,13 @@ def init_yaml_config(
                 market=market,
                 config_path=output_path,
             )
+            if build and "assistant" not in build_results:
+                build_results["assistant"] = build_yaml_assistant_config_file(
+                    repo_root=repo_root,
+                    config_path=output_path,
+                    output_config_path=assistant_output,
+                    dry_run=False,
+                )
             if build:
                 build_results[market] = build_yaml_runtime_config_file(
                     repo_root=repo_root,
@@ -266,13 +287,14 @@ def init_yaml_config(
         "futu_account_id_placeholder": futu_id == DEFAULT_FUTU_ACCOUNT_ID,
         "runtime_output_dir": str(output_dir),
         "runtime_config_paths": {market: str(path) for market, path in runtime_outputs.items()},
+        "assistant_config_path": str(assistant_output),
         "validation": validation,
         "build": build_results,
         "build_enabled": bool(build),
         "yaml": yaml_text,
         "next_steps": [
             *(f"./om config validate --source yaml --market {market} --config-yaml {shlex.quote(str(output_path))}" for market in selected_markets),
-            *(_build_commands(config_path=output_path, outputs=runtime_outputs, markets=selected_markets) if build else []),
+            *(_build_commands(config_path=output_path, outputs=all_outputs, markets=selected_markets) if build else []),
         ],
     }
     return attach_write_contract(

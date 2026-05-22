@@ -34,13 +34,13 @@
 Agent 工具：
 
 ```bash
-./om-agent run --tool strategy_replay_analyze --input-json '{"replay_path":"output/reports/strategy_replay.csv","min_sample":5}'
+./om-agent run --tool strategy_replay_analyze --input-json '{"replay_path":"output_shared/reports/strategy_replay.csv","min_sample":5}'
 ```
 
 统一 CLI：
 
 ```bash
-./om strategy-replay analyze --replay-path output/reports/strategy_replay.csv --min-sample 5
+./om strategy-replay analyze --replay-path output_shared/reports/strategy_replay.csv --min-sample 5
 ```
 
 也可以传 JSON / JSONL。JSON 顶层支持数组，或对象里的 `rows` / `records` / `candidates`。

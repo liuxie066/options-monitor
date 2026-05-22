@@ -70,7 +70,7 @@ def build_cash_summary_footer(
             market=str(market),
             account=str(account),
             output_format="json",
-            out_dir="output/state",
+            out_dir="output_shared/state",
             base_dir=base,
         )
         rows.append(

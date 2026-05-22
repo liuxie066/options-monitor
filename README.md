@@ -256,7 +256,7 @@ om run tick --config config.us.json --accounts lx sy
 
 ```bash
 ./om-agent run --tool candidate_rank_explain --input-json '{"mode":"put","top_n":5}'
-./om-agent run --tool candidate_rank_explain --input-json '{"candidate_path":"output/reports/sell_call_candidates.csv","mode":"call","top_n":5}'
+./om-agent run --tool candidate_rank_explain --input-json '{"candidate_path":"output_shared/reports/sell_call_candidates.csv","mode":"call","top_n":5}'
 ```
 
 这个工具只读已有 CSV，不重跑扫描，不发送通知，也不改配置。
@@ -274,7 +274,7 @@ om run tick --config config.us.json --accounts lx sy
 按 trace 文件查：
 
 ```bash
-./om-agent run --tool candidate_filter_explain --input-json '{"trace_path":"output/reports/candidate_filter_trace.jsonl","symbol":"NVDA"}'
+./om-agent run --tool candidate_filter_explain --input-json '{"trace_path":"output_shared/reports/candidate_filter_trace.jsonl","symbol":"NVDA"}'
 ```
 
 它会把 trace 汇总到这几个函数维度：
@@ -390,7 +390,7 @@ python3 -m src.application.option_intake --config /var/lib/options-monitor/confi
 
 ```bash
 ./om notify preview
-./om-agent run --tool preview_notification --input-json '{"alerts_path":"output/reports/symbols_alerts.txt","changes_path":"output/reports/symbols_changes.txt","account_label":"lx"}'
+./om-agent run --tool preview_notification --input-json '{"alerts_path":"output_shared/reports/symbols_alerts.txt","changes_path":"output_shared/reports/symbols_changes.txt","account_label":"lx"}'
 ```
 
 ### 离线复盘
@@ -398,8 +398,8 @@ python3 -m src.application.option_intake --config /var/lib/options-monitor/confi
 策略复盘分析是离线、只读、证据优先的：
 
 ```bash
-./om strategy-replay analyze --replay-path output/reports/strategy_replay.csv --min-sample 5
-./om-agent run --tool strategy_replay_analyze --input-json '{"replay_path":"output/reports/strategy_replay.csv","min_sample":5}'
+./om strategy-replay analyze --replay-path output_shared/reports/strategy_replay.csv --min-sample 5
+./om-agent run --tool strategy_replay_analyze --input-json '{"replay_path":"output_shared/reports/strategy_replay.csv","min_sample":5}'
 ```
 
 它的目标是回答“历史上哪些 DTE、Delta、过滤阈值更有效”，不是直接改线上配置。
@@ -548,10 +548,10 @@ bash scripts/install_agent_plugin.sh
 ./om inbound feishu --input-file feishu_event.json --format text
 ./om inbound feishu-ws --check
 ./om agent commands --format text
-./om agent llm-check --config-key us
+./om agent llm-check
 ```
 
-它只接受确定性只读命令，并带 sender allowlist、message_id 幂等和 SQLite audit。AgentRuntime command facade 默认开启，例如 `/status`、`/positions sy`、`/income 2026-05`；Feishu WS 使用同一层 command facade，仍可通过 runtime config 的 `agent.runtime.enabled` 显式关闭。`agent.llm` 默认关闭；显式配置 `provider: openai` 或 `provider: deepseek`、`model`、可选 `base_url` 和本机 API key env 后，只会把自然语言和同一对话的有限上下文翻译成 `om-llm-intent-v1` 只读 intent，再走同一条 router。`feishu-ws` 可作为长驻 Feishu App long-connection client，通过飞书 SDK 长连接接收消息，并自动回复，不需要公网 HTTPS callback；reaction、reply、queue 行为配置在 runtime config 的 `inbound.feishu_ws` 下。接飞书、微信或 Hermes 前先看
+它只接受确定性只读命令，并带 sender allowlist、message_id 幂等和 SQLite audit。AgentRuntime command facade 默认开启，例如 `/status`、`/positions sy`、`/income 2026-05`；Feishu WS 使用同一层 command facade，由 assistant config 的 `assistant.mode` 控制。LLM 默认关闭；显式把 `assistant.mode` 设为 `llm_router` 或 `agent_loop`，并配置 `assistant.llm.provider`、`model`、可选 `base_url` 和本机 API key env 后，只会把自然语言和同一对话的有限上下文翻译成 `om-llm-intent-v1` 只读 intent，再走同一条 router。`feishu-ws` 可作为长驻 Feishu App long-connection client，通过飞书 SDK 长连接接收消息，并自动回复，不需要公网 HTTPS callback；reaction、reply、queue 行为配置在 assistant config 的 `inbound.feishu_ws` 下。接飞书、微信或 Hermes 前先看
 [docs/INBOUND_CONTROL.md](docs/INBOUND_CONTROL.md)。
 
 AI Cofunder 证据交接：

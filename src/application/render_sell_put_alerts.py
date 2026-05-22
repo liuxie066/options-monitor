@@ -275,7 +275,7 @@ def render_one(row) -> str:
 def render_sell_put_alerts(
     *,
     input_path: str | Path | None = None,
-    report_dir: str | Path = 'output/reports',
+    report_dir: str | Path = 'output_shared/reports',
     top: int = 5,
     symbol: str | None = None,
     output_path: str | Path | None = None,
@@ -333,7 +333,7 @@ def render_sell_put_alerts(
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='Render Sell Put alert text from candidate CSV')
     parser.add_argument('--input', default=None, help='Input CSV path (default: <report-dir>/sell_put_candidates_labeled.csv)')
-    parser.add_argument('--report-dir', default='output/reports', help='Report dir for default input/output (default: output/reports)')
+    parser.add_argument('--report-dir', default='output_shared/reports', help='Report dir for default input/output (default: output_shared/reports)')
     parser.add_argument('--top', type=int, default=5)
     parser.add_argument('--symbol', default=None)
     parser.add_argument('--output', default=None, help='Output txt path (default: <report-dir>/sell_put_alerts.txt)')

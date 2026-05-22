@@ -111,13 +111,11 @@
       "opend_alert_after_consecutive_failures": 3,
       "opend_alert_send_recovery_notice": true
     },
-    "agent": {
-      "runtime": {
-        "enabled": true,
-        "context_window_messages": 8
-      },
+    "assistant": {
+      "mode": "deterministic",
+      "context_window_messages": 8,
+      "default_market_scope": "us",
       "llm": {
-        "enabled": false,
         "provider": "",
         "base_url": "",
         "model": "",

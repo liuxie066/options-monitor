@@ -122,7 +122,7 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
         input_schema={
             "config_key": "us|hk",
             "config_path": "optional explicit config path",
-            "state_dir": "optional state dir; defaults to output/state",
+            "state_dir": "optional state dir; defaults to output_shared/state",
             "state": "optional explicit scheduler state file",
             "schedule_key": "optional schedule key; defaults to schedule",
             "account": "optional account label",
@@ -160,7 +160,7 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
         input_schema={
             "mode": "optional put|call|all; defaults to all",
             "top_n": "optional int, max 100; defaults to 10",
-            "report_dir": "optional report dir; defaults to output/reports then output/agent_plugin/reports",
+            "report_dir": "optional report dir; defaults to output_shared/reports then output_shared/agent_tools/reports",
             "output_dir": "optional output root; uses <output_dir>/reports",
             "candidate_path": "optional explicit candidate CSV path",
             "candidate_paths": "optional list of candidate CSV paths",
@@ -171,7 +171,7 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
         safe_default_input={"mode": "all", "top_n": 10},
         examples=(
             {"input": {"mode": "put", "top_n": 5}},
-            {"input": {"candidate_path": "output/reports/sell_put_candidates_labeled.csv", "mode": "put"}},
+            {"input": {"candidate_path": "output_shared/reports/sell_put_candidates_labeled.csv", "mode": "put"}},
         ),
     ),
     AgentToolDefinition(
@@ -194,7 +194,7 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
         safe_default_input={"symbol": "NVDA"},
         examples=(
             {"input": {"run_id": "20260514T100000Z", "account": "lx", "symbol": "NVDA"}},
-            {"input": {"trace_path": "output/reports/candidate_filter_trace.jsonl", "symbol": "NVDA"}},
+            {"input": {"trace_path": "output_shared/reports/candidate_filter_trace.jsonl", "symbol": "NVDA"}},
         ),
     ),
     AgentToolDefinition(
@@ -217,7 +217,7 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
         risk_level="read_only",
         safe_default_input={"min_sample": 5},
         examples=(
-            {"input": {"replay_path": "output/reports/strategy_replay.csv", "min_sample": 5}},
+            {"input": {"replay_path": "output_shared/reports/strategy_replay.csv", "min_sample": 5}},
             {"input": {"rows": [{"symbol": "NVDA", "dte": 30, "delta": -0.2, "actual_return": 0.03}], "min_sample": 1}},
         ),
     ),
@@ -328,7 +328,7 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
             "data_config": "optional explicit data config path",
             "account": "optional account label",
             "broker": "optional broker name, preferred public field",
-            "output_dir": "optional output root; defaults to output/agent_plugin",
+            "output_dir": "optional output root; defaults to output_shared/agent_tools",
             "ttl_sec": "optional int",
             "timeout_sec": "optional int",
         },
@@ -346,7 +346,7 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
         input_schema={
             "config_key": "us|hk",
             "config_path": "optional explicit config path",
-            "output_dir": "optional output root; defaults to output/agent_plugin",
+            "output_dir": "optional output root; defaults to output_shared/agent_tools",
             "context_path": "optional explicit option_positions_context.json path",
             "required_data_root": "optional explicit required_data root",
         },
@@ -367,7 +367,7 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
             "data_config": "optional explicit data config path",
             "account": "optional account label",
             "broker": "optional broker name, preferred public field",
-            "output_dir": "optional output root; defaults to output/agent_plugin",
+            "output_dir": "optional output root; defaults to output_shared/agent_tools",
             "ttl_sec": "optional int",
             "timeout_sec": "optional int",
         },
@@ -418,8 +418,8 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
         examples=(
             {
                 "input": {
-                    "alerts_path": "output/reports/symbols_alerts.txt",
-                    "changes_path": "output/reports/symbols_changes.txt",
+                    "alerts_path": "output_shared/reports/symbols_alerts.txt",
+                    "changes_path": "output_shared/reports/symbols_changes.txt",
                 }
             },
         ),
@@ -434,8 +434,8 @@ AGENT_TOOL_DEFINITIONS: tuple[AgentToolDefinition, ...] = (
             "config_key": "us|hk",
             "config_path": "optional explicit config path",
             "accounts": "optional list[str]",
-            "report_dir": "optional report dir; defaults to output/reports",
-            "state_dir": "optional legacy state dir; defaults to output/state",
+            "report_dir": "optional report dir; defaults to output_shared/reports",
+            "state_dir": "optional legacy state dir; defaults to output_shared/state",
             "shared_state_dir": "optional shared state dir; defaults to output_shared/state",
             "accounts_root": "optional accounts output root; defaults to output_accounts",
             "runs_root": "optional run history root; defaults to output_runs",

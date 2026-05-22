@@ -58,7 +58,7 @@ def test_validate_config_accepts_valid_openclaw_notification_route() -> None:
     mod.validate_config(cfg)
 
 
-def test_validate_config_rejects_non_bool_agent_runtime_enabled() -> None:
+def test_validate_config_rejects_retired_agent_config() -> None:
     import src.application.config_validator as mod
 
     cfg = _base_cfg()
@@ -68,172 +68,181 @@ def test_validate_config_rejects_non_bool_agent_runtime_enabled() -> None:
         mod.validate_config(cfg)
         raise AssertionError("expected SystemExit")
     except SystemExit as exc:
-        assert "agent.runtime.enabled must be a boolean" in str(exc)
+        assert "agent.* config is retired; use assistant.*" in str(exc)
 
 
-def test_validate_config_rejects_invalid_agent_context_window() -> None:
+def test_validate_config_rejects_invalid_assistant_context_window() -> None:
     import src.application.config_validator as mod
 
     cfg = _base_cfg()
-    cfg["agent"] = {"runtime": {"context_window_messages": "many"}}
+    cfg["assistant"] = {"context_window_messages": "many"}
 
     try:
         mod.validate_config(cfg)
         raise AssertionError("expected SystemExit")
     except SystemExit as exc:
-        assert "agent.runtime.context_window_messages must be an integer" in str(exc)
+        assert "assistant.context_window_messages must be an integer" in str(exc)
 
     cfg = _base_cfg()
-    cfg["agent"] = {"runtime": {"context_window_messages": 21}}
+    cfg["assistant"] = {"context_window_messages": 21}
 
     try:
         mod.validate_config(cfg)
         raise AssertionError("expected SystemExit")
     except SystemExit as exc:
-        assert "agent.runtime.context_window_messages must be <= 20" in str(exc)
+        assert "assistant.context_window_messages must be <= 20" in str(exc)
 
 
-def test_validate_config_rejects_non_object_agent() -> None:
+def test_validate_config_accepts_disabled_assistant_mode() -> None:
     import src.application.config_validator as mod
 
     cfg = _base_cfg()
-    cfg["agent"] = False
+    cfg["assistant"] = {"mode": "disabled"}
 
-    try:
-        mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "agent must be an object" in str(exc)
+    mod.validate_config(cfg)
 
 
-def test_validate_config_rejects_invalid_agent_llm_config() -> None:
+def test_validate_config_rejects_non_object_assistant() -> None:
     import src.application.config_validator as mod
 
     cfg = _base_cfg()
-    cfg["agent"] = {"llm": {"enabled": "yes"}}
+    cfg["assistant"] = False
 
     try:
         mod.validate_config(cfg)
         raise AssertionError("expected SystemExit")
     except SystemExit as exc:
-        assert "agent.llm.enabled must be a boolean" in str(exc)
-
-    cfg = _base_cfg()
-    cfg["agent"] = {"llm": {"provider": ["openai"]}}
-
-    try:
-        mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "agent.llm.provider must be a string" in str(exc)
-
-    cfg = _base_cfg()
-    cfg["agent"] = {"llm": {"base_url": ["https://llm.example/v1"]}}
-
-    try:
-        mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "agent.llm.base_url must be a string" in str(exc)
-
-    cfg = _base_cfg()
-    cfg["agent"] = {"llm": {"base_url": "llm.example/v1"}}
-
-    try:
-        mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "agent.llm.base_url must start with http:// or https:// when set" in str(exc)
-
-    cfg = _base_cfg()
-    cfg["agent"] = {"llm": {"confidence_min": 1.5}}
-
-    try:
-        mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "agent.llm.confidence_min must be between 0 and 1" in str(exc)
-
-    cfg = _base_cfg()
-    cfg["agent"] = {"llm": {"timeout_seconds": "slow"}}
-
-    try:
-        mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "agent.llm.timeout_seconds must be an integer" in str(exc)
-
-    cfg = _base_cfg()
-    cfg["agent"] = {"llm": {"timeout_seconds": 121}}
-
-    try:
-        mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "agent.llm.timeout_seconds must be <= 120" in str(exc)
-
-    cfg = _base_cfg()
-    cfg["agent"] = {"llm": {"max_output_tokens": 63}}
-
-    try:
-        mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "agent.llm.max_output_tokens must be >= 64" in str(exc)
-
-    cfg = _base_cfg()
-    cfg["agent"] = {"llm": {"max_output_tokens": 4097}}
-
-    try:
-        mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "agent.llm.max_output_tokens must be <= 4096" in str(exc)
-
-    cfg = _base_cfg()
-    cfg["agent"] = {"llm": {"provider": "anthropic"}}
-
-    try:
-        mod.validate_config(cfg)
-        raise AssertionError("expected SystemExit")
-    except SystemExit as exc:
-        assert "agent.llm.provider must be one of: openai, deepseek" in str(exc)
+        assert "assistant must be an object" in str(exc)
 
 
-def test_validate_config_requires_complete_agent_llm_when_enabled() -> None:
+def test_validate_config_rejects_invalid_assistant_llm_config() -> None:
     import src.application.config_validator as mod
 
     cfg = _base_cfg()
-    cfg["agent"] = {"llm": {"enabled": True, "provider": "", "model": "gpt-5.2", "api_key_env": "OM_LLM_API_KEY"}}
+    cfg["assistant"] = {"llm": {"enabled": True}}
 
     try:
         mod.validate_config(cfg)
         raise AssertionError("expected SystemExit")
     except SystemExit as exc:
-        assert "agent.llm.provider is required when agent.llm.enabled is true" in str(exc)
+        assert "assistant.llm.enabled is retired; use assistant.mode" in str(exc)
 
     cfg = _base_cfg()
-    cfg["agent"] = {"llm": {"enabled": True, "provider": "openai", "model": "", "api_key_env": "OM_LLM_API_KEY"}}
+    cfg["assistant"] = {"llm": {"provider": ["openai"]}}
 
     try:
         mod.validate_config(cfg)
         raise AssertionError("expected SystemExit")
     except SystemExit as exc:
-        assert "agent.llm.model is required when agent.llm.enabled is true" in str(exc)
+        assert "assistant.llm.provider must be a string" in str(exc)
 
     cfg = _base_cfg()
-    cfg["agent"] = {"llm": {"enabled": True, "provider": "openai", "model": "gpt-5.2", "api_key_env": ""}}
+    cfg["assistant"] = {"llm": {"base_url": ["https://llm.example/v1"]}}
 
     try:
         mod.validate_config(cfg)
         raise AssertionError("expected SystemExit")
     except SystemExit as exc:
-        assert "agent.llm.api_key_env is required when agent.llm.enabled is true" in str(exc)
+        assert "assistant.llm.base_url must be a string" in str(exc)
 
     cfg = _base_cfg()
-    cfg["agent"] = {
+    cfg["assistant"] = {"llm": {"base_url": "llm.example/v1"}}
+
+    try:
+        mod.validate_config(cfg)
+        raise AssertionError("expected SystemExit")
+    except SystemExit as exc:
+        assert "assistant.llm.base_url must start with http:// or https:// when set" in str(exc)
+
+    cfg = _base_cfg()
+    cfg["assistant"] = {"llm": {"confidence_min": 1.5}}
+
+    try:
+        mod.validate_config(cfg)
+        raise AssertionError("expected SystemExit")
+    except SystemExit as exc:
+        assert "assistant.llm.confidence_min must be between 0 and 1" in str(exc)
+
+    cfg = _base_cfg()
+    cfg["assistant"] = {"llm": {"timeout_seconds": "slow"}}
+
+    try:
+        mod.validate_config(cfg)
+        raise AssertionError("expected SystemExit")
+    except SystemExit as exc:
+        assert "assistant.llm.timeout_seconds must be an integer" in str(exc)
+
+    cfg = _base_cfg()
+    cfg["assistant"] = {"llm": {"timeout_seconds": 121}}
+
+    try:
+        mod.validate_config(cfg)
+        raise AssertionError("expected SystemExit")
+    except SystemExit as exc:
+        assert "assistant.llm.timeout_seconds must be <= 120" in str(exc)
+
+    cfg = _base_cfg()
+    cfg["assistant"] = {"llm": {"max_output_tokens": 63}}
+
+    try:
+        mod.validate_config(cfg)
+        raise AssertionError("expected SystemExit")
+    except SystemExit as exc:
+        assert "assistant.llm.max_output_tokens must be >= 64" in str(exc)
+
+    cfg = _base_cfg()
+    cfg["assistant"] = {"llm": {"max_output_tokens": 4097}}
+
+    try:
+        mod.validate_config(cfg)
+        raise AssertionError("expected SystemExit")
+    except SystemExit as exc:
+        assert "assistant.llm.max_output_tokens must be <= 4096" in str(exc)
+
+    cfg = _base_cfg()
+    cfg["assistant"] = {"llm": {"provider": "anthropic"}}
+
+    try:
+        mod.validate_config(cfg)
+        raise AssertionError("expected SystemExit")
+    except SystemExit as exc:
+        assert "assistant.llm.provider must be one of: openai, deepseek" in str(exc)
+
+
+def test_validate_config_requires_complete_assistant_llm_when_mode_uses_llm() -> None:
+    import src.application.config_validator as mod
+
+    cfg = _base_cfg()
+    cfg["assistant"] = {"mode": "llm_router", "llm": {"provider": "", "model": "gpt-5.2", "api_key_env": "OM_LLM_API_KEY"}}
+
+    try:
+        mod.validate_config(cfg)
+        raise AssertionError("expected SystemExit")
+    except SystemExit as exc:
+        assert "assistant.llm.provider is required when assistant.mode uses LLM" in str(exc)
+
+    cfg = _base_cfg()
+    cfg["assistant"] = {"mode": "llm_router", "llm": {"provider": "openai", "model": "", "api_key_env": "OM_LLM_API_KEY"}}
+
+    try:
+        mod.validate_config(cfg)
+        raise AssertionError("expected SystemExit")
+    except SystemExit as exc:
+        assert "assistant.llm.model is required when assistant.mode uses LLM" in str(exc)
+
+    cfg = _base_cfg()
+    cfg["assistant"] = {"mode": "llm_router", "llm": {"provider": "openai", "model": "gpt-5.2", "api_key_env": ""}}
+
+    try:
+        mod.validate_config(cfg)
+        raise AssertionError("expected SystemExit")
+    except SystemExit as exc:
+        assert "assistant.llm.api_key_env is required when assistant.mode uses LLM" in str(exc)
+
+    cfg = _base_cfg()
+    cfg["assistant"] = {
+        "mode": "llm_router",
         "llm": {
-            "enabled": True,
             "provider": "openai",
             "base_url": "https://llm.example/v1",
             "model": "gpt-5.2",
@@ -245,9 +254,9 @@ def test_validate_config_requires_complete_agent_llm_when_enabled() -> None:
     mod.validate_config(cfg)
 
     cfg = _base_cfg()
-    cfg["agent"] = {
+    cfg["assistant"] = {
+        "mode": "llm_router",
         "llm": {
-            "enabled": True,
             "provider": "deepseek",
             "base_url": "https://api.deepseek.com",
             "model": "deepseek-v4-flash",

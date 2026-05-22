@@ -270,7 +270,7 @@ def main():
     parser.add_argument("--account", default=None)
     parser.add_argument("--shared-out", default=None, help="Optional output path for shared context cache")
     parser.add_argument("--out", default=None, help="Output JSON path (default: <state-dir>/option_positions_context.json)")
-    parser.add_argument("--state-dir", default="output/state", help="Directory for outputs (default: output/state)")
+    parser.add_argument("--state-dir", default="output_shared/state", help="Directory for outputs (default: output_shared/state)")
     parser.add_argument("--quiet", action="store_true", help="suppress stdout (scheduled/cron)")
     args = parser.parse_args()
 

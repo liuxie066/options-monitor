@@ -65,3 +65,20 @@ def test_load_exchange_rate_info_can_read_cache_without_fetch(tmp_path: Path) ->
     out = load_exchange_rate_info(cache_path=cache_path, fetch_latest_on_miss=False)
 
     assert out == {"rates": {"USDCNY": 7.21}, "timestamp": "2026-04-21T00:00:00+00:00"}
+
+
+def test_get_usd_per_cny_uses_shared_state_cache(tmp_path: Path, monkeypatch) -> None:
+    from src.infrastructure import exchange_rates
+
+    calls: list[Path] = []
+
+    def _fake_rates(*, cache_path: Path, **_kwargs):  # type: ignore[no-untyped-def]
+        calls.append(Path(cache_path))
+        return {"rates": {"USDCNY": 7.25}}
+
+    monkeypatch.setattr(exchange_rates, "get_exchange_rates_or_fetch_latest", _fake_rates)
+
+    out = exchange_rates.get_usd_per_cny_exchange_rate(tmp_path)
+
+    assert out == 1.0 / 7.25
+    assert calls == [(tmp_path / "output_shared" / "state" / "rate_cache.json").resolve()]

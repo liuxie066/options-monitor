@@ -294,9 +294,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--no-event-risk-enabled", dest="event_risk_enabled", action="store_false")
     parser.add_argument("--event-risk-mode", dest="event_risk_mode", type=str, default="warn")
     parser.add_argument("--quiet", action="store_true", help="quiet mode: suppress human-friendly prints")
-    parser.add_argument("--output", default=None, help="Output CSV path (default: output/reports/sell_put_candidates.csv)")
+    parser.add_argument("--output", default=None, help="Output CSV path (default: output_shared/reports/sell_put_candidates.csv)")
     parser.add_argument("--reject-log-output", default=None, help="Reject log CSV path (default: <output>_reject_log.csv)")
-    parser.add_argument("--input-root", default=None, help="Input root containing parsed/ required_data CSVs (default: ./output)")
+    parser.add_argument("--input-root", default=None, help="Input root containing parsed/ required_data CSVs (default: output_shared/required_data)")
     return parser.parse_args(argv)
 
 
@@ -304,8 +304,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
 
     base = Path(__file__).resolve().parents[2]
-    input_root = Path(args.input_root).resolve() if args.input_root else (base / "output").resolve()
-    out_path = Path(args.output).resolve() if args.output else (base / "output" / "reports" / "sell_put_candidates.csv")
+    input_root = Path(args.input_root).resolve() if args.input_root else (base / "output_shared" / "required_data").resolve()
+    out_path = Path(args.output).resolve() if args.output else (base / "output_shared" / "reports" / "sell_put_candidates.csv")
 
     try:
         run_sell_put_scan(

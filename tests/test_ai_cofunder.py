@@ -388,7 +388,7 @@ def test_ai_cofunder_collects_strategy_evidence_from_profile_runtime_root(tmp_pa
                 "runtime_root": str(runtime_root),
                 "paths": {
                     "runs_root": str(runs_root),
-                    "report_dir": str(runtime_root / "output" / "reports"),
+                    "report_dir": str(runtime_root / "output_shared" / "reports"),
                     "shared_state_dir": str(runtime_root / "output_shared" / "state"),
                 },
             },
@@ -778,7 +778,7 @@ def test_ai_cofunder_agent_tool_runs_with_local_runtime_artifacts(tmp_path: Path
         encoding="utf-8",
     )
     shared_state_dir = tmp_path / "output_shared" / "state"
-    report_dir = tmp_path / "output" / "reports"
+    report_dir = tmp_path / "output_shared" / "reports"
     accounts_root = tmp_path / "output_accounts"
     runs_root = tmp_path / "output_runs"
     run_dir = runs_root / "run-1"

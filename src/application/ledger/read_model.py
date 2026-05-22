@@ -304,7 +304,7 @@ def build_position_monthly_income_report(
         broker=broker,
         month=month,
         rates=get_exchange_rates_or_fetch_latest(
-            cache_path=(base / "output" / "state" / "rate_cache.json").resolve(),
+            cache_path=(base / "output_shared" / "state" / "rate_cache.json").resolve(),
         ),
         trade_events=trade_events,
     )

@@ -52,6 +52,6 @@ def test_scan_pipeline_defaults_runtime_outputs_to_runtime_root(monkeypatch, tmp
     assert captured["load_config_base"] == repo_root
     assert captured["load_config_path"] == config_path.resolve()
     assert captured["pipeline_base"] == runtime_root.resolve()
-    assert captured["report_dir"] == (runtime_root / "output" / "reports").resolve()
-    assert captured["state_dir"] == (runtime_root / "output" / "state").resolve()
-    assert captured["required_data_dir"] == (runtime_root / "output").resolve()
+    assert captured["report_dir"] == (runtime_root / "output_shared" / "reports").resolve()
+    assert captured["state_dir"] == (runtime_root / "output_shared" / "state").resolve()
+    assert captured["required_data_dir"] == (runtime_root / "output_shared" / "required_data").resolve()

@@ -3,8 +3,8 @@
   "accounts": ["lx", "sy"],
   "max_run_age_minutes": 60,
   "paths": {
-    "report_dir": "output/reports",
-    "state_dir": "output/state",
+    "report_dir": "output_shared/reports",
+    "state_dir": "output_shared/state",
     "shared_state_dir": "output_shared/state",
     "accounts_root": "output_accounts",
     "runs_root": "output_runs"

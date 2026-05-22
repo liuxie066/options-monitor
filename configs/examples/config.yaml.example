@@ -26,12 +26,11 @@ markets:
       - "0700.HK"
       - "9992.HK"
 
-agent:
-  runtime:
-    enabled: true
-    context_window_messages: 8
+assistant:
+  mode: deterministic
+  context_window_messages: 8
+  default_market_scope: us
   llm:
-    enabled: false
     provider: ""
     base_url: ""
     model: ""

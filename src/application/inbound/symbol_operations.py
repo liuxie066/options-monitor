@@ -12,6 +12,7 @@ from src.application.config_loader import resolve_watchlist_config, set_watchlis
 from src.application.config_validator import validate_config
 from src.application.inbound.contracts import InboundIntent, InboundRequest
 from src.application.inbound.operation_policy import enforce_symbol_write_allowed
+from src.application.inbound.operation_signature import verify_operation_signature
 from src.application.inbound.operation_store import InboundOperationStore, operation_is_expired
 from src.application.inbound.operation_status_text import cannot_repeat_message
 from src.application.runtime_config_paths import write_json_atomic
@@ -114,6 +115,7 @@ def _confirm_operation(*, operation_id: str | None, request: InboundRequest, sto
         result = {"operation_id": operation_id, "status": "failed", "reason": "payload_hash_mismatch"}
         store.mark_failed(operation_id, result=result)
         raise AgentToolError(code="INTERNAL_ERROR", message="pending symbol operation payload hash mismatch; refusing to write config", details=result)
+    verify_operation_signature(operation)
     if not store.mark_confirmed(operation_id):
         current = store.get(operation_id) or {}
         current_status = str(current.get("status") or "-")

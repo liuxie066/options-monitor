@@ -71,6 +71,10 @@ def parse_inbound_text(text: str, *, now_fn: Callable[[], date] | None = None) -
 
     if compact in {"帮助", "help", "/help"}:
         return InboundIntent(name="help", arguments={})
+    if compact in {"你好", "您好", "hi", "hello", "嗨"}:
+        return InboundIntent(name="small_talk", arguments={"kind": "hello"})
+    if compact in {"你能做什么", "能做什么", "你会什么", "功能", "菜单"}:
+        return InboundIntent(name="help", arguments={})
 
     if compact in {"待确认", "当前预览", "待确认记录", "pending", "pendingoperations"} or lower in {
         "pending",

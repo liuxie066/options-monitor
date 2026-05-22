@@ -9,7 +9,12 @@ import yaml
 from src.application.agent_tool_contracts import AgentToolError
 from src.application.config_defaults import DEFAULT_CONFIG, DEFAULT_CONFIG_REF
 from src.application.config_validator import validate_config
-from src.application.config_yaml import RESOLVED_KEY, resolve_yaml_runtime_config
+from src.application.config_yaml import (
+    RESOLVED_KEY,
+    build_yaml_assistant_config_file,
+    resolve_yaml_assistant_config,
+    resolve_yaml_runtime_config,
+)
 from src.application.config_yaml_init import init_yaml_config
 from src.application.runtime_config_freshness import GENERATED_KEY
 
@@ -35,12 +40,11 @@ accounts:
 features:
   close_advice: false
 
-agent:
-  runtime:
-    enabled: true
-    context_window_messages: 6
+assistant:
+  mode: deterministic
+  context_window_messages: 6
+  default_market_scope: us
   llm:
-    enabled: false
     provider: ""
     base_url: ""
     model: ""
@@ -100,13 +104,8 @@ def test_yaml_config_resolves_user_overrides_and_defaults(tmp_path: Path) -> Non
     assert cfg["account_settings"]["sy"] == {"type": "external_holdings", "holdings_account": "sy"}
     assert cfg["portfolio"]["source_by_account"] == {"lx": "futu", "sy": "holdings"}
     assert cfg["close_advice"]["enabled"] is False
-    assert cfg["agent"]["runtime"]["enabled"] is True
-    assert cfg["agent"]["runtime"]["context_window_messages"] == 6
-    assert cfg["agent"]["llm"]["base_url"] == ""
-    assert cfg["agent"]["llm"]["api_key_env"] == "OM_LLM_API_KEY"
-    assert cfg["agent"]["llm"]["timeout_seconds"] == 20
-    assert cfg["agent"]["llm"]["max_output_tokens"] == 512
-    assert cfg["inbound"]["feishu_ws"]["ack_reaction"] == "THUMBSUP"
+    assert "assistant" not in cfg
+    assert "inbound" not in cfg
     assert cfg["symbols"][0]["symbol"] == "NVDA"
     assert cfg["symbols"][0]["sell_put"]["min_dte"] == 20
     futu = cfg["symbols"][1]
@@ -123,6 +122,90 @@ def test_yaml_config_resolves_user_overrides_and_defaults(tmp_path: Path) -> Non
     assert cfg[RESOLVED_KEY]["default_source"] == DEFAULT_CONFIG_REF
 
     validate_config(json.loads(json.dumps(cfg)))
+
+
+def test_yaml_assistant_config_merges_system_defaults(tmp_path: Path) -> None:
+    config_path = _write_yaml(
+        tmp_path / "config.yaml",
+        """\
+accounts:
+  lx:
+    type: external_holdings
+    holdings_account: lx
+markets:
+  us:
+    accounts: [lx]
+    symbols: [FUTU]
+inbound:
+  feishu_ws:
+    ack_reaction: THUMBSUP
+""",
+    )
+
+    cfg, _meta = resolve_yaml_assistant_config(repo_root=REPO_ROOT, config_path=config_path)
+
+    assert cfg["assistant"]["mode"] == "deterministic"
+    assert cfg["assistant"]["llm"]["api_key_env"] == "OM_LLM_API_KEY"
+    assert cfg["inbound"]["feishu_ws"]["reply_enabled"] is True
+    assert cfg["inbound"]["feishu_ws"]["queue_size"] == 100
+    assert cfg["inbound"]["feishu_ws"]["ack_reaction"] == "THUMBSUP"
+
+
+def test_yaml_assistant_config_unwraps_explicit_system_defaults(tmp_path: Path) -> None:
+    config_path = _write_yaml(
+        tmp_path / "config.yaml",
+        """\
+accounts:
+  lx:
+    type: external_holdings
+    holdings_account: lx
+markets:
+  us:
+    accounts: [lx]
+    symbols: [FUTU]
+""",
+    )
+    system_path = tmp_path / "system.json"
+    system_path.write_text(
+        json.dumps(
+            {
+                "defaults": {
+                    "assistant": {
+                        "mode": "deterministic",
+                        "context_window_messages": 3,
+                        "default_market_scope": "hk",
+                        "llm": {"provider": "openai"},
+                    },
+                    "inbound": {"feishu_ws": {"ack_reaction": "SMILE", "queue_size": 7}},
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    cfg, _meta = resolve_yaml_assistant_config(
+        repo_root=REPO_ROOT,
+        config_path=config_path,
+        system_config_path=system_path,
+    )
+
+    assert cfg["assistant"]["mode"] == "deterministic"
+    assert cfg["assistant"]["context_window_messages"] == 3
+    assert cfg["assistant"]["default_market_scope"] == "hk"
+    assert cfg["assistant"]["llm"]["provider"] == "openai"
+    assert cfg["inbound"]["feishu_ws"]["ack_reaction"] == "SMILE"
+    assert cfg["inbound"]["feishu_ws"]["queue_size"] == 7
+
+    output_path = tmp_path / "config.assistant.json"
+    build_yaml_assistant_config_file(
+        repo_root=REPO_ROOT,
+        config_path=config_path,
+        system_config_path=system_path,
+        output_config_path=output_path,
+    )
+    generated = json.loads(output_path.read_text(encoding="utf-8"))
+    assert f"--system-config {system_path}" in generated[GENERATED_KEY]["rebuild_command"]
 
 
 def test_default_config_matches_legacy_system_json() -> None:
@@ -150,19 +233,30 @@ def test_config_init_writes_starter_yaml_and_runtime_configs(tmp_path: Path) -> 
     assert (runtime_dir / "config.hk.json").exists()
     payload = yaml.safe_load(output_path.read_text(encoding="utf-8"))
     assert payload["accounts"]["lx"]["futu_account_id"] == "12345678"
-    assert payload["agent"]["runtime"]["enabled"] is True
-    assert payload["agent"]["runtime"]["context_window_messages"] == 8
-    assert payload["agent"]["llm"]["enabled"] is False
-    assert payload["agent"]["llm"]["base_url"] == ""
-    assert payload["agent"]["llm"]["api_key_env"] == "OM_LLM_API_KEY"
-    assert payload["agent"]["llm"]["timeout_seconds"] == 20
-    assert payload["agent"]["llm"]["max_output_tokens"] == 512
+    assert payload["assistant"]["mode"] == "deterministic"
+    assert payload["assistant"]["context_window_messages"] == 8
+    assert payload["assistant"]["default_market_scope"] == "us"
+    assert payload["assistant"]["llm"]["base_url"] == ""
+    assert payload["assistant"]["llm"]["api_key_env"] == "OM_LLM_API_KEY"
+    assert payload["assistant"]["llm"]["timeout_seconds"] == 20
+    assert payload["assistant"]["llm"]["max_output_tokens"] == 512
     assert payload["markets"]["us"]["accounts"] == ["lx", "sy"]
     assert payload["markets"]["hk"]["symbols"] == ["0700.HK", "9992.HK"]
     us_cfg = json.loads((runtime_dir / "config.us.json").read_text(encoding="utf-8"))
     hk_cfg = json.loads((runtime_dir / "config.hk.json").read_text(encoding="utf-8"))
+    assistant_cfg = json.loads((runtime_dir / "config.assistant.json").read_text(encoding="utf-8"))
     assert us_cfg[GENERATED_KEY]["source_format"] == "yaml"
+    assert "assistant" not in us_cfg
+    assert "inbound" not in us_cfg
     assert hk_cfg[GENERATED_KEY]["market"] == "hk"
+    assert assistant_cfg["assistant"]["mode"] == "deterministic"
+    assert assistant_cfg["assistant"]["context_window_messages"] == 8
+    assert assistant_cfg["assistant"]["default_market_scope"] == "us"
+    assert assistant_cfg["assistant"]["llm"]["base_url"] == ""
+    assert assistant_cfg["assistant"]["llm"]["api_key_env"] == "OM_LLM_API_KEY"
+    assert assistant_cfg["assistant"]["llm"]["timeout_seconds"] == 20
+    assert assistant_cfg["assistant"]["llm"]["max_output_tokens"] == 512
+    assert assistant_cfg["inbound"]["feishu_ws"]["ack_reaction"] == "THUMBSUP"
 
 
 def test_config_init_cli_supports_dry_run(tmp_path: Path, capsys) -> None:

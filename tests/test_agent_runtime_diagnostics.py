@@ -4,44 +4,34 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
+from src.application.agent_tool_contracts import AgentToolError
 from src.application.agent_runtime.diagnostics import check_llm_translator
 from src.application.agent_runtime.llm_intent_schema import llm_intent_json_schema
 
 
-def _runtime_config(*, llm: dict[str, Any] | None = None) -> dict[str, Any]:
+def _assistant_config(*, llm: dict[str, Any] | None = None) -> dict[str, Any]:
+    llm_cfg = dict(llm or {"enabled": False})
+    enabled = bool(llm_cfg.pop("enabled", False))
     return {
-        "accounts": ["sy"],
-        "account_settings": {"sy": {"type": "futu"}},
-        "portfolio": {
-            "broker": "富途",
-            "account": "sy",
-            "source": "futu",
-            "base_currency": "CNY",
-        },
-        "symbols": [
-            {
-                "symbol": "NVDA",
-                "market": "US",
-                "fetch": {"source": "futu"},
-                "sell_put": {"enabled": False},
-                "sell_call": {"enabled": False},
-            }
-        ],
-        "agent": {
-            "runtime": {"enabled": True, "context_window_messages": 8},
-            "llm": llm or {"enabled": False},
+        "assistant": {
+            "mode": "llm_router" if enabled else "deterministic",
+            "context_window_messages": 8,
+            "default_market_scope": "us",
+            "llm": llm_cfg,
         },
     }
 
 
 def _write_config(tmp_path: Path, cfg: dict[str, Any]) -> Path:
-    path = tmp_path / "config.us.json"
+    path = tmp_path / "config.assistant.json"
     path.write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
     return path
 
 
 def test_llm_check_allows_disabled_translator_without_api_key(tmp_path: Path) -> None:
-    cfg_path = _write_config(tmp_path, _runtime_config())
+    cfg_path = _write_config(tmp_path, _assistant_config())
 
     out = check_llm_translator(
         repo_root=tmp_path,
@@ -59,10 +49,59 @@ def test_llm_check_allows_disabled_translator_without_api_key(tmp_path: Path) ->
     assert checks["live_probe"]["status"] == "skipped"
 
 
+def test_llm_check_rejects_missing_explicit_assistant_config(tmp_path: Path) -> None:
+    with pytest.raises(AgentToolError) as exc:
+        check_llm_translator(
+            repo_root=tmp_path,
+            config_path=tmp_path / "missing.assistant.json",
+            include_local_env_file=False,
+        )
+
+    assert exc.value.code == "CONFIG_ERROR"
+    assert "assistant config not found" in exc.value.message
+
+
+def test_llm_check_rejects_invalid_assistant_config(tmp_path: Path) -> None:
+    cfg_path = tmp_path / "config.assistant.json"
+    cfg_path.write_text(
+        json.dumps({"assistant": {"mode": "unknown"}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(AgentToolError) as exc:
+        check_llm_translator(
+            repo_root=tmp_path,
+            config_path=cfg_path,
+            include_local_env_file=False,
+        )
+
+    assert exc.value.code == "CONFIG_ERROR"
+    assert "assistant config validation failed" in exc.value.message
+    assert exc.value.details["error"] == "assistant.mode must be one of: disabled, deterministic, llm_router, agent_loop"
+
+
+def test_llm_check_rejects_business_runtime_config_as_assistant_config(tmp_path: Path) -> None:
+    cfg_path = tmp_path / "config.us.json"
+    cfg_path.write_text(
+        json.dumps({"accounts": ["sy"], "symbols": [{"symbol": "NVDA"}], "assistant": {}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(AgentToolError) as exc:
+        check_llm_translator(
+            repo_root=tmp_path,
+            config_path=cfg_path,
+            include_local_env_file=False,
+        )
+
+    assert exc.value.code == "CONFIG_ERROR"
+    assert "use config.assistant.json, not config.<market>.json" in exc.value.details["error"]
+
+
 def test_llm_check_reports_ready_custom_openai_compatible_endpoint(tmp_path: Path) -> None:
     cfg_path = _write_config(
         tmp_path,
-        _runtime_config(
+        _assistant_config(
             llm={
                 "enabled": True,
                 "provider": "openai",
@@ -101,7 +140,7 @@ def test_llm_check_reports_ready_custom_openai_compatible_endpoint(tmp_path: Pat
 def test_llm_check_reports_ready_deepseek_endpoint(tmp_path: Path) -> None:
     cfg_path = _write_config(
         tmp_path,
-        _runtime_config(
+        _assistant_config(
             llm={
                 "enabled": True,
                 "provider": "deepseek",
@@ -141,7 +180,7 @@ def test_llm_check_live_probe_uses_read_only_structured_translation(tmp_path: Pa
     calls: list[dict[str, Any]] = []
     cfg_path = _write_config(
         tmp_path,
-        _runtime_config(
+        _assistant_config(
             llm={
                 "enabled": True,
                 "provider": "openai",

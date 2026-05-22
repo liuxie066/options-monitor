@@ -150,8 +150,8 @@ def test_agent_llm_check_command_forwards_diagnostic_args(monkeypatch, capsys) -
     rc = cli.main([
         "agent",
         "llm-check",
-        "--config-key",
-        "hk",
+        "--assistant-config",
+        "config.assistant.json",
         "--env-file",
         "options-monitor.env",
         "--no-local-env-file",
@@ -166,13 +166,20 @@ def test_agent_llm_check_command_forwards_diagnostic_args(monkeypatch, capsys) -
     assert payload["ok"] is True
     assert calls == [{
         "repo_root": cli.repo_base(),
-        "config_key": "hk",
-        "config_path": None,
+        "config_path": "config.assistant.json",
         "env_file": "options-monitor.env",
         "include_local_env_file": False,
         "live": True,
         "live_text": "状态",
     }]
+
+
+def test_no_local_env_file_flag_prevents_process_env_bootstrap() -> None:
+    import src.interfaces.cli.main as cli
+
+    assert cli._should_bootstrap_process_env(["agent", "llm-check"]) is True
+    assert cli._should_bootstrap_process_env(["agent", "llm-check", "--no-local-env-file"]) is False
+    assert cli._should_bootstrap_process_env(["support", "bundle", "--no-local-env-file"]) is False
 
 
 def test_agent_commands_command_renders_catalog(capsys) -> None:
@@ -340,7 +347,7 @@ def test_ai_cofunder_collect_forwards_remote_runtime_selection(monkeypatch, caps
         "--runs-root",
         "/var/lib/options-monitor/output_runs",
         "--report-dir",
-        "/var/lib/options-monitor/output/reports",
+        "/var/lib/options-monitor/output_shared/reports",
         "--shared-state-dir",
         "/var/lib/options-monitor/output_shared/state",
         "--accounts-root",
@@ -371,7 +378,7 @@ def test_ai_cofunder_collect_forwards_remote_runtime_selection(monkeypatch, caps
                 "config_key": "us",
                 "config_path": "/var/lib/options-monitor/config.us.json",
                 "profile_path": "/var/lib/options-monitor/service.profile.json",
-                "report_dir": "/var/lib/options-monitor/output/reports",
+                "report_dir": "/var/lib/options-monitor/output_shared/reports",
                 "shared_state_dir": "/var/lib/options-monitor/output_shared/state",
                 "accounts_root": "/var/lib/options-monitor/output_accounts",
                 "runs_root": "/var/lib/options-monitor/output_runs",

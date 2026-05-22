@@ -339,7 +339,7 @@ def monthly_income_report_tool(
     include_rows = bool(payload.get("include_rows", False))
 
     warnings: list[str] = []
-    rate_cache_path = (config_path.parent / "output" / "state" / "rate_cache.json").resolve()
+    rate_cache_path = (config_path.parent / "output_shared" / "state" / "rate_cache.json").resolve()
     rates = get_exchange_rates(cache_path=rate_cache_path, log=warnings.append)
     if rates is None:
         warnings.append("exchange_rate cache unavailable; *_cny fields may be null")

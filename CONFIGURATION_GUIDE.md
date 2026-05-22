@@ -607,7 +607,7 @@ markets:
 ```
 
 默认输出文件：
-- 独立 close-advice 命令：默认写到 `output/reports/close_advice.csv` / `output/reports/close_advice.txt`
+- 独立 close-advice 命令：默认写到 `output_shared/reports/close_advice.csv` / `output_shared/reports/close_advice.txt`
 - 统一 tick 运行：按账户写到 `output_runs/<run_id>/accounts/<account>/close_advice.csv|txt`
 
 ### 4.10 手续费：内置规则
@@ -729,6 +729,6 @@ markets:
 
 ```bash
 openclaw cron runs
-cat /home/node/.openclaw/workspace/options-monitor-prod/output/state/last_run.json
-cat /home/node/.openclaw/workspace/options-monitor-prod/<report_dir>/symbols_notification.txt  # 默认 report_dir=output/reports
+cat /home/node/.openclaw/workspace/options-monitor-prod/output_shared/state/last_run.json
+cat /home/node/.openclaw/workspace/options-monitor-prod/<report_dir>/symbols_notification.txt  # 默认 report_dir=output_shared/reports
 ```

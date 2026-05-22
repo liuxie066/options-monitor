@@ -6,7 +6,6 @@ from typing import Any
 
 from domain.domain.ledger import ContractKey, TradeEvent
 from domain.domain.ledger.events import LedgerDiagnostic, validate_trade_event
-from src.application.ledger.migration import legacy_trade_event_to_ledger_event
 
 
 @dataclass(frozen=True)
@@ -30,9 +29,6 @@ def encode_trade_event_for_storage(item: Any) -> EncodedTradeEvent:
     event, diagnostics = stored_trade_event_to_ledger_event(item)
     errors = [diag for diag in diagnostics if diag.severity == "error"]
     if event is None or errors:
-        passthrough = _encode_legacy_bootstrap_passthrough(item)
-        if passthrough is not None:
-            return passthrough
         codes = ", ".join(diag.code for diag in errors) or "event_decode_failed"
         raise ValueError(f"trade event could not be encoded for storage: {codes}")
     validation_errors = [diag for diag in validate_trade_event(event) if diag.severity == "error"]
@@ -62,7 +58,16 @@ def stored_trade_event_to_ledger_event(item: Any) -> tuple[TradeEvent | None, li
     payload = trade_event_payload_dict(item)
     if _is_canonical_payload(payload):
         return _canonical_payload_to_ledger_event(payload)
-    return legacy_trade_event_to_ledger_event(item)
+    event_id = str(payload.get("event_id") or "").strip()
+    return None, [
+        LedgerDiagnostic(
+            event_id=event_id,
+            severity="error",
+            code="non_canonical_trade_event_schema",
+            message="trade event storage payload is not canonical",
+            details={"keys": sorted(str(key) for key in payload.keys())},
+        )
+    ]
 
 
 def trade_event_payload_dict(item: Any) -> dict[str, Any]:
@@ -107,28 +112,6 @@ def _is_canonical_payload(payload: dict[str, Any]) -> bool:
         isinstance(payload.get("contract_key"), dict)
         and str(payload.get("event_type") or "").strip() != ""
         and payload.get("event_time_ms") not in (None, "")
-    )
-
-
-def _encode_legacy_bootstrap_passthrough(item: Any) -> EncodedTradeEvent | None:
-    payload = trade_event_payload_dict(item)
-    if str(payload.get("source_type") or "").strip().lower() != "bootstrap_snapshot":
-        return None
-    raw_payload = payload.get("raw_payload")
-    if not isinstance(raw_payload, dict):
-        return None
-    fields = raw_payload.get("fields")
-    record_id = str(raw_payload.get("lot_record_id") or "").strip()
-    event_id = str(payload.get("event_id") or "").strip()
-    if not event_id or not record_id or not isinstance(fields, dict):
-        return None
-    event_time_ms = trade_event_sort_time_ms(payload)
-    return EncodedTradeEvent(
-        event=None,
-        payload=payload,
-        event_json=json.dumps(payload, ensure_ascii=False, sort_keys=True),
-        event_id_value=event_id,
-        event_time_ms_value=event_time_ms,
     )
 
 

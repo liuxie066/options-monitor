@@ -153,10 +153,10 @@ def run_healthcheck_runner(
             )
             scheduler_portfolio_cfg["account"] = acct
             cfg["portfolio"] = scheduler_portfolio_cfg
-            tmp = repo_base / "output" / "state" / f"healthcheck_config.{acct}.json"
+            tmp = repo_base / "output_shared" / "state" / f"healthcheck_config.{acct}.json"
             tmp.parent.mkdir(parents=True, exist_ok=True)
             tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-            scheduler_state = repo_base / "output" / "state" / f"healthcheck_scheduler_state.{acct}.json"
+            scheduler_state = repo_base / "output_shared" / "state" / f"healthcheck_scheduler_state.{acct}.json"
             with redirect_stdout(io.StringIO()):
                 run_scheduler(config=tmp, state=scheduler_state, jsonl=True, base_dir=repo_base)
             scheduler_outputs.append(

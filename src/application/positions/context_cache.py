@@ -7,7 +7,7 @@ from typing import Any
 def invalidate_option_positions_context_cache(*, runtime_root: str | Path, account: str | None = None) -> dict[str, Any]:
     root = Path(runtime_root).expanduser().resolve()
     targets = [
-        root / "output" / "state" / "option_positions_context.json",
+        root / "output_shared" / "state" / "option_positions_context.json",
         root / "output_shared" / "state" / "option_positions_context.shared.json",
     ]
     account_name = str(account or "").strip().lower()

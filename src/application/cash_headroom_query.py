@@ -114,7 +114,7 @@ def query_sell_put_cash(
     output_format: str = 'text',
     top: int = 10,
     no_exchange_rates: bool = False,
-    out_dir: str | Path = 'output/state',
+    out_dir: str | Path = 'output_shared/state',
     base_dir: Path | None = None,
     runtime_config: dict | None = None,
 ) -> dict:

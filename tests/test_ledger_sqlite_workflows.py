@@ -246,9 +246,15 @@ def test_bootstrap_trade_events_skips_invalid_timestamp_rows_without_degrading_b
                     "account": "lx",
                     "broker": "富途",
                     "symbol": "NVDA",
+                    "option_type": "call",
+                    "side": "short",
+                    "strike": 500,
+                    "expiration_ymd": "2026-04-29",
                     "status": "open",
                     "contracts": 1,
                     "contracts_open": 1,
+                    "premium": 3.5,
+                    "currency": "HKD",
                     "opened_at": 1000,
                     "last_action_at": 1000,
                 },
@@ -321,12 +327,29 @@ def test_load_option_positions_repo_does_not_migrate_legacy_rows_by_default(tmp_
             INSERT INTO option_positions (record_id, fields_json, created_at_ms, updated_at_ms)
             VALUES (?, ?, ?, ?)
             """,
-            (
-                "legacy_1",
-                json.dumps({"symbol": "AAPL", "market": "富途证券", "status": "open", "contracts_open": 1}, ensure_ascii=False),
-                1000,
-                1000,
-            ),
+                (
+                    "legacy_1",
+                    json.dumps(
+                        {
+                            "account": "lx",
+                            "broker": "富途",
+                            "symbol": "AAPL",
+                            "option_type": "put",
+                            "side": "short",
+                            "strike": 100,
+                            "expiration_ymd": "2026-06-19",
+                            "status": "open",
+                            "contracts": 1,
+                            "contracts_open": 1,
+                            "premium": 1.2,
+                            "currency": "USD",
+                            "opened_at": 1000,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    1000,
+                    1000,
+                ),
         )
         conn.commit()
 
@@ -368,7 +391,24 @@ def test_migrate_legacy_sqlite_imports_legacy_option_positions_explicitly(tmp_pa
             """,
             (
                 "legacy_1",
-                json.dumps({"symbol": "AAPL", "market": "富途证券", "status": "open", "contracts_open": 1}, ensure_ascii=False),
+                json.dumps(
+                    {
+                        "account": "lx",
+                        "broker": "富途",
+                        "symbol": "AAPL",
+                        "option_type": "put",
+                        "side": "short",
+                        "strike": 100,
+                        "expiration_ymd": "2026-06-19",
+                        "status": "open",
+                        "contracts": 1,
+                        "contracts_open": 1,
+                        "premium": 1.2,
+                        "currency": "USD",
+                        "opened_at": 1000,
+                    },
+                    ensure_ascii=False,
+                ),
                 1000,
                 1000,
             ),
@@ -406,30 +446,52 @@ def test_migrate_legacy_sqlite_prefers_legacy_trade_events_explicitly(tmp_path: 
 
     legacy_db = tmp_path / "legacy" / "option_positions.sqlite3"
     legacy_repo = ledger_repository.SQLiteOptionPositionsRepository(legacy_db)
-    legacy_repo.upsert_trade_event(
-        TradeEvent(
-            event_id="deal-open-legacy",
-            source_type="broker_trade_event",
-            source_name="legacy_sqlite",
-            broker="富途",
-            account="sy",
-            symbol="AAPL",
-            option_type="put",
-            side="sell",
-            position_effect="open",
-            contracts=2,
-            price=1.25,
-            strike=150.0,
-            multiplier=100,
-            expiration_ymd="2026-06-19",
-            currency="USD",
-            trade_time_ms=1000,
-            order_id="order-legacy",
-            multiplier_source="payload",
-            raw_payload={"deal_id": "deal-open-legacy"},
-        )
+    legacy_event = TradeEvent(
+        event_id="deal-open-legacy",
+        source_type="broker_trade_event",
+        source_name="legacy_sqlite",
+        broker="富途",
+        account="sy",
+        symbol="AAPL",
+        option_type="put",
+        side="sell",
+        position_effect="open",
+        contracts=2,
+        price=1.25,
+        strike=150.0,
+        multiplier=100,
+        expiration_ymd="2026-06-19",
+        currency="USD",
+        trade_time_ms=1000,
+        order_id="order-legacy",
+        multiplier_source="payload",
+        raw_payload={"deal_id": "deal-open-legacy"},
     )
     with legacy_repo._connect() as conn:  # type: ignore[attr-defined]
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS trade_events (
+              event_id TEXT PRIMARY KEY,
+              trade_time_ms INTEGER NOT NULL,
+              event_json TEXT NOT NULL,
+              created_at_ms INTEGER NOT NULL,
+              updated_at_ms INTEGER NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO trade_events (event_id, trade_time_ms, event_json, created_at_ms, updated_at_ms)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                legacy_event.event_id,
+                legacy_event.trade_time_ms,
+                json.dumps(legacy_event.to_legacy_dict(), ensure_ascii=False),
+                1000,
+                1000,
+            ),
+        )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS option_positions (
@@ -1249,7 +1311,7 @@ def test_close_projection_prefers_structured_expiration_over_missing_note_exp() 
             trade_time_ms=2000,
             order_id="order-close-lx-exp-structured",
             multiplier_source="payload",
-            raw_payload={"deal_id": "deal-close-lx-exp-structured"},
+            raw_payload={"deal_id": "deal-close-lx-exp-structured", "record_id": "rec_lx_seed"},
         ),
     ]
 
@@ -1307,7 +1369,7 @@ def test_close_projection_buy_side_marks_buy_to_close_type() -> None:
             trade_time_ms=2000,
             order_id="order-close-1",
             multiplier_source="payload",
-            raw_payload={"deal_id": "close-1"},
+            raw_payload={"deal_id": "close-1", "record_id": "lot_open-1"},
         ),
     ]
 

@@ -60,7 +60,7 @@ def _resolve_config_path(config: str | Path, *, base: Path) -> Path:
 def _resolve_state_path(
     *,
     base: Path,
-    state_dir: str | Path = 'output/state',
+    state_dir: str | Path = 'output_shared/state',
     state: str | Path | None = None,
 ) -> Path:
     state_dir_path = Path(state_dir)
@@ -122,7 +122,7 @@ def mark_scheduler_accounts(
     *,
     config: str | Path | dict,
     state: str | Path,
-    state_dir: str | Path = 'output/state',
+    state_dir: str | Path = 'output_shared/state',
     schedule_key: str = 'schedule',
     accounts: list[str],
     mark_notified: bool = False,
@@ -507,7 +507,7 @@ def decide(
 def run_scheduler(
     *,
     config: str | Path,
-    state_dir: str | Path = 'output/state',
+    state_dir: str | Path = 'output_shared/state',
     state: str | Path | None = None,
     schedule_key: str = 'schedule',
     account: str | None = None,

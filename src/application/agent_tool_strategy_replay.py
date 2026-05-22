@@ -30,7 +30,7 @@ def _resolve_path(value: Any, *, base: Path) -> Path:
 
 
 def _default_replay_paths(base: Path) -> list[Path]:
-    report_dir = (base / "output" / "reports").resolve()
+    report_dir = (base / "output_shared" / "reports").resolve()
     candidates = [
         report_dir / "strategy_replay.csv",
         report_dir / "strategy_replay.json",
@@ -92,7 +92,7 @@ def strategy_replay_analyze_tool(
         raise AgentToolError(
             code="DEPENDENCY_MISSING",
             message="strategy replay rows not found",
-            hint="Pass rows/replay_path, or write output/reports/strategy_replay.csv.",
+            hint="Pass rows/replay_path, or write output_shared/reports/strategy_replay.csv.",
         )
 
     data = analyze_strategy_replay(

@@ -86,7 +86,7 @@ OM_FEISHU_BOT_USER_OPEN_ID=ou_xxx
 OM_FEISHU_BOT_ALLOWED_OPEN_IDS=ou_xxx
 ```
 
-Feishu long-connection 的 reaction、reply、queue 行为配置在 runtime config 的 `inbound.feishu_ws` 下，不写入服务器 secret env file。
+Feishu long-connection 的 reaction、reply、queue 行为配置在 assistant config 的 `inbound.feishu_ws` 下，不写入服务器 secret env file。使用 YAML authoring 时，先用 `./om config build-assistant --source yaml --config-yaml "$RUNTIME/config.yaml" --output "$RUNTIME/resolved/config.assistant.json"` 生成该文件；服务渲染会把它作为 `--assistant-config` 传给 Feishu WS。
 
 渲染服务文件：
 
@@ -127,7 +127,7 @@ cd "$REPO"
   --output-dir /tmp/options-monitor-service
 ```
 
-启用 `--include-auto-upgrade` 时，渲染器会保留 `--repo-root` 传入的 symlink 字面路径，并默认把 tick / trade-intake / Feishu WS / maintenance config 指到 runtime root 下的 `config.us.json` / `config.hk.json`。这样 release 切换只移动代码，不绑定 release 目录内的生产配置。使用 YAML authoring 时，同时传 `--config-yaml "$RUNTIME/config.yaml"`；profile 会记录 YAML source，`update apply` 会用 `config build --source yaml` 重建 runtime config。legacy profile 仍会走 `configs/user*.json` overlay 恢复。
+启用 `--include-auto-upgrade` 时，渲染器会保留 `--repo-root` 传入的 symlink 字面路径，并默认把 tick / trade-intake / Feishu WS / maintenance config 指到 runtime root 下的 `config.us.json` / `config.hk.json`。这样 release 切换只移动代码，不绑定 release 目录内的生产配置。使用 YAML authoring 时，同时传 `--config-yaml "$RUNTIME/config.yaml"`；profile 会记录 YAML source，`update apply` 会用 `config build --source yaml` 重建 runtime config，并用 `config build-assistant --source yaml` 重建 `$RUNTIME/resolved/config.assistant.json`。legacy profile 仍会走 `configs/user*.json` overlay 恢复。
 
 升级切换 release 后还会做一次 service drift reconcile：以当前 release 的 `service render` 结果为期望状态，对比 `$RUNTIME/service.profile.json` 和 systemd unit 文件。缺失 unit 会被写入 `/etc/systemd/system/`，缺失 timer 会执行 `systemctl enable --now`。随后升级流程会用 reconcile 后的 profile 重启长期运行的 trade-intake / Feishu WS，并执行服务 active/enabled 检查；Feishu WS 还会运行 `./om inbound feishu-ws --check`，避免长驻进程继续使用旧 release、旧 config 或不可用 env。
 

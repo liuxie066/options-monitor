@@ -175,6 +175,101 @@ def _validate_optional_unit_interval_number(cfg: dict, key: str, path: str):
         die(f'{path}.{key} must be a number')
 
 
+def _validate_llm_config(llm_cfg: dict, *, path: str, enabled: bool, required_reason: str) -> None:
+    for key in ('provider', 'base_url', 'model', 'api_key_env'):
+        if key in llm_cfg and llm_cfg.get(key) is not None and not isinstance(llm_cfg.get(key), str):
+            die(f'{path}.{key} must be a string')
+    _validate_optional_unit_interval_number(llm_cfg, 'confidence_min', path)
+    if str(llm_cfg.get('base_url') or '').strip():
+        llm_base_url = str(llm_cfg.get('base_url') or '').strip()
+        if not (llm_base_url.startswith('https://') or llm_base_url.startswith('http://')):
+            die(f'{path}.base_url must start with http:// or https:// when set')
+    if 'timeout_seconds' in llm_cfg and llm_cfg.get('timeout_seconds') is not None:
+        validate_positive_integer(llm_cfg.get('timeout_seconds'), f'{path}.timeout_seconds')
+        if int(llm_cfg.get('timeout_seconds')) > 120:
+            die(f'{path}.timeout_seconds must be <= 120')
+    if 'max_output_tokens' in llm_cfg and llm_cfg.get('max_output_tokens') is not None:
+        validate_positive_integer(llm_cfg.get('max_output_tokens'), f'{path}.max_output_tokens')
+        if int(llm_cfg.get('max_output_tokens')) < 64:
+            die(f'{path}.max_output_tokens must be >= 64')
+        if int(llm_cfg.get('max_output_tokens')) > 4096:
+            die(f'{path}.max_output_tokens must be <= 4096')
+    llm_provider = str(llm_cfg.get('provider') or '').strip()
+    if llm_provider and llm_provider not in {'openai', 'deepseek'}:
+        die(f'{path}.provider must be one of: openai, deepseek')
+    if enabled:
+        if not llm_provider:
+            die(f'{path}.provider is required when {required_reason}')
+        if not str(llm_cfg.get('model') or '').strip():
+            die(f'{path}.model is required when {required_reason}')
+        if not str(llm_cfg.get('api_key_env') or '').strip():
+            die(f'{path}.api_key_env is required when {required_reason}')
+
+
+def _validate_inbound_config(cfg: dict) -> None:
+    inbound = cfg.get('inbound') or {}
+    if inbound and not isinstance(inbound, dict):
+        die('inbound must be an object')
+    if isinstance(inbound, dict):
+        feishu_ws = inbound.get('feishu_ws') or {}
+        if feishu_ws and not isinstance(feishu_ws, dict):
+            die('inbound.feishu_ws must be an object')
+        if isinstance(feishu_ws, dict):
+            for key in ('reply_enabled', 'reply_in_thread'):
+                if key in feishu_ws and feishu_ws.get(key) is not None and not isinstance(feishu_ws.get(key), bool):
+                    die(f'inbound.feishu_ws.{key} must be a boolean')
+            for key in ('max_reply_chars', 'queue_size'):
+                if key in feishu_ws and feishu_ws.get(key) is not None:
+                    validate_positive_integer(feishu_ws.get(key), f'inbound.feishu_ws.{key}')
+            if 'ack_reaction' in feishu_ws and feishu_ws.get('ack_reaction') is not None and not isinstance(feishu_ws.get('ack_reaction'), str):
+                die('inbound.feishu_ws.ack_reaction must be a string')
+
+
+def _validate_assistant_config(cfg: dict) -> None:
+    assistant = cfg.get('assistant')
+    if assistant is None:
+        assistant = {}
+    if not isinstance(assistant, dict):
+        die('assistant must be an object')
+    mode = str(assistant.get('mode') or 'deterministic').strip().lower()
+    if mode not in {'disabled', 'deterministic', 'llm_router', 'agent_loop'}:
+        die('assistant.mode must be one of: disabled, deterministic, llm_router, agent_loop')
+    if 'context_window_messages' in assistant and assistant.get('context_window_messages') is not None:
+        validate_non_negative_integer(assistant.get('context_window_messages'), 'assistant.context_window_messages')
+        if int(assistant.get('context_window_messages')) > 20:
+            die('assistant.context_window_messages must be <= 20')
+    if 'default_market_scope' in assistant and assistant.get('default_market_scope') is not None:
+        if str(assistant.get('default_market_scope') or '').strip().lower() not in {'us', 'hk', 'all'}:
+            die('assistant.default_market_scope must be one of: us, hk, all')
+    llm = assistant.get('llm') or {}
+    if not isinstance(llm, dict):
+        die('assistant.llm must be an object')
+    if 'enabled' in llm:
+        die('assistant.llm.enabled is retired; use assistant.mode')
+    _validate_llm_config(
+        llm,
+        path='assistant.llm',
+        enabled=mode in {'llm_router', 'agent_loop'},
+        required_reason='assistant.mode uses LLM',
+    )
+
+    if 'agent' in cfg:
+        die('agent.* config is retired; use assistant.*')
+
+
+def validate_assistant_config(cfg: dict) -> None:
+    allowed = {'assistant', 'inbound', '_generated', '_resolved'}
+    unsupported = sorted(str(key) for key in cfg.keys() if str(key) not in allowed)
+    if unsupported:
+        die(
+            'assistant config has unsupported top-level keys: '
+            + ', '.join(unsupported)
+            + '; use config.assistant.json, not config.<market>.json'
+        )
+    _validate_inbound_config(cfg)
+    _validate_assistant_config(cfg)
+
+
 def _validate_score_weights(cfg: dict, path: str) -> None:
     if 'score_weights' not in cfg or cfg.get('score_weights') is None:
         return
@@ -491,75 +586,9 @@ def validate_config(cfg: dict):
                     die(f'runtime.opend_rate_limits.{endpoint} must be an object')
                 validate_rate_limit_object(raw, f'runtime.opend_rate_limits.{endpoint}')
 
-    inbound = cfg.get('inbound') or {}
-    if inbound and not isinstance(inbound, dict):
-        die('inbound must be an object')
-    if isinstance(inbound, dict):
-        feishu_ws = inbound.get('feishu_ws') or {}
-        if feishu_ws and not isinstance(feishu_ws, dict):
-            die('inbound.feishu_ws must be an object')
-        if isinstance(feishu_ws, dict):
-            for key in ('reply_enabled', 'reply_in_thread'):
-                if key in feishu_ws and feishu_ws.get(key) is not None and not isinstance(feishu_ws.get(key), bool):
-                    die(f'inbound.feishu_ws.{key} must be a boolean')
-            for key in ('max_reply_chars', 'queue_size'):
-                if key in feishu_ws and feishu_ws.get(key) is not None:
-                    validate_positive_integer(feishu_ws.get(key), f'inbound.feishu_ws.{key}')
-            if 'ack_reaction' in feishu_ws and feishu_ws.get('ack_reaction') is not None and not isinstance(feishu_ws.get('ack_reaction'), str):
-                die('inbound.feishu_ws.ack_reaction must be a string')
+    _validate_inbound_config(cfg)
 
-    agent = cfg.get('agent')
-    if agent is None:
-        agent = {}
-    if not isinstance(agent, dict):
-        die('agent must be an object')
-    runtime_agent = agent.get('runtime')
-    if runtime_agent is None:
-        runtime_agent = {}
-    if not isinstance(runtime_agent, dict):
-        die('agent.runtime must be an object')
-    if 'enabled' in runtime_agent and runtime_agent.get('enabled') is not None and not isinstance(runtime_agent.get('enabled'), bool):
-        die('agent.runtime.enabled must be a boolean')
-    if 'context_window_messages' in runtime_agent and runtime_agent.get('context_window_messages') is not None:
-        validate_non_negative_integer(runtime_agent.get('context_window_messages'), 'agent.runtime.context_window_messages')
-        if int(runtime_agent.get('context_window_messages')) > 20:
-            die('agent.runtime.context_window_messages must be <= 20')
-    llm_agent = agent.get('llm')
-    if llm_agent is None:
-        llm_agent = {}
-    if not isinstance(llm_agent, dict):
-        die('agent.llm must be an object')
-    if 'enabled' in llm_agent and llm_agent.get('enabled') is not None and not isinstance(llm_agent.get('enabled'), bool):
-        die('agent.llm.enabled must be a boolean')
-    for key in ('provider', 'base_url', 'model', 'api_key_env'):
-        if key in llm_agent and llm_agent.get(key) is not None and not isinstance(llm_agent.get(key), str):
-            die(f'agent.llm.{key} must be a string')
-    _validate_optional_unit_interval_number(llm_agent, 'confidence_min', 'agent.llm')
-    if str(llm_agent.get('base_url') or '').strip():
-        llm_base_url = str(llm_agent.get('base_url') or '').strip()
-        if not (llm_base_url.startswith('https://') or llm_base_url.startswith('http://')):
-            die('agent.llm.base_url must start with http:// or https:// when set')
-    if 'timeout_seconds' in llm_agent and llm_agent.get('timeout_seconds') is not None:
-        validate_positive_integer(llm_agent.get('timeout_seconds'), 'agent.llm.timeout_seconds')
-        if int(llm_agent.get('timeout_seconds')) > 120:
-            die('agent.llm.timeout_seconds must be <= 120')
-    if 'max_output_tokens' in llm_agent and llm_agent.get('max_output_tokens') is not None:
-        validate_positive_integer(llm_agent.get('max_output_tokens'), 'agent.llm.max_output_tokens')
-        if int(llm_agent.get('max_output_tokens')) < 64:
-            die('agent.llm.max_output_tokens must be >= 64')
-        if int(llm_agent.get('max_output_tokens')) > 4096:
-            die('agent.llm.max_output_tokens must be <= 4096')
-    llm_enabled = bool(llm_agent.get('enabled')) if isinstance(llm_agent.get('enabled'), bool) else False
-    llm_provider = str(llm_agent.get('provider') or '').strip()
-    if llm_provider and llm_provider not in {'openai', 'deepseek'}:
-        die('agent.llm.provider must be one of: openai, deepseek')
-    if llm_enabled:
-        if not llm_provider:
-            die('agent.llm.provider is required when agent.llm.enabled is true')
-        if not str(llm_agent.get('model') or '').strip():
-            die('agent.llm.model is required when agent.llm.enabled is true')
-        if not str(llm_agent.get('api_key_env') or '').strip():
-            die('agent.llm.api_key_env is required when agent.llm.enabled is true')
+    _validate_assistant_config(cfg)
 
     notifications = cfg.get('notifications') or {}
     if notifications and not isinstance(notifications, dict):

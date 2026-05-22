@@ -79,18 +79,21 @@ def _enable_inbound_trade_write(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OM_INBOUND_OPERATIONS_ENABLED", "1")
     monkeypatch.setenv("OM_INBOUND_TRADE_WRITE_ENABLED", "1")
     monkeypatch.setenv("OM_INBOUND_ADMIN_OPEN_IDS", "feishu:ou_1")
+    monkeypatch.setenv("OM_INBOUND_OPERATION_HMAC_KEY", "test-operation-hmac-key")
 
 
 def _enable_inbound_symbol_write(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OM_INBOUND_OPERATIONS_ENABLED", "1")
     monkeypatch.setenv("OM_INBOUND_SYMBOL_WRITE_ENABLED", "1")
     monkeypatch.setenv("OM_INBOUND_ADMIN_OPEN_IDS", "feishu:ou_1")
+    monkeypatch.setenv("OM_INBOUND_OPERATION_HMAC_KEY", "test-operation-hmac-key")
 
 
 def _enable_inbound_upgrade_write(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OM_INBOUND_OPERATIONS_ENABLED", "1")
     monkeypatch.setenv("OM_INBOUND_UPGRADE_WRITE_ENABLED", "1")
     monkeypatch.setenv("OM_INBOUND_ADMIN_OPEN_IDS", "feishu:ou_1")
+    monkeypatch.setenv("OM_INBOUND_OPERATION_HMAC_KEY", "test-operation-hmac-key")
 
 
 def test_inbound_parser_maps_core_read_only_commands() -> None:
@@ -278,6 +281,71 @@ def test_inbound_manual_trade_preview_and_confirm_open(monkeypatch: pytest.Monke
     assert "交易已写入 OM 本地账本：开仓" in confirmed["data"]["response_text"]
     repo = ledger_repository.SQLiteOptionPositionsRepository(sqlite_path)
     assert len(repo.list_trade_events()) == 1
+
+
+def test_inbound_manual_trade_confirm_rejects_signature_mismatch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import src.application.ledger.repository as ledger_repository
+
+    _enable_inbound_trade_write(monkeypatch)
+    cfg_path, sqlite_path = _write_inbound_runtime_config(tmp_path)
+    audit_db = tmp_path / "inbound.sqlite3"
+
+    preview = handle_inbound_request(
+        InboundRequest(
+            text="记录开仓 sy NVDA short put strike 100 exp 2026-06-19 1张 premium 2.5 multiplier 100",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_open_preview_signed",
+            config_path=str(cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+
+    assert preview["ok"] is True
+    monkeypatch.setenv("OM_INBOUND_OPERATION_HMAC_KEY", "different-operation-hmac-key")
+
+    confirmed = handle_inbound_request(
+        InboundRequest(
+            text="确认记录",
+            sender_id="ou_1",
+            channel="feishu",
+            message_id="msg_open_confirm_bad_signature",
+            config_path=str(cfg_path),
+            audit_db=str(audit_db),
+        ),
+        allowed_senders="feishu:ou_1",
+    )
+
+    assert confirmed["ok"] is False
+    assert confirmed["error"]["code"] == "PERMISSION_DENIED"
+    assert "signature mismatch" in confirmed["error"]["message"]
+    repo = ledger_repository.SQLiteOptionPositionsRepository(sqlite_path)
+    assert repo.list_trade_events() == []
+
+
+def test_inbound_write_policy_requires_hmac_and_explicit_admin(monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.application.inbound.operation_policy import enforce_trade_write_allowed
+
+    monkeypatch.setenv("OM_INBOUND_OPERATIONS_ENABLED", "1")
+    monkeypatch.setenv("OM_INBOUND_TRADE_WRITE_ENABLED", "1")
+    monkeypatch.setenv("OM_INBOUND_ADMIN_OPEN_IDS", "feishu:*")
+    monkeypatch.setenv("OM_INBOUND_OPERATION_HMAC_KEY", "test-operation-hmac-key")
+
+    with pytest.raises(AgentToolError) as wildcard:
+        enforce_trade_write_allowed(channel="feishu", sender_id="ou_1")
+
+    assert wildcard.value.code == "CONFIG_ERROR"
+    assert "wildcard inbound operation admins are not allowed" in wildcard.value.message
+
+    monkeypatch.setenv("OM_INBOUND_ADMIN_OPEN_IDS", "feishu:ou_1")
+    monkeypatch.delenv("OM_INBOUND_OPERATION_HMAC_KEY", raising=False)
+
+    with pytest.raises(AgentToolError) as missing_key:
+        enforce_trade_write_allowed(channel="feishu", sender_id="ou_1")
+
+    assert missing_key.value.code == "CONFIG_ERROR"
+    assert "inbound operation HMAC key is not configured" in missing_key.value.message
 
 
 def test_inbound_operation_confirm_claim_is_atomic(tmp_path: Path) -> None:
@@ -1719,14 +1787,18 @@ def test_feishu_payload_adapter_extracts_text_message_and_calls_inbound(tmp_path
     assert calls == [("monthly_income_report", {"config_key": "us", "account": "sy", "month": "2026-05"})]
 
 
-def test_feishu_payload_adapter_agent_runtime_reads_runtime_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_feishu_payload_adapter_agent_runtime_reads_assistant_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     data_cfg_path = tmp_path / "portfolio.runtime.json"
     data_cfg_path.write_text(json.dumps({"option_positions": {}}, ensure_ascii=False), encoding="utf-8")
     cfg = _runtime_cfg(str(data_cfg_path))
-    cfg["agent"] = {
-        "runtime": {"enabled": False, "context_window_messages": 7},
+    cfg_path = tmp_path / "config.us.json"
+    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    assistant_config_path = tmp_path / "config.assistant.json"
+    assistant_config_path.write_text(json.dumps({"assistant": {
+        "mode": "llm_router",
+        "context_window_messages": 7,
+        "default_market_scope": "us",
         "llm": {
-            "enabled": True,
             "provider": "openai",
             "base_url": "https://llm.example/v1",
             "model": "gpt-5.2",
@@ -1735,9 +1807,7 @@ def test_feishu_payload_adapter_agent_runtime_reads_runtime_config(monkeypatch: 
             "timeout_seconds": 32,
             "max_output_tokens": 770,
         },
-    }
-    cfg_path = tmp_path / "config.us.json"
-    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    }}, ensure_ascii=False, indent=2), encoding="utf-8")
     payload = {
         "schema": "2.0",
         "header": {"event_id": "evt_agent", "event_type": "im.message.receive_v1"},
@@ -1767,6 +1837,7 @@ def test_feishu_payload_adapter_agent_runtime_reads_runtime_config(monkeypatch: 
     out = handle_feishu_payload(
         payload,
         config_path=str(cfg_path),
+        assistant_config_path=str(assistant_config_path),
         audit_db=str(tmp_path / "audit.sqlite3"),
         allowed_senders="feishu:ou_1",
         use_agent_runtime=True,
@@ -1787,13 +1858,17 @@ def test_feishu_payload_adapter_agent_runtime_reads_runtime_config(monkeypatch: 
     assert settings.llm.max_output_tokens == 770
 
 
-def test_feishu_payload_adapter_defaults_to_agent_runtime_from_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_feishu_payload_adapter_defaults_to_agent_runtime_from_assistant_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     data_cfg_path = tmp_path / "portfolio.runtime.json"
     data_cfg_path.write_text(json.dumps({"option_positions": {}}, ensure_ascii=False), encoding="utf-8")
     cfg = _runtime_cfg(str(data_cfg_path))
-    cfg["agent"] = {"runtime": {"enabled": True, "context_window_messages": 5}, "llm": {"enabled": False}}
     cfg_path = tmp_path / "config.us.json"
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    assistant_config_path = tmp_path / "config.assistant.json"
+    assistant_config_path.write_text(
+        json.dumps({"assistant": {"mode": "deterministic", "context_window_messages": 5, "llm": {}}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
     payload = {
         "schema": "2.0",
         "header": {"event_id": "evt_agent_default", "event_type": "im.message.receive_v1"},
@@ -1823,6 +1898,7 @@ def test_feishu_payload_adapter_defaults_to_agent_runtime_from_config(monkeypatc
     out = handle_feishu_payload(
         payload,
         config_path=str(cfg_path),
+        assistant_config_path=str(assistant_config_path),
         audit_db=str(tmp_path / "audit.sqlite3"),
         allowed_senders="feishu:ou_1",
     )
@@ -1903,10 +1979,14 @@ def test_inbound_cli_agent_runtime_loads_settings_from_config(monkeypatch, capsy
     import src.interfaces.cli.main as cli
 
     cfg = _runtime_cfg(str(tmp_path / "portfolio.runtime.json"))
-    cfg["agent"] = {
-        "runtime": {"enabled": True, "context_window_messages": 6},
+    cfg_path = tmp_path / "config.us.json"
+    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    assistant_config_path = tmp_path / "config.assistant.json"
+    assistant_config_path.write_text(json.dumps({"assistant": {
+        "mode": "llm_router",
+        "context_window_messages": 6,
+        "default_market_scope": "us",
         "llm": {
-            "enabled": True,
             "provider": "openai",
             "base_url": "https://llm.example/v1",
             "model": "gpt-5.2",
@@ -1915,9 +1995,7 @@ def test_inbound_cli_agent_runtime_loads_settings_from_config(monkeypatch, capsy
             "timeout_seconds": 33,
             "max_output_tokens": 771,
         },
-    }
-    cfg_path = tmp_path / "config.us.json"
-    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    }}, ensure_ascii=False, indent=2), encoding="utf-8")
     seen = []
 
     def _handle_agent(request: InboundRequest, **kwargs) -> dict:
@@ -1936,6 +2014,8 @@ def test_inbound_cli_agent_runtime_loads_settings_from_config(monkeypatch, capsy
             "handle",
             "--config-path",
             str(cfg_path),
+            "--assistant-config",
+            str(assistant_config_path),
             "--text",
             "/status",
             "--sender",
@@ -1963,9 +2043,13 @@ def test_inbound_cli_agent_runtime_flag_forces_disabled_config(monkeypatch, caps
     import src.interfaces.cli.main as cli
 
     cfg = _runtime_cfg(str(tmp_path / "portfolio.runtime.json"))
-    cfg["agent"] = {"runtime": {"enabled": False, "context_window_messages": 4}, "llm": {"enabled": False}}
     cfg_path = tmp_path / "config.us.json"
     cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    assistant_config_path = tmp_path / "config.assistant.json"
+    assistant_config_path.write_text(
+        json.dumps({"assistant": {"mode": "deterministic", "context_window_messages": 4, "llm": {}}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
     seen = []
 
     def _handle_agent(request: InboundRequest, **kwargs) -> dict:
@@ -1985,6 +2069,8 @@ def test_inbound_cli_agent_runtime_flag_forces_disabled_config(monkeypatch, caps
             "--agent-runtime",
             "--config-path",
             str(cfg_path),
+            "--assistant-config",
+            str(assistant_config_path),
             "--text",
             "/status",
             "--sender",
@@ -2149,6 +2235,7 @@ def test_inbound_cli_feishu_wires_payload(monkeypatch, capsys, tmp_path: Path) -
                 "config_path": None,
                 "audit_db": str(tmp_path / "audit.sqlite3"),
                 "use_agent_runtime": None,
+                "assistant_config_path": None,
             },
         }
     ]
