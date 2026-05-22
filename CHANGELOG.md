@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.2.119 - 2026-05-22
+
+### Fixed
+- Made `runtime_status` normalize `v`-prefixed service-upgrade target versions before comparing them with the active release.
+- Added service-upgrade failure details to runtime status summaries and Feishu replies, including target/current versions, reason, failed services, and remediation hints.
+
 ## 1.2.118 - 2026-05-22
 
 ### Added

@@ -1408,6 +1408,30 @@ def test_runtime_status_marks_remediated_upgrade_failure(monkeypatch, tmp_path: 
     assert "Service drift detected: required maintenance units are missing: options-monitor-projection-verify.timer." in warnings
 
 
+def test_runtime_status_normalizes_v_prefixed_upgrade_target(monkeypatch, tmp_path: Path) -> None:
+    import src.application.agent_tool_openclaw as openclaw
+
+    fixture = _runtime_status_upgrade_fixture(tmp_path, target_version="v1.2.82")
+
+    def _service_status(profile: dict[str, Any], *, include_status: bool = False) -> dict[str, Any]:
+        services_raw = profile.get("services")
+        services = services_raw if isinstance(services_raw, list) else []
+        return {
+            "provider": profile.get("service_provider"),
+            "services": [{**item, "status": "ok", "returncode": 0} for item in services if isinstance(item, dict)],
+            "status_checked": include_status,
+        }
+
+    monkeypatch.setattr(openclaw, "service_status_from_profile", _service_status)
+
+    data, warnings, _meta = _call_runtime_status_for_upgrade(tmp_path, fixture["cfg_path"], fixture["cfg"])
+
+    assert data["service_upgrade"]["evaluation"]["target_version"] == "1.2.82"
+    assert data["summary"]["service_upgrade_status"] == "remediated"
+    assert data["summary"]["service_upgrade_target_version"] == "1.2.82"
+    assert "Service upgrade status still indicates an unrecovered runtime failure." not in warnings
+
+
 def test_runtime_status_keeps_upgrade_failed_when_service_still_failed(monkeypatch, tmp_path: Path) -> None:
     import src.application.agent_tool_openclaw as openclaw
 

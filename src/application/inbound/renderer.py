@@ -482,6 +482,9 @@ def _render_runtime_status(data: dict[str, Any], tool_result: dict[str, Any]) ->
     if projection_ok is not None:
         lines.append(f"Projection：{_yes_no(projection_ok)} mode={_value(summary.get('projection_verify_mode'))}")
 
+    if summary.get("service_upgrade_runtime_failed"):
+        lines.extend(_runtime_service_upgrade_lines(data))
+
     trade_intake = _dict(data.get("trade_intake"))
     intake_summary = _dict(trade_intake.get("summary"))
     if intake_summary:
@@ -498,6 +501,26 @@ def _render_runtime_status(data: dict[str, Any], tool_result: dict[str, Any]) ->
     else:
         lines.append("异常：无")
     return "\n".join(lines)
+
+
+def _runtime_service_upgrade_lines(data: dict[str, Any]) -> list[str]:
+    summary = _dict(data.get("summary"))
+    service_upgrade = _dict(data.get("service_upgrade"))
+    evaluation = _dict(service_upgrade.get("evaluation"))
+    status = summary.get("service_upgrade_status") or evaluation.get("status")
+    target = summary.get("service_upgrade_target_version") or evaluation.get("target_version")
+    current = summary.get("service_upgrade_current_version") or evaluation.get("current_version")
+    reason = summary.get("service_upgrade_reason") or evaluation.get("reason")
+    lines = [f"升级状态：{_value(status)} target={_value(target)} current={_value(current)} reason={_value(reason)}"]
+    failed_services = summary.get("service_upgrade_failed_services") or evaluation.get("failed_services")
+    failed = [str(item).strip() for item in _list(failed_services) if str(item).strip()]
+    if failed:
+        lines.append("失败服务：" + ", ".join(failed))
+    remediation = summary.get("service_upgrade_remediation") or evaluation.get("remediation")
+    hints = [str(item).strip() for item in _list(remediation) if str(item).strip()]
+    if hints:
+        lines.append("修复提示：" + "；".join(hints[:2]))
+    return lines
 
 
 def _render_healthcheck(data: dict[str, Any], tool_result: dict[str, Any]) -> str:
