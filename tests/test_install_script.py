@@ -13,7 +13,8 @@ def test_install_script_is_shell_parseable_and_has_no_service_side_effects() -> 
     subprocess.run(["bash", "-n", str(script)], check=True)
 
     text = script.read_text(encoding="utf-8")
-    assert "--version is required" in text
+    assert "resolved latest release" in text
+    assert "Default: latest published GitHub release, never main." in text
     assert "xcode-select --install" in text
     assert "python3-venv" in text
     assert "systemctl enable" not in text
@@ -59,6 +60,13 @@ chmod +x "$dest/om" "$dest/om-agent"
 """,
     )
     _write_executable(
+        bin_dir / "curl",
+        """#!/usr/bin/env bash
+set -euo pipefail
+printf '{"tag_name":"v9.9.10"}\\n'
+""",
+    )
+    _write_executable(
         bin_dir / "python3",
         """#!/usr/bin/env bash
 set -euo pipefail
@@ -92,16 +100,38 @@ def _installer_env(tmp_path: Path, *, path_prefix: str | None = None) -> dict[st
 
 def _run_installer(tmp_path: Path, *args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     script = ROOT / "scripts" / "install.sh"
+    cmd = [
+        "bash",
+        str(script),
+        "--version",
+        "v9.9.9",
+        "--prefix",
+        str(tmp_path / "apps" / "options-monitor"),
+        "--repo-url",
+        "https://example.invalid/options-monitor.git",
+        *args,
+    ]
+    return subprocess.run(
+        cmd,
+        check=False,
+        text=True,
+        capture_output=True,
+        env=env or _installer_env(tmp_path),
+    )
+
+
+def _run_installer_without_version(
+    tmp_path: Path,
+    *args: str,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    script = ROOT / "scripts" / "install.sh"
     return subprocess.run(
         [
             "bash",
             str(script),
-            "--version",
-            "v9.9.9",
             "--prefix",
             str(tmp_path / "apps" / "options-monitor"),
-            "--repo-url",
-            "https://example.invalid/options-monitor.git",
             *args,
         ],
         check=False,
@@ -109,6 +139,17 @@ def _run_installer(tmp_path: Path, *args: str, env: dict[str, str] | None = None
         capture_output=True,
         env=env or _installer_env(tmp_path),
     )
+
+
+def test_install_script_resolves_latest_release_by_default(tmp_path: Path) -> None:
+    env = _installer_env(tmp_path)
+    result = _run_installer_without_version(tmp_path, env=env)
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    prefix = tmp_path / "apps" / "options-monitor"
+    assert (prefix / "releases" / "v9.9.10").exists()
+    assert os.readlink(prefix / "current") == str(prefix / "releases" / "v9.9.10")
+    assert "[install] resolved latest release: v9.9.10" in result.stdout
 
 
 def test_install_script_creates_user_cli_wrappers_by_default(tmp_path: Path) -> None:
@@ -129,6 +170,16 @@ def test_install_script_creates_user_cli_wrappers_by_default(tmp_path: Path) -> 
     assert subprocess.check_output([str(om), "doctor"], text=True).strip() == "fake om doctor"
     assert subprocess.check_output([str(om_agent), "spec"], text=True).strip() == "fake om-agent spec"
     assert "Warning:" in result.stdout
+
+
+def test_install_script_reinstall_current_release_is_idempotent(tmp_path: Path) -> None:
+    env = _installer_env(tmp_path)
+    first = _run_installer(tmp_path, env=env)
+    second = _run_installer(tmp_path, env=env)
+
+    assert first.returncode == 0, first.stderr + first.stdout
+    assert second.returncode == 0, second.stderr + second.stdout
+    assert "[install] options-monitor v9.9.9 is already installed" in second.stdout
 
 
 def test_install_script_no_install_cli_skips_wrappers(tmp_path: Path) -> None:
