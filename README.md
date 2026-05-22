@@ -45,13 +45,17 @@
 ### 1. 安装
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh -o /tmp/options-monitor-install.sh
-bash /tmp/options-monitor-install.sh --version <release-tag> --prefix "$HOME/apps/options-monitor"
+curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh | bash
 
 om setup check
 ```
 
-`<release-tag>` 必须换成明确的 GitHub release tag，例如 `v1.2.109`。不要在生产机器上安装浮动分支。
+无参数安装会解析并安装最新 GitHub release，例如 `v1.2.118`；不会安装浮动 `main` 分支。需要复现、回滚或固定生产版本时，显式指定 release tag：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/liuxie066/options-monitor/main/scripts/install.sh -o /tmp/options-monitor-install.sh
+bash /tmp/options-monitor-install.sh --version v1.2.118 --prefix "$HOME/apps/options-monitor"
+```
 
 安装脚本会下载代码、checkout 指定 release、创建 `.venv`、安装依赖、更新 `current` symlink，并默认在 `$HOME/.local/bin` 创建 `om` / `om-agent` 用户级 wrapper。它不会写配置、不会写 secrets、不会启动服务、不会创建定时任务。
 如果 `$HOME/.local/bin` 尚未加入 `PATH`，按安装输出提示先加入 PATH，或使用 fallback：`$HOME/apps/options-monitor/current/om setup check`。

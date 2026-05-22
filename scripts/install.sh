@@ -16,9 +16,9 @@ OS_NAME="$(uname -s 2>/dev/null || printf 'unknown')"
 usage() {
   cat <<'EOF'
 Usage:
-  install.sh --version v1.2.107 [--prefix "$HOME/apps/options-monitor"]
+  install.sh [--version latest] [--prefix "$HOME/apps/options-monitor"]
 
-Installs one pinned options-monitor release into:
+Installs the latest GitHub release, or one pinned options-monitor release, into:
   <prefix>/releases/<version>
   <prefix>/current -> <prefix>/releases/<version>
 
@@ -28,7 +28,8 @@ write env secrets, start services, create timers, connect to OpenD, send Feishu
 messages, or touch SQLite state.
 
 Options:
-  --version VERSION     Required. Release tag to install, for example v1.2.107.
+  --version VERSION     Release tag to install, for example v1.2.118.
+                        Default: latest published GitHub release, never main.
   --prefix PATH        Install root. Default: $HOME/apps/options-monitor.
   --repo-url URL       Git repository URL.
   --python PATH        Python executable for venv creation. Default: python3.
@@ -76,6 +77,20 @@ missing_python_message() {
   esac
 }
 
+missing_curl_message() {
+  case "$OS_NAME" in
+    Darwin)
+      printf 'curl is required to resolve the latest release. On macOS install it with system tools or Homebrew, or pass --version vX.Y.Z.'
+      ;;
+    Linux)
+      printf 'curl is required to resolve the latest release. Install it with your package manager, or pass --version vX.Y.Z.'
+      ;;
+    *)
+      printf 'curl is required to resolve the latest release, or pass --version vX.Y.Z.'
+      ;;
+  esac
+}
+
 check_python_runtime() {
   "$PYTHON_BIN" - <<'PY'
 import importlib.util
@@ -97,6 +112,89 @@ normalize_dir_path() {
   parent="$(dirname "$raw")"
   mkdir -p "$parent"
   printf '%s/%s' "$(cd "$parent" && pwd)" "$(basename "$raw")"
+}
+
+github_repo_slug_from_url() {
+  raw="$1"
+  case "$raw" in
+    https://github.com/*)
+      slug="${raw#https://github.com/}"
+      ;;
+    http://github.com/*)
+      slug="${raw#http://github.com/}"
+      ;;
+    git@github.com:*)
+      slug="${raw#git@github.com:}"
+      ;;
+    ssh://git@github.com/*)
+      slug="${raw#ssh://git@github.com/}"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  slug="${slug%%\?*}"
+  slug="${slug%%#*}"
+  slug="${slug%/}"
+  owner="${slug%%/*}"
+  rest="${slug#*/}"
+  repo="${rest%%/*}"
+  repo="${repo%.git}"
+  if [ "$owner" = "$slug" ] || [ -z "$owner" ] || [ -z "$repo" ]; then
+    return 1
+  fi
+  case "${owner}/${repo}" in
+    *[!A-Za-z0-9._/-]*|*//*|/*|*/)
+      return 1
+      ;;
+  esac
+  printf '%s/%s\n' "$owner" "$repo"
+}
+
+latest_release_api_url() {
+  slug="$(github_repo_slug_from_url "$REPO_URL")" || return 1
+  printf 'https://api.github.com/repos/%s/releases/latest\n' "$slug"
+}
+
+normalize_tag() {
+  raw="$1"
+  case "$raw" in
+    v*) printf '%s\n' "$raw" ;;
+    *) printf 'v%s\n' "$raw" ;;
+  esac
+}
+
+validate_tag() {
+  tag="$1"
+  case "$tag" in
+    *[!A-Za-z0-9._-]*|.*|*..*)
+      die "unsupported version tag: $tag"
+      ;;
+  esac
+}
+
+resolve_latest_release_tag() {
+  api_url="$(latest_release_api_url)" || die "cannot resolve latest GitHub release from repo URL: $REPO_URL; pass --version vX.Y.Z"
+  command -v curl >/dev/null 2>&1 || die "$(missing_curl_message)"
+  latest_json="$(curl -fsSL "$api_url")" || die "failed to resolve latest GitHub release from $api_url; pass --version vX.Y.Z"
+  latest_tag="$(printf '%s\n' "$latest_json" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+  [ -n "$latest_tag" ] || die "latest GitHub release response did not include tag_name; pass --version vX.Y.Z"
+  normalize_tag "$latest_tag"
+}
+
+install_optional_requirements() {
+  release_dir="$1"
+  if [ "$WITH_SERVER" -ne 1 ] && [ "$WITH_DEV" -ne 1 ]; then
+    return 0
+  fi
+  pip_bin="${release_dir}/.venv/bin/pip"
+  [ -x "$pip_bin" ] || die "cannot install optional requirements; pip is missing: $pip_bin"
+  if [ "$WITH_SERVER" -eq 1 ]; then
+    "$pip_bin" install -r "$release_dir/requirements/server.txt" -c "$release_dir/constraints/server.txt"
+  fi
+  if [ "$WITH_DEV" -eq 1 ]; then
+    "$pip_bin" install -r "$release_dir/requirements/dev.txt" -c "$release_dir/constraints/dev.txt"
+  fi
 }
 
 write_cli_wrapper() {
@@ -147,6 +245,52 @@ bin_dir_in_path() {
     *":${BIN_DIR}:"*) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+print_next_steps() {
+  printf '\n[install] installed options-monitor %s\n' "$TAG"
+  printf '[install] current -> %s\n\n' "$TARGET_DIR"
+  if [ "$INSTALL_CLI" -eq 1 ]; then
+    printf '[install] CLI wrappers installed in %s\n\n' "$(quote "$BIN_DIR")"
+  fi
+  printf 'Next steps:\n'
+  if [ "$INSTALL_CLI" -eq 1 ]; then
+    if bin_dir_in_path; then
+      printf '  om setup check\n'
+    else
+      printf '  export PATH=%s:"$PATH"\n' "$(quote "$BIN_DIR")"
+      printf '  om setup check\n'
+    fi
+  else
+    printf '  cd %s\n' "$(quote "$CURRENT_LINK")"
+    printf '  ./om setup check\n'
+  fi
+  case "$OS_NAME" in
+    Darwin)
+      printf '\nmacOS service env-file, if you later render launchd services:\n'
+      printf '  mkdir -p "$HOME/Library/Application Support/options-monitor"\n'
+      printf '  cp -n configs/examples/options-monitor.env.example "$HOME/Library/Application Support/options-monitor/options-monitor.env"\n'
+      if [ "$INSTALL_CLI" -eq 1 ]; then
+        printf '  om settings doctor --env-file "$HOME/Library/Application Support/options-monitor/options-monitor.env"\n'
+      else
+        printf '  ./om settings doctor --env-file "$HOME/Library/Application Support/options-monitor/options-monitor.env"\n'
+      fi
+      ;;
+    Linux)
+      printf '\nLinux production env-file, if you later render systemd services:\n'
+      printf '  sudo install -d -m 700 /etc/options-monitor\n'
+      printf '  sudo test -f /etc/options-monitor/options-monitor.env || sudo install -m 600 configs/examples/options-monitor.env.example /etc/options-monitor/options-monitor.env\n'
+      if [ "$INSTALL_CLI" -eq 1 ]; then
+        printf '  om settings doctor --env-file /etc/options-monitor/options-monitor.env\n'
+      else
+        printf '  ./om settings doctor --env-file /etc/options-monitor/options-monitor.env\n'
+      fi
+      ;;
+  esac
+  if [ "$INSTALL_CLI" -eq 1 ] && ! bin_dir_in_path; then
+    printf '\nWarning: %s is not in PATH for this shell. Add it to your shell profile to keep using om directly.\n' "$(quote "$BIN_DIR")"
+  fi
+  printf '\nCreate runtime config and env-file only after reviewing setup output.\n'
 }
 
 while [ "$#" -gt 0 ]; do
@@ -210,16 +354,13 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-[ -n "$VERSION" ] || die "--version is required; install a pinned release tag, for example --version v1.2.107"
-case "$VERSION" in
-  v*) TAG="$VERSION" ;;
-  *) TAG="v${VERSION}" ;;
-esac
-case "$TAG" in
-  *[!A-Za-z0-9._-]*|.*|*..*)
-    die "unsupported version tag: $TAG"
-    ;;
-esac
+if [ -z "$VERSION" ] || [ "$VERSION" = "latest" ]; then
+  TAG="$(resolve_latest_release_tag)"
+  printf '[install] resolved latest release: %s\n' "$TAG"
+else
+  TAG="$(normalize_tag "$VERSION")"
+fi
+validate_tag "$TAG"
 
 command -v git >/dev/null 2>&1 || die "$(missing_git_message)"
 command -v "$PYTHON_BIN" >/dev/null 2>&1 || die "$(missing_python_message)"
@@ -241,81 +382,43 @@ if [ -e "$CURRENT_LINK" ] && [ ! -L "$CURRENT_LINK" ]; then
   die "current path exists and is not a symlink: $CURRENT_LINK"
 fi
 
+ALREADY_INSTALLED=0
 if [ -e "$TARGET_DIR" ]; then
-  if [ "$FORCE" -ne 1 ]; then
-    die "target release already exists: $TARGET_DIR (pass --force to recreate it)"
+  if [ "$FORCE" -eq 1 ]; then
+    rm -rf "$TARGET_DIR"
+  elif [ -L "$CURRENT_LINK" ] && [ "$(readlink "$CURRENT_LINK")" = "$TARGET_DIR" ]; then
+    ALREADY_INSTALLED=1
+  else
+    die "target release already exists but is not the active current release: $TARGET_DIR (pass --force to recreate it)"
   fi
-  rm -rf "$TARGET_DIR"
 fi
 
-tmp_dir="${RELEASES_DIR}/.${TAG}.tmp.$$"
-rm -rf "$tmp_dir"
-trap 'rm -rf "$tmp_dir"' EXIT
+if [ "$ALREADY_INSTALLED" -eq 1 ]; then
+  printf '[install] options-monitor %s is already installed\n' "$TAG"
+  install_optional_requirements "$TARGET_DIR"
+else
+  tmp_dir="${RELEASES_DIR}/.${TAG}.tmp.$$"
+  rm -rf "$tmp_dir"
+  trap 'rm -rf "$tmp_dir"' EXIT
 
-printf '[install] cloning %s at %s\n' "$REPO_URL" "$TAG"
-git clone --depth 1 --branch "$TAG" "$REPO_URL" "$tmp_dir"
+  printf '[install] cloning %s at %s\n' "$REPO_URL" "$TAG"
+  git clone --depth 1 --branch "$TAG" "$REPO_URL" "$tmp_dir"
 
-printf '[install] creating virtualenv\n'
-"$PYTHON_BIN" -m venv "$tmp_dir/.venv"
-"$tmp_dir/.venv/bin/pip" install -U pip
-"$tmp_dir/.venv/bin/pip" install -r "$tmp_dir/requirements.txt" -c "$tmp_dir/constraints.txt"
+  printf '[install] creating virtualenv\n'
+  "$PYTHON_BIN" -m venv "$tmp_dir/.venv"
+  "$tmp_dir/.venv/bin/pip" install -U pip
+  "$tmp_dir/.venv/bin/pip" install -r "$tmp_dir/requirements.txt" -c "$tmp_dir/constraints.txt"
 
-if [ "$WITH_SERVER" -eq 1 ]; then
-  "$tmp_dir/.venv/bin/pip" install -r "$tmp_dir/requirements/server.txt" -c "$tmp_dir/constraints/server.txt"
+  install_optional_requirements "$tmp_dir"
+
+  mv "$tmp_dir" "$TARGET_DIR"
+  ln -sfn "$TARGET_DIR" "$CURRENT_LINK"
+  trap - EXIT
 fi
-if [ "$WITH_DEV" -eq 1 ]; then
-  "$tmp_dir/.venv/bin/pip" install -r "$tmp_dir/requirements/dev.txt" -c "$tmp_dir/constraints/dev.txt"
-fi
-
-mv "$tmp_dir" "$TARGET_DIR"
-ln -sfn "$TARGET_DIR" "$CURRENT_LINK"
-trap - EXIT
 
 if [ "$INSTALL_CLI" -eq 1 ]; then
   write_cli_wrapper "om" "${CURRENT_LINK}/om"
   write_cli_wrapper "om-agent" "${CURRENT_LINK}/om-agent"
 fi
 
-printf '\n[install] installed options-monitor %s\n' "$TAG"
-printf '[install] current -> %s\n\n' "$TARGET_DIR"
-if [ "$INSTALL_CLI" -eq 1 ]; then
-  printf '[install] CLI wrappers installed in %s\n\n' "$(quote "$BIN_DIR")"
-fi
-printf 'Next steps:\n'
-if [ "$INSTALL_CLI" -eq 1 ]; then
-  if bin_dir_in_path; then
-    printf '  om setup check\n'
-  else
-    printf '  export PATH=%s:"$PATH"\n' "$(quote "$BIN_DIR")"
-    printf '  om setup check\n'
-  fi
-else
-  printf '  cd %s\n' "$(quote "$CURRENT_LINK")"
-  printf '  ./om setup check\n'
-fi
-case "$OS_NAME" in
-  Darwin)
-    printf '\nmacOS service env-file, if you later render launchd services:\n'
-    printf '  mkdir -p "$HOME/Library/Application Support/options-monitor"\n'
-    printf '  cp -n configs/examples/options-monitor.env.example "$HOME/Library/Application Support/options-monitor/options-monitor.env"\n'
-    if [ "$INSTALL_CLI" -eq 1 ]; then
-      printf '  om settings doctor --env-file "$HOME/Library/Application Support/options-monitor/options-monitor.env"\n'
-    else
-      printf '  ./om settings doctor --env-file "$HOME/Library/Application Support/options-monitor/options-monitor.env"\n'
-    fi
-    ;;
-  Linux)
-    printf '\nLinux production env-file, if you later render systemd services:\n'
-    printf '  sudo install -d -m 700 /etc/options-monitor\n'
-    printf '  sudo test -f /etc/options-monitor/options-monitor.env || sudo install -m 600 configs/examples/options-monitor.env.example /etc/options-monitor/options-monitor.env\n'
-    if [ "$INSTALL_CLI" -eq 1 ]; then
-      printf '  om settings doctor --env-file /etc/options-monitor/options-monitor.env\n'
-    else
-      printf '  ./om settings doctor --env-file /etc/options-monitor/options-monitor.env\n'
-    fi
-    ;;
-esac
-if [ "$INSTALL_CLI" -eq 1 ] && ! bin_dir_in_path; then
-  printf '\nWarning: %s is not in PATH for this shell. Add it to your shell profile to keep using om directly.\n' "$(quote "$BIN_DIR")"
-fi
-printf '\nCreate runtime config and env-file only after reviewing setup output.\n'
+print_next_steps
