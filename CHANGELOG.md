@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 1.2.124 - 2026-05-22
+
+### Fixed
+- Kept default `portfolio.runtime.json` resolution scoped to the runtime root, avoiding permission failures from probing `/etc/options-monitor` during cash footer generation.
+
 ## 1.2.123 - 2026-05-22
 
 ### Added

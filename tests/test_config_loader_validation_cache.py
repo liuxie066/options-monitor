@@ -97,6 +97,16 @@ def test_default_data_config_path_falls_back_to_runtime_config_location_when_mis
     assert out == (base / "portfolio.runtime.json").resolve()
 
 
+def test_data_config_candidates_use_runtime_location_only() -> None:
+    from src.application.config_loader import data_config_candidates
+
+    with TemporaryDirectory() as td:
+        base = Path(td)
+        out = data_config_candidates(base=base)
+
+    assert out == [(base / "portfolio.runtime.json").resolve()]
+
+
 def test_resolve_data_config_path_prefers_env_override(monkeypatch) -> None:
     from src.application.config_loader import resolve_data_config_path
 
