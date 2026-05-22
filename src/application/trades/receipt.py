@@ -137,6 +137,8 @@ def decide_trade_intake_receipt(
         return {"should_send": bool(cfg.get("notify_unresolved", True)), "reason": "unresolved"}
     if status == "failed":
         return {"should_send": bool(cfg.get("notify_failed", True)), "reason": "failed"}
+    if status == "skipped" and reason == "not_option_deal":
+        return {"should_send": False, "reason": "skipped_not_option_deal"}
     if status == "skipped" and reason == "duplicate_deal_id":
         if bool(cfg.get("notify_duplicate", False)):
             return {"should_send": True, "reason": "duplicate"}

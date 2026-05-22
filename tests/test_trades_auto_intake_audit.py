@@ -509,6 +509,76 @@ def test_process_payload_records_failed_state_when_resolver_raises(tmp_path: Pat
     assert any(event.get("phase") == "failed" and event.get("deal_id") == "deal-failed-1" for event in events)
 
 
+def test_process_payload_ignores_non_option_deal_without_receipt_or_state_write(tmp_path: Path) -> None:
+    deal = NormalizedTradeDeal(
+        broker="富途",
+        futu_account_id="REAL_1",
+        internal_account="lx",
+        deal_id="deal-stock-1",
+        order_id="order-stock-1",
+        symbol="TIGR",
+        option_type=None,
+        side="sell",
+        position_effect="open",
+        contracts=500,
+        price=4.32,
+        strike=None,
+        multiplier=None,
+        multiplier_source=None,
+        expiration_ymd=None,
+        currency="USD",
+        trade_time_ms=1779414218000,
+        raw_payload={"deal_id": "deal-stock-1", "symbol": "TIGR"},
+    )
+
+    class _Result:
+        status = "skipped"
+        action = None
+        reason = "not_option_deal"
+        deal_id = "deal-stock-1"
+        account = "lx"
+        operations: list[dict] = []
+
+        def to_dict(self) -> dict:
+            return {
+                "status": self.status,
+                "action": self.action,
+                "reason": self.reason,
+                "deal_id": self.deal_id,
+                "account": self.account,
+                "operations": self.operations,
+            }
+
+    writes: list[dict] = []
+    events: list[dict] = []
+    receipt_calls: list[dict] = []
+
+    out = process_trade_payload(
+        {"deal_id": "deal-stock-1", "symbol": "TIGR"},
+        repo=object(),
+        state_path=tmp_path / "state.json",
+        audit_path=tmp_path / "audit.jsonl",
+        account_mapping={"REAL_1": "lx"},
+        apply_changes=True,
+        load_trade_intake_state_fn=lambda _path: {"processed_deal_ids": {}, "failed_deal_ids": {}, "unresolved_deal_ids": {}},
+        write_trade_intake_state_fn=lambda _path, state: writes.append(dict(state)),
+        upsert_deal_state_fn=upsert_deal_state,
+        append_trade_intake_audit_fn=lambda _path, event: events.append(dict(event)),
+        enrich_trade_payload_fn=None,
+        normalize_trade_deal_fn=lambda payload, futu_account_mapping=None: deal,
+        resolve_trade_deal_fn=lambda *_args, **_kwargs: _Result(),
+        on_result_fn=lambda context: receipt_calls.append(dict(context)) or {"status": "sent", "delivery_confirmed": True},
+    )
+
+    assert out["status"] == "skipped"
+    assert out["reason"] == "not_option_deal"
+    assert "receipt" not in out
+    assert receipt_calls == []
+    assert writes == []
+    assert any(event.get("phase") == "resolved" and event.get("reason") == "not_option_deal" for event in events)
+    assert not any(str(event.get("phase") or "").startswith("receipt_") for event in events)
+
+
 def test_process_payload_records_receipt_state_after_applied(tmp_path: Path) -> None:
     deal = NormalizedTradeDeal(
         broker="富途",

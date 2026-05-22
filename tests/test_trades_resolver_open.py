@@ -123,6 +123,40 @@ def test_resolve_trade_open_rejects_duplicate_deal_id() -> None:
     assert result.reason == "duplicate_deal_id"
 
 
+def test_resolve_trade_skips_non_option_deal() -> None:
+    result = resolve_trade_deal(
+        _deal(symbol="TIGR", option_type=None, strike=None, expiration_ymd=None, multiplier=None),
+        repo=FakeRepo(),
+        state={},
+        apply_changes=True,
+    )
+
+    assert result.status == "skipped"
+    assert result.action is None
+    assert result.reason == "not_option_deal"
+    assert result.operations == []
+
+
+def test_resolve_trade_skips_non_option_deal_before_account_mapping() -> None:
+    result = resolve_trade_deal(
+        _deal(
+            internal_account=None,
+            futu_account_id="REAL_2",
+            symbol="TIGR",
+            option_type=None,
+            strike=None,
+            expiration_ymd=None,
+            multiplier=None,
+        ),
+        repo=FakeRepo(),
+        state={},
+        apply_changes=True,
+    )
+
+    assert result.status == "skipped"
+    assert result.reason == "not_option_deal"
+
+
 def test_resolve_trade_open_retries_retryable_unresolved_deal_id() -> None:
     result = resolve_trade_deal(
         _deal(),
