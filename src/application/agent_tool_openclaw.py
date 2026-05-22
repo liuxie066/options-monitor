@@ -387,6 +387,62 @@ def _repo_version(base: Path) -> str | None:
     return text or None
 
 
+def _upgrade_version_text(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.startswith("v") and len(text) > 1:
+        return text[1:]
+    return text
+
+
+def _upgrade_target_version(upgrade_json: dict[str, Any]) -> str | None:
+    target = _upgrade_version_text(upgrade_json.get("target_version"))
+    if target:
+        return target
+    release_tag = _upgrade_version_text(upgrade_json.get("release_tag"))
+    if release_tag:
+        return release_tag
+    target_dir = str(upgrade_json.get("target_dir") or "").strip()
+    if target_dir:
+        return _upgrade_version_text(Path(target_dir).name)
+    return None
+
+
+def _upgrade_failed_services(upgrade_json: dict[str, Any]) -> list[str]:
+    out: list[str] = []
+
+    def add(value: Any) -> None:
+        text = str(value or "").strip()
+        if text and text not in out:
+            out.append(text)
+
+    raw = upgrade_json.get("restart_failed_services")
+    if isinstance(raw, list):
+        for item in raw:
+            add(item)
+    service_health = upgrade_json.get("service_health")
+    health = service_health if isinstance(service_health, dict) else {}
+    failed_checks = health.get("failed_checks")
+    if isinstance(failed_checks, list):
+        for item in failed_checks:
+            if isinstance(item, dict):
+                add(item.get("service"))
+    return out
+
+
+def _upgrade_remediation(upgrade_json: dict[str, Any]) -> list[str]:
+    raw = upgrade_json.get("remediation") or upgrade_json.get("manual_remediation")
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    for item in raw:
+        text = str(item or "").strip()
+        if text:
+            out.append(text)
+    return out
+
+
 def _upgrade_service_profile(payload: dict[str, Any], *, runtime_root: Path) -> dict[str, Any]:
     profile = _load_runtime_service_profile(runtime_root)
     if profile:
@@ -460,16 +516,15 @@ def _upgrade_status_evaluation(
         return {"status": None, "runtime_failed": False, "warning": False, "checked": False}
 
     historical_status = str(upgrade_json.get("status") or "").strip()
-    target_version = str(upgrade_json.get("target_version") or "").strip() or None
+    target_version = _upgrade_target_version(upgrade_json)
     current_version = _repo_version(base)
     lock_path = runtime_root / "locks" / "upgrade.lock"
     lock_info = _upgrade_lock_info(lock_path)
     lock_exists = bool(lock_info.get("exists"))
     error = upgrade_json.get("error")
     failed_statuses = {"failed", "upgraded_restart_failed"}
-    failed_services_raw = upgrade_json.get("restart_failed_services")
-    failed_services = [str(item).strip() for item in failed_services_raw] if isinstance(failed_services_raw, list) else []
-    failed_services = [item for item in failed_services if item]
+    failed_services = _upgrade_failed_services(upgrade_json)
+    remediation = _upgrade_remediation(upgrade_json)
     service_check: dict[str, Any] = {"checked": False, "services": []}
 
     out: dict[str, Any] = {
@@ -482,6 +537,8 @@ def _upgrade_status_evaluation(
         "lock_pid": lock_info.get("pid"),
         "lock_active": bool(lock_info.get("active")),
         "lock_stale": bool(lock_info.get("stale")),
+        "failed_services": failed_services,
+        "remediation": remediation,
         "runtime_failed": False,
         "warning": False,
         "checked": True,
@@ -1642,10 +1699,13 @@ def runtime_status_tool(
     upgrade_json = upgrade_status.get("json") if isinstance(upgrade_status.get("json"), dict) else {}
     data["summary"]["service_upgrade_status"] = upgrade_evaluation.get("status") or (upgrade_json.get("status") if upgrade_json else None)
     data["summary"]["service_upgrade_historical_status"] = upgrade_evaluation.get("historical_status")
-    data["summary"]["service_upgrade_target_version"] = upgrade_json.get("target_version") if upgrade_json else None
+    data["summary"]["service_upgrade_target_version"] = upgrade_evaluation.get("target_version") or (upgrade_json.get("target_version") if upgrade_json else None)
     data["summary"]["service_upgrade_current_version"] = upgrade_evaluation.get("current_version")
     data["summary"]["service_upgrade_error"] = upgrade_evaluation.get("error")
     data["summary"]["service_upgrade_runtime_failed"] = bool(upgrade_evaluation.get("runtime_failed"))
+    data["summary"]["service_upgrade_reason"] = upgrade_evaluation.get("reason")
+    data["summary"]["service_upgrade_failed_services"] = upgrade_evaluation.get("failed_services")
+    data["summary"]["service_upgrade_remediation"] = upgrade_evaluation.get("remediation")
     data["summary"]["service_drift_status"] = service_drift_summary.get("status")
     data["summary"]["service_drift_missing_units"] = service_drift.get("missing_installed_units")
     data["summary"]["service_drift_missing_required_units"] = missing_required_units
