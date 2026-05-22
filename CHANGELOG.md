@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.2.121 - 2026-05-22
+
+### Changed
+- Split `runtime_status_tool` into `agent_tool_runtime_status.py`, leaving `agent_tool_openclaw.py` focused on OpenClaw readiness.
+- Updated agent tool handlers and runtime-status tests to use the neutral runtime-status module.
+
+### Added
+- Added an architecture guard to prevent `runtime_status_tool` from moving back into the OpenClaw module.
+
 ## 1.2.120 - 2026-05-22
 
 ### Changed

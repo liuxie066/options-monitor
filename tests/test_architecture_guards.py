@@ -167,3 +167,13 @@ def test_feishu_ws_cli_keeps_runtime_and_assistant_config_flags_separate() -> No
     assert "build_feishu_ws_settings(" in text
     assert "config_path=args.config_path" in text
     assert "assistant_config_path=args.assistant_config" in text
+
+
+def test_runtime_status_tool_is_not_owned_by_openclaw_module() -> None:
+    openclaw_text = (ROOT / "src" / "application" / "agent_tool_openclaw.py").read_text(encoding="utf-8")
+    runtime_text = (ROOT / "src" / "application" / "agent_tool_runtime_status.py").read_text(encoding="utf-8")
+    handlers_text = (ROOT / "src" / "application" / "agent_tool_handlers.py").read_text(encoding="utf-8")
+
+    assert "def runtime_status_tool(" not in openclaw_text
+    assert "def runtime_status_tool(" in runtime_text
+    assert "from src.application.agent_tool_runtime_status import runtime_status_tool" in handlers_text

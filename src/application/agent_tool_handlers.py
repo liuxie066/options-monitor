@@ -33,10 +33,8 @@ from src.application.agent_tool_candidate_filter import candidate_filter_explain
 from src.application.agent_tool_strategy_replay import strategy_replay_analyze_tool
 from src.application.ai_cofunder import ai_cofunder_tool
 from src.application.agent_tool_notifications import preview_notification_tool
-from src.application.agent_tool_openclaw import (
-    openclaw_readiness_tool,
-    runtime_status_tool,
-)
+from src.application.agent_tool_openclaw import openclaw_readiness_tool
+from src.application.agent_tool_runtime_status import runtime_status_tool
 from src.application.runtime_logs_cli import collect_runtime_logs
 from src.application.runtime_runs_cli import collect_runtime_runs
 from src.application.agent_tool_operations import (
