@@ -25,7 +25,6 @@ from src.application.config_yaml import (
 from src.infrastructure.io_utils import atomic_write_text
 from src.application.layered_config import (
     MARKETS,
-    build_layered_runtime_config,
     build_layered_runtime_config_from_user_config,
     default_common_user_config_path,
     default_user_config_path,
@@ -164,6 +163,48 @@ def _copy_supported_fields(
             out[key] = deepcopy(value)
             continue
         warnings.append(f"{path}.{key} omitted: no config.yaml mapping")
+    return out
+
+
+def _normalize_legacy_agent_config(raw: dict[str, Any] | None, *, warnings: list[str]) -> dict[str, Any] | None:
+    if raw is None or "agent" not in raw:
+        return raw
+    out = deepcopy(raw)
+    legacy_agent = out.pop("agent")
+    if not isinstance(legacy_agent, dict):
+        warnings.append("configs/user.common.json.agent omitted: expected object")
+        return out
+
+    assistant = out.get("assistant")
+    assistant_cfg = deepcopy(assistant) if isinstance(assistant, dict) else {}
+    legacy_runtime = legacy_agent.get("runtime")
+    runtime_cfg = legacy_runtime if isinstance(legacy_runtime, dict) else {}
+    legacy_llm = legacy_agent.get("llm")
+    llm_cfg = legacy_llm if isinstance(legacy_llm, dict) else {}
+
+    legacy_llm_enabled = llm_cfg.get("enabled") if isinstance(llm_cfg.get("enabled"), bool) else None
+    legacy_runtime_enabled = runtime_cfg.get("enabled") if isinstance(runtime_cfg.get("enabled"), bool) else None
+    if "mode" not in assistant_cfg:
+        if legacy_runtime_enabled is False:
+            assistant_cfg["mode"] = "disabled"
+        elif legacy_llm_enabled is True:
+            assistant_cfg["mode"] = "llm_router"
+        elif legacy_runtime_enabled is True:
+            assistant_cfg["mode"] = "deterministic"
+
+    if "context_window_messages" not in assistant_cfg and "context_window_messages" in runtime_cfg:
+        assistant_cfg["context_window_messages"] = deepcopy(runtime_cfg["context_window_messages"])
+    if "default_market_scope" not in assistant_cfg and "default_market_scope" in runtime_cfg:
+        assistant_cfg["default_market_scope"] = deepcopy(runtime_cfg["default_market_scope"])
+
+    clean_llm = {key: deepcopy(value) for key, value in llm_cfg.items() if key != "enabled"}
+    if clean_llm:
+        existing_llm = assistant_cfg.get("llm")
+        assistant_cfg["llm"] = _deep_merge(clean_llm, existing_llm if isinstance(existing_llm, dict) else {})
+
+    if assistant_cfg:
+        out["assistant"] = assistant_cfg
+    warnings.append("configs/user.common.json.agent migrated to assistant")
     return out
 
 
@@ -319,15 +360,17 @@ def preview_config_yaml_migration(
     }
 
     warnings: list[str] = []
+    common_cfg = _normalize_legacy_agent_config(common_cfg, warnings=warnings)
     old_runtime: dict[str, dict[str, Any]] = {}
     legacy_market_accounts: dict[str, list[str]] = {}
     for market in MARKETS:
-        cfg, meta = build_layered_runtime_config(
+        cfg, meta = build_layered_runtime_config_from_user_config(
             repo_root=repo_root,
             market=market,
-            common_user_config_path=common_path if common_loaded else None,
-            include_common_user_config=common_loaded,
-            user_config_path=user_paths[market],
+            user_config=user_cfgs[market],
+            common_user_config=common_cfg if common_loaded else None,
+            common_user_config_ref=str(common_path) if common_loaded else None,
+            user_config_ref=str(user_paths[market]),
         )
         old_runtime[market] = cfg
         legacy_market_accounts[market] = [str(item) for item in meta.get("accounts", [])]

@@ -459,6 +459,16 @@ def test_config_migrate_yaml_preview_generates_valid_yaml(tmp_path: Path) -> Non
                     "lx": {"type": "futu", "futu": {"account_id": "REAL_12345678"}},
                     "sy": {"type": "external_holdings", "holdings_account": "sy"},
                 },
+                "agent": {
+                    "runtime": {"enabled": True, "context_window_messages": 6},
+                    "llm": {
+                        "enabled": True,
+                        "provider": "deepseek",
+                        "base_url": "https://api.deepseek.com",
+                        "model": "deepseek-v4-flash",
+                        "api_key_env": "DEEPSEEK_API_KEY",
+                    },
+                },
                 "inbound": {"feishu_ws": {"ack_reaction": "THUMBSUP"}},
             },
             ensure_ascii=False,
@@ -504,13 +514,26 @@ def test_config_migrate_yaml_preview_generates_valid_yaml(tmp_path: Path) -> Non
 
     payload = yaml.safe_load(out["yaml"])
     assert payload["accounts"]["lx"]["futu_account_id"] == "REAL_12345678"
+    assert "agent" not in payload
+    assert payload["assistant"]["mode"] == "llm_router"
+    assert payload["assistant"]["context_window_messages"] == 6
+    assert payload["assistant"]["llm"] == {
+        "provider": "deepseek",
+        "base_url": "https://api.deepseek.com",
+        "model": "deepseek-v4-flash",
+        "api_key_env": "DEEPSEEK_API_KEY",
+    }
     assert payload["markets"]["us"]["symbols"] == ["NVDA", "PDD"]
     assert payload["markets"]["us"]["overrides"]["PDD"]["yield_enhancement"] is True
+    assert any("configs/user.common.json.agent migrated to assistant" in item for item in out["warnings"])
 
     migrated_path = tmp_path / "generated.yaml"
     migrated_path.write_text(out["yaml"], encoding="utf-8")
     cfg, _meta = resolve_yaml_runtime_config(repo_root=REPO_ROOT, market="us", config_path=migrated_path)
     validate_config(json.loads(json.dumps(cfg)))
+    assistant_cfg, _meta = resolve_yaml_assistant_config(repo_root=REPO_ROOT, config_path=migrated_path)
+    assert assistant_cfg["assistant"]["mode"] == "llm_router"
+    assert "enabled" not in assistant_cfg["assistant"]["llm"]
 
 
 def test_config_migrate_yaml_preview_can_override_market_accounts(tmp_path: Path) -> None:
