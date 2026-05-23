@@ -32,7 +32,6 @@ from src.application.config_yaml_migration import preview_config_yaml_migration
 from src.application.healthcheck import run_healthcheck
 from src.application.assistant.contracts import AssistantRequest
 from src.application.assistant.operation_diagnostics import collect_pending_operations, collect_recent_audit
-from src.application.assistant.router import handle_assistant_request
 from src.application.inbound import (
     build_feishu_ws_settings,
     check_feishu_ws_settings,
@@ -192,6 +191,17 @@ def _service_write_contract(data: dict[str, Any], *, confirmed: bool, rollback_h
 
 def _add_assistant_commands(parser: argparse.ArgumentParser) -> None:
     assistant_sub = parser.add_subparsers(dest="assistant_command", required=True)
+    assistant_handle = assistant_sub.add_parser("handle", help="handle one local or remote assistant message")
+    assistant_handle.add_argument("--text", required=True)
+    assistant_handle.add_argument("--sender", dest="sender_id", default="local")
+    assistant_handle.add_argument("--channel", default="local")
+    assistant_handle.add_argument("--message-id", default=None)
+    assistant_handle.add_argument("--conversation-id", default=None)
+    assistant_handle.add_argument("--config-key", default="us", choices=("us", "hk"))
+    assistant_handle.add_argument("--config-path", default=None)
+    assistant_handle.add_argument("--assistant-config", default=None)
+    assistant_handle.add_argument("--audit-db", default=None)
+    assistant_handle.add_argument("--format", choices=("json", "text"), default="json")
     assistant_commands = assistant_sub.add_parser("commands", help="list supported assistant commands and intents")
     assistant_commands.add_argument("--format", choices=("json", "text"), default="json")
     assistant_capabilities = assistant_sub.add_parser("capabilities", help="list supported assistant capabilities and LLM routing surface")
@@ -202,6 +212,31 @@ def _add_assistant_commands(parser: argparse.ArgumentParser) -> None:
     assistant_llm_check.add_argument("--no-local-env-file", action="store_true")
     assistant_llm_check.add_argument("--live", action="store_true", help="run one read-only provider translation probe")
     assistant_llm_check.add_argument("--text", default=None, help="probe text used with --live")
+    assistant_pending = assistant_sub.add_parser("pending", help="inspect pending assistant operations")
+    assistant_pending_sub = assistant_pending.add_subparsers(dest="assistant_pending_command", required=True)
+    assistant_pending_list = assistant_pending_sub.add_parser("list", help="list previewed operations awaiting confirmation")
+    assistant_pending_list.add_argument("--sender", dest="sender_id", default=None)
+    assistant_pending_list.add_argument("--channel", default=None)
+    assistant_pending_list.add_argument("--conversation-id", default=None)
+    assistant_pending_list.add_argument("--operation-type", action="append", dest="operation_types", default=None)
+    assistant_pending_list.add_argument("--include-expired", action="store_true")
+    assistant_pending_list.add_argument("--limit", type=int, default=20)
+    assistant_pending_list.add_argument("--audit-db", default=None)
+    assistant_pending_list.add_argument("--format", choices=("json", "text"), default="json")
+    assistant_audit = assistant_sub.add_parser("audit", help="inspect assistant audit records")
+    assistant_audit_sub = assistant_audit.add_subparsers(dest="assistant_audit_command", required=True)
+    assistant_audit_recent = assistant_audit_sub.add_parser("recent", help="show recent assistant audit records")
+    assistant_audit_recent.add_argument("--sender", dest="sender_id", default=None)
+    assistant_audit_recent.add_argument("--channel", default=None)
+    assistant_audit_recent.add_argument("--conversation-id", default=None)
+    assistant_audit_recent.add_argument("--limit", type=int, default=20)
+    assistant_audit_recent.add_argument("--audit-db", default=None)
+    assistant_audit_recent.add_argument("--format", choices=("json", "text"), default="json")
+    assistant_upgrade_worker = assistant_sub.add_parser("upgrade-worker", help="run one confirmed assistant upgrade operation")
+    assistant_upgrade_worker.add_argument("--operation-id", required=True)
+    assistant_upgrade_worker.add_argument("--audit-db", default=None)
+    assistant_upgrade_worker.add_argument("--no-final-receipt", action="store_true")
+    assistant_upgrade_worker.add_argument("--format", choices=("json", "text"), default="json")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -243,43 +278,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     _add_assistant_commands(sub.add_parser("assistant", help="inspect optional conversational assistant runtime"))
 
-    inbound = sub.add_parser("inbound", help="handle controlled inbound remote commands")
+    inbound = sub.add_parser("inbound", help="handle channel transport adapters")
     inbound_sub = inbound.add_subparsers(dest="inbound_command", required=True)
-    inbound_handle = inbound_sub.add_parser("handle", help="parse, authorize, audit, and execute one inbound command")
-    inbound_handle.add_argument("--text", required=True)
-    inbound_handle.add_argument("--sender", dest="sender_id", default="local")
-    inbound_handle.add_argument("--channel", default="local")
-    inbound_handle.add_argument("--message-id", default=None)
-    inbound_handle.add_argument("--conversation-id", default=None)
-    inbound_handle.add_argument("--config-key", default="us", choices=("us", "hk"))
-    inbound_handle.add_argument("--config-path", default=None)
-    inbound_handle.add_argument("--assistant-config", default=None)
-    inbound_handle.add_argument("--audit-db", default=None)
-    inbound_handle_assistant = inbound_handle.add_mutually_exclusive_group()
-    inbound_handle_assistant.add_argument("--assistant", dest="assistant", action="store_true", default=None, help="force routing through the assistant control plane")
-    inbound_handle_assistant.add_argument("--no-assistant", dest="assistant", action="store_false", help="bypass assistant routing and use the deterministic inbound parser directly")
-    inbound_handle.add_argument("--format", choices=("json", "text"), default="json")
-    inbound_pending = inbound_sub.add_parser("pending", help="inspect pending inbound operations")
-    inbound_pending_sub = inbound_pending.add_subparsers(dest="inbound_pending_command", required=True)
-    inbound_pending_list = inbound_pending_sub.add_parser("list", help="list previewed operations awaiting confirmation")
-    inbound_pending_list.add_argument("--sender", dest="sender_id", default=None)
-    inbound_pending_list.add_argument("--channel", default=None)
-    inbound_pending_list.add_argument("--conversation-id", default=None)
-    inbound_pending_list.add_argument("--operation-type", action="append", dest="operation_types", default=None)
-    inbound_pending_list.add_argument("--include-expired", action="store_true")
-    inbound_pending_list.add_argument("--limit", type=int, default=20)
-    inbound_pending_list.add_argument("--audit-db", default=None)
-    inbound_pending_list.add_argument("--format", choices=("json", "text"), default="json")
-    inbound_audit = inbound_sub.add_parser("audit", help="inspect inbound audit records")
-    inbound_audit_sub = inbound_audit.add_subparsers(dest="inbound_audit_command", required=True)
-    inbound_audit_recent = inbound_audit_sub.add_parser("recent", help="show recent inbound audit records")
-    inbound_audit_recent.add_argument("--sender", dest="sender_id", default=None)
-    inbound_audit_recent.add_argument("--channel", default=None)
-    inbound_audit_recent.add_argument("--conversation-id", default=None)
-    inbound_audit_recent.add_argument("--limit", type=int, default=20)
-    inbound_audit_recent.add_argument("--audit-db", default=None)
-    inbound_audit_recent.add_argument("--format", choices=("json", "text"), default="json")
-    inbound_feishu = inbound_sub.add_parser("feishu", help="handle one Feishu event payload through inbound control")
+    inbound_feishu = inbound_sub.add_parser("feishu", help="handle one Feishu event payload through assistant control")
     feishu_input = inbound_feishu.add_mutually_exclusive_group(required=True)
     feishu_input.add_argument("--input-json", default=None)
     feishu_input.add_argument("--input-file", default=None)
@@ -288,9 +289,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     inbound_feishu.add_argument("--config-path", default=None)
     inbound_feishu.add_argument("--assistant-config", default=None)
     inbound_feishu.add_argument("--audit-db", default=None)
-    inbound_feishu_assistant = inbound_feishu.add_mutually_exclusive_group()
-    inbound_feishu_assistant.add_argument("--assistant", dest="assistant", action="store_true", default=None, help="force routing through the assistant control plane")
-    inbound_feishu_assistant.add_argument("--no-assistant", dest="assistant", action="store_false", help="bypass assistant routing and use the deterministic inbound parser directly")
     inbound_feishu.add_argument("--format", choices=("json", "text"), default="json")
     inbound_ws = inbound_sub.add_parser("feishu-ws", help="serve the Feishu App long-connection inbound client")
     inbound_ws.add_argument("--config-key", default="us", choices=("us", "hk"))
@@ -303,12 +301,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     inbound_ws.add_argument("--queue-size", type=int, default=None)
     inbound_ws.add_argument("--lock-path", default=None)
     inbound_ws.add_argument("--check", action="store_true", help="validate and print redacted long-connection configuration without starting the client")
-    inbound_upgrade_worker = inbound_sub.add_parser("upgrade-worker", help="run one confirmed inbound upgrade operation")
-    inbound_upgrade_worker.add_argument("--operation-id", required=True)
-    inbound_upgrade_worker.add_argument("--audit-db", default=None)
-    inbound_upgrade_worker.add_argument("--no-final-receipt", action="store_true")
-    inbound_upgrade_worker.add_argument("--format", choices=("json", "text"), default="json")
-
     status = sub.add_parser("status", help="summarize runtime status")
     status.add_argument("--config-key", default=None, choices=("us", "hk"))
     status.add_argument("--config-path", default=None)
@@ -912,19 +904,13 @@ def main(argv: list[str] | None = None) -> int:
             )
             return _print(build_response(tool_name=tool_name, ok=True, data=data))
 
-        if args.command == "inbound" and args.inbound_command == "handle":
-            force_assistant = getattr(args, "assistant", None)
-            assistant_settings: AssistantSettings | None = None
-            if force_assistant is False:
-                use_assistant = False
-            else:
-                assistant_settings = _assistant_settings_for_cli(
-                    config_key=args.config_key,
-                    config_path=args.config_path,
-                    assistant_config_path=args.assistant_config,
-                    force_enabled=True if force_assistant is True else None,
-                )
-                use_assistant = bool(assistant_settings.enabled)
+        if args.command == "assistant" and args.assistant_command == "handle":
+            assistant_settings = _assistant_settings_for_cli(
+                config_key=args.config_key,
+                config_path=args.config_path,
+                assistant_config_path=args.assistant_config,
+                force_enabled=None,
+            )
             request = AssistantRequest(
                 text=args.text,
                 sender_id=args.sender_id,
@@ -935,11 +921,7 @@ def main(argv: list[str] | None = None) -> int:
                 config_path=args.config_path,
                 audit_db=args.audit_db,
             )
-            if use_assistant:
-                assert assistant_settings is not None
-                out = handle_assistant_message(request, settings=assistant_settings)
-            else:
-                out = handle_assistant_request(request)
+            out = handle_assistant_message(request, settings=assistant_settings)
             if args.format == "text":
                 data_raw = out.get("data")
                 data: dict[str, Any] = data_raw if isinstance(data_raw, dict) else {}
@@ -948,7 +930,7 @@ def main(argv: list[str] | None = None) -> int:
                 return 0 if out.get("ok", True) else 2
             return _print(out)
 
-        if args.command == "inbound" and args.inbound_command == "pending" and args.inbound_pending_command == "list":
+        if args.command == "assistant" and args.assistant_command == "pending" and args.assistant_pending_command == "list":
             data = collect_pending_operations(
                 audit_db=args.audit_db,
                 channel=args.channel,
@@ -958,13 +940,13 @@ def main(argv: list[str] | None = None) -> int:
                 include_expired=bool(args.include_expired),
                 limit=int(args.limit),
             )
-            out = build_response(tool_name="inbound.pending.list", ok=True, data=data)
+            out = build_response(tool_name="assistant.pending.list", ok=True, data=data)
             if args.format == "text":
                 sys.stdout.write(str(data.get("response_text") or "").strip() + "\n")
                 return 0
             return _print(out)
 
-        if args.command == "inbound" and args.inbound_command == "audit" and args.inbound_audit_command == "recent":
+        if args.command == "assistant" and args.assistant_command == "audit" and args.assistant_audit_command == "recent":
             data = collect_recent_audit(
                 audit_db=args.audit_db,
                 channel=args.channel,
@@ -972,14 +954,13 @@ def main(argv: list[str] | None = None) -> int:
                 conversation_id=args.conversation_id,
                 limit=int(args.limit),
             )
-            out = build_response(tool_name="inbound.audit.recent", ok=True, data=data)
+            out = build_response(tool_name="assistant.audit.recent", ok=True, data=data)
             if args.format == "text":
                 sys.stdout.write(str(data.get("response_text") or "").strip() + "\n")
                 return 0
             return _print(out)
 
         if args.command == "inbound" and args.inbound_command == "feishu":
-            force_assistant = getattr(args, "assistant", None)
             out = handle_feishu_payload(
                 _load_json_payload(
                     json_text=args.input_json,
@@ -989,7 +970,6 @@ def main(argv: list[str] | None = None) -> int:
                 config_key=args.config_key,
                 config_path=args.config_path,
                 audit_db=args.audit_db,
-                use_assistant=None if force_assistant is None else bool(force_assistant),
                 assistant_config_path=args.assistant_config,
             )
             if args.format == "text":
@@ -1016,7 +996,7 @@ def main(argv: list[str] | None = None) -> int:
             serve_feishu_ws(settings, lock_path=args.lock_path)
             return 0
 
-        if args.command == "inbound" and args.inbound_command == "upgrade-worker":
+        if args.command == "assistant" and args.assistant_command == "upgrade-worker":
             out = run_confirmed_upgrade_operation(
                 operation_id=args.operation_id,
                 audit_db=args.audit_db,

@@ -548,7 +548,7 @@ bash scripts/install_agent_plugin.sh
 受控远程消息入口：
 
 ```bash
-./om inbound handle --text '持仓 sy' --sender local --channel local --message-id local-1
+./om assistant handle --text '持仓 sy' --sender local --channel local --message-id local-1
 ./om inbound feishu --input-file feishu_event.json --format text
 ./om inbound feishu-ws --check
 ./om assistant commands --format text
@@ -556,7 +556,7 @@ bash scripts/install_agent_plugin.sh
 ./om assistant llm-check
 ```
 
-它只接受确定性只读命令，并带 sender allowlist、message_id 幂等和 SQLite audit。Assistant command facade 默认开启，例如 `/status`、`/positions sy`、`/income 2026-05`；Feishu WS 使用同一层 command facade，由 assistant config 的 `assistant.mode` 控制。LLM 默认关闭；显式把 `assistant.mode` 设为 `llm_router` 或 `agent_loop`，并配置 `assistant.llm.provider`、`model`、可选 `base_url` 和本机 API key env 后，只会把自然语言和同一对话的有限上下文翻译成 `om-llm-intent-v1` 只读 capability，再走同一条 router。`assistant capabilities` 可查看 LLM 能看到的项目能力清单：写入、确认、升级等能力会出现在清单里，但不会进入 LLM 可执行 enum。`feishu-ws` 可作为长驻 Feishu App long-connection client，通过飞书 SDK 长连接接收消息，并自动回复，不需要公网 HTTPS callback；reaction、reply、queue 行为配置在 assistant config 的 `inbound.feishu_ws` 下。接飞书、微信或 Hermes 前先看
+只读查询会直接执行；写操作必须先返回预览并等待确认。链路带 sender allowlist、message_id 幂等和 SQLite audit。Assistant command facade 默认开启，例如 `/status`、`/positions sy`、`/income 2026-05`；Feishu WS 使用同一层 command facade，由 assistant config 的 `assistant.mode` 控制。LLM 默认关闭；显式把 `assistant.mode` 设为 `llm_router` 或 `agent_loop`，并配置 `assistant.llm.provider`、`model`、可选 `base_url` 和本机 API key env 后，只会把自然语言和同一对话的有限上下文翻译成 `om-llm-intent-v1` 只读 capability，再走同一条 router。`assistant capabilities` 可查看 LLM 能看到的项目能力清单：写入、确认、升级等能力会出现在清单里，但不会进入 LLM 可执行 enum。`feishu-ws` 可作为长驻 Feishu App long-connection client，通过飞书 SDK 长连接接收消息，并自动回复，不需要公网 HTTPS callback；reaction、reply、queue 行为配置在 assistant config 的 `inbound.feishu_ws` 下。接飞书、微信或 Hermes 前先看
 [docs/INBOUND_CONTROL.md](docs/INBOUND_CONTROL.md)。
 
 AI Cofunder 证据交接：

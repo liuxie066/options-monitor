@@ -55,7 +55,7 @@ def enforce_sender_allowed(*, channel: str, sender_id: str, allowed_senders: str
     if not decision.allowed:
         raise AgentToolError(
             code="PERMISSION_DENIED",
-            message="sender is not allowed to use inbound control",
+            message="sender is not allowed to use assistant control",
             hint="Set OM_FEISHU_BOT_USER_OPEN_ID or OM_FEISHU_BOT_ALLOWED_OPEN_IDS.",
             details=decision.public_payload(),
         )

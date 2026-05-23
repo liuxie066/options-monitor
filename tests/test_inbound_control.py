@@ -1951,7 +1951,7 @@ def test_feishu_payload_adapter_assistant_reads_assistant_config(monkeypatch: py
     def _handle_assistant_message(request: AssistantRequest, **kwargs) -> dict:
         seen.append({"request": request, "kwargs": kwargs})
         return build_response(
-            tool_name="inbound.handle",
+            tool_name="assistant.handle",
             ok=True,
             data={"response_text": "状态查询完成。"},
             meta={"assistant": {"route": "command"}},
@@ -1965,7 +1965,6 @@ def test_feishu_payload_adapter_assistant_reads_assistant_config(monkeypatch: py
         assistant_config_path=str(assistant_config_path),
         audit_db=str(tmp_path / "audit.sqlite3"),
         allowed_senders="feishu:ou_1",
-        use_assistant=True,
     )
 
     assert out["ok"] is True
@@ -2012,7 +2011,7 @@ def test_feishu_payload_adapter_defaults_to_assistant_from_assistant_config(monk
     def _handle_assistant_message(request: AssistantRequest, **kwargs) -> dict:
         seen.append({"request": request, "kwargs": kwargs})
         return build_response(
-            tool_name="inbound.handle",
+            tool_name="assistant.handle",
             ok=True,
             data={"response_text": "状态查询完成。"},
             meta={"assistant": {"route": "command"}},
@@ -2049,24 +2048,25 @@ def test_feishu_payload_adapter_ignores_non_message_events() -> None:
     assert out["data"]["reason"] == "unsupported_event_type"
 
 
-def test_inbound_cli_wires_request(monkeypatch, capsys, tmp_path: Path) -> None:
+def test_assistant_cli_handle_wires_request(monkeypatch, capsys, tmp_path: Path) -> None:
     import src.interfaces.cli.main as cli
 
     seen: list[AssistantRequest] = []
 
-    def _handle(request: AssistantRequest) -> dict:
+    def _handle(request: AssistantRequest, **kwargs) -> dict:
+        del kwargs
         seen.append(request)
         return build_response(
-            tool_name="inbound.handle",
+            tool_name="assistant.handle",
             ok=True,
             data={"response_text": "状态查询完成。"},
         )
 
-    monkeypatch.setattr(cli, "handle_assistant_request", _handle)
+    monkeypatch.setattr(cli, "handle_assistant_message", _handle)
 
     rc = cli.main(
         [
-            "inbound",
+            "assistant",
             "handle",
             "--text",
             "状态",
@@ -2080,13 +2080,12 @@ def test_inbound_cli_wires_request(monkeypatch, capsys, tmp_path: Path) -> None:
             "feishu:oc_1:ou_1",
             "--audit-db",
             str(tmp_path / "audit.sqlite3"),
-            "--no-assistant",
         ]
     )
     payload = json.loads(capsys.readouterr().out)
 
     assert rc == 0
-    assert payload["tool_name"] == "inbound.handle"
+    assert payload["tool_name"] == "assistant.handle"
     assert seen == [
         AssistantRequest(
             text="状态",
@@ -2100,7 +2099,7 @@ def test_inbound_cli_wires_request(monkeypatch, capsys, tmp_path: Path) -> None:
     ]
 
 
-def test_inbound_cli_assistant_loads_settings_from_config(monkeypatch, capsys, tmp_path: Path) -> None:
+def test_assistant_cli_handle_loads_settings_from_config(monkeypatch, capsys, tmp_path: Path) -> None:
     import src.interfaces.cli.main as cli
 
     cfg = _runtime_cfg(str(tmp_path / "portfolio.runtime.json"))
@@ -2126,7 +2125,7 @@ def test_inbound_cli_assistant_loads_settings_from_config(monkeypatch, capsys, t
     def _handle_assistant(request: AssistantRequest, **kwargs) -> dict:
         seen.append({"request": request, "settings": kwargs.get("settings")})
         return build_response(
-            tool_name="inbound.handle",
+            tool_name="assistant.handle",
             ok=True,
             data={"response_text": "状态查询完成。"},
         )
@@ -2135,7 +2134,7 @@ def test_inbound_cli_assistant_loads_settings_from_config(monkeypatch, capsys, t
 
     rc = cli.main(
         [
-            "inbound",
+            "assistant",
             "handle",
             "--config-path",
             str(cfg_path),
@@ -2150,7 +2149,7 @@ def test_inbound_cli_assistant_loads_settings_from_config(monkeypatch, capsys, t
     payload = json.loads(capsys.readouterr().out)
 
     assert rc == 0
-    assert payload["tool_name"] == "inbound.handle"
+    assert payload["tool_name"] == "assistant.handle"
     assert len(seen) == 1
     settings = seen[0]["settings"]
     assert settings.enabled is True
@@ -2164,7 +2163,7 @@ def test_inbound_cli_assistant_loads_settings_from_config(monkeypatch, capsys, t
     assert settings.llm.max_output_tokens == 771
 
 
-def test_inbound_cli_assistant_flag_forces_disabled_config(monkeypatch, capsys, tmp_path: Path) -> None:
+def test_assistant_cli_handle_uses_deterministic_config(monkeypatch, capsys, tmp_path: Path) -> None:
     import src.interfaces.cli.main as cli
 
     cfg = _runtime_cfg(str(tmp_path / "portfolio.runtime.json"))
@@ -2180,7 +2179,7 @@ def test_inbound_cli_assistant_flag_forces_disabled_config(monkeypatch, capsys, 
     def _handle_assistant(request: AssistantRequest, **kwargs) -> dict:
         seen.append({"request": request, "settings": kwargs.get("settings")})
         return build_response(
-            tool_name="inbound.handle",
+            tool_name="assistant.handle",
             ok=True,
             data={"response_text": "状态查询完成。"},
         )
@@ -2189,9 +2188,8 @@ def test_inbound_cli_assistant_flag_forces_disabled_config(monkeypatch, capsys, 
 
     rc = cli.main(
         [
-            "inbound",
+            "assistant",
             "handle",
-            "--assistant",
             "--config-path",
             str(cfg_path),
             "--assistant-config",
@@ -2205,14 +2203,14 @@ def test_inbound_cli_assistant_flag_forces_disabled_config(monkeypatch, capsys, 
     payload = json.loads(capsys.readouterr().out)
 
     assert rc == 0
-    assert payload["tool_name"] == "inbound.handle"
+    assert payload["tool_name"] == "assistant.handle"
     assert len(seen) == 1
     settings = seen[0]["settings"]
     assert settings.enabled is True
     assert settings.context_window_messages == 4
 
 
-def test_inbound_cli_pending_and_audit_diagnostics(monkeypatch: pytest.MonkeyPatch, capsys, tmp_path: Path) -> None:
+def test_assistant_cli_pending_and_audit_diagnostics(monkeypatch: pytest.MonkeyPatch, capsys, tmp_path: Path) -> None:
     import src.interfaces.cli.main as cli
 
     _enable_inbound_trade_write(monkeypatch)
@@ -2234,7 +2232,7 @@ def test_inbound_cli_pending_and_audit_diagnostics(monkeypatch: pytest.MonkeyPat
 
     pending_rc = cli.main(
         [
-            "inbound",
+            "assistant",
             "pending",
             "list",
             "--channel",
@@ -2250,14 +2248,14 @@ def test_inbound_cli_pending_and_audit_diagnostics(monkeypatch: pytest.MonkeyPat
     pending_payload = json.loads(capsys.readouterr().out)
 
     assert pending_rc == 0
-    assert pending_payload["tool_name"] == "inbound.pending.list"
+    assert pending_payload["tool_name"] == "assistant.pending.list"
     assert pending_payload["data"]["pending_count"] == 1
     assert pending_payload["data"]["pending_operations"][0]["operation_id"] == preview["data"]["operation_id"]
     assert "NVDA 2026-06-19 100.0P short put 1张 premium 2.5" in pending_payload["data"]["response_text"]
 
     text_rc = cli.main(
         [
-            "inbound",
+            "assistant",
             "pending",
             "list",
             "--channel",
@@ -2274,12 +2272,12 @@ def test_inbound_cli_pending_and_audit_diagnostics(monkeypatch: pytest.MonkeyPat
     )
     pending_text = capsys.readouterr().out
     assert text_rc == 0
-    assert "Inbound pending：1 条" in pending_text
+    assert "Assistant pending：1 条" in pending_text
     assert f"确认：确认记录 {preview['data']['operation_id']}" in pending_text
 
     audit_rc = cli.main(
         [
-            "inbound",
+            "assistant",
             "audit",
             "recent",
             "--channel",
@@ -2293,7 +2291,7 @@ def test_inbound_cli_pending_and_audit_diagnostics(monkeypatch: pytest.MonkeyPat
     audit_payload = json.loads(capsys.readouterr().out)
 
     assert audit_rc == 0
-    assert audit_payload["tool_name"] == "inbound.audit.recent"
+    assert audit_payload["tool_name"] == "assistant.audit.recent"
     assert audit_payload["data"]["audit_count"] == 1
     assert audit_payload["data"]["audit_rows"][0]["intent_name"] == "manual_trade_open"
     assert audit_payload["data"]["audit_rows"][0]["message_id"] == "msg_cli_pending_preview"
@@ -2301,7 +2299,7 @@ def test_inbound_cli_pending_and_audit_diagnostics(monkeypatch: pytest.MonkeyPat
 
     audit_text_rc = cli.main(
         [
-            "inbound",
+            "assistant",
             "audit",
             "recent",
             "--channel",
@@ -2316,7 +2314,7 @@ def test_inbound_cli_pending_and_audit_diagnostics(monkeypatch: pytest.MonkeyPat
     )
     audit_text = capsys.readouterr().out
     assert audit_text_rc == 0
-    assert "Inbound audit recent：1 条" in audit_text
+    assert "Assistant audit recent：1 条" in audit_text
     assert "manual_trade_open" in audit_text
     assert "msg_cli_pending_preview" in audit_text
 
@@ -2359,7 +2357,6 @@ def test_inbound_cli_feishu_wires_payload(monkeypatch, capsys, tmp_path: Path) -
                 "config_key": "us",
                 "config_path": None,
                 "audit_db": str(tmp_path / "audit.sqlite3"),
-                "use_assistant": None,
                 "assistant_config_path": None,
             },
         }

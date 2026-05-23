@@ -97,17 +97,17 @@ om-agent run --tool <tool-name> --input-file payload.json
 
 ### 远程消息入口
 
-`om inbound handle` 是飞书、微信、Hermes 等消息入口调用 OM 的受控入口：
+`om assistant handle` 是飞书、微信、Hermes 等消息入口调用 OM 的受控入口：
 
 ```bash
-om inbound handle --text '收益 sy 2026-05' --sender ou_xxx --channel feishu --message-id msg_xxx
+om assistant handle --text '收益 sy 2026-05' --sender ou_xxx --channel feishu --message-id msg_xxx
 om inbound feishu --input-file feishu_event.json --format text
 om inbound feishu-ws --check
 om assistant capabilities
 om assistant llm-check
 ```
 
-它不是 `om-agent` manifest 里的工具，也不是 shell bridge。`inbound feishu` 只解析 Feishu 事件 payload，然后进入同一条 sender allowlist、message_id 幂等、SQLite audit 和工具白名单路径。Assistant command facade 默认开启；assistant config 可选择启用 LLM intent translation，但 LLM 只能从 `assistant capabilities` 暴露的只读可执行 capability 中产出结构化 intent，不能执行工具或改写事实输出。`inbound feishu-ws` 是长驻 Feishu App long-connection client：通过飞书 SDK 长连接接收消息、进入 inbound control，并使用同一个 Bot 自动回复；Assistant 由 `assistant.mode` 控制，reaction、reply、queue 行为配置在 assistant config 的 `inbound.feishu_ws` 下。完整边界见 [INBOUND_CONTROL.md](INBOUND_CONTROL.md)。
+它不是 `om-agent` manifest 里的工具，也不是 shell bridge。`inbound feishu` 只解析 Feishu 事件 payload，然后进入同一条 sender allowlist、message_id 幂等、SQLite audit 和工具白名单路径。Assistant command facade 默认开启；assistant config 可选择启用 LLM intent translation，但 LLM 只能从 `assistant capabilities` 暴露的只读可执行 capability 中产出结构化 intent，不能执行工具或改写事实输出。`inbound feishu-ws` 是长驻 Feishu App long-connection client：通过飞书 SDK 长连接接收消息、进入 assistant control，并使用同一个 Bot 自动回复；Assistant 由 `assistant.mode` 控制，reaction、reply、queue 行为配置在 assistant config 的 `inbound.feishu_ws` 下。完整边界见 [INBOUND_CONTROL.md](INBOUND_CONTROL.md)。
 
 ### Tick 入口关系
 

@@ -107,13 +107,13 @@ For MacBook-side Codex diagnosis of online quality or strategy direction, collec
 
 ## Inbound Remote Messages
 
-Use `./om inbound handle` when a remote messaging gateway needs to send user text into OM:
+Use `./om assistant handle` when a remote messaging gateway needs to send user text into OM:
 
 ```bash
-./om inbound handle --text '持仓 sy' --sender ou_xxx --channel feishu --message-id msg_xxx
+./om assistant handle --text '持仓 sy' --sender ou_xxx --channel feishu --message-id msg_xxx
 ```
 
-This is a controlled message entrypoint, not an `om-agent` tool and not a shell bridge. By default it performs Assistant command parsing, deterministic parsing, sender allowlist checks, message idempotency, SQLite audit, and then calls an allowlisted tool through the same `execute_tool(...)` path used by `om-agent`. `--no-assistant` bypasses the command facade for parser diagnostics, and assistant config may opt into LLM intent translation; both still return structured intents into the same allowlist, audit, and renderer path.
+This is a controlled message entrypoint, not an `om-agent` tool and not a shell bridge. It performs Assistant command parsing, deterministic parsing, sender allowlist checks, message idempotency, SQLite audit, and then calls an allowlisted tool through the same `execute_tool(...)` path used by `om-agent`. Assistant config may opt into LLM intent translation; translated intents still return into the same allowlist, audit, and renderer path.
 
 Remote channels require:
 
@@ -134,7 +134,7 @@ The first whitelist is intentionally small:
 - `symbol_list`
 - `pending_operations`
 
-Do not connect Feishu, WeChat, or Hermes to arbitrary shell execution. Gateways should call only `./om inbound handle`. See [INBOUND_CONTROL.md](INBOUND_CONTROL.md).
+Do not connect Feishu, WeChat, or Hermes to arbitrary shell execution. Gateways should call only `./om assistant handle`. See [INBOUND_CONTROL.md](INBOUND_CONTROL.md).
 
 For Feishu event JSON specifically, use the thin adapter:
 
@@ -143,7 +143,7 @@ OM_FEISHU_BOT_ALLOWED_OPEN_IDS='ou_xxx' \
 ./om inbound feishu --input-file feishu_event.json --format text
 ```
 
-It extracts `im.message.receive_v1` text fields and then delegates to the same inbound control path.
+It extracts `im.message.receive_v1` text fields and then delegates to the same assistant control path.
 
 For the full Feishu loop, run the long-connection service:
 
@@ -152,7 +152,7 @@ For the full Feishu loop, run the long-connection service:
 ./om inbound feishu-ws --config-key us --config-path /var/lib/options-monitor/config.us.json --lock-path /var/lib/options-monitor/locks/feishu-ws.lock
 ```
 
-The long-connection client receives Feishu events through the authenticated SDK connection, delegates text messages to inbound control, optionally adds the configured assistant `inbound.feishu_ws.ack_reaction`, and replies through the Feishu message reply API. Render it as a long-running service with `./om service render --include-feishu-ws ...`; no public callback URL or reverse proxy is required.
+The long-connection client receives Feishu events through the authenticated SDK connection, delegates text messages to assistant control, optionally adds the configured assistant `inbound.feishu_ws.ack_reaction`, and replies through the Feishu message reply API. Render it as a long-running service with `./om service render --include-feishu-ws ...`; no public callback URL or reverse proxy is required.
 
 Treat `openclaw_readiness` as OpenClaw-specific. It is safe to call outside OpenClaw, but the
 `openclaw_binary` check may return `warn` when the `openclaw` command is not installed.

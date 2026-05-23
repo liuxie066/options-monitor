@@ -182,7 +182,6 @@ def handle_feishu_ws_event(
         config_key=settings.config_key,
         config_path=settings.config_path,
         audit_db=settings.audit_db,
-        use_assistant=settings.assistant_enabled,
         assistant_settings=AssistantSettings(
             mode=settings.assistant_mode,
             enabled=settings.assistant_enabled,
@@ -433,7 +432,10 @@ def _permission_denied_should_stay_silent(inbound_result: dict[str, Any]) -> boo
     details = cast(dict[str, Any], details_raw) if isinstance(details_raw, dict) else {}
     reason = str(details.get("reason") or "").strip()
     message = str(error.get("message") or "").strip()
-    return reason in {"sender_not_allowed", "missing_sender"} or message == "sender is not allowed to use inbound control"
+    return reason in {"sender_not_allowed", "missing_sender"} or message in {
+        "sender is not allowed to use assistant control",
+        "sender is not allowed to use inbound control",
+    }
 
 
 def _permission_denied_message(inbound_result: dict[str, Any]) -> str:

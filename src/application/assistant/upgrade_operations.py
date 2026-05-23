@@ -452,15 +452,15 @@ def _launch_upgrade_worker(*, operation_id: str, audit_db: Path) -> dict[str, An
 def _default_upgrade_worker_launcher(operation_id: str, audit_db: Path) -> dict[str, Any]:
     root = repo_base()
     om_path = root / "om"
-    command = [str(om_path if om_path.exists() else sys.executable), "inbound", "upgrade-worker", "--operation-id", operation_id, "--audit-db", str(audit_db)]
+    command = [str(om_path if om_path.exists() else sys.executable), "assistant", "upgrade-worker", "--operation-id", operation_id, "--audit-db", str(audit_db)]
     if not om_path.exists():
-        command = [sys.executable, "-m", "src.interfaces.cli.main", "inbound", "upgrade-worker", "--operation-id", operation_id, "--audit-db", str(audit_db)]
+        command = [sys.executable, "-m", "src.interfaces.cli.main", "assistant", "upgrade-worker", "--operation-id", operation_id, "--audit-db", str(audit_db)]
 
     systemd_run = shutil.which("systemd-run")
     worker_env = _upgrade_worker_child_env(root=root)
     systemd_env_args = _systemd_setenv_args(worker_env)
     if systemd_run and sys.platform.startswith("linux"):
-        unit = "options-monitor-inbound-upgrade-" + "".join(ch if ch.isalnum() else "-" for ch in operation_id.lower())[:48]
+        unit = "options-monitor-assistant-upgrade-" + "".join(ch if ch.isalnum() else "-" for ch in operation_id.lower())[:48]
         attempts = [
             [systemd_run, "--user", "--unit", unit, "--collect", "--working-directory", str(root), *systemd_env_args, *command],
             ["sudo", "-n", systemd_run, "--unit", unit, "--collect", "--working-directory", str(root), *systemd_env_args, *command],
