@@ -4,6 +4,7 @@ import json
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from src.application.assistant.commands import llm_capability_prompt
 from src.application.assistant.llm_intent_schema import inbound_intent_from_llm_payload, llm_intent_json_schema, llm_intent_schema
 from src.application.assistant.settings import LlmTranslatorSettings
 from src.application.agent_tool_contracts import AgentToolError
@@ -40,6 +41,9 @@ Rules:
 - For unclear or unsupported messages, return a low confidence value below 0.5.
 - Use account only when the user explicitly mentions lx or sy.
 - Use month only when the user explicitly mentions a YYYY-MM month.
+- The JSON `intent` field is an OM capability_id.
+- You can only choose capabilities marked llm_executable=true in the manifest below.
+- If the user asks for a known but non-executable capability, such as writing trades, confirming operations, editing monitored symbols, or upgrading software, return confidence below 0.5.
 
 Example JSON output:
 {
@@ -137,7 +141,7 @@ def translate_inbound_intent(
             base_url=settings.base_url,
             model=settings.model,
             input_text=_provider_input_text(text, conversation_context=conversation_context),
-            instructions=_TRANSLATOR_INSTRUCTIONS,
+            instructions=_translator_instructions(),
             json_schema=llm_intent_json_schema(),
             timeout=int(settings.timeout_seconds),
             max_output_tokens=int(settings.max_output_tokens),
@@ -199,6 +203,10 @@ def translate_inbound_intent(
 
 def skipped_llm_trace(settings: LlmTranslatorSettings, *, reason: str) -> dict[str, Any]:
     return _trace(settings, attempted=False, reason=reason)
+
+
+def _translator_instructions() -> str:
+    return f"{_TRANSLATOR_INSTRUCTIONS}\n\n{llm_capability_prompt()}"
 
 
 def _missing_config(settings: LlmTranslatorSettings) -> list[str]:

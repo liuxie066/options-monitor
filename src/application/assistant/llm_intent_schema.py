@@ -8,6 +8,7 @@ from src.application.assistant.commands import (
     LLM_INTENT_SCHEMA_VERSION,
     LOG_KIND_VALUES,
     POSITION_STATUS_VALUES,
+    llm_capability_manifest,
     llm_allowed_arguments,
     llm_argument_schema_properties,
     llm_argument_schema_required_keys,
@@ -35,6 +36,7 @@ def llm_intent_schema() -> dict[str, Any]:
             "confidence": "number 0..1",
         },
         "argument_keys": {name: sorted(keys) for name, keys in _ALLOWED_ARGUMENTS.items()},
+        "capability_manifest": llm_capability_manifest(),
         "write_intents_allowed": False,
     }
 

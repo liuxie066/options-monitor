@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from src.application.assistant.commands import command_catalog_payload, command_specs
+from src.application.assistant.commands import capability_catalog_payload, capability_specs, command_catalog_payload, command_specs
 from src.application.assistant.command_parser import parse_agent_command, parse_assistant_command
 from src.application.assistant.llm_intent_schema import LLM_INTENT_SCHEMA_VERSION, llm_intent_json_schema, llm_intent_schema
 from src.application.assistant.settings import AgentRuntimeSettings, AssistantSettings, LlmTranslatorSettings
@@ -11,6 +11,8 @@ __all__ = [
     "handle_agent_message",
     "LLM_INTENT_SCHEMA_VERSION",
     "LlmTranslatorSettings",
+    "capability_catalog_payload",
+    "capability_specs",
     "command_catalog_payload",
     "command_specs",
     "llm_intent_json_schema",

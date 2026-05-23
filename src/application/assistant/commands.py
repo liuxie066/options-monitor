@@ -12,10 +12,13 @@ class AssistantCommandSpec:
     arguments: tuple[str, ...] = ()
     read_only: bool = True
     llm_allowed: bool = True
+    llm_visible: bool = True
+    risk_level: str | None = None
     examples: tuple[str, ...] = ()
     summary: str = ""
 
 
+AssistantCapabilitySpec = AssistantCommandSpec
 AgentCommandSpec = AssistantCommandSpec
 
 
@@ -117,6 +120,7 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         arguments=("operation_id", "operation_resolution"),
         read_only=False,
         llm_allowed=False,
+        risk_level="confirm_write",
         examples=("/confirm trade|symbol|upgrade [operation_id]",),
         summary="confirm a pending manual trade preview",
     ),
@@ -127,8 +131,42 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         arguments=("operation_id", "operation_resolution"),
         read_only=False,
         llm_allowed=False,
+        risk_level="confirm_write",
         examples=("/cancel trade|symbol|upgrade [operation_id]",),
         summary="cancel a pending manual trade preview",
+    ),
+    AssistantCommandSpec(
+        intent_name="manual_trade_open",
+        tool_name="inbound.manual_trade",
+        commands=(),
+        arguments=("raw_text",),
+        read_only=False,
+        llm_allowed=False,
+        risk_level="preview_write",
+        examples=("记录开仓", "record open"),
+        summary="preview a manual opening trade record",
+    ),
+    AssistantCommandSpec(
+        intent_name="manual_trade_close",
+        tool_name="inbound.manual_trade",
+        commands=(),
+        arguments=("raw_text",),
+        read_only=False,
+        llm_allowed=False,
+        risk_level="preview_write",
+        examples=("记录平仓", "record close"),
+        summary="preview a manual closing trade record",
+    ),
+    AssistantCommandSpec(
+        intent_name="manual_trade_update",
+        tool_name="inbound.manual_trade",
+        commands=(),
+        arguments=("operation_id", "operation_resolution", "updates"),
+        read_only=False,
+        llm_allowed=False,
+        risk_level="preview_write",
+        examples=("权利金改成 1.23", "合约数改成 2"),
+        summary="update a pending manual trade preview",
     ),
     AssistantCommandSpec(
         intent_name="symbol_confirm",
@@ -137,6 +175,7 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         arguments=("operation_id", "operation_resolution"),
         read_only=False,
         llm_allowed=False,
+        risk_level="confirm_write",
         examples=("/confirm trade|symbol|upgrade [operation_id]",),
         summary="confirm a pending symbol preview",
     ),
@@ -147,8 +186,42 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         arguments=("operation_id", "operation_resolution"),
         read_only=False,
         llm_allowed=False,
+        risk_level="confirm_write",
         examples=("/cancel trade|symbol|upgrade [operation_id]",),
         summary="cancel a pending symbol preview",
+    ),
+    AssistantCommandSpec(
+        intent_name="symbol_add",
+        tool_name="inbound.symbols",
+        commands=(),
+        arguments=("symbol", "sell_put_enabled", "sell_call_enabled"),
+        read_only=False,
+        llm_allowed=False,
+        risk_level="preview_write",
+        examples=("增加监控标的 700 put",),
+        summary="preview adding a monitored symbol",
+    ),
+    AssistantCommandSpec(
+        intent_name="symbol_edit",
+        tool_name="inbound.symbols",
+        commands=(),
+        arguments=("symbol", "set"),
+        read_only=False,
+        llm_allowed=False,
+        risk_level="preview_write",
+        examples=("修改监控标的 HK.00700 sell_put.max_strike=480",),
+        summary="preview editing a monitored symbol",
+    ),
+    AssistantCommandSpec(
+        intent_name="symbol_remove",
+        tool_name="inbound.symbols",
+        commands=(),
+        arguments=("symbol",),
+        read_only=False,
+        llm_allowed=False,
+        risk_level="preview_write",
+        examples=("删除监控标的 腾讯",),
+        summary="preview removing a monitored symbol",
     ),
     AssistantCommandSpec(
         intent_name="upgrade_confirm",
@@ -157,6 +230,7 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         arguments=("operation_id", "operation_resolution"),
         read_only=False,
         llm_allowed=False,
+        risk_level="confirm_write",
         examples=("/confirm trade|symbol|upgrade [operation_id]",),
         summary="confirm a pending upgrade preview",
     ),
@@ -167,8 +241,20 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         arguments=("operation_id", "operation_resolution"),
         read_only=False,
         llm_allowed=False,
+        risk_level="confirm_write",
         examples=("/cancel trade|symbol|upgrade [operation_id]",),
         summary="cancel a pending upgrade preview",
+    ),
+    AssistantCommandSpec(
+        intent_name="upgrade_now",
+        tool_name="inbound.upgrade",
+        commands=(),
+        arguments=("target_version",),
+        read_only=False,
+        llm_allowed=False,
+        risk_level="preview_admin",
+        examples=("立即升级", "立即升级到 v1.2.111"),
+        summary="preview a software upgrade operation",
     ),
 )
 
@@ -177,31 +263,32 @@ def command_specs() -> tuple[AssistantCommandSpec, ...]:
     return COMMAND_SPECS
 
 
+def capability_specs() -> tuple[AssistantCapabilitySpec, ...]:
+    return COMMAND_SPECS
+
+
 def command_catalog_payload() -> dict[str, Any]:
-    specs = [
-        {
-            "intent_name": spec.intent_name,
-            "tool_name": spec.tool_name,
-            "commands": list(spec.commands),
-            "arguments": list(spec.arguments),
-            "read_only": bool(spec.read_only),
-            "llm_allowed": bool(spec.llm_allowed),
-            "examples": list(spec.examples),
-            "summary": spec.summary,
-        }
-        for spec in COMMAND_SPECS
-    ]
+    specs = [_spec_payload(spec) for spec in COMMAND_SPECS]
     return {
         "summary": {
             "command_count": len(specs),
+            "capability_count": len(specs),
+            "slash_command_count": len({command for spec in COMMAND_SPECS for command in spec.commands}),
             "read_only_count": sum(1 for item in specs if item["read_only"]),
             "llm_allowed_count": sum(1 for item in specs if item["llm_allowed"]),
+            "llm_executable_count": sum(1 for item in specs if item["llm_executable"]),
             "write_command_count": sum(1 for item in specs if not item["read_only"]),
+            "write_capability_count": sum(1 for item in specs if not item["read_only"]),
         },
         "schema_version": LLM_INTENT_SCHEMA_VERSION,
         "commands": specs,
+        "capabilities": specs,
         "help_text": command_help_text(),
     }
+
+
+def capability_catalog_payload() -> dict[str, Any]:
+    return command_catalog_payload()
 
 
 def spec_by_intent() -> dict[str, AssistantCommandSpec]:
@@ -227,6 +314,40 @@ def llm_intent_names() -> list[str]:
     return sorted(spec.intent_name for spec in llm_allowed_specs())
 
 
+def llm_capability_manifest() -> dict[str, Any]:
+    capabilities = [
+        _spec_payload(spec)
+        for spec in COMMAND_SPECS
+        if spec.llm_visible
+    ]
+    return {
+        "schema_version": LLM_INTENT_SCHEMA_VERSION,
+        "intent_field_semantics": "The JSON `intent` field is the OM capability_id.",
+        "routing_rule": "Choose only capabilities where llm_executable is true. For write, confirm, admin, or unknown requests, return low confidence.",
+        "llm_executable_intents": llm_intent_names(),
+        "capabilities": capabilities,
+    }
+
+
+def llm_capability_prompt() -> str:
+    manifest = llm_capability_manifest()
+    lines = [
+        "Available OM capabilities:",
+        "The JSON `intent` field must be one executable capability_id from this manifest.",
+        "Capabilities with llm_executable=false are known project abilities but must not be routed by LLM.",
+    ]
+    for item in manifest["capabilities"]:
+        executable = "true" if item["llm_executable"] else "false"
+        commands = ", ".join(item["commands"]) if item["commands"] else "-"
+        examples = " | ".join(item["examples"]) if item["examples"] else "-"
+        args = ", ".join(item["arguments"]) if item["arguments"] else "-"
+        lines.append(
+            f"- {item['capability_id']}: {item['summary']}; risk={item['risk_level']}; "
+            f"llm_executable={executable}; commands={commands}; args={args}; examples={examples}"
+        )
+    return "\n".join(lines)
+
+
 def llm_argument_schema_properties() -> dict[str, dict[str, Any]]:
     names = sorted({arg for spec in llm_allowed_specs() for arg in spec.arguments})
     return {name: dict(ARGUMENT_JSON_SCHEMA[name]) for name in names}
@@ -234,6 +355,29 @@ def llm_argument_schema_properties() -> dict[str, dict[str, Any]]:
 
 def llm_argument_schema_required_keys() -> list[str]:
     return sorted({arg for spec in llm_allowed_specs() for arg in spec.arguments})
+
+
+def _spec_payload(spec: AssistantCommandSpec) -> dict[str, Any]:
+    return {
+        "capability_id": spec.intent_name,
+        "intent_name": spec.intent_name,
+        "tool_name": spec.tool_name,
+        "commands": list(spec.commands),
+        "arguments": list(spec.arguments),
+        "read_only": bool(spec.read_only),
+        "llm_allowed": bool(spec.llm_allowed),
+        "llm_visible": bool(spec.llm_visible),
+        "llm_executable": bool(spec.read_only and spec.llm_allowed),
+        "risk_level": _risk_level(spec),
+        "examples": list(spec.examples),
+        "summary": spec.summary,
+    }
+
+
+def _risk_level(spec: AssistantCommandSpec) -> str:
+    if spec.risk_level:
+        return spec.risk_level
+    return "read_only" if spec.read_only else "write"
 
 
 def command_help_text() -> str:
