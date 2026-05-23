@@ -8,7 +8,7 @@ from typing import Any
 
 from src.application.agent_tool_config import load_runtime_config, repo_base
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response
-from src.application.assistant import command_catalog_payload
+from src.application.assistant import capability_catalog_payload, command_catalog_payload
 from src.application.assistant.settings import AssistantSettings
 from src.application.assistant.config_loader import load_assistant_config
 from src.application.assistant.diagnostics import check_llm_translator
@@ -190,6 +190,8 @@ def _add_assistant_commands(parser: argparse.ArgumentParser) -> None:
     assistant_sub = parser.add_subparsers(dest="assistant_command", required=True)
     assistant_commands = assistant_sub.add_parser("commands", help="list supported assistant commands and intents")
     assistant_commands.add_argument("--format", choices=("json", "text"), default="json")
+    assistant_capabilities = assistant_sub.add_parser("capabilities", help="list supported assistant capabilities and LLM routing surface")
+    assistant_capabilities.add_argument("--format", choices=("json", "text"), default="json")
     assistant_llm_check = assistant_sub.add_parser("llm-check", help="check optional LLM intent translator configuration")
     assistant_llm_check.add_argument("--assistant-config", default=None)
     assistant_llm_check.add_argument("--env-file", default=None)
@@ -889,12 +891,13 @@ def main(argv: list[str] | None = None) -> int:
                 data=data,
             ))
 
-        if args.command == "assistant" and args.assistant_command == "commands":
-            data = command_catalog_payload()
+        if args.command == "assistant" and args.assistant_command in {"commands", "capabilities"}:
+            data = capability_catalog_payload() if args.assistant_command == "capabilities" else command_catalog_payload()
             if args.format == "text":
                 sys.stdout.write(str(data.get("help_text") or "").strip() + "\n")
                 return 0
-            return _print(build_response(tool_name="assistant.commands", ok=True, data=data))
+            tool_name = "assistant.capabilities" if args.assistant_command == "capabilities" else "assistant.commands"
+            return _print(build_response(tool_name=tool_name, ok=True, data=data))
 
         if args.command == "inbound" and args.inbound_command == "handle":
             force_assistant = getattr(args, "assistant", None)

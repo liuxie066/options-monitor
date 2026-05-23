@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable
 
+from src.application.assistant.commands import llm_capability_manifest
 from src.application.assistant.config_loader import load_assistant_config
 from src.application.assistant.llm_translator import CreateStructuredResponseFn, translate_inbound_intent
 from src.application.assistant.settings import AssistantSettings, LlmTranslatorSettings
@@ -41,6 +42,7 @@ def check_llm_translator(
     checks: list[dict[str, Any]] = []
     validation_ok = _append_assistant_config_check(checks, cfg=cfg, settings=runtime_settings)
     checks.extend(_config_checks(settings, effective_env=effective_env))
+    manifest = llm_capability_manifest()
 
     live_probe = _live_probe_check(
         settings=settings,
@@ -90,6 +92,7 @@ def check_llm_translator(
             "api_key_configured": bool(effective_env.get(settings.api_key_env)),
             "api_key_source": _source_value(effective_env.source_of(settings.api_key_env)),
         },
+        "capabilities": _capability_summary(manifest),
         "checks": checks,
     }
 
@@ -281,6 +284,24 @@ def _live_probe_check(
             "trace": dict(result.trace),
             "intent": result.intent.public_payload() if result.intent is not None else None,
         },
+    }
+
+
+def _capability_summary(manifest: dict[str, Any]) -> dict[str, Any]:
+    capabilities = list(manifest.get("capabilities") or [])
+    executable = list(manifest.get("llm_executable_intents") or [])
+    non_executable = [
+        str(item.get("capability_id") or "")
+        for item in capabilities
+        if item.get("llm_visible") and not item.get("llm_executable")
+    ]
+    return {
+        "schema_version": manifest.get("schema_version"),
+        "visible_count": len(capabilities),
+        "llm_executable_count": len(executable),
+        "llm_executable_intents": executable,
+        "known_non_executable_count": len([item for item in non_executable if item]),
+        "known_non_executable_intents": [item for item in non_executable if item],
     }
 
 
