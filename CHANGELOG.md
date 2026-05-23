@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.2.133 - 2026-05-23
+
+### Added
+- Added explicit `--env-file` support for `./om healthcheck`, `./om doctor`, `./om status`, Feishu inbound commands, assistant commands, and `./om-agent run`.
+- Added redacted environment-source diagnostics to `healthcheck` and `runtime_status` so production checks can confirm which env file and keys are loaded without exposing secret values.
+
+### Fixed
+- Unified Feishu Bot, Feishu holdings, assistant, and runtime-status environment loading through the same effective-env path, reducing drift between manual CLI checks, systemd services, and upgrade health checks.
+
 ## 1.2.132 - 2026-05-23
 
 ### Fixed

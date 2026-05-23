@@ -53,6 +53,12 @@ om-agent run --tool <tool-name> --input-file payload.json
 
 `--input-file` 会覆盖 `--input-json`。
 
+线上诊断时可以显式指定生产环境变量文件：
+
+```bash
+om-agent run --tool runtime_status --env-file /etc/options-monitor/options-monitor.env --input-json '{"config_key":"us"}'
+```
+
 ---
 
 ## 4. Tool 与 `om` CLI 的关系

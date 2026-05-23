@@ -142,6 +142,37 @@ def test_agent_run_unknown_tool_returns_structured_error() -> None:
     assert out["schema_version"] == "1.0"
 
 
+def test_agent_cli_run_loads_explicit_env_file(monkeypatch, tmp_path: Path, capsys) -> None:
+    import src.interfaces.agent.cli as agent_cli
+
+    env_file = tmp_path / "options-monitor.env"
+    env_file.write_text("OM_FEISHU_BOT_APP_ID=cli_agent\n", encoding="utf-8")
+    bootstrap_calls: list[dict] = []
+    calls: list[tuple[str, dict]] = []
+
+    def _bootstrap_process_env(**kwargs):
+        bootstrap_calls.append(kwargs)
+
+    def _execute_tool(name: str, payload: dict) -> dict:
+        calls.append((name, payload))
+        return {"schema_version": "1.0", "tool_name": name, "ok": True, "data": {"status": "ok"}, "warnings": [], "error": None, "meta": {}}
+
+    monkeypatch.setattr(agent_cli, "bootstrap_process_env", _bootstrap_process_env)
+    monkeypatch.setattr(agent_cli, "execute_tool", _execute_tool)
+
+    rc = agent_cli.main(["run", "--tool", "healthcheck", "--env-file", str(env_file)])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert payload["tool_name"] == "healthcheck"
+    assert calls == [("healthcheck", {})]
+    assert bootstrap_calls == [{
+        "repo_root": agent_cli.repo_base(),
+        "env_file": str(env_file),
+        "include_local_env_file": True,
+    }]
+
+
 def test_agent_cli_spec_prints_json_manifest() -> None:
     import subprocess
 
