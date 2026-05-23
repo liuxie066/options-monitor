@@ -132,19 +132,19 @@ def test_assistant_config_rejects_business_runtime_shape() -> None:
 def test_llm_intent_surface_is_read_only_only() -> None:
     from src.application.assistant.llm_intent_schema import llm_intent_json_schema, llm_intent_schema
     from src.application.agent_tool_registry import get_tool_definition
-    from src.application.assistant.commands import llm_allowed_specs
+    from src.application.assistant.commands import llm_executable_specs
     from src.application.tool_allowlist import PURE_READ_TOOLS
 
     schema = llm_intent_schema()
     json_schema = llm_intent_json_schema()
-    allowed_names = {spec.intent_name for spec in llm_allowed_specs()}
+    allowed_names = {spec.intent_name for spec in llm_executable_specs()}
 
     assert schema["write_intents_allowed"] is False
     assert set(json_schema["properties"]["intent"]["enum"]) == allowed_names
     assert not any(name.endswith(("_confirm", "_cancel")) for name in allowed_names)
 
     pure_read_router_tools = {"inbound.pending", "inbound.symbols"}
-    for spec in llm_allowed_specs():
+    for spec in llm_executable_specs():
         assert spec.read_only is True
         if spec.tool_name is None:
             continue
@@ -173,8 +173,11 @@ def test_read_tool_allowlist_has_neutral_owner() -> None:
 
 
 def test_assistant_owns_command_catalog_and_interaction_contracts() -> None:
+    from src.application.agent_runtime import capability_catalog_text as compat_runtime_capability_text
     from src.application.agent_runtime.command_catalog import capability_specs as compat_capability_specs
+    from src.application.agent_runtime.command_catalog import capability_catalog_text as compat_capability_text
     from src.application.agent_runtime.command_catalog import command_specs as compat_command_specs
+    from src.application.assistant.commands import capability_catalog_text
     from src.application.assistant.commands import capability_specs
     from src.application.assistant.commands import command_specs
     from src.application.assistant.contracts import AssistantRequest
@@ -182,6 +185,8 @@ def test_assistant_owns_command_catalog_and_interaction_contracts() -> None:
 
     assert compat_capability_specs is capability_specs
     assert compat_command_specs is command_specs
+    assert compat_capability_text is capability_catalog_text
+    assert compat_runtime_capability_text is capability_catalog_text
     assert InboundRequest is AssistantRequest
 
     offenders: list[str] = []

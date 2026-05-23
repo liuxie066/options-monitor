@@ -9,6 +9,7 @@ class AssistantCommandSpec:
     intent_name: str
     tool_name: str | None
     commands: tuple[str, ...]
+    display_name: str
     arguments: tuple[str, ...] = ()
     read_only: bool = True
     llm_allowed: bool = True
@@ -43,6 +44,7 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         intent_name="help",
         tool_name=None,
         commands=("/help", "/?"),
+        display_name="帮助",
         examples=("帮助", "/help"),
         summary="show supported inbound commands",
     ),
@@ -50,6 +52,7 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         intent_name="runtime_status",
         tool_name="runtime_status",
         commands=("/status",),
+        display_name="状态",
         examples=("状态", "/status"),
         summary="show runtime status",
     ),
@@ -57,6 +60,7 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         intent_name="healthcheck",
         tool_name="healthcheck",
         commands=("/health", "/doctor"),
+        display_name="健康检查",
         examples=("健康检查", "/health"),
         summary="run read-only health checks",
     ),
@@ -64,6 +68,7 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         intent_name="config_validate",
         tool_name="config_validate",
         commands=("/config-check", "/config"),
+        display_name="配置检查",
         examples=("配置检查", "/config-check"),
         summary="validate runtime config",
     ),
@@ -71,6 +76,7 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         intent_name="option_positions_open",
         tool_name="option_positions_read",
         commands=("/positions",),
+        display_name="持仓",
         arguments=("account", "status"),
         examples=("持仓", "持仓 sy", "/positions [lx|sy|all]"),
         summary="list option positions",
@@ -79,6 +85,7 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         intent_name="monthly_income_report",
         tool_name="monthly_income_report",
         commands=("/income",),
+        display_name="收益",
         arguments=("account", "month"),
         examples=("收益", "收益 sy", "收益 sy 2026-05", "/income [lx|sy] [YYYY-MM|本月|上月]"),
         summary="show monthly income report",
@@ -87,6 +94,7 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         intent_name="runtime_runs",
         tool_name="runtime_runs",
         commands=("/runs",),
+        display_name="运行记录",
         arguments=("limit",),
         examples=("最近运行", "/runs [limit]"),
         summary="list recent runtime runs",
@@ -95,6 +103,7 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         intent_name="runtime_logs",
         tool_name="runtime_logs",
         commands=("/logs",),
+        display_name="日志",
         arguments=("run_id", "kind", "lines"),
         examples=("日志 <run_id>", "/logs <run_id>"),
         summary="show runtime logs for a run",
@@ -103,6 +112,7 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         intent_name="symbol_list",
         tool_name="inbound.symbols",
         commands=("/symbols",),
+        display_name="监控标的",
         examples=("查看监控标的", "/symbols"),
         summary="list monitored symbols",
     ),
@@ -110,6 +120,7 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         intent_name="pending_operations",
         tool_name="inbound.pending",
         commands=("/pending",),
+        display_name="待确认",
         examples=("待确认", "/pending"),
         summary="list pending preview operations",
     ),
@@ -117,28 +128,31 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         intent_name="manual_trade_confirm",
         tool_name="inbound.manual_trade",
         commands=("/confirm",),
+        display_name="确认交易记录",
         arguments=("operation_id", "operation_resolution"),
         read_only=False,
         llm_allowed=False,
         risk_level="confirm_write",
-        examples=("/confirm trade|symbol|upgrade [operation_id]",),
+        examples=("确认记录", "/confirm trade|symbol|upgrade [operation_id]"),
         summary="confirm a pending manual trade preview",
     ),
     AssistantCommandSpec(
         intent_name="manual_trade_cancel",
         tool_name="inbound.manual_trade",
         commands=("/cancel",),
+        display_name="取消交易记录",
         arguments=("operation_id", "operation_resolution"),
         read_only=False,
         llm_allowed=False,
         risk_level="confirm_write",
-        examples=("/cancel trade|symbol|upgrade [operation_id]",),
+        examples=("取消记录", "/cancel trade|symbol|upgrade [operation_id]"),
         summary="cancel a pending manual trade preview",
     ),
     AssistantCommandSpec(
         intent_name="manual_trade_open",
         tool_name="inbound.manual_trade",
         commands=(),
+        display_name="记录开仓",
         arguments=("raw_text",),
         read_only=False,
         llm_allowed=False,
@@ -150,6 +164,7 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         intent_name="manual_trade_close",
         tool_name="inbound.manual_trade",
         commands=(),
+        display_name="记录平仓",
         arguments=("raw_text",),
         read_only=False,
         llm_allowed=False,
@@ -161,6 +176,7 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         intent_name="manual_trade_update",
         tool_name="inbound.manual_trade",
         commands=(),
+        display_name="修改待确认交易",
         arguments=("operation_id", "operation_resolution", "updates"),
         read_only=False,
         llm_allowed=False,
@@ -172,28 +188,31 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         intent_name="symbol_confirm",
         tool_name="inbound.symbols",
         commands=("/confirm",),
+        display_name="确认监控变更",
         arguments=("operation_id", "operation_resolution"),
         read_only=False,
         llm_allowed=False,
         risk_level="confirm_write",
-        examples=("/confirm trade|symbol|upgrade [operation_id]",),
+        examples=("确认监控", "/confirm trade|symbol|upgrade [operation_id]"),
         summary="confirm a pending symbol preview",
     ),
     AssistantCommandSpec(
         intent_name="symbol_cancel",
         tool_name="inbound.symbols",
         commands=("/cancel",),
+        display_name="取消监控变更",
         arguments=("operation_id", "operation_resolution"),
         read_only=False,
         llm_allowed=False,
         risk_level="confirm_write",
-        examples=("/cancel trade|symbol|upgrade [operation_id]",),
+        examples=("取消监控", "/cancel trade|symbol|upgrade [operation_id]"),
         summary="cancel a pending symbol preview",
     ),
     AssistantCommandSpec(
         intent_name="symbol_add",
         tool_name="inbound.symbols",
         commands=(),
+        display_name="增加监控标的",
         arguments=("symbol", "sell_put_enabled", "sell_call_enabled"),
         read_only=False,
         llm_allowed=False,
@@ -205,6 +224,7 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         intent_name="symbol_edit",
         tool_name="inbound.symbols",
         commands=(),
+        display_name="修改监控标的",
         arguments=("symbol", "set"),
         read_only=False,
         llm_allowed=False,
@@ -216,6 +236,7 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         intent_name="symbol_remove",
         tool_name="inbound.symbols",
         commands=(),
+        display_name="删除监控标的",
         arguments=("symbol",),
         read_only=False,
         llm_allowed=False,
@@ -227,28 +248,31 @@ COMMAND_SPECS: tuple[AssistantCommandSpec, ...] = (
         intent_name="upgrade_confirm",
         tool_name="inbound.upgrade",
         commands=("/confirm",),
+        display_name="确认升级",
         arguments=("operation_id", "operation_resolution"),
         read_only=False,
         llm_allowed=False,
         risk_level="confirm_write",
-        examples=("/confirm trade|symbol|upgrade [operation_id]",),
+        examples=("确认升级", "/confirm trade|symbol|upgrade [operation_id]"),
         summary="confirm a pending upgrade preview",
     ),
     AssistantCommandSpec(
         intent_name="upgrade_cancel",
         tool_name="inbound.upgrade",
         commands=("/cancel",),
+        display_name="取消升级",
         arguments=("operation_id", "operation_resolution"),
         read_only=False,
         llm_allowed=False,
         risk_level="confirm_write",
-        examples=("/cancel trade|symbol|upgrade [operation_id]",),
+        examples=("取消升级", "/cancel trade|symbol|upgrade [operation_id]"),
         summary="cancel a pending upgrade preview",
     ),
     AssistantCommandSpec(
         intent_name="upgrade_now",
         tool_name="inbound.upgrade",
         commands=(),
+        display_name="立即升级",
         arguments=("target_version",),
         read_only=False,
         llm_allowed=False,
@@ -275,7 +299,7 @@ def command_catalog_payload() -> dict[str, Any]:
             "capability_count": len(specs),
             "slash_command_count": len({command for spec in COMMAND_SPECS for command in spec.commands}),
             "read_only_count": sum(1 for item in specs if item["read_only"]),
-            "llm_allowed_count": sum(1 for item in specs if item["llm_allowed"]),
+            "llm_allowed_count": sum(1 for item in specs if item["llm_executable"]),
             "llm_executable_count": sum(1 for item in specs if item["llm_executable"]),
             "write_command_count": sum(1 for item in specs if not item["read_only"]),
             "write_capability_count": sum(1 for item in specs if not item["read_only"]),
@@ -288,7 +312,36 @@ def command_catalog_payload() -> dict[str, Any]:
 
 
 def capability_catalog_payload() -> dict[str, Any]:
-    return command_catalog_payload()
+    payload = command_catalog_payload()
+    payload["capability_text"] = capability_catalog_text(payload)
+    return payload
+
+
+def capability_catalog_text(payload: dict[str, Any] | None = None) -> str:
+    catalog = payload if payload is not None else command_catalog_payload()
+    capabilities = list(catalog.get("capabilities") or [])
+    executable = [item for item in capabilities if item.get("llm_executable")]
+    non_executable = [item for item in capabilities if not item.get("llm_executable")]
+
+    lines = [
+        "Assistant capabilities",
+        "",
+        "LLM executable read-only capabilities:",
+    ]
+    lines.extend(_capability_text_line(item) for item in executable)
+    lines.extend([
+        "",
+        "Known capabilities not executable by LLM:",
+    ])
+    lines.extend(_capability_text_line(item) for item in non_executable)
+    lines.extend([
+        "",
+        (
+            "Rule: LLM may choose only llm_executable=true capabilities. Writes, confirms, "
+            "and admin operations stay behind deterministic preview/confirm handling."
+        ),
+    ])
+    return "\n".join(lines)
 
 
 def spec_by_intent() -> dict[str, AssistantCommandSpec]:
@@ -299,19 +352,31 @@ def commands_by_intent() -> dict[str, tuple[str, ...]]:
     return {spec.intent_name: spec.commands for spec in COMMAND_SPECS}
 
 
+def llm_executable_specs() -> tuple[AssistantCommandSpec, ...]:
+    return tuple(spec for spec in COMMAND_SPECS if _is_llm_executable_spec(spec))
+
+
 def llm_allowed_specs() -> tuple[AssistantCommandSpec, ...]:
-    return tuple(spec for spec in COMMAND_SPECS if spec.llm_allowed)
+    return llm_executable_specs()
 
 
-def llm_allowed_arguments() -> dict[str, frozenset[str]]:
+def llm_executable_arguments() -> dict[str, frozenset[str]]:
     return {
         spec.intent_name: frozenset(spec.arguments)
-        for spec in llm_allowed_specs()
+        for spec in llm_executable_specs()
     }
 
 
+def llm_allowed_arguments() -> dict[str, frozenset[str]]:
+    return llm_executable_arguments()
+
+
+def llm_executable_intent_names() -> list[str]:
+    return sorted(spec.intent_name for spec in llm_executable_specs())
+
+
 def llm_intent_names() -> list[str]:
-    return sorted(spec.intent_name for spec in llm_allowed_specs())
+    return llm_executable_intent_names()
 
 
 def llm_capability_manifest() -> dict[str, Any]:
@@ -324,7 +389,7 @@ def llm_capability_manifest() -> dict[str, Any]:
         "schema_version": LLM_INTENT_SCHEMA_VERSION,
         "intent_field_semantics": "The JSON `intent` field is the OM capability_id.",
         "routing_rule": "Choose only capabilities where llm_executable is true. For write, confirm, admin, or unknown requests, return low confidence.",
-        "llm_executable_intents": llm_intent_names(),
+        "llm_executable_intents": llm_executable_intent_names(),
         "capabilities": capabilities,
     }
 
@@ -342,19 +407,19 @@ def llm_capability_prompt() -> str:
         examples = " | ".join(item["examples"]) if item["examples"] else "-"
         args = ", ".join(item["arguments"]) if item["arguments"] else "-"
         lines.append(
-            f"- {item['capability_id']}: {item['summary']}; risk={item['risk_level']}; "
+            f"- {item['capability_id']} ({item['display_name']}): {item['summary']}; risk={item['risk_level']}; "
             f"llm_executable={executable}; commands={commands}; args={args}; examples={examples}"
         )
     return "\n".join(lines)
 
 
 def llm_argument_schema_properties() -> dict[str, dict[str, Any]]:
-    names = sorted({arg for spec in llm_allowed_specs() for arg in spec.arguments})
+    names = sorted({arg for spec in llm_executable_specs() for arg in spec.arguments})
     return {name: dict(ARGUMENT_JSON_SCHEMA[name]) for name in names}
 
 
 def llm_argument_schema_required_keys() -> list[str]:
-    return sorted({arg for spec in llm_allowed_specs() for arg in spec.arguments})
+    return sorted({arg for spec in llm_executable_specs() for arg in spec.arguments})
 
 
 def _spec_payload(spec: AssistantCommandSpec) -> dict[str, Any]:
@@ -363,15 +428,20 @@ def _spec_payload(spec: AssistantCommandSpec) -> dict[str, Any]:
         "intent_name": spec.intent_name,
         "tool_name": spec.tool_name,
         "commands": list(spec.commands),
+        "display_name": spec.display_name,
         "arguments": list(spec.arguments),
         "read_only": bool(spec.read_only),
         "llm_allowed": bool(spec.llm_allowed),
         "llm_visible": bool(spec.llm_visible),
-        "llm_executable": bool(spec.read_only and spec.llm_allowed),
+        "llm_executable": _is_llm_executable_spec(spec),
         "risk_level": _risk_level(spec),
         "examples": list(spec.examples),
         "summary": spec.summary,
     }
+
+
+def _is_llm_executable_spec(spec: AssistantCommandSpec) -> bool:
+    return bool(spec.read_only and spec.llm_allowed)
 
 
 def _risk_level(spec: AssistantCommandSpec) -> str:
@@ -380,36 +450,102 @@ def _risk_level(spec: AssistantCommandSpec) -> str:
     return "read_only" if spec.read_only else "write"
 
 
-def command_help_text() -> str:
-    return "\n".join(
-        [
-            "我可以帮你处理这些事：",
-            "",
-            "只读查询",
-            "- 状态：状态、/status",
-            "- 健康检查：健康检查、自检、/health",
-            "- 配置检查：配置检查、/config-check",
-            "- 持仓：持仓、持仓 sy、/positions [lx|sy|all]",
-            "- 收益：收益、收益 sy、收益 sy 2026-05、/income [lx|sy] [YYYY-MM|本月|上月]",
-            "- 运行记录：最近运行、/runs [limit]",
-            "- 日志：日志 <run_id>、/logs <run_id>",
-            "- 监控标的：查看监控标的、/symbols",
-            "- 待确认：待确认、/pending",
-            "",
-            "写操作",
-            "- 记录交易：记录开仓、记录平仓",
-            "- 管理监控标的：增加/修改/删除监控标的",
-            "- 升级：立即升级",
-            "",
-            "安全规则",
-            "- 写操作只会先返回预览，不会直接执行。",
-            "- 同一对话只有一条待确认时，可回复：确认记录、确认监控、确认升级。",
-            "- 指定确认：/confirm trade|symbol|upgrade [operation_id]",
-            "- 指定取消：/cancel trade|symbol|upgrade [operation_id]",
-            "",
-            "Command：/help、/status、/health、/config-check、/positions、/income、/runs、/logs、/symbols、/pending。",
-        ]
+def _capability_text_line(item: dict[str, Any]) -> str:
+    commands = ", ".join(_unique(item.get("commands") or ())) or "-"
+    examples = " | ".join(_unique(item.get("examples") or ())[:3]) or "-"
+    arguments = ", ".join(_unique(item.get("arguments") or ())) or "-"
+    executable = "true" if item.get("llm_executable") else "false"
+    return (
+        f"- {item.get('capability_id')} ({item.get('display_name')}): risk={item.get('risk_level')} "
+        f"llm_executable={executable} commands={commands} args={arguments} examples={examples}"
     )
+
+
+def command_help_text() -> str:
+    specs = [_spec_payload(spec) for spec in COMMAND_SPECS]
+    read_only = [item for item in specs if item["read_only"]]
+    preview_writes = [
+        item
+        for item in specs
+        if not item["read_only"] and item["risk_level"] in {"preview_write", "preview_admin"}
+    ]
+    confirm_shortcuts = _non_slash_examples(
+        item for item in specs if not item["read_only"] and item["intent_name"].endswith("_confirm")
+    )
+    confirm_command = _first_slash_example(
+        item for item in specs if not item["read_only"] and item["intent_name"].endswith("_confirm")
+    )
+    cancel_command = _first_slash_example(
+        item for item in specs if not item["read_only"] and item["intent_name"].endswith("_cancel")
+    )
+    command_line = "、".join(_read_only_slash_commands(read_only))
+
+    lines = [
+        "我可以帮你处理这些事：",
+        "",
+        "只读查询",
+    ]
+    lines.extend(_help_menu_line(item) for item in read_only)
+    lines.extend([
+        "",
+        "写操作",
+    ])
+    lines.extend(_help_menu_line(item) for item in preview_writes)
+    lines.extend([
+        "",
+        "安全规则",
+        "- 写操作只会先返回预览，不会直接执行。",
+    ])
+    if confirm_shortcuts:
+        lines.append(f"- 同一对话只有一条待确认时，可回复：{'、'.join(confirm_shortcuts)}。")
+    if confirm_command:
+        lines.append(f"- 指定确认：{confirm_command}")
+    if cancel_command:
+        lines.append(f"- 指定取消：{cancel_command}")
+    if command_line:
+        lines.extend(["", f"Command：{command_line}。"])
+    return "\n".join(lines)
+
+
+def _help_menu_line(item: dict[str, Any]) -> str:
+    return f"- {item['display_name']}：{_help_examples(item)}"
+
+
+def _help_examples(item: dict[str, Any]) -> str:
+    examples = _unique(item.get("examples") or ())
+    commands = [
+        command
+        for command in _unique(item.get("commands") or ())
+        if not _command_is_covered_by_example(command, examples)
+    ]
+    values = _unique([*examples, *commands])
+    return "、".join(values) if values else "-"
+
+
+def _command_is_covered_by_example(command: str, examples: list[str]) -> bool:
+    return any(example == command or example.startswith(f"{command} ") for example in examples)
+
+
+def _read_only_slash_commands(items: list[dict[str, Any]]) -> list[str]:
+    return _unique(command for item in items for command in item.get("commands") or ())
+
+
+def _non_slash_examples(items: Any) -> list[str]:
+    return _unique(
+        example
+        for item in items
+        for example in item.get("examples") or ()
+        if not str(example).startswith("/")
+    )
+
+
+def _first_slash_example(items: Any) -> str:
+    for item in items:
+        for example in item.get("examples") or ():
+            value = str(example or "").strip()
+            if value.startswith("/"):
+                return value
+    return ""
 
 
 def _unique(values: Any) -> list[str]:

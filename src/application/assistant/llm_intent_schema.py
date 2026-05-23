@@ -9,10 +9,10 @@ from src.application.assistant.commands import (
     LOG_KIND_VALUES,
     POSITION_STATUS_VALUES,
     llm_capability_manifest,
-    llm_allowed_arguments,
     llm_argument_schema_properties,
     llm_argument_schema_required_keys,
-    llm_intent_names,
+    llm_executable_arguments,
+    llm_executable_intent_names,
 )
 from src.application.assistant.settings import LlmTranslatorSettings
 from src.application.agent_tool_contracts import AgentToolError
@@ -24,14 +24,14 @@ _POSITION_STATUS_VALUES = frozenset(POSITION_STATUS_VALUES)
 _LOG_KIND_VALUES = frozenset(LOG_KIND_VALUES)
 _MONTH_RE = re.compile(r"^20\d{2}-(0[1-9]|1[0-2])$")
 
-_ALLOWED_ARGUMENTS = llm_allowed_arguments()
+_ALLOWED_ARGUMENTS = llm_executable_arguments()
 
 
 def llm_intent_schema() -> dict[str, Any]:
     return {
         "schema_version": LLM_INTENT_SCHEMA_VERSION,
         "shape": {
-            "intent": llm_intent_names(),
+            "intent": llm_executable_intent_names(),
             "arguments": "object",
             "confidence": "number 0..1",
         },
@@ -54,7 +54,7 @@ def llm_intent_json_schema() -> dict[str, Any]:
         "additionalProperties": False,
         "properties": {
             "schema_version": {"type": "string", "enum": [LLM_INTENT_SCHEMA_VERSION]},
-            "intent": {"type": "string", "enum": llm_intent_names()},
+            "intent": {"type": "string", "enum": llm_executable_intent_names()},
             "arguments": {
                 "type": "object",
                 "additionalProperties": False,
@@ -91,7 +91,7 @@ def inbound_intent_from_llm_payload(
             code="PERMISSION_DENIED",
             message=f"LLM intent is not allowed: {intent_name}",
             hint="LLM translator is currently restricted to read-only intents.",
-            details={"allowed_intents": llm_intent_names()},
+            details={"allowed_intents": llm_executable_intent_names()},
         )
 
     confidence = _parse_confidence(payload.get("confidence"))

@@ -219,6 +219,17 @@ def test_assistant_capabilities_command_renders_capability_catalog(capsys) -> No
     assert capabilities["manual_trade_open"]["llm_executable"] is False
     assert capabilities["upgrade_now"]["risk_level"] == "preview_admin"
 
+    rc = cli.main(["assistant", "capabilities", "--format", "text"])
+    text = capsys.readouterr().out
+
+    assert rc == 0
+    assert "Assistant capabilities" in text
+    assert "LLM executable read-only capabilities" in text
+    assert "Known capabilities not executable by LLM" in text
+    assert "runtime_status (状态): risk=read_only llm_executable=true" in text
+    assert "manual_trade_open (记录开仓): risk=preview_write llm_executable=false" in text
+    assert "upgrade_now (立即升级): risk=preview_admin llm_executable=false" in text
+
 
 def test_legacy_agent_command_alias_is_hidden_but_supported(capsys) -> None:
     import src.interfaces.cli.main as cli

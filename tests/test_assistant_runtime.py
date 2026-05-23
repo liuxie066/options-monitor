@@ -11,7 +11,12 @@ from src.application.assistant.agent_loop import (
     build_tool_observation,
     run_read_only_agent_loop,
 )
-from src.application.assistant.commands import command_catalog_payload, command_specs, llm_capability_manifest
+from src.application.assistant.commands import (
+    capability_catalog_payload,
+    command_catalog_payload,
+    command_specs,
+    llm_capability_manifest,
+)
 from src.application.assistant.command_parser import parse_assistant_command
 from src.application.assistant.conversation_context import build_conversation_context
 from src.application.assistant.llm_intent_schema import LLM_INTENT_SCHEMA_VERSION, llm_intent_json_schema, llm_intent_schema
@@ -50,27 +55,34 @@ def test_assistant_command_parser_maps_read_commands() -> None:
 
 
 def test_assistant_command_catalog_drives_llm_allowed_surface() -> None:
-    llm_allowed = {spec.intent_name for spec in command_specs() if spec.llm_allowed}
-    llm_denied = {spec.intent_name for spec in command_specs() if not spec.llm_allowed}
+    llm_executable = {
+        spec.intent_name
+        for spec in command_specs()
+        if spec.read_only and spec.llm_allowed
+    }
+    llm_denied = {spec.intent_name for spec in command_specs()} - llm_executable
     schema = llm_intent_schema()
     payload = command_catalog_payload()
     capabilities = {item["capability_id"]: item for item in payload["capabilities"]}
 
-    assert set(schema["shape"]["intent"]) == llm_allowed
-    assert "runtime_status" in llm_allowed
+    assert set(schema["shape"]["intent"]) == llm_executable
+    assert "runtime_status" in llm_executable
     assert "manual_trade_open" in llm_denied
     assert "symbol_add" in llm_denied
     assert "upgrade_now" in llm_denied
     assert "manual_trade_confirm" in llm_denied
-    assert not (llm_allowed & llm_denied)
+    assert not (llm_executable & llm_denied)
     assert payload["summary"]["command_count"] == len(command_specs())
     assert payload["summary"]["capability_count"] == len(command_specs())
+    assert capabilities["runtime_status"]["display_name"] == "状态"
     assert capabilities["manual_trade_open"]["risk_level"] == "preview_write"
     assert capabilities["manual_trade_open"]["llm_executable"] is False
     assert capabilities["symbol_add"]["risk_level"] == "preview_write"
     assert capabilities["upgrade_now"]["risk_level"] == "preview_admin"
     assert "Command：" in payload["help_text"]
     assert "只读查询" in payload["help_text"]
+    assert "记录开仓：记录开仓" in payload["help_text"]
+    assert "确认记录、确认监控、确认升级" in payload["help_text"]
     assert "写操作只会先返回预览" in payload["help_text"]
 
 
@@ -90,6 +102,34 @@ def test_llm_capability_manifest_lists_known_but_non_executable_operations() -> 
     assert "Choose only capabilities" in manifest["routing_rule"]
 
 
+def test_assistant_capability_catalog_has_safe_llm_invariants() -> None:
+    payload = capability_catalog_payload()
+    capabilities = payload["capabilities"]
+    ids = [item["capability_id"] for item in capabilities]
+
+    assert len(ids) == len(set(ids))
+    assert payload["summary"]["capability_count"] == len(capabilities)
+    assert payload["summary"]["llm_executable_count"] == sum(
+        1 for item in capabilities if item["llm_executable"]
+    )
+    assert payload["capability_text"].startswith("Assistant capabilities")
+
+    for item in capabilities:
+        assert item["display_name"]
+        assert item["risk_level"]
+        assert item["summary"]
+        assert item["commands"] or item["examples"]
+        if item["llm_allowed"]:
+            assert item["read_only"] is True
+            assert item["llm_executable"] is True
+        if item["llm_executable"]:
+            assert item["read_only"] is True
+            assert item["llm_allowed"] is True
+            assert item["risk_level"] == "read_only"
+        else:
+            assert item["read_only"] is False or item["llm_allowed"] is False
+
+
 def test_assistant_deterministic_parser_supports_productized_read_aliases() -> None:
     from src.application.assistant.parser import parse_inbound_text
 
@@ -97,8 +137,22 @@ def test_assistant_deterministic_parser_supports_productized_read_aliases() -> N
     assert parse_inbound_text("有哪些功能").name == "help"
     assert parse_inbound_text("自检").name == "healthcheck"
     assert parse_inbound_text("配置是否正常").name == "config_validate"
+    assert parse_inbound_text("config").name == "config_validate"
+    assert parse_inbound_text("positions").arguments == {"status": "open"}
+    assert parse_inbound_text("income").arguments == {}
+    assert parse_inbound_text("runs").arguments == {"limit": 10}
     assert parse_inbound_text("最近任务").name == "runtime_runs"
+    assert parse_inbound_text("symbols").name == "symbol_list"
     assert parse_inbound_text("监控标的有哪些").name == "symbol_list"
+    assert parse_inbound_text("pending").name == "pending_operations"
+
+    try:
+        parse_inbound_text("查一下")
+    except AgentToolError as err:
+        assert "监控标的" in str(err.hint)
+        assert "日志 <run_id>" in str(err.hint)
+    else:
+        raise AssertionError("unknown input should request clarification")
 
 
 def test_assistant_command_parser_maps_typed_confirm_commands() -> None:
