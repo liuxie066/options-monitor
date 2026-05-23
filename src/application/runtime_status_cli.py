@@ -8,6 +8,7 @@ PAYLOAD_KEYS = (
     "config_path",
     "accounts",
     "profile_path",
+    "env_file",
     "run_id",
     "run_dir",
     "report_dir",
@@ -40,6 +41,7 @@ def format_runtime_status_summary(envelope: dict[str, Any]) -> str:
     scanned_prefetch = _dict(data.get("latest_scanned_run_required_data_prefetch"))
     service = _dict(data.get("service_upgrade"))
     service_drift = _dict(data.get("service_drift"))
+    environment = _dict(data.get("environment"))
     assistant = _dict(data.get("assistant_runtime"))
     warnings = _list(envelope.get("warnings"))
     ledger_warnings = _list(ledger.get("warnings"))
@@ -62,6 +64,7 @@ def format_runtime_status_summary(envelope: dict[str, Any]) -> str:
         _prefetch_line("prefetch scanned", scanned_prefetch),
         _service_line(service),
         _service_drift_line(service_drift),
+        _environment_line(environment),
         _assistant_line(assistant),
     ]
 
@@ -250,6 +253,18 @@ def _service_drift_line(drift: dict[str, Any]) -> str:
         f"status={_value(summary.get('status'))} "
         f"missing={_int_value(summary.get('missing_installed_count'))} "
         f"required_missing={_csv(summary.get('missing_required_units'))}"
+    )
+
+
+def _environment_line(environment: dict[str, Any]) -> str:
+    entries = _dict(environment.get("entries"))
+    configured_count = sum(1 for item in entries.values() if _dict(item).get("configured"))
+    return (
+        "environment: "
+        f"env_file={_value(environment.get('env_file'))} "
+        f"loaded={_yes_no(environment.get('env_file_loaded'))} "
+        f"configured_keys={configured_count} "
+        f"warnings={len(_list(environment.get('warnings')))}"
     )
 
 

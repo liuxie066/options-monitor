@@ -103,8 +103,9 @@ def build_feishu_ws_settings(
     max_reply_chars: int | None = None,
     queue_size: int | None = None,
     environ: Mapping[str, str] | None = None,
+    env_file: str | Path | None = None,
 ) -> FeishuWsSettings:
-    env = build_effective_env(environ=environ).values
+    env = build_effective_env(environ=environ, env_file=env_file).values
     bot_cfg = resolve_feishu_bot_config(environ=env)
     assistant_cfg = _load_assistant_behavior_config(config_path=assistant_config_path)
     behavior_cfg = _dict(_dict(assistant_cfg.get("inbound")).get("feishu_ws"))

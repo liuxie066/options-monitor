@@ -37,6 +37,7 @@ def test_top_level_doctor_wraps_healthcheck(monkeypatch, capsys) -> None:
         "opend_telnet_port": None,
         "audit_db": None,
         "profile_path": None,
+        "env_file": None,
         "include_service_status": False,
     }]
 
@@ -76,7 +77,49 @@ def test_top_level_healthcheck_passes_inbound_diagnostics_args(monkeypatch, caps
         "opend_telnet_port": None,
         "audit_db": "inbound.sqlite3",
         "profile_path": "service.profile.json",
+        "env_file": None,
         "include_service_status": True,
+    }]
+
+
+def test_top_level_healthcheck_forwards_env_file(monkeypatch, capsys, tmp_path: Path) -> None:
+    import src.interfaces.cli.main as cli
+
+    env_file = tmp_path / "options-monitor.env"
+    env_file.write_text("OM_FEISHU_BOT_APP_ID=cli_1\n", encoding="utf-8")
+    bootstrap_calls: list[dict] = []
+    calls: list[dict] = []
+
+    def _bootstrap_process_env(**kwargs):
+        bootstrap_calls.append(kwargs)
+
+    def _healthcheck(**kwargs):
+        calls.append(kwargs)
+        return {"tool_name": "healthcheck", "ok": True, "data": {"status": "pass"}}
+
+    monkeypatch.setattr(cli, "bootstrap_process_env", _bootstrap_process_env)
+    monkeypatch.setattr(cli, "run_healthcheck", _healthcheck)
+
+    rc = cli.main(["healthcheck", "--config-key", "us", "--env-file", str(env_file)])
+    payload = _read_json_output(capsys)
+
+    assert rc == 0
+    assert payload["tool_name"] == "healthcheck"
+    assert calls == [{
+        "config_key": "us",
+        "config_path": None,
+        "accounts": None,
+        "opend_telnet_host": None,
+        "opend_telnet_port": None,
+        "audit_db": None,
+        "profile_path": None,
+        "env_file": str(env_file),
+        "include_service_status": False,
+    }]
+    assert bootstrap_calls == [{
+        "repo_root": cli.repo_base(),
+        "env_file": str(env_file),
+        "include_local_env_file": True,
     }]
 
 
@@ -178,6 +221,7 @@ def test_no_local_env_file_flag_prevents_process_env_bootstrap() -> None:
     import src.interfaces.cli.main as cli
 
     assert cli._should_bootstrap_process_env(["assistant", "llm-check"]) is True
+    assert cli._should_bootstrap_process_env(["healthcheck", "--env-file", "prod.env"]) is False
     assert cli._should_bootstrap_process_env(["assistant", "llm-check", "--no-local-env-file"]) is False
     assert cli._should_bootstrap_process_env(["support", "bundle", "--no-local-env-file"]) is False
 
@@ -368,6 +412,37 @@ def test_top_level_status_prints_human_summary(monkeypatch, capsys) -> None:
     assert "config: key=us path=.../config.us.json accounts=lx, sy" in out
     assert "notifications: status=sent reason=confirmed route=openclaw/openclaw-weixin target=yes sent=1 confirmed=1 failed=0" in out
     assert "ledger: status=ok fail_closed=no events=3 lots=2 sqlite=output_shared/state/option_positions.sqlite3" in out
+
+
+def test_top_level_status_forwards_env_file(monkeypatch, capsys, tmp_path: Path) -> None:
+    import src.interfaces.cli.main as cli
+
+    env_file = tmp_path / "options-monitor.env"
+    env_file.write_text("OM_RUNTIME_ROOT=/tmp/options-monitor\n", encoding="utf-8")
+    bootstrap_calls: list[dict] = []
+    calls: list[tuple[str, dict]] = []
+
+    def _bootstrap_process_env(**kwargs):
+        bootstrap_calls.append(kwargs)
+
+    def _execute_tool(name: str, payload: dict) -> dict:
+        calls.append((name, payload))
+        return _runtime_status_envelope()
+
+    monkeypatch.setattr(cli, "bootstrap_process_env", _bootstrap_process_env)
+    monkeypatch.setattr(cli, "execute_tool", _execute_tool)
+
+    rc = cli.main(["status", "--config-key", "us", "--env-file", str(env_file), "--json"])
+    payload = _read_json_output(capsys)
+
+    assert rc == 0
+    assert payload["tool_name"] == "runtime_status"
+    assert calls == [("runtime_status", {"config_key": "us", "env_file": str(env_file)})]
+    assert bootstrap_calls == [{
+        "repo_root": cli.repo_base(),
+        "env_file": str(env_file),
+        "include_local_env_file": True,
+    }]
 
 
 def test_ai_cofunder_collect_forwards_remote_runtime_selection(monkeypatch, capsys) -> None:
