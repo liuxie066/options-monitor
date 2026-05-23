@@ -8,7 +8,11 @@ from typing import Any
 
 from src.application.agent_tool_config import load_runtime_config, repo_base
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response
-from src.application.assistant import capability_catalog_payload, command_catalog_payload
+from src.application.assistant import (
+    capability_catalog_payload,
+    capability_catalog_text,
+    command_catalog_payload,
+)
 from src.application.assistant.settings import AssistantSettings
 from src.application.assistant.config_loader import load_assistant_config
 from src.application.assistant.diagnostics import check_llm_translator
@@ -892,11 +896,24 @@ def main(argv: list[str] | None = None) -> int:
             ))
 
         if args.command == "assistant" and args.assistant_command in {"commands", "capabilities"}:
-            data = capability_catalog_payload() if args.assistant_command == "capabilities" else command_catalog_payload()
+            data = (
+                capability_catalog_payload()
+                if args.assistant_command == "capabilities"
+                else command_catalog_payload()
+            )
             if args.format == "text":
-                sys.stdout.write(str(data.get("help_text") or "").strip() + "\n")
+                text = (
+                    capability_catalog_text(data)
+                    if args.assistant_command == "capabilities"
+                    else str(data.get("help_text") or "")
+                )
+                sys.stdout.write(text.strip() + "\n")
                 return 0
-            tool_name = "assistant.capabilities" if args.assistant_command == "capabilities" else "assistant.commands"
+            tool_name = (
+                "assistant.capabilities"
+                if args.assistant_command == "capabilities"
+                else "assistant.commands"
+            )
             return _print(build_response(tool_name=tool_name, ok=True, data=data))
 
         if args.command == "inbound" and args.inbound_command == "handle":

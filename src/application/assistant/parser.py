@@ -5,6 +5,7 @@ from datetime import date
 from typing import Callable
 
 from src.application.agent_tool_contracts import AgentToolError
+from src.application.assistant.commands import command_specs
 from src.application.assistant.contracts import InboundIntent
 
 
@@ -54,6 +55,8 @@ _MANUAL_UPDATE_ALIASES: tuple[tuple[str, str], ...] = (
     ("note", "note"),
     ("备注", "note"),
 )
+_READ_ONLY_EXACT_ALIASES: dict[str, str] = {}
+_READ_ONLY_HINT = ""
 
 
 def parse_inbound_text(text: str, *, now_fn: Callable[[], date] | None = None) -> InboundIntent:
@@ -62,17 +65,20 @@ def parse_inbound_text(text: str, *, now_fn: Callable[[], date] | None = None) -
         raise AgentToolError(
             code="NEEDS_CLARIFICATION",
             message="请输入要查询的内容。",
-            hint="可用：状态、健康检查、持仓、持仓 sy、收益、收益 sy 2026-05、最近运行、日志 <run_id>。",
+            hint=_read_only_hint(),
         )
 
     compact = _compact(raw)
     lower = raw.lower().strip()
     today = now_fn() if now_fn is not None else date.today()
 
-    if compact in {"帮助", "help", "/help"}:
-        return InboundIntent(name="help", arguments={})
     if compact in {"你好", "您好", "hi", "hello", "嗨"}:
         return InboundIntent(name="small_talk", arguments={"kind": "hello"})
+
+    catalog_intent = _parse_catalog_read_alias(compact, lower)
+    if catalog_intent is not None:
+        return catalog_intent
+
     if compact in {
         "你能做什么",
         "我能做什么",
@@ -143,12 +149,78 @@ def parse_inbound_text(text: str, *, now_fn: Callable[[], date] | None = None) -
     raise AgentToolError(
         code="NEEDS_CLARIFICATION",
         message="没有识别出可执行的只读命令。",
-        hint="可用：状态、健康检查、持仓、持仓 sy、收益、收益 sy 2026-05、最近运行、日志 <run_id>。",
+        hint=_read_only_hint(),
     )
 
 
 def _compact(text: str) -> str:
     return re.sub(r"\s+", "", text.strip().lower())
+
+
+def _parse_catalog_read_alias(compact: str, lower: str) -> InboundIntent | None:
+    intent_name = _read_only_exact_aliases().get(compact) or _read_only_exact_aliases().get(lower)
+    if not intent_name:
+        return None
+    if intent_name == "option_positions_open":
+        return InboundIntent(name=intent_name, arguments={"status": "open"})
+    if intent_name == "runtime_runs":
+        return InboundIntent(name=intent_name, arguments={"limit": 10})
+    return InboundIntent(name=intent_name, arguments={})
+
+
+def _read_only_exact_aliases() -> dict[str, str]:
+    global _READ_ONLY_EXACT_ALIASES
+    if _READ_ONLY_EXACT_ALIASES:
+        return _READ_ONLY_EXACT_ALIASES
+
+    out: dict[str, str] = {}
+    for spec in command_specs():
+        if not spec.read_only or spec.intent_name == "runtime_logs":
+            continue
+        values = [spec.display_name, *spec.examples, *(command.lstrip("/") for command in spec.commands)]
+        for raw in values:
+            value = str(raw or "").strip()
+            if not value or value.startswith("/") or any(marker in value for marker in ("<", "[", "]")):
+                continue
+            if re.search(r"\s", value):
+                continue
+            out[_compact(value)] = spec.intent_name
+            out[value.lower()] = spec.intent_name
+    _READ_ONLY_EXACT_ALIASES = out
+    return _READ_ONLY_EXACT_ALIASES
+
+
+def _read_only_hint() -> str:
+    global _READ_ONLY_HINT
+    if _READ_ONLY_HINT:
+        return _READ_ONLY_HINT
+    examples: list[str] = []
+    for spec in command_specs():
+        if not spec.read_only or spec.intent_name == "help":
+            continue
+        example = _first_hint_example(spec.examples)
+        examples.append(example or spec.display_name)
+    _READ_ONLY_HINT = f"可用：{'、'.join(_unique(examples))}。"
+    return _READ_ONLY_HINT
+
+
+def _first_hint_example(values: tuple[str, ...]) -> str:
+    for raw in values:
+        value = str(raw or "").strip()
+        if value and not value.startswith("/"):
+            return value
+    return ""
+
+
+def _unique(values: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if not value or value in seen:
+            continue
+        out.append(value)
+        seen.add(value)
+    return out
 
 
 def _extract_account(text: str) -> str | None:
