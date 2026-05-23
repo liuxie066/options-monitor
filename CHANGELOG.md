@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.2.127 - 2026-05-23
+
+### Changed
+- Consolidated runtime artifact cleanup under `om service cleanup`, replacing the old standalone cleanup script with the canonical maintenance entry.
+
+### Added
+- Added type-aware retention controls for `output_runs` and runtime `.log` files, with dry-run planning, protected latest-run pointers, and minimum recent-run retention.
+
 ## 1.2.126 - 2026-05-22
 
 ### Added
