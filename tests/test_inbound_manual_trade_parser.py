@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from src.application.inbound.manual_trade_parser import build_manual_trade_draft
+from src.application.assistant.manual_trade_parser import build_manual_trade_draft
 from src.application.multiplier_cache import save_cache
 
 
@@ -35,7 +35,7 @@ def _patch_multiplier(
             diagnostics["message"] = f"recognized {kwargs.get('symbol')} but multiplier could not be resolved"
         return value, source if value else None, diagnostics
 
-    monkeypatch.setattr("src.application.inbound.manual_trade_parser.resolve_multiplier_with_source_and_diagnostics", _fake_resolve)
+    monkeypatch.setattr("src.application.assistant.manual_trade_parser.resolve_multiplier_with_source_and_diagnostics", _fake_resolve)
 
 
 def test_manual_trade_draft_parses_futu_open_without_manual_multiplier(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

@@ -380,9 +380,9 @@ def _assistant_runtime_summary(
     mask_path: Callable[[Any], str | None],
 ) -> dict[str, Any]:
     try:
-        from src.application.agent_runtime.config_loader import load_assistant_config
-        from src.application.agent_runtime.settings import AgentRuntimeSettings
-        from src.application.inbound.audit import InboundAuditStore
+        from src.application.assistant.config_loader import load_assistant_config
+        from src.application.assistant.settings import AssistantSettings
+        from src.application.assistant.audit import InboundAuditStore
         from src.application.settings import build_effective_env
         from src.infrastructure.openai_chat_completions import resolve_chat_completions_url
         from src.infrastructure.openai_responses import resolve_responses_url
@@ -412,7 +412,7 @@ def _assistant_runtime_summary(
             repo_root=base,
             missing_ok=missing_ok,
         )
-        settings = AgentRuntimeSettings.from_runtime_config(cfg)
+        settings = AssistantSettings.from_runtime_config(cfg)
     except Exception as exc:
         return {
             "available": False,
@@ -517,11 +517,13 @@ def _assistant_audit_latest(row: dict[str, Any]) -> dict[str, Any]:
     except Exception:
         response = {}
     meta = response.get("meta")
-    runtime = meta.get("agent_runtime") if isinstance(meta, dict) else None
-    runtime_payload = runtime if isinstance(runtime, dict) else {}
-    llm = runtime_payload.get("llm")
+    assistant = meta.get("assistant") if isinstance(meta, dict) else None
+    if not isinstance(assistant, dict):
+        assistant = meta.get("agent_runtime") if isinstance(meta, dict) else None
+    assistant_payload = assistant if isinstance(assistant, dict) else {}
+    llm = assistant_payload.get("llm")
     llm_payload = llm if isinstance(llm, dict) else {}
-    context = runtime_payload.get("context")
+    context = assistant_payload.get("context")
     context_payload = context if isinstance(context, dict) else {}
     return {
         "created_at": row.get("created_at"),
@@ -534,8 +536,8 @@ def _assistant_audit_latest(row: dict[str, Any]) -> dict[str, Any]:
         "decision": row.get("decision"),
         "result_ok": bool(row.get("result_ok")),
         "error_code": row.get("error_code"),
-        "route": runtime_payload.get("route"),
-        "mode": runtime_payload.get("mode"),
+        "route": assistant_payload.get("route"),
+        "mode": assistant_payload.get("mode"),
         "llm_reason": llm_payload.get("reason"),
         "llm_attempted": llm_payload.get("attempted"),
         "context": {

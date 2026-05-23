@@ -92,7 +92,7 @@ def test_feishu_ws_can_route_through_agent_runtime(tmp_path: Path) -> None:
             app_id="app_1",
             app_secret="secret_1",
             audit_db=str(tmp_path / "audit.sqlite3"),
-            agent_runtime_enabled=True,
+            assistant_enabled=True,
         ),
         reply_fn=lambda **_kwargs: {"code": 0},
         execute_tool_fn=_execute,
@@ -102,8 +102,8 @@ def test_feishu_ws_can_route_through_agent_runtime(tmp_path: Path) -> None:
     assert out["ok"] is True
     assert calls == [("runtime_status", {"config_path": str(tmp_path / "config.us.json")})]
     assert inbound_result["data"]["intent"]["parser"] == "command"
-    assert inbound_result["meta"]["agent_runtime"]["route"] == "command"
-    assert inbound_result["meta"]["agent_runtime"]["llm"]["enabled"] is False
+    assert inbound_result["meta"]["assistant"]["route"] == "command"
+    assert inbound_result["meta"]["assistant"]["llm"]["enabled"] is False
 
 
 def test_feishu_ws_reaction_failure_does_not_fail_inbound_or_reply(tmp_path: Path) -> None:
@@ -279,16 +279,16 @@ def test_feishu_ws_settings_reads_behavior_from_assistant_config(tmp_path: Path)
     assert settings.max_reply_chars == 1200
     assert settings.ack_reaction == "SMILE"
     assert settings.queue_size == 5
-    assert settings.agent_runtime_mode == "agent_loop"
-    assert settings.agent_runtime_enabled is True
-    assert settings.agent_context_window_messages == 9
-    assert settings.agent_llm.enabled is True
-    assert settings.agent_llm.provider == "openai"
-    assert settings.agent_llm.base_url == "https://llm.example/v1"
-    assert settings.agent_llm.model == "gpt-5.2"
-    assert settings.agent_llm.confidence_min == 0.8
-    assert settings.agent_llm.timeout_seconds == 31
-    assert settings.agent_llm.max_output_tokens == 769
+    assert settings.assistant_mode == "agent_loop"
+    assert settings.assistant_enabled is True
+    assert settings.assistant_context_window_messages == 9
+    assert settings.assistant_llm.enabled is True
+    assert settings.assistant_llm.provider == "openai"
+    assert settings.assistant_llm.base_url == "https://llm.example/v1"
+    assert settings.assistant_llm.model == "gpt-5.2"
+    assert settings.assistant_llm.confidence_min == 0.8
+    assert settings.assistant_llm.timeout_seconds == 31
+    assert settings.assistant_llm.max_output_tokens == 769
 
 
 def test_feishu_ws_settings_enables_command_runtime_by_default(tmp_path: Path) -> None:
@@ -304,9 +304,9 @@ def test_feishu_ws_settings_enables_command_runtime_by_default(tmp_path: Path) -
         },
     )
 
-    assert settings.agent_runtime_mode == "deterministic"
-    assert settings.agent_runtime_enabled is True
-    assert settings.agent_llm.enabled is False
+    assert settings.assistant_mode == "deterministic"
+    assert settings.assistant_enabled is True
+    assert settings.assistant_llm.enabled is False
 
 
 def test_feishu_ws_check_reports_missing_sdk() -> None:

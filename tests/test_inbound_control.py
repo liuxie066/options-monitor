@@ -8,12 +8,12 @@ from pathlib import Path
 import pytest
 
 from src.application.agent_tool_contracts import AgentToolError, build_response
-from src.application.agent_runtime.command_catalog import command_specs
+from src.application.assistant.commands import command_specs
 from src.application.inbound import InboundRequest, handle_inbound_request
 from src.application.inbound.contracts import InboundToolCall
 from src.application.inbound.feishu import feishu_payload_to_inbound_request, handle_feishu_payload
 from src.application.inbound.parser import parse_inbound_text
-from src.application.inbound.policy import PURE_READ_TOOLS, check_sender_allowed, enforce_tool_allowed
+from src.application.assistant.policy import PURE_READ_TOOLS, check_sender_allowed, enforce_tool_allowed
 from src.application.inbound.renderer import render_inbound_text
 
 
@@ -325,7 +325,7 @@ def test_inbound_manual_trade_confirm_rejects_signature_mismatch(monkeypatch: py
 
 
 def test_inbound_write_policy_requires_hmac_and_explicit_admin(monkeypatch: pytest.MonkeyPatch) -> None:
-    from src.application.inbound.operation_policy import enforce_trade_write_allowed
+    from src.application.assistant.operation_policy import enforce_trade_write_allowed
 
     monkeypatch.setenv("OM_INBOUND_OPERATIONS_ENABLED", "1")
     monkeypatch.setenv("OM_INBOUND_TRADE_WRITE_ENABLED", "1")
@@ -349,7 +349,7 @@ def test_inbound_write_policy_requires_hmac_and_explicit_admin(monkeypatch: pyte
 
 
 def test_inbound_operation_confirm_claim_is_atomic(tmp_path: Path) -> None:
-    from src.application.inbound.operation_store import InboundOperationStore
+    from src.application.assistant.operation_store import InboundOperationStore
 
     store = InboundOperationStore(tmp_path / "inbound.sqlite3")
     store.save_preview(
@@ -511,7 +511,7 @@ def test_inbound_pending_operations_lists_current_conversation(monkeypatch: pyte
 
 
 def test_inbound_upgrade_preview_and_confirm(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from src.application.inbound import upgrade_operations
+    from src.application.assistant import upgrade_operations
 
     _enable_inbound_upgrade_write(monkeypatch)
     monkeypatch.setenv("OM_RUNTIME_ROOT", str(tmp_path / "runtime"))
@@ -615,7 +615,7 @@ def test_inbound_upgrade_preview_and_confirm(monkeypatch: pytest.MonkeyPatch, tm
 
 
 def test_inbound_upgrade_reconfirm_hides_internal_status(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from src.application.inbound import upgrade_operations
+    from src.application.assistant import upgrade_operations
 
     _enable_inbound_upgrade_write(monkeypatch)
     audit_db = tmp_path / "inbound.sqlite3"
@@ -689,7 +689,7 @@ def test_inbound_upgrade_reconfirm_hides_internal_status(monkeypatch: pytest.Mon
 def test_upgrade_worker_launcher_passes_env_file_pointer_to_systemd(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import subprocess
 
-    from src.application.inbound import upgrade_operations
+    from src.application.assistant import upgrade_operations
 
     root = tmp_path / "repo"
     root.mkdir()
@@ -727,7 +727,7 @@ def test_upgrade_worker_launcher_passes_env_file_pointer_to_systemd(monkeypatch:
 def test_upgrade_worker_launcher_falls_back_to_service_profile_env_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import subprocess
 
-    from src.application.inbound import upgrade_operations
+    from src.application.assistant import upgrade_operations
 
     root = tmp_path / "repo"
     root.mkdir()
@@ -1009,7 +1009,7 @@ def test_inbound_manual_trade_preview_canonicalizes_symbol_and_keeps_diagnostics
     def _fake_resolve(**_kwargs: object) -> tuple[int, str, dict]:
         return 500, "cache", {"attempted_sources": [{"source": "cache", "status": "resolved", "value": 500}]}
 
-    monkeypatch.setattr("src.application.inbound.manual_trade_parser.resolve_multiplier_with_source_and_diagnostics", _fake_resolve)
+    monkeypatch.setattr("src.application.assistant.manual_trade_parser.resolve_multiplier_with_source_and_diagnostics", _fake_resolve)
 
     preview = handle_inbound_request(
         InboundRequest(
@@ -1940,16 +1940,16 @@ def test_feishu_payload_adapter_agent_runtime_reads_assistant_config(monkeypatch
     }
     seen: list[dict] = []
 
-    def _handle_agent_message(request: InboundRequest, **kwargs) -> dict:
+    def _handle_assistant_message(request: InboundRequest, **kwargs) -> dict:
         seen.append({"request": request, "kwargs": kwargs})
         return build_response(
             tool_name="inbound.handle",
             ok=True,
             data={"response_text": "状态查询完成。"},
-            meta={"agent_runtime": {"route": "command"}},
+            meta={"assistant": {"route": "command"}},
         )
 
-    monkeypatch.setattr("src.application.agent_runtime.handle_agent_message", _handle_agent_message)
+    monkeypatch.setattr("src.application.assistant.runtime.handle_assistant_message", _handle_assistant_message)
 
     out = handle_feishu_payload(
         payload,
@@ -1957,7 +1957,7 @@ def test_feishu_payload_adapter_agent_runtime_reads_assistant_config(monkeypatch
         assistant_config_path=str(assistant_config_path),
         audit_db=str(tmp_path / "audit.sqlite3"),
         allowed_senders="feishu:ou_1",
-        use_agent_runtime=True,
+        use_assistant=True,
     )
 
     assert out["ok"] is True
@@ -2001,16 +2001,16 @@ def test_feishu_payload_adapter_defaults_to_agent_runtime_from_assistant_config(
     }
     seen: list[dict] = []
 
-    def _handle_agent_message(request: InboundRequest, **kwargs) -> dict:
+    def _handle_assistant_message(request: InboundRequest, **kwargs) -> dict:
         seen.append({"request": request, "kwargs": kwargs})
         return build_response(
             tool_name="inbound.handle",
             ok=True,
             data={"response_text": "状态查询完成。"},
-            meta={"agent_runtime": {"route": "command"}},
+            meta={"assistant": {"route": "command"}},
         )
 
-    monkeypatch.setattr("src.application.agent_runtime.handle_agent_message", _handle_agent_message)
+    monkeypatch.setattr("src.application.assistant.runtime.handle_assistant_message", _handle_assistant_message)
 
     out = handle_feishu_payload(
         payload,
@@ -2072,7 +2072,7 @@ def test_inbound_cli_wires_request(monkeypatch, capsys, tmp_path: Path) -> None:
             "feishu:oc_1:ou_1",
             "--audit-db",
             str(tmp_path / "audit.sqlite3"),
-            "--no-agent-runtime",
+            "--no-assistant",
         ]
     )
     payload = json.loads(capsys.readouterr().out)
@@ -2115,7 +2115,7 @@ def test_inbound_cli_agent_runtime_loads_settings_from_config(monkeypatch, capsy
     }}, ensure_ascii=False, indent=2), encoding="utf-8")
     seen = []
 
-    def _handle_agent(request: InboundRequest, **kwargs) -> dict:
+    def _handle_assistant(request: InboundRequest, **kwargs) -> dict:
         seen.append({"request": request, "settings": kwargs.get("settings")})
         return build_response(
             tool_name="inbound.handle",
@@ -2123,7 +2123,7 @@ def test_inbound_cli_agent_runtime_loads_settings_from_config(monkeypatch, capsy
             data={"response_text": "状态查询完成。"},
         )
 
-    monkeypatch.setattr(cli, "handle_agent_message", _handle_agent)
+    monkeypatch.setattr(cli, "handle_assistant_message", _handle_assistant)
 
     rc = cli.main(
         [
@@ -2169,7 +2169,7 @@ def test_inbound_cli_agent_runtime_flag_forces_disabled_config(monkeypatch, caps
     )
     seen = []
 
-    def _handle_agent(request: InboundRequest, **kwargs) -> dict:
+    def _handle_assistant(request: InboundRequest, **kwargs) -> dict:
         seen.append({"request": request, "settings": kwargs.get("settings")})
         return build_response(
             tool_name="inbound.handle",
@@ -2177,13 +2177,13 @@ def test_inbound_cli_agent_runtime_flag_forces_disabled_config(monkeypatch, caps
             data={"response_text": "状态查询完成。"},
         )
 
-    monkeypatch.setattr(cli, "handle_agent_message", _handle_agent)
+    monkeypatch.setattr(cli, "handle_assistant_message", _handle_assistant)
 
     rc = cli.main(
         [
             "inbound",
             "handle",
-            "--agent-runtime",
+            "--assistant",
             "--config-path",
             str(cfg_path),
             "--assistant-config",
@@ -2351,7 +2351,7 @@ def test_inbound_cli_feishu_wires_payload(monkeypatch, capsys, tmp_path: Path) -
                 "config_key": "us",
                 "config_path": None,
                 "audit_db": str(tmp_path / "audit.sqlite3"),
-                "use_agent_runtime": None,
+                "use_assistant": None,
                 "assistant_config_path": None,
             },
         }
