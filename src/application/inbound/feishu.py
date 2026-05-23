@@ -5,7 +5,7 @@ import re
 from typing import Any, cast
 
 from src.application.agent_tool_contracts import AgentToolError, build_response
-from src.application.assistant.contracts import InboundRequest
+from src.application.assistant.contracts import AssistantRequest
 from src.application.assistant.router import ExecuteToolFn, handle_assistant_request
 
 
@@ -20,13 +20,7 @@ def handle_feishu_payload(
     use_assistant: bool | None = None,
     assistant_settings: Any | None = None,
     assistant_config_path: str | None = None,
-    **legacy_kwargs: Any,
 ) -> dict[str, Any]:
-    use_assistant, assistant_settings = _resolve_legacy_assistant_kwargs(
-        use_assistant=use_assistant,
-        assistant_settings=assistant_settings,
-        legacy_kwargs=legacy_kwargs,
-    )
     event_type = _extract_event_type(payload)
     if event_type and event_type != "im.message.receive_v1":
         return build_response(
@@ -85,22 +79,6 @@ def handle_feishu_payload(
     )
 
 
-def _resolve_legacy_assistant_kwargs(
-    *,
-    use_assistant: bool | None,
-    assistant_settings: Any | None,
-    legacy_kwargs: dict[str, Any],
-) -> tuple[bool | None, Any | None]:
-    if "use_agent_runtime" in legacy_kwargs and use_assistant is None:
-        use_assistant = legacy_kwargs.pop("use_agent_runtime")
-    if "agent_runtime_settings" in legacy_kwargs and assistant_settings is None:
-        assistant_settings = legacy_kwargs.pop("agent_runtime_settings")
-    if legacy_kwargs:
-        names = ", ".join(sorted(str(name) for name in legacy_kwargs))
-        raise TypeError(f"unexpected keyword argument(s): {names}")
-    return use_assistant, assistant_settings
-
-
 def _assistant_settings(
     *,
     config_key: str | None,
@@ -134,7 +112,7 @@ def feishu_payload_to_inbound_request(
     config_key: str | None = "us",
     config_path: str | None = None,
     audit_db: str | None = None,
-) -> InboundRequest:
+) -> AssistantRequest:
     event = _dict(payload.get("event"))
     message = _dict(event.get("message"))
     sender = _dict(event.get("sender"))
@@ -168,7 +146,7 @@ def feishu_payload_to_inbound_request(
             hint="Only Feishu text messages are supported by the thin inbound adapter.",
         )
 
-    return InboundRequest(
+    return AssistantRequest(
         text=text,
         sender_id=sender_id,
         channel="feishu",

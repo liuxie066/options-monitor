@@ -11,7 +11,7 @@ from typing import Any, Callable
 
 from src.application.agent_tool_config import repo_base
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response, mask_path
-from src.application.assistant.contracts import InboundIntent, InboundRequest
+from src.application.assistant.contracts import AssistantIntent, AssistantRequest
 from src.application.assistant.operation_policy import enforce_upgrade_write_allowed
 from src.application.assistant.operation_signature import verify_operation_signature
 from src.application.assistant.operation_store import InboundOperationStore, operation_is_expired
@@ -31,13 +31,13 @@ UPGRADE_WORKER_LAUNCHER: UpgradeWorkerLauncher | None = None
 _DEFAULT_RUNTIME_ROOT = Path("/var/lib/options-monitor")
 
 
-def is_upgrade_operation_intent(intent: InboundIntent) -> bool:
+def is_upgrade_operation_intent(intent: AssistantIntent) -> bool:
     return intent.name in PREVIEW_INTENTS or intent.name in CONFIRM_INTENTS
 
 
 def handle_upgrade_operation(
-    intent: InboundIntent,
-    request: InboundRequest,
+    intent: AssistantIntent,
+    request: AssistantRequest,
     *,
     command_id: str,
     store: InboundOperationStore,
@@ -56,7 +56,7 @@ def handle_upgrade_operation(
 def _preview_and_save(
     payload: dict[str, Any],
     *,
-    request: InboundRequest,
+    request: AssistantRequest,
     command_id: str,
     store: InboundOperationStore,
     ttl_seconds: int,
@@ -101,7 +101,7 @@ def _preview_and_save(
     )
 
 
-def _confirm_operation(*, operation_id: str | None, request: InboundRequest, store: InboundOperationStore) -> dict[str, Any]:
+def _confirm_operation(*, operation_id: str | None, request: AssistantRequest, store: InboundOperationStore) -> dict[str, Any]:
     operation_id, operation, operation_resolution = _resolve_upgrade_operation(
         operation_id=operation_id,
         request=request,
@@ -168,7 +168,7 @@ def _confirm_operation(*, operation_id: str | None, request: InboundRequest, sto
     )
 
 
-def _cancel_operation(*, operation_id: str | None, request: InboundRequest, store: InboundOperationStore) -> dict[str, Any]:
+def _cancel_operation(*, operation_id: str | None, request: AssistantRequest, store: InboundOperationStore) -> dict[str, Any]:
     operation_id, operation, operation_resolution = _resolve_upgrade_operation(
         operation_id=operation_id,
         request=request,
@@ -197,7 +197,7 @@ def _cancel_operation(*, operation_id: str | None, request: InboundRequest, stor
 def _resolve_upgrade_operation(
     *,
     operation_id: str | None,
-    request: InboundRequest,
+    request: AssistantRequest,
     store: InboundOperationStore,
     allow_expired: bool,
     action: str,
@@ -269,11 +269,11 @@ def _build_operation_payload(operation_type: str, arguments: dict[str, Any]) -> 
     return {"schema_version": "1.0", "operation_type": operation_type, "arguments": arguments}
 
 
-def _attach_receipt_target(payload: dict[str, Any], request: InboundRequest) -> None:
+def _attach_receipt_target(payload: dict[str, Any], request: AssistantRequest) -> None:
     payload["receipt_target"] = _receipt_target_from_request(request)
 
 
-def _receipt_target_from_request(request: InboundRequest) -> dict[str, Any]:
+def _receipt_target_from_request(request: AssistantRequest) -> dict[str, Any]:
     receipt = {
         "channel": request.channel,
         "sender_id": request.sender_id,

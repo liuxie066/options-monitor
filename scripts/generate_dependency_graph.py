@@ -12,7 +12,6 @@ from pathlib import Path
 DEFAULT_INCLUDE_ROOTS = ("src", "domain", "scripts", "tests")
 PRODUCTION_ROOTS = ("src", "domain", "scripts")
 APPLICATION_SUBPACKAGES = {
-    "agent_runtime",
     "ai_cofunder",
     "inbound",
     "ledger",
