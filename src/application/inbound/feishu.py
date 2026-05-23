@@ -19,10 +19,14 @@ def handle_feishu_payload(
     allowed_senders: str | None = None,
     use_assistant: bool | None = None,
     assistant_settings: Any | None = None,
-    use_agent_runtime: bool | None = None,
-    agent_runtime_settings: Any | None = None,
     assistant_config_path: str | None = None,
+    **legacy_kwargs: Any,
 ) -> dict[str, Any]:
+    use_assistant, assistant_settings = _resolve_legacy_assistant_kwargs(
+        use_assistant=use_assistant,
+        assistant_settings=assistant_settings,
+        legacy_kwargs=legacy_kwargs,
+    )
     event_type = _extract_event_type(payload)
     if event_type and event_type != "im.message.receive_v1":
         return build_response(
@@ -45,12 +49,10 @@ def handle_feishu_payload(
     if execute_tool_fn is not None:
         kwargs["execute_tool_fn"] = execute_tool_fn
     settings: Any | None = None
-    if use_assistant is None:
-        use_assistant = use_agent_runtime
     if use_assistant is False:
         use_control_plane = False
     else:
-        settings = assistant_settings or agent_runtime_settings or _assistant_settings(
+        settings = assistant_settings or _assistant_settings(
             config_key=config_key,
             config_path=config_path,
             assistant_config_path=assistant_config_path,
@@ -81,6 +83,22 @@ def handle_feishu_payload(
         error=inbound_result.get("error") if not bool(inbound_result.get("ok", False)) else None,
         meta=dict(inbound_result.get("meta") or {}),
     )
+
+
+def _resolve_legacy_assistant_kwargs(
+    *,
+    use_assistant: bool | None,
+    assistant_settings: Any | None,
+    legacy_kwargs: dict[str, Any],
+) -> tuple[bool | None, Any | None]:
+    if "use_agent_runtime" in legacy_kwargs and use_assistant is None:
+        use_assistant = legacy_kwargs.pop("use_agent_runtime")
+    if "agent_runtime_settings" in legacy_kwargs and assistant_settings is None:
+        assistant_settings = legacy_kwargs.pop("agent_runtime_settings")
+    if legacy_kwargs:
+        names = ", ".join(sorted(str(name) for name in legacy_kwargs))
+        raise TypeError(f"unexpected keyword argument(s): {names}")
+    return use_assistant, assistant_settings
 
 
 def _assistant_settings(
