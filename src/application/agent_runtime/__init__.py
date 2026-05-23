@@ -6,6 +6,8 @@ from src.application.assistant.commands import (
     capability_specs,
     command_catalog_payload,
     command_specs,
+    operation_specs,
+    operation_target_intents,
 )
 from src.application.assistant.command_parser import parse_agent_command, parse_assistant_command
 from src.application.assistant.llm_intent_schema import LLM_INTENT_SCHEMA_VERSION, llm_intent_json_schema, llm_intent_schema
@@ -22,6 +24,8 @@ __all__ = [
     "capability_specs",
     "command_catalog_payload",
     "command_specs",
+    "operation_specs",
+    "operation_target_intents",
     "llm_intent_json_schema",
     "llm_intent_schema",
     "parse_agent_command",

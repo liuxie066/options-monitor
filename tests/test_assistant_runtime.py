@@ -16,6 +16,8 @@ from src.application.assistant.commands import (
     command_catalog_payload,
     command_specs,
     llm_capability_manifest,
+    operation_specs,
+    operation_target_intents,
 )
 from src.application.assistant.command_parser import parse_assistant_command
 from src.application.assistant.conversation_context import build_conversation_context
@@ -79,6 +81,10 @@ def test_assistant_command_catalog_drives_llm_allowed_surface() -> None:
     assert capabilities["manual_trade_open"]["llm_executable"] is False
     assert capabilities["symbol_add"]["risk_level"] == "preview_write"
     assert capabilities["upgrade_now"]["risk_level"] == "preview_admin"
+    assert capabilities["manual_trade_confirm"]["operation_action"] == "confirm"
+    assert capabilities["manual_trade_confirm"]["operation_target"] == "trade"
+    assert "record" in capabilities["manual_trade_confirm"]["operation_target_aliases"]
+    assert capabilities["upgrade_cancel"]["operation_action"] == "cancel"
     assert "Command：" in payload["help_text"]
     assert "只读查询" in payload["help_text"]
     assert "记录开仓：记录开仓" in payload["help_text"]
@@ -106,6 +112,8 @@ def test_assistant_capability_catalog_has_safe_llm_invariants() -> None:
     payload = capability_catalog_payload()
     capabilities = payload["capabilities"]
     ids = [item["capability_id"] for item in capabilities]
+    confirm_targets = operation_target_intents("confirm")
+    cancel_targets = operation_target_intents("cancel")
 
     assert len(ids) == len(set(ids))
     assert payload["summary"]["capability_count"] == len(capabilities)
@@ -113,6 +121,17 @@ def test_assistant_capability_catalog_has_safe_llm_invariants() -> None:
         1 for item in capabilities if item["llm_executable"]
     )
     assert payload["capability_text"].startswith("Assistant capabilities")
+    assert confirm_targets["record"] == "manual_trade_confirm"
+    assert confirm_targets["symbol"] == "symbol_confirm"
+    assert confirm_targets["upgrade"] == "upgrade_confirm"
+    assert cancel_targets["record"] == "manual_trade_cancel"
+    assert cancel_targets["monitor"] == "symbol_cancel"
+    assert cancel_targets["upgrade"] == "upgrade_cancel"
+    assert {spec.intent_name for spec in operation_specs(action="preview", target="trade")} >= {
+        "manual_trade_open",
+        "manual_trade_close",
+        "manual_trade_update",
+    }
 
     for item in capabilities:
         assert item["display_name"]
@@ -161,10 +180,18 @@ def test_assistant_command_parser_maps_typed_confirm_commands() -> None:
     assert confirm.name == "manual_trade_confirm"
     assert confirm.arguments == {"operation_id": "in_abc123", "operation_resolution": "explicit"}
 
+    confirm_record = parse_assistant_command("/confirm record in_abc123")
+    assert confirm_record is not None
+    assert confirm_record.name == "manual_trade_confirm"
+
     latest_symbol = parse_assistant_command("/confirm symbol")
     assert latest_symbol is not None
     assert latest_symbol.name == "symbol_confirm"
     assert latest_symbol.arguments == {"operation_id": None, "operation_resolution": "latest_pending"}
+
+    cancel_monitor = parse_assistant_command("/cancel monitor")
+    assert cancel_monitor is not None
+    assert cancel_monitor.name == "symbol_cancel"
 
     cancel_upgrade = parse_assistant_command("/cancel upgrade in_abc123")
     assert cancel_upgrade is not None

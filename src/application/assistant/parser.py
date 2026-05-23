@@ -5,7 +5,7 @@ from datetime import date
 from typing import Callable
 
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.assistant.commands import command_specs
+from src.application.assistant.commands import command_specs, operation_specs
 from src.application.assistant.contracts import InboundIntent
 
 
@@ -265,18 +265,12 @@ def _extract_run_id_for_logs(text: str) -> str | None:
 
 
 def _parse_operation_intent(text: str, *, compact: str, lower: str) -> InboundIntent | None:
-    if compact.startswith("确认升级") or lower.startswith("confirm upgrade"):
-        return InboundIntent(name="upgrade_confirm", arguments=_operation_reference_args(text))
-    if compact.startswith("取消升级") or lower.startswith("cancel upgrade"):
-        return InboundIntent(name="upgrade_cancel", arguments=_operation_reference_args(text))
-    if compact.startswith("确认记录") or lower.startswith("confirm trade"):
-        return InboundIntent(name="manual_trade_confirm", arguments=_operation_reference_args(text))
-    if compact.startswith("取消记录") or lower.startswith("cancel trade"):
-        return InboundIntent(name="manual_trade_cancel", arguments=_operation_reference_args(text))
-    if compact.startswith("确认监控") or lower.startswith("confirm symbol"):
-        return InboundIntent(name="symbol_confirm", arguments=_operation_reference_args(text))
-    if compact.startswith("取消监控") or lower.startswith("cancel symbol"):
-        return InboundIntent(name="symbol_cancel", arguments=_operation_reference_args(text))
+    confirm_intent = _parse_catalog_operation_reference(text, compact=compact, lower=lower, action="confirm")
+    if confirm_intent is not None:
+        return confirm_intent
+    cancel_intent = _parse_catalog_operation_reference(text, compact=compact, lower=lower, action="cancel")
+    if cancel_intent is not None:
+        return cancel_intent
 
     if _looks_like_symbol_list(compact, lower):
         return InboundIntent(name="symbol_list", arguments={})
@@ -297,6 +291,42 @@ def _parse_operation_intent(text: str, *, compact: str, lower: str) -> InboundIn
     if manual_update:
         return InboundIntent(name="manual_trade_update", arguments=manual_update)
     return None
+
+
+def _parse_catalog_operation_reference(
+    text: str,
+    *,
+    compact: str,
+    lower: str,
+    action: str,
+) -> InboundIntent | None:
+    for spec in operation_specs(action=action):
+        if _matches_operation_reference(spec, compact=compact, lower=lower, action=action):
+            return InboundIntent(name=spec.intent_name, arguments=_operation_reference_args(text))
+    return None
+
+
+def _matches_operation_reference(spec: object, *, compact: str, lower: str, action: str) -> bool:
+    for example in getattr(spec, "examples", ()):
+        value = str(example or "").strip()
+        if not value or value.startswith("/"):
+            continue
+        if compact.startswith(_compact(value)) or lower.startswith(value.lower()):
+            return True
+
+    action_words = {
+        "confirm": ("confirm", "确认"),
+        "cancel": ("cancel", "取消"),
+    }.get(action, ())
+    for alias in getattr(spec, "operation_target_aliases", ()):
+        target = str(alias or "").strip().lower()
+        if not target:
+            continue
+        if any(lower.startswith(f"{word} {target}") for word in action_words if word.isascii()):
+            return True
+        if any(compact.startswith(f"{word}{target}") for word in action_words if not word.isascii()):
+            return True
+    return False
 
 
 def _operation_reference_args(text: str) -> dict[str, object]:

@@ -176,11 +176,18 @@ def test_inbound_parser_maps_manual_trade_and_symbol_operations() -> None:
         "operation_id": "in_abc123",
         "operation_resolution": "explicit",
     }
+    english_confirm = parse_inbound_text("confirm trade in_abc123")
+    assert english_confirm.name == "manual_trade_confirm"
+    assert english_confirm.arguments == {
+        "operation_id": "in_abc123",
+        "operation_resolution": "explicit",
+    }
     assert parse_inbound_text("确认记录").arguments == {
         "operation_id": None,
         "operation_resolution": "latest_pending",
     }
     assert parse_inbound_text("取消记录 in_abc123").name == "manual_trade_cancel"
+    assert parse_inbound_text("取消交易 in_abc123").name == "manual_trade_cancel"
     trade_update = parse_inbound_text("premium 改成 2.75")
     assert trade_update.name == "manual_trade_update"
     assert trade_update.arguments == {
@@ -208,6 +215,7 @@ def test_inbound_parser_maps_manual_trade_and_symbol_operations() -> None:
     assert symbol_edit.arguments == {"symbol": "HK.00700", "set": {"sell_put.max_strike": 480}}
     assert parse_inbound_text("删除监控标的 腾讯").arguments == {"symbol": "腾讯"}
     assert parse_inbound_text("确认监控 in_abc123").name == "symbol_confirm"
+    assert parse_inbound_text("cancel monitor in_abc123").name == "symbol_cancel"
     upgrade = parse_inbound_text("立即升级到 v1.2.111")
     assert upgrade.name == "upgrade_now"
     assert upgrade.arguments == {"target_version": "1.2.111"}
