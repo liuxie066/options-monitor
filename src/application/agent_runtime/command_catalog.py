@@ -27,6 +27,8 @@ from src.application.assistant.commands import (
     llm_executable_intent_names,
     llm_executable_specs,
     llm_intent_names,
+    operation_specs,
+    operation_target_intents,
     spec_by_intent,
 )
 
@@ -57,5 +59,7 @@ __all__ = [
     "llm_executable_intent_names",
     "llm_executable_specs",
     "llm_intent_names",
+    "operation_specs",
+    "operation_target_intents",
     "spec_by_intent",
 ]

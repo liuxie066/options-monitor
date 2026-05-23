@@ -6,7 +6,7 @@ from datetime import date
 from typing import Callable
 
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.assistant.commands import commands_by_intent
+from src.application.assistant.commands import commands_by_intent, operation_target_intents
 from src.application.assistant.contracts import AssistantIntent
 
 
@@ -14,35 +14,8 @@ _MONTH_RE = re.compile(r"^(20\d{2})[-/.](0[1-9]|1[0-2])$")
 _OPERATION_ID_RE = re.compile(r"^in_[A-Za-z0-9_.:-]+$")
 _ACCOUNTS = frozenset({"lx", "sy"})
 _COMMANDS = commands_by_intent()
-
-_CONFIRM_TARGETS = {
-    "trade": "manual_trade_confirm",
-    "record": "manual_trade_confirm",
-    "records": "manual_trade_confirm",
-    "manual": "manual_trade_confirm",
-    "记录": "manual_trade_confirm",
-    "交易": "manual_trade_confirm",
-    "symbol": "symbol_confirm",
-    "symbols": "symbol_confirm",
-    "monitor": "symbol_confirm",
-    "监控": "symbol_confirm",
-    "upgrade": "upgrade_confirm",
-    "升级": "upgrade_confirm",
-}
-_CANCEL_TARGETS = {
-    "trade": "manual_trade_cancel",
-    "record": "manual_trade_cancel",
-    "records": "manual_trade_cancel",
-    "manual": "manual_trade_cancel",
-    "记录": "manual_trade_cancel",
-    "交易": "manual_trade_cancel",
-    "symbol": "symbol_cancel",
-    "symbols": "symbol_cancel",
-    "monitor": "symbol_cancel",
-    "监控": "symbol_cancel",
-    "upgrade": "upgrade_cancel",
-    "升级": "upgrade_cancel",
-}
+_CONFIRM_TARGETS = operation_target_intents("confirm")
+_CANCEL_TARGETS = operation_target_intents("cancel")
 
 
 def parse_assistant_command(text: str, *, now_fn: Callable[[], date] | None = None) -> AssistantIntent | None:
