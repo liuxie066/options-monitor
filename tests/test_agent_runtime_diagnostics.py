@@ -7,8 +7,8 @@ from typing import Any
 import pytest
 
 from src.application.agent_tool_contracts import AgentToolError
-from src.application.agent_runtime.diagnostics import check_llm_translator
-from src.application.agent_runtime.llm_intent_schema import llm_intent_json_schema
+from src.application.assistant.diagnostics import check_llm_translator
+from src.application.assistant.llm_intent_schema import llm_intent_json_schema
 
 
 def _assistant_config(*, llm: dict[str, Any] | None = None) -> dict[str, Any]:

@@ -8,9 +8,11 @@ from typing import Any
 
 from src.application.agent_tool_config import load_runtime_config, repo_base
 from src.application.agent_tool_contracts import AgentToolError, build_error_payload, build_response
-from src.application.agent_runtime import AgentRuntimeSettings, command_catalog_payload, handle_agent_message
-from src.application.agent_runtime.config_loader import load_assistant_config
-from src.application.agent_runtime.diagnostics import check_llm_translator
+from src.application.assistant import command_catalog_payload
+from src.application.assistant.settings import AssistantSettings
+from src.application.assistant.config_loader import load_assistant_config
+from src.application.assistant.diagnostics import check_llm_translator
+from src.application.assistant.runtime import handle_assistant_message
 from src.application.config_validator import validate_config
 from src.application.account_management import add_account, edit_account, remove_account
 from src.application.close_advice_pipeline import run_close_advice
@@ -24,16 +26,16 @@ from src.application.config_yaml import (
 from src.application.config_yaml_init import init_yaml_config
 from src.application.config_yaml_migration import preview_config_yaml_migration
 from src.application.healthcheck import run_healthcheck
+from src.application.assistant.contracts import InboundRequest
+from src.application.assistant.operation_diagnostics import collect_pending_operations, collect_recent_audit
+from src.application.assistant.router import handle_assistant_request as handle_inbound_request
 from src.application.inbound import (
-    InboundRequest,
     build_feishu_ws_settings,
     check_feishu_ws_settings,
     handle_feishu_payload,
-    handle_inbound_request,
     serve_feishu_ws,
 )
-from src.application.inbound.diagnostics import collect_pending_operations, collect_recent_audit
-from src.application.inbound.upgrade_operations import run_confirmed_upgrade_operation
+from src.application.assistant.upgrade_operations import run_confirmed_upgrade_operation
 from src.application.layered_config import build_layered_runtime_config_file, explain_layered_runtime_config_key
 from src.application.multi_account_tick import run_tick
 from src.application.notification_pipeline import preview_notification
@@ -107,26 +109,26 @@ def _with_warning(payload: dict[str, Any], warning: str) -> dict[str, Any]:
     return out
 
 
-def _agent_runtime_settings_for_cli(
+def _assistant_settings_for_cli(
     *,
     config_key: str | None,
     config_path: str | None,
     assistant_config_path: str | None = None,
     force_enabled: bool | None = None,
-) -> AgentRuntimeSettings:
+) -> AssistantSettings:
     del config_key, config_path
     assistant_explicit = bool(assistant_config_path is not None and str(assistant_config_path).strip())
     _assistant_path, assistant_cfg = load_assistant_config(config_path=assistant_config_path, missing_ok=not assistant_explicit)
     if assistant_cfg:
-        configured = AgentRuntimeSettings.from_runtime_config(assistant_cfg)
-        return AgentRuntimeSettings(
+        configured = AssistantSettings.from_runtime_config(assistant_cfg)
+        return AssistantSettings(
             mode=configured.mode,
             enabled=configured.enabled if force_enabled is None else bool(force_enabled),
             context_window_messages=configured.context_window_messages,
             default_market_scope=configured.default_market_scope,
             llm=configured.llm,
         )
-    return AgentRuntimeSettings(enabled=True if force_enabled is None else bool(force_enabled))
+    return AssistantSettings(enabled=True if force_enabled is None else bool(force_enabled))
 
 
 def _reject_legacy_config_flags_without_legacy_source(args: argparse.Namespace) -> None:
@@ -184,6 +186,18 @@ def _service_write_contract(data: dict[str, Any], *, confirmed: bool, rollback_h
     )
 
 
+def _add_assistant_commands(parser: argparse.ArgumentParser) -> None:
+    assistant_sub = parser.add_subparsers(dest="assistant_command", required=True)
+    assistant_commands = assistant_sub.add_parser("commands", help="list supported assistant commands and intents")
+    assistant_commands.add_argument("--format", choices=("json", "text"), default="json")
+    assistant_llm_check = assistant_sub.add_parser("llm-check", help="check optional LLM intent translator configuration")
+    assistant_llm_check.add_argument("--assistant-config", default=None)
+    assistant_llm_check.add_argument("--env-file", default=None)
+    assistant_llm_check.add_argument("--no-local-env-file", action="store_true")
+    assistant_llm_check.add_argument("--live", action="store_true", help="run one read-only provider translation probe")
+    assistant_llm_check.add_argument("--text", default=None, help="probe text used with --live")
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="options-monitor unified CLI")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -221,16 +235,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     support_bundle.add_argument("--runtime-root", default=None)
     support_bundle.add_argument("--output-dir", default=None)
 
-    agent = sub.add_parser("agent", help="inspect optional conversational agent runtime")
-    agent_sub = agent.add_subparsers(dest="agent_command", required=True)
-    agent_commands = agent_sub.add_parser("commands", help="list supported agent commands and intents")
-    agent_commands.add_argument("--format", choices=("json", "text"), default="json")
-    agent_llm_check = agent_sub.add_parser("llm-check", help="check optional LLM intent translator configuration")
-    agent_llm_check.add_argument("--assistant-config", default=None)
-    agent_llm_check.add_argument("--env-file", default=None)
-    agent_llm_check.add_argument("--no-local-env-file", action="store_true")
-    agent_llm_check.add_argument("--live", action="store_true", help="run one read-only provider translation probe")
-    agent_llm_check.add_argument("--text", default=None, help="probe text used with --live")
+    _add_assistant_commands(sub.add_parser("assistant", help="inspect optional conversational assistant runtime"))
 
     inbound = sub.add_parser("inbound", help="handle controlled inbound remote commands")
     inbound_sub = inbound.add_subparsers(dest="inbound_command", required=True)
@@ -244,9 +249,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     inbound_handle.add_argument("--config-path", default=None)
     inbound_handle.add_argument("--assistant-config", default=None)
     inbound_handle.add_argument("--audit-db", default=None)
-    inbound_handle_agent = inbound_handle.add_mutually_exclusive_group()
-    inbound_handle_agent.add_argument("--agent-runtime", dest="agent_runtime", action="store_true", default=None, help="force routing through the AgentRuntime command facade")
-    inbound_handle_agent.add_argument("--no-agent-runtime", dest="agent_runtime", action="store_false", help="bypass AgentRuntime and use the deterministic inbound parser directly")
+    inbound_handle_assistant = inbound_handle.add_mutually_exclusive_group()
+    inbound_handle_assistant.add_argument("--assistant", dest="assistant", action="store_true", default=None, help="force routing through the assistant control plane")
+    inbound_handle_assistant.add_argument("--no-assistant", dest="assistant", action="store_false", help="bypass assistant routing and use the deterministic inbound parser directly")
+    inbound_handle_assistant.add_argument("--agent-runtime", dest="assistant", action="store_true", help=argparse.SUPPRESS)
+    inbound_handle_assistant.add_argument("--no-agent-runtime", dest="assistant", action="store_false", help=argparse.SUPPRESS)
     inbound_handle.add_argument("--format", choices=("json", "text"), default="json")
     inbound_pending = inbound_sub.add_parser("pending", help="inspect pending inbound operations")
     inbound_pending_sub = inbound_pending.add_subparsers(dest="inbound_pending_command", required=True)
@@ -277,9 +284,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     inbound_feishu.add_argument("--config-path", default=None)
     inbound_feishu.add_argument("--assistant-config", default=None)
     inbound_feishu.add_argument("--audit-db", default=None)
-    inbound_feishu_agent = inbound_feishu.add_mutually_exclusive_group()
-    inbound_feishu_agent.add_argument("--agent-runtime", dest="agent_runtime", action="store_true", default=None, help="force routing through the AgentRuntime command facade")
-    inbound_feishu_agent.add_argument("--no-agent-runtime", dest="agent_runtime", action="store_false", help="bypass AgentRuntime and use the deterministic inbound parser directly")
+    inbound_feishu_assistant = inbound_feishu.add_mutually_exclusive_group()
+    inbound_feishu_assistant.add_argument("--assistant", dest="assistant", action="store_true", default=None, help="force routing through the assistant control plane")
+    inbound_feishu_assistant.add_argument("--no-assistant", dest="assistant", action="store_false", help="bypass assistant routing and use the deterministic inbound parser directly")
+    inbound_feishu_assistant.add_argument("--agent-runtime", dest="assistant", action="store_true", help=argparse.SUPPRESS)
+    inbound_feishu_assistant.add_argument("--no-agent-runtime", dest="assistant", action="store_false", help=argparse.SUPPRESS)
     inbound_feishu.add_argument("--format", choices=("json", "text"), default="json")
     inbound_ws = inbound_sub.add_parser("feishu-ws", help="serve the Feishu App long-connection inbound client")
     inbound_ws.add_argument("--config-key", default="us", choices=("us", "hk"))
@@ -801,6 +810,8 @@ def main(argv: list[str] | None = None) -> int:
     actual_argv = list(sys.argv[1:] if argv is None else argv)
     if argv is None and _should_bootstrap_process_env(actual_argv):
         bootstrap_process_env(repo_root=repo_base(), include_local_env_file=True)
+    if actual_argv and actual_argv[0] == "agent":
+        actual_argv[0] = "assistant"
     if actual_argv and actual_argv[0] == "scan-pipeline":
         return int(run_scan_pipeline(actual_argv[1:]))
     if actual_argv and actual_argv[0] == "option-positions":
@@ -863,7 +874,7 @@ def main(argv: list[str] | None = None) -> int:
                 runtime_root=args.runtime_root,
             ))
 
-        if args.command == "agent" and args.agent_command == "llm-check":
+        if args.command == "assistant" and args.assistant_command == "llm-check":
             data = check_llm_translator(
                 repo_root=repo_base(),
                 config_path=args.assistant_config,
@@ -873,31 +884,31 @@ def main(argv: list[str] | None = None) -> int:
                 live_text=args.text or "状态",
             )
             return _print(build_response(
-                tool_name="agent.llm_check",
+                tool_name="assistant.llm_check",
                 ok=bool(data.get("summary", {}).get("ok", True)),
                 data=data,
             ))
 
-        if args.command == "agent" and args.agent_command == "commands":
+        if args.command == "assistant" and args.assistant_command == "commands":
             data = command_catalog_payload()
             if args.format == "text":
                 sys.stdout.write(str(data.get("help_text") or "").strip() + "\n")
                 return 0
-            return _print(build_response(tool_name="agent.commands", ok=True, data=data))
+            return _print(build_response(tool_name="assistant.commands", ok=True, data=data))
 
         if args.command == "inbound" and args.inbound_command == "handle":
-            force_agent_runtime = getattr(args, "agent_runtime", None)
-            agent_settings: AgentRuntimeSettings | None = None
-            if force_agent_runtime is False:
-                use_agent_runtime = False
+            force_assistant = getattr(args, "assistant", None)
+            assistant_settings: AssistantSettings | None = None
+            if force_assistant is False:
+                use_assistant = False
             else:
-                agent_settings = _agent_runtime_settings_for_cli(
+                assistant_settings = _assistant_settings_for_cli(
                     config_key=args.config_key,
                     config_path=args.config_path,
                     assistant_config_path=args.assistant_config,
-                    force_enabled=True if force_agent_runtime is True else None,
+                    force_enabled=True if force_assistant is True else None,
                 )
-                use_agent_runtime = bool(agent_settings.enabled)
+                use_assistant = bool(assistant_settings.enabled)
             request = InboundRequest(
                 text=args.text,
                 sender_id=args.sender_id,
@@ -908,9 +919,9 @@ def main(argv: list[str] | None = None) -> int:
                 config_path=args.config_path,
                 audit_db=args.audit_db,
             )
-            if use_agent_runtime:
-                assert agent_settings is not None
-                out = handle_agent_message(request, settings=agent_settings)
+            if use_assistant:
+                assert assistant_settings is not None
+                out = handle_assistant_message(request, settings=assistant_settings)
             else:
                 out = handle_inbound_request(request)
             if args.format == "text":
@@ -952,7 +963,7 @@ def main(argv: list[str] | None = None) -> int:
             return _print(out)
 
         if args.command == "inbound" and args.inbound_command == "feishu":
-            force_agent_runtime = getattr(args, "agent_runtime", None)
+            force_assistant = getattr(args, "assistant", None)
             out = handle_feishu_payload(
                 _load_json_payload(
                     json_text=args.input_json,
@@ -962,7 +973,7 @@ def main(argv: list[str] | None = None) -> int:
                 config_key=args.config_key,
                 config_path=args.config_path,
                 audit_db=args.audit_db,
-                use_agent_runtime=None if force_agent_runtime is None else bool(force_agent_runtime),
+                use_assistant=None if force_assistant is None else bool(force_assistant),
                 assistant_config_path=args.assistant_config,
             )
             if args.format == "text":

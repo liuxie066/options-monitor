@@ -78,7 +78,7 @@ om-agent run --tool <tool-name> --input-file payload.json
 | `candidate_rank_explain` | Agent-only read existing candidate CSV ranking explanations |
 | `strategy_replay_analyze` | `om strategy-replay analyze` |
 | `preview_notification` | `om notify preview` |
-| `runtime_status` | `om status` or raw agent runtime artifact summary |
+| `runtime_status` | `om status` or raw assistant/runtime artifact summary |
 | `runtime_runs` | `om runs` |
 | `runtime_logs` | `om logs` |
 | `openclaw_readiness` | Agent-only OpenClaw readiness summary |
@@ -103,10 +103,10 @@ om-agent run --tool <tool-name> --input-file payload.json
 om inbound handle --text '收益 sy 2026-05' --sender ou_xxx --channel feishu --message-id msg_xxx
 om inbound feishu --input-file feishu_event.json --format text
 om inbound feishu-ws --check
-om agent llm-check
+om assistant llm-check
 ```
 
-它不是 `om-agent` manifest 里的工具，也不是 shell bridge。`inbound feishu` 只解析 Feishu 事件 payload，然后进入同一条 sender allowlist、message_id 幂等、SQLite audit 和工具白名单路径。AgentRuntime command facade 默认开启；assistant config 可选择启用 LLM intent translation，但 LLM 只能产出结构化 intent，不能执行工具或改写事实输出。`inbound feishu-ws` 是长驻 Feishu App long-connection client：通过飞书 SDK 长连接接收消息、进入 inbound control，并使用同一个 Bot 自动回复；AgentRuntime 由 `assistant.mode` 控制，reaction、reply、queue 行为配置在 assistant config 的 `inbound.feishu_ws` 下。完整边界见 [INBOUND_CONTROL.md](INBOUND_CONTROL.md)。
+它不是 `om-agent` manifest 里的工具，也不是 shell bridge。`inbound feishu` 只解析 Feishu 事件 payload，然后进入同一条 sender allowlist、message_id 幂等、SQLite audit 和工具白名单路径。Assistant command facade 默认开启；assistant config 可选择启用 LLM intent translation，但 LLM 只能产出结构化 intent，不能执行工具或改写事实输出。`inbound feishu-ws` 是长驻 Feishu App long-connection client：通过飞书 SDK 长连接接收消息、进入 inbound control，并使用同一个 Bot 自动回复；Assistant 由 `assistant.mode` 控制，reaction、reply、queue 行为配置在 assistant config 的 `inbound.feishu_ws` 下。完整边界见 [INBOUND_CONTROL.md](INBOUND_CONTROL.md)。
 
 ### Tick 入口关系
 

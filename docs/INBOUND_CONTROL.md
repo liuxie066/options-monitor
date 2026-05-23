@@ -52,9 +52,9 @@ The first implementation is read-only and deterministic. It supports:
 
 Read commands use the pure-read whitelist. Admin write operations are separate and must pass sender allowlist, operation gates, preview storage, and explicit confirmation before applying.
 
-## AgentRuntime Command Facade
+## Assistant Command Facade
 
-`AgentRuntime` is the default command facade above the same inbound parser, policy, audit, and tool execution path. It adds slash commands for users who do not want to remember natural-language phrases:
+`Assistant` is the default command facade above the same inbound parser, policy, audit, and tool execution path. It adds slash commands for users who do not want to remember natural-language phrases:
 
 | Command | Intent |
 |---|---|
@@ -78,7 +78,7 @@ Local one-shot testing uses the same command facade by default when `assistant.m
 For parser diagnostics, bypass the facade explicitly:
 
 ```bash
-./om inbound handle --no-agent-runtime --text '持仓 sy' --format text
+./om inbound handle --no-assistant --text '持仓 sy' --format text
 ```
 
 For long-running Feishu WS, `config.assistant.json` controls the facade:
@@ -111,7 +111,7 @@ assistant:
 
 When enabled, LLM translation only runs after command and deterministic parsing fail. It must return an `om-llm-intent-v1` JSON intent into the same inbound router; it must not execute tools or rewrite canonical OM responses. The current intent schema is read-only and only allows help/status/health/config/positions/income/runs/logs/symbols/pending operations.
 
-The command surface authority is `src/application/agent_runtime/command_catalog.py`. Slash command metadata, the read-only LLM intent surface, and inbound help text should use that catalog instead of maintaining separate command lists.
+The command surface authority is `src/application/assistant/commands.py`. Slash command metadata, the read-only LLM intent surface, and inbound help text should use that catalog instead of maintaining separate command lists.
 
 Supported providers:
 
@@ -165,12 +165,12 @@ The API key stays in environment settings; assistant config only names which env
 Check the translator control plane before enabling it in Feishu:
 
 ```bash
-./om agent commands --format text
-./om agent llm-check
-./om agent llm-check --live
+./om assistant commands --format text
+./om assistant llm-check
+./om assistant llm-check --live
 ```
 
-`agent commands` renders the same command catalog used by slash commands, inbound help, and the LLM intent schema. The default LLM check validates `config.assistant.json`, the effective env file, redacted API-key presence, and the resolved provider endpoint URL. `--live` sends one read-only structured translation probe to the configured provider.
+`assistant commands` renders the same command catalog used by slash commands, inbound help, and the LLM intent schema. The default LLM check validates `config.assistant.json`, the effective env file, redacted API-key presence, and the resolved provider endpoint URL. `--live` sends one read-only structured translation probe to the configured provider.
 
 ## Sender Allowlist
 
@@ -268,7 +268,7 @@ Text output for chat replies:
 Feishu Event Subscription long connection
   -> ./om inbound feishu-ws
   -> ./om inbound feishu
-  -> AgentRuntime command facade
+  -> Assistant command facade
   -> OM inbound allowlist/audit/pure-read tools
   -> Feishu message reply API
 ```

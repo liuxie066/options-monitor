@@ -158,7 +158,7 @@ def test_healthcheck_works_with_explicit_config_path(monkeypatch, tmp_path: Path
 
 
 def test_healthcheck_reports_feishu_inbound_audit_ready(monkeypatch, tmp_path: Path) -> None:
-    from src.application.inbound.audit import InboundAuditStore
+    from src.application.assistant.audit import InboundAuditStore
     from src.application.tool_execution import execute_tool as run_tool
     import src.application.agent_tool_handlers as tools
 
@@ -204,7 +204,7 @@ def test_healthcheck_reports_feishu_inbound_audit_ready(monkeypatch, tmp_path: P
 
 
 def test_healthcheck_warns_when_feishu_latest_sender_not_allowed(monkeypatch, tmp_path: Path) -> None:
-    from src.application.inbound.audit import InboundAuditStore
+    from src.application.assistant.audit import InboundAuditStore
     from src.application.tool_execution import execute_tool as run_tool
     import src.application.agent_tool_handlers as tools
 
@@ -1315,7 +1315,7 @@ def _call_runtime_status_for_upgrade(tmp_path: Path, cfg_path: Path, cfg: dict[s
 
 
 def test_runtime_status_reports_assistant_llm_and_latest_agent_route(monkeypatch, tmp_path: Path) -> None:
-    from src.application.inbound.audit import InboundAuditStore
+    from src.application.assistant.audit import InboundAuditStore
 
     fixture = _runtime_status_upgrade_fixture(tmp_path)
     assistant_dir = tmp_path / "resolved"
@@ -1357,7 +1357,7 @@ def test_runtime_status_reports_assistant_llm_and_latest_agent_route(monkeypatch
             "result_ok": True,
             "response": {
                 "meta": {
-                    "agent_runtime": {
+                    "assistant": {
                         "mode": "agent_loop",
                         "route": "agent_loop",
                         "llm": {"attempted": True, "reason": "accepted"},
@@ -1393,7 +1393,7 @@ def test_runtime_status_does_not_report_llm_endpoint_when_llm_disabled(tmp_path:
 
 
 def test_runtime_status_uses_service_profile_assistant_config_and_env_file(tmp_path: Path) -> None:
-    from src.application.inbound.audit import InboundAuditStore
+    from src.application.assistant.audit import InboundAuditStore
 
     fixture = _runtime_status_upgrade_fixture(tmp_path)
     assistant_path = tmp_path / "assistant" / "config.assistant.json"
@@ -1453,7 +1453,7 @@ def test_runtime_status_uses_service_profile_assistant_config_and_env_file(tmp_p
             "result_ok": True,
             "response": {
                 "meta": {
-                    "agent_runtime": {
+                    "assistant": {
                         "mode": "agent_loop",
                         "route": "agent_loop",
                         "llm": {"attempted": True, "reason": "accepted"},

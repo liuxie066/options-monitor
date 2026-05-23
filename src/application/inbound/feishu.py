@@ -5,8 +5,8 @@ import re
 from typing import Any, cast
 
 from src.application.agent_tool_contracts import AgentToolError, build_response
-from src.application.inbound.contracts import InboundRequest
-from src.application.inbound.router import ExecuteToolFn, handle_inbound_request
+from src.application.assistant.contracts import InboundRequest
+from src.application.assistant.router import ExecuteToolFn, handle_assistant_request
 
 
 def handle_feishu_payload(
@@ -17,6 +17,8 @@ def handle_feishu_payload(
     audit_db: str | None = None,
     execute_tool_fn: ExecuteToolFn | None = None,
     allowed_senders: str | None = None,
+    use_assistant: bool | None = None,
+    assistant_settings: Any | None = None,
     use_agent_runtime: bool | None = None,
     agent_runtime_settings: Any | None = None,
     assistant_config_path: str | None = None,
@@ -43,25 +45,27 @@ def handle_feishu_payload(
     if execute_tool_fn is not None:
         kwargs["execute_tool_fn"] = execute_tool_fn
     settings: Any | None = None
-    if use_agent_runtime is False:
-        use_runtime = False
+    if use_assistant is None:
+        use_assistant = use_agent_runtime
+    if use_assistant is False:
+        use_control_plane = False
     else:
-        settings = agent_runtime_settings or _agent_runtime_settings(
+        settings = assistant_settings or agent_runtime_settings or _assistant_settings(
             config_key=config_key,
             config_path=config_path,
             assistant_config_path=assistant_config_path,
-            force_enabled=True if use_agent_runtime is True else None,
+            force_enabled=True if use_assistant is True else None,
         )
         assert settings is not None
-        use_runtime = bool(settings.enabled)
-    if use_runtime:
-        from src.application.agent_runtime import handle_agent_message
+        use_control_plane = bool(settings.enabled)
+    if use_control_plane:
+        from src.application.assistant.runtime import handle_assistant_message
 
         assert settings is not None
         kwargs["settings"] = settings
-        inbound_result = handle_agent_message(request, **kwargs)
+        inbound_result = handle_assistant_message(request, **kwargs)
     else:
-        inbound_result = handle_inbound_request(request, **kwargs)
+        inbound_result = handle_assistant_request(request, **kwargs)
     data_raw = inbound_result.get("data")
     data = cast(dict[str, Any], data_raw) if isinstance(data_raw, dict) else {}
     return build_response(
@@ -79,23 +83,23 @@ def handle_feishu_payload(
     )
 
 
-def _agent_runtime_settings(
+def _assistant_settings(
     *,
     config_key: str | None,
     config_path: str | None,
     assistant_config_path: str | None = None,
     force_enabled: bool | None = None,
 ) -> Any:
-    from src.application.agent_runtime import AgentRuntimeSettings
-    from src.application.agent_runtime.config_loader import load_assistant_config
+    from src.application.assistant.settings import AssistantSettings
+    from src.application.assistant.config_loader import load_assistant_config
 
     del config_key, config_path
     assistant_explicit = bool(assistant_config_path is not None and str(assistant_config_path).strip())
     assistant_path, assistant_cfg = load_assistant_config(config_path=assistant_config_path, missing_ok=not assistant_explicit)
     del assistant_path
     if assistant_cfg:
-        configured = AgentRuntimeSettings.from_runtime_config(assistant_cfg)
-        return AgentRuntimeSettings(
+        configured = AssistantSettings.from_runtime_config(assistant_cfg)
+        return AssistantSettings(
             mode=configured.mode,
             enabled=configured.enabled if force_enabled is None else bool(force_enabled),
             context_window_messages=configured.context_window_messages,
@@ -103,7 +107,7 @@ def _agent_runtime_settings(
             llm=configured.llm,
         )
 
-    return AgentRuntimeSettings(enabled=True if force_enabled is None else bool(force_enabled))
+    return AssistantSettings(enabled=True if force_enabled is None else bool(force_enabled))
 
 
 def feishu_payload_to_inbound_request(
