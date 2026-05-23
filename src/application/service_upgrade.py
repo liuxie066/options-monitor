@@ -703,7 +703,24 @@ def _feishu_ws_check_command(*, profile: dict[str, Any], repo_root: Path) -> lis
     assistant_config_path = _assistant_config_path_from_profile(profile=profile)
     if assistant_config_path:
         command.extend(["--assistant-config", assistant_config_path])
+    env_file = str(profile.get("env_file") or "").strip()
+    if env_file:
+        command.extend(["--env-file", str(Path(env_file).expanduser())])
+    if _feishu_ws_check_needs_sudo_for_env_file(profile):
+        return ["sudo", "-n", *command]
     return command
+
+
+def _feishu_ws_check_needs_sudo_for_env_file(profile: dict[str, Any]) -> bool:
+    if _is_root_process():
+        return False
+    env_file = str(profile.get("env_file") or "").strip()
+    if not env_file:
+        return False
+    try:
+        return not os.access(str(Path(env_file).expanduser()), os.R_OK)
+    except OSError:
+        return True
 
 
 def _assistant_config_path_from_profile(*, profile: dict[str, Any], runtime_root: Path | None = None) -> str:

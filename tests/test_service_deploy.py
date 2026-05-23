@@ -978,6 +978,8 @@ def test_service_upgrade_restarts_feishu_ws_from_refreshed_profile_after_reconci
         "us",
         "--config-path",
         str(runtime / "config.us.json"),
+        "--env-file",
+        str(env_file),
     ] in calls
     refreshed_profile = json.loads((runtime / "service.profile.json").read_text(encoding="utf-8"))
     assert refreshed_profile["restart"]["services"] == [
@@ -1036,6 +1038,8 @@ def test_post_upgrade_feishu_ws_check_preserves_systemd_loaded_env(monkeypatch, 
 
     def _run_cmd(command, **kwargs):  # type: ignore[no-untyped-def]
         if list(command)[:3] == [str(repo / "om"), "inbound", "feishu-ws"]:
+            assert "--env-file" in command
+            assert command[command.index("--env-file") + 1] == str(env_file)
             env = kwargs.get("env") or {}
             assert env["OM_ENV_FILE"] == str(env_file)
             assert env["OM_RUNTIME_ROOT"] == str(runtime)
@@ -1046,6 +1050,37 @@ def test_post_upgrade_feishu_ws_check_preserves_systemd_loaded_env(monkeypatch, 
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
     out = _post_upgrade_service_health(profile=profile, repo_root=repo, run_cmd=_run_cmd, operations=[])
+
+    assert out["ok"] is True
+
+
+def test_post_upgrade_feishu_ws_check_uses_sudo_when_env_file_is_not_readable(monkeypatch, tmp_path: Path) -> None:
+    from src.application import service_upgrade
+
+    repo = tmp_path / "repo"
+    runtime = tmp_path / "runtime"
+    env_file = tmp_path / "options-monitor.env"
+    repo.mkdir()
+    runtime.mkdir()
+    env_file.write_text("OM_FEISHU_BOT_APP_ID=cli_1\n", encoding="utf-8")
+    profile = {
+        "service_provider": "systemd",
+        "runtime_root": str(runtime),
+        "env_file": str(env_file),
+        "config_paths": {"us": str(tmp_path / "config.us.json")},
+        "feishu_ws": {"enabled": True, "config_key": "us"},
+        "services": [{"name": "options-monitor-feishu-ws.service"}],
+    }
+    monkeypatch.setattr(service_upgrade, "_is_root_process", lambda: False)
+    monkeypatch.setattr(service_upgrade.os, "access", lambda *_args, **_kwargs: False)
+
+    def _run_cmd(command, **_kwargs):  # type: ignore[no-untyped-def]
+        if list(command)[:5] == ["sudo", "-n", str(repo / "om"), "inbound", "feishu-ws"]:
+            assert "--env-file" in command
+            assert command[command.index("--env-file") + 1] == str(env_file)
+        return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+    out = service_upgrade._post_upgrade_service_health(profile=profile, repo_root=repo, run_cmd=_run_cmd, operations=[])
 
     assert out["ok"] is True
 
