@@ -681,7 +681,7 @@ def _post_upgrade_service_health(
         "services": services,
         "checks": checks,
         "failed_checks": failed,
-        "remediation": _service_health_remediation(failed),
+        "remediation": _service_health_remediation(failed, profile=profile),
     }
 
 
@@ -764,7 +764,7 @@ def _child_env_from_profile(profile: dict[str, Any]) -> dict[str, str] | None:
     return env
 
 
-def _service_health_remediation(failed_checks: list[dict[str, Any]]) -> list[str]:
+def _service_health_remediation(failed_checks: list[dict[str, Any]], *, profile: dict[str, Any] | None = None) -> list[str]:
     services = sorted({str(item.get("service") or "") for item in failed_checks if str(item.get("service") or "").strip()})
     remediation: list[str] = []
     for service_name in services:
@@ -772,7 +772,11 @@ def _service_health_remediation(failed_checks: list[dict[str, Any]]) -> list[str
             remediation.append(f"manual_enable: sudo systemctl enable --now {service_name}")
             remediation.append(f"manual_restart: sudo systemctl restart {service_name}")
     if any(item.get("check") == "feishu-ws-check" for item in failed_checks):
-        remediation.append("manual_check: source the env file, then run ./om inbound feishu-ws --check")
+        env_file = str((profile or {}).get("env_file") or "").strip()
+        if env_file:
+            remediation.append(f"manual_check: sudo -n ./om inbound feishu-ws --check --env-file {shlex.quote(env_file)}")
+        else:
+            remediation.append("manual_check: source the env file, then run ./om inbound feishu-ws --check")
     return remediation
 
 
