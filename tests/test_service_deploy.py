@@ -1012,10 +1012,13 @@ def test_post_upgrade_service_health_reports_feishu_ws_check_failure(tmp_path: P
     assert "manual_check: source the env file, then run ./om inbound feishu-ws --check" in out["remediation"]
 
 
-def test_post_upgrade_feishu_ws_check_uses_profile_env_file_not_process_secret(monkeypatch, tmp_path: Path) -> None:
+def test_post_upgrade_feishu_ws_check_preserves_systemd_loaded_env(monkeypatch, tmp_path: Path) -> None:
     from src.application.service_upgrade import _post_upgrade_service_health
 
-    monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "stale-process-app")
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_ID", "systemd-loaded-app")
+    monkeypatch.setenv("OM_FEISHU_BOT_APP_SECRET", "systemd-loaded-secret")
+    monkeypatch.setenv("OM_FEISHU_BOT_ALLOWED_OPEN_IDS", "ou_1")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-systemd-loaded")
     repo = tmp_path / "repo"
     runtime = tmp_path / "runtime"
     env_file = tmp_path / "options-monitor.env"
@@ -1036,7 +1039,10 @@ def test_post_upgrade_feishu_ws_check_uses_profile_env_file_not_process_secret(m
             env = kwargs.get("env") or {}
             assert env["OM_ENV_FILE"] == str(env_file)
             assert env["OM_RUNTIME_ROOT"] == str(runtime)
-            assert "OM_FEISHU_BOT_APP_ID" not in env
+            assert env["OM_FEISHU_BOT_APP_ID"] == "systemd-loaded-app"
+            assert env["OM_FEISHU_BOT_APP_SECRET"] == "systemd-loaded-secret"
+            assert env["OM_FEISHU_BOT_ALLOWED_OPEN_IDS"] == "ou_1"
+            assert env["DEEPSEEK_API_KEY"] == "sk-systemd-loaded"
         return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
 
     out = _post_upgrade_service_health(profile=profile, repo_root=repo, run_cmd=_run_cmd, operations=[])
