@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 1.2.131 - 2026-05-23
+
+### Changed
+- Made `./om assistant handle` the canonical controlled message entrypoint and moved pending, audit, and upgrade-worker diagnostics under `./om assistant`.
+- Narrowed `./om inbound` to channel transport adapters only, leaving `feishu` and `feishu-ws` as the public inbound subcommands.
+- Removed the legacy `agent_runtime` package and old inbound backend wrappers so Assistant owns command parsing, routing, policy, audit, operation handling, and rendering directly.
+
+### Fixed
+- Updated Feishu event handling and Feishu WS to always enter Assistant control, removing the old assistant bypass flags.
+- Added architecture guards and CLI smoke coverage to prevent old `inbound handle` and `agent_runtime` compatibility paths from returning.
+
 ## 1.2.130 - 2026-05-23
 
 ### Added
