@@ -2799,10 +2799,20 @@ def test_cli_service_cleanup_delegates_to_application(monkeypatch, capsys, tmp_p
             str(tmp_path / "current"),
             "--releases-root",
             str(tmp_path / "releases"),
+            "--runtime-root",
+            str(tmp_path / "runtime"),
             "--keep-releases",
             "3",
             "--cleanup-downloads",
             "--cleanup-pip-cache",
+            "--cleanup-output-runs",
+            "--output-runs-keep-days",
+            "10",
+            "--output-runs-keep-count",
+            "50",
+            "--cleanup-runtime-logs",
+            "--runtime-logs-keep-days",
+            "5",
         ]
     )
 
@@ -2812,9 +2822,15 @@ def test_cli_service_cleanup_delegates_to_application(monkeypatch, capsys, tmp_p
     assert payload["ok"] is True
     assert calls[0]["repo_root"] == str(tmp_path / "current")
     assert calls[0]["releases_root"] == str(tmp_path / "releases")
+    assert calls[0]["runtime_root"] == str(tmp_path / "runtime")
     assert calls[0]["keep_releases"] == 3
     assert calls[0]["cleanup_downloads"] is True
     assert calls[0]["cleanup_pip_cache"] is True
+    assert calls[0]["cleanup_output_runs"] is True
+    assert calls[0]["output_runs_keep_days"] == 10
+    assert calls[0]["output_runs_keep_count"] == 50
+    assert calls[0]["cleanup_runtime_logs"] is True
+    assert calls[0]["runtime_logs_keep_days"] == 5
     assert calls[0]["confirm"] is False
 
 
@@ -2915,6 +2931,126 @@ def test_service_cleanup_keeps_active_release_even_when_it_is_not_newest(tmp_pat
     assert v100.exists()
     assert v102.exists()
     assert not v101.exists()
+
+
+def test_service_cleanup_dry_run_reports_expired_output_runs_and_protects_latest_pointer(tmp_path: Path) -> None:
+    from datetime import datetime, timezone
+
+    from src.application.service_cleanup import service_cleanup
+
+    apps = tmp_path / "apps"
+    releases = apps / "releases"
+    active = releases / "1.0.2"
+    old = releases / "1.0.1"
+    for release in (active, old):
+        _write_upgrade_release_skeleton(release, release.name)
+    current = apps / "current"
+    current.symlink_to(active, target_is_directory=True)
+
+    runtime = tmp_path / "runtime"
+    runs_root = runtime / "output_runs"
+    state_root = runtime / "output_shared" / "state"
+    state_root.mkdir(parents=True)
+
+    def _run(name: str, ts: int) -> Path:
+        run = runs_root / name
+        state = run / "state"
+        state.mkdir(parents=True)
+        (state / "audit_events.jsonl").write_text("x" * 32, encoding="utf-8")
+        os.utime(state / "audit_events.jsonl", (ts, ts))
+        os.utime(state, (ts, ts))
+        os.utime(run, (ts, ts))
+        return run
+
+    new_run = _run("run-new", 1_780_000_000)
+    keep_count_run = _run("run-keep-count", 1_779_900_000)
+    delete_run = _run("run-delete", 1_700_000_000)
+    pointer_run = _run("run-pointer", 1_690_000_000)
+    (state_root / "last_run_dir.txt").write_text(str(pointer_run), encoding="utf-8")
+
+    out = service_cleanup(
+        repo_root=current,
+        releases_root=releases,
+        runtime_root=runtime,
+        cleanup_output_runs=True,
+        output_runs_keep_days=14,
+        output_runs_keep_count=2,
+        now=datetime(2026, 5, 23, tzinfo=timezone.utc),
+    )
+
+    cleanup = out["output_runs_cleanup"]
+    assert out["status"] == "dry_run"
+    assert cleanup["scanned_count"] == 4
+    assert [Path(item["path"]).name for item in cleanup["delete_runs"]] == ["run-delete"]
+    protected = {Path(item["path"]).name: item["reason"] for item in cleanup["protected_runs"]}
+    assert protected[new_run.name] == "latest_keep_count"
+    assert protected[keep_count_run.name] == "latest_keep_count"
+    assert protected[pointer_run.name] == "last_run_dir_pointer"
+    assert delete_run.exists()
+
+
+def test_service_cleanup_confirm_deletes_expired_output_runs_and_runtime_logs(tmp_path: Path) -> None:
+    from datetime import datetime, timezone
+
+    from src.application.service_cleanup import service_cleanup
+
+    apps = tmp_path / "apps"
+    releases = apps / "releases"
+    active = releases / "1.0.2"
+    old = releases / "1.0.1"
+    for release in (active, old):
+        _write_upgrade_release_skeleton(release, release.name)
+    current = apps / "current"
+    current.symlink_to(active, target_is_directory=True)
+
+    runtime = tmp_path / "runtime"
+    runs_root = runtime / "output_runs"
+    logs_root = runtime / "logs"
+    logs_root.mkdir(parents=True)
+
+    def _run(name: str, ts: int) -> Path:
+        run = runs_root / name
+        state = run / "state"
+        state.mkdir(parents=True)
+        (state / "audit_events.jsonl").write_text("x" * 32, encoding="utf-8")
+        os.utime(state / "audit_events.jsonl", (ts, ts))
+        os.utime(state, (ts, ts))
+        os.utime(run, (ts, ts))
+        return run
+
+    kept_run = _run("run-kept", 1_780_000_000)
+    expired_run = _run("run-expired", 1_700_000_000)
+    old_log = logs_root / "old.log"
+    new_log = logs_root / "new.log"
+    audit_file = logs_root / "audit.jsonl"
+    for path in (old_log, new_log, audit_file):
+        path.write_text(path.name, encoding="utf-8")
+    os.utime(old_log, (1_700_000_000, 1_700_000_000))
+    os.utime(new_log, (1_780_000_000, 1_780_000_000))
+    os.utime(audit_file, (1_700_000_000, 1_700_000_000))
+
+    out = service_cleanup(
+        repo_root=current,
+        releases_root=releases,
+        runtime_root=runtime,
+        keep_releases=2,
+        cleanup_output_runs=True,
+        output_runs_keep_days=14,
+        output_runs_keep_count=1,
+        cleanup_runtime_logs=True,
+        runtime_logs_keep_days=14,
+        confirm=True,
+        now=datetime(2026, 5, 23, tzinfo=timezone.utc),
+    )
+
+    assert out["status"] == "cleaned"
+    assert out["changed"] is True
+    assert kept_run.exists()
+    assert not expired_run.exists()
+    assert not old_log.exists()
+    assert new_log.exists()
+    assert audit_file.exists()
+    assert {item["kind"] for item in out["operations"]} >= {"output_run", "runtime_log"}
 
 
 def test_service_cleanup_requires_repo_root_symlink(tmp_path: Path) -> None:
